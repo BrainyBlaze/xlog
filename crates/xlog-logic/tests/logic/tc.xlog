@@ -1,0 +1,9 @@
+// Transitive closure test program
+edge(1, 2).
+edge(2, 3).
+edge(3, 4).
+
+reach(X, Y) :- edge(X, Y).
+reach(X, Z) :- reach(X, Y), edge(Y, Z).
+
+?- reach(1, N).

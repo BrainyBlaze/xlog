@@ -1,0 +1,9 @@
+// Stratified negation test program
+node(1).
+node(2).
+node(3).
+edge(1, 2).
+
+isolated(X) :- node(X), not edge(X, Y), not edge(Y, X).
+
+?- isolated(N).
