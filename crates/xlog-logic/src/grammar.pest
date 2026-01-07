@@ -1,0 +1,59 @@
+// XLOG Grammar for Datalog-style logic programs
+
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
+COMMENT = _{ "//" ~ (!"\n" ~ ANY)* }
+
+// Identifiers
+ident = @{ ASCII_ALPHA_LOWER ~ (ASCII_ALPHANUMERIC | "_")* }
+variable = @{ ASCII_ALPHA_UPPER ~ (ASCII_ALPHANUMERIC | "_")* }
+
+// Literals
+integer = @{ "-"? ~ ASCII_DIGIT+ }
+float_num = @{ "-"? ~ ASCII_DIGIT+ ~ "." ~ ASCII_DIGIT+ }
+string_lit = @{ "\"" ~ (!"\"" ~ ANY)* ~ "\"" }
+
+// Terms
+term = { variable | integer | float_num | string_lit | ident }
+
+// Atoms
+atom = { ident ~ "(" ~ term_list? ~ ")" }
+term_list = { term ~ ("," ~ term)* }
+
+// Aggregate expressions
+agg_op = { "count" | "sum" | "min" | "max" }
+aggregate = { agg_op ~ "(" ~ variable ~ ")" }
+agg_term = { aggregate | term }
+
+// Comparison operators
+cmp_op = { "==" | "!=" | "<=" | ">=" | "<" | ">" | "=" }
+comparison = { term ~ cmp_op ~ term }
+
+// Body literals
+negated_atom = { "not" ~ atom }
+body_literal = { negated_atom | atom | comparison }
+body = { body_literal ~ ("," ~ body_literal)* }
+
+// Head with optional aggregate
+head_term = { agg_term | term }
+head_term_list = { head_term ~ ("," ~ head_term)* }
+head = { ident ~ "(" ~ head_term_list? ~ ")" }
+
+// Rules and facts
+rule_def = { head ~ ":-" ~ body ~ "." }
+fact = { atom ~ "." }
+constraint = { ":-" ~ body ~ "." }
+
+// Queries
+query = { "?-" ~ atom ~ "." }
+
+// Domain declarations
+domain_decl = { "domain" ~ ident ~ ":" ~ type_spec ~ "." }
+type_spec = { "u32" | "u64" | "i32" | "i64" | "f32" | "f64" | "bool" | "symbol" }
+
+// Predicate declarations
+pred_decl = { "pred" ~ ident ~ "(" ~ type_list? ~ ")" ~ "." }
+type_list = { type_spec ~ ("," ~ type_spec)* }
+
+// Program structure
+statement = { domain_decl | pred_decl | rule_def | fact | constraint | query }
+program = { SOI ~ statement* ~ EOI }
