@@ -1,0 +1,278 @@
+//! Abstract Syntax Tree for XLOG programs
+
+use xlog_core::ScalarType;
+
+/// A term in an atom
+#[derive(Debug, Clone, PartialEq)]
+pub enum Term {
+    Variable(String),
+    Integer(i64),
+    Float(f64),
+    String(String),
+    Symbol(String),
+    Aggregate(AggExpr),
+}
+
+impl Term {
+    pub fn is_variable(&self) -> bool {
+        matches!(self, Term::Variable(_))
+    }
+
+    pub fn is_constant(&self) -> bool {
+        !self.is_variable() && !matches!(self, Term::Aggregate(_))
+    }
+
+    pub fn variable_name(&self) -> Option<&str> {
+        match self {
+            Term::Variable(name) => Some(name),
+            _ => None,
+        }
+    }
+}
+
+/// Aggregate expression
+#[derive(Debug, Clone, PartialEq)]
+pub struct AggExpr {
+    pub op: AggOp,
+    pub variable: String,
+}
+
+/// Aggregation operator
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AggOp {
+    Count,
+    Sum,
+    Min,
+    Max,
+}
+
+/// An atom (predicate applied to terms)
+#[derive(Debug, Clone, PartialEq)]
+pub struct Atom {
+    pub predicate: String,
+    pub terms: Vec<Term>,
+}
+
+impl Atom {
+    pub fn arity(&self) -> usize {
+        self.terms.len()
+    }
+
+    pub fn variables(&self) -> Vec<&str> {
+        self.terms
+            .iter()
+            .filter_map(|t| t.variable_name())
+            .collect()
+    }
+}
+
+/// Comparison operator
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompOp {
+    Eq, Ne, Lt, Le, Gt, Ge,
+}
+
+/// A comparison expression
+#[derive(Debug, Clone, PartialEq)]
+pub struct Comparison {
+    pub left: Term,
+    pub op: CompOp,
+    pub right: Term,
+}
+
+/// A literal in the body of a rule
+#[derive(Debug, Clone, PartialEq)]
+pub enum BodyLiteral {
+    Positive(Atom),
+    Negated(Atom),
+    Comparison(Comparison),
+}
+
+impl BodyLiteral {
+    pub fn is_positive(&self) -> bool {
+        matches!(self, BodyLiteral::Positive(_))
+    }
+
+    pub fn is_negated(&self) -> bool {
+        matches!(self, BodyLiteral::Negated(_))
+    }
+
+    pub fn atom(&self) -> Option<&Atom> {
+        match self {
+            BodyLiteral::Positive(a) | BodyLiteral::Negated(a) => Some(a),
+            BodyLiteral::Comparison(_) => None,
+        }
+    }
+
+    pub fn variables(&self) -> Vec<&str> {
+        match self {
+            BodyLiteral::Positive(a) | BodyLiteral::Negated(a) => a.variables(),
+            BodyLiteral::Comparison(c) => {
+                let mut vars = vec![];
+                if let Some(v) = c.left.variable_name() { vars.push(v); }
+                if let Some(v) = c.right.variable_name() { vars.push(v); }
+                vars
+            }
+        }
+    }
+}
+
+/// A rule (head :- body)
+#[derive(Debug, Clone, PartialEq)]
+pub struct Rule {
+    pub head: Atom,
+    pub body: Vec<BodyLiteral>,
+}
+
+impl Rule {
+    pub fn is_fact(&self) -> bool { self.body.is_empty() }
+
+    pub fn has_negation(&self) -> bool {
+        self.body.iter().any(|l| l.is_negated())
+    }
+
+    pub fn has_aggregation(&self) -> bool {
+        self.head.terms.iter().any(|t| matches!(t, Term::Aggregate(_)))
+    }
+
+    pub fn body_predicates(&self) -> Vec<&str> {
+        self.body.iter().filter_map(|l| l.atom().map(|a| a.predicate.as_str())).collect()
+    }
+
+    pub fn head_variables(&self) -> Vec<&str> { self.head.variables() }
+
+    pub fn body_variables(&self) -> Vec<&str> {
+        self.body.iter().flat_map(|l| l.variables()).collect()
+    }
+}
+
+/// A constraint (:- body)
+#[derive(Debug, Clone, PartialEq)]
+pub struct Constraint {
+    pub body: Vec<BodyLiteral>,
+}
+
+/// A query (?- atom)
+#[derive(Debug, Clone, PartialEq)]
+pub struct Query {
+    pub atom: Atom,
+}
+
+/// Domain declaration
+#[derive(Debug, Clone, PartialEq)]
+pub struct DomainDecl {
+    pub name: String,
+    pub typ: ScalarType,
+}
+
+/// Predicate declaration
+#[derive(Debug, Clone, PartialEq)]
+pub struct PredDecl {
+    pub name: String,
+    pub types: Vec<ScalarType>,
+}
+
+/// A complete XLOG program
+#[derive(Debug, Clone, Default)]
+pub struct Program {
+    pub domains: Vec<DomainDecl>,
+    pub predicates: Vec<PredDecl>,
+    pub rules: Vec<Rule>,
+    pub constraints: Vec<Constraint>,
+    pub queries: Vec<Query>,
+}
+
+impl Program {
+    pub fn new() -> Self { Self::default() }
+
+    pub fn facts(&self) -> impl Iterator<Item = &Rule> {
+        self.rules.iter().filter(|r| r.is_fact())
+    }
+
+    pub fn proper_rules(&self) -> impl Iterator<Item = &Rule> {
+        self.rules.iter().filter(|r| !r.is_fact())
+    }
+
+    pub fn defined_predicates(&self) -> Vec<&str> {
+        self.rules
+            .iter()
+            .map(|r| r.head.predicate.as_str())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_term_variable() {
+        let term = Term::Variable("X".to_string());
+        assert!(term.is_variable());
+        assert!(!term.is_constant());
+    }
+
+    #[test]
+    fn test_term_constant() {
+        let term = Term::Integer(42);
+        assert!(!term.is_variable());
+        assert!(term.is_constant());
+    }
+
+    #[test]
+    fn test_atom_arity() {
+        let atom = Atom {
+            predicate: "edge".to_string(),
+            terms: vec![Term::Integer(1), Term::Integer(2)],
+        };
+        assert_eq!(atom.arity(), 2);
+    }
+
+    #[test]
+    fn test_atom_variables() {
+        let atom = Atom {
+            predicate: "edge".to_string(),
+            terms: vec![Term::Variable("X".to_string()), Term::Integer(2)],
+        };
+        let vars = atom.variables();
+        assert_eq!(vars, vec!["X"]);
+    }
+
+    #[test]
+    fn test_rule_is_fact() {
+        let fact = Rule {
+            head: Atom { predicate: "edge".to_string(), terms: vec![Term::Integer(1), Term::Integer(2)] },
+            body: vec![],
+        };
+        assert!(fact.is_fact());
+    }
+
+    #[test]
+    fn test_rule_has_negation() {
+        let rule = Rule {
+            head: Atom { predicate: "isolated".to_string(), terms: vec![Term::Variable("X".to_string())] },
+            body: vec![
+                BodyLiteral::Positive(Atom { predicate: "node".to_string(), terms: vec![Term::Variable("X".to_string())] }),
+                BodyLiteral::Negated(Atom { predicate: "edge".to_string(), terms: vec![Term::Variable("X".to_string()), Term::Variable("Y".to_string())] }),
+            ],
+        };
+        assert!(rule.has_negation());
+    }
+
+    #[test]
+    fn test_program_facts() {
+        let mut program = Program::new();
+        program.rules.push(Rule {
+            head: Atom { predicate: "edge".to_string(), terms: vec![Term::Integer(1), Term::Integer(2)] },
+            body: vec![],
+        });
+        program.rules.push(Rule {
+            head: Atom { predicate: "reach".to_string(), terms: vec![Term::Variable("X".to_string()), Term::Variable("Y".to_string())] },
+            body: vec![BodyLiteral::Positive(Atom { predicate: "edge".to_string(), terms: vec![Term::Variable("X".to_string()), Term::Variable("Y".to_string())] })],
+        });
+        assert_eq!(program.facts().count(), 1);
+        assert_eq!(program.proper_rules().count(), 1);
+    }
+}
