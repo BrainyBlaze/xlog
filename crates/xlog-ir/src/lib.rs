@@ -4,5 +4,5 @@ pub mod rir;
 pub mod metadata;
 pub mod plan;
 
-pub use rir::RirNode;
+pub use rir::{RirNode, JoinType, Expr, CompareOp, ConstValue};
 pub use metadata::RirMeta;

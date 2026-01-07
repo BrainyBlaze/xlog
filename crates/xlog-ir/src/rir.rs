@@ -1,0 +1,236 @@
+//! Relational IR node definitions
+
+use xlog_core::{AggOp, RelId};
+
+/// Join type variants
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinType {
+    /// Standard inner join
+    Inner,
+    /// Left outer join
+    LeftOuter,
+    /// Semi join (exists check)
+    Semi,
+    /// Anti join (not exists / negation)
+    Anti,
+}
+
+/// Expression in filter predicates
+#[derive(Debug, Clone)]
+pub enum Expr {
+    /// Column reference by index
+    Column(usize),
+    /// Constant value
+    Const(ConstValue),
+    /// Binary comparison
+    Compare {
+        left: Box<Expr>,
+        op: CompareOp,
+        right: Box<Expr>,
+    },
+    /// Logical AND
+    And(Vec<Expr>),
+    /// Logical OR
+    Or(Vec<Expr>),
+    /// Logical NOT
+    Not(Box<Expr>),
+}
+
+/// Comparison operators
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompareOp {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+/// Constant values in expressions
+#[derive(Debug, Clone)]
+pub enum ConstValue {
+    U32(u32),
+    U64(u64),
+    I32(i32),
+    I64(i64),
+    F32(f32),
+    F64(f64),
+    Bool(bool),
+    Symbol(String),
+}
+
+/// Relational IR node types
+#[derive(Debug, Clone)]
+pub enum RirNode {
+    /// Scan a base relation
+    Scan {
+        rel: RelId,
+    },
+
+    /// Filter rows by predicate
+    Filter {
+        input: Box<RirNode>,
+        predicate: Expr,
+    },
+
+    /// Project specific columns
+    Project {
+        input: Box<RirNode>,
+        columns: Vec<usize>,
+    },
+
+    /// Join two relations
+    Join {
+        left: Box<RirNode>,
+        right: Box<RirNode>,
+        left_keys: Vec<usize>,
+        right_keys: Vec<usize>,
+        join_type: JoinType,
+    },
+
+    /// Group by with aggregation
+    GroupBy {
+        input: Box<RirNode>,
+        key_cols: Vec<usize>,
+        /// (value_column, aggregation_op)
+        aggs: Vec<(usize, AggOp)>,
+    },
+
+    /// Union multiple inputs
+    Union {
+        inputs: Vec<RirNode>,
+    },
+
+    /// Remove duplicates
+    Distinct {
+        input: Box<RirNode>,
+        key_cols: Vec<usize>,
+    },
+
+    /// Set difference (left - right)
+    Diff {
+        left: Box<RirNode>,
+        right: Box<RirNode>,
+    },
+
+    /// Fixpoint iteration for recursion
+    Fixpoint {
+        /// SCC identifier
+        scc_id: u32,
+        /// Base case computation
+        base: Box<RirNode>,
+        /// Recursive step computation
+        recursive: Box<RirNode>,
+        /// Relation for delta (new tuples)
+        delta_rel: RelId,
+        /// Relation for full result
+        full_rel: RelId,
+    },
+}
+
+impl RirNode {
+    /// Check if this node is a leaf (Scan)
+    pub fn is_leaf(&self) -> bool {
+        matches!(self, RirNode::Scan { .. })
+    }
+
+    /// Get all relation IDs referenced in this subtree
+    pub fn referenced_relations(&self) -> Vec<RelId> {
+        let mut rels = Vec::new();
+        self.collect_relations(&mut rels);
+        rels
+    }
+
+    fn collect_relations(&self, rels: &mut Vec<RelId>) {
+        match self {
+            RirNode::Scan { rel } => rels.push(*rel),
+            RirNode::Filter { input, .. } | RirNode::Project { input, .. } => {
+                input.collect_relations(rels);
+            }
+            RirNode::Join { left, right, .. } | RirNode::Diff { left, right } => {
+                left.collect_relations(rels);
+                right.collect_relations(rels);
+            }
+            RirNode::Union { inputs } => {
+                for input in inputs {
+                    input.collect_relations(rels);
+                }
+            }
+            RirNode::GroupBy { input, .. } | RirNode::Distinct { input, .. } => {
+                input.collect_relations(rels);
+            }
+            RirNode::Fixpoint {
+                base,
+                recursive,
+                delta_rel,
+                full_rel,
+                ..
+            } => {
+                base.collect_relations(rels);
+                recursive.collect_relations(rels);
+                rels.push(*delta_rel);
+                rels.push(*full_rel);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_scan_node() {
+        let node = RirNode::Scan { rel: RelId(1) };
+        assert!(matches!(node, RirNode::Scan { rel: RelId(1) }));
+        assert!(node.is_leaf());
+    }
+
+    #[test]
+    fn test_join_node() {
+        let left = Box::new(RirNode::Scan { rel: RelId(1) });
+        let right = Box::new(RirNode::Scan { rel: RelId(2) });
+        let join = RirNode::Join {
+            left,
+            right,
+            left_keys: vec![0],
+            right_keys: vec![0],
+            join_type: JoinType::Inner,
+        };
+        assert!(matches!(join, RirNode::Join { .. }));
+        let rels = join.referenced_relations();
+        assert!(rels.contains(&RelId(1)));
+        assert!(rels.contains(&RelId(2)));
+    }
+
+    #[test]
+    fn test_fixpoint_node() {
+        let base = Box::new(RirNode::Scan { rel: RelId(1) });
+        let recursive = Box::new(RirNode::Scan { rel: RelId(2) });
+        let fp = RirNode::Fixpoint {
+            scc_id: 0,
+            base,
+            recursive,
+            delta_rel: RelId(3),
+            full_rel: RelId(4),
+        };
+        assert!(matches!(fp, RirNode::Fixpoint { scc_id: 0, .. }));
+    }
+
+    #[test]
+    fn test_anti_join() {
+        let left = Box::new(RirNode::Scan { rel: RelId(1) });
+        let right = Box::new(RirNode::Scan { rel: RelId(2) });
+        let anti = RirNode::Join {
+            left,
+            right,
+            left_keys: vec![0],
+            right_keys: vec![0],
+            join_type: JoinType::Anti,
+        };
+        if let RirNode::Join { join_type, .. } = anti {
+            assert_eq!(join_type, JoinType::Anti);
+        }
+    }
+}
