@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/xlog-core",
+    "crates/xlog-ir",
+    "crates/xlog-cuda",
+    "crates/xlog-runtime",
+    "crates/xlog-logic",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/xlog-project/xlog"
+
+[workspace.dependencies]
+thiserror = "1.0"
+cudarc = "0.12"
+pest = "2.7"
+pest_derive = "2.7"

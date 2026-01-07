@@ -1,0 +1,9 @@
+[package]
+name = "xlog-runtime"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+xlog-core = { path = "../xlog-core" }
+xlog-ir = { path = "../xlog-ir" }
+xlog-cuda = { path = "../xlog-cuda" }

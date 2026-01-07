@@ -1,0 +1,7 @@
+[package]
+name = "xlog-ir"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+xlog-core = { path = "../xlog-core" }

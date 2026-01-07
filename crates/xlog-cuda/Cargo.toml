@@ -1,0 +1,8 @@
+[package]
+name = "xlog-cuda"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+xlog-core = { path = "../xlog-core" }
+cudarc.workspace = true
