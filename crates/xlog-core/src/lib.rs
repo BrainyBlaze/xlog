@@ -7,4 +7,5 @@ pub mod traits;
 
 pub use error::{XlogError, Result};
 pub use config::{MemoryBudget, RuntimeConfig};
-pub use types::{ScalarType, Schema};
+pub use types::{ScalarType, Schema, RelId, AggOp};
+pub use traits::{GpuBuffer, KernelProvider, RelationStore};
