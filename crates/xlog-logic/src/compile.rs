@@ -1,0 +1,1 @@
+//! Compilation pipeline (stub)

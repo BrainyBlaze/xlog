@@ -16,6 +16,6 @@ repository = "https://github.com/xlog-project/xlog"
 
 [workspace.dependencies]
 thiserror = "1.0"
-cudarc = "0.12"
+cudarc = { version = "0.12", features = ["cuda-12060"] }
 pest = "2.7"
 pest_derive = "2.7"

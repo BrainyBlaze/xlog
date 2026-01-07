@@ -1,0 +1,1 @@
+//! Performance profiler (stub)
