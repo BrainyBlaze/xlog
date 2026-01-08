@@ -78,6 +78,7 @@ pub fn build_dependency_graph(program: &Program) -> DependencyGraph {
 }
 
 /// Find strongly connected components using Tarjan's algorithm
+/// Returns SCCs in reverse topological order (dependencies first)
 fn find_sccs(graph: &DependencyGraph) -> Vec<Vec<String>> {
     let mut index_counter = 0;
     let mut stack = Vec::new();
@@ -216,6 +217,12 @@ pub fn stratify(program: &Program) -> Result<Vec<Stratum>> {
     }
 
     Ok(strata)
+}
+
+/// Find SCCs for the lowering phase
+/// Returns SCCs in reverse topological order (dependencies first)
+pub fn find_sccs_for_lowering(graph: &DependencyGraph) -> Vec<Vec<String>> {
+    find_sccs(graph)
 }
 
 #[cfg(test)]
