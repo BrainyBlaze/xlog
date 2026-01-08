@@ -1472,19 +1472,20 @@ impl CudaKernelProvider {
         self.filter_u32(input, col, value, CompareOp::Gt)
     }
 
-    /// Filter u32 column with comparison operator
+    /// Filter u32 column with comparison operator.
     ///
     /// # Arguments
-    /// * `input` - The input buffer to filter
-    /// * `col` - Column index to filter on
-    /// * `value` - Value to compare against
+    /// * `input` - Buffer to filter
+    /// * `col` - Column index to compare
+    /// * `value` - Constant to compare against
     /// * `op` - Comparison operator
     ///
-    /// # Returns
-    /// A new buffer containing only rows that satisfy the comparison
+    /// # Limitations
+    /// Currently limited to buffers with <= 256 rows due to single-block prefix sum.
+    /// TODO: Implement multi-block prefix sum for larger datasets.
     ///
     /// # Errors
-    /// Returns `XlogError::Kernel` if kernel execution fails
+    /// Returns error if column index is out of bounds or buffer has > 256 rows.
     pub fn filter_u32(
         &self,
         input: &CudaBuffer,
@@ -1558,17 +1559,18 @@ impl CudaKernelProvider {
         self.compact_buffer_by_mask(input, &mask_host, &prefix_sum, count as u64)
     }
 
-    /// Filter buffer by pre-computed mask
+    /// Filter buffer by pre-computed mask.
     ///
     /// # Arguments
     /// * `input` - The input buffer to filter
     /// * `mask` - Mask slice where non-zero means keep the row
     ///
-    /// # Returns
-    /// A new buffer containing only rows where mask is non-zero
+    /// # Limitations
+    /// Currently limited to buffers with <= 256 rows due to single-block prefix sum.
+    /// TODO: Implement multi-block prefix sum for larger datasets.
     ///
     /// # Errors
-    /// Returns `XlogError::Kernel` if kernel execution fails
+    /// Returns error if mask length doesn't match buffer rows or buffer has > 256 rows.
     pub fn filter_by_mask(&self, input: &CudaBuffer, mask: &[u8]) -> Result<CudaBuffer> {
         if input.num_rows == 0 {
             return self.create_empty_buffer(input.schema.clone());

@@ -1,7 +1,7 @@
 // crates/xlog-cuda/tests/filter_tests.rs
 use std::sync::Arc;
 use xlog_core::{MemoryBudget, Schema, ScalarType};
-use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_cuda::{CompareOp, CudaDevice, CudaKernelProvider, GpuMemoryManager};
 
 fn setup_provider() -> Option<CudaKernelProvider> {
     if cudarc::driver::CudaDevice::count().unwrap_or(0) == 0 {
@@ -98,4 +98,53 @@ fn test_filter_by_mask() {
 
     let result = provider.download_column_u32(&filtered, 0).unwrap();
     assert_eq!(result, vec![10, 30, 50]);
+}
+
+#[test]
+fn test_filter_u32_over_limit() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    // More than 256 rows should error
+    let col0: Vec<u32> = (0..300).collect();
+    let schema = Schema::new(vec![("col0".to_string(), ScalarType::U32)]);
+
+    let buffer = provider.create_buffer_from_u32_slice(&col0, schema).unwrap();
+    let result = provider.filter_u32_eq(&buffer, 0, 100);
+
+    assert!(result.is_err(), "Should error for > 256 rows");
+}
+
+#[test]
+fn test_filter_u32_all_ops() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    let col0: Vec<u32> = vec![1, 2, 3, 4, 5];
+    let schema = Schema::new(vec![("col0".to_string(), ScalarType::U32)]);
+    let buffer = provider.create_buffer_from_u32_slice(&col0, schema).unwrap();
+
+    // Test Lt (less than 3): [1, 2]
+    let filtered = provider.filter_u32(&buffer, 0, 3, CompareOp::Lt).unwrap();
+    let result = provider.download_column_u32(&filtered, 0).unwrap();
+    assert_eq!(result, vec![1, 2]);
+
+    // Test Le (less than or equal 3): [1, 2, 3]
+    let filtered = provider.filter_u32(&buffer, 0, 3, CompareOp::Le).unwrap();
+    let result = provider.download_column_u32(&filtered, 0).unwrap();
+    assert_eq!(result, vec![1, 2, 3]);
+
+    // Test Ge (greater than or equal 3): [3, 4, 5]
+    let filtered = provider.filter_u32(&buffer, 0, 3, CompareOp::Ge).unwrap();
+    let result = provider.download_column_u32(&filtered, 0).unwrap();
+    assert_eq!(result, vec![3, 4, 5]);
+
+    // Test Ne (not equal 3): [1, 2, 4, 5]
+    let filtered = provider.filter_u32(&buffer, 0, 3, CompareOp::Ne).unwrap();
+    let result = provider.download_column_u32(&filtered, 0).unwrap();
+    assert_eq!(result, vec![1, 2, 4, 5]);
 }
