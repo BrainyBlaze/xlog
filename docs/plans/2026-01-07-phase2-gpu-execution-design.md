@@ -137,8 +137,10 @@ pub struct RelationStore {
 
 impl RelationStore {
     pub fn get(&self, name: &str) -> Option<&CudaBuffer>;
+    pub fn get_mut(&mut self, name: &str) -> Option<&mut CudaBuffer>;
     pub fn put(&mut self, name: &str, buffer: CudaBuffer);
-    pub fn get_or_empty(&self, name: &str) -> CudaBuffer;
+    pub fn get_or_insert_empty(&mut self, name: &str, schema: &Schema) -> &CudaBuffer;
+    pub fn get_or_insert_empty_mut(&mut self, name: &str, schema: &Schema) -> &mut CudaBuffer;
 }
 ```
 
