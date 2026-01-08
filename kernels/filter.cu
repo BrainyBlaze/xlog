@@ -1,0 +1,196 @@
+// kernels/filter.cu
+#include <cstdint>
+
+/**
+ * GPU Filter Kernels
+ *
+ * Provides comparison operations and stream compaction for filtering.
+ * Works with prefix_sum from scan.cu for compaction indices.
+ *
+ * Comparison operations (OP values):
+ * - 0 = Eq (equal)
+ * - 1 = Ne (not equal)
+ * - 2 = Lt (less than)
+ * - 3 = Le (less than or equal)
+ * - 4 = Gt (greater than)
+ * - 5 = Ge (greater than or equal)
+ */
+
+#define OP_EQ 0
+#define OP_NE 1
+#define OP_LT 2
+#define OP_LE 3
+#define OP_GT 4
+#define OP_GE 5
+
+/**
+ * Compare i64 column against constant, output mask.
+ * @param column Input column data
+ * @param constant Value to compare against
+ * @param num_rows Number of elements
+ * @param op Comparison operator (0-5)
+ * @param mask Output: 1 if comparison true, 0 otherwise
+ */
+extern "C" __global__ void filter_compare_i64(
+    const int64_t* __restrict__ column,
+    int64_t constant,
+    uint32_t num_rows,
+    uint8_t op,
+    uint8_t* __restrict__ mask
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= num_rows) return;
+
+    int64_t val = column[gid];
+    bool result;
+    switch (op) {
+        case OP_EQ: result = (val == constant); break;
+        case OP_NE: result = (val != constant); break;
+        case OP_LT: result = (val < constant); break;
+        case OP_LE: result = (val <= constant); break;
+        case OP_GT: result = (val > constant); break;
+        case OP_GE: result = (val >= constant); break;
+        default: result = false;
+    }
+    mask[gid] = result ? 1 : 0;
+}
+
+/** Compare u32 column against constant */
+extern "C" __global__ void filter_compare_u32(
+    const uint32_t* __restrict__ column,
+    uint32_t constant,
+    uint32_t num_rows,
+    uint8_t op,
+    uint8_t* __restrict__ mask
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= num_rows) return;
+
+    uint32_t val = column[gid];
+    bool result;
+    switch (op) {
+        case OP_EQ: result = (val == constant); break;
+        case OP_NE: result = (val != constant); break;
+        case OP_LT: result = (val < constant); break;
+        case OP_LE: result = (val <= constant); break;
+        case OP_GT: result = (val > constant); break;
+        case OP_GE: result = (val >= constant); break;
+        default: result = false;
+    }
+    mask[gid] = result ? 1 : 0;
+}
+
+/** Compare f64 column against constant */
+extern "C" __global__ void filter_compare_f64(
+    const double* __restrict__ column,
+    double constant,
+    uint32_t num_rows,
+    uint8_t op,
+    uint8_t* __restrict__ mask
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= num_rows) return;
+
+    double val = column[gid];
+    bool result;
+    switch (op) {
+        case OP_EQ: result = (val == constant); break;
+        case OP_NE: result = (val != constant); break;
+        case OP_LT: result = (val < constant); break;
+        case OP_LE: result = (val <= constant); break;
+        case OP_GT: result = (val > constant); break;
+        case OP_GE: result = (val >= constant); break;
+        default: result = false;
+    }
+    mask[gid] = result ? 1 : 0;
+}
+
+/** Combine two masks with AND */
+extern "C" __global__ void mask_and(
+    const uint8_t* __restrict__ a,
+    const uint8_t* __restrict__ b,
+    uint8_t* __restrict__ out,
+    uint32_t n
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid < n) {
+        out[gid] = (a[gid] && b[gid]) ? 1 : 0;
+    }
+}
+
+/** Combine two masks with OR */
+extern "C" __global__ void mask_or(
+    const uint8_t* __restrict__ a,
+    const uint8_t* __restrict__ b,
+    uint8_t* __restrict__ out,
+    uint32_t n
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid < n) {
+        out[gid] = (a[gid] || b[gid]) ? 1 : 0;
+    }
+}
+
+/** Negate a mask */
+extern "C" __global__ void mask_not(
+    const uint8_t* __restrict__ a,
+    uint8_t* __restrict__ out,
+    uint32_t n
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid < n) {
+        out[gid] = a[gid] ? 0 : 1;
+    }
+}
+
+/**
+ * Compact u32 column by mask using prefix sum indices.
+ * @param input Input column
+ * @param mask Filter mask (1 = keep, 0 = discard)
+ * @param prefix_sum Exclusive prefix sum of mask (from scan.cu)
+ * @param num_rows Input size
+ * @param output Output column (compacted)
+ */
+extern "C" __global__ void compact_u32_by_mask(
+    const uint32_t* __restrict__ input,
+    const uint8_t* __restrict__ mask,
+    const uint32_t* __restrict__ prefix_sum,
+    uint32_t num_rows,
+    uint32_t* __restrict__ output
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= num_rows) return;
+
+    if (mask[gid]) {
+        uint32_t out_idx = prefix_sum[gid];
+        output[out_idx] = input[gid];
+    }
+}
+
+/**
+ * Compact bytes by mask (for any element size).
+ * @param input Input data
+ * @param mask Filter mask
+ * @param prefix_sum Exclusive prefix sum of mask
+ * @param num_rows Number of rows
+ * @param elem_size Bytes per element
+ * @param output Output data (compacted)
+ */
+extern "C" __global__ void compact_bytes_by_mask(
+    const uint8_t* __restrict__ input,
+    const uint8_t* __restrict__ mask,
+    const uint32_t* __restrict__ prefix_sum,
+    uint32_t num_rows,
+    uint32_t elem_size,
+    uint8_t* __restrict__ output
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= num_rows) return;
+
+    if (mask[gid]) {
+        uint32_t out_idx = prefix_sum[gid];
+        for (uint32_t b = 0; b < elem_size; b++) {
+            output[out_idx * elem_size + b] = input[gid * elem_size + b];
+        }
+    }
+}
