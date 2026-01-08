@@ -36,6 +36,9 @@ pub struct Compiler {
     lowerer: Lowerer,
 }
 
+use std::collections::HashMap;
+use xlog_core::{RelId, Schema};
+
 impl Default for Compiler {
     fn default() -> Self {
         Self::new()
@@ -108,6 +111,21 @@ impl Compiler {
     /// from previous compilations.
     pub fn reset(&mut self) {
         self.lowerer = Lowerer::new();
+    }
+
+    /// Get the mapping from predicate names to relation IDs after compilation.
+    ///
+    /// This mapping is needed to register relations in the executor with
+    /// the correct RelIds.
+    pub fn rel_ids(&self) -> &HashMap<String, RelId> {
+        self.lowerer.rel_ids()
+    }
+
+    /// Get the inferred schemas for predicates after compilation.
+    ///
+    /// These schemas are needed to create GPU buffers with correct column types.
+    pub fn schemas(&self) -> &HashMap<String, Schema> {
+        self.lowerer.schemas()
     }
 }
 

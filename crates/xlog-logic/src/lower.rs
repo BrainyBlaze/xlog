@@ -60,6 +60,16 @@ impl Lowerer {
         self.strata = strata;
     }
 
+    /// Get the mapping from predicate names to relation IDs
+    pub fn rel_ids(&self) -> &HashMap<String, RelId> {
+        &self.rel_ids
+    }
+
+    /// Get the inferred schemas for predicates
+    pub fn schemas(&self) -> &HashMap<String, Schema> {
+        &self.schemas
+    }
+
     /// Get or allocate a relation ID for a predicate
     fn get_or_create_rel_id(&mut self, name: &str) -> RelId {
         if let Some(&id) = self.rel_ids.get(name) {

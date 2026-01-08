@@ -9,3 +9,6 @@ xlog-ir = { path = "../xlog-ir" }
 xlog-runtime = { path = "../xlog-runtime" }
 pest.workspace = true
 pest_derive.workspace = true
+
+[dev-dependencies]
+xlog-cuda = { path = "../xlog-cuda" }
