@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use xlog_core::{AggOp, RelId, Result, Schema, ScalarType, XlogError};
+use xlog_core::{AggOp, RelId, Result, ScalarType, Schema, XlogError};
 use xlog_cuda::{CudaBuffer, CudaKernelProvider};
 use xlog_ir::{CompareOp, ConstValue, ExecutionPlan, Expr, JoinType, RirNode, Stratum};
 
@@ -177,8 +177,8 @@ impl Executor {
                 delta_rel,
                 full_rel,
             } => {
-                // Stub for Task 7 - fixpoint iteration
-                self.execute_fixpoint_stub(*scc_id, base, recursive, *delta_rel, *full_rel)
+                // Semi-naive fixpoint iteration
+                self.execute_fixpoint(*scc_id, base, recursive, *delta_rel, *full_rel)
             }
         }
     }
@@ -186,11 +186,7 @@ impl Executor {
     /// Execute a stratum (internal implementation)
     ///
     /// Processes all SCCs in the stratum by executing their rules.
-    fn execute_stratum_impl(
-        &mut self,
-        stratum: &Stratum,
-        plan: &ExecutionPlan,
-    ) -> Result<()> {
+    fn execute_stratum_impl(&mut self, stratum: &Stratum, plan: &ExecutionPlan) -> Result<()> {
         // Process each SCC in the stratum
         for &scc_id in &stratum.sccs {
             // Get rules for this SCC
@@ -323,7 +319,11 @@ impl Executor {
             result_columns.push(result_col);
         }
 
-        Ok(CudaBuffer::from_columns(result_columns, result_rows, schema))
+        Ok(CudaBuffer::from_columns(
+            result_columns,
+            result_rows,
+            schema,
+        ))
     }
 
     /// Evaluate a predicate expression for a single row
@@ -339,7 +339,10 @@ impl Executor {
                 // Interpret column value as boolean
                 let col_type = schema.column_type(*col_idx);
                 if let Some(ScalarType::Bool) = col_type {
-                    Ok(columns.get(*col_idx).map(|c| c.get(row_idx).copied().unwrap_or(0) != 0).unwrap_or(false))
+                    Ok(columns
+                        .get(*col_idx)
+                        .map(|c| c.get(row_idx).copied().unwrap_or(0) != 0)
+                        .unwrap_or(false))
                 } else {
                     // Non-bool columns: check if non-zero
                     Ok(true)
@@ -381,9 +384,7 @@ impl Executor {
                 Ok(false)
             }
 
-            Expr::Not(inner) => {
-                Ok(!self.evaluate_predicate(inner, columns, row_idx, schema)?)
-            }
+            Expr::Not(inner) => Ok(!self.evaluate_predicate(inner, columns, row_idx, schema)?),
         }
     }
 
@@ -543,9 +544,7 @@ impl Executor {
         join_type: JoinType,
     ) -> Result<CudaBuffer> {
         match join_type {
-            JoinType::Inner => {
-                self.provider.hash_join(left, right, left_keys, right_keys)
-            }
+            JoinType::Inner => self.provider.hash_join(left, right, left_keys, right_keys),
 
             JoinType::LeftOuter => {
                 // MVP: Fall back to inner join (lossy but functional)
@@ -555,7 +554,9 @@ impl Executor {
             JoinType::Semi => {
                 // Semi join: return left rows that have a match in right
                 // MVP: Use hash join and project only left columns
-                let joined = self.provider.hash_join(left, right, left_keys, right_keys)?;
+                let joined = self
+                    .provider
+                    .hash_join(left, right, left_keys, right_keys)?;
                 let left_cols: Vec<usize> = (0..left.arity()).collect();
                 self.execute_project(&joined, &left_cols)
             }
@@ -585,7 +586,8 @@ impl Executor {
 
         // MVP: Execute first aggregation only
         let (value_col, agg_op) = aggs[0];
-        self.provider.groupby_agg(input, key_cols, agg_op, value_col)
+        self.provider
+            .groupby_agg(input, key_cols, agg_op, value_col)
     }
 
     /// Execute a Union node
@@ -623,21 +625,121 @@ impl Executor {
         self.provider.diff(left, right)
     }
 
-    /// Execute a Fixpoint node (stub for Task 7)
+    /// Maximum iterations for fixpoint computation to prevent infinite loops
+    const MAX_FIXPOINT_ITERATIONS: usize = 1000;
+
+    /// Execute a Fixpoint node using semi-naive evaluation
     ///
-    /// This is a placeholder implementation. Full fixpoint iteration
-    /// with semi-naive evaluation will be implemented in Task 7.
-    fn execute_fixpoint_stub(
+    /// The semi-naive algorithm avoids redundant computation in recursive queries:
+    ///
+    /// 1. **Initialize:**
+    ///    - Compute base case: `R = eval(base)`
+    ///    - Set delta to base: `delta = R`
+    ///    - Store both `R` and `delta` in RelationStore
+    ///
+    /// 2. **Iterate until fixpoint:**
+    ///    - Compute new tuples: `delta_new = eval(recursive)` using current `delta`
+    ///    - Remove already-known tuples: `delta_new = delta_new - R`
+    ///    - If `delta_new` is empty, we've reached fixpoint
+    ///    - Otherwise: `R = R union delta_new`, `delta = delta_new`
+    ///
+    /// 3. **Return:** Final `R`
+    ///
+    /// # Arguments
+    /// * `scc_id` - SCC identifier for logging/debugging
+    /// * `base` - Base case RIR tree (non-recursive facts/rules)
+    /// * `recursive` - Recursive RIR tree (references delta relation)
+    /// * `delta_rel` - RelId for delta relation
+    /// * `full_rel` - RelId for full relation
+    ///
+    /// # Returns
+    /// A CudaBuffer containing the final fixpoint result
+    ///
+    /// # Errors
+    /// Returns an error if evaluation fails or iteration limit is exceeded
+    fn execute_fixpoint(
         &mut self,
-        _scc_id: u32,
+        scc_id: u32,
         base: &RirNode,
-        _recursive: &RirNode,
-        _delta_rel: RelId,
-        _full_rel: RelId,
+        recursive: &RirNode,
+        delta_rel: RelId,
+        full_rel: RelId,
     ) -> Result<CudaBuffer> {
-        // Stub: Just execute the base case for now
-        // Task 7 will implement proper fixpoint iteration
-        self.execute_node(base)
+        // Step 1: Compute base case R = eval(base)
+        let r_initial = self.execute_node(base)?;
+
+        // Handle empty base case
+        if r_initial.is_empty() {
+            return Ok(r_initial);
+        }
+
+        // Step 2: Initialize delta = R (clone the base result)
+        let delta_initial = self.clone_buffer(&r_initial)?;
+
+        // Get relation names for delta and full relations
+        let delta_name = self.get_or_create_rel_name(delta_rel, &format!("__delta_{}", scc_id));
+        let full_name = self.get_or_create_rel_name(full_rel, &format!("__full_{}", scc_id));
+
+        // Store initial R and delta in relation store
+        self.store.put(&full_name, r_initial);
+        self.store.put(&delta_name, delta_initial);
+
+        // Step 3: Iterate until fixpoint
+        for _iteration in 0..Self::MAX_FIXPOINT_ITERATIONS {
+            // Evaluate recursive step using current delta
+            // The recursive RIR tree should reference delta_rel internally
+            let delta_new_raw = self.execute_node(recursive)?;
+
+            // Get current R for set difference
+            let current_r = self.store.get(&full_name).ok_or_else(|| {
+                XlogError::Execution(format!(
+                    "Full relation {} not found during fixpoint iteration",
+                    full_name
+                ))
+            })?;
+
+            // Compute delta_new = delta_new_raw - R (remove already-known tuples)
+            let delta_new = self.provider.diff(&delta_new_raw, current_r)?;
+
+            // Check for fixpoint: if delta_new is empty, we're done
+            if delta_new.is_empty() {
+                // Fixpoint reached - return final R
+                let final_r = self.store.remove(&full_name).ok_or_else(|| {
+                    XlogError::Execution("Full relation lost during fixpoint".to_string())
+                })?;
+
+                // Clean up delta relation
+                self.store.remove(&delta_name);
+
+                return Ok(final_r);
+            }
+
+            // Not at fixpoint yet: R = R union delta_new
+            let new_r = self.provider.union(current_r, &delta_new)?;
+
+            // Update relations for next iteration
+            // delta = delta_new (the newly discovered tuples)
+            self.store.put(&delta_name, delta_new);
+            self.store.put(&full_name, new_r);
+        }
+
+        // Iteration limit exceeded
+        Err(XlogError::Execution(format!(
+            "Fixpoint iteration limit ({}) exceeded for SCC {}",
+            Self::MAX_FIXPOINT_ITERATIONS,
+            scc_id
+        )))
+    }
+
+    /// Get the relation name for a RelId, creating a default name if not registered
+    fn get_or_create_rel_name(&mut self, rel_id: RelId, default: &str) -> String {
+        if let Some(name) = self.rel_names.get(&rel_id) {
+            name.clone()
+        } else {
+            let name = default.to_string();
+            self.rel_names.insert(rel_id, name.clone());
+            name
+        }
     }
 
     // ============== Helper methods ==============
@@ -699,8 +801,8 @@ impl Executor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xlog_cuda::{CudaDevice, GpuMemoryManager};
     use xlog_core::MemoryBudget;
+    use xlog_cuda::{CudaDevice, GpuMemoryManager};
     use xlog_ir::{CompiledRule, RirMeta, Scc};
 
     fn has_cuda_device() -> bool {
@@ -1004,10 +1106,21 @@ mod tests {
         ]);
 
         let a_data: Vec<u8> = [1u32, 2, 3].iter().flat_map(|v| v.to_le_bytes()).collect();
-        let b_data: Vec<u8> = [10u32, 20, 30].iter().flat_map(|v| v.to_le_bytes()).collect();
+        let b_data: Vec<u8> = [10u32, 20, 30]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
 
-        let mut col_a = executor.provider.memory().alloc::<u8>(a_data.len()).unwrap();
-        let mut col_b = executor.provider.memory().alloc::<u8>(b_data.len()).unwrap();
+        let mut col_a = executor
+            .provider
+            .memory()
+            .alloc::<u8>(a_data.len())
+            .unwrap();
+        let mut col_b = executor
+            .provider
+            .memory()
+            .alloc::<u8>(b_data.len())
+            .unwrap();
 
         executor
             .provider
@@ -1146,10 +1259,191 @@ mod tests {
         assert_eq!(values, vec![1, 3, 5]);
     }
 
-    // ============== Fixpoint Stub Tests ==============
+    // ============== Fixpoint Tests ==============
 
     #[test]
-    fn test_execute_fixpoint_stub() {
+    fn test_execute_fixpoint_base_only() {
+        // Test fixpoint with a base case that reaches fixpoint immediately
+        // (recursive step produces nothing new)
+        let mut executor = match create_test_executor() {
+            Some(e) => e,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+
+        // Create base relation
+        let buffer = create_test_buffer(&executor, &[1, 2, 3], "key");
+        executor.store_mut().put("base_rel", buffer);
+        executor.register_relation(RelId(1), "base_rel");
+
+        // Create an empty recursive relation (simulating a recursive step that produces nothing)
+        let empty_schema = Schema::new(vec![("key".to_string(), ScalarType::U32)]);
+        let empty_buffer = executor.create_empty_buffer(empty_schema).unwrap();
+        executor.store_mut().put("empty_rel", empty_buffer);
+        executor.register_relation(RelId(4), "empty_rel");
+
+        // Base: scan base_rel
+        // Recursive: scan empty_rel (produces nothing new)
+        let base = Box::new(RirNode::Scan { rel: RelId(1) });
+        let recursive = Box::new(RirNode::Scan { rel: RelId(4) });
+
+        let node = RirNode::Fixpoint {
+            scc_id: 0,
+            base,
+            recursive,
+            delta_rel: RelId(2),
+            full_rel: RelId(3),
+        };
+
+        let result = executor.execute_node(&node);
+        assert!(result.is_ok());
+
+        // Should return base case since recursive produces nothing
+        let result = result.unwrap();
+        assert_eq!(result.num_rows(), 3);
+        let values = read_buffer_u32(&executor, &result, 0);
+        assert_eq!(values, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_execute_fixpoint_empty_base() {
+        // Test fixpoint with empty base case
+        let mut executor = match create_test_executor() {
+            Some(e) => e,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+
+        // Create empty base relation
+        let empty_schema = Schema::new(vec![("key".to_string(), ScalarType::U32)]);
+        let empty_buffer = executor.create_empty_buffer(empty_schema.clone()).unwrap();
+        executor.store_mut().put("empty_base", empty_buffer);
+        executor.register_relation(RelId(1), "empty_base");
+
+        // Create recursive relation (won't be used since base is empty)
+        let rec_buffer = create_test_buffer(&executor, &[4, 5, 6], "key");
+        executor.store_mut().put("rec_rel", rec_buffer);
+        executor.register_relation(RelId(4), "rec_rel");
+
+        let base = Box::new(RirNode::Scan { rel: RelId(1) });
+        let recursive = Box::new(RirNode::Scan { rel: RelId(4) });
+
+        let node = RirNode::Fixpoint {
+            scc_id: 0,
+            base,
+            recursive,
+            delta_rel: RelId(2),
+            full_rel: RelId(3),
+        };
+
+        let result = executor.execute_node(&node);
+        assert!(result.is_ok());
+
+        // Should return empty since base is empty
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_execute_fixpoint_one_iteration() {
+        // Test fixpoint that converges after one iteration
+        let mut executor = match create_test_executor() {
+            Some(e) => e,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+
+        // Base: [1, 2]
+        let base_buffer = create_test_buffer(&executor, &[1, 2], "key");
+        executor.store_mut().put("base_rel", base_buffer);
+        executor.register_relation(RelId(1), "base_rel");
+
+        // Recursive produces [1, 2, 3] - after diff with R, only [3] remains
+        let rec_buffer = create_test_buffer(&executor, &[1, 2, 3], "key");
+        executor.store_mut().put("rec_rel", rec_buffer);
+        executor.register_relation(RelId(4), "rec_rel");
+
+        // After first iteration, R = [1, 2, 3], recursive produces [1, 2, 3] again
+        // diff([1, 2, 3], [1, 2, 3]) = empty -> fixpoint reached
+
+        let base = Box::new(RirNode::Scan { rel: RelId(1) });
+        let recursive = Box::new(RirNode::Scan { rel: RelId(4) });
+
+        let node = RirNode::Fixpoint {
+            scc_id: 0,
+            base,
+            recursive,
+            delta_rel: RelId(2),
+            full_rel: RelId(3),
+        };
+
+        let result = executor.execute_node(&node);
+        assert!(result.is_ok());
+
+        let result = result.unwrap();
+        // Result should be [1, 2, 3]
+        assert_eq!(result.num_rows(), 3);
+    }
+
+    #[test]
+    fn test_execute_fixpoint_multiple_iterations() {
+        // Test fixpoint that requires multiple iterations to converge
+        // This simulates transitive closure behavior
+        let mut executor = match create_test_executor() {
+            Some(e) => e,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+
+        // Base: [1]
+        let base_buffer = create_test_buffer(&executor, &[1], "key");
+        executor.store_mut().put("base_rel", base_buffer);
+        executor.register_relation(RelId(1), "base_rel");
+
+        // For this test, we need a recursive rule that can expand
+        // Since we can't easily simulate join-based recursion without complex setup,
+        // we'll test a simpler case where recursive produces cumulative data
+
+        // Recursive relation will produce [1, 2] in first iteration,
+        // then [1, 2, 3] in second iteration, etc.
+        // This requires a more complex setup, so let's test the basic convergence
+
+        // Simplified test: recursive produces union of base with [2]
+        // First iteration: R=[1], rec produces [1, 2] -> delta_new = [2]
+        // Second iteration: R=[1, 2], rec produces [1, 2] -> delta_new = empty
+        let rec_buffer = create_test_buffer(&executor, &[1, 2], "key");
+        executor.store_mut().put("rec_rel", rec_buffer);
+        executor.register_relation(RelId(4), "rec_rel");
+
+        let base = Box::new(RirNode::Scan { rel: RelId(1) });
+        let recursive = Box::new(RirNode::Scan { rel: RelId(4) });
+
+        let node = RirNode::Fixpoint {
+            scc_id: 0,
+            base,
+            recursive,
+            delta_rel: RelId(2),
+            full_rel: RelId(3),
+        };
+
+        let result = executor.execute_node(&node);
+        assert!(result.is_ok());
+
+        let result = result.unwrap();
+        // Result should be union of [1] and [2] = [1, 2]
+        assert_eq!(result.num_rows(), 2);
+    }
+
+    #[test]
+    fn test_execute_fixpoint_via_node() {
+        // Test fixpoint through execute_node to ensure the match arm works
         let mut executor = match create_test_executor() {
             Some(e) => e,
             None => {
@@ -1163,8 +1457,14 @@ mod tests {
         executor.store_mut().put("base_rel", buffer);
         executor.register_relation(RelId(1), "base_rel");
 
+        // Empty recursive means immediate fixpoint
+        let empty_schema = Schema::new(vec![("key".to_string(), ScalarType::U32)]);
+        let empty_buffer = executor.create_empty_buffer(empty_schema).unwrap();
+        executor.store_mut().put("empty_rel", empty_buffer);
+        executor.register_relation(RelId(4), "empty_rel");
+
         let base = Box::new(RirNode::Scan { rel: RelId(1) });
-        let recursive = Box::new(RirNode::Scan { rel: RelId(1) });
+        let recursive = Box::new(RirNode::Scan { rel: RelId(4) });
 
         let node = RirNode::Fixpoint {
             scc_id: 0,
@@ -1177,9 +1477,51 @@ mod tests {
         let result = executor.execute_node(&node);
         assert!(result.is_ok());
 
-        // Stub just returns base case
         let result = result.unwrap();
         assert_eq!(result.num_rows(), 3);
+    }
+
+    #[test]
+    fn test_fixpoint_cleanup() {
+        // Test that fixpoint properly cleans up delta and full relations
+        let mut executor = match create_test_executor() {
+            Some(e) => e,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+
+        let buffer = create_test_buffer(&executor, &[1, 2], "key");
+        executor.store_mut().put("base_rel", buffer);
+        executor.register_relation(RelId(1), "base_rel");
+
+        let empty_schema = Schema::new(vec![("key".to_string(), ScalarType::U32)]);
+        let empty_buffer = executor.create_empty_buffer(empty_schema).unwrap();
+        executor.store_mut().put("empty_rel", empty_buffer);
+        executor.register_relation(RelId(4), "empty_rel");
+
+        // Register names for delta and full relations to check cleanup
+        executor.register_relation(RelId(2), "__delta_test");
+        executor.register_relation(RelId(3), "__full_test");
+
+        let base = Box::new(RirNode::Scan { rel: RelId(1) });
+        let recursive = Box::new(RirNode::Scan { rel: RelId(4) });
+
+        let node = RirNode::Fixpoint {
+            scc_id: 0,
+            base,
+            recursive,
+            delta_rel: RelId(2),
+            full_rel: RelId(3),
+        };
+
+        let result = executor.execute_node(&node);
+        assert!(result.is_ok());
+
+        // After fixpoint, the delta and full relations should be cleaned up
+        assert!(!executor.store().contains("__delta_test"));
+        assert!(!executor.store().contains("__full_test"));
     }
 
     // ============== Execute Plan Tests ==============
@@ -1229,7 +1571,10 @@ mod tests {
             meta: RirMeta::default(),
         };
 
-        let stratum = Stratum { id: 0, sccs: vec![0] };
+        let stratum = Stratum {
+            id: 0,
+            sccs: vec![0],
+        };
 
         let plan = ExecutionPlan {
             sccs: vec![scc],

@@ -99,11 +99,13 @@ impl RelationStore {
     /// # Returns
     /// A reference to the existing buffer, or the newly inserted empty buffer
     pub fn get_or_insert_empty(&mut self, name: &str, schema: &Schema) -> &CudaBuffer {
-        self.relations.entry(name.to_string()).or_insert_with(|| CudaBuffer {
-            columns: Vec::new(),
-            num_rows: 0,
-            schema: schema.clone(),
-        })
+        self.relations
+            .entry(name.to_string())
+            .or_insert_with(|| CudaBuffer {
+                columns: Vec::new(),
+                num_rows: 0,
+                schema: schema.clone(),
+            })
     }
 
     /// Get a mutable reference to a relation, or insert an empty buffer with the given schema
@@ -119,11 +121,13 @@ impl RelationStore {
     /// # Returns
     /// A mutable reference to the existing buffer, or the newly inserted empty buffer
     pub fn get_or_insert_empty_mut(&mut self, name: &str, schema: &Schema) -> &mut CudaBuffer {
-        self.relations.entry(name.to_string()).or_insert_with(|| CudaBuffer {
-            columns: Vec::new(),
-            num_rows: 0,
-            schema: schema.clone(),
-        })
+        self.relations
+            .entry(name.to_string())
+            .or_insert_with(|| CudaBuffer {
+                columns: Vec::new(),
+                num_rows: 0,
+                schema: schema.clone(),
+            })
     }
 
     /// Check if a relation exists in the store
@@ -410,11 +414,14 @@ mod tests {
         assert!(!store.contains("b"));
 
         // Replace one
-        store.put("a", CudaBuffer {
-            columns: Vec::new(),
-            num_rows: 50,
-            schema: Schema::new(vec![]),
-        });
+        store.put(
+            "a",
+            CudaBuffer {
+                columns: Vec::new(),
+                num_rows: 50,
+                schema: Schema::new(vec![]),
+            },
+        );
         assert_eq!(store.len(), 2);
         assert_eq!(store.get("a").unwrap().num_rows, 50);
 
