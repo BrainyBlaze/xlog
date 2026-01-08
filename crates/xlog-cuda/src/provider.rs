@@ -15,11 +15,13 @@ use crate::{CudaBuffer, CudaDevice, GpuMemoryManager};
 const JOIN_PTX: &str = include_str!("../../../kernels/join.ptx");
 const DEDUP_PTX: &str = include_str!("../../../kernels/dedup.ptx");
 const GROUPBY_PTX: &str = include_str!("../../../kernels/groupby.ptx");
+const SCAN_PTX: &str = include_str!("../../../kernels/scan.ptx");
 
 /// Module names for loaded PTX modules
 pub const JOIN_MODULE: &str = "xlog_join";
 pub const DEDUP_MODULE: &str = "xlog_dedup";
 pub const GROUPBY_MODULE: &str = "xlog_groupby";
+pub const SCAN_MODULE: &str = "xlog_scan";
 
 /// Kernel function names in the join module
 pub mod join_kernels {
@@ -40,6 +42,12 @@ pub mod groupby_kernels {
     pub const GROUPBY_SUM: &str = "groupby_sum";
     pub const GROUPBY_MIN: &str = "groupby_min";
     pub const GROUPBY_MAX: &str = "groupby_max";
+}
+
+/// Kernel function names in the scan module
+pub mod scan_kernels {
+    pub const EXCLUSIVE_SCAN_MASK: &str = "exclusive_scan_mask";
+    pub const COUNT_MASK: &str = "count_mask";
 }
 
 /// CUDA kernel provider for xlog GPU operations
@@ -124,6 +132,19 @@ impl CudaKernelProvider {
                 ],
             )
             .map_err(|e| XlogError::Kernel(format!("Failed to load groupby PTX: {}", e)))?;
+
+        // Load scan module
+        device
+            .inner()
+            .load_ptx(
+                Ptx::from_src(SCAN_PTX),
+                SCAN_MODULE,
+                &[
+                    scan_kernels::EXCLUSIVE_SCAN_MASK,
+                    scan_kernels::COUNT_MASK,
+                ],
+            )
+            .map_err(|e| XlogError::Kernel(format!("Failed to load scan PTX: {}", e)))?;
 
         Ok(Self { device, memory })
     }
@@ -999,6 +1020,114 @@ impl CudaKernelProvider {
             num_groups as u64,
             result_schema,
         ))
+    }
+
+    /// Compute exclusive prefix sum of u8 mask, returns (prefix_sum_vec, total_count)
+    ///
+    /// This is useful for compaction operations where we need to know:
+    /// 1. The output position for each input element (prefix sum)
+    /// 2. The total number of elements that pass the mask (count)
+    ///
+    /// # Arguments
+    /// * `mask` - A slice of u8 values (0 or non-zero)
+    ///
+    /// # Returns
+    /// A tuple of:
+    /// - `Vec<u32>` containing the exclusive prefix sum
+    /// - `u32` containing the total count of non-zero mask elements
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mask = vec![1u8, 0, 1, 1, 0, 1];
+    /// let (prefix_sum, count) = provider.prefix_sum_mask(&mask)?;
+    /// // prefix_sum = [0, 1, 1, 2, 3, 3]
+    /// // count = 4
+    /// ```
+    ///
+    /// # Limitations
+    /// The current implementation uses a single-block scan kernel which only
+    /// works correctly for masks with up to 256 elements. For larger masks,
+    /// a multi-pass algorithm would be needed.
+    ///
+    /// # Errors
+    /// Returns `XlogError::Kernel` if kernel execution fails
+    pub fn prefix_sum_mask(&self, mask: &[u8]) -> Result<(Vec<u32>, u32)> {
+        if mask.is_empty() {
+            return Ok((vec![], 0));
+        }
+
+        let n = mask.len();
+        let device = self.device.inner();
+
+        // Upload mask to GPU
+        let d_mask = device
+            .htod_sync_copy(mask)
+            .map_err(|e| XlogError::Kernel(format!("Failed to upload mask: {}", e)))?;
+
+        // Allocate output for prefix sum
+        let d_prefix_sum = unsafe { device.alloc::<u32>(n) }
+            .map_err(|e| XlogError::Kernel(format!("Failed to alloc prefix_sum: {}", e)))?;
+
+        // Allocate count (initialize to 0)
+        let d_count = device
+            .htod_sync_copy(&[0u32])
+            .map_err(|e| XlogError::Kernel(format!("Failed to alloc count: {}", e)))?;
+
+        // Launch exclusive_scan_mask kernel
+        let block_size = 256u32;
+        let grid_size = ((n as u32) + block_size - 1) / block_size;
+
+        let scan_fn = device
+            .get_func(SCAN_MODULE, scan_kernels::EXCLUSIVE_SCAN_MASK)
+            .ok_or_else(|| {
+                XlogError::Kernel("Failed to get exclusive_scan_mask kernel".to_string())
+            })?;
+
+        // SAFETY: Kernel parameters match expected signature:
+        // exclusive_scan_mask(const uint8_t* mask, uint32_t* prefix_sum, uint32_t n)
+        unsafe {
+            scan_fn.clone().launch(
+                LaunchConfig {
+                    grid_dim: (grid_size, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (&d_mask, &d_prefix_sum, n as u32),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("Failed to launch exclusive_scan_mask: {}", e)))?;
+
+        // Launch count_mask kernel
+        let count_fn = device
+            .get_func(SCAN_MODULE, scan_kernels::COUNT_MASK)
+            .ok_or_else(|| XlogError::Kernel("Failed to get count_mask kernel".to_string()))?;
+
+        // SAFETY: Kernel parameters match expected signature:
+        // count_mask(const uint8_t* mask, uint32_t n, uint32_t* count)
+        unsafe {
+            count_fn.clone().launch(
+                LaunchConfig {
+                    grid_dim: (grid_size, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (&d_mask, n as u32, &d_count),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("Failed to launch count_mask: {}", e)))?;
+
+        // Synchronize and download results
+        self.device.synchronize()?;
+
+        let prefix_sum = device
+            .dtoh_sync_copy(&d_prefix_sum)
+            .map_err(|e| XlogError::Kernel(format!("Failed to download prefix_sum: {}", e)))?;
+
+        let count_vec = device
+            .dtoh_sync_copy(&d_count)
+            .map_err(|e| XlogError::Kernel(format!("Failed to download count: {}", e)))?;
+
+        Ok((prefix_sum, count_vec[0]))
     }
 
     // Helper methods
