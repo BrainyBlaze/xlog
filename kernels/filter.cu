@@ -168,6 +168,54 @@ extern "C" __global__ void compact_u32_by_mask(
 }
 
 /**
+ * Compact i64 column by mask using prefix sum indices.
+ * @param input Input column (int64_t)
+ * @param mask Filter mask (1 = keep, 0 = discard)
+ * @param prefix_sum Exclusive prefix sum of mask
+ * @param num_rows Input size
+ * @param output Output column (compacted)
+ */
+extern "C" __global__ void compact_i64_by_mask(
+    const int64_t* __restrict__ input,
+    const uint8_t* __restrict__ mask,
+    const uint32_t* __restrict__ prefix_sum,
+    uint32_t num_rows,
+    int64_t* __restrict__ output
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= num_rows) return;
+
+    if (mask[gid]) {
+        uint32_t out_idx = prefix_sum[gid];
+        output[out_idx] = input[gid];
+    }
+}
+
+/**
+ * Compact f64 column by mask using prefix sum indices.
+ * @param input Input column (double)
+ * @param mask Filter mask (1 = keep, 0 = discard)
+ * @param prefix_sum Exclusive prefix sum of mask
+ * @param num_rows Input size
+ * @param output Output column (compacted)
+ */
+extern "C" __global__ void compact_f64_by_mask(
+    const double* __restrict__ input,
+    const uint8_t* __restrict__ mask,
+    const uint32_t* __restrict__ prefix_sum,
+    uint32_t num_rows,
+    double* __restrict__ output
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= num_rows) return;
+
+    if (mask[gid]) {
+        uint32_t out_idx = prefix_sum[gid];
+        output[out_idx] = input[gid];
+    }
+}
+
+/**
  * Compact bytes by mask (for any element size).
  * @param input Input data
  * @param mask Filter mask
