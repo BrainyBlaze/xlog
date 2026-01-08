@@ -16,12 +16,14 @@ const JOIN_PTX: &str = include_str!("../../../kernels/join.ptx");
 const DEDUP_PTX: &str = include_str!("../../../kernels/dedup.ptx");
 const GROUPBY_PTX: &str = include_str!("../../../kernels/groupby.ptx");
 const SCAN_PTX: &str = include_str!("../../../kernels/scan.ptx");
+const SORT_PTX: &str = include_str!("../../../kernels/sort.ptx");
 
 /// Module names for loaded PTX modules
 pub const JOIN_MODULE: &str = "xlog_join";
 pub const DEDUP_MODULE: &str = "xlog_dedup";
 pub const GROUPBY_MODULE: &str = "xlog_groupby";
 pub const SCAN_MODULE: &str = "xlog_scan";
+pub const SORT_MODULE: &str = "xlog_sort";
 
 /// Kernel function names in the join module
 pub mod join_kernels {
@@ -48,6 +50,15 @@ pub mod groupby_kernels {
 pub mod scan_kernels {
     pub const EXCLUSIVE_SCAN_MASK: &str = "exclusive_scan_mask";
     pub const COUNT_MASK: &str = "count_mask";
+}
+
+/// Kernel function names in the sort module
+pub mod sort_kernels {
+    pub const RADIX_HISTOGRAM: &str = "radix_histogram";
+    pub const RADIX_SCATTER: &str = "radix_scatter";
+    pub const INIT_INDICES: &str = "init_indices";
+    pub const APPLY_PERMUTATION_U32: &str = "apply_permutation_u32";
+    pub const APPLY_PERMUTATION_BYTES: &str = "apply_permutation_bytes";
 }
 
 /// CUDA kernel provider for xlog GPU operations
@@ -145,6 +156,22 @@ impl CudaKernelProvider {
                 ],
             )
             .map_err(|e| XlogError::Kernel(format!("Failed to load scan PTX: {}", e)))?;
+
+        // Load sort module
+        device
+            .inner()
+            .load_ptx(
+                Ptx::from_src(SORT_PTX),
+                SORT_MODULE,
+                &[
+                    sort_kernels::RADIX_HISTOGRAM,
+                    sort_kernels::RADIX_SCATTER,
+                    sort_kernels::INIT_INDICES,
+                    sort_kernels::APPLY_PERMUTATION_U32,
+                    sort_kernels::APPLY_PERMUTATION_BYTES,
+                ],
+            )
+            .map_err(|e| XlogError::Kernel(format!("Failed to load sort PTX: {}", e)))?;
 
         Ok(Self { device, memory })
     }
@@ -1138,7 +1165,346 @@ impl CudaKernelProvider {
         Ok((prefix_sum, count_vec[0]))
     }
 
-    // Helper methods
+    // ============== Sort Methods ==============
+
+    // Radix sort constants
+    const RADIX_BITS: u32 = 4;
+    const RADIX_SIZE: u32 = 16; // 1 << RADIX_BITS
+    const SORT_BLOCK_SIZE: u32 = 256;
+
+    /// Sort buffer by key columns using GPU radix sort
+    /// Currently supports single U32 key column
+    ///
+    /// Uses 4-bit radix sort with 8 passes (32 bits / 4 bits = 8 passes).
+    /// Each pass: histogram -> prefix sum -> scatter
+    ///
+    /// # Arguments
+    /// * `input` - The input buffer to sort
+    /// * `key_cols` - Column indices to use for sorting (currently only single column supported)
+    ///
+    /// # Returns
+    /// A new buffer with rows sorted by the key columns
+    ///
+    /// # Errors
+    /// Returns `XlogError::Kernel` if:
+    /// - Multi-column sort is requested (not yet implemented)
+    /// - Kernel execution fails
+    pub fn sort(&self, input: &CudaBuffer, key_cols: &[usize]) -> Result<CudaBuffer> {
+        if input.num_rows == 0 {
+            return self.create_empty_buffer(input.schema.clone());
+        }
+
+        if key_cols.len() != 1 {
+            return Err(XlogError::Kernel(
+                "Multi-column sort not yet implemented".into(),
+            ));
+        }
+
+        let key_col = key_cols[0];
+        let n = input.num_rows as u32;
+        let device = self.device.inner();
+
+        // Compute grid size
+        let grid_size = (n + Self::SORT_BLOCK_SIZE - 1) / Self::SORT_BLOCK_SIZE;
+
+        // Get kernel functions
+        let histogram_fn = device
+            .get_func(SORT_MODULE, sort_kernels::RADIX_HISTOGRAM)
+            .ok_or_else(|| XlogError::Kernel("radix_histogram kernel not found".to_string()))?;
+        let scatter_fn = device
+            .get_func(SORT_MODULE, sort_kernels::RADIX_SCATTER)
+            .ok_or_else(|| XlogError::Kernel("radix_scatter kernel not found".to_string()))?;
+        let init_indices_fn = device
+            .get_func(SORT_MODULE, sort_kernels::INIT_INDICES)
+            .ok_or_else(|| XlogError::Kernel("init_indices kernel not found".to_string()))?;
+
+        // Allocate double buffers for keys and indices
+        let mut keys_a = self.memory.alloc::<u32>(n as usize)?;
+        let mut keys_b = self.memory.alloc::<u32>(n as usize)?;
+        let mut indices_a = self.memory.alloc::<u32>(n as usize)?;
+        let mut indices_b = self.memory.alloc::<u32>(n as usize)?;
+
+        // Copy key column to keys_a (need to transmute from u8 to u32)
+        let key_col_data = input.column(key_col)
+            .ok_or_else(|| XlogError::Kernel("Key column not found".to_string()))?;
+        let key_bytes = (n as usize) * std::mem::size_of::<u32>();
+        let mut key_host = vec![0u8; key_bytes];
+        device
+            .dtoh_sync_copy_into(key_col_data, &mut key_host)
+            .map_err(|e| XlogError::Kernel(format!("Failed to read keys: {}", e)))?;
+        let key_u32: Vec<u32> = key_host
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        device
+            .htod_sync_copy_into(&key_u32, &mut keys_a)
+            .map_err(|e| XlogError::Kernel(format!("Failed to upload keys: {}", e)))?;
+
+        // Initialize indices to identity permutation
+        let launch_config = LaunchConfig {
+            grid_dim: (grid_size, 1, 1),
+            block_dim: (Self::SORT_BLOCK_SIZE, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        // SAFETY: Kernel signature matches: init_indices(uint32_t* indices, uint32_t n)
+        unsafe {
+            init_indices_fn.clone().launch(launch_config, (&indices_a, n))
+        }
+        .map_err(|e| XlogError::Kernel(format!("init_indices failed: {}", e)))?;
+
+        // Allocate histograms buffer: [grid_size * RADIX_SIZE]
+        let hist_size = (grid_size * Self::RADIX_SIZE) as usize;
+        let histograms = self.memory.alloc::<u32>(hist_size)?;
+
+        // Perform 8 radix sort passes (4 bits per pass, 32 bits total)
+        let mut use_a = true;
+        for pass in 0..8u32 {
+            let shift = pass * Self::RADIX_BITS;
+
+            let (keys_in, keys_out) = if use_a {
+                (&keys_a, &mut keys_b)
+            } else {
+                (&keys_b, &mut keys_a)
+            };
+            let (indices_in, indices_out) = if use_a {
+                (&indices_a, &mut indices_b)
+            } else {
+                (&indices_b, &mut indices_a)
+            };
+
+            // Step 1: Compute histograms
+            // SAFETY: Kernel signature matches: radix_histogram(const uint32_t* keys, uint32_t num_rows, uint32_t* histograms, uint32_t shift)
+            unsafe {
+                histogram_fn.clone().launch(launch_config, (keys_in, n, &histograms, shift))
+            }
+            .map_err(|e| XlogError::Kernel(format!("radix_histogram failed: {}", e)))?;
+
+            // Step 2: Compute global prefix sums from histograms (on CPU for simplicity)
+            // Download histograms, compute prefix sums, upload
+            self.device.synchronize()?;
+            let mut hist_host = vec![0u32; hist_size];
+            device
+                .dtoh_sync_copy_into(&histograms, &mut hist_host)
+                .map_err(|e| XlogError::Kernel(format!("Failed to read histograms: {}", e)))?;
+
+            // Sum across blocks for each digit to get global counts
+            let mut global_counts = vec![0u32; Self::RADIX_SIZE as usize];
+            for block in 0..grid_size as usize {
+                for digit in 0..Self::RADIX_SIZE as usize {
+                    global_counts[digit] += hist_host[block * Self::RADIX_SIZE as usize + digit];
+                }
+            }
+
+            // Compute exclusive prefix sum of global counts
+            let mut prefix_host = vec![0u32; Self::RADIX_SIZE as usize];
+            let mut running_sum = 0u32;
+            for digit in 0..Self::RADIX_SIZE as usize {
+                prefix_host[digit] = running_sum;
+                running_sum += global_counts[digit];
+            }
+
+            // Upload prefix sums
+            let mut prefix_sums_mut = self.memory.alloc::<u32>(Self::RADIX_SIZE as usize)?;
+            device
+                .htod_sync_copy_into(&prefix_host, &mut prefix_sums_mut)
+                .map_err(|e| XlogError::Kernel(format!("Failed to upload prefix sums: {}", e)))?;
+
+            // Step 3: Scatter keys to sorted positions
+            // SAFETY: Kernel signature matches: radix_scatter(keys_in, indices_in, keys_out, indices_out, prefix_sums, local_offsets, num_rows, shift)
+            unsafe {
+                scatter_fn.clone().launch(
+                    launch_config,
+                    (keys_in, indices_in, keys_out, indices_out, &prefix_sums_mut, &histograms, n, shift),
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("radix_scatter failed: {}", e)))?;
+
+            use_a = !use_a;
+        }
+
+        // Synchronize to ensure sort is complete
+        self.device.synchronize()?;
+
+        // Get final permutation (indices are in indices_a or indices_b depending on use_a)
+        let final_indices = if use_a { &indices_a } else { &indices_b };
+
+        // Apply permutation to all columns using GPU kernel
+        self.apply_permutation_gpu(input, final_indices)
+    }
+
+    /// Apply permutation to reorder all columns in buffer using GPU
+    fn apply_permutation_gpu(
+        &self,
+        input: &CudaBuffer,
+        permutation: &cudarc::driver::CudaSlice<u32>,
+    ) -> Result<CudaBuffer> {
+        let n = input.num_rows as u32;
+        let device = self.device.inner();
+
+        let grid_size = (n + Self::SORT_BLOCK_SIZE - 1) / Self::SORT_BLOCK_SIZE;
+        let launch_config = LaunchConfig {
+            grid_dim: (grid_size, 1, 1),
+            block_dim: (Self::SORT_BLOCK_SIZE, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        let apply_perm_fn = device
+            .get_func(SORT_MODULE, sort_kernels::APPLY_PERMUTATION_BYTES)
+            .ok_or_else(|| XlogError::Kernel("apply_permutation_bytes kernel not found".to_string()))?;
+
+        let mut new_columns = Vec::with_capacity(input.columns.len());
+
+        for col_idx in 0..input.columns.len() {
+            let src_col = input.column(col_idx)
+                .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
+
+            let elem_size = input.schema.column_type(col_idx)
+                .map(|t| t.size_bytes())
+                .unwrap_or(4) as u32;
+
+            let output_bytes = (n as usize) * (elem_size as usize);
+            let dst_col = self.memory.alloc::<u8>(output_bytes)?;
+
+            // SAFETY: Kernel signature matches: apply_permutation_bytes(input, output, permutation, num_rows, elem_size)
+            unsafe {
+                apply_perm_fn.clone().launch(
+                    launch_config,
+                    (src_col, &dst_col, permutation, n, elem_size),
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("apply_permutation_bytes failed: {}", e)))?;
+
+            new_columns.push(dst_col);
+        }
+
+        self.device.synchronize()?;
+
+        Ok(CudaBuffer {
+            columns: new_columns,
+            num_rows: input.num_rows,
+            schema: input.schema.clone(),
+        })
+    }
+
+    // ============== Buffer Helper Methods ==============
+
+    /// Create a CudaBuffer from a slice of u32 values (single column)
+    ///
+    /// # Arguments
+    /// * `data` - The u32 values to upload
+    /// * `schema` - The schema for the buffer (should have one U32 column)
+    ///
+    /// # Returns
+    /// A new CudaBuffer containing the data
+    ///
+    /// # Errors
+    /// Returns `XlogError::Kernel` if upload fails
+    pub fn create_buffer_from_u32_slice(
+        &self,
+        data: &[u32],
+        schema: Schema,
+    ) -> Result<CudaBuffer> {
+        let bytes: Vec<u8> = data.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let mut col = self.memory.alloc::<u8>(bytes.len())?;
+        self.device
+            .inner()
+            .htod_sync_copy_into(&bytes, &mut col)
+            .map_err(|e| XlogError::Kernel(format!("Failed to upload data: {}", e)))?;
+
+        Ok(CudaBuffer::from_columns(
+            vec![col],
+            data.len() as u64,
+            schema,
+        ))
+    }
+
+    /// Create a CudaBuffer from multiple u32 column slices
+    ///
+    /// # Arguments
+    /// * `columns` - Slice of column data slices (each column as &[u32])
+    /// * `schema` - The schema for the buffer
+    ///
+    /// # Returns
+    /// A new CudaBuffer containing all columns
+    ///
+    /// # Errors
+    /// Returns `XlogError::Kernel` if upload fails or columns have mismatched lengths
+    pub fn create_buffer_from_u32_columns(
+        &self,
+        columns: &[&[u32]],
+        schema: Schema,
+    ) -> Result<CudaBuffer> {
+        if columns.is_empty() {
+            return self.create_empty_buffer(schema);
+        }
+
+        let num_rows = columns[0].len();
+        for (i, col) in columns.iter().enumerate() {
+            if col.len() != num_rows {
+                return Err(XlogError::Kernel(format!(
+                    "Column {} has {} rows but expected {}",
+                    i,
+                    col.len(),
+                    num_rows
+                )));
+            }
+        }
+
+        let mut cuda_columns = Vec::with_capacity(columns.len());
+        for col_data in columns {
+            let bytes: Vec<u8> = col_data.iter().flat_map(|v| v.to_le_bytes()).collect();
+            let mut col = self.memory.alloc::<u8>(bytes.len())?;
+            self.device
+                .inner()
+                .htod_sync_copy_into(&bytes, &mut col)
+                .map_err(|e| XlogError::Kernel(format!("Failed to upload column: {}", e)))?;
+            cuda_columns.push(col);
+        }
+
+        Ok(CudaBuffer::from_columns(
+            cuda_columns,
+            num_rows as u64,
+            schema,
+        ))
+    }
+
+    /// Download a column from a CudaBuffer as Vec<u32>
+    ///
+    /// # Arguments
+    /// * `buffer` - The buffer to download from
+    /// * `col_idx` - The column index to download
+    ///
+    /// # Returns
+    /// A Vec<u32> containing the column data
+    ///
+    /// # Errors
+    /// Returns `XlogError::Kernel` if:
+    /// - Column index is out of bounds
+    /// - Download fails
+    pub fn download_column_u32(&self, buffer: &CudaBuffer, col_idx: usize) -> Result<Vec<u32>> {
+        let col = buffer.column(col_idx).ok_or_else(|| {
+            XlogError::Kernel(format!("Column {} not found", col_idx))
+        })?;
+
+        if buffer.num_rows == 0 {
+            return Ok(vec![]);
+        }
+
+        let num_bytes = (buffer.num_rows as usize) * std::mem::size_of::<u32>();
+        let mut bytes = vec![0u8; num_bytes];
+        self.device
+            .inner()
+            .dtoh_sync_copy_into(col, &mut bytes)
+            .map_err(|e| XlogError::Kernel(format!("Failed to download column: {}", e)))?;
+
+        Ok(bytes
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect())
+    }
+
+    // ============== Internal Helper Methods ==============
 
     /// Transmute a CudaSlice<u8> column to a CudaView<u32> for kernel access
     ///
@@ -1166,7 +1532,16 @@ impl CudaKernelProvider {
     }
 
     /// Create an empty buffer with the given schema (all columns are empty slices)
-    fn create_empty_buffer(&self, schema: Schema) -> Result<CudaBuffer> {
+    ///
+    /// # Arguments
+    /// * `schema` - The schema for the empty buffer
+    ///
+    /// # Returns
+    /// A new CudaBuffer with zero rows
+    ///
+    /// # Errors
+    /// Returns `XlogError::Kernel` if allocation fails
+    pub fn create_empty_buffer(&self, schema: Schema) -> Result<CudaBuffer> {
         let mut columns = Vec::with_capacity(schema.arity());
         for _ in 0..schema.arity() {
             // Allocate zero-length column
