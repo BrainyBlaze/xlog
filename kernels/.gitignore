@@ -1,2 +1,3 @@
 build/
-*.ptx
+# PTX files are tracked in git as they are embedded in the Rust binary via include_str!
+# They can be regenerated with: nvcc -ptx <file>.cu -o <file>.ptx --gpu-architecture=sm_90
