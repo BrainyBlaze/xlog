@@ -1257,6 +1257,9 @@ impl CudaKernelProvider {
         let hist_size = (grid_size * Self::RADIX_SIZE) as usize;
         let histograms = self.memory.alloc::<u32>(hist_size)?;
 
+        // Allocate prefix sums buffer once (reused each pass)
+        let mut prefix_sums = self.memory.alloc::<u32>(Self::RADIX_SIZE as usize)?;
+
         // Perform 8 radix sort passes (4 bits per pass, 32 bits total)
         let mut use_a = true;
         for pass in 0..8u32 {
@@ -1304,10 +1307,9 @@ impl CudaKernelProvider {
                 running_sum += global_counts[digit];
             }
 
-            // Upload prefix sums
-            let mut prefix_sums_mut = self.memory.alloc::<u32>(Self::RADIX_SIZE as usize)?;
+            // Upload prefix sums (reusing pre-allocated buffer)
             device
-                .htod_sync_copy_into(&prefix_host, &mut prefix_sums_mut)
+                .htod_sync_copy_into(&prefix_host, &mut prefix_sums)
                 .map_err(|e| XlogError::Kernel(format!("Failed to upload prefix sums: {}", e)))?;
 
             // Step 3: Scatter keys to sorted positions
@@ -1315,7 +1317,7 @@ impl CudaKernelProvider {
             unsafe {
                 scatter_fn.clone().launch(
                     launch_config,
-                    (keys_in, indices_in, keys_out, indices_out, &prefix_sums_mut, &histograms, n, shift),
+                    (keys_in, indices_in, keys_out, indices_out, &prefix_sums, &histograms, n, shift),
                 )
             }
             .map_err(|e| XlogError::Kernel(format!("radix_scatter failed: {}", e)))?;

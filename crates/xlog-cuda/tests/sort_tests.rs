@@ -95,3 +95,45 @@ fn test_sort_already_sorted() {
     let result = provider.download_column_u32(&sorted, 0).unwrap();
     assert_eq!(result, vec![1, 2, 3, 4, 5]);
 }
+
+#[test]
+fn test_sort_duplicates() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    // Input with duplicates: [3, 1, 2, 1, 3, 2]
+    // Sorted: [1, 1, 2, 2, 3, 3]
+    let keys: Vec<u32> = vec![3, 1, 2, 1, 3, 2];
+    let schema = Schema::new(vec![("key".to_string(), ScalarType::U32)]);
+
+    let buffer = provider
+        .create_buffer_from_u32_slice(&keys, schema)
+        .unwrap();
+    let sorted = provider.sort(&buffer, &[0]).unwrap();
+
+    let result = provider.download_column_u32(&sorted, 0).unwrap();
+    assert_eq!(result, vec![1, 1, 2, 2, 3, 3]);
+}
+
+#[test]
+fn test_sort_reverse() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    // Reverse sorted: [5, 4, 3, 2, 1]
+    // Sorted: [1, 2, 3, 4, 5]
+    let keys: Vec<u32> = vec![5, 4, 3, 2, 1];
+    let schema = Schema::new(vec![("key".to_string(), ScalarType::U32)]);
+
+    let buffer = provider
+        .create_buffer_from_u32_slice(&keys, schema)
+        .unwrap();
+    let sorted = provider.sort(&buffer, &[0]).unwrap();
+
+    let result = provider.download_column_u32(&sorted, 0).unwrap();
+    assert_eq!(result, vec![1, 2, 3, 4, 5]);
+}
