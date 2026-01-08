@@ -103,7 +103,7 @@ extern "C" __global__ void compute_composite_hash(
     if (gid >= num_rows) return;
 
     uint64_t hash = FNV_OFFSET;
-    const uint8_t* row = data + gid * row_stride;
+    const uint8_t* row = data + (uint64_t)gid * row_stride;
 
     for (uint32_t c = 0; c < num_key_cols; c++) {
         uint32_t offset = col_offsets[c];
@@ -146,6 +146,13 @@ extern "C" __global__ void hash_join_build_v2(
 
 /**
  * Probe hash table (v2) - outputs matching row index pairs.
+ *
+ * NOTE: This kernel compares hash values only, not actual key bytes.
+ * FNV-1a 64-bit hash has extremely low collision probability (~2^-64),
+ * making false positives negligible for practical dataset sizes.
+ * For guaranteed correctness, callers should verify key equality
+ * on the output pairs.
+ *
  * @param probe_hashes Hash values for probe side
  * @param num_probe Number of probe rows
  * @param hash_table Bucket heads

@@ -7,7 +7,7 @@
 //
 
 .version 8.8
-.target sm_90
+.target sm_70
 .address_size 64
 
 	// .globl	hash_join_build
@@ -173,6 +173,531 @@ $L__BB1_5:
 	@%p4 bra 	$L__BB1_3;
 
 $L__BB1_6:
+	ret;
+
+}
+	// .globl	compute_composite_hash
+.visible .entry compute_composite_hash(
+	.param .u64 compute_composite_hash_param_0,
+	.param .u64 compute_composite_hash_param_1,
+	.param .u64 compute_composite_hash_param_2,
+	.param .u32 compute_composite_hash_param_3,
+	.param .u32 compute_composite_hash_param_4,
+	.param .u32 compute_composite_hash_param_5,
+	.param .u64 compute_composite_hash_param_6
+)
+{
+	.reg .pred 	%p<10>;
+	.reg .b16 	%rs<8>;
+	.reg .b32 	%r<35>;
+	.reg .b64 	%rd<80>;
+
+
+	ld.param.u64 	%rd19, [compute_composite_hash_param_0];
+	ld.param.u64 	%rd16, [compute_composite_hash_param_1];
+	ld.param.u64 	%rd17, [compute_composite_hash_param_2];
+	ld.param.u32 	%r15, [compute_composite_hash_param_3];
+	ld.param.u32 	%r17, [compute_composite_hash_param_4];
+	ld.param.u32 	%r16, [compute_composite_hash_param_5];
+	ld.param.u64 	%rd18, [compute_composite_hash_param_6];
+	cvta.to.global.u64 	%rd1, %rd19;
+	mov.u32 	%r18, %ntid.x;
+	mov.u32 	%r19, %ctaid.x;
+	mov.u32 	%r20, %tid.x;
+	mad.lo.s32 	%r1, %r19, %r18, %r20;
+	setp.ge.u32 	%p1, %r1, %r17;
+	@%p1 bra 	$L__BB2_13;
+
+	cvt.u64.u32 	%rd2, %r1;
+	mul.wide.u32 	%rd3, %r16, %r1;
+	setp.eq.s32 	%p2, %r15, 0;
+	mov.u64 	%rd78, -3750763034362895579;
+	@%p2 bra 	$L__BB2_12;
+
+	cvta.to.global.u64 	%rd4, %rd17;
+	cvta.to.global.u64 	%rd5, %rd16;
+	mov.u64 	%rd78, -3750763034362895579;
+	mov.u32 	%r31, 0;
+
+$L__BB2_3:
+	mul.wide.u32 	%rd22, %r31, 4;
+	add.s64 	%rd23, %rd5, %rd22;
+	ld.global.nc.u32 	%r3, [%rd23];
+	add.s64 	%rd24, %rd4, %rd22;
+	ld.global.nc.u32 	%r4, [%rd24];
+	setp.eq.s32 	%p3, %r4, 0;
+	@%p3 bra 	$L__BB2_11;
+
+	add.s32 	%r23, %r4, -1;
+	and.b32  	%r5, %r4, 3;
+	setp.lt.u32 	%p4, %r23, 3;
+	mov.u32 	%r34, 0;
+	@%p4 bra 	$L__BB2_7;
+
+	add.s32 	%r32, %r3, 3;
+	sub.s32 	%r7, %r5, %r4;
+	mov.u32 	%r34, 0;
+
+$L__BB2_6:
+	add.s32 	%r25, %r32, -3;
+	cvt.u64.u32 	%rd26, %r25;
+	add.s64 	%rd27, %rd3, %rd26;
+	add.s64 	%rd28, %rd1, %rd27;
+	ld.global.nc.u8 	%rs1, [%rd28];
+	cvt.u64.u16 	%rd29, %rs1;
+	and.b64  	%rd30, %rd29, 255;
+	xor.b64  	%rd31, %rd78, %rd30;
+	mul.lo.s64 	%rd32, %rd31, 1099511628211;
+	add.s32 	%r26, %r32, -2;
+	cvt.u64.u32 	%rd33, %r26;
+	add.s64 	%rd34, %rd3, %rd33;
+	add.s64 	%rd35, %rd1, %rd34;
+	ld.global.nc.u8 	%rs2, [%rd35];
+	cvt.u64.u16 	%rd36, %rs2;
+	and.b64  	%rd37, %rd36, 255;
+	xor.b64  	%rd38, %rd32, %rd37;
+	mul.lo.s64 	%rd39, %rd38, 1099511628211;
+	add.s32 	%r27, %r32, -1;
+	cvt.u64.u32 	%rd40, %r27;
+	add.s64 	%rd41, %rd3, %rd40;
+	add.s64 	%rd42, %rd1, %rd41;
+	ld.global.nc.u8 	%rs3, [%rd42];
+	cvt.u64.u16 	%rd43, %rs3;
+	and.b64  	%rd44, %rd43, 255;
+	xor.b64  	%rd45, %rd39, %rd44;
+	mul.lo.s64 	%rd46, %rd45, 1099511628211;
+	cvt.u64.u32 	%rd47, %r32;
+	add.s64 	%rd48, %rd3, %rd47;
+	add.s64 	%rd49, %rd1, %rd48;
+	ld.global.nc.u8 	%rs4, [%rd49];
+	cvt.u64.u16 	%rd50, %rs4;
+	and.b64  	%rd51, %rd50, 255;
+	xor.b64  	%rd52, %rd46, %rd51;
+	mul.lo.s64 	%rd78, %rd52, 1099511628211;
+	add.s32 	%r32, %r32, 4;
+	add.s32 	%r34, %r34, 4;
+	add.s32 	%r28, %r7, %r34;
+	setp.ne.s32 	%p5, %r28, 0;
+	@%p5 bra 	$L__BB2_6;
+
+$L__BB2_7:
+	setp.eq.s32 	%p6, %r5, 0;
+	@%p6 bra 	$L__BB2_11;
+
+	add.s32 	%r13, %r34, %r3;
+	cvt.u64.u32 	%rd53, %r13;
+	add.s64 	%rd54, %rd3, %rd53;
+	add.s64 	%rd55, %rd1, %rd54;
+	ld.global.nc.u8 	%rs5, [%rd55];
+	cvt.u64.u16 	%rd56, %rs5;
+	and.b64  	%rd57, %rd56, 255;
+	xor.b64  	%rd58, %rd78, %rd57;
+	mul.lo.s64 	%rd78, %rd58, 1099511628211;
+	setp.eq.s32 	%p7, %r5, 1;
+	@%p7 bra 	$L__BB2_11;
+
+	add.s32 	%r29, %r13, 1;
+	cvt.u64.u32 	%rd59, %r29;
+	add.s64 	%rd60, %rd3, %rd59;
+	add.s64 	%rd61, %rd1, %rd60;
+	ld.global.nc.u8 	%rs6, [%rd61];
+	cvt.u64.u16 	%rd62, %rs6;
+	and.b64  	%rd63, %rd62, 255;
+	xor.b64  	%rd64, %rd78, %rd63;
+	mul.lo.s64 	%rd78, %rd64, 1099511628211;
+	setp.eq.s32 	%p8, %r5, 2;
+	@%p8 bra 	$L__BB2_11;
+
+	add.s32 	%r30, %r13, 2;
+	cvt.u64.u32 	%rd65, %r30;
+	add.s64 	%rd66, %rd3, %rd65;
+	add.s64 	%rd67, %rd1, %rd66;
+	ld.global.nc.u8 	%rs7, [%rd67];
+	cvt.u64.u16 	%rd68, %rs7;
+	and.b64  	%rd69, %rd68, 255;
+	xor.b64  	%rd70, %rd78, %rd69;
+	mul.lo.s64 	%rd78, %rd70, 1099511628211;
+
+$L__BB2_11:
+	add.s32 	%r31, %r31, 1;
+	setp.lt.u32 	%p9, %r31, %r15;
+	@%p9 bra 	$L__BB2_3;
+
+$L__BB2_12:
+	cvta.to.global.u64 	%rd71, %rd18;
+	shl.b64 	%rd72, %rd2, 3;
+	add.s64 	%rd73, %rd71, %rd72;
+	st.global.u64 	[%rd73], %rd78;
+
+$L__BB2_13:
+	ret;
+
+}
+	// .globl	hash_join_build_v2
+.visible .entry hash_join_build_v2(
+	.param .u64 hash_join_build_v2_param_0,
+	.param .u32 hash_join_build_v2_param_1,
+	.param .u64 hash_join_build_v2_param_2,
+	.param .u64 hash_join_build_v2_param_3,
+	.param .u32 hash_join_build_v2_param_4
+)
+{
+	.reg .pred 	%p<3>;
+	.reg .b32 	%r<11>;
+	.reg .b64 	%rd<21>;
+
+
+	ld.param.u64 	%rd7, [hash_join_build_v2_param_0];
+	ld.param.u32 	%r3, [hash_join_build_v2_param_1];
+	ld.param.u64 	%rd8, [hash_join_build_v2_param_2];
+	ld.param.u64 	%rd9, [hash_join_build_v2_param_3];
+	ld.param.u32 	%r2, [hash_join_build_v2_param_4];
+	mov.u32 	%r4, %ctaid.x;
+	mov.u32 	%r5, %ntid.x;
+	mov.u32 	%r6, %tid.x;
+	mad.lo.s32 	%r1, %r4, %r5, %r6;
+	setp.ge.u32 	%p1, %r1, %r3;
+	@%p1 bra 	$L__BB3_5;
+
+	cvta.to.global.u64 	%rd10, %rd7;
+	cvt.u64.u32 	%rd1, %r1;
+	mul.wide.u32 	%rd11, %r1, 8;
+	add.s64 	%rd12, %rd10, %rd11;
+	cvt.u64.u32 	%rd2, %r2;
+	ld.global.nc.u64 	%rd3, [%rd12];
+	and.b64  	%rd13, %rd3, -4294967296;
+	setp.eq.s64 	%p2, %rd13, 0;
+	@%p2 bra 	$L__BB3_3;
+
+	rem.u64 	%rd20, %rd3, %rd2;
+	bra.uni 	$L__BB3_4;
+
+$L__BB3_3:
+	cvt.u32.u64 	%r7, %rd2;
+	cvt.u32.u64 	%r8, %rd3;
+	rem.u32 	%r9, %r8, %r7;
+	cvt.u64.u32 	%rd20, %r9;
+
+$L__BB3_4:
+	cvta.to.global.u64 	%rd14, %rd8;
+	shl.b64 	%rd15, %rd20, 2;
+	add.s64 	%rd16, %rd14, %rd15;
+	atom.global.exch.b32 	%r10, [%rd16], %r1;
+	cvta.to.global.u64 	%rd17, %rd9;
+	shl.b64 	%rd18, %rd1, 2;
+	add.s64 	%rd19, %rd17, %rd18;
+	st.global.u32 	[%rd19], %r10;
+
+$L__BB3_5:
+	ret;
+
+}
+	// .globl	hash_join_probe_v2
+.visible .entry hash_join_probe_v2(
+	.param .u64 hash_join_probe_v2_param_0,
+	.param .u32 hash_join_probe_v2_param_1,
+	.param .u64 hash_join_probe_v2_param_2,
+	.param .u64 hash_join_probe_v2_param_3,
+	.param .u64 hash_join_probe_v2_param_4,
+	.param .u32 hash_join_probe_v2_param_5,
+	.param .u64 hash_join_probe_v2_param_6,
+	.param .u64 hash_join_probe_v2_param_7,
+	.param .u64 hash_join_probe_v2_param_8,
+	.param .u32 hash_join_probe_v2_param_9
+)
+{
+	.reg .pred 	%p<7>;
+	.reg .b32 	%r<16>;
+	.reg .b64 	%rd<35>;
+
+
+	ld.param.u64 	%rd12, [hash_join_probe_v2_param_0];
+	ld.param.u32 	%r8, [hash_join_probe_v2_param_1];
+	ld.param.u64 	%rd13, [hash_join_probe_v2_param_2];
+	ld.param.u64 	%rd14, [hash_join_probe_v2_param_3];
+	ld.param.u64 	%rd15, [hash_join_probe_v2_param_4];
+	ld.param.u32 	%r6, [hash_join_probe_v2_param_5];
+	ld.param.u64 	%rd16, [hash_join_probe_v2_param_6];
+	ld.param.u64 	%rd17, [hash_join_probe_v2_param_7];
+	ld.param.u64 	%rd18, [hash_join_probe_v2_param_8];
+	ld.param.u32 	%r7, [hash_join_probe_v2_param_9];
+	mov.u32 	%r9, %ntid.x;
+	mov.u32 	%r10, %ctaid.x;
+	mov.u32 	%r11, %tid.x;
+	mad.lo.s32 	%r1, %r10, %r9, %r11;
+	setp.ge.u32 	%p1, %r1, %r8;
+	@%p1 bra 	$L__BB4_10;
+
+	cvta.to.global.u64 	%rd19, %rd12;
+	mul.wide.u32 	%rd20, %r1, 8;
+	add.s64 	%rd21, %rd19, %rd20;
+	cvt.u64.u32 	%rd1, %r6;
+	ld.global.nc.u64 	%rd2, [%rd21];
+	and.b64  	%rd22, %rd2, -4294967296;
+	setp.eq.s64 	%p2, %rd22, 0;
+	@%p2 bra 	$L__BB4_3;
+
+	rem.u64 	%rd34, %rd2, %rd1;
+	bra.uni 	$L__BB4_4;
+
+$L__BB4_3:
+	cvt.u32.u64 	%r12, %rd1;
+	cvt.u32.u64 	%r13, %rd2;
+	rem.u32 	%r14, %r13, %r12;
+	cvt.u64.u32 	%rd34, %r14;
+
+$L__BB4_4:
+	cvta.to.global.u64 	%rd23, %rd13;
+	shl.b64 	%rd24, %rd34, 2;
+	add.s64 	%rd25, %rd23, %rd24;
+	ld.global.nc.u32 	%r15, [%rd25];
+	setp.eq.s32 	%p3, %r15, -1;
+	@%p3 bra 	$L__BB4_10;
+
+	cvta.to.global.u64 	%rd6, %rd14;
+	cvta.to.global.u64 	%rd7, %rd18;
+	cvta.to.global.u64 	%rd8, %rd16;
+	cvta.to.global.u64 	%rd9, %rd17;
+	cvta.to.global.u64 	%rd10, %rd15;
+
+$L__BB4_6:
+	cvt.u64.u32 	%rd11, %r15;
+	mul.wide.u32 	%rd26, %r15, 8;
+	add.s64 	%rd27, %rd6, %rd26;
+	ld.global.nc.u64 	%rd28, [%rd27];
+	setp.ne.s64 	%p4, %rd28, %rd2;
+	@%p4 bra 	$L__BB4_9;
+
+	atom.global.add.u32 	%r4, [%rd7], 1;
+	setp.ge.u32 	%p5, %r4, %r7;
+	@%p5 bra 	$L__BB4_9;
+
+	mul.wide.u32 	%rd29, %r4, 4;
+	add.s64 	%rd30, %rd8, %rd29;
+	st.global.u32 	[%rd30], %r1;
+	add.s64 	%rd31, %rd9, %rd29;
+	st.global.u32 	[%rd31], %r15;
+
+$L__BB4_9:
+	shl.b64 	%rd32, %rd11, 2;
+	add.s64 	%rd33, %rd10, %rd32;
+	ld.global.nc.u32 	%r15, [%rd33];
+	setp.ne.s32 	%p6, %r15, -1;
+	@%p6 bra 	$L__BB4_6;
+
+$L__BB4_10:
+	ret;
+
+}
+	// .globl	hash_join_semi
+.visible .entry hash_join_semi(
+	.param .u64 hash_join_semi_param_0,
+	.param .u32 hash_join_semi_param_1,
+	.param .u64 hash_join_semi_param_2,
+	.param .u64 hash_join_semi_param_3,
+	.param .u64 hash_join_semi_param_4,
+	.param .u32 hash_join_semi_param_5,
+	.param .u64 hash_join_semi_param_6
+)
+{
+	.reg .pred 	%p<6>;
+	.reg .b16 	%rs<3>;
+	.reg .b32 	%r<14>;
+	.reg .b64 	%rd<30>;
+
+
+	ld.param.u64 	%rd11, [hash_join_semi_param_0];
+	ld.param.u32 	%r6, [hash_join_semi_param_1];
+	ld.param.u64 	%rd12, [hash_join_semi_param_2];
+	ld.param.u64 	%rd13, [hash_join_semi_param_3];
+	ld.param.u64 	%rd14, [hash_join_semi_param_4];
+	ld.param.u32 	%r5, [hash_join_semi_param_5];
+	ld.param.u64 	%rd15, [hash_join_semi_param_6];
+	mov.u32 	%r7, %ntid.x;
+	mov.u32 	%r8, %ctaid.x;
+	mov.u32 	%r9, %tid.x;
+	mad.lo.s32 	%r1, %r8, %r7, %r9;
+	setp.ge.u32 	%p1, %r1, %r6;
+	@%p1 bra 	$L__BB5_9;
+
+	cvta.to.global.u64 	%rd16, %rd11;
+	cvt.u64.u32 	%rd1, %r1;
+	mul.wide.u32 	%rd17, %r1, 8;
+	add.s64 	%rd18, %rd16, %rd17;
+	cvt.u64.u32 	%rd2, %r5;
+	ld.global.nc.u64 	%rd3, [%rd18];
+	and.b64  	%rd19, %rd3, -4294967296;
+	setp.eq.s64 	%p2, %rd19, 0;
+	@%p2 bra 	$L__BB5_3;
+
+	rem.u64 	%rd29, %rd3, %rd2;
+	bra.uni 	$L__BB5_4;
+
+$L__BB5_3:
+	cvt.u32.u64 	%r10, %rd2;
+	cvt.u32.u64 	%r11, %rd3;
+	rem.u32 	%r12, %r11, %r10;
+	cvt.u64.u32 	%rd29, %r12;
+
+$L__BB5_4:
+	cvta.to.global.u64 	%rd20, %rd12;
+	shl.b64 	%rd21, %rd29, 2;
+	add.s64 	%rd22, %rd20, %rd21;
+	ld.global.nc.u32 	%r13, [%rd22];
+	setp.eq.s32 	%p3, %r13, -1;
+	cvta.to.global.u64 	%rd23, %rd15;
+	add.s64 	%rd7, %rd23, %rd1;
+	@%p3 bra 	$L__BB5_8;
+
+	cvta.to.global.u64 	%rd8, %rd13;
+	cvta.to.global.u64 	%rd9, %rd14;
+
+$L__BB5_6:
+	cvt.u64.u32 	%rd10, %r13;
+	mul.wide.u32 	%rd24, %r13, 8;
+	add.s64 	%rd25, %rd8, %rd24;
+	ld.global.nc.u64 	%rd26, [%rd25];
+	setp.eq.s64 	%p4, %rd26, %rd3;
+	@%p4 bra 	$L__BB5_10;
+
+	shl.b64 	%rd27, %rd10, 2;
+	add.s64 	%rd28, %rd9, %rd27;
+	ld.global.nc.u32 	%r13, [%rd28];
+	setp.eq.s32 	%p5, %r13, -1;
+	@%p5 bra 	$L__BB5_8;
+	bra.uni 	$L__BB5_6;
+
+$L__BB5_8:
+	mov.u16 	%rs2, 0;
+	st.global.u8 	[%rd7], %rs2;
+	bra.uni 	$L__BB5_9;
+
+$L__BB5_10:
+	mov.u16 	%rs1, 1;
+	st.global.u8 	[%rd7], %rs1;
+
+$L__BB5_9:
+	ret;
+
+}
+	// .globl	hash_join_anti
+.visible .entry hash_join_anti(
+	.param .u64 hash_join_anti_param_0,
+	.param .u32 hash_join_anti_param_1,
+	.param .u64 hash_join_anti_param_2,
+	.param .u64 hash_join_anti_param_3,
+	.param .u64 hash_join_anti_param_4,
+	.param .u32 hash_join_anti_param_5,
+	.param .u64 hash_join_anti_param_6
+)
+{
+	.reg .pred 	%p<6>;
+	.reg .b16 	%rs<3>;
+	.reg .b32 	%r<14>;
+	.reg .b64 	%rd<30>;
+
+
+	ld.param.u64 	%rd11, [hash_join_anti_param_0];
+	ld.param.u32 	%r6, [hash_join_anti_param_1];
+	ld.param.u64 	%rd12, [hash_join_anti_param_2];
+	ld.param.u64 	%rd13, [hash_join_anti_param_3];
+	ld.param.u64 	%rd14, [hash_join_anti_param_4];
+	ld.param.u32 	%r5, [hash_join_anti_param_5];
+	ld.param.u64 	%rd15, [hash_join_anti_param_6];
+	mov.u32 	%r7, %ntid.x;
+	mov.u32 	%r8, %ctaid.x;
+	mov.u32 	%r9, %tid.x;
+	mad.lo.s32 	%r1, %r8, %r7, %r9;
+	setp.ge.u32 	%p1, %r1, %r6;
+	@%p1 bra 	$L__BB6_9;
+
+	cvta.to.global.u64 	%rd16, %rd11;
+	cvt.u64.u32 	%rd1, %r1;
+	mul.wide.u32 	%rd17, %r1, 8;
+	add.s64 	%rd18, %rd16, %rd17;
+	cvt.u64.u32 	%rd2, %r5;
+	ld.global.nc.u64 	%rd3, [%rd18];
+	and.b64  	%rd19, %rd3, -4294967296;
+	setp.eq.s64 	%p2, %rd19, 0;
+	@%p2 bra 	$L__BB6_3;
+
+	rem.u64 	%rd29, %rd3, %rd2;
+	bra.uni 	$L__BB6_4;
+
+$L__BB6_3:
+	cvt.u32.u64 	%r10, %rd2;
+	cvt.u32.u64 	%r11, %rd3;
+	rem.u32 	%r12, %r11, %r10;
+	cvt.u64.u32 	%rd29, %r12;
+
+$L__BB6_4:
+	cvta.to.global.u64 	%rd20, %rd12;
+	shl.b64 	%rd21, %rd29, 2;
+	add.s64 	%rd22, %rd20, %rd21;
+	ld.global.nc.u32 	%r13, [%rd22];
+	setp.eq.s32 	%p3, %r13, -1;
+	cvta.to.global.u64 	%rd23, %rd15;
+	add.s64 	%rd7, %rd23, %rd1;
+	@%p3 bra 	$L__BB6_8;
+
+	cvta.to.global.u64 	%rd8, %rd13;
+	cvta.to.global.u64 	%rd9, %rd14;
+
+$L__BB6_6:
+	cvt.u64.u32 	%rd10, %r13;
+	mul.wide.u32 	%rd24, %r13, 8;
+	add.s64 	%rd25, %rd8, %rd24;
+	ld.global.nc.u64 	%rd26, [%rd25];
+	setp.eq.s64 	%p4, %rd26, %rd3;
+	@%p4 bra 	$L__BB6_10;
+
+	shl.b64 	%rd27, %rd10, 2;
+	add.s64 	%rd28, %rd9, %rd27;
+	ld.global.nc.u32 	%r13, [%rd28];
+	setp.eq.s32 	%p5, %r13, -1;
+	@%p5 bra 	$L__BB6_8;
+	bra.uni 	$L__BB6_6;
+
+$L__BB6_8:
+	mov.u16 	%rs2, 1;
+	st.global.u8 	[%rd7], %rs2;
+	bra.uni 	$L__BB6_9;
+
+$L__BB6_10:
+	mov.u16 	%rs1, 0;
+	st.global.u8 	[%rd7], %rs1;
+
+$L__BB6_9:
+	ret;
+
+}
+	// .globl	init_hash_table
+.visible .entry init_hash_table(
+	.param .u64 init_hash_table_param_0,
+	.param .u32 init_hash_table_param_1
+)
+{
+	.reg .pred 	%p<2>;
+	.reg .b32 	%r<7>;
+	.reg .b64 	%rd<5>;
+
+
+	ld.param.u64 	%rd1, [init_hash_table_param_0];
+	ld.param.u32 	%r2, [init_hash_table_param_1];
+	mov.u32 	%r3, %ctaid.x;
+	mov.u32 	%r4, %ntid.x;
+	mov.u32 	%r5, %tid.x;
+	mad.lo.s32 	%r1, %r3, %r4, %r5;
+	setp.ge.u32 	%p1, %r1, %r2;
+	@%p1 bra 	$L__BB7_2;
+
+	cvta.to.global.u64 	%rd2, %rd1;
+	mul.wide.u32 	%rd3, %r1, 4;
+	add.s64 	%rd4, %rd2, %rd3;
+	mov.u32 	%r6, -1;
+	st.global.u32 	[%rd4], %r6;
+
+$L__BB7_2:
 	ret;
 
 }
