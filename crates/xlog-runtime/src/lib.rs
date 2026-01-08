@@ -8,4 +8,5 @@ pub mod profiler;
 pub mod relation;
 
 pub use executor::Executor;
+pub use profiler::{OpStats, Profiler};
 pub use relation::RelationStore;
