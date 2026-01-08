@@ -781,6 +781,7 @@ impl CudaKernelProvider {
         // Prepare sorted keys buffer (MVP: use first key column)
         let sorted_keys = input.column(key_cols[0])
             .ok_or_else(|| XlogError::Kernel("Key column not found".to_string()))?;
+        let sorted_keys_view = self.column_as_u32_view(sorted_keys, num_rows as usize)?;
 
         // Launch boundary detection
         let block_size = 256u32;
@@ -794,7 +795,7 @@ impl CudaKernelProvider {
         // SAFETY: Kernel parameters match expected signature
         unsafe {
             boundary_func.clone().launch(config, (
-                sorted_keys,
+                &sorted_keys_view,
                 num_rows,
                 num_key_cols,
                 row_stride,
