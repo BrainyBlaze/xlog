@@ -2237,7 +2237,9 @@ impl CudaKernelProvider {
             .inner()
             .dtoh_sync_copy_into(&d_output_count, &mut count_host)
             .map_err(|e| XlogError::Kernel(format!("Failed to read output count: {}", e)))?;
-        let result_count = count_host[0] as u64;
+        // Clamp result count to max_output to prevent buffer overflow
+        // (kernel atomically increments before bounds check, so count can exceed max_output)
+        let result_count = (count_host[0] as u64).min(max_output as u64);
 
         if result_count == 0 {
             let combined_schema = self.combine_schemas(left.schema(), right.schema());
@@ -2677,7 +2679,9 @@ impl CudaKernelProvider {
             .inner()
             .dtoh_sync_copy_into(&d_output_count, &mut count_host)
             .map_err(|e| XlogError::Kernel(format!("Failed to read output count: {}", e)))?;
-        let inner_count = count_host[0] as usize;
+        // Clamp inner count to max_output to prevent buffer overflow
+        // (kernel atomically increments before bounds check, so count can exceed max_output)
+        let inner_count = (count_host[0] as usize).min(max_output as usize);
 
         // Download inner join indices
         let mut left_indices = vec![0u32; inner_count];

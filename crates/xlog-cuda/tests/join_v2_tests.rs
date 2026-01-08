@@ -309,6 +309,60 @@ fn test_left_outer_all_unmatched() {
 }
 
 #[test]
+fn test_multi_column_join() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    // Left: (a, b, payload)
+    // Right: (x, y, value)
+    // Join on (a, b) = (x, y)
+
+    // Left side
+    let left_a: Vec<u32> = vec![1, 1, 2];
+    let left_b: Vec<u32> = vec![10, 20, 10];
+    let left_p: Vec<u32> = vec![100, 200, 300];
+
+    // Right side
+    let right_x: Vec<u32> = vec![1, 2, 1];
+    let right_y: Vec<u32> = vec![10, 10, 20];
+    let right_v: Vec<u32> = vec![1000, 2000, 3000];
+
+    let left_schema = make_schema(&[
+        ("a", ScalarType::U32),
+        ("b", ScalarType::U32),
+        ("payload", ScalarType::U32),
+    ]);
+    let right_schema = make_schema(&[
+        ("x", ScalarType::U32),
+        ("y", ScalarType::U32),
+        ("value", ScalarType::U32),
+    ]);
+
+    let left = provider
+        .create_buffer_from_u32_columns(&[&left_a, &left_b, &left_p], left_schema)
+        .unwrap();
+    let right = provider
+        .create_buffer_from_u32_columns(&[&right_x, &right_y, &right_v], right_schema)
+        .unwrap();
+
+    // Join on columns 0,1 (a,b) = (x,y)
+    let result = provider
+        .hash_join_v2(&left, &right, &[0, 1], &[0, 1], JoinType::Inner)
+        .unwrap();
+
+    // Expected matches:
+    // (1, 10, 100) joins (1, 10, 1000) -> result row
+    // (1, 20, 200) joins (1, 20, 3000) -> result row
+    // (2, 10, 300) joins (2, 10, 2000) -> result row
+    assert_eq!(
+        result.num_rows, 3,
+        "Should have 3 matches for multi-column join"
+    );
+}
+
+#[test]
 fn test_left_outer_empty_right() {
     let Some(provider) = setup_provider() else {
         eprintln!("Skipping: no CUDA device");
