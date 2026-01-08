@@ -3,6 +3,17 @@
 
 #include <cstdint>
 
+/**
+ * Multi-Column Join Kernels (v2)
+ *
+ * Uses composite hashing for multi-column keys.
+ * All scalar types supported by hashing bytes directly.
+ */
+
+// FNV-1a hash constants
+#define FNV_OFFSET 0xcbf29ce484222325ULL
+#define FNV_PRIME 0x100000001b3ULL
+
 // Hash function for join keys
 __device__ __forceinline__ uint32_t hash_key(uint32_t key) {
     key ^= key >> 16;
@@ -65,5 +76,199 @@ extern "C" __global__ void hash_join_probe(
             output_right[out_idx] = build_payloads[current];
         }
         current = next_ptrs[current];
+    }
+}
+
+/**
+ * Compute composite hash for multi-column keys.
+ * Hashes all key columns together using FNV-1a.
+ * @param data Row-major packed data
+ * @param col_offsets Byte offset of each key column within a row
+ * @param col_sizes Size in bytes of each key column
+ * @param num_key_cols Number of key columns
+ * @param num_rows Number of rows
+ * @param row_stride Total bytes per row
+ * @param hashes Output: one u64 hash per row
+ */
+extern "C" __global__ void compute_composite_hash(
+    const uint8_t* __restrict__ data,
+    const uint32_t* __restrict__ col_offsets,
+    const uint32_t* __restrict__ col_sizes,
+    uint32_t num_key_cols,
+    uint32_t num_rows,
+    uint32_t row_stride,
+    uint64_t* __restrict__ hashes
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= num_rows) return;
+
+    uint64_t hash = FNV_OFFSET;
+    const uint8_t* row = data + gid * row_stride;
+
+    for (uint32_t c = 0; c < num_key_cols; c++) {
+        uint32_t offset = col_offsets[c];
+        uint32_t size = col_sizes[c];
+
+        for (uint32_t b = 0; b < size; b++) {
+            hash ^= row[offset + b];
+            hash *= FNV_PRIME;
+        }
+    }
+
+    hashes[gid] = hash;
+}
+
+/**
+ * Build hash table with u64 hashes (v2).
+ * @param hashes Hash values for build side
+ * @param num_rows Number of build rows
+ * @param hash_table Bucket heads (stores row index or 0xFFFFFFFF)
+ * @param next_ptrs Linked list next pointers
+ * @param hash_table_size Number of buckets
+ */
+extern "C" __global__ void hash_join_build_v2(
+    const uint64_t* __restrict__ hashes,
+    uint32_t num_rows,
+    uint32_t* __restrict__ hash_table,
+    uint32_t* __restrict__ next_ptrs,
+    uint32_t hash_table_size
+) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= num_rows) return;
+
+    uint64_t hash = hashes[tid];
+    uint32_t bucket = (uint32_t)(hash % hash_table_size);
+
+    // Atomic linked list insertion
+    uint32_t old = atomicExch(&hash_table[bucket], tid);
+    next_ptrs[tid] = old;
+}
+
+/**
+ * Probe hash table (v2) - outputs matching row index pairs.
+ * @param probe_hashes Hash values for probe side
+ * @param num_probe Number of probe rows
+ * @param hash_table Bucket heads
+ * @param build_hashes Build side hashes (for collision verification)
+ * @param next_ptrs Linked list next pointers
+ * @param hash_table_size Number of buckets
+ * @param output_left Output: probe row indices
+ * @param output_right Output: build row indices
+ * @param output_count Atomic counter for output size
+ * @param max_output Maximum output size to prevent overflow
+ */
+extern "C" __global__ void hash_join_probe_v2(
+    const uint64_t* __restrict__ probe_hashes,
+    uint32_t num_probe,
+    const uint32_t* __restrict__ hash_table,
+    const uint64_t* __restrict__ build_hashes,
+    const uint32_t* __restrict__ next_ptrs,
+    uint32_t hash_table_size,
+    uint32_t* __restrict__ output_left,
+    uint32_t* __restrict__ output_right,
+    uint32_t* __restrict__ output_count,
+    uint32_t max_output
+) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= num_probe) return;
+
+    uint64_t hash = probe_hashes[tid];
+    uint32_t bucket = (uint32_t)(hash % hash_table_size);
+
+    uint32_t current = hash_table[bucket];
+    while (current != 0xFFFFFFFF) {
+        if (build_hashes[current] == hash) {
+            uint32_t out_idx = atomicAdd(output_count, 1);
+            if (out_idx < max_output) {
+                output_left[out_idx] = tid;
+                output_right[out_idx] = current;
+            }
+        }
+        current = next_ptrs[current];
+    }
+}
+
+/**
+ * Semi-join: mark probe rows that have any match.
+ * @param probe_hashes Hash values for probe side
+ * @param num_probe Number of probe rows
+ * @param hash_table Bucket heads
+ * @param build_hashes Build side hashes
+ * @param next_ptrs Linked list next pointers
+ * @param hash_table_size Number of buckets
+ * @param has_match Output: 1 if row has match, 0 otherwise
+ */
+extern "C" __global__ void hash_join_semi(
+    const uint64_t* __restrict__ probe_hashes,
+    uint32_t num_probe,
+    const uint32_t* __restrict__ hash_table,
+    const uint64_t* __restrict__ build_hashes,
+    const uint32_t* __restrict__ next_ptrs,
+    uint32_t hash_table_size,
+    uint8_t* __restrict__ has_match
+) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= num_probe) return;
+
+    uint64_t hash = probe_hashes[tid];
+    uint32_t bucket = (uint32_t)(hash % hash_table_size);
+
+    uint32_t current = hash_table[bucket];
+    while (current != 0xFFFFFFFF) {
+        if (build_hashes[current] == hash) {
+            has_match[tid] = 1;
+            return;
+        }
+        current = next_ptrs[current];
+    }
+    has_match[tid] = 0;
+}
+
+/**
+ * Anti-join: mark probe rows that have NO match.
+ * @param probe_hashes Hash values for probe side
+ * @param num_probe Number of probe rows
+ * @param hash_table Bucket heads
+ * @param build_hashes Build side hashes
+ * @param next_ptrs Linked list next pointers
+ * @param hash_table_size Number of buckets
+ * @param no_match Output: 1 if no match, 0 otherwise
+ */
+extern "C" __global__ void hash_join_anti(
+    const uint64_t* __restrict__ probe_hashes,
+    uint32_t num_probe,
+    const uint32_t* __restrict__ hash_table,
+    const uint64_t* __restrict__ build_hashes,
+    const uint32_t* __restrict__ next_ptrs,
+    uint32_t hash_table_size,
+    uint8_t* __restrict__ no_match
+) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= num_probe) return;
+
+    uint64_t hash = probe_hashes[tid];
+    uint32_t bucket = (uint32_t)(hash % hash_table_size);
+
+    uint32_t current = hash_table[bucket];
+    while (current != 0xFFFFFFFF) {
+        if (build_hashes[current] == hash) {
+            no_match[tid] = 0;
+            return;
+        }
+        current = next_ptrs[current];
+    }
+    no_match[tid] = 1;
+}
+
+/**
+ * Initialize hash table buckets to empty (0xFFFFFFFF).
+ */
+extern "C" __global__ void init_hash_table(
+    uint32_t* __restrict__ hash_table,
+    uint32_t size
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid < size) {
+        hash_table[gid] = 0xFFFFFFFF;
     }
 }
