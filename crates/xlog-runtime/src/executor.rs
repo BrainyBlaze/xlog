@@ -199,19 +199,12 @@ impl Executor {
                 let scc = plan.sccs.get(scc_id as usize);
                 let is_recursive = scc.map(|s| s.is_recursive).unwrap_or(false);
 
-                if is_recursive {
-                    // Recursive SCCs will be handled by fixpoint iteration
-                    // For now, just execute rules once as a stub
-                    for rule in rules {
-                        let result = self.execute_node(&rule.body)?;
-                        self.store.put(&rule.head, result);
-                    }
-                } else {
-                    // Non-recursive: execute each rule once
-                    for rule in rules {
-                        let result = self.execute_node(&rule.body)?;
-                        self.store.put(&rule.head, result);
-                    }
+                // For MVP (Task 6), execute rules once regardless of recursion.
+                // Task 7 will implement proper fixpoint iteration for recursive SCCs.
+                let _ = is_recursive; // Will be used in Task 7
+                for rule in rules {
+                    let result = self.execute_node(&rule.body)?;
+                    self.store.put(&rule.head, result);
                 }
             }
         }
@@ -221,22 +214,24 @@ impl Executor {
 
     /// Execute a stratum (public API)
     ///
-    /// Processes the rules in a stratum. For non-recursive strata,
-    /// each rule is executed once. Recursive strata use fixpoint iteration.
+    /// This method cannot be called directly because stratum execution requires
+    /// access to the full ExecutionPlan (for rules_by_scc mapping). Use
+    /// `execute_plan` instead, which processes all strata with proper context.
     ///
     /// # Arguments
-    /// * `stratum` - The stratum to execute
+    /// * `_stratum` - The stratum (unused - see error)
     ///
     /// # Returns
-    /// Ok(()) on success
+    /// Always returns an error indicating this method should not be called directly
     ///
     /// # Errors
-    /// Returns an error if rule execution fails
-    pub fn execute_stratum(&mut self, stratum: &Stratum) -> Result<()> {
-        // This is a simplified version without access to the full plan
-        // In practice, execute_plan should be used which has access to rules_by_scc
-        let _ = stratum;
-        Ok(())
+    /// Always returns an error. Use `execute_plan` instead.
+    pub fn execute_stratum(&mut self, _stratum: &Stratum) -> Result<()> {
+        Err(XlogError::Execution(
+            "execute_stratum cannot be called directly; use execute_plan instead which provides \
+             the required rules_by_scc context"
+                .to_string(),
+        ))
     }
 
     // ============== Node execution implementations ==============
@@ -439,8 +434,10 @@ impl Executor {
                         u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as i64
                     }
                     ScalarType::F32 | ScalarType::F64 => {
-                        // Truncate floats to i64 for comparison
-                        0i64
+                        // TODO: Implement proper float comparison (Task 7+)
+                        return Err(XlogError::Execution(
+                            "Float comparison not yet supported in filter predicates".to_string(),
+                        ));
                     }
                 })
             }
