@@ -9,7 +9,7 @@ fn main() {
     let kernels_dir = Path::new(&manifest_dir).parent().unwrap().parent().unwrap().join("kernels");
 
     // List of CUDA kernels to compile
-    let kernels = ["join", "dedup", "groupby", "scan"];
+    let kernels = ["join", "dedup", "groupby", "scan", "sort"];
 
     for kernel in &kernels {
         let cu_path = kernels_dir.join(format!("{}.cu", kernel));
