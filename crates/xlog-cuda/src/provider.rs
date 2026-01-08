@@ -17,6 +17,7 @@ const DEDUP_PTX: &str = include_str!("../../../kernels/dedup.ptx");
 const GROUPBY_PTX: &str = include_str!("../../../kernels/groupby.ptx");
 const SCAN_PTX: &str = include_str!("../../../kernels/scan.ptx");
 const SORT_PTX: &str = include_str!("../../../kernels/sort.ptx");
+const FILTER_PTX: &str = include_str!("../../../kernels/filter.ptx");
 
 /// Module names for loaded PTX modules
 pub const JOIN_MODULE: &str = "xlog_join";
@@ -24,6 +25,7 @@ pub const DEDUP_MODULE: &str = "xlog_dedup";
 pub const GROUPBY_MODULE: &str = "xlog_groupby";
 pub const SCAN_MODULE: &str = "xlog_scan";
 pub const SORT_MODULE: &str = "xlog_sort";
+pub const FILTER_MODULE: &str = "xlog_filter";
 
 /// Kernel function names in the join module
 pub mod join_kernels {
@@ -59,6 +61,32 @@ pub mod sort_kernels {
     pub const INIT_INDICES: &str = "init_indices";
     pub const APPLY_PERMUTATION_U32: &str = "apply_permutation_u32";
     pub const APPLY_PERMUTATION_BYTES: &str = "apply_permutation_bytes";
+}
+
+/// Kernel function names in the filter module
+pub mod filter_kernels {
+    pub const FILTER_COMPARE_U32: &str = "filter_compare_u32";
+    pub const FILTER_COMPARE_I64: &str = "filter_compare_i64";
+    pub const FILTER_COMPARE_F64: &str = "filter_compare_f64";
+    pub const COMPACT_U32_BY_MASK: &str = "compact_u32_by_mask";
+    pub const COMPACT_I64_BY_MASK: &str = "compact_i64_by_mask";
+    pub const COMPACT_F64_BY_MASK: &str = "compact_f64_by_mask";
+    pub const COMPACT_BYTES_BY_MASK: &str = "compact_bytes_by_mask";
+    pub const MASK_AND: &str = "mask_and";
+    pub const MASK_OR: &str = "mask_or";
+    pub const MASK_NOT: &str = "mask_not";
+}
+
+/// Comparison operators for filtering
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum CompareOp {
+    Eq = 0,
+    Ne = 1,
+    Lt = 2,
+    Le = 3,
+    Gt = 4,
+    Ge = 5,
 }
 
 /// CUDA kernel provider for xlog GPU operations
@@ -172,6 +200,27 @@ impl CudaKernelProvider {
                 ],
             )
             .map_err(|e| XlogError::Kernel(format!("Failed to load sort PTX: {}", e)))?;
+
+        // Load filter module
+        device
+            .inner()
+            .load_ptx(
+                Ptx::from_src(FILTER_PTX),
+                FILTER_MODULE,
+                &[
+                    filter_kernels::FILTER_COMPARE_U32,
+                    filter_kernels::FILTER_COMPARE_I64,
+                    filter_kernels::FILTER_COMPARE_F64,
+                    filter_kernels::COMPACT_U32_BY_MASK,
+                    filter_kernels::COMPACT_I64_BY_MASK,
+                    filter_kernels::COMPACT_F64_BY_MASK,
+                    filter_kernels::COMPACT_BYTES_BY_MASK,
+                    filter_kernels::MASK_AND,
+                    filter_kernels::MASK_OR,
+                    filter_kernels::MASK_NOT,
+                ],
+            )
+            .map_err(|e| XlogError::Kernel(format!("Failed to load filter PTX: {}", e)))?;
 
         Ok(Self { device, memory })
     }
@@ -1385,6 +1434,234 @@ impl CudaKernelProvider {
         Ok(CudaBuffer {
             columns: new_columns,
             num_rows: input.num_rows,
+            schema: input.schema.clone(),
+        })
+    }
+
+    // ============== Filter Methods ==============
+
+    /// Filter buffer where u32 column equals constant
+    ///
+    /// # Arguments
+    /// * `input` - The input buffer to filter
+    /// * `col` - Column index to filter on
+    /// * `value` - Value to compare against
+    ///
+    /// # Returns
+    /// A new buffer containing only rows where `input[col] == value`
+    ///
+    /// # Errors
+    /// Returns `XlogError::Kernel` if kernel execution fails
+    pub fn filter_u32_eq(&self, input: &CudaBuffer, col: usize, value: u32) -> Result<CudaBuffer> {
+        self.filter_u32(input, col, value, CompareOp::Eq)
+    }
+
+    /// Filter buffer where u32 column is greater than constant
+    ///
+    /// # Arguments
+    /// * `input` - The input buffer to filter
+    /// * `col` - Column index to filter on
+    /// * `value` - Value to compare against
+    ///
+    /// # Returns
+    /// A new buffer containing only rows where `input[col] > value`
+    ///
+    /// # Errors
+    /// Returns `XlogError::Kernel` if kernel execution fails
+    pub fn filter_u32_gt(&self, input: &CudaBuffer, col: usize, value: u32) -> Result<CudaBuffer> {
+        self.filter_u32(input, col, value, CompareOp::Gt)
+    }
+
+    /// Filter u32 column with comparison operator
+    ///
+    /// # Arguments
+    /// * `input` - The input buffer to filter
+    /// * `col` - Column index to filter on
+    /// * `value` - Value to compare against
+    /// * `op` - Comparison operator
+    ///
+    /// # Returns
+    /// A new buffer containing only rows that satisfy the comparison
+    ///
+    /// # Errors
+    /// Returns `XlogError::Kernel` if kernel execution fails
+    pub fn filter_u32(
+        &self,
+        input: &CudaBuffer,
+        col: usize,
+        value: u32,
+        op: CompareOp,
+    ) -> Result<CudaBuffer> {
+        if input.num_rows == 0 {
+            return self.create_empty_buffer(input.schema.clone());
+        }
+
+        let n = input.num_rows as usize;
+        let device = self.device.inner();
+
+        // Validate column index
+        if col >= input.arity() {
+            return Err(XlogError::Kernel(format!(
+                "Column index {} out of bounds (arity {})",
+                col,
+                input.arity()
+            )));
+        }
+
+        // Get the filter column as u32 view
+        let col_data = input
+            .column(col)
+            .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col)))?;
+        let col_view = self.column_as_u32_view(col_data, n)?;
+
+        // Allocate mask buffer
+        let d_mask = self.memory.alloc::<u8>(n)?;
+
+        // Launch filter_compare_u32 kernel
+        let block_size = 256u32;
+        let grid_size = ((n as u32) + block_size - 1) / block_size;
+        let config = LaunchConfig {
+            grid_dim: (grid_size, 1, 1),
+            block_dim: (block_size, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        let filter_fn = device
+            .get_func(FILTER_MODULE, filter_kernels::FILTER_COMPARE_U32)
+            .ok_or_else(|| XlogError::Kernel("filter_compare_u32 kernel not found".to_string()))?;
+
+        // SAFETY: Kernel parameters match expected signature:
+        // filter_compare_u32(const uint32_t* column, uint32_t constant, uint32_t num_rows, uint8_t op, uint8_t* mask)
+        unsafe {
+            filter_fn
+                .clone()
+                .launch(config, (&col_view, value, n as u32, op as u8, &d_mask))
+        }
+        .map_err(|e| XlogError::Kernel(format!("filter_compare_u32 failed: {}", e)))?;
+
+        // Synchronize and download mask to compute prefix sum
+        self.device.synchronize()?;
+
+        let mut mask_host = vec![0u8; n];
+        device
+            .dtoh_sync_copy_into(&d_mask, &mut mask_host)
+            .map_err(|e| XlogError::Kernel(format!("Failed to download mask: {}", e)))?;
+
+        // Compute prefix sum and count
+        let (prefix_sum, count) = self.prefix_sum_mask(&mask_host)?;
+
+        if count == 0 {
+            return self.create_empty_buffer(input.schema.clone());
+        }
+
+        // Compact all columns using mask
+        self.compact_buffer_by_mask(input, &mask_host, &prefix_sum, count as u64)
+    }
+
+    /// Filter buffer by pre-computed mask
+    ///
+    /// # Arguments
+    /// * `input` - The input buffer to filter
+    /// * `mask` - Mask slice where non-zero means keep the row
+    ///
+    /// # Returns
+    /// A new buffer containing only rows where mask is non-zero
+    ///
+    /// # Errors
+    /// Returns `XlogError::Kernel` if kernel execution fails
+    pub fn filter_by_mask(&self, input: &CudaBuffer, mask: &[u8]) -> Result<CudaBuffer> {
+        if input.num_rows == 0 {
+            return self.create_empty_buffer(input.schema.clone());
+        }
+
+        let n = input.num_rows as usize;
+        if mask.len() != n {
+            return Err(XlogError::Kernel(format!(
+                "Mask length {} doesn't match buffer rows {}",
+                mask.len(),
+                n
+            )));
+        }
+
+        // Compute prefix sum and count
+        let (prefix_sum, count) = self.prefix_sum_mask(mask)?;
+
+        if count == 0 {
+            return self.create_empty_buffer(input.schema.clone());
+        }
+
+        // Compact all columns using mask
+        self.compact_buffer_by_mask(input, mask, &prefix_sum, count as u64)
+    }
+
+    /// Compact buffer columns using mask and prefix sum indices
+    fn compact_buffer_by_mask(
+        &self,
+        input: &CudaBuffer,
+        mask: &[u8],
+        prefix_sum: &[u32],
+        output_count: u64,
+    ) -> Result<CudaBuffer> {
+        let n = input.num_rows as u32;
+        let device = self.device.inner();
+
+        // Upload mask and prefix sum to GPU
+        let d_mask = device
+            .htod_sync_copy(mask)
+            .map_err(|e| XlogError::Kernel(format!("Failed to upload mask: {}", e)))?;
+        let d_prefix_sum = device
+            .htod_sync_copy(prefix_sum)
+            .map_err(|e| XlogError::Kernel(format!("Failed to upload prefix_sum: {}", e)))?;
+
+        // Get compact kernel
+        let compact_fn = device
+            .get_func(FILTER_MODULE, filter_kernels::COMPACT_BYTES_BY_MASK)
+            .ok_or_else(|| {
+                XlogError::Kernel("compact_bytes_by_mask kernel not found".to_string())
+            })?;
+
+        let block_size = 256u32;
+        let grid_size = (n + block_size - 1) / block_size;
+        let config = LaunchConfig {
+            grid_dim: (grid_size, 1, 1),
+            block_dim: (block_size, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        // Compact each column
+        let mut new_columns = Vec::with_capacity(input.columns.len());
+        for col_idx in 0..input.columns.len() {
+            let src_col = input
+                .column(col_idx)
+                .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
+
+            let elem_size = input
+                .schema
+                .column_type(col_idx)
+                .map(|t| t.size_bytes())
+                .unwrap_or(4) as u32;
+
+            let output_bytes = (output_count as usize) * (elem_size as usize);
+            let dst_col = self.memory.alloc::<u8>(output_bytes)?;
+
+            // SAFETY: Kernel signature matches:
+            // compact_bytes_by_mask(input, mask, prefix_sum, num_rows, elem_size, output)
+            unsafe {
+                compact_fn.clone().launch(
+                    config,
+                    (src_col, &d_mask, &d_prefix_sum, n, elem_size, &dst_col),
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("compact_bytes_by_mask failed: {}", e)))?;
+
+            new_columns.push(dst_col);
+        }
+
+        self.device.synchronize()?;
+
+        Ok(CudaBuffer {
+            columns: new_columns,
+            num_rows: output_count,
             schema: input.schema.clone(),
         })
     }
