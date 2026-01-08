@@ -29,6 +29,9 @@ pub enum XlogError {
 
     #[error("Compilation error: {0}")]
     Compilation(String),
+
+    #[error("Execution error: {0}")]
+    Execution(String),
 }
 
 /// Result alias using XlogError

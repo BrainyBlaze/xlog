@@ -7,4 +7,5 @@ pub mod executor;
 pub mod profiler;
 pub mod relation;
 
+pub use executor::Executor;
 pub use relation::RelationStore;
