@@ -1,11 +1,50 @@
 // kernels/sort.cu
 #include <cstdint>
 
+/**
+ * GPU Radix Sort Kernels
+ *
+ * Implements a 4-bit radix sort for uint32 keys with associated indices.
+ *
+ * Algorithm Overview:
+ * - Uses 8 passes (32 bits / 4 bits per pass = 8 passes)
+ * - Each pass: histogram -> prefix sum -> scatter
+ *
+ * Calling Sequence (per pass):
+ * 1. radix_histogram: Compute per-block histograms of radix digits
+ *    - Output: histograms[grid_size * 16] (16 buckets per block)
+ *
+ * 2. Host/GPU prefix sum: Compute global prefix sums from histograms
+ *    - Sum histograms across blocks to get global counts
+ *    - Compute exclusive prefix sum of global counts
+ *
+ * 3. radix_scatter: Scatter keys to sorted positions
+ *    - Uses prefix sums and per-block offsets to compute output positions
+ *
+ * Buffer Requirements:
+ * - keys_in/keys_out: uint32[num_rows] - double-buffered, swap each pass
+ * - indices_in/indices_out: uint32[num_rows] - tracks original positions
+ * - histograms: uint32[grid_size * 16]
+ * - prefix_sums: uint32[16] - global prefix sums
+ *
+ * Note: The radix_scatter kernel iterates through previous blocks to compute
+ * offsets. For large datasets (>100K rows), consider pre-computing per-block
+ * prefix sums on the host for better performance.
+ */
+
 #define BLOCK_SIZE 256
 #define RADIX_BITS 4
 #define RADIX_SIZE (1 << RADIX_BITS)  // 16 buckets
 
-// Compute histogram of radix digits for current pass
+/**
+ * Compute histogram of radix digits for current pass.
+ * Each block computes a local histogram using shared memory atomics,
+ * then writes to global histograms array.
+ * @param keys Input keys
+ * @param num_rows Number of elements
+ * @param histograms Output: [grid_size * RADIX_SIZE]
+ * @param shift Bit shift for current pass (0, 4, 8, ..., 28)
+ */
 extern "C" __global__ void radix_histogram(
     const uint32_t* __restrict__ keys,
     uint32_t num_rows,
@@ -33,7 +72,18 @@ extern "C" __global__ void radix_histogram(
     }
 }
 
-// Scatter keys to sorted positions based on prefix sums
+/**
+ * Scatter keys to sorted positions based on prefix sums.
+ * Uses atomic adds to shared memory to handle intra-block ordering.
+ * @param keys_in Input keys
+ * @param indices_in Input indices (tracks original positions)
+ * @param keys_out Output keys (sorted for this pass)
+ * @param indices_out Output indices
+ * @param prefix_sums Global prefix sums [RADIX_SIZE]
+ * @param local_offsets Same as histograms from histogram pass
+ * @param num_rows Number of elements
+ * @param shift Bit shift for current pass
+ */
 extern "C" __global__ void radix_scatter(
     const uint32_t* __restrict__ keys_in,
     const uint32_t* __restrict__ indices_in,
@@ -66,7 +116,7 @@ extern "C" __global__ void radix_scatter(
     }
 }
 
-// Initialize indices to identity permutation
+/** Initialize identity permutation: indices[i] = i */
 extern "C" __global__ void init_indices(
     uint32_t* __restrict__ indices,
     uint32_t n
@@ -77,7 +127,7 @@ extern "C" __global__ void init_indices(
     }
 }
 
-// Apply permutation to reorder a column
+/** Apply permutation to reorder a uint32 column: output[i] = input[perm[i]] */
 extern "C" __global__ void apply_permutation_u32(
     const uint32_t* __restrict__ input,
     uint32_t* __restrict__ output,
@@ -90,7 +140,7 @@ extern "C" __global__ void apply_permutation_u32(
     }
 }
 
-// Apply permutation to reorder bytes (for any column type)
+/** Apply permutation to reorder byte arrays of any element size */
 extern "C" __global__ void apply_permutation_bytes(
     const uint8_t* __restrict__ input,
     uint8_t* __restrict__ output,
