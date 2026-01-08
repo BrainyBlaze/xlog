@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use xlog_core::{AggOp, RelId, Result, ScalarType, Schema, XlogError};
-use xlog_cuda::{CudaBuffer, CudaKernelProvider};
+use xlog_cuda::{CudaBuffer, CudaKernelProvider, JoinType as CudaJoinType};
 use xlog_ir::{CompareOp, ConstValue, ExecutionPlan, Expr, JoinType, RirNode, Stratum};
 
 use crate::RelationStore;
@@ -533,8 +533,7 @@ impl Executor {
 
     /// Execute a Join node
     ///
-    /// Delegates to the kernel provider's hash_join for inner joins.
-    /// Other join types have simplified implementations.
+    /// Delegates to the kernel provider's hash_join_v2 which supports all join types natively.
     fn execute_join(
         &self,
         left: &CudaBuffer,
@@ -543,36 +542,22 @@ impl Executor {
         right_keys: &[usize],
         join_type: JoinType,
     ) -> Result<CudaBuffer> {
-        match join_type {
-            JoinType::Inner => self.provider.hash_join(left, right, left_keys, right_keys),
+        // Convert IR JoinType to CUDA JoinType
+        let cuda_join_type = match join_type {
+            JoinType::Inner => CudaJoinType::Inner,
+            JoinType::Semi => CudaJoinType::Semi,
+            JoinType::Anti => CudaJoinType::Anti,
+            JoinType::LeftOuter => CudaJoinType::LeftOuter,
+        };
 
-            JoinType::LeftOuter => {
-                // MVP: Fall back to inner join (lossy but functional)
-                self.provider.hash_join(left, right, left_keys, right_keys)
-            }
-
-            JoinType::Semi => {
-                // Semi join: return left rows that have a match in right
-                // MVP: Use hash join and project only left columns
-                let joined = self
-                    .provider
-                    .hash_join(left, right, left_keys, right_keys)?;
-                let left_cols: Vec<usize> = (0..left.arity()).collect();
-                self.execute_project(&joined, &left_cols)
-            }
-
-            JoinType::Anti => {
-                // Anti join: return left rows that have NO match in right
-                // MVP: Use diff on the key columns
-                self.provider.diff(left, right)
-            }
-        }
+        // Use hash_join_v2 which supports all join types natively
+        self.provider
+            .hash_join_v2(left, right, left_keys, right_keys, cuda_join_type)
     }
 
     /// Execute a GroupBy node
     ///
-    /// Delegates to the kernel provider's groupby_agg.
-    /// For multiple aggregations, executes them sequentially (MVP simplification).
+    /// Delegates to the kernel provider's groupby_multi_agg for multi-aggregation support.
     fn execute_groupby(
         &self,
         input: &CudaBuffer,
@@ -584,15 +569,13 @@ impl Executor {
             return self.provider.dedup(input, key_cols);
         }
 
-        // MVP: Execute first aggregation only
-        let (value_col, agg_op) = aggs[0];
-        self.provider
-            .groupby_agg(input, key_cols, agg_op, value_col)
+        // Use multi-aggregation groupby
+        self.provider.groupby_multi_agg(input, key_cols, aggs)
     }
 
     /// Execute a Union node
     ///
-    /// Combines multiple input buffers into one.
+    /// Combines multiple input buffers into one using GPU-native operation.
     fn execute_union(&self, inputs: &[CudaBuffer]) -> Result<CudaBuffer> {
         if inputs.is_empty() {
             return Ok(CudaBuffer::empty());
@@ -602,10 +585,10 @@ impl Executor {
             return self.clone_buffer(&inputs[0]);
         }
 
-        // Pairwise union
+        // Pairwise union using GPU-native operation
         let mut result = self.clone_buffer(&inputs[0])?;
         for input in inputs.iter().skip(1) {
-            result = self.provider.union(&result, input)?;
+            result = self.provider.union_gpu(&result, input)?;
         }
 
         Ok(result)
@@ -620,9 +603,9 @@ impl Executor {
 
     /// Execute a Diff node
     ///
-    /// Returns rows in left that are not in right.
+    /// Returns rows in left that are not in right using GPU-native operation.
     fn execute_diff(&self, left: &CudaBuffer, right: &CudaBuffer) -> Result<CudaBuffer> {
-        self.provider.diff(left, right)
+        self.provider.diff_gpu(left, right)
     }
 
     /// Maximum iterations for fixpoint computation to prevent infinite loops
