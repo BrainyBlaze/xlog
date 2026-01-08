@@ -59,3 +59,38 @@ fn test_prefix_sum_mask_all_ones() {
     assert_eq!(count, 5);
     assert_eq!(prefix_sum, vec![0u32, 1, 2, 3, 4]);
 }
+
+#[test]
+fn test_prefix_sum_mask_max_size() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    // Test exactly at the 256-element limit
+    let mut mask = vec![0u8; 256];
+    mask[0] = 1;
+    mask[127] = 1;
+    mask[255] = 1;
+
+    let (prefix_sum, count) = provider.prefix_sum_mask(&mask).unwrap();
+
+    assert_eq!(count, 3);
+    assert_eq!(prefix_sum[0], 0);   // First 1 at index 0
+    assert_eq!(prefix_sum[127], 1); // Second 1 at index 127
+    assert_eq!(prefix_sum[255], 2); // Third 1 at index 255
+}
+
+#[test]
+fn test_prefix_sum_mask_over_limit() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    // Test over the 256-element limit should fail
+    let mask = vec![1u8; 257];
+    let result = provider.prefix_sum_mask(&mask);
+
+    assert!(result.is_err());
+}

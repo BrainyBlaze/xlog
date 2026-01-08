@@ -1056,6 +1056,14 @@ impl CudaKernelProvider {
             return Ok((vec![], 0));
         }
 
+        // Check for single-block limitation
+        if mask.len() > 256 {
+            return Err(XlogError::Kernel(format!(
+                "prefix_sum_mask currently limited to 256 elements, got {}",
+                mask.len()
+            )));
+        }
+
         let n = mask.len();
         let device = self.device.inner();
 
