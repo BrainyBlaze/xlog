@@ -88,3 +88,37 @@ extern "C" __global__ void groupby_max(
     uint32_t group = group_ids[tid];
     atomicMax(&maxs[group], values[tid]);
 }
+
+// Detect group boundaries in sorted data (single-column version)
+// More efficient for single-key groupby operations
+extern "C" __global__ void detect_boundaries(
+    const uint32_t* __restrict__ keys,
+    uint32_t num_rows,
+    uint8_t* __restrict__ boundaries  // 1 if keys[i] != keys[i-1]
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= num_rows) return;
+
+    if (gid == 0) {
+        boundaries[gid] = 1;  // First element is always a boundary
+    } else {
+        boundaries[gid] = (keys[gid] != keys[gid - 1]) ? 1 : 0;
+    }
+}
+
+// Extract unique group keys (first element of each group)
+extern "C" __global__ void extract_group_keys(
+    const uint32_t* __restrict__ keys,
+    const uint8_t* __restrict__ boundaries,
+    const uint32_t* __restrict__ boundary_positions,  // prefix sum of boundaries
+    uint32_t num_rows,
+    uint32_t* __restrict__ group_keys
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= num_rows) return;
+
+    if (boundaries[gid] == 1) {
+        uint32_t group_idx = boundary_positions[gid];
+        group_keys[group_idx] = keys[gid];
+    }
+}

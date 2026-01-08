@@ -18,6 +18,7 @@ const GROUPBY_PTX: &str = include_str!("../../../kernels/groupby.ptx");
 const SCAN_PTX: &str = include_str!("../../../kernels/scan.ptx");
 const SORT_PTX: &str = include_str!("../../../kernels/sort.ptx");
 const FILTER_PTX: &str = include_str!("../../../kernels/filter.ptx");
+const SET_OPS_PTX: &str = include_str!("../../../kernels/set_ops.ptx");
 
 /// Module names for loaded PTX modules
 pub const JOIN_MODULE: &str = "xlog_join";
@@ -26,6 +27,7 @@ pub const GROUPBY_MODULE: &str = "xlog_groupby";
 pub const SCAN_MODULE: &str = "xlog_scan";
 pub const SORT_MODULE: &str = "xlog_sort";
 pub const FILTER_MODULE: &str = "xlog_filter";
+pub const SET_OPS_MODULE: &str = "xlog_set_ops";
 
 /// Kernel function names in the join module
 pub mod join_kernels {
@@ -49,6 +51,8 @@ pub mod dedup_kernels {
 /// Kernel function names in the groupby module
 pub mod groupby_kernels {
     pub const DETECT_GROUP_BOUNDARIES: &str = "detect_group_boundaries";
+    pub const DETECT_BOUNDARIES: &str = "detect_boundaries";
+    pub const EXTRACT_GROUP_KEYS: &str = "extract_group_keys";
     pub const GROUPBY_COUNT: &str = "groupby_count";
     pub const GROUPBY_SUM: &str = "groupby_sum";
     pub const GROUPBY_MIN: &str = "groupby_min";
@@ -82,6 +86,12 @@ pub mod filter_kernels {
     pub const MASK_AND: &str = "mask_and";
     pub const MASK_OR: &str = "mask_or";
     pub const MASK_NOT: &str = "mask_not";
+}
+
+/// Kernel function names in the set_ops module
+pub mod set_ops_kernels {
+    pub const CONCAT_U32: &str = "concat_u32";
+    pub const SORTED_DIFF_MARK: &str = "sorted_diff_mark";
 }
 
 /// Comparison operators for filtering
@@ -193,6 +203,8 @@ impl CudaKernelProvider {
                 GROUPBY_MODULE,
                 &[
                     groupby_kernels::DETECT_GROUP_BOUNDARIES,
+                    groupby_kernels::DETECT_BOUNDARIES,
+                    groupby_kernels::EXTRACT_GROUP_KEYS,
                     groupby_kernels::GROUPBY_COUNT,
                     groupby_kernels::GROUPBY_SUM,
                     groupby_kernels::GROUPBY_MIN,
@@ -250,6 +262,19 @@ impl CudaKernelProvider {
                 ],
             )
             .map_err(|e| XlogError::Kernel(format!("Failed to load filter PTX: {}", e)))?;
+
+        // Load set_ops module
+        device
+            .inner()
+            .load_ptx(
+                Ptx::from_src(SET_OPS_PTX),
+                SET_OPS_MODULE,
+                &[
+                    set_ops_kernels::CONCAT_U32,
+                    set_ops_kernels::SORTED_DIFF_MARK,
+                ],
+            )
+            .map_err(|e| XlogError::Kernel(format!("Failed to load set_ops PTX: {}", e)))?;
 
         Ok(Self { device, memory })
     }
@@ -855,6 +880,228 @@ impl CudaKernelProvider {
         Ok(CudaBuffer::from_columns(result_columns, diff_count, schema))
     }
 
+    // ============== GPU-Native Set Operations ==============
+
+    /// GPU-native union (no host roundtrip)
+    ///
+    /// Computes the union of two buffers entirely on the GPU using:
+    /// 1. Concatenate arrays using concat_u32 kernel
+    /// 2. Sort the concatenated result
+    /// 3. Deduplicate using existing dedup()
+    ///
+    /// # Arguments
+    /// * `a` - First buffer
+    /// * `b` - Second buffer
+    ///
+    /// # Returns
+    /// A buffer containing deduplicated union of both inputs, sorted
+    ///
+    /// # Errors
+    /// Returns `XlogError::Kernel` if schemas don't match or operation fails
+    pub fn union_gpu(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
+        // Handle empty cases
+        if a.is_empty() && b.is_empty() {
+            return self.create_empty_buffer(a.schema().clone());
+        }
+        if a.is_empty() {
+            // Sort and dedup b
+            let sorted_b = self.sort(b, &[0])?;
+            return self.dedup(&sorted_b, &[0]);
+        }
+        if b.is_empty() {
+            // Sort and dedup a
+            let sorted_a = self.sort(a, &[0])?;
+            return self.dedup(&sorted_a, &[0]);
+        }
+
+        // Verify schemas match
+        if a.schema() != b.schema() {
+            return Err(XlogError::Kernel("Union requires matching schemas".to_string()));
+        }
+
+        // For GPU union, we only support single U32 column for now
+        if a.arity() != 1 {
+            return Err(XlogError::Kernel(
+                "GPU union currently only supports single-column U32 buffers".to_string(),
+            ));
+        }
+
+        let num_a = a.num_rows() as u32;
+        let num_b = b.num_rows() as u32;
+        let total = num_a + num_b;
+
+        // Step 1: Concatenate on GPU using concat_u32 kernel
+        let concat_fn = self.device.inner()
+            .get_func(SET_OPS_MODULE, set_ops_kernels::CONCAT_U32)
+            .ok_or_else(|| XlogError::Kernel("concat_u32 kernel not found".to_string()))?;
+
+        // Get column data as u32 views
+        let a_col = a.column(0)
+            .ok_or_else(|| XlogError::Kernel("A column 0 not found".to_string()))?;
+        let b_col = b.column(0)
+            .ok_or_else(|| XlogError::Kernel("B column 0 not found".to_string()))?;
+
+        let a_view = self.column_as_u32_view(a_col, num_a as usize)?;
+        let b_view = self.column_as_u32_view(b_col, num_b as usize)?;
+
+        // Allocate output for concatenation
+        let concat_output = self.memory.alloc::<u32>(total as usize)?;
+
+        // Launch concat kernel
+        let block_size = 256u32;
+        let grid_size = (total + block_size - 1) / block_size;
+        let config = LaunchConfig {
+            grid_dim: (grid_size, 1, 1),
+            block_dim: (block_size, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        // SAFETY: Kernel signature matches: concat_u32(a, a_len, b, b_len, output)
+        unsafe {
+            concat_fn.clone().launch(config, (
+                &a_view,
+                num_a,
+                &b_view,
+                num_b,
+                &concat_output,
+            ))
+        }
+        .map_err(|e| XlogError::Kernel(format!("concat_u32 failed: {}", e)))?;
+
+        self.device.synchronize()?;
+
+        // Convert concat_output to CudaBuffer for sort
+        // Need to convert u32 slice to u8 slice
+        let concat_bytes = (total as usize) * std::mem::size_of::<u32>();
+        let mut concat_u8 = self.memory.alloc::<u8>(concat_bytes)?;
+
+        // Copy via dtod using raw bytes
+        let mut host_u32 = vec![0u32; total as usize];
+        self.device.inner()
+            .dtoh_sync_copy_into(&concat_output, &mut host_u32)
+            .map_err(|e| XlogError::Kernel(format!("Failed to read concat output: {}", e)))?;
+        let host_bytes: Vec<u8> = host_u32.iter().flat_map(|v| v.to_le_bytes()).collect();
+        self.device.inner()
+            .htod_sync_copy_into(&host_bytes, &mut concat_u8)
+            .map_err(|e| XlogError::Kernel(format!("Failed to upload concat bytes: {}", e)))?;
+
+        let concat_buffer = CudaBuffer::from_columns(
+            vec![concat_u8],
+            total as u64,
+            a.schema().clone(),
+        );
+
+        // Step 2: Sort the concatenated result
+        let sorted = self.sort(&concat_buffer, &[0])?;
+
+        // Step 3: Dedup to remove duplicates
+        self.dedup(&sorted, &[0])
+    }
+
+    /// GPU-native set difference (no host roundtrip)
+    ///
+    /// Computes a - b (elements in a but not in b) entirely on GPU using:
+    /// 1. Sort both inputs
+    /// 2. Dedup both inputs
+    /// 3. Mark elements in a not in b using sorted_diff_mark kernel (binary search)
+    /// 4. Filter using existing filter_by_mask()
+    ///
+    /// # Arguments
+    /// * `a` - Source buffer
+    /// * `b` - Buffer to subtract
+    ///
+    /// # Returns
+    /// A buffer containing elements in a but not in b, sorted and deduped
+    ///
+    /// # Errors
+    /// Returns `XlogError::Kernel` if schemas don't match or operation fails
+    pub fn diff_gpu(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
+        // Handle empty cases
+        if a.is_empty() {
+            return self.create_empty_buffer(a.schema().clone());
+        }
+        if b.is_empty() {
+            // Sort and dedup a, return it
+            let sorted_a = self.sort(a, &[0])?;
+            return self.dedup(&sorted_a, &[0]);
+        }
+
+        // Verify schemas match
+        if a.schema() != b.schema() {
+            return Err(XlogError::Kernel("Diff requires matching schemas".to_string()));
+        }
+
+        // For GPU diff, we only support single U32 column for now
+        if a.arity() != 1 {
+            return Err(XlogError::Kernel(
+                "GPU diff currently only supports single-column U32 buffers".to_string(),
+            ));
+        }
+
+        // Step 1: Sort and dedup both inputs
+        let sorted_a = self.sort(a, &[0])?;
+        let deduped_a = self.dedup(&sorted_a, &[0])?;
+
+        let sorted_b = self.sort(b, &[0])?;
+        let deduped_b = self.dedup(&sorted_b, &[0])?;
+
+        if deduped_a.is_empty() {
+            return self.create_empty_buffer(a.schema().clone());
+        }
+
+        let num_a = deduped_a.num_rows() as u32;
+        let num_b = deduped_b.num_rows() as u32;
+
+        // Step 2: Mark elements in a not in b using sorted_diff_mark kernel
+        let diff_mark_fn = self.device.inner()
+            .get_func(SET_OPS_MODULE, set_ops_kernels::SORTED_DIFF_MARK)
+            .ok_or_else(|| XlogError::Kernel("sorted_diff_mark kernel not found".to_string()))?;
+
+        // Get column data as u32 views
+        let a_col = deduped_a.column(0)
+            .ok_or_else(|| XlogError::Kernel("A column 0 not found".to_string()))?;
+        let b_col = deduped_b.column(0)
+            .ok_or_else(|| XlogError::Kernel("B column 0 not found".to_string()))?;
+
+        let a_view = self.column_as_u32_view(a_col, num_a as usize)?;
+        let b_view = self.column_as_u32_view(b_col, num_b as usize)?;
+
+        // Allocate mask for diff marking
+        let diff_mask = self.memory.alloc::<u8>(num_a as usize)?;
+
+        // Launch diff mark kernel
+        let block_size = 256u32;
+        let grid_size = (num_a + block_size - 1) / block_size;
+        let config = LaunchConfig {
+            grid_dim: (grid_size, 1, 1),
+            block_dim: (block_size, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        // SAFETY: Kernel signature matches: sorted_diff_mark(a, a_len, b, b_len, in_diff)
+        unsafe {
+            diff_mark_fn.clone().launch(config, (
+                &a_view,
+                num_a,
+                &b_view,
+                num_b,
+                &diff_mask,
+            ))
+        }
+        .map_err(|e| XlogError::Kernel(format!("sorted_diff_mark failed: {}", e)))?;
+
+        self.device.synchronize()?;
+
+        // Step 3: Download mask and filter using existing filter_by_mask
+        let mut mask_host = vec![0u8; num_a as usize];
+        self.device.inner()
+            .dtoh_sync_copy_into(&diff_mask, &mut mask_host)
+            .map_err(|e| XlogError::Kernel(format!("Failed to read diff mask: {}", e)))?;
+
+        // Step 4: Filter using existing filter_by_mask()
+        self.filter_by_mask(&deduped_a, &mask_host)
+    }
+
     /// Perform groupby aggregation
     ///
     /// Assumes input is sorted by key columns (sorting is complex, deferred).
@@ -1125,6 +1372,433 @@ impl CudaKernelProvider {
             num_groups as u64,
             result_schema,
         ))
+    }
+
+    /// Multi-aggregation groupby
+    ///
+    /// Performs groupby with multiple aggregation operations at once.
+    /// This is more efficient than running separate groupby operations
+    /// because it only sorts and computes group boundaries once.
+    ///
+    /// # Arguments
+    /// * `buffer` - The input buffer
+    /// * `key_cols` - Column indices for grouping (currently only single-column supported)
+    /// * `aggs` - A slice of (value_col, AggOp) pairs specifying which aggregations to perform
+    ///
+    /// # Returns
+    /// A buffer with one row per group, containing key columns followed by aggregated values
+    /// in the same order as the `aggs` parameter
+    ///
+    /// # Errors
+    /// Returns `XlogError::Kernel` if kernel execution fails
+    ///
+    /// # Example
+    /// ```ignore
+    /// let result = provider.groupby_multi_agg(
+    ///     &buffer,
+    ///     &[0],  // group by column 0
+    ///     &[(1, AggOp::Sum), (1, AggOp::Count), (1, AggOp::Min)],
+    /// )?;
+    /// // result has columns: key, sum, count, min
+    /// ```
+    pub fn groupby_multi_agg(
+        &self,
+        buffer: &CudaBuffer,
+        key_cols: &[usize],
+        aggs: &[(usize, AggOp)],
+    ) -> Result<CudaBuffer> {
+        // Handle empty input
+        if buffer.is_empty() {
+            let result_schema = self.groupby_multi_agg_result_schema(buffer.schema(), key_cols, aggs);
+            return self.create_empty_buffer(result_schema);
+        }
+
+        // Validate inputs
+        if key_cols.is_empty() {
+            return Err(XlogError::Kernel(
+                "GroupBy requires at least one key column".to_string(),
+            ));
+        }
+        if key_cols.len() > 1 {
+            return Err(XlogError::Kernel(
+                "Multi-column groupby not yet implemented".to_string(),
+            ));
+        }
+        if aggs.is_empty() {
+            return Err(XlogError::Kernel(
+                "GroupBy requires at least one aggregation".to_string(),
+            ));
+        }
+
+        // Validate all value columns exist
+        for &(value_col, _) in aggs {
+            if value_col >= buffer.arity() {
+                return Err(XlogError::Kernel(format!(
+                    "Value column {} out of bounds (arity {})",
+                    value_col,
+                    buffer.arity()
+                )));
+            }
+        }
+
+        let key_col = key_cols[0];
+        let num_rows = buffer.num_rows() as u32;
+
+        // Step 1: Sort buffer by key column
+        let sorted = self.sort(buffer, key_cols)?;
+
+        // Step 2: Detect boundaries using detect_boundaries kernel
+        let boundary_func = self
+            .device
+            .inner()
+            .get_func(GROUPBY_MODULE, groupby_kernels::DETECT_BOUNDARIES)
+            .ok_or_else(|| XlogError::Kernel("detect_boundaries kernel not found".to_string()))?;
+
+        // Allocate boundaries mask
+        let boundaries = self.memory.alloc::<u8>(num_rows as usize)?;
+
+        // Get sorted key column
+        let sorted_keys = sorted
+            .column(key_col)
+            .ok_or_else(|| XlogError::Kernel("Sorted key column not found".to_string()))?;
+        let sorted_keys_view = self.column_as_u32_view(sorted_keys, num_rows as usize)?;
+
+        // Launch boundary detection
+        let block_size = 256u32;
+        let grid_size = (num_rows + block_size - 1) / block_size;
+        let config = LaunchConfig {
+            grid_dim: (grid_size, 1, 1),
+            block_dim: (block_size, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        // SAFETY: Kernel parameters match expected signature
+        unsafe {
+            boundary_func.clone().launch(
+                config,
+                (&sorted_keys_view, num_rows, &boundaries),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("detect_boundaries failed: {}", e)))?;
+
+        self.device.synchronize()?;
+
+        // Step 3: Compute group IDs using prefix_sum_mask
+        // Read boundaries to host
+        let mut boundaries_host = vec![0u8; num_rows as usize];
+        self.device
+            .inner()
+            .dtoh_sync_copy_into(&boundaries, &mut boundaries_host)
+            .map_err(|e| XlogError::Kernel(format!("Failed to read boundaries: {}", e)))?;
+
+        // Compute group IDs: cumulative sum of boundaries - 1
+        let mut group_ids_host = vec![0u32; num_rows as usize];
+        let mut current_group = 0u32;
+        for i in 0..num_rows as usize {
+            if i > 0 && boundaries_host[i] == 1 {
+                current_group += 1;
+            }
+            group_ids_host[i] = current_group;
+        }
+        let num_groups = (current_group + 1) as usize;
+
+        // Upload group IDs
+        let mut group_ids = self.memory.alloc::<u32>(num_rows as usize)?;
+        self.device
+            .inner()
+            .htod_sync_copy_into(&group_ids_host, &mut group_ids)
+            .map_err(|e| XlogError::Kernel(format!("Failed to upload group IDs: {}", e)))?;
+
+        // Step 4: Extract unique group keys
+        // Compute prefix sum of boundaries for extract_group_keys
+        let mut boundary_positions_host = vec![0u32; num_rows as usize];
+        let mut running_sum = 0u32;
+        for i in 0..num_rows as usize {
+            boundary_positions_host[i] = running_sum;
+            running_sum += boundaries_host[i] as u32;
+        }
+
+        let mut boundary_positions = self.memory.alloc::<u32>(num_rows as usize)?;
+        self.device
+            .inner()
+            .htod_sync_copy_into(&boundary_positions_host, &mut boundary_positions)
+            .map_err(|e| XlogError::Kernel(format!("Failed to upload boundary positions: {}", e)))?;
+
+        // Allocate group keys output
+        let group_keys_output = self.memory.alloc::<u32>(num_groups)?;
+
+        // Get extract_group_keys kernel
+        let extract_keys_func = self
+            .device
+            .inner()
+            .get_func(GROUPBY_MODULE, groupby_kernels::EXTRACT_GROUP_KEYS)
+            .ok_or_else(|| XlogError::Kernel("extract_group_keys kernel not found".to_string()))?;
+
+        // SAFETY: Kernel parameters match expected signature
+        unsafe {
+            extract_keys_func.clone().launch(
+                config,
+                (
+                    &sorted_keys_view,
+                    &boundaries,
+                    &boundary_positions,
+                    num_rows,
+                    &group_keys_output,
+                ),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("extract_group_keys failed: {}", e)))?;
+
+        self.device.synchronize()?;
+
+        // Step 5: For each (value_col, op) pair, run the appropriate kernel
+        let mut agg_columns_bytes: Vec<Vec<u8>> = Vec::with_capacity(aggs.len());
+
+        for &(value_col, agg_op) in aggs {
+            // Get value column from sorted buffer
+            let values = sorted
+                .column(value_col)
+                .ok_or_else(|| XlogError::Kernel("Value column not found".to_string()))?;
+            let values_view = self.column_as_u32_view(values, num_rows as usize)?;
+
+            let agg_bytes = match agg_op {
+                AggOp::Count => {
+                    let mut output = self.memory.alloc::<u32>(num_groups)?;
+                    // Initialize to 0
+                    self.device
+                        .inner()
+                        .htod_sync_copy_into(&vec![0u32; num_groups], &mut output)
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("Failed to init count output: {}", e))
+                        })?;
+
+                    let count_func = self
+                        .device
+                        .inner()
+                        .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_COUNT)
+                        .ok_or_else(|| {
+                            XlogError::Kernel("groupby_count kernel not found".to_string())
+                        })?;
+
+                    // SAFETY: Kernel parameters match expected signature
+                    unsafe {
+                        count_func.clone().launch(
+                            config,
+                            (&boundaries, &group_ids, num_rows, &output),
+                        )
+                    }
+                    .map_err(|e| XlogError::Kernel(format!("groupby_count failed: {}", e)))?;
+
+                    self.device.synchronize()?;
+
+                    let mut host_output = vec![0u32; num_groups];
+                    self.device
+                        .inner()
+                        .dtoh_sync_copy_into(&output, &mut host_output)
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("Failed to read count output: {}", e))
+                        })?;
+                    host_output
+                        .iter()
+                        .flat_map(|v| v.to_le_bytes())
+                        .collect::<Vec<u8>>()
+                }
+                AggOp::Sum => {
+                    let mut output = self.memory.alloc::<u64>(num_groups)?;
+                    // Initialize to 0
+                    self.device
+                        .inner()
+                        .htod_sync_copy_into(&vec![0u64; num_groups], &mut output)
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("Failed to init sum output: {}", e))
+                        })?;
+
+                    let sum_func = self
+                        .device
+                        .inner()
+                        .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_SUM)
+                        .ok_or_else(|| {
+                            XlogError::Kernel("groupby_sum kernel not found".to_string())
+                        })?;
+
+                    // SAFETY: Kernel parameters match expected signature
+                    unsafe {
+                        sum_func.clone().launch(
+                            config,
+                            (&values_view, &group_ids, num_rows, &output),
+                        )
+                    }
+                    .map_err(|e| XlogError::Kernel(format!("groupby_sum failed: {}", e)))?;
+
+                    self.device.synchronize()?;
+
+                    let mut host_output = vec![0u64; num_groups];
+                    self.device
+                        .inner()
+                        .dtoh_sync_copy_into(&output, &mut host_output)
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("Failed to read sum output: {}", e))
+                        })?;
+                    // Truncate u64 to u32 for now (MVP simplification)
+                    host_output
+                        .iter()
+                        .flat_map(|v| (*v as u32).to_le_bytes())
+                        .collect::<Vec<u8>>()
+                }
+                AggOp::Min => {
+                    let mut output = self.memory.alloc::<u32>(num_groups)?;
+                    // Initialize to MAX
+                    self.device
+                        .inner()
+                        .htod_sync_copy_into(&vec![u32::MAX; num_groups], &mut output)
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("Failed to init min output: {}", e))
+                        })?;
+
+                    let min_func = self
+                        .device
+                        .inner()
+                        .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_MIN)
+                        .ok_or_else(|| {
+                            XlogError::Kernel("groupby_min kernel not found".to_string())
+                        })?;
+
+                    // SAFETY: Kernel parameters match expected signature
+                    unsafe {
+                        min_func.clone().launch(
+                            config,
+                            (&values_view, &group_ids, num_rows, &output),
+                        )
+                    }
+                    .map_err(|e| XlogError::Kernel(format!("groupby_min failed: {}", e)))?;
+
+                    self.device.synchronize()?;
+
+                    let mut host_output = vec![0u32; num_groups];
+                    self.device
+                        .inner()
+                        .dtoh_sync_copy_into(&output, &mut host_output)
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("Failed to read min output: {}", e))
+                        })?;
+                    host_output
+                        .iter()
+                        .flat_map(|v| v.to_le_bytes())
+                        .collect::<Vec<u8>>()
+                }
+                AggOp::Max => {
+                    let mut output = self.memory.alloc::<u32>(num_groups)?;
+                    // Initialize to 0
+                    self.device
+                        .inner()
+                        .htod_sync_copy_into(&vec![0u32; num_groups], &mut output)
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("Failed to init max output: {}", e))
+                        })?;
+
+                    let max_func = self
+                        .device
+                        .inner()
+                        .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_MAX)
+                        .ok_or_else(|| {
+                            XlogError::Kernel("groupby_max kernel not found".to_string())
+                        })?;
+
+                    // SAFETY: Kernel parameters match expected signature
+                    unsafe {
+                        max_func.clone().launch(
+                            config,
+                            (&values_view, &group_ids, num_rows, &output),
+                        )
+                    }
+                    .map_err(|e| XlogError::Kernel(format!("groupby_max failed: {}", e)))?;
+
+                    self.device.synchronize()?;
+
+                    let mut host_output = vec![0u32; num_groups];
+                    self.device
+                        .inner()
+                        .dtoh_sync_copy_into(&output, &mut host_output)
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("Failed to read max output: {}", e))
+                        })?;
+                    host_output
+                        .iter()
+                        .flat_map(|v| v.to_le_bytes())
+                        .collect::<Vec<u8>>()
+                }
+                AggOp::LogSumExp => {
+                    return Err(XlogError::Kernel("LogSumExp not yet implemented".to_string()));
+                }
+            };
+
+            agg_columns_bytes.push(agg_bytes);
+        }
+
+        // Step 6: Build output buffer with keys and aggregated values
+        // Download group keys
+        let mut group_keys_host = vec![0u32; num_groups];
+        self.device
+            .inner()
+            .dtoh_sync_copy_into(&group_keys_output, &mut group_keys_host)
+            .map_err(|e| XlogError::Kernel(format!("Failed to read group keys: {}", e)))?;
+        let group_keys_bytes: Vec<u8> = group_keys_host
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+
+        // Upload key column
+        let mut result_key_col = self.memory.alloc::<u8>(group_keys_bytes.len())?;
+        self.device
+            .inner()
+            .htod_sync_copy_into(&group_keys_bytes, &mut result_key_col)
+            .map_err(|e| XlogError::Kernel(format!("Failed to upload result keys: {}", e)))?;
+
+        // Build result columns: key column + agg columns
+        let mut result_columns = vec![result_key_col];
+        for agg_bytes in agg_columns_bytes {
+            let mut agg_col = self.memory.alloc::<u8>(agg_bytes.len())?;
+            self.device
+                .inner()
+                .htod_sync_copy_into(&agg_bytes, &mut agg_col)
+                .map_err(|e| XlogError::Kernel(format!("Failed to upload agg column: {}", e)))?;
+            result_columns.push(agg_col);
+        }
+
+        let result_schema = self.groupby_multi_agg_result_schema(buffer.schema(), key_cols, aggs);
+
+        Ok(CudaBuffer::from_columns(
+            result_columns,
+            num_groups as u64,
+            result_schema,
+        ))
+    }
+
+    /// Create result schema for multi-aggregation groupby
+    fn groupby_multi_agg_result_schema(
+        &self,
+        input: &Schema,
+        key_cols: &[usize],
+        aggs: &[(usize, AggOp)],
+    ) -> Schema {
+        let mut columns: Vec<(String, ScalarType)> = key_cols
+            .iter()
+            .filter_map(|&i| input.columns.get(i).cloned())
+            .collect();
+
+        for (i, &(_value_col, agg_op)) in aggs.iter().enumerate() {
+            let agg_name = match agg_op {
+                AggOp::Count => format!("count_{}", i),
+                AggOp::Sum => format!("sum_{}", i),
+                AggOp::Min => format!("min_{}", i),
+                AggOp::Max => format!("max_{}", i),
+                AggOp::LogSumExp => format!("logsumexp_{}", i),
+            };
+            // All aggregations return U32 in our MVP (even Sum is truncated)
+            columns.push((agg_name, ScalarType::U32));
+        }
+
+        Schema::new(columns)
     }
 
     /// Compute exclusive prefix sum of u8 mask, returns (prefix_sum_vec, total_count)

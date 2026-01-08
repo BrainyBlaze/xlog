@@ -241,4 +241,104 @@ $L__BB4_2:
 	ret;
 
 }
+	// .globl	detect_boundaries
+.visible .entry detect_boundaries(
+	.param .u64 detect_boundaries_param_0,
+	.param .u32 detect_boundaries_param_1,
+	.param .u64 detect_boundaries_param_2
+)
+{
+	.reg .pred 	%p<4>;
+	.reg .b16 	%rs<3>;
+	.reg .b32 	%r<9>;
+	.reg .b64 	%rd<11>;
+
+
+	ld.param.u64 	%rd3, [detect_boundaries_param_0];
+	ld.param.u32 	%r2, [detect_boundaries_param_1];
+	ld.param.u64 	%rd4, [detect_boundaries_param_2];
+	mov.u32 	%r3, %ntid.x;
+	mov.u32 	%r4, %ctaid.x;
+	mov.u32 	%r5, %tid.x;
+	mad.lo.s32 	%r1, %r4, %r3, %r5;
+	setp.ge.u32 	%p1, %r1, %r2;
+	@%p1 bra 	$L__BB5_4;
+
+	setp.eq.s32 	%p2, %r1, 0;
+	cvt.u64.u32 	%rd1, %r1;
+	cvta.to.global.u64 	%rd5, %rd4;
+	add.s64 	%rd2, %rd5, %rd1;
+	@%p2 bra 	$L__BB5_3;
+
+	cvta.to.global.u64 	%rd6, %rd3;
+	shl.b64 	%rd7, %rd1, 2;
+	add.s64 	%rd8, %rd6, %rd7;
+	add.s32 	%r6, %r1, -1;
+	mul.wide.u32 	%rd9, %r6, 4;
+	add.s64 	%rd10, %rd6, %rd9;
+	ld.global.nc.u32 	%r7, [%rd10];
+	ld.global.nc.u32 	%r8, [%rd8];
+	setp.ne.s32 	%p3, %r8, %r7;
+	selp.u16 	%rs1, 1, 0, %p3;
+	st.global.u8 	[%rd2], %rs1;
+	bra.uni 	$L__BB5_4;
+
+$L__BB5_3:
+	mov.u16 	%rs2, 1;
+	st.global.u8 	[%rd2], %rs2;
+
+$L__BB5_4:
+	ret;
+
+}
+	// .globl	extract_group_keys
+.visible .entry extract_group_keys(
+	.param .u64 extract_group_keys_param_0,
+	.param .u64 extract_group_keys_param_1,
+	.param .u64 extract_group_keys_param_2,
+	.param .u32 extract_group_keys_param_3,
+	.param .u64 extract_group_keys_param_4
+)
+{
+	.reg .pred 	%p<3>;
+	.reg .b16 	%rs<3>;
+	.reg .b32 	%r<8>;
+	.reg .b64 	%rd<16>;
+
+
+	ld.param.u64 	%rd2, [extract_group_keys_param_0];
+	ld.param.u64 	%rd3, [extract_group_keys_param_1];
+	ld.param.u64 	%rd4, [extract_group_keys_param_2];
+	ld.param.u32 	%r2, [extract_group_keys_param_3];
+	ld.param.u64 	%rd5, [extract_group_keys_param_4];
+	mov.u32 	%r3, %ntid.x;
+	mov.u32 	%r4, %ctaid.x;
+	mov.u32 	%r5, %tid.x;
+	mad.lo.s32 	%r1, %r4, %r3, %r5;
+	setp.ge.u32 	%p1, %r1, %r2;
+	@%p1 bra 	$L__BB6_3;
+
+	cvta.to.global.u64 	%rd6, %rd3;
+	cvt.u64.u32 	%rd1, %r1;
+	add.s64 	%rd7, %rd6, %rd1;
+	ld.global.nc.u8 	%rs1, [%rd7];
+	setp.ne.s16 	%p2, %rs1, 1;
+	@%p2 bra 	$L__BB6_3;
+
+	cvta.to.global.u64 	%rd8, %rd4;
+	shl.b64 	%rd9, %rd1, 2;
+	add.s64 	%rd10, %rd8, %rd9;
+	cvta.to.global.u64 	%rd11, %rd2;
+	add.s64 	%rd12, %rd11, %rd9;
+	ld.global.nc.u32 	%r6, [%rd12];
+	ld.global.nc.u32 	%r7, [%rd10];
+	cvta.to.global.u64 	%rd13, %rd5;
+	mul.wide.u32 	%rd14, %r7, 4;
+	add.s64 	%rd15, %rd13, %rd14;
+	st.global.u32 	[%rd15], %r6;
+
+$L__BB6_3:
+	ret;
+
+}
 
