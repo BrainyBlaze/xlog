@@ -10,26 +10,8 @@
  * - Uses 8 passes (32 bits / 4 bits per pass = 8 passes)
  * - Each pass: histogram -> prefix sum -> scatter
  *
- * Calling Sequence (per pass):
- * 1. radix_histogram: Compute per-block histograms of radix digits
- *    - Output: histograms[grid_size * 16] (16 buckets per block)
- *
- * 2. Host/GPU prefix sum: Compute global prefix sums from histograms
- *    - Sum histograms across blocks to get global counts
- *    - Compute exclusive prefix sum of global counts
- *
- * 3. radix_scatter: Scatter keys to sorted positions
- *    - Uses prefix sums and per-block offsets to compute output positions
- *
- * Buffer Requirements:
- * - keys_in/keys_out: uint32[num_rows] - double-buffered, swap each pass
- * - indices_in/indices_out: uint32[num_rows] - tracks original positions
- * - histograms: uint32[grid_size * 16]
- * - prefix_sums: uint32[16] - global prefix sums
- *
- * Note: The radix_scatter kernel iterates through previous blocks to compute
- * offsets. For large datasets (>100K rows), consider pre-computing per-block
- * prefix sums on the host for better performance.
+ * IMPORTANT: This is a STABLE sort. Elements with the same digit retain
+ * their relative input order. This is required for radix sort correctness.
  */
 
 #define BLOCK_SIZE 256
@@ -40,10 +22,6 @@
  * Compute histogram of radix digits for current pass.
  * Each block computes a local histogram using shared memory atomics,
  * then writes to global histograms array.
- * @param keys Input keys
- * @param num_rows Number of elements
- * @param histograms Output: [grid_size * RADIX_SIZE]
- * @param shift Bit shift for current pass (0, 4, 8, ..., 28)
  */
 extern "C" __global__ void radix_histogram(
     const uint32_t* __restrict__ keys,
@@ -73,33 +51,106 @@ extern "C" __global__ void radix_histogram(
 }
 
 /**
- * Scatter keys to sorted positions based on prefix sums.
- * Uses atomic adds to shared memory to handle intra-block ordering.
- * @param keys_in Input keys
- * @param indices_in Input indices (tracks original positions)
- * @param keys_out Output keys (sorted for this pass)
- * @param indices_out Output indices
- * @param prefix_sums Global prefix sums [RADIX_SIZE]
- * @param local_offsets Same as histograms from histogram pass
+ * Compute per-element ranks within each digit group.
+ * This ensures stable sorting by assigning each element its position
+ * within elements of the same digit based on input order.
+ *
+ * @param keys Input keys
  * @param num_rows Number of elements
+ * @param ranks Output: rank of each element within its digit group
  * @param shift Bit shift for current pass
+ */
+extern "C" __global__ void compute_ranks(
+    const uint32_t* __restrict__ keys,
+    uint32_t num_rows,
+    uint32_t* __restrict__ ranks,
+    uint32_t shift
+) {
+    __shared__ uint32_t block_digits[BLOCK_SIZE];
+
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    uint32_t block_start = blockIdx.x * blockDim.x;
+    uint32_t block_end = min(block_start + BLOCK_SIZE, num_rows);
+    uint32_t block_count = block_end - block_start;
+
+    // Load this thread's digit into shared memory
+    uint32_t my_digit = 0;
+    if (gid < num_rows) {
+        my_digit = (keys[gid] >> shift) & (RADIX_SIZE - 1);
+        block_digits[threadIdx.x] = my_digit;
+    }
+    __syncthreads();
+
+    // Compute rank for each element by counting prior elements with same digit
+    // Process elements in order to ensure stability
+    if (threadIdx.x < block_count) {
+        uint32_t my_rank = 0;
+        uint32_t target_digit = block_digits[threadIdx.x];
+
+        // Count elements before this one with the same digit
+        for (uint32_t i = 0; i < threadIdx.x; i++) {
+            if (block_digits[i] == target_digit) {
+                my_rank++;
+            }
+        }
+
+        ranks[gid] = my_rank;
+    }
+}
+
+/**
+ * Stable scatter using pre-computed ranks.
+ * Each element's output position = global_prefix[digit] + block_offset[digit] + rank
+ */
+extern "C" __global__ void radix_scatter_stable(
+    const uint32_t* __restrict__ keys_in,
+    const uint32_t* __restrict__ indices_in,
+    const uint32_t* __restrict__ ranks,
+    uint32_t* __restrict__ keys_out,
+    uint32_t* __restrict__ indices_out,
+    const uint32_t* __restrict__ prefix_sums,     // [RADIX_SIZE] global prefix sums
+    const uint32_t* __restrict__ block_offsets,   // [grid_size * RADIX_SIZE]
+    uint32_t num_rows,
+    uint32_t shift
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= num_rows) return;
+
+    uint32_t key = keys_in[gid];
+    uint32_t digit = (key >> shift) & (RADIX_SIZE - 1);
+    uint32_t rank = ranks[gid];
+
+    // Compute block offset for this digit (sum of histograms from previous blocks)
+    uint32_t block_offset = 0;
+    for (uint32_t b = 0; b < blockIdx.x; b++) {
+        block_offset += block_offsets[b * RADIX_SIZE + digit];
+    }
+
+    // Final position = global prefix + block offset + rank within block
+    uint32_t pos = prefix_sums[digit] + block_offset + rank;
+
+    keys_out[pos] = key;
+    indices_out[pos] = indices_in[gid];
+}
+
+/**
+ * Legacy scatter using atomics (unstable, kept for reference).
+ * WARNING: This kernel is NOT stable and should not be used.
  */
 extern "C" __global__ void radix_scatter(
     const uint32_t* __restrict__ keys_in,
     const uint32_t* __restrict__ indices_in,
     uint32_t* __restrict__ keys_out,
     uint32_t* __restrict__ indices_out,
-    const uint32_t* __restrict__ prefix_sums,  // [RADIX_SIZE] global prefix sums
-    uint32_t* __restrict__ local_offsets,      // [grid_size * RADIX_SIZE] for local counting
+    const uint32_t* __restrict__ prefix_sums,
+    uint32_t* __restrict__ local_offsets,
     uint32_t num_rows,
     uint32_t shift
 ) {
     __shared__ uint32_t local_prefix[RADIX_SIZE];
 
-    // Load global prefix sums
     if (threadIdx.x < RADIX_SIZE) {
         local_prefix[threadIdx.x] = prefix_sums[threadIdx.x];
-        // Add local offset from previous blocks
         for (uint32_t b = 0; b < blockIdx.x; b++) {
             local_prefix[threadIdx.x] += local_offsets[b * RADIX_SIZE + threadIdx.x];
         }

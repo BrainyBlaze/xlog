@@ -77,6 +77,8 @@ pub mod scan_kernels {
 pub mod sort_kernels {
     pub const RADIX_HISTOGRAM: &str = "radix_histogram";
     pub const RADIX_SCATTER: &str = "radix_scatter";
+    pub const COMPUTE_RANKS: &str = "compute_ranks";
+    pub const RADIX_SCATTER_STABLE: &str = "radix_scatter_stable";
     pub const INIT_INDICES: &str = "init_indices";
     pub const APPLY_PERMUTATION_U32: &str = "apply_permutation_u32";
     pub const APPLY_PERMUTATION_BYTES: &str = "apply_permutation_bytes";
@@ -263,6 +265,8 @@ impl CudaKernelProvider {
                 &[
                     sort_kernels::RADIX_HISTOGRAM,
                     sort_kernels::RADIX_SCATTER,
+                    sort_kernels::COMPUTE_RANKS,
+                    sort_kernels::RADIX_SCATTER_STABLE,
                     sort_kernels::INIT_INDICES,
                     sort_kernels::APPLY_PERMUTATION_U32,
                     sort_kernels::APPLY_PERMUTATION_BYTES,
@@ -2605,9 +2609,12 @@ impl CudaKernelProvider {
         let histogram_fn = device
             .get_func(SORT_MODULE, sort_kernels::RADIX_HISTOGRAM)
             .ok_or_else(|| XlogError::Kernel("radix_histogram kernel not found".to_string()))?;
-        let scatter_fn = device
-            .get_func(SORT_MODULE, sort_kernels::RADIX_SCATTER)
-            .ok_or_else(|| XlogError::Kernel("radix_scatter kernel not found".to_string()))?;
+        let compute_ranks_fn = device
+            .get_func(SORT_MODULE, sort_kernels::COMPUTE_RANKS)
+            .ok_or_else(|| XlogError::Kernel("compute_ranks kernel not found".to_string()))?;
+        let scatter_stable_fn = device
+            .get_func(SORT_MODULE, sort_kernels::RADIX_SCATTER_STABLE)
+            .ok_or_else(|| XlogError::Kernel("radix_scatter_stable kernel not found".to_string()))?;
         let init_indices_fn = device
             .get_func(SORT_MODULE, sort_kernels::INIT_INDICES)
             .ok_or_else(|| XlogError::Kernel("init_indices kernel not found".to_string()))?;
@@ -2653,6 +2660,9 @@ impl CudaKernelProvider {
 
         // Allocate prefix sums buffer once (reused each pass)
         let mut prefix_sums = self.memory.alloc::<u32>(Self::RADIX_SIZE as usize)?;
+
+        // Allocate ranks buffer for stable scatter (reused each pass)
+        let ranks = self.memory.alloc::<u32>(n as usize)?;
 
         // Perform 8 radix sort passes (4 bits per pass, 32 bits total)
         let mut use_a = true;
@@ -2706,15 +2716,22 @@ impl CudaKernelProvider {
                 .htod_sync_copy_into(&prefix_host, &mut prefix_sums)
                 .map_err(|e| XlogError::Kernel(format!("Failed to upload prefix sums: {}", e)))?;
 
-            // Step 3: Scatter keys to sorted positions
-            // SAFETY: Kernel signature matches: radix_scatter(keys_in, indices_in, keys_out, indices_out, prefix_sums, local_offsets, num_rows, shift)
+            // Step 3: Compute per-element ranks within digit groups (ensures stability)
+            // SAFETY: Kernel signature matches: compute_ranks(keys, num_rows, ranks, shift)
             unsafe {
-                scatter_fn.clone().launch(
+                compute_ranks_fn.clone().launch(launch_config, (keys_in, n, &ranks, shift))
+            }
+            .map_err(|e| XlogError::Kernel(format!("compute_ranks failed: {}", e)))?;
+
+            // Step 4: Scatter keys to sorted positions using pre-computed ranks
+            // SAFETY: Kernel signature matches: radix_scatter_stable(keys_in, indices_in, ranks, keys_out, indices_out, prefix_sums, block_offsets, num_rows, shift)
+            unsafe {
+                scatter_stable_fn.clone().launch(
                     launch_config,
-                    (keys_in, indices_in, keys_out, indices_out, &prefix_sums, &histograms, n, shift),
+                    (keys_in, indices_in, &ranks, keys_out, indices_out, &prefix_sums, &histograms, n, shift),
                 )
             }
-            .map_err(|e| XlogError::Kernel(format!("radix_scatter failed: {}", e)))?;
+            .map_err(|e| XlogError::Kernel(format!("radix_scatter_stable failed: {}", e)))?;
 
             use_a = !use_a;
         }
