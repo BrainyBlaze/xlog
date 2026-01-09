@@ -152,7 +152,6 @@ fn setup_executor_with_facts(
 ///
 /// Current status: Requires join execution improvements (buffer size handling)
 #[test]
-#[ignore = "requires join execution improvements - see test_tc_compiles for compilation verification"]
 fn test_transitive_closure() {
     let (mut executor, provider) = match create_test_executor() {
         Some(e) => e,
@@ -220,7 +219,6 @@ fn test_transitive_closure() {
 ///
 /// Current status: Requires join execution improvements (buffer size handling)
 #[test]
-#[ignore = "requires join execution improvements - see test_negation_compiles for compilation verification"]
 fn test_stratified_negation() {
     let (mut executor, provider) = match create_test_executor() {
         Some(e) => e,
@@ -396,7 +394,6 @@ fn test_simple_scan() {
 ///
 /// Current status: Requires join execution improvements (buffer size handling)
 #[test]
-#[ignore = "requires join execution improvements - see test_simple_scan for single-atom execution"]
 fn test_simple_join() {
     let (mut executor, provider) = match create_test_executor() {
         Some(e) => e,

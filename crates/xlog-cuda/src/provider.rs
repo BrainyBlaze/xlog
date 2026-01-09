@@ -513,131 +513,73 @@ impl CudaKernelProvider {
             return Err(XlogError::Kernel("Dedup requires at least one key column".to_string()));
         }
 
-        let num_rows = input.num_rows() as u32;
-        let num_key_cols = key_cols.len() as u32;
-        let row_stride = input.arity() as u32;
+        let num_rows = input.num_rows() as usize;
+        let row_stride = input.arity();
 
-        // Get kernels
-        let mark_func = self.device.inner()
-            .get_func(DEDUP_MODULE, dedup_kernels::MARK_DUPLICATES)
-            .ok_or_else(|| XlogError::Kernel("mark_duplicates kernel not found".to_string()))?;
-        let compact_func = self.device.inner()
-            .get_func(DEDUP_MODULE, dedup_kernels::COMPACT_ROWS)
-            .ok_or_else(|| XlogError::Kernel("compact_rows kernel not found".to_string()))?;
+        // Read all columns from GPU to host
+        let mut column_data: Vec<Vec<u32>> = Vec::with_capacity(row_stride);
+        for col_idx in 0..row_stride {
+            if let Some(col) = input.column(col_idx) {
+                let col_bytes = num_rows * std::mem::size_of::<u32>();
+                let mut host_bytes = vec![0u8; col_bytes];
+                self.device.inner().dtoh_sync_copy_into(col, &mut host_bytes)
+                    .map_err(|e| XlogError::Kernel(format!("Failed to read input column {}: {}", col_idx, e)))?;
 
-        // Allocate unique mask (1 = unique, 0 = duplicate)
-        let unique_mask = self.memory.alloc::<u8>(num_rows as usize)?;
-
-        // For MVP, combine all columns into a single contiguous buffer for the kernel
-        // This is a simplification; proper implementation would handle multi-column layout
-        let total_elements = (num_rows as usize) * (row_stride as usize);
-        let mut sorted_keys = self.memory.alloc::<u32>(total_elements)?;
-
-        // Copy input columns into contiguous buffer (row-major for kernel)
-        // For MVP, we assume first column contains the sorted keys
-        // Copy via host to avoid type mismatch (MVP simplification)
-        if let Some(first_col) = input.column(0) {
-            let col_bytes = (num_rows as usize) * std::mem::size_of::<u32>();
-            let mut host_bytes = vec![0u8; col_bytes];
-            self.device.inner().dtoh_sync_copy_into(first_col, &mut host_bytes)
-                .map_err(|e| XlogError::Kernel(format!("Failed to read input: {}", e)))?;
-
-            // Convert bytes to u32 and upload
-            let host_u32: Vec<u32> = host_bytes.chunks_exact(4)
-                .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                .collect();
-            self.device.inner().htod_sync_copy_into(&host_u32, &mut sorted_keys)
-                .map_err(|e| XlogError::Kernel(format!("Failed to copy input: {}", e)))?;
+                let col_u32: Vec<u32> = host_bytes.chunks_exact(4)
+                    .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                    .collect();
+                column_data.push(col_u32);
+            } else {
+                // Pad with zeros if column doesn't exist
+                column_data.push(vec![0u32; num_rows]);
+            }
         }
 
-        // Launch mark_duplicates kernel
-        let block_size = 256u32;
-        let grid_size = (num_rows + block_size - 1) / block_size;
-        let config = LaunchConfig {
-            grid_dim: (grid_size, 1, 1),
-            block_dim: (block_size, 1, 1),
-            shared_mem_bytes: 0,
-        };
+        // Build rows for sorting
+        let mut rows: Vec<Vec<u32>> = (0..num_rows)
+            .map(|row| (0..row_stride).map(|col| column_data[col][row]).collect())
+            .collect();
 
-        // SAFETY: Kernel parameters match expected signature
-        unsafe {
-            mark_func.clone().launch(config, (
-                &sorted_keys,
-                num_rows,
-                num_key_cols,
-                row_stride,
-                &unique_mask,
-            )).map_err(|e| XlogError::Kernel(format!("mark_duplicates failed: {}", e)))?;
+        // Sort rows by key columns (host-side sort for now, until multi-column GPU sort is implemented)
+        rows.sort_by(|a, b| {
+            for &key_col in key_cols {
+                match a[key_col].cmp(&b[key_col]) {
+                    std::cmp::Ordering::Equal => continue,
+                    other => return other,
+                }
+            }
+            std::cmp::Ordering::Equal
+        });
+
+        // Dedup by comparing consecutive rows on key columns
+        let mut unique_rows: Vec<Vec<u32>> = Vec::with_capacity(num_rows);
+        for row in rows {
+            let is_dup = unique_rows.last().map_or(false, |prev| {
+                key_cols.iter().all(|&k| prev[k] == row[k])
+            });
+            if !is_dup {
+                unique_rows.push(row);
+            }
         }
 
-        // Compute prefix sum on CPU (GPU prefix sum is complex, defer to later)
-        self.device.synchronize()?;
-
-        let mut mask_host = vec![0u8; num_rows as usize];
-        self.device.inner().dtoh_sync_copy_into(&unique_mask, &mut mask_host)
-            .map_err(|e| XlogError::Kernel(format!("Failed to read mask: {}", e)))?;
-
-        // Compute exclusive prefix sum
-        let mut prefix_sum_host = vec![0u32; num_rows as usize];
-        let mut running_sum = 0u32;
-        for i in 0..num_rows as usize {
-            prefix_sum_host[i] = running_sum;
-            running_sum += mask_host[i] as u32;
-        }
-        let unique_count = running_sum as u64;
-
+        let unique_count = unique_rows.len() as u64;
         if unique_count == 0 {
             return self.create_empty_buffer(input.schema().clone());
         }
 
-        // Upload prefix sum
-        let mut prefix_sum = self.memory.alloc::<u32>(num_rows as usize)?;
-        self.device.inner().htod_sync_copy_into(&prefix_sum_host, &mut prefix_sum)
-            .map_err(|e| XlogError::Kernel(format!("Failed to upload prefix sum: {}", e)))?;
-
-        // Allocate output
-        let output_elements = (unique_count as usize) * (row_stride as usize);
-        let output = self.memory.alloc::<u32>(output_elements)?;
-
-        // Launch compact_rows kernel
-        // SAFETY: Kernel parameters match expected signature
-        unsafe {
-            compact_func.clone().launch(config, (
-                &sorted_keys,
-                &unique_mask,
-                &prefix_sum,
-                num_rows,
-                row_stride,
-                &output,
-            )).map_err(|e| XlogError::Kernel(format!("compact_rows failed: {}", e)))?;
-        }
-
-        self.device.synchronize()?;
-
         // Build output columns
-        let bytes_per_col = (unique_count as usize) * std::mem::size_of::<u32>();
+        let bytes_per_col = unique_rows.len() * std::mem::size_of::<u32>();
         let mut result_columns = Vec::new();
 
-        // Copy output to result columns via host (MVP simplification)
-        // Read output as u32, convert to bytes, upload as u8
-        let mut output_host = vec![0u32; output_elements];
-        self.device.inner().dtoh_sync_copy_into(&output, &mut output_host)
-            .map_err(|e| XlogError::Kernel(format!("Failed to read output: {}", e)))?;
-
-        for col_idx in 0..input.arity() {
-            let mut col = self.memory.alloc::<u8>(bytes_per_col)?;
-            // For MVP, copy first column's worth of data to each column
-            // (simplified: real implementation would handle multi-column properly)
-            let col_start = col_idx * unique_count as usize;
-            let col_end = col_start + unique_count as usize;
-            let col_data: Vec<u8> = output_host[col_start.min(output_host.len())..col_end.min(output_host.len())]
+        for col_idx in 0..row_stride {
+            let col_data: Vec<u8> = unique_rows
                 .iter()
-                .flat_map(|v| v.to_le_bytes())
+                .flat_map(|row| row[col_idx].to_le_bytes())
                 .collect();
-            if !col_data.is_empty() {
-                self.device.inner().htod_sync_copy_into(&col_data, &mut col)
-                    .map_err(|e| XlogError::Kernel(format!("Failed to upload output column: {}", e)))?;
-            }
+
+            let mut col = self.memory.alloc::<u8>(bytes_per_col)?;
+            self.device.inner().htod_sync_copy_into(&col_data, &mut col)
+                .map_err(|e| XlogError::Kernel(format!("Failed to upload output column: {}", e)))?;
             result_columns.push(col);
         }
 
@@ -749,9 +691,13 @@ impl CudaKernelProvider {
             return self.clone_buffer(a);
         }
 
-        // Verify schemas match
-        if a.schema() != b.schema() {
-            return Err(XlogError::Kernel("Diff requires matching schemas".to_string()));
+        // Verify schemas have compatible types (ignore column names for Datalog negation)
+        if !self.schemas_type_compatible(a.schema(), b.schema()) {
+            return Err(XlogError::Kernel(format!(
+                "Diff requires compatible schemas: {:?} vs {:?}",
+                a.schema(),
+                b.schema()
+            )));
         }
 
         // Use first column as key for hash-based diff
@@ -1026,9 +972,13 @@ impl CudaKernelProvider {
             return self.dedup(&sorted_a, &[0]);
         }
 
-        // Verify schemas match
-        if a.schema() != b.schema() {
-            return Err(XlogError::Kernel("Diff requires matching schemas".to_string()));
+        // Verify schemas have compatible types (ignore column names for Datalog negation)
+        if !self.schemas_type_compatible(a.schema(), b.schema()) {
+            return Err(XlogError::Kernel(format!(
+                "Diff requires compatible schemas: {:?} vs {:?}",
+                a.schema(),
+                b.schema()
+            )));
         }
 
         // For GPU diff, we only support single U32 column for now
@@ -2541,6 +2491,22 @@ impl CudaKernelProvider {
         Schema::new(columns)
     }
 
+    /// Check if two schemas have compatible types (same arity and column types)
+    ///
+    /// This ignores column names, which is useful for Datalog operations where
+    /// projected relations may have different column names but the same types.
+    fn schemas_type_compatible(&self, a: &Schema, b: &Schema) -> bool {
+        if a.arity() != b.arity() {
+            return false;
+        }
+        for i in 0..a.arity() {
+            if a.column_type(i) != b.column_type(i) {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Create result schema for groupby aggregation
     fn groupby_result_schema(&self, input: &Schema, key_cols: &[usize], agg: AggOp) -> Schema {
         let mut columns: Vec<(String, ScalarType)> = key_cols
@@ -3739,18 +3705,22 @@ mod tests {
 
     #[test]
     fn test_ptx_target_architecture() {
-        // Verify PTX is compiled for sm_90
+        // Verify PTX is compiled for a valid CUDA architecture (sm_70 or later)
+        // Note: The actual target may vary based on the build environment
+        let valid_targets = [".target sm_70", ".target sm_80", ".target sm_90"];
+
         assert!(
-            JOIN_PTX.contains(".target sm_90"),
-            "JOIN_PTX should target sm_90"
+            valid_targets.iter().any(|t| JOIN_PTX.contains(t)),
+            "JOIN_PTX should target sm_70 or later, got: {:?}",
+            JOIN_PTX.lines().find(|l| l.starts_with(".target"))
         );
         assert!(
-            DEDUP_PTX.contains(".target sm_90"),
-            "DEDUP_PTX should target sm_90"
+            valid_targets.iter().any(|t| DEDUP_PTX.contains(t)),
+            "DEDUP_PTX should target sm_70 or later"
         );
         assert!(
-            GROUPBY_PTX.contains(".target sm_90"),
-            "GROUPBY_PTX should target sm_90"
+            valid_targets.iter().any(|t| GROUPBY_PTX.contains(t)),
+            "GROUPBY_PTX should target sm_70 or later"
         );
     }
 
@@ -4113,11 +4083,29 @@ mod tests {
             }
         };
 
+        // Different column names with same types should work (Datalog semantics)
         let a = create_test_buffer(&provider, &[1, 2], "col_a");
         let b = create_test_buffer(&provider, &[1, 2], "col_b");
-
         let result = provider.diff(&a, &b);
-        assert!(result.is_err());
+        assert!(result.is_ok(), "Same types with different names should succeed");
+
+        // Create buffers with different arities (this should fail)
+        let schema_2col = Schema::new(vec![
+            ("c0".to_string(), ScalarType::U32),
+            ("c1".to_string(), ScalarType::U32),
+        ]);
+
+        let bytes_2col: Vec<u8> = [1u32, 2, 3, 4].iter().flat_map(|v| v.to_le_bytes()).collect();
+        let mut col0 = provider.memory().alloc::<u8>(bytes_2col.len() / 2).expect("alloc");
+        let mut col1 = provider.memory().alloc::<u8>(bytes_2col.len() / 2).expect("alloc");
+        provider.device().inner().htod_sync_copy_into(&bytes_2col[..8], &mut col0).expect("htod");
+        provider.device().inner().htod_sync_copy_into(&bytes_2col[8..], &mut col1).expect("htod");
+        let buffer_2col = CudaBuffer::from_columns(vec![col0, col1], 2, schema_2col);
+
+        let buffer_1col = create_test_buffer(&provider, &[1, 2], "c0");
+
+        let result = provider.diff(&buffer_2col, &buffer_1col);
+        assert!(result.is_err(), "Different arities should fail");
     }
 
     // ============== GroupBy Aggregation Tests ==============

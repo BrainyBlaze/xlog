@@ -143,6 +143,16 @@ impl GpuMemoryManager {
         let allocated = self.allocated.load(Ordering::SeqCst);
         self.budget.device_bytes.saturating_sub(allocated)
     }
+
+    /// Reset allocation tracking
+    ///
+    /// This should be called when GPU memory has been freed but the tracker
+    /// hasn't been updated (e.g., when CudaSlice instances are dropped without
+    /// calling record_free). This is a temporary workaround until proper
+    /// RAII-based tracking is implemented.
+    pub fn reset_tracking(&self) {
+        self.allocated.store(0, Ordering::SeqCst);
+    }
 }
 
 /// Column-oriented GPU buffer
