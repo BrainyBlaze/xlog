@@ -1755,8 +1755,14 @@ impl CudaKernelProvider {
                 AggOp::Max => format!("max_{}", i),
                 AggOp::LogSumExp => format!("logsumexp_{}", i),
             };
-            // All aggregations return U32 in our MVP (even Sum is truncated)
-            columns.push((agg_name, ScalarType::U32));
+            // Return correct types for each aggregation
+            let agg_type = match agg_op {
+                AggOp::Count => ScalarType::U32,
+                AggOp::Sum => ScalarType::U64,  // Sum uses u64 to prevent overflow
+                AggOp::Min | AggOp::Max => ScalarType::U32,
+                AggOp::LogSumExp => ScalarType::F64,
+            };
+            columns.push((agg_name, agg_type));
         }
 
         Schema::new(columns)
@@ -4308,5 +4314,31 @@ mod tests {
         let min_schema = provider.groupby_result_schema(&input, &[0], AggOp::Min);
         assert_eq!(min_schema.arity(), 2);
         assert_eq!(min_schema.column_type(1), Some(ScalarType::U32));
+    }
+
+    #[test]
+    fn test_groupby_multi_agg_sum_returns_u64_schema() {
+        let provider = match create_test_provider() {
+            Some(p) => p,
+            None => {
+                eprintln!("Skipping test: no CUDA device");
+                return;
+            }
+        };
+
+        let schema = Schema::new(vec![
+            ("key".to_string(), ScalarType::U32),
+            ("val".to_string(), ScalarType::U32),
+        ]);
+
+        let result_schema = provider.groupby_multi_agg_result_schema(
+            &schema,
+            &[0],
+            &[(1, AggOp::Sum)],
+        );
+
+        // Sum should return U64 to prevent overflow
+        assert_eq!(result_schema.column_type(1), Some(ScalarType::U64),
+            "Sum aggregation should return U64 type, not U32");
     }
 }
