@@ -388,3 +388,157 @@ fn test_diff_gpu_with_duplicates() {
 
     assert_eq!(result_data, vec![1, 3]);
 }
+
+// ============== U64 Union Tests ==============
+
+#[test]
+fn test_union_u64() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    let schema = Schema::new(vec![("val".to_string(), ScalarType::U64)]);
+
+    let a_vals: Vec<u64> = vec![1, 2, 3];
+    let b_vals: Vec<u64> = vec![2, 3, 4];
+
+    let a_buf = provider.create_buffer_from_u64_slice(&a_vals, schema.clone()).unwrap();
+    let b_buf = provider.create_buffer_from_u64_slice(&b_vals, schema).unwrap();
+
+    let result = provider.union_gpu(&a_buf, &b_buf).unwrap();
+    assert_eq!(result.num_rows(), 4); // 1, 2, 3, 4
+
+    let result_data = provider.download_column_u64(&result, 0).unwrap();
+    assert_eq!(result_data, vec![1, 2, 3, 4]);
+}
+
+#[test]
+fn test_union_u64_with_duplicates() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    let schema = Schema::new(vec![("val".to_string(), ScalarType::U64)]);
+
+    // Input with duplicates
+    let a_vals: Vec<u64> = vec![1, 1, 2];
+    let b_vals: Vec<u64> = vec![2, 3, 3];
+
+    let a_buf = provider.create_buffer_from_u64_slice(&a_vals, schema.clone()).unwrap();
+    let b_buf = provider.create_buffer_from_u64_slice(&b_vals, schema).unwrap();
+
+    let result = provider.union_gpu(&a_buf, &b_buf).unwrap();
+    assert_eq!(result.num_rows(), 3); // 1, 2, 3
+
+    let result_data = provider.download_column_u64(&result, 0).unwrap();
+    assert_eq!(result_data, vec![1, 2, 3]);
+}
+
+#[test]
+fn test_union_u64_empty_a() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    let schema = Schema::new(vec![("val".to_string(), ScalarType::U64)]);
+
+    let b_vals: Vec<u64> = vec![1, 2, 3];
+
+    let a_buf = provider.create_empty_buffer(schema.clone()).unwrap();
+    let b_buf = provider.create_buffer_from_u64_slice(&b_vals, schema).unwrap();
+
+    let result = provider.union_gpu(&a_buf, &b_buf).unwrap();
+    assert_eq!(result.num_rows(), 3);
+
+    let result_data = provider.download_column_u64(&result, 0).unwrap();
+    assert_eq!(result_data, vec![1, 2, 3]);
+}
+
+// ============== U64 Diff Tests ==============
+
+#[test]
+fn test_diff_u64() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    let schema = Schema::new(vec![("val".to_string(), ScalarType::U64)]);
+
+    let a_vals: Vec<u64> = vec![1, 2, 3, 4];
+    let b_vals: Vec<u64> = vec![2, 4];
+
+    let a_buf = provider.create_buffer_from_u64_slice(&a_vals, schema.clone()).unwrap();
+    let b_buf = provider.create_buffer_from_u64_slice(&b_vals, schema).unwrap();
+
+    let result = provider.diff_gpu(&a_buf, &b_buf).unwrap();
+    assert_eq!(result.num_rows(), 2); // 1, 3
+
+    let result_data = provider.download_column_u64(&result, 0).unwrap();
+    assert_eq!(result_data, vec![1, 3]);
+}
+
+#[test]
+fn test_diff_u64_no_overlap() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    let schema = Schema::new(vec![("val".to_string(), ScalarType::U64)]);
+
+    let a_vals: Vec<u64> = vec![1, 2, 3];
+    let b_vals: Vec<u64> = vec![4, 5, 6];
+
+    let a_buf = provider.create_buffer_from_u64_slice(&a_vals, schema.clone()).unwrap();
+    let b_buf = provider.create_buffer_from_u64_slice(&b_vals, schema).unwrap();
+
+    let result = provider.diff_gpu(&a_buf, &b_buf).unwrap();
+    assert_eq!(result.num_rows(), 3); // All remain
+
+    let result_data = provider.download_column_u64(&result, 0).unwrap();
+    assert_eq!(result_data, vec![1, 2, 3]);
+}
+
+#[test]
+fn test_diff_u64_complete_overlap() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    let schema = Schema::new(vec![("val".to_string(), ScalarType::U64)]);
+
+    let a_vals: Vec<u64> = vec![1, 2, 3];
+    let b_vals: Vec<u64> = vec![1, 2, 3];
+
+    let a_buf = provider.create_buffer_from_u64_slice(&a_vals, schema.clone()).unwrap();
+    let b_buf = provider.create_buffer_from_u64_slice(&b_vals, schema).unwrap();
+
+    let result = provider.diff_gpu(&a_buf, &b_buf).unwrap();
+    assert_eq!(result.num_rows(), 0); // All removed
+}
+
+#[test]
+fn test_diff_u64_empty_b() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    let schema = Schema::new(vec![("val".to_string(), ScalarType::U64)]);
+
+    let a_vals: Vec<u64> = vec![1, 2, 3];
+
+    let a_buf = provider.create_buffer_from_u64_slice(&a_vals, schema.clone()).unwrap();
+    let b_buf = provider.create_empty_buffer(schema).unwrap();
+
+    let result = provider.diff_gpu(&a_buf, &b_buf).unwrap();
+    assert_eq!(result.num_rows(), 3); // All remain
+
+    let result_data = provider.download_column_u64(&result, 0).unwrap();
+    assert_eq!(result_data, vec![1, 2, 3]);
+}

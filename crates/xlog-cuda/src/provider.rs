@@ -58,6 +58,9 @@ pub mod groupby_kernels {
     pub const GROUPBY_SUM: &str = "groupby_sum";
     pub const GROUPBY_MIN: &str = "groupby_min";
     pub const GROUPBY_MAX: &str = "groupby_max";
+    pub const GROUPBY_LOGSUMEXP_MAX: &str = "groupby_logsumexp_max";
+    pub const GROUPBY_LOGSUMEXP_SUMEXP: &str = "groupby_logsumexp_sumexp";
+    pub const GROUPBY_LOGSUMEXP_FINAL: &str = "groupby_logsumexp_final";
 }
 
 /// Kernel function names in the scan module
@@ -228,6 +231,9 @@ impl CudaKernelProvider {
                     groupby_kernels::GROUPBY_SUM,
                     groupby_kernels::GROUPBY_MIN,
                     groupby_kernels::GROUPBY_MAX,
+                    groupby_kernels::GROUPBY_LOGSUMEXP_MAX,
+                    groupby_kernels::GROUPBY_LOGSUMEXP_SUMEXP,
+                    groupby_kernels::GROUPBY_LOGSUMEXP_FINAL,
                 ],
             )
             .map_err(|e| XlogError::Kernel(format!("Failed to load groupby PTX: {}", e)))?;
@@ -1023,15 +1029,45 @@ impl CudaKernelProvider {
         if a.is_empty() && b.is_empty() {
             return self.create_empty_buffer(a.schema().clone());
         }
+
+        // For empty input handling, check type to use correct dedup path
+        let col_type = if a.is_empty() {
+            b.schema().column_type(0)
+        } else {
+            a.schema().column_type(0)
+        }.ok_or_else(|| XlogError::Kernel("No columns".to_string()))?;
+
         if a.is_empty() {
-            // Sort and dedup b
-            let sorted_b = self.sort(b, &[0])?;
-            return self.dedup_sorted(&sorted_b, &[0]);
+            // For non-U32 types, use CPU sort path to handle type-specific dedup
+            return match col_type {
+                ScalarType::U32 => self.dedup(b, &[0]),
+                ScalarType::U64 | ScalarType::I64 | ScalarType::F64 => {
+                    // CPU-based dedup for non-U32
+                    let mut data = self.download_buffer_rows(b)?;
+                    let col_size = col_type.size_bytes();
+                    data.sort_by(|x, y| x[..col_size].cmp(&y[..col_size]));
+                    data.dedup_by(|x, y| x[..col_size] == y[..col_size]);
+                    self.upload_buffer_rows(&data, b.schema().clone())
+                }
+                _ => Err(XlogError::Kernel(format!(
+                    "Union not supported for type {:?}", col_type
+                ))),
+            };
         }
         if b.is_empty() {
-            // Sort and dedup a
-            let sorted_a = self.sort(a, &[0])?;
-            return self.dedup_sorted(&sorted_a, &[0]);
+            return match col_type {
+                ScalarType::U32 => self.dedup(a, &[0]),
+                ScalarType::U64 | ScalarType::I64 | ScalarType::F64 => {
+                    let mut data = self.download_buffer_rows(a)?;
+                    let col_size = col_type.size_bytes();
+                    data.sort_by(|x, y| x[..col_size].cmp(&y[..col_size]));
+                    data.dedup_by(|x, y| x[..col_size] == y[..col_size]);
+                    self.upload_buffer_rows(&data, a.schema().clone())
+                }
+                _ => Err(XlogError::Kernel(format!(
+                    "Union not supported for type {:?}", col_type
+                ))),
+            };
         }
 
         // Verify schemas match
@@ -1039,7 +1075,21 @@ impl CudaKernelProvider {
             return Err(XlogError::Kernel("Union requires matching schemas".to_string()));
         }
 
-        // For GPU union, we only support single U32 column for now
+        match col_type {
+            ScalarType::U32 => self.union_gpu_u32(a, b),
+            ScalarType::U64 | ScalarType::I64 | ScalarType::F64 => {
+                // For non-U32 types, use CPU-based concat + sort + dedup
+                self.union_cpu_sort(a, b)
+            }
+            _ => Err(XlogError::Kernel(format!(
+                "Union not supported for type {:?}", col_type
+            ))),
+        }
+    }
+
+    /// U32-optimized union using GPU sort
+    fn union_gpu_u32(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
+        // For GPU union, we only support single U32 column
         if a.arity() != 1 {
             return Err(XlogError::Kernel(
                 "GPU union currently only supports single-column U32 buffers".to_string(),
@@ -1118,6 +1168,87 @@ impl CudaKernelProvider {
         self.dedup_sorted(&sorted, &[0])
     }
 
+    /// CPU-sort based union for non-U32 types
+    fn union_cpu_sort(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
+        // Download both buffers
+        let mut a_data = self.download_buffer_rows(a)?;
+        let b_data = self.download_buffer_rows(b)?;
+
+        // Concatenate
+        a_data.extend(b_data);
+
+        // Sort by first column bytes
+        let col_size = a.schema().column_type(0).map(|t| t.size_bytes()).unwrap_or(4);
+        a_data.sort_by(|x, y| x[..col_size].cmp(&y[..col_size]));
+
+        // Dedup consecutive equal rows
+        a_data.dedup_by(|x, y| x[..col_size] == y[..col_size]);
+
+        // Upload result
+        self.upload_buffer_rows(&a_data, a.schema().clone())
+    }
+
+    /// Download buffer as row-major byte arrays
+    fn download_buffer_rows(&self, buffer: &CudaBuffer) -> Result<Vec<Vec<u8>>> {
+        let num_rows = buffer.num_rows() as usize;
+        let row_size: usize = buffer.schema().columns.iter()
+            .map(|(_, t)| t.size_bytes())
+            .sum();
+
+        // Download all columns
+        let mut col_data: Vec<Vec<u8>> = Vec::new();
+        for col_idx in 0..buffer.arity() {
+            let col = buffer.column(col_idx)
+                .ok_or_else(|| XlogError::Kernel("Column not found".to_string()))?;
+            let mut data = vec![0u8; col.len()];
+            self.device.inner().dtoh_sync_copy_into(col, &mut data)
+                .map_err(|e| XlogError::Kernel(format!("Download failed: {}", e)))?;
+            col_data.push(data);
+        }
+
+        // Convert to row-major
+        let mut rows = Vec::with_capacity(num_rows);
+        for row_idx in 0..num_rows {
+            let mut row = Vec::with_capacity(row_size);
+            for (col_idx, col) in col_data.iter().enumerate() {
+                let col_size = buffer.schema().column_type(col_idx)
+                    .map(|t| t.size_bytes()).unwrap_or(4);
+                let start = row_idx * col_size;
+                row.extend_from_slice(&col[start..start + col_size]);
+            }
+            rows.push(row);
+        }
+
+        Ok(rows)
+    }
+
+    /// Upload row-major byte arrays as buffer
+    fn upload_buffer_rows(&self, rows: &[Vec<u8>], schema: Schema) -> Result<CudaBuffer> {
+        if rows.is_empty() {
+            return self.create_empty_buffer(schema);
+        }
+
+        let num_rows = rows.len();
+        let mut columns = Vec::new();
+        let mut offset = 0;
+
+        for (_, col_type) in &schema.columns {
+            let col_size = col_type.size_bytes();
+            let mut col_bytes = Vec::with_capacity(num_rows * col_size);
+
+            for row in rows {
+                col_bytes.extend_from_slice(&row[offset..offset + col_size]);
+            }
+
+            let d_col = self.device.inner().htod_sync_copy(&col_bytes)
+                .map_err(|e| XlogError::Kernel(format!("Upload failed: {}", e)))?;
+            columns.push(d_col);
+            offset += col_size;
+        }
+
+        Ok(CudaBuffer::from_columns(columns, num_rows as u64, schema))
+    }
+
     /// GPU-native set difference (no host roundtrip)
     ///
     /// Computes a - b (elements in a but not in b) entirely on GPU using:
@@ -1140,10 +1271,25 @@ impl CudaKernelProvider {
         if a.is_empty() {
             return self.create_empty_buffer(a.schema().clone());
         }
+
+        let col_type = a.schema().column_type(0)
+            .ok_or_else(|| XlogError::Kernel("No columns".to_string()))?;
+
         if b.is_empty() {
-            // Sort and dedup a, return it
-            let sorted_a = self.sort(a, &[0])?;
-            return self.dedup_sorted(&sorted_a, &[0]);
+            // For non-U32 types, use CPU sort path to handle type-specific dedup
+            return match col_type {
+                ScalarType::U32 => self.dedup(a, &[0]),
+                ScalarType::U64 | ScalarType::I64 | ScalarType::F64 => {
+                    let mut data = self.download_buffer_rows(a)?;
+                    let col_size = col_type.size_bytes();
+                    data.sort_by(|x, y| x[..col_size].cmp(&y[..col_size]));
+                    data.dedup_by(|x, y| x[..col_size] == y[..col_size]);
+                    self.upload_buffer_rows(&data, a.schema().clone())
+                }
+                _ => Err(XlogError::Kernel(format!(
+                    "Diff not supported for type {:?}", col_type
+                ))),
+            };
         }
 
         // Verify schemas have compatible types (ignore column names for Datalog negation)
@@ -1155,7 +1301,20 @@ impl CudaKernelProvider {
             )));
         }
 
-        // For GPU diff, we only support single U32 column for now
+        match col_type {
+            ScalarType::U32 => self.diff_gpu_u32(a, b),
+            ScalarType::U64 | ScalarType::I64 | ScalarType::F64 => {
+                self.diff_cpu_sort(a, b)
+            }
+            _ => Err(XlogError::Kernel(format!(
+                "Diff not supported for type {:?}", col_type
+            ))),
+        }
+    }
+
+    /// U32-optimized diff using GPU sort
+    fn diff_gpu_u32(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
+        // For GPU diff, we only support single U32 column
         if a.arity() != 1 {
             return Err(XlogError::Kernel(
                 "GPU diff currently only supports single-column U32 buffers".to_string(),
@@ -1226,6 +1385,28 @@ impl CudaKernelProvider {
         self.filter_by_mask(&deduped_a, &mask_host)
     }
 
+    /// CPU-sort based diff for non-U32 types
+    fn diff_cpu_sort(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
+        let mut a_data = self.download_buffer_rows(a)?;
+        let b_data = self.download_buffer_rows(b)?;
+
+        let col_size = a.schema().column_type(0).map(|t| t.size_bytes()).unwrap_or(4);
+
+        // Create a set of b values for efficient lookup
+        let b_set: std::collections::HashSet<Vec<u8>> = b_data.into_iter()
+            .map(|row| row[..col_size].to_vec())
+            .collect();
+
+        // Filter a to only keep rows not in b
+        a_data.retain(|row| !b_set.contains(&row[..col_size].to_vec()));
+
+        // Sort and dedup
+        a_data.sort_by(|x, y| x[..col_size].cmp(&y[..col_size]));
+        a_data.dedup_by(|x, y| x[..col_size] == y[..col_size]);
+
+        self.upload_buffer_rows(&a_data, a.schema().clone())
+    }
+
     /// Perform groupby aggregation
     ///
     /// Assumes input is sorted by key columns (sorting is complex, deferred).
@@ -1265,7 +1446,9 @@ impl CudaKernelProvider {
 
         let num_rows = input.num_rows() as u32;
         let num_key_cols = key_cols.len() as u32;
-        let row_stride = input.arity() as u32;
+        // For column-based storage with single key column, row_stride = 1
+        // since we pass a single contiguous column view
+        let row_stride = 1u32;
 
         // Get boundary detection kernel
         let boundary_func = self.device.inner()
@@ -1447,8 +1630,87 @@ impl CudaKernelProvider {
                 (bytes, ScalarType::U32)
             }
             AggOp::LogSumExp => {
-                // LogSumExp not implemented in kernels yet
-                return Err(XlogError::Kernel("LogSumExp not yet implemented".to_string()));
+                // LogSumExp requires F64 values, use 3-pass algorithm:
+                // 1. Find max per group
+                // 2. Compute sum of exp(x - max) per group
+                // 3. Compute log(sum) + max per group
+
+                // Get values as f64 view
+                let values_f64 = self.column_as_f64_view(values, num_rows as usize)?;
+
+                // Allocate buffers for intermediate results
+                let mut maxs = self.memory.alloc::<f64>(num_groups as usize)?;
+                let mut sumexps = self.memory.alloc::<f64>(num_groups as usize)?;
+                let results = self.memory.alloc::<f64>(num_groups as usize)?;
+
+                // Initialize maxs to -INFINITY
+                self.device.inner().htod_sync_copy_into(
+                    &vec![f64::NEG_INFINITY; num_groups as usize],
+                    &mut maxs
+                ).map_err(|e| XlogError::Kernel(format!("Failed to init maxs: {}", e)))?;
+
+                // Initialize sumexps to 0.0
+                self.device.inner().htod_sync_copy_into(
+                    &vec![0.0f64; num_groups as usize],
+                    &mut sumexps
+                ).map_err(|e| XlogError::Kernel(format!("Failed to init sumexps: {}", e)))?;
+
+                // Pass 1: Find max per group
+                let max_func = self.device.inner()
+                    .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_LOGSUMEXP_MAX)
+                    .ok_or_else(|| XlogError::Kernel("groupby_logsumexp_max kernel not found".to_string()))?;
+
+                // SAFETY: Kernel parameters match expected signature
+                unsafe {
+                    max_func.clone().launch(config, (
+                        &values_f64,
+                        &group_ids,
+                        num_rows,
+                        &maxs,
+                    )).map_err(|e| XlogError::Kernel(format!("groupby_logsumexp_max failed: {}", e)))?;
+                }
+                self.device.synchronize()?;
+
+                // Pass 2: Compute sum of exp(x - max) per group
+                let sumexp_func = self.device.inner()
+                    .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_LOGSUMEXP_SUMEXP)
+                    .ok_or_else(|| XlogError::Kernel("groupby_logsumexp_sumexp kernel not found".to_string()))?;
+
+                // SAFETY: Kernel parameters match expected signature
+                unsafe {
+                    sumexp_func.clone().launch(config, (
+                        &values_f64,
+                        &group_ids,
+                        &maxs,
+                        num_rows,
+                        &sumexps,
+                    )).map_err(|e| XlogError::Kernel(format!("groupby_logsumexp_sumexp failed: {}", e)))?;
+                }
+                self.device.synchronize()?;
+
+                // Pass 3: Compute final result = max + log(sumexp)
+                let final_config = LaunchConfig::for_num_elems(num_groups);
+                let final_func = self.device.inner()
+                    .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_LOGSUMEXP_FINAL)
+                    .ok_or_else(|| XlogError::Kernel("groupby_logsumexp_final kernel not found".to_string()))?;
+
+                // SAFETY: Kernel parameters match expected signature
+                unsafe {
+                    final_func.clone().launch(final_config, (
+                        &maxs,
+                        &sumexps,
+                        num_groups,
+                        &results,
+                    )).map_err(|e| XlogError::Kernel(format!("groupby_logsumexp_final failed: {}", e)))?;
+                }
+                self.device.synchronize()?;
+
+                // Read back as bytes
+                let mut host_output = vec![0.0f64; num_groups as usize];
+                self.device.inner().dtoh_sync_copy_into(&results, &mut host_output)
+                    .map_err(|e| XlogError::Kernel(format!("Failed to read logsumexp output: {}", e)))?;
+                let bytes: Vec<u8> = host_output.iter().flat_map(|v| v.to_le_bytes()).collect();
+                (bytes, ScalarType::F64)
             }
         };
 
@@ -1852,7 +2114,108 @@ impl CudaKernelProvider {
                         .collect::<Vec<u8>>()
                 }
                 AggOp::LogSumExp => {
-                    return Err(XlogError::Kernel("LogSumExp not yet implemented".to_string()));
+                    // LogSumExp requires F64 values, use 3-pass algorithm:
+                    // 1. Find max per group
+                    // 2. Compute sum of exp(x - max) per group
+                    // 3. Compute log(sum) + max per group
+
+                    // Get values as f64 view
+                    let values_f64 = self.column_as_f64_view(values, num_rows as usize)?;
+
+                    // Allocate buffers for intermediate results
+                    let mut maxs = self.memory.alloc::<f64>(num_groups)?;
+                    let mut sumexps = self.memory.alloc::<f64>(num_groups)?;
+                    let results = self.memory.alloc::<f64>(num_groups)?;
+
+                    // Initialize maxs to -INFINITY
+                    self.device
+                        .inner()
+                        .htod_sync_copy_into(&vec![f64::NEG_INFINITY; num_groups], &mut maxs)
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("Failed to init maxs: {}", e))
+                        })?;
+
+                    // Initialize sumexps to 0.0
+                    self.device
+                        .inner()
+                        .htod_sync_copy_into(&vec![0.0f64; num_groups], &mut sumexps)
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("Failed to init sumexps: {}", e))
+                        })?;
+
+                    // Pass 1: Find max per group
+                    let max_func = self
+                        .device
+                        .inner()
+                        .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_LOGSUMEXP_MAX)
+                        .ok_or_else(|| {
+                            XlogError::Kernel("groupby_logsumexp_max kernel not found".to_string())
+                        })?;
+
+                    // SAFETY: Kernel parameters match expected signature
+                    unsafe {
+                        max_func.clone().launch(
+                            config,
+                            (&values_f64, &group_ids, num_rows, &maxs),
+                        )
+                    }
+                    .map_err(|e| XlogError::Kernel(format!("groupby_logsumexp_max failed: {}", e)))?;
+
+                    self.device.synchronize()?;
+
+                    // Pass 2: Compute sum of exp(x - max) per group
+                    let sumexp_func = self
+                        .device
+                        .inner()
+                        .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_LOGSUMEXP_SUMEXP)
+                        .ok_or_else(|| {
+                            XlogError::Kernel("groupby_logsumexp_sumexp kernel not found".to_string())
+                        })?;
+
+                    // SAFETY: Kernel parameters match expected signature
+                    unsafe {
+                        sumexp_func.clone().launch(
+                            config,
+                            (&values_f64, &group_ids, &maxs, num_rows, &sumexps),
+                        )
+                    }
+                    .map_err(|e| XlogError::Kernel(format!("groupby_logsumexp_sumexp failed: {}", e)))?;
+
+                    self.device.synchronize()?;
+
+                    // Pass 3: Compute final result = max + log(sumexp)
+                    let final_config = LaunchConfig::for_num_elems(num_groups as u32);
+                    let final_func = self
+                        .device
+                        .inner()
+                        .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_LOGSUMEXP_FINAL)
+                        .ok_or_else(|| {
+                            XlogError::Kernel("groupby_logsumexp_final kernel not found".to_string())
+                        })?;
+
+                    // SAFETY: Kernel parameters match expected signature
+                    unsafe {
+                        final_func.clone().launch(
+                            final_config,
+                            (&maxs, &sumexps, num_groups as u32, &results),
+                        )
+                    }
+                    .map_err(|e| XlogError::Kernel(format!("groupby_logsumexp_final failed: {}", e)))?;
+
+                    self.device.synchronize()?;
+
+                    // Read back as bytes
+                    let mut host_output = vec![0.0f64; num_groups];
+                    self.device
+                        .inner()
+                        .dtoh_sync_copy_into(&results, &mut host_output)
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("Failed to read logsumexp output: {}", e))
+                        })?;
+                    host_output
+                        .iter()
+                        .flat_map(|v| v.to_le_bytes())
+                        .collect::<Vec<u8>>()
                 }
             };
 
@@ -2767,6 +3130,36 @@ impl CudaKernelProvider {
         ))
     }
 
+    /// Create a CudaBuffer from a u64 slice (single column)
+    ///
+    /// # Arguments
+    /// * `data` - The u64 data slice
+    /// * `schema` - The schema for the buffer
+    ///
+    /// # Returns
+    /// A new CudaBuffer containing the data as a single column
+    ///
+    /// # Errors
+    /// Returns `XlogError::Kernel` if upload fails
+    pub fn create_buffer_from_u64_slice(
+        &self,
+        data: &[u64],
+        schema: Schema,
+    ) -> Result<CudaBuffer> {
+        let bytes: Vec<u8> = data.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let mut col = self.memory.alloc::<u8>(bytes.len())?;
+        self.device
+            .inner()
+            .htod_sync_copy_into(&bytes, &mut col)
+            .map_err(|e| XlogError::Kernel(format!("Failed to upload data: {}", e)))?;
+
+        Ok(CudaBuffer::from_columns(
+            vec![col],
+            data.len() as u64,
+            schema,
+        ))
+    }
+
     /// Download a column from a CudaBuffer as Vec<u32>
     ///
     /// # Arguments
@@ -2834,6 +3227,41 @@ impl CudaKernelProvider {
         Ok(bytes
             .chunks_exact(8)
             .map(|c| u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
+            .collect())
+    }
+
+    /// Download an F64 column from GPU to host memory
+    ///
+    /// # Arguments
+    /// * `buffer` - The CudaBuffer containing the column
+    /// * `col_idx` - The column index to download
+    ///
+    /// # Returns
+    /// A Vec<f64> containing the column data
+    ///
+    /// # Errors
+    /// Returns `XlogError::Kernel` if:
+    /// - Column index is out of bounds
+    /// - Download fails
+    pub fn download_column_f64(&self, buffer: &CudaBuffer, col_idx: usize) -> Result<Vec<f64>> {
+        let col = buffer.column(col_idx).ok_or_else(|| {
+            XlogError::Kernel(format!("Column {} not found", col_idx))
+        })?;
+
+        if buffer.num_rows == 0 {
+            return Ok(vec![]);
+        }
+
+        let num_bytes = (buffer.num_rows as usize) * std::mem::size_of::<f64>();
+        let mut bytes = vec![0u8; num_bytes];
+        self.device
+            .inner()
+            .dtoh_sync_copy_into(col, &mut bytes)
+            .map_err(|e| XlogError::Kernel(format!("Failed to download column: {}", e)))?;
+
+        Ok(bytes
+            .chunks_exact(8)
+            .map(|c| f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
             .collect())
     }
 
@@ -4739,7 +5167,7 @@ mod tests {
     }
 
     #[test]
-    fn test_groupby_logsumexp_not_implemented() {
+    fn test_groupby_logsumexp() {
         let provider = match create_test_provider() {
             Some(p) => p,
             None => {
@@ -4748,10 +5176,58 @@ mod tests {
             }
         };
 
-        let buffer = create_test_buffer(&provider, &[1, 1, 2], "key");
+        // Create buffer with U32 keys and F64 values
+        // Group 0 (key=1): values 1.0, 2.0 -> logsumexp = log(e^1 + e^2) ≈ 2.31326
+        // Group 1 (key=2): values 3.0, 4.0 -> logsumexp = log(e^3 + e^4) ≈ 4.31326
+        let keys: Vec<u32> = vec![1, 1, 2, 2];
+        let values: Vec<f64> = vec![1.0, 2.0, 3.0, 4.0];
 
-        let result = provider.groupby_agg(&buffer, &[0], AggOp::LogSumExp, 0);
-        assert!(result.is_err());
+        let schema = Schema::new(vec![
+            ("key".to_string(), ScalarType::U32),
+            ("value".to_string(), ScalarType::F64),
+        ]);
+
+        // Create key column
+        let key_bytes: Vec<u8> = keys.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let mut key_col = provider.memory().alloc::<u8>(key_bytes.len()).expect("alloc key");
+        provider.device().inner().htod_sync_copy_into(&key_bytes, &mut key_col).expect("upload key");
+
+        // Create value column
+        let val_bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let mut val_col = provider.memory().alloc::<u8>(val_bytes.len()).expect("alloc val");
+        provider.device().inner().htod_sync_copy_into(&val_bytes, &mut val_col).expect("upload val");
+
+        let buffer = CudaBuffer::from_columns(vec![key_col, val_col], 4, schema);
+
+        // Run LogSumExp aggregation grouped by key column (0), aggregating value column (1)
+        let result = provider.groupby_agg(&buffer, &[0], AggOp::LogSumExp, 1);
+        assert!(result.is_ok(), "groupby_agg with LogSumExp should succeed: {:?}", result.err());
+
+        let result = result.unwrap();
+        assert_eq!(result.num_rows(), 2, "Should have 2 groups");
+
+        // Download results
+        let result_values = provider.download_column_f64(&result, 1).expect("download result");
+
+        // Expected values:
+        // logsumexp(1.0, 2.0) = 2.0 + log(exp(1.0-2.0) + exp(2.0-2.0)) = 2.0 + log(e^-1 + 1) ≈ 2.31326
+        // logsumexp(3.0, 4.0) = 4.0 + log(exp(3.0-4.0) + exp(4.0-4.0)) = 4.0 + log(e^-1 + 1) ≈ 4.31326
+        let expected_0 = 2.0_f64 + ((-1.0_f64).exp() + 1.0_f64).ln(); // ≈ 2.31326
+        let expected_1 = 4.0_f64 + ((-1.0_f64).exp() + 1.0_f64).ln(); // ≈ 4.31326
+
+        let tolerance = 1e-5;
+        assert!(
+            (result_values[0] - expected_0).abs() < tolerance,
+            "Group 0 logsumexp mismatch: got {}, expected {}",
+            result_values[0],
+            expected_0
+        );
+        assert!(
+            (result_values[1] - expected_1).abs() < tolerance,
+            "Group 1 logsumexp mismatch: got {}, expected {}",
+            result_values[1],
+            expected_1
+        );
     }
 
     // ============== Schema Helper Tests ==============
