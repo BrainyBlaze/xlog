@@ -2455,6 +2455,41 @@ impl CudaKernelProvider {
             .collect())
     }
 
+    /// Download a column from GPU memory as u64 values
+    ///
+    /// # Arguments
+    /// * `buffer` - The CudaBuffer containing the column
+    /// * `col_idx` - Index of the column to download
+    ///
+    /// # Returns
+    /// A Vec<u64> containing the column data
+    ///
+    /// # Errors
+    /// Returns `XlogError::Kernel` if:
+    /// - Column index is out of bounds
+    /// - Download fails
+    pub fn download_column_u64(&self, buffer: &CudaBuffer, col_idx: usize) -> Result<Vec<u64>> {
+        let col = buffer.column(col_idx).ok_or_else(|| {
+            XlogError::Kernel(format!("Column {} not found", col_idx))
+        })?;
+
+        if buffer.num_rows == 0 {
+            return Ok(vec![]);
+        }
+
+        let num_bytes = (buffer.num_rows as usize) * std::mem::size_of::<u64>();
+        let mut bytes = vec![0u8; num_bytes];
+        self.device
+            .inner()
+            .dtoh_sync_copy_into(col, &mut bytes)
+            .map_err(|e| XlogError::Kernel(format!("Failed to download column: {}", e)))?;
+
+        Ok(bytes
+            .chunks_exact(8)
+            .map(|c| u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
+            .collect())
+    }
+
     // ============== Internal Helper Methods ==============
 
     /// Transmute a CudaSlice<u8> column to a CudaView<u32> for kernel access
