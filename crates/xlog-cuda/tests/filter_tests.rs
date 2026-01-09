@@ -101,20 +101,23 @@ fn test_filter_by_mask() {
 }
 
 #[test]
-fn test_filter_u32_over_limit() {
+fn test_filter_u32_large() {
     let Some(provider) = setup_provider() else {
         eprintln!("Skipping: no CUDA device");
         return;
     };
 
-    // More than 256 rows should error
+    // More than 256 rows now works with multi-block prefix sum
     let col0: Vec<u32> = (0..300).collect();
     let schema = Schema::new(vec![("col0".to_string(), ScalarType::U32)]);
 
     let buffer = provider.create_buffer_from_u32_slice(&col0, schema).unwrap();
     let result = provider.filter_u32_eq(&buffer, 0, 100);
 
-    assert!(result.is_err(), "Should error for > 256 rows");
+    assert!(result.is_ok(), "Filter should work with > 256 rows");
+    let filtered = result.unwrap();
+    let values = provider.download_column_u32(&filtered, 0).unwrap();
+    assert_eq!(values, vec![100u32]);
 }
 
 #[test]

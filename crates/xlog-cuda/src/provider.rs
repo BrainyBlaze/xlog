@@ -64,6 +64,10 @@ pub mod groupby_kernels {
 pub mod scan_kernels {
     pub const EXCLUSIVE_SCAN_MASK: &str = "exclusive_scan_mask";
     pub const COUNT_MASK: &str = "count_mask";
+    // Multi-block scan kernels for large prefix sums
+    pub const MULTIBLOCK_SCAN_PHASE1: &str = "multiblock_scan_phase1";
+    pub const MULTIBLOCK_SCAN_PHASE2: &str = "multiblock_scan_phase2";
+    pub const MULTIBLOCK_SCAN_PHASE3: &str = "multiblock_scan_phase3";
 }
 
 /// Kernel function names in the sort module
@@ -233,6 +237,9 @@ impl CudaKernelProvider {
                 &[
                     scan_kernels::EXCLUSIVE_SCAN_MASK,
                     scan_kernels::COUNT_MASK,
+                    scan_kernels::MULTIBLOCK_SCAN_PHASE1,
+                    scan_kernels::MULTIBLOCK_SCAN_PHASE2,
+                    scan_kernels::MULTIBLOCK_SCAN_PHASE3,
                 ],
             )
             .map_err(|e| XlogError::Kernel(format!("Failed to load scan PTX: {}", e)))?;
@@ -1790,10 +1797,9 @@ impl CudaKernelProvider {
     /// // count = 4
     /// ```
     ///
-    /// # Limitations
-    /// The current implementation uses a single-block scan kernel which only
-    /// works correctly for masks with up to 256 elements. For larger masks,
-    /// a multi-pass algorithm would be needed.
+    /// # Note
+    /// For small inputs (<=256 elements), a CPU scan is used for efficiency.
+    /// For larger inputs, a three-phase multi-block GPU scan is used.
     ///
     /// # Errors
     /// Returns `XlogError::Kernel` if kernel execution fails
@@ -1802,16 +1808,38 @@ impl CudaKernelProvider {
             return Ok((vec![], 0));
         }
 
-        // Check for single-block limitation
-        if mask.len() > 256 {
-            return Err(XlogError::Kernel(format!(
-                "prefix_sum_mask currently limited to 256 elements, got {}",
-                mask.len()
-            )));
+        let n = mask.len();
+
+        // For small inputs, use CPU scan (faster than kernel launch overhead)
+        if n <= 256 {
+            return self.prefix_sum_mask_cpu(mask);
         }
 
+        // For larger inputs, use multi-block GPU scan
+        self.prefix_sum_mask_gpu_multiblock(mask)
+    }
+
+    /// CPU implementation for small prefix sums (avoids kernel launch overhead)
+    fn prefix_sum_mask_cpu(&self, mask: &[u8]) -> Result<(Vec<u32>, u32)> {
+        let mut prefix_sum = Vec::with_capacity(mask.len());
+        let mut sum = 0u32;
+        for &m in mask {
+            prefix_sum.push(sum);
+            sum += m as u32;
+        }
+        Ok((prefix_sum, sum))
+    }
+
+    /// Multi-block GPU implementation for large prefix sums
+    /// Uses three-phase algorithm:
+    /// 1. Each block computes local exclusive scan and outputs block total
+    /// 2. Scan the block totals to get block offsets
+    /// 3. Add block offsets to each element
+    fn prefix_sum_mask_gpu_multiblock(&self, mask: &[u8]) -> Result<(Vec<u32>, u32)> {
         let n = mask.len();
         let device = self.device.inner();
+        let block_size = 256u32;
+        let num_blocks = ((n as u32) + block_size - 1) / block_size;
 
         // Upload mask to GPU
         let d_mask = device
@@ -1822,53 +1850,78 @@ impl CudaKernelProvider {
         let d_prefix_sum = unsafe { device.alloc::<u32>(n) }
             .map_err(|e| XlogError::Kernel(format!("Failed to alloc prefix_sum: {}", e)))?;
 
-        // Allocate count (initialize to 0)
-        let d_count = device
-            .htod_sync_copy(&[0u32])
-            .map_err(|e| XlogError::Kernel(format!("Failed to alloc count: {}", e)))?;
+        // Allocate block sums array
+        let d_block_sums = unsafe { device.alloc::<u32>(num_blocks as usize) }
+            .map_err(|e| XlogError::Kernel(format!("Failed to alloc block_sums: {}", e)))?;
 
-        // Launch exclusive_scan_mask kernel
-        let block_size = 256u32;
-        let grid_size = ((n as u32) + block_size - 1) / block_size;
-
-        let scan_fn = device
-            .get_func(SCAN_MODULE, scan_kernels::EXCLUSIVE_SCAN_MASK)
+        // Phase 1: Block-level exclusive scans + collect block totals
+        let phase1_fn = device
+            .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE1)
             .ok_or_else(|| {
-                XlogError::Kernel("Failed to get exclusive_scan_mask kernel".to_string())
+                XlogError::Kernel("Failed to get multiblock_scan_phase1 kernel".to_string())
             })?;
 
         // SAFETY: Kernel parameters match expected signature:
-        // exclusive_scan_mask(const uint8_t* mask, uint32_t* prefix_sum, uint32_t n)
+        // multiblock_scan_phase1(const uint8_t* mask, uint32_t* prefix_sum, uint32_t* block_sums, uint32_t n)
         unsafe {
-            scan_fn.clone().launch(
+            phase1_fn.clone().launch(
                 LaunchConfig {
-                    grid_dim: (grid_size, 1, 1),
+                    grid_dim: (num_blocks, 1, 1),
                     block_dim: (block_size, 1, 1),
                     shared_mem_bytes: 0,
                 },
-                (&d_mask, &d_prefix_sum, n as u32),
+                (&d_mask, &d_prefix_sum, &d_block_sums, n as u32),
             )
         }
-        .map_err(|e| XlogError::Kernel(format!("Failed to launch exclusive_scan_mask: {}", e)))?;
+        .map_err(|e| XlogError::Kernel(format!("Failed to launch multiblock_scan_phase1: {}", e)))?;
 
-        // Launch count_mask kernel
-        let count_fn = device
-            .get_func(SCAN_MODULE, scan_kernels::COUNT_MASK)
-            .ok_or_else(|| XlogError::Kernel("Failed to get count_mask kernel".to_string()))?;
+        // Phase 2: Scan block sums (only if we have more than 1 block)
+        if num_blocks > 1 {
+            let phase2_fn = device
+                .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE2)
+                .ok_or_else(|| {
+                    XlogError::Kernel("Failed to get multiblock_scan_phase2 kernel".to_string())
+                })?;
 
-        // SAFETY: Kernel parameters match expected signature:
-        // count_mask(const uint8_t* mask, uint32_t n, uint32_t* count)
-        unsafe {
-            count_fn.clone().launch(
-                LaunchConfig {
-                    grid_dim: (grid_size, 1, 1),
-                    block_dim: (block_size, 1, 1),
-                    shared_mem_bytes: 0,
-                },
-                (&d_mask, n as u32, &d_count),
-            )
+            // SAFETY: Kernel parameters match expected signature:
+            // multiblock_scan_phase2(uint32_t* block_sums, uint32_t num_blocks)
+            unsafe {
+                phase2_fn.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (block_size, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (&d_block_sums, num_blocks),
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!("Failed to launch multiblock_scan_phase2: {}", e))
+            })?;
+
+            // Phase 3: Add block offsets
+            let phase3_fn = device
+                .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE3)
+                .ok_or_else(|| {
+                    XlogError::Kernel("Failed to get multiblock_scan_phase3 kernel".to_string())
+                })?;
+
+            // SAFETY: Kernel parameters match expected signature:
+            // multiblock_scan_phase3(uint32_t* prefix_sum, const uint32_t* block_offsets, uint32_t n)
+            unsafe {
+                phase3_fn.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (num_blocks, 1, 1),
+                        block_dim: (block_size, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (&d_prefix_sum, &d_block_sums, n as u32),
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!("Failed to launch multiblock_scan_phase3: {}", e))
+            })?;
         }
-        .map_err(|e| XlogError::Kernel(format!("Failed to launch count_mask: {}", e)))?;
 
         // Synchronize and download results
         self.device.synchronize()?;
@@ -1877,11 +1930,10 @@ impl CudaKernelProvider {
             .dtoh_sync_copy(&d_prefix_sum)
             .map_err(|e| XlogError::Kernel(format!("Failed to download prefix_sum: {}", e)))?;
 
-        let count_vec = device
-            .dtoh_sync_copy(&d_count)
-            .map_err(|e| XlogError::Kernel(format!("Failed to download count: {}", e)))?;
+        // Compute count from the last prefix sum value + last mask value
+        let count = prefix_sum[n - 1] + mask[n - 1] as u32;
 
-        Ok((prefix_sum, count_vec[0]))
+        Ok((prefix_sum, count))
     }
 
     // ============== Sort Methods ==============

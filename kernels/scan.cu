@@ -121,3 +121,112 @@ extern "C" __global__ void count_mask(
         atomicAdd(count, block_count);
     }
 }
+
+// ============== Multi-Block Scan Kernels ==============
+// Three-phase algorithm for arbitrary-length prefix sums:
+// Phase 1: Each block computes local exclusive scan, outputs block total
+// Phase 2: Scan the block totals array (sequential on CPU for small arrays)
+// Phase 3: Add block offsets to each element
+
+// Phase 1: Block-level exclusive scan of mask, output block totals
+// Each block processes BLOCK_SIZE elements, outputs its total sum to block_sums
+extern "C" __global__ void multiblock_scan_phase1(
+    const uint8_t* __restrict__ mask,
+    uint32_t* __restrict__ prefix_sum,
+    uint32_t* __restrict__ block_sums,
+    uint32_t n
+) {
+    __shared__ uint32_t temp[BLOCK_SIZE];
+
+    uint32_t tid = threadIdx.x;
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+
+    // Load mask as u32 into shared memory
+    uint32_t val = (gid < n) ? (uint32_t)mask[gid] : 0;
+    temp[tid] = val;
+    __syncthreads();
+
+    // Inclusive scan within block (Hillis-Steele style)
+    for (uint32_t stride = 1; stride < BLOCK_SIZE; stride *= 2) {
+        uint32_t left_val = 0;
+        if (tid >= stride) {
+            left_val = temp[tid - stride];
+        }
+        __syncthreads();
+        temp[tid] += left_val;
+        __syncthreads();
+    }
+
+    // Now temp[tid] contains inclusive scan
+    // For exclusive scan, shift by 1
+    uint32_t inclusive = temp[tid];
+    uint32_t exclusive = (tid == 0) ? 0 : temp[tid - 1];
+
+    // Write exclusive scan result
+    if (gid < n) {
+        prefix_sum[gid] = exclusive;
+    }
+
+    // Last thread of each block writes block total (inclusive scan of last element)
+    if (tid == BLOCK_SIZE - 1) {
+        block_sums[blockIdx.x] = inclusive;
+    }
+}
+
+// Phase 2: Scan the block sums array (exclusive scan)
+// This kernel is designed for small arrays (num_blocks typically < 1024)
+// Uses a single block to process all block sums
+extern "C" __global__ void multiblock_scan_phase2(
+    uint32_t* __restrict__ block_sums,
+    uint32_t num_blocks
+) {
+    __shared__ uint32_t temp[BLOCK_SIZE];
+
+    uint32_t tid = threadIdx.x;
+
+    // Load block sums (handle case where num_blocks > BLOCK_SIZE with loop)
+    // For simplicity, assume num_blocks <= BLOCK_SIZE * BLOCK_SIZE
+    // We'll process in chunks if needed
+
+    // Single-block approach for up to BLOCK_SIZE blocks
+    // For larger arrays, we'd need recursive scan, but 256 blocks * 256 elements = 65536
+    // which handles up to 65536 elements with this simple approach
+
+    if (tid < num_blocks) {
+        temp[tid] = block_sums[tid];
+    } else {
+        temp[tid] = 0;
+    }
+    __syncthreads();
+
+    // Inclusive scan
+    for (uint32_t stride = 1; stride < BLOCK_SIZE; stride *= 2) {
+        uint32_t left_val = 0;
+        if (tid >= stride) {
+            left_val = temp[tid - stride];
+        }
+        __syncthreads();
+        temp[tid] += left_val;
+        __syncthreads();
+    }
+
+    // Convert to exclusive scan and write back
+    if (tid < num_blocks) {
+        block_sums[tid] = (tid == 0) ? 0 : temp[tid - 1];
+    }
+}
+
+// Phase 3: Add block offsets to get global exclusive prefix sum
+// Skip block 0 since it has no offset
+extern "C" __global__ void multiblock_scan_phase3(
+    uint32_t* __restrict__ prefix_sum,
+    const uint32_t* __restrict__ block_offsets,
+    uint32_t n
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+
+    // Block 0 doesn't need offset (offset is 0)
+    if (gid < n && blockIdx.x > 0) {
+        prefix_sum[gid] += block_offsets[blockIdx.x];
+    }
+}

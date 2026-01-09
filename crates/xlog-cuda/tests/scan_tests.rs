@@ -82,15 +82,21 @@ fn test_prefix_sum_mask_max_size() {
 }
 
 #[test]
-fn test_prefix_sum_mask_over_limit() {
+fn test_prefix_sum_mask_over_256() {
     let Some(provider) = setup_provider() else {
         eprintln!("Skipping: no CUDA device");
         return;
     };
 
-    // Test over the 256-element limit should fail
+    // Test over 256 elements now works with multi-block scan
     let mask = vec![1u8; 257];
     let result = provider.prefix_sum_mask(&mask);
 
-    assert!(result.is_err());
+    assert!(result.is_ok(), "prefix_sum_mask should work with 257 elements");
+    let (prefix_sum, count) = result.unwrap();
+    assert_eq!(count, 257);
+    // Verify exclusive prefix sum: [0, 1, 2, ..., 256]
+    for i in 0..257 {
+        assert_eq!(prefix_sum[i], i as u32);
+    }
 }
