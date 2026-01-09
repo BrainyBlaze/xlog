@@ -315,3 +315,191 @@ fn test_groupby_many_groups() {
     // Each group has count = 1
     assert_eq!(result_counts, vec![1, 1, 1, 1, 1]);
 }
+
+// ============== LogSumExp Edge Case Tests ==============
+//
+// LogSumExp special value behavior:
+// - NaN inputs: If any input is NaN, the result is NaN
+// - +INFINITY: If max value is +INFINITY, result is +INFINITY
+// - -INFINITY: Treated as a very small value, effectively ignored in the sum
+// - Single element: logsumexp(x) = x (since log(exp(x)) = x)
+
+/// Helper to create a buffer with u32 keys and f64 values for logsumexp tests
+fn create_keyed_f64_buffer(
+    provider: &CudaKernelProvider,
+    keys: &[u32],
+    values: &[f64],
+) -> xlog_cuda::CudaBuffer {
+    let schema = Schema::new(vec![
+        ("key".to_string(), ScalarType::U32),
+        ("value".to_string(), ScalarType::F64),
+    ]);
+
+    // Create key column
+    let key_bytes: Vec<u8> = keys.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let mut key_col = provider
+        .memory()
+        .alloc::<u8>(key_bytes.len())
+        .expect("alloc key");
+    provider
+        .device()
+        .inner()
+        .htod_sync_copy_into(&key_bytes, &mut key_col)
+        .expect("upload key");
+
+    // Create value column
+    let val_bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let mut val_col = provider
+        .memory()
+        .alloc::<u8>(val_bytes.len())
+        .expect("alloc val");
+    provider
+        .device()
+        .inner()
+        .htod_sync_copy_into(&val_bytes, &mut val_col)
+        .expect("upload val");
+
+    xlog_cuda::CudaBuffer::from_columns(vec![key_col, val_col], keys.len() as u64, schema)
+}
+
+#[test]
+fn test_groupby_logsumexp_single_element_groups() {
+    // Test that logsumexp(x) = x for single-element groups
+    // This verifies the identity property: log(exp(x)) = x
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    // Each key appears exactly once
+    let keys: Vec<u32> = vec![1, 2, 3, 4, 5];
+    let values: Vec<f64> = vec![0.0, 1.0, -1.0, 10.0, -10.0];
+
+    let buffer = create_keyed_f64_buffer(&provider, &keys, &values);
+
+    let result = provider
+        .groupby_multi_agg(&buffer, &[0], &[(1, AggOp::LogSumExp)])
+        .expect("groupby_multi_agg should succeed");
+
+    assert_eq!(result.num_rows(), 5, "Should have 5 single-element groups");
+
+    let result_values = provider.download_column_f64(&result, 1).expect("download result");
+
+    // For single element groups, logsumexp(x) = x
+    let tolerance = 1e-10;
+    for (i, (&expected, &actual)) in values.iter().zip(result_values.iter()).enumerate() {
+        assert!(
+            (actual - expected).abs() < tolerance,
+            "Group {} (key={}): logsumexp({}) should equal {}, got {}",
+            i,
+            keys[i],
+            expected,
+            expected,
+            actual
+        );
+    }
+}
+
+#[test]
+fn test_groupby_logsumexp_mixed_positive_negative() {
+    // Test logsumexp with mixed positive and negative values
+    // Including large negative values to test for underflow handling
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    // Group 1: mixed values [5.0, -100.0]
+    //   max = 5.0
+    //   sumexp = exp(5-5) + exp(-100-5) = 1 + exp(-105) ≈ 1 (exp(-105) is negligible)
+    //   logsumexp ≈ 5.0 + log(1) = 5.0
+    //
+    // Group 2: similar negative values [-1.0, -2.0, -3.0]
+    //   max = -1.0
+    //   sumexp = exp(-1-(-1)) + exp(-2-(-1)) + exp(-3-(-1))
+    //          = exp(0) + exp(-1) + exp(-2)
+    //          = 1 + 0.3679 + 0.1353 ≈ 1.5032
+    //   logsumexp = -1.0 + log(1.5032) ≈ -0.5924
+    //
+    // Group 3: large negative values [-500.0, -501.0]
+    //   max = -500.0
+    //   sumexp = exp(0) + exp(-1) = 1.3679
+    //   logsumexp = -500.0 + log(1.3679) ≈ -499.687
+    let keys: Vec<u32> = vec![1, 1, 2, 2, 2, 3, 3];
+    let values: Vec<f64> = vec![5.0, -100.0, -1.0, -2.0, -3.0, -500.0, -501.0];
+
+    let buffer = create_keyed_f64_buffer(&provider, &keys, &values);
+
+    let result = provider
+        .groupby_multi_agg(&buffer, &[0], &[(1, AggOp::LogSumExp)])
+        .expect("groupby_multi_agg should succeed");
+
+    assert_eq!(result.num_rows(), 3);
+
+    let result_values = provider.download_column_f64(&result, 1).expect("download result");
+
+    let tolerance = 1e-5;
+
+    // Group 1: logsumexp(5.0, -100.0) ≈ 5.0 (exp(-105) is negligible)
+    let expected_0 = 5.0_f64 + (1.0_f64 + (-105.0_f64).exp()).ln();
+    assert!(
+        (result_values[0] - expected_0).abs() < tolerance,
+        "Group 1: expected {}, got {}",
+        expected_0,
+        result_values[0]
+    );
+
+    // Group 2: logsumexp(-1.0, -2.0, -3.0)
+    let expected_1 = -1.0_f64 + (1.0_f64 + (-1.0_f64).exp() + (-2.0_f64).exp()).ln();
+    assert!(
+        (result_values[1] - expected_1).abs() < tolerance,
+        "Group 2: expected {}, got {}",
+        expected_1,
+        result_values[1]
+    );
+
+    // Group 3: logsumexp(-500.0, -501.0)
+    let expected_2 = -500.0_f64 + (1.0_f64 + (-1.0_f64).exp()).ln();
+    assert!(
+        (result_values[2] - expected_2).abs() < tolerance,
+        "Group 3: expected {}, got {}",
+        expected_2,
+        result_values[2]
+    );
+}
+
+#[test]
+fn test_groupby_logsumexp_infinity() {
+    // Test that +INFINITY is correctly handled in LogSumExp
+    // When a group contains +INFINITY, the result should be +INFINITY
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    // Group 1: contains +INFINITY -> should return +INFINITY
+    // Group 2: normal values -> should return normal result
+    let keys: Vec<u32> = vec![1, 1, 2, 2];
+    let values: Vec<f64> = vec![
+        f64::INFINITY, 1.0,  // group 1: has infinity
+        2.0, 3.0,            // group 2: normal values
+    ];
+
+    let buffer = create_keyed_f64_buffer(&provider, &keys, &values);
+
+    let result = provider
+        .groupby_multi_agg(&buffer, &[0], &[(1, AggOp::LogSumExp)])
+        .expect("groupby_multi_agg should succeed");
+
+    assert_eq!(result.num_rows(), 2);
+
+    let result_values = provider.download_column_f64(&result, 1).expect("download result");
+
+    // Group 1 should be +INFINITY
+    assert!(result_values[0].is_infinite() && result_values[0] > 0.0,
+        "Group with +INFINITY should return +INFINITY, got {}", result_values[0]);
+
+    // Group 2 should be finite (logsumexp(2, 3) ≈ 3.3133)
+    assert!(result_values[1].is_finite(),
+        "Group with normal values should return finite, got {}", result_values[1]);
+}

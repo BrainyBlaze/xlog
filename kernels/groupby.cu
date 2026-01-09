@@ -122,3 +122,76 @@ extern "C" __global__ void extract_group_keys(
         group_keys[group_idx] = keys[gid];
     }
 }
+
+// LogSumExp Pass 1: Find max value per group
+extern "C" __global__ void groupby_logsumexp_max(
+    const double* __restrict__ values,
+    const uint32_t* __restrict__ group_ids,
+    uint32_t num_rows,
+    double* __restrict__ maxs  // Initialize to -INFINITY
+) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= num_rows) return;
+
+    uint32_t group = group_ids[tid];
+    double val = values[tid];
+
+    // Atomic max for doubles using CAS
+    unsigned long long* addr = (unsigned long long*)&maxs[group];
+    unsigned long long old = *addr;
+    unsigned long long assumed;
+    do {
+        assumed = old;
+        double old_val = __longlong_as_double(assumed);
+        if (val <= old_val) break;
+        old = atomicCAS(addr, assumed, __double_as_longlong(val));
+    } while (assumed != old);
+}
+
+// LogSumExp Pass 2: Compute sum of exp(x - max) per group
+extern "C" __global__ void groupby_logsumexp_sumexp(
+    const double* __restrict__ values,
+    const uint32_t* __restrict__ group_ids,
+    const double* __restrict__ maxs,
+    uint32_t num_rows,
+    double* __restrict__ sumexps  // Initialize to 0
+) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= num_rows) return;
+
+    uint32_t group = group_ids[tid];
+    double val = values[tid];
+    double max_val = maxs[group];
+    double exp_val = exp(val - max_val);
+
+    // Atomic add for doubles using CAS
+    unsigned long long* addr = (unsigned long long*)&sumexps[group];
+    unsigned long long old = *addr;
+    unsigned long long assumed;
+    do {
+        assumed = old;
+        double sum = __longlong_as_double(assumed) + exp_val;
+        old = atomicCAS(addr, assumed, __double_as_longlong(sum));
+    } while (assumed != old);
+}
+
+// LogSumExp Pass 3: Compute final result = max + log(sumexp)
+// Special case: If max is +INFINITY, result is +INFINITY regardless of sumexp
+// (since exp(val - inf) would produce NaN for finite or +inf values)
+extern "C" __global__ void groupby_logsumexp_final(
+    const double* __restrict__ maxs,
+    const double* __restrict__ sumexps,
+    uint32_t num_groups,
+    double* __restrict__ results
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= num_groups) return;
+
+    double max_val = maxs[gid];
+    // If max is +INFINITY, result is +INFINITY regardless of sumexp
+    if (isinf(max_val) && max_val > 0) {
+        results[gid] = max_val;
+    } else {
+        results[gid] = max_val + log(sumexps[gid]);
+    }
+}
