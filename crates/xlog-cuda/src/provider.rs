@@ -2437,6 +2437,145 @@ impl CudaKernelProvider {
         self.compact_buffer_by_mask(input, &mask_host, &prefix_sum, count as u64)
     }
 
+    /// Filter buffer where f64 column equals constant
+    ///
+    /// # Arguments
+    /// * `input` - The input buffer to filter
+    /// * `col` - Column index to filter on
+    /// * `value` - Value to compare against
+    ///
+    /// # Returns
+    /// A new buffer containing only rows where `input[col] == value`
+    ///
+    /// # Errors
+    /// Returns `XlogError::Kernel` if kernel execution fails or column type is not F64
+    pub fn filter_f64_eq(&self, input: &CudaBuffer, col: usize, value: f64) -> Result<CudaBuffer> {
+        self.filter_f64(input, col, value, CompareOp::Eq)
+    }
+
+    /// Filter buffer where f64 column is greater than constant
+    ///
+    /// # Arguments
+    /// * `input` - The input buffer to filter
+    /// * `col` - Column index to filter on
+    /// * `value` - Value to compare against
+    ///
+    /// # Returns
+    /// A new buffer containing only rows where `input[col] > value`
+    ///
+    /// # Errors
+    /// Returns `XlogError::Kernel` if kernel execution fails or column type is not F64
+    pub fn filter_f64_gt(&self, input: &CudaBuffer, col: usize, value: f64) -> Result<CudaBuffer> {
+        self.filter_f64(input, col, value, CompareOp::Gt)
+    }
+
+    /// Filter buffer where f64 column is less than constant
+    ///
+    /// # Arguments
+    /// * `input` - The input buffer to filter
+    /// * `col` - Column index to filter on
+    /// * `value` - Value to compare against
+    ///
+    /// # Returns
+    /// A new buffer containing only rows where `input[col] < value`
+    ///
+    /// # Errors
+    /// Returns `XlogError::Kernel` if kernel execution fails or column type is not F64
+    pub fn filter_f64_lt(&self, input: &CudaBuffer, col: usize, value: f64) -> Result<CudaBuffer> {
+        self.filter_f64(input, col, value, CompareOp::Lt)
+    }
+
+    /// Filter f64 column with comparison operator.
+    ///
+    /// # Arguments
+    /// * `input` - Buffer to filter
+    /// * `col` - Column index to compare
+    /// * `value` - Constant to compare against
+    /// * `op` - Comparison operator
+    ///
+    /// # Errors
+    /// Returns error if column index is out of bounds or column type is not F64.
+    pub fn filter_f64(
+        &self,
+        input: &CudaBuffer,
+        col: usize,
+        value: f64,
+        op: CompareOp,
+    ) -> Result<CudaBuffer> {
+        if input.num_rows == 0 {
+            return self.create_empty_buffer(input.schema.clone());
+        }
+
+        let n = input.num_rows as usize;
+        let device = self.device.inner();
+
+        // Validate column index
+        if col >= input.arity() {
+            return Err(XlogError::Kernel(format!(
+                "Column index {} out of bounds (arity {})",
+                col,
+                input.arity()
+            )));
+        }
+
+        // Validate column type is F64
+        if input.schema().column_type(col) != Some(ScalarType::F64) {
+            return Err(XlogError::Kernel(format!(
+                "Column {} is not F64 (expected F64 for filter_f64)",
+                col
+            )));
+        }
+
+        // Get the filter column as f64 view
+        let col_data = input
+            .column(col)
+            .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col)))?;
+        let col_view = self.column_as_f64_view(col_data, n)?;
+
+        // Allocate mask buffer
+        let d_mask = self.memory.alloc::<u8>(n)?;
+
+        // Launch filter_compare_f64 kernel
+        let block_size = 256u32;
+        let grid_size = ((n as u32) + block_size - 1) / block_size;
+        let config = LaunchConfig {
+            grid_dim: (grid_size, 1, 1),
+            block_dim: (block_size, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        let filter_fn = device
+            .get_func(FILTER_MODULE, filter_kernels::FILTER_COMPARE_F64)
+            .ok_or_else(|| XlogError::Kernel("filter_compare_f64 kernel not found".to_string()))?;
+
+        // SAFETY: Kernel parameters match expected signature:
+        // filter_compare_f64(const double* column, double constant, uint32_t num_rows, uint8_t op, uint8_t* mask)
+        unsafe {
+            filter_fn
+                .clone()
+                .launch(config, (&col_view, value, n as u32, op as u8, &d_mask))
+        }
+        .map_err(|e| XlogError::Kernel(format!("filter_compare_f64 failed: {}", e)))?;
+
+        // Synchronize and download mask to compute prefix sum
+        self.device.synchronize()?;
+
+        let mut mask_host = vec![0u8; n];
+        device
+            .dtoh_sync_copy_into(&d_mask, &mut mask_host)
+            .map_err(|e| XlogError::Kernel(format!("Failed to download mask: {}", e)))?;
+
+        // Compute prefix sum and count
+        let (prefix_sum, count) = self.prefix_sum_mask(&mask_host)?;
+
+        if count == 0 {
+            return self.create_empty_buffer(input.schema.clone());
+        }
+
+        // Compact all columns using mask
+        self.compact_buffer_by_mask(input, &mask_host, &prefix_sum, count as u64)
+    }
+
     /// Filter buffer by pre-computed mask.
     ///
     /// # Arguments
@@ -2723,6 +2862,31 @@ impl CudaKernelProvider {
         // SAFETY: We've verified the column has enough bytes
         unsafe { col.transmute(num_elements) }
             .ok_or_else(|| XlogError::Kernel("Failed to transmute column to u32".to_string()))
+    }
+
+    /// Transmute a CudaSlice<u8> column to a CudaView<f64> for kernel access
+    ///
+    /// # Safety
+    /// Caller must ensure:
+    /// - The column contains valid f64 data (8-byte aligned, correct endianness)
+    /// - The column length is a multiple of 8 bytes
+    fn column_as_f64_view<'a>(
+        &self,
+        col: &'a cudarc::driver::CudaSlice<u8>,
+        num_elements: usize,
+    ) -> Result<CudaView<'a, f64>> {
+        let required_bytes = num_elements * std::mem::size_of::<f64>();
+        if col.num_bytes() < required_bytes {
+            return Err(XlogError::Kernel(format!(
+                "Column has {} bytes but {} required for {} f64 elements",
+                col.num_bytes(),
+                required_bytes,
+                num_elements
+            )));
+        }
+        // SAFETY: We've verified the column has enough bytes
+        unsafe { col.transmute(num_elements) }
+            .ok_or_else(|| XlogError::Kernel("Failed to transmute column to f64".to_string()))
     }
 
     /// Create an empty buffer with the given schema (all columns are empty slices)

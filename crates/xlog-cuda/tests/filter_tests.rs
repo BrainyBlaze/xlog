@@ -151,3 +151,145 @@ fn test_filter_u32_all_ops() {
     let result = provider.download_column_u32(&filtered, 0).unwrap();
     assert_eq!(result, vec![1, 2, 4, 5]);
 }
+
+// ============== F64 Filter Tests ==============
+
+/// Helper to create an F64 test buffer from a slice of f64 values
+fn create_f64_buffer(provider: &CudaKernelProvider, values: &[f64], name: &str) -> xlog_cuda::CudaBuffer {
+    let schema = Schema::new(vec![(name.to_string(), ScalarType::F64)]);
+    let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+
+    // Upload to GPU
+    let device = provider.device();
+    let col = device.inner().htod_sync_copy(&bytes).unwrap();
+
+    xlog_cuda::CudaBuffer::from_columns(vec![col], values.len() as u64, schema)
+}
+
+/// Helper to download F64 column from GPU
+fn download_f64_column(provider: &CudaKernelProvider, buffer: &xlog_cuda::CudaBuffer, col_idx: usize) -> Vec<f64> {
+    let col = buffer.column(col_idx).unwrap();
+    if buffer.num_rows() == 0 {
+        return vec![];
+    }
+    let num_bytes = (buffer.num_rows() as usize) * std::mem::size_of::<f64>();
+    let mut bytes = vec![0u8; num_bytes];
+    provider.device().inner().dtoh_sync_copy_into(col, &mut bytes).unwrap();
+
+    bytes.chunks_exact(8)
+        .map(|c| f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
+        .collect()
+}
+
+#[test]
+fn test_filter_f64_eq() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    // Filter col0 == 2.5
+    // col0: [1.0, 2.5, 3.0, 2.5, 4.0] -> [2.5, 2.5]
+    let values: Vec<f64> = vec![1.0, 2.5, 3.0, 2.5, 4.0];
+    let buffer = create_f64_buffer(&provider, &values, "col0");
+
+    let filtered = provider.filter_f64_eq(&buffer, 0, 2.5).unwrap();
+    let result = download_f64_column(&provider, &filtered, 0);
+
+    assert_eq!(result, vec![2.5, 2.5]);
+}
+
+#[test]
+fn test_filter_f64_gt() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    // Filter col0 > 2.0
+    let values: Vec<f64> = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+    let buffer = create_f64_buffer(&provider, &values, "col0");
+
+    let filtered = provider.filter_f64_gt(&buffer, 0, 2.0).unwrap();
+    let result = download_f64_column(&provider, &filtered, 0);
+
+    assert_eq!(result, vec![3.0, 4.0, 5.0]);
+}
+
+#[test]
+fn test_filter_f64_lt() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    // Filter col0 < 3.0
+    let values: Vec<f64> = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+    let buffer = create_f64_buffer(&provider, &values, "col0");
+
+    let filtered = provider.filter_f64_lt(&buffer, 0, 3.0).unwrap();
+    let result = download_f64_column(&provider, &filtered, 0);
+
+    assert_eq!(result, vec![1.0, 2.0]);
+}
+
+#[test]
+fn test_filter_f64_all_ops() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    let values: Vec<f64> = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+    let buffer = create_f64_buffer(&provider, &values, "col0");
+
+    // Test Lt (less than 3.0): [1.0, 2.0]
+    let filtered = provider.filter_f64(&buffer, 0, 3.0, CompareOp::Lt).unwrap();
+    let result = download_f64_column(&provider, &filtered, 0);
+    assert_eq!(result, vec![1.0, 2.0]);
+
+    // Test Le (less than or equal 3.0): [1.0, 2.0, 3.0]
+    let filtered = provider.filter_f64(&buffer, 0, 3.0, CompareOp::Le).unwrap();
+    let result = download_f64_column(&provider, &filtered, 0);
+    assert_eq!(result, vec![1.0, 2.0, 3.0]);
+
+    // Test Ge (greater than or equal 3.0): [3.0, 4.0, 5.0]
+    let filtered = provider.filter_f64(&buffer, 0, 3.0, CompareOp::Ge).unwrap();
+    let result = download_f64_column(&provider, &filtered, 0);
+    assert_eq!(result, vec![3.0, 4.0, 5.0]);
+
+    // Test Ne (not equal 3.0): [1.0, 2.0, 4.0, 5.0]
+    let filtered = provider.filter_f64(&buffer, 0, 3.0, CompareOp::Ne).unwrap();
+    let result = download_f64_column(&provider, &filtered, 0);
+    assert_eq!(result, vec![1.0, 2.0, 4.0, 5.0]);
+}
+
+#[test]
+fn test_filter_f64_no_matches() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    let values: Vec<f64> = vec![1.0, 2.0, 3.0];
+    let buffer = create_f64_buffer(&provider, &values, "col0");
+
+    let filtered = provider.filter_f64_eq(&buffer, 0, 99.0).unwrap();
+    assert_eq!(filtered.num_rows(), 0);
+}
+
+#[test]
+fn test_filter_f64_type_validation() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    // Create a U32 buffer and try to filter with F64 - should fail
+    let col0: Vec<u32> = vec![1, 2, 3];
+    let schema = Schema::new(vec![("col0".to_string(), ScalarType::U32)]);
+    let buffer = provider.create_buffer_from_u32_slice(&col0, schema).unwrap();
+
+    let result = provider.filter_f64(&buffer, 0, 2.0, CompareOp::Eq);
+    assert!(result.is_err(), "Should fail when filtering U32 column with F64 filter");
+}
