@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 use xlog_core::{MemoryBudget, Schema, ScalarType};
-use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager};
 
 fn setup_provider() -> Option<CudaKernelProvider> {
     if cudarc::driver::CudaDevice::count().unwrap_or(0) == 0 {
@@ -541,4 +541,253 @@ fn test_diff_u64_empty_b() {
 
     let result_data = provider.download_column_u64(&result, 0).unwrap();
     assert_eq!(result_data, vec![1, 2, 3]);
+}
+
+// ============== I64 Union Tests ==============
+
+#[test]
+fn test_union_i64() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    let schema = Schema::new(vec![("val".to_string(), ScalarType::I64)]);
+
+    // Include negative values to test proper ordering
+    let a_vals: Vec<i64> = vec![-10, -5, 0, 5];
+    let b_vals: Vec<i64> = vec![-5, 0, 10, 20];
+
+    let a_bytes: Vec<u8> = a_vals.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let b_bytes: Vec<u8> = b_vals.iter().flat_map(|v| v.to_le_bytes()).collect();
+
+    let a = CudaBuffer::from_columns(
+        vec![provider.device().inner().htod_sync_copy(&a_bytes).unwrap()],
+        4,
+        schema.clone(),
+    );
+    let b = CudaBuffer::from_columns(
+        vec![provider.device().inner().htod_sync_copy(&b_bytes).unwrap()],
+        4,
+        schema,
+    );
+
+    let result = provider.union_gpu(&a, &b).unwrap();
+    assert_eq!(result.num_rows(), 6); // -10, -5, 0, 5, 10, 20
+}
+
+#[test]
+fn test_union_i64_with_duplicates() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    let schema = Schema::new(vec![("val".to_string(), ScalarType::I64)]);
+
+    let a_vals: Vec<i64> = vec![-5, -5, 0];
+    let b_vals: Vec<i64> = vec![0, 5, 5];
+
+    let a_bytes: Vec<u8> = a_vals.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let b_bytes: Vec<u8> = b_vals.iter().flat_map(|v| v.to_le_bytes()).collect();
+
+    let a = CudaBuffer::from_columns(
+        vec![provider.device().inner().htod_sync_copy(&a_bytes).unwrap()],
+        3,
+        schema.clone(),
+    );
+    let b = CudaBuffer::from_columns(
+        vec![provider.device().inner().htod_sync_copy(&b_bytes).unwrap()],
+        3,
+        schema,
+    );
+
+    let result = provider.union_gpu(&a, &b).unwrap();
+    assert_eq!(result.num_rows(), 3); // -5, 0, 5
+}
+
+// ============== F64 Union Tests ==============
+
+#[test]
+fn test_union_f64() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    let schema = Schema::new(vec![("val".to_string(), ScalarType::F64)]);
+
+    let a_vals: Vec<f64> = vec![1.5, 2.5, 3.5];
+    let b_vals: Vec<f64> = vec![2.5, 3.5, 4.5];
+
+    let a_bytes: Vec<u8> = a_vals.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let b_bytes: Vec<u8> = b_vals.iter().flat_map(|v| v.to_le_bytes()).collect();
+
+    let a = CudaBuffer::from_columns(
+        vec![provider.device().inner().htod_sync_copy(&a_bytes).unwrap()],
+        3,
+        schema.clone(),
+    );
+    let b = CudaBuffer::from_columns(
+        vec![provider.device().inner().htod_sync_copy(&b_bytes).unwrap()],
+        3,
+        schema,
+    );
+
+    let result = provider.union_gpu(&a, &b).unwrap();
+    assert_eq!(result.num_rows(), 4); // 1.5, 2.5, 3.5, 4.5
+}
+
+#[test]
+fn test_union_f64_with_duplicates() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    let schema = Schema::new(vec![("val".to_string(), ScalarType::F64)]);
+
+    let a_vals: Vec<f64> = vec![1.5, 1.5, 2.5];
+    let b_vals: Vec<f64> = vec![2.5, 3.5, 3.5];
+
+    let a_bytes: Vec<u8> = a_vals.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let b_bytes: Vec<u8> = b_vals.iter().flat_map(|v| v.to_le_bytes()).collect();
+
+    let a = CudaBuffer::from_columns(
+        vec![provider.device().inner().htod_sync_copy(&a_bytes).unwrap()],
+        3,
+        schema.clone(),
+    );
+    let b = CudaBuffer::from_columns(
+        vec![provider.device().inner().htod_sync_copy(&b_bytes).unwrap()],
+        3,
+        schema,
+    );
+
+    let result = provider.union_gpu(&a, &b).unwrap();
+    assert_eq!(result.num_rows(), 3); // 1.5, 2.5, 3.5
+}
+
+// ============== I64 Diff Tests ==============
+
+#[test]
+fn test_diff_i64() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    let schema = Schema::new(vec![("val".to_string(), ScalarType::I64)]);
+
+    let a_vals: Vec<i64> = vec![-10, -5, 0, 5, 10];
+    let b_vals: Vec<i64> = vec![-5, 5];
+
+    let a_bytes: Vec<u8> = a_vals.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let b_bytes: Vec<u8> = b_vals.iter().flat_map(|v| v.to_le_bytes()).collect();
+
+    let a = CudaBuffer::from_columns(
+        vec![provider.device().inner().htod_sync_copy(&a_bytes).unwrap()],
+        5,
+        schema.clone(),
+    );
+    let b = CudaBuffer::from_columns(
+        vec![provider.device().inner().htod_sync_copy(&b_bytes).unwrap()],
+        2,
+        schema,
+    );
+
+    let result = provider.diff_gpu(&a, &b).unwrap();
+    assert_eq!(result.num_rows(), 3); // -10, 0, 10
+}
+
+#[test]
+fn test_diff_i64_no_overlap() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    let schema = Schema::new(vec![("val".to_string(), ScalarType::I64)]);
+
+    let a_vals: Vec<i64> = vec![-10, -5, 0];
+    let b_vals: Vec<i64> = vec![5, 10, 15];
+
+    let a_bytes: Vec<u8> = a_vals.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let b_bytes: Vec<u8> = b_vals.iter().flat_map(|v| v.to_le_bytes()).collect();
+
+    let a = CudaBuffer::from_columns(
+        vec![provider.device().inner().htod_sync_copy(&a_bytes).unwrap()],
+        3,
+        schema.clone(),
+    );
+    let b = CudaBuffer::from_columns(
+        vec![provider.device().inner().htod_sync_copy(&b_bytes).unwrap()],
+        3,
+        schema,
+    );
+
+    let result = provider.diff_gpu(&a, &b).unwrap();
+    assert_eq!(result.num_rows(), 3); // All remain: -10, -5, 0
+}
+
+// ============== F64 Diff Tests ==============
+
+#[test]
+fn test_diff_f64() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    let schema = Schema::new(vec![("val".to_string(), ScalarType::F64)]);
+
+    let a_vals: Vec<f64> = vec![1.5, 2.5, 3.5, 4.5];
+    let b_vals: Vec<f64> = vec![2.5, 4.5];
+
+    let a_bytes: Vec<u8> = a_vals.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let b_bytes: Vec<u8> = b_vals.iter().flat_map(|v| v.to_le_bytes()).collect();
+
+    let a = CudaBuffer::from_columns(
+        vec![provider.device().inner().htod_sync_copy(&a_bytes).unwrap()],
+        4,
+        schema.clone(),
+    );
+    let b = CudaBuffer::from_columns(
+        vec![provider.device().inner().htod_sync_copy(&b_bytes).unwrap()],
+        2,
+        schema,
+    );
+
+    let result = provider.diff_gpu(&a, &b).unwrap();
+    assert_eq!(result.num_rows(), 2); // 1.5, 3.5
+}
+
+#[test]
+fn test_diff_f64_no_overlap() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    let schema = Schema::new(vec![("val".to_string(), ScalarType::F64)]);
+
+    let a_vals: Vec<f64> = vec![1.5, 2.5, 3.5];
+    let b_vals: Vec<f64> = vec![4.5, 5.5, 6.5];
+
+    let a_bytes: Vec<u8> = a_vals.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let b_bytes: Vec<u8> = b_vals.iter().flat_map(|v| v.to_le_bytes()).collect();
+
+    let a = CudaBuffer::from_columns(
+        vec![provider.device().inner().htod_sync_copy(&a_bytes).unwrap()],
+        3,
+        schema.clone(),
+    );
+    let b = CudaBuffer::from_columns(
+        vec![provider.device().inner().htod_sync_copy(&b_bytes).unwrap()],
+        3,
+        schema,
+    );
+
+    let result = provider.diff_gpu(&a, &b).unwrap();
+    assert_eq!(result.num_rows(), 3); // All remain: 1.5, 2.5, 3.5
 }

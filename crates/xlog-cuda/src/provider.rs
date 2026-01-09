@@ -1177,12 +1177,56 @@ impl CudaKernelProvider {
         // Concatenate
         a_data.extend(b_data);
 
-        // Sort by first column bytes
-        let col_size = a.schema().column_type(0).map(|t| t.size_bytes()).unwrap_or(4);
-        a_data.sort_by(|x, y| x[..col_size].cmp(&y[..col_size]));
+        let col_type = a.schema().column_type(0)
+            .ok_or_else(|| XlogError::Kernel("No columns".to_string()))?;
+        let col_size = col_type.size_bytes();
 
-        // Dedup consecutive equal rows
-        a_data.dedup_by(|x, y| x[..col_size] == y[..col_size]);
+        // Type-aware sort and dedup
+        match col_type {
+            ScalarType::U64 => {
+                a_data.sort_by(|x, y| {
+                    let a_val = u64::from_le_bytes(x[..8].try_into().unwrap());
+                    let b_val = u64::from_le_bytes(y[..8].try_into().unwrap());
+                    a_val.cmp(&b_val)
+                });
+                a_data.dedup_by(|x, y| {
+                    let a_val = u64::from_le_bytes(x[..8].try_into().unwrap());
+                    let b_val = u64::from_le_bytes(y[..8].try_into().unwrap());
+                    a_val == b_val
+                });
+            }
+            ScalarType::I64 => {
+                a_data.sort_by(|x, y| {
+                    let a_val = i64::from_le_bytes(x[..8].try_into().unwrap());
+                    let b_val = i64::from_le_bytes(y[..8].try_into().unwrap());
+                    a_val.cmp(&b_val)
+                });
+                a_data.dedup_by(|x, y| {
+                    let a_val = i64::from_le_bytes(x[..8].try_into().unwrap());
+                    let b_val = i64::from_le_bytes(y[..8].try_into().unwrap());
+                    a_val == b_val
+                });
+            }
+            ScalarType::F64 => {
+                // Use total_cmp for consistent ordering (handles NaN, -0.0/+0.0)
+                a_data.sort_by(|x, y| {
+                    let a_val = f64::from_le_bytes(x[..8].try_into().unwrap());
+                    let b_val = f64::from_le_bytes(y[..8].try_into().unwrap());
+                    a_val.total_cmp(&b_val)
+                });
+                a_data.dedup_by(|x, y| {
+                    let a_val = f64::from_le_bytes(x[..8].try_into().unwrap());
+                    let b_val = f64::from_le_bytes(y[..8].try_into().unwrap());
+                    // For set operations, treat NaN == NaN and -0.0 == +0.0
+                    a_val.to_bits() == b_val.to_bits() || (a_val == b_val)
+                });
+            }
+            _ => {
+                // Fallback to byte comparison for other types
+                a_data.sort_by(|x, y| x[..col_size].cmp(&y[..col_size]));
+                a_data.dedup_by(|x, y| x[..col_size] == y[..col_size]);
+            }
+        }
 
         // Upload result
         self.upload_buffer_rows(&a_data, a.schema().clone())
@@ -1390,19 +1434,79 @@ impl CudaKernelProvider {
         let mut a_data = self.download_buffer_rows(a)?;
         let b_data = self.download_buffer_rows(b)?;
 
-        let col_size = a.schema().column_type(0).map(|t| t.size_bytes()).unwrap_or(4);
+        let col_type = a.schema().column_type(0)
+            .ok_or_else(|| XlogError::Kernel("No columns".to_string()))?;
+        let col_size = col_type.size_bytes();
 
-        // Create a set of b values for efficient lookup
-        let b_set: std::collections::HashSet<Vec<u8>> = b_data.into_iter()
-            .map(|row| row[..col_size].to_vec())
-            .collect();
-
-        // Filter a to only keep rows not in b
-        a_data.retain(|row| !b_set.contains(&row[..col_size].to_vec()));
-
-        // Sort and dedup
-        a_data.sort_by(|x, y| x[..col_size].cmp(&y[..col_size]));
-        a_data.dedup_by(|x, y| x[..col_size] == y[..col_size]);
+        // Type-aware filtering
+        match col_type {
+            ScalarType::U64 => {
+                let b_set: std::collections::HashSet<u64> = b_data.iter()
+                    .map(|row| u64::from_le_bytes(row[..8].try_into().unwrap()))
+                    .collect();
+                a_data.retain(|row| {
+                    let val = u64::from_le_bytes(row[..8].try_into().unwrap());
+                    !b_set.contains(&val)
+                });
+                a_data.sort_by(|x, y| {
+                    let a_val = u64::from_le_bytes(x[..8].try_into().unwrap());
+                    let b_val = u64::from_le_bytes(y[..8].try_into().unwrap());
+                    a_val.cmp(&b_val)
+                });
+                a_data.dedup_by(|x, y| {
+                    let a_val = u64::from_le_bytes(x[..8].try_into().unwrap());
+                    let b_val = u64::from_le_bytes(y[..8].try_into().unwrap());
+                    a_val == b_val
+                });
+            }
+            ScalarType::I64 => {
+                let b_set: std::collections::HashSet<i64> = b_data.iter()
+                    .map(|row| i64::from_le_bytes(row[..8].try_into().unwrap()))
+                    .collect();
+                a_data.retain(|row| {
+                    let val = i64::from_le_bytes(row[..8].try_into().unwrap());
+                    !b_set.contains(&val)
+                });
+                a_data.sort_by(|x, y| {
+                    let a_val = i64::from_le_bytes(x[..8].try_into().unwrap());
+                    let b_val = i64::from_le_bytes(y[..8].try_into().unwrap());
+                    a_val.cmp(&b_val)
+                });
+                a_data.dedup_by(|x, y| {
+                    let a_val = i64::from_le_bytes(x[..8].try_into().unwrap());
+                    let b_val = i64::from_le_bytes(y[..8].try_into().unwrap());
+                    a_val == b_val
+                });
+            }
+            ScalarType::F64 => {
+                // For F64, use bits for hashing (handles NaN consistently)
+                let b_set: std::collections::HashSet<u64> = b_data.iter()
+                    .map(|row| f64::from_le_bytes(row[..8].try_into().unwrap()).to_bits())
+                    .collect();
+                a_data.retain(|row| {
+                    let val = f64::from_le_bytes(row[..8].try_into().unwrap());
+                    !b_set.contains(&val.to_bits())
+                });
+                a_data.sort_by(|x, y| {
+                    let a_val = f64::from_le_bytes(x[..8].try_into().unwrap());
+                    let b_val = f64::from_le_bytes(y[..8].try_into().unwrap());
+                    a_val.total_cmp(&b_val)
+                });
+                a_data.dedup_by(|x, y| {
+                    let a_val = f64::from_le_bytes(x[..8].try_into().unwrap());
+                    let b_val = f64::from_le_bytes(y[..8].try_into().unwrap());
+                    a_val.to_bits() == b_val.to_bits() || (a_val == b_val)
+                });
+            }
+            _ => {
+                let b_set: std::collections::HashSet<Vec<u8>> = b_data.into_iter()
+                    .map(|row| row[..col_size].to_vec())
+                    .collect();
+                a_data.retain(|row| !b_set.contains(&row[..col_size].to_vec()));
+                a_data.sort_by(|x, y| x[..col_size].cmp(&y[..col_size]));
+                a_data.dedup_by(|x, y| x[..col_size] == y[..col_size]);
+            }
+        }
 
         self.upload_buffer_rows(&a_data, a.schema().clone())
     }
