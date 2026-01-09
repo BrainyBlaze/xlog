@@ -11,7 +11,7 @@ fn create_test_provider() -> Option<CudaKernelProvider> {
     let device = Arc::new(CudaDevice::new(0).ok()?);
     let memory = Arc::new(GpuMemoryManager::new(
         device.clone(),
-        MemoryBudget::default(),
+        MemoryBudget::with_limit(1024 * 1024 * 1024), // 1 GB budget
     ));
     CudaKernelProvider::new(device, memory).ok()
 }

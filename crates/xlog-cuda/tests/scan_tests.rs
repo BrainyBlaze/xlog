@@ -10,7 +10,7 @@ fn setup_provider() -> Option<CudaKernelProvider> {
     let device = Arc::new(CudaDevice::new(0).unwrap());
     let memory = Arc::new(GpuMemoryManager::new(
         device.clone(),
-        MemoryBudget::default(),
+        MemoryBudget::with_limit(1024 * 1024 * 1024), // 1 GB budget
     ));
     Some(CudaKernelProvider::new(device, memory).unwrap())
 }

@@ -2473,13 +2473,11 @@ impl CudaKernelProvider {
             .htod_sync_copy(mask)
             .map_err(|e| XlogError::Kernel(format!("Failed to upload mask: {}", e)))?;
 
-        // Allocate output for prefix sum
-        let d_prefix_sum = unsafe { device.alloc::<u32>(n) }
-            .map_err(|e| XlogError::Kernel(format!("Failed to alloc prefix_sum: {}", e)))?;
+        // Allocate output for prefix sum (using memory manager for budget enforcement)
+        let d_prefix_sum = self.memory.alloc::<u32>(n)?;
 
-        // Allocate block sums array
-        let d_block_sums = unsafe { device.alloc::<u32>(num_blocks as usize) }
-            .map_err(|e| XlogError::Kernel(format!("Failed to alloc block_sums: {}", e)))?;
+        // Allocate block sums array (using memory manager for budget enforcement)
+        let d_block_sums = self.memory.alloc::<u32>(num_blocks as usize)?;
 
         // Phase 1: Block-level exclusive scans + collect block totals
         let phase1_fn = device
