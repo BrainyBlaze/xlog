@@ -510,8 +510,8 @@ impl CudaKernelProvider {
 
     /// Remove duplicate rows based on key columns
     ///
-    /// Assumes input is already sorted by key columns (sorting is complex,
-    /// deferred to future implementation).
+    /// Uses CPU sort for ordering (GPU sort has known issues for inputs > ~10 elements),
+    /// then uses GPU filter_by_mask for efficient compaction.
     ///
     /// # Arguments
     /// * `input` - The input buffer
@@ -531,10 +531,24 @@ impl CudaKernelProvider {
             return Err(XlogError::Kernel("Dedup requires at least one key column".to_string()));
         }
 
+        // Note: GPU sort has known issues for larger inputs (> ~10 elements).
+        // Use CPU sort for correctness, with GPU-accelerated compaction via filter_by_mask.
+        // TODO: Replace with GPU sort when sort kernels are fixed.
+        self.dedup_cpu_sort_gpu_compact(input, key_cols)
+    }
+
+    /// CPU-based sorting with GPU-based compaction for dedup
+    ///
+    /// Sorts on CPU (more reliable), then uses GPU filter_by_mask for efficient compaction.
+    fn dedup_cpu_sort_gpu_compact(&self, input: &CudaBuffer, key_cols: &[usize]) -> Result<CudaBuffer> {
         let num_rows = input.num_rows() as usize;
         let row_stride = input.arity();
 
-        // Read all columns from GPU to host
+        if num_rows <= 1 {
+            return self.clone_buffer(input);
+        }
+
+        // Download all columns to host for sorting
         let mut column_data: Vec<Vec<u32>> = Vec::with_capacity(row_stride);
         for col_idx in 0..row_stride {
             if let Some(col) = input.column(col_idx) {
@@ -548,20 +562,15 @@ impl CudaKernelProvider {
                     .collect();
                 column_data.push(col_u32);
             } else {
-                // Pad with zeros if column doesn't exist
                 column_data.push(vec![0u32; num_rows]);
             }
         }
 
-        // Build rows for sorting
-        let mut rows: Vec<Vec<u32>> = (0..num_rows)
-            .map(|row| (0..row_stride).map(|col| column_data[col][row]).collect())
-            .collect();
-
-        // Sort rows by key columns (host-side sort for now, until multi-column GPU sort is implemented)
-        rows.sort_by(|a, b| {
+        // Build row indices and sort by key columns on CPU
+        let mut indices: Vec<usize> = (0..num_rows).collect();
+        indices.sort_by(|&a, &b| {
             for &key_col in key_cols {
-                match a[key_col].cmp(&b[key_col]) {
+                match column_data[key_col][a].cmp(&column_data[key_col][b]) {
                     std::cmp::Ordering::Equal => continue,
                     other => return other,
                 }
@@ -569,44 +578,155 @@ impl CudaKernelProvider {
             std::cmp::Ordering::Equal
         });
 
-        // Dedup by comparing consecutive rows on key columns
-        let mut unique_rows: Vec<Vec<u32>> = Vec::with_capacity(num_rows);
-        for row in rows {
-            let is_dup = unique_rows.last().map_or(false, |prev| {
-                key_cols.iter().all(|&k| prev[k] == row[k])
-            });
+        // Build unique mask by comparing consecutive sorted rows on CPU
+        let mut mask = vec![0u8; num_rows];
+        mask[0] = 1; // First row is always unique
+        for i in 1..num_rows {
+            let curr_idx = indices[i];
+            let prev_idx = indices[i - 1];
+            let is_dup = key_cols.iter().all(|&k| column_data[k][curr_idx] == column_data[k][prev_idx]);
             if !is_dup {
-                unique_rows.push(row);
+                mask[i] = 1;
             }
         }
 
-        let unique_count = unique_rows.len() as u64;
+        // Count unique rows
+        let unique_count: u64 = mask.iter().map(|&m| m as u64).sum();
         if unique_count == 0 {
             return self.create_empty_buffer(input.schema().clone());
         }
 
-        // Build output columns
-        let bytes_per_col = unique_rows.len() * std::mem::size_of::<u32>();
-        let mut result_columns = Vec::new();
+        // Build sorted output columns and upload to GPU
+        let bytes_per_col = num_rows * std::mem::size_of::<u32>();
+        let mut sorted_columns = Vec::new();
 
         for col_idx in 0..row_stride {
-            let col_data: Vec<u8> = unique_rows
-                .iter()
-                .flat_map(|row| row[col_idx].to_le_bytes())
+            // Reorder column data according to sorted indices
+            let sorted_col_data: Vec<u8> = indices.iter()
+                .flat_map(|&idx| column_data[col_idx][idx].to_le_bytes())
                 .collect();
 
             let mut col = self.memory.alloc::<u8>(bytes_per_col)?;
-            self.device.inner().htod_sync_copy_into(&col_data, &mut col)
-                .map_err(|e| XlogError::Kernel(format!("Failed to upload output column: {}", e)))?;
-            result_columns.push(col);
+            self.device.inner().htod_sync_copy_into(&sorted_col_data, &mut col)
+                .map_err(|e| XlogError::Kernel(format!("Failed to upload sorted column: {}", e)))?;
+            sorted_columns.push(col);
         }
 
-        Ok(CudaBuffer::from_columns(
-            result_columns,
-            unique_count,
+        let sorted_buffer = CudaBuffer::from_columns(
+            sorted_columns,
+            num_rows as u64,
             input.schema().clone(),
-        ))
+        );
+
+        // Use GPU filter_by_mask for efficient compaction
+        self.filter_by_mask(&sorted_buffer, &mask)
     }
+
+    /// Remove duplicate rows from a buffer that is already sorted by key columns
+    ///
+    /// This is an optimized version of `dedup` that skips the sorting step.
+    /// The caller must ensure the input is already sorted by the key columns.
+    ///
+    /// # Arguments
+    /// * `input` - The input buffer (must be sorted by key columns)
+    /// * `key_cols` - Column indices to use for duplicate detection
+    ///
+    /// # Returns
+    /// A buffer with duplicate rows removed
+    pub fn dedup_sorted(&self, input: &CudaBuffer, key_cols: &[usize]) -> Result<CudaBuffer> {
+        if input.is_empty() {
+            return self.create_empty_buffer(input.schema().clone());
+        }
+
+        if key_cols.is_empty() {
+            return Err(XlogError::Kernel("Dedup requires at least one key column".to_string()));
+        }
+
+        if input.num_rows() <= 1 {
+            return self.clone_buffer(input);
+        }
+
+        // For single key column, use GPU-based boundary detection
+        if key_cols.len() == 1 {
+            return self.dedup_sorted_single_key(input, key_cols[0]);
+        }
+
+        // For multi-column keys, use CPU-based boundary detection on already-sorted data
+        self.dedup_sorted_multi_key_cpu(input, key_cols)
+    }
+
+    /// CPU-based boundary detection for sorted multi-column dedup
+    fn dedup_sorted_multi_key_cpu(&self, input: &CudaBuffer, key_cols: &[usize]) -> Result<CudaBuffer> {
+        let num_rows = input.num_rows() as usize;
+
+        // Download key columns only
+        let mut key_column_data: Vec<Vec<u32>> = Vec::with_capacity(key_cols.len());
+        for &key_col in key_cols {
+            if let Some(col) = input.column(key_col) {
+                let col_bytes = num_rows * std::mem::size_of::<u32>();
+                let mut host_bytes = vec![0u8; col_bytes];
+                self.device.inner().dtoh_sync_copy_into(col, &mut host_bytes)
+                    .map_err(|e| XlogError::Kernel(format!("Failed to read key column {}: {}", key_col, e)))?;
+
+                let col_u32: Vec<u32> = host_bytes.chunks_exact(4)
+                    .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                    .collect();
+                key_column_data.push(col_u32);
+            } else {
+                key_column_data.push(vec![0u32; num_rows]);
+            }
+        }
+
+        // Build unique mask by comparing consecutive rows
+        let mut mask = vec![0u8; num_rows];
+        mask[0] = 1; // First row is always unique
+        for i in 1..num_rows {
+            let is_dup = (0..key_cols.len()).all(|k| key_column_data[k][i] == key_column_data[k][i - 1]);
+            if !is_dup {
+                mask[i] = 1;
+            }
+        }
+
+        // Use filter_by_mask to compact all columns
+        self.filter_by_mask(input, &mask)
+    }
+
+    /// Dedup sorted buffer with single-column key
+    ///
+    /// Performs CPU-based boundary detection on the sorted key column, then
+    /// uses GPU filter_by_mask for efficient compaction.
+    fn dedup_sorted_single_key(&self, sorted: &CudaBuffer, key_col: usize) -> Result<CudaBuffer> {
+        let num_rows = sorted.num_rows() as usize;
+        let device = self.device.inner();
+
+        // Download key column to build unique mask on CPU
+        // (The mark_duplicates kernel expects row-major interleaved data,
+        // but our buffer is column-major. For single key, we do boundary detection on CPU.)
+        let key_col_data = sorted.column(key_col)
+            .ok_or_else(|| XlogError::Kernel("Key column not found".to_string()))?;
+
+        let key_bytes = num_rows * std::mem::size_of::<u32>();
+        let mut host_bytes = vec![0u8; key_bytes];
+        device.dtoh_sync_copy_into(key_col_data, &mut host_bytes)
+            .map_err(|e| XlogError::Kernel(format!("Failed to read key column: {}", e)))?;
+
+        let keys: Vec<u32> = host_bytes.chunks_exact(4)
+            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+
+        // Build unique mask: 1 for first occurrence, 0 for duplicate
+        let mut mask = vec![0u8; num_rows];
+        mask[0] = 1; // First row is always unique
+        for i in 1..num_rows {
+            if keys[i] != keys[i - 1] {
+                mask[i] = 1;
+            }
+        }
+
+        // Use filter_by_mask to compact
+        self.filter_by_mask(sorted, &mask)
+    }
+
 
     /// Compute union of two buffers
     ///
@@ -870,12 +990,12 @@ impl CudaKernelProvider {
         if a.is_empty() {
             // Sort and dedup b
             let sorted_b = self.sort(b, &[0])?;
-            return self.dedup(&sorted_b, &[0]);
+            return self.dedup_sorted(&sorted_b, &[0]);
         }
         if b.is_empty() {
             // Sort and dedup a
             let sorted_a = self.sort(a, &[0])?;
-            return self.dedup(&sorted_a, &[0]);
+            return self.dedup_sorted(&sorted_a, &[0]);
         }
 
         // Verify schemas match
@@ -958,8 +1078,8 @@ impl CudaKernelProvider {
         // Step 2: Sort the concatenated result
         let sorted = self.sort(&concat_buffer, &[0])?;
 
-        // Step 3: Dedup to remove duplicates
-        self.dedup(&sorted, &[0])
+        // Step 3: Dedup to remove duplicates (sorted, so use dedup_sorted)
+        self.dedup_sorted(&sorted, &[0])
     }
 
     /// GPU-native set difference (no host roundtrip)
@@ -987,7 +1107,7 @@ impl CudaKernelProvider {
         if b.is_empty() {
             // Sort and dedup a, return it
             let sorted_a = self.sort(a, &[0])?;
-            return self.dedup(&sorted_a, &[0]);
+            return self.dedup_sorted(&sorted_a, &[0]);
         }
 
         // Verify schemas have compatible types (ignore column names for Datalog negation)
@@ -1006,12 +1126,12 @@ impl CudaKernelProvider {
             ));
         }
 
-        // Step 1: Sort and dedup both inputs
+        // Step 1: Sort and dedup both inputs (sorted, so use dedup_sorted)
         let sorted_a = self.sort(a, &[0])?;
-        let deduped_a = self.dedup(&sorted_a, &[0])?;
+        let deduped_a = self.dedup_sorted(&sorted_a, &[0])?;
 
         let sorted_b = self.sort(b, &[0])?;
-        let deduped_b = self.dedup(&sorted_b, &[0])?;
+        let deduped_b = self.dedup_sorted(&sorted_b, &[0])?;
 
         if deduped_a.is_empty() {
             return self.create_empty_buffer(a.schema().clone());
@@ -4141,6 +4261,57 @@ mod tests {
         // Empty key columns
         let result = provider.dedup(&buffer, &[]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_dedup_with_duplicates() {
+        let provider = match create_test_provider() {
+            Some(p) => p,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+
+        // Test dedup with duplicates: [3, 1, 2, 1, 3, 2]
+        let buffer = create_test_buffer(&provider, &[3, 1, 2, 1, 3, 2], "key");
+        let deduped = provider.dedup(&buffer, &[0]).unwrap();
+
+        assert_eq!(deduped.num_rows(), 3, "Should have 3 unique values");
+
+        let result = provider.download_column_u32(&deduped, 0).unwrap();
+        // Result should be sorted and deduped
+        assert_eq!(result, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_dedup_larger_input() {
+        let provider = match create_test_provider() {
+            Some(p) => p,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+
+        // Create input with duplicates: 0..500 ++ 250..750 = 1000 elements, 750 unique
+        let a: Vec<u32> = (0..500).collect();
+        let b: Vec<u32> = (250..750).collect();
+        let input: Vec<u32> = a.iter().chain(b.iter()).copied().collect();
+
+        let buffer = create_test_buffer(&provider, &input, "key");
+        let deduped = provider.dedup(&buffer, &[0]).unwrap();
+
+        assert_eq!(deduped.num_rows(), 750, "Should have 750 unique values (0..750)");
+
+        // Verify output is sorted
+        let result = provider.download_column_u32(&deduped, 0).unwrap();
+        let is_sorted = result.windows(2).all(|w| w[0] <= w[1]);
+        assert!(is_sorted, "Output should be sorted");
+
+        // Verify expected values
+        let expected: Vec<u32> = (0..750).collect();
+        assert_eq!(result, expected);
     }
 
     // ============== Union Tests ==============
