@@ -1,0 +1,22 @@
+# Build artifacts
+/target/
+
+# Compiled CUDA PTX files (regenerated during build)
+*.ptx
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Rust
+**/*.rs.bk
+Cargo.lock
+
+# Debug
+*.log
