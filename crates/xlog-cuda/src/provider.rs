@@ -99,6 +99,10 @@ pub mod set_ops_kernels {
     pub const SORTED_DIFF_MARK: &str = "sorted_diff_mark";
 }
 
+/// Default maximum output size for join operations.
+/// This prevents memory overflow when joining large tables with high cardinality matches.
+pub const DEFAULT_JOIN_MAX_OUTPUT: usize = 1_000_000;
+
 /// Comparison operators for filtering
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -331,6 +335,37 @@ impl CudaKernelProvider {
         left_keys: &[usize],
         right_keys: &[usize],
     ) -> Result<CudaBuffer> {
+        self.hash_join_with_limit(left, right, left_keys, right_keys, None)
+    }
+
+    /// Hash join with configurable maximum output size
+    ///
+    /// Uses a two-phase hash join:
+    /// 1. Build phase: Insert keys from `right` into a hash table
+    /// 2. Probe phase: Match keys from `left` against the hash table
+    ///
+    /// # Arguments
+    /// * `left` - The left (probe) buffer
+    /// * `right` - The right (build) buffer
+    /// * `left_keys` - Column indices for join keys in left buffer
+    /// * `right_keys` - Column indices for join keys in right buffer
+    /// * `max_output` - Maximum number of output rows (defaults to DEFAULT_JOIN_MAX_OUTPUT)
+    ///
+    /// # Returns
+    /// A buffer containing the joined rows with columns from both inputs
+    ///
+    /// # Errors
+    /// Returns `XlogError::Kernel` if kernel execution fails
+    pub fn hash_join_with_limit(
+        &self,
+        left: &CudaBuffer,
+        right: &CudaBuffer,
+        left_keys: &[usize],
+        right_keys: &[usize],
+        max_output: Option<usize>,
+    ) -> Result<CudaBuffer> {
+        let max_output_limit = max_output.unwrap_or(DEFAULT_JOIN_MAX_OUTPUT);
+
         // Handle empty inputs
         if left.is_empty() || right.is_empty() {
             // Return empty buffer with combined schema
@@ -425,7 +460,8 @@ impl CudaKernelProvider {
         }
 
         // Allocate output buffers (worst case: cross product)
-        let max_output = (num_build as u64 * num_probe as u64).min(1_000_000) as usize;
+        // Use the configurable max_output_limit instead of hardcoded 1_000_000
+        let max_output = (num_build as u64 * num_probe as u64).min(max_output_limit as u64) as usize;
         let output_left = self.memory.alloc::<u32>(max_output)?;
         let output_right = self.memory.alloc::<u32>(max_output)?;
         let mut output_count = self.memory.alloc::<u32>(1)?;
@@ -2778,12 +2814,40 @@ impl CudaKernelProvider {
         right_keys: &[usize],
         join_type: JoinType,
     ) -> Result<CudaBuffer> {
+        self.hash_join_v2_with_limit(left, right, left_keys, right_keys, join_type, None)
+    }
+
+    /// V2 hash join with configurable maximum output size
+    ///
+    /// Multi-column join with typed key comparison, supporting different join types.
+    /// Uses composite hashing (FNV-1a) for multi-column keys with full key verification.
+    ///
+    /// # Arguments
+    /// * `left` - The left (probe) buffer
+    /// * `right` - The right (build) buffer
+    /// * `left_keys` - Column indices for join keys in left buffer
+    /// * `right_keys` - Column indices for join keys in right buffer
+    /// * `join_type` - Type of join to perform (Inner, Semi, Anti, LeftOuter)
+    /// * `max_output` - Maximum number of output rows (defaults to DEFAULT_JOIN_MAX_OUTPUT)
+    ///
+    /// # Errors
+    /// Returns `XlogError::Kernel` if kernel execution fails or parameters are invalid
+    pub fn hash_join_v2_with_limit(
+        &self,
+        left: &CudaBuffer,
+        right: &CudaBuffer,
+        left_keys: &[usize],
+        right_keys: &[usize],
+        join_type: JoinType,
+        max_output: Option<usize>,
+    ) -> Result<CudaBuffer> {
+        let limit = max_output.unwrap_or(DEFAULT_JOIN_MAX_OUTPUT);
         match join_type {
-            JoinType::Inner => self.hash_join_inner_v2(left, right, left_keys, right_keys),
+            JoinType::Inner => self.hash_join_inner_v2(left, right, left_keys, right_keys, limit),
             JoinType::Semi => self.hash_join_semi_impl(left, right, left_keys, right_keys),
             JoinType::Anti => self.hash_join_anti_impl(left, right, left_keys, right_keys),
             JoinType::LeftOuter => {
-                self.hash_join_left_outer_impl(left, right, left_keys, right_keys)
+                self.hash_join_left_outer_impl(left, right, left_keys, right_keys, limit)
             }
         }
     }
@@ -3023,6 +3087,7 @@ impl CudaKernelProvider {
         right: &CudaBuffer,
         left_keys: &[usize],
         right_keys: &[usize],
+        max_output_limit: usize,
     ) -> Result<CudaBuffer> {
         // Handle empty inputs
         if left.is_empty() || right.is_empty() {
@@ -3067,7 +3132,8 @@ impl CudaKernelProvider {
             self.build_hash_table_v2(&right_packed.hashes, num_right)?;
 
         // Allocate output buffers for row index pairs
-        let max_output = ((num_left as u64) * (num_right as u64)).min(1_000_000) as u32;
+        // Use the configurable max_output_limit instead of hardcoded 1_000_000
+        let max_output = ((num_left as u64) * (num_right as u64)).min(max_output_limit as u64) as u32;
         let d_output_left = self.memory.alloc::<u32>(max_output as usize)?;
         let d_output_right = self.memory.alloc::<u32>(max_output as usize)?;
         let d_output_count = self
@@ -3478,6 +3544,7 @@ impl CudaKernelProvider {
         right: &CudaBuffer,
         left_keys: &[usize],
         right_keys: &[usize],
+        max_output_limit: usize,
     ) -> Result<CudaBuffer> {
         // Handle empty left - return empty with combined schema
         if left.is_empty() {
@@ -3569,7 +3636,8 @@ impl CudaKernelProvider {
         }
 
         // Also do inner join to get matching pairs
-        let max_output = ((num_left as u64) * (num_right as u64)).min(1_000_000) as u32;
+        // Use the configurable max_output_limit instead of hardcoded 1_000_000
+        let max_output = ((num_left as u64) * (num_right as u64)).min(max_output_limit as u64) as u32;
         let d_output_left = self.memory.alloc::<u32>(max_output as usize)?;
         let d_output_right = self.memory.alloc::<u32>(max_output as usize)?;
         let d_output_count = self
@@ -4598,5 +4666,55 @@ mod tests {
         // Sum should return U64 to prevent overflow
         assert_eq!(result_schema.column_type(1), Some(ScalarType::U64),
             "Sum aggregation should return U64 type, not U32");
+    }
+
+    #[test]
+    fn test_join_custom_max_output() {
+        let provider = match create_test_provider() {
+            Some(p) => p,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+
+        // Create buffers that produce more than 10 results when joined
+        // Left: [1, 1, 1, 1, 2, 2, 2, 2] - 4 copies of 1, 4 copies of 2
+        // Right: [1, 1, 1, 2, 2, 2] - 3 copies of 1, 3 copies of 2
+        // Join produces: 4*3 + 4*3 = 24 results
+        let left = create_test_buffer(&provider, &[1, 1, 1, 1, 2, 2, 2, 2], "left_key");
+        let right = create_test_buffer(&provider, &[1, 1, 1, 2, 2, 2], "right_key");
+
+        // Test with limit of 10 - should get at most 10
+        let result_limited = provider
+            .hash_join_v2_with_limit(&left, &right, &[0], &[0], JoinType::Inner, Some(10))
+            .expect("join with limit should succeed");
+        assert!(
+            result_limited.num_rows() <= 10,
+            "With limit 10, got {} rows but expected at most 10",
+            result_limited.num_rows()
+        );
+
+        // Test with None (default) - should get all 24 results
+        let result_unlimited = provider
+            .hash_join_v2_with_limit(&left, &right, &[0], &[0], JoinType::Inner, None)
+            .expect("join without limit should succeed");
+        assert_eq!(
+            result_unlimited.num_rows(),
+            24,
+            "Without limit, expected 24 rows but got {}",
+            result_unlimited.num_rows()
+        );
+
+        // Test legacy API still works (backward compatibility)
+        let result_legacy = provider
+            .hash_join_v2(&left, &right, &[0], &[0], JoinType::Inner)
+            .expect("legacy hash_join_v2 should succeed");
+        assert_eq!(
+            result_legacy.num_rows(),
+            24,
+            "Legacy API without limit, expected 24 rows but got {}",
+            result_legacy.num_rows()
+        );
     }
 }
