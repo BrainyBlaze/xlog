@@ -5,7 +5,8 @@
 
 use std::sync::Arc;
 
-use cudarc::driver::{CudaView, DeviceSlice, LaunchAsync, LaunchConfig};
+use cudarc::driver::{CudaView, DeviceRepr, DeviceSlice, LaunchAsync, LaunchConfig};
+use std::ffi::c_void;
 use cudarc::nvrtc::Ptx;
 use xlog_core::{AggOp, Result, Schema, ScalarType, XlogError};
 
@@ -117,6 +118,16 @@ pub enum JoinType {
     Anti,
     /// Left outer join: return all left rows, with nulls for non-matching right
     LeftOuter,
+}
+
+/// Result of packing key columns and computing hashes for join operations
+struct PackedKeyData {
+    /// Computed hash values (one per row)
+    hashes: cudarc::driver::CudaSlice<u64>,
+    /// Packed key data in row-major format
+    packed_keys: cudarc::driver::CudaSlice<u8>,
+    /// Total bytes per row (key stride)
+    key_bytes: u32,
 }
 
 /// CUDA kernel provider for xlog GPU operations
@@ -1589,10 +1600,10 @@ impl CudaKernelProvider {
                         .map_err(|e| {
                             XlogError::Kernel(format!("Failed to read sum output: {}", e))
                         })?;
-                    // Truncate u64 to u32 for now (MVP simplification)
+                    // Return full u64 values (8 bytes each)
                     host_output
                         .iter()
-                        .flat_map(|v| (*v as u32).to_le_bytes())
+                        .flat_map(|v| v.to_le_bytes())
                         .collect::<Vec<u8>>()
                 }
                 AggOp::Min => {
@@ -2564,17 +2575,22 @@ impl CudaKernelProvider {
         }
     }
 
-    /// Compute composite hashes for key columns of a buffer
+    /// Compute composite hashes AND return packed key data for key verification
     ///
     /// Uses FNV-1a hash to combine all key columns into a single u64 hash per row.
-    fn compute_composite_hashes(
+    /// Also returns the packed key data for byte-by-byte comparison in join kernels.
+    fn compute_hashes_and_pack_keys(
         &self,
         buffer: &CudaBuffer,
         key_cols: &[usize],
-    ) -> Result<cudarc::driver::CudaSlice<u64>> {
+    ) -> Result<PackedKeyData> {
         let num_rows = buffer.num_rows() as u32;
         if num_rows == 0 {
-            return self.memory.alloc::<u64>(0);
+            return Ok(PackedKeyData {
+                hashes: self.memory.alloc::<u64>(0)?,
+                packed_keys: self.memory.alloc::<u8>(0)?,
+                key_bytes: 0,
+            });
         }
 
         // For column-major storage, we need to pack data row-major for the kernel
@@ -2698,7 +2714,11 @@ impl CudaKernelProvider {
         }
 
         self.device.synchronize()?;
-        Ok(d_hashes)
+        Ok(PackedKeyData {
+            hashes: d_hashes,
+            packed_keys: d_data,
+            key_bytes: row_stride,
+        })
     }
 
     /// Build hash table from u64 hashes
@@ -2809,16 +2829,29 @@ impl CudaKernelProvider {
             ));
         }
 
+        // Validate key column types match
+        for (&left_idx, &right_idx) in left_keys.iter().zip(right_keys.iter()) {
+            let left_type = left.schema().column_type(left_idx);
+            let right_type = right.schema().column_type(right_idx);
+            if left_type != right_type {
+                return Err(XlogError::Kernel(format!(
+                    "Key column type mismatch: left[{}]={:?}, right[{}]={:?}",
+                    left_idx, left_type, right_idx, right_type
+                )));
+            }
+        }
+
         let num_left = left.num_rows() as u32;
         let num_right = right.num_rows() as u32;
 
-        // Compute composite hashes for both sides
-        let left_hashes = self.compute_composite_hashes(left, left_keys)?;
-        let right_hashes = self.compute_composite_hashes(right, right_keys)?;
+        // Compute composite hashes and pack keys for both sides
+        let left_packed = self.compute_hashes_and_pack_keys(left, left_keys)?;
+        let right_packed = self.compute_hashes_and_pack_keys(right, right_keys)?;
 
         // Build hash table from right side
         let hash_table_size = ((num_right as usize) * 2).max(1024) as u32;
-        let (d_hash_table, d_next_ptrs) = self.build_hash_table_v2(&right_hashes, num_right)?;
+        let (d_hash_table, d_next_ptrs) =
+            self.build_hash_table_v2(&right_packed.hashes, num_right)?;
 
         // Allocate output buffers for row index pairs
         let max_output = ((num_left as u64) * (num_right as u64)).min(1_000_000) as u32;
@@ -2846,26 +2879,28 @@ impl CudaKernelProvider {
         };
 
         // SAFETY: hash_join_probe_v2(probe_hashes, num_probe, hash_table, build_hashes,
-        //                            next_ptrs, hash_table_size, output_left, output_right,
-        //                            output_count, max_output)
+        //                            next_ptrs, hash_table_size, probe_keys, build_keys,
+        //                            key_bytes, output_left, output_right, output_count, max_output)
+        // Note: Using raw pointer launch because tuple exceeds 12-element limit
         unsafe {
+            let mut params: Vec<*mut c_void> = vec![
+                (&left_packed.hashes).as_kernel_param(),
+                (&num_left).as_kernel_param(),
+                (&d_hash_table).as_kernel_param(),
+                (&right_packed.hashes).as_kernel_param(),
+                (&d_next_ptrs).as_kernel_param(),
+                (&hash_table_size).as_kernel_param(),
+                (&left_packed.packed_keys).as_kernel_param(),
+                (&right_packed.packed_keys).as_kernel_param(),
+                (&left_packed.key_bytes).as_kernel_param(),
+                (&d_output_left).as_kernel_param(),
+                (&d_output_right).as_kernel_param(),
+                (&d_output_count).as_kernel_param(),
+                (&max_output).as_kernel_param(),
+            ];
             probe_func
                 .clone()
-                .launch(
-                    probe_config,
-                    (
-                        &left_hashes,
-                        num_left,
-                        &d_hash_table,
-                        &right_hashes,
-                        &d_next_ptrs,
-                        hash_table_size,
-                        &d_output_left,
-                        &d_output_right,
-                        &d_output_count,
-                        max_output,
-                    ),
-                )
+                .launch(probe_config, &mut params)
                 .map_err(|e| XlogError::Kernel(format!("hash_join_probe_v2 failed: {}", e)))?;
         }
 
@@ -3036,16 +3071,29 @@ impl CudaKernelProvider {
             ));
         }
 
+        // Validate key column types match
+        for (&left_idx, &right_idx) in left_keys.iter().zip(right_keys.iter()) {
+            let left_type = left.schema().column_type(left_idx);
+            let right_type = right.schema().column_type(right_idx);
+            if left_type != right_type {
+                return Err(XlogError::Kernel(format!(
+                    "Key column type mismatch: left[{}]={:?}, right[{}]={:?}",
+                    left_idx, left_type, right_idx, right_type
+                )));
+            }
+        }
+
         let num_left = left.num_rows() as u32;
         let num_right = right.num_rows() as u32;
 
-        // Compute composite hashes
-        let left_hashes = self.compute_composite_hashes(left, left_keys)?;
-        let right_hashes = self.compute_composite_hashes(right, right_keys)?;
+        // Compute composite hashes and pack keys for both sides
+        let left_packed = self.compute_hashes_and_pack_keys(left, left_keys)?;
+        let right_packed = self.compute_hashes_and_pack_keys(right, right_keys)?;
 
         // Build hash table from right side
         let hash_table_size = ((num_right as usize) * 2).max(1024) as u32;
-        let (d_hash_table, d_next_ptrs) = self.build_hash_table_v2(&right_hashes, num_right)?;
+        let (d_hash_table, d_next_ptrs) =
+            self.build_hash_table_v2(&right_packed.hashes, num_right)?;
 
         // Allocate output mask
         let d_has_match = self.memory.alloc::<u8>(num_left as usize)?;
@@ -3066,19 +3114,23 @@ impl CudaKernelProvider {
         };
 
         // SAFETY: hash_join_semi(probe_hashes, num_probe, hash_table, build_hashes,
-        //                        next_ptrs, hash_table_size, has_match)
+        //                        next_ptrs, hash_table_size, probe_keys, build_keys,
+        //                        key_bytes, has_match)
         unsafe {
             semi_func
                 .clone()
                 .launch(
                     config,
                     (
-                        &left_hashes,
+                        &left_packed.hashes,
                         num_left,
                         &d_hash_table,
-                        &right_hashes,
+                        &right_packed.hashes,
                         &d_next_ptrs,
                         hash_table_size,
+                        &left_packed.packed_keys,
+                        &right_packed.packed_keys,
+                        left_packed.key_bytes,
                         &d_has_match,
                     ),
                 )
@@ -3127,16 +3179,29 @@ impl CudaKernelProvider {
             ));
         }
 
+        // Validate key column types match
+        for (&left_idx, &right_idx) in left_keys.iter().zip(right_keys.iter()) {
+            let left_type = left.schema().column_type(left_idx);
+            let right_type = right.schema().column_type(right_idx);
+            if left_type != right_type {
+                return Err(XlogError::Kernel(format!(
+                    "Key column type mismatch: left[{}]={:?}, right[{}]={:?}",
+                    left_idx, left_type, right_idx, right_type
+                )));
+            }
+        }
+
         let num_left = left.num_rows() as u32;
         let num_right = right.num_rows() as u32;
 
-        // Compute composite hashes
-        let left_hashes = self.compute_composite_hashes(left, left_keys)?;
-        let right_hashes = self.compute_composite_hashes(right, right_keys)?;
+        // Compute composite hashes and pack keys for both sides
+        let left_packed = self.compute_hashes_and_pack_keys(left, left_keys)?;
+        let right_packed = self.compute_hashes_and_pack_keys(right, right_keys)?;
 
         // Build hash table from right side
         let hash_table_size = ((num_right as usize) * 2).max(1024) as u32;
-        let (d_hash_table, d_next_ptrs) = self.build_hash_table_v2(&right_hashes, num_right)?;
+        let (d_hash_table, d_next_ptrs) =
+            self.build_hash_table_v2(&right_packed.hashes, num_right)?;
 
         // Allocate output mask
         let d_no_match = self.memory.alloc::<u8>(num_left as usize)?;
@@ -3157,19 +3222,23 @@ impl CudaKernelProvider {
         };
 
         // SAFETY: hash_join_anti(probe_hashes, num_probe, hash_table, build_hashes,
-        //                        next_ptrs, hash_table_size, no_match)
+        //                        next_ptrs, hash_table_size, probe_keys, build_keys,
+        //                        key_bytes, no_match)
         unsafe {
             anti_func
                 .clone()
                 .launch(
                     config,
                     (
-                        &left_hashes,
+                        &left_packed.hashes,
                         num_left,
                         &d_hash_table,
-                        &right_hashes,
+                        &right_packed.hashes,
                         &d_next_ptrs,
                         hash_table_size,
+                        &left_packed.packed_keys,
+                        &right_packed.packed_keys,
+                        left_packed.key_bytes,
                         &d_no_match,
                     ),
                 )
@@ -3220,16 +3289,29 @@ impl CudaKernelProvider {
             ));
         }
 
+        // Validate key column types match
+        for (&left_idx, &right_idx) in left_keys.iter().zip(right_keys.iter()) {
+            let left_type = left.schema().column_type(left_idx);
+            let right_type = right.schema().column_type(right_idx);
+            if left_type != right_type {
+                return Err(XlogError::Kernel(format!(
+                    "Key column type mismatch: left[{}]={:?}, right[{}]={:?}",
+                    left_idx, left_type, right_idx, right_type
+                )));
+            }
+        }
+
         let num_left = left.num_rows() as u32;
         let num_right = right.num_rows() as u32;
 
-        // Compute composite hashes
-        let left_hashes = self.compute_composite_hashes(left, left_keys)?;
-        let right_hashes = self.compute_composite_hashes(right, right_keys)?;
+        // Compute composite hashes and pack keys for both sides
+        let left_packed = self.compute_hashes_and_pack_keys(left, left_keys)?;
+        let right_packed = self.compute_hashes_and_pack_keys(right, right_keys)?;
 
         // Build hash table from right side
         let hash_table_size = ((num_right as usize) * 2).max(1024) as u32;
-        let (d_hash_table, d_next_ptrs) = self.build_hash_table_v2(&right_hashes, num_right)?;
+        let (d_hash_table, d_next_ptrs) =
+            self.build_hash_table_v2(&right_packed.hashes, num_right)?;
 
         // Allocate mask for semi-join to check which left rows have matches
         let d_has_match = self.memory.alloc::<u8>(num_left as usize)?;
@@ -3249,18 +3331,24 @@ impl CudaKernelProvider {
             shared_mem_bytes: 0,
         };
 
+        // SAFETY: hash_join_semi(probe_hashes, num_probe, hash_table, build_hashes,
+        //                        next_ptrs, hash_table_size, probe_keys, build_keys,
+        //                        key_bytes, has_match)
         unsafe {
             semi_func
                 .clone()
                 .launch(
                     config,
                     (
-                        &left_hashes,
+                        &left_packed.hashes,
                         num_left,
                         &d_hash_table,
-                        &right_hashes,
+                        &right_packed.hashes,
                         &d_next_ptrs,
                         hash_table_size,
+                        &left_packed.packed_keys,
+                        &right_packed.packed_keys,
+                        left_packed.key_bytes,
                         &d_has_match,
                     ),
                 )
@@ -3283,24 +3371,29 @@ impl CudaKernelProvider {
             .get_func(JOIN_MODULE, join_kernels::HASH_JOIN_PROBE_V2)
             .ok_or_else(|| XlogError::Kernel("hash_join_probe_v2 kernel not found".to_string()))?;
 
+        // SAFETY: hash_join_probe_v2(probe_hashes, num_probe, hash_table, build_hashes,
+        //                            next_ptrs, hash_table_size, probe_keys, build_keys,
+        //                            key_bytes, output_left, output_right, output_count, max_output)
+        // Note: Using raw pointer launch because tuple exceeds 12-element limit
         unsafe {
+            let mut params: Vec<*mut c_void> = vec![
+                (&left_packed.hashes).as_kernel_param(),
+                (&num_left).as_kernel_param(),
+                (&d_hash_table).as_kernel_param(),
+                (&right_packed.hashes).as_kernel_param(),
+                (&d_next_ptrs).as_kernel_param(),
+                (&hash_table_size).as_kernel_param(),
+                (&left_packed.packed_keys).as_kernel_param(),
+                (&right_packed.packed_keys).as_kernel_param(),
+                (&left_packed.key_bytes).as_kernel_param(),
+                (&d_output_left).as_kernel_param(),
+                (&d_output_right).as_kernel_param(),
+                (&d_output_count).as_kernel_param(),
+                (&max_output).as_kernel_param(),
+            ];
             probe_func
                 .clone()
-                .launch(
-                    config,
-                    (
-                        &left_hashes,
-                        num_left,
-                        &d_hash_table,
-                        &right_hashes,
-                        &d_next_ptrs,
-                        hash_table_size,
-                        &d_output_left,
-                        &d_output_right,
-                        &d_output_count,
-                        max_output,
-                    ),
-                )
+                .launch(config, &mut params)
                 .map_err(|e| XlogError::Kernel(format!("hash_join_probe_v2 failed: {}", e)))?;
         }
 

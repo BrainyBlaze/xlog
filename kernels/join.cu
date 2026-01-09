@@ -145,20 +145,47 @@ extern "C" __global__ void hash_join_build_v2(
 }
 
 /**
+ * Compare key bytes for two rows.
+ * @param probe_keys Packed probe key data (row-major)
+ * @param build_keys Packed build key data (row-major)
+ * @param probe_idx Probe row index
+ * @param build_idx Build row index
+ * @param key_bytes Total bytes per key (row stride)
+ * @return true if keys are equal byte-for-byte
+ */
+__device__ __forceinline__ bool keys_equal(
+    const uint8_t* __restrict__ probe_keys,
+    const uint8_t* __restrict__ build_keys,
+    uint32_t probe_idx,
+    uint32_t build_idx,
+    uint32_t key_bytes
+) {
+    const uint8_t* probe_row = probe_keys + (uint64_t)probe_idx * key_bytes;
+    const uint8_t* build_row = build_keys + (uint64_t)build_idx * key_bytes;
+
+    for (uint32_t i = 0; i < key_bytes; i++) {
+        if (probe_row[i] != build_row[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
  * Probe hash table (v2) - outputs matching row index pairs.
  *
- * NOTE: This kernel compares hash values only, not actual key bytes.
- * FNV-1a 64-bit hash has extremely low collision probability (~2^-64),
- * making false positives negligible for practical dataset sizes.
- * For guaranteed correctness, callers should verify key equality
- * on the output pairs.
+ * This kernel first compares hash values for fast filtering, then
+ * verifies actual key bytes to ensure mathematical correctness.
  *
  * @param probe_hashes Hash values for probe side
  * @param num_probe Number of probe rows
  * @param hash_table Bucket heads
- * @param build_hashes Build side hashes (for collision verification)
+ * @param build_hashes Build side hashes (for fast filtering)
  * @param next_ptrs Linked list next pointers
  * @param hash_table_size Number of buckets
+ * @param probe_keys Packed probe key data (row-major, key columns only)
+ * @param build_keys Packed build key data (row-major, key columns only)
+ * @param key_bytes Total bytes per key (sum of key column sizes)
  * @param output_left Output: probe row indices
  * @param output_right Output: build row indices
  * @param output_count Atomic counter for output size
@@ -171,6 +198,9 @@ extern "C" __global__ void hash_join_probe_v2(
     const uint64_t* __restrict__ build_hashes,
     const uint32_t* __restrict__ next_ptrs,
     uint32_t hash_table_size,
+    const uint8_t* __restrict__ probe_keys,
+    const uint8_t* __restrict__ build_keys,
+    uint32_t key_bytes,
     uint32_t* __restrict__ output_left,
     uint32_t* __restrict__ output_right,
     uint32_t* __restrict__ output_count,
@@ -184,7 +214,9 @@ extern "C" __global__ void hash_join_probe_v2(
 
     uint32_t current = hash_table[bucket];
     while (current != 0xFFFFFFFF) {
-        if (build_hashes[current] == hash) {
+        // First check hash for fast filtering, then verify actual keys
+        if (build_hashes[current] == hash &&
+            keys_equal(probe_keys, build_keys, tid, current, key_bytes)) {
             uint32_t out_idx = atomicAdd(output_count, 1);
             if (out_idx < max_output) {
                 output_left[out_idx] = tid;
@@ -203,6 +235,9 @@ extern "C" __global__ void hash_join_probe_v2(
  * @param build_hashes Build side hashes
  * @param next_ptrs Linked list next pointers
  * @param hash_table_size Number of buckets
+ * @param probe_keys Packed probe key data (row-major, key columns only)
+ * @param build_keys Packed build key data (row-major, key columns only)
+ * @param key_bytes Total bytes per key (sum of key column sizes)
  * @param has_match Output: 1 if row has match, 0 otherwise
  */
 extern "C" __global__ void hash_join_semi(
@@ -212,6 +247,9 @@ extern "C" __global__ void hash_join_semi(
     const uint64_t* __restrict__ build_hashes,
     const uint32_t* __restrict__ next_ptrs,
     uint32_t hash_table_size,
+    const uint8_t* __restrict__ probe_keys,
+    const uint8_t* __restrict__ build_keys,
+    uint32_t key_bytes,
     uint8_t* __restrict__ has_match
 ) {
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -222,7 +260,9 @@ extern "C" __global__ void hash_join_semi(
 
     uint32_t current = hash_table[bucket];
     while (current != 0xFFFFFFFF) {
-        if (build_hashes[current] == hash) {
+        // First check hash for fast filtering, then verify actual keys
+        if (build_hashes[current] == hash &&
+            keys_equal(probe_keys, build_keys, tid, current, key_bytes)) {
             has_match[tid] = 1;
             return;
         }
@@ -239,6 +279,9 @@ extern "C" __global__ void hash_join_semi(
  * @param build_hashes Build side hashes
  * @param next_ptrs Linked list next pointers
  * @param hash_table_size Number of buckets
+ * @param probe_keys Packed probe key data (row-major, key columns only)
+ * @param build_keys Packed build key data (row-major, key columns only)
+ * @param key_bytes Total bytes per key (sum of key column sizes)
  * @param no_match Output: 1 if no match, 0 otherwise
  */
 extern "C" __global__ void hash_join_anti(
@@ -248,6 +291,9 @@ extern "C" __global__ void hash_join_anti(
     const uint64_t* __restrict__ build_hashes,
     const uint32_t* __restrict__ next_ptrs,
     uint32_t hash_table_size,
+    const uint8_t* __restrict__ probe_keys,
+    const uint8_t* __restrict__ build_keys,
+    uint32_t key_bytes,
     uint8_t* __restrict__ no_match
 ) {
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -258,7 +304,9 @@ extern "C" __global__ void hash_join_anti(
 
     uint32_t current = hash_table[bucket];
     while (current != 0xFFFFFFFF) {
-        if (build_hashes[current] == hash) {
+        // First check hash for fast filtering, then verify actual keys
+        if (build_hashes[current] == hash &&
+            keys_equal(probe_keys, build_keys, tid, current, key_bytes)) {
             no_match[tid] = 0;
             return;
         }
