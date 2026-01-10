@@ -11,4 +11,4 @@ mod statistics;
 pub use executor::Executor;
 pub use profiler::{OpStats, Profiler};
 pub use relation::RelationStore;
-pub use statistics::{JoinStats, QueryStatistics};
+pub use statistics::{JoinStats, JoinStrategy, QueryStatistics};

@@ -1,6 +1,6 @@
 //! Tests for query statistics tracking
 
-use xlog_runtime::QueryStatistics;
+use xlog_runtime::{JoinStrategy, QueryStatistics};
 
 #[test]
 fn test_statistics_tracking() {
@@ -33,4 +33,21 @@ fn test_heat_calculation() {
     stats.record_scan("cold_table");
 
     assert!(stats.heat("hot_table") > stats.heat("cold_table"));
+}
+
+#[test]
+fn test_join_strategy_selection() {
+    let stats = QueryStatistics::new();
+
+    // Small table should use nested loop
+    let strategy = JoinStrategy::select(100, 10, None, &stats);
+    assert_eq!(strategy, JoinStrategy::NestedLoop);
+
+    // Large tables should use hash join
+    let strategy = JoinStrategy::select(10000, 10000, None, &stats);
+    assert_eq!(strategy, JoinStrategy::Hash);
+
+    // Pre-sorted should use sort-merge
+    let strategy = JoinStrategy::select(10000, 10000, Some(true), &stats);
+    assert_eq!(strategy, JoinStrategy::SortMerge);
 }

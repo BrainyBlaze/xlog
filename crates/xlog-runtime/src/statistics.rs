@@ -4,6 +4,45 @@
 
 use std::collections::HashMap;
 
+/// Join execution strategy
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinStrategy {
+    /// Hash join - build hash table on right, probe with left
+    Hash,
+    /// Nested loop join - for small right tables
+    NestedLoop,
+    /// Sort-merge join - for pre-sorted data
+    SortMerge,
+    /// Index nested loop - use existing index
+    IndexNestedLoop,
+}
+
+impl JoinStrategy {
+    /// Threshold for switching to nested loop (right table size)
+    const NESTED_LOOP_THRESHOLD: u64 = 1000;
+
+    /// Select optimal join strategy based on table sizes and data characteristics
+    pub fn select(
+        _left_rows: u64,
+        right_rows: u64,
+        pre_sorted: Option<bool>,
+        _stats: &QueryStatistics,
+    ) -> Self {
+        // If data is pre-sorted, sort-merge is efficient
+        if pre_sorted == Some(true) {
+            return JoinStrategy::SortMerge;
+        }
+
+        // For small right tables, nested loop avoids hash table overhead
+        if right_rows < Self::NESTED_LOOP_THRESHOLD {
+            return JoinStrategy::NestedLoop;
+        }
+
+        // Default to hash join
+        JoinStrategy::Hash
+    }
+}
+
 /// Statistics for a specific join pair
 #[derive(Debug, Clone, Default)]
 pub struct JoinStats {
