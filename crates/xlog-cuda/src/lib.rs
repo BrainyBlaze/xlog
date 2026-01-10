@@ -2,7 +2,6 @@
 
 pub mod device;
 pub mod device_pool;
-pub mod kernels;
 pub mod memory;
 pub mod multi_gpu_memory;
 pub mod provider;
