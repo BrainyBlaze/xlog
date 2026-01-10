@@ -135,3 +135,43 @@ fn test_create_buffer_from_slices_row_count_validation() {
     assert!(err_msg.contains("3 rows") && err_msg.contains("5 rows"),
         "Error message should mention the row count mismatch: {}", err_msg);
 }
+
+#[test]
+fn test_import_from_arrow_record_batch() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    use arrow::array::*;
+    use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
+
+    // Create an Arrow RecordBatch
+    let schema = Arc::new(ArrowSchema::new(vec![
+        Field::new("x", DataType::UInt32, false),
+        Field::new("y", DataType::Float64, false),
+    ]));
+
+    let x_array = Arc::new(UInt32Array::from(vec![10, 20, 30])) as Arc<dyn Array>;
+    let y_array = Arc::new(Float64Array::from(vec![1.5, 2.5, 3.5])) as Arc<dyn Array>;
+
+    let record_batch = arrow::record_batch::RecordBatch::try_new(
+        schema,
+        vec![x_array, y_array],
+    ).unwrap();
+
+    // Import into CudaBuffer
+    let buffer = provider.from_arrow_record_batch(&record_batch).unwrap();
+
+    assert_eq!(buffer.num_rows(), 3);
+    assert_eq!(buffer.arity(), 2);
+
+    // Verify data roundtrips correctly
+    let x_values = provider.download_column_u32(&buffer, 0).unwrap();
+    let y_values = provider.download_column_f64(&buffer, 1).unwrap();
+
+    assert_eq!(x_values, vec![10, 20, 30]);
+    assert!((y_values[0] - 1.5).abs() < 0.001);
+    assert!((y_values[1] - 2.5).abs() < 0.001);
+    assert!((y_values[2] - 3.5).abs() < 0.001);
+}

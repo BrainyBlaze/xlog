@@ -3459,6 +3459,95 @@ impl CudaKernelProvider {
             .map_err(|e| XlogError::Kernel(format!("Failed to create RecordBatch: {}", e)))
     }
 
+    /// Import Arrow RecordBatch to CudaBuffer
+    ///
+    /// Uploads Arrow data to GPU memory.
+    ///
+    /// # Arguments
+    /// * `record_batch` - The Arrow RecordBatch to import
+    ///
+    /// # Returns
+    /// A new CudaBuffer with the data on GPU
+    ///
+    /// # Errors
+    /// Returns error if Arrow type is not supported or upload fails
+    pub fn from_arrow_record_batch(
+        &self,
+        record_batch: &arrow::record_batch::RecordBatch,
+    ) -> Result<CudaBuffer> {
+        use arrow::array::*;
+        use arrow::datatypes::DataType;
+
+        let num_rows = record_batch.num_rows() as u64;
+
+        if num_rows == 0 {
+            let columns: Vec<(String, ScalarType)> = record_batch.schema().fields()
+                .iter()
+                .filter_map(|f| {
+                    ScalarType::from_arrow_type(f.data_type())
+                        .map(|st| (f.name().clone(), st))
+                })
+                .collect();
+            return self.create_empty_buffer(Schema::new(columns));
+        }
+
+        let device = self.device.inner();
+        let mut columns = Vec::with_capacity(record_batch.num_columns());
+        let mut schema_cols = Vec::with_capacity(record_batch.num_columns());
+
+        for (col_idx, field) in record_batch.schema().fields().iter().enumerate() {
+            let array = record_batch.column(col_idx);
+            let scalar_type = ScalarType::from_arrow_type(field.data_type())
+                .ok_or_else(|| XlogError::Kernel(format!(
+                    "Unsupported Arrow type: {:?}", field.data_type()
+                )))?;
+
+            let bytes: Vec<u8> = match field.data_type() {
+                DataType::Boolean => {
+                    let arr = array.as_any().downcast_ref::<BooleanArray>().unwrap();
+                    arr.iter().map(|v| if v.unwrap_or(false) { 1u8 } else { 0u8 }).collect()
+                }
+                DataType::UInt32 => {
+                    let arr = array.as_any().downcast_ref::<UInt32Array>().unwrap();
+                    arr.values().iter().flat_map(|v| v.to_le_bytes()).collect()
+                }
+                DataType::Int32 => {
+                    let arr = array.as_any().downcast_ref::<Int32Array>().unwrap();
+                    arr.values().iter().flat_map(|v| v.to_le_bytes()).collect()
+                }
+                DataType::UInt64 => {
+                    let arr = array.as_any().downcast_ref::<UInt64Array>().unwrap();
+                    arr.values().iter().flat_map(|v| v.to_le_bytes()).collect()
+                }
+                DataType::Int64 => {
+                    let arr = array.as_any().downcast_ref::<Int64Array>().unwrap();
+                    arr.values().iter().flat_map(|v| v.to_le_bytes()).collect()
+                }
+                DataType::Float32 => {
+                    let arr = array.as_any().downcast_ref::<Float32Array>().unwrap();
+                    arr.values().iter().flat_map(|v| v.to_le_bytes()).collect()
+                }
+                DataType::Float64 => {
+                    let arr = array.as_any().downcast_ref::<Float64Array>().unwrap();
+                    arr.values().iter().flat_map(|v| v.to_le_bytes()).collect()
+                }
+                _ => return Err(XlogError::Kernel(format!(
+                    "Unsupported Arrow type: {:?}", field.data_type()
+                ))),
+            };
+
+            let mut d_col = self.memory.alloc::<u8>(bytes.len())?;
+            device
+                .htod_sync_copy_into(&bytes, &mut d_col)
+                .map_err(|e| XlogError::Kernel(format!("Failed to upload column: {}", e)))?;
+
+            columns.push(d_col);
+            schema_cols.push((field.name().clone(), scalar_type));
+        }
+
+        Ok(CudaBuffer::from_columns(columns, num_rows, Schema::new(schema_cols)))
+    }
+
     /// Download a column from a CudaBuffer as Vec<u32>
     ///
     /// # Arguments
