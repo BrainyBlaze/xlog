@@ -3653,6 +3653,143 @@ impl CudaKernelProvider {
             .collect())
     }
 
+    /// Download a Bool column from GPU to host memory
+    ///
+    /// # Arguments
+    /// * `buffer` - The CudaBuffer containing the column
+    /// * `col_idx` - The column index to download
+    ///
+    /// # Returns
+    /// A Vec<bool> containing the column data
+    ///
+    /// # Errors
+    /// Returns `XlogError::Kernel` if:
+    /// - Column index is out of bounds
+    /// - Download fails
+    pub fn download_column_bool(&self, buffer: &CudaBuffer, col_idx: usize) -> Result<Vec<bool>> {
+        let col = buffer.column(col_idx).ok_or_else(|| {
+            XlogError::Kernel(format!("Column {} not found", col_idx))
+        })?;
+
+        if buffer.num_rows == 0 {
+            return Ok(vec![]);
+        }
+
+        let num_bytes = buffer.num_rows as usize;
+        let mut bytes = vec![0u8; num_bytes];
+        self.device
+            .inner()
+            .dtoh_sync_copy_into(col, &mut bytes)
+            .map_err(|e| XlogError::Kernel(format!("Failed to download column: {}", e)))?;
+
+        Ok(bytes.into_iter().map(|b| b != 0).collect())
+    }
+
+    /// Download an I32 column from GPU to host memory
+    ///
+    /// # Arguments
+    /// * `buffer` - The CudaBuffer containing the column
+    /// * `col_idx` - The column index to download
+    ///
+    /// # Returns
+    /// A Vec<i32> containing the column data
+    ///
+    /// # Errors
+    /// Returns `XlogError::Kernel` if:
+    /// - Column index is out of bounds
+    /// - Download fails
+    pub fn download_column_i32(&self, buffer: &CudaBuffer, col_idx: usize) -> Result<Vec<i32>> {
+        let col = buffer.column(col_idx).ok_or_else(|| {
+            XlogError::Kernel(format!("Column {} not found", col_idx))
+        })?;
+
+        if buffer.num_rows == 0 {
+            return Ok(vec![]);
+        }
+
+        let num_bytes = (buffer.num_rows as usize) * std::mem::size_of::<i32>();
+        let mut bytes = vec![0u8; num_bytes];
+        self.device
+            .inner()
+            .dtoh_sync_copy_into(col, &mut bytes)
+            .map_err(|e| XlogError::Kernel(format!("Failed to download column: {}", e)))?;
+
+        Ok(bytes
+            .chunks_exact(4)
+            .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect())
+    }
+
+    /// Download an I64 column from GPU to host memory
+    ///
+    /// # Arguments
+    /// * `buffer` - The CudaBuffer containing the column
+    /// * `col_idx` - The column index to download
+    ///
+    /// # Returns
+    /// A Vec<i64> containing the column data
+    ///
+    /// # Errors
+    /// Returns `XlogError::Kernel` if:
+    /// - Column index is out of bounds
+    /// - Download fails
+    pub fn download_column_i64(&self, buffer: &CudaBuffer, col_idx: usize) -> Result<Vec<i64>> {
+        let col = buffer.column(col_idx).ok_or_else(|| {
+            XlogError::Kernel(format!("Column {} not found", col_idx))
+        })?;
+
+        if buffer.num_rows == 0 {
+            return Ok(vec![]);
+        }
+
+        let num_bytes = (buffer.num_rows as usize) * std::mem::size_of::<i64>();
+        let mut bytes = vec![0u8; num_bytes];
+        self.device
+            .inner()
+            .dtoh_sync_copy_into(col, &mut bytes)
+            .map_err(|e| XlogError::Kernel(format!("Failed to download column: {}", e)))?;
+
+        Ok(bytes
+            .chunks_exact(8)
+            .map(|c| i64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
+            .collect())
+    }
+
+    /// Download an F32 column from GPU to host memory
+    ///
+    /// # Arguments
+    /// * `buffer` - The CudaBuffer containing the column
+    /// * `col_idx` - The column index to download
+    ///
+    /// # Returns
+    /// A Vec<f32> containing the column data
+    ///
+    /// # Errors
+    /// Returns `XlogError::Kernel` if:
+    /// - Column index is out of bounds
+    /// - Download fails
+    pub fn download_column_f32(&self, buffer: &CudaBuffer, col_idx: usize) -> Result<Vec<f32>> {
+        let col = buffer.column(col_idx).ok_or_else(|| {
+            XlogError::Kernel(format!("Column {} not found", col_idx))
+        })?;
+
+        if buffer.num_rows == 0 {
+            return Ok(vec![]);
+        }
+
+        let num_bytes = (buffer.num_rows as usize) * std::mem::size_of::<f32>();
+        let mut bytes = vec![0u8; num_bytes];
+        self.device
+            .inner()
+            .dtoh_sync_copy_into(col, &mut bytes)
+            .map_err(|e| XlogError::Kernel(format!("Failed to download column: {}", e)))?;
+
+        Ok(bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect())
+    }
+
     // ============== Internal Helper Methods ==============
 
     /// Transmute a CudaSlice<u8> column to a CudaView<u32> for kernel access
