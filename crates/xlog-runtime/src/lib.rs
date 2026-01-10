@@ -6,7 +6,9 @@
 pub mod executor;
 pub mod profiler;
 pub mod relation;
+mod statistics;
 
 pub use executor::Executor;
 pub use profiler::{OpStats, Profiler};
 pub use relation::RelationStore;
+pub use statistics::{JoinStats, QueryStatistics};
