@@ -800,9 +800,13 @@ impl CudaKernelProvider {
             return self.clone_buffer(a);
         }
 
-        // Verify schemas match
-        if a.schema() != b.schema() {
-            return Err(XlogError::Kernel("Union requires matching schemas".to_string()));
+        // Verify schemas have compatible types (ignore column names for Datalog union)
+        if !self.schemas_type_compatible(a.schema(), b.schema()) {
+            return Err(XlogError::Kernel(format!(
+                "Union requires compatible schemas: {:?} vs {:?}",
+                a.schema(),
+                b.schema()
+            )));
         }
 
         let total_rows = a.num_rows() + b.num_rows();
@@ -1074,9 +1078,13 @@ impl CudaKernelProvider {
             };
         }
 
-        // Verify schemas match
-        if a.schema() != b.schema() {
-            return Err(XlogError::Kernel("Union requires matching schemas".to_string()));
+        // Verify schemas have compatible types (ignore column names for Datalog union)
+        if !self.schemas_type_compatible(a.schema(), b.schema()) {
+            return Err(XlogError::Kernel(format!(
+                "Union requires compatible schemas: {:?} vs {:?}",
+                a.schema(),
+                b.schema()
+            )));
         }
 
         match col_type {
@@ -1362,11 +1370,9 @@ impl CudaKernelProvider {
 
     /// U32-optimized diff using GPU sort
     fn diff_gpu_u32(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
-        // For GPU diff, we only support single U32 column
+        // For multi-column U32 buffers, use anti-join on all columns
         if a.arity() != 1 {
-            return Err(XlogError::Kernel(
-                "GPU diff currently only supports single-column U32 buffers".to_string(),
-            ));
+            return self.diff_via_anti_join(a, b);
         }
 
         // Step 1: Sort and dedup both inputs (sorted, so use dedup_sorted)
@@ -1431,6 +1437,31 @@ impl CudaKernelProvider {
 
         // Step 4: Filter using existing filter_by_mask()
         self.filter_by_mask(&deduped_a, &mask_host)
+    }
+
+    /// Multi-column diff using anti-join
+    ///
+    /// Uses hash-based anti-join on all columns to compute set difference.
+    /// This is the appropriate algorithm for multi-column Datalog negation.
+    fn diff_via_anti_join(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
+        // Use all columns as join keys for set difference
+        let all_cols: Vec<usize> = (0..a.arity()).collect();
+
+        // Dedup both inputs first (set difference requires set semantics)
+        let deduped_a = self.dedup(a, &all_cols)?;
+        let deduped_b = self.dedup(b, &all_cols)?;
+
+        if deduped_a.is_empty() {
+            return self.create_empty_buffer(a.schema().clone());
+        }
+
+        if deduped_b.is_empty() {
+            return Ok(deduped_a);
+        }
+
+        // Anti-join: return rows from a that don't match any row in b
+        // Since we're doing set difference, all columns are keys
+        self.hash_join_v2(&deduped_a, &deduped_b, &all_cols, &all_cols, JoinType::Anti)
     }
 
     /// CPU-sort based diff for non-U32 types

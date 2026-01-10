@@ -5,7 +5,10 @@ COMMENT = _{ "//" ~ (!"\n" ~ ANY)* }
 
 // Identifiers
 ident = @{ ASCII_ALPHA_LOWER ~ (ASCII_ALPHANUMERIC | "_")* }
+// Variables: uppercase letter followed by alphanumerics, OR anonymous wildcard "_"
+anonymous = @{ "_" }
 variable = @{ ASCII_ALPHA_UPPER ~ (ASCII_ALPHANUMERIC | "_")* }
+var_or_anon = { anonymous | variable }
 
 // Literals
 integer = @{ "-"? ~ ASCII_DIGIT+ }
@@ -13,7 +16,7 @@ float_num = @{ "-"? ~ ASCII_DIGIT+ ~ "." ~ ASCII_DIGIT+ }
 string_lit = @{ "\"" ~ (!"\"" ~ ANY)* ~ "\"" }
 
 // Terms
-term = { variable | integer | float_num | string_lit | ident }
+term = { var_or_anon | integer | float_num | string_lit | ident }
 
 // Atoms
 atom = { ident ~ "(" ~ term_list? ~ ")" }

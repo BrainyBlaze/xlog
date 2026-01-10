@@ -311,45 +311,60 @@ fn test_rbac_permission_derivation() {
         }
     };
 
-    // Simplified RBAC: test basic role assignment and permission derivation
-    // Role IDs: Admin=1, Manager=2
-    // User IDs: Alice=10, Bob=11
-    // Resource IDs: Database=100
-    // Permission IDs: Read=1, Write=2
+    // Full RBAC: role hierarchy with permission inheritance
+    // Role IDs: Admin=1, Manager=2, Employee=3, Auditor=4
+    // User IDs: Alice=10, Bob=11, Carol=12, Diana=13
+    // Resource IDs: Database=100, Reports=101, Logs=102
+    // Permission IDs: Read=1, Write=2, Delete=3
     //
-    // Test pattern: compute derived permissions from role hierarchy
+    // Hierarchy: Admin(1) <- Manager(2) <- Employee(3)
+    //                     <- Auditor(4)
     let source = r#"
-        // Role hierarchy: Manager inherits from Admin (role 2 inherits from role 1)
+        // Role hierarchy: child inherits from parent
         inherits(2, 1).
+        inherits(3, 2).
+        inherits(4, 2).
 
         // Direct user-role assignments
         user_role(10, 1).
         user_role(11, 2).
+        user_role(12, 3).
+        user_role(13, 4).
 
-        // Direct role permissions
-        role_perm(1, 100, 2).
-        role_perm(2, 100, 1).
+        // Direct role permissions: role_perm(role, resource, permission)
+        role_perm(1, 100, 3).
+        role_perm(2, 100, 2).
+        role_perm(3, 100, 1).
+        role_perm(2, 101, 2).
+        role_perm(3, 101, 1).
+        role_perm(4, 102, 1).
 
         // Role hierarchy (transitive)
         has_role(Child, Parent) :- inherits(Child, Parent).
         has_role(Child, Ancestor) :- has_role(Child, Parent), inherits(Parent, Ancestor).
 
-        // Inherited roles through hierarchy: user gets parent roles
-        inherited_role(U, ParentRole) :- user_role(U, R), has_role(R, ParentRole).
+        // User's effective roles: direct role
+        effective_role(U, R) :- user_role(U, R).
+        // User's effective roles: inherited roles through hierarchy
+        effective_role(U, ParentRole) :- user_role(U, R), has_role(R, ParentRole).
 
-        // User permissions from their direct role
-        direct_perm(U, Res, Perm) :- user_role(U, R), role_perm(R, Res, Perm).
-
-        // User permissions from inherited roles
-        inherited_perm(U, Res, Perm) :- inherited_role(U, R), role_perm(R, Res, Perm).
+        // User has permission if any of their effective roles grants it
+        user_perm(U, Res, Perm) :- effective_role(U, R), role_perm(R, Res, Perm).
     "#;
 
     let mut compiler = Compiler::new();
     let plan = compiler.compile(source).expect("Compilation failed");
 
-    let inherits = vec![(2, 1)];
-    let user_role = vec![(10, 1), (11, 2)];
-    let role_perm = vec![(1, 100, 2), (2, 100, 1)];
+    let inherits = vec![(2, 1), (3, 2), (4, 2)];
+    let user_role = vec![(10, 1), (11, 2), (12, 3), (13, 4)];
+    let role_perm = vec![
+        (1, 100, 3), // Admin: Delete Database
+        (2, 100, 2), // Manager: Write Database
+        (3, 100, 1), // Employee: Read Database
+        (2, 101, 2), // Manager: Write Reports
+        (3, 101, 1), // Employee: Read Reports
+        (4, 102, 1), // Auditor: Read Logs
+    ];
 
     let inherits_buf = create_edge_buffer(&provider, &inherits);
     let user_role_buf = create_edge_buffer(&provider, &user_role);
@@ -363,46 +378,55 @@ fn test_rbac_permission_derivation() {
 
     executor.execute_plan(&plan).expect("Execution failed");
 
-    // Debug: print all computed relations
-    println!("has_role: {:?}", executor.store().get("has_role").map(|b| read_pairs(&provider, b)));
-    println!("inherited_role: {:?}", executor.store().get("inherited_role").map(|b| read_pairs(&provider, b)));
-    println!("direct_perm: {:?}", executor.store().get("direct_perm").map(|b| read_triples(&provider, b)));
-    println!("inherited_perm: {:?}", executor.store().get("inherited_perm").map(|b| read_triples(&provider, b)));
+    // Check effective roles
+    if let Some(effective_role) = executor.store().get("effective_role") {
+        let roles = read_pairs(&provider, effective_role);
+        let alice_roles: HashSet<u32> = roles.iter()
+            .filter(|(u, _)| *u == 10)
+            .map(|(_, r)| *r)
+            .collect();
 
-    // Check direct permissions for Alice
-    if let Some(direct_perm) = executor.store().get("direct_perm") {
-        let perms = read_triples(&provider, direct_perm);
+        println!("Alice's effective roles: {:?}", alice_roles);
 
-        // Alice (10) has Admin (1), which has Write (2) on Database (100)
+        // Alice (Admin) should have Admin role directly
+        assert!(alice_roles.contains(&1), "Alice should have Admin role");
+
+        // Bob (Manager) should have Manager (2) and Admin (1) through inheritance
+        let bob_roles: HashSet<u32> = roles.iter()
+            .filter(|(u, _)| *u == 11)
+            .map(|(_, r)| *r)
+            .collect();
+        println!("Bob's effective roles: {:?}", bob_roles);
+        assert!(bob_roles.contains(&2), "Bob should have Manager role");
+        assert!(bob_roles.contains(&1), "Bob should have Admin role (inherited)");
+
+        // Carol (Employee) should have Employee (3), Manager (2), and Admin (1)
+        let carol_roles: HashSet<u32> = roles.iter()
+            .filter(|(u, _)| *u == 12)
+            .map(|(_, r)| *r)
+            .collect();
+        println!("Carol's effective roles: {:?}", carol_roles);
+        assert!(carol_roles.contains(&3), "Carol should have Employee role");
+        assert!(carol_roles.contains(&2), "Carol should have Manager role (inherited)");
+        assert!(carol_roles.contains(&1), "Carol should have Admin role (inherited)");
+    } else {
+        panic!("effective_role relation not found");
+    }
+
+    // Check user permissions
+    if let Some(user_perm) = executor.store().get("user_perm") {
+        let perms = read_triples(&provider, user_perm);
+
+        // Alice (10) should have Delete (3) on Database (100) from Admin role
         let alice_db_perms: HashSet<u32> = perms.iter()
             .filter(|(u, res, _)| *u == 10 && *res == 100)
             .map(|(_, _, p)| *p)
             .collect();
 
-        println!("Alice's direct Database permissions: {:?}", alice_db_perms);
-
-        // Alice should have Write permission (2) from Admin role
-        assert!(alice_db_perms.contains(&2), "Alice should have Write on Database");
+        println!("Alice's Database permissions: {:?}", alice_db_perms);
+        assert!(alice_db_perms.contains(&3), "Alice should have Delete on Database");
     } else {
-        panic!("direct_perm relation not found");
-    }
-
-    // Check inherited permissions for Bob
-    if let Some(inherited_perm) = executor.store().get("inherited_perm") {
-        let perms = read_triples(&provider, inherited_perm);
-
-        // Bob (11) has Manager (2), which inherits Admin (1), which has Write (2)
-        let bob_db_perms: HashSet<u32> = perms.iter()
-            .filter(|(u, res, _)| *u == 11 && *res == 100)
-            .map(|(_, _, p)| *p)
-            .collect();
-
-        println!("Bob's inherited Database permissions: {:?}", bob_db_perms);
-
-        // Bob should have Write permission (2) inherited from Admin
-        assert!(bob_db_perms.contains(&2), "Bob should have inherited Write on Database");
-    } else {
-        panic!("inherited_perm relation not found");
+        panic!("user_perm relation not found");
     }
 }
 

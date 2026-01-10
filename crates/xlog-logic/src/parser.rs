@@ -339,7 +339,18 @@ fn build_term(pair: Pair<'_, Rule>) -> Result<Term> {
     };
 
     match inner.as_rule() {
+        Rule::var_or_anon => {
+            // Unwrap var_or_anon to get either anonymous or variable
+            let var_inner = inner.into_inner().next()
+                .ok_or_else(|| XlogError::Parse("Empty var_or_anon".to_string()))?;
+            match var_inner.as_rule() {
+                Rule::anonymous => Ok(Term::Anonymous),
+                Rule::variable => Ok(Term::Variable(var_inner.as_str().to_string())),
+                _ => Err(XlogError::Parse(format!("Expected variable or anonymous, got: {:?}", var_inner.as_rule()))),
+            }
+        }
         Rule::variable => Ok(Term::Variable(inner.as_str().to_string())),
+        Rule::anonymous => Ok(Term::Anonymous),
         Rule::integer => {
             let val: i64 = inner.as_str().parse()
                 .map_err(|_| XlogError::Parse(format!("Invalid integer: {}", inner.as_str())))?;
@@ -502,5 +513,44 @@ mod tests {
         assert_eq!(program.predicates[0].types.len(), 2);
         assert_eq!(program.predicates[0].types[0], ScalarType::U32);
         assert_eq!(program.predicates[0].types[1], ScalarType::U32);
+    }
+
+    #[test]
+    fn test_parse_anonymous_wildcard() {
+        // Test anonymous wildcard in body
+        let input = "has_child(X) :- parent(X, _).";
+        let result = parse_program(input);
+        assert!(result.is_ok(), "Failed to parse anonymous wildcard: {:?}", result.err());
+
+        let program = result.unwrap();
+        assert_eq!(program.rules.len(), 1);
+        let rule = &program.rules[0];
+        assert_eq!(rule.head.predicate, "has_child");
+
+        // Check body atom has anonymous term
+        if let BodyLiteral::Positive(atom) = &rule.body[0] {
+            assert_eq!(atom.predicate, "parent");
+            assert_eq!(atom.terms.len(), 2);
+            assert_eq!(atom.terms[0], Term::Variable("X".to_string()));
+            assert_eq!(atom.terms[1], Term::Anonymous);
+        } else {
+            panic!("Expected positive atom");
+        }
+    }
+
+    #[test]
+    fn test_parse_multiple_wildcards() {
+        // Multiple wildcards in same rule - each is independent
+        let input = "exists(X) :- rel(X, _, _).";
+        let result = parse_program(input);
+        assert!(result.is_ok(), "Failed to parse multiple wildcards: {:?}", result.err());
+
+        let program = result.unwrap();
+        if let BodyLiteral::Positive(atom) = &program.rules[0].body[0] {
+            assert_eq!(atom.terms.len(), 3);
+            assert_eq!(atom.terms[0], Term::Variable("X".to_string()));
+            assert_eq!(atom.terms[1], Term::Anonymous);
+            assert_eq!(atom.terms[2], Term::Anonymous);
+        }
     }
 }

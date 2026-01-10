@@ -506,6 +506,9 @@ impl Lowerer {
                     )))
                 }
             }
+            Term::Anonymous => Err(XlogError::Compilation(
+                "Anonymous wildcard '_' not allowed in comparisons".to_string(),
+            )),
             Term::Integer(i) => Ok(Expr::Const(ConstValue::I64(*i))),
             Term::Float(f) => Ok(Expr::Const(ConstValue::F64(*f))),
             Term::String(s) => Ok(Expr::Const(ConstValue::Symbol(s.clone()))),
@@ -605,6 +608,12 @@ impl Lowerer {
                         return Err(XlogError::UnsafeVariable(name.clone()));
                     }
                 }
+                Term::Anonymous => {
+                    // Anonymous wildcard in head is a semantic error
+                    return Err(XlogError::Compilation(
+                        "Anonymous wildcard '_' not allowed in rule head".to_string(),
+                    ));
+                }
                 Term::Aggregate(agg) => {
                     // For aggregates, we need the column of the aggregated variable
                     if let Some(col) = var_env.get_column(&agg.variable) {
@@ -659,7 +668,7 @@ impl VariableEnv {
 /// Infer the type of a term
 fn infer_term_type(term: &Term) -> ScalarType {
     match term {
-        Term::Variable(_) => ScalarType::U64, // Default for variables
+        Term::Variable(_) | Term::Anonymous => ScalarType::U64, // Default for variables
         Term::Integer(i) => {
             if *i >= 0 && *i <= u32::MAX as i64 {
                 ScalarType::U32
@@ -680,7 +689,7 @@ fn term_to_const_value(term: &Term) -> Option<ConstValue> {
         Term::Float(f) => Some(ConstValue::F64(*f)),
         Term::String(s) => Some(ConstValue::Symbol(s.clone())),
         Term::Symbol(s) => Some(ConstValue::Symbol(s.clone())),
-        Term::Variable(_) | Term::Aggregate(_) => None,
+        Term::Variable(_) | Term::Anonymous | Term::Aggregate(_) => None,
     }
 }
 

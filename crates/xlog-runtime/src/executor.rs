@@ -200,10 +200,29 @@ impl Executor {
                     // Recursive SCC: use semi-naive fixpoint iteration
                     self.execute_recursive_scc(rules)?;
                 } else {
-                    // Non-recursive SCC: execute rules once
+                    // Non-recursive SCC: execute rules once, union results for same predicate
                     for rule in rules {
                         let result = self.execute_node(&rule.body)?;
-                        self.store.put(&rule.head, result);
+
+                        // Union with existing result if predicate already has data
+                        if let Some(existing) = self.store.get(&rule.head) {
+                            let merged = self.provider.union(existing, &result)?;
+                            let key_cols: Vec<usize> = (0..merged.arity()).collect();
+                            let deduped = if merged.is_empty() {
+                                merged
+                            } else {
+                                self.provider.dedup(&merged, &key_cols)?
+                            };
+                            self.store.put(&rule.head, deduped);
+                        } else {
+                            let key_cols: Vec<usize> = (0..result.arity()).collect();
+                            let deduped = if result.is_empty() {
+                                result
+                            } else {
+                                self.provider.dedup(&result, &key_cols)?
+                            };
+                            self.store.put(&rule.head, deduped);
+                        }
                     }
                 }
             }
@@ -223,17 +242,31 @@ impl Executor {
     /// 3. Re-execute rules, using delta from previous iteration
     /// 4. Repeat until no changes (fixpoint reached)
     fn execute_recursive_scc(&mut self, rules: &[xlog_ir::CompiledRule]) -> Result<()> {
-        // Step 1: Execute all rules once to get initial results, with dedup
+        // Step 1: Execute all rules once to get initial results
+        // Important: Union results for rules with the same head predicate
         for rule in rules {
             let result = self.execute_node(&rule.body)?;
-            // Dedup to avoid duplicates in initial result
-            let key_cols: Vec<usize> = (0..result.arity()).collect();
-            let deduped = if result.is_empty() {
-                result
+
+            // Union with existing result if predicate already has data
+            if let Some(existing) = self.store.get(&rule.head) {
+                let merged = self.provider.union(existing, &result)?;
+                let key_cols: Vec<usize> = (0..merged.arity()).collect();
+                let deduped = if merged.is_empty() {
+                    merged
+                } else {
+                    self.provider.dedup(&merged, &key_cols)?
+                };
+                self.store.put(&rule.head, deduped);
             } else {
-                self.provider.dedup(&result, &key_cols)?
-            };
-            self.store.put(&rule.head, deduped);
+                // Dedup to avoid duplicates in initial result
+                let key_cols: Vec<usize> = (0..result.arity()).collect();
+                let deduped = if result.is_empty() {
+                    result
+                } else {
+                    self.provider.dedup(&result, &key_cols)?
+                };
+                self.store.put(&rule.head, deduped);
+            }
         }
 
         // Step 2: Iterate until fixpoint

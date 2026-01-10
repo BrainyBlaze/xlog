@@ -6,6 +6,8 @@ use xlog_core::ScalarType;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Term {
     Variable(String),
+    /// Anonymous wildcard `_` - each occurrence is a fresh unnamed variable
+    Anonymous,
     Integer(i64),
     Float(f64),
     String(String),
@@ -18,10 +20,21 @@ impl Term {
         matches!(self, Term::Variable(_))
     }
 
-    pub fn is_constant(&self) -> bool {
-        !self.is_variable() && !matches!(self, Term::Aggregate(_))
+    /// Returns true if this is an anonymous wildcard `_`
+    pub fn is_anonymous(&self) -> bool {
+        matches!(self, Term::Anonymous)
     }
 
+    /// Returns true if this is any kind of variable (named or anonymous)
+    pub fn is_any_variable(&self) -> bool {
+        matches!(self, Term::Variable(_) | Term::Anonymous)
+    }
+
+    pub fn is_constant(&self) -> bool {
+        !self.is_any_variable() && !matches!(self, Term::Aggregate(_))
+    }
+
+    /// Returns the variable name, or None for anonymous/constants
     pub fn variable_name(&self) -> Option<&str> {
         match self {
             Term::Variable(name) => Some(name),
