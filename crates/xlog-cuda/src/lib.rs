@@ -1,11 +1,13 @@
 //! GPU kernel provider for XLOG
 
 pub mod device;
+pub mod device_pool;
 pub mod kernels;
 pub mod memory;
 pub mod provider;
 
 pub use device::CudaDevice;
+pub use device_pool::GpuDevicePool;
 pub use memory::{CudaBuffer, GpuMemoryManager};
 pub use provider::{
     dedup_kernels, filter_kernels, groupby_kernels, join_kernels, scan_kernels, sort_kernels,
