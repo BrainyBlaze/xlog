@@ -28,6 +28,36 @@ impl ScalarType {
     pub fn is_numeric(&self) -> bool {
         !matches!(self, ScalarType::Bool | ScalarType::Symbol)
     }
+
+    /// Convert to Arrow DataType
+    pub fn to_arrow_type(&self) -> arrow::datatypes::DataType {
+        use arrow::datatypes::DataType;
+        match self {
+            ScalarType::Bool => DataType::Boolean,
+            ScalarType::U32 => DataType::UInt32,
+            ScalarType::I32 => DataType::Int32,
+            ScalarType::U64 => DataType::UInt64,
+            ScalarType::I64 => DataType::Int64,
+            ScalarType::F32 => DataType::Float32,
+            ScalarType::F64 => DataType::Float64,
+            ScalarType::Symbol => DataType::UInt32, // Symbols are interned u32
+        }
+    }
+
+    /// Create from Arrow DataType
+    pub fn from_arrow_type(dt: &arrow::datatypes::DataType) -> Option<Self> {
+        use arrow::datatypes::DataType;
+        match dt {
+            DataType::Boolean => Some(ScalarType::Bool),
+            DataType::UInt32 => Some(ScalarType::U32),
+            DataType::Int32 => Some(ScalarType::I32),
+            DataType::UInt64 => Some(ScalarType::U64),
+            DataType::Int64 => Some(ScalarType::I64),
+            DataType::Float32 => Some(ScalarType::F32),
+            DataType::Float64 => Some(ScalarType::F64),
+            _ => None,
+        }
+    }
 }
 
 /// Schema describing a relation's columns
@@ -115,5 +145,54 @@ mod tests {
             key_columns: vec![0, 1, 2],
         };
         assert_eq!(schema.arity(), 3);
+    }
+
+    #[test]
+    fn test_arrow_type_roundtrip() {
+        use arrow::datatypes::DataType;
+
+        // Test all scalar types convert to expected Arrow types
+        assert_eq!(ScalarType::Bool.to_arrow_type(), DataType::Boolean);
+        assert_eq!(ScalarType::U32.to_arrow_type(), DataType::UInt32);
+        assert_eq!(ScalarType::I32.to_arrow_type(), DataType::Int32);
+        assert_eq!(ScalarType::U64.to_arrow_type(), DataType::UInt64);
+        assert_eq!(ScalarType::I64.to_arrow_type(), DataType::Int64);
+        assert_eq!(ScalarType::F32.to_arrow_type(), DataType::Float32);
+        assert_eq!(ScalarType::F64.to_arrow_type(), DataType::Float64);
+        assert_eq!(ScalarType::Symbol.to_arrow_type(), DataType::UInt32);
+
+        // Test roundtrip conversion (except Symbol which maps to UInt32)
+        assert_eq!(
+            ScalarType::from_arrow_type(&ScalarType::Bool.to_arrow_type()),
+            Some(ScalarType::Bool)
+        );
+        assert_eq!(
+            ScalarType::from_arrow_type(&ScalarType::U32.to_arrow_type()),
+            Some(ScalarType::U32)
+        );
+        assert_eq!(
+            ScalarType::from_arrow_type(&ScalarType::I32.to_arrow_type()),
+            Some(ScalarType::I32)
+        );
+        assert_eq!(
+            ScalarType::from_arrow_type(&ScalarType::U64.to_arrow_type()),
+            Some(ScalarType::U64)
+        );
+        assert_eq!(
+            ScalarType::from_arrow_type(&ScalarType::I64.to_arrow_type()),
+            Some(ScalarType::I64)
+        );
+        assert_eq!(
+            ScalarType::from_arrow_type(&ScalarType::F32.to_arrow_type()),
+            Some(ScalarType::F32)
+        );
+        assert_eq!(
+            ScalarType::from_arrow_type(&ScalarType::F64.to_arrow_type()),
+            Some(ScalarType::F64)
+        );
+
+        // Test unsupported Arrow types return None
+        assert_eq!(ScalarType::from_arrow_type(&DataType::Utf8), None);
+        assert_eq!(ScalarType::from_arrow_type(&DataType::Date32), None);
     }
 }
