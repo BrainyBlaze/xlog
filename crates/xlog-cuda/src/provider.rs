@@ -5560,7 +5560,7 @@ mod tests {
     }
 
     #[test]
-    fn test_union_schema_mismatch() {
+    fn test_union_schema_type_mismatch() {
         let provider = match create_test_provider() {
             Some(p) => p,
             None => {
@@ -5572,8 +5572,20 @@ mod tests {
         let a = create_test_buffer(&provider, &[1, 2], "col_a");
         let b = create_test_buffer(&provider, &[3, 4], "col_b");
 
-        // Different column names should fail
+        // Different column names but same types should succeed (Datalog union semantics)
         let result = provider.union(&a, &b);
+        assert!(result.is_ok());
+
+        // Different arity should fail - create a 2-column buffer
+        let two_col_schema = Schema::new(vec![
+            ("x".to_string(), ScalarType::U32),
+            ("y".to_string(), ScalarType::U32),
+        ]);
+        let c = provider.create_buffer_from_u32_columns(
+            &[&[1, 2], &[3, 4]],
+            two_col_schema,
+        ).unwrap();
+        let result = provider.union(&a, &c);
         assert!(result.is_err());
     }
 
