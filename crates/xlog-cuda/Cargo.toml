@@ -7,3 +7,6 @@ edition.workspace = true
 xlog-core = { path = "../xlog-core" }
 cudarc.workspace = true
 arrow = { version = "53", default-features = false, features = ["ffi"] }
+
+[dev-dependencies]
+bytemuck = "1.14"

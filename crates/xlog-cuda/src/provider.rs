@@ -3279,6 +3279,186 @@ impl CudaKernelProvider {
         ))
     }
 
+    /// Create a buffer from multiple column slices (raw bytes)
+    ///
+    /// This is a generic version that works with any column type by accepting
+    /// raw byte slices. Each slice should contain the column data in little-endian
+    /// format with the correct size for the column's type.
+    ///
+    /// # Arguments
+    /// * `slices` - Slice of raw byte slices, one per column
+    /// * `schema` - The schema for the buffer
+    ///
+    /// # Returns
+    /// A new CudaBuffer containing all columns
+    ///
+    /// # Errors
+    /// Returns `XlogError::Kernel` if:
+    /// - Number of slices doesn't match schema arity
+    /// - Upload fails
+    pub fn create_buffer_from_slices(
+        &self,
+        slices: &[&[u8]],
+        schema: Schema,
+    ) -> Result<CudaBuffer> {
+        if slices.len() != schema.arity() {
+            return Err(XlogError::Kernel(format!(
+                "Slice count {} doesn't match schema arity {}",
+                slices.len(),
+                schema.arity()
+            )));
+        }
+
+        if slices.is_empty() {
+            return self.create_empty_buffer(schema);
+        }
+
+        let first_col_size = schema.column_type(0)
+            .map(|t| t.size_bytes())
+            .unwrap_or(4);
+        let num_rows = slices[0].len() / first_col_size;
+
+        // Validate that all columns have consistent row counts
+        for (i, slice) in slices.iter().enumerate() {
+            let col_size = schema.column_type(i)
+                .map(|t| t.size_bytes())
+                .unwrap_or(4);
+            let col_rows = slice.len() / col_size;
+            if col_rows != num_rows {
+                return Err(XlogError::Kernel(format!(
+                    "Column {} has {} rows but expected {} rows (based on first column)",
+                    i, col_rows, num_rows
+                )));
+            }
+            // Also verify the slice length is exactly divisible by the type size
+            if slice.len() % col_size != 0 {
+                return Err(XlogError::Kernel(format!(
+                    "Column {} slice length {} is not divisible by type size {}",
+                    i, slice.len(), col_size
+                )));
+            }
+        }
+
+        let mut columns = Vec::with_capacity(slices.len());
+
+        for (i, slice) in slices.iter().enumerate() {
+            let mut col = self.memory.alloc::<u8>(slice.len())?;
+            self.device
+                .inner()
+                .htod_sync_copy_into(slice, &mut col)
+                .map_err(|e| XlogError::Kernel(format!("Failed to upload column {}: {}", i, e)))?;
+            columns.push(col);
+        }
+
+        Ok(CudaBuffer::from_columns(columns, num_rows as u64, schema))
+    }
+
+    /// Export CudaBuffer to Arrow RecordBatch
+    ///
+    /// Downloads data from GPU and converts it to an Arrow RecordBatch for
+    /// interoperability with Arrow-based tools like cuDF, Polars, or DuckDB.
+    ///
+    /// # Arguments
+    /// * `buffer` - The CudaBuffer to export
+    ///
+    /// # Returns
+    /// An Arrow RecordBatch containing all columns from the buffer
+    ///
+    /// # Errors
+    /// Returns `XlogError::Kernel` if:
+    /// - Column download fails
+    /// - RecordBatch creation fails
+    pub fn to_arrow_record_batch(
+        &self,
+        buffer: &CudaBuffer,
+    ) -> Result<arrow::record_batch::RecordBatch> {
+        use arrow::array::*;
+        use arrow::datatypes::{Field, Schema as ArrowSchema};
+
+        let num_rows = buffer.num_rows as usize;
+
+        let fields: Vec<Field> = buffer.schema.columns.iter()
+            .map(|(name, scalar_type)| {
+                Field::new(name, scalar_type.to_arrow_type(), false)
+            })
+            .collect();
+        let arrow_schema = Arc::new(ArrowSchema::new(fields));
+
+        let mut arrays: Vec<Arc<dyn Array>> = Vec::with_capacity(buffer.arity());
+
+        for (col_idx, (_, scalar_type)) in buffer.schema.columns.iter().enumerate() {
+            let col = buffer.column(col_idx)
+                .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
+
+            // Handle empty buffer case
+            if num_rows == 0 {
+                let array: Arc<dyn Array> = match scalar_type {
+                    ScalarType::Bool => Arc::new(BooleanArray::from(Vec::<bool>::new())),
+                    ScalarType::U32 | ScalarType::Symbol => Arc::new(UInt32Array::from(Vec::<u32>::new())),
+                    ScalarType::I32 => Arc::new(Int32Array::from(Vec::<i32>::new())),
+                    ScalarType::U64 => Arc::new(UInt64Array::from(Vec::<u64>::new())),
+                    ScalarType::I64 => Arc::new(Int64Array::from(Vec::<i64>::new())),
+                    ScalarType::F32 => Arc::new(Float32Array::from(Vec::<f32>::new())),
+                    ScalarType::F64 => Arc::new(Float64Array::from(Vec::<f64>::new())),
+                };
+                arrays.push(array);
+                continue;
+            }
+
+            let mut bytes = vec![0u8; col.len()];
+            self.device.inner()
+                .dtoh_sync_copy_into(col, &mut bytes)
+                .map_err(|e| XlogError::Kernel(format!("Failed to download column: {}", e)))?;
+
+            let array: Arc<dyn Array> = match scalar_type {
+                ScalarType::Bool => {
+                    Arc::new(BooleanArray::from(bytes.iter().map(|&b| b != 0).collect::<Vec<_>>()))
+                }
+                ScalarType::U32 | ScalarType::Symbol => {
+                    let values: Vec<u32> = bytes.chunks_exact(4)
+                        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                        .collect();
+                    Arc::new(UInt32Array::from(values))
+                }
+                ScalarType::I32 => {
+                    let values: Vec<i32> = bytes.chunks_exact(4)
+                        .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                        .collect();
+                    Arc::new(Int32Array::from(values))
+                }
+                ScalarType::U64 => {
+                    let values: Vec<u64> = bytes.chunks_exact(8)
+                        .map(|c| u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
+                        .collect();
+                    Arc::new(UInt64Array::from(values))
+                }
+                ScalarType::I64 => {
+                    let values: Vec<i64> = bytes.chunks_exact(8)
+                        .map(|c| i64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
+                        .collect();
+                    Arc::new(Int64Array::from(values))
+                }
+                ScalarType::F32 => {
+                    let values: Vec<f32> = bytes.chunks_exact(4)
+                        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                        .collect();
+                    Arc::new(Float32Array::from(values))
+                }
+                ScalarType::F64 => {
+                    let values: Vec<f64> = bytes.chunks_exact(8)
+                        .map(|c| f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
+                        .collect();
+                    Arc::new(Float64Array::from(values))
+                }
+            };
+
+            arrays.push(array);
+        }
+
+        arrow::record_batch::RecordBatch::try_new(arrow_schema, arrays)
+            .map_err(|e| XlogError::Kernel(format!("Failed to create RecordBatch: {}", e)))
+    }
+
     /// Download a column from a CudaBuffer as Vec<u32>
     ///
     /// # Arguments
