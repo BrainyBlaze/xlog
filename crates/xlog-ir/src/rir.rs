@@ -1,6 +1,6 @@
 //! Relational IR node definitions
 
-use xlog_core::{AggOp, RelId};
+use xlog_core::{AggOp, RelId, ScalarType};
 
 /// Join type variants
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,7 +16,7 @@ pub enum JoinType {
 }
 
 /// Expression in filter predicates
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     /// Column reference by index
     Column(usize),
@@ -34,6 +34,39 @@ pub enum Expr {
     Or(Vec<Expr>),
     /// Logical NOT
     Not(Box<Expr>),
+
+    // Arithmetic operations
+    /// Addition
+    Add(Box<Expr>, Box<Expr>),
+    /// Subtraction
+    Sub(Box<Expr>, Box<Expr>),
+    /// Multiplication
+    Mul(Box<Expr>, Box<Expr>),
+    /// Division
+    Div(Box<Expr>, Box<Expr>),
+    /// Modulo
+    Mod(Box<Expr>, Box<Expr>),
+
+    // Built-in functions
+    /// Absolute value
+    Abs(Box<Expr>),
+    /// Minimum of two values
+    Min(Box<Expr>, Box<Expr>),
+    /// Maximum of two values
+    Max(Box<Expr>, Box<Expr>),
+    /// Power (base, exponent)
+    Pow(Box<Expr>, Box<Expr>),
+    /// Type cast
+    Cast(Box<Expr>, ScalarType),
+}
+
+/// Projection expression - either pass-through column or computed value
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProjectExpr {
+    /// Pass through column at given index
+    Column(usize),
+    /// Compute expression, result has given type
+    Computed(Expr, ScalarType),
 }
 
 /// Comparison operators
@@ -48,7 +81,7 @@ pub enum CompareOp {
 }
 
 /// Constant values in expressions
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ConstValue {
     U32(u32),
     U64(u64),
@@ -179,6 +212,7 @@ impl RirNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use xlog_core::ScalarType;
 
     #[test]
     fn test_scan_node() {
@@ -232,5 +266,23 @@ mod tests {
         if let RirNode::Join { join_type, .. } = anti {
             assert_eq!(join_type, JoinType::Anti);
         }
+    }
+
+    #[test]
+    fn test_expr_arithmetic() {
+        let expr = Expr::Add(
+            Box::new(Expr::Column(0)),
+            Box::new(Expr::Const(ConstValue::I64(1))),
+        );
+        assert!(matches!(expr, Expr::Add(_, _)));
+    }
+
+    #[test]
+    fn test_project_expr_computed() {
+        let proj = ProjectExpr::Computed(
+            Expr::Add(Box::new(Expr::Column(0)), Box::new(Expr::Const(ConstValue::I64(1)))),
+            ScalarType::I64,
+        );
+        assert!(matches!(proj, ProjectExpr::Computed(_, _)));
     }
 }
