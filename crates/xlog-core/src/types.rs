@@ -98,7 +98,7 @@ impl Schema {
 }
 
 /// Unique identifier for a relation
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RelId(pub u32);
 
 /// Aggregation operations supported
