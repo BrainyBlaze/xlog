@@ -9,8 +9,8 @@ use pest_derive::Parser;
 use xlog_core::{ScalarType, XlogError, Result};
 
 use crate::ast::{
-    AggExpr, AggOp, Atom, BodyLiteral, CompOp, Comparison, Constraint,
-    DomainDecl, PredDecl, Program, Query, Rule as AstRule, Term,
+    AggExpr, AggOp, ArithExpr, Atom, BodyLiteral, CompOp, Comparison, Constraint,
+    DomainDecl, IsExpr, PredDecl, Program, Query, Rule as AstRule, Term,
 };
 
 #[derive(Parser)]
@@ -297,6 +297,9 @@ fn build_body_literal(pair: Pair<'_, Rule>) -> Result<BodyLiteral> {
         Rule::comparison => {
             Ok(BodyLiteral::Comparison(build_comparison(inner)?))
         }
+        Rule::is_expr => {
+            Ok(BodyLiteral::IsExpr(build_is_expr(inner)?))
+        }
         _ => Err(XlogError::Parse(format!("Unknown body literal: {:?}", inner.as_rule()))),
     }
 }
@@ -370,6 +373,161 @@ fn build_term(pair: Pair<'_, Rule>) -> Result<Term> {
         Rule::ident => Ok(Term::Symbol(inner.as_str().to_string())),
         _ => Err(XlogError::Parse(format!("Unknown term type: {:?}", inner.as_rule()))),
     }
+}
+
+/// Build an arithmetic expression (handles additive operations + -)
+/// Grammar: arith_expr = { arith_term ~ (arith_op_add ~ arith_term)* }
+fn build_arith_expr(pair: Pair<'_, Rule>) -> Result<ArithExpr> {
+    let mut inner = pair.into_inner();
+
+    // First operand is always an arith_term
+    let first = inner.next()
+        .ok_or_else(|| XlogError::Parse("Empty arithmetic expression".to_string()))?;
+    let mut result = build_arith_term(first)?;
+
+    // Process remaining (operator, operand) pairs
+    while let Some(op_pair) = inner.next() {
+        let op_str = op_pair.as_str();
+        let right_pair = inner.next()
+            .ok_or_else(|| XlogError::Parse("Missing right operand in arith expression".to_string()))?;
+        let right = build_arith_term(right_pair)?;
+
+        result = match op_str {
+            "+" => ArithExpr::Add(Box::new(result), Box::new(right)),
+            "-" => ArithExpr::Sub(Box::new(result), Box::new(right)),
+            _ => return Err(XlogError::Parse(format!("Unknown additive operator: {}", op_str))),
+        };
+    }
+
+    Ok(result)
+}
+
+/// Build an arithmetic term (handles multiplicative operations * / %)
+/// Grammar: arith_term = { arith_primary ~ (arith_op_mul ~ arith_primary)* }
+fn build_arith_term(pair: Pair<'_, Rule>) -> Result<ArithExpr> {
+    let mut inner = pair.into_inner();
+
+    // First operand is always an arith_primary
+    let first = inner.next()
+        .ok_or_else(|| XlogError::Parse("Empty arithmetic term".to_string()))?;
+    let mut result = build_arith_primary(first)?;
+
+    // Process remaining (operator, operand) pairs
+    while let Some(op_pair) = inner.next() {
+        let op_str = op_pair.as_str();
+        let right_pair = inner.next()
+            .ok_or_else(|| XlogError::Parse("Missing right operand in arith term".to_string()))?;
+        let right = build_arith_primary(right_pair)?;
+
+        result = match op_str {
+            "*" => ArithExpr::Mul(Box::new(result), Box::new(right)),
+            "/" => ArithExpr::Div(Box::new(result), Box::new(right)),
+            "%" => ArithExpr::Mod(Box::new(result), Box::new(right)),
+            _ => return Err(XlogError::Parse(format!("Unknown multiplicative operator: {}", op_str))),
+        };
+    }
+
+    Ok(result)
+}
+
+/// Build an arithmetic primary (leaf nodes, parentheses, and builtin functions)
+/// Grammar: arith_primary = {
+///     builtin_fn ~ "(" ~ arith_expr ~ ("," ~ (arith_expr | type_spec))* ~ ")" |
+///     "(" ~ arith_expr ~ ")" |
+///     variable |
+///     integer |
+///     float_num
+/// }
+fn build_arith_primary(pair: Pair<'_, Rule>) -> Result<ArithExpr> {
+    let mut inner = pair.into_inner();
+    let first = inner.next()
+        .ok_or_else(|| XlogError::Parse("Empty arithmetic primary".to_string()))?;
+
+    match first.as_rule() {
+        Rule::builtin_fn => {
+            let fn_name = first.as_str();
+            // Collect all arguments
+            let args: Vec<Pair<'_, Rule>> = inner.collect();
+
+            match fn_name {
+                "abs" => {
+                    if args.len() != 1 {
+                        return Err(XlogError::Parse("abs() takes exactly 1 argument".to_string()));
+                    }
+                    let arg = build_arith_expr(args.into_iter().next().unwrap())?;
+                    Ok(ArithExpr::Abs(Box::new(arg)))
+                }
+                "min" => {
+                    if args.len() != 2 {
+                        return Err(XlogError::Parse("min() takes exactly 2 arguments".to_string()));
+                    }
+                    let mut args_iter = args.into_iter();
+                    let arg1 = build_arith_expr(args_iter.next().unwrap())?;
+                    let arg2 = build_arith_expr(args_iter.next().unwrap())?;
+                    Ok(ArithExpr::Min(Box::new(arg1), Box::new(arg2)))
+                }
+                "max" => {
+                    if args.len() != 2 {
+                        return Err(XlogError::Parse("max() takes exactly 2 arguments".to_string()));
+                    }
+                    let mut args_iter = args.into_iter();
+                    let arg1 = build_arith_expr(args_iter.next().unwrap())?;
+                    let arg2 = build_arith_expr(args_iter.next().unwrap())?;
+                    Ok(ArithExpr::Max(Box::new(arg1), Box::new(arg2)))
+                }
+                "pow" => {
+                    if args.len() != 2 {
+                        return Err(XlogError::Parse("pow() takes exactly 2 arguments".to_string()));
+                    }
+                    let mut args_iter = args.into_iter();
+                    let arg1 = build_arith_expr(args_iter.next().unwrap())?;
+                    let arg2 = build_arith_expr(args_iter.next().unwrap())?;
+                    Ok(ArithExpr::Pow(Box::new(arg1), Box::new(arg2)))
+                }
+                "cast" => {
+                    if args.len() != 2 {
+                        return Err(XlogError::Parse("cast() takes exactly 2 arguments".to_string()));
+                    }
+                    let mut args_iter = args.into_iter();
+                    let arg1 = build_arith_expr(args_iter.next().unwrap())?;
+                    let type_pair = args_iter.next().unwrap();
+                    let target_type = build_type_spec(type_pair)?;
+                    Ok(ArithExpr::Cast(Box::new(arg1), target_type))
+                }
+                _ => Err(XlogError::Parse(format!("Unknown builtin function: {}", fn_name))),
+            }
+        }
+        Rule::arith_expr => {
+            // Parenthesized expression
+            build_arith_expr(first)
+        }
+        Rule::variable => {
+            Ok(ArithExpr::Variable(first.as_str().to_string()))
+        }
+        Rule::integer => {
+            let val: i64 = first.as_str().parse()
+                .map_err(|_| XlogError::Parse(format!("Invalid integer: {}", first.as_str())))?;
+            Ok(ArithExpr::Integer(val))
+        }
+        Rule::float_num => {
+            let val: f64 = first.as_str().parse()
+                .map_err(|_| XlogError::Parse(format!("Invalid float: {}", first.as_str())))?;
+            Ok(ArithExpr::Float(val))
+        }
+        _ => Err(XlogError::Parse(format!("Unexpected token in arith_primary: {:?}", first.as_rule()))),
+    }
+}
+
+/// Build an is-expression: Z is X + Y
+fn build_is_expr(pair: Pair<'_, Rule>) -> Result<IsExpr> {
+    let mut inner = pair.into_inner();
+    let target = inner.next()
+        .ok_or_else(|| XlogError::Parse("Missing target variable in is expression".to_string()))?
+        .as_str()
+        .to_string();
+    let expr = build_arith_expr(inner.next()
+        .ok_or_else(|| XlogError::Parse("Missing expression in is expression".to_string()))?)?;
+    Ok(IsExpr { target, expr })
 }
 
 #[cfg(test)]
@@ -560,5 +718,41 @@ mod tests {
         let input = "result(X, Z) :- input(X, Y), Z is Y + 1.";
         let result = XlogParser::parse(Rule::program, input);
         assert!(result.is_ok(), "Failed to parse is expression: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_parse_arithmetic_precedence() {
+        // Multiplication before addition
+        let input = "r(X, Z) :- p(X, A, B), Z is A + B * 2.";
+        let result = parse_program(input).unwrap();
+        let rule = &result.rules[0];
+        assert_eq!(rule.body.len(), 2);
+        assert!(matches!(&rule.body[1], BodyLiteral::IsExpr(_)));
+    }
+
+    #[test]
+    fn test_parse_arithmetic_parentheses() {
+        let input = "r(X, Z) :- p(X, A, B), Z is (A + B) * 2.";
+        assert!(parse_program(input).is_ok());
+    }
+
+    #[test]
+    fn test_parse_arithmetic_builtins() {
+        let inputs = [
+            "r(X, Z) :- p(X, Y), Z is abs(Y).",
+            "r(X, Z) :- p(X, A, B), Z is min(A, B).",
+            "r(X, Z) :- p(X, A, B), Z is max(A, B).",
+            "r(X, Z) :- p(X, A, B), Z is pow(A, B).",
+            "r(X, Z) :- p(X, Y), Z is cast(Y, f64).",
+        ];
+        for input in inputs {
+            assert!(parse_program(input).is_ok(), "Failed to parse: {}", input);
+        }
+    }
+
+    #[test]
+    fn test_parse_arithmetic_nested() {
+        let input = "r(X, Z) :- p(X, A, B, C), Z is abs(A - B) + min(B, C) * 2.";
+        assert!(parse_program(input).is_ok());
     }
 }
