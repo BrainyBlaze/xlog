@@ -39,4 +39,4 @@ mod proof;
 
 pub use instance::{SolveInstance, Clause, Literal, Objective};
 pub use solver::{Solver, SolverConfig, SolverState};
-pub use proof::{SolveProof, SolveResult, SolveStatus, SolveStats};
+pub use proof::{SolveProof, SolveResult, SolveStatus, SolveStats, compute_checksum};
