@@ -1169,3 +1169,98 @@ fn test_arithmetic_fresh_var_error() {
         "Error should mention variable binding issue: {}", err_msg
     );
 }
+
+// =============================================================================
+// 8. REAL-WORLD ARITHMETIC PROBLEM SOLVING
+// =============================================================================
+
+/// Real-world scenario: Forward Value Computation
+///
+/// Problem: Compute a sequence where each value depends on previous values.
+/// This tests forward chaining with arithmetic using explicit index generation.
+///
+/// Pattern: Generate steps (N, N+1) then join with values to compute next.
+#[test]
+fn test_forward_computation() {
+    let (mut executor, provider) = match create_test_executor() {
+        Some(e) => e,
+        None => {
+            eprintln!("Skipping: no CUDA device");
+            return;
+        }
+    };
+
+    // Approach: Explicit step relation for N -> N+1 transitions
+    // Use V + V instead of V * 2 to avoid type issues with literals.
+    let source = r#"
+        pred base_val(u32, u32).
+        pred step(u32, u32).
+        pred val(u32, u32).
+
+        // Base case
+        base_val(0, 1).
+
+        // Explicit step transitions
+        step(0, 1).
+        step(1, 2).
+        step(2, 3).
+        step(3, 4).
+
+        // val includes base and computed
+        val(N, V) :- base_val(N, V).
+
+        // Forward computation: val(N+1) = val(N) + val(N) (doubling)
+        val(N1, V2) :-
+            val(N, V),
+            step(N, N1),
+            V2 is V + V.
+
+        ?- val(N, V).
+    "#;
+
+    let mut compiler = Compiler::new();
+    let plan = match compiler.compile(source) {
+        Ok(p) => p,
+        Err(e) => {
+            println!("Compilation error: {}", e);
+            panic!("Failed to compile forward computation program");
+        }
+    };
+
+    // Create base fact buffers
+    let base_val_data: Vec<(u32, u32)> = vec![(0, 1)];
+    let step_data: Vec<(u32, u32)> = vec![(0, 1), (1, 2), (2, 3), (3, 4)];
+
+    let base_val_buffer = create_edge_buffer(&provider, &base_val_data);
+    let step_buffer = create_edge_buffer(&provider, &step_data);
+
+    setup_facts(&mut executor, &compiler, vec![
+        ("base_val", base_val_buffer),
+        ("step", step_buffer),
+    ]);
+
+    match executor.execute_plan(&plan) {
+        Ok(_) => println!("Forward computation completed"),
+        Err(e) => {
+            println!("Execution error: {}", e);
+            panic!("Failed to execute forward computation program");
+        }
+    }
+
+    // Check results: 0->1, 1->2, 2->4, 3->8, 4->16
+    if let Some(val) = executor.store().get("val") {
+        let results = read_pairs(&provider, val);
+        println!("Forward values: {:?}", results);
+
+        let expected: HashSet<(u32, u32)> = [
+            (0, 1), (1, 2), (2, 4), (3, 8), (4, 16)
+        ].into_iter().collect();
+        let actual: HashSet<(u32, u32)> = results.into_iter().collect();
+
+        for (n, v) in expected.iter() {
+            assert!(actual.contains(&(*n, *v)), "Missing val({})={}", n, v);
+        }
+    } else {
+        panic!("val relation not found");
+    }
+}
