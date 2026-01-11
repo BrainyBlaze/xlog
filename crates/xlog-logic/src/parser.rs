@@ -553,4 +553,12 @@ mod tests {
             assert_eq!(atom.terms[2], Term::Anonymous);
         }
     }
+
+    #[test]
+    fn test_parse_is_expr() {
+        // Test that grammar accepts 'is' expressions (AST building is in Task 3)
+        let input = "result(X, Z) :- input(X, Y), Z is Y + 1.";
+        let result = XlogParser::parse(Rule::program, input);
+        assert!(result.is_ok(), "Failed to parse is expression: {:?}", result.err());
+    }
 }

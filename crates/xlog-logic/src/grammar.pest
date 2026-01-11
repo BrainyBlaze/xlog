@@ -31,9 +31,31 @@ agg_term = { aggregate | term }
 cmp_op = { "==" | "!=" | "<=" | ">=" | "<" | ">" | "=" }
 comparison = { term ~ cmp_op ~ term }
 
+// Arithmetic operators
+arith_op_mul = { "*" | "/" | "%" }
+arith_op_add = { "+" | "-" }
+
+// Built-in functions
+builtin_fn = { "abs" | "min" | "max" | "pow" | "cast" }
+
+// Arithmetic expressions with precedence
+arith_primary = {
+    builtin_fn ~ "(" ~ arith_expr ~ ("," ~ (arith_expr | type_spec))* ~ ")" |
+    "(" ~ arith_expr ~ ")" |
+    variable |
+    integer |
+    float_num
+}
+
+arith_term = { arith_primary ~ (arith_op_mul ~ arith_primary)* }
+arith_expr = { arith_term ~ (arith_op_add ~ arith_term)* }
+
+// The 'is' construct
+is_expr = { variable ~ "is" ~ arith_expr }
+
 // Body literals
 negated_atom = { "not" ~ atom }
-body_literal = { negated_atom | atom | comparison }
+body_literal = { negated_atom | atom | comparison | is_expr }
 body = { body_literal ~ ("," ~ body_literal)* }
 
 // Head with optional aggregate
