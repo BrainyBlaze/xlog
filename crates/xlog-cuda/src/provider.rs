@@ -3310,6 +3310,126 @@ impl CudaKernelProvider {
         ))
     }
 
+    /// Create a CudaBuffer from an i64 slice (single column)
+    ///
+    /// # Arguments
+    /// * `data` - The i64 data slice
+    /// * `schema` - The schema for the buffer
+    ///
+    /// # Returns
+    /// A new CudaBuffer containing the data as a single column
+    ///
+    /// # Errors
+    /// Returns `XlogError::Kernel` if upload fails
+    pub fn create_buffer_from_i64_slice(
+        &self,
+        data: &[i64],
+        schema: Schema,
+    ) -> Result<CudaBuffer> {
+        let bytes: Vec<u8> = data.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let mut col = self.memory.alloc::<u8>(bytes.len())?;
+        self.device
+            .inner()
+            .htod_sync_copy_into(&bytes, &mut col)
+            .map_err(|e| XlogError::Kernel(format!("Failed to upload data: {}", e)))?;
+
+        Ok(CudaBuffer::from_columns(
+            vec![col],
+            data.len() as u64,
+            schema,
+        ))
+    }
+
+    /// Create a CudaBuffer from an i32 slice (single column)
+    ///
+    /// # Arguments
+    /// * `data` - The i32 data slice
+    /// * `schema` - The schema for the buffer
+    ///
+    /// # Returns
+    /// A new CudaBuffer containing the data as a single column
+    ///
+    /// # Errors
+    /// Returns `XlogError::Kernel` if upload fails
+    pub fn create_buffer_from_i32_slice(
+        &self,
+        data: &[i32],
+        schema: Schema,
+    ) -> Result<CudaBuffer> {
+        let bytes: Vec<u8> = data.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let mut col = self.memory.alloc::<u8>(bytes.len())?;
+        self.device
+            .inner()
+            .htod_sync_copy_into(&bytes, &mut col)
+            .map_err(|e| XlogError::Kernel(format!("Failed to upload data: {}", e)))?;
+
+        Ok(CudaBuffer::from_columns(
+            vec![col],
+            data.len() as u64,
+            schema,
+        ))
+    }
+
+    /// Create a CudaBuffer from an f64 slice (single column)
+    ///
+    /// # Arguments
+    /// * `data` - The f64 data slice
+    /// * `schema` - The schema for the buffer
+    ///
+    /// # Returns
+    /// A new CudaBuffer containing the data as a single column
+    ///
+    /// # Errors
+    /// Returns `XlogError::Kernel` if upload fails
+    pub fn create_buffer_from_f64_slice(
+        &self,
+        data: &[f64],
+        schema: Schema,
+    ) -> Result<CudaBuffer> {
+        let bytes: Vec<u8> = data.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let mut col = self.memory.alloc::<u8>(bytes.len())?;
+        self.device
+            .inner()
+            .htod_sync_copy_into(&bytes, &mut col)
+            .map_err(|e| XlogError::Kernel(format!("Failed to upload data: {}", e)))?;
+
+        Ok(CudaBuffer::from_columns(
+            vec![col],
+            data.len() as u64,
+            schema,
+        ))
+    }
+
+    /// Create a CudaBuffer from an f32 slice (single column)
+    ///
+    /// # Arguments
+    /// * `data` - The f32 data slice
+    /// * `schema` - The schema for the buffer
+    ///
+    /// # Returns
+    /// A new CudaBuffer containing the data as a single column
+    ///
+    /// # Errors
+    /// Returns `XlogError::Kernel` if upload fails
+    pub fn create_buffer_from_f32_slice(
+        &self,
+        data: &[f32],
+        schema: Schema,
+    ) -> Result<CudaBuffer> {
+        let bytes: Vec<u8> = data.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let mut col = self.memory.alloc::<u8>(bytes.len())?;
+        self.device
+            .inner()
+            .htod_sync_copy_into(&bytes, &mut col)
+            .map_err(|e| XlogError::Kernel(format!("Failed to upload data: {}", e)))?;
+
+        Ok(CudaBuffer::from_columns(
+            vec![col],
+            data.len() as u64,
+            schema,
+        ))
+    }
+
     /// Create a buffer from multiple column slices (raw bytes)
     ///
     /// This is a generic version that works with any column type by accepting
@@ -5255,92 +5375,650 @@ impl CudaKernelProvider {
 
     /// Element-wise addition of two single-column buffers
     ///
-    /// Stub implementation - returns error until Task 8 implements GPU kernels.
-    pub fn add_columns(&self, _left: &CudaBuffer, _right: &CudaBuffer) -> Result<CudaBuffer> {
-        Err(XlogError::Kernel(
-            "add_columns: GPU arithmetic kernels not yet implemented (Task 8)".to_string()
-        ))
+    /// Performs element-wise addition using CPU-based evaluation with host roundtrips.
+    /// Uses wrapping arithmetic for integer overflow.
+    ///
+    /// # Arguments
+    /// * `a` - First operand buffer (single column)
+    /// * `b` - Second operand buffer (single column)
+    ///
+    /// # Returns
+    /// A new CudaBuffer containing the element-wise sum
+    ///
+    /// # Errors
+    /// Returns `XlogError::Kernel` if:
+    /// - Row counts don't match
+    /// - Buffers are not single-column
+    /// - Type is not supported for arithmetic
+    pub fn add_columns(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
+        self.binary_arith_op(a, b, |x, y| x.wrapping_add(y), |x, y| x + y)
     }
 
     /// Element-wise subtraction of two single-column buffers
     ///
-    /// Stub implementation - returns error until Task 8 implements GPU kernels.
-    pub fn sub_columns(&self, _left: &CudaBuffer, _right: &CudaBuffer) -> Result<CudaBuffer> {
-        Err(XlogError::Kernel(
-            "sub_columns: GPU arithmetic kernels not yet implemented (Task 8)".to_string()
-        ))
+    /// Performs element-wise subtraction using CPU-based evaluation with host roundtrips.
+    /// Uses wrapping arithmetic for integer overflow.
+    ///
+    /// # Arguments
+    /// * `a` - First operand buffer (single column)
+    /// * `b` - Second operand buffer (single column)
+    ///
+    /// # Returns
+    /// A new CudaBuffer containing the element-wise difference
+    ///
+    /// # Errors
+    /// Returns `XlogError::Kernel` if:
+    /// - Row counts don't match
+    /// - Buffers are not single-column
+    /// - Type is not supported for arithmetic
+    pub fn sub_columns(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
+        self.binary_arith_op(a, b, |x, y| x.wrapping_sub(y), |x, y| x - y)
     }
 
     /// Element-wise multiplication of two single-column buffers
     ///
-    /// Stub implementation - returns error until Task 8 implements GPU kernels.
-    pub fn mul_columns(&self, _left: &CudaBuffer, _right: &CudaBuffer) -> Result<CudaBuffer> {
-        Err(XlogError::Kernel(
-            "mul_columns: GPU arithmetic kernels not yet implemented (Task 8)".to_string()
-        ))
+    /// Performs element-wise multiplication using CPU-based evaluation with host roundtrips.
+    /// Uses wrapping arithmetic for integer overflow.
+    ///
+    /// # Arguments
+    /// * `a` - First operand buffer (single column)
+    /// * `b` - Second operand buffer (single column)
+    ///
+    /// # Returns
+    /// A new CudaBuffer containing the element-wise product
+    ///
+    /// # Errors
+    /// Returns `XlogError::Kernel` if:
+    /// - Row counts don't match
+    /// - Buffers are not single-column
+    /// - Type is not supported for arithmetic
+    pub fn mul_columns(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
+        self.binary_arith_op(a, b, |x, y| x.wrapping_mul(y), |x, y| x * y)
     }
 
     /// Element-wise division of two single-column buffers
     ///
-    /// Stub implementation - returns error until Task 8 implements GPU kernels.
-    pub fn div_columns(&self, _left: &CudaBuffer, _right: &CudaBuffer) -> Result<CudaBuffer> {
-        Err(XlogError::Kernel(
-            "div_columns: GPU arithmetic kernels not yet implemented (Task 8)".to_string()
-        ))
+    /// Performs element-wise division using CPU-based evaluation with host roundtrips.
+    /// For integers, division by zero returns i64::MAX.
+    /// For floats, division by zero produces Inf/NaN as per IEEE 754.
+    ///
+    /// # Arguments
+    /// * `a` - Dividend buffer (single column)
+    /// * `b` - Divisor buffer (single column)
+    ///
+    /// # Returns
+    /// A new CudaBuffer containing the element-wise quotient
+    ///
+    /// # Errors
+    /// Returns `XlogError::Kernel` if:
+    /// - Row counts don't match
+    /// - Buffers are not single-column
+    /// - Type is not supported for arithmetic
+    pub fn div_columns(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
+        self.binary_arith_op(
+            a,
+            b,
+            |x, y| if y == 0 { i64::MAX } else { x / y },
+            |x, y| x / y, // f64 div-by-zero produces Inf
+        )
     }
 
     /// Element-wise modulo of two single-column buffers
     ///
-    /// Stub implementation - returns error until Task 8 implements GPU kernels.
-    pub fn mod_columns(&self, _left: &CudaBuffer, _right: &CudaBuffer) -> Result<CudaBuffer> {
-        Err(XlogError::Kernel(
-            "mod_columns: GPU arithmetic kernels not yet implemented (Task 8)".to_string()
-        ))
+    /// Performs element-wise modulo using CPU-based evaluation with host roundtrips.
+    /// For integers, modulo by zero returns 0.
+    /// For floats, modulo by zero produces NaN as per IEEE 754.
+    ///
+    /// # Arguments
+    /// * `a` - Dividend buffer (single column)
+    /// * `b` - Divisor buffer (single column)
+    ///
+    /// # Returns
+    /// A new CudaBuffer containing the element-wise remainder
+    ///
+    /// # Errors
+    /// Returns `XlogError::Kernel` if:
+    /// - Row counts don't match
+    /// - Buffers are not single-column
+    /// - Type is not supported for arithmetic
+    pub fn mod_columns(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
+        self.binary_arith_op(
+            a,
+            b,
+            |x, y| if y == 0 { 0 } else { x % y },
+            |x, y| x % y,
+        )
     }
 
     /// Element-wise absolute value of a single-column buffer
     ///
-    /// Stub implementation - returns error until Task 8 implements GPU kernels.
-    pub fn abs_column(&self, _input: &CudaBuffer) -> Result<CudaBuffer> {
-        Err(XlogError::Kernel(
-            "abs_column: GPU arithmetic kernels not yet implemented (Task 8)".to_string()
-        ))
+    /// Performs element-wise absolute value using CPU-based evaluation with host roundtrips.
+    ///
+    /// # Arguments
+    /// * `a` - Input buffer (single column)
+    ///
+    /// # Returns
+    /// A new CudaBuffer containing the absolute values
+    ///
+    /// # Errors
+    /// Returns `XlogError::Kernel` if:
+    /// - Buffer is not single-column
+    /// - Type is not supported for arithmetic
+    pub fn abs_column(&self, a: &CudaBuffer) -> Result<CudaBuffer> {
+        if a.arity() != 1 {
+            return Err(XlogError::Kernel(
+                "Arithmetic requires single-column buffers".into(),
+            ));
+        }
+
+        let col_type = a
+            .schema()
+            .column_type(0)
+            .ok_or_else(|| XlogError::Kernel("Missing column type".into()))?;
+
+        match col_type {
+            ScalarType::I64 => {
+                let vals = self.download_column_i64(a, 0)?;
+                let result: Vec<i64> = vals.iter().map(|x| x.wrapping_abs()).collect();
+                self.create_buffer_from_i64_slice(&result, a.schema().clone())
+            }
+            ScalarType::I32 => {
+                let vals = self.download_column_i32(a, 0)?;
+                let result: Vec<i32> = vals.iter().map(|x| x.wrapping_abs()).collect();
+                self.create_buffer_from_i32_slice(&result, a.schema().clone())
+            }
+            ScalarType::F64 => {
+                let vals = self.download_column_f64(a, 0)?;
+                let result: Vec<f64> = vals.iter().map(|x| x.abs()).collect();
+                self.create_buffer_from_f64_slice(&result, a.schema().clone())
+            }
+            ScalarType::F32 => {
+                let vals = self.download_column_f32(a, 0)?;
+                let result: Vec<f32> = vals.iter().map(|x| x.abs()).collect();
+                self.create_buffer_from_f32_slice(&result, a.schema().clone())
+            }
+            ScalarType::U64 | ScalarType::U32 => {
+                // Unsigned types are already non-negative, just clone
+                self.clone_buffer(a)
+            }
+            _ => Err(XlogError::Kernel(format!(
+                "Absolute value not supported for {:?}",
+                col_type
+            ))),
+        }
     }
 
     /// Element-wise minimum of two single-column buffers
     ///
-    /// Stub implementation - returns error until Task 8 implements GPU kernels.
-    pub fn min_columns(&self, _left: &CudaBuffer, _right: &CudaBuffer) -> Result<CudaBuffer> {
-        Err(XlogError::Kernel(
-            "min_columns: GPU arithmetic kernels not yet implemented (Task 8)".to_string()
-        ))
+    /// Performs element-wise minimum using CPU-based evaluation with host roundtrips.
+    ///
+    /// # Arguments
+    /// * `a` - First operand buffer (single column)
+    /// * `b` - Second operand buffer (single column)
+    ///
+    /// # Returns
+    /// A new CudaBuffer containing the element-wise minimums
+    ///
+    /// # Errors
+    /// Returns `XlogError::Kernel` if:
+    /// - Row counts don't match
+    /// - Buffers are not single-column
+    /// - Type is not supported for arithmetic
+    pub fn min_columns(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
+        self.binary_arith_op(a, b, |x, y| x.min(y), |x, y| x.min(y))
     }
 
     /// Element-wise maximum of two single-column buffers
     ///
-    /// Stub implementation - returns error until Task 8 implements GPU kernels.
-    pub fn max_columns(&self, _left: &CudaBuffer, _right: &CudaBuffer) -> Result<CudaBuffer> {
-        Err(XlogError::Kernel(
-            "max_columns: GPU arithmetic kernels not yet implemented (Task 8)".to_string()
-        ))
+    /// Performs element-wise maximum using CPU-based evaluation with host roundtrips.
+    ///
+    /// # Arguments
+    /// * `a` - First operand buffer (single column)
+    /// * `b` - Second operand buffer (single column)
+    ///
+    /// # Returns
+    /// A new CudaBuffer containing the element-wise maximums
+    ///
+    /// # Errors
+    /// Returns `XlogError::Kernel` if:
+    /// - Row counts don't match
+    /// - Buffers are not single-column
+    /// - Type is not supported for arithmetic
+    pub fn max_columns(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
+        self.binary_arith_op(a, b, |x, y| x.max(y), |x, y| x.max(y))
     }
 
     /// Element-wise power of two single-column buffers
     ///
-    /// Stub implementation - returns error until Task 8 implements GPU kernels.
-    pub fn pow_columns(&self, _base: &CudaBuffer, _exp: &CudaBuffer) -> Result<CudaBuffer> {
-        Err(XlogError::Kernel(
-            "pow_columns: GPU arithmetic kernels not yet implemented (Task 8)".to_string()
-        ))
+    /// Converts both operands to f64, computes x^y, and returns f64 result.
+    /// This matches the behavior of most database systems where pow() returns a float.
+    ///
+    /// # Arguments
+    /// * `base` - Base values buffer (single column)
+    /// * `exp` - Exponent values buffer (single column)
+    ///
+    /// # Returns
+    /// A new CudaBuffer containing the element-wise powers as f64
+    ///
+    /// # Errors
+    /// Returns `XlogError::Kernel` if:
+    /// - Row counts don't match
+    /// - Buffers are not single-column
+    /// - Type is not supported for arithmetic
+    pub fn pow_columns(&self, base: &CudaBuffer, exp: &CudaBuffer) -> Result<CudaBuffer> {
+        if base.num_rows() != exp.num_rows() {
+            return Err(XlogError::Kernel("Row count mismatch".into()));
+        }
+        if base.arity() != 1 || exp.arity() != 1 {
+            return Err(XlogError::Kernel(
+                "Arithmetic requires single-column buffers".into(),
+            ));
+        }
+
+        // Convert base to f64
+        let base_vals = self.column_to_f64(base, 0)?;
+        // Convert exponent to f64
+        let exp_vals = self.column_to_f64(exp, 0)?;
+
+        // Compute power
+        let result: Vec<f64> = base_vals
+            .iter()
+            .zip(exp_vals.iter())
+            .map(|(b, e)| b.powf(*e))
+            .collect();
+
+        let schema = Schema::new(vec![("result".to_string(), ScalarType::F64)]);
+        self.create_buffer_from_f64_slice(&result, schema)
     }
 
     /// Cast a single-column buffer to a different type
     ///
-    /// Stub implementation - returns error until Task 8 implements GPU kernels.
-    pub fn cast_column(&self, _input: &CudaBuffer, _target_type: ScalarType) -> Result<CudaBuffer> {
-        Err(XlogError::Kernel(
-            "cast_column: GPU arithmetic kernels not yet implemented (Task 8)".to_string()
-        ))
+    /// Downloads the source data, converts each value to the target type,
+    /// and uploads the result.
+    ///
+    /// # Arguments
+    /// * `a` - Input buffer (single column)
+    /// * `target` - Target scalar type
+    ///
+    /// # Returns
+    /// A new CudaBuffer with the cast values
+    ///
+    /// # Errors
+    /// Returns `XlogError::Kernel` if:
+    /// - Buffer is not single-column
+    /// - Source or target type is not supported for casting
+    pub fn cast_column(&self, a: &CudaBuffer, target: ScalarType) -> Result<CudaBuffer> {
+        if a.arity() != 1 {
+            return Err(XlogError::Kernel(
+                "Cast requires single-column buffer".into(),
+            ));
+        }
+
+        let source_type = a
+            .schema()
+            .column_type(0)
+            .ok_or_else(|| XlogError::Kernel("Missing column type".into()))?;
+
+        let schema = Schema::new(vec![("result".to_string(), target)]);
+
+        // Handle each source type
+        match source_type {
+            ScalarType::I64 => {
+                let vals = self.download_column_i64(a, 0)?;
+                self.cast_from_i64(&vals, target, schema)
+            }
+            ScalarType::I32 => {
+                let vals = self.download_column_i32(a, 0)?;
+                self.cast_from_i32(&vals, target, schema)
+            }
+            ScalarType::U64 => {
+                let vals = self.download_column_u64(a, 0)?;
+                self.cast_from_u64(&vals, target, schema)
+            }
+            ScalarType::U32 => {
+                let vals = self.download_column_u32(a, 0)?;
+                self.cast_from_u32(&vals, target, schema)
+            }
+            ScalarType::F64 => {
+                let vals = self.download_column_f64(a, 0)?;
+                self.cast_from_f64(&vals, target, schema)
+            }
+            ScalarType::F32 => {
+                let vals = self.download_column_f32(a, 0)?;
+                self.cast_from_f32(&vals, target, schema)
+            }
+            _ => Err(XlogError::Kernel(format!(
+                "Cast from {:?} not supported",
+                source_type
+            ))),
+        }
+    }
+
+    /// Helper for binary arithmetic operations
+    ///
+    /// Downloads both operands, applies the operation element-wise, and uploads the result.
+    ///
+    /// # Arguments
+    /// * `a` - First operand buffer (single column)
+    /// * `b` - Second operand buffer (single column)
+    /// * `int_op` - Operation to apply for integer types (i64)
+    /// * `float_op` - Operation to apply for float types (f64)
+    ///
+    /// # Returns
+    /// A new CudaBuffer containing the operation results
+    fn binary_arith_op<FI, FF>(
+        &self,
+        a: &CudaBuffer,
+        b: &CudaBuffer,
+        int_op: FI,
+        float_op: FF,
+    ) -> Result<CudaBuffer>
+    where
+        FI: Fn(i64, i64) -> i64,
+        FF: Fn(f64, f64) -> f64,
+    {
+        if a.num_rows() != b.num_rows() {
+            return Err(XlogError::Kernel("Row count mismatch".into()));
+        }
+        if a.arity() != 1 || b.arity() != 1 {
+            return Err(XlogError::Kernel(
+                "Arithmetic requires single-column buffers".into(),
+            ));
+        }
+
+        let col_type = a
+            .schema()
+            .column_type(0)
+            .ok_or_else(|| XlogError::Kernel("Missing column type".into()))?;
+
+        match col_type {
+            ScalarType::I64 => {
+                let a_vals = self.download_column_i64(a, 0)?;
+                let b_vals = self.download_column_i64(b, 0)?;
+                let result: Vec<i64> = a_vals
+                    .iter()
+                    .zip(b_vals.iter())
+                    .map(|(x, y)| int_op(*x, *y))
+                    .collect();
+                self.create_buffer_from_i64_slice(&result, a.schema().clone())
+            }
+            ScalarType::I32 => {
+                let a_vals = self.download_column_i32(a, 0)?;
+                let b_vals = self.download_column_i32(b, 0)?;
+                let result: Vec<i32> = a_vals
+                    .iter()
+                    .zip(b_vals.iter())
+                    .map(|(x, y)| int_op(*x as i64, *y as i64) as i32)
+                    .collect();
+                self.create_buffer_from_i32_slice(&result, a.schema().clone())
+            }
+            ScalarType::U64 => {
+                let a_vals = self.download_column_u64(a, 0)?;
+                let b_vals = self.download_column_u64(b, 0)?;
+                let result: Vec<u64> = a_vals
+                    .iter()
+                    .zip(b_vals.iter())
+                    .map(|(x, y)| int_op(*x as i64, *y as i64) as u64)
+                    .collect();
+                self.create_buffer_from_u64_slice(&result, a.schema().clone())
+            }
+            ScalarType::U32 => {
+                let a_vals = self.download_column_u32(a, 0)?;
+                let b_vals = self.download_column_u32(b, 0)?;
+                let result: Vec<u32> = a_vals
+                    .iter()
+                    .zip(b_vals.iter())
+                    .map(|(x, y)| int_op(*x as i64, *y as i64) as u32)
+                    .collect();
+                self.create_buffer_from_u32_slice(&result, a.schema().clone())
+            }
+            ScalarType::F64 => {
+                let a_vals = self.download_column_f64(a, 0)?;
+                let b_vals = self.download_column_f64(b, 0)?;
+                let result: Vec<f64> = a_vals
+                    .iter()
+                    .zip(b_vals.iter())
+                    .map(|(x, y)| float_op(*x, *y))
+                    .collect();
+                self.create_buffer_from_f64_slice(&result, a.schema().clone())
+            }
+            ScalarType::F32 => {
+                let a_vals = self.download_column_f32(a, 0)?;
+                let b_vals = self.download_column_f32(b, 0)?;
+                let result: Vec<f32> = a_vals
+                    .iter()
+                    .zip(b_vals.iter())
+                    .map(|(x, y)| float_op(*x as f64, *y as f64) as f32)
+                    .collect();
+                self.create_buffer_from_f32_slice(&result, a.schema().clone())
+            }
+            _ => Err(XlogError::Kernel(format!(
+                "Arithmetic not supported for {:?}",
+                col_type
+            ))),
+        }
+    }
+
+    /// Helper to convert any numeric column to f64 values
+    fn column_to_f64(&self, buf: &CudaBuffer, col_idx: usize) -> Result<Vec<f64>> {
+        let col_type = buf
+            .schema()
+            .column_type(col_idx)
+            .ok_or_else(|| XlogError::Kernel("Missing column type".into()))?;
+
+        match col_type {
+            ScalarType::I64 => {
+                let vals = self.download_column_i64(buf, col_idx)?;
+                Ok(vals.iter().map(|x| *x as f64).collect())
+            }
+            ScalarType::I32 => {
+                let vals = self.download_column_i32(buf, col_idx)?;
+                Ok(vals.iter().map(|x| *x as f64).collect())
+            }
+            ScalarType::U64 => {
+                let vals = self.download_column_u64(buf, col_idx)?;
+                Ok(vals.iter().map(|x| *x as f64).collect())
+            }
+            ScalarType::U32 => {
+                let vals = self.download_column_u32(buf, col_idx)?;
+                Ok(vals.iter().map(|x| *x as f64).collect())
+            }
+            ScalarType::F64 => self.download_column_f64(buf, col_idx),
+            ScalarType::F32 => {
+                let vals = self.download_column_f32(buf, col_idx)?;
+                Ok(vals.iter().map(|x| *x as f64).collect())
+            }
+            _ => Err(XlogError::Kernel(format!(
+                "Cannot convert {:?} to f64",
+                col_type
+            ))),
+        }
+    }
+
+    /// Helper to cast from i64 to target type
+    fn cast_from_i64(&self, vals: &[i64], target: ScalarType, schema: Schema) -> Result<CudaBuffer> {
+        match target {
+            ScalarType::I64 => self.create_buffer_from_i64_slice(vals, schema),
+            ScalarType::I32 => {
+                let result: Vec<i32> = vals.iter().map(|x| *x as i32).collect();
+                self.create_buffer_from_i32_slice(&result, schema)
+            }
+            ScalarType::U64 => {
+                let result: Vec<u64> = vals.iter().map(|x| *x as u64).collect();
+                self.create_buffer_from_u64_slice(&result, schema)
+            }
+            ScalarType::U32 => {
+                let result: Vec<u32> = vals.iter().map(|x| *x as u32).collect();
+                self.create_buffer_from_u32_slice(&result, schema)
+            }
+            ScalarType::F64 => {
+                let result: Vec<f64> = vals.iter().map(|x| *x as f64).collect();
+                self.create_buffer_from_f64_slice(&result, schema)
+            }
+            ScalarType::F32 => {
+                let result: Vec<f32> = vals.iter().map(|x| *x as f32).collect();
+                self.create_buffer_from_f32_slice(&result, schema)
+            }
+            _ => Err(XlogError::Kernel(format!(
+                "Cast to {:?} not supported",
+                target
+            ))),
+        }
+    }
+
+    /// Helper to cast from i32 to target type
+    fn cast_from_i32(&self, vals: &[i32], target: ScalarType, schema: Schema) -> Result<CudaBuffer> {
+        match target {
+            ScalarType::I64 => {
+                let result: Vec<i64> = vals.iter().map(|x| *x as i64).collect();
+                self.create_buffer_from_i64_slice(&result, schema)
+            }
+            ScalarType::I32 => self.create_buffer_from_i32_slice(vals, schema),
+            ScalarType::U64 => {
+                let result: Vec<u64> = vals.iter().map(|x| *x as u64).collect();
+                self.create_buffer_from_u64_slice(&result, schema)
+            }
+            ScalarType::U32 => {
+                let result: Vec<u32> = vals.iter().map(|x| *x as u32).collect();
+                self.create_buffer_from_u32_slice(&result, schema)
+            }
+            ScalarType::F64 => {
+                let result: Vec<f64> = vals.iter().map(|x| *x as f64).collect();
+                self.create_buffer_from_f64_slice(&result, schema)
+            }
+            ScalarType::F32 => {
+                let result: Vec<f32> = vals.iter().map(|x| *x as f32).collect();
+                self.create_buffer_from_f32_slice(&result, schema)
+            }
+            _ => Err(XlogError::Kernel(format!(
+                "Cast to {:?} not supported",
+                target
+            ))),
+        }
+    }
+
+    /// Helper to cast from u64 to target type
+    fn cast_from_u64(&self, vals: &[u64], target: ScalarType, schema: Schema) -> Result<CudaBuffer> {
+        match target {
+            ScalarType::I64 => {
+                let result: Vec<i64> = vals.iter().map(|x| *x as i64).collect();
+                self.create_buffer_from_i64_slice(&result, schema)
+            }
+            ScalarType::I32 => {
+                let result: Vec<i32> = vals.iter().map(|x| *x as i32).collect();
+                self.create_buffer_from_i32_slice(&result, schema)
+            }
+            ScalarType::U64 => self.create_buffer_from_u64_slice(vals, schema),
+            ScalarType::U32 => {
+                let result: Vec<u32> = vals.iter().map(|x| *x as u32).collect();
+                self.create_buffer_from_u32_slice(&result, schema)
+            }
+            ScalarType::F64 => {
+                let result: Vec<f64> = vals.iter().map(|x| *x as f64).collect();
+                self.create_buffer_from_f64_slice(&result, schema)
+            }
+            ScalarType::F32 => {
+                let result: Vec<f32> = vals.iter().map(|x| *x as f32).collect();
+                self.create_buffer_from_f32_slice(&result, schema)
+            }
+            _ => Err(XlogError::Kernel(format!(
+                "Cast to {:?} not supported",
+                target
+            ))),
+        }
+    }
+
+    /// Helper to cast from u32 to target type
+    fn cast_from_u32(&self, vals: &[u32], target: ScalarType, schema: Schema) -> Result<CudaBuffer> {
+        match target {
+            ScalarType::I64 => {
+                let result: Vec<i64> = vals.iter().map(|x| *x as i64).collect();
+                self.create_buffer_from_i64_slice(&result, schema)
+            }
+            ScalarType::I32 => {
+                let result: Vec<i32> = vals.iter().map(|x| *x as i32).collect();
+                self.create_buffer_from_i32_slice(&result, schema)
+            }
+            ScalarType::U64 => {
+                let result: Vec<u64> = vals.iter().map(|x| *x as u64).collect();
+                self.create_buffer_from_u64_slice(&result, schema)
+            }
+            ScalarType::U32 => self.create_buffer_from_u32_slice(vals, schema),
+            ScalarType::F64 => {
+                let result: Vec<f64> = vals.iter().map(|x| *x as f64).collect();
+                self.create_buffer_from_f64_slice(&result, schema)
+            }
+            ScalarType::F32 => {
+                let result: Vec<f32> = vals.iter().map(|x| *x as f32).collect();
+                self.create_buffer_from_f32_slice(&result, schema)
+            }
+            _ => Err(XlogError::Kernel(format!(
+                "Cast to {:?} not supported",
+                target
+            ))),
+        }
+    }
+
+    /// Helper to cast from f64 to target type
+    fn cast_from_f64(&self, vals: &[f64], target: ScalarType, schema: Schema) -> Result<CudaBuffer> {
+        match target {
+            ScalarType::I64 => {
+                let result: Vec<i64> = vals.iter().map(|x| *x as i64).collect();
+                self.create_buffer_from_i64_slice(&result, schema)
+            }
+            ScalarType::I32 => {
+                let result: Vec<i32> = vals.iter().map(|x| *x as i32).collect();
+                self.create_buffer_from_i32_slice(&result, schema)
+            }
+            ScalarType::U64 => {
+                let result: Vec<u64> = vals.iter().map(|x| *x as u64).collect();
+                self.create_buffer_from_u64_slice(&result, schema)
+            }
+            ScalarType::U32 => {
+                let result: Vec<u32> = vals.iter().map(|x| *x as u32).collect();
+                self.create_buffer_from_u32_slice(&result, schema)
+            }
+            ScalarType::F64 => self.create_buffer_from_f64_slice(vals, schema),
+            ScalarType::F32 => {
+                let result: Vec<f32> = vals.iter().map(|x| *x as f32).collect();
+                self.create_buffer_from_f32_slice(&result, schema)
+            }
+            _ => Err(XlogError::Kernel(format!(
+                "Cast to {:?} not supported",
+                target
+            ))),
+        }
+    }
+
+    /// Helper to cast from f32 to target type
+    fn cast_from_f32(&self, vals: &[f32], target: ScalarType, schema: Schema) -> Result<CudaBuffer> {
+        match target {
+            ScalarType::I64 => {
+                let result: Vec<i64> = vals.iter().map(|x| *x as i64).collect();
+                self.create_buffer_from_i64_slice(&result, schema)
+            }
+            ScalarType::I32 => {
+                let result: Vec<i32> = vals.iter().map(|x| *x as i32).collect();
+                self.create_buffer_from_i32_slice(&result, schema)
+            }
+            ScalarType::U64 => {
+                let result: Vec<u64> = vals.iter().map(|x| *x as u64).collect();
+                self.create_buffer_from_u64_slice(&result, schema)
+            }
+            ScalarType::U32 => {
+                let result: Vec<u32> = vals.iter().map(|x| *x as u32).collect();
+                self.create_buffer_from_u32_slice(&result, schema)
+            }
+            ScalarType::F64 => {
+                let result: Vec<f64> = vals.iter().map(|x| *x as f64).collect();
+                self.create_buffer_from_f64_slice(&result, schema)
+            }
+            ScalarType::F32 => self.create_buffer_from_f32_slice(vals, schema),
+            _ => Err(XlogError::Kernel(format!(
+                "Cast to {:?} not supported",
+                target
+            ))),
+        }
     }
 
     /// Combine multiple single-column buffers into a multi-column buffer
@@ -6166,5 +6844,407 @@ mod tests {
             "Legacy API without limit, expected 24 rows but got {}",
             result_legacy.num_rows()
         );
+    }
+
+    // ============== Arithmetic Operation Tests ==============
+
+    /// Helper to create a test provider for arithmetic tests
+    fn create_arith_test_provider() -> Option<CudaKernelProvider> {
+        if !has_cuda_device() {
+            return None;
+        }
+        let device = Arc::new(CudaDevice::new(0).ok()?);
+        let budget = MemoryBudget::with_limit(1024 * 1024 * 1024);
+        let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
+        CudaKernelProvider::new(device, memory).ok()
+    }
+
+    /// Helper to create an i64 buffer for arithmetic tests
+    fn create_i64_buffer(provider: &CudaKernelProvider, data: &[i64]) -> CudaBuffer {
+        let schema = Schema::new(vec![("col".to_string(), ScalarType::I64)]);
+        provider.create_buffer_from_i64_slice(data, schema).unwrap()
+    }
+
+    /// Helper to create an f64 buffer for arithmetic tests
+    fn create_f64_buffer(provider: &CudaKernelProvider, data: &[f64]) -> CudaBuffer {
+        let schema = Schema::new(vec![("col".to_string(), ScalarType::F64)]);
+        provider.create_buffer_from_f64_slice(data, schema).unwrap()
+    }
+
+    #[test]
+    fn test_add_columns_i64() {
+        let Some(provider) = create_arith_test_provider() else {
+            eprintln!("Skipping test: no CUDA device available");
+            return;
+        };
+
+        let a = create_i64_buffer(&provider, &[1, 2, 3, 4, 5]);
+        let b = create_i64_buffer(&provider, &[10, 20, 30, 40, 50]);
+
+        let result = provider.add_columns(&a, &b).unwrap();
+        let values = provider.download_column_i64(&result, 0).unwrap();
+
+        assert_eq!(values, vec![11, 22, 33, 44, 55]);
+    }
+
+    #[test]
+    fn test_sub_columns_i64() {
+        let Some(provider) = create_arith_test_provider() else {
+            eprintln!("Skipping test: no CUDA device available");
+            return;
+        };
+
+        let a = create_i64_buffer(&provider, &[10, 20, 30, 40, 50]);
+        let b = create_i64_buffer(&provider, &[1, 2, 3, 4, 5]);
+
+        let result = provider.sub_columns(&a, &b).unwrap();
+        let values = provider.download_column_i64(&result, 0).unwrap();
+
+        assert_eq!(values, vec![9, 18, 27, 36, 45]);
+    }
+
+    #[test]
+    fn test_mul_columns_i64() {
+        let Some(provider) = create_arith_test_provider() else {
+            eprintln!("Skipping test: no CUDA device available");
+            return;
+        };
+
+        let a = create_i64_buffer(&provider, &[2, 3, 4, 5, 6]);
+        let b = create_i64_buffer(&provider, &[3, 4, 5, 6, 7]);
+
+        let result = provider.mul_columns(&a, &b).unwrap();
+        let values = provider.download_column_i64(&result, 0).unwrap();
+
+        assert_eq!(values, vec![6, 12, 20, 30, 42]);
+    }
+
+    #[test]
+    fn test_div_columns_i64() {
+        let Some(provider) = create_arith_test_provider() else {
+            eprintln!("Skipping test: no CUDA device available");
+            return;
+        };
+
+        let a = create_i64_buffer(&provider, &[100, 200, 300, 400]);
+        let b = create_i64_buffer(&provider, &[10, 20, 30, 40]);
+
+        let result = provider.div_columns(&a, &b).unwrap();
+        let values = provider.download_column_i64(&result, 0).unwrap();
+
+        assert_eq!(values, vec![10, 10, 10, 10]);
+    }
+
+    #[test]
+    fn test_div_columns_by_zero() {
+        let Some(provider) = create_arith_test_provider() else {
+            eprintln!("Skipping test: no CUDA device available");
+            return;
+        };
+
+        let a = create_i64_buffer(&provider, &[10, 20, 30]);
+        let b = create_i64_buffer(&provider, &[2, 0, 3]); // Note: division by zero
+
+        let result = provider.div_columns(&a, &b).unwrap();
+        let values = provider.download_column_i64(&result, 0).unwrap();
+
+        // Division by zero returns i64::MAX
+        assert_eq!(values, vec![5, i64::MAX, 10]);
+    }
+
+    #[test]
+    fn test_mod_columns_i64() {
+        let Some(provider) = create_arith_test_provider() else {
+            eprintln!("Skipping test: no CUDA device available");
+            return;
+        };
+
+        let a = create_i64_buffer(&provider, &[17, 23, 100, 7]);
+        let b = create_i64_buffer(&provider, &[5, 7, 30, 3]);
+
+        let result = provider.mod_columns(&a, &b).unwrap();
+        let values = provider.download_column_i64(&result, 0).unwrap();
+
+        assert_eq!(values, vec![2, 2, 10, 1]);
+    }
+
+    #[test]
+    fn test_mod_columns_by_zero() {
+        let Some(provider) = create_arith_test_provider() else {
+            eprintln!("Skipping test: no CUDA device available");
+            return;
+        };
+
+        let a = create_i64_buffer(&provider, &[10, 20]);
+        let b = create_i64_buffer(&provider, &[3, 0]); // Note: mod by zero
+
+        let result = provider.mod_columns(&a, &b).unwrap();
+        let values = provider.download_column_i64(&result, 0).unwrap();
+
+        // Mod by zero returns 0
+        assert_eq!(values, vec![1, 0]);
+    }
+
+    #[test]
+    fn test_abs_column_i64() {
+        let Some(provider) = create_arith_test_provider() else {
+            eprintln!("Skipping test: no CUDA device available");
+            return;
+        };
+
+        let a = create_i64_buffer(&provider, &[-5, 10, -15, 20, 0]);
+
+        let result = provider.abs_column(&a).unwrap();
+        let values = provider.download_column_i64(&result, 0).unwrap();
+
+        assert_eq!(values, vec![5, 10, 15, 20, 0]);
+    }
+
+    #[test]
+    fn test_min_columns_i64() {
+        let Some(provider) = create_arith_test_provider() else {
+            eprintln!("Skipping test: no CUDA device available");
+            return;
+        };
+
+        let a = create_i64_buffer(&provider, &[5, 10, 15, 20]);
+        let b = create_i64_buffer(&provider, &[3, 12, 10, 25]);
+
+        let result = provider.min_columns(&a, &b).unwrap();
+        let values = provider.download_column_i64(&result, 0).unwrap();
+
+        assert_eq!(values, vec![3, 10, 10, 20]);
+    }
+
+    #[test]
+    fn test_max_columns_i64() {
+        let Some(provider) = create_arith_test_provider() else {
+            eprintln!("Skipping test: no CUDA device available");
+            return;
+        };
+
+        let a = create_i64_buffer(&provider, &[5, 10, 15, 20]);
+        let b = create_i64_buffer(&provider, &[3, 12, 10, 25]);
+
+        let result = provider.max_columns(&a, &b).unwrap();
+        let values = provider.download_column_i64(&result, 0).unwrap();
+
+        assert_eq!(values, vec![5, 12, 15, 25]);
+    }
+
+    #[test]
+    fn test_add_columns_f64() {
+        let Some(provider) = create_arith_test_provider() else {
+            eprintln!("Skipping test: no CUDA device available");
+            return;
+        };
+
+        let a = create_f64_buffer(&provider, &[1.5, 2.5, 3.5]);
+        let b = create_f64_buffer(&provider, &[0.5, 1.5, 2.5]);
+
+        let result = provider.add_columns(&a, &b).unwrap();
+        let values = provider.download_column_f64(&result, 0).unwrap();
+
+        assert_eq!(values, vec![2.0, 4.0, 6.0]);
+    }
+
+    #[test]
+    fn test_mul_columns_f64() {
+        let Some(provider) = create_arith_test_provider() else {
+            eprintln!("Skipping test: no CUDA device available");
+            return;
+        };
+
+        let a = create_f64_buffer(&provider, &[2.0, 3.0, 4.0]);
+        let b = create_f64_buffer(&provider, &[1.5, 2.0, 2.5]);
+
+        let result = provider.mul_columns(&a, &b).unwrap();
+        let values = provider.download_column_f64(&result, 0).unwrap();
+
+        assert_eq!(values, vec![3.0, 6.0, 10.0]);
+    }
+
+    #[test]
+    fn test_div_columns_f64_by_zero() {
+        let Some(provider) = create_arith_test_provider() else {
+            eprintln!("Skipping test: no CUDA device available");
+            return;
+        };
+
+        let a = create_f64_buffer(&provider, &[1.0, -1.0, 0.0]);
+        let b = create_f64_buffer(&provider, &[0.0, 0.0, 0.0]);
+
+        let result = provider.div_columns(&a, &b).unwrap();
+        let values = provider.download_column_f64(&result, 0).unwrap();
+
+        // IEEE 754: 1.0/0.0 = Inf, -1.0/0.0 = -Inf, 0.0/0.0 = NaN
+        assert!(values[0].is_infinite() && values[0].is_sign_positive());
+        assert!(values[1].is_infinite() && values[1].is_sign_negative());
+        assert!(values[2].is_nan());
+    }
+
+    #[test]
+    fn test_pow_columns() {
+        let Some(provider) = create_arith_test_provider() else {
+            eprintln!("Skipping test: no CUDA device available");
+            return;
+        };
+
+        let base = create_i64_buffer(&provider, &[2, 3, 4, 5]);
+        let exp = create_i64_buffer(&provider, &[3, 2, 2, 1]);
+
+        let result = provider.pow_columns(&base, &exp).unwrap();
+        let values = provider.download_column_f64(&result, 0).unwrap();
+
+        // pow always returns f64
+        assert_eq!(values, vec![8.0, 9.0, 16.0, 5.0]);
+    }
+
+    #[test]
+    fn test_pow_columns_fractional_exp() {
+        let Some(provider) = create_arith_test_provider() else {
+            eprintln!("Skipping test: no CUDA device available");
+            return;
+        };
+
+        let base = create_f64_buffer(&provider, &[4.0, 9.0, 27.0]);
+        let exp = create_f64_buffer(&provider, &[0.5, 0.5, 1.0 / 3.0]);
+
+        let result = provider.pow_columns(&base, &exp).unwrap();
+        let values = provider.download_column_f64(&result, 0).unwrap();
+
+        // sqrt(4) = 2, sqrt(9) = 3, cbrt(27) = 3
+        assert!((values[0] - 2.0).abs() < 1e-10);
+        assert!((values[1] - 3.0).abs() < 1e-10);
+        assert!((values[2] - 3.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_cast_i64_to_f64() {
+        let Some(provider) = create_arith_test_provider() else {
+            eprintln!("Skipping test: no CUDA device available");
+            return;
+        };
+
+        let a = create_i64_buffer(&provider, &[1, 2, 3, 4, 5]);
+
+        let result = provider.cast_column(&a, ScalarType::F64).unwrap();
+        let values = provider.download_column_f64(&result, 0).unwrap();
+
+        assert_eq!(values, vec![1.0, 2.0, 3.0, 4.0, 5.0]);
+    }
+
+    #[test]
+    fn test_cast_f64_to_i64() {
+        let Some(provider) = create_arith_test_provider() else {
+            eprintln!("Skipping test: no CUDA device available");
+            return;
+        };
+
+        let a = create_f64_buffer(&provider, &[1.9, 2.1, 3.5, 4.0, 5.7]);
+
+        let result = provider.cast_column(&a, ScalarType::I64).unwrap();
+        let values = provider.download_column_i64(&result, 0).unwrap();
+
+        // Truncation towards zero
+        assert_eq!(values, vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn test_cast_i64_to_i32() {
+        let Some(provider) = create_arith_test_provider() else {
+            eprintln!("Skipping test: no CUDA device available");
+            return;
+        };
+
+        let a = create_i64_buffer(&provider, &[1, 2, 3, 100, 200]);
+
+        let result = provider.cast_column(&a, ScalarType::I32).unwrap();
+        let values = provider.download_column_i32(&result, 0).unwrap();
+
+        assert_eq!(values, vec![1, 2, 3, 100, 200]);
+    }
+
+    #[test]
+    fn test_arithmetic_row_count_mismatch() {
+        let Some(provider) = create_arith_test_provider() else {
+            eprintln!("Skipping test: no CUDA device available");
+            return;
+        };
+
+        let a = create_i64_buffer(&provider, &[1, 2, 3]);
+        let b = create_i64_buffer(&provider, &[1, 2]); // Different size
+
+        let result = provider.add_columns(&a, &b);
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert!(err.to_string().contains("Row count mismatch"));
+    }
+
+    #[test]
+    fn test_arithmetic_empty_buffers() {
+        let Some(provider) = create_arith_test_provider() else {
+            eprintln!("Skipping test: no CUDA device available");
+            return;
+        };
+
+        let a = create_i64_buffer(&provider, &[]);
+        let b = create_i64_buffer(&provider, &[]);
+
+        let result = provider.add_columns(&a, &b).unwrap();
+        let values = provider.download_column_i64(&result, 0).unwrap();
+
+        assert_eq!(values, Vec::<i64>::new());
+    }
+
+    #[test]
+    fn test_wrapping_arithmetic_overflow() {
+        let Some(provider) = create_arith_test_provider() else {
+            eprintln!("Skipping test: no CUDA device available");
+            return;
+        };
+
+        let a = create_i64_buffer(&provider, &[i64::MAX, i64::MIN]);
+        let b = create_i64_buffer(&provider, &[1, -1]);
+
+        // Addition should wrap
+        let add_result = provider.add_columns(&a, &b).unwrap();
+        let add_values = provider.download_column_i64(&add_result, 0).unwrap();
+        assert_eq!(add_values[0], i64::MIN); // MAX + 1 wraps to MIN
+        assert_eq!(add_values[1], i64::MAX); // MIN - 1 wraps to MAX
+    }
+
+    #[test]
+    fn test_abs_column_f64() {
+        let Some(provider) = create_arith_test_provider() else {
+            eprintln!("Skipping test: no CUDA device available");
+            return;
+        };
+
+        let a = create_f64_buffer(&provider, &[-1.5, 2.5, -3.5, 0.0]);
+
+        let result = provider.abs_column(&a).unwrap();
+        let values = provider.download_column_f64(&result, 0).unwrap();
+
+        assert_eq!(values, vec![1.5, 2.5, 3.5, 0.0]);
+    }
+
+    #[test]
+    fn test_min_max_columns_f64() {
+        let Some(provider) = create_arith_test_provider() else {
+            eprintln!("Skipping test: no CUDA device available");
+            return;
+        };
+
+        let a = create_f64_buffer(&provider, &[1.5, 5.0, 3.0]);
+        let b = create_f64_buffer(&provider, &[2.0, 3.0, 4.0]);
+
+        let min_result = provider.min_columns(&a, &b).unwrap();
+        let min_values = provider.download_column_f64(&min_result, 0).unwrap();
+        assert_eq!(min_values, vec![1.5, 3.0, 3.0]);
+
+        let max_result = provider.max_columns(&a, &b).unwrap();
+        let max_values = provider.download_column_f64(&max_result, 0).unwrap();
+        assert_eq!(max_values, vec![2.0, 5.0, 4.0]);
     }
 }
