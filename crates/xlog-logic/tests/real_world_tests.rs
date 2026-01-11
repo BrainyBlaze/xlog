@@ -913,3 +913,259 @@ fn test_complex_join_query() {
         assert!(!order_ids.contains(&1005), "Order 1005 should NOT be local");
     }
 }
+
+// =============================================================================
+// 7. ARITHMETIC EXPRESSIONS
+// =============================================================================
+
+/// Test all basic arithmetic operations (+, -, *, /, %)
+///
+/// This test verifies that arithmetic is-expressions work correctly
+/// for all basic operations. Uses only variable-to-variable operations
+/// to match the current type inference behavior (which types integer
+/// literals as I64 but fact integers as U32).
+#[test]
+fn test_arithmetic_all_ops() {
+    // Test arithmetic using only variables (no integer literals in arithmetic)
+    // This matches the type inference where variables from relations match their schema types
+    let (mut executor, provider) = match create_test_executor() {
+        Some(e) => e,
+        None => {
+            eprintln!("Skipping: no CUDA device");
+            return;
+        }
+    };
+
+    // Define pairs of values for addition, subtraction, multiplication, division, modulo
+    let source = r#"
+        // Use pairs for arithmetic: val(X, Y) means compute X op Y
+        add_pair(10, 5).
+        add_pair(20, 3).
+
+        sub_pair(30, 7).
+        sub_pair(15, 5).
+
+        mul_pair(4, 5).
+        mul_pair(6, 7).
+
+        div_pair(20, 4).
+        div_pair(15, 3).
+
+        mod_pair(17, 5).
+        mod_pair(23, 7).
+
+        // Arithmetic operations using only variables
+        add_result(X, Y, Z) :- add_pair(X, Y), Z is X + Y.
+        sub_result(X, Y, Z) :- sub_pair(X, Y), Z is X - Y.
+        mul_result(X, Y, Z) :- mul_pair(X, Y), Z is X * Y.
+        div_result(X, Y, Z) :- div_pair(X, Y), Z is X / Y.
+        mod_result(X, Y, Z) :- mod_pair(X, Y), Z is X % Y.
+
+        ?- add_result(X, Y, Z).
+        ?- sub_result(X, Y, Z).
+        ?- mul_result(X, Y, Z).
+        ?- div_result(X, Y, Z).
+        ?- mod_result(X, Y, Z).
+    "#;
+
+    let mut compiler = Compiler::new();
+    let plan = compiler.compile(source).expect("Compilation failed");
+
+    // Create fact buffers
+    let add_pair_buf = create_edge_buffer(&provider, &[(10, 5), (20, 3)]);
+    let sub_pair_buf = create_edge_buffer(&provider, &[(30, 7), (15, 5)]);
+    let mul_pair_buf = create_edge_buffer(&provider, &[(4, 5), (6, 7)]);
+    let div_pair_buf = create_edge_buffer(&provider, &[(20, 4), (15, 3)]);
+    let mod_pair_buf = create_edge_buffer(&provider, &[(17, 5), (23, 7)]);
+
+    setup_facts(&mut executor, &compiler, vec![
+        ("add_pair", add_pair_buf),
+        ("sub_pair", sub_pair_buf),
+        ("mul_pair", mul_pair_buf),
+        ("div_pair", div_pair_buf),
+        ("mod_pair", mod_pair_buf),
+    ]);
+
+    executor.execute_plan(&plan).expect("Execution failed");
+
+    // Check add_result: (10, 5, 15), (20, 3, 23)
+    if let Some(result) = executor.store().get("add_result") {
+        let results = read_triples(&provider, result);
+        println!("add_result: {:?}", results);
+        assert_eq!(results.len(), 2, "add_result should have 2 results");
+        let expected: HashSet<(u32, u32, u32)> = [(10, 5, 15), (20, 3, 23)].into_iter().collect();
+        let actual: HashSet<(u32, u32, u32)> = results.into_iter().collect();
+        assert_eq!(actual, expected, "add_result should match");
+    } else {
+        panic!("add_result relation not found");
+    }
+
+    // Check sub_result: (30, 7, 23), (15, 5, 10)
+    if let Some(result) = executor.store().get("sub_result") {
+        let results = read_triples(&provider, result);
+        println!("sub_result: {:?}", results);
+        assert_eq!(results.len(), 2, "sub_result should have 2 results");
+        let expected: HashSet<(u32, u32, u32)> = [(30, 7, 23), (15, 5, 10)].into_iter().collect();
+        let actual: HashSet<(u32, u32, u32)> = results.into_iter().collect();
+        assert_eq!(actual, expected, "sub_result should match");
+    } else {
+        panic!("sub_result relation not found");
+    }
+
+    // Check mul_result: (4, 5, 20), (6, 7, 42)
+    if let Some(result) = executor.store().get("mul_result") {
+        let results = read_triples(&provider, result);
+        println!("mul_result: {:?}", results);
+        assert_eq!(results.len(), 2, "mul_result should have 2 results");
+        let expected: HashSet<(u32, u32, u32)> = [(4, 5, 20), (6, 7, 42)].into_iter().collect();
+        let actual: HashSet<(u32, u32, u32)> = results.into_iter().collect();
+        assert_eq!(actual, expected, "mul_result should match");
+    } else {
+        panic!("mul_result relation not found");
+    }
+
+    // Check div_result: (20, 4, 5), (15, 3, 5)
+    if let Some(result) = executor.store().get("div_result") {
+        let results = read_triples(&provider, result);
+        println!("div_result: {:?}", results);
+        assert_eq!(results.len(), 2, "div_result should have 2 results");
+        let expected: HashSet<(u32, u32, u32)> = [(20, 4, 5), (15, 3, 5)].into_iter().collect();
+        let actual: HashSet<(u32, u32, u32)> = results.into_iter().collect();
+        assert_eq!(actual, expected, "div_result should match");
+    } else {
+        panic!("div_result relation not found");
+    }
+
+    // Check mod_result: (17, 5, 2), (23, 7, 2)
+    if let Some(result) = executor.store().get("mod_result") {
+        let results = read_triples(&provider, result);
+        println!("mod_result: {:?}", results);
+        assert_eq!(results.len(), 2, "mod_result should have 2 results");
+        let expected: HashSet<(u32, u32, u32)> = [(17, 5, 2), (23, 7, 2)].into_iter().collect();
+        let actual: HashSet<(u32, u32, u32)> = results.into_iter().collect();
+        assert_eq!(actual, expected, "mod_result should match");
+    } else {
+        panic!("mod_result relation not found");
+    }
+}
+
+/// Test chained is-expressions (like distance calculation)
+///
+/// This test verifies that multiple is-expressions can be chained
+/// in a single rule, with intermediate results used in subsequent expressions.
+#[test]
+fn test_arithmetic_chained() {
+    let (mut executor, provider) = match create_test_executor() {
+        Some(e) => e,
+        None => {
+            eprintln!("Skipping: no CUDA device");
+            return;
+        }
+    };
+
+    // Using U32 for point coordinates, computing squared values
+    let source = r#"
+        point(0, 0).
+        point(3, 4).
+
+        // Chained arithmetic: compute x^2 + y^2
+        sum_squares(X, Y, Sum) :-
+            point(X, Y),
+            X2 is X * X,
+            Y2 is Y * Y,
+            Sum is X2 + Y2.
+
+        ?- sum_squares(X, Y, Sum).
+    "#;
+
+    let mut compiler = Compiler::new();
+    let plan = compiler.compile(source).expect("Compilation failed");
+
+    // Create point buffer with U32 values
+    let point_data: Vec<(u32, u32)> = vec![(0, 0), (3, 4)];
+    let point_buffer = create_edge_buffer(&provider, &point_data);
+
+    setup_facts(&mut executor, &compiler, vec![("point", point_buffer)]);
+
+    executor.execute_plan(&plan).expect("Execution failed");
+
+    // Check sum_squares: (0,0,0), (3,4,25)
+    if let Some(sum_squares) = executor.store().get("sum_squares") {
+        let c0 = read_column_u32(&provider, sum_squares, 0);
+        let c1 = read_column_u32(&provider, sum_squares, 1);
+        let c2 = read_column_u32(&provider, sum_squares, 2);
+        let results: Vec<(u32, u32, u32)> = c0.into_iter()
+            .zip(c1.into_iter())
+            .zip(c2.into_iter())
+            .map(|((a, b), c)| (a, b, c))
+            .collect();
+
+        println!("sum_squares results: {:?}", results);
+        assert_eq!(results.len(), 2, "sum_squares should have 2 results");
+
+        let expected: HashSet<(u32, u32, u32)> = [(0, 0, 0), (3, 4, 25)].into_iter().collect();
+        let actual: HashSet<(u32, u32, u32)> = results.into_iter().collect();
+        assert_eq!(actual, expected, "sum_squares results should match");
+    } else {
+        panic!("sum_squares relation not found");
+    }
+}
+
+/// Test that type mismatch in arithmetic produces error
+///
+/// This test verifies that mixing incompatible types (i64 + u32)
+/// produces a compile-time error.
+#[test]
+fn test_arithmetic_type_error() {
+    // Use two separate predicates with different declared types
+    // to trigger type mismatch in arithmetic
+    let program = r#"
+        pred int_val(i64).
+        pred uint_val(u32).
+        int_val(10).
+        uint_val(20).
+        // This should fail: X is i64, Y is u32 - type mismatch
+        bad(Z) :- int_val(X), uint_val(Y), Z is X + Y.
+        ?- bad(Z).
+    "#;
+
+    let mut compiler = Compiler::new();
+    let result = compiler.compile(program);
+    assert!(result.is_err(), "Should fail with type mismatch error");
+    let err_msg = result.unwrap_err().to_string();
+    println!("Type error message: {}", err_msg);
+    // Check that the error mentions type mismatch in some way
+    assert!(
+        err_msg.to_lowercase().contains("type")
+            || err_msg.to_lowercase().contains("mismatch")
+            || err_msg.to_lowercase().contains("incompatible"),
+        "Error should mention type issue: {}", err_msg
+    );
+}
+
+/// Test that non-fresh variable in is-expression produces error
+///
+/// This test verifies that using an already-bound variable as the
+/// target of an is-expression produces a compile-time error.
+#[test]
+fn test_arithmetic_fresh_var_error() {
+    let program = r#"
+        val(10).
+        // Z is already bound from val, cannot be used as target of is
+        bad(Z) :- val(Z), Z is Z + 1.
+        ?- bad(Z).
+    "#;
+
+    let mut compiler = Compiler::new();
+    let result = compiler.compile(program);
+    assert!(result.is_err(), "Should fail with non-fresh variable error");
+    let err_msg = result.unwrap_err().to_string();
+    println!("Fresh var error message: {}", err_msg);
+    // Check that the error mentions the variable being bound
+    assert!(
+        err_msg.to_lowercase().contains("bound")
+            || err_msg.to_lowercase().contains("fresh")
+            || err_msg.to_lowercase().contains("already"),
+        "Error should mention variable binding issue: {}", err_msg
+    );
+}
