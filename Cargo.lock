@@ -1028,6 +1028,7 @@ dependencies = [
  "xlog-cuda",
  "xlog-ir",
  "xlog-runtime",
+ "xlog-stats",
 ]
 
 [[package]]
@@ -1037,6 +1038,14 @@ dependencies = [
  "xlog-core",
  "xlog-cuda",
  "xlog-ir",
+]
+
+[[package]]
+name = "xlog-solve"
+version = "0.1.0"
+dependencies = [
+ "xlog-core",
+ "xlog-cuda",
 ]
 
 [[package]]

@@ -1,0 +1,8 @@
+[package]
+name = "xlog-solve"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+xlog-core = { path = "../xlog-core" }
+xlog-cuda = { path = "../xlog-cuda" }
