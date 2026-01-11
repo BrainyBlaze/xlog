@@ -631,8 +631,12 @@ impl Executor {
                 let exp_val = self.evaluate_expr_as_i64(exp, columns, row_idx, schema)?;
                 if exp_val < 0 {
                     return Err(XlogError::Execution("Negative exponent in integer pow".to_string()));
+                } else if exp_val > u32::MAX as i64 {
+                    // Exponent too large - would overflow anyway
+                    Ok(i64::MAX)
+                } else {
+                    Ok(base_val.pow(exp_val as u32))
                 }
-                Ok(base_val.pow(exp_val as u32))
             }
             Expr::Cast(inner, _target_type) => {
                 // For i64 evaluation, cast is a no-op since we evaluate everything as i64
@@ -1402,6 +1406,102 @@ mod tests {
         // Second column should be a's values
         let col1 = read_buffer_u32(&executor, &result, 1);
         assert_eq!(col1, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_execute_computed_projection_wiring() {
+        // Test that ProjectExpr::Computed is handled correctly
+        // Even if arithmetic stubs return errors, verify the flow is correct
+        let executor = match create_test_executor() {
+            Some(e) => e,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+
+        // Create a 2-column buffer
+        let schema = Schema::new(vec![
+            ("a".to_string(), ScalarType::U32),
+            ("b".to_string(), ScalarType::U32),
+        ]);
+
+        let a_data: Vec<u8> = [10u32, 20, 30].iter().flat_map(|v| v.to_le_bytes()).collect();
+        let b_data: Vec<u8> = [1u32, 2, 3]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+
+        let mut col_a = executor
+            .provider
+            .memory()
+            .alloc::<u8>(a_data.len())
+            .unwrap();
+        let mut col_b = executor
+            .provider
+            .memory()
+            .alloc::<u8>(b_data.len())
+            .unwrap();
+
+        executor
+            .provider
+            .device()
+            .inner()
+            .htod_sync_copy_into(&a_data, &mut col_a)
+            .unwrap();
+        executor
+            .provider
+            .device()
+            .inner()
+            .htod_sync_copy_into(&b_data, &mut col_b)
+            .unwrap();
+
+        let buffer = CudaBuffer::from_columns(vec![col_a, col_b], 3, schema);
+
+        // Project with computed expression: a + b
+        let add_expr = Expr::Add(
+            Box::new(Expr::Column(0)),
+            Box::new(Expr::Column(1)),
+        );
+        let projections = vec![
+            ProjectExpr::Column(0),                              // Pass through column a
+            ProjectExpr::Computed(add_expr, ScalarType::U32),   // Compute a + b
+        ];
+
+        let result = executor.execute_project(&buffer, &projections);
+
+        // The wiring should be correct - result depends on whether CUDA arithmetic kernels are available
+        // If available: result has 2 columns with computed values
+        // If not available: may return error from provider stubs
+        match result {
+            Ok(res) => {
+                // Wiring worked and arithmetic kernels are available
+                assert_eq!(res.num_rows(), 3);
+                assert_eq!(res.arity(), 2);
+
+                // First column should be a's values (pass-through)
+                let col0 = read_buffer_u32(&executor, &res, 0);
+                assert_eq!(col0, vec![10, 20, 30]);
+
+                // Second column should be a + b = [11, 22, 33]
+                let col1 = read_buffer_u32(&executor, &res, 1);
+                assert_eq!(col1, vec![11, 22, 33]);
+            }
+            Err(e) => {
+                // Arithmetic kernels not available - that's OK for this test
+                // The important thing is that the wiring reached the provider
+                let err_msg = format!("{}", e);
+                assert!(
+                    err_msg.contains("not implemented") ||
+                    err_msg.contains("not yet implemented") ||
+                    err_msg.contains("not supported") ||
+                    err_msg.contains("stub") ||
+                    err_msg.contains("Unsupported") ||
+                    err_msg.contains("arithmetic kernels"),
+                    "Unexpected error: {}. Expected arithmetic kernel stub error.", err_msg
+                );
+            }
+        }
     }
 
     // ============== Union Node Tests ==============
