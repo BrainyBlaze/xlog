@@ -1040,6 +1040,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "xlog-stats"
+version = "0.1.0"
+dependencies = [
+ "xlog-core",
+ "xlog-cuda",
+]
+
+[[package]]
 name = "zerocopy"
 version = "0.8.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"

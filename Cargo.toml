@@ -6,6 +6,7 @@ members = [
     "crates/xlog-cuda",
     "crates/xlog-runtime",
     "crates/xlog-logic",
+    "crates/xlog-stats",
 ]
 
 [workspace.package]
