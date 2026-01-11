@@ -502,6 +502,15 @@ impl Executor {
             }
 
             Expr::Not(inner) => Ok(!self.evaluate_predicate(inner, columns, row_idx, schema)?),
+
+            // Arithmetic expressions are not used as predicates directly
+            Expr::Add(_, _) | Expr::Sub(_, _) | Expr::Mul(_, _) |
+            Expr::Div(_, _) | Expr::Mod(_, _) | Expr::Abs(_) |
+            Expr::Min(_, _) | Expr::Max(_, _) | Expr::Pow(_, _) | Expr::Cast(_, _) => {
+                Err(XlogError::Execution(
+                    "Arithmetic expression cannot be evaluated as boolean predicate".into()
+                ))
+            }
         }
     }
 

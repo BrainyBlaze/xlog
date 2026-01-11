@@ -19,7 +19,7 @@ use xlog_ir::{
 };
 
 use crate::ast::{
-    AggOp, Atom, BodyLiteral, Comparison, CompOp, Program, Rule, Term,
+    AggOp, ArithExpr, Atom, BodyLiteral, Comparison, CompOp, Program, Rule, Term,
 };
 use crate::stratify::{build_dependency_graph, find_sccs_for_lowering, DepType};
 
@@ -635,14 +635,125 @@ impl Lowerer {
 
         Ok(cols)
     }
+
+    /// Infer the result type of an arithmetic expression (strict same-type)
+    pub fn infer_arith_type(
+        &self,
+        expr: &ArithExpr,
+        var_env: &VariableEnv,
+    ) -> Result<ScalarType> {
+        match expr {
+            ArithExpr::Variable(name) => {
+                var_env.get_type(name).ok_or_else(||
+                    XlogError::Compilation(format!("Unknown variable {} in arithmetic", name)))
+            }
+            ArithExpr::Integer(_) => Ok(ScalarType::I64),
+            ArithExpr::Float(_) => Ok(ScalarType::F64),
+
+            ArithExpr::Add(l, r) | ArithExpr::Sub(l, r) |
+            ArithExpr::Mul(l, r) | ArithExpr::Div(l, r) => {
+                let lt = self.infer_arith_type(l, var_env)?;
+                let rt = self.infer_arith_type(r, var_env)?;
+
+                if lt != rt {
+                    return Err(XlogError::Compilation(format!(
+                        "Type mismatch in arithmetic: {:?} vs {:?}. Use cast() for conversion.",
+                        lt, rt
+                    )));
+                }
+
+                if !Self::is_numeric_type(&lt) {
+                    return Err(XlogError::Compilation(format!(
+                        "Arithmetic requires numeric type, got {:?}", lt
+                    )));
+                }
+
+                Ok(lt)
+            }
+
+            ArithExpr::Mod(l, r) => {
+                let lt = self.infer_arith_type(l, var_env)?;
+                let rt = self.infer_arith_type(r, var_env)?;
+
+                if lt != rt {
+                    return Err(XlogError::Compilation(format!(
+                        "Type mismatch in mod: {:?} vs {:?}", lt, rt
+                    )));
+                }
+
+                if matches!(lt, ScalarType::F32 | ScalarType::F64) {
+                    return Err(XlogError::Compilation(
+                        "Modulo (%) not supported for floating point".into()
+                    ));
+                }
+
+                Ok(lt)
+            }
+
+            ArithExpr::Abs(inner) => {
+                let t = self.infer_arith_type(inner, var_env)?;
+                if !Self::is_numeric_type(&t) {
+                    return Err(XlogError::Compilation(format!(
+                        "abs requires numeric type, got {:?}", t
+                    )));
+                }
+                Ok(t)
+            }
+
+            ArithExpr::Min(l, r) | ArithExpr::Max(l, r) => {
+                let lt = self.infer_arith_type(l, var_env)?;
+                let rt = self.infer_arith_type(r, var_env)?;
+
+                if lt != rt {
+                    return Err(XlogError::Compilation(format!(
+                        "Type mismatch in min/max: {:?} vs {:?}", lt, rt
+                    )));
+                }
+
+                if !Self::is_numeric_type(&lt) {
+                    return Err(XlogError::Compilation(format!(
+                        "min/max requires numeric type, got {:?}", lt
+                    )));
+                }
+
+                Ok(lt)
+            }
+
+            ArithExpr::Pow(base, exp) => {
+                let base_t = self.infer_arith_type(base, var_env)?;
+                let exp_t = self.infer_arith_type(exp, var_env)?;
+
+                if !Self::is_numeric_type(&base_t) || !Self::is_numeric_type(&exp_t) {
+                    return Err(XlogError::Compilation(format!(
+                        "pow requires numeric operands, got {:?} and {:?}", base_t, exp_t
+                    )));
+                }
+
+                // pow always returns f64 (standard math behavior)
+                Ok(ScalarType::F64)
+            }
+
+            ArithExpr::Cast(_, target) => Ok(*target),
+        }
+    }
+
+    fn is_numeric_type(t: &ScalarType) -> bool {
+        matches!(t,
+            ScalarType::I32 | ScalarType::I64 |
+            ScalarType::U32 | ScalarType::U64 |
+            ScalarType::F32 | ScalarType::F64
+        )
+    }
 }
 
 /// Track variable occurrences and column positions
-struct VariableEnv {
+pub struct VariableEnv {
     /// Maps variable name to list of (predicate, position in atom, global column)
     occurrences: HashMap<String, Vec<(String, usize, usize)>>,
     /// Total columns in current result
     total_cols: usize,
+    /// Maps variable name to its type (for type inference)
+    types: HashMap<String, ScalarType>,
 }
 
 impl VariableEnv {
@@ -650,6 +761,7 @@ impl VariableEnv {
         Self {
             occurrences: HashMap::new(),
             total_cols: 0,
+            types: HashMap::new(),
         }
     }
 
@@ -665,6 +777,21 @@ impl VariableEnv {
             .get(var)
             .and_then(|occs| occs.first())
             .map(|(_, _, col)| *col)
+    }
+
+    /// Bind a variable to a column with a specific type (for type inference)
+    fn bind(&mut self, name: &str, column: usize, typ: ScalarType) {
+        self.types.insert(name.to_string(), typ);
+        // Also add occurrence for column lookup
+        self.occurrences
+            .entry(name.to_string())
+            .or_default()
+            .push(("".to_string(), 0, column));
+    }
+
+    /// Get the type of a bound variable
+    fn get_type(&self, name: &str) -> Option<ScalarType> {
+        self.types.get(name).copied()
     }
 }
 
@@ -709,6 +836,45 @@ fn convert_agg_op(op: &AggOp) -> CoreAggOp {
 
 // Export the find_sccs_for_lowering function from stratify
 // We need to add this to the stratify module
+
+#[cfg(test)]
+mod arith_type_tests {
+    use super::*;
+    use crate::ast::ArithExpr;
+
+    #[test]
+    fn test_arith_type_inference_same_type() {
+        // X + Y where both are i64 should succeed and return i64
+        let lowerer = Lowerer::new();
+        let mut var_env = VariableEnv::new();
+        var_env.bind("X", 0, ScalarType::I64);
+        var_env.bind("Y", 1, ScalarType::I64);
+
+        let expr = ArithExpr::Add(
+            Box::new(ArithExpr::Variable("X".to_string())),
+            Box::new(ArithExpr::Variable("Y".to_string())),
+        );
+        let result = lowerer.infer_arith_type(&expr, &var_env);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), ScalarType::I64);
+    }
+
+    #[test]
+    fn test_arith_type_inference_mismatch() {
+        // X + Y where X is i64 and Y is f64 should fail
+        let lowerer = Lowerer::new();
+        let mut var_env = VariableEnv::new();
+        var_env.bind("X", 0, ScalarType::I64);
+        var_env.bind("Y", 1, ScalarType::F64);
+
+        let expr = ArithExpr::Add(
+            Box::new(ArithExpr::Variable("X".to_string())),
+            Box::new(ArithExpr::Variable("Y".to_string())),
+        );
+        let result = lowerer.infer_arith_type(&expr, &var_env);
+        assert!(result.is_err());
+    }
+}
 
 #[cfg(test)]
 mod tests {
