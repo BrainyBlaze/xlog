@@ -6,3 +6,10 @@ edition.workspace = true
 [dependencies]
 xlog-core = { path = "../xlog-core" }
 xlog-cuda = { path = "../xlog-cuda" }
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "stats_bench"
+harness = false
