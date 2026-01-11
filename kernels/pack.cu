@@ -25,6 +25,9 @@
  * @param num_rows Number of rows to process
  * @param row_size Total size of packed row in bytes (sum of col_sizes)
  * @param packed_output Output buffer for packed rows (row_size * num_rows bytes)
+ *
+ * @note Precondition: All column pointers from col0 to col(num_cols-1) MUST be non-null.
+ *       Passing nullptr for an in-range column results in undefined behavior.
  */
 extern "C" __global__ void pack_keys(
     const uint8_t* __restrict__ col0,
@@ -133,6 +136,9 @@ extern "C" __global__ void hash_packed_keys(
  * @param row_size Total size of packed row in bytes
  * @param packed_output Output buffer for packed rows
  * @param hashes Output hash values (one uint64_t per row)
+ *
+ * @note Precondition: All column pointers from col0 to col(num_cols-1) MUST be non-null.
+ *       Passing nullptr for an in-range column results in undefined behavior.
  */
 extern "C" __global__ void pack_and_hash_keys(
     const uint8_t* __restrict__ col0,
@@ -218,6 +224,12 @@ extern "C" __global__ void pack_and_hash_keys(
  * @param num_rows Number of rows to process
  * @param row_size Total size of packed row in bytes (should be multiple of 8)
  * @param packed_output Output buffer for packed rows (8-byte aligned)
+ *
+ * @note ALIGNMENT REQUIREMENTS: All column data buffers (col0-col3) MUST be 8-byte aligned.
+ *       The packed_output buffer MUST also be 8-byte aligned. Caller is responsible for
+ *       ensuring alignment. Misaligned pointers result in undefined behavior on GPU.
+ * @note Precondition: All column pointers from col0 to col(num_cols-1) MUST be non-null.
+ *       Passing nullptr for an in-range column results in undefined behavior.
  */
 extern "C" __global__ void pack_keys_aligned(
     const uint8_t* __restrict__ col0,
@@ -371,19 +383,23 @@ extern "C" __global__ void gather_packed_rows(
  * @param row_size Size of each packed row in bytes
  * @param output_indices Array specifying output position for each input row
  * @param num_rows Number of rows to scatter
- * @param dst_packed Output buffer (must be pre-allocated to hold max(output_indices)+1 rows)
+ * @param max_output_rows Maximum valid output row index + 1 (bounds check limit)
+ * @param dst_packed Output buffer (must be pre-allocated to hold max_output_rows rows)
  */
 extern "C" __global__ void scatter_packed_rows(
     const uint8_t* __restrict__ src_packed,
     uint32_t row_size,
     const uint32_t* __restrict__ output_indices,
     uint32_t num_rows,
+    uint32_t max_output_rows,
     uint8_t* __restrict__ dst_packed
 ) {
     uint32_t src_row = blockIdx.x * blockDim.x + threadIdx.x;
     if (src_row >= num_rows) return;
 
     uint32_t dst_row = output_indices[src_row];
+    if (dst_row >= max_output_rows) return;  // Bounds check to prevent buffer overflow
+
     const uint8_t* src = src_packed + (uint64_t)src_row * row_size;
     uint8_t* dst = dst_packed + (uint64_t)dst_row * row_size;
 
