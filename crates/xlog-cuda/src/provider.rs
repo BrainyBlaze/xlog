@@ -5168,6 +5168,248 @@ impl CudaKernelProvider {
             buffer.schema().clone(),
         ))
     }
+
+    // ============== Arithmetic Operations (Stubs for Task 7, GPU implementation in Task 8) ==============
+
+    /// Extract a single column from a buffer as a new single-column buffer
+    ///
+    /// # Arguments
+    /// * `buffer` - The source buffer
+    /// * `col_idx` - The column index to extract
+    ///
+    /// # Returns
+    /// A new single-column CudaBuffer containing just the specified column
+    pub fn extract_column(&self, buffer: &CudaBuffer, col_idx: usize) -> Result<CudaBuffer> {
+        if buffer.is_empty() {
+            let col_type = buffer.schema().column_type(col_idx)
+                .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
+            let schema = Schema::new(vec![("col".to_string(), col_type)]);
+            return self.create_empty_buffer(schema);
+        }
+
+        let col_type = buffer.schema().column_type(col_idx)
+            .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
+        let col_type_size = col_type.size_bytes();
+        let num_rows = buffer.num_rows();
+        let bytes = (num_rows as usize) * col_type_size;
+
+        let src_col = buffer.column(col_idx)
+            .ok_or_else(|| XlogError::Kernel(format!("Column {} not found in buffer", col_idx)))?;
+
+        // Copy via host
+        let mut host_data = vec![0u8; bytes];
+        self.device.inner().dtoh_sync_copy_into(src_col, &mut host_data)
+            .map_err(|e| XlogError::Kernel(format!("Failed to read column: {}", e)))?;
+
+        let mut dst_col = self.memory.alloc::<u8>(bytes)?;
+        self.device.inner().htod_sync_copy_into(&host_data, &mut dst_col)
+            .map_err(|e| XlogError::Kernel(format!("Failed to copy column: {}", e)))?;
+
+        let schema = Schema::new(vec![("col".to_string(), col_type)]);
+        Ok(CudaBuffer::from_columns(vec![dst_col], num_rows, schema))
+    }
+
+    /// Create a column filled with a constant value
+    ///
+    /// # Arguments
+    /// * `value_bytes` - The raw bytes of the constant value (in little-endian format)
+    /// * `col_type` - The ScalarType of the column
+    /// * `num_rows` - Number of rows to create
+    ///
+    /// # Returns
+    /// A new single-column CudaBuffer filled with the constant value
+    pub fn create_constant_column(
+        &self,
+        value_bytes: &[u8],
+        col_type: ScalarType,
+        num_rows: u64,
+    ) -> Result<CudaBuffer> {
+        if num_rows == 0 {
+            let schema = Schema::new(vec![("const".to_string(), col_type)]);
+            return self.create_empty_buffer(schema);
+        }
+
+        let elem_size = col_type.size_bytes();
+        if value_bytes.len() != elem_size {
+            return Err(XlogError::Kernel(format!(
+                "Value bytes length {} doesn't match type size {}",
+                value_bytes.len(),
+                elem_size
+            )));
+        }
+
+        // Replicate the value for each row
+        let total_bytes = (num_rows as usize) * elem_size;
+        let mut host_data = Vec::with_capacity(total_bytes);
+        for _ in 0..num_rows {
+            host_data.extend_from_slice(value_bytes);
+        }
+
+        let mut dst_col = self.memory.alloc::<u8>(host_data.len())?;
+        self.device.inner().htod_sync_copy_into(&host_data, &mut dst_col)
+            .map_err(|e| XlogError::Kernel(format!("Failed to upload constant column: {}", e)))?;
+
+        let schema = Schema::new(vec![("const".to_string(), col_type)]);
+        Ok(CudaBuffer::from_columns(vec![dst_col], num_rows, schema))
+    }
+
+    /// Element-wise addition of two single-column buffers
+    ///
+    /// Stub implementation - returns error until Task 8 implements GPU kernels.
+    pub fn add_columns(&self, _left: &CudaBuffer, _right: &CudaBuffer) -> Result<CudaBuffer> {
+        Err(XlogError::Kernel(
+            "add_columns: GPU arithmetic kernels not yet implemented (Task 8)".to_string()
+        ))
+    }
+
+    /// Element-wise subtraction of two single-column buffers
+    ///
+    /// Stub implementation - returns error until Task 8 implements GPU kernels.
+    pub fn sub_columns(&self, _left: &CudaBuffer, _right: &CudaBuffer) -> Result<CudaBuffer> {
+        Err(XlogError::Kernel(
+            "sub_columns: GPU arithmetic kernels not yet implemented (Task 8)".to_string()
+        ))
+    }
+
+    /// Element-wise multiplication of two single-column buffers
+    ///
+    /// Stub implementation - returns error until Task 8 implements GPU kernels.
+    pub fn mul_columns(&self, _left: &CudaBuffer, _right: &CudaBuffer) -> Result<CudaBuffer> {
+        Err(XlogError::Kernel(
+            "mul_columns: GPU arithmetic kernels not yet implemented (Task 8)".to_string()
+        ))
+    }
+
+    /// Element-wise division of two single-column buffers
+    ///
+    /// Stub implementation - returns error until Task 8 implements GPU kernels.
+    pub fn div_columns(&self, _left: &CudaBuffer, _right: &CudaBuffer) -> Result<CudaBuffer> {
+        Err(XlogError::Kernel(
+            "div_columns: GPU arithmetic kernels not yet implemented (Task 8)".to_string()
+        ))
+    }
+
+    /// Element-wise modulo of two single-column buffers
+    ///
+    /// Stub implementation - returns error until Task 8 implements GPU kernels.
+    pub fn mod_columns(&self, _left: &CudaBuffer, _right: &CudaBuffer) -> Result<CudaBuffer> {
+        Err(XlogError::Kernel(
+            "mod_columns: GPU arithmetic kernels not yet implemented (Task 8)".to_string()
+        ))
+    }
+
+    /// Element-wise absolute value of a single-column buffer
+    ///
+    /// Stub implementation - returns error until Task 8 implements GPU kernels.
+    pub fn abs_column(&self, _input: &CudaBuffer) -> Result<CudaBuffer> {
+        Err(XlogError::Kernel(
+            "abs_column: GPU arithmetic kernels not yet implemented (Task 8)".to_string()
+        ))
+    }
+
+    /// Element-wise minimum of two single-column buffers
+    ///
+    /// Stub implementation - returns error until Task 8 implements GPU kernels.
+    pub fn min_columns(&self, _left: &CudaBuffer, _right: &CudaBuffer) -> Result<CudaBuffer> {
+        Err(XlogError::Kernel(
+            "min_columns: GPU arithmetic kernels not yet implemented (Task 8)".to_string()
+        ))
+    }
+
+    /// Element-wise maximum of two single-column buffers
+    ///
+    /// Stub implementation - returns error until Task 8 implements GPU kernels.
+    pub fn max_columns(&self, _left: &CudaBuffer, _right: &CudaBuffer) -> Result<CudaBuffer> {
+        Err(XlogError::Kernel(
+            "max_columns: GPU arithmetic kernels not yet implemented (Task 8)".to_string()
+        ))
+    }
+
+    /// Element-wise power of two single-column buffers
+    ///
+    /// Stub implementation - returns error until Task 8 implements GPU kernels.
+    pub fn pow_columns(&self, _base: &CudaBuffer, _exp: &CudaBuffer) -> Result<CudaBuffer> {
+        Err(XlogError::Kernel(
+            "pow_columns: GPU arithmetic kernels not yet implemented (Task 8)".to_string()
+        ))
+    }
+
+    /// Cast a single-column buffer to a different type
+    ///
+    /// Stub implementation - returns error until Task 8 implements GPU kernels.
+    pub fn cast_column(&self, _input: &CudaBuffer, _target_type: ScalarType) -> Result<CudaBuffer> {
+        Err(XlogError::Kernel(
+            "cast_column: GPU arithmetic kernels not yet implemented (Task 8)".to_string()
+        ))
+    }
+
+    /// Combine multiple single-column buffers into a multi-column buffer
+    ///
+    /// # Arguments
+    /// * `columns` - Vector of single-column CudaBuffers to combine
+    /// * `types` - Vector of ScalarTypes for each column
+    ///
+    /// # Returns
+    /// A new CudaBuffer with all columns combined
+    pub fn combine_columns(&self, columns: Vec<CudaBuffer>, types: Vec<ScalarType>) -> Result<CudaBuffer> {
+        if columns.is_empty() {
+            return Ok(CudaBuffer::empty());
+        }
+
+        let num_rows = columns[0].num_rows();
+
+        // Verify all columns have the same number of rows
+        for (i, col) in columns.iter().enumerate() {
+            if col.num_rows() != num_rows {
+                return Err(XlogError::Kernel(format!(
+                    "Column {} has {} rows, expected {}",
+                    i, col.num_rows(), num_rows
+                )));
+            }
+        }
+
+        if num_rows == 0 {
+            let schema_cols: Vec<(String, ScalarType)> = types
+                .iter()
+                .enumerate()
+                .map(|(i, t)| (format!("col_{}", i), *t))
+                .collect();
+            let schema = Schema::new(schema_cols);
+            return self.create_empty_buffer(schema);
+        }
+
+        // Extract each single-column buffer's data
+        let mut result_columns = Vec::with_capacity(columns.len());
+        for (i, col_buf) in columns.iter().enumerate() {
+            let col_type = types.get(i).copied().unwrap_or(ScalarType::U64);
+            let col_type_size = col_type.size_bytes();
+            let bytes = (num_rows as usize) * col_type_size;
+
+            // Each input buffer should have exactly one column
+            let src_col = col_buf.column(0)
+                .ok_or_else(|| XlogError::Kernel(format!("Column {} buffer has no data", i)))?;
+
+            // Copy via host
+            let mut host_data = vec![0u8; bytes];
+            self.device.inner().dtoh_sync_copy_into(src_col, &mut host_data)
+                .map_err(|e| XlogError::Kernel(format!("Failed to read column {}: {}", i, e)))?;
+
+            let mut dst_col = self.memory.alloc::<u8>(bytes)?;
+            self.device.inner().htod_sync_copy_into(&host_data, &mut dst_col)
+                .map_err(|e| XlogError::Kernel(format!("Failed to copy column {}: {}", i, e)))?;
+
+            result_columns.push(dst_col);
+        }
+
+        let schema_cols: Vec<(String, ScalarType)> = types
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (format!("col_{}", i), *t))
+            .collect();
+        let schema = Schema::new(schema_cols);
+
+        Ok(CudaBuffer::from_columns(result_columns, num_rows, schema))
+    }
 }
 
 #[cfg(test)]

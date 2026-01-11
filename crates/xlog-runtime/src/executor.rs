@@ -580,9 +580,156 @@ impl Executor {
                 ConstValue::Symbol(_) => 0,
             }),
 
+            // Arithmetic expressions - evaluate them and return the result
+            Expr::Add(l, r) => {
+                let left_val = self.evaluate_expr_as_i64(l, columns, row_idx, schema)?;
+                let right_val = self.evaluate_expr_as_i64(r, columns, row_idx, schema)?;
+                Ok(left_val.wrapping_add(right_val))
+            }
+            Expr::Sub(l, r) => {
+                let left_val = self.evaluate_expr_as_i64(l, columns, row_idx, schema)?;
+                let right_val = self.evaluate_expr_as_i64(r, columns, row_idx, schema)?;
+                Ok(left_val.wrapping_sub(right_val))
+            }
+            Expr::Mul(l, r) => {
+                let left_val = self.evaluate_expr_as_i64(l, columns, row_idx, schema)?;
+                let right_val = self.evaluate_expr_as_i64(r, columns, row_idx, schema)?;
+                Ok(left_val.wrapping_mul(right_val))
+            }
+            Expr::Div(l, r) => {
+                let left_val = self.evaluate_expr_as_i64(l, columns, row_idx, schema)?;
+                let right_val = self.evaluate_expr_as_i64(r, columns, row_idx, schema)?;
+                if right_val == 0 {
+                    return Err(XlogError::Execution("Division by zero".to_string()));
+                }
+                Ok(left_val / right_val)
+            }
+            Expr::Mod(l, r) => {
+                let left_val = self.evaluate_expr_as_i64(l, columns, row_idx, schema)?;
+                let right_val = self.evaluate_expr_as_i64(r, columns, row_idx, schema)?;
+                if right_val == 0 {
+                    return Err(XlogError::Execution("Modulo by zero".to_string()));
+                }
+                Ok(left_val % right_val)
+            }
+            Expr::Abs(inner) => {
+                let val = self.evaluate_expr_as_i64(inner, columns, row_idx, schema)?;
+                Ok(val.abs())
+            }
+            Expr::Min(l, r) => {
+                let left_val = self.evaluate_expr_as_i64(l, columns, row_idx, schema)?;
+                let right_val = self.evaluate_expr_as_i64(r, columns, row_idx, schema)?;
+                Ok(left_val.min(right_val))
+            }
+            Expr::Max(l, r) => {
+                let left_val = self.evaluate_expr_as_i64(l, columns, row_idx, schema)?;
+                let right_val = self.evaluate_expr_as_i64(r, columns, row_idx, schema)?;
+                Ok(left_val.max(right_val))
+            }
+            Expr::Pow(base, exp) => {
+                let base_val = self.evaluate_expr_as_i64(base, columns, row_idx, schema)?;
+                let exp_val = self.evaluate_expr_as_i64(exp, columns, row_idx, schema)?;
+                if exp_val < 0 {
+                    return Err(XlogError::Execution("Negative exponent in integer pow".to_string()));
+                }
+                Ok(base_val.pow(exp_val as u32))
+            }
+            Expr::Cast(inner, _target_type) => {
+                // For i64 evaluation, cast is a no-op since we evaluate everything as i64
+                self.evaluate_expr_as_i64(inner, columns, row_idx, schema)
+            }
+
             _ => Err(XlogError::Execution(
                 "Cannot evaluate compound expression as value".to_string(),
             )),
+        }
+    }
+
+    /// Evaluate an arithmetic expression on a buffer, producing a single-column result
+    ///
+    /// This method recursively evaluates arithmetic expressions (Add, Sub, Mul, Div, etc.)
+    /// by delegating to the CUDA kernel provider for GPU-accelerated operations.
+    fn evaluate_arith_expr(&self, expr: &Expr, input: &CudaBuffer) -> Result<CudaBuffer> {
+        match expr {
+            Expr::Column(idx) => {
+                // Extract the column as a single-column buffer
+                self.provider.extract_column(input, *idx)
+            }
+            Expr::Const(val) => {
+                // Create a column filled with the constant value
+                let (bytes, col_type) = self.const_to_bytes_and_type(val);
+                self.provider.create_constant_column(&bytes, col_type, input.num_rows())
+            }
+            Expr::Add(l, r) => {
+                let left = self.evaluate_arith_expr(l, input)?;
+                let right = self.evaluate_arith_expr(r, input)?;
+                self.provider.add_columns(&left, &right)
+            }
+            Expr::Sub(l, r) => {
+                let left = self.evaluate_arith_expr(l, input)?;
+                let right = self.evaluate_arith_expr(r, input)?;
+                self.provider.sub_columns(&left, &right)
+            }
+            Expr::Mul(l, r) => {
+                let left = self.evaluate_arith_expr(l, input)?;
+                let right = self.evaluate_arith_expr(r, input)?;
+                self.provider.mul_columns(&left, &right)
+            }
+            Expr::Div(l, r) => {
+                let left = self.evaluate_arith_expr(l, input)?;
+                let right = self.evaluate_arith_expr(r, input)?;
+                self.provider.div_columns(&left, &right)
+            }
+            Expr::Mod(l, r) => {
+                let left = self.evaluate_arith_expr(l, input)?;
+                let right = self.evaluate_arith_expr(r, input)?;
+                self.provider.mod_columns(&left, &right)
+            }
+            Expr::Abs(inner) => {
+                let val = self.evaluate_arith_expr(inner, input)?;
+                self.provider.abs_column(&val)
+            }
+            Expr::Min(l, r) => {
+                let left = self.evaluate_arith_expr(l, input)?;
+                let right = self.evaluate_arith_expr(r, input)?;
+                self.provider.min_columns(&left, &right)
+            }
+            Expr::Max(l, r) => {
+                let left = self.evaluate_arith_expr(l, input)?;
+                let right = self.evaluate_arith_expr(r, input)?;
+                self.provider.max_columns(&left, &right)
+            }
+            Expr::Pow(base, exp) => {
+                let base_buf = self.evaluate_arith_expr(base, input)?;
+                let exp_buf = self.evaluate_arith_expr(exp, input)?;
+                self.provider.pow_columns(&base_buf, &exp_buf)
+            }
+            Expr::Cast(inner, target_type) => {
+                let val = self.evaluate_arith_expr(inner, input)?;
+                self.provider.cast_column(&val, *target_type)
+            }
+            _ => Err(XlogError::Execution(format!(
+                "Unsupported expression in arithmetic evaluation: {:?}",
+                expr
+            ))),
+        }
+    }
+
+    /// Convert a ConstValue to raw bytes and ScalarType
+    fn const_to_bytes_and_type(&self, val: &ConstValue) -> (Vec<u8>, ScalarType) {
+        match val {
+            ConstValue::U32(v) => (v.to_le_bytes().to_vec(), ScalarType::U32),
+            ConstValue::U64(v) => (v.to_le_bytes().to_vec(), ScalarType::U64),
+            ConstValue::I32(v) => (v.to_le_bytes().to_vec(), ScalarType::I32),
+            ConstValue::I64(v) => (v.to_le_bytes().to_vec(), ScalarType::I64),
+            ConstValue::F32(v) => (v.to_le_bytes().to_vec(), ScalarType::F32),
+            ConstValue::F64(v) => (v.to_le_bytes().to_vec(), ScalarType::F64),
+            ConstValue::Bool(v) => (vec![if *v { 1u8 } else { 0u8 }], ScalarType::Bool),
+            ConstValue::Symbol(s) => {
+                // For symbols, we just hash to a u32 for now (MVP simplification)
+                let hash = s.bytes().fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
+                (hash.to_le_bytes().to_vec(), ScalarType::Symbol)
+            }
         }
     }
 
@@ -597,61 +744,33 @@ impl Executor {
             return self.create_empty_buffer(projected_schema);
         }
 
-        let num_rows = input.num_rows();
-        let projected_schema = self.project_schema(input.schema(), columns)?;
-
-        let mut result_columns = Vec::with_capacity(columns.len());
+        // Build result columns as single-column CudaBuffers
+        let mut result_buffers: Vec<CudaBuffer> = Vec::with_capacity(columns.len());
+        let mut result_types: Vec<ScalarType> = Vec::with_capacity(columns.len());
 
         for proj_expr in columns {
             match proj_expr {
                 ProjectExpr::Column(col_idx) => {
-                    let col_type_size = input
+                    // Use extract_column to get a single-column buffer
+                    let col_buffer = self.provider.extract_column(input, *col_idx)?;
+                    let col_type = input
                         .schema()
                         .column_type(*col_idx)
-                        .map(|t| t.size_bytes())
-                        .unwrap_or(4);
-                    let col_bytes = (num_rows as usize) * col_type_size;
-
-                    if let Some(src_col) = input.column(*col_idx) {
-                        // Clone the column
-                        let mut host_data = vec![0u8; col_bytes];
-                        self.provider
-                            .device()
-                            .inner()
-                            .dtoh_sync_copy_into(src_col, &mut host_data)
-                            .map_err(|e| XlogError::Execution(format!("Failed to read column: {}", e)))?;
-
-                        let mut dst_col = self.provider.memory().alloc::<u8>(col_bytes)?;
-                        self.provider
-                            .device()
-                            .inner()
-                            .htod_sync_copy_into(&host_data, &mut dst_col)
-                            .map_err(|e| XlogError::Execution(format!("Failed to upload column: {}", e)))?;
-
-                        result_columns.push(dst_col);
-                    } else {
-                        return Err(XlogError::Execution(format!(
-                            "Column {} not found in input",
-                            col_idx
-                        )));
-                    }
+                        .unwrap_or(ScalarType::U64);
+                    result_types.push(col_type);
+                    result_buffers.push(col_buffer);
                 }
-                ProjectExpr::Computed(expr, _result_type) => {
-                    // Computed expressions will be fully implemented in Task 7
-                    // For now, return an error indicating this feature is pending
-                    return Err(XlogError::Execution(format!(
-                        "Computed expression evaluation not yet implemented: {:?}",
-                        expr
-                    )));
+                ProjectExpr::Computed(expr, result_type) => {
+                    // Evaluate the arithmetic expression to get a single-column buffer
+                    let computed_buffer = self.evaluate_arith_expr(expr, input)?;
+                    result_types.push(*result_type);
+                    result_buffers.push(computed_buffer);
                 }
             }
         }
 
-        Ok(CudaBuffer::from_columns(
-            result_columns,
-            num_rows,
-            projected_schema,
-        ))
+        // Combine all single-column buffers into a multi-column buffer
+        self.provider.combine_columns(result_buffers, result_types)
     }
 
     /// Build a projected schema from ProjectExpr list
