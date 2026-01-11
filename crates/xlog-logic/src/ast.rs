@@ -59,6 +59,55 @@ pub enum AggOp {
     Max,
 }
 
+/// Arithmetic expression tree
+#[derive(Debug, Clone, PartialEq)]
+pub enum ArithExpr {
+    Variable(String),
+    Integer(i64),
+    Float(f64),
+
+    // Binary operations
+    Add(Box<ArithExpr>, Box<ArithExpr>),
+    Sub(Box<ArithExpr>, Box<ArithExpr>),
+    Mul(Box<ArithExpr>, Box<ArithExpr>),
+    Div(Box<ArithExpr>, Box<ArithExpr>),
+    Mod(Box<ArithExpr>, Box<ArithExpr>),
+
+    // Built-in functions
+    Abs(Box<ArithExpr>),
+    Min(Box<ArithExpr>, Box<ArithExpr>),
+    Max(Box<ArithExpr>, Box<ArithExpr>),
+    Pow(Box<ArithExpr>, Box<ArithExpr>),
+
+    // Type cast
+    Cast(Box<ArithExpr>, ScalarType),
+}
+
+impl ArithExpr {
+    /// Get all variable names used in this expression
+    pub fn variables(&self) -> Vec<&str> {
+        match self {
+            ArithExpr::Variable(name) => vec![name.as_str()],
+            ArithExpr::Integer(_) | ArithExpr::Float(_) => vec![],
+            ArithExpr::Add(l, r) | ArithExpr::Sub(l, r) | ArithExpr::Mul(l, r)
+            | ArithExpr::Div(l, r) | ArithExpr::Mod(l, r)
+            | ArithExpr::Min(l, r) | ArithExpr::Max(l, r) | ArithExpr::Pow(l, r) => {
+                let mut vars = l.variables();
+                vars.extend(r.variables());
+                vars
+            }
+            ArithExpr::Abs(e) | ArithExpr::Cast(e, _) => e.variables(),
+        }
+    }
+}
+
+/// Is-expression for variable binding: Z is X + Y
+#[derive(Debug, Clone, PartialEq)]
+pub struct IsExpr {
+    pub target: String,      // Must be fresh (unbound) variable
+    pub expr: ArithExpr,
+}
+
 /// An atom (predicate applied to terms)
 #[derive(Debug, Clone, PartialEq)]
 pub struct Atom {
@@ -99,6 +148,7 @@ pub enum BodyLiteral {
     Positive(Atom),
     Negated(Atom),
     Comparison(Comparison),
+    IsExpr(IsExpr),
 }
 
 impl BodyLiteral {
@@ -113,7 +163,7 @@ impl BodyLiteral {
     pub fn atom(&self) -> Option<&Atom> {
         match self {
             BodyLiteral::Positive(a) | BodyLiteral::Negated(a) => Some(a),
-            BodyLiteral::Comparison(_) => None,
+            BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) => None,
         }
     }
 
@@ -124,6 +174,11 @@ impl BodyLiteral {
                 let mut vars = vec![];
                 if let Some(v) = c.left.variable_name() { vars.push(v); }
                 if let Some(v) = c.right.variable_name() { vars.push(v); }
+                vars
+            }
+            BodyLiteral::IsExpr(is_expr) => {
+                let mut vars = is_expr.expr.variables();
+                vars.push(is_expr.target.as_str());
                 vars
             }
         }
@@ -287,5 +342,23 @@ mod tests {
         });
         assert_eq!(program.facts().count(), 1);
         assert_eq!(program.proper_rules().count(), 1);
+    }
+
+    #[test]
+    fn test_arith_expr_structure() {
+        let expr = ArithExpr::Add(
+            Box::new(ArithExpr::Variable("X".to_string())),
+            Box::new(ArithExpr::Integer(1)),
+        );
+        assert!(matches!(expr, ArithExpr::Add(_, _)));
+    }
+
+    #[test]
+    fn test_is_expr_structure() {
+        let is_expr = IsExpr {
+            target: "Z".to_string(),
+            expr: ArithExpr::Variable("Y".to_string()),
+        };
+        assert_eq!(is_expr.target, "Z");
     }
 }

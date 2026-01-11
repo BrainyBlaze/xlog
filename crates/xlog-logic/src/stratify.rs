@@ -61,7 +61,7 @@ pub fn build_dependency_graph(program: &Program) -> DependencyGraph {
                 BodyLiteral::Negated(atom) => {
                     graph.add_edge(head.clone(), atom.predicate.clone(), DepType::Negative);
                 }
-                BodyLiteral::Comparison(_) => {}
+                BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) => {}
             }
         }
 

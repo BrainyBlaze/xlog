@@ -302,6 +302,9 @@ impl Lowerer {
                 BodyLiteral::Positive(atom) => positive_atoms.push(atom),
                 BodyLiteral::Negated(atom) => negated_atoms.push(atom),
                 BodyLiteral::Comparison(cmp) => comparisons.push(cmp),
+                BodyLiteral::IsExpr(_) => {
+                    // IsExpr handling will be implemented in Task 5-6
+                }
             }
         }
 
