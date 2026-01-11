@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use cudarc::driver::{CudaView, DeviceRepr, DeviceSlice, LaunchAsync, LaunchConfig};
+use cudarc::driver::{CudaView, DevicePtr, DeviceRepr, DeviceSlice, LaunchAsync, LaunchConfig};
 use std::ffi::c_void;
 use cudarc::nvrtc::Ptx;
 use xlog_core::{AggOp, Result, Schema, ScalarType, XlogError};
@@ -20,6 +20,7 @@ const SCAN_PTX: &str = include_str!("../../../kernels/scan.ptx");
 const SORT_PTX: &str = include_str!("../../../kernels/sort.ptx");
 const FILTER_PTX: &str = include_str!("../../../kernels/filter.ptx");
 const SET_OPS_PTX: &str = include_str!("../../../kernels/set_ops.ptx");
+const PACK_PTX: &str = include_str!("../../../kernels/pack.ptx");
 
 /// Module names for loaded PTX modules
 pub const JOIN_MODULE: &str = "xlog_join";
@@ -29,6 +30,7 @@ pub const SCAN_MODULE: &str = "xlog_scan";
 pub const SORT_MODULE: &str = "xlog_sort";
 pub const FILTER_MODULE: &str = "xlog_filter";
 pub const SET_OPS_MODULE: &str = "xlog_set_ops";
+pub const PACK_MODULE: &str = "xlog_pack";
 
 /// Kernel function names in the join module
 pub mod join_kernels {
@@ -102,6 +104,26 @@ pub mod filter_kernels {
 pub mod set_ops_kernels {
     pub const CONCAT_U32: &str = "concat_u32";
     pub const SORTED_DIFF_MARK: &str = "sorted_diff_mark";
+}
+
+/// Kernel function names in the pack module (GPU-side key packing)
+pub mod pack_kernels {
+    /// Pack multiple columns into row-major byte array
+    pub const PACK_KEYS: &str = "pack_keys";
+    /// Compute FNV-1a hash from packed keys
+    pub const HASH_PACKED_KEYS: &str = "hash_packed_keys";
+    /// Fused pack + hash in single pass (optimal for join key preparation)
+    pub const PACK_AND_HASH_KEYS: &str = "pack_and_hash_keys";
+    /// Vectorized pack for 8-byte aligned columns
+    pub const PACK_KEYS_ALIGNED: &str = "pack_keys_aligned";
+    /// Unpack single column from packed row data
+    pub const UNPACK_COLUMN: &str = "unpack_column";
+    /// Gather rows from packed data based on index array
+    pub const GATHER_PACKED_ROWS: &str = "gather_packed_rows";
+    /// Scatter write: distribute packed rows to non-contiguous output positions
+    pub const SCATTER_PACKED_ROWS: &str = "scatter_packed_rows";
+    /// Compare packed keys for equality
+    pub const COMPARE_PACKED_KEYS: &str = "compare_packed_keys";
 }
 
 /// Default maximum output size for join operations.
@@ -307,6 +329,25 @@ impl CudaKernelProvider {
                 ],
             )
             .map_err(|e| XlogError::Kernel(format!("Failed to load set_ops PTX: {}", e)))?;
+
+        // Load pack module (GPU-side key packing for multi-column joins)
+        device
+            .inner()
+            .load_ptx(
+                Ptx::from_src(PACK_PTX),
+                PACK_MODULE,
+                &[
+                    pack_kernels::PACK_KEYS,
+                    pack_kernels::HASH_PACKED_KEYS,
+                    pack_kernels::PACK_AND_HASH_KEYS,
+                    pack_kernels::PACK_KEYS_ALIGNED,
+                    pack_kernels::UNPACK_COLUMN,
+                    pack_kernels::GATHER_PACKED_ROWS,
+                    pack_kernels::SCATTER_PACKED_ROWS,
+                    pack_kernels::COMPARE_PACKED_KEYS,
+                ],
+            )
+            .map_err(|e| XlogError::Kernel(format!("Failed to load pack PTX: {}", e)))?;
 
         Ok(Self { device, memory })
     }
@@ -4120,11 +4161,165 @@ impl CudaKernelProvider {
         }
     }
 
-    /// Compute composite hashes AND return packed key data for key verification
+    /// Pack key columns on GPU and compute hashes (no host roundtrip).
+    ///
+    /// Uses the fused `pack_and_hash_keys` kernel for optimal performance when both
+    /// packed keys and hashes are needed. This eliminates the host roundtrip that
+    /// was previously required for column-major to row-major conversion.
+    ///
+    /// # Arguments
+    /// * `buffer` - Source buffer with columns to pack
+    /// * `key_cols` - Indices of columns to pack as keys (max 4)
+    ///
+    /// # Returns
+    /// `PackedKeyData` containing GPU-resident packed keys and hashes
+    ///
+    /// # Errors
+    /// Returns `XlogError::Kernel` if:
+    /// - No key columns specified
+    /// - More than 4 key columns specified (kernel limitation)
+    /// - Column index is out of bounds
+    /// - Kernel launch fails
+    fn pack_keys_gpu(
+        &self,
+        buffer: &CudaBuffer,
+        key_cols: &[usize],
+    ) -> Result<PackedKeyData> {
+        if key_cols.is_empty() {
+            return Err(XlogError::Kernel(
+                "pack_keys_gpu: no key columns specified".into(),
+            ));
+        }
+        if key_cols.len() > 4 {
+            return Err(XlogError::Kernel(
+                "pack_keys_gpu: max 4 key columns supported".into(),
+            ));
+        }
+
+        let num_rows = buffer.num_rows() as u32;
+        if num_rows == 0 {
+            // Handle empty buffer case
+            return Ok(PackedKeyData {
+                hashes: self.memory.alloc::<u64>(0)?,
+                packed_keys: self.memory.alloc::<u8>(0)?,
+                key_bytes: 0,
+            });
+        }
+
+        // Calculate column sizes and total row size
+        let mut col_sizes: Vec<u32> = Vec::with_capacity(key_cols.len());
+        let mut row_size: u32 = 0;
+        for &col_idx in key_cols {
+            let col_type = buffer
+                .schema()
+                .column_type(col_idx)
+                .ok_or_else(|| XlogError::Kernel(format!("Invalid column index: {}", col_idx)))?;
+            let size = col_type.size_bytes() as u32;
+            col_sizes.push(size);
+            row_size += size;
+        }
+
+        // Allocate output buffers on GPU
+        let packed_bytes = (num_rows as u64) * (row_size as u64);
+        let packed_slice = self.memory.alloc::<u8>(packed_bytes as usize)?;
+        let hash_slice = self.memory.alloc::<u64>(num_rows as usize)?;
+
+        // Upload column sizes to GPU
+        let col_sizes_slice = self
+            .device
+            .inner()
+            .htod_sync_copy(&col_sizes)
+            .map_err(|e| XlogError::Kernel(format!("Failed to upload col_sizes: {}", e)))?;
+
+        // Get column device pointers as u64 values for the kernel
+        // The kernel expects raw pointers as u64
+        let mut col_ptrs: [u64; 4] = [0; 4];
+        for (i, &col_idx) in key_cols.iter().enumerate() {
+            let col = buffer.column(col_idx).ok_or_else(|| {
+                XlogError::Kernel(format!("Key column {} not found", col_idx))
+            })?;
+            // Get the device pointer as a raw u64 value
+            col_ptrs[i] = *col.device_ptr() as u64;
+        }
+
+        // Get the kernel function
+        let func = self
+            .device
+            .inner()
+            .get_func(PACK_MODULE, pack_kernels::PACK_AND_HASH_KEYS)
+            .ok_or_else(|| {
+                XlogError::Kernel("pack_and_hash_keys kernel not found".to_string())
+            })?;
+
+        // Launch configuration
+        let block_size = 256u32;
+        let grid_size = (num_rows + block_size - 1) / block_size;
+        let config = LaunchConfig {
+            grid_dim: (grid_size, 1, 1),
+            block_dim: (block_size, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        // Launch the fused pack+hash kernel
+        // SAFETY: Kernel signature matches pack_and_hash_keys in pack.cu:
+        // pack_and_hash_keys(col0, col1, col2, col3, col_sizes, num_cols, num_rows, row_size, packed_output, hashes)
+        // Column pointers are passed as CudaSlice references - the kernel sees raw device pointers.
+        // We pass column data as raw pointers cast to u8* in the kernel.
+        unsafe {
+            func.clone()
+                .launch(
+                    config,
+                    (
+                        col_ptrs[0],
+                        col_ptrs[1],
+                        col_ptrs[2],
+                        col_ptrs[3],
+                        &col_sizes_slice,
+                        key_cols.len() as u32,
+                        num_rows,
+                        row_size,
+                        &packed_slice,
+                        &hash_slice,
+                    ),
+                )
+                .map_err(|e| XlogError::Kernel(format!("pack_and_hash_keys launch failed: {}", e)))?;
+        }
+
+        self.device.synchronize()?;
+
+        Ok(PackedKeyData {
+            hashes: hash_slice,
+            packed_keys: packed_slice,
+            key_bytes: row_size,
+        })
+    }
+
+    /// Compute composite hashes AND return packed key data for key verification.
+    ///
+    /// Uses GPU-side packing via `pack_keys_gpu` when possible (1-4 key columns).
+    /// Falls back to CPU packing for edge cases or when GPU packing fails.
     ///
     /// Uses FNV-1a hash to combine all key columns into a single u64 hash per row.
     /// Also returns the packed key data for byte-by-byte comparison in join kernels.
     fn compute_hashes_and_pack_keys(
+        &self,
+        buffer: &CudaBuffer,
+        key_cols: &[usize],
+    ) -> Result<PackedKeyData> {
+        // Use GPU-side packing for 1-4 key columns (optimal path)
+        if !key_cols.is_empty() && key_cols.len() <= 4 {
+            return self.pack_keys_gpu(buffer, key_cols);
+        }
+
+        // Fallback path for empty key_cols or >4 key columns
+        // (>4 key columns is rare in practice and uses CPU packing)
+        self.compute_hashes_and_pack_keys_cpu(buffer, key_cols)
+    }
+
+    /// CPU-based key packing fallback for edge cases.
+    ///
+    /// This is used when GPU packing is not applicable (e.g., >4 key columns).
+    fn compute_hashes_and_pack_keys_cpu(
         &self,
         buffer: &CudaBuffer,
         key_cols: &[usize],
@@ -4139,10 +4334,7 @@ impl CudaKernelProvider {
         }
 
         // For column-major storage, we need to pack data row-major for the kernel
-        // However, the current compute_composite_hash kernel expects row-major layout
-        // with byte offsets within each row.
-        //
-        // MVP approach: copy key columns to host, pack row-major, upload
+        // CPU approach: copy key columns to host, pack row-major, upload
 
         let num_key_cols = key_cols.len();
         let mut col_sizes: Vec<u32> = Vec::with_capacity(num_key_cols);
