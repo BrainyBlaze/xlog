@@ -15,11 +15,11 @@ use std::collections::HashMap;
 use xlog_core::{RelId, Result, Schema, ScalarType, XlogError, AggOp as CoreAggOp};
 use xlog_ir::{
     CompiledRule, ExecutionPlan, PlanBuilder, RirMeta, RirNode,
-    Scc, Stratum as IrStratum, CompareOp, ConstValue, Expr, JoinType,
+    Scc, Stratum as IrStratum, CompareOp, ConstValue, Expr, JoinType, ProjectExpr,
 };
 
 use crate::ast::{
-    AggOp, ArithExpr, Atom, BodyLiteral, Comparison, CompOp, Program, Rule, Term,
+    AggOp, ArithExpr, Atom, BodyLiteral, Comparison, CompOp, IsExpr, Program, Rule, Term,
 };
 use crate::stratify::{build_dependency_graph, find_sccs_for_lowering, DepType};
 
@@ -262,9 +262,18 @@ impl Lowerer {
         for lit in &rule.body {
             if let Some(atom) = lit.atom() {
                 if lit.is_positive() {
+                    // Get the schema for this predicate to determine column types
+                    let schema = self.schemas.get(&atom.predicate);
                     for (i, term) in atom.terms.iter().enumerate() {
                         if let Term::Variable(name) = term {
                             var_env.add_occurrence(name, atom.predicate.clone(), i, current_col + i);
+                            // Also record the type for this variable (first occurrence wins)
+                            if !var_env.types.contains_key(name) {
+                                let typ = schema
+                                    .and_then(|s| s.column_type(i))
+                                    .unwrap_or(ScalarType::I64); // Default to I64 for arithmetic
+                                var_env.types.insert(name.to_string(), typ);
+                            }
                         }
                     }
                     current_col += atom.terms.len();
@@ -279,32 +288,36 @@ impl Lowerer {
         let projection_cols = self.compute_projection(&rule.head, &var_env)?;
 
         if projection_cols.iter().enumerate().all(|(i, &c)| c == i)
-            && projection_cols.len() == var_env.total_cols {
+            && projection_cols.len() == var_env.column_count() {
             // No projection needed if columns match exactly
             Ok(body_node)
         } else {
+            // Convert to ProjectExpr::Column
+            let proj_exprs: Vec<ProjectExpr> = projection_cols
+                .into_iter()
+                .map(ProjectExpr::Column)
+                .collect();
             Ok(RirNode::Project {
                 input: Box::new(body_node),
-                columns: projection_cols,
+                columns: proj_exprs,
             })
         }
     }
 
     /// Lower the body literals to an RIR node
     fn lower_body(&mut self, body: &[BodyLiteral], var_env: &mut VariableEnv) -> Result<RirNode> {
-        // Separate positive atoms, negated atoms, and comparisons
+        // Separate positive atoms, negated atoms, comparisons, and is-expressions
         let mut positive_atoms: Vec<&Atom> = Vec::new();
         let mut negated_atoms: Vec<&Atom> = Vec::new();
         let mut comparisons: Vec<&Comparison> = Vec::new();
+        let mut is_exprs: Vec<&IsExpr> = Vec::new();
 
         for lit in body {
             match lit {
                 BodyLiteral::Positive(atom) => positive_atoms.push(atom),
                 BodyLiteral::Negated(atom) => negated_atoms.push(atom),
                 BodyLiteral::Comparison(cmp) => comparisons.push(cmp),
-                BodyLiteral::IsExpr(_) => {
-                    // IsExpr handling will be implemented in Task 5-6
-                }
+                BodyLiteral::IsExpr(is_expr) => is_exprs.push(is_expr),
             }
         }
 
@@ -314,6 +327,11 @@ impl Lowerer {
         // Apply comparisons as filters
         for cmp in comparisons {
             result = self.apply_comparison(result, cmp, var_env)?;
+        }
+
+        // Apply is-expressions (must be after atoms that bind the input variables)
+        for is_expr in is_exprs {
+            result = self.lower_is_expr(is_expr, result, var_env)?;
         }
 
         // Handle negated atoms via Diff
@@ -559,9 +577,12 @@ impl Lowerer {
         } else {
             // Project the negated atom to only the shared variable columns
             let neg_projected = if neg_cols.len() < neg_atom.terms.len() {
+                let neg_proj_exprs: Vec<ProjectExpr> = neg_cols.iter()
+                    .map(|&c| ProjectExpr::Column(c))
+                    .collect();
                 RirNode::Project {
                     input: Box::new(neg_filtered),
-                    columns: neg_cols.clone(),
+                    columns: neg_proj_exprs,
                 }
             } else {
                 neg_filtered
@@ -574,9 +595,12 @@ impl Lowerer {
 
             // Simpler approach: project input to shared columns, diff with negated,
             // then rejoin with original
+            let input_proj_exprs: Vec<ProjectExpr> = input_cols.iter()
+                .map(|&c| ProjectExpr::Column(c))
+                .collect();
             let input_projected = RirNode::Project {
                 input: Box::new(input.clone()),
-                columns: input_cols.clone(),
+                columns: input_proj_exprs,
             };
 
             // The Diff gives us the keys that should be kept
@@ -744,6 +768,107 @@ impl Lowerer {
             ScalarType::F32 | ScalarType::F64
         )
     }
+
+    /// Convert ArithExpr to IR Expr
+    fn arith_to_expr(&self, arith: &ArithExpr, var_env: &VariableEnv) -> Result<Expr> {
+        match arith {
+            ArithExpr::Variable(name) => {
+                let col = var_env.get_column(name)
+                    .ok_or_else(|| XlogError::Compilation(format!(
+                        "Variable {} not bound before use in arithmetic", name
+                    )))?;
+                Ok(Expr::Column(col))
+            }
+            ArithExpr::Integer(i) => Ok(Expr::Const(ConstValue::I64(*i))),
+            ArithExpr::Float(f) => Ok(Expr::Const(ConstValue::F64(*f))),
+
+            ArithExpr::Add(l, r) => Ok(Expr::Add(
+                Box::new(self.arith_to_expr(l, var_env)?),
+                Box::new(self.arith_to_expr(r, var_env)?),
+            )),
+            ArithExpr::Sub(l, r) => Ok(Expr::Sub(
+                Box::new(self.arith_to_expr(l, var_env)?),
+                Box::new(self.arith_to_expr(r, var_env)?),
+            )),
+            ArithExpr::Mul(l, r) => Ok(Expr::Mul(
+                Box::new(self.arith_to_expr(l, var_env)?),
+                Box::new(self.arith_to_expr(r, var_env)?),
+            )),
+            ArithExpr::Div(l, r) => Ok(Expr::Div(
+                Box::new(self.arith_to_expr(l, var_env)?),
+                Box::new(self.arith_to_expr(r, var_env)?),
+            )),
+            ArithExpr::Mod(l, r) => Ok(Expr::Mod(
+                Box::new(self.arith_to_expr(l, var_env)?),
+                Box::new(self.arith_to_expr(r, var_env)?),
+            )),
+
+            ArithExpr::Abs(e) => Ok(Expr::Abs(Box::new(self.arith_to_expr(e, var_env)?))),
+            ArithExpr::Min(l, r) => Ok(Expr::Min(
+                Box::new(self.arith_to_expr(l, var_env)?),
+                Box::new(self.arith_to_expr(r, var_env)?),
+            )),
+            ArithExpr::Max(l, r) => Ok(Expr::Max(
+                Box::new(self.arith_to_expr(l, var_env)?),
+                Box::new(self.arith_to_expr(r, var_env)?),
+            )),
+            ArithExpr::Pow(l, r) => Ok(Expr::Pow(
+                Box::new(self.arith_to_expr(l, var_env)?),
+                Box::new(self.arith_to_expr(r, var_env)?),
+            )),
+            ArithExpr::Cast(e, t) => Ok(Expr::Cast(
+                Box::new(self.arith_to_expr(e, var_env)?),
+                *t,
+            )),
+        }
+    }
+
+    /// Lower an is-expression to a Project node with computed column
+    fn lower_is_expr(
+        &mut self,
+        is_expr: &IsExpr,
+        input: RirNode,
+        var_env: &mut VariableEnv,
+    ) -> Result<RirNode> {
+        // 1. Verify target is NOT already bound
+        if var_env.contains(&is_expr.target) {
+            return Err(XlogError::Compilation(format!(
+                "Variable {} already bound; 'is' requires fresh variable",
+                is_expr.target
+            )));
+        }
+
+        // 2. Verify all variables in expression are bound
+        for var in is_expr.expr.variables() {
+            if !var_env.contains(var) {
+                return Err(XlogError::Compilation(format!(
+                    "Variable {} used in arithmetic but not bound",
+                    var
+                )));
+            }
+        }
+
+        // 3. Infer result type
+        let result_type = self.infer_arith_type(&is_expr.expr, var_env)?;
+
+        // 4. Convert expression to IR
+        let ir_expr = self.arith_to_expr(&is_expr.expr, var_env)?;
+
+        // 5. Build projection: pass through all existing columns + add computed column
+        let num_cols = var_env.column_count();
+        let mut proj_exprs: Vec<ProjectExpr> = (0..num_cols)
+            .map(ProjectExpr::Column)
+            .collect();
+        proj_exprs.push(ProjectExpr::Computed(ir_expr, result_type));
+
+        // 6. Bind the new variable
+        var_env.bind(&is_expr.target, num_cols, result_type);
+
+        Ok(RirNode::Project {
+            input: Box::new(input),
+            columns: proj_exprs,
+        })
+    }
 }
 
 /// Track variable occurrences and column positions
@@ -787,11 +912,26 @@ impl VariableEnv {
             .entry(name.to_string())
             .or_default()
             .push(("".to_string(), 0, column));
+        // Update total_cols to account for the new computed column
+        // This is critical for chained is-expressions where each adds a column
+        if column >= self.total_cols {
+            self.total_cols = column + 1;
+        }
     }
 
     /// Get the type of a bound variable
     fn get_type(&self, name: &str) -> Option<ScalarType> {
         self.types.get(name).copied()
+    }
+
+    /// Check if a variable is bound
+    fn contains(&self, name: &str) -> bool {
+        self.occurrences.contains_key(name)
+    }
+
+    /// Get the current column count (for adding new computed columns)
+    fn column_count(&self) -> usize {
+        self.total_cols
     }
 }
 
@@ -1014,7 +1154,8 @@ mod tests {
         let node = result.unwrap();
         // Should be Project(Join(Scan, Scan))
         if let RirNode::Project { input, columns } = node {
-            assert_eq!(columns, vec![0, 3]); // X from reach, Z from edge
+            // X from reach (col 0), Z from edge (col 3)
+            assert_eq!(columns, vec![ProjectExpr::Column(0), ProjectExpr::Column(3)]);
             assert!(matches!(*input, RirNode::Join { .. }));
             if let RirNode::Join { left_keys, right_keys, .. } = *input {
                 assert_eq!(left_keys, vec![1]); // Y in reach (position 1)
@@ -1234,5 +1375,102 @@ mod tests {
         assert_eq!(convert_agg_op(&AggOp::Sum), CoreAggOp::Sum);
         assert_eq!(convert_agg_op(&AggOp::Min), CoreAggOp::Min);
         assert_eq!(convert_agg_op(&AggOp::Max), CoreAggOp::Max);
+    }
+
+    #[test]
+    fn test_variable_env_bind_updates_total_cols() {
+        // Test that bind() properly updates total_cols for chained is-expressions
+        let mut env = VariableEnv::new();
+        env.total_cols = 2; // Simulate 2 columns from atoms
+
+        // Bind first computed variable at column 2
+        env.bind("A", 2, ScalarType::I64);
+        assert_eq!(env.column_count(), 3, "total_cols should be 3 after first bind");
+        assert_eq!(env.get_column("A"), Some(2));
+
+        // Bind second computed variable at column 3
+        env.bind("B", 3, ScalarType::I64);
+        assert_eq!(env.column_count(), 4, "total_cols should be 4 after second bind");
+        assert_eq!(env.get_column("B"), Some(3));
+    }
+
+    #[test]
+    fn test_lower_chained_is_expressions() {
+        // result(A, B) :- input(X, Y), A is X + Y, B is A * 2.
+        // This tests that chained is-expressions correctly update column indices
+        let rule = Rule {
+            head: Atom {
+                predicate: "result".to_string(),
+                terms: vec![
+                    Term::Variable("A".to_string()),
+                    Term::Variable("B".to_string()),
+                ],
+            },
+            body: vec![
+                BodyLiteral::Positive(Atom {
+                    predicate: "input".to_string(),
+                    terms: vec![
+                        Term::Variable("X".to_string()),
+                        Term::Variable("Y".to_string()),
+                    ],
+                }),
+                BodyLiteral::IsExpr(IsExpr {
+                    target: "A".to_string(),
+                    expr: ArithExpr::Add(
+                        Box::new(ArithExpr::Variable("X".to_string())),
+                        Box::new(ArithExpr::Variable("Y".to_string())),
+                    ),
+                }),
+                BodyLiteral::IsExpr(IsExpr {
+                    target: "B".to_string(),
+                    expr: ArithExpr::Mul(
+                        Box::new(ArithExpr::Variable("A".to_string())),
+                        Box::new(ArithExpr::Integer(2)),
+                    ),
+                }),
+            ],
+        };
+
+        let mut lowerer = Lowerer::new();
+        lowerer.schemas.insert(
+            "input".to_string(),
+            Schema::new(vec![
+                ("c0".to_string(), ScalarType::I64),
+                ("c1".to_string(), ScalarType::I64),
+            ]),
+        );
+
+        let result = lowerer.lower_rule(&rule);
+        assert!(result.is_ok(), "Lowering chained is-expressions should succeed: {:?}", result.err());
+
+        let node = result.unwrap();
+
+        // The structure should be:
+        // Project([col 2, col 3]) <-- final projection for A, B
+        //   Project([col 0, col 1, col 2, A*2]) <-- second is-expr adds B at col 3
+        //     Project([col 0, col 1, X+Y]) <-- first is-expr adds A at col 2
+        //       Scan(input)
+
+        // Verify we have nested Project nodes
+        fn count_projects(node: &RirNode) -> usize {
+            match node {
+                RirNode::Project { input, .. } => 1 + count_projects(input),
+                _ => 0,
+            }
+        }
+
+        // We expect 3 Project nodes: 2 for is-expressions + 1 for final head projection
+        let project_count = count_projects(&node);
+        assert!(project_count >= 2, "Expected at least 2 Project nodes for chained is-exprs, got {}", project_count);
+
+        // Verify the final projection references columns 2 and 3 (A and B)
+        if let RirNode::Project { columns, .. } = &node {
+            assert_eq!(columns.len(), 2, "Head has 2 variables");
+            // A should be at column 2, B at column 3
+            assert_eq!(columns[0], ProjectExpr::Column(2), "A should be column 2");
+            assert_eq!(columns[1], ProjectExpr::Column(3), "B should be column 3");
+        } else {
+            panic!("Expected top-level Project node");
+        }
     }
 }

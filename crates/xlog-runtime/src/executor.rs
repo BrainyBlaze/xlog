@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use xlog_core::{AggOp, RelId, Result, ScalarType, Schema, XlogError};
 use xlog_cuda::{CudaBuffer, CudaKernelProvider, JoinType as CudaJoinType};
-use xlog_ir::{CompareOp, ConstValue, ExecutionPlan, Expr, JoinType, RirNode, Stratum};
+use xlog_ir::{CompareOp, ConstValue, ExecutionPlan, Expr, JoinType, ProjectExpr, RirNode, Stratum};
 
 use crate::RelationStore;
 
@@ -589,7 +589,8 @@ impl Executor {
     /// Execute a Project node
     ///
     /// Selects and reorders columns according to the projection list.
-    fn execute_project(&self, input: &CudaBuffer, columns: &[usize]) -> Result<CudaBuffer> {
+    /// Supports both column pass-through and computed expressions.
+    fn execute_project(&self, input: &CudaBuffer, columns: &[ProjectExpr]) -> Result<CudaBuffer> {
         if input.is_empty() {
             // Build projected schema
             let projected_schema = self.project_schema(input.schema(), columns)?;
@@ -601,36 +602,48 @@ impl Executor {
 
         let mut result_columns = Vec::with_capacity(columns.len());
 
-        for &col_idx in columns {
-            let col_type_size = input
-                .schema()
-                .column_type(col_idx)
-                .map(|t| t.size_bytes())
-                .unwrap_or(4);
-            let col_bytes = (num_rows as usize) * col_type_size;
+        for proj_expr in columns {
+            match proj_expr {
+                ProjectExpr::Column(col_idx) => {
+                    let col_type_size = input
+                        .schema()
+                        .column_type(*col_idx)
+                        .map(|t| t.size_bytes())
+                        .unwrap_or(4);
+                    let col_bytes = (num_rows as usize) * col_type_size;
 
-            if let Some(src_col) = input.column(col_idx) {
-                // Clone the column
-                let mut host_data = vec![0u8; col_bytes];
-                self.provider
-                    .device()
-                    .inner()
-                    .dtoh_sync_copy_into(src_col, &mut host_data)
-                    .map_err(|e| XlogError::Execution(format!("Failed to read column: {}", e)))?;
+                    if let Some(src_col) = input.column(*col_idx) {
+                        // Clone the column
+                        let mut host_data = vec![0u8; col_bytes];
+                        self.provider
+                            .device()
+                            .inner()
+                            .dtoh_sync_copy_into(src_col, &mut host_data)
+                            .map_err(|e| XlogError::Execution(format!("Failed to read column: {}", e)))?;
 
-                let mut dst_col = self.provider.memory().alloc::<u8>(col_bytes)?;
-                self.provider
-                    .device()
-                    .inner()
-                    .htod_sync_copy_into(&host_data, &mut dst_col)
-                    .map_err(|e| XlogError::Execution(format!("Failed to upload column: {}", e)))?;
+                        let mut dst_col = self.provider.memory().alloc::<u8>(col_bytes)?;
+                        self.provider
+                            .device()
+                            .inner()
+                            .htod_sync_copy_into(&host_data, &mut dst_col)
+                            .map_err(|e| XlogError::Execution(format!("Failed to upload column: {}", e)))?;
 
-                result_columns.push(dst_col);
-            } else {
-                return Err(XlogError::Execution(format!(
-                    "Column {} not found in input",
-                    col_idx
-                )));
+                        result_columns.push(dst_col);
+                    } else {
+                        return Err(XlogError::Execution(format!(
+                            "Column {} not found in input",
+                            col_idx
+                        )));
+                    }
+                }
+                ProjectExpr::Computed(expr, _result_type) => {
+                    // Computed expressions will be fully implemented in Task 7
+                    // For now, return an error indicating this feature is pending
+                    return Err(XlogError::Execution(format!(
+                        "Computed expression evaluation not yet implemented: {:?}",
+                        expr
+                    )));
+                }
             }
         }
 
@@ -641,17 +654,26 @@ impl Executor {
         ))
     }
 
-    /// Build a projected schema
-    fn project_schema(&self, input: &Schema, columns: &[usize]) -> Result<Schema> {
-        let mut projected_columns = Vec::with_capacity(columns.len());
-        for &col_idx in columns {
-            if let Some((name, ty)) = input.columns.get(col_idx) {
-                projected_columns.push((name.clone(), *ty));
-            } else {
-                return Err(XlogError::Execution(format!(
-                    "Column index {} out of bounds",
-                    col_idx
-                )));
+    /// Build a projected schema from ProjectExpr list
+    fn project_schema(&self, input: &Schema, columns: &[ProjectExpr]) -> Result<Schema> {
+        let mut projected_columns: Vec<(String, ScalarType)> = Vec::with_capacity(columns.len());
+        for proj_expr in columns {
+            match proj_expr {
+                ProjectExpr::Column(col_idx) => {
+                    if let Some((name, ty)) = input.columns.get(*col_idx) {
+                        projected_columns.push((name.clone(), *ty));
+                    } else {
+                        return Err(XlogError::Execution(format!(
+                            "Column index {} out of bounds",
+                            col_idx
+                        )));
+                    }
+                }
+                ProjectExpr::Computed(_expr, result_type) => {
+                    // Computed columns get a generated name
+                    let col_name = format!("computed_{}", projected_columns.len());
+                    projected_columns.push((col_name, *result_type));
+                }
             }
         }
         Ok(Schema::new(projected_columns))
@@ -1190,7 +1212,7 @@ mod tests {
         ]);
         let empty = executor.create_empty_buffer(schema).unwrap();
 
-        let result = executor.execute_project(&empty, &[0]);
+        let result = executor.execute_project(&empty, &[ProjectExpr::Column(0)]);
         assert!(result.is_ok());
 
         let result = result.unwrap();
@@ -1247,7 +1269,7 @@ mod tests {
         let buffer = CudaBuffer::from_columns(vec![col_a, col_b], 3, schema);
 
         // Project: [b, a] (reverse order)
-        let result = executor.execute_project(&buffer, &[1, 0]);
+        let result = executor.execute_project(&buffer, &[ProjectExpr::Column(1), ProjectExpr::Column(0)]);
         assert!(result.is_ok());
 
         let result = result.unwrap();
@@ -1730,7 +1752,7 @@ mod tests {
         };
         let project = RirNode::Project {
             input: Box::new(filter),
-            columns: vec![0],
+            columns: vec![ProjectExpr::Column(0)],
         };
 
         let result = executor.execute_node(&project);

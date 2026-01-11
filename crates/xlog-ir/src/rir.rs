@@ -107,10 +107,10 @@ pub enum RirNode {
         predicate: Expr,
     },
 
-    /// Project specific columns
+    /// Project specific columns (pass-through or computed)
     Project {
         input: Box<RirNode>,
-        columns: Vec<usize>,
+        columns: Vec<ProjectExpr>,
     },
 
     /// Join two relations
