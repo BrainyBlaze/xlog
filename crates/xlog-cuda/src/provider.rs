@@ -512,8 +512,7 @@ impl CudaKernelProvider {
 
     /// Remove duplicate rows based on key columns
     ///
-    /// Uses CPU sort for ordering (GPU sort has known issues for inputs > ~10 elements),
-    /// then uses GPU filter_by_mask for efficient compaction.
+    /// Sorts the input by the provided key columns, then removes adjacent duplicates.
     ///
     /// # Arguments
     /// * `input` - The input buffer
@@ -533,95 +532,8 @@ impl CudaKernelProvider {
             return Err(XlogError::Kernel("Dedup requires at least one key column".to_string()));
         }
 
-        // Note: GPU sort has known issues for larger inputs (> ~10 elements).
-        // Use CPU sort for correctness, with GPU-accelerated compaction via filter_by_mask.
-        // TODO: Replace with GPU sort when sort kernels are fixed.
-        self.dedup_cpu_sort_gpu_compact(input, key_cols)
-    }
-
-    /// CPU-based sorting with GPU-based compaction for dedup
-    ///
-    /// Sorts on CPU (more reliable), then uses GPU filter_by_mask for efficient compaction.
-    fn dedup_cpu_sort_gpu_compact(&self, input: &CudaBuffer, key_cols: &[usize]) -> Result<CudaBuffer> {
-        let num_rows = input.num_rows() as usize;
-        let row_stride = input.arity();
-
-        if num_rows <= 1 {
-            return self.clone_buffer(input);
-        }
-
-        // Download all columns to host for sorting
-        let mut column_data: Vec<Vec<u32>> = Vec::with_capacity(row_stride);
-        for col_idx in 0..row_stride {
-            if let Some(col) = input.column(col_idx) {
-                let col_bytes = num_rows * std::mem::size_of::<u32>();
-                let mut host_bytes = vec![0u8; col_bytes];
-                self.device.inner().dtoh_sync_copy_into(col, &mut host_bytes)
-                    .map_err(|e| XlogError::Kernel(format!("Failed to read input column {}: {}", col_idx, e)))?;
-
-                let col_u32: Vec<u32> = host_bytes.chunks_exact(4)
-                    .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                    .collect();
-                column_data.push(col_u32);
-            } else {
-                column_data.push(vec![0u32; num_rows]);
-            }
-        }
-
-        // Build row indices and sort by key columns on CPU
-        let mut indices: Vec<usize> = (0..num_rows).collect();
-        indices.sort_by(|&a, &b| {
-            for &key_col in key_cols {
-                match column_data[key_col][a].cmp(&column_data[key_col][b]) {
-                    std::cmp::Ordering::Equal => continue,
-                    other => return other,
-                }
-            }
-            std::cmp::Ordering::Equal
-        });
-
-        // Build unique mask by comparing consecutive sorted rows on CPU
-        let mut mask = vec![0u8; num_rows];
-        mask[0] = 1; // First row is always unique
-        for i in 1..num_rows {
-            let curr_idx = indices[i];
-            let prev_idx = indices[i - 1];
-            let is_dup = key_cols.iter().all(|&k| column_data[k][curr_idx] == column_data[k][prev_idx]);
-            if !is_dup {
-                mask[i] = 1;
-            }
-        }
-
-        // Count unique rows
-        let unique_count: u64 = mask.iter().map(|&m| m as u64).sum();
-        if unique_count == 0 {
-            return self.create_empty_buffer(input.schema().clone());
-        }
-
-        // Build sorted output columns and upload to GPU
-        let bytes_per_col = num_rows * std::mem::size_of::<u32>();
-        let mut sorted_columns = Vec::new();
-
-        for col_idx in 0..row_stride {
-            // Reorder column data according to sorted indices
-            let sorted_col_data: Vec<u8> = indices.iter()
-                .flat_map(|&idx| column_data[col_idx][idx].to_le_bytes())
-                .collect();
-
-            let mut col = self.memory.alloc::<u8>(bytes_per_col)?;
-            self.device.inner().htod_sync_copy_into(&sorted_col_data, &mut col)
-                .map_err(|e| XlogError::Kernel(format!("Failed to upload sorted column: {}", e)))?;
-            sorted_columns.push(col);
-        }
-
-        let sorted_buffer = CudaBuffer::from_columns(
-            sorted_columns,
-            num_rows as u64,
-            input.schema().clone(),
-        );
-
-        // Use GPU filter_by_mask for efficient compaction
-        self.filter_by_mask(&sorted_buffer, &mask)
+        let sorted = self.sort(input, key_cols)?;
+        self.dedup_sorted(&sorted, key_cols)
     }
 
     /// Remove duplicate rows from a buffer that is already sorted by key columns
@@ -648,85 +560,68 @@ impl CudaKernelProvider {
             return self.clone_buffer(input);
         }
 
-        // For single key column, use GPU-based boundary detection
-        if key_cols.len() == 1 {
-            return self.dedup_sorted_single_key(input, key_cols[0]);
-        }
-
-        // For multi-column keys, use CPU-based boundary detection on already-sorted data
-        self.dedup_sorted_multi_key_cpu(input, key_cols)
-    }
-
-    /// CPU-based boundary detection for sorted multi-column dedup
-    fn dedup_sorted_multi_key_cpu(&self, input: &CudaBuffer, key_cols: &[usize]) -> Result<CudaBuffer> {
         let num_rows = input.num_rows() as usize;
 
-        // Download key columns only
-        let mut key_column_data: Vec<Vec<u32>> = Vec::with_capacity(key_cols.len());
+        struct KeyColumnBytes {
+            ty: ScalarType,
+            elem_size: usize,
+            bytes: Vec<u8>,
+        }
+
+        fn keys_equal(ty: ScalarType, a: &[u8], b: &[u8]) -> bool {
+            match ty {
+                ScalarType::F64 => {
+                    let a = f64::from_le_bytes(a.try_into().unwrap());
+                    let b = f64::from_le_bytes(b.try_into().unwrap());
+                    a.to_bits() == b.to_bits() || a == b
+                }
+                ScalarType::F32 => {
+                    let a = f32::from_le_bytes(a.try_into().unwrap());
+                    let b = f32::from_le_bytes(b.try_into().unwrap());
+                    a.to_bits() == b.to_bits() || a == b
+                }
+                _ => a == b,
+            }
+        }
+
+        let mut key_columns = Vec::with_capacity(key_cols.len());
         for &key_col in key_cols {
-            if let Some(col) = input.column(key_col) {
-                let col_bytes = num_rows * std::mem::size_of::<u32>();
-                let mut host_bytes = vec![0u8; col_bytes];
-                self.device.inner().dtoh_sync_copy_into(col, &mut host_bytes)
-                    .map_err(|e| XlogError::Kernel(format!("Failed to read key column {}: {}", key_col, e)))?;
+            let col = input
+                .column(key_col)
+                .ok_or_else(|| XlogError::Kernel(format!("Key column {} not found", key_col)))?;
+            let ty = input.schema().column_type(key_col).ok_or_else(|| {
+                XlogError::Kernel(format!("Key column {} type not found in schema", key_col))
+            })?;
+            let elem_size = ty.size_bytes();
+            let expected_bytes = num_rows * elem_size;
 
-                let col_u32: Vec<u32> = host_bytes.chunks_exact(4)
-                    .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                    .collect();
-                key_column_data.push(col_u32);
-            } else {
-                key_column_data.push(vec![0u32; num_rows]);
-            }
+            let mut bytes = vec![0u8; expected_bytes];
+            self.device
+                .inner()
+                .dtoh_sync_copy_into(col, &mut bytes)
+                .map_err(|e| XlogError::Kernel(format!("Failed to read key column {}: {}", key_col, e)))?;
+
+            key_columns.push(KeyColumnBytes { ty, elem_size, bytes });
         }
 
-        // Build unique mask by comparing consecutive rows
         let mut mask = vec![0u8; num_rows];
-        mask[0] = 1; // First row is always unique
-        for i in 1..num_rows {
-            let is_dup = (0..key_cols.len()).all(|k| key_column_data[k][i] == key_column_data[k][i - 1]);
-            if !is_dup {
-                mask[i] = 1;
+        mask[0] = 1;
+        for row in 1..num_rows {
+            let mut is_dup = true;
+            for col in &key_columns {
+                let prev_start = (row - 1) * col.elem_size;
+                let curr_start = row * col.elem_size;
+                let a = &col.bytes[prev_start..prev_start + col.elem_size];
+                let b = &col.bytes[curr_start..curr_start + col.elem_size];
+                if !keys_equal(col.ty, a, b) {
+                    is_dup = false;
+                    break;
+                }
             }
+            mask[row] = if is_dup { 0 } else { 1 };
         }
 
-        // Use filter_by_mask to compact all columns
         self.filter_by_mask(input, &mask)
-    }
-
-    /// Dedup sorted buffer with single-column key
-    ///
-    /// Performs CPU-based boundary detection on the sorted key column, then
-    /// uses GPU filter_by_mask for efficient compaction.
-    fn dedup_sorted_single_key(&self, sorted: &CudaBuffer, key_col: usize) -> Result<CudaBuffer> {
-        let num_rows = sorted.num_rows() as usize;
-        let device = self.device.inner();
-
-        // Download key column to build unique mask on CPU
-        // (The mark_duplicates kernel expects row-major interleaved data,
-        // but our buffer is column-major. For single key, we do boundary detection on CPU.)
-        let key_col_data = sorted.column(key_col)
-            .ok_or_else(|| XlogError::Kernel("Key column not found".to_string()))?;
-
-        let key_bytes = num_rows * std::mem::size_of::<u32>();
-        let mut host_bytes = vec![0u8; key_bytes];
-        device.dtoh_sync_copy_into(key_col_data, &mut host_bytes)
-            .map_err(|e| XlogError::Kernel(format!("Failed to read key column: {}", e)))?;
-
-        let keys: Vec<u32> = host_bytes.chunks_exact(4)
-            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect();
-
-        // Build unique mask: 1 for first occurrence, 0 for duplicate
-        let mut mask = vec![0u8; num_rows];
-        mask[0] = 1; // First row is always unique
-        for i in 1..num_rows {
-            if keys[i] != keys[i - 1] {
-                mask[i] = 1;
-            }
-        }
-
-        // Use filter_by_mask to compact
-        self.filter_by_mask(sorted, &mask)
     }
 
 
@@ -2498,25 +2393,55 @@ impl CudaKernelProvider {
 
         // Phase 2: Scan block sums (only if we have more than 1 block)
         if num_blocks > 1 {
-            // NOTE: The GPU phase-2 kernel only supports up to 256 block sums (one block).
-            // For correctness at large sizes, scan the block sums on CPU and upload offsets.
-            self.device.synchronize()?;
+            if num_blocks <= block_size {
+                // Phase 2 (GPU): scan block sums in a single block when num_blocks <= 256.
+                let phase2_fn = device
+                    .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE2)
+                    .ok_or_else(|| {
+                        XlogError::Kernel(
+                            "Failed to get multiblock_scan_phase2 kernel".to_string(),
+                        )
+                    })?;
 
-            let mut block_sums_host = vec![0u32; num_blocks as usize];
-            device
-                .dtoh_sync_copy_into(&d_block_sums, &mut block_sums_host)
-                .map_err(|e| XlogError::Kernel(format!("Failed to download block sums: {}", e)))?;
+                // SAFETY: Kernel parameters match expected signature:
+                // multiblock_scan_phase2(uint32_t* block_sums, uint32_t num_blocks)
+                unsafe {
+                    phase2_fn.clone().launch(
+                        LaunchConfig {
+                            grid_dim: (1, 1, 1),
+                            block_dim: (block_size, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        (&mut d_block_sums, num_blocks),
+                    )
+                }
+                .map_err(|e| {
+                    XlogError::Kernel(format!("Failed to launch multiblock_scan_phase2: {}", e))
+                })?;
+            } else {
+                // Phase 2 (CPU): for large block counts, scan the block sums on host and upload offsets.
+                self.device.synchronize()?;
 
-            let mut block_offsets_host = vec![0u32; num_blocks as usize];
-            let mut running_sum = 0u32;
-            for (i, v) in block_sums_host.iter().enumerate() {
-                block_offsets_host[i] = running_sum;
-                running_sum = running_sum.wrapping_add(*v);
+                let mut block_sums_host = vec![0u32; num_blocks as usize];
+                device
+                    .dtoh_sync_copy_into(&d_block_sums, &mut block_sums_host)
+                    .map_err(|e| {
+                        XlogError::Kernel(format!("Failed to download block sums: {}", e))
+                    })?;
+
+                let mut block_offsets_host = vec![0u32; num_blocks as usize];
+                let mut running_sum = 0u32;
+                for (i, v) in block_sums_host.iter().enumerate() {
+                    block_offsets_host[i] = running_sum;
+                    running_sum = running_sum.wrapping_add(*v);
+                }
+
+                device
+                    .htod_sync_copy_into(&block_offsets_host, &mut d_block_sums)
+                    .map_err(|e| {
+                        XlogError::Kernel(format!("Failed to upload block offsets: {}", e))
+                    })?;
             }
-
-            device
-                .htod_sync_copy_into(&block_offsets_host, &mut d_block_sums)
-                .map_err(|e| XlogError::Kernel(format!("Failed to upload block offsets: {}", e)))?;
 
             // Phase 3: Add block offsets
             let phase3_fn = device
@@ -2557,9 +2482,6 @@ impl CudaKernelProvider {
 
     // ============== Sort Methods ==============
 
-    // Radix sort constants
-    const RADIX_BITS: u32 = 4;
-    const RADIX_SIZE: u32 = 16; // 1 << RADIX_BITS
     const SORT_BLOCK_SIZE: u32 = 256;
 
     /// Sort buffer by key columns.
@@ -3016,12 +2938,8 @@ impl CudaKernelProvider {
     /// * `input` - The input buffer to filter
     /// * `mask` - Mask slice where non-zero means keep the row
     ///
-    /// # Limitations
-    /// Currently limited to buffers with <= 256 rows due to single-block prefix sum.
-    /// TODO: Implement multi-block prefix sum for larger datasets.
-    ///
     /// # Errors
-    /// Returns error if mask length doesn't match buffer rows or buffer has > 256 rows.
+    /// Returns error if mask length doesn't match buffer rows.
     pub fn filter_by_mask(&self, input: &CudaBuffer, mask: &[u8]) -> Result<CudaBuffer> {
         if input.num_rows == 0 {
             return self.create_empty_buffer(input.schema.clone());
@@ -4080,7 +3998,7 @@ impl CudaKernelProvider {
     /// * `left_keys` - Column indices for join keys in left buffer
     /// * `right_keys` - Column indices for join keys in right buffer
     /// * `join_type` - Type of join to perform (Inner, Semi, Anti, LeftOuter)
-    /// * `max_output` - Maximum number of output rows (defaults to DEFAULT_JOIN_MAX_OUTPUT)
+    /// * `max_output` - Optional maximum number of output rows (None = unlimited, subject to memory budget)
     ///
     /// # Errors
     /// Returns `XlogError::Kernel` if kernel execution fails or parameters are invalid
@@ -4093,13 +4011,12 @@ impl CudaKernelProvider {
         join_type: JoinType,
         max_output: Option<usize>,
     ) -> Result<CudaBuffer> {
-        let limit = max_output.unwrap_or(DEFAULT_JOIN_MAX_OUTPUT);
         match join_type {
-            JoinType::Inner => self.hash_join_inner_v2(left, right, left_keys, right_keys, limit),
+            JoinType::Inner => self.hash_join_inner_v2(left, right, left_keys, right_keys, max_output),
             JoinType::Semi => self.hash_join_semi_impl(left, right, left_keys, right_keys),
             JoinType::Anti => self.hash_join_anti_impl(left, right, left_keys, right_keys),
             JoinType::LeftOuter => {
-                self.hash_join_left_outer_impl(left, right, left_keys, right_keys, limit)
+                self.hash_join_left_outer_impl(left, right, left_keys, right_keys, max_output)
             }
         }
     }
@@ -4490,7 +4407,7 @@ impl CudaKernelProvider {
         right: &CudaBuffer,
         left_keys: &[usize],
         right_keys: &[usize],
-        max_output_limit: usize,
+        max_output: Option<usize>,
     ) -> Result<CudaBuffer> {
         // Handle empty inputs
         if left.is_empty() || right.is_empty() {
@@ -4534,18 +4451,10 @@ impl CudaKernelProvider {
         let (d_hash_table, d_next_ptrs) =
             self.build_hash_table_v2(&right_packed.hashes, num_right)?;
 
-        // Allocate output buffers for row index pairs
-        // Use the configurable max_output_limit instead of hardcoded 1_000_000
-        let max_output = ((num_left as u64) * (num_right as u64)).min(max_output_limit as u64) as u32;
-        let d_output_left = self.memory.alloc::<u32>(max_output as usize)?;
-        let d_output_right = self.memory.alloc::<u32>(max_output as usize)?;
-        let d_output_count = self
-            .device
-            .inner()
-            .htod_sync_copy(&[0u32])
-            .map_err(|e| XlogError::Kernel(format!("Failed to alloc output count: {}", e)))?;
-
-        // Launch probe kernel
+        // Count join output (no truncation) to size buffers precisely.
+        //
+        // The probe kernel always increments output_count, even when max_output==0,
+        // so we can run a first pass with max_output=0 to get the full match count.
         let probe_func = self
             .device
             .inner()
@@ -4559,6 +4468,74 @@ impl CudaKernelProvider {
             block_dim: (block_size, 1, 1),
             shared_mem_bytes: 0,
         };
+
+        let d_count_only = self
+            .device
+            .inner()
+            .htod_sync_copy(&[0u32])
+            .map_err(|e| XlogError::Kernel(format!("Failed to alloc output count: {}", e)))?;
+        let d_dummy_left = self.memory.alloc::<u32>(1)?;
+        let d_dummy_right = self.memory.alloc::<u32>(1)?;
+        let max_output_count_only = 0u32;
+
+        // SAFETY: hash_join_probe_v2(probe_hashes, num_probe, hash_table, build_hashes,
+        //                            next_ptrs, hash_table_size, probe_keys, build_keys,
+        //                            key_bytes, output_left, output_right, output_count, max_output)
+        // Note: Using raw pointer launch because tuple exceeds 12-element limit
+        unsafe {
+            let mut params: Vec<*mut c_void> = vec![
+                (&*left_packed.hashes).as_kernel_param(),
+                (&num_left).as_kernel_param(),
+                (&*d_hash_table).as_kernel_param(),
+                (&*right_packed.hashes).as_kernel_param(),
+                (&*d_next_ptrs).as_kernel_param(),
+                (&hash_table_size).as_kernel_param(),
+                (&*left_packed.packed_keys).as_kernel_param(),
+                (&*right_packed.packed_keys).as_kernel_param(),
+                (&left_packed.key_bytes).as_kernel_param(),
+                (&*d_dummy_left).as_kernel_param(),
+                (&*d_dummy_right).as_kernel_param(),
+                (&d_count_only).as_kernel_param(),
+                (&max_output_count_only).as_kernel_param(),
+            ];
+            probe_func
+                .clone()
+                .launch(probe_config, &mut params)
+                .map_err(|e| XlogError::Kernel(format!("hash_join_probe_v2 (count) failed: {}", e)))?;
+        }
+
+        self.device.synchronize()?;
+
+        let mut count_host = vec![0u32];
+        self.device
+            .inner()
+            .dtoh_sync_copy_into(&d_count_only, &mut count_host)
+            .map_err(|e| XlogError::Kernel(format!("Failed to read output count: {}", e)))?;
+
+        let full_count = count_host[0] as u64;
+        let requested = max_output.map(|limit| (limit as u64).min(full_count)).unwrap_or(full_count);
+
+        if requested == 0 {
+            let combined_schema = self.combine_schemas(left.schema(), right.schema());
+            return self.create_empty_buffer(combined_schema);
+        }
+
+        if requested > u32::MAX as u64 {
+            return Err(XlogError::Kernel(format!(
+                "Join produced {} rows which exceeds the u32 index limit",
+                requested
+            )));
+        }
+
+        // Allocate output buffers for row index pairs and rerun probe to materialize results.
+        let max_output = requested as u32;
+        let d_output_left = self.memory.alloc::<u32>(max_output as usize)?;
+        let d_output_right = self.memory.alloc::<u32>(max_output as usize)?;
+        let d_output_count = self
+            .device
+            .inner()
+            .htod_sync_copy(&[0u32])
+            .map_err(|e| XlogError::Kernel(format!("Failed to alloc output count: {}", e)))?;
 
         // SAFETY: hash_join_probe_v2(probe_hashes, num_probe, hash_table, build_hashes,
         //                            next_ptrs, hash_table_size, probe_keys, build_keys,
@@ -4947,7 +4924,7 @@ impl CudaKernelProvider {
         right: &CudaBuffer,
         left_keys: &[usize],
         right_keys: &[usize],
-        max_output_limit: usize,
+        max_output: Option<usize>,
     ) -> Result<CudaBuffer> {
         // Handle empty left - return empty with combined schema
         if left.is_empty() {
@@ -5038,22 +5015,71 @@ impl CudaKernelProvider {
                 .map_err(|e| XlogError::Kernel(format!("hash_join_semi failed: {}", e)))?;
         }
 
-        // Also do inner join to get matching pairs
-        // Use the configurable max_output_limit instead of hardcoded 1_000_000
-        let max_output = ((num_left as u64) * (num_right as u64)).min(max_output_limit as u64) as u32;
-        let d_output_left = self.memory.alloc::<u32>(max_output as usize)?;
-        let d_output_right = self.memory.alloc::<u32>(max_output as usize)?;
-        let d_output_count = self
-            .device
-            .inner()
-            .htod_sync_copy(&[0u32])
-            .map_err(|e| XlogError::Kernel(format!("Failed to alloc output count: {}", e)))?;
-
         let probe_func = self
             .device
             .inner()
             .get_func(JOIN_MODULE, join_kernels::HASH_JOIN_PROBE_V2)
             .ok_or_else(|| XlogError::Kernel("hash_join_probe_v2 kernel not found".to_string()))?;
+
+        // Count inner-join matches to size buffers precisely.
+        let d_count_only = self
+            .device
+            .inner()
+            .htod_sync_copy(&[0u32])
+            .map_err(|e| XlogError::Kernel(format!("Failed to alloc output count: {}", e)))?;
+        let d_dummy_left = self.memory.alloc::<u32>(1)?;
+        let d_dummy_right = self.memory.alloc::<u32>(1)?;
+        let max_output_count_only = 0u32;
+
+        unsafe {
+            let mut params: Vec<*mut c_void> = vec![
+                (&left_packed.hashes).as_kernel_param(),
+                (&num_left).as_kernel_param(),
+                (&d_hash_table).as_kernel_param(),
+                (&right_packed.hashes).as_kernel_param(),
+                (&d_next_ptrs).as_kernel_param(),
+                (&hash_table_size).as_kernel_param(),
+                (&left_packed.packed_keys).as_kernel_param(),
+                (&right_packed.packed_keys).as_kernel_param(),
+                (&left_packed.key_bytes).as_kernel_param(),
+                (&d_dummy_left).as_kernel_param(),
+                (&d_dummy_right).as_kernel_param(),
+                (&d_count_only).as_kernel_param(),
+                (&max_output_count_only).as_kernel_param(),
+            ];
+            probe_func
+                .clone()
+                .launch(config, &mut params)
+                .map_err(|e| XlogError::Kernel(format!("hash_join_probe_v2 (count) failed: {}", e)))?;
+        }
+
+        self.device.synchronize()?;
+
+        let mut count_host = vec![0u32];
+        self.device
+            .inner()
+            .dtoh_sync_copy_into(&d_count_only, &mut count_host)
+            .map_err(|e| XlogError::Kernel(format!("Failed to read output count: {}", e)))?;
+
+        let full_inner = count_host[0] as u64;
+        let requested_inner = max_output.map(|limit| (limit as u64).min(full_inner)).unwrap_or(full_inner);
+
+        if requested_inner > u32::MAX as u64 {
+            return Err(XlogError::Kernel(format!(
+                "Join produced {} rows which exceeds the u32 index limit",
+                requested_inner
+            )));
+        }
+
+        let max_output = requested_inner as u32;
+        let alloc_len = (requested_inner.max(1)) as usize;
+        let d_output_left = self.memory.alloc::<u32>(alloc_len)?;
+        let d_output_right = self.memory.alloc::<u32>(alloc_len)?;
+        let d_output_count = self
+            .device
+            .inner()
+            .htod_sync_copy(&[0u32])
+            .map_err(|e| XlogError::Kernel(format!("Failed to alloc output count: {}", e)))?;
 
         // SAFETY: hash_join_probe_v2(probe_hashes, num_probe, hash_table, build_hashes,
         //                            next_ptrs, hash_table_size, probe_keys, build_keys,

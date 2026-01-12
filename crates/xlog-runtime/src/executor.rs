@@ -400,7 +400,7 @@ impl Executor {
         // Evaluate predicate for each row
         let mut matching_indices = Vec::new();
         for row_idx in 0..num_rows {
-            if self.evaluate_predicate(predicate, &host_columns, row_idx, &schema)? {
+            if Self::evaluate_predicate(predicate, &host_columns, row_idx, &schema)? {
                 matching_indices.push(row_idx);
             }
         }
@@ -445,7 +445,6 @@ impl Executor {
 
     /// Evaluate a predicate expression for a single row
     fn evaluate_predicate(
-        &self,
         expr: &Expr,
         columns: &[Vec<u8>],
         row_idx: usize,
@@ -470,22 +469,39 @@ impl Executor {
             Expr::Const(_) => Ok(true), // Non-bool constants are truthy
 
             Expr::Compare { left, op, right } => {
-                let left_val = self.evaluate_expr_as_i64(left, columns, row_idx, schema)?;
-                let right_val = self.evaluate_expr_as_i64(right, columns, row_idx, schema)?;
+                let use_float = Self::expr_may_be_float(left, schema) || Self::expr_may_be_float(right, schema);
 
-                Ok(match op {
-                    CompareOp::Eq => left_val == right_val,
-                    CompareOp::Ne => left_val != right_val,
-                    CompareOp::Lt => left_val < right_val,
-                    CompareOp::Le => left_val <= right_val,
-                    CompareOp::Gt => left_val > right_val,
-                    CompareOp::Ge => left_val >= right_val,
-                })
+                if use_float {
+                    let left_val = Self::evaluate_expr_as_f64(left, columns, row_idx, schema)?;
+                    let right_val = Self::evaluate_expr_as_f64(right, columns, row_idx, schema)?;
+
+                    Ok(match op {
+                        CompareOp::Eq => left_val == right_val,
+                        CompareOp::Ne => left_val != right_val,
+                        CompareOp::Lt => left_val < right_val,
+                        CompareOp::Le => left_val <= right_val,
+                        CompareOp::Gt => left_val > right_val,
+                        CompareOp::Ge => left_val >= right_val,
+                    })
+                } else {
+                    let left_val = Self::evaluate_expr_as_i64(left, columns, row_idx, schema)?;
+                    let right_val = Self::evaluate_expr_as_i64(right, columns, row_idx, schema)?;
+
+                    Ok(match op {
+                        CompareOp::Eq => left_val == right_val,
+                        CompareOp::Ne => left_val != right_val,
+                        CompareOp::Lt => left_val < right_val,
+                        CompareOp::Le => left_val <= right_val,
+                        CompareOp::Gt => left_val > right_val,
+                        CompareOp::Ge => left_val >= right_val,
+                    })
+                }
+
             }
 
             Expr::And(exprs) => {
                 for e in exprs {
-                    if !self.evaluate_predicate(e, columns, row_idx, schema)? {
+                    if !Self::evaluate_predicate(e, columns, row_idx, schema)? {
                         return Ok(false);
                     }
                 }
@@ -494,14 +510,14 @@ impl Executor {
 
             Expr::Or(exprs) => {
                 for e in exprs {
-                    if self.evaluate_predicate(e, columns, row_idx, schema)? {
+                    if Self::evaluate_predicate(e, columns, row_idx, schema)? {
                         return Ok(true);
                     }
                 }
                 Ok(false)
             }
 
-            Expr::Not(inner) => Ok(!self.evaluate_predicate(inner, columns, row_idx, schema)?),
+            Expr::Not(inner) => Ok(!Self::evaluate_predicate(inner, columns, row_idx, schema)?),
 
             // Arithmetic expressions are not used as predicates directly
             Expr::Add(_, _) | Expr::Sub(_, _) | Expr::Mul(_, _) |
@@ -514,9 +530,145 @@ impl Executor {
         }
     }
 
+    fn expr_may_be_float(expr: &Expr, schema: &Schema) -> bool {
+        match expr {
+            Expr::Column(col_idx) => matches!(schema.column_type(*col_idx), Some(ScalarType::F32 | ScalarType::F64)),
+            Expr::Const(ConstValue::F32(_) | ConstValue::F64(_)) => true,
+            Expr::Cast(_, ScalarType::F32 | ScalarType::F64) => true,
+            Expr::Add(l, r)
+            | Expr::Sub(l, r)
+            | Expr::Mul(l, r)
+            | Expr::Div(l, r)
+            | Expr::Mod(l, r)
+            | Expr::Min(l, r)
+            | Expr::Max(l, r)
+            | Expr::Pow(l, r) => Self::expr_may_be_float(l, schema) || Self::expr_may_be_float(r, schema),
+            Expr::Abs(inner) | Expr::Cast(inner, _) => Self::expr_may_be_float(inner, schema),
+            _ => false,
+        }
+    }
+
+    fn evaluate_expr_as_f64(
+        expr: &Expr,
+        columns: &[Vec<u8>],
+        row_idx: usize,
+        schema: &Schema,
+    ) -> Result<f64> {
+        match expr {
+            Expr::Column(col_idx) => {
+                let col_type = schema.column_type(*col_idx).unwrap_or(ScalarType::U32);
+                let col_data = columns
+                    .get(*col_idx)
+                    .ok_or_else(|| XlogError::Execution(format!("Column {} not found", col_idx)))?;
+
+                let type_size = col_type.size_bytes();
+                let start = row_idx * type_size;
+
+                Ok(match col_type {
+                    ScalarType::F64 => {
+                        let bytes = &col_data[start..start + 8];
+                        f64::from_le_bytes([
+                            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                        ])
+                    }
+                    ScalarType::F32 => {
+                        let bytes = &col_data[start..start + 4];
+                        f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as f64
+                    }
+                    ScalarType::U32 | ScalarType::Symbol => {
+                        let bytes = &col_data[start..start + 4];
+                        u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as f64
+                    }
+                    ScalarType::I32 => {
+                        let bytes = &col_data[start..start + 4];
+                        i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as f64
+                    }
+                    ScalarType::U64 => {
+                        let bytes = &col_data[start..start + 8];
+                        u64::from_le_bytes([
+                            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                        ]) as f64
+                    }
+                    ScalarType::I64 => {
+                        let bytes = &col_data[start..start + 8];
+                        i64::from_le_bytes([
+                            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                        ]) as f64
+                    }
+                    ScalarType::Bool => col_data.get(start).copied().unwrap_or(0) as f64,
+                })
+            }
+
+            Expr::Const(val) => Ok(match val {
+                ConstValue::U32(v) => *v as f64,
+                ConstValue::I32(v) => *v as f64,
+                ConstValue::U64(v) => *v as f64,
+                ConstValue::I64(v) => *v as f64,
+                ConstValue::Bool(b) => if *b { 1.0 } else { 0.0 },
+                ConstValue::F32(f) => *f as f64,
+                ConstValue::F64(f) => *f,
+                ConstValue::Symbol(_) => {
+                    return Err(XlogError::Execution(
+                        "Cannot evaluate Symbol constant as f64".to_string(),
+                    ));
+                }
+            }),
+
+            Expr::Add(l, r) => Ok(
+                Self::evaluate_expr_as_f64(l, columns, row_idx, schema)?
+                    + Self::evaluate_expr_as_f64(r, columns, row_idx, schema)?,
+            ),
+            Expr::Sub(l, r) => Ok(
+                Self::evaluate_expr_as_f64(l, columns, row_idx, schema)?
+                    - Self::evaluate_expr_as_f64(r, columns, row_idx, schema)?,
+            ),
+            Expr::Mul(l, r) => Ok(
+                Self::evaluate_expr_as_f64(l, columns, row_idx, schema)?
+                    * Self::evaluate_expr_as_f64(r, columns, row_idx, schema)?,
+            ),
+            Expr::Div(l, r) => {
+                let left_val = Self::evaluate_expr_as_f64(l, columns, row_idx, schema)?;
+                let right_val = Self::evaluate_expr_as_f64(r, columns, row_idx, schema)?;
+                if right_val == 0.0 {
+                    return Err(XlogError::Execution("Division by zero".to_string()));
+                }
+                Ok(left_val / right_val)
+            }
+            Expr::Mod(l, r) => {
+                let left_val = Self::evaluate_expr_as_f64(l, columns, row_idx, schema)?;
+                let right_val = Self::evaluate_expr_as_f64(r, columns, row_idx, schema)?;
+                if right_val == 0.0 {
+                    return Err(XlogError::Execution("Modulo by zero".to_string()));
+                }
+                Ok(left_val % right_val)
+            }
+            Expr::Abs(inner) => Ok(Self::evaluate_expr_as_f64(inner, columns, row_idx, schema)?.abs()),
+            Expr::Min(l, r) => Ok(
+                Self::evaluate_expr_as_f64(l, columns, row_idx, schema)?
+                    .min(Self::evaluate_expr_as_f64(r, columns, row_idx, schema)?),
+            ),
+            Expr::Max(l, r) => Ok(
+                Self::evaluate_expr_as_f64(l, columns, row_idx, schema)?
+                    .max(Self::evaluate_expr_as_f64(r, columns, row_idx, schema)?),
+            ),
+            Expr::Pow(base, exp) => Ok(
+                Self::evaluate_expr_as_f64(base, columns, row_idx, schema)?
+                    .powf(Self::evaluate_expr_as_f64(exp, columns, row_idx, schema)?),
+            ),
+            Expr::Cast(inner, target_type) => match target_type {
+                ScalarType::F64 => Self::evaluate_expr_as_f64(inner, columns, row_idx, schema),
+                ScalarType::F32 => Ok(Self::evaluate_expr_as_f64(inner, columns, row_idx, schema)? as f32 as f64),
+                _ => Ok(Self::evaluate_expr_as_i64(inner, columns, row_idx, schema)? as f64),
+            },
+
+            _ => Err(XlogError::Execution(
+                "Cannot evaluate compound expression as f64".to_string(),
+            )),
+        }
+    }
+
     /// Evaluate an expression as an i64 value
     fn evaluate_expr_as_i64(
-        &self,
         expr: &Expr,
         columns: &[Vec<u8>],
         row_idx: usize,
@@ -560,11 +712,17 @@ impl Executor {
                         let bytes = &col_data[start..start + 4];
                         u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as i64
                     }
-                    ScalarType::F32 | ScalarType::F64 => {
-                        // TODO: Implement proper float comparison (Task 7+)
-                        return Err(XlogError::Execution(
-                            "Float comparison not yet supported in filter predicates".to_string(),
-                        ));
+                    ScalarType::F32 => {
+                        let bytes = &col_data[start..start + 4];
+                        let val = f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+                        val as i64
+                    }
+                    ScalarType::F64 => {
+                        let bytes = &col_data[start..start + 8];
+                        let val = f64::from_le_bytes([
+                            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                        ]);
+                        val as i64
                     }
                 })
             }
@@ -582,53 +740,53 @@ impl Executor {
 
             // Arithmetic expressions - evaluate them and return the result
             Expr::Add(l, r) => {
-                let left_val = self.evaluate_expr_as_i64(l, columns, row_idx, schema)?;
-                let right_val = self.evaluate_expr_as_i64(r, columns, row_idx, schema)?;
+                let left_val = Self::evaluate_expr_as_i64(l, columns, row_idx, schema)?;
+                let right_val = Self::evaluate_expr_as_i64(r, columns, row_idx, schema)?;
                 Ok(left_val.wrapping_add(right_val))
             }
             Expr::Sub(l, r) => {
-                let left_val = self.evaluate_expr_as_i64(l, columns, row_idx, schema)?;
-                let right_val = self.evaluate_expr_as_i64(r, columns, row_idx, schema)?;
+                let left_val = Self::evaluate_expr_as_i64(l, columns, row_idx, schema)?;
+                let right_val = Self::evaluate_expr_as_i64(r, columns, row_idx, schema)?;
                 Ok(left_val.wrapping_sub(right_val))
             }
             Expr::Mul(l, r) => {
-                let left_val = self.evaluate_expr_as_i64(l, columns, row_idx, schema)?;
-                let right_val = self.evaluate_expr_as_i64(r, columns, row_idx, schema)?;
+                let left_val = Self::evaluate_expr_as_i64(l, columns, row_idx, schema)?;
+                let right_val = Self::evaluate_expr_as_i64(r, columns, row_idx, schema)?;
                 Ok(left_val.wrapping_mul(right_val))
             }
             Expr::Div(l, r) => {
-                let left_val = self.evaluate_expr_as_i64(l, columns, row_idx, schema)?;
-                let right_val = self.evaluate_expr_as_i64(r, columns, row_idx, schema)?;
+                let left_val = Self::evaluate_expr_as_i64(l, columns, row_idx, schema)?;
+                let right_val = Self::evaluate_expr_as_i64(r, columns, row_idx, schema)?;
                 if right_val == 0 {
                     return Err(XlogError::Execution("Division by zero".to_string()));
                 }
                 Ok(left_val / right_val)
             }
             Expr::Mod(l, r) => {
-                let left_val = self.evaluate_expr_as_i64(l, columns, row_idx, schema)?;
-                let right_val = self.evaluate_expr_as_i64(r, columns, row_idx, schema)?;
+                let left_val = Self::evaluate_expr_as_i64(l, columns, row_idx, schema)?;
+                let right_val = Self::evaluate_expr_as_i64(r, columns, row_idx, schema)?;
                 if right_val == 0 {
                     return Err(XlogError::Execution("Modulo by zero".to_string()));
                 }
                 Ok(left_val % right_val)
             }
             Expr::Abs(inner) => {
-                let val = self.evaluate_expr_as_i64(inner, columns, row_idx, schema)?;
+                let val = Self::evaluate_expr_as_i64(inner, columns, row_idx, schema)?;
                 Ok(val.abs())
             }
             Expr::Min(l, r) => {
-                let left_val = self.evaluate_expr_as_i64(l, columns, row_idx, schema)?;
-                let right_val = self.evaluate_expr_as_i64(r, columns, row_idx, schema)?;
+                let left_val = Self::evaluate_expr_as_i64(l, columns, row_idx, schema)?;
+                let right_val = Self::evaluate_expr_as_i64(r, columns, row_idx, schema)?;
                 Ok(left_val.min(right_val))
             }
             Expr::Max(l, r) => {
-                let left_val = self.evaluate_expr_as_i64(l, columns, row_idx, schema)?;
-                let right_val = self.evaluate_expr_as_i64(r, columns, row_idx, schema)?;
+                let left_val = Self::evaluate_expr_as_i64(l, columns, row_idx, schema)?;
+                let right_val = Self::evaluate_expr_as_i64(r, columns, row_idx, schema)?;
                 Ok(left_val.max(right_val))
             }
             Expr::Pow(base, exp) => {
-                let base_val = self.evaluate_expr_as_i64(base, columns, row_idx, schema)?;
-                let exp_val = self.evaluate_expr_as_i64(exp, columns, row_idx, schema)?;
+                let base_val = Self::evaluate_expr_as_i64(base, columns, row_idx, schema)?;
+                let exp_val = Self::evaluate_expr_as_i64(exp, columns, row_idx, schema)?;
                 if exp_val < 0 {
                     return Err(XlogError::Execution("Negative exponent in integer pow".to_string()));
                 } else if exp_val > u32::MAX as i64 {
@@ -640,7 +798,7 @@ impl Executor {
             }
             Expr::Cast(inner, _target_type) => {
                 // For i64 evaluation, cast is a no-op since we evaluate everything as i64
-                self.evaluate_expr_as_i64(inner, columns, row_idx, schema)
+                Self::evaluate_expr_as_i64(inner, columns, row_idx, schema)
             }
 
             _ => Err(XlogError::Execution(
@@ -1112,6 +1270,14 @@ mod tests {
             .collect()
     }
 
+    fn to_f64_column_bytes(values: &[f64]) -> Vec<u8> {
+        values.iter().flat_map(|v| v.to_le_bytes()).collect()
+    }
+
+    fn to_f32_column_bytes(values: &[f32]) -> Vec<u8> {
+        values.iter().flat_map(|v| v.to_le_bytes()).collect()
+    }
+
     // ============== Basic Executor Tests ==============
 
     #[test]
@@ -1125,6 +1291,97 @@ mod tests {
         };
 
         assert!(executor.store().is_empty());
+    }
+
+    #[test]
+    fn test_predicate_f64_comparisons() {
+        let schema = Schema::new(vec![("x".to_string(), ScalarType::F64)]);
+        let values = [1.0f64, 2.0, 3.0, f64::NAN];
+        let columns = vec![to_f64_column_bytes(&values)];
+
+        let gt_two = Expr::Compare {
+            left: Box::new(Expr::Column(0)),
+            op: CompareOp::Gt,
+            right: Box::new(Expr::Const(ConstValue::F64(2.0))),
+        };
+
+        let results: Vec<bool> = (0..values.len())
+            .map(|row| Executor::evaluate_predicate(&gt_two, &columns, row, &schema).unwrap())
+            .collect();
+        assert_eq!(results, vec![false, false, true, false]);
+
+        let eq_nan = Expr::Compare {
+            left: Box::new(Expr::Column(0)),
+            op: CompareOp::Eq,
+            right: Box::new(Expr::Const(ConstValue::F64(f64::NAN))),
+        };
+        let results: Vec<bool> = (0..values.len())
+            .map(|row| Executor::evaluate_predicate(&eq_nan, &columns, row, &schema).unwrap())
+            .collect();
+        assert_eq!(results, vec![false, false, false, false]);
+
+        let ne_nan = Expr::Compare {
+            left: Box::new(Expr::Column(0)),
+            op: CompareOp::Ne,
+            right: Box::new(Expr::Const(ConstValue::F64(f64::NAN))),
+        };
+        let results: Vec<bool> = (0..values.len())
+            .map(|row| Executor::evaluate_predicate(&ne_nan, &columns, row, &schema).unwrap())
+            .collect();
+        assert_eq!(results, vec![true, true, true, true]);
+    }
+
+    #[test]
+    fn test_predicate_f32_comparisons() {
+        let schema = Schema::new(vec![("x".to_string(), ScalarType::F32)]);
+        let values = [1.0f32, 2.0, 3.0, f32::NAN];
+        let columns = vec![to_f32_column_bytes(&values)];
+
+        let le_two = Expr::Compare {
+            left: Box::new(Expr::Column(0)),
+            op: CompareOp::Le,
+            right: Box::new(Expr::Const(ConstValue::F32(2.0))),
+        };
+
+        let results: Vec<bool> = (0..values.len())
+            .map(|row| Executor::evaluate_predicate(&le_two, &columns, row, &schema).unwrap())
+            .collect();
+        assert_eq!(results, vec![true, true, false, false]);
+    }
+
+    #[test]
+    fn test_predicate_mixed_float_int_comparisons() {
+        let schema = Schema::new(vec![
+            ("x".to_string(), ScalarType::F64),
+            ("y".to_string(), ScalarType::U32),
+        ]);
+
+        let x = [1.5f64, 2.0, 2.5];
+        let y = [1u32, 2, 3];
+        let columns = vec![
+            to_f64_column_bytes(&x),
+            y.iter().flat_map(|v| v.to_le_bytes()).collect(),
+        ];
+
+        let x_gt_2 = Expr::Compare {
+            left: Box::new(Expr::Column(0)),
+            op: CompareOp::Gt,
+            right: Box::new(Expr::Const(ConstValue::U32(2))),
+        };
+        let results: Vec<bool> = (0..x.len())
+            .map(|row| Executor::evaluate_predicate(&x_gt_2, &columns, row, &schema).unwrap())
+            .collect();
+        assert_eq!(results, vec![false, false, true]);
+
+        let y_lt_2_5 = Expr::Compare {
+            left: Box::new(Expr::Column(1)),
+            op: CompareOp::Lt,
+            right: Box::new(Expr::Const(ConstValue::F64(2.5))),
+        };
+        let results: Vec<bool> = (0..y.len())
+            .map(|row| Executor::evaluate_predicate(&y_lt_2_5, &columns, row, &schema).unwrap())
+            .collect();
+        assert_eq!(results, vec![true, true, false]);
     }
 
     #[test]

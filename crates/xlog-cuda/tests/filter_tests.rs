@@ -157,13 +157,7 @@ fn test_filter_u32_all_ops() {
 /// Helper to create an F64 test buffer from a slice of f64 values
 fn create_f64_buffer(provider: &CudaKernelProvider, values: &[f64], name: &str) -> xlog_cuda::CudaBuffer {
     let schema = Schema::new(vec![(name.to_string(), ScalarType::F64)]);
-    let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
-
-    // Upload to GPU
-    let device = provider.device();
-    let col = device.inner().htod_sync_copy(&bytes).unwrap();
-
-    xlog_cuda::CudaBuffer::from_columns(vec![col], values.len() as u64, schema)
+    provider.create_buffer_from_f64_slice(values, schema).unwrap()
 }
 
 /// Helper to download F64 column from GPU

@@ -1,7 +1,7 @@
 # XLOG Development Roadmap
 
-**Last Updated:** January 9, 2026
-**Current Status:** Phase 3 Complete (with critical issues)
+**Last Updated:** January 12, 2026
+**Current Status:** Phase 3 Complete (CUDA certification passed)
 
 ---
 
@@ -9,104 +9,84 @@
 
 | Metric | Value |
 |--------|-------|
-| Tests Passing | 275 |
-| Crates | 5 (core, ir, logic, runtime, cuda) |
-| CUDA Kernels | 7 (join, dedup, filter, sort, groupby, scan, set_ops) |
+| Workspace Tests Passing | 717 (`cargo test --workspace --all-targets --release`) |
+| CUDA Certification | **133/133 (100%)** - see `docs/plans/2026-01-12-cuda-certification-results.md` |
+| Crates | 8 (core, ir, logic, runtime, cuda, solve, stats, cuda-tests) |
+| CUDA Kernels | 8 (join, dedup, groupby, scan, filter, pack, sort, set_ops) |
 | Phase | 3 of 6 complete |
 
 ### What Works
 - ✅ Datalog parsing and compilation
 - ✅ Stratified negation analysis
 - ✅ Semi-naive fixpoint iteration
-- ✅ GPU hash joins (single/multi-column)
-- ✅ GPU radix sort (U32 keys)
+- ✅ GPU hash joins (multi-column, key verification, byte-hashed scalar keys)
+- ✅ Sort correctness for all scalar key types (stable CPU permutation + GPU reorder)
 - ✅ GPU set operations (union, diff)
 - ✅ GPU aggregations (count, sum, min, max)
+- ✅ LogSumExp aggregation (F64)
 - ✅ E2E transitive closure queries
+- ✅ CUDA certification suite + PTX validation
 
 ### What's Broken/Limited
-- ❌ Join uses hash-only comparison (no key verification)
-- ❌ Sum aggregation truncates u64 to u32
-- ❌ Filter/compact limited to 256 rows
-- ❌ Dedup uses CPU sort (not GPU)
-- ❌ Memory budget not enforced
-- ❌ No float support in predicates
-- ❌ LogSumExp not implemented
+- ❌ Dedup still uses CPU sort / CPU boundary detection (host roundtrip)
+- ❌ GPU-native set ops are U32-only (other scalar types fall back to CPU sort/dedup)
+- ❌ Multi-column GPU-native sort not implemented (current path computes permutation on CPU)
 
 ---
 
-## Priority 1: Critical Fixes (Required for Production)
+## Priority 1: Production Blockers
 
-### P1.1 Fix Join Correctness
-**Issue:** Hash-only comparison allows false positives
-**Impact:** Incorrect query results
-**Solution:** Add key byte comparison in probe phase
-**Files:** `kernels/join.cu`, `provider.rs`
-**Effort:** 2-3 days
+### P1.1 Join Correctness (Hash Collision Safety) - DONE
+**Solution:** Join v2 verifies key bytes after hash match (no false positives).
+**Files:** `kernels/join.cu`, `crates/xlog-cuda/src/provider.rs`
 
-### P1.2 Fix Aggregation Overflow
-**Issue:** Sum computed as u64, truncated to u32
-**Impact:** Silent data corruption
-**Solution:** Return u64 sum, update schema handling
-**Files:** `provider.rs:1592`
-**Effort:** 1 day
+### P1.2 Aggregation Sum Overflow/Truncation - DONE
+**Solution:** Sum aggregates return `U64` and the schema reflects it.
+**Files:** `crates/xlog-cuda/src/provider.rs`
 
-### P1.3 Implement Multi-Block Prefix Sum
-**Issue:** Current 256-element limit blocks all large filters
-**Impact:** System unusable for real data
-**Solution:** Implement hierarchical Blelloch scan
-**Files:** `kernels/scan.cu`, `provider.rs`
-**Effort:** 3-5 days
+### P1.3 Large-Input Filter/Compaction - DONE
+**Solution:** Multi-block scan works beyond 256 elements (CPU scan of block sums when needed).
+**Files:** `kernels/scan.cu`, `crates/xlog-cuda/src/provider.rs`
 
-### P1.4 Enforce Memory Budget
-**Issue:** Allocator tracks but doesn't enforce budget
-**Impact:** OOM crashes instead of graceful errors
-**Solution:** Add budget check before allocation
-**Files:** `memory.rs`
-**Effort:** 0.5 days
+### P1.4 GPU Memory Budget Enforcement - DONE
+**Solution:** Atomic budget reservation + RAII accounting for frees.
+**Files:** `crates/xlog-cuda/src/memory.rs`, `crates/xlog-cuda/src/multi_gpu_memory.rs`
 
-### P1.5 GPU Sort in Dedup
-**Issue:** Dedup uses CPU sort, causing host roundtrip
-**Impact:** Performance bottleneck, violates GPU-residency goal
-**Solution:** Use existing `sort()` method in `dedup()`
-**Files:** `provider.rs:507-591`
-**Effort:** 1 day
+### P1.5 Remove CPU Roundtrips in Dedup - TODO
+**Issue:** Dedup downloads keys to host for ordering/boundary detection.
+**Impact:** GPU-residency and performance bottleneck for real workloads.
+**Direction:** Use `sort()` + GPU boundary detection (column-major) to build the unique mask fully on-device.
+**Files:** `crates/xlog-cuda/src/provider.rs`, `kernels/dedup.cu`
 
-**Total P1 Effort:** ~2 weeks
+**Remaining P1 Effort:** ~1-2 weeks
 
 ---
 
 ## Priority 2: Important Improvements
 
 ### P2.1 Extend Type Support
-**Current:** Joins/set-ops only support U32
-**Goal:** Support I32, I64, U64, F32, F64
-**Files:** `provider.rs`, `kernels/*.cu`
-**Effort:** 1 week
+**Current:** GPU-native set ops are U32-only; runtime predicates are largely integer-only.
+**Goal:** Uniform scalar support across join/sort/filter/dedup/set-ops (including I32/I64/U64/F32/F64/Bool/Symbol).
+**Files:** `crates/xlog-runtime/src/executor.rs`, `crates/xlog-cuda/src/provider.rs`, `kernels/*.cu`
+**Effort:** 1-2 weeks
 
 ### P2.2 Float Comparisons in Filters
-**Current:** Float predicates return error
-**Goal:** Support F32/F64 in filter expressions
-**Files:** `executor.rs:522-525`, `filter.cu`
-**Effort:** 2-3 days
+**Status:** DONE
+**Change:** Runtime filter predicate evaluation supports F32/F64 comparisons.
+**Files:** `crates/xlog-runtime/src/executor.rs`
 
-### P2.3 Implement LogSumExp
-**Current:** Returns "not implemented"
-**Goal:** Numerically stable log-sum-exp for probabilistic tier
-**Files:** `groupby.cu`, `provider.rs`
-**Effort:** 2-3 days
+### P2.3 Implement LogSumExp - DONE
+**Files:** `kernels/groupby.cu`, `crates/xlog-cuda/src/provider.rs`
 
 ### P2.4 Increase Join Output Limit
-**Current:** Clamped at 1M results
-**Goal:** Dynamic allocation or chunked output
-**Files:** `provider.rs:2825`
-**Effort:** 2 days
+**Status:** DONE (v2 join)
+**Change:** Join output buffers are sized from a count pass (no silent truncation); optional cap still supported.
+**Files:** `crates/xlog-cuda/src/provider.rs`
 
-### P2.5 Add Key Verification Mode
-**Current:** Hash-only comparison everywhere
-**Goal:** Optional full key verification for correctness-critical use
-**Files:** `provider.rs`, `join.cu`
-**Effort:** 2 days
+### P2.5 Key Verification Mode - DONE (Default)
+**Current:** Join v2 performs key verification by default after hash match.
+**Goal:** Optional unsafe "hash-only" fast path for performance experiments (explicitly opt-in).
+**Files:** `kernels/join.cu`, `crates/xlog-cuda/src/provider.rs`
 
 **Total P2 Effort:** ~2 weeks
 
@@ -125,8 +105,8 @@
 **Effort:** 1 week
 
 ### P3.3 Multi-Column GPU Sort
-**Current:** Only U32 keys
-**Goal:** Composite key sort on GPU
+**Current:** Correct multi-column sorting works, but permutation is computed on CPU.
+**Goal:** Fully GPU-native composite key sort (no host roundtrip), reusing pack + radix or bitonic strategies.
 **Effort:** 1 week
 
 ### P3.4 Kernel Fusion
@@ -170,7 +150,7 @@
 - Neural predicate support (PyTorch integration)
 
 ### Prerequisites
-- P1 fixes complete
+- CUDA correctness suite passing (P1.1-P1.4)
 - P2.3 LogSumExp implemented
 
 ### Effort Estimate: 2-3 months
@@ -214,8 +194,8 @@
 ## Recommended Execution Order
 
 ```
-Week 1-2:   P1.1-P1.5 (Critical fixes)
-Week 3-4:   P2.1-P2.5 (Important improvements)
+Week 1-2:   P1.5 (GPU-resident dedup)
+Week 3:     P2.1 (Type support)
 Week 5-8:   P3.1-P3.4 (Performance)
 Month 3-4:  P4.1-P4.4 (Features)
 Month 5-7:  Phase 4 (xlog-prob)
@@ -228,16 +208,17 @@ Month 12+:  Phase 6 (Scaling)
 ## Success Metrics
 
 ### Phase 3 Complete (Current)
-- [x] 275 tests passing
+- [x] 717 workspace tests passing (release)
 - [x] E2E Datalog queries work
-- [ ] No critical correctness bugs ← **BLOCKED**
+- [x] CUDA certification suite passes (133/133)
+- [x] No known critical correctness bugs in CUDA provider
 - [ ] GPU-resident execution ← **Partial**
 
 ### Production Ready (After P1+P2)
-- [ ] All critical fixes applied
-- [ ] Float support complete
-- [ ] Memory budget enforced
-- [ ] No 256-row limit
+- [x] All critical CUDA correctness fixes applied
+- [ ] Float predicate support complete (runtime + CUDA)
+- [x] Memory budget enforced
+- [x] No 256-row filter/compact limit
 - [ ] Benchmarks documented
 
 ### Feature Complete (After P4)
@@ -258,7 +239,8 @@ Month 12+:  Phase 6 (Scaling)
 
 | Risk | Likelihood | Impact | Mitigation |
 |------|------------|--------|------------|
-| Multi-block scan complexity | Medium | High | Research existing implementations |
+| GPU-native dedup/unique complexity | Medium | High | Start with single-key, then multi-key; keep CPU fallback |
+| Float predicate semantics (NaN/total order) | Medium | Medium | Define semantics; mirror CUDA `total_cmp` where needed |
 | D4 integration challenges | High | Medium | Plan fallback KC backends |
 | ELP complexity explosion | High | High | Strict tier bounds |
 | Multi-GPU synchronization | Medium | High | Start single-node first |
@@ -272,6 +254,7 @@ Month 12+:  Phase 6 (Scaling)
 - `docs/spec-v1.1.md` - Revised design
 - `docs/ARCHITECTURE.md` - System architecture
 - `docs/VALIDATION_REPORT.md` - Current validation
+- `docs/plans/2026-01-12-cuda-certification-results.md` - CUDA certification results
 
 ### Key Papers
 - GPUlog (HISA indexes, parallel fixpoint)
