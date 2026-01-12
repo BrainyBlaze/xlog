@@ -136,10 +136,11 @@
 **Status:** IN PROGRESS (predicate pushdown enabled; join ordering heuristic)
 **Implemented:**
 - Compiler runs optimizer pass (predicate pushdown) on all compiled rule bodies
-- Lowering-time greedy join atom ordering using estimated cardinalities + bound-variable preference
+- Lowering-time cost-based join atom ordering (DP for small bodies, greedy fallback) using estimated cardinalities + bound-variable preference
+- Compiler can seed optimizer from a `xlog_stats::StatsSnapshot` (runtime → compiler feedback loop)
 **Next:**
-- Cost-based join ordering across full join tree shapes (beyond left-deep greedy)
-- Broader stats feedback loop (runtime → compiler)
+- Cost-based join ordering across full join tree shapes (beyond left-deep)
+- Stats snapshot keyed by predicate name (avoid RelId reuse across different programs)
 **Effort:** 3-4 weeks
 
 ### P4.3 Incremental Maintenance

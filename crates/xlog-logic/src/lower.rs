@@ -10,7 +10,7 @@
 //! 5. Wraps recursive predicates in Fixpoint nodes
 //! 6. Projects to match head variables
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use xlog_core::{AggOp as CoreAggOp, RelId, Result, ScalarType, Schema, XlogError};
 use xlog_ir::{
@@ -403,9 +403,20 @@ impl Lowerer {
             return atoms.to_vec();
         }
 
+        // Dynamic programming left-deep ordering for small join bodies; greedy fallback
+        // keeps compilation time bounded for very large rules.
+        const MAX_DP_ATOMS: usize = 10;
+        if atoms.len() <= MAX_DP_ATOMS {
+            return self.order_positive_atoms_cost_based(atoms);
+        }
+
+        self.order_positive_atoms_greedy(atoms)
+    }
+
+    fn order_positive_atoms_greedy<'a>(&self, atoms: &[&'a Atom]) -> Vec<&'a Atom> {
         let mut remaining: Vec<(usize, &Atom)> = atoms.iter().copied().enumerate().collect();
         let mut ordered: Vec<&Atom> = Vec::with_capacity(atoms.len());
-        let mut bound_vars: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut bound_vars: HashSet<String> = HashSet::new();
 
         while !remaining.is_empty() {
             let pick_idx = if ordered.is_empty() {
@@ -462,6 +473,99 @@ impl Lowerer {
         }
 
         ordered
+    }
+
+    fn order_positive_atoms_cost_based<'a>(&self, atoms: &[&'a Atom]) -> Vec<&'a Atom> {
+        let n = atoms.len();
+        let size = 1usize << n;
+
+        let atom_est: Vec<f64> = atoms.iter().map(|a| self.estimate_atom_rows(a)).collect();
+        let atom_vars: Vec<HashSet<String>> = atoms.iter().map(|a| Self::atom_vars(a)).collect();
+
+        let mut union_vars: Vec<HashSet<String>> = vec![HashSet::new(); size];
+        for mask in 1..size {
+            let bit_idx = (mask as u32).trailing_zeros() as usize;
+            let prev = mask & !(1usize << bit_idx);
+            let mut vars = union_vars[prev].clone();
+            vars.extend(atom_vars[bit_idx].iter().cloned());
+            union_vars[mask] = vars;
+        }
+
+        let mut best_total_cost: Vec<f64> = vec![f64::INFINITY; size];
+        let mut best_card: Vec<f64> = vec![0.0; size];
+        let mut best_order: Vec<Vec<usize>> = vec![Vec::new(); size];
+
+        for i in 0..n {
+            let mask = 1usize << i;
+            best_total_cost[mask] = atom_est[i];
+            best_card[mask] = atom_est[i];
+            best_order[mask] = vec![i];
+        }
+
+        fn lex_lt(a: &[usize], b: &[usize]) -> bool {
+            for (ai, bi) in a.iter().zip(b.iter()) {
+                if ai != bi {
+                    return ai < bi;
+                }
+            }
+            a.len() < b.len()
+        }
+
+        for mask in 1..size {
+            let prev_total = best_total_cost[mask];
+            if !prev_total.is_finite() {
+                continue;
+            }
+            let prev_card = best_card[mask];
+            let bound = &union_vars[mask];
+
+            for next in 0..n {
+                if (mask & (1usize << next)) != 0 {
+                    continue;
+                }
+
+                let shared = bound.intersection(&atom_vars[next]).count();
+                let mut selectivity = if shared == 0 {
+                    1.0
+                } else {
+                    0.1_f64.powi(shared as i32)
+                };
+                if shared == 0 {
+                    // Heavily penalize cartesian products in ordering decisions.
+                    selectivity *= 1.0e6;
+                }
+
+                let next_card = (prev_card * atom_est[next] * selectivity).max(1.0);
+                let next_total = prev_total + next_card;
+                let next_mask = mask | (1usize << next);
+
+                let should_replace = if next_total < best_total_cost[next_mask] {
+                    true
+                } else if (next_total - best_total_cost[next_mask]).abs() < 1e-9 {
+                    let mut candidate = best_order[mask].clone();
+                    candidate.push(next);
+                    lex_lt(&candidate, &best_order[next_mask])
+                } else {
+                    false
+                };
+
+                if should_replace {
+                    best_total_cost[next_mask] = next_total;
+                    best_card[next_mask] = next_card;
+                    let mut candidate = best_order[mask].clone();
+                    candidate.push(next);
+                    best_order[next_mask] = candidate;
+                }
+            }
+        }
+
+        let full_mask = size - 1;
+        let order = &best_order[full_mask];
+        if order.len() != n {
+            return self.order_positive_atoms_greedy(atoms);
+        }
+
+        order.iter().map(|&idx| atoms[idx]).collect()
     }
 
     fn lower_body_parts(
