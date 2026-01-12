@@ -53,7 +53,7 @@
 ### P1.5 Remove CPU Roundtrips in Dedup - DONE
 **Issue:** Dedup previously downloaded keys to host for boundary detection.
 **Solution:** GPU columnar boundary detection + GPU scan/compact (mask/prefix/compact stays on-device).
-**Remaining:** `sort()` still computes the permutation on CPU (tracked under P3.3).
+**Remaining:** None (P3.3 removed the CPU sort permutation).
 **Files:** `crates/xlog-cuda/src/provider.rs`, `kernels/dedup.cu`
 
 **Remaining P1 Effort:** 0 (P1 complete)
@@ -64,7 +64,7 @@
 
 ### P2.1 Extend Type Support
 **Status:** DONE
-**Change:** `union_gpu`/`diff_gpu` support all scalar types (and multi-column schemas) without CPU row-materialization; only `sort()` permutation remains CPU-side until P3.3.
+**Change:** `union_gpu`/`diff_gpu` support all scalar types (and multi-column schemas) without CPU row-materialization; GPU sort permutation is now fully on-device (P3.3).
 **Goal:** Uniform scalar support across join/sort/filter/dedup/set-ops (including I32/I64/U64/F32/F64/Bool/Symbol).
 **Files:** `crates/xlog-runtime/src/executor.rs`, `crates/xlog-cuda/src/provider.rs`, `kernels/*.cu`
 **Effort:** 1-2 weeks
