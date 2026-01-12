@@ -1,7 +1,7 @@
 # XLOG Development Roadmap
 
 **Last Updated:** January 12, 2026
-**Current Status:** Phase 3 Complete (CUDA certification passed)
+**Current Status:** Phase 3 Complete (CUDA certification passed); Phase 4 in progress
 
 ---
 
@@ -122,18 +122,44 @@
 
 ### P4.1 CuDF Integration
 **Goal:** Interoperability with RAPIDS ecosystem
+**Status:** IN PROGRESS (Arrow interop + IPC stream)
+**Implemented:**
+- Arrow RecordBatch export/import (`CudaKernelProvider::{to_arrow_record_batch, from_arrow_record_batch}`)
+- Arrow IPC stream helpers (`CudaKernelProvider::{to_arrow_ipc_stream, from_arrow_ipc_stream, write_arrow_ipc_stream_file, read_arrow_ipc_stream_file}`)
+- Notes + Python cuDF example: `docs/architecture/cudf-interop.md`
+**Next:**
+- Zero-copy interchange (likely DLPack or CUDA-aware Arrow memory)
 **Effort:** 2-3 weeks
 
 ### P4.2 Query Optimizer
 **Goal:** Cost-based join ordering, predicate pushdown
+**Status:** IN PROGRESS (predicate pushdown enabled; join ordering heuristic)
+**Implemented:**
+- Compiler runs optimizer pass (predicate pushdown) on all compiled rule bodies
+- Lowering-time greedy join atom ordering using estimated cardinalities + bound-variable preference
+**Next:**
+- Cost-based join ordering across full join tree shapes (beyond left-deep greedy)
+- Broader stats feedback loop (runtime → compiler)
 **Effort:** 3-4 weeks
 
 ### P4.3 Incremental Maintenance
 **Goal:** Delta updates without full recomputation
+**Status:** IN PROGRESS (semi-naive SCC evaluation)
+**Implemented:**
+- Runtime recursive SCC evaluation uses semi-naive deltas with per-scan occurrence rewriting (supports mutual recursion + self-joins)
+**Next:**
+- Incremental maintenance across EDB updates (insert/delete) without recompilation
 **Effort:** 2-3 weeks
 
 ### P4.4 Adaptive Indexing (HISA)
 **Goal:** Build indexes dynamically for hot relations
+**Status:** IN PROGRESS (runtime stats wiring)
+**Implemented:**
+- Runtime `Executor` maintains `xlog_stats::StatsManager` and records:
+  - Scan heat + cardinality/bytes
+  - Join selectivities (when both sides are base relations)
+**Next:**
+- Index manager + memory-budget-aware caching/eviction (hash build-side reuse keyed by observed join keys)
 **Effort:** 4-6 weeks
 
 **Total P4 Effort:** ~3 months

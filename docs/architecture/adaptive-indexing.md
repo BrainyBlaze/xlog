@@ -7,50 +7,23 @@ for frequently accessed relations.
 
 ## Components
 
-### 1. QueryStatistics
-- Tracks scan counts, join selectivities
-- Calculates "heat" score per relation
-- Location: `xlog-runtime/src/statistics.rs`
+### 1. StatsManager (Current)
+- Tracks per-relation heat + cardinality/bytes
+- Caches join selectivities + observed join keys
+- Location: `crates/xlog-stats`
 
 ### 2. JoinStrategy
 - Selects optimal join algorithm
 - Options: Hash, NestedLoop, SortMerge, IndexNestedLoop
 - Location: `xlog-runtime/src/statistics.rs`
 
-### 3. Executor Integration (TODO)
+### 3. Executor Integration (Implemented: statistics wiring)
 
-Update `executor.rs` execute_join():
+`Executor` records:
+- Scan heat + cardinality/bytes during `Scan`
+- Join selectivity observations for base/base joins (both sides are `Scan`)
 
-```rust
-fn execute_join(&mut self, ...) -> Result<CudaBuffer> {
-    // 1. Record statistics
-    self.stats.record_scan(&left_rel);
-    self.stats.record_scan(&right_rel);
-
-    // 2. Select strategy
-    let strategy = JoinStrategy::select(
-        left.num_rows(),
-        right.num_rows(),
-        self.is_sorted(&left, &left_keys),
-        &self.stats,
-    );
-
-    // 3. Execute with selected strategy
-    match strategy {
-        JoinStrategy::Hash => self.provider.hash_join_v2(...),
-        JoinStrategy::NestedLoop => self.provider.nested_loop_join(...),
-        JoinStrategy::SortMerge => self.provider.sort_merge_join(...),
-        JoinStrategy::IndexNestedLoop => self.provider.index_join(...),
-    }
-
-    // 4. Record selectivity
-    let selectivity = result.num_rows() as f64 /
-        (left.num_rows() * right.num_rows()) as f64;
-    self.stats.record_join(&left_rel, &right_rel, selectivity);
-
-    Ok(result)
-}
-```
+See: `crates/xlog-runtime/src/executor.rs`
 
 ## Index Building Decisions
 
@@ -71,6 +44,6 @@ fn maybe_build_index(&mut self, relation: &str) {
 ## Future Work
 
 1. Implement NestedLoop and SortMerge joins
-2. Add index manager with hash index support
-3. Integrate statistics into fixpoint loop
-4. Add index invalidation on relation updates
+2. Add index manager with hash index support + invalidation
+3. Integrate statistics into fixpoint loop (recursive SCCs)
+4. Add memory-budget-aware index eviction
