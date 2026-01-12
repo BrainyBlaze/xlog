@@ -51,4 +51,5 @@ mod manager;
 mod stats;
 
 pub use manager::StatsManager;
+pub use manager::StatsSnapshot;
 pub use stats::{ColumnStats, JoinSelectivity, RelationStats};

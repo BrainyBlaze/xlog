@@ -9,6 +9,15 @@ use xlog_core::RelId;
 
 use crate::stats::{ColumnStats, JoinSelectivity, RelationStats};
 
+/// Serializable snapshot of collected statistics.
+///
+/// This is intended for feeding runtime observations back into the compiler/optimizer.
+#[derive(Debug, Clone, Default)]
+pub struct StatsSnapshot {
+    pub relations: Vec<RelationStats>,
+    pub join_selectivities: Vec<JoinSelectivity>,
+}
+
 /// Manages GPU-resident statistics for all relations.
 ///
 /// The `StatsManager` is the central repository for relation statistics and join
@@ -72,6 +81,36 @@ impl StatsManager {
         self.relations
             .entry(rel_id)
             .or_insert_with(|| RelationStats::new(rel_id));
+    }
+
+    /// Create a snapshot of all currently tracked statistics.
+    pub fn snapshot(&self) -> StatsSnapshot {
+        StatsSnapshot {
+            relations: self.relations.values().cloned().collect(),
+            join_selectivities: self.join_selectivities.values().cloned().collect(),
+        }
+    }
+
+    /// Merge a previously captured snapshot into this manager.
+    ///
+    /// Existing entries are overwritten with the snapshot values.
+    pub fn merge_snapshot(&mut self, snapshot: &StatsSnapshot) {
+        for rel in &snapshot.relations {
+            self.register_relation(rel.rel_id);
+            if let Some(stats) = self.relations.get_mut(&rel.rel_id) {
+                *stats = rel.clone();
+            }
+        }
+
+        for js in &snapshot.join_selectivities {
+            self.set_join_selectivity(
+                js.left_rel,
+                js.right_rel,
+                js.left_keys.clone(),
+                js.right_keys.clone(),
+                js.selectivity,
+            );
+        }
     }
 
     /// Unregisters a relation, removing all associated statistics.
@@ -296,6 +335,33 @@ impl StatsManager {
         const EMA_OLD_WEIGHT: f64 = 0.7;
         const EMA_NEW_WEIGHT: f64 = 0.3;
         entry.selectivity = entry.selectivity * EMA_OLD_WEIGHT + observed_selectivity * EMA_NEW_WEIGHT;
+    }
+
+    /// Set (or overwrite) the join selectivity between two relations.
+    ///
+    /// This is useful for seeding the optimizer from external observations (e.g., runtime stats).
+    pub fn set_join_selectivity(
+        &mut self,
+        left_rel: RelId,
+        right_rel: RelId,
+        left_keys: Vec<usize>,
+        right_keys: Vec<usize>,
+        selectivity: f64,
+    ) {
+        let key = Self::canonical_join_key(left_rel, right_rel);
+        let entry = self.join_selectivities.entry(key).or_insert_with(|| {
+            let (canonical_left, canonical_right) = key;
+            JoinSelectivity::new(canonical_left, canonical_right)
+        });
+
+        // Store keys in canonical order.
+        let (keys_left, keys_right) = if left_rel <= right_rel {
+            (left_keys, right_keys)
+        } else {
+            (right_keys, left_keys)
+        };
+        entry.set_keys(keys_left, keys_right);
+        entry.set_selectivity(selectivity);
     }
 
     /// Gets the cached join selectivity between two relations.
@@ -833,6 +899,45 @@ mod tests {
         let js = mgr.get_join_selectivity(RelId(1), RelId(2)).unwrap();
         let expected = ((1000_u64 as f64 * 500_u64 as f64 * js.selectivity) as u64).max(1);
         assert_eq!(estimate, expected);
+    }
+
+    #[test]
+    fn test_stats_manager_set_join_selectivity_canonicalizes_keys() {
+        let mut mgr = StatsManager::new();
+        mgr.register_relation(RelId(1));
+        mgr.register_relation(RelId(2));
+
+        // Set in reverse order; manager should store in canonical (1,2).
+        mgr.set_join_selectivity(RelId(2), RelId(1), vec![3], vec![7], 0.05);
+
+        let js = mgr.get_join_selectivity(RelId(1), RelId(2)).unwrap();
+        assert_eq!(js.left_rel, RelId(1));
+        assert_eq!(js.right_rel, RelId(2));
+        assert_eq!(js.left_keys, vec![7]);
+        assert_eq!(js.right_keys, vec![3]);
+        assert!((js.selectivity - 0.05).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_stats_manager_snapshot_and_merge() {
+        let mut mgr = StatsManager::new();
+        mgr.register_relation(RelId(1));
+        mgr.update_cardinality(RelId(1), 123);
+        mgr.record_access(RelId(1));
+        mgr.set_join_selectivity(RelId(1), RelId(2), vec![0], vec![0], 0.2);
+
+        let snap = mgr.snapshot();
+
+        let mut mgr2 = StatsManager::new();
+        mgr2.merge_snapshot(&snap);
+
+        let r1 = mgr2.get_relation_stats(RelId(1)).unwrap();
+        assert_eq!(r1.cardinality, 123);
+
+        let js = mgr2.get_join_selectivity(RelId(1), RelId(2)).unwrap();
+        assert_eq!(js.left_keys, vec![0]);
+        assert_eq!(js.right_keys, vec![0]);
+        assert!((js.selectivity - 0.2).abs() < 1e-9);
     }
 
     #[test]

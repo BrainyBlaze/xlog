@@ -12,7 +12,7 @@
 
 use xlog_core::Result;
 use xlog_ir::ExecutionPlan;
-use xlog_stats::StatsManager;
+use xlog_stats::{StatsManager, StatsSnapshot};
 
 use crate::lower::Lowerer;
 use crate::optimizer::Optimizer;
@@ -91,6 +91,16 @@ impl Compiler {
     /// // The plan can now be executed by xlog-runtime
     /// ```
     pub fn compile(&mut self, source: &str) -> Result<ExecutionPlan> {
+        self.compile_with_stats_snapshot(source, None)
+    }
+
+    /// Compile XLOG source code into an execution plan, optionally seeding the optimizer
+    /// with a runtime statistics snapshot.
+    pub fn compile_with_stats_snapshot(
+        &mut self,
+        source: &str,
+        stats_snapshot: Option<&StatsSnapshot>,
+    ) -> Result<ExecutionPlan> {
         // Phase 1: Parse source into AST
         let program = parse_program(source)?;
 
@@ -123,6 +133,10 @@ impl Compiler {
                     mgr.update_byte_size(*rel_id, rows * schema.row_size_bytes() as u64);
                 }
             }
+        }
+
+        if let Some(snapshot) = stats_snapshot {
+            mgr.merge_snapshot(snapshot);
         }
 
         let optimizer = Optimizer::new(Arc::new(mgr));
@@ -179,6 +193,7 @@ pub fn compile(source: &str) -> Result<ExecutionPlan> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use xlog_stats::StatsManager;
 
     #[test]
     fn test_compiler_new() {
@@ -378,5 +393,28 @@ mod tests {
             "Failed to compile with aggregation: {:?}",
             result.err()
         );
+    }
+
+    #[test]
+    fn test_compile_with_stats_snapshot() {
+        let mut compiler = Compiler::new();
+        let source = r#"
+            edge(1, 2).
+            edge(2, 3).
+            reach(X, Y) :- edge(X, Y).
+        "#;
+
+        let _ = compiler.compile(source).expect("Initial compile failed");
+        let edge_id = *compiler.rel_ids().get("edge").expect("edge rel_id missing");
+
+        let mut mgr = StatsManager::new();
+        mgr.register_relation(edge_id);
+        mgr.update_cardinality(edge_id, 42);
+        let snapshot = mgr.snapshot();
+
+        let plan = compiler
+            .compile_with_stats_snapshot(source, Some(&snapshot))
+            .expect("Compile with snapshot failed");
+        assert!(!plan.sccs.is_empty());
     }
 }
