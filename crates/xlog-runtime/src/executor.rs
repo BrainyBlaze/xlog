@@ -3,12 +3,15 @@
 //! The executor interprets RIR (Relational IR) nodes using the CUDA kernel provider
 //! to execute GPU-accelerated relational operations.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use xlog_core::{AggOp, RelId, Result, ScalarType, Schema, XlogError};
 use xlog_cuda::{CudaBuffer, CudaKernelProvider, JoinType as CudaJoinType};
-use xlog_ir::{CompareOp, ConstValue, ExecutionPlan, Expr, JoinType, ProjectExpr, RirNode, Stratum};
+use xlog_ir::{
+    CompareOp, ConstValue, ExecutionPlan, Expr, JoinType, ProjectExpr, RirNode, Stratum,
+};
+use xlog_stats::StatsManager;
 
 use crate::RelationStore;
 
@@ -38,6 +41,8 @@ pub struct Executor {
     store: RelationStore,
     /// Mapping from RelId to relation name
     rel_names: HashMap<RelId, String>,
+    /// Runtime statistics for adaptive optimization
+    stats: StatsManager,
 }
 
 impl Executor {
@@ -50,6 +55,7 @@ impl Executor {
             provider,
             store: RelationStore::new(),
             rel_names: HashMap::new(),
+            stats: StatsManager::new(),
         }
     }
 
@@ -63,6 +69,16 @@ impl Executor {
         &mut self.store
     }
 
+    /// Get a reference to the runtime statistics manager
+    pub fn stats(&self) -> &StatsManager {
+        &self.stats
+    }
+
+    /// Get a mutable reference to the runtime statistics manager
+    pub fn stats_mut(&mut self) -> &mut StatsManager {
+        &mut self.stats
+    }
+
     /// Register a relation name for a RelId
     ///
     /// This mapping is used when executing Scan nodes to look up relations
@@ -73,6 +89,7 @@ impl Executor {
     /// * `name` - The name to associate with the relation
     pub fn register_relation(&mut self, rel_id: RelId, name: &str) {
         self.rel_names.insert(rel_id, name.to_string());
+        self.stats.register_relation(rel_id);
     }
 
     /// Get the relation name for a RelId
@@ -137,9 +154,19 @@ impl Executor {
                 right_keys,
                 join_type,
             } => {
+                let left_rel = match left.as_ref() {
+                    RirNode::Scan { rel } => Some(*rel),
+                    _ => None,
+                };
+                let right_rel = match right.as_ref() {
+                    RirNode::Scan { rel } => Some(*rel),
+                    _ => None,
+                };
                 let left_buf = self.execute_node(left)?;
                 let right_buf = self.execute_node(right)?;
-                self.execute_join(&left_buf, &right_buf, left_keys, right_keys, *join_type)
+                self.execute_join(
+                    &left_buf, &right_buf, left_keys, right_keys, *join_type, left_rel, right_rel,
+                )
             }
 
             RirNode::GroupBy {
@@ -242,87 +269,471 @@ impl Executor {
     /// 3. Re-execute rules, using delta from previous iteration
     /// 4. Repeat until no changes (fixpoint reached)
     fn execute_recursive_scc(&mut self, rules: &[xlog_ir::CompiledRule]) -> Result<()> {
-        // Step 1: Execute all rules once to get initial results
-        // Important: Union results for rules with the same head predicate
+        // Identify SCC predicates from rule heads (these are the recursive IDBs).
+        let mut recursive_preds: HashSet<String> = HashSet::new();
+        let mut schema_by_pred: HashMap<String, Schema> = HashMap::new();
+        for rule in rules {
+            recursive_preds.insert(rule.head.clone());
+            schema_by_pred
+                .entry(rule.head.clone())
+                .or_insert_with(|| rule.meta.schema.clone());
+        }
+
+        // Ensure all recursive predicates exist in the store so scans never fail
+        // due to evaluation order (mutual recursion can reference an as-yet-empty relation).
+        for pred in &recursive_preds {
+            if !self.store.contains(pred) {
+                let schema = schema_by_pred
+                    .get(pred)
+                    .cloned()
+                    .unwrap_or_else(|| Schema::new(vec![]));
+                let empty = self.create_empty_buffer(schema)?;
+                self.store.put(pred, empty);
+            }
+        }
+
+        // Create per-predicate delta relations (distinct RelIds) so semi-naive evaluation
+        // can target a single recursive Scan occurrence without overriding *all* scans of
+        // that predicate in a rule (required for self-joins like p(X,Y), p(Y,Z)).
+        let mut next_rel_id = self
+            .rel_names
+            .keys()
+            .map(|r| r.0)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+
+        let mut delta_rel_by_pred: HashMap<String, (RelId, String)> = HashMap::new();
+        for pred in &recursive_preds {
+            let rel_id = RelId(next_rel_id);
+            next_rel_id = next_rel_id.saturating_add(1);
+            let name = format!("__delta_{}_{}", pred, rel_id.0);
+            self.register_relation(rel_id, &name);
+            delta_rel_by_pred.insert(pred.clone(), (rel_id, name));
+        }
+
+        // Step 1: Execute all rules once against the current store to seed initial results.
+        // Accumulate per-head before mutating the store to avoid order dependence.
+        let mut derived_initial: HashMap<String, CudaBuffer> = HashMap::new();
         for rule in rules {
             let result = self.execute_node(&rule.body)?;
+            if let Some(acc) = derived_initial.get_mut(&rule.head) {
+                *acc = self.provider.union(acc, &result)?;
+            } else {
+                derived_initial.insert(rule.head.clone(), result);
+            }
+        }
 
-            // Union with existing result if predicate already has data
-            if let Some(existing) = self.store.get(&rule.head) {
-                let merged = self.provider.union(existing, &result)?;
+        // Initialize delta = full after seeding (standard semi-naive initialization).
+        // Keep delta relations in the store under their dedicated delta names to avoid extra cloning
+        // when iterating.
+        for pred in &recursive_preds {
+            let existing_full = self
+                .store
+                .remove(pred)
+                .ok_or_else(|| XlogError::Execution(format!("Missing relation: {}", pred)))?;
+
+            let derived = derived_initial
+                .remove(pred)
+                .unwrap_or_else(|| CudaBuffer::empty());
+            let merged = self.provider.union(&existing_full, &derived)?;
+            let key_cols: Vec<usize> = (0..merged.arity()).collect();
+            let full = if merged.is_empty() {
+                merged
+            } else {
+                self.provider.dedup(&merged, &key_cols)?
+            };
+
+            let (_delta_rel_id, delta_name) = delta_rel_by_pred.get(pred).ok_or_else(|| {
+                XlogError::Execution(format!("Missing delta relation for {}", pred))
+            })?;
+
+            // Store full and seed delta with a copy of full for the first iteration.
+            let delta_initial = self.clone_buffer(&full)?;
+            self.store.put(pred, full);
+            self.store.put(delta_name, delta_initial);
+        }
+
+        // Step 2: Iterate until no new tuples are produced.
+        let mut reached_fixpoint = false;
+        for _iteration in 0..Self::MAX_SCC_ITERATIONS {
+            // Compute delta_new_raw per head by evaluating each rule once per recursive Scan occurrence.
+            let mut delta_new_raw_by_head: HashMap<String, CudaBuffer> = HashMap::new();
+
+            for rule in rules {
+                let mut scans = Vec::new();
+                Self::collect_scan_rels(&rule.body, &mut scans);
+
+                // Build a list of (rel_id, occurrence_idx, pred_name) for recursive scans.
+                let mut seen: HashMap<RelId, usize> = HashMap::new();
+                let mut variants: Vec<(RelId, usize, String)> = Vec::new();
+                for rel_id in scans {
+                    let pred_name = match self.get_rel_name(rel_id) {
+                        Some(n) => n.to_string(),
+                        None => continue,
+                    };
+                    if !recursive_preds.contains(&pred_name) {
+                        continue;
+                    }
+
+                    // Skip variants where the delta for this predicate is empty.
+                    let (_delta_rel_id, delta_name) = match delta_rel_by_pred.get(&pred_name) {
+                        Some(v) => v,
+                        None => continue,
+                    };
+                    if self
+                        .store
+                        .get(delta_name)
+                        .map(|b| b.is_empty())
+                        .unwrap_or(true)
+                    {
+                        continue;
+                    }
+
+                    let occ = seen.entry(rel_id).or_insert(0);
+                    variants.push((rel_id, *occ, pred_name));
+                    *occ += 1;
+                }
+
+                if variants.is_empty() {
+                    // Base rule: it can only contribute on the first seeding pass.
+                    continue;
+                }
+
+                let mut rule_delta_raw: Option<CudaBuffer> = None;
+                for (rel_id, occ, pred_name) in variants {
+                    let (delta_rel_id, _delta_name) =
+                        delta_rel_by_pred.get(&pred_name).ok_or_else(|| {
+                            XlogError::Execution(format!(
+                                "Missing delta relation for predicate {}",
+                                pred_name
+                            ))
+                        })?;
+
+                    let variant_node =
+                        Self::rewrite_scan_nth(&rule.body, rel_id, occ, *delta_rel_id).ok_or_else(
+                            || {
+                                XlogError::Execution(format!(
+                                    "Failed to rewrite rule body for predicate {}",
+                                    pred_name
+                                ))
+                            },
+                        )?;
+
+                    let out = self.execute_node(&variant_node)?;
+                    rule_delta_raw = Some(if let Some(acc) = rule_delta_raw {
+                        self.provider.union(&acc, &out)?
+                    } else {
+                        out
+                    });
+                }
+
+                if let Some(rule_out) = rule_delta_raw {
+                    if let Some(acc) = delta_new_raw_by_head.get_mut(&rule.head) {
+                        *acc = self.provider.union(acc, &rule_out)?;
+                    } else {
+                        delta_new_raw_by_head.insert(rule.head.clone(), rule_out);
+                    }
+                }
+            }
+
+            // Finalize delta_new per head: delta_new = dedup(delta_raw - full).
+            let mut any_changed = false;
+
+            for pred in &recursive_preds {
+                let full = self
+                    .store
+                    .get(pred)
+                    .ok_or_else(|| XlogError::Execution(format!("Missing relation: {}", pred)))?;
+
+                let delta_raw = delta_new_raw_by_head.remove(pred);
+                let delta_new = if let Some(delta_raw) = delta_raw {
+                    if delta_raw.is_empty() {
+                        self.create_empty_buffer(full.schema().clone())?
+                    } else {
+                        self.provider.diff_gpu(&delta_raw, full)?
+                    }
+                } else {
+                    self.create_empty_buffer(full.schema().clone())?
+                };
+
+                let (_delta_rel_id, delta_name) = delta_rel_by_pred.get(pred).ok_or_else(|| {
+                    XlogError::Execution(format!("Missing delta relation for {}", pred))
+                })?;
+                if !delta_new.is_empty() {
+                    any_changed = true;
+                }
+                self.store.put(delta_name, delta_new);
+            }
+
+            // Fixpoint reached if no deltas produced.
+            if !any_changed {
+                reached_fixpoint = true;
+                break;
+            }
+
+            // Merge deltas into full relations.
+            for pred in &recursive_preds {
+                let full_old = self
+                    .store
+                    .remove(pred)
+                    .ok_or_else(|| XlogError::Execution(format!("Missing relation: {}", pred)))?;
+                let (_delta_rel_id, delta_name) = delta_rel_by_pred.get(pred).ok_or_else(|| {
+                    XlogError::Execution(format!("Missing delta relation for {}", pred))
+                })?;
+                let delta = self.store.remove(delta_name).ok_or_else(|| {
+                    XlogError::Execution(format!("Missing relation: {}", delta_name))
+                })?;
+
+                if delta.is_empty() {
+                    self.store.put(pred, full_old);
+                    self.store.put(delta_name, delta);
+                    continue;
+                }
+
+                let merged = self.provider.union(&full_old, &delta)?;
                 let key_cols: Vec<usize> = (0..merged.arity()).collect();
-                let deduped = if merged.is_empty() {
+                let full_new = if merged.is_empty() {
                     merged
                 } else {
                     self.provider.dedup(&merged, &key_cols)?
                 };
-                self.store.put(&rule.head, deduped);
-            } else {
-                // Dedup to avoid duplicates in initial result
-                let key_cols: Vec<usize> = (0..result.arity()).collect();
-                let deduped = if result.is_empty() {
-                    result
-                } else {
-                    self.provider.dedup(&result, &key_cols)?
-                };
-                self.store.put(&rule.head, deduped);
+                self.store.put(pred, full_new);
+                self.store.put(delta_name, delta);
             }
         }
 
-        // Step 2: Iterate until fixpoint
-        for _iteration in 0..Self::MAX_SCC_ITERATIONS {
-            // Reset memory tracking to avoid accumulating false allocation counts
-            // This is a workaround until proper RAII-based tracking is implemented
-            self.provider.memory().reset_tracking();
+        // Cleanup: remove delta relations from store and relation mapping.
+        for (_pred, (rel_id, delta_name)) in delta_rel_by_pred {
+            self.store.remove(&delta_name);
+            self.rel_names.remove(&rel_id);
+            let _ = self.stats.unregister_relation(rel_id);
+        }
 
-            let mut any_changed = false;
+        if !reached_fixpoint {
+            return Err(XlogError::Execution(format!(
+                "Recursive SCC iteration limit ({}) exceeded",
+                Self::MAX_SCC_ITERATIONS
+            )));
+        }
 
-            for rule in rules {
-                // Get current relation state
-                let old_count = self.store.get(&rule.head).map(|b| b.num_rows()).unwrap_or(0);
+        Ok(())
+    }
 
-                // Execute the rule again
-                let new_result = self.execute_node(&rule.body)?;
-
-                // Union with existing result and dedup
-                if let Some(existing) = self.store.get(&rule.head) {
-                    let merged = self.provider.union(existing, &new_result)?;
-                    // Dedup to remove duplicates introduced by union
-                    let key_cols: Vec<usize> = (0..merged.arity()).collect();
-                    let deduped = if merged.is_empty() {
-                        merged
-                    } else {
-                        self.provider.dedup(&merged, &key_cols)?
-                    };
-                    let new_count = deduped.num_rows();
-
-                    if new_count > old_count {
-                        any_changed = true;
-                    }
-
-                    self.store.put(&rule.head, deduped);
-                } else {
-                    let key_cols: Vec<usize> = (0..new_result.arity()).collect();
-                    let deduped = if new_result.is_empty() {
-                        new_result
-                    } else {
-                        self.provider.dedup(&new_result, &key_cols)?
-                    };
-                    self.store.put(&rule.head, deduped);
-                    any_changed = true;
+    fn collect_scan_rels(node: &RirNode, out: &mut Vec<RelId>) {
+        match node {
+            RirNode::Scan { rel } => out.push(*rel),
+            RirNode::Filter { input, .. } | RirNode::Project { input, .. } => {
+                Self::collect_scan_rels(input, out);
+            }
+            RirNode::Join { left, right, .. } | RirNode::Diff { left, right } => {
+                Self::collect_scan_rels(left, out);
+                Self::collect_scan_rels(right, out);
+            }
+            RirNode::GroupBy { input, .. } | RirNode::Distinct { input, .. } => {
+                Self::collect_scan_rels(input, out);
+            }
+            RirNode::Union { inputs } => {
+                for input in inputs {
+                    Self::collect_scan_rels(input, out);
                 }
             }
-
-            // Fixpoint reached if no relations changed
-            if !any_changed {
-                return Ok(());
+            RirNode::Fixpoint {
+                base, recursive, ..
+            } => {
+                Self::collect_scan_rels(base, out);
+                Self::collect_scan_rels(recursive, out);
             }
         }
+    }
 
-        Err(XlogError::Execution(format!(
-            "Recursive SCC iteration limit ({}) exceeded",
-            Self::MAX_SCC_ITERATIONS
-        )))
+    fn rewrite_scan_nth(
+        node: &RirNode,
+        target: RelId,
+        nth: usize,
+        replacement: RelId,
+    ) -> Option<RirNode> {
+        let mut remaining = nth;
+        let (rewritten, replaced) =
+            Self::rewrite_scan_nth_impl(node, target, &mut remaining, replacement);
+        replaced.then_some(rewritten)
+    }
+
+    fn rewrite_scan_nth_impl(
+        node: &RirNode,
+        target: RelId,
+        remaining: &mut usize,
+        replacement: RelId,
+    ) -> (RirNode, bool) {
+        match node {
+            RirNode::Scan { rel } => {
+                if *rel == target {
+                    if *remaining == 0 {
+                        return (RirNode::Scan { rel: replacement }, true);
+                    }
+                    *remaining -= 1;
+                }
+                (node.clone(), false)
+            }
+
+            RirNode::Filter { input, predicate } => {
+                let (new_input, replaced) =
+                    Self::rewrite_scan_nth_impl(input, target, remaining, replacement);
+                (
+                    RirNode::Filter {
+                        input: Box::new(new_input),
+                        predicate: predicate.clone(),
+                    },
+                    replaced,
+                )
+            }
+
+            RirNode::Project { input, columns } => {
+                let (new_input, replaced) =
+                    Self::rewrite_scan_nth_impl(input, target, remaining, replacement);
+                (
+                    RirNode::Project {
+                        input: Box::new(new_input),
+                        columns: columns.clone(),
+                    },
+                    replaced,
+                )
+            }
+
+            RirNode::Join {
+                left,
+                right,
+                left_keys,
+                right_keys,
+                join_type,
+            } => {
+                let (new_left, replaced_left) =
+                    Self::rewrite_scan_nth_impl(left, target, remaining, replacement);
+                if replaced_left {
+                    return (
+                        RirNode::Join {
+                            left: Box::new(new_left),
+                            right: right.clone(),
+                            left_keys: left_keys.clone(),
+                            right_keys: right_keys.clone(),
+                            join_type: *join_type,
+                        },
+                        true,
+                    );
+                }
+                let (new_right, replaced_right) =
+                    Self::rewrite_scan_nth_impl(right, target, remaining, replacement);
+                (
+                    RirNode::Join {
+                        left: Box::new(new_left),
+                        right: Box::new(new_right),
+                        left_keys: left_keys.clone(),
+                        right_keys: right_keys.clone(),
+                        join_type: *join_type,
+                    },
+                    replaced_right,
+                )
+            }
+
+            RirNode::GroupBy {
+                input,
+                key_cols,
+                aggs,
+            } => {
+                let (new_input, replaced) =
+                    Self::rewrite_scan_nth_impl(input, target, remaining, replacement);
+                (
+                    RirNode::GroupBy {
+                        input: Box::new(new_input),
+                        key_cols: key_cols.clone(),
+                        aggs: aggs.clone(),
+                    },
+                    replaced,
+                )
+            }
+
+            RirNode::Union { inputs } => {
+                let mut replaced_any = false;
+                let mut new_inputs = Vec::with_capacity(inputs.len());
+                for input in inputs {
+                    let (new_input, replaced) =
+                        Self::rewrite_scan_nth_impl(input, target, remaining, replacement);
+                    replaced_any |= replaced;
+                    new_inputs.push(new_input);
+                }
+                (RirNode::Union { inputs: new_inputs }, replaced_any)
+            }
+
+            RirNode::Distinct { input, key_cols } => {
+                let (new_input, replaced) =
+                    Self::rewrite_scan_nth_impl(input, target, remaining, replacement);
+                (
+                    RirNode::Distinct {
+                        input: Box::new(new_input),
+                        key_cols: key_cols.clone(),
+                    },
+                    replaced,
+                )
+            }
+
+            RirNode::Diff { left, right } => {
+                let (new_left, replaced_left) =
+                    Self::rewrite_scan_nth_impl(left, target, remaining, replacement);
+                if replaced_left {
+                    return (
+                        RirNode::Diff {
+                            left: Box::new(new_left),
+                            right: right.clone(),
+                        },
+                        true,
+                    );
+                }
+                let (new_right, replaced_right) =
+                    Self::rewrite_scan_nth_impl(right, target, remaining, replacement);
+                (
+                    RirNode::Diff {
+                        left: Box::new(new_left),
+                        right: Box::new(new_right),
+                    },
+                    replaced_right,
+                )
+            }
+
+            RirNode::Fixpoint {
+                scc_id,
+                base,
+                recursive,
+                delta_rel,
+                full_rel,
+            } => {
+                let (new_base, replaced_base) =
+                    Self::rewrite_scan_nth_impl(base, target, remaining, replacement);
+                if replaced_base {
+                    return (
+                        RirNode::Fixpoint {
+                            scc_id: *scc_id,
+                            base: Box::new(new_base),
+                            recursive: recursive.clone(),
+                            delta_rel: *delta_rel,
+                            full_rel: *full_rel,
+                        },
+                        true,
+                    );
+                }
+                let (new_recursive, replaced_recursive) =
+                    Self::rewrite_scan_nth_impl(recursive, target, remaining, replacement);
+                (
+                    RirNode::Fixpoint {
+                        scc_id: *scc_id,
+                        base: Box::new(new_base),
+                        recursive: Box::new(new_recursive),
+                        delta_rel: *delta_rel,
+                        full_rel: *full_rel,
+                    },
+                    replaced_recursive,
+                )
+            }
+        }
     }
 
     /// Execute a stratum (public API)
@@ -352,7 +763,7 @@ impl Executor {
     /// Execute a Scan node
     ///
     /// Looks up the relation by RelId and returns a clone of its buffer.
-    fn execute_scan(&self, rel: RelId) -> Result<CudaBuffer> {
+    fn execute_scan(&mut self, rel: RelId) -> Result<CudaBuffer> {
         let name = self
             .get_rel_name(rel)
             .ok_or_else(|| XlogError::Execution(format!("Unknown relation: RelId({})", rel.0)))?;
@@ -361,6 +772,10 @@ impl Executor {
             .store
             .get(name)
             .ok_or_else(|| XlogError::Execution(format!("Relation not found: {}", name)))?;
+
+        self.stats.record_access(rel);
+        self.stats.update_cardinality(rel, buffer.num_rows());
+        self.stats.update_byte_size(rel, buffer.estimated_bytes());
 
         // Clone the buffer
         self.clone_buffer(buffer)
@@ -469,7 +884,8 @@ impl Executor {
             Expr::Const(_) => Ok(true), // Non-bool constants are truthy
 
             Expr::Compare { left, op, right } => {
-                let use_float = Self::expr_may_be_float(left, schema) || Self::expr_may_be_float(right, schema);
+                let use_float =
+                    Self::expr_may_be_float(left, schema) || Self::expr_may_be_float(right, schema);
 
                 if use_float {
                     let left_val = Self::evaluate_expr_as_f64(left, columns, row_idx, schema)?;
@@ -496,7 +912,6 @@ impl Executor {
                         CompareOp::Ge => left_val >= right_val,
                     })
                 }
-
             }
 
             Expr::And(exprs) => {
@@ -520,19 +935,27 @@ impl Executor {
             Expr::Not(inner) => Ok(!Self::evaluate_predicate(inner, columns, row_idx, schema)?),
 
             // Arithmetic expressions are not used as predicates directly
-            Expr::Add(_, _) | Expr::Sub(_, _) | Expr::Mul(_, _) |
-            Expr::Div(_, _) | Expr::Mod(_, _) | Expr::Abs(_) |
-            Expr::Min(_, _) | Expr::Max(_, _) | Expr::Pow(_, _) | Expr::Cast(_, _) => {
-                Err(XlogError::Execution(
-                    "Arithmetic expression cannot be evaluated as boolean predicate".into()
-                ))
-            }
+            Expr::Add(_, _)
+            | Expr::Sub(_, _)
+            | Expr::Mul(_, _)
+            | Expr::Div(_, _)
+            | Expr::Mod(_, _)
+            | Expr::Abs(_)
+            | Expr::Min(_, _)
+            | Expr::Max(_, _)
+            | Expr::Pow(_, _)
+            | Expr::Cast(_, _) => Err(XlogError::Execution(
+                "Arithmetic expression cannot be evaluated as boolean predicate".into(),
+            )),
         }
     }
 
     fn expr_may_be_float(expr: &Expr, schema: &Schema) -> bool {
         match expr {
-            Expr::Column(col_idx) => matches!(schema.column_type(*col_idx), Some(ScalarType::F32 | ScalarType::F64)),
+            Expr::Column(col_idx) => matches!(
+                schema.column_type(*col_idx),
+                Some(ScalarType::F32 | ScalarType::F64)
+            ),
             Expr::Const(ConstValue::F32(_) | ConstValue::F64(_)) => true,
             Expr::Cast(_, ScalarType::F32 | ScalarType::F64) => true,
             Expr::Add(l, r)
@@ -542,7 +965,9 @@ impl Executor {
             | Expr::Mod(l, r)
             | Expr::Min(l, r)
             | Expr::Max(l, r)
-            | Expr::Pow(l, r) => Self::expr_may_be_float(l, schema) || Self::expr_may_be_float(r, schema),
+            | Expr::Pow(l, r) => {
+                Self::expr_may_be_float(l, schema) || Self::expr_may_be_float(r, schema)
+            }
             Expr::Abs(inner) | Expr::Cast(inner, _) => Self::expr_may_be_float(inner, schema),
             _ => false,
         }
@@ -568,7 +993,8 @@ impl Executor {
                     ScalarType::F64 => {
                         let bytes = &col_data[start..start + 8];
                         f64::from_le_bytes([
-                            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6],
+                            bytes[7],
                         ])
                     }
                     ScalarType::F32 => {
@@ -586,13 +1012,15 @@ impl Executor {
                     ScalarType::U64 => {
                         let bytes = &col_data[start..start + 8];
                         u64::from_le_bytes([
-                            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6],
+                            bytes[7],
                         ]) as f64
                     }
                     ScalarType::I64 => {
                         let bytes = &col_data[start..start + 8];
                         i64::from_le_bytes([
-                            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6],
+                            bytes[7],
                         ]) as f64
                     }
                     ScalarType::Bool => col_data.get(start).copied().unwrap_or(0) as f64,
@@ -604,7 +1032,13 @@ impl Executor {
                 ConstValue::I32(v) => *v as f64,
                 ConstValue::U64(v) => *v as f64,
                 ConstValue::I64(v) => *v as f64,
-                ConstValue::Bool(b) => if *b { 1.0 } else { 0.0 },
+                ConstValue::Bool(b) => {
+                    if *b {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                }
                 ConstValue::F32(f) => *f as f64,
                 ConstValue::F64(f) => *f,
                 ConstValue::Symbol(_) => {
@@ -614,18 +1048,12 @@ impl Executor {
                 }
             }),
 
-            Expr::Add(l, r) => Ok(
-                Self::evaluate_expr_as_f64(l, columns, row_idx, schema)?
-                    + Self::evaluate_expr_as_f64(r, columns, row_idx, schema)?,
-            ),
-            Expr::Sub(l, r) => Ok(
-                Self::evaluate_expr_as_f64(l, columns, row_idx, schema)?
-                    - Self::evaluate_expr_as_f64(r, columns, row_idx, schema)?,
-            ),
-            Expr::Mul(l, r) => Ok(
-                Self::evaluate_expr_as_f64(l, columns, row_idx, schema)?
-                    * Self::evaluate_expr_as_f64(r, columns, row_idx, schema)?,
-            ),
+            Expr::Add(l, r) => Ok(Self::evaluate_expr_as_f64(l, columns, row_idx, schema)?
+                + Self::evaluate_expr_as_f64(r, columns, row_idx, schema)?),
+            Expr::Sub(l, r) => Ok(Self::evaluate_expr_as_f64(l, columns, row_idx, schema)?
+                - Self::evaluate_expr_as_f64(r, columns, row_idx, schema)?),
+            Expr::Mul(l, r) => Ok(Self::evaluate_expr_as_f64(l, columns, row_idx, schema)?
+                * Self::evaluate_expr_as_f64(r, columns, row_idx, schema)?),
             Expr::Div(l, r) => {
                 let left_val = Self::evaluate_expr_as_f64(l, columns, row_idx, schema)?;
                 let right_val = Self::evaluate_expr_as_f64(r, columns, row_idx, schema)?;
@@ -642,22 +1070,20 @@ impl Executor {
                 }
                 Ok(left_val % right_val)
             }
-            Expr::Abs(inner) => Ok(Self::evaluate_expr_as_f64(inner, columns, row_idx, schema)?.abs()),
-            Expr::Min(l, r) => Ok(
-                Self::evaluate_expr_as_f64(l, columns, row_idx, schema)?
-                    .min(Self::evaluate_expr_as_f64(r, columns, row_idx, schema)?),
-            ),
-            Expr::Max(l, r) => Ok(
-                Self::evaluate_expr_as_f64(l, columns, row_idx, schema)?
-                    .max(Self::evaluate_expr_as_f64(r, columns, row_idx, schema)?),
-            ),
-            Expr::Pow(base, exp) => Ok(
-                Self::evaluate_expr_as_f64(base, columns, row_idx, schema)?
-                    .powf(Self::evaluate_expr_as_f64(exp, columns, row_idx, schema)?),
-            ),
+            Expr::Abs(inner) => {
+                Ok(Self::evaluate_expr_as_f64(inner, columns, row_idx, schema)?.abs())
+            }
+            Expr::Min(l, r) => Ok(Self::evaluate_expr_as_f64(l, columns, row_idx, schema)?
+                .min(Self::evaluate_expr_as_f64(r, columns, row_idx, schema)?)),
+            Expr::Max(l, r) => Ok(Self::evaluate_expr_as_f64(l, columns, row_idx, schema)?
+                .max(Self::evaluate_expr_as_f64(r, columns, row_idx, schema)?)),
+            Expr::Pow(base, exp) => Ok(Self::evaluate_expr_as_f64(base, columns, row_idx, schema)?
+                .powf(Self::evaluate_expr_as_f64(exp, columns, row_idx, schema)?)),
             Expr::Cast(inner, target_type) => match target_type {
                 ScalarType::F64 => Self::evaluate_expr_as_f64(inner, columns, row_idx, schema),
-                ScalarType::F32 => Ok(Self::evaluate_expr_as_f64(inner, columns, row_idx, schema)? as f32 as f64),
+                ScalarType::F32 => {
+                    Ok(Self::evaluate_expr_as_f64(inner, columns, row_idx, schema)? as f32 as f64)
+                }
                 _ => Ok(Self::evaluate_expr_as_i64(inner, columns, row_idx, schema)? as f64),
             },
 
@@ -720,7 +1146,8 @@ impl Executor {
                     ScalarType::F64 => {
                         let bytes = &col_data[start..start + 8];
                         let val = f64::from_le_bytes([
-                            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6],
+                            bytes[7],
                         ]);
                         val as i64
                     }
@@ -788,7 +1215,9 @@ impl Executor {
                 let base_val = Self::evaluate_expr_as_i64(base, columns, row_idx, schema)?;
                 let exp_val = Self::evaluate_expr_as_i64(exp, columns, row_idx, schema)?;
                 if exp_val < 0 {
-                    return Err(XlogError::Execution("Negative exponent in integer pow".to_string()));
+                    return Err(XlogError::Execution(
+                        "Negative exponent in integer pow".to_string(),
+                    ));
                 } else if exp_val > u32::MAX as i64 {
                     // Exponent too large - would overflow anyway
                     Ok(i64::MAX)
@@ -820,7 +1249,8 @@ impl Executor {
             Expr::Const(val) => {
                 // Create a column filled with the constant value
                 let (bytes, col_type) = self.const_to_bytes_and_type(val);
-                self.provider.create_constant_column(&bytes, col_type, input.num_rows())
+                self.provider
+                    .create_constant_column(&bytes, col_type, input.num_rows())
             }
             Expr::Add(l, r) => {
                 let left = self.evaluate_arith_expr(l, input)?;
@@ -889,7 +1319,9 @@ impl Executor {
             ConstValue::Bool(v) => (vec![if *v { 1u8 } else { 0u8 }], ScalarType::Bool),
             ConstValue::Symbol(s) => {
                 // For symbols, we just hash to a u32 for now (MVP simplification)
-                let hash = s.bytes().fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
+                let hash = s
+                    .bytes()
+                    .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
                 (hash.to_le_bytes().to_vec(), ScalarType::Symbol)
             }
         }
@@ -964,12 +1396,14 @@ impl Executor {
     ///
     /// Delegates to the kernel provider's hash_join_v2 which supports all join types natively.
     fn execute_join(
-        &self,
+        &mut self,
         left: &CudaBuffer,
         right: &CudaBuffer,
         left_keys: &[usize],
         right_keys: &[usize],
         join_type: JoinType,
+        left_rel: Option<RelId>,
+        right_rel: Option<RelId>,
     ) -> Result<CudaBuffer> {
         // Convert IR JoinType to CUDA JoinType
         let cuda_join_type = match join_type {
@@ -980,8 +1414,23 @@ impl Executor {
         };
 
         // Use hash_join_v2 which supports all join types natively
-        self.provider
-            .hash_join_v2(left, right, left_keys, right_keys, cuda_join_type)
+        let out = self
+            .provider
+            .hash_join_v2(left, right, left_keys, right_keys, cuda_join_type)?;
+
+        if let (Some(l), Some(r)) = (left_rel, right_rel) {
+            let input_rows = left.num_rows().saturating_mul(right.num_rows());
+            self.stats.record_join_result(
+                l,
+                r,
+                left_keys.to_vec(),
+                right_keys.to_vec(),
+                input_rows,
+                out.num_rows(),
+            );
+        }
+
+        Ok(out)
     }
 
     /// Execute a GroupBy node
@@ -1148,9 +1597,8 @@ impl Executor {
         if let Some(name) = self.rel_names.get(&rel_id) {
             name.clone()
         } else {
-            let name = default.to_string();
-            self.rel_names.insert(rel_id, name.clone());
-            name
+            self.register_relation(rel_id, default);
+            default.to_string()
         }
     }
 
@@ -1649,7 +2097,8 @@ mod tests {
         let buffer = CudaBuffer::from_columns(vec![col_a, col_b], 3, schema);
 
         // Project: [b, a] (reverse order)
-        let result = executor.execute_project(&buffer, &[ProjectExpr::Column(1), ProjectExpr::Column(0)]);
+        let result =
+            executor.execute_project(&buffer, &[ProjectExpr::Column(1), ProjectExpr::Column(0)]);
         assert!(result.is_ok());
 
         let result = result.unwrap();
@@ -1683,11 +2132,11 @@ mod tests {
             ("b".to_string(), ScalarType::U32),
         ]);
 
-        let a_data: Vec<u8> = [10u32, 20, 30].iter().flat_map(|v| v.to_le_bytes()).collect();
-        let b_data: Vec<u8> = [1u32, 2, 3]
+        let a_data: Vec<u8> = [10u32, 20, 30]
             .iter()
             .flat_map(|v| v.to_le_bytes())
             .collect();
+        let b_data: Vec<u8> = [1u32, 2, 3].iter().flat_map(|v| v.to_le_bytes()).collect();
 
         let mut col_a = executor
             .provider
@@ -1716,13 +2165,10 @@ mod tests {
         let buffer = CudaBuffer::from_columns(vec![col_a, col_b], 3, schema);
 
         // Project with computed expression: a + b
-        let add_expr = Expr::Add(
-            Box::new(Expr::Column(0)),
-            Box::new(Expr::Column(1)),
-        );
+        let add_expr = Expr::Add(Box::new(Expr::Column(0)), Box::new(Expr::Column(1)));
         let projections = vec![
-            ProjectExpr::Column(0),                              // Pass through column a
-            ProjectExpr::Computed(add_expr, ScalarType::U32),   // Compute a + b
+            ProjectExpr::Column(0),                           // Pass through column a
+            ProjectExpr::Computed(add_expr, ScalarType::U32), // Compute a + b
         ];
 
         let result = executor.execute_project(&buffer, &projections);
@@ -1749,13 +2195,14 @@ mod tests {
                 // The important thing is that the wiring reached the provider
                 let err_msg = format!("{}", e);
                 assert!(
-                    err_msg.contains("not implemented") ||
-                    err_msg.contains("not yet implemented") ||
-                    err_msg.contains("not supported") ||
-                    err_msg.contains("stub") ||
-                    err_msg.contains("Unsupported") ||
-                    err_msg.contains("arithmetic kernels"),
-                    "Unexpected error: {}. Expected arithmetic kernel stub error.", err_msg
+                    err_msg.contains("not implemented")
+                        || err_msg.contains("not yet implemented")
+                        || err_msg.contains("not supported")
+                        || err_msg.contains("stub")
+                        || err_msg.contains("Unsupported")
+                        || err_msg.contains("arithmetic kernels"),
+                    "Unexpected error: {}. Expected arithmetic kernel stub error.",
+                    err_msg
                 );
             }
         }

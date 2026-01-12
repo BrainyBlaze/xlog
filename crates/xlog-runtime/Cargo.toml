@@ -7,3 +7,4 @@ edition.workspace = true
 xlog-core = { path = "../xlog-core" }
 xlog-ir = { path = "../xlog-ir" }
 xlog-cuda = { path = "../xlog-cuda" }
+xlog-stats = { path = "../xlog-stats" }
