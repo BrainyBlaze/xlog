@@ -1,0 +1,26 @@
+//! Test category modules covering all 24 edge case categories.
+
+pub mod c01_toolchain;
+pub mod c02_launch_config;
+pub mod c03_pointer_bounds;
+pub mod c04_address_space;
+pub mod c05_global_memory;
+pub mod c06_shared_memory;
+pub mod c07_local_memory;
+pub mod c08_synchronization;
+pub mod c09_warp_level;
+pub mod c10_block_grid;
+pub mod c11_control_flow;
+pub mod c12_atomics;
+pub mod c13_floating_point;
+pub mod c14_integer;
+pub mod c15_determinism;
+pub mod c16_async_pipeline;
+pub mod c17_caching;
+pub mod c18_host_device;
+pub mod c19_multi_stream;
+pub mod c20_multi_gpu;
+pub mod c21_hardware;
+pub mod c22_algorithms;
+pub mod c23_blind_spots;
+pub mod c24_edge_matrix;

@@ -1,0 +1,31 @@
+[package]
+name = "xlog-cuda-tests"
+version = "0.1.0"
+edition = "2021"
+description = "Comprehensive CUDA/PTX kernel certification test suite"
+publish = false
+
+[dependencies]
+xlog-cuda = { path = "../xlog-cuda" }
+xlog-core = { path = "../xlog-core" }
+cudarc = { workspace = true }
+rand = "0.8"
+rand_chacha = "0.3"
+
+[dev-dependencies]
+bytemuck = "1.14"
+
+[[test]]
+name = "certification_suite"
+path = "tests/certification_suite.rs"
+harness = true
+
+[[test]]
+name = "quick_smoke"
+path = "tests/quick_smoke.rs"
+harness = true
+
+[[test]]
+name = "category_isolation"
+path = "tests/category_isolation.rs"
+harness = true
