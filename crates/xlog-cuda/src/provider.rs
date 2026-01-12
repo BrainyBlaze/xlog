@@ -12,7 +12,7 @@ use xlog_core::{AggOp, Result, Schema, ScalarType, XlogError};
 
 use crate::{CudaBuffer, CudaDevice, GpuMemoryManager};
 
-// Embedded PTX sources (pre-compiled from .cu files with nvcc -ptx --gpu-architecture=sm_90)
+// Embedded PTX sources (pre-compiled from .cu files with nvcc -ptx -arch=sm_70)
 const JOIN_PTX: &str = include_str!("../../../kernels/join.ptx");
 const DEDUP_PTX: &str = include_str!("../../../kernels/dedup.ptx");
 const GROUPBY_PTX: &str = include_str!("../../../kernels/groupby.ptx");
@@ -48,6 +48,7 @@ pub mod join_kernels {
 /// Kernel function names in the dedup module
 pub mod dedup_kernels {
     pub const MARK_DUPLICATES: &str = "mark_duplicates";
+    pub const MARK_UNIQUE_COLUMNAR: &str = "mark_unique_columnar";
     pub const COMPACT_ROWS: &str = "compact_rows";
 }
 
@@ -71,6 +72,7 @@ pub mod scan_kernels {
     pub const COUNT_MASK: &str = "count_mask";
     // Multi-block scan kernels for large prefix sums
     pub const MULTIBLOCK_SCAN_PHASE1: &str = "multiblock_scan_phase1";
+    pub const MULTIBLOCK_SCAN_U32_PHASE1: &str = "multiblock_scan_u32_phase1";
     pub const MULTIBLOCK_SCAN_PHASE2: &str = "multiblock_scan_phase2";
     pub const MULTIBLOCK_SCAN_PHASE3: &str = "multiblock_scan_phase3";
 }
@@ -195,8 +197,8 @@ pub struct CudaKernelProvider {
 impl CudaKernelProvider {
     /// Create a new CUDA kernel provider
     ///
-    /// Loads all PTX modules (join, dedup, groupby) into the CUDA device.
-    /// The modules are compiled for sm_90 (H200/Hopper architecture).
+    /// Loads all PTX modules into the CUDA device.
+    /// The modules are compiled for sm_70 (Volta) and above.
     ///
     /// # Arguments
     /// * `device` - The CUDA device to load modules into
@@ -237,7 +239,11 @@ impl CudaKernelProvider {
             .load_ptx(
                 Ptx::from_src(DEDUP_PTX),
                 DEDUP_MODULE,
-                &[dedup_kernels::MARK_DUPLICATES, dedup_kernels::COMPACT_ROWS],
+                &[
+                    dedup_kernels::MARK_DUPLICATES,
+                    dedup_kernels::MARK_UNIQUE_COLUMNAR,
+                    dedup_kernels::COMPACT_ROWS,
+                ],
             )
             .map_err(|e| XlogError::Kernel(format!("Failed to load dedup PTX: {}", e)))?;
 
@@ -272,6 +278,7 @@ impl CudaKernelProvider {
                     scan_kernels::EXCLUSIVE_SCAN_MASK,
                     scan_kernels::COUNT_MASK,
                     scan_kernels::MULTIBLOCK_SCAN_PHASE1,
+                    scan_kernels::MULTIBLOCK_SCAN_U32_PHASE1,
                     scan_kernels::MULTIBLOCK_SCAN_PHASE2,
                     scan_kernels::MULTIBLOCK_SCAN_PHASE3,
                 ],
@@ -560,68 +567,197 @@ impl CudaKernelProvider {
             return self.clone_buffer(input);
         }
 
-        let num_rows = input.num_rows() as usize;
-
-        struct KeyColumnBytes {
-            ty: ScalarType,
-            elem_size: usize,
-            bytes: Vec<u8>,
+        if input.num_rows() > u32::MAX as u64 {
+            return Err(XlogError::Kernel(format!(
+                "Dedup supports at most {} rows, got {}",
+                u32::MAX,
+                input.num_rows()
+            )));
         }
 
-        fn keys_equal(ty: ScalarType, a: &[u8], b: &[u8]) -> bool {
+        fn scalar_type_code(ty: ScalarType) -> u8 {
             match ty {
-                ScalarType::F64 => {
-                    let a = f64::from_le_bytes(a.try_into().unwrap());
-                    let b = f64::from_le_bytes(b.try_into().unwrap());
-                    a.to_bits() == b.to_bits() || a == b
-                }
-                ScalarType::F32 => {
-                    let a = f32::from_le_bytes(a.try_into().unwrap());
-                    let b = f32::from_le_bytes(b.try_into().unwrap());
-                    a.to_bits() == b.to_bits() || a == b
-                }
-                _ => a == b,
+                ScalarType::U32 => 0,
+                ScalarType::U64 => 1,
+                ScalarType::I32 => 2,
+                ScalarType::I64 => 3,
+                ScalarType::F32 => 4,
+                ScalarType::F64 => 5,
+                ScalarType::Bool => 6,
+                ScalarType::Symbol => 7,
             }
         }
 
-        let mut key_columns = Vec::with_capacity(key_cols.len());
+        let device = self.device.inner();
+        let num_rows = input.num_rows() as u32;
+
+        let mut col_ptrs_host: Vec<u64> = Vec::with_capacity(key_cols.len());
+        let mut col_sizes_host: Vec<u32> = Vec::with_capacity(key_cols.len());
+        let mut col_types_host: Vec<u8> = Vec::with_capacity(key_cols.len());
+
         for &key_col in key_cols {
+            if key_col >= input.arity() {
+                return Err(XlogError::Kernel(format!(
+                    "Key column {} out of bounds (arity {})",
+                    key_col,
+                    input.arity()
+                )));
+            }
+
             let col = input
                 .column(key_col)
                 .ok_or_else(|| XlogError::Kernel(format!("Key column {} not found", key_col)))?;
             let ty = input.schema().column_type(key_col).ok_or_else(|| {
                 XlogError::Kernel(format!("Key column {} type not found in schema", key_col))
             })?;
+
             let elem_size = ty.size_bytes();
-            let expected_bytes = num_rows * elem_size;
-
-            let mut bytes = vec![0u8; expected_bytes];
-            self.device
-                .inner()
-                .dtoh_sync_copy_into(col, &mut bytes)
-                .map_err(|e| XlogError::Kernel(format!("Failed to read key column {}: {}", key_col, e)))?;
-
-            key_columns.push(KeyColumnBytes { ty, elem_size, bytes });
-        }
-
-        let mut mask = vec![0u8; num_rows];
-        mask[0] = 1;
-        for row in 1..num_rows {
-            let mut is_dup = true;
-            for col in &key_columns {
-                let prev_start = (row - 1) * col.elem_size;
-                let curr_start = row * col.elem_size;
-                let a = &col.bytes[prev_start..prev_start + col.elem_size];
-                let b = &col.bytes[curr_start..curr_start + col.elem_size];
-                if !keys_equal(col.ty, a, b) {
-                    is_dup = false;
-                    break;
-                }
+            let expected_bytes = (num_rows as usize) * elem_size;
+            if col.num_bytes() != expected_bytes {
+                return Err(XlogError::Kernel(format!(
+                    "Key column {} has {} bytes but expected {} (num_rows={}, elem_size={})",
+                    key_col,
+                    col.num_bytes(),
+                    expected_bytes,
+                    num_rows,
+                    elem_size
+                )));
             }
-            mask[row] = if is_dup { 0 } else { 1 };
+
+            let ptr = *cudarc::driver::DevicePtr::device_ptr(col) as u64;
+            col_ptrs_host.push(ptr);
+            col_sizes_host.push(elem_size as u32);
+            col_types_host.push(scalar_type_code(ty));
         }
 
-        self.filter_by_mask(input, &mask)
+        let num_key_cols = key_cols.len() as u32;
+        let mut d_col_ptrs = self.memory.alloc::<u64>(key_cols.len())?;
+        let mut d_col_sizes = self.memory.alloc::<u32>(key_cols.len())?;
+        let mut d_col_types = self.memory.alloc::<u8>(key_cols.len())?;
+
+        device
+            .htod_sync_copy_into(&col_ptrs_host, &mut d_col_ptrs)
+            .map_err(|e| XlogError::Kernel(format!("Failed to upload key column ptrs: {}", e)))?;
+        device
+            .htod_sync_copy_into(&col_sizes_host, &mut d_col_sizes)
+            .map_err(|e| XlogError::Kernel(format!("Failed to upload key column sizes: {}", e)))?;
+        device
+            .htod_sync_copy_into(&col_types_host, &mut d_col_types)
+            .map_err(|e| XlogError::Kernel(format!("Failed to upload key column types: {}", e)))?;
+
+        let d_unique_mask = self.memory.alloc::<u8>(num_rows as usize)?;
+        let mark_unique_fn = device
+            .get_func(DEDUP_MODULE, dedup_kernels::MARK_UNIQUE_COLUMNAR)
+            .ok_or_else(|| XlogError::Kernel("mark_unique_columnar kernel not found".to_string()))?;
+
+        let block_size = 256u32;
+        let grid_size = (num_rows + block_size - 1) / block_size;
+        let config = LaunchConfig {
+            grid_dim: (grid_size, 1, 1),
+            block_dim: (block_size, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        // SAFETY: mark_unique_columnar(col_ptrs, col_sizes, col_types, num_key_cols, num_rows, unique_mask)
+        unsafe {
+            mark_unique_fn.clone().launch(
+                config,
+                (
+                    &d_col_ptrs,
+                    &d_col_sizes,
+                    &d_col_types,
+                    num_key_cols,
+                    num_rows,
+                    &d_unique_mask,
+                ),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("mark_unique_columnar failed: {}", e)))?;
+
+        // Compute prefix sum of unique mask on GPU.
+        let n_usize = num_rows as usize;
+        let num_blocks = (num_rows + block_size - 1) / block_size;
+        let d_prefix_sum = self.memory.alloc::<u32>(n_usize)?;
+        let mut d_block_sums = self.memory.alloc::<u32>(num_blocks as usize)?;
+
+        let phase1_fn = device
+            .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE1)
+            .ok_or_else(|| {
+                XlogError::Kernel("Failed to get multiblock_scan_phase1 kernel".to_string())
+            })?;
+
+        // SAFETY: multiblock_scan_phase1(const uint8_t* mask, uint32_t* prefix_sum, uint32_t* block_sums, uint32_t n)
+        unsafe {
+            phase1_fn.clone().launch(
+                LaunchConfig {
+                    grid_dim: (num_blocks, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (&d_unique_mask, &d_prefix_sum, &d_block_sums, num_rows),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("multiblock_scan_phase1 failed: {}", e)))?;
+
+        if num_blocks > 1 {
+            self.multiblock_scan_u32_inplace(&mut d_block_sums, num_blocks)?;
+
+            let phase3_fn = device
+                .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE3)
+                .ok_or_else(|| {
+                    XlogError::Kernel("Failed to get multiblock_scan_phase3 kernel".to_string())
+                })?;
+
+            // SAFETY: multiblock_scan_phase3(uint32_t* prefix_sum, const uint32_t* block_offsets, uint32_t n)
+            unsafe {
+                phase3_fn.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (num_blocks, 1, 1),
+                        block_dim: (block_size, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (&d_prefix_sum, &d_block_sums, num_rows),
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("multiblock_scan_phase3 failed: {}", e)))?;
+        }
+
+        // Count total unique rows (1s in mask).
+        let mut d_count = self.memory.alloc::<u32>(1)?;
+        device
+            .htod_sync_copy_into(&[0u32], &mut d_count)
+            .map_err(|e| XlogError::Kernel(format!("Failed to init unique count: {}", e)))?;
+
+        let count_fn = device
+            .get_func(SCAN_MODULE, scan_kernels::COUNT_MASK)
+            .ok_or_else(|| XlogError::Kernel("count_mask kernel not found".to_string()))?;
+
+        // SAFETY: count_mask(const uint8_t* mask, uint32_t n, uint32_t* count)
+        unsafe {
+            count_fn.clone().launch(
+                LaunchConfig {
+                    grid_dim: (num_blocks, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (&d_unique_mask, num_rows, &mut d_count),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("count_mask failed: {}", e)))?;
+
+        self.device.synchronize()?;
+
+        let mut count_host = vec![0u32];
+        device
+            .dtoh_sync_copy_into(&d_count, &mut count_host)
+            .map_err(|e| XlogError::Kernel(format!("Failed to read unique count: {}", e)))?;
+        let output_count = count_host[0] as u64;
+
+        if output_count == 0 {
+            return self.create_empty_buffer(input.schema().clone());
+        }
+
+        self.compact_buffer_by_device_mask(input, &d_unique_mask, &d_prefix_sum, output_count)
     }
 
 
@@ -2393,55 +2529,7 @@ impl CudaKernelProvider {
 
         // Phase 2: Scan block sums (only if we have more than 1 block)
         if num_blocks > 1 {
-            if num_blocks <= block_size {
-                // Phase 2 (GPU): scan block sums in a single block when num_blocks <= 256.
-                let phase2_fn = device
-                    .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE2)
-                    .ok_or_else(|| {
-                        XlogError::Kernel(
-                            "Failed to get multiblock_scan_phase2 kernel".to_string(),
-                        )
-                    })?;
-
-                // SAFETY: Kernel parameters match expected signature:
-                // multiblock_scan_phase2(uint32_t* block_sums, uint32_t num_blocks)
-                unsafe {
-                    phase2_fn.clone().launch(
-                        LaunchConfig {
-                            grid_dim: (1, 1, 1),
-                            block_dim: (block_size, 1, 1),
-                            shared_mem_bytes: 0,
-                        },
-                        (&mut d_block_sums, num_blocks),
-                    )
-                }
-                .map_err(|e| {
-                    XlogError::Kernel(format!("Failed to launch multiblock_scan_phase2: {}", e))
-                })?;
-            } else {
-                // Phase 2 (CPU): for large block counts, scan the block sums on host and upload offsets.
-                self.device.synchronize()?;
-
-                let mut block_sums_host = vec![0u32; num_blocks as usize];
-                device
-                    .dtoh_sync_copy_into(&d_block_sums, &mut block_sums_host)
-                    .map_err(|e| {
-                        XlogError::Kernel(format!("Failed to download block sums: {}", e))
-                    })?;
-
-                let mut block_offsets_host = vec![0u32; num_blocks as usize];
-                let mut running_sum = 0u32;
-                for (i, v) in block_sums_host.iter().enumerate() {
-                    block_offsets_host[i] = running_sum;
-                    running_sum = running_sum.wrapping_add(*v);
-                }
-
-                device
-                    .htod_sync_copy_into(&block_offsets_host, &mut d_block_sums)
-                    .map_err(|e| {
-                        XlogError::Kernel(format!("Failed to upload block offsets: {}", e))
-                    })?;
-            }
+            self.multiblock_scan_u32_inplace(&mut d_block_sums, num_blocks)?;
 
             // Phase 3: Add block offsets
             let phase3_fn = device
@@ -2478,6 +2566,89 @@ impl CudaKernelProvider {
         let count = prefix_sum[n - 1] + mask[n - 1] as u32;
 
         Ok((prefix_sum, count))
+    }
+
+    fn multiblock_scan_u32_inplace(
+        &self,
+        data: &mut crate::memory::TrackedCudaSlice<u32>,
+        n: u32,
+    ) -> Result<()> {
+        if n == 0 {
+            return Ok(());
+        }
+
+        let device = self.device.inner();
+        let block_size = 256u32;
+
+        if n <= block_size {
+            let phase2_fn = device
+                .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE2)
+                .ok_or_else(|| {
+                    XlogError::Kernel("Failed to get multiblock_scan_phase2 kernel".to_string())
+                })?;
+
+            // SAFETY: multiblock_scan_phase2(uint32_t* block_sums, uint32_t num_blocks)
+            unsafe {
+                phase2_fn.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (block_size, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (data, n),
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("multiblock_scan_phase2 failed: {}", e)))?;
+
+            return Ok(());
+        }
+
+        let num_blocks = (n + block_size - 1) / block_size;
+        let mut block_sums = self.memory.alloc::<u32>(num_blocks as usize)?;
+
+        let phase1_u32_fn = device
+            .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_U32_PHASE1)
+            .ok_or_else(|| {
+                XlogError::Kernel("Failed to get multiblock_scan_u32_phase1 kernel".to_string())
+            })?;
+
+        // SAFETY: multiblock_scan_u32_phase1(uint32_t* data, uint32_t* block_sums, uint32_t n)
+        unsafe {
+            phase1_u32_fn.clone().launch(
+                LaunchConfig {
+                    grid_dim: (num_blocks, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (&mut *data, &mut block_sums, n),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("multiblock_scan_u32_phase1 failed: {}", e)))?;
+
+        if num_blocks > 1 {
+            self.multiblock_scan_u32_inplace(&mut block_sums, num_blocks)?;
+        }
+
+        let phase3_fn = device
+            .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE3)
+            .ok_or_else(|| {
+                XlogError::Kernel("Failed to get multiblock_scan_phase3 kernel".to_string())
+            })?;
+
+        // SAFETY: multiblock_scan_phase3(uint32_t* prefix_sum, const uint32_t* block_offsets, uint32_t n)
+        unsafe {
+            phase3_fn.clone().launch(
+                LaunchConfig {
+                    grid_dim: (num_blocks, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (&mut *data, &block_sums, n),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("multiblock_scan_phase3 failed: {}", e)))?;
+
+        Ok(())
     }
 
     // ============== Sort Methods ==============
@@ -2973,7 +3144,6 @@ impl CudaKernelProvider {
         prefix_sum: &[u32],
         output_count: u64,
     ) -> Result<CudaBuffer> {
-        let n = input.num_rows as u32;
         let device = self.device.inner();
 
         // Upload mask and prefix sum to GPU
@@ -2983,6 +3153,19 @@ impl CudaKernelProvider {
         let d_prefix_sum = device
             .htod_sync_copy(prefix_sum)
             .map_err(|e| XlogError::Kernel(format!("Failed to upload prefix_sum: {}", e)))?;
+
+        self.compact_buffer_by_device_mask(input, &d_mask, &d_prefix_sum, output_count)
+    }
+
+    fn compact_buffer_by_device_mask(
+        &self,
+        input: &CudaBuffer,
+        d_mask: &cudarc::driver::CudaSlice<u8>,
+        d_prefix_sum: &cudarc::driver::CudaSlice<u32>,
+        output_count: u64,
+    ) -> Result<CudaBuffer> {
+        let n = input.num_rows as u32;
+        let device = self.device.inner();
 
         // Get compact kernel
         let compact_fn = device
@@ -3020,7 +3203,7 @@ impl CudaKernelProvider {
             unsafe {
                 compact_fn.clone().launch(
                     config,
-                    (src_col, &d_mask, &d_prefix_sum, n, elem_size, &dst_col),
+                    (src_col, d_mask, d_prefix_sum, n, elem_size, &dst_col),
                 )
             }
             .map_err(|e| XlogError::Kernel(format!("compact_bytes_by_mask failed: {}", e)))?;

@@ -9,7 +9,9 @@ fn main() {
     let kernels_dir = Path::new(&manifest_dir).parent().unwrap().parent().unwrap().join("kernels");
 
     // List of CUDA kernels to compile
-    let kernels = ["join", "dedup", "groupby", "scan", "sort", "filter"];
+    let kernels = [
+        "join", "dedup", "groupby", "scan", "sort", "filter", "pack", "set_ops",
+    ];
 
     for kernel in &kernels {
         let cu_path = kernels_dir.join(format!("{}.cu", kernel));
@@ -36,6 +38,7 @@ fn main() {
                 .args([
                     "-ptx",
                     "-arch=sm_70",
+                    "-Wno-deprecated-gpu-targets",
                     "-O3",
                     "-o",
                     ptx_path.to_str().unwrap(),

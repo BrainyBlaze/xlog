@@ -7,7 +7,7 @@
 //
 
 .version 8.8
-.target sm_90
+.target sm_70
 .address_size 64
 
 	// .globl	block_inclusive_scan
@@ -15,6 +15,7 @@
 // _ZZ19exclusive_scan_maskE4temp has been demoted
 // _ZZ10count_maskE11block_count has been demoted
 // _ZZ22multiblock_scan_phase1E4temp has been demoted
+// _ZZ26multiblock_scan_u32_phase1E4temp has been demoted
 // _ZZ22multiblock_scan_phase2E4temp has been demoted
 
 .visible .entry block_inclusive_scan(
@@ -487,6 +488,161 @@ $L__BB4_24:
 	ret;
 
 }
+	// .globl	multiblock_scan_u32_phase1
+.visible .entry multiblock_scan_u32_phase1(
+	.param .u64 multiblock_scan_u32_phase1_param_0,
+	.param .u64 multiblock_scan_u32_phase1_param_1,
+	.param .u32 multiblock_scan_u32_phase1_param_2
+)
+{
+	.reg .pred 	%p<13>;
+	.reg .b32 	%r<66>;
+	.reg .b64 	%rd<9>;
+	// demoted variable
+	.shared .align 4 .b8 _ZZ26multiblock_scan_u32_phase1E4temp[1024];
+
+	ld.param.u64 	%rd3, [multiblock_scan_u32_phase1_param_0];
+	ld.param.u64 	%rd2, [multiblock_scan_u32_phase1_param_1];
+	ld.param.u32 	%r26, [multiblock_scan_u32_phase1_param_2];
+	mov.u32 	%r28, %ntid.x;
+	mov.u32 	%r1, %ctaid.x;
+	mov.u32 	%r2, %tid.x;
+	mad.lo.s32 	%r3, %r1, %r28, %r2;
+	setp.ge.u32 	%p1, %r3, %r26;
+	cvta.to.global.u64 	%rd4, %rd3;
+	mul.wide.u32 	%rd5, %r3, 4;
+	add.s64 	%rd1, %rd4, %rd5;
+	mov.u32 	%r57, 0;
+	mov.u32 	%r56, %r57;
+	@%p1 bra 	$L__BB5_2;
+
+	ld.global.u32 	%r56, [%rd1];
+
+$L__BB5_2:
+	shl.b32 	%r30, %r2, 2;
+	mov.u32 	%r31, _ZZ26multiblock_scan_u32_phase1E4temp;
+	add.s32 	%r6, %r31, %r30;
+	st.shared.u32 	[%r6], %r56;
+	bar.sync 	0;
+	setp.eq.s32 	%p2, %r2, 0;
+	@%p2 bra 	$L__BB5_4;
+
+	ld.shared.u32 	%r57, [%r6+-4];
+
+$L__BB5_4:
+	bar.sync 	0;
+	ld.shared.u32 	%r33, [%r6];
+	mov.u32 	%r59, 0;
+	add.s32 	%r34, %r33, %r57;
+	st.shared.u32 	[%r6], %r34;
+	bar.sync 	0;
+	setp.lt.u32 	%p3, %r2, 2;
+	mov.u32 	%r58, %r59;
+	@%p3 bra 	$L__BB5_6;
+
+	ld.shared.u32 	%r58, [%r6+-8];
+
+$L__BB5_6:
+	bar.sync 	0;
+	ld.shared.u32 	%r36, [%r6];
+	add.s32 	%r37, %r36, %r58;
+	st.shared.u32 	[%r6], %r37;
+	bar.sync 	0;
+	setp.lt.u32 	%p4, %r2, 4;
+	@%p4 bra 	$L__BB5_8;
+
+	ld.shared.u32 	%r59, [%r6+-16];
+
+$L__BB5_8:
+	bar.sync 	0;
+	ld.shared.u32 	%r39, [%r6];
+	mov.u32 	%r61, 0;
+	add.s32 	%r40, %r39, %r59;
+	st.shared.u32 	[%r6], %r40;
+	bar.sync 	0;
+	setp.lt.u32 	%p5, %r2, 8;
+	mov.u32 	%r60, %r61;
+	@%p5 bra 	$L__BB5_10;
+
+	ld.shared.u32 	%r60, [%r6+-32];
+
+$L__BB5_10:
+	bar.sync 	0;
+	ld.shared.u32 	%r42, [%r6];
+	add.s32 	%r43, %r42, %r60;
+	st.shared.u32 	[%r6], %r43;
+	bar.sync 	0;
+	setp.lt.u32 	%p6, %r2, 16;
+	@%p6 bra 	$L__BB5_12;
+
+	ld.shared.u32 	%r61, [%r6+-64];
+
+$L__BB5_12:
+	bar.sync 	0;
+	ld.shared.u32 	%r45, [%r6];
+	mov.u32 	%r63, 0;
+	add.s32 	%r46, %r45, %r61;
+	st.shared.u32 	[%r6], %r46;
+	bar.sync 	0;
+	setp.lt.u32 	%p7, %r2, 32;
+	mov.u32 	%r62, %r63;
+	@%p7 bra 	$L__BB5_14;
+
+	ld.shared.u32 	%r62, [%r6+-128];
+
+$L__BB5_14:
+	bar.sync 	0;
+	ld.shared.u32 	%r48, [%r6];
+	add.s32 	%r49, %r48, %r62;
+	st.shared.u32 	[%r6], %r49;
+	bar.sync 	0;
+	setp.lt.u32 	%p8, %r2, 64;
+	@%p8 bra 	$L__BB5_16;
+
+	ld.shared.u32 	%r63, [%r6+-256];
+
+$L__BB5_16:
+	bar.sync 	0;
+	ld.shared.u32 	%r51, [%r6];
+	mov.u32 	%r65, 0;
+	add.s32 	%r52, %r51, %r63;
+	st.shared.u32 	[%r6], %r52;
+	bar.sync 	0;
+	setp.lt.u32 	%p9, %r2, 128;
+	mov.u32 	%r64, %r65;
+	@%p9 bra 	$L__BB5_18;
+
+	ld.shared.u32 	%r64, [%r6+-512];
+
+$L__BB5_18:
+	bar.sync 	0;
+	ld.shared.u32 	%r54, [%r6];
+	add.s32 	%r55, %r54, %r64;
+	st.shared.u32 	[%r6], %r55;
+	bar.sync 	0;
+	ld.shared.u32 	%r23, [%r6];
+	@%p2 bra 	$L__BB5_20;
+
+	ld.shared.u32 	%r65, [%r6+-4];
+
+$L__BB5_20:
+	@%p1 bra 	$L__BB5_22;
+
+	st.global.u32 	[%rd1], %r65;
+
+$L__BB5_22:
+	setp.ne.s32 	%p12, %r2, 255;
+	@%p12 bra 	$L__BB5_24;
+
+	cvta.to.global.u64 	%rd6, %rd2;
+	mul.wide.u32 	%rd7, %r1, 4;
+	add.s64 	%rd8, %rd6, %rd7;
+	st.global.u32 	[%rd8], %r23;
+
+$L__BB5_24:
+	ret;
+
+}
 	// .globl	multiblock_scan_phase2
 .visible .entry multiblock_scan_phase2(
 	.param .u64 multiblock_scan_phase2_param_0,
@@ -509,39 +665,39 @@ $L__BB4_24:
 	add.s32 	%r2, %r23, %r22;
 	mul.wide.u32 	%rd4, %r1, 4;
 	add.s64 	%rd1, %rd3, %rd4;
-	@%p1 bra 	$L__BB5_2;
-	bra.uni 	$L__BB5_1;
+	@%p1 bra 	$L__BB6_2;
+	bra.uni 	$L__BB6_1;
 
-$L__BB5_2:
+$L__BB6_2:
 	ld.global.u32 	%r25, [%rd1];
 	st.shared.u32 	[%r2], %r25;
-	bra.uni 	$L__BB5_3;
+	bra.uni 	$L__BB6_3;
 
-$L__BB5_1:
+$L__BB6_1:
 	mov.u32 	%r24, 0;
 	st.shared.u32 	[%r2], %r24;
 
-$L__BB5_3:
+$L__BB6_3:
 	bar.sync 	0;
 	setp.eq.s32 	%p2, %r1, 0;
 	mov.u32 	%r52, 0;
 	mov.u32 	%r51, %r52;
-	@%p2 bra 	$L__BB5_5;
+	@%p2 bra 	$L__BB6_5;
 
 	ld.shared.u32 	%r51, [%r2+-4];
 
-$L__BB5_5:
+$L__BB6_5:
 	bar.sync 	0;
 	ld.shared.u32 	%r28, [%r2];
 	add.s32 	%r29, %r28, %r51;
 	st.shared.u32 	[%r2], %r29;
 	bar.sync 	0;
 	setp.lt.u32 	%p3, %r1, 2;
-	@%p3 bra 	$L__BB5_7;
+	@%p3 bra 	$L__BB6_7;
 
 	ld.shared.u32 	%r52, [%r2+-8];
 
-$L__BB5_7:
+$L__BB6_7:
 	bar.sync 	0;
 	ld.shared.u32 	%r31, [%r2];
 	mov.u32 	%r54, 0;
@@ -550,22 +706,22 @@ $L__BB5_7:
 	bar.sync 	0;
 	setp.lt.u32 	%p4, %r1, 4;
 	mov.u32 	%r53, %r54;
-	@%p4 bra 	$L__BB5_9;
+	@%p4 bra 	$L__BB6_9;
 
 	ld.shared.u32 	%r53, [%r2+-16];
 
-$L__BB5_9:
+$L__BB6_9:
 	bar.sync 	0;
 	ld.shared.u32 	%r34, [%r2];
 	add.s32 	%r35, %r34, %r53;
 	st.shared.u32 	[%r2], %r35;
 	bar.sync 	0;
 	setp.lt.u32 	%p5, %r1, 8;
-	@%p5 bra 	$L__BB5_11;
+	@%p5 bra 	$L__BB6_11;
 
 	ld.shared.u32 	%r54, [%r2+-32];
 
-$L__BB5_11:
+$L__BB6_11:
 	bar.sync 	0;
 	ld.shared.u32 	%r37, [%r2];
 	mov.u32 	%r56, 0;
@@ -574,22 +730,22 @@ $L__BB5_11:
 	bar.sync 	0;
 	setp.lt.u32 	%p6, %r1, 16;
 	mov.u32 	%r55, %r56;
-	@%p6 bra 	$L__BB5_13;
+	@%p6 bra 	$L__BB6_13;
 
 	ld.shared.u32 	%r55, [%r2+-64];
 
-$L__BB5_13:
+$L__BB6_13:
 	bar.sync 	0;
 	ld.shared.u32 	%r40, [%r2];
 	add.s32 	%r41, %r40, %r55;
 	st.shared.u32 	[%r2], %r41;
 	bar.sync 	0;
 	setp.lt.u32 	%p7, %r1, 32;
-	@%p7 bra 	$L__BB5_15;
+	@%p7 bra 	$L__BB6_15;
 
 	ld.shared.u32 	%r56, [%r2+-128];
 
-$L__BB5_15:
+$L__BB6_15:
 	bar.sync 	0;
 	ld.shared.u32 	%r43, [%r2];
 	mov.u32 	%r58, 0;
@@ -598,39 +754,39 @@ $L__BB5_15:
 	bar.sync 	0;
 	setp.lt.u32 	%p8, %r1, 64;
 	mov.u32 	%r57, %r58;
-	@%p8 bra 	$L__BB5_17;
+	@%p8 bra 	$L__BB6_17;
 
 	ld.shared.u32 	%r57, [%r2+-256];
 
-$L__BB5_17:
+$L__BB6_17:
 	bar.sync 	0;
 	ld.shared.u32 	%r46, [%r2];
 	add.s32 	%r47, %r46, %r57;
 	st.shared.u32 	[%r2], %r47;
 	bar.sync 	0;
 	setp.lt.u32 	%p9, %r1, 128;
-	@%p9 bra 	$L__BB5_19;
+	@%p9 bra 	$L__BB6_19;
 
 	ld.shared.u32 	%r58, [%r2+-512];
 
-$L__BB5_19:
+$L__BB6_19:
 	bar.sync 	0;
 	ld.shared.u32 	%r48, [%r2];
 	add.s32 	%r49, %r48, %r58;
 	st.shared.u32 	[%r2], %r49;
 	bar.sync 	0;
 	setp.ge.u32 	%p10, %r1, %r21;
-	@%p10 bra 	$L__BB5_23;
+	@%p10 bra 	$L__BB6_23;
 
 	mov.u32 	%r59, 0;
-	@%p2 bra 	$L__BB5_22;
+	@%p2 bra 	$L__BB6_22;
 
 	ld.shared.u32 	%r59, [%r2+-4];
 
-$L__BB5_22:
+$L__BB6_22:
 	st.global.u32 	[%rd1], %r59;
 
-$L__BB5_23:
+$L__BB6_23:
 	ret;
 
 }
@@ -656,7 +812,7 @@ $L__BB5_23:
 	setp.ge.u32 	%p1, %r2, %r3;
 	setp.eq.s32 	%p2, %r1, 0;
 	or.pred  	%p3, %p2, %p1;
-	@%p3 bra 	$L__BB6_2;
+	@%p3 bra 	$L__BB7_2;
 
 	cvta.to.global.u64 	%rd3, %rd2;
 	mul.wide.u32 	%rd4, %r1, 4;
@@ -669,7 +825,7 @@ $L__BB5_23:
 	add.s32 	%r8, %r6, %r7;
 	st.global.u32 	[%rd8], %r8;
 
-$L__BB6_2:
+$L__BB7_2:
 	ret;
 
 }

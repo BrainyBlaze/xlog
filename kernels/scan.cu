@@ -173,6 +173,44 @@ extern "C" __global__ void multiblock_scan_phase1(
     }
 }
 
+// Phase 1 variant for scanning u32 arrays (exclusive scan), used to recursively scan block sums.
+extern "C" __global__ void multiblock_scan_u32_phase1(
+    uint32_t* __restrict__ data,
+    uint32_t* __restrict__ block_sums,
+    uint32_t n
+) {
+    __shared__ uint32_t temp[BLOCK_SIZE];
+
+    uint32_t tid = threadIdx.x;
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+
+    uint32_t val = (gid < n) ? data[gid] : 0;
+    temp[tid] = val;
+    __syncthreads();
+
+    // Inclusive scan within block (Hillis-Steele style)
+    for (uint32_t stride = 1; stride < BLOCK_SIZE; stride *= 2) {
+        uint32_t left_val = 0;
+        if (tid >= stride) {
+            left_val = temp[tid - stride];
+        }
+        __syncthreads();
+        temp[tid] += left_val;
+        __syncthreads();
+    }
+
+    uint32_t inclusive = temp[tid];
+    uint32_t exclusive = (tid == 0) ? 0 : temp[tid - 1];
+
+    if (gid < n) {
+        data[gid] = exclusive;
+    }
+
+    if (tid == BLOCK_SIZE - 1) {
+        block_sums[blockIdx.x] = inclusive;
+    }
+}
+
 // Phase 2: Scan the block sums array (exclusive scan)
 // This kernel is designed for small arrays (num_blocks typically < 1024)
 // Uses a single block to process all block sums

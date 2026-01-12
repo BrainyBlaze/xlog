@@ -7,7 +7,7 @@
 //
 
 .version 8.8
-.target sm_90
+.target sm_70
 .address_size 64
 
 	// .globl	pack_keys

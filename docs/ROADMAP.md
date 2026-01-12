@@ -28,7 +28,7 @@
 - ✅ CUDA certification suite + PTX validation
 
 ### What's Broken/Limited
-- ❌ Dedup still uses CPU sort / CPU boundary detection (host roundtrip)
+- ❌ Dedup still uses CPU sort permutation (host roundtrip)
 - ❌ GPU-native set ops are U32-only (other scalar types fall back to CPU sort/dedup)
 - ❌ Multi-column GPU-native sort not implemented (current path computes permutation on CPU)
 
@@ -45,20 +45,20 @@
 **Files:** `crates/xlog-cuda/src/provider.rs`
 
 ### P1.3 Large-Input Filter/Compaction - DONE
-**Solution:** Multi-block scan works beyond 256 elements (CPU scan of block sums when needed).
+**Solution:** Multi-block scan works beyond 256 elements fully on GPU (recursive scan of block sums).
 **Files:** `kernels/scan.cu`, `crates/xlog-cuda/src/provider.rs`
 
 ### P1.4 GPU Memory Budget Enforcement - DONE
 **Solution:** Atomic budget reservation + RAII accounting for frees.
 **Files:** `crates/xlog-cuda/src/memory.rs`, `crates/xlog-cuda/src/multi_gpu_memory.rs`
 
-### P1.5 Remove CPU Roundtrips in Dedup - TODO
-**Issue:** Dedup downloads keys to host for ordering/boundary detection.
-**Impact:** GPU-residency and performance bottleneck for real workloads.
-**Direction:** Use `sort()` + GPU boundary detection (column-major) to build the unique mask fully on-device.
+### P1.5 Remove CPU Roundtrips in Dedup - DONE
+**Issue:** Dedup previously downloaded keys to host for boundary detection.
+**Solution:** GPU columnar boundary detection + GPU scan/compact (mask/prefix/compact stays on-device).
+**Remaining:** `sort()` still computes the permutation on CPU (tracked under P3.3).
 **Files:** `crates/xlog-cuda/src/provider.rs`, `kernels/dedup.cu`
 
-**Remaining P1 Effort:** ~1-2 weeks
+**Remaining P1 Effort:** 0 (P1 complete)
 
 ---
 
@@ -194,10 +194,9 @@
 ## Recommended Execution Order
 
 ```
-Week 1-2:   P1.5 (GPU-resident dedup)
-Week 3:     P2.1 (Type support)
-Week 5-8:   P3.1-P3.4 (Performance)
-Month 3-4:  P4.1-P4.4 (Features)
+Week 1-2:   P2.1 (Type support)
+Week 3-6:   P3.1-P3.4 (Performance)
+Month 2-3:  P4.1-P4.4 (Features)
 Month 5-7:  Phase 4 (xlog-prob)
 Month 8-11: Phase 5 (xlog-elp)
 Month 12+:  Phase 6 (Scaling)
