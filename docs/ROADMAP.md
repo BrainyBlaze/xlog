@@ -19,7 +19,7 @@
 - ✅ Datalog parsing and compilation
 - ✅ Stratified negation analysis
 - ✅ Semi-naive fixpoint iteration
-- ✅ GPU hash joins (multi-column, key verification, byte-hashed scalar keys)
+- ✅ GPU hash joins (inner/semi/anti/left-outer; on-device materialization; key verification; byte-hashed scalar keys)
 - ✅ Sort correctness for all scalar key types (stable CPU permutation + GPU reorder)
 - ✅ GPU set operations (union, diff)
 - ✅ GPU aggregations (count, sum, min, max)
@@ -28,8 +28,8 @@
 - ✅ CUDA certification suite + PTX validation
 
 ### What's Broken/Limited
-- ❌ Dedup still uses CPU sort permutation (host roundtrip)
-- ❌ Set ops still rely on CPU sort permutation (tracked under P3.3)
+- ❌ Dedup still relies on CPU-computed sort permutation (host roundtrip)
+- ❌ Set ops still rely on CPU-computed sort permutation (tracked under P3.3)
 - ❌ Multi-column GPU-native sort not implemented (current path computes permutation on CPU)
 
 ---
@@ -211,7 +211,7 @@ Month 12+:  Phase 6 (Scaling)
 - [x] E2E Datalog queries work
 - [x] CUDA certification suite passes (133/133)
 - [x] No known critical correctness bugs in CUDA provider
-- [ ] GPU-resident execution ← **Partial**
+- [ ] GPU-resident execution ← **Partial** (joins + filter/compact + dedup/set-ops compaction stay on-GPU; sort permutation still CPU)
 
 ### Production Ready (After P1+P2)
 - [x] All critical CUDA correctness fixes applied
