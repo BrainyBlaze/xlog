@@ -115,7 +115,8 @@ fn test_kernel_function_resolution(ctx: &TestContext) -> TestResult {
                 join_kernels::HASH_JOIN_BUILD,
                 join_kernels::HASH_JOIN_PROBE,
                 join_kernels::COMPUTE_COMPOSITE_HASH,
-                join_kernels::HASH_JOIN_BUILD_V2,
+                join_kernels::HASH_JOIN_BUCKET_COUNT_V2,
+                join_kernels::HASH_JOIN_SCATTER_V2,
                 join_kernels::HASH_JOIN_PROBE_V2,
                 join_kernels::HASH_JOIN_SEMI,
                 join_kernels::HASH_JOIN_ANTI,
@@ -126,6 +127,8 @@ fn test_kernel_function_resolution(ctx: &TestContext) -> TestResult {
             DEDUP_MODULE,
             &[
                 dedup_kernels::MARK_DUPLICATES,
+                dedup_kernels::MARK_UNIQUE_COLUMNAR,
+                dedup_kernels::MARK_UNIQUE_AND_SCAN_COLUMNAR,
                 dedup_kernels::COMPACT_ROWS,
             ],
         ),
@@ -172,6 +175,8 @@ fn test_kernel_function_resolution(ctx: &TestContext) -> TestResult {
                 filter_kernels::FILTER_COMPARE_U32,
                 filter_kernels::FILTER_COMPARE_I64,
                 filter_kernels::FILTER_COMPARE_F64,
+                filter_kernels::FILTER_COMPARE_U32_SCAN_PHASE1,
+                filter_kernels::FILTER_COMPARE_F64_SCAN_PHASE1,
                 filter_kernels::COMPACT_U32_BY_MASK,
                 filter_kernels::COMPACT_I64_BY_MASK,
                 filter_kernels::COMPACT_F64_BY_MASK,
@@ -236,13 +241,13 @@ fn test_kernel_function_resolution(ctx: &TestContext) -> TestResult {
     }
 
     // Verify we checked all expected functions (sanity check)
-    // 8 join + 2 dedup + 10 groupby + 5 scan + 7 sort + 10 filter + 2 set_ops + 8 pack = 52
-    if total_functions != 52 {
+    // 9 join + 4 dedup + 10 groupby + 5 scan + 7 sort + 12 filter + 2 set_ops + 8 pack = 57
+    if total_functions != 57 {
         return TestResult::error(
             "test_kernel_function_resolution",
             start.elapsed(),
             format!(
-                "Unexpected function count: expected 52, got {}",
+                "Unexpected function count: expected 57, got {}",
                 total_functions
             ),
         );

@@ -120,28 +120,47 @@ extern "C" __global__ void compute_composite_hash(
 
 /**
  * Build hash table with u64 hashes (v2).
- * @param hashes Hash values for build side
- * @param num_rows Number of build rows
- * @param hash_table Bucket heads (stores row index or 0xFFFFFFFF)
- * @param next_ptrs Linked list next pointers
- * @param hash_table_size Number of buckets
+ *
+ * This is a coalesced, cache-friendly bucket layout:
+ * - `bucket_counts[b]` is the number of build rows in bucket b
+ * - `bucket_offsets[b]` (computed on host via scan) is the start index of bucket b in `bucket_entries`
+ * - `bucket_entries` stores build row indices contiguously per bucket
+ *
+ * This replaces the linked-list chaining used by earlier versions.
  */
-extern "C" __global__ void hash_join_build_v2(
+extern "C" __global__ void hash_join_bucket_count_v2(
     const uint64_t* __restrict__ hashes,
     uint32_t num_rows,
-    uint32_t* __restrict__ hash_table,
-    uint32_t* __restrict__ next_ptrs,
-    uint32_t hash_table_size
+    uint32_t* __restrict__ bucket_counts,
+    uint32_t bucket_mask
 ) {
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= num_rows) return;
 
     uint64_t hash = hashes[tid];
-    uint32_t bucket = (uint32_t)(hash % hash_table_size);
+    uint32_t h32 = (uint32_t)(hash ^ (hash >> 32));
+    uint32_t bucket = h32 & bucket_mask;
+    atomicAdd(&bucket_counts[bucket], 1);
+}
 
-    // Atomic linked list insertion
-    uint32_t old = atomicExch(&hash_table[bucket], tid);
-    next_ptrs[tid] = old;
+extern "C" __global__ void hash_join_scatter_v2(
+    const uint64_t* __restrict__ hashes,
+    uint32_t num_rows,
+    uint32_t* __restrict__ bucket_cursors,
+    uint32_t bucket_mask,
+    uint32_t* __restrict__ bucket_entries,
+    uint64_t* __restrict__ bucket_entry_hashes
+) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= num_rows) return;
+
+    uint64_t hash = hashes[tid];
+    uint32_t h32 = (uint32_t)(hash ^ (hash >> 32));
+    uint32_t bucket = h32 & bucket_mask;
+
+    uint32_t pos = atomicAdd(&bucket_cursors[bucket], 1);
+    bucket_entries[pos] = tid;
+    bucket_entry_hashes[pos] = hash;
 }
 
 /**
@@ -179,10 +198,10 @@ __device__ __forceinline__ bool keys_equal(
  *
  * @param probe_hashes Hash values for probe side
  * @param num_probe Number of probe rows
- * @param hash_table Bucket heads
- * @param build_hashes Build side hashes (for fast filtering)
- * @param next_ptrs Linked list next pointers
- * @param hash_table_size Number of buckets
+ * @param bucket_offsets Start offsets per bucket
+ * @param bucket_counts Build row counts per bucket
+ * @param bucket_entries Build row indices, bucketed contiguously
+ * @param bucket_entry_hashes Build hashes aligned with bucket_entries
  * @param probe_keys Packed probe key data (row-major, key columns only)
  * @param build_keys Packed build key data (row-major, key columns only)
  * @param key_bytes Total bytes per key (sum of key column sizes)
@@ -194,10 +213,11 @@ __device__ __forceinline__ bool keys_equal(
 extern "C" __global__ void hash_join_probe_v2(
     const uint64_t* __restrict__ probe_hashes,
     uint32_t num_probe,
-    const uint32_t* __restrict__ hash_table,
-    const uint64_t* __restrict__ build_hashes,
-    const uint32_t* __restrict__ next_ptrs,
-    uint32_t hash_table_size,
+    const uint32_t* __restrict__ bucket_offsets,
+    const uint32_t* __restrict__ bucket_counts,
+    const uint32_t* __restrict__ bucket_entries,
+    const uint64_t* __restrict__ bucket_entry_hashes,
+    uint32_t bucket_mask,
     const uint8_t* __restrict__ probe_keys,
     const uint8_t* __restrict__ build_keys,
     uint32_t key_bytes,
@@ -210,20 +230,24 @@ extern "C" __global__ void hash_join_probe_v2(
     if (tid >= num_probe) return;
 
     uint64_t hash = probe_hashes[tid];
-    uint32_t bucket = (uint32_t)(hash % hash_table_size);
+    uint32_t h32 = (uint32_t)(hash ^ (hash >> 32));
+    uint32_t bucket = h32 & bucket_mask;
 
-    uint32_t current = hash_table[bucket];
-    while (current != 0xFFFFFFFF) {
-        // First check hash for fast filtering, then verify actual keys
-        if (build_hashes[current] == hash &&
-            keys_equal(probe_keys, build_keys, tid, current, key_bytes)) {
-            uint32_t out_idx = atomicAdd(output_count, 1);
-            if (out_idx < max_output) {
-                output_left[out_idx] = tid;
-                output_right[out_idx] = current;
+    uint32_t start = bucket_offsets[bucket];
+    uint32_t count = bucket_counts[bucket];
+
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t pos = start + i;
+        if (bucket_entry_hashes[pos] == hash) {
+            uint32_t build_idx = bucket_entries[pos];
+            if (keys_equal(probe_keys, build_keys, tid, build_idx, key_bytes)) {
+                uint32_t out_idx = atomicAdd(output_count, 1);
+                if (out_idx < max_output) {
+                    output_left[out_idx] = tid;
+                    output_right[out_idx] = build_idx;
+                }
             }
         }
-        current = next_ptrs[current];
     }
 }
 
@@ -231,10 +255,10 @@ extern "C" __global__ void hash_join_probe_v2(
  * Semi-join: mark probe rows that have any match.
  * @param probe_hashes Hash values for probe side
  * @param num_probe Number of probe rows
- * @param hash_table Bucket heads
- * @param build_hashes Build side hashes
- * @param next_ptrs Linked list next pointers
- * @param hash_table_size Number of buckets
+ * @param bucket_offsets Start offsets per bucket
+ * @param bucket_counts Build row counts per bucket
+ * @param bucket_entries Build row indices, bucketed contiguously
+ * @param bucket_entry_hashes Build hashes aligned with bucket_entries
  * @param probe_keys Packed probe key data (row-major, key columns only)
  * @param build_keys Packed build key data (row-major, key columns only)
  * @param key_bytes Total bytes per key (sum of key column sizes)
@@ -243,10 +267,11 @@ extern "C" __global__ void hash_join_probe_v2(
 extern "C" __global__ void hash_join_semi(
     const uint64_t* __restrict__ probe_hashes,
     uint32_t num_probe,
-    const uint32_t* __restrict__ hash_table,
-    const uint64_t* __restrict__ build_hashes,
-    const uint32_t* __restrict__ next_ptrs,
-    uint32_t hash_table_size,
+    const uint32_t* __restrict__ bucket_offsets,
+    const uint32_t* __restrict__ bucket_counts,
+    const uint32_t* __restrict__ bucket_entries,
+    const uint64_t* __restrict__ bucket_entry_hashes,
+    uint32_t bucket_mask,
     const uint8_t* __restrict__ probe_keys,
     const uint8_t* __restrict__ build_keys,
     uint32_t key_bytes,
@@ -256,17 +281,20 @@ extern "C" __global__ void hash_join_semi(
     if (tid >= num_probe) return;
 
     uint64_t hash = probe_hashes[tid];
-    uint32_t bucket = (uint32_t)(hash % hash_table_size);
+    uint32_t h32 = (uint32_t)(hash ^ (hash >> 32));
+    uint32_t bucket = h32 & bucket_mask;
 
-    uint32_t current = hash_table[bucket];
-    while (current != 0xFFFFFFFF) {
-        // First check hash for fast filtering, then verify actual keys
-        if (build_hashes[current] == hash &&
-            keys_equal(probe_keys, build_keys, tid, current, key_bytes)) {
-            has_match[tid] = 1;
-            return;
+    uint32_t start = bucket_offsets[bucket];
+    uint32_t count = bucket_counts[bucket];
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t pos = start + i;
+        if (bucket_entry_hashes[pos] == hash) {
+            uint32_t build_idx = bucket_entries[pos];
+            if (keys_equal(probe_keys, build_keys, tid, build_idx, key_bytes)) {
+                has_match[tid] = 1;
+                return;
+            }
         }
-        current = next_ptrs[current];
     }
     has_match[tid] = 0;
 }
@@ -275,10 +303,10 @@ extern "C" __global__ void hash_join_semi(
  * Anti-join: mark probe rows that have NO match.
  * @param probe_hashes Hash values for probe side
  * @param num_probe Number of probe rows
- * @param hash_table Bucket heads
- * @param build_hashes Build side hashes
- * @param next_ptrs Linked list next pointers
- * @param hash_table_size Number of buckets
+ * @param bucket_offsets Start offsets per bucket
+ * @param bucket_counts Build row counts per bucket
+ * @param bucket_entries Build row indices, bucketed contiguously
+ * @param bucket_entry_hashes Build hashes aligned with bucket_entries
  * @param probe_keys Packed probe key data (row-major, key columns only)
  * @param build_keys Packed build key data (row-major, key columns only)
  * @param key_bytes Total bytes per key (sum of key column sizes)
@@ -287,10 +315,11 @@ extern "C" __global__ void hash_join_semi(
 extern "C" __global__ void hash_join_anti(
     const uint64_t* __restrict__ probe_hashes,
     uint32_t num_probe,
-    const uint32_t* __restrict__ hash_table,
-    const uint64_t* __restrict__ build_hashes,
-    const uint32_t* __restrict__ next_ptrs,
-    uint32_t hash_table_size,
+    const uint32_t* __restrict__ bucket_offsets,
+    const uint32_t* __restrict__ bucket_counts,
+    const uint32_t* __restrict__ bucket_entries,
+    const uint64_t* __restrict__ bucket_entry_hashes,
+    uint32_t bucket_mask,
     const uint8_t* __restrict__ probe_keys,
     const uint8_t* __restrict__ build_keys,
     uint32_t key_bytes,
@@ -300,17 +329,20 @@ extern "C" __global__ void hash_join_anti(
     if (tid >= num_probe) return;
 
     uint64_t hash = probe_hashes[tid];
-    uint32_t bucket = (uint32_t)(hash % hash_table_size);
+    uint32_t h32 = (uint32_t)(hash ^ (hash >> 32));
+    uint32_t bucket = h32 & bucket_mask;
 
-    uint32_t current = hash_table[bucket];
-    while (current != 0xFFFFFFFF) {
-        // First check hash for fast filtering, then verify actual keys
-        if (build_hashes[current] == hash &&
-            keys_equal(probe_keys, build_keys, tid, current, key_bytes)) {
-            no_match[tid] = 0;
-            return;
+    uint32_t start = bucket_offsets[bucket];
+    uint32_t count = bucket_counts[bucket];
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t pos = start + i;
+        if (bucket_entry_hashes[pos] == hash) {
+            uint32_t build_idx = bucket_entries[pos];
+            if (keys_equal(probe_keys, build_keys, tid, build_idx, key_bytes)) {
+                no_match[tid] = 0;
+                return;
+            }
         }
-        current = next_ptrs[current];
     }
     no_match[tid] = 1;
 }

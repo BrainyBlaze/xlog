@@ -23,6 +23,8 @@
 #define OP_GT 4
 #define OP_GE 5
 
+#define BLOCK_SIZE 256
+
 /**
  * Compare i64 column against constant, output mask.
  * @param column Input column data
@@ -103,6 +105,138 @@ extern "C" __global__ void filter_compare_f64(
         default: result = false;
     }
     mask[gid] = result ? 1 : 0;
+}
+
+/**
+ * Fused compare + scan phase1 for u32 filters.
+ *
+ * Produces:
+ * - mask[gid] (0/1)
+ * - prefix_sum[gid] (exclusive scan within the block)
+ * - block_sums[blockIdx] (number of kept rows in the block)
+ */
+extern "C" __global__ void filter_compare_u32_scan_phase1(
+    const uint32_t* __restrict__ column,
+    uint32_t constant,
+    uint32_t num_rows,
+    uint8_t op,
+    uint8_t* __restrict__ mask,
+    uint32_t* __restrict__ prefix_sum,
+    uint32_t* __restrict__ block_sums
+) {
+    __shared__ uint32_t temp[BLOCK_SIZE];
+
+    uint32_t tid = threadIdx.x;
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+
+    uint32_t val = 0;
+    if (gid < num_rows) {
+        uint32_t col_val = column[gid];
+        bool result;
+        switch (op) {
+            case OP_EQ: result = (col_val == constant); break;
+            case OP_NE: result = (col_val != constant); break;
+            case OP_LT: result = (col_val < constant); break;
+            case OP_LE: result = (col_val <= constant); break;
+            case OP_GT: result = (col_val > constant); break;
+            case OP_GE: result = (col_val >= constant); break;
+            default: result = false;
+        }
+        uint8_t out = result ? 1 : 0;
+        mask[gid] = out;
+        val = (uint32_t)out;
+    }
+
+    temp[tid] = val;
+    __syncthreads();
+
+    // Inclusive scan within block (Hillis-Steele style).
+    for (uint32_t stride = 1; stride < BLOCK_SIZE; stride *= 2) {
+        uint32_t left_val = 0;
+        if (tid >= stride) {
+            left_val = temp[tid - stride];
+        }
+        __syncthreads();
+        temp[tid] += left_val;
+        __syncthreads();
+    }
+
+    uint32_t inclusive = temp[tid];
+    uint32_t exclusive = (tid == 0) ? 0 : temp[tid - 1];
+
+    if (gid < num_rows) {
+        prefix_sum[gid] = exclusive;
+    }
+
+    if (tid == BLOCK_SIZE - 1) {
+        block_sums[blockIdx.x] = inclusive;
+    }
+}
+
+/**
+ * Fused compare + scan phase1 for f64 filters.
+ *
+ * Produces:
+ * - mask[gid] (0/1)
+ * - prefix_sum[gid] (exclusive scan within the block)
+ * - block_sums[blockIdx] (number of kept rows in the block)
+ */
+extern "C" __global__ void filter_compare_f64_scan_phase1(
+    const double* __restrict__ column,
+    double constant,
+    uint32_t num_rows,
+    uint8_t op,
+    uint8_t* __restrict__ mask,
+    uint32_t* __restrict__ prefix_sum,
+    uint32_t* __restrict__ block_sums
+) {
+    __shared__ uint32_t temp[BLOCK_SIZE];
+
+    uint32_t tid = threadIdx.x;
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+
+    uint32_t val = 0;
+    if (gid < num_rows) {
+        double col_val = column[gid];
+        bool result;
+        switch (op) {
+            case OP_EQ: result = (col_val == constant); break;
+            case OP_NE: result = (col_val != constant); break;
+            case OP_LT: result = (col_val < constant); break;
+            case OP_LE: result = (col_val <= constant); break;
+            case OP_GT: result = (col_val > constant); break;
+            case OP_GE: result = (col_val >= constant); break;
+            default: result = false;
+        }
+        uint8_t out = result ? 1 : 0;
+        mask[gid] = out;
+        val = (uint32_t)out;
+    }
+
+    temp[tid] = val;
+    __syncthreads();
+
+    // Inclusive scan within block (Hillis-Steele style).
+    for (uint32_t stride = 1; stride < BLOCK_SIZE; stride *= 2) {
+        uint32_t left_val = 0;
+        if (tid >= stride) {
+            left_val = temp[tid - stride];
+        }
+        __syncthreads();
+        temp[tid] += left_val;
+        __syncthreads();
+    }
+
+    uint32_t inclusive = temp[tid];
+    uint32_t exclusive = (tid == 0) ? 0 : temp[tid - 1];
+
+    if (gid < num_rows) {
+        prefix_sum[gid] = exclusive;
+    }
+
+    if (tid == BLOCK_SIZE - 1) {
+        block_sums[blockIdx.x] = inclusive;
+    }
 }
 
 /** Combine two masks with AND */

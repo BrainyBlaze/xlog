@@ -38,7 +38,8 @@ pub mod join_kernels {
     pub const HASH_JOIN_PROBE: &str = "hash_join_probe";
     // V2 kernels for multi-column joins
     pub const COMPUTE_COMPOSITE_HASH: &str = "compute_composite_hash";
-    pub const HASH_JOIN_BUILD_V2: &str = "hash_join_build_v2";
+    pub const HASH_JOIN_BUCKET_COUNT_V2: &str = "hash_join_bucket_count_v2";
+    pub const HASH_JOIN_SCATTER_V2: &str = "hash_join_scatter_v2";
     pub const HASH_JOIN_PROBE_V2: &str = "hash_join_probe_v2";
     pub const HASH_JOIN_SEMI: &str = "hash_join_semi";
     pub const HASH_JOIN_ANTI: &str = "hash_join_anti";
@@ -49,6 +50,7 @@ pub mod join_kernels {
 pub mod dedup_kernels {
     pub const MARK_DUPLICATES: &str = "mark_duplicates";
     pub const MARK_UNIQUE_COLUMNAR: &str = "mark_unique_columnar";
+    pub const MARK_UNIQUE_AND_SCAN_COLUMNAR: &str = "mark_unique_and_scan_columnar";
     pub const COMPACT_ROWS: &str = "compact_rows";
 }
 
@@ -107,6 +109,8 @@ pub mod filter_kernels {
     pub const FILTER_COMPARE_U32: &str = "filter_compare_u32";
     pub const FILTER_COMPARE_I64: &str = "filter_compare_i64";
     pub const FILTER_COMPARE_F64: &str = "filter_compare_f64";
+    pub const FILTER_COMPARE_U32_SCAN_PHASE1: &str = "filter_compare_u32_scan_phase1";
+    pub const FILTER_COMPARE_F64_SCAN_PHASE1: &str = "filter_compare_f64_scan_phase1";
     pub const COMPACT_U32_BY_MASK: &str = "compact_u32_by_mask";
     pub const COMPACT_I64_BY_MASK: &str = "compact_i64_by_mask";
     pub const COMPACT_F64_BY_MASK: &str = "compact_f64_by_mask";
@@ -182,6 +186,14 @@ struct PackedKeyData {
     key_bytes: u32,
 }
 
+struct JoinHashTableV2 {
+    bucket_counts: crate::memory::TrackedCudaSlice<u32>,
+    bucket_offsets: crate::memory::TrackedCudaSlice<u32>,
+    bucket_entries: crate::memory::TrackedCudaSlice<u32>,
+    bucket_entry_hashes: crate::memory::TrackedCudaSlice<u64>,
+    bucket_mask: u32,
+}
+
 /// CUDA kernel provider for xlog GPU operations
 ///
 /// Manages pre-compiled PTX modules for relational operations:
@@ -239,7 +251,8 @@ impl CudaKernelProvider {
                     join_kernels::HASH_JOIN_BUILD,
                     join_kernels::HASH_JOIN_PROBE,
                     join_kernels::COMPUTE_COMPOSITE_HASH,
-                    join_kernels::HASH_JOIN_BUILD_V2,
+                    join_kernels::HASH_JOIN_BUCKET_COUNT_V2,
+                    join_kernels::HASH_JOIN_SCATTER_V2,
                     join_kernels::HASH_JOIN_PROBE_V2,
                     join_kernels::HASH_JOIN_SEMI,
                     join_kernels::HASH_JOIN_ANTI,
@@ -257,6 +270,7 @@ impl CudaKernelProvider {
                 &[
                     dedup_kernels::MARK_DUPLICATES,
                     dedup_kernels::MARK_UNIQUE_COLUMNAR,
+                    dedup_kernels::MARK_UNIQUE_AND_SCAN_COLUMNAR,
                     dedup_kernels::COMPACT_ROWS,
                 ],
             )
@@ -338,6 +352,8 @@ impl CudaKernelProvider {
                     filter_kernels::FILTER_COMPARE_U32,
                     filter_kernels::FILTER_COMPARE_I64,
                     filter_kernels::FILTER_COMPARE_F64,
+                    filter_kernels::FILTER_COMPARE_U32_SCAN_PHASE1,
+                    filter_kernels::FILTER_COMPARE_F64_SCAN_PHASE1,
                     filter_kernels::COMPACT_U32_BY_MASK,
                     filter_kernels::COMPACT_I64_BY_MASK,
                     filter_kernels::COMPACT_F64_BY_MASK,
@@ -671,22 +687,27 @@ impl CudaKernelProvider {
             .htod_sync_copy_into(&col_types_host, &mut d_col_types)
             .map_err(|e| XlogError::Kernel(format!("Failed to upload key column types: {}", e)))?;
 
-        let d_unique_mask = self.memory.alloc::<u8>(num_rows as usize)?;
-        let mark_unique_fn = device
-            .get_func(DEDUP_MODULE, dedup_kernels::MARK_UNIQUE_COLUMNAR)
-            .ok_or_else(|| XlogError::Kernel("mark_unique_columnar kernel not found".to_string()))?;
-
         let block_size = 256u32;
-        let grid_size = (num_rows + block_size - 1) / block_size;
+        let num_blocks = (num_rows + block_size - 1) / block_size;
         let config = LaunchConfig {
-            grid_dim: (grid_size, 1, 1),
+            grid_dim: (num_blocks, 1, 1),
             block_dim: (block_size, 1, 1),
             shared_mem_bytes: 0,
         };
 
-        // SAFETY: mark_unique_columnar(col_ptrs, col_sizes, col_types, num_key_cols, num_rows, unique_mask)
+        let d_unique_mask = self.memory.alloc::<u8>(num_rows as usize)?;
+        let d_prefix_sum = self.memory.alloc::<u32>(num_rows as usize)?;
+        let mut d_block_sums = self.memory.alloc::<u32>(num_blocks as usize)?;
+
+        let mark_and_scan_fn = device
+            .get_func(DEDUP_MODULE, dedup_kernels::MARK_UNIQUE_AND_SCAN_COLUMNAR)
+            .ok_or_else(|| {
+                XlogError::Kernel("mark_unique_and_scan_columnar kernel not found".to_string())
+            })?;
+
+        // SAFETY: mark_unique_and_scan_columnar(col_ptrs, col_sizes, col_types, num_key_cols, num_rows, unique_mask, prefix_sum, block_sums)
         unsafe {
-            mark_unique_fn.clone().launch(
+            mark_and_scan_fn.clone().launch(
                 config,
                 (
                     &d_col_ptrs,
@@ -695,35 +716,12 @@ impl CudaKernelProvider {
                     num_key_cols,
                     num_rows,
                     &d_unique_mask,
+                    &d_prefix_sum,
+                    &d_block_sums,
                 ),
             )
         }
-        .map_err(|e| XlogError::Kernel(format!("mark_unique_columnar failed: {}", e)))?;
-
-        // Compute prefix sum of unique mask on GPU.
-        let n_usize = num_rows as usize;
-        let num_blocks = (num_rows + block_size - 1) / block_size;
-        let d_prefix_sum = self.memory.alloc::<u32>(n_usize)?;
-        let mut d_block_sums = self.memory.alloc::<u32>(num_blocks as usize)?;
-
-        let phase1_fn = device
-            .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE1)
-            .ok_or_else(|| {
-                XlogError::Kernel("Failed to get multiblock_scan_phase1 kernel".to_string())
-            })?;
-
-        // SAFETY: multiblock_scan_phase1(const uint8_t* mask, uint32_t* prefix_sum, uint32_t* block_sums, uint32_t n)
-        unsafe {
-            phase1_fn.clone().launch(
-                LaunchConfig {
-                    grid_dim: (num_blocks, 1, 1),
-                    block_dim: (block_size, 1, 1),
-                    shared_mem_bytes: 0,
-                },
-                (&d_unique_mask, &d_prefix_sum, &d_block_sums, num_rows),
-            )
-        }
-        .map_err(|e| XlogError::Kernel(format!("multiblock_scan_phase1 failed: {}", e)))?;
+        .map_err(|e| XlogError::Kernel(format!("mark_unique_and_scan_columnar failed: {}", e)))?;
 
         if num_blocks > 1 {
             self.multiblock_scan_u32_inplace(&mut d_block_sums, num_blocks)?;
@@ -748,36 +746,24 @@ impl CudaKernelProvider {
             .map_err(|e| XlogError::Kernel(format!("multiblock_scan_phase3 failed: {}", e)))?;
         }
 
-        // Count total unique rows (1s in mask).
-        let mut d_count = self.memory.alloc::<u32>(1)?;
-        device
-            .htod_sync_copy_into(&[0u32], &mut d_count)
-            .map_err(|e| XlogError::Kernel(format!("Failed to init unique count: {}", e)))?;
-
-        let count_fn = device
-            .get_func(SCAN_MODULE, scan_kernels::COUNT_MASK)
-            .ok_or_else(|| XlogError::Kernel("count_mask kernel not found".to_string()))?;
-
-        // SAFETY: count_mask(const uint8_t* mask, uint32_t n, uint32_t* count)
-        unsafe {
-            count_fn.clone().launch(
-                LaunchConfig {
-                    grid_dim: (num_blocks, 1, 1),
-                    block_dim: (block_size, 1, 1),
-                    shared_mem_bytes: 0,
-                },
-                (&d_unique_mask, num_rows, &mut d_count),
-            )
-        }
-        .map_err(|e| XlogError::Kernel(format!("count_mask failed: {}", e)))?;
-
         self.device.synchronize()?;
 
-        let mut count_host = vec![0u32];
+        let last_idx = (num_rows as usize).checked_sub(1).ok_or_else(|| {
+            XlogError::Kernel("Dedup: unexpected empty input".to_string())
+        })?;
+        let last_prefix_view = d_prefix_sum.slice(last_idx..(last_idx + 1));
+        let last_mask_view = d_unique_mask.slice(last_idx..(last_idx + 1));
+
+        let mut last_prefix_host = [0u32];
+        let mut last_mask_host = [0u8];
         device
-            .dtoh_sync_copy_into(&d_count, &mut count_host)
-            .map_err(|e| XlogError::Kernel(format!("Failed to read unique count: {}", e)))?;
-        let output_count = count_host[0] as u64;
+            .dtoh_sync_copy_into(&last_prefix_view, &mut last_prefix_host)
+            .map_err(|e| XlogError::Kernel(format!("Failed to read last prefix sum: {}", e)))?;
+        device
+            .dtoh_sync_copy_into(&last_mask_view, &mut last_mask_host)
+            .map_err(|e| XlogError::Kernel(format!("Failed to read last unique mask: {}", e)))?;
+
+        let output_count = (last_prefix_host[0] as u64) + (last_mask_host[0] as u64);
 
         if output_count == 0 {
             return self.create_empty_buffer(input.schema().clone());
@@ -1298,36 +1284,25 @@ impl CudaKernelProvider {
             .map_err(|e| XlogError::Kernel(format!("multiblock_scan_phase3 failed: {}", e)))?;
         }
 
-        // Count total output rows (1s in mask).
-        let mut d_count = self.memory.alloc::<u32>(1)?;
-        device
-            .htod_sync_copy_into(&[0u32], &mut d_count)
-            .map_err(|e| XlogError::Kernel(format!("Failed to init diff count: {}", e)))?;
-
-        let count_fn = device
-            .get_func(SCAN_MODULE, scan_kernels::COUNT_MASK)
-            .ok_or_else(|| XlogError::Kernel("count_mask kernel not found".to_string()))?;
-
-        // SAFETY: count_mask(const uint8_t* mask, uint32_t n, uint32_t* count)
-        unsafe {
-            count_fn.clone().launch(
-                LaunchConfig {
-                    grid_dim: (num_blocks, 1, 1),
-                    block_dim: (block_size, 1, 1),
-                    shared_mem_bytes: 0,
-                },
-                (&diff_mask, num_a, &mut d_count),
-            )
-        }
-        .map_err(|e| XlogError::Kernel(format!("count_mask failed: {}", e)))?;
-
         self.device.synchronize()?;
 
-        let mut count_host = vec![0u32];
+        let last_idx = (num_a as usize).checked_sub(1).ok_or_else(|| {
+            XlogError::Kernel("Diff: unexpected empty input".to_string())
+        })?;
+
+        let last_prefix_view = d_prefix_sum.slice(last_idx..(last_idx + 1));
+        let last_mask_view = diff_mask.slice(last_idx..(last_idx + 1));
+
+        let mut last_prefix_host = [0u32];
+        let mut last_mask_host = [0u8];
         device
-            .dtoh_sync_copy_into(&d_count, &mut count_host)
-            .map_err(|e| XlogError::Kernel(format!("Failed to read diff count: {}", e)))?;
-        let output_count = count_host[0] as u64;
+            .dtoh_sync_copy_into(&last_prefix_view, &mut last_prefix_host)
+            .map_err(|e| XlogError::Kernel(format!("Failed to read last prefix sum: {}", e)))?;
+        device
+            .dtoh_sync_copy_into(&last_mask_view, &mut last_mask_host)
+            .map_err(|e| XlogError::Kernel(format!("Failed to read last diff mask: {}", e)))?;
+
+        let output_count = (last_prefix_host[0] as u64) + (last_mask_host[0] as u64);
 
         if output_count == 0 {
             return self.create_empty_buffer(a.schema().clone());
@@ -3175,12 +3150,8 @@ impl CudaKernelProvider {
     /// * `value` - Constant to compare against
     /// * `op` - Comparison operator
     ///
-    /// # Limitations
-    /// Currently limited to buffers with <= 256 rows due to single-block prefix sum.
-    /// TODO: Implement multi-block prefix sum for larger datasets.
-    ///
     /// # Errors
-    /// Returns error if column index is out of bounds or buffer has > 256 rows.
+    /// Returns error if column index is out of bounds or the input exceeds the u32 row limit.
     pub fn filter_u32(
         &self,
         input: &CudaBuffer,
@@ -3192,7 +3163,16 @@ impl CudaKernelProvider {
             return self.create_empty_buffer(input.schema.clone());
         }
 
+        if input.num_rows() > u32::MAX as u64 {
+            return Err(XlogError::Kernel(format!(
+                "filter_u32 supports at most {} rows, got {}",
+                u32::MAX,
+                input.num_rows()
+            )));
+        }
+
         let n = input.num_rows as usize;
+        let num_rows = input.num_rows as u32;
         let device = self.device.inner();
 
         // Validate column index
@@ -3219,48 +3199,88 @@ impl CudaKernelProvider {
             .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col)))?;
         let col_view = self.column_as_u32_view(col_data, n)?;
 
-        // Allocate mask buffer
-        let d_mask = self.memory.alloc::<u8>(n)?;
-
-        // Launch filter_compare_u32 kernel
         let block_size = 256u32;
-        let grid_size = ((n as u32) + block_size - 1) / block_size;
+        let num_blocks = (num_rows + block_size - 1) / block_size;
         let config = LaunchConfig {
-            grid_dim: (grid_size, 1, 1),
+            grid_dim: (num_blocks, 1, 1),
             block_dim: (block_size, 1, 1),
             shared_mem_bytes: 0,
         };
 
-        let filter_fn = device
-            .get_func(FILTER_MODULE, filter_kernels::FILTER_COMPARE_U32)
-            .ok_or_else(|| XlogError::Kernel("filter_compare_u32 kernel not found".to_string()))?;
+        // Fused compare + scan phase1.
+        let d_mask = self.memory.alloc::<u8>(n)?;
+        let d_prefix_sum = self.memory.alloc::<u32>(n)?;
+        let mut d_block_sums = self.memory.alloc::<u32>(num_blocks as usize)?;
 
-        // SAFETY: Kernel parameters match expected signature:
-        // filter_compare_u32(const uint32_t* column, uint32_t constant, uint32_t num_rows, uint8_t op, uint8_t* mask)
+        let filter_scan_fn = device
+            .get_func(FILTER_MODULE, filter_kernels::FILTER_COMPARE_U32_SCAN_PHASE1)
+            .ok_or_else(|| {
+                XlogError::Kernel("filter_compare_u32_scan_phase1 kernel not found".to_string())
+            })?;
+
+        // SAFETY: filter_compare_u32_scan_phase1(column, constant, num_rows, op, mask, prefix_sum, block_sums)
         unsafe {
-            filter_fn
-                .clone()
-                .launch(config, (&col_view, value, n as u32, op as u8, &d_mask))
+            filter_scan_fn.clone().launch(
+                config,
+                (
+                    &col_view,
+                    value,
+                    num_rows,
+                    op as u8,
+                    &d_mask,
+                    &d_prefix_sum,
+                    &d_block_sums,
+                ),
+            )
         }
-        .map_err(|e| XlogError::Kernel(format!("filter_compare_u32 failed: {}", e)))?;
+        .map_err(|e| XlogError::Kernel(format!("filter_compare_u32_scan_phase1 failed: {}", e)))?;
 
-        // Synchronize and download mask to compute prefix sum
+        if num_blocks > 1 {
+            self.multiblock_scan_u32_inplace(&mut d_block_sums, num_blocks)?;
+
+            let phase3_fn = device
+                .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE3)
+                .ok_or_else(|| {
+                    XlogError::Kernel("Failed to get multiblock_scan_phase3 kernel".to_string())
+                })?;
+
+            // SAFETY: multiblock_scan_phase3(uint32_t* prefix_sum, const uint32_t* block_offsets, uint32_t n)
+            unsafe {
+                phase3_fn.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (num_blocks, 1, 1),
+                        block_dim: (block_size, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (&d_prefix_sum, &d_block_sums, num_rows),
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("multiblock_scan_phase3 failed: {}", e)))?;
+        }
+
         self.device.synchronize()?;
 
-        let mut mask_host = vec![0u8; n];
+        let last_idx = (n as usize).checked_sub(1).ok_or_else(|| {
+            XlogError::Kernel("filter_u32: unexpected empty input".to_string())
+        })?;
+        let last_prefix_view = d_prefix_sum.slice(last_idx..(last_idx + 1));
+        let last_mask_view = d_mask.slice(last_idx..(last_idx + 1));
+
+        let mut last_prefix_host = [0u32];
+        let mut last_mask_host = [0u8];
         device
-            .dtoh_sync_copy_into(&d_mask, &mut mask_host)
-            .map_err(|e| XlogError::Kernel(format!("Failed to download mask: {}", e)))?;
+            .dtoh_sync_copy_into(&last_prefix_view, &mut last_prefix_host)
+            .map_err(|e| XlogError::Kernel(format!("Failed to read last prefix sum: {}", e)))?;
+        device
+            .dtoh_sync_copy_into(&last_mask_view, &mut last_mask_host)
+            .map_err(|e| XlogError::Kernel(format!("Failed to read last mask: {}", e)))?;
 
-        // Compute prefix sum and count
-        let (prefix_sum, count) = self.prefix_sum_mask(&mask_host)?;
-
-        if count == 0 {
+        let output_count = (last_prefix_host[0] as u64) + (last_mask_host[0] as u64);
+        if output_count == 0 {
             return self.create_empty_buffer(input.schema.clone());
         }
 
-        // Compact all columns using mask
-        self.compact_buffer_by_mask(input, &mask_host, &prefix_sum, count as u64)
+        self.compact_buffer_by_device_mask(input, &d_mask, &d_prefix_sum, output_count)
     }
 
     /// Filter buffer where f64 column equals constant
@@ -3332,7 +3352,16 @@ impl CudaKernelProvider {
             return self.create_empty_buffer(input.schema.clone());
         }
 
+        if input.num_rows() > u32::MAX as u64 {
+            return Err(XlogError::Kernel(format!(
+                "filter_f64 supports at most {} rows, got {}",
+                u32::MAX,
+                input.num_rows()
+            )));
+        }
+
         let n = input.num_rows as usize;
+        let num_rows = input.num_rows as u32;
         let device = self.device.inner();
 
         // Validate column index
@@ -3358,48 +3387,88 @@ impl CudaKernelProvider {
             .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col)))?;
         let col_view = self.column_as_f64_view(col_data, n)?;
 
-        // Allocate mask buffer
-        let d_mask = self.memory.alloc::<u8>(n)?;
-
-        // Launch filter_compare_f64 kernel
         let block_size = 256u32;
-        let grid_size = ((n as u32) + block_size - 1) / block_size;
+        let num_blocks = (num_rows + block_size - 1) / block_size;
         let config = LaunchConfig {
-            grid_dim: (grid_size, 1, 1),
+            grid_dim: (num_blocks, 1, 1),
             block_dim: (block_size, 1, 1),
             shared_mem_bytes: 0,
         };
 
-        let filter_fn = device
-            .get_func(FILTER_MODULE, filter_kernels::FILTER_COMPARE_F64)
-            .ok_or_else(|| XlogError::Kernel("filter_compare_f64 kernel not found".to_string()))?;
+        // Fused compare + scan phase1.
+        let d_mask = self.memory.alloc::<u8>(n)?;
+        let d_prefix_sum = self.memory.alloc::<u32>(n)?;
+        let mut d_block_sums = self.memory.alloc::<u32>(num_blocks as usize)?;
 
-        // SAFETY: Kernel parameters match expected signature:
-        // filter_compare_f64(const double* column, double constant, uint32_t num_rows, uint8_t op, uint8_t* mask)
+        let filter_scan_fn = device
+            .get_func(FILTER_MODULE, filter_kernels::FILTER_COMPARE_F64_SCAN_PHASE1)
+            .ok_or_else(|| {
+                XlogError::Kernel("filter_compare_f64_scan_phase1 kernel not found".to_string())
+            })?;
+
+        // SAFETY: filter_compare_f64_scan_phase1(column, constant, num_rows, op, mask, prefix_sum, block_sums)
         unsafe {
-            filter_fn
-                .clone()
-                .launch(config, (&col_view, value, n as u32, op as u8, &d_mask))
+            filter_scan_fn.clone().launch(
+                config,
+                (
+                    &col_view,
+                    value,
+                    num_rows,
+                    op as u8,
+                    &d_mask,
+                    &d_prefix_sum,
+                    &d_block_sums,
+                ),
+            )
         }
-        .map_err(|e| XlogError::Kernel(format!("filter_compare_f64 failed: {}", e)))?;
+        .map_err(|e| XlogError::Kernel(format!("filter_compare_f64_scan_phase1 failed: {}", e)))?;
 
-        // Synchronize and download mask to compute prefix sum
+        if num_blocks > 1 {
+            self.multiblock_scan_u32_inplace(&mut d_block_sums, num_blocks)?;
+
+            let phase3_fn = device
+                .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE3)
+                .ok_or_else(|| {
+                    XlogError::Kernel("Failed to get multiblock_scan_phase3 kernel".to_string())
+                })?;
+
+            // SAFETY: multiblock_scan_phase3(uint32_t* prefix_sum, const uint32_t* block_offsets, uint32_t n)
+            unsafe {
+                phase3_fn.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (num_blocks, 1, 1),
+                        block_dim: (block_size, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (&d_prefix_sum, &d_block_sums, num_rows),
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("multiblock_scan_phase3 failed: {}", e)))?;
+        }
+
         self.device.synchronize()?;
 
-        let mut mask_host = vec![0u8; n];
+        let last_idx = (n as usize).checked_sub(1).ok_or_else(|| {
+            XlogError::Kernel("filter_f64: unexpected empty input".to_string())
+        })?;
+        let last_prefix_view = d_prefix_sum.slice(last_idx..(last_idx + 1));
+        let last_mask_view = d_mask.slice(last_idx..(last_idx + 1));
+
+        let mut last_prefix_host = [0u32];
+        let mut last_mask_host = [0u8];
         device
-            .dtoh_sync_copy_into(&d_mask, &mut mask_host)
-            .map_err(|e| XlogError::Kernel(format!("Failed to download mask: {}", e)))?;
+            .dtoh_sync_copy_into(&last_prefix_view, &mut last_prefix_host)
+            .map_err(|e| XlogError::Kernel(format!("Failed to read last prefix sum: {}", e)))?;
+        device
+            .dtoh_sync_copy_into(&last_mask_view, &mut last_mask_host)
+            .map_err(|e| XlogError::Kernel(format!("Failed to read last mask: {}", e)))?;
 
-        // Compute prefix sum and count
-        let (prefix_sum, count) = self.prefix_sum_mask(&mask_host)?;
-
-        if count == 0 {
+        let output_count = (last_prefix_host[0] as u64) + (last_mask_host[0] as u64);
+        if output_count == 0 {
             return self.create_empty_buffer(input.schema.clone());
         }
 
-        // Compact all columns using mask
-        self.compact_buffer_by_mask(input, &mask_host, &prefix_sum, count as u64)
+        self.compact_buffer_by_device_mask(input, &d_mask, &d_prefix_sum, output_count)
     }
 
     /// Filter buffer by pre-computed mask.
@@ -3587,36 +3656,25 @@ impl CudaKernelProvider {
             .map_err(|e| XlogError::Kernel(format!("multiblock_scan_phase3 failed: {}", e)))?;
         }
 
-        // Count total output rows (1s in mask).
-        let mut d_count = self.memory.alloc::<u32>(1)?;
-        device
-            .htod_sync_copy_into(&[0u32], &mut d_count)
-            .map_err(|e| XlogError::Kernel(format!("Failed to init filtered count: {}", e)))?;
-
-        let count_fn = device
-            .get_func(SCAN_MODULE, scan_kernels::COUNT_MASK)
-            .ok_or_else(|| XlogError::Kernel("count_mask kernel not found".to_string()))?;
-
-        // SAFETY: count_mask(const uint8_t* mask, uint32_t n, uint32_t* count)
-        unsafe {
-            count_fn.clone().launch(
-                LaunchConfig {
-                    grid_dim: (num_blocks, 1, 1),
-                    block_dim: (block_size, 1, 1),
-                    shared_mem_bytes: 0,
-                },
-                (d_mask, n, &mut d_count),
-            )
-        }
-        .map_err(|e| XlogError::Kernel(format!("count_mask failed: {}", e)))?;
-
         self.device.synchronize()?;
 
-        let mut count_host = vec![0u32];
+        let last_idx = (n as usize).checked_sub(1).ok_or_else(|| {
+            XlogError::Kernel("Device-mask filtering: unexpected empty input".to_string())
+        })?;
+
+        let last_prefix_view = d_prefix_sum.slice(last_idx..(last_idx + 1));
+        let last_mask_view = d_mask.slice(last_idx..(last_idx + 1));
+
+        let mut last_prefix_host = [0u32];
+        let mut last_mask_host = [0u8];
         device
-            .dtoh_sync_copy_into(&d_count, &mut count_host)
-            .map_err(|e| XlogError::Kernel(format!("Failed to read filtered count: {}", e)))?;
-        let output_count = count_host[0] as u64;
+            .dtoh_sync_copy_into(&last_prefix_view, &mut last_prefix_host)
+            .map_err(|e| XlogError::Kernel(format!("Failed to read last prefix sum: {}", e)))?;
+        device
+            .dtoh_sync_copy_into(&last_mask_view, &mut last_mask_host)
+            .map_err(|e| XlogError::Kernel(format!("Failed to read last mask: {}", e)))?;
+
+        let output_count = (last_prefix_host[0] as u64) + (last_mask_host[0] as u64);
 
         if output_count == 0 {
             return self.create_empty_buffer(input.schema().clone());
@@ -4925,86 +4983,109 @@ impl CudaKernelProvider {
         })
     }
 
-    /// Build hash table from u64 hashes
+    /// Build a cache-friendly hash table from u64 hashes (v2).
     ///
-    /// Returns (hash_table, next_ptrs) for probing.
-    fn build_hash_table_v2(
-        &self,
-        hashes: &cudarc::driver::CudaSlice<u64>,
-        num_rows: u32,
-    ) -> Result<(crate::memory::TrackedCudaSlice<u32>, crate::memory::TrackedCudaSlice<u32>)> {
-        // Hash table size: 2x build size for good load factor
-        let hash_table_size = ((num_rows as usize) * 2).max(1024) as u32;
+    /// The table uses a bucketed CSR layout (counts + offsets + entries), avoiding linked-list
+    /// pointer chasing during probe.
+    fn build_hash_table_v2(&self, hashes: &cudarc::driver::CudaSlice<u64>, num_rows: u32) -> Result<JoinHashTableV2> {
+        let device = self.device.inner();
 
-        // Allocate hash table and next pointers
-        let d_hash_table = self.memory.alloc::<u32>(hash_table_size as usize)?;
-        let d_next_ptrs = self.memory.alloc::<u32>(num_rows as usize)?;
+        // Number of buckets: next power-of-two >= max(2*num_rows, 1024)
+        let target = (num_rows as u64)
+            .saturating_mul(2)
+            .max(1024);
+        let num_buckets_u64 = target.next_power_of_two();
+        let num_buckets = u32::try_from(num_buckets_u64).map_err(|_| {
+            XlogError::Kernel(format!(
+                "Join hash table too large: num_buckets={}",
+                num_buckets_u64
+            ))
+        })?;
+        let bucket_mask = num_buckets
+            .checked_sub(1)
+            .ok_or_else(|| XlogError::Kernel("Join hash table size underflow".to_string()))?;
 
-        // Initialize hash table to 0xFFFFFFFF using init_hash_table kernel
-        let init_func = self
-            .device
-            .inner()
-            .get_func(JOIN_MODULE, join_kernels::INIT_HASH_TABLE)
-            .ok_or_else(|| XlogError::Kernel("init_hash_table kernel not found".to_string()))?;
+        let mut bucket_counts = self.memory.alloc::<u32>(num_buckets as usize)?;
+        if num_buckets > 0 {
+            device.memset_zeros(&mut bucket_counts).map_err(|e| {
+                XlogError::Kernel(format!("Failed to zero bucket_counts: {}", e))
+            })?;
+        }
 
         let block_size = 256u32;
-        let init_grid = (hash_table_size + block_size - 1) / block_size;
-        let init_config = LaunchConfig {
-            grid_dim: (init_grid, 1, 1),
+        let grid_size = (num_rows + block_size - 1) / block_size;
+        let config = LaunchConfig {
+            grid_dim: (grid_size, 1, 1),
             block_dim: (block_size, 1, 1),
             shared_mem_bytes: 0,
         };
 
-        // SAFETY: init_hash_table(hash_table, size)
+        let count_fn = device
+            .get_func(JOIN_MODULE, join_kernels::HASH_JOIN_BUCKET_COUNT_V2)
+            .ok_or_else(|| {
+                XlogError::Kernel("hash_join_bucket_count_v2 kernel not found".to_string())
+            })?;
+
+        // SAFETY: hash_join_bucket_count_v2(hashes, num_rows, bucket_counts, bucket_mask)
         unsafe {
-            init_func
+            count_fn
                 .clone()
-                .launch(init_config, (&d_hash_table, hash_table_size))
-                .map_err(|e| XlogError::Kernel(format!("init_hash_table failed: {}", e)))?;
+                .launch(config, (hashes, num_rows, &bucket_counts, bucket_mask))
+                .map_err(|e| {
+                    XlogError::Kernel(format!("hash_join_bucket_count_v2 failed: {}", e))
+                })?;
         }
 
-        // Initialize next_ptrs to 0xFFFFFFFF
-        let next_init_grid = (num_rows + block_size - 1) / block_size;
-        let next_init_config = LaunchConfig {
-            grid_dim: (next_init_grid, 1, 1),
-            block_dim: (block_size, 1, 1),
-            shared_mem_bytes: 0,
-        };
-
-        unsafe {
-            init_func
-                .clone()
-                .launch(next_init_config, (&d_next_ptrs, num_rows))
-                .map_err(|e| XlogError::Kernel(format!("init next_ptrs failed: {}", e)))?;
+        // bucket_offsets = exclusive scan(bucket_counts)
+        let mut bucket_offsets = self.memory.alloc::<u32>(num_buckets as usize)?;
+        if num_buckets > 0 {
+            device
+                .dtod_copy(&bucket_counts, &mut bucket_offsets)
+                .map_err(|e| XlogError::Kernel(format!("Failed to copy bucket_counts: {}", e)))?;
+            self.multiblock_scan_u32_inplace(&mut bucket_offsets, num_buckets)?;
         }
 
-        // Build hash table
-        let build_func = self
-            .device
-            .inner()
-            .get_func(JOIN_MODULE, join_kernels::HASH_JOIN_BUILD_V2)
-            .ok_or_else(|| XlogError::Kernel("hash_join_build_v2 kernel not found".to_string()))?;
+        // bucket_cursors = bucket_offsets (then atomically incremented during scatter)
+        let mut bucket_cursors = self.memory.alloc::<u32>(num_buckets as usize)?;
+        if num_buckets > 0 {
+            device
+                .dtod_copy(&bucket_offsets, &mut bucket_cursors)
+                .map_err(|e| XlogError::Kernel(format!("Failed to copy bucket_offsets: {}", e)))?;
+        }
 
-        let build_grid = (num_rows + block_size - 1) / block_size;
-        let build_config = LaunchConfig {
-            grid_dim: (build_grid, 1, 1),
-            block_dim: (block_size, 1, 1),
-            shared_mem_bytes: 0,
-        };
+        let bucket_entries = self.memory.alloc::<u32>(num_rows as usize)?;
+        let bucket_entry_hashes = self.memory.alloc::<u64>(num_rows as usize)?;
 
-        // SAFETY: hash_join_build_v2(hashes, num_rows, hash_table, next_ptrs, hash_table_size)
+        let scatter_fn = device
+            .get_func(JOIN_MODULE, join_kernels::HASH_JOIN_SCATTER_V2)
+            .ok_or_else(|| XlogError::Kernel("hash_join_scatter_v2 kernel not found".to_string()))?;
+
+        // SAFETY: hash_join_scatter_v2(hashes, num_rows, bucket_cursors, bucket_mask, bucket_entries, bucket_entry_hashes)
         unsafe {
-            build_func
+            scatter_fn
                 .clone()
                 .launch(
-                    build_config,
-                    (hashes, num_rows, &d_hash_table, &d_next_ptrs, hash_table_size),
+                    config,
+                    (
+                        hashes,
+                        num_rows,
+                        &bucket_cursors,
+                        bucket_mask,
+                        &bucket_entries,
+                        &bucket_entry_hashes,
+                    ),
                 )
-                .map_err(|e| XlogError::Kernel(format!("hash_join_build_v2 failed: {}", e)))?;
+                .map_err(|e| XlogError::Kernel(format!("hash_join_scatter_v2 failed: {}", e)))?;
         }
 
         self.device.synchronize()?;
-        Ok((d_hash_table, d_next_ptrs))
+        Ok(JoinHashTableV2 {
+            bucket_counts,
+            bucket_offsets,
+            bucket_entries,
+            bucket_entry_hashes,
+            bucket_mask,
+        })
     }
 
     /// Inner join implementation using v2 kernels
@@ -5053,10 +5134,8 @@ impl CudaKernelProvider {
         let left_packed = self.compute_hashes_and_pack_keys(left, left_keys)?;
         let right_packed = self.compute_hashes_and_pack_keys(right, right_keys)?;
 
-        // Build hash table from right side
-        let hash_table_size = ((num_right as usize) * 2).max(1024) as u32;
-        let (d_hash_table, d_next_ptrs) =
-            self.build_hash_table_v2(&right_packed.hashes, num_right)?;
+        // Build hash table from right side (cache-friendly bucket layout).
+        let table = self.build_hash_table_v2(&right_packed.hashes, num_right)?;
 
         // Count join output (no truncation) to size buffers precisely.
         //
@@ -5085,18 +5164,20 @@ impl CudaKernelProvider {
         let d_dummy_right = self.memory.alloc::<u32>(1)?;
         let max_output_count_only = 0u32;
 
-        // SAFETY: hash_join_probe_v2(probe_hashes, num_probe, hash_table, build_hashes,
-        //                            next_ptrs, hash_table_size, probe_keys, build_keys,
-        //                            key_bytes, output_left, output_right, output_count, max_output)
+        // SAFETY: hash_join_probe_v2(probe_hashes, num_probe,
+        //                            bucket_offsets, bucket_counts, bucket_entries, bucket_entry_hashes, bucket_mask,
+        //                            probe_keys, build_keys, key_bytes,
+        //                            output_left, output_right, output_count, max_output)
         // Note: Using raw pointer launch because tuple exceeds 12-element limit
         unsafe {
             let mut params: Vec<*mut c_void> = vec![
                 (&*left_packed.hashes).as_kernel_param(),
                 (&num_left).as_kernel_param(),
-                (&*d_hash_table).as_kernel_param(),
-                (&*right_packed.hashes).as_kernel_param(),
-                (&*d_next_ptrs).as_kernel_param(),
-                (&hash_table_size).as_kernel_param(),
+                (&*table.bucket_offsets).as_kernel_param(),
+                (&*table.bucket_counts).as_kernel_param(),
+                (&*table.bucket_entries).as_kernel_param(),
+                (&*table.bucket_entry_hashes).as_kernel_param(),
+                (&table.bucket_mask).as_kernel_param(),
                 (&*left_packed.packed_keys).as_kernel_param(),
                 (&*right_packed.packed_keys).as_kernel_param(),
                 (&left_packed.key_bytes).as_kernel_param(),
@@ -5144,18 +5225,20 @@ impl CudaKernelProvider {
             .htod_sync_copy(&[0u32])
             .map_err(|e| XlogError::Kernel(format!("Failed to alloc output count: {}", e)))?;
 
-        // SAFETY: hash_join_probe_v2(probe_hashes, num_probe, hash_table, build_hashes,
-        //                            next_ptrs, hash_table_size, probe_keys, build_keys,
-        //                            key_bytes, output_left, output_right, output_count, max_output)
+        // SAFETY: hash_join_probe_v2(probe_hashes, num_probe,
+        //                            bucket_offsets, bucket_counts, bucket_entries, bucket_entry_hashes, bucket_mask,
+        //                            probe_keys, build_keys, key_bytes,
+        //                            output_left, output_right, output_count, max_output)
         // Note: Using raw pointer launch because tuple exceeds 12-element limit
         unsafe {
             let mut params: Vec<*mut c_void> = vec![
                 (&*left_packed.hashes).as_kernel_param(),
                 (&num_left).as_kernel_param(),
-                (&*d_hash_table).as_kernel_param(),
-                (&*right_packed.hashes).as_kernel_param(),
-                (&*d_next_ptrs).as_kernel_param(),
-                (&hash_table_size).as_kernel_param(),
+                (&*table.bucket_offsets).as_kernel_param(),
+                (&*table.bucket_counts).as_kernel_param(),
+                (&*table.bucket_entries).as_kernel_param(),
+                (&*table.bucket_entry_hashes).as_kernel_param(),
+                (&table.bucket_mask).as_kernel_param(),
                 (&*left_packed.packed_keys).as_kernel_param(),
                 (&*right_packed.packed_keys).as_kernel_param(),
                 (&left_packed.key_bytes).as_kernel_param(),
@@ -5253,10 +5336,8 @@ impl CudaKernelProvider {
         let left_packed = self.compute_hashes_and_pack_keys(left, left_keys)?;
         let right_packed = self.compute_hashes_and_pack_keys(right, right_keys)?;
 
-        // Build hash table from right side
-        let hash_table_size = ((num_right as usize) * 2).max(1024) as u32;
-        let (d_hash_table, d_next_ptrs) =
-            self.build_hash_table_v2(&right_packed.hashes, num_right)?;
+        // Build hash table from right side (cache-friendly bucket layout).
+        let table = self.build_hash_table_v2(&right_packed.hashes, num_right)?;
 
         // Allocate output mask
         let d_has_match = self.memory.alloc::<u8>(num_left as usize)?;
@@ -5276,9 +5357,9 @@ impl CudaKernelProvider {
             shared_mem_bytes: 0,
         };
 
-        // SAFETY: hash_join_semi(probe_hashes, num_probe, hash_table, build_hashes,
-        //                        next_ptrs, hash_table_size, probe_keys, build_keys,
-        //                        key_bytes, has_match)
+        // SAFETY: hash_join_semi(probe_hashes, num_probe,
+        //                        bucket_offsets, bucket_counts, bucket_entries, bucket_entry_hashes, bucket_mask,
+        //                        probe_keys, build_keys, key_bytes, has_match)
         unsafe {
             semi_func
                 .clone()
@@ -5287,10 +5368,11 @@ impl CudaKernelProvider {
                     (
                         &left_packed.hashes,
                         num_left,
-                        &d_hash_table,
-                        &right_packed.hashes,
-                        &d_next_ptrs,
-                        hash_table_size,
+                        &table.bucket_offsets,
+                        &table.bucket_counts,
+                        &table.bucket_entries,
+                        &table.bucket_entry_hashes,
+                        table.bucket_mask,
                         &left_packed.packed_keys,
                         &right_packed.packed_keys,
                         left_packed.key_bytes,
@@ -5351,10 +5433,8 @@ impl CudaKernelProvider {
         let left_packed = self.compute_hashes_and_pack_keys(left, left_keys)?;
         let right_packed = self.compute_hashes_and_pack_keys(right, right_keys)?;
 
-        // Build hash table from right side
-        let hash_table_size = ((num_right as usize) * 2).max(1024) as u32;
-        let (d_hash_table, d_next_ptrs) =
-            self.build_hash_table_v2(&right_packed.hashes, num_right)?;
+        // Build hash table from right side (cache-friendly bucket layout).
+        let table = self.build_hash_table_v2(&right_packed.hashes, num_right)?;
 
         // Allocate output mask
         let d_no_match = self.memory.alloc::<u8>(num_left as usize)?;
@@ -5374,9 +5454,9 @@ impl CudaKernelProvider {
             shared_mem_bytes: 0,
         };
 
-        // SAFETY: hash_join_anti(probe_hashes, num_probe, hash_table, build_hashes,
-        //                        next_ptrs, hash_table_size, probe_keys, build_keys,
-        //                        key_bytes, no_match)
+        // SAFETY: hash_join_anti(probe_hashes, num_probe,
+        //                        bucket_offsets, bucket_counts, bucket_entries, bucket_entry_hashes, bucket_mask,
+        //                        probe_keys, build_keys, key_bytes, no_match)
         unsafe {
             anti_func
                 .clone()
@@ -5385,10 +5465,11 @@ impl CudaKernelProvider {
                     (
                         &left_packed.hashes,
                         num_left,
-                        &d_hash_table,
-                        &right_packed.hashes,
-                        &d_next_ptrs,
-                        hash_table_size,
+                        &table.bucket_offsets,
+                        &table.bucket_counts,
+                        &table.bucket_entries,
+                        &table.bucket_entry_hashes,
+                        table.bucket_mask,
                         &left_packed.packed_keys,
                         &right_packed.packed_keys,
                         left_packed.key_bytes,
@@ -5452,10 +5533,8 @@ impl CudaKernelProvider {
         let left_packed = self.compute_hashes_and_pack_keys(left, left_keys)?;
         let right_packed = self.compute_hashes_and_pack_keys(right, right_keys)?;
 
-        // Build hash table from right side
-        let hash_table_size = ((num_right as usize) * 2).max(1024) as u32;
-        let (d_hash_table, d_next_ptrs) =
-            self.build_hash_table_v2(&right_packed.hashes, num_right)?;
+        // Build hash table from right side (cache-friendly bucket layout).
+        let table = self.build_hash_table_v2(&right_packed.hashes, num_right)?;
 
         // Allocate mask for semi-join to check which left rows have matches
         let d_has_match = self.memory.alloc::<u8>(num_left as usize)?;
@@ -5475,9 +5554,9 @@ impl CudaKernelProvider {
             shared_mem_bytes: 0,
         };
 
-        // SAFETY: hash_join_semi(probe_hashes, num_probe, hash_table, build_hashes,
-        //                        next_ptrs, hash_table_size, probe_keys, build_keys,
-        //                        key_bytes, has_match)
+        // SAFETY: hash_join_semi(probe_hashes, num_probe,
+        //                        bucket_offsets, bucket_counts, bucket_entries, bucket_entry_hashes, bucket_mask,
+        //                        probe_keys, build_keys, key_bytes, has_match)
         unsafe {
             semi_func
                 .clone()
@@ -5486,10 +5565,11 @@ impl CudaKernelProvider {
                     (
                         &left_packed.hashes,
                         num_left,
-                        &d_hash_table,
-                        &right_packed.hashes,
-                        &d_next_ptrs,
-                        hash_table_size,
+                        &table.bucket_offsets,
+                        &table.bucket_counts,
+                        &table.bucket_entries,
+                        &table.bucket_entry_hashes,
+                        table.bucket_mask,
                         &left_packed.packed_keys,
                         &right_packed.packed_keys,
                         left_packed.key_bytes,
@@ -5519,10 +5599,11 @@ impl CudaKernelProvider {
             let mut params: Vec<*mut c_void> = vec![
                 (&left_packed.hashes).as_kernel_param(),
                 (&num_left).as_kernel_param(),
-                (&d_hash_table).as_kernel_param(),
-                (&right_packed.hashes).as_kernel_param(),
-                (&d_next_ptrs).as_kernel_param(),
-                (&hash_table_size).as_kernel_param(),
+                (&table.bucket_offsets).as_kernel_param(),
+                (&table.bucket_counts).as_kernel_param(),
+                (&table.bucket_entries).as_kernel_param(),
+                (&table.bucket_entry_hashes).as_kernel_param(),
+                (&table.bucket_mask).as_kernel_param(),
                 (&left_packed.packed_keys).as_kernel_param(),
                 (&right_packed.packed_keys).as_kernel_param(),
                 (&left_packed.key_bytes).as_kernel_param(),
@@ -5565,18 +5646,20 @@ impl CudaKernelProvider {
             .htod_sync_copy(&[0u32])
             .map_err(|e| XlogError::Kernel(format!("Failed to alloc output count: {}", e)))?;
 
-        // SAFETY: hash_join_probe_v2(probe_hashes, num_probe, hash_table, build_hashes,
-        //                            next_ptrs, hash_table_size, probe_keys, build_keys,
-        //                            key_bytes, output_left, output_right, output_count, max_output)
+        // SAFETY: hash_join_probe_v2(probe_hashes, num_probe,
+        //                            bucket_offsets, bucket_counts, bucket_entries, bucket_entry_hashes, bucket_mask,
+        //                            probe_keys, build_keys, key_bytes,
+        //                            output_left, output_right, output_count, max_output)
         // Note: Using raw pointer launch because tuple exceeds 12-element limit
         unsafe {
             let mut params: Vec<*mut c_void> = vec![
                 (&left_packed.hashes).as_kernel_param(),
                 (&num_left).as_kernel_param(),
-                (&d_hash_table).as_kernel_param(),
-                (&right_packed.hashes).as_kernel_param(),
-                (&d_next_ptrs).as_kernel_param(),
-                (&hash_table_size).as_kernel_param(),
+                (&table.bucket_offsets).as_kernel_param(),
+                (&table.bucket_counts).as_kernel_param(),
+                (&table.bucket_entries).as_kernel_param(),
+                (&table.bucket_entry_hashes).as_kernel_param(),
+                (&table.bucket_mask).as_kernel_param(),
                 (&left_packed.packed_keys).as_kernel_param(),
                 (&right_packed.packed_keys).as_kernel_param(),
                 (&left_packed.key_bytes).as_kernel_param(),

@@ -28,7 +28,7 @@
 - ✅ CUDA certification suite + PTX validation
 
 ### What's Broken/Limited
-- ❌ GPU sort is correct but not fully optimized (tracked under P3.2/P3.4)
+- ✅ No remaining P1-P3 roadmap blockers (performance tuning continues under Phase 6 benchmarks)
 
 ---
 
@@ -100,7 +100,8 @@
 
 ### P3.2 Coalesced Memory Access
 **Issue:** Hash table probe causes cache misses
-**Solution:** Cache-friendly bucket layout
+**Status:** DONE
+**Solution:** Cache-friendly bucket layout (CSR buckets: counts + offsets + contiguous entries + hashes)
 **Effort:** 1 week
 
 ### P3.3 Multi-Column GPU Sort
@@ -109,7 +110,8 @@
 
 ### P3.4 Kernel Fusion
 **Issue:** Multiple kernel launches for compound operations
-**Solution:** Fuse filter+compact, sort+dedup
+**Status:** DONE
+**Solution:** Fuse filter compare+scan and dedup unique+scan; remove count-kernel pass by computing output counts from final prefix element
 **Effort:** 1-2 weeks
 
 **Total P3 Effort:** ~4 weeks
