@@ -3021,6 +3021,112 @@ impl CudaKernelProvider {
         })
     }
 
+    fn filter_by_device_mask(
+        &self,
+        input: &CudaBuffer,
+        d_mask: &cudarc::driver::CudaSlice<u8>,
+    ) -> Result<CudaBuffer> {
+        if input.is_empty() {
+            return self.create_empty_buffer(input.schema().clone());
+        }
+
+        if input.num_rows() > u32::MAX as u64 {
+            return Err(XlogError::Kernel(format!(
+                "Device-mask filtering supports at most {} rows, got {}",
+                u32::MAX,
+                input.num_rows()
+            )));
+        }
+
+        let n = input.num_rows() as u32;
+        let device = self.device.inner();
+
+        let block_size = 256u32;
+        let num_blocks = (n + block_size - 1) / block_size;
+
+        let d_prefix_sum = self.memory.alloc::<u32>(n as usize)?;
+        let mut d_block_sums = self.memory.alloc::<u32>(num_blocks as usize)?;
+
+        let phase1_fn = device
+            .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE1)
+            .ok_or_else(|| {
+                XlogError::Kernel("Failed to get multiblock_scan_phase1 kernel".to_string())
+            })?;
+
+        // SAFETY: multiblock_scan_phase1(const uint8_t* mask, uint32_t* prefix_sum, uint32_t* block_sums, uint32_t n)
+        unsafe {
+            phase1_fn.clone().launch(
+                LaunchConfig {
+                    grid_dim: (num_blocks, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (d_mask, &d_prefix_sum, &d_block_sums, n),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("multiblock_scan_phase1 failed: {}", e)))?;
+
+        if num_blocks > 1 {
+            self.multiblock_scan_u32_inplace(&mut d_block_sums, num_blocks)?;
+
+            let phase3_fn = device
+                .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE3)
+                .ok_or_else(|| {
+                    XlogError::Kernel("Failed to get multiblock_scan_phase3 kernel".to_string())
+                })?;
+
+            // SAFETY: multiblock_scan_phase3(uint32_t* prefix_sum, const uint32_t* block_offsets, uint32_t n)
+            unsafe {
+                phase3_fn.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (num_blocks, 1, 1),
+                        block_dim: (block_size, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (&d_prefix_sum, &d_block_sums, n),
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("multiblock_scan_phase3 failed: {}", e)))?;
+        }
+
+        // Count total output rows (1s in mask).
+        let mut d_count = self.memory.alloc::<u32>(1)?;
+        device
+            .htod_sync_copy_into(&[0u32], &mut d_count)
+            .map_err(|e| XlogError::Kernel(format!("Failed to init filtered count: {}", e)))?;
+
+        let count_fn = device
+            .get_func(SCAN_MODULE, scan_kernels::COUNT_MASK)
+            .ok_or_else(|| XlogError::Kernel("count_mask kernel not found".to_string()))?;
+
+        // SAFETY: count_mask(const uint8_t* mask, uint32_t n, uint32_t* count)
+        unsafe {
+            count_fn.clone().launch(
+                LaunchConfig {
+                    grid_dim: (num_blocks, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (d_mask, n, &mut d_count),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("count_mask failed: {}", e)))?;
+
+        self.device.synchronize()?;
+
+        let mut count_host = vec![0u32];
+        device
+            .dtoh_sync_copy_into(&d_count, &mut count_host)
+            .map_err(|e| XlogError::Kernel(format!("Failed to read filtered count: {}", e)))?;
+        let output_count = count_host[0] as u64;
+
+        if output_count == 0 {
+            return self.create_empty_buffer(input.schema().clone());
+        }
+
+        self.compact_buffer_by_device_mask(input, d_mask, &d_prefix_sum, output_count)
+    }
+
     // ============== Buffer Helper Methods ==============
 
     /// Create a CudaBuffer from a slice of u32 values (single column)
@@ -4780,17 +4886,7 @@ impl CudaKernelProvider {
                 .map_err(|e| XlogError::Kernel(format!("hash_join_semi failed: {}", e)))?;
         }
 
-        self.device.synchronize()?;
-
-        // Download mask
-        let mut mask_host = vec![0u8; num_left as usize];
-        self.device
-            .inner()
-            .dtoh_sync_copy_into(&d_has_match, &mut mask_host)
-            .map_err(|e| XlogError::Kernel(format!("Failed to read semi-join mask: {}", e)))?;
-
-        // Filter left buffer by mask using gather-based approach (no row limit)
-        self.gather_rows_by_mask(left, &mask_host)
+        self.filter_by_device_mask(left, &d_has_match)
     }
 
     /// Anti-join implementation: return left rows that have NO matches in right
@@ -4888,17 +4984,7 @@ impl CudaKernelProvider {
                 .map_err(|e| XlogError::Kernel(format!("hash_join_anti failed: {}", e)))?;
         }
 
-        self.device.synchronize()?;
-
-        // Download mask
-        let mut mask_host = vec![0u8; num_left as usize];
-        self.device
-            .inner()
-            .dtoh_sync_copy_into(&d_no_match, &mut mask_host)
-            .map_err(|e| XlogError::Kernel(format!("Failed to read anti-join mask: {}", e)))?;
-
-        // Filter left buffer by mask using gather-based approach (no row limit)
-        self.gather_rows_by_mask(left, &mask_host)
+        self.filter_by_device_mask(left, &d_no_match)
     }
 
     /// Left outer join implementation: return all left rows with matched right columns or nulls
@@ -5333,74 +5419,6 @@ impl CudaKernelProvider {
             result_columns,
             num_rows,
             combined_schema,
-        ))
-    }
-
-    /// Gather rows from buffer based on mask (host-based filtering with no row limit)
-    ///
-    /// This is an alternative to filter_by_mask that doesn't have the 256-row limitation
-    /// because it does gathering on the host side.
-    fn gather_rows_by_mask(&self, buffer: &CudaBuffer, mask: &[u8]) -> Result<CudaBuffer> {
-        // Count matching rows and collect indices
-        let indices: Vec<u32> = mask
-            .iter()
-            .enumerate()
-            .filter(|(_, &m)| m != 0)
-            .map(|(i, _)| i as u32)
-            .collect();
-
-        let result_count = indices.len() as u64;
-
-        if result_count == 0 {
-            return self.create_empty_buffer(buffer.schema().clone());
-        }
-
-        // Gather columns using indices
-        let mut result_columns = Vec::with_capacity(buffer.arity());
-
-        for col_idx in 0..buffer.arity() {
-            let col = buffer.column(col_idx).ok_or_else(|| {
-                XlogError::Kernel(format!("Column {} not found", col_idx))
-            })?;
-
-            let elem_size = buffer
-                .schema()
-                .column_type(col_idx)
-                .map(|t| t.size_bytes())
-                .unwrap_or(4);
-
-            // Read column to host
-            let src_bytes = (buffer.num_rows() as usize) * elem_size;
-            let mut src_host = vec![0u8; src_bytes];
-            self.device
-                .inner()
-                .dtoh_sync_copy_into(col, &mut src_host)
-                .map_err(|e| XlogError::Kernel(format!("Failed to read column: {}", e)))?;
-
-            // Gather values using indices
-            let dst_bytes = (result_count as usize) * elem_size;
-            let mut dst_host = vec![0u8; dst_bytes];
-            for (i, &idx) in indices.iter().enumerate() {
-                let src_start = (idx as usize) * elem_size;
-                let dst_start = i * elem_size;
-                dst_host[dst_start..dst_start + elem_size]
-                    .copy_from_slice(&src_host[src_start..src_start + elem_size]);
-            }
-
-            // Upload gathered column
-            let mut dst_col = self.memory.alloc::<u8>(dst_bytes)?;
-            self.device
-                .inner()
-                .htod_sync_copy_into(&dst_host, &mut dst_col)
-                .map_err(|e| XlogError::Kernel(format!("Failed to upload column: {}", e)))?;
-
-            result_columns.push(dst_col);
-        }
-
-        Ok(CudaBuffer::from_columns(
-            result_columns,
-            result_count,
-            buffer.schema().clone(),
         ))
     }
 
