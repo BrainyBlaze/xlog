@@ -23,6 +23,16 @@ use crate::ast::{
 };
 use crate::stratify::{build_dependency_graph, find_sccs_for_lowering, DepType};
 
+struct JoinPlan<'a> {
+    node: RirNode,
+    leaf_order: Vec<&'a Atom>,
+    leaf_order_idx: Vec<usize>,
+    var_pos: HashMap<String, usize>,
+    width: usize,
+    est_rows: f64,
+    total_cost: f64,
+}
+
 /// Lowerer transforms AST programs into RIR execution plans.
 pub struct Lowerer {
     /// Inferred or declared schemas for each predicate
@@ -304,13 +314,25 @@ impl Lowerer {
         let (positive_atoms, negated_atoms, comparisons, is_exprs) =
             Self::split_body_literals(&rule.body);
 
-        // Order positive atoms for join performance.
-        let ordered_atoms = self.order_positive_atoms(&positive_atoms);
+        // Allocate RelIds for all body predicates in source order so join planning
+        // does not influence identifier assignment.
+        for lit in &rule.body {
+            match lit {
+                BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) => {
+                    self.get_or_create_rel_id(&atom.predicate);
+                }
+                BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) => {}
+            }
+        }
 
-        // Build variable environment from the ordered atom layout.
+        // Plan positive atoms (join tree shape + leaf order).
+        let (positive_root, leaf_order) = self.plan_positive_atoms(&positive_atoms)?;
+
+        // Build variable environment from the planned leaf order (matches join output layout:
+        // left subtree columns then right subtree columns).
         let mut var_env = VariableEnv::new();
         let mut current_col = 0;
-        for atom in &ordered_atoms {
+        for atom in &leaf_order {
             let schema = self.schemas.get(&atom.predicate);
             for (i, term) in atom.terms.iter().enumerate() {
                 if let Term::Variable(name) = term {
@@ -329,10 +351,11 @@ impl Lowerer {
             }
             current_col += atom.terms.len();
         }
+        var_env.total_cols = current_col;
 
-        // Lower the body with the chosen join order.
+        // Lower the body starting from the planned positive join root.
         let body_node = self.lower_body_parts(
-            &ordered_atoms,
+            positive_root,
             &negated_atoms,
             &comparisons,
             &is_exprs,
@@ -427,6 +450,246 @@ impl Lowerer {
         }
 
         self.order_positive_atoms_greedy(atoms)
+    }
+
+    fn build_cartesian_join(&self, left: RirNode, right: RirNode, left_width: usize, right_width: usize) -> RirNode {
+        // Implement cross join by appending a constant key column to both inputs and joining on it,
+        // then projecting away the constant columns.
+        let left_const_col = ProjectExpr::Computed(Expr::Const(ConstValue::U32(0)), ScalarType::U32);
+        let right_const_col = ProjectExpr::Computed(Expr::Const(ConstValue::U32(0)), ScalarType::U32);
+
+        let mut left_cols: Vec<ProjectExpr> = (0..left_width).map(ProjectExpr::Column).collect();
+        left_cols.push(left_const_col);
+        let left_aug = RirNode::Project {
+            input: Box::new(left),
+            columns: left_cols,
+        };
+
+        let mut right_cols: Vec<ProjectExpr> = (0..right_width).map(ProjectExpr::Column).collect();
+        right_cols.push(right_const_col);
+        let right_aug = RirNode::Project {
+            input: Box::new(right),
+            columns: right_cols,
+        };
+
+        let joined = RirNode::Join {
+            left: Box::new(left_aug),
+            right: Box::new(right_aug),
+            left_keys: vec![left_width],
+            right_keys: vec![right_width],
+            join_type: JoinType::Inner,
+        };
+
+        let mut keep: Vec<ProjectExpr> = Vec::with_capacity(left_width + right_width);
+        keep.extend((0..left_width).map(ProjectExpr::Column));
+        let right_start = left_width + 1;
+        keep.extend((right_start..right_start + right_width).map(ProjectExpr::Column));
+
+        RirNode::Project {
+            input: Box::new(joined),
+            columns: keep,
+        }
+    }
+
+    fn make_leaf_plan<'a>(&mut self, atom: &'a Atom, orig_idx: usize) -> Result<JoinPlan<'a>> {
+        let rel_id = self.get_or_create_rel_id(&atom.predicate);
+        let scan = RirNode::Scan { rel: rel_id };
+        let node = self.apply_constant_filters(scan, atom, 0)?;
+
+        let mut var_pos: HashMap<String, usize> = HashMap::new();
+        for (i, term) in atom.terms.iter().enumerate() {
+            if let Term::Variable(name) = term {
+                if name != "_" {
+                    var_pos.entry(name.clone()).or_insert(i);
+                }
+            }
+        }
+
+        let est_rows = self.estimate_atom_rows(atom);
+        Ok(JoinPlan {
+            node,
+            leaf_order: vec![atom],
+            leaf_order_idx: vec![orig_idx],
+            var_pos,
+            width: atom.terms.len(),
+            est_rows,
+            total_cost: est_rows,
+        })
+    }
+
+    fn join_plans<'a>(&self, left: &JoinPlan<'a>, right: &JoinPlan<'a>) -> JoinPlan<'a> {
+        let shared_vars: Vec<&String> = left
+            .var_pos
+            .keys()
+            .filter(|v| right.var_pos.contains_key(*v))
+            .collect();
+
+        let node = if shared_vars.is_empty() {
+            self.build_cartesian_join(left.node.clone(), right.node.clone(), left.width, right.width)
+        } else {
+            let mut key_pairs: Vec<(usize, usize)> = shared_vars
+                .iter()
+                .filter_map(|v| Some((left.var_pos.get(*v).copied()?, right.var_pos.get(*v).copied()?)))
+                .collect();
+            key_pairs.sort_unstable();
+
+            let (left_keys, right_keys): (Vec<usize>, Vec<usize>) =
+                key_pairs.into_iter().unzip();
+
+            RirNode::Join {
+                left: Box::new(left.node.clone()),
+                right: Box::new(right.node.clone()),
+                left_keys,
+                right_keys,
+                join_type: JoinType::Inner,
+            }
+        };
+
+        let mut leaf_order = left.leaf_order.clone();
+        leaf_order.extend(right.leaf_order.iter().copied());
+
+        let mut leaf_order_idx = left.leaf_order_idx.clone();
+        leaf_order_idx.extend_from_slice(&right.leaf_order_idx);
+
+        let mut var_pos = left.var_pos.clone();
+        for (var, pos) in &right.var_pos {
+            var_pos.entry(var.clone()).or_insert(left.width + *pos);
+        }
+
+        let shared = shared_vars.len();
+        let mut selectivity = if shared == 0 {
+            1.0
+        } else {
+            0.1_f64.powi(shared as i32)
+        };
+        if shared == 0 {
+            // Penalize cartesian joins strongly.
+            selectivity *= 1.0e6;
+        }
+
+        let output_rows = (left.est_rows * right.est_rows * selectivity).max(1.0);
+
+        // Hash join cost is sensitive to which side is build (right) and probe (left).
+        let build_cost = right.est_rows;
+        let probe_cost = left.est_rows * 0.5;
+        let total_cost = left.total_cost + right.total_cost + build_cost + probe_cost + output_rows;
+
+        JoinPlan {
+            node,
+            leaf_order,
+            leaf_order_idx,
+            var_pos,
+            width: left.width + right.width,
+            est_rows: output_rows,
+            total_cost,
+        }
+    }
+
+    fn plan_positive_atoms_bushy<'a>(&mut self, atoms: &[&'a Atom]) -> Result<(RirNode, Vec<&'a Atom>)> {
+        let n = atoms.len();
+        if n == 0 {
+            return Err(XlogError::Compilation("Empty rule body".to_string()));
+        }
+        if n == 1 {
+            let plan = self.make_leaf_plan(atoms[0], 0)?;
+            return Ok((plan.node, plan.leaf_order));
+        }
+
+        let size = 1usize << n;
+        let mut best: Vec<Option<JoinPlan<'a>>> = (0..size).map(|_| None).collect();
+
+        for (i, atom) in atoms.iter().enumerate() {
+            best[1usize << i] = Some(self.make_leaf_plan(atom, i)?);
+        }
+
+        fn lex_lt(a: &[usize], b: &[usize]) -> bool {
+            for (ai, bi) in a.iter().zip(b.iter()) {
+                if ai != bi {
+                    return ai < bi;
+                }
+            }
+            a.len() < b.len()
+        }
+
+        for mask in 1..size {
+            if mask.count_ones() <= 1 {
+                continue;
+            }
+
+            let mut best_for_mask: Option<JoinPlan<'a>> = None;
+
+            let mut sub = (mask - 1) & mask;
+            while sub > 0 {
+                let a = sub;
+                let b = mask ^ a;
+                if b == 0 {
+                    sub = (sub - 1) & mask;
+                    continue;
+                }
+
+                let (Some(plan_a), Some(plan_b)) = (&best[a], &best[b]) else {
+                    sub = (sub - 1) & mask;
+                    continue;
+                };
+
+                // Consider both orientations: A ⋈ B and B ⋈ A.
+                for (left, right) in [(plan_a, plan_b), (plan_b, plan_a)] {
+                    let cand = self.join_plans(left, right);
+                    let replace = match &best_for_mask {
+                        None => true,
+                        Some(current) => {
+                            if cand.total_cost < current.total_cost {
+                                true
+                            } else if (cand.total_cost - current.total_cost).abs() < 1e-9 {
+                                lex_lt(&cand.leaf_order_idx, &current.leaf_order_idx)
+                            } else {
+                                false
+                            }
+                        }
+                    };
+
+                    if replace {
+                        best_for_mask = Some(cand);
+                    }
+                }
+
+                sub = (sub - 1) & mask;
+            }
+
+            best[mask] = best_for_mask;
+        }
+
+        let full_mask = size - 1;
+        if let Some(plan) = best[full_mask].take() {
+            return Ok((plan.node, plan.leaf_order));
+        }
+
+        // Should be unreachable, but fall back to greedy ordering.
+        let ordered = self.order_positive_atoms_greedy(atoms);
+        let mut dummy_env = VariableEnv::new();
+        let node = self.build_join_tree(&ordered, &mut dummy_env)?;
+        Ok((node, ordered))
+    }
+
+    fn plan_positive_atoms<'a>(&mut self, atoms: &[&'a Atom]) -> Result<(RirNode, Vec<&'a Atom>)> {
+        if atoms.len() <= 1 {
+            if atoms.is_empty() {
+                return Err(XlogError::Compilation("Empty rule body".to_string()));
+            }
+            let plan = self.make_leaf_plan(atoms[0], 0)?;
+            return Ok((plan.node, plan.leaf_order));
+        }
+
+        const MAX_BUSHY_DP_ATOMS: usize = 10;
+        if atoms.len() <= MAX_BUSHY_DP_ATOMS {
+            return self.plan_positive_atoms_bushy(atoms);
+        }
+
+        // Greedy left-deep fallback for large rules.
+        let ordered = self.order_positive_atoms_greedy(atoms);
+        let mut dummy_env = VariableEnv::new();
+        let node = self.build_join_tree(&ordered, &mut dummy_env)?;
+        Ok((node, ordered))
     }
 
     fn order_positive_atoms_greedy<'a>(&self, atoms: &[&'a Atom]) -> Vec<&'a Atom> {
@@ -586,13 +849,13 @@ impl Lowerer {
 
     fn lower_body_parts(
         &mut self,
-        positive_atoms: &[&Atom],
+        positive_root: RirNode,
         negated_atoms: &[&Atom],
         comparisons: &[&Comparison],
         is_exprs: &[&IsExpr],
         var_env: &mut VariableEnv,
     ) -> Result<RirNode> {
-        let mut result = self.build_join_tree(positive_atoms, var_env)?;
+        let mut result = positive_root;
 
         // Apply comparisons as filters.
         for cmp in comparisons {
@@ -1482,8 +1745,9 @@ mod tests {
 
         match join {
             RirNode::Join { left, right, .. } => {
-                assert!(matches!(*left, RirNode::Scan { rel } if rel == small_id));
-                assert!(matches!(*right, RirNode::Scan { rel } if rel == big_id));
+                // Prefer building the hash table on the smaller relation (right/build side).
+                assert!(matches!(*left, RirNode::Scan { rel } if rel == big_id));
+                assert!(matches!(*right, RirNode::Scan { rel } if rel == small_id));
             }
             other => panic!("Expected Join node, got {:?}", other),
         }

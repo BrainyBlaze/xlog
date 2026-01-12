@@ -7,13 +7,126 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use xlog_core::{AggOp, RelId, Result, ScalarType, Schema, XlogError};
-use xlog_cuda::{CudaBuffer, CudaKernelProvider, JoinType as CudaJoinType};
+use xlog_cuda::{CudaBuffer, CudaKernelProvider, JoinIndexV2, JoinType as CudaJoinType};
 use xlog_ir::{
     CompareOp, ConstValue, ExecutionPlan, Expr, JoinType, ProjectExpr, RirNode, Stratum,
 };
 use xlog_stats::{StatsManager, StatsSnapshot};
 
 use crate::RelationStore;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct JoinIndexKey {
+    rel: RelId,
+    version: u64,
+    key_cols: Vec<usize>,
+}
+
+struct CachedJoinIndex {
+    index: JoinIndexV2,
+    bytes: u64,
+    last_used: u64,
+}
+
+struct JoinIndexCache {
+    entries: HashMap<JoinIndexKey, CachedJoinIndex>,
+    clock: u64,
+    total_bytes: u64,
+    max_bytes: u64,
+}
+
+impl JoinIndexCache {
+    fn new(max_bytes: u64) -> Self {
+        Self {
+            entries: HashMap::new(),
+            clock: 0,
+            total_bytes: 0,
+            max_bytes,
+        }
+    }
+
+    fn get(&mut self, key: &JoinIndexKey) -> Option<&JoinIndexV2> {
+        let entry = self.entries.get_mut(key)?;
+        self.clock = self.clock.saturating_add(1);
+        entry.last_used = self.clock;
+        Some(&entry.index)
+    }
+
+    fn insert(&mut self, key: JoinIndexKey, index: JoinIndexV2) {
+        let bytes = index.estimated_bytes();
+        if bytes > self.max_bytes {
+            return;
+        }
+
+        self.evict_until_fits(bytes);
+
+        self.clock = self.clock.saturating_add(1);
+        let last_used = self.clock;
+
+        if let Some(prev) = self.entries.remove(&key) {
+            self.total_bytes = self.total_bytes.saturating_sub(prev.bytes);
+        }
+
+        self.total_bytes = self.total_bytes.saturating_add(bytes);
+        self.entries.insert(
+            key,
+            CachedJoinIndex {
+                index,
+                bytes,
+                last_used,
+            },
+        );
+    }
+
+    fn invalidate_rel(&mut self, rel: RelId) {
+        let keys: Vec<JoinIndexKey> = self
+            .entries
+            .keys()
+            .filter(|k| k.rel == rel)
+            .cloned()
+            .collect();
+        for key in keys {
+            if let Some(entry) = self.entries.remove(&key) {
+                self.total_bytes = self.total_bytes.saturating_sub(entry.bytes);
+            }
+        }
+    }
+
+    fn evict_until_fits(&mut self, additional_bytes: u64) {
+        while !self.entries.is_empty() && self.total_bytes.saturating_add(additional_bytes) > self.max_bytes {
+            let mut oldest_key: Option<JoinIndexKey> = None;
+            let mut oldest_clock = u64::MAX;
+
+            for (k, v) in &self.entries {
+                if v.last_used < oldest_clock {
+                    oldest_clock = v.last_used;
+                    oldest_key = Some(k.clone());
+                }
+            }
+
+            let Some(key) = oldest_key else {
+                break;
+            };
+            if let Some(entry) = self.entries.remove(&key) {
+                self.total_bytes = self.total_bytes.saturating_sub(entry.bytes);
+            } else {
+                break;
+            }
+        }
+    }
+}
+
+/// Incremental update for a base relation.
+pub struct RelationDelta {
+    pub insert: Option<CudaBuffer>,
+    pub delete: Option<CudaBuffer>,
+}
+
+impl RelationDelta {
+    pub fn new(insert: Option<CudaBuffer>, delete: Option<CudaBuffer>) -> Self {
+        Self { insert, delete }
+    }
+}
 
 /// Query executor that interprets RIR nodes using GPU kernels
 ///
@@ -41,8 +154,12 @@ pub struct Executor {
     store: RelationStore,
     /// Mapping from RelId to relation name
     rel_names: HashMap<RelId, String>,
+    /// Mapping from relation name to RelId
+    name_to_rel: HashMap<String, RelId>,
     /// Runtime statistics for adaptive optimization
     stats: StatsManager,
+    /// Cached build-side join indexes (adaptive indexing)
+    join_index_cache: JoinIndexCache,
 }
 
 impl Executor {
@@ -51,11 +168,14 @@ impl Executor {
     /// # Arguments
     /// * `provider` - The CUDA kernel provider for GPU operations
     pub fn new(provider: Arc<CudaKernelProvider>) -> Self {
+        const DEFAULT_JOIN_INDEX_CACHE_BYTES: u64 = 256 * 1024 * 1024;
         Self {
             provider,
             store: RelationStore::new(),
             rel_names: HashMap::new(),
+            name_to_rel: HashMap::new(),
             stats: StatsManager::new(),
+            join_index_cache: JoinIndexCache::new(DEFAULT_JOIN_INDEX_CACHE_BYTES),
         }
     }
 
@@ -92,6 +212,20 @@ impl Executor {
         snapshot
     }
 
+    fn store_put(&mut self, name: &str, buffer: CudaBuffer) {
+        self.store.put(name, buffer);
+        if let Some(&rel_id) = self.name_to_rel.get(name) {
+            self.join_index_cache.invalidate_rel(rel_id);
+        }
+    }
+
+    fn store_remove(&mut self, name: &str) -> Option<CudaBuffer> {
+        if let Some(&rel_id) = self.name_to_rel.get(name) {
+            self.join_index_cache.invalidate_rel(rel_id);
+        }
+        self.store.remove(name)
+    }
+
     /// Register a relation name for a RelId
     ///
     /// This mapping is used when executing Scan nodes to look up relations
@@ -102,6 +236,7 @@ impl Executor {
     /// * `name` - The name to associate with the relation
     pub fn register_relation(&mut self, rel_id: RelId, name: &str) {
         self.rel_names.insert(rel_id, name.to_string());
+        self.name_to_rel.insert(name.to_string(), rel_id);
         self.stats.register_relation(rel_id);
     }
 
@@ -131,6 +266,180 @@ impl Executor {
 
         // If there are no strata, return empty buffer
         Ok(CudaBuffer::empty())
+    }
+
+    /// Apply base-relation deltas and recompute affected SCCs (no recompilation).
+    ///
+    /// This provides correctness for both insertions and deletions by recomputing any SCCs that
+    /// depend (directly or transitively) on the changed relations.
+    pub fn apply_deltas_and_recompute(
+        &mut self,
+        plan: &ExecutionPlan,
+        deltas: &HashMap<String, RelationDelta>,
+    ) -> Result<()> {
+        if deltas.is_empty() {
+            return Ok(());
+        }
+
+        // 1) Apply EDB updates.
+        for (name, delta) in deltas {
+            let existing = self.store.get(name);
+
+            let base_schema = existing
+                .map(|b| b.schema().clone())
+                .or_else(|| delta.insert.as_ref().map(|b| b.schema().clone()))
+                .or_else(|| delta.delete.as_ref().map(|b| b.schema().clone()))
+                .ok_or_else(|| {
+                    XlogError::Execution(format!(
+                        "Delta update for {} has no existing relation and no schema",
+                        name
+                    ))
+                })?;
+
+            let mut updated = if let Some(buf) = existing {
+                self.clone_buffer(buf)?
+            } else {
+                self.create_empty_buffer(base_schema)?
+            };
+
+            if let Some(delete_buf) = &delta.delete {
+                updated = self.provider.diff_gpu(&updated, delete_buf)?;
+            }
+            if let Some(insert_buf) = &delta.insert {
+                updated = self.provider.union_gpu(&updated, insert_buf)?;
+            }
+
+            self.store_put(name, updated);
+        }
+
+        // 2) Compute affected SCC closure.
+        let changed_preds: HashSet<&str> = deltas.keys().map(|s| s.as_str()).collect();
+
+        let mut pred_to_scc: HashMap<&str, u32> = HashMap::new();
+        for scc in &plan.sccs {
+            for pred in &scc.predicates {
+                pred_to_scc.insert(pred.as_str(), scc.id);
+            }
+        }
+
+        let mut dependents: HashMap<u32, Vec<u32>> = HashMap::new();
+        for (scc_id, rules) in plan.rules_by_scc.iter().enumerate() {
+            let scc_id = scc_id as u32;
+            for rule in rules {
+                let mut rels = Vec::new();
+                Self::collect_scan_rels(&rule.body, &mut rels);
+                for rel in rels {
+                    let Some(name) = self.get_rel_name(rel) else {
+                        continue;
+                    };
+                    let Some(&dep_scc) = pred_to_scc.get(name) else {
+                        continue;
+                    };
+                    if dep_scc == scc_id {
+                        continue;
+                    }
+                    dependents.entry(dep_scc).or_default().push(scc_id);
+                }
+            }
+        }
+
+        let mut affected: HashSet<u32> = HashSet::new();
+        let mut queue: Vec<u32> = Vec::new();
+        for pred in &changed_preds {
+            if let Some(&scc) = pred_to_scc.get(*pred) {
+                affected.insert(scc);
+                queue.push(scc);
+            }
+        }
+
+        while let Some(scc) = queue.pop() {
+            if let Some(deps) = dependents.get(&scc) {
+                for &next in deps {
+                    if affected.insert(next) {
+                        queue.push(next);
+                    }
+                }
+            }
+        }
+
+        if affected.is_empty() {
+            return Ok(());
+        }
+
+        // 3) Clear IDB relations for affected SCCs (but never clear directly-updated bases).
+        for scc_id in &affected {
+            let Some(scc) = plan.sccs.iter().find(|s| s.id == *scc_id) else {
+                continue;
+            };
+
+            for pred in &scc.predicates {
+                if changed_preds.contains(pred.as_str()) {
+                    continue;
+                }
+                let schema = plan
+                    .rules_by_scc
+                    .get(*scc_id as usize)
+                    .and_then(|rules| rules.iter().find(|r| r.head == pred.as_str()))
+                    .map(|r| r.meta.schema.clone())
+                    .or_else(|| self.store.get(pred).map(|b| b.schema().clone()))
+                    .unwrap_or_else(|| Schema::new(vec![]));
+
+                let empty = self.create_empty_buffer(schema)?;
+                self.store_put(pred, empty);
+            }
+        }
+
+        // 4) Re-execute affected SCCs in plan order.
+        for stratum in &plan.strata {
+            for &scc_id in &stratum.sccs {
+                if !affected.contains(&scc_id) {
+                    continue;
+                }
+                let rules = plan.rules_by_scc.get(scc_id as usize).ok_or_else(|| {
+                    XlogError::Execution(format!("Missing rules for SCC {}", scc_id))
+                })?;
+                let is_recursive = plan
+                    .sccs
+                    .iter()
+                    .find(|s| s.id == scc_id)
+                    .map(|s| s.is_recursive)
+                    .unwrap_or(false);
+
+                if is_recursive {
+                    self.execute_recursive_scc(rules)?;
+                } else {
+                    self.execute_non_recursive_scc(rules)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn execute_non_recursive_scc(&mut self, rules: &[xlog_ir::CompiledRule]) -> Result<()> {
+        for rule in rules {
+            let result = self.execute_node(&rule.body)?;
+
+            if let Some(existing) = self.store.get(&rule.head) {
+                let merged = self.provider.union(existing, &result)?;
+                let key_cols: Vec<usize> = (0..merged.arity()).collect();
+                let deduped = if merged.is_empty() {
+                    merged
+                } else {
+                    self.provider.dedup(&merged, &key_cols)?
+                };
+                self.store_put(&rule.head, deduped);
+            } else {
+                let key_cols: Vec<usize> = (0..result.arity()).collect();
+                let deduped = if result.is_empty() {
+                    result
+                } else {
+                    self.provider.dedup(&result, &key_cols)?
+                };
+                self.store_put(&rule.head, deduped);
+            }
+        }
+        Ok(())
     }
 
     /// Execute a single RIR node tree
@@ -253,7 +562,7 @@ impl Executor {
                             } else {
                                 self.provider.dedup(&merged, &key_cols)?
                             };
-                            self.store.put(&rule.head, deduped);
+                            self.store_put(&rule.head, deduped);
                         } else {
                             let key_cols: Vec<usize> = (0..result.arity()).collect();
                             let deduped = if result.is_empty() {
@@ -261,7 +570,7 @@ impl Executor {
                             } else {
                                 self.provider.dedup(&result, &key_cols)?
                             };
-                            self.store.put(&rule.head, deduped);
+                            self.store_put(&rule.head, deduped);
                         }
                     }
                 }
@@ -301,7 +610,7 @@ impl Executor {
                     .cloned()
                     .unwrap_or_else(|| Schema::new(vec![]));
                 let empty = self.create_empty_buffer(schema)?;
-                self.store.put(pred, empty);
+                self.store_put(pred, empty);
             }
         }
 
@@ -363,8 +672,8 @@ impl Executor {
 
             // Store full and seed delta with a copy of full for the first iteration.
             let delta_initial = self.clone_buffer(&full)?;
-            self.store.put(pred, full);
-            self.store.put(delta_name, delta_initial);
+            self.store_put(pred, full);
+            self.store_put(delta_name, delta_initial);
         }
 
         // Step 2: Iterate until no new tuples are produced.
@@ -476,7 +785,7 @@ impl Executor {
                 if !delta_new.is_empty() {
                     any_changed = true;
                 }
-                self.store.put(delta_name, delta_new);
+                self.store_put(delta_name, delta_new);
             }
 
             // Fixpoint reached if no deltas produced.
@@ -494,13 +803,13 @@ impl Executor {
                 let (_delta_rel_id, delta_name) = delta_rel_by_pred.get(pred).ok_or_else(|| {
                     XlogError::Execution(format!("Missing delta relation for {}", pred))
                 })?;
-                let delta = self.store.remove(delta_name).ok_or_else(|| {
+                let delta = self.store_remove(delta_name).ok_or_else(|| {
                     XlogError::Execution(format!("Missing relation: {}", delta_name))
                 })?;
 
                 if delta.is_empty() {
-                    self.store.put(pred, full_old);
-                    self.store.put(delta_name, delta);
+                    self.store_put(pred, full_old);
+                    self.store_put(delta_name, delta);
                     continue;
                 }
 
@@ -511,15 +820,16 @@ impl Executor {
                 } else {
                     self.provider.dedup(&merged, &key_cols)?
                 };
-                self.store.put(pred, full_new);
-                self.store.put(delta_name, delta);
+                self.store_put(pred, full_new);
+                self.store_put(delta_name, delta);
             }
         }
 
         // Cleanup: remove delta relations from store and relation mapping.
         for (_pred, (rel_id, delta_name)) in delta_rel_by_pred {
-            self.store.remove(&delta_name);
+            self.store_remove(&delta_name);
             self.rel_names.remove(&rel_id);
+            self.name_to_rel.remove(&delta_name);
             let _ = self.stats.unregister_relation(rel_id);
         }
 
@@ -1426,10 +1736,70 @@ impl Executor {
             JoinType::LeftOuter => CudaJoinType::LeftOuter,
         };
 
-        // Use hash_join_v2 which supports all join types natively
-        let out = self
-            .provider
-            .hash_join_v2(left, right, left_keys, right_keys, cuda_join_type)?;
+        // Adaptive indexing: opportunistically reuse cached build-side hash tables when the right side
+        // is a base relation scan and has become "hot" in runtime statistics.
+        let mut out: Option<CudaBuffer> = None;
+        if let Some(build_rel) = right_rel {
+            let build_heat = self
+                .stats
+                .get_relation_stats(build_rel)
+                .map(|s| s.heat)
+                .unwrap_or(0.0);
+            let should_index = build_heat >= 0.3;
+
+            if let Some(build_name) = self.get_rel_name(build_rel).map(|s| s.to_string()) {
+                if let Some(version) = self.store.version(&build_name) {
+                    let key = JoinIndexKey {
+                        rel: build_rel,
+                        version,
+                        key_cols: right_keys.to_vec(),
+                    };
+
+                    if let Some(index) = self.join_index_cache.get(&key) {
+                        out = Some(self.provider.hash_join_v2_with_index(
+                            left,
+                            right,
+                            left_keys,
+                            right_keys,
+                            cuda_join_type,
+                            index,
+                            None,
+                        )?);
+                    } else if should_index {
+                        if let Some(build_buf) = self.store.get(&build_name) {
+                            match self.provider.build_join_index_v2(build_buf, right_keys) {
+                                Ok(index) => {
+                                    let joined = self.provider.hash_join_v2_with_index(
+                                        left,
+                                        right,
+                                        left_keys,
+                                        right_keys,
+                                        cuda_join_type,
+                                        &index,
+                                        None,
+                                    )?;
+                                    self.join_index_cache.insert(key, index);
+                                    if let Some(stats) = self.stats.get_relation_stats_mut(build_rel) {
+                                        stats.has_index = true;
+                                    }
+                                    out = Some(joined);
+                                }
+                                Err(_) => {
+                                    // If indexing fails (e.g., memory pressure), fall back to normal join.
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let out = match out {
+            Some(buf) => buf,
+            None => self
+                .provider
+                .hash_join_v2(left, right, left_keys, right_keys, cuda_join_type)?,
+        };
 
         if let (Some(l), Some(r)) = (left_rel, right_rel) {
             let input_rows = left.num_rows().saturating_mul(right.num_rows());
@@ -1555,8 +1925,8 @@ impl Executor {
         let full_name = self.get_or_create_rel_name(full_rel, &format!("__full_{}", scc_id));
 
         // Store initial R and delta in relation store
-        self.store.put(&full_name, r_initial);
-        self.store.put(&delta_name, delta_initial);
+        self.store_put(&full_name, r_initial);
+        self.store_put(&delta_name, delta_initial);
 
         // Step 3: Iterate until fixpoint
         for _iteration in 0..Self::MAX_FIXPOINT_ITERATIONS {
@@ -1578,12 +1948,12 @@ impl Executor {
             // Check for fixpoint: if delta_new is empty, we're done
             if delta_new.is_empty() {
                 // Fixpoint reached - return final R
-                let final_r = self.store.remove(&full_name).ok_or_else(|| {
+                let final_r = self.store_remove(&full_name).ok_or_else(|| {
                     XlogError::Execution("Full relation lost during fixpoint".to_string())
                 })?;
 
                 // Clean up delta relation
-                self.store.remove(&delta_name);
+                self.store_remove(&delta_name);
 
                 return Ok(final_r);
             }
@@ -1593,8 +1963,8 @@ impl Executor {
 
             // Update relations for next iteration
             // delta = delta_new (the newly discovered tuples)
-            self.store.put(&delta_name, delta_new);
-            self.store.put(&full_name, new_r);
+            self.store_put(&delta_name, delta_new);
+            self.store_put(&full_name, new_r);
         }
 
         // Iteration limit exceeded
@@ -2657,6 +3027,87 @@ mod tests {
         assert!(executor.store().contains("output"));
         let output = executor.store().get("output").unwrap();
         assert_eq!(output.num_rows(), 5);
+    }
+
+    #[test]
+    fn test_apply_deltas_and_recompute_updates_dependents() {
+        let mut executor = match create_test_executor() {
+            Some(e) => e,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+
+        let input = create_test_buffer(&executor, &[1, 2, 3, 4, 5], "key");
+        executor.store_mut().put("input", input);
+        executor.register_relation(RelId(1), "input");
+
+        // SCC0: identity rule for input (mirrors how compiled facts appear as scan rules).
+        // SCC1: output depends on input.
+        let scc0 = Scc {
+            id: 0,
+            predicates: vec!["input".to_string()],
+            is_recursive: false,
+        };
+        let scc1 = Scc {
+            id: 1,
+            predicates: vec!["output".to_string()],
+            is_recursive: false,
+        };
+
+        let input_rule = CompiledRule {
+            head: "input".to_string(),
+            body: RirNode::Scan { rel: RelId(1) },
+            meta: RirMeta::default(),
+        };
+
+        let output_rule = CompiledRule {
+            head: "output".to_string(),
+            body: RirNode::Filter {
+                input: Box::new(RirNode::Scan { rel: RelId(1) }),
+                predicate: Expr::Compare {
+                    left: Box::new(Expr::Column(0)),
+                    op: CompareOp::Gt,
+                    right: Box::new(Expr::Const(ConstValue::U32(2))),
+                },
+            },
+            meta: RirMeta::default(),
+        };
+
+        let stratum = Stratum {
+            id: 0,
+            sccs: vec![0, 1],
+        };
+
+        let plan = ExecutionPlan {
+            sccs: vec![scc0, scc1],
+            strata: vec![stratum],
+            rules_by_scc: vec![vec![input_rule], vec![output_rule]],
+            est_memory_peak: 0,
+        };
+
+        executor.execute_plan(&plan).expect("initial execute_plan");
+        let initial_out = executor.store().get("output").expect("output missing");
+        let initial_vals = read_buffer_u32(&executor, initial_out, 0);
+        assert_eq!(initial_vals, vec![3, 4, 5]);
+
+        let delete_buf = create_test_buffer(&executor, &[5], "key");
+        let insert_buf = create_test_buffer(&executor, &[10], "key");
+
+        let mut deltas = HashMap::new();
+        deltas.insert(
+            "input".to_string(),
+            RelationDelta::new(Some(insert_buf), Some(delete_buf)),
+        );
+
+        executor
+            .apply_deltas_and_recompute(&plan, &deltas)
+            .expect("apply_deltas_and_recompute");
+
+        let out = executor.store().get("output").expect("output missing after recompute");
+        let vals = read_buffer_u32(&executor, out, 0);
+        assert_eq!(vals, vec![3, 4, 10]);
     }
 
     // ============== RIR Node Composition Tests ==============

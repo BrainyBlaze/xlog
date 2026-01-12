@@ -519,7 +519,7 @@ mod tests {
         let source = r#"
             foo(1).
             edge(1).
-            out(X) :- foo(X), edge(X).
+            out(X) :- edge(X), foo(X).
         "#;
 
         // Snapshot uses different RelIds than the compiler will assign for this program.
@@ -569,8 +569,9 @@ mod tests {
 
         match node {
             RirNode::Join { left, right, .. } => {
-                assert!(matches!(**left, RirNode::Scan { rel } if rel == edge_id));
-                assert!(matches!(**right, RirNode::Scan { rel } if rel == foo_id));
+                // Prefer building on the smaller relation (right/build side).
+                assert!(matches!(**left, RirNode::Scan { rel } if rel == foo_id));
+                assert!(matches!(**right, RirNode::Scan { rel } if rel == edge_id));
             }
             other => panic!("Expected Join node, got {:?}", other),
         }

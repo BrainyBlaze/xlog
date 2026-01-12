@@ -6,7 +6,8 @@ This enables interoperability with the RAPIDS ecosystem (cuDF) and other Arrow-n
 ## Current State
 
 - Export/import is **compatible** with Arrow and cuDF workflows.
-- It is **not zero-copy** today: export downloads GPU → host; import uploads host → GPU.
+- Arrow export/import is **not zero-copy** today: export downloads GPU → host; import uploads host → GPU.
+- A **zero-copy** path exists via DLPack export (per-column) from device memory.
 
 ## Rust API
 
@@ -16,6 +17,7 @@ This enables interoperability with the RAPIDS ecosystem (cuDF) and other Arrow-n
 - `xlog_cuda::CudaKernelProvider::from_arrow_ipc_stream`
 - `xlog_cuda::CudaKernelProvider::write_arrow_ipc_stream_file`
 - `xlog_cuda::CudaKernelProvider::read_arrow_ipc_stream_file`
+- `xlog_cuda::CudaKernelProvider::to_dlpack_table` (zero-copy export)
 
 ## Python cuDF Example (via Arrow IPC)
 
@@ -37,4 +39,6 @@ print(df)
 
 ## Next Work (Zero-Copy)
 
-True zero-copy cuDF interop likely requires a GPU-native interchange path (e.g., DLPack or a CUDA-aware Arrow memory representation).
+True zero-copy cuDF interop needs a GPU-native interchange path:
+- ✅ DLPack export (current): produces DLPack `DLManagedTensor` pointers for each column without copies
+- Next: zero-copy import (wrap external CUDA allocations safely) or CUDA-aware Arrow memory

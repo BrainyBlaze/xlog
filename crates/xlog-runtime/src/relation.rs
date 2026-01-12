@@ -42,7 +42,12 @@ use xlog_cuda::CudaBuffer;
 /// ```
 pub struct RelationStore {
     /// Map of relation names to GPU buffers
-    relations: HashMap<String, CudaBuffer>,
+    relations: HashMap<String, VersionedCudaBuffer>,
+}
+
+struct VersionedCudaBuffer {
+    buffer: CudaBuffer,
+    version: u64,
 }
 
 impl RelationStore {
@@ -61,7 +66,7 @@ impl RelationStore {
     /// # Returns
     /// `Some(&CudaBuffer)` if the relation exists, `None` otherwise
     pub fn get(&self, name: &str) -> Option<&CudaBuffer> {
-        self.relations.get(name)
+        self.relations.get(name).map(|e| &e.buffer)
     }
 
     /// Get a mutable reference to a relation by name
@@ -72,7 +77,24 @@ impl RelationStore {
     /// # Returns
     /// `Some(&mut CudaBuffer)` if the relation exists, `None` otherwise
     pub fn get_mut(&mut self, name: &str) -> Option<&mut CudaBuffer> {
-        self.relations.get_mut(name)
+        self.relations.get_mut(name).map(|e| {
+            // Any mutable access may change the contents; bump the version so cached
+            // indexes can be invalidated conservatively.
+            e.version = e.version.saturating_add(1);
+            &mut e.buffer
+        })
+    }
+
+    /// Get a relation by name along with its current version.
+    pub fn get_with_version(&self, name: &str) -> Option<(&CudaBuffer, u64)> {
+        self.relations
+            .get(name)
+            .map(|e| (&e.buffer, e.version))
+    }
+
+    /// Get the current version for a relation.
+    pub fn version(&self, name: &str) -> Option<u64> {
+        self.relations.get(name).map(|e| e.version)
     }
 
     /// Store a relation with the given name
@@ -83,7 +105,15 @@ impl RelationStore {
     /// * `name` - The name of the relation
     /// * `buffer` - The GPU buffer containing the relation data
     pub fn put(&mut self, name: &str, buffer: CudaBuffer) {
-        self.relations.insert(name.to_string(), buffer);
+        let version = self
+            .relations
+            .get(name)
+            .map(|e| e.version.saturating_add(1))
+            .unwrap_or(1);
+        self.relations.insert(
+            name.to_string(),
+            VersionedCudaBuffer { buffer, version },
+        );
     }
 
     /// Get a relation by name, or insert an empty buffer with the given schema
@@ -99,13 +129,17 @@ impl RelationStore {
     /// # Returns
     /// A reference to the existing buffer, or the newly inserted empty buffer
     pub fn get_or_insert_empty(&mut self, name: &str, schema: &Schema) -> &CudaBuffer {
-        self.relations
-            .entry(name.to_string())
-            .or_insert_with(|| CudaBuffer {
-                columns: Vec::new(),
-                num_rows: 0,
-                schema: schema.clone(),
-            })
+        let entry = self.relations.entry(name.to_string()).or_insert_with(|| {
+            VersionedCudaBuffer {
+                buffer: CudaBuffer {
+                    columns: Vec::new(),
+                    num_rows: 0,
+                    schema: schema.clone(),
+                },
+                version: 1,
+            }
+        });
+        &entry.buffer
     }
 
     /// Get a mutable reference to a relation, or insert an empty buffer with the given schema
@@ -121,13 +155,18 @@ impl RelationStore {
     /// # Returns
     /// A mutable reference to the existing buffer, or the newly inserted empty buffer
     pub fn get_or_insert_empty_mut(&mut self, name: &str, schema: &Schema) -> &mut CudaBuffer {
-        self.relations
-            .entry(name.to_string())
-            .or_insert_with(|| CudaBuffer {
-                columns: Vec::new(),
-                num_rows: 0,
-                schema: schema.clone(),
-            })
+        let entry = self.relations.entry(name.to_string()).or_insert_with(|| {
+            VersionedCudaBuffer {
+                buffer: CudaBuffer {
+                    columns: Vec::new(),
+                    num_rows: 0,
+                    schema: schema.clone(),
+                },
+                version: 1,
+            }
+        });
+        entry.version = entry.version.saturating_add(1);
+        &mut entry.buffer
     }
 
     /// Check if a relation exists in the store
@@ -149,7 +188,7 @@ impl RelationStore {
     /// # Returns
     /// `Some(CudaBuffer)` if the relation existed, `None` otherwise
     pub fn remove(&mut self, name: &str) -> Option<CudaBuffer> {
-        self.relations.remove(name)
+        self.relations.remove(name).map(|e| e.buffer)
     }
 
     /// Clear all relations from the store
