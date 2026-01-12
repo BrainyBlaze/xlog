@@ -1,9 +1,9 @@
 //! Tests for Arrow/CuDF integration
 
-use std::sync::Arc;
 use arrow::array::{AsArray, BooleanArray};
 use arrow::datatypes::{Int64Type, UInt32Type};
-use xlog_core::{MemoryBudget, Schema, ScalarType};
+use std::sync::Arc;
+use xlog_core::{MemoryBudget, ScalarType, Schema};
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 
 fn setup_provider() -> Option<CudaKernelProvider> {
@@ -34,13 +34,12 @@ fn test_export_to_arrow_record_batch() {
     let ids: Vec<u32> = vec![1, 2, 3, 4, 5];
     let values: Vec<i64> = vec![100, 200, 300, 400, 500];
 
-    let buffer = provider.create_buffer_from_slices(
-        &[
-            bytemuck::cast_slice(&ids),
-            bytemuck::cast_slice(&values),
-        ],
-        schema,
-    ).unwrap();
+    let buffer = provider
+        .create_buffer_from_slices(
+            &[bytemuck::cast_slice(&ids), bytemuck::cast_slice(&values)],
+            schema,
+        )
+        .unwrap();
 
     // Export to Arrow RecordBatch
     let record_batch = provider.to_arrow_record_batch(&buffer).unwrap();
@@ -57,10 +56,20 @@ fn test_export_to_arrow_record_batch() {
     let value_array = record_batch.column(1).as_primitive::<Int64Type>();
 
     for (i, expected_id) in ids.iter().enumerate() {
-        assert_eq!(id_array.value(i), *expected_id, "id mismatch at index {}", i);
+        assert_eq!(
+            id_array.value(i),
+            *expected_id,
+            "id mismatch at index {}",
+            i
+        );
     }
     for (i, expected_value) in values.iter().enumerate() {
-        assert_eq!(value_array.value(i), *expected_value, "value mismatch at index {}", i);
+        assert_eq!(
+            value_array.value(i),
+            *expected_value,
+            "value mismatch at index {}",
+            i
+        );
     }
 }
 
@@ -72,16 +81,13 @@ fn test_export_bool_column_to_arrow() {
     };
 
     // Create a buffer with Bool column
-    let schema = Schema::new(vec![
-        ("flag".to_string(), ScalarType::Bool),
-    ]);
+    let schema = Schema::new(vec![("flag".to_string(), ScalarType::Bool)]);
 
     let flags: Vec<u8> = vec![1, 0, 1, 1, 0]; // true, false, true, true, false
 
-    let buffer = provider.create_buffer_from_slices(
-        &[&flags],
-        schema,
-    ).unwrap();
+    let buffer = provider
+        .create_buffer_from_slices(&[&flags], schema)
+        .unwrap();
 
     // Export to Arrow RecordBatch
     let record_batch = provider.to_arrow_record_batch(&buffer).unwrap();
@@ -99,8 +105,82 @@ fn test_export_bool_column_to_arrow() {
 
     let expected_bools = [true, false, true, true, false];
     for (i, expected) in expected_bools.iter().enumerate() {
-        assert_eq!(flag_array.value(i), *expected, "flag mismatch at index {}", i);
+        assert_eq!(
+            flag_array.value(i),
+            *expected,
+            "flag mismatch at index {}",
+            i
+        );
     }
+}
+
+#[test]
+fn test_arrow_ipc_stream_roundtrip() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    let schema = Schema::new(vec![
+        ("id".to_string(), ScalarType::U32),
+        ("value".to_string(), ScalarType::I64),
+    ]);
+
+    let ids: Vec<u32> = vec![10, 20, 30];
+    let values: Vec<i64> = vec![111, 222, 333];
+
+    let buffer = provider
+        .create_buffer_from_slices(
+            &[bytemuck::cast_slice(&ids), bytemuck::cast_slice(&values)],
+            schema,
+        )
+        .unwrap();
+
+    let ipc = provider.to_arrow_ipc_stream(&buffer).unwrap();
+    let roundtripped = provider.from_arrow_ipc_stream(&ipc).unwrap();
+
+    let rb = provider.to_arrow_record_batch(&roundtripped).unwrap();
+    assert_eq!(rb.num_rows(), 3);
+
+    let id_array = rb.column(0).as_primitive::<UInt32Type>();
+    let value_array = rb.column(1).as_primitive::<Int64Type>();
+
+    assert_eq!(id_array.values(), &ids);
+    assert_eq!(value_array.values(), &values);
+}
+
+#[test]
+fn test_arrow_ipc_stream_file_roundtrip() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    let schema = Schema::new(vec![("id".to_string(), ScalarType::U32)]);
+    let ids: Vec<u32> = vec![1, 2, 3, 4];
+
+    let buffer = provider
+        .create_buffer_from_slices(&[bytemuck::cast_slice(&ids)], schema)
+        .unwrap();
+
+    let path = std::env::temp_dir().join(format!(
+        "xlog_arrow_ipc_test_{}_{}.arrow",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+
+    provider
+        .write_arrow_ipc_stream_file(&buffer, &path)
+        .unwrap();
+    let roundtripped = provider.read_arrow_ipc_stream_file(&path).unwrap();
+    let _ = std::fs::remove_file(&path);
+
+    let rb = provider.to_arrow_record_batch(&roundtripped).unwrap();
+    let id_array = rb.column(0).as_primitive::<UInt32Type>();
+    assert_eq!(id_array.values(), &ids);
 }
 
 #[test]
@@ -120,10 +200,7 @@ fn test_create_buffer_from_slices_row_count_validation() {
     let values: Vec<i64> = vec![100, 200, 300]; // 3 rows - mismatch!
 
     let result = provider.create_buffer_from_slices(
-        &[
-            bytemuck::cast_slice(&ids),
-            bytemuck::cast_slice(&values),
-        ],
+        &[bytemuck::cast_slice(&ids), bytemuck::cast_slice(&values)],
         schema,
     );
 
@@ -132,8 +209,11 @@ fn test_create_buffer_from_slices_row_count_validation() {
         Err(e) => e.to_string(),
         Ok(_) => panic!("Expected error for mismatched row counts"),
     };
-    assert!(err_msg.contains("3 rows") && err_msg.contains("5 rows"),
-        "Error message should mention the row count mismatch: {}", err_msg);
+    assert!(
+        err_msg.contains("3 rows") && err_msg.contains("5 rows"),
+        "Error message should mention the row count mismatch: {}",
+        err_msg
+    );
 }
 
 #[test]
@@ -155,10 +235,8 @@ fn test_import_from_arrow_record_batch() {
     let x_array = Arc::new(UInt32Array::from(vec![10, 20, 30])) as Arc<dyn Array>;
     let y_array = Arc::new(Float64Array::from(vec![1.5, 2.5, 3.5])) as Arc<dyn Array>;
 
-    let record_batch = arrow::record_batch::RecordBatch::try_new(
-        schema,
-        vec![x_array, y_array],
-    ).unwrap();
+    let record_batch =
+        arrow::record_batch::RecordBatch::try_new(schema, vec![x_array, y_array]).unwrap();
 
     // Import into CudaBuffer
     let buffer = provider.from_arrow_record_batch(&record_batch).unwrap();
@@ -195,17 +273,39 @@ fn test_arrow_roundtrip_all_types() {
     ]);
 
     let bool_data: Vec<u8> = vec![1, 0, 1, 0];
-    let u32_data: Vec<u8> = [1u32, 2, 3, 4].iter().flat_map(|v| v.to_le_bytes()).collect();
-    let i32_data: Vec<u8> = [-1i32, -2, 3, 4].iter().flat_map(|v| v.to_le_bytes()).collect();
-    let u64_data: Vec<u8> = [100u64, 200, 300, 400].iter().flat_map(|v| v.to_le_bytes()).collect();
-    let i64_data: Vec<u8> = [-100i64, 200, -300, 400].iter().flat_map(|v| v.to_le_bytes()).collect();
-    let f32_data: Vec<u8> = [1.5f32, 2.5, 3.5, 4.5].iter().flat_map(|v| v.to_le_bytes()).collect();
-    let f64_data: Vec<u8> = [1.5f64, 2.5, 3.5, 4.5].iter().flat_map(|v| v.to_le_bytes()).collect();
+    let u32_data: Vec<u8> = [1u32, 2, 3, 4]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    let i32_data: Vec<u8> = [-1i32, -2, 3, 4]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    let u64_data: Vec<u8> = [100u64, 200, 300, 400]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    let i64_data: Vec<u8> = [-100i64, 200, -300, 400]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    let f32_data: Vec<u8> = [1.5f32, 2.5, 3.5, 4.5]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    let f64_data: Vec<u8> = [1.5f64, 2.5, 3.5, 4.5]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
 
-    let buffer = provider.create_buffer_from_slices(
-        &[&bool_data, &u32_data, &i32_data, &u64_data, &i64_data, &f32_data, &f64_data],
-        schema,
-    ).unwrap();
+    let buffer = provider
+        .create_buffer_from_slices(
+            &[
+                &bool_data, &u32_data, &i32_data, &u64_data, &i64_data, &f32_data, &f64_data,
+            ],
+            schema,
+        )
+        .unwrap();
 
     // Export to Arrow
     let record_batch = provider.to_arrow_record_batch(&buffer).unwrap();
