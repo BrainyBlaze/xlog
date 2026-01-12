@@ -20,7 +20,7 @@
 - ✅ Stratified negation analysis
 - ✅ Semi-naive fixpoint iteration
 - ✅ GPU hash joins (inner/semi/anti/left-outer; on-device materialization; key verification; byte-hashed scalar keys)
-- ✅ Sort correctness for all scalar key types (stable CPU permutation + GPU reorder)
+- ✅ Sort correctness for all scalar key types (stable GPU permutation + GPU reorder)
 - ✅ GPU set operations (union, diff)
 - ✅ GPU aggregations (count, sum, min, max)
 - ✅ LogSumExp aggregation (F64)
@@ -28,9 +28,7 @@
 - ✅ CUDA certification suite + PTX validation
 
 ### What's Broken/Limited
-- ❌ Dedup still relies on CPU-computed sort permutation (host roundtrip)
-- ❌ Set ops still rely on CPU-computed sort permutation (tracked under P3.3)
-- ❌ Multi-column GPU-native sort not implemented (current path computes permutation on CPU)
+- ❌ GPU sort is correct but not fully optimized (tracked under P3.2/P3.4)
 
 ---
 
@@ -96,9 +94,9 @@
 ## Priority 3: Performance Optimizations
 
 ### P3.1 Optimize Radix Scatter
+**Status:** DONE
 **Issue:** O(grid_size) loop in scatter phase
-**Solution:** Use multi-level prefix sum for offsets
-**Effort:** 3-4 days
+**Solution:** Precompute per-digit per-block offsets via GPU prefix sums (no per-element block loop)
 
 ### P3.2 Coalesced Memory Access
 **Issue:** Hash table probe causes cache misses
@@ -106,9 +104,8 @@
 **Effort:** 1 week
 
 ### P3.3 Multi-Column GPU Sort
-**Current:** Correct multi-column sorting works, but permutation is computed on CPU.
-**Goal:** Fully GPU-native composite key sort (no host roundtrip), reusing pack + radix or bitonic strategies.
-**Effort:** 1 week
+**Status:** DONE
+**Change:** Stable GPU radix sort generates the permutation on-device for all scalar key types and multi-column lexicographic keys (no host roundtrip).
 
 ### P3.4 Kernel Fusion
 **Issue:** Multiple kernel launches for compound operations
@@ -211,7 +208,7 @@ Month 12+:  Phase 6 (Scaling)
 - [x] E2E Datalog queries work
 - [x] CUDA certification suite passes (133/133)
 - [x] No known critical correctness bugs in CUDA provider
-- [ ] GPU-resident execution ← **Partial** (joins + filter/compact + dedup/set-ops compaction stay on-GPU; sort permutation still CPU)
+- [ ] GPU-resident execution ← **Partial** (core joins/sort/dedup/set-ops stay on-GPU; remaining CPU paths mostly in arithmetic/utility helpers)
 
 ### Production Ready (After P1+P2)
 - [x] All critical CUDA correctness fixes applied

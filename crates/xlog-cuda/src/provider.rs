@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use cudarc::driver::{CudaView, DevicePtr, DeviceRepr, DeviceSlice, LaunchAsync, LaunchConfig};
+use cudarc::driver::{CudaView, CudaViewMut, DevicePtr, DeviceRepr, DeviceSlice, LaunchAsync, LaunchConfig};
 use std::ffi::c_void;
 use cudarc::nvrtc::Ptx;
 use xlog_core::{AggOp, Result, Schema, ScalarType, XlogError};
@@ -83,9 +83,23 @@ pub mod sort_kernels {
     pub const RADIX_SCATTER: &str = "radix_scatter";
     pub const COMPUTE_RANKS: &str = "compute_ranks";
     pub const RADIX_SCATTER_STABLE: &str = "radix_scatter_stable";
+    pub const COMPUTE_DIGIT_PREFIX_SUMS: &str = "compute_digit_prefix_sums";
     pub const INIT_INDICES: &str = "init_indices";
     pub const APPLY_PERMUTATION_U32: &str = "apply_permutation_u32";
     pub const APPLY_PERMUTATION_BYTES: &str = "apply_permutation_bytes";
+
+    pub const GATHER_KEYS_I32_ORDERED_U32: &str = "gather_keys_i32_ordered_u32";
+    pub const GATHER_KEYS_F32_ORDERED_U32: &str = "gather_keys_f32_ordered_u32";
+    pub const GATHER_KEYS_BOOL_ORDERED_U32: &str = "gather_keys_bool_ordered_u32";
+
+    pub const GATHER_KEYS_U64_LO_U32: &str = "gather_keys_u64_lo_u32";
+    pub const GATHER_KEYS_U64_HI_U32: &str = "gather_keys_u64_hi_u32";
+
+    pub const GATHER_KEYS_I64_LO_U32: &str = "gather_keys_i64_lo_u32";
+    pub const GATHER_KEYS_I64_HI_U32: &str = "gather_keys_i64_hi_u32";
+
+    pub const GATHER_KEYS_F64_LO_U32: &str = "gather_keys_f64_lo_u32";
+    pub const GATHER_KEYS_F64_HI_U32: &str = "gather_keys_f64_hi_u32";
 }
 
 /// Kernel function names in the filter module
@@ -297,9 +311,19 @@ impl CudaKernelProvider {
                     sort_kernels::RADIX_SCATTER,
                     sort_kernels::COMPUTE_RANKS,
                     sort_kernels::RADIX_SCATTER_STABLE,
+                    sort_kernels::COMPUTE_DIGIT_PREFIX_SUMS,
                     sort_kernels::INIT_INDICES,
                     sort_kernels::APPLY_PERMUTATION_U32,
                     sort_kernels::APPLY_PERMUTATION_BYTES,
+                    sort_kernels::GATHER_KEYS_I32_ORDERED_U32,
+                    sort_kernels::GATHER_KEYS_F32_ORDERED_U32,
+                    sort_kernels::GATHER_KEYS_BOOL_ORDERED_U32,
+                    sort_kernels::GATHER_KEYS_U64_LO_U32,
+                    sort_kernels::GATHER_KEYS_U64_HI_U32,
+                    sort_kernels::GATHER_KEYS_I64_LO_U32,
+                    sort_kernels::GATHER_KEYS_I64_HI_U32,
+                    sort_kernels::GATHER_KEYS_F64_LO_U32,
+                    sort_kernels::GATHER_KEYS_F64_HI_U32,
                 ],
             )
             .map_err(|e| XlogError::Kernel(format!("Failed to load sort PTX: {}", e)))?;
@@ -2396,6 +2420,85 @@ impl CudaKernelProvider {
                         block_dim: (block_size, 1, 1),
                         shared_mem_bytes: 0,
                     },
+                    (&mut *data, n),
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("multiblock_scan_phase2 failed: {}", e)))?;
+
+            return Ok(());
+        }
+
+        let num_blocks = (n + block_size - 1) / block_size;
+        let mut block_sums = self.memory.alloc::<u32>(num_blocks as usize)?;
+
+        let phase1_u32_fn = device
+            .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_U32_PHASE1)
+            .ok_or_else(|| {
+                XlogError::Kernel("Failed to get multiblock_scan_u32_phase1 kernel".to_string())
+            })?;
+
+        // SAFETY: multiblock_scan_u32_phase1(uint32_t* data, uint32_t* block_sums, uint32_t n)
+        unsafe {
+            phase1_u32_fn.clone().launch(
+                LaunchConfig {
+                    grid_dim: (num_blocks, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (&mut *data, &mut block_sums, n),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("multiblock_scan_u32_phase1 failed: {}", e)))?;
+
+        if num_blocks > 1 {
+            self.multiblock_scan_u32_inplace(&mut block_sums, num_blocks)?;
+        }
+
+        let phase3_fn = device
+            .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE3)
+            .ok_or_else(|| {
+                XlogError::Kernel("Failed to get multiblock_scan_phase3 kernel".to_string())
+            })?;
+
+        // SAFETY: multiblock_scan_phase3(uint32_t* prefix_sum, const uint32_t* block_offsets, uint32_t n)
+        unsafe {
+            phase3_fn.clone().launch(
+                LaunchConfig {
+                    grid_dim: (num_blocks, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (&mut *data, &block_sums, n),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("multiblock_scan_phase3 failed: {}", e)))?;
+
+        Ok(())
+    }
+
+    fn multiblock_scan_u32_view_inplace(&self, data: &mut CudaViewMut<'_, u32>, n: u32) -> Result<()> {
+        if n == 0 {
+            return Ok(());
+        }
+
+        let device = self.device.inner();
+        let block_size = 256u32;
+
+        if n <= block_size {
+            let phase2_fn = device
+                .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE2)
+                .ok_or_else(|| {
+                    XlogError::Kernel("Failed to get multiblock_scan_phase2 kernel".to_string())
+                })?;
+
+            // SAFETY: multiblock_scan_phase2(uint32_t* block_sums, uint32_t num_blocks)
+            unsafe {
+                phase2_fn.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (block_size, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
                     (data, n),
                 )
             }
@@ -2458,12 +2561,12 @@ impl CudaKernelProvider {
 
     /// Sort buffer by key columns.
     ///
-    /// Computes a row permutation on the CPU (supports multi-column and all scalar types),
+    /// Computes a stable row permutation on the GPU (supports multi-column and all scalar types),
     /// then applies the permutation on the GPU to reorder all columns.
     ///
     /// # Arguments
     /// * `input` - The input buffer to sort
-    /// * `key_cols` - Column indices to use for sorting (currently only single column supported)
+    /// * `key_cols` - Column indices to use for sorting (lexicographic, first key is most significant)
     ///
     /// # Returns
     /// A new buffer with rows sorted by the key columns
@@ -2502,69 +2605,377 @@ impl CudaKernelProvider {
             }
         }
 
-        let n = input.num_rows as usize;
+        let n = input.num_rows as u32;
+        let device = self.device.inner();
 
-        enum KeyColumn {
-            U32(Vec<u32>),
-            U64(Vec<u64>),
-            I32(Vec<i32>),
-            I64(Vec<i64>),
-            F32(Vec<f32>),
-            F64(Vec<f64>),
-            Bool(Vec<bool>),
-        }
+        let block_size = Self::SORT_BLOCK_SIZE;
+        let grid_size = (n + block_size - 1) / block_size;
+        let launch_config = LaunchConfig {
+            grid_dim: (grid_size, 1, 1),
+            block_dim: (block_size, 1, 1),
+            shared_mem_bytes: 0,
+        };
 
-        let mut key_columns = Vec::with_capacity(key_cols.len());
-        for &col_idx in key_cols {
+        // Allocate and initialize identity permutation.
+        let init_fn = device
+            .get_func(SORT_MODULE, sort_kernels::INIT_INDICES)
+            .ok_or_else(|| XlogError::Kernel("init_indices kernel not found".to_string()))?;
+
+        let mut indices_a = self.memory.alloc::<u32>(n as usize)?;
+        let mut indices_b = self.memory.alloc::<u32>(n as usize)?;
+
+        // SAFETY: init_indices(uint32_t* indices, uint32_t n)
+        unsafe { init_fn.clone().launch(launch_config, (&mut indices_a, n)) }
+            .map_err(|e| XlogError::Kernel(format!("init_indices failed: {}", e)))?;
+
+        // Working key buffers (u32 words).
+        let mut keys_a = self.memory.alloc::<u32>(n as usize)?;
+        let mut keys_b = self.memory.alloc::<u32>(n as usize)?;
+
+        // Radix-sort scratch.
+        let mut d_hist = self.memory.alloc::<u32>((grid_size as usize) * 16)?;
+        let mut d_prefix = self.memory.alloc::<u32>(16)?;
+        let mut d_ranks = self.memory.alloc::<u32>(n as usize)?;
+
+        // Process key columns from least-significant to most-significant (stable LSD).
+        for &col_idx in key_cols.iter().rev() {
             let ty = input.schema.column_type(col_idx).ok_or_else(|| {
                 XlogError::Kernel(format!("Key column {} type not found in schema", col_idx))
             })?;
 
-            let col_data = match ty {
+            let col = input.column(col_idx).ok_or_else(|| {
+                XlogError::Kernel(format!("Key column {} not found", col_idx))
+            })?;
+
+            match ty {
                 ScalarType::U32 | ScalarType::Symbol => {
-                    KeyColumn::U32(self.download_column_u32(input, col_idx)?)
+                    let col_view = self.column_as_u32_view(col, n as usize)?;
+                    let gather_fn = device
+                        .get_func(SORT_MODULE, sort_kernels::APPLY_PERMUTATION_U32)
+                        .ok_or_else(|| {
+                            XlogError::Kernel("apply_permutation_u32 kernel not found".to_string())
+                        })?;
+
+                    // SAFETY: apply_permutation_u32(input, output, permutation, n)
+                    unsafe {
+                        gather_fn.clone().launch(
+                            launch_config,
+                            (&col_view, &mut keys_a, &indices_a, n),
+                        )
+                    }
+                    .map_err(|e| XlogError::Kernel(format!("apply_permutation_u32 failed: {}", e)))?;
+
+                    self.radix_sort_u32_pairs_with_scratch(
+                        &mut keys_a,
+                        &mut keys_b,
+                        &mut indices_a,
+                        &mut indices_b,
+                        &mut d_hist,
+                        &mut d_prefix,
+                        &mut d_ranks,
+                        n,
+                    )?;
                 }
-                ScalarType::U64 => KeyColumn::U64(self.download_column_u64(input, col_idx)?),
-                ScalarType::I32 => KeyColumn::I32(self.download_column_i32(input, col_idx)?),
-                ScalarType::I64 => KeyColumn::I64(self.download_column_i64(input, col_idx)?),
-                ScalarType::F32 => KeyColumn::F32(self.download_column_f32(input, col_idx)?),
-                ScalarType::F64 => KeyColumn::F64(self.download_column_f64(input, col_idx)?),
-                ScalarType::Bool => KeyColumn::Bool(self.download_column_bool(input, col_idx)?),
-            };
-            key_columns.push(col_data);
-        }
+                ScalarType::I32 => {
+                    let col_bits = self.column_as_u32_view(col, n as usize)?;
+                    let gather_fn = device
+                        .get_func(SORT_MODULE, sort_kernels::GATHER_KEYS_I32_ORDERED_U32)
+                        .ok_or_else(|| {
+                            XlogError::Kernel("gather_keys_i32_ordered_u32 kernel not found".to_string())
+                        })?;
 
-        let mut permutation: Vec<u32> = (0..n as u32).collect();
-        permutation.sort_by(|&a, &b| {
-            let a = a as usize;
-            let b = b as usize;
+                    // SAFETY: gather_keys_i32_ordered_u32(i32_bits, permutation, num_rows, out_keys)
+                    unsafe {
+                        gather_fn
+                            .clone()
+                            .launch(launch_config, (&col_bits, &indices_a, n, &mut keys_a))
+                    }
+                    .map_err(|e| XlogError::Kernel(format!("gather_keys_i32_ordered_u32 failed: {}", e)))?;
 
-            for col in &key_columns {
-                let ord = match col {
-                    KeyColumn::U32(v) => v[a].cmp(&v[b]),
-                    KeyColumn::U64(v) => v[a].cmp(&v[b]),
-                    KeyColumn::I32(v) => v[a].cmp(&v[b]),
-                    KeyColumn::I64(v) => v[a].cmp(&v[b]),
-                    KeyColumn::F32(v) => v[a].total_cmp(&v[b]),
-                    KeyColumn::F64(v) => v[a].total_cmp(&v[b]),
-                    KeyColumn::Bool(v) => v[a].cmp(&v[b]),
-                };
+                    self.radix_sort_u32_pairs_with_scratch(
+                        &mut keys_a,
+                        &mut keys_b,
+                        &mut indices_a,
+                        &mut indices_b,
+                        &mut d_hist,
+                        &mut d_prefix,
+                        &mut d_ranks,
+                        n,
+                    )?;
+                }
+                ScalarType::F32 => {
+                    let col_bits = self.column_as_u32_view(col, n as usize)?;
+                    let gather_fn = device
+                        .get_func(SORT_MODULE, sort_kernels::GATHER_KEYS_F32_ORDERED_U32)
+                        .ok_or_else(|| {
+                            XlogError::Kernel("gather_keys_f32_ordered_u32 kernel not found".to_string())
+                        })?;
 
-                if ord != std::cmp::Ordering::Equal {
-                    return ord;
+                    // SAFETY: gather_keys_f32_ordered_u32(f32_bits, permutation, num_rows, out_keys)
+                    unsafe {
+                        gather_fn
+                            .clone()
+                            .launch(launch_config, (&col_bits, &indices_a, n, &mut keys_a))
+                    }
+                    .map_err(|e| XlogError::Kernel(format!("gather_keys_f32_ordered_u32 failed: {}", e)))?;
+
+                    self.radix_sort_u32_pairs_with_scratch(
+                        &mut keys_a,
+                        &mut keys_b,
+                        &mut indices_a,
+                        &mut indices_b,
+                        &mut d_hist,
+                        &mut d_prefix,
+                        &mut d_ranks,
+                        n,
+                    )?;
+                }
+                ScalarType::Bool => {
+                    if col.num_bytes() < n as usize {
+                        return Err(XlogError::Kernel(format!(
+                            "Bool column {} has {} bytes but expected {}",
+                            col_idx,
+                            col.num_bytes(),
+                            n
+                        )));
+                    }
+
+                    let gather_fn = device
+                        .get_func(SORT_MODULE, sort_kernels::GATHER_KEYS_BOOL_ORDERED_U32)
+                        .ok_or_else(|| {
+                            XlogError::Kernel("gather_keys_bool_ordered_u32 kernel not found".to_string())
+                        })?;
+
+                    // SAFETY: gather_keys_bool_ordered_u32(bools, permutation, num_rows, out_keys)
+                    unsafe {
+                        gather_fn
+                            .clone()
+                            .launch(launch_config, (col, &indices_a, n, &mut keys_a))
+                    }
+                    .map_err(|e| XlogError::Kernel(format!("gather_keys_bool_ordered_u32 failed: {}", e)))?;
+
+                    self.radix_sort_u32_pairs_with_scratch(
+                        &mut keys_a,
+                        &mut keys_b,
+                        &mut indices_a,
+                        &mut indices_b,
+                        &mut d_hist,
+                        &mut d_prefix,
+                        &mut d_ranks,
+                        n,
+                    )?;
+                }
+                ScalarType::U64 => {
+                    let col_bits = self.column_as_u64_view(col, n as usize)?;
+                    for &word in &[sort_kernels::GATHER_KEYS_U64_LO_U32, sort_kernels::GATHER_KEYS_U64_HI_U32] {
+                        let gather_fn = device
+                            .get_func(SORT_MODULE, word)
+                            .ok_or_else(|| XlogError::Kernel(format!("{} kernel not found", word)))?;
+
+                        // SAFETY: gather_keys_u64_*_u32(vals, permutation, num_rows, out_keys)
+                        unsafe {
+                            gather_fn
+                                .clone()
+                                .launch(launch_config, (&col_bits, &indices_a, n, &mut keys_a))
+                        }
+                        .map_err(|e| XlogError::Kernel(format!("{} failed: {}", word, e)))?;
+
+                        self.radix_sort_u32_pairs_with_scratch(
+                            &mut keys_a,
+                            &mut keys_b,
+                            &mut indices_a,
+                            &mut indices_b,
+                            &mut d_hist,
+                            &mut d_prefix,
+                            &mut d_ranks,
+                            n,
+                        )?;
+                    }
+                }
+                ScalarType::I64 => {
+                    let col_bits = self.column_as_u64_view(col, n as usize)?;
+                    for &word in &[sort_kernels::GATHER_KEYS_I64_LO_U32, sort_kernels::GATHER_KEYS_I64_HI_U32] {
+                        let gather_fn = device
+                            .get_func(SORT_MODULE, word)
+                            .ok_or_else(|| XlogError::Kernel(format!("{} kernel not found", word)))?;
+
+                        // SAFETY: gather_keys_i64_*_u32(i64_bits, permutation, num_rows, out_keys)
+                        unsafe {
+                            gather_fn
+                                .clone()
+                                .launch(launch_config, (&col_bits, &indices_a, n, &mut keys_a))
+                        }
+                        .map_err(|e| XlogError::Kernel(format!("{} failed: {}", word, e)))?;
+
+                        self.radix_sort_u32_pairs_with_scratch(
+                            &mut keys_a,
+                            &mut keys_b,
+                            &mut indices_a,
+                            &mut indices_b,
+                            &mut d_hist,
+                            &mut d_prefix,
+                            &mut d_ranks,
+                            n,
+                        )?;
+                    }
+                }
+                ScalarType::F64 => {
+                    let col_bits = self.column_as_u64_view(col, n as usize)?;
+                    for &word in &[sort_kernels::GATHER_KEYS_F64_LO_U32, sort_kernels::GATHER_KEYS_F64_HI_U32] {
+                        let gather_fn = device
+                            .get_func(SORT_MODULE, word)
+                            .ok_or_else(|| XlogError::Kernel(format!("{} kernel not found", word)))?;
+
+                        // SAFETY: gather_keys_f64_*_u32(f64_bits, permutation, num_rows, out_keys)
+                        unsafe {
+                            gather_fn
+                                .clone()
+                                .launch(launch_config, (&col_bits, &indices_a, n, &mut keys_a))
+                        }
+                        .map_err(|e| XlogError::Kernel(format!("{} failed: {}", word, e)))?;
+
+                        self.radix_sort_u32_pairs_with_scratch(
+                            &mut keys_a,
+                            &mut keys_b,
+                            &mut indices_a,
+                            &mut indices_b,
+                            &mut d_hist,
+                            &mut d_prefix,
+                            &mut d_ranks,
+                            n,
+                        )?;
+                    }
                 }
             }
+        }
 
-            std::cmp::Ordering::Equal
-        });
+        self.apply_permutation_gpu(input, &indices_a)
+    }
+
+    fn radix_sort_u32_pairs_with_scratch(
+        &self,
+        keys_a: &mut crate::memory::TrackedCudaSlice<u32>,
+        keys_b: &mut crate::memory::TrackedCudaSlice<u32>,
+        indices_a: &mut crate::memory::TrackedCudaSlice<u32>,
+        indices_b: &mut crate::memory::TrackedCudaSlice<u32>,
+        hist: &mut crate::memory::TrackedCudaSlice<u32>,
+        prefix: &mut crate::memory::TrackedCudaSlice<u32>,
+        ranks: &mut crate::memory::TrackedCudaSlice<u32>,
+        n: u32,
+    ) -> Result<()> {
+        if n == 0 {
+            return Ok(());
+        }
 
         let device = self.device.inner();
-        let mut d_perm = self.memory.alloc::<u32>(n)?;
-        device
-            .htod_sync_copy_into(&permutation, &mut d_perm)
-            .map_err(|e| XlogError::Kernel(format!("Failed to upload sort permutation: {}", e)))?;
+        let block_size = Self::SORT_BLOCK_SIZE;
+        let grid_size = (n + block_size - 1) / block_size;
 
-        self.apply_permutation_gpu(input, &d_perm)
+        let sort_config = LaunchConfig {
+            grid_dim: (grid_size, 1, 1),
+            block_dim: (block_size, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        let histogram_fn = device
+            .get_func(SORT_MODULE, sort_kernels::RADIX_HISTOGRAM)
+            .ok_or_else(|| XlogError::Kernel("radix_histogram kernel not found".to_string()))?;
+        let prefix_fn = device
+            .get_func(SORT_MODULE, sort_kernels::COMPUTE_DIGIT_PREFIX_SUMS)
+            .ok_or_else(|| {
+                XlogError::Kernel("compute_digit_prefix_sums kernel not found".to_string())
+            })?;
+        let ranks_fn = device
+            .get_func(SORT_MODULE, sort_kernels::COMPUTE_RANKS)
+            .ok_or_else(|| XlogError::Kernel("compute_ranks kernel not found".to_string()))?;
+        let scatter_fn = device
+            .get_func(SORT_MODULE, sort_kernels::RADIX_SCATTER_STABLE)
+            .ok_or_else(|| {
+                XlogError::Kernel("radix_scatter_stable kernel not found".to_string())
+            })?;
+
+        let prefix_config = LaunchConfig {
+            grid_dim: (1, 1, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        let mut in_a = true;
+        for pass in 0..8u32 {
+            let shift = pass * 4;
+
+            let (keys_in, indices_in, keys_out, indices_out) = if in_a {
+                (&*keys_a, &*indices_a, &mut *keys_b, &mut *indices_b)
+            } else {
+                (&*keys_b, &*indices_b, &mut *keys_a, &mut *indices_a)
+            };
+
+            // Histogram (digit-major): hist[digit * grid_size + block] = count
+            // SAFETY: radix_histogram(keys, num_rows, histograms, shift)
+            unsafe {
+                histogram_fn
+                    .clone()
+                    .launch(sort_config, (keys_in, n, &mut *hist, shift))
+            }
+            .map_err(|e| XlogError::Kernel(format!("radix_histogram failed: {}", e)))?;
+
+            // Compute global digit prefix sums.
+            // SAFETY: compute_digit_prefix_sums(histograms, grid_size, prefix_sums)
+            unsafe {
+                prefix_fn
+                    .clone()
+                    .launch(prefix_config, (&*hist, grid_size, &mut *prefix))
+            }
+            .map_err(|e| XlogError::Kernel(format!("compute_digit_prefix_sums failed: {}", e)))?;
+
+            // Convert per-block histograms to per-block exclusive offsets (in-place scan per digit).
+            for digit in 0..16u32 {
+                let start = (digit * grid_size) as usize;
+                let end = start + (grid_size as usize);
+                let mut digit_slice = hist.slice_mut(start..end);
+                self.multiblock_scan_u32_view_inplace(&mut digit_slice, grid_size)?;
+            }
+
+            // Compute per-element ranks for stability.
+            // SAFETY: compute_ranks(keys, num_rows, ranks, shift)
+            unsafe {
+                ranks_fn
+                    .clone()
+                    .launch(sort_config, (keys_in, n, &mut *ranks, shift))
+            }
+            .map_err(|e| XlogError::Kernel(format!("compute_ranks failed: {}", e)))?;
+
+            // Stable scatter using digit prefix + per-block offsets + ranks.
+            // SAFETY: radix_scatter_stable(keys_in, indices_in, ranks, keys_out, indices_out, prefix_sums, block_offsets, num_rows, shift)
+            unsafe {
+                scatter_fn.clone().launch(
+                    sort_config,
+                    (
+                        keys_in,
+                        indices_in,
+                        &*ranks,
+                        keys_out,
+                        indices_out,
+                        &*prefix,
+                        &*hist,
+                        n,
+                        shift,
+                    ),
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("radix_scatter_stable failed: {}", e)))?;
+
+            in_a = !in_a;
+        }
+
+        // 8 passes (32b/4b) => even number of swaps => sorted data ends in A.
+        if !in_a {
+            return Err(XlogError::Kernel(
+                "Unexpected radix-sort buffer parity (expected even number of passes)".to_string(),
+            ));
+        }
+
+        Ok(())
     }
 
     /// Apply permutation to reorder all columns in buffer using GPU
@@ -4045,6 +4456,25 @@ impl CudaKernelProvider {
         // SAFETY: We've verified the column has enough bytes
         unsafe { col.transmute(num_elements) }
             .ok_or_else(|| XlogError::Kernel("Failed to transmute column to u32".to_string()))
+    }
+
+    fn column_as_u64_view<'a>(
+        &self,
+        col: &'a cudarc::driver::CudaSlice<u8>,
+        num_elements: usize,
+    ) -> Result<CudaView<'a, u64>> {
+        let required_bytes = num_elements * std::mem::size_of::<u64>();
+        if col.num_bytes() < required_bytes {
+            return Err(XlogError::Kernel(format!(
+                "Column has {} bytes but {} required for {} u64 elements",
+                col.num_bytes(),
+                required_bytes,
+                num_elements
+            )));
+        }
+        // SAFETY: We've verified the column has enough bytes.
+        unsafe { col.transmute(num_elements) }
+            .ok_or_else(|| XlogError::Kernel("Failed to transmute column to u64".to_string()))
     }
 
     /// Transmute a CudaSlice<u8> column to a CudaView<f64> for kernel access
