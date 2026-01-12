@@ -112,6 +112,26 @@ impl Compiler {
 
         // Phase 3: Lower AST to execution plan
         self.lowerer.set_strata(strata_preds);
+
+        // If we have predicate names for the snapshot, use them to seed lowering-time
+        // join ordering with better cardinality estimates.
+        let mut cardinality_hints: HashMap<String, u64> = HashMap::new();
+        if let Some(snapshot) = stats_snapshot {
+            if !snapshot.rel_names.is_empty() {
+                let rel_name_by_id: HashMap<RelId, &str> = snapshot
+                    .rel_names
+                    .iter()
+                    .map(|(id, name)| (*id, name.as_str()))
+                    .collect();
+                for rel in &snapshot.relations {
+                    if let Some(name) = rel_name_by_id.get(&rel.rel_id) {
+                        cardinality_hints.insert((*name).to_string(), rel.cardinality);
+                    }
+                }
+            }
+        }
+        self.lowerer.set_cardinality_hints(cardinality_hints);
+
         let mut plan = self.lowerer.lower_program(&program)?;
 
         // Phase 4: Optimize (predicate pushdown + cost-aware rewrites)
@@ -136,7 +156,80 @@ impl Compiler {
         }
 
         if let Some(snapshot) = stats_snapshot {
-            mgr.merge_snapshot(snapshot);
+            if snapshot.rel_names.is_empty() {
+                mgr.merge_snapshot(snapshot);
+            } else {
+                let rel_name_by_id: HashMap<RelId, &str> = snapshot
+                    .rel_names
+                    .iter()
+                    .map(|(id, name)| (*id, name.as_str()))
+                    .collect();
+
+                for rel in &snapshot.relations {
+                    let Some(pred) = rel_name_by_id.get(&rel.rel_id) else {
+                        continue;
+                    };
+                    let Some(rel_id) = self.lowerer.rel_ids().get(*pred) else {
+                        continue;
+                    };
+
+                    let mut remapped = rel.clone();
+                    remapped.rel_id = *rel_id;
+
+                    if let Some(schema) = self.lowerer.schemas().get(*pred) {
+                        remapped.column_stats.retain(|col| {
+                            col.col_idx < schema.arity()
+                                && schema.column_type(col.col_idx) == Some(col.dtype)
+                        });
+                    } else {
+                        remapped.column_stats.clear();
+                    }
+
+                    mgr.register_relation(*rel_id);
+                    if let Some(stats) = mgr.get_relation_stats_mut(*rel_id) {
+                        *stats = remapped;
+                    }
+                }
+
+                for js in &snapshot.join_selectivities {
+                    if js.left_keys.len() != js.right_keys.len() {
+                        continue;
+                    }
+
+                    let Some(left_pred) = rel_name_by_id.get(&js.left_rel) else {
+                        continue;
+                    };
+                    let Some(right_pred) = rel_name_by_id.get(&js.right_rel) else {
+                        continue;
+                    };
+                    let Some(&left_id) = self.lowerer.rel_ids().get(*left_pred) else {
+                        continue;
+                    };
+                    let Some(&right_id) = self.lowerer.rel_ids().get(*right_pred) else {
+                        continue;
+                    };
+
+                    let Some(left_schema) = self.lowerer.schemas().get(*left_pred) else {
+                        continue;
+                    };
+                    let Some(right_schema) = self.lowerer.schemas().get(*right_pred) else {
+                        continue;
+                    };
+                    if js.left_keys.iter().any(|&k| k >= left_schema.arity())
+                        || js.right_keys.iter().any(|&k| k >= right_schema.arity())
+                    {
+                        continue;
+                    }
+
+                    mgr.set_join_selectivity(
+                        left_id,
+                        right_id,
+                        js.left_keys.clone(),
+                        js.right_keys.clone(),
+                        js.selectivity,
+                    );
+                }
+            }
         }
 
         let optimizer = Optimizer::new(Arc::new(mgr));
@@ -194,6 +287,8 @@ pub fn compile(source: &str) -> Result<ExecutionPlan> {
 mod tests {
     use super::*;
     use xlog_stats::StatsManager;
+    use xlog_stats::RelationStats;
+    use xlog_ir::RirNode;
 
     #[test]
     fn test_compiler_new() {
@@ -416,5 +511,68 @@ mod tests {
             .compile_with_stats_snapshot(source, Some(&snapshot))
             .expect("Compile with snapshot failed");
         assert!(!plan.sccs.is_empty());
+    }
+
+    #[test]
+    fn test_compile_with_named_stats_snapshot_reorders_joins() {
+        let mut compiler = Compiler::new();
+        let source = r#"
+            foo(1).
+            edge(1).
+            out(X) :- foo(X), edge(X).
+        "#;
+
+        // Snapshot uses different RelIds than the compiler will assign for this program.
+        // Map: RelId(0) -> edge (small), RelId(1) -> foo (big)
+        let mut edge_stats = RelationStats::new(RelId(0));
+        edge_stats.update_cardinality(10);
+        let mut foo_stats = RelationStats::new(RelId(1));
+        foo_stats.update_cardinality(10_000);
+
+        let snapshot = StatsSnapshot {
+            relations: vec![edge_stats, foo_stats],
+            join_selectivities: Vec::new(),
+            rel_names: vec![
+                (RelId(0), "edge".to_string()),
+                (RelId(1), "foo".to_string()),
+            ],
+        };
+
+        let plan = compiler
+            .compile_with_stats_snapshot(source, Some(&snapshot))
+            .expect("Compile with named snapshot failed");
+
+        let foo_id = *compiler
+            .rel_ids()
+            .get("foo")
+            .expect("foo rel_id missing");
+        let edge_id = *compiler
+            .rel_ids()
+            .get("edge")
+            .expect("edge rel_id missing");
+
+        let out_rule = plan
+            .rules_by_scc
+            .iter()
+            .flatten()
+            .find(|r| r.head == "out")
+            .expect("out rule missing");
+
+        // Peel projections to reach the join.
+        let mut node = &out_rule.body;
+        loop {
+            match node {
+                RirNode::Project { input, .. } => node = input,
+                other => break other,
+            }
+        };
+
+        match node {
+            RirNode::Join { left, right, .. } => {
+                assert!(matches!(**left, RirNode::Scan { rel } if rel == edge_id));
+                assert!(matches!(**right, RirNode::Scan { rel } if rel == foo_id));
+            }
+            other => panic!("Expected Join node, got {:?}", other),
+        }
     }
 }

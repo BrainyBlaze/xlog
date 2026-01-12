@@ -16,6 +16,11 @@ use crate::stats::{ColumnStats, JoinSelectivity, RelationStats};
 pub struct StatsSnapshot {
     pub relations: Vec<RelationStats>,
     pub join_selectivities: Vec<JoinSelectivity>,
+    /// Optional mapping from runtime `RelId` to predicate name.
+    ///
+    /// When present, consumers should prefer this over raw `RelId` matching to avoid
+    /// misapplying statistics across different programs where `RelId`s may be reused.
+    pub rel_names: Vec<(RelId, String)>,
 }
 
 /// Manages GPU-resident statistics for all relations.
@@ -88,6 +93,7 @@ impl StatsManager {
         StatsSnapshot {
             relations: self.relations.values().cloned().collect(),
             join_selectivities: self.join_selectivities.values().cloned().collect(),
+            rel_names: Vec::new(),
         }
     }
 

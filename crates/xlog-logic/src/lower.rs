@@ -31,6 +31,8 @@ pub struct Lowerer {
     strata: Vec<Vec<String>>,
     /// Estimated cardinality per predicate (for join ordering)
     est_cardinality: HashMap<String, u64>,
+    /// Optional cardinality hints per predicate (e.g., from runtime statistics).
+    cardinality_hints: HashMap<String, u64>,
     /// Next available relation ID
     next_rel_id: u32,
     /// Mapping from predicate names to relation IDs
@@ -52,6 +54,7 @@ impl Lowerer {
             schemas: HashMap::new(),
             strata: Vec::new(),
             est_cardinality: HashMap::new(),
+            cardinality_hints: HashMap::new(),
             next_rel_id: 0,
             rel_ids: HashMap::new(),
             sccs: Vec::new(),
@@ -61,6 +64,13 @@ impl Lowerer {
     /// Set the stratification result for ordering
     pub fn set_strata(&mut self, strata: Vec<Vec<String>>) {
         self.strata = strata;
+    }
+
+    /// Set cardinality hints (typically sourced from runtime statistics snapshots).
+    ///
+    /// These hints are used by lowering-time join ordering when available.
+    pub fn set_cardinality_hints(&mut self, hints: HashMap<String, u64>) {
+        self.cardinality_hints = hints;
     }
 
     /// Get the mapping from predicate names to relation IDs
@@ -146,7 +156,13 @@ impl Lowerer {
         }
 
         for pred in self.schemas.keys() {
-            let est = fact_counts.get(pred).copied().unwrap_or(1000).max(1);
+            let est = self
+                .cardinality_hints
+                .get(pred)
+                .copied()
+                .or_else(|| fact_counts.get(pred).copied())
+                .unwrap_or(1000)
+                .max(1);
             self.est_cardinality.insert(pred.clone(), est);
         }
     }

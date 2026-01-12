@@ -11,7 +11,7 @@ use xlog_cuda::{CudaBuffer, CudaKernelProvider, JoinType as CudaJoinType};
 use xlog_ir::{
     CompareOp, ConstValue, ExecutionPlan, Expr, JoinType, ProjectExpr, RirNode, Stratum,
 };
-use xlog_stats::StatsManager;
+use xlog_stats::{StatsManager, StatsSnapshot};
 
 use crate::RelationStore;
 
@@ -77,6 +77,19 @@ impl Executor {
     /// Get a mutable reference to the runtime statistics manager
     pub fn stats_mut(&mut self) -> &mut StatsManager {
         &mut self.stats
+    }
+
+    /// Capture a runtime statistics snapshot, including predicate name mappings.
+    ///
+    /// Use this snapshot to seed the compiler/optimizer on subsequent compilations.
+    pub fn stats_snapshot(&self) -> StatsSnapshot {
+        let mut snapshot = self.stats.snapshot();
+        snapshot.rel_names = self
+            .rel_names
+            .iter()
+            .map(|(id, name)| (*id, name.clone()))
+            .collect();
+        snapshot
     }
 
     /// Register a relation name for a RelId

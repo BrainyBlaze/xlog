@@ -138,9 +138,9 @@
 - Compiler runs optimizer pass (predicate pushdown) on all compiled rule bodies
 - Lowering-time cost-based join atom ordering (DP for small bodies, greedy fallback) using estimated cardinalities + bound-variable preference
 - Compiler can seed optimizer from a `xlog_stats::StatsSnapshot` (runtime → compiler feedback loop)
+- Stats snapshots can include predicate names so the compiler can safely remap stats across `RelId` reuse and use snapshot cardinalities to inform lowering-time join ordering
 **Next:**
 - Cost-based join ordering across full join tree shapes (beyond left-deep)
-- Stats snapshot keyed by predicate name (avoid RelId reuse across different programs)
 **Effort:** 3-4 weeks
 
 ### P4.3 Incremental Maintenance
