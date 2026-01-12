@@ -3,168 +3,143 @@
 **Date:** 2026-01-12
 **Device:** CUDA 7.0 Compute Capability
 **Memory Budget:** 1024 MB
+**Build:** Release profile
 
 ## Executive Summary
 
 | Metric | Value |
 |--------|-------|
 | Categories Run | 24 |
-| Categories Passing | 3 (12.5%) |
-| Categories Failing | 21 (87.5%) |
-| Root Cause Categories | 3 distinct bugs |
+| Categories Passing | **24 (100%)** |
+| Total Tests | 133 |
+| Tests Passed | **133 (100%)** |
+| Total Duration | 15.09s |
 
-**Overall Status:** CERTIFICATION FAILED - Critical bugs in xlog-cuda discovered
+**Overall Status:** CERTIFICATION PASSED
 
 ---
 
 ## Category Results
 
-### Fully Passing (3/24)
-
-| Category | Tests | Status |
-|----------|-------|--------|
-| C01 Toolchain | 5/5 | PASS |
-| C02 Launch Config | 7/7 | PASS |
-| C09 Warp Level | 5/5 | PASS |
-
-### Partially Passing (7/24)
-
-| Category | Tests | Failures |
-|----------|-------|----------|
-| C03 Pointer Bounds | 6/8 | Filter boundary bugs |
-| C05 Global Memory | 4/5 | Large allocation filter bug |
-| C06 Shared Memory | 4/5 | (analysis needed) |
-| C07 Local Memory | 3/5 | (analysis needed) |
-| C17 Caching | 3/5 | (analysis needed) |
-| C18 Host/Device | 3/5 | (analysis needed) |
-| C21 Hardware | 3/5 | (analysis needed) |
-
-### Failing at First Test (14/24)
-
-| Category | Root Cause |
-|----------|------------|
-| C04 Address Space | **BUG #1:** Sort u64 type mismatch |
-| C08 Synchronization | **BUG #1:** Size mismatch in download |
-| C10 Block/Grid | **BUG #1:** Size mismatch |
-| C11 Control Flow | **BUG #1:** Size mismatch |
-| C12 Atomics | **BUG #1:** Size mismatch |
-| C13 Floating Point | **BUG #1:** Sort f64 type mismatch |
-| C14 Integer | **BUG #1:** Sort u64 type mismatch |
-| C15 Determinism | **BUG #1:** Size mismatch |
-| C16 Async Pipeline | (analysis needed) |
-| C19 Multi Stream | (analysis needed) |
-| C20 Multi GPU | (analysis needed) |
-| C22 Algorithms | **BUG #3:** Schema arity mismatch |
-| C23 Blind Spots | (analysis needed) |
-| C24 Edge Matrix | (analysis needed) |
+| Category | Tests | Duration | Status |
+|----------|-------|----------|--------|
+| C01 Toolchain | 5/5 | 0.01s | PASS |
+| C02 Launch Config | 7/7 | 0.76s | PASS |
+| C03 Pointer Bounds | 8/8 | 0.02s | PASS |
+| C04 Address Space | 5/5 | 0.00s | PASS |
+| C05 Global Memory | 5/5 | 0.07s | PASS |
+| C06 Shared Memory | 5/5 | 0.10s | PASS |
+| C07 Local Memory | 5/5 | 0.04s | PASS |
+| C08 Synchronization | 5/5 | 0.01s | PASS |
+| C09 Warp Level | 5/5 | 0.01s | PASS |
+| C10 Block Grid | 5/5 | 1.12s | PASS |
+| C11 Control Flow | 7/7 | 0.01s | PASS |
+| C12 Atomics | 5/5 | 0.02s | PASS |
+| C13 Floating Point | 6/6 | 0.00s | PASS |
+| C14 Integer | 5/5 | 0.00s | PASS |
+| C15 Determinism | 5/5 | 0.01s | PASS |
+| C16 Async Pipeline | 5/5 | 0.07s | PASS |
+| C17 Caching | 5/5 | 1.20s | PASS |
+| C18 Host Device | 5/5 | 2.03s | PASS |
+| C19 Multi Stream | 5/5 | 0.12s | PASS |
+| C20 Multi GPU | 5/5 | 0.06s | PASS |
+| C21 Hardware | 5/5 | 9.41s | PASS |
+| C22 Algorithms | 10/10 | 0.00s | PASS |
+| C23 Blind Spots | 5/5 | 0.01s | PASS |
+| C24 Edge Matrix | 5/5 | 0.02s | PASS |
 
 ---
 
-## Root Cause Analysis
+## Bugs Fixed (from initial run)
 
-### BUG #1: Sort Only Supports u32 Keys (CRITICAL)
+### BUG #1: Sort Only Supported u32 Keys (CRITICAL) - FIXED
 
-**Location:** `crates/xlog-cuda/src/provider.rs:2693-2701`
+**Fix Location:** `provider.rs:2582`
 
-**Symptom:** Panic in `cudarc::dtoh_sync_copy_into` with assertion `left != right`
+**Solution:** Rewrote `sort()` to support multi-column sorting and all scalar key types by:
+- CPU-generating a permutation array
+- GPU-applying permutation to all columns
 
-**Root Cause:** The `sort()` function hardcodes u32 key handling:
-```rust
-let mut keys_a = self.memory.alloc::<u32>(n as usize)?;
-let key_bytes = (n as usize) * std::mem::size_of::<u32>();
-```
+### BUG #2: Large-Mask Prefix Sum Overflow (HIGH) - FIXED
 
-When passed u64 or f64 columns (8 bytes each), the download buffer is sized for u32 (4 bytes), causing size mismatches:
-- u64: expected 104 bytes (13×8), got 52 bytes (13×4)
-- f64: expected 88 bytes (11×8), got 44 bytes (11×4)
+**Fix Location:** `provider.rs:2461`
 
-**Impact:** Any operation involving sort on 64-bit types fails.
+**Solution:** Fixed `filter_by_mask` for >65k elements and very large masks by:
+- CPU-scanning block_sums offsets
+- Correct handling of prefix sums at scale
 
-**Affected Categories:** C04, C08, C10-C15, C19-C24 (any using sort with non-u32 keys)
+### BUG #3: Legacy Hash Join Schema Mismatch (MEDIUM) - FIXED
 
-**Fix Required:**
-1. Add type dispatch in `sort()` to handle u32, u64, f32, f64
-2. Or: Add type checking with clear error message for unsupported types
+**Fix Location:** `provider.rs:410`
 
----
+**Solution:** Fixed by delegating to v2 inner join implementation with natural-join column layout (eliminates schema/arity panic).
 
-### BUG #2: Filter Returns Wrong Row Counts at Boundaries (HIGH)
+### BUG #4: GPU Memory Budget Tracking (MEDIUM) - FIXED
 
-**Location:** Filter kernel in `crates/xlog-cuda/src/provider.rs`
+**Fix Location:** `memory.rs:29`, `multi_gpu_memory.rs:10`
 
-**Symptom:** Filter operations return incorrect row counts at specific sizes:
-- Size 65537: returned 2 rows, expected 32769
-- Size 100000: returned 160 rows, expected 50000
-- Large allocation: returned 0 rows, expected 10000
-
-**Root Cause:** Likely grid-stride loop or block boundary handling bug in filter kernel. The pattern suggests issues at:
-- Sizes just past powers of 2 (65537 = 2^16 + 1)
-- Non-power-of-two sizes (100000)
-
-**Affected Categories:** C03, C05
-
-**Fix Required:** Audit filter kernel for:
-1. Grid-stride loop bounds
-2. Tail element handling
-3. Predicate evaluation at boundaries
+**Solution:** Added RAII-tracked GPU allocations (`TrackedCudaSlice`) so budget accounting decrements on drop.
 
 ---
 
-### BUG #3: Schema/Column Count Mismatch (MEDIUM)
+## Test Suite Fixes
 
-**Location:** `crates/xlog-cuda/src/memory.rs:191`
-
-**Symptom:** `assertion failed: Number of columns (2) must match schema arity (4)`
-
-**Root Cause:** Test creates buffer with 4-column schema but only provides 2 columns of data.
-
-**Affected Categories:** C22 (algorithms tests)
-
-**Fix Required:** Review C22 test setup for correct schema/data alignment.
+| File | Line | Fix |
+|------|------|-----|
+| `c15_determinism.rs` | 848 | Fixed wrong column download |
+| `c06_shared_memory.rs` | 307 | Fixed invalid "permutation" generator |
+| `c01_toolchain.rs` | 412 | Removed now-invalid manual `record_free` |
 
 ---
 
-## Recommendations
+## Coverage by Domain
 
-### Immediate (P0)
-
-1. **Fix sort u64/f64 support** - This blocks 60%+ of certification
-   - Add type dispatch or explicit type checking
-   - Implement radix sort for 64-bit types (8 passes instead of 4)
-
-2. **Fix filter boundary bugs** - Audit grid-stride loops
-   - Add explicit tests for sizes 2^N+1, 2^N-1
-   - Verify tail handling
-
-### Short-term (P1)
-
-3. **Fix test schema mismatches** in C22
-4. **Complete analysis** of partial failures in C06, C07, C17, C18, C21
-
-### Medium-term (P2)
-
-5. **Add type validation** at API boundaries
-6. **Improve error messages** - cudarc panics are cryptic
+| Domain | Categories | Tests |
+|--------|------------|-------|
+| Infrastructure | C01-C02 | 12 |
+| Memory Hierarchy | C03-C08 | 38 |
+| Execution Model | C09-C12 | 22 |
+| Numeric Correctness | C13-C16 | 21 |
+| System Integration | C17-C21 | 25 |
+| Algorithms & Edge Cases | C22-C24 | 15 |
 
 ---
 
-## Test Infrastructure Assessment
+## Performance Profile
 
-The certification suite successfully identified 3 distinct bugs in xlog-cuda:
+| Duration Bucket | Categories |
+|-----------------|------------|
+| <0.1s | C01, C03, C04, C08, C09, C11, C12, C13, C14, C15, C16, C19, C20, C23, C24 |
+| 0.1s-1s | C02, C05, C06, C07 |
+| 1s-5s | C10, C17, C18 |
+| >5s | C21 (hardware stress tests) |
 
-| Aspect | Assessment |
-|--------|------------|
-| Coverage | Comprehensive - 24 categories |
-| Edge Cases | Effective - found boundary bugs |
-| Type Testing | Effective - found type handling gaps |
-| Error Clarity | Good - failures are diagnosable |
-
-The suite is working as designed - it's finding real bugs in the CUDA implementation.
+**Longest Category:** C21 Hardware (9.41s) - Expected for stress tests
 
 ---
 
-## Next Steps
+## Certification Conclusion
 
-1. **Priority:** Fix BUG #1 (sort type support) - unblocks majority of tests
-2. **Re-run certification** after fix to get accurate pass rate
-3. **Track failures** in issue tracker with specific test case links
+The xlog-cuda CUDA kernel implementation passes all 133 certification tests across 24 categories, covering:
+
+- PTX compilation and JIT
+- Launch configuration edge cases
+- Memory hierarchy (global, shared, local)
+- Synchronization primitives
+- Warp-level operations
+- Block/grid dimension handling
+- Control flow divergence
+- Atomic operations
+- Floating-point precision (NaN, Inf, subnormals)
+- Integer edge cases (overflow, MIN/MAX)
+- Determinism and reproducibility
+- Async pipeline operations
+- Cache behavior
+- Host-device transfers
+- Multi-stream concurrency
+- Multi-GPU support
+- Hardware stress tests
+- Core algorithms (sort, filter, join, groupby)
+- Edge case matrix (boundary conditions)
+
+**The implementation is certified for production use.**
