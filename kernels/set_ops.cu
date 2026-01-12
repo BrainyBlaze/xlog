@@ -33,6 +33,35 @@ extern "C" __global__ void concat_u32(
 }
 
 /**
+ * Concatenate two byte arrays (device-to-device).
+ *
+ * This is used to concatenate arbitrary typed columns stored as raw bytes.
+ *
+ * @param a First input byte array
+ * @param a_bytes Length of first input in bytes
+ * @param b Second input byte array
+ * @param b_bytes Length of second input in bytes
+ * @param output Output byte array (must be pre-allocated to a_bytes + b_bytes)
+ */
+extern "C" __global__ void concat_bytes(
+    const uint8_t* __restrict__ a,
+    uint32_t a_bytes,
+    const uint8_t* __restrict__ b,
+    uint32_t b_bytes,
+    uint8_t* __restrict__ output
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    uint32_t total = a_bytes + b_bytes;
+    if (gid >= total) return;
+
+    if (gid < a_bytes) {
+        output[gid] = a[gid];
+    } else {
+        output[gid] = b[gid - a_bytes];
+    }
+}
+
+/**
  * Mark elements in sorted array A that are NOT in sorted array B
  * Uses binary search for O(log n) lookup per element
  *

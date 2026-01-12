@@ -66,6 +66,60 @@ $L__BB0_4:
 	ret;
 
 }
+	// .globl	concat_bytes
+.visible .entry concat_bytes(
+	.param .u64 concat_bytes_param_0,
+	.param .u32 concat_bytes_param_1,
+	.param .u64 concat_bytes_param_2,
+	.param .u32 concat_bytes_param_3,
+	.param .u64 concat_bytes_param_4
+)
+{
+	.reg .pred 	%p<3>;
+	.reg .b16 	%rs<3>;
+	.reg .b32 	%r<9>;
+	.reg .b64 	%rd<12>;
+
+
+	ld.param.u64 	%rd3, [concat_bytes_param_0];
+	ld.param.u32 	%r2, [concat_bytes_param_1];
+	ld.param.u64 	%rd4, [concat_bytes_param_2];
+	ld.param.u32 	%r3, [concat_bytes_param_3];
+	ld.param.u64 	%rd5, [concat_bytes_param_4];
+	mov.u32 	%r4, %ntid.x;
+	mov.u32 	%r5, %ctaid.x;
+	mov.u32 	%r6, %tid.x;
+	mad.lo.s32 	%r1, %r5, %r4, %r6;
+	add.s32 	%r7, %r3, %r2;
+	setp.ge.u32 	%p1, %r1, %r7;
+	@%p1 bra 	$L__BB1_4;
+
+	setp.lt.u32 	%p2, %r1, %r2;
+	cvt.u64.u32 	%rd1, %r1;
+	cvta.to.global.u64 	%rd6, %rd5;
+	add.s64 	%rd2, %rd6, %rd1;
+	@%p2 bra 	$L__BB1_3;
+	bra.uni 	$L__BB1_2;
+
+$L__BB1_3:
+	cvta.to.global.u64 	%rd10, %rd3;
+	add.s64 	%rd11, %rd10, %rd1;
+	ld.global.nc.u8 	%rs2, [%rd11];
+	st.global.u8 	[%rd2], %rs2;
+	bra.uni 	$L__BB1_4;
+
+$L__BB1_2:
+	sub.s32 	%r8, %r1, %r2;
+	cvt.u64.u32 	%rd7, %r8;
+	cvta.to.global.u64 	%rd8, %rd4;
+	add.s64 	%rd9, %rd8, %rd7;
+	ld.global.nc.u8 	%rs1, [%rd9];
+	st.global.u8 	[%rd2], %rs1;
+
+$L__BB1_4:
+	ret;
+
+}
 	// .globl	sorted_diff_mark
 .visible .entry sorted_diff_mark(
 	.param .u64 sorted_diff_mark_param_0,
@@ -92,7 +146,7 @@ $L__BB0_4:
 	mov.u32 	%r12, %tid.x;
 	mad.lo.s32 	%r1, %r11, %r10, %r12;
 	setp.ge.u32 	%p1, %r1, %r9;
-	@%p1 bra 	$L__BB1_7;
+	@%p1 bra 	$L__BB2_7;
 
 	cvta.to.global.u64 	%rd6, %rd3;
 	cvt.u64.u32 	%rd2, %r1;
@@ -101,12 +155,12 @@ $L__BB0_4:
 	ld.global.nc.u32 	%r2, [%rd8];
 	setp.eq.s32 	%p2, %r8, 0;
 	mov.u32 	%r22, 0;
-	@%p2 bra 	$L__BB1_4;
+	@%p2 bra 	$L__BB2_4;
 
 	mov.u32 	%r22, 0;
 	mov.u32 	%r20, %r8;
 
-$L__BB1_3:
+$L__BB2_3:
 	add.s32 	%r15, %r20, %r22;
 	shr.u32 	%r16, %r15, 1;
 	mul.wide.u32 	%rd9, %r16, 4;
@@ -117,12 +171,12 @@ $L__BB1_3:
 	selp.b32 	%r22, %r18, %r22, %p3;
 	selp.b32 	%r20, %r20, %r16, %p3;
 	setp.lt.u32 	%p4, %r22, %r20;
-	@%p4 bra 	$L__BB1_3;
+	@%p4 bra 	$L__BB2_3;
 
-$L__BB1_4:
+$L__BB2_4:
 	setp.ge.u32 	%p5, %r22, %r8;
 	mov.u16 	%rs4, 1;
-	@%p5 bra 	$L__BB1_6;
+	@%p5 bra 	$L__BB2_6;
 
 	mul.wide.u32 	%rd11, %r22, 4;
 	add.s64 	%rd12, %rd1, %rd11;
@@ -130,12 +184,12 @@ $L__BB1_4:
 	setp.ne.s32 	%p6, %r19, %r2;
 	selp.u16 	%rs4, 1, 0, %p6;
 
-$L__BB1_6:
+$L__BB2_6:
 	cvta.to.global.u64 	%rd13, %rd4;
 	add.s64 	%rd14, %rd13, %rd2;
 	st.global.u8 	[%rd14], %rs4;
 
-$L__BB1_7:
+$L__BB2_7:
 	ret;
 
 }

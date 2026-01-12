@@ -105,6 +105,7 @@ pub mod filter_kernels {
 /// Kernel function names in the set_ops module
 pub mod set_ops_kernels {
     pub const CONCAT_U32: &str = "concat_u32";
+    pub const CONCAT_BYTES: &str = "concat_bytes";
     pub const SORTED_DIFF_MARK: &str = "sorted_diff_mark";
 }
 
@@ -332,6 +333,7 @@ impl CudaKernelProvider {
                 SET_OPS_MODULE,
                 &[
                     set_ops_kernels::CONCAT_U32,
+                    set_ops_kernels::CONCAT_BYTES,
                     set_ops_kernels::SORTED_DIFF_MARK,
                 ],
             )
@@ -796,49 +798,110 @@ impl CudaKernelProvider {
             )));
         }
 
-        let total_rows = a.num_rows() + b.num_rows();
-        let schema = a.schema().clone();
+        self.concat_buffers_gpu(a, b)
+    }
 
-        // Concatenate each column via host (MVP simplification)
+    fn concat_buffers_gpu(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
+        if a.is_empty() && b.is_empty() {
+            return self.create_empty_buffer(a.schema().clone());
+        }
+        if a.is_empty() {
+            return self.clone_buffer(b);
+        }
+        if b.is_empty() {
+            return self.clone_buffer(a);
+        }
+
+        if !self.schemas_type_compatible(a.schema(), b.schema()) {
+            return Err(XlogError::Kernel(format!(
+                "Concat requires compatible schemas: {:?} vs {:?}",
+                a.schema(),
+                b.schema()
+            )));
+        }
+
+        let schema = a.schema().clone();
+        let total_rows = a.num_rows() + b.num_rows();
+        if total_rows > u32::MAX as u64 {
+            return Err(XlogError::Kernel(format!(
+                "Concat supports at most {} rows, got {}",
+                u32::MAX,
+                total_rows
+            )));
+        }
+
+        let device = self.device.inner();
+        let concat_fn = device
+            .get_func(SET_OPS_MODULE, set_ops_kernels::CONCAT_BYTES)
+            .ok_or_else(|| XlogError::Kernel("concat_bytes kernel not found".to_string()))?;
+
+        let block_size = 256u32;
+
+        let a_rows = usize::try_from(a.num_rows()).map_err(|_| {
+            XlogError::Kernel(format!("Concat: a has too many rows: {}", a.num_rows()))
+        })?;
+        let b_rows = usize::try_from(b.num_rows()).map_err(|_| {
+            XlogError::Kernel(format!("Concat: b has too many rows: {}", b.num_rows()))
+        })?;
+
         let mut result_columns = Vec::with_capacity(schema.arity());
         for col_idx in 0..schema.arity() {
-            let col_type_size = schema.column_type(col_idx)
+            let elem_size = schema
+                .column_type(col_idx)
                 .map(|t| t.size_bytes())
                 .unwrap_or(4);
-            let a_bytes = (a.num_rows() as usize) * col_type_size;
-            let b_bytes = (b.num_rows() as usize) * col_type_size;
-            let total_bytes = a_bytes + b_bytes;
 
-            // Read both columns to host
-            let mut result_host = Vec::with_capacity(total_bytes);
+            let a_bytes = a_rows
+                .checked_mul(elem_size)
+                .ok_or_else(|| XlogError::Kernel("Concat: a_bytes overflow".to_string()))?;
+            let b_bytes = b_rows
+                .checked_mul(elem_size)
+                .ok_or_else(|| XlogError::Kernel("Concat: b_bytes overflow".to_string()))?;
+            let total_bytes = a_bytes
+                .checked_add(b_bytes)
+                .ok_or_else(|| XlogError::Kernel("Concat: total_bytes overflow".to_string()))?;
 
-            // Copy a's column data
-            if let Some(a_col) = a.column(col_idx) {
-                if a_bytes > 0 {
-                    let mut a_host = vec![0u8; a_bytes];
-                    self.device.inner().dtoh_sync_copy_into(a_col, &mut a_host)
-                        .map_err(|e| XlogError::Kernel(format!("Failed to read column from a: {}", e)))?;
-                    result_host.extend_from_slice(&a_host);
+            let a_bytes_u32 = u32::try_from(a_bytes).map_err(|_| {
+                XlogError::Kernel(format!("Concat: a_bytes too large: {}", a_bytes))
+            })?;
+            let b_bytes_u32 = u32::try_from(b_bytes).map_err(|_| {
+                XlogError::Kernel(format!("Concat: b_bytes too large: {}", b_bytes))
+            })?;
+            let total_bytes_u32 = u32::try_from(total_bytes).map_err(|_| {
+                XlogError::Kernel(format!("Concat: total_bytes too large: {}", total_bytes))
+            })?;
+
+            let a_col = a
+                .column(col_idx)
+                .ok_or_else(|| XlogError::Kernel(format!("A column {} not found", col_idx)))?;
+            let b_col = b
+                .column(col_idx)
+                .ok_or_else(|| XlogError::Kernel(format!("B column {} not found", col_idx)))?;
+
+            let mut out_col = self.memory.alloc::<u8>(total_bytes)?;
+
+            if total_bytes_u32 > 0 {
+                let grid_size = (total_bytes_u32 + block_size - 1) / block_size;
+                let config = LaunchConfig {
+                    grid_dim: (grid_size, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                };
+
+                // SAFETY: concat_bytes(const uint8_t* a, uint32_t a_bytes, const uint8_t* b, uint32_t b_bytes, uint8_t* output)
+                unsafe {
+                    concat_fn.clone().launch(
+                        config,
+                        (a_col, a_bytes_u32, b_col, b_bytes_u32, &mut out_col),
+                    )
                 }
+                .map_err(|e| XlogError::Kernel(format!("concat_bytes failed: {}", e)))?;
             }
 
-            // Copy b's column data after a's
-            if let Some(b_col) = b.column(col_idx) {
-                if b_bytes > 0 {
-                    let mut b_host = vec![0u8; b_bytes];
-                    self.device.inner().dtoh_sync_copy_into(b_col, &mut b_host)
-                        .map_err(|e| XlogError::Kernel(format!("Failed to read column from b: {}", e)))?;
-                    result_host.extend_from_slice(&b_host);
-                }
-            }
-
-            // Upload concatenated result
-            let mut result_col = self.memory.alloc::<u8>(total_bytes)?;
-            self.device.inner().htod_sync_copy_into(&result_host, &mut result_col)
-                .map_err(|e| XlogError::Kernel(format!("Failed to upload concatenated column: {}", e)))?;
-
-            result_columns.push(result_col);
+            result_columns.push(out_col);
         }
+
+        self.device.synchronize()?;
 
         Ok(CudaBuffer::from_columns(result_columns, total_rows, schema))
     }
@@ -1020,52 +1083,11 @@ impl CudaKernelProvider {
     /// # Errors
     /// Returns `XlogError::Kernel` if schemas don't match or operation fails
     pub fn union_gpu(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
-        // Handle empty cases
         if a.is_empty() && b.is_empty() {
             return self.create_empty_buffer(a.schema().clone());
         }
 
-        // For empty input handling, check type to use correct dedup path
-        let col_type = if a.is_empty() {
-            b.schema().column_type(0)
-        } else {
-            a.schema().column_type(0)
-        }.ok_or_else(|| XlogError::Kernel("No columns".to_string()))?;
-
-        if a.is_empty() {
-            // For non-U32 types, use CPU sort path to handle type-specific dedup
-            return match col_type {
-                ScalarType::U32 => self.dedup(b, &[0]),
-                ScalarType::U64 | ScalarType::I64 | ScalarType::F64 => {
-                    // CPU-based dedup for non-U32
-                    let mut data = self.download_buffer_rows(b)?;
-                    let col_size = col_type.size_bytes();
-                    data.sort_by(|x, y| x[..col_size].cmp(&y[..col_size]));
-                    data.dedup_by(|x, y| x[..col_size] == y[..col_size]);
-                    self.upload_buffer_rows(&data, b.schema().clone())
-                }
-                _ => Err(XlogError::Kernel(format!(
-                    "Union not supported for type {:?}", col_type
-                ))),
-            };
-        }
-        if b.is_empty() {
-            return match col_type {
-                ScalarType::U32 => self.dedup(a, &[0]),
-                ScalarType::U64 | ScalarType::I64 | ScalarType::F64 => {
-                    let mut data = self.download_buffer_rows(a)?;
-                    let col_size = col_type.size_bytes();
-                    data.sort_by(|x, y| x[..col_size].cmp(&y[..col_size]));
-                    data.dedup_by(|x, y| x[..col_size] == y[..col_size]);
-                    self.upload_buffer_rows(&data, a.schema().clone())
-                }
-                _ => Err(XlogError::Kernel(format!(
-                    "Union not supported for type {:?}", col_type
-                ))),
-            };
-        }
-
-        // Verify schemas have compatible types (ignore column names for Datalog union)
+        // Verify schemas have compatible types (ignore column names for Datalog union).
         if !self.schemas_type_compatible(a.schema(), b.schema()) {
             return Err(XlogError::Kernel(format!(
                 "Union requires compatible schemas: {:?} vs {:?}",
@@ -1074,225 +1096,25 @@ impl CudaKernelProvider {
             )));
         }
 
-        match col_type {
-            ScalarType::U32 => self.union_gpu_u32(a, b),
-            ScalarType::U64 | ScalarType::I64 | ScalarType::F64 => {
-                // For non-U32 types, use CPU-based concat + sort + dedup
-                self.union_cpu_sort(a, b)
-            }
-            _ => Err(XlogError::Kernel(format!(
-                "Union not supported for type {:?}", col_type
-            ))),
-        }
-    }
-
-    /// U32-optimized union using GPU sort
-    fn union_gpu_u32(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
-        // For GPU union, we only support single U32 column
-        if a.arity() != 1 {
+        let schema = a.schema().clone();
+        let key_cols: Vec<usize> = (0..schema.arity()).collect();
+        if key_cols.is_empty() {
             return Err(XlogError::Kernel(
-                "GPU union currently only supports single-column U32 buffers".to_string(),
+                "Union requires at least one column".to_string(),
             ));
         }
 
-        let num_a = a.num_rows() as u32;
-        let num_b = b.num_rows() as u32;
-        let total = num_a + num_b;
-
-        // Step 1: Concatenate on GPU using concat_u32 kernel
-        let concat_fn = self.device.inner()
-            .get_func(SET_OPS_MODULE, set_ops_kernels::CONCAT_U32)
-            .ok_or_else(|| XlogError::Kernel("concat_u32 kernel not found".to_string()))?;
-
-        // Get column data as u32 views
-        let a_col = a.column(0)
-            .ok_or_else(|| XlogError::Kernel("A column 0 not found".to_string()))?;
-        let b_col = b.column(0)
-            .ok_or_else(|| XlogError::Kernel("B column 0 not found".to_string()))?;
-
-        let a_view = self.column_as_u32_view(a_col, num_a as usize)?;
-        let b_view = self.column_as_u32_view(b_col, num_b as usize)?;
-
-        // Allocate output for concatenation
-        let concat_output = self.memory.alloc::<u32>(total as usize)?;
-
-        // Launch concat kernel
-        let block_size = 256u32;
-        let grid_size = (total + block_size - 1) / block_size;
-        let config = LaunchConfig {
-            grid_dim: (grid_size, 1, 1),
-            block_dim: (block_size, 1, 1),
-            shared_mem_bytes: 0,
-        };
-
-        // SAFETY: Kernel signature matches: concat_u32(a, a_len, b, b_len, output)
-        unsafe {
-            concat_fn.clone().launch(config, (
-                &a_view,
-                num_a,
-                &b_view,
-                num_b,
-                &concat_output,
-            ))
+        // Set semantics require dedup even when one side is empty.
+        if a.is_empty() {
+            return self.dedup(b, &key_cols);
         }
-        .map_err(|e| XlogError::Kernel(format!("concat_u32 failed: {}", e)))?;
-
-        self.device.synchronize()?;
-
-        // Convert concat_output to CudaBuffer for sort
-        // Need to convert u32 slice to u8 slice
-        let concat_bytes = (total as usize) * std::mem::size_of::<u32>();
-        let mut concat_u8 = self.memory.alloc::<u8>(concat_bytes)?;
-
-        // Copy via dtod using raw bytes
-        let mut host_u32 = vec![0u32; total as usize];
-        self.device.inner()
-            .dtoh_sync_copy_into(&concat_output, &mut host_u32)
-            .map_err(|e| XlogError::Kernel(format!("Failed to read concat output: {}", e)))?;
-        let host_bytes: Vec<u8> = host_u32.iter().flat_map(|v| v.to_le_bytes()).collect();
-        self.device.inner()
-            .htod_sync_copy_into(&host_bytes, &mut concat_u8)
-            .map_err(|e| XlogError::Kernel(format!("Failed to upload concat bytes: {}", e)))?;
-
-        let concat_buffer = CudaBuffer::from_columns(
-            vec![concat_u8],
-            total as u64,
-            a.schema().clone(),
-        );
-
-        // Step 2: Sort the concatenated result
-        let sorted = self.sort(&concat_buffer, &[0])?;
-
-        // Step 3: Dedup to remove duplicates (sorted, so use dedup_sorted)
-        self.dedup_sorted(&sorted, &[0])
-    }
-
-    /// CPU-sort based union for non-U32 types
-    fn union_cpu_sort(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
-        // Download both buffers
-        let mut a_data = self.download_buffer_rows(a)?;
-        let b_data = self.download_buffer_rows(b)?;
-
-        // Concatenate
-        a_data.extend(b_data);
-
-        let col_type = a.schema().column_type(0)
-            .ok_or_else(|| XlogError::Kernel("No columns".to_string()))?;
-        let col_size = col_type.size_bytes();
-
-        // Type-aware sort and dedup
-        match col_type {
-            ScalarType::U64 => {
-                a_data.sort_by(|x, y| {
-                    let a_val = u64::from_le_bytes(x[..8].try_into().unwrap());
-                    let b_val = u64::from_le_bytes(y[..8].try_into().unwrap());
-                    a_val.cmp(&b_val)
-                });
-                a_data.dedup_by(|x, y| {
-                    let a_val = u64::from_le_bytes(x[..8].try_into().unwrap());
-                    let b_val = u64::from_le_bytes(y[..8].try_into().unwrap());
-                    a_val == b_val
-                });
-            }
-            ScalarType::I64 => {
-                a_data.sort_by(|x, y| {
-                    let a_val = i64::from_le_bytes(x[..8].try_into().unwrap());
-                    let b_val = i64::from_le_bytes(y[..8].try_into().unwrap());
-                    a_val.cmp(&b_val)
-                });
-                a_data.dedup_by(|x, y| {
-                    let a_val = i64::from_le_bytes(x[..8].try_into().unwrap());
-                    let b_val = i64::from_le_bytes(y[..8].try_into().unwrap());
-                    a_val == b_val
-                });
-            }
-            ScalarType::F64 => {
-                // Use total_cmp for consistent ordering (handles NaN, -0.0/+0.0)
-                a_data.sort_by(|x, y| {
-                    let a_val = f64::from_le_bytes(x[..8].try_into().unwrap());
-                    let b_val = f64::from_le_bytes(y[..8].try_into().unwrap());
-                    a_val.total_cmp(&b_val)
-                });
-                a_data.dedup_by(|x, y| {
-                    let a_val = f64::from_le_bytes(x[..8].try_into().unwrap());
-                    let b_val = f64::from_le_bytes(y[..8].try_into().unwrap());
-                    // For set operations, treat NaN == NaN and -0.0 == +0.0
-                    a_val.to_bits() == b_val.to_bits() || (a_val == b_val)
-                });
-            }
-            _ => {
-                // Fallback to byte comparison for other types
-                a_data.sort_by(|x, y| x[..col_size].cmp(&y[..col_size]));
-                a_data.dedup_by(|x, y| x[..col_size] == y[..col_size]);
-            }
+        if b.is_empty() {
+            return self.dedup(a, &key_cols);
         }
 
-        // Upload result
-        self.upload_buffer_rows(&a_data, a.schema().clone())
-    }
-
-    /// Download buffer as row-major byte arrays
-    fn download_buffer_rows(&self, buffer: &CudaBuffer) -> Result<Vec<Vec<u8>>> {
-        let num_rows = buffer.num_rows() as usize;
-        let row_size: usize = buffer.schema().columns.iter()
-            .map(|(_, t)| t.size_bytes())
-            .sum();
-
-        // Download all columns
-        let mut col_data: Vec<Vec<u8>> = Vec::new();
-        for col_idx in 0..buffer.arity() {
-            let col = buffer.column(col_idx)
-                .ok_or_else(|| XlogError::Kernel("Column not found".to_string()))?;
-            let mut data = vec![0u8; col.len()];
-            self.device.inner().dtoh_sync_copy_into(col, &mut data)
-                .map_err(|e| XlogError::Kernel(format!("Download failed: {}", e)))?;
-            col_data.push(data);
-        }
-
-        // Convert to row-major
-        let mut rows = Vec::with_capacity(num_rows);
-        for row_idx in 0..num_rows {
-            let mut row = Vec::with_capacity(row_size);
-            for (col_idx, col) in col_data.iter().enumerate() {
-                let col_size = buffer.schema().column_type(col_idx)
-                    .map(|t| t.size_bytes()).unwrap_or(4);
-                let start = row_idx * col_size;
-                row.extend_from_slice(&col[start..start + col_size]);
-            }
-            rows.push(row);
-        }
-
-        Ok(rows)
-    }
-
-    /// Upload row-major byte arrays as buffer
-    fn upload_buffer_rows(&self, rows: &[Vec<u8>], schema: Schema) -> Result<CudaBuffer> {
-        if rows.is_empty() {
-            return self.create_empty_buffer(schema);
-        }
-
-        let num_rows = rows.len();
-        let mut columns = Vec::new();
-        let mut offset = 0;
-
-        for (_, col_type) in &schema.columns {
-            let col_size = col_type.size_bytes();
-            let mut col_bytes = Vec::with_capacity(num_rows * col_size);
-
-            for row in rows {
-                col_bytes.extend_from_slice(&row[offset..offset + col_size]);
-            }
-
-            let mut d_col = self.memory.alloc::<u8>(col_bytes.len())?;
-            self.device
-                .inner()
-                .htod_sync_copy_into(&col_bytes, &mut d_col)
-                .map_err(|e| XlogError::Kernel(format!("Upload failed: {}", e)))?;
-            columns.push(d_col);
-            offset += col_size;
-        }
-
-        Ok(CudaBuffer::from_columns(columns, num_rows as u64, schema))
+        let concat = self.concat_buffers_gpu(a, b)?;
+        let sorted = self.sort(&concat, &key_cols)?;
+        self.dedup_sorted(&sorted, &key_cols)
     }
 
     /// GPU-native set difference (no host roundtrip)
@@ -1313,29 +1135,8 @@ impl CudaKernelProvider {
     /// # Errors
     /// Returns `XlogError::Kernel` if schemas don't match or operation fails
     pub fn diff_gpu(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
-        // Handle empty cases
         if a.is_empty() {
             return self.create_empty_buffer(a.schema().clone());
-        }
-
-        let col_type = a.schema().column_type(0)
-            .ok_or_else(|| XlogError::Kernel("No columns".to_string()))?;
-
-        if b.is_empty() {
-            // For non-U32 types, use CPU sort path to handle type-specific dedup
-            return match col_type {
-                ScalarType::U32 => self.dedup(a, &[0]),
-                ScalarType::U64 | ScalarType::I64 | ScalarType::F64 => {
-                    let mut data = self.download_buffer_rows(a)?;
-                    let col_size = col_type.size_bytes();
-                    data.sort_by(|x, y| x[..col_size].cmp(&y[..col_size]));
-                    data.dedup_by(|x, y| x[..col_size] == y[..col_size]);
-                    self.upload_buffer_rows(&data, a.schema().clone())
-                }
-                _ => Err(XlogError::Kernel(format!(
-                    "Diff not supported for type {:?}", col_type
-                ))),
-            };
         }
 
         // Verify schemas have compatible types (ignore column names for Datalog negation)
@@ -1347,15 +1148,23 @@ impl CudaKernelProvider {
             )));
         }
 
-        match col_type {
-            ScalarType::U32 => self.diff_gpu_u32(a, b),
-            ScalarType::U64 | ScalarType::I64 | ScalarType::F64 => {
-                self.diff_cpu_sort(a, b)
-            }
-            _ => Err(XlogError::Kernel(format!(
-                "Diff not supported for type {:?}", col_type
-            ))),
+        if a.arity() == 0 {
+            return Err(XlogError::Kernel(
+                "Diff requires at least one column".to_string(),
+            ));
         }
+
+        let col_type = a
+            .schema()
+            .column_type(0)
+            .ok_or_else(|| XlogError::Kernel("No columns".to_string()))?;
+
+        // Keep the single-column U32 fast path; all other cases use hash-based anti-join.
+        if a.arity() == 1 && matches!(col_type, ScalarType::U32) && !b.is_empty() {
+            return self.diff_gpu_u32(a, b);
+        }
+
+        self.diff_via_anti_join(a, b)
     }
 
     /// U32-optimized diff using GPU sort
@@ -1417,16 +1226,90 @@ impl CudaKernelProvider {
         }
         .map_err(|e| XlogError::Kernel(format!("sorted_diff_mark failed: {}", e)))?;
 
+        // Compute prefix sum of diff mask on GPU.
+        let device = self.device.inner();
+        let num_blocks = grid_size;
+        let d_prefix_sum = self.memory.alloc::<u32>(num_a as usize)?;
+        let mut d_block_sums = self.memory.alloc::<u32>(num_blocks as usize)?;
+
+        let phase1_fn = device
+            .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE1)
+            .ok_or_else(|| {
+                XlogError::Kernel("Failed to get multiblock_scan_phase1 kernel".to_string())
+            })?;
+
+        // SAFETY: multiblock_scan_phase1(const uint8_t* mask, uint32_t* prefix_sum, uint32_t* block_sums, uint32_t n)
+        unsafe {
+            phase1_fn.clone().launch(
+                LaunchConfig {
+                    grid_dim: (num_blocks, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (&diff_mask, &d_prefix_sum, &d_block_sums, num_a),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("multiblock_scan_phase1 failed: {}", e)))?;
+
+        if num_blocks > 1 {
+            self.multiblock_scan_u32_inplace(&mut d_block_sums, num_blocks)?;
+
+            let phase3_fn = device
+                .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE3)
+                .ok_or_else(|| {
+                    XlogError::Kernel("Failed to get multiblock_scan_phase3 kernel".to_string())
+                })?;
+
+            // SAFETY: multiblock_scan_phase3(uint32_t* prefix_sum, const uint32_t* block_offsets, uint32_t n)
+            unsafe {
+                phase3_fn.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (num_blocks, 1, 1),
+                        block_dim: (block_size, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (&d_prefix_sum, &d_block_sums, num_a),
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("multiblock_scan_phase3 failed: {}", e)))?;
+        }
+
+        // Count total output rows (1s in mask).
+        let mut d_count = self.memory.alloc::<u32>(1)?;
+        device
+            .htod_sync_copy_into(&[0u32], &mut d_count)
+            .map_err(|e| XlogError::Kernel(format!("Failed to init diff count: {}", e)))?;
+
+        let count_fn = device
+            .get_func(SCAN_MODULE, scan_kernels::COUNT_MASK)
+            .ok_or_else(|| XlogError::Kernel("count_mask kernel not found".to_string()))?;
+
+        // SAFETY: count_mask(const uint8_t* mask, uint32_t n, uint32_t* count)
+        unsafe {
+            count_fn.clone().launch(
+                LaunchConfig {
+                    grid_dim: (num_blocks, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (&diff_mask, num_a, &mut d_count),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("count_mask failed: {}", e)))?;
+
         self.device.synchronize()?;
 
-        // Step 3: Download mask and filter using existing filter_by_mask
-        let mut mask_host = vec![0u8; num_a as usize];
-        self.device.inner()
-            .dtoh_sync_copy_into(&diff_mask, &mut mask_host)
-            .map_err(|e| XlogError::Kernel(format!("Failed to read diff mask: {}", e)))?;
+        let mut count_host = vec![0u32];
+        device
+            .dtoh_sync_copy_into(&d_count, &mut count_host)
+            .map_err(|e| XlogError::Kernel(format!("Failed to read diff count: {}", e)))?;
+        let output_count = count_host[0] as u64;
 
-        // Step 4: Filter using existing filter_by_mask()
-        self.filter_by_mask(&deduped_a, &mask_host)
+        if output_count == 0 {
+            return self.create_empty_buffer(a.schema().clone());
+        }
+
+        self.compact_buffer_by_device_mask(&deduped_a, &diff_mask, &d_prefix_sum, output_count)
     }
 
     /// Multi-column diff using anti-join
@@ -1452,88 +1335,6 @@ impl CudaKernelProvider {
         // Anti-join: return rows from a that don't match any row in b
         // Since we're doing set difference, all columns are keys
         self.hash_join_v2(&deduped_a, &deduped_b, &all_cols, &all_cols, JoinType::Anti)
-    }
-
-    /// CPU-sort based diff for non-U32 types
-    fn diff_cpu_sort(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
-        let mut a_data = self.download_buffer_rows(a)?;
-        let b_data = self.download_buffer_rows(b)?;
-
-        let col_type = a.schema().column_type(0)
-            .ok_or_else(|| XlogError::Kernel("No columns".to_string()))?;
-        let col_size = col_type.size_bytes();
-
-        // Type-aware filtering
-        match col_type {
-            ScalarType::U64 => {
-                let b_set: std::collections::HashSet<u64> = b_data.iter()
-                    .map(|row| u64::from_le_bytes(row[..8].try_into().unwrap()))
-                    .collect();
-                a_data.retain(|row| {
-                    let val = u64::from_le_bytes(row[..8].try_into().unwrap());
-                    !b_set.contains(&val)
-                });
-                a_data.sort_by(|x, y| {
-                    let a_val = u64::from_le_bytes(x[..8].try_into().unwrap());
-                    let b_val = u64::from_le_bytes(y[..8].try_into().unwrap());
-                    a_val.cmp(&b_val)
-                });
-                a_data.dedup_by(|x, y| {
-                    let a_val = u64::from_le_bytes(x[..8].try_into().unwrap());
-                    let b_val = u64::from_le_bytes(y[..8].try_into().unwrap());
-                    a_val == b_val
-                });
-            }
-            ScalarType::I64 => {
-                let b_set: std::collections::HashSet<i64> = b_data.iter()
-                    .map(|row| i64::from_le_bytes(row[..8].try_into().unwrap()))
-                    .collect();
-                a_data.retain(|row| {
-                    let val = i64::from_le_bytes(row[..8].try_into().unwrap());
-                    !b_set.contains(&val)
-                });
-                a_data.sort_by(|x, y| {
-                    let a_val = i64::from_le_bytes(x[..8].try_into().unwrap());
-                    let b_val = i64::from_le_bytes(y[..8].try_into().unwrap());
-                    a_val.cmp(&b_val)
-                });
-                a_data.dedup_by(|x, y| {
-                    let a_val = i64::from_le_bytes(x[..8].try_into().unwrap());
-                    let b_val = i64::from_le_bytes(y[..8].try_into().unwrap());
-                    a_val == b_val
-                });
-            }
-            ScalarType::F64 => {
-                // For F64, use bits for hashing (handles NaN consistently)
-                let b_set: std::collections::HashSet<u64> = b_data.iter()
-                    .map(|row| f64::from_le_bytes(row[..8].try_into().unwrap()).to_bits())
-                    .collect();
-                a_data.retain(|row| {
-                    let val = f64::from_le_bytes(row[..8].try_into().unwrap());
-                    !b_set.contains(&val.to_bits())
-                });
-                a_data.sort_by(|x, y| {
-                    let a_val = f64::from_le_bytes(x[..8].try_into().unwrap());
-                    let b_val = f64::from_le_bytes(y[..8].try_into().unwrap());
-                    a_val.total_cmp(&b_val)
-                });
-                a_data.dedup_by(|x, y| {
-                    let a_val = f64::from_le_bytes(x[..8].try_into().unwrap());
-                    let b_val = f64::from_le_bytes(y[..8].try_into().unwrap());
-                    a_val.to_bits() == b_val.to_bits() || (a_val == b_val)
-                });
-            }
-            _ => {
-                let b_set: std::collections::HashSet<Vec<u8>> = b_data.into_iter()
-                    .map(|row| row[..col_size].to_vec())
-                    .collect();
-                a_data.retain(|row| !b_set.contains(&row[..col_size].to_vec()));
-                a_data.sort_by(|x, y| x[..col_size].cmp(&y[..col_size]));
-                a_data.dedup_by(|x, y| x[..col_size] == y[..col_size]);
-            }
-        }
-
-        self.upload_buffer_rows(&a_data, a.schema().clone())
     }
 
     /// Perform groupby aggregation

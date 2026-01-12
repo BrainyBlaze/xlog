@@ -29,7 +29,7 @@
 
 ### What's Broken/Limited
 - ❌ Dedup still uses CPU sort permutation (host roundtrip)
-- ❌ GPU-native set ops are U32-only (other scalar types fall back to CPU sort/dedup)
+- ❌ Set ops still rely on CPU sort permutation (tracked under P3.3)
 - ❌ Multi-column GPU-native sort not implemented (current path computes permutation on CPU)
 
 ---
@@ -65,7 +65,8 @@
 ## Priority 2: Important Improvements
 
 ### P2.1 Extend Type Support
-**Current:** GPU-native set ops are U32-only; runtime predicates are largely integer-only.
+**Status:** DONE
+**Change:** `union_gpu`/`diff_gpu` support all scalar types (and multi-column schemas) without CPU row-materialization; only `sort()` permutation remains CPU-side until P3.3.
 **Goal:** Uniform scalar support across join/sort/filter/dedup/set-ops (including I32/I64/U64/F32/F64/Bool/Symbol).
 **Files:** `crates/xlog-runtime/src/executor.rs`, `crates/xlog-cuda/src/provider.rs`, `kernels/*.cu`
 **Effort:** 1-2 weeks
@@ -194,8 +195,7 @@
 ## Recommended Execution Order
 
 ```
-Week 1-2:   P2.1 (Type support)
-Week 3-6:   P3.1-P3.4 (Performance)
+Week 1-4:   P3.1-P3.4 (Performance)
 Month 2-3:  P4.1-P4.4 (Features)
 Month 5-7:  Phase 4 (xlog-prob)
 Month 8-11: Phase 5 (xlog-elp)
