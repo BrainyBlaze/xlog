@@ -12,14 +12,14 @@
 
 use std::collections::HashMap;
 
-use xlog_core::{RelId, Result, Schema, ScalarType, XlogError, AggOp as CoreAggOp};
+use xlog_core::{AggOp as CoreAggOp, RelId, Result, ScalarType, Schema, XlogError};
 use xlog_ir::{
-    CompiledRule, ExecutionPlan, PlanBuilder, RirMeta, RirNode,
-    Scc, Stratum as IrStratum, CompareOp, ConstValue, Expr, JoinType, ProjectExpr,
+    CompareOp, CompiledRule, ConstValue, ExecutionPlan, Expr, JoinType, PlanBuilder, ProjectExpr,
+    RirMeta, RirNode, Scc, Stratum as IrStratum,
 };
 
 use crate::ast::{
-    AggOp, ArithExpr, Atom, BodyLiteral, Comparison, CompOp, IsExpr, Program, Rule, Term,
+    AggOp, ArithExpr, Atom, BodyLiteral, CompOp, Comparison, IsExpr, Program, Rule, Term,
 };
 use crate::stratify::{build_dependency_graph, find_sccs_for_lowering, DepType};
 
@@ -29,6 +29,8 @@ pub struct Lowerer {
     schemas: HashMap<String, Schema>,
     /// Stratification result (predicates grouped by strata)
     strata: Vec<Vec<String>>,
+    /// Estimated cardinality per predicate (for join ordering)
+    est_cardinality: HashMap<String, u64>,
     /// Next available relation ID
     next_rel_id: u32,
     /// Mapping from predicate names to relation IDs
@@ -49,6 +51,7 @@ impl Lowerer {
         Self {
             schemas: HashMap::new(),
             strata: Vec::new(),
+            est_cardinality: HashMap::new(),
             next_rel_id: 0,
             rel_ids: HashMap::new(),
             sccs: Vec::new(),
@@ -92,7 +95,8 @@ impl Lowerer {
                 .enumerate()
                 .map(|(i, ty)| (format!("c{}", i), *ty))
                 .collect();
-            self.schemas.insert(pred_decl.name.clone(), Schema::new(columns));
+            self.schemas
+                .insert(pred_decl.name.clone(), Schema::new(columns));
         }
 
         // Then, infer from facts (if no declaration exists)
@@ -133,6 +137,20 @@ impl Lowerer {
         }
     }
 
+    fn infer_cardinalities(&mut self, program: &Program) {
+        self.est_cardinality.clear();
+
+        let mut fact_counts: HashMap<String, u64> = HashMap::new();
+        for fact in program.facts() {
+            *fact_counts.entry(fact.head.predicate.clone()).or_insert(0) += 1;
+        }
+
+        for pred in self.schemas.keys() {
+            let est = fact_counts.get(pred).copied().unwrap_or(1000).max(1);
+            self.est_cardinality.insert(pred.clone(), est);
+        }
+    }
+
     /// Build SCCs from the dependency graph
     fn build_sccs(&mut self, program: &Program) {
         let graph = build_dependency_graph(program);
@@ -146,9 +164,10 @@ impl Lowerer {
                 true
             } else {
                 let pred = &predicates[0];
-                graph.outgoing(pred).iter().any(|e| {
-                    e.to == *pred && e.dep_type == DepType::Positive
-                })
+                graph
+                    .outgoing(pred)
+                    .iter()
+                    .any(|e| e.to == *pred && e.dep_type == DepType::Positive)
             };
 
             self.sccs.push(Scc {
@@ -163,6 +182,7 @@ impl Lowerer {
     pub fn lower_program(&mut self, program: &Program) -> Result<ExecutionPlan> {
         // Infer schemas
         self.infer_schemas(program);
+        self.infer_cardinalities(program);
 
         // Build SCCs
         self.build_sccs(program);
@@ -178,7 +198,9 @@ impl Lowerer {
         // Build strata from our strata field
         for (id, preds) in self.strata.iter().enumerate() {
             // Find which SCCs belong to this stratum
-            let scc_ids: Vec<u32> = self.sccs.iter()
+            let scc_ids: Vec<u32> = self
+                .sccs
+                .iter()
                 .filter(|scc| scc.predicates.iter().any(|p| preds.contains(p)))
                 .map(|scc| scc.id)
                 .collect();
@@ -209,11 +231,14 @@ impl Lowerer {
             let body = RirNode::Scan { rel: rel_id };
             let meta = self.create_meta_for_predicate(pred);
 
-            builder.add_rule(scc_id, CompiledRule {
-                head: pred.clone(),
-                body,
-                meta,
-            });
+            builder.add_rule(
+                scc_id,
+                CompiledRule {
+                    head: pred.clone(),
+                    body,
+                    meta,
+                },
+            );
         }
 
         // Lower proper rules
@@ -224,11 +249,14 @@ impl Lowerer {
                 let body = self.lower_rule(rule)?;
                 let meta = self.create_meta_for_predicate(pred);
 
-                builder.add_rule(scc_id, CompiledRule {
-                    head: pred.clone(),
-                    body,
-                    meta,
-                });
+                builder.add_rule(
+                    scc_id,
+                    CompiledRule {
+                        head: pred.clone(),
+                        body,
+                        meta,
+                    },
+                );
             }
         }
 
@@ -246,49 +274,61 @@ impl Lowerer {
 
     /// Create metadata for a predicate
     fn create_meta_for_predicate(&self, pred: &str) -> RirMeta {
-        let schema = self.schemas.get(pred).cloned().unwrap_or_else(|| {
-            Schema::new(vec![])
-        });
+        let schema = self
+            .schemas
+            .get(pred)
+            .cloned()
+            .unwrap_or_else(|| Schema::new(vec![]));
         RirMeta::with_schema(schema)
     }
 
     /// Lower a single rule to an RIR node
     fn lower_rule(&mut self, rule: &Rule) -> Result<RirNode> {
-        // Build variable environment: track which variables are at which positions
-        let mut var_env = VariableEnv::new();
+        // Split body literals.
+        let (positive_atoms, negated_atoms, comparisons, is_exprs) =
+            Self::split_body_literals(&rule.body);
 
-        // First pass: collect all variable positions from body atoms
+        // Order positive atoms for join performance.
+        let ordered_atoms = self.order_positive_atoms(&positive_atoms);
+
+        // Build variable environment from the ordered atom layout.
+        let mut var_env = VariableEnv::new();
         let mut current_col = 0;
-        for lit in &rule.body {
-            if let Some(atom) = lit.atom() {
-                if lit.is_positive() {
-                    // Get the schema for this predicate to determine column types
-                    let schema = self.schemas.get(&atom.predicate);
-                    for (i, term) in atom.terms.iter().enumerate() {
-                        if let Term::Variable(name) = term {
-                            var_env.add_occurrence(name, atom.predicate.clone(), i, current_col + i);
-                            // Also record the type for this variable (first occurrence wins)
-                            if !var_env.types.contains_key(name) {
-                                let typ = schema
-                                    .and_then(|s| s.column_type(i))
-                                    .unwrap_or(ScalarType::I64); // Default to I64 for arithmetic
-                                var_env.types.insert(name.to_string(), typ);
-                            }
-                        }
+        for atom in &ordered_atoms {
+            let schema = self.schemas.get(&atom.predicate);
+            for (i, term) in atom.terms.iter().enumerate() {
+                if let Term::Variable(name) = term {
+                    if name == "_" {
+                        continue;
                     }
-                    current_col += atom.terms.len();
+                    var_env.add_occurrence(name, atom.predicate.clone(), i, current_col + i);
+                    // Also record the type for this variable (first occurrence wins)
+                    if !var_env.types.contains_key(name) {
+                        let typ = schema
+                            .and_then(|s| s.column_type(i))
+                            .unwrap_or(ScalarType::I64); // Default to I64 for arithmetic
+                        var_env.types.insert(name.to_string(), typ);
+                    }
                 }
             }
+            current_col += atom.terms.len();
         }
 
-        // Lower the body
-        let body_node = self.lower_body(&rule.body, &mut var_env)?;
+        // Lower the body with the chosen join order.
+        let body_node = self.lower_body_parts(
+            &ordered_atoms,
+            &negated_atoms,
+            &comparisons,
+            &is_exprs,
+            &mut var_env,
+        )?;
 
         // Project to head variables
         let projection_cols = self.compute_projection(&rule.head, &var_env)?;
 
         if projection_cols.iter().enumerate().all(|(i, &c)| c == i)
-            && projection_cols.len() == var_env.column_count() {
+            && projection_cols.len() == var_env.column_count()
+        {
             // No projection needed if columns match exactly
             Ok(body_node)
         } else {
@@ -304,9 +344,14 @@ impl Lowerer {
         }
     }
 
-    /// Lower the body literals to an RIR node
-    fn lower_body(&mut self, body: &[BodyLiteral], var_env: &mut VariableEnv) -> Result<RirNode> {
-        // Separate positive atoms, negated atoms, comparisons, and is-expressions
+    fn split_body_literals<'a>(
+        body: &'a [BodyLiteral],
+    ) -> (
+        Vec<&'a Atom>,
+        Vec<&'a Atom>,
+        Vec<&'a Comparison>,
+        Vec<&'a IsExpr>,
+    ) {
         let mut positive_atoms: Vec<&Atom> = Vec::new();
         let mut negated_atoms: Vec<&Atom> = Vec::new();
         let mut comparisons: Vec<&Comparison> = Vec::new();
@@ -321,20 +366,125 @@ impl Lowerer {
             }
         }
 
-        // Build join tree from positive atoms
-        let mut result = self.build_join_tree(&positive_atoms, var_env)?;
+        (positive_atoms, negated_atoms, comparisons, is_exprs)
+    }
 
-        // Apply comparisons as filters
+    fn atom_vars(atom: &Atom) -> std::collections::HashSet<String> {
+        atom.terms
+            .iter()
+            .filter_map(|t| match t {
+                Term::Variable(name) if name != "_" => Some(name.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn estimate_atom_rows(&self, atom: &Atom) -> f64 {
+        let base = self
+            .est_cardinality
+            .get(&atom.predicate)
+            .copied()
+            .unwrap_or(1000)
+            .max(1) as f64;
+
+        let const_count = atom
+            .terms
+            .iter()
+            .filter(|t| term_to_const_value(t).is_some())
+            .count();
+
+        // Equality constants are usually selective; use a conservative default.
+        let selectivity = 0.1_f64.powi(const_count as i32);
+        (base * selectivity).max(1.0)
+    }
+
+    fn order_positive_atoms<'a>(&self, atoms: &[&'a Atom]) -> Vec<&'a Atom> {
+        if atoms.len() <= 1 {
+            return atoms.to_vec();
+        }
+
+        let mut remaining: Vec<(usize, &Atom)> = atoms.iter().copied().enumerate().collect();
+        let mut ordered: Vec<&Atom> = Vec::with_capacity(atoms.len());
+        let mut bound_vars: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        while !remaining.is_empty() {
+            let pick_idx = if ordered.is_empty() {
+                remaining
+                    .iter()
+                    .enumerate()
+                    .min_by(|(_, a), (_, b)| {
+                        let (ai, aa) = **a;
+                        let (bi, bb) = **b;
+                        self.estimate_atom_rows(aa)
+                            .partial_cmp(&self.estimate_atom_rows(bb))
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                            .then(ai.cmp(&bi))
+                    })
+                    .map(|(idx, _)| idx)
+                    .unwrap()
+            } else {
+                remaining
+                    .iter()
+                    .enumerate()
+                    .min_by(|(_, a), (_, b)| {
+                        let (ai, aa) = **a;
+                        let (bi, bb) = **b;
+
+                        let a_vars = Self::atom_vars(aa);
+                        let b_vars = Self::atom_vars(bb);
+
+                        let a_shared = a_vars.intersection(&bound_vars).count();
+                        let b_shared = b_vars.intersection(&bound_vars).count();
+
+                        let a_score = if a_shared == 0 {
+                            self.estimate_atom_rows(aa) * 1.0e12
+                        } else {
+                            self.estimate_atom_rows(aa) / a_shared as f64
+                        };
+                        let b_score = if b_shared == 0 {
+                            self.estimate_atom_rows(bb) * 1.0e12
+                        } else {
+                            self.estimate_atom_rows(bb) / b_shared as f64
+                        };
+
+                        a_score
+                            .partial_cmp(&b_score)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                            .then(ai.cmp(&bi))
+                    })
+                    .map(|(idx, _)| idx)
+                    .unwrap()
+            };
+
+            let (_orig_idx, atom) = remaining.remove(pick_idx);
+            ordered.push(atom);
+            bound_vars.extend(Self::atom_vars(atom));
+        }
+
+        ordered
+    }
+
+    fn lower_body_parts(
+        &mut self,
+        positive_atoms: &[&Atom],
+        negated_atoms: &[&Atom],
+        comparisons: &[&Comparison],
+        is_exprs: &[&IsExpr],
+        var_env: &mut VariableEnv,
+    ) -> Result<RirNode> {
+        let mut result = self.build_join_tree(positive_atoms, var_env)?;
+
+        // Apply comparisons as filters.
         for cmp in comparisons {
             result = self.apply_comparison(result, cmp, var_env)?;
         }
 
-        // Apply is-expressions (must be after atoms that bind the input variables)
+        // Apply is-expressions (must be after atoms that bind the input variables).
         for is_expr in is_exprs {
             result = self.lower_is_expr(is_expr, result, var_env)?;
         }
 
-        // Handle negated atoms via Diff
+        // Handle negated atoms via Diff / semi-join.
         for neg_atom in negated_atoms {
             result = self.apply_negation(result, neg_atom, var_env)?;
         }
@@ -345,9 +495,7 @@ impl Lowerer {
     /// Build a left-deep join tree from positive atoms
     fn build_join_tree(&mut self, atoms: &[&Atom], var_env: &mut VariableEnv) -> Result<RirNode> {
         if atoms.is_empty() {
-            return Err(XlogError::Compilation(
-                "Empty rule body".to_string(),
-            ));
+            return Err(XlogError::Compilation("Empty rule body".to_string()));
         }
 
         // Start with the first atom as a scan
@@ -369,11 +517,7 @@ impl Lowerer {
             let right_filtered = self.apply_constant_filters(right_scan, atom, 0)?;
 
             // Compute join keys based on shared variables
-            let (left_keys, right_keys) = self.compute_join_keys(
-                &result_vars,
-                atom,
-                result_width,
-            );
+            let (left_keys, right_keys) = self.compute_join_keys(&result_vars, atom, result_width);
 
             if left_keys.is_empty() {
                 // Cartesian product (no shared variables)
@@ -577,9 +721,8 @@ impl Lowerer {
         } else {
             // Project the negated atom to only the shared variable columns
             let neg_projected = if neg_cols.len() < neg_atom.terms.len() {
-                let neg_proj_exprs: Vec<ProjectExpr> = neg_cols.iter()
-                    .map(|&c| ProjectExpr::Column(c))
-                    .collect();
+                let neg_proj_exprs: Vec<ProjectExpr> =
+                    neg_cols.iter().map(|&c| ProjectExpr::Column(c)).collect();
                 RirNode::Project {
                     input: Box::new(neg_filtered),
                     columns: neg_proj_exprs,
@@ -595,9 +738,8 @@ impl Lowerer {
 
             // Simpler approach: project input to shared columns, diff with negated,
             // then rejoin with original
-            let input_proj_exprs: Vec<ProjectExpr> = input_cols.iter()
-                .map(|&c| ProjectExpr::Column(c))
-                .collect();
+            let input_proj_exprs: Vec<ProjectExpr> =
+                input_cols.iter().map(|&c| ProjectExpr::Column(c)).collect();
             let input_projected = RirNode::Project {
                 input: Box::new(input.clone()),
                 columns: input_proj_exprs,
@@ -661,21 +803,18 @@ impl Lowerer {
     }
 
     /// Infer the result type of an arithmetic expression (strict same-type)
-    pub fn infer_arith_type(
-        &self,
-        expr: &ArithExpr,
-        var_env: &VariableEnv,
-    ) -> Result<ScalarType> {
+    pub fn infer_arith_type(&self, expr: &ArithExpr, var_env: &VariableEnv) -> Result<ScalarType> {
         match expr {
-            ArithExpr::Variable(name) => {
-                var_env.get_type(name).ok_or_else(||
-                    XlogError::Compilation(format!("Unknown variable {} in arithmetic", name)))
-            }
+            ArithExpr::Variable(name) => var_env.get_type(name).ok_or_else(|| {
+                XlogError::Compilation(format!("Unknown variable {} in arithmetic", name))
+            }),
             ArithExpr::Integer(_) => Ok(ScalarType::I64),
             ArithExpr::Float(_) => Ok(ScalarType::F64),
 
-            ArithExpr::Add(l, r) | ArithExpr::Sub(l, r) |
-            ArithExpr::Mul(l, r) | ArithExpr::Div(l, r) => {
+            ArithExpr::Add(l, r)
+            | ArithExpr::Sub(l, r)
+            | ArithExpr::Mul(l, r)
+            | ArithExpr::Div(l, r) => {
                 let lt = self.infer_arith_type(l, var_env)?;
                 let rt = self.infer_arith_type(r, var_env)?;
 
@@ -688,7 +827,8 @@ impl Lowerer {
 
                 if !Self::is_numeric_type(&lt) {
                     return Err(XlogError::Compilation(format!(
-                        "Arithmetic requires numeric type, got {:?}", lt
+                        "Arithmetic requires numeric type, got {:?}",
+                        lt
                     )));
                 }
 
@@ -701,13 +841,14 @@ impl Lowerer {
 
                 if lt != rt {
                     return Err(XlogError::Compilation(format!(
-                        "Type mismatch in mod: {:?} vs {:?}", lt, rt
+                        "Type mismatch in mod: {:?} vs {:?}",
+                        lt, rt
                     )));
                 }
 
                 if matches!(lt, ScalarType::F32 | ScalarType::F64) {
                     return Err(XlogError::Compilation(
-                        "Modulo (%) not supported for floating point".into()
+                        "Modulo (%) not supported for floating point".into(),
                     ));
                 }
 
@@ -718,7 +859,8 @@ impl Lowerer {
                 let t = self.infer_arith_type(inner, var_env)?;
                 if !Self::is_numeric_type(&t) {
                     return Err(XlogError::Compilation(format!(
-                        "abs requires numeric type, got {:?}", t
+                        "abs requires numeric type, got {:?}",
+                        t
                     )));
                 }
                 Ok(t)
@@ -730,13 +872,15 @@ impl Lowerer {
 
                 if lt != rt {
                     return Err(XlogError::Compilation(format!(
-                        "Type mismatch in min/max: {:?} vs {:?}", lt, rt
+                        "Type mismatch in min/max: {:?} vs {:?}",
+                        lt, rt
                     )));
                 }
 
                 if !Self::is_numeric_type(&lt) {
                     return Err(XlogError::Compilation(format!(
-                        "min/max requires numeric type, got {:?}", lt
+                        "min/max requires numeric type, got {:?}",
+                        lt
                     )));
                 }
 
@@ -749,7 +893,8 @@ impl Lowerer {
 
                 if !Self::is_numeric_type(&base_t) || !Self::is_numeric_type(&exp_t) {
                     return Err(XlogError::Compilation(format!(
-                        "pow requires numeric operands, got {:?} and {:?}", base_t, exp_t
+                        "pow requires numeric operands, got {:?} and {:?}",
+                        base_t, exp_t
                     )));
                 }
 
@@ -762,10 +907,14 @@ impl Lowerer {
     }
 
     fn is_numeric_type(t: &ScalarType) -> bool {
-        matches!(t,
-            ScalarType::I32 | ScalarType::I64 |
-            ScalarType::U32 | ScalarType::U64 |
-            ScalarType::F32 | ScalarType::F64
+        matches!(
+            t,
+            ScalarType::I32
+                | ScalarType::I64
+                | ScalarType::U32
+                | ScalarType::U64
+                | ScalarType::F32
+                | ScalarType::F64
         )
     }
 
@@ -773,10 +922,12 @@ impl Lowerer {
     fn arith_to_expr(&self, arith: &ArithExpr, var_env: &VariableEnv) -> Result<Expr> {
         match arith {
             ArithExpr::Variable(name) => {
-                let col = var_env.get_column(name)
-                    .ok_or_else(|| XlogError::Compilation(format!(
-                        "Variable {} not bound before use in arithmetic", name
-                    )))?;
+                let col = var_env.get_column(name).ok_or_else(|| {
+                    XlogError::Compilation(format!(
+                        "Variable {} not bound before use in arithmetic",
+                        name
+                    ))
+                })?;
                 Ok(Expr::Column(col))
             }
             ArithExpr::Integer(i) => Ok(Expr::Const(ConstValue::I64(*i))),
@@ -816,10 +967,7 @@ impl Lowerer {
                 Box::new(self.arith_to_expr(l, var_env)?),
                 Box::new(self.arith_to_expr(r, var_env)?),
             )),
-            ArithExpr::Cast(e, t) => Ok(Expr::Cast(
-                Box::new(self.arith_to_expr(e, var_env)?),
-                *t,
-            )),
+            ArithExpr::Cast(e, t) => Ok(Expr::Cast(Box::new(self.arith_to_expr(e, var_env)?), *t)),
         }
     }
 
@@ -856,9 +1004,7 @@ impl Lowerer {
 
         // 5. Build projection: pass through all existing columns + add computed column
         let num_cols = var_env.column_count();
-        let mut proj_exprs: Vec<ProjectExpr> = (0..num_cols)
-            .map(ProjectExpr::Column)
-            .collect();
+        let mut proj_exprs: Vec<ProjectExpr> = (0..num_cols).map(ProjectExpr::Column).collect();
         proj_exprs.push(ProjectExpr::Computed(ir_expr, result_type));
 
         // 6. Bind the new variable
@@ -1025,10 +1171,7 @@ mod tests {
     fn edge_atom(x: &str, y: &str) -> Atom {
         Atom {
             predicate: "edge".to_string(),
-            terms: vec![
-                Term::Variable(x.to_string()),
-                Term::Variable(y.to_string()),
-            ],
+            terms: vec![Term::Variable(x.to_string()), Term::Variable(y.to_string())],
         }
     }
 
@@ -1036,10 +1179,7 @@ mod tests {
     fn reach_atom(x: &str, y: &str) -> Atom {
         Atom {
             predicate: "reach".to_string(),
-            terms: vec![
-                Term::Variable(x.to_string()),
-                Term::Variable(y.to_string()),
-            ],
+            terms: vec![Term::Variable(x.to_string()), Term::Variable(y.to_string())],
         }
     }
 
@@ -1155,14 +1295,77 @@ mod tests {
         // Should be Project(Join(Scan, Scan))
         if let RirNode::Project { input, columns } = node {
             // X from reach (col 0), Z from edge (col 3)
-            assert_eq!(columns, vec![ProjectExpr::Column(0), ProjectExpr::Column(3)]);
+            assert_eq!(
+                columns,
+                vec![ProjectExpr::Column(0), ProjectExpr::Column(3)]
+            );
             assert!(matches!(*input, RirNode::Join { .. }));
-            if let RirNode::Join { left_keys, right_keys, .. } = *input {
+            if let RirNode::Join {
+                left_keys,
+                right_keys,
+                ..
+            } = *input
+            {
                 assert_eq!(left_keys, vec![1]); // Y in reach (position 1)
                 assert_eq!(right_keys, vec![0]); // Y in edge (position 0)
             }
         } else {
             panic!("Expected Project node");
+        }
+    }
+
+    #[test]
+    fn test_join_order_prefers_smaller_relation() {
+        // out(X) :- big(X), small(X).
+        let rule = Rule {
+            head: Atom {
+                predicate: "out".to_string(),
+                terms: vec![Term::Variable("X".to_string())],
+            },
+            body: vec![
+                BodyLiteral::Positive(Atom {
+                    predicate: "big".to_string(),
+                    terms: vec![Term::Variable("X".to_string())],
+                }),
+                BodyLiteral::Positive(Atom {
+                    predicate: "small".to_string(),
+                    terms: vec![Term::Variable("X".to_string())],
+                }),
+            ],
+        };
+
+        let mut lowerer = Lowerer::new();
+        lowerer.schemas.insert(
+            "big".to_string(),
+            Schema::new(vec![("c0".to_string(), ScalarType::U32)]),
+        );
+        lowerer.schemas.insert(
+            "small".to_string(),
+            Schema::new(vec![("c0".to_string(), ScalarType::U32)]),
+        );
+
+        // Ensure stable RelIds independent of join order.
+        let big_id = lowerer.get_or_create_rel_id("big");
+        let small_id = lowerer.get_or_create_rel_id("small");
+        assert_eq!(big_id, RelId(0));
+        assert_eq!(small_id, RelId(1));
+
+        // Prefer scanning the smaller relation first.
+        lowerer.est_cardinality.insert("big".to_string(), 10_000);
+        lowerer.est_cardinality.insert("small".to_string(), 10);
+
+        let node = lowerer.lower_rule(&rule).unwrap();
+        let join = match node {
+            RirNode::Project { input, .. } => *input,
+            other => other,
+        };
+
+        match join {
+            RirNode::Join { left, right, .. } => {
+                assert!(matches!(*left, RirNode::Scan { rel } if rel == small_id));
+                assert!(matches!(*right, RirNode::Scan { rel } if rel == big_id));
+            }
+            other => panic!("Expected Join node, got {:?}", other),
         }
     }
 
@@ -1208,7 +1411,10 @@ mod tests {
         fn contains_diff_or_semi(node: &RirNode) -> bool {
             match node {
                 RirNode::Diff { .. } => true,
-                RirNode::Join { join_type: JoinType::Semi, .. } => true,
+                RirNode::Join {
+                    join_type: JoinType::Semi,
+                    ..
+                } => true,
                 RirNode::Join { left, right, .. } => {
                     contains_diff_or_semi(left) || contains_diff_or_semi(right)
                 }
@@ -1265,7 +1471,9 @@ mod tests {
             match node {
                 RirNode::Filter { .. } => true,
                 RirNode::Project { input, .. } => contains_filter(input),
-                RirNode::Join { left, right, .. } => contains_filter(left) || contains_filter(right),
+                RirNode::Join { left, right, .. } => {
+                    contains_filter(left) || contains_filter(right)
+                }
                 _ => false,
             }
         }
@@ -1336,10 +1544,7 @@ mod tests {
         });
 
         let mut lowerer = Lowerer::new();
-        lowerer.set_strata(vec![
-            vec!["edge".to_string()],
-            vec!["reach".to_string()],
-        ]);
+        lowerer.set_strata(vec![vec!["edge".to_string()], vec!["reach".to_string()]]);
 
         let result = lowerer.lower_program(&program);
         assert!(result.is_ok());
@@ -1362,11 +1567,17 @@ mod tests {
 
     #[test]
     fn test_infer_term_type() {
-        assert_eq!(infer_term_type(&Term::Variable("X".to_string())), ScalarType::U64);
+        assert_eq!(
+            infer_term_type(&Term::Variable("X".to_string())),
+            ScalarType::U64
+        );
         assert_eq!(infer_term_type(&Term::Integer(42)), ScalarType::U32);
         assert_eq!(infer_term_type(&Term::Integer(i64::MAX)), ScalarType::I64);
         assert_eq!(infer_term_type(&Term::Float(3.14)), ScalarType::F64);
-        assert_eq!(infer_term_type(&Term::Symbol("foo".to_string())), ScalarType::Symbol);
+        assert_eq!(
+            infer_term_type(&Term::Symbol("foo".to_string())),
+            ScalarType::Symbol
+        );
     }
 
     #[test]
@@ -1385,12 +1596,20 @@ mod tests {
 
         // Bind first computed variable at column 2
         env.bind("A", 2, ScalarType::I64);
-        assert_eq!(env.column_count(), 3, "total_cols should be 3 after first bind");
+        assert_eq!(
+            env.column_count(),
+            3,
+            "total_cols should be 3 after first bind"
+        );
         assert_eq!(env.get_column("A"), Some(2));
 
         // Bind second computed variable at column 3
         env.bind("B", 3, ScalarType::I64);
-        assert_eq!(env.column_count(), 4, "total_cols should be 4 after second bind");
+        assert_eq!(
+            env.column_count(),
+            4,
+            "total_cols should be 4 after second bind"
+        );
         assert_eq!(env.get_column("B"), Some(3));
     }
 
@@ -1441,7 +1660,11 @@ mod tests {
         );
 
         let result = lowerer.lower_rule(&rule);
-        assert!(result.is_ok(), "Lowering chained is-expressions should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Lowering chained is-expressions should succeed: {:?}",
+            result.err()
+        );
 
         let node = result.unwrap();
 
@@ -1461,7 +1684,11 @@ mod tests {
 
         // We expect 3 Project nodes: 2 for is-expressions + 1 for final head projection
         let project_count = count_projects(&node);
-        assert!(project_count >= 2, "Expected at least 2 Project nodes for chained is-exprs, got {}", project_count);
+        assert!(
+            project_count >= 2,
+            "Expected at least 2 Project nodes for chained is-exprs, got {}",
+            project_count
+        );
 
         // Verify the final projection references columns 2 and 3 (A and B)
         if let RirNode::Project { columns, .. } = &node {

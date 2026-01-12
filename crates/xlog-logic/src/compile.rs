@@ -12,8 +12,10 @@
 
 use xlog_core::Result;
 use xlog_ir::ExecutionPlan;
+use xlog_stats::StatsManager;
 
 use crate::lower::Lowerer;
+use crate::optimizer::Optimizer;
 use crate::parser::parse_program;
 use crate::stratify::stratify;
 
@@ -37,6 +39,7 @@ pub struct Compiler {
 }
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use xlog_core::{RelId, Schema};
 
 impl Default for Compiler {
@@ -95,14 +98,41 @@ impl Compiler {
         let strata = stratify(&program)?;
 
         // Convert strata to the format expected by the lowerer
-        let strata_preds: Vec<Vec<String>> = strata
-            .into_iter()
-            .map(|s| s.predicates)
-            .collect();
+        let strata_preds: Vec<Vec<String>> = strata.into_iter().map(|s| s.predicates).collect();
 
         // Phase 3: Lower AST to execution plan
         self.lowerer.set_strata(strata_preds);
-        self.lowerer.lower_program(&program)
+        let mut plan = self.lowerer.lower_program(&program)?;
+
+        // Phase 4: Optimize (predicate pushdown + cost-aware rewrites)
+        //
+        // Seed statistics with any known fact cardinalities so cost estimation has
+        // at least a baseline for EDB relations.
+        let mut mgr = StatsManager::new();
+        let mut fact_counts: HashMap<String, u64> = HashMap::new();
+        for fact in program.facts() {
+            *fact_counts.entry(fact.head.predicate.clone()).or_insert(0) += 1;
+        }
+
+        for (pred, rel_id) in self.lowerer.rel_ids() {
+            mgr.register_relation(*rel_id);
+            let rows = fact_counts.get(pred).copied().unwrap_or(0);
+            if rows > 0 {
+                mgr.update_cardinality(*rel_id, rows);
+                if let Some(schema) = self.lowerer.schemas().get(pred) {
+                    mgr.update_byte_size(*rel_id, rows * schema.row_size_bytes() as u64);
+                }
+            }
+        }
+
+        let optimizer = Optimizer::new(Arc::new(mgr));
+        for rules in &mut plan.rules_by_scc {
+            for rule in rules {
+                rule.body = optimizer.optimize(rule.body.clone());
+            }
+        }
+
+        Ok(plan)
     }
 
     /// Reset the compiler state for a fresh compilation.
@@ -167,11 +197,17 @@ mod tests {
     #[test]
     fn test_compile_simple_rule() {
         let mut compiler = Compiler::new();
-        let result = compiler.compile(r#"
+        let result = compiler.compile(
+            r#"
             edge(1, 2).
             reach(X, Y) :- edge(X, Y).
-        "#);
-        assert!(result.is_ok(), "Failed to compile simple rule: {:?}", result.err());
+        "#,
+        );
+        assert!(
+            result.is_ok(),
+            "Failed to compile simple rule: {:?}",
+            result.err()
+        );
 
         let plan = result.unwrap();
         assert!(!plan.sccs.is_empty(), "Expected at least one SCC");
@@ -180,13 +216,15 @@ mod tests {
     #[test]
     fn test_compile_transitive_closure() {
         let mut compiler = Compiler::new();
-        let result = compiler.compile(r#"
+        let result = compiler.compile(
+            r#"
             edge(1, 2).
             edge(2, 3).
             edge(3, 4).
             reach(X, Y) :- edge(X, Y).
             reach(X, Z) :- reach(X, Y), edge(Y, Z).
-        "#);
+        "#,
+        );
         assert!(result.is_ok(), "Failed to compile TC: {:?}", result.err());
 
         let plan = result.unwrap();
@@ -197,50 +235,68 @@ mod tests {
     #[test]
     fn test_compile_with_negation() {
         let mut compiler = Compiler::new();
-        let result = compiler.compile(r#"
+        let result = compiler.compile(
+            r#"
             node(1).
             node(2).
             node(3).
             edge(1, 2).
             isolated(X) :- node(X), not edge(X, Y).
-        "#);
-        assert!(result.is_ok(), "Failed to compile with negation: {:?}", result.err());
+        "#,
+        );
+        assert!(
+            result.is_ok(),
+            "Failed to compile with negation: {:?}",
+            result.err()
+        );
     }
 
     #[test]
     fn test_compile_with_comparison() {
         let mut compiler = Compiler::new();
-        let result = compiler.compile(r#"
+        let result = compiler.compile(
+            r#"
             value(1).
             value(5).
             value(10).
             value(15).
             small(X) :- value(X), X < 10.
-        "#);
-        assert!(result.is_ok(), "Failed to compile with comparison: {:?}", result.err());
+        "#,
+        );
+        assert!(
+            result.is_ok(),
+            "Failed to compile with comparison: {:?}",
+            result.err()
+        );
     }
 
     #[test]
     fn test_compile_unstratifiable_fails() {
         let mut compiler = Compiler::new();
-        let result = compiler.compile(r#"
+        let result = compiler.compile(
+            r#"
             p :- not q.
             q :- not p.
-        "#);
+        "#,
+        );
         assert!(result.is_err(), "Should fail with stratification cycle");
     }
 
     #[test]
     fn test_compile_syntax_error_fails() {
         let mut compiler = Compiler::new();
-        let result = compiler.compile("edge(1, 2");  // Missing closing paren and period
+        let result = compiler.compile("edge(1, 2"); // Missing closing paren and period
         assert!(result.is_err(), "Should fail with syntax error");
     }
 
     #[test]
     fn test_compile_convenience_function() {
         let result = compile("edge(1, 2).");
-        assert!(result.is_ok(), "Convenience compile failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Convenience compile failed: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -260,19 +316,26 @@ mod tests {
     #[test]
     fn test_compile_with_pred_decl() {
         let mut compiler = Compiler::new();
-        let result = compiler.compile(r#"
+        let result = compiler.compile(
+            r#"
             pred edge(u32, u32).
             edge(1, 2).
             edge(2, 3).
             reach(X, Y) :- edge(X, Y).
-        "#);
-        assert!(result.is_ok(), "Failed to compile with pred decl: {:?}", result.err());
+        "#,
+        );
+        assert!(
+            result.is_ok(),
+            "Failed to compile with pred decl: {:?}",
+            result.err()
+        );
     }
 
     #[test]
     fn test_compile_multi_stratum() {
         let mut compiler = Compiler::new();
-        let result = compiler.compile(r#"
+        let result = compiler.compile(
+            r#"
             // Base facts
             edge(1, 2).
             edge(2, 3).
@@ -286,8 +349,13 @@ mod tests {
             // Stratum 2: non_reach (negates reach)
             all_pairs(X, Y) :- edge(X, Z), edge(Y, W).
             non_reach(X, Y) :- all_pairs(X, Y), not reach(X, Y).
-        "#);
-        assert!(result.is_ok(), "Failed to compile multi-stratum: {:?}", result.err());
+        "#,
+        );
+        assert!(
+            result.is_ok(),
+            "Failed to compile multi-stratum: {:?}",
+            result.err()
+        );
 
         let plan = result.unwrap();
         // Should have multiple strata
@@ -297,12 +365,18 @@ mod tests {
     #[test]
     fn test_compile_aggregation() {
         let mut compiler = Compiler::new();
-        let result = compiler.compile(r#"
+        let result = compiler.compile(
+            r#"
             edge(1, 2).
             edge(1, 3).
             edge(2, 3).
             out_degree(X, count(Y)) :- edge(X, Y).
-        "#);
-        assert!(result.is_ok(), "Failed to compile with aggregation: {:?}", result.err());
+        "#,
+        );
+        assert!(
+            result.is_ok(),
+            "Failed to compile with aggregation: {:?}",
+            result.err()
+        );
     }
 }
