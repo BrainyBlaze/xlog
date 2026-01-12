@@ -158,9 +158,9 @@ pub enum JoinType {
 /// Result of packing key columns and computing hashes for join operations
 struct PackedKeyData {
     /// Computed hash values (one per row)
-    hashes: cudarc::driver::CudaSlice<u64>,
+    hashes: crate::memory::TrackedCudaSlice<u64>,
     /// Packed key data in row-major format
-    packed_keys: cudarc::driver::CudaSlice<u8>,
+    packed_keys: crate::memory::TrackedCudaSlice<u8>,
     /// Total bytes per row (key stride)
     key_bytes: u32,
 }
@@ -417,182 +417,97 @@ impl CudaKernelProvider {
     ) -> Result<CudaBuffer> {
         let max_output_limit = max_output.unwrap_or(DEFAULT_JOIN_MAX_OUTPUT);
 
-        // Handle empty inputs
-        if left.is_empty() || right.is_empty() {
-            // Return empty buffer with combined schema
-            let combined_schema = self.combine_schemas(left.schema(), right.schema());
-            return self.create_empty_buffer(combined_schema);
-        }
-
-        // Validate key columns
+        // Validate key columns early (even for empty inputs).
         if left_keys.is_empty() || right_keys.is_empty() {
             return Err(XlogError::Kernel("Join requires at least one key column".to_string()));
         }
         if left_keys.len() != right_keys.len() {
-            return Err(XlogError::Kernel("Left and right key columns must have same length".to_string()));
+            return Err(XlogError::Kernel(
+                "Left and right key columns must have same length".to_string(),
+            ));
+        }
+        for (&left_idx, &right_idx) in left_keys.iter().zip(right_keys.iter()) {
+            if left_idx >= left.arity() {
+                return Err(XlogError::Kernel(format!(
+                    "Left key column index {} out of bounds (arity {})",
+                    left_idx,
+                    left.arity()
+                )));
+            }
+            if right_idx >= right.arity() {
+                return Err(XlogError::Kernel(format!(
+                    "Right key column index {} out of bounds (arity {})",
+                    right_idx,
+                    right.arity()
+                )));
+            }
         }
 
-        // For MVP, we support single-column U32 keys only
-        if left_keys.len() != 1 {
-            return Err(XlogError::Kernel("MVP: Only single-column joins supported".to_string()));
+        // Natural-join output: all left columns + right non-key columns.
+        let right_key_set: std::collections::HashSet<usize> = right_keys.iter().copied().collect();
+        let mut result_columns_schema = left.schema().columns.clone();
+        for (idx, col) in right.schema().columns.iter().enumerate() {
+            if !right_key_set.contains(&idx) {
+                result_columns_schema.push(col.clone());
+            }
         }
+        let result_schema = Schema::new(result_columns_schema);
 
-        let left_key_col = left_keys[0];
-        let right_key_col = right_keys[0];
-
-        // Verify column types are U32
-        if left.schema().column_type(left_key_col) != Some(ScalarType::U32)
-            || right.schema().column_type(right_key_col) != Some(ScalarType::U32)
-        {
-            return Err(XlogError::Kernel("MVP: Only U32 key columns supported".to_string()));
-        }
-
-        let num_build = right.num_rows() as u32;
-        let num_probe = left.num_rows() as u32;
-
-        // Hash table size: 2x build size for good load factor
-        let hash_table_size = (num_build as usize * 2).max(1024) as u32;
-
-        // Allocate hash table: 3 entries per slot (key, payload, head pointer)
-        let hash_table_alloc_size = (hash_table_size * 3) as usize;
-        let mut hash_table = self.memory.alloc::<u32>(hash_table_alloc_size)?;
-        // Initialize all hash table entries to 0xFFFFFFFF (empty)
-        let init_val = 0xFFFFFFFFu32;
-        self.device.inner().htod_sync_copy_into(
-            &vec![init_val; hash_table_alloc_size],
-            &mut hash_table,
-        ).map_err(|e| XlogError::Kernel(format!("Failed to init hash table: {}", e)))?;
-
-        // Allocate next pointers for linked list collision handling
-        let mut next_ptrs = self.memory.alloc::<u32>(num_build as usize)?;
-        // Initialize to 0xFFFFFFFF
-        self.device.inner().htod_sync_copy_into(
-            &vec![init_val; num_build as usize],
-            &mut next_ptrs,
-        ).map_err(|e| XlogError::Kernel(format!("Failed to init next pointers: {}", e)))?;
-
-        // Get kernel functions
-        let build_func = self.device.inner()
-            .get_func(JOIN_MODULE, join_kernels::HASH_JOIN_BUILD)
-            .ok_or_else(|| XlogError::Kernel("hash_join_build kernel not found".to_string()))?;
-        let probe_func = self.device.inner()
-            .get_func(JOIN_MODULE, join_kernels::HASH_JOIN_PROBE)
-            .ok_or_else(|| XlogError::Kernel("hash_join_probe kernel not found".to_string()))?;
-
-        // For MVP, we use the key column as both key and payload
-        // In a full implementation, we'd project out the specific columns
-        let build_keys = right.column(right_key_col)
-            .ok_or_else(|| XlogError::Kernel("Build key column not found".to_string()))?;
-        let build_payloads = build_keys; // Use row index as payload for simplicity
-
-        let probe_keys = left.column(left_key_col)
-            .ok_or_else(|| XlogError::Kernel("Probe key column not found".to_string()))?;
-        let probe_payloads = probe_keys;
-
-        // Launch build kernel
-        let block_size = 256u32;
-        let build_grid_size = (num_build + block_size - 1) / block_size;
-        let build_config = LaunchConfig {
-            grid_dim: (build_grid_size, 1, 1),
-            block_dim: (block_size, 1, 1),
-            shared_mem_bytes: 0,
-        };
-
-        // SAFETY: Kernel parameters match the expected signature in join.cu
-        unsafe {
-            build_func.clone().launch(build_config, (
-                build_keys,
-                build_payloads,
-                num_build,
-                &hash_table,
-                &next_ptrs,
-                hash_table_size,
-            )).map_err(|e| XlogError::Kernel(format!("Build kernel failed: {}", e)))?;
-        }
-
-        // Allocate output buffers (worst case: cross product)
-        // Use the configurable max_output_limit instead of hardcoded 1_000_000
-        let max_output = (num_build as u64 * num_probe as u64).min(max_output_limit as u64) as usize;
-        let output_left = self.memory.alloc::<u32>(max_output)?;
-        let output_right = self.memory.alloc::<u32>(max_output)?;
-        let mut output_count = self.memory.alloc::<u32>(1)?;
-        // Initialize count to 0
-        self.device.inner().htod_sync_copy_into(
-            &vec![0u32],
-            &mut output_count,
-        ).map_err(|e| XlogError::Kernel(format!("Failed to init output count: {}", e)))?;
-
-        // Launch probe kernel
-        let probe_grid_size = (num_probe + block_size - 1) / block_size;
-        let probe_config = LaunchConfig {
-            grid_dim: (probe_grid_size, 1, 1),
-            block_dim: (block_size, 1, 1),
-            shared_mem_bytes: 0,
-        };
-
-        // SAFETY: Kernel parameters match the expected signature in join.cu
-        unsafe {
-            probe_func.clone().launch(probe_config, (
-                probe_keys,
-                probe_payloads,
-                num_probe,
-                &hash_table,
-                build_keys,
-                build_payloads,
-                &next_ptrs,
-                hash_table_size,
-                &output_left,
-                &output_right,
-                &output_count,
-            )).map_err(|e| XlogError::Kernel(format!("Probe kernel failed: {}", e)))?;
-        }
-
-        // Synchronize and get result count
-        self.device.synchronize()?;
-
-        let mut count_host = vec![0u32; 1];
-        self.device.inner().dtoh_sync_copy_into(&output_count, &mut count_host)
-            .map_err(|e| XlogError::Kernel(format!("Failed to read output count: {}", e)))?;
-        let result_count = count_host[0] as u64;
-
-        // Build result schema: combine left and right schemas
-        let result_schema = self.combine_schemas(left.schema(), right.schema());
-
-        // For MVP, return left/right key columns as result
-        // Copy via host to convert between types (MVP simplification)
-        let left_bytes = (result_count as usize) * std::mem::size_of::<u32>();
-        let right_bytes = left_bytes;
-
-        if result_count == 0 {
+        // Handle empty inputs
+        if left.is_empty() || right.is_empty() {
             return self.create_empty_buffer(result_schema);
         }
 
-        // Copy via host: read u32, write as u8
-        let mut left_host = vec![0u32; result_count as usize];
-        let mut right_host = vec![0u32; result_count as usize];
+        // Delegate to the v2 implementation for correctness across key types and cardinalities.
+        let combined = self.hash_join_v2_with_limit(
+            left,
+            right,
+            left_keys,
+            right_keys,
+            JoinType::Inner,
+            Some(max_output_limit),
+        )?;
 
-        self.device.inner().dtoh_sync_copy_into(&output_left, &mut left_host)
-            .map_err(|e| XlogError::Kernel(format!("Failed to read left output: {}", e)))?;
-        self.device.inner().dtoh_sync_copy_into(&output_right, &mut right_host)
-            .map_err(|e| XlogError::Kernel(format!("Failed to read right output: {}", e)))?;
+        if combined.is_empty() {
+            return self.create_empty_buffer(result_schema);
+        }
 
-        // Convert to bytes and upload as u8 slices
-        let left_bytes_vec: Vec<u8> = left_host.iter().flat_map(|v| v.to_le_bytes()).collect();
-        let right_bytes_vec: Vec<u8> = right_host.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let left_arity = left.arity();
+        let right_arity = right.arity();
 
-        let mut output_left_u8 = self.memory.alloc::<u8>(left_bytes)?;
-        let mut output_right_u8 = self.memory.alloc::<u8>(right_bytes)?;
+        let CudaBuffer {
+            columns: combined_columns,
+            num_rows,
+            schema: _,
+        } = combined;
 
-        self.device.inner().htod_sync_copy_into(&left_bytes_vec, &mut output_left_u8)
-            .map_err(|e| XlogError::Kernel(format!("Failed to upload left output: {}", e)))?;
-        self.device.inner().htod_sync_copy_into(&right_bytes_vec, &mut output_right_u8)
-            .map_err(|e| XlogError::Kernel(format!("Failed to upload right output: {}", e)))?;
+        if combined_columns.len() != left_arity + right_arity {
+            return Err(XlogError::Kernel(format!(
+                "Join internal error: expected {} columns, got {}",
+                left_arity + right_arity,
+                combined_columns.len()
+            )));
+        }
 
-        Ok(CudaBuffer::from_columns(
-            vec![output_left_u8, output_right_u8],
-            result_count,
-            result_schema,
-        ))
+        let mut output_columns = Vec::with_capacity(result_schema.arity());
+        let mut it = combined_columns.into_iter();
+
+        // Left columns (all preserved)
+        for _ in 0..left_arity {
+            let col = it.next().ok_or_else(|| {
+                XlogError::Kernel("Join internal error: missing left columns".to_string())
+            })?;
+            output_columns.push(col);
+        }
+
+        // Right columns, excluding join keys
+        for (right_col_idx, col) in it.enumerate() {
+            if !right_key_set.contains(&right_col_idx) {
+                output_columns.push(col);
+            }
+        }
+
+        Ok(CudaBuffer::from_columns(output_columns, num_rows, result_schema))
     }
 
     /// Remove duplicate rows based on key columns
@@ -1337,7 +1252,10 @@ impl CudaKernelProvider {
                 col_bytes.extend_from_slice(&row[offset..offset + col_size]);
             }
 
-            let d_col = self.device.inner().htod_sync_copy(&col_bytes)
+            let mut d_col = self.memory.alloc::<u8>(col_bytes.len())?;
+            self.device
+                .inner()
+                .htod_sync_copy_into(&col_bytes, &mut d_col)
                 .map_err(|e| XlogError::Kernel(format!("Upload failed: {}", e)))?;
             columns.push(d_col);
             offset += col_size;
@@ -2508,6 +2426,12 @@ impl CudaKernelProvider {
         }
 
         let n = mask.len();
+        if n > u32::MAX as usize {
+            return Err(XlogError::Kernel(format!(
+                "Mask length {} exceeds u32::MAX",
+                n
+            )));
+        }
 
         // For small inputs, use CPU scan (faster than kernel launch overhead)
         if n <= 256 {
@@ -2549,7 +2473,7 @@ impl CudaKernelProvider {
         let d_prefix_sum = self.memory.alloc::<u32>(n)?;
 
         // Allocate block sums array (using memory manager for budget enforcement)
-        let d_block_sums = self.memory.alloc::<u32>(num_blocks as usize)?;
+        let mut d_block_sums = self.memory.alloc::<u32>(num_blocks as usize)?;
 
         // Phase 1: Block-level exclusive scans + collect block totals
         let phase1_fn = device
@@ -2574,27 +2498,25 @@ impl CudaKernelProvider {
 
         // Phase 2: Scan block sums (only if we have more than 1 block)
         if num_blocks > 1 {
-            let phase2_fn = device
-                .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE2)
-                .ok_or_else(|| {
-                    XlogError::Kernel("Failed to get multiblock_scan_phase2 kernel".to_string())
-                })?;
+            // NOTE: The GPU phase-2 kernel only supports up to 256 block sums (one block).
+            // For correctness at large sizes, scan the block sums on CPU and upload offsets.
+            self.device.synchronize()?;
 
-            // SAFETY: Kernel parameters match expected signature:
-            // multiblock_scan_phase2(uint32_t* block_sums, uint32_t num_blocks)
-            unsafe {
-                phase2_fn.clone().launch(
-                    LaunchConfig {
-                        grid_dim: (1, 1, 1),
-                        block_dim: (block_size, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
-                    (&d_block_sums, num_blocks),
-                )
+            let mut block_sums_host = vec![0u32; num_blocks as usize];
+            device
+                .dtoh_sync_copy_into(&d_block_sums, &mut block_sums_host)
+                .map_err(|e| XlogError::Kernel(format!("Failed to download block sums: {}", e)))?;
+
+            let mut block_offsets_host = vec![0u32; num_blocks as usize];
+            let mut running_sum = 0u32;
+            for (i, v) in block_sums_host.iter().enumerate() {
+                block_offsets_host[i] = running_sum;
+                running_sum = running_sum.wrapping_add(*v);
             }
-            .map_err(|e| {
-                XlogError::Kernel(format!("Failed to launch multiblock_scan_phase2: {}", e))
-            })?;
+
+            device
+                .htod_sync_copy_into(&block_offsets_host, &mut d_block_sums)
+                .map_err(|e| XlogError::Kernel(format!("Failed to upload block offsets: {}", e)))?;
 
             // Phase 3: Add block offsets
             let phase3_fn = device
@@ -2640,11 +2562,10 @@ impl CudaKernelProvider {
     const RADIX_SIZE: u32 = 16; // 1 << RADIX_BITS
     const SORT_BLOCK_SIZE: u32 = 256;
 
-    /// Sort buffer by key columns using GPU radix sort
-    /// Currently supports single U32 key column
+    /// Sort buffer by key columns.
     ///
-    /// Uses 4-bit radix sort with 8 passes (32 bits / 4 bits = 8 passes).
-    /// Each pass: histogram -> prefix sum -> scatter
+    /// Computes a row permutation on the CPU (supports multi-column and all scalar types),
+    /// then applies the permutation on the GPU to reorder all columns.
     ///
     /// # Arguments
     /// * `input` - The input buffer to sort
@@ -2655,165 +2576,101 @@ impl CudaKernelProvider {
     ///
     /// # Errors
     /// Returns `XlogError::Kernel` if:
-    /// - Multi-column sort is requested (not yet implemented)
-    /// - Kernel execution fails
+    /// - `key_cols` is empty or out of bounds
+    /// - Input has more than `u32::MAX` rows
+    /// - Download/upload or kernel execution fails
     pub fn sort(&self, input: &CudaBuffer, key_cols: &[usize]) -> Result<CudaBuffer> {
         if input.num_rows == 0 {
             return self.create_empty_buffer(input.schema.clone());
         }
 
-        if key_cols.len() != 1 {
+        if key_cols.is_empty() {
             return Err(XlogError::Kernel(
-                "Multi-column sort not yet implemented".into(),
+                "Sort requires at least one key column".to_string(),
             ));
         }
 
-        let key_col = key_cols[0];
-        let n = input.num_rows as u32;
-        let device = self.device.inner();
-
-        // Compute grid size
-        let grid_size = (n + Self::SORT_BLOCK_SIZE - 1) / Self::SORT_BLOCK_SIZE;
-
-        // Get kernel functions
-        let histogram_fn = device
-            .get_func(SORT_MODULE, sort_kernels::RADIX_HISTOGRAM)
-            .ok_or_else(|| XlogError::Kernel("radix_histogram kernel not found".to_string()))?;
-        let compute_ranks_fn = device
-            .get_func(SORT_MODULE, sort_kernels::COMPUTE_RANKS)
-            .ok_or_else(|| XlogError::Kernel("compute_ranks kernel not found".to_string()))?;
-        let scatter_stable_fn = device
-            .get_func(SORT_MODULE, sort_kernels::RADIX_SCATTER_STABLE)
-            .ok_or_else(|| XlogError::Kernel("radix_scatter_stable kernel not found".to_string()))?;
-        let init_indices_fn = device
-            .get_func(SORT_MODULE, sort_kernels::INIT_INDICES)
-            .ok_or_else(|| XlogError::Kernel("init_indices kernel not found".to_string()))?;
-
-        // Allocate double buffers for keys and indices
-        let mut keys_a = self.memory.alloc::<u32>(n as usize)?;
-        let mut keys_b = self.memory.alloc::<u32>(n as usize)?;
-        let mut indices_a = self.memory.alloc::<u32>(n as usize)?;
-        let mut indices_b = self.memory.alloc::<u32>(n as usize)?;
-
-        // Copy key column to keys_a (need to transmute from u8 to u32)
-        let key_col_data = input.column(key_col)
-            .ok_or_else(|| XlogError::Kernel("Key column not found".to_string()))?;
-        let key_bytes = (n as usize) * std::mem::size_of::<u32>();
-        let mut key_host = vec![0u8; key_bytes];
-        device
-            .dtoh_sync_copy_into(key_col_data, &mut key_host)
-            .map_err(|e| XlogError::Kernel(format!("Failed to read keys: {}", e)))?;
-        let key_u32: Vec<u32> = key_host
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect();
-        device
-            .htod_sync_copy_into(&key_u32, &mut keys_a)
-            .map_err(|e| XlogError::Kernel(format!("Failed to upload keys: {}", e)))?;
-
-        // Initialize indices to identity permutation
-        let launch_config = LaunchConfig {
-            grid_dim: (grid_size, 1, 1),
-            block_dim: (Self::SORT_BLOCK_SIZE, 1, 1),
-            shared_mem_bytes: 0,
-        };
-
-        // SAFETY: Kernel signature matches: init_indices(uint32_t* indices, uint32_t n)
-        unsafe {
-            init_indices_fn.clone().launch(launch_config, (&indices_a, n))
+        if input.num_rows > u32::MAX as u64 {
+            return Err(XlogError::Kernel(format!(
+                "Sort supports at most {} rows, got {}",
+                u32::MAX,
+                input.num_rows
+            )));
         }
-        .map_err(|e| XlogError::Kernel(format!("init_indices failed: {}", e)))?;
 
-        // Allocate histograms buffer: [grid_size * RADIX_SIZE]
-        let hist_size = (grid_size * Self::RADIX_SIZE) as usize;
-        let histograms = self.memory.alloc::<u32>(hist_size)?;
-
-        // Allocate prefix sums buffer once (reused each pass)
-        let mut prefix_sums = self.memory.alloc::<u32>(Self::RADIX_SIZE as usize)?;
-
-        // Allocate ranks buffer for stable scatter (reused each pass)
-        let ranks = self.memory.alloc::<u32>(n as usize)?;
-
-        // Perform 8 radix sort passes (4 bits per pass, 32 bits total)
-        let mut use_a = true;
-        for pass in 0..8u32 {
-            let shift = pass * Self::RADIX_BITS;
-
-            let (keys_in, keys_out) = if use_a {
-                (&keys_a, &mut keys_b)
-            } else {
-                (&keys_b, &mut keys_a)
-            };
-            let (indices_in, indices_out) = if use_a {
-                (&indices_a, &mut indices_b)
-            } else {
-                (&indices_b, &mut indices_a)
-            };
-
-            // Step 1: Compute histograms
-            // SAFETY: Kernel signature matches: radix_histogram(const uint32_t* keys, uint32_t num_rows, uint32_t* histograms, uint32_t shift)
-            unsafe {
-                histogram_fn.clone().launch(launch_config, (keys_in, n, &histograms, shift))
+        for &key_col in key_cols {
+            if key_col >= input.arity() {
+                return Err(XlogError::Kernel(format!(
+                    "Key column index {} out of bounds (arity {})",
+                    key_col,
+                    input.arity()
+                )));
             }
-            .map_err(|e| XlogError::Kernel(format!("radix_histogram failed: {}", e)))?;
+        }
 
-            // Step 2: Compute global prefix sums from histograms (on CPU for simplicity)
-            // Download histograms, compute prefix sums, upload
-            self.device.synchronize()?;
-            let mut hist_host = vec![0u32; hist_size];
-            device
-                .dtoh_sync_copy_into(&histograms, &mut hist_host)
-                .map_err(|e| XlogError::Kernel(format!("Failed to read histograms: {}", e)))?;
+        let n = input.num_rows as usize;
 
-            // Sum across blocks for each digit to get global counts
-            let mut global_counts = vec![0u32; Self::RADIX_SIZE as usize];
-            for block in 0..grid_size as usize {
-                for digit in 0..Self::RADIX_SIZE as usize {
-                    global_counts[digit] += hist_host[block * Self::RADIX_SIZE as usize + digit];
+        enum KeyColumn {
+            U32(Vec<u32>),
+            U64(Vec<u64>),
+            I32(Vec<i32>),
+            I64(Vec<i64>),
+            F32(Vec<f32>),
+            F64(Vec<f64>),
+            Bool(Vec<bool>),
+        }
+
+        let mut key_columns = Vec::with_capacity(key_cols.len());
+        for &col_idx in key_cols {
+            let ty = input.schema.column_type(col_idx).ok_or_else(|| {
+                XlogError::Kernel(format!("Key column {} type not found in schema", col_idx))
+            })?;
+
+            let col_data = match ty {
+                ScalarType::U32 | ScalarType::Symbol => {
+                    KeyColumn::U32(self.download_column_u32(input, col_idx)?)
+                }
+                ScalarType::U64 => KeyColumn::U64(self.download_column_u64(input, col_idx)?),
+                ScalarType::I32 => KeyColumn::I32(self.download_column_i32(input, col_idx)?),
+                ScalarType::I64 => KeyColumn::I64(self.download_column_i64(input, col_idx)?),
+                ScalarType::F32 => KeyColumn::F32(self.download_column_f32(input, col_idx)?),
+                ScalarType::F64 => KeyColumn::F64(self.download_column_f64(input, col_idx)?),
+                ScalarType::Bool => KeyColumn::Bool(self.download_column_bool(input, col_idx)?),
+            };
+            key_columns.push(col_data);
+        }
+
+        let mut permutation: Vec<u32> = (0..n as u32).collect();
+        permutation.sort_by(|&a, &b| {
+            let a = a as usize;
+            let b = b as usize;
+
+            for col in &key_columns {
+                let ord = match col {
+                    KeyColumn::U32(v) => v[a].cmp(&v[b]),
+                    KeyColumn::U64(v) => v[a].cmp(&v[b]),
+                    KeyColumn::I32(v) => v[a].cmp(&v[b]),
+                    KeyColumn::I64(v) => v[a].cmp(&v[b]),
+                    KeyColumn::F32(v) => v[a].total_cmp(&v[b]),
+                    KeyColumn::F64(v) => v[a].total_cmp(&v[b]),
+                    KeyColumn::Bool(v) => v[a].cmp(&v[b]),
+                };
+
+                if ord != std::cmp::Ordering::Equal {
+                    return ord;
                 }
             }
 
-            // Compute exclusive prefix sum of global counts
-            let mut prefix_host = vec![0u32; Self::RADIX_SIZE as usize];
-            let mut running_sum = 0u32;
-            for digit in 0..Self::RADIX_SIZE as usize {
-                prefix_host[digit] = running_sum;
-                running_sum += global_counts[digit];
-            }
+            std::cmp::Ordering::Equal
+        });
 
-            // Upload prefix sums (reusing pre-allocated buffer)
-            device
-                .htod_sync_copy_into(&prefix_host, &mut prefix_sums)
-                .map_err(|e| XlogError::Kernel(format!("Failed to upload prefix sums: {}", e)))?;
+        let device = self.device.inner();
+        let mut d_perm = self.memory.alloc::<u32>(n)?;
+        device
+            .htod_sync_copy_into(&permutation, &mut d_perm)
+            .map_err(|e| XlogError::Kernel(format!("Failed to upload sort permutation: {}", e)))?;
 
-            // Step 3: Compute per-element ranks within digit groups (ensures stability)
-            // SAFETY: Kernel signature matches: compute_ranks(keys, num_rows, ranks, shift)
-            unsafe {
-                compute_ranks_fn.clone().launch(launch_config, (keys_in, n, &ranks, shift))
-            }
-            .map_err(|e| XlogError::Kernel(format!("compute_ranks failed: {}", e)))?;
-
-            // Step 4: Scatter keys to sorted positions using pre-computed ranks
-            // SAFETY: Kernel signature matches: radix_scatter_stable(keys_in, indices_in, ranks, keys_out, indices_out, prefix_sums, block_offsets, num_rows, shift)
-            unsafe {
-                scatter_stable_fn.clone().launch(
-                    launch_config,
-                    (keys_in, indices_in, &ranks, keys_out, indices_out, &prefix_sums, &histograms, n, shift),
-                )
-            }
-            .map_err(|e| XlogError::Kernel(format!("radix_scatter_stable failed: {}", e)))?;
-
-            use_a = !use_a;
-        }
-
-        // Synchronize to ensure sort is complete
-        self.device.synchronize()?;
-
-        // Get final permutation (indices are in indices_a or indices_b depending on use_a)
-        let final_indices = if use_a { &indices_a } else { &indices_b };
-
-        // Apply permutation to all columns using GPU kernel
-        self.apply_permutation_gpu(input, final_indices)
+        self.apply_permutation_gpu(input, &d_perm)
     }
 
     /// Apply permutation to reorder all columns in buffer using GPU
@@ -2842,11 +2699,25 @@ impl CudaKernelProvider {
             let src_col = input.column(col_idx)
                 .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
 
-            let elem_size = input.schema.column_type(col_idx)
-                .map(|t| t.size_bytes())
-                .unwrap_or(4) as u32;
+            let elem_size = input
+                .schema
+                .column_type(col_idx)
+                .ok_or_else(|| {
+                    XlogError::Kernel(format!("Schema type for column {} not found", col_idx))
+                })?
+                .size_bytes() as u32;
 
             let output_bytes = (n as usize) * (elem_size as usize);
+            if src_col.num_bytes() != output_bytes {
+                return Err(XlogError::Kernel(format!(
+                    "Column {} has {} bytes but expected {} (num_rows={}, elem_size={})",
+                    col_idx,
+                    src_col.num_bytes(),
+                    output_bytes,
+                    n,
+                    elem_size
+                )));
+            }
             let dst_col = self.memory.alloc::<u8>(output_bytes)?;
 
             // SAFETY: Kernel signature matches: apply_permutation_bytes(input, output, permutation, num_rows, elem_size)
@@ -2938,6 +2809,15 @@ impl CudaKernelProvider {
                 "Column index {} out of bounds (arity {})",
                 col,
                 input.arity()
+            )));
+        }
+
+        // Validate column type is U32 (or Symbol which is u32-backed)
+        let col_type = input.schema().column_type(col);
+        if col_type != Some(ScalarType::U32) && col_type != Some(ScalarType::Symbol) {
+            return Err(XlogError::Kernel(format!(
+                "Column {} is {:?} (expected U32/Symbol for filter_u32)",
+                col, col_type
             )));
         }
 
@@ -3763,6 +3643,15 @@ impl CudaKernelProvider {
         }
 
         let num_bytes = (buffer.num_rows as usize) * std::mem::size_of::<u32>();
+        if col.num_bytes() != num_bytes {
+            return Err(XlogError::Kernel(format!(
+                "Column {} has {} bytes but expected {} for {} rows",
+                col_idx,
+                col.num_bytes(),
+                num_bytes,
+                buffer.num_rows
+            )));
+        }
         let mut bytes = vec![0u8; num_bytes];
         self.device
             .inner()
@@ -3798,6 +3687,15 @@ impl CudaKernelProvider {
         }
 
         let num_bytes = (buffer.num_rows as usize) * std::mem::size_of::<u64>();
+        if col.num_bytes() != num_bytes {
+            return Err(XlogError::Kernel(format!(
+                "Column {} has {} bytes but expected {} for {} rows",
+                col_idx,
+                col.num_bytes(),
+                num_bytes,
+                buffer.num_rows
+            )));
+        }
         let mut bytes = vec![0u8; num_bytes];
         self.device
             .inner()
@@ -3833,6 +3731,15 @@ impl CudaKernelProvider {
         }
 
         let num_bytes = (buffer.num_rows as usize) * std::mem::size_of::<f64>();
+        if col.num_bytes() != num_bytes {
+            return Err(XlogError::Kernel(format!(
+                "Column {} has {} bytes but expected {} for {} rows",
+                col_idx,
+                col.num_bytes(),
+                num_bytes,
+                buffer.num_rows
+            )));
+        }
         let mut bytes = vec![0u8; num_bytes];
         self.device
             .inner()
@@ -3868,6 +3775,15 @@ impl CudaKernelProvider {
         }
 
         let num_bytes = buffer.num_rows as usize;
+        if col.num_bytes() != num_bytes {
+            return Err(XlogError::Kernel(format!(
+                "Column {} has {} bytes but expected {} for {} rows",
+                col_idx,
+                col.num_bytes(),
+                num_bytes,
+                buffer.num_rows
+            )));
+        }
         let mut bytes = vec![0u8; num_bytes];
         self.device
             .inner()
@@ -3900,6 +3816,15 @@ impl CudaKernelProvider {
         }
 
         let num_bytes = (buffer.num_rows as usize) * std::mem::size_of::<i32>();
+        if col.num_bytes() != num_bytes {
+            return Err(XlogError::Kernel(format!(
+                "Column {} has {} bytes but expected {} for {} rows",
+                col_idx,
+                col.num_bytes(),
+                num_bytes,
+                buffer.num_rows
+            )));
+        }
         let mut bytes = vec![0u8; num_bytes];
         self.device
             .inner()
@@ -3935,6 +3860,15 @@ impl CudaKernelProvider {
         }
 
         let num_bytes = (buffer.num_rows as usize) * std::mem::size_of::<i64>();
+        if col.num_bytes() != num_bytes {
+            return Err(XlogError::Kernel(format!(
+                "Column {} has {} bytes but expected {} for {} rows",
+                col_idx,
+                col.num_bytes(),
+                num_bytes,
+                buffer.num_rows
+            )));
+        }
         let mut bytes = vec![0u8; num_bytes];
         self.device
             .inner()
@@ -3970,6 +3904,15 @@ impl CudaKernelProvider {
         }
 
         let num_bytes = (buffer.num_rows as usize) * std::mem::size_of::<f32>();
+        if col.num_bytes() != num_bytes {
+            return Err(XlogError::Kernel(format!(
+                "Column {} has {} bytes but expected {} for {} rows",
+                col_idx,
+                col.num_bytes(),
+                num_bytes,
+                buffer.num_rows
+            )));
+        }
         let mut bytes = vec![0u8; num_bytes];
         self.device
             .inner()
@@ -4383,10 +4326,10 @@ impl CudaKernelProvider {
         }
 
         // Upload packed data
-        let d_data = self
-            .device
+        let mut d_data = self.memory.alloc::<u8>(packed.len())?;
+        self.device
             .inner()
-            .htod_sync_copy(&packed)
+            .htod_sync_copy_into(&packed, &mut d_data)
             .map_err(|e| XlogError::Kernel(format!("Failed to upload packed data: {}", e)))?;
 
         // Compute column offsets within each row
@@ -4465,7 +4408,7 @@ impl CudaKernelProvider {
         &self,
         hashes: &cudarc::driver::CudaSlice<u64>,
         num_rows: u32,
-    ) -> Result<(cudarc::driver::CudaSlice<u32>, cudarc::driver::CudaSlice<u32>)> {
+    ) -> Result<(crate::memory::TrackedCudaSlice<u32>, crate::memory::TrackedCudaSlice<u32>)> {
         // Hash table size: 2x build size for good load factor
         let hash_table_size = ((num_rows as usize) * 2).max(1024) as u32;
 
@@ -4623,17 +4566,17 @@ impl CudaKernelProvider {
         // Note: Using raw pointer launch because tuple exceeds 12-element limit
         unsafe {
             let mut params: Vec<*mut c_void> = vec![
-                (&left_packed.hashes).as_kernel_param(),
+                (&*left_packed.hashes).as_kernel_param(),
                 (&num_left).as_kernel_param(),
-                (&d_hash_table).as_kernel_param(),
-                (&right_packed.hashes).as_kernel_param(),
-                (&d_next_ptrs).as_kernel_param(),
+                (&*d_hash_table).as_kernel_param(),
+                (&*right_packed.hashes).as_kernel_param(),
+                (&*d_next_ptrs).as_kernel_param(),
                 (&hash_table_size).as_kernel_param(),
-                (&left_packed.packed_keys).as_kernel_param(),
-                (&right_packed.packed_keys).as_kernel_param(),
+                (&*left_packed.packed_keys).as_kernel_param(),
+                (&*right_packed.packed_keys).as_kernel_param(),
                 (&left_packed.key_bytes).as_kernel_param(),
-                (&d_output_left).as_kernel_param(),
-                (&d_output_right).as_kernel_param(),
+                (&*d_output_left).as_kernel_param(),
+                (&*d_output_right).as_kernel_param(),
                 (&d_output_count).as_kernel_param(),
                 (&max_output).as_kernel_param(),
             ];

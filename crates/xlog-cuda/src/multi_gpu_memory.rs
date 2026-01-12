@@ -4,10 +4,10 @@
 
 use std::sync::Arc;
 
-use cudarc::driver::CudaSlice;
 use xlog_core::{MemoryBudget, Result, XlogError};
 
 use crate::{GpuDevicePool, GpuMemoryManager};
+use crate::memory::TrackedCudaSlice;
 
 /// Memory manager for multiple GPU devices
 pub struct MultiGpuMemoryManager {
@@ -38,7 +38,7 @@ impl MultiGpuMemoryManager {
         &self,
         device_idx: usize,
         len: usize,
-    ) -> Result<CudaSlice<T>> {
+    ) -> Result<TrackedCudaSlice<T>> {
         let mgr = self.managers.get(device_idx)
             .ok_or_else(|| XlogError::Kernel(format!(
                 "Device {} not found", device_idx
@@ -50,7 +50,7 @@ impl MultiGpuMemoryManager {
     pub fn alloc_next<T: cudarc::driver::DeviceRepr>(
         &self,
         len: usize,
-    ) -> Result<(usize, CudaSlice<T>)> {
+    ) -> Result<(usize, TrackedCudaSlice<T>)> {
         let device_idx = self.pool.next_device_idx();
         let slice = self.alloc_on_device::<T>(device_idx, len)?;
         Ok((device_idx, slice))

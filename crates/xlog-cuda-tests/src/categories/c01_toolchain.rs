@@ -481,9 +481,7 @@ fn test_repeated_jit_compilation(ctx: &TestContext) -> TestResult {
             );
         }
 
-        // Record that memory was freed (buffer will be dropped)
-        let bytes_freed = (BUFFER_SIZE * std::mem::size_of::<u32>()) as u64;
-        ctx.memory.record_free(bytes_freed);
+        // gpu_buffer will be dropped at the end of the loop iteration
     }
 
     // Final verification: resolve a kernel function to ensure JIT cache is still valid

@@ -300,8 +300,16 @@ fn test_sort_multiple_passes(ctx: &TestContext) -> TestResult {
     // Large enough to require multiple passes
     const SIZE: usize = 1_000_000;
 
-    // Create data with keys in random-ish order
-    let keys: Vec<u32> = (0..SIZE).map(|i| ((i * 1103515245 + 12345) % SIZE) as u32).collect();
+    // Create data with keys in random-ish order.
+    //
+    // Use parameters where (a * i + c) mod SIZE is a permutation of 0..SIZE-1
+    // (i.e., gcd(a, SIZE) == 1).
+    let a = 1_103_515_247u64;
+    let c = 12_345u64;
+    let m = SIZE as u64;
+    let keys: Vec<u32> = (0..SIZE)
+        .map(|i| (((i as u64) * a + c) % m) as u32)
+        .collect();
     let vals: Vec<u32> = (0..SIZE as u32).collect();
 
     let buffer = match ctx.provider.create_buffer_from_u32_columns(&[&keys, &vals], schema.clone()) {
@@ -365,33 +373,16 @@ fn test_sort_multiple_passes(ctx: &TestContext) -> TestResult {
         }
     }
 
-    // Verify all keys are present (check a few specific positions)
-    // With the LCG pattern, we should have all values 0 to SIZE-1
-    let mut key_set: std::collections::HashSet<u32> = std::collections::HashSet::new();
-    for &k in &sorted_keys {
-        key_set.insert(k);
-    }
-
-    // The LCG generates a permutation of 0..SIZE, so all values should be present
-    // (This is a property of full-period LCGs with proper parameters)
-    // Just verify the range
-    let min_key = *sorted_keys.first().unwrap();
-    let max_key = *sorted_keys.last().unwrap();
-
-    if min_key != 0 {
-        return TestResult::error(
-            "test_sort_multiple_passes",
-            start.elapsed(),
-            format!("Minimum key is {}, expected 0", min_key),
-        );
-    }
-
-    if max_key != (SIZE - 1) as u32 {
-        return TestResult::error(
-            "test_sort_multiple_passes",
-            start.elapsed(),
-            format!("Maximum key is {}, expected {}", max_key, SIZE - 1),
-        );
+    // Since the input keys are a permutation of 0..SIZE-1, a correct sort must produce
+    // exactly 0, 1, 2, ..., SIZE-1.
+    for (i, &k) in sorted_keys.iter().enumerate() {
+        if k != i as u32 {
+            return TestResult::error(
+                "test_sort_multiple_passes",
+                start.elapsed(),
+                format!("Key at {} is {}, expected {}", i, k, i),
+            );
+        }
     }
 
     if let Err(e) = ctx.sync_and_check() {

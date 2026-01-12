@@ -845,7 +845,7 @@ fn test_stable_sort_order(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let sorted_vals = match ctx.provider.download_column_u32(&sorted, 0) {
+    let sorted_vals = match ctx.provider.download_column_u32(&sorted, 1) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(

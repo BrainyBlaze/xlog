@@ -5,6 +5,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::ops::{Deref, DerefMut};
 
 use cudarc::driver::CudaSlice;
 use xlog_core::{MemoryBudget, Result, Schema, XlogError};
@@ -22,6 +23,67 @@ pub struct GpuMemoryManager {
     budget: MemoryBudget,
     /// Currently allocated bytes (tracked atomically for thread safety)
     allocated: AtomicU64,
+}
+
+/// A `CudaSlice` that automatically updates `GpuMemoryManager` allocation tracking on drop.
+pub struct TrackedCudaSlice<T: cudarc::driver::DeviceRepr> {
+    bytes: u64,
+    manager: Arc<GpuMemoryManager>,
+    inner: CudaSlice<T>,
+}
+
+impl<T: cudarc::driver::DeviceRepr> Deref for TrackedCudaSlice<T> {
+    type Target = CudaSlice<T>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl<T: cudarc::driver::DeviceRepr> DerefMut for TrackedCudaSlice<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
+impl<T: cudarc::driver::DeviceRepr> cudarc::driver::DeviceSlice<T> for TrackedCudaSlice<T> {
+    fn len(&self) -> usize {
+        self.inner.len()
+    }
+}
+
+impl<T: cudarc::driver::DeviceRepr> cudarc::driver::DevicePtr<T> for TrackedCudaSlice<T> {
+    fn device_ptr(&self) -> &cudarc::driver::sys::CUdeviceptr {
+        cudarc::driver::DevicePtr::device_ptr(&self.inner)
+    }
+}
+
+impl<T: cudarc::driver::DeviceRepr> cudarc::driver::DevicePtrMut<T> for TrackedCudaSlice<T> {
+    fn device_ptr_mut(&mut self) -> &mut cudarc::driver::sys::CUdeviceptr {
+        cudarc::driver::DevicePtrMut::device_ptr_mut(&mut self.inner)
+    }
+}
+
+unsafe impl<T: cudarc::driver::DeviceRepr> cudarc::driver::DeviceRepr for &TrackedCudaSlice<T> {
+    #[inline(always)]
+    fn as_kernel_param(&self) -> *mut std::ffi::c_void {
+        let ptr = cudarc::driver::DevicePtr::device_ptr(*self);
+        ptr as *const cudarc::driver::sys::CUdeviceptr as *mut std::ffi::c_void
+    }
+}
+
+unsafe impl<T: cudarc::driver::DeviceRepr> cudarc::driver::DeviceRepr for &mut TrackedCudaSlice<T> {
+    #[inline(always)]
+    fn as_kernel_param(&self) -> *mut std::ffi::c_void {
+        let ptr = cudarc::driver::DevicePtr::device_ptr(&**self);
+        ptr as *const cudarc::driver::sys::CUdeviceptr as *mut std::ffi::c_void
+    }
+}
+
+impl<T: cudarc::driver::DeviceRepr> Drop for TrackedCudaSlice<T> {
+    fn drop(&mut self) {
+        self.manager.record_free(self.bytes);
+    }
 }
 
 impl GpuMemoryManager {
@@ -44,12 +106,15 @@ impl GpuMemoryManager {
     /// * `len` - Number of elements to allocate
     ///
     /// # Returns
-    /// A `CudaSlice<T>` containing the allocated memory
+    /// A tracked `CudaSlice<T>` containing the allocated memory
     ///
     /// # Errors
     /// - `XlogError::ResourceExhausted` if allocation would exceed budget
     /// - `XlogError::Kernel` if CUDA allocation fails
-    pub fn alloc<T: cudarc::driver::DeviceRepr>(&self, len: usize) -> Result<CudaSlice<T>> {
+    pub fn alloc<T: cudarc::driver::DeviceRepr>(
+        self: &Arc<Self>,
+        len: usize,
+    ) -> Result<TrackedCudaSlice<T>> {
         // Fix Issue 2: Use checked_mul to prevent integer overflow before cast
         let bytes = (len as u64)
             .checked_mul(std::mem::size_of::<T>() as u64)
@@ -87,7 +152,11 @@ impl GpuMemoryManager {
             })?
         };
 
-        Ok(slice)
+        Ok(TrackedCudaSlice {
+            bytes,
+            manager: Arc::clone(self),
+            inner: slice,
+        })
     }
 
     /// Check if an allocation of `bytes` would exceed the budget
@@ -161,7 +230,7 @@ impl GpuMemoryManager {
 /// Each column is stored as a separate `CudaSlice<u8>`.
 pub struct CudaBuffer {
     /// Column data stored as raw bytes
-    pub columns: Vec<CudaSlice<u8>>,
+    pub columns: Vec<TrackedCudaSlice<u8>>,
     /// Number of rows in the buffer
     pub num_rows: u64,
     /// Schema describing the column types
@@ -187,7 +256,7 @@ impl CudaBuffer {
     ///
     /// # Panics
     /// Panics if the number of columns doesn't match the schema arity
-    pub fn from_columns(columns: Vec<CudaSlice<u8>>, num_rows: u64, schema: Schema) -> Self {
+    pub fn from_columns(columns: Vec<TrackedCudaSlice<u8>>, num_rows: u64, schema: Schema) -> Self {
         assert_eq!(
             columns.len(),
             schema.arity(),
@@ -229,7 +298,7 @@ impl CudaBuffer {
 
     /// Get a reference to a specific column by index
     pub fn column(&self, index: usize) -> Option<&CudaSlice<u8>> {
-        self.columns.get(index)
+        self.columns.get(index).map(|c| c.deref())
     }
 }
 
@@ -279,7 +348,7 @@ mod tests {
 
         let device = Arc::new(CudaDevice::new(0).expect("Failed to create device"));
         let budget = MemoryBudget::with_limit(1024 * 1024); // 1 MB
-        let manager = GpuMemoryManager::new(device, budget);
+        let manager = Arc::new(GpuMemoryManager::new(device, budget));
 
         assert_eq!(manager.allocated_bytes(), 0);
         assert_eq!(manager.budget().device_bytes, 1024 * 1024);
@@ -295,7 +364,7 @@ mod tests {
 
         let device = Arc::new(CudaDevice::new(0).expect("Failed to create device"));
         let budget = MemoryBudget::with_limit(1024 * 1024); // 1 MB
-        let manager = GpuMemoryManager::new(device, budget);
+        let manager = Arc::new(GpuMemoryManager::new(device, budget));
 
         // Allocate 256 u32 values = 1024 bytes
         let _slice = manager.alloc::<u32>(256).expect("Allocation should succeed");
@@ -313,7 +382,7 @@ mod tests {
 
         let device = Arc::new(CudaDevice::new(0).expect("Failed to create device"));
         let budget = MemoryBudget::with_limit(1024); // 1 KB limit
-        let manager = GpuMemoryManager::new(device, budget);
+        let manager = Arc::new(GpuMemoryManager::new(device, budget));
 
         // Try to allocate 512 u32 values = 2048 bytes (exceeds 1KB budget)
         let result = manager.alloc::<u32>(512);
@@ -336,7 +405,7 @@ mod tests {
 
         let device = Arc::new(CudaDevice::new(0).expect("Failed to create device"));
         let budget = MemoryBudget::with_limit(1000);
-        let manager = GpuMemoryManager::new(device, budget);
+        let manager = Arc::new(GpuMemoryManager::new(device, budget));
 
         // Check that 500 bytes is within budget
         assert!(manager.check_budget(500).is_ok());
@@ -354,7 +423,7 @@ mod tests {
 
         let device = Arc::new(CudaDevice::new(0).expect("Failed to create device"));
         let budget = MemoryBudget::with_limit(4096); // 4 KB
-        let manager = GpuMemoryManager::new(device, budget);
+        let manager = Arc::new(GpuMemoryManager::new(device, budget));
 
         // First allocation: 256 u32 = 1024 bytes
         let _slice1 = manager.alloc::<u32>(256).expect("First allocation should succeed");
@@ -381,14 +450,14 @@ mod tests {
 
         let device = Arc::new(CudaDevice::new(0).expect("Failed to create device"));
         let budget = MemoryBudget::with_limit(4096);
-        let manager = GpuMemoryManager::new(device, budget);
+        let manager = Arc::new(GpuMemoryManager::new(device, budget));
 
         // Allocate
-        let _slice = manager.alloc::<u32>(256).expect("Allocation should succeed");
+        let slice = manager.alloc::<u32>(256).expect("Allocation should succeed");
         assert_eq!(manager.allocated_bytes(), 1024);
 
-        // Record free (simulating drop)
-        manager.record_free(1024);
+        // Drop should automatically update tracking
+        drop(slice);
         assert_eq!(manager.allocated_bytes(), 0);
         assert_eq!(manager.remaining_bytes(), 4096);
     }
@@ -402,7 +471,7 @@ mod tests {
 
         let device = Arc::new(CudaDevice::new(0).expect("Failed to create device"));
         let budget = MemoryBudget::with_limit(1024 * 1024);
-        let manager = GpuMemoryManager::new(device, budget);
+        let manager = Arc::new(GpuMemoryManager::new(device, budget));
 
         let schema = Schema::new(vec![
             ("col1".to_string(), ScalarType::U32),
