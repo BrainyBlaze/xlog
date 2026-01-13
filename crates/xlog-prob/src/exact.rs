@@ -3,14 +3,17 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 
-use xlog_core::{Result, XlogError};
+use xlog_core::{MemoryBudget, Result, XlogError};
 
 use crate::cnf::encode_cnf;
+use crate::gpu::GpuXgcf;
 use crate::kc::d4::D4Compiler;
 use crate::kc::ddnnf::DecisionDnnf;
 use crate::provenance::{extract_from_source, GroundAtom, Provenance};
 use crate::xgcf::{Xgcf, XgcfNodeType};
+use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 
 #[derive(Debug, Clone)]
 pub struct QueryProbability {
@@ -26,25 +29,99 @@ pub struct ExactResult {
 }
 
 #[derive(Debug, Clone)]
+pub struct QueryGradients {
+    pub atom: GroundAtom,
+    pub log_prob: f64,
+    pub prob: f64,
+    pub grad_true: Vec<f64>,
+    pub grad_false: Vec<f64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExactResultWithGrads {
+    pub log_z_e: f64,
+    pub query_grads: Vec<QueryGradients>,
+}
+
+#[derive(Debug, Clone)]
 struct QuerySpec {
     atom: GroundAtom,
     var: Option<u32>,
 }
 
-#[derive(Debug, Clone)]
+struct GpuExactState {
+    provider: CudaKernelProvider,
+    circuit: Mutex<GpuXgcf>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct GpuConfig {
+    pub device_ordinal: usize,
+    pub memory_bytes: u64,
+}
+
+impl Default for GpuConfig {
+    fn default() -> Self {
+        Self {
+            device_ordinal: 0,
+            memory_bytes: 1024 * 1024 * 1024,
+        }
+    }
+}
+
+impl GpuExactState {
+    fn new(circuit: &Xgcf, config: GpuConfig) -> Result<Self> {
+        let device_count = cudarc::driver::CudaDevice::count().unwrap_or(0) as usize;
+        if device_count == 0 {
+            return Err(XlogError::Kernel("No CUDA device available".to_string()));
+        }
+        if config.device_ordinal >= device_count {
+            return Err(XlogError::Kernel(format!(
+                "CUDA device ordinal {} out of range (count={})",
+                config.device_ordinal, device_count
+            )));
+        }
+        if config.memory_bytes == 0 {
+            return Err(XlogError::Kernel(
+                "GPU memory budget must be non-zero".to_string(),
+            ));
+        }
+
+        let device = Arc::new(CudaDevice::new(config.device_ordinal)?);
+        let memory = Arc::new(GpuMemoryManager::new(
+            device.clone(),
+            MemoryBudget::with_limit(config.memory_bytes),
+        ));
+        let provider = CudaKernelProvider::new(device, memory)?;
+        let gpu_xgcf = GpuXgcf::upload(&provider, circuit)?;
+        Ok(Self {
+            provider,
+            circuit: Mutex::new(gpu_xgcf),
+        })
+    }
+}
+
+#[derive(Clone)]
 pub struct ExactDdnnfProgram {
     circuit: Option<Xgcf>,
-    base_log_weights: Vec<(f64, f64)>,
-    evidence_assign: Vec<u8>,
-    evidence_vars: Vec<(u32, u8)>,
+    evidence_log_weights: Vec<(f64, f64)>,
     free_vars: Vec<u32>,
     queries: Vec<QuerySpec>,
+    gpu_config: GpuConfig,
+    gpu: Arc<OnceLock<GpuExactState>>,
 }
 
 impl ExactDdnnfProgram {
     pub fn compile_source(source: &str) -> Result<Self> {
         let provenance = extract_from_source(source)?;
         Self::compile_provenance(provenance)
+    }
+
+    pub fn compile_source_with_gpu(source: &str, config: GpuConfig) -> Result<Self> {
+        let mut program = Self::compile_source(source)?;
+        program.gpu_config = config;
+        program.gpu = Arc::new(OnceLock::new());
+        Ok(program)
     }
 
     pub fn evaluate(&self) -> Result<ExactResult> {
@@ -106,6 +183,102 @@ impl ExactDdnnfProgram {
         Ok(ExactResult { log_z_e, query_probs })
     }
 
+    pub fn num_vars(&self) -> usize {
+        self.evidence_log_weights.len()
+    }
+
+    pub fn evaluate_gpu_with_grads(&self) -> Result<ExactResultWithGrads> {
+        let Some(_circuit) = &self.circuit else {
+            return Ok(ExactResultWithGrads {
+                log_z_e: 0.0,
+                query_grads: Vec::new(),
+            });
+        };
+
+        let mut weights: Vec<(f64, f64)> = self.evidence_log_weights.clone();
+
+        let (log_z_e, grad_true_e, grad_false_e) =
+            self.eval_log_z_and_grads_gpu(&weights)?;
+
+        if log_z_e.is_infinite() && log_z_e.is_sign_negative() {
+            return Err(XlogError::Execution(
+                "Exact inference error: evidence is inconsistent (P(E)=0)".to_string(),
+            ));
+        }
+
+        let mut query_grads: Vec<QueryGradients> = Vec::with_capacity(self.queries.len());
+
+        for query in &self.queries {
+            let Some(var) = query.var else {
+                query_grads.push(QueryGradients {
+                    atom: query.atom.clone(),
+                    log_prob: f64::NEG_INFINITY,
+                    prob: 0.0,
+                    grad_true: vec![0.0; weights.len()],
+                    grad_false: vec![0.0; weights.len()],
+                });
+                continue;
+            };
+
+            let idx = var as usize;
+            if idx >= weights.len() {
+                return Err(XlogError::Compilation(format!(
+                    "Exact inference error: query var {} out of bounds (len={})",
+                    var,
+                    weights.len()
+                )));
+            }
+
+            let prev = weights[idx];
+            weights[idx].1 = f64::NEG_INFINITY;
+
+            let (log_z_eq, grad_true_eq, grad_false_eq) =
+                self.eval_log_z_and_grads_gpu(&weights)?;
+
+            weights[idx] = prev;
+
+            let log_prob = log_z_eq - log_z_e;
+            let mut prob = if log_prob.is_infinite() && log_prob.is_sign_negative() {
+                0.0
+            } else {
+                log_prob.exp()
+            };
+            if prob.is_nan() {
+                return Err(XlogError::Execution(
+                    "Exact inference error: NaN probability encountered".to_string(),
+                ));
+            }
+            if prob < 0.0 {
+                prob = 0.0;
+            } else if prob > 1.0 {
+                prob = 1.0;
+            }
+
+            if grad_true_eq.len() != grad_true_e.len() || grad_false_eq.len() != grad_false_e.len() {
+                return Err(XlogError::Execution(
+                    "Exact inference error: gradient length mismatch".to_string(),
+                ));
+            }
+
+            let mut grad_true: Vec<f64> = grad_true_eq;
+            let mut grad_false: Vec<f64> = grad_false_eq;
+            for i in 0..grad_true.len() {
+                grad_true[i] -= grad_true_e[i];
+                grad_false[i] -= grad_false_e[i];
+            }
+
+            query_grads.push(QueryGradients {
+                atom: query.atom.clone(),
+                log_prob,
+                prob,
+                grad_true,
+                grad_false,
+            });
+        }
+
+        Ok(ExactResultWithGrads { log_z_e, query_grads })
+    }
+
     fn compile_provenance(provenance: Provenance) -> Result<Self> {
         let d4 = D4Compiler::detect()?;
 
@@ -148,11 +321,11 @@ impl ExactDdnnfProgram {
         if roots.is_empty() {
             return Ok(Self {
                 circuit: None,
-                base_log_weights: vec![(0.0, 0.0)],
-                evidence_assign: vec![0],
-                evidence_vars: Vec::new(),
+                evidence_log_weights: vec![(0.0, 0.0)],
                 free_vars: Vec::new(),
                 queries,
+                gpu_config: GpuConfig::default(),
+                gpu: Arc::new(OnceLock::new()),
             });
         }
 
@@ -211,10 +384,12 @@ impl ExactDdnnfProgram {
             }
         }
 
-        let mut evidence_vars: Vec<(u32, u8)> = Vec::new();
+        let mut evidence_log_weights: Vec<(f64, f64)> = base_log_weights.clone();
         for (idx, &enc) in evidence_assign.iter().enumerate().skip(1) {
-            if enc != 0 {
-                evidence_vars.push((idx as u32, enc));
+            if enc == 1 {
+                evidence_log_weights[idx].1 = f64::NEG_INFINITY;
+            } else if enc == 2 {
+                evidence_log_weights[idx].0 = f64::NEG_INFINITY;
             }
         }
 
@@ -278,7 +453,14 @@ impl ExactDdnnfProgram {
             )));
         }
 
-        let circuit = Xgcf::from_ddnnf(&ddnnf)?;
+        let mut is_random_var: Vec<bool> = vec![false; base_log_weights.len()];
+        for (idx, &(t, f)) in base_log_weights.iter().enumerate().skip(1) {
+            if (t, f) != (0.0, 0.0) {
+                is_random_var[idx] = true;
+            }
+        }
+
+        let circuit = Xgcf::from_ddnnf(&ddnnf)?.smooth_random_vars(&is_random_var)?;
 
         let num_vars = encoding.cnf.num_vars() as usize;
         let mut vars_in_clauses: Vec<bool> = vec![false; num_vars + 1];
@@ -339,11 +521,11 @@ impl ExactDdnnfProgram {
 
         Ok(Self {
             circuit: Some(circuit),
-            base_log_weights,
-            evidence_assign,
-            evidence_vars,
+            evidence_log_weights,
             free_vars,
             queries,
+            gpu_config: GpuConfig::default(),
+            gpu: Arc::new(OnceLock::new()),
         })
     }
 
@@ -352,82 +534,24 @@ impl ExactDdnnfProgram {
             return Ok(0.0);
         };
 
-        let weights = &self.base_log_weights;
-        let evidence = &self.evidence_assign;
+        let weights = &self.evidence_log_weights;
 
-        if let Some(q) = query_true {
-            let idx = q as usize;
-            if idx < evidence.len() && evidence[idx] == 2 {
-                return Ok(f64::NEG_INFINITY);
-            }
-        }
-
-        let mut forced_random: std::collections::HashMap<u32, bool> = std::collections::HashMap::new();
-        for &(var, enc) in &self.evidence_vars {
+        let base_log_z = circuit.eval_log_wmc(|var| {
             let idx = var as usize;
-            if idx >= weights.len() {
-                continue;
-            }
-            if weights[idx] == (0.0, 0.0) {
-                continue;
-            }
-            if self.free_vars.binary_search(&var).is_ok() {
-                continue;
-            }
-            let is_true = enc == 1;
-            match forced_random.insert(var, is_true) {
-                None => {}
-                Some(prev) if prev == is_true => {}
-                Some(_) => return Ok(f64::NEG_INFINITY),
-            }
-        }
-        if let Some(q) = query_true {
-            let idx = q as usize;
-            if idx < weights.len() && weights[idx] != (0.0, 0.0) && self.free_vars.binary_search(&q).is_err() {
-                match forced_random.insert(q, true) {
-                    None => {}
-                    Some(prev) if prev => {}
-                    Some(_) => return Ok(f64::NEG_INFINITY),
+            let (t, mut f) = weights[idx];
+            if let Some(q) = query_true {
+                if var == q {
+                    f = f64::NEG_INFINITY;
                 }
             }
-        }
-
-        let base_log_z = if forced_random.is_empty() {
-            circuit.eval_log_wmc(|var| {
-                let idx = var as usize;
-                let (mut t, mut f) = weights[idx];
-                match evidence[idx] {
-                    1 => f = f64::NEG_INFINITY,
-                    2 => t = f64::NEG_INFINITY,
-                    _ => {}
-                }
-                if let Some(q) = query_true {
-                    if var == q {
-                        f = f64::NEG_INFINITY;
-                    }
-                }
-                (t, f)
-            })?
-        } else {
-            eval_log_wmc_forced(
-                circuit,
-                weights,
-                evidence,
-                query_true,
-                &forced_random,
-            )?
-        };
+            (t, f)
+        })?;
 
         let mut log_z = base_log_z;
 
         for &var in &self.free_vars {
             let idx = var as usize;
-            let (mut t, mut f) = weights[idx];
-            match evidence[idx] {
-                1 => f = f64::NEG_INFINITY,
-                2 => t = f64::NEG_INFINITY,
-                _ => {}
-            }
+            let (t, mut f) = weights[idx];
             if let Some(q) = query_true {
                 if var == q {
                     f = f64::NEG_INFINITY;
@@ -438,215 +562,71 @@ impl ExactDdnnfProgram {
 
         Ok(log_z)
     }
-}
 
-fn eval_log_wmc_forced(
-    circuit: &Xgcf,
-    weights: &[(f64, f64)],
-    evidence: &[u8],
-    query_true: Option<u32>,
-    forced_random: &std::collections::HashMap<u32, bool>,
-) -> Result<f64> {
-    let n = circuit.node_type.len();
-    if circuit.roots.len() != 1 {
-        return Err(XlogError::Compilation(format!(
-            "Exact inference error: expected exactly 1 circuit root, got {}",
-            circuit.roots.len()
-        )));
+    fn gpu_state(&self) -> Result<&GpuExactState> {
+        let Some(circuit) = &self.circuit else {
+            return Err(XlogError::Execution(
+                "Exact inference GPU error: program has no compiled circuit".to_string(),
+            ));
+        };
+
+        if let Some(state) = self.gpu.get() {
+            return Ok(state);
+        }
+
+        let state = GpuExactState::new(circuit, self.gpu_config)?;
+        let _ = self.gpu.set(state);
+        Ok(self.gpu.get().expect("OnceLock set failed"))
     }
 
-    let mut forced_vars: Vec<(u32, bool)> = forced_random.iter().map(|(&v, &b)| (v, b)).collect();
-    forced_vars.sort_by_key(|(v, _)| *v);
+    fn eval_log_z_and_grads_gpu(
+        &self,
+        weights: &[(f64, f64)],
+    ) -> Result<(f64, Vec<f64>, Vec<f64>)> {
+        let Some(_circuit) = &self.circuit else {
+            return Ok((0.0, vec![0.0], vec![0.0]));
+        };
+        let state = self.gpu_state()?;
 
-    let k = forced_vars.len();
-    let words = (k + 63) / 64;
-    let mut masks: Vec<u64> = vec![0; n.saturating_mul(words)];
-    let mut values: Vec<f64> = vec![0.0; n];
+        let (base_log_z, grad_true_base, grad_false_base) = {
+            let mut gpu_xgcf = state
+                .circuit
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            gpu_xgcf.eval_log_wmc_and_grads(&state.provider, weights)?
+        };
 
-    let mut var_to_bit: std::collections::HashMap<u32, usize> =
-        std::collections::HashMap::with_capacity(k.saturating_mul(2));
-    let mut forced_log_weight: Vec<f64> = vec![0.0; k];
-    for (bit, (var, is_true)) in forced_vars.iter().copied().enumerate() {
-        var_to_bit.insert(var, bit);
-        let idx = var as usize;
-        let (mut t, mut f) = weights[idx];
-        match evidence[idx] {
-            1 => f = f64::NEG_INFINITY,
-            2 => t = f64::NEG_INFINITY,
-            _ => {}
+        if grad_true_base.len() > weights.len() || grad_false_base.len() > weights.len() {
+            return Err(XlogError::Execution(
+                "Exact inference error: circuit gradient exceeds weight table".to_string(),
+            ));
         }
-        if let Some(q) = query_true {
-            if var == q {
-                f = f64::NEG_INFINITY;
+
+        let mut log_z = base_log_z;
+
+        let mut grad_true: Vec<f64> = vec![0.0; weights.len()];
+        let mut grad_false: Vec<f64> = vec![0.0; weights.len()];
+        grad_true[..grad_true_base.len()].copy_from_slice(&grad_true_base);
+        grad_false[..grad_false_base.len()].copy_from_slice(&grad_false_base);
+
+        for &var in &self.free_vars {
+            let idx = var as usize;
+            if idx >= weights.len() {
+                return Err(XlogError::Execution(format!(
+                    "Exact inference error: free var {} out of bounds (len={})",
+                    var,
+                    weights.len()
+                )));
             }
+            let (t, f) = weights[idx];
+            let (ls, pt, pf) = logsumexp2_with_grads(t, f);
+            log_z += ls;
+            grad_true[idx] += pt;
+            grad_false[idx] += pf;
         }
-        forced_log_weight[bit] = if is_true { t } else { f };
+
+        Ok((log_z, grad_true, grad_false))
     }
-
-    let var_weights = |var: u32| {
-        let idx = var as usize;
-        let (mut t, mut f) = weights[idx];
-        match evidence[idx] {
-            1 => f = f64::NEG_INFINITY,
-            2 => t = f64::NEG_INFINITY,
-            _ => {}
-        }
-        if let Some(q) = query_true {
-            if var == q {
-                f = f64::NEG_INFINITY;
-            }
-        }
-        (t, f)
-    };
-
-    fn sum_missing_weights(
-        masks: &[u64],
-        words: usize,
-        node_base: usize,
-        child_base: usize,
-        forced_log_weight: &[f64],
-    ) -> f64 {
-        let mut acc = 0.0;
-        for word_idx in 0..words {
-            let m_node = masks[node_base + word_idx];
-            let m_child = masks[child_base + word_idx];
-            let mut missing = m_node & !m_child;
-            while missing != 0 {
-                let bit = missing.trailing_zeros() as usize;
-                let idx = word_idx * 64 + bit;
-                acc += forced_log_weight[idx];
-                missing &= missing - 1;
-            }
-        }
-        acc
-    }
-
-    for level in 0..(circuit.level_offsets.len().saturating_sub(1)) {
-        let start = circuit.level_offsets[level] as usize;
-        let end = circuit.level_offsets[level + 1] as usize;
-        for &node_u32 in &circuit.level_nodes[start..end] {
-            let idx = node_u32 as usize;
-            let base = idx.saturating_mul(words);
-            for w in 0..words {
-                masks[base + w] = 0;
-            }
-
-            let v = match circuit.node_type[idx] {
-                XgcfNodeType::Const0 => f64::NEG_INFINITY,
-                XgcfNodeType::Const1 => 0.0,
-                XgcfNodeType::Lit => {
-                    let lit = circuit.lit[idx];
-                    if lit == 0 {
-                        return Err(XlogError::Compilation(format!(
-                            "Exact inference error: circuit LIT node {} has lit=0",
-                            idx
-                        )));
-                    }
-                    let var = lit.unsigned_abs();
-                    if let Some(&bit) = var_to_bit.get(&var) {
-                        masks[base + (bit / 64)] |= 1u64 << (bit % 64);
-                    }
-                    let (t, f) = var_weights(var);
-                    if lit > 0 { t } else { f }
-                }
-                XgcfNodeType::And => {
-                    let c0 = circuit.child_offsets[idx] as usize;
-                    let c1 = circuit.child_offsets[idx + 1] as usize;
-                    if c0 == c1 {
-                        return Err(XlogError::Compilation(format!(
-                            "Exact inference error: circuit AND node {} has no children",
-                            idx
-                        )));
-                    }
-                    let mut acc = 0.0;
-                    for &child in &circuit.child_indices[c0..c1] {
-                        let child_idx = child as usize;
-                        acc += values[child_idx];
-                        let child_base = child_idx.saturating_mul(words);
-                        for w in 0..words {
-                            masks[base + w] |= masks[child_base + w];
-                        }
-                    }
-                    acc
-                }
-                XgcfNodeType::Or => {
-                    let c0 = circuit.child_offsets[idx] as usize;
-                    let c1 = circuit.child_offsets[idx + 1] as usize;
-                    if c0 == c1 {
-                        return Err(XlogError::Compilation(format!(
-                            "Exact inference error: circuit OR node {} has no children",
-                            idx
-                        )));
-                    }
-                    for &child in &circuit.child_indices[c0..c1] {
-                        let child_idx = child as usize;
-                        let child_base = child_idx.saturating_mul(words);
-                        for w in 0..words {
-                            masks[base + w] |= masks[child_base + w];
-                        }
-                    }
-
-                    let mut max = f64::NEG_INFINITY;
-                    for &child in &circuit.child_indices[c0..c1] {
-                        let child_idx = child as usize;
-                        let child_base = child_idx.saturating_mul(words);
-                        let branch = values[child_idx]
-                            + sum_missing_weights(&masks, words, base, child_base, &forced_log_weight);
-                        if branch > max {
-                            max = branch;
-                        }
-                    }
-                    if max.is_infinite() && max.is_sign_negative() {
-                        max
-                    } else {
-                        let mut sum = 0.0;
-                        for &child in &circuit.child_indices[c0..c1] {
-                            let child_idx = child as usize;
-                            let child_base = child_idx.saturating_mul(words);
-                            let branch = values[child_idx]
-                                + sum_missing_weights(&masks, words, base, child_base, &forced_log_weight);
-                            sum += (branch - max).exp();
-                        }
-                        max + sum.ln()
-                    }
-                }
-                XgcfNodeType::Decision => {
-                    let var = circuit.decision_var[idx];
-                    if var == 0 {
-                        return Err(XlogError::Compilation(format!(
-                            "Exact inference error: circuit DECISION node {} has var=0",
-                            idx
-                        )));
-                    }
-                    let child_false = circuit.decision_child_false[idx] as usize;
-                    let child_true = circuit.decision_child_true[idx] as usize;
-                    let base_false = child_false.saturating_mul(words);
-                    let base_true = child_true.saturating_mul(words);
-                    for w in 0..words {
-                        masks[base + w] = masks[base_false + w] | masks[base_true + w];
-                    }
-
-                    let missing_false =
-                        sum_missing_weights(&masks, words, base, base_false, &forced_log_weight);
-                    let missing_true =
-                        sum_missing_weights(&masks, words, base, base_true, &forced_log_weight);
-
-                    if let Some(&bit) = var_to_bit.get(&var) {
-                        masks[base + (bit / 64)] |= 1u64 << (bit % 64);
-                    }
-
-                    let (t, f) = var_weights(var);
-                    let v_false = f + values[child_false] + missing_false;
-                    let v_true = t + values[child_true] + missing_true;
-                    logsumexp2(v_false, v_true)
-                }
-            };
-
-            values[idx] = v;
-        }
-    }
-
-    Ok(values[circuit.roots[0] as usize])
 }
 
 fn logsumexp2(a: f64, b: f64) -> f64 {
@@ -655,6 +635,27 @@ fn logsumexp2(a: f64, b: f64) -> f64 {
         return m;
     }
     m + ((a - m).exp() + (b - m).exp()).ln()
+}
+
+fn logsumexp2_with_grads(a: f64, b: f64) -> (f64, f64, f64) {
+    let m = if a > b { a } else { b };
+    if m.is_infinite() && m.is_sign_negative() {
+        return (m, 0.0, 0.0);
+    }
+    if a.is_infinite() && a.is_sign_negative() {
+        return (b, 0.0, 1.0);
+    }
+    if b.is_infinite() && b.is_sign_negative() {
+        return (a, 1.0, 0.0);
+    }
+
+    let ea = (a - m).exp();
+    let eb = (b - m).exp();
+    let sum = ea + eb;
+    let ls = m + sum.ln();
+    let pa = ea / sum;
+    let pb = eb / sum;
+    (ls, pa, pb)
 }
 
 fn ln_prob(p: f64) -> f64 {

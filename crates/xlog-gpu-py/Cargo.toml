@@ -1,0 +1,16 @@
+[package]
+name = "xlog-gpu-py"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+test = false
+doctest = false
+
+[dependencies]
+pyo3 = { workspace = true }
+cudarc = { workspace = true }
+xlog-core = { path = "../xlog-core" }
+xlog-cuda = { path = "../xlog-cuda" }
+xlog-prob = { path = "../xlog-prob" }

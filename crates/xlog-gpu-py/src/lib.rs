@@ -1,0 +1,367 @@
+use std::os::raw::{c_char, c_void};
+use std::sync::Arc;
+
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::prelude::*;
+
+use xlog_core::{MemoryBudget, ScalarType, Schema};
+use xlog_cuda::{CudaDevice, CudaKernelProvider, DlpackManagedTensor, GpuMemoryManager};
+use xlog_prob::exact::{ExactDdnnfProgram, ExactResultWithGrads, GpuConfig, QueryProbability};
+
+const DLPACK_CAPSULE_NAME: &[u8] = b"dltensor\0";
+const USED_DLPACK_CAPSULE_NAME: &[u8] = b"used_dltensor\0";
+
+unsafe extern "C" fn dlpack_capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
+    if capsule.is_null() {
+        return;
+    }
+
+    let valid =
+        pyo3::ffi::PyCapsule_IsValid(capsule, DLPACK_CAPSULE_NAME.as_ptr() as *const c_char);
+    if valid == 0 {
+        return;
+    }
+
+    let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, DLPACK_CAPSULE_NAME.as_ptr() as *const c_char);
+    if ptr.is_null() {
+        pyo3::ffi::PyErr_Clear();
+        return;
+    }
+
+    let managed = ptr as *mut xlog_cuda::DLManagedTensor;
+    drop(DlpackManagedTensor::from_raw(managed));
+}
+
+fn dlpack_capsule_from_tensor(py: Python<'_>, tensor: DlpackManagedTensor) -> PyResult<PyObject> {
+    let raw = tensor.into_raw();
+    let ptr = raw as *mut c_void;
+    let capsule = unsafe {
+        pyo3::ffi::PyCapsule_New(
+            ptr,
+            DLPACK_CAPSULE_NAME.as_ptr() as *const c_char,
+            Some(dlpack_capsule_destructor),
+        )
+    };
+    if capsule.is_null() {
+        unsafe {
+            drop(DlpackManagedTensor::from_raw(raw));
+        }
+        return Err(PyRuntimeError::new_err("Failed to create DLPack capsule"));
+    }
+    let obj: Py<PyAny> = unsafe { Py::from_owned_ptr(py, capsule) };
+    Ok(obj.into_py(py))
+}
+
+fn atom_to_string(atom: &xlog_prob::provenance::GroundAtom) -> String {
+    use xlog_prob::provenance::Value;
+
+    if atom.args.is_empty() {
+        return format!("{}()", atom.predicate);
+    }
+
+    let mut s = String::new();
+    s.push_str(&atom.predicate);
+    s.push('(');
+    for (i, arg) in atom.args.iter().enumerate() {
+        if i != 0 {
+            s.push_str(", ");
+        }
+        match arg {
+            Value::I64(v) => s.push_str(&v.to_string()),
+            Value::F64(bits) => s.push_str(&f64::from_bits(*bits).to_string()),
+            Value::Symbol(sym) => s.push_str(&format!("sym#{}", sym)),
+            Value::String(v) => s.push_str(v),
+        }
+    }
+    s.push(')');
+    s
+}
+
+fn provider_from_config(config: GpuConfig) -> xlog_core::Result<CudaKernelProvider> {
+    let device = Arc::new(CudaDevice::new(config.device_ordinal)?);
+    let memory = Arc::new(GpuMemoryManager::new(
+        device.clone(),
+        MemoryBudget::with_limit(config.memory_bytes),
+    ));
+    CudaKernelProvider::new(device, memory)
+}
+
+fn dlpack_from_py(obj: &Bound<'_, PyAny>) -> PyResult<DlpackManagedTensor> {
+    let py = obj.py();
+
+    let capsule_obj: Bound<'_, PyAny> = if unsafe {
+        pyo3::ffi::PyCapsule_IsValid(obj.as_ptr(), DLPACK_CAPSULE_NAME.as_ptr() as *const c_char)
+    } != 0
+    {
+        obj.clone()
+    } else if obj.hasattr("__dlpack__")? {
+        match obj.call_method0("__dlpack__") {
+            Ok(v) => v,
+            Err(err) => {
+                if err.is_instance_of::<pyo3::exceptions::PyTypeError>(py) {
+                    obj.call_method1("__dlpack__", (py.None(),))?
+                } else {
+                    return Err(err);
+                }
+            }
+        }
+    } else {
+        return Err(PyValueError::new_err(
+            "Expected a DLPack capsule or an object with __dlpack__",
+        ));
+    };
+
+    if unsafe {
+        pyo3::ffi::PyCapsule_IsValid(
+            capsule_obj.as_ptr(),
+            DLPACK_CAPSULE_NAME.as_ptr() as *const c_char,
+        )
+    } == 0
+    {
+        return Err(PyValueError::new_err("Invalid DLPack capsule"));
+    }
+
+    let ptr = unsafe {
+        pyo3::ffi::PyCapsule_GetPointer(
+            capsule_obj.as_ptr(),
+            DLPACK_CAPSULE_NAME.as_ptr() as *const c_char,
+        )
+    };
+    if ptr.is_null() {
+        return Err(PyRuntimeError::new_err("Failed to get DLPack pointer"));
+    }
+
+    let rc = unsafe {
+        pyo3::ffi::PyCapsule_SetName(
+            capsule_obj.as_ptr(),
+            USED_DLPACK_CAPSULE_NAME.as_ptr() as *const c_char,
+        )
+    };
+    if rc != 0 {
+        return Err(PyRuntimeError::new_err(
+            "Failed to mark DLPack capsule as consumed",
+        ));
+    }
+
+    Ok(unsafe { DlpackManagedTensor::from_raw(ptr as *mut xlog_cuda::DLManagedTensor) })
+}
+
+#[pyfunction]
+fn dlpack_roundtrip(
+    py: Python<'_>,
+    tensor: &Bound<'_, PyAny>,
+    device: usize,
+    memory_mb: u64,
+) -> PyResult<PyObject> {
+    if memory_mb == 0 {
+        return Err(PyValueError::new_err("memory_mb must be > 0"));
+    }
+    let config = GpuConfig {
+        device_ordinal: device,
+        memory_bytes: memory_mb * 1024 * 1024,
+    };
+    let provider =
+        provider_from_config(config).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+    let managed = dlpack_from_py(tensor)?;
+    let buffer = provider
+        .from_dlpack_tensors(vec![managed])
+        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+    let out = provider
+        .to_dlpack_table(buffer)
+        .column(0)
+        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+    dlpack_capsule_from_tensor(py, out)
+}
+
+#[pyclass]
+pub struct Program;
+
+#[pymethods]
+impl Program {
+    #[staticmethod]
+    pub fn compile(source: &str, device: usize, memory_mb: u64) -> PyResult<CompiledProgram> {
+        if memory_mb == 0 {
+            return Err(PyValueError::new_err("memory_mb must be > 0"));
+        }
+
+        let config = GpuConfig {
+            device_ordinal: device,
+            memory_bytes: memory_mb * 1024 * 1024,
+        };
+
+        let program = ExactDdnnfProgram::compile_source_with_gpu(source, config)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let provider =
+            provider_from_config(config).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+        Ok(CompiledProgram {
+            program,
+            output_provider: Arc::new(provider),
+        })
+    }
+}
+
+#[pyclass(unsendable)]
+pub struct CompiledProgram {
+    program: ExactDdnnfProgram,
+    output_provider: Arc<CudaKernelProvider>,
+}
+
+#[pymethods]
+impl CompiledProgram {
+    pub fn evaluate(&self, py: Python<'_>, return_grads: bool) -> PyResult<EvalResult> {
+        if return_grads {
+            let result = self
+                .program
+                .evaluate_gpu_with_grads()
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            self.pack_result_with_grads(py, result)
+        } else {
+            let result = self
+                .program
+                .evaluate()
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            self.pack_result_probs(py, result.query_probs)
+        }
+    }
+}
+
+impl CompiledProgram {
+    fn pack_result_probs(&self, py: Python<'_>, query_probs: Vec<QueryProbability>) -> PyResult<EvalResult> {
+        let mut atoms: Vec<String> = Vec::with_capacity(query_probs.len());
+        let mut probs: Vec<f64> = Vec::with_capacity(query_probs.len());
+        let mut log_probs: Vec<f64> = Vec::with_capacity(query_probs.len());
+
+        for q in query_probs {
+            atoms.push(atom_to_string(&q.atom));
+            probs.push(q.prob);
+            log_probs.push(q.log_prob);
+        }
+
+        let schema = Schema::new(vec![("col0".to_string(), ScalarType::F64)]);
+        let prob_buf = self
+            .output_provider
+            .create_buffer_from_f64_slice(&probs, schema.clone())
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let log_prob_buf = self
+            .output_provider
+            .create_buffer_from_f64_slice(&log_probs, schema)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+        let prob_tensor = self
+            .output_provider
+            .to_dlpack_table(prob_buf)
+            .column(0)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let log_prob_tensor = self
+            .output_provider
+            .to_dlpack_table(log_prob_buf)
+            .column(0)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+        Ok(EvalResult {
+            atoms,
+            prob: dlpack_capsule_from_tensor(py, prob_tensor)?,
+            log_prob: dlpack_capsule_from_tensor(py, log_prob_tensor)?,
+            num_vars: self.program.num_vars(),
+            grad_true: None,
+            grad_false: None,
+        })
+    }
+
+    fn pack_result_with_grads(&self, py: Python<'_>, result: ExactResultWithGrads) -> PyResult<EvalResult> {
+        let mut atoms: Vec<String> = Vec::with_capacity(result.query_grads.len());
+        let mut probs: Vec<f64> = Vec::with_capacity(result.query_grads.len());
+        let mut log_probs: Vec<f64> = Vec::with_capacity(result.query_grads.len());
+
+        let mut grad_true_caps: Vec<PyObject> = Vec::with_capacity(result.query_grads.len());
+        let mut grad_false_caps: Vec<PyObject> = Vec::with_capacity(result.query_grads.len());
+
+        let schema = Schema::new(vec![("col0".to_string(), ScalarType::F64)]);
+
+        let num_vars = self.program.num_vars();
+        for q in result.query_grads {
+            atoms.push(atom_to_string(&q.atom));
+            probs.push(q.prob);
+            log_probs.push(q.log_prob);
+
+            let grad_true_buf = self
+                .output_provider
+                .create_buffer_from_f64_slice(&q.grad_true, schema.clone())
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            let grad_false_buf = self
+                .output_provider
+                .create_buffer_from_f64_slice(&q.grad_false, schema.clone())
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+            let grad_true_tensor = self
+                .output_provider
+                .to_dlpack_table(grad_true_buf)
+                .column(0)
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            let grad_false_tensor = self
+                .output_provider
+                .to_dlpack_table(grad_false_buf)
+                .column(0)
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+            grad_true_caps.push(dlpack_capsule_from_tensor(py, grad_true_tensor)?);
+            grad_false_caps.push(dlpack_capsule_from_tensor(py, grad_false_tensor)?);
+        }
+
+        let prob_buf = self
+            .output_provider
+            .create_buffer_from_f64_slice(&probs, schema.clone())
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let log_prob_buf = self
+            .output_provider
+            .create_buffer_from_f64_slice(&log_probs, schema)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+        let prob_tensor = self
+            .output_provider
+            .to_dlpack_table(prob_buf)
+            .column(0)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let log_prob_tensor = self
+            .output_provider
+            .to_dlpack_table(log_prob_buf)
+            .column(0)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+        Ok(EvalResult {
+            atoms,
+            prob: dlpack_capsule_from_tensor(py, prob_tensor)?,
+            log_prob: dlpack_capsule_from_tensor(py, log_prob_tensor)?,
+            num_vars,
+            grad_true: Some(grad_true_caps),
+            grad_false: Some(grad_false_caps),
+        })
+    }
+}
+
+#[pyclass]
+pub struct EvalResult {
+    #[pyo3(get)]
+    pub atoms: Vec<String>,
+    #[pyo3(get)]
+    pub prob: PyObject,
+    #[pyo3(get)]
+    pub log_prob: PyObject,
+    #[pyo3(get)]
+    pub num_vars: usize,
+    #[pyo3(get)]
+    pub grad_true: Option<Vec<PyObject>>,
+    #[pyo3(get)]
+    pub grad_false: Option<Vec<PyObject>>,
+}
+
+#[pymodule]
+fn xlog_gpu(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    m.add_class::<Program>()?;
+    m.add_class::<CompiledProgram>()?;
+    m.add_class::<EvalResult>()?;
+    m.add_function(wrap_pyfunction!(dlpack_roundtrip, m)?)?;
+    Ok(())
+}

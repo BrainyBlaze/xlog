@@ -36,6 +36,17 @@ impl Xgcf {
         XgcfBuilder::new(ddnnf).build()
     }
 
+    /// Return a semantically equivalent circuit that is **smooth** with respect to
+    /// the subset of variables marked as random in `is_random_var`.
+    ///
+    /// Smoothness guarantees that, for any OR/DECISION node, all branches mention
+    /// the same set of random variables. This makes WMC evaluation and gradients
+    /// correct even when evidence/queries force random variables in non-smooth
+    /// Decision-DNNF outputs.
+    pub fn smooth_random_vars(&self, is_random_var: &[bool]) -> Result<Self> {
+        XgcfSmoother::new(self, is_random_var)?.smooth()
+    }
+
     pub fn eval_log_wmc<F>(&self, var_log_weights: F) -> Result<f64>
     where
         F: Fn(u32) -> (f64, f64),
@@ -418,6 +429,506 @@ impl Xgcf {
         }
 
         Ok((log_z, grad_true, grad_false))
+    }
+}
+
+fn max_var_in_circuit(circuit: &Xgcf) -> Result<u32> {
+    let mut max_var: u32 = 0;
+    for (&ty, &lit) in circuit.node_type.iter().zip(circuit.lit.iter()) {
+        if ty == XgcfNodeType::Lit {
+            if lit == 0 {
+                return Err(XlogError::Compilation(
+                    "XGCF invariant violation: LIT node has lit=0".to_string(),
+                ));
+            }
+            max_var = max_var.max(lit.unsigned_abs());
+        }
+    }
+    for (&ty, &var) in circuit.node_type.iter().zip(circuit.decision_var.iter()) {
+        if ty == XgcfNodeType::Decision {
+            if var == 0 {
+                return Err(XlogError::Compilation(
+                    "XGCF invariant violation: DECISION node has var=0".to_string(),
+                ));
+            }
+            max_var = max_var.max(var);
+        }
+    }
+    Ok(max_var)
+}
+
+fn merge_union_sorted(a: &[u32], b: &[u32], out: &mut Vec<u32>) {
+    out.clear();
+    let mut i = 0usize;
+    let mut j = 0usize;
+    while i < a.len() && j < b.len() {
+        let va = a[i];
+        let vb = b[j];
+        if va == vb {
+            out.push(va);
+            i += 1;
+            j += 1;
+        } else if va < vb {
+            out.push(va);
+            i += 1;
+        } else {
+            out.push(vb);
+            j += 1;
+        }
+    }
+    if i < a.len() {
+        out.extend_from_slice(&a[i..]);
+    }
+    if j < b.len() {
+        out.extend_from_slice(&b[j..]);
+    }
+}
+
+fn sorted_difference(a: &[u32], b: &[u32], out: &mut Vec<u32>) {
+    out.clear();
+    let mut i = 0usize;
+    let mut j = 0usize;
+    while i < a.len() {
+        let va = a[i];
+        while j < b.len() && b[j] < va {
+            j += 1;
+        }
+        if j < b.len() && b[j] == va {
+            i += 1;
+            j += 1;
+            continue;
+        }
+        out.push(va);
+        i += 1;
+    }
+}
+
+fn insert_sorted_unique(sorted: &mut Vec<u32>, var: u32) {
+    match sorted.binary_search(&var) {
+        Ok(_) => {}
+        Err(pos) => sorted.insert(pos, var),
+    }
+}
+
+fn compute_random_support(circuit: &Xgcf, is_random_var: &[bool]) -> Result<Vec<Vec<u32>>> {
+    let n = circuit.node_type.len();
+    let mut support: Vec<Vec<u32>> = vec![Vec::new(); n];
+
+    let num_levels = circuit.level_offsets.len().saturating_sub(1);
+    for level in 0..num_levels {
+        let start = circuit.level_offsets[level] as usize;
+        let end = circuit.level_offsets[level + 1] as usize;
+        for &node_u32 in &circuit.level_nodes[start..end] {
+            let idx = node_u32 as usize;
+            match circuit.node_type[idx] {
+                XgcfNodeType::Const0 | XgcfNodeType::Const1 => {}
+                XgcfNodeType::Lit => {
+                    let lit = circuit.lit[idx];
+                    if lit == 0 {
+                        return Err(XlogError::Compilation(format!(
+                            "XGCF invariant violation: LIT node {} has lit=0",
+                            idx
+                        )));
+                    }
+                    let var = lit.unsigned_abs() as usize;
+                    if var < is_random_var.len() && is_random_var[var] {
+                        support[idx].push(var as u32);
+                    }
+                }
+                XgcfNodeType::And | XgcfNodeType::Or => {
+                    let c0 = circuit.child_offsets[idx] as usize;
+                    let c1 = circuit.child_offsets[idx + 1] as usize;
+                    let mut acc: Vec<u32> = Vec::new();
+                    let mut tmp: Vec<u32> = Vec::new();
+                    for &child in &circuit.child_indices[c0..c1] {
+                        let child_idx = child as usize;
+                        merge_union_sorted(&acc, &support[child_idx], &mut tmp);
+                        std::mem::swap(&mut acc, &mut tmp);
+                    }
+                    support[idx] = acc;
+                }
+                XgcfNodeType::Decision => {
+                    let var = circuit.decision_var[idx];
+                    if var == 0 {
+                        return Err(XlogError::Compilation(format!(
+                            "XGCF invariant violation: DECISION node {} has var=0",
+                            idx
+                        )));
+                    }
+                    let child_false = circuit.decision_child_false[idx] as usize;
+                    let child_true = circuit.decision_child_true[idx] as usize;
+
+                    let mut acc: Vec<u32> = Vec::new();
+                    merge_union_sorted(&support[child_false], &support[child_true], &mut acc);
+
+                    let var_usize = var as usize;
+                    if var_usize < is_random_var.len() && is_random_var[var_usize] {
+                        insert_sorted_unique(&mut acc, var);
+                    }
+                    support[idx] = acc;
+                }
+            }
+        }
+    }
+
+    Ok(support)
+}
+
+struct XgcfSmoother<'a> {
+    input: &'a Xgcf,
+    is_random_var: &'a [bool],
+    support: Vec<Vec<u32>>,
+}
+
+impl<'a> XgcfSmoother<'a> {
+    fn new(input: &'a Xgcf, is_random_var: &'a [bool]) -> Result<Self> {
+        let n = input.node_type.len();
+        if input.child_offsets.len() != n + 1 {
+            return Err(XlogError::Compilation(format!(
+                "XGCF invariant violation: child_offsets len {} != num_nodes+1 ({})",
+                input.child_offsets.len(),
+                n + 1
+            )));
+        }
+        if input.lit.len() != n
+            || input.decision_var.len() != n
+            || input.decision_child_false.len() != n
+            || input.decision_child_true.len() != n
+        {
+            return Err(XlogError::Compilation(
+                "XGCF invariant violation: per-node arrays length mismatch".to_string(),
+            ));
+        }
+
+        let max_var = max_var_in_circuit(input)?;
+        if is_random_var.len() <= (max_var as usize) {
+            return Err(XlogError::Compilation(format!(
+                "XGCF smoothing expects is_random_var len >= {}, got {}",
+                (max_var as usize) + 1,
+                is_random_var.len()
+            )));
+        }
+
+        let support = compute_random_support(input, is_random_var)?;
+        Ok(Self {
+            input,
+            is_random_var,
+            support,
+        })
+    }
+
+    fn smooth(&self) -> Result<Xgcf> {
+        XgcfSmoothBuilder::new(self.input).smooth(self.is_random_var, &self.support)
+    }
+}
+
+struct XgcfSmoothBuilder<'a> {
+    input: &'a Xgcf,
+    node_type: Vec<XgcfNodeType>,
+    child_offsets: Vec<u32>,
+    child_indices: Vec<u32>,
+    lit: Vec<i32>,
+    decision_var: Vec<u32>,
+    decision_child_false: Vec<u32>,
+    decision_child_true: Vec<u32>,
+    old_to_new: Vec<Option<u32>>,
+    lit_cache: HashMap<i32, u32>,
+    tautology_cache: HashMap<u32, u32>,
+    const0: u32,
+    const1: u32,
+}
+
+impl<'a> XgcfSmoothBuilder<'a> {
+    fn new(input: &'a Xgcf) -> Self {
+        let mut b = Self {
+            input,
+            node_type: Vec::new(),
+            child_offsets: Vec::new(),
+            child_indices: Vec::new(),
+            lit: Vec::new(),
+            decision_var: Vec::new(),
+            decision_child_false: Vec::new(),
+            decision_child_true: Vec::new(),
+            old_to_new: Vec::new(),
+            lit_cache: HashMap::new(),
+            tautology_cache: HashMap::new(),
+            const0: 0,
+            const1: 0,
+        };
+
+        b.const0 = b.push_const(false);
+        b.const1 = b.push_const(true);
+        b
+    }
+
+    fn push_base_node(&mut self, ty: XgcfNodeType) -> u32 {
+        let idx = u32::try_from(self.node_type.len()).expect("XGCF node index overflow");
+        self.node_type.push(ty);
+        self.child_offsets.push(self.child_indices.len() as u32);
+        self.lit.push(0);
+        self.decision_var.push(0);
+        self.decision_child_false.push(0);
+        self.decision_child_true.push(0);
+        idx
+    }
+
+    fn push_const(&mut self, value: bool) -> u32 {
+        self.push_base_node(if value {
+            XgcfNodeType::Const1
+        } else {
+            XgcfNodeType::Const0
+        })
+    }
+
+    fn get_lit_node(&mut self, lit: i32) -> Result<u32> {
+        if lit == 0 {
+            return Err(XlogError::Compilation(
+                "Cannot create XGCF LIT for 0 literal".to_string(),
+            ));
+        }
+        if let Some(&idx) = self.lit_cache.get(&lit) {
+            return Ok(idx);
+        }
+        let idx = self.push_base_node(XgcfNodeType::Lit);
+        self.lit[idx as usize] = lit;
+        self.lit_cache.insert(lit, idx);
+        Ok(idx)
+    }
+
+    fn push_and(&mut self, mut children: Vec<u32>) -> Result<u32> {
+        if children.iter().any(|&c| c == self.const0) {
+            return Ok(self.const0);
+        }
+        children.retain(|&c| c != self.const1);
+        children.sort();
+        children.dedup();
+        match children.as_slice() {
+            [] => Ok(self.const1),
+            [only] => Ok(*only),
+            _ => {
+                let idx = self.push_base_node(XgcfNodeType::And);
+                self.child_indices.extend_from_slice(&children);
+                Ok(idx)
+            }
+        }
+    }
+
+    fn push_or(&mut self, mut children: Vec<u32>) -> Result<u32> {
+        children.retain(|&c| c != self.const0);
+        children.sort();
+        children.dedup();
+        match children.as_slice() {
+            [] => Ok(self.const0),
+            [only] => Ok(*only),
+            _ => {
+                let idx = self.push_base_node(XgcfNodeType::Or);
+                self.child_indices.extend_from_slice(&children);
+                Ok(idx)
+            }
+        }
+    }
+
+    fn push_decision(&mut self, var: u32, child_false: u32, child_true: u32) -> Result<u32> {
+        if var == 0 {
+            return Err(XlogError::Compilation(
+                "Cannot create XGCF DECISION with var=0".to_string(),
+            ));
+        }
+        let idx = self.push_base_node(XgcfNodeType::Decision);
+        self.decision_var[idx as usize] = var;
+        self.decision_child_false[idx as usize] = child_false;
+        self.decision_child_true[idx as usize] = child_true;
+        Ok(idx)
+    }
+
+    fn tautology_decision(&mut self, var: u32) -> Result<u32> {
+        if let Some(&idx) = self.tautology_cache.get(&var) {
+            return Ok(idx);
+        }
+        let idx = self.push_decision(var, self.const1, self.const1)?;
+        self.tautology_cache.insert(var, idx);
+        Ok(idx)
+    }
+
+    fn smooth(mut self, is_random_var: &[bool], support: &[Vec<u32>]) -> Result<Xgcf> {
+        let n = self.input.node_type.len();
+        self.old_to_new = vec![None; n];
+
+        let num_levels = self.input.level_offsets.len().saturating_sub(1);
+        for level in 0..num_levels {
+            let start = self.input.level_offsets[level] as usize;
+            let end = self.input.level_offsets[level + 1] as usize;
+            for &node_u32 in &self.input.level_nodes[start..end] {
+                let idx = node_u32 as usize;
+
+                let new_idx = match self.input.node_type[idx] {
+                    XgcfNodeType::Const0 => self.const0,
+                    XgcfNodeType::Const1 => self.const1,
+                    XgcfNodeType::Lit => {
+                        let lit = self.input.lit[idx];
+                        self.get_lit_node(lit)?
+                    }
+                    XgcfNodeType::And => {
+                        let c0 = self.input.child_offsets[idx] as usize;
+                        let c1 = self.input.child_offsets[idx + 1] as usize;
+                        let mut children: Vec<u32> = Vec::with_capacity(c1 - c0);
+                        for &child in &self.input.child_indices[c0..c1] {
+                            let child_idx = child as usize;
+                            let mapped = self.old_to_new[child_idx].ok_or_else(|| {
+                                XlogError::Compilation(format!(
+                                    "XGCF smoothing error: missing mapped child {} for AND node {}",
+                                    child_idx, idx
+                                ))
+                            })?;
+                            children.push(mapped);
+                        }
+                        self.push_and(children)?
+                    }
+                    XgcfNodeType::Or => {
+                        let parent_support = &support[idx];
+                        let c0 = self.input.child_offsets[idx] as usize;
+                        let c1 = self.input.child_offsets[idx + 1] as usize;
+                        let mut wrapped_children: Vec<u32> = Vec::with_capacity(c1 - c0);
+                        let mut missing: Vec<u32> = Vec::new();
+                        for &child in &self.input.child_indices[c0..c1] {
+                            let child_idx = child as usize;
+                            let child_new = self.old_to_new[child_idx].ok_or_else(|| {
+                                XlogError::Compilation(format!(
+                                    "XGCF smoothing error: missing mapped child {} for OR node {}",
+                                    child_idx, idx
+                                ))
+                            })?;
+
+                            let child_support = &support[child_idx];
+                            sorted_difference(parent_support, child_support, &mut missing);
+
+                            if missing.is_empty() {
+                                wrapped_children.push(child_new);
+                            } else {
+                                let mut and_children: Vec<u32> =
+                                    Vec::with_capacity(1 + missing.len());
+                                and_children.push(child_new);
+                                for &var in &missing {
+                                    let var_usize = var as usize;
+                                    if var_usize < is_random_var.len() && is_random_var[var_usize] {
+                                        and_children.push(self.tautology_decision(var)?);
+                                    }
+                                }
+                                wrapped_children.push(self.push_and(and_children)?);
+                            }
+                        }
+                        self.push_or(wrapped_children)?
+                    }
+                    XgcfNodeType::Decision => {
+                        let var = self.input.decision_var[idx];
+                        let child_false_old = self.input.decision_child_false[idx] as usize;
+                        let child_true_old = self.input.decision_child_true[idx] as usize;
+
+                        let child_false_new = self.old_to_new[child_false_old].ok_or_else(|| {
+                            XlogError::Compilation(format!(
+                                "XGCF smoothing error: missing mapped decision false child {} for node {}",
+                                child_false_old, idx
+                            ))
+                        })?;
+                        let child_true_new = self.old_to_new[child_true_old].ok_or_else(|| {
+                            XlogError::Compilation(format!(
+                                "XGCF smoothing error: missing mapped decision true child {} for node {}",
+                                child_true_old, idx
+                            ))
+                        })?;
+
+                        let mut union_children: Vec<u32> = Vec::new();
+                        merge_union_sorted(
+                            &support[child_false_old],
+                            &support[child_true_old],
+                            &mut union_children,
+                        );
+
+                        if union_children.binary_search(&var).is_ok() {
+                            return Err(XlogError::Compilation(format!(
+                                "XGCF smoothing error: decision var {} appears in child support at node {}",
+                                var, idx
+                            )));
+                        }
+
+                        let mut missing: Vec<u32> = Vec::new();
+
+                        sorted_difference(&union_children, &support[child_false_old], &mut missing);
+                        let new_false = if missing.is_empty() {
+                            child_false_new
+                        } else {
+                            let mut and_children: Vec<u32> =
+                                Vec::with_capacity(1 + missing.len());
+                            and_children.push(child_false_new);
+                            for &v in &missing {
+                                let v_usize = v as usize;
+                                if v_usize < is_random_var.len() && is_random_var[v_usize] {
+                                    and_children.push(self.tautology_decision(v)?);
+                                }
+                            }
+                            self.push_and(and_children)?
+                        };
+
+                        sorted_difference(&union_children, &support[child_true_old], &mut missing);
+                        let new_true = if missing.is_empty() {
+                            child_true_new
+                        } else {
+                            let mut and_children: Vec<u32> =
+                                Vec::with_capacity(1 + missing.len());
+                            and_children.push(child_true_new);
+                            for &v in &missing {
+                                let v_usize = v as usize;
+                                if v_usize < is_random_var.len() && is_random_var[v_usize] {
+                                    and_children.push(self.tautology_decision(v)?);
+                                }
+                            }
+                            self.push_and(and_children)?
+                        };
+
+                        self.push_decision(var, new_false, new_true)?
+                    }
+                };
+
+                self.old_to_new[idx] = Some(new_idx);
+            }
+        }
+
+        // Finalize offsets (sentinel).
+        self.child_offsets.push(self.child_indices.len() as u32);
+
+        let mut roots: Vec<u32> = Vec::with_capacity(self.input.roots.len());
+        for &root in &self.input.roots {
+            let idx = root as usize;
+            let mapped = self.old_to_new[idx].ok_or_else(|| {
+                XlogError::Compilation(format!(
+                    "XGCF smoothing error: missing mapped root node {}",
+                    idx
+                ))
+            })?;
+            roots.push(mapped);
+        }
+
+        let (level_offsets, level_nodes) = XgcfBuilder::levelize(
+            &self.node_type,
+            &self.child_offsets,
+            &self.child_indices,
+            &self.decision_child_false,
+            &self.decision_child_true,
+            &roots,
+        )?;
+
+        Ok(Xgcf {
+            node_type: self.node_type,
+            child_offsets: self.child_offsets,
+            child_indices: self.child_indices,
+            lit: self.lit,
+            decision_var: self.decision_var,
+            decision_child_false: self.decision_child_false,
+            decision_child_true: self.decision_child_true,
+            roots,
+            level_offsets,
+            level_nodes,
+        })
     }
 }
 
