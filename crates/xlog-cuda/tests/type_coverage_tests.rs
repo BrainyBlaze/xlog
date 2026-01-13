@@ -54,7 +54,7 @@ fn test_filter_i64_by_mask() {
         .htod_sync_copy_into(&bytes, &mut col)
         .expect("upload failed");
 
-    let buffer = xlog_cuda::CudaBuffer::from_columns(vec![col], data.len() as u64, schema);
+    let buffer = xlog_cuda::CudaBuffer::from_columns(vec![col.into()], data.len() as u64, schema);
 
     // Apply filter by mask
     let filtered = provider.filter_by_mask(&buffer, &mask).unwrap();
@@ -104,7 +104,7 @@ fn test_filter_f64_by_mask() {
         .htod_sync_copy_into(&bytes, &mut col)
         .expect("upload failed");
 
-    let buffer = xlog_cuda::CudaBuffer::from_columns(vec![col], data.len() as u64, schema);
+    let buffer = xlog_cuda::CudaBuffer::from_columns(vec![col.into()], data.len() as u64, schema);
     let filtered = provider.filter_by_mask(&buffer, &mask).unwrap();
 
     assert_eq!(filtered.num_rows, 3);
@@ -149,7 +149,7 @@ fn test_filter_i32_by_mask() {
         .htod_sync_copy_into(&bytes, &mut col)
         .expect("upload failed");
 
-    let buffer = xlog_cuda::CudaBuffer::from_columns(vec![col], data.len() as u64, schema);
+    let buffer = xlog_cuda::CudaBuffer::from_columns(vec![col.into()], data.len() as u64, schema);
     let filtered = provider.filter_by_mask(&buffer, &mask).unwrap();
 
     assert_eq!(filtered.num_rows, 3);
@@ -194,7 +194,7 @@ fn test_filter_f32_by_mask() {
         .htod_sync_copy_into(&bytes, &mut col)
         .expect("upload failed");
 
-    let buffer = xlog_cuda::CudaBuffer::from_columns(vec![col], data.len() as u64, schema);
+    let buffer = xlog_cuda::CudaBuffer::from_columns(vec![col.into()], data.len() as u64, schema);
     let filtered = provider.filter_by_mask(&buffer, &mask).unwrap();
 
     assert_eq!(filtered.num_rows, 2);
@@ -790,7 +790,7 @@ fn test_filter_multi_column_mixed_types() {
         .expect("upload failed");
 
     let buffer = xlog_cuda::CudaBuffer::from_columns(
-        vec![cuda_col0, cuda_col1],
+        vec![cuda_col0.into(), cuda_col1.into()],
         col0.len() as u64,
         schema,
     );

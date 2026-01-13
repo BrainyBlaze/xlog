@@ -4,15 +4,16 @@
 //! PTX kernels for GPU execution of relational operations (join, dedup, groupby).
 
 use std::sync::Arc;
+use std::marker::PhantomData;
 
 use cudarc::driver::{
-    CudaView, CudaViewMut, DevicePtr, DeviceRepr, DeviceSlice, LaunchAsync, LaunchConfig,
+    CudaViewMut, DevicePtr, DeviceRepr, DeviceSlice, LaunchAsync, LaunchConfig,
 };
 use cudarc::nvrtc::Ptx;
 use std::ffi::c_void;
 use xlog_core::{AggOp, Result, ScalarType, Schema, XlogError};
 
-use crate::{CudaBuffer, CudaDevice, GpuMemoryManager};
+use crate::{memory::CudaColumn, CudaBuffer, CudaDevice, GpuMemoryManager};
 
 // Embedded PTX sources (pre-compiled from .cu files with nvcc -ptx -arch=sm_70)
 const JOIN_PTX: &str = include_str!("../../../kernels/join.ptx");
@@ -23,6 +24,33 @@ const SORT_PTX: &str = include_str!("../../../kernels/sort.ptx");
 const FILTER_PTX: &str = include_str!("../../../kernels/filter.ptx");
 const SET_OPS_PTX: &str = include_str!("../../../kernels/set_ops.ptx");
 const PACK_PTX: &str = include_str!("../../../kernels/pack.ptx");
+
+#[derive(Clone, Copy)]
+struct RawCudaView<'a, T> {
+    ptr: cudarc::driver::sys::CUdeviceptr,
+    len: usize,
+    _marker: PhantomData<&'a [T]>,
+}
+
+impl<'a, T> DeviceSlice<T> for RawCudaView<'a, T> {
+    fn len(&self) -> usize {
+        self.len
+    }
+}
+
+impl<'a, T> DevicePtr<T> for RawCudaView<'a, T> {
+    fn device_ptr(&self) -> &cudarc::driver::sys::CUdeviceptr {
+        &self.ptr
+    }
+}
+
+unsafe impl<'a, T: DeviceRepr> DeviceRepr for &RawCudaView<'a, T> {
+    #[inline(always)]
+    fn as_kernel_param(&self) -> *mut c_void {
+        let ptr = DevicePtr::device_ptr(*self);
+        ptr as *const cudarc::driver::sys::CUdeviceptr as *mut c_void
+    }
+}
 
 /// Module names for loaded PTX modules
 pub const JOIN_MODULE: &str = "xlog_join";
@@ -954,7 +982,7 @@ impl CudaKernelProvider {
                 .map_err(|e| XlogError::Kernel(format!("concat_bytes failed: {}", e)))?;
             }
 
-            result_columns.push(out_col);
+            result_columns.push(out_col.into());
         }
 
         self.device.synchronize()?;
@@ -1141,7 +1169,7 @@ impl CudaKernelProvider {
                     .htod_sync_copy_into(&result_host, &mut result_col)
                     .map_err(|e| XlogError::Kernel(format!("Failed to upload result: {}", e)))?;
 
-                result_columns.push(result_col);
+                result_columns.push(result_col.into());
             }
         }
 
@@ -1821,7 +1849,7 @@ impl CudaKernelProvider {
         let result_schema = self.groupby_result_schema(input.schema(), key_cols, agg);
 
         Ok(CudaBuffer::from_columns(
-            vec![result_key_col, output_col_u8],
+            vec![result_key_col.into(), output_col_u8.into()],
             num_groups as u64,
             result_schema,
         ))
@@ -2310,14 +2338,14 @@ impl CudaKernelProvider {
             .map_err(|e| XlogError::Kernel(format!("Failed to upload result keys: {}", e)))?;
 
         // Build result columns: key column + agg columns
-        let mut result_columns = vec![result_key_col];
+        let mut result_columns = vec![result_key_col.into()];
         for agg_bytes in agg_columns_bytes {
             let mut agg_col = self.memory.alloc::<u8>(agg_bytes.len())?;
             self.device
                 .inner()
                 .htod_sync_copy_into(&agg_bytes, &mut agg_col)
                 .map_err(|e| XlogError::Kernel(format!("Failed to upload agg column: {}", e)))?;
-            result_columns.push(agg_col);
+            result_columns.push(agg_col.into());
         }
 
         let result_schema = self.groupby_multi_agg_result_schema(buffer.schema(), key_cols, aggs);
@@ -3179,7 +3207,7 @@ impl CudaKernelProvider {
             }
             .map_err(|e| XlogError::Kernel(format!("apply_permutation_bytes failed: {}", e)))?;
 
-            new_columns.push(dst_col);
+            new_columns.push(dst_col.into());
         }
 
         self.device.synchronize()?;
@@ -3266,7 +3294,7 @@ impl CudaKernelProvider {
             }
             .map_err(|e| XlogError::Kernel(format!("apply_permutation_bytes failed: {}", e)))?;
 
-            new_columns.push(dst_col);
+            new_columns.push(dst_col.into());
         }
 
         self.device.synchronize()?;
@@ -3752,7 +3780,7 @@ impl CudaKernelProvider {
             }
             .map_err(|e| XlogError::Kernel(format!("compact_bytes_by_mask failed: {}", e)))?;
 
-            new_columns.push(dst_col);
+            new_columns.push(dst_col.into());
         }
 
         self.device.synchronize()?;
@@ -3881,7 +3909,7 @@ impl CudaKernelProvider {
             .map_err(|e| XlogError::Kernel(format!("Failed to upload data: {}", e)))?;
 
         Ok(CudaBuffer::from_columns(
-            vec![col],
+            vec![col.into()],
             data.len() as u64,
             schema,
         ))
@@ -3927,7 +3955,7 @@ impl CudaKernelProvider {
                 .inner()
                 .htod_sync_copy_into(&bytes, &mut col)
                 .map_err(|e| XlogError::Kernel(format!("Failed to upload column: {}", e)))?;
-            cuda_columns.push(col);
+            cuda_columns.push(col.into());
         }
 
         Ok(CudaBuffer::from_columns(
@@ -3957,7 +3985,7 @@ impl CudaKernelProvider {
             .map_err(|e| XlogError::Kernel(format!("Failed to upload data: {}", e)))?;
 
         Ok(CudaBuffer::from_columns(
-            vec![col],
+            vec![col.into()],
             data.len() as u64,
             schema,
         ))
@@ -3983,7 +4011,7 @@ impl CudaKernelProvider {
             .map_err(|e| XlogError::Kernel(format!("Failed to upload data: {}", e)))?;
 
         Ok(CudaBuffer::from_columns(
-            vec![col],
+            vec![col.into()],
             data.len() as u64,
             schema,
         ))
@@ -4009,7 +4037,7 @@ impl CudaKernelProvider {
             .map_err(|e| XlogError::Kernel(format!("Failed to upload data: {}", e)))?;
 
         Ok(CudaBuffer::from_columns(
-            vec![col],
+            vec![col.into()],
             data.len() as u64,
             schema,
         ))
@@ -4035,7 +4063,7 @@ impl CudaKernelProvider {
             .map_err(|e| XlogError::Kernel(format!("Failed to upload data: {}", e)))?;
 
         Ok(CudaBuffer::from_columns(
-            vec![col],
+            vec![col.into()],
             data.len() as u64,
             schema,
         ))
@@ -4061,7 +4089,7 @@ impl CudaKernelProvider {
             .map_err(|e| XlogError::Kernel(format!("Failed to upload data: {}", e)))?;
 
         Ok(CudaBuffer::from_columns(
-            vec![col],
+            vec![col.into()],
             data.len() as u64,
             schema,
         ))
@@ -4133,7 +4161,7 @@ impl CudaKernelProvider {
                 .inner()
                 .htod_sync_copy_into(slice, &mut col)
                 .map_err(|e| XlogError::Kernel(format!("Failed to upload column {}: {}", i, e)))?;
-            columns.push(col);
+            columns.push(col.into());
         }
 
         Ok(CudaBuffer::from_columns(columns, num_rows as u64, schema))
@@ -4349,7 +4377,7 @@ impl CudaKernelProvider {
                 .htod_sync_copy_into(&bytes, &mut d_col)
                 .map_err(|e| XlogError::Kernel(format!("Failed to upload column: {}", e)))?;
 
-            columns.push(d_col);
+            columns.push(d_col.into());
             schema_cols.push((field.name().clone(), scalar_type));
         }
 
@@ -4750,17 +4778,8 @@ impl CudaKernelProvider {
 
     // ============== Internal Helper Methods ==============
 
-    /// Transmute a CudaSlice<u8> column to a CudaView<u32> for kernel access
-    ///
-    /// # Safety
-    /// Caller must ensure:
-    /// - The column contains valid u32 data (4-byte aligned, correct endianness)
-    /// - The column length is a multiple of 4 bytes
-    fn column_as_u32_view<'a>(
-        &self,
-        col: &'a cudarc::driver::CudaSlice<u8>,
-        num_elements: usize,
-    ) -> Result<CudaView<'a, u32>> {
+    /// Reinterpret a `CudaBuffer` column as a `u32` slice for kernel access.
+    fn column_as_u32_view<'a>(&self, col: &'a CudaColumn, num_elements: usize) -> Result<RawCudaView<'a, u32>> {
         let required_bytes = num_elements * std::mem::size_of::<u32>();
         if col.num_bytes() < required_bytes {
             return Err(XlogError::Kernel(format!(
@@ -4770,16 +4789,20 @@ impl CudaKernelProvider {
                 num_elements
             )));
         }
-        // SAFETY: We've verified the column has enough bytes
-        unsafe { col.transmute(num_elements) }
-            .ok_or_else(|| XlogError::Kernel("Failed to transmute column to u32".to_string()))
+        let ptr = *col.device_ptr();
+        if (ptr as usize) % std::mem::align_of::<u32>() != 0 {
+            return Err(XlogError::Kernel(
+                "Column device pointer is not u32-aligned".to_string(),
+            ));
+        }
+        Ok(RawCudaView {
+            ptr,
+            len: num_elements,
+            _marker: PhantomData,
+        })
     }
 
-    fn column_as_u64_view<'a>(
-        &self,
-        col: &'a cudarc::driver::CudaSlice<u8>,
-        num_elements: usize,
-    ) -> Result<CudaView<'a, u64>> {
+    fn column_as_u64_view<'a>(&self, col: &'a CudaColumn, num_elements: usize) -> Result<RawCudaView<'a, u64>> {
         let required_bytes = num_elements * std::mem::size_of::<u64>();
         if col.num_bytes() < required_bytes {
             return Err(XlogError::Kernel(format!(
@@ -4789,22 +4812,21 @@ impl CudaKernelProvider {
                 num_elements
             )));
         }
-        // SAFETY: We've verified the column has enough bytes.
-        unsafe { col.transmute(num_elements) }
-            .ok_or_else(|| XlogError::Kernel("Failed to transmute column to u64".to_string()))
+        let ptr = *col.device_ptr();
+        if (ptr as usize) % std::mem::align_of::<u64>() != 0 {
+            return Err(XlogError::Kernel(
+                "Column device pointer is not u64-aligned".to_string(),
+            ));
+        }
+        Ok(RawCudaView {
+            ptr,
+            len: num_elements,
+            _marker: PhantomData,
+        })
     }
 
-    /// Transmute a CudaSlice<u8> column to a CudaView<f64> for kernel access
-    ///
-    /// # Safety
-    /// Caller must ensure:
-    /// - The column contains valid f64 data (8-byte aligned, correct endianness)
-    /// - The column length is a multiple of 8 bytes
-    fn column_as_f64_view<'a>(
-        &self,
-        col: &'a cudarc::driver::CudaSlice<u8>,
-        num_elements: usize,
-    ) -> Result<CudaView<'a, f64>> {
+    /// Reinterpret a `CudaBuffer` column as an `f64` slice for kernel access.
+    fn column_as_f64_view<'a>(&self, col: &'a CudaColumn, num_elements: usize) -> Result<RawCudaView<'a, f64>> {
         let required_bytes = num_elements * std::mem::size_of::<f64>();
         if col.num_bytes() < required_bytes {
             return Err(XlogError::Kernel(format!(
@@ -4814,9 +4836,17 @@ impl CudaKernelProvider {
                 num_elements
             )));
         }
-        // SAFETY: We've verified the column has enough bytes
-        unsafe { col.transmute(num_elements) }
-            .ok_or_else(|| XlogError::Kernel("Failed to transmute column to f64".to_string()))
+        let ptr = *col.device_ptr();
+        if (ptr as usize) % std::mem::align_of::<f64>() != 0 {
+            return Err(XlogError::Kernel(
+                "Column device pointer is not f64-aligned".to_string(),
+            ));
+        }
+        Ok(RawCudaView {
+            ptr,
+            len: num_elements,
+            _marker: PhantomData,
+        })
     }
 
     /// Create an empty buffer with the given schema (all columns are empty slices)
@@ -4833,7 +4863,7 @@ impl CudaKernelProvider {
         let mut columns = Vec::with_capacity(schema.arity());
         for _ in 0..schema.arity() {
             // Allocate zero-length column
-            columns.push(self.memory.alloc::<u8>(0)?);
+            columns.push(self.memory.alloc::<u8>(0)?.into());
         }
         Ok(CudaBuffer::from_columns(columns, 0, schema))
     }
@@ -6409,7 +6439,7 @@ impl CudaKernelProvider {
                         XlogError::Kernel(format!("Failed to zero null right column: {}", e))
                     })?;
                 }
-                result_columns.push(dst_col);
+                result_columns.push(dst_col.into());
             }
 
             self.device.synchronize()?;
@@ -6466,7 +6496,7 @@ impl CudaKernelProvider {
                     })?;
             }
 
-            result_columns.push(out_col);
+            result_columns.push(out_col.into());
         }
 
         for (col_idx, inner_col) in inner_right.columns.into_iter().enumerate() {
@@ -6505,7 +6535,7 @@ impl CudaKernelProvider {
                 })?;
             }
 
-            result_columns.push(out_col);
+            result_columns.push(out_col.into());
         }
 
         self.device.synchronize()?;
@@ -6792,7 +6822,7 @@ impl CudaKernelProvider {
                         XlogError::Kernel(format!("Failed to zero null right column: {}", e))
                     })?;
                 }
-                result_columns.push(dst_col);
+                result_columns.push(dst_col.into());
             }
 
             self.device.synchronize()?;
@@ -6851,7 +6881,7 @@ impl CudaKernelProvider {
                     })?;
             }
 
-            result_columns.push(out_col);
+            result_columns.push(out_col.into());
         }
 
         // Right columns: inner-right then zeros.
@@ -6891,7 +6921,7 @@ impl CudaKernelProvider {
                 })?;
             }
 
-            result_columns.push(out_col);
+            result_columns.push(out_col.into());
         }
 
         self.device.synchronize()?;
@@ -6931,7 +6961,7 @@ impl CudaKernelProvider {
                     .map_err(|e| XlogError::Kernel(format!("Failed to copy left column: {}", e)))?;
             }
 
-            result_columns.push(dst_col);
+            result_columns.push(dst_col.into());
         }
 
         // Create null (zero) columns for right side on-device
@@ -6950,7 +6980,7 @@ impl CudaKernelProvider {
                     .map_err(|e| XlogError::Kernel(format!("Failed to zero null column: {}", e)))?;
             }
 
-            result_columns.push(dst_col);
+            result_columns.push(dst_col.into());
         }
 
         self.device.synchronize()?;
@@ -6989,7 +7019,7 @@ impl CudaKernelProvider {
                     .inner()
                     .htod_sync_copy_into(&host_data, &mut dst_col)
                     .map_err(|e| XlogError::Kernel(format!("Failed to clone column: {}", e)))?;
-                result_columns.push(dst_col);
+                result_columns.push(dst_col.into());
             }
         }
 
@@ -7046,7 +7076,7 @@ impl CudaKernelProvider {
             .map_err(|e| XlogError::Kernel(format!("Failed to copy column: {}", e)))?;
 
         let schema = Schema::new(vec![("col".to_string(), col_type)]);
-        Ok(CudaBuffer::from_columns(vec![dst_col], num_rows, schema))
+        Ok(CudaBuffer::from_columns(vec![dst_col.into()], num_rows, schema))
     }
 
     /// Create a column filled with a constant value
@@ -7092,7 +7122,7 @@ impl CudaKernelProvider {
             .map_err(|e| XlogError::Kernel(format!("Failed to upload constant column: {}", e)))?;
 
         let schema = Schema::new(vec![("const".to_string(), col_type)]);
-        Ok(CudaBuffer::from_columns(vec![dst_col], num_rows, schema))
+        Ok(CudaBuffer::from_columns(vec![dst_col.into()], num_rows, schema))
     }
 
     /// Element-wise addition of two single-column buffers
@@ -7834,7 +7864,7 @@ impl CudaKernelProvider {
                 .htod_sync_copy_into(&host_data, &mut dst_col)
                 .map_err(|e| XlogError::Kernel(format!("Failed to copy column {}: {}", i, e)))?;
 
-            result_columns.push(dst_col);
+            result_columns.push(dst_col.into());
         }
 
         let schema_cols: Vec<(String, ScalarType)> = types
@@ -8058,14 +8088,14 @@ mod tests {
             .htod_sync_copy_into(&bytes, &mut col)
             .expect("htod");
 
-        CudaBuffer::from_columns(vec![col], data.len() as u64, schema)
+        CudaBuffer::from_columns(vec![col.into()], data.len() as u64, schema)
     }
 
     // Helper function to create an empty buffer with correct column count
     fn create_empty_test_buffer(provider: &CudaKernelProvider, schema: Schema) -> CudaBuffer {
         let mut columns = Vec::with_capacity(schema.arity());
         for _ in 0..schema.arity() {
-            columns.push(provider.memory().alloc::<u8>(0).expect("alloc"));
+            columns.push(provider.memory().alloc::<u8>(0).expect("alloc").into());
         }
         CudaBuffer::from_columns(columns, 0, schema)
     }
@@ -8397,7 +8427,7 @@ mod tests {
             .inner()
             .htod_sync_copy_into(&bytes_2col[8..], &mut col1)
             .expect("htod");
-        let buffer_2col = CudaBuffer::from_columns(vec![col0, col1], 2, schema_2col);
+        let buffer_2col = CudaBuffer::from_columns(vec![col0.into(), col1.into()], 2, schema_2col);
 
         let buffer_1col = create_test_buffer(&provider, &[1, 2], "c0");
 
@@ -8491,7 +8521,7 @@ mod tests {
             .htod_sync_copy_into(&val_bytes, &mut val_col)
             .expect("upload val");
 
-        let buffer = CudaBuffer::from_columns(vec![key_col, val_col], 4, schema);
+        let buffer = CudaBuffer::from_columns(vec![key_col.into(), val_col.into()], 4, schema);
 
         // Run LogSumExp aggregation grouped by key column (0), aggregating value column (1)
         let result = provider.groupby_agg(&buffer, &[0], AggOp::LogSumExp, 1);

@@ -122,14 +122,15 @@
 
 ### P4.1 CuDF Integration
 **Goal:** Interoperability with RAPIDS ecosystem
-**Status:** IN PROGRESS (Arrow IPC + DLPack export)
+**Status:** IN PROGRESS (Arrow IPC + DLPack export/import)
 **Implemented:**
 - Arrow RecordBatch export/import (`CudaKernelProvider::{to_arrow_record_batch, from_arrow_record_batch}`)
 - Arrow IPC stream helpers (`CudaKernelProvider::{to_arrow_ipc_stream, from_arrow_ipc_stream, write_arrow_ipc_stream_file, read_arrow_ipc_stream_file}`)
 - DLPack export for zero-copy GPU handoff (`CudaKernelProvider::to_dlpack_table`)
+- DLPack import for zero-copy GPU ingestion (`CudaKernelProvider::{from_dlpack_tensors, from_dlpack_tensors_with_schema}`)
 - Notes + Python cuDF example: `docs/architecture/cudf-interop.md`
 **Next:**
-- Zero-copy import (wrap external CUDA allocations safely)
+- Python binding layer (capsule/FFI) + cuDF DLPack example
 **Effort:** 2-3 weeks
 
 ### P4.2 Query Optimizer
@@ -139,22 +140,24 @@
 - Compiler runs optimizer pass (predicate pushdown) on all compiled rule bodies
 - Lowering-time cost-based join planning:
   - bushy DP join trees for small bodies (≤10 atoms) with build/probe cost model
-  - greedy fallback for large bodies
+  - greedy bushy join planning fallback for large bodies
   - cartesian joins supported via constant-key join (avoids empty-key GPU join errors)
 - Compiler can seed optimizer from a `xlog_stats::StatsSnapshot` (runtime → compiler feedback loop)
 - Stats snapshots can include predicate names so the compiler can safely remap stats across `RelId` reuse and use snapshot cardinalities to inform lowering-time join ordering
 **Next:**
-- Scale bushy planning beyond small bodies (or add memoization/beam search)
+- Improve large-body plan quality (memoization/beam search)
 **Effort:** 3-4 weeks
 
 ### P4.3 Incremental Maintenance
 **Goal:** Delta updates without full recomputation
-**Status:** IN PROGRESS (semi-naive SCC evaluation + EDB delta recompute)
+**Status:** IN PROGRESS (semi-naive SCC evaluation + insert-only incremental updates)
 **Implemented:**
 - Runtime recursive SCC evaluation uses semi-naive deltas with per-scan occurrence rewriting (supports mutual recursion + self-joins)
-- Runtime supports applying EDB insert/delete deltas and recomputing affected SCCs without recompiling (`Executor::apply_deltas_and_recompute`)
+- Runtime supports applying EDB insert/delete deltas without recompiling (`Executor::apply_deltas_and_recompute`):
+  - insert-only: incremental update for monotone SCCs; recompute for non-monotone SCCs and dependents
+  - deletes: recompute affected SCC closure for correctness
 **Next:**
-- True incremental maintenance (avoid full SCC recomputation for inserts)
+- True incremental maintenance for non-monotone programs (negation/aggregation), and finer-grained delta propagation
 **Effort:** 2-3 weeks
 
 ### P4.4 Adaptive Indexing (HISA)
@@ -164,9 +167,9 @@
 - Runtime `Executor` maintains `xlog_stats::StatsManager` and records:
   - Scan heat + cardinality/bytes
   - Join selectivities (when both sides are base relations)
-- Join index cache with LRU eviction and invalidation on relation updates (build-side hash reuse when the right side is a hot Scan relation)
+- Join index cache with LRU eviction, invalidation on relation updates, and budget-aware sizing/heuristics (build-side hash reuse when the right side is a hot Scan relation)
 **Next:**
-- Improve index selection heuristics and cache sizing (budget-aware tuning)
+- Improve index selection policy (join frequency/selectivity-aware) and reduce rebuild churn
 **Effort:** 4-6 weeks
 
 **Total P4 Effort:** ~3 months

@@ -169,13 +169,15 @@ impl Executor {
     /// * `provider` - The CUDA kernel provider for GPU operations
     pub fn new(provider: Arc<CudaKernelProvider>) -> Self {
         const DEFAULT_JOIN_INDEX_CACHE_BYTES: u64 = 256 * 1024 * 1024;
+        let max_index_cache_bytes = (provider.memory().budget().device_bytes / 4)
+            .min(DEFAULT_JOIN_INDEX_CACHE_BYTES);
         Self {
             provider,
             store: RelationStore::new(),
             rel_names: HashMap::new(),
             name_to_rel: HashMap::new(),
             stats: StatsManager::new(),
-            join_index_cache: JoinIndexCache::new(DEFAULT_JOIN_INDEX_CACHE_BYTES),
+            join_index_cache: JoinIndexCache::new(max_index_cache_bytes),
         }
     }
 
@@ -281,6 +283,13 @@ impl Executor {
             return Ok(());
         }
 
+        let has_deletes = deltas.values().any(|d| {
+            d.delete
+                .as_ref()
+                .map(|b| !b.is_empty())
+                .unwrap_or(false)
+        });
+
         // 1) Apply EDB updates.
         for (name, delta) in deltas {
             let existing = self.store.get(name);
@@ -366,8 +375,66 @@ impl Executor {
             return Ok(());
         }
 
-        // 3) Clear IDB relations for affected SCCs (but never clear directly-updated bases).
-        for scc_id in &affected {
+        fn contains_non_monotonic_ops(node: &RirNode) -> bool {
+            match node {
+                RirNode::Scan { .. } => false,
+                RirNode::Filter { input, .. }
+                | RirNode::Project { input, .. }
+                | RirNode::Distinct { input, .. } => contains_non_monotonic_ops(input),
+                RirNode::Union { inputs } => inputs.iter().any(contains_non_monotonic_ops),
+                RirNode::GroupBy { .. } | RirNode::Diff { .. } => true,
+                RirNode::Join {
+                    left,
+                    right,
+                    join_type,
+                    ..
+                } => {
+                    matches!(join_type, JoinType::Anti | JoinType::LeftOuter)
+                        || contains_non_monotonic_ops(left)
+                        || contains_non_monotonic_ops(right)
+                }
+                RirNode::Fixpoint { base, recursive, .. } => {
+                    contains_non_monotonic_ops(base) || contains_non_monotonic_ops(recursive)
+                }
+            }
+        }
+
+        // 3) Decide which SCCs must be recomputed (cleared first).
+        //
+        // If there are deletes, we always recompute for correctness.
+        // If there are only inserts, we can incrementally update SCCs that are monotone w.r.t.
+        // insertion (no anti-joins, diffs, or aggregates) and do a targeted recompute for the rest.
+        let mut recompute_sccs: HashSet<u32> = HashSet::new();
+        if has_deletes {
+            recompute_sccs = affected.clone();
+        } else {
+            for &scc_id in &affected {
+                if let Some(rules) = plan.rules_by_scc.get(scc_id as usize) {
+                    if rules.iter().any(|r| contains_non_monotonic_ops(&r.body)) {
+                        recompute_sccs.insert(scc_id);
+                    }
+                }
+            }
+
+            // If any SCC is recomputed due to non-monotonic ops, all dependents must also be
+            // recomputed because their prior outputs may now be invalid.
+            let mut queue: Vec<u32> = recompute_sccs.iter().copied().collect();
+            while let Some(scc) = queue.pop() {
+                if let Some(deps) = dependents.get(&scc) {
+                    for &next in deps {
+                        if !affected.contains(&next) {
+                            continue;
+                        }
+                        if recompute_sccs.insert(next) {
+                            queue.push(next);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4) Clear IDB relations for SCCs we are recomputing (but never clear directly-updated bases).
+        for scc_id in &recompute_sccs {
             let Some(scc) = plan.sccs.iter().find(|s| s.id == *scc_id) else {
                 continue;
             };
@@ -389,7 +456,7 @@ impl Executor {
             }
         }
 
-        // 4) Re-execute affected SCCs in plan order.
+        // 5) Re-execute affected SCCs in plan order (incremental for insert-only monotone SCCs).
         for stratum in &plan.strata {
             for &scc_id in &stratum.sccs {
                 if !affected.contains(&scc_id) {
@@ -646,11 +713,13 @@ impl Executor {
             }
         }
 
-        // Initialize delta = full after seeding (standard semi-naive initialization).
-        // Keep delta relations in the store under their dedicated delta names to avoid extra cloning
-        // when iterating.
+        // Initialize delta from the newly-derived tuples only.
+        //
+        // This supports incremental maintenance: if the SCC is executed again after EDB inserts,
+        // the delta relations start with only the *new* tuples, not a full rescan of the current
+        // fixed point.
         for pred in &recursive_preds {
-            let existing_full = self
+            let full_old = self
                 .store
                 .remove(pred)
                 .ok_or_else(|| XlogError::Execution(format!("Missing relation: {}", pred)))?;
@@ -658,9 +727,9 @@ impl Executor {
             let derived = derived_initial
                 .remove(pred)
                 .unwrap_or_else(|| CudaBuffer::empty());
-            let merged = self.provider.union(&existing_full, &derived)?;
+            let merged = self.provider.union(&full_old, &derived)?;
             let key_cols: Vec<usize> = (0..merged.arity()).collect();
-            let full = if merged.is_empty() {
+            let full_new = if merged.is_empty() {
                 merged
             } else {
                 self.provider.dedup(&merged, &key_cols)?
@@ -670,9 +739,13 @@ impl Executor {
                 XlogError::Execution(format!("Missing delta relation for {}", pred))
             })?;
 
-            // Store full and seed delta with a copy of full for the first iteration.
-            let delta_initial = self.clone_buffer(&full)?;
-            self.store_put(pred, full);
+            let delta_initial = if full_old.is_empty() || full_new.is_empty() {
+                self.clone_buffer(&full_new)?
+            } else {
+                self.provider.diff_gpu(&full_new, &full_old)?
+            };
+
+            self.store_put(pred, full_new);
             self.store_put(delta_name, delta_initial);
         }
 
@@ -1171,7 +1244,7 @@ impl Executor {
                 .htod_sync_copy_into(&result_host, &mut result_col)
                 .map_err(|e| XlogError::Execution(format!("Failed to upload result: {}", e)))?;
 
-            result_columns.push(result_col);
+            result_columns.push(result_col.into());
         }
 
         Ok(CudaBuffer::from_columns(
@@ -1728,6 +1801,32 @@ impl Executor {
         left_rel: Option<RelId>,
         right_rel: Option<RelId>,
     ) -> Result<CudaBuffer> {
+        fn estimate_join_index_bytes(right: &CudaBuffer, right_keys: &[usize]) -> u64 {
+            if right_keys.is_empty() {
+                return u64::MAX;
+            }
+
+            let mut key_bytes_per_row: u64 = 0;
+            for &k in right_keys {
+                let Some(ty) = right.schema().column_type(k) else {
+                    return u64::MAX;
+                };
+                let sz = ty.size_bytes();
+                key_bytes_per_row = key_bytes_per_row.saturating_add(sz as u64);
+            }
+
+            let num_rows = right.num_rows();
+            let packed_bytes = num_rows.saturating_mul(key_bytes_per_row);
+
+            let target = num_rows.saturating_mul(2).max(1024);
+            let num_buckets = target.next_power_of_two();
+
+            // Stored index bytes: packed keys + (counts+offsets) + (entry row ids + entry hashes)
+            packed_bytes
+                .saturating_add(num_buckets.saturating_mul(8))
+                .saturating_add(num_rows.saturating_mul(12))
+        }
+
         // Convert IR JoinType to CUDA JoinType
         let cuda_join_type = match join_type {
             JoinType::Inner => CudaJoinType::Inner,
@@ -1745,7 +1844,24 @@ impl Executor {
                 .get_relation_stats(build_rel)
                 .map(|s| s.heat)
                 .unwrap_or(0.0);
-            let should_index = build_heat >= 0.3;
+            let est_index_bytes = estimate_join_index_bytes(right, right_keys);
+
+            let cache_budget = self.join_index_cache.max_bytes;
+            let budget_bytes = self.provider.memory().budget().device_bytes;
+            let remaining_bytes = self.provider.memory().remaining_bytes();
+
+            // Heuristic: require higher "heat" for larger indexes, and avoid building under
+            // memory pressure. Always skip if the estimated index cannot fit in the cache budget.
+            let heat_threshold = if cache_budget > 0 && est_index_bytes > cache_budget / 2 {
+                0.6
+            } else {
+                0.3
+            };
+            let has_room = remaining_bytes >= est_index_bytes.saturating_add(budget_bytes / 10);
+
+            let should_index = build_heat >= heat_threshold
+                && est_index_bytes <= cache_budget
+                && has_room;
 
             if let Some(build_name) = self.get_rel_name(build_rel).map(|s| s.to_string()) {
                 if let Some(version) = self.store.version(&build_name) {
@@ -1991,7 +2107,7 @@ impl Executor {
     fn create_empty_buffer(&self, schema: Schema) -> Result<CudaBuffer> {
         let mut columns = Vec::with_capacity(schema.arity());
         for _ in 0..schema.arity() {
-            columns.push(self.provider.memory().alloc::<u8>(0)?);
+            columns.push(self.provider.memory().alloc::<u8>(0)?.into());
         }
         Ok(CudaBuffer::from_columns(columns, 0, schema))
     }
@@ -2029,7 +2145,7 @@ impl Executor {
                     .htod_sync_copy_into(&host_data, &mut dst_col)
                     .map_err(|e| XlogError::Execution(format!("Failed to clone column: {}", e)))?;
 
-                result_columns.push(dst_col);
+                result_columns.push(dst_col.into());
             }
         }
 
@@ -2080,7 +2196,7 @@ mod tests {
             .htod_sync_copy_into(&bytes, &mut col)
             .expect("htod");
 
-        CudaBuffer::from_columns(vec![col], data.len() as u64, schema)
+        CudaBuffer::from_columns(vec![col.into()], data.len() as u64, schema)
     }
 
     fn read_buffer_u32(executor: &Executor, buffer: &CudaBuffer, col: usize) -> Vec<u32> {
@@ -2477,7 +2593,7 @@ mod tests {
             .htod_sync_copy_into(&b_data, &mut col_b)
             .unwrap();
 
-        let buffer = CudaBuffer::from_columns(vec![col_a, col_b], 3, schema);
+        let buffer = CudaBuffer::from_columns(vec![col_a.into(), col_b.into()], 3, schema);
 
         // Project: [b, a] (reverse order)
         let result =
@@ -2545,7 +2661,7 @@ mod tests {
             .htod_sync_copy_into(&b_data, &mut col_b)
             .unwrap();
 
-        let buffer = CudaBuffer::from_columns(vec![col_a, col_b], 3, schema);
+        let buffer = CudaBuffer::from_columns(vec![col_a.into(), col_b.into()], 3, schema);
 
         // Project with computed expression: a + b
         let add_expr = Expr::Add(Box::new(Expr::Column(0)), Box::new(Expr::Column(1)));
@@ -3108,6 +3224,99 @@ mod tests {
         let out = executor.store().get("output").expect("output missing after recompute");
         let vals = read_buffer_u32(&executor, out, 0);
         assert_eq!(vals, vec![3, 4, 10]);
+    }
+
+    #[test]
+    fn test_apply_deltas_and_recompute_insert_only_recomputes_anti_join() {
+        let mut executor = match create_test_executor() {
+            Some(e) => e,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+
+        let lhs = create_test_buffer(&executor, &[1, 2, 3, 4, 5], "key");
+        executor.store_mut().put("lhs", lhs);
+        executor.register_relation(RelId(1), "lhs");
+
+        let blocked = create_test_buffer(&executor, &[], "key");
+        executor.store_mut().put("blocked", blocked);
+        executor.register_relation(RelId(2), "blocked");
+
+        // SCC0: lhs identity rule
+        // SCC1: blocked identity rule
+        // SCC2: out = lhs \ blocked (anti-join)
+        let scc0 = Scc {
+            id: 0,
+            predicates: vec!["lhs".to_string()],
+            is_recursive: false,
+        };
+        let scc1 = Scc {
+            id: 1,
+            predicates: vec!["blocked".to_string()],
+            is_recursive: false,
+        };
+        let scc2 = Scc {
+            id: 2,
+            predicates: vec!["out".to_string()],
+            is_recursive: false,
+        };
+
+        let lhs_rule = CompiledRule {
+            head: "lhs".to_string(),
+            body: RirNode::Scan { rel: RelId(1) },
+            meta: RirMeta::default(),
+        };
+        let blocked_rule = CompiledRule {
+            head: "blocked".to_string(),
+            body: RirNode::Scan { rel: RelId(2) },
+            meta: RirMeta::default(),
+        };
+        let out_rule = CompiledRule {
+            head: "out".to_string(),
+            body: RirNode::Join {
+                left: Box::new(RirNode::Scan { rel: RelId(1) }),
+                right: Box::new(RirNode::Scan { rel: RelId(2) }),
+                left_keys: vec![0],
+                right_keys: vec![0],
+                join_type: JoinType::Anti,
+            },
+            meta: RirMeta::default(),
+        };
+
+        let stratum = Stratum {
+            id: 0,
+            sccs: vec![0, 1, 2],
+        };
+
+        let plan = ExecutionPlan {
+            sccs: vec![scc0, scc1, scc2],
+            strata: vec![stratum],
+            rules_by_scc: vec![vec![lhs_rule], vec![blocked_rule], vec![out_rule]],
+            est_memory_peak: 0,
+        };
+
+        executor.execute_plan(&plan).expect("initial execute_plan");
+        let initial = executor.store().get("out").expect("out missing");
+        let initial_vals = read_buffer_u32(&executor, initial, 0);
+        assert_eq!(initial_vals, vec![1, 2, 3, 4, 5]);
+
+        // Insert into the "blocked" relation: output should shrink.
+        let insert_buf = create_test_buffer(&executor, &[2, 4], "key");
+        let mut deltas = HashMap::new();
+        deltas.insert(
+            "blocked".to_string(),
+            RelationDelta::new(Some(insert_buf), None),
+        );
+
+        executor
+            .apply_deltas_and_recompute(&plan, &deltas)
+            .expect("apply_deltas_and_recompute");
+
+        let out = executor.store().get("out").expect("out missing after update");
+        let vals = read_buffer_u32(&executor, out, 0);
+        assert_eq!(vals, vec![1, 3, 5]);
     }
 
     // ============== RIR Node Composition Tests ==============

@@ -11,6 +11,7 @@ use cudarc::driver::CudaSlice;
 use xlog_core::{MemoryBudget, Result, Schema, XlogError};
 
 use crate::CudaDevice;
+use crate::dlpack::DlpackManagedTensor;
 
 /// GPU memory manager with budget enforcement
 ///
@@ -224,13 +225,91 @@ impl GpuMemoryManager {
     }
 }
 
+/// Column data stored in device memory.
+///
+/// Most columns are owned by XLOG (`Owned`) and tracked against the memory budget. Columns may
+/// also be imported via DLPack (`Dlpack`) without copies; these are freed via the DLPack deleter.
+pub enum CudaColumn {
+    Owned(TrackedCudaSlice<u8>),
+    Dlpack(DlpackColumn),
+}
+
+pub struct DlpackColumn {
+    ptr: cudarc::driver::sys::CUdeviceptr,
+    len_bytes: usize,
+    _tensor: DlpackManagedTensor,
+}
+
+impl CudaColumn {
+    pub fn owned(slice: TrackedCudaSlice<u8>) -> Self {
+        Self::Owned(slice)
+    }
+
+    pub fn dlpack(ptr: cudarc::driver::sys::CUdeviceptr, len_bytes: usize, tensor: DlpackManagedTensor) -> Self {
+        Self::Dlpack(DlpackColumn {
+            ptr,
+            len_bytes,
+            _tensor: tensor,
+        })
+    }
+}
+
+impl From<TrackedCudaSlice<u8>> for CudaColumn {
+    fn from(value: TrackedCudaSlice<u8>) -> Self {
+        CudaColumn::Owned(value)
+    }
+}
+
+impl cudarc::driver::DeviceSlice<u8> for CudaColumn {
+    fn len(&self) -> usize {
+        match self {
+            CudaColumn::Owned(slice) => slice.len(),
+            CudaColumn::Dlpack(col) => col.len_bytes,
+        }
+    }
+}
+
+impl cudarc::driver::DevicePtr<u8> for CudaColumn {
+    fn device_ptr(&self) -> &cudarc::driver::sys::CUdeviceptr {
+        match self {
+            CudaColumn::Owned(slice) => cudarc::driver::DevicePtr::device_ptr(slice),
+            CudaColumn::Dlpack(col) => &col.ptr,
+        }
+    }
+}
+
+impl cudarc::driver::DevicePtrMut<u8> for CudaColumn {
+    fn device_ptr_mut(&mut self) -> &mut cudarc::driver::sys::CUdeviceptr {
+        match self {
+            CudaColumn::Owned(slice) => cudarc::driver::DevicePtrMut::device_ptr_mut(slice),
+            CudaColumn::Dlpack(col) => &mut col.ptr,
+        }
+    }
+}
+
+unsafe impl cudarc::driver::DeviceRepr for &CudaColumn {
+    #[inline(always)]
+    fn as_kernel_param(&self) -> *mut std::ffi::c_void {
+        let ptr = cudarc::driver::DevicePtr::device_ptr(*self);
+        ptr as *const cudarc::driver::sys::CUdeviceptr as *mut std::ffi::c_void
+    }
+}
+
+unsafe impl cudarc::driver::DeviceRepr for &mut CudaColumn {
+    #[inline(always)]
+    fn as_kernel_param(&self) -> *mut std::ffi::c_void {
+        let ptr = cudarc::driver::DevicePtr::device_ptr(&**self);
+        ptr as *const cudarc::driver::sys::CUdeviceptr as *mut std::ffi::c_void
+    }
+}
+
 /// Column-oriented GPU buffer
 ///
 /// Holds columnar data on the GPU with an associated schema.
 /// Each column is stored as a separate `CudaSlice<u8>`.
 pub struct CudaBuffer {
     /// Column data stored as raw bytes
-    pub columns: Vec<TrackedCudaSlice<u8>>,
+    pub columns: Vec<CudaColumn>,
     /// Number of rows in the buffer
     pub num_rows: u64,
     /// Schema describing the column types
@@ -256,7 +335,7 @@ impl CudaBuffer {
     ///
     /// # Panics
     /// Panics if the number of columns doesn't match the schema arity
-    pub fn from_columns(columns: Vec<TrackedCudaSlice<u8>>, num_rows: u64, schema: Schema) -> Self {
+    pub fn from_columns(columns: Vec<CudaColumn>, num_rows: u64, schema: Schema) -> Self {
         assert_eq!(
             columns.len(),
             schema.arity(),
@@ -297,8 +376,8 @@ impl CudaBuffer {
     }
 
     /// Get a reference to a specific column by index
-    pub fn column(&self, index: usize) -> Option<&CudaSlice<u8>> {
-        self.columns.get(index).map(|c| c.deref())
+    pub fn column(&self, index: usize) -> Option<&CudaColumn> {
+        self.columns.get(index)
     }
 }
 
@@ -482,7 +561,7 @@ mod tests {
         let col1 = manager.alloc::<u8>(400).expect("Alloc col1");
         let col2 = manager.alloc::<u8>(400).expect("Alloc col2");
 
-        let buffer = CudaBuffer::from_columns(vec![col1, col2], 100, schema);
+        let buffer = CudaBuffer::from_columns(vec![col1.into(), col2.into()], 100, schema);
 
         assert_eq!(buffer.num_rows(), 100);
         assert_eq!(buffer.arity(), 2);

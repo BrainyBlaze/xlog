@@ -9,7 +9,7 @@ pub mod provider;
 
 pub use device::CudaDevice;
 pub use device_pool::GpuDevicePool;
-pub use memory::{CudaBuffer, GpuMemoryManager};
+pub use memory::{CudaBuffer, CudaColumn, GpuMemoryManager};
 pub use multi_gpu_memory::MultiGpuMemoryManager;
 pub use dlpack::{DlpackManagedTensor, DlpackTable, DLManagedTensor};
 pub use provider::{

@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use cudarc::driver::DevicePtr;
 use xlog_core::{MemoryBudget, ScalarType, Schema};
 use xlog_cuda::{dlpack, CudaDevice, CudaKernelProvider, GpuMemoryManager};
 
@@ -55,3 +56,43 @@ fn test_export_u32_column_to_dlpack() {
     assert!(!managed.dl_tensor.data.is_null());
 }
 
+#[test]
+fn test_roundtrip_import_u32_column_from_dlpack_zero_copy() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    let schema = Schema::new(vec![("id".to_string(), ScalarType::U32)]);
+    let ids: Vec<u32> = vec![10, 20, 30, 40, 50];
+
+    let buffer = provider
+        .create_buffer_from_slices(&[bytemuck::cast_slice(&ids)], schema.clone())
+        .unwrap();
+
+    let table = provider.to_dlpack_table(buffer);
+    let tensor = table.column(0).unwrap();
+
+    let raw_ptr = tensor.as_ptr();
+    assert!(!raw_ptr.is_null());
+
+    // Import takes ownership of the tensor (no device↔host copy).
+    let imported = provider
+        .from_dlpack_tensors_with_schema(schema, vec![tensor])
+        .unwrap();
+
+    assert_eq!(imported.num_rows(), ids.len() as u64);
+
+    // The imported column should point to the same device pointer as the DLPack tensor.
+    let dl_data_ptr = unsafe {
+        let managed = &*raw_ptr;
+        let base = managed.dl_tensor.data as usize;
+        base + managed.dl_tensor.byte_offset as usize
+    } as u64;
+    let imported_ptr = *DevicePtr::device_ptr(imported.column(0).unwrap());
+    assert_eq!(imported_ptr as u64, dl_data_ptr);
+
+    // Verify contents.
+    let got = provider.download_column_u32(&imported, 0).unwrap();
+    assert_eq!(got, ids);
+}

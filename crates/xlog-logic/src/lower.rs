@@ -685,11 +685,86 @@ impl Lowerer {
             return self.plan_positive_atoms_bushy(atoms);
         }
 
-        // Greedy left-deep fallback for large rules.
-        let ordered = self.order_positive_atoms_greedy(atoms);
-        let mut dummy_env = VariableEnv::new();
-        let node = self.build_join_tree(&ordered, &mut dummy_env)?;
-        Ok((node, ordered))
+        // Greedy bushy join planning for large rules (scales beyond exponential DP).
+        self.plan_positive_atoms_bushy_greedy(atoms)
+    }
+
+    fn plan_positive_atoms_bushy_greedy<'a>(
+        &mut self,
+        atoms: &[&'a Atom],
+    ) -> Result<(RirNode, Vec<&'a Atom>)> {
+        if atoms.is_empty() {
+            return Err(XlogError::Compilation("Empty rule body".to_string()));
+        }
+
+        fn lex_lt(a: &[usize], b: &[usize]) -> bool {
+            for (ai, bi) in a.iter().zip(b.iter()) {
+                if ai != bi {
+                    return ai < bi;
+                }
+            }
+            a.len() < b.len()
+        }
+
+        let mut plans: Vec<JoinPlan<'a>> = Vec::with_capacity(atoms.len());
+        for (idx, atom) in atoms.iter().enumerate() {
+            plans.push(self.make_leaf_plan(*atom, idx)?);
+        }
+
+        while plans.len() > 1 {
+            let mut best_pair: Option<(usize, usize, JoinPlan<'a>)> = None;
+
+            for i in 0..plans.len() {
+                for j in (i + 1)..plans.len() {
+                    let a = &plans[i];
+                    let b = &plans[j];
+
+                    let cand_ab = self.join_plans(a, b);
+                    let cand_ba = self.join_plans(b, a);
+
+                    let cand = if cand_ab.total_cost < cand_ba.total_cost
+                        || (cand_ab.total_cost - cand_ba.total_cost).abs() < 1e-9
+                            && lex_lt(&cand_ab.leaf_order_idx, &cand_ba.leaf_order_idx)
+                    {
+                        cand_ab
+                    } else {
+                        cand_ba
+                    };
+
+                    let replace = match &best_pair {
+                        None => true,
+                        Some((_bi, _bj, best)) => {
+                            if cand.total_cost < best.total_cost {
+                                true
+                            } else if (cand.total_cost - best.total_cost).abs() < 1e-9 {
+                                lex_lt(&cand.leaf_order_idx, &best.leaf_order_idx)
+                            } else {
+                                false
+                            }
+                        }
+                    };
+
+                    if replace {
+                        best_pair = Some((i, j, cand));
+                    }
+                }
+            }
+
+            let Some((i, j, joined)) = best_pair else {
+                break;
+            };
+
+            // Remove joined inputs from the plan list and replace with the join.
+            let (a, b) = if i < j { (i, j) } else { (j, i) };
+            plans.remove(b);
+            plans.remove(a);
+            plans.push(joined);
+        }
+
+        let plan = plans
+            .pop()
+            .ok_or_else(|| XlogError::Compilation("Join planning failed".to_string()))?;
+        Ok((plan.node, plan.leaf_order))
     }
 
     fn order_positive_atoms_greedy<'a>(&self, atoms: &[&'a Atom]) -> Vec<&'a Atom> {

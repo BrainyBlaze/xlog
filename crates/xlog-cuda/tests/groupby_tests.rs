@@ -359,7 +359,7 @@ fn create_keyed_f64_buffer(
         .htod_sync_copy_into(&val_bytes, &mut val_col)
         .expect("upload val");
 
-    xlog_cuda::CudaBuffer::from_columns(vec![key_col, val_col], keys.len() as u64, schema)
+    xlog_cuda::CudaBuffer::from_columns(vec![key_col.into(), val_col.into()], keys.len() as u64, schema)
 }
 
 #[test]

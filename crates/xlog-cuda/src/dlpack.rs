@@ -9,7 +9,7 @@ use std::sync::Arc;
 use cudarc::driver::DevicePtr;
 use xlog_core::{Result, ScalarType, XlogError};
 
-use crate::memory::CudaBuffer;
+use crate::memory::{CudaBuffer, CudaColumn};
 use crate::provider::CudaKernelProvider;
 
 pub type DLDeviceType = i32;
@@ -121,6 +121,29 @@ fn scalar_to_dl_dtype(ty: ScalarType) -> DLDataType {
     }
 }
 
+fn dl_dtype_to_scalar(dtype: DLDataType) -> Result<ScalarType> {
+    if dtype.lanes != 1 {
+        return Err(XlogError::Kernel(format!(
+            "Unsupported DLPack dtype lanes {} (expected 1)",
+            dtype.lanes
+        )));
+    }
+    match (dtype.code, dtype.bits) {
+        (K_DLUINT, 32) => Ok(ScalarType::U32),
+        (K_DLUINT, 64) => Ok(ScalarType::U64),
+        (K_DLINT, 32) => Ok(ScalarType::I32),
+        (K_DLINT, 64) => Ok(ScalarType::I64),
+        (K_DLFLOAT, 32) => Ok(ScalarType::F32),
+        (K_DLFLOAT, 64) => Ok(ScalarType::F64),
+        // XLOG represents bool as one byte per row today (not bitpacked).
+        (K_DLBOOL, 8) => Ok(ScalarType::Bool),
+        _ => Err(XlogError::Kernel(format!(
+            "Unsupported DLPack dtype code={} bits={} lanes={}",
+            dtype.code, dtype.bits, dtype.lanes
+        ))),
+    }
+}
+
 /// Owned DLPack tensor handle.
 ///
 /// Dropping this value will call the DLPack deleter and free the underlying GPU memory.
@@ -129,6 +152,15 @@ pub struct DlpackManagedTensor {
 }
 
 impl DlpackManagedTensor {
+    /// Construct an owned DLPack tensor from a raw pointer.
+    ///
+    /// # Safety
+    /// `ptr` must be a valid `DLManagedTensor*` obtained from a DLPack producer, and ownership
+    /// must be transferred to the caller (the returned value will call the DLPack deleter on drop).
+    pub unsafe fn from_raw(ptr: *mut DLManagedTensor) -> Self {
+        Self { ptr }
+    }
+
     pub fn as_ptr(&self) -> *mut DLManagedTensor {
         self.ptr
     }
@@ -150,6 +182,91 @@ impl Drop for DlpackManagedTensor {
             }
         }
     }
+}
+
+unsafe fn dlpack_tensor_info(
+    provider: &CudaKernelProvider,
+    tensor: &DlpackManagedTensor,
+) -> Result<(u64, ScalarType, cudarc::driver::sys::CUdeviceptr, usize)> {
+    let ptr = tensor.as_ptr();
+    if ptr.is_null() {
+        return Err(XlogError::Kernel("Null DLManagedTensor pointer".to_string()));
+    }
+
+    let dl = unsafe { &(*ptr).dl_tensor };
+
+    if dl.device.device_type != K_DLCUDA {
+        return Err(XlogError::Kernel(format!(
+            "Unsupported DLPack device type {} (expected CUDA)",
+            dl.device.device_type
+        )));
+    }
+    if dl.device.device_id != provider.device().ordinal() as i32 {
+        return Err(XlogError::Kernel(format!(
+            "DLPack tensor device_id {} does not match provider device_id {}",
+            dl.device.device_id,
+            provider.device().ordinal()
+        )));
+    }
+
+    if dl.ndim != 1 {
+        return Err(XlogError::Kernel(format!(
+            "Unsupported DLPack ndim {} (expected 1)",
+            dl.ndim
+        )));
+    }
+    if dl.shape.is_null() {
+        return Err(XlogError::Kernel("DLPack tensor shape is null".to_string()));
+    }
+    if !dl.strides.is_null() {
+        let stride0 = unsafe { *dl.strides };
+        if stride0 != 1 {
+            return Err(XlogError::Kernel(format!(
+                "Non-contiguous DLPack tensor stride {} (expected 1)",
+                stride0
+            )));
+        }
+    }
+
+    let shape0 = unsafe { *dl.shape };
+    if shape0 < 0 {
+        return Err(XlogError::Kernel(format!(
+            "Negative DLPack tensor shape {}",
+            shape0
+        )));
+    }
+    let num_rows = shape0 as u64;
+
+    let scalar = dl_dtype_to_scalar(dl.dtype)?;
+    let elem_size = scalar.size_bytes();
+    if dl.byte_offset % (elem_size as u64) != 0 {
+        return Err(XlogError::Kernel(format!(
+            "DLPack byte_offset {} is not aligned to element size {}",
+            dl.byte_offset, elem_size
+        )));
+    }
+
+    if dl.data.is_null() && num_rows > 0 {
+        return Err(XlogError::Kernel("DLPack tensor data pointer is null".to_string()));
+    }
+
+    let base = dl.data as usize;
+    let ptr_with_offset = base
+        .checked_add(dl.byte_offset as usize)
+        .ok_or_else(|| XlogError::Kernel("DLPack data pointer overflow".to_string()))?;
+
+    if ptr_with_offset % elem_size != 0 {
+        return Err(XlogError::Kernel(
+            "DLPack tensor data is not properly aligned".to_string(),
+        ));
+    }
+
+    let len_bytes = usize::try_from(num_rows)
+        .ok()
+        .and_then(|n| n.checked_mul(elem_size))
+        .ok_or_else(|| XlogError::Kernel("DLPack tensor length overflow".to_string()))?;
+
+    Ok((num_rows, scalar, ptr_with_offset as u64, len_bytes))
 }
 
 /// A table-like wrapper that can export individual columns as DLPack tensors without copies.
@@ -216,5 +333,89 @@ impl CudaKernelProvider {
                 device_id: self.device().ordinal() as i32,
             },
         }
+    }
+
+    /// Import one DLPack tensor per column as a zero-copy `CudaBuffer`.
+    ///
+    /// The returned buffer owns the DLPack tensors and will call their deleters on drop.
+    pub fn from_dlpack_tensors(&self, tensors: Vec<DlpackManagedTensor>) -> Result<CudaBuffer> {
+        if tensors.is_empty() {
+            return Ok(CudaBuffer::empty());
+        }
+
+        let mut columns = Vec::with_capacity(tensors.len());
+        let mut schema_cols = Vec::with_capacity(tensors.len());
+        let mut num_rows: Option<u64> = None;
+
+        for (i, tensor) in tensors.into_iter().enumerate() {
+            let (rows, ty, ptr, len_bytes) = unsafe { dlpack_tensor_info(self, &tensor)? };
+            if let Some(n) = num_rows {
+                if rows != n {
+                    return Err(XlogError::Kernel(
+                        "DLPack column row counts do not match".to_string(),
+                    ));
+                }
+            } else {
+                num_rows = Some(rows);
+            }
+
+            schema_cols.push((format!("col_{}", i), ty));
+            columns.push(CudaColumn::dlpack(ptr, len_bytes, tensor));
+        }
+
+        Ok(CudaBuffer::from_columns(
+            columns,
+            num_rows.unwrap_or(0),
+            xlog_core::Schema::new(schema_cols),
+        ))
+    }
+
+    /// Import DLPack column tensors with an explicit schema (type-checked).
+    pub fn from_dlpack_tensors_with_schema(
+        &self,
+        schema: xlog_core::Schema,
+        tensors: Vec<DlpackManagedTensor>,
+    ) -> Result<CudaBuffer> {
+        if schema.arity() != tensors.len() {
+            return Err(XlogError::Kernel(format!(
+                "Schema arity {} does not match tensor count {}",
+                schema.arity(),
+                tensors.len()
+            )));
+        }
+
+        if tensors.is_empty() {
+            return Ok(CudaBuffer::from_columns(Vec::new(), 0, schema));
+        }
+
+        let mut columns = Vec::with_capacity(tensors.len());
+        let mut num_rows: Option<u64> = None;
+
+        for (i, tensor) in tensors.into_iter().enumerate() {
+            let (rows, ty, ptr, len_bytes) = unsafe { dlpack_tensor_info(self, &tensor)? };
+            let expected = schema
+                .column_type(i)
+                .ok_or_else(|| XlogError::Kernel(format!("Missing schema type for column {}", i)))?;
+            if ty != expected {
+                return Err(XlogError::Kernel(format!(
+                    "DLPack column {} dtype {:?} does not match schema {:?}",
+                    i, ty, expected
+                )));
+            }
+
+            if let Some(n) = num_rows {
+                if rows != n {
+                    return Err(XlogError::Kernel(
+                        "DLPack column row counts do not match".to_string(),
+                    ));
+                }
+            } else {
+                num_rows = Some(rows);
+            }
+
+            columns.push(CudaColumn::dlpack(ptr, len_bytes, tensor));
+        }
+
+        Ok(CudaBuffer::from_columns(columns, num_rows.unwrap_or(0), schema))
     }
 }

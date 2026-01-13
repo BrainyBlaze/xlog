@@ -57,7 +57,7 @@ fn create_edge_buffer(
     if edges.is_empty() {
         let col0 = provider.memory().alloc::<u8>(0).expect("alloc");
         let col1 = provider.memory().alloc::<u8>(0).expect("alloc");
-        return CudaBuffer::from_columns(vec![col0, col1], 0, schema);
+        return CudaBuffer::from_columns(vec![col0.into(), col1.into()], 0, schema);
     }
 
     let col0_bytes: Vec<u8> = edges.iter().flat_map(|(from, _)| from.to_le_bytes()).collect();
@@ -69,7 +69,7 @@ fn create_edge_buffer(
     provider.device().inner().htod_sync_copy_into(&col0_bytes, &mut col0).expect("htod");
     provider.device().inner().htod_sync_copy_into(&col1_bytes, &mut col1).expect("htod");
 
-    CudaBuffer::from_columns(vec![col0, col1], edges.len() as u64, schema)
+    CudaBuffer::from_columns(vec![col0.into(), col1.into()], edges.len() as u64, schema)
 }
 
 /// Create a CudaBuffer with 1-column U32 data (for node relations)
@@ -81,14 +81,14 @@ fn create_node_buffer(
 
     if nodes.is_empty() {
         let col = provider.memory().alloc::<u8>(0).expect("alloc");
-        return CudaBuffer::from_columns(vec![col], 0, schema);
+        return CudaBuffer::from_columns(vec![col.into()], 0, schema);
     }
 
     let col_bytes: Vec<u8> = nodes.iter().flat_map(|n| n.to_le_bytes()).collect();
     let mut col = provider.memory().alloc::<u8>(col_bytes.len()).expect("alloc");
     provider.device().inner().htod_sync_copy_into(&col_bytes, &mut col).expect("htod");
 
-    CudaBuffer::from_columns(vec![col], nodes.len() as u64, schema)
+    CudaBuffer::from_columns(vec![col.into()], nodes.len() as u64, schema)
 }
 
 /// Read a single column of U32 values from a CudaBuffer
