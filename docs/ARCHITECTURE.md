@@ -20,14 +20,14 @@ XLOG is a **GPU-accelerated Datalog query engine** built in Rust with CUDA kerne
 ## System Overview
 
 ```
-Datalog Source → Parser → Stratifier → Lowerer → Executor → GPU Kernels → Results
+Datalog Source → Parser → Stratifier → Lowerer/Optimizer → Executor → GPU Kernels → Results
 ```
 
 XLOG transforms declarative Datalog rules into efficient GPU-parallel operations:
 
 - **Parsing**: PEG-based grammar with Pest
 - **Stratification**: Ensures safe negation ordering via SCC analysis
-- **Lowering**: Converts AST to Relational IR (join trees, projections, filters)
+- **Lowering/Optimization**: Converts AST to Relational IR and applies rewrites (predicate pushdown, join planning)
 - **Execution**: Interprets RIR nodes using GPU kernels
 - **GPU Kernels**: CUDA implementations of joins, sorts, aggregations, set operations
 
@@ -42,17 +42,25 @@ xlog/
 │   ├── xlog-ir/         # Intermediate representations (RIR nodes)
 │   ├── xlog-logic/      # Datalog frontend (parser, compiler)
 │   ├── xlog-runtime/    # Query executor, relation storage
-│   └── xlog-cuda/       # GPU kernels, memory management
-└── kernels/             # CUDA source files (.cu)
+│   ├── xlog-cuda/       # CUDA provider, memory management, interop (Arrow/DLPack)
+│   ├── xlog-stats/      # Runtime stats snapshots (optimizer + adaptive indexing)
+│   ├── xlog-solve/      # Solver services (CLS SAT/MaxSAT MVP)
+│   └── xlog-cuda-tests/ # CUDA/PTX certification suite (not published)
+└── kernels/             # CUDA source files (.cu) + embedded PTX (.ptx)
 ```
 
 ### Dependency Graph
 
 ```
-xlog-logic ──┐
-             ├──> xlog-runtime ──┐
-xlog-ir ─────┤                   ├──> xlog-cuda
-xlog-core <──┴───────────────────┘
+xlog-logic ───────┐
+xlog-ir ──────────┼──> xlog-runtime ──┐
+xlog-stats ───────┘                   ├──> xlog-cuda
+xlog-core  <──────────────────────────┘
+
+xlog-solve ───────────────┬──────────────> xlog-cuda
+                           └──────────────> xlog-core
+
+xlog-cuda-tests ──────────────────────────> xlog-cuda (+ xlog-core)
 ```
 
 ### Crate Responsibilities
@@ -61,9 +69,12 @@ xlog-core <──┴───────────────────┘
 |-------|---------|
 | `xlog-core` | Shared types (`ScalarType`, `Schema`, `AggOp`), traits (`KernelProvider`), errors |
 | `xlog-ir` | Relational IR nodes (`RirNode`), expressions (`Expr`), execution plans |
-| `xlog-logic` | Parser, stratification, lowering (AST → RIR) |
-| `xlog-runtime` | `Executor`, `RelationStore`, `Profiler` |
-| `xlog-cuda` | `CudaKernelProvider`, `GpuMemoryManager`, `CudaBuffer` |
+| `xlog-logic` | Parser, stratification, lowering (AST → RIR), optimizer (predicate pushdown + join planning) |
+| `xlog-runtime` | `Executor`, versioned `RelationStore`, profiling, incremental maintenance hooks, adaptive join index cache |
+| `xlog-cuda` | `CudaKernelProvider`, `GpuMemoryManager`, `CudaBuffer`/`CudaColumn`, PTX embedding, Arrow IPC + DLPack interop |
+| `xlog-stats` | `StatsManager` + `StatsSnapshot` (compiler feedback + runtime tracking) |
+| `xlog-solve` | Solver services (CLS SAT/MaxSAT MVP; not used by `xlog-logic` in v0.1.0) |
+| `xlog-cuda-tests` | CUDA/PTX certification suite (release gating; `publish = false`) |
 
 ---
 
@@ -223,11 +234,12 @@ let strata = stratify(&program)?;
 Transforms AST to Relational IR:
 
 1. **Schema inference**: Derive column types from facts
-2. **Join tree construction**: Build left-deep join trees from rule bodies
-3. **Variable tracking**: Map variables to column indices for join keys
-4. **Negation handling**: Convert negated atoms to `Diff` nodes
-5. **Recursion wrapping**: Wrap recursive rules in `Fixpoint` nodes
-6. **Projection**: Project result columns to match rule head
+2. **Join planning**: Build join trees for positive atoms (bushy DP for small bodies, greedy for large bodies) using a simple cost model; can be seeded from runtime `StatsSnapshot`
+3. **Variable tracking**: Map variables to column indices for join keys and projections
+4. **Comparisons + arithmetic**: Lower comparisons to `Filter` and `is` expressions to computed projections (`ProjectExpr::Computed`)
+5. **Negation handling**: Lower stratified negation via `Diff` + `Semi` join (anti-semi pattern over shared variables)
+6. **Recursion**: Mark recursive predicate groups as SCCs in the plan; runtime executes recursive SCCs with semi-naive deltas (the compiler does not currently emit `RirNode::Fixpoint`)
+7. **Projection**: Project result columns to match rule head (and lower aggregates to `GroupBy`)
 
 ```rust
 lowerer.set_strata(strata_preds);
@@ -277,8 +289,11 @@ impl Compiler {
 ```rust
 pub struct Executor {
     provider: Arc<CudaKernelProvider>,   // GPU kernel interface
-    store: RelationStore,                 // Named relation storage
+    store: RelationStore,                 // Versioned relation storage
     rel_names: HashMap<RelId, String>,    // RelId → name mapping
+    name_to_rel: HashMap<String, RelId>,  // name → RelId mapping
+    stats: StatsManager,                  // Runtime stats (optimizer feedback)
+    join_index_cache: JoinIndexCache,     // Cached build-side indexes (adaptive indexing)
 }
 ```
 
@@ -310,36 +325,22 @@ fn execute_node(&mut self, node: &RirNode) -> Result<CudaBuffer> {
 }
 ```
 
-### Fixpoint Iteration (Recursion)
+### Recursive SCC Evaluation (Semi-Naive)
 
-Semi-naive evaluation algorithm:
+Recursive programs are executed at the **SCC level** (see `ExecutionPlan.sccs` and `ExecutionPlan.rules_by_scc`), using semi-naive deltas.
 
-```rust
-fn execute_recursive_scc(&mut self, rules: &[CompiledRule]) -> Result<()> {
-    // 1. Execute all rules once (initial results)
-    for rule in rules {
-        let result = self.execute_node(&rule.body)?;
-        self.store.put(&rule.head, self.provider.dedup(&result)?);
-    }
+High-level algorithm (mirrors `Executor::execute_recursive_scc`):
 
-    // 2. Iterate until fixpoint
-    loop {
-        let mut any_changed = false;
-        for rule in rules {
-            let old_count = self.store.get(&rule.head).map(|b| b.num_rows());
-            let new_result = self.execute_node(&rule.body)?;
-            let merged = self.provider.union(existing, &new_result)?;
-            let deduped = self.provider.dedup(&merged)?;
+1. **Seed** each recursive predicate `P`:
+   - `full[P] = dedup(⋃ base-rule outputs for P)`
+   - `delta[P] = full[P]`
+2. **Iterate** up to `MAX_SCC_ITERATIONS`:
+   - For each recursive rule, evaluate it semi-naively by **rewriting exactly one recursive scan occurrence** in the rule body to use `delta[...]`, then union all such variants for the head predicate.
+   - `delta_new[P] = dedup(delta_raw[P] - full[P])`
+   - Stop if all `delta_new[P]` are empty.
+   - `full[P] = dedup(full[P] ∪ delta_new[P])`; set `delta[P] = delta_new[P]`.
 
-            if deduped.num_rows() > old_count {
-                any_changed = true;
-            }
-            self.store.put(&rule.head, deduped);
-        }
-        if !any_changed { break; }  // Fixpoint reached
-    }
-}
-```
+Note: `RirNode::Fixpoint` exists and is interpreted by `Executor::execute_fixpoint`, but the current compiler emits recursion via SCC metadata + delta rewriting rather than explicit `Fixpoint` nodes.
 
 ---
 
@@ -349,53 +350,27 @@ fn execute_recursive_scc(&mut self, rules: &[CompiledRule]) -> Result<()> {
 
 | File | Kernels | Purpose |
 |------|---------|---------|
-| `join.cu` | `hash_join_build`, `hash_join_probe`, `hash_join_v2`, `hash_join_semi`, `hash_join_anti`, `compute_composite_hash` | Hash joins with multi-column support |
-| `dedup.cu` | `mark_duplicates`, `compact_unique` | Sort-based deduplication |
-| `filter.cu` | `filter_compare_u32/i64/f64`, `compact_*_by_mask`, `mask_and/or/not` | Filtering and stream compaction |
-| `sort.cu` | `radix_histogram`, `radix_scatter`, `apply_permutation_*` | 4-bit radix sort |
-| `groupby.cu` | `detect_boundaries`, `groupby_count/sum/min/max`, `extract_group_keys` | Sorted aggregation |
-| `scan.cu` | `block_inclusive_scan`, `exclusive_scan_mask`, `count_mask` | Prefix sum operations |
-| `set_ops.cu` | `concat_u32`, `sorted_diff_mark` | Union/difference operations |
+| `join.cu` | `hash_join_build`, `hash_join_probe` (legacy), `hash_join_bucket_count_v2`, `hash_join_scatter_v2`, `hash_join_probe_v2`, `hash_join_semi`, `hash_join_anti`, `init_hash_table`, `compute_composite_hash` | Hash joins (v2 default) + composite hashing |
+| `pack.cu` | `pack_keys`, `pack_and_hash_keys`, `hash_packed_keys`, `gather_packed_rows`, `compare_packed_keys` | Key packing/hashing + packed-row utilities |
+| `dedup.cu` | `mark_unique_*`, `compact_rows` | Sort-based deduplication |
+| `filter.cu` | `filter_compare_*`, `compact_*_by_mask`, `mask_{and,or,not}` | Filtering and stream compaction |
+| `sort.cu` | `radix_histogram`, `radix_scatter_*`, `init_indices`, `apply_permutation_*`, `gather_keys_*` | Stable radix sort + permutation apply |
+| `groupby.cu` | `detect_group_boundaries`, `extract_group_keys`, `groupby_*`, `groupby_logsumexp_*` | Sorted aggregation |
+| `scan.cu` | `exclusive_scan_mask`, `count_mask`, `multiblock_scan_*` | Prefix sum operations |
+| `set_ops.cu` | `concat_{u32,bytes}`, `sorted_diff_mark` | Union/difference operations |
 
-### Hash Join Implementation
+### Hash Join Implementation (v2 default)
 
-**Build Phase**:
-```cuda
-__global__ void hash_join_build(
-    const uint32_t* keys,
-    uint32_t* hash_table,
-    uint32_t* next_ptrs,      // Linked list for collisions
-    uint32_t hash_table_size
-) {
-    uint32_t hash = keys[gid] % hash_table_size;
-    // Atomic linked-list insertion
-    next_ptrs[gid] = atomicExch(&hash_table[hash], gid + 1);
-}
-```
+The runtime uses a **bucketed “CSR buckets”** layout for join v2 (see `kernels/join.cu` + `CudaKernelProvider::hash_join_v2`):
 
-**Probe Phase**:
-```cuda
-__global__ void hash_join_probe(
-    const uint32_t* probe_keys,
-    const uint32_t* build_keys,
-    uint32_t* hash_table,
-    uint32_t* next_ptrs,
-    uint32_t* output_left,
-    uint32_t* output_right,
-    uint32_t* match_count
-) {
-    uint32_t hash = probe_keys[gid] % hash_table_size;
-    uint32_t idx = hash_table[hash];
-    while (idx != 0) {
-        if (build_keys[idx - 1] == probe_keys[gid]) {
-            uint32_t out_idx = atomicAdd(match_count, 1);
-            output_left[out_idx] = gid;
-            output_right[out_idx] = idx - 1;
-        }
-        idx = next_ptrs[idx - 1];
-    }
-}
-```
+- Compute a 64-bit composite hash for the join key columns (typically via packed key bytes in `kernels/pack.cu`).
+- **Build** (right side):
+  - `hash_join_bucket_count_v2`: count build rows per bucket (bucket = low bits of hash)
+  - GPU exclusive scan → `bucket_offsets`
+  - `hash_join_scatter_v2`: scatter build row indices contiguously per bucket and store aligned hashes
+- **Probe** (left side):
+  - `hash_join_probe_v2`: probe the bucket range and compare hashes
+  - optional **key verification** compares packed key bytes to eliminate hash-collision false positives
 
 ### Multi-Column Composite Hash
 
@@ -422,10 +397,10 @@ __global__ void compute_composite_hash(
 }
 ```
 
-### Radix Sort (4-bit)
+### Radix Sort (4-bit, stable)
 
 ```cuda
-// 8 passes for 32-bit keys (4 bits per pass)
+// Radix sort operates on u32 digit segments; passes depend on key width.
 __global__ void radix_histogram(
     const uint32_t* keys,
     uint32_t* histograms,  // [grid_size * 16]
@@ -464,7 +439,9 @@ __global__ void groupby_sum(
 ```
 
 Notes:
-- Multi-key groupby is supported by packing key columns into a byte key and detecting boundaries on-device.
+- `groupby_multi_agg` sorts by `key_cols` on GPU, then detects group boundaries over packed key bytes.
+- Group IDs are currently computed on the host from the boundary mask (MVP).
+- Multi-key groupby is supported by packing key columns into a byte key and detecting boundaries on-device; key packing currently requires a 4-byte segment width, so `Bool` keys are not supported.
 - Current value-type support (MVP):
   - `count`: any value type (counts rows)
   - `sum`/`min`/`max`: `u32` values (output `u64` for `sum`, `u32` for `min`/`max`)
@@ -476,17 +453,22 @@ Notes:
 
 ### CudaBuffer
 
-**File**: `xlog-cuda/src/buffer.rs`
+**File**: `crates/xlog-cuda/src/memory.rs`
 
 ```rust
+pub enum CudaColumn {
+    Owned(TrackedCudaSlice<u8>),
+    Dlpack(DlpackColumn), // calls the DLPack deleter on drop
+}
+
 pub struct CudaBuffer {
-    columns: Vec<CudaSlice<u8>>,  // Column-major storage
-    num_rows: u64,
-    schema: Schema,
+    pub columns: Vec<CudaColumn>, // Column-major, bytes; typed by `schema`
+    pub num_rows: u64,
+    pub schema: Schema,
 }
 
 impl CudaBuffer {
-    pub fn column(&self, idx: usize) -> Option<&CudaSlice<u8>>;
+    pub fn column(&self, idx: usize) -> Option<&CudaColumn>;
     pub fn num_rows(&self) -> u64;
     pub fn arity(&self) -> usize;  // Number of columns
     pub fn schema(&self) -> &Schema;
@@ -496,7 +478,7 @@ impl CudaBuffer {
 
 ### GPU Memory Manager
 
-**File**: `xlog-cuda/src/memory.rs`
+**File**: `crates/xlog-cuda/src/memory.rs`
 
 ```rust
 pub struct GpuMemoryManager {
@@ -506,13 +488,13 @@ pub struct GpuMemoryManager {
 }
 
 impl GpuMemoryManager {
-    pub fn alloc<T>(&self, len: usize) -> Result<CudaSlice<T>> {
-        let bytes = len * std::mem::size_of::<T>();
+    pub fn alloc<T: DeviceRepr>(self: &Arc<Self>, len: usize) -> Result<TrackedCudaSlice<T>> {
+        let bytes = (len as u64) * (std::mem::size_of::<T>() as u64);
 
         // Atomic budget check with compare-exchange loop
         loop {
             let current = self.allocated.load(Ordering::SeqCst);
-            let new = current.checked_add(bytes as u64)
+            let new = current.checked_add(bytes)
                 .ok_or(XlogError::ResourceExhausted { ... })?;
 
             if new > self.budget.device_bytes {
@@ -524,8 +506,8 @@ impl GpuMemoryManager {
             }
         }
 
-        // Allocate via cudarc
-        self.device.inner().alloc(len)
+        // Allocate via cudarc; tracked slice decrements budget on drop
+        self.device.inner().alloc::<T>(len)
     }
 }
 ```
@@ -554,15 +536,16 @@ impl MemoryBudget {
 
 ### Hash Join
 
-1. **Build phase**: Insert right relation into hash table with linked-list collision handling
-2. **Probe phase**: For each left row, walk collision chain looking for matches
-3. **Output**: Concatenated rows from both relations
+1. **Key prep**: Pack join key columns into row-major bytes and compute a 64-bit composite hash (FNV-1a) on GPU.
+2. **Build phase (v2 buckets)**: Bucket build rows by low hash bits (count → scan offsets → scatter contiguous bucket entries).
+3. **Probe phase**: For each probe row, scan the bucket range, compare hashes, and (optionally) verify key bytes to eliminate hash collisions.
+4. **Materialization**: Gather left/right columns into the output schema; for left-outer joins, unmatched right columns are zero-filled (MVP null representation).
 
 **Join Types**:
 - **Inner**: Output matching pairs
 - **Semi**: Output left rows that have any match (existence check)
 - **Anti**: Output left rows with no matches
-- **LeftOuter**: Output all left rows, with NULLs for non-matches
+- **LeftOuter**: Output all left rows; unmatched right-side columns are zero-filled
 
 ### Sort-Based Deduplication
 
@@ -572,12 +555,12 @@ impl MemoryBudget {
 
 ### Fixpoint Iteration (Semi-Naive)
 
-1. Compute initial result from base case
-2. Repeat:
-   - Evaluate recursive rules using current delta
-   - Compute new tuples: `delta_new = recursive_result - current_result`
-   - If `delta_new` is empty, fixpoint reached
-   - Otherwise: `result = result ∪ delta_new`, `delta = delta_new`
+1. Seed `full` and `delta` relations for each recursive predicate in an SCC.
+2. Iterate:
+   - Evaluate rule variants where exactly one recursive scan uses `delta` (semi-naive).
+   - `delta_new = dedup(delta_raw - full)`
+   - `full = dedup(full ∪ delta_new)`; set `delta = delta_new`
+3. Stop when all `delta_new` are empty (or iteration limit reached).
 
 ### Stream Compaction
 
@@ -587,7 +570,7 @@ impl MemoryBudget {
 
 ### Radix Sort
 
-8 passes for 32-bit keys (4 bits per pass):
+Radix sort uses 4-bit digits over `u32` segments; the number of passes depends on key width (e.g., 8 passes per 32 bits):
 1. Compute per-block histograms for current digit
 2. Global prefix sum of histograms
 3. Scatter elements to sorted positions
@@ -771,8 +754,9 @@ pub enum XlogError {
 ### Memory Budget
 
 ```rust
-// Use 80% of device memory
-let budget = MemoryBudget::from_device_memory(device.total_memory());
+// Use 80% of total device memory (caller provides total bytes)
+let total_device_bytes = /* query via CUDA driver */;
+let budget = MemoryBudget::from_device_memory(total_device_bytes);
 
 // Fixed limit
 let budget = MemoryBudget::with_limit(4 * 1024 * 1024 * 1024); // 4 GB
@@ -793,18 +777,5 @@ const MAX_SCC_ITERATIONS: usize = 1000;
 
 ## Test Coverage
 
-| Test Suite | Tests | Coverage |
-|------------|-------|----------|
-| `xlog-core` | 11 | Types, schemas, errors |
-| `xlog-cuda` (unit) | 35 | Provider, buffer, memory |
-| `xlog-cuda` (filter) | 6 | Filter operations |
-| `xlog-cuda` (groupby) | 8 | Aggregations |
-| `xlog-cuda` (join_v2) | 10 | All join types |
-| `xlog-cuda` (scan) | 5 | Prefix sum |
-| `xlog-cuda` (set_ops) | 15 | Union/diff |
-| `xlog-cuda` (sort) | 6 | Radix sort |
-| `xlog-cuda` (type_coverage) | 26 | Multi-type support |
-| `xlog-logic` (e2e) | 11 | End-to-end Datalog |
-| `xlog-runtime` | 71 | Executor operations |
-
-**Total: ~275 tests**
+- Workspace unit/integration tests: `cargo test --workspace --all-targets` (debug) or `cargo test --workspace --all-targets --release`.
+- CUDA/PTX certification suite (133 tests): `cargo test -p xlog-cuda-tests --test certification_suite --release -- --nocapture`.
