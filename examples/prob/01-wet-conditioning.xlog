@@ -1,0 +1,11 @@
+0.7::rain().
+0.2::sprinkler().
+
+wet() :- rain().
+wet() :- sprinkler().
+
+evidence(wet(), true).
+
+query(rain()).
+query(sprinkler()).
+

@@ -9,10 +9,10 @@
 
 | Metric | Value |
 |--------|-------|
-| Workspace Tests Passing | 717 (`cargo test --workspace --all-targets --release`) |
+| Workspace Tests Passing | ✅ (`cargo test --workspace --all-targets --release`) |
 | CUDA Certification | **133/133 (100%)** - see `docs/plans/2026-01-12-cuda-certification-results.md` |
-| Crates | 8 (core, ir, logic, runtime, cuda, solve, stats, cuda-tests) |
-| CUDA Kernels | 8 (join, dedup, groupby, scan, filter, pack, sort, set_ops) |
+| Crates | 11 (`xlog-core`, `xlog-ir`, `xlog-logic`, `xlog-runtime`, `xlog-cuda`, `xlog-solve`, `xlog-stats`, `xlog-cuda-tests`, `xlog-prob`, `xlog-gpu`, `xlog-gpu-py`) |
+| CUDA Kernels | 9 (join, dedup, groupby, scan, filter, pack, sort, set_ops, circuit) |
 | Phase | 3 of 6 complete |
 
 ### What Works

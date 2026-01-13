@@ -1,0 +1,5 @@
+0.6::coin(heads); 0.4::coin(tails).
+
+query(coin(heads)).
+query(coin(tails)).
+

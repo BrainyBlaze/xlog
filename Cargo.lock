@@ -1590,6 +1590,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "xlog-gpu"
+version = "0.1.0"
+dependencies = [
+ "xlog-core",
+ "xlog-cuda",
+ "xlog-ir",
+ "xlog-logic",
+ "xlog-runtime",
+]
+
+[[package]]
 name = "xlog-gpu-py"
 version = "0.1.0"
 dependencies = [
@@ -1597,6 +1608,7 @@ dependencies = [
  "pyo3",
  "xlog-core",
  "xlog-cuda",
+ "xlog-gpu",
  "xlog-prob",
 ]
 

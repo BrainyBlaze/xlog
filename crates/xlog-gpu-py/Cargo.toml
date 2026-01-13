@@ -13,4 +13,5 @@ pyo3 = { workspace = true }
 cudarc = { workspace = true }
 xlog-core = { path = "../xlog-core" }
 xlog-cuda = { path = "../xlog-cuda" }
+xlog-gpu = { path = "../xlog-gpu" }
 xlog-prob = { path = "../xlog-prob" }

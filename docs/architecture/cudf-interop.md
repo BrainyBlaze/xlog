@@ -44,4 +44,8 @@ print(df)
 True zero-copy cuDF interop needs a GPU-native interchange path:
 - ✅ DLPack export (current): produces DLPack `DLManagedTensor` pointers for each column without copies
 - ✅ DLPack import (current): consumes DLPack `DLManagedTensor` pointers and wraps them without copies
-- Next: Python capsule/FFI layer in the `xlog-gpu` package (PyO3 + maturin; returns DLPack capsules) + cuDF example (DLPack) or CUDA-aware Arrow memory
+- ✅ Python capsule/FFI layer (Phase 4): `crates/xlog-gpu-py` builds a `xlog_gpu` module via `maturin` that:
+  - accepts DLPack capsules / `__dlpack__` producers for input relations
+  - returns DLPack capsules for query result columns
+  - provides a `dlpack_roundtrip(...)` helper for low-level DLPack validation
+- Next: add a small Python example using cuDF (DLPack) or CUDA-aware Arrow memory

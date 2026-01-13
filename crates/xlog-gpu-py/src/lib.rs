@@ -1,11 +1,14 @@
+use std::collections::HashMap;
 use std::os::raw::{c_char, c_void};
 use std::sync::Arc;
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::types::{PyDict, PySequence};
 
 use xlog_core::{MemoryBudget, ScalarType, Schema};
 use xlog_cuda::{CudaDevice, CudaKernelProvider, DlpackManagedTensor, GpuMemoryManager};
+use ::xlog_gpu::logic as gpu_logic;
 use xlog_prob::exact::{ExactDdnnfProgram, ExactResultWithGrads, GpuConfig, QueryProbability};
 
 const DLPACK_CAPSULE_NAME: &[u8] = b"dltensor\0";
@@ -341,6 +344,152 @@ impl CompiledProgram {
 }
 
 #[pyclass]
+pub struct LogicProgram;
+
+#[pymethods]
+impl LogicProgram {
+    #[staticmethod]
+    #[pyo3(signature = (source, device=0, memory_mb=1024))]
+    pub fn compile(source: &str, device: usize, memory_mb: u64) -> PyResult<CompiledLogicProgram> {
+        if memory_mb == 0 {
+            return Err(PyValueError::new_err("memory_mb must be > 0"));
+        }
+
+        let config = GpuConfig {
+            device_ordinal: device,
+            memory_bytes: memory_mb * 1024 * 1024,
+        };
+
+        let program = gpu_logic::LogicProgram::compile(source)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let provider =
+            provider_from_config(config).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+        Ok(CompiledLogicProgram {
+            program,
+            provider: Arc::new(provider),
+        })
+    }
+}
+
+#[pyclass(unsendable)]
+pub struct CompiledLogicProgram {
+    program: gpu_logic::LogicProgram,
+    provider: Arc<CudaKernelProvider>,
+}
+
+#[pymethods]
+impl CompiledLogicProgram {
+    #[pyo3(signature = (dlpack_inputs=None))]
+    pub fn evaluate(
+        &self,
+        py: Python<'_>,
+        dlpack_inputs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<LogicEvalResult> {
+        let mut inputs: HashMap<String, xlog_cuda::CudaBuffer> = HashMap::new();
+
+        if let Some(dict) = dlpack_inputs {
+            for (k, v) in dict.iter() {
+                let name: String = k.extract()?;
+                let schema = self.program.schema(&name).ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "Unknown input relation {} (not present in compiled schemas)",
+                        name
+                    ))
+                })?;
+
+                let seq = v.downcast::<PySequence>().map_err(|_| {
+                    PyValueError::new_err(format!(
+                        "Input relation {} must be a sequence of DLPack columns",
+                        name
+                    ))
+                })?;
+
+                let mut tensors: Vec<DlpackManagedTensor> = Vec::with_capacity(seq.len()? as usize);
+                for item in seq.iter()? {
+                    let item = item?;
+                    tensors.push(dlpack_from_py(&item)?);
+                }
+
+                let buffer = self
+                    .provider
+                    .from_dlpack_tensors_with_schema(schema.clone(), tensors)
+                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+                inputs.insert(name, buffer);
+            }
+        }
+
+        let result = self
+            .program
+            .evaluate(self.provider.clone(), inputs)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        self.pack_logic_result(py, result)
+    }
+}
+
+impl CompiledLogicProgram {
+    fn pack_logic_result(
+        &self,
+        py: Python<'_>,
+        result: gpu_logic::LogicEvalResult,
+    ) -> PyResult<LogicEvalResult> {
+        let mut queries: Vec<Py<LogicQueryResult>> = Vec::with_capacity(result.queries.len());
+
+        for q in result.queries {
+            let num_rows = q.buffer.num_rows() as usize;
+            let is_true = q.columns.is_empty() && num_rows > 0;
+            let arity = q.buffer.arity();
+
+            let mut tensors: Vec<PyObject> = Vec::new();
+            if !q.columns.is_empty() {
+                let table = self.provider.to_dlpack_table(q.buffer);
+                tensors.reserve(arity);
+                for col_idx in 0..arity {
+                    let tensor = table
+                        .column(col_idx)
+                        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                    tensors.push(dlpack_capsule_from_tensor(py, tensor)?);
+                }
+            }
+
+            queries.push(Py::new(
+                py,
+                LogicQueryResult {
+                    relation_name: q.relation_name,
+                    columns: q.columns,
+                    tensors,
+                    num_rows,
+                    is_true,
+                },
+            )?);
+        }
+
+        Ok(LogicEvalResult { queries })
+    }
+}
+
+#[pyclass]
+pub struct LogicQueryResult {
+    #[pyo3(get)]
+    pub relation_name: String,
+    #[pyo3(get)]
+    pub columns: Vec<String>,
+    #[pyo3(get)]
+    pub tensors: Vec<PyObject>,
+    #[pyo3(get)]
+    pub num_rows: usize,
+    #[pyo3(get)]
+    pub is_true: bool,
+}
+
+#[pyclass]
+pub struct LogicEvalResult {
+    #[pyo3(get)]
+    pub queries: Vec<Py<LogicQueryResult>>,
+}
+
+#[pyclass]
 pub struct EvalResult {
     #[pyo3(get)]
     pub atoms: Vec<String>,
@@ -361,6 +510,10 @@ fn xlog_gpu(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_class::<Program>()?;
     m.add_class::<CompiledProgram>()?;
+    m.add_class::<LogicProgram>()?;
+    m.add_class::<CompiledLogicProgram>()?;
+    m.add_class::<LogicQueryResult>()?;
+    m.add_class::<LogicEvalResult>()?;
     m.add_class::<EvalResult>()?;
     m.add_function(wrap_pyfunction!(dlpack_roundtrip, m)?)?;
     Ok(())

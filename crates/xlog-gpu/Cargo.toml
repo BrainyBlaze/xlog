@@ -1,0 +1,11 @@
+[package]
+name = "xlog-gpu"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+xlog-core = { path = "../xlog-core" }
+xlog-cuda = { path = "../xlog-cuda" }
+xlog-ir = { path = "../xlog-ir" }
+xlog-logic = { path = "../xlog-logic" }
+xlog-runtime = { path = "../xlog-runtime" }
