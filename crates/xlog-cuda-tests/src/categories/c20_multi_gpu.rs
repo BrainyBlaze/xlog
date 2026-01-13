@@ -702,7 +702,14 @@ fn test_device_capability_query(ctx: &TestContext) -> TestResult {
     };
 
     let data: Vec<u32> = (0..test_size)
-        .map(|i| ((i * 1103515245 + 12345) % test_size) as u32)
+        .map(|i| {
+            // Use u64 + wrapping arithmetic so debug builds don't panic on overflow.
+            let v = (i as u64)
+                .wrapping_mul(1103515245)
+                .wrapping_add(12345)
+                % (test_size as u64);
+            v as u32
+        })
         .collect();
 
     let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema) {

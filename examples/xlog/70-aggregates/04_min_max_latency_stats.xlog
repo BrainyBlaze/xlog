@@ -1,0 +1,16 @@
+// Aggregation: min/max per group.
+
+pred latency(u32, u32).          // service_id, latency_ms
+pred latency_stats(u32, u32, u32). // service_id, min_latency, max_latency
+
+latency(1, 100).
+latency(1, 250).
+latency(1, 150).
+latency(2, 7).
+latency(2, 3).
+latency(2, 5).
+
+latency_stats(Service, min(L), max(L)) :- latency(Service, L).
+
+?- latency_stats(Service, Min, Max).
+

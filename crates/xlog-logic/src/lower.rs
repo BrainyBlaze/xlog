@@ -362,23 +362,19 @@ impl Lowerer {
             &mut var_env,
         )?;
 
-        // Project to head variables
-        let projection_cols = self.compute_projection(&rule.head, &var_env)?;
+        if rule.has_aggregation() {
+            return self.lower_aggregate_rule(&rule.head, body_node, &var_env);
+        }
 
-        if projection_cols.iter().enumerate().all(|(i, &c)| c == i)
-            && projection_cols.len() == var_env.column_count()
-        {
-            // No projection needed if columns match exactly
+        // Project to head terms (variables and constants).
+        let projection_exprs = self.compute_head_projection(&rule.head, &var_env)?;
+
+        if Self::is_identity_projection(&projection_exprs, var_env.column_count()) {
             Ok(body_node)
         } else {
-            // Convert to ProjectExpr::Column
-            let proj_exprs: Vec<ProjectExpr> = projection_cols
-                .into_iter()
-                .map(ProjectExpr::Column)
-                .collect();
             Ok(RirNode::Project {
                 input: Box::new(body_node),
-                columns: proj_exprs,
+                columns: projection_exprs,
             })
         }
     }
@@ -1060,8 +1056,23 @@ impl Lowerer {
         _base_col: usize,
     ) -> Result<RirNode> {
         let mut filters = Vec::new();
+        let mut first_var_col: HashMap<&str, usize> = HashMap::new();
 
         for (i, term) in atom.terms.iter().enumerate() {
+            if let Term::Variable(name) = term {
+                if name != "_" {
+                    if let Some(&first) = first_var_col.get(name.as_str()) {
+                        filters.push(Expr::Compare {
+                            left: Box::new(Expr::Column(first)),
+                            op: CompareOp::Eq,
+                            right: Box::new(Expr::Column(i)),
+                        });
+                    } else {
+                        first_var_col.insert(name.as_str(), i);
+                    }
+                }
+            }
+
             if let Some(const_val) = term_to_const_value(term) {
                 filters.push(Expr::Compare {
                     left: Box::new(Expr::Column(i)),
@@ -1222,42 +1233,212 @@ impl Lowerer {
         }
     }
 
-    /// Compute the projection columns to match head variables
-    fn compute_projection(&self, head: &Atom, var_env: &VariableEnv) -> Result<Vec<usize>> {
-        let mut cols = Vec::new();
+    fn is_identity_projection(proj: &[ProjectExpr], input_cols: usize) -> bool {
+        if proj.len() != input_cols {
+            return false;
+        }
+        proj.iter()
+            .enumerate()
+            .all(|(i, e)| matches!(e, ProjectExpr::Column(c) if *c == i))
+    }
+
+    /// Build a projection list that matches the rule head term order.
+    ///
+    /// For non-aggregate rules this supports:
+    /// - Variables (column passthrough)
+    /// - Constants (computed constant columns)
+    fn compute_head_projection(&self, head: &Atom, var_env: &VariableEnv) -> Result<Vec<ProjectExpr>> {
+        let mut cols = Vec::with_capacity(head.terms.len());
 
         for term in &head.terms {
             match term {
                 Term::Variable(name) => {
-                    if let Some(col) = var_env.get_column(name) {
-                        cols.push(col);
-                    } else {
-                        return Err(XlogError::UnsafeVariable(name.clone()));
-                    }
+                    let col = var_env
+                        .get_column(name)
+                        .ok_or_else(|| XlogError::UnsafeVariable(name.clone()))?;
+                    cols.push(ProjectExpr::Column(col));
                 }
                 Term::Anonymous => {
-                    // Anonymous wildcard in head is a semantic error
                     return Err(XlogError::Compilation(
                         "Anonymous wildcard '_' not allowed in rule head".to_string(),
                     ));
                 }
-                Term::Aggregate(agg) => {
-                    // For aggregates, we need the column of the aggregated variable
-                    if let Some(col) = var_env.get_column(&agg.variable) {
-                        cols.push(col);
-                    } else {
-                        return Err(XlogError::UnsafeVariable(agg.variable.clone()));
-                    }
+                Term::Aggregate(_) => {
+                    return Err(XlogError::Compilation(
+                        "Aggregate term in non-aggregate rule head".to_string(),
+                    ));
                 }
-                // Constants in head are handled differently (they're projected out)
-                _ => {
-                    // For now, skip constants in head
-                    // A more complete implementation would validate them
+                Term::Integer(_) | Term::Float(_) | Term::String(_) | Term::Symbol(_) => {
+                    let (expr, typ) = term_to_project_const_expr(term)?;
+                    cols.push(ProjectExpr::Computed(expr, typ));
                 }
             }
         }
 
         Ok(cols)
+    }
+
+    /// Lower an aggregate rule head into `GroupBy` + final projection.
+    fn lower_aggregate_rule(&mut self, head: &Atom, body: RirNode, var_env: &VariableEnv) -> Result<RirNode> {
+        // Collect unique group keys in head order.
+        let mut key_vars: Vec<String> = Vec::new();
+        let mut key_var_to_pos: HashMap<String, usize> = HashMap::new();
+        let mut key_src_cols: Vec<usize> = Vec::new();
+
+        // Collect unique aggregate specs (op, var) in head order.
+        let mut agg_specs: Vec<(AggOp, String)> = Vec::new();
+        let mut agg_to_pos: HashMap<(AggOp, String), usize> = HashMap::new();
+        let mut value_vars: Vec<String> = Vec::new();
+        let mut value_var_to_pos: HashMap<String, usize> = HashMap::new();
+        let mut value_src_cols: Vec<usize> = Vec::new();
+
+        for term in &head.terms {
+            match term {
+                Term::Variable(name) => {
+                    if !key_var_to_pos.contains_key(name) {
+                        let col = var_env
+                            .get_column(name)
+                            .ok_or_else(|| XlogError::UnsafeVariable(name.clone()))?;
+                        let pos = key_vars.len();
+                        key_vars.push(name.clone());
+                        key_var_to_pos.insert(name.clone(), pos);
+                        key_src_cols.push(col);
+                    }
+                }
+                Term::Aggregate(agg) => {
+                    let key = (agg.op, agg.variable.clone());
+                    if !agg_to_pos.contains_key(&key) {
+                        // Ensure the aggregated variable is bound.
+                        let col = var_env
+                            .get_column(&agg.variable)
+                            .ok_or_else(|| XlogError::UnsafeVariable(agg.variable.clone()))?;
+
+                        // Ensure the value variable exists in the groupby input.
+                        let value_pos = *value_var_to_pos.entry(agg.variable.clone()).or_insert_with(|| {
+                            let p = value_vars.len();
+                            value_vars.push(agg.variable.clone());
+                            value_src_cols.push(col);
+                            p
+                        });
+
+                        let agg_pos = agg_specs.len();
+                        agg_specs.push((agg.op, agg.variable.clone()));
+                        agg_to_pos.insert(key, agg_pos);
+
+                        // Keep clippy happy about unused value_pos in insert_with closure.
+                        let _ = value_pos;
+                    }
+                }
+                Term::Anonymous => {
+                    return Err(XlogError::Compilation(
+                        "Anonymous wildcard '_' not allowed in rule head".to_string(),
+                    ));
+                }
+                Term::Integer(_) | Term::Float(_) | Term::String(_) | Term::Symbol(_) => {
+                    // Constants are allowed in the head; they are projected after aggregation.
+                }
+            }
+        }
+
+        if agg_specs.is_empty() {
+            return Err(XlogError::Compilation(
+                "Rule marked as aggregate but no aggregate terms found".to_string(),
+            ));
+        }
+
+        // Build groupby input: [keys..., values...]. For global aggregates (no keys),
+        // synthesize a constant key column so GroupBy is well-defined.
+        let mut group_input_cols: Vec<ProjectExpr> = Vec::new();
+        let mut key_cols: Vec<usize> = Vec::new();
+
+        if key_src_cols.is_empty() {
+            group_input_cols.push(ProjectExpr::Computed(
+                Expr::Const(ConstValue::U32(0)),
+                ScalarType::U32,
+            ));
+            key_cols.push(0);
+        } else {
+            for (i, &col) in key_src_cols.iter().enumerate() {
+                group_input_cols.push(ProjectExpr::Column(col));
+                key_cols.push(i);
+            }
+        }
+
+        let value_offset = group_input_cols.len();
+        for &col in &value_src_cols {
+            group_input_cols.push(ProjectExpr::Column(col));
+        }
+
+        let group_input = RirNode::Project {
+            input: Box::new(body),
+            columns: group_input_cols,
+        };
+
+        // Build multi-aggregation spec list (value_col indices are in the group_input schema).
+        let mut aggs: Vec<(usize, CoreAggOp)> = Vec::with_capacity(agg_specs.len());
+        for (op, var) in &agg_specs {
+            let value_pos = *value_var_to_pos
+                .get(var)
+                .ok_or_else(|| XlogError::UnsafeVariable(var.clone()))?;
+            let value_col = value_offset + value_pos;
+            aggs.push((value_col, convert_agg_op(op)));
+        }
+
+        let groupby = RirNode::GroupBy {
+            input: Box::new(group_input),
+            key_cols,
+            aggs,
+        };
+
+        // Final projection to match head term order:
+        // - variables map to group key columns
+        // - aggregates map to groupby output agg columns (after keys)
+        // - constants are computed columns
+        let key_count = if key_src_cols.is_empty() { 1 } else { key_vars.len() };
+
+        let mut final_proj: Vec<ProjectExpr> = Vec::with_capacity(head.terms.len());
+        for term in &head.terms {
+            match term {
+                Term::Variable(name) => {
+                    let idx = if key_src_cols.is_empty() {
+                        // Global aggregates have no key vars in the output; binding a variable in the head
+                        // is a semantic error because it would be unbound.
+                        return Err(XlogError::UnsafeVariable(name.clone()));
+                    } else {
+                        *key_var_to_pos
+                            .get(name)
+                            .ok_or_else(|| XlogError::UnsafeVariable(name.clone()))?
+                    };
+                    final_proj.push(ProjectExpr::Column(idx));
+                }
+                Term::Aggregate(agg) => {
+                    let pos = *agg_to_pos
+                        .get(&(agg.op, agg.variable.clone()))
+                        .ok_or_else(|| XlogError::UnsafeVariable(agg.variable.clone()))?;
+                    final_proj.push(ProjectExpr::Column(key_count + pos));
+                }
+                Term::Anonymous => {
+                    return Err(XlogError::Compilation(
+                        "Anonymous wildcard '_' not allowed in rule head".to_string(),
+                    ));
+                }
+                Term::Integer(_) | Term::Float(_) | Term::String(_) | Term::Symbol(_) => {
+                    let (expr, typ) = term_to_project_const_expr(term)?;
+                    final_proj.push(ProjectExpr::Computed(expr, typ));
+                }
+            }
+        }
+
+        if final_proj.is_empty() {
+            return Err(XlogError::Compilation(
+                "Aggregate rule produced empty head projection".to_string(),
+            ));
+        }
+
+        Ok(RirNode::Project {
+            input: Box::new(groupby),
+            columns: final_proj,
+        })
     }
 
     /// Infer the result type of an arithmetic expression (strict same-type)
@@ -1552,7 +1733,12 @@ fn infer_term_type(term: &Term) -> ScalarType {
         }
         Term::Float(_) => ScalarType::F64,
         Term::String(_) | Term::Symbol(_) => ScalarType::Symbol,
-        Term::Aggregate(_) => ScalarType::U64, // Aggregates typically produce integers
+        Term::Aggregate(agg) => match agg.op {
+            AggOp::Count => ScalarType::U32,
+            AggOp::Sum => ScalarType::U64,
+            AggOp::Min | AggOp::Max => ScalarType::U32,
+            AggOp::LogSumExp => ScalarType::F64,
+        },
     }
 }
 
@@ -1567,6 +1753,26 @@ fn term_to_const_value(term: &Term) -> Option<ConstValue> {
     }
 }
 
+fn term_to_project_const_expr(term: &Term) -> Result<(Expr, ScalarType)> {
+    match term {
+        Term::Integer(i) => {
+            if *i >= 0 && *i <= u32::MAX as i64 {
+                Ok((Expr::Const(ConstValue::U32(*i as u32)), ScalarType::U32))
+            } else {
+                Ok((Expr::Const(ConstValue::I64(*i)), ScalarType::I64))
+            }
+        }
+        Term::Float(f) => Ok((Expr::Const(ConstValue::F64(*f)), ScalarType::F64)),
+        Term::String(s) | Term::Symbol(s) => Ok((
+            Expr::Const(ConstValue::Symbol(s.clone())),
+            ScalarType::Symbol,
+        )),
+        Term::Variable(_) | Term::Anonymous | Term::Aggregate(_) => Err(XlogError::Compilation(
+            "Expected constant term".to_string(),
+        )),
+    }
+}
+
 /// Convert AST AggOp to core AggOp
 #[allow(dead_code)]
 fn convert_agg_op(op: &AggOp) -> CoreAggOp {
@@ -1575,6 +1781,7 @@ fn convert_agg_op(op: &AggOp) -> CoreAggOp {
         AggOp::Sum => CoreAggOp::Sum,
         AggOp::Min => CoreAggOp::Min,
         AggOp::Max => CoreAggOp::Max,
+        AggOp::LogSumExp => CoreAggOp::LogSumExp,
     }
 }
 
@@ -1984,6 +2191,55 @@ mod tests {
     }
 
     #[test]
+    fn test_lower_repeated_variable_filter() {
+        // self_loop(X) :- edge(X, X).
+        let rule = Rule {
+            head: Atom {
+                predicate: "self_loop".to_string(),
+                terms: vec![Term::Variable("X".to_string())],
+            },
+            body: vec![BodyLiteral::Positive(Atom {
+                predicate: "edge".to_string(),
+                terms: vec![Term::Variable("X".to_string()), Term::Variable("X".to_string())],
+            })],
+        };
+
+        let mut lowerer = Lowerer::new();
+        lowerer.schemas.insert(
+            "edge".to_string(),
+            Schema::new(vec![
+                ("c0".to_string(), ScalarType::U32),
+                ("c1".to_string(), ScalarType::U32),
+            ]),
+        );
+
+        let node = lowerer.lower_rule(&rule).expect("lower_rule failed");
+
+        fn has_col_eq_filter(node: &RirNode) -> bool {
+            match node {
+                RirNode::Filter { predicate, .. } => match predicate {
+                    Expr::Compare { left, op: CompareOp::Eq, right } => {
+                        matches!((&**left, &**right), (Expr::Column(0), Expr::Column(1)))
+                            || matches!((&**left, &**right), (Expr::Column(1), Expr::Column(0)))
+                    }
+                    Expr::And(exprs) => exprs.iter().any(|e| match e {
+                        Expr::Compare { left, op: CompareOp::Eq, right } => {
+                            matches!((&**left, &**right), (Expr::Column(0), Expr::Column(1)))
+                                || matches!((&**left, &**right), (Expr::Column(1), Expr::Column(0)))
+                        }
+                        _ => false,
+                    }),
+                    _ => false,
+                },
+                RirNode::Project { input, .. } => has_col_eq_filter(input),
+                _ => false,
+            }
+        }
+
+        assert!(has_col_eq_filter(&node));
+    }
+
+    #[test]
     fn test_lower_program_simple() {
         let mut program = Program::new();
 
@@ -2045,6 +2301,7 @@ mod tests {
         assert_eq!(convert_agg_op(&AggOp::Sum), CoreAggOp::Sum);
         assert_eq!(convert_agg_op(&AggOp::Min), CoreAggOp::Min);
         assert_eq!(convert_agg_op(&AggOp::Max), CoreAggOp::Max);
+        assert_eq!(convert_agg_op(&AggOp::LogSumExp), CoreAggOp::LogSumExp);
     }
 
     #[test]

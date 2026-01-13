@@ -18,6 +18,7 @@ use crate::lower::Lowerer;
 use crate::optimizer::Optimizer;
 use crate::parser::parse_program;
 use crate::stratify::stratify;
+use crate::{BodyLiteral, Program, Query, Rule as AstRule, Term};
 
 /// The XLOG compiler orchestrates the full compilation pipeline.
 ///
@@ -103,6 +104,24 @@ impl Compiler {
     ) -> Result<ExecutionPlan> {
         // Phase 1: Parse source into AST
         let program = parse_program(source)?;
+        self.compile_program_with_stats_snapshot(&program, stats_snapshot)
+    }
+
+    /// Compile a parsed XLOG program into an execution plan.
+    ///
+    /// This is useful for callers that want to inspect the AST (facts, queries,
+    /// constraints) while compiling without reparsing.
+    pub fn compile_program(&mut self, program: &Program) -> Result<ExecutionPlan> {
+        self.compile_program_with_stats_snapshot(program, None)
+    }
+
+    /// Compile a parsed XLOG program into an execution plan, optionally seeding the optimizer.
+    pub fn compile_program_with_stats_snapshot(
+        &mut self,
+        program: &Program,
+        stats_snapshot: Option<&StatsSnapshot>,
+    ) -> Result<ExecutionPlan> {
+        let program = desugar_queries_and_constraints(program);
 
         // Phase 2: Stratify (analyze dependencies, detect cycles)
         let strata = stratify(&program)?;
@@ -264,6 +283,52 @@ impl Compiler {
     pub fn schemas(&self) -> &HashMap<String, Schema> {
         self.lowerer.schemas()
     }
+}
+
+fn desugar_queries_and_constraints(program: &Program) -> Program {
+    let mut out = program.clone();
+
+    // Constraints: `:- body.` becomes `__xlog_constraint_i(1) :- body.`
+    for (i, constraint) in program.constraints.iter().enumerate() {
+        let pred = format!("__xlog_constraint_{}", i);
+        out.rules.push(AstRule {
+            head: crate::ast::Atom {
+                predicate: pred,
+                terms: vec![Term::Integer(1)],
+            },
+            body: constraint.body.clone(),
+        });
+    }
+
+    // Queries: `?- atom.` becomes `__xlog_query_i(Vars...) :- atom.`
+    for (i, Query { atom }) in program.queries.iter().enumerate() {
+        let pred = format!("__xlog_query_{}", i);
+
+        let mut head_terms: Vec<Term> = Vec::new();
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+
+        for term in &atom.terms {
+            if let Term::Variable(name) = term {
+                if seen.insert(name.as_str()) {
+                    head_terms.push(Term::Variable(name.clone()));
+                }
+            }
+        }
+
+        if head_terms.is_empty() {
+            head_terms.push(Term::Integer(1));
+        }
+
+        out.rules.push(AstRule {
+            head: crate::ast::Atom {
+                predicate: pred,
+                terms: head_terms,
+            },
+            body: vec![BodyLiteral::Positive(atom.clone())],
+        });
+    }
+
+    out
 }
 
 /// Convenience function to compile source in one call.
@@ -488,6 +553,28 @@ mod tests {
             "Failed to compile with aggregation: {:?}",
             result.err()
         );
+
+        let plan = result.unwrap();
+        let out_degree_rules: Vec<_> = plan
+            .rules_by_scc
+            .iter()
+            .flatten()
+            .filter(|r| r.head == "out_degree")
+            .collect();
+        assert_eq!(out_degree_rules.len(), 1, "Expected one out_degree rule");
+
+        // Aggregation lowering should produce a GroupBy node (wrapped in a Project to match head order).
+        let body = &out_degree_rules[0].body;
+        match body {
+            RirNode::Project { input, .. } => {
+                assert!(
+                    matches!(input.as_ref(), RirNode::GroupBy { .. }),
+                    "Expected Project(GroupBy(..)), got {:?}",
+                    input
+                );
+            }
+            other => panic!("Expected Project(GroupBy(..)), got {:?}", other),
+        }
     }
 
     #[test]

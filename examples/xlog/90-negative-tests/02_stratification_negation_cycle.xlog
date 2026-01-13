@@ -1,0 +1,16 @@
+// Negative test: unstratifiable negation cycle.
+//
+// `p` depends on `not q` and `q` depends on `not p`, forming a negation cycle.
+
+pred node(u32).
+pred p(u32).
+pred q(u32).
+
+node(1).
+node(2).
+
+p(X) :- node(X), not q(X).
+q(X) :- node(X), not p(X).
+
+?- p(X).
+

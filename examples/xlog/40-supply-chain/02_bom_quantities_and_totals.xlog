@@ -1,0 +1,29 @@
+// BOM explosion with quantities using arithmetic + aggregation.
+//
+// `need(P, C, Q)` enumerates required quantities for each path.
+// `total_need(P, C, sum(Q))` aggregates per (P,C).
+
+pred contains(u32, u32, u32).     // parent, child, qty
+pred need(u32, u32, u32).         // parent, child, qty (per-path)
+pred total_need(u32, u32, u64).   // parent, child, total qty
+
+// Car(1) needs 1 engine, 1 chassis, 4 wheels.
+contains(1, 2, 1).
+contains(1, 3, 1).
+contains(1, 4, 4).
+
+// Engine(2) needs 4 pistons.
+contains(2, 5, 4).
+
+// Wheel(4) needs 1 tire and 1 rim.
+contains(4, 8, 1).
+contains(4, 9, 1).
+
+need(P, C, Q) :- contains(P, C, Q).
+need(P, C, Q) :- contains(P, M, Q1), need(M, C, Q2), Q is Q1 * Q2.
+
+// Total required quantity per (parent, component).
+total_need(P, C, sum(Q)) :- need(P, C, Q).
+
+?- total_need(1, C, Total).
+

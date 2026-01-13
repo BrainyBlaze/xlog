@@ -1,0 +1,15 @@
+// Stratified negation: nodes with no incoming/outgoing edges.
+
+pred node(u32).
+pred edge(u32, u32).
+pred isolated(u32).
+
+node(1).
+node(2).
+node(3).
+edge(1, 2).
+
+isolated(X) :- node(X), not edge(X, _), not edge(_, X).
+
+?- isolated(N).
+

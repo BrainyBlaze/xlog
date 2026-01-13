@@ -1,0 +1,27 @@
+// Social-network style queries: friends-of-friends, mutuals, and recommendations.
+
+pred friend(u32, u32).
+pred fof(u32, u32).
+pred recommend(u32, u32).
+pred mutual(u32, u32, u32).
+
+// Bidirectional friend edges (undirected graph encoded as two directed edges).
+friend(1, 2). friend(2, 1).
+friend(2, 3). friend(3, 2).
+friend(3, 4). friend(4, 3).
+friend(1, 5). friend(5, 1).
+friend(2, 5). friend(5, 2).
+friend(5, 6). friend(6, 5).
+
+// Friends-of-friends (excluding self loops).
+fof(X, Z) :- friend(X, Y), friend(Y, Z), X != Z.
+
+// Recommendations: a friend-of-friend that is not already a direct friend.
+recommend(X, Z) :- fof(X, Z), not friend(X, Z).
+
+// Mutual friends (canonicalize X < Y to avoid duplicate symmetric rows).
+mutual(X, Y, M) :- friend(X, M), friend(Y, M), X < Y, X != M, Y != M.
+
+?- recommend(1, R).
+?- mutual(1, 3, M).
+

@@ -1,0 +1,28 @@
+// Comparisons and explicit equality (`=`, `<=`, `>=`).
+//
+// This complements the join-style equality you get from reusing the same variable
+// across atoms (e.g. `p(X), q(X)`).
+
+pred value(u32, u32).        // id, score
+pred equal_pair(u32).        // ids where left == right in the same tuple
+pred in_range(u32).          // ids where score is within an inclusive range
+
+value(1, 40).
+value(2, 60).
+value(3, 100).
+value(4, 120).
+
+// Demonstrate equality between two variables.
+pred pair(u32, u32).
+pair(1, 1).
+pair(1, 2).
+pair(2, 2).
+
+equal_pair(X) :- pair(X, Y), X = Y.
+
+// Inclusive bounds using <= and >=.
+in_range(Id) :- value(Id, Score), Score >= 50, Score <= 100.
+
+?- equal_pair(X).
+?- in_range(Id).
+

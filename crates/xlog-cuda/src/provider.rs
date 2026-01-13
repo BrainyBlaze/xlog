@@ -1901,19 +1901,25 @@ impl CudaKernelProvider {
                 "GroupBy requires at least one key column".to_string(),
             ));
         }
-        if key_cols.len() > 1 {
-            return Err(XlogError::Kernel(
-                "Multi-column groupby not yet implemented".to_string(),
-            ));
-        }
         if aggs.is_empty() {
             return Err(XlogError::Kernel(
                 "GroupBy requires at least one aggregation".to_string(),
             ));
         }
 
-        // Validate all value columns exist
-        for &(value_col, _) in aggs {
+        // Validate key columns exist
+        for &key_col in key_cols {
+            if key_col >= buffer.arity() {
+                return Err(XlogError::Kernel(format!(
+                    "Key column {} out of bounds (arity {})",
+                    key_col,
+                    buffer.arity()
+                )));
+            }
+        }
+
+        // Validate all value columns exist and basic dtype constraints for current kernels.
+        for &(value_col, agg_op) in aggs {
             if value_col >= buffer.arity() {
                 return Err(XlogError::Kernel(format!(
                     "Value column {} out of bounds (arity {})",
@@ -1921,29 +1927,61 @@ impl CudaKernelProvider {
                     buffer.arity()
                 )));
             }
+
+            let value_ty = buffer
+                .schema()
+                .column_type(value_col)
+                .ok_or_else(|| XlogError::Kernel("Value column has no type".to_string()))?;
+            match agg_op {
+                AggOp::Count => {}
+                AggOp::Sum | AggOp::Min | AggOp::Max => {
+                    if value_ty != ScalarType::U32 {
+                        return Err(XlogError::Kernel(format!(
+                            "{:?} currently requires U32 values, got {:?}",
+                            agg_op, value_ty
+                        )));
+                    }
+                }
+                AggOp::LogSumExp => {
+                    if value_ty != ScalarType::F64 {
+                        return Err(XlogError::Kernel(format!(
+                            "LogSumExp requires F64 values, got {:?}",
+                            value_ty
+                        )));
+                    }
+                }
+            }
         }
 
-        let key_col = key_cols[0];
         let num_rows = buffer.num_rows() as u32;
 
-        // Step 1: Sort buffer by key column
+        // Step 1: Sort buffer by key columns
         let sorted = self.sort(buffer, key_cols)?;
 
-        // Step 2: Detect boundaries using detect_boundaries kernel
+        // Step 2: Detect boundaries using detect_group_boundaries kernel over packed key bytes
         let boundary_func = self
             .device
             .inner()
-            .get_func(GROUPBY_MODULE, groupby_kernels::DETECT_BOUNDARIES)
-            .ok_or_else(|| XlogError::Kernel("detect_boundaries kernel not found".to_string()))?;
+            .get_func(GROUPBY_MODULE, groupby_kernels::DETECT_GROUP_BOUNDARIES)
+            .ok_or_else(|| {
+                XlogError::Kernel("detect_group_boundaries kernel not found".to_string())
+            })?;
 
         // Allocate boundaries mask
         let boundaries = self.memory.alloc::<u8>(num_rows as usize)?;
 
-        // Get sorted key column
-        let sorted_keys = sorted
-            .column(key_col)
-            .ok_or_else(|| XlogError::Kernel("Sorted key column not found".to_string()))?;
-        let sorted_keys_view = self.column_as_u32_view(sorted_keys, num_rows as usize)?;
+        let packed = self.compute_hashes_and_pack_keys(&sorted, key_cols)?;
+        if packed.key_bytes == 0 || packed.key_bytes % 4 != 0 {
+            return Err(XlogError::Kernel(format!(
+                "GroupBy key packing produced {} bytes per row (expected multiple of 4); Bool keys are not supported",
+                packed.key_bytes
+            )));
+        }
+
+        let segments_per_row = (packed.key_bytes / 4) as usize;
+        let total_segments = (num_rows as usize) * segments_per_row;
+        let packed_col: CudaColumn = packed.packed_keys.into();
+        let packed_u32 = self.column_as_u32_view(&packed_col, total_segments)?;
 
         // Launch boundary detection
         let block_size = 256u32;
@@ -1958,9 +1996,18 @@ impl CudaKernelProvider {
         unsafe {
             boundary_func
                 .clone()
-                .launch(config, (&sorted_keys_view, num_rows, &boundaries))
+                .launch(
+                    config,
+                    (
+                        &packed_u32,
+                        num_rows,
+                        segments_per_row as u32,
+                        segments_per_row as u32,
+                        &boundaries,
+                    ),
+                )
         }
-        .map_err(|e| XlogError::Kernel(format!("detect_boundaries failed: {}", e)))?;
+        .map_err(|e| XlogError::Kernel(format!("detect_group_boundaries failed: {}", e)))?;
 
         self.device.synchronize()?;
 
@@ -1990,51 +2037,7 @@ impl CudaKernelProvider {
             .htod_sync_copy_into(&group_ids_host, &mut group_ids)
             .map_err(|e| XlogError::Kernel(format!("Failed to upload group IDs: {}", e)))?;
 
-        // Step 4: Extract unique group keys
-        // Compute prefix sum of boundaries for extract_group_keys
-        let mut boundary_positions_host = vec![0u32; num_rows as usize];
-        let mut running_sum = 0u32;
-        for i in 0..num_rows as usize {
-            boundary_positions_host[i] = running_sum;
-            running_sum += boundaries_host[i] as u32;
-        }
-
-        let mut boundary_positions = self.memory.alloc::<u32>(num_rows as usize)?;
-        self.device
-            .inner()
-            .htod_sync_copy_into(&boundary_positions_host, &mut boundary_positions)
-            .map_err(|e| {
-                XlogError::Kernel(format!("Failed to upload boundary positions: {}", e))
-            })?;
-
-        // Allocate group keys output
-        let group_keys_output = self.memory.alloc::<u32>(num_groups)?;
-
-        // Get extract_group_keys kernel
-        let extract_keys_func = self
-            .device
-            .inner()
-            .get_func(GROUPBY_MODULE, groupby_kernels::EXTRACT_GROUP_KEYS)
-            .ok_or_else(|| XlogError::Kernel("extract_group_keys kernel not found".to_string()))?;
-
-        // SAFETY: Kernel parameters match expected signature
-        unsafe {
-            extract_keys_func.clone().launch(
-                config,
-                (
-                    &sorted_keys_view,
-                    &boundaries,
-                    &boundary_positions,
-                    num_rows,
-                    &group_keys_output,
-                ),
-            )
-        }
-        .map_err(|e| XlogError::Kernel(format!("extract_group_keys failed: {}", e)))?;
-
-        self.device.synchronize()?;
-
-        // Step 5: For each (value_col, op) pair, run the appropriate kernel
+        // Step 4: For each (value_col, op) pair, run the appropriate kernel
         let mut agg_columns_bytes: Vec<Vec<u8>> = Vec::with_capacity(aggs.len());
 
         for &(value_col, agg_op) in aggs {
@@ -2042,7 +2045,6 @@ impl CudaKernelProvider {
             let values = sorted
                 .column(value_col)
                 .ok_or_else(|| XlogError::Kernel("Value column not found".to_string()))?;
-            let values_view = self.column_as_u32_view(values, num_rows as usize)?;
 
             let agg_bytes = match agg_op {
                 AggOp::Count => {
@@ -2086,6 +2088,7 @@ impl CudaKernelProvider {
                         .collect::<Vec<u8>>()
                 }
                 AggOp::Sum => {
+                    let values_view = self.column_as_u32_view(values, num_rows as usize)?;
                     let mut output = self.memory.alloc::<u64>(num_groups)?;
                     // Initialize to 0
                     self.device
@@ -2127,6 +2130,7 @@ impl CudaKernelProvider {
                         .collect::<Vec<u8>>()
                 }
                 AggOp::Min => {
+                    let values_view = self.column_as_u32_view(values, num_rows as usize)?;
                     let mut output = self.memory.alloc::<u32>(num_groups)?;
                     // Initialize to MAX
                     self.device
@@ -2167,6 +2171,7 @@ impl CudaKernelProvider {
                         .collect::<Vec<u8>>()
                 }
                 AggOp::Max => {
+                    let values_view = self.column_as_u32_view(values, num_rows as usize)?;
                     let mut output = self.memory.alloc::<u32>(num_groups)?;
                     // Initialize to 0
                     self.device
@@ -2318,27 +2323,56 @@ impl CudaKernelProvider {
             agg_columns_bytes.push(agg_bytes);
         }
 
-        // Step 6: Build output buffer with keys and aggregated values
-        // Download group keys
-        let mut group_keys_host = vec![0u32; num_groups];
-        self.device
-            .inner()
-            .dtoh_sync_copy_into(&group_keys_output, &mut group_keys_host)
-            .map_err(|e| XlogError::Kernel(format!("Failed to read group keys: {}", e)))?;
-        let group_keys_bytes: Vec<u8> = group_keys_host
-            .iter()
-            .flat_map(|v| v.to_le_bytes())
-            .collect();
+        // Step 5: Build output buffer with keys and aggregated values
+        // Extract the first row index of each group (CPU for MVP).
+        let mut group_first_indices = vec![0usize; num_groups];
+        group_first_indices[0] = 0;
+        for (i, &is_boundary) in boundaries_host.iter().enumerate() {
+            if i > 0 && is_boundary == 1 {
+                let group = group_ids_host[i] as usize;
+                group_first_indices[group] = i;
+            }
+        }
 
-        // Upload key column
-        let mut result_key_col = self.memory.alloc::<u8>(group_keys_bytes.len())?;
-        self.device
-            .inner()
-            .htod_sync_copy_into(&group_keys_bytes, &mut result_key_col)
-            .map_err(|e| XlogError::Kernel(format!("Failed to upload result keys: {}", e)))?;
+        let mut result_columns: Vec<CudaColumn> = Vec::with_capacity(key_cols.len() + aggs.len());
 
-        // Build result columns: key column + agg columns
-        let mut result_columns = vec![result_key_col.into()];
+        // Key columns (in key_cols order)
+        for &key_col in key_cols {
+            let elem_size = buffer
+                .schema()
+                .column_type(key_col)
+                .map(|t| t.size_bytes())
+                .unwrap_or(4);
+            let total_bytes = (num_rows as usize) * elem_size;
+
+            let col = sorted
+                .column(key_col)
+                .ok_or_else(|| XlogError::Kernel("Key column not found".to_string()))?;
+
+            let mut host_data = vec![0u8; total_bytes];
+            self.device
+                .inner()
+                .dtoh_sync_copy_into(col, &mut host_data)
+                .map_err(|e| XlogError::Kernel(format!("Failed to read key column: {}", e)))?;
+
+            let mut group_bytes = vec![0u8; num_groups * elem_size];
+            for (g, &row_idx) in group_first_indices.iter().enumerate() {
+                let src_start = row_idx * elem_size;
+                let src_end = src_start + elem_size;
+                let dst_start = g * elem_size;
+                group_bytes[dst_start..dst_start + elem_size]
+                    .copy_from_slice(&host_data[src_start..src_end]);
+            }
+
+            let mut out_col = self.memory.alloc::<u8>(group_bytes.len())?;
+            self.device
+                .inner()
+                .htod_sync_copy_into(&group_bytes, &mut out_col)
+                .map_err(|e| XlogError::Kernel(format!("Failed to upload group keys: {}", e)))?;
+            result_columns.push(out_col.into());
+        }
+
+        // Aggregation output columns (in aggs order)
         for agg_bytes in agg_columns_bytes {
             let mut agg_col = self.memory.alloc::<u8>(agg_bytes.len())?;
             self.device

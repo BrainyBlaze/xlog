@@ -16,14 +16,14 @@ float_num = @{ "-"? ~ ASCII_DIGIT+ ~ "." ~ ASCII_DIGIT+ }
 string_lit = @{ "\"" ~ (!"\"" ~ ANY)* ~ "\"" }
 
 // Terms
-term = { var_or_anon | integer | float_num | string_lit | ident }
+term = { var_or_anon | float_num | integer | string_lit | ident }
 
 // Atoms
 atom = { ident ~ "(" ~ term_list? ~ ")" }
 term_list = { term ~ ("," ~ term)* }
 
 // Aggregate expressions
-agg_op = { "count" | "sum" | "min" | "max" }
+agg_op = { "count" | "sum" | "min" | "max" | "logsumexp" }
 aggregate = { agg_op ~ "(" ~ variable ~ ")" }
 agg_term = { aggregate | term }
 
@@ -43,8 +43,8 @@ arith_primary = {
     builtin_fn ~ "(" ~ arith_expr ~ ("," ~ (arith_expr | type_spec))* ~ ")" |
     "(" ~ arith_expr ~ ")" |
     variable |
-    integer |
-    float_num
+    float_num |
+    integer
 }
 
 arith_term = { arith_primary ~ (arith_op_mul ~ arith_primary)* }

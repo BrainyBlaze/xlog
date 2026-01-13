@@ -98,6 +98,54 @@ fn test_compile_aggregate_program() {
 }
 
 #[test]
+fn test_compile_desugars_query_to_rule() {
+    let input = include_str!("logic/tc.xlog");
+    let mut compiler = Compiler::new();
+    let plan = compiler.compile(input).expect("Compile failed");
+
+    assert!(
+        compiler.schemas().contains_key("__xlog_query_0"),
+        "Expected query predicate schema to be inferred"
+    );
+
+    let has_query_rule = plan
+        .rules_by_scc
+        .iter()
+        .flatten()
+        .any(|r| r.head == "__xlog_query_0");
+    assert!(has_query_rule, "Expected a compiled rule for __xlog_query_0");
+}
+
+#[test]
+fn test_compile_desugars_constraint_to_rule() {
+    let input = r#"
+        edge(1, 2).
+        edge(2, 3).
+        reach(X, Y) :- edge(X, Y).
+        reach(X, Z) :- reach(X, Y), edge(Y, Z).
+        :- reach(X, X).
+    "#;
+
+    let mut compiler = Compiler::new();
+    let plan = compiler.compile(input).expect("Compile failed");
+
+    assert!(
+        compiler.schemas().contains_key("__xlog_constraint_0"),
+        "Expected constraint predicate schema to be inferred"
+    );
+
+    let has_constraint_rule = plan
+        .rules_by_scc
+        .iter()
+        .flatten()
+        .any(|r| r.head == "__xlog_constraint_0");
+    assert!(
+        has_constraint_rule,
+        "Expected a compiled rule for __xlog_constraint_0"
+    );
+}
+
+#[test]
 fn test_compile_convenience_function() {
     let input = include_str!("logic/tc.xlog");
     let result = compile(input);

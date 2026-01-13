@@ -1,0 +1,15 @@
+// Negative test: this graph has a cycle, so the acyclicity constraint must fail.
+
+pred edge(u32, u32).
+pred reach(u32, u32).
+
+edge(1, 2).
+edge(2, 1).
+
+reach(X, Y) :- edge(X, Y).
+reach(X, Z) :- reach(X, Y), edge(Y, Z).
+
+:- reach(X, X).
+
+?- reach(1, N).
+

@@ -239,6 +239,7 @@ fn build_aggregate(pair: Pair<'_, Rule>) -> Result<Term> {
         "sum" => AggOp::Sum,
         "min" => AggOp::Min,
         "max" => AggOp::Max,
+        "logsumexp" => AggOp::LogSumExp,
         _ => return Err(XlogError::Parse(format!("Unknown aggregate: {}", op_pair.as_str()))),
     };
 
@@ -594,6 +595,26 @@ mod tests {
         assert!(program.rules[0].has_aggregation());
         if let Term::Aggregate(agg) = &program.rules[0].head.terms[1] {
             assert_eq!(agg.op, AggOp::Count);
+            assert_eq!(agg.variable, "Y");
+        } else {
+            panic!("Expected aggregate term");
+        }
+    }
+
+    #[test]
+    fn test_parse_logsumexp_aggregate() {
+        let input = "score(X, logsumexp(Y)) :- obs(X, Y).";
+        let result = parse_program(input);
+        assert!(
+            result.is_ok(),
+            "Failed to parse logsumexp aggregate: {:?}",
+            result.err()
+        );
+
+        let program = result.unwrap();
+        assert!(program.rules[0].has_aggregation());
+        if let Term::Aggregate(agg) = &program.rules[0].head.terms[1] {
+            assert_eq!(agg.op, AggOp::LogSumExp);
             assert_eq!(agg.variable, "Y");
         } else {
             panic!("Expected aggregate term");

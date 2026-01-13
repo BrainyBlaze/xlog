@@ -1,0 +1,36 @@
+// Network connectivity analysis: reachability + isolated segment detection.
+
+pred link(u32, u32).
+pred node(u32).
+pred gateway(u32).
+pred reachable(u32, u32).
+pred has_internet(u32).
+pred no_internet(u32).
+
+// Bidirectional links
+link(1, 2). link(2, 1).
+link(2, 3). link(3, 2).
+link(2, 4). link(4, 2).
+link(4, 5). link(5, 4).
+link(4, 6). link(6, 4).
+
+// Isolated segment
+link(7, 8). link(8, 7).
+
+node(1). node(2). node(3). node(4). node(5). node(6). node(7). node(8).
+gateway(1).
+
+// Transitive reachability
+reachable(X, Y) :- link(X, Y).
+reachable(X, Z) :- reachable(X, Y), link(Y, Z).
+
+// Nodes that can reach the gateway
+has_internet(X) :- gateway(X).
+has_internet(X) :- reachable(X, G), gateway(G).
+
+// Isolated nodes (cannot reach gateway)
+no_internet(X) :- node(X), not has_internet(X).
+
+?- has_internet(X).
+?- no_internet(X).
+

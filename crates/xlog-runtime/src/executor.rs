@@ -1714,11 +1714,7 @@ impl Executor {
             ConstValue::F64(v) => (v.to_le_bytes().to_vec(), ScalarType::F64),
             ConstValue::Bool(v) => (vec![if *v { 1u8 } else { 0u8 }], ScalarType::Bool),
             ConstValue::Symbol(s) => {
-                // For symbols, we just hash to a u32 for now (MVP simplification)
-                let hash = s
-                    .bytes()
-                    .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
-                (hash.to_le_bytes().to_vec(), ScalarType::Symbol)
+                (xlog_core::hash_symbol_to_u32(s).to_le_bytes().to_vec(), ScalarType::Symbol)
             }
         }
     }

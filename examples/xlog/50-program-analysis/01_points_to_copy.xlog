@@ -1,0 +1,18 @@
+// Points-to analysis (copy propagation).
+
+pred addr_of(u32, u32).     // ptr = &target
+pred copy(u32, u32).        // dest = src
+pred points_to(u32, u32).   // ptr -> target
+
+// Variable IDs: a=1, b=2, x=3, y=4, z=5, w=6
+addr_of(3, 1).
+addr_of(4, 2).
+
+copy(5, 3).
+copy(6, 5).
+
+points_to(P, T) :- addr_of(P, T).
+points_to(Dest, T) :- copy(Dest, Src), points_to(Src, T).
+
+?- points_to(P, T).
+

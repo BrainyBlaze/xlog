@@ -91,6 +91,43 @@ fn create_node_buffer(
     CudaBuffer::from_columns(vec![col.into()], nodes.len() as u64, schema)
 }
 
+/// Create a CudaBuffer with 3-column U32 data
+fn create_triple_buffer(
+    provider: &CudaKernelProvider,
+    rows: &[(u32, u32, u32)],
+) -> CudaBuffer {
+    let schema = Schema::new(vec![
+        ("c0".to_string(), ScalarType::U32),
+        ("c1".to_string(), ScalarType::U32),
+        ("c2".to_string(), ScalarType::U32),
+    ]);
+
+    if rows.is_empty() {
+        let col0 = provider.memory().alloc::<u8>(0).expect("alloc");
+        let col1 = provider.memory().alloc::<u8>(0).expect("alloc");
+        let col2 = provider.memory().alloc::<u8>(0).expect("alloc");
+        return CudaBuffer::from_columns(vec![col0.into(), col1.into(), col2.into()], 0, schema);
+    }
+
+    let col0_bytes: Vec<u8> = rows.iter().flat_map(|(a, _, _)| a.to_le_bytes()).collect();
+    let col1_bytes: Vec<u8> = rows.iter().flat_map(|(_, b, _)| b.to_le_bytes()).collect();
+    let col2_bytes: Vec<u8> = rows.iter().flat_map(|(_, _, c)| c.to_le_bytes()).collect();
+
+    let mut col0 = provider.memory().alloc::<u8>(col0_bytes.len()).expect("alloc");
+    let mut col1 = provider.memory().alloc::<u8>(col1_bytes.len()).expect("alloc");
+    let mut col2 = provider.memory().alloc::<u8>(col2_bytes.len()).expect("alloc");
+
+    provider.device().inner().htod_sync_copy_into(&col0_bytes, &mut col0).expect("htod");
+    provider.device().inner().htod_sync_copy_into(&col1_bytes, &mut col1).expect("htod");
+    provider.device().inner().htod_sync_copy_into(&col2_bytes, &mut col2).expect("htod");
+
+    CudaBuffer::from_columns(
+        vec![col0.into(), col1.into(), col2.into()],
+        rows.len() as u64,
+        schema,
+    )
+}
+
 /// Read a single column of U32 values from a CudaBuffer
 fn read_buffer_u32(provider: &CudaKernelProvider, buffer: &CudaBuffer, col: usize) -> Vec<u32> {
     if buffer.is_empty() || buffer.column(col).is_none() {
@@ -278,7 +315,6 @@ fn test_stratified_negation() {
 /// 2. GroupBy node is generated for aggregation
 /// 3. Count aggregation produces correct results
 ///
-/// Current status: Aggregation lowering not yet producing GroupBy nodes
 #[test]
 fn test_aggregates() {
     let (mut executor, provider) = match create_test_executor() {
@@ -308,34 +344,87 @@ fn test_aggregates() {
     setup_executor_with_facts(&mut executor, &compiler, vec![("edge", edge_buffer)]);
 
     // Execute the plan
-    let result = executor.execute_plan(&plan);
+    executor.execute_plan(&plan).expect("Aggregation execution failed");
 
-    // Execution may succeed but aggregation not yet computed correctly
-    if let Err(e) = &result {
-        eprintln!("Aggregation execution error: {}", e);
-        return;
-    }
+    // Verify the out_degree relation
+    let out_degree = executor
+        .store()
+        .get("out_degree")
+        .expect("out_degree relation not found");
+    let pairs = read_buffer_pairs(&provider, out_degree);
 
-    // If execution succeeds, verify the out_degree relation
-    if let Some(out_degree) = executor.store().get("out_degree") {
-        let pairs = read_buffer_pairs(&provider, out_degree);
+    // out_degree(1) = 2, out_degree(2) = 1
+    let degree_of_1 = pairs
+        .iter()
+        .find(|(node, _)| *node == 1)
+        .map(|(_, count)| *count);
+    assert_eq!(
+        degree_of_1,
+        Some(2),
+        "out_degree(1) should be 2, got {:?}. Raw: {:?}",
+        degree_of_1,
+        pairs
+    );
+}
 
-        // Find out_degree(1, N) - should be 2
-        let degree_of_1 = pairs
-            .iter()
-            .find(|(node, _)| *node == 1)
-            .map(|(_, count)| *count);
-
-        // Note: Current implementation may not produce correct aggregation
-        // This test documents the expected behavior
-        if degree_of_1 != Some(2) {
-            eprintln!(
-                "Aggregation not yet working correctly: out_degree(1, N) = {:?}, expected 2. Raw data: {:?}",
-                degree_of_1, pairs
-            );
-            // Don't fail - this is expected until aggregation lowering is complete
+/// Multi-key aggregation (sum)
+///
+/// Validates that aggregation lowering emits a multi-key GroupBy and that the runtime
+/// can execute it end-to-end.
+#[test]
+fn test_aggregates_multi_key_sum() {
+    let (mut executor, provider) = match create_test_executor() {
+        Some(e) => e,
+        None => {
+            eprintln!("Skipping test: no CUDA device available");
+            return;
         }
-    }
+    };
+
+    let source = r#"
+        sales(1, 10, 5).
+        sales(1, 10, 7).
+        sales(1, 11, 3).
+        sales(2, 10, 2).
+
+        sales_by_cat_region(Cat, Region, sum(Amount)) :- sales(Cat, Region, Amount).
+    "#;
+
+    let mut compiler = Compiler::new();
+    let plan = compiler.compile(source).expect("Compilation failed");
+
+    let sales_buf = create_triple_buffer(&provider, &[
+        (1, 10, 5),
+        (1, 10, 7),
+        (1, 11, 3),
+        (2, 10, 2),
+    ]);
+    setup_executor_with_facts(&mut executor, &compiler, vec![("sales", sales_buf)]);
+
+    executor.execute_plan(&plan).expect("Execution failed");
+
+    let out = executor
+        .store()
+        .get("sales_by_cat_region")
+        .expect("sales_by_cat_region not found");
+
+    let cats = provider.download_column_u32(out, 0).expect("download cat");
+    let regions = provider.download_column_u32(out, 1).expect("download region");
+    let sums = provider.download_column_u64(out, 2).expect("download sum");
+
+    let mut rows: Vec<(u32, u32, u64)> = cats
+        .into_iter()
+        .zip(regions.into_iter())
+        .zip(sums.into_iter())
+        .map(|((c, r), s)| (c, r, s))
+        .collect();
+    rows.sort();
+
+    assert_eq!(
+        rows,
+        vec![(1, 10, 12), (1, 11, 3), (2, 10, 2)],
+        "Unexpected grouped sums"
+    );
 }
 
 // =============================================================================

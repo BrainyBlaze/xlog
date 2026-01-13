@@ -1,0 +1,26 @@
+// Arithmetic coverage:
+// - Operators: + - * / %
+// - Parentheses / precedence
+// - Built-ins: abs/min/max/pow/cast
+
+pred v(i64).
+pred metrics(i64, i64, i64, i64, i64, i64, i64, f64).
+// metrics(x, abs_x, clamped_0_10, scaled, delta, quot, rem, pow2)
+
+v(-7).
+v(0).
+v(5).
+v(12).
+
+metrics(X, AbsX, Clamped, Scaled, Delta, Quot, Rem, Pow2) :-
+  v(X),
+  AbsX is abs(X),
+  Clamped is min(max(X, 0), 10),
+  Scaled is (Clamped * 3) + 1,
+  Delta is AbsX - Clamped,
+  Quot is (AbsX + 3) / 5,
+  Rem is (AbsX + 3) % 5,
+  Pow2 is pow(cast(Clamped, f64), 2).
+
+?- metrics(X, AbsX, Clamped, Scaled, Delta, Quot, Rem, Pow2).
+

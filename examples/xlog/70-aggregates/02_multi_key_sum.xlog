@@ -1,0 +1,16 @@
+// Multi-key aggregation: sum amounts per (user, day).
+//
+// Note: `sum` currently aggregates `u32` values and returns `u64`.
+
+pred txn(u32, u32, u32).      // txn(user, day, amount)
+pred daily_total(u32, u32, u64).
+
+txn(1, 1, 10).
+txn(1, 1, 5).
+txn(1, 2, 7).
+txn(2, 1, 3).
+
+daily_total(User, Day, sum(Amount)) :- txn(User, Day, Amount).
+
+?- daily_total(User, Day, Total).
+

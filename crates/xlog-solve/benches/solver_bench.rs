@@ -417,7 +417,8 @@ fn bench_literal_operations(c: &mut Criterion) {
     });
 
     group.bench_function("to_packed_batch", |b| {
-        b.iter(|| literals.iter().map(|lit| lit.to_packed()).sum::<u32>());
+        // Use a wider accumulator so debug builds don't panic on overflow.
+        b.iter(|| literals.iter().map(|lit| lit.to_packed() as u64).sum::<u64>());
     });
 
     group.bench_function("from_packed_batch", |b| {
@@ -431,7 +432,8 @@ fn bench_literal_operations(c: &mut Criterion) {
     });
 
     group.bench_function("to_dimacs_batch", |b| {
-        b.iter(|| literals.iter().map(|lit| lit.to_dimacs()).sum::<i32>());
+        // Use a wider accumulator so debug builds don't panic on overflow.
+        b.iter(|| literals.iter().map(|lit| lit.to_dimacs() as i64).sum::<i64>());
     });
 
     group.finish();

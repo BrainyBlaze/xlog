@@ -1,0 +1,17 @@
+// Probabilistic-style aggregation: logsumexp over f64 values.
+//
+// score(X) = log(sum(exp(obs(X, Y)))).
+
+pred obs(u32, f64).
+pred score(u32, f64).
+
+obs(1, 0.0).
+obs(1, 1.0).
+obs(1, 2.0).
+obs(2, 0.0).
+obs(2, 0.0).
+
+score(X, logsumexp(Y)) :- obs(X, Y).
+
+?- score(X, S).
+

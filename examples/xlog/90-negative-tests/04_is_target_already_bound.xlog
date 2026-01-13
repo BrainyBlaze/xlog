@@ -1,0 +1,12 @@
+// Negative test: the target of `is` must be a fresh (unbound) variable.
+
+pred p(u32, u32).
+pred r(u32, u32).
+
+p(1, 10).
+
+// Y is already bound by p(X, Y), so this must fail compilation.
+r(X, Y) :- p(X, Y), Y is Y + 1.
+
+?- r(X, Y).
+

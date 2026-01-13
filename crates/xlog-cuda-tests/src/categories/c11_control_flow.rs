@@ -680,8 +680,12 @@ fn test_random_predicate_distribution(ctx: &TestContext) -> TestResult {
         // Pattern 2: Different LCG parameters (~30% selectivity)
         let mask2: Vec<u8> = (0..size)
             .map(|i| {
-                let hash = ((i as u64 * 6364136223846793005 + 1442695040888963407) >> 40) % 10;
-                if hash < 3 { 1 } else { 0 }
+                // Use wrapping arithmetic so debug builds don't panic on overflow.
+                let hash = (i as u64)
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                let digit = (hash >> 40) % 10;
+                if digit < 3 { 1 } else { 0 }
             })
             .collect();
         let expected_count2: usize = mask2.iter().map(|&m| m as usize).sum();

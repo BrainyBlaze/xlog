@@ -96,7 +96,7 @@ pub struct Schema {
 pub enum RirNode {
     Scan { rel: RelId },                                    // Read relation
     Filter { input: Box<RirNode>, predicate: Expr },        // Selection
-    Project { input: Box<RirNode>, columns: Vec<usize> },   // Projection
+    Project { input: Box<RirNode>, columns: Vec<ProjectExpr> }, // Projection (pass-through + computed)
     Join {                                                   // Hash join
         left: Box<RirNode>,
         right: Box<RirNode>,
@@ -132,6 +132,18 @@ pub enum Expr {
     And(Vec<Expr>),                             // Logical AND
     Or(Vec<Expr>),                              // Logical OR
     Not(Box<Expr>),                             // Logical NOT
+
+    // Arithmetic (used by `is` expressions)
+    Add(Box<Expr>, Box<Expr>),
+    Sub(Box<Expr>, Box<Expr>),
+    Mul(Box<Expr>, Box<Expr>),
+    Div(Box<Expr>, Box<Expr>),
+    Mod(Box<Expr>, Box<Expr>),
+    Abs(Box<Expr>),
+    Min(Box<Expr>, Box<Expr>),
+    Max(Box<Expr>, Box<Expr>),
+    Pow(Box<Expr>, Box<Expr>),
+    Cast(Box<Expr>, ScalarType),
 }
 ```
 
@@ -153,7 +165,7 @@ pub enum AggOp {
 
 ### Phase 1: Parsing
 
-**File**: `xlog-logic/src/parser.rs`
+**File**: `crates/xlog-logic/src/parser.rs`
 
 Uses Pest PEG grammar to parse Datalog source into AST:
 
@@ -169,11 +181,26 @@ reach(X, Y) :- edge(X, Y).
 reach(X, Z) :- reach(X, Y), edge(Y, Z).
 ```
 
-**Output**: `Program` AST with rules, facts, predicates, queries
+**Output**: `Program` AST with rules, facts, predicate declarations, constraints, and queries
+
+### Queries and Constraints (Desugaring)
+
+XLOG supports:
+- **Constraints**: `:- body.` (must have *no* solutions)
+- **Queries**: `?- atom.` (what to print)
+
+The compiler desugars these into ordinary rules so they run through the same stratification + lowering
+pipeline:
+
+- `:- body.` → `__xlog_constraint_N(1) :- body.`
+- `?- p(1, X).` → `__xlog_query_N(X) :- p(1, X).`
+
+The example runner (`crates/xlog-logic/examples/xlog_run.rs`) enforces that all constraint relations
+are empty, and prints the query relations.
 
 ### Phase 2: Stratification
 
-**File**: `xlog-logic/src/stratify.rs`
+**File**: `crates/xlog-logic/src/stratify.rs`
 
 Ensures safe negation ordering using dependency analysis:
 
@@ -191,7 +218,7 @@ let strata = stratify(&program)?;
 
 ### Phase 3: Lowering
 
-**File**: `xlog-logic/src/lower.rs`
+**File**: `crates/xlog-logic/src/lower.rs`
 
 Transforms AST to Relational IR:
 
@@ -203,14 +230,15 @@ Transforms AST to Relational IR:
 6. **Projection**: Project result columns to match rule head
 
 ```rust
-let plan = lowerer.lower_program(program, strata)?;
+lowerer.set_strata(strata_preds);
+let plan = lowerer.lower_program(&program)?;
 ```
 
 **Output**: `ExecutionPlan` with SCCs, strata, compiled rules
 
 ### Compiler Orchestration
 
-**File**: `xlog-logic/src/compile.rs`
+**File**: `crates/xlog-logic/src/compile.rs`
 
 ```rust
 pub struct Compiler {
@@ -219,9 +247,21 @@ pub struct Compiler {
 
 impl Compiler {
     pub fn compile(&mut self, source: &str) -> Result<ExecutionPlan> {
-        let program = parse_program(source)?;   // Phase 1
-        let strata = stratify(&program)?;       // Phase 2
-        self.lowerer.lower_program(program, strata)  // Phase 3
+        // Phase 1: parse to AST
+        let program = parse_program(source)?;
+
+        // Compiler-internal desugaring of queries/constraints into internal rules happens here.
+
+        // Phase 2: stratify + pass predicate groups into the lowerer
+        let strata = stratify(&program)?;
+        self.lowerer.set_strata(strata.into_iter().map(|s| s.predicates).collect());
+
+        // Phase 3: lower to RIR plan
+        let mut plan = self.lowerer.lower_program(&program)?;
+
+        // Phase 4: optimizer rewrites (predicate pushdown, cost-aware join planning) happen here.
+
+        Ok(plan)
     }
 }
 ```
@@ -232,7 +272,7 @@ impl Compiler {
 
 ### Executor
 
-**File**: `xlog-runtime/src/executor.rs`
+**File**: `crates/xlog-runtime/src/executor.rs`
 
 ```rust
 pub struct Executor {
@@ -422,6 +462,13 @@ __global__ void groupby_sum(
     atomicAdd((unsigned long long*)&sums[group], values[gid]);
 }
 ```
+
+Notes:
+- Multi-key groupby is supported by packing key columns into a byte key and detecting boundaries on-device.
+- Current value-type support (MVP):
+  - `count`: any value type (counts rows)
+  - `sum`/`min`/`max`: `u32` values (output `u64` for `sum`, `u32` for `min`/`max`)
+  - `logsumexp`: `f64` values (output `f64`)
 
 ---
 

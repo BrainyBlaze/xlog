@@ -1,0 +1,19 @@
+// Constraints: enforce invariants after evaluation.
+//
+// This program requires the graph to be acyclic (no reach(X, X)).
+
+pred edge(u32, u32).
+pred reach(u32, u32).
+
+edge(1, 2).
+edge(2, 3).
+edge(3, 4).
+
+reach(X, Y) :- edge(X, Y).
+reach(X, Z) :- reach(X, Y), edge(Y, Z).
+
+// No cycles allowed.
+:- reach(X, X).
+
+?- reach(1, N).
+

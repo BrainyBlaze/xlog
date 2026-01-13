@@ -22,13 +22,17 @@
 - ✅ GPU hash joins (inner/semi/anti/left-outer; on-device materialization; key verification; byte-hashed scalar keys)
 - ✅ Sort correctness for all scalar key types (stable GPU permutation + GPU reorder)
 - ✅ GPU set operations (union, diff)
-- ✅ GPU aggregations (count, sum, min, max)
+- ✅ GPU aggregations (count, sum, min, max) including multi-key groupby
 - ✅ LogSumExp aggregation (F64)
 - ✅ E2E transitive closure queries
+- ✅ `.xlog` queries (`?-`) and constraints (`:-`) via compilation desugaring + runner enforcement
+- ✅ Runnable `.xlog` runner example (`crates/xlog-logic/examples/xlog_run.rs`) + example programs (`examples/xlog/`)
 - ✅ CUDA certification suite + PTX validation
 
 ### What's Broken/Limited
 - ✅ No remaining P1-P3 roadmap blockers (performance tuning continues under Phase 6 benchmarks)
+- ⚠️ `symbol` is currently a `u32` hash (MVP, not reversible)
+- ⚠️ Some aggregate value-type restrictions remain (see `docs/ARCHITECTURE.md`)
 
 ---
 
@@ -287,6 +291,7 @@ Month 12+:  Phase 6 (Scaling)
 - `docs/spec.md` - Full system specification
 - `docs/spec-v1.1.md` - Revised design
 - `docs/ARCHITECTURE.md` - System architecture
+- `docs/EXAMPLES.md` - Example programs plan + runner usage
 - `docs/VALIDATION_REPORT.md` - Current validation
 - `docs/plans/2026-01-12-cuda-certification-results.md` - CUDA certification results
 

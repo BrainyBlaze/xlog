@@ -1,0 +1,29 @@
+// Multi-way join: orders where customer city == supplier city.
+
+pred customer(u32, u32). // id, city
+pred supplier(u32, u32). // id, city
+pred order(u32, u32, u32). // order_id, customer_id, supplier_id
+pred local_order(u32, u32, u32, u32).
+
+customer(1, 100).
+customer(2, 100).
+customer(3, 200).
+
+supplier(10, 100).
+supplier(11, 200).
+supplier(12, 300).
+
+order(1001, 1, 10).
+order(1002, 1, 11).
+order(1003, 2, 10).
+order(1004, 3, 11).
+order(1005, 3, 12).
+
+local_order(OrderId, CustId, SuppId, City) :-
+  order(OrderId, CustId, SuppId),
+  customer(CustId, City),
+  supplier(SuppId, City).
+
+// Show only the matching order ids.
+?- local_order(OrderId, _, _, _).
+

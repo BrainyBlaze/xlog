@@ -1,0 +1,28 @@
+// Call graph construction with direct + indirect calls and transitive reachability.
+
+pred direct_call(u32, u32).     // caller -> callee
+pred indirect_call(u32, u32).   // caller -> fp
+pred fp_target(u32, u32).       // fp -> callee
+
+pred calls(u32, u32).
+pred reaches(u32, u32).
+
+// Function IDs: main=1, foo=2, bar=3, baz=4
+direct_call(1, 2).
+direct_call(1, 3).
+direct_call(2, 4).
+
+// main calls through fp=10 which may point to foo or bar.
+indirect_call(1, 10).
+fp_target(10, 2).
+fp_target(10, 3).
+
+calls(X, Y) :- direct_call(X, Y).
+calls(X, Y) :- indirect_call(X, F), fp_target(F, Y).
+
+reaches(X, Y) :- calls(X, Y).
+reaches(X, Z) :- reaches(X, Y), calls(Y, Z).
+
+?- calls(1, F).
+?- reaches(1, F).
+

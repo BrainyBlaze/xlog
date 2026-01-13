@@ -1,0 +1,32 @@
+// Star-schema style join + aggregation.
+//
+// total sales per category and per (segment, category).
+
+pred customer(u32, u32).              // customer_id, segment_id
+pred product(u32, u32).               // product_id, category_id
+pred sale(u32, u32, u32, u32).        // sale_id, customer_id, product_id, amount(u32)
+
+pred cat_sales(u32, u64).             // category_id, total_amount
+pred seg_cat_sales(u32, u32, u64).    // segment_id, category_id, total_amount
+pred big_sale(u32).                   // sale_id
+
+customer(1, 10). customer(2, 10). customer(3, 20).
+product(100, 7). product(101, 7). product(200, 9).
+
+sale(1, 1, 100, 50).
+sale(2, 1, 101, 75).
+sale(3, 2, 200, 200).
+sale(4, 3, 200, 25).
+
+big_sale(SaleId) :- sale(SaleId, _, _, Amount), Amount > 100.
+
+cat_sales(Category, sum(Amount)) :- sale(_, _, P, Amount), product(P, Category).
+seg_cat_sales(Segment, Category, sum(Amount)) :-
+  sale(_, C, P, Amount),
+  customer(C, Segment),
+  product(P, Category).
+
+?- big_sale(SaleId).
+?- cat_sales(Category, Total).
+?- seg_cat_sales(Segment, Category, Total).
+

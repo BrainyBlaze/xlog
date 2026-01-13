@@ -1,0 +1,12 @@
+// Negative test: arithmetic type mismatch without cast().
+
+pred p(u32, u32).
+pred bad(u32, f64).
+
+p(1, 10).
+
+// Y is u32 but 0.5 is f64 => requires an explicit cast().
+bad(X, Z) :- p(X, Y), Z is Y + 0.5.
+
+?- bad(X, Z).
+

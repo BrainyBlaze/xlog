@@ -1,0 +1,15 @@
+// Arithmetic via `is` with built-ins and casts.
+
+pred input(u32, u32).
+pred doubled(u32, u32).
+pred absdiff(u32, i64).
+
+input(1, 10).
+input(2, 3).
+input(3, 7).
+
+doubled(X, Z) :- input(X, Y), Z is Y * cast(2, u32).
+absdiff(X, D) :- input(X, Y), D is abs(cast(Y, i64) - 7).
+
+?- doubled(X, Z).
+?- absdiff(X, D).

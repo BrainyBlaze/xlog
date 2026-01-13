@@ -51,12 +51,13 @@ pub struct AggExpr {
 }
 
 /// Aggregation operator
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AggOp {
     Count,
     Sum,
     Min,
     Max,
+    LogSumExp,
 }
 
 /// Arithmetic expression tree

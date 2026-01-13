@@ -1,0 +1,41 @@
+// RBAC: hierarchical roles and derived permissions.
+
+pred inherits(u32, u32).        // child role -> parent role
+pred user_role(u32, u32).       // user -> role
+pred role_perm(u32, u32, u32).  // role -> resource -> permission
+
+pred has_role(u32, u32).
+pred effective_role(u32, u32).
+pred user_perm(u32, u32, u32).
+
+// Role IDs: Admin=1, Manager=2, Employee=3
+inherits(2, 1).
+inherits(3, 2).
+
+// Users: Alice=10 (Admin), Bob=11 (Manager), Carol=12 (Employee)
+user_role(10, 1).
+user_role(11, 2).
+user_role(12, 3).
+
+// Resource IDs: Database=100, Reports=101
+// Permission IDs: Read=1, Write=2, Delete=3
+role_perm(1, 100, 3). // Admin can delete database
+role_perm(2, 100, 2). // Manager can write database
+role_perm(3, 100, 1). // Employee can read database
+role_perm(2, 101, 2). // Manager can write reports
+role_perm(3, 101, 1). // Employee can read reports
+
+// Role hierarchy closure
+has_role(Child, Parent) :- inherits(Child, Parent).
+has_role(Child, Ancestor) :- has_role(Child, Parent), inherits(Parent, Ancestor).
+
+// Effective roles (direct + inherited)
+effective_role(U, R) :- user_role(U, R).
+effective_role(U, ParentRole) :- user_role(U, R), has_role(R, ParentRole).
+
+// Permissions derived from effective roles
+user_perm(U, Res, Perm) :- effective_role(U, R), role_perm(R, Res, Perm).
+
+?- effective_role(11, R).
+?- user_perm(12, Res, Perm).
+

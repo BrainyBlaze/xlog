@@ -1,0 +1,23 @@
+// Deriving an average by combining `sum` + `count` with arithmetic.
+
+pred txn(u32, u32).      // user_id, amount(u32)
+pred total(u32, u64).
+pred cnt(u32, u32).
+pred avg(u32, f64).
+
+txn(1, 10).
+txn(1, 5).
+txn(1, 7).
+txn(2, 3).
+txn(2, 9).
+
+total(User, sum(Amount)) :- txn(User, Amount).
+cnt(User, count(Amount)) :- txn(User, Amount).
+
+avg(User, A) :-
+  total(User, Total),
+  cnt(User, N),
+  A is cast(Total, f64) / cast(N, f64).
+
+?- avg(User, A).
+
