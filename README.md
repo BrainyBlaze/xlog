@@ -37,6 +37,6 @@ See `docs/EXAMPLES.md` for the full example suite and runner flags.
 
 - [Architecture](docs/ARCHITECTURE.md)
 - [Roadmap](docs/ROADMAP.md)
-- [Examples](examples/README.md)
+- [Examples](examples/)
 - [CUDA certification results](docs/plans/2026-01-12-cuda-certification-results.md)
 - [Current validation summary](docs/VALIDATION_REPORT.md)
