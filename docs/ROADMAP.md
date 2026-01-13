@@ -1,7 +1,7 @@
 # XLOG Development Roadmap
 
-**Last Updated:** January 12, 2026
-**Current Status:** Phase 3 Complete (CUDA certification passed); Phase 4 in progress
+**Last Updated:** January 13, 2026
+**Current Status:** Phase 3 Complete (CUDA certification passed); Phase 4 in progress (integrated xlog-prob + Python `xlog-gpu`)
 
 ---
 
@@ -134,7 +134,7 @@
 - DLPack import for zero-copy GPU ingestion (`CudaKernelProvider::{from_dlpack_tensors, from_dlpack_tensors_with_schema}`)
 - Notes + Python cuDF example: `docs/architecture/cudf-interop.md`
 **Next:**
-- Python binding layer (capsule/FFI) + cuDF DLPack example
+- Python binding layer in `xlog-gpu` (PyO3 + maturin; DLPack-first) + cuDF DLPack example
 **Effort:** 2-3 weeks
 
 ### P4.2 Query Optimizer
@@ -180,20 +180,25 @@
 
 ---
 
-## Phase 4: xlog-prob (Probabilistic Reasoning)
+## Phase 4: xlog-prob (Probabilistic Reasoning) + Python `xlog-gpu`
 
 ### Deliverables
 - PIR (Provenance IR) implementation
 - XGCF (GPU Circuit Format) for WMC
-- D4 backend integration for knowledge compilation
+- D4 backend integration for knowledge compilation (**vendored; built in-repo**)
 - Forward/backward circuit evaluation
-- Neural predicate support (PyTorch integration)
+- Neural predicate support (DLPack-first; torch optional)
+- User-visible Python package: `xlog-gpu` (PyO3 + maturin; returns DLPack capsules)
+- Explicit P3 gating: non-monotone recursion errors unless `prob_engine=mc` is requested
 
 ### Prerequisites
 - CUDA correctness suite passing (P1.1-P1.4)
 - P2.3 LogSumExp implemented
 
 ### Effort Estimate: 2-3 months
+**Plans:**
+- Design: `docs/plans/2026-01-13-phase4-integrated-design.md`
+- Implementation plan: `docs/plans/2026-01-13-phase4-integrated-implementation-plan.md`
 
 ---
 
@@ -234,11 +239,10 @@
 ## Recommended Execution Order
 
 ```
-Week 1-4:   P3.1-P3.4 (Performance)
-Month 2-3:  P4.1-P4.4 (Features)
-Month 5-7:  Phase 4 (xlog-prob)
-Month 8-11: Phase 5 (xlog-elp)
-Month 12+:  Phase 6 (Scaling)
+Now:        P4.1-P4.4 (Interop/optimizer/incremental/indexing)
+Month 1-3:  Phase 4 (xlog-prob exact path + `xlog-gpu` MVP), in parallel with remaining P4 work
+Month 4-6:  Phase 5 (xlog-elp)
+Month 7+:   Phase 6 (Scaling)
 ```
 
 ---
@@ -303,5 +307,5 @@ Month 12+:  Phase 6 (Scaling)
 
 ### External Dependencies
 - cudarc 0.12 (CUDA bindings)
-- D4 (knowledge compiler) - Phase 4
-- PyTorch (neural predicates) - Phase 4
+- D4 (knowledge compiler; vendored, built in-repo) - Phase 4
+- PyTorch (optional; via DLPack interop) - Phase 4

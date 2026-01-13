@@ -12,14 +12,24 @@
 *.swp
 *.swo
 
+# Local assistant/tooling state
+.claude/
+
 # OS
 .DS_Store
 Thumbs.db
 
 # Rust
 **/*.rs.bk
-Cargo.lock
 
 # Debug
 *.log
 .worktrees/
+
+# Python (Phase 4 Python package work)
+__pycache__/
+*.pyc
+.venv/
+.python-version
+.mypy_cache/
+.pytest_cache/
