@@ -6,4 +6,5 @@ edition.workspace = true
 [dependencies]
 xlog-core = { path = "../xlog-core" }
 xlog-logic = { path = "../xlog-logic" }
-
+xlog-cuda = { path = "../xlog-cuda" }
+cudarc = { workspace = true }

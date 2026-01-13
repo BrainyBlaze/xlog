@@ -6,3 +6,4 @@ pub mod kc;
 pub mod xgcf;
 pub mod provenance;
 pub mod exact;
+pub mod gpu;

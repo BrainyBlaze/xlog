@@ -1455,7 +1455,9 @@ dependencies = [
 name = "xlog-prob"
 version = "0.1.0"
 dependencies = [
+ "cudarc",
  "xlog-core",
+ "xlog-cuda",
  "xlog-logic",
 ]
 

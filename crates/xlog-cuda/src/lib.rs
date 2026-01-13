@@ -13,8 +13,9 @@ pub use memory::{CudaBuffer, CudaColumn, GpuMemoryManager};
 pub use multi_gpu_memory::MultiGpuMemoryManager;
 pub use dlpack::{DlpackManagedTensor, DlpackTable, DLManagedTensor};
 pub use provider::{
-    dedup_kernels, filter_kernels, groupby_kernels, join_kernels, pack_kernels, scan_kernels,
+    circuit_kernels, dedup_kernels, filter_kernels, groupby_kernels, join_kernels, pack_kernels,
+    scan_kernels,
     set_ops_kernels, sort_kernels, CompareOp, CudaKernelProvider, JoinIndexV2, JoinType, DEDUP_MODULE,
-    FILTER_MODULE, GROUPBY_MODULE, JOIN_MODULE, PACK_MODULE, SCAN_MODULE, SET_OPS_MODULE,
-    SORT_MODULE,
+    CIRCUIT_MODULE, FILTER_MODULE, GROUPBY_MODULE, JOIN_MODULE, PACK_MODULE, SCAN_MODULE,
+    SET_OPS_MODULE, SORT_MODULE,
 };

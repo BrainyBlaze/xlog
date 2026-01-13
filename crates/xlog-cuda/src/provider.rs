@@ -24,6 +24,7 @@ const SORT_PTX: &str = include_str!("../../../kernels/sort.ptx");
 const FILTER_PTX: &str = include_str!("../../../kernels/filter.ptx");
 const SET_OPS_PTX: &str = include_str!("../../../kernels/set_ops.ptx");
 const PACK_PTX: &str = include_str!("../../../kernels/pack.ptx");
+const CIRCUIT_PTX: &str = include_str!("../../../kernels/circuit.ptx");
 
 #[derive(Clone, Copy)]
 struct RawCudaView<'a, T> {
@@ -61,6 +62,7 @@ pub const SORT_MODULE: &str = "xlog_sort";
 pub const FILTER_MODULE: &str = "xlog_filter";
 pub const SET_OPS_MODULE: &str = "xlog_set_ops";
 pub const PACK_MODULE: &str = "xlog_pack";
+pub const CIRCUIT_MODULE: &str = "xlog_circuit";
 
 /// Kernel function names in the join module
 pub mod join_kernels {
@@ -175,6 +177,11 @@ pub mod pack_kernels {
     pub const SCATTER_PACKED_ROWS: &str = "scatter_packed_rows";
     /// Compare packed keys for equality
     pub const COMPARE_PACKED_KEYS: &str = "compare_packed_keys";
+}
+
+/// Kernel function names in the circuit module
+pub mod circuit_kernels {
+    pub const XGCF_FORWARD_LEVEL: &str = "xgcf_forward_level";
 }
 
 /// Default maximum output size for join operations.
@@ -462,6 +469,16 @@ impl CudaKernelProvider {
                 ],
             )
             .map_err(|e| XlogError::Kernel(format!("Failed to load pack PTX: {}", e)))?;
+
+        // Load circuit module (XGCF circuit evaluation)
+        device
+            .inner()
+            .load_ptx(
+                Ptx::from_src(CIRCUIT_PTX),
+                CIRCUIT_MODULE,
+                &[circuit_kernels::XGCF_FORWARD_LEVEL],
+            )
+            .map_err(|e| XlogError::Kernel(format!("Failed to load circuit PTX: {}", e)))?;
 
         Ok(Self { device, memory })
     }
@@ -7927,6 +7944,7 @@ mod tests {
         assert!(!JOIN_PTX.is_empty(), "JOIN_PTX should not be empty");
         assert!(!DEDUP_PTX.is_empty(), "DEDUP_PTX should not be empty");
         assert!(!GROUPBY_PTX.is_empty(), "GROUPBY_PTX should not be empty");
+        assert!(!CIRCUIT_PTX.is_empty(), "CIRCUIT_PTX should not be empty");
 
         // Verify PTX contains expected kernel names
         assert!(
@@ -7965,6 +7983,10 @@ mod tests {
             GROUPBY_PTX.contains("groupby_max"),
             "GROUPBY_PTX should contain groupby_max"
         );
+        assert!(
+            CIRCUIT_PTX.contains("xgcf_forward_level"),
+            "CIRCUIT_PTX should contain xgcf_forward_level"
+        );
     }
 
     #[test]
@@ -7985,6 +8007,10 @@ mod tests {
         assert!(
             valid_targets.iter().any(|t| GROUPBY_PTX.contains(t)),
             "GROUPBY_PTX should target sm_70 or later"
+        );
+        assert!(
+            valid_targets.iter().any(|t| CIRCUIT_PTX.contains(t)),
+            "CIRCUIT_PTX should target sm_70 or later"
         );
     }
 
