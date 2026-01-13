@@ -227,6 +227,59 @@ pub struct Query {
     pub atom: Atom,
 }
 
+/// Probabilistic engine selection
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbEngine {
+    ExactDdnnf,
+    Mc,
+}
+
+/// Probabilistic compilation caching
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbCache {
+    On,
+    Off,
+}
+
+/// Compilation/evaluation directives (e.g., `#pragma ...`)
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Directives {
+    pub prob_engine: Option<ProbEngine>,
+    pub prob_cache: Option<ProbCache>,
+}
+
+impl Directives {
+    pub fn prob_engine_or_default(&self) -> ProbEngine {
+        self.prob_engine.unwrap_or(ProbEngine::ExactDdnnf)
+    }
+}
+
+/// A probabilistic fact (`p::atom.`)
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProbFact {
+    pub prob: f64,
+    pub atom: Atom,
+}
+
+/// Annotated disjunction (`p1::a1; p2::a2.`)
+#[derive(Debug, Clone, PartialEq)]
+pub struct AnnotatedDisjunction {
+    pub choices: Vec<ProbFact>,
+}
+
+/// Evidence statement (`evidence(atom, true|false).`)
+#[derive(Debug, Clone, PartialEq)]
+pub struct Evidence {
+    pub atom: Atom,
+    pub value: bool,
+}
+
+/// Probabilistic query statement (`query(atom).`)
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProbQuery {
+    pub atom: Atom,
+}
+
 /// Domain declaration
 #[derive(Debug, Clone, PartialEq)]
 pub struct DomainDecl {
@@ -249,6 +302,11 @@ pub struct Program {
     pub rules: Vec<Rule>,
     pub constraints: Vec<Constraint>,
     pub queries: Vec<Query>,
+    pub prob_facts: Vec<ProbFact>,
+    pub annotated_disjunctions: Vec<AnnotatedDisjunction>,
+    pub evidence: Vec<Evidence>,
+    pub prob_queries: Vec<ProbQuery>,
+    pub directives: Directives,
 }
 
 impl Program {
@@ -269,6 +327,19 @@ impl Program {
             .collect::<std::collections::HashSet<_>>()
             .into_iter()
             .collect()
+    }
+
+    pub fn is_probabilistic_profile(&self) -> bool {
+        !self.prob_facts.is_empty()
+            || !self.annotated_disjunctions.is_empty()
+            || !self.evidence.is_empty()
+            || !self.prob_queries.is_empty()
+            || self.directives.prob_engine.is_some()
+            || self.directives.prob_cache.is_some()
+    }
+
+    pub fn prob_engine(&self) -> ProbEngine {
+        self.directives.prob_engine_or_default()
     }
 }
 

@@ -14,6 +14,10 @@ var_or_anon = { anonymous | variable }
 integer = @{ "-"? ~ ASCII_DIGIT+ }
 float_num = @{ "-"? ~ ASCII_DIGIT+ ~ "." ~ ASCII_DIGIT+ }
 string_lit = @{ "\"" ~ (!"\"" ~ ANY)* ~ "\"" }
+bool_lit = { "true" | "false" }
+
+// Probabilistic annotations
+prob_num = @{ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)? }
 
 // Terms
 term = { var_or_anon | float_num | integer | string_lit | ident }
@@ -68,8 +72,22 @@ rule_def = { head ~ ":-" ~ body ~ "." }
 fact = { atom ~ "." }
 constraint = { ":-" ~ body ~ "." }
 
+// Probabilistic facts / annotated disjunctions
+prob_choice = { prob_num ~ "::" ~ atom }
+prob_fact = { prob_choice ~ "." }
+annotated_disjunction = { prob_choice ~ (";" ~ prob_choice)+ ~ "." }
+
 // Queries
 query = { "?-" ~ atom ~ "." }
+prob_query = { "query" ~ "(" ~ atom ~ ")" ~ "." }
+evidence_stmt = { "evidence" ~ "(" ~ atom ~ "," ~ bool_lit ~ ")" ~ "." }
+
+// Pragmas / directives
+prob_engine_value = { "exact_ddnnf" | "mc" }
+prob_cache_value = { "on" | "off" }
+pragma_prob_engine = { "#pragma" ~ "prob_engine" ~ "=" ~ prob_engine_value }
+pragma_prob_cache = { "#pragma" ~ "prob_cache" ~ "=" ~ prob_cache_value }
+pragma = { pragma_prob_engine | pragma_prob_cache }
 
 // Domain declarations
 domain_decl = { "domain" ~ ident ~ ":" ~ type_spec ~ "." }
@@ -80,5 +98,17 @@ pred_decl = { "pred" ~ ident ~ "(" ~ type_list? ~ ")" ~ "." }
 type_list = { type_spec ~ ("," ~ type_spec)* }
 
 // Program structure
-statement = { domain_decl | pred_decl | rule_def | fact | constraint | query }
+statement = {
+    domain_decl
+    | pred_decl
+    | pragma
+    | rule_def
+    | prob_fact
+    | annotated_disjunction
+    | evidence_stmt
+    | prob_query
+    | fact
+    | constraint
+    | query
+}
 program = { SOI ~ statement* ~ EOI }

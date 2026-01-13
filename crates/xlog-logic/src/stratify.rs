@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use xlog_core::{XlogError, Result};
-use crate::ast::{Program, BodyLiteral};
+use crate::ast::{BodyLiteral, ProbEngine, Program};
 
 /// Dependency edge type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -173,7 +173,16 @@ pub fn stratify(program: &Program) -> Result<Vec<Stratum>> {
 
     for scc in &sccs {
         if let Some(cycle) = check_scc_for_negation_cycle(scc, &graph) {
-            return Err(XlogError::StratificationCycle(cycle));
+            if program.is_probabilistic_profile() && program.prob_engine() != ProbEngine::Mc {
+                return Err(XlogError::Compilation(format!(
+                    "Non-monotone recursion detected (cycle through negation/aggregation involving {:?}); requires P3 (`prob_engine=mc`)",
+                    cycle
+                )));
+            }
+
+            if !program.is_probabilistic_profile() {
+                return Err(XlogError::StratificationCycle(cycle));
+            }
         }
     }
 
@@ -309,6 +318,34 @@ mod tests {
         if let Err(XlogError::StratificationCycle(preds)) = result {
             assert!(preds.contains(&"p".to_string()) || preds.contains(&"q".to_string()));
         }
+    }
+
+    #[test]
+    fn test_stratify_probabilistic_non_monotone_requires_mc() {
+        let mut program = create_unstratifiable_program();
+        program.directives.prob_engine = Some(ProbEngine::ExactDdnnf);
+
+        let result = stratify(&program);
+        match result {
+            Err(XlogError::Compilation(msg)) => {
+                assert!(msg.contains("requires P3"), "msg={}", msg);
+                assert!(msg.contains("prob_engine=mc"), "msg={}", msg);
+            }
+            other => panic!("Expected Compilation error, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_stratify_probabilistic_non_monotone_allows_mc() {
+        let mut program = create_unstratifiable_program();
+        program.directives.prob_engine = Some(ProbEngine::Mc);
+
+        let result = stratify(&program);
+        assert!(
+            result.is_ok(),
+            "Expected mc to allow non-monotone recursion, got: {:?}",
+            result.err()
+        );
     }
 
     #[test]

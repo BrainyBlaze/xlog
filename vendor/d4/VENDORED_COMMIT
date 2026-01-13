@@ -1,0 +1,5 @@
+upstream=https://github.com/crillab/d4.git
+commit=333370cc1e843dd0749c1efe88516e72b5239174
+xlog_patches=remove_gmp_dependency;use_vendored_boost_headers
+xlog_patch_rev=4
+boost_version=1.84.0

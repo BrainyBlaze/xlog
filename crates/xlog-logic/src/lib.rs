@@ -36,7 +36,10 @@ pub mod optimizer;
 
 // Re-export main types
 pub use parser::{parse_program, parse_statement};
-pub use ast::{Atom, BodyLiteral, Constraint, Program, Query, Rule, Term};
+pub use ast::{
+    AnnotatedDisjunction, Atom, BodyLiteral, Constraint, Directives, Evidence, ProbCache,
+    ProbEngine, ProbFact, ProbQuery, Program, Query, Rule, Term,
+};
 pub use stratify::{stratify, Stratum, DependencyGraph, find_sccs_for_lowering};
 pub use lower::Lowerer;
 pub use compile::{Compiler, compile};

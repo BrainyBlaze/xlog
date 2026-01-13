@@ -9,8 +9,9 @@ use pest_derive::Parser;
 use xlog_core::{ScalarType, XlogError, Result};
 
 use crate::ast::{
-    AggExpr, AggOp, ArithExpr, Atom, BodyLiteral, CompOp, Comparison, Constraint,
-    DomainDecl, IsExpr, PredDecl, Program, Query, Rule as AstRule, Term,
+    AggExpr, AggOp, AnnotatedDisjunction, ArithExpr, Atom, BodyLiteral, CompOp, Comparison,
+    Constraint, DomainDecl, Evidence, IsExpr, PredDecl, ProbCache, ProbEngine, ProbFact,
+    ProbQuery, Program, Query, Rule as AstRule, Term,
 };
 
 #[derive(Parser)]
@@ -75,11 +76,28 @@ fn build_statement(pair: Pair<'_, Rule>, program: &mut Program) -> Result<()> {
             Rule::pred_decl => {
                 program.predicates.push(build_pred_decl(inner)?);
             }
+            Rule::pragma => {
+                apply_pragma(inner, program)?;
+            }
             Rule::rule_def => {
                 program.rules.push(build_rule(inner)?);
             }
             Rule::fact => {
                 program.rules.push(build_fact(inner)?);
+            }
+            Rule::prob_fact => {
+                program.prob_facts.push(build_prob_fact(inner)?);
+            }
+            Rule::annotated_disjunction => {
+                program
+                    .annotated_disjunctions
+                    .push(build_annotated_disjunction(inner)?);
+            }
+            Rule::evidence_stmt => {
+                program.evidence.push(build_evidence(inner)?);
+            }
+            Rule::prob_query => {
+                program.prob_queries.push(build_prob_query(inner)?);
             }
             Rule::constraint => {
                 program.constraints.push(build_constraint(inner)?);
@@ -90,6 +108,53 @@ fn build_statement(pair: Pair<'_, Rule>, program: &mut Program) -> Result<()> {
             _ => {}
         }
     }
+    Ok(())
+}
+
+fn apply_pragma(pair: Pair<'_, Rule>, program: &mut Program) -> Result<()> {
+    let pragma = pair
+        .into_inner()
+        .next()
+        .ok_or_else(|| XlogError::Parse("Empty pragma".to_string()))?;
+
+    match pragma.as_rule() {
+        Rule::pragma_prob_engine => {
+            let value = pragma
+                .into_inner()
+                .next()
+                .ok_or_else(|| XlogError::Parse("Missing prob_engine value".to_string()))?;
+            let engine = match value.as_str() {
+                "exact_ddnnf" => ProbEngine::ExactDdnnf,
+                "mc" => ProbEngine::Mc,
+                other => {
+                    return Err(XlogError::Parse(format!(
+                        "Unknown prob_engine value: {}",
+                        other
+                    )))
+                }
+            };
+            program.directives.prob_engine = Some(engine);
+        }
+        Rule::pragma_prob_cache => {
+            let value = pragma
+                .into_inner()
+                .next()
+                .ok_or_else(|| XlogError::Parse("Missing prob_cache value".to_string()))?;
+            let cache = match value.as_str() {
+                "on" => ProbCache::On,
+                "off" => ProbCache::Off,
+                other => {
+                    return Err(XlogError::Parse(format!(
+                        "Unknown prob_cache value: {}",
+                        other
+                    )))
+                }
+            };
+            program.directives.prob_cache = Some(cache);
+        }
+        _ => {}
+    }
+
     Ok(())
 }
 
@@ -185,6 +250,80 @@ fn build_query(pair: Pair<'_, Rule>) -> Result<Query> {
     let atom = build_atom(atom_pair)?;
 
     Ok(Query { atom })
+}
+
+fn build_prob_fact(pair: Pair<'_, Rule>) -> Result<ProbFact> {
+    let choice = pair
+        .into_inner()
+        .next()
+        .ok_or_else(|| XlogError::Parse("Missing probabilistic fact".to_string()))?;
+    build_prob_choice(choice)
+}
+
+fn build_annotated_disjunction(pair: Pair<'_, Rule>) -> Result<AnnotatedDisjunction> {
+    let mut choices = Vec::new();
+    for inner in pair.into_inner() {
+        if inner.as_rule() == Rule::prob_choice {
+            choices.push(build_prob_choice(inner)?);
+        }
+    }
+    if choices.is_empty() {
+        return Err(XlogError::Parse(
+            "Annotated disjunction must have at least one choice".to_string(),
+        ));
+    }
+    Ok(AnnotatedDisjunction { choices })
+}
+
+fn build_prob_choice(pair: Pair<'_, Rule>) -> Result<ProbFact> {
+    let mut inner = pair.into_inner();
+    let prob_pair = inner
+        .next()
+        .ok_or_else(|| XlogError::Parse("Missing probability".to_string()))?;
+    let prob: f64 = prob_pair
+        .as_str()
+        .parse()
+        .map_err(|_| XlogError::Parse(format!("Invalid probability: {}", prob_pair.as_str())))?;
+
+    let atom_pair = inner
+        .next()
+        .ok_or_else(|| XlogError::Parse("Missing probabilistic atom".to_string()))?;
+    let atom = build_atom(atom_pair)?;
+
+    Ok(ProbFact { prob, atom })
+}
+
+fn build_evidence(pair: Pair<'_, Rule>) -> Result<Evidence> {
+    let mut inner = pair.into_inner();
+    let atom_pair = inner
+        .next()
+        .ok_or_else(|| XlogError::Parse("Missing evidence atom".to_string()))?;
+    let atom = build_atom(atom_pair)?;
+
+    let value_pair = inner
+        .next()
+        .ok_or_else(|| XlogError::Parse("Missing evidence value".to_string()))?;
+    let value = match value_pair.as_str() {
+        "true" => true,
+        "false" => false,
+        other => {
+            return Err(XlogError::Parse(format!(
+                "Invalid evidence value (expected true/false): {}",
+                other
+            )))
+        }
+    };
+
+    Ok(Evidence { atom, value })
+}
+
+fn build_prob_query(pair: Pair<'_, Rule>) -> Result<ProbQuery> {
+    let atom_pair = pair
+        .into_inner()
+        .next()
+        .ok_or_else(|| XlogError::Parse("Missing query atom".to_string()))?;
+    let atom = build_atom(atom_pair)?;
+    Ok(ProbQuery { atom })
 }
 
 /// Build a head (atom that may contain aggregates)
@@ -755,6 +894,109 @@ mod tests {
     fn test_parse_arithmetic_parentheses() {
         let input = "r(X, Z) :- p(X, A, B), Z is (A + B) * 2.";
         assert!(parse_program(input).is_ok());
+    }
+
+    #[test]
+    fn test_parse_probabilistic_fact_syntax() {
+        let input = "0.7::rain().";
+        let result = parse_program(input);
+        assert!(
+            result.is_ok(),
+            "Failed to parse probabilistic fact: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_parse_annotated_disjunction_syntax() {
+        let input = "0.6::coin(heads); 0.4::coin(tails).";
+        let result = parse_program(input);
+        assert!(
+            result.is_ok(),
+            "Failed to parse annotated disjunction: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_parse_evidence_is_not_a_fact() {
+        let input = "evidence(rain(), true).";
+        let program = parse_program(input).unwrap();
+        assert_eq!(
+            program.rules.len(),
+            0,
+            "evidence/2 should not be parsed as a regular fact"
+        );
+    }
+
+    #[test]
+    fn test_parse_query_directive_is_not_a_fact() {
+        let input = "query(reach(1,3)).";
+        let program = parse_program(input).unwrap();
+        assert_eq!(
+            program.rules.len(),
+            0,
+            "query/1 should not be parsed as a regular fact"
+        );
+    }
+
+    #[test]
+    fn test_parse_prob_engine_pragma_syntax() {
+        let input = "#pragma prob_engine = mc";
+        let result = parse_program(input);
+        assert!(
+            result.is_ok(),
+            "Failed to parse prob_engine pragma: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_parse_probabilistic_fact_ast() {
+        let program = parse_program("0.7::rain().").unwrap();
+        assert_eq!(program.prob_facts.len(), 1);
+        assert!((program.prob_facts[0].prob - 0.7).abs() < 1e-9);
+        assert_eq!(program.prob_facts[0].atom.predicate, "rain");
+        assert!(program.prob_facts[0].atom.terms.is_empty());
+    }
+
+    #[test]
+    fn test_parse_annotated_disjunction_ast() {
+        let program = parse_program("0.6::coin(heads); 0.4::coin(tails).").unwrap();
+        assert_eq!(program.annotated_disjunctions.len(), 1);
+        let ad = &program.annotated_disjunctions[0];
+        assert_eq!(ad.choices.len(), 2);
+        assert!((ad.choices[0].prob - 0.6).abs() < 1e-9);
+        assert_eq!(ad.choices[0].atom.predicate, "coin");
+        assert_eq!(ad.choices[0].atom.terms.len(), 1);
+        assert_eq!(ad.choices[0].atom.terms[0], Term::Symbol("heads".to_string()));
+        assert!((ad.choices[1].prob - 0.4).abs() < 1e-9);
+        assert_eq!(ad.choices[1].atom.terms[0], Term::Symbol("tails".to_string()));
+    }
+
+    #[test]
+    fn test_parse_evidence_ast() {
+        let program = parse_program("evidence(rain(), true).").unwrap();
+        assert_eq!(program.evidence.len(), 1);
+        assert_eq!(program.evidence[0].atom.predicate, "rain");
+        assert!(program.evidence[0].value);
+    }
+
+    #[test]
+    fn test_parse_prob_query_ast() {
+        let program = parse_program("query(reach(1,3)).").unwrap();
+        assert_eq!(program.prob_queries.len(), 1);
+        assert_eq!(program.prob_queries[0].atom.predicate, "reach");
+        assert_eq!(program.prob_queries[0].atom.terms.len(), 2);
+        assert_eq!(program.prob_queries[0].atom.terms[0], Term::Integer(1));
+        assert_eq!(program.prob_queries[0].atom.terms[1], Term::Integer(3));
+    }
+
+    #[test]
+    fn test_parse_prob_engine_pragma_ast() {
+        let program = parse_program("#pragma prob_engine = mc").unwrap();
+        assert_eq!(program.directives.prob_engine, Some(crate::ast::ProbEngine::Mc));
+        assert_eq!(program.prob_engine(), crate::ast::ProbEngine::Mc);
     }
 
     #[test]
