@@ -165,6 +165,260 @@ impl Xgcf {
 
         Ok(values[self.roots[0] as usize])
     }
+
+    pub fn eval_log_wmc_and_grads(
+        &self,
+        var_log_weights: &[(f64, f64)],
+    ) -> Result<(f64, Vec<f64>, Vec<f64>)> {
+        if self.roots.len() != 1 {
+            return Err(XlogError::Compilation(format!(
+                "XGCF eval expects exactly 1 root, got {}",
+                self.roots.len()
+            )));
+        }
+
+        let n = self.node_type.len();
+        if self.child_offsets.len() != n + 1 {
+            return Err(XlogError::Compilation(format!(
+                "XGCF invariant violation: child_offsets len {} != num_nodes+1 ({})",
+                self.child_offsets.len(),
+                n + 1
+            )));
+        }
+        if self.lit.len() != n
+            || self.decision_var.len() != n
+            || self.decision_child_false.len() != n
+            || self.decision_child_true.len() != n
+        {
+            return Err(XlogError::Compilation(
+                "XGCF invariant violation: per-node arrays length mismatch".to_string(),
+            ));
+        }
+        if self.level_offsets.is_empty() || *self.level_offsets.first().unwrap() != 0 {
+            return Err(XlogError::Compilation(
+                "XGCF invariant violation: level_offsets must start at 0".to_string(),
+            ));
+        }
+        if *self.level_offsets.last().unwrap() != self.level_nodes.len() as u32 {
+            return Err(XlogError::Compilation(
+                "XGCF invariant violation: level_offsets last != level_nodes.len".to_string(),
+            ));
+        }
+
+        let mut max_var: u32 = 0;
+        for (&ty, &lit) in self.node_type.iter().zip(self.lit.iter()) {
+            if ty == XgcfNodeType::Lit && lit != 0 {
+                max_var = max_var.max(lit.unsigned_abs());
+            }
+        }
+        for &var in &self.decision_var {
+            max_var = max_var.max(var);
+        }
+
+        let weights_len = (max_var as usize) + 1;
+        if var_log_weights.len() < weights_len {
+            return Err(XlogError::Compilation(format!(
+                "XGCF eval expects weight table len >= {}, got {}",
+                weights_len,
+                var_log_weights.len()
+            )));
+        }
+
+        fn logsumexp(values: &[f64]) -> f64 {
+            let mut max = f64::NEG_INFINITY;
+            for &v in values {
+                if v > max {
+                    max = v;
+                }
+            }
+            if max.is_infinite() {
+                return max;
+            }
+            let mut sum = 0.0;
+            for &v in values {
+                sum += (v - max).exp();
+            }
+            max + sum.ln()
+        }
+
+        let mut values: Vec<f64> = vec![0.0; n];
+
+        let num_levels = self.level_offsets.len() - 1;
+        for level in 0..num_levels {
+            let start = self.level_offsets[level] as usize;
+            let end = self.level_offsets[level + 1] as usize;
+            for &node_u32 in &self.level_nodes[start..end] {
+                let idx = node_u32 as usize;
+                let v = match self.node_type[idx] {
+                    XgcfNodeType::Const0 => f64::NEG_INFINITY,
+                    XgcfNodeType::Const1 => 0.0,
+                    XgcfNodeType::Lit => {
+                        let lit = self.lit[idx];
+                        if lit == 0 {
+                            return Err(XlogError::Compilation(format!(
+                                "XGCF invariant violation: LIT node {} has lit=0",
+                                idx
+                            )));
+                        }
+                        let var = lit.unsigned_abs();
+                        let (t, f) = var_log_weights[var as usize];
+                        if lit > 0 { t } else { f }
+                    }
+                    XgcfNodeType::And => {
+                        let c0 = self.child_offsets[idx] as usize;
+                        let c1 = self.child_offsets[idx + 1] as usize;
+                        if c0 == c1 {
+                            return Err(XlogError::Compilation(format!(
+                                "XGCF eval error: AND node {} has no children",
+                                idx
+                            )));
+                        }
+                        let mut acc = 0.0;
+                        for &child in &self.child_indices[c0..c1] {
+                            acc += values[child as usize];
+                        }
+                        acc
+                    }
+                    XgcfNodeType::Or => {
+                        let c0 = self.child_offsets[idx] as usize;
+                        let c1 = self.child_offsets[idx + 1] as usize;
+                        if c0 == c1 {
+                            return Err(XlogError::Compilation(format!(
+                                "XGCF eval error: OR node {} has no children",
+                                idx
+                            )));
+                        }
+                        let mut branch_vals: Vec<f64> = Vec::with_capacity(c1 - c0);
+                        for &child in &self.child_indices[c0..c1] {
+                            branch_vals.push(values[child as usize]);
+                        }
+                        logsumexp(&branch_vals)
+                    }
+                    XgcfNodeType::Decision => {
+                        let var = self.decision_var[idx];
+                        if var == 0 {
+                            return Err(XlogError::Compilation(format!(
+                                "XGCF invariant violation: DECISION node {} has var=0",
+                                idx
+                            )));
+                        }
+                        let child_false = self.decision_child_false[idx] as usize;
+                        let child_true = self.decision_child_true[idx] as usize;
+                        let (t, f) = var_log_weights[var as usize];
+                        logsumexp(&[f + values[child_false], t + values[child_true]])
+                    }
+                };
+                values[idx] = v;
+            }
+        }
+
+        let root_idx = self.roots[0] as usize;
+        let log_z = values[root_idx];
+
+        let mut adj: Vec<f64> = vec![0.0; n];
+        adj[root_idx] = 1.0;
+
+        let mut grad_true: Vec<f64> = vec![0.0; weights_len];
+        let mut grad_false: Vec<f64> = vec![0.0; weights_len];
+
+        for level in (0..num_levels).rev() {
+            let start = self.level_offsets[level] as usize;
+            let end = self.level_offsets[level + 1] as usize;
+            for &node_u32 in &self.level_nodes[start..end] {
+                let idx = node_u32 as usize;
+                let a = adj[idx];
+                if a == 0.0 {
+                    continue;
+                }
+
+                match self.node_type[idx] {
+                    XgcfNodeType::Const0 | XgcfNodeType::Const1 => {}
+                    XgcfNodeType::Lit => {
+                        let lit = self.lit[idx];
+                        if lit == 0 {
+                            return Err(XlogError::Compilation(format!(
+                                "XGCF invariant violation: LIT node {} has lit=0",
+                                idx
+                            )));
+                        }
+                        let var = lit.unsigned_abs() as usize;
+                        if lit > 0 {
+                            grad_true[var] += a;
+                        } else {
+                            grad_false[var] += a;
+                        }
+                    }
+                    XgcfNodeType::And => {
+                        let c0 = self.child_offsets[idx] as usize;
+                        let c1 = self.child_offsets[idx + 1] as usize;
+                        for &child in &self.child_indices[c0..c1] {
+                            adj[child as usize] += a;
+                        }
+                    }
+                    XgcfNodeType::Or => {
+                        let parent_v = values[idx];
+                        if parent_v.is_infinite() && parent_v.is_sign_negative() {
+                            continue;
+                        }
+                        let c0 = self.child_offsets[idx] as usize;
+                        let c1 = self.child_offsets[idx + 1] as usize;
+                        for &child in &self.child_indices[c0..c1] {
+                            let child_idx = child as usize;
+                            let child_v = values[child_idx];
+                            if child_v.is_infinite() && child_v.is_sign_negative() {
+                                continue;
+                            }
+                            let ratio = (child_v - parent_v).exp();
+                            if ratio != 0.0 {
+                                adj[child_idx] += a * ratio;
+                            }
+                        }
+                    }
+                    XgcfNodeType::Decision => {
+                        let var = self.decision_var[idx] as usize;
+                        if var == 0 {
+                            return Err(XlogError::Compilation(format!(
+                                "XGCF invariant violation: DECISION node {} has var=0",
+                                idx
+                            )));
+                        }
+
+                        let parent_v = values[idx];
+                        if parent_v.is_infinite() && parent_v.is_sign_negative() {
+                            continue;
+                        }
+
+                        let child_false = self.decision_child_false[idx] as usize;
+                        let child_true = self.decision_child_true[idx] as usize;
+                        let (t, f) = var_log_weights[var];
+
+                        let vf = values[child_false];
+                        let vt = values[child_true];
+
+                        let mut p_false = 0.0;
+                        let mut p_true = 0.0;
+                        if !(vf.is_infinite() && vf.is_sign_negative()) {
+                            p_false = (f + vf - parent_v).exp();
+                        }
+                        if !(vt.is_infinite() && vt.is_sign_negative()) {
+                            p_true = (t + vt - parent_v).exp();
+                        }
+
+                        if p_false != 0.0 {
+                            adj[child_false] += a * p_false;
+                            grad_false[var] += a * p_false;
+                        }
+                        if p_true != 0.0 {
+                            adj[child_true] += a * p_true;
+                            grad_true[var] += a * p_true;
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok((log_z, grad_true, grad_false))
+    }
 }
 
 struct XgcfBuilder<'a> {

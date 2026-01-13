@@ -182,6 +182,9 @@ pub mod pack_kernels {
 /// Kernel function names in the circuit module
 pub mod circuit_kernels {
     pub const XGCF_FORWARD_LEVEL: &str = "xgcf_forward_level";
+    pub const XGCF_BACKWARD_LEVEL_PROPAGATE: &str = "xgcf_backward_level_propagate";
+    pub const XGCF_BACKWARD_LEVEL_DECISION_GRAD: &str = "xgcf_backward_level_decision_grad";
+    pub const XGCF_BACKWARD_LEVEL_LIT_GRAD: &str = "xgcf_backward_level_lit_grad";
 }
 
 /// Default maximum output size for join operations.
@@ -476,7 +479,12 @@ impl CudaKernelProvider {
             .load_ptx(
                 Ptx::from_src(CIRCUIT_PTX),
                 CIRCUIT_MODULE,
-                &[circuit_kernels::XGCF_FORWARD_LEVEL],
+                &[
+                    circuit_kernels::XGCF_FORWARD_LEVEL,
+                    circuit_kernels::XGCF_BACKWARD_LEVEL_PROPAGATE,
+                    circuit_kernels::XGCF_BACKWARD_LEVEL_DECISION_GRAD,
+                    circuit_kernels::XGCF_BACKWARD_LEVEL_LIT_GRAD,
+                ],
             )
             .map_err(|e| XlogError::Kernel(format!("Failed to load circuit PTX: {}", e)))?;
 
@@ -7987,6 +7995,18 @@ mod tests {
             CIRCUIT_PTX.contains("xgcf_forward_level"),
             "CIRCUIT_PTX should contain xgcf_forward_level"
         );
+        assert!(
+            CIRCUIT_PTX.contains("xgcf_backward_level_propagate"),
+            "CIRCUIT_PTX should contain xgcf_backward_level_propagate"
+        );
+        assert!(
+            CIRCUIT_PTX.contains("xgcf_backward_level_decision_grad"),
+            "CIRCUIT_PTX should contain xgcf_backward_level_decision_grad"
+        );
+        assert!(
+            CIRCUIT_PTX.contains("xgcf_backward_level_lit_grad"),
+            "CIRCUIT_PTX should contain xgcf_backward_level_lit_grad"
+        );
     }
 
     #[test]
@@ -8110,6 +8130,31 @@ mod tests {
         assert!(
             max_fn.is_some(),
             "groupby_max function should be accessible"
+        );
+
+        // Circuit kernels (XGCF forward/backward)
+        let xgcf_forward = inner.get_func(CIRCUIT_MODULE, "xgcf_forward_level");
+        assert!(
+            xgcf_forward.is_some(),
+            "xgcf_forward_level function should be accessible"
+        );
+
+        let xgcf_backward_propagate = inner.get_func(CIRCUIT_MODULE, "xgcf_backward_level_propagate");
+        assert!(
+            xgcf_backward_propagate.is_some(),
+            "xgcf_backward_level_propagate function should be accessible"
+        );
+
+        let xgcf_backward_decision_grad = inner.get_func(CIRCUIT_MODULE, "xgcf_backward_level_decision_grad");
+        assert!(
+            xgcf_backward_decision_grad.is_some(),
+            "xgcf_backward_level_decision_grad function should be accessible"
+        );
+
+        let xgcf_backward_lit_grad = inner.get_func(CIRCUIT_MODULE, "xgcf_backward_level_lit_grad");
+        assert!(
+            xgcf_backward_lit_grad.is_some(),
+            "xgcf_backward_level_lit_grad function should be accessible"
         );
     }
 

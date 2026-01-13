@@ -22,6 +22,9 @@ pub struct GpuXgcf {
     var_log_true: TrackedCudaSlice<f64>,
     var_log_false: TrackedCudaSlice<f64>,
     values: TrackedCudaSlice<f64>,
+    adj: TrackedCudaSlice<f64>,
+    grad_true: TrackedCudaSlice<f64>,
+    grad_false: TrackedCudaSlice<f64>,
 }
 
 impl GpuXgcf {
@@ -100,6 +103,9 @@ impl GpuXgcf {
         let var_log_true = memory.alloc::<f64>(weights_len)?;
         let var_log_false = memory.alloc::<f64>(weights_len)?;
         let values = memory.alloc::<f64>(n)?;
+        let adj = memory.alloc::<f64>(n)?;
+        let grad_true = memory.alloc::<f64>(weights_len)?;
+        let grad_false = memory.alloc::<f64>(weights_len)?;
 
         Ok(Self {
             node_type: d_node_type,
@@ -116,6 +122,9 @@ impl GpuXgcf {
             var_log_true,
             var_log_false,
             values,
+            adj,
+            grad_true,
+            grad_false,
         })
     }
 
@@ -208,5 +217,143 @@ impl GpuXgcf {
             .dtoh_sync_copy_into(&root_view, &mut out)
             .map_err(|e| XlogError::Kernel(format!("Failed to read circuit root value: {}", e)))?;
         Ok(out[0])
+    }
+
+    pub fn eval_log_wmc_and_grads(
+        &mut self,
+        provider: &CudaKernelProvider,
+        var_log_weights: &[(f64, f64)],
+    ) -> Result<(f64, Vec<f64>, Vec<f64>)> {
+        let log_z = self.eval_log_wmc(provider, var_log_weights)?;
+
+        let device = provider.device().inner();
+
+        device
+            .memset_zeros(&mut self.adj)
+            .map_err(|e| XlogError::Kernel(format!("Failed to zero adj buffer: {}", e)))?;
+        device
+            .memset_zeros(&mut self.grad_true)
+            .map_err(|e| XlogError::Kernel(format!("Failed to zero grad_true buffer: {}", e)))?;
+        device
+            .memset_zeros(&mut self.grad_false)
+            .map_err(|e| XlogError::Kernel(format!("Failed to zero grad_false buffer: {}", e)))?;
+
+        let root_idx = self.root as usize;
+        let mut root_adj_view = self.adj.slice_mut(root_idx..(root_idx + 1));
+        device
+            .htod_sync_copy_into(&[1.0_f64], &mut root_adj_view)
+            .map_err(|e| XlogError::Kernel(format!("Failed to set root adjoint: {}", e)))?;
+
+        let propagate = device
+            .get_func(CIRCUIT_MODULE, circuit_kernels::XGCF_BACKWARD_LEVEL_PROPAGATE)
+            .ok_or_else(|| {
+                XlogError::Kernel("xgcf_backward_level_propagate kernel not found".to_string())
+            })?;
+        let decision_grad = device
+            .get_func(CIRCUIT_MODULE, circuit_kernels::XGCF_BACKWARD_LEVEL_DECISION_GRAD)
+            .ok_or_else(|| {
+                XlogError::Kernel(
+                    "xgcf_backward_level_decision_grad kernel not found".to_string(),
+                )
+            })?;
+        let lit_grad = device
+            .get_func(CIRCUIT_MODULE, circuit_kernels::XGCF_BACKWARD_LEVEL_LIT_GRAD)
+            .ok_or_else(|| {
+                XlogError::Kernel("xgcf_backward_level_lit_grad kernel not found".to_string())
+            })?;
+
+        let block_size: u32 = 256;
+        let num_levels = self.level_offsets.len().saturating_sub(1);
+        for level in (0..num_levels).rev() {
+            let start = self.level_offsets[level] as usize;
+            let end = self.level_offsets[level + 1] as usize;
+            let num_level_nodes = end.saturating_sub(start);
+            if num_level_nodes == 0 {
+                continue;
+            }
+
+            let num_blocks = ((num_level_nodes as u32) + block_size - 1) / block_size;
+            let config = LaunchConfig {
+                grid_dim: (num_blocks, 1, 1),
+                block_dim: (block_size, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            let level_range = ((num_level_nodes as u64) << 32) | (start as u64);
+
+            unsafe {
+                propagate.clone().launch(
+                    config,
+                    (
+                        &self.node_type,
+                        &self.child_offsets,
+                        &self.child_indices,
+                        &self.decision_var,
+                        &self.decision_child_false,
+                        &self.decision_child_true,
+                        &self.level_nodes,
+                        level_range,
+                        &self.var_log_true,
+                        &self.var_log_false,
+                        &self.values,
+                        &self.adj,
+                    ),
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("xgcf_backward_level_propagate failed: {}", e)))?;
+
+            unsafe {
+                decision_grad.clone().launch(
+                    config,
+                    (
+                        &self.node_type,
+                        &self.decision_var,
+                        &self.decision_child_false,
+                        &self.decision_child_true,
+                        &self.level_nodes,
+                        level_range,
+                        &self.var_log_true,
+                        &self.var_log_false,
+                        &self.values,
+                        &self.adj,
+                        &self.grad_true,
+                        &self.grad_false,
+                    ),
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!("xgcf_backward_level_decision_grad failed: {}", e))
+            })?;
+
+            unsafe {
+                lit_grad.clone().launch(
+                    config,
+                    (
+                        &self.node_type,
+                        &self.lit,
+                        &self.level_nodes,
+                        level_range,
+                        &self.adj,
+                        &self.grad_true,
+                        &self.grad_false,
+                    ),
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("xgcf_backward_level_lit_grad failed: {}", e)))?;
+        }
+
+        provider.device().synchronize()?;
+
+        let weights_len = (self.max_var as usize) + 1;
+        let mut host_grad_true: Vec<f64> = vec![0.0; weights_len];
+        let mut host_grad_false: Vec<f64> = vec![0.0; weights_len];
+
+        device
+            .dtoh_sync_copy_into(&self.grad_true, &mut host_grad_true)
+            .map_err(|e| XlogError::Kernel(format!("Failed to download grad_true: {}", e)))?;
+        device
+            .dtoh_sync_copy_into(&self.grad_false, &mut host_grad_false)
+            .map_err(|e| XlogError::Kernel(format!("Failed to download grad_false: {}", e)))?;
+
+        Ok((log_z, host_grad_true, host_grad_false))
     }
 }
