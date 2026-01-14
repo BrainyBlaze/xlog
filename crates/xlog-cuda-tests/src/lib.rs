@@ -2,10 +2,10 @@
 //!
 //! # Usage
 //! ```bash
-//! # Full certification (30-60 min)
+//! # Full certification (seconds to minutes; GPU-dependent)
 //! cargo test -p xlog-cuda-tests --test certification_suite --release
 //!
-//! # Quick smoke test (2-5 min)
+//! # Quick smoke test (sub-second to seconds; GPU-dependent)
 //! cargo test -p xlog-cuda-tests --test quick_smoke --release
 //!
 //! # Single category

@@ -2,11 +2,11 @@
 
 XLOG is a **GPU-accelerated Datalog engine** written in Rust with CUDA kernels. It compiles `.xlog` programs into relational plans and executes them efficiently on NVIDIA GPUs.
 
-## Status (v0.1.0)
+## Status (phase4-integrated)
 
 - Deterministic `xlog-logic` tier: **production-ready** (Phase 3 complete).
-- CUDA certification suite: **133/133 passing** (see `docs/plans/2026-01-12-cuda-certification-results.md`).
-- Planned next tier: `xlog-prob` (probabilistic + differentiable reasoning) and a Python package (`xlog-gpu`) — not shipped in v0.1.0.
+- CUDA certification suite: **140/140 passing** (see `docs/plans/2026-01-14-cuda-certification-results.md`).
+- Phase 4 integrated: `xlog-prob` (exact `exact_ddnnf` + approximate `mc`) and Python `xlog-gpu` (PyO3 + DLPack) are implemented on this branch.
 
 ## What Works
 
@@ -31,12 +31,12 @@ cargo test --workspace --all-targets --release
 cargo run -p xlog-logic --example xlog_run -- examples/xlog/00-basics/01_tc_reachability.xlog
 ```
 
-See `docs/EXAMPLES.md` for the full example suite and runner flags.
+See `examples/README.md` for the full example suite and runner flags.
 
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md)
 - [Roadmap](docs/ROADMAP.md)
 - [Examples](examples/)
-- [CUDA certification results](docs/plans/2026-01-12-cuda-certification-results.md)
+- [CUDA certification results](docs/plans/2026-01-14-cuda-certification-results.md)
 - [Current validation summary](docs/VALIDATION_REPORT.md)

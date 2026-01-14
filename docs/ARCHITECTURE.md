@@ -778,4 +778,4 @@ const MAX_SCC_ITERATIONS: usize = 1000;
 ## Test Coverage
 
 - Workspace unit/integration tests: `cargo test --workspace --all-targets` (debug) or `cargo test --workspace --all-targets --release`.
-- CUDA/PTX certification suite (133 tests): `cargo test -p xlog-cuda-tests --test certification_suite --release -- --nocapture`.
+- CUDA/PTX certification suite (140 tests): `cargo test -p xlog-cuda-tests --test certification_suite --release -- --nocapture`.

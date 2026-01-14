@@ -9,7 +9,8 @@ Comprehensive 24-category certification test suite for xlog CUDA kernels coverin
 - **Goal:** Full certification suite covering all 24 edge case categories
 - **Structure:** Dedicated `xlog-cuda-tests` crate
 - **Execution:** GPU-only strict (requires real CUDA hardware)
-- **Coverage:** ~3,590 tests across 54 kernel functions in 8 modules
+- **Coverage:** 140 tests across 24 categories; C01 enumerates every PTX `.entry` under `kernels/*.ptx` (10 modules) and requires each to resolve via `CudaKernelProvider`
+- **PTX modules:** `join`, `dedup`, `groupby`, `scan`, `filter`, `pack`, `sort`, `set_ops`, `circuit`, `mc_sample`
 
 ## Crate Structure
 
@@ -93,18 +94,18 @@ crates/xlog-cuda-tests/
 
 | Mode | Command | Runtime | Use Case |
 |------|---------|---------|----------|
-| Full certification | `cargo test --test certification_suite` | 30-60 min | Release |
-| Quick smoke | `cargo test --test quick_smoke` | 2-5 min | CI |
-| Single category | `cargo test --test category_isolation c03` | 1-5 min | Debug |
+| Full certification | `cargo test -p xlog-cuda-tests --test certification_suite --release -- --nocapture` | Seconds to minutes (GPU-dependent) | Release |
+| Quick smoke | `cargo test -p xlog-cuda-tests --test quick_smoke --release -- --nocapture` | Sub-second to seconds (GPU-dependent) | CI |
+| Single category | `cargo test -p xlog-cuda-tests --test category_isolation c03 --release -- --nocapture` | Sub-second to seconds (GPU-dependent) | Debug |
 
 ## Test Count
 
 | Category Group | Tests |
 |----------------|-------|
-| C01-C08 (Infrastructure) | ~45 |
-| C09-C16 (Execution Model) | ~55 |
-| C17-C21 (Environment) | ~35 |
-| C22 (Algorithms) | ~40 |
-| C23 (Blind Spots) | ~15 |
-| C24 (Edge Matrix) | ~3,400 |
-| **Total** | **~3,590** |
+| Infrastructure | 13 |
+| Memory Hierarchy | 33 |
+| Execution Model | 22 |
+| Numeric Correctness | 24 |
+| System Integration | 25 |
+| Algorithms & Edge Cases | 23 |
+| **Total** | **140** |

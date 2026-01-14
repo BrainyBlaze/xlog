@@ -1609,6 +1609,7 @@ dependencies = [
  "xlog-core",
  "xlog-cuda",
  "xlog-gpu",
+ "xlog-logic",
  "xlog-prob",
 ]
 

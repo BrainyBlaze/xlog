@@ -25,6 +25,7 @@ const FILTER_PTX: &str = include_str!("../../../kernels/filter.ptx");
 const SET_OPS_PTX: &str = include_str!("../../../kernels/set_ops.ptx");
 const PACK_PTX: &str = include_str!("../../../kernels/pack.ptx");
 const CIRCUIT_PTX: &str = include_str!("../../../kernels/circuit.ptx");
+const MC_SAMPLE_PTX: &str = include_str!("../../../kernels/mc_sample.ptx");
 
 #[derive(Clone, Copy)]
 struct RawCudaView<'a, T> {
@@ -63,6 +64,12 @@ pub const FILTER_MODULE: &str = "xlog_filter";
 pub const SET_OPS_MODULE: &str = "xlog_set_ops";
 pub const PACK_MODULE: &str = "xlog_pack";
 pub const CIRCUIT_MODULE: &str = "xlog_circuit";
+pub const MC_SAMPLE_MODULE: &str = "xlog_mc_sample";
+
+/// Kernel function names in the Monte Carlo sampling module
+pub mod mc_sample_kernels {
+    pub const MC_SAMPLE_BERNOULLI: &str = "mc_sample_bernoulli";
+}
 
 /// Kernel function names in the join module
 pub mod join_kernels {
@@ -102,6 +109,8 @@ pub mod groupby_kernels {
 
 /// Kernel function names in the scan module
 pub mod scan_kernels {
+    pub const BLOCK_INCLUSIVE_SCAN: &str = "block_inclusive_scan";
+    pub const ADD_BLOCK_OFFSETS: &str = "add_block_offsets";
     pub const EXCLUSIVE_SCAN_MASK: &str = "exclusive_scan_mask";
     pub const COUNT_MASK: &str = "count_mask";
     // Multi-block scan kernels for large prefix sums
@@ -379,6 +388,8 @@ impl CudaKernelProvider {
                 Ptx::from_src(SCAN_PTX),
                 SCAN_MODULE,
                 &[
+                    scan_kernels::BLOCK_INCLUSIVE_SCAN,
+                    scan_kernels::ADD_BLOCK_OFFSETS,
                     scan_kernels::EXCLUSIVE_SCAN_MASK,
                     scan_kernels::COUNT_MASK,
                     scan_kernels::MULTIBLOCK_SCAN_PHASE1,
@@ -488,6 +499,16 @@ impl CudaKernelProvider {
             )
             .map_err(|e| XlogError::Kernel(format!("Failed to load circuit PTX: {}", e)))?;
 
+        // Load Monte Carlo sampling module (Bernoulli sampler)
+        device
+            .inner()
+            .load_ptx(
+                Ptx::from_src(MC_SAMPLE_PTX),
+                MC_SAMPLE_MODULE,
+                &[mc_sample_kernels::MC_SAMPLE_BERNOULLI],
+            )
+            .map_err(|e| XlogError::Kernel(format!("Failed to load MC sample PTX: {}", e)))?;
+
         Ok(Self { device, memory })
     }
 
@@ -499,6 +520,80 @@ impl CudaKernelProvider {
     /// Get the GPU memory manager
     pub fn memory(&self) -> &Arc<GpuMemoryManager> {
         &self.memory
+    }
+
+    /// Sample independent Bernoulli variables on the GPU.
+    ///
+    /// Returns a row-major `(sample, var)` matrix as a flat `Vec<u8>` of length
+    /// `num_samples * probs.len()`, where each entry is 0/1.
+    pub fn sample_bernoulli_matrix(
+        &self,
+        probs: &[f32],
+        num_samples: usize,
+        seed: u64,
+    ) -> Result<Vec<u8>> {
+        if probs.is_empty() || num_samples == 0 {
+            return Ok(Vec::new());
+        }
+
+        let num_vars_u32: u32 = probs.len().try_into().map_err(|_| {
+            XlogError::Kernel(format!(
+                "sample_bernoulli_matrix: num_vars {} exceeds u32::MAX",
+                probs.len()
+            ))
+        })?;
+        let num_samples_u32: u32 = num_samples.try_into().map_err(|_| {
+            XlogError::Kernel(format!(
+                "sample_bernoulli_matrix: num_samples {} exceeds u32::MAX",
+                num_samples
+            ))
+        })?;
+
+        let total = probs.len().checked_mul(num_samples).ok_or_else(|| {
+            XlogError::Kernel("sample_bernoulli_matrix: size overflow".to_string())
+        })?;
+
+        let device = self.device.inner();
+
+        let mut d_probs = self.memory.alloc::<f32>(probs.len())?;
+        device
+            .htod_sync_copy_into(probs, &mut d_probs)
+            .map_err(|e| XlogError::Kernel(format!("Failed to upload Bernoulli probs: {}", e)))?;
+
+        let mut d_out = self.memory.alloc::<u8>(total)?;
+
+        let block_size = 256u32;
+        let total_u32: u32 = total.try_into().map_err(|_| {
+            XlogError::Kernel(format!(
+                "sample_bernoulli_matrix: total {} exceeds u32::MAX",
+                total
+            ))
+        })?;
+        let num_blocks = (total_u32 + block_size - 1) / block_size;
+        let config = LaunchConfig {
+            grid_dim: (num_blocks, 1, 1),
+            block_dim: (block_size, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        let kernel = device
+            .get_func(MC_SAMPLE_MODULE, mc_sample_kernels::MC_SAMPLE_BERNOULLI)
+            .ok_or_else(|| XlogError::Kernel("mc_sample_bernoulli kernel not found".to_string()))?;
+
+        // SAFETY: mc_sample_bernoulli(out, probs, num_vars, num_samples, seed)
+        unsafe {
+            kernel
+                .clone()
+                .launch(config, (&mut d_out, &d_probs, num_vars_u32, num_samples_u32, seed))
+        }
+        .map_err(|e| XlogError::Kernel(format!("Failed to launch mc_sample_bernoulli: {}", e)))?;
+
+        let mut host: Vec<u8> = vec![0u8; total];
+        device
+            .dtoh_sync_copy_into(&d_out, &mut host)
+            .map_err(|e| XlogError::Kernel(format!("Failed to download Bernoulli samples: {}", e)))?;
+
+        Ok(host)
     }
 
     /// Perform a hash join between two buffers
@@ -7953,6 +8048,7 @@ mod tests {
         assert!(!DEDUP_PTX.is_empty(), "DEDUP_PTX should not be empty");
         assert!(!GROUPBY_PTX.is_empty(), "GROUPBY_PTX should not be empty");
         assert!(!CIRCUIT_PTX.is_empty(), "CIRCUIT_PTX should not be empty");
+        assert!(!MC_SAMPLE_PTX.is_empty(), "MC_SAMPLE_PTX should not be empty");
 
         // Verify PTX contains expected kernel names
         assert!(
@@ -8007,6 +8103,10 @@ mod tests {
             CIRCUIT_PTX.contains("xgcf_backward_level_lit_grad"),
             "CIRCUIT_PTX should contain xgcf_backward_level_lit_grad"
         );
+        assert!(
+            MC_SAMPLE_PTX.contains("mc_sample_bernoulli"),
+            "MC_SAMPLE_PTX should contain mc_sample_bernoulli"
+        );
     }
 
     #[test]
@@ -8031,6 +8131,10 @@ mod tests {
         assert!(
             valid_targets.iter().any(|t| CIRCUIT_PTX.contains(t)),
             "CIRCUIT_PTX should target sm_70 or later"
+        );
+        assert!(
+            valid_targets.iter().any(|t| MC_SAMPLE_PTX.contains(t)),
+            "MC_SAMPLE_PTX should target sm_70 or later"
         );
     }
 

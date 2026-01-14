@@ -15,7 +15,7 @@ maturin develop --release
 ```bash
 python examples/python/01_dlpack_reachability_torch.py
 python examples/python/02_prob_wet_conditioning_torch.py
+python examples/python/03_prob_mc_nonmonotone_torch.py
 ```
 
 Torch is optional; the module accepts any DLPack producer (e.g., cuDF, CuPy, JAX).
-

@@ -29,11 +29,10 @@ where
                 "Memory budget: {} MB",
                 ctx.memory_budget() / (1024 * 1024)
             );
-            println!(
-                "Compute capability: {}.{}",
-                ctx.compute_capability().0,
-                ctx.compute_capability().1
-            );
+            match ctx.compute_capability() {
+                Ok((major, minor)) => println!("Compute capability: {}.{}", major, minor),
+                Err(e) => println!("Compute capability: <unavailable> ({})", e),
+            }
             println!();
             ctx
         }

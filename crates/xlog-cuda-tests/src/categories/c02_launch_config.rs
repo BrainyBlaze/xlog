@@ -24,9 +24,80 @@ pub fn run_all(ctx: &TestContext) -> CategoryResult {
     results.add_result(test_non_power_of_two_sizes(ctx));
     results.add_result(test_large_grid_sizes(ctx));
     results.add_result(test_max_practical_size(ctx));
+    results.add_result(test_mc_sample_edge_sizes(ctx));
 
     results.set_duration(start.elapsed());
     results
+}
+
+/// Test 8: MC sampling kernel launch config across edge sizes.
+///
+/// Validates `(num_vars, num_samples)` combinations around warp and block boundaries.
+fn test_mc_sample_edge_sizes(ctx: &TestContext) -> TestResult {
+    let start = Instant::now();
+
+    let var_counts: Vec<usize> = vec![0, 1, 31, 32, 33, 255, 256, 257];
+    let sample_counts: Vec<usize> = vec![0, 1, 31, 32, 33, 255, 256, 257];
+
+    for &num_vars in &var_counts {
+        let probs: Vec<f32> = vec![0.5f32; num_vars];
+        for &num_samples in &sample_counts {
+            let got = match ctx
+                .provider
+                .sample_bernoulli_matrix(&probs, num_samples, 123)
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    return TestResult::error(
+                        "test_mc_sample_edge_sizes",
+                        start.elapsed(),
+                        format!(
+                            "sample_bernoulli_matrix failed for num_vars={}, num_samples={}: {}",
+                            num_vars, num_samples, e
+                        ),
+                    )
+                }
+            };
+
+            let expected_len = num_vars.saturating_mul(num_samples);
+            if got.len() != expected_len {
+                return TestResult::error(
+                    "test_mc_sample_edge_sizes",
+                    start.elapsed(),
+                    format!(
+                        "Unexpected output length for num_vars={}, num_samples={}: got {}, expected {}",
+                        num_vars,
+                        num_samples,
+                        got.len(),
+                        expected_len
+                    ),
+                );
+            }
+
+            for (i, &b) in got.iter().enumerate() {
+                if b > 1 {
+                    return TestResult::error(
+                        "test_mc_sample_edge_sizes",
+                        start.elapsed(),
+                        format!(
+                            "Invalid sample bit at idx {} for num_vars={}, num_samples={}: {}",
+                            i, num_vars, num_samples, b
+                        ),
+                    );
+                }
+            }
+        }
+    }
+
+    if let Err(e) = ctx.sync_and_check() {
+        return TestResult::error(
+            "test_mc_sample_edge_sizes",
+            start.elapsed(),
+            format!("Sync failed: {}", e),
+        );
+    }
+
+    TestResult::passed("test_mc_sample_edge_sizes", start.elapsed())
 }
 
 /// Test 1: Empty buffer operations should not crash.

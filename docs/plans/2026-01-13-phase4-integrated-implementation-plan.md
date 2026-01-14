@@ -1,10 +1,20 @@
 # Phase 4 Integrated Implementation Plan (xlog-prob + P4.1–P4.4 + Python `xlog-gpu`)
 
 **Date:** 2026-01-13  
-**Status:** Draft (ready to execute)  
+**Status:** Completed on `phase4-integrated`  
 **Targets:** Linux x86_64 + CUDA-only  
 
 This plan executes the design in `docs/plans/2026-01-13-phase4-integrated-design.md` and updates the Phase 4 roadmap items (P4.1–P4.4) as substrate, not as separate projects.
+
+## Execution Summary (2026-01-14)
+
+All tasks in this plan are implemented on branch `phase4-integrated`, including the P3 Monte Carlo engine (Task 7) and Python API wiring.
+
+**Key artifacts:**
+- MC engine: `crates/xlog-prob/src/mc.rs` + sampler kernel `kernels/mc_sample.ptx`
+- MC tests: `crates/xlog-prob/tests/mc.rs` and CUDA certification coverage under `crates/xlog-cuda-tests/`
+- Python API: `crates/xlog-gpu-py/src/lib.rs` (`prob_engine="exact_ddnnf"|"mc"`)
+- Python examples: `examples/python/03_prob_mc_nonmonotone_torch.py`, probabilistic `.xlog` examples under `examples/prob/`
 
 ---
 
@@ -26,7 +36,7 @@ This plan executes the design in `docs/plans/2026-01-13-phase4-integrated-design
 ### 0.3 xlog-prob (approx / P3)
 - Non-monotone recursion is:
   - **error by default**, with a diagnostic that says “requires P3 (`prob_engine=mc`)”
-  - allowed only when explicitly requested via `#pragma prob_engine = mc` or CLI `--prob-engine mc` (CLI overrides pragma)
+  - allowed only when explicitly requested via `#pragma prob_engine = mc` or an explicit API override (e.g., Python `Program.compile(..., prob_engine="mc")`)
 - Approx results include uncertainty metadata (samples/seed + stderr/CI).
 
 ### 0.4 Python distribution (`xlog-gpu`)
@@ -252,4 +262,3 @@ This plan executes the design in `docs/plans/2026-01-13-phase4-integrated-design
 3. Task 8 (Python layer wired to exact path)
 4. Task 7 (P3 MC engine)
 5. Task 9 (docs/examples/CI hardening)
-

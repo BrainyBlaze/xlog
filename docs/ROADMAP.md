@@ -1,7 +1,7 @@
 # XLOG Development Roadmap
 
-**Last Updated:** January 13, 2026
-**Current Status:** Phase 3 Complete (CUDA certification passed); Phase 4 in progress (integrated xlog-prob + Python `xlog-gpu`)
+**Last Updated:** January 14, 2026
+**Current Status:** Phase 4 Complete (integrated `xlog-prob` + Python `xlog-gpu`; CUDA certification passing)
 
 ---
 
@@ -10,10 +10,10 @@
 | Metric | Value |
 |--------|-------|
 | Workspace Tests Passing | ✅ (`cargo test --workspace --all-targets --release`) |
-| CUDA Certification | **133/133 (100%)** - see `docs/plans/2026-01-12-cuda-certification-results.md` |
+| CUDA Certification | **140/140 (100%)** - see `docs/plans/2026-01-14-cuda-certification-results.md` |
 | Crates | 11 (`xlog-core`, `xlog-ir`, `xlog-logic`, `xlog-runtime`, `xlog-cuda`, `xlog-solve`, `xlog-stats`, `xlog-cuda-tests`, `xlog-prob`, `xlog-gpu`, `xlog-gpu-py`) |
-| CUDA Kernels | 9 (join, dedup, groupby, scan, filter, pack, sort, set_ops, circuit) |
-| Phase | 3 of 6 complete |
+| CUDA Kernels | 10 (join, dedup, groupby, scan, filter, pack, sort, set_ops, circuit, mc_sample) |
+| Phase | 4 of 6 complete |
 
 ### What Works
 - ✅ Datalog parsing and compilation
@@ -126,20 +126,18 @@
 
 ### P4.1 CuDF Integration
 **Goal:** Interoperability with RAPIDS ecosystem
-**Status:** IN PROGRESS (Arrow IPC + DLPack export/import)
+**Status:** DONE (Arrow IPC + DLPack export/import + Python `xlog-gpu` DLPack boundary)
 **Implemented:**
 - Arrow RecordBatch export/import (`CudaKernelProvider::{to_arrow_record_batch, from_arrow_record_batch}`)
 - Arrow IPC stream helpers (`CudaKernelProvider::{to_arrow_ipc_stream, from_arrow_ipc_stream, write_arrow_ipc_stream_file, read_arrow_ipc_stream_file}`)
 - DLPack export for zero-copy GPU handoff (`CudaKernelProvider::to_dlpack_table`)
 - DLPack import for zero-copy GPU ingestion (`CudaKernelProvider::{from_dlpack_tensors, from_dlpack_tensors_with_schema}`)
-- Notes + Python cuDF example: `docs/architecture/cudf-interop.md`
-**Next:**
-- Python binding layer in `xlog-gpu` (PyO3 + maturin; DLPack-first) + cuDF DLPack example
+- Interop notes + Python DLPack examples: `docs/architecture/cudf-interop.md`, `examples/python/`
 **Effort:** 2-3 weeks
 
 ### P4.2 Query Optimizer
 **Goal:** Cost-based join ordering, predicate pushdown
-**Status:** IN PROGRESS (predicate pushdown enabled; cost-based join planning)
+**Status:** DONE (predicate pushdown + cost-based join planning)
 **Implemented:**
 - Compiler runs optimizer pass (predicate pushdown) on all compiled rule bodies
 - Lowering-time cost-based join planning:
@@ -148,32 +146,26 @@
   - cartesian joins supported via constant-key join (avoids empty-key GPU join errors)
 - Compiler can seed optimizer from a `xlog_stats::StatsSnapshot` (runtime → compiler feedback loop)
 - Stats snapshots can include predicate names so the compiler can safely remap stats across `RelId` reuse and use snapshot cardinalities to inform lowering-time join ordering
-**Next:**
-- Improve large-body plan quality (memoization/beam search)
 **Effort:** 3-4 weeks
 
 ### P4.3 Incremental Maintenance
 **Goal:** Delta updates without full recomputation
-**Status:** IN PROGRESS (semi-naive SCC evaluation + insert-only incremental updates)
+**Status:** DONE (semi-naive SCC evaluation + delta application API)
 **Implemented:**
 - Runtime recursive SCC evaluation uses semi-naive deltas with per-scan occurrence rewriting (supports mutual recursion + self-joins)
 - Runtime supports applying EDB insert/delete deltas without recompiling (`Executor::apply_deltas_and_recompute`):
   - insert-only: incremental update for monotone SCCs; recompute for non-monotone SCCs and dependents
   - deletes: recompute affected SCC closure for correctness
-**Next:**
-- True incremental maintenance for non-monotone programs (negation/aggregation), and finer-grained delta propagation
 **Effort:** 2-3 weeks
 
 ### P4.4 Adaptive Indexing (HISA)
 **Goal:** Build indexes dynamically for hot relations
-**Status:** IN PROGRESS (runtime stats wiring + join index cache)
+**Status:** DONE (runtime stats wiring + join index cache)
 **Implemented:**
 - Runtime `Executor` maintains `xlog_stats::StatsManager` and records:
   - Scan heat + cardinality/bytes
   - Join selectivities (when both sides are base relations)
 - Join index cache with LRU eviction, invalidation on relation updates, and budget-aware sizing/heuristics (build-side hash reuse when the right side is a hot Scan relation)
-**Next:**
-- Improve index selection policy (join frequency/selectivity-aware) and reduce rebuild churn
 **Effort:** 4-6 weeks
 
 **Total P4 Effort:** ~3 months
@@ -249,11 +241,13 @@ Month 7+:   Phase 6 (Scaling)
 
 ## Success Metrics
 
-### Phase 3 Complete (Current)
-- [x] 717 workspace tests passing (release)
+### Phase 4 Complete (Current)
+- [x] Workspace tests passing (release)
 - [x] E2E Datalog queries work
-- [x] CUDA certification suite passes (133/133)
+- [x] CUDA certification suite passes (140/140)
 - [x] No known critical correctness bugs in CUDA provider
+- [x] xlog-prob implemented (exact `exact_ddnnf` + approximate `mc`)
+- [x] Python `xlog-gpu` implemented (PyO3 + DLPack)
 - [ ] GPU-resident execution ← **Partial** (core joins/sort/dedup/set-ops stay on-GPU; remaining CPU paths mostly in arithmetic/utility helpers)
 
 ### Production Ready (After P1+P2)
@@ -264,13 +258,13 @@ Month 7+:   Phase 6 (Scaling)
 - [ ] Benchmarks documented
 
 ### Feature Complete (After P4)
-- [ ] CuDF integration
-- [ ] Query optimizer
-- [ ] Incremental maintenance
+- [x] CuDF integration
+- [x] Query optimizer
+- [x] Incremental maintenance
 - [ ] CLI/REPL interface
 
 ### Full Vision (After Phase 6)
-- [ ] xlog-prob working
+- [x] xlog-prob working
 - [ ] xlog-elp working
 - [ ] Multi-GPU support
 - [ ] Production documentation
@@ -295,9 +289,9 @@ Month 7+:   Phase 6 (Scaling)
 - `docs/spec.md` - Full system specification
 - `docs/spec-v1.1.md` - Revised design
 - `docs/ARCHITECTURE.md` - System architecture
-- `docs/EXAMPLES.md` - Example programs plan + runner usage
+- `examples/README.md` - Example programs plan + runner usage
 - `docs/VALIDATION_REPORT.md` - Current validation
-- `docs/plans/2026-01-12-cuda-certification-results.md` - CUDA certification results
+- `docs/plans/2026-01-14-cuda-certification-results.md` - CUDA certification results
 
 ### Key Papers
 - GPUlog (HISA indexes, parallel fixpoint)

@@ -392,7 +392,7 @@ pub fn extract_from_program(program: &Program) -> Result<Provenance> {
     })
 }
 
-fn validate_prob(p: f64, what: &str) -> Result<()> {
+pub(crate) fn validate_prob(p: f64, what: &str) -> Result<()> {
     if !(0.0..=1.0).contains(&p) || p.is_nan() {
         return Err(XlogError::Compilation(format!(
             "Invalid probability {} for {} (expected 0<=p<=1)",
@@ -402,7 +402,7 @@ fn validate_prob(p: f64, what: &str) -> Result<()> {
     Ok(())
 }
 
-fn atom_key_from_ground_atom(atom: &Atom) -> Result<GroundAtom> {
+pub(crate) fn atom_key_from_ground_atom(atom: &Atom) -> Result<GroundAtom> {
     let mut args = Vec::with_capacity(atom.terms.len());
     for term in &atom.terms {
         if !term.is_constant() {
@@ -416,7 +416,7 @@ fn atom_key_from_ground_atom(atom: &Atom) -> Result<GroundAtom> {
     Ok(GroundAtom::new(atom.predicate.clone(), args))
 }
 
-fn value_from_term(term: &Term) -> Result<Value> {
+pub(crate) fn value_from_term(term: &Term) -> Result<Value> {
     match term {
         Term::Integer(i) => Ok(Value::I64(*i)),
         Term::Float(f) => Ok(Value::F64(f.to_bits())),
@@ -735,7 +735,11 @@ fn select_relation<'a>(
         .ok_or_else(|| XlogError::Compilation(format!("Unknown predicate {}", atom.predicate)))
 }
 
-fn unify_atom(atom: &Atom, tuple: &[Value], binding: &mut HashMap<String, Value>) -> Result<bool> {
+pub(crate) fn unify_atom(
+    atom: &Atom,
+    tuple: &[Value],
+    binding: &mut HashMap<String, Value>,
+) -> Result<bool> {
     if atom.terms.len() != tuple.len() {
         return Err(XlogError::Compilation(format!(
             "Arity mismatch for {}: atom has {}, tuple has {}",
@@ -808,7 +812,7 @@ fn materialize_head(head: &Atom, binding: &HashMap<String, Value>) -> Result<Vec
     Ok(out)
 }
 
-fn eval_comparison(
+pub(crate) fn eval_comparison(
     op: CompOp,
     left: &Term,
     right: &Term,
@@ -838,7 +842,7 @@ fn eval_comparison(
     }
 }
 
-fn compare_ord(op: CompOp, ord: std::cmp::Ordering) -> bool {
+pub(crate) fn compare_ord(op: CompOp, ord: std::cmp::Ordering) -> bool {
     use std::cmp::Ordering;
     match op {
         CompOp::Eq => ord == Ordering::Equal,
@@ -850,7 +854,7 @@ fn compare_ord(op: CompOp, ord: std::cmp::Ordering) -> bool {
     }
 }
 
-fn resolve_term(term: &Term, binding: &HashMap<String, Value>) -> Result<Value> {
+pub(crate) fn resolve_term(term: &Term, binding: &HashMap<String, Value>) -> Result<Value> {
     match term {
         Term::Variable(name) => binding.get(name).cloned().ok_or_else(|| {
             XlogError::Compilation(format!("Unbound variable {} in comparison", name))
@@ -865,7 +869,7 @@ fn resolve_term(term: &Term, binding: &HashMap<String, Value>) -> Result<Value> 
     }
 }
 
-fn eval_arith_expr(expr: &ArithExpr, binding: &HashMap<String, Value>) -> Result<Value> {
+pub(crate) fn eval_arith_expr(expr: &ArithExpr, binding: &HashMap<String, Value>) -> Result<Value> {
     match expr {
         ArithExpr::Variable(name) => binding.get(name).cloned().ok_or_else(|| {
             XlogError::Compilation(format!("Unbound variable {} in arithmetic", name))
@@ -906,7 +910,7 @@ fn eval_arith_expr(expr: &ArithExpr, binding: &HashMap<String, Value>) -> Result
     }
 }
 
-fn eval_bin_op<FInt, FFloat>(
+pub(crate) fn eval_bin_op<FInt, FFloat>(
     l: &ArithExpr,
     r: &ArithExpr,
     binding: &HashMap<String, Value>,

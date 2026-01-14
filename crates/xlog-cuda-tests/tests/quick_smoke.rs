@@ -2,7 +2,7 @@
 //!
 //! Run with: cargo test -p xlog-cuda-tests --test quick_smoke --release -- --nocapture
 //!
-//! Expected runtime: 2-5 minutes
+//! Expected runtime: sub-second to seconds (GPU-dependent)
 //!
 //! This runs a subset of key tests for quick validation:
 //! - c01_toolchain: infrastructure check
@@ -30,11 +30,10 @@ fn run_quick_smoke() {
                 "Memory budget: {} MB",
                 ctx.memory_budget() / (1024 * 1024)
             );
-            println!(
-                "Compute capability: {}.{}",
-                ctx.compute_capability().0,
-                ctx.compute_capability().1
-            );
+            match ctx.compute_capability() {
+                Ok((major, minor)) => println!("Compute capability: {}.{}", major, minor),
+                Err(e) => println!("Compute capability: <unavailable> ({})", e),
+            }
             println!();
             ctx
         }

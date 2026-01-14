@@ -644,7 +644,16 @@ fn test_device_capability_query(ctx: &TestContext) -> TestResult {
     let start = Instant::now();
 
     // Get compute capability
-    let (major, minor) = ctx.compute_capability();
+    let (major, minor) = match ctx.compute_capability() {
+        Ok(v) => v,
+        Err(e) => {
+            return TestResult::error(
+                "test_device_capability_query",
+                start.elapsed(),
+                format!("Failed to query compute capability: {}", e),
+            );
+        }
+    };
 
     // Verify reasonable compute capability
     // CUDA compute capability ranges from about 2.0 to 9.x as of 2024

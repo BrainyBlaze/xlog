@@ -40,6 +40,10 @@ Examples live under `examples/xlog/`, grouped by intent:
 - `70-aggregates/`: aggregation queries (count/sum/min/max/logsumexp)
 - `90-negative-tests/`: programs expected to fail (stratification/type errors)
 
+Phase 4 examples live under:
+- `examples/prob/`: probabilistic `.xlog` programs (prob facts, AD, evidence/query, and `prob_engine=mc`)
+- `examples/python/`: Python scripts exercising `xlog_gpu` via DLPack (Torch optional)
+
 ## Example Index
 
 **00-basics/**

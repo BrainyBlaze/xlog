@@ -9,7 +9,9 @@ use pyo3::types::{PyDict, PySequence};
 use xlog_core::{MemoryBudget, ScalarType, Schema};
 use xlog_cuda::{CudaDevice, CudaKernelProvider, DlpackManagedTensor, GpuMemoryManager};
 use ::xlog_gpu::logic as gpu_logic;
+use xlog_logic::ast::ProbEngine;
 use xlog_prob::exact::{ExactDdnnfProgram, ExactResultWithGrads, GpuConfig, QueryProbability};
+use xlog_prob::mc::{McEvalConfig, McProgram};
 
 const DLPACK_CAPSULE_NAME: &[u8] = b"dltensor\0";
 const USED_DLPACK_CAPSULE_NAME: &[u8] = b"used_dltensor\0";
@@ -87,6 +89,18 @@ fn provider_from_config(config: GpuConfig) -> xlog_core::Result<CudaKernelProvid
         MemoryBudget::with_limit(config.memory_bytes),
     ));
     CudaKernelProvider::new(device, memory)
+}
+
+fn parse_prob_engine_override(s: &str) -> PyResult<ProbEngine> {
+    let v = s.trim().to_ascii_lowercase();
+    match v.as_str() {
+        "exact_ddnnf" | "exact" | "ddnnf" => Ok(ProbEngine::ExactDdnnf),
+        "mc" => Ok(ProbEngine::Mc),
+        other => Err(PyValueError::new_err(format!(
+            "Unknown prob_engine '{}'; expected 'exact_ddnnf' or 'mc'",
+            other
+        ))),
+    }
 }
 
 fn dlpack_from_py(obj: &Bound<'_, PyAny>) -> PyResult<DlpackManagedTensor> {
@@ -182,7 +196,13 @@ pub struct Program;
 #[pymethods]
 impl Program {
     #[staticmethod]
-    pub fn compile(source: &str, device: usize, memory_mb: u64) -> PyResult<CompiledProgram> {
+    #[pyo3(signature = (source, device=0, memory_mb=1024, prob_engine=None))]
+    pub fn compile(
+        source: &str,
+        device: usize,
+        memory_mb: u64,
+        prob_engine: Option<String>,
+    ) -> PyResult<CompiledProgram> {
         if memory_mb == 0 {
             return Err(PyValueError::new_err("memory_mb must be > 0"));
         }
@@ -192,8 +212,25 @@ impl Program {
             memory_bytes: memory_mb * 1024 * 1024,
         };
 
-        let program = ExactDdnnfProgram::compile_source_with_gpu(source, config)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let engine = match prob_engine {
+            Some(s) => parse_prob_engine_override(&s)?,
+            None => {
+                let ast = xlog_logic::parse_program(source)
+                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                ast.prob_engine()
+            }
+        };
+
+        let program = match engine {
+            ProbEngine::ExactDdnnf => CompiledProbProgram::Exact(
+                ExactDdnnfProgram::compile_source_with_gpu(source, config)
+                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?,
+            ),
+            ProbEngine::Mc => CompiledProbProgram::Mc(
+                McProgram::compile_source_with_gpu(source, config)
+                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?,
+            ),
+        };
         let provider =
             provider_from_config(config).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
@@ -204,27 +241,75 @@ impl Program {
     }
 }
 
+enum CompiledProbProgram {
+    Exact(ExactDdnnfProgram),
+    Mc(McProgram),
+}
+
+impl CompiledProbProgram {
+    fn num_vars(&self) -> usize {
+        match self {
+            Self::Exact(p) => p.num_vars(),
+            Self::Mc(p) => p.num_vars(),
+        }
+    }
+}
+
 #[pyclass(unsendable)]
 pub struct CompiledProgram {
-    program: ExactDdnnfProgram,
+    program: CompiledProbProgram,
     output_provider: Arc<CudaKernelProvider>,
 }
 
 #[pymethods]
 impl CompiledProgram {
-    pub fn evaluate(&self, py: Python<'_>, return_grads: bool) -> PyResult<EvalResult> {
-        if return_grads {
-            let result = self
-                .program
-                .evaluate_gpu_with_grads()
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-            self.pack_result_with_grads(py, result)
-        } else {
-            let result = self
-                .program
-                .evaluate()
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-            self.pack_result_probs(py, result.query_probs)
+    #[pyo3(signature = (return_grads=false, samples=None, seed=None, confidence=0.95, max_nonmonotone_iterations=1024))]
+    pub fn evaluate(
+        &self,
+        py: Python<'_>,
+        return_grads: bool,
+        samples: Option<usize>,
+        seed: Option<u64>,
+        confidence: f64,
+        max_nonmonotone_iterations: usize,
+    ) -> PyResult<EvalResult> {
+        match &self.program {
+            CompiledProbProgram::Exact(program) => {
+                if samples.is_some() || seed.is_some() {
+                    return Err(PyValueError::new_err(
+                        "samples/seed are only supported for prob_engine='mc'",
+                    ));
+                }
+                if return_grads {
+                    let result = program
+                        .evaluate_gpu_with_grads()
+                        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                    self.pack_result_with_grads(py, result)
+                } else {
+                    let result = program
+                        .evaluate()
+                        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                    self.pack_result_probs(py, result.query_probs)
+                }
+            }
+            CompiledProbProgram::Mc(program) => {
+                if return_grads {
+                    return Err(PyValueError::new_err(
+                        "MC inference does not support gradients (return_grads must be false)",
+                    ));
+                }
+
+                let cfg = McEvalConfig {
+                    samples: samples.unwrap_or(10000),
+                    seed: seed.unwrap_or(0),
+                    confidence,
+                    max_nonmonotone_iterations,
+                };
+                let result = program
+                    .evaluate(cfg)
+                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                self.pack_result_mc(py, result)
+            }
         }
     }
 }
@@ -269,6 +354,18 @@ impl CompiledProgram {
             num_vars: self.program.num_vars(),
             grad_true: None,
             grad_false: None,
+            approx: false,
+            stderr: None,
+            ci_low: None,
+            ci_high: None,
+            samples: None,
+            evidence_samples: None,
+            seed: None,
+            confidence: None,
+            nonmonotone_semantics: None,
+            nonmonotone_sccs: None,
+            nonmonotone_cycles: None,
+            nonmonotone_iteration_limit_hits: None,
         })
     }
 
@@ -339,6 +436,109 @@ impl CompiledProgram {
             num_vars,
             grad_true: Some(grad_true_caps),
             grad_false: Some(grad_false_caps),
+            approx: false,
+            stderr: None,
+            ci_low: None,
+            ci_high: None,
+            samples: None,
+            evidence_samples: None,
+            seed: None,
+            confidence: None,
+            nonmonotone_semantics: None,
+            nonmonotone_sccs: None,
+            nonmonotone_cycles: None,
+            nonmonotone_iteration_limit_hits: None,
+        })
+    }
+
+    fn pack_result_mc(
+        &self,
+        py: Python<'_>,
+        result: xlog_prob::mc::McResult,
+    ) -> PyResult<EvalResult> {
+        let mut atoms: Vec<String> = Vec::with_capacity(result.query_estimates.len());
+        let mut probs: Vec<f64> = Vec::with_capacity(result.query_estimates.len());
+        let mut log_probs: Vec<f64> = Vec::with_capacity(result.query_estimates.len());
+        let mut stderrs: Vec<f64> = Vec::with_capacity(result.query_estimates.len());
+        let mut ci_lows: Vec<f64> = Vec::with_capacity(result.query_estimates.len());
+        let mut ci_highs: Vec<f64> = Vec::with_capacity(result.query_estimates.len());
+
+        for q in &result.query_estimates {
+            atoms.push(atom_to_string(&q.atom));
+            probs.push(q.prob);
+            log_probs.push(q.log_prob);
+            stderrs.push(q.stderr);
+            ci_lows.push(q.ci_low);
+            ci_highs.push(q.ci_high);
+        }
+
+        let schema = Schema::new(vec![("col0".to_string(), ScalarType::F64)]);
+        let prob_buf = self
+            .output_provider
+            .create_buffer_from_f64_slice(&probs, schema.clone())
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let log_prob_buf = self
+            .output_provider
+            .create_buffer_from_f64_slice(&log_probs, schema.clone())
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let stderr_buf = self
+            .output_provider
+            .create_buffer_from_f64_slice(&stderrs, schema.clone())
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let ci_low_buf = self
+            .output_provider
+            .create_buffer_from_f64_slice(&ci_lows, schema.clone())
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let ci_high_buf = self
+            .output_provider
+            .create_buffer_from_f64_slice(&ci_highs, schema)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+        let prob_tensor = self
+            .output_provider
+            .to_dlpack_table(prob_buf)
+            .column(0)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let log_prob_tensor = self
+            .output_provider
+            .to_dlpack_table(log_prob_buf)
+            .column(0)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let stderr_tensor = self
+            .output_provider
+            .to_dlpack_table(stderr_buf)
+            .column(0)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let ci_low_tensor = self
+            .output_provider
+            .to_dlpack_table(ci_low_buf)
+            .column(0)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let ci_high_tensor = self
+            .output_provider
+            .to_dlpack_table(ci_high_buf)
+            .column(0)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+        Ok(EvalResult {
+            atoms,
+            prob: dlpack_capsule_from_tensor(py, prob_tensor)?,
+            log_prob: dlpack_capsule_from_tensor(py, log_prob_tensor)?,
+            num_vars: self.program.num_vars(),
+            grad_true: None,
+            grad_false: None,
+            approx: true,
+            stderr: Some(dlpack_capsule_from_tensor(py, stderr_tensor)?),
+            ci_low: Some(dlpack_capsule_from_tensor(py, ci_low_tensor)?),
+            ci_high: Some(dlpack_capsule_from_tensor(py, ci_high_tensor)?),
+            samples: Some(result.total_samples),
+            evidence_samples: Some(result.evidence_samples),
+            seed: Some(result.seed),
+            confidence: Some(result.confidence),
+            nonmonotone_semantics: Some(xlog_prob::mc::NONMONOTONE_SEMANTICS.to_string()),
+            nonmonotone_sccs: Some(result.nonmonotone_sccs),
+            nonmonotone_cycles: Some(result.nonmonotone_cycles),
+            nonmonotone_iteration_limit_hits: Some(result.nonmonotone_iteration_limit_hits),
         })
     }
 }
@@ -503,6 +703,30 @@ pub struct EvalResult {
     pub grad_true: Option<Vec<PyObject>>,
     #[pyo3(get)]
     pub grad_false: Option<Vec<PyObject>>,
+    #[pyo3(get)]
+    pub approx: bool,
+    #[pyo3(get)]
+    pub stderr: Option<PyObject>,
+    #[pyo3(get)]
+    pub ci_low: Option<PyObject>,
+    #[pyo3(get)]
+    pub ci_high: Option<PyObject>,
+    #[pyo3(get)]
+    pub samples: Option<usize>,
+    #[pyo3(get)]
+    pub evidence_samples: Option<usize>,
+    #[pyo3(get)]
+    pub seed: Option<u64>,
+    #[pyo3(get)]
+    pub confidence: Option<f64>,
+    #[pyo3(get)]
+    pub nonmonotone_semantics: Option<String>,
+    #[pyo3(get)]
+    pub nonmonotone_sccs: Option<usize>,
+    #[pyo3(get)]
+    pub nonmonotone_cycles: Option<usize>,
+    #[pyo3(get)]
+    pub nonmonotone_iteration_limit_hits: Option<usize>,
 }
 
 #[pymodule]

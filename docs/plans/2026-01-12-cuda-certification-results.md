@@ -1,5 +1,7 @@
 # CUDA Certification Suite Results
 
+> **Note (2026-01-14):** This is a historical snapshot. For the latest certification results (including `circuit.ptx` + `mc_sample.ptx` coverage and 140 tests), see `docs/plans/2026-01-14-cuda-certification-results.md`.
+
 **Date:** 2026-01-12
 **Device:** CUDA 7.0 Compute Capability
 **Memory Budget:** 1024 MB

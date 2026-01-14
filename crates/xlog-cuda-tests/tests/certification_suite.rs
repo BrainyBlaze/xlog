@@ -2,7 +2,7 @@
 //!
 //! Run with: cargo test -p xlog-cuda-tests --test certification_suite --release -- --nocapture
 //!
-//! Expected runtime: 30-60 minutes
+//! Expected runtime: seconds to minutes (GPU-dependent; dominated by C21 hardware stress tests)
 
 use xlog_cuda_tests::categories;
 use xlog_cuda_tests::harness::TestContext;
@@ -22,11 +22,10 @@ fn run_full_certification() {
                 "Memory budget: {} MB",
                 ctx.memory_budget() / (1024 * 1024)
             );
-            println!(
-                "Compute capability: {}.{}",
-                ctx.compute_capability().0,
-                ctx.compute_capability().1
-            );
+            match ctx.compute_capability() {
+                Ok((major, minor)) => println!("Compute capability: {}.{}", major, minor),
+                Err(e) => println!("Compute capability: <unavailable> ({})", e),
+            }
             println!();
             ctx
         }

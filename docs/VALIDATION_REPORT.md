@@ -1,10 +1,10 @@
 # XLOG Validation Report
 
-**Date:** 2026-01-13  
-**Release:** v0.1.0  
-**Status:** `xlog-logic` tier production-ready (Linux x86_64 + CUDA-only)  
+**Date:** 2026-01-14  
+**Branch:** `phase4-integrated`  
+**Status:** `xlog-logic` + `xlog-prob` tiers validated (Linux x86_64 + CUDA-only)  
 
-This document summarizes the current validated state of XLOG’s deterministic engine. Historical validation notes were archived to `docs/plans/2026-01-09-validation-report.md`.
+This document summarizes the current validated state of XLOG on `phase4-integrated`, including the deterministic engine and the Phase 4 probabilistic tier. Historical validation notes were archived to `docs/plans/2026-01-09-validation-report.md`.
 
 ---
 
@@ -13,10 +13,11 @@ This document summarizes the current validated state of XLOG’s deterministic e
 | Item | Status | Evidence |
 |------|--------|----------|
 | Workspace tests | ✅ PASS (release) | `cargo test --workspace --all-targets --release` |
-| CUDA kernel certification | ✅ PASS (133/133) | `docs/plans/2026-01-12-cuda-certification-results.md` |
+| CUDA kernel certification | ✅ PASS (140/140) | `docs/plans/2026-01-14-cuda-certification-results.md` |
 | Supported logic fragment | ✅ Stratified Datalog + recursion | `crates/xlog-logic`, `crates/xlog-runtime` |
 | GPU relational ops | ✅ join/sort/filter/dedup/groupby/set-ops | `crates/xlog-cuda`, `kernels/*.cu`, `kernels/*.ptx` |
-| Python interop substrate | ✅ Arrow IPC + DLPack (zero-copy columns) | `docs/architecture/cudf-interop.md`, `crates/xlog-cuda/src/dlpack.rs` |
+| Probabilistic tier | ✅ PASS (exact `exact_ddnnf` + approximate `mc`) | `crates/xlog-prob`, `crates/xlog-prob/tests/mc.rs` |
+| Python package | ✅ `xlog-gpu` (PyO3 + DLPack) | `crates/xlog-gpu-py`, `examples/python/` |
 
 ---
 
@@ -42,12 +43,25 @@ This document summarizes the current validated state of XLOG’s deterministic e
 
 ---
 
+## Validated Capabilities (Phase 4 integrated)
+
+### Probabilistic profile (`xlog-prob`)
+- Probabilistic facts and annotated disjunctions (`exact_ddnnf` backend via D4 Decision-DNNF).
+- Query conditioning via evidence and GPU circuit evaluation (XGCF).
+- P3 Monte Carlo execution (`prob_engine=mc`) for non-monotone recursion and approximate inference, returning uncertainty metadata (samples/seed + stderr/CI).
+
+### Python API (`xlog-gpu`)
+- `xlog_gpu.Program.compile(..., prob_engine="exact_ddnnf"|"mc")` compiles and runs on GPU.
+- Results returned as DLPack capsules; Torch is optional (any DLPack producer works).
+
+---
+
 ## Primary Validation Artifacts
 
-- CUDA certification suite results: `docs/plans/2026-01-12-cuda-certification-results.md`
+- CUDA certification suite results: `docs/plans/2026-01-14-cuda-certification-results.md`
 - Architecture overview: `docs/ARCHITECTURE.md`
 - Roadmap + current status: `docs/ROADMAP.md`
-- Example programs (end-to-end): `docs/EXAMPLES.md` and `examples/xlog/`
+- Example programs (end-to-end): `examples/README.md` and `examples/xlog/`
 
 ---
 
@@ -77,5 +91,4 @@ cargo run -p xlog-logic --example xlog_run -- examples/xlog/00-basics/01_tc_reac
 
 - `symbol` values are currently represented as a `u32` hash (not reversible).
 - Arrow IPC paths involve device↔host copies; DLPack is the zero-copy path.
-- `xlog-prob`, `xlog-elp`, and a user-visible Python package (`xlog-gpu`) are planned for later phases.
-
+- `xlog-elp` and `xlog-solve` remain planned for later phases; `mc` inference does not currently support gradients.

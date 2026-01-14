@@ -5,6 +5,8 @@
 **Branch:** feature/arithmetic-expressions
 **Total Tests:** 388 passing
 
+> **Addendum (2026-01-14 / `phase4-integrated`):** Phase 4 is implemented on `phase4-integrated`, including `xlog-prob` (exact `exact_ddnnf` + P3 `mc`) and Python `xlog-gpu`. The CUDA kernel set now includes `circuit.ptx` and `mc_sample.ptx`, and the CUDA certification suite passes **140/140** tests (see `docs/plans/2026-01-14-cuda-certification-results.md`).
+
 ---
 
 ## Executive Summary

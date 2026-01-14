@@ -48,4 +48,22 @@ True zero-copy cuDF interop needs a GPU-native interchange path:
   - accepts DLPack capsules / `__dlpack__` producers for input relations
   - returns DLPack capsules for query result columns
   - provides a `dlpack_roundtrip(...)` helper for low-level DLPack validation
-- Next: add a small Python example using cuDF (DLPack) or CUDA-aware Arrow memory
+
+## Python cuDF Example (via DLPack)
+
+This uses cuDF as a DLPack producer and round-trips a GPU column through XLOG’s DLPack boundary:
+
+```python
+import cupy as cp
+import cudf
+from xlog_gpu import dlpack_roundtrip
+
+s = cudf.Series([1, 2, 3], dtype="int32")
+
+# Returns a DLPack capsule for the round-tripped column.
+out_capsule = dlpack_roundtrip(s, device=0, memory_mb=1024)
+
+# Convert back to a CuPy array to validate the bytes made the round trip.
+out = cp.fromDlpack(out_capsule)
+assert out.tolist() == [1, 2, 3]
+```

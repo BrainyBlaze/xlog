@@ -4,6 +4,7 @@
 //! join patterns, dedup edge cases, and groupby scenarios.
 
 use crate::harness::{CategoryResult, TestResult, TestContext};
+use crate::harness::xgcf;
 use std::collections::HashSet;
 use std::time::Instant;
 use xlog_core::{AggOp, Schema, ScalarType};
@@ -23,9 +24,271 @@ pub fn run_all(ctx: &TestContext) -> CategoryResult {
     results.add_result(test_dedup_all_same(ctx));
     results.add_result(test_groupby_single_group(ctx));
     results.add_result(test_groupby_all_unique_keys(ctx));
+    results.add_result(test_mc_sample_matches_cpu_reference(ctx));
+    results.add_result(test_xgcf_forward_tiny_matches_expected(ctx));
+    results.add_result(test_xgcf_backward_tiny_matches_expected(ctx));
 
     results.set_duration(start.elapsed());
     results
+}
+
+fn splitmix64(mut x: u64) -> u64 {
+    x = x.wrapping_add(0x9e3779b97f4a7c15);
+    x = (x ^ (x >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94d049bb133111eb);
+    x ^ (x >> 31)
+}
+
+fn mc_sample_cpu_reference(probs: &[f32], num_samples: usize, seed: u64) -> Vec<u8> {
+    let num_vars = probs.len();
+    let total = num_vars * num_samples;
+    let mut out = vec![0u8; total];
+    if total == 0 {
+        return out;
+    }
+
+    let stride = 0x9e3779b97f4a7c15u64;
+    let inv_u32: f32 = 1.0f32 / 4294967296.0f32;
+
+    for tid in 0..(total as u64) {
+        let var_idx = (tid % (num_vars as u64)) as usize;
+        let p = probs[var_idx];
+        let p_clamped = if p <= 0.0 {
+            0.0
+        } else if p >= 1.0 {
+            1.0
+        } else {
+            p
+        };
+
+        let x = splitmix64(seed ^ tid.wrapping_mul(stride));
+        let r = (x >> 32) as u32;
+        let u = (r as f32 + 0.5f32) * inv_u32;
+        out[tid as usize] = if u < p_clamped { 1 } else { 0 };
+    }
+    out
+}
+
+/// Test 11: MC sampling kernel produces expected bit patterns for a fixed seed.
+fn test_mc_sample_matches_cpu_reference(ctx: &TestContext) -> TestResult {
+    let start = Instant::now();
+
+    let probs: Vec<f32> = vec![0.0, 1.0, 0.25, 0.75];
+    let num_samples = 256usize;
+    let seed = 123456789u64;
+
+    let expected = mc_sample_cpu_reference(&probs, num_samples, seed);
+    let got = match ctx.provider.sample_bernoulli_matrix(&probs, num_samples, seed) {
+        Ok(v) => v,
+        Err(e) => {
+            return TestResult::error(
+                "test_mc_sample_matches_cpu_reference",
+                start.elapsed(),
+                format!("sample_bernoulli_matrix failed: {}", e),
+            )
+        }
+    };
+
+    if got != expected {
+        // Provide a small diagnostic sample.
+        let mut first_mismatch = None;
+        for (i, (&a, &b)) in got.iter().zip(expected.iter()).enumerate() {
+            if a != b {
+                first_mismatch = Some((i, a, b));
+                break;
+            }
+        }
+        let diag = if let Some((i, a, b)) = first_mismatch {
+            format!("first mismatch at idx {}: got {}, expected {}", i, a, b)
+        } else {
+            "unknown mismatch".to_string()
+        };
+
+        return TestResult::error(
+            "test_mc_sample_matches_cpu_reference",
+            start.elapsed(),
+            format!(
+                "MC sampling output differed from CPU reference (len={}): {}",
+                got.len(),
+                diag
+            ),
+        );
+    }
+
+    if let Err(e) = ctx.sync_and_check() {
+        return TestResult::error(
+            "test_mc_sample_matches_cpu_reference",
+            start.elapsed(),
+            format!("Sync failed: {}", e),
+        );
+    }
+
+    TestResult::passed("test_mc_sample_matches_cpu_reference", start.elapsed())
+}
+
+/// Test 12: XGCF forward kernel matches CPU expectations on a tiny circuit.
+fn test_xgcf_forward_tiny_matches_expected(ctx: &TestContext) -> TestResult {
+    let start = Instant::now();
+
+    let spec = xgcf::tiny_xgcf_spec();
+    let values = match xgcf::run_tiny_xgcf_forward(ctx, &spec) {
+        Ok(v) => v,
+        Err(e) => {
+            return TestResult::error(
+                "test_xgcf_forward_tiny_matches_expected",
+                start.elapsed(),
+                format!("xgcf forward failed: {}", e),
+            )
+        }
+    };
+
+    if values.len() != spec.expected_values.len() {
+        return TestResult::error(
+            "test_xgcf_forward_tiny_matches_expected",
+            start.elapsed(),
+            format!(
+                "Unexpected values length: got {}, expected {}",
+                values.len(),
+                spec.expected_values.len()
+            ),
+        );
+    }
+
+    const EPS: f64 = 1e-9;
+    for (i, (&got, &expected)) in values.iter().zip(spec.expected_values.iter()).enumerate() {
+        if expected.is_infinite() && expected.is_sign_negative() {
+            if !(got.is_infinite() && got.is_sign_negative()) {
+                return TestResult::error(
+                    "test_xgcf_forward_tiny_matches_expected",
+                    start.elapsed(),
+                    format!("node {}: expected -inf, got {}", i, got),
+                );
+            }
+            continue;
+        }
+        let diff = (got - expected).abs();
+        if diff > EPS || got.is_nan() || expected.is_nan() {
+            return TestResult::error(
+                "test_xgcf_forward_tiny_matches_expected",
+                start.elapsed(),
+                format!(
+                    "node {}: got {}, expected {} (|diff|={})",
+                    i, got, expected, diff
+                ),
+            );
+        }
+    }
+
+    TestResult::passed("test_xgcf_forward_tiny_matches_expected", start.elapsed())
+}
+
+/// Test 13: XGCF backward kernels produce expected gradients on a tiny circuit.
+fn test_xgcf_backward_tiny_matches_expected(ctx: &TestContext) -> TestResult {
+    let start = Instant::now();
+
+    let spec = xgcf::tiny_xgcf_spec();
+    let run = match xgcf::run_tiny_xgcf_backward(ctx, &spec) {
+        Ok(r) => r,
+        Err(e) => {
+            return TestResult::error(
+                "test_xgcf_backward_tiny_matches_expected",
+                start.elapsed(),
+                format!("xgcf backward failed: {}", e),
+            )
+        }
+    };
+
+    const EPS: f64 = 1e-9;
+
+    if run.values.len() != spec.expected_values.len() {
+        return TestResult::error(
+            "test_xgcf_backward_tiny_matches_expected",
+            start.elapsed(),
+            format!(
+                "Unexpected values length: got {}, expected {}",
+                run.values.len(),
+                spec.expected_values.len()
+            ),
+        );
+    }
+    for (i, (&got, &expected)) in run.values.iter().zip(spec.expected_values.iter()).enumerate() {
+        if expected.is_infinite() && expected.is_sign_negative() {
+            if !(got.is_infinite() && got.is_sign_negative()) {
+                return TestResult::error(
+                    "test_xgcf_backward_tiny_matches_expected",
+                    start.elapsed(),
+                    format!("node {}: expected -inf, got {}", i, got),
+                );
+            }
+            continue;
+        }
+        let diff = (got - expected).abs();
+        if diff > EPS || got.is_nan() || expected.is_nan() {
+            return TestResult::error(
+                "test_xgcf_backward_tiny_matches_expected",
+                start.elapsed(),
+                format!(
+                    "node {}: got {}, expected {} (|diff|={})",
+                    i, got, expected, diff
+                ),
+            );
+        }
+    }
+
+    if run.grad_true.len() != spec.expected_grad_true.len()
+        || run.grad_false.len() != spec.expected_grad_false.len()
+    {
+        return TestResult::error(
+            "test_xgcf_backward_tiny_matches_expected",
+            start.elapsed(),
+            format!(
+                "Unexpected gradient lengths: got true/false {}/{} expected {}/{}",
+                run.grad_true.len(),
+                run.grad_false.len(),
+                spec.expected_grad_true.len(),
+                spec.expected_grad_false.len()
+            ),
+        );
+    }
+
+    for (i, (&got, &expected)) in run
+        .grad_true
+        .iter()
+        .zip(spec.expected_grad_true.iter())
+        .enumerate()
+    {
+        let diff = (got - expected).abs();
+        if diff > EPS || got.is_nan() || expected.is_nan() {
+            return TestResult::error(
+                "test_xgcf_backward_tiny_matches_expected",
+                start.elapsed(),
+                format!(
+                    "grad_true[{}]: got {}, expected {} (|diff|={})",
+                    i, got, expected, diff
+                ),
+            );
+        }
+    }
+    for (i, (&got, &expected)) in run
+        .grad_false
+        .iter()
+        .zip(spec.expected_grad_false.iter())
+        .enumerate()
+    {
+        let diff = (got - expected).abs();
+        if diff > EPS || got.is_nan() || expected.is_nan() {
+            return TestResult::error(
+                "test_xgcf_backward_tiny_matches_expected",
+                start.elapsed(),
+                format!(
+                    "grad_false[{}]: got {}, expected {} (|diff|={})",
+                    i, got, expected, diff
+                ),
+            );
+        }
+    }
+
+    TestResult::passed("test_xgcf_backward_tiny_matches_expected", start.elapsed())
 }
 
 /// Test 1: Sort when all values are equal.

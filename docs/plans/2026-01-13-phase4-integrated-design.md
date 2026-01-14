@@ -1,10 +1,17 @@
 # Phase 4 Integrated Design (xlog-prob + P4.1–P4.4 + Python `xlog-gpu`)
 
 **Date:** 2026-01-13  
-**Status:** Approved (interactive requirements lock)  
+**Status:** Implemented on `phase4-integrated`  
 **Targets:** Linux x86_64 + CUDA-only  
 
 This document captures the **integrated Phase 4** design: deliver `xlog-prob` (probabilistic + differentiable reasoning) while completing/solidifying the Phase 4 substrate items in `docs/ROADMAP.md` (CuDF/Arrow/DLPack interop, optimizer, incremental maintenance, adaptive indexing) and shipping a user-visible Python package.
+
+> **Implementation note (2026-01-14):** This design is implemented on branch `phase4-integrated`.
+>
+> Key entry points:
+> - Exact path: `crates/xlog-prob/src/exact.rs`, `crates/xlog-prob/src/xgcf.rs`, `kernels/circuit.ptx`
+> - P3 Monte Carlo: `crates/xlog-prob/src/mc.rs`, `kernels/mc_sample.ptx`
+> - Python API: `crates/xlog-gpu-py/src/lib.rs`, `examples/python/03_prob_mc_nonmonotone_torch.py`
 
 ---
 
@@ -25,10 +32,10 @@ This document captures the **integrated Phase 4** design: deliver `xlog-prob` (p
 - **Full recursion is supported**, including probabilistic heads in recursive SCCs, via a fixpoint-aware provenance construction (see §4).
 - **Non-monotone recursion** (recursion through `not` and/or aggregates) is permitted syntactically, but:
   - **Default:** compilation error with a clear diagnostic and remediation.
-  - **Only if user explicitly requests P3** (via `#pragma prob_engine = mc` or CLI `--prob-engine mc`, with CLI overriding pragma): approximate execution is allowed.
+  - **Only if user explicitly requests P3** (via `#pragma prob_engine = mc` or an API override such as `xlog_gpu.Program.compile(..., prob_engine="mc")`): approximate execution is allowed.
 
 ### 1.4 Controls / UX
-- **P3 selection:** both `#pragma` in source and CLI flag exist; **CLI overrides pragma**.
+- **P3 selection:** both `#pragma` in source and an API override exist; **explicit overrides take precedence**.
 
 ---
 
@@ -44,7 +51,7 @@ This document captures the **integrated Phase 4** design: deliver `xlog-prob` (p
 
 ### 2.2 Python API (package: `xlog-gpu`)
 MVP surface (subject to naming refinement):
-- `xlog_gpu.Program.compile(source: str, *, device=0, memory_mb=..., prob_engine="exact|mc", ...) -> CompiledProgram`
+- `xlog_gpu.Program.compile(source: str, *, device=0, memory_mb=..., prob_engine="exact_ddnnf|mc", ...) -> CompiledProgram`
 - `CompiledProgram.evaluate(queries=[...], evidence=[...], *, return_grads=False, dlpack_inputs={...}) -> Result`
 - All GPU data interchange is via **DLPack**:
   - inputs accepted as DLPack capsule objects (or objects exposing `__dlpack__`)
@@ -170,7 +177,7 @@ MVP approach for conditional probabilities:
 ### 7.1 Trigger conditions
 P3 is allowed only when explicitly requested:
 - `#pragma prob_engine = mc` (source), or
-- CLI `--prob-engine mc` (CLI overrides pragma)
+- an API override such as `xlog_gpu.Program.compile(..., prob_engine="mc")`
 
 ### 7.2 Scope
 P3 is the escape hatch for:
@@ -182,6 +189,8 @@ P3 results must be **explicitly labeled approximate** and include uncertainty:
 - report `(estimate, stderr/confidence interval, samples, seed)`
 - for non-monotone programs, the engine must be explicit about the semantics used for the inner evaluation
   (Phase 4 begins with an honest, bounded/unknown-aware approach; exact stable-model probability semantics is deferred).
+
+**Non-monotone recursion semantics (Phase 4 MC engine):** synchronous iteration per SCC; if a fixpoint is reached, use it; if a cycle is detected, use the intersection of all states in the cycle (skeptical tuples only); if the iteration budget is exceeded, use the intersection across all visited states (conservative). See `xlog_prob::mc::NONMONOTONE_SEMANTICS`.
 
 ---
 
@@ -223,4 +232,3 @@ P4.2–P4.4 are leveraged to keep slice and GPU costs bounded:
 - Cross-platform packaging (macOS/Windows) — deferred.
 - A full internal Torch runtime — deferred (external neural via DLPack ships first).
 - Exact stable-model probability semantics for non-monotone recursion — deferred (requires deeper solver integration).
-

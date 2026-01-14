@@ -5,6 +5,7 @@
 //! the same inputs.
 
 use crate::harness::{CategoryResult, TestResult, TestContext};
+use crate::harness::xgcf;
 use std::collections::HashSet;
 use std::time::Instant;
 use xlog_core::{Schema, ScalarType};
@@ -19,9 +20,126 @@ pub fn run_all(ctx: &TestContext) -> CategoryResult {
     results.add_result(test_join_reproducibility(ctx));
     results.add_result(test_dedup_reproducibility(ctx));
     results.add_result(test_stable_sort_order(ctx));
+    results.add_result(test_mc_sample_reproducibility(ctx));
+    results.add_result(test_xgcf_forward_reproducibility(ctx));
+    results.add_result(test_xgcf_backward_reproducibility(ctx));
 
     results.set_duration(start.elapsed());
     results
+}
+
+/// Test 6: MC sampling is deterministic for a fixed seed.
+fn test_mc_sample_reproducibility(ctx: &TestContext) -> TestResult {
+    let start = Instant::now();
+
+    let probs: Vec<f32> = vec![0.1, 0.5, 0.9];
+    let num_samples = 4096usize;
+    let seed = 424242u64;
+
+    let a = match ctx.provider.sample_bernoulli_matrix(&probs, num_samples, seed) {
+        Ok(v) => v,
+        Err(e) => {
+            return TestResult::error(
+                "test_mc_sample_reproducibility",
+                start.elapsed(),
+                format!("sample_bernoulli_matrix failed: {}", e),
+            )
+        }
+    };
+    let b = match ctx.provider.sample_bernoulli_matrix(&probs, num_samples, seed) {
+        Ok(v) => v,
+        Err(e) => {
+            return TestResult::error(
+                "test_mc_sample_reproducibility",
+                start.elapsed(),
+                format!("sample_bernoulli_matrix failed (2nd run): {}", e),
+            )
+        }
+    };
+
+    if a != b {
+        return TestResult::error(
+            "test_mc_sample_reproducibility",
+            start.elapsed(),
+            format!("MC sampling not deterministic: outputs differ (len={})", a.len()),
+        );
+    }
+
+    TestResult::passed("test_mc_sample_reproducibility", start.elapsed())
+}
+
+/// Test 7: XGCF forward kernel is deterministic for identical inputs.
+fn test_xgcf_forward_reproducibility(ctx: &TestContext) -> TestResult {
+    let start = Instant::now();
+
+    let spec = xgcf::tiny_xgcf_spec();
+    let a = match xgcf::run_tiny_xgcf_forward(ctx, &spec) {
+        Ok(v) => v,
+        Err(e) => {
+            return TestResult::error(
+                "test_xgcf_forward_reproducibility",
+                start.elapsed(),
+                format!("xgcf forward failed: {}", e),
+            )
+        }
+    };
+    let b = match xgcf::run_tiny_xgcf_forward(ctx, &spec) {
+        Ok(v) => v,
+        Err(e) => {
+            return TestResult::error(
+                "test_xgcf_forward_reproducibility",
+                start.elapsed(),
+                format!("xgcf forward failed (2nd run): {}", e),
+            )
+        }
+    };
+
+    if a != b {
+        return TestResult::error(
+            "test_xgcf_forward_reproducibility",
+            start.elapsed(),
+            "XGCF forward not deterministic: values differ across runs".to_string(),
+        );
+    }
+
+    TestResult::passed("test_xgcf_forward_reproducibility", start.elapsed())
+}
+
+/// Test 8: XGCF backward kernels are deterministic for identical inputs.
+fn test_xgcf_backward_reproducibility(ctx: &TestContext) -> TestResult {
+    let start = Instant::now();
+
+    let spec = xgcf::tiny_xgcf_spec();
+    let a = match xgcf::run_tiny_xgcf_backward(ctx, &spec) {
+        Ok(r) => r,
+        Err(e) => {
+            return TestResult::error(
+                "test_xgcf_backward_reproducibility",
+                start.elapsed(),
+                format!("xgcf backward failed: {}", e),
+            )
+        }
+    };
+    let b = match xgcf::run_tiny_xgcf_backward(ctx, &spec) {
+        Ok(r) => r,
+        Err(e) => {
+            return TestResult::error(
+                "test_xgcf_backward_reproducibility",
+                start.elapsed(),
+                format!("xgcf backward failed (2nd run): {}", e),
+            )
+        }
+    };
+
+    if a.values != b.values || a.adj != b.adj || a.grad_true != b.grad_true || a.grad_false != b.grad_false {
+        return TestResult::error(
+            "test_xgcf_backward_reproducibility",
+            start.elapsed(),
+            "XGCF backward not deterministic: outputs differ across runs".to_string(),
+        );
+    }
+
+    TestResult::passed("test_xgcf_backward_reproducibility", start.elapsed())
 }
 
 /// Test 1: Run same sort multiple times, verify identical results.

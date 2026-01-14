@@ -8,6 +8,8 @@
 
 **Tech Stack:** Rust, cudarc 0.12, rand/rand_chacha for deterministic RNG, xlog-cuda/xlog-core integration.
 
+**Status (2026-01-14):** Implemented (24 categories, 140 internal tests). Latest results: `docs/plans/2026-01-14-cuda-certification-results.md`.
+
 ---
 
 ## Batch 1: Crate Setup and Harness Infrastructure
@@ -63,10 +65,10 @@ harness = true
 //!
 //! # Usage
 //! ```bash
-//! # Full certification (30-60 min)
+//! # Full certification (seconds to minutes; GPU-dependent)
 //! cargo test -p xlog-cuda-tests --test certification_suite --release
 //!
-//! # Quick smoke test (2-5 min)
+//! # Quick smoke test (sub-second to seconds; GPU-dependent)
 //! cargo test -p xlog-cuda-tests --test quick_smoke --release
 //!
 //! # Single category

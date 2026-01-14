@@ -33,3 +33,4 @@ __pycache__/
 .python-version
 .mypy_cache/
 .pytest_cache/
+crates/xlog-gpu-py/dist/

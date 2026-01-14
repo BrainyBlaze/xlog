@@ -62,9 +62,34 @@ impl TestContext {
     }
 
     /// Get compute capability of current device.
-    pub fn compute_capability(&self) -> (u32, u32) {
-        // Default to sm_70 (Volta) as minimum supported
-        (7, 0)
+    pub fn compute_capability(&self) -> Result<(u32, u32)> {
+        use cudarc::driver::sys::CUdevice_attribute;
+
+        let major = self
+            .device
+            .inner()
+            .attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)
+            .map_err(|e| XlogError::Kernel(format!("Failed to query compute capability major: {}", e)))?;
+        let minor = self
+            .device
+            .inner()
+            .attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR)
+            .map_err(|e| XlogError::Kernel(format!("Failed to query compute capability minor: {}", e)))?;
+
+        let major_u32: u32 = major.try_into().map_err(|_| {
+            XlogError::Kernel(format!(
+                "Failed to convert compute capability major {} to u32",
+                major
+            ))
+        })?;
+        let minor_u32: u32 = minor.try_into().map_err(|_| {
+            XlogError::Kernel(format!(
+                "Failed to convert compute capability minor {} to u32",
+                minor
+            ))
+        })?;
+
+        Ok((major_u32, minor_u32))
     }
 }
 

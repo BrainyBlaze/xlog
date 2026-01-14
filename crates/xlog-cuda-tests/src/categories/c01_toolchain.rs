@@ -8,12 +8,57 @@
 //! - JIT cache behavior under repeated kernel execution
 
 use crate::harness::{CategoryResult, TestContext, TestResult};
+use std::collections::HashSet;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
-use xlog_cuda::{
-    dedup_kernels, filter_kernels, groupby_kernels, join_kernels, pack_kernels, scan_kernels,
-    set_ops_kernels, sort_kernels, DEDUP_MODULE, FILTER_MODULE, GROUPBY_MODULE, JOIN_MODULE,
-    PACK_MODULE, SCAN_MODULE, SET_OPS_MODULE, SORT_MODULE,
-};
+use xlog_cuda::{join_kernels, JOIN_MODULE};
+
+fn kernels_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../kernels")
+}
+
+fn extract_ptx_directive(ptx: &str, directive: &str) -> Option<String> {
+    for line in ptx.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix(directive) {
+            let rest = rest.trim();
+            if rest.is_empty() {
+                continue;
+            }
+            return rest.split_whitespace().next().map(|s| s.to_string());
+        }
+    }
+    None
+}
+
+fn extract_entry_names(ptx: &str) -> Vec<String> {
+    let mut entries = Vec::new();
+    for line in ptx.lines() {
+        let line = line.trim();
+        let line = if let Some(rest) = line.strip_prefix(".visible .entry ") {
+            rest
+        } else if let Some(rest) = line.strip_prefix(".entry ") {
+            rest
+        } else {
+            continue;
+        };
+
+        if let Some((name, _)) = line.split_once('(') {
+            let name = name.trim();
+            if !name.is_empty() {
+                entries.push(name.to_string());
+            }
+        }
+    }
+    entries
+}
+
+fn parse_sm_target(target: &str) -> Option<u32> {
+    let s = target.trim();
+    let sm = s.strip_prefix("sm_")?;
+    sm.parse::<u32>().ok()
+}
 
 /// Run all tests in this category.
 pub fn run_all(ctx: &TestContext) -> CategoryResult {
@@ -70,7 +115,16 @@ fn test_ptx_loads_successfully(ctx: &TestContext) -> TestResult {
 fn test_compute_capability_check(ctx: &TestContext) -> TestResult {
     let start = Instant::now();
 
-    let (major, minor) = ctx.compute_capability();
+    let (major, minor) = match ctx.compute_capability() {
+        Ok(v) => v,
+        Err(e) => {
+            return TestResult::error(
+                "test_compute_capability_check",
+                start.elapsed(),
+                format!("Failed to query compute capability: {}", e),
+            );
+        }
+    };
 
     // Minimum requirement is sm_70 (Volta)
     // major >= 7 is the effective check since minor is always >= 0 for u32
@@ -100,134 +154,126 @@ fn test_compute_capability_check(ctx: &TestContext) -> TestResult {
 
 /// Test 3: Verify all kernel functions can be resolved from the loaded modules.
 ///
-/// This test iterates through all 8 PTX modules and verifies that each
-/// kernel function can be resolved using device.get_func().
+/// This test parses every `kernels/*.ptx` file, extracts all `.entry` points,
+/// and verifies that `CudaKernelProvider` loaded each entry under the expected
+/// module name `xlog_<stem>`.
 fn test_kernel_function_resolution(ctx: &TestContext) -> TestResult {
     let start = Instant::now();
 
     let device = ctx.device.inner();
 
-    // Define all modules and their kernel functions
-    let modules_and_functions: &[(&str, &[&str])] = &[
-        (
-            JOIN_MODULE,
-            &[
-                join_kernels::HASH_JOIN_BUILD,
-                join_kernels::HASH_JOIN_PROBE,
-                join_kernels::COMPUTE_COMPOSITE_HASH,
-                join_kernels::HASH_JOIN_BUCKET_COUNT_V2,
-                join_kernels::HASH_JOIN_SCATTER_V2,
-                join_kernels::HASH_JOIN_PROBE_V2,
-                join_kernels::HASH_JOIN_SEMI,
-                join_kernels::HASH_JOIN_ANTI,
-                join_kernels::INIT_HASH_TABLE,
-            ],
-        ),
-        (
-            DEDUP_MODULE,
-            &[
-                dedup_kernels::MARK_DUPLICATES,
-                dedup_kernels::MARK_UNIQUE_COLUMNAR,
-                dedup_kernels::MARK_UNIQUE_AND_SCAN_COLUMNAR,
-                dedup_kernels::COMPACT_ROWS,
-            ],
-        ),
-        (
-            GROUPBY_MODULE,
-            &[
-                groupby_kernels::DETECT_GROUP_BOUNDARIES,
-                groupby_kernels::DETECT_BOUNDARIES,
-                groupby_kernels::EXTRACT_GROUP_KEYS,
-                groupby_kernels::GROUPBY_COUNT,
-                groupby_kernels::GROUPBY_SUM,
-                groupby_kernels::GROUPBY_MIN,
-                groupby_kernels::GROUPBY_MAX,
-                groupby_kernels::GROUPBY_LOGSUMEXP_MAX,
-                groupby_kernels::GROUPBY_LOGSUMEXP_SUMEXP,
-                groupby_kernels::GROUPBY_LOGSUMEXP_FINAL,
-            ],
-        ),
-        (
-            SCAN_MODULE,
-            &[
-                scan_kernels::EXCLUSIVE_SCAN_MASK,
-                scan_kernels::COUNT_MASK,
-                scan_kernels::MULTIBLOCK_SCAN_PHASE1,
-                scan_kernels::MULTIBLOCK_SCAN_PHASE2,
-                scan_kernels::MULTIBLOCK_SCAN_PHASE3,
-            ],
-        ),
-        (
-            SORT_MODULE,
-            &[
-                sort_kernels::RADIX_HISTOGRAM,
-                sort_kernels::RADIX_SCATTER,
-                sort_kernels::COMPUTE_RANKS,
-                sort_kernels::RADIX_SCATTER_STABLE,
-                sort_kernels::INIT_INDICES,
-                sort_kernels::APPLY_PERMUTATION_U32,
-                sort_kernels::APPLY_PERMUTATION_BYTES,
-            ],
-        ),
-        (
-            FILTER_MODULE,
-            &[
-                filter_kernels::FILTER_COMPARE_U32,
-                filter_kernels::FILTER_COMPARE_I64,
-                filter_kernels::FILTER_COMPARE_F64,
-                filter_kernels::FILTER_COMPARE_U32_SCAN_PHASE1,
-                filter_kernels::FILTER_COMPARE_F64_SCAN_PHASE1,
-                filter_kernels::COMPACT_U32_BY_MASK,
-                filter_kernels::COMPACT_I64_BY_MASK,
-                filter_kernels::COMPACT_F64_BY_MASK,
-                filter_kernels::COMPACT_BYTES_BY_MASK,
-                filter_kernels::MASK_AND,
-                filter_kernels::MASK_OR,
-                filter_kernels::MASK_NOT,
-            ],
-        ),
-        (
-            SET_OPS_MODULE,
-            &[
-                set_ops_kernels::CONCAT_U32,
-                set_ops_kernels::SORTED_DIFF_MARK,
-            ],
-        ),
-        (
-            PACK_MODULE,
-            &[
-                pack_kernels::PACK_KEYS,
-                pack_kernels::HASH_PACKED_KEYS,
-                pack_kernels::PACK_AND_HASH_KEYS,
-                pack_kernels::PACK_KEYS_ALIGNED,
-                pack_kernels::UNPACK_COLUMN,
-                pack_kernels::GATHER_PACKED_ROWS,
-                pack_kernels::SCATTER_PACKED_ROWS,
-                pack_kernels::COMPARE_PACKED_KEYS,
-            ],
-        ),
-    ];
-
     let mut total_functions = 0;
     let mut resolved_functions = 0;
 
-    for (module_name, functions) in modules_and_functions {
-        for func_name in *functions {
+    let kernels_dir = kernels_dir();
+    let mut ptx_files: Vec<PathBuf> = match fs::read_dir(&kernels_dir) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|ext| ext == "ptx"))
+            .collect(),
+        Err(e) => {
+            return TestResult::error(
+                "test_kernel_function_resolution",
+                start.elapsed(),
+                format!("Failed to read kernels dir {}: {}", kernels_dir.display(), e),
+            );
+        }
+    };
+    ptx_files.sort();
+
+    if ptx_files.is_empty() {
+        return TestResult::error(
+            "test_kernel_function_resolution",
+            start.elapsed(),
+            format!("No PTX files found under {}", kernels_dir.display()),
+        );
+    }
+
+    for path in ptx_files {
+        let filename = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("<unknown>");
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        if stem.is_empty() {
+            return TestResult::error(
+                "test_kernel_function_resolution",
+                start.elapsed(),
+                format!("Invalid PTX filename stem: {}", filename),
+            );
+        }
+
+        let module_name = format!("xlog_{}", stem);
+
+        let ptx = match fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) => {
+                return TestResult::error(
+                    "test_kernel_function_resolution",
+                    start.elapsed(),
+                    format!("Failed to read {}: {}", path.display(), e),
+                );
+            }
+        };
+
+        let address_size = extract_ptx_directive(&ptx, ".address_size").unwrap_or_default();
+        if address_size != "64" {
+            return TestResult::error(
+                "test_kernel_function_resolution",
+                start.elapsed(),
+                format!(
+                    "{}: expected .address_size 64, got '{}'",
+                    filename, address_size
+                ),
+            );
+        }
+
+        let target = extract_ptx_directive(&ptx, ".target").unwrap_or_default();
+        let sm = parse_sm_target(&target).unwrap_or(0);
+        if sm < 70 {
+            return TestResult::error(
+                "test_kernel_function_resolution",
+                start.elapsed(),
+                format!(
+                    "{}: expected .target sm_70 or later, got '{}'",
+                    filename, target
+                ),
+            );
+        }
+
+        let entries = extract_entry_names(&ptx);
+        if entries.is_empty() {
+            return TestResult::error(
+                "test_kernel_function_resolution",
+                start.elapsed(),
+                format!("{}: no .entry kernels found", filename),
+            );
+        }
+
+        let mut seen = HashSet::new();
+        for entry in &entries {
+            if !seen.insert(entry.as_str()) {
+                return TestResult::error(
+                    "test_kernel_function_resolution",
+                    start.elapsed(),
+                    format!("{}: duplicate .entry name {}", filename, entry),
+                );
+            }
+        }
+
+        for entry in &entries {
             total_functions += 1;
-            match device.get_func(module_name, func_name) {
-                Some(_func) => {
-                    resolved_functions += 1;
-                }
-                None => {
-                    return TestResult::error(
-                        "test_kernel_function_resolution",
-                        start.elapsed(),
-                        format!(
-                            "Failed to resolve kernel function '{}' from module '{}'",
-                            func_name, module_name
-                        ),
-                    );
-                }
+            if device.get_func(&module_name, entry).is_some() {
+                resolved_functions += 1;
+            } else {
+                return TestResult::error(
+                    "test_kernel_function_resolution",
+                    start.elapsed(),
+                    format!(
+                        "{}: failed to resolve kernel function '{}' from module '{}'",
+                        filename, entry, module_name
+                    ),
+                );
             }
         }
     }
@@ -237,19 +283,6 @@ fn test_kernel_function_resolution(ctx: &TestContext) -> TestResult {
             "test_kernel_function_resolution",
             start.elapsed(),
             format!("Sync failed after function resolution: {}", e),
-        );
-    }
-
-    // Verify we checked all expected functions (sanity check)
-    // 9 join + 4 dedup + 10 groupby + 5 scan + 7 sort + 12 filter + 2 set_ops + 8 pack = 57
-    if total_functions != 57 {
-        return TestResult::error(
-            "test_kernel_function_resolution",
-            start.elapsed(),
-            format!(
-                "Unexpected function count: expected 57, got {}",
-                total_functions
-            ),
         );
     }
 

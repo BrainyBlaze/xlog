@@ -66,5 +66,26 @@ jobs:
           prob = xlog_gpu.Program.compile(prob_src, device=0, memory_mb=1024)
           prob_res = prob.evaluate(return_grads=False)
           assert len(prob_res.atoms) == 2
-          PY
 
+          mc_src = r"""
+          #pragma prob_engine = mc
+
+          0.5::flip().
+
+          p() :- flip().
+          q() :- not p().
+          p() :- not q().
+
+          query(p()).
+          query(flip()).
+          """.strip()
+
+          mc = xlog_gpu.Program.compile(mc_src, device=0, memory_mb=1024)
+          mc_res = mc.evaluate(return_grads=False, samples=20000, seed=123, confidence=0.95, max_nonmonotone_iterations=256)
+          assert len(mc_res.atoms) == 2
+          assert mc_res.approx is True
+          assert mc_res.stderr is not None
+          assert mc_res.ci_low is not None
+          assert mc_res.ci_high is not None
+          assert mc_res.samples == 20000
+          PY

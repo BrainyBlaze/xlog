@@ -1,9 +1,7 @@
 # CUDA Certification Suite Results
 
-> **Note (2026-01-14):** This is a historical snapshot. For the latest certification results (including `circuit.ptx` + `mc_sample.ptx` coverage and 140 tests), see `docs/plans/2026-01-14-cuda-certification-results.md`.
-
-**Date:** 2026-01-12
-**Device:** CUDA 7.0 Compute Capability
+**Date:** 2026-01-14
+**Device:** CUDA 9.0 Compute Capability
 **Memory Budget:** 1024 MB
 **Build:** Release profile
 
@@ -13,9 +11,9 @@
 |--------|-------|
 | Categories Run | 24 |
 | Categories Passing | **24 (100%)** |
-| Total Tests | 133 |
-| Tests Passed | **133 (100%)** |
-| Total Duration | 15.09s |
+| Total Tests | 140 |
+| Tests Passed | **140 (100%)** |
+| Total Duration | 11.67s |
 
 **Overall Status:** CERTIFICATION PASSED
 
@@ -31,23 +29,24 @@ Tests PTX compilation, JIT behavior, and kernel function resolution.
 |------|-------------|
 | `test_ptx_loads_successfully` | Verifies all PTX modules loaded during TestContext creation. Synchronizes the device and checks for async errors during module loading. |
 | `test_compute_capability_check` | Verifies device compute capability meets minimum sm_70 (Volta) requirement for xlog CUDA kernels. |
-| `test_kernel_function_resolution` | Iterates through all 8 PTX modules (join, dedup, groupby, scan, filter, pack, sort, set_ops) and verifies each kernel function can be resolved. |
+| `test_kernel_function_resolution` | Parses every `kernels/*.ptx`, extracts all `.entry` points, and verifies each can be resolved under module `xlog_<stem>` via `CudaKernelProvider` (also validates `.address_size 64` and `.target sm_70+`). |
 | `test_ptx_module_attributes` | Verifies PTX module attributes and metadata are correctly set. |
 | `test_repeated_jit_compilation` | Tests JIT cache behavior under repeated kernel execution to ensure no memory leaks or compilation errors. |
 
-### C02: Launch Config (7 tests)
+### C02: Launch Config (8 tests)
 
 Tests kernel launch configuration edge cases across various data sizes.
 
 | Test | Description |
 |------|-------------|
-| `test_zero_elements_no_launch` | Creates empty buffer and verifies sort/filter operations return empty results without crashing or CUDA errors. |
-| `test_single_element` | Tests sort and filter with exactly one element - edge case for GPU algorithms that assume multiple elements. |
-| `test_warp_boundary_sizes` | Tests sizes at warp boundaries: 31, 32, 33 (partial warp, full warp, warp+1). Verifies correct behavior with partial and full warps. |
-| `test_block_boundary_sizes` | Tests sizes at block boundaries: 255, 256, 257. Verifies correct inter-block communication. |
-| `test_non_power_of_two_sizes` | Tests prime and non-power-of-two sizes that stress tail handling: 127, 1000, 10007, 65537. |
-| `test_large_grid_sizes` | Tests large data sizes (1M, 10M elements) requiring many thread blocks and grid-stride loops. |
-| `test_max_practical_size` | Tests maximum practical size within memory budget to verify scalability limits. |
+| `zero_elements_no_launch` | Creates empty buffer and verifies sort/filter operations return empty results without crashing or CUDA errors. |
+| `single_element` | Tests sort and filter with exactly one element - edge case for GPU algorithms that assume multiple elements. |
+| `warp_boundary_sizes` | Tests sizes at warp boundaries: 31, 32, 33 (partial warp, full warp, warp+1). Verifies correct behavior with partial and full warps. |
+| `block_boundary_sizes` | Tests sizes at block boundaries: 255, 256, 257. Verifies correct inter-block communication. |
+| `non_power_of_two_sizes` | Tests prime and non-power-of-two sizes that stress tail handling: 127, 1000, 10007, 65537. |
+| `large_grid_sizes` | Tests large data sizes (1M, 10M elements) requiring many thread blocks and grid-stride loops. |
+| `max_practical_size` | Tests maximum practical size within memory budget to verify scalability limits. |
+| `test_mc_sample_edge_sizes` | Validates MC sampler kernel launch across edge `(num_vars, num_samples)` sizes (0/1/warp/block boundaries) and checks output shape + bit validity. |
 
 ### C03: Pointer Bounds (8 tests)
 
@@ -199,7 +198,7 @@ Tests integer boundary conditions.
 | `test_i64_signed_comparison` | Tests that signed comparison is used for i64 (not bitwise). -1 should sort before 0. |
 | `test_integer_wraparound_keys` | Tests keys near wraparound boundaries to catch overflow bugs. |
 
-### C15: Determinism (5 tests)
+### C15: Determinism (8 tests)
 
 Tests reproducibility across multiple executions.
 
@@ -210,6 +209,9 @@ Tests reproducibility across multiple executions.
 | `test_join_reproducibility` | Runs same join 5 times, verifies identical results (may have different row order but same set). |
 | `test_dedup_reproducibility` | Runs same dedup 5 times, verifies identical results. |
 | `test_stable_sort_order` | Tests sort stability - equal keys should maintain relative input order. |
+| `test_mc_sample_reproducibility` | Verifies MC sampling is deterministic for a fixed seed (exact bitwise equality across runs). |
+| `test_xgcf_forward_reproducibility` | Verifies the XGCF forward kernels produce identical values across repeated runs. |
+| `test_xgcf_backward_reproducibility` | Verifies the XGCF backward kernels (adjoints + decision grads) are deterministic across repeated runs. |
 
 ### C16: Async Pipeline (5 tests)
 
@@ -283,7 +285,7 @@ Tests hardware reliability and error handling.
 | `test_memory_pressure` | Tests behavior under memory pressure (near budget limit). |
 | `test_sustained_operation` | Tests sustained operation over extended period (~10 seconds) for stability. |
 
-### C22: Algorithms (10 tests)
+### C22: Algorithms (13 tests)
 
 Tests specific algorithm edge cases.
 
@@ -299,6 +301,9 @@ Tests specific algorithm edge cases.
 | `test_dedup_all_same` | Dedup where all values same. Output is single row. |
 | `test_groupby_single_group` | Groupby where all rows have same key. Single output group. |
 | `test_groupby_all_unique_keys` | Groupby where all keys unique. Output equals input (no aggregation). |
+| `test_mc_sample_matches_cpu_reference` | Validates the MC sampler kernel matches a CPU reference bit-for-bit for a fixed seed (including p=0/1 clamping). |
+| `test_xgcf_forward_tiny_matches_expected` | Runs a tiny XGCF circuit forward pass and verifies values match expected CPU results. |
+| `test_xgcf_backward_tiny_matches_expected` | Runs a tiny XGCF circuit backward pass and verifies adjoints + decision grads match expected CPU results. |
 
 ### C23: Blind Spots (5 tests)
 
@@ -331,71 +336,29 @@ Cross-product testing of Size × Distribution × Type.
 | Category | Tests | Duration | Status |
 |----------|-------|----------|--------|
 | C01 Toolchain | 5/5 | 0.01s | PASS |
-| C02 Launch Config | 7/7 | 0.76s | PASS |
+| C02 Launch Config | 8/8 | 0.14s | PASS |
 | C03 Pointer Bounds | 8/8 | 0.02s | PASS |
 | C04 Address Space | 5/5 | 0.00s | PASS |
-| C05 Global Memory | 5/5 | 0.07s | PASS |
-| C06 Shared Memory | 5/5 | 0.10s | PASS |
-| C07 Local Memory | 5/5 | 0.04s | PASS |
+| C05 Global Memory | 5/5 | 0.08s | PASS |
+| C06 Shared Memory | 5/5 | 0.03s | PASS |
+| C07 Local Memory | 5/5 | 0.15s | PASS |
 | C08 Synchronization | 5/5 | 0.01s | PASS |
-| C09 Warp Level | 5/5 | 0.01s | PASS |
-| C10 Block Grid | 5/5 | 1.12s | PASS |
+| C09 Warp Level | 5/5 | 0.04s | PASS |
+| C10 Block Grid | 5/5 | 0.23s | PASS |
 | C11 Control Flow | 7/7 | 0.01s | PASS |
 | C12 Atomics | 5/5 | 0.02s | PASS |
-| C13 Floating Point | 6/6 | 0.00s | PASS |
+| C13 Floating Point | 6/6 | 0.01s | PASS |
 | C14 Integer | 5/5 | 0.00s | PASS |
-| C15 Determinism | 5/5 | 0.01s | PASS |
-| C16 Async Pipeline | 5/5 | 0.07s | PASS |
-| C17 Caching | 5/5 | 1.20s | PASS |
-| C18 Host Device | 5/5 | 2.03s | PASS |
-| C19 Multi Stream | 5/5 | 0.12s | PASS |
-| C20 Multi GPU | 5/5 | 0.06s | PASS |
-| C21 Hardware | 5/5 | 9.41s | PASS |
-| C22 Algorithms | 10/10 | 0.00s | PASS |
-| C23 Blind Spots | 5/5 | 0.01s | PASS |
-| C24 Edge Matrix | 5/5 | 0.02s | PASS |
-
----
-
-## Bugs Fixed (from initial run)
-
-### BUG #1: Sort Only Supported u32 Keys (CRITICAL) - FIXED
-
-**Fix Location:** `provider.rs:2582`
-
-**Solution:** Rewrote `sort()` to support multi-column sorting and all scalar key types by:
-- CPU-generating a permutation array
-- GPU-applying permutation to all columns
-
-### BUG #2: Large-Mask Prefix Sum Overflow (HIGH) - FIXED
-
-**Fix Location:** `provider.rs:2461`
-
-**Solution:** Fixed `filter_by_mask` for >65k elements and very large masks by:
-- CPU-scanning block_sums offsets
-- Correct handling of prefix sums at scale
-
-### BUG #3: Legacy Hash Join Schema Mismatch (MEDIUM) - FIXED
-
-**Fix Location:** `provider.rs:410`
-
-**Solution:** Fixed by delegating to v2 inner join implementation with natural-join column layout (eliminates schema/arity panic).
-
-### BUG #4: GPU Memory Budget Tracking (MEDIUM) - FIXED
-
-**Fix Location:** `memory.rs:29`, `multi_gpu_memory.rs:10`
-
-**Solution:** Added RAII-tracked GPU allocations (`TrackedCudaSlice`) so budget accounting decrements on drop.
-
----
-
-## Test Suite Fixes
-
-| File | Line | Fix |
-|------|------|-----|
-| `c15_determinism.rs` | 848 | Fixed wrong column download |
-| `c06_shared_memory.rs` | 307 | Fixed invalid "permutation" generator |
-| `c01_toolchain.rs` | 412 | Removed now-invalid manual `record_free` |
+| C15 Determinism | 8/8 | 0.01s | PASS |
+| C16 Async Pipeline | 5/5 | 0.13s | PASS |
+| C17 Caching | 5/5 | 0.12s | PASS |
+| C18 Host Device | 5/5 | 0.95s | PASS |
+| C19 Multi Stream | 5/5 | 0.06s | PASS |
+| C20 Multi GPU | 5/5 | 0.02s | PASS |
+| C21 Hardware | 5/5 | 9.50s | PASS |
+| C22 Algorithms | 13/13 | 0.01s | PASS |
+| C23 Blind Spots | 5/5 | 0.03s | PASS |
+| C24 Edge Matrix | 5/5 | 0.08s | PASS |
 
 ---
 
@@ -403,12 +366,12 @@ Cross-product testing of Size × Distribution × Type.
 
 | Domain | Categories | Tests |
 |--------|------------|-------|
-| Infrastructure | C01-C02 | 12 |
-| Memory Hierarchy | C03-C08 | 38 |
+| Infrastructure | C01-C02 | 13 |
+| Memory Hierarchy | C03-C08 | 33 |
 | Execution Model | C09-C12 | 22 |
-| Numeric Correctness | C13-C16 | 21 |
+| Numeric Correctness | C13-C16 | 24 |
 | System Integration | C17-C21 | 25 |
-| Algorithms & Edge Cases | C22-C24 | 15 |
+| Algorithms & Edge Cases | C22-C24 | 23 |
 
 ---
 
@@ -416,20 +379,20 @@ Cross-product testing of Size × Distribution × Type.
 
 | Duration Bucket | Categories |
 |-----------------|------------|
-| <0.1s | C01, C03, C04, C08, C09, C11, C12, C13, C14, C15, C16, C19, C20, C23, C24 |
-| 0.1s-1s | C02, C05, C06, C07 |
-| 1s-5s | C10, C17, C18 |
+| <0.1s | C01, C03, C04, C05, C06, C08, C09, C11, C12, C13, C14, C15, C19, C20, C22, C23, C24 |
+| 0.1s-1s | C02, C07, C10, C16, C17, C18 |
 | >5s | C21 (hardware stress tests) |
 
-**Longest Category:** C21 Hardware (9.41s) - Expected for stress tests
+**Longest Category:** C21 Hardware (9.50s) - Expected for stress tests
 
 ---
 
 ## Certification Conclusion
 
-The xlog-cuda CUDA kernel implementation passes all 133 certification tests across 24 categories, covering:
+The xlog-cuda CUDA kernel implementation passes all 140 certification tests across 24 categories, covering:
 
 - PTX compilation and JIT
+- PTX entrypoint coverage: every `.entry` in `kernels/*.ptx` must resolve via `CudaKernelProvider` (including `circuit.ptx` and `mc_sample.ptx`)
 - Launch configuration edge cases
 - Memory hierarchy (global, shared, local)
 - Synchronization primitives
@@ -446,7 +409,7 @@ The xlog-cuda CUDA kernel implementation passes all 133 certification tests acro
 - Multi-stream concurrency
 - Multi-GPU support
 - Hardware stress tests
-- Core algorithms (sort, filter, join, groupby)
+- Core algorithms (sort, filter, join, dedup, groupby) + circuit and MC sampler correctness checks
 - Edge case matrix (boundary conditions)
 
 **The implementation is certified for production use.**
