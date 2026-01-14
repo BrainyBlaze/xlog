@@ -2,11 +2,11 @@
 
 XLOG is a **GPU-accelerated Datalog engine** written in Rust with CUDA kernels. It compiles `.xlog` programs into relational plans and executes them efficiently on NVIDIA GPUs.
 
-## Status (phase4-integrated)
+## Status (`main`)
 
 - Deterministic `xlog-logic` tier: **production-ready** (Phase 3 complete).
 - CUDA certification suite: **140/140 passing** (see `docs/plans/2026-01-14-cuda-certification-results.md`).
-- Phase 4 integrated: `xlog-prob` (exact `exact_ddnnf` + approximate `mc`) and Python `xlog-gpu` (PyO3 + DLPack) are implemented on this branch.
+- Phase 4 complete: `xlog-prob` (exact `exact_ddnnf` + approximate `mc`) and Python `xlog_gpu` (PyO3 + DLPack) are implemented on `main`.
 
 ## What Works
 
@@ -36,6 +36,7 @@ See `examples/README.md` for the full example suite and runner flags.
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md)
+- [xlog-prob architecture](docs/architecture/xlog-prob.md)
 - [Roadmap](docs/ROADMAP.md)
 - [Examples](examples/)
 - [CUDA certification results](docs/plans/2026-01-14-cuda-certification-results.md)

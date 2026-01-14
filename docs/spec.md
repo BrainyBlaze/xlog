@@ -4,6 +4,8 @@
 **Subsystems:** `xlog-logic`, `xlog-prob`, `xlog-elp`, `xlog-solve`
 **Primary constraint:** End-to-end **GPU-resident** execution for *semantic evaluation* (facts, intermediate relations, inference state, and solver state remain on GPU). Host involvement is limited to orchestration, I/O, and compilation.
 
+> **Implementation status (2026-01-14):** Phase 3 (`xlog-logic`) and Phase 4 (`xlog-prob` exact `exact_ddnnf` + approximate `mc`, plus Python `xlog_gpu`) are implemented on `main`. See `docs/VALIDATION_REPORT.md` and `docs/architecture/xlog-prob.md`.
+
 ---
 
 ## 1. Executive Summary

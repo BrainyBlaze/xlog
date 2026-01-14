@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+Phase 4 probabilistic tier (`xlog-prob`) + Python GPU API (`xlog_gpu`) merged into `main`.
+
+### Added
+- `xlog-prob`: exact inference via Decision-DNNF (vendored D4) + GPU weighted model counting and gradients.
+- `xlog-prob`: P3 Monte Carlo engine (`prob_engine=mc`) with GPU sampling, deterministic non-monotone SCC semantics, and uncertainty metadata.
+- `xlog-gpu` + `xlog-gpu-py`: `xlog_gpu` Python module (PyO3) with DLPack-first I/O for deterministic and probabilistic evaluation.
+- New CUDA kernels: `kernels/circuit.ptx` (XGCF forward/backward) and `kernels/mc_sample.ptx` (MC sampling).
+- New examples: `examples/prob/` and `examples/python/`.
+- New/updated docs: `docs/architecture/xlog-prob.md`, `docs/VALIDATION_REPORT.md`.
+
+### Validation
+- Workspace tests pass in release (`cargo test --workspace --all-targets --release`).
+- CUDA certification suite passes: **140/140** (see `docs/plans/2026-01-14-cuda-certification-results.md`).
+
 ## v0.1.0 — 2026-01-13
 
 Initial release of the deterministic `xlog-logic` tier (Phase 3 complete).
@@ -21,4 +37,3 @@ Initial release of the deterministic `xlog-logic` tier (Phase 3 complete).
 ### Known limitations
 - `symbol` values are currently represented as a `u32` hash (not reversible).
 - Arrow IPC interop involves device↔host copies; DLPack is the zero-copy path.
-

@@ -1,14 +1,14 @@
 # Phase 4 Integrated Implementation Plan (xlog-prob + P4.1–P4.4 + Python `xlog-gpu`)
 
 **Date:** 2026-01-13  
-**Status:** Completed on `phase4-integrated`  
+**Status:** Completed (merged into `main`)  
 **Targets:** Linux x86_64 + CUDA-only  
 
 This plan executes the design in `docs/plans/2026-01-13-phase4-integrated-design.md` and updates the Phase 4 roadmap items (P4.1–P4.4) as substrate, not as separate projects.
 
 ## Execution Summary (2026-01-14)
 
-All tasks in this plan are implemented on branch `phase4-integrated`, including the P3 Monte Carlo engine (Task 7) and Python API wiring.
+All tasks in this plan are implemented and merged into `main`, including the P3 Monte Carlo engine (Task 7) and Python API wiring.
 
 **Key artifacts:**
 - MC engine: `crates/xlog-prob/src/mc.rs` + sampler kernel `kernels/mc_sample.ptx`

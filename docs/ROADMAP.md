@@ -191,6 +191,7 @@
 **Plans:**
 - Design: `docs/plans/2026-01-13-phase4-integrated-design.md`
 - Implementation plan: `docs/plans/2026-01-13-phase4-integrated-implementation-plan.md`
+- Architecture (implementation details): `docs/architecture/xlog-prob.md`
 
 ---
 

@@ -1,12 +1,12 @@
 # Phase 4 Integrated Design (xlog-prob + P4.1–P4.4 + Python `xlog-gpu`)
 
 **Date:** 2026-01-13  
-**Status:** Implemented on `phase4-integrated`  
+**Status:** Implemented (merged into `main`)  
 **Targets:** Linux x86_64 + CUDA-only  
 
 This document captures the **integrated Phase 4** design: deliver `xlog-prob` (probabilistic + differentiable reasoning) while completing/solidifying the Phase 4 substrate items in `docs/ROADMAP.md` (CuDF/Arrow/DLPack interop, optimizer, incremental maintenance, adaptive indexing) and shipping a user-visible Python package.
 
-> **Implementation note (2026-01-14):** This design is implemented on branch `phase4-integrated`.
+> **Implementation note (2026-01-14):** This design is implemented and merged into `main` (merged from the Phase 4 integration development branch/worktree).
 >
 > Key entry points:
 > - Exact path: `crates/xlog-prob/src/exact.rs`, `crates/xlog-prob/src/xgcf.rs`, `kernels/circuit.ptx`

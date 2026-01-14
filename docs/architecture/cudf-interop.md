@@ -39,9 +39,9 @@ df = cudf.DataFrame.from_arrow(table)
 print(df)
 ```
 
-## Next Work (Zero-Copy)
+## Zero-Copy (DLPack)
 
-True zero-copy cuDF interop needs a GPU-native interchange path:
+DLPack provides a GPU-native interchange path that avoids host copies. The current implementation includes:
 - ✅ DLPack export (current): produces DLPack `DLManagedTensor` pointers for each column without copies
 - ✅ DLPack import (current): consumes DLPack `DLManagedTensor` pointers and wraps them without copies
 - ✅ Python capsule/FFI layer (Phase 4): `crates/xlog-gpu-py` builds a `xlog_gpu` module via `maturin` that:

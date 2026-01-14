@@ -1,11 +1,11 @@
 # XLOG Full System Validation Report
 
 **Date:** 2026-01-11
-**Status:** xlog-logic PRODUCTION READY | Other tiers PLANNED
-**Branch:** feature/arithmetic-expressions
-**Total Tests:** 388 passing
+**Status:** Snapshot (2026-01-11): xlog-logic PRODUCTION READY
+**Branch (snapshot):** feature/arithmetic-expressions
+**Total Tests (snapshot):** 388 passing
 
-> **Addendum (2026-01-14 / `phase4-integrated`):** Phase 4 is implemented on `phase4-integrated`, including `xlog-prob` (exact `exact_ddnnf` + P3 `mc`) and Python `xlog-gpu`. The CUDA kernel set now includes `circuit.ptx` and `mc_sample.ptx`, and the CUDA certification suite passes **140/140** tests (see `docs/plans/2026-01-14-cuda-certification-results.md`).
+> **Addendum (2026-01-14 / `main`):** Phase 4 is implemented on `main`, including `xlog-prob` (exact `exact_ddnnf` + P3 `mc`) and Python `xlog_gpu` (package name `xlog-gpu`). The CUDA kernel set includes `circuit.ptx` and `mc_sample.ptx`, and the CUDA certification suite passes **140/140** tests (see `docs/plans/2026-01-14-cuda-certification-results.md`). See `docs/VALIDATION_REPORT.md` for the current validated state.
 
 ---
 
@@ -18,7 +18,7 @@ XLOG is a **unified GPU-native declarative programming stack** targeting four cl
 | Subsystem | Purpose | Status | Phase |
 |-----------|---------|--------|-------|
 | **xlog-logic** | Datalog/Prolog-like deterministic rule evaluation | ✅ PRODUCTION READY | Complete |
-| **xlog-prob** | ProbLog/DeepProbLog-like probabilistic & differentiable reasoning | ❌ Not Started | Phase 4 |
+| **xlog-prob** | ProbLog/DeepProbLog-like probabilistic & differentiable reasoning | ✅ Implemented | Complete (Phase 4) |
 | **xlog-elp** | ASP-style epistemic logic programming (K/M operators) | ❌ Not Started | Phase 5 |
 | **xlog-solve** | GPU-native SAT/MaxSAT solver services | ❌ Not Started | Phase 4-5 |
 
@@ -633,7 +633,7 @@ Phase 6: Scaling & Production (Month 12+)
 │  ┌─────────────────────────────────────────────────────────────┐   │
 │  │                    NVIDIA GPU (CUDA)                         │   │
 │  │  join.ptx | filter.ptx | dedup.ptx | sort.ptx | groupby.ptx  │   │
-│  │  scan.ptx | set_ops.ptx | (future: circuit.ptx, solve.ptx)   │   │
+│  │  scan.ptx | set_ops.ptx | circuit.ptx | mc_sample.ptx | (future: solve.ptx)   │   │
 │  └─────────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────┘
 ```
@@ -659,16 +659,16 @@ The xlog-logic tier (GPU-accelerated Datalog) is complete and validated:
 
 | Subsystem | Status | Blocking Issues |
 |-----------|--------|-----------------|
-| xlog-prob | Not Started | Requires PIR design, D4 integration |
-| xlog-elp | Not Started | Requires xlog-prob, xlog-solve |
+| xlog-prob | Implemented | Phase 4 complete (see `docs/architecture/xlog-prob.md`) |
+| xlog-elp | Not Started | Requires xlog-solve |
 | xlog-solve | Not Started | Requires GPU solver kernel development |
 
 ### Recommendations
 
 1. **Deploy xlog-logic** for production Datalog workloads now
-2. **Begin xlog-solve prototyping** as shared infrastructure
-3. **Design PIR** for xlog-prob before implementation
-4. **Defer xlog-elp** until xlog-prob and xlog-solve are stable
+2. **Deploy xlog-prob** for probabilistic workloads (exact `exact_ddnnf` where supported; `mc` for non-monotone programs)
+3. **Begin xlog-solve prototyping** as shared infrastructure
+4. **Defer xlog-elp** until xlog-solve is stable
 
 ### Files Modified in This Branch
 
