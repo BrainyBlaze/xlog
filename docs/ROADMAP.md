@@ -5,302 +5,163 @@
 
 ---
 
-## Current State
-
-| Metric | Value |
-|--------|-------|
-| Workspace Tests Passing | ✅ (`cargo test --workspace --all-targets --release`) |
-| CUDA Certification | **140/140 (100%)** - see `docs/plans/2026-01-14-cuda-certification-results.md` |
-| Crates | 11 (`xlog-core`, `xlog-ir`, `xlog-logic`, `xlog-runtime`, `xlog-cuda`, `xlog-solve`, `xlog-stats`, `xlog-cuda-tests`, `xlog-prob`, `xlog-gpu`, `xlog-gpu-py`) |
-| CUDA Kernels | 10 (join, dedup, groupby, scan, filter, pack, sort, set_ops, circuit, mc_sample) |
-| Phase | 4 of 6 complete |
-
-### What Works
-- ✅ Datalog parsing and compilation
-- ✅ Stratified negation analysis
-- ✅ Semi-naive fixpoint iteration
-- ✅ GPU hash joins (inner/semi/anti/left-outer; on-device materialization; key verification; byte-hashed scalar keys)
-- ✅ Sort correctness for all scalar key types (stable GPU permutation + GPU reorder)
-- ✅ GPU set operations (union, diff)
-- ✅ GPU aggregations (count, sum, min, max) including multi-key groupby
-- ✅ LogSumExp aggregation (F64)
-- ✅ E2E transitive closure queries
-- ✅ `.xlog` queries (`?-`) and constraints (`:-`) via compilation desugaring + runner enforcement
-- ✅ Runnable `.xlog` runner example (`crates/xlog-logic/examples/xlog_run.rs`) + example programs (`examples/xlog/`)
-- ✅ CUDA certification suite + PTX validation
-
-### What's Broken/Limited
-- ✅ No remaining P1-P3 roadmap blockers (performance tuning continues under Phase 6 benchmarks)
-- ⚠️ `symbol` is currently a `u32` hash (MVP, not reversible)
-- ⚠️ Some aggregate value-type restrictions remain (see `docs/ARCHITECTURE.md`)
-
----
-
-## Priority 1: Production Blockers
-
-### P1.1 Join Correctness (Hash Collision Safety) - DONE
-**Solution:** Join v2 verifies key bytes after hash match (no false positives).
-**Files:** `kernels/join.cu`, `crates/xlog-cuda/src/provider.rs`
-
-### P1.2 Aggregation Sum Overflow/Truncation - DONE
-**Solution:** Sum aggregates return `U64` and the schema reflects it.
-**Files:** `crates/xlog-cuda/src/provider.rs`
-
-### P1.3 Large-Input Filter/Compaction - DONE
-**Solution:** Multi-block scan works beyond 256 elements fully on GPU (recursive scan of block sums).
-**Files:** `kernels/scan.cu`, `crates/xlog-cuda/src/provider.rs`
-
-### P1.4 GPU Memory Budget Enforcement - DONE
-**Solution:** Atomic budget reservation + RAII accounting for frees.
-**Files:** `crates/xlog-cuda/src/memory.rs`, `crates/xlog-cuda/src/multi_gpu_memory.rs`
-
-### P1.5 Remove CPU Roundtrips in Dedup - DONE
-**Issue:** Dedup previously downloaded keys to host for boundary detection.
-**Solution:** GPU columnar boundary detection + GPU scan/compact (mask/prefix/compact stays on-device).
-**Remaining:** None (P3.3 removed the CPU sort permutation).
-**Files:** `crates/xlog-cuda/src/provider.rs`, `kernels/dedup.cu`
-
-**Remaining P1 Effort:** 0 (P1 complete)
-
----
-
-## Priority 2: Important Improvements
-
-### P2.1 Extend Type Support
-**Status:** DONE
-**Change:** `union_gpu`/`diff_gpu` support all scalar types (and multi-column schemas) without CPU row-materialization; GPU sort permutation is now fully on-device (P3.3).
-**Goal:** Uniform scalar support across join/sort/filter/dedup/set-ops (including I32/I64/U64/F32/F64/Bool/Symbol).
-**Files:** `crates/xlog-runtime/src/executor.rs`, `crates/xlog-cuda/src/provider.rs`, `kernels/*.cu`
-**Effort:** 1-2 weeks
-
-### P2.2 Float Comparisons in Filters
-**Status:** DONE
-**Change:** Runtime filter predicate evaluation supports F32/F64 comparisons.
-**Files:** `crates/xlog-runtime/src/executor.rs`
-
-### P2.3 Implement LogSumExp - DONE
-**Files:** `kernels/groupby.cu`, `crates/xlog-cuda/src/provider.rs`
-
-### P2.4 Increase Join Output Limit
-**Status:** DONE (v2 join)
-**Change:** Join output buffers are sized from a count pass (no silent truncation); optional cap still supported.
-**Files:** `crates/xlog-cuda/src/provider.rs`
-
-### P2.5 Key Verification Mode - DONE (Default)
-**Current:** Join v2 performs key verification by default after hash match.
-**Goal:** Optional unsafe "hash-only" fast path for performance experiments (explicitly opt-in).
-**Files:** `kernels/join.cu`, `crates/xlog-cuda/src/provider.rs`
-
-**Total P2 Effort:** ~2 weeks
-
----
-
-## Priority 3: Performance Optimizations
-
-### P3.1 Optimize Radix Scatter
-**Status:** DONE
-**Issue:** O(grid_size) loop in scatter phase
-**Solution:** Precompute per-digit per-block offsets via GPU prefix sums (no per-element block loop)
-
-### P3.2 Coalesced Memory Access
-**Issue:** Hash table probe causes cache misses
-**Status:** DONE
-**Solution:** Cache-friendly bucket layout (CSR buckets: counts + offsets + contiguous entries + hashes)
-**Effort:** 1 week
-
-### P3.3 Multi-Column GPU Sort
-**Status:** DONE
-**Change:** Stable GPU radix sort generates the permutation on-device for all scalar key types and multi-column lexicographic keys (no host roundtrip).
-
-### P3.4 Kernel Fusion
-**Issue:** Multiple kernel launches for compound operations
-**Status:** DONE
-**Solution:** Fuse filter compare+scan and dedup unique+scan; remove count-kernel pass by computing output counts from final prefix element
-**Effort:** 1-2 weeks
-
-**Total P3 Effort:** ~4 weeks
-
----
-
-## Priority 4: Feature Completeness
-
-### P4.1 CuDF Integration
-**Goal:** Interoperability with RAPIDS ecosystem
-**Status:** DONE (Arrow IPC + DLPack export/import + Python `xlog-gpu` DLPack boundary)
-**Implemented:**
-- Arrow RecordBatch export/import (`CudaKernelProvider::{to_arrow_record_batch, from_arrow_record_batch}`)
-- Arrow IPC stream helpers (`CudaKernelProvider::{to_arrow_ipc_stream, from_arrow_ipc_stream, write_arrow_ipc_stream_file, read_arrow_ipc_stream_file}`)
-- DLPack export for zero-copy GPU handoff (`CudaKernelProvider::to_dlpack_table`)
-- DLPack import for zero-copy GPU ingestion (`CudaKernelProvider::{from_dlpack_tensors, from_dlpack_tensors_with_schema}`)
-- Interop notes + Python DLPack examples: `docs/architecture/cudf-interop.md`, `examples/python/`
-**Effort:** 2-3 weeks
-
-### P4.2 Query Optimizer
-**Goal:** Cost-based join ordering, predicate pushdown
-**Status:** DONE (predicate pushdown + cost-based join planning)
-**Implemented:**
-- Compiler runs optimizer pass (predicate pushdown) on all compiled rule bodies
-- Lowering-time cost-based join planning:
-  - bushy DP join trees for small bodies (≤10 atoms) with build/probe cost model
-  - greedy bushy join planning fallback for large bodies
-  - cartesian joins supported via constant-key join (avoids empty-key GPU join errors)
-- Compiler can seed optimizer from a `xlog_stats::StatsSnapshot` (runtime → compiler feedback loop)
-- Stats snapshots can include predicate names so the compiler can safely remap stats across `RelId` reuse and use snapshot cardinalities to inform lowering-time join ordering
-**Effort:** 3-4 weeks
-
-### P4.3 Incremental Maintenance
-**Goal:** Delta updates without full recomputation
-**Status:** DONE (semi-naive SCC evaluation + delta application API)
-**Implemented:**
-- Runtime recursive SCC evaluation uses semi-naive deltas with per-scan occurrence rewriting (supports mutual recursion + self-joins)
-- Runtime supports applying EDB insert/delete deltas without recompiling (`Executor::apply_deltas_and_recompute`):
-  - insert-only: incremental update for monotone SCCs; recompute for non-monotone SCCs and dependents
-  - deletes: recompute affected SCC closure for correctness
-**Effort:** 2-3 weeks
-
-### P4.4 Adaptive Indexing (HISA)
-**Goal:** Build indexes dynamically for hot relations
-**Status:** DONE (runtime stats wiring + join index cache)
-**Implemented:**
-- Runtime `Executor` maintains `xlog_stats::StatsManager` and records:
-  - Scan heat + cardinality/bytes
-  - Join selectivities (when both sides are base relations)
-- Join index cache with LRU eviction, invalidation on relation updates, and budget-aware sizing/heuristics (build-side hash reuse when the right side is a hot Scan relation)
-**Effort:** 4-6 weeks
-
-**Total P4 Effort:** ~3 months
-
----
-
-## Phase 4: xlog-prob (Probabilistic Reasoning) + Python `xlog-gpu`
-
-### Deliverables
-- PIR (Provenance IR) implementation
-- XGCF (GPU Circuit Format) for WMC
-- D4 backend integration for knowledge compilation (**vendored; built in-repo**)
-- Forward/backward circuit evaluation
-- Neural predicate support (DLPack-first; torch optional)
-- User-visible Python package: `xlog-gpu` (PyO3 + maturin; returns DLPack capsules)
-- Explicit P3 gating: non-monotone recursion errors unless `prob_engine=mc` is requested
-
-### Prerequisites
-- CUDA correctness suite passing (P1.1-P1.4)
-- P2.3 LogSumExp implemented
-
-### Effort Estimate: 2-3 months
-**Plans:**
-- Design: `docs/plans/2026-01-13-phase4-integrated-design.md`
-- Implementation plan: `docs/plans/2026-01-13-phase4-integrated-implementation-plan.md`
-- Architecture (implementation details): `docs/architecture/xlog-prob.md`
-
----
-
-## Phase 5: xlog-elp (Epistemic Logic)
-
-### Deliverables
-- EIR (Epistemic IR) implementation
-- G91 semantics (compatibility mode)
-- FAEEL semantics (default)
-- Generate-Propagate-Test algorithm
-- Epistemic splitting
-
-### Prerequisites
-- Phase 4 complete
-- Solver integration
-
-### Effort Estimate: 3-4 months
-
----
-
-## Phase 6: Scaling & Production
-
-### Deliverables
-- Multi-GPU support (single node)
-- Distributed execution
-- Production CLI/REPL
-- Comprehensive benchmarks
-- Documentation and tutorials
-
-### Prerequisites
-- Phases 4-5 complete
-- P3-P4 optimizations
-
-### Effort Estimate: 4-6 months
-
----
-
-## Recommended Execution Order
-
-```
-Now:        P4.1-P4.4 (Interop/optimizer/incremental/indexing)
-Month 1-3:  Phase 4 (xlog-prob exact path + `xlog-gpu` MVP), in parallel with remaining P4 work
-Month 4-6:  Phase 5 (xlog-elp)
-Month 7+:   Phase 6 (Scaling)
-```
-
----
-
-## Success Metrics
-
-### Phase 4 Complete (Current)
-- [x] Workspace tests passing (release)
-- [x] E2E Datalog queries work
-- [x] CUDA certification suite passes (140/140)
-- [x] No known critical correctness bugs in CUDA provider
-- [x] xlog-prob implemented (exact `exact_ddnnf` + approximate `mc`)
-- [x] Python `xlog-gpu` implemented (PyO3 + DLPack)
-- [ ] GPU-resident execution ← **Partial** (core joins/sort/dedup/set-ops stay on-GPU; remaining CPU paths mostly in arithmetic/utility helpers)
-
-### Production Ready (After P1+P2)
-- [x] All critical CUDA correctness fixes applied
-- [ ] Float predicate support complete (runtime + CUDA)
-- [x] Memory budget enforced
-- [x] No 256-row filter/compact limit
-- [ ] Benchmarks documented
-
-### Feature Complete (After P4)
-- [x] CuDF integration
-- [x] Query optimizer
-- [x] Incremental maintenance
-- [ ] CLI/REPL interface
-
-### Full Vision (After Phase 6)
-- [x] xlog-prob working
-- [ ] xlog-elp working
-- [ ] Multi-GPU support
-- [ ] Production documentation
-
----
-
-## Risk Assessment
-
-| Risk | Likelihood | Impact | Mitigation |
-|------|------------|--------|------------|
-| GPU-native dedup/unique complexity | Medium | High | Start with single-key, then multi-key; keep CPU fallback |
-| Float predicate semantics (NaN/total order) | Medium | Medium | Define semantics; mirror CUDA `total_cmp` where needed |
-| D4 integration challenges | High | Medium | Plan fallback KC backends |
-| ELP complexity explosion | High | High | Strict tier bounds |
-| Multi-GPU synchronization | Medium | High | Start single-node first |
-
----
-
-## Resources
-
-### Documentation
-- `docs/spec.md` - Full system specification
-- `docs/spec-v1.1.md` - Revised design
-- `docs/ARCHITECTURE.md` - System architecture
-- `examples/README.md` - Example programs plan + runner usage
-- `docs/VALIDATION_REPORT.md` - Current validation
-- `docs/plans/2026-01-14-cuda-certification-results.md` - CUDA certification results
-
-### Key Papers
-- GPUlog (HISA indexes, parallel fixpoint)
-- VFLog (columnar GPU Datalog)
-- ProbLog (knowledge compilation)
-- FAEEL (epistemic semantics)
-
-### External Dependencies
-- cudarc 0.12 (CUDA bindings)
-- D4 (knowledge compiler; vendored, built in-repo) - Phase 4
-- PyTorch (optional; via DLPack interop) - Phase 4
+## Core Language & Compiler (xlog-logic)
+
+### Implemented
+- Datalog parsing and compilation. [v0.2.0]
+- Stratified negation analysis. [v0.2.0]
+- `.xlog` queries (`?-`) and constraints (`:-`) via compilation desugaring + runner enforcement. [v0.2.0]
+- `symbol` values are currently represented as a `u32` hash (MVP, not reversible). [v0.2.0]
+
+### Planned
+
+## Runtime & Execution (xlog-runtime)
+
+### Implemented
+- Semi-naive fixpoint iteration. [v0.2.0]
+- E2E transitive closure queries. [v0.2.0]
+- P2.2 Float Comparisons in Filters — runtime filter predicate evaluation supports F32/F64 comparisons. Files: `crates/xlog-runtime/src/executor.rs`. [v0.2.0]
+- Some aggregate value-type restrictions remain (see `docs/ARCHITECTURE.md`). [v0.2.0]
+
+### Planned
+- GPU-resident execution fully on GPU (currently partial; arithmetic/utility helpers remain on CPU). [v0.3.x]
+- CLI/REPL interface. [v0.3.x]
+
+## GPU Backend & Kernels (xlog-cuda + kernels)
+
+### Implemented
+- GPU hash joins (inner/semi/anti/left-outer; on-device materialization; key verification; byte-hashed scalar keys). [v0.2.0]
+- Sort correctness for all scalar key types (stable GPU permutation + GPU reorder). [v0.2.0]
+- GPU set operations (union, diff). [v0.2.0]
+- GPU aggregations (count, sum, min, max) including multi-key groupby. [v0.2.0]
+- P2.3 Implement LogSumExp — Files: `kernels/groupby.cu`, `crates/xlog-cuda/src/provider.rs`. [v0.2.0]
+- CUDA kernels: join, dedup, groupby, scan, filter, pack, sort, set_ops, circuit, mc_sample. [v0.2.0]
+- P1.1 Join Correctness (Hash Collision Safety) — Join v2 verifies key bytes after hash match (no false positives). Files: `kernels/join.cu`, `crates/xlog-cuda/src/provider.rs`. [v0.2.0]
+- P1.2 Aggregation Sum Overflow/Truncation — Sum aggregates return `U64` and the schema reflects it. Files: `crates/xlog-cuda/src/provider.rs`. [v0.2.0]
+- P1.3 Large-Input Filter/Compaction — Multi-block scan works beyond 256 elements fully on GPU (recursive scan of block sums). Files: `kernels/scan.cu`, `crates/xlog-cuda/src/provider.rs`. [v0.2.0]
+- P1.4 GPU Memory Budget Enforcement — Atomic budget reservation + RAII accounting for frees. Files: `crates/xlog-cuda/src/memory.rs`, `crates/xlog-cuda/src/multi_gpu_memory.rs`. [v0.2.0]
+- P1.5 Remove CPU Roundtrips in Dedup — Issue: Dedup previously downloaded keys to host for boundary detection. Solution: GPU columnar boundary detection + GPU scan/compact (mask/prefix/compact stays on-device). Remaining: None (P3.3 removed the CPU sort permutation). Files: `crates/xlog-cuda/src/provider.rs`, `kernels/dedup.cu`. [v0.2.0]
+- P2.1 Extend Type Support — `union_gpu`/`diff_gpu` support all scalar types (and multi-column schemas) without CPU row-materialization; GPU sort permutation is now fully on-device (P3.3). Goal: uniform scalar support across join/sort/filter/dedup/set-ops (I32/I64/U64/F32/F64/Bool/Symbol). Files: `crates/xlog-runtime/src/executor.rs`, `crates/xlog-cuda/src/provider.rs`, `kernels/*.cu`. Effort: 1-2 weeks. [v0.2.0]
+- P2.4 Increase Join Output Limit — Join output buffers are sized from a count pass (no silent truncation); optional cap still supported. Files: `crates/xlog-cuda/src/provider.rs`. [v0.2.0]
+- P2.5 Key Verification Mode — Join v2 performs key verification by default after hash match. Goal: optional unsafe "hash-only" fast path for performance experiments (explicitly opt-in). Files: `kernels/join.cu`, `crates/xlog-cuda/src/provider.rs`. [v0.2.0]
+- P3.1 Optimize Radix Scatter — Precompute per-digit per-block offsets via GPU prefix sums (no per-element block loop). [v0.2.0]
+- P3.2 Coalesced Memory Access — Cache-friendly bucket layout (CSR buckets: counts + offsets + contiguous entries + hashes). Effort: 1 week. [v0.2.0]
+- P3.3 Multi-Column GPU Sort — Stable GPU radix sort generates the permutation on-device for all scalar key types and multi-column lexicographic keys (no host roundtrip). [v0.2.0]
+- P3.4 Kernel Fusion — Fuse filter compare+scan and dedup unique+scan; remove count-kernel pass by computing output counts from final prefix element. Effort: 1-2 weeks. [v0.2.0]
+
+### Planned
+
+## Optimizer & Stats (xlog-solve + xlog-stats)
+
+### Implemented
+- P4.2 Query Optimizer — predicate pushdown + cost-based join planning. Includes bushy DP join trees for small bodies (≤10 atoms) with build/probe cost model; greedy bushy join planning fallback for large bodies; cartesian joins supported via constant-key join (avoids empty-key GPU join errors); compiler can seed optimizer from `xlog_stats::StatsSnapshot` (runtime → compiler feedback loop); stats snapshots include predicate names for safe `RelId` remapping and join ordering. [v0.2.0]
+
+### Planned
+
+## Incremental Maintenance & Adaptive Indexing
+
+### Implemented
+- P4.3 Incremental Maintenance — semi-naive SCC evaluation + delta application API; runtime recursive SCC evaluation uses semi-naive deltas with per-scan occurrence rewriting; `Executor::apply_deltas_and_recompute` supports insert-only incremental updates for monotone SCCs and recompute for non-monotone SCCs and dependents; deletes recompute affected SCC closure. [v0.2.0]
+- P4.4 Adaptive Indexing (HISA) — runtime `Executor` maintains `xlog_stats::StatsManager` for scan heat/cardinality/bytes and join selectivities; join index cache with LRU eviction, invalidation on relation updates, and budget-aware sizing/heuristics (build-side hash reuse when right side is a hot Scan relation). [v0.2.0]
+
+### Planned
+
+## Interop (Arrow/DLPack/CuDF)
+
+### Implemented
+- P4.1 CuDF Integration — Arrow RecordBatch export/import (`CudaKernelProvider::{to_arrow_record_batch, from_arrow_record_batch}`); Arrow IPC stream helpers (`CudaKernelProvider::{to_arrow_ipc_stream, from_arrow_ipc_stream, write_arrow_ipc_stream_file, read_arrow_ipc_stream_file}`); DLPack export for zero-copy GPU handoff (`CudaKernelProvider::to_dlpack_table`); DLPack import for zero-copy GPU ingestion (`CudaKernelProvider::{from_dlpack_tensors, from_dlpack_tensors_with_schema}`); interop notes + Python DLPack examples in `docs/architecture/cudf-interop.md` and `examples/python/`. Effort: 2-3 weeks. [v0.2.0]
+
+### Planned
+
+## Probabilistic Reasoning (xlog-prob)
+
+### Implemented
+- Phase 4 deliverables: PIR (Provenance IR) implementation; XGCF (GPU Circuit Format) for WMC; D4 backend integration for knowledge compilation (vendored; built in-repo); forward/backward circuit evaluation; neural predicate support (DLPack-first; torch optional); explicit P3 gating for non-monotone recursion unless `prob_engine=mc` is requested. [v0.2.0]
+- Phase 4 prerequisites: CUDA correctness suite passing (P1.1-P1.4) and P2.3 LogSumExp implemented. [v0.2.0]
+- Phase 4 plans: design `docs/plans/2026-01-13-phase4-integrated-design.md`, implementation `docs/plans/2026-01-13-phase4-integrated-implementation-plan.md`, architecture `docs/architecture/xlog-prob.md`. [v0.2.0]
+- Phase 4 effort estimate: 2-3 months. [v0.2.0]
+
+### Planned
+
+## Python Interop (xlog-gpu-py)
+
+### Implemented
+- User-visible Python package `xlog-gpu` (PyO3 + maturin; returns DLPack capsules). [v0.2.0]
+
+### Planned
+
+## CUDA Certification & Validation
+
+### Implemented
+- CUDA certification suite + PTX validation. [v0.2.0]
+- CUDA certification results: 140/140 (100%) in `docs/plans/2026-01-14-cuda-certification-results.md`. [v0.2.0]
+
+### Planned
+
+## Epistemic Logic (xlog-elp)
+
+### Implemented
+
+### Planned
+- Phase 5 deliverables: EIR (Epistemic IR) implementation; G91 semantics (compatibility mode); FAEEL semantics (default); Generate-Propagate-Test algorithm; Epistemic splitting. [v0.4-0.5]
+- Phase 5 prerequisites: Phase 4 complete; solver integration. [v0.4-0.5]
+- Phase 5 effort estimate: 3-4 months. [v0.4-0.5]
+
+## Scaling & Distributed
+
+### Implemented
+
+### Planned
+- Phase 6 deliverables: Multi-GPU support (single node); Distributed execution; Production CLI/REPL; Comprehensive benchmarks; Documentation and tutorials. [v0.6+]
+- Phase 6 prerequisites: Phases 4-5 complete; P3-P4 optimizations. [v0.6+]
+- Phase 6 effort estimate: 4-6 months. [v0.6+]
+
+## Quality & Readiness
+
+### Implemented
+- Current status: Phase 4 Complete (integrated `xlog-prob` + Python `xlog-gpu`; CUDA certification passing). [v0.2.0]
+- Workspace tests passing (`cargo test --workspace --all-targets --release`). [v0.2.0]
+- CUDA certification: 140/140 (100%) — see `docs/plans/2026-01-14-cuda-certification-results.md`. [v0.2.0]
+- Crates: 11 (`xlog-core`, `xlog-ir`, `xlog-logic`, `xlog-runtime`, `xlog-cuda`, `xlog-solve`, `xlog-stats`, `xlog-cuda-tests`, `xlog-prob`, `xlog-gpu`, `xlog-gpu-py`). [v0.2.0]
+- CUDA Kernels: 10 (join, dedup, groupby, scan, filter, pack, sort, set_ops, circuit, mc_sample). [v0.2.0]
+- Phase: 4 of 6 complete. [v0.2.0]
+- No remaining P1-P3 roadmap blockers (performance tuning continues under Phase 6 benchmarks). [v0.2.0]
+- Phase 4 Complete metrics: workspace tests passing; E2E Datalog queries work; CUDA certification suite passes (140/140); no known critical correctness bugs in CUDA provider; xlog-prob implemented (exact `exact_ddnnf` + approximate `mc`); Python `xlog-gpu` implemented (PyO3 + DLPack). [v0.2.0]
+- Production Ready (After P1+P2): all critical CUDA correctness fixes applied; memory budget enforced; no 256-row filter/compact limit. [v0.2.0]
+- Feature Complete (After P4): CuDF integration; Query optimizer; Incremental maintenance. [v0.2.0]
+- Full Vision (After Phase 6): xlog-prob working. [v0.2.0]
+- P1 remaining effort: 0 (P1 complete). [v0.2.0]
+- Total P2 Effort: ~2 weeks. [v0.2.0]
+- Total P3 Effort: ~4 weeks. [v0.2.0]
+- Total P4 Effort: ~3 months. [v0.2.0]
+
+### Planned
+- GPU-resident execution fully on GPU (currently partial; core joins/sort/dedup/set-ops stay on-GPU; remaining CPU paths mostly in arithmetic/utility helpers). [v0.3.x]
+- Float predicate support complete (runtime + CUDA). [v0.3.x]
+- Benchmarks documented. [v0.3.x]
+- CLI/REPL interface. [v0.3.x]
+- xlog-elp working. [v0.4-0.5]
+- Multi-GPU support. [v0.6+]
+- Production documentation. [v0.6+]
+- Recommended Execution Order: Now: P4.1-P4.4 (Interop/optimizer/incremental/indexing); Month 1-3: Phase 4 (xlog-prob exact path + `xlog-gpu` MVP) in parallel with remaining P4 work; Month 4-6: Phase 5 (xlog-elp); Month 7+: Phase 6 (Scaling). [v0.2.0]
+
+## Reliability & Risk
+
+### Implemented
+- Risk Assessment: GPU-native dedup/unique complexity (Likelihood: Medium, Impact: High, Mitigation: Start with single-key, then multi-key; keep CPU fallback). [v0.2.0]
+- Risk Assessment: Float predicate semantics (NaN/total order) (Likelihood: Medium, Impact: Medium, Mitigation: Define semantics; mirror CUDA `total_cmp` where needed). [v0.2.0]
+- Risk Assessment: D4 integration challenges (Likelihood: High, Impact: Medium, Mitigation: Plan fallback KC backends). [v0.2.0]
+- Risk Assessment: ELP complexity explosion (Likelihood: High, Impact: High, Mitigation: Strict tier bounds). [v0.2.0]
+- Risk Assessment: Multi-GPU synchronization (Likelihood: Medium, Impact: High, Mitigation: Start single-node first). [v0.2.0]
+
+### Planned
+
+## Documentation & References
+
+### Implemented
+- Resources (Documentation): `docs/spec.md`, `docs/spec-v1.1.md`, `docs/ARCHITECTURE.md`, `examples/README.md`, `docs/VALIDATION_REPORT.md`, `docs/plans/2026-01-14-cuda-certification-results.md`. [v0.2.0]
+- Runnable `.xlog` runner example (`crates/xlog-logic/examples/xlog_run.rs`) + example programs (`examples/xlog/`). [v0.2.0]
+- Resources (Key Papers): GPUlog (HISA indexes, parallel fixpoint); VFLog (columnar GPU Datalog); ProbLog (knowledge compilation); FAEEL (epistemic semantics). [v0.2.0]
+- Resources (External Dependencies): cudarc 0.12 (CUDA bindings); D4 (knowledge compiler; vendored, built in-repo) - Phase 4; PyTorch (optional; via DLPack interop) - Phase 4. [v0.2.0]
+
+### Planned
