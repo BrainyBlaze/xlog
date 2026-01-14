@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "xlog-gpu"
-version = "0.1.0"
+version = "0.2.0"
 description = "GPU-accelerated XLOG (PyO3 bindings)"
 requires-python = ">=3.8"
 classifiers = [
@@ -16,4 +16,3 @@ classifiers = [
 [tool.maturin]
 module-name = "xlog_gpu"
 features = ["pyo3/extension-module"]
-

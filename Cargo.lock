@@ -1561,7 +1561,7 @@ checksum = "f17a85883d4e6d00e8a97c586de764dabcc06133f7f1d55dce5cdc070ad7fe59"
 
 [[package]]
 name = "xlog-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arrow",
  "thiserror",
@@ -1569,7 +1569,7 @@ dependencies = [
 
 [[package]]
 name = "xlog-cuda"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arrow",
  "bytemuck",
@@ -1579,7 +1579,7 @@ dependencies = [
 
 [[package]]
 name = "xlog-cuda-tests"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
  "cudarc",
@@ -1591,7 +1591,7 @@ dependencies = [
 
 [[package]]
 name = "xlog-gpu"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "xlog-core",
  "xlog-cuda",
@@ -1602,7 +1602,7 @@ dependencies = [
 
 [[package]]
 name = "xlog-gpu-py"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cudarc",
  "pyo3",
@@ -1615,14 +1615,14 @@ dependencies = [
 
 [[package]]
 name = "xlog-ir"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "xlog-core",
 ]
 
 [[package]]
 name = "xlog-logic"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pest",
  "pest_derive",
@@ -1635,7 +1635,7 @@ dependencies = [
 
 [[package]]
 name = "xlog-prob"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cudarc",
  "xlog-core",
@@ -1645,7 +1645,7 @@ dependencies = [
 
 [[package]]
 name = "xlog-runtime"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "xlog-core",
  "xlog-cuda",
@@ -1655,7 +1655,7 @@ dependencies = [
 
 [[package]]
 name = "xlog-solve"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "criterion",
  "xlog-core",
@@ -1664,7 +1664,7 @@ dependencies = [
 
 [[package]]
 name = "xlog-stats"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "criterion",
  "xlog-core",
