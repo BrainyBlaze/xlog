@@ -24,6 +24,35 @@ impl ScalarType {
         }
     }
 
+    /// Returns the kernel type code for this scalar type
+    pub fn to_code(&self) -> u8 {
+        match self {
+            ScalarType::U32 => 0,
+            ScalarType::U64 => 1,
+            ScalarType::I32 => 2,
+            ScalarType::I64 => 3,
+            ScalarType::F32 => 4,
+            ScalarType::F64 => 5,
+            ScalarType::Bool => 6,
+            ScalarType::Symbol => 7,
+        }
+    }
+
+    /// Returns the scalar type for a kernel type code
+    pub fn from_code(code: u8) -> Option<Self> {
+        match code {
+            0 => Some(ScalarType::U32),
+            1 => Some(ScalarType::U64),
+            2 => Some(ScalarType::I32),
+            3 => Some(ScalarType::I64),
+            4 => Some(ScalarType::F32),
+            5 => Some(ScalarType::F64),
+            6 => Some(ScalarType::Bool),
+            7 => Some(ScalarType::Symbol),
+            _ => None,
+        }
+    }
+
     /// Returns true if this is a numeric type
     pub fn is_numeric(&self) -> bool {
         !matches!(self, ScalarType::Bool | ScalarType::Symbol)
@@ -130,6 +159,24 @@ mod tests {
         assert_eq!(ScalarType::U32.size_bytes(), 4);
         assert_eq!(ScalarType::U64.size_bytes(), 8);
         assert_eq!(ScalarType::Bool.size_bytes(), 1);
+    }
+
+    #[test]
+    fn test_scalar_type_code_roundtrip() {
+        for ty in [
+            ScalarType::U32,
+            ScalarType::U64,
+            ScalarType::I32,
+            ScalarType::I64,
+            ScalarType::F32,
+            ScalarType::F64,
+            ScalarType::Bool,
+            ScalarType::Symbol,
+        ] {
+            let code = ty.to_code();
+            let back = ScalarType::from_code(code).unwrap();
+            assert_eq!(ty, back);
+        }
     }
 
     #[test]
