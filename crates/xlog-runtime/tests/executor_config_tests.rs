@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
-use xlog_core::{MemoryBudget, RuntimeConfig, ScalarType, Schema};
+use xlog_core::{hash_symbol_to_u32, MemoryBudget, RuntimeConfig, ScalarType, Schema};
 use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_ir::{CompareOp, ConstValue, Expr};
 use xlog_logic::Compiler;
 use xlog_runtime::Executor;
 
@@ -117,4 +118,47 @@ fn test_executor_respects_max_iterations() {
         msg.contains("iteration limit (1)"),
         "unexpected error message: {msg}"
     );
+}
+
+#[test]
+fn test_executor_filter_with_column_column_compare_and_symbol() {
+    let (executor, provider) = match create_executor_with_config(RuntimeConfig::default()) {
+        Some(e) => e,
+        None => {
+            eprintln!("Skipping test: no CUDA device available");
+            return;
+        }
+    };
+
+    let symbol_hash = hash_symbol_to_u32("sym");
+
+    let schema = Schema::new(vec![
+        ("a".to_string(), ScalarType::U32),
+        ("b".to_string(), ScalarType::U32),
+        ("s".to_string(), ScalarType::Symbol),
+    ]);
+
+    let buf = provider
+        .create_buffer_from_u32_columns(
+            &[&[1, 2, 3], &[1, 9, 3], &[symbol_hash, 7, symbol_hash]],
+            schema,
+        )
+        .unwrap();
+
+    let predicate = Expr::And(vec![
+        Expr::Compare {
+            left: Box::new(Expr::Column(0)),
+            op: CompareOp::Eq,
+            right: Box::new(Expr::Column(1)),
+        },
+        Expr::Compare {
+            left: Box::new(Expr::Column(2)),
+            op: CompareOp::Eq,
+            right: Box::new(Expr::Const(ConstValue::Symbol("sym".to_string()))),
+        },
+    ]);
+
+    let filtered = executor.execute_filter(&buf, &predicate).unwrap();
+    let vals = provider.download_column_u32(&filtered, 0).unwrap();
+    assert_eq!(vals, vec![1, 3]);
 }

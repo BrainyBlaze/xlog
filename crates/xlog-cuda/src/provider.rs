@@ -7797,18 +7797,68 @@ impl CudaKernelProvider {
             )));
         }
 
-        // Replicate the value for each row
-        let total_bytes = (num_rows as usize) * elem_size;
-        let mut host_data = Vec::with_capacity(total_bytes);
-        for _ in 0..num_rows {
-            host_data.extend_from_slice(value_bytes);
+        if num_rows > u32::MAX as u64 {
+            return Err(XlogError::Kernel(format!(
+                "Constant column supports at most {} rows, got {}",
+                u32::MAX,
+                num_rows
+            )));
         }
 
-        let mut dst_col = self.memory.alloc::<u8>(host_data.len())?;
-        self.device
-            .inner()
-            .htod_sync_copy_into(&host_data, &mut dst_col)
-            .map_err(|e| XlogError::Kernel(format!("Failed to upload constant column: {}", e)))?;
+        let total_bytes = (num_rows as usize)
+            .checked_mul(elem_size)
+            .ok_or_else(|| XlogError::Kernel("Constant column size overflow".to_string()))?;
+
+        let mut dst_col = self.memory.alloc::<u8>(total_bytes)?;
+        let n = num_rows as u32;
+
+        macro_rules! launch_fill_const {
+            ($kernel:expr, $value:expr) => {{
+                let func = self
+                    .device
+                    .inner()
+                    .get_func(ARITH_MODULE, $kernel)
+                    .ok_or_else(|| {
+                        XlogError::Kernel("arith fill kernel not found".to_string())
+                    })?;
+                let config = LaunchConfig::for_num_elems(n);
+                unsafe { func.clone().launch(config, ($value, n, &mut dst_col)) }
+                    .map_err(|e| XlogError::Kernel(format!("fill const failed: {}", e)))?;
+            }};
+        }
+
+        match col_type {
+            ScalarType::U32 | ScalarType::Symbol => {
+                let value = u32::from_le_bytes(value_bytes.try_into().unwrap());
+                launch_fill_const!(arith_kernels::ARITH_FILL_CONST_U32, value);
+            }
+            ScalarType::U64 => {
+                let value = u64::from_le_bytes(value_bytes.try_into().unwrap());
+                launch_fill_const!(arith_kernels::ARITH_FILL_CONST_U64, value);
+            }
+            ScalarType::I64 => {
+                let value = i64::from_le_bytes(value_bytes.try_into().unwrap());
+                launch_fill_const!(arith_kernels::ARITH_FILL_CONST_I64, value);
+            }
+            ScalarType::I32 => {
+                let value = i32::from_le_bytes(value_bytes.try_into().unwrap());
+                launch_fill_const!(arith_kernels::ARITH_FILL_CONST_I32, value);
+            }
+            ScalarType::F64 => {
+                let value = f64::from_le_bytes(value_bytes.try_into().unwrap());
+                launch_fill_const!(arith_kernels::ARITH_FILL_CONST_F64, value);
+            }
+            ScalarType::F32 => {
+                let value = f32::from_le_bytes(value_bytes.try_into().unwrap());
+                launch_fill_const!(arith_kernels::ARITH_FILL_CONST_F32, value);
+            }
+            ScalarType::Bool => {
+                let value = value_bytes[0];
+                launch_fill_const!(arith_kernels::ARITH_FILL_CONST_U8, value);
+            }
+        }
+
+        self.device.synchronize()?;
 
         let schema = Schema::new(vec![("const".to_string(), col_type)]);
         Ok(CudaBuffer::from_columns(vec![dst_col.into()], num_rows, schema))

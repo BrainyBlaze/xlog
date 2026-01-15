@@ -6,7 +6,10 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use cudarc::driver::{LaunchAsync, LaunchConfig};
 use xlog_core::{AggOp, RelId, Result, RuntimeConfig, ScalarType, Schema, XlogError};
+use xlog_cuda::memory::TrackedCudaSlice;
+use xlog_cuda::provider::{arith_kernels, filter_kernels, ARITH_MODULE, FILTER_MODULE};
 use xlog_cuda::{CudaBuffer, CudaKernelProvider, JoinIndexV2, JoinType as CudaJoinType};
 use xlog_ir::{
     CompareOp, ConstValue, ExecutionPlan, Expr, JoinType, ProjectExpr, RirNode, Stratum,
@@ -1183,84 +1186,280 @@ impl Executor {
         self.clone_buffer(buffer)
     }
 
-    /// Execute a Filter node (CPU-based for MVP)
-    ///
-    /// Copies data to host, applies the predicate, and copies back.
-    fn execute_filter(&self, input: &CudaBuffer, predicate: &Expr) -> Result<CudaBuffer> {
+    /// Execute a Filter node using GPU predicate evaluation.
+    pub fn execute_filter(&self, input: &CudaBuffer, predicate: &Expr) -> Result<CudaBuffer> {
         if input.is_empty() {
             return self.create_empty_buffer(input.schema().clone());
         }
 
-        let num_rows = input.num_rows() as usize;
-        let schema = input.schema().clone();
+        let mask = self.eval_predicate_mask_gpu(predicate, input)?;
+        self.provider.filter_by_device_mask(input, &mask)
+    }
 
-        // Read all columns to host
-        let mut host_columns: Vec<Vec<u8>> = Vec::with_capacity(input.arity());
-        for col_idx in 0..input.arity() {
-            let col_type_size = schema
-                .column_type(col_idx)
-                .map(|t| t.size_bytes())
-                .unwrap_or(4);
-            let col_bytes = num_rows * col_type_size;
+    fn eval_predicate_mask_gpu(
+        &self,
+        expr: &Expr,
+        input: &CudaBuffer,
+    ) -> Result<TrackedCudaSlice<u8>> {
+        if input.num_rows() > u32::MAX as u64 {
+            return Err(XlogError::Execution(format!(
+                "Predicate evaluation supports at most {} rows, got {}",
+                u32::MAX,
+                input.num_rows()
+            )));
+        }
+        let n = input.num_rows() as u32;
 
-            if let Some(col) = input.column(col_idx) {
-                let mut host_data = vec![0u8; col_bytes];
-                self.provider
-                    .device()
-                    .inner()
-                    .dtoh_sync_copy_into(col, &mut host_data)
-                    .map_err(|e| XlogError::Execution(format!("Failed to read column: {}", e)))?;
-                host_columns.push(host_data);
+        match expr {
+            Expr::Column(col_idx) => {
+                let col_type = input.schema().column_type(*col_idx).ok_or_else(|| {
+                    XlogError::Execution(format!("Column {} not found", col_idx))
+                })?;
+                if col_type == ScalarType::Bool {
+                    let col_buf = self.wrap_single_column(input, *col_idx)?;
+                    let zero = self
+                        .provider
+                        .create_constant_column(&[0u8], ScalarType::Bool, input.num_rows())?;
+                    return self.compare_buffers_mask(&col_buf, &zero, CompareOp::Ne);
+                }
+                self.mask_filled(n, 1)
             }
+            Expr::Const(ConstValue::Bool(b)) => self.mask_filled(n, if *b { 1 } else { 0 }),
+            Expr::Const(_) => self.mask_filled(n, 1),
+            Expr::Compare { left, op, right } => {
+                let use_float = Self::expr_may_be_float(left, input.schema())
+                    || Self::expr_may_be_float(right, input.schema());
+
+                let mut left_buf = self.evaluate_arith_expr(left, input)?;
+                let mut right_buf = self.evaluate_arith_expr(right, input)?;
+
+                if use_float {
+                    left_buf = self.provider.cast_column(&left_buf, ScalarType::F64)?;
+                    right_buf = self.provider.cast_column(&right_buf, ScalarType::F64)?;
+                }
+
+                self.compare_buffers_mask(&left_buf, &right_buf, *op)
+            }
+            Expr::And(exprs) => {
+                if exprs.is_empty() {
+                    return self.mask_filled(n, 1);
+                }
+                let mut mask = self.eval_predicate_mask_gpu(&exprs[0], input)?;
+                for expr in &exprs[1..] {
+                    let next = self.eval_predicate_mask_gpu(expr, input)?;
+                    mask = self.mask_and(&mask, &next, n)?;
+                }
+                Ok(mask)
+            }
+            Expr::Or(exprs) => {
+                if exprs.is_empty() {
+                    return self.mask_filled(n, 0);
+                }
+                let mut mask = self.eval_predicate_mask_gpu(&exprs[0], input)?;
+                for expr in &exprs[1..] {
+                    let next = self.eval_predicate_mask_gpu(expr, input)?;
+                    mask = self.mask_or(&mask, &next, n)?;
+                }
+                Ok(mask)
+            }
+            Expr::Not(inner) => {
+                let mask = self.eval_predicate_mask_gpu(inner, input)?;
+                self.mask_not(&mask, n)
+            }
+            Expr::Add(_, _)
+            | Expr::Sub(_, _)
+            | Expr::Mul(_, _)
+            | Expr::Div(_, _)
+            | Expr::Mod(_, _)
+            | Expr::Abs(_)
+            | Expr::Min(_, _)
+            | Expr::Max(_, _)
+            | Expr::Pow(_, _)
+            | Expr::Cast(_, _) => Err(XlogError::Execution(
+                "Arithmetic expression cannot be evaluated as boolean predicate".into(),
+            )),
+        }
+    }
+
+    fn compare_buffers_mask(
+        &self,
+        left: &CudaBuffer,
+        right: &CudaBuffer,
+        op: CompareOp,
+    ) -> Result<TrackedCudaSlice<u8>> {
+        if left.arity() != 1 || right.arity() != 1 {
+            return Err(XlogError::Execution(
+                "Compare requires single-column buffers".into(),
+            ));
+        }
+        if left.num_rows() != right.num_rows() {
+            return Err(XlogError::Execution(
+                "Compare requires matching row counts".into(),
+            ));
+        }
+        if left.num_rows() > u32::MAX as u64 {
+            return Err(XlogError::Execution(format!(
+                "Compare supports at most {} rows, got {}",
+                u32::MAX,
+                left.num_rows()
+            )));
+        }
+        if left.is_empty() {
+            return self.provider.memory().alloc::<u8>(0).map_err(|e| {
+                XlogError::Execution(format!("Failed to allocate empty mask: {}", e))
+            });
         }
 
-        // Evaluate predicate for each row
-        let mut matching_indices = Vec::new();
-        for row_idx in 0..num_rows {
-            if Self::evaluate_predicate(predicate, &host_columns, row_idx, &schema)? {
-                matching_indices.push(row_idx);
-            }
+        let left_type = left
+            .schema()
+            .column_type(0)
+            .ok_or_else(|| XlogError::Execution("Missing left column type".into()))?;
+        let right_type = right
+            .schema()
+            .column_type(0)
+            .ok_or_else(|| XlogError::Execution("Missing right column type".into()))?;
+
+        if left_type != right_type {
+            return Err(XlogError::Execution(
+                "Compare requires matching column types".into(),
+            ));
         }
 
-        let result_rows = matching_indices.len() as u64;
-        if result_rows == 0 {
-            return self.create_empty_buffer(schema);
+        let kernel = match left_type {
+            ScalarType::U32 | ScalarType::Symbol => filter_kernels::FILTER_COMPARE_U32_COL,
+            ScalarType::U64 => filter_kernels::FILTER_COMPARE_U64_COL,
+            ScalarType::I32 => filter_kernels::FILTER_COMPARE_I32_COL,
+            ScalarType::I64 => filter_kernels::FILTER_COMPARE_I64_COL,
+            ScalarType::F32 => filter_kernels::FILTER_COMPARE_F32_COL,
+            ScalarType::F64 => filter_kernels::FILTER_COMPARE_F64_COL,
+            ScalarType::Bool => filter_kernels::FILTER_COMPARE_U8_COL,
+        };
+
+        let left_col = left
+            .column(0)
+            .ok_or_else(|| XlogError::Execution("Missing left column".into()))?;
+        let right_col = right
+            .column(0)
+            .ok_or_else(|| XlogError::Execution("Missing right column".into()))?;
+
+        let num_rows = left.num_rows() as u32;
+        let mut d_mask = self.provider.memory().alloc::<u8>(num_rows as usize)?;
+
+        let func = self
+            .provider
+            .device()
+            .inner()
+            .get_func(FILTER_MODULE, kernel)
+            .ok_or_else(|| XlogError::Execution("filter compare kernel not found".into()))?;
+        let config = LaunchConfig::for_num_elems(num_rows);
+
+        unsafe { func.clone().launch(config, (left_col, right_col, num_rows, op as u8, &mut d_mask)) }
+            .map_err(|e| XlogError::Execution(format!("filter compare failed: {}", e)))?;
+
+        Ok(d_mask)
+    }
+
+    fn mask_and(
+        &self,
+        left: &TrackedCudaSlice<u8>,
+        right: &TrackedCudaSlice<u8>,
+        n: u32,
+    ) -> Result<TrackedCudaSlice<u8>> {
+        let mut out = self.provider.memory().alloc::<u8>(n as usize)?;
+        if n == 0 {
+            return Ok(out);
         }
 
-        // Build result columns
-        let mut result_columns = Vec::with_capacity(input.arity());
-        for col_idx in 0..input.arity() {
-            let col_type_size = schema
-                .column_type(col_idx)
-                .map(|t| t.size_bytes())
-                .unwrap_or(4);
-            let result_bytes = (result_rows as usize) * col_type_size;
+        let func = self
+            .provider
+            .device()
+            .inner()
+            .get_func(FILTER_MODULE, filter_kernels::MASK_AND)
+            .ok_or_else(|| XlogError::Execution("mask_and kernel not found".into()))?;
+        let config = LaunchConfig::for_num_elems(n);
 
-            let mut result_host = Vec::with_capacity(result_bytes);
-            for &row_idx in &matching_indices {
-                let start = row_idx * col_type_size;
-                let end = start + col_type_size;
-                result_host.extend_from_slice(&host_columns[col_idx][start..end]);
-            }
+        unsafe { func.clone().launch(config, (left, right, &mut out, n)) }
+            .map_err(|e| XlogError::Execution(format!("mask_and failed: {}", e)))?;
 
-            let mut result_col = self.provider.memory().alloc::<u8>(result_bytes)?;
+        Ok(out)
+    }
+
+    fn mask_or(
+        &self,
+        left: &TrackedCudaSlice<u8>,
+        right: &TrackedCudaSlice<u8>,
+        n: u32,
+    ) -> Result<TrackedCudaSlice<u8>> {
+        let mut out = self.provider.memory().alloc::<u8>(n as usize)?;
+        if n == 0 {
+            return Ok(out);
+        }
+
+        let func = self
+            .provider
+            .device()
+            .inner()
+            .get_func(FILTER_MODULE, filter_kernels::MASK_OR)
+            .ok_or_else(|| XlogError::Execution("mask_or kernel not found".into()))?;
+        let config = LaunchConfig::for_num_elems(n);
+
+        unsafe { func.clone().launch(config, (left, right, &mut out, n)) }
+            .map_err(|e| XlogError::Execution(format!("mask_or failed: {}", e)))?;
+
+        Ok(out)
+    }
+
+    fn mask_not(&self, input: &TrackedCudaSlice<u8>, n: u32) -> Result<TrackedCudaSlice<u8>> {
+        let mut out = self.provider.memory().alloc::<u8>(n as usize)?;
+        if n == 0 {
+            return Ok(out);
+        }
+
+        let func = self
+            .provider
+            .device()
+            .inner()
+            .get_func(FILTER_MODULE, filter_kernels::MASK_NOT)
+            .ok_or_else(|| XlogError::Execution("mask_not kernel not found".into()))?;
+        let config = LaunchConfig::for_num_elems(n);
+
+        unsafe { func.clone().launch(config, (input, &mut out, n)) }
+            .map_err(|e| XlogError::Execution(format!("mask_not failed: {}", e)))?;
+
+        Ok(out)
+    }
+
+    fn mask_filled(&self, n: u32, value: u8) -> Result<TrackedCudaSlice<u8>> {
+        let mut out = self.provider.memory().alloc::<u8>(n as usize)?;
+        if n == 0 {
+            return Ok(out);
+        }
+
+        if value == 0 {
             self.provider
                 .device()
                 .inner()
-                .htod_sync_copy_into(&result_host, &mut result_col)
-                .map_err(|e| XlogError::Execution(format!("Failed to upload result: {}", e)))?;
-
-            result_columns.push(result_col.into());
+                .memset_zeros(&mut out)
+                .map_err(|e| XlogError::Execution(format!("mask memset failed: {}", e)))?;
+            return Ok(out);
         }
 
-        Ok(CudaBuffer::from_columns(
-            result_columns,
-            result_rows,
-            schema,
-        ))
+        let func = self
+            .provider
+            .device()
+            .inner()
+            .get_func(ARITH_MODULE, arith_kernels::ARITH_FILL_CONST_U8)
+            .ok_or_else(|| XlogError::Execution("arith fill kernel not found".into()))?;
+        let config = LaunchConfig::for_num_elems(n);
+
+        unsafe { func.clone().launch(config, (value, n, &mut out)) }
+            .map_err(|e| XlogError::Execution(format!("mask fill failed: {}", e)))?;
+
+        Ok(out)
     }
 
     /// Evaluate a predicate expression for a single row
+    #[cfg(test)]
     fn evaluate_predicate(
         expr: &Expr,
         columns: &[Vec<u8>],
@@ -1375,6 +1574,7 @@ impl Executor {
         }
     }
 
+    #[cfg(test)]
     fn evaluate_expr_as_f64(
         expr: &Expr,
         columns: &[Vec<u8>],
@@ -1496,6 +1696,7 @@ impl Executor {
     }
 
     /// Evaluate an expression as an i64 value
+    #[cfg(test)]
     fn evaluate_expr_as_i64(
         expr: &Expr,
         columns: &[Vec<u8>],
@@ -1638,6 +1839,41 @@ impl Executor {
         }
     }
 
+    fn wrap_single_column(&self, buffer: &CudaBuffer, col_idx: usize) -> Result<CudaBuffer> {
+        let col_type = buffer
+            .schema()
+            .column_type(col_idx)
+            .ok_or_else(|| XlogError::Execution(format!("Column {} not found", col_idx)))?;
+        let schema = Schema::new(vec![("expr".to_string(), col_type)]);
+
+        if buffer.is_empty() {
+            return self.create_empty_buffer(schema);
+        }
+
+        let num_rows = buffer.num_rows();
+        let bytes = (num_rows as usize)
+            .checked_mul(col_type.size_bytes())
+            .ok_or_else(|| XlogError::Execution("Column size overflow".into()))?;
+
+        let src_col = buffer
+            .column(col_idx)
+            .ok_or_else(|| XlogError::Execution(format!("Column {} not found", col_idx)))?;
+        let mut dst_col = self.provider.memory().alloc::<u8>(bytes)?;
+        if bytes > 0 {
+            self.provider
+                .device()
+                .inner()
+                .dtod_copy(src_col, &mut dst_col)
+                .map_err(|e| XlogError::Execution(format!("Failed to copy column: {}", e)))?;
+        }
+
+        Ok(CudaBuffer::from_columns(
+            vec![dst_col.into()],
+            num_rows,
+            schema,
+        ))
+    }
+
     /// Evaluate an arithmetic expression on a buffer, producing a single-column result
     ///
     /// This method recursively evaluates arithmetic expressions (Add, Sub, Mul, Div, etc.)
@@ -1645,8 +1881,8 @@ impl Executor {
     fn evaluate_arith_expr(&self, expr: &Expr, input: &CudaBuffer) -> Result<CudaBuffer> {
         match expr {
             Expr::Column(idx) => {
-                // Extract the column as a single-column buffer
-                self.provider.extract_column(input, *idx)
+                // Extract the column as a single-column buffer without host round-trip
+                self.wrap_single_column(input, *idx)
             }
             Expr::Const(val) => {
                 // Create a column filled with the constant value

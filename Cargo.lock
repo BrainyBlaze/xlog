@@ -1647,6 +1647,7 @@ dependencies = [
 name = "xlog-runtime"
 version = "0.2.0"
 dependencies = [
+ "cudarc",
  "xlog-core",
  "xlog-cuda",
  "xlog-ir",
