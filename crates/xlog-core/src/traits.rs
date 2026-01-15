@@ -11,14 +11,6 @@ pub struct GpuBuffer {
     pub num_rows: u64,
     /// Schema of this buffer
     pub schema: Schema,
-    /// Opaque handle (will be CudaSlice in xlog-cuda)
-    handle: GpuBufferHandle,
-}
-
-#[derive(Debug)]
-enum GpuBufferHandle {
-    Empty,
-    // Cuda(cudarc::driver::CudaSlice<u8>) - added in xlog-cuda
 }
 
 impl GpuBuffer {
@@ -27,7 +19,6 @@ impl GpuBuffer {
         Self {
             num_rows: 0,
             schema: Schema::new(vec![]),
-            handle: GpuBufferHandle::Empty,
         }
     }
 
