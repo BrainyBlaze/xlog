@@ -8,3 +8,6 @@ xlog-core = { path = "../xlog-core" }
 xlog-ir = { path = "../xlog-ir" }
 xlog-cuda = { path = "../xlog-cuda" }
 xlog-stats = { path = "../xlog-stats" }
+
+[dev-dependencies]
+xlog-logic = { path = "../xlog-logic" }

@@ -1,0 +1,120 @@
+use std::sync::Arc;
+
+use xlog_core::{MemoryBudget, RuntimeConfig, ScalarType, Schema};
+use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_logic::Compiler;
+use xlog_runtime::Executor;
+
+fn has_cuda_device() -> bool {
+    CudaDevice::new(0).is_ok()
+}
+
+fn create_executor_with_config(
+    config: RuntimeConfig,
+) -> Option<(Executor, Arc<CudaKernelProvider>)> {
+    if !has_cuda_device() {
+        return None;
+    }
+
+    let device = Arc::new(CudaDevice::new(0).ok()?);
+    let budget = MemoryBudget::with_limit(1024 * 1024 * 1024);
+    let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
+    let provider = Arc::new(CudaKernelProvider::new(device, memory).ok()?);
+    let executor = Executor::new_with_config(provider.clone(), config);
+
+    Some((executor, provider))
+}
+
+fn create_edge_buffer(
+    provider: &CudaKernelProvider,
+    edges: &[(u32, u32)],
+) -> CudaBuffer {
+    let schema = Schema::new(vec![
+        ("c0".to_string(), ScalarType::U32),
+        ("c1".to_string(), ScalarType::U32),
+    ]);
+
+    if edges.is_empty() {
+        let col0 = provider.memory().alloc::<u8>(0).expect("alloc");
+        let col1 = provider.memory().alloc::<u8>(0).expect("alloc");
+        return CudaBuffer::from_columns(vec![col0.into(), col1.into()], 0, schema);
+    }
+
+    let col0_bytes: Vec<u8> = edges
+        .iter()
+        .flat_map(|(from, _)| from.to_le_bytes())
+        .collect();
+    let col1_bytes: Vec<u8> = edges
+        .iter()
+        .flat_map(|(_, to)| to.to_le_bytes())
+        .collect();
+
+    let mut col0 = provider.memory().alloc::<u8>(col0_bytes.len()).expect("alloc");
+    let mut col1 = provider.memory().alloc::<u8>(col1_bytes.len()).expect("alloc");
+
+    provider
+        .device()
+        .inner()
+        .htod_sync_copy_into(&col0_bytes, &mut col0)
+        .expect("htod");
+    provider
+        .device()
+        .inner()
+        .htod_sync_copy_into(&col1_bytes, &mut col1)
+        .expect("htod");
+
+    CudaBuffer::from_columns(vec![col0.into(), col1.into()], edges.len() as u64, schema)
+}
+
+fn setup_executor_with_facts(
+    executor: &mut Executor,
+    compiler: &Compiler,
+    facts: Vec<(&str, CudaBuffer)>,
+) {
+    for (name, rel_id) in compiler.rel_ids() {
+        executor.register_relation(*rel_id, name);
+    }
+
+    for (name, buffer) in facts {
+        executor.store_mut().put(name, buffer);
+    }
+}
+
+#[test]
+fn test_executor_respects_max_iterations() {
+    let mut config = RuntimeConfig::default();
+    config.max_iterations = 1;
+
+    let (mut executor, provider) = match create_executor_with_config(config) {
+        Some(e) => e,
+        None => {
+            eprintln!("Skipping test: no CUDA device available");
+            return;
+        }
+    };
+
+    let source = r#"
+        edge(1, 2).
+        edge(2, 3).
+        edge(3, 4).
+        reach(X, Y) :- edge(X, Y).
+        reach(X, Z) :- reach(X, Y), edge(Y, Z).
+    "#;
+
+    let mut compiler = Compiler::new();
+    let plan = compiler.compile(source).expect("Compilation failed");
+    assert!(plan.has_recursion(), "Expected recursive plan");
+
+    let edge_buffer = create_edge_buffer(&provider, &[(1, 2), (2, 3), (3, 4)]);
+    setup_executor_with_facts(&mut executor, &compiler, vec![("edge", edge_buffer)]);
+
+    let err = match executor.execute_plan(&plan) {
+        Ok(_) => panic!("expected iteration cap error"),
+        Err(err) => err,
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("iteration limit (1)"),
+        "unexpected error message: {msg}"
+    );
+}

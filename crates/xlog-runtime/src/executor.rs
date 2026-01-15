@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use xlog_core::{AggOp, RelId, Result, ScalarType, Schema, XlogError};
+use xlog_core::{AggOp, RelId, Result, RuntimeConfig, ScalarType, Schema, XlogError};
 use xlog_cuda::{CudaBuffer, CudaKernelProvider, JoinIndexV2, JoinType as CudaJoinType};
 use xlog_ir::{
     CompareOp, ConstValue, ExecutionPlan, Expr, JoinType, ProjectExpr, RirNode, Stratum,
@@ -160,6 +160,8 @@ pub struct Executor {
     stats: StatsManager,
     /// Cached build-side join indexes (adaptive indexing)
     join_index_cache: JoinIndexCache,
+    /// Runtime configuration
+    config: RuntimeConfig,
 }
 
 impl Executor {
@@ -168,6 +170,11 @@ impl Executor {
     /// # Arguments
     /// * `provider` - The CUDA kernel provider for GPU operations
     pub fn new(provider: Arc<CudaKernelProvider>) -> Self {
+        Self::new_with_config(provider, RuntimeConfig::default())
+    }
+
+    /// Create a new executor with the given kernel provider and runtime config
+    pub fn new_with_config(provider: Arc<CudaKernelProvider>, config: RuntimeConfig) -> Self {
         const DEFAULT_JOIN_INDEX_CACHE_BYTES: u64 = 256 * 1024 * 1024;
         let max_index_cache_bytes = (provider.memory().budget().device_bytes / 4)
             .min(DEFAULT_JOIN_INDEX_CACHE_BYTES);
@@ -178,6 +185,7 @@ impl Executor {
             name_to_rel: HashMap::new(),
             stats: StatsManager::new(),
             join_index_cache: JoinIndexCache::new(max_index_cache_bytes),
+            config,
         }
     }
 
@@ -647,9 +655,6 @@ impl Executor {
         Ok(())
     }
 
-    /// Maximum iterations for recursive SCC fixpoint computation
-    const MAX_SCC_ITERATIONS: usize = 1000;
-
     /// Execute a recursive SCC using semi-naive fixpoint iteration
     ///
     /// The algorithm:
@@ -751,7 +756,8 @@ impl Executor {
 
         // Step 2: Iterate until no new tuples are produced.
         let mut reached_fixpoint = false;
-        for _iteration in 0..Self::MAX_SCC_ITERATIONS {
+        let max_iterations = self.config.max_iterations as usize;
+        for _iteration in 0..max_iterations {
             // Compute delta_new_raw per head by evaluating each rule once per recursive Scan occurrence.
             let mut delta_new_raw_by_head: HashMap<String, CudaBuffer> = HashMap::new();
 
@@ -909,7 +915,7 @@ impl Executor {
         if !reached_fixpoint {
             return Err(XlogError::Execution(format!(
                 "Recursive SCC iteration limit ({}) exceeded",
-                Self::MAX_SCC_ITERATIONS
+                self.config.max_iterations
             )));
         }
 
