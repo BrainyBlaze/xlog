@@ -25,17 +25,6 @@ use xlog_stats::{ColumnStats, StatsManager};
 // Helper Functions
 // =============================================================================
 
-/// Creates a stats manager with pre-configured relation statistics.
-fn create_stats_manager_with_rels(configs: Vec<(RelId, u64, u64)>) -> StatsManager {
-    let mut mgr = StatsManager::new();
-    for (rel_id, cardinality, byte_size) in configs {
-        mgr.register_relation(rel_id);
-        mgr.update_cardinality(rel_id, cardinality);
-        mgr.update_byte_size(rel_id, byte_size);
-    }
-    mgr
-}
-
 /// Adds column statistics to a relation in the stats manager.
 fn add_column_stats_to_rel(
     mgr: &mut StatsManager,
