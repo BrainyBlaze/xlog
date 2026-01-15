@@ -4,6 +4,7 @@
 //! PTX kernels for GPU execution of relational operations (join, dedup, groupby).
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::marker::PhantomData;
 
 use cudarc::driver::{
@@ -123,6 +124,8 @@ pub mod groupby_kernels {
     pub const DETECT_GROUP_BOUNDARIES: &str = "detect_group_boundaries";
     pub const DETECT_BOUNDARIES: &str = "detect_boundaries";
     pub const EXTRACT_GROUP_KEYS: &str = "extract_group_keys";
+    pub const GROUP_IDS_FROM_BOUNDARIES: &str = "group_ids_from_boundaries";
+    pub const GROUP_START_INDICES: &str = "group_start_indices";
     pub const GROUPBY_COUNT: &str = "groupby_count";
     pub const GROUPBY_SUM: &str = "groupby_sum";
     pub const GROUPBY_MIN: &str = "groupby_min";
@@ -339,6 +342,52 @@ pub struct CudaKernelProvider {
     device: Arc<CudaDevice>,
     /// GPU memory manager for kernel allocations
     memory: Arc<GpuMemoryManager>,
+    /// Tracked host transfers for diagnostics
+    transfer_tracker: HostTransferTracker,
+}
+
+#[derive(Default)]
+struct HostTransferTracker {
+    dtoh_bytes: AtomicU64,
+    htod_bytes: AtomicU64,
+    dtoh_calls: AtomicU64,
+    htod_calls: AtomicU64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct HostTransferStats {
+    pub dtoh_bytes: u64,
+    pub htod_bytes: u64,
+    pub dtoh_calls: u64,
+    pub htod_calls: u64,
+}
+
+impl HostTransferTracker {
+    fn record_dtoh(&self, bytes: u64) {
+        self.dtoh_calls.fetch_add(1, Ordering::Relaxed);
+        self.dtoh_bytes.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    fn record_htod(&self, bytes: u64) {
+        self.htod_calls.fetch_add(1, Ordering::Relaxed);
+        self.htod_bytes.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> HostTransferStats {
+        HostTransferStats {
+            dtoh_bytes: self.dtoh_bytes.load(Ordering::Relaxed),
+            htod_bytes: self.htod_bytes.load(Ordering::Relaxed),
+            dtoh_calls: self.dtoh_calls.load(Ordering::Relaxed),
+            htod_calls: self.htod_calls.load(Ordering::Relaxed),
+        }
+    }
+
+    fn reset(&self) {
+        self.dtoh_bytes.store(0, Ordering::Relaxed);
+        self.htod_bytes.store(0, Ordering::Relaxed);
+        self.dtoh_calls.store(0, Ordering::Relaxed);
+        self.htod_calls.store(0, Ordering::Relaxed);
+    }
 }
 
 impl CudaKernelProvider {
@@ -406,6 +455,8 @@ impl CudaKernelProvider {
                     groupby_kernels::DETECT_GROUP_BOUNDARIES,
                     groupby_kernels::DETECT_BOUNDARIES,
                     groupby_kernels::EXTRACT_GROUP_KEYS,
+                    groupby_kernels::GROUP_IDS_FROM_BOUNDARIES,
+                    groupby_kernels::GROUP_START_INDICES,
                     groupby_kernels::GROUPBY_COUNT,
                     groupby_kernels::GROUPBY_SUM,
                     groupby_kernels::GROUPBY_MIN,
@@ -587,7 +638,11 @@ impl CudaKernelProvider {
             )
             .map_err(|e| XlogError::Kernel(format!("Failed to load arith PTX: {}", e)))?;
 
-        Ok(Self { device, memory })
+        Ok(Self {
+            device,
+            memory,
+            transfer_tracker: HostTransferTracker::default(),
+        })
     }
 
     /// Get the CUDA device
@@ -598,6 +653,46 @@ impl CudaKernelProvider {
     /// Get the GPU memory manager
     pub fn memory(&self) -> &Arc<GpuMemoryManager> {
         &self.memory
+    }
+
+    /// Reset tracked host transfer statistics.
+    pub fn reset_host_transfer_stats(&self) {
+        self.transfer_tracker.reset();
+    }
+
+    /// Snapshot tracked host transfer statistics.
+    pub fn host_transfer_stats(&self) -> HostTransferStats {
+        self.transfer_tracker.snapshot()
+    }
+
+    fn dtoh_sync_copy_into_tracked<T: DeviceRepr, Src: DevicePtr<T>>(
+        &self,
+        src: &Src,
+        dst: &mut [T],
+    ) -> Result<()> {
+        let bytes = std::mem::size_of::<T>()
+            .checked_mul(dst.len())
+            .ok_or_else(|| XlogError::Kernel("dtoh size overflow".to_string()))?;
+        self.transfer_tracker.record_dtoh(bytes as u64);
+        self.device
+            .inner()
+            .dtoh_sync_copy_into(src, dst)
+            .map_err(|e| XlogError::Kernel(format!("Failed to copy from device: {}", e)))
+    }
+
+    fn htod_sync_copy_into_tracked<T: DeviceRepr, Dst: cudarc::driver::DevicePtrMut<T>>(
+        &self,
+        src: &[T],
+        dst: &mut Dst,
+    ) -> Result<()> {
+        let bytes = std::mem::size_of::<T>()
+            .checked_mul(src.len())
+            .ok_or_else(|| XlogError::Kernel("htod size overflow".to_string()))?;
+        self.transfer_tracker.record_htod(bytes as u64);
+        self.device
+            .inner()
+            .htod_sync_copy_into(src, dst)
+            .map_err(|e| XlogError::Kernel(format!("Failed to copy to device: {}", e)))
     }
 
     /// Sample independent Bernoulli variables on the GPU.
@@ -2178,8 +2273,7 @@ impl CudaKernelProvider {
 
         let segments_per_row = (packed.key_bytes / 4) as usize;
         let total_segments = (num_rows as usize) * segments_per_row;
-        let packed_col: CudaColumn = packed.packed_keys.into();
-        let packed_u32 = self.column_as_u32_view(&packed_col, total_segments)?;
+        let packed_u32 = self.bytes_as_u32_view(&packed.packed_keys, total_segments)?;
 
         // Launch boundary detection
         let block_size = 256u32;
@@ -2209,61 +2303,148 @@ impl CudaKernelProvider {
 
         self.device.synchronize()?;
 
-        // Step 3: Compute group IDs using prefix_sum_mask
-        // Read boundaries to host
-        let mut boundaries_host = vec![0u8; num_rows as usize];
-        self.device
-            .inner()
-            .dtoh_sync_copy_into(&boundaries, &mut boundaries_host)
-            .map_err(|e| XlogError::Kernel(format!("Failed to read boundaries: {}", e)))?;
+        // Step 3: Compute group IDs on-device using prefix sum over boundaries.
+        let device = self.device.inner();
+        let num_blocks = grid_size;
+        let d_boundary_pos = self.memory.alloc::<u32>(num_rows as usize)?;
+        let mut d_block_sums = self.memory.alloc::<u32>(num_blocks as usize)?;
 
-        // Compute group IDs: cumulative sum of boundaries - 1
-        let mut group_ids_host = vec![0u32; num_rows as usize];
-        let mut current_group = 0u32;
-        for i in 0..num_rows as usize {
-            if i > 0 && boundaries_host[i] == 1 {
-                current_group += 1;
-            }
-            group_ids_host[i] = current_group;
+        let phase1_fn = device
+            .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE1)
+            .ok_or_else(|| {
+                XlogError::Kernel("Failed to get multiblock_scan_phase1 kernel".to_string())
+            })?;
+
+        // SAFETY: multiblock_scan_phase1(const uint8_t* mask, uint32_t* prefix_sum, uint32_t* block_sums, uint32_t n)
+        unsafe {
+            phase1_fn.clone().launch(
+                LaunchConfig {
+                    grid_dim: (num_blocks, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (&boundaries, &d_boundary_pos, &d_block_sums, num_rows),
+            )
         }
-        let num_groups = (current_group + 1) as usize;
+        .map_err(|e| XlogError::Kernel(format!("multiblock_scan_phase1 failed: {}", e)))?;
 
-        // Upload group IDs
+        if num_blocks > 1 {
+            self.multiblock_scan_u32_inplace(&mut d_block_sums, num_blocks)?;
+
+            let phase3_fn = device
+                .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE3)
+                .ok_or_else(|| {
+                    XlogError::Kernel("Failed to get multiblock_scan_phase3 kernel".to_string())
+                })?;
+
+            // SAFETY: multiblock_scan_phase3(uint32_t* prefix_sum, const uint32_t* block_offsets, uint32_t n)
+            unsafe {
+                phase3_fn.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (num_blocks, 1, 1),
+                        block_dim: (block_size, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (&d_boundary_pos, &d_block_sums, num_rows),
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("multiblock_scan_phase3 failed: {}", e)))?;
+        }
+
+        self.device.synchronize()?;
+
+        let last_idx = (num_rows as usize).checked_sub(1).ok_or_else(|| {
+            XlogError::Kernel("GroupBy: unexpected empty input after boundary scan".to_string())
+        })?;
+
+        let last_prefix_view = d_boundary_pos.slice(last_idx..(last_idx + 1));
+        let last_boundary_view = boundaries.slice(last_idx..(last_idx + 1));
+        let mut last_prefix = [0u32];
+        let mut last_boundary = [0u8];
+        self.dtoh_sync_copy_into_tracked(&last_prefix_view, &mut last_prefix)
+            .map_err(|e| XlogError::Kernel(format!("Failed to read last prefix sum: {}", e)))?;
+        self.dtoh_sync_copy_into_tracked(&last_boundary_view, &mut last_boundary)
+            .map_err(|e| XlogError::Kernel(format!("Failed to read last boundary: {}", e)))?;
+
+        let num_groups = (last_prefix[0] as u64) + (last_boundary[0] as u64);
+        if num_groups == 0 {
+            let result_schema =
+                self.groupby_multi_agg_result_schema(buffer.schema(), key_cols, aggs);
+            return self.create_empty_buffer(result_schema);
+        }
+
+        let num_groups_u32 = u32::try_from(num_groups).map_err(|_| {
+            XlogError::Kernel(format!(
+                "GroupBy produced {} groups, exceeding u32::MAX",
+                num_groups
+            ))
+        })?;
+        let num_groups_usize = num_groups_u32 as usize;
+
         let mut group_ids = self.memory.alloc::<u32>(num_rows as usize)?;
-        self.device
-            .inner()
-            .htod_sync_copy_into(&group_ids_host, &mut group_ids)
-            .map_err(|e| XlogError::Kernel(format!("Failed to upload group IDs: {}", e)))?;
+        let mut group_first_idx = self.memory.alloc::<u32>(num_groups_usize)?;
 
-        // Step 4: For each (value_col, op) pair, run the appropriate kernel
-        let mut agg_columns_bytes: Vec<Vec<u8>> = Vec::with_capacity(aggs.len());
+        let group_ids_fn = device
+            .get_func(GROUPBY_MODULE, groupby_kernels::GROUP_IDS_FROM_BOUNDARIES)
+            .ok_or_else(|| {
+                XlogError::Kernel("group_ids_from_boundaries kernel not found".to_string())
+            })?;
+        let group_start_fn = device
+            .get_func(GROUPBY_MODULE, groupby_kernels::GROUP_START_INDICES)
+            .ok_or_else(|| {
+                XlogError::Kernel("group_start_indices kernel not found".to_string())
+            })?;
+
+        // SAFETY: group_ids_from_boundaries(boundaries, boundary_pos, num_rows, group_ids)
+        unsafe {
+            group_ids_fn
+                .clone()
+                .launch(config, (&boundaries, &d_boundary_pos, num_rows, &mut group_ids))
+        }
+        .map_err(|e| XlogError::Kernel(format!("group_ids_from_boundaries failed: {}", e)))?;
+
+        // SAFETY: group_start_indices(boundaries, boundary_pos, num_rows, group_first_idx)
+        unsafe {
+            group_start_fn
+                .clone()
+                .launch(
+                    config,
+                    (&boundaries, &d_boundary_pos, num_rows, &mut group_first_idx),
+                )
+        }
+        .map_err(|e| XlogError::Kernel(format!("group_start_indices failed: {}", e)))?;
+
+        self.device.synchronize()?;
+
+        // Step 4: For each (value_col, op) pair, run the appropriate kernel on-device.
+        let mut agg_columns: Vec<CudaColumn> = Vec::with_capacity(aggs.len());
 
         for &(value_col, agg_op) in aggs {
-            // Get value column from sorted buffer
             let values = sorted
                 .column(value_col)
                 .ok_or_else(|| XlogError::Kernel("Value column not found".to_string()))?;
 
-            let agg_bytes = match agg_op {
+            match agg_op {
                 AggOp::Count => {
-                    let mut output = self.memory.alloc::<u32>(num_groups)?;
-                    // Initialize to 0
-                    self.device
-                        .inner()
-                        .htod_sync_copy_into(&vec![0u32; num_groups], &mut output)
-                        .map_err(|e| {
-                            XlogError::Kernel(format!("Failed to init count output: {}", e))
-                        })?;
+                    let output_bytes = num_groups_usize
+                        .checked_mul(std::mem::size_of::<u32>())
+                        .ok_or_else(|| XlogError::Kernel("Count output size overflow".to_string()))?;
+                    let mut output = self.memory.alloc::<u8>(output_bytes)?;
+                    if num_groups_u32 > 0 {
+                        device
+                            .memset_zeros(&mut output)
+                            .map_err(|e| {
+                                XlogError::Kernel(format!("Failed to zero count output: {}", e))
+                            })?;
+                    }
 
-                    let count_func = self
-                        .device
-                        .inner()
+                    let count_func = device
                         .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_COUNT)
                         .ok_or_else(|| {
                             XlogError::Kernel("groupby_count kernel not found".to_string())
                         })?;
 
-                    // SAFETY: Kernel parameters match expected signature
+                    // SAFETY: groupby_count(boundaries, group_ids, num_rows, counts)
                     unsafe {
                         count_func
                             .clone()
@@ -2272,39 +2453,29 @@ impl CudaKernelProvider {
                     .map_err(|e| XlogError::Kernel(format!("groupby_count failed: {}", e)))?;
 
                     self.device.synchronize()?;
-
-                    let mut host_output = vec![0u32; num_groups];
-                    self.device
-                        .inner()
-                        .dtoh_sync_copy_into(&output, &mut host_output)
-                        .map_err(|e| {
-                            XlogError::Kernel(format!("Failed to read count output: {}", e))
-                        })?;
-                    host_output
-                        .iter()
-                        .flat_map(|v| v.to_le_bytes())
-                        .collect::<Vec<u8>>()
+                    agg_columns.push(output.into());
                 }
                 AggOp::Sum => {
                     let values_view = self.column_as_u32_view(values, num_rows as usize)?;
-                    let mut output = self.memory.alloc::<u64>(num_groups)?;
-                    // Initialize to 0
-                    self.device
-                        .inner()
-                        .htod_sync_copy_into(&vec![0u64; num_groups], &mut output)
-                        .map_err(|e| {
-                            XlogError::Kernel(format!("Failed to init sum output: {}", e))
-                        })?;
+                    let output_bytes = num_groups_usize
+                        .checked_mul(std::mem::size_of::<u64>())
+                        .ok_or_else(|| XlogError::Kernel("Sum output size overflow".to_string()))?;
+                    let mut output = self.memory.alloc::<u8>(output_bytes)?;
+                    if num_groups_u32 > 0 {
+                        device
+                            .memset_zeros(&mut output)
+                            .map_err(|e| {
+                                XlogError::Kernel(format!("Failed to zero sum output: {}", e))
+                            })?;
+                    }
 
-                    let sum_func = self
-                        .device
-                        .inner()
+                    let sum_func = device
                         .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_SUM)
                         .ok_or_else(|| {
                             XlogError::Kernel("groupby_sum kernel not found".to_string())
                         })?;
 
-                    // SAFETY: Kernel parameters match expected signature
+                    // SAFETY: groupby_sum(values, group_ids, num_rows, sums)
                     unsafe {
                         sum_func
                             .clone()
@@ -2313,40 +2484,36 @@ impl CudaKernelProvider {
                     .map_err(|e| XlogError::Kernel(format!("groupby_sum failed: {}", e)))?;
 
                     self.device.synchronize()?;
-
-                    let mut host_output = vec![0u64; num_groups];
-                    self.device
-                        .inner()
-                        .dtoh_sync_copy_into(&output, &mut host_output)
-                        .map_err(|e| {
-                            XlogError::Kernel(format!("Failed to read sum output: {}", e))
-                        })?;
-                    // Return full u64 values (8 bytes each)
-                    host_output
-                        .iter()
-                        .flat_map(|v| v.to_le_bytes())
-                        .collect::<Vec<u8>>()
+                    agg_columns.push(output.into());
                 }
                 AggOp::Min => {
                     let values_view = self.column_as_u32_view(values, num_rows as usize)?;
-                    let mut output = self.memory.alloc::<u32>(num_groups)?;
-                    // Initialize to MAX
-                    self.device
-                        .inner()
-                        .htod_sync_copy_into(&vec![u32::MAX; num_groups], &mut output)
-                        .map_err(|e| {
-                            XlogError::Kernel(format!("Failed to init min output: {}", e))
+                    let output_bytes = num_groups_usize
+                        .checked_mul(std::mem::size_of::<u32>())
+                        .ok_or_else(|| XlogError::Kernel("Min output size overflow".to_string()))?;
+                    let mut output = self.memory.alloc::<u8>(output_bytes)?;
+                    let fill_fn = device
+                        .get_func(ARITH_MODULE, arith_kernels::ARITH_FILL_CONST_U32)
+                        .ok_or_else(|| {
+                            XlogError::Kernel("arith_fill_const_u32 not found".to_string())
                         })?;
+                    let fill_config = LaunchConfig::for_num_elems(num_groups_u32);
+                    unsafe {
+                        fill_fn
+                            .clone()
+                            .launch(fill_config, (u32::MAX, num_groups_u32, &mut output))
+                    }
+                    .map_err(|e| {
+                        XlogError::Kernel(format!("Failed to init min output: {}", e))
+                    })?;
 
-                    let min_func = self
-                        .device
-                        .inner()
+                    let min_func = device
                         .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_MIN)
                         .ok_or_else(|| {
                             XlogError::Kernel("groupby_min kernel not found".to_string())
                         })?;
 
-                    // SAFETY: Kernel parameters match expected signature
+                    // SAFETY: groupby_min(values, group_ids, num_rows, mins)
                     unsafe {
                         min_func
                             .clone()
@@ -2355,39 +2522,29 @@ impl CudaKernelProvider {
                     .map_err(|e| XlogError::Kernel(format!("groupby_min failed: {}", e)))?;
 
                     self.device.synchronize()?;
-
-                    let mut host_output = vec![0u32; num_groups];
-                    self.device
-                        .inner()
-                        .dtoh_sync_copy_into(&output, &mut host_output)
-                        .map_err(|e| {
-                            XlogError::Kernel(format!("Failed to read min output: {}", e))
-                        })?;
-                    host_output
-                        .iter()
-                        .flat_map(|v| v.to_le_bytes())
-                        .collect::<Vec<u8>>()
+                    agg_columns.push(output.into());
                 }
                 AggOp::Max => {
                     let values_view = self.column_as_u32_view(values, num_rows as usize)?;
-                    let mut output = self.memory.alloc::<u32>(num_groups)?;
-                    // Initialize to 0
-                    self.device
-                        .inner()
-                        .htod_sync_copy_into(&vec![0u32; num_groups], &mut output)
-                        .map_err(|e| {
-                            XlogError::Kernel(format!("Failed to init max output: {}", e))
-                        })?;
+                    let output_bytes = num_groups_usize
+                        .checked_mul(std::mem::size_of::<u32>())
+                        .ok_or_else(|| XlogError::Kernel("Max output size overflow".to_string()))?;
+                    let mut output = self.memory.alloc::<u8>(output_bytes)?;
+                    if num_groups_u32 > 0 {
+                        device
+                            .memset_zeros(&mut output)
+                            .map_err(|e| {
+                                XlogError::Kernel(format!("Failed to zero max output: {}", e))
+                            })?;
+                    }
 
-                    let max_func = self
-                        .device
-                        .inner()
+                    let max_func = device
                         .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_MAX)
                         .ok_or_else(|| {
                             XlogError::Kernel("groupby_max kernel not found".to_string())
                         })?;
 
-                    // SAFETY: Kernel parameters match expected signature
+                    // SAFETY: groupby_max(values, group_ids, num_rows, maxs)
                     unsafe {
                         max_func
                             .clone()
@@ -2396,55 +2553,46 @@ impl CudaKernelProvider {
                     .map_err(|e| XlogError::Kernel(format!("groupby_max failed: {}", e)))?;
 
                     self.device.synchronize()?;
-
-                    let mut host_output = vec![0u32; num_groups];
-                    self.device
-                        .inner()
-                        .dtoh_sync_copy_into(&output, &mut host_output)
-                        .map_err(|e| {
-                            XlogError::Kernel(format!("Failed to read max output: {}", e))
-                        })?;
-                    host_output
-                        .iter()
-                        .flat_map(|v| v.to_le_bytes())
-                        .collect::<Vec<u8>>()
+                    agg_columns.push(output.into());
                 }
                 AggOp::LogSumExp => {
-                    // LogSumExp requires F64 values, use 3-pass algorithm:
-                    // 1. Find max per group
-                    // 2. Compute sum of exp(x - max) per group
-                    // 3. Compute log(sum) + max per group
-
-                    // Get values as f64 view
                     let values_f64 = self.column_as_f64_view(values, num_rows as usize)?;
+                    let output_bytes = num_groups_usize
+                        .checked_mul(std::mem::size_of::<f64>())
+                        .ok_or_else(|| {
+                            XlogError::Kernel("LogSumExp output size overflow".to_string())
+                        })?;
+                    let mut maxs = self.memory.alloc::<u8>(output_bytes)?;
+                    let mut sumexps = self.memory.alloc::<u8>(output_bytes)?;
+                    let results = self.memory.alloc::<u8>(output_bytes)?;
 
-                    // Allocate buffers for intermediate results
-                    let mut maxs = self.memory.alloc::<f64>(num_groups)?;
-                    let mut sumexps = self.memory.alloc::<f64>(num_groups)?;
-                    let results = self.memory.alloc::<f64>(num_groups)?;
+                    let fill_f64 = device
+                        .get_func(ARITH_MODULE, arith_kernels::ARITH_FILL_CONST_F64)
+                        .ok_or_else(|| {
+                            XlogError::Kernel("arith_fill_const_f64 not found".to_string())
+                        })?;
+                    let fill_config = LaunchConfig::for_num_elems(num_groups_u32);
+                    unsafe {
+                        fill_f64.clone().launch(
+                            fill_config,
+                            (f64::NEG_INFINITY, num_groups_u32, &mut maxs),
+                        )
+                    }
+                    .map_err(|e| XlogError::Kernel(format!("Failed to init maxs: {}", e)))?;
+                    if num_groups_u32 > 0 {
+                        device
+                            .memset_zeros(&mut sumexps)
+                            .map_err(|e| {
+                                XlogError::Kernel(format!("Failed to init sumexps: {}", e))
+                            })?;
+                    }
 
-                    // Initialize maxs to -INFINITY
-                    self.device
-                        .inner()
-                        .htod_sync_copy_into(&vec![f64::NEG_INFINITY; num_groups], &mut maxs)
-                        .map_err(|e| XlogError::Kernel(format!("Failed to init maxs: {}", e)))?;
-
-                    // Initialize sumexps to 0.0
-                    self.device
-                        .inner()
-                        .htod_sync_copy_into(&vec![0.0f64; num_groups], &mut sumexps)
-                        .map_err(|e| XlogError::Kernel(format!("Failed to init sumexps: {}", e)))?;
-
-                    // Pass 1: Find max per group
-                    let max_func = self
-                        .device
-                        .inner()
+                    let max_func = device
                         .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_LOGSUMEXP_MAX)
                         .ok_or_else(|| {
                             XlogError::Kernel("groupby_logsumexp_max kernel not found".to_string())
                         })?;
 
-                    // SAFETY: Kernel parameters match expected signature
                     unsafe {
                         max_func
                             .clone()
@@ -2456,10 +2604,7 @@ impl CudaKernelProvider {
 
                     self.device.synchronize()?;
 
-                    // Pass 2: Compute sum of exp(x - max) per group
-                    let sumexp_func = self
-                        .device
-                        .inner()
+                    let sumexp_func = device
                         .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_LOGSUMEXP_SUMEXP)
                         .ok_or_else(|| {
                             XlogError::Kernel(
@@ -2467,11 +2612,13 @@ impl CudaKernelProvider {
                             )
                         })?;
 
-                    // SAFETY: Kernel parameters match expected signature
                     unsafe {
                         sumexp_func
                             .clone()
-                            .launch(config, (&values_f64, &group_ids, &maxs, num_rows, &sumexps))
+                            .launch(
+                                config,
+                                (&values_f64, &group_ids, &maxs, num_rows, &sumexps),
+                            )
                     }
                     .map_err(|e| {
                         XlogError::Kernel(format!("groupby_logsumexp_sumexp failed: {}", e))
@@ -2479,11 +2626,8 @@ impl CudaKernelProvider {
 
                     self.device.synchronize()?;
 
-                    // Pass 3: Compute final result = max + log(sumexp)
-                    let final_config = LaunchConfig::for_num_elems(num_groups as u32);
-                    let final_func = self
-                        .device
-                        .inner()
+                    let final_config = LaunchConfig::for_num_elems(num_groups_u32);
+                    let final_func = device
                         .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_LOGSUMEXP_FINAL)
                         .ok_or_else(|| {
                             XlogError::Kernel(
@@ -2491,94 +2635,101 @@ impl CudaKernelProvider {
                             )
                         })?;
 
-                    // SAFETY: Kernel parameters match expected signature
                     unsafe {
                         final_func
                             .clone()
-                            .launch(final_config, (&maxs, &sumexps, num_groups as u32, &results))
+                            .launch(final_config, (&maxs, &sumexps, num_groups_u32, &results))
                     }
                     .map_err(|e| {
                         XlogError::Kernel(format!("groupby_logsumexp_final failed: {}", e))
                     })?;
 
                     self.device.synchronize()?;
-
-                    // Read back as bytes
-                    let mut host_output = vec![0.0f64; num_groups];
-                    self.device
-                        .inner()
-                        .dtoh_sync_copy_into(&results, &mut host_output)
-                        .map_err(|e| {
-                            XlogError::Kernel(format!("Failed to read logsumexp output: {}", e))
-                        })?;
-                    host_output
-                        .iter()
-                        .flat_map(|v| v.to_le_bytes())
-                        .collect::<Vec<u8>>()
+                    agg_columns.push(results.into());
                 }
-            };
-
-            agg_columns_bytes.push(agg_bytes);
-        }
-
-        // Step 5: Build output buffer with keys and aggregated values
-        // Extract the first row index of each group (CPU for MVP).
-        let mut group_first_indices = vec![0usize; num_groups];
-        group_first_indices[0] = 0;
-        for (i, &is_boundary) in boundaries_host.iter().enumerate() {
-            if i > 0 && is_boundary == 1 {
-                let group = group_ids_host[i] as usize;
-                group_first_indices[group] = i;
             }
         }
 
-        let mut result_columns: Vec<CudaColumn> = Vec::with_capacity(key_cols.len() + aggs.len());
+        // Step 5: Build output buffer with keys and aggregated values.
+        let mut result_columns: Vec<CudaColumn> =
+            Vec::with_capacity(key_cols.len() + aggs.len());
 
-        // Key columns (in key_cols order)
+        let group_packed_bytes = (num_groups_usize)
+            .checked_mul(packed.key_bytes as usize)
+            .ok_or_else(|| XlogError::Kernel("GroupBy packed size overflow".to_string()))?;
+        let mut group_packed = self.memory.alloc::<u8>(group_packed_bytes)?;
+
+        let gather_fn = device
+            .get_func(PACK_MODULE, pack_kernels::GATHER_PACKED_ROWS)
+            .ok_or_else(|| {
+                XlogError::Kernel("gather_packed_rows kernel not found".to_string())
+            })?;
+        let gather_config = LaunchConfig::for_num_elems(num_groups_u32);
+
+        // SAFETY: gather_packed_rows(src_packed, row_size, indices, num_indices, dst_packed)
+        unsafe {
+            gather_fn.clone().launch(
+                gather_config,
+                (
+                    &packed.packed_keys,
+                    packed.key_bytes,
+                    &group_first_idx,
+                    num_groups_u32,
+                    &mut group_packed,
+                ),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("gather_packed_rows failed: {}", e)))?;
+
+        let mut col_offsets: Vec<u32> = Vec::with_capacity(key_cols.len());
+        let mut col_sizes: Vec<u32> = Vec::with_capacity(key_cols.len());
+        let mut offset = 0u32;
         for &key_col in key_cols {
-            let elem_size = buffer
+            let size = buffer
                 .schema()
                 .column_type(key_col)
-                .map(|t| t.size_bytes())
+                .map(|t| t.size_bytes() as u32)
                 .unwrap_or(4);
-            let total_bytes = (num_rows as usize) * elem_size;
+            col_offsets.push(offset);
+            col_sizes.push(size);
+            offset = offset
+                .checked_add(size)
+                .ok_or_else(|| XlogError::Kernel("GroupBy key size overflow".to_string()))?;
+        }
 
-            let col = sorted
-                .column(key_col)
-                .ok_or_else(|| XlogError::Kernel("Key column not found".to_string()))?;
+        let unpack_fn = device
+            .get_func(PACK_MODULE, pack_kernels::UNPACK_COLUMN)
+            .ok_or_else(|| XlogError::Kernel("unpack_column kernel not found".to_string()))?;
+        let unpack_config = LaunchConfig::for_num_elems(num_groups_u32);
 
-            let mut host_data = vec![0u8; total_bytes];
-            self.device
-                .inner()
-                .dtoh_sync_copy_into(col, &mut host_data)
-                .map_err(|e| XlogError::Kernel(format!("Failed to read key column: {}", e)))?;
+        for idx in 0..key_cols.len() {
+            let col_size = col_sizes[idx];
+            let col_offset = col_offsets[idx];
+            let out_bytes = (num_groups_usize)
+                .checked_mul(col_size as usize)
+                .ok_or_else(|| XlogError::Kernel("GroupBy key column overflow".to_string()))?;
+            let mut out_col = self.memory.alloc::<u8>(out_bytes)?;
 
-            let mut group_bytes = vec![0u8; num_groups * elem_size];
-            for (g, &row_idx) in group_first_indices.iter().enumerate() {
-                let src_start = row_idx * elem_size;
-                let src_end = src_start + elem_size;
-                let dst_start = g * elem_size;
-                group_bytes[dst_start..dst_start + elem_size]
-                    .copy_from_slice(&host_data[src_start..src_end]);
+            // SAFETY: unpack_column(packed_input, row_size, col_offset, col_size, num_rows, col_output)
+            unsafe {
+                unpack_fn.clone().launch(
+                    unpack_config,
+                    (
+                        &group_packed,
+                        packed.key_bytes,
+                        col_offset,
+                        col_size,
+                        num_groups_u32,
+                        &mut out_col,
+                    ),
+                )
             }
+            .map_err(|e| XlogError::Kernel(format!("unpack_column failed: {}", e)))?;
 
-            let mut out_col = self.memory.alloc::<u8>(group_bytes.len())?;
-            self.device
-                .inner()
-                .htod_sync_copy_into(&group_bytes, &mut out_col)
-                .map_err(|e| XlogError::Kernel(format!("Failed to upload group keys: {}", e)))?;
             result_columns.push(out_col.into());
         }
 
-        // Aggregation output columns (in aggs order)
-        for agg_bytes in agg_columns_bytes {
-            let mut agg_col = self.memory.alloc::<u8>(agg_bytes.len())?;
-            self.device
-                .inner()
-                .htod_sync_copy_into(&agg_bytes, &mut agg_col)
-                .map_err(|e| XlogError::Kernel(format!("Failed to upload agg column: {}", e)))?;
-            result_columns.push(agg_col.into());
-        }
+        result_columns.extend(agg_columns);
 
         let result_schema = self.groupby_multi_agg_result_schema(buffer.schema(), key_cols, aggs);
 
@@ -5467,6 +5618,33 @@ impl CudaKernelProvider {
 
     // ============== Internal Helper Methods ==============
 
+    fn bytes_as_u32_view<'a>(
+        &self,
+        bytes: &'a TrackedCudaSlice<u8>,
+        num_elements: usize,
+    ) -> Result<RawCudaView<'a, u32>> {
+        let required_bytes = num_elements * std::mem::size_of::<u32>();
+        if bytes.len() < required_bytes {
+            return Err(XlogError::Kernel(format!(
+                "Packed keys have {} bytes but {} required for {} u32 elements",
+                bytes.len(),
+                required_bytes,
+                num_elements
+            )));
+        }
+        let ptr = *bytes.device_ptr();
+        if (ptr as usize) % std::mem::align_of::<u32>() != 0 {
+            return Err(XlogError::Kernel(
+                "Packed keys device pointer is not u32-aligned".to_string(),
+            ));
+        }
+        Ok(RawCudaView {
+            ptr,
+            len: num_elements,
+            _marker: PhantomData,
+        })
+    }
+
     /// Reinterpret a `CudaBuffer` column as a `u32` slice for kernel access.
     fn column_as_u32_view<'a>(&self, col: &'a CudaColumn, num_elements: usize) -> Result<RawCudaView<'a, u32>> {
         let required_bytes = num_elements * std::mem::size_of::<u32>();
@@ -5854,10 +6032,8 @@ impl CudaKernelProvider {
         let hash_slice = self.memory.alloc::<u64>(num_rows as usize)?;
 
         // Upload column sizes to GPU
-        let col_sizes_slice = self
-            .device
-            .inner()
-            .htod_sync_copy(&col_sizes)
+        let mut col_sizes_slice = self.memory.alloc::<u32>(col_sizes.len())?;
+        self.htod_sync_copy_into_tracked(&col_sizes, &mut col_sizes_slice)
             .map_err(|e| XlogError::Kernel(format!("Failed to upload col_sizes: {}", e)))?;
 
         // Get column device pointers as u64 values for the kernel

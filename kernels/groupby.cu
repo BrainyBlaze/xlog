@@ -33,6 +33,36 @@ extern "C" __global__ void detect_group_boundaries(
     is_boundary[tid] = boundary ? 1 : 0;
 }
 
+// Build per-row group ids from boundary flags and exclusive prefix sum.
+extern "C" __global__ void group_ids_from_boundaries(
+    const uint8_t* __restrict__ boundaries,
+    const uint32_t* __restrict__ boundary_pos,
+    uint32_t num_rows,
+    uint32_t* __restrict__ group_ids
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= num_rows) return;
+
+    uint32_t prefix = boundary_pos[gid];
+    uint32_t is_boundary = boundaries[gid] ? 1 : 0;
+    group_ids[gid] = prefix + is_boundary - 1;
+}
+
+// Record the first row index for each group from boundary flags.
+extern "C" __global__ void group_start_indices(
+    const uint8_t* __restrict__ boundaries,
+    const uint32_t* __restrict__ boundary_pos,
+    uint32_t num_rows,
+    uint32_t* __restrict__ group_first_idx
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= num_rows) return;
+    if (boundaries[gid]) {
+        uint32_t group = boundary_pos[gid];
+        group_first_idx[group] = gid;
+    }
+}
+
 // Count aggregation per group
 extern "C" __global__ void groupby_count(
     const uint8_t* __restrict__ is_boundary,

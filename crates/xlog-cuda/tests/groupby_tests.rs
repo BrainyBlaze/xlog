@@ -279,6 +279,53 @@ fn test_groupby_unsorted_input() {
 }
 
 #[test]
+fn test_groupby_multi_key_device_keys() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    let schema = Schema::new(vec![
+        ("k1".to_string(), ScalarType::U32),
+        ("k2".to_string(), ScalarType::U32),
+        ("v".to_string(), ScalarType::U32),
+    ]);
+
+    let buffer = provider
+        .create_buffer_from_u32_columns(
+            &[&[1, 1, 2, 2], &[10, 10, 20, 20], &[5, 7, 11, 13]],
+            schema,
+        )
+        .unwrap();
+
+    provider.reset_host_transfer_stats();
+
+    let result = provider
+        .groupby_multi_agg(&buffer, &[0, 1], &[(2, AggOp::Sum)])
+        .unwrap();
+
+    let k1 = provider.download_column_u32(&result, 0).unwrap();
+    let k2 = provider.download_column_u32(&result, 1).unwrap();
+    let sums = provider.download_column_u64(&result, 2).unwrap();
+
+    assert_eq!(k1, vec![1, 2]);
+    assert_eq!(k2, vec![10, 20]);
+    assert_eq!(sums, vec![12, 24]);
+
+    let stats = provider.host_transfer_stats();
+    assert!(
+        stats.dtoh_bytes <= 8,
+        "unexpected device-to-host transfers: {} bytes",
+        stats.dtoh_bytes
+    );
+    assert!(
+        stats.htod_bytes <= 16,
+        "unexpected host-to-device transfers: {} bytes",
+        stats.htod_bytes
+    );
+}
+
+#[test]
 fn test_groupby_many_groups() {
     let Some(provider) = setup_provider() else {
         eprintln!("Skipping: no CUDA device");
