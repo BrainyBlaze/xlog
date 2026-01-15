@@ -949,6 +949,12 @@ impl Lowerer {
     ) -> Result<RirNode> {
         let mut filters = Vec::new();
         let mut first_var_col: HashMap<&str, usize> = HashMap::new();
+        let schema = self.schemas.get(&atom.predicate).ok_or_else(|| {
+            XlogError::Compilation(format!(
+                "Missing schema for predicate {}",
+                atom.predicate
+            ))
+        })?;
 
         for (i, term) in atom.terms.iter().enumerate() {
             if let Term::Variable(name) = term {
@@ -965,7 +971,13 @@ impl Lowerer {
                 }
             }
 
-            if let Some(const_val) = term_to_const_value(term) {
+            let col_type = schema.column_type(i).ok_or_else(|| {
+                XlogError::Compilation(format!(
+                    "Missing column type for {} column {}",
+                    atom.predicate, i
+                ))
+            })?;
+            if let Some(const_val) = term_to_typed_const_value(term, col_type)? {
                 filters.push(Expr::Compare {
                     left: Box::new(Expr::Column(i)),
                     op: CompareOp::Eq,
@@ -997,8 +1009,38 @@ impl Lowerer {
         cmp: &Comparison,
         var_env: &VariableEnv,
     ) -> Result<RirNode> {
-        let left_expr = self.term_to_expr(&cmp.left, var_env)?;
-        let right_expr = self.term_to_expr(&cmp.right, var_env)?;
+        let (left_expr, right_expr) = match (&cmp.left, &cmp.right) {
+            (Term::Variable(name), term) => {
+                let col = var_env.get_column(name).ok_or_else(|| {
+                    XlogError::Compilation(format!("Variable {} not found in environment", name))
+                })?;
+                let typ = var_env.get_type(name).ok_or_else(|| {
+                    XlogError::Compilation(format!("Missing type for variable {}", name))
+                })?;
+                if let Some(const_val) = term_to_typed_const_value(term, typ)? {
+                    (Expr::Column(col), Expr::Const(const_val))
+                } else {
+                    (self.term_to_expr(&cmp.left, var_env)?, self.term_to_expr(&cmp.right, var_env)?)
+                }
+            }
+            (term, Term::Variable(name)) => {
+                let col = var_env.get_column(name).ok_or_else(|| {
+                    XlogError::Compilation(format!("Variable {} not found in environment", name))
+                })?;
+                let typ = var_env.get_type(name).ok_or_else(|| {
+                    XlogError::Compilation(format!("Missing type for variable {}", name))
+                })?;
+                if let Some(const_val) = term_to_typed_const_value(term, typ)? {
+                    (Expr::Const(const_val), Expr::Column(col))
+                } else {
+                    (self.term_to_expr(&cmp.left, var_env)?, self.term_to_expr(&cmp.right, var_env)?)
+                }
+            }
+            _ => (
+                self.term_to_expr(&cmp.left, var_env)?,
+                self.term_to_expr(&cmp.right, var_env)?,
+            ),
+        };
 
         let op = match cmp.op {
             CompOp::Eq => CompareOp::Eq,
@@ -1643,6 +1685,113 @@ fn term_to_const_value(term: &Term) -> Option<ConstValue> {
         Term::Symbol(s) => Some(ConstValue::Symbol(s.clone())),
         Term::Variable(_) | Term::Anonymous | Term::Aggregate(_) => None,
     }
+}
+
+fn term_to_typed_const_value(term: &Term, expected: ScalarType) -> Result<Option<ConstValue>> {
+    let const_val = match term {
+        Term::Integer(i) => match expected {
+            ScalarType::U32 => {
+                if *i >= 0 && *i <= u32::MAX as i64 {
+                    ConstValue::U32(*i as u32)
+                } else {
+                    return Err(XlogError::Compilation(format!(
+                        "Integer literal {} out of range for {:?}",
+                        i, expected
+                    )));
+                }
+            }
+            ScalarType::U64 => {
+                if *i >= 0 {
+                    ConstValue::U64(*i as u64)
+                } else {
+                    return Err(XlogError::Compilation(format!(
+                        "Integer literal {} out of range for {:?}",
+                        i, expected
+                    )));
+                }
+            }
+            ScalarType::I32 => {
+                if *i >= i32::MIN as i64 && *i <= i32::MAX as i64 {
+                    ConstValue::I32(*i as i32)
+                } else {
+                    return Err(XlogError::Compilation(format!(
+                        "Integer literal {} out of range for {:?}",
+                        i, expected
+                    )));
+                }
+            }
+            ScalarType::I64 => ConstValue::I64(*i),
+            ScalarType::F32 => {
+                let value = *i as f64;
+                if value < f32::MIN as f64 || value > f32::MAX as f64 {
+                    return Err(XlogError::Compilation(format!(
+                        "Integer literal {} out of range for {:?}",
+                        i, expected
+                    )));
+                }
+                ConstValue::F32(value as f32)
+            }
+            ScalarType::F64 => ConstValue::F64(*i as f64),
+            ScalarType::Bool => {
+                if *i == 0 || *i == 1 {
+                    ConstValue::Bool(*i == 1)
+                } else {
+                    return Err(XlogError::Compilation(format!(
+                        "Integer literal {} not valid for {:?}",
+                        i, expected
+                    )));
+                }
+            }
+            ScalarType::Symbol => {
+                return Err(XlogError::Compilation(format!(
+                    "Integer literal {} not valid for {:?}",
+                    i, expected
+                )));
+            }
+        },
+        Term::Float(f) => match expected {
+            ScalarType::F32 => {
+                if !f.is_finite() {
+                    return Err(XlogError::Compilation(format!(
+                        "Float literal {} not valid for {:?}",
+                        f, expected
+                    )));
+                }
+                if *f < f32::MIN as f64 || *f > f32::MAX as f64 {
+                    return Err(XlogError::Compilation(format!(
+                        "Float literal {} out of range for {:?}",
+                        f, expected
+                    )));
+                }
+                ConstValue::F32(*f as f32)
+            }
+            ScalarType::F64 => ConstValue::F64(*f),
+            ScalarType::U32
+            | ScalarType::U64
+            | ScalarType::I32
+            | ScalarType::I64
+            | ScalarType::Bool
+            | ScalarType::Symbol => {
+                return Err(XlogError::Compilation(format!(
+                    "Float literal {} not valid for {:?}",
+                    f, expected
+                )));
+            }
+        },
+        Term::String(s) | Term::Symbol(s) => {
+            if expected == ScalarType::Symbol {
+                ConstValue::Symbol(s.clone())
+            } else {
+                return Err(XlogError::Compilation(format!(
+                    "String literal {} not valid for {:?}",
+                    s, expected
+                )));
+            }
+        }
+        Term::Variable(_) | Term::Anonymous | Term::Aggregate(_) => return Ok(None),
+    };
+
+    Ok(Some(const_val))
 }
 
 fn term_to_project_const_expr(term: &Term) -> Result<(Expr, ScalarType)> {
