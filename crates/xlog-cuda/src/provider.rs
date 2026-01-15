@@ -26,6 +26,7 @@ const SET_OPS_PTX: &str = include_str!("../../../kernels/set_ops.ptx");
 const PACK_PTX: &str = include_str!("../../../kernels/pack.ptx");
 const CIRCUIT_PTX: &str = include_str!("../../../kernels/circuit.ptx");
 const MC_SAMPLE_PTX: &str = include_str!("../../../kernels/mc_sample.ptx");
+const ARITH_PTX: &str = include_str!("../../../kernels/arith.ptx");
 
 #[derive(Clone, Copy)]
 struct RawCudaView<'a, T> {
@@ -65,10 +66,34 @@ pub const SET_OPS_MODULE: &str = "xlog_set_ops";
 pub const PACK_MODULE: &str = "xlog_pack";
 pub const CIRCUIT_MODULE: &str = "xlog_circuit";
 pub const MC_SAMPLE_MODULE: &str = "xlog_mc_sample";
+pub const ARITH_MODULE: &str = "xlog_arith";
 
 /// Kernel function names in the Monte Carlo sampling module
 pub mod mc_sample_kernels {
     pub const MC_SAMPLE_BERNOULLI: &str = "mc_sample_bernoulli";
+}
+
+/// Kernel function names in the arithmetic module
+pub mod arith_kernels {
+    pub const ARITH_BINARY_I64: &str = "arith_binary_i64";
+    pub const ARITH_BINARY_I32: &str = "arith_binary_i32";
+    pub const ARITH_BINARY_U64: &str = "arith_binary_u64";
+    pub const ARITH_BINARY_U32: &str = "arith_binary_u32";
+    pub const ARITH_BINARY_F64: &str = "arith_binary_f64";
+    pub const ARITH_BINARY_F32: &str = "arith_binary_f32";
+    pub const ARITH_ABS_I64: &str = "arith_abs_i64";
+    pub const ARITH_ABS_I32: &str = "arith_abs_i32";
+    pub const ARITH_ABS_F64: &str = "arith_abs_f64";
+    pub const ARITH_ABS_F32: &str = "arith_abs_f32";
+    pub const ARITH_POW_F64: &str = "arith_pow_f64";
+    pub const ARITH_CAST: &str = "arith_cast";
+    pub const ARITH_FILL_CONST_U32: &str = "arith_fill_const_u32";
+    pub const ARITH_FILL_CONST_U64: &str = "arith_fill_const_u64";
+    pub const ARITH_FILL_CONST_I64: &str = "arith_fill_const_i64";
+    pub const ARITH_FILL_CONST_I32: &str = "arith_fill_const_i32";
+    pub const ARITH_FILL_CONST_F64: &str = "arith_fill_const_f64";
+    pub const ARITH_FILL_CONST_F32: &str = "arith_fill_const_f32";
+    pub const ARITH_FILL_CONST_U8: &str = "arith_fill_const_u8";
 }
 
 /// Kernel function names in the join module
@@ -508,6 +533,37 @@ impl CudaKernelProvider {
                 &[mc_sample_kernels::MC_SAMPLE_BERNOULLI],
             )
             .map_err(|e| XlogError::Kernel(format!("Failed to load MC sample PTX: {}", e)))?;
+
+        // Load arithmetic module
+        let arith_module = Ptx::from_src(ARITH_PTX);
+        let _arith = device
+            .inner()
+            .load_ptx(
+                arith_module,
+                ARITH_MODULE,
+                &[
+                    arith_kernels::ARITH_BINARY_I64,
+                    arith_kernels::ARITH_BINARY_I32,
+                    arith_kernels::ARITH_BINARY_U64,
+                    arith_kernels::ARITH_BINARY_U32,
+                    arith_kernels::ARITH_BINARY_F64,
+                    arith_kernels::ARITH_BINARY_F32,
+                    arith_kernels::ARITH_ABS_I64,
+                    arith_kernels::ARITH_ABS_I32,
+                    arith_kernels::ARITH_ABS_F64,
+                    arith_kernels::ARITH_ABS_F32,
+                    arith_kernels::ARITH_POW_F64,
+                    arith_kernels::ARITH_CAST,
+                    arith_kernels::ARITH_FILL_CONST_U32,
+                    arith_kernels::ARITH_FILL_CONST_U64,
+                    arith_kernels::ARITH_FILL_CONST_I64,
+                    arith_kernels::ARITH_FILL_CONST_I32,
+                    arith_kernels::ARITH_FILL_CONST_F64,
+                    arith_kernels::ARITH_FILL_CONST_F32,
+                    arith_kernels::ARITH_FILL_CONST_U8,
+                ],
+            )
+            .map_err(|e| XlogError::Kernel(format!("Failed to load arith PTX: {}", e)))?;
 
         Ok(Self { device, memory })
     }

@@ -11,7 +11,7 @@ fn main() {
     // List of CUDA kernels to compile
     let kernels = [
         "join", "dedup", "groupby", "scan", "sort", "filter", "pack", "set_ops", "circuit",
-        "mc_sample",
+        "mc_sample", "arith",
     ];
 
     for kernel in &kernels {

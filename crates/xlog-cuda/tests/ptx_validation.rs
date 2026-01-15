@@ -142,3 +142,15 @@ fn validate_all_ptx_files_load_and_resolve_all_entry_points() {
         }
     }
 }
+
+#[test]
+fn validate_arith_ptx_contains_expected_kernels() {
+    let ptx_path = kernels_dir().join("arith.ptx");
+    let ptx = fs::read_to_string(&ptx_path)
+        .unwrap_or_else(|e| panic!("arith.ptx should exist after build: {}", e));
+    assert!(ptx.contains("arith_binary_i64"));
+    assert!(ptx.contains("arith_binary_f64"));
+    assert!(ptx.contains("arith_abs_i64"));
+    assert!(ptx.contains("arith_cast"));
+    assert!(ptx.contains("arith_fill_const_u32"));
+}
