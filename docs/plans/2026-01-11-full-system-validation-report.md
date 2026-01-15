@@ -127,7 +127,7 @@ ExecutionPlan
 | Rule | `head :- body.` | `reach(X,Y) :- edge(X,Y).` |
 | Query | `?- atom.` | `?- reach(X, Y).` |
 | Constraint | `:- body.` | `:- conflict(X).` |
-| Negation | `\+ atom` | `safe(X) :- node(X), \+ danger(X).` |
+| Negation | `not atom` | `safe(X) :- node(X), not danger(X).` |
 | Comparison | `X op Y` | `X > 10, Y = Z` |
 | Arithmetic | `Z is expr` | `Sum is X + Y` |
 | Aggregate | `agg(X)` | `count(X), sum(X)` |
@@ -166,7 +166,7 @@ ExecutionPlan with RirNodes
 | Pattern | IR Result |
 |---------|-----------|
 | `A(X), B(X,Y)` | Join(Scan(A), Scan(B), [0], [0]) |
-| `\+ B(X)` | Diff(input, Scan(B)) |
+| `not B(X)` | Diff(input, Scan(B)) |
 | `X > 10` | Filter(input, Compare(Col(0), Gt, 10)) |
 | `Z is X + Y` | Project(input, [..., Computed(Add)]) |
 | Recursive rules | Fixpoint(base, recursive, delta, full) |
@@ -331,7 +331,7 @@ reach(X, Z) :- reach(X, Y), edge(Y, Z).
 
 **Stratified Negation:**
 ```datalog
-safe(X) :- node(X), \+ danger(X).
+safe(X) :- node(X), not danger(X).
 ```
 
 **Aggregation:**
