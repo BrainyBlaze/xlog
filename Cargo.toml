@@ -12,6 +12,7 @@ members = [
     "crates/xlog-stats",
     "crates/xlog-solve",
     "crates/xlog-cuda-tests",
+    "crates/xlog-cli",
 ]
 
 [workspace.package]
