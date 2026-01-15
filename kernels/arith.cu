@@ -21,10 +21,12 @@ extern "C" __global__ void arith_binary_i64(
     int64_t x = a[gid];
     int64_t y = b[gid];
     int64_t v = 0;
+    uint64_t ux = static_cast<uint64_t>(x);
+    uint64_t uy = static_cast<uint64_t>(y);
     switch (op) {
-        case ARITH_OP_ADD: v = x + y; break;
-        case ARITH_OP_SUB: v = x - y; break;
-        case ARITH_OP_MUL: v = x * y; break;
+        case ARITH_OP_ADD: v = static_cast<int64_t>(ux + uy); break;
+        case ARITH_OP_SUB: v = static_cast<int64_t>(ux - uy); break;
+        case ARITH_OP_MUL: v = static_cast<int64_t>(ux * uy); break;
         case ARITH_OP_DIV: v = (y == 0) ? INT64_MAX : (x / y); break;
         case ARITH_OP_MOD: v = (y == 0) ? 0 : (x % y); break;
         case ARITH_OP_MIN: v = (x < y) ? x : y; break;
@@ -46,10 +48,12 @@ extern "C" __global__ void arith_binary_i32(
     int32_t x = a[gid];
     int32_t y = b[gid];
     int32_t v = 0;
+    uint32_t ux = static_cast<uint32_t>(x);
+    uint32_t uy = static_cast<uint32_t>(y);
     switch (op) {
-        case ARITH_OP_ADD: v = x + y; break;
-        case ARITH_OP_SUB: v = x - y; break;
-        case ARITH_OP_MUL: v = x * y; break;
+        case ARITH_OP_ADD: v = static_cast<int32_t>(ux + uy); break;
+        case ARITH_OP_SUB: v = static_cast<int32_t>(ux - uy); break;
+        case ARITH_OP_MUL: v = static_cast<int32_t>(ux * uy); break;
         case ARITH_OP_DIV: v = (y == 0) ? INT32_MAX : (x / y); break;
         case ARITH_OP_MOD: v = (y == 0) ? 0 : (x % y); break;
         case ARITH_OP_MIN: v = (x < y) ? x : y; break;
@@ -167,7 +171,11 @@ extern "C" __global__ void arith_abs_i64(
     uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
     if (gid >= n) return;
     int64_t v = a[gid];
-    out[gid] = (v < 0) ? -v : v;
+    uint64_t uv = static_cast<uint64_t>(v);
+    if (v < 0) {
+        uv = (~uv) + 1;
+    }
+    out[gid] = static_cast<int64_t>(uv);
 }
 
 extern "C" __global__ void arith_abs_i32(
@@ -178,7 +186,11 @@ extern "C" __global__ void arith_abs_i32(
     uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
     if (gid >= n) return;
     int32_t v = a[gid];
-    out[gid] = (v < 0) ? -v : v;
+    uint32_t uv = static_cast<uint32_t>(v);
+    if (v < 0) {
+        uv = (~uv) + 1;
+    }
+    out[gid] = static_cast<int32_t>(uv);
 }
 
 extern "C" __global__ void arith_abs_f64(

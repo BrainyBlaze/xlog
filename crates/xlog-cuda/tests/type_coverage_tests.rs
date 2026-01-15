@@ -897,3 +897,68 @@ fn test_filter_select_none() {
     let filtered = provider.filter_by_mask(&buffer, &mask).unwrap();
     assert_eq!(filtered.num_rows, 0);
 }
+
+#[test]
+fn test_arith_u32_i32_u64_f32() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    let schema_u32 = Schema::new(vec![("v".to_string(), ScalarType::U32)]);
+    let a_u32 = provider
+        .create_buffer_from_u32_slice(&[1, 2, 3], schema_u32.clone())
+        .unwrap();
+    let b_u32 = provider
+        .create_buffer_from_u32_slice(&[4, 5, 6], schema_u32.clone())
+        .unwrap();
+    let sum_u32 = provider.add_columns(&a_u32, &b_u32).unwrap();
+    let vals_u32 = provider.download_column_u32(&sum_u32, 0).unwrap();
+    assert_eq!(vals_u32, vec![5, 7, 9]);
+
+    let b_u32_div = provider
+        .create_buffer_from_u32_slice(&[1, 0, 2], schema_u32.clone())
+        .unwrap();
+    let div_u32 = provider.div_columns(&a_u32, &b_u32_div).unwrap();
+    let vals_u32_div = provider.download_column_u32(&div_u32, 0).unwrap();
+    assert_eq!(vals_u32_div, vec![1, u32::MAX, 1]);
+
+    let schema_i32 = Schema::new(vec![("v".to_string(), ScalarType::I32)]);
+    let a_i32 = provider
+        .create_buffer_from_i32_slice(&[-3, 4, -5], schema_i32.clone())
+        .unwrap();
+    let abs_i32 = provider.abs_column(&a_i32).unwrap();
+    let vals_i32 = provider.download_column_i32(&abs_i32, 0).unwrap();
+    assert_eq!(vals_i32, vec![3, 4, 5]);
+
+    let schema_u64 = Schema::new(vec![("v".to_string(), ScalarType::U64)]);
+    let a_u64 = provider
+        .create_buffer_from_u64_slice(&[10, 20, 30], schema_u64.clone())
+        .unwrap();
+    let b_u64 = provider
+        .create_buffer_from_u64_slice(&[1, 2, 3], schema_u64.clone())
+        .unwrap();
+    let diff_u64 = provider.sub_columns(&a_u64, &b_u64).unwrap();
+    let vals_u64 = provider.download_column_u64(&diff_u64, 0).unwrap();
+    assert_eq!(vals_u64, vec![9, 18, 27]);
+
+    let b_u64_div = provider
+        .create_buffer_from_u64_slice(&[2, 0, 3], schema_u64.clone())
+        .unwrap();
+    let div_u64 = provider.div_columns(&a_u64, &b_u64_div).unwrap();
+    let vals_u64_div = provider.download_column_u64(&div_u64, 0).unwrap();
+    assert_eq!(vals_u64_div, vec![5, u64::MAX, 10]);
+
+    let schema_f32 = Schema::new(vec![("v".to_string(), ScalarType::F32)]);
+    let a_f32 = provider
+        .create_buffer_from_f32_slice(&[1.5, -2.0, 3.0], schema_f32.clone())
+        .unwrap();
+    let b_f32 = provider
+        .create_buffer_from_f32_slice(&[2.0, 2.0, 0.5], schema_f32.clone())
+        .unwrap();
+    let prod_f32 = provider.mul_columns(&a_f32, &b_f32).unwrap();
+    let vals_f32 = provider.download_column_f32(&prod_f32, 0).unwrap();
+    assert!((vals_f32[0] - 3.0).abs() < 1e-6);
+    assert!((vals_f32[1] + 4.0).abs() < 1e-6);
+    assert!((vals_f32[2] - 1.5).abs() < 1e-6);
+}

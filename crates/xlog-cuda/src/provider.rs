@@ -7240,7 +7240,7 @@ impl CudaKernelProvider {
         ))
     }
 
-    // ============== Arithmetic Operations (Stubs for Task 7, GPU implementation in Task 8) ==============
+    // ============== Arithmetic Operations (GPU) ==============
 
     /// Extract a single column from a buffer as a new single-column buffer
     ///
@@ -7337,7 +7337,7 @@ impl CudaKernelProvider {
 
     /// Element-wise addition of two single-column buffers
     ///
-    /// Performs element-wise addition using CPU-based evaluation with host roundtrips.
+    /// Performs element-wise addition using GPU kernels.
     /// Uses wrapping arithmetic for integer overflow.
     ///
     /// # Arguments
@@ -7353,12 +7353,53 @@ impl CudaKernelProvider {
     /// - Buffers are not single-column
     /// - Type is not supported for arithmetic
     pub fn add_columns(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
-        self.binary_arith_op(a, b, |x, y| x.wrapping_add(y), |x, y| x + y)
+        match a.schema().column_type(0) {
+            Some(ScalarType::I64) => self.binary_arith_op_device::<i64>(
+                a,
+                b,
+                0,
+                arith_kernels::ARITH_BINARY_I64,
+            ),
+            Some(ScalarType::I32) => self.binary_arith_op_device::<i32>(
+                a,
+                b,
+                0,
+                arith_kernels::ARITH_BINARY_I32,
+            ),
+            Some(ScalarType::U64) => self.binary_arith_op_device::<u64>(
+                a,
+                b,
+                0,
+                arith_kernels::ARITH_BINARY_U64,
+            ),
+            Some(ScalarType::U32 | ScalarType::Symbol) => self.binary_arith_op_device::<u32>(
+                a,
+                b,
+                0,
+                arith_kernels::ARITH_BINARY_U32,
+            ),
+            Some(ScalarType::F64) => self.binary_arith_op_device::<f64>(
+                a,
+                b,
+                0,
+                arith_kernels::ARITH_BINARY_F64,
+            ),
+            Some(ScalarType::F32) => self.binary_arith_op_device::<f32>(
+                a,
+                b,
+                0,
+                arith_kernels::ARITH_BINARY_F32,
+            ),
+            other => Err(XlogError::Kernel(format!(
+                "Arithmetic not supported for {:?}",
+                other
+            ))),
+        }
     }
 
     /// Element-wise subtraction of two single-column buffers
     ///
-    /// Performs element-wise subtraction using CPU-based evaluation with host roundtrips.
+    /// Performs element-wise subtraction using GPU kernels.
     /// Uses wrapping arithmetic for integer overflow.
     ///
     /// # Arguments
@@ -7374,12 +7415,53 @@ impl CudaKernelProvider {
     /// - Buffers are not single-column
     /// - Type is not supported for arithmetic
     pub fn sub_columns(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
-        self.binary_arith_op(a, b, |x, y| x.wrapping_sub(y), |x, y| x - y)
+        match a.schema().column_type(0) {
+            Some(ScalarType::I64) => self.binary_arith_op_device::<i64>(
+                a,
+                b,
+                1,
+                arith_kernels::ARITH_BINARY_I64,
+            ),
+            Some(ScalarType::I32) => self.binary_arith_op_device::<i32>(
+                a,
+                b,
+                1,
+                arith_kernels::ARITH_BINARY_I32,
+            ),
+            Some(ScalarType::U64) => self.binary_arith_op_device::<u64>(
+                a,
+                b,
+                1,
+                arith_kernels::ARITH_BINARY_U64,
+            ),
+            Some(ScalarType::U32 | ScalarType::Symbol) => self.binary_arith_op_device::<u32>(
+                a,
+                b,
+                1,
+                arith_kernels::ARITH_BINARY_U32,
+            ),
+            Some(ScalarType::F64) => self.binary_arith_op_device::<f64>(
+                a,
+                b,
+                1,
+                arith_kernels::ARITH_BINARY_F64,
+            ),
+            Some(ScalarType::F32) => self.binary_arith_op_device::<f32>(
+                a,
+                b,
+                1,
+                arith_kernels::ARITH_BINARY_F32,
+            ),
+            other => Err(XlogError::Kernel(format!(
+                "Arithmetic not supported for {:?}",
+                other
+            ))),
+        }
     }
 
     /// Element-wise multiplication of two single-column buffers
     ///
-    /// Performs element-wise multiplication using CPU-based evaluation with host roundtrips.
+    /// Performs element-wise multiplication using GPU kernels.
     /// Uses wrapping arithmetic for integer overflow.
     ///
     /// # Arguments
@@ -7395,13 +7477,55 @@ impl CudaKernelProvider {
     /// - Buffers are not single-column
     /// - Type is not supported for arithmetic
     pub fn mul_columns(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
-        self.binary_arith_op(a, b, |x, y| x.wrapping_mul(y), |x, y| x * y)
+        match a.schema().column_type(0) {
+            Some(ScalarType::I64) => self.binary_arith_op_device::<i64>(
+                a,
+                b,
+                2,
+                arith_kernels::ARITH_BINARY_I64,
+            ),
+            Some(ScalarType::I32) => self.binary_arith_op_device::<i32>(
+                a,
+                b,
+                2,
+                arith_kernels::ARITH_BINARY_I32,
+            ),
+            Some(ScalarType::U64) => self.binary_arith_op_device::<u64>(
+                a,
+                b,
+                2,
+                arith_kernels::ARITH_BINARY_U64,
+            ),
+            Some(ScalarType::U32 | ScalarType::Symbol) => self.binary_arith_op_device::<u32>(
+                a,
+                b,
+                2,
+                arith_kernels::ARITH_BINARY_U32,
+            ),
+            Some(ScalarType::F64) => self.binary_arith_op_device::<f64>(
+                a,
+                b,
+                2,
+                arith_kernels::ARITH_BINARY_F64,
+            ),
+            Some(ScalarType::F32) => self.binary_arith_op_device::<f32>(
+                a,
+                b,
+                2,
+                arith_kernels::ARITH_BINARY_F32,
+            ),
+            other => Err(XlogError::Kernel(format!(
+                "Arithmetic not supported for {:?}",
+                other
+            ))),
+        }
     }
 
     /// Element-wise division of two single-column buffers
     ///
-    /// Performs element-wise division using CPU-based evaluation with host roundtrips.
-    /// For integers, division by zero returns i64::MAX.
+    /// Performs element-wise division using GPU kernels.
+    /// For signed integers, division by zero returns i64::MAX/i32::MAX.
+    /// For unsigned integers, division by zero returns u64::MAX/u32::MAX.
     /// For floats, division by zero produces Inf/NaN as per IEEE 754.
     ///
     /// # Arguments
@@ -7417,17 +7541,53 @@ impl CudaKernelProvider {
     /// - Buffers are not single-column
     /// - Type is not supported for arithmetic
     pub fn div_columns(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
-        self.binary_arith_op(
-            a,
-            b,
-            |x, y| if y == 0 { i64::MAX } else { x / y },
-            |x, y| x / y, // f64 div-by-zero produces Inf
-        )
+        match a.schema().column_type(0) {
+            Some(ScalarType::I64) => self.binary_arith_op_device::<i64>(
+                a,
+                b,
+                3,
+                arith_kernels::ARITH_BINARY_I64,
+            ),
+            Some(ScalarType::I32) => self.binary_arith_op_device::<i32>(
+                a,
+                b,
+                3,
+                arith_kernels::ARITH_BINARY_I32,
+            ),
+            Some(ScalarType::U64) => self.binary_arith_op_device::<u64>(
+                a,
+                b,
+                3,
+                arith_kernels::ARITH_BINARY_U64,
+            ),
+            Some(ScalarType::U32 | ScalarType::Symbol) => self.binary_arith_op_device::<u32>(
+                a,
+                b,
+                3,
+                arith_kernels::ARITH_BINARY_U32,
+            ),
+            Some(ScalarType::F64) => self.binary_arith_op_device::<f64>(
+                a,
+                b,
+                3,
+                arith_kernels::ARITH_BINARY_F64,
+            ),
+            Some(ScalarType::F32) => self.binary_arith_op_device::<f32>(
+                a,
+                b,
+                3,
+                arith_kernels::ARITH_BINARY_F32,
+            ),
+            other => Err(XlogError::Kernel(format!(
+                "Arithmetic not supported for {:?}",
+                other
+            ))),
+        }
     }
 
     /// Element-wise modulo of two single-column buffers
     ///
-    /// Performs element-wise modulo using CPU-based evaluation with host roundtrips.
+    /// Performs element-wise modulo using GPU kernels.
     /// For integers, modulo by zero returns 0.
     /// For floats, modulo by zero produces NaN as per IEEE 754.
     ///
@@ -7444,12 +7604,53 @@ impl CudaKernelProvider {
     /// - Buffers are not single-column
     /// - Type is not supported for arithmetic
     pub fn mod_columns(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
-        self.binary_arith_op(a, b, |x, y| if y == 0 { 0 } else { x % y }, |x, y| x % y)
+        match a.schema().column_type(0) {
+            Some(ScalarType::I64) => self.binary_arith_op_device::<i64>(
+                a,
+                b,
+                4,
+                arith_kernels::ARITH_BINARY_I64,
+            ),
+            Some(ScalarType::I32) => self.binary_arith_op_device::<i32>(
+                a,
+                b,
+                4,
+                arith_kernels::ARITH_BINARY_I32,
+            ),
+            Some(ScalarType::U64) => self.binary_arith_op_device::<u64>(
+                a,
+                b,
+                4,
+                arith_kernels::ARITH_BINARY_U64,
+            ),
+            Some(ScalarType::U32 | ScalarType::Symbol) => self.binary_arith_op_device::<u32>(
+                a,
+                b,
+                4,
+                arith_kernels::ARITH_BINARY_U32,
+            ),
+            Some(ScalarType::F64) => self.binary_arith_op_device::<f64>(
+                a,
+                b,
+                4,
+                arith_kernels::ARITH_BINARY_F64,
+            ),
+            Some(ScalarType::F32) => self.binary_arith_op_device::<f32>(
+                a,
+                b,
+                4,
+                arith_kernels::ARITH_BINARY_F32,
+            ),
+            other => Err(XlogError::Kernel(format!(
+                "Arithmetic not supported for {:?}",
+                other
+            ))),
+        }
     }
 
     /// Element-wise absolute value of a single-column buffer
     ///
-    /// Performs element-wise absolute value using CPU-based evaluation with host roundtrips.
+    /// Performs element-wise absolute value using GPU kernels.
     ///
     /// # Arguments
     /// * `a` - Input buffer (single column)
@@ -7468,46 +7669,127 @@ impl CudaKernelProvider {
             ));
         }
 
-        let col_type = a
-            .schema()
-            .column_type(0)
-            .ok_or_else(|| XlogError::Kernel("Missing column type".into()))?;
+        if a.num_rows() == 0 {
+            return self.create_empty_buffer(a.schema().clone());
+        }
 
-        match col_type {
-            ScalarType::I64 => {
-                let vals = self.download_column_i64(a, 0)?;
-                let result: Vec<i64> = vals.iter().map(|x| x.wrapping_abs()).collect();
-                self.create_buffer_from_i64_slice(&result, a.schema().clone())
+        let n: u32 = a.num_rows().try_into().map_err(|_| {
+            XlogError::Kernel(format!(
+                "abs_column: row count {} exceeds u32::MAX",
+                a.num_rows()
+            ))
+        })?;
+        let col = a
+            .column(0)
+            .ok_or_else(|| XlogError::Kernel("Missing column 0".into()))?;
+        let config = LaunchConfig::for_num_elems(n);
+
+        match a.schema().column_type(0) {
+            Some(ScalarType::I64) => {
+                let expected_bytes = (n as usize)
+                    .checked_mul(std::mem::size_of::<i64>())
+                    .ok_or_else(|| XlogError::Kernel("abs_column size overflow".into()))?;
+                if col.num_bytes() != expected_bytes {
+                    return Err(XlogError::Kernel(format!(
+                        "Column 0 has {} bytes but expected {} for {} rows",
+                        col.num_bytes(),
+                        expected_bytes,
+                        a.num_rows()
+                    )));
+                }
+                let mut out = self.memory.alloc::<u8>(expected_bytes)?;
+                let func = self
+                    .device
+                    .inner()
+                    .get_func(ARITH_MODULE, arith_kernels::ARITH_ABS_I64)
+                    .ok_or_else(|| XlogError::Kernel("arith_abs_i64 not found".into()))?;
+                unsafe { func.clone().launch(config, (col, n, &mut out)) }
+                    .map_err(|e| XlogError::Kernel(format!("abs_i64 failed: {}", e)))?;
+                self.device.synchronize()?;
+                Ok(CudaBuffer::from_columns(vec![out.into()], a.num_rows(), a.schema.clone()))
             }
-            ScalarType::I32 => {
-                let vals = self.download_column_i32(a, 0)?;
-                let result: Vec<i32> = vals.iter().map(|x| x.wrapping_abs()).collect();
-                self.create_buffer_from_i32_slice(&result, a.schema().clone())
+            Some(ScalarType::I32) => {
+                let expected_bytes = (n as usize)
+                    .checked_mul(std::mem::size_of::<i32>())
+                    .ok_or_else(|| XlogError::Kernel("abs_column size overflow".into()))?;
+                if col.num_bytes() != expected_bytes {
+                    return Err(XlogError::Kernel(format!(
+                        "Column 0 has {} bytes but expected {} for {} rows",
+                        col.num_bytes(),
+                        expected_bytes,
+                        a.num_rows()
+                    )));
+                }
+                let mut out = self.memory.alloc::<u8>(expected_bytes)?;
+                let func = self
+                    .device
+                    .inner()
+                    .get_func(ARITH_MODULE, arith_kernels::ARITH_ABS_I32)
+                    .ok_or_else(|| XlogError::Kernel("arith_abs_i32 not found".into()))?;
+                unsafe { func.clone().launch(config, (col, n, &mut out)) }
+                    .map_err(|e| XlogError::Kernel(format!("abs_i32 failed: {}", e)))?;
+                self.device.synchronize()?;
+                Ok(CudaBuffer::from_columns(vec![out.into()], a.num_rows(), a.schema.clone()))
             }
-            ScalarType::F64 => {
-                let vals = self.download_column_f64(a, 0)?;
-                let result: Vec<f64> = vals.iter().map(|x| x.abs()).collect();
-                self.create_buffer_from_f64_slice(&result, a.schema().clone())
+            Some(ScalarType::F64) => {
+                let expected_bytes = (n as usize)
+                    .checked_mul(std::mem::size_of::<f64>())
+                    .ok_or_else(|| XlogError::Kernel("abs_column size overflow".into()))?;
+                if col.num_bytes() != expected_bytes {
+                    return Err(XlogError::Kernel(format!(
+                        "Column 0 has {} bytes but expected {} for {} rows",
+                        col.num_bytes(),
+                        expected_bytes,
+                        a.num_rows()
+                    )));
+                }
+                let mut out = self.memory.alloc::<u8>(expected_bytes)?;
+                let func = self
+                    .device
+                    .inner()
+                    .get_func(ARITH_MODULE, arith_kernels::ARITH_ABS_F64)
+                    .ok_or_else(|| XlogError::Kernel("arith_abs_f64 not found".into()))?;
+                unsafe { func.clone().launch(config, (col, n, &mut out)) }
+                    .map_err(|e| XlogError::Kernel(format!("abs_f64 failed: {}", e)))?;
+                self.device.synchronize()?;
+                Ok(CudaBuffer::from_columns(vec![out.into()], a.num_rows(), a.schema.clone()))
             }
-            ScalarType::F32 => {
-                let vals = self.download_column_f32(a, 0)?;
-                let result: Vec<f32> = vals.iter().map(|x| x.abs()).collect();
-                self.create_buffer_from_f32_slice(&result, a.schema().clone())
+            Some(ScalarType::F32) => {
+                let expected_bytes = (n as usize)
+                    .checked_mul(std::mem::size_of::<f32>())
+                    .ok_or_else(|| XlogError::Kernel("abs_column size overflow".into()))?;
+                if col.num_bytes() != expected_bytes {
+                    return Err(XlogError::Kernel(format!(
+                        "Column 0 has {} bytes but expected {} for {} rows",
+                        col.num_bytes(),
+                        expected_bytes,
+                        a.num_rows()
+                    )));
+                }
+                let mut out = self.memory.alloc::<u8>(expected_bytes)?;
+                let func = self
+                    .device
+                    .inner()
+                    .get_func(ARITH_MODULE, arith_kernels::ARITH_ABS_F32)
+                    .ok_or_else(|| XlogError::Kernel("arith_abs_f32 not found".into()))?;
+                unsafe { func.clone().launch(config, (col, n, &mut out)) }
+                    .map_err(|e| XlogError::Kernel(format!("abs_f32 failed: {}", e)))?;
+                self.device.synchronize()?;
+                Ok(CudaBuffer::from_columns(vec![out.into()], a.num_rows(), a.schema.clone()))
             }
-            ScalarType::U64 | ScalarType::U32 => {
-                // Unsigned types are already non-negative, just clone
+            Some(ScalarType::U32 | ScalarType::U64 | ScalarType::Bool | ScalarType::Symbol) => {
                 self.clone_buffer(a)
             }
-            _ => Err(XlogError::Kernel(format!(
-                "Absolute value not supported for {:?}",
-                col_type
+            other => Err(XlogError::Kernel(format!(
+                "Abs not supported for {:?}",
+                other
             ))),
         }
     }
 
     /// Element-wise minimum of two single-column buffers
     ///
-    /// Performs element-wise minimum using CPU-based evaluation with host roundtrips.
+    /// Performs element-wise minimum using GPU kernels.
     ///
     /// # Arguments
     /// * `a` - First operand buffer (single column)
@@ -7522,12 +7804,53 @@ impl CudaKernelProvider {
     /// - Buffers are not single-column
     /// - Type is not supported for arithmetic
     pub fn min_columns(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
-        self.binary_arith_op(a, b, |x, y| x.min(y), |x, y| x.min(y))
+        match a.schema().column_type(0) {
+            Some(ScalarType::I64) => self.binary_arith_op_device::<i64>(
+                a,
+                b,
+                5,
+                arith_kernels::ARITH_BINARY_I64,
+            ),
+            Some(ScalarType::I32) => self.binary_arith_op_device::<i32>(
+                a,
+                b,
+                5,
+                arith_kernels::ARITH_BINARY_I32,
+            ),
+            Some(ScalarType::U64) => self.binary_arith_op_device::<u64>(
+                a,
+                b,
+                5,
+                arith_kernels::ARITH_BINARY_U64,
+            ),
+            Some(ScalarType::U32 | ScalarType::Symbol) => self.binary_arith_op_device::<u32>(
+                a,
+                b,
+                5,
+                arith_kernels::ARITH_BINARY_U32,
+            ),
+            Some(ScalarType::F64) => self.binary_arith_op_device::<f64>(
+                a,
+                b,
+                5,
+                arith_kernels::ARITH_BINARY_F64,
+            ),
+            Some(ScalarType::F32) => self.binary_arith_op_device::<f32>(
+                a,
+                b,
+                5,
+                arith_kernels::ARITH_BINARY_F32,
+            ),
+            other => Err(XlogError::Kernel(format!(
+                "Arithmetic not supported for {:?}",
+                other
+            ))),
+        }
     }
 
     /// Element-wise maximum of two single-column buffers
     ///
-    /// Performs element-wise maximum using CPU-based evaluation with host roundtrips.
+    /// Performs element-wise maximum using GPU kernels.
     ///
     /// # Arguments
     /// * `a` - First operand buffer (single column)
@@ -7542,12 +7865,53 @@ impl CudaKernelProvider {
     /// - Buffers are not single-column
     /// - Type is not supported for arithmetic
     pub fn max_columns(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
-        self.binary_arith_op(a, b, |x, y| x.max(y), |x, y| x.max(y))
+        match a.schema().column_type(0) {
+            Some(ScalarType::I64) => self.binary_arith_op_device::<i64>(
+                a,
+                b,
+                6,
+                arith_kernels::ARITH_BINARY_I64,
+            ),
+            Some(ScalarType::I32) => self.binary_arith_op_device::<i32>(
+                a,
+                b,
+                6,
+                arith_kernels::ARITH_BINARY_I32,
+            ),
+            Some(ScalarType::U64) => self.binary_arith_op_device::<u64>(
+                a,
+                b,
+                6,
+                arith_kernels::ARITH_BINARY_U64,
+            ),
+            Some(ScalarType::U32 | ScalarType::Symbol) => self.binary_arith_op_device::<u32>(
+                a,
+                b,
+                6,
+                arith_kernels::ARITH_BINARY_U32,
+            ),
+            Some(ScalarType::F64) => self.binary_arith_op_device::<f64>(
+                a,
+                b,
+                6,
+                arith_kernels::ARITH_BINARY_F64,
+            ),
+            Some(ScalarType::F32) => self.binary_arith_op_device::<f32>(
+                a,
+                b,
+                6,
+                arith_kernels::ARITH_BINARY_F32,
+            ),
+            other => Err(XlogError::Kernel(format!(
+                "Arithmetic not supported for {:?}",
+                other
+            ))),
+        }
     }
 
     /// Element-wise power of two single-column buffers
     ///
-    /// Converts both operands to f64, computes x^y, and returns f64 result.
+    /// Converts both operands to f64, computes x^y on the GPU, and returns f64 result.
     /// This matches the behavior of most database systems where pow() returns a float.
     ///
     /// # Arguments
@@ -7572,26 +7936,74 @@ impl CudaKernelProvider {
             ));
         }
 
-        // Convert base to f64
-        let base_vals = self.column_to_f64(base, 0)?;
-        // Convert exponent to f64
-        let exp_vals = self.column_to_f64(exp, 0)?;
+        if base.num_rows() == 0 {
+            let schema = Schema::new(vec![("result".to_string(), ScalarType::F64)]);
+            return self.create_empty_buffer(schema);
+        }
 
-        // Compute power
-        let result: Vec<f64> = base_vals
-            .iter()
-            .zip(exp_vals.iter())
-            .map(|(b, e)| b.powf(*e))
-            .collect();
+        let n: u32 = base.num_rows().try_into().map_err(|_| {
+            XlogError::Kernel(format!(
+                "pow_columns: row count {} exceeds u32::MAX",
+                base.num_rows()
+            ))
+        })?;
+
+        let base_f64_buf = if base.schema().column_type(0) == Some(ScalarType::F64) {
+            None
+        } else {
+            Some(self.cast_column(base, ScalarType::F64)?)
+        };
+        let base_buf = base_f64_buf.as_ref().unwrap_or(base);
+
+        let exp_f64_buf = if exp.schema().column_type(0) == Some(ScalarType::F64) {
+            None
+        } else {
+            Some(self.cast_column(exp, ScalarType::F64)?)
+        };
+        let exp_buf = exp_f64_buf.as_ref().unwrap_or(exp);
+
+        let base_col = base_buf
+            .column(0)
+            .ok_or_else(|| XlogError::Kernel("Missing base column".into()))?;
+        let exp_col = exp_buf
+            .column(0)
+            .ok_or_else(|| XlogError::Kernel("Missing exp column".into()))?;
+
+        let expected_bytes = (n as usize)
+            .checked_mul(std::mem::size_of::<f64>())
+            .ok_or_else(|| XlogError::Kernel("pow_columns size overflow".into()))?;
+        if base_col.num_bytes() != expected_bytes || exp_col.num_bytes() != expected_bytes {
+            return Err(XlogError::Kernel(format!(
+                "pow_columns: expected {} bytes for {} rows",
+                expected_bytes,
+                base.num_rows()
+            )));
+        }
+
+        let mut out = self.memory.alloc::<u8>(expected_bytes)?;
+        let func = self
+            .device
+            .inner()
+            .get_func(ARITH_MODULE, arith_kernels::ARITH_POW_F64)
+            .ok_or_else(|| XlogError::Kernel("arith_pow_f64 not found".into()))?;
+        let config = LaunchConfig::for_num_elems(n);
+
+        unsafe { func.clone().launch(config, (base_col, exp_col, n, &mut out)) }
+            .map_err(|e| XlogError::Kernel(format!("pow_f64 failed: {}", e)))?;
+
+        self.device.synchronize()?;
 
         let schema = Schema::new(vec![("result".to_string(), ScalarType::F64)]);
-        self.create_buffer_from_f64_slice(&result, schema)
+        Ok(CudaBuffer::from_columns(
+            vec![out.into()],
+            base.num_rows(),
+            schema,
+        ))
     }
 
     /// Cast a single-column buffer to a different type
     ///
-    /// Downloads the source data, converts each value to the target type,
-    /// and uploads the result.
+    /// Casts data on the GPU using the arithmetic cast kernel.
     ///
     /// # Arguments
     /// * `a` - Input buffer (single column)
@@ -7618,62 +8030,63 @@ impl CudaKernelProvider {
 
         let schema = Schema::new(vec![("result".to_string(), target)]);
 
-        // Handle each source type
-        match source_type {
-            ScalarType::I64 => {
-                let vals = self.download_column_i64(a, 0)?;
-                self.cast_from_i64(&vals, target, schema)
-            }
-            ScalarType::I32 => {
-                let vals = self.download_column_i32(a, 0)?;
-                self.cast_from_i32(&vals, target, schema)
-            }
-            ScalarType::U64 => {
-                let vals = self.download_column_u64(a, 0)?;
-                self.cast_from_u64(&vals, target, schema)
-            }
-            ScalarType::U32 => {
-                let vals = self.download_column_u32(a, 0)?;
-                self.cast_from_u32(&vals, target, schema)
-            }
-            ScalarType::F64 => {
-                let vals = self.download_column_f64(a, 0)?;
-                self.cast_from_f64(&vals, target, schema)
-            }
-            ScalarType::F32 => {
-                let vals = self.download_column_f32(a, 0)?;
-                self.cast_from_f32(&vals, target, schema)
-            }
-            _ => Err(XlogError::Kernel(format!(
-                "Cast from {:?} not supported",
-                source_type
-            ))),
+        if a.num_rows() == 0 {
+            return self.create_empty_buffer(schema);
         }
+
+        let n: u32 = a.num_rows().try_into().map_err(|_| {
+            XlogError::Kernel(format!(
+                "cast_column: row count {} exceeds u32::MAX",
+                a.num_rows()
+            ))
+        })?;
+
+        let src_col = a
+            .column(0)
+            .ok_or_else(|| XlogError::Kernel("Missing column 0".into()))?;
+        let src_bytes = (n as usize)
+            .checked_mul(source_type.size_bytes())
+            .ok_or_else(|| XlogError::Kernel("cast_column size overflow".into()))?;
+        if src_col.num_bytes() != src_bytes {
+            return Err(XlogError::Kernel(format!(
+                "Column 0 has {} bytes but expected {} for {} rows",
+                src_col.num_bytes(),
+                src_bytes,
+                a.num_rows()
+            )));
+        }
+
+        let dst_bytes = (n as usize)
+            .checked_mul(target.size_bytes())
+            .ok_or_else(|| XlogError::Kernel("cast_column size overflow".into()))?;
+        let mut out = self.memory.alloc::<u8>(dst_bytes)?;
+
+        let func = self
+            .device
+            .inner()
+            .get_func(ARITH_MODULE, arith_kernels::ARITH_CAST)
+            .ok_or_else(|| XlogError::Kernel("arith_cast not found".into()))?;
+        let config = LaunchConfig::for_num_elems(n);
+
+        unsafe {
+            func.clone()
+                .launch(config, (src_col, &mut out, n, source_type.to_code(), target.to_code()))
+        }
+        .map_err(|e| XlogError::Kernel(format!("cast failed: {}", e)))?;
+
+        self.device.synchronize()?;
+
+        Ok(CudaBuffer::from_columns(vec![out.into()], a.num_rows(), schema))
     }
 
-    /// Helper for binary arithmetic operations
-    ///
-    /// Downloads both operands, applies the operation element-wise, and uploads the result.
-    ///
-    /// # Arguments
-    /// * `a` - First operand buffer (single column)
-    /// * `b` - Second operand buffer (single column)
-    /// * `int_op` - Operation to apply for integer types (i64)
-    /// * `float_op` - Operation to apply for float types (f64)
-    ///
-    /// # Returns
-    /// A new CudaBuffer containing the operation results
-    fn binary_arith_op<FI, FF>(
+    /// Helper for binary arithmetic operations on device.
+    fn binary_arith_op_device<T: DeviceRepr>(
         &self,
         a: &CudaBuffer,
         b: &CudaBuffer,
-        int_op: FI,
-        float_op: FF,
-    ) -> Result<CudaBuffer>
-    where
-        FI: Fn(i64, i64) -> i64,
-        FF: Fn(f64, f64) -> f64,
-    {
+        op: u8,
+        kernel: &str,
+    ) -> Result<CudaBuffer> {
         if a.num_rows() != b.num_rows() {
             return Err(XlogError::Kernel("Row count mismatch".into()));
         }
@@ -7682,330 +8095,58 @@ impl CudaKernelProvider {
                 "Arithmetic requires single-column buffers".into(),
             ));
         }
-
-        let col_type = a
-            .schema()
-            .column_type(0)
-            .ok_or_else(|| XlogError::Kernel("Missing column type".into()))?;
-
-        match col_type {
-            ScalarType::I64 => {
-                let a_vals = self.download_column_i64(a, 0)?;
-                let b_vals = self.download_column_i64(b, 0)?;
-                let result: Vec<i64> = a_vals
-                    .iter()
-                    .zip(b_vals.iter())
-                    .map(|(x, y)| int_op(*x, *y))
-                    .collect();
-                self.create_buffer_from_i64_slice(&result, a.schema().clone())
-            }
-            ScalarType::I32 => {
-                let a_vals = self.download_column_i32(a, 0)?;
-                let b_vals = self.download_column_i32(b, 0)?;
-                let result: Vec<i32> = a_vals
-                    .iter()
-                    .zip(b_vals.iter())
-                    .map(|(x, y)| int_op(*x as i64, *y as i64) as i32)
-                    .collect();
-                self.create_buffer_from_i32_slice(&result, a.schema().clone())
-            }
-            ScalarType::U64 => {
-                let a_vals = self.download_column_u64(a, 0)?;
-                let b_vals = self.download_column_u64(b, 0)?;
-                let result: Vec<u64> = a_vals
-                    .iter()
-                    .zip(b_vals.iter())
-                    .map(|(x, y)| int_op(*x as i64, *y as i64) as u64)
-                    .collect();
-                self.create_buffer_from_u64_slice(&result, a.schema().clone())
-            }
-            ScalarType::U32 => {
-                let a_vals = self.download_column_u32(a, 0)?;
-                let b_vals = self.download_column_u32(b, 0)?;
-                let result: Vec<u32> = a_vals
-                    .iter()
-                    .zip(b_vals.iter())
-                    .map(|(x, y)| int_op(*x as i64, *y as i64) as u32)
-                    .collect();
-                self.create_buffer_from_u32_slice(&result, a.schema().clone())
-            }
-            ScalarType::F64 => {
-                let a_vals = self.download_column_f64(a, 0)?;
-                let b_vals = self.download_column_f64(b, 0)?;
-                let result: Vec<f64> = a_vals
-                    .iter()
-                    .zip(b_vals.iter())
-                    .map(|(x, y)| float_op(*x, *y))
-                    .collect();
-                self.create_buffer_from_f64_slice(&result, a.schema().clone())
-            }
-            ScalarType::F32 => {
-                let a_vals = self.download_column_f32(a, 0)?;
-                let b_vals = self.download_column_f32(b, 0)?;
-                let result: Vec<f32> = a_vals
-                    .iter()
-                    .zip(b_vals.iter())
-                    .map(|(x, y)| float_op(*x as f64, *y as f64) as f32)
-                    .collect();
-                self.create_buffer_from_f32_slice(&result, a.schema().clone())
-            }
-            _ => Err(XlogError::Kernel(format!(
-                "Arithmetic not supported for {:?}",
-                col_type
-            ))),
+        if a.schema().column_type(0) != b.schema().column_type(0) {
+            return Err(XlogError::Kernel(
+                "Arithmetic requires matching column types".into(),
+            ));
         }
-    }
-
-    /// Helper to convert any numeric column to f64 values
-    fn column_to_f64(&self, buf: &CudaBuffer, col_idx: usize) -> Result<Vec<f64>> {
-        let col_type = buf
-            .schema()
-            .column_type(col_idx)
-            .ok_or_else(|| XlogError::Kernel("Missing column type".into()))?;
-
-        match col_type {
-            ScalarType::I64 => {
-                let vals = self.download_column_i64(buf, col_idx)?;
-                Ok(vals.iter().map(|x| *x as f64).collect())
-            }
-            ScalarType::I32 => {
-                let vals = self.download_column_i32(buf, col_idx)?;
-                Ok(vals.iter().map(|x| *x as f64).collect())
-            }
-            ScalarType::U64 => {
-                let vals = self.download_column_u64(buf, col_idx)?;
-                Ok(vals.iter().map(|x| *x as f64).collect())
-            }
-            ScalarType::U32 => {
-                let vals = self.download_column_u32(buf, col_idx)?;
-                Ok(vals.iter().map(|x| *x as f64).collect())
-            }
-            ScalarType::F64 => self.download_column_f64(buf, col_idx),
-            ScalarType::F32 => {
-                let vals = self.download_column_f32(buf, col_idx)?;
-                Ok(vals.iter().map(|x| *x as f64).collect())
-            }
-            _ => Err(XlogError::Kernel(format!(
-                "Cannot convert {:?} to f64",
-                col_type
-            ))),
+        if a.num_rows() == 0 {
+            return self.create_empty_buffer(a.schema.clone());
         }
-    }
 
-    /// Helper to cast from i64 to target type
-    fn cast_from_i64(
-        &self,
-        vals: &[i64],
-        target: ScalarType,
-        schema: Schema,
-    ) -> Result<CudaBuffer> {
-        match target {
-            ScalarType::I64 => self.create_buffer_from_i64_slice(vals, schema),
-            ScalarType::I32 => {
-                let result: Vec<i32> = vals.iter().map(|x| *x as i32).collect();
-                self.create_buffer_from_i32_slice(&result, schema)
-            }
-            ScalarType::U64 => {
-                let result: Vec<u64> = vals.iter().map(|x| *x as u64).collect();
-                self.create_buffer_from_u64_slice(&result, schema)
-            }
-            ScalarType::U32 => {
-                let result: Vec<u32> = vals.iter().map(|x| *x as u32).collect();
-                self.create_buffer_from_u32_slice(&result, schema)
-            }
-            ScalarType::F64 => {
-                let result: Vec<f64> = vals.iter().map(|x| *x as f64).collect();
-                self.create_buffer_from_f64_slice(&result, schema)
-            }
-            ScalarType::F32 => {
-                let result: Vec<f32> = vals.iter().map(|x| *x as f32).collect();
-                self.create_buffer_from_f32_slice(&result, schema)
-            }
-            _ => Err(XlogError::Kernel(format!(
-                "Cast to {:?} not supported",
-                target
-            ))),
-        }
-    }
+        let n: u32 = a.num_rows().try_into().map_err(|_| {
+            XlogError::Kernel(format!(
+                "arith: row count {} exceeds u32::MAX",
+                a.num_rows()
+            ))
+        })?;
 
-    /// Helper to cast from i32 to target type
-    fn cast_from_i32(
-        &self,
-        vals: &[i32],
-        target: ScalarType,
-        schema: Schema,
-    ) -> Result<CudaBuffer> {
-        match target {
-            ScalarType::I64 => {
-                let result: Vec<i64> = vals.iter().map(|x| *x as i64).collect();
-                self.create_buffer_from_i64_slice(&result, schema)
-            }
-            ScalarType::I32 => self.create_buffer_from_i32_slice(vals, schema),
-            ScalarType::U64 => {
-                let result: Vec<u64> = vals.iter().map(|x| *x as u64).collect();
-                self.create_buffer_from_u64_slice(&result, schema)
-            }
-            ScalarType::U32 => {
-                let result: Vec<u32> = vals.iter().map(|x| *x as u32).collect();
-                self.create_buffer_from_u32_slice(&result, schema)
-            }
-            ScalarType::F64 => {
-                let result: Vec<f64> = vals.iter().map(|x| *x as f64).collect();
-                self.create_buffer_from_f64_slice(&result, schema)
-            }
-            ScalarType::F32 => {
-                let result: Vec<f32> = vals.iter().map(|x| *x as f32).collect();
-                self.create_buffer_from_f32_slice(&result, schema)
-            }
-            _ => Err(XlogError::Kernel(format!(
-                "Cast to {:?} not supported",
-                target
-            ))),
-        }
-    }
+        let expected_bytes = (n as usize)
+            .checked_mul(std::mem::size_of::<T>())
+            .ok_or_else(|| XlogError::Kernel("arith output size overflow".into()))?;
 
-    /// Helper to cast from u64 to target type
-    fn cast_from_u64(
-        &self,
-        vals: &[u64],
-        target: ScalarType,
-        schema: Schema,
-    ) -> Result<CudaBuffer> {
-        match target {
-            ScalarType::I64 => {
-                let result: Vec<i64> = vals.iter().map(|x| *x as i64).collect();
-                self.create_buffer_from_i64_slice(&result, schema)
-            }
-            ScalarType::I32 => {
-                let result: Vec<i32> = vals.iter().map(|x| *x as i32).collect();
-                self.create_buffer_from_i32_slice(&result, schema)
-            }
-            ScalarType::U64 => self.create_buffer_from_u64_slice(vals, schema),
-            ScalarType::U32 => {
-                let result: Vec<u32> = vals.iter().map(|x| *x as u32).collect();
-                self.create_buffer_from_u32_slice(&result, schema)
-            }
-            ScalarType::F64 => {
-                let result: Vec<f64> = vals.iter().map(|x| *x as f64).collect();
-                self.create_buffer_from_f64_slice(&result, schema)
-            }
-            ScalarType::F32 => {
-                let result: Vec<f32> = vals.iter().map(|x| *x as f32).collect();
-                self.create_buffer_from_f32_slice(&result, schema)
-            }
-            _ => Err(XlogError::Kernel(format!(
-                "Cast to {:?} not supported",
-                target
-            ))),
-        }
-    }
+        let col_a = a
+            .column(0)
+            .ok_or_else(|| XlogError::Kernel("Missing column 0".into()))?;
+        let col_b = b
+            .column(0)
+            .ok_or_else(|| XlogError::Kernel("Missing column 0".into()))?;
 
-    /// Helper to cast from u32 to target type
-    fn cast_from_u32(
-        &self,
-        vals: &[u32],
-        target: ScalarType,
-        schema: Schema,
-    ) -> Result<CudaBuffer> {
-        match target {
-            ScalarType::I64 => {
-                let result: Vec<i64> = vals.iter().map(|x| *x as i64).collect();
-                self.create_buffer_from_i64_slice(&result, schema)
-            }
-            ScalarType::I32 => {
-                let result: Vec<i32> = vals.iter().map(|x| *x as i32).collect();
-                self.create_buffer_from_i32_slice(&result, schema)
-            }
-            ScalarType::U64 => {
-                let result: Vec<u64> = vals.iter().map(|x| *x as u64).collect();
-                self.create_buffer_from_u64_slice(&result, schema)
-            }
-            ScalarType::U32 => self.create_buffer_from_u32_slice(vals, schema),
-            ScalarType::F64 => {
-                let result: Vec<f64> = vals.iter().map(|x| *x as f64).collect();
-                self.create_buffer_from_f64_slice(&result, schema)
-            }
-            ScalarType::F32 => {
-                let result: Vec<f32> = vals.iter().map(|x| *x as f32).collect();
-                self.create_buffer_from_f32_slice(&result, schema)
-            }
-            _ => Err(XlogError::Kernel(format!(
-                "Cast to {:?} not supported",
-                target
-            ))),
+        if col_a.num_bytes() != expected_bytes || col_b.num_bytes() != expected_bytes {
+            return Err(XlogError::Kernel(format!(
+                "Arithmetic expects {} bytes per column for {} rows",
+                expected_bytes,
+                a.num_rows()
+            )));
         }
-    }
 
-    /// Helper to cast from f64 to target type
-    fn cast_from_f64(
-        &self,
-        vals: &[f64],
-        target: ScalarType,
-        schema: Schema,
-    ) -> Result<CudaBuffer> {
-        match target {
-            ScalarType::I64 => {
-                let result: Vec<i64> = vals.iter().map(|x| *x as i64).collect();
-                self.create_buffer_from_i64_slice(&result, schema)
-            }
-            ScalarType::I32 => {
-                let result: Vec<i32> = vals.iter().map(|x| *x as i32).collect();
-                self.create_buffer_from_i32_slice(&result, schema)
-            }
-            ScalarType::U64 => {
-                let result: Vec<u64> = vals.iter().map(|x| *x as u64).collect();
-                self.create_buffer_from_u64_slice(&result, schema)
-            }
-            ScalarType::U32 => {
-                let result: Vec<u32> = vals.iter().map(|x| *x as u32).collect();
-                self.create_buffer_from_u32_slice(&result, schema)
-            }
-            ScalarType::F64 => self.create_buffer_from_f64_slice(vals, schema),
-            ScalarType::F32 => {
-                let result: Vec<f32> = vals.iter().map(|x| *x as f32).collect();
-                self.create_buffer_from_f32_slice(&result, schema)
-            }
-            _ => Err(XlogError::Kernel(format!(
-                "Cast to {:?} not supported",
-                target
-            ))),
-        }
-    }
+        let mut out = self.memory.alloc::<u8>(expected_bytes)?;
+        let func = self
+            .device
+            .inner()
+            .get_func(ARITH_MODULE, kernel)
+            .ok_or_else(|| XlogError::Kernel("arith kernel not found".into()))?;
+        let config = LaunchConfig::for_num_elems(n);
 
-    /// Helper to cast from f32 to target type
-    fn cast_from_f32(
-        &self,
-        vals: &[f32],
-        target: ScalarType,
-        schema: Schema,
-    ) -> Result<CudaBuffer> {
-        match target {
-            ScalarType::I64 => {
-                let result: Vec<i64> = vals.iter().map(|x| *x as i64).collect();
-                self.create_buffer_from_i64_slice(&result, schema)
-            }
-            ScalarType::I32 => {
-                let result: Vec<i32> = vals.iter().map(|x| *x as i32).collect();
-                self.create_buffer_from_i32_slice(&result, schema)
-            }
-            ScalarType::U64 => {
-                let result: Vec<u64> = vals.iter().map(|x| *x as u64).collect();
-                self.create_buffer_from_u64_slice(&result, schema)
-            }
-            ScalarType::U32 => {
-                let result: Vec<u32> = vals.iter().map(|x| *x as u32).collect();
-                self.create_buffer_from_u32_slice(&result, schema)
-            }
-            ScalarType::F64 => {
-                let result: Vec<f64> = vals.iter().map(|x| *x as f64).collect();
-                self.create_buffer_from_f64_slice(&result, schema)
-            }
-            ScalarType::F32 => self.create_buffer_from_f32_slice(vals, schema),
-            _ => Err(XlogError::Kernel(format!(
-                "Cast to {:?} not supported",
-                target
-            ))),
-        }
+        unsafe { func.clone().launch(config, (col_a, col_b, n, op, &mut out)) }
+            .map_err(|e| XlogError::Kernel(format!("arith binary failed: {}", e)))?;
+
+        self.device.synchronize()?;
+        Ok(CudaBuffer::from_columns(
+            vec![out.into()],
+            a.num_rows(),
+            a.schema.clone(),
+        ))
     }
 
     /// Combine multiple single-column buffers into a multi-column buffer
