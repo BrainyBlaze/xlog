@@ -107,6 +107,288 @@ extern "C" __global__ void filter_compare_f64(
     mask[gid] = result ? 1 : 0;
 }
 
+/** Compare i32 column against constant */
+extern "C" __global__ void filter_compare_i32(
+    const int32_t* __restrict__ column,
+    int32_t constant,
+    uint32_t num_rows,
+    uint8_t op,
+    uint8_t* __restrict__ mask
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= num_rows) return;
+
+    int32_t val = column[gid];
+    bool result;
+    switch (op) {
+        case OP_EQ: result = (val == constant); break;
+        case OP_NE: result = (val != constant); break;
+        case OP_LT: result = (val < constant); break;
+        case OP_LE: result = (val <= constant); break;
+        case OP_GT: result = (val > constant); break;
+        case OP_GE: result = (val >= constant); break;
+        default: result = false;
+    }
+    mask[gid] = result ? 1 : 0;
+}
+
+/** Compare u64 column against constant */
+extern "C" __global__ void filter_compare_u64(
+    const uint64_t* __restrict__ column,
+    uint64_t constant,
+    uint32_t num_rows,
+    uint8_t op,
+    uint8_t* __restrict__ mask
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= num_rows) return;
+
+    uint64_t val = column[gid];
+    bool result;
+    switch (op) {
+        case OP_EQ: result = (val == constant); break;
+        case OP_NE: result = (val != constant); break;
+        case OP_LT: result = (val < constant); break;
+        case OP_LE: result = (val <= constant); break;
+        case OP_GT: result = (val > constant); break;
+        case OP_GE: result = (val >= constant); break;
+        default: result = false;
+    }
+    mask[gid] = result ? 1 : 0;
+}
+
+/** Compare f32 column against constant */
+extern "C" __global__ void filter_compare_f32(
+    const float* __restrict__ column,
+    float constant,
+    uint32_t num_rows,
+    uint8_t op,
+    uint8_t* __restrict__ mask
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= num_rows) return;
+
+    float val = column[gid];
+    bool result;
+    switch (op) {
+        case OP_EQ: result = (val == constant); break;
+        case OP_NE: result = (val != constant); break;
+        case OP_LT: result = (val < constant); break;
+        case OP_LE: result = (val <= constant); break;
+        case OP_GT: result = (val > constant); break;
+        case OP_GE: result = (val >= constant); break;
+        default: result = false;
+    }
+    mask[gid] = result ? 1 : 0;
+}
+
+/** Compare u8 column against constant */
+extern "C" __global__ void filter_compare_u8(
+    const uint8_t* __restrict__ column,
+    uint8_t constant,
+    uint32_t num_rows,
+    uint8_t op,
+    uint8_t* __restrict__ mask
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= num_rows) return;
+
+    uint8_t val = column[gid];
+    bool result;
+    switch (op) {
+        case OP_EQ: result = (val == constant); break;
+        case OP_NE: result = (val != constant); break;
+        case OP_LT: result = (val < constant); break;
+        case OP_LE: result = (val <= constant); break;
+        case OP_GT: result = (val > constant); break;
+        case OP_GE: result = (val >= constant); break;
+        default: result = false;
+    }
+    mask[gid] = result ? 1 : 0;
+}
+
+/** Compare u32 column against column */
+extern "C" __global__ void filter_compare_u32_col(
+    const uint32_t* __restrict__ left,
+    const uint32_t* __restrict__ right,
+    uint32_t num_rows,
+    uint8_t op,
+    uint8_t* __restrict__ mask
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= num_rows) return;
+
+    uint32_t lval = left[gid];
+    uint32_t rval = right[gid];
+    bool result;
+    switch (op) {
+        case OP_EQ: result = (lval == rval); break;
+        case OP_NE: result = (lval != rval); break;
+        case OP_LT: result = (lval < rval); break;
+        case OP_LE: result = (lval <= rval); break;
+        case OP_GT: result = (lval > rval); break;
+        case OP_GE: result = (lval >= rval); break;
+        default: result = false;
+    }
+    mask[gid] = result ? 1 : 0;
+}
+
+/** Compare i32 column against column */
+extern "C" __global__ void filter_compare_i32_col(
+    const int32_t* __restrict__ left,
+    const int32_t* __restrict__ right,
+    uint32_t num_rows,
+    uint8_t op,
+    uint8_t* __restrict__ mask
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= num_rows) return;
+
+    int32_t lval = left[gid];
+    int32_t rval = right[gid];
+    bool result;
+    switch (op) {
+        case OP_EQ: result = (lval == rval); break;
+        case OP_NE: result = (lval != rval); break;
+        case OP_LT: result = (lval < rval); break;
+        case OP_LE: result = (lval <= rval); break;
+        case OP_GT: result = (lval > rval); break;
+        case OP_GE: result = (lval >= rval); break;
+        default: result = false;
+    }
+    mask[gid] = result ? 1 : 0;
+}
+
+/** Compare i64 column against column */
+extern "C" __global__ void filter_compare_i64_col(
+    const int64_t* __restrict__ left,
+    const int64_t* __restrict__ right,
+    uint32_t num_rows,
+    uint8_t op,
+    uint8_t* __restrict__ mask
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= num_rows) return;
+
+    int64_t lval = left[gid];
+    int64_t rval = right[gid];
+    bool result;
+    switch (op) {
+        case OP_EQ: result = (lval == rval); break;
+        case OP_NE: result = (lval != rval); break;
+        case OP_LT: result = (lval < rval); break;
+        case OP_LE: result = (lval <= rval); break;
+        case OP_GT: result = (lval > rval); break;
+        case OP_GE: result = (lval >= rval); break;
+        default: result = false;
+    }
+    mask[gid] = result ? 1 : 0;
+}
+
+/** Compare u64 column against column */
+extern "C" __global__ void filter_compare_u64_col(
+    const uint64_t* __restrict__ left,
+    const uint64_t* __restrict__ right,
+    uint32_t num_rows,
+    uint8_t op,
+    uint8_t* __restrict__ mask
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= num_rows) return;
+
+    uint64_t lval = left[gid];
+    uint64_t rval = right[gid];
+    bool result;
+    switch (op) {
+        case OP_EQ: result = (lval == rval); break;
+        case OP_NE: result = (lval != rval); break;
+        case OP_LT: result = (lval < rval); break;
+        case OP_LE: result = (lval <= rval); break;
+        case OP_GT: result = (lval > rval); break;
+        case OP_GE: result = (lval >= rval); break;
+        default: result = false;
+    }
+    mask[gid] = result ? 1 : 0;
+}
+
+/** Compare f32 column against column */
+extern "C" __global__ void filter_compare_f32_col(
+    const float* __restrict__ left,
+    const float* __restrict__ right,
+    uint32_t num_rows,
+    uint8_t op,
+    uint8_t* __restrict__ mask
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= num_rows) return;
+
+    float lval = left[gid];
+    float rval = right[gid];
+    bool result;
+    switch (op) {
+        case OP_EQ: result = (lval == rval); break;
+        case OP_NE: result = (lval != rval); break;
+        case OP_LT: result = (lval < rval); break;
+        case OP_LE: result = (lval <= rval); break;
+        case OP_GT: result = (lval > rval); break;
+        case OP_GE: result = (lval >= rval); break;
+        default: result = false;
+    }
+    mask[gid] = result ? 1 : 0;
+}
+
+/** Compare f64 column against column */
+extern "C" __global__ void filter_compare_f64_col(
+    const double* __restrict__ left,
+    const double* __restrict__ right,
+    uint32_t num_rows,
+    uint8_t op,
+    uint8_t* __restrict__ mask
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= num_rows) return;
+
+    double lval = left[gid];
+    double rval = right[gid];
+    bool result;
+    switch (op) {
+        case OP_EQ: result = (lval == rval); break;
+        case OP_NE: result = (lval != rval); break;
+        case OP_LT: result = (lval < rval); break;
+        case OP_LE: result = (lval <= rval); break;
+        case OP_GT: result = (lval > rval); break;
+        case OP_GE: result = (lval >= rval); break;
+        default: result = false;
+    }
+    mask[gid] = result ? 1 : 0;
+}
+
+/** Compare u8 column against column */
+extern "C" __global__ void filter_compare_u8_col(
+    const uint8_t* __restrict__ left,
+    const uint8_t* __restrict__ right,
+    uint32_t num_rows,
+    uint8_t op,
+    uint8_t* __restrict__ mask
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= num_rows) return;
+
+    uint8_t lval = left[gid];
+    uint8_t rval = right[gid];
+    bool result;
+    switch (op) {
+        case OP_EQ: result = (lval == rval); break;
+        case OP_NE: result = (lval != rval); break;
+        case OP_LT: result = (lval < rval); break;
+        case OP_LE: result = (lval <= rval); break;
+        case OP_GT: result = (lval > rval); break;
+        case OP_GE: result = (lval >= rval); break;
+        default: result = false;
+    }
+    mask[gid] = result ? 1 : 0;
+}
+
 /**
  * Fused compare + scan phase1 for u32 filters.
  *

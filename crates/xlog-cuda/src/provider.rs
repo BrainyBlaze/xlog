@@ -13,7 +13,7 @@ use cudarc::nvrtc::Ptx;
 use std::ffi::c_void;
 use xlog_core::{AggOp, Result, ScalarType, Schema, XlogError};
 
-use crate::{memory::CudaColumn, CudaBuffer, CudaDevice, GpuMemoryManager};
+use crate::{memory::{CudaColumn, TrackedCudaSlice}, CudaBuffer, CudaDevice, GpuMemoryManager};
 
 // Embedded PTX sources (pre-compiled from .cu files with nvcc -ptx -arch=sm_70)
 const JOIN_PTX: &str = include_str!("../../../kernels/join.ptx");
@@ -175,8 +175,19 @@ pub mod filter_kernels {
     pub const FILTER_COMPARE_U32: &str = "filter_compare_u32";
     pub const FILTER_COMPARE_I64: &str = "filter_compare_i64";
     pub const FILTER_COMPARE_F64: &str = "filter_compare_f64";
+    pub const FILTER_COMPARE_I32: &str = "filter_compare_i32";
+    pub const FILTER_COMPARE_U64: &str = "filter_compare_u64";
+    pub const FILTER_COMPARE_F32: &str = "filter_compare_f32";
+    pub const FILTER_COMPARE_U8: &str = "filter_compare_u8";
     pub const FILTER_COMPARE_U32_SCAN_PHASE1: &str = "filter_compare_u32_scan_phase1";
     pub const FILTER_COMPARE_F64_SCAN_PHASE1: &str = "filter_compare_f64_scan_phase1";
+    pub const FILTER_COMPARE_U32_COL: &str = "filter_compare_u32_col";
+    pub const FILTER_COMPARE_I32_COL: &str = "filter_compare_i32_col";
+    pub const FILTER_COMPARE_I64_COL: &str = "filter_compare_i64_col";
+    pub const FILTER_COMPARE_U64_COL: &str = "filter_compare_u64_col";
+    pub const FILTER_COMPARE_F32_COL: &str = "filter_compare_f32_col";
+    pub const FILTER_COMPARE_F64_COL: &str = "filter_compare_f64_col";
+    pub const FILTER_COMPARE_U8_COL: &str = "filter_compare_u8_col";
     pub const COMPACT_U32_BY_MASK: &str = "compact_u32_by_mask";
     pub const COMPACT_I64_BY_MASK: &str = "compact_i64_by_mask";
     pub const COMPACT_F64_BY_MASK: &str = "compact_f64_by_mask";
@@ -463,8 +474,19 @@ impl CudaKernelProvider {
                     filter_kernels::FILTER_COMPARE_U32,
                     filter_kernels::FILTER_COMPARE_I64,
                     filter_kernels::FILTER_COMPARE_F64,
+                    filter_kernels::FILTER_COMPARE_I32,
+                    filter_kernels::FILTER_COMPARE_U64,
+                    filter_kernels::FILTER_COMPARE_F32,
+                    filter_kernels::FILTER_COMPARE_U8,
                     filter_kernels::FILTER_COMPARE_U32_SCAN_PHASE1,
                     filter_kernels::FILTER_COMPARE_F64_SCAN_PHASE1,
+                    filter_kernels::FILTER_COMPARE_U32_COL,
+                    filter_kernels::FILTER_COMPARE_I32_COL,
+                    filter_kernels::FILTER_COMPARE_I64_COL,
+                    filter_kernels::FILTER_COMPARE_U64_COL,
+                    filter_kernels::FILTER_COMPARE_F32_COL,
+                    filter_kernels::FILTER_COMPARE_F64_COL,
+                    filter_kernels::FILTER_COMPARE_U8_COL,
                     filter_kernels::COMPACT_U32_BY_MASK,
                     filter_kernels::COMPACT_I64_BY_MASK,
                     filter_kernels::COMPACT_F64_BY_MASK,
@@ -3694,6 +3716,396 @@ impl CudaKernelProvider {
         self.compact_buffer_by_device_mask(input, &d_mask, &d_prefix_sum, output_count)
     }
 
+    /// Filter i32 column with comparison operator.
+    pub fn filter_i32(
+        &self,
+        input: &CudaBuffer,
+        col: usize,
+        value: i32,
+        op: CompareOp,
+    ) -> Result<CudaBuffer> {
+        if input.is_empty() {
+            return self.create_empty_buffer(input.schema.clone());
+        }
+
+        let mask = self.compare_const_mask::<i32>(
+            input,
+            col,
+            value,
+            op,
+            &[ScalarType::I32],
+            filter_kernels::FILTER_COMPARE_I32,
+        )?;
+        self.filter_by_device_mask(input, &mask)
+    }
+
+    /// Filter u64 column with comparison operator.
+    pub fn filter_u64(
+        &self,
+        input: &CudaBuffer,
+        col: usize,
+        value: u64,
+        op: CompareOp,
+    ) -> Result<CudaBuffer> {
+        if input.is_empty() {
+            return self.create_empty_buffer(input.schema.clone());
+        }
+
+        let mask = self.compare_const_mask::<u64>(
+            input,
+            col,
+            value,
+            op,
+            &[ScalarType::U64],
+            filter_kernels::FILTER_COMPARE_U64,
+        )?;
+        self.filter_by_device_mask(input, &mask)
+    }
+
+    /// Filter f32 column with comparison operator.
+    pub fn filter_f32(
+        &self,
+        input: &CudaBuffer,
+        col: usize,
+        value: f32,
+        op: CompareOp,
+    ) -> Result<CudaBuffer> {
+        if input.is_empty() {
+            return self.create_empty_buffer(input.schema.clone());
+        }
+
+        let mask = self.compare_const_mask::<f32>(
+            input,
+            col,
+            value,
+            op,
+            &[ScalarType::F32],
+            filter_kernels::FILTER_COMPARE_F32,
+        )?;
+        self.filter_by_device_mask(input, &mask)
+    }
+
+    /// Filter bool column with comparison operator.
+    pub fn filter_bool(
+        &self,
+        input: &CudaBuffer,
+        col: usize,
+        value: bool,
+        op: CompareOp,
+    ) -> Result<CudaBuffer> {
+        if input.is_empty() {
+            return self.create_empty_buffer(input.schema.clone());
+        }
+
+        let value_u8 = if value { 1u8 } else { 0u8 };
+        let mask = self.compare_const_mask::<u8>(
+            input,
+            col,
+            value_u8,
+            op,
+            &[ScalarType::Bool],
+            filter_kernels::FILTER_COMPARE_U8,
+        )?;
+        self.filter_by_device_mask(input, &mask)
+    }
+
+    /// Compare two u32 columns and return a device mask.
+    pub fn compare_columns_u32(
+        &self,
+        input: &CudaBuffer,
+        left: usize,
+        right: usize,
+        op: CompareOp,
+    ) -> Result<TrackedCudaSlice<u8>> {
+        self.compare_columns_mask::<u32>(
+            input,
+            left,
+            right,
+            op,
+            &[ScalarType::U32, ScalarType::Symbol],
+            filter_kernels::FILTER_COMPARE_U32_COL,
+        )
+    }
+
+    /// Compare two i32 columns and return a device mask.
+    pub fn compare_columns_i32(
+        &self,
+        input: &CudaBuffer,
+        left: usize,
+        right: usize,
+        op: CompareOp,
+    ) -> Result<TrackedCudaSlice<u8>> {
+        self.compare_columns_mask::<i32>(
+            input,
+            left,
+            right,
+            op,
+            &[ScalarType::I32],
+            filter_kernels::FILTER_COMPARE_I32_COL,
+        )
+    }
+
+    /// Compare two i64 columns and return a device mask.
+    pub fn compare_columns_i64(
+        &self,
+        input: &CudaBuffer,
+        left: usize,
+        right: usize,
+        op: CompareOp,
+    ) -> Result<TrackedCudaSlice<u8>> {
+        self.compare_columns_mask::<i64>(
+            input,
+            left,
+            right,
+            op,
+            &[ScalarType::I64],
+            filter_kernels::FILTER_COMPARE_I64_COL,
+        )
+    }
+
+    /// Compare two u64 columns and return a device mask.
+    pub fn compare_columns_u64(
+        &self,
+        input: &CudaBuffer,
+        left: usize,
+        right: usize,
+        op: CompareOp,
+    ) -> Result<TrackedCudaSlice<u8>> {
+        self.compare_columns_mask::<u64>(
+            input,
+            left,
+            right,
+            op,
+            &[ScalarType::U64],
+            filter_kernels::FILTER_COMPARE_U64_COL,
+        )
+    }
+
+    /// Compare two f32 columns and return a device mask.
+    pub fn compare_columns_f32(
+        &self,
+        input: &CudaBuffer,
+        left: usize,
+        right: usize,
+        op: CompareOp,
+    ) -> Result<TrackedCudaSlice<u8>> {
+        self.compare_columns_mask::<f32>(
+            input,
+            left,
+            right,
+            op,
+            &[ScalarType::F32],
+            filter_kernels::FILTER_COMPARE_F32_COL,
+        )
+    }
+
+    /// Compare two f64 columns and return a device mask.
+    pub fn compare_columns_f64(
+        &self,
+        input: &CudaBuffer,
+        left: usize,
+        right: usize,
+        op: CompareOp,
+    ) -> Result<TrackedCudaSlice<u8>> {
+        self.compare_columns_mask::<f64>(
+            input,
+            left,
+            right,
+            op,
+            &[ScalarType::F64],
+            filter_kernels::FILTER_COMPARE_F64_COL,
+        )
+    }
+
+    /// Compare two u8 columns and return a device mask.
+    pub fn compare_columns_u8(
+        &self,
+        input: &CudaBuffer,
+        left: usize,
+        right: usize,
+        op: CompareOp,
+    ) -> Result<TrackedCudaSlice<u8>> {
+        self.compare_columns_mask::<u8>(
+            input,
+            left,
+            right,
+            op,
+            &[ScalarType::Bool],
+            filter_kernels::FILTER_COMPARE_U8_COL,
+        )
+    }
+
+    fn compare_const_mask<T: DeviceRepr + Copy>(
+        &self,
+        input: &CudaBuffer,
+        col: usize,
+        value: T,
+        op: CompareOp,
+        allowed_types: &[ScalarType],
+        kernel: &str,
+    ) -> Result<TrackedCudaSlice<u8>> {
+        if input.num_rows() > u32::MAX as u64 {
+            return Err(XlogError::Kernel(format!(
+                "Filter supports at most {} rows, got {}",
+                u32::MAX,
+                input.num_rows()
+            )));
+        }
+        if col >= input.arity() {
+            return Err(XlogError::Kernel(format!(
+                "Column index {} out of bounds (arity {})",
+                col,
+                input.arity()
+            )));
+        }
+
+        if input.is_empty() {
+            return Ok(self.memory.alloc::<u8>(0)?);
+        }
+
+        let col_type = input
+            .schema()
+            .column_type(col)
+            .ok_or_else(|| XlogError::Kernel("Missing column type".into()))?;
+        if !allowed_types.contains(&col_type) {
+            return Err(XlogError::Kernel(format!(
+                "Column {} is {:?} (expected {:?})",
+                col, col_type, allowed_types
+            )));
+        }
+
+        let num_rows = input.num_rows() as u32;
+        let expected_bytes = (num_rows as usize)
+            .checked_mul(std::mem::size_of::<T>())
+            .ok_or_else(|| XlogError::Kernel("filter compare size overflow".into()))?;
+        let col_data = input
+            .column(col)
+            .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col)))?;
+        if col_data.num_bytes() != expected_bytes {
+            return Err(XlogError::Kernel(format!(
+                "Column {} has {} bytes but expected {} for {} rows",
+                col,
+                col_data.num_bytes(),
+                expected_bytes,
+                input.num_rows()
+            )));
+        }
+
+        let block_size = 256u32;
+        let num_blocks = (num_rows + block_size - 1) / block_size;
+        let config = LaunchConfig {
+            grid_dim: (num_blocks, 1, 1),
+            block_dim: (block_size, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        let mut d_mask = self.memory.alloc::<u8>(num_rows as usize)?;
+        let func = self
+            .device
+            .inner()
+            .get_func(FILTER_MODULE, kernel)
+            .ok_or_else(|| XlogError::Kernel("filter compare kernel not found".into()))?;
+
+        unsafe { func.clone().launch(config, (col_data, value, num_rows, op as u8, &mut d_mask)) }
+            .map_err(|e| XlogError::Kernel(format!("filter compare failed: {}", e)))?;
+
+        Ok(d_mask)
+    }
+
+    fn compare_columns_mask<T: DeviceRepr>(
+        &self,
+        input: &CudaBuffer,
+        left: usize,
+        right: usize,
+        op: CompareOp,
+        allowed_types: &[ScalarType],
+        kernel: &str,
+    ) -> Result<TrackedCudaSlice<u8>> {
+        if input.num_rows() > u32::MAX as u64 {
+            return Err(XlogError::Kernel(format!(
+                "Filter supports at most {} rows, got {}",
+                u32::MAX,
+                input.num_rows()
+            )));
+        }
+        if left >= input.arity() || right >= input.arity() {
+            return Err(XlogError::Kernel(format!(
+                "Column indices {} or {} out of bounds (arity {})",
+                left,
+                right,
+                input.arity()
+            )));
+        }
+
+        if input.is_empty() {
+            return Ok(self.memory.alloc::<u8>(0)?);
+        }
+
+        let left_type = input
+            .schema()
+            .column_type(left)
+            .ok_or_else(|| XlogError::Kernel("Missing left column type".into()))?;
+        let right_type = input
+            .schema()
+            .column_type(right)
+            .ok_or_else(|| XlogError::Kernel("Missing right column type".into()))?;
+
+        if left_type != right_type {
+            return Err(XlogError::Kernel(
+                "Column-column compare requires matching types".into(),
+            ));
+        }
+        if !allowed_types.contains(&left_type) {
+            return Err(XlogError::Kernel(format!(
+                "Column type {:?} not supported for compare",
+                left_type
+            )));
+        }
+
+        let num_rows = input.num_rows() as u32;
+        let expected_bytes = (num_rows as usize)
+            .checked_mul(std::mem::size_of::<T>())
+            .ok_or_else(|| XlogError::Kernel("compare columns size overflow".into()))?;
+
+        let left_col = input
+            .column(left)
+            .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", left)))?;
+        let right_col = input
+            .column(right)
+            .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", right)))?;
+
+        if left_col.num_bytes() != expected_bytes || right_col.num_bytes() != expected_bytes {
+            return Err(XlogError::Kernel(format!(
+                "Compare columns expect {} bytes per column for {} rows",
+                expected_bytes,
+                input.num_rows()
+            )));
+        }
+
+        let block_size = 256u32;
+        let num_blocks = (num_rows + block_size - 1) / block_size;
+        let config = LaunchConfig {
+            grid_dim: (num_blocks, 1, 1),
+            block_dim: (block_size, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        let mut d_mask = self.memory.alloc::<u8>(num_rows as usize)?;
+        let func = self
+            .device
+            .inner()
+            .get_func(FILTER_MODULE, kernel)
+            .ok_or_else(|| XlogError::Kernel("filter compare kernel not found".into()))?;
+
+        unsafe {
+            func.clone()
+                .launch(config, (left_col, right_col, num_rows, op as u8, &mut d_mask))
+        }
+        .map_err(|e| XlogError::Kernel(format!("filter compare failed: {}", e)))?;
+
+        Ok(d_mask)
+    }
+
     /// Filter buffer where f64 column equals constant
     ///
     /// # Arguments
@@ -4002,7 +4414,7 @@ impl CudaKernelProvider {
         })
     }
 
-    fn filter_by_device_mask(
+    pub fn filter_by_device_mask(
         &self,
         input: &CudaBuffer,
         d_mask: &cudarc::driver::CudaSlice<u8>,
@@ -4296,6 +4708,31 @@ impl CudaKernelProvider {
         self.device
             .inner()
             .htod_sync_copy_into(&bytes, &mut col)
+            .map_err(|e| XlogError::Kernel(format!("Failed to upload data: {}", e)))?;
+
+        Ok(CudaBuffer::from_columns(
+            vec![col.into()],
+            data.len() as u64,
+            schema,
+        ))
+    }
+
+    /// Create a CudaBuffer from a u8 slice (single column)
+    ///
+    /// # Arguments
+    /// * `data` - The u8 data slice
+    /// * `schema` - The schema for the buffer
+    ///
+    /// # Returns
+    /// A new CudaBuffer containing the data as a single column
+    ///
+    /// # Errors
+    /// Returns `XlogError::Kernel` if upload fails
+    pub fn create_buffer_from_u8_slice(&self, data: &[u8], schema: Schema) -> Result<CudaBuffer> {
+        let mut col = self.memory.alloc::<u8>(data.len())?;
+        self.device
+            .inner()
+            .htod_sync_copy_into(data, &mut col)
             .map_err(|e| XlogError::Kernel(format!("Failed to upload data: {}", e)))?;
 
         Ok(CudaBuffer::from_columns(
@@ -4723,6 +5160,48 @@ impl CudaKernelProvider {
             .chunks_exact(4)
             .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect())
+    }
+
+    /// Download a column from a CudaBuffer as Vec<u8>
+    ///
+    /// # Arguments
+    /// * `buffer` - The buffer to download from
+    /// * `col_idx` - The column index to download
+    ///
+    /// # Returns
+    /// A Vec<u8> containing the column data
+    ///
+    /// # Errors
+    /// Returns `XlogError::Kernel` if:
+    /// - Column index is out of bounds
+    /// - Download fails
+    pub fn download_column_u8(&self, buffer: &CudaBuffer, col_idx: usize) -> Result<Vec<u8>> {
+        let col = buffer
+            .column(col_idx)
+            .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
+
+        if buffer.num_rows == 0 {
+            return Ok(vec![]);
+        }
+
+        let num_bytes = buffer.num_rows as usize;
+        if col.num_bytes() != num_bytes {
+            return Err(XlogError::Kernel(format!(
+                "Column {} has {} bytes but expected {} for {} rows",
+                col_idx,
+                col.num_bytes(),
+                num_bytes,
+                buffer.num_rows
+            )));
+        }
+
+        let mut bytes = vec![0u8; num_bytes];
+        self.device
+            .inner()
+            .dtoh_sync_copy_into(col, &mut bytes)
+            .map_err(|e| XlogError::Kernel(format!("Failed to download column: {}", e)))?;
+
+        Ok(bytes)
     }
 
     /// Download a column from GPU memory as u64 values

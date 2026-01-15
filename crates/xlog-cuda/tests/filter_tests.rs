@@ -211,6 +211,60 @@ fn test_filter_f64_gt() {
 }
 
 #[test]
+fn test_filter_i32_u64_f32_bool_and_column_column_compare() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    let schema_i32 = Schema::new(vec![("v".to_string(), ScalarType::I32)]);
+    let buf_i32 = provider
+        .create_buffer_from_i32_slice(&[-2, 0, 3], schema_i32)
+        .unwrap();
+    let filtered_i32 = provider.filter_i32(&buf_i32, 0, -1, CompareOp::Gt).unwrap();
+    let vals_i32 = provider.download_column_i32(&filtered_i32, 0).unwrap();
+    assert_eq!(vals_i32, vec![0, 3]);
+
+    let schema_u64 = Schema::new(vec![("v".to_string(), ScalarType::U64)]);
+    let buf_u64 = provider
+        .create_buffer_from_u64_slice(&[1, 5, 9], schema_u64)
+        .unwrap();
+    let filtered_u64 = provider.filter_u64(&buf_u64, 0, 5, CompareOp::Ge).unwrap();
+    let vals_u64 = provider.download_column_u64(&filtered_u64, 0).unwrap();
+    assert_eq!(vals_u64, vec![5, 9]);
+
+    let schema_f32 = Schema::new(vec![("v".to_string(), ScalarType::F32)]);
+    let buf_f32 = provider
+        .create_buffer_from_f32_slice(&[1.0, -1.5, 2.5], schema_f32)
+        .unwrap();
+    let filtered_f32 = provider.filter_f32(&buf_f32, 0, 0.0, CompareOp::Gt).unwrap();
+    let vals_f32 = provider.download_column_f32(&filtered_f32, 0).unwrap();
+    assert_eq!(vals_f32.len(), 2);
+
+    let schema_bool = Schema::new(vec![("v".to_string(), ScalarType::Bool)]);
+    let buf_bool = provider
+        .create_buffer_from_u8_slice(&[0, 1, 1, 0], schema_bool)
+        .unwrap();
+    let filtered_bool = provider.filter_bool(&buf_bool, 0, true, CompareOp::Eq).unwrap();
+    let vals_bool = provider.download_column_u8(&filtered_bool, 0).unwrap();
+    assert_eq!(vals_bool, vec![1, 1]);
+
+    let schema_u32 = Schema::new(vec![
+        ("a".to_string(), ScalarType::U32),
+        ("b".to_string(), ScalarType::U32),
+    ]);
+    let buf_u32 = provider
+        .create_buffer_from_u32_columns(&[&[1, 2, 3], &[1, 9, 3]], schema_u32)
+        .unwrap();
+    let mask = provider
+        .compare_columns_u32(&buf_u32, 0, 1, CompareOp::Eq)
+        .unwrap();
+    let filtered = provider.filter_by_device_mask(&buf_u32, &mask).unwrap();
+    let vals = provider.download_column_u32(&filtered, 0).unwrap();
+    assert_eq!(vals, vec![1, 3]);
+}
+
+#[test]
 fn test_filter_f64_lt() {
     let Some(provider) = setup_provider() else {
         eprintln!("Skipping: no CUDA device");
