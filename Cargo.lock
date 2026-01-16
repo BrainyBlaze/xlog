@@ -1811,6 +1811,7 @@ dependencies = [
  "xlog-cuda",
  "xlog-gpu",
  "xlog-logic",
+ "xlog-prob",
 ]
 
 [[package]]

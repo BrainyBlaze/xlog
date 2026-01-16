@@ -15,6 +15,7 @@ xlog-core = { path = "../xlog-core" }
 xlog-cuda = { path = "../xlog-cuda" }
 xlog-logic = { path = "../xlog-logic" }
 xlog-gpu = { path = "../xlog-gpu" }
+xlog-prob = { path = "../xlog-prob" }
 
 [dev-dependencies]
 assert_cmd = "2.0"

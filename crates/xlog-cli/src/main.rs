@@ -8,6 +8,8 @@ use arrow::util::pretty::pretty_format_batches;
 use xlog_core::{MemoryBudget, Result, XlogError};
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 use xlog_gpu::logic::LogicProgram;
+use xlog_prob::exact::{ExactDdnnfProgram, GpuConfig};
+use xlog_prob::mc::{McEvalConfig, McProgram};
 
 #[derive(Parser)]
 #[command(author, version, about = "XLOG CLI")]
@@ -19,6 +21,7 @@ pub struct Cli {
 #[derive(Subcommand)]
 enum Command {
     Run(RunArgs),
+    Prob(ProbArgs),
 }
 
 #[derive(Parser)]
@@ -36,6 +39,27 @@ struct RunArgs {
     output_dir: Option<PathBuf>,
 }
 
+#[derive(Parser)]
+struct ProbArgs {
+    source: PathBuf,
+    #[arg(long, default_value = "0")]
+    device: usize,
+    #[arg(long, default_value = "1024")]
+    memory_mb: u64,
+    #[arg(long, value_enum, default_value = "exact_ddnnf")]
+    prob_engine: ProbEngineCli,
+    #[arg(long, default_value = "10000")]
+    samples: usize,
+    #[arg(long, default_value = "0")]
+    seed: u64,
+    #[arg(long, default_value = "0.95")]
+    confidence: f64,
+    #[arg(long, value_enum, default_value = "pretty")]
+    output: OutputFormat,
+    #[arg(long)]
+    output_dir: Option<PathBuf>,
+}
+
 #[derive(Copy, Clone, ValueEnum)]
 enum OutputFormat {
     Pretty,
@@ -43,10 +67,18 @@ enum OutputFormat {
     Arrow,
 }
 
+#[derive(Copy, Clone, ValueEnum)]
+enum ProbEngineCli {
+    #[value(name = "exact_ddnnf")]
+    ExactDdnnf,
+    Mc,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Run(args) => run_deterministic(args),
+        Command::Prob(args) => run_probabilistic(args),
     }
 }
 
@@ -96,6 +128,40 @@ fn run_deterministic(args: RunArgs) -> Result<()> {
     )
 }
 
+fn run_probabilistic(args: ProbArgs) -> Result<()> {
+    let source = std::fs::read_to_string(&args.source).map_err(|e| {
+        XlogError::Execution(format!(
+            "Failed to read {}: {}",
+            args.source.display(),
+            e
+        ))
+    })?;
+
+    let config = GpuConfig {
+        device_ordinal: args.device,
+        memory_bytes: args.memory_mb * 1024 * 1024,
+    };
+
+    match args.prob_engine {
+        ProbEngineCli::ExactDdnnf => {
+            let prog = ExactDdnnfProgram::compile_source_with_gpu(&source, config)?;
+            let result = prog.evaluate()?;
+            emit_prob_exact(result, args.output, args.output_dir.as_deref())
+        }
+        ProbEngineCli::Mc => {
+            let prog = McProgram::compile_source_with_gpu(&source, config)?;
+            let cfg = McEvalConfig {
+                samples: args.samples,
+                seed: args.seed,
+                confidence: args.confidence,
+                ..Default::default()
+            };
+            let result = prog.evaluate(cfg)?;
+            emit_prob_mc(result, args.output, args.output_dir.as_deref())
+        }
+    }
+}
+
 fn emit_logic_results(
     provider: &CudaKernelProvider,
     queries: &[xlog_gpu::logic::LogicQueryResult],
@@ -129,4 +195,160 @@ fn emit_logic_results(
         }
     }
     Ok(())
+}
+
+fn emit_prob_exact(
+    result: xlog_prob::exact::ExactResult,
+    format: OutputFormat,
+    output_dir: Option<&Path>,
+) -> Result<()> {
+    let mut atoms = Vec::new();
+    let mut probs = Vec::new();
+    let mut log_probs = Vec::new();
+    for q in result.query_probs {
+        atoms.push(atom_to_string(&q.atom));
+        probs.push(q.prob);
+        log_probs.push(q.log_prob);
+    }
+
+    let batch = arrow::record_batch::RecordBatch::try_from_iter(vec![
+        (
+            "atom",
+            Arc::new(arrow::array::StringArray::from(atoms)) as Arc<dyn arrow::array::Array>,
+        ),
+        (
+            "prob",
+            Arc::new(arrow::array::Float64Array::from(probs)) as Arc<dyn arrow::array::Array>,
+        ),
+        (
+            "log_prob",
+            Arc::new(arrow::array::Float64Array::from(log_probs))
+                as Arc<dyn arrow::array::Array>,
+        ),
+    ])
+    .map_err(|e| XlogError::Execution(format!("Failed to build prob batch: {}", e)))?;
+
+    emit_batch("prob", &batch, format, output_dir)
+}
+
+fn emit_prob_mc(
+    result: xlog_prob::mc::McResult,
+    format: OutputFormat,
+    output_dir: Option<&Path>,
+) -> Result<()> {
+    let mut atoms = Vec::new();
+    let mut probs = Vec::new();
+    let mut log_probs = Vec::new();
+    let mut stderr = Vec::new();
+    let mut ci_low = Vec::new();
+    let mut ci_high = Vec::new();
+    for q in result.query_estimates {
+        atoms.push(atom_to_string(&q.atom));
+        probs.push(q.prob);
+        log_probs.push(q.log_prob);
+        stderr.push(q.stderr);
+        ci_low.push(q.ci_low);
+        ci_high.push(q.ci_high);
+    }
+
+    let batch = arrow::record_batch::RecordBatch::try_from_iter(vec![
+        (
+            "atom",
+            Arc::new(arrow::array::StringArray::from(atoms)) as Arc<dyn arrow::array::Array>,
+        ),
+        (
+            "prob",
+            Arc::new(arrow::array::Float64Array::from(probs)) as Arc<dyn arrow::array::Array>,
+        ),
+        (
+            "log_prob",
+            Arc::new(arrow::array::Float64Array::from(log_probs))
+                as Arc<dyn arrow::array::Array>,
+        ),
+        (
+            "stderr",
+            Arc::new(arrow::array::Float64Array::from(stderr))
+                as Arc<dyn arrow::array::Array>,
+        ),
+        (
+            "ci_low",
+            Arc::new(arrow::array::Float64Array::from(ci_low))
+                as Arc<dyn arrow::array::Array>,
+        ),
+        (
+            "ci_high",
+            Arc::new(arrow::array::Float64Array::from(ci_high))
+                as Arc<dyn arrow::array::Array>,
+        ),
+    ])
+    .map_err(|e| XlogError::Execution(format!("Failed to build mc batch: {}", e)))?;
+
+    emit_batch("prob", &batch, format, output_dir)
+}
+
+fn emit_batch(
+    name: &str,
+    batch: &arrow::record_batch::RecordBatch,
+    format: OutputFormat,
+    output_dir: Option<&Path>,
+) -> Result<()> {
+    match format {
+        OutputFormat::Pretty => {
+            let formatted = pretty_format_batches(&[batch.clone()])
+                .map_err(|e| XlogError::Execution(format!("Pretty print failed: {}", e)))?;
+            println!("{}\n{}", name, formatted);
+        }
+        OutputFormat::Csv => {
+            let mut out = Vec::new();
+            {
+                let mut writer = WriterBuilder::new().build(&mut out);
+                writer
+                    .write(batch)
+                    .map_err(|e| XlogError::Execution(format!("CSV write failed: {}", e)))?;
+            }
+            println!("{}\n{}", name, String::from_utf8_lossy(&out));
+        }
+        OutputFormat::Arrow => {
+            let dir = output_dir.unwrap_or_else(|| Path::new("."));
+            let path = dir.join(format!("{}_prob.arrow", name));
+            let mut out = Vec::new();
+            let mut writer = arrow::ipc::writer::StreamWriter::try_new(&mut out, &batch.schema())
+                .map_err(|e| XlogError::Execution(format!("Arrow writer failed: {}", e)))?;
+            writer
+                .write(batch)
+                .map_err(|e| XlogError::Execution(format!("Arrow write failed: {}", e)))?;
+            writer
+                .finish()
+                .map_err(|e| XlogError::Execution(format!("Arrow finish failed: {}", e)))?;
+            std::fs::write(&path, out)
+                .map_err(|e| XlogError::Execution(format!("Arrow write file failed: {}", e)))?;
+            println!("wrote {}", path.display());
+        }
+    }
+    Ok(())
+}
+
+fn atom_to_string(atom: &xlog_prob::provenance::GroundAtom) -> String {
+    use xlog_prob::provenance::Value;
+
+    if atom.args.is_empty() {
+        return format!("{}()", atom.predicate);
+    }
+
+    let mut out = String::new();
+    out.push_str(&atom.predicate);
+    out.push('(');
+    for (i, arg) in atom.args.iter().enumerate() {
+        if i != 0 {
+            out.push_str(", ");
+        }
+        match arg {
+            Value::I64(v) => out.push_str(&v.to_string()),
+            Value::F64(bits) => out.push_str(&f64::from_bits(*bits).to_string()),
+            Value::Symbol(sym) => out.push_str(&format!("sym#{}", sym)),
+            Value::String(v) => out.push_str(v),
+        }
+    }
+    out.push(')');
+    out
 }
