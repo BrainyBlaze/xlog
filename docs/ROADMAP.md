@@ -21,11 +21,11 @@
 - Semi-naive fixpoint iteration. [v0.2.0]
 - E2E transitive closure queries. [v0.2.0]
 - P2.2 Float Comparisons in Filters — runtime filter predicate evaluation supports F32/F64 comparisons. Files: `crates/xlog-runtime/src/executor.rs`. [v0.2.0]
+- GPU-resident filter/arithmetic evaluation and groupby finalization (device mask DAG, device group IDs + key extraction; no host round-trips in deterministic execution). [v0.3.x]
+- `xlog` CLI for deterministic and probabilistic execution with Arrow IPC I/O. [v0.3.x]
 - Some aggregate value-type restrictions remain (see `docs/ARCHITECTURE.md`). [v0.2.0]
 
 ### Planned
-- GPU-resident execution fully on GPU (currently partial; arithmetic/utility helpers remain on CPU). [v0.3.x]
-- CLI/REPL interface. [v0.3.x]
 
 ## GPU Backend & Kernels (xlog-cuda + kernels)
 
@@ -126,6 +126,7 @@
 - CUDA Kernels: 10 (join, dedup, groupby, scan, filter, pack, sort, set_ops, circuit, mc_sample). [v0.2.0]
 - Phase: 4 of 6 complete. [v0.2.0]
 - No remaining P1-P3 roadmap blockers (performance tuning continues under Phase 6 benchmarks). [v0.2.0]
+- GPU-resident deterministic execution (filter mask DAG, arithmetic, groupby IDs/keys) completed. [v0.3.x]
 - Phase 4 Complete metrics: workspace tests passing; E2E Datalog queries work; CUDA certification suite passes (140/140); no known critical correctness bugs in CUDA provider; xlog-prob implemented (exact `exact_ddnnf` + approximate `mc`); Python `xlog-gpu` implemented (PyO3 + DLPack). [v0.2.0]
 - Production Ready (After P1+P2): all critical CUDA correctness fixes applied; memory budget enforced; no 256-row filter/compact limit. [v0.2.0]
 - Feature Complete (After P4): CuDF integration; Query optimizer; Incremental maintenance. [v0.2.0]
@@ -136,10 +137,8 @@
 - Total P4 Effort: ~3 months. [v0.2.0]
 
 ### Planned
-- GPU-resident execution fully on GPU (currently partial; core joins/sort/dedup/set-ops stay on-GPU; remaining CPU paths mostly in arithmetic/utility helpers). [v0.3.x]
 - Float predicate support complete (runtime + CUDA). [v0.3.x]
 - Benchmarks documented. [v0.3.x]
-- CLI/REPL interface. [v0.3.x]
 - xlog-elp working. [v0.4-0.5]
 - Multi-GPU support. [v0.6+]
 - Production documentation. [v0.6+]

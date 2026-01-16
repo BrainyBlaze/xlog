@@ -8,8 +8,15 @@ This repo includes (and is growing) a curated suite of `.xlog` programs intended
 
 ## How To Run
 
-XLOG does not yet ship a full interactive CLI/REPL, but the workspace provides a small runner for
+XLOG ships a production CLI (`xlog`) for deterministic and probabilistic execution. For deterministic
 examples:
+
+```bash
+xlog run examples/xlog/00-basics/01_tc_reachability.xlog
+xlog run --input edge=data.arrow examples/xlog/00-basics/01_tc_reachability.xlog
+```
+
+The workspace also provides a small runner for examples:
 
 ```bash
 cargo run -p xlog-logic --release --example xlog_run -- examples/xlog/00-basics/01_tc_reachability.xlog

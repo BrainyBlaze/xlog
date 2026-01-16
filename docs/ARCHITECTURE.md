@@ -49,6 +49,7 @@ xlog/
 │   ├── xlog-prob/       # Probabilistic tier (exact Decision-DNNF + P3 Monte Carlo)
 │   ├── xlog-solve/      # Solver services (CLS SAT/MaxSAT MVP)
 │   ├── xlog-gpu/        # High-level GPU API (Rust)
+│   ├── xlog-cli/        # CLI binary (deterministic + probabilistic execution)
 │   ├── xlog-gpu-py/     # Python module (PyO3 + DLPack)
 │   └── xlog-cuda-tests/ # CUDA/PTX certification suite (not published)
 ├── kernels/             # CUDA source files (.cu) + embedded PTX (.ptx)
@@ -66,6 +67,7 @@ xlog-core  <──────────────────────�
 xlog-prob ────────────────> xlog-logic + xlog-cuda (+ xlog-core)
 xlog-gpu  ────────────────> xlog-logic + xlog-runtime + xlog-cuda
 xlog-gpu-py ──────────────> xlog-gpu + xlog-prob (+ xlog-cuda)
+xlog-cli  ────────────────> xlog-gpu + xlog-prob (+ xlog-cuda)
 
 xlog-solve ───────────────┬──────────────> xlog-cuda
                            └──────────────> xlog-core
@@ -86,6 +88,7 @@ xlog-cuda-tests ─────────────────────�
 | `xlog-prob` | Probabilistic tier: provenance → CNF → D4 → XGCF; exact inference + MC sampling |
 | `xlog-solve` | Solver services (CLS SAT/MaxSAT MVP; not used by `xlog-logic` in v0.1.0) |
 | `xlog-gpu` | High-level GPU API: deterministic execution + input/output buffers for integration layers |
+| `xlog-cli` | `xlog` CLI for deterministic and probabilistic execution with Arrow IPC I/O |
 | `xlog-gpu-py` | PyO3 extension (`xlog_gpu` Python module) exposing DLPack-first deterministic + probabilistic evaluation |
 | `xlog-cuda-tests` | CUDA/PTX certification suite (release gating; `publish = false`) |
 
@@ -338,6 +341,10 @@ fn execute_node(&mut self, node: &RirNode) -> Result<CudaBuffer> {
 }
 ```
 
+Filter execution is fully GPU-resident. Predicate trees are lowered to a **mask DAG**: typed compare kernels generate masks, boolean operators (`mask_and`, `mask_or`, `mask_not`) compose them, and stream compaction selects rows without CPU round-trips. Arithmetic expressions referenced by predicates are materialized on the GPU using the arithmetic kernels.
+
+GroupBy finalization is also GPU-resident: group boundaries are detected over packed key bytes, a GPU prefix-sum generates group IDs and group start indices, and packed rows are gathered + unpacked on-device to extract group keys. Aggregation outputs remain on the GPU until final output conversion.
+
 ### Recursive SCC Evaluation (Semi-Naive)
 
 Recursive programs are executed at the **SCC level** (see `ExecutionPlan.sccs` and `ExecutionPlan.rules_by_scc`), using semi-naive deltas.
@@ -455,8 +462,9 @@ __global__ void groupby_sum(
 
 Notes:
 - `groupby_multi_agg` sorts by `key_cols` on GPU, then detects group boundaries over packed key bytes.
-- Group IDs are currently computed on the host from the boundary mask (MVP).
-- Multi-key groupby is supported by packing key columns into a byte key and detecting boundaries on-device; key packing currently requires a 4-byte segment width, so `Bool` keys are not supported.
+- Group IDs and group start indices are computed on GPU via prefix-sum over the boundary mask.
+- Group key columns are gathered on GPU by packed-row gather + per-column unpacking (no host round-trips).
+- Multi-key groupby is supported by packing key columns into a byte key and detecting boundaries on-device.
 - Current value-type support (MVP):
   - `count`: any value type (counts rows)
   - `sum`/`min`/`max`: `u32` values (output `u64` for `sum`, `u32` for `min`/`max`)
@@ -637,6 +645,23 @@ let result = executor.execute_plan(&plan)?;
 let reach = executor.store().get("reach").unwrap();
 ```
 
+### CLI (xlog)
+
+The `xlog` CLI is a production entry point for deterministic and probabilistic programs. It reads
+`.xlog` sources, accepts Arrow IPC inputs for EDB relations, and emits query results as pretty
+tables, CSV, or Arrow IPC streams.
+
+```bash
+xlog run examples/xlog/00-basics/01_tc_reachability.xlog
+xlog run --input edge=data.arrow examples/xlog/00-basics/01_tc_reachability.xlog
+xlog prob examples/prob/01-wet-conditioning.xlog --prob-engine exact_ddnnf
+xlog prob examples/prob/04-nonmonotone-mc.xlog --prob-engine mc --samples 1000 --seed 42
+```
+
+Arrow IPC I/O:
+- Inputs: `--input rel=path.arrow` (repeatable; Arrow IPC stream)
+- Outputs: `--output=pretty|csv|arrow` with `--output-dir` for Arrow files
+
 ### Profiling
 
 ```rust
@@ -694,10 +719,10 @@ println!("{}", profiler.summary());
 │  │ RIR NODE EVALUATION                                      │          │
 │  │                                                          │          │
 │  │  Scan ──────► Read from RelationStore                    │          │
-│  │  Filter ────► GPU: compare + compact                     │          │
+│  │  Filter ────► GPU: mask DAG + compact                    │          │
 │  │  Project ───► GPU: column selection                      │          │
 │  │  Join ──────► GPU: hash_join_v2 (build/probe)           │          │
-│  │  GroupBy ───► GPU: sort → boundaries → aggregation       │          │
+│  │  GroupBy ───► GPU: sort → boundaries → ids/keys → agg    │          │
 │  │  Union ─────► GPU: concat → sort → dedup                 │          │
 │  │  Diff ──────► GPU: sort both → binary search mark        │          │
 │  │  Distinct ──► GPU: sort → mark dups → compact            │          │
