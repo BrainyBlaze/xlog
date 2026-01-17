@@ -4,16 +4,275 @@ XLOG is a **GPU-accelerated Datalog query engine** built in Rust with CUDA kerne
 
 ## Table of Contents
 
-1. [System Overview](#system-overview)
-2. [Crate Structure](#crate-structure)
-3. [Data Types](#data-types)
-4. [Compilation Pipeline](#compilation-pipeline)
-5. [Execution Pipeline](#execution-pipeline)
-6. [CUDA Kernels](#cuda-kernels)
-7. [Memory Management](#memory-management)
-8. [Key Algorithms](#key-algorithms)
-9. [Public APIs](#public-apis)
-10. [Dataflow Diagram](#dataflow-diagram)
+1. [Theoretical Foundations](#theoretical-foundations)
+2. [System Overview](#system-overview)
+3. [Crate Structure](#crate-structure)
+4. [Data Types](#data-types)
+5. [Compilation Pipeline](#compilation-pipeline)
+6. [Execution Pipeline](#execution-pipeline)
+7. [CUDA Kernels](#cuda-kernels)
+8. [Memory Management](#memory-management)
+9. [Key Algorithms](#key-algorithms)
+10. [Public APIs](#public-apis)
+11. [Dataflow Diagram](#dataflow-diagram)
+12. [Error Handling](#error-handling)
+13. [Configuration](#configuration)
+14. [Testing](#testing)
+15. [See Also](#see-also)
+
+---
+
+## Glossary
+
+For definitions of technical terms used throughout this document (SCC, RIR, PIR, CNF, XGCF, WMC, Decision-DNNF, DLPack, Arrow IPC, Semi-Naive, HISA, etc.), see the [Glossary in ROADMAP.md](ROADMAP.md#glossary-of-terms).
+
+---
+
+## Theoretical Foundations
+
+This section describes the formal semantics, design principles, and research foundations underlying XLOG.
+
+### Design Goals
+
+XLOG is designed around these core principles:
+
+| Goal | Description |
+|------|-------------|
+| **GPU-Resident Execution** | All semantic evaluation data structures (facts, derived relations, solver state, circuit values) remain GPU-resident during execution. Host involvement is limited to orchestration, I/O, and compilation. |
+| **Formal Semantics with Explicit Tiers** | XLOG provides explicit semantics choices and "tiers" (exact vs approximate) per subsystem, with machine-checkable boundaries. |
+| **Practical Implementability** | A staged implementation plan delivers value early (GPU Datalog + probabilistic facts) and grows toward full epistemic support. |
+| **Robustness and Verifiability** | Where "exactness" is claimed, XLOG includes proof/certificate artifacts or cross-check capability. |
+
+### Declarative Programming Paradigms
+
+XLOG is a unified platform spanning four closely-related reasoning paradigms:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         XLOG REASONING STACK                                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌─────────────┐   ┌─────────────┐   ┌─────────────┐   ┌─────────────┐    │
+│  │ xlog-logic  │   │ xlog-prob   │   │ xlog-elp    │   │ xlog-solve  │    │
+│  │             │   │             │   │ (planned)   │   │             │    │
+│  │ Datalog     │   │ ProbLog     │   │ Epistemic   │   │ SAT/MaxSAT  │    │
+│  │ recursion   │   │ inference   │   │ world views │   │ solving     │    │
+│  │ stratified  │   │ WMC/MC      │   │ K/M ops     │   │ GPU search  │    │
+│  │ negation    │   │ gradients   │   │ splitting   │   │ certificates│    │
+│  └──────┬──────┘   └──────┬──────┘   └──────┬──────┘   └──────┬──────┘    │
+│         │                 │                 │                 │            │
+│         └────────────┬────┴────────┬────────┴────────┬────────┘            │
+│                      ▼             ▼                 ▼                     │
+│              ┌─────────────────────────────────────────────┐               │
+│              │         GPU Kernel Provider                 │               │
+│              │   joins · sorts · aggregations · circuits   │               │
+│              └─────────────────────────────────────────────┘               │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+| Subsystem | Purpose | Primary Inspirations |
+|-----------|---------|---------------------|
+| **xlog-logic** | Deterministic Datalog-style recursion and stratified negation | GPUlog (HISA indexing), VFLog (columnar GPU Datalog) |
+| **xlog-prob** | Probabilistic + differentiable reasoning (ProbLog/DeepProbLog-like) | ProbLog knowledge compilation (d-DNNF/SDD/BDD), WMC |
+| **xlog-elp** | Epistemic Logic Programming with world views (planned) | eclingo (G91 guess-check), FAEEL founded world views |
+| **xlog-solve** | SAT/MaxSAT solving services for GPU | ParaFROST certified GPU inprocessing, FastFourierSAT GPU CLS |
+
+### Intermediate Representations
+
+XLOG uses a layered IR stack to keep the platform coherent across paradigms:
+
+```
+Source Code
+    │
+    ▼
+┌─────────┐
+│   AST   │  Abstract Syntax Tree from parser
+└────┬────┘
+     │
+     ▼
+┌─────────┐
+│   RIR   │  Relational IR: joins, projections, unions, dedup, fixpoint loops
+└────┬────┘
+     │
+     ├──────────────────┬──────────────────┐
+     ▼                  ▼                  ▼
+┌─────────┐       ┌─────────┐       ┌─────────┐
+│   PIR   │       │   EIR   │       │   SIR   │
+│Provenance│       │Epistemic│       │ Solve  │
+│   IR    │       │   IR    │       │   IR   │
+└────┬────┘       └────┬────┘       └────┬────┘
+     │                  │                 │
+     ▼                  │                 │
+┌─────────┐             │                 │
+│  XGCF   │◄────────────┴─────────────────┘
+│GPU Circt│
+└─────────┘
+```
+
+| IR | Purpose | Key Structures |
+|----|---------|----------------|
+| **RIR** | Relational operations for deterministic logic | `Scan`, `Filter`, `Project`, `Join`, `GroupBy`, `Union`, `Distinct`, `Diff`, `Fixpoint` |
+| **PIR** | Provenance tracking for probabilistic inference | `PIR_Lit`, `PIR_And`, `PIR_Or`, `PIR_Decision` — weighted Boolean formula / circuit terms |
+| **EIR** | Epistemic reasoning structures (planned) | `EAtom`, `SplitPlan`, `GuessSpace`, `PropagationRules`, `TestTask`, `WorldViewCandidate` |
+| **SIR** | Boolean satisfiability and optimization | `SIR_CNF`, `SIR_Cardinality`, `SIR_Weights`, `SIR_Objective`, `SIR_ProofPolicy` |
+| **XGCF** | GPU-evaluable circuit format | Levelized DAG with `node_type[]`, `value[]`, `adj[]` for forward/backward evaluation |
+
+All IR nodes include metadata for:
+- Estimated cardinality ranges
+- Memory peak estimates
+- Skew hints (for join partitioning)
+- Incremental update semantics (delta/full)
+- Tier requirements (exact vs approximate)
+
+### Formal Semantics
+
+#### Deterministic Logic (`xlog-logic`)
+
+XLOG implements **Datalog with stratified negation**:
+
+- **Evaluation model**: Semi-naive fixpoint iteration
+- **Negation**: Must be stratifiable (no cycles through negation)
+- **Aggregation**: Stratified (no recursion through aggregates)
+- **Exactness**: **Exact** for the supported fragment
+
+The formal semantics is the standard least Herbrand model semantics for Datalog, extended with stratified negation using the iterated fixpoint approach.
+
+#### Probabilistic Logic (`xlog-prob`)
+
+XLOG implements **ProbLog-style distribution semantics**:
+
+- **Base**: Each probabilistic fact `p::f.` independently holds with probability `p`
+- **Semantics**: The probability of a query is the sum of probabilities of all worlds where the query holds
+- **Evaluation**: Weighted Model Counting (WMC) via knowledge compilation
+
+**Inference tiers:**
+
+| Tier | Name | Description | Requirements |
+|------|------|-------------|--------------|
+| **P1** | Exact (circuit-evaluable) | Programs compiled into decomposable circuits evaluated exactly on GPU | Compilation succeeds; positive rule bodies only |
+| **P2** | Exact (restricted structure) | Acyclic probabilistic dependencies or bounded-treewidth fragments | Structural restrictions satisfied |
+| **P3** | Approximate | Monte Carlo sampling with GPU-parallel estimators and calibrated uncertainty | Any program; results include confidence intervals |
+
+**Circuit evaluation** uses log-space arithmetic for numerical stability:
+- **LIT node**: `v = log(w_lit)` with evidence masking
+- **AND node**: `v = v_a + v_b + …`
+- **OR node**: `v = logsumexp(v_a, v_b, …)`
+- **DECISION node**: `v = logsumexp(log(p(var=1)) + v_true, log(p(var=0)) + v_false)`
+
+**Reverse-mode autodiff** on XGCF circuits:
+- Initialize `adj[root] = dL/dv_root` from the loss
+- AND: distribute `adj` unchanged to children
+- OR: `adj[child_j] += adj[parent] * exp(v_child_j - v_parent)` (softmax weights)
+- Gradients flow back to neural predicates via PyTorch custom autograd
+
+#### Epistemic Logic (`xlog-elp`, planned)
+
+XLOG will implement **epistemic logic programming with world views**:
+
+- **Modal operators**: `K l` (known: l is true in all answer sets), `M l` (possible: l is true in some answer set)
+- **Default semantics**: FAEEL-style founded world views (avoids self-supported world views)
+- **Compatibility mode**: Gelfond 1991 (G91) semantics for interoperability
+
+**Complexity**: World view existence is **Σ_P^3-complete**, requiring careful engineering.
+
+**Inference tiers (planned):**
+
+| Tier | Name | Description | Feasibility Bounds |
+|------|------|-------------|--------------------|
+| **E1** | Exact (structural) | Epistemically stratified programs or successful splitting | `k ≤ 24` epistemic atoms per component |
+| **E2** | Exact (bounded enumeration) | Bounded candidate enumeration with propagation | `k ≤ 16` or `|candidates| ≤ 50,000` after propagation |
+| **E3** | Approximate | Sampling-based world-view approximation | Any program; explicit `UNKNOWN/approx` labeling |
+
+**Core algorithm**: Generate–Propagate–Test
+1. **Normalize and split**: Apply epistemic splitting to decompose into components
+2. **Generate**: Represent guesses as bitvectors over epistemic atoms (GPU-friendly)
+3. **Propagate**: Structural propagation (modal consistency) + semantic propagation (batched solver calls)
+4. **Test**: Verify candidates against brave/cautious consequences
+
+### XGCF: GPU Circuit Format
+
+The **XLOG GPU Circuit Format (XGCF)** is a levelized DAG representation optimized for parallel GPU evaluation:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    XGCF Structure                       │
+├─────────────────────────────────────────────────────────┤
+│                                                         │
+│  node_type[i] ∈ {CONST0, CONST1, LIT, AND, OR, DECISION}│
+│                                                         │
+│  a[i], b[i]      Child indices (node-type dependent)    │
+│  var[i]          Variable ID for DECISION nodes         │
+│  lit[i]          Literal ID for LIT nodes               │
+│                                                         │
+│  level_offsets[] Topological levels for parallel eval   │
+│                                                         │
+│  value[i]        Forward pass values (log-space)        │
+│  adj[i]          Backward pass adjoints                 │
+│                                                         │
+└─────────────────────────────────────────────────────────┘
+```
+
+**Batching**: Multiple circuits can be concatenated with `circuit_offsets` for batch evaluation. Neural batch dimensions are expressed as multiple leaf-weight tables with fused kernels for leaf-gather.
+
+### Knowledge Compilation Pipeline
+
+The probabilistic exact inference path uses knowledge compilation:
+
+```
+PIR (Provenance IR)
+    │
+    ▼ Tseitin encoding
+┌─────────┐
+│   CNF   │  Conjunctive Normal Form (with weights)
+└────┬────┘
+     │ Optional GPU preprocessing (simplification)
+     ▼
+┌─────────┐
+│   D4    │  Decision-DNNF compiler (CPU, vendored)
+└────┬────┘
+     │
+     ▼
+┌─────────────┐
+│Decision-DNNF│  Decomposable circuit form
+└──────┬──────┘
+       │ Lower to GPU format
+       ▼
+┌─────────┐
+│  XGCF   │  GPU-evaluable levelized circuit
+└─────────┘
+```
+
+**Compile-once, evaluate-many**: Following ProbLog's operational pattern, XLOG compiles the circuit structure once. Training iterations and evidence updates only modify leaf weights and evidence masks—no recompilation required.
+
+### Memory Residency Contract
+
+XLOG enforces strict GPU residency by default:
+
+**Strict GPU-Resident Mode (default):**
+- All runtime semantic state (relations, deltas, circuit values, solver state) must fit in device memory
+- If the plan cannot execute within GPU memory budget, XLOG returns a deterministic `RESOURCE_EXHAUSTED` error with diagnostics
+
+**Out-of-Core Mode (explicit opt-in via `--allow-ooc`):**
+- XLOG may spill *immutable* intermediates to host-pinned memory
+- Never used silently; performance not guaranteed
+
+### Research Foundations
+
+XLOG builds on established research in GPU-accelerated databases and probabilistic logic programming:
+
+| System/Paper | Contribution to XLOG |
+|--------------|---------------------|
+| **[GPUlog](https://thomas.gilray.org/pdf/datalog-gpu.pdf)** | HISA (Hash-Indexed Sorted Array) for efficient range queries, lock-free deduplication, parallel iteration. Reports up to 45× speedups. |
+| **[VFLog](https://arxiv.org/abs/2501.13051)** | Column-oriented GPU Datalog runtime. Demonstrates 200× gains over CPU column engines. |
+| **[mnmgDatalog](https://hpcrl.github.io/ICS2025-webpage/program/Proceedings_ICS25/ics25-71.pdf)** | Multi-node multi-GPU Datalog. Radix-hash partitioning, GPU-aware all-to-all. |
+| **[ProbLog](https://dtai.cs.kuleuven.be/problog/)** | Knowledge compilation approach to probabilistic logic. Compile-once evaluate-many pattern. |
+| **[DeepProbLog](https://papers.nips.cc/paper/7632-deepproblog-neural-probabilistic-logic-programming)** | Neural predicates integrated with probabilistic logic. End-to-end differentiable inference. |
+| **[D4](https://www.ijcai.org/proceedings/2017/0093.pdf)** | State-of-the-art Decision-DNNF compiler for weighted model counting. |
+| **[eclingo](https://arxiv.org/abs/2008.02018)** | Epistemic logic solver implementing G91 semantics via guess-and-check. |
+| **[FAEEL](https://arxiv.org/abs/1907.09247)** | Founded Autoepistemic Equilibrium Logic. Avoids self-supported world views. |
+| **[FastFourierSAT](https://arxiv.org/abs/2308.15020)** | Massively parallel continuous local search for GPU SAT solving. |
+| **[ParaFROST](https://link.springer.com/article/10.1007/s10703-023-00432-z)** | Certified GPU-accelerated SAT inprocessing with proof generation. |
 
 ---
 
@@ -26,12 +285,12 @@ Datalog Source → Parser → Stratifier → Lowerer/Optimizer → Executor → 
 XLOG transforms declarative Datalog rules into efficient GPU-parallel operations:
 
 - **Parsing**: PEG-based grammar with Pest
-- **Stratification**: Ensures safe negation ordering via SCC analysis
-- **Lowering/Optimization**: Converts AST to Relational IR and applies rewrites (predicate pushdown, join planning)
+- **Stratification**: Ensures safe negation ordering via SCC (Strongly Connected Component) analysis
+- **Lowering/Optimization**: Converts AST to Relational IR (RIR) and applies rewrites (predicate pushdown, join planning)
 - **Execution**: Interprets RIR nodes using GPU kernels
 - **GPU Kernels**: CUDA implementations of joins, sorts, aggregations, set operations
 
-Phase 4 adds a probabilistic tier (`xlog-prob`) with exact knowledge compilation (`exact_ddnnf`) and Monte Carlo sampling (`mc`). Implementation details live in `docs/architecture/xlog-prob.md`.
+XLOG also includes a probabilistic reasoning tier (`xlog-prob`) with exact knowledge compilation and Monte Carlo sampling. See [xlog-prob Architecture](architecture/xlog-prob.md) for details.
 
 ---
 
@@ -42,18 +301,18 @@ xlog/
 ├── crates/
 │   ├── xlog-core/       # Foundation types, traits, error handling
 │   ├── xlog-ir/         # Intermediate representations (RIR nodes)
-│   ├── xlog-logic/      # Datalog frontend (parser, compiler)
+│   ├── xlog-logic/      # Datalog frontend (parser, compiler, optimizer)
 │   ├── xlog-runtime/    # Query executor, relation storage
 │   ├── xlog-cuda/       # CUDA provider, memory management, interop (Arrow/DLPack)
-│   ├── xlog-stats/      # Runtime stats snapshots (optimizer + adaptive indexing)
-│   ├── xlog-prob/       # Probabilistic tier (exact Decision-DNNF + P3 Monte Carlo)
-│   ├── xlog-solve/      # Solver services (CLS SAT/MaxSAT MVP)
+│   ├── xlog-stats/      # Runtime statistics (optimizer feedback + adaptive indexing)
+│   ├── xlog-prob/       # Probabilistic tier (exact inference + Monte Carlo)
+│   ├── xlog-solve/      # Solver services (SAT/MaxSAT)
 │   ├── xlog-gpu/        # High-level GPU API (Rust)
 │   ├── xlog-cli/        # CLI binary (deterministic + probabilistic execution)
 │   ├── xlog-gpu-py/     # Python module (PyO3 + DLPack)
 │   └── xlog-cuda-tests/ # CUDA/PTX certification suite (not published)
 ├── kernels/             # CUDA source files (.cu) + embedded PTX (.ptx)
-└── vendor/              # Vendored D4 + Boost (Phase 4 exact inference)
+└── vendor/              # Vendored D4 + Boost (for exact probabilistic inference)
 ```
 
 ### Dependency Graph
@@ -70,7 +329,7 @@ xlog-gpu-py ──────────────> xlog-gpu + xlog-prob (+ 
 xlog-cli  ────────────────> xlog-gpu + xlog-prob (+ xlog-cuda)
 
 xlog-solve ───────────────┬──────────────> xlog-cuda
-                           └──────────────> xlog-core
+                          └──────────────> xlog-core
 
 xlog-cuda-tests ──────────────────────────> xlog-cuda (+ xlog-core)
 ```
@@ -82,11 +341,11 @@ xlog-cuda-tests ─────────────────────�
 | `xlog-core` | Shared types (`ScalarType`, `Schema`, `AggOp`), traits (`KernelProvider`), errors |
 | `xlog-ir` | Relational IR nodes (`RirNode`), expressions (`Expr`), execution plans |
 | `xlog-logic` | Parser, stratification, lowering (AST → RIR), optimizer (predicate pushdown + join planning) |
-| `xlog-runtime` | `Executor`, versioned `RelationStore`, profiling, incremental maintenance hooks, adaptive join index cache |
+| `xlog-runtime` | `Executor`, versioned `RelationStore`, profiling, incremental maintenance, adaptive join index cache |
 | `xlog-cuda` | `CudaKernelProvider`, `GpuMemoryManager`, `CudaBuffer`/`CudaColumn`, PTX embedding, Arrow IPC + DLPack interop |
 | `xlog-stats` | `StatsManager` + `StatsSnapshot` (compiler feedback + runtime tracking) |
-| `xlog-prob` | Probabilistic tier: provenance → CNF → D4 → XGCF; exact inference + MC sampling |
-| `xlog-solve` | Solver services (CLS SAT/MaxSAT MVP; not used by `xlog-logic` in v0.1.0) |
+| `xlog-prob` | Probabilistic tier: provenance → CNF → D4 → XGCF; exact inference + Monte Carlo sampling |
+| `xlog-solve` | Solver services (Continuous Local Search SAT/MaxSAT) |
 | `xlog-gpu` | High-level GPU API: deterministic execution + input/output buffers for integration layers |
 | `xlog-cli` | `xlog` CLI for deterministic and probabilistic execution with Arrow IPC I/O |
 | `xlog-gpu-py` | PyO3 extension (`xlog_gpu` Python module) exposing DLPack-first deterministic + probabilistic evaluation |
@@ -104,9 +363,11 @@ pub enum ScalarType {
     I32, I64,           // Signed integers
     F32, F64,           // Floating point
     Bool,               // Boolean
-    Symbol,             // Dictionary-encoded strings
+    Symbol,             // Dictionary-encoded strings (hashed to u32)
 }
 ```
+
+**Note**: `Symbol` values are currently stored as `u32` hashes. This is an MVP representation—the hash is not reversible to the original string in the current version.
 
 ### Schema
 
@@ -182,7 +443,7 @@ pub enum AggOp {
     Sum,        // Sum values per group
     Min,        // Minimum value per group
     Max,        // Maximum value per group
-    LogSumExp,  // Numerically stable log-sum-exp
+    LogSumExp,  // Numerically stable log-sum-exp (for probabilistic inference)
 }
 ```
 
@@ -197,6 +458,8 @@ pub enum AggOp {
 Uses Pest PEG grammar to parse Datalog source into AST:
 
 ```rust
+use xlog_logic::parse_program;
+
 let program = parse_program(source)?;
 ```
 
@@ -216,14 +479,12 @@ XLOG supports:
 - **Constraints**: `:- body.` (must have *no* solutions)
 - **Queries**: `?- atom.` (what to print)
 
-The compiler desugars these into ordinary rules so they run through the same stratification + lowering
-pipeline:
+The compiler desugars these into ordinary rules so they run through the same stratification + lowering pipeline:
 
 - `:- body.` → `__xlog_constraint_N(1) :- body.`
 - `?- p(1, X).` → `__xlog_query_N(X) :- p(1, X).`
 
-The example runner (`crates/xlog-logic/examples/xlog_run.rs`) enforces that all constraint relations
-are empty, and prints the query relations.
+The runner enforces that all constraint relations are empty, and prints the query relations.
 
 ### Phase 2: Stratification
 
@@ -238,6 +499,8 @@ Ensures safe negation ordering using dependency analysis:
 5. Topologically sort strata
 
 ```rust
+use xlog_logic::stratify;
+
 let strata = stratify(&program)?;
 ```
 
@@ -250,11 +513,11 @@ let strata = stratify(&program)?;
 Transforms AST to Relational IR:
 
 1. **Schema inference**: Derive column types from facts
-2. **Join planning**: Build join trees for positive atoms (bushy DP for small bodies, greedy for large bodies) using a simple cost model; can be seeded from runtime `StatsSnapshot`
+2. **Join planning**: Build join trees for positive atoms (bushy dynamic programming for small bodies, greedy for large bodies) using a cost model; can be seeded from runtime `StatsSnapshot`
 3. **Variable tracking**: Map variables to column indices for join keys and projections
 4. **Comparisons + arithmetic**: Lower comparisons to `Filter` and `is` expressions to computed projections (`ProjectExpr::Computed`)
 5. **Negation handling**: Lower stratified negation via `Diff` + `Semi` join (anti-semi pattern over shared variables)
-6. **Recursion**: Mark recursive predicate groups as SCCs in the plan; runtime executes recursive SCCs with semi-naive deltas (the compiler does not currently emit `RirNode::Fixpoint`)
+6. **Recursion**: Mark recursive predicate groups as SCCs in the plan; runtime executes recursive SCCs with semi-naive deltas
 7. **Projection**: Project result columns to match rule head (and lower aggregates to `GroupBy`)
 
 ```rust
@@ -269,6 +532,8 @@ let plan = lowerer.lower_program(&program)?;
 **File**: `crates/xlog-logic/src/compile.rs`
 
 ```rust
+use xlog_logic::Compiler;
+
 pub struct Compiler {
     lowerer: Lowerer,
 }
@@ -278,16 +543,16 @@ impl Compiler {
         // Phase 1: parse to AST
         let program = parse_program(source)?;
 
-        // Compiler-internal desugaring of queries/constraints into internal rules happens here.
+        // Compiler-internal desugaring of queries/constraints into internal rules
 
         // Phase 2: stratify + pass predicate groups into the lowerer
         let strata = stratify(&program)?;
         self.lowerer.set_strata(strata.into_iter().map(|s| s.predicates).collect());
 
         // Phase 3: lower to RIR plan
-        let mut plan = self.lowerer.lower_program(&program)?;
+        let plan = self.lowerer.lower_program(&program)?;
 
-        // Phase 4: optimizer rewrites (predicate pushdown, cost-aware join planning) happen here.
+        // Phase 4: optimizer rewrites (predicate pushdown, cost-aware join planning)
 
         Ok(plan)
     }
@@ -308,7 +573,7 @@ pub struct Executor {
     store: RelationStore,                 // Versioned relation storage
     rel_names: HashMap<RelId, String>,    // RelId → name mapping
     name_to_rel: HashMap<String, RelId>,  // name → RelId mapping
-    stats: StatsManager,                  // Runtime stats (optimizer feedback)
+    stats: StatsManager,                  // Runtime statistics (optimizer feedback)
     join_index_cache: JoinIndexCache,     // Cached build-side indexes (adaptive indexing)
 }
 ```
@@ -326,7 +591,9 @@ pub struct Executor {
 ```rust
 fn execute_node(&mut self, node: &RirNode) -> Result<CudaBuffer> {
     match node {
-        RirNode::Scan { rel } => self.execute_scan(*rel),
+        RirNode::Scan { rel } => {
+            self.execute_scan(*rel)
+        }
         RirNode::Filter { input, predicate } => {
             let buf = self.execute_node(input)?;
             self.execute_filter(&buf, predicate)
@@ -336,18 +603,45 @@ fn execute_node(&mut self, node: &RirNode) -> Result<CudaBuffer> {
             let r = self.execute_node(right)?;
             self.provider.hash_join_v2(&l, &r, left_keys, right_keys, *join_type)
         }
-        // ... other operations
+        RirNode::GroupBy { input, key_cols, aggs } => {
+            let buf = self.execute_node(input)?;
+            self.provider.groupby_multi_agg(&buf, key_cols, aggs)
+        }
+        RirNode::Union { inputs } => {
+            let bufs: Vec<_> = inputs.iter()
+                .map(|n| self.execute_node(n))
+                .collect::<Result<_>>()?;
+            self.provider.union_all(&bufs)
+        }
+        RirNode::Distinct { input, key_cols } => {
+            let buf = self.execute_node(input)?;
+            self.provider.dedup(&buf, key_cols)
+        }
+        RirNode::Diff { left, right } => {
+            let l = self.execute_node(left)?;
+            let r = self.execute_node(right)?;
+            self.provider.diff(&l, &r)
+        }
+        RirNode::Project { input, columns } => {
+            let buf = self.execute_node(input)?;
+            self.execute_project(&buf, columns)
+        }
+        RirNode::Fixpoint { .. } => {
+            self.execute_fixpoint(node)
+        }
     }
 }
 ```
 
-Filter execution is fully GPU-resident. Predicate trees are lowered to a **mask DAG**: typed compare kernels generate masks, boolean operators (`mask_and`, `mask_or`, `mask_not`) compose them, and stream compaction selects rows without CPU round-trips. Arithmetic expressions referenced by predicates are materialized on the GPU using the arithmetic kernels.
+### GPU-Resident Execution
 
-GroupBy finalization is also GPU-resident: group boundaries are detected over packed key bytes, a GPU prefix-sum generates group IDs and group start indices, and packed rows are gathered + unpacked on-device to extract group keys. Aggregation outputs remain on the GPU until final output conversion.
+**Filter execution** is fully GPU-resident. Predicate trees are lowered to a **mask DAG**: typed compare kernels generate masks, boolean operators (`mask_and`, `mask_or`, `mask_not`) compose them, and stream compaction selects rows without CPU round-trips. Arithmetic expressions referenced by predicates are materialized on the GPU using the arithmetic kernels.
+
+**GroupBy finalization** is also GPU-resident: group boundaries are detected over packed key bytes, a GPU prefix-sum generates group IDs and group start indices, and packed rows are gathered + unpacked on-device to extract group keys. Aggregation outputs remain on the GPU until final output conversion.
 
 ### Recursive SCC Evaluation (Semi-Naive)
 
-Recursive programs are executed at the **SCC level** (see `ExecutionPlan.sccs` and `ExecutionPlan.rules_by_scc`), using semi-naive deltas.
+Recursive programs are executed at the **SCC level** using semi-naive deltas.
 
 High-level algorithm (mirrors `Executor::execute_recursive_scc`):
 
@@ -370,7 +664,7 @@ Note: `RirNode::Fixpoint` exists and is interpreted by `Executor::execute_fixpoi
 
 | File | Kernels | Purpose |
 |------|---------|---------|
-| `join.cu` | `hash_join_build`, `hash_join_probe` (legacy), `hash_join_bucket_count_v2`, `hash_join_scatter_v2`, `hash_join_probe_v2`, `hash_join_semi`, `hash_join_anti`, `init_hash_table`, `compute_composite_hash` | Hash joins (v2 default) + composite hashing |
+| `join.cu` | `hash_join_bucket_count_v2`, `hash_join_scatter_v2`, `hash_join_probe_v2`, `hash_join_semi`, `hash_join_anti`, `compute_composite_hash` | Hash joins (v2 with bucketed layout) + composite hashing |
 | `pack.cu` | `pack_keys`, `pack_and_hash_keys`, `hash_packed_keys`, `gather_packed_rows`, `compare_packed_keys` | Key packing/hashing + packed-row utilities |
 | `dedup.cu` | `mark_unique_*`, `compact_rows` | Sort-based deduplication |
 | `filter.cu` | `filter_compare_*`, `compact_*_by_mask`, `mask_{and,or,not}` | Filtering and stream compaction |
@@ -378,14 +672,14 @@ Note: `RirNode::Fixpoint` exists and is interpreted by `Executor::execute_fixpoi
 | `groupby.cu` | `detect_group_boundaries`, `extract_group_keys`, `groupby_*`, `groupby_logsumexp_*` | Sorted aggregation |
 | `scan.cu` | `exclusive_scan_mask`, `count_mask`, `multiblock_scan_*` | Prefix sum operations |
 | `set_ops.cu` | `concat_{u32,bytes}`, `sorted_diff_mark` | Union/difference operations |
-| `circuit.cu` | `xgcf_forward_level`, `xgcf_backward_level_propagate`, `xgcf_backward_level_decision_grad`, `xgcf_backward_level_lit_grad` | XGCF circuit eval + reverse-mode gradients |
-| `mc_sample.cu` | `mc_sample_bernoulli` | Bernoulli sampling for `prob_engine=mc` |
+| `circuit.cu` | `xgcf_forward_level`, `xgcf_backward_level_*` | XGCF circuit eval + reverse-mode gradients (probabilistic) |
+| `mc_sample.cu` | `mc_sample_bernoulli` | Bernoulli sampling (Monte Carlo inference) |
 
-### Hash Join Implementation (v2 default)
+### Hash Join Implementation (v2)
 
-The runtime uses a **bucketed “CSR buckets”** layout for join v2 (see `kernels/join.cu` + `CudaKernelProvider::hash_join_v2`):
+The runtime uses a **bucketed "CSR buckets"** layout for joins:
 
-- Compute a 64-bit composite hash for the join key columns (typically via packed key bytes in `kernels/pack.cu`).
+- Compute a 64-bit composite hash for the join key columns (via packed key bytes).
 - **Build** (right side):
   - `hash_join_bucket_count_v2`: count build rows per bucket (bucket = low bits of hash)
   - GPU exclusive scan → `bucket_offsets`
@@ -398,14 +692,19 @@ The runtime uses a **bucketed “CSR buckets”** layout for join v2 (see `kerne
 
 ```cuda
 __global__ void compute_composite_hash(
-    const uint8_t* data,
-    const uint32_t* col_offsets,
-    const uint32_t* col_sizes,
+    const uint8_t* data,          // Packed row data
+    const uint32_t* col_offsets,  // Byte offset of each key column
+    const uint32_t* col_sizes,    // Byte size of each key column
     uint32_t num_key_cols,
     uint32_t num_rows,
     uint32_t row_stride,
-    uint64_t* hashes
+    uint64_t* hashes              // Output: 64-bit hash per row
 ) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= num_rows) return;
+
+    const uint8_t* row = data + gid * row_stride;
+
     // FNV-1a hash combining all key columns
     uint64_t hash = 14695981039346656037ULL;
     for (uint32_t k = 0; k < num_key_cols; k++) {
@@ -422,24 +721,30 @@ __global__ void compute_composite_hash(
 ### Radix Sort (4-bit, stable)
 
 ```cuda
-// Radix sort operates on u32 digit segments; passes depend on key width.
+// Radix sort operates on u32 digit segments; passes depend on key width (8 passes per 32 bits).
 __global__ void radix_histogram(
     const uint32_t* keys,
+    uint32_t n,
     uint32_t* histograms,  // [grid_size * 16]
     uint32_t shift
 ) {
     __shared__ uint32_t local_hist[16];
+
     // Initialize shared memory
     if (threadIdx.x < 16) local_hist[threadIdx.x] = 0;
     __syncthreads();
 
-    uint32_t digit = (keys[gid] >> shift) & 0xF;
-    atomicAdd(&local_hist[digit], 1);
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid < n) {
+        uint32_t digit = (keys[gid] >> shift) & 0xF;
+        atomicAdd(&local_hist[digit], 1);
+    }
     __syncthreads();
 
-    // Write to global
-    if (threadIdx.x < 16)
+    // Write to global histogram
+    if (threadIdx.x < 16) {
         histograms[blockIdx.x * 16 + threadIdx.x] = local_hist[threadIdx.x];
+    }
 }
 ```
 
@@ -460,15 +765,17 @@ __global__ void groupby_sum(
 }
 ```
 
-Notes:
-- `groupby_multi_agg` sorts by `key_cols` on GPU, then detects group boundaries over packed key bytes.
-- Group IDs and group start indices are computed on GPU via prefix-sum over the boundary mask.
-- Group key columns are gathered on GPU by packed-row gather + per-column unpacking (no host round-trips).
-- Multi-key groupby is supported by packing key columns into a byte key and detecting boundaries on-device.
-- Current value-type support (MVP):
-  - `count`: any value type (counts rows)
-  - `sum`/`min`/`max`: `u32` values (output `u64` for `sum`, `u32` for `min`/`max`)
-  - `logsumexp`: `f64` values (output `f64`)
+**GroupBy Pipeline:**
+1. Sort by `key_cols` on GPU
+2. Detect group boundaries over packed key bytes
+3. Compute group IDs and start indices via prefix-sum
+4. Gather group key columns on GPU (packed-row gather + unpack)
+5. Run aggregation kernels
+
+**Current value-type support:**
+- `count`: any value type (counts rows)
+- `sum`/`min`/`max`: `u32` values (output `u64` for `sum`, `u32` for `min`/`max`)
+- `logsumexp`: `f64` values (output `f64`)
 
 ---
 
@@ -480,12 +787,12 @@ Notes:
 
 ```rust
 pub enum CudaColumn {
-    Owned(TrackedCudaSlice<u8>),
-    Dlpack(DlpackColumn), // calls the DLPack deleter on drop
+    Owned(TrackedCudaSlice<u8>),      // XLOG-allocated GPU memory
+    Dlpack(DlpackColumn),              // External memory via DLPack (calls deleter on drop)
 }
 
 pub struct CudaBuffer {
-    pub columns: Vec<CudaColumn>, // Column-major, bytes; typed by `schema`
+    pub columns: Vec<CudaColumn>,      // Column-major storage, bytes; typed by schema
     pub num_rows: u64,
     pub schema: Schema,
 }
@@ -493,7 +800,7 @@ pub struct CudaBuffer {
 impl CudaBuffer {
     pub fn column(&self, idx: usize) -> Option<&CudaColumn>;
     pub fn num_rows(&self) -> u64;
-    pub fn arity(&self) -> usize;  // Number of columns
+    pub fn arity(&self) -> usize;      // Number of columns
     pub fn schema(&self) -> &Schema;
     pub fn is_empty(&self) -> bool;
 }
@@ -518,19 +825,30 @@ impl GpuMemoryManager {
         loop {
             let current = self.allocated.load(Ordering::SeqCst);
             let new = current.checked_add(bytes)
-                .ok_or(XlogError::ResourceExhausted { ... })?;
+                .ok_or_else(|| XlogError::ResourceExhausted {
+                    context: "allocation overflow".into(),
+                    estimated_bytes: bytes,
+                    budget_bytes: self.budget.device_bytes,
+                })?;
 
             if new > self.budget.device_bytes {
-                return Err(XlogError::ResourceExhausted { ... });
+                return Err(XlogError::ResourceExhausted {
+                    context: "GPU memory budget exceeded".into(),
+                    estimated_bytes: bytes,
+                    budget_bytes: self.budget.device_bytes,
+                });
             }
 
-            if self.allocated.compare_exchange(current, new, ...).is_ok() {
+            if self.allocated.compare_exchange(
+                current, new, Ordering::SeqCst, Ordering::SeqCst
+            ).is_ok() {
                 break;
             }
         }
 
         // Allocate via cudarc; tracked slice decrements budget on drop
-        self.device.inner().alloc::<T>(len)
+        let slice = self.device.inner().alloc::<T>(len)?;
+        Ok(TrackedCudaSlice::new(slice, bytes, self.clone()))
     }
 }
 ```
@@ -540,16 +858,28 @@ impl GpuMemoryManager {
 ```rust
 pub struct MemoryBudget {
     pub device_bytes: u64,      // Hard limit
-    pub allow_ooc: bool,        // Out-of-core spill (future)
+    pub allow_ooc: bool,        // Out-of-core spill (future feature)
     pub abort_on_exceed: bool,  // Fail vs warn
 }
 
 impl MemoryBudget {
+    /// Use 80% of total device memory
     pub fn from_device_memory(total: u64) -> Self {
-        Self { device_bytes: total * 80 / 100, .. }  // 80% of device memory
+        Self {
+            device_bytes: total * 80 / 100,
+            allow_ooc: false,
+            abort_on_exceed: true,
+        }
     }
 
-    pub fn with_limit(bytes: u64) -> Self { ... }
+    /// Fixed byte limit
+    pub fn with_limit(bytes: u64) -> Self {
+        Self {
+            device_bytes: bytes,
+            allow_ooc: false,
+            abort_on_exceed: true,
+        }
+    }
 }
 ```
 
@@ -562,7 +892,7 @@ impl MemoryBudget {
 1. **Key prep**: Pack join key columns into row-major bytes and compute a 64-bit composite hash (FNV-1a) on GPU.
 2. **Build phase (v2 buckets)**: Bucket build rows by low hash bits (count → scan offsets → scatter contiguous bucket entries).
 3. **Probe phase**: For each probe row, scan the bucket range, compare hashes, and (optionally) verify key bytes to eliminate hash collisions.
-4. **Materialization**: Gather left/right columns into the output schema; for left-outer joins, unmatched right columns are zero-filled (MVP null representation).
+4. **Materialization**: Gather left/right columns into the output schema; for left-outer joins, unmatched right columns are zero-filled.
 
 **Join Types**:
 - **Inner**: Output matching pairs
@@ -610,10 +940,16 @@ use xlog_logic::Compiler;
 
 let mut compiler = Compiler::new();
 let plan = compiler.compile(r#"
+    pred edge(u32, u32).
+    pred reach(u32, u32).
+
     edge(1, 2).
     edge(2, 3).
+
     reach(X, Y) :- edge(X, Y).
     reach(X, Z) :- reach(X, Y), edge(Y, Z).
+
+    ?- reach(1, N).
 "#)?;
 ```
 
@@ -638,29 +974,66 @@ let mut executor = Executor::new(provider);
 executor.register_relation(RelId(0), "edge");
 executor.store_mut().put("edge", edge_buffer);
 
-// Execute
+// Execute plan
 let result = executor.execute_plan(&plan)?;
 
 // Read results
 let reach = executor.store().get("reach").unwrap();
+println!("Reachable pairs: {} rows", reach.num_rows());
 ```
 
-### CLI (xlog)
+### High-Level API (xlog-gpu)
 
-The `xlog` CLI is a production entry point for deterministic and probabilistic programs. It reads
-`.xlog` sources, accepts Arrow IPC inputs for EDB relations, and emits query results as pretty
-tables, CSV, or Arrow IPC streams.
+```rust
+use xlog_gpu::LogicProgram;
+
+let program = LogicProgram::compile(source)?;
+let results = program.run()?;
+
+for (name, buffer) in results {
+    println!("{}: {} rows", name, buffer.num_rows());
+}
+```
+
+### CLI
+
+The `xlog` CLI is a production entry point for deterministic and probabilistic programs. It reads `.xlog` sources, accepts Arrow IPC inputs for EDB relations, and emits query results as pretty tables, CSV, or Arrow IPC streams.
 
 ```bash
+# Deterministic execution
 xlog run examples/xlog/00-basics/01_tc_reachability.xlog
-xlog run --input edge=data.arrow examples/xlog/00-basics/01_tc_reachability.xlog
+xlog run --input edge=data.arrow --output csv program.xlog
+
+# Probabilistic execution
 xlog prob examples/prob/01-wet-conditioning.xlog --prob-engine exact_ddnnf
-xlog prob examples/prob/04-nonmonotone-mc.xlog --prob-engine mc --samples 1000 --seed 42
+xlog prob program.xlog --prob-engine mc --samples 10000 --seed 42
+
+# Output formats
+xlog run program.xlog --output pretty   # Default: formatted tables
+xlog run program.xlog --output csv      # CSV format
+xlog run program.xlog --output arrow --output-dir ./results  # Arrow IPC files
 ```
 
-Arrow IPC I/O:
-- Inputs: `--input rel=path.arrow` (repeatable; Arrow IPC stream)
-- Outputs: `--output=pretty|csv|arrow` with `--output-dir` for Arrow files
+### Python API
+
+```python
+import xlog_gpu
+
+# Deterministic execution
+program = xlog_gpu.LogicProgram.compile(source)
+results = program.evaluate()
+
+# Results are DLPack capsules (zero-copy GPU tensors)
+for name, capsule in results.items():
+    import torch
+    tensor = torch.from_dlpack(capsule)
+    print(f"{name}: {tensor.shape}")
+
+# Probabilistic execution
+prob_program = xlog_gpu.Program.compile(source, prob_engine="exact_ddnnf")
+prob_results = prob_program.evaluate()
+print(f"P(query) = {prob_results.prob}")
+```
 
 ### Profiling
 
@@ -669,6 +1042,7 @@ use xlog_runtime::{Profiler, OpStats};
 
 let mut profiler = Profiler::new(true);  // enabled
 profiler.record(OpStats::new("hash_join", 1000, 500, 1234, 8000));
+profiler.record(OpStats::new("filter", 500, 100, 567, 4000));
 println!("{}", profiler.summary());
 ```
 
@@ -720,7 +1094,7 @@ println!("{}", profiler.summary());
 │  │                                                          │          │
 │  │  Scan ──────► Read from RelationStore                    │          │
 │  │  Filter ────► GPU: mask DAG + compact                    │          │
-│  │  Project ───► GPU: column selection                      │          │
+│  │  Project ───► GPU: column selection + arithmetic         │          │
 │  │  Join ──────► GPU: hash_join_v2 (build/probe)           │          │
 │  │  GroupBy ───► GPU: sort → boundaries → ids/keys → agg    │          │
 │  │  Union ─────► GPU: concat → sort → dedup                 │          │
@@ -772,18 +1146,33 @@ println!("{}", profiler.summary());
 
 ```rust
 pub enum XlogError {
-    Parse(String),                    // Syntax errors
-    StratificationCycle(Vec<String>), // Unstratifiable negation
-    UnsafeVariable(String),           // Domain safety violation
-    ResourceExhausted {               // Memory budget exceeded
+    /// Syntax errors during parsing
+    Parse(String),
+
+    /// Unstratifiable negation (cycle through negation)
+    StratificationCycle(Vec<String>),
+
+    /// Domain safety violation (variable not bound in positive atoms)
+    UnsafeVariable(String),
+
+    /// Memory budget exceeded
+    ResourceExhausted {
         context: String,
         estimated_bytes: u64,
         budget_bytes: u64,
     },
-    Kernel(String),                   // CUDA errors
-    Type(String),                     // Type mismatches
-    Compilation(String),              // Semantic errors
-    Execution(String),                // Runtime failures
+
+    /// CUDA kernel errors
+    Kernel(String),
+
+    /// Type mismatches
+    Type(String),
+
+    /// Semantic errors during compilation
+    Compilation(String),
+
+    /// Runtime failures
+    Execution(String),
 }
 ```
 
@@ -794,15 +1183,12 @@ pub enum XlogError {
 ### Memory Budget
 
 ```rust
-// Use 80% of total device memory (caller provides total bytes)
-let total_device_bytes = /* query via CUDA driver */;
+// Use 80% of total device memory
+let total_device_bytes = device.total_memory()?;
 let budget = MemoryBudget::from_device_memory(total_device_bytes);
 
-// Fixed limit
-let budget = MemoryBudget::with_limit(4 * 1024 * 1024 * 1024); // 4 GB
-
-// Allow out-of-core spill (future)
-let budget = budget.with_ooc();
+// Fixed limit (e.g., 4 GB)
+let budget = MemoryBudget::with_limit(4 * 1024 * 1024 * 1024);
 ```
 
 ### Execution Limits
@@ -815,7 +1201,48 @@ const MAX_SCC_ITERATIONS: usize = 1000;
 
 ---
 
-## Test Coverage
+## Testing
 
-- Workspace unit/integration tests: `cargo test --workspace --all-targets` (debug) or `cargo test --workspace --all-targets --release`.
-- CUDA/PTX certification suite (140 tests): `cargo test -p xlog-cuda-tests --test certification_suite --release -- --nocapture`.
+### Workspace Tests
+
+```bash
+# Debug mode
+cargo test --workspace --all-targets
+
+# Release mode (recommended for GPU tests)
+cargo test --workspace --all-targets --release
+```
+
+### CUDA Certification Suite
+
+The certification suite validates all CUDA kernel operations:
+
+```bash
+cargo test -p xlog-cuda-tests --test certification_suite --release -- --nocapture
+```
+
+**Coverage**: 140 tests covering hash joins, filter, sort, dedup, groupby, scan, pack, set_ops, circuit evaluation, and Monte Carlo sampling.
+
+---
+
+## See Also
+
+### Core Documentation
+
+- [Roadmap](ROADMAP.md) — Feature status, planned development, glossary
+
+### Architecture Documents
+
+| Document | Description |
+|----------|-------------|
+| [GPU Execution](architecture/gpu-execution.md) | GPU-resident filter, groupby, and arithmetic evaluation |
+| [Query Optimizer](architecture/query-optimizer.md) | Cost-based join ordering, predicate pushdown, statistics |
+| [Arithmetic Expressions](architecture/arithmetic-expressions.md) | `is` syntax, type inference, GPU evaluation |
+| [Probabilistic Tier](architecture/xlog-prob.md) | Exact inference (D4/XGCF) and Monte Carlo sampling |
+| [Solver Services](architecture/solver-services.md) | GPU-native CLS SAT/MaxSAT solver |
+| [Adaptive Indexing](architecture/adaptive-indexing.md) | HISA-based heat tracking and index selection |
+| [Multi-GPU Joins](architecture/multi-gpu-join.md) | Distributed join design (planned) |
+| [Data Interoperability](architecture/cudf-interop.md) | Arrow IPC and DLPack integration |
+| [CUDA Certification](architecture/cuda-certification.md) | PTX kernel test suite (140 tests, 24 categories) |
+| [CLI Reference](architecture/cli-reference.md) | `xlog run` and `xlog prob` commands |
+| [Python Bindings](architecture/python-bindings.md) | PyO3 + DLPack API (`xlog_gpu` module) |
