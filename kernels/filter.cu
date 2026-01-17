@@ -489,6 +489,7 @@ extern "C" __global__ void filter_compare_u32_scan_phase1(
 
 /**
  * Fused compare + scan phase1 for f64 filters.
+ * Eq/Ne use IEEE semantics. Lt/Le/Gt/Ge use total ordering.
  *
  * Produces:
  * - mask[gid] (0/1)
@@ -516,10 +517,10 @@ extern "C" __global__ void filter_compare_f64_scan_phase1(
         switch (op) {
             case OP_EQ: result = (col_val == constant); break;
             case OP_NE: result = (col_val != constant); break;
-            case OP_LT: result = (col_val < constant); break;
-            case OP_LE: result = (col_val <= constant); break;
-            case OP_GT: result = (col_val > constant); break;
-            case OP_GE: result = (col_val >= constant); break;
+            case OP_LT: result = (float_to_ordered_f64(col_val) < float_to_ordered_f64(constant)); break;
+            case OP_LE: result = (float_to_ordered_f64(col_val) <= float_to_ordered_f64(constant)); break;
+            case OP_GT: result = (float_to_ordered_f64(col_val) > float_to_ordered_f64(constant)); break;
+            case OP_GE: result = (float_to_ordered_f64(col_val) >= float_to_ordered_f64(constant)); break;
             default: result = false;
         }
         uint8_t out = result ? 1 : 0;
