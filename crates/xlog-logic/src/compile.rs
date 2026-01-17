@@ -354,6 +354,7 @@ mod tests {
     use xlog_stats::StatsManager;
     use xlog_stats::RelationStats;
     use xlog_ir::RirNode;
+    use xlog_core::ScalarType;
 
     #[test]
     fn test_compiler_new() {
@@ -442,6 +443,38 @@ mod tests {
             result.is_ok(),
             "Failed to compile with comparison: {:?}",
             result.err()
+        );
+    }
+
+    #[test]
+    fn test_schema_infers_from_rule_body_types() {
+        let mut compiler = Compiler::new();
+        let result = compiler.compile(
+            r#"
+            edge(1, 2).
+            edge(2, 3).
+            reach(X, Y) :- edge(X, Y).
+        "#,
+        );
+        assert!(
+            result.is_ok(),
+            "Failed to compile rule for schema inference: {:?}",
+            result.err()
+        );
+
+        let schema = compiler
+            .schemas()
+            .get("reach")
+            .expect("missing reach schema");
+        assert_eq!(
+            schema.column_type(0),
+            Some(ScalarType::U32),
+            "reach column 0 should match edge column type"
+        );
+        assert_eq!(
+            schema.column_type(1),
+            Some(ScalarType::U32),
+            "reach column 1 should match edge column type"
         );
     }
 

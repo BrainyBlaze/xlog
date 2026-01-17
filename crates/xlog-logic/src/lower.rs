@@ -148,13 +148,38 @@ impl Lowerer {
                     .iter()
                     .enumerate()
                     .map(|(i, term)| {
-                        let ty = infer_term_type(term);
+                        let ty = match term {
+                            Term::Variable(name) => self
+                                .infer_head_term_type_from_body(rule, name)
+                                .unwrap_or_else(|| infer_term_type(term)),
+                            _ => infer_term_type(term),
+                        };
                         (format!("c{}", i), ty)
                     })
                     .collect();
                 self.schemas.insert(pred.clone(), Schema::new(columns));
             }
         }
+    }
+
+    fn infer_head_term_type_from_body(&self, rule: &Rule, var_name: &str) -> Option<ScalarType> {
+        for lit in &rule.body {
+            let atom = match lit {
+                BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) => atom,
+                BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) => continue,
+            };
+            let schema = self.schemas.get(&atom.predicate)?;
+            for (idx, term) in atom.terms.iter().enumerate() {
+                if let Term::Variable(name) = term {
+                    if name == var_name {
+                        if let Some(ty) = schema.column_type(idx) {
+                            return Some(ty);
+                        }
+                    }
+                }
+            }
+        }
+        None
     }
 
     fn infer_cardinalities(&mut self, program: &Program) {

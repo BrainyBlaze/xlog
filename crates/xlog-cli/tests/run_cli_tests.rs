@@ -1,4 +1,4 @@
-use assert_cmd::Command;
+use assert_cmd::cargo::cargo_bin_cmd;
 use cudarc::driver::CudaDevice;
 use std::path::Path;
 
@@ -14,7 +14,7 @@ fn test_xlog_run_basic() {
         .expect("workspace root");
     let program = repo_root.join("examples/xlog/00-basics/01_tc_reachability.xlog");
 
-    let mut cmd = Command::cargo_bin("xlog").unwrap();
+    let mut cmd = cargo_bin_cmd!("xlog");
     cmd.args(["run", program.to_str().expect("valid path")]);
     cmd.assert().success();
 }

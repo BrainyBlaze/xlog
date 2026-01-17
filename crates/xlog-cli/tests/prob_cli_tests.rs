@@ -1,4 +1,4 @@
-use assert_cmd::Command;
+use assert_cmd::cargo::cargo_bin_cmd;
 use cudarc::driver::CudaDevice;
 use std::path::Path;
 
@@ -15,7 +15,7 @@ fn test_xlog_prob_exact_and_mc() {
     let exact_program = repo_root.join("examples/prob/01-wet-conditioning.xlog");
     let mc_program = repo_root.join("examples/prob/04-nonmonotone-mc.xlog");
 
-    let mut cmd = Command::cargo_bin("xlog").unwrap();
+    let mut cmd = cargo_bin_cmd!("xlog");
     cmd.args([
         "prob",
         exact_program.to_str().expect("valid path"),
@@ -24,7 +24,7 @@ fn test_xlog_prob_exact_and_mc() {
     ]);
     cmd.assert().success();
 
-    let mut cmd = Command::cargo_bin("xlog").unwrap();
+    let mut cmd = cargo_bin_cmd!("xlog");
     cmd.args([
         "prob",
         mc_program.to_str().expect("valid path"),
