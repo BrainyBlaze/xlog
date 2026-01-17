@@ -183,7 +183,9 @@ extern "C" __global__ void filter_compare_u64(
     mask[gid] = result ? 1 : 0;
 }
 
-/** Compare f32 column against constant */
+/** Compare f32 column against constant.
+ *  Eq/Ne use IEEE semantics. Lt/Le/Gt/Ge use total ordering.
+ */
 extern "C" __global__ void filter_compare_f32(
     const float* __restrict__ column,
     float constant,
@@ -199,10 +201,10 @@ extern "C" __global__ void filter_compare_f32(
     switch (op) {
         case OP_EQ: result = (val == constant); break;
         case OP_NE: result = (val != constant); break;
-        case OP_LT: result = (val < constant); break;
-        case OP_LE: result = (val <= constant); break;
-        case OP_GT: result = (val > constant); break;
-        case OP_GE: result = (val >= constant); break;
+        case OP_LT: result = (float_to_ordered_f32(val) < float_to_ordered_f32(constant)); break;
+        case OP_LE: result = (float_to_ordered_f32(val) <= float_to_ordered_f32(constant)); break;
+        case OP_GT: result = (float_to_ordered_f32(val) > float_to_ordered_f32(constant)); break;
+        case OP_GE: result = (float_to_ordered_f32(val) >= float_to_ordered_f32(constant)); break;
         default: result = false;
     }
     mask[gid] = result ? 1 : 0;
