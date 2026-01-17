@@ -13,3 +13,4 @@ pest_derive.workspace = true
 
 [dev-dependencies]
 xlog-cuda = { path = "../xlog-cuda" }
+xlog-gpu = { path = "../xlog-gpu" }

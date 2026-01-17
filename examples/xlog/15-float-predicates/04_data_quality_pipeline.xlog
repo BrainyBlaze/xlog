@@ -18,8 +18,15 @@ raw_measurement(102, 78.9).     // Normal (hot)
 raw_measurement(103, 23.1).     // Normal (cool)
 raw_measurement(104, 55.0).     // Normal
 raw_measurement(105, 12.8).     // Normal (cold)
-raw_measurement(106, 91.3).     // Normal (very hot)
+raw_measurement(106, 91.3).     // Normal (very hot - in range but close to max)
 raw_measurement(107, 67.4).     // Normal
+raw_measurement(108, 105.5).    // Outlier (over 100)
+raw_measurement(109, -5.0).     // Outlier (below 0)
+
+// Sensor 110 produces NaN via computation (simulating sensor error)
+pred nan_source(u32, f64, f64).
+nan_source(110, 0.0, 0.0).  // Will produce NaN
+raw_measurement(Id, V) :- nan_source(Id, A, B), V is A / B.
 
 // Step 1: Identify missing data (NaN values)
 // NaN != NaN under IEEE, so if V != V, it's NaN

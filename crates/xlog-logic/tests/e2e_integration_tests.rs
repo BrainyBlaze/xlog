@@ -1147,3 +1147,84 @@ fn test_float_predicate_f32_special_values() {
     assert!(!finite_ids.contains(&2), "+Inf is not finite");
     assert!(!finite_ids.contains(&3), "-Inf is not finite");
 }
+
+/// Test 6: Computed NaN/Inf via division
+///
+/// This test verifies that NaN and Inf computed via arithmetic operations
+/// (not loaded directly) still work correctly with float predicates.
+/// This mirrors the xlog CLI usage where NaN comes from 0.0/0.0.
+#[test]
+fn test_float_predicate_computed_nan_via_division() {
+    let provider = match create_test_executor() {
+        Some((_, p)) => p,
+        None => {
+            eprintln!("Skipping test: no CUDA device available");
+            return;
+        }
+    };
+
+    // Input data: (id, numerator, denominator)
+    // Division will compute: 0/0 = NaN, 1/0 = Inf, 10/1 = 10, 3/1 = 3
+    let source = r#"
+        pred input(u32, f64, f64).
+        pred result(u32, f64).
+        pred gt_five(u32, f64).
+
+        input(1, 0.0, 0.0).
+        input(2, 1.0, 0.0).
+        input(3, 10.0, 1.0).
+        input(4, 3.0, 1.0).
+
+        result(Id, V) :- input(Id, A, B), V is A / B.
+        gt_five(Id, V) :- result(Id, V), V > 5.0.
+
+        ?- result(Id, V).
+        ?- gt_five(Id, V).
+    "#;
+
+    // Use LogicProgram like the CLI does - it handles in-source facts
+    let program = xlog_gpu::logic::LogicProgram::compile(source).expect("Compilation failed");
+    let eval_result = program.evaluate(provider.clone(), std::collections::HashMap::new())
+        .expect("Evaluation failed");
+
+    // Extract result from queries
+    assert_eq!(eval_result.queries.len(), 2, "Expected 2 query results");
+
+    // Query 0: result(Id, V)
+    let result_query = &eval_result.queries[0];
+    let result_ids = read_buffer_u32(&provider, &result_query.buffer, 0);
+    let result_vals = read_buffer_f64(&provider, &result_query.buffer, 1);
+    println!("result ids: {:?}", result_ids);
+    println!("result vals: {:?}", result_vals);
+    assert_eq!(result_query.buffer.num_rows(), 4, "Expected 4 result rows");
+
+    // Verify NaN and Inf were computed correctly
+    let id_1_idx = result_ids.iter().position(|&x| x == 1).expect("id 1 not found");
+    let id_2_idx = result_ids.iter().position(|&x| x == 2).expect("id 2 not found");
+
+    assert!(result_vals[id_1_idx].is_nan(), "0.0/0.0 should be NaN");
+    assert!(result_vals[id_2_idx].is_infinite() && result_vals[id_2_idx] > 0.0, "1.0/0.0 should be +Inf");
+
+    // Verify NaN is normalized to positive NaN (for consistent total ordering)
+    let nan_bits = result_vals[id_1_idx].to_bits();
+    assert_eq!(
+        nan_bits & 0x8000000000000000,
+        0,
+        "Computed NaN should be positive (canonical form for total ordering)"
+    );
+
+    // Query 1: gt_five(Id, V)
+    // gt_five should include: (1, NaN), (2, Inf), (3, 10.0) but NOT (4, 3.0)
+    // Under total ordering: NaN > 5.0, Inf > 5.0, 10.0 > 5.0, 3.0 < 5.0
+    let gt_five_query = &eval_result.queries[1];
+    let gt_five_ids = read_buffer_u32(&provider, &gt_five_query.buffer, 0);
+    let gt_five_vals = read_buffer_f64(&provider, &gt_five_query.buffer, 1);
+    println!("gt_five ids: {:?}", gt_five_ids);
+    println!("gt_five vals: {:?}", gt_five_vals);
+
+    assert_eq!(gt_five_query.buffer.num_rows(), 3, "Expected 3 gt_five rows (NaN, Inf, 10.0)");
+    assert!(gt_five_ids.contains(&1), "NaN > 5.0 under total ordering");
+    assert!(gt_five_ids.contains(&2), "Inf > 5.0");
+    assert!(gt_five_ids.contains(&3), "10.0 > 5.0");
+    assert!(!gt_five_ids.contains(&4), "3.0 < 5.0");
+}

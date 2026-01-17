@@ -1883,6 +1883,7 @@ dependencies = [
  "pest_derive",
  "xlog-core",
  "xlog-cuda",
+ "xlog-gpu",
  "xlog-ir",
  "xlog-runtime",
  "xlog-stats",
