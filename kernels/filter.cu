@@ -554,6 +554,66 @@ extern "C" __global__ void filter_compare_f64_scan_phase1(
     }
 }
 
+/**
+ * Fused compare + scan phase1 for f32 filters.
+ */
+extern "C" __global__ void filter_compare_f32_scan_phase1(
+    const float* __restrict__ column,
+    float constant,
+    uint32_t num_rows,
+    uint8_t op,
+    uint8_t* __restrict__ mask,
+    uint32_t* __restrict__ prefix_sum,
+    uint32_t* __restrict__ block_sums
+) {
+    __shared__ uint32_t temp[BLOCK_SIZE];
+
+    uint32_t tid = threadIdx.x;
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+
+    uint32_t val = 0;
+    if (gid < num_rows) {
+        float col_val = column[gid];
+        bool result;
+        switch (op) {
+            case OP_EQ: result = (col_val == constant); break;
+            case OP_NE: result = (col_val != constant); break;
+            case OP_LT: result = (float_to_ordered_f32(col_val) < float_to_ordered_f32(constant)); break;
+            case OP_LE: result = (float_to_ordered_f32(col_val) <= float_to_ordered_f32(constant)); break;
+            case OP_GT: result = (float_to_ordered_f32(col_val) > float_to_ordered_f32(constant)); break;
+            case OP_GE: result = (float_to_ordered_f32(col_val) >= float_to_ordered_f32(constant)); break;
+            default: result = false;
+        }
+        uint8_t out = result ? 1 : 0;
+        mask[gid] = out;
+        val = (uint32_t)out;
+    }
+
+    temp[tid] = val;
+    __syncthreads();
+
+    for (uint32_t stride = 1; stride < BLOCK_SIZE; stride *= 2) {
+        uint32_t left_val = 0;
+        if (tid >= stride) {
+            left_val = temp[tid - stride];
+        }
+        __syncthreads();
+        temp[tid] += left_val;
+        __syncthreads();
+    }
+
+    uint32_t inclusive = temp[tid];
+    uint32_t exclusive = (tid == 0) ? 0 : temp[tid - 1];
+
+    if (gid < num_rows) {
+        prefix_sum[gid] = exclusive;
+    }
+
+    if (tid == BLOCK_SIZE - 1) {
+        block_sums[blockIdx.x] = inclusive;
+    }
+}
+
 /** Combine two masks with AND */
 extern "C" __global__ void mask_and(
     const uint8_t* __restrict__ a,
