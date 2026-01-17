@@ -339,7 +339,9 @@ extern "C" __global__ void filter_compare_u64_col(
     mask[gid] = result ? 1 : 0;
 }
 
-/** Compare f32 column against column */
+/** Compare f32 column against column.
+ *  Eq/Ne use IEEE semantics. Lt/Le/Gt/Ge use total ordering.
+ */
 extern "C" __global__ void filter_compare_f32_col(
     const float* __restrict__ left,
     const float* __restrict__ right,
@@ -356,10 +358,10 @@ extern "C" __global__ void filter_compare_f32_col(
     switch (op) {
         case OP_EQ: result = (lval == rval); break;
         case OP_NE: result = (lval != rval); break;
-        case OP_LT: result = (lval < rval); break;
-        case OP_LE: result = (lval <= rval); break;
-        case OP_GT: result = (lval > rval); break;
-        case OP_GE: result = (lval >= rval); break;
+        case OP_LT: result = (float_to_ordered_f32(lval) < float_to_ordered_f32(rval)); break;
+        case OP_LE: result = (float_to_ordered_f32(lval) <= float_to_ordered_f32(rval)); break;
+        case OP_GT: result = (float_to_ordered_f32(lval) > float_to_ordered_f32(rval)); break;
+        case OP_GE: result = (float_to_ordered_f32(lval) >= float_to_ordered_f32(rval)); break;
         default: result = false;
     }
     mask[gid] = result ? 1 : 0;
