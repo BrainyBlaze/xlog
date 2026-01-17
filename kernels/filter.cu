@@ -30,22 +30,26 @@
  *
  * IEEE 754 total order: -NaN < -Inf < ... < -0.0 < +0.0 < ... < +Inf < +NaN
  *
- * Bit manipulation trick:
- * - Negative floats: flip all bits (makes them sort before positives)
- * - Positive floats: flip sign bit only (preserves order)
+ * Matches Rust's f64::total_cmp() algorithm:
+ * - Negative floats: XOR with 0x7FFFFFFFFFFFFFFF (flip all except sign)
+ * - Positive floats: unchanged (XOR with 0)
+ * This works correctly with signed comparison.
  */
 __device__ __forceinline__ int64_t float_to_ordered_f64(double val) {
     int64_t bits = __double_as_longlong(val);
-    int64_t mask = (bits >> 63) | 0x8000000000000000LL;
+    // Arithmetic shift: -1 (all 1s) for negative, 0 for positive
+    // Unsigned shift >> 1 gives 0x7FFFFFFFFFFFFFFF or 0
+    int64_t mask = (int64_t)(((uint64_t)(bits >> 63)) >> 1);
     return bits ^ mask;
 }
 
 /**
  * Transform f32 to comparable i32 for total ordering.
+ * Same algorithm as f64 version.
  */
 __device__ __forceinline__ int32_t float_to_ordered_f32(float val) {
     int32_t bits = __float_as_int(val);
-    int32_t mask = (bits >> 31) | 0x80000000;
+    int32_t mask = (int32_t)(((uint32_t)(bits >> 31)) >> 1);
     return bits ^ mask;
 }
 

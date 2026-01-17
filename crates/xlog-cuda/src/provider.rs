@@ -532,6 +532,7 @@ impl CudaKernelProvider {
                     filter_kernels::FILTER_COMPARE_U8,
                     filter_kernels::FILTER_COMPARE_U32_SCAN_PHASE1,
                     filter_kernels::FILTER_COMPARE_F64_SCAN_PHASE1,
+                    filter_kernels::FILTER_COMPARE_F32_SCAN_PHASE1,
                     filter_kernels::FILTER_COMPARE_U32_COL,
                     filter_kernels::FILTER_COMPARE_I32_COL,
                     filter_kernels::FILTER_COMPARE_I64_COL,
