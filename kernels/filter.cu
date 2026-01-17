@@ -26,6 +26,30 @@
 #define BLOCK_SIZE 256
 
 /**
+ * Transform f64 to comparable i64 for total ordering.
+ *
+ * IEEE 754 total order: -NaN < -Inf < ... < -0.0 < +0.0 < ... < +Inf < +NaN
+ *
+ * Bit manipulation trick:
+ * - Negative floats: flip all bits (makes them sort before positives)
+ * - Positive floats: flip sign bit only (preserves order)
+ */
+__device__ __forceinline__ int64_t float_to_ordered_f64(double val) {
+    int64_t bits = __double_as_longlong(val);
+    int64_t mask = (bits >> 63) | 0x8000000000000000LL;
+    return bits ^ mask;
+}
+
+/**
+ * Transform f32 to comparable i32 for total ordering.
+ */
+__device__ __forceinline__ int32_t float_to_ordered_f32(float val) {
+    int32_t bits = __float_as_int(val);
+    int32_t mask = (bits >> 31) | 0x80000000;
+    return bits ^ mask;
+}
+
+/**
  * Compare i64 column against constant, output mask.
  * @param column Input column data
  * @param constant Value to compare against
