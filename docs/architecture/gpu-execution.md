@@ -47,6 +47,31 @@ Filter comparisons support all scalar types:
 - `f32`, `f64`
 - `bool`, `symbol`
 
+### Float Comparison Semantics
+
+Float comparisons (`f32`, `f64`) use hybrid semantics:
+
+| Operator | Semantics | `NaN == NaN` | `NaN > Inf` | `-0.0 < +0.0` |
+|----------|-----------|--------------|-------------|---------------|
+| `Eq`, `Ne` | IEEE 754 | `false` | N/A | N/A |
+| `Lt`, `Le`, `Gt`, `Ge` | Total Order | N/A | `true` | `true` |
+
+**IEEE 754 (equality)**: Standard IEEE behavior where `NaN` is not equal to anything, including itself.
+
+**Total ordering (relational)**: Uses IEEE 754 `totalOrder` predicate semantics:
+
+```
+-NaN < -Inf < -MAX < ... < -MIN > -0.0 < +0.0 < ... < +MIN < +MAX < +Inf < +NaN
+```
+
+This ordering:
+- Places negative `NaN` below all other values
+- Places positive `NaN` above all other values
+- Distinguishes `-0.0` from `+0.0` (unlike IEEE equality)
+- Matches Rust's `f64::total_cmp` behavior
+
+**Implementation**: Bit manipulation transforms floats to integers that sort correctly with signed comparison, avoiding branches for performance.
+
 ## GPU GroupBy Finalization
 
 The groupby pipeline is fully GPU-resident, eliminating host round-trips for boundary detection and key extraction.
