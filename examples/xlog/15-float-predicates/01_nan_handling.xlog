@@ -1,0 +1,36 @@
+// Float Predicates: NaN Handling
+//
+// Demonstrates how NaN (Not a Number) values behave in filter predicates.
+//
+// Key semantics:
+// - Equality (=, !=): Uses IEEE 754 - NaN is not equal to anything, including itself
+// - Ordering (<, <=, >, >=): Uses total ordering - NaN is greater than all other values
+//
+// Real-world use case: Sensor data with missing/failed readings represented as NaN
+
+pred sensor_reading(u32, f64).  // sensor_id, temperature
+pred valid_reading(u32, f64).   // readings that are not NaN
+pred high_temp(u32, f64).       // temperatures above threshold
+pred anomaly(u32, f64).         // unusually high values (including NaN!)
+
+// Sensor data - some sensors have failed readings (NaN)
+sensor_reading(1, 22.5).         // Normal
+sensor_reading(2, 0.0).          // Zero (valid)
+sensor_reading(3, 28.3).         // High
+sensor_reading(4, 19.1).         // Normal
+sensor_reading(5, 35.7).         // Very high
+
+// Filter out NaN: values that are "equal to themselves" are not NaN
+// Because NaN != NaN under IEEE semantics, this excludes NaN values
+valid_reading(Id, Temp) :- sensor_reading(Id, Temp), Temp = Temp.
+
+// High temperature: above 25 degrees
+// Under total ordering, NaN > 25.0 is TRUE, so NaN would be included!
+high_temp(Id, Temp) :- sensor_reading(Id, Temp), Temp > 25.0.
+
+// Anomaly detection: values above 30 but bounded (excludes infinity and NaN)
+anomaly(Id, Temp) :- sensor_reading(Id, Temp), Temp > 30.0, Temp < 1000.0.
+
+?- valid_reading(Id, Temp).
+?- high_temp(Id, Temp).
+?- anomaly(Id, Temp).

@@ -1,0 +1,38 @@
+// Float Predicates: Signed Zero Semantics
+//
+// Demonstrates the difference between -0.0 and +0.0 in predicates.
+//
+// Key semantics:
+// - Equality (=): -0.0 = +0.0 is TRUE (IEEE 754)
+// - Less than (<): -0.0 < +0.0 is TRUE (total ordering)
+//
+// Real-world use case: Physics simulations approaching zero from different directions
+
+pred velocity(u32, f64).          // object_id, velocity (can approach 0 from +/-)
+pred stationary(u32).             // objects at rest (velocity = 0)
+pred approaching_from_below(u32). // objects with negative velocity or -0.0
+pred strictly_positive(u32).      // objects moving in positive direction
+
+// Object velocities - some approach zero from positive, some from negative
+velocity(1, 0.5).      // Moving forward
+velocity(2, 0.0).      // At rest (positive zero)
+velocity(3, 0.001).    // Barely moving forward
+velocity(4, 0.0).      // At rest (positive zero)
+velocity(5, -0.5).     // Moving backward
+velocity(6, -0.001).   // Barely moving backward
+
+// Stationary: velocity equals zero (both -0.0 and +0.0 match under IEEE equality)
+stationary(Id) :- velocity(Id, V), V = 0.0.
+
+// Approaching from below: velocity < +0.0
+// Under total ordering, -0.0 < +0.0, so -0.0 would be included
+// Also includes all negative velocities
+approaching_from_below(Id) :- velocity(Id, V), V < 0.0.
+
+// Strictly positive: velocity > +0.0
+// Under total ordering, this excludes both -0.0 and +0.0
+strictly_positive(Id) :- velocity(Id, V), V > 0.0.
+
+?- stationary(Id).
+?- approaching_from_below(Id).
+?- strictly_positive(Id).
