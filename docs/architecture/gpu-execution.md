@@ -61,7 +61,7 @@ Float comparisons (`f32`, `f64`) use hybrid semantics:
 **Total ordering (relational)**: Uses IEEE 754 `totalOrder` predicate semantics:
 
 ```
--NaN < -Inf < -MAX < ... < -MIN > -0.0 < +0.0 < ... < +MIN < +MAX < +Inf < +NaN
+-NaN < -Inf < -MAX < ... < -MIN < -0.0 < +0.0 < ... < +MIN < +MAX < +Inf < +NaN
 ```
 
 This ordering:
