@@ -8,6 +8,7 @@ use arrow::util::pretty::pretty_format_batches;
 use xlog_core::{symbol, MemoryBudget, Result, XlogError};
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 use xlog_gpu::logic::LogicProgram;
+use xlog_logic::compile::load_modules;
 use xlog_prob::exact::{ExactDdnnfProgram, GpuConfig};
 use xlog_prob::mc::{McEvalConfig, McProgram};
 
@@ -131,6 +132,13 @@ fn run_deterministic(args: RunArgs) -> Result<()> {
         ))
     })?;
 
+    // Validate module imports if any search paths are provided
+    if !args.module_path.is_empty() {
+        let _ = load_modules(&args.source, args.module_path.clone()).map_err(|e| {
+            XlogError::Execution(format!("Module resolution failed: {}", e))
+        })?;
+    }
+
     let program = LogicProgram::compile(&source)?;
     let mut inputs = HashMap::new();
     for (name, path) in parse_inputs(&args.input)? {
@@ -176,6 +184,13 @@ fn run_probabilistic(args: ProbArgs) -> Result<()> {
             e
         ))
     })?;
+
+    // Validate module imports if any search paths are provided
+    if !args.module_path.is_empty() {
+        let _ = load_modules(&args.source, args.module_path.clone()).map_err(|e| {
+            XlogError::Execution(format!("Module resolution failed: {}", e))
+        })?;
+    }
 
     let config = GpuConfig {
         device_ordinal: args.device,
