@@ -45,10 +45,7 @@ fn create_test_executor() -> Option<(Executor, Arc<CudaKernelProvider>)> {
 }
 
 /// Create a CudaBuffer with 2-column U32 data (for edge relations)
-fn create_edge_buffer(
-    provider: &CudaKernelProvider,
-    edges: &[(u32, u32)],
-) -> CudaBuffer {
+fn create_edge_buffer(provider: &CudaKernelProvider, edges: &[(u32, u32)]) -> CudaBuffer {
     let schema = Schema::new(vec![
         ("c0".to_string(), ScalarType::U32),
         ("c1".to_string(), ScalarType::U32),
@@ -60,23 +57,37 @@ fn create_edge_buffer(
         return CudaBuffer::from_columns(vec![col0.into(), col1.into()], 0, schema);
     }
 
-    let col0_bytes: Vec<u8> = edges.iter().flat_map(|(from, _)| from.to_le_bytes()).collect();
+    let col0_bytes: Vec<u8> = edges
+        .iter()
+        .flat_map(|(from, _)| from.to_le_bytes())
+        .collect();
     let col1_bytes: Vec<u8> = edges.iter().flat_map(|(_, to)| to.to_le_bytes()).collect();
 
-    let mut col0 = provider.memory().alloc::<u8>(col0_bytes.len()).expect("alloc");
-    let mut col1 = provider.memory().alloc::<u8>(col1_bytes.len()).expect("alloc");
+    let mut col0 = provider
+        .memory()
+        .alloc::<u8>(col0_bytes.len())
+        .expect("alloc");
+    let mut col1 = provider
+        .memory()
+        .alloc::<u8>(col1_bytes.len())
+        .expect("alloc");
 
-    provider.device().inner().htod_sync_copy_into(&col0_bytes, &mut col0).expect("htod");
-    provider.device().inner().htod_sync_copy_into(&col1_bytes, &mut col1).expect("htod");
+    provider
+        .device()
+        .inner()
+        .htod_sync_copy_into(&col0_bytes, &mut col0)
+        .expect("htod");
+    provider
+        .device()
+        .inner()
+        .htod_sync_copy_into(&col1_bytes, &mut col1)
+        .expect("htod");
 
     CudaBuffer::from_columns(vec![col0.into(), col1.into()], edges.len() as u64, schema)
 }
 
 /// Create a CudaBuffer with 1-column U32 data (for node relations)
-fn create_node_buffer(
-    provider: &CudaKernelProvider,
-    nodes: &[u32],
-) -> CudaBuffer {
+fn create_node_buffer(provider: &CudaKernelProvider, nodes: &[u32]) -> CudaBuffer {
     let schema = Schema::new(vec![("c0".to_string(), ScalarType::U32)]);
 
     if nodes.is_empty() {
@@ -85,17 +96,21 @@ fn create_node_buffer(
     }
 
     let col_bytes: Vec<u8> = nodes.iter().flat_map(|n| n.to_le_bytes()).collect();
-    let mut col = provider.memory().alloc::<u8>(col_bytes.len()).expect("alloc");
-    provider.device().inner().htod_sync_copy_into(&col_bytes, &mut col).expect("htod");
+    let mut col = provider
+        .memory()
+        .alloc::<u8>(col_bytes.len())
+        .expect("alloc");
+    provider
+        .device()
+        .inner()
+        .htod_sync_copy_into(&col_bytes, &mut col)
+        .expect("htod");
 
     CudaBuffer::from_columns(vec![col.into()], nodes.len() as u64, schema)
 }
 
 /// Create a CudaBuffer with 3-column U32 data
-fn create_triple_buffer(
-    provider: &CudaKernelProvider,
-    rows: &[(u32, u32, u32)],
-) -> CudaBuffer {
+fn create_triple_buffer(provider: &CudaKernelProvider, rows: &[(u32, u32, u32)]) -> CudaBuffer {
     let schema = Schema::new(vec![
         ("c0".to_string(), ScalarType::U32),
         ("c1".to_string(), ScalarType::U32),
@@ -113,13 +128,34 @@ fn create_triple_buffer(
     let col1_bytes: Vec<u8> = rows.iter().flat_map(|(_, b, _)| b.to_le_bytes()).collect();
     let col2_bytes: Vec<u8> = rows.iter().flat_map(|(_, _, c)| c.to_le_bytes()).collect();
 
-    let mut col0 = provider.memory().alloc::<u8>(col0_bytes.len()).expect("alloc");
-    let mut col1 = provider.memory().alloc::<u8>(col1_bytes.len()).expect("alloc");
-    let mut col2 = provider.memory().alloc::<u8>(col2_bytes.len()).expect("alloc");
+    let mut col0 = provider
+        .memory()
+        .alloc::<u8>(col0_bytes.len())
+        .expect("alloc");
+    let mut col1 = provider
+        .memory()
+        .alloc::<u8>(col1_bytes.len())
+        .expect("alloc");
+    let mut col2 = provider
+        .memory()
+        .alloc::<u8>(col2_bytes.len())
+        .expect("alloc");
 
-    provider.device().inner().htod_sync_copy_into(&col0_bytes, &mut col0).expect("htod");
-    provider.device().inner().htod_sync_copy_into(&col1_bytes, &mut col1).expect("htod");
-    provider.device().inner().htod_sync_copy_into(&col2_bytes, &mut col2).expect("htod");
+    provider
+        .device()
+        .inner()
+        .htod_sync_copy_into(&col0_bytes, &mut col0)
+        .expect("htod");
+    provider
+        .device()
+        .inner()
+        .htod_sync_copy_into(&col1_bytes, &mut col1)
+        .expect("htod");
+    provider
+        .device()
+        .inner()
+        .htod_sync_copy_into(&col2_bytes, &mut col2)
+        .expect("htod");
 
     CudaBuffer::from_columns(
         vec![col0.into(), col1.into(), col2.into()],
@@ -224,7 +260,10 @@ fn test_transitive_closure() {
     let _result = executor.execute_plan(&plan).expect("TC execution failed");
 
     // Get the reach relation from the store
-    let reach = executor.store().get("reach").expect("reach relation not found");
+    let reach = executor
+        .store()
+        .get("reach")
+        .expect("reach relation not found");
     let pairs = read_buffer_pairs(&provider, reach);
 
     // Filter to get reach(1, N) results
@@ -235,10 +274,27 @@ fn test_transitive_closure() {
         .collect();
 
     // Should reach 2, 3, and 4 from node 1
-    assert!(reachable_from_1.contains(&2), "Should reach 2 from 1, got {:?}", reachable_from_1);
-    assert!(reachable_from_1.contains(&3), "Should reach 3 from 1, got {:?}", reachable_from_1);
-    assert!(reachable_from_1.contains(&4), "Should reach 4 from 1, got {:?}", reachable_from_1);
-    assert_eq!(reachable_from_1.len(), 3, "Should have exactly 3 reachable nodes, got {:?}", reachable_from_1);
+    assert!(
+        reachable_from_1.contains(&2),
+        "Should reach 2 from 1, got {:?}",
+        reachable_from_1
+    );
+    assert!(
+        reachable_from_1.contains(&3),
+        "Should reach 3 from 1, got {:?}",
+        reachable_from_1
+    );
+    assert!(
+        reachable_from_1.contains(&4),
+        "Should reach 4 from 1, got {:?}",
+        reachable_from_1
+    );
+    assert_eq!(
+        reachable_from_1.len(),
+        3,
+        "Should have exactly 3 reachable nodes, got {:?}",
+        reachable_from_1
+    );
 }
 
 /// Test stratified negation
@@ -286,21 +342,36 @@ fn test_stratified_negation() {
     let edge_buffer = create_edge_buffer(&provider, &[(1, 2)]);
 
     // Setup executor with facts
-    setup_executor_with_facts(&mut executor, &compiler, vec![
-        ("node", node_buffer),
-        ("edge", edge_buffer),
-    ]);
+    setup_executor_with_facts(
+        &mut executor,
+        &compiler,
+        vec![("node", node_buffer), ("edge", edge_buffer)],
+    );
 
     // Execute the plan
-    let _result = executor.execute_plan(&plan).expect("Negation execution failed");
+    let _result = executor
+        .execute_plan(&plan)
+        .expect("Negation execution failed");
 
     // Get the isolated relation from the store
-    let isolated = executor.store().get("isolated").expect("isolated relation not found");
+    let isolated = executor
+        .store()
+        .get("isolated")
+        .expect("isolated relation not found");
     let nodes = read_buffer_u32(&provider, isolated, 0);
 
     // Only node 3 should be isolated (1 and 2 are connected by edge(1,2))
-    assert_eq!(nodes.len(), 1, "Should have exactly 1 isolated node, got {:?}", nodes);
-    assert!(nodes.contains(&3), "Node 3 should be isolated, got {:?}", nodes);
+    assert_eq!(
+        nodes.len(),
+        1,
+        "Should have exactly 1 isolated node, got {:?}",
+        nodes
+    );
+    assert!(
+        nodes.contains(&3),
+        "Node 3 should be isolated, got {:?}",
+        nodes
+    );
 }
 
 /// Test aggregation (count)
@@ -344,7 +415,9 @@ fn test_aggregates() {
     setup_executor_with_facts(&mut executor, &compiler, vec![("edge", edge_buffer)]);
 
     // Execute the plan
-    executor.execute_plan(&plan).expect("Aggregation execution failed");
+    executor
+        .execute_plan(&plan)
+        .expect("Aggregation execution failed");
 
     // Verify the out_degree relation
     let out_degree = executor
@@ -393,12 +466,8 @@ fn test_aggregates_multi_key_sum() {
     let mut compiler = Compiler::new();
     let plan = compiler.compile(source).expect("Compilation failed");
 
-    let sales_buf = create_triple_buffer(&provider, &[
-        (1, 10, 5),
-        (1, 10, 7),
-        (1, 11, 3),
-        (2, 10, 2),
-    ]);
+    let sales_buf =
+        create_triple_buffer(&provider, &[(1, 10, 5), (1, 10, 7), (1, 11, 3), (2, 10, 2)]);
     setup_executor_with_facts(&mut executor, &compiler, vec![("sales", sales_buf)]);
 
     executor.execute_plan(&plan).expect("Execution failed");
@@ -409,7 +478,9 @@ fn test_aggregates_multi_key_sum() {
         .expect("sales_by_cat_region not found");
 
     let cats = provider.download_column_u32(out, 0).expect("download cat");
-    let regions = provider.download_column_u32(out, 1).expect("download region");
+    let regions = provider
+        .download_column_u32(out, 1)
+        .expect("download region");
     let sums = provider.download_column_u64(out, 2).expect("download sum");
 
     let mut rows: Vec<(u32, u32, u64)> = cats
@@ -461,7 +532,10 @@ fn test_simple_scan() {
 
     let _result = executor.execute_plan(&plan).expect("Execution failed");
 
-    let result = executor.store().get("result").expect("result relation not found");
+    let result = executor
+        .store()
+        .get("result")
+        .expect("result relation not found");
     let pairs = read_buffer_pairs(&provider, result);
 
     assert_eq!(pairs.len(), 2, "Should have 2 edges");
@@ -508,14 +582,30 @@ fn test_simple_join() {
     // Execute the plan
     let _result = executor.execute_plan(&plan).expect("Join execution failed");
 
-    let path2 = executor.store().get("path2").expect("path2 relation not found");
+    let path2 = executor
+        .store()
+        .get("path2")
+        .expect("path2 relation not found");
     let pairs = read_buffer_pairs(&provider, path2);
 
     // From edge(1,2), edge(2,3) -> path2(1, 3)
     // From edge(2,3), edge(3,4) -> path2(2, 4)
-    assert_eq!(pairs.len(), 2, "Should have 2 length-2 paths, got {:?}", pairs);
-    assert!(pairs.contains(&(1, 3)), "Should have path2(1, 3), got {:?}", pairs);
-    assert!(pairs.contains(&(2, 4)), "Should have path2(2, 4), got {:?}", pairs);
+    assert_eq!(
+        pairs.len(),
+        2,
+        "Should have 2 length-2 paths, got {:?}",
+        pairs
+    );
+    assert!(
+        pairs.contains(&(1, 3)),
+        "Should have path2(1, 3), got {:?}",
+        pairs
+    );
+    assert!(
+        pairs.contains(&(2, 4)),
+        "Should have path2(2, 4), got {:?}",
+        pairs
+    );
 }
 
 /// Test compilation and execution with filtering
@@ -550,12 +640,28 @@ fn test_constant_filter() {
 
     let _result = executor.execute_plan(&plan).expect("Execution failed");
 
-    let neighbor = executor.store().get("neighbor").expect("neighbor relation not found");
+    let neighbor = executor
+        .store()
+        .get("neighbor")
+        .expect("neighbor relation not found");
     let nodes = read_buffer_u32(&provider, neighbor, 0);
 
-    assert_eq!(nodes.len(), 2, "Node 1 should have 2 neighbors, got {:?}", nodes);
-    assert!(nodes.contains(&2), "2 should be a neighbor, got {:?}", nodes);
-    assert!(nodes.contains(&3), "3 should be a neighbor, got {:?}", nodes);
+    assert_eq!(
+        nodes.len(),
+        2,
+        "Node 1 should have 2 neighbors, got {:?}",
+        nodes
+    );
+    assert!(
+        nodes.contains(&2),
+        "2 should be a neighbor, got {:?}",
+        nodes
+    );
+    assert!(
+        nodes.contains(&3),
+        "3 should be a neighbor, got {:?}",
+        nodes
+    );
 }
 
 // =============================================================================
@@ -606,7 +712,9 @@ fn test_aggregation_compiles() {
     "#;
 
     let mut compiler = Compiler::new();
-    let plan = compiler.compile(source).expect("Aggregation should compile");
+    let plan = compiler
+        .compile(source)
+        .expect("Aggregation should compile");
     assert!(!plan.sccs.is_empty(), "Aggregation should have SCCs");
 }
 
@@ -677,7 +785,10 @@ fn test_xlog_engine_workflow() {
     } else {
         // Results might be stored under a different name
         let names: Vec<&str> = executor.store().names().collect();
-        eprintln!("Note: copy relation not found directly. Store contents: {:?}", names);
+        eprintln!(
+            "Note: copy relation not found directly. Store contents: {:?}",
+            names
+        );
     }
 }
 
@@ -692,10 +803,7 @@ fn test_xlog_engine_workflow() {
 // Total ordering: -NaN < -Inf < ... < -0.0 < +0.0 < ... < +Inf < +NaN
 
 /// Create a CudaBuffer with (u32, f64) data for sensor-like relations
-fn create_sensor_buffer_f64(
-    provider: &CudaKernelProvider,
-    data: &[(u32, f64)],
-) -> CudaBuffer {
+fn create_sensor_buffer_f64(provider: &CudaKernelProvider, data: &[(u32, f64)]) -> CudaBuffer {
     let schema = Schema::new(vec![
         ("c0".to_string(), ScalarType::U32),
         ("c1".to_string(), ScalarType::F64),
@@ -710,20 +818,31 @@ fn create_sensor_buffer_f64(
     let col0_bytes: Vec<u8> = data.iter().flat_map(|(id, _)| id.to_le_bytes()).collect();
     let col1_bytes: Vec<u8> = data.iter().flat_map(|(_, val)| val.to_le_bytes()).collect();
 
-    let mut col0 = provider.memory().alloc::<u8>(col0_bytes.len()).expect("alloc");
-    let mut col1 = provider.memory().alloc::<u8>(col1_bytes.len()).expect("alloc");
+    let mut col0 = provider
+        .memory()
+        .alloc::<u8>(col0_bytes.len())
+        .expect("alloc");
+    let mut col1 = provider
+        .memory()
+        .alloc::<u8>(col1_bytes.len())
+        .expect("alloc");
 
-    provider.device().inner().htod_sync_copy_into(&col0_bytes, &mut col0).expect("htod");
-    provider.device().inner().htod_sync_copy_into(&col1_bytes, &mut col1).expect("htod");
+    provider
+        .device()
+        .inner()
+        .htod_sync_copy_into(&col0_bytes, &mut col0)
+        .expect("htod");
+    provider
+        .device()
+        .inner()
+        .htod_sync_copy_into(&col1_bytes, &mut col1)
+        .expect("htod");
 
     CudaBuffer::from_columns(vec![col0.into(), col1.into()], data.len() as u64, schema)
 }
 
 /// Create a CudaBuffer with (u32, f32) data
-fn create_sensor_buffer_f32(
-    provider: &CudaKernelProvider,
-    data: &[(u32, f32)],
-) -> CudaBuffer {
+fn create_sensor_buffer_f32(provider: &CudaKernelProvider, data: &[(u32, f32)]) -> CudaBuffer {
     let schema = Schema::new(vec![
         ("c0".to_string(), ScalarType::U32),
         ("c1".to_string(), ScalarType::F32),
@@ -738,11 +857,25 @@ fn create_sensor_buffer_f32(
     let col0_bytes: Vec<u8> = data.iter().flat_map(|(id, _)| id.to_le_bytes()).collect();
     let col1_bytes: Vec<u8> = data.iter().flat_map(|(_, val)| val.to_le_bytes()).collect();
 
-    let mut col0 = provider.memory().alloc::<u8>(col0_bytes.len()).expect("alloc");
-    let mut col1 = provider.memory().alloc::<u8>(col1_bytes.len()).expect("alloc");
+    let mut col0 = provider
+        .memory()
+        .alloc::<u8>(col0_bytes.len())
+        .expect("alloc");
+    let mut col1 = provider
+        .memory()
+        .alloc::<u8>(col1_bytes.len())
+        .expect("alloc");
 
-    provider.device().inner().htod_sync_copy_into(&col0_bytes, &mut col0).expect("htod");
-    provider.device().inner().htod_sync_copy_into(&col1_bytes, &mut col1).expect("htod");
+    provider
+        .device()
+        .inner()
+        .htod_sync_copy_into(&col0_bytes, &mut col0)
+        .expect("htod");
+    provider
+        .device()
+        .inner()
+        .htod_sync_copy_into(&col1_bytes, &mut col1)
+        .expect("htod");
 
     CudaBuffer::from_columns(vec![col0.into(), col1.into()], data.len() as u64, schema)
 }
@@ -787,13 +920,13 @@ fn test_float_predicate_sensor_data_with_nan() {
 
     // Sensor data: some valid readings, some NaN (missing)
     let sensor_data: Vec<(u32, f64)> = vec![
-        (1, 22.5),           // Normal reading
-        (2, f64::NAN),       // Missing reading
-        (3, 28.3),           // High reading
-        (4, 19.1),           // Normal reading
-        (5, f64::NAN),       // Missing reading
-        (6, 31.7),           // High reading
-        (7, f64::INFINITY),  // Overflow reading
+        (1, 22.5),          // Normal reading
+        (2, f64::NAN),      // Missing reading
+        (3, 28.3),          // High reading
+        (4, 19.1),          // Normal reading
+        (5, f64::NAN),      // Missing reading
+        (6, 31.7),          // High reading
+        (7, f64::INFINITY), // Overflow reading
     ];
 
     let source = r#"
@@ -819,27 +952,55 @@ fn test_float_predicate_sensor_data_with_nan() {
 
     // high_temp should include: 3 (28.3), 6 (31.7), 7 (Inf), 2 (NaN), 5 (NaN)
     // Because under total ordering, NaN > 25.0 and Inf > 25.0
-    let high_temp = executor.store().get("high_temp").expect("high_temp not found");
+    let high_temp = executor
+        .store()
+        .get("high_temp")
+        .expect("high_temp not found");
     let high_ids = read_buffer_u32(&provider, high_temp, 0);
     println!("high_temp ids: {:?}", high_ids);
 
     // Should have 5 results: sensors 2, 3, 5, 6, 7
-    assert_eq!(high_ids.len(), 5, "Expected 5 high temps (including NaN and Inf), got {:?}", high_ids);
+    assert_eq!(
+        high_ids.len(),
+        5,
+        "Expected 5 high temps (including NaN and Inf), got {:?}",
+        high_ids
+    );
     assert!(high_ids.contains(&3), "Sensor 3 (28.3) should be high");
     assert!(high_ids.contains(&6), "Sensor 6 (31.7) should be high");
     assert!(high_ids.contains(&7), "Sensor 7 (Inf) should be high");
-    assert!(high_ids.contains(&2), "Sensor 2 (NaN) should be > 25.0 under total ordering");
-    assert!(high_ids.contains(&5), "Sensor 5 (NaN) should be > 25.0 under total ordering");
+    assert!(
+        high_ids.contains(&2),
+        "Sensor 2 (NaN) should be > 25.0 under total ordering"
+    );
+    assert!(
+        high_ids.contains(&5),
+        "Sensor 5 (NaN) should be > 25.0 under total ordering"
+    );
 
     // valid_high should include only: 3 (28.3), 6 (31.7)
     // Because Inf and NaN are NOT < 100000.0
-    let valid_high = executor.store().get("valid_high").expect("valid_high not found");
+    let valid_high = executor
+        .store()
+        .get("valid_high")
+        .expect("valid_high not found");
     let valid_ids = read_buffer_u32(&provider, valid_high, 0);
     println!("valid_high ids: {:?}", valid_ids);
 
-    assert_eq!(valid_ids.len(), 2, "Expected 2 valid high temps, got {:?}", valid_ids);
-    assert!(valid_ids.contains(&3), "Sensor 3 (28.3) should be valid high");
-    assert!(valid_ids.contains(&6), "Sensor 6 (31.7) should be valid high");
+    assert_eq!(
+        valid_ids.len(),
+        2,
+        "Expected 2 valid high temps, got {:?}",
+        valid_ids
+    );
+    assert!(
+        valid_ids.contains(&3),
+        "Sensor 3 (28.3) should be valid high"
+    );
+    assert!(
+        valid_ids.contains(&6),
+        "Sensor 6 (31.7) should be valid high"
+    );
 }
 
 /// Test 2: Financial data with infinity (division by zero, overflow)
@@ -862,12 +1023,12 @@ fn test_float_predicate_financial_infinity() {
 
     // Financial ratios: some normal, some infinite (division by zero)
     let ratio_data: Vec<(u32, f64)> = vec![
-        (1, 1.5),              // Normal ratio
-        (2, f64::INFINITY),    // Division by zero (positive)
-        (3, -0.5),             // Negative ratio
+        (1, 1.5),               // Normal ratio
+        (2, f64::INFINITY),     // Division by zero (positive)
+        (3, -0.5),              // Negative ratio
         (4, f64::NEG_INFINITY), // Division by zero (negative)
-        (5, 2.0),              // Normal ratio
-        (6, 0.0),              // Zero ratio
+        (5, 2.0),               // Normal ratio
+        (6, 0.0),               // Zero ratio
     ];
 
     let source = r#"
@@ -897,16 +1058,32 @@ fn test_float_predicate_financial_infinity() {
     executor.execute_plan(&plan).expect("Execution failed");
 
     // positive: 1 (1.5), 2 (+Inf), 5 (2.0)
-    let positive = executor.store().get("positive").expect("positive not found");
+    let positive = executor
+        .store()
+        .get("positive")
+        .expect("positive not found");
     let pos_ids = read_buffer_u32(&provider, positive, 0);
     println!("positive ids: {:?}", pos_ids);
-    assert_eq!(pos_ids.len(), 3, "Expected 3 positive ratios, got {:?}", pos_ids);
+    assert_eq!(
+        pos_ids.len(),
+        3,
+        "Expected 3 positive ratios, got {:?}",
+        pos_ids
+    );
 
     // finite_positive: 1 (1.5), 5 (2.0) - excludes Inf
-    let finite_pos = executor.store().get("finite_positive").expect("finite_positive not found");
+    let finite_pos = executor
+        .store()
+        .get("finite_positive")
+        .expect("finite_positive not found");
     let finite_ids = read_buffer_u32(&provider, finite_pos, 0);
     println!("finite_positive ids: {:?}", finite_ids);
-    assert_eq!(finite_ids.len(), 2, "Expected 2 finite positive ratios, got {:?}", finite_ids);
+    assert_eq!(
+        finite_ids.len(),
+        2,
+        "Expected 2 finite positive ratios, got {:?}",
+        finite_ids
+    );
     assert!(finite_ids.contains(&1));
     assert!(finite_ids.contains(&5));
 
@@ -914,7 +1091,12 @@ fn test_float_predicate_financial_infinity() {
     let extreme = executor.store().get("extreme").expect("extreme not found");
     let extreme_ids = read_buffer_u32(&provider, extreme, 0);
     println!("extreme ids: {:?}", extreme_ids);
-    assert_eq!(extreme_ids.len(), 2, "Expected 2 extreme ratios, got {:?}", extreme_ids);
+    assert_eq!(
+        extreme_ids.len(),
+        2,
+        "Expected 2 extreme ratios, got {:?}",
+        extreme_ids
+    );
     assert!(extreme_ids.contains(&2), "+Inf should be extreme");
     assert!(extreme_ids.contains(&4), "-Inf should be extreme");
 }
@@ -970,19 +1152,38 @@ fn test_float_predicate_signed_zero() {
 
     // below_zero: 1 (-0.0), 3 (-0.0), 6 (-0.001)
     // Under total ordering, -0.0 < +0.0, so -0.0 is "below zero"
-    let below = executor.store().get("below_zero").expect("below_zero not found");
+    let below = executor
+        .store()
+        .get("below_zero")
+        .expect("below_zero not found");
     let below_ids = read_buffer_u32(&provider, below, 0);
     println!("below_zero ids: {:?}", below_ids);
-    assert_eq!(below_ids.len(), 3, "Expected 3 below zero (including -0.0), got {:?}", below_ids);
-    assert!(below_ids.contains(&1), "-0.0 should be < +0.0 under total ordering");
-    assert!(below_ids.contains(&3), "-0.0 should be < +0.0 under total ordering");
+    assert_eq!(
+        below_ids.len(),
+        3,
+        "Expected 3 below zero (including -0.0), got {:?}",
+        below_ids
+    );
+    assert!(
+        below_ids.contains(&1),
+        "-0.0 should be < +0.0 under total ordering"
+    );
+    assert!(
+        below_ids.contains(&3),
+        "-0.0 should be < +0.0 under total ordering"
+    );
     assert!(below_ids.contains(&6), "-0.001 should be < 0.0");
 
     // at_zero: 1, 2, 3, 4 (both -0.0 and +0.0 are equal under IEEE)
     let at_zero = executor.store().get("at_zero").expect("at_zero not found");
     let zero_ids = read_buffer_u32(&provider, at_zero, 0);
     println!("at_zero ids: {:?}", zero_ids);
-    assert_eq!(zero_ids.len(), 4, "Expected 4 at zero (both -0.0 and +0.0), got {:?}", zero_ids);
+    assert_eq!(
+        zero_ids.len(),
+        4,
+        "Expected 4 at zero (both -0.0 and +0.0), got {:?}",
+        zero_ids
+    );
 }
 
 /// Test 4: Complex multi-predicate filter with mixed operators
@@ -1001,15 +1202,15 @@ fn test_float_predicate_complex_classification() {
 
     // Test data covering all special cases
     let data: Vec<(u32, f64)> = vec![
-        (1, f64::NAN),          // NaN
-        (2, f64::INFINITY),     // +Inf
-        (3, f64::NEG_INFINITY), // -Inf
-        (4, -0.0),              // -0.0
-        (5, 0.0),               // +0.0
-        (6, 1.0),               // Normal positive
-        (7, -1.0),              // Normal negative
-        (8, f64::MAX),          // Max finite
-        (9, f64::MIN),          // Min finite (most negative)
+        (1, f64::NAN),           // NaN
+        (2, f64::INFINITY),      // +Inf
+        (3, f64::NEG_INFINITY),  // -Inf
+        (4, -0.0),               // -0.0
+        (5, 0.0),                // +0.0
+        (6, 1.0),                // Normal positive
+        (7, -1.0),               // Normal negative
+        (8, f64::MAX),           // Max finite
+        (9, f64::MIN),           // Min finite (most negative)
         (10, f64::MIN_POSITIVE), // Smallest positive
     ];
 
@@ -1058,16 +1259,25 @@ fn test_float_predicate_complex_classification() {
     let special = executor.store().get("special").expect("special not found");
     let special_ids = read_buffer_u32(&provider, special, 0);
     println!("special ids: {:?}", special_ids);
-    assert!(special_ids.contains(&1), "NaN should be special (> MAX under total ordering)");
+    assert!(
+        special_ids.contains(&1),
+        "NaN should be special (> MAX under total ordering)"
+    );
     assert!(special_ids.contains(&2), "+Inf should be special");
     assert!(special_ids.contains(&3), "-Inf should be special");
 
     // Check positive_finite
-    let pos_finite = executor.store().get("positive_finite").expect("positive_finite not found");
+    let pos_finite = executor
+        .store()
+        .get("positive_finite")
+        .expect("positive_finite not found");
     let pf_ids = read_buffer_u32(&provider, pos_finite, 0);
     println!("positive_finite ids: {:?}", pf_ids);
     assert!(pf_ids.contains(&6), "1.0 should be positive finite");
-    assert!(pf_ids.contains(&10), "MIN_POSITIVE should be positive finite");
+    assert!(
+        pf_ids.contains(&10),
+        "MIN_POSITIVE should be positive finite"
+    );
     assert!(!pf_ids.contains(&2), "+Inf should not be positive finite");
     assert!(!pf_ids.contains(&1), "NaN should not be positive finite");
 
@@ -1075,7 +1285,10 @@ fn test_float_predicate_complex_classification() {
     // Note: -0.0 is NOT >= +0.0 under total ordering for Ge!
     // Actually wait - let me reconsider. -0.0 >= +0.0:
     // Under total ordering, -0.0 < +0.0, so -0.0 >= +0.0 is FALSE
-    let unit = executor.store().get("in_unit_interval").expect("in_unit_interval not found");
+    let unit = executor
+        .store()
+        .get("in_unit_interval")
+        .expect("in_unit_interval not found");
     let unit_ids = read_buffer_u32(&provider, unit, 0);
     println!("in_unit_interval ids: {:?}", unit_ids);
     assert!(unit_ids.contains(&5), "+0.0 should be in [0,1]");
@@ -1128,7 +1341,10 @@ fn test_float_predicate_f32_special_values() {
     executor.execute_plan(&plan).expect("Execution failed");
 
     // above_zero: 1 (NaN), 2 (+Inf), 6 (1.0)
-    let above = executor.store().get("above_zero").expect("above_zero not found");
+    let above = executor
+        .store()
+        .get("above_zero")
+        .expect("above_zero not found");
     let above_ids = read_buffer_u32(&provider, above, 0);
     println!("f32 above_zero ids: {:?}", above_ids);
     assert_eq!(above_ids.len(), 3, "Expected 3 above zero for f32");
@@ -1184,7 +1400,8 @@ fn test_float_predicate_computed_nan_via_division() {
 
     // Use LogicProgram like the CLI does - it handles in-source facts
     let program = xlog_gpu::logic::LogicProgram::compile(source).expect("Compilation failed");
-    let eval_result = program.evaluate(provider.clone(), std::collections::HashMap::new())
+    let eval_result = program
+        .evaluate(provider.clone(), std::collections::HashMap::new())
         .expect("Evaluation failed");
 
     // Extract result from queries
@@ -1199,11 +1416,20 @@ fn test_float_predicate_computed_nan_via_division() {
     assert_eq!(result_query.buffer.num_rows(), 4, "Expected 4 result rows");
 
     // Verify NaN and Inf were computed correctly
-    let id_1_idx = result_ids.iter().position(|&x| x == 1).expect("id 1 not found");
-    let id_2_idx = result_ids.iter().position(|&x| x == 2).expect("id 2 not found");
+    let id_1_idx = result_ids
+        .iter()
+        .position(|&x| x == 1)
+        .expect("id 1 not found");
+    let id_2_idx = result_ids
+        .iter()
+        .position(|&x| x == 2)
+        .expect("id 2 not found");
 
     assert!(result_vals[id_1_idx].is_nan(), "0.0/0.0 should be NaN");
-    assert!(result_vals[id_2_idx].is_infinite() && result_vals[id_2_idx] > 0.0, "1.0/0.0 should be +Inf");
+    assert!(
+        result_vals[id_2_idx].is_infinite() && result_vals[id_2_idx] > 0.0,
+        "1.0/0.0 should be +Inf"
+    );
 
     // Verify NaN is normalized to positive NaN (for consistent total ordering)
     let nan_bits = result_vals[id_1_idx].to_bits();
@@ -1222,7 +1448,11 @@ fn test_float_predicate_computed_nan_via_division() {
     println!("gt_five ids: {:?}", gt_five_ids);
     println!("gt_five vals: {:?}", gt_five_vals);
 
-    assert_eq!(gt_five_query.buffer.num_rows(), 3, "Expected 3 gt_five rows (NaN, Inf, 10.0)");
+    assert_eq!(
+        gt_five_query.buffer.num_rows(),
+        3,
+        "Expected 3 gt_five rows (NaN, Inf, 10.0)"
+    );
     assert!(gt_five_ids.contains(&1), "NaN > 5.0 under total ordering");
     assert!(gt_five_ids.contains(&2), "Inf > 5.0");
     assert!(gt_five_ids.contains(&3), "10.0 > 5.0");

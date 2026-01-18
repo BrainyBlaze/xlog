@@ -30,7 +30,9 @@ fn test_compile_with_optimizer_cost_estimation() {
         reach(X, Z) :- reach(X, Y), edge(Y, Z).
     "#;
 
-    let plan = compiler.compile(source).expect("Should compile transitive closure");
+    let plan = compiler
+        .compile(source)
+        .expect("Should compile transitive closure");
 
     // Create optimizer with stats manager containing relation statistics
     let mut stats_mgr = StatsManager::new();
@@ -53,15 +55,26 @@ fn test_compile_with_optimizer_cost_estimation() {
             let cost = optimizer.estimate_cost(&rule.body);
 
             // Verify we get meaningful cost estimates
-            assert!(cost.rows >= 1, "Rule for {} should have positive row estimate", rule.head);
-            assert!(cost.cpu_cost >= 0.0, "Rule for {} should have non-negative CPU cost", rule.head);
+            assert!(
+                cost.rows >= 1,
+                "Rule for {} should have positive row estimate",
+                rule.head
+            );
+            assert!(
+                cost.cpu_cost >= 0.0,
+                "Rule for {} should have non-negative CPU cost",
+                rule.head
+            );
             // gpu_mem is u64, always non-negative
         }
     }
 
     // Verify plan structure
     assert!(!plan.sccs.is_empty(), "Expected SCCs in execution plan");
-    assert!(plan.has_recursion(), "Transitive closure should be recursive");
+    assert!(
+        plan.has_recursion(),
+        "Transitive closure should be recursive"
+    );
 }
 
 /// Test optimizer with a stratified program containing negation.
@@ -82,7 +95,9 @@ fn test_optimizer_with_stratified_program() {
         isolated(X) :- node(X), not edge(X, Y).
     "#;
 
-    let plan = compiler.compile(source).expect("Should compile stratified program");
+    let plan = compiler
+        .compile(source)
+        .expect("Should compile stratified program");
 
     let mut stats_mgr = StatsManager::new();
     for (_name, rel_id) in compiler.rel_ids() {
@@ -125,7 +140,9 @@ fn test_optimizer_with_aggregation() {
         out_degree(X, count(Y)) :- edge(X, Y).
     "#;
 
-    let plan = compiler.compile(source).expect("Should compile aggregation program");
+    let plan = compiler
+        .compile(source)
+        .expect("Should compile aggregation program");
 
     let mut stats_mgr = StatsManager::new();
     for (_name, rel_id) in compiler.rel_ids() {
@@ -263,7 +280,10 @@ fn test_optimize_compiled_rules() {
             // Optimized plan should still have valid cost
             let cost = optimizer.estimate_cost(&optimized);
             // rows is u64, always non-negative - verify optimization produced a plan
-            assert!(cost.cpu_cost >= 0.0, "Optimized plan should have valid cost estimate");
+            assert!(
+                cost.cpu_cost >= 0.0,
+                "Optimized plan should have valid cost estimate"
+            );
         }
     }
 }
@@ -304,8 +324,14 @@ fn test_optimizer_uses_relation_stats() {
     let scan = RirNode::Scan { rel: edge_rel_id };
     let cost = optimizer.estimate_cost(&scan);
 
-    assert_eq!(cost.rows, 10_000, "Scan cost should use registered cardinality");
-    assert!(cost.gpu_mem >= 320_000, "GPU memory should reflect byte size");
+    assert_eq!(
+        cost.rows, 10_000,
+        "Scan cost should use registered cardinality"
+    );
+    assert!(
+        cost.gpu_mem >= 320_000,
+        "GPU memory should reflect byte size"
+    );
 }
 
 /// Test that optimizer uses column statistics for selectivity estimation.
@@ -432,10 +458,7 @@ fn test_optimizer_join_cardinality_estimation() {
 
     // Cost should use the cached selectivity (0.005 = 2500/500000)
     // So estimate should be around 1000 * 500 * 0.005 = 2500
-    assert!(
-        cost.rows > 0,
-        "Join should have positive row estimate"
-    );
+    assert!(cost.rows > 0, "Join should have positive row estimate");
 }
 
 // =============================================================================
@@ -471,7 +494,10 @@ fn test_optimizer_unknown_relation() {
     let cost = optimizer.estimate_cost(&scan);
 
     // Should use default estimates
-    assert_eq!(cost.rows, 1000, "Unknown relation should use default 1000 rows");
+    assert_eq!(
+        cost.rows, 1000,
+        "Unknown relation should use default 1000 rows"
+    );
     assert!(cost.gpu_mem > 0, "Should estimate some GPU memory");
 }
 
@@ -494,7 +520,10 @@ fn test_plan_cost_operations() {
 
     // Test sequential operation cost combination
     let combined = cost1.clone().then(cost2.clone());
-    assert_eq!(combined.rows, 500, "Sequential takes output rows from second");
+    assert_eq!(
+        combined.rows, 500,
+        "Sequential takes output rows from second"
+    );
     assert!((combined.cpu_cost - 150.0).abs() < 0.001, "CPU costs sum");
     assert_eq!(combined.gpu_mem, 80_000, "Peak memory is max");
     assert_eq!(combined.transfers, 2, "Transfers sum");
@@ -586,7 +615,9 @@ fn test_optimizer_social_network_analysis() {
         isolated(X) :- person(X), not has_follower(X).
     "#;
 
-    let plan = compiler.compile(source).expect("Should compile social network program");
+    let plan = compiler
+        .compile(source)
+        .expect("Should compile social network program");
 
     let mut stats_mgr = StatsManager::new();
     for (name, rel_id) in compiler.rel_ids() {
@@ -612,8 +643,16 @@ fn test_optimizer_social_network_analysis() {
             total_estimated_work += cost.rows;
 
             // All estimates should be positive
-            assert!(cost.rows >= 1, "Rule {} should have positive rows", rule.head);
-            assert!(cost.cpu_cost >= 0.0, "Rule {} should have non-negative CPU cost", rule.head);
+            assert!(
+                cost.rows >= 1,
+                "Rule {} should have positive rows",
+                rule.head
+            );
+            assert!(
+                cost.cpu_cost >= 0.0,
+                "Rule {} should have non-negative CPU cost",
+                rule.head
+            );
         }
     }
 
@@ -627,7 +666,10 @@ fn test_optimizer_social_network_analysis() {
     assert!(plan.sccs.len() >= 2, "Should have multiple SCCs");
 
     // Should have strata due to negation
-    assert!(!plan.strata.is_empty(), "Should have strata due to negation");
+    assert!(
+        !plan.strata.is_empty(),
+        "Should have strata due to negation"
+    );
 }
 
 /// Test optimizer with graph algorithm program.
@@ -653,7 +695,9 @@ fn test_optimizer_graph_algorithm() {
         leaf(X) :- node(X), not has_edge(X).
     "#;
 
-    let plan = compiler.compile(source).expect("Should compile graph algorithm");
+    let plan = compiler
+        .compile(source)
+        .expect("Should compile graph algorithm");
 
     let mut stats_mgr = StatsManager::new();
     for (_name, rel_id) in compiler.rel_ids() {
@@ -672,11 +716,17 @@ fn test_optimizer_graph_algorithm() {
         .filter(|r| r.head == "out_edges")
         .collect();
 
-    assert!(!agg_rules.is_empty(), "Should have out_edges aggregation rule");
+    assert!(
+        !agg_rules.is_empty(),
+        "Should have out_edges aggregation rule"
+    );
 
     for rule in agg_rules {
         let cost = optimizer.estimate_cost(&rule.body);
         // Aggregation should produce fewer rows than input
-        assert!(cost.rows <= 10_000, "Aggregation should not exceed input rows");
+        assert!(
+            cost.rows <= 10_000,
+            "Aggregation should not exceed input rows"
+        );
     }
 }

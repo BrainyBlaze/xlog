@@ -174,7 +174,11 @@ fn demo_social_network_analysis() {
         }
     };
 
-    println!("  Compiled {} SCCs, {} strata", plan.sccs.len(), plan.strata.len());
+    println!(
+        "  Compiled {} SCCs, {} strata",
+        plan.sccs.len(),
+        plan.strata.len()
+    );
     println!("  Recursive: {}", plan.has_recursion());
 
     // Create realistic statistics for a medium-sized social network
@@ -182,8 +186,16 @@ fn demo_social_network_analysis() {
 
     // Register relations with realistic cardinalities
     let rel_configs: Vec<(&str, u64, Vec<(usize, u64, i64, i64)>)> = vec![
-        ("user", 1_000_000, vec![(0, 1_000_000, 1, 1_000_000), (2, 100, 0, 100)]),
-        ("follows", 50_000_000, vec![(0, 1_000_000, 1, 1_000_000), (1, 1_000_000, 1, 1_000_000)]),
+        (
+            "user",
+            1_000_000,
+            vec![(0, 1_000_000, 1, 1_000_000), (2, 100, 0, 100)],
+        ),
+        (
+            "follows",
+            50_000_000,
+            vec![(0, 1_000_000, 1, 1_000_000), (1, 1_000_000, 1, 1_000_000)],
+        ),
         ("posts", 100_000_000, vec![(0, 1_000_000, 1, 1_000_000)]),
         ("likes", 500_000_000, vec![(0, 1_000_000, 1, 1_000_000)]),
     ];
@@ -213,7 +225,7 @@ fn demo_social_network_analysis() {
             vec![1],
             vec![0],
             50_000_000 * 50_000_000 / 1000, // sampled product
-            250_000_000,                     // typical result size
+            250_000_000,                    // typical result size
         );
     }
 
@@ -504,9 +516,7 @@ fn demo_supply_chain_optimization() {
         let cost_a = optimizer.estimate_cost(&plan_a);
         let cost_b = optimizer.estimate_cost(&plan_b);
 
-        println!(
-            "    Plan A [(Orders JOIN Inventory) JOIN PartSupplier]:"
-        );
+        println!("    Plan A [(Orders JOIN Inventory) JOIN PartSupplier]:");
         println!(
             "      Rows: {}, CPU: {:.1}, Memory: {}",
             format_number(cost_a.rows),
@@ -514,9 +524,7 @@ fn demo_supply_chain_optimization() {
             format_number(cost_a.gpu_mem)
         );
 
-        println!(
-            "    Plan B [Orders JOIN (Inventory JOIN PartSupplier)]:"
-        );
+        println!("    Plan B [Orders JOIN (Inventory JOIN PartSupplier)]:");
         println!(
             "      Rows: {}, CPU: {:.1}, Memory: {}",
             format_number(cost_b.rows),
@@ -703,7 +711,11 @@ fn demo_graph_analytics() {
             println!(
                 "    {} [{}]: rows={}, cpu={:.1}, gpu_mem={}",
                 rule.head,
-                if is_recursive { "recursive" } else { "non-recursive" },
+                if is_recursive {
+                    "recursive"
+                } else {
+                    "non-recursive"
+                },
                 format_number(cost.rows),
                 cost.cpu_cost,
                 format_number(cost.gpu_mem)
@@ -753,21 +765,11 @@ fn demo_graph_analytics() {
         let cost1 = optimizer.estimate_cost(&plan1);
         let cost2 = optimizer.estimate_cost(&plan2);
 
-        println!(
-            "    Left-deep ((E1 JOIN E2) JOIN E3):"
-        );
-        println!(
-            "      Total cost: {:.1}",
-            cost1.total_cost(100.0)
-        );
+        println!("    Left-deep ((E1 JOIN E2) JOIN E3):");
+        println!("      Total cost: {:.1}", cost1.total_cost(100.0));
 
-        println!(
-            "    Bushy (E1 JOIN (E2 JOIN E3)):"
-        );
-        println!(
-            "      Total cost: {:.1}",
-            cost2.total_cost(100.0)
-        );
+        println!("    Bushy (E1 JOIN (E2 JOIN E3)):");
+        println!("      Total cost: {:.1}", cost2.total_cost(100.0));
 
         // Check if greedy should be used for this query
         let test_plan = plan1.clone();
@@ -876,7 +878,10 @@ fn demo_business_intelligence() {
     };
 
     println!("  Compiled {} SCCs", plan.sccs.len());
-    println!("  Total rules: {}", plan.rules_by_scc.iter().map(|r| r.len()).sum::<usize>());
+    println!(
+        "  Total rules: {}",
+        plan.rules_by_scc.iter().map(|r| r.len()).sum::<usize>()
+    );
 
     // Create realistic data warehouse statistics
     let mut stats_mgr = StatsManager::new();
@@ -932,7 +937,10 @@ fn demo_business_intelligence() {
     let optimizer = Optimizer::new(stats);
 
     println!("\n  Query Cost Analysis:");
-    println!("  (Data warehouse: {} fact rows, 4 dimension tables)", format_number(fact_rows));
+    println!(
+        "  (Data warehouse: {} fact rows, 4 dimension tables)",
+        format_number(fact_rows)
+    );
 
     for scc_rules in &plan.rules_by_scc {
         for rule in scc_rules {
@@ -946,10 +954,7 @@ fn demo_business_intelligence() {
                 0.0
             };
 
-            println!(
-                "\n    {}:",
-                rule.head
-            );
+            println!("\n    {}:", rule.head);
             println!(
                 "      Original: rows={}, cpu={:.1}",
                 format_number(cost.rows),
@@ -1043,15 +1048,9 @@ fn demo_business_intelligence() {
         };
 
         let cost = optimizer.estimate_cost(&star_join);
-        println!(
-            "    Estimated rows: {}",
-            format_number(cost.rows)
-        );
+        println!("    Estimated rows: {}", format_number(cost.rows));
         println!("    CPU cost: {:.1}", cost.cpu_cost);
-        println!(
-            "    GPU memory: {} bytes",
-            format_number(cost.gpu_mem)
-        );
+        println!("    GPU memory: {} bytes", format_number(cost.gpu_mem));
         println!(
             "    Should use greedy algorithm: {}",
             optimizer.should_use_greedy(&star_join)
@@ -1221,10 +1220,7 @@ fn demo_recursive_patterns() {
 
     // Analyze with different iteration estimates
     let configs = vec![
-        (
-            "Default (log2 iterations)",
-            OptimizerConfig::default(),
-        ),
+        ("Default (log2 iterations)", OptimizerConfig::default()),
         (
             "Shallow hierarchy",
             OptimizerConfig {

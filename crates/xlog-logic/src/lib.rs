@@ -27,25 +27,25 @@
 //! - [`lower`] - Lowering from AST to Relational IR
 //! - [`compile`] - Full compilation pipeline
 
-pub mod parser;
 pub mod ast;
-pub mod stratify;
-pub mod lower;
 pub mod compile;
-pub mod optimizer;
-pub mod module;
-pub mod resolver;
-pub mod function;
 pub mod expand;
+pub mod function;
+pub mod lower;
+pub mod module;
+pub mod optimizer;
+pub mod parser;
+pub mod resolver;
+pub mod stratify;
 pub mod typeinfer;
 
 // Re-export main types
-pub use parser::{parse_program, parse_statement};
 pub use ast::{
     AnnotatedDisjunction, Atom, BodyLiteral, Constraint, Directives, Evidence, ProbCache,
     ProbEngine, ProbFact, ProbQuery, Program, Query, Rule, Term,
 };
-pub use stratify::{stratify, Stratum, DependencyGraph, find_sccs_for_lowering};
+pub use compile::{compile, Compiler};
 pub use lower::Lowerer;
-pub use compile::{Compiler, compile};
 pub use optimizer::{Optimizer, OptimizerConfig, PlanCost};
+pub use parser::{parse_program, parse_statement};
+pub use stratify::{find_sccs_for_lowering, stratify, DependencyGraph, Stratum};

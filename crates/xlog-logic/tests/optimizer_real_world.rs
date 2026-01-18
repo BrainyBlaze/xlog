@@ -79,7 +79,9 @@ mod social_network {
             friend_of_friend(X, Z) :- follows(X, Y), follows(Y, Z), X != Z.
         "#;
 
-        let plan = compiler.compile(source).expect("Should compile friend-of-friend");
+        let plan = compiler
+            .compile(source)
+            .expect("Should compile friend-of-friend");
 
         let follows_id = compiler.rel_ids().get("follows").copied().unwrap();
 
@@ -126,9 +128,14 @@ mod social_network {
             can_influence(X, Z) :- can_influence(X, Y), follows(Y, Z).
         "#;
 
-        let plan = compiler.compile(source).expect("Should compile influence query");
+        let plan = compiler
+            .compile(source)
+            .expect("Should compile influence query");
 
-        assert!(plan.has_recursion(), "Transitive closure should be recursive");
+        assert!(
+            plan.has_recursion(),
+            "Transitive closure should be recursive"
+        );
 
         let follows_id = compiler.rel_ids().get("follows").copied().unwrap();
 
@@ -170,7 +177,9 @@ mod social_network {
             mutual_friends(X, Y) :- follows(X, Y), follows(Y, X), X < Y.
         "#;
 
-        let plan = compiler.compile(source).expect("Should compile mutual friends");
+        let plan = compiler
+            .compile(source)
+            .expect("Should compile mutual friends");
 
         let follows_id = compiler.rel_ids().get("follows").copied().unwrap();
 
@@ -217,7 +226,9 @@ mod social_network {
             follower_count(X, count(Y)) :- follows(Y, X).
         "#;
 
-        let plan = compiler.compile(source).expect("Should compile follower count");
+        let plan = compiler
+            .compile(source)
+            .expect("Should compile follower count");
 
         let follows_id = compiler.rel_ids().get("follows").copied().unwrap();
 
@@ -245,10 +256,7 @@ mod social_network {
         // The optimizer uses sqrt(input_rows) as a heuristic for group count
         // sqrt(50M) ~ 7071, so we expect rows to be around that order of magnitude
         assert!(cost.rows >= 1, "Should have positive row estimate");
-        assert!(
-            cost.cpu_cost > 0.0,
-            "Aggregation should have CPU cost"
-        );
+        assert!(cost.cpu_cost > 0.0, "Aggregation should have CPU cost");
     }
 
     /// Test predicate pushdown for social queries with filters.
@@ -311,7 +319,9 @@ mod social_network {
             isolated(X) :- user(X), not has_followers(X).
         "#;
 
-        let plan = compiler.compile(source).expect("Should compile isolated detection");
+        let plan = compiler
+            .compile(source)
+            .expect("Should compile isolated detection");
 
         // Should have multiple strata due to negation
         assert!(
@@ -371,7 +381,9 @@ mod supply_chain {
                 part_supplier(Part, Supplier, Lead).
         "#;
 
-        let plan = compiler.compile(source).expect("Should compile supplier chain");
+        let plan = compiler
+            .compile(source)
+            .expect("Should compile supplier chain");
 
         assert!(plan.has_recursion(), "BOM explosion should be recursive");
 
@@ -390,7 +402,11 @@ mod supply_chain {
         for scc_rules in &plan.rules_by_scc {
             for rule in scc_rules {
                 let cost = optimizer.estimate_cost(&rule.body);
-                assert!(cost.rows >= 1, "Rule {} should have positive rows", rule.head);
+                assert!(
+                    cost.rows >= 1,
+                    "Rule {} should have positive rows",
+                    rule.head
+                );
             }
         }
     }
@@ -408,7 +424,9 @@ mod supply_chain {
                 Qty < ReorderPt.
         "#;
 
-        let plan = compiler.compile(source).expect("Should compile shortage query");
+        let plan = compiler
+            .compile(source)
+            .expect("Should compile shortage query");
 
         let inv_id = compiler.rel_ids().get("inventory").copied().unwrap();
 
@@ -430,10 +448,7 @@ mod supply_chain {
         let cost = optimizer.estimate_cost(&rules[0].body);
 
         // Filter should reduce rows (not all inventory is below reorder)
-        assert!(
-            cost.rows < 5_000_000,
-            "Filter should reduce inventory rows"
-        );
+        assert!(cost.rows < 5_000_000, "Filter should reduce inventory rows");
     }
 
     /// Test complex multi-way join for order fulfillment.
@@ -559,7 +574,9 @@ mod graph_analytics {
             reachable(X, Z) :- reachable(X, Y), edge(Y, Z, W).
         "#;
 
-        let plan = compiler.compile(source).expect("Should compile reachability");
+        let plan = compiler
+            .compile(source)
+            .expect("Should compile reachability");
 
         assert!(plan.has_recursion());
 
@@ -601,7 +618,9 @@ mod graph_analytics {
             in_cycle(X) :- reachable(X, X).
         "#;
 
-        let plan = compiler.compile(source).expect("Should compile cycle detection");
+        let plan = compiler
+            .compile(source)
+            .expect("Should compile cycle detection");
 
         let edge_id = compiler.rel_ids().get("edge").copied().unwrap();
 
@@ -639,7 +658,9 @@ mod graph_analytics {
             source_node(X) :- vertex(X), not has_incoming(X).
         "#;
 
-        let plan = compiler.compile(source).expect("Should compile source detection");
+        let plan = compiler
+            .compile(source)
+            .expect("Should compile source detection");
 
         // Should have strata due to negation
         assert!(!plan.strata.is_empty());
@@ -678,7 +699,9 @@ mod graph_analytics {
             in_degree(X, count(Y)) :- edge(Y, X).
         "#;
 
-        let plan = compiler.compile(source).expect("Should compile degree computation");
+        let plan = compiler
+            .compile(source)
+            .expect("Should compile degree computation");
 
         let edge_id = compiler.rel_ids().get("edge").copied().unwrap();
 
@@ -764,7 +787,9 @@ mod graph_analytics {
             same_component(X, Z) :- same_component(X, Y), undirected(Y, Z).
         "#;
 
-        let plan = compiler.compile(source).expect("Should compile connected components");
+        let plan = compiler
+            .compile(source)
+            .expect("Should compile connected components");
 
         assert!(plan.has_recursion());
 
@@ -780,7 +805,11 @@ mod graph_analytics {
         for scc_rules in &plan.rules_by_scc {
             for rule in scc_rules {
                 let cost = optimizer.estimate_cost(&rule.body);
-                assert!(cost.rows >= 1, "Rule {} should have positive rows", rule.head);
+                assert!(
+                    cost.rows >= 1,
+                    "Rule {} should have positive rows",
+                    rule.head
+                );
             }
         }
     }
@@ -806,7 +835,9 @@ mod business_intelligence {
                 dim_product(P, N, Category, B, Pr).
         "#;
 
-        let plan = compiler.compile(source).expect("Should compile sales aggregation");
+        let plan = compiler
+            .compile(source)
+            .expect("Should compile sales aggregation");
 
         let fact_id = compiler.rel_ids().get("fact_sales").copied().unwrap();
         let product_id = compiler.rel_ids().get("dim_product").copied().unwrap();
@@ -857,7 +888,9 @@ mod business_intelligence {
                 dim_date(D, Y, Quarter).
         "#;
 
-        let plan = compiler.compile(source).expect("Should compile cube analysis");
+        let plan = compiler
+            .compile(source)
+            .expect("Should compile cube analysis");
 
         // Register all relations
         let fact_id = compiler.rel_ids().get("fact_sales").copied().unwrap();
@@ -1065,7 +1098,9 @@ mod recursive_patterns {
                 composition(Child, Grandchild, Qty2).
         "#;
 
-        let plan = compiler.compile(source).expect("Should compile BOM explosion");
+        let plan = compiler
+            .compile(source)
+            .expect("Should compile BOM explosion");
 
         assert!(plan.has_recursion());
 
@@ -1110,7 +1145,9 @@ mod recursive_patterns {
                 reports_to(Indirect, Direct).
         "#;
 
-        let plan = compiler.compile(source).expect("Should compile org hierarchy");
+        let plan = compiler
+            .compile(source)
+            .expect("Should compile org hierarchy");
 
         assert!(plan.has_recursion());
 
@@ -1208,7 +1245,10 @@ mod recursive_patterns {
         // Fixpoint should estimate multiple iterations
         // Output should be > base case due to accumulation
         assert!(cost.rows >= 100_000, "Fixpoint should accumulate rows");
-        assert!(cost.gpu_mem > 0, "Should estimate GPU memory for delta+full");
+        assert!(
+            cost.gpu_mem > 0,
+            "Should estimate GPU memory for delta+full"
+        );
     }
 
     /// Test individual contributor detection with negation.
@@ -1227,7 +1267,9 @@ mod recursive_patterns {
             individual_contributor(E) :- employee(E), not has_reports(E).
         "#;
 
-        let plan = compiler.compile(source).expect("Should compile IC detection");
+        let plan = compiler
+            .compile(source)
+            .expect("Should compile IC detection");
 
         // Should have strata due to negation
         assert!(!plan.strata.is_empty());
@@ -1360,7 +1402,10 @@ mod optimizer_config {
         let opt_disabled = disabled.optimize(make_plan());
 
         // Enabled should push filter into join
-        assert!(has_filter_child(&opt_enabled), "Pushdown enabled should push filter");
+        assert!(
+            has_filter_child(&opt_enabled),
+            "Pushdown enabled should push filter"
+        );
 
         // Disabled should keep filter on top
         assert!(
@@ -1449,9 +1494,15 @@ mod optimizer_config {
 
         let hot = optimizer.recommend_indexes();
 
-        assert!(hot.contains(&RelId(1)), "Hot relation 1 should be recommended");
+        assert!(
+            hot.contains(&RelId(1)),
+            "Hot relation 1 should be recommended"
+        );
         // Relation 3 definitely should not be recommended
-        assert!(!hot.contains(&RelId(3)), "Cold relation 3 should not be recommended");
+        assert!(
+            !hot.contains(&RelId(3)),
+            "Cold relation 3 should not be recommended"
+        );
     }
 }
 
@@ -1482,7 +1533,10 @@ mod plan_cost_ops {
         let combined = cost1.then(cost2);
 
         assert_eq!(combined.rows, 500, "Should take output rows from second");
-        assert!((combined.cpu_cost - 150.0).abs() < 0.001, "CPU costs should sum");
+        assert!(
+            (combined.cpu_cost - 150.0).abs() < 0.001,
+            "CPU costs should sum"
+        );
         assert_eq!(combined.gpu_mem, 80_000, "Should take peak memory");
         assert_eq!(combined.transfers, 3, "Transfers should sum");
     }
@@ -1551,7 +1605,10 @@ mod edge_cases {
         let scan = RirNode::Scan { rel: RelId(999) };
         let cost = optimizer.estimate_cost(&scan);
 
-        assert_eq!(cost.rows, 1000, "Unknown relation should use default 1000 rows");
+        assert_eq!(
+            cost.rows, 1000,
+            "Unknown relation should use default 1000 rows"
+        );
     }
 
     /// Test very large cardinality handling.
@@ -1678,10 +1735,7 @@ mod edge_cases {
         let optimizer = Optimizer::new(Arc::new(stats_mgr));
 
         let union = RirNode::Union {
-            inputs: vec![
-                RirNode::Scan { rel: rel1 },
-                RirNode::Scan { rel: rel2 },
-            ],
+            inputs: vec![RirNode::Scan { rel: rel1 }, RirNode::Scan { rel: rel2 }],
         };
 
         let cost = optimizer.estimate_cost(&union);

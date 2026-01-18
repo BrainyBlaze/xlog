@@ -34,7 +34,9 @@ impl<'a> ExpansionContext<'a> {
             });
         }
 
-        let func = self.registry.get(name)
+        let func = self
+            .registry
+            .get(name)
             .ok_or_else(|| FunctionError::UndefinedFunction {
                 name: name.to_string(),
             })?;
@@ -82,7 +84,8 @@ impl<'a> ExpansionContext<'a> {
                 // Predicate bodies are expanded differently - they become joins
                 // For now, return a placeholder that signals predicate expansion needed
                 // The result variable after substitution
-                let result_var = subst.get(result)
+                let result_var = subst
+                    .get(result)
                     .cloned()
                     .unwrap_or_else(|| ArithExpr::Variable(result.clone()));
                 Ok(result_var)
@@ -102,10 +105,8 @@ impl<'a> ExpansionContext<'a> {
             ArithExpr::Integer(_) | ArithExpr::Float(_) => Ok(expr.clone()),
             ArithExpr::FuncCall { name, args } => {
                 // First expand arguments
-                let expanded_args: Result<Vec<_>, _> = args
-                    .iter()
-                    .map(|a| self.expand_expr(a, subst))
-                    .collect();
+                let expanded_args: Result<Vec<_>, _> =
+                    args.iter().map(|a| self.expand_expr(a, subst)).collect();
                 let expanded_args = expanded_args?;
 
                 // Then expand the function call if it's a UDF
@@ -167,7 +168,13 @@ impl<'a> ExpansionContext<'a> {
                 let ee = self.expand_expr(e, subst)?;
                 Ok(ArithExpr::Cast(Box::new(ee), *t))
             }
-            ArithExpr::Conditional { cond_left, cond_op, cond_right, then_expr, else_expr } => {
+            ArithExpr::Conditional {
+                cond_left,
+                cond_op,
+                cond_right,
+                then_expr,
+                else_expr,
+            } => {
                 let cl = self.expand_expr(cond_left, subst)?;
                 let cr = self.expand_expr(cond_right, subst)?;
                 let te = self.expand_expr(then_expr, subst)?;
@@ -196,7 +203,10 @@ mod tests {
         // func double(X) = X + X
         let double = FuncDef {
             name: "double".to_string(),
-            params: vec![FuncParam { name: "X".to_string(), typ: None }],
+            params: vec![FuncParam {
+                name: "X".to_string(),
+                typ: None,
+            }],
             return_type: None,
             body: FuncBody::Arithmetic(ArithExpr::Add(
                 Box::new(ArithExpr::Variable("X".to_string())),
@@ -227,7 +237,10 @@ mod tests {
         // func double(X) = X + X
         let double = FuncDef {
             name: "double".to_string(),
-            params: vec![FuncParam { name: "X".to_string(), typ: None }],
+            params: vec![FuncParam {
+                name: "X".to_string(),
+                typ: None,
+            }],
             return_type: None,
             body: FuncBody::Arithmetic(ArithExpr::Add(
                 Box::new(ArithExpr::Variable("X".to_string())),
@@ -239,7 +252,10 @@ mod tests {
         // func quadruple(X) = double(double(X))
         let quadruple = FuncDef {
             name: "quadruple".to_string(),
-            params: vec![FuncParam { name: "X".to_string(), typ: None }],
+            params: vec![FuncParam {
+                name: "X".to_string(),
+                typ: None,
+            }],
             return_type: None,
             body: FuncBody::Arithmetic(ArithExpr::FuncCall {
                 name: "double".to_string(),
@@ -257,7 +273,9 @@ mod tests {
         let mut ctx = ExpansionContext::new(&reg, 100);
 
         // quadruple(2) should expand to (2 + 2) + (2 + 2)
-        let result = ctx.expand_call("quadruple", &[ArithExpr::Integer(2)]).unwrap();
+        let result = ctx
+            .expand_call("quadruple", &[ArithExpr::Integer(2)])
+            .unwrap();
 
         // Result should be Add(Add(2, 2), Add(2, 2))
         match &result {
@@ -276,7 +294,10 @@ mod tests {
         // func infinite(X) = infinite(X)
         let infinite = FuncDef {
             name: "infinite".to_string(),
-            params: vec![FuncParam { name: "X".to_string(), typ: None }],
+            params: vec![FuncParam {
+                name: "X".to_string(),
+                typ: None,
+            }],
             return_type: None,
             body: FuncBody::Arithmetic(ArithExpr::FuncCall {
                 name: "infinite".to_string(),
@@ -289,7 +310,10 @@ mod tests {
         let mut ctx = ExpansionContext::new(&reg, 10);
 
         let result = ctx.expand_call("infinite", &[ArithExpr::Integer(1)]);
-        assert!(matches!(result, Err(FunctionError::MaxRecursionDepth { .. })));
+        assert!(matches!(
+            result,
+            Err(FunctionError::MaxRecursionDepth { .. })
+        ));
     }
 
     #[test]
@@ -298,7 +322,10 @@ mod tests {
         let mut ctx = ExpansionContext::new(&reg, 100);
 
         let result = ctx.expand_call("undefined", &[ArithExpr::Integer(1)]);
-        assert!(matches!(result, Err(FunctionError::UndefinedFunction { .. })));
+        assert!(matches!(
+            result,
+            Err(FunctionError::UndefinedFunction { .. })
+        ));
     }
 
     #[test]
@@ -308,7 +335,10 @@ mod tests {
         // func abs_x(X) = abs(X)
         let abs_x = FuncDef {
             name: "abs_x".to_string(),
-            params: vec![FuncParam { name: "X".to_string(), typ: None }],
+            params: vec![FuncParam {
+                name: "X".to_string(),
+                typ: None,
+            }],
             return_type: None,
             body: FuncBody::Arithmetic(ArithExpr::FuncCall {
                 name: "abs".to_string(),
@@ -341,8 +371,14 @@ mod tests {
         let add = FuncDef {
             name: "add".to_string(),
             params: vec![
-                FuncParam { name: "X".to_string(), typ: None },
-                FuncParam { name: "Y".to_string(), typ: None },
+                FuncParam {
+                    name: "X".to_string(),
+                    typ: None,
+                },
+                FuncParam {
+                    name: "Y".to_string(),
+                    typ: None,
+                },
             ],
             return_type: None,
             body: FuncBody::Arithmetic(ArithExpr::Add(
@@ -356,10 +392,9 @@ mod tests {
         let mut ctx = ExpansionContext::new(&reg, 100);
 
         // add(3, 7) should expand to 3 + 7
-        let result = ctx.expand_call("add", &[
-            ArithExpr::Integer(3),
-            ArithExpr::Integer(7),
-        ]).unwrap();
+        let result = ctx
+            .expand_call("add", &[ArithExpr::Integer(3), ArithExpr::Integer(7)])
+            .unwrap();
 
         match result {
             ArithExpr::Add(l, r) => {
@@ -377,7 +412,10 @@ mod tests {
         // func double(X) = X + X
         let double = FuncDef {
             name: "double".to_string(),
-            params: vec![FuncParam { name: "X".to_string(), typ: None }],
+            params: vec![FuncParam {
+                name: "X".to_string(),
+                typ: None,
+            }],
             return_type: None,
             body: FuncBody::Arithmetic(ArithExpr::Add(
                 Box::new(ArithExpr::Variable("X".to_string())),
@@ -390,7 +428,9 @@ mod tests {
         let mut ctx = ExpansionContext::new(&reg, 100);
 
         // double(Y) should expand to Y + Y
-        let result = ctx.expand_call("double", &[ArithExpr::Variable("Y".to_string())]).unwrap();
+        let result = ctx
+            .expand_call("double", &[ArithExpr::Variable("Y".to_string())])
+            .unwrap();
 
         match result {
             ArithExpr::Add(l, r) => {

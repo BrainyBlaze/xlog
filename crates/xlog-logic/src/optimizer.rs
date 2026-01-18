@@ -269,7 +269,9 @@ impl Optimizer {
                         columns,
                     } => {
                         // Check if predicate only references pass-through columns
-                        if let Some(remapped) = self.remap_predicate_through_project(&predicate, &columns) {
+                        if let Some(remapped) =
+                            self.remap_predicate_through_project(&predicate, &columns)
+                        {
                             // Push the remapped predicate below the projection
                             RirNode::Project {
                                 input: Box::new(RirNode::Filter {
@@ -382,7 +384,10 @@ impl Optimizer {
 
             // Union: recursively optimize all inputs
             RirNode::Union { inputs } => RirNode::Union {
-                inputs: inputs.into_iter().map(|i| self.predicate_pushdown(i)).collect(),
+                inputs: inputs
+                    .into_iter()
+                    .map(|i| self.predicate_pushdown(i))
+                    .collect(),
             },
 
             // Distinct: recursively optimize input
@@ -616,9 +621,9 @@ impl Optimizer {
             Expr::And(exprs) | Expr::Or(exprs) => {
                 exprs.iter().flat_map(Self::collect_columns).collect()
             }
-            Expr::Not(inner)
-            | Expr::Abs(inner)
-            | Expr::Cast(inner, _) => Self::collect_columns(inner),
+            Expr::Not(inner) | Expr::Abs(inner) | Expr::Cast(inner, _) => {
+                Self::collect_columns(inner)
+            }
             Expr::Add(l, r)
             | Expr::Sub(l, r)
             | Expr::Mul(l, r)
@@ -644,7 +649,9 @@ impl Optimizer {
                 op: *op,
                 right: Box::new(Self::remap_columns(right, f)),
             },
-            Expr::And(exprs) => Expr::And(exprs.iter().map(|e| Self::remap_columns(e, f)).collect()),
+            Expr::And(exprs) => {
+                Expr::And(exprs.iter().map(|e| Self::remap_columns(e, f)).collect())
+            }
             Expr::Or(exprs) => Expr::Or(exprs.iter().map(|e| Self::remap_columns(e, f)).collect()),
             Expr::Not(inner) => Expr::Not(Box::new(Self::remap_columns(inner, f))),
             Expr::Add(l, r) => Expr::Add(
@@ -730,13 +737,7 @@ impl Optimizer {
                 let left_cost = self.estimate_cost(left);
                 let right_cost = self.estimate_cost(right);
                 self.estimate_join_cost(
-                    left_cost,
-                    right_cost,
-                    left,
-                    right,
-                    left_keys,
-                    right_keys,
-                    *join_type,
+                    left_cost, right_cost, left, right, left_keys, right_keys, *join_type,
                 )
             }
 
@@ -766,9 +767,7 @@ impl Optimizer {
             }
 
             RirNode::Fixpoint {
-                base,
-                recursive,
-                ..
+                base, recursive, ..
             } => {
                 let base_cost = self.estimate_cost(base);
                 let recursive_cost = self.estimate_cost(recursive);
@@ -783,7 +782,9 @@ impl Optimizer {
             PlanCost {
                 rows: stats.cardinality,
                 cpu_cost: stats.cardinality as f64 * 0.01, // Minimal per-row CPU cost
-                gpu_mem: stats.byte_size.max(stats.cardinality * self.config.default_bytes_per_row),
+                gpu_mem: stats
+                    .byte_size
+                    .max(stats.cardinality * self.config.default_bytes_per_row),
                 transfers: 0, // Data already on GPU
             }
         } else {
@@ -799,7 +800,12 @@ impl Optimizer {
     }
 
     /// Estimates cost for a filter operation.
-    fn estimate_filter_cost(&self, input_cost: PlanCost, predicate: &Expr, input: &RirNode) -> PlanCost {
+    fn estimate_filter_cost(
+        &self,
+        input_cost: PlanCost,
+        predicate: &Expr,
+        input: &RirNode,
+    ) -> PlanCost {
         let selectivity = self.estimate_predicate_selectivity(predicate, input);
         let output_rows = ((input_cost.rows as f64 * selectivity) as u64).max(1);
 
@@ -812,7 +818,11 @@ impl Optimizer {
     }
 
     /// Estimates cost for a projection operation.
-    fn estimate_project_cost(&self, input_cost: PlanCost, columns: &[xlog_ir::ProjectExpr]) -> PlanCost {
+    fn estimate_project_cost(
+        &self,
+        input_cost: PlanCost,
+        columns: &[xlog_ir::ProjectExpr],
+    ) -> PlanCost {
         // Count computed vs pass-through columns
         let computed_count = columns
             .iter()
@@ -883,7 +893,8 @@ impl Optimizer {
                         JoinType::LeftOuter => {
                             // At least left side rows
                             left_cost.rows.max(
-                                ((left_cost.rows as f64 * right_cost.rows as f64 * 0.1) as u64).max(1),
+                                ((left_cost.rows as f64 * right_cost.rows as f64 * 0.1) as u64)
+                                    .max(1),
                             )
                         }
                         _ => unreachable!(),
@@ -943,7 +954,7 @@ impl Optimizer {
         PlanCost {
             rows: total_rows,
             cpu_cost: total_cpu + total_rows as f64 * 0.01, // Concatenation cost
-            gpu_mem: max_gpu, // Can process sequentially
+            gpu_mem: max_gpu,                               // Can process sequentially
             transfers: total_transfers,
         }
     }
@@ -956,7 +967,7 @@ impl Optimizer {
         PlanCost {
             rows: estimated_distinct.max(1),
             cpu_cost: input_cost.cpu_cost + input_cost.rows as f64 * 0.3, // Hash-based dedup
-            gpu_mem: input_cost.gpu_mem + input_cost.rows * 8, // Hash set overhead
+            gpu_mem: input_cost.gpu_mem + input_cost.rows * 8,            // Hash set overhead
             transfers: input_cost.transfers,
         }
     }
@@ -1032,7 +1043,9 @@ impl Optimizer {
                     if let Some(col_stats) = stats.get_column(*col_idx) {
                         return match op {
                             CompareOp::Eq => col_stats.equality_selectivity(stats.cardinality),
-                            CompareOp::Ne => 1.0 - col_stats.equality_selectivity(stats.cardinality),
+                            CompareOp::Ne => {
+                                1.0 - col_stats.equality_selectivity(stats.cardinality)
+                            }
                             CompareOp::Lt | CompareOp::Le | CompareOp::Gt | CompareOp::Ge => {
                                 // Range predicates: estimate ~33% selectivity
                                 0.33
@@ -1098,9 +1111,9 @@ impl Optimizer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use xlog_core::ScalarType;
     use xlog_ir::{ConstValue, ProjectExpr};
     use xlog_stats::ColumnStats;
-    use xlog_core::ScalarType;
 
     fn make_stats_manager() -> Arc<StatsManager> {
         let mut mgr = StatsManager::new();
@@ -1230,14 +1243,7 @@ mod tests {
         mgr.update_cardinality(RelId(2), 500);
 
         // Record a join result to cache selectivity
-        mgr.record_join_result(
-            RelId(1),
-            RelId(2),
-            vec![0],
-            vec![0],
-            500_000,
-            2500,
-        );
+        mgr.record_join_result(RelId(1), RelId(2), vec![0], vec![0], 500_000, 2500);
 
         let optimizer = Optimizer::new(Arc::new(mgr));
 

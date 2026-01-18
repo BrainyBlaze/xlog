@@ -23,8 +23,8 @@
 //!    - Dataflow reachability
 //!    - Call graph construction
 
-use std::sync::Arc;
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use xlog_core::{MemoryBudget, ScalarType, Schema};
 use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager};
@@ -50,20 +50,28 @@ fn create_edge_buffer(provider: &CudaKernelProvider, edges: &[(u32, u32)]) -> Cu
         ("c1".to_string(), ScalarType::U32),
     ]);
     if edges.is_empty() {
-        return provider.create_empty_buffer(schema).expect("create empty buffer");
+        return provider
+            .create_empty_buffer(schema)
+            .expect("create empty buffer");
     }
     let col0: Vec<u8> = edges.iter().flat_map(|(a, _)| a.to_le_bytes()).collect();
     let col1: Vec<u8> = edges.iter().flat_map(|(_, b)| b.to_le_bytes()).collect();
-    provider.create_buffer_from_slices(&[&col0, &col1], schema).expect("create buffer")
+    provider
+        .create_buffer_from_slices(&[&col0, &col1], schema)
+        .expect("create buffer")
 }
 
 fn create_node_buffer(provider: &CudaKernelProvider, nodes: &[u32]) -> CudaBuffer {
     let schema = Schema::new(vec![("c0".to_string(), ScalarType::U32)]);
     if nodes.is_empty() {
-        return provider.create_empty_buffer(schema).expect("create empty buffer");
+        return provider
+            .create_empty_buffer(schema)
+            .expect("create empty buffer");
     }
     let col: Vec<u8> = nodes.iter().flat_map(|n| n.to_le_bytes()).collect();
-    provider.create_buffer_from_slices(&[&col], schema).expect("create buffer")
+    provider
+        .create_buffer_from_slices(&[&col], schema)
+        .expect("create buffer")
 }
 
 fn create_triple_buffer(provider: &CudaKernelProvider, triples: &[(u32, u32, u32)]) -> CudaBuffer {
@@ -73,19 +81,34 @@ fn create_triple_buffer(provider: &CudaKernelProvider, triples: &[(u32, u32, u32
         ("c2".to_string(), ScalarType::U32),
     ]);
     if triples.is_empty() {
-        return provider.create_empty_buffer(schema).expect("create empty buffer");
+        return provider
+            .create_empty_buffer(schema)
+            .expect("create empty buffer");
     }
-    let col0: Vec<u8> = triples.iter().flat_map(|(a, _, _)| a.to_le_bytes()).collect();
-    let col1: Vec<u8> = triples.iter().flat_map(|(_, b, _)| b.to_le_bytes()).collect();
-    let col2: Vec<u8> = triples.iter().flat_map(|(_, _, c)| c.to_le_bytes()).collect();
-    provider.create_buffer_from_slices(&[&col0, &col1, &col2], schema).expect("create buffer")
+    let col0: Vec<u8> = triples
+        .iter()
+        .flat_map(|(a, _, _)| a.to_le_bytes())
+        .collect();
+    let col1: Vec<u8> = triples
+        .iter()
+        .flat_map(|(_, b, _)| b.to_le_bytes())
+        .collect();
+    let col2: Vec<u8> = triples
+        .iter()
+        .flat_map(|(_, _, c)| c.to_le_bytes())
+        .collect();
+    provider
+        .create_buffer_from_slices(&[&col0, &col1, &col2], schema)
+        .expect("create buffer")
 }
 
 fn read_column_u32(provider: &CudaKernelProvider, buffer: &CudaBuffer, col: usize) -> Vec<u32> {
     if buffer.is_empty() || buffer.column(col).is_none() {
         return vec![];
     }
-    provider.download_column_u32(buffer, col).unwrap_or_default()
+    provider
+        .download_column_u32(buffer, col)
+        .unwrap_or_default()
 }
 
 fn read_pairs(provider: &CudaKernelProvider, buffer: &CudaBuffer) -> Vec<(u32, u32)> {
@@ -98,7 +121,11 @@ fn read_triples(provider: &CudaKernelProvider, buffer: &CudaBuffer) -> Vec<(u32,
     let c0 = read_column_u32(provider, buffer, 0);
     let c1 = read_column_u32(provider, buffer, 1);
     let c2 = read_column_u32(provider, buffer, 2);
-    c0.into_iter().zip(c1).zip(c2).map(|((a,b),c)| (a,b,c)).collect()
+    c0.into_iter()
+        .zip(c1)
+        .zip(c2)
+        .map(|((a, b), c)| (a, b, c))
+        .collect()
 }
 
 fn setup_facts(executor: &mut Executor, compiler: &Compiler, facts: Vec<(&str, CudaBuffer)>) {
@@ -170,8 +197,18 @@ fn test_social_network_friend_recommendations() {
     let plan = compiler.compile(source).expect("Compilation failed");
 
     let friends = vec![
-        (1, 2), (2, 1), (2, 3), (3, 2), (3, 4), (4, 3),
-        (1, 5), (5, 1), (2, 5), (5, 2), (5, 6), (6, 5),
+        (1, 2),
+        (2, 1),
+        (2, 3),
+        (3, 2),
+        (3, 4),
+        (4, 3),
+        (1, 5),
+        (5, 1),
+        (2, 5),
+        (5, 2),
+        (5, 6),
+        (6, 5),
     ];
     let friend_buffer = create_edge_buffer(&provider, &friends);
     setup_facts(&mut executor, &compiler, vec![("friend", friend_buffer)]);
@@ -181,7 +218,8 @@ fn test_social_network_friend_recommendations() {
     // Check friends-of-friends for Alice (user 1)
     if let Some(fof) = executor.store().get("fof") {
         let fofs = read_pairs(&provider, fof);
-        let alice_fofs: HashSet<u32> = fofs.iter()
+        let alice_fofs: HashSet<u32> = fofs
+            .iter()
             .filter(|(from, _)| *from == 1)
             .map(|(_, to)| *to)
             .collect();
@@ -189,9 +227,15 @@ fn test_social_network_friend_recommendations() {
         println!("Alice's friends-of-friends: {:?}", alice_fofs);
 
         // Alice -> Bob -> Carol, so Carol (3) is fof
-        assert!(alice_fofs.contains(&3), "Carol (3) should be Alice's friend-of-friend (via Bob)");
+        assert!(
+            alice_fofs.contains(&3),
+            "Carol (3) should be Alice's friend-of-friend (via Bob)"
+        );
         // Alice -> Eve -> Frank, so Frank (6) is fof
-        assert!(alice_fofs.contains(&6), "Frank (6) should be Alice's friend-of-friend (via Eve)");
+        assert!(
+            alice_fofs.contains(&6),
+            "Frank (6) should be Alice's friend-of-friend (via Eve)"
+        );
         // Alice -> Bob -> Eve (back-link), so Eve appears in fof even though direct friend
         // This is expected behavior - fof doesn't exclude direct friends
     }
@@ -201,15 +245,22 @@ fn test_social_network_friend_recommendations() {
         let mutuals = read_triples(&provider, mutual);
 
         // Bob (2) should be a mutual friend of Alice (1) and Carol (3)
-        let alice_carol_mutuals: HashSet<u32> = mutuals.iter()
+        let alice_carol_mutuals: HashSet<u32> = mutuals
+            .iter()
             .filter(|(x, y, _)| (*x == 1 && *y == 3) || (*x == 3 && *y == 1))
             .map(|(_, _, m)| *m)
             .collect();
 
-        println!("Mutual friends of Alice and Carol: {:?}", alice_carol_mutuals);
+        println!(
+            "Mutual friends of Alice and Carol: {:?}",
+            alice_carol_mutuals
+        );
 
         // Bob is mutual friend
-        assert!(alice_carol_mutuals.contains(&2), "Bob should be mutual friend of Alice and Carol");
+        assert!(
+            alice_carol_mutuals.contains(&2),
+            "Bob should be mutual friend of Alice and Carol"
+        );
     }
 }
 
@@ -252,9 +303,7 @@ fn test_influence_propagation() {
     let follows = vec![(1, 2), (2, 3), (3, 4), (4, 5)];
     let follows_buffer = create_edge_buffer(&provider, &follows);
 
-    setup_facts(&mut executor, &compiler, vec![
-        ("follows", follows_buffer),
-    ]);
+    setup_facts(&mut executor, &compiler, vec![("follows", follows_buffer)]);
 
     executor.execute_plan(&plan).expect("Execution failed");
 
@@ -263,7 +312,8 @@ fn test_influence_propagation() {
         let reach_pairs = read_pairs(&provider, reaches);
 
         // Node 1 should reach all others
-        let from_one: HashSet<u32> = reach_pairs.iter()
+        let from_one: HashSet<u32> = reach_pairs
+            .iter()
             .filter(|(src, _)| *src == 1)
             .map(|(_, dst)| *dst)
             .collect();
@@ -275,7 +325,11 @@ fn test_influence_propagation() {
         assert!(from_one.contains(&3), "Node 3 should be reachable from 1");
         assert!(from_one.contains(&4), "Node 4 should be reachable from 1");
         assert!(from_one.contains(&5), "Node 5 should be reachable from 1");
-        assert_eq!(from_one.len(), 4, "Exactly 4 nodes should be reachable from 1");
+        assert_eq!(
+            from_one.len(),
+            4,
+            "Exactly 4 nodes should be reachable from 1"
+        );
     }
 }
 
@@ -370,18 +424,23 @@ fn test_rbac_permission_derivation() {
     let user_role_buf = create_edge_buffer(&provider, &user_role);
     let role_perm_buf = create_triple_buffer(&provider, &role_perm);
 
-    setup_facts(&mut executor, &compiler, vec![
-        ("inherits", inherits_buf),
-        ("user_role", user_role_buf),
-        ("role_perm", role_perm_buf),
-    ]);
+    setup_facts(
+        &mut executor,
+        &compiler,
+        vec![
+            ("inherits", inherits_buf),
+            ("user_role", user_role_buf),
+            ("role_perm", role_perm_buf),
+        ],
+    );
 
     executor.execute_plan(&plan).expect("Execution failed");
 
     // Check effective roles
     if let Some(effective_role) = executor.store().get("effective_role") {
         let roles = read_pairs(&provider, effective_role);
-        let alice_roles: HashSet<u32> = roles.iter()
+        let alice_roles: HashSet<u32> = roles
+            .iter()
             .filter(|(u, _)| *u == 10)
             .map(|(_, r)| *r)
             .collect();
@@ -392,23 +451,34 @@ fn test_rbac_permission_derivation() {
         assert!(alice_roles.contains(&1), "Alice should have Admin role");
 
         // Bob (Manager) should have Manager (2) and Admin (1) through inheritance
-        let bob_roles: HashSet<u32> = roles.iter()
+        let bob_roles: HashSet<u32> = roles
+            .iter()
             .filter(|(u, _)| *u == 11)
             .map(|(_, r)| *r)
             .collect();
         println!("Bob's effective roles: {:?}", bob_roles);
         assert!(bob_roles.contains(&2), "Bob should have Manager role");
-        assert!(bob_roles.contains(&1), "Bob should have Admin role (inherited)");
+        assert!(
+            bob_roles.contains(&1),
+            "Bob should have Admin role (inherited)"
+        );
 
         // Carol (Employee) should have Employee (3), Manager (2), and Admin (1)
-        let carol_roles: HashSet<u32> = roles.iter()
+        let carol_roles: HashSet<u32> = roles
+            .iter()
             .filter(|(u, _)| *u == 12)
             .map(|(_, r)| *r)
             .collect();
         println!("Carol's effective roles: {:?}", carol_roles);
         assert!(carol_roles.contains(&3), "Carol should have Employee role");
-        assert!(carol_roles.contains(&2), "Carol should have Manager role (inherited)");
-        assert!(carol_roles.contains(&1), "Carol should have Admin role (inherited)");
+        assert!(
+            carol_roles.contains(&2),
+            "Carol should have Manager role (inherited)"
+        );
+        assert!(
+            carol_roles.contains(&1),
+            "Carol should have Admin role (inherited)"
+        );
     } else {
         panic!("effective_role relation not found");
     }
@@ -418,13 +488,17 @@ fn test_rbac_permission_derivation() {
         let perms = read_triples(&provider, user_perm);
 
         // Alice (10) should have Delete (3) on Database (100) from Admin role
-        let alice_db_perms: HashSet<u32> = perms.iter()
+        let alice_db_perms: HashSet<u32> = perms
+            .iter()
             .filter(|(u, res, _)| *u == 10 && *res == 100)
             .map(|(_, _, p)| *p)
             .collect();
 
         println!("Alice's Database permissions: {:?}", alice_db_perms);
-        assert!(alice_db_perms.contains(&3), "Alice should have Delete on Database");
+        assert!(
+            alice_db_perms.contains(&3),
+            "Alice should have Delete on Database"
+        );
     } else {
         panic!("user_perm relation not found");
     }
@@ -490,10 +564,14 @@ fn test_bill_of_materials() {
     let plan = compiler.compile(source).expect("Compilation failed");
 
     let contains = vec![
-        (1, 2), (1, 3), (1, 4),  // Car contains Engine, Chassis, Wheels
-        (2, 5), (2, 6),          // Engine contains Piston, Crankshaft
-        (3, 7),                  // Chassis contains Frame
-        (4, 8), (4, 9),          // Wheels contains Tire, Rim
+        (1, 2),
+        (1, 3),
+        (1, 4), // Car contains Engine, Chassis, Wheels
+        (2, 5),
+        (2, 6), // Engine contains Piston, Crankshaft
+        (3, 7), // Chassis contains Frame
+        (4, 8),
+        (4, 9), // Wheels contains Tire, Rim
     ];
     let contains_buf = create_edge_buffer(&provider, &contains);
 
@@ -504,7 +582,8 @@ fn test_bill_of_materials() {
     // Check all components needed for Car (1)
     if let Some(component) = executor.store().get("component") {
         let comps = read_pairs(&provider, component);
-        let car_components: HashSet<u32> = comps.iter()
+        let car_components: HashSet<u32> = comps
+            .iter()
             .filter(|(parent, _)| *parent == 1)
             .map(|(_, child)| *child)
             .collect();
@@ -517,13 +596,32 @@ fn test_bill_of_materials() {
         assert!(car_components.contains(&4), "Car should contain Wheels");
 
         // Indirect components (through recursion)
-        assert!(car_components.contains(&5), "Car should contain Piston (via Engine)");
-        assert!(car_components.contains(&6), "Car should contain Crankshaft (via Engine)");
-        assert!(car_components.contains(&7), "Car should contain Frame (via Chassis)");
-        assert!(car_components.contains(&8), "Car should contain Tire (via Wheels)");
-        assert!(car_components.contains(&9), "Car should contain Rim (via Wheels)");
+        assert!(
+            car_components.contains(&5),
+            "Car should contain Piston (via Engine)"
+        );
+        assert!(
+            car_components.contains(&6),
+            "Car should contain Crankshaft (via Engine)"
+        );
+        assert!(
+            car_components.contains(&7),
+            "Car should contain Frame (via Chassis)"
+        );
+        assert!(
+            car_components.contains(&8),
+            "Car should contain Tire (via Wheels)"
+        );
+        assert!(
+            car_components.contains(&9),
+            "Car should contain Rim (via Wheels)"
+        );
 
-        assert_eq!(car_components.len(), 8, "Car should have 8 total components");
+        assert_eq!(
+            car_components.len(),
+            8,
+            "Car should have 8 total components"
+        );
     }
 
     // Check leaf parts
@@ -595,16 +693,17 @@ fn test_points_to_analysis() {
     let mut compiler = Compiler::new();
     let plan = compiler.compile(source).expect("Compilation failed");
 
-    let addr_of = vec![(3, 1), (4, 2)];  // x = &a, y = &b
-    let copy_rel = vec![(5, 3), (6, 5)];  // z = x, w = z
+    let addr_of = vec![(3, 1), (4, 2)]; // x = &a, y = &b
+    let copy_rel = vec![(5, 3), (6, 5)]; // z = x, w = z
 
     let addr_of_buf = create_edge_buffer(&provider, &addr_of);
     let copy_buf = create_edge_buffer(&provider, &copy_rel);
 
-    setup_facts(&mut executor, &compiler, vec![
-        ("addr_of", addr_of_buf),
-        ("copy", copy_buf),
-    ]);
+    setup_facts(
+        &mut executor,
+        &compiler,
+        vec![("addr_of", addr_of_buf), ("copy", copy_buf)],
+    );
 
     executor.execute_plan(&plan).expect("Execution failed");
 
@@ -621,10 +720,16 @@ fn test_points_to_analysis() {
         assert!(pts_set.contains(&(4, 2)), "y should point to b");
 
         // z (5) points to a (1) from copy(z, x)
-        assert!(pts_set.contains(&(5, 1)), "z should point to a (copied from x)");
+        assert!(
+            pts_set.contains(&(5, 1)),
+            "z should point to a (copied from x)"
+        );
 
         // w (6) points to a (1) from copy(w, z)
-        assert!(pts_set.contains(&(6, 1)), "w should point to a (copied from z)");
+        assert!(
+            pts_set.contains(&(6, 1)),
+            "w should point to a (copied from z)"
+        );
     }
 }
 
@@ -669,9 +774,7 @@ fn test_call_graph_construction() {
     let calls_data = vec![(1, 2), (1, 3), (2, 4)];
     let calls_buf = create_edge_buffer(&provider, &calls_data);
 
-    setup_facts(&mut executor, &compiler, vec![
-        ("calls", calls_buf),
-    ]);
+    setup_facts(&mut executor, &compiler, vec![("calls", calls_buf)]);
 
     executor.execute_plan(&plan).expect("Execution failed");
 
@@ -698,7 +801,10 @@ fn test_call_graph_construction() {
         // main (1) should reach all functions
         assert!(reach_set.contains(&(1, 2)), "main should reach foo");
         assert!(reach_set.contains(&(1, 3)), "main should reach bar");
-        assert!(reach_set.contains(&(1, 4)), "main should reach baz (via foo)");
+        assert!(
+            reach_set.contains(&(1, 4)),
+            "main should reach baz (via foo)"
+        );
     }
 }
 
@@ -769,9 +875,18 @@ fn test_network_connectivity() {
     let plan = compiler.compile(source).expect("Compilation failed");
 
     let links = vec![
-        (1, 2), (2, 1), (2, 3), (3, 2), (2, 4), (4, 2),
-        (4, 5), (5, 4), (4, 6), (6, 4),
-        (7, 8), (8, 7),
+        (1, 2),
+        (2, 1),
+        (2, 3),
+        (3, 2),
+        (2, 4),
+        (4, 2),
+        (4, 5),
+        (5, 4),
+        (4, 6),
+        (6, 4),
+        (7, 8),
+        (8, 7),
     ];
     let nodes = vec![1, 2, 3, 4, 5, 6, 7, 8];
     let gateway_nodes = vec![1];
@@ -780,11 +895,15 @@ fn test_network_connectivity() {
     let node_buf = create_node_buffer(&provider, &nodes);
     let gateway_buf = create_node_buffer(&provider, &gateway_nodes);
 
-    setup_facts(&mut executor, &compiler, vec![
-        ("link", link_buf),
-        ("node", node_buf),
-        ("gateway", gateway_buf),
-    ]);
+    setup_facts(
+        &mut executor,
+        &compiler,
+        vec![
+            ("link", link_buf),
+            ("node", node_buf),
+            ("gateway", gateway_buf),
+        ],
+    );
 
     executor.execute_plan(&plan).expect("Execution failed");
 
@@ -800,12 +919,24 @@ fn test_network_connectivity() {
         assert!(connected_set.contains(&2), "Router should have internet");
         assert!(connected_set.contains(&3), "Server should have internet");
         assert!(connected_set.contains(&4), "Switch should have internet");
-        assert!(connected_set.contains(&5), "Workstation 5 should have internet");
-        assert!(connected_set.contains(&6), "Workstation 6 should have internet");
+        assert!(
+            connected_set.contains(&5),
+            "Workstation 5 should have internet"
+        );
+        assert!(
+            connected_set.contains(&6),
+            "Workstation 6 should have internet"
+        );
 
         // Isolated segment should NOT have internet
-        assert!(!connected_set.contains(&7), "Printer should NOT have internet");
-        assert!(!connected_set.contains(&8), "Scanner should NOT have internet");
+        assert!(
+            !connected_set.contains(&7),
+            "Printer should NOT have internet"
+        );
+        assert!(
+            !connected_set.contains(&8),
+            "Scanner should NOT have internet"
+        );
     }
 
     // Check isolated nodes
@@ -817,7 +948,11 @@ fn test_network_connectivity() {
 
         assert!(isolated_set.contains(&7), "Printer should be isolated");
         assert!(isolated_set.contains(&8), "Scanner should be isolated");
-        assert_eq!(isolated_set.len(), 2, "Should have exactly 2 isolated nodes");
+        assert_eq!(
+            isolated_set.len(),
+            2,
+            "Should have exactly 2 isolated nodes"
+        );
     }
 }
 
@@ -877,22 +1012,26 @@ fn test_complex_join_query() {
     let customers = vec![(1, 100), (2, 100), (3, 200)];
     let suppliers = vec![(10, 100), (11, 200), (12, 300)];
     let orders = vec![
-        (1001, 1, 10),  // Customer 1 (city 100), Supplier 10 (city 100) - LOCAL
-        (1002, 1, 11),  // Customer 1 (city 100), Supplier 11 (city 200) - NOT local
-        (1003, 2, 10),  // Customer 2 (city 100), Supplier 10 (city 100) - LOCAL
-        (1004, 3, 11),  // Customer 3 (city 200), Supplier 11 (city 200) - LOCAL
-        (1005, 3, 12),  // Customer 3 (city 200), Supplier 12 (city 300) - NOT local
+        (1001, 1, 10), // Customer 1 (city 100), Supplier 10 (city 100) - LOCAL
+        (1002, 1, 11), // Customer 1 (city 100), Supplier 11 (city 200) - NOT local
+        (1003, 2, 10), // Customer 2 (city 100), Supplier 10 (city 100) - LOCAL
+        (1004, 3, 11), // Customer 3 (city 200), Supplier 11 (city 200) - LOCAL
+        (1005, 3, 12), // Customer 3 (city 200), Supplier 12 (city 300) - NOT local
     ];
 
     let customer_buf = create_edge_buffer(&provider, &customers);
     let supplier_buf = create_edge_buffer(&provider, &suppliers);
     let order_buf = create_triple_buffer(&provider, &orders);
 
-    setup_facts(&mut executor, &compiler, vec![
-        ("customer", customer_buf),
-        ("supplier", supplier_buf),
-        ("order", order_buf),
-    ]);
+    setup_facts(
+        &mut executor,
+        &compiler,
+        vec![
+            ("customer", customer_buf),
+            ("supplier", supplier_buf),
+            ("order", order_buf),
+        ],
+    );
 
     executor.execute_plan(&plan).expect("Execution failed");
 
@@ -978,13 +1117,17 @@ fn test_arithmetic_all_ops() {
     let div_pair_buf = create_edge_buffer(&provider, &[(20, 4), (15, 3)]);
     let mod_pair_buf = create_edge_buffer(&provider, &[(17, 5), (23, 7)]);
 
-    setup_facts(&mut executor, &compiler, vec![
-        ("add_pair", add_pair_buf),
-        ("sub_pair", sub_pair_buf),
-        ("mul_pair", mul_pair_buf),
-        ("div_pair", div_pair_buf),
-        ("mod_pair", mod_pair_buf),
-    ]);
+    setup_facts(
+        &mut executor,
+        &compiler,
+        vec![
+            ("add_pair", add_pair_buf),
+            ("sub_pair", sub_pair_buf),
+            ("mul_pair", mul_pair_buf),
+            ("div_pair", div_pair_buf),
+            ("mod_pair", mod_pair_buf),
+        ],
+    );
 
     executor.execute_plan(&plan).expect("Execution failed");
 
@@ -1094,7 +1237,8 @@ fn test_arithmetic_chained() {
         let c0 = read_column_u32(&provider, sum_squares, 0);
         let c1 = read_column_u32(&provider, sum_squares, 1);
         let c2 = read_column_u32(&provider, sum_squares, 2);
-        let results: Vec<(u32, u32, u32)> = c0.into_iter()
+        let results: Vec<(u32, u32, u32)> = c0
+            .into_iter()
             .zip(c1.into_iter())
             .zip(c2.into_iter())
             .map(|((a, b), c)| (a, b, c))
@@ -1139,7 +1283,8 @@ fn test_arithmetic_type_error() {
         err_msg.to_lowercase().contains("type")
             || err_msg.to_lowercase().contains("mismatch")
             || err_msg.to_lowercase().contains("incompatible"),
-        "Error should mention type issue: {}", err_msg
+        "Error should mention type issue: {}",
+        err_msg
     );
 }
 
@@ -1166,7 +1311,8 @@ fn test_arithmetic_fresh_var_error() {
         err_msg.to_lowercase().contains("bound")
             || err_msg.to_lowercase().contains("fresh")
             || err_msg.to_lowercase().contains("already"),
-        "Error should mention variable binding issue: {}", err_msg
+        "Error should mention variable binding issue: {}",
+        err_msg
     );
 }
 
@@ -1234,10 +1380,11 @@ fn test_forward_computation() {
     let base_val_buffer = create_edge_buffer(&provider, &base_val_data);
     let step_buffer = create_edge_buffer(&provider, &step_data);
 
-    setup_facts(&mut executor, &compiler, vec![
-        ("base_val", base_val_buffer),
-        ("step", step_buffer),
-    ]);
+    setup_facts(
+        &mut executor,
+        &compiler,
+        vec![("base_val", base_val_buffer), ("step", step_buffer)],
+    );
 
     match executor.execute_plan(&plan) {
         Ok(_) => println!("Forward computation completed"),
@@ -1252,9 +1399,9 @@ fn test_forward_computation() {
         let results = read_pairs(&provider, val);
         println!("Forward values: {:?}", results);
 
-        let expected: HashSet<(u32, u32)> = [
-            (0, 1), (1, 2), (2, 4), (3, 8), (4, 16)
-        ].into_iter().collect();
+        let expected: HashSet<(u32, u32)> = [(0, 1), (1, 2), (2, 4), (3, 8), (4, 16)]
+            .into_iter()
+            .collect();
         let actual: HashSet<(u32, u32)> = results.into_iter().collect();
 
         for (n, v) in expected.iter() {

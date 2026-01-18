@@ -26,17 +26,32 @@ impl std::fmt::Display for FunctionError {
                 write!(f, "error[E0501]: duplicate function definition `{}`", name)
             }
             FunctionError::RecursionWithoutBaseCase { name } => {
-                writeln!(f, "error[E0502]: recursive function `{}` without base case", name)?;
-                write!(f, "  = help: use conditional form: `if <condition> then <base> else <recursive>`")
+                writeln!(
+                    f,
+                    "error[E0502]: recursive function `{}` without base case",
+                    name
+                )?;
+                write!(
+                    f,
+                    "  = help: use conditional form: `if <condition> then <base> else <recursive>`"
+                )
             }
             FunctionError::UndefinedFunction { name } => {
                 write!(f, "error[E0503]: undefined function `{}`", name)
             }
             FunctionError::MaxRecursionDepth { name, depth } => {
-                write!(f, "error[E0504]: maximum recursion depth ({}) exceeded in function `{}`", depth, name)
+                write!(
+                    f,
+                    "error[E0504]: maximum recursion depth ({}) exceeded in function `{}`",
+                    depth, name
+                )
             }
             FunctionError::NameConflict { name } => {
-                write!(f, "error[E0505]: `{}` is already defined as a predicate", name)
+                write!(
+                    f,
+                    "error[E0505]: `{}` is already defined as a predicate",
+                    name
+                )
             }
         }
     }
@@ -182,7 +197,13 @@ impl FunctionRegistry {
                 Self::extract_calls_from_expr(e, calls);
             }
             ArithExpr::Variable(_) | ArithExpr::Integer(_) | ArithExpr::Float(_) => {}
-            ArithExpr::Conditional { cond_left, cond_right, then_expr, else_expr, .. } => {
+            ArithExpr::Conditional {
+                cond_left,
+                cond_right,
+                then_expr,
+                else_expr,
+                ..
+            } => {
                 Self::extract_calls_from_expr(cond_left, calls);
                 Self::extract_calls_from_expr(cond_right, calls);
                 Self::extract_calls_from_expr(then_expr, calls);
@@ -222,9 +243,7 @@ impl FunctionRegistry {
             if let Some(calls) = self.call_graph.get(name) {
                 for call in calls {
                     if !self.functions.contains_key(call) && !is_builtin(call) {
-                        return Err(FunctionError::UndefinedFunction {
-                            name: call.clone(),
-                        });
+                        return Err(FunctionError::UndefinedFunction { name: call.clone() });
                     }
                 }
             }
@@ -232,9 +251,7 @@ impl FunctionRegistry {
             // Check recursive functions have base case
             if self.is_recursive(name) {
                 if !Self::has_base_case(&func.body) {
-                    return Err(FunctionError::RecursionWithoutBaseCase {
-                        name: name.clone(),
-                    });
+                    return Err(FunctionError::RecursionWithoutBaseCase { name: name.clone() });
                 }
             }
         }
@@ -250,9 +267,7 @@ impl FunctionRegistry {
         let mut registry = Self::new();
 
         // Check for name conflicts with predicates
-        let pred_names: HashSet<_> = program.predicates.iter()
-            .map(|p| p.name.clone())
-            .collect();
+        let pred_names: HashSet<_> = program.predicates.iter().map(|p| p.name.clone()).collect();
 
         for func in &program.functions {
             if pred_names.contains(&func.name) {
@@ -406,7 +421,10 @@ mod tests {
     fn make_arith_func(name: &str, body: ArithExpr) -> FuncDef {
         FuncDef {
             name: name.to_string(),
-            params: vec![FuncParam { name: "X".to_string(), typ: None }],
+            params: vec![FuncParam {
+                name: "X".to_string(),
+                typ: None,
+            }],
             return_type: None,
             body: FuncBody::Arithmetic(body),
             is_private: false,
@@ -426,7 +444,10 @@ mod tests {
         let func = make_arith_func("f", ArithExpr::Variable("X".to_string()));
         reg.register(func.clone()).unwrap();
         let result = reg.register(func);
-        assert!(matches!(result, Err(FunctionError::DuplicateDefinition { .. })));
+        assert!(matches!(
+            result,
+            Err(FunctionError::DuplicateDefinition { .. })
+        ));
     }
 
     #[test]
@@ -487,7 +508,10 @@ mod tests {
         reg.register(f).unwrap();
 
         let result = reg.validate();
-        assert!(matches!(result, Err(FunctionError::UndefinedFunction { .. })));
+        assert!(matches!(
+            result,
+            Err(FunctionError::UndefinedFunction { .. })
+        ));
     }
 
     #[test]
@@ -497,7 +521,10 @@ mod tests {
         // Function that calls built-in functions
         let f = FuncDef {
             name: "f".to_string(),
-            params: vec![FuncParam { name: "X".to_string(), typ: None }],
+            params: vec![FuncParam {
+                name: "X".to_string(),
+                typ: None,
+            }],
             return_type: None,
             body: FuncBody::Arithmetic(ArithExpr::FuncCall {
                 name: "abs".to_string(),

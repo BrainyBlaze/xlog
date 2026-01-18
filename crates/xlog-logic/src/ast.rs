@@ -106,18 +106,27 @@ impl ArithExpr {
         match self {
             ArithExpr::Variable(name) => vec![name.as_str()],
             ArithExpr::Integer(_) | ArithExpr::Float(_) => vec![],
-            ArithExpr::Add(l, r) | ArithExpr::Sub(l, r) | ArithExpr::Mul(l, r)
-            | ArithExpr::Div(l, r) | ArithExpr::Mod(l, r)
-            | ArithExpr::Min(l, r) | ArithExpr::Max(l, r) | ArithExpr::Pow(l, r) => {
+            ArithExpr::Add(l, r)
+            | ArithExpr::Sub(l, r)
+            | ArithExpr::Mul(l, r)
+            | ArithExpr::Div(l, r)
+            | ArithExpr::Mod(l, r)
+            | ArithExpr::Min(l, r)
+            | ArithExpr::Max(l, r)
+            | ArithExpr::Pow(l, r) => {
                 let mut vars = l.variables();
                 vars.extend(r.variables());
                 vars
             }
             ArithExpr::Abs(e) | ArithExpr::Cast(e, _) => e.variables(),
-            ArithExpr::FuncCall { args, .. } => {
-                args.iter().flat_map(|a| a.variables()).collect()
-            }
-            ArithExpr::Conditional { cond_left, cond_right, then_expr, else_expr, .. } => {
+            ArithExpr::FuncCall { args, .. } => args.iter().flat_map(|a| a.variables()).collect(),
+            ArithExpr::Conditional {
+                cond_left,
+                cond_right,
+                then_expr,
+                else_expr,
+                ..
+            } => {
                 let mut vars = cond_left.variables();
                 vars.extend(cond_right.variables());
                 vars.extend(then_expr.variables());
@@ -131,7 +140,7 @@ impl ArithExpr {
 /// Is-expression for variable binding: Z is X + Y
 #[derive(Debug, Clone, PartialEq)]
 pub struct IsExpr {
-    pub target: String,      // Must be fresh (unbound) variable
+    pub target: String, // Must be fresh (unbound) variable
     pub expr: ArithExpr,
 }
 
@@ -158,7 +167,12 @@ impl Atom {
 /// Comparison operator
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompOp {
-    Eq, Ne, Lt, Le, Gt, Ge,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
 }
 
 /// A comparison expression
@@ -199,8 +213,12 @@ impl BodyLiteral {
             BodyLiteral::Positive(a) | BodyLiteral::Negated(a) => a.variables(),
             BodyLiteral::Comparison(c) => {
                 let mut vars = vec![];
-                if let Some(v) = c.left.variable_name() { vars.push(v); }
-                if let Some(v) = c.right.variable_name() { vars.push(v); }
+                if let Some(v) = c.left.variable_name() {
+                    vars.push(v);
+                }
+                if let Some(v) = c.right.variable_name() {
+                    vars.push(v);
+                }
                 vars
             }
             BodyLiteral::IsExpr(is_expr) => {
@@ -220,21 +238,31 @@ pub struct Rule {
 }
 
 impl Rule {
-    pub fn is_fact(&self) -> bool { self.body.is_empty() }
+    pub fn is_fact(&self) -> bool {
+        self.body.is_empty()
+    }
 
     pub fn has_negation(&self) -> bool {
         self.body.iter().any(|l| l.is_negated())
     }
 
     pub fn has_aggregation(&self) -> bool {
-        self.head.terms.iter().any(|t| matches!(t, Term::Aggregate(_)))
+        self.head
+            .terms
+            .iter()
+            .any(|t| matches!(t, Term::Aggregate(_)))
     }
 
     pub fn body_predicates(&self) -> Vec<&str> {
-        self.body.iter().filter_map(|l| l.atom().map(|a| a.predicate.as_str())).collect()
+        self.body
+            .iter()
+            .filter_map(|l| l.atom().map(|a| a.predicate.as_str()))
+            .collect()
     }
 
-    pub fn head_variables(&self) -> Vec<&str> { self.head.variables() }
+    pub fn head_variables(&self) -> Vec<&str> {
+        self.head.variables()
+    }
 
     pub fn body_variables(&self) -> Vec<&str> {
         self.body.iter().flat_map(|l| l.variables()).collect()
@@ -406,7 +434,9 @@ pub struct Program {
 }
 
 impl Program {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     pub fn facts(&self) -> impl Iterator<Item = &Rule> {
         self.rules.iter().filter(|r| r.is_fact())
@@ -479,7 +509,10 @@ mod tests {
     #[test]
     fn test_rule_is_fact() {
         let fact = Rule {
-            head: Atom { predicate: "edge".to_string(), terms: vec![Term::Integer(1), Term::Integer(2)] },
+            head: Atom {
+                predicate: "edge".to_string(),
+                terms: vec![Term::Integer(1), Term::Integer(2)],
+            },
             body: vec![],
         };
         assert!(fact.is_fact());
@@ -488,10 +521,22 @@ mod tests {
     #[test]
     fn test_rule_has_negation() {
         let rule = Rule {
-            head: Atom { predicate: "isolated".to_string(), terms: vec![Term::Variable("X".to_string())] },
+            head: Atom {
+                predicate: "isolated".to_string(),
+                terms: vec![Term::Variable("X".to_string())],
+            },
             body: vec![
-                BodyLiteral::Positive(Atom { predicate: "node".to_string(), terms: vec![Term::Variable("X".to_string())] }),
-                BodyLiteral::Negated(Atom { predicate: "edge".to_string(), terms: vec![Term::Variable("X".to_string()), Term::Variable("Y".to_string())] }),
+                BodyLiteral::Positive(Atom {
+                    predicate: "node".to_string(),
+                    terms: vec![Term::Variable("X".to_string())],
+                }),
+                BodyLiteral::Negated(Atom {
+                    predicate: "edge".to_string(),
+                    terms: vec![
+                        Term::Variable("X".to_string()),
+                        Term::Variable("Y".to_string()),
+                    ],
+                }),
             ],
         };
         assert!(rule.has_negation());
@@ -501,12 +546,27 @@ mod tests {
     fn test_program_facts() {
         let mut program = Program::new();
         program.rules.push(Rule {
-            head: Atom { predicate: "edge".to_string(), terms: vec![Term::Integer(1), Term::Integer(2)] },
+            head: Atom {
+                predicate: "edge".to_string(),
+                terms: vec![Term::Integer(1), Term::Integer(2)],
+            },
             body: vec![],
         });
         program.rules.push(Rule {
-            head: Atom { predicate: "reach".to_string(), terms: vec![Term::Variable("X".to_string()), Term::Variable("Y".to_string())] },
-            body: vec![BodyLiteral::Positive(Atom { predicate: "edge".to_string(), terms: vec![Term::Variable("X".to_string()), Term::Variable("Y".to_string())] })],
+            head: Atom {
+                predicate: "reach".to_string(),
+                terms: vec![
+                    Term::Variable("X".to_string()),
+                    Term::Variable("Y".to_string()),
+                ],
+            },
+            body: vec![BodyLiteral::Positive(Atom {
+                predicate: "edge".to_string(),
+                terms: vec![
+                    Term::Variable("X".to_string()),
+                    Term::Variable("Y".to_string()),
+                ],
+            })],
         });
         assert_eq!(program.facts().count(), 1);
         assert_eq!(program.proper_rules().count(), 1);

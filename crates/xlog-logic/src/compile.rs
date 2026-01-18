@@ -390,10 +390,10 @@ pub fn load_modules(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xlog_stats::StatsManager;
-    use xlog_stats::RelationStats;
-    use xlog_ir::RirNode;
     use xlog_core::ScalarType;
+    use xlog_ir::RirNode;
+    use xlog_stats::RelationStats;
+    use xlog_stats::StatsManager;
 
     #[test]
     fn test_compiler_new() {
@@ -701,14 +701,8 @@ mod tests {
             .compile_with_stats_snapshot(source, Some(&snapshot))
             .expect("Compile with named snapshot failed");
 
-        let foo_id = *compiler
-            .rel_ids()
-            .get("foo")
-            .expect("foo rel_id missing");
-        let edge_id = *compiler
-            .rel_ids()
-            .get("edge")
-            .expect("edge rel_id missing");
+        let foo_id = *compiler.rel_ids().get("foo").expect("foo rel_id missing");
+        let edge_id = *compiler.rel_ids().get("edge").expect("edge rel_id missing");
 
         let out_rule = plan
             .rules_by_scc
@@ -724,7 +718,7 @@ mod tests {
                 RirNode::Project { input, .. } => node = input,
                 other => break other,
             }
-        };
+        }
 
         match node {
             RirNode::Join { left, right, .. } => {

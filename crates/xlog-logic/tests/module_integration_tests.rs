@@ -42,7 +42,10 @@ fn test_circular_import_detected() {
 
     let result = resolver.load_module(&dir, &["a".into()]);
     assert!(
-        matches!(result, Err(xlog_logic::module::ModuleError::CircularImport { .. })),
+        matches!(
+            result,
+            Err(xlog_logic::module::ModuleError::CircularImport { .. })
+        ),
         "Expected CircularImport error, got: {:?}",
         result
     );
@@ -55,12 +58,22 @@ fn test_visibility_exports() {
 
     // Load internal module
     let result = resolver.load_module(&dir, &["internal".into()]);
-    assert!(result.is_ok(), "Failed to load visibility module: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Failed to load visibility module: {:?}",
+        result
+    );
 
     // Check that public_pred is exported but private_pred is not
     let module = resolver.get_module(&["internal".into()]).unwrap();
-    assert!(module.exports.contains("public_pred"), "public_pred should be exported");
-    assert!(!module.exports.contains("private_pred"), "private_pred should NOT be exported");
+    assert!(
+        module.exports.contains("public_pred"),
+        "public_pred should be exported"
+    );
+    assert!(
+        !module.exports.contains("private_pred"),
+        "private_pred should NOT be exported"
+    );
 }
 
 #[test]
@@ -82,7 +95,11 @@ fn test_transitive_dependencies() {
 
     // Loading main should recursively load mid and base
     let result = resolver.load_module(&dir, &["main".into()]);
-    assert!(result.is_ok(), "Failed to load transitive chain: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Failed to load transitive chain: {:?}",
+        result
+    );
 
     // Verify all three modules were loaded
     assert!(resolver.is_loaded("main"), "main not loaded");
@@ -101,7 +118,10 @@ fn test_search_path_precedence() {
     let result = resolver.find_module_file(&base, &["helper".into()]);
     assert!(result.is_some(), "helper not found");
     // Verify it's from the relative path, not search path
-    assert!(result.unwrap().starts_with(&base), "Should find helper in relative path first");
+    assert!(
+        result.unwrap().starts_with(&base),
+        "Should find helper in relative path first"
+    );
 }
 
 #[test]

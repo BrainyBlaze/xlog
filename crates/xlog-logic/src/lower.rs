@@ -12,7 +12,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use xlog_core::{AggOp as CoreAggOp, RelId, Result, ScalarType, Schema, XlogError, symbol};
+use xlog_core::{symbol, AggOp as CoreAggOp, RelId, Result, ScalarType, Schema, XlogError};
 use xlog_ir::{
     CompareOp, CompiledRule, ConstValue, ExecutionPlan, Expr, JoinType, PlanBuilder, ProjectExpr,
     RirMeta, RirNode, Scc, Stratum as IrStratum,
@@ -458,11 +458,19 @@ impl Lowerer {
         (base * selectivity).max(1.0)
     }
 
-    fn build_cartesian_join(&self, left: RirNode, right: RirNode, left_width: usize, right_width: usize) -> RirNode {
+    fn build_cartesian_join(
+        &self,
+        left: RirNode,
+        right: RirNode,
+        left_width: usize,
+        right_width: usize,
+    ) -> RirNode {
         // Implement cross join by appending a constant key column to both inputs and joining on it,
         // then projecting away the constant columns.
-        let left_const_col = ProjectExpr::Computed(Expr::Const(ConstValue::U32(0)), ScalarType::U32);
-        let right_const_col = ProjectExpr::Computed(Expr::Const(ConstValue::U32(0)), ScalarType::U32);
+        let left_const_col =
+            ProjectExpr::Computed(Expr::Const(ConstValue::U32(0)), ScalarType::U32);
+        let right_const_col =
+            ProjectExpr::Computed(Expr::Const(ConstValue::U32(0)), ScalarType::U32);
 
         let mut left_cols: Vec<ProjectExpr> = (0..left_width).map(ProjectExpr::Column).collect();
         left_cols.push(left_const_col);
@@ -531,16 +539,25 @@ impl Lowerer {
             .collect();
 
         let node = if shared_vars.is_empty() {
-            self.build_cartesian_join(left.node.clone(), right.node.clone(), left.width, right.width)
+            self.build_cartesian_join(
+                left.node.clone(),
+                right.node.clone(),
+                left.width,
+                right.width,
+            )
         } else {
             let mut key_pairs: Vec<(usize, usize)> = shared_vars
                 .iter()
-                .filter_map(|v| Some((left.var_pos.get(*v).copied()?, right.var_pos.get(*v).copied()?)))
+                .filter_map(|v| {
+                    Some((
+                        left.var_pos.get(*v).copied()?,
+                        right.var_pos.get(*v).copied()?,
+                    ))
+                })
                 .collect();
             key_pairs.sort_unstable();
 
-            let (left_keys, right_keys): (Vec<usize>, Vec<usize>) =
-                key_pairs.into_iter().unzip();
+            let (left_keys, right_keys): (Vec<usize>, Vec<usize>) = key_pairs.into_iter().unzip();
 
             RirNode::Join {
                 left: Box::new(left.node.clone()),
@@ -591,7 +608,10 @@ impl Lowerer {
         }
     }
 
-    fn plan_positive_atoms_bushy<'a>(&mut self, atoms: &[&'a Atom]) -> Result<(RirNode, Vec<&'a Atom>)> {
+    fn plan_positive_atoms_bushy<'a>(
+        &mut self,
+        atoms: &[&'a Atom],
+    ) -> Result<(RirNode, Vec<&'a Atom>)> {
         let n = atoms.len();
         if n == 0 {
             return Err(XlogError::Compilation("Empty rule body".to_string()));
@@ -975,10 +995,7 @@ impl Lowerer {
         let mut filters = Vec::new();
         let mut first_var_col: HashMap<&str, usize> = HashMap::new();
         let schema = self.schemas.get(&atom.predicate).ok_or_else(|| {
-            XlogError::Compilation(format!(
-                "Missing schema for predicate {}",
-                atom.predicate
-            ))
+            XlogError::Compilation(format!("Missing schema for predicate {}", atom.predicate))
         })?;
 
         for (i, term) in atom.terms.iter().enumerate() {
@@ -1045,7 +1062,10 @@ impl Lowerer {
                 if let Some(const_val) = term_to_typed_const_value(term, typ)? {
                     (Expr::Column(col), Expr::Const(const_val))
                 } else {
-                    (self.term_to_expr(&cmp.left, var_env)?, self.term_to_expr(&cmp.right, var_env)?)
+                    (
+                        self.term_to_expr(&cmp.left, var_env)?,
+                        self.term_to_expr(&cmp.right, var_env)?,
+                    )
                 }
             }
             (term, Term::Variable(name)) => {
@@ -1058,7 +1078,10 @@ impl Lowerer {
                 if let Some(const_val) = term_to_typed_const_value(term, typ)? {
                     (Expr::Const(const_val), Expr::Column(col))
                 } else {
-                    (self.term_to_expr(&cmp.left, var_env)?, self.term_to_expr(&cmp.right, var_env)?)
+                    (
+                        self.term_to_expr(&cmp.left, var_env)?,
+                        self.term_to_expr(&cmp.right, var_env)?,
+                    )
                 }
             }
             _ => (
@@ -1206,7 +1229,11 @@ impl Lowerer {
     /// For non-aggregate rules this supports:
     /// - Variables (column passthrough)
     /// - Constants (computed constant columns)
-    fn compute_head_projection(&self, head: &Atom, var_env: &VariableEnv) -> Result<Vec<ProjectExpr>> {
+    fn compute_head_projection(
+        &self,
+        head: &Atom,
+        var_env: &VariableEnv,
+    ) -> Result<Vec<ProjectExpr>> {
         let mut cols = Vec::with_capacity(head.terms.len());
 
         for term in &head.terms {
@@ -1238,7 +1265,12 @@ impl Lowerer {
     }
 
     /// Lower an aggregate rule head into `GroupBy` + final projection.
-    fn lower_aggregate_rule(&mut self, head: &Atom, body: RirNode, var_env: &VariableEnv) -> Result<RirNode> {
+    fn lower_aggregate_rule(
+        &mut self,
+        head: &Atom,
+        body: RirNode,
+        var_env: &VariableEnv,
+    ) -> Result<RirNode> {
         // Collect unique group keys in head order.
         let mut key_vars: Vec<String> = Vec::new();
         let mut key_var_to_pos: HashMap<String, usize> = HashMap::new();
@@ -1273,12 +1305,14 @@ impl Lowerer {
                             .ok_or_else(|| XlogError::UnsafeVariable(agg.variable.clone()))?;
 
                         // Ensure the value variable exists in the groupby input.
-                        let value_pos = *value_var_to_pos.entry(agg.variable.clone()).or_insert_with(|| {
-                            let p = value_vars.len();
-                            value_vars.push(agg.variable.clone());
-                            value_src_cols.push(col);
-                            p
-                        });
+                        let value_pos = *value_var_to_pos
+                            .entry(agg.variable.clone())
+                            .or_insert_with(|| {
+                                let p = value_vars.len();
+                                value_vars.push(agg.variable.clone());
+                                value_src_cols.push(col);
+                                p
+                            });
 
                         let agg_pos = agg_specs.len();
                         agg_specs.push((agg.op, agg.variable.clone()));
@@ -1353,7 +1387,11 @@ impl Lowerer {
         // - variables map to group key columns
         // - aggregates map to groupby output agg columns (after keys)
         // - constants are computed columns
-        let key_count = if key_src_cols.is_empty() { 1 } else { key_vars.len() };
+        let key_count = if key_src_cols.is_empty() {
+            1
+        } else {
+            key_vars.len()
+        };
 
         let mut final_proj: Vec<ProjectExpr> = Vec::with_capacity(head.terms.len());
         for term in &head.terms {
@@ -1507,7 +1545,11 @@ impl Lowerer {
                 name
             ))),
 
-            ArithExpr::Conditional { then_expr, else_expr, .. } => {
+            ArithExpr::Conditional {
+                then_expr,
+                else_expr,
+                ..
+            } => {
                 // Both branches must have the same type
                 let then_type = self.infer_arith_type(then_expr, var_env)?;
                 let else_type = self.infer_arith_type(else_expr, var_env)?;
@@ -1846,7 +1888,8 @@ fn term_to_typed_const_value(term: &Term, expected: ScalarType) -> Result<Option
             } else {
                 return Err(XlogError::Compilation(format!(
                     "Symbol literal {} not valid for {:?}",
-                    symbol::resolve(*id), expected
+                    symbol::resolve(*id),
+                    expected
                 )));
             }
         }
@@ -1874,9 +1917,9 @@ fn term_to_project_const_expr(term: &Term) -> Result<(Expr, ScalarType)> {
             Expr::Const(ConstValue::Symbol(symbol::resolve(*id))),
             ScalarType::Symbol,
         )),
-        Term::Variable(_) | Term::Anonymous | Term::Aggregate(_) => Err(XlogError::Compilation(
-            "Expected constant term".to_string(),
-        )),
+        Term::Variable(_) | Term::Anonymous | Term::Aggregate(_) => {
+            Err(XlogError::Compilation("Expected constant term".to_string()))
+        }
     }
 }
 
@@ -2307,7 +2350,10 @@ mod tests {
             },
             body: vec![BodyLiteral::Positive(Atom {
                 predicate: "edge".to_string(),
-                terms: vec![Term::Variable("X".to_string()), Term::Variable("X".to_string())],
+                terms: vec![
+                    Term::Variable("X".to_string()),
+                    Term::Variable("X".to_string()),
+                ],
             })],
         };
 
@@ -2325,12 +2371,20 @@ mod tests {
         fn has_col_eq_filter(node: &RirNode) -> bool {
             match node {
                 RirNode::Filter { predicate, .. } => match predicate {
-                    Expr::Compare { left, op: CompareOp::Eq, right } => {
+                    Expr::Compare {
+                        left,
+                        op: CompareOp::Eq,
+                        right,
+                    } => {
                         matches!((&**left, &**right), (Expr::Column(0), Expr::Column(1)))
                             || matches!((&**left, &**right), (Expr::Column(1), Expr::Column(0)))
                     }
                     Expr::And(exprs) => exprs.iter().any(|e| match e {
-                        Expr::Compare { left, op: CompareOp::Eq, right } => {
+                        Expr::Compare {
+                            left,
+                            op: CompareOp::Eq,
+                            right,
+                        } => {
                             matches!((&**left, &**right), (Expr::Column(0), Expr::Column(1)))
                                 || matches!((&**left, &**right), (Expr::Column(1), Expr::Column(0)))
                         }

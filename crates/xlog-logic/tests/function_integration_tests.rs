@@ -1,9 +1,9 @@
 //! Integration tests for user-defined functions
 
-use xlog_logic::parse_program as parse;
-use xlog_logic::function::{FunctionRegistry, FunctionError};
+use xlog_logic::ast::{ArithExpr, CompOp, CondExpr, FuncBody, FuncDef, FuncParam};
 use xlog_logic::expand::ExpansionContext;
-use xlog_logic::ast::{ArithExpr, FuncDef, FuncParam, FuncBody, CondExpr, CompOp};
+use xlog_logic::function::{FunctionError, FunctionRegistry};
+use xlog_logic::parse_program as parse;
 
 #[test]
 fn test_full_function_pipeline() {
@@ -137,12 +137,14 @@ fn test_nested_function_expansion() {
     let registry = FunctionRegistry::from_program(&program).unwrap();
 
     let mut ctx = ExpansionContext::new(&registry, 100);
-    let result = ctx.expand_call("quadruple", &[ArithExpr::Integer(3)]).unwrap();
+    let result = ctx
+        .expand_call("quadruple", &[ArithExpr::Integer(3)])
+        .unwrap();
 
     // quadruple(3) -> double(double(3)) -> double(3 * 2) -> (3 * 2) * 2
     // Result should be Mul(Mul(3, 2), 2)
     match result {
-        ArithExpr::Mul(_, _) => {}  // Nested Mul is expected
+        ArithExpr::Mul(_, _) => {} // Nested Mul is expected
         _ => panic!("Expected Mul expression, got {:?}", result),
     }
 }
@@ -206,7 +208,10 @@ fn test_recursion_warning_analysis() {
     // This should produce a warning because N + 1 moves away from N <= 0
     let risky = FuncDef {
         name: "risky".to_string(),
-        params: vec![FuncParam { name: "N".to_string(), typ: None }],
+        params: vec![FuncParam {
+            name: "N".to_string(),
+            typ: None,
+        }],
         return_type: None,
         body: FuncBody::Conditional(CondExpr {
             cond_left: ArithExpr::Variable("N".to_string()),

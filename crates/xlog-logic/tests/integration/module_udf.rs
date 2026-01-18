@@ -232,9 +232,7 @@ fn test_nested_conditional_function() {
                 FuncBody::Conditional(inner) => {
                     // Inner condition: X > Hi
                     assert!(matches!(&inner.cond_left, ArithExpr::Variable(v) if v == "X"));
-                    assert!(
-                        matches!(&inner.cond_right, ArithExpr::Variable(v) if v == "Hi")
-                    );
+                    assert!(matches!(&inner.cond_right, ArithExpr::Variable(v) if v == "Hi"));
                 }
                 _ => panic!("Expected nested conditional in else branch"),
             }

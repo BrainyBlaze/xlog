@@ -1,7 +1,7 @@
 //! Module resolution for XLOG programs.
 
 use crate::ast::Program;
-use crate::module::{LoadedModule, ModuleError, ModulePath, module_path_to_string};
+use crate::module::{module_path_to_string, LoadedModule, ModuleError, ModulePath};
 use crate::parser::parse_program;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -126,7 +126,8 @@ impl ModuleResolver {
         }
 
         // Find the file
-        let source_file = self.find_module_file(base_dir, module_path)
+        let source_file = self
+            .find_module_file(base_dir, module_path)
             .ok_or_else(|| ModuleError::NotFound {
                 path: module_path.to_vec(),
                 searched: self.searched_paths(base_dir, module_path),
@@ -136,17 +137,15 @@ impl ModuleResolver {
         self.loading.push(module_path.to_vec());
 
         // Read and parse
-        let source = fs::read_to_string(&source_file)
-            .map_err(|e| ModuleError::ParseError {
-                path: source_file.clone(),
-                message: e.to_string(),
-            })?;
+        let source = fs::read_to_string(&source_file).map_err(|e| ModuleError::ParseError {
+            path: source_file.clone(),
+            message: e.to_string(),
+        })?;
 
-        let program = parse_program(&source)
-            .map_err(|e| ModuleError::ParseError {
-                path: source_file.clone(),
-                message: e.to_string(),
-            })?;
+        let program = parse_program(&source).map_err(|e| ModuleError::ParseError {
+            path: source_file.clone(),
+            message: e.to_string(),
+        })?;
 
         // Extract exports
         let (exports, function_exports) = Self::extract_exports(&program);
@@ -173,13 +172,11 @@ impl ModuleResolver {
     }
 
     /// Check if a predicate can be imported from a module
-    pub fn check_import(
-        &self,
-        module_path: &[String],
-        predicate: &str,
-    ) -> Result<(), ModuleError> {
+    pub fn check_import(&self, module_path: &[String], predicate: &str) -> Result<(), ModuleError> {
         let path_key = module_path_to_string(module_path);
-        let module = self.loaded.get(&path_key)
+        let module = self
+            .loaded
+            .get(&path_key)
             .ok_or_else(|| ModuleError::NotFound {
                 path: module_path.to_vec(),
                 searched: vec![],
@@ -330,10 +327,14 @@ mod tests {
     #[test]
     fn test_load_simple_module() {
         let tmp = TempDir::new().unwrap();
-        create_test_module(tmp.path(), "math", r#"
+        create_test_module(
+            tmp.path(),
+            "math",
+            r#"
             pred add(u32, u32, u32).
             add(1, 2, 3).
-        "#);
+        "#,
+        );
 
         let mut resolver = ModuleResolver::new(vec![]);
         let result = resolver.load_module(tmp.path(), &["math".into()]);
@@ -345,12 +346,16 @@ mod tests {
     #[test]
     fn test_private_not_exported() {
         let tmp = TempDir::new().unwrap();
-        create_test_module(tmp.path(), "graph", r#"
+        create_test_module(
+            tmp.path(),
+            "graph",
+            r#"
             pred edge(u32, u32).
             private pred helper(u32).
             edge(1, 2).
             helper(1).
-        "#);
+        "#,
+        );
 
         let mut resolver = ModuleResolver::new(vec![]);
         let result = resolver.load_module(tmp.path(), &["graph".into()]);

@@ -38,12 +38,12 @@ fn parse_args() -> Result<(String, usize, usize, usize)> {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--device" => {
-                let v = args
-                    .next()
-                    .ok_or_else(|| XlogError::Execution("Missing value for --device".to_string()))?;
-                device = v.parse().map_err(|_| {
-                    XlogError::Execution(format!("Invalid --device value: {}", v))
+                let v = args.next().ok_or_else(|| {
+                    XlogError::Execution("Missing value for --device".to_string())
                 })?;
+                device = v
+                    .parse()
+                    .map_err(|_| XlogError::Execution(format!("Invalid --device value: {}", v)))?;
             }
             "--memory-mb" => {
                 let v = args.next().ok_or_else(|| {
@@ -79,10 +79,7 @@ fn push_term_bytes(out: &mut Vec<u8>, term: &Term, typ: ScalarType) -> Result<()
     match (typ, term) {
         (ScalarType::U32, Term::Integer(v)) => {
             if *v < 0 || *v > u32::MAX as i64 {
-                return Err(XlogError::Execution(format!(
-                    "u32 out of range: {}",
-                    v
-                )));
+                return Err(XlogError::Execution(format!("u32 out of range: {}", v)));
             }
             out.extend_from_slice(&(*v as u32).to_le_bytes());
         }
@@ -97,10 +94,7 @@ fn push_term_bytes(out: &mut Vec<u8>, term: &Term, typ: ScalarType) -> Result<()
         }
         (ScalarType::I32, Term::Integer(v)) => {
             if *v < i32::MIN as i64 || *v > i32::MAX as i64 {
-                return Err(XlogError::Execution(format!(
-                    "i32 out of range: {}",
-                    v
-                )));
+                return Err(XlogError::Execution(format!("i32 out of range: {}", v)));
             }
             out.extend_from_slice(&(*v as i32).to_le_bytes());
         }
@@ -218,11 +212,21 @@ fn format_constraint(body: &[BodyLiteral]) -> String {
         .iter()
         .map(|lit| match lit {
             BodyLiteral::Positive(a) => {
-                let args = a.terms.iter().map(format_term).collect::<Vec<_>>().join(", ");
+                let args = a
+                    .terms
+                    .iter()
+                    .map(format_term)
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 format!("{}({})", a.predicate, args)
             }
             BodyLiteral::Negated(a) => {
-                let args = a.terms.iter().map(format_term).collect::<Vec<_>>().join(", ");
+                let args = a
+                    .terms
+                    .iter()
+                    .map(format_term)
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 format!("not {}({})", a.predicate, args)
             }
             BodyLiteral::Comparison(c) => format!("{:?} {:?} {:?}", c.left, c.op, c.right),
@@ -274,26 +278,35 @@ fn decode_column_to_strings(
         }
         ScalarType::U64 => {
             for chunk in bytes.chunks_exact(8) {
-                out.push(u64::from_le_bytes([
-                    chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
-                ])
-                .to_string());
+                out.push(
+                    u64::from_le_bytes([
+                        chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6],
+                        chunk[7],
+                    ])
+                    .to_string(),
+                );
             }
         }
         ScalarType::I64 => {
             for chunk in bytes.chunks_exact(8) {
-                out.push(i64::from_le_bytes([
-                    chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
-                ])
-                .to_string());
+                out.push(
+                    i64::from_le_bytes([
+                        chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6],
+                        chunk[7],
+                    ])
+                    .to_string(),
+                );
             }
         }
         ScalarType::F64 => {
             for chunk in bytes.chunks_exact(8) {
-                out.push(f64::from_le_bytes([
-                    chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
-                ])
-                .to_string());
+                out.push(
+                    f64::from_le_bytes([
+                        chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6],
+                        chunk[7],
+                    ])
+                    .to_string(),
+                );
             }
         }
         ScalarType::Bool => {
@@ -340,10 +353,7 @@ fn main() -> Result<()> {
 
     for (pred, rows) in rows_by_pred {
         let schema = compiler.schemas().get(&pred).ok_or_else(|| {
-            XlogError::Execution(format!(
-                "Missing inferred schema for predicate {}",
-                pred
-            ))
+            XlogError::Execution(format!("Missing inferred schema for predicate {}", pred))
         })?;
 
         if rows.iter().any(|r| r.len() != schema.arity()) {
@@ -396,7 +406,11 @@ fn main() -> Result<()> {
     if !violated.is_empty() {
         eprintln!("Constraint violations:");
         for &i in &violated {
-            eprintln!("  [{}] {}", i, format_constraint(&program.constraints[i].body));
+            eprintln!(
+                "  [{}] {}",
+                i,
+                format_constraint(&program.constraints[i].body)
+            );
         }
         return Err(XlogError::Execution(format!(
             "{} constraint(s) violated",

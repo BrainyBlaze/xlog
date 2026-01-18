@@ -1,8 +1,8 @@
 //! Stratification analysis for negation and aggregation
 
-use std::collections::{HashMap, HashSet};
-use xlog_core::{XlogError, Result};
 use crate::ast::{BodyLiteral, ProbEngine, Program};
+use std::collections::{HashMap, HashSet};
+use xlog_core::{Result, XlogError};
 
 /// Dependency edge type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,7 +28,9 @@ pub struct DependencyGraph {
 }
 
 impl DependencyGraph {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     pub fn add_predicate(&mut self, name: String) {
         self.predicates.insert(name);
@@ -88,9 +90,13 @@ fn find_sccs(graph: &DependencyGraph) -> Vec<Vec<String>> {
     let mut sccs: Vec<Vec<String>> = Vec::new();
 
     fn strongconnect(
-        v: &str, graph: &DependencyGraph, index_counter: &mut usize,
-        stack: &mut Vec<String>, indices: &mut HashMap<String, usize>,
-        lowlinks: &mut HashMap<String, usize>, on_stack: &mut HashSet<String>,
+        v: &str,
+        graph: &DependencyGraph,
+        index_counter: &mut usize,
+        stack: &mut Vec<String>,
+        indices: &mut HashMap<String, usize>,
+        lowlinks: &mut HashMap<String, usize>,
+        on_stack: &mut HashSet<String>,
         sccs: &mut Vec<Vec<String>>,
     ) {
         indices.insert(v.to_string(), *index_counter);
@@ -102,7 +108,16 @@ fn find_sccs(graph: &DependencyGraph) -> Vec<Vec<String>> {
         for edge in graph.outgoing(v) {
             let w = &edge.to;
             if !indices.contains_key(w) {
-                strongconnect(w, graph, index_counter, stack, indices, lowlinks, on_stack, sccs);
+                strongconnect(
+                    w,
+                    graph,
+                    index_counter,
+                    stack,
+                    indices,
+                    lowlinks,
+                    on_stack,
+                    sccs,
+                );
                 let low_v = *lowlinks.get(v).unwrap();
                 let low_w = *lowlinks.get(w).unwrap();
                 lowlinks.insert(v.to_string(), low_v.min(low_w));
@@ -121,7 +136,9 @@ fn find_sccs(graph: &DependencyGraph) -> Vec<Vec<String>> {
                 let w = stack.pop().unwrap();
                 on_stack.remove(&w);
                 scc.push(w.clone());
-                if w == v { break; }
+                if w == v {
+                    break;
+                }
             }
             sccs.push(scc);
         }
@@ -129,7 +146,16 @@ fn find_sccs(graph: &DependencyGraph) -> Vec<Vec<String>> {
 
     for pred in &graph.predicates {
         if !indices.contains_key(pred) {
-            strongconnect(pred, graph, &mut index_counter, &mut stack, &mut indices, &mut lowlinks, &mut on_stack, &mut sccs);
+            strongconnect(
+                pred,
+                graph,
+                &mut index_counter,
+                &mut stack,
+                &mut indices,
+                &mut lowlinks,
+                &mut on_stack,
+                &mut sccs,
+            );
         }
     }
 
@@ -213,7 +239,10 @@ pub fn stratify(program: &Program) -> Result<Vec<Stratum>> {
     }
 
     let mut strata: Vec<Stratum> = (0..=max_stratum)
-        .map(|id| Stratum { id, predicates: vec![] })
+        .map(|id| Stratum {
+            id,
+            predicates: vec![],
+        })
         .collect();
 
     for (pred, stratum) in stratum_map {
@@ -242,18 +271,36 @@ mod tests {
     fn create_tc_program() -> Program {
         let mut program = Program::new();
         program.rules.push(Rule {
-            head: Atom { predicate: "edge".into(), terms: vec![Term::Integer(1), Term::Integer(2)] },
+            head: Atom {
+                predicate: "edge".into(),
+                terms: vec![Term::Integer(1), Term::Integer(2)],
+            },
             body: vec![],
         });
         program.rules.push(Rule {
-            head: Atom { predicate: "reach".into(), terms: vec![Term::Variable("X".into()), Term::Variable("Y".into())] },
-            body: vec![BodyLiteral::Positive(Atom { predicate: "edge".into(), terms: vec![Term::Variable("X".into()), Term::Variable("Y".into())] })],
+            head: Atom {
+                predicate: "reach".into(),
+                terms: vec![Term::Variable("X".into()), Term::Variable("Y".into())],
+            },
+            body: vec![BodyLiteral::Positive(Atom {
+                predicate: "edge".into(),
+                terms: vec![Term::Variable("X".into()), Term::Variable("Y".into())],
+            })],
         });
         program.rules.push(Rule {
-            head: Atom { predicate: "reach".into(), terms: vec![Term::Variable("X".into()), Term::Variable("Z".into())] },
+            head: Atom {
+                predicate: "reach".into(),
+                terms: vec![Term::Variable("X".into()), Term::Variable("Z".into())],
+            },
             body: vec![
-                BodyLiteral::Positive(Atom { predicate: "reach".into(), terms: vec![Term::Variable("X".into()), Term::Variable("Y".into())] }),
-                BodyLiteral::Positive(Atom { predicate: "edge".into(), terms: vec![Term::Variable("Y".into()), Term::Variable("Z".into())] }),
+                BodyLiteral::Positive(Atom {
+                    predicate: "reach".into(),
+                    terms: vec![Term::Variable("X".into()), Term::Variable("Y".into())],
+                }),
+                BodyLiteral::Positive(Atom {
+                    predicate: "edge".into(),
+                    terms: vec![Term::Variable("Y".into()), Term::Variable("Z".into())],
+                }),
             ],
         });
         program
@@ -263,19 +310,34 @@ mod tests {
         let mut program = Program::new();
         for i in 1..=3 {
             program.rules.push(Rule {
-                head: Atom { predicate: "node".into(), terms: vec![Term::Integer(i)] },
+                head: Atom {
+                    predicate: "node".into(),
+                    terms: vec![Term::Integer(i)],
+                },
                 body: vec![],
             });
         }
         program.rules.push(Rule {
-            head: Atom { predicate: "edge".into(), terms: vec![Term::Integer(1), Term::Integer(2)] },
+            head: Atom {
+                predicate: "edge".into(),
+                terms: vec![Term::Integer(1), Term::Integer(2)],
+            },
             body: vec![],
         });
         program.rules.push(Rule {
-            head: Atom { predicate: "isolated".into(), terms: vec![Term::Variable("X".into())] },
+            head: Atom {
+                predicate: "isolated".into(),
+                terms: vec![Term::Variable("X".into())],
+            },
             body: vec![
-                BodyLiteral::Positive(Atom { predicate: "node".into(), terms: vec![Term::Variable("X".into())] }),
-                BodyLiteral::Negated(Atom { predicate: "edge".into(), terms: vec![Term::Variable("X".into()), Term::Variable("Y".into())] }),
+                BodyLiteral::Positive(Atom {
+                    predicate: "node".into(),
+                    terms: vec![Term::Variable("X".into())],
+                }),
+                BodyLiteral::Negated(Atom {
+                    predicate: "edge".into(),
+                    terms: vec![Term::Variable("X".into()), Term::Variable("Y".into())],
+                }),
             ],
         });
         program
@@ -284,12 +346,24 @@ mod tests {
     fn create_unstratifiable_program() -> Program {
         let mut program = Program::new();
         program.rules.push(Rule {
-            head: Atom { predicate: "p".into(), terms: vec![] },
-            body: vec![BodyLiteral::Negated(Atom { predicate: "q".into(), terms: vec![] })],
+            head: Atom {
+                predicate: "p".into(),
+                terms: vec![],
+            },
+            body: vec![BodyLiteral::Negated(Atom {
+                predicate: "q".into(),
+                terms: vec![],
+            })],
         });
         program.rules.push(Rule {
-            head: Atom { predicate: "q".into(), terms: vec![] },
-            body: vec![BodyLiteral::Negated(Atom { predicate: "p".into(), terms: vec![] })],
+            head: Atom {
+                predicate: "q".into(),
+                terms: vec![],
+            },
+            body: vec![BodyLiteral::Negated(Atom {
+                predicate: "p".into(),
+                terms: vec![],
+            })],
         });
         program
     }
@@ -307,7 +381,11 @@ mod tests {
         let result = stratify(&program);
         assert!(result.is_ok(), "Stratification failed: {:?}", result.err());
         let strata = result.unwrap();
-        assert!(strata.len() >= 2, "Expected at least 2 strata, got {}", strata.len());
+        assert!(
+            strata.len() >= 2,
+            "Expected at least 2 strata, got {}",
+            strata.len()
+        );
     }
 
     #[test]

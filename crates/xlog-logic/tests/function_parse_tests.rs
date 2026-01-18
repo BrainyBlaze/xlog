@@ -103,7 +103,9 @@ fn test_parse_nested_func_calls() {
             assert_eq!(name, "outer");
             assert_eq!(args.len(), 1);
             match &args[0] {
-                ArithExpr::FuncCall { name: inner_name, .. } => {
+                ArithExpr::FuncCall {
+                    name: inner_name, ..
+                } => {
                     assert_eq!(inner_name, "inner");
                 }
                 _ => panic!("Expected inner FuncCall"),
