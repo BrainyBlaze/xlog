@@ -308,6 +308,7 @@ pub struct PredDecl {
 /// A complete XLOG program
 #[derive(Debug, Clone, Default)]
 pub struct Program {
+    pub imports: Vec<UseDecl>,
     pub domains: Vec<DomainDecl>,
     pub predicates: Vec<PredDecl>,
     pub rules: Vec<Rule>,
