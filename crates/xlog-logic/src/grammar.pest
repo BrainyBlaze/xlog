@@ -100,7 +100,8 @@ prob_engine_value = { "exact_ddnnf" | "mc" }
 prob_cache_value = { "on" | "off" }
 pragma_prob_engine = { "#pragma" ~ "prob_engine" ~ "=" ~ prob_engine_value }
 pragma_prob_cache = { "#pragma" ~ "prob_cache" ~ "=" ~ prob_cache_value }
-pragma = { pragma_prob_engine | pragma_prob_cache }
+pragma_max_recursion = { "#pragma" ~ "max_recursion_depth" ~ "=" ~ integer }
+pragma = { pragma_prob_engine | pragma_prob_cache | pragma_max_recursion }
 
 // Domain declarations
 domain_decl = { "domain" ~ ident ~ ":" ~ type_spec ~ "." }
