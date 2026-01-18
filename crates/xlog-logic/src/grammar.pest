@@ -51,9 +51,13 @@ arith_op_add = { "+" | "-" }
 // Built-in functions
 builtin_fn = { "abs" | "min" | "max" | "pow" | "cast" }
 
+// Function call: square(X) or dist(X1, Y1, X2, Y2)
+func_call = { ident ~ "(" ~ (arith_expr ~ ("," ~ arith_expr)*)? ~ ")" }
+
 // Arithmetic expressions with precedence
 arith_primary = {
     builtin_fn ~ "(" ~ arith_expr ~ ("," ~ (arith_expr | type_spec))* ~ ")" |
+    func_call |
     "(" ~ arith_expr ~ ")" |
     variable |
     float_num |
