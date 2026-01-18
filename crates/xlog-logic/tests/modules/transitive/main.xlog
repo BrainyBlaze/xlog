@@ -1,0 +1,7 @@
+// Main module - depends on mid (which depends on base)
+use mid.
+
+pred main_pred(u32).
+main_pred(X) :- mid_pred(X).
+
+?- main_pred(X).

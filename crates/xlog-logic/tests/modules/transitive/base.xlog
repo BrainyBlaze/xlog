@@ -1,0 +1,4 @@
+// Base module - no dependencies
+pred base_pred(u32).
+base_pred(1).
+base_pred(2).

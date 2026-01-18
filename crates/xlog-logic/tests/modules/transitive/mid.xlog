@@ -1,0 +1,5 @@
+// Mid-level module - depends on base
+use base.
+
+pred mid_pred(u32).
+mid_pred(X) :- base_pred(X), X > 1.

@@ -1,0 +1,2 @@
+use a.
+b_pred(X) :- a_pred(X).

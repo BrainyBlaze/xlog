@@ -1,0 +1,7 @@
+use lib/utils::{double}.
+
+pred input(u32).
+input(5).
+input(10).
+
+result(X, Y) :- input(X), double(X, Y).

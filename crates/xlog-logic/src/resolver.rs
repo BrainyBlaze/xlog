@@ -232,6 +232,16 @@ impl ModuleResolver {
     pub fn get_module(&self, module_path: &[String]) -> Option<&LoadedModule> {
         self.loaded.get(&module_path_to_string(module_path))
     }
+
+    /// Check if a module is loaded
+    pub fn is_loaded(&self, module_path: &str) -> bool {
+        self.loaded.contains_key(module_path)
+    }
+
+    /// Get all loaded module paths (for testing)
+    pub fn loaded_modules(&self) -> Vec<&str> {
+        self.loaded.keys().map(|s| s.as_str()).collect()
+    }
 }
 
 #[cfg(test)]

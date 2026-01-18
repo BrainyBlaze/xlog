@@ -1,0 +1,4 @@
+// Helper predicates for math operations
+pred double(u32, u32).
+
+double(X, Y) :- Y is X * 2.

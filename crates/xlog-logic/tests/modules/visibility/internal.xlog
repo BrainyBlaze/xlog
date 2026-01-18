@@ -1,0 +1,5 @@
+pred public_pred(u32).
+private pred private_pred(u32).
+
+public_pred(1).
+private_pred(2).

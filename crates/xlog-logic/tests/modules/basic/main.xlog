@@ -1,0 +1,3 @@
+use helper.
+
+main_pred(X) :- helper_pred(X).

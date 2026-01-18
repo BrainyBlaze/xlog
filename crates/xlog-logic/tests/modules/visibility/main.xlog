@@ -1,0 +1,4 @@
+use internal::{public_pred}.
+// Attempting to import private_pred should fail
+
+result(X) :- public_pred(X).
