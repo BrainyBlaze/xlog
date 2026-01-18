@@ -1,3 +1,4 @@
+#![allow(clippy::arc_with_non_send_sync)]
 use std::sync::Arc;
 
 use xlog_core::{symbol, MemoryBudget, RuntimeConfig, ScalarType, Schema};
@@ -83,8 +84,10 @@ fn setup_executor_with_facts(
 
 #[test]
 fn test_executor_respects_max_iterations() {
-    let mut config = RuntimeConfig::default();
-    config.max_iterations = 1;
+    let config = RuntimeConfig {
+        max_iterations: 1,
+        ..RuntimeConfig::default()
+    };
 
     let (mut executor, provider) = match create_executor_with_config(config) {
         Some(e) => e,

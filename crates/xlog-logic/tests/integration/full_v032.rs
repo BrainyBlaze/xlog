@@ -309,7 +309,7 @@ fn test_inventory_warehouse_system() {
 
     // Verify main program structure
     assert_eq!(main.imports.len(), 2);
-    assert!(main.queries.len() >= 1);
+    assert!(!main.queries.is_empty());
 
     // Verify needs_reorder rule has complex body
     let needs_reorder_rules: Vec<_> = main

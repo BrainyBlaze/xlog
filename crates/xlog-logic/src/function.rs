@@ -249,10 +249,8 @@ impl FunctionRegistry {
             }
 
             // Check recursive functions have base case
-            if self.is_recursive(name) {
-                if !Self::has_base_case(&func.body) {
-                    return Err(FunctionError::RecursionWithoutBaseCase { name: name.clone() });
-                }
+            if self.is_recursive(name) && !Self::has_base_case(&func.body) {
+                return Err(FunctionError::RecursionWithoutBaseCase { name: name.clone() });
             }
         }
         Ok(())

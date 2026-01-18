@@ -1,3 +1,4 @@
+#![allow(clippy::arc_with_non_send_sync)]
 //! Real-World Integration Tests for XLOG
 //!
 //! These tests validate the xlog-logic subsystem against real-world problems:
@@ -1239,8 +1240,8 @@ fn test_arithmetic_chained() {
         let c2 = read_column_u32(&provider, sum_squares, 2);
         let results: Vec<(u32, u32, u32)> = c0
             .into_iter()
-            .zip(c1.into_iter())
-            .zip(c2.into_iter())
+            .zip(c1)
+            .zip(c2)
             .map(|((a, b), c)| (a, b, c))
             .collect();
 

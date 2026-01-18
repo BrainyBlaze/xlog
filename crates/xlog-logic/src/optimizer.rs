@@ -215,12 +215,11 @@ impl Optimizer {
     ///
     /// An optimized plan that is semantically equivalent to the input
     pub fn optimize(&self, node: RirNode) -> RirNode {
-        let node = if self.config.enable_pushdown {
+        if self.config.enable_pushdown {
             self.predicate_pushdown(node)
         } else {
             node
-        };
-        node
+        }
     }
 
     /// Pushes filter predicates closer to scan nodes.
@@ -844,6 +843,7 @@ impl Optimizer {
     }
 
     /// Estimates cost for a join operation.
+    #[allow(clippy::too_many_arguments)]
     fn estimate_join_cost(
         &self,
         left_cost: PlanCost,

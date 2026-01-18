@@ -194,6 +194,7 @@ impl ModuleResolver {
 
     /// Validate all imports in a program
     /// Returns (predicate imports, function imports) mapped to their source modules
+    #[allow(clippy::type_complexity)]
     pub fn validate_imports(
         &self,
         program: &Program,

@@ -1,3 +1,4 @@
+#![allow(clippy::arc_with_non_send_sync)]
 //! End-to-end integration tests for XLOG
 //!
 //! These tests verify the complete system works by:
@@ -485,8 +486,8 @@ fn test_aggregates_multi_key_sum() {
 
     let mut rows: Vec<(u32, u32, u64)> = cats
         .into_iter()
-        .zip(regions.into_iter())
-        .zip(sums.into_iter())
+        .zip(regions)
+        .zip(sums)
         .map(|((c, r), s)| (c, r, s))
         .collect();
     rows.sort();

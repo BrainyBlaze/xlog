@@ -39,7 +39,7 @@ fn test_compile_with_optimizer_cost_estimation() {
 
     // Register relations that the compiler creates
     // The compiler assigns RelIds to predicates - we'll use the rel_ids() method
-    for (_name, rel_id) in compiler.rel_ids() {
+    for rel_id in compiler.rel_ids().values() {
         stats_mgr.register_relation(*rel_id);
         // Set reasonable default cardinalities for test
         stats_mgr.update_cardinality(*rel_id, 100);
@@ -100,7 +100,7 @@ fn test_optimizer_with_stratified_program() {
         .expect("Should compile stratified program");
 
     let mut stats_mgr = StatsManager::new();
-    for (_name, rel_id) in compiler.rel_ids() {
+    for rel_id in compiler.rel_ids().values() {
         stats_mgr.register_relation(*rel_id);
         stats_mgr.update_cardinality(*rel_id, 50);
         stats_mgr.update_byte_size(*rel_id, 400);
@@ -145,7 +145,7 @@ fn test_optimizer_with_aggregation() {
         .expect("Should compile aggregation program");
 
     let mut stats_mgr = StatsManager::new();
-    for (_name, rel_id) in compiler.rel_ids() {
+    for rel_id in compiler.rel_ids().values() {
         stats_mgr.register_relation(*rel_id);
         stats_mgr.update_cardinality(*rel_id, 100);
         stats_mgr.update_byte_size(*rel_id, 800);
@@ -264,7 +264,7 @@ fn test_optimize_compiled_rules() {
     let plan = compiler.compile(source).expect("Should compile");
 
     let mut stats_mgr = StatsManager::new();
-    for (_name, rel_id) in compiler.rel_ids() {
+    for rel_id in compiler.rel_ids().values() {
         stats_mgr.register_relation(*rel_id);
         stats_mgr.update_cardinality(*rel_id, 1000);
     }
@@ -700,7 +700,7 @@ fn test_optimizer_graph_algorithm() {
         .expect("Should compile graph algorithm");
 
     let mut stats_mgr = StatsManager::new();
-    for (_name, rel_id) in compiler.rel_ids() {
+    for rel_id in compiler.rel_ids().values() {
         stats_mgr.register_relation(*rel_id);
         stats_mgr.update_cardinality(*rel_id, 10_000);
     }

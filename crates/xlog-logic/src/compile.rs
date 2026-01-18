@@ -713,11 +713,8 @@ mod tests {
 
         // Peel projections to reach the join.
         let mut node = &out_rule.body;
-        loop {
-            match node {
-                RirNode::Project { input, .. } => node = input,
-                _ => break,
-            }
+        while let RirNode::Project { input, .. } = node {
+            node = input;
         }
 
         match node {

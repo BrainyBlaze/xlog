@@ -43,7 +43,7 @@ impl Lcg {
     fn next_prob(&mut self) -> f64 {
         let r = (self.next() % 100) as f64 / 100.0;
         // Clamp to valid probability range
-        r.max(0.01).min(0.99)
+        r.clamp(0.01, 0.99)
     }
 }
 

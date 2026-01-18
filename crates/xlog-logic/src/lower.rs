@@ -404,13 +404,13 @@ impl Lowerer {
         }
     }
 
-    fn split_body_literals<'a>(
-        body: &'a [BodyLiteral],
+    fn split_body_literals(
+        body: &[BodyLiteral],
     ) -> (
-        Vec<&'a Atom>,
-        Vec<&'a Atom>,
-        Vec<&'a Comparison>,
-        Vec<&'a IsExpr>,
+        Vec<&Atom>,
+        Vec<&Atom>,
+        Vec<&Comparison>,
+        Vec<&IsExpr>,
     ) {
         let mut positive_atoms: Vec<&Atom> = Vec::new();
         let mut negated_atoms: Vec<&Atom> = Vec::new();
@@ -734,7 +734,7 @@ impl Lowerer {
 
         let mut plans: Vec<JoinPlan<'a>> = Vec::with_capacity(atoms.len());
         for (idx, atom) in atoms.iter().enumerate() {
-            plans.push(self.make_leaf_plan(*atom, idx)?);
+            plans.push(self.make_leaf_plan(atom, idx)?);
         }
 
         while plans.len() > 1 {
@@ -1298,7 +1298,8 @@ impl Lowerer {
                 }
                 Term::Aggregate(agg) => {
                     let key = (agg.op, agg.variable.clone());
-                    if !agg_to_pos.contains_key(&key) {
+                    if let std::collections::hash_map::Entry::Vacant(entry) = agg_to_pos.entry(key)
+                    {
                         // Ensure the aggregated variable is bound.
                         let col = var_env
                             .get_column(&agg.variable)
@@ -1316,7 +1317,7 @@ impl Lowerer {
 
                         let agg_pos = agg_specs.len();
                         agg_specs.push((agg.op, agg.variable.clone()));
-                        agg_to_pos.insert(key, agg_pos);
+                        entry.insert(agg_pos);
 
                         // Keep clippy happy about unused value_pos in insert_with closure.
                         let _ = value_pos;
@@ -2326,13 +2327,10 @@ mod tests {
         // Should contain a Filter for the constant 1
         fn has_const_filter(node: &RirNode) -> bool {
             match node {
-                RirNode::Filter { predicate, .. } => {
-                    if let Expr::Compare { right, .. } = predicate {
-                        matches!(**right, Expr::Const(_))
-                    } else {
-                        false
-                    }
-                }
+                RirNode::Filter {
+                    predicate: Expr::Compare { right, .. },
+                    ..
+                } => matches!(**right, Expr::Const(_)),
                 RirNode::Project { input, .. } => has_const_filter(input),
                 _ => false,
             }

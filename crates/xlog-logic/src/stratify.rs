@@ -89,6 +89,7 @@ fn find_sccs(graph: &DependencyGraph) -> Vec<Vec<String>> {
     let mut on_stack: HashSet<String> = HashSet::new();
     let mut sccs: Vec<Vec<String>> = Vec::new();
 
+    #[allow(clippy::too_many_arguments)]
     fn strongconnect(
         v: &str,
         graph: &DependencyGraph,
