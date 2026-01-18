@@ -151,6 +151,12 @@ fn run_deterministic(args: RunArgs) -> Result<()> {
             };
             eprintln!("{}", stats_output);
         }
+        // Symbol table statistics
+        eprintln!(
+            "Symbols: {} interned ({} bytes)",
+            symbol::count(),
+            symbol::memory_usage()
+        );
     }
 
     Ok(())
