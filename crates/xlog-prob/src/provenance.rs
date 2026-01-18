@@ -907,6 +907,17 @@ pub(crate) fn eval_arith_expr(expr: &ArithExpr, binding: &HashMap<String, Value>
             // type system, but provenance needs only deterministic evaluation.
             eval_arith_expr(e, binding)
         }
+        ArithExpr::FuncCall { name, .. } => {
+            Err(XlogError::Compilation(format!(
+                "Function call `{}` must be expanded before provenance extraction",
+                name
+            )))
+        }
+        ArithExpr::Conditional { .. } => {
+            Err(XlogError::Compilation(
+                "Conditional expressions must be expanded before provenance extraction".to_string()
+            ))
+        }
     }
 }
 
