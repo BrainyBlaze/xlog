@@ -83,6 +83,12 @@ pub enum ArithExpr {
 
     // Type cast
     Cast(Box<ArithExpr>, ScalarType),
+
+    /// User-defined function call
+    FuncCall {
+        name: String,
+        args: Vec<ArithExpr>,
+    },
 }
 
 impl ArithExpr {
@@ -99,6 +105,9 @@ impl ArithExpr {
                 vars
             }
             ArithExpr::Abs(e) | ArithExpr::Cast(e, _) => e.variables(),
+            ArithExpr::FuncCall { args, .. } => {
+                args.iter().flat_map(|a| a.variables()).collect()
+            }
         }
     }
 }
@@ -247,11 +256,16 @@ pub enum ProbCache {
 pub struct Directives {
     pub prob_engine: Option<ProbEngine>,
     pub prob_cache: Option<ProbCache>,
+    pub max_recursion_depth: Option<u32>,
 }
 
 impl Directives {
     pub fn prob_engine_or_default(&self) -> ProbEngine {
         self.prob_engine.unwrap_or(ProbEngine::ExactDdnnf)
+    }
+
+    pub fn max_recursion_depth_or_default(&self) -> u32 {
+        self.max_recursion_depth.unwrap_or(1000)
     }
 }
 
@@ -305,10 +319,64 @@ pub struct PredDecl {
     pub is_private: bool,
 }
 
+/// Function parameter with optional type annotation
+#[derive(Debug, Clone, PartialEq)]
+pub struct FuncParam {
+    pub name: String,
+    pub typ: Option<ScalarType>,
+}
+
+/// Conditional expression: if X < 0 then A else B
+#[derive(Debug, Clone, PartialEq)]
+pub struct CondExpr {
+    /// Left side of condition
+    pub cond_left: ArithExpr,
+    /// Comparison operator
+    pub cond_op: CompOp,
+    /// Right side of condition
+    pub cond_right: ArithExpr,
+    /// Value if condition is true
+    pub then_branch: Box<FuncBody>,
+    /// Value if condition is false
+    pub else_branch: Box<FuncBody>,
+}
+
+/// Function body - arithmetic, conditional, or predicate-based
+#[derive(Debug, Clone, PartialEq)]
+pub enum FuncBody {
+    /// Pure arithmetic expression: X * X
+    Arithmetic(ArithExpr),
+    /// Conditional expression: if X < 0 then ...
+    Conditional(CondExpr),
+    /// Predicate-based: P :- parent(X, P)
+    Predicate {
+        /// Result variable
+        result: String,
+        /// Body literals
+        body: Vec<BodyLiteral>,
+    },
+}
+
+/// User-defined function
+#[derive(Debug, Clone, PartialEq)]
+pub struct FuncDef {
+    /// Function name
+    pub name: String,
+    /// Parameters
+    pub params: Vec<FuncParam>,
+    /// Optional return type annotation
+    pub return_type: Option<ScalarType>,
+    /// Function body
+    pub body: FuncBody,
+    /// Is this function private?
+    pub is_private: bool,
+}
+
 /// A complete XLOG program
 #[derive(Debug, Clone, Default)]
 pub struct Program {
     pub imports: Vec<UseDecl>,
+    pub functions: Vec<FuncDef>,
     pub domains: Vec<DomainDecl>,
     pub predicates: Vec<PredDecl>,
     pub rules: Vec<Rule>,

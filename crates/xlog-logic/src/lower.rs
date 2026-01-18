@@ -1501,6 +1501,11 @@ impl Lowerer {
             }
 
             ArithExpr::Cast(_, target) => Ok(*target),
+
+            ArithExpr::FuncCall { name, .. } => Err(XlogError::Compilation(format!(
+                "User-defined function '{}' must be inlined before lowering",
+                name
+            ))),
         }
     }
 
@@ -1566,6 +1571,11 @@ impl Lowerer {
                 Box::new(self.arith_to_expr(r, var_env)?),
             )),
             ArithExpr::Cast(e, t) => Ok(Expr::Cast(Box::new(self.arith_to_expr(e, var_env)?), *t)),
+
+            ArithExpr::FuncCall { name, .. } => Err(XlogError::Compilation(format!(
+                "User-defined function '{}' must be inlined before lowering",
+                name
+            ))),
         }
     }
 
