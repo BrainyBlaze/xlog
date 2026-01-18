@@ -302,6 +302,7 @@ pub struct DomainDecl {
 pub struct PredDecl {
     pub name: String,
     pub types: Vec<ScalarType>,
+    pub is_private: bool,
 }
 
 /// A complete XLOG program

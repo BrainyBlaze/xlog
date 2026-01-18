@@ -189,7 +189,7 @@ fn build_pred_decl(pair: Pair<'_, Rule>) -> Result<PredDecl> {
         }
     }
 
-    Ok(PredDecl { name, types })
+    Ok(PredDecl { name, types, is_private: false })
 }
 
 /// Build a type specification
