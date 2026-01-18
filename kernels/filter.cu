@@ -26,6 +26,34 @@
 #define BLOCK_SIZE 256
 
 /**
+ * Transform f64 to comparable i64 for total ordering.
+ *
+ * IEEE 754 total order: -NaN < -Inf < ... < -0.0 < +0.0 < ... < +Inf < +NaN
+ *
+ * Matches Rust's f64::total_cmp() algorithm:
+ * - Negative floats: XOR with 0x7FFFFFFFFFFFFFFF (flip all except sign)
+ * - Positive floats: unchanged (XOR with 0)
+ * This works correctly with signed comparison.
+ */
+__device__ __forceinline__ int64_t float_to_ordered_f64(double val) {
+    int64_t bits = __double_as_longlong(val);
+    // Arithmetic shift: -1 (all 1s) for negative, 0 for positive
+    // Unsigned shift >> 1 gives 0x7FFFFFFFFFFFFFFF or 0
+    int64_t mask = (int64_t)(((uint64_t)(bits >> 63)) >> 1);
+    return bits ^ mask;
+}
+
+/**
+ * Transform f32 to comparable i32 for total ordering.
+ * Same algorithm as f64 version.
+ */
+__device__ __forceinline__ int32_t float_to_ordered_f32(float val) {
+    int32_t bits = __float_as_int(val);
+    int32_t mask = (int32_t)(((uint32_t)(bits >> 31)) >> 1);
+    return bits ^ mask;
+}
+
+/**
  * Compare i64 column against constant, output mask.
  * @param column Input column data
  * @param constant Value to compare against
@@ -82,7 +110,9 @@ extern "C" __global__ void filter_compare_u32(
     mask[gid] = result ? 1 : 0;
 }
 
-/** Compare f64 column against constant */
+/** Compare f64 column against constant.
+ *  Eq/Ne use IEEE semantics. Lt/Le/Gt/Ge use total ordering.
+ */
 extern "C" __global__ void filter_compare_f64(
     const double* __restrict__ column,
     double constant,
@@ -98,10 +128,10 @@ extern "C" __global__ void filter_compare_f64(
     switch (op) {
         case OP_EQ: result = (val == constant); break;
         case OP_NE: result = (val != constant); break;
-        case OP_LT: result = (val < constant); break;
-        case OP_LE: result = (val <= constant); break;
-        case OP_GT: result = (val > constant); break;
-        case OP_GE: result = (val >= constant); break;
+        case OP_LT: result = (float_to_ordered_f64(val) < float_to_ordered_f64(constant)); break;
+        case OP_LE: result = (float_to_ordered_f64(val) <= float_to_ordered_f64(constant)); break;
+        case OP_GT: result = (float_to_ordered_f64(val) > float_to_ordered_f64(constant)); break;
+        case OP_GE: result = (float_to_ordered_f64(val) >= float_to_ordered_f64(constant)); break;
         default: result = false;
     }
     mask[gid] = result ? 1 : 0;
@@ -157,7 +187,9 @@ extern "C" __global__ void filter_compare_u64(
     mask[gid] = result ? 1 : 0;
 }
 
-/** Compare f32 column against constant */
+/** Compare f32 column against constant.
+ *  Eq/Ne use IEEE semantics. Lt/Le/Gt/Ge use total ordering.
+ */
 extern "C" __global__ void filter_compare_f32(
     const float* __restrict__ column,
     float constant,
@@ -173,10 +205,10 @@ extern "C" __global__ void filter_compare_f32(
     switch (op) {
         case OP_EQ: result = (val == constant); break;
         case OP_NE: result = (val != constant); break;
-        case OP_LT: result = (val < constant); break;
-        case OP_LE: result = (val <= constant); break;
-        case OP_GT: result = (val > constant); break;
-        case OP_GE: result = (val >= constant); break;
+        case OP_LT: result = (float_to_ordered_f32(val) < float_to_ordered_f32(constant)); break;
+        case OP_LE: result = (float_to_ordered_f32(val) <= float_to_ordered_f32(constant)); break;
+        case OP_GT: result = (float_to_ordered_f32(val) > float_to_ordered_f32(constant)); break;
+        case OP_GE: result = (float_to_ordered_f32(val) >= float_to_ordered_f32(constant)); break;
         default: result = false;
     }
     mask[gid] = result ? 1 : 0;
@@ -311,7 +343,9 @@ extern "C" __global__ void filter_compare_u64_col(
     mask[gid] = result ? 1 : 0;
 }
 
-/** Compare f32 column against column */
+/** Compare f32 column against column.
+ *  Eq/Ne use IEEE semantics. Lt/Le/Gt/Ge use total ordering.
+ */
 extern "C" __global__ void filter_compare_f32_col(
     const float* __restrict__ left,
     const float* __restrict__ right,
@@ -328,16 +362,18 @@ extern "C" __global__ void filter_compare_f32_col(
     switch (op) {
         case OP_EQ: result = (lval == rval); break;
         case OP_NE: result = (lval != rval); break;
-        case OP_LT: result = (lval < rval); break;
-        case OP_LE: result = (lval <= rval); break;
-        case OP_GT: result = (lval > rval); break;
-        case OP_GE: result = (lval >= rval); break;
+        case OP_LT: result = (float_to_ordered_f32(lval) < float_to_ordered_f32(rval)); break;
+        case OP_LE: result = (float_to_ordered_f32(lval) <= float_to_ordered_f32(rval)); break;
+        case OP_GT: result = (float_to_ordered_f32(lval) > float_to_ordered_f32(rval)); break;
+        case OP_GE: result = (float_to_ordered_f32(lval) >= float_to_ordered_f32(rval)); break;
         default: result = false;
     }
     mask[gid] = result ? 1 : 0;
 }
 
-/** Compare f64 column against column */
+/** Compare f64 column against column.
+ *  Eq/Ne use IEEE semantics. Lt/Le/Gt/Ge use total ordering.
+ */
 extern "C" __global__ void filter_compare_f64_col(
     const double* __restrict__ left,
     const double* __restrict__ right,
@@ -354,10 +390,10 @@ extern "C" __global__ void filter_compare_f64_col(
     switch (op) {
         case OP_EQ: result = (lval == rval); break;
         case OP_NE: result = (lval != rval); break;
-        case OP_LT: result = (lval < rval); break;
-        case OP_LE: result = (lval <= rval); break;
-        case OP_GT: result = (lval > rval); break;
-        case OP_GE: result = (lval >= rval); break;
+        case OP_LT: result = (float_to_ordered_f64(lval) < float_to_ordered_f64(rval)); break;
+        case OP_LE: result = (float_to_ordered_f64(lval) <= float_to_ordered_f64(rval)); break;
+        case OP_GT: result = (float_to_ordered_f64(lval) > float_to_ordered_f64(rval)); break;
+        case OP_GE: result = (float_to_ordered_f64(lval) >= float_to_ordered_f64(rval)); break;
         default: result = false;
     }
     mask[gid] = result ? 1 : 0;
@@ -457,6 +493,7 @@ extern "C" __global__ void filter_compare_u32_scan_phase1(
 
 /**
  * Fused compare + scan phase1 for f64 filters.
+ * Eq/Ne use IEEE semantics. Lt/Le/Gt/Ge use total ordering.
  *
  * Produces:
  * - mask[gid] (0/1)
@@ -484,10 +521,10 @@ extern "C" __global__ void filter_compare_f64_scan_phase1(
         switch (op) {
             case OP_EQ: result = (col_val == constant); break;
             case OP_NE: result = (col_val != constant); break;
-            case OP_LT: result = (col_val < constant); break;
-            case OP_LE: result = (col_val <= constant); break;
-            case OP_GT: result = (col_val > constant); break;
-            case OP_GE: result = (col_val >= constant); break;
+            case OP_LT: result = (float_to_ordered_f64(col_val) < float_to_ordered_f64(constant)); break;
+            case OP_LE: result = (float_to_ordered_f64(col_val) <= float_to_ordered_f64(constant)); break;
+            case OP_GT: result = (float_to_ordered_f64(col_val) > float_to_ordered_f64(constant)); break;
+            case OP_GE: result = (float_to_ordered_f64(col_val) >= float_to_ordered_f64(constant)); break;
             default: result = false;
         }
         uint8_t out = result ? 1 : 0;
@@ -499,6 +536,66 @@ extern "C" __global__ void filter_compare_f64_scan_phase1(
     __syncthreads();
 
     // Inclusive scan within block (Hillis-Steele style).
+    for (uint32_t stride = 1; stride < BLOCK_SIZE; stride *= 2) {
+        uint32_t left_val = 0;
+        if (tid >= stride) {
+            left_val = temp[tid - stride];
+        }
+        __syncthreads();
+        temp[tid] += left_val;
+        __syncthreads();
+    }
+
+    uint32_t inclusive = temp[tid];
+    uint32_t exclusive = (tid == 0) ? 0 : temp[tid - 1];
+
+    if (gid < num_rows) {
+        prefix_sum[gid] = exclusive;
+    }
+
+    if (tid == BLOCK_SIZE - 1) {
+        block_sums[blockIdx.x] = inclusive;
+    }
+}
+
+/**
+ * Fused compare + scan phase1 for f32 filters.
+ */
+extern "C" __global__ void filter_compare_f32_scan_phase1(
+    const float* __restrict__ column,
+    float constant,
+    uint32_t num_rows,
+    uint8_t op,
+    uint8_t* __restrict__ mask,
+    uint32_t* __restrict__ prefix_sum,
+    uint32_t* __restrict__ block_sums
+) {
+    __shared__ uint32_t temp[BLOCK_SIZE];
+
+    uint32_t tid = threadIdx.x;
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+
+    uint32_t val = 0;
+    if (gid < num_rows) {
+        float col_val = column[gid];
+        bool result;
+        switch (op) {
+            case OP_EQ: result = (col_val == constant); break;
+            case OP_NE: result = (col_val != constant); break;
+            case OP_LT: result = (float_to_ordered_f32(col_val) < float_to_ordered_f32(constant)); break;
+            case OP_LE: result = (float_to_ordered_f32(col_val) <= float_to_ordered_f32(constant)); break;
+            case OP_GT: result = (float_to_ordered_f32(col_val) > float_to_ordered_f32(constant)); break;
+            case OP_GE: result = (float_to_ordered_f32(col_val) >= float_to_ordered_f32(constant)); break;
+            default: result = false;
+        }
+        uint8_t out = result ? 1 : 0;
+        mask[gid] = out;
+        val = (uint32_t)out;
+    }
+
+    temp[tid] = val;
+    __syncthreads();
+
     for (uint32_t stride = 1; stride < BLOCK_SIZE; stride *= 2) {
         uint32_t left_val = 0;
         if (tid >= stride) {

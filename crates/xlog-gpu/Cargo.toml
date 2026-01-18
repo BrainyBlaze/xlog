@@ -9,3 +9,10 @@ xlog-cuda = { path = "../xlog-cuda" }
 xlog-ir = { path = "../xlog-ir" }
 xlog-logic = { path = "../xlog-logic" }
 xlog-runtime = { path = "../xlog-runtime" }
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "logic_bench"
+harness = false

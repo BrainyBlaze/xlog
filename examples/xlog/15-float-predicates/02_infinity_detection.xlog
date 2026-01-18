@@ -1,0 +1,40 @@
+// Float Predicates: Infinity Detection
+//
+// Demonstrates how infinity values behave in filter predicates.
+//
+// Key semantics:
+// - +Infinity > all finite values (total ordering)
+// - -Infinity < all finite values (total ordering)
+//
+// Real-world use case: Financial ratios where division by zero produces infinity
+
+pred account(u32, f64, f64).      // account_id, revenue, expenses
+pred profit_ratio(u32, f64).      // account_id, revenue/expenses ratio
+pred healthy_ratio(u32, f64).     // finite positive ratios
+pred problematic(u32, f64).       // infinite or extreme ratios
+
+// Account data: revenue and expenses
+// Note: When expenses = 0, the ratio becomes infinity
+account(1, 1000.0, 500.0).   // ratio = 2.0
+account(2, 500.0, 1000.0).   // ratio = 0.5
+account(3, 750.0, 250.0).    // ratio = 3.0
+account(4, 100.0, 100.0).    // ratio = 1.0
+account(5, 200.0, 50.0).     // ratio = 4.0
+account(6, 500.0, 0.0).      // ratio = +Inf (division by zero)
+account(7, -200.0, 0.0).     // ratio = -Inf (negative div by zero)
+
+// Compute profit ratio (revenue / expenses)
+// Division by zero in xlog produces infinity
+profit_ratio(Id, R) :- account(Id, Rev, Exp), R is Rev / Exp.
+
+// Healthy ratios: positive and finite (between 0 and a large bound)
+healthy_ratio(Id, R) :- profit_ratio(Id, R), R > 0.0, R < 100.0.
+
+// Problematic accounts: ratios outside normal bounds
+// This catches infinity (> 100) and very low ratios (< 0.1)
+problematic(Id, R) :- profit_ratio(Id, R), R > 100.0.
+problematic(Id, R) :- profit_ratio(Id, R), R < 0.1.
+
+?- profit_ratio(Id, R).
+?- healthy_ratio(Id, R).
+?- problematic(Id, R).

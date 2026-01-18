@@ -1,0 +1,180 @@
+name: Fuzz Testing
+
+on:
+  schedule:
+    # Run daily at 3 AM UTC
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Fuzz target to run (or "all")'
+        required: false
+        default: 'all'
+      duration:
+        description: 'Fuzzing duration in seconds'
+        required: false
+        default: '300'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz:
+    name: Fuzz ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [fuzz_parser, fuzz_compiler, fuzz_type_inference]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz
+
+      - name: Cache fuzz corpus
+        uses: actions/cache@v4
+        with:
+          path: |
+            fuzz/corpus/${{ matrix.target }}
+            fuzz/artifacts/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.sha }}
+          restore-keys: |
+            fuzz-corpus-${{ matrix.target }}-
+
+      - name: Run fuzzer
+        working-directory: fuzz
+        run: |
+          DURATION=${{ github.event.inputs.duration || '300' }}
+          echo "Running ${{ matrix.target }} for ${DURATION}s"
+
+          # Create corpus directory if it doesn't exist
+          mkdir -p corpus/${{ matrix.target }}
+
+          # Run fuzzer with timeout
+          timeout ${DURATION}s cargo +nightly fuzz run ${{ matrix.target }} -- \
+            -max_total_time=${DURATION} \
+            -max_len=4096 \
+            || EXIT_CODE=$?
+
+          # Exit code 124 means timeout (expected)
+          if [ "${EXIT_CODE:-0}" -eq 124 ]; then
+            echo "Fuzzer completed (timeout)"
+            exit 0
+          elif [ "${EXIT_CODE:-0}" -ne 0 ]; then
+            echo "Fuzzer found issues (exit code ${EXIT_CODE})"
+            exit 1
+          fi
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          retention-days: 30
+
+      - name: Upload corpus
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-corpus-${{ matrix.target }}
+          path: fuzz/corpus/${{ matrix.target }}/
+          retention-days: 7
+
+  fuzz-asan:
+    name: Fuzz with AddressSanitizer
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: llvm-tools-preview
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz
+
+      - name: Run fuzzer with ASAN
+        working-directory: fuzz
+        env:
+          RUSTFLAGS: "-Zsanitizer=address"
+        run: |
+          DURATION=${{ github.event.inputs.duration || '300' }}
+          TARGET=${{ github.event.inputs.target || 'fuzz_parser' }}
+
+          if [ "$TARGET" = "all" ]; then
+            TARGET="fuzz_parser"
+          fi
+
+          echo "Running $TARGET with AddressSanitizer for ${DURATION}s"
+
+          timeout ${DURATION}s cargo +nightly fuzz run $TARGET -- \
+            -max_total_time=${DURATION} \
+            -max_len=4096 \
+            || EXIT_CODE=$?
+
+          if [ "${EXIT_CODE:-0}" -eq 124 ]; then
+            echo "Fuzzer completed (timeout)"
+            exit 0
+          elif [ "${EXIT_CODE:-0}" -ne 0 ]; then
+            echo "Fuzzer found issues (exit code ${EXIT_CODE})"
+            exit 1
+          fi
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-asan-crashes
+          path: fuzz/artifacts/
+          retention-days: 30
+
+  report:
+    name: Generate Fuzz Report
+    runs-on: ubuntu-latest
+    needs: [fuzz]
+    if: always()
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Generate report
+        run: |
+          echo "## Fuzz Testing Report" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Run completed at: $(date -u)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "### Targets" >> $GITHUB_STEP_SUMMARY
+          echo "| Target | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|--------|" >> $GITHUB_STEP_SUMMARY
+
+          for target in fuzz_parser fuzz_compiler fuzz_type_inference; do
+            if [ -d "artifacts/fuzz-crashes-$target" ]; then
+              echo "| $target | :x: Crashes found |" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "| $target | :white_check_mark: No crashes |" >> $GITHUB_STEP_SUMMARY
+            fi
+          done
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Corpus Statistics" >> $GITHUB_STEP_SUMMARY
+
+          for target in fuzz_parser fuzz_compiler fuzz_type_inference; do
+            if [ -d "artifacts/fuzz-corpus-$target" ]; then
+              COUNT=$(find "artifacts/fuzz-corpus-$target" -type f | wc -l)
+              echo "- **$target**: $COUNT inputs" >> $GITHUB_STEP_SUMMARY
+            fi
+          done

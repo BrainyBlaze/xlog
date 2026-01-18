@@ -24,3 +24,4 @@ pub mod c21_hardware;
 pub mod c22_algorithms;
 pub mod c23_blind_spots;
 pub mod c24_edge_matrix;
+pub mod c25_float_filter;

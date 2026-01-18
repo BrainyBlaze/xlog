@@ -9,6 +9,6 @@ pub mod relation;
 mod statistics;
 
 pub use executor::Executor;
-pub use profiler::{OpStats, Profiler};
+pub use profiler::{ExecutionStats, MeasureGuard, OpStats, Profiler, StratumStats};
 pub use relation::RelationStore;
 pub use statistics::{JoinStats, JoinStrategy, QueryStatistics};

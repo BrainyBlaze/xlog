@@ -14,6 +14,7 @@ rand_chacha = "0.3"
 
 [dev-dependencies]
 bytemuck = "1.14"
+proptest = "1.4"
 
 [[test]]
 name = "certification_suite"
@@ -28,4 +29,9 @@ harness = true
 [[test]]
 name = "category_isolation"
 path = "tests/category_isolation.rs"
+harness = true
+
+[[test]]
+name = "properties"
+path = "tests/properties.rs"
 harness = true

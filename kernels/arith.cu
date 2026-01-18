@@ -1,6 +1,36 @@
 #include <cstdint>
 #include <cmath>
 
+/**
+ * Normalize NaN to positive (canonical) NaN.
+ *
+ * CUDA division (0.0/0.0) produces negative NaN (0xFFF8000000000000),
+ * but under IEEE 754 total ordering, negative NaN is the SMALLEST value.
+ * This is counterintuitive for users who expect NaN to represent "missing"
+ * or "undefined" values that should be filtered out with `V > threshold`.
+ *
+ * By normalizing all NaN values to positive NaN (0x7FF8000000000000),
+ * we ensure that NaN is always the LARGEST value in total ordering,
+ * which matches typical data processing expectations.
+ *
+ * Total ordering: -Inf < ... < -0.0 < +0.0 < ... < +Inf < +NaN
+ */
+__device__ __forceinline__ double normalize_nan_f64(double val) {
+    if (isnan(val)) {
+        // Return canonical positive quiet NaN
+        return __longlong_as_double(0x7FF8000000000000LL);
+    }
+    return val;
+}
+
+__device__ __forceinline__ float normalize_nan_f32(float val) {
+    if (isnan(val)) {
+        // Return canonical positive quiet NaN
+        return __int_as_float(0x7FC00000);
+    }
+    return val;
+}
+
 #define ARITH_OP_ADD 0
 #define ARITH_OP_SUB 1
 #define ARITH_OP_MUL 2
@@ -129,8 +159,8 @@ extern "C" __global__ void arith_binary_f64(
         case ARITH_OP_ADD: v = x + y; break;
         case ARITH_OP_SUB: v = x - y; break;
         case ARITH_OP_MUL: v = x * y; break;
-        case ARITH_OP_DIV: v = x / y; break;
-        case ARITH_OP_MOD: v = fmod(x, y); break;
+        case ARITH_OP_DIV: v = normalize_nan_f64(x / y); break;
+        case ARITH_OP_MOD: v = normalize_nan_f64(fmod(x, y)); break;
         case ARITH_OP_MIN: v = (x < y) ? x : y; break;
         case ARITH_OP_MAX: v = (x > y) ? x : y; break;
         default: v = 0.0;
@@ -154,8 +184,8 @@ extern "C" __global__ void arith_binary_f32(
         case ARITH_OP_ADD: v = x + y; break;
         case ARITH_OP_SUB: v = x - y; break;
         case ARITH_OP_MUL: v = x * y; break;
-        case ARITH_OP_DIV: v = x / y; break;
-        case ARITH_OP_MOD: v = fmodf(x, y); break;
+        case ARITH_OP_DIV: v = normalize_nan_f32(x / y); break;
+        case ARITH_OP_MOD: v = normalize_nan_f32(fmodf(x, y)); break;
         case ARITH_OP_MIN: v = (x < y) ? x : y; break;
         case ARITH_OP_MAX: v = (x > y) ? x : y; break;
         default: v = 0.0f;
@@ -221,7 +251,7 @@ extern "C" __global__ void arith_pow_f64(
 ) {
     uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
     if (gid >= n) return;
-    out[gid] = pow(base[gid], exp[gid]);
+    out[gid] = normalize_nan_f64(pow(base[gid], exp[gid]));
 }
 
 extern "C" __global__ void arith_fill_const_u32(

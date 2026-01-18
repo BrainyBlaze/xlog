@@ -1,8 +1,8 @@
 //! Performance profiler for execution statistics
 //!
-//! This module provides [`Profiler`] for tracking per-operation statistics during
-//! query execution. It can be used to identify performance bottlenecks and
-//! understand resource usage patterns.
+//! This module provides [`Profiler`] for tracking per-operation and per-stratum
+//! statistics during query execution. It can be used to identify performance
+//! bottlenecks and understand resource usage patterns.
 //!
 //! # Example
 //!
@@ -23,6 +23,9 @@
 //! // Get summary
 //! println!("{}", profiler.summary());
 //! ```
+
+use std::collections::HashMap;
+use std::time::Instant;
 
 /// Statistics for a single operation
 ///
@@ -71,6 +74,149 @@ impl OpStats {
     }
 }
 
+/// Statistics for a single stratum
+#[derive(Debug, Clone, Default)]
+pub struct StratumStats {
+    /// Stratum index (0-based)
+    pub stratum_id: usize,
+    /// Number of rules in this stratum
+    pub num_rules: usize,
+    /// Whether this stratum contains recursive rules
+    pub is_recursive: bool,
+    /// Number of iterations (1 for non-recursive, N for fixpoint)
+    pub iterations: usize,
+    /// Total duration in microseconds
+    pub duration_us: u64,
+    /// Operations within this stratum
+    pub ops: Vec<OpStats>,
+}
+
+impl StratumStats {
+    /// Create a new StratumStats
+    pub fn new(stratum_id: usize, num_rules: usize, is_recursive: bool) -> Self {
+        Self {
+            stratum_id,
+            num_rules,
+            is_recursive,
+            iterations: if is_recursive { 0 } else { 1 },
+            duration_us: 0,
+            ops: Vec::new(),
+        }
+    }
+
+    /// Get aggregated operation counts by operation name
+    pub fn op_summary(&self) -> HashMap<String, (usize, u64)> {
+        let mut summary: HashMap<String, (usize, u64)> = HashMap::new();
+        for op in &self.ops {
+            let entry = summary.entry(op.op_name.clone()).or_insert((0, 0));
+            entry.0 += 1;
+            entry.1 += op.duration_us;
+        }
+        summary
+    }
+}
+
+/// Final execution statistics returned to CLI
+#[derive(Debug, Clone, Default)]
+pub struct ExecutionStats {
+    /// Total execution duration in microseconds
+    pub total_duration_us: u64,
+    /// Per-stratum statistics
+    pub strata: Vec<StratumStats>,
+    /// Peak memory usage in bytes
+    pub peak_memory_bytes: u64,
+    /// Memory budget in bytes
+    pub memory_budget_bytes: u64,
+    /// Total output rows across all queries
+    pub total_output_rows: u64,
+}
+
+impl ExecutionStats {
+    /// Format stats as human-readable string
+    pub fn format_human(&self) -> String {
+        let total_secs = self.total_duration_us as f64 / 1_000_000.0;
+        let mut output = String::new();
+
+        output.push_str(&format!("Execution completed in {:.2}s\n\n", total_secs));
+
+        for stratum in &self.strata {
+            let stratum_secs = stratum.duration_us as f64 / 1_000_000.0;
+            let recursive_info = if stratum.is_recursive {
+                format!(", recursive, {} iterations", stratum.iterations)
+            } else {
+                String::new()
+            };
+
+            output.push_str(&format!(
+                "Stratum {}: {:.2}s ({} rules{})\n",
+                stratum.stratum_id, stratum_secs, stratum.num_rules, recursive_info
+            ));
+
+            // Aggregate operations by name
+            let op_summary = stratum.op_summary();
+            let mut ops: Vec<_> = op_summary.into_iter().collect();
+            ops.sort_by(|a, b| b.1 .1.cmp(&a.1 .1)); // Sort by duration descending
+
+            for (op_name, (count, duration_us)) in ops {
+                let op_secs = duration_us as f64 / 1_000_000.0;
+                output.push_str(&format!(
+                    "  - {}: {:.2}s ({} calls)\n",
+                    op_name, op_secs, count
+                ));
+            }
+        }
+
+        let peak_mb = self.peak_memory_bytes as f64 / (1024.0 * 1024.0);
+        let budget_mb = self.memory_budget_bytes as f64 / (1024.0 * 1024.0);
+        output.push_str(&format!(
+            "\nMemory: {:.0} MB peak / {:.0} MB budget\n",
+            peak_mb, budget_mb
+        ));
+        output.push_str(&format!("Output: {} rows\n", format_rows(self.total_output_rows)));
+
+        output
+    }
+
+    /// Format stats as JSON string
+    pub fn format_json(&self) -> String {
+        let total_ms = self.total_duration_us / 1000;
+        let strata_json: Vec<String> = self.strata.iter().map(|s| {
+            let ops_json: Vec<String> = s.op_summary().iter().map(|(name, (count, duration))| {
+                format!(
+                    r#"{{"op":"{}","calls":{},"duration_ms":{}}}"#,
+                    name, count, duration / 1000
+                )
+            }).collect();
+            format!(
+                r#"{{"stratum":{},"rules":{},"recursive":{},"iterations":{},"duration_ms":{},"ops":[{}]}}"#,
+                s.stratum_id, s.num_rules, s.is_recursive, s.iterations, s.duration_us / 1000,
+                ops_json.join(",")
+            )
+        }).collect();
+
+        format!(
+            r#"{{"total_ms":{},"strata":[{}],"peak_memory_mb":{},"budget_memory_mb":{},"output_rows":{}}}"#,
+            total_ms,
+            strata_json.join(","),
+            self.peak_memory_bytes / (1024 * 1024),
+            self.memory_budget_bytes / (1024 * 1024),
+            self.total_output_rows
+        )
+    }
+}
+
+/// Format row count with commas for readability
+fn format_rows(rows: u64) -> String {
+    let s = rows.to_string();
+    let mut result = String::new();
+    for (i, c) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            result.insert(0, ',');
+        }
+        result.insert(0, c);
+    }
+    result
+}
 
 /// Execution profiler for tracking operation statistics
 ///
@@ -104,8 +250,18 @@ impl OpStats {
 pub struct Profiler {
     /// Whether profiling is enabled
     enabled: bool,
-    /// Collected operation statistics
+    /// Collected operation statistics (flat list for backward compatibility)
     stats: Vec<OpStats>,
+    /// Per-stratum statistics
+    strata: Vec<StratumStats>,
+    /// Currently active stratum index
+    current_stratum: Option<usize>,
+    /// Stratum start time
+    stratum_start: Option<Instant>,
+    /// Peak memory observed during execution
+    peak_memory_bytes: u64,
+    /// Memory budget
+    memory_budget_bytes: u64,
 }
 
 impl Profiler {
@@ -117,6 +273,119 @@ impl Profiler {
         Self {
             enabled,
             stats: Vec::new(),
+            strata: Vec::new(),
+            current_stratum: None,
+            stratum_start: None,
+            peak_memory_bytes: 0,
+            memory_budget_bytes: 0,
+        }
+    }
+
+    /// Set memory budget for reporting
+    pub fn set_memory_budget(&mut self, budget_bytes: u64) {
+        self.memory_budget_bytes = budget_bytes;
+    }
+
+    /// Begin timing a stratum
+    ///
+    /// # Arguments
+    /// * `stratum_id` - The stratum index
+    /// * `num_rules` - Number of rules in the stratum
+    /// * `is_recursive` - Whether the stratum is recursive
+    pub fn begin_stratum(&mut self, stratum_id: usize, num_rules: usize, is_recursive: bool) {
+        if !self.enabled {
+            return;
+        }
+        self.current_stratum = Some(stratum_id);
+        self.stratum_start = Some(Instant::now());
+        self.strata.push(StratumStats::new(stratum_id, num_rules, is_recursive));
+    }
+
+    /// End timing the current stratum
+    pub fn end_stratum(&mut self) {
+        if !self.enabled {
+            return;
+        }
+        if let (Some(start), Some(_idx)) = (self.stratum_start.take(), self.current_stratum.take()) {
+            let duration = start.elapsed();
+            if let Some(stratum) = self.strata.last_mut() {
+                stratum.duration_us = duration.as_micros() as u64;
+            }
+        }
+    }
+
+    /// Record fixpoint iteration count for the current stratum
+    pub fn record_iterations(&mut self, iterations: usize) {
+        if !self.enabled {
+            return;
+        }
+        if let Some(stratum) = self.strata.last_mut() {
+            stratum.iterations = iterations;
+        }
+    }
+
+    /// Record an operation with timing
+    ///
+    /// This is a convenience method that calculates duration from a start time.
+    ///
+    /// # Arguments
+    /// * `op_name` - Name of the operation (e.g., "join", "filter", "scan")
+    /// * `input_rows` - Number of input rows
+    /// * `output_rows` - Number of output rows
+    /// * `start` - The instant when the operation started
+    /// * `memory_bytes` - Memory used by the operation
+    pub fn record_op(
+        &mut self,
+        op_name: impl Into<String>,
+        input_rows: u64,
+        output_rows: u64,
+        start: Instant,
+        memory_bytes: u64,
+    ) {
+        if !self.enabled {
+            return;
+        }
+        let duration = start.elapsed();
+        self.record(OpStats {
+            op_name: op_name.into(),
+            input_rows,
+            output_rows,
+            duration_us: duration.as_micros() as u64,
+            memory_bytes,
+        });
+    }
+
+    /// Start timing an operation
+    ///
+    /// Returns the current instant if profiling is enabled, None otherwise.
+    /// This allows zero-overhead timing when profiling is disabled.
+    #[inline]
+    pub fn start_op(&self) -> Option<Instant> {
+        if self.enabled {
+            Some(Instant::now())
+        } else {
+            None
+        }
+    }
+
+    /// Record peak memory observation
+    pub fn record_peak_memory(&mut self, memory_bytes: u64) {
+        if !self.enabled {
+            return;
+        }
+        if memory_bytes > self.peak_memory_bytes {
+            self.peak_memory_bytes = memory_bytes;
+        }
+    }
+
+    /// Get execution stats for CLI output
+    pub fn execution_stats(&self, total_output_rows: u64) -> ExecutionStats {
+        ExecutionStats {
+            total_duration_us: self.strata.iter().map(|s| s.duration_us).sum(),
+            strata: self.strata.clone(),
+            peak_memory_bytes: self.peak_memory_bytes,
+            memory_budget_bytes: self.memory_budget_bytes,
+            total_output_rows,
         }
     }
 
@@ -128,11 +397,18 @@ impl Profiler {
     /// Record operation statistics
     ///
     /// If the profiler is disabled, this is a no-op.
+    /// If a stratum is active, the operation is also recorded in the stratum.
     ///
     /// # Arguments
     /// * `stats` - The operation statistics to record
     pub fn record(&mut self, stats: OpStats) {
         if self.enabled {
+            // Also add to current stratum if one is active
+            if self.current_stratum.is_some() {
+                if let Some(stratum) = self.strata.last_mut() {
+                    stratum.ops.push(stats.clone());
+                }
+            }
             self.stats.push(stats);
         }
     }
@@ -149,6 +425,10 @@ impl Profiler {
     /// Removes all collected statistics but keeps the profiler enabled/disabled state.
     pub fn clear(&mut self) {
         self.stats.clear();
+        self.strata.clear();
+        self.current_stratum = None;
+        self.stratum_start = None;
+        self.peak_memory_bytes = 0;
     }
 
     /// Get total duration across all operations in microseconds
@@ -237,7 +517,60 @@ impl Profiler {
 impl Default for Profiler {
     /// Creates a disabled profiler by default
     fn default() -> Self {
-        Self::new(false)
+        Self {
+            enabled: false,
+            stats: Vec::new(),
+            strata: Vec::new(),
+            current_stratum: None,
+            stratum_start: None,
+            peak_memory_bytes: 0,
+            memory_budget_bytes: 0,
+        }
+    }
+}
+
+/// RAII guard for measuring operation timing
+///
+/// Records the operation duration when dropped.
+pub struct MeasureGuard<'a> {
+    profiler: &'a mut Profiler,
+    op_name: String,
+    input_rows: u64,
+    start: Instant,
+    output_rows: Option<u64>,
+}
+
+impl<'a> MeasureGuard<'a> {
+    /// Create a new measure guard
+    pub fn new(profiler: &'a mut Profiler, op_name: impl Into<String>, input_rows: u64) -> Self {
+        Self {
+            profiler,
+            op_name: op_name.into(),
+            input_rows,
+            start: Instant::now(),
+            output_rows: None,
+        }
+    }
+
+    /// Set the output row count and finish timing
+    pub fn finish(mut self, output_rows: u64) {
+        self.output_rows = Some(output_rows);
+        // Drop will record the stats
+    }
+}
+
+impl<'a> Drop for MeasureGuard<'a> {
+    fn drop(&mut self) {
+        if self.profiler.is_enabled() {
+            let duration = self.start.elapsed();
+            self.profiler.record(OpStats {
+                op_name: std::mem::take(&mut self.op_name),
+                input_rows: self.input_rows,
+                output_rows: self.output_rows.unwrap_or(0),
+                duration_us: duration.as_micros() as u64,
+                memory_bytes: 0,
+            });
+        }
     }
 }
 

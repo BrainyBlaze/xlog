@@ -1,0 +1,51 @@
+// Float Predicates: Filtering and Counting
+//
+// Demonstrates combining float predicates with count aggregation
+// for analyzing filtered numerical data.
+//
+// Use case: Analyzing experimental measurements with filtering and counting
+
+pred experiment(u32, u32, f64).   // run_id, trial_id, measurement
+pred valid_trial(u32, u32, f64).  // trials with valid measurements
+pred high_value(u32, u32, f64).   // trials with high measurements
+pred run_count(u32, u64).         // count of valid trials per run
+pred high_count(u32, u64).        // count of high-value trials per run
+
+// Experimental data: multiple runs with multiple trials each
+experiment(1, 1, 3.2).
+experiment(1, 2, 4.1).
+experiment(1, 3, 3.8).
+experiment(1, 4, 5.2).
+
+experiment(2, 1, 7.1).
+experiment(2, 2, 6.8).
+experiment(2, 3, 7.5).
+experiment(2, 4, 6.2).
+
+experiment(3, 1, 2.1).
+experiment(3, 2, 2.5).
+experiment(3, 3, 1.9).
+experiment(3, 4, 2.3).
+
+// Filter to valid trials (exclude NaN/Inf if any)
+valid_trial(Run, Trial, Val) :-
+    experiment(Run, Trial, Val),
+    Val = Val,                    // Not NaN (V = V is false for NaN)
+    Val > -1000000.0,            // Not -Inf
+    Val < 1000000.0.             // Not +Inf
+
+// High value trials: measurements above 5.0
+high_value(Run, Trial, Val) :-
+    valid_trial(Run, Trial, Val),
+    Val > 5.0.
+
+// Count valid trials per run
+run_count(Run, count(Trial)) :- valid_trial(Run, Trial, _).
+
+// Count high-value trials per run
+high_count(Run, count(Trial)) :- high_value(Run, Trial, _).
+
+?- valid_trial(Run, Trial, Val).
+?- high_value(Run, Trial, Val).
+?- run_count(Run, N).
+?- high_count(Run, N).

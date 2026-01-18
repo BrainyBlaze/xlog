@@ -111,6 +111,9 @@ fn run_full_certification() {
     println!("Running C24: Edge Matrix...");
     results.add_category(categories::c24_edge_matrix::run_all(&ctx));
 
+    println!("Running C25: Float Filter...");
+    results.add_category(categories::c25_float_filter::run_all(&ctx));
+
     // Finalize and print results
     results.finalize();
     results.print_summary();

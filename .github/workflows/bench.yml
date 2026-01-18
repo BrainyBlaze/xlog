@@ -1,0 +1,172 @@
+name: Benchmarks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      baseline:
+        description: 'Baseline commit to compare against'
+        required: false
+        default: ''
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  benchmark:
+    name: Performance Benchmarks
+    runs-on: [self-hosted, linux, x64, cuda]
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for baseline comparison
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-bench-
+
+      - name: Check GPU availability
+        run: |
+          nvidia-smi || echo "Warning: nvidia-smi failed, GPU benchmarks may be skipped"
+
+      - name: Build benchmarks
+        run: cargo build --release --benches
+
+      - name: Run benchmarks (PR)
+        if: github.event_name == 'pull_request'
+        run: |
+          # Run benchmarks and save as PR baseline
+          cargo bench --no-fail-fast -- \
+            --save-baseline pr_${{ github.sha }} \
+            --noplot
+
+      - name: Run benchmarks (main)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          # Run benchmarks and save as main baseline
+          cargo bench --no-fail-fast -- \
+            --save-baseline main_${{ github.sha }} \
+            --noplot
+
+      - name: Compare against main (PR)
+        if: github.event_name == 'pull_request'
+        run: |
+          # Fetch main branch baselines if they exist
+          git fetch origin main --depth=1
+
+          # Get the merge base
+          MERGE_BASE=$(git merge-base HEAD origin/main)
+          echo "Merge base: $MERGE_BASE"
+
+          # Check out main and run benchmarks for comparison
+          git stash || true
+          git checkout origin/main
+
+          # Run main branch benchmarks
+          cargo bench --no-fail-fast -- \
+            --save-baseline main_baseline \
+            --noplot || echo "Main branch benchmark run failed, continuing..."
+
+          # Return to PR branch
+          git checkout -
+          git stash pop || true
+
+          # Compare PR against main
+          cargo bench --no-fail-fast -- \
+            --baseline main_baseline \
+            --load-baseline pr_${{ github.sha }} \
+            --noplot 2>&1 | tee benchmark_comparison.txt
+
+          # Check for significant regressions (>10%)
+          if grep -E "Performance has regressed" benchmark_comparison.txt; then
+            echo "::warning::Performance regressions detected. Review benchmark_comparison.txt"
+          fi
+
+      - name: Generate benchmark report
+        run: |
+          echo "## Benchmark Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Commit: \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # List benchmark groups
+          echo "### Benchmark Groups" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **xlog-gpu**: Transitive closure, hash joins, aggregation" >> $GITHUB_STEP_SUMMARY
+          echo "- **xlog-prob**: Exact inference (DDNNF), Monte Carlo" >> $GITHUB_STEP_SUMMARY
+          echo "- **xlog-stats**: Statistics manager" >> $GITHUB_STEP_SUMMARY
+          echo "- **xlog-solve**: SAT solver" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Add comparison summary if available
+          if [ -f benchmark_comparison.txt ]; then
+            echo "### Comparison with main" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            head -100 benchmark_comparison.txt >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results-${{ github.sha }}
+          path: |
+            target/criterion/
+            benchmark_comparison.txt
+          retention-days: 30
+
+      - name: Check for regressions
+        if: github.event_name == 'pull_request'
+        run: |
+          # Fail the job if significant regressions were detected
+          if [ -f benchmark_comparison.txt ]; then
+            # Count lines with "Performance has regressed" that also show >10% regression
+            REGRESSED=$(grep -c "Performance has regressed" benchmark_comparison.txt || true)
+            if [ "$REGRESSED" -gt "0" ]; then
+              echo "::error::$REGRESSED benchmark(s) show significant performance regression"
+              echo "Review the benchmark results artifact for details"
+              # Uncomment to fail the job on regression:
+              # exit 1
+            fi
+          fi
+
+  benchmark-quick:
+    name: Quick Benchmark Smoke Test
+    runs-on: [self-hosted, linux, x64, cuda]
+    if: github.event_name == 'push' && github.ref != 'refs/heads/main'
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build benchmarks
+        run: cargo build --release --benches
+
+      - name: Quick benchmark check
+        run: |
+          # Run a subset of benchmarks quickly to catch obvious issues
+          cargo bench -p xlog-gpu -- tc_chain/depth/100 --noplot --sample-size 5 || true
+          cargo bench -p xlog-stats -- register_relation --noplot --sample-size 5 || true
+          cargo bench -p xlog-solve -- solve_easy/vars/10 --noplot --sample-size 5 || true

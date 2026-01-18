@@ -184,6 +184,7 @@ pub mod filter_kernels {
     pub const FILTER_COMPARE_U8: &str = "filter_compare_u8";
     pub const FILTER_COMPARE_U32_SCAN_PHASE1: &str = "filter_compare_u32_scan_phase1";
     pub const FILTER_COMPARE_F64_SCAN_PHASE1: &str = "filter_compare_f64_scan_phase1";
+    pub const FILTER_COMPARE_F32_SCAN_PHASE1: &str = "filter_compare_f32_scan_phase1";
     pub const FILTER_COMPARE_U32_COL: &str = "filter_compare_u32_col";
     pub const FILTER_COMPARE_I32_COL: &str = "filter_compare_i32_col";
     pub const FILTER_COMPARE_I64_COL: &str = "filter_compare_i64_col";
@@ -531,6 +532,7 @@ impl CudaKernelProvider {
                     filter_kernels::FILTER_COMPARE_U8,
                     filter_kernels::FILTER_COMPARE_U32_SCAN_PHASE1,
                     filter_kernels::FILTER_COMPARE_F64_SCAN_PHASE1,
+                    filter_kernels::FILTER_COMPARE_F32_SCAN_PHASE1,
                     filter_kernels::FILTER_COMPARE_U32_COL,
                     filter_kernels::FILTER_COMPARE_I32_COL,
                     filter_kernels::FILTER_COMPARE_I64_COL,

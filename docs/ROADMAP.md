@@ -1,8 +1,8 @@
 # XLOG Development Roadmap
 
-> **Last Updated:** January 17, 2026
-> **Current Version:** v0.2.0
-> **Status:** Phase 4 Complete — Probabilistic reasoning tier and Python bindings are production-ready
+> **Last Updated:** January 18, 2026
+> **Current Version:** v0.3.1
+> **Status:** v0.3.1 Complete — Float predicates, benchmarks, statistics, fuzz testing, and property-based testing
 
 ---
 
@@ -175,6 +175,7 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 
 **Filtering:**
 - [x] Typed comparison kernels for all scalar types
+- [x] Float predicate support with IEEE 754 total ordering (`NaN > Inf > nums > +0 > -0 > -Inf`)
 - [x] Boolean mask composition (AND, OR, NOT)
 - [x] Stream compaction without host round-trips
 - [x] Multi-block prefix scan for large inputs
@@ -368,11 +369,11 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 - [x] Monte Carlo options: `--samples`, `--seed`, `--confidence`
 - [x] Device selection: `--device`
 - [x] Memory limit: `--memory-mb`
+- [x] Query timing and statistics: `--stats` (human-readable and JSON formats)
 
 ### Planned 📋
 
 - [ ] Interactive REPL mode
-- [ ] Query timing and statistics output
 - [ ] Explain/plan visualization
 - [ ] Watch mode for incremental file changes
 
@@ -413,12 +414,13 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 - [x] Memory budget enforcement tests
 - [x] End-to-end Datalog query tests
 - [x] Probabilistic inference correctness tests
+- [x] Performance regression benchmarks with CI tracking (Criterion.rs, `.github/workflows/bench.yml`)
+- [x] Fuzz testing for parser, compiler, and type inference (cargo-fuzz, ASAN, `.github/workflows/fuzz.yml`)
+- [x] Property-based testing for kernel correctness (proptest: sort stability, join correctness, filter idempotence, dedup determinism)
+- [x] Float predicate edge case tests (NaN, Infinity, subnormals, signed zeros)
 
 ### Planned 📋
 
-- [ ] Performance regression benchmarks with CI tracking
-- [ ] Fuzz testing for parser and compiler
-- [ ] Property-based testing for kernel correctness
 - [ ] Integration tests with cuDF and PyTorch
 
 ---
@@ -451,8 +453,9 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 | Version | Status | Key Features |
 |---------|--------|--------------|
 | v0.1.0 | Released | Deterministic Datalog, GPU joins/aggregations, basic CLI |
-| v0.2.0 | **Current** | Probabilistic reasoning (exact + MC), Python bindings, GPU-resident execution |
-| v0.3.x | Planned | Float predicate support, documented benchmarks |
+| v0.2.0 | Released | Probabilistic reasoning (exact + MC), Python bindings, GPU-resident execution |
+| v0.3.1 | **Current** | Float predicates (IEEE 754 total ordering), benchmarks, `--stats` flag, fuzz testing, property-based testing |
+| v0.3.2–v0.3.5 | Planned | Language core, probabilistic power, solver maturity, ecosystem ready (see v0.3.x-scope.md) |
 | v0.4–0.5 | Planned | Epistemic logic tier (Phase 5) |
 | v0.6+ | Planned | Multi-GPU support, distributed execution (Phase 6) |
 
@@ -463,7 +466,7 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 | Risk | Likelihood | Impact | Mitigation |
 |------|------------|--------|------------|
 | GPU-native dedup complexity | Medium | High | Start with single-key, then multi-key; maintain CPU fallback |
-| Float predicate semantics (NaN handling) | Medium | Medium | Define IEEE 754 total order semantics; mirror CUDA `total_cmp` |
+| ~~Float predicate semantics (NaN handling)~~ | ~~Medium~~ | ~~Medium~~ | **Resolved in v0.3.1:** IEEE 754 total ordering implemented |
 | Epistemic logic complexity explosion | High | High | Strict tier bounds; bounded iteration limits |
 | Multi-GPU synchronization overhead | Medium | High | Start with single-node; benchmark before distributed |
 | D4 integration challenges | High | Medium | Plan fallback knowledge compilers (c2d, miniC2D) |

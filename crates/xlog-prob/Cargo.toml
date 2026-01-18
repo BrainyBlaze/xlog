@@ -8,3 +8,10 @@ xlog-core = { path = "../xlog-core" }
 xlog-logic = { path = "../xlog-logic" }
 xlog-cuda = { path = "../xlog-cuda" }
 cudarc = { workspace = true }
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "prob_bench"
+harness = false

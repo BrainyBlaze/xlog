@@ -1,0 +1,49 @@
+// Float Predicates: Data Quality Pipeline
+//
+// A comprehensive example showing how to build a data quality pipeline
+// that classifies and filters float data based on various criteria.
+//
+// This demonstrates real-world data cleaning patterns using float predicates.
+
+pred raw_measurement(u32, f64).    // sensor_id, raw_value
+pred clean_data(u32, f64).         // sensor_id, validated_value
+pred outlier(u32, f64).            // sensor_id, outlier_value
+pred missing_data(u32).            // sensor_id (for sensors with bad readings)
+pred in_normal_range(u32, f64).    // sensor_id, value in expected range
+
+// Raw sensor measurements from industrial equipment
+// Range: temperature sensors typically read 0-100 Celsius
+raw_measurement(101, 45.2).     // Normal
+raw_measurement(102, 78.9).     // Normal (hot)
+raw_measurement(103, 23.1).     // Normal (cool)
+raw_measurement(104, 55.0).     // Normal
+raw_measurement(105, 12.8).     // Normal (cold)
+raw_measurement(106, 91.3).     // Normal (very hot - in range but close to max)
+raw_measurement(107, 67.4).     // Normal
+raw_measurement(108, 105.5).    // Outlier (over 100)
+raw_measurement(109, -5.0).     // Outlier (below 0)
+
+// Sensor 110 produces NaN via computation (simulating sensor error)
+pred nan_source(u32, f64, f64).
+nan_source(110, 0.0, 0.0).  // Will produce NaN
+raw_measurement(Id, V) :- nan_source(Id, A, B), V is A / B.
+
+// Step 1: Identify missing data (NaN values)
+// NaN != NaN under IEEE, so if V != V, it's NaN
+missing_data(Id) :- raw_measurement(Id, V), V != V.
+
+// Step 2: Filter to clean data (not NaN, not infinite)
+// Value must equal itself (not NaN) and be bounded (not infinite)
+clean_data(Id, V) :- raw_measurement(Id, V), V = V, V > -1000000.0, V < 1000000.0.
+
+// Step 3: Detect outliers (outside expected range 0-100)
+outlier(Id, V) :- clean_data(Id, V), V < 0.0.
+outlier(Id, V) :- clean_data(Id, V), V > 100.0.
+
+// Step 4: Values in normal operating range (10-90 degrees)
+in_normal_range(Id, V) :- clean_data(Id, V), V >= 10.0, V <= 90.0.
+
+?- clean_data(Id, V).
+?- missing_data(Id).
+?- outlier(Id, V).
+?- in_normal_range(Id, V).

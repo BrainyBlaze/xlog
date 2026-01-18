@@ -37,6 +37,19 @@ struct RunArgs {
     output: OutputFormat,
     #[arg(long)]
     output_dir: Option<PathBuf>,
+    /// Show execution statistics (timing, memory usage)
+    #[arg(long)]
+    stats: bool,
+    /// Stats output format (human or json)
+    #[arg(long, value_enum, default_value = "human")]
+    stats_format: StatsFormat,
+}
+
+#[derive(Copy, Clone, ValueEnum, Default)]
+enum StatsFormat {
+    #[default]
+    Human,
+    Json,
 }
 
 #[derive(Parser)]
@@ -119,13 +132,28 @@ fn run_deterministic(args: RunArgs) -> Result<()> {
         inputs.insert(name, buf);
     }
 
-    let result = program.evaluate(provider.clone(), inputs)?;
+    let result = program.evaluate_with_options(provider.clone(), inputs, args.stats)?;
+
+    // Emit query results
     emit_logic_results(
         provider.as_ref(),
         &result.queries,
         args.output,
         args.output_dir.as_deref(),
-    )
+    )?;
+
+    // Emit stats if requested
+    if args.stats {
+        if let Some(stats) = result.stats {
+            let stats_output = match args.stats_format {
+                StatsFormat::Human => stats.format_human(),
+                StatsFormat::Json => stats.format_json(),
+            };
+            eprintln!("{}", stats_output);
+        }
+    }
+
+    Ok(())
 }
 
 fn run_probabilistic(args: ProbArgs) -> Result<()> {
