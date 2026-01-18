@@ -102,6 +102,12 @@ pragma = { pragma_prob_engine | pragma_prob_cache }
 domain_decl = { "domain" ~ ident ~ ":" ~ type_spec ~ "." }
 type_spec = { "u32" | "u64" | "i32" | "i64" | "f32" | "f64" | "bool" | "symbol" }
 
+// Type annotation for function parameters: X: f64
+type_annotation = { ":" ~ type_spec }
+
+// Return type annotation: -> f64
+return_type = { "->" ~ type_spec }
+
 // Private modifier
 private_mod = { "private" }
 

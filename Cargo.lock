@@ -2033,6 +2033,7 @@ version = "0.2.0"
 dependencies = [
  "pest",
  "pest_derive",
+ "tempfile",
  "xlog-core",
  "xlog-cuda",
  "xlog-gpu",
