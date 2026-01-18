@@ -89,6 +89,15 @@ pub enum ArithExpr {
         name: String,
         args: Vec<ArithExpr>,
     },
+
+    /// Conditional expression (for expanded function bodies)
+    Conditional {
+        cond_left: Box<ArithExpr>,
+        cond_op: CompOp,
+        cond_right: Box<ArithExpr>,
+        then_expr: Box<ArithExpr>,
+        else_expr: Box<ArithExpr>,
+    },
 }
 
 impl ArithExpr {
@@ -107,6 +116,13 @@ impl ArithExpr {
             ArithExpr::Abs(e) | ArithExpr::Cast(e, _) => e.variables(),
             ArithExpr::FuncCall { args, .. } => {
                 args.iter().flat_map(|a| a.variables()).collect()
+            }
+            ArithExpr::Conditional { cond_left, cond_right, then_expr, else_expr, .. } => {
+                let mut vars = cond_left.variables();
+                vars.extend(cond_right.variables());
+                vars.extend(then_expr.variables());
+                vars.extend(else_expr.variables());
+                vars
             }
         }
     }

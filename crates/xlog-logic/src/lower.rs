@@ -1506,6 +1506,19 @@ impl Lowerer {
                 "User-defined function '{}' must be inlined before lowering",
                 name
             ))),
+
+            ArithExpr::Conditional { then_expr, else_expr, .. } => {
+                // Both branches must have the same type
+                let then_type = self.infer_arith_type(then_expr, var_env)?;
+                let else_type = self.infer_arith_type(else_expr, var_env)?;
+                if then_type != else_type {
+                    return Err(XlogError::Compilation(format!(
+                        "Conditional branches have different types: {:?} vs {:?}",
+                        then_type, else_type
+                    )));
+                }
+                Ok(then_type)
+            }
         }
     }
 
@@ -1576,6 +1589,10 @@ impl Lowerer {
                 "User-defined function '{}' must be inlined before lowering",
                 name
             ))),
+
+            ArithExpr::Conditional { .. } => Err(XlogError::Compilation(
+                "Conditional expressions must be expanded before lowering (IR does not yet support conditionals)".to_string()
+            )),
         }
     }
 

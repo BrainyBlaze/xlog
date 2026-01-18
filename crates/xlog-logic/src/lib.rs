@@ -35,6 +35,8 @@ pub mod compile;
 pub mod optimizer;
 pub mod module;
 pub mod resolver;
+pub mod function;
+pub mod expand;
 
 // Re-export main types
 pub use parser::{parse_program, parse_statement};
