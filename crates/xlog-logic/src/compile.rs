@@ -10,13 +10,17 @@
 //! The `Compiler` struct orchestrates these phases and provides a single
 //! entry point via the `compile` method.
 
+use std::path::{Path, PathBuf};
+
 use xlog_core::Result;
 use xlog_ir::ExecutionPlan;
 use xlog_stats::{StatsManager, StatsSnapshot};
 
 use crate::lower::Lowerer;
+use crate::module::ModuleError;
 use crate::optimizer::Optimizer;
 use crate::parser::parse_program;
+use crate::resolver::ModuleResolver;
 use crate::stratify::stratify;
 use crate::{BodyLiteral, Program, Query, Rule as AstRule, Term};
 
@@ -346,6 +350,41 @@ fn desugar_queries_and_constraints(program: &Program) -> Program {
 pub fn compile(source: &str) -> Result<ExecutionPlan> {
     let mut compiler = Compiler::new();
     compiler.compile(source)
+}
+
+/// Load and validate modules for a source file.
+///
+/// This function:
+/// 1. Determines the module path from the entry file name
+/// 2. Loads the entry module and all its dependencies
+/// 3. Validates imports (checks for conflicts, private predicates, etc.)
+///
+/// # Arguments
+///
+/// * `entry_file` - Path to the main .xlog file
+/// * `search_paths` - Additional directories to search for modules
+///
+/// # Returns
+///
+/// The loaded module resolver with all dependencies resolved, or an error
+/// if module resolution fails.
+pub fn load_modules(
+    entry_file: &Path,
+    search_paths: Vec<PathBuf>,
+) -> std::result::Result<ModuleResolver, ModuleError> {
+    let mut resolver = ModuleResolver::new(search_paths);
+
+    // Determine base directory and module path
+    let base_dir = entry_file.parent().unwrap_or(Path::new("."));
+    let module_name = entry_file
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("main");
+
+    // Load entry module (recursively loads dependencies)
+    resolver.load_module(base_dir, &[module_name.to_string()])?;
+
+    Ok(resolver)
 }
 
 #[cfg(test)]
