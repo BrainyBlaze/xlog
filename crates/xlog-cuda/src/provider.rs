@@ -5010,9 +5010,8 @@ impl CudaKernelProvider {
             if num_rows == 0 {
                 let array: Arc<dyn Array> = match scalar_type {
                     ScalarType::Bool => Arc::new(BooleanArray::from(Vec::<bool>::new())),
-                    ScalarType::U32 | ScalarType::Symbol => {
-                        Arc::new(UInt32Array::from(Vec::<u32>::new()))
-                    }
+                    ScalarType::U32 => Arc::new(UInt32Array::from(Vec::<u32>::new())),
+                    ScalarType::Symbol => Arc::new(xlog_core::symbol::to_arrow(&[])),
                     ScalarType::I32 => Arc::new(Int32Array::from(Vec::<i32>::new())),
                     ScalarType::U64 => Arc::new(UInt64Array::from(Vec::<u64>::new())),
                     ScalarType::I64 => Arc::new(Int64Array::from(Vec::<i64>::new())),
@@ -5033,12 +5032,19 @@ impl CudaKernelProvider {
                 ScalarType::Bool => Arc::new(BooleanArray::from(
                     bytes.iter().map(|&b| b != 0).collect::<Vec<_>>(),
                 )),
-                ScalarType::U32 | ScalarType::Symbol => {
+                ScalarType::U32 => {
                     let values: Vec<u32> = bytes
                         .chunks_exact(4)
                         .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                         .collect();
                     Arc::new(UInt32Array::from(values))
+                }
+                ScalarType::Symbol => {
+                    let values: Vec<u32> = bytes
+                        .chunks_exact(4)
+                        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                        .collect();
+                    Arc::new(xlog_core::symbol::to_arrow(&values))
                 }
                 ScalarType::I32 => {
                     let values: Vec<i32> = bytes
