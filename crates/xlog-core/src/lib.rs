@@ -4,6 +4,7 @@ pub mod error;
 pub mod config;
 pub mod types;
 pub mod traits;
+pub mod symbol;
 
 pub use error::{XlogError, Result};
 pub use config::{MemoryBudget, RuntimeConfig};
