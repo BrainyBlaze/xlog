@@ -11,7 +11,7 @@ use xlog_core::{ScalarType, XlogError, Result, symbol};
 use crate::ast::{
     AggExpr, AggOp, AnnotatedDisjunction, ArithExpr, Atom, BodyLiteral, CompOp, Comparison,
     Constraint, DomainDecl, Evidence, IsExpr, PredDecl, ProbCache, ProbEngine, ProbFact,
-    ProbQuery, Program, Query, Rule as AstRule, Term,
+    ProbQuery, Program, Query, Rule as AstRule, Term, UseDecl,
 };
 
 #[derive(Parser)]
@@ -70,6 +70,9 @@ fn build_program(pairs: ParseResult<'_>) -> Result<Program> {
 fn build_statement(pair: Pair<'_, Rule>, program: &mut Program) -> Result<()> {
     for inner in pair.into_inner() {
         match inner.as_rule() {
+            Rule::use_stmt => {
+                program.imports.push(build_use_stmt(inner));
+            }
             Rule::domain_decl => {
                 program.domains.push(build_domain_decl(inner)?);
             }
@@ -172,13 +175,50 @@ fn build_domain_decl(pair: Pair<'_, Rule>) -> Result<DomainDecl> {
     Ok(DomainDecl { name, typ })
 }
 
+/// Parse a module path (e.g., "utils/math" -> ["utils", "math"])
+fn parse_module_path(pair: Pair<Rule>) -> Vec<String> {
+    pair.as_str()
+        .split('/')
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// Build a use statement
+fn build_use_stmt(pair: Pair<Rule>) -> UseDecl {
+    let mut inner = pair.into_inner();
+
+    // Parse module path
+    let path_pair = inner.next().unwrap();
+    let module_path = parse_module_path(path_pair);
+
+    // Parse optional import list
+    let imports = inner.next().map(|import_list| {
+        import_list.into_inner()
+            .map(|p| p.as_str().to_string())
+            .collect()
+    });
+
+    UseDecl { module_path, imports }
+}
+
 /// Build a predicate declaration
 fn build_pred_decl(pair: Pair<'_, Rule>) -> Result<PredDecl> {
     let mut inner = pair.into_inner();
-    let name = inner.next()
-        .ok_or_else(|| XlogError::Parse("Missing predicate name".to_string()))?
-        .as_str()
-        .to_string();
+    let mut is_private = false;
+
+    // Check for private modifier
+    let first = inner.next()
+        .ok_or_else(|| XlogError::Parse("Missing predicate name".to_string()))?;
+
+    let name_pair = if first.as_rule() == Rule::private_mod {
+        is_private = true;
+        inner.next()
+            .ok_or_else(|| XlogError::Parse("Missing predicate name after private".to_string()))?
+    } else {
+        first
+    };
+
+    let name = name_pair.as_str().to_string();
 
     let mut types = Vec::new();
     for type_pair in inner {
@@ -189,7 +229,7 @@ fn build_pred_decl(pair: Pair<'_, Rule>) -> Result<PredDecl> {
         }
     }
 
-    Ok(PredDecl { name, types, is_private: false })
+    Ok(PredDecl { name, types, is_private })
 }
 
 /// Build a type specification
