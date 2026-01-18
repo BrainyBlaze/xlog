@@ -235,6 +235,36 @@ pred label(u32, symbol).  % symbol = hashed string
 
 Supported types: `u32`, `u64`, `i32`, `i64`, `f32`, `f64`, `bool`, `symbol`
 
+### Modules and Functions (v0.3.2)
+
+Organize code into reusable modules with `use` imports and define custom functions with arithmetic, conditionals, and recursion. Symbol values display as readable strings for improved debugging.
+
+```prolog
+% Module example (math.xl)
+func abs(X) = if X < 0 then 0 - X else X.
+
+% Main program
+use math::{abs}.
+
+pred task(symbol, f64).
+task(temperature, -5.0).
+
+pred result(symbol, f64).
+result(Label, AbsVal) :- task(Label, Val), abs(Val) is AbsVal.
+
+?- result(X, Y).
+% Output: result(temperature, 5.0).
+```
+
+**Features:**
+
+- **Modules**: Define functions in `.xl` files and import them with `use module::{func1, func2}`
+- **User-Defined Functions**: Create reusable functions with `func name(args) = expression`
+  - Arithmetic operations: `+`, `-`, `*`, `/`, `%`
+  - Conditionals: `if condition then expr1 else expr2`
+  - Recursion: Functions can call themselves and other functions
+- **Reversible Symbols**: Symbol values round-trip through the string table, displaying as readable strings in query output
+
 ---
 
 ## CLI Reference
