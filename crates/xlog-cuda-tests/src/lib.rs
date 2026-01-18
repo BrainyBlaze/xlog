@@ -14,6 +14,7 @@
 
 pub mod harness;
 pub mod categories;
+pub mod properties;
 
 pub use harness::{TestContext, FailureDiagnostic, CertificationResults, CategoryResult, TestResult, TestStatus};
 pub use harness::generators::{SizeGen, Distribution, NumericEdges, AlignmentGen};

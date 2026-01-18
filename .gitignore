@@ -36,3 +36,8 @@ __pycache__/
 crates/xlog-gpu-py/dist/
 
 .docs/
+
+# Fuzz testing artifacts
+fuzz/target/
+fuzz/corpus/
+fuzz/artifacts/

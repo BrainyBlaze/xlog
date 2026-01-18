@@ -1,0 +1,45 @@
+[package]
+name = "xlog-fuzz"
+version = "0.0.0"
+authors = ["Automated"]
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Keep fuzz crate out of main workspace
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+
+# XLOG crates to fuzz
+xlog-logic = { path = "../crates/xlog-logic" }
+xlog-core = { path = "../crates/xlog-core" }
+xlog-ir = { path = "../crates/xlog-ir" }
+
+[[bin]]
+name = "fuzz_parser"
+path = "fuzz_targets/fuzz_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_compiler"
+path = "fuzz_targets/fuzz_compiler.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_type_inference"
+path = "fuzz_targets/fuzz_type_inference.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use xlog_core::{Result, Schema, XlogError};
 use xlog_cuda::{CudaBuffer, CudaKernelProvider};
 use xlog_logic::{BodyLiteral, Compiler, Program, Query, Term};
-use xlog_runtime::Executor;
+use xlog_runtime::{ExecutionStats, Executor};
 
 pub struct LogicQueryResult {
     pub relation_name: String,
@@ -14,6 +14,8 @@ pub struct LogicQueryResult {
 
 pub struct LogicEvalResult {
     pub queries: Vec<LogicQueryResult>,
+    /// Execution statistics (populated when profiling is enabled)
+    pub stats: Option<ExecutionStats>,
 }
 
 pub struct LogicProgram {
@@ -49,7 +51,23 @@ impl LogicProgram {
         provider: Arc<CudaKernelProvider>,
         inputs: HashMap<String, CudaBuffer>,
     ) -> Result<LogicEvalResult> {
+        self.evaluate_with_options(provider, inputs, false)
+    }
+
+    /// Evaluate the program with optional profiling
+    ///
+    /// # Arguments
+    /// * `provider` - The CUDA kernel provider
+    /// * `inputs` - Input relations
+    /// * `profiling` - Whether to collect execution statistics
+    pub fn evaluate_with_options(
+        &self,
+        provider: Arc<CudaKernelProvider>,
+        inputs: HashMap<String, CudaBuffer>,
+        profiling: bool,
+    ) -> Result<LogicEvalResult> {
         let mut executor = Executor::new(provider.clone());
+        executor.set_profiling(profiling);
         for (name, rel_id) in &self.rel_ids {
             executor.register_relation(*rel_id, name);
         }
@@ -99,7 +117,15 @@ impl LogicProgram {
             });
         }
 
-        Ok(LogicEvalResult { queries })
+        // Collect execution stats if profiling was enabled
+        let total_output_rows: u64 = queries.iter().map(|q| q.buffer.num_rows()).sum();
+        let stats = if profiling {
+            Some(executor.execution_stats(total_output_rows))
+        } else {
+            None
+        };
+
+        Ok(LogicEvalResult { queries, stats })
     }
 
     fn load_facts(&self, provider: &CudaKernelProvider, executor: &mut Executor) -> Result<()> {
