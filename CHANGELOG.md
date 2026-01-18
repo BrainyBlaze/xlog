@@ -2,6 +2,48 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.3.2 — 2026-01-18
+
+Module system, user-defined functions, and reversible symbols for expressive, modular Datalog programs.
+
+### Added
+
+**Module System:**
+- File-based modules with explicit imports
+- `use module.` to import all public predicates
+- `use module::{pred1, pred2}.` for selective imports
+- `use path/to/module.` for nested modules
+- `private` keyword for module-internal predicates and functions
+
+**User-Defined Functions:**
+- Reusable functions in rule bodies
+- Arithmetic functions: `func double(X) = X * 2.`
+- Conditional functions: `func abs(X) = if X < 0 then 0 - X else X.`
+- Recursive functions with base-case validation
+- Optional type annotations: `func add(X: f64, Y: f64) -> f64 = X + Y.`
+- Predicate-based functions: `func get_parent(X) = P :- parent(X, P).`
+
+**Reversible Symbols:**
+- Bidirectional string-to-ID mapping
+- Symbols display as original strings in query output
+- Arrow dictionary encoding for efficient serialization
+- `--stats` shows symbol registry metrics
+
+**CLI Enhancements:**
+- `--module-path` flag for specifying module search directories
+
+### Changed
+
+- Symbol storage changed from hash-based to sequential ID allocation
+- Module resolution now validates imports before compilation
+
+### Breaking Changes
+
+- Serialized Arrow files from v0.3.1 with symbol columns may need re-export
+- `hash_symbol_to_u32` function removed from public API
+
+---
+
 ## v0.3.1 — 2026-01-18
 
 Float predicates, performance benchmarks, query statistics, fuzz testing, and property-based tests.
