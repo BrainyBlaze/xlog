@@ -89,16 +89,6 @@ impl ScalarType {
     }
 }
 
-/// Hash a symbol string into its on-device `u32` representation.
-///
-/// Notes:
-/// - This is an MVP encoding used consistently across compilation/runtime.
-/// - It is not reversible and is not collision-free.
-pub fn hash_symbol_to_u32(s: &str) -> u32 {
-    s.bytes()
-        .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32))
-}
-
 /// Schema describing a relation's columns
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Schema {
