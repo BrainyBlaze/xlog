@@ -87,3 +87,63 @@ fn test_parse_max_recursion_pragma() {
     let program = parse(src).unwrap();
     assert_eq!(program.directives.max_recursion_depth, Some(500));
 }
+
+#[test]
+fn test_parse_nested_func_calls() {
+    let src = "func compose(X) = outer(inner(X)).";
+    let program = parse(src).unwrap();
+
+    assert_eq!(program.functions.len(), 1);
+    let func = &program.functions[0];
+    assert_eq!(func.name, "compose");
+
+    // Body should be FuncCall containing another FuncCall
+    match &func.body {
+        FuncBody::Arithmetic(ArithExpr::FuncCall { name, args }) => {
+            assert_eq!(name, "outer");
+            assert_eq!(args.len(), 1);
+            match &args[0] {
+                ArithExpr::FuncCall { name: inner_name, .. } => {
+                    assert_eq!(inner_name, "inner");
+                }
+                _ => panic!("Expected inner FuncCall"),
+            }
+        }
+        _ => panic!("Expected FuncCall body"),
+    }
+}
+
+#[test]
+fn test_parse_deeply_nested() {
+    let src = "func deep(X) = a(b(c(d(X)))).";
+    let program = parse(src).unwrap();
+    assert_eq!(program.functions.len(), 1);
+}
+
+#[test]
+fn test_parse_both_call_syntaxes() {
+    let src = r#"
+        func double(X) = X * 2.
+
+        // Via is expression
+        result1(Y) :- input(X), Y is double(X).
+
+        // Function call in arithmetic expression via is
+        check(X, R) :- input(X), R is double(X), R > 10.
+    "#;
+    let program = parse(src).unwrap();
+
+    assert_eq!(program.functions.len(), 1);
+    assert_eq!(program.rules.len(), 2);
+}
+
+#[test]
+fn test_parse_complex_conditional() {
+    let src = "func clamp(X, Lo, Hi) = if X < Lo then Lo else if X > Hi then Hi else X.";
+    let program = parse(src).unwrap();
+    assert_eq!(program.functions[0].params.len(), 3);
+    match &program.functions[0].body {
+        FuncBody::Conditional(_) => {}
+        _ => panic!("Expected conditional body"),
+    }
+}
