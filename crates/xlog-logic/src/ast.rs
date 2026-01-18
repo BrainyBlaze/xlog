@@ -281,6 +281,15 @@ pub struct ProbQuery {
     pub atom: Atom,
 }
 
+/// Import statement: use module. or use module::{pred1, pred2}.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UseDecl {
+    /// Module path segments, e.g., ["utils", "math"]
+    pub module_path: Vec<String>,
+    /// Specific imports (None = import all public)
+    pub imports: Option<Vec<String>>,
+}
+
 /// Domain declaration
 #[derive(Debug, Clone, PartialEq)]
 pub struct DomainDecl {
