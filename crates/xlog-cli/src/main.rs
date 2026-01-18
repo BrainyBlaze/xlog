@@ -43,6 +43,9 @@ struct RunArgs {
     /// Stats output format (human or json)
     #[arg(long, value_enum, default_value = "human")]
     stats_format: StatsFormat,
+    /// Additional directories to search for modules (colon-separated)
+    #[arg(long, value_delimiter = ':')]
+    module_path: Vec<PathBuf>,
 }
 
 #[derive(Copy, Clone, ValueEnum, Default)]
@@ -71,6 +74,9 @@ struct ProbArgs {
     output: OutputFormat,
     #[arg(long)]
     output_dir: Option<PathBuf>,
+    /// Additional directories to search for modules (colon-separated)
+    #[arg(long, value_delimiter = ':')]
+    module_path: Vec<PathBuf>,
 }
 
 #[derive(Copy, Clone, ValueEnum)]
