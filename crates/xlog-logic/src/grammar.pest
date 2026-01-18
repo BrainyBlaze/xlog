@@ -10,6 +10,9 @@ anonymous = @{ "_" }
 variable = @{ ASCII_ALPHA_UPPER ~ (ASCII_ALPHANUMERIC | "_")* }
 var_or_anon = { anonymous | variable }
 
+// Module path: graph or utils/math or deep/nested/module
+module_path = @{ ident ~ ("/" ~ ident)* }
+
 // Literals
 integer = @{ "-"? ~ ASCII_DIGIT+ }
 float_num = @{ "-"? ~ ASCII_DIGIT+ ~ "." ~ ASCII_DIGIT+ }
