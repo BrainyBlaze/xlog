@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use xlog_core::{hash_symbol_to_u32, MemoryBudget, RuntimeConfig, ScalarType, Schema};
+use xlog_core::{symbol, MemoryBudget, RuntimeConfig, ScalarType, Schema};
 use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager};
 use xlog_ir::{CompareOp, ConstValue, Expr};
 use xlog_logic::Compiler;
@@ -130,7 +130,7 @@ fn test_executor_filter_with_column_column_compare_and_symbol() {
         }
     };
 
-    let symbol_hash = hash_symbol_to_u32("sym");
+    let symbol_hash = symbol::intern("sym");
 
     let schema = Schema::new(vec![
         ("a".to_string(), ScalarType::U32),
