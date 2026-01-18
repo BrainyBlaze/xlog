@@ -10,8 +10,8 @@ use xlog_core::{ScalarType, XlogError, Result, symbol};
 
 use crate::ast::{
     AggExpr, AggOp, AnnotatedDisjunction, ArithExpr, Atom, BodyLiteral, CompOp, Comparison,
-    Constraint, DomainDecl, Evidence, IsExpr, PredDecl, ProbCache, ProbEngine, ProbFact,
-    ProbQuery, Program, Query, Rule as AstRule, Term, UseDecl,
+    CondExpr, Constraint, DomainDecl, Evidence, FuncBody, FuncDef, FuncParam, IsExpr, PredDecl,
+    ProbCache, ProbEngine, ProbFact, ProbQuery, Program, Query, Rule as AstRule, Term, UseDecl,
 };
 
 #[derive(Parser)]
@@ -108,6 +108,9 @@ fn build_statement(pair: Pair<'_, Rule>, program: &mut Program) -> Result<()> {
             Rule::query => {
                 program.queries.push(build_query(inner)?);
             }
+            Rule::func_def => {
+                program.functions.push(parse_func_def(inner)?);
+            }
             _ => {}
         }
     }
@@ -154,6 +157,19 @@ fn apply_pragma(pair: Pair<'_, Rule>, program: &mut Program) -> Result<()> {
                 }
             };
             program.directives.prob_cache = Some(cache);
+        }
+        Rule::pragma_max_recursion => {
+            let value = pragma
+                .into_inner()
+                .next()
+                .ok_or_else(|| XlogError::Parse("Missing max_recursion_depth value".to_string()))?;
+            let depth: u32 = value.as_str().parse().map_err(|_| {
+                XlogError::Parse(format!(
+                    "Invalid max_recursion_depth value: {}",
+                    value.as_str()
+                ))
+            })?;
+            program.directives.max_recursion_depth = Some(depth);
         }
         _ => {}
     }
@@ -246,6 +262,182 @@ fn build_type_spec(pair: Pair<'_, Rule>) -> Result<ScalarType> {
         "symbol" => Ok(ScalarType::Symbol),
         _ => Err(XlogError::Parse(format!("Unknown type: {}", type_str))),
     }
+}
+
+/// Parse a function parameter: X or X: f64
+fn parse_func_param(pair: Pair<'_, Rule>) -> Result<FuncParam> {
+    let mut inner = pair.into_inner();
+    let name = inner
+        .next()
+        .ok_or_else(|| XlogError::Parse("Missing parameter name".to_string()))?
+        .as_str()
+        .to_string();
+    let typ = inner
+        .next()
+        .map(|ta| {
+            // type_annotation contains type_spec
+            build_type_spec(
+                ta.into_inner()
+                    .next()
+                    .expect("type_annotation must contain type_spec"),
+            )
+        })
+        .transpose()?;
+    Ok(FuncParam { name, typ })
+}
+
+/// Parse a comparison operator
+fn parse_cmp_op(pair: Pair<'_, Rule>) -> CompOp {
+    match pair.as_str() {
+        "==" | "=" => CompOp::Eq,
+        "!=" => CompOp::Ne,
+        "<" => CompOp::Lt,
+        "<=" => CompOp::Le,
+        ">" => CompOp::Gt,
+        ">=" => CompOp::Ge,
+        _ => unreachable!("unexpected comparison operator: {}", pair.as_str()),
+    }
+}
+
+/// Parse a conditional expression: if X < 0 then 0 - X else X
+fn parse_cond_expr(pair: Pair<'_, Rule>) -> Result<CondExpr> {
+    let mut inner = pair.into_inner();
+
+    // Parse condition test
+    let cond_test = inner
+        .next()
+        .ok_or_else(|| XlogError::Parse("Missing condition test".to_string()))?;
+    let mut test_inner = cond_test.into_inner();
+    let cond_left = build_arith_expr(
+        test_inner
+            .next()
+            .ok_or_else(|| XlogError::Parse("Missing left side of condition".to_string()))?,
+    )?;
+    let cond_op = parse_cmp_op(
+        test_inner
+            .next()
+            .ok_or_else(|| XlogError::Parse("Missing condition operator".to_string()))?,
+    );
+    let cond_right = build_arith_expr(
+        test_inner
+            .next()
+            .ok_or_else(|| XlogError::Parse("Missing right side of condition".to_string()))?,
+    )?;
+
+    // Parse then branch
+    let then_branch = Box::new(parse_func_body(
+        inner
+            .next()
+            .ok_or_else(|| XlogError::Parse("Missing then branch".to_string()))?,
+    )?);
+
+    // Parse else branch
+    let else_branch = Box::new(parse_func_body(
+        inner
+            .next()
+            .ok_or_else(|| XlogError::Parse("Missing else branch".to_string()))?,
+    )?);
+
+    Ok(CondExpr {
+        cond_left,
+        cond_op,
+        cond_right,
+        then_branch,
+        else_branch,
+    })
+}
+
+/// Parse a function body: arithmetic, conditional, or predicate-based
+fn parse_func_body(pair: Pair<'_, Rule>) -> Result<FuncBody> {
+    let inner = pair
+        .into_inner()
+        .next()
+        .ok_or_else(|| XlogError::Parse("Empty function body".to_string()))?;
+    match inner.as_rule() {
+        Rule::func_body_pred => {
+            let mut parts = inner.into_inner();
+            let result = parts
+                .next()
+                .ok_or_else(|| XlogError::Parse("Missing result variable".to_string()))?
+                .as_str()
+                .to_string();
+            let body = build_body(
+                parts
+                    .next()
+                    .ok_or_else(|| XlogError::Parse("Missing predicate body".to_string()))?,
+            )?;
+            Ok(FuncBody::Predicate { result, body })
+        }
+        Rule::func_body_arith => {
+            let arith_inner = inner
+                .into_inner()
+                .next()
+                .ok_or_else(|| XlogError::Parse("Empty arithmetic body".to_string()))?;
+            match arith_inner.as_rule() {
+                Rule::cond_expr => Ok(FuncBody::Conditional(parse_cond_expr(arith_inner)?)),
+                _ => Ok(FuncBody::Arithmetic(build_arith_expr(arith_inner)?)),
+            }
+        }
+        _ => Err(XlogError::Parse(format!(
+            "Unexpected rule in func_body: {:?}",
+            inner.as_rule()
+        ))),
+    }
+}
+
+/// Parse a function definition
+fn parse_func_def(pair: Pair<'_, Rule>) -> Result<FuncDef> {
+    let mut inner = pair.into_inner();
+    let mut is_private = false;
+
+    // Check for private modifier
+    let first = inner
+        .next()
+        .ok_or_else(|| XlogError::Parse("Empty function definition".to_string()))?;
+    let name_pair = if first.as_rule() == Rule::private_mod {
+        is_private = true;
+        inner
+            .next()
+            .ok_or_else(|| XlogError::Parse("Missing function name after private".to_string()))?
+    } else {
+        first
+    };
+
+    let name = name_pair.as_str().to_string();
+
+    let mut params = Vec::new();
+    let mut return_type = None;
+    let mut body = None;
+
+    for p in inner {
+        match p.as_rule() {
+            Rule::func_params => {
+                params = p
+                    .into_inner()
+                    .map(parse_func_param)
+                    .collect::<Result<Vec<_>>>()?;
+            }
+            Rule::return_type => {
+                return_type = Some(build_type_spec(
+                    p.into_inner()
+                        .next()
+                        .ok_or_else(|| XlogError::Parse("Missing return type".to_string()))?,
+                )?);
+            }
+            Rule::func_body => {
+                body = Some(parse_func_body(p)?);
+            }
+            _ => {}
+        }
+    }
+
+    Ok(FuncDef {
+        name,
+        params,
+        return_type,
+        body: body.ok_or_else(|| XlogError::Parse("Function must have a body".to_string()))?,
+        is_private,
+    })
 }
 
 /// Build a rule (with body)
@@ -693,6 +885,18 @@ fn build_arith_primary(pair: Pair<'_, Rule>) -> Result<ArithExpr> {
             let val: f64 = first.as_str().parse()
                 .map_err(|_| XlogError::Parse(format!("Invalid float: {}", first.as_str())))?;
             Ok(ArithExpr::Float(val))
+        }
+        Rule::func_call => {
+            let mut call_inner = first.into_inner();
+            let name = call_inner
+                .next()
+                .ok_or_else(|| XlogError::Parse("Missing function name".to_string()))?
+                .as_str()
+                .to_string();
+            let args: Vec<ArithExpr> = call_inner
+                .map(build_arith_expr)
+                .collect::<Result<Vec<_>>>()?;
+            Ok(ArithExpr::FuncCall { name, args })
         }
         _ => Err(XlogError::Parse(format!("Unexpected token in arith_primary: {:?}", first.as_rule()))),
     }
