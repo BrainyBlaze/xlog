@@ -13,6 +13,12 @@ var_or_anon = { anonymous | variable }
 // Module path: graph or utils/math or deep/nested/module
 module_path = @{ ident ~ ("/" ~ ident)* }
 
+// Import list: {edge, reach, node}
+import_list = { "{" ~ ident ~ ("," ~ ident)* ~ "}" }
+
+// Use statement: use graph. or use utils/math::{abs, clamp}.
+use_stmt = { "use" ~ module_path ~ (":" ~ import_list)? ~ "." }
+
 // Literals
 integer = @{ "-"? ~ ASCII_DIGIT+ }
 float_num = @{ "-"? ~ ASCII_DIGIT+ ~ "." ~ ASCII_DIGIT+ }
@@ -96,13 +102,17 @@ pragma = { pragma_prob_engine | pragma_prob_cache }
 domain_decl = { "domain" ~ ident ~ ":" ~ type_spec ~ "." }
 type_spec = { "u32" | "u64" | "i32" | "i64" | "f32" | "f64" | "bool" | "symbol" }
 
+// Private modifier
+private_mod = { "private" }
+
 // Predicate declarations
-pred_decl = { "pred" ~ ident ~ "(" ~ type_list? ~ ")" ~ "." }
+pred_decl = { private_mod? ~ "pred" ~ ident ~ "(" ~ type_list? ~ ")" ~ "." }
 type_list = { type_spec ~ ("," ~ type_spec)* }
 
 // Program structure
 statement = {
-    domain_decl
+    use_stmt
+    | domain_decl
     | pred_decl
     | pragma
     | rule_def
