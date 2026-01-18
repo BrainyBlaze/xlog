@@ -5,3 +5,4 @@
 
 mod module_udf;
 mod symbol_module;
+mod symbol_udf;
