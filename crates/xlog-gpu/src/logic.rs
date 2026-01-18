@@ -236,7 +236,7 @@ fn ensure_schema_type_compatible(expected: &Schema, actual: &Schema) -> Result<(
 }
 
 fn push_term_bytes(out: &mut Vec<u8>, term: &Term, typ: xlog_core::ScalarType) -> Result<()> {
-    use xlog_core::hash_symbol_to_u32;
+    use xlog_core::symbol;
     use xlog_core::ScalarType;
 
     match (typ, term) {
@@ -290,7 +290,7 @@ fn push_term_bytes(out: &mut Vec<u8>, term: &Term, typ: xlog_core::ScalarType) -
             out.push(if s == "true" { 1u8 } else { 0u8 });
         }
         (ScalarType::Symbol, Term::String(s)) | (ScalarType::Symbol, Term::Symbol(s)) => {
-            out.extend_from_slice(&hash_symbol_to_u32(s).to_le_bytes());
+            out.extend_from_slice(&symbol::intern(s).to_le_bytes());
         }
         (_, Term::Variable(v)) => {
             return Err(XlogError::Execution(format!(

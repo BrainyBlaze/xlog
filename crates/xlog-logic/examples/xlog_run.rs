@@ -8,7 +8,7 @@ use std::env;
 use std::fs;
 use std::sync::Arc;
 
-use xlog_core::{hash_symbol_to_u32, MemoryBudget, Result, ScalarType, XlogError};
+use xlog_core::{symbol, MemoryBudget, Result, ScalarType, XlogError};
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 use xlog_logic::{parse_program, BodyLiteral, Compiler, Query, Term};
 use xlog_runtime::Executor;
@@ -136,7 +136,7 @@ fn push_term_bytes(out: &mut Vec<u8>, term: &Term, typ: ScalarType) -> Result<()
             out.push(if s == "true" { 1u8 } else { 0u8 });
         }
         (ScalarType::Symbol, Term::String(s)) | (ScalarType::Symbol, Term::Symbol(s)) => {
-            out.extend_from_slice(&hash_symbol_to_u32(s).to_le_bytes());
+            out.extend_from_slice(&symbol::intern(s).to_le_bytes());
         }
         (_, Term::Variable(v)) => {
             return Err(XlogError::Execution(format!(

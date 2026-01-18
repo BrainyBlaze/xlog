@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
 
-use xlog_core::{hash_symbol_to_u32, Result, XlogError};
+use xlog_core::{symbol, Result, XlogError};
 use xlog_logic::ast::{AggExpr, AggOp, ArithExpr, Atom, BodyLiteral, CompOp, Evidence, ProbQuery, Program, Rule, Term};
 use xlog_logic::stratify::{build_dependency_graph, find_sccs_for_lowering, stratify};
 
@@ -421,7 +421,7 @@ pub(crate) fn value_from_term(term: &Term) -> Result<Value> {
         Term::Integer(i) => Ok(Value::I64(*i)),
         Term::Float(f) => Ok(Value::F64(f.to_bits())),
         Term::String(s) => Ok(Value::String(s.clone())),
-        Term::Symbol(s) => Ok(Value::Symbol(hash_symbol_to_u32(s))),
+        Term::Symbol(s) => Ok(Value::Symbol(symbol::intern(s))),
         Term::Variable(_) | Term::Anonymous | Term::Aggregate(_) => Err(XlogError::Compilation(
             "Non-constant term cannot be converted to a value".to_string(),
         )),
