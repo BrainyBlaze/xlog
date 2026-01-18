@@ -108,6 +108,12 @@ type_annotation = { ":" ~ type_spec }
 // Return type annotation: -> f64
 return_type = { "->" ~ type_spec }
 
+// Function parameter: X or X: f64
+func_param = { variable ~ type_annotation? }
+
+// Parameter list: X, Y, Z or X: f64, Y: f64
+func_params = { func_param ~ ("," ~ func_param)* }
+
 // Private modifier
 private_mod = { "private" }
 
