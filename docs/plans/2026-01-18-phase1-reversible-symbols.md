@@ -322,11 +322,57 @@ Add to tests module:
 Run: `cargo test -p xlog-core test_concurrent -- --test-threads=1`
 Expected: PASS
 
-**Step 3: Commit**
+**Step 3: Add large scale test (100K symbols)**
+
+Add to tests module:
+
+```rust
+    #[test]
+    fn test_large_scale() {
+        setup();
+        use std::time::Instant;
+
+        let start = Instant::now();
+
+        // Intern 100K unique symbols
+        for i in 0..100_000 {
+            let s = format!("symbol_{:06}", i);
+            let id = intern(&s);
+            assert_eq!(id, i as u32);
+        }
+
+        let intern_time = start.elapsed();
+
+        // Verify all resolve correctly
+        let start = Instant::now();
+        for i in 0..100_000 {
+            let expected = format!("symbol_{:06}", i);
+            assert_eq!(resolve(i as u32), expected);
+        }
+        let resolve_time = start.elapsed();
+
+        // Verify count
+        assert_eq!(count(), 100_000);
+
+        // Log performance (not assertions, just info)
+        println!("100K intern: {:?}, 100K resolve: {:?}", intern_time, resolve_time);
+
+        // Memory should be reasonable (rough check: < 10MB for 100K symbols)
+        let mem = memory_usage();
+        assert!(mem < 10_000_000, "memory usage {} exceeds 10MB", mem);
+    }
+```
+
+**Step 4: Run large scale test**
+
+Run: `cargo test -p xlog-core test_large_scale -- --test-threads=1 --nocapture`
+Expected: PASS with timing output
+
+**Step 5: Commit**
 
 ```bash
 git add crates/xlog-core/src/symbol.rs
-git commit -m "test(core): add concurrent symbol interning test"
+git commit -m "test(core): add concurrent and large-scale symbol tests"
 ```
 
 ---

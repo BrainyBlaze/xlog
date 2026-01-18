@@ -1326,6 +1326,53 @@ git commit -m "test(logic): add visibility test fixtures"
 
 ---
 
+### Task 24b: Create Transitive Dependency Test Fixtures
+
+**Files:**
+- Create: `crates/xlog-logic/tests/modules/transitive/main.xlog`
+- Create: `crates/xlog-logic/tests/modules/transitive/mid.xlog`
+- Create: `crates/xlog-logic/tests/modules/transitive/base.xlog`
+
+**Step 1: Create transitive/base.xlog**
+
+```prolog
+% Base module - no dependencies
+pred base_pred(u32).
+base_pred(1).
+base_pred(2).
+```
+
+**Step 2: Create transitive/mid.xlog**
+
+```prolog
+% Mid-level module - depends on base
+use base.
+
+pred mid_pred(u32).
+mid_pred(X) :- base_pred(X), X > 1.
+```
+
+**Step 3: Create transitive/main.xlog**
+
+```prolog
+% Main module - depends on mid (which depends on base)
+use mid.
+
+pred main_pred(u32).
+main_pred(X) :- mid_pred(X).
+
+?- main_pred(X).
+```
+
+**Step 4: Commit**
+
+```bash
+git add crates/xlog-logic/tests/modules/transitive/
+git commit -m "test(logic): add transitive dependency test fixtures"
+```
+
+---
+
 ### Task 25: Add Module Integration Tests
 
 **Files:**
@@ -1384,6 +1431,39 @@ fn test_search_paths() {
     let result = resolver.find_module_file(&base, &["helper".into()]);
     assert!(result.is_some());
 }
+
+#[test]
+fn test_transitive_dependencies() {
+    // Test: main → mid → base (transitive chain)
+    let dir = test_modules_dir().join("transitive");
+    let mut resolver = ModuleResolver::new(vec![]);
+
+    // Loading main should recursively load mid and base
+    let result = resolver.load_module(&dir, &["main".into()]);
+    assert!(result.is_ok(), "Failed to load transitive chain: {:?}", result);
+
+    // Verify all three modules were loaded
+    assert!(resolver.loaded.contains_key("main"), "main not loaded");
+    assert!(resolver.loaded.contains_key("mid"), "mid not loaded");
+    assert!(resolver.loaded.contains_key("base"), "base not loaded");
+
+    // Verify load order didn't cause issues (base should be loaded before mid)
+}
+
+#[test]
+fn test_search_path_precedence() {
+    // Relative path should take precedence over search path
+    let base = test_modules_dir().join("basic");
+    let search = vec![test_modules_dir().join("nested")];
+    let mut resolver = ModuleResolver::new(search);
+
+    // Create a scenario where same module name exists in both locations
+    // Should prefer the relative path
+    let result = resolver.find_module_file(&base, &["helper".into()]);
+    assert!(result.is_some());
+    // Verify it's from the relative path, not search path
+    assert!(result.unwrap().starts_with(&base));
+}
 ```
 
 **Step 2: Run integration tests**
@@ -1419,6 +1499,8 @@ Phase 2 (Module System) complete:
 | 13-16 | Module resolver | C |
 | 17-18 | Name resolution | D |
 | 19-20 | Integration & CLI | E |
-| 21-25 | Test infrastructure | F |
+| 21-24 | Test fixtures (basic, nested, circular, visibility) | F |
+| 24b | Transitive dependency fixtures | F |
+| 25 | Integration tests | F |
 
-**Total: 25 tasks, ~125 steps**
+**Total: 26 tasks, ~130 steps**

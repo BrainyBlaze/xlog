@@ -128,8 +128,8 @@ use xlog_logic::parser::parse_program;
 fn test_import_function_from_module() {
     // Module with function
     let math_module = r#"
-        fn abs(X) = if X < 0 then 0 - X else X.
-        fn clamp(X, Lo, Hi) = if X < Lo then Lo else if X > Hi then Hi else X.
+        func abs(X) = if X < 0 then 0 - X else X.
+        func clamp(X, Lo, Hi) = if X < Lo then Lo else if X > Hi then Hi else X.
     "#;
 
     // Main using imported function
@@ -150,8 +150,8 @@ fn test_import_function_from_module() {
 fn test_private_function_not_importable() {
     // Module with private function
     let util_module = r#"
-        private fn helper(X) = X * 2.
-        fn public_func(X) = helper(X) + 1.
+        private func helper(X) = X * 2.
+        func public_func(X) = helper(X) + 1.
     "#;
 
     // Main trying to import private
@@ -168,7 +168,7 @@ fn test_private_function_not_importable() {
 fn test_recursive_function_across_modules() {
     // Module with recursive function
     let math_module = r#"
-        fn factorial(N) = if N <= 1 then 1 else N * factorial(N - 1).
+        func factorial(N) = if N <= 1 then 1 else N * factorial(N - 1).
     "#;
 
     // Main using imported recursive function
@@ -311,12 +311,12 @@ fn test_task_management_system() {
 
     // Module: priorities.xl
     let priorities_module = r#"
-        fn priority_score(Urgency, Importance) =
+        func priority_score(Urgency, Importance) =
             if Urgency > 8 then Importance * 2
             else if Urgency > 5 then Importance + Urgency
             else Importance.
 
-        fn is_critical(Score) = if Score > 15 then 1 else 0.
+        func is_critical(Score) = if Score > 15 then 1 else 0.
     "#;
 
     // Module: statuses.xl
@@ -383,7 +383,7 @@ fn test_nested_module_with_functions_and_symbols() {
 
     // Nested module path
     let utils_math = r#"
-        fn abs(X) = if X < 0 then 0 - X else X.
+        func abs(X) = if X < 0 then 0 - X else X.
     "#;
 
     // Main using nested path
@@ -666,16 +666,16 @@ Functions provide reusable calculations within rules.
 ### Basic Functions
 
 ```xlog
-fn double(X) = X * 2.
-fn add(X, Y) = X + Y.
+func double(X) = X * 2.
+func add(X, Y) = X + Y.
 ```
 
 ### Conditional Functions
 
 ```xlog
-fn abs(X) = if X < 0 then 0 - X else X.
+func abs(X) = if X < 0 then 0 - X else X.
 
-fn clamp(X, Lo, Hi) =
+func clamp(X, Lo, Hi) =
     if X < Lo then Lo
     else if X > Hi then Hi
     else X.
@@ -684,8 +684,8 @@ fn clamp(X, Lo, Hi) =
 ### Recursive Functions
 
 ```xlog
-fn factorial(N) = if N <= 1 then 1 else N * factorial(N - 1).
-fn fib(N) = if N <= 1 then N else fib(N - 1) + fib(N - 2).
+func factorial(N) = if N <= 1 then 1 else N * factorial(N - 1).
+func fib(N) = if N <= 1 then N else fib(N - 1) + fib(N - 2).
 ```
 
 Note: Recursive functions require a conditional with a base case.
@@ -709,7 +709,7 @@ doubled(Y) :- number(X), double(X) = Y.
 ### Type Annotations (Optional)
 
 ```xlog
-fn add(X: f64, Y: f64) -> f64 = X + Y.
+func add(X: f64, Y: f64) -> f64 = X + Y.
 ```
 ```
 
@@ -769,7 +769,7 @@ Add to features section:
 
 ```xlog
 % Module example (math.xl)
-fn abs(X) = if X < 0 then 0 - X else X.
+func abs(X) = if X < 0 then 0 - X else X.
 
 % Main program
 use math::{abs}.
@@ -813,8 +813,8 @@ git commit -m "docs: update README with v0.3.2 features"
   - `private` keyword for module-internal predicates
 
 - **User-Defined Functions**: Reusable functions in rule bodies
-  - Arithmetic functions: `fn double(X) = X * 2.`
-  - Conditional functions: `fn abs(X) = if X < 0 then 0 - X else X.`
+  - Arithmetic functions: `func double(X) = X * 2.`
+  - Conditional functions: `func abs(X) = if X < 0 then 0 - X else X.`
   - Recursive functions with safety checks
   - Optional type annotations
 
@@ -868,7 +868,7 @@ Expected: PASS
 
 Create test file `/tmp/v032_test.xl`:
 ```xlog
-fn abs(X) = if X < 0 then 0 - X else X.
+func abs(X) = if X < 0 then 0 - X else X.
 
 pred data(symbol, f64).
 data(sensor_a, -5.0).
