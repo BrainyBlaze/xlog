@@ -34,6 +34,7 @@ pub mod lower;
 pub mod compile;
 pub mod optimizer;
 pub mod module;
+pub mod resolver;
 
 // Re-export main types
 pub use parser::{parse_program, parse_statement};
