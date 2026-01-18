@@ -131,6 +131,7 @@ pub fn from_arrow(arr: &DictionaryArray<UInt32Type>) -> Vec<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     // Each test must call setup() to get clean state
     fn setup() {
@@ -138,6 +139,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_intern_sequential() {
         setup();
         assert_eq!(intern("foo"), 0);
@@ -146,6 +148,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_intern_idempotent() {
         setup();
         let id1 = intern("hello");
@@ -155,6 +158,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_resolve_roundtrip() {
         setup();
         let id = intern("world");
@@ -162,6 +166,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     #[should_panic(expected = "invalid symbol ID")]
     fn test_resolve_invalid() {
         setup();
@@ -169,6 +174,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_clear() {
         setup();
         intern("a");
@@ -180,6 +186,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_empty_string() {
         setup();
         let id = intern("");
@@ -187,6 +194,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_unicode() {
         setup();
         let id = intern("日本語");
@@ -197,6 +205,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_concurrent_intern() {
         setup();
         use std::collections::HashSet;
@@ -235,6 +244,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_large_scale() {
         setup();
         use std::time::Instant;
@@ -273,6 +283,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_arrow_roundtrip() {
         setup();
         let ids = vec![
