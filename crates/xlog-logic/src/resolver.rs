@@ -73,28 +73,38 @@ impl ModuleResolver {
     }
 
     /// Extract exports from a parsed program
-    pub fn extract_exports(program: &Program) -> HashSet<String> {
-        let mut exports = HashSet::new();
+    /// Returns (predicate exports, function exports)
+    pub fn extract_exports(program: &Program) -> (HashSet<String>, HashSet<String>) {
+        let mut pred_exports = HashSet::new();
+        let mut func_exports = HashSet::new();
 
         // Add declared predicates that aren't private
         for pred in &program.predicates {
             if !pred.is_private {
-                exports.insert(pred.name.clone());
+                pred_exports.insert(pred.name.clone());
             }
         }
 
         // Add rule heads (all rules define public predicates unless declared private)
         for rule in &program.rules {
             // Check if this predicate was declared as private
-            let is_private = program.predicates
+            let is_private = program
+                .predicates
                 .iter()
                 .any(|p| p.name == rule.head.predicate && p.is_private);
             if !is_private {
-                exports.insert(rule.head.predicate.clone());
+                pred_exports.insert(rule.head.predicate.clone());
             }
         }
 
-        exports
+        // Add functions that aren't private
+        for func in &program.functions {
+            if !func.is_private {
+                func_exports.insert(func.name.clone());
+            }
+        }
+
+        (pred_exports, func_exports)
     }
 
     /// Load a module from a path
@@ -139,7 +149,7 @@ impl ModuleResolver {
             })?;
 
         // Extract exports
-        let exports = Self::extract_exports(&program);
+        let (exports, function_exports) = Self::extract_exports(&program);
 
         // Recursively load imports
         let module_dir = source_file.parent().unwrap_or(base_dir);
@@ -155,7 +165,7 @@ impl ModuleResolver {
             path: module_path.to_vec(),
             source_file,
             exports,
-            function_exports: HashSet::new(),
+            function_exports,
         };
 
         self.loaded.insert(path_key.clone(), module);
@@ -186,46 +196,76 @@ impl ModuleResolver {
     }
 
     /// Validate all imports in a program
+    /// Returns (predicate imports, function imports) mapped to their source modules
     pub fn validate_imports(
         &self,
         program: &Program,
-    ) -> Result<HashMap<String, ModulePath>, ModuleError> {
-        let mut imported_names: HashMap<String, ModulePath> = HashMap::new();
+    ) -> Result<(HashMap<String, ModulePath>, HashMap<String, ModulePath>), ModuleError> {
+        let mut imported_predicates: HashMap<String, ModulePath> = HashMap::new();
+        let mut imported_functions: HashMap<String, ModulePath> = HashMap::new();
 
         for use_decl in &program.imports {
-            let module = self.loaded.get(&module_path_to_string(&use_decl.module_path))
+            let module = self
+                .loaded
+                .get(&module_path_to_string(&use_decl.module_path))
                 .expect("module should be loaded");
+
+            // Combine all available exports for wildcard imports
+            let all_exports: HashSet<String> = module
+                .exports
+                .iter()
+                .chain(module.function_exports.iter())
+                .cloned()
+                .collect();
 
             let names_to_import: Vec<String> = match &use_decl.imports {
                 Some(specific) => specific.clone(),
-                None => module.exports.iter().cloned().collect(),
+                None => all_exports.iter().cloned().collect(),
             };
 
             for name in names_to_import {
-                // Check if predicate exists and is public
-                if !module.exports.contains(&name) {
+                // Check if name exists as predicate or function
+                let is_predicate = module.exports.contains(&name);
+                let is_function = module.function_exports.contains(&name);
+
+                if !is_predicate && !is_function {
                     return Err(ModuleError::PredicateNotFound {
                         name: name.clone(),
                         module: use_decl.module_path.clone(),
                     });
                 }
 
-                // Check for conflicts
-                if let Some(prev_module) = imported_names.get(&name) {
-                    if prev_module != &use_decl.module_path {
-                        return Err(ModuleError::ImportConflict {
-                            name,
-                            module1: prev_module.clone(),
-                            module2: use_decl.module_path.clone(),
-                        });
+                // Check for conflicts with predicates
+                if is_predicate {
+                    if let Some(prev_module) = imported_predicates.get(&name) {
+                        if prev_module != &use_decl.module_path {
+                            return Err(ModuleError::ImportConflict {
+                                name,
+                                module1: prev_module.clone(),
+                                module2: use_decl.module_path.clone(),
+                            });
+                        }
                     }
+                    imported_predicates.insert(name.clone(), use_decl.module_path.clone());
                 }
 
-                imported_names.insert(name, use_decl.module_path.clone());
+                // Check for conflicts with functions
+                if is_function {
+                    if let Some(prev_module) = imported_functions.get(&name) {
+                        if prev_module != &use_decl.module_path {
+                            return Err(ModuleError::ImportConflict {
+                                name,
+                                module1: prev_module.clone(),
+                                module2: use_decl.module_path.clone(),
+                            });
+                        }
+                    }
+                    imported_functions.insert(name.clone(), use_decl.module_path.clone());
+                }
             }
         }
 
-        Ok(imported_names)
+        Ok((imported_predicates, imported_functions))
     }
 
     /// Get a loaded module by path
@@ -331,5 +371,54 @@ mod tests {
         let found = resolver.find_module_file(tmp.path(), &["stdlib".into()]);
         assert!(found.is_some());
         assert!(found.unwrap().starts_with(&lib_dir));
+    }
+
+    #[test]
+    fn test_function_exports() {
+        let tmp = TempDir::new().unwrap();
+        create_test_module(
+            tmp.path(),
+            "mathfuncs",
+            r#"
+            func square(X) = X * X.
+            func cube(X) = X * X * X.
+            private func helper(X) = X.
+        "#,
+        );
+
+        let mut resolver = ModuleResolver::new(vec![]);
+        let result = resolver.load_module(tmp.path(), &["mathfuncs".into()]);
+        assert!(result.is_ok());
+        let module = result.unwrap();
+
+        // Public functions should be exported
+        assert!(module.function_exports.contains("square"));
+        assert!(module.function_exports.contains("cube"));
+
+        // Private function should not be exported
+        assert!(!module.function_exports.contains("helper"));
+    }
+
+    #[test]
+    fn test_mixed_exports() {
+        let tmp = TempDir::new().unwrap();
+        create_test_module(
+            tmp.path(),
+            "mixed",
+            r#"
+            pred value(i64).
+            value(42).
+            func double(X) = X * 2.
+        "#,
+        );
+
+        let mut resolver = ModuleResolver::new(vec![]);
+        let result = resolver.load_module(tmp.path(), &["mixed".into()]);
+        assert!(result.is_ok());
+        let module = result.unwrap();
+
+        // Both predicate and function exports should be present
+        assert!(module.exports.contains("value"));
+        assert!(module.function_exports.contains("double"));
     }
 }

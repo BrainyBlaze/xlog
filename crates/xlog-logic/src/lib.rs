@@ -37,6 +37,7 @@ pub mod module;
 pub mod resolver;
 pub mod function;
 pub mod expand;
+pub mod typeinfer;
 
 // Re-export main types
 pub use parser::{parse_program, parse_statement};

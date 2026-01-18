@@ -1,7 +1,8 @@
 //! Function registry and validation for user-defined functions.
 
-use crate::ast::{FuncDef, FuncBody, ArithExpr, Program};
+use crate::ast::{ArithExpr, CompOp, CondExpr, FuncBody, FuncDef, Program};
 use std::collections::{HashMap, HashSet};
+use xlog_core::ScalarType;
 
 /// Errors related to functions
 #[derive(Debug, Clone)]
@@ -42,6 +43,61 @@ impl std::fmt::Display for FunctionError {
 }
 
 impl std::error::Error for FunctionError {}
+
+/// Type errors
+#[derive(Debug, Clone)]
+pub enum TypeError {
+    /// Type mismatch
+    Mismatch {
+        expected: ScalarType,
+        found: ScalarType,
+        location: String,
+    },
+    /// Cannot infer type
+    CannotInfer { name: String },
+}
+
+impl std::fmt::Display for TypeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TypeError::Mismatch {
+                expected,
+                found,
+                location,
+            } => {
+                writeln!(f, "error[E0506]: type mismatch in {}", location)?;
+                write!(f, "  expected {:?}, found {:?}", expected, found)
+            }
+            TypeError::CannotInfer { name } => {
+                write!(f, "error[E0507]: cannot infer type for `{}`", name)
+            }
+        }
+    }
+}
+
+impl std::error::Error for TypeError {}
+
+/// Warning for potentially infinite recursion
+#[derive(Debug, Clone)]
+pub struct RecursionWarning {
+    pub func_name: String,
+    pub message: String,
+}
+
+impl std::fmt::Display for RecursionWarning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(
+            f,
+            "warning[W0502]: potentially infinite recursion in `{}`",
+            self.func_name
+        )?;
+        writeln!(f, "  {}", self.message)?;
+        write!(
+            f,
+            "  = note: base case may be unreachable with given recursive call"
+        )
+    }
+}
 
 /// Registry of user-defined functions
 #[derive(Debug, Default)]
@@ -215,6 +271,126 @@ impl FunctionRegistry {
     pub fn functions(&self) -> impl Iterator<Item = &FuncDef> {
         self.functions.values()
     }
+
+    /// Analyze recursive function for potential infinite recursion
+    pub fn analyze_recursion(&self, func: &FuncDef) -> Option<RecursionWarning> {
+        if !self.is_recursive(&func.name) {
+            return None;
+        }
+
+        match &func.body {
+            FuncBody::Conditional(cond) => self.check_convergence(func, cond),
+            _ => None,
+        }
+    }
+
+    fn check_convergence(&self, func: &FuncDef, cond: &CondExpr) -> Option<RecursionWarning> {
+        // Find recursive calls in else branch
+        let recursive_calls = Self::find_recursive_calls_in_body(&func.name, &cond.else_branch);
+
+        for call_args in recursive_calls {
+            if call_args.is_empty() {
+                continue;
+            }
+
+            // Simple pattern check: if condition is var <= k and recursive uses var + n
+            // This is a warning sign (moving away from base case)
+            if let (ArithExpr::Variable(var), CompOp::Le | CompOp::Lt) =
+                (&cond.cond_left, cond.cond_op)
+            {
+                if let ArithExpr::Add(left, right) = &call_args[0] {
+                    if let (ArithExpr::Variable(arg_var), ArithExpr::Integer(n)) =
+                        (left.as_ref(), right.as_ref())
+                    {
+                        if arg_var == var && *n > 0 {
+                            return Some(RecursionWarning {
+                                func_name: func.name.clone(),
+                                message: format!(
+                                    "recursive call increases `{}`, but base case requires it to decrease",
+                                    var
+                                ),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    fn find_recursive_calls_in_body(name: &str, body: &FuncBody) -> Vec<Vec<ArithExpr>> {
+        let mut calls = Vec::new();
+        match body {
+            FuncBody::Arithmetic(expr) => {
+                Self::find_recursive_calls_in_expr(name, expr, &mut calls);
+            }
+            FuncBody::Conditional(cond) => {
+                Self::find_recursive_calls_in_expr(name, &cond.cond_left, &mut calls);
+                Self::find_recursive_calls_in_expr(name, &cond.cond_right, &mut calls);
+                calls.extend(Self::find_recursive_calls_in_body(name, &cond.then_branch));
+                calls.extend(Self::find_recursive_calls_in_body(name, &cond.else_branch));
+            }
+            FuncBody::Predicate { .. } => {}
+        }
+        calls
+    }
+
+    fn find_recursive_calls_in_expr(name: &str, expr: &ArithExpr, calls: &mut Vec<Vec<ArithExpr>>) {
+        match expr {
+            ArithExpr::FuncCall {
+                name: fn_name,
+                args,
+            } if fn_name == name => {
+                calls.push(args.clone());
+            }
+            ArithExpr::Add(l, r)
+            | ArithExpr::Sub(l, r)
+            | ArithExpr::Mul(l, r)
+            | ArithExpr::Div(l, r)
+            | ArithExpr::Mod(l, r)
+            | ArithExpr::Min(l, r)
+            | ArithExpr::Max(l, r)
+            | ArithExpr::Pow(l, r) => {
+                Self::find_recursive_calls_in_expr(name, l, calls);
+                Self::find_recursive_calls_in_expr(name, r, calls);
+            }
+            ArithExpr::Abs(e) | ArithExpr::Cast(e, _) => {
+                Self::find_recursive_calls_in_expr(name, e, calls);
+            }
+            ArithExpr::FuncCall { args, .. } => {
+                for arg in args {
+                    Self::find_recursive_calls_in_expr(name, arg, calls);
+                }
+            }
+            ArithExpr::Conditional {
+                cond_left,
+                cond_right,
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                Self::find_recursive_calls_in_expr(name, cond_left, calls);
+                Self::find_recursive_calls_in_expr(name, cond_right, calls);
+                Self::find_recursive_calls_in_expr(name, then_expr, calls);
+                Self::find_recursive_calls_in_expr(name, else_expr, calls);
+            }
+            _ => {}
+        }
+    }
+
+    /// Validate all functions, collecting warnings
+    pub fn validate_with_warnings(&self) -> (Result<(), FunctionError>, Vec<RecursionWarning>) {
+        let mut warnings = Vec::new();
+
+        for func in self.functions.values() {
+            if let Some(warning) = self.analyze_recursion(func) {
+                warnings.push(warning);
+            }
+        }
+
+        (self.validate(), warnings)
+    }
 }
 
 /// Check if a name is a built-in function
@@ -382,5 +558,162 @@ mod tests {
         assert!(names.contains("f1"));
         assert!(names.contains("f2"));
         assert_eq!(names.len(), 2);
+    }
+
+    #[test]
+    fn test_type_error_display() {
+        let err = TypeError::Mismatch {
+            expected: ScalarType::I64,
+            found: ScalarType::F64,
+            location: "function f".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("E0506"));
+        assert!(msg.contains("type mismatch"));
+
+        let err2 = TypeError::CannotInfer {
+            name: "X".to_string(),
+        };
+        let msg2 = err2.to_string();
+        assert!(msg2.contains("E0507"));
+        assert!(msg2.contains("cannot infer"));
+    }
+
+    #[test]
+    fn test_recursion_warning_display() {
+        let warning = RecursionWarning {
+            func_name: "fib".to_string(),
+            message: "recursive call increases `N`".to_string(),
+        };
+        let msg = warning.to_string();
+        assert!(msg.contains("W0502"));
+        assert!(msg.contains("infinite recursion"));
+        assert!(msg.contains("fib"));
+    }
+
+    #[test]
+    fn test_analyze_non_recursive() {
+        let mut reg = FunctionRegistry::new();
+        let func = make_arith_func("square", ArithExpr::Variable("X".to_string()));
+        reg.register(func.clone()).unwrap();
+
+        // Non-recursive functions shouldn't trigger warnings
+        assert!(reg.analyze_recursion(&func).is_none());
+    }
+
+    #[test]
+    fn test_analyze_recursive_with_proper_convergence() {
+        use crate::ast::CondExpr;
+
+        let mut reg = FunctionRegistry::new();
+
+        // Proper factorial: if N <= 1 then 1 else N * fact(N - 1)
+        let factorial = FuncDef {
+            name: "fact".to_string(),
+            params: vec![FuncParam {
+                name: "N".to_string(),
+                typ: None,
+            }],
+            return_type: None,
+            body: FuncBody::Conditional(CondExpr {
+                cond_left: ArithExpr::Variable("N".to_string()),
+                cond_op: CompOp::Le,
+                cond_right: ArithExpr::Integer(1),
+                then_branch: Box::new(FuncBody::Arithmetic(ArithExpr::Integer(1))),
+                else_branch: Box::new(FuncBody::Arithmetic(ArithExpr::Mul(
+                    Box::new(ArithExpr::Variable("N".to_string())),
+                    Box::new(ArithExpr::FuncCall {
+                        name: "fact".to_string(),
+                        args: vec![ArithExpr::Sub(
+                            Box::new(ArithExpr::Variable("N".to_string())),
+                            Box::new(ArithExpr::Integer(1)),
+                        )],
+                    }),
+                ))),
+            }),
+            is_private: false,
+        };
+
+        reg.register(factorial.clone()).unwrap();
+
+        // Proper convergence (N - 1) shouldn't trigger warning
+        assert!(reg.analyze_recursion(&factorial).is_none());
+    }
+
+    #[test]
+    fn test_analyze_recursive_with_divergence() {
+        use crate::ast::CondExpr;
+
+        let mut reg = FunctionRegistry::new();
+
+        // Bad function: if N <= 1 then 1 else f(N + 1)
+        // This increases N, which diverges from the base case
+        let bad_func = FuncDef {
+            name: "badfunc".to_string(),
+            params: vec![FuncParam {
+                name: "N".to_string(),
+                typ: None,
+            }],
+            return_type: None,
+            body: FuncBody::Conditional(CondExpr {
+                cond_left: ArithExpr::Variable("N".to_string()),
+                cond_op: CompOp::Le,
+                cond_right: ArithExpr::Integer(1),
+                then_branch: Box::new(FuncBody::Arithmetic(ArithExpr::Integer(1))),
+                else_branch: Box::new(FuncBody::Arithmetic(ArithExpr::FuncCall {
+                    name: "badfunc".to_string(),
+                    args: vec![ArithExpr::Add(
+                        Box::new(ArithExpr::Variable("N".to_string())),
+                        Box::new(ArithExpr::Integer(1)),
+                    )],
+                })),
+            }),
+            is_private: false,
+        };
+
+        reg.register(bad_func.clone()).unwrap();
+
+        // Should trigger a warning about potential infinite recursion
+        let warning = reg.analyze_recursion(&bad_func);
+        assert!(warning.is_some());
+        assert!(warning.unwrap().message.contains("increases"));
+    }
+
+    #[test]
+    fn test_validate_with_warnings() {
+        use crate::ast::CondExpr;
+
+        let mut reg = FunctionRegistry::new();
+
+        // Bad function that will generate a warning
+        let bad_func = FuncDef {
+            name: "diverging".to_string(),
+            params: vec![FuncParam {
+                name: "X".to_string(),
+                typ: None,
+            }],
+            return_type: None,
+            body: FuncBody::Conditional(CondExpr {
+                cond_left: ArithExpr::Variable("X".to_string()),
+                cond_op: CompOp::Lt,
+                cond_right: ArithExpr::Integer(0),
+                then_branch: Box::new(FuncBody::Arithmetic(ArithExpr::Integer(0))),
+                else_branch: Box::new(FuncBody::Arithmetic(ArithExpr::FuncCall {
+                    name: "diverging".to_string(),
+                    args: vec![ArithExpr::Add(
+                        Box::new(ArithExpr::Variable("X".to_string())),
+                        Box::new(ArithExpr::Integer(1)),
+                    )],
+                })),
+            }),
+            is_private: false,
+        };
+
+        reg.register(bad_func).unwrap();
+
+        let (result, warnings) = reg.validate_with_warnings();
+        assert!(result.is_ok());
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].func_name == "diverging");
     }
 }
