@@ -14,8 +14,10 @@
 | **Datalog** | Rules, facts, recursion (semi-naive), stratified negation, aggregation |
 | **Arithmetic** | Comparisons, `is` expressions, builtins (`abs`, `min`, `max`, `pow`, `cast`) |
 | **GPU Operators** | Hash joins, radix sort, filter, dedup, union, difference, groupby |
+| **Float Predicates** | IEEE 754 total ordering for `f32`/`f64` (`NaN > Inf > nums > +0 > -0 > -Inf`) |
 | **Probabilistic** | Exact inference (knowledge compilation), Monte Carlo sampling |
 | **Interop** | Arrow IPC, DLPack (zero-copy), Python bindings |
+| **Profiling** | `--stats` flag for per-stratum/per-operation timing, memory tracking |
 
 ---
 
@@ -250,6 +252,10 @@ xlog run program.xlog --input edge=graph.arrow
 xlog prob program.xlog --prob-engine exact_ddnnf
 xlog prob program.xlog --prob-engine mc --samples 10000 --seed 42
 
+# Performance profiling
+xlog run program.xlog --stats          # Human-readable timing
+xlog run program.xlog --stats --json   # JSON format
+
 # Options
 xlog run --help
 ```
@@ -262,6 +268,7 @@ xlog run --help
 |----------|-------------|
 | [Architecture](docs/ARCHITECTURE.md) | System design, crate structure, algorithms |
 | [Roadmap](docs/ROADMAP.md) | Feature status and development plans |
+| [Benchmarks](docs/BENCHMARKS.md) | Performance methodology and baseline metrics |
 | [Probabilistic Tier](docs/architecture/xlog-prob.md) | Exact and Monte Carlo inference |
 | [Data Interop](docs/architecture/cudf-interop.md) | Arrow and DLPack integration |
 | [Examples](examples/) | Annotated example programs |

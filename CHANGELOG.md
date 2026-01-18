@@ -2,6 +2,53 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.3.1 — 2026-01-18
+
+Float predicates, performance benchmarks, query statistics, fuzz testing, and property-based tests.
+
+### Added
+
+**Float Predicate Support:**
+- IEEE 754 total ordering for `f32`/`f64` filter comparisons: `NaN > Inf > positive > +0 > -0 > negative > -Inf`
+- Filter kernels: `filter_compare_f32_*` and `filter_compare_f64_*` with proper edge case handling
+- Comprehensive tests for NaN, Infinity, subnormals, and signed zeros
+
+**Performance Benchmarks:**
+- Criterion.rs benchmarks for `xlog-gpu` (transitive closure, hash join, aggregation)
+- Criterion.rs benchmarks for `xlog-prob` (exact inference, Monte Carlo sampling)
+- `docs/BENCHMARKS.md` with methodology and baseline metrics
+- `.github/workflows/bench.yml` for CI regression detection
+
+**Query Timing & Statistics:**
+- `--stats` CLI flag for execution profiling
+- Per-stratum timing with iteration counts for recursive strata
+- Per-operation timing (join, sort, dedup, filter)
+- Memory usage tracking (peak, budget)
+- Human-readable and JSON output formats
+
+**Fuzz Testing:**
+- `fuzz/` directory with cargo-fuzz targets:
+  - `fuzz_parser` — raw byte input fuzzing
+  - `fuzz_compiler` — structured program generation
+  - `fuzz_type_inference` — type system stress testing
+- AddressSanitizer (ASAN) integration for crash detection
+- `.github/workflows/fuzz.yml` for continuous fuzzing
+
+**Property-Based Testing:**
+- proptest integration in `xlog-cuda-tests`
+- Sort stability property (data preservation, ascending order)
+- Join correctness property (CPU reference comparison)
+- Filter idempotence property (`filter(filter(x)) = filter(x)`)
+- Dedup determinism property (consistent output across runs)
+- Stress tests for large datasets (50K+ rows)
+
+### Validation
+- Workspace tests pass: `cargo test --workspace --all-targets --release`
+- Property tests pass: `cargo test -p xlog-cuda-tests --test properties --release`
+- Fuzz targets build and run with ASAN
+
+---
+
 ## v0.2.0 — 2026-01-14
 
 Phase 4 probabilistic logic programming (`xlog-prob`) merged into `main`; Python bindings are the integration surface for GPU I/O.
