@@ -114,6 +114,21 @@ func_param = { variable ~ type_annotation? }
 // Parameter list: X, Y, Z or X: f64, Y: f64
 func_params = { func_param ~ ("," ~ func_param)* }
 
+// Condition test: X < 0 or N == 1
+cond_test = { arith_expr ~ cmp_op ~ arith_expr }
+
+// Conditional expression: if X < 0 then 0 - X else X
+cond_expr = { "if" ~ cond_test ~ "then" ~ func_body ~ "else" ~ func_body }
+
+// Arithmetic function body (includes conditionals)
+func_body_arith = { cond_expr | arith_expr }
+
+// Predicate-based function body: P :- parent(X, P).
+func_body_pred = { variable ~ ":-" ~ body }
+
+// Function body - either arithmetic or predicate-based
+func_body = { func_body_pred | func_body_arith }
+
 // Private modifier
 private_mod = { "private" }
 
