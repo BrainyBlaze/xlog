@@ -143,4 +143,80 @@ mod tests {
         let id2 = intern("émoji🎉");
         assert_eq!(resolve(id2), "émoji🎉");
     }
+
+    #[test]
+    fn test_concurrent_intern() {
+        setup();
+        use std::collections::HashSet;
+        use std::thread;
+
+        let handles: Vec<_> = (0..10)
+            .map(|i| {
+                thread::spawn(move || {
+                    let mut ids = Vec::new();
+                    for j in 0..100 {
+                        let s = format!("thread{}_{}", i, j);
+                        let id = intern(&s);
+                        ids.push((s, id));
+                    }
+                    ids
+                })
+            })
+            .collect();
+
+        let mut all_results = Vec::new();
+        for h in handles {
+            all_results.extend(h.join().unwrap());
+        }
+
+        // Verify all symbols resolve correctly
+        for (s, id) in &all_results {
+            assert_eq!(&resolve(*id), s);
+        }
+
+        // Verify we have 1000 unique symbols
+        assert_eq!(count(), 1000);
+
+        // Verify no duplicate IDs for different strings
+        let unique_ids: HashSet<u32> = all_results.iter().map(|(_, id)| *id).collect();
+        assert_eq!(unique_ids.len(), 1000);
+    }
+
+    #[test]
+    fn test_large_scale() {
+        setup();
+        use std::time::Instant;
+
+        let start = Instant::now();
+
+        // Intern 100K unique symbols
+        for i in 0..100_000 {
+            let s = format!("symbol_{:06}", i);
+            let id = intern(&s);
+            assert_eq!(id, i as u32);
+        }
+
+        let intern_time = start.elapsed();
+
+        // Verify all resolve correctly
+        let start = Instant::now();
+        for i in 0..100_000 {
+            let expected = format!("symbol_{:06}", i);
+            assert_eq!(resolve(i as u32), expected);
+        }
+        let resolve_time = start.elapsed();
+
+        // Verify count
+        assert_eq!(count(), 100_000);
+
+        // Log performance (not assertions, just info)
+        println!(
+            "100K intern: {:?}, 100K resolve: {:?}",
+            intern_time, resolve_time
+        );
+
+        // Memory should be reasonable (rough check: < 10MB for 100K symbols)
+        let mem = memory_usage();
+        assert!(mem < 10_000_000, "memory usage {} exceeds 10MB", mem);
+    }
 }
