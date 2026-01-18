@@ -17,7 +17,7 @@ module_path = @{ ident ~ ("/" ~ ident)* }
 import_list = { "{" ~ ident ~ ("," ~ ident)* ~ "}" }
 
 // Use statement: use graph. or use utils/math::{abs, clamp}.
-use_stmt = { "use" ~ module_path ~ (":" ~ import_list)? ~ "." }
+use_stmt = { "use" ~ module_path ~ ("::" ~ import_list)? ~ "." }
 
 // Literals
 integer = @{ "-"? ~ ASCII_DIGIT+ }
