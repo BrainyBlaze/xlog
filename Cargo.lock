@@ -2129,6 +2129,7 @@ version = "0.2.0"
 dependencies = [
  "pest",
  "pest_derive",
+ "serial_test",
  "tempfile",
  "xlog-core",
  "xlog-cuda",
