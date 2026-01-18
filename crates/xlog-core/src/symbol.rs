@@ -1,7 +1,9 @@
 //! Global symbol interning for reversible string-to-ID mapping.
 
+use arrow::array::{Array, DictionaryArray, StringArray, UInt32Array};
+use arrow::datatypes::UInt32Type;
 use std::collections::HashMap;
-use std::sync::{OnceLock, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 static REGISTRY: OnceLock<RwLock<SymbolRegistry>> = OnceLock::new();
 
@@ -74,6 +76,56 @@ pub fn memory_usage() -> usize {
     let string_bytes: usize = reg.to_string.iter().map(|s| s.len()).sum();
     let map_overhead = reg.to_id.len() * (std::mem::size_of::<String>() + std::mem::size_of::<u32>());
     string_bytes + map_overhead
+}
+
+/// Convert a column of symbol IDs to Arrow DictionaryArray.
+pub fn to_arrow(ids: &[u32]) -> DictionaryArray<UInt32Type> {
+    use std::collections::HashSet;
+
+    // Collect unique IDs preserving order
+    let mut seen = HashSet::new();
+    let unique_ids: Vec<u32> = ids.iter()
+        .filter(|id| seen.insert(**id))
+        .copied()
+        .collect();
+
+    // Build string dictionary
+    let dict_strings: Vec<String> = unique_ids.iter()
+        .map(|&id| resolve(id))
+        .collect();
+    let dictionary = StringArray::from(dict_strings);
+
+    // Map original IDs to dictionary indices
+    let id_to_index: HashMap<u32, u32> = unique_ids.iter()
+        .enumerate()
+        .map(|(i, &id)| (id, i as u32))
+        .collect();
+
+    let keys: Vec<u32> = ids.iter()
+        .map(|id| *id_to_index.get(id).unwrap())
+        .collect();
+    let keys_array = UInt32Array::from(keys);
+
+    DictionaryArray::try_new(keys_array, Arc::new(dictionary)).unwrap()
+}
+
+/// Convert Arrow DictionaryArray back to symbol IDs.
+pub fn from_arrow(arr: &DictionaryArray<UInt32Type>) -> Vec<u32> {
+    let dict = arr.values().as_any().downcast_ref::<StringArray>()
+        .expect("dictionary values must be StringArray");
+
+    // Intern all dictionary values
+    let dict_to_symbol: Vec<u32> = dict.iter()
+        .map(|s| intern(s.expect("null not supported in symbols")))
+        .collect();
+
+    // Map keys through dictionary
+    arr.keys().iter()
+        .map(|k| {
+            let idx = k.expect("null keys not supported") as usize;
+            dict_to_symbol[idx]
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -218,5 +270,22 @@ mod tests {
         // Memory should be reasonable (rough check: < 10MB for 100K symbols)
         let mem = memory_usage();
         assert!(mem < 10_000_000, "memory usage {} exceeds 10MB", mem);
+    }
+
+    #[test]
+    fn test_arrow_roundtrip() {
+        setup();
+        let ids = vec![
+            intern("apple"),
+            intern("banana"),
+            intern("apple"),
+            intern("cherry"),
+            intern("banana"),
+        ];
+
+        let arrow = to_arrow(&ids);
+        let back = from_arrow(&arrow);
+
+        assert_eq!(ids, back);
     }
 }

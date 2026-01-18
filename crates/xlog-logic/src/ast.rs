@@ -11,7 +11,8 @@ pub enum Term {
     Integer(i64),
     Float(f64),
     String(String),
-    Symbol(String),
+    /// Interned symbol ID - use `xlog_core::symbol::resolve(id)` to get the string
+    Symbol(u32),
     Aggregate(AggExpr),
 }
 

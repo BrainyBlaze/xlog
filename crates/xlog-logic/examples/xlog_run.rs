@@ -132,11 +132,23 @@ fn push_term_bytes(out: &mut Vec<u8>, term: &Term, typ: ScalarType) -> Result<()
             };
             out.push(b);
         }
-        (ScalarType::Bool, Term::Symbol(s)) if s == "true" || s == "false" => {
-            out.push(if s == "true" { 1u8 } else { 0u8 });
+        (ScalarType::Bool, Term::Symbol(id)) => {
+            let s = symbol::resolve(*id);
+            if s == "true" || s == "false" {
+                out.push(if s == "true" { 1u8 } else { 0u8 });
+            } else {
+                return Err(XlogError::Execution(format!(
+                    "Expected boolean symbol 'true' or 'false', got '{}'",
+                    s
+                )));
+            }
         }
-        (ScalarType::Symbol, Term::String(s)) | (ScalarType::Symbol, Term::Symbol(s)) => {
+        (ScalarType::Symbol, Term::String(s)) => {
             out.extend_from_slice(&symbol::intern(s).to_le_bytes());
+        }
+        (ScalarType::Symbol, Term::Symbol(id)) => {
+            // Symbol is already interned, just use the ID directly
+            out.extend_from_slice(&id.to_le_bytes());
         }
         (_, Term::Variable(v)) => {
             return Err(XlogError::Execution(format!(
@@ -185,7 +197,7 @@ fn format_term(term: &Term) -> String {
         Term::Integer(i) => i.to_string(),
         Term::Float(f) => f.to_string(),
         Term::String(s) => format!("{:?}", s),
-        Term::Symbol(s) => s.clone(),
+        Term::Symbol(id) => symbol::resolve(*id),
         Term::Aggregate(a) => format!("{:?}({})", a.op, a.variable),
     }
 }

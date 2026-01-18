@@ -12,7 +12,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use xlog_core::{AggOp as CoreAggOp, RelId, Result, ScalarType, Schema, XlogError};
+use xlog_core::{AggOp as CoreAggOp, RelId, Result, ScalarType, Schema, XlogError, symbol};
 use xlog_ir::{
     CompareOp, CompiledRule, ConstValue, ExecutionPlan, Expr, JoinType, PlanBuilder, ProjectExpr,
     RirMeta, RirNode, Scc, Stratum as IrStratum,
@@ -1105,7 +1105,7 @@ impl Lowerer {
             Term::Integer(i) => Ok(Expr::Const(ConstValue::I64(*i))),
             Term::Float(f) => Ok(Expr::Const(ConstValue::F64(*f))),
             Term::String(s) => Ok(Expr::Const(ConstValue::Symbol(s.clone()))),
-            Term::Symbol(s) => Ok(Expr::Const(ConstValue::Symbol(s.clone()))),
+            Term::Symbol(id) => Ok(Expr::Const(ConstValue::Symbol(symbol::resolve(*id)))),
             Term::Aggregate(_) => Err(XlogError::Compilation(
                 "Aggregates not allowed in comparisons".to_string(),
             )),
@@ -1707,7 +1707,7 @@ fn term_to_const_value(term: &Term) -> Option<ConstValue> {
         Term::Integer(i) => Some(ConstValue::I64(*i)),
         Term::Float(f) => Some(ConstValue::F64(*f)),
         Term::String(s) => Some(ConstValue::Symbol(s.clone())),
-        Term::Symbol(s) => Some(ConstValue::Symbol(s.clone())),
+        Term::Symbol(id) => Some(ConstValue::Symbol(symbol::resolve(*id))),
         Term::Variable(_) | Term::Anonymous | Term::Aggregate(_) => None,
     }
 }
@@ -1803,13 +1803,23 @@ fn term_to_typed_const_value(term: &Term, expected: ScalarType) -> Result<Option
                 )));
             }
         },
-        Term::String(s) | Term::Symbol(s) => {
+        Term::String(s) => {
             if expected == ScalarType::Symbol {
                 ConstValue::Symbol(s.clone())
             } else {
                 return Err(XlogError::Compilation(format!(
                     "String literal {} not valid for {:?}",
                     s, expected
+                )));
+            }
+        }
+        Term::Symbol(id) => {
+            if expected == ScalarType::Symbol {
+                ConstValue::Symbol(symbol::resolve(*id))
+            } else {
+                return Err(XlogError::Compilation(format!(
+                    "Symbol literal {} not valid for {:?}",
+                    symbol::resolve(*id), expected
                 )));
             }
         }
@@ -1829,8 +1839,12 @@ fn term_to_project_const_expr(term: &Term) -> Result<(Expr, ScalarType)> {
             }
         }
         Term::Float(f) => Ok((Expr::Const(ConstValue::F64(*f)), ScalarType::F64)),
-        Term::String(s) | Term::Symbol(s) => Ok((
+        Term::String(s) => Ok((
             Expr::Const(ConstValue::Symbol(s.clone())),
+            ScalarType::Symbol,
+        )),
+        Term::Symbol(id) => Ok((
+            Expr::Const(ConstValue::Symbol(symbol::resolve(*id))),
             ScalarType::Symbol,
         )),
         Term::Variable(_) | Term::Anonymous | Term::Aggregate(_) => Err(XlogError::Compilation(
@@ -2356,7 +2370,7 @@ mod tests {
         assert_eq!(infer_term_type(&Term::Integer(i64::MAX)), ScalarType::I64);
         assert_eq!(infer_term_type(&Term::Float(3.14)), ScalarType::F64);
         assert_eq!(
-            infer_term_type(&Term::Symbol("foo".to_string())),
+            infer_term_type(&Term::Symbol(symbol::intern("foo"))),
             ScalarType::Symbol
         );
     }

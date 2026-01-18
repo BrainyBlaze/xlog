@@ -69,7 +69,10 @@ impl ScalarType {
             ScalarType::I64 => DataType::Int64,
             ScalarType::F32 => DataType::Float32,
             ScalarType::F64 => DataType::Float64,
-            ScalarType::Symbol => DataType::UInt32, // Symbols are interned u32
+            ScalarType::Symbol => DataType::Dictionary(
+                Box::new(DataType::UInt32),
+                Box::new(DataType::Utf8),
+            ),
         }
     }
 
@@ -84,6 +87,12 @@ impl ScalarType {
             DataType::Int64 => Some(ScalarType::I64),
             DataType::Float32 => Some(ScalarType::F32),
             DataType::Float64 => Some(ScalarType::F64),
+            DataType::Dictionary(key, value)
+                if matches!(key.as_ref(), DataType::UInt32)
+                    && matches!(value.as_ref(), DataType::Utf8) =>
+            {
+                Some(ScalarType::Symbol)
+            }
             _ => None,
         }
     }
@@ -206,9 +215,12 @@ mod tests {
         assert_eq!(ScalarType::I64.to_arrow_type(), DataType::Int64);
         assert_eq!(ScalarType::F32.to_arrow_type(), DataType::Float32);
         assert_eq!(ScalarType::F64.to_arrow_type(), DataType::Float64);
-        assert_eq!(ScalarType::Symbol.to_arrow_type(), DataType::UInt32);
+        assert_eq!(
+            ScalarType::Symbol.to_arrow_type(),
+            DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Utf8))
+        );
 
-        // Test roundtrip conversion (except Symbol which maps to UInt32)
+        // Test roundtrip conversion
         assert_eq!(
             ScalarType::from_arrow_type(&ScalarType::Bool.to_arrow_type()),
             Some(ScalarType::Bool)
@@ -236,6 +248,10 @@ mod tests {
         assert_eq!(
             ScalarType::from_arrow_type(&ScalarType::F64.to_arrow_type()),
             Some(ScalarType::F64)
+        );
+        assert_eq!(
+            ScalarType::from_arrow_type(&ScalarType::Symbol.to_arrow_type()),
+            Some(ScalarType::Symbol)
         );
 
         // Test unsupported Arrow types return None

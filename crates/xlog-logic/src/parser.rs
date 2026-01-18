@@ -6,7 +6,7 @@
 use pest::Parser;
 use pest::iterators::Pair;
 use pest_derive::Parser;
-use xlog_core::{ScalarType, XlogError, Result};
+use xlog_core::{ScalarType, XlogError, Result, symbol};
 
 use crate::ast::{
     AggExpr, AggOp, AnnotatedDisjunction, ArithExpr, Atom, BodyLiteral, CompOp, Comparison,
@@ -510,7 +510,7 @@ fn build_term(pair: Pair<'_, Rule>) -> Result<Term> {
             let unquoted = &s[1..s.len()-1];
             Ok(Term::String(unquoted.to_string()))
         }
-        Rule::ident => Ok(Term::Symbol(inner.as_str().to_string())),
+        Rule::ident => Ok(Term::Symbol(symbol::intern(inner.as_str()))),
         _ => Err(XlogError::Parse(format!("Unknown term type: {:?}", inner.as_rule()))),
     }
 }
@@ -969,9 +969,9 @@ mod tests {
         assert!((ad.choices[0].prob - 0.6).abs() < 1e-9);
         assert_eq!(ad.choices[0].atom.predicate, "coin");
         assert_eq!(ad.choices[0].atom.terms.len(), 1);
-        assert_eq!(ad.choices[0].atom.terms[0], Term::Symbol("heads".to_string()));
+        assert_eq!(ad.choices[0].atom.terms[0], Term::Symbol(symbol::intern("heads")));
         assert!((ad.choices[1].prob - 0.4).abs() < 1e-9);
-        assert_eq!(ad.choices[1].atom.terms[0], Term::Symbol("tails".to_string()));
+        assert_eq!(ad.choices[1].atom.terms[0], Term::Symbol(symbol::intern("tails")));
     }
 
     #[test]

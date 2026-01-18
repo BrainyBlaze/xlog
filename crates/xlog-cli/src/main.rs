@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use arrow::csv::WriterBuilder;
 use arrow::util::pretty::pretty_format_batches;
-use xlog_core::{MemoryBudget, Result, XlogError};
+use xlog_core::{symbol, MemoryBudget, Result, XlogError};
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 use xlog_gpu::logic::LogicProgram;
 use xlog_prob::exact::{ExactDdnnfProgram, GpuConfig};
@@ -373,7 +373,7 @@ fn atom_to_string(atom: &xlog_prob::provenance::GroundAtom) -> String {
         match arg {
             Value::I64(v) => out.push_str(&v.to_string()),
             Value::F64(bits) => out.push_str(&f64::from_bits(*bits).to_string()),
-            Value::Symbol(sym) => out.push_str(&format!("sym#{}", sym)),
+            Value::Symbol(sym) => out.push_str(&symbol::resolve(*sym)),
             Value::String(v) => out.push_str(v),
         }
     }
