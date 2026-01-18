@@ -129,6 +129,12 @@ func_body_pred = { variable ~ ":-" ~ body }
 // Function body - either arithmetic or predicate-based
 func_body = { func_body_pred | func_body_arith }
 
+// Function definition: func square(X) = X * X.
+func_def = {
+    private_mod? ~ "func" ~ ident ~ "(" ~ func_params? ~ ")" ~ return_type?
+    ~ "=" ~ func_body ~ "."
+}
+
 // Private modifier
 private_mod = { "private" }
 
@@ -138,7 +144,8 @@ type_list = { type_spec ~ ("," ~ type_spec)* }
 
 // Program structure
 statement = {
-    use_stmt
+    func_def
+    | use_stmt
     | domain_decl
     | pred_decl
     | pragma
