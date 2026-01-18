@@ -115,6 +115,32 @@ impl std::fmt::Display for ModuleError {
 
 impl std::error::Error for ModuleError {}
 
+/// Generate internal qualified name for a predicate
+/// E.g., (["utils", "math"], "abs") -> "__utils_math__abs"
+pub fn internal_name(module_path: &[String], predicate: &str) -> String {
+    if module_path.is_empty() {
+        predicate.to_string()
+    } else {
+        format!("__{}__{}", module_path.join("_"), predicate)
+    }
+}
+
+/// Extract module and predicate from internal name
+/// E.g., "__utils_math__abs" -> (["utils", "math"], "abs")
+pub fn parse_internal_name(internal: &str) -> (Vec<String>, String) {
+    if internal.starts_with("__") {
+        if let Some(pos) = internal.rfind("__") {
+            if pos > 2 {
+                let module_part = &internal[2..pos];
+                let pred_part = &internal[pos + 2..];
+                let modules: Vec<String> = module_part.split('_').map(String::from).collect();
+                return (modules, pred_part.to_string());
+            }
+        }
+    }
+    (vec![], internal.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -144,5 +170,28 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("module not found"));
         assert!(msg.contains("missing"));
+    }
+
+    #[test]
+    fn test_internal_name() {
+        assert_eq!(internal_name(&[], "foo"), "foo");
+        assert_eq!(
+            internal_name(&["utils".into(), "math".into()], "abs"),
+            "__utils_math__abs"
+        );
+        assert_eq!(internal_name(&["single".into()], "pred"), "__single__pred");
+    }
+
+    #[test]
+    fn test_parse_internal_name() {
+        assert_eq!(parse_internal_name("foo"), (vec![], "foo".to_string()));
+        assert_eq!(
+            parse_internal_name("__utils_math__abs"),
+            (vec!["utils".to_string(), "math".to_string()], "abs".to_string())
+        );
+        assert_eq!(
+            parse_internal_name("__single__pred"),
+            (vec!["single".to_string()], "pred".to_string())
+        );
     }
 }
