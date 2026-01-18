@@ -716,7 +716,7 @@ mod tests {
         loop {
             match node {
                 RirNode::Project { input, .. } => node = input,
-                other => break other,
+                _ => break,
             }
         }
 
