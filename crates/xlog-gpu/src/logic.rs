@@ -28,10 +28,16 @@ pub struct LogicProgram {
 impl LogicProgram {
     pub fn compile(source: &str) -> Result<Self> {
         let program = xlog_logic::parse_program(source)?;
+
+        // Expand user-defined function calls before compilation
+        let max_recursion = program.directives.max_recursion_depth.unwrap_or(100);
+        let expanded = xlog_logic::expand_program_functions(&program, max_recursion)
+            .map_err(|e| XlogError::Compilation(e.to_string()))?;
+
         let mut compiler = Compiler::new();
-        let plan = compiler.compile_program(&program)?;
+        let plan = compiler.compile_program(&expanded)?;
         Ok(Self {
-            program,
+            program: expanded,
             plan,
             schemas: compiler.schemas().clone(),
             rel_ids: compiler.rel_ids().clone(),

@@ -2096,6 +2096,7 @@ name = "xlog-gpu"
 version = "0.2.0"
 dependencies = [
  "criterion",
+ "serial_test",
  "xlog-core",
  "xlog-cuda",
  "xlog-ir",

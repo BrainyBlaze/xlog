@@ -378,6 +378,162 @@ impl<'a> ExpansionContext<'a> {
             .map(|f| matches!(f.body, FuncBody::Predicate { .. }))
             .unwrap_or(false)
     }
+
+    /// Expand all function calls in an arithmetic expression.
+    /// Returns the expanded expression with all UDF calls inlined.
+    pub fn expand_expr_fully(&mut self, expr: &ArithExpr) -> Result<ArithExpr, FunctionError> {
+        match expr {
+            ArithExpr::Variable(_) | ArithExpr::Integer(_) | ArithExpr::Float(_) => {
+                Ok(expr.clone())
+            }
+            ArithExpr::FuncCall { name, args } => {
+                // First expand arguments
+                let expanded_args: Result<Vec<_>, _> = args
+                    .iter()
+                    .map(|a| self.expand_expr_fully(a))
+                    .collect();
+                let expanded_args = expanded_args?;
+
+                // Then expand the function call if it's a UDF
+                if self.registry.contains(name) {
+                    self.expand_call(name, &expanded_args)
+                } else {
+                    // Built-in function, just return with expanded args
+                    Ok(ArithExpr::FuncCall {
+                        name: name.clone(),
+                        args: expanded_args,
+                    })
+                }
+            }
+            ArithExpr::Add(l, r) => Ok(ArithExpr::Add(
+                Box::new(self.expand_expr_fully(l)?),
+                Box::new(self.expand_expr_fully(r)?),
+            )),
+            ArithExpr::Sub(l, r) => Ok(ArithExpr::Sub(
+                Box::new(self.expand_expr_fully(l)?),
+                Box::new(self.expand_expr_fully(r)?),
+            )),
+            ArithExpr::Mul(l, r) => Ok(ArithExpr::Mul(
+                Box::new(self.expand_expr_fully(l)?),
+                Box::new(self.expand_expr_fully(r)?),
+            )),
+            ArithExpr::Div(l, r) => Ok(ArithExpr::Div(
+                Box::new(self.expand_expr_fully(l)?),
+                Box::new(self.expand_expr_fully(r)?),
+            )),
+            ArithExpr::Mod(l, r) => Ok(ArithExpr::Mod(
+                Box::new(self.expand_expr_fully(l)?),
+                Box::new(self.expand_expr_fully(r)?),
+            )),
+            ArithExpr::Abs(e) => Ok(ArithExpr::Abs(Box::new(self.expand_expr_fully(e)?))),
+            ArithExpr::Min(l, r) => Ok(ArithExpr::Min(
+                Box::new(self.expand_expr_fully(l)?),
+                Box::new(self.expand_expr_fully(r)?),
+            )),
+            ArithExpr::Max(l, r) => Ok(ArithExpr::Max(
+                Box::new(self.expand_expr_fully(l)?),
+                Box::new(self.expand_expr_fully(r)?),
+            )),
+            ArithExpr::Pow(l, r) => Ok(ArithExpr::Pow(
+                Box::new(self.expand_expr_fully(l)?),
+                Box::new(self.expand_expr_fully(r)?),
+            )),
+            ArithExpr::Cast(e, t) => Ok(ArithExpr::Cast(
+                Box::new(self.expand_expr_fully(e)?),
+                *t,
+            )),
+            ArithExpr::Conditional {
+                cond_left,
+                cond_op,
+                cond_right,
+                then_expr,
+                else_expr,
+            } => Ok(ArithExpr::Conditional {
+                cond_left: Box::new(self.expand_expr_fully(cond_left)?),
+                cond_op: *cond_op,
+                cond_right: Box::new(self.expand_expr_fully(cond_right)?),
+                then_expr: Box::new(self.expand_expr_fully(then_expr)?),
+                else_expr: Box::new(self.expand_expr_fully(else_expr)?),
+            }),
+        }
+    }
+}
+
+use crate::ast::{Program, Rule};
+
+/// Expand all user-defined function calls in a program.
+/// Returns a new program with all UDF calls replaced by their expanded bodies.
+pub fn expand_program_functions(program: &Program, max_depth: u32) -> Result<Program, FunctionError> {
+    // Build function registry from program
+    let mut registry = FunctionRegistry::new();
+    for func in &program.functions {
+        registry.register(func.clone())?;
+    }
+
+    // If no functions defined, return program unchanged
+    if program.functions.is_empty() {
+        return Ok(program.clone());
+    }
+
+    let mut ctx = ExpansionContext::new(&registry, max_depth);
+
+    // Expand function calls in each rule
+    let expanded_rules: Result<Vec<Rule>, FunctionError> = program
+        .rules
+        .iter()
+        .map(|rule| expand_rule_functions(&mut ctx, rule))
+        .collect();
+
+    Ok(Program {
+        rules: expanded_rules?,
+        directives: program.directives.clone(),
+        queries: program.queries.clone(),
+        predicates: program.predicates.clone(),
+        constraints: program.constraints.clone(),
+        imports: program.imports.clone(),
+        functions: program.functions.clone(),
+        domains: program.domains.clone(),
+        prob_facts: program.prob_facts.clone(),
+        annotated_disjunctions: program.annotated_disjunctions.clone(),
+        evidence: program.evidence.clone(),
+        prob_queries: program.prob_queries.clone(),
+    })
+}
+
+/// Expand function calls in a single rule.
+fn expand_rule_functions(
+    ctx: &mut ExpansionContext,
+    rule: &Rule,
+) -> Result<Rule, FunctionError> {
+    let expanded_body: Result<Vec<BodyLiteral>, FunctionError> = rule
+        .body
+        .iter()
+        .map(|lit| expand_literal_functions(ctx, lit))
+        .collect();
+
+    Ok(Rule {
+        head: rule.head.clone(),
+        body: expanded_body?,
+    })
+}
+
+/// Expand function calls in a body literal.
+fn expand_literal_functions(
+    ctx: &mut ExpansionContext,
+    lit: &BodyLiteral,
+) -> Result<BodyLiteral, FunctionError> {
+    match lit {
+        BodyLiteral::Positive(atom) => Ok(BodyLiteral::Positive(atom.clone())),
+        BodyLiteral::Negated(atom) => Ok(BodyLiteral::Negated(atom.clone())),
+        BodyLiteral::Comparison(cmp) => Ok(BodyLiteral::Comparison(cmp.clone())),
+        BodyLiteral::IsExpr(is_expr) => {
+            let expanded_expr = ctx.expand_expr_fully(&is_expr.expr)?;
+            Ok(BodyLiteral::IsExpr(IsExpr {
+                target: is_expr.target.clone(),
+                expr: expanded_expr,
+            }))
+        }
+    }
 }
 
 #[cfg(test)]
