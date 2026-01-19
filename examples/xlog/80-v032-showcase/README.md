@@ -2,65 +2,129 @@
 
 This directory contains comprehensive real-world examples demonstrating all v0.3.2 language features:
 
-- **Symbols**: String values with efficient interning (`symbol` type)
+- **Reversible Symbols**: String values with efficient interning (`symbol` type) that display as readable strings
 - **User-Defined Functions**: Reusable calculations (`func name(args) = expr.`)
 - **Module System**: Code organization with imports and visibility
+- **Aggregations**: count (u64), sum, min, max with comparison support
+- **Recursive Rules**: Transitive closure, management chains, type hierarchies
 
 ## Examples
 
-| Directory | Domain | Features Highlighted |
-|-----------|--------|---------------------|
-| `01-enterprise/` | HR & Compensation | Symbols for names, UDFs for salary/tax, org hierarchy |
-| `02-knowledge-graph/` | Movie Database | Symbols for entities, UDFs for scoring, type inference |
-| `03-game-analytics/` | Gaming Platform | Symbols for players, UDFs for ELO, leaderboards |
-| `04-supply-chain/` | Logistics Network | Symbols for SKUs, UDFs for costs, route optimization |
+| Directory | Domain | Key Features |
+|-----------|--------|--------------|
+| `01-enterprise/` | HR & Compensation | Employee tracking, salary calculations, recursive org hierarchy, management chains |
+| `02-knowledge-graph/` | Scientific Ontology | Type inheritance, citation analysis, co-authorship networks, semantic inference |
+| `03-game-analytics/` | Gaming Platform | Player stats, achievement chains, guild analytics, leaderboards, social graphs |
+| `04-supply-chain/` | Logistics Network | BOM explosion, inventory management, supplier analytics, order tracking |
 
 ## Running Examples
 
 ```bash
 # Run any example
-cargo run -p xlog-cli -- run examples/xlog/80-v032-showcase/01-enterprise/main.xlog
+cargo run --release -- run examples/xlog/80-v032-showcase/01-enterprise/main.xlog
 
 # Run with statistics
-cargo run -p xlog-cli -- run --stats examples/xlog/80-v032-showcase/01-enterprise/main.xlog
+cargo run --release -- run --stats examples/xlog/80-v032-showcase/01-enterprise/main.xlog
+
+# Run all showcase examples
+for dir in examples/xlog/80-v032-showcase/*/; do
+    cargo run --release -- run "${dir}main.xlog"
+done
 ```
 
-## Feature Coverage
+## Feature Coverage Matrix
 
-Each example demonstrates:
+| Feature | Enterprise | Knowledge Graph | Game Analytics | Supply Chain |
+|---------|:----------:|:---------------:|:--------------:|:------------:|
+| `symbol` type | Names, IDs | Entities, Labels | Players, Items | Products, Suppliers |
+| Recursive rules | Org hierarchy | Type inheritance | Achievement chains | BOM explosion |
+| count aggregation | Direct reports | Citations | Match stats | Order lines |
+| sum aggregation | Dept budgets | - | XP totals | Inventory value |
+| Comparisons (>=, <) | Tenure checks | Depth filters | Score thresholds | Stock alerts |
+| Arithmetic (`is`) | Salary calcs | - | KDA ratios | Cost calculations |
 
-| Feature | Description | Example |
-|---------|-------------|---------|
-| `symbol` type | Human-readable string values | `employee(e001, "Alice Chen", eng)` |
-| `func` (arithmetic) | Mathematical calculations | `func bonus(Salary) = Salary * 20 / 100.` |
-| `func` (conditional) | Branching logic | `func tier(X) = if X > 100 then 1 else 2.` |
-| `use` imports | Module dependencies | `use finance/compensation.` |
-| `private` predicate | Encapsulation | `private pred helper(u32).` |
-| Recursion | Self-referential rules | `reach(X, Z) :- reach(X, Y), edge(Y, Z).` |
-| Aggregation | count, sum, min, max | `total(Dept, sum(Salary)) :- ...` |
-| Negation | Stratified negation | `best(X) :- option(X), not better(X).` |
+## Example Highlights
 
-## Data Volumes
+### Enterprise Analytics
+```xlog
+// Recursive management chain with depth tracking
+management_chain(Emp, Mgr, 1) :- reports_to(Emp, Mgr).
+management_chain(Emp, TopMgr, Level) :-
+    reports_to(Emp, Mgr),
+    management_chain(Mgr, TopMgr, PrevLevel),
+    Level is PrevLevel + cast(1, u32).
 
-| Domain | Facts | Predicates | UDFs |
-|--------|-------|------------|------|
-| Enterprise | ~200 | 15 | 7 |
-| Knowledge Graph | ~300 | 20 | 7 |
-| Game Analytics | ~500 | 18 | 6 |
-| Supply Chain | ~400 | 16 | 8 |
-
-## Architecture
-
-Each domain follows a consistent module structure:
-
-```
-<domain>/
-├── main.xlog           # Entry point with queries
-├── README.md           # Domain documentation
-└── <module>/
-    └── <component>.xlog  # Feature modules
+// Aggregation + comparison for filtering
+large_team_manager(Name, DeptId, Count) :-
+    employee(MgrId, Name, DeptId),
+    direct_report_count(MgrId, Count),
+    Count >= 3.
 ```
 
-Modules are imported via `use <module>/<component>.` syntax and can reference
-each other's public predicates. Private predicates (marked with `private`)
-are only visible within their defining module.
+### Knowledge Graph
+```xlog
+// Type hierarchy inference (transitive closure)
+is_a(Child, Parent) :- subclass_of(Child, Parent).
+is_a(Child, Ancestor) :-
+    subclass_of(Child, Parent),
+    is_a(Parent, Ancestor).
+
+// Citation analysis with depth
+cites_transitively(A, B, 1) :- cites(A, B).
+cites_transitively(A, C, Depth) :-
+    cites(A, B),
+    cites_transitively(B, C, PrevDepth),
+    Depth is PrevDepth + cast(1, u32).
+```
+
+### Game Analytics
+```xlog
+// Achievement prerequisite chains
+all_prerequisites(AchId, PrereqId) :- achievement_requires(AchId, PrereqId).
+all_prerequisites(AchId, TransPrereq) :-
+    achievement_requires(AchId, DirectPrereq),
+    all_prerequisites(DirectPrereq, TransPrereq).
+
+// Guild power calculation
+guild_power(GuildId, sum(Level)) :-
+    guild_member(GuildId, PlayerId),
+    player(PlayerId, _, Level).
+```
+
+### Supply Chain
+```xlog
+// Bill of Materials explosion (recursive)
+bom_exploded(Product, Component, Qty) :- bom(Product, Component, Qty).
+bom_explosion_recursive(Product, SubComponent, TotalQty) :-
+    bom(Product, Component, ParentQty),
+    bom_exploded(Component, SubComponent, ChildQty),
+    TotalQty is ParentQty * ChildQty.
+
+// Inventory alerts
+low_stock_alert(WarehouseName, ProductName, Category, CurrentQty, ReorderPt) :-
+    warehouse(WarehouseId, WarehouseName, _),
+    inventory(WarehouseId, ProductId, CurrentQty),
+    product(ProductId, ProductName, Category),
+    reorder_point(ProductId, ReorderPt),
+    CurrentQty < ReorderPt.
+```
+
+## Data Scale
+
+| Domain | Facts | Predicates | Derived Relations | Queries |
+|--------|-------|------------|-------------------|---------|
+| Enterprise | ~150 | 12 | 10 | 7 |
+| Knowledge Graph | ~200 | 18 | 15 | 7 |
+| Game Analytics | ~350 | 25 | 20 | 7 |
+| Supply Chain | ~250 | 20 | 18 | 7 |
+
+## Validation
+
+All examples are validated as part of the test suite:
+
+```bash
+# Run all examples and verify they execute without errors
+cargo test --workspace
+```
+
+All 4 showcase examples execute successfully with meaningful query results.

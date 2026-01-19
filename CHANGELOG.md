@@ -2,9 +2,9 @@
 
 All notable changes to this project are documented in this file.
 
-## v0.3.2 — 2026-01-18
+## v0.3.2 — 2026-01-19
 
-Module system, user-defined functions, and reversible symbols for expressive, modular Datalog programs.
+Module system, user-defined functions, reversible symbols, and comprehensive showcase examples for expressive, modular Datalog programs.
 
 ### Added
 
@@ -32,6 +32,17 @@ Module system, user-defined functions, and reversible symbols for expressive, mo
 **CLI Enhancements:**
 - `--module-path` flag for specifying module search directories
 
+**Showcase Examples:**
+- Enterprise Analytics: HR management, compensation, org hierarchy with recursive management chains
+- Knowledge Graph: Ontology modeling, citation analysis, semantic inference with type inheritance
+- Game Analytics: Player statistics, achievements, guilds, leaderboards with social network analysis
+- Supply Chain: Bill of Materials explosion, inventory management, supplier analytics
+
+### Fixed
+
+- **GroupBy count aggregation type**: Count now outputs `u64` (was `u32`) to match predicate declarations and prevent type mismatch errors when comparing count results
+- **Optimizer predicate pushdown**: Fixed column width estimation to use schema information for accurate filtering
+
 ### Changed
 
 - Symbol storage changed from hash-based to sequential ID allocation
@@ -41,6 +52,7 @@ Module system, user-defined functions, and reversible symbols for expressive, mo
 
 - Serialized Arrow files from v0.3.1 with symbol columns may need re-export
 - `hash_symbol_to_u32` function removed from public API
+- Count aggregation results are now `u64` instead of `u32`
 
 ---
 

@@ -578,7 +578,7 @@ Aggregations compute summary values over groups of tuples.
 
 | Aggregate | Description | Input Types | Output Type |
 |-----------|-------------|-------------|-------------|
-| `count(X)` | Count of values | Any | `u32` |
+| `count(X)` | Count of values | Any | `u64` |
 | `sum(X)` | Sum of values | `u32` | `u64` |
 | `min(X)` | Minimum value | `u32` | `u32` |
 | `max(X)` | Maximum value | `u32` | `u32` |
@@ -898,7 +898,25 @@ Symbols can be compared for equality:
 same_status(X, Y) :- item(X, S), item(Y, S), X != Y.
 ```
 
-**Note:** In the current version, symbols are stored as `u32` hashes. The hash is not reversible to the original string for output display in all contexts.
+### Reversible Symbols (v0.3.2)
+
+As of v0.3.2, symbols are **reversible**: the original string value is preserved and displayed in query output. Symbols are stored internally as `u32` IDs with a bidirectional mapping to strings.
+
+```xlog
+pred task(symbol, symbol).
+task(project_alpha, alice).
+task(project_beta, bob).
+
+?- task(Project, Owner).
+```
+
+Output displays original string values:
+```
+| Project       | Owner |
+|---------------|-------|
+| project_alpha | alice |
+| project_beta  | bob   |
+```
 
 ---
 

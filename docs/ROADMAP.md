@@ -1,8 +1,8 @@
 # XLOG Development Roadmap
 
-> **Last Updated:** January 18, 2026
-> **Current Version:** v0.3.1
-> **Status:** v0.3.1 Complete — Float predicates, benchmarks, statistics, fuzz testing, and property-based testing
+> **Last Updated:** January 19, 2026
+> **Current Version:** v0.3.2
+> **Status:** v0.3.2 Complete — Module system, user-defined functions, reversible symbols, and showcase examples
 
 ---
 
@@ -53,11 +53,14 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 - [x] Evidence declarations (`evidence(atom, true|false).`)
 - [x] Probabilistic queries (`query(atom).`)
 
+### Implemented ✅ (v0.3.2)
+
+- [x] Reversible symbol values (bidirectional string-to-ID mapping with query output display)
+- [x] User-defined functions (arithmetic, conditional, recursive)
+- [x] Module system with `use` imports and `private` visibility
+
 ### Planned 📋
 
-- [ ] Reversible symbol values (string interning with lookup table)
-- [ ] User-defined functions
-- [ ] Module system for organizing large programs
 - [ ] Incremental parsing for interactive use
 
 ---
@@ -454,8 +457,9 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 |---------|--------|--------------|
 | v0.1.0 | Released | Deterministic Datalog, GPU joins/aggregations, basic CLI |
 | v0.2.0 | Released | Probabilistic reasoning (exact + MC), Python bindings, GPU-resident execution |
-| v0.3.1 | **Current** | Float predicates (IEEE 754 total ordering), benchmarks, `--stats` flag, fuzz testing, property-based testing |
-| v0.3.2–v0.3.5 | Planned | Language core, probabilistic power, solver maturity, ecosystem ready (see v0.3.x-scope.md) |
+| v0.3.1 | Released | Float predicates (IEEE 754 total ordering), benchmarks, `--stats` flag, fuzz testing, property-based testing |
+| v0.3.2 | **Current** | Module system, UDFs, reversible symbols, showcase examples, count→u64 fix |
+| v0.3.3–v0.3.5 | Planned | Probabilistic power, solver maturity, ecosystem ready (see v0.3.x-scope.md) |
 | v0.4–0.5 | Planned | Epistemic logic tier (Phase 5) |
 | v0.6+ | Planned | Multi-GPU support, distributed execution (Phase 6) |
 
