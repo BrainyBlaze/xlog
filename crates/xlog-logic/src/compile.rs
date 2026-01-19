@@ -255,7 +255,21 @@ impl Compiler {
             }
         }
 
-        let optimizer = Optimizer::new(Arc::new(mgr));
+        // Build schemas by RelId for the optimizer
+        let schemas_by_rel_id: HashMap<RelId, Schema> = self
+            .lowerer
+            .rel_ids()
+            .iter()
+            .filter_map(|(pred, rel_id)| {
+                self.lowerer
+                    .schemas()
+                    .get(pred)
+                    .map(|schema| (*rel_id, schema.clone()))
+            })
+            .collect();
+
+        let mut optimizer = Optimizer::new(Arc::new(mgr));
+        optimizer.set_schemas(schemas_by_rel_id);
         for rules in &mut plan.rules_by_scc {
             for rule in rules {
                 rule.body = optimizer.optimize(rule.body.clone());

@@ -29,8 +29,9 @@
 //! println!("Estimated rows: {}, GPU memory: {} bytes", cost.rows, cost.gpu_mem);
 //! ```
 
+use std::collections::HashMap;
 use std::sync::Arc;
-use xlog_core::RelId;
+use xlog_core::{RelId, Schema};
 use xlog_ir::{CompareOp, Expr, JoinType, RirNode};
 use xlog_stats::StatsManager;
 
@@ -162,6 +163,8 @@ impl PlanCost {
 pub struct Optimizer {
     stats: Arc<StatsManager>,
     config: OptimizerConfig,
+    /// Schemas for relations, keyed by RelId
+    schemas: HashMap<RelId, Schema>,
 }
 
 impl Optimizer {
@@ -174,6 +177,7 @@ impl Optimizer {
         Self {
             stats,
             config: OptimizerConfig::default(),
+            schemas: HashMap::new(),
         }
     }
 
@@ -184,7 +188,19 @@ impl Optimizer {
     /// * `stats` - Shared statistics manager
     /// * `config` - Custom optimizer configuration
     pub fn with_config(stats: Arc<StatsManager>, config: OptimizerConfig) -> Self {
-        Self { stats, config }
+        Self {
+            stats,
+            config,
+            schemas: HashMap::new(),
+        }
+    }
+
+    /// Sets the schemas for relations.
+    ///
+    /// This information is used by the optimizer to accurately determine
+    /// column widths during predicate pushdown.
+    pub fn set_schemas(&mut self, schemas: HashMap<RelId, Schema>) {
+        self.schemas = schemas;
     }
 
     /// Returns a reference to the current configuration.
@@ -538,8 +554,10 @@ impl Optimizer {
     fn estimate_width(&self, node: &RirNode) -> usize {
         match node {
             RirNode::Scan { rel } => {
-                // Use stats if available, otherwise default
-                if let Some(stats) = self.stats.get_relation_stats(*rel) {
+                // Use schema if available, otherwise stats, otherwise default
+                if let Some(schema) = self.schemas.get(rel) {
+                    schema.arity()
+                } else if let Some(stats) = self.stats.get_relation_stats(*rel) {
                     stats.column_stats.len().max(1)
                 } else {
                     4 // Default assumption
@@ -1793,5 +1811,67 @@ mod tests {
         let result = Optimizer::conjoin(multiple);
 
         assert!(matches!(result, Expr::And(_)));
+    }
+
+    #[test]
+    fn test_predicate_pushdown_with_schemas() {
+        // Regression test: ensure predicate pushdown uses schemas for accurate width estimation.
+        // Without schemas, the optimizer could incorrectly remap column indices.
+        let stats = make_stats_manager();
+        let mut optimizer = Optimizer::new(stats);
+
+        // Set up schemas: left has 3 columns, right has 3 columns
+        let left_schema = Schema::new(vec![
+            ("c0".to_string(), xlog_core::ScalarType::Symbol),
+            ("c1".to_string(), xlog_core::ScalarType::Symbol),
+            ("c2".to_string(), xlog_core::ScalarType::Symbol),
+        ]);
+        let right_schema = Schema::new(vec![
+            ("c0".to_string(), xlog_core::ScalarType::Symbol),
+            ("c1".to_string(), xlog_core::ScalarType::Symbol),
+            ("c2".to_string(), xlog_core::ScalarType::U32),
+        ]);
+
+        let mut schemas = HashMap::new();
+        schemas.insert(RelId(1), left_schema);
+        schemas.insert(RelId(2), right_schema);
+        optimizer.set_schemas(schemas);
+
+        // Filter on Column(5) which is in the right side (left_width=3, so column 5-3=2 in right)
+        let plan = RirNode::Filter {
+            input: Box::new(RirNode::Join {
+                left: Box::new(RirNode::Scan { rel: RelId(1) }),
+                right: Box::new(RirNode::Scan { rel: RelId(2) }),
+                left_keys: vec![0],
+                right_keys: vec![0],
+                join_type: JoinType::Inner,
+            }),
+            predicate: Expr::Compare {
+                left: Box::new(Expr::Column(5)), // Right side column (index 5 = 3 + 2)
+                op: CompareOp::Ge,
+                right: Box::new(Expr::Const(ConstValue::U32(4))),
+            },
+        };
+
+        let optimized = optimizer.optimize(plan);
+
+        // Filter should be pushed into right side of join with Column(2) (remapped from 5-3=2)
+        if let RirNode::Join { right, .. } = optimized {
+            if let RirNode::Filter { predicate, .. } = *right {
+                if let Expr::Compare { left, .. } = predicate {
+                    if let Expr::Column(idx) = *left {
+                        assert_eq!(idx, 2, "Column should be remapped to 2 (5 - left_width(3) = 2)");
+                    } else {
+                        panic!("Expected Column expression");
+                    }
+                } else {
+                    panic!("Expected Compare predicate");
+                }
+            } else {
+                panic!("Expected Filter on right side of join");
+            }
+        } else {
+            panic!("Expected Join node");
+        }
     }
 }
