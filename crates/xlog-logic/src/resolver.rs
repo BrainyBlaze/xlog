@@ -165,6 +165,7 @@ impl ModuleResolver {
             source_file,
             exports,
             function_exports,
+            program,
         };
 
         self.loaded.insert(path_key.clone(), module);
@@ -279,6 +280,43 @@ impl ModuleResolver {
     /// Get all loaded module paths (for testing)
     pub fn loaded_modules(&self) -> Vec<&str> {
         self.loaded.keys().map(|s| s.as_str()).collect()
+    }
+
+    /// Merge all imported modules into a program.
+    /// Returns a new program with all imports resolved and merged.
+    ///
+    /// # Arguments
+    /// * `program` - The main program with imports to resolve
+    ///
+    /// # Returns
+    /// The program with all imports merged in
+    pub fn merge_imports(&self, mut program: Program) -> Result<Program, ModuleError> {
+        for use_decl in &program.imports.clone() {
+            let path_key = module_path_to_string(&use_decl.module_path);
+            let loaded_module = self.loaded.get(&path_key).ok_or_else(|| {
+                ModuleError::NotFound {
+                    path: use_decl.module_path.clone(),
+                    searched: vec![],
+                }
+            })?;
+
+            // Determine which items to import
+            let imported_items = match &use_decl.imports {
+                Some(items) if !items.is_empty() => {
+                    // Import specific items
+                    Some(items.iter().cloned().collect())
+                }
+                _ => {
+                    // Import all public items
+                    None
+                }
+            };
+
+            // Merge the module into the program
+            program.merge_from(&loaded_module.program, imported_items.as_ref());
+        }
+
+        Ok(program)
     }
 }
 

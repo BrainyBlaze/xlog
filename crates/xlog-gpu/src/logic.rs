@@ -44,6 +44,43 @@ impl LogicProgram {
         })
     }
 
+    /// Compile a program with module resolution.
+    ///
+    /// This method resolves all imports using the provided resolver and merges
+    /// imported predicates, functions, and rules into the main program.
+    ///
+    /// # Arguments
+    /// * `source` - The source code of the main program
+    /// * `resolver` - A pre-loaded ModuleResolver with all dependencies resolved
+    ///
+    /// # Returns
+    /// The compiled LogicProgram with all imports merged
+    pub fn compile_with_resolver(
+        source: &str,
+        resolver: &xlog_logic::resolver::ModuleResolver,
+    ) -> Result<Self> {
+        let program = xlog_logic::parse_program(source)?;
+
+        // Merge imports from the resolver
+        let merged = resolver
+            .merge_imports(program)
+            .map_err(|e| XlogError::Compilation(format!("Module resolution failed: {}", e)))?;
+
+        // Expand user-defined function calls before compilation
+        let max_recursion = merged.directives.max_recursion_depth.unwrap_or(100);
+        let expanded = xlog_logic::expand_program_functions(&merged, max_recursion)
+            .map_err(|e| XlogError::Compilation(e.to_string()))?;
+
+        let mut compiler = Compiler::new();
+        let plan = compiler.compile_program(&expanded)?;
+        Ok(Self {
+            program: expanded,
+            plan,
+            schemas: compiler.schemas().clone(),
+            rel_ids: compiler.rel_ids().clone(),
+        })
+    }
+
     pub fn schema(&self, relation: &str) -> Option<&Schema> {
         self.schemas.get(relation)
     }

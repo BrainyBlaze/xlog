@@ -1,0 +1,197 @@
+// HR Employee Management Module
+// Demonstrates: symbol type for names/departments/skills
+
+// Employee: id, name, department
+pred employee(symbol, symbol, symbol).
+
+// Skills: employee_id, skill_name, proficiency (1-5)
+pred skill(symbol, symbol, u32).
+
+// Hire date: employee_id, year, month, day
+pred hire_date(symbol, u32, u32, u32).
+
+// Department metadata
+pred department(symbol, symbol).  // dept_id, dept_name
+
+// --- Departments ---
+department(eng, "Engineering").
+department(sales, "Sales").
+department(hr, "Human Resources").
+department(finance, "Finance").
+department(ops, "Operations").
+
+// --- Engineering Team (15 employees) ---
+employee(e001, "Alice Chen", eng).
+employee(e002, "Bob Smith", eng).
+employee(e003, "Carol Williams", eng).
+employee(e004, "David Brown", eng).
+employee(e005, "Eva Martinez", eng).
+employee(e006, "Frank Johnson", eng).
+employee(e007, "Grace Lee", eng).
+employee(e008, "Henry Wilson", eng).
+employee(e009, "Ivy Taylor", eng).
+employee(e010, "Jack Anderson", eng).
+
+hire_date(e001, 2018, 3, 15).
+hire_date(e002, 2019, 7, 1).
+hire_date(e003, 2020, 1, 10).
+hire_date(e004, 2021, 5, 20).
+hire_date(e005, 2019, 11, 5).
+hire_date(e006, 2022, 2, 14).
+hire_date(e007, 2020, 8, 22).
+hire_date(e008, 2021, 4, 1).
+hire_date(e009, 2023, 6, 15).
+hire_date(e010, 2022, 9, 30).
+
+// Engineering skills
+skill(e001, rust, 5).
+skill(e001, cuda, 4).
+skill(e001, python, 4).
+skill(e002, rust, 4).
+skill(e002, javascript, 5).
+skill(e003, python, 5).
+skill(e003, sql, 4).
+skill(e004, rust, 3).
+skill(e004, go, 4).
+skill(e005, cuda, 5).
+skill(e005, cpp, 5).
+skill(e006, javascript, 4).
+skill(e006, typescript, 4).
+skill(e007, python, 4).
+skill(e007, ml, 5).
+skill(e008, rust, 4).
+skill(e008, wasm, 3).
+skill(e009, go, 3).
+skill(e009, kubernetes, 4).
+skill(e010, sql, 5).
+skill(e010, postgres, 4).
+
+// --- Sales Team (10 employees) ---
+employee(e011, "Karen Davis", sales).
+employee(e012, "Leo Garcia", sales).
+employee(e013, "Mia Robinson", sales).
+employee(e014, "Nathan Clark", sales).
+employee(e015, "Olivia Lewis", sales).
+employee(e016, "Paul Walker", sales).
+employee(e017, "Quinn Hall", sales).
+employee(e018, "Rachel Young", sales).
+employee(e019, "Sam King", sales).
+employee(e020, "Tina Wright", sales).
+
+hire_date(e011, 2017, 2, 1).
+hire_date(e012, 2019, 4, 15).
+hire_date(e013, 2020, 10, 1).
+hire_date(e014, 2018, 8, 20).
+hire_date(e015, 2021, 1, 5).
+hire_date(e016, 2022, 3, 10).
+hire_date(e017, 2019, 6, 25).
+hire_date(e018, 2023, 2, 14).
+hire_date(e019, 2020, 12, 1).
+hire_date(e020, 2021, 7, 18).
+
+skill(e011, negotiation, 5).
+skill(e011, crm, 4).
+skill(e012, presentation, 4).
+skill(e013, analytics, 4).
+skill(e014, negotiation, 4).
+skill(e015, crm, 5).
+skill(e016, cold_calling, 4).
+skill(e017, presentation, 5).
+skill(e018, analytics, 3).
+skill(e019, negotiation, 4).
+skill(e020, crm, 4).
+
+// --- HR Team (5 employees) ---
+employee(e021, "Uma Patel", hr).
+employee(e022, "Victor Adams", hr).
+employee(e023, "Wendy Scott", hr).
+employee(e024, "Xavier Torres", hr).
+employee(e025, "Yuki Tanaka", hr).
+
+hire_date(e021, 2016, 5, 1).
+hire_date(e022, 2018, 9, 15).
+hire_date(e023, 2020, 4, 1).
+hire_date(e024, 2021, 11, 20).
+hire_date(e025, 2022, 7, 5).
+
+skill(e021, recruiting, 5).
+skill(e021, compliance, 4).
+skill(e022, benefits, 5).
+skill(e023, training, 4).
+skill(e024, recruiting, 4).
+skill(e025, payroll, 4).
+
+// --- Finance Team (10 employees) ---
+employee(e026, "Zoe Campbell", finance).
+employee(e027, "Adam Mitchell", finance).
+employee(e028, "Beth Turner", finance).
+employee(e029, "Chris Phillips", finance).
+employee(e030, "Diana Evans", finance).
+employee(e031, "Eric Barnes", finance).
+employee(e032, "Fiona Ross", finance).
+employee(e033, "George Hughes", finance).
+employee(e034, "Hannah Price", finance).
+employee(e035, "Ian Foster", finance).
+
+hire_date(e026, 2015, 1, 10).
+hire_date(e027, 2017, 6, 1).
+hire_date(e028, 2019, 3, 15).
+hire_date(e029, 2020, 8, 1).
+hire_date(e030, 2018, 12, 5).
+hire_date(e031, 2021, 2, 20).
+hire_date(e032, 2022, 5, 10).
+hire_date(e033, 2019, 10, 25).
+hire_date(e034, 2023, 1, 3).
+hire_date(e035, 2020, 7, 15).
+
+skill(e026, accounting, 5).
+skill(e026, excel, 5).
+skill(e027, budgeting, 5).
+skill(e028, forecasting, 4).
+skill(e029, tax, 4).
+skill(e030, audit, 5).
+skill(e031, excel, 4).
+skill(e032, sap, 4).
+skill(e033, budgeting, 4).
+skill(e034, accounting, 3).
+skill(e035, forecasting, 4).
+
+// --- Operations Team (10 employees) ---
+employee(e036, "Julia Reed", ops).
+employee(e037, "Kevin Cooper", ops).
+employee(e038, "Laura Morgan", ops).
+employee(e039, "Mike Bell", ops).
+employee(e040, "Nina Gray", ops).
+employee(e041, "Oscar Rivera", ops).
+employee(e042, "Paula Cox", ops).
+employee(e043, "Raj Sharma", ops).
+employee(e044, "Sara Wood", ops).
+employee(e045, "Tom Hayes", ops).
+
+hire_date(e036, 2016, 4, 1).
+hire_date(e037, 2018, 7, 15).
+hire_date(e038, 2019, 2, 1).
+hire_date(e039, 2020, 5, 10).
+hire_date(e040, 2017, 11, 20).
+hire_date(e041, 2021, 8, 5).
+hire_date(e042, 2022, 1, 15).
+hire_date(e043, 2019, 9, 1).
+hire_date(e044, 2023, 4, 20).
+hire_date(e045, 2020, 6, 30).
+
+skill(e036, logistics, 5).
+skill(e037, inventory, 4).
+skill(e038, scheduling, 5).
+skill(e039, quality, 4).
+skill(e040, logistics, 4).
+skill(e041, inventory, 4).
+skill(e042, scheduling, 3).
+skill(e043, lean, 5).
+skill(e044, quality, 3).
+skill(e045, lean, 4).
+
+// --- CEO (for org hierarchy) ---
+employee(e046, "Morgan Blake", eng).
+hire_date(e046, 2010, 1, 1).
+skill(e046, leadership, 5).
+skill(e046, strategy, 5).

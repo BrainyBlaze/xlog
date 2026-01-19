@@ -1,0 +1,109 @@
+// Finance Compensation Module
+// Demonstrates: UDFs for salary calculations, conditionals, arithmetic
+
+// Base salary: employee_id, annual_amount (cents to avoid float)
+pred base_salary(symbol, u32).
+
+// Bonus tier by department: dept_id, tier (1=gold, 2=silver, 3=bronze)
+pred bonus_tier(symbol, u32).
+
+// --- UDFs for compensation calculations ---
+
+// Years of service calculation
+func years_of_service(HireYear, CurrentYear) = CurrentYear - HireYear.
+
+// Bonus multiplier based on tier (returns percentage)
+func bonus_multiplier(Tier) =
+    if Tier = 1 then 20
+    else if Tier = 2 then 15
+    else if Tier = 3 then 10
+    else 5.
+
+// Calculate bonus amount
+func calculate_bonus(BaseSalary, BonusPct) = BaseSalary * BonusPct / 100.
+
+// Tax bracket determination (returns percentage)
+func tax_bracket(AnnualSalary) =
+    if AnnualSalary > 20000000 then 37
+    else if AnnualSalary > 15000000 then 32
+    else if AnnualSalary > 10000000 then 24
+    else if AnnualSalary > 5000000 then 22
+    else 12.
+
+// Net salary after tax
+func net_after_tax(Gross, TaxPct) = Gross - (Gross * TaxPct / 100).
+
+// Seniority bonus (additional % per year over 5)
+func seniority_bonus(YearsService) =
+    if YearsService > 5 then (YearsService - 5) * 2
+    else 0.
+
+// Total compensation calculation
+func total_comp(Base, BonusPct, SeniorityPct) =
+    Base + (Base * BonusPct / 100) + (Base * SeniorityPct / 100).
+
+// --- Bonus tiers by department ---
+bonus_tier(eng, 1).       // Engineering: gold (20%)
+bonus_tier(sales, 1).     // Sales: gold (20%)
+bonus_tier(finance, 2).   // Finance: silver (15%)
+bonus_tier(hr, 3).        // HR: bronze (10%)
+bonus_tier(ops, 3).       // Operations: bronze (10%)
+
+// --- Base salaries (in cents, so $120,000 = 12000000) ---
+// Engineering (higher base)
+base_salary(e001, 18000000).  // $180k - Senior
+base_salary(e002, 15000000).  // $150k
+base_salary(e003, 14000000).  // $140k
+base_salary(e004, 12000000).  // $120k
+base_salary(e005, 16000000).  // $160k - CUDA specialist
+base_salary(e006, 11000000).  // $110k
+base_salary(e007, 15000000).  // $150k - ML
+base_salary(e008, 13000000).  // $130k
+base_salary(e009, 10000000).  // $100k - Junior
+base_salary(e010, 14000000).  // $140k
+
+// Sales (base + commission potential)
+base_salary(e011, 12000000).  // $120k - Senior
+base_salary(e012, 9500000).   // $95k
+base_salary(e013, 8500000).   // $85k
+base_salary(e014, 11000000).  // $110k
+base_salary(e015, 8000000).   // $80k
+base_salary(e016, 7500000).   // $75k
+base_salary(e017, 10000000).  // $100k
+base_salary(e018, 7000000).   // $70k - Junior
+base_salary(e019, 9000000).   // $90k
+base_salary(e020, 8500000).   // $85k
+
+// HR
+base_salary(e021, 13000000).  // $130k - Director
+base_salary(e022, 9500000).   // $95k
+base_salary(e023, 8000000).   // $80k
+base_salary(e024, 7500000).   // $75k
+base_salary(e025, 8500000).   // $85k
+
+// Finance
+base_salary(e026, 16000000).  // $160k - CFO
+base_salary(e027, 12000000).  // $120k
+base_salary(e028, 10000000).  // $100k
+base_salary(e029, 9500000).   // $95k
+base_salary(e030, 11000000).  // $110k
+base_salary(e031, 8500000).   // $85k
+base_salary(e032, 9000000).   // $90k
+base_salary(e033, 9500000).   // $95k
+base_salary(e034, 7500000).   // $75k - Junior
+base_salary(e035, 10000000).  // $100k
+
+// Operations
+base_salary(e036, 11000000).  // $110k - Director
+base_salary(e037, 8500000).   // $85k
+base_salary(e038, 9000000).   // $90k
+base_salary(e039, 8000000).   // $80k
+base_salary(e040, 9500000).   // $95k
+base_salary(e041, 7500000).   // $75k
+base_salary(e042, 7000000).   // $70k
+base_salary(e043, 10000000).  // $100k
+base_salary(e044, 6500000).   // $65k - Junior
+base_salary(e045, 8500000).   // $85k
+
+// CEO
+base_salary(e046, 25000000).  // $250k

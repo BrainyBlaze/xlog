@@ -3,6 +3,8 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+use crate::ast::Program;
+
 /// A module path like ["utils", "math"]
 pub type ModulePath = Vec<String>;
 
@@ -22,15 +24,18 @@ pub struct LoadedModule {
     pub exports: HashSet<String>,
     /// Public function names
     pub function_exports: HashSet<String>,
+    /// The parsed program content
+    pub program: Program,
 }
 
 impl LoadedModule {
-    pub fn new(path: ModulePath, source_file: PathBuf) -> Self {
+    pub fn new(path: ModulePath, source_file: PathBuf, program: Program) -> Self {
         Self {
             path,
             source_file,
             exports: HashSet::new(),
             function_exports: HashSet::new(),
+            program,
         }
     }
 }
@@ -181,7 +186,11 @@ mod tests {
 
     #[test]
     fn test_loaded_module_new() {
-        let module = LoadedModule::new(vec!["test".to_string()], PathBuf::from("/test.xlog"));
+        let module = LoadedModule::new(
+            vec!["test".to_string()],
+            PathBuf::from("/test.xlog"),
+            Program::default(),
+        );
         assert_eq!(module.path, vec!["test"]);
         assert!(module.exports.is_empty());
     }

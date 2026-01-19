@@ -547,6 +547,20 @@ impl Optimizer {
                 let remapped = self.remap_expr(inner, mapping)?;
                 Some(Expr::Cast(Box::new(remapped), *scalar_type))
             }
+            Expr::Conditional {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                let new_condition = self.remap_expr(condition, mapping)?;
+                let new_then = self.remap_expr(then_expr, mapping)?;
+                let new_else = self.remap_expr(else_expr, mapping)?;
+                Some(Expr::Conditional {
+                    condition: Box::new(new_condition),
+                    then_expr: Box::new(new_then),
+                    else_expr: Box::new(new_else),
+                })
+            }
         }
     }
 
@@ -653,6 +667,16 @@ impl Optimizer {
                 cols.extend(Self::collect_columns(r));
                 cols
             }
+            Expr::Conditional {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                let mut cols = Self::collect_columns(condition);
+                cols.extend(Self::collect_columns(then_expr));
+                cols.extend(Self::collect_columns(else_expr));
+                cols
+            }
         }
     }
 
@@ -705,6 +729,15 @@ impl Optimizer {
                 Box::new(Self::remap_columns(r, f)),
             ),
             Expr::Cast(inner, t) => Expr::Cast(Box::new(Self::remap_columns(inner, f)), *t),
+            Expr::Conditional {
+                condition,
+                then_expr,
+                else_expr,
+            } => Expr::Conditional {
+                condition: Box::new(Self::remap_columns(condition, f)),
+                then_expr: Box::new(Self::remap_columns(then_expr, f)),
+                else_expr: Box::new(Self::remap_columns(else_expr, f)),
+            },
         }
     }
 

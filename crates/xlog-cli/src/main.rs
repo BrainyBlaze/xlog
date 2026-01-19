@@ -132,14 +132,18 @@ fn run_deterministic(args: RunArgs) -> Result<()> {
         ))
     })?;
 
-    // Validate module imports if any search paths are provided
-    if !args.module_path.is_empty() {
-        let _ = load_modules(&args.source, args.module_path.clone()).map_err(|e| {
+    // Check if the source has any imports that need resolution
+    let has_imports = source.contains("use ");
+
+    // Load and merge modules if there are imports
+    let program = if has_imports {
+        let resolver = load_modules(&args.source, args.module_path.clone()).map_err(|e| {
             XlogError::Execution(format!("Module resolution failed: {}", e))
         })?;
-    }
-
-    let program = LogicProgram::compile(&source)?;
+        LogicProgram::compile_with_resolver(&source, &resolver)?
+    } else {
+        LogicProgram::compile(&source)?
+    };
     let mut inputs = HashMap::new();
     for (name, path) in parse_inputs(&args.input)? {
         let buf = provider.read_arrow_ipc_stream_file(&path)?;

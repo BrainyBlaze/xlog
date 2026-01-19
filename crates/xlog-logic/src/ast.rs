@@ -467,6 +467,87 @@ impl Program {
     pub fn prob_engine(&self) -> ProbEngine {
         self.directives.prob_engine_or_default()
     }
+
+    /// Merge another program's exports into this program.
+    /// Used for importing modules - adds predicates, functions, rules from the imported module.
+    /// Only merges public items (private items are not exported).
+    ///
+    /// # Arguments
+    /// * `other` - The program to merge from
+    /// * `imported_items` - Optional set of specific items to import. If None, imports all public items.
+    pub fn merge_from(&mut self, other: &Program, imported_items: Option<&std::collections::HashSet<String>>) {
+        use std::collections::HashSet;
+
+        // Track which predicates are private in the source
+        let private_preds: HashSet<&str> = other
+            .predicates
+            .iter()
+            .filter(|p| p.is_private)
+            .map(|p| p.name.as_str())
+            .collect();
+
+        let private_funcs: HashSet<&str> = other
+            .functions
+            .iter()
+            .filter(|f| f.is_private)
+            .map(|f| f.name.as_str())
+            .collect();
+
+        // Merge predicate declarations (only public ones)
+        for pred in &other.predicates {
+            if pred.is_private {
+                continue;
+            }
+            // Check if this is in the import list (if specified)
+            if let Some(items) = imported_items {
+                if !items.contains(&pred.name) {
+                    continue;
+                }
+            }
+            // Avoid duplicate declarations
+            if !self.predicates.iter().any(|p| p.name == pred.name) {
+                self.predicates.push(pred.clone());
+            }
+        }
+
+        // Merge functions (only public ones)
+        for func in &other.functions {
+            if func.is_private {
+                continue;
+            }
+            if let Some(items) = imported_items {
+                if !items.contains(&func.name) {
+                    continue;
+                }
+            }
+            // Avoid duplicate functions
+            if !self.functions.iter().any(|f| f.name == func.name) {
+                self.functions.push(func.clone());
+            }
+        }
+
+        // Merge rules (facts and rules for public predicates)
+        for rule in &other.rules {
+            // Skip if the head predicate is private
+            if private_preds.contains(rule.head.predicate.as_str()) {
+                continue;
+            }
+            // Check import list for facts/rules
+            if let Some(items) = imported_items {
+                if !items.contains(&rule.head.predicate) {
+                    continue;
+                }
+            }
+            self.rules.push(rule.clone());
+        }
+
+        // Merge domains
+        for domain in &other.domains {
+            if !self.domains.iter().any(|d| d.name == domain.name) {
+                self.domains.push(domain.clone());
+            }
+        }
+    }
 }
 
 #[cfg(test)]

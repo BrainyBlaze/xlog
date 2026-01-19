@@ -58,6 +58,18 @@ pub enum Expr {
     Pow(Box<Expr>, Box<Expr>),
     /// Type cast
     Cast(Box<Expr>, ScalarType),
+
+    /// Conditional expression: if condition then then_expr else else_expr
+    /// The condition is a boolean comparison expression.
+    /// Used for UDF conditionals like: if X >= 100 then 1 else 2
+    Conditional {
+        /// Boolean condition (should evaluate to bool)
+        condition: Box<Expr>,
+        /// Expression to evaluate when condition is true
+        then_expr: Box<Expr>,
+        /// Expression to evaluate when condition is false
+        else_expr: Box<Expr>,
+    },
 }
 
 /// Projection expression - either pass-through column or computed value

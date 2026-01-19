@@ -366,6 +366,84 @@ __device__ inline int64_t load_as_i64(const uint8_t* p, uint8_t code) {
     }
 }
 
+// =============================================================================
+// Conditional Select Kernels
+// select_<type>(mask, then_vals, else_vals, n, out)
+// For each element: out[i] = mask[i] ? then_vals[i] : else_vals[i]
+// =============================================================================
+
+extern "C" __global__ void arith_select_i64(
+    const uint8_t* __restrict__ mask,
+    const int64_t* __restrict__ then_vals,
+    const int64_t* __restrict__ else_vals,
+    uint32_t n,
+    int64_t* __restrict__ out
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= n) return;
+    out[gid] = mask[gid] ? then_vals[gid] : else_vals[gid];
+}
+
+extern "C" __global__ void arith_select_i32(
+    const uint8_t* __restrict__ mask,
+    const int32_t* __restrict__ then_vals,
+    const int32_t* __restrict__ else_vals,
+    uint32_t n,
+    int32_t* __restrict__ out
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= n) return;
+    out[gid] = mask[gid] ? then_vals[gid] : else_vals[gid];
+}
+
+extern "C" __global__ void arith_select_u64(
+    const uint8_t* __restrict__ mask,
+    const uint64_t* __restrict__ then_vals,
+    const uint64_t* __restrict__ else_vals,
+    uint32_t n,
+    uint64_t* __restrict__ out
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= n) return;
+    out[gid] = mask[gid] ? then_vals[gid] : else_vals[gid];
+}
+
+extern "C" __global__ void arith_select_u32(
+    const uint8_t* __restrict__ mask,
+    const uint32_t* __restrict__ then_vals,
+    const uint32_t* __restrict__ else_vals,
+    uint32_t n,
+    uint32_t* __restrict__ out
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= n) return;
+    out[gid] = mask[gid] ? then_vals[gid] : else_vals[gid];
+}
+
+extern "C" __global__ void arith_select_f64(
+    const uint8_t* __restrict__ mask,
+    const double* __restrict__ then_vals,
+    const double* __restrict__ else_vals,
+    uint32_t n,
+    double* __restrict__ out
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= n) return;
+    out[gid] = mask[gid] ? then_vals[gid] : else_vals[gid];
+}
+
+extern "C" __global__ void arith_select_f32(
+    const uint8_t* __restrict__ mask,
+    const float* __restrict__ then_vals,
+    const float* __restrict__ else_vals,
+    uint32_t n,
+    float* __restrict__ out
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= n) return;
+    out[gid] = mask[gid] ? then_vals[gid] : else_vals[gid];
+}
+
 extern "C" __global__ void arith_cast(
     const uint8_t* __restrict__ input,
     uint8_t* __restrict__ output,

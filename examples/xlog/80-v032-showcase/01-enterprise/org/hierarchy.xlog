@@ -1,0 +1,128 @@
+// Organization Hierarchy Module
+// Demonstrates: Recursion for management chains, aggregation
+
+// Reports-to relationship: employee_id, manager_id
+pred reports_to(symbol, symbol).
+
+// Team membership: team_name, employee_id
+pred team(symbol, symbol).
+
+// --- Organization Structure ---
+// CEO (e046) is at the top
+
+// Executive team reports to CEO
+reports_to(e001, e046).   // Alice (VP Eng) -> CEO
+reports_to(e021, e046).   // Uma (VP HR) -> CEO
+reports_to(e026, e046).   // Zoe (CFO) -> CEO
+reports_to(e036, e046).   // Julia (VP Ops) -> CEO
+reports_to(e011, e046).   // Karen (VP Sales) -> CEO
+
+// Engineering managers report to VP Eng (e001)
+reports_to(e002, e001).   // Bob -> Alice
+reports_to(e005, e001).   // Eva -> Alice
+reports_to(e007, e001).   // Grace -> Alice
+
+// Engineering ICs report to managers
+reports_to(e003, e002).   // Carol -> Bob
+reports_to(e004, e002).   // David -> Bob
+reports_to(e006, e005).   // Frank -> Eva
+reports_to(e008, e005).   // Henry -> Eva
+reports_to(e009, e007).   // Ivy -> Grace
+reports_to(e010, e007).   // Jack -> Grace
+
+// Sales reports to VP Sales (e011)
+reports_to(e012, e011).   // Leo -> Karen
+reports_to(e014, e011).   // Nathan -> Karen
+reports_to(e013, e012).   // Mia -> Leo
+reports_to(e015, e012).   // Olivia -> Leo
+reports_to(e016, e014).   // Paul -> Nathan
+reports_to(e017, e014).   // Quinn -> Nathan
+reports_to(e018, e014).   // Rachel -> Nathan
+reports_to(e019, e012).   // Sam -> Leo
+reports_to(e020, e014).   // Tina -> Nathan
+
+// HR reports to VP HR (e021)
+reports_to(e022, e021).   // Victor -> Uma
+reports_to(e023, e021).   // Wendy -> Uma
+reports_to(e024, e022).   // Xavier -> Victor
+reports_to(e025, e022).   // Yuki -> Victor
+
+// Finance reports to CFO (e026)
+reports_to(e027, e026).   // Adam -> Zoe
+reports_to(e030, e026).   // Diana -> Zoe
+reports_to(e028, e027).   // Beth -> Adam
+reports_to(e029, e027).   // Chris -> Adam
+reports_to(e031, e030).   // Eric -> Diana
+reports_to(e032, e030).   // Fiona -> Diana
+reports_to(e033, e027).   // George -> Adam
+reports_to(e034, e030).   // Hannah -> Diana
+reports_to(e035, e027).   // Ian -> Adam
+
+// Operations reports to VP Ops (e036)
+reports_to(e037, e036).   // Kevin -> Julia
+reports_to(e040, e036).   // Nina -> Julia
+reports_to(e038, e037).   // Laura -> Kevin
+reports_to(e039, e037).   // Mike -> Kevin
+reports_to(e041, e040).   // Oscar -> Nina
+reports_to(e042, e040).   // Paula -> Nina
+reports_to(e043, e037).   // Raj -> Kevin
+reports_to(e044, e040).   // Sara -> Nina
+reports_to(e045, e037).   // Tom -> Kevin
+
+// --- Teams ---
+team(platform, e001).
+team(platform, e002).
+team(platform, e003).
+team(platform, e004).
+
+team(gpu, e005).
+team(gpu, e006).
+team(gpu, e008).
+
+team(ml, e007).
+team(ml, e009).
+team(ml, e010).
+
+team(enterprise_sales, e011).
+team(enterprise_sales, e012).
+team(enterprise_sales, e013).
+team(enterprise_sales, e019).
+
+team(smb_sales, e014).
+team(smb_sales, e015).
+team(smb_sales, e016).
+team(smb_sales, e017).
+team(smb_sales, e018).
+team(smb_sales, e020).
+
+// --- Recursive management chain ---
+
+// Direct report (level 1)
+pred management_chain(symbol, symbol, u32).
+management_chain(Emp, Mgr, 1) :- reports_to(Emp, Mgr).
+
+// Transitive (recursive) - finds all managers up the chain
+management_chain(Emp, TopMgr, Level) :-
+    reports_to(Emp, Mgr),
+    management_chain(Mgr, TopMgr, PrevLevel),
+    Level is PrevLevel + 1.
+
+// Count direct reports
+pred direct_report_count(symbol, u64).
+direct_report_count(Mgr, count(Emp)) :- reports_to(Emp, Mgr).
+
+// Count total reports (direct + indirect)
+pred total_report_count(symbol, u64).
+total_report_count(Mgr, count(Emp)) :- management_chain(Emp, Mgr, _).
+
+// Team size
+pred team_size(symbol, u64).
+team_size(TeamName, count(Emp)) :- team(TeamName, Emp).
+
+// Is manager predicate
+pred is_manager(symbol).
+is_manager(Emp) :- reports_to(_, Emp).
+
+// Org depth (max levels below this person)
+pred org_depth(symbol, u64).
+org_depth(Mgr, max(Level)) :- management_chain(_, Mgr, Level).

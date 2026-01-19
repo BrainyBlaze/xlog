@@ -1,0 +1,312 @@
+// =============================================================================
+// Enterprise Analytics - Complete Self-Contained Example
+// =============================================================================
+// Demonstrates working features:
+//   - symbol type for identifiers
+//   - Recursive rules for org hierarchy
+//   - Aggregations for analytics (count, sum, max)
+//   - Arithmetic expressions with cast()
+//
+// Note: v0.3.2 will add UDFs and private predicates to simplify calculations
+// =============================================================================
+
+// --- Predicate Declarations ---
+pred employee(symbol, symbol, symbol).      // id, name, department
+pred skill(symbol, symbol, u32).            // employee_id, skill_name, level
+pred hire_date(symbol, u32, u32, u32).      // employee_id, year, month, day
+pred department(symbol, symbol).            // dept_id, dept_name
+pred base_salary(symbol, u32).              // employee_id, salary_cents
+pred bonus_tier(symbol, u32).               // dept_id, tier (1=gold, 2=silver, 3=bronze)
+pred reports_to(symbol, symbol).            // employee_id, manager_id
+pred team(symbol, symbol).                  // team_name, employee_id
+
+// =============================================================================
+// BONUS PERCENTAGES (lookup table instead of UDF)
+// v0.3.2 will allow: func bonus_multiplier(Tier) = if Tier = 1 then 20 else ...
+// =============================================================================
+pred bonus_pct(u32, u32).  // tier, percentage
+bonus_pct(1, 20).   // Gold: 20%
+bonus_pct(2, 15).   // Silver: 15%
+bonus_pct(3, 10).   // Bronze: 10%
+
+// =============================================================================
+// DEPARTMENT DATA
+// =============================================================================
+
+department(eng, "Engineering").
+department(sales, "Sales").
+department(hr, "Human Resources").
+department(finance, "Finance").
+department(ops, "Operations").
+
+bonus_tier(eng, 1).       // Engineering: gold (20%)
+bonus_tier(sales, 1).     // Sales: gold (20%)
+bonus_tier(finance, 2).   // Finance: silver (15%)
+bonus_tier(hr, 3).        // HR: bronze (10%)
+bonus_tier(ops, 3).       // Operations: bronze (10%)
+
+// =============================================================================
+// EMPLOYEE DATA (using symbols for identifiers)
+// =============================================================================
+
+// --- Engineering Team ---
+employee(e001, "Alice Chen", eng).
+employee(e002, "Bob Smith", eng).
+employee(e003, "Carol Williams", eng).
+employee(e004, "David Brown", eng).
+employee(e005, "Eva Martinez", eng).
+employee(e006, "Frank Johnson", eng).
+employee(e007, "Grace Lee", eng).
+employee(e008, "Henry Wilson", eng).
+
+hire_date(e001, 2018, 3, 15).
+hire_date(e002, 2019, 7, 1).
+hire_date(e003, 2020, 1, 10).
+hire_date(e004, 2021, 5, 20).
+hire_date(e005, 2019, 11, 5).
+hire_date(e006, 2022, 2, 14).
+hire_date(e007, 2020, 8, 22).
+hire_date(e008, 2021, 4, 1).
+
+base_salary(e001, 18000000).  // $180k
+base_salary(e002, 15000000).  // $150k
+base_salary(e003, 14000000).  // $140k
+base_salary(e004, 12000000).  // $120k
+base_salary(e005, 16000000).  // $160k
+base_salary(e006, 11000000).  // $110k
+base_salary(e007, 15000000).  // $150k
+base_salary(e008, 13000000).  // $130k
+
+skill(e001, rust, 5).
+skill(e001, cuda, 4).
+skill(e002, rust, 4).
+skill(e002, javascript, 5).
+skill(e003, python, 5).
+skill(e003, sql, 4).
+skill(e004, rust, 3).
+skill(e005, cuda, 5).
+skill(e005, cpp, 5).
+skill(e006, javascript, 4).
+skill(e007, python, 4).
+skill(e007, ml, 5).
+skill(e008, rust, 4).
+
+// --- Sales Team ---
+employee(e011, "Karen Davis", sales).
+employee(e012, "Leo Garcia", sales).
+employee(e013, "Mia Robinson", sales).
+employee(e014, "Nathan Clark", sales).
+
+hire_date(e011, 2017, 2, 1).
+hire_date(e012, 2019, 4, 15).
+hire_date(e013, 2020, 10, 1).
+hire_date(e014, 2018, 8, 20).
+
+base_salary(e011, 12000000).  // $120k
+base_salary(e012, 9500000).   // $95k
+base_salary(e013, 8500000).   // $85k
+base_salary(e014, 11000000).  // $110k
+
+skill(e011, negotiation, 5).
+skill(e012, presentation, 4).
+skill(e013, analytics, 4).
+skill(e014, negotiation, 4).
+
+// --- HR Team ---
+employee(e021, "Uma Patel", hr).
+employee(e022, "Victor Adams", hr).
+
+hire_date(e021, 2016, 5, 1).
+hire_date(e022, 2018, 9, 15).
+
+base_salary(e021, 13000000).  // $130k
+base_salary(e022, 9500000).   // $95k
+
+skill(e021, recruiting, 5).
+skill(e022, benefits, 5).
+
+// --- Finance Team ---
+employee(e026, "Zoe Campbell", finance).
+employee(e027, "Adam Mitchell", finance).
+employee(e028, "Beth Turner", finance).
+
+hire_date(e026, 2015, 1, 10).
+hire_date(e027, 2017, 6, 1).
+hire_date(e028, 2019, 3, 15).
+
+base_salary(e026, 16000000).  // $160k
+base_salary(e027, 12000000).  // $120k
+base_salary(e028, 10000000).  // $100k
+
+skill(e026, accounting, 5).
+skill(e027, budgeting, 5).
+skill(e028, forecasting, 4).
+
+// --- Operations Team ---
+employee(e036, "Julia Reed", ops).
+employee(e037, "Kevin Cooper", ops).
+
+hire_date(e036, 2016, 4, 1).
+hire_date(e037, 2018, 7, 15).
+
+base_salary(e036, 11000000).  // $110k
+base_salary(e037, 8500000).   // $85k
+
+skill(e036, logistics, 5).
+skill(e037, inventory, 4).
+
+// --- CEO ---
+employee(e046, "Morgan Blake", eng).
+hire_date(e046, 2010, 1, 1).
+base_salary(e046, 25000000).  // $250k
+skill(e046, leadership, 5).
+
+// =============================================================================
+// ORGANIZATION HIERARCHY
+// =============================================================================
+
+// Executive team reports to CEO
+reports_to(e001, e046).   // Alice (VP Eng) -> CEO
+reports_to(e021, e046).   // Uma (VP HR) -> CEO
+reports_to(e026, e046).   // Zoe (CFO) -> CEO
+reports_to(e036, e046).   // Julia (VP Ops) -> CEO
+reports_to(e011, e046).   // Karen (VP Sales) -> CEO
+
+// Engineering reports to VP Eng (e001)
+reports_to(e002, e001).
+reports_to(e005, e001).
+reports_to(e007, e001).
+reports_to(e003, e002).
+reports_to(e004, e002).
+reports_to(e006, e005).
+reports_to(e008, e005).
+
+// Sales reports to VP Sales (e011)
+reports_to(e012, e011).
+reports_to(e014, e011).
+reports_to(e013, e012).
+
+// HR reports to VP HR (e021)
+reports_to(e022, e021).
+
+// Finance reports to CFO (e026)
+reports_to(e027, e026).
+reports_to(e028, e027).
+
+// Ops reports to VP Ops (e036)
+reports_to(e037, e036).
+
+// Teams
+team(platform, e001).
+team(platform, e002).
+team(platform, e003).
+team(platform, e004).
+team(gpu, e005).
+team(gpu, e006).
+team(gpu, e008).
+team(ml, e007).
+
+// =============================================================================
+// DERIVED ANALYTICS
+// =============================================================================
+
+// Employee tenure (years since hire)
+// Using 2026 as current year
+pred employee_tenure(symbol, u32).
+employee_tenure(EmpId, Years) :-
+    hire_date(EmpId, HireYear, _, _),
+    Years is cast(2026, u32) - HireYear.
+
+// Total compensation (base + bonus using lookup table)
+pred employee_compensation(symbol, symbol, u32, u32, u32).
+employee_compensation(EmpId, Name, Base, Bonus, Total) :-
+    employee(EmpId, Name, Dept),
+    base_salary(EmpId, Base),
+    bonus_tier(Dept, Tier),
+    bonus_pct(Tier, BonusPct),
+    Bonus is Base * BonusPct / cast(100, u32),
+    Total is Base + Bonus.
+
+// Senior engineers: 5+ years, skill level 4+
+pred senior_engineer(symbol, symbol, u32).
+senior_engineer(Name, SkillName, Level) :-
+    employee(EmpId, Name, eng),
+    skill(EmpId, SkillName, Level),
+    Level >= 4,
+    employee_tenure(EmpId, Years),
+    Years >= 5.
+
+// High earners (> $150k total comp)
+pred high_earner(symbol, symbol, u32).
+high_earner(Name, DeptId, Total) :-
+    employee(EmpId, Name, DeptId),
+    employee_compensation(EmpId, _, _, _, Total),
+    Total > 15000000.
+
+// Department compensation totals (aggregation)
+pred dept_total_comp(symbol, u64).
+dept_total_comp(DeptId, sum(Total)) :-
+    employee(EmpId, _, DeptId),
+    employee_compensation(EmpId, _, _, _, Total).
+
+// Expert skills (level 5)
+pred expert_skill(symbol, symbol).
+expert_skill(Name, SkillName) :-
+    employee(EmpId, Name, _),
+    skill(EmpId, SkillName, 5).
+
+// =============================================================================
+// RECURSIVE MANAGEMENT CHAIN
+// =============================================================================
+
+// Recursive rule to find all managers in chain
+pred management_chain(symbol, symbol, u32).
+
+// Base case: direct report (level 1)
+management_chain(Emp, Mgr, 1) :- reports_to(Emp, Mgr).
+
+// Recursive case: transitive closure
+management_chain(Emp, TopMgr, Level) :-
+    reports_to(Emp, Mgr),
+    management_chain(Mgr, TopMgr, PrevLevel),
+    Level is PrevLevel + cast(1, u32).
+
+// Direct report count (aggregation)
+pred direct_report_count(symbol, u64).
+direct_report_count(Mgr, count(Emp)) :- reports_to(Emp, Mgr).
+
+// Large team managers (3+ reports)
+pred large_team_manager(symbol, symbol, u64).
+large_team_manager(Name, DeptId, Count) :-
+    employee(MgrId, Name, DeptId),
+    direct_report_count(MgrId, Count),
+    Count >= 3.
+
+// Team sizes (aggregation)
+pred team_size(symbol, u64).
+team_size(TeamName, count(Emp)) :- team(TeamName, Emp).
+
+// =============================================================================
+// QUERIES
+// =============================================================================
+
+// Q1: Senior engineers with their top skills
+?- senior_engineer(Name, Skill, Level).
+
+// Q2: High earners by department
+?- high_earner(Name, Dept, TotalComp).
+
+// Q3: Total compensation by department
+?- dept_total_comp(Dept, Total).
+
+// Q4: Expert-level skills
+?- expert_skill(Name, Skill).
+
+// Q5: Management chain for Bob (e002)
+?- management_chain(e002, Manager, Level).
+
+// Q6: Managers with large teams
+?- large_team_manager(Name, Dept, TeamSize).
+
+// Q7: Team sizes
+?- team_size(Team, Size).

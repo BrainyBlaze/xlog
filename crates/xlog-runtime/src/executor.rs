@@ -1496,7 +1496,8 @@ impl Executor {
             | Expr::Min(_, _)
             | Expr::Max(_, _)
             | Expr::Pow(_, _)
-            | Expr::Cast(_, _) => Err(XlogError::Execution(
+            | Expr::Cast(_, _)
+            | Expr::Conditional { .. } => Err(XlogError::Execution(
                 "Arithmetic expression cannot be evaluated as boolean predicate".into(),
             )),
         }
@@ -1766,7 +1767,8 @@ impl Executor {
             | Expr::Min(_, _)
             | Expr::Max(_, _)
             | Expr::Pow(_, _)
-            | Expr::Cast(_, _) => Err(XlogError::Execution(
+            | Expr::Cast(_, _)
+            | Expr::Conditional { .. } => Err(XlogError::Execution(
                 "Arithmetic expression cannot be evaluated as boolean predicate".into(),
             )),
         }
@@ -2158,6 +2160,28 @@ impl Executor {
             Expr::Cast(inner, target_type) => {
                 let val = self.evaluate_arith_expr(inner, input)?;
                 self.provider.cast_column(&val, *target_type)
+            }
+            Expr::Conditional {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                // Evaluate condition to get boolean mask
+                let mask_slice = self.eval_predicate_mask_gpu(condition, input)?;
+
+                // Convert mask slice to a CudaBuffer for select_columns
+                let mask_buffer = CudaBuffer::from_columns(
+                    vec![mask_slice.into()],
+                    input.num_rows(),
+                    Schema::new(vec![("mask".to_string(), ScalarType::Bool)]),
+                );
+
+                // Evaluate both branches
+                let then_buf = self.evaluate_arith_expr(then_expr, input)?;
+                let else_buf = self.evaluate_arith_expr(else_expr, input)?;
+
+                // Select based on mask
+                self.provider.select_columns(&mask_buffer, &then_buf, &else_buf)
             }
             _ => Err(XlogError::Execution(format!(
                 "Unsupported expression in arithmetic evaluation: {:?}",

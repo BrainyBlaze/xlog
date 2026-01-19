@@ -1633,9 +1633,40 @@ impl Lowerer {
                 name
             ))),
 
-            ArithExpr::Conditional { .. } => Err(XlogError::Compilation(
-                "Conditional expressions must be expanded before lowering (IR does not yet support conditionals)".to_string()
-            )),
+            ArithExpr::Conditional {
+                cond_left,
+                cond_op,
+                cond_right,
+                then_expr,
+                else_expr,
+            } => {
+                // Convert AST comparison operator to IR comparison operator
+                let ir_cond_op = match cond_op {
+                    CompOp::Eq => CompareOp::Eq,
+                    CompOp::Ne => CompareOp::Ne,
+                    CompOp::Lt => CompareOp::Lt,
+                    CompOp::Le => CompareOp::Le,
+                    CompOp::Gt => CompareOp::Gt,
+                    CompOp::Ge => CompareOp::Ge,
+                };
+
+                // Build the condition as a Compare expression
+                let condition = Expr::Compare {
+                    left: Box::new(self.arith_to_expr(cond_left, var_env)?),
+                    op: ir_cond_op,
+                    right: Box::new(self.arith_to_expr(cond_right, var_env)?),
+                };
+
+                // Build then and else expressions (recursive for nested conditionals)
+                let then_ir = self.arith_to_expr(then_expr, var_env)?;
+                let else_ir = self.arith_to_expr(else_expr, var_env)?;
+
+                Ok(Expr::Conditional {
+                    condition: Box::new(condition),
+                    then_expr: Box::new(then_ir),
+                    else_expr: Box::new(else_ir),
+                })
+            }
         }
     }
 

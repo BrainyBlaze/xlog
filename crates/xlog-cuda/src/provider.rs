@@ -95,6 +95,13 @@ pub mod arith_kernels {
     pub const ARITH_FILL_CONST_F64: &str = "arith_fill_const_f64";
     pub const ARITH_FILL_CONST_F32: &str = "arith_fill_const_f32";
     pub const ARITH_FILL_CONST_U8: &str = "arith_fill_const_u8";
+    // Conditional select kernels
+    pub const ARITH_SELECT_I64: &str = "arith_select_i64";
+    pub const ARITH_SELECT_I32: &str = "arith_select_i32";
+    pub const ARITH_SELECT_U64: &str = "arith_select_u64";
+    pub const ARITH_SELECT_U32: &str = "arith_select_u32";
+    pub const ARITH_SELECT_F64: &str = "arith_select_f64";
+    pub const ARITH_SELECT_F32: &str = "arith_select_f32";
 }
 
 /// Kernel function names in the join module
@@ -636,6 +643,12 @@ impl CudaKernelProvider {
                     arith_kernels::ARITH_FILL_CONST_F64,
                     arith_kernels::ARITH_FILL_CONST_F32,
                     arith_kernels::ARITH_FILL_CONST_U8,
+                    arith_kernels::ARITH_SELECT_I64,
+                    arith_kernels::ARITH_SELECT_I32,
+                    arith_kernels::ARITH_SELECT_U64,
+                    arith_kernels::ARITH_SELECT_U32,
+                    arith_kernels::ARITH_SELECT_F64,
+                    arith_kernels::ARITH_SELECT_F32,
                 ],
             )
             .map_err(|e| XlogError::Kernel(format!("Failed to load arith PTX: {}", e)))?;
@@ -8712,6 +8725,126 @@ impl CudaKernelProvider {
             base.num_rows(),
             schema,
         ))
+    }
+
+    /// Conditional select between two single-column buffers based on a boolean mask.
+    ///
+    /// For each row: out[i] = mask[i] ? then_vals[i] : else_vals[i]
+    ///
+    /// # Arguments
+    /// * `mask` - Boolean mask buffer (single column, type Bool/u8)
+    /// * `then_vals` - Values to select when mask is true
+    /// * `else_vals` - Values to select when mask is false
+    ///
+    /// # Returns
+    /// A new CudaBuffer with values selected based on the mask
+    ///
+    /// # Errors
+    /// Returns `XlogError::Kernel` if:
+    /// - Row counts don't match
+    /// - Buffers are not single-column
+    /// - Types of then/else values don't match
+    pub fn select_columns(
+        &self,
+        mask: &CudaBuffer,
+        then_vals: &CudaBuffer,
+        else_vals: &CudaBuffer,
+    ) -> Result<CudaBuffer> {
+        if mask.num_rows() != then_vals.num_rows() || mask.num_rows() != else_vals.num_rows() {
+            return Err(XlogError::Kernel("Row count mismatch in select".into()));
+        }
+        if mask.arity() != 1 || then_vals.arity() != 1 || else_vals.arity() != 1 {
+            return Err(XlogError::Kernel(
+                "Select requires single-column buffers".into(),
+            ));
+        }
+
+        let then_type = then_vals.schema().column_type(0);
+        let else_type = else_vals.schema().column_type(0);
+        if then_type != else_type {
+            return Err(XlogError::Kernel(format!(
+                "Type mismatch in select: then={:?}, else={:?}",
+                then_type, else_type
+            )));
+        }
+
+        if mask.num_rows() == 0 {
+            let result_type = then_type.unwrap_or(ScalarType::I64);
+            let schema = Schema::new(vec![("result".to_string(), result_type)]);
+            return self.create_empty_buffer(schema);
+        }
+
+        let n: u32 = mask.num_rows().try_into().map_err(|_| {
+            XlogError::Kernel(format!(
+                "select_columns: row count {} exceeds u32::MAX",
+                mask.num_rows()
+            ))
+        })?;
+
+        let mask_col = mask
+            .column(0)
+            .ok_or_else(|| XlogError::Kernel("Missing mask column".into()))?;
+        let then_col = then_vals
+            .column(0)
+            .ok_or_else(|| XlogError::Kernel("Missing then column".into()))?;
+        let else_col = else_vals
+            .column(0)
+            .ok_or_else(|| XlogError::Kernel("Missing else column".into()))?;
+
+        let result_type = then_type.unwrap_or(ScalarType::I64);
+        let elem_size = result_type.size_bytes();
+        let expected_bytes = (n as usize)
+            .checked_mul(elem_size)
+            .ok_or_else(|| XlogError::Kernel("select_columns size overflow".into()))?;
+
+        let mut out = self.memory.alloc::<u8>(expected_bytes)?;
+
+        let kernel_name = match result_type {
+            ScalarType::I64 => arith_kernels::ARITH_SELECT_I64,
+            ScalarType::I32 => arith_kernels::ARITH_SELECT_I32,
+            ScalarType::U64 => arith_kernels::ARITH_SELECT_U64,
+            ScalarType::U32 | ScalarType::Symbol => arith_kernels::ARITH_SELECT_U32,
+            ScalarType::F64 => arith_kernels::ARITH_SELECT_F64,
+            ScalarType::F32 => arith_kernels::ARITH_SELECT_F32,
+            ScalarType::Bool => {
+                // Bool is stored as u8, treat as u8 select (use fill + mask trick)
+                // For simplicity, cast to u32 and back
+                return self.select_columns_bool(mask, then_vals, else_vals);
+            }
+        };
+
+        let func = self
+            .device
+            .inner()
+            .get_func(ARITH_MODULE, kernel_name)
+            .ok_or_else(|| XlogError::Kernel(format!("{} not found", kernel_name)))?;
+        let config = LaunchConfig::for_num_elems(n);
+
+        unsafe { func.clone().launch(config, (mask_col, then_col, else_col, n, &mut out)) }
+            .map_err(|e| XlogError::Kernel(format!("select kernel failed: {}", e)))?;
+
+        self.device.synchronize()?;
+
+        let schema = Schema::new(vec![("result".to_string(), result_type)]);
+        Ok(CudaBuffer::from_columns(
+            vec![out.into()],
+            mask.num_rows(),
+            schema,
+        ))
+    }
+
+    /// Helper for select_columns when result type is Bool
+    fn select_columns_bool(
+        &self,
+        mask: &CudaBuffer,
+        then_vals: &CudaBuffer,
+        else_vals: &CudaBuffer,
+    ) -> Result<CudaBuffer> {
+        // Cast bool columns to u32, select, then cast back
+        let then_u32 = self.cast_column(then_vals, ScalarType::U32)?;
+        let else_u32 = self.cast_column(else_vals, ScalarType::U32)?;
+        let result_u32 = self.select_columns(mask, &then_u32, &else_u32)?;
+        self.cast_column(&result_u32, ScalarType::Bool)
     }
 
     /// Cast a single-column buffer to a different type
