@@ -5787,8 +5787,9 @@ impl CudaKernelProvider {
             .filter_map(|&i| input.columns.get(i).cloned())
             .collect();
 
+        // Count and Sum use u64 to match predicate declarations and prevent overflow
         let agg_type = match agg {
-            AggOp::Count => ScalarType::U32,
+            AggOp::Count => ScalarType::U64,
             AggOp::Sum => ScalarType::U64,
             AggOp::Min | AggOp::Max => ScalarType::U32,
             AggOp::LogSumExp => ScalarType::F64,
@@ -9849,10 +9850,10 @@ mod tests {
             ("value".to_string(), ScalarType::U32),
         ]);
 
-        // Count result schema
+        // Count result schema (u64 to match predicate declarations)
         let count_schema = provider.groupby_result_schema(&input, &[0], AggOp::Count);
         assert_eq!(count_schema.arity(), 2);
-        assert_eq!(count_schema.column_type(1), Some(ScalarType::U32));
+        assert_eq!(count_schema.column_type(1), Some(ScalarType::U64));
 
         // Sum result schema
         let sum_schema = provider.groupby_result_schema(&input, &[0], AggOp::Sum);
