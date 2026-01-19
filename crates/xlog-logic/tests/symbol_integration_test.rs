@@ -1,5 +1,6 @@
 //! Integration test for reversible symbols
 
+use serial_test::serial;
 use xlog_core::symbol;
 use xlog_logic::parse_program;
 
@@ -8,6 +9,7 @@ fn setup() {
 }
 
 #[test]
+#[serial]
 fn test_symbol_roundtrip_through_parser() {
     setup();
 
@@ -42,6 +44,7 @@ fn test_symbol_roundtrip_through_parser() {
 }
 
 #[test]
+#[serial]
 fn test_symbol_deduplication() {
     setup();
 

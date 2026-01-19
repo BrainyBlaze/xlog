@@ -1,6 +1,6 @@
 //! Inline expansion of user-defined functions.
 
-use crate::ast::{ArithExpr, FuncBody};
+use crate::ast::{ArithExpr, Atom, BodyLiteral, Comparison, FuncBody, FuncDef, IsExpr, Term};
 use crate::function::{FunctionError, FunctionRegistry};
 use std::collections::HashMap;
 
@@ -80,10 +80,11 @@ impl<'a> ExpansionContext<'a> {
                     else_expr: Box::new(else_expr),
                 })
             }
-            FuncBody::Predicate { result, body: _ } => {
-                // Predicate bodies are expanded differently - they become joins
-                // For now, return a placeholder that signals predicate expansion needed
-                // The result variable after substitution
+            FuncBody::Predicate { result, .. } => {
+                // Predicate bodies are expanded via expand_predicate_func at the rule level.
+                // When expand_body is called for a predicate body (shouldn't happen directly),
+                // return the result variable after substitution as an ArithExpr.
+                // The actual expansion to join literals happens via expand_predicate_func.
                 let result_var = subst
                     .get(result)
                     .cloned()
@@ -188,6 +189,194 @@ impl<'a> ExpansionContext<'a> {
                 })
             }
         }
+    }
+
+    /// Expand a predicate-based function call to join literals.
+    ///
+    /// Predicate functions like `func get_parent(X) = P :- parent(X, P).`
+    /// expand to body literals that get added to the calling rule.
+    ///
+    /// Returns the expanded body literals and the result variable name.
+    pub fn expand_predicate_func(
+        &self,
+        func: &FuncDef,
+        args: &[ArithExpr],
+    ) -> Result<(Vec<BodyLiteral>, String), FunctionError> {
+        match &func.body {
+            FuncBody::Predicate { result, body } => {
+                // Build substitution map from params to args
+                let mut subst: HashMap<String, ArithExpr> = HashMap::new();
+                for (param, arg) in func.params.iter().zip(args.iter()) {
+                    subst.insert(param.name.clone(), arg.clone());
+                }
+
+                // Substitute in body literals
+                let expanded_body: Vec<BodyLiteral> = body
+                    .iter()
+                    .map(|lit| self.substitute_literal(lit, &subst))
+                    .collect();
+
+                // The result variable becomes the output (substitute if mapped)
+                let result_var = self.substitute_var(result, &subst);
+
+                Ok((expanded_body, result_var))
+            }
+            _ => Err(FunctionError::UndefinedFunction {
+                name: func.name.clone(),
+            }),
+        }
+    }
+
+    /// Substitute variables in a body literal using the given substitution map.
+    fn substitute_literal(
+        &self,
+        lit: &BodyLiteral,
+        subst: &HashMap<String, ArithExpr>,
+    ) -> BodyLiteral {
+        match lit {
+            BodyLiteral::Positive(atom) => {
+                BodyLiteral::Positive(self.substitute_atom(atom, subst))
+            }
+            BodyLiteral::Negated(atom) => {
+                BodyLiteral::Negated(self.substitute_atom(atom, subst))
+            }
+            BodyLiteral::Comparison(cmp) => {
+                BodyLiteral::Comparison(Comparison {
+                    left: self.substitute_term(&cmp.left, subst),
+                    op: cmp.op,
+                    right: self.substitute_term(&cmp.right, subst),
+                })
+            }
+            BodyLiteral::IsExpr(is_expr) => {
+                // Substitute in both the target variable and the expression
+                let target = self.substitute_var(&is_expr.target, subst);
+                // For ArithExpr substitution, we need to substitute variables
+                let expr = self.substitute_arith_expr(&is_expr.expr, subst);
+                BodyLiteral::IsExpr(IsExpr { target, expr })
+            }
+        }
+    }
+
+    /// Substitute variables in an atom.
+    fn substitute_atom(&self, atom: &Atom, subst: &HashMap<String, ArithExpr>) -> Atom {
+        Atom {
+            predicate: atom.predicate.clone(),
+            terms: atom
+                .terms
+                .iter()
+                .map(|t| self.substitute_term(t, subst))
+                .collect(),
+        }
+    }
+
+    /// Substitute a variable in a term.
+    fn substitute_term(&self, term: &Term, subst: &HashMap<String, ArithExpr>) -> Term {
+        match term {
+            Term::Variable(name) => {
+                if let Some(replacement) = subst.get(name) {
+                    match replacement {
+                        ArithExpr::Variable(new_name) => Term::Variable(new_name.clone()),
+                        ArithExpr::Integer(n) => Term::Integer(*n),
+                        ArithExpr::Float(f) => Term::Float(*f),
+                        // For complex expressions, we can't directly substitute into a Term,
+                        // so we keep the original variable (this is a limitation)
+                        _ => term.clone(),
+                    }
+                } else {
+                    term.clone()
+                }
+            }
+            _ => term.clone(),
+        }
+    }
+
+    /// Substitute variables in an arithmetic expression.
+    fn substitute_arith_expr(
+        &self,
+        expr: &ArithExpr,
+        subst: &HashMap<String, ArithExpr>,
+    ) -> ArithExpr {
+        match expr {
+            ArithExpr::Variable(name) => {
+                subst.get(name).cloned().unwrap_or_else(|| expr.clone())
+            }
+            ArithExpr::Integer(_) | ArithExpr::Float(_) => expr.clone(),
+            ArithExpr::Add(l, r) => ArithExpr::Add(
+                Box::new(self.substitute_arith_expr(l, subst)),
+                Box::new(self.substitute_arith_expr(r, subst)),
+            ),
+            ArithExpr::Sub(l, r) => ArithExpr::Sub(
+                Box::new(self.substitute_arith_expr(l, subst)),
+                Box::new(self.substitute_arith_expr(r, subst)),
+            ),
+            ArithExpr::Mul(l, r) => ArithExpr::Mul(
+                Box::new(self.substitute_arith_expr(l, subst)),
+                Box::new(self.substitute_arith_expr(r, subst)),
+            ),
+            ArithExpr::Div(l, r) => ArithExpr::Div(
+                Box::new(self.substitute_arith_expr(l, subst)),
+                Box::new(self.substitute_arith_expr(r, subst)),
+            ),
+            ArithExpr::Mod(l, r) => ArithExpr::Mod(
+                Box::new(self.substitute_arith_expr(l, subst)),
+                Box::new(self.substitute_arith_expr(r, subst)),
+            ),
+            ArithExpr::Abs(e) => {
+                ArithExpr::Abs(Box::new(self.substitute_arith_expr(e, subst)))
+            }
+            ArithExpr::Min(l, r) => ArithExpr::Min(
+                Box::new(self.substitute_arith_expr(l, subst)),
+                Box::new(self.substitute_arith_expr(r, subst)),
+            ),
+            ArithExpr::Max(l, r) => ArithExpr::Max(
+                Box::new(self.substitute_arith_expr(l, subst)),
+                Box::new(self.substitute_arith_expr(r, subst)),
+            ),
+            ArithExpr::Pow(l, r) => ArithExpr::Pow(
+                Box::new(self.substitute_arith_expr(l, subst)),
+                Box::new(self.substitute_arith_expr(r, subst)),
+            ),
+            ArithExpr::Cast(e, t) => {
+                ArithExpr::Cast(Box::new(self.substitute_arith_expr(e, subst)), *t)
+            }
+            ArithExpr::FuncCall { name, args } => ArithExpr::FuncCall {
+                name: name.clone(),
+                args: args
+                    .iter()
+                    .map(|a| self.substitute_arith_expr(a, subst))
+                    .collect(),
+            },
+            ArithExpr::Conditional {
+                cond_left,
+                cond_op,
+                cond_right,
+                then_expr,
+                else_expr,
+            } => ArithExpr::Conditional {
+                cond_left: Box::new(self.substitute_arith_expr(cond_left, subst)),
+                cond_op: *cond_op,
+                cond_right: Box::new(self.substitute_arith_expr(cond_right, subst)),
+                then_expr: Box::new(self.substitute_arith_expr(then_expr, subst)),
+                else_expr: Box::new(self.substitute_arith_expr(else_expr, subst)),
+            },
+        }
+    }
+
+    /// Substitute a variable name using the substitution map.
+    fn substitute_var(&self, var: &str, subst: &HashMap<String, ArithExpr>) -> String {
+        if let Some(ArithExpr::Variable(new_name)) = subst.get(var) {
+            new_name.clone()
+        } else {
+            var.to_string()
+        }
+    }
+
+    /// Check if a function has a predicate body.
+    pub fn is_predicate_func(&self, name: &str) -> bool {
+        self.registry
+            .get(name)
+            .map(|f| matches!(f.body, FuncBody::Predicate { .. }))
+            .unwrap_or(false)
     }
 }
 
@@ -439,5 +628,216 @@ mod tests {
             }
             _ => panic!("Expected Add expression"),
         }
+    }
+
+    #[test]
+    fn test_predicate_func_expansion() {
+        // func get_parent(X) = P :- parent(X, P).
+        // get_parent(alice) should expand to: parent(alice, P)
+
+        let func = FuncDef {
+            name: "get_parent".to_string(),
+            params: vec![FuncParam {
+                name: "X".to_string(),
+                typ: None,
+            }],
+            return_type: None,
+            body: FuncBody::Predicate {
+                result: "P".to_string(),
+                body: vec![BodyLiteral::Positive(Atom {
+                    predicate: "parent".to_string(),
+                    terms: vec![
+                        Term::Variable("X".to_string()),
+                        Term::Variable("P".to_string()),
+                    ],
+                })],
+            },
+            is_private: false,
+        };
+
+        let mut reg = FunctionRegistry::new();
+        reg.register(func).unwrap();
+
+        let ctx = ExpansionContext::new(&reg, 100);
+
+        // Call get_parent with "alice"
+        let args = vec![ArithExpr::Variable("alice".to_string())];
+        let func_def = reg.get("get_parent").unwrap();
+        let (body, result) = ctx.expand_predicate_func(func_def, &args).unwrap();
+
+        assert_eq!(result, "P");
+        assert_eq!(body.len(), 1);
+
+        // Check the expanded literal
+        if let BodyLiteral::Positive(atom) = &body[0] {
+            assert_eq!(atom.predicate, "parent");
+            assert!(matches!(&atom.terms[0], Term::Variable(v) if v == "alice"));
+            assert!(matches!(&atom.terms[1], Term::Variable(v) if v == "P"));
+        } else {
+            panic!("Expected Positive literal");
+        }
+    }
+
+    #[test]
+    fn test_predicate_func_with_constant_arg() {
+        // func get_child(P) = C :- parent(C, P).
+        // get_child(bob) should expand to: parent(C, bob)
+
+        let func = FuncDef {
+            name: "get_child".to_string(),
+            params: vec![FuncParam {
+                name: "P".to_string(),
+                typ: None,
+            }],
+            return_type: None,
+            body: FuncBody::Predicate {
+                result: "C".to_string(),
+                body: vec![BodyLiteral::Positive(Atom {
+                    predicate: "parent".to_string(),
+                    terms: vec![
+                        Term::Variable("C".to_string()),
+                        Term::Variable("P".to_string()),
+                    ],
+                })],
+            },
+            is_private: false,
+        };
+
+        let mut reg = FunctionRegistry::new();
+        reg.register(func).unwrap();
+
+        let ctx = ExpansionContext::new(&reg, 100);
+
+        // Call get_child with integer constant
+        let args = vec![ArithExpr::Integer(42)];
+        let func_def = reg.get("get_child").unwrap();
+        let (body, result) = ctx.expand_predicate_func(func_def, &args).unwrap();
+
+        assert_eq!(result, "C");
+        assert_eq!(body.len(), 1);
+
+        // Check the expanded literal has integer substituted
+        if let BodyLiteral::Positive(atom) = &body[0] {
+            assert_eq!(atom.predicate, "parent");
+            assert!(matches!(&atom.terms[0], Term::Variable(v) if v == "C"));
+            assert!(matches!(&atom.terms[1], Term::Integer(42)));
+        } else {
+            panic!("Expected Positive literal");
+        }
+    }
+
+    #[test]
+    fn test_predicate_func_multiple_body_literals() {
+        // func get_grandparent(X) = G :- parent(X, P), parent(P, G).
+        // get_grandparent(alice) should expand to: parent(alice, P), parent(P, G)
+
+        let func = FuncDef {
+            name: "get_grandparent".to_string(),
+            params: vec![FuncParam {
+                name: "X".to_string(),
+                typ: None,
+            }],
+            return_type: None,
+            body: FuncBody::Predicate {
+                result: "G".to_string(),
+                body: vec![
+                    BodyLiteral::Positive(Atom {
+                        predicate: "parent".to_string(),
+                        terms: vec![
+                            Term::Variable("X".to_string()),
+                            Term::Variable("P".to_string()),
+                        ],
+                    }),
+                    BodyLiteral::Positive(Atom {
+                        predicate: "parent".to_string(),
+                        terms: vec![
+                            Term::Variable("P".to_string()),
+                            Term::Variable("G".to_string()),
+                        ],
+                    }),
+                ],
+            },
+            is_private: false,
+        };
+
+        let mut reg = FunctionRegistry::new();
+        reg.register(func).unwrap();
+
+        let ctx = ExpansionContext::new(&reg, 100);
+
+        let args = vec![ArithExpr::Variable("alice".to_string())];
+        let func_def = reg.get("get_grandparent").unwrap();
+        let (body, result) = ctx.expand_predicate_func(func_def, &args).unwrap();
+
+        assert_eq!(result, "G");
+        assert_eq!(body.len(), 2);
+
+        // First literal: parent(alice, P)
+        if let BodyLiteral::Positive(atom) = &body[0] {
+            assert_eq!(atom.predicate, "parent");
+            assert!(matches!(&atom.terms[0], Term::Variable(v) if v == "alice"));
+            assert!(matches!(&atom.terms[1], Term::Variable(v) if v == "P"));
+        } else {
+            panic!("Expected Positive literal for first body");
+        }
+
+        // Second literal: parent(P, G)
+        if let BodyLiteral::Positive(atom) = &body[1] {
+            assert_eq!(atom.predicate, "parent");
+            assert!(matches!(&atom.terms[0], Term::Variable(v) if v == "P"));
+            assert!(matches!(&atom.terms[1], Term::Variable(v) if v == "G"));
+        } else {
+            panic!("Expected Positive literal for second body");
+        }
+    }
+
+    #[test]
+    fn test_is_predicate_func() {
+        let mut reg = FunctionRegistry::new();
+
+        // Arithmetic function
+        let arith_func = FuncDef {
+            name: "double".to_string(),
+            params: vec![FuncParam {
+                name: "X".to_string(),
+                typ: None,
+            }],
+            return_type: None,
+            body: FuncBody::Arithmetic(ArithExpr::Add(
+                Box::new(ArithExpr::Variable("X".to_string())),
+                Box::new(ArithExpr::Variable("X".to_string())),
+            )),
+            is_private: false,
+        };
+
+        // Predicate function
+        let pred_func = FuncDef {
+            name: "get_parent".to_string(),
+            params: vec![FuncParam {
+                name: "X".to_string(),
+                typ: None,
+            }],
+            return_type: None,
+            body: FuncBody::Predicate {
+                result: "P".to_string(),
+                body: vec![BodyLiteral::Positive(Atom {
+                    predicate: "parent".to_string(),
+                    terms: vec![
+                        Term::Variable("X".to_string()),
+                        Term::Variable("P".to_string()),
+                    ],
+                })],
+            },
+            is_private: false,
+        };
+
+        reg.register(arith_func).unwrap();
+        reg.register(pred_func).unwrap();
+
+        let ctx = ExpansionContext::new(&reg, 100);
+
+        assert!(!ctx.is_predicate_func("double"));
+        assert!(ctx.is_predicate_func("get_parent"));
+        assert!(!ctx.is_predicate_func("nonexistent"));
     }
 }
