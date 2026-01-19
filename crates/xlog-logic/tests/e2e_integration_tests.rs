@@ -425,7 +425,15 @@ fn test_aggregates() {
         .store()
         .get("out_degree")
         .expect("out_degree relation not found");
-    let pairs = read_buffer_pairs(&provider, out_degree);
+
+    // Read columns with correct types (count is now u64)
+    let nodes = read_buffer_u32(&provider, out_degree, 0);
+    let counts = provider
+        .download_column_u64(out_degree, 1)
+        .expect("download counts");
+
+    // Build pairs from columns
+    let pairs: Vec<(u32, u64)> = nodes.into_iter().zip(counts).collect();
 
     // out_degree(1) = 2, out_degree(2) = 1
     let degree_of_1 = pairs
@@ -434,7 +442,7 @@ fn test_aggregates() {
         .map(|(_, count)| *count);
     assert_eq!(
         degree_of_1,
-        Some(2),
+        Some(2u64),
         "out_degree(1) should be 2, got {:?}. Raw: {:?}",
         degree_of_1,
         pairs

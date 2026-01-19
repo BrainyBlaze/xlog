@@ -486,7 +486,7 @@ impl Program {
             .map(|p| p.name.as_str())
             .collect();
 
-        let private_funcs: HashSet<&str> = other
+        let _private_funcs: HashSet<&str> = other
             .functions
             .iter()
             .filter(|f| f.is_private)

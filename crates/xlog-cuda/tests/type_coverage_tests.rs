@@ -414,10 +414,11 @@ fn test_groupby_count_u32() {
     assert_eq!(result.num_rows(), 3);
 
     let result_keys = provider.download_column_u32(&result, 0).unwrap();
-    let result_counts = provider.download_column_u32(&result, 1).unwrap();
+    // Count results are u64 (to match predicate declaration types)
+    let result_counts = provider.download_column_u64(&result, 1).unwrap();
 
     assert_eq!(result_keys, vec![1, 2, 3]);
-    assert_eq!(result_counts, vec![2, 3, 1]);
+    assert_eq!(result_counts, vec![2u64, 3u64, 1u64]);
 }
 
 /// Test groupby min/max with u32 values
@@ -652,13 +653,14 @@ fn test_buffer_operations_with_groupby() {
 
     // Verify results
     let result_keys = provider.download_column_u32(&grouped, 0).unwrap();
-    let result_counts = provider.download_column_u32(&grouped, 1).unwrap();
+    // Count results are u64 (to match predicate declaration types)
+    let result_counts = provider.download_column_u64(&grouped, 1).unwrap();
     let result_sums = provider.download_column_u64(&grouped, 2).unwrap();
     let result_mins = provider.download_column_u32(&grouped, 3).unwrap();
     let result_maxs = provider.download_column_u32(&grouped, 4).unwrap();
 
     assert_eq!(result_keys, vec![1, 2, 3]);
-    assert_eq!(result_counts, vec![2, 3, 1]);
+    assert_eq!(result_counts, vec![2u64, 3u64, 1u64]);
     assert_eq!(result_sums, vec![30u64, 45u64, 100u64]);
     assert_eq!(result_mins, vec![10, 5, 100]);
     assert_eq!(result_maxs, vec![20, 25, 100]);

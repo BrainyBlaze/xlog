@@ -183,8 +183,8 @@ $L__BB2_3:
 )
 {
 	.reg .pred 	%p<2>;
-	.reg .b32 	%r<8>;
-	.reg .b64 	%rd<9>;
+	.reg .b32 	%r<7>;
+	.reg .b64 	%rd<10>;
 
 
 	ld.param.u64 	%rd1, [groupby_count_param_1];
@@ -202,9 +202,9 @@ $L__BB2_3:
 	add.s64 	%rd5, %rd3, %rd4;
 	ld.global.nc.u32 	%r6, [%rd5];
 	cvta.to.global.u64 	%rd6, %rd2;
-	mul.wide.u32 	%rd7, %r6, 4;
+	mul.wide.u32 	%rd7, %r6, 8;
 	add.s64 	%rd8, %rd6, %rd7;
-	atom.global.add.u32 	%r7, [%rd8], 1;
+	atom.global.add.u64 	%rd9, [%rd8], 1;
 
 $L__BB3_2:
 	ret;

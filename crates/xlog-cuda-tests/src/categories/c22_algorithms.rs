@@ -1246,7 +1246,8 @@ fn test_groupby_single_group(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let counts = match ctx.provider.download_column_u32(&count_result, 1) {
+    // Count results are u64 (to match predicate declaration types)
+    let counts = match ctx.provider.download_column_u64(&count_result, 1) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -1265,7 +1266,7 @@ fn test_groupby_single_group(ctx: &TestContext) -> TestResult {
         );
     }
 
-    if counts[0] != SIZE as u32 {
+    if counts[0] != SIZE as u64 {
         return TestResult::error(
             "test_groupby_single_group",
             start.elapsed(),
@@ -1441,7 +1442,8 @@ fn test_groupby_all_unique_keys(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let counts = match ctx.provider.download_column_u32(&count_result, 1) {
+    // Count results are u64 (to match predicate declaration types)
+    let counts = match ctx.provider.download_column_u64(&count_result, 1) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -1454,7 +1456,7 @@ fn test_groupby_all_unique_keys(ctx: &TestContext) -> TestResult {
 
     // Verify all counts are 1
     for (i, &count) in counts.iter().enumerate() {
-        if count != 1 {
+        if count != 1u64 {
             return TestResult::error(
                 "test_groupby_all_unique_keys",
                 start.elapsed(),

@@ -63,18 +63,18 @@ extern "C" __global__ void group_start_indices(
     }
 }
 
-// Count aggregation per group
+// Count aggregation per group (outputs u64 to match predicate declarations)
 extern "C" __global__ void groupby_count(
     const uint8_t* __restrict__ is_boundary,
     const uint32_t* __restrict__ group_ids,
     uint32_t num_rows,
-    uint32_t* __restrict__ counts
+    unsigned long long* __restrict__ counts
 ) {
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= num_rows) return;
 
     uint32_t group = group_ids[tid];
-    atomicAdd(&counts[group], 1);
+    atomicAdd(&counts[group], 1ULL);
 }
 
 // Sum aggregation per group

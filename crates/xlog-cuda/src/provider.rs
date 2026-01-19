@@ -1874,11 +1874,11 @@ impl CudaKernelProvider {
         // Return output as bytes via host for consistent handling
         let (output_bytes, _result_type): (Vec<u8>, ScalarType) = match agg {
             AggOp::Count => {
-                let mut output = self.memory.alloc::<u32>(num_groups as usize)?;
+                let mut output = self.memory.alloc::<u64>(num_groups as usize)?;
                 // Initialize to 0
                 self.device
                     .inner()
-                    .htod_sync_copy_into(&vec![0u32; num_groups as usize], &mut output)
+                    .htod_sync_copy_into(&vec![0u64; num_groups as usize], &mut output)
                     .map_err(|e| {
                         XlogError::Kernel(format!("Failed to init count output: {}", e))
                     })?;
@@ -1902,7 +1902,7 @@ impl CudaKernelProvider {
                 self.device.synchronize()?;
 
                 // Read back as bytes
-                let mut host_output = vec![0u32; num_groups as usize];
+                let mut host_output = vec![0u64; num_groups as usize];
                 self.device
                     .inner()
                     .dtoh_sync_copy_into(&output, &mut host_output)
@@ -1910,7 +1910,7 @@ impl CudaKernelProvider {
                         XlogError::Kernel(format!("Failed to read count output: {}", e))
                     })?;
                 let bytes: Vec<u8> = host_output.iter().flat_map(|v| v.to_le_bytes()).collect();
-                (bytes, ScalarType::U32)
+                (bytes, ScalarType::U64)
             }
             AggOp::Sum => {
                 let mut output = self.memory.alloc::<u64>(num_groups as usize)?;
@@ -2442,7 +2442,7 @@ impl CudaKernelProvider {
             match agg_op {
                 AggOp::Count => {
                     let output_bytes = num_groups_usize
-                        .checked_mul(std::mem::size_of::<u32>())
+                        .checked_mul(std::mem::size_of::<u64>())
                         .ok_or_else(|| XlogError::Kernel("Count output size overflow".to_string()))?;
                     let mut output = self.memory.alloc::<u8>(output_bytes)?;
                     if num_groups_u32 > 0 {
@@ -2776,9 +2776,10 @@ impl CudaKernelProvider {
                 AggOp::LogSumExp => format!("logsumexp_{}", i),
             };
             // Return correct types for each aggregation
+            // Count and Sum use u64 to match predicate declarations and prevent overflow
             let agg_type = match agg_op {
-                AggOp::Count => ScalarType::U32,
-                AggOp::Sum => ScalarType::U64, // Sum uses u64 to prevent overflow
+                AggOp::Count => ScalarType::U64,
+                AggOp::Sum => ScalarType::U64,
                 AggOp::Min | AggOp::Max => ScalarType::U32,
                 AggOp::LogSumExp => ScalarType::F64,
             };

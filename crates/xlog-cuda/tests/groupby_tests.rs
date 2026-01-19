@@ -44,10 +44,11 @@ fn test_groupby_count() {
 
     // Download and verify results
     let result_keys = provider.download_column_u32(&result, 0).unwrap();
-    let result_counts = provider.download_column_u32(&result, 1).unwrap();
+    // Count results are u64 to match predicate declarations
+    let result_counts = provider.download_column_u64(&result, 1).unwrap();
 
     assert_eq!(result_keys, vec![1, 2]);
-    assert_eq!(result_counts, vec![2, 3]);
+    assert_eq!(result_counts, vec![2u64, 3u64]);
 }
 
 #[test]
@@ -172,15 +173,15 @@ fn test_groupby_multi_agg() {
     assert_eq!(result.arity(), 5);
 
     let result_keys = provider.download_column_u32(&result, 0).unwrap();
-    // Sum results are u64 (to prevent overflow)
+    // Sum and Count results are u64
     let result_sums = provider.download_column_u64(&result, 1).unwrap();
-    let result_counts = provider.download_column_u32(&result, 2).unwrap();
+    let result_counts = provider.download_column_u64(&result, 2).unwrap();
     let result_mins = provider.download_column_u32(&result, 3).unwrap();
     let result_maxs = provider.download_column_u32(&result, 4).unwrap();
 
     assert_eq!(result_keys, vec![1, 2]);
     assert_eq!(result_sums, vec![30u64, 45u64]);
-    assert_eq!(result_counts, vec![2, 3]);
+    assert_eq!(result_counts, vec![2u64, 3u64]);
     assert_eq!(result_mins, vec![10, 5]);
     assert_eq!(result_maxs, vec![20, 25]);
 }
@@ -232,13 +233,13 @@ fn test_groupby_single_group() {
     assert_eq!(result.num_rows(), 1);
 
     let result_keys = provider.download_column_u32(&result, 0).unwrap();
-    // Sum results are u64 (to prevent overflow)
+    // Sum and Count results are u64
     let result_sums = provider.download_column_u64(&result, 1).unwrap();
-    let result_counts = provider.download_column_u32(&result, 2).unwrap();
+    let result_counts = provider.download_column_u64(&result, 2).unwrap();
 
     assert_eq!(result_keys, vec![5]);
     assert_eq!(result_sums, vec![100u64]); // 10+20+30+40
-    assert_eq!(result_counts, vec![4]);
+    assert_eq!(result_counts, vec![4u64]);
 }
 
 #[test]
@@ -353,14 +354,15 @@ fn test_groupby_many_groups() {
     let result_keys = provider.download_column_u32(&result, 0).unwrap();
     // Sum results are u64 (to prevent overflow)
     let result_sums = provider.download_column_u64(&result, 1).unwrap();
-    let result_counts = provider.download_column_u32(&result, 2).unwrap();
+    // Count results are u64 (to match predicate declaration types)
+    let result_counts = provider.download_column_u64(&result, 2).unwrap();
 
     // Keys should be sorted: 1, 2, 3, 4, 5
     assert_eq!(result_keys, vec![1, 2, 3, 4, 5]);
     // Each group has sum = its own value
     assert_eq!(result_sums, vec![10u64, 20u64, 30u64, 40u64, 50u64]);
     // Each group has count = 1
-    assert_eq!(result_counts, vec![1, 1, 1, 1, 1]);
+    assert_eq!(result_counts, vec![1u64, 1u64, 1u64, 1u64, 1u64]);
 }
 
 // ============== LogSumExp Edge Case Tests ==============

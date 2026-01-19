@@ -2606,4 +2606,257 @@ mod tests {
             panic!("Expected top-level Project node");
         }
     }
+
+    #[test]
+    fn test_u64_comparison_type_from_pred_decl() {
+        use crate::ast::PredDecl;
+
+        // Test that u64 type from pred decl is preserved in comparison lowering
+        let mut program = Program::new();
+
+        // pred count_data(symbol, u64).
+        program.predicates.push(PredDecl {
+            name: "count_data".to_string(),
+            types: vec![ScalarType::Symbol, ScalarType::U64],
+            is_private: false,
+        });
+
+        // count_data(alice, 5).
+        program.rules.push(Rule {
+            head: Atom {
+                predicate: "count_data".to_string(),
+                terms: vec![
+                    Term::Symbol(xlog_core::symbol::intern("alice")),
+                    Term::Integer(5),
+                ],
+            },
+            body: vec![],
+        });
+
+        // pred big_count(symbol, u64).
+        program.predicates.push(PredDecl {
+            name: "big_count".to_string(),
+            types: vec![ScalarType::Symbol, ScalarType::U64],
+            is_private: false,
+        });
+
+        // big_count(Name, Count) :- count_data(Name, Count), Count >= 3.
+        program.rules.push(Rule {
+            head: Atom {
+                predicate: "big_count".to_string(),
+                terms: vec![
+                    Term::Variable("Name".to_string()),
+                    Term::Variable("Count".to_string()),
+                ],
+            },
+            body: vec![
+                BodyLiteral::Positive(Atom {
+                    predicate: "count_data".to_string(),
+                    terms: vec![
+                        Term::Variable("Name".to_string()),
+                        Term::Variable("Count".to_string()),
+                    ],
+                }),
+                BodyLiteral::Comparison(Comparison {
+                    left: Term::Variable("Count".to_string()),
+                    op: CompOp::Ge,
+                    right: Term::Integer(3),
+                }),
+            ],
+        });
+
+        let mut lowerer = Lowerer::new();
+        lowerer.infer_schemas(&program);
+
+        // Verify schema has correct types
+        let schema = lowerer.schemas.get("count_data").expect("schema for count_data");
+        assert_eq!(schema.column_type(0), Some(ScalarType::Symbol), "First column should be Symbol");
+        assert_eq!(schema.column_type(1), Some(ScalarType::U64), "Second column should be U64");
+
+        // Now test lowering the rule with comparison
+        lowerer.set_strata(vec![
+            vec!["count_data".to_string()],
+            vec!["big_count".to_string()],
+        ]);
+        lowerer.build_sccs(&program);
+
+        let rule = &program.rules[1]; // big_count rule
+        let result = lowerer.lower_rule(rule);
+        assert!(result.is_ok(), "Lowering should succeed: {:?}", result.err());
+
+        // Check that the filter has the correct constant type
+        fn find_compare_const(node: &RirNode) -> Option<&ConstValue> {
+            match node {
+                RirNode::Filter { predicate, input } => {
+                    if let Expr::Compare { right, .. } = predicate {
+                        if let Expr::Const(val) = right.as_ref() {
+                            return Some(val);
+                        }
+                    }
+                    find_compare_const(input)
+                }
+                RirNode::Project { input, .. } => find_compare_const(input),
+                RirNode::Join { left, right, .. } => {
+                    find_compare_const(left).or_else(|| find_compare_const(right))
+                }
+                _ => None,
+            }
+        }
+
+        let node = result.unwrap();
+        let const_val = find_compare_const(&node);
+        assert!(const_val.is_some(), "Should find a constant in comparison");
+
+        // The constant should be U64(3), not I64(3)
+        match const_val.unwrap() {
+            ConstValue::U64(v) => assert_eq!(*v, 3, "Value should be 3"),
+            other => panic!("Expected U64(3), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_u64_comparison_with_aggregation() {
+        use crate::ast::{AggExpr, PredDecl};
+
+        // Test aggregation + comparison case
+        let mut program = Program::new();
+
+        // pred reports_to(symbol, symbol).
+        program.predicates.push(PredDecl {
+            name: "reports_to".to_string(),
+            types: vec![ScalarType::Symbol, ScalarType::Symbol],
+            is_private: false,
+        });
+
+        // reports_to facts
+        program.rules.push(Rule {
+            head: Atom {
+                predicate: "reports_to".to_string(),
+                terms: vec![
+                    Term::Symbol(xlog_core::symbol::intern("alice")),
+                    Term::Symbol(xlog_core::symbol::intern("bob")),
+                ],
+            },
+            body: vec![],
+        });
+        program.rules.push(Rule {
+            head: Atom {
+                predicate: "reports_to".to_string(),
+                terms: vec![
+                    Term::Symbol(xlog_core::symbol::intern("carol")),
+                    Term::Symbol(xlog_core::symbol::intern("bob")),
+                ],
+            },
+            body: vec![],
+        });
+
+        // pred direct_count(symbol, u64).
+        program.predicates.push(PredDecl {
+            name: "direct_count".to_string(),
+            types: vec![ScalarType::Symbol, ScalarType::U64],
+            is_private: false,
+        });
+
+        // direct_count(Mgr, count(Emp)) :- reports_to(Emp, Mgr).
+        program.rules.push(Rule {
+            head: Atom {
+                predicate: "direct_count".to_string(),
+                terms: vec![
+                    Term::Variable("Mgr".to_string()),
+                    Term::Aggregate(AggExpr {
+                        op: AggOp::Count,
+                        variable: "Emp".to_string(),
+                    }),
+                ],
+            },
+            body: vec![BodyLiteral::Positive(Atom {
+                predicate: "reports_to".to_string(),
+                terms: vec![
+                    Term::Variable("Emp".to_string()),
+                    Term::Variable("Mgr".to_string()),
+                ],
+            })],
+        });
+
+        // pred big_manager(symbol, u64).
+        program.predicates.push(PredDecl {
+            name: "big_manager".to_string(),
+            types: vec![ScalarType::Symbol, ScalarType::U64],
+            is_private: false,
+        });
+
+        // big_manager(Mgr, Count) :- direct_count(Mgr, Count), Count >= 2.
+        program.rules.push(Rule {
+            head: Atom {
+                predicate: "big_manager".to_string(),
+                terms: vec![
+                    Term::Variable("Mgr".to_string()),
+                    Term::Variable("Count".to_string()),
+                ],
+            },
+            body: vec![
+                BodyLiteral::Positive(Atom {
+                    predicate: "direct_count".to_string(),
+                    terms: vec![
+                        Term::Variable("Mgr".to_string()),
+                        Term::Variable("Count".to_string()),
+                    ],
+                }),
+                BodyLiteral::Comparison(Comparison {
+                    left: Term::Variable("Count".to_string()),
+                    op: CompOp::Ge,
+                    right: Term::Integer(2),
+                }),
+            ],
+        });
+
+        let mut lowerer = Lowerer::new();
+        lowerer.infer_schemas(&program);
+
+        // Verify schema has correct types
+        let schema = lowerer.schemas.get("direct_count").expect("schema for direct_count");
+        assert_eq!(schema.column_type(0), Some(ScalarType::Symbol), "First column should be Symbol");
+        assert_eq!(schema.column_type(1), Some(ScalarType::U64), "Second column should be U64");
+
+        lowerer.set_strata(vec![
+            vec!["reports_to".to_string()],
+            vec!["direct_count".to_string()],
+            vec!["big_manager".to_string()],
+        ]);
+        lowerer.build_sccs(&program);
+
+        // Lower the big_manager rule (index 3: after 2 facts + aggregation rule)
+        let big_manager_rule = &program.rules[3];
+        let result = lowerer.lower_rule(big_manager_rule);
+        assert!(result.is_ok(), "Lowering should succeed: {:?}", result.err());
+
+        // Check that the filter has the correct constant type
+        fn find_compare_const(node: &RirNode) -> Option<&ConstValue> {
+            match node {
+                RirNode::Filter { predicate, input } => {
+                    if let Expr::Compare { right, .. } = predicate {
+                        if let Expr::Const(val) = right.as_ref() {
+                            return Some(val);
+                        }
+                    }
+                    find_compare_const(input)
+                }
+                RirNode::Project { input, .. } => find_compare_const(input),
+                RirNode::Join { left, right, .. } => {
+                    find_compare_const(left).or_else(|| find_compare_const(right))
+                }
+                _ => None,
+            }
+        }
+
+        let node = result.unwrap();
+        let const_val = find_compare_const(&node);
+        assert!(const_val.is_some(), "Should find a constant in comparison");
+
+        // The constant should be U64(2), not I64(2)
+        match const_val.unwrap() {
+            ConstValue::U64(v) => assert_eq!(*v, 2, "Value should be 2"),
+            other => panic!("Expected U64(2), got {:?}", other),
+        }
+    }
 }

@@ -1,0 +1,364 @@
+// =============================================================================
+// Knowledge Graph - Complete Self-Contained Example
+// =============================================================================
+// Demonstrates working features:
+//   - symbol type for entity/property identifiers
+//   - Recursive rules for type inheritance and transitive relations
+//   - Aggregations for graph statistics (count, sum)
+//   - Arithmetic expressions for scoring
+//   - Semantic inference rules
+//
+// Domain: Scientific ontology with researchers, publications, and concepts
+// =============================================================================
+
+// --- Core Ontology Predicates ---
+pred entity(symbol, symbol).           // entity_id, entity_type
+pred label(symbol, symbol).            // entity_id, human_readable_name
+pred subclass_of(symbol, symbol).      // child_type, parent_type
+pred property(symbol, symbol, symbol). // subject, predicate, object
+pred literal(symbol, symbol, u32).     // entity_id, property_name, numeric_value
+
+// --- Domain-Specific Predicates ---
+pred researcher(symbol, symbol, symbol).     // id, name, institution
+pred publication(symbol, symbol, u32).       // id, title, year
+pred authored(symbol, symbol).               // researcher_id, publication_id
+pred cites(symbol, symbol).                  // citing_pub, cited_pub
+pred topic(symbol, symbol).                  // publication_id, topic_id
+pred concept(symbol, symbol).                // concept_id, concept_name
+pred related_to(symbol, symbol, u32).        // concept1, concept2, similarity_score
+
+// =============================================================================
+// TYPE HIERARCHY (Ontology Classes)
+// =============================================================================
+
+// Root concepts
+entity(thing, class).
+entity(agent, class).
+entity(creative_work, class).
+entity(event, class).
+entity(abstract_concept, class).
+
+// Agent subtypes
+subclass_of(agent, thing).
+subclass_of(person, agent).
+subclass_of(organization, agent).
+subclass_of(researcher, person).
+subclass_of(institution, organization).
+
+// CreativeWork subtypes
+subclass_of(creative_work, thing).
+subclass_of(publication, creative_work).
+subclass_of(article, publication).
+subclass_of(book, publication).
+subclass_of(thesis, publication).
+subclass_of(conference_paper, article).
+subclass_of(journal_article, article).
+
+// AbstractConcept subtypes
+subclass_of(abstract_concept, thing).
+subclass_of(field_of_study, abstract_concept).
+subclass_of(research_topic, abstract_concept).
+subclass_of(methodology, abstract_concept).
+
+// Labels for types
+label(thing, "Thing").
+label(agent, "Agent").
+label(person, "Person").
+label(researcher, "Researcher").
+label(organization, "Organization").
+label(institution, "Institution").
+label(creative_work, "Creative Work").
+label(publication, "Publication").
+label(article, "Article").
+label(conference_paper, "Conference Paper").
+label(journal_article, "Journal Article").
+
+// =============================================================================
+// RESEARCHERS AND INSTITUTIONS
+// =============================================================================
+
+researcher(r001, "Alice Chen", mit).
+researcher(r002, "Bob Smith", stanford).
+researcher(r003, "Carol Williams", mit).
+researcher(r004, "David Brown", berkeley).
+researcher(r005, "Eva Martinez", stanford).
+researcher(r006, "Frank Lee", cmu).
+researcher(r007, "Grace Kim", mit).
+researcher(r008, "Henry Wilson", berkeley).
+
+entity(mit, institution).
+entity(stanford, institution).
+entity(berkeley, institution).
+entity(cmu, institution).
+
+label(mit, "Massachusetts Institute of Technology").
+label(stanford, "Stanford University").
+label(berkeley, "UC Berkeley").
+label(cmu, "Carnegie Mellon University").
+
+// =============================================================================
+// PUBLICATIONS
+// =============================================================================
+
+publication(p001, "Declarative GPU Computing", 2024).
+publication(p002, "Datalog on Modern Hardware", 2023).
+publication(p003, "Recursive Query Optimization", 2023).
+publication(p004, "Graph Analytics at Scale", 2022).
+publication(p005, "Knowledge Representation Systems", 2024).
+publication(p006, "Semantic Web Technologies", 2021).
+publication(p007, "Machine Learning Integration", 2024).
+publication(p008, "Query Processing Advances", 2022).
+publication(p009, "Parallel Join Algorithms", 2023).
+publication(p010, "Type Systems for Databases", 2024).
+
+entity(p001, conference_paper).
+entity(p002, journal_article).
+entity(p003, conference_paper).
+entity(p004, journal_article).
+entity(p005, conference_paper).
+entity(p006, journal_article).
+entity(p007, conference_paper).
+entity(p008, journal_article).
+entity(p009, conference_paper).
+entity(p010, journal_article).
+
+// Authorship relations
+authored(r001, p001).
+authored(r001, p002).
+authored(r002, p002).
+authored(r002, p003).
+authored(r003, p003).
+authored(r003, p004).
+authored(r004, p004).
+authored(r004, p005).
+authored(r005, p005).
+authored(r005, p006).
+authored(r006, p006).
+authored(r006, p007).
+authored(r007, p007).
+authored(r007, p008).
+authored(r008, p008).
+authored(r008, p009).
+authored(r001, p010).
+authored(r003, p010).
+
+// Citation network
+cites(p001, p002).
+cites(p001, p004).
+cites(p002, p006).
+cites(p003, p002).
+cites(p003, p004).
+cites(p004, p006).
+cites(p005, p006).
+cites(p005, p004).
+cites(p007, p001).
+cites(p007, p005).
+cites(p008, p002).
+cites(p008, p003).
+cites(p009, p003).
+cites(p009, p008).
+cites(p010, p001).
+cites(p010, p002).
+
+// =============================================================================
+// RESEARCH TOPICS AND CONCEPTS
+// =============================================================================
+
+concept(c001, "GPU Computing").
+concept(c002, "Datalog").
+concept(c003, "Query Optimization").
+concept(c004, "Graph Processing").
+concept(c005, "Knowledge Graphs").
+concept(c006, "Semantic Web").
+concept(c007, "Machine Learning").
+concept(c008, "Database Systems").
+
+// Publication topics
+topic(p001, c001).
+topic(p001, c002).
+topic(p002, c002).
+topic(p002, c008).
+topic(p003, c003).
+topic(p003, c002).
+topic(p004, c004).
+topic(p004, c008).
+topic(p005, c005).
+topic(p005, c006).
+topic(p006, c006).
+topic(p006, c005).
+topic(p007, c007).
+topic(p007, c002).
+topic(p008, c003).
+topic(p008, c008).
+topic(p009, c008).
+topic(p009, c003).
+topic(p010, c002).
+topic(p010, c008).
+
+// Concept similarity scores (0-100)
+related_to(c001, c008, 70).
+related_to(c002, c003, 85).
+related_to(c002, c008, 90).
+related_to(c004, c008, 80).
+related_to(c005, c006, 95).
+related_to(c007, c008, 60).
+
+// =============================================================================
+// TYPE INFERENCE (Recursive)
+// =============================================================================
+
+// Transitive closure of subclass hierarchy
+pred is_a(symbol, symbol).
+
+// Base case: direct subclass
+is_a(Child, Parent) :- subclass_of(Child, Parent).
+
+// Recursive case: transitive inheritance
+is_a(Child, Ancestor) :-
+    subclass_of(Child, Parent),
+    is_a(Parent, Ancestor).
+
+// Instance type inference
+pred instance_of(symbol, symbol).
+
+// Direct type
+instance_of(Entity, Type) :- entity(Entity, Type).
+
+// Inferred types via inheritance
+instance_of(Entity, AncestorType) :-
+    entity(Entity, DirectType),
+    is_a(DirectType, AncestorType).
+
+// =============================================================================
+// CITATION ANALYSIS (Recursive)
+// =============================================================================
+
+// Transitive citation reachability
+pred cites_transitively(symbol, symbol, u32).
+
+// Base case: direct citation (depth 1)
+cites_transitively(A, B, 1) :- cites(A, B).
+
+// Recursive case: citation chain
+cites_transitively(A, C, Depth) :-
+    cites(A, B),
+    cites_transitively(B, C, PrevDepth),
+    Depth is PrevDepth + cast(1, u32).
+
+// Direct citation count per publication
+pred citation_count(symbol, u64).
+citation_count(Pub, count(Citing)) :- cites(Citing, Pub).
+
+// Highly cited publications (5+ citations)
+pred highly_cited(symbol, symbol, u64).
+highly_cited(PubId, Title, Citations) :-
+    publication(PubId, Title, _),
+    citation_count(PubId, Citations),
+    Citations >= 5.
+
+// =============================================================================
+// AUTHOR ANALYTICS
+// =============================================================================
+
+// Publication count per researcher
+pred publication_count(symbol, u64).
+publication_count(ResId, count(PubId)) :- authored(ResId, PubId).
+
+// Prolific authors (3+ publications)
+pred prolific_author(symbol, symbol, u64).
+prolific_author(Name, Institution, Count) :-
+    researcher(ResId, Name, Institution),
+    publication_count(ResId, Count),
+    Count >= 3.
+
+// Co-authorship relation
+pred coauthors(symbol, symbol).
+coauthors(R1, R2) :-
+    authored(R1, Pub),
+    authored(R2, Pub),
+    R1 != R2.
+
+// Co-author count per researcher
+pred coauthor_count(symbol, u64).
+coauthor_count(ResId, count(CoauthorId)) :- coauthors(ResId, CoauthorId).
+
+// =============================================================================
+// INSTITUTION ANALYTICS
+// =============================================================================
+
+// Institution researcher count
+pred institution_size(symbol, u64).
+institution_size(Inst, count(ResId)) :- researcher(ResId, _, Inst).
+
+// Institution publication count
+pred institution_publications(symbol, u64).
+institution_publications(Inst, count(PubId)) :-
+    researcher(ResId, _, Inst),
+    authored(ResId, PubId).
+
+// Large research institutions (5+ publications)
+pred major_institution(symbol, symbol, u64).
+major_institution(InstId, Name, PubCount) :-
+    entity(InstId, institution),
+    label(InstId, Name),
+    institution_publications(InstId, PubCount),
+    PubCount >= 5.
+
+// =============================================================================
+// SEMANTIC INFERENCE
+// =============================================================================
+
+// Related publications (share topic)
+pred related_publications(symbol, symbol, symbol).
+related_publications(P1, P2, TopicName) :-
+    topic(P1, TopicId),
+    topic(P2, TopicId),
+    concept(TopicId, TopicName),
+    P1 != P2.
+
+// Expert in topic (authored 2+ papers on topic)
+pred topic_expert(symbol, symbol).
+topic_expert(Name, TopicName) :-
+    researcher(ResId, Name, _),
+    authored(ResId, PubId),
+    topic(PubId, TopicId),
+    concept(TopicId, TopicName),
+    publication_count(ResId, Count),
+    Count >= 2.
+
+// Strongly related concepts (similarity >= 80)
+pred strongly_related(symbol, symbol, symbol, symbol).
+strongly_related(C1Name, C2Name, C1Id, C2Id) :-
+    concept(C1Id, C1Name),
+    concept(C2Id, C2Name),
+    related_to(C1Id, C2Id, Score),
+    Score >= 80.
+
+// =============================================================================
+// QUERIES
+// =============================================================================
+
+// Q1: Type hierarchy traversal - all types that inherit from 'thing'
+?- is_a(Type, thing).
+
+// Q2: Prolific authors with their institutions
+?- prolific_author(Name, Institution, PubCount).
+
+// Q3: Citation count for all publications (aggregation)
+?- citation_count(Pub, Count).
+
+// Q4: Multi-hop citation chains (depth > 1)
+pred deep_citation_chain(symbol, symbol, u32).
+deep_citation_chain(Source, Target, Depth) :-
+    cites_transitively(Source, Target, Depth),
+    Depth > 1.
+?- deep_citation_chain(Source, Target, Depth).
+
+// Q5: Co-authorship network
+?- coauthors(R1, R2).
+
+// Q6: Major research institutions
+?- major_institution(InstId, Name, PubCount).
+
+// Q7: Strongly related concepts
+?- strongly_related(Concept1, Concept2, _, _).
