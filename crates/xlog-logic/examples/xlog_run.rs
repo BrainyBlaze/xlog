@@ -6,11 +6,15 @@
 use std::collections::HashMap;
 use std::env;
 use std::fs;
+use std::path::Path;
 use std::sync::Arc;
 
 use xlog_core::{symbol, MemoryBudget, Result, ScalarType, XlogError};
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
-use xlog_logic::{parse_program, BodyLiteral, Compiler, Query, Term};
+use xlog_logic::{
+    compile::load_modules, expand_program_functions, parse_program, BodyLiteral, Compiler, Query,
+    Term,
+};
 use xlog_runtime::Executor;
 
 fn usage() -> String {
@@ -261,9 +265,15 @@ fn decode_column_to_strings(
 
     let mut out = Vec::with_capacity(num_rows);
     match typ {
-        ScalarType::U32 | ScalarType::Symbol => {
+        ScalarType::U32 => {
             for chunk in bytes.chunks_exact(4) {
                 out.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]).to_string());
+            }
+        }
+        ScalarType::Symbol => {
+            for chunk in bytes.chunks_exact(4) {
+                let id = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                out.push(symbol::resolve(id));
             }
         }
         ScalarType::I32 => {
@@ -324,7 +334,27 @@ fn main() -> Result<()> {
     let source = fs::read_to_string(&path)
         .map_err(|e| XlogError::Execution(format!("Failed to read {}: {}", path, e)))?;
 
-    let program = parse_program(&source)?;
+    // Parse and resolve module imports
+    let entry_path = Path::new(&path);
+    let base_dir = entry_path.parent().unwrap_or(Path::new("."));
+
+    let mut program = parse_program(&source)?;
+
+    // If the program has imports, resolve them using the module system
+    if !program.imports.is_empty() {
+        let resolver = load_modules(entry_path, vec![base_dir.to_path_buf()])
+            .map_err(|e| XlogError::Compilation(format!("Module resolution failed: {}", e)))?;
+        program = resolver
+            .merge_imports(program)
+            .map_err(|e| XlogError::Compilation(format!("Module merge failed: {}", e)))?;
+    }
+
+    // Expand user-defined functions (inline UDF calls in rules)
+    if !program.functions.is_empty() {
+        let max_depth = program.directives.max_recursion_depth.unwrap_or(1000);
+        program = expand_program_functions(&program, max_depth)
+            .map_err(|e| XlogError::Compilation(format!("Function expansion failed: {}", e)))?;
+    }
 
     let mut compiler = Compiler::new();
     let plan = compiler.compile_program(&program)?;
