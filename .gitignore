@@ -41,3 +41,5 @@ crates/xlog-gpu-py/dist/
 fuzz/target/
 fuzz/corpus/
 fuzz/artifacts/
+
+docs/ref
