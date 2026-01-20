@@ -1,0 +1,589 @@
+// =============================================================================
+// Shipping & Routes Module
+// =============================================================================
+// Logistics data: carriers, shipping routes, lanes, and transit information
+//
+// Features:
+//   - Multiple carriers with different service levels
+//   - Shipping lanes between warehouses and regions
+//   - Recursive can_ship reachability for multi-hop routes
+//   - Zone-based surcharges and fuel rates
+// =============================================================================
+
+// --- Core Predicates ---
+pred carrier(symbol, symbol, symbol).         // carrier_id, name, service_level
+pred shipping_lane(symbol, symbol, symbol).   // lane_id, origin_region, dest_region
+pred carrier_rate(symbol, u32, u32).          // carrier_id, rate_per_kg_cents, fuel_surcharge_pct
+pred carrier_zone(symbol, symbol).            // carrier_id, zone_id
+pred zone_surcharge(symbol, u32).             // zone_id, surcharge_pct
+
+// Direct routes between locations
+pred direct_route(symbol, symbol, symbol, u32, u32). // origin, destination, carrier_id, distance_km, base_cost_cents
+
+// Transit times
+pred transit_time(symbol, symbol, symbol, u32). // origin, destination, carrier_id, days
+
+// Delivery zones
+pred delivery_zone(symbol, symbol).           // location_id, zone_id
+
+// Carrier service areas
+pred carrier_serves(symbol, symbol).          // carrier_id, region
+
+// =============================================================================
+// CARRIERS (12 carriers)
+// =============================================================================
+
+// National carriers - full coverage
+carrier(carrier_fedex, "FedEx Express", express).
+carrier(carrier_ups, "UPS Ground", standard).
+carrier(carrier_usps, "USPS Priority", economy).
+carrier(carrier_dhl, "DHL International", express).
+
+// Regional carriers
+carrier(carrier_ontrac, "OnTrac", regional).
+carrier(carrier_lasership, "LaserShip", regional).
+carrier(carrier_speedee, "Spee-Dee Delivery", regional).
+carrier(carrier_lso, "Lone Star Overnight", regional).
+
+// Freight carriers
+carrier(carrier_xpo, "XPO Logistics", freight).
+carrier(carrier_odfl, "Old Dominion", freight).
+carrier(carrier_saia, "SAIA LTL Freight", freight).
+carrier(carrier_estes, "Estes Express", freight).
+
+// =============================================================================
+// CARRIER RATES (rate_per_kg, fuel_surcharge_pct)
+// =============================================================================
+
+carrier_rate(carrier_fedex, 450, 18).     // $4.50/kg, 18% fuel
+carrier_rate(carrier_ups, 380, 15).       // $3.80/kg, 15% fuel
+carrier_rate(carrier_usps, 290, 8).       // $2.90/kg, 8% fuel
+carrier_rate(carrier_dhl, 520, 22).       // $5.20/kg, 22% fuel
+carrier_rate(carrier_ontrac, 320, 12).    // $3.20/kg, 12% fuel
+carrier_rate(carrier_lasership, 310, 10). // $3.10/kg, 10% fuel
+carrier_rate(carrier_speedee, 280, 9).    // $2.80/kg, 9% fuel
+carrier_rate(carrier_lso, 340, 14).       // $3.40/kg, 14% fuel
+carrier_rate(carrier_xpo, 180, 20).       // $1.80/kg, 20% fuel (freight)
+carrier_rate(carrier_odfl, 165, 18).      // $1.65/kg, 18% fuel (freight)
+carrier_rate(carrier_saia, 175, 19).      // $1.75/kg, 19% fuel (freight)
+carrier_rate(carrier_estes, 170, 17).     // $1.70/kg, 17% fuel (freight)
+
+// =============================================================================
+// DELIVERY ZONES
+// =============================================================================
+
+// Zone definitions (proximity-based pricing)
+zone_surcharge(zone_local, 0).        // Local - no surcharge
+zone_surcharge(zone_metro, 5).        // Metro area - 5%
+zone_surcharge(zone_regional, 10).    // Regional - 10%
+zone_surcharge(zone_national, 15).    // National - 15%
+zone_surcharge(zone_extended, 25).    // Extended/rural - 25%
+zone_surcharge(zone_remote, 35).      // Remote areas - 35%
+
+// Warehouse delivery zones
+delivery_zone(wh_seattle, zone_local).
+delivery_zone(wh_portland, zone_regional).
+delivery_zone(wh_la, zone_metro).
+delivery_zone(wh_phoenix, zone_regional).
+delivery_zone(wh_chicago, zone_metro).
+delivery_zone(wh_dallas, zone_regional).
+delivery_zone(wh_atlanta, zone_metro).
+delivery_zone(wh_newark, zone_metro).
+
+// Carrier zone coverage
+carrier_zone(carrier_fedex, zone_local).
+carrier_zone(carrier_fedex, zone_metro).
+carrier_zone(carrier_fedex, zone_regional).
+carrier_zone(carrier_fedex, zone_national).
+carrier_zone(carrier_fedex, zone_extended).
+carrier_zone(carrier_fedex, zone_remote).
+
+carrier_zone(carrier_ups, zone_local).
+carrier_zone(carrier_ups, zone_metro).
+carrier_zone(carrier_ups, zone_regional).
+carrier_zone(carrier_ups, zone_national).
+carrier_zone(carrier_ups, zone_extended).
+
+carrier_zone(carrier_usps, zone_local).
+carrier_zone(carrier_usps, zone_metro).
+carrier_zone(carrier_usps, zone_regional).
+carrier_zone(carrier_usps, zone_national).
+carrier_zone(carrier_usps, zone_extended).
+carrier_zone(carrier_usps, zone_remote).
+
+carrier_zone(carrier_dhl, zone_national).
+carrier_zone(carrier_dhl, zone_extended).
+carrier_zone(carrier_dhl, zone_remote).
+
+carrier_zone(carrier_ontrac, zone_local).
+carrier_zone(carrier_ontrac, zone_metro).
+carrier_zone(carrier_ontrac, zone_regional).
+
+carrier_zone(carrier_lasership, zone_local).
+carrier_zone(carrier_lasership, zone_metro).
+carrier_zone(carrier_lasership, zone_regional).
+
+carrier_zone(carrier_speedee, zone_local).
+carrier_zone(carrier_speedee, zone_metro).
+carrier_zone(carrier_speedee, zone_regional).
+
+carrier_zone(carrier_lso, zone_local).
+carrier_zone(carrier_lso, zone_metro).
+carrier_zone(carrier_lso, zone_regional).
+
+carrier_zone(carrier_xpo, zone_metro).
+carrier_zone(carrier_xpo, zone_regional).
+carrier_zone(carrier_xpo, zone_national).
+
+carrier_zone(carrier_odfl, zone_metro).
+carrier_zone(carrier_odfl, zone_regional).
+carrier_zone(carrier_odfl, zone_national).
+
+carrier_zone(carrier_saia, zone_metro).
+carrier_zone(carrier_saia, zone_regional).
+carrier_zone(carrier_saia, zone_national).
+
+carrier_zone(carrier_estes, zone_metro).
+carrier_zone(carrier_estes, zone_regional).
+carrier_zone(carrier_estes, zone_national).
+carrier_zone(carrier_estes, zone_extended).
+
+// =============================================================================
+// CARRIER SERVICE AREAS
+// =============================================================================
+
+// FedEx - national coverage
+carrier_serves(carrier_fedex, northwest).
+carrier_serves(carrier_fedex, southwest).
+carrier_serves(carrier_fedex, midwest).
+carrier_serves(carrier_fedex, south).
+carrier_serves(carrier_fedex, southeast).
+carrier_serves(carrier_fedex, northeast).
+
+// UPS - national coverage
+carrier_serves(carrier_ups, northwest).
+carrier_serves(carrier_ups, southwest).
+carrier_serves(carrier_ups, midwest).
+carrier_serves(carrier_ups, south).
+carrier_serves(carrier_ups, southeast).
+carrier_serves(carrier_ups, northeast).
+
+// USPS - national coverage
+carrier_serves(carrier_usps, northwest).
+carrier_serves(carrier_usps, southwest).
+carrier_serves(carrier_usps, midwest).
+carrier_serves(carrier_usps, south).
+carrier_serves(carrier_usps, southeast).
+carrier_serves(carrier_usps, northeast).
+
+// DHL - national + international focus
+carrier_serves(carrier_dhl, northwest).
+carrier_serves(carrier_dhl, southwest).
+carrier_serves(carrier_dhl, midwest).
+carrier_serves(carrier_dhl, south).
+carrier_serves(carrier_dhl, southeast).
+carrier_serves(carrier_dhl, northeast).
+
+// OnTrac - West Coast regional
+carrier_serves(carrier_ontrac, northwest).
+carrier_serves(carrier_ontrac, southwest).
+
+// LaserShip - East Coast regional
+carrier_serves(carrier_lasership, southeast).
+carrier_serves(carrier_lasership, northeast).
+
+// Spee-Dee - Midwest regional
+carrier_serves(carrier_speedee, midwest).
+
+// LSO - Texas/South regional
+carrier_serves(carrier_lso, south).
+carrier_serves(carrier_lso, southwest).
+
+// Freight carriers - national
+carrier_serves(carrier_xpo, northwest).
+carrier_serves(carrier_xpo, southwest).
+carrier_serves(carrier_xpo, midwest).
+carrier_serves(carrier_xpo, south).
+carrier_serves(carrier_xpo, southeast).
+carrier_serves(carrier_xpo, northeast).
+
+carrier_serves(carrier_odfl, midwest).
+carrier_serves(carrier_odfl, south).
+carrier_serves(carrier_odfl, southeast).
+carrier_serves(carrier_odfl, northeast).
+
+carrier_serves(carrier_saia, southwest).
+carrier_serves(carrier_saia, midwest).
+carrier_serves(carrier_saia, south).
+carrier_serves(carrier_saia, southeast).
+
+carrier_serves(carrier_estes, midwest).
+carrier_serves(carrier_estes, south).
+carrier_serves(carrier_estes, southeast).
+carrier_serves(carrier_estes, northeast).
+
+// =============================================================================
+// SHIPPING LANES
+// =============================================================================
+
+// Northwest lanes
+shipping_lane(lane_nw_sw, northwest, southwest).
+shipping_lane(lane_nw_mw, northwest, midwest).
+
+// Southwest lanes
+shipping_lane(lane_sw_nw, southwest, northwest).
+shipping_lane(lane_sw_s, southwest, south).
+shipping_lane(lane_sw_mw, southwest, midwest).
+
+// Midwest lanes
+shipping_lane(lane_mw_nw, midwest, northwest).
+shipping_lane(lane_mw_sw, midwest, southwest).
+shipping_lane(lane_mw_s, midwest, south).
+shipping_lane(lane_mw_se, midwest, southeast).
+shipping_lane(lane_mw_ne, midwest, northeast).
+
+// South lanes
+shipping_lane(lane_s_sw, south, southwest).
+shipping_lane(lane_s_mw, south, midwest).
+shipping_lane(lane_s_se, south, southeast).
+
+// Southeast lanes
+shipping_lane(lane_se_s, southeast, south).
+shipping_lane(lane_se_mw, southeast, midwest).
+shipping_lane(lane_se_ne, southeast, northeast).
+
+// Northeast lanes
+shipping_lane(lane_ne_mw, northeast, midwest).
+shipping_lane(lane_ne_se, northeast, southeast).
+
+// =============================================================================
+// DIRECT ROUTES (80+ routes)
+// =============================================================================
+
+// --- Seattle (wh_seattle) outbound routes ---
+direct_route(wh_seattle, wh_portland, carrier_ontrac, 280, 4500).
+direct_route(wh_seattle, wh_portland, carrier_fedex, 280, 5200).
+direct_route(wh_seattle, wh_portland, carrier_ups, 280, 4800).
+direct_route(wh_seattle, wh_la, carrier_fedex, 1850, 18500).
+direct_route(wh_seattle, wh_la, carrier_ups, 1850, 16800).
+direct_route(wh_seattle, wh_la, carrier_xpo, 1850, 9500).
+direct_route(wh_seattle, wh_chicago, carrier_fedex, 3300, 28000).
+direct_route(wh_seattle, wh_chicago, carrier_ups, 3300, 25500).
+direct_route(wh_seattle, wh_chicago, carrier_xpo, 3300, 15200).
+
+// --- Portland (wh_portland) outbound routes ---
+direct_route(wh_portland, wh_seattle, carrier_ontrac, 280, 4500).
+direct_route(wh_portland, wh_seattle, carrier_fedex, 280, 5200).
+direct_route(wh_portland, wh_la, carrier_ontrac, 1570, 14200).
+direct_route(wh_portland, wh_la, carrier_fedex, 1570, 16500).
+direct_route(wh_portland, wh_la, carrier_xpo, 1570, 8500).
+direct_route(wh_portland, wh_phoenix, carrier_fedex, 2180, 19500).
+
+// --- Los Angeles (wh_la) outbound routes ---
+direct_route(wh_la, wh_seattle, carrier_fedex, 1850, 18500).
+direct_route(wh_la, wh_seattle, carrier_ups, 1850, 16800).
+direct_route(wh_la, wh_seattle, carrier_xpo, 1850, 9500).
+direct_route(wh_la, wh_portland, carrier_ontrac, 1570, 14200).
+direct_route(wh_la, wh_portland, carrier_fedex, 1570, 16500).
+direct_route(wh_la, wh_phoenix, carrier_ontrac, 600, 6200).
+direct_route(wh_la, wh_phoenix, carrier_fedex, 600, 7500).
+direct_route(wh_la, wh_phoenix, carrier_lso, 600, 5800).
+direct_route(wh_la, wh_dallas, carrier_fedex, 2200, 22000).
+direct_route(wh_la, wh_dallas, carrier_ups, 2200, 20500).
+direct_route(wh_la, wh_dallas, carrier_lso, 2200, 18500).
+direct_route(wh_la, wh_dallas, carrier_xpo, 2200, 12500).
+direct_route(wh_la, wh_chicago, carrier_fedex, 3200, 28500).
+direct_route(wh_la, wh_chicago, carrier_ups, 3200, 26000).
+direct_route(wh_la, wh_chicago, carrier_xpo, 3200, 15500).
+direct_route(wh_la, wh_atlanta, carrier_fedex, 3500, 31000).
+direct_route(wh_la, wh_atlanta, carrier_xpo, 3500, 17500).
+direct_route(wh_la, wh_newark, carrier_fedex, 4400, 38500).
+direct_route(wh_la, wh_newark, carrier_dhl, 4400, 42000).
+direct_route(wh_la, wh_newark, carrier_xpo, 4400, 22500).
+
+// --- Phoenix (wh_phoenix) outbound routes ---
+direct_route(wh_phoenix, wh_la, carrier_ontrac, 600, 6200).
+direct_route(wh_phoenix, wh_la, carrier_fedex, 600, 7500).
+direct_route(wh_phoenix, wh_la, carrier_lso, 600, 5800).
+direct_route(wh_phoenix, wh_dallas, carrier_lso, 1500, 13500).
+direct_route(wh_phoenix, wh_dallas, carrier_fedex, 1500, 15000).
+direct_route(wh_phoenix, wh_dallas, carrier_saia, 1500, 8500).
+direct_route(wh_phoenix, wh_chicago, carrier_fedex, 2700, 24500).
+direct_route(wh_phoenix, wh_chicago, carrier_xpo, 2700, 13500).
+
+// --- Chicago (wh_chicago) outbound routes ---
+direct_route(wh_chicago, wh_seattle, carrier_fedex, 3300, 28000).
+direct_route(wh_chicago, wh_seattle, carrier_ups, 3300, 25500).
+direct_route(wh_chicago, wh_seattle, carrier_xpo, 3300, 15200).
+direct_route(wh_chicago, wh_la, carrier_fedex, 3200, 28500).
+direct_route(wh_chicago, wh_la, carrier_ups, 3200, 26000).
+direct_route(wh_chicago, wh_la, carrier_xpo, 3200, 15500).
+direct_route(wh_chicago, wh_phoenix, carrier_fedex, 2700, 24500).
+direct_route(wh_chicago, wh_phoenix, carrier_xpo, 2700, 13500).
+direct_route(wh_chicago, wh_dallas, carrier_speedee, 1450, 11500).
+direct_route(wh_chicago, wh_dallas, carrier_fedex, 1450, 14500).
+direct_route(wh_chicago, wh_dallas, carrier_ups, 1450, 13000).
+direct_route(wh_chicago, wh_dallas, carrier_odfl, 1450, 7500).
+direct_route(wh_chicago, wh_atlanta, carrier_speedee, 1150, 9500).
+direct_route(wh_chicago, wh_atlanta, carrier_fedex, 1150, 11500).
+direct_route(wh_chicago, wh_atlanta, carrier_ups, 1150, 10500).
+direct_route(wh_chicago, wh_atlanta, carrier_estes, 1150, 6200).
+direct_route(wh_chicago, wh_newark, carrier_speedee, 1250, 10500).
+direct_route(wh_chicago, wh_newark, carrier_fedex, 1250, 12500).
+direct_route(wh_chicago, wh_newark, carrier_ups, 1250, 11500).
+direct_route(wh_chicago, wh_newark, carrier_odfl, 1250, 6500).
+
+// --- Dallas (wh_dallas) outbound routes ---
+direct_route(wh_dallas, wh_la, carrier_fedex, 2200, 22000).
+direct_route(wh_dallas, wh_la, carrier_ups, 2200, 20500).
+direct_route(wh_dallas, wh_la, carrier_lso, 2200, 18500).
+direct_route(wh_dallas, wh_la, carrier_xpo, 2200, 12500).
+direct_route(wh_dallas, wh_phoenix, carrier_lso, 1500, 13500).
+direct_route(wh_dallas, wh_phoenix, carrier_fedex, 1500, 15000).
+direct_route(wh_dallas, wh_phoenix, carrier_saia, 1500, 8500).
+direct_route(wh_dallas, wh_chicago, carrier_lso, 1450, 11500).
+direct_route(wh_dallas, wh_chicago, carrier_fedex, 1450, 14500).
+direct_route(wh_dallas, wh_chicago, carrier_ups, 1450, 13000).
+direct_route(wh_dallas, wh_chicago, carrier_saia, 1450, 7500).
+direct_route(wh_dallas, wh_atlanta, carrier_lso, 1250, 10500).
+direct_route(wh_dallas, wh_atlanta, carrier_fedex, 1250, 12500).
+direct_route(wh_dallas, wh_atlanta, carrier_ups, 1250, 11500).
+direct_route(wh_dallas, wh_atlanta, carrier_saia, 1250, 6500).
+direct_route(wh_dallas, wh_newark, carrier_fedex, 2500, 24000).
+direct_route(wh_dallas, wh_newark, carrier_ups, 2500, 22000).
+direct_route(wh_dallas, wh_newark, carrier_saia, 2500, 13500).
+
+// --- Atlanta (wh_atlanta) outbound routes ---
+direct_route(wh_atlanta, wh_la, carrier_fedex, 3500, 31000).
+direct_route(wh_atlanta, wh_la, carrier_xpo, 3500, 17500).
+direct_route(wh_atlanta, wh_chicago, carrier_lasership, 1150, 9500).
+direct_route(wh_atlanta, wh_chicago, carrier_fedex, 1150, 11500).
+direct_route(wh_atlanta, wh_chicago, carrier_ups, 1150, 10500).
+direct_route(wh_atlanta, wh_chicago, carrier_estes, 1150, 6200).
+direct_route(wh_atlanta, wh_dallas, carrier_lasership, 1250, 10500).
+direct_route(wh_atlanta, wh_dallas, carrier_fedex, 1250, 12500).
+direct_route(wh_atlanta, wh_dallas, carrier_ups, 1250, 11500).
+direct_route(wh_atlanta, wh_dallas, carrier_estes, 1250, 6500).
+direct_route(wh_atlanta, wh_newark, carrier_lasership, 1350, 11500).
+direct_route(wh_atlanta, wh_newark, carrier_fedex, 1350, 13500).
+direct_route(wh_atlanta, wh_newark, carrier_ups, 1350, 12500).
+direct_route(wh_atlanta, wh_newark, carrier_estes, 1350, 7200).
+
+// --- Newark (wh_newark) outbound routes ---
+direct_route(wh_newark, wh_la, carrier_fedex, 4400, 38500).
+direct_route(wh_newark, wh_la, carrier_dhl, 4400, 42000).
+direct_route(wh_newark, wh_la, carrier_xpo, 4400, 22500).
+direct_route(wh_newark, wh_chicago, carrier_lasership, 1250, 10500).
+direct_route(wh_newark, wh_chicago, carrier_fedex, 1250, 12500).
+direct_route(wh_newark, wh_chicago, carrier_ups, 1250, 11500).
+direct_route(wh_newark, wh_chicago, carrier_odfl, 1250, 6500).
+direct_route(wh_newark, wh_dallas, carrier_fedex, 2500, 24000).
+direct_route(wh_newark, wh_dallas, carrier_ups, 2500, 22000).
+direct_route(wh_newark, wh_dallas, carrier_estes, 2500, 13500).
+direct_route(wh_newark, wh_atlanta, carrier_lasership, 1350, 11500).
+direct_route(wh_newark, wh_atlanta, carrier_fedex, 1350, 13500).
+direct_route(wh_newark, wh_atlanta, carrier_ups, 1350, 12500).
+direct_route(wh_newark, wh_atlanta, carrier_estes, 1350, 7200).
+
+// =============================================================================
+// TRANSIT TIMES
+// =============================================================================
+
+// Seattle routes
+transit_time(wh_seattle, wh_portland, carrier_ontrac, 1).
+transit_time(wh_seattle, wh_portland, carrier_fedex, 1).
+transit_time(wh_seattle, wh_portland, carrier_ups, 2).
+transit_time(wh_seattle, wh_la, carrier_fedex, 2).
+transit_time(wh_seattle, wh_la, carrier_ups, 3).
+transit_time(wh_seattle, wh_la, carrier_xpo, 4).
+transit_time(wh_seattle, wh_chicago, carrier_fedex, 3).
+transit_time(wh_seattle, wh_chicago, carrier_ups, 4).
+transit_time(wh_seattle, wh_chicago, carrier_xpo, 5).
+
+// Portland routes
+transit_time(wh_portland, wh_seattle, carrier_ontrac, 1).
+transit_time(wh_portland, wh_seattle, carrier_fedex, 1).
+transit_time(wh_portland, wh_la, carrier_ontrac, 2).
+transit_time(wh_portland, wh_la, carrier_fedex, 2).
+transit_time(wh_portland, wh_la, carrier_xpo, 3).
+transit_time(wh_portland, wh_phoenix, carrier_fedex, 3).
+
+// LA routes
+transit_time(wh_la, wh_seattle, carrier_fedex, 2).
+transit_time(wh_la, wh_seattle, carrier_ups, 3).
+transit_time(wh_la, wh_seattle, carrier_xpo, 4).
+transit_time(wh_la, wh_portland, carrier_ontrac, 2).
+transit_time(wh_la, wh_portland, carrier_fedex, 2).
+transit_time(wh_la, wh_phoenix, carrier_ontrac, 1).
+transit_time(wh_la, wh_phoenix, carrier_fedex, 1).
+transit_time(wh_la, wh_phoenix, carrier_lso, 1).
+transit_time(wh_la, wh_dallas, carrier_fedex, 2).
+transit_time(wh_la, wh_dallas, carrier_ups, 3).
+transit_time(wh_la, wh_dallas, carrier_lso, 2).
+transit_time(wh_la, wh_dallas, carrier_xpo, 4).
+transit_time(wh_la, wh_chicago, carrier_fedex, 3).
+transit_time(wh_la, wh_chicago, carrier_ups, 4).
+transit_time(wh_la, wh_chicago, carrier_xpo, 5).
+transit_time(wh_la, wh_atlanta, carrier_fedex, 3).
+transit_time(wh_la, wh_atlanta, carrier_xpo, 5).
+transit_time(wh_la, wh_newark, carrier_fedex, 4).
+transit_time(wh_la, wh_newark, carrier_dhl, 3).
+transit_time(wh_la, wh_newark, carrier_xpo, 6).
+
+// Phoenix routes
+transit_time(wh_phoenix, wh_la, carrier_ontrac, 1).
+transit_time(wh_phoenix, wh_la, carrier_fedex, 1).
+transit_time(wh_phoenix, wh_la, carrier_lso, 1).
+transit_time(wh_phoenix, wh_dallas, carrier_lso, 2).
+transit_time(wh_phoenix, wh_dallas, carrier_fedex, 2).
+transit_time(wh_phoenix, wh_dallas, carrier_saia, 3).
+transit_time(wh_phoenix, wh_chicago, carrier_fedex, 3).
+transit_time(wh_phoenix, wh_chicago, carrier_xpo, 4).
+
+// Chicago routes
+transit_time(wh_chicago, wh_seattle, carrier_fedex, 3).
+transit_time(wh_chicago, wh_seattle, carrier_ups, 4).
+transit_time(wh_chicago, wh_seattle, carrier_xpo, 5).
+transit_time(wh_chicago, wh_la, carrier_fedex, 3).
+transit_time(wh_chicago, wh_la, carrier_ups, 4).
+transit_time(wh_chicago, wh_la, carrier_xpo, 5).
+transit_time(wh_chicago, wh_phoenix, carrier_fedex, 3).
+transit_time(wh_chicago, wh_phoenix, carrier_xpo, 4).
+transit_time(wh_chicago, wh_dallas, carrier_speedee, 2).
+transit_time(wh_chicago, wh_dallas, carrier_fedex, 2).
+transit_time(wh_chicago, wh_dallas, carrier_ups, 2).
+transit_time(wh_chicago, wh_dallas, carrier_odfl, 3).
+transit_time(wh_chicago, wh_atlanta, carrier_speedee, 2).
+transit_time(wh_chicago, wh_atlanta, carrier_fedex, 2).
+transit_time(wh_chicago, wh_atlanta, carrier_ups, 2).
+transit_time(wh_chicago, wh_atlanta, carrier_estes, 3).
+transit_time(wh_chicago, wh_newark, carrier_speedee, 2).
+transit_time(wh_chicago, wh_newark, carrier_fedex, 2).
+transit_time(wh_chicago, wh_newark, carrier_ups, 2).
+transit_time(wh_chicago, wh_newark, carrier_odfl, 3).
+
+// Dallas routes
+transit_time(wh_dallas, wh_la, carrier_fedex, 2).
+transit_time(wh_dallas, wh_la, carrier_ups, 3).
+transit_time(wh_dallas, wh_la, carrier_lso, 2).
+transit_time(wh_dallas, wh_la, carrier_xpo, 4).
+transit_time(wh_dallas, wh_phoenix, carrier_lso, 2).
+transit_time(wh_dallas, wh_phoenix, carrier_fedex, 2).
+transit_time(wh_dallas, wh_phoenix, carrier_saia, 3).
+transit_time(wh_dallas, wh_chicago, carrier_lso, 2).
+transit_time(wh_dallas, wh_chicago, carrier_fedex, 2).
+transit_time(wh_dallas, wh_chicago, carrier_ups, 2).
+transit_time(wh_dallas, wh_chicago, carrier_saia, 3).
+transit_time(wh_dallas, wh_atlanta, carrier_lso, 2).
+transit_time(wh_dallas, wh_atlanta, carrier_fedex, 2).
+transit_time(wh_dallas, wh_atlanta, carrier_ups, 2).
+transit_time(wh_dallas, wh_atlanta, carrier_saia, 3).
+transit_time(wh_dallas, wh_newark, carrier_fedex, 3).
+transit_time(wh_dallas, wh_newark, carrier_ups, 3).
+transit_time(wh_dallas, wh_newark, carrier_saia, 4).
+
+// Atlanta routes
+transit_time(wh_atlanta, wh_la, carrier_fedex, 3).
+transit_time(wh_atlanta, wh_la, carrier_xpo, 5).
+transit_time(wh_atlanta, wh_chicago, carrier_lasership, 2).
+transit_time(wh_atlanta, wh_chicago, carrier_fedex, 2).
+transit_time(wh_atlanta, wh_chicago, carrier_ups, 2).
+transit_time(wh_atlanta, wh_chicago, carrier_estes, 3).
+transit_time(wh_atlanta, wh_dallas, carrier_lasership, 2).
+transit_time(wh_atlanta, wh_dallas, carrier_fedex, 2).
+transit_time(wh_atlanta, wh_dallas, carrier_ups, 2).
+transit_time(wh_atlanta, wh_dallas, carrier_estes, 3).
+transit_time(wh_atlanta, wh_newark, carrier_lasership, 2).
+transit_time(wh_atlanta, wh_newark, carrier_fedex, 2).
+transit_time(wh_atlanta, wh_newark, carrier_ups, 2).
+transit_time(wh_atlanta, wh_newark, carrier_estes, 3).
+
+// Newark routes
+transit_time(wh_newark, wh_la, carrier_fedex, 4).
+transit_time(wh_newark, wh_la, carrier_dhl, 3).
+transit_time(wh_newark, wh_la, carrier_xpo, 6).
+transit_time(wh_newark, wh_chicago, carrier_lasership, 2).
+transit_time(wh_newark, wh_chicago, carrier_fedex, 2).
+transit_time(wh_newark, wh_chicago, carrier_ups, 2).
+transit_time(wh_newark, wh_chicago, carrier_odfl, 3).
+transit_time(wh_newark, wh_dallas, carrier_fedex, 3).
+transit_time(wh_newark, wh_dallas, carrier_ups, 3).
+transit_time(wh_newark, wh_dallas, carrier_estes, 4).
+transit_time(wh_newark, wh_atlanta, carrier_lasership, 2).
+transit_time(wh_newark, wh_atlanta, carrier_fedex, 2).
+transit_time(wh_newark, wh_atlanta, carrier_ups, 2).
+transit_time(wh_newark, wh_atlanta, carrier_estes, 3).
+
+// =============================================================================
+// RECURSIVE SHIPPING REACHABILITY
+// =============================================================================
+
+// Can ship directly between two locations
+pred can_ship(symbol, symbol).
+
+// Base case: direct route exists
+can_ship(Origin, Dest) :- direct_route(Origin, Dest, _, _, _).
+
+// Recursive case: can reach via intermediate hub
+can_ship(Origin, Dest) :-
+    direct_route(Origin, Intermediate, _, _, _),
+    can_ship(Intermediate, Dest),
+    Origin != Dest,
+    Intermediate != Origin,
+    Intermediate != Dest.
+
+// =============================================================================
+// ROUTE ANALYTICS
+// =============================================================================
+
+// Count routes per carrier
+pred routes_per_carrier(symbol, u64).
+routes_per_carrier(CarrierId, count(Origin)) :-
+    direct_route(Origin, _, CarrierId, _, _).
+
+// Cheapest route between locations
+pred cheapest_route(symbol, symbol, symbol, u32).
+cheapest_route(Origin, Dest, CarrierId, Cost) :-
+    direct_route(Origin, Dest, CarrierId, _, Cost).
+
+// Fastest route between locations
+pred fastest_route(symbol, symbol, symbol, u32).
+fastest_route(Origin, Dest, CarrierId, Days) :-
+    transit_time(Origin, Dest, CarrierId, Days).
+
+// =============================================================================
+// PRIVATE PREDICATES FOR CARRIER SELECTION
+// =============================================================================
+
+// Private helper: identify if another carrier offers a cheaper option
+pred cheaper_option(symbol, symbol, symbol, symbol).
+cheaper_option(Origin, Dest, CarrierId, CheaperCarrierId) :-
+    direct_route(Origin, Dest, CarrierId, _, Cost1),
+    direct_route(Origin, Dest, CheaperCarrierId, _, Cost2),
+    CarrierId != CheaperCarrierId,
+    Cost2 < Cost1.
+
+// Best carrier for a route: no cheaper alternative exists
+pred best_carrier_for_route(symbol, symbol, symbol, u32).
+best_carrier_for_route(Origin, Dest, CarrierId, Cost) :-
+    direct_route(Origin, Dest, CarrierId, _, Cost),
+    not cheaper_option(Origin, Dest, CarrierId, _).
+
+// Private helper: identify if another carrier offers a faster option
+pred faster_option(symbol, symbol, symbol, symbol).
+faster_option(Origin, Dest, CarrierId, FasterCarrierId) :-
+    transit_time(Origin, Dest, CarrierId, Days1),
+    transit_time(Origin, Dest, FasterCarrierId, Days2),
+    CarrierId != FasterCarrierId,
+    Days2 < Days1.
+
+// Fastest carrier for a route: no faster alternative exists
+pred fastest_carrier_for_route(symbol, symbol, symbol, u32).
+fastest_carrier_for_route(Origin, Dest, CarrierId, Days) :-
+    transit_time(Origin, Dest, CarrierId, Days),
+    not faster_option(Origin, Dest, CarrierId, _).
+
+// Multi-carrier routes available
+pred multi_carrier_route(symbol, symbol, u64).
+multi_carrier_route(Origin, Dest, count(CarrierId)) :-
+    direct_route(Origin, Dest, CarrierId, _, _).

@@ -1,0 +1,358 @@
+// =============================================================================
+// ELO Ranking System Module
+// =============================================================================
+// Demonstrates: Multiple UDFs with arithmetic and conditionals for rating calc
+// Contains: ELO ratings, tier system, and win rate calculations
+// =============================================================================
+
+// --- Predicate Declarations ---
+pred player_elo(symbol, u32).                  // player_id, elo_rating
+pred elo_history(symbol, symbol, u32, u32).    // player_id, match_id, elo_before, elo_after
+pred player_tier(symbol, symbol).              // player_id, tier_name
+pred season_record(symbol, u32, u32).          // player_id, wins, losses
+
+// --- Private Helpers ---
+pred base_elo(u32).
+pred tier_name(u32, symbol).
+
+base_elo(1200).  // Starting ELO for new players
+
+tier_name(1, grandmaster).
+tier_name(2, master).
+tier_name(3, diamond).
+tier_name(4, platinum).
+tier_name(5, gold).
+tier_name(6, silver).
+
+// =============================================================================
+// USER-DEFINED FUNCTIONS (UDFs)
+// =============================================================================
+
+// K-factor for ELO calculation based on games played
+// New players (< 30 games) get K=40, intermediate K=20, veterans K=10
+func elo_k_factor(GamesPlayed) = if GamesPlayed < cast(30, u32) then cast(40, u32) else if GamesPlayed < cast(100, u32) then cast(20, u32) else cast(10, u32).
+
+// Expected score calculation (simplified integer version)
+// Returns percentage * 100 (so 75 = 75% expected win rate)
+func elo_expected(PlayerRating, OpponentRating) =
+    if PlayerRating > OpponentRating + cast(400, u32) then cast(95, u32)
+    else if PlayerRating > OpponentRating + cast(200, u32) then cast(85, u32)
+    else if PlayerRating > OpponentRating + cast(100, u32) then cast(70, u32)
+    else if PlayerRating > OpponentRating then cast(55, u32)
+    else if PlayerRating = OpponentRating then cast(50, u32)
+    else if PlayerRating > OpponentRating - cast(100, u32) then cast(45, u32)
+    else if PlayerRating > OpponentRating - cast(200, u32) then cast(30, u32)
+    else if PlayerRating > OpponentRating - cast(400, u32) then cast(15, u32)
+    else cast(5, u32).
+
+// ELO change calculation (simplified)
+// Result: 100 = win, 50 = draw, 0 = loss
+func elo_change(K, Expected, Result) = (K * (Result - Expected)) / cast(100, u32).
+
+// Tier determination from ELO rating
+// 2400+ = Grandmaster, 2000+ = Master, 1600+ = Diamond, 1200+ = Platinum, 800+ = Gold, else Silver
+func tier_from_elo(Rating) = if Rating >= cast(2400, u32) then cast(1, u32) else if Rating >= cast(2000, u32) then cast(2, u32) else if Rating >= cast(1600, u32) then cast(3, u32) else if Rating >= cast(1200, u32) then cast(4, u32) else if Rating >= cast(800, u32) then cast(5, u32) else cast(6, u32).
+
+// Win rate calculation (returns percentage)
+func win_rate(Wins, Total) = (Wins * cast(100, u32)) / Total.
+
+// KDA ratio calculation (scaled by 100 for integer precision)
+// if Deaths = 0, treat as 1 death for calculation
+func kda_ratio(Kills, Deaths, Assists) = if Deaths > cast(0, u32) then (Kills + Assists) * cast(100, u32) / Deaths else (Kills + Assists) * cast(100, u32).
+
+// Rating adjustment for streaks
+func streak_bonus(ConsecutiveWins) = if ConsecutiveWins >= cast(10, u32) then cast(50, u32) else if ConsecutiveWins >= cast(5, u32) then cast(25, u32) else if ConsecutiveWins >= cast(3, u32) then cast(10, u32) else cast(0, u32).
+
+// Performance multiplier based on KDA
+func performance_multiplier(KdaScaled) = if KdaScaled >= cast(500, u32) then cast(150, u32) else if KdaScaled >= cast(300, u32) then cast(125, u32) else if KdaScaled >= cast(200, u32) then cast(110, u32) else if KdaScaled >= cast(100, u32) then cast(100, u32) else cast(90, u32).
+
+// =============================================================================
+// PLAYER ELO RATINGS (55 players)
+// =============================================================================
+
+// Top tier players (Grandmaster 2400+)
+player_elo(p031, 2650).   // TokyoDrift - Highest rated
+player_elo(p033, 2580).   // ShanghaiDragon
+player_elo(p005, 2520).   // StormBringer
+player_elo(p032, 2480).   // SeoulStriker
+player_elo(p001, 2450).   // DragonSlayer99
+
+// Master tier (2000-2399)
+player_elo(p016, 2380).   // EuroLegend
+player_elo(p008, 2320).   // VoidWalker
+player_elo(p044, 2280).   // BusanBomber
+player_elo(p002, 2240).   // NightHawk
+player_elo(p051, 2180).   // AussieAce
+player_elo(p025, 2120).   // BritishLion
+player_elo(p043, 2080).   // OsakaOni
+player_elo(p017, 2040).   // NordicWolf
+
+// Diamond tier (1600-1999)
+player_elo(p006, 1950).   // FrostQueen
+player_elo(p046, 1920).   // BrazilianBlitz
+player_elo(p021, 1880).   // FrenchFury
+player_elo(p037, 1850).   // TaipeiTiger
+player_elo(p038, 1820).   // HongKongHero
+player_elo(p012, 1780).   // MoonRider
+player_elo(p009, 1750).   // ThunderStrike
+player_elo(p022, 1720).   // DutchMaster
+player_elo(p047, 1690).   // ArgentineArrow
+player_elo(p003, 1660).   // ShadowMaster
+player_elo(p014, 1640).   // DarkPhoenix
+player_elo(p052, 1620).   // KiwiKiller
+
+// Platinum tier (1200-1599)
+player_elo(p018, 1580).   // CelticStorm
+player_elo(p026, 1550).   // VikingRaider
+player_elo(p030, 1520).   // FinnishFrost
+player_elo(p035, 1490).   // SingaporeSniper
+player_elo(p053, 1460).   // SydneySniper
+player_elo(p040, 1430).   // ManilaMarauder
+player_elo(p041, 1400).   // HanoiHunter
+player_elo(p048, 1380).   // ChileanChampion
+player_elo(p019, 1350).   // AlpineHunter
+player_elo(p007, 1320).   // BlazeFury
+player_elo(p055, 1290).   // AucklandAssassin
+player_elo(p020, 1260).   // IberianKnight
+player_elo(p023, 1240).   // PolishThunder
+player_elo(p034, 1220).   // BangkokBlade
+player_elo(p036, 1200).   // MumbaiMaverick
+
+// Gold tier (800-1199)
+player_elo(p010, 1180).   // CrystalMage
+player_elo(p011, 1150).   // SteelWarrior
+player_elo(p013, 1120).   // CyberNinja
+player_elo(p027, 1090).   // GreekWarrior
+player_elo(p028, 1060).   // AustrianEagle
+player_elo(p042, 1030).   // KualaLumpurKing
+player_elo(p050, 1000).   // ColombianCrusher
+player_elo(p004, 980).    // IronFist
+
+// Silver tier (< 800)
+player_elo(p024, 780).    // ItalianAce (inactive)
+player_elo(p029, 750).    // BelgianFlash (inactive)
+player_elo(p039, 720).    // JakartaJet (inactive)
+player_elo(p049, 680).    // PeruvianPredator (inactive)
+player_elo(p054, 650).    // MelbourneMage (inactive)
+player_elo(p015, 600).    // RapidFire (banned)
+player_elo(p045, 580).    // BeijingBeast (banned)
+
+// =============================================================================
+// SEASON RECORDS (wins, losses for 55 players)
+// =============================================================================
+
+// Top performers
+season_record(p031, 420, 80).
+season_record(p033, 390, 95).
+season_record(p005, 385, 90).
+season_record(p032, 365, 105).
+season_record(p001, 350, 100).
+
+// Master tier
+season_record(p016, 340, 110).
+season_record(p008, 330, 115).
+season_record(p044, 320, 120).
+season_record(p002, 310, 125).
+season_record(p051, 295, 130).
+season_record(p025, 280, 140).
+season_record(p043, 270, 145).
+season_record(p017, 260, 150).
+
+// Diamond tier
+season_record(p006, 245, 155).
+season_record(p046, 235, 160).
+season_record(p021, 225, 165).
+season_record(p037, 220, 170).
+season_record(p038, 210, 175).
+season_record(p012, 200, 180).
+season_record(p009, 195, 185).
+season_record(p022, 185, 190).
+season_record(p047, 180, 195).
+season_record(p003, 170, 200).
+season_record(p014, 165, 205).
+season_record(p052, 160, 210).
+
+// Platinum tier
+season_record(p018, 155, 215).
+season_record(p026, 150, 220).
+season_record(p030, 145, 225).
+season_record(p035, 140, 230).
+season_record(p053, 138, 232).
+season_record(p040, 135, 235).
+season_record(p041, 130, 240).
+season_record(p048, 125, 245).
+season_record(p019, 120, 250).
+season_record(p007, 115, 255).
+season_record(p055, 112, 258).
+season_record(p020, 108, 262).
+season_record(p023, 105, 265).
+season_record(p034, 100, 270).
+season_record(p036, 95, 275).
+
+// Gold tier
+season_record(p010, 90, 280).
+season_record(p011, 85, 285).
+season_record(p013, 82, 288).
+season_record(p027, 78, 292).
+season_record(p028, 75, 295).
+season_record(p042, 72, 298).
+season_record(p050, 68, 302).
+season_record(p004, 65, 305).
+
+// Silver tier (inactive/banned)
+season_record(p024, 45, 125).
+season_record(p029, 40, 110).
+season_record(p039, 35, 105).
+season_record(p049, 30, 90).
+season_record(p054, 28, 82).
+season_record(p015, 50, 150).
+season_record(p045, 48, 142).
+
+// =============================================================================
+// ELO HISTORY (sample history entries - 60 entries)
+// =============================================================================
+
+// Player p001 ELO progression
+elo_history(p001, m001, 2420, 2435).
+elo_history(p001, m006, 2435, 2450).
+elo_history(p001, m015, 2400, 2420).
+elo_history(p001, m020, 2380, 2400).
+elo_history(p001, m031, 2360, 2380).
+
+// Player p002 ELO progression
+elo_history(p002, m004, 2200, 2220).
+elo_history(p002, m008, 2180, 2200).
+elo_history(p002, m012, 2160, 2180).
+elo_history(p002, m023, 2220, 2240).
+elo_history(p002, m039, 2230, 2240).
+
+// Player p005 ELO progression
+elo_history(p005, m001, 2500, 2510).
+elo_history(p005, m018, 2490, 2500).
+elo_history(p005, m025, 2480, 2510).
+elo_history(p005, m033, 2510, 2520).
+elo_history(p005, m055, 2505, 2520).
+
+// Player p016 ELO progression
+elo_history(p016, m002, 2360, 2370).
+elo_history(p016, m004, 2350, 2360).
+elo_history(p016, m020, 2370, 2380).
+elo_history(p016, m047, 2365, 2380).
+elo_history(p016, m073, 2370, 2380).
+
+// Player p031 ELO progression
+elo_history(p031, m003, 2620, 2635).
+elo_history(p031, m010, 2600, 2620).
+elo_history(p031, m011, 2635, 2650).
+elo_history(p031, m027, 2640, 2650).
+elo_history(p031, m051, 2645, 2650).
+
+// Player p032 ELO progression
+elo_history(p032, m010, 2450, 2465).
+elo_history(p032, m012, 2440, 2450).
+elo_history(p032, m035, 2465, 2475).
+elo_history(p032, m043, 2470, 2480).
+elo_history(p032, m077, 2475, 2480).
+
+// Player p033 ELO progression
+elo_history(p033, m006, 2560, 2570).
+elo_history(p033, m015, 2550, 2560).
+elo_history(p033, m031, 2570, 2580).
+elo_history(p033, m055, 2575, 2580).
+elo_history(p033, m089, 2570, 2580).
+
+// Player p008 ELO progression
+elo_history(p008, m001, 2290, 2305).
+elo_history(p008, m010, 2280, 2290).
+elo_history(p008, m036, 2305, 2315).
+elo_history(p008, m060, 2310, 2320).
+elo_history(p008, m097, 2315, 2320).
+
+// Player p025 ELO progression
+elo_history(p025, m002, 2100, 2110).
+elo_history(p025, m019, 2095, 2110).
+elo_history(p025, m043, 2108, 2115).
+elo_history(p025, m077, 2115, 2120).
+elo_history(p025, m092, 2118, 2120).
+
+// Player p051 ELO progression
+elo_history(p051, m020, 2150, 2165).
+elo_history(p051, m033, 2160, 2170).
+elo_history(p051, m044, 2165, 2175).
+elo_history(p051, m066, 2170, 2180).
+elo_history(p051, m093, 2175, 2180).
+
+// Player p044 ELO progression
+elo_history(p044, m006, 2250, 2265).
+elo_history(p044, m015, 2240, 2255).
+elo_history(p044, m036, 2265, 2275).
+elo_history(p044, m049, 2270, 2280).
+elo_history(p044, m099, 2278, 2280).
+
+// Player p043 ELO progression
+elo_history(p043, m018, 2060, 2070).
+elo_history(p043, m025, 2055, 2065).
+elo_history(p043, m041, 2065, 2075).
+elo_history(p043, m066, 2072, 2080).
+elo_history(p043, m097, 2078, 2080).
+
+// =============================================================================
+// DERIVED PREDICATES
+// =============================================================================
+
+// Assign tier based on ELO rating
+pred player_calculated_tier(symbol, u32).
+player_calculated_tier(PlayerId, Tier) :-
+    player_elo(PlayerId, Rating),
+    Tier is tier_from_elo(Rating).
+
+// Helper: compute total games for win rate calculation
+pred player_total_games(symbol, u32, u32, u32).
+player_total_games(PlayerId, Wins, Losses, Total) :-
+    season_record(PlayerId, Wins, Losses),
+    Total is Wins + Losses.
+
+// Calculate win rate for players
+pred player_win_rate(symbol, u32).
+player_win_rate(PlayerId, Rate) :-
+    player_total_games(PlayerId, Wins, _, Total),
+    Total > 0,
+    Rate is win_rate(Wins, Total).
+
+// Calculate K-factor for each player based on games played
+pred player_k_factor(symbol, u32).
+player_k_factor(PlayerId, K) :-
+    season_record(PlayerId, Wins, Losses),
+    Games is Wins + Losses,
+    K is elo_k_factor(Games).
+
+// Top ranked players (2400+ ELO)
+pred grandmaster_player(symbol, u32).
+grandmaster_player(PlayerId, Rating) :-
+    player_elo(PlayerId, Rating),
+    Rating >= 2400.
+
+// Master players (2000-2399 ELO)
+pred master_player(symbol, u32).
+master_player(PlayerId, Rating) :-
+    player_elo(PlayerId, Rating),
+    Rating >= 2000,
+    Rating < 2400.
+
+// Players with high win rate (60%+)
+pred high_win_rate_player(symbol, u32, u32).
+high_win_rate_player(PlayerId, Rate, Elo) :-
+    player_win_rate(PlayerId, Rate),
+    Rate >= 60,
+    player_elo(PlayerId, Elo).
+
+// ELO gain in history (positive change)
+pred elo_gain(symbol, symbol, u32).
+elo_gain(PlayerId, MatchId, Gain) :-
+    elo_history(PlayerId, MatchId, Before, After),
+    After > Before,
+    Gain is After - Before.
+
+// Players by tier distribution
+pred tier_distribution(u32, u64).
+tier_distribution(Tier, count(PlayerId)) :- player_calculated_tier(PlayerId, Tier).

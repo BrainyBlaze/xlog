@@ -1,0 +1,431 @@
+// =============================================================================
+// Knowledge Graph Inference - UDFs and Derived Reasoning
+// =============================================================================
+// Contains user-defined functions and derived predicates for movie analytics.
+//
+// Features:
+//   - 6+ UDFs with arithmetic and conditionals
+//   - Private predicates for internal helpers
+//   - Derived analytics rules
+//   - Aggregation-based statistics
+// =============================================================================
+
+// Note: ontology/schema and entities/movies are imported via main.xlog
+// Removed redundant use statements to fix predicate ordering issues
+
+// =============================================================================
+// USER-DEFINED FUNCTIONS (6 required UDFs)
+// =============================================================================
+
+// UDF 1: Calculate the decade of a given year
+// Example: decade(1994) = 1990, decade(2023) = 2020
+func decade(Year) = (Year / cast(10, u32)) * cast(10, u32).
+
+// UDF 2: Categorize rating into tiers (1=excellent, 2=good, 3=average, 4=poor)
+// Rating scale: 0-100
+func rating_category(Rating) =
+    if Rating >= cast(85, u32) then cast(1, u32)
+    else if Rating >= cast(75, u32) then cast(2, u32)
+    else if Rating >= cast(60, u32) then cast(3, u32)
+    else cast(4, u32).
+
+// UDF 3: Calculate return on investment percentage
+// ROI = (BoxOffice / Budget) * 100
+func roi_pct(BoxOffice, Budget) =
+    if Budget > cast(0, u32) then (BoxOffice * cast(100, u32)) / Budget
+    else cast(0, u32).
+
+// UDF 4: Calculate person's age at time of movie release
+// Simple subtraction of birth year from release year
+func age_at_release(BirthYear, ReleaseYear) = ReleaseYear - BirthYear.
+
+// UDF 5: Calculate career span in years (inclusive)
+// For a person active from 1990 to 2023, span is 34 years
+func career_span(FirstYear, LastYear) = LastYear - FirstYear + cast(1, u32).
+
+// UDF 6: Calculate productivity (movies per decade)
+// Scaled by 10 to avoid fractions
+func productivity(MovieCount, CareerYears) =
+    if CareerYears > cast(0, u32) then (MovieCount * cast(10, u32)) / CareerYears
+    else cast(0, u32).
+
+// =============================================================================
+// ADDITIONAL UTILITY UDFS
+// =============================================================================
+
+// Classify budget size
+func budget_category(Budget) =
+    if Budget >= cast(150, u32) then cast(1, u32)       // blockbuster
+    else if Budget >= cast(75, u32) then cast(2, u32)   // major
+    else if Budget >= cast(30, u32) then cast(3, u32)   // mid-budget
+    else cast(4, u32).                       // indie
+
+// Calculate profit
+func profit(BoxOffice, Budget) = BoxOffice - Budget.
+
+// Box office tier
+func box_office_tier(BoxOffice) =
+    if BoxOffice >= cast(1000, u32) then cast(1, u32)   // billion club
+    else if BoxOffice >= cast(500, u32) then cast(2, u32)
+    else if BoxOffice >= cast(200, u32) then cast(3, u32)
+    else cast(4, u32).
+
+// =============================================================================
+// PRIVATE PREDICATES (Internal Helpers)
+// =============================================================================
+
+// Private: current year for calculations
+pred current_year(u32).
+current_year(2026).
+
+// Private: minimum/maximum year for a director's filmography
+pred director_first_film_year(symbol, u32).
+pred director_last_film_year(symbol, u32).
+
+director_first_film_year(DirId, min(Year)) :-
+    directed(DirId, MovieId),
+    movie(MovieId, _, Year, _, _, _).
+
+director_last_film_year(DirId, max(Year)) :-
+    directed(DirId, MovieId),
+    movie(MovieId, _, Year, _, _, _).
+
+// Private: count of movies per director
+pred director_movie_count_raw(symbol, u64).
+director_movie_count_raw(DirId, count(MovieId)) :- directed(DirId, MovieId).
+
+// Private: count of movies per actor
+pred actor_movie_count_raw(symbol, u64).
+actor_movie_count_raw(ActorId, count(MovieId)) :- acted_in(ActorId, MovieId).
+
+// Private: minimum/maximum year for an actor's filmography
+pred actor_first_film_year(symbol, u32).
+pred actor_last_film_year(symbol, u32).
+
+actor_first_film_year(ActorId, min(Year)) :-
+    acted_in(ActorId, MovieId),
+    movie(MovieId, _, Year, _, _, _).
+
+actor_last_film_year(ActorId, max(Year)) :-
+    acted_in(ActorId, MovieId),
+    movie(MovieId, _, Year, _, _, _).
+
+// Private: total box office per director
+pred director_total_box_office_raw(symbol, u64).
+director_total_box_office_raw(DirId, sum(BoxOffice)) :-
+    directed(DirId, MovieId),
+    movie(MovieId, _, _, _, _, BoxOffice).
+
+// Private: total budget per director
+pred director_total_budget_raw(symbol, u64).
+director_total_budget_raw(DirId, sum(Budget)) :-
+    directed(DirId, MovieId),
+    movie(MovieId, _, _, _, Budget, _).
+
+// =============================================================================
+// DERIVED PREDICATES - MOVIE ANALYTICS
+// =============================================================================
+
+// Movie decade classification
+pred movie_decade(symbol, symbol, u32).
+movie_decade(MovieId, Title, Dec) :-
+    movie(MovieId, Title, Year, _, _, _),
+    Dec is decade(Year).
+
+// Movie rating tier
+pred movie_rating_tier(symbol, symbol, u32, u32).
+movie_rating_tier(MovieId, Title, Rating, Tier) :-
+    movie(MovieId, Title, _, Rating, _, _),
+    Tier is rating_category(Rating).
+
+// Movie ROI calculation
+pred movie_roi(symbol, symbol, u32).
+movie_roi(MovieId, Title, ROI) :-
+    movie(MovieId, Title, _, _, Budget, BoxOffice),
+    ROI is roi_pct(BoxOffice, Budget).
+
+// Movie profit calculation
+pred movie_profit(symbol, symbol, u32).
+movie_profit(MovieId, Title, Profit) :-
+    movie(MovieId, Title, _, _, Budget, BoxOffice),
+    Profit is profit(BoxOffice, Budget).
+
+// High ROI movies (> 500% return)
+pred high_roi_movie(symbol, symbol, u32).
+high_roi_movie(MovieId, Title, ROI) :-
+    movie_roi(MovieId, Title, ROI),
+    ROI > 500.
+
+// Blockbuster movies (box office > $500M)
+pred blockbuster(symbol, symbol, u32).
+blockbuster(MovieId, Title, BoxOffice) :-
+    movie(MovieId, Title, _, _, _, BoxOffice),
+    BoxOffice > 500.
+
+// Billion dollar club
+pred billion_club(symbol, symbol, u32).
+billion_club(MovieId, Title, BoxOffice) :-
+    movie(MovieId, Title, _, _, _, BoxOffice),
+    BoxOffice >= 1000.
+
+// Critically acclaimed (rating >= 90)
+pred critically_acclaimed(symbol, symbol, u32).
+critically_acclaimed(MovieId, Title, Rating) :-
+    movie(MovieId, Title, _, Rating, _, _),
+    Rating >= 90.
+
+// =============================================================================
+// DERIVED PREDICATES - DIRECTOR ANALYTICS
+// =============================================================================
+
+// Director movie count
+pred director_movie_count(symbol, symbol, u64).
+director_movie_count(DirId, Name, Count) :-
+    person(DirId, Name, _, _),
+    entity_type(DirId, director),
+    director_movie_count_raw(DirId, Count).
+
+// Director career span
+pred director_career(symbol, symbol, u32).
+director_career(DirId, Name, Span) :-
+    person(DirId, Name, _, _),
+    director_first_film_year(DirId, FirstYear),
+    director_last_film_year(DirId, LastYear),
+    Span is career_span(FirstYear, LastYear).
+
+// Director productivity score
+pred director_productivity(symbol, symbol, u32).
+director_productivity(DirId, Name, Score) :-
+    person(DirId, Name, _, _),
+    director_movie_count_raw(DirId, CountU64),
+    director_career(DirId, _, CareerYears),
+    Count is cast(CountU64, u32),
+    Score is productivity(Count, CareerYears).
+
+// Director total box office
+pred director_total_box_office(symbol, symbol, u64).
+director_total_box_office(DirId, Name, Total) :-
+    person(DirId, Name, _, _),
+    director_total_box_office_raw(DirId, Total).
+
+// Private helper for total rating (declared before use)
+pred director_total_rating(symbol, u64).
+director_total_rating(DirId, sum(Rating)) :-
+    directed(DirId, MovieId),
+    movie(MovieId, _, _, Rating, _, _).
+
+// Director average rating
+pred director_avg_rating(symbol, symbol, u64).
+director_avg_rating(DirId, Name, AvgRating) :-
+    person(DirId, Name, _, _),
+    director_movie_count_raw(DirId, MovieCount),
+    director_total_rating(DirId, TotalRating),
+    MovieCount > 0,
+    AvgRating is TotalRating / MovieCount.
+
+// Prolific directors (4+ movies)
+pred prolific_director(symbol, symbol, u64).
+prolific_director(DirId, Name, Count) :-
+    director_movie_count(DirId, Name, Count),
+    Count >= 4.
+
+// =============================================================================
+// DERIVED PREDICATES - ACTOR ANALYTICS
+// =============================================================================
+
+// Actor age at each film release
+pred actor_age_in_film(symbol, symbol, symbol, u32).
+actor_age_in_film(ActorId, ActorName, MovieTitle, Age) :-
+    person(ActorId, ActorName, BirthYear, _),
+    acted_in(ActorId, MovieId),
+    movie(MovieId, MovieTitle, ReleaseYear, _, _, _),
+    Age is age_at_release(BirthYear, ReleaseYear).
+
+// Actor movie count
+pred actor_movie_count(symbol, symbol, u64).
+actor_movie_count(ActorId, Name, Count) :-
+    person(ActorId, Name, _, _),
+    has_type(ActorId, actor),
+    actor_movie_count_raw(ActorId, Count).
+
+// Actor career span
+pred actor_career(symbol, symbol, u32).
+actor_career(ActorId, Name, Span) :-
+    person(ActorId, Name, _, _),
+    actor_first_film_year(ActorId, FirstYear),
+    actor_last_film_year(ActorId, LastYear),
+    Span is career_span(FirstYear, LastYear).
+
+// Actor productivity score
+pred actor_productivity(symbol, symbol, u32).
+actor_productivity(ActorId, Name, Score) :-
+    person(ActorId, Name, _, _),
+    actor_movie_count_raw(ActorId, CountU64),
+    actor_career(ActorId, _, CareerYears),
+    CareerYears > 0,
+    Count is cast(CountU64, u32),
+    Score is productivity(Count, CareerYears).
+
+// Prolific actors (3+ movies in dataset)
+pred prolific_actor(symbol, symbol, u64).
+prolific_actor(ActorId, Name, Count) :-
+    actor_movie_count(ActorId, Name, Count),
+    Count >= 3.
+
+// =============================================================================
+// DERIVED PREDICATES - GENRE ANALYTICS
+// =============================================================================
+
+// Private helper for genre counts (declared before use)
+pred genre_count_raw(symbol, u64).
+genre_count_raw(GenreId, count(MovieId)) :- movie_genre(MovieId, GenreId).
+
+// Movies per genre count
+pred genre_movie_count(symbol, symbol, u64).
+genre_movie_count(GenreId, GenreName, Count) :-
+    genre(GenreId, GenreName, _),
+    genre_count_raw(GenreId, Count).
+
+// Private helper for genre total rating (declared before use)
+pred genre_total_rating(symbol, u64).
+genre_total_rating(GenreId, sum(Rating)) :-
+    movie_genre(MovieId, GenreId),
+    movie(MovieId, _, _, Rating, _, _).
+
+// Genre average rating
+pred genre_avg_rating(symbol, symbol, u64).
+genre_avg_rating(GenreId, GenreName, AvgRating) :-
+    genre(GenreId, GenreName, _),
+    genre_count_raw(GenreId, MovieCount),
+    genre_total_rating(GenreId, TotalRating),
+    MovieCount > 0,
+    AvgRating is TotalRating / MovieCount.
+
+// Private helper for genre box office (declared before use)
+pred genre_box_office_raw(symbol, u64).
+genre_box_office_raw(GenreId, sum(BoxOffice)) :-
+    movie_genre(MovieId, GenreId),
+    movie(MovieId, _, _, _, _, BoxOffice).
+
+// Genre total box office
+pred genre_total_box_office(symbol, symbol, u64).
+genre_total_box_office(GenreId, GenreName, Total) :-
+    genre(GenreId, GenreName, _),
+    genre_box_office_raw(GenreId, Total).
+
+// =============================================================================
+// DERIVED PREDICATES - STUDIO ANALYTICS
+// =============================================================================
+
+// Private helper (declared before use)
+pred studio_count_raw(symbol, u64).
+studio_count_raw(StudioId, count(MovieId)) :- produced_by(MovieId, StudioId).
+
+// Movies per studio
+pred studio_movie_count(symbol, symbol, u64).
+studio_movie_count(StudioId, StudioName, Count) :-
+    studio(StudioId, StudioName, _),
+    studio_count_raw(StudioId, Count).
+
+// Private helper (declared before use)
+pred studio_box_office_raw(symbol, u64).
+studio_box_office_raw(StudioId, sum(BoxOffice)) :-
+    produced_by(MovieId, StudioId),
+    movie(MovieId, _, _, _, _, BoxOffice).
+
+// Studio total box office
+pred studio_total_box_office(symbol, symbol, u64).
+studio_total_box_office(StudioId, StudioName, Total) :-
+    studio(StudioId, StudioName, _),
+    studio_box_office_raw(StudioId, Total).
+
+// Major studios (5+ movies)
+pred major_studio(symbol, symbol, u64).
+major_studio(StudioId, StudioName, Count) :-
+    studio_movie_count(StudioId, StudioName, Count),
+    Count >= 5.
+
+// =============================================================================
+// DERIVED PREDICATES - COLLABORATION ANALYTICS
+// =============================================================================
+
+// Director-actor collaborations
+pred collaboration(symbol, symbol, symbol, symbol).
+collaboration(DirName, ActorName, DirId, ActorId) :-
+    person(DirId, DirName, _, _),
+    person(ActorId, ActorName, _, _),
+    directed(DirId, MovieId),
+    acted_in(ActorId, MovieId).
+
+// Private helper for collaboration count (declared before use)
+pred collaboration_count(symbol, symbol, u64).
+collaboration_count(DirName, ActorName, count(MovieId)) :-
+    person(DirId, DirName, _, _),
+    person(ActorId, ActorName, _, _),
+    directed(DirId, MovieId),
+    acted_in(ActorId, MovieId).
+
+// Frequent collaborators (2+ movies together)
+pred frequent_collaborators(symbol, symbol, u64).
+frequent_collaborators(DirName, ActorName, Count) :-
+    collaboration_count(DirName, ActorName, Count),
+    Count >= 2.
+
+// =============================================================================
+// DERIVED PREDICATES - DECADE ANALYTICS
+// =============================================================================
+
+// Movies per decade
+pred decade_movie_count(u32, u64).
+decade_movie_count(Dec, count(MovieId)) :-
+    movie(MovieId, _, Year, _, _, _),
+    Dec is decade(Year).
+
+// Private helper (declared before use)
+pred decade_total_rating(u32, u64).
+decade_total_rating(Dec, sum(Rating)) :-
+    movie(MovieId, _, Year, Rating, _, _),
+    Dec is decade(Year).
+
+// Decade average rating
+pred decade_avg_rating(u32, u64).
+decade_avg_rating(Dec, AvgRating) :-
+    decade_movie_count(Dec, MovieCount),
+    decade_total_rating(Dec, TotalRating),
+    MovieCount > 0,
+    AvgRating is TotalRating / MovieCount.
+
+// Decade total box office
+pred decade_total_box_office(u32, u64).
+decade_total_box_office(Dec, sum(BoxOffice)) :-
+    movie(MovieId, _, Year, _, _, BoxOffice),
+    Dec is decade(Year).
+
+// =============================================================================
+// AWARD ANALYTICS
+// =============================================================================
+
+// Private helper (declared before use)
+pred studio_award_count_raw(symbol, u64).
+studio_award_count_raw(StudioId, count(Award)) :-
+    produced_by(MovieId, StudioId),
+    won_award(MovieId, Award, _).
+
+// Award-winning movies count per studio
+pred studio_awards(symbol, symbol, u64).
+studio_awards(StudioId, StudioName, Count) :-
+    studio(StudioId, StudioName, _),
+    studio_award_count_raw(StudioId, Count).
+
+// Private helper (declared before use)
+pred director_oscar_count_raw(symbol, u64).
+director_oscar_count_raw(DirId, count(Award)) :-
+    directed(DirId, MovieId),
+    won_award(MovieId, Award, _),
+    entity_type(Award, oscar).
+
+// Director Oscar wins
+pred director_oscar_wins(symbol, symbol, u64).
+director_oscar_wins(DirId, Name, Count) :-
+    person(DirId, Name, _, _),
+    director_oscar_count_raw(DirId, Count).

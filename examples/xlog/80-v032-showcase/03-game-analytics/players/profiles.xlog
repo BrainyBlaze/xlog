@@ -1,0 +1,381 @@
+// =============================================================================
+// Player Profiles Module
+// =============================================================================
+// Demonstrates: symbol type for player identifiers, countries, and statuses
+// Contains: 55 players with comprehensive profile data
+// =============================================================================
+
+// --- Predicate Declarations ---
+pred player(symbol, symbol, symbol, symbol).   // player_id, username, country, status
+pred player_stats(symbol, u32, u32, u32).      // player_id, total_xp, games_played, hours_played
+pred region(symbol, symbol).                   // region_id, region_name
+pred player_region(symbol, symbol).            // player_id, region_id
+pred friend(symbol, symbol).                   // player1_id, player2_id (symmetric)
+pred guild(symbol, symbol, symbol).            // guild_id, guild_name, leader_id
+pred guild_member(symbol, symbol).             // guild_id, player_id
+
+// --- Private Helpers ---
+pred active_threshold(u32).
+active_threshold(300).  // 300+ hours = active
+
+// --- Regions ---
+region(na, "North America").
+region(eu, "Europe").
+region(asia, "Asia Pacific").
+region(sa, "South America").
+region(oce, "Oceania").
+
+// =============================================================================
+// PLAYER DATA (55 players)
+// =============================================================================
+
+// --- North America Players (15) ---
+player(p001, dragon_slayer_99, usa, active).
+player(p002, night_hawk, usa, active).
+player(p003, shadow_master, canada, active).
+player(p004, iron_fist, usa, inactive).
+player(p005, storm_bringer, mexico, active).
+player(p006, frost_queen, canada, active).
+player(p007, blaze_fury, usa, active).
+player(p008, void_walker, usa, active).
+player(p009, thunder_strike, canada, active).
+player(p010, crystal_mage, usa, inactive).
+player(p011, steel_warrior, mexico, active).
+player(p012, moon_rider, usa, active).
+player(p013, cyber_ninja, canada, active).
+player(p014, dark_phoenix, usa, active).
+player(p015, rapid_fire, usa, banned).
+
+// --- Europe Players (15) ---
+player(p016, euro_legend, germany, active).
+player(p017, nordic_wolf, sweden, active).
+player(p018, celtic_storm, ireland, active).
+player(p019, alpine_hunter, switzerland, active).
+player(p020, iberian_knight, spain, active).
+player(p021, french_fury, france, active).
+player(p022, dutch_master, netherlands, active).
+player(p023, polish_thunder, poland, active).
+player(p024, italian_ace, italy, inactive).
+player(p025, british_lion, uk, active).
+player(p026, viking_raider, norway, active).
+player(p027, greek_warrior, greece, active).
+player(p028, austrian_eagle, austria, active).
+player(p029, belgian_flash, belgium, inactive).
+player(p030, finnish_frost, finland, active).
+
+// --- Asia Players (15) ---
+player(p031, tokyo_drift, japan, active).
+player(p032, seoul_striker, korea, active).
+player(p033, shanghai_dragon, china, active).
+player(p034, bangkok_blade, thailand, active).
+player(p035, singapore_sniper, singapore, active).
+player(p036, mumbai_maverick, india, active).
+player(p037, taipei_tiger, taiwan, active).
+player(p038, hong_kong_hero, hong_kong, active).
+player(p039, jakarta_jet, indonesia, inactive).
+player(p040, manila_marauder, philippines, active).
+player(p041, hanoi_hunter, vietnam, active).
+player(p042, kuala_lumpur_king, malaysia, active).
+player(p043, osaka_oni, japan, active).
+player(p044, busan_bomber, korea, active).
+player(p045, beijing_beast, china, banned).
+
+// --- South America Players (5) ---
+player(p046, brazilian_blitz, brazil, active).
+player(p047, argentine_arrow, argentina, active).
+player(p048, chilean_champion, chile, active).
+player(p049, peruvian_predator, peru, inactive).
+player(p050, colombian_crusher, colombia, active).
+
+// --- Oceania Players (5) ---
+player(p051, aussie_ace, australia, active).
+player(p052, kiwi_killer, new_zealand, active).
+player(p053, sydney_sniper, australia, active).
+player(p054, melbourne_mage, australia, inactive).
+player(p055, auckland_assassin, new_zealand, active).
+
+// =============================================================================
+// PLAYER STATS (55 entries)
+// =============================================================================
+
+// North America
+player_stats(p001, 125000, 500, 1200).
+player_stats(p002, 98000, 380, 950).
+player_stats(p003, 87000, 320, 800).
+player_stats(p004, 65000, 280, 650).
+player_stats(p005, 145000, 620, 1500).
+player_stats(p006, 110000, 450, 1100).
+player_stats(p007, 52000, 220, 500).
+player_stats(p008, 135000, 550, 1350).
+player_stats(p009, 72000, 300, 700).
+player_stats(p010, 95000, 400, 980).
+player_stats(p011, 48000, 200, 480).
+player_stats(p012, 105000, 430, 1050).
+player_stats(p013, 78000, 310, 760).
+player_stats(p014, 92000, 375, 920).
+player_stats(p015, 115000, 470, 1150).
+
+// Europe
+player_stats(p016, 142000, 580, 1420).
+player_stats(p017, 88000, 350, 870).
+player_stats(p018, 76000, 290, 740).
+player_stats(p019, 103000, 420, 1030).
+player_stats(p020, 67000, 260, 660).
+player_stats(p021, 119000, 485, 1180).
+player_stats(p022, 95000, 390, 940).
+player_stats(p023, 83000, 340, 820).
+player_stats(p024, 54000, 210, 530).
+player_stats(p025, 128000, 520, 1270).
+player_stats(p026, 97000, 400, 960).
+player_stats(p027, 71000, 280, 700).
+player_stats(p028, 62000, 240, 610).
+player_stats(p029, 45000, 175, 440).
+player_stats(p030, 108000, 440, 1070).
+
+// Asia
+player_stats(p031, 165000, 700, 1650).
+player_stats(p032, 158000, 670, 1580).
+player_stats(p033, 172000, 730, 1720).
+player_stats(p034, 82000, 330, 810).
+player_stats(p035, 94000, 380, 930).
+player_stats(p036, 68000, 270, 670).
+player_stats(p037, 115000, 470, 1140).
+player_stats(p038, 121000, 495, 1200).
+player_stats(p039, 43000, 170, 420).
+player_stats(p040, 77000, 305, 760).
+player_stats(p041, 89000, 360, 880).
+player_stats(p042, 73000, 295, 720).
+player_stats(p043, 131000, 535, 1300).
+player_stats(p044, 147000, 600, 1460).
+player_stats(p045, 155000, 640, 1540).
+
+// South America
+player_stats(p046, 98000, 400, 970).
+player_stats(p047, 85000, 345, 840).
+player_stats(p048, 72000, 290, 710).
+player_stats(p049, 51000, 200, 500).
+player_stats(p050, 79000, 315, 780).
+
+// Oceania
+player_stats(p051, 112000, 455, 1110).
+player_stats(p052, 87000, 350, 860).
+player_stats(p053, 95000, 385, 940).
+player_stats(p054, 58000, 230, 570).
+player_stats(p055, 81000, 325, 800).
+
+// =============================================================================
+// PLAYER REGION ASSIGNMENTS (55 entries)
+// =============================================================================
+
+// North America
+player_region(p001, na).
+player_region(p002, na).
+player_region(p003, na).
+player_region(p004, na).
+player_region(p005, na).
+player_region(p006, na).
+player_region(p007, na).
+player_region(p008, na).
+player_region(p009, na).
+player_region(p010, na).
+player_region(p011, na).
+player_region(p012, na).
+player_region(p013, na).
+player_region(p014, na).
+player_region(p015, na).
+
+// Europe
+player_region(p016, eu).
+player_region(p017, eu).
+player_region(p018, eu).
+player_region(p019, eu).
+player_region(p020, eu).
+player_region(p021, eu).
+player_region(p022, eu).
+player_region(p023, eu).
+player_region(p024, eu).
+player_region(p025, eu).
+player_region(p026, eu).
+player_region(p027, eu).
+player_region(p028, eu).
+player_region(p029, eu).
+player_region(p030, eu).
+
+// Asia
+player_region(p031, asia).
+player_region(p032, asia).
+player_region(p033, asia).
+player_region(p034, asia).
+player_region(p035, asia).
+player_region(p036, asia).
+player_region(p037, asia).
+player_region(p038, asia).
+player_region(p039, asia).
+player_region(p040, asia).
+player_region(p041, asia).
+player_region(p042, asia).
+player_region(p043, asia).
+player_region(p044, asia).
+player_region(p045, asia).
+
+// South America
+player_region(p046, sa).
+player_region(p047, sa).
+player_region(p048, sa).
+player_region(p049, sa).
+player_region(p050, sa).
+
+// Oceania
+player_region(p051, oce).
+player_region(p052, oce).
+player_region(p053, oce).
+player_region(p054, oce).
+player_region(p055, oce).
+
+// =============================================================================
+// FRIENDSHIPS (symmetric relationships - 30 pairs = 60 facts)
+// =============================================================================
+
+// NA friend clusters
+friend(p001, p002). friend(p002, p001).
+friend(p001, p005). friend(p005, p001).
+friend(p002, p005). friend(p005, p002).
+friend(p003, p006). friend(p006, p003).
+friend(p003, p009). friend(p009, p003).
+friend(p007, p012). friend(p012, p007).
+friend(p008, p014). friend(p014, p008).
+friend(p010, p011). friend(p011, p010).
+friend(p013, p014). friend(p014, p013).
+
+// EU friend clusters
+friend(p016, p017). friend(p017, p016).
+friend(p016, p025). friend(p025, p016).
+friend(p018, p025). friend(p025, p018).
+friend(p020, p021). friend(p021, p020).
+friend(p022, p023). friend(p023, p022).
+friend(p026, p030). friend(p030, p026).
+
+// Asia friend clusters
+friend(p031, p032). friend(p032, p031).
+friend(p031, p043). friend(p043, p031).
+friend(p032, p044). friend(p044, p032).
+friend(p033, p037). friend(p037, p033).
+friend(p033, p038). friend(p038, p033).
+friend(p034, p035). friend(p035, p034).
+friend(p040, p041). friend(p041, p040).
+
+// Cross-region friends
+friend(p001, p016). friend(p016, p001).
+friend(p005, p031). friend(p031, p005).
+friend(p008, p025). friend(p025, p008).
+friend(p012, p046). friend(p046, p012).
+friend(p017, p032). friend(p032, p017).
+friend(p051, p025). friend(p025, p051).
+
+// =============================================================================
+// GUILDS (8 guilds)
+// =============================================================================
+
+guild(g001, dragon_knights, p001).
+guild(g002, shadow_legion, p005).
+guild(g003, frost_wolves, p016).
+guild(g004, phoenix_rising, p031).
+guild(g005, steel_titans, p046).
+guild(g006, nordic_raiders, p017).
+guild(g007, asian_alliance, p033).
+guild(g008, global_elite, p008).
+
+// =============================================================================
+// GUILD MEMBERSHIPS (40 memberships)
+// =============================================================================
+
+// Dragon Knights (NA guild)
+guild_member(g001, p001).
+guild_member(g001, p002).
+guild_member(g001, p007).
+guild_member(g001, p012).
+guild_member(g001, p014).
+
+// Shadow Legion (NA/Mexico)
+guild_member(g002, p005).
+guild_member(g002, p006).
+guild_member(g002, p009).
+guild_member(g002, p011).
+
+// Frost Wolves (EU guild)
+guild_member(g003, p016).
+guild_member(g003, p017).
+guild_member(g003, p025).
+guild_member(g003, p026).
+guild_member(g003, p030).
+
+// Phoenix Rising (Asia guild)
+guild_member(g004, p031).
+guild_member(g004, p032).
+guild_member(g004, p043).
+guild_member(g004, p044).
+guild_member(g004, p037).
+
+// Steel Titans (SA guild)
+guild_member(g005, p046).
+guild_member(g005, p047).
+guild_member(g005, p048).
+guild_member(g005, p050).
+
+// Nordic Raiders (EU Scandinavian)
+guild_member(g006, p017).
+guild_member(g006, p026).
+guild_member(g006, p030).
+guild_member(g006, p019).
+
+// Asian Alliance (Multi-Asia)
+guild_member(g007, p033).
+guild_member(g007, p034).
+guild_member(g007, p035).
+guild_member(g007, p038).
+guild_member(g007, p040).
+guild_member(g007, p041).
+
+// Global Elite (Cross-region top players)
+guild_member(g008, p008).
+guild_member(g008, p016).
+guild_member(g008, p031).
+guild_member(g008, p033).
+guild_member(g008, p051).
+guild_member(g008, p025).
+
+// =============================================================================
+// DERIVED PREDICATES
+// =============================================================================
+
+// Friend count per player
+pred friend_count(symbol, u64).
+friend_count(PlayerId, count(FriendId)) :- friend(PlayerId, FriendId).
+
+// Active player check (300+ hours)
+pred is_active_player(symbol).
+is_active_player(PlayerId) :-
+    player_stats(PlayerId, _, _, Hours),
+    active_threshold(Threshold),
+    Hours >= Threshold.
+
+// Friend of friend (2-hop social connection, avoiding self-loops)
+pred friend_of_friend(symbol, symbol).
+friend_of_friend(P1, P3) :-
+    friend(P1, P2),
+    friend(P2, P3),
+    P1 != P3,
+    P1 != P2.
+
+// Guild member count
+pred guild_size(symbol, u64).
+guild_size(GuildId, count(PlayerId)) :- guild_member(GuildId, PlayerId).
+
+// Popular players (3+ friends)
+pred popular_player(symbol, symbol, u64).
+popular_player(Username, RegionName, FriendCount) :-
+    player(PlayerId, Username, _, active),
+    player_region(PlayerId, RegionId),
+    region(RegionId, RegionName),
+    friend_count(PlayerId, FriendCount),
+    FriendCount >= 3.

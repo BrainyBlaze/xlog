@@ -1,0 +1,173 @@
+// =============================================================================
+// Knowledge Graph Schema - Type Hierarchy and Ontology
+// =============================================================================
+// Defines the type system for the movie domain knowledge graph.
+//
+// Features:
+//   - symbol type for entity/type identifiers
+//   - Recursive rule for transitive subclass inference (is_subclass)
+//   - Type hierarchy: thing -> creative_work -> movie, etc.
+// =============================================================================
+
+// --- Core Ontology Predicates ---
+
+// Type relationship: child_type is a direct subtype of parent_type
+pred subclass_of(symbol, symbol).
+
+// Type label for human-readable names
+pred type_label(symbol, symbol).
+
+// =============================================================================
+// TYPE HIERARCHY
+// =============================================================================
+
+// Root type - everything is a thing
+type_label(thing, "Thing").
+
+// --- Level 1: Top-level categories ---
+subclass_of(creative_work, thing).
+subclass_of(person, thing).
+subclass_of(concept, thing).
+subclass_of(organization, thing).
+subclass_of(award, thing).
+
+type_label(creative_work, "Creative Work").
+type_label(person, "Person").
+type_label(concept, "Concept").
+type_label(organization, "Organization").
+type_label(award, "Award").
+
+// --- Level 2: Creative Work subtypes ---
+subclass_of(movie, creative_work).
+subclass_of(tv_series, creative_work).
+subclass_of(documentary, creative_work).
+subclass_of(short_film, creative_work).
+subclass_of(animated_film, movie).
+
+type_label(movie, "Movie").
+type_label(tv_series, "TV Series").
+type_label(documentary, "Documentary").
+type_label(short_film, "Short Film").
+type_label(animated_film, "Animated Film").
+
+// --- Level 3: Movie subtypes by genre/format ---
+subclass_of(action_movie, movie).
+subclass_of(drama_movie, movie).
+subclass_of(comedy_movie, movie).
+subclass_of(scifi_movie, movie).
+subclass_of(thriller_movie, movie).
+subclass_of(horror_movie, movie).
+
+type_label(action_movie, "Action Movie").
+type_label(drama_movie, "Drama Movie").
+type_label(comedy_movie, "Comedy Movie").
+type_label(scifi_movie, "Sci-Fi Movie").
+type_label(thriller_movie, "Thriller Movie").
+type_label(horror_movie, "Horror Movie").
+
+// --- Level 2: Person subtypes ---
+subclass_of(film_person, person).
+subclass_of(celebrity, person).
+
+type_label(film_person, "Film Industry Person").
+type_label(celebrity, "Celebrity").
+
+// --- Level 3: Film person subtypes ---
+subclass_of(actor, film_person).
+subclass_of(director, film_person).
+subclass_of(producer, film_person).
+subclass_of(writer, film_person).
+subclass_of(composer, film_person).
+subclass_of(cinematographer, film_person).
+
+type_label(actor, "Actor").
+type_label(director, "Director").
+type_label(producer, "Producer").
+type_label(writer, "Writer").
+type_label(composer, "Composer").
+type_label(cinematographer, "Cinematographer").
+
+// --- Level 4: Actor subtypes ---
+subclass_of(lead_actor, actor).
+subclass_of(supporting_actor, actor).
+subclass_of(voice_actor, actor).
+
+type_label(lead_actor, "Lead Actor").
+type_label(supporting_actor, "Supporting Actor").
+type_label(voice_actor, "Voice Actor").
+
+// --- Level 2: Concept subtypes ---
+subclass_of(genre, concept).
+subclass_of(theme, concept).
+subclass_of(era, concept).
+subclass_of(rating_category, concept).
+
+type_label(genre, "Genre").
+type_label(theme, "Theme").
+type_label(era, "Era").
+type_label(rating_category, "Rating Category").
+
+// --- Level 2: Organization subtypes ---
+subclass_of(studio, organization).
+subclass_of(distributor, organization).
+subclass_of(awards_body, organization).
+
+type_label(studio, "Studio").
+type_label(distributor, "Distributor").
+type_label(awards_body, "Awards Body").
+
+// --- Level 2: Award subtypes ---
+subclass_of(oscar, award).
+subclass_of(golden_globe, award).
+subclass_of(bafta, award).
+subclass_of(cannes_award, award).
+
+type_label(oscar, "Academy Award").
+type_label(golden_globe, "Golden Globe").
+type_label(bafta, "BAFTA Award").
+type_label(cannes_award, "Cannes Award").
+
+// =============================================================================
+// RECURSIVE TYPE INFERENCE
+// =============================================================================
+
+// Predicate for transitive type hierarchy traversal
+pred is_subclass(symbol, symbol).
+
+// Base case: direct subclass relationship
+is_subclass(Child, Parent) :- subclass_of(Child, Parent).
+
+// Recursive case: transitive inheritance through the hierarchy
+is_subclass(Child, Ancestor) :-
+    subclass_of(Child, Parent),
+    is_subclass(Parent, Ancestor).
+
+// =============================================================================
+// ENTITY TYPE ASSIGNMENT
+// =============================================================================
+
+// Entity type: entity_id has direct type Type
+pred entity_type(symbol, symbol).
+
+// Inferred types via hierarchy
+pred has_type(symbol, symbol).
+
+// Direct type assignment
+has_type(Entity, Type) :- entity_type(Entity, Type).
+
+// Inferred type through subclass relationship
+has_type(Entity, AncestorType) :-
+    entity_type(Entity, DirectType),
+    is_subclass(DirectType, AncestorType).
+
+// =============================================================================
+// TYPE STATISTICS (for validation/debugging)
+// =============================================================================
+
+// Count direct subtypes of each type
+pred direct_subtype_count(symbol, u64).
+direct_subtype_count(Parent, count(Child)) :- subclass_of(Child, Parent).
+
+// Count all subtypes (transitive) of each type
+pred total_subtype_count(symbol, u64).
+total_subtype_count(Ancestor, count(Descendant)) :- is_subclass(Descendant, Ancestor).

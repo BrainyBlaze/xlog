@@ -1,0 +1,542 @@
+// =============================================================================
+// Achievement System Module
+// =============================================================================
+// Demonstrates: Recursive prerequisite chains, UDFs for points calculation
+// Contains: 25 achievements with complex prerequisite relationships
+// =============================================================================
+
+// --- Predicate Declarations ---
+pred achievement(symbol, symbol, u32).         // achievement_id, name, rarity (1=legendary, 2=epic, 3=rare, 4=common)
+pred achievement_requires(symbol, symbol).     // achievement_id, prerequisite_id
+pred player_achievement(symbol, symbol).       // player_id, achievement_id
+pred achievement_category(symbol, symbol).     // achievement_id, category
+
+// --- Private Helpers ---
+pred legendary_rarity(u32).
+pred epic_rarity(u32).
+pred rare_rarity(u32).
+pred common_rarity(u32).
+
+legendary_rarity(1).
+epic_rarity(2).
+rare_rarity(3).
+common_rarity(4).
+
+// =============================================================================
+// USER-DEFINED FUNCTIONS (UDFs)
+// =============================================================================
+
+// Achievement points based on rarity
+// Rarity 1 (Legendary) = 100 points, Rarity 2 (Epic) = 50, Rarity 3 (Rare) = 25, Common = 10
+func achievement_points(Rarity) = if Rarity = cast(1, u32) then cast(100, u32) else if Rarity = cast(2, u32) then cast(50, u32) else if Rarity = cast(3, u32) then cast(25, u32) else cast(10, u32).
+
+// =============================================================================
+// ACHIEVEMENT DEFINITIONS (25 achievements)
+// =============================================================================
+
+// --- Combat Chain (6 achievements) ---
+achievement(a001, first_blood, 4).           // Common - Get first kill
+achievement(a002, killing_spree, 3).         // Rare - 5 kills without dying
+achievement(a003, unstoppable, 2).           // Epic - 10 kills without dying
+achievement(a004, legendary_warrior, 1).     // Legendary - 20 kills without dying
+achievement(a005, godlike, 1).               // Legendary - 30 kills without dying
+achievement(a006, demigod, 1).               // Legendary - 50 kills without dying
+
+// --- Team Play Chain (4 achievements) ---
+achievement(a007, team_player, 4).           // Common - 10 assists
+achievement(a008, support_specialist, 3).    // Rare - 50 assists
+achievement(a009, support_master, 2).        // Epic - 100 assists
+achievement(a010, ultimate_support, 1).      // Legendary - 250 assists
+
+// --- Experience Chain (5 achievements) ---
+achievement(a011, beginner, 4).              // Common - Complete tutorial
+achievement(a012, veteran, 3).               // Rare - 100 games played
+achievement(a013, elite, 2).                 // Epic - 500 games played
+achievement(a014, champion, 1).              // Legendary - 1000 games played
+achievement(a015, immortal_legend, 1).       // Legendary - 2000 games played
+
+// --- Win Streak Chain (4 achievements) ---
+achievement(a016, first_win, 4).             // Common - Win first match
+achievement(a017, winning_streak, 3).        // Rare - Win 5 matches in a row
+achievement(a018, dominant_force, 2).        // Epic - Win 10 matches in a row
+achievement(a019, undefeated, 1).            // Legendary - Win 20 matches in a row
+
+// --- Social Chain (3 achievements) ---
+achievement(a020, social_butterfly, 4).      // Common - Add 5 friends
+achievement(a021, community_leader, 3).      // Rare - Add 20 friends
+achievement(a022, guild_master, 2).          // Epic - Lead a guild with 10+ members
+
+// --- Special Achievements (3 achievements) ---
+achievement(a023, accuracy_king, 2).         // Epic - 80%+ accuracy in a match
+achievement(a024, survivor, 3).              // Rare - Win Battle Royale
+achievement(a025, perfectionist, 1).         // Legendary - Complete all other achievements
+
+// =============================================================================
+// ACHIEVEMENT CATEGORIES
+// =============================================================================
+
+achievement_category(a001, combat).
+achievement_category(a002, combat).
+achievement_category(a003, combat).
+achievement_category(a004, combat).
+achievement_category(a005, combat).
+achievement_category(a006, combat).
+achievement_category(a007, teamwork).
+achievement_category(a008, teamwork).
+achievement_category(a009, teamwork).
+achievement_category(a010, teamwork).
+achievement_category(a011, progression).
+achievement_category(a012, progression).
+achievement_category(a013, progression).
+achievement_category(a014, progression).
+achievement_category(a015, progression).
+achievement_category(a016, winning).
+achievement_category(a017, winning).
+achievement_category(a018, winning).
+achievement_category(a019, winning).
+achievement_category(a020, social).
+achievement_category(a021, social).
+achievement_category(a022, social).
+achievement_category(a023, skill).
+achievement_category(a024, skill).
+achievement_category(a025, completion).
+
+// =============================================================================
+// PREREQUISITE CHAINS (Achievement Dependencies)
+// =============================================================================
+
+// Combat chain: First Blood -> Killing Spree -> Unstoppable -> Legendary -> Godlike -> Demigod
+achievement_requires(a002, a001).  // Killing Spree requires First Blood
+achievement_requires(a003, a002).  // Unstoppable requires Killing Spree
+achievement_requires(a004, a003).  // Legendary Warrior requires Unstoppable
+achievement_requires(a005, a004).  // Godlike requires Legendary Warrior
+achievement_requires(a006, a005).  // Demigod requires Godlike
+
+// Team play chain: Team Player -> Support Specialist -> Support Master -> Ultimate Support
+achievement_requires(a008, a007).  // Support Specialist requires Team Player
+achievement_requires(a009, a008).  // Support Master requires Support Specialist
+achievement_requires(a010, a009).  // Ultimate Support requires Support Master
+
+// Experience chain: Beginner -> Veteran -> Elite -> Champion -> Immortal Legend
+achievement_requires(a012, a011).  // Veteran requires Beginner
+achievement_requires(a013, a012).  // Elite requires Veteran
+achievement_requires(a014, a013).  // Champion requires Elite
+achievement_requires(a015, a014).  // Immortal Legend requires Champion
+
+// Win streak chain: First Win -> Winning Streak -> Dominant Force -> Undefeated
+achievement_requires(a017, a016).  // Winning Streak requires First Win
+achievement_requires(a018, a017).  // Dominant Force requires Winning Streak
+achievement_requires(a019, a018).  // Undefeated requires Dominant Force
+
+// Social chain: Social Butterfly -> Community Leader -> Guild Master
+achievement_requires(a021, a020).  // Community Leader requires Social Butterfly
+achievement_requires(a022, a021).  // Guild Master requires Community Leader
+
+// Perfectionist requires all legendary achievements
+achievement_requires(a025, a006).  // Perfectionist requires Demigod
+achievement_requires(a025, a010).  // Perfectionist requires Ultimate Support
+achievement_requires(a025, a015).  // Perfectionist requires Immortal Legend
+achievement_requires(a025, a019).  // Perfectionist requires Undefeated
+
+// =============================================================================
+// PLAYER ACHIEVEMENTS (100+ assignments)
+// =============================================================================
+
+// Player p001 (DragonSlayer99) - Very high achiever
+player_achievement(p001, a001).
+player_achievement(p001, a002).
+player_achievement(p001, a003).
+player_achievement(p001, a004).
+player_achievement(p001, a007).
+player_achievement(p001, a008).
+player_achievement(p001, a011).
+player_achievement(p001, a012).
+player_achievement(p001, a013).
+player_achievement(p001, a016).
+player_achievement(p001, a017).
+player_achievement(p001, a020).
+player_achievement(p001, a021).
+player_achievement(p001, a023).
+player_achievement(p001, a024).
+
+// Player p002 (NightHawk) - High achiever
+player_achievement(p002, a001).
+player_achievement(p002, a002).
+player_achievement(p002, a003).
+player_achievement(p002, a007).
+player_achievement(p002, a008).
+player_achievement(p002, a011).
+player_achievement(p002, a012).
+player_achievement(p002, a016).
+player_achievement(p002, a017).
+player_achievement(p002, a020).
+player_achievement(p002, a024).
+
+// Player p005 (StormBringer) - Top player with most achievements
+player_achievement(p005, a001).
+player_achievement(p005, a002).
+player_achievement(p005, a003).
+player_achievement(p005, a004).
+player_achievement(p005, a005).
+player_achievement(p005, a007).
+player_achievement(p005, a008).
+player_achievement(p005, a009).
+player_achievement(p005, a011).
+player_achievement(p005, a012).
+player_achievement(p005, a013).
+player_achievement(p005, a014).
+player_achievement(p005, a016).
+player_achievement(p005, a017).
+player_achievement(p005, a018).
+player_achievement(p005, a020).
+player_achievement(p005, a021).
+player_achievement(p005, a022).
+player_achievement(p005, a023).
+player_achievement(p005, a024).
+
+// Player p008 (VoidWalker) - Strong player
+player_achievement(p008, a001).
+player_achievement(p008, a002).
+player_achievement(p008, a003).
+player_achievement(p008, a007).
+player_achievement(p008, a008).
+player_achievement(p008, a009).
+player_achievement(p008, a011).
+player_achievement(p008, a012).
+player_achievement(p008, a013).
+player_achievement(p008, a016).
+player_achievement(p008, a017).
+player_achievement(p008, a020).
+
+// Player p016 (EuroLegend) - EU top player
+player_achievement(p016, a001).
+player_achievement(p016, a002).
+player_achievement(p016, a003).
+player_achievement(p016, a004).
+player_achievement(p016, a007).
+player_achievement(p016, a008).
+player_achievement(p016, a011).
+player_achievement(p016, a012).
+player_achievement(p016, a013).
+player_achievement(p016, a016).
+player_achievement(p016, a017).
+player_achievement(p016, a018).
+player_achievement(p016, a020).
+player_achievement(p016, a021).
+
+// Player p025 (BritishLion) - EU achiever
+player_achievement(p025, a001).
+player_achievement(p025, a002).
+player_achievement(p025, a003).
+player_achievement(p025, a007).
+player_achievement(p025, a008).
+player_achievement(p025, a011).
+player_achievement(p025, a012).
+player_achievement(p025, a016).
+player_achievement(p025, a017).
+player_achievement(p025, a020).
+player_achievement(p025, a024).
+
+// Player p031 (TokyoDrift) - Asia top player
+player_achievement(p031, a001).
+player_achievement(p031, a002).
+player_achievement(p031, a003).
+player_achievement(p031, a004).
+player_achievement(p031, a005).
+player_achievement(p031, a006).
+player_achievement(p031, a007).
+player_achievement(p031, a008).
+player_achievement(p031, a009).
+player_achievement(p031, a010).
+player_achievement(p031, a011).
+player_achievement(p031, a012).
+player_achievement(p031, a013).
+player_achievement(p031, a014).
+player_achievement(p031, a016).
+player_achievement(p031, a017).
+player_achievement(p031, a018).
+player_achievement(p031, a019).
+player_achievement(p031, a020).
+player_achievement(p031, a021).
+player_achievement(p031, a022).
+player_achievement(p031, a023).
+player_achievement(p031, a024).
+
+// Player p032 (SeoulStriker) - Korea top player
+player_achievement(p032, a001).
+player_achievement(p032, a002).
+player_achievement(p032, a003).
+player_achievement(p032, a004).
+player_achievement(p032, a007).
+player_achievement(p032, a008).
+player_achievement(p032, a009).
+player_achievement(p032, a011).
+player_achievement(p032, a012).
+player_achievement(p032, a013).
+player_achievement(p032, a016).
+player_achievement(p032, a017).
+player_achievement(p032, a020).
+
+// Player p033 (ShanghaiDragon) - China top player
+player_achievement(p033, a001).
+player_achievement(p033, a002).
+player_achievement(p033, a003).
+player_achievement(p033, a004).
+player_achievement(p033, a005).
+player_achievement(p033, a007).
+player_achievement(p033, a008).
+player_achievement(p033, a011).
+player_achievement(p033, a012).
+player_achievement(p033, a013).
+player_achievement(p033, a016).
+player_achievement(p033, a017).
+player_achievement(p033, a018).
+player_achievement(p033, a020).
+player_achievement(p033, a021).
+
+// Player p043 (OsakaOni) - Japan strong player
+player_achievement(p043, a001).
+player_achievement(p043, a002).
+player_achievement(p043, a003).
+player_achievement(p043, a007).
+player_achievement(p043, a008).
+player_achievement(p043, a011).
+player_achievement(p043, a012).
+player_achievement(p043, a016).
+player_achievement(p043, a017).
+player_achievement(p043, a020).
+
+// Player p044 (BusanBomber) - Korea strong player
+player_achievement(p044, a001).
+player_achievement(p044, a002).
+player_achievement(p044, a003).
+player_achievement(p044, a007).
+player_achievement(p044, a008).
+player_achievement(p044, a011).
+player_achievement(p044, a012).
+player_achievement(p044, a013).
+player_achievement(p044, a016).
+player_achievement(p044, a017).
+player_achievement(p044, a020).
+
+// Player p051 (AussieAce) - Oceania top player
+player_achievement(p051, a001).
+player_achievement(p051, a002).
+player_achievement(p051, a003).
+player_achievement(p051, a004).
+player_achievement(p051, a007).
+player_achievement(p051, a008).
+player_achievement(p051, a011).
+player_achievement(p051, a012).
+player_achievement(p051, a013).
+player_achievement(p051, a016).
+player_achievement(p051, a017).
+player_achievement(p051, a020).
+player_achievement(p051, a021).
+
+// Player p046 (BrazilianBlitz) - SA top player
+player_achievement(p046, a001).
+player_achievement(p046, a002).
+player_achievement(p046, a007).
+player_achievement(p046, a008).
+player_achievement(p046, a011).
+player_achievement(p046, a012).
+player_achievement(p046, a016).
+player_achievement(p046, a020).
+
+// Player p017 (NordicWolf) - EU player
+player_achievement(p017, a001).
+player_achievement(p017, a002).
+player_achievement(p017, a003).
+player_achievement(p017, a007).
+player_achievement(p017, a011).
+player_achievement(p017, a012).
+player_achievement(p017, a016).
+player_achievement(p017, a017).
+player_achievement(p017, a020).
+
+// Player p006 (FrostQueen) - NA player
+player_achievement(p006, a001).
+player_achievement(p006, a002).
+player_achievement(p006, a007).
+player_achievement(p006, a008).
+player_achievement(p006, a011).
+player_achievement(p006, a012).
+player_achievement(p006, a016).
+player_achievement(p006, a020).
+
+// Player p003 (ShadowMaster) - NA player
+player_achievement(p003, a001).
+player_achievement(p003, a007).
+player_achievement(p003, a011).
+player_achievement(p003, a016).
+player_achievement(p003, a020).
+
+// Player p007 (BlazeFury) - NA player
+player_achievement(p007, a001).
+player_achievement(p007, a011).
+player_achievement(p007, a016).
+player_achievement(p007, a020).
+
+// Player p009 (ThunderStrike) - NA player
+player_achievement(p009, a001).
+player_achievement(p009, a002).
+player_achievement(p009, a007).
+player_achievement(p009, a011).
+player_achievement(p009, a012).
+player_achievement(p009, a016).
+player_achievement(p009, a020).
+
+// Player p012 (MoonRider) - NA player
+player_achievement(p012, a001).
+player_achievement(p012, a002).
+player_achievement(p012, a007).
+player_achievement(p012, a011).
+player_achievement(p012, a012).
+player_achievement(p012, a016).
+player_achievement(p012, a017).
+player_achievement(p012, a020).
+
+// Basic achievements for casual players
+player_achievement(p004, a001).
+player_achievement(p004, a011).
+player_achievement(p004, a016).
+player_achievement(p010, a001).
+player_achievement(p010, a011).
+player_achievement(p010, a016).
+player_achievement(p011, a001).
+player_achievement(p011, a011).
+player_achievement(p011, a016).
+player_achievement(p013, a001).
+player_achievement(p013, a011).
+player_achievement(p013, a016).
+player_achievement(p014, a001).
+player_achievement(p014, a011).
+player_achievement(p014, a016).
+player_achievement(p018, a001).
+player_achievement(p018, a011).
+player_achievement(p018, a016).
+player_achievement(p019, a001).
+player_achievement(p019, a011).
+player_achievement(p019, a016).
+player_achievement(p020, a001).
+player_achievement(p020, a011).
+player_achievement(p020, a016).
+player_achievement(p021, a001).
+player_achievement(p021, a011).
+player_achievement(p021, a016).
+player_achievement(p022, a001).
+player_achievement(p022, a011).
+player_achievement(p022, a016).
+player_achievement(p023, a001).
+player_achievement(p023, a011).
+player_achievement(p023, a016).
+player_achievement(p026, a001).
+player_achievement(p026, a011).
+player_achievement(p026, a016).
+player_achievement(p027, a001).
+player_achievement(p027, a011).
+player_achievement(p027, a016).
+player_achievement(p028, a001).
+player_achievement(p028, a011).
+player_achievement(p028, a016).
+player_achievement(p030, a001).
+player_achievement(p030, a011).
+player_achievement(p030, a016).
+player_achievement(p034, a001).
+player_achievement(p034, a011).
+player_achievement(p034, a016).
+player_achievement(p035, a001).
+player_achievement(p035, a011).
+player_achievement(p035, a016).
+player_achievement(p036, a001).
+player_achievement(p036, a011).
+player_achievement(p036, a016).
+player_achievement(p037, a001).
+player_achievement(p037, a011).
+player_achievement(p037, a016).
+player_achievement(p038, a001).
+player_achievement(p038, a011).
+player_achievement(p038, a016).
+player_achievement(p040, a001).
+player_achievement(p040, a011).
+player_achievement(p040, a016).
+player_achievement(p041, a001).
+player_achievement(p041, a011).
+player_achievement(p041, a016).
+player_achievement(p042, a001).
+player_achievement(p042, a011).
+player_achievement(p042, a016).
+player_achievement(p047, a001).
+player_achievement(p047, a011).
+player_achievement(p047, a016).
+player_achievement(p048, a001).
+player_achievement(p048, a011).
+player_achievement(p048, a016).
+player_achievement(p050, a001).
+player_achievement(p050, a011).
+player_achievement(p050, a016).
+player_achievement(p052, a001).
+player_achievement(p052, a011).
+player_achievement(p052, a016).
+player_achievement(p053, a001).
+player_achievement(p053, a011).
+player_achievement(p053, a016).
+player_achievement(p055, a001).
+player_achievement(p055, a011).
+player_achievement(p055, a016).
+
+// =============================================================================
+// RECURSIVE RULES - Achievement Prerequisite Chain
+// =============================================================================
+
+// All prerequisites for an achievement (transitive closure)
+pred all_prerequisites(symbol, symbol).
+
+// Base case: direct prerequisite
+all_prerequisites(AchId, PrereqId) :- achievement_requires(AchId, PrereqId).
+
+// Recursive case: transitive prerequisites
+all_prerequisites(AchId, TransPrereq) :-
+    achievement_requires(AchId, DirectPrereq),
+    all_prerequisites(DirectPrereq, TransPrereq).
+
+// =============================================================================
+// DERIVED PREDICATES
+// =============================================================================
+
+// Achievement points calculation per player
+// Note: sum(u32) returns u64
+pred player_achievement_points(symbol, u64).
+player_achievement_points(PlayerId, sum(Points)) :-
+    player_achievement(PlayerId, AchId),
+    achievement(AchId, _, Rarity),
+    Points is achievement_points(Rarity).
+
+// Count achievements per player
+pred player_achievement_count(symbol, u64).
+player_achievement_count(PlayerId, count(AchId)) :- player_achievement(PlayerId, AchId).
+
+// High achievers (200+ achievement points)
+pred high_achiever(symbol, u64).
+high_achiever(PlayerId, Points) :-
+    player_achievement_points(PlayerId, Points),
+    Points >= 200.
+
+// Legendary achievement holders
+pred legendary_holder(symbol, symbol).
+legendary_holder(PlayerId, AchName) :-
+    player_achievement(PlayerId, AchId),
+    achievement(AchId, AchName, Rarity),
+    legendary_rarity(Rarity).
+
+// Count achievements per category
+pred category_count(symbol, u64).
+category_count(Category, count(AchId)) :- achievement_category(AchId, Category).
+
+// Missing prerequisites for a player
+pred missing_prerequisite(symbol, symbol, symbol).
+missing_prerequisite(PlayerId, AchId, PrereqId) :-
+    player_achievement(PlayerId, AchId),
+    all_prerequisites(AchId, PrereqId),
+    not player_achievement(PlayerId, PrereqId).

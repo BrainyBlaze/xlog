@@ -1,0 +1,810 @@
+// =============================================================================
+// Inventory & Stock Management Module
+// =============================================================================
+// Supply chain inventory data: products, warehouses, stock levels, reorder points
+//
+// Features:
+//   - 50+ products across multiple categories
+//   - Multi-warehouse inventory tracking
+//   - Daily demand and reorder point management
+//   - Bill of Materials (BOM) for manufactured products
+// =============================================================================
+
+// --- Core Predicates ---
+pred product(symbol, symbol, symbol).        // product_id, name, category
+pred warehouse(symbol, symbol, symbol).      // warehouse_id, name, region
+pred stock(symbol, symbol, u32).             // warehouse_id, product_id, quantity
+pred unit_cost(symbol, u32).                 // product_id, cost_cents
+pred reorder_point(symbol, u32).             // product_id, min_quantity
+pred daily_demand(symbol, u32).              // product_id, avg_daily_units
+pred lead_time_days(symbol, u32).            // product_id, supplier_lead_days
+
+// Bill of Materials: parent_product, component_product, quantity_needed
+pred bom(symbol, symbol, u32).
+
+// =============================================================================
+// WAREHOUSES (8 locations)
+// =============================================================================
+
+warehouse(wh_seattle, "Seattle Distribution Center", northwest).
+warehouse(wh_portland, "Portland Fulfillment Hub", northwest).
+warehouse(wh_la, "Los Angeles Mega Center", southwest).
+warehouse(wh_phoenix, "Phoenix Regional Hub", southwest).
+warehouse(wh_chicago, "Chicago Central Warehouse", midwest).
+warehouse(wh_dallas, "Dallas Distribution Point", south).
+warehouse(wh_atlanta, "Atlanta Logistics Center", southeast).
+warehouse(wh_newark, "Newark East Coast Hub", northeast).
+
+// =============================================================================
+// PRODUCT CATALOG (55 products)
+// =============================================================================
+
+// --- Electronics (15 products) ---
+product(prod_laptop_pro, "ProBook Laptop 15", electronics).
+product(prod_laptop_air, "AirBook Laptop 13", electronics).
+product(prod_desktop_tower, "PowerTower Desktop", electronics).
+product(prod_monitor_27, "UltraView Monitor 27in", electronics).
+product(prod_monitor_32, "UltraView Monitor 32in", electronics).
+product(prod_keyboard_mech, "MechType Keyboard", electronics).
+product(prod_keyboard_wireless, "WirelessType Keyboard", electronics).
+product(prod_mouse_gaming, "ProGamer Mouse", electronics).
+product(prod_mouse_ergonomic, "ErgoComfort Mouse", electronics).
+product(prod_webcam_hd, "ClearView Webcam HD", electronics).
+product(prod_headset_pro, "AudioPro Headset", electronics).
+product(prod_speaker_bt, "SoundWave BT Speaker", electronics).
+product(prod_tablet_10, "SlateTab 10in", electronics).
+product(prod_phone_flagship, "PhonePro Max", electronics).
+product(prod_smartwatch, "WristTech Watch", electronics).
+
+// --- Components (15 products) ---
+product(prod_cpu_i7, "Intel Core i7-13700", components).
+product(prod_cpu_i9, "Intel Core i9-13900", components).
+product(prod_cpu_ryzen7, "AMD Ryzen 7 7800X", components).
+product(prod_gpu_rtx4070, "NVIDIA RTX 4070", components).
+product(prod_gpu_rtx4090, "NVIDIA RTX 4090", components).
+product(prod_ram_16gb, "DDR5 RAM 16GB", components).
+product(prod_ram_32gb, "DDR5 RAM 32GB", components).
+product(prod_ssd_512, "NVMe SSD 512GB", components).
+product(prod_ssd_1tb, "NVMe SSD 1TB", components).
+product(prod_ssd_2tb, "NVMe SSD 2TB", components).
+product(prod_psu_650w, "PowerSupply 650W", components).
+product(prod_psu_850w, "PowerSupply 850W", components).
+product(prod_motherboard_intel, "Intel Z790 Motherboard", components).
+product(prod_motherboard_amd, "AMD X670 Motherboard", components).
+product(prod_case_mid, "MidTower PC Case", components).
+
+// --- Office Supplies (10 products) ---
+product(prod_paper_a4, "Premium A4 Paper 500ct", office).
+product(prod_paper_legal, "Legal Size Paper 500ct", office).
+product(prod_pen_ballpoint, "Ballpoint Pen 12pk", office).
+product(prod_pen_gel, "Gel Pen 12pk", office).
+product(prod_notebook_spiral, "Spiral Notebook 5pk", office).
+product(prod_folder_manila, "Manila Folders 100ct", office).
+product(prod_stapler_heavy, "Heavy Duty Stapler", office).
+product(prod_tape_packing, "Packing Tape 6pk", office).
+product(prod_scissors_office, "Office Scissors", office).
+product(prod_calculator_desk, "Desktop Calculator", office).
+
+// --- Furniture (10 products) ---
+product(prod_desk_standing, "Electric Standing Desk", furniture).
+product(prod_desk_standard, "Standard Office Desk", furniture).
+product(prod_chair_ergonomic, "ErgoMax Office Chair", furniture).
+product(prod_chair_executive, "Executive Leather Chair", furniture).
+product(prod_cabinet_filing, "4-Drawer Filing Cabinet", furniture).
+product(prod_bookshelf_5tier, "5-Tier Bookshelf", furniture).
+product(prod_table_conference, "8-Person Conference Table", furniture).
+product(prod_lamp_desk, "LED Desk Lamp", furniture).
+product(prod_mat_chair, "Chair Floor Mat", furniture).
+product(prod_whiteboard_large, "Large Whiteboard 6x4ft", furniture).
+
+// --- Packaging (5 products) ---
+product(prod_box_small, "Shipping Box Small", packaging).
+product(prod_box_medium, "Shipping Box Medium", packaging).
+product(prod_box_large, "Shipping Box Large", packaging).
+product(prod_bubble_wrap, "Bubble Wrap Roll 100ft", packaging).
+product(prod_peanuts_foam, "Foam Packing Peanuts 14cuft", packaging).
+
+// =============================================================================
+// UNIT COSTS (in cents)
+// =============================================================================
+
+// Electronics costs
+unit_cost(prod_laptop_pro, 129900).      // $1,299
+unit_cost(prod_laptop_air, 99900).       // $999
+unit_cost(prod_desktop_tower, 159900).   // $1,599
+unit_cost(prod_monitor_27, 34900).       // $349
+unit_cost(prod_monitor_32, 44900).       // $449
+unit_cost(prod_keyboard_mech, 14900).    // $149
+unit_cost(prod_keyboard_wireless, 7900). // $79
+unit_cost(prod_mouse_gaming, 7900).      // $79
+unit_cost(prod_mouse_ergonomic, 5900).   // $59
+unit_cost(prod_webcam_hd, 9900).         // $99
+unit_cost(prod_headset_pro, 19900).      // $199
+unit_cost(prod_speaker_bt, 12900).       // $129
+unit_cost(prod_tablet_10, 49900).        // $499
+unit_cost(prod_phone_flagship, 109900).  // $1,099
+unit_cost(prod_smartwatch, 39900).       // $399
+
+// Component costs
+unit_cost(prod_cpu_i7, 38900).           // $389
+unit_cost(prod_cpu_i9, 58900).           // $589
+unit_cost(prod_cpu_ryzen7, 34900).       // $349
+unit_cost(prod_gpu_rtx4070, 59900).      // $599
+unit_cost(prod_gpu_rtx4090, 159900).     // $1,599
+unit_cost(prod_ram_16gb, 6900).          // $69
+unit_cost(prod_ram_32gb, 12900).         // $129
+unit_cost(prod_ssd_512, 5900).           // $59
+unit_cost(prod_ssd_1tb, 9900).           // $99
+unit_cost(prod_ssd_2tb, 17900).          // $179
+unit_cost(prod_psu_650w, 8900).          // $89
+unit_cost(prod_psu_850w, 12900).         // $129
+unit_cost(prod_motherboard_intel, 29900). // $299
+unit_cost(prod_motherboard_amd, 27900).   // $279
+unit_cost(prod_case_mid, 9900).          // $99
+
+// Office supplies costs
+unit_cost(prod_paper_a4, 2999).          // $29.99
+unit_cost(prod_paper_legal, 3499).       // $34.99
+unit_cost(prod_pen_ballpoint, 899).      // $8.99
+unit_cost(prod_pen_gel, 1299).           // $12.99
+unit_cost(prod_notebook_spiral, 1499).   // $14.99
+unit_cost(prod_folder_manila, 1999).     // $19.99
+unit_cost(prod_stapler_heavy, 2499).     // $24.99
+unit_cost(prod_tape_packing, 1899).      // $18.99
+unit_cost(prod_scissors_office, 799).    // $7.99
+unit_cost(prod_calculator_desk, 1499).   // $14.99
+
+// Furniture costs
+unit_cost(prod_desk_standing, 59900).    // $599
+unit_cost(prod_desk_standard, 29900).    // $299
+unit_cost(prod_chair_ergonomic, 49900).  // $499
+unit_cost(prod_chair_executive, 79900).  // $799
+unit_cost(prod_cabinet_filing, 39900).   // $399
+unit_cost(prod_bookshelf_5tier, 14900).  // $149
+unit_cost(prod_table_conference, 149900). // $1,499
+unit_cost(prod_lamp_desk, 4900).         // $49
+unit_cost(prod_mat_chair, 3900).         // $39
+unit_cost(prod_whiteboard_large, 24900). // $249
+
+// Packaging costs
+unit_cost(prod_box_small, 150).          // $1.50
+unit_cost(prod_box_medium, 250).         // $2.50
+unit_cost(prod_box_large, 400).          // $4.00
+unit_cost(prod_bubble_wrap, 2500).       // $25
+unit_cost(prod_peanuts_foam, 3500).      // $35
+
+// =============================================================================
+// REORDER POINTS
+// =============================================================================
+
+// Electronics - moderate reorder points
+reorder_point(prod_laptop_pro, 25).
+reorder_point(prod_laptop_air, 30).
+reorder_point(prod_desktop_tower, 15).
+reorder_point(prod_monitor_27, 40).
+reorder_point(prod_monitor_32, 25).
+reorder_point(prod_keyboard_mech, 50).
+reorder_point(prod_keyboard_wireless, 75).
+reorder_point(prod_mouse_gaming, 60).
+reorder_point(prod_mouse_ergonomic, 80).
+reorder_point(prod_webcam_hd, 45).
+reorder_point(prod_headset_pro, 35).
+reorder_point(prod_speaker_bt, 40).
+reorder_point(prod_tablet_10, 20).
+reorder_point(prod_phone_flagship, 30).
+reorder_point(prod_smartwatch, 25).
+
+// Components - higher reorder points for production
+reorder_point(prod_cpu_i7, 100).
+reorder_point(prod_cpu_i9, 50).
+reorder_point(prod_cpu_ryzen7, 75).
+reorder_point(prod_gpu_rtx4070, 40).
+reorder_point(prod_gpu_rtx4090, 20).
+reorder_point(prod_ram_16gb, 200).
+reorder_point(prod_ram_32gb, 100).
+reorder_point(prod_ssd_512, 150).
+reorder_point(prod_ssd_1tb, 120).
+reorder_point(prod_ssd_2tb, 60).
+reorder_point(prod_psu_650w, 80).
+reorder_point(prod_psu_850w, 50).
+reorder_point(prod_motherboard_intel, 60).
+reorder_point(prod_motherboard_amd, 50).
+reorder_point(prod_case_mid, 70).
+
+// Office supplies - high volume reorder points
+reorder_point(prod_paper_a4, 500).
+reorder_point(prod_paper_legal, 200).
+reorder_point(prod_pen_ballpoint, 300).
+reorder_point(prod_pen_gel, 200).
+reorder_point(prod_notebook_spiral, 150).
+reorder_point(prod_folder_manila, 100).
+reorder_point(prod_stapler_heavy, 50).
+reorder_point(prod_tape_packing, 100).
+reorder_point(prod_scissors_office, 75).
+reorder_point(prod_calculator_desk, 40).
+
+// Furniture - low reorder points
+reorder_point(prod_desk_standing, 10).
+reorder_point(prod_desk_standard, 15).
+reorder_point(prod_chair_ergonomic, 20).
+reorder_point(prod_chair_executive, 8).
+reorder_point(prod_cabinet_filing, 12).
+reorder_point(prod_bookshelf_5tier, 15).
+reorder_point(prod_table_conference, 5).
+reorder_point(prod_lamp_desk, 30).
+reorder_point(prod_mat_chair, 25).
+reorder_point(prod_whiteboard_large, 10).
+
+// Packaging - very high reorder points
+reorder_point(prod_box_small, 2000).
+reorder_point(prod_box_medium, 1500).
+reorder_point(prod_box_large, 1000).
+reorder_point(prod_bubble_wrap, 50).
+reorder_point(prod_peanuts_foam, 30).
+
+// =============================================================================
+// DAILY DEMAND (average units per day)
+// =============================================================================
+
+// Electronics
+daily_demand(prod_laptop_pro, 8).
+daily_demand(prod_laptop_air, 12).
+daily_demand(prod_desktop_tower, 5).
+daily_demand(prod_monitor_27, 15).
+daily_demand(prod_monitor_32, 10).
+daily_demand(prod_keyboard_mech, 20).
+daily_demand(prod_keyboard_wireless, 30).
+daily_demand(prod_mouse_gaming, 25).
+daily_demand(prod_mouse_ergonomic, 35).
+daily_demand(prod_webcam_hd, 18).
+daily_demand(prod_headset_pro, 12).
+daily_demand(prod_speaker_bt, 15).
+daily_demand(prod_tablet_10, 7).
+daily_demand(prod_phone_flagship, 10).
+daily_demand(prod_smartwatch, 8).
+
+// Components
+daily_demand(prod_cpu_i7, 30).
+daily_demand(prod_cpu_i9, 15).
+daily_demand(prod_cpu_ryzen7, 25).
+daily_demand(prod_gpu_rtx4070, 12).
+daily_demand(prod_gpu_rtx4090, 5).
+daily_demand(prod_ram_16gb, 60).
+daily_demand(prod_ram_32gb, 35).
+daily_demand(prod_ssd_512, 50).
+daily_demand(prod_ssd_1tb, 40).
+daily_demand(prod_ssd_2tb, 20).
+daily_demand(prod_psu_650w, 25).
+daily_demand(prod_psu_850w, 15).
+daily_demand(prod_motherboard_intel, 18).
+daily_demand(prod_motherboard_amd, 15).
+daily_demand(prod_case_mid, 22).
+
+// Office supplies
+daily_demand(prod_paper_a4, 150).
+daily_demand(prod_paper_legal, 50).
+daily_demand(prod_pen_ballpoint, 80).
+daily_demand(prod_pen_gel, 60).
+daily_demand(prod_notebook_spiral, 45).
+daily_demand(prod_folder_manila, 30).
+daily_demand(prod_stapler_heavy, 15).
+daily_demand(prod_tape_packing, 35).
+daily_demand(prod_scissors_office, 20).
+daily_demand(prod_calculator_desk, 12).
+
+// Furniture
+daily_demand(prod_desk_standing, 3).
+daily_demand(prod_desk_standard, 5).
+daily_demand(prod_chair_ergonomic, 7).
+daily_demand(prod_chair_executive, 2).
+daily_demand(prod_cabinet_filing, 4).
+daily_demand(prod_bookshelf_5tier, 5).
+daily_demand(prod_table_conference, 1).
+daily_demand(prod_lamp_desk, 10).
+daily_demand(prod_mat_chair, 8).
+daily_demand(prod_whiteboard_large, 3).
+
+// Packaging
+daily_demand(prod_box_small, 500).
+daily_demand(prod_box_medium, 350).
+daily_demand(prod_box_large, 200).
+daily_demand(prod_bubble_wrap, 15).
+daily_demand(prod_peanuts_foam, 10).
+
+// =============================================================================
+// LEAD TIME (supplier lead days)
+// =============================================================================
+
+// Electronics - longer lead times
+lead_time_days(prod_laptop_pro, 14).
+lead_time_days(prod_laptop_air, 14).
+lead_time_days(prod_desktop_tower, 21).
+lead_time_days(prod_monitor_27, 10).
+lead_time_days(prod_monitor_32, 10).
+lead_time_days(prod_keyboard_mech, 7).
+lead_time_days(prod_keyboard_wireless, 7).
+lead_time_days(prod_mouse_gaming, 5).
+lead_time_days(prod_mouse_ergonomic, 5).
+lead_time_days(prod_webcam_hd, 7).
+lead_time_days(prod_headset_pro, 7).
+lead_time_days(prod_speaker_bt, 10).
+lead_time_days(prod_tablet_10, 14).
+lead_time_days(prod_phone_flagship, 21).
+lead_time_days(prod_smartwatch, 14).
+
+// Components - variable lead times
+lead_time_days(prod_cpu_i7, 5).
+lead_time_days(prod_cpu_i9, 7).
+lead_time_days(prod_cpu_ryzen7, 5).
+lead_time_days(prod_gpu_rtx4070, 10).
+lead_time_days(prod_gpu_rtx4090, 14).
+lead_time_days(prod_ram_16gb, 3).
+lead_time_days(prod_ram_32gb, 5).
+lead_time_days(prod_ssd_512, 3).
+lead_time_days(prod_ssd_1tb, 3).
+lead_time_days(prod_ssd_2tb, 5).
+lead_time_days(prod_psu_650w, 5).
+lead_time_days(prod_psu_850w, 7).
+lead_time_days(prod_motherboard_intel, 7).
+lead_time_days(prod_motherboard_amd, 7).
+lead_time_days(prod_case_mid, 5).
+
+// Office supplies - short lead times
+lead_time_days(prod_paper_a4, 2).
+lead_time_days(prod_paper_legal, 2).
+lead_time_days(prod_pen_ballpoint, 2).
+lead_time_days(prod_pen_gel, 2).
+lead_time_days(prod_notebook_spiral, 3).
+lead_time_days(prod_folder_manila, 2).
+lead_time_days(prod_stapler_heavy, 3).
+lead_time_days(prod_tape_packing, 2).
+lead_time_days(prod_scissors_office, 3).
+lead_time_days(prod_calculator_desk, 3).
+
+// Furniture - long lead times
+lead_time_days(prod_desk_standing, 21).
+lead_time_days(prod_desk_standard, 14).
+lead_time_days(prod_chair_ergonomic, 14).
+lead_time_days(prod_chair_executive, 21).
+lead_time_days(prod_cabinet_filing, 14).
+lead_time_days(prod_bookshelf_5tier, 10).
+lead_time_days(prod_table_conference, 28).
+lead_time_days(prod_lamp_desk, 5).
+lead_time_days(prod_mat_chair, 7).
+lead_time_days(prod_whiteboard_large, 10).
+
+// Packaging - very short lead times
+lead_time_days(prod_box_small, 1).
+lead_time_days(prod_box_medium, 1).
+lead_time_days(prod_box_large, 1).
+lead_time_days(prod_bubble_wrap, 2).
+lead_time_days(prod_peanuts_foam, 2).
+
+// =============================================================================
+// STOCK LEVELS BY WAREHOUSE
+// =============================================================================
+
+// --- Seattle Distribution Center (wh_seattle) ---
+stock(wh_seattle, prod_laptop_pro, 45).
+stock(wh_seattle, prod_laptop_air, 62).
+stock(wh_seattle, prod_desktop_tower, 28).
+stock(wh_seattle, prod_monitor_27, 85).
+stock(wh_seattle, prod_monitor_32, 42).
+stock(wh_seattle, prod_keyboard_mech, 120).
+stock(wh_seattle, prod_mouse_gaming, 95).
+stock(wh_seattle, prod_webcam_hd, 78).
+stock(wh_seattle, prod_headset_pro, 55).
+stock(wh_seattle, prod_cpu_i7, 180).
+stock(wh_seattle, prod_gpu_rtx4070, 65).
+stock(wh_seattle, prod_ram_16gb, 350).
+stock(wh_seattle, prod_ssd_1tb, 220).
+stock(wh_seattle, prod_paper_a4, 1200).
+stock(wh_seattle, prod_pen_ballpoint, 450).
+stock(wh_seattle, prod_desk_standing, 18).
+stock(wh_seattle, prod_chair_ergonomic, 32).
+stock(wh_seattle, prod_box_small, 4500).
+stock(wh_seattle, prod_box_medium, 3200).
+stock(wh_seattle, prod_bubble_wrap, 85).
+
+// --- Portland Fulfillment Hub (wh_portland) ---
+stock(wh_portland, prod_laptop_pro, 22).
+stock(wh_portland, prod_laptop_air, 35).
+stock(wh_portland, prod_monitor_27, 55).
+stock(wh_portland, prod_keyboard_wireless, 95).
+stock(wh_portland, prod_mouse_ergonomic, 110).
+stock(wh_portland, prod_speaker_bt, 68).
+stock(wh_portland, prod_tablet_10, 25).
+stock(wh_portland, prod_cpu_ryzen7, 95).
+stock(wh_portland, prod_ram_32gb, 145).
+stock(wh_portland, prod_ssd_512, 190).
+stock(wh_portland, prod_motherboard_amd, 72).
+stock(wh_portland, prod_paper_legal, 280).
+stock(wh_portland, prod_notebook_spiral, 210).
+stock(wh_portland, prod_folder_manila, 145).
+stock(wh_portland, prod_desk_standard, 22).
+stock(wh_portland, prod_bookshelf_5tier, 28).
+stock(wh_portland, prod_lamp_desk, 55).
+stock(wh_portland, prod_box_large, 1800).
+stock(wh_portland, prod_peanuts_foam, 45).
+
+// --- Los Angeles Mega Center (wh_la) ---
+stock(wh_la, prod_laptop_pro, 85).
+stock(wh_la, prod_laptop_air, 110).
+stock(wh_la, prod_desktop_tower, 52).
+stock(wh_la, prod_monitor_27, 145).
+stock(wh_la, prod_monitor_32, 88).
+stock(wh_la, prod_keyboard_mech, 195).
+stock(wh_la, prod_keyboard_wireless, 240).
+stock(wh_la, prod_mouse_gaming, 175).
+stock(wh_la, prod_mouse_ergonomic, 210).
+stock(wh_la, prod_webcam_hd, 125).
+stock(wh_la, prod_headset_pro, 95).
+stock(wh_la, prod_speaker_bt, 110).
+stock(wh_la, prod_tablet_10, 48).
+stock(wh_la, prod_phone_flagship, 72).
+stock(wh_la, prod_smartwatch, 58).
+stock(wh_la, prod_cpu_i7, 280).
+stock(wh_la, prod_cpu_i9, 85).
+stock(wh_la, prod_cpu_ryzen7, 165).
+stock(wh_la, prod_gpu_rtx4070, 95).
+stock(wh_la, prod_gpu_rtx4090, 32).
+stock(wh_la, prod_ram_16gb, 520).
+stock(wh_la, prod_ram_32gb, 280).
+stock(wh_la, prod_ssd_512, 380).
+stock(wh_la, prod_ssd_1tb, 320).
+stock(wh_la, prod_ssd_2tb, 110).
+stock(wh_la, prod_psu_650w, 145).
+stock(wh_la, prod_psu_850w, 85).
+stock(wh_la, prod_motherboard_intel, 110).
+stock(wh_la, prod_motherboard_amd, 92).
+stock(wh_la, prod_case_mid, 125).
+stock(wh_la, prod_paper_a4, 2500).
+stock(wh_la, prod_pen_ballpoint, 850).
+stock(wh_la, prod_pen_gel, 520).
+stock(wh_la, prod_desk_standing, 35).
+stock(wh_la, prod_desk_standard, 48).
+stock(wh_la, prod_chair_ergonomic, 62).
+stock(wh_la, prod_chair_executive, 18).
+stock(wh_la, prod_cabinet_filing, 28).
+stock(wh_la, prod_table_conference, 8).
+stock(wh_la, prod_whiteboard_large, 22).
+stock(wh_la, prod_box_small, 8500).
+stock(wh_la, prod_box_medium, 6200).
+stock(wh_la, prod_box_large, 3800).
+stock(wh_la, prod_bubble_wrap, 145).
+stock(wh_la, prod_peanuts_foam, 95).
+
+// --- Phoenix Regional Hub (wh_phoenix) ---
+stock(wh_phoenix, prod_laptop_air, 38).
+stock(wh_phoenix, prod_monitor_27, 62).
+stock(wh_phoenix, prod_keyboard_wireless, 85).
+stock(wh_phoenix, prod_mouse_ergonomic, 95).
+stock(wh_phoenix, prod_webcam_hd, 55).
+stock(wh_phoenix, prod_headset_pro, 42).
+stock(wh_phoenix, prod_speaker_bt, 58).
+stock(wh_phoenix, prod_tablet_10, 22).
+stock(wh_phoenix, prod_phone_flagship, 35).
+stock(wh_phoenix, prod_cpu_i7, 95).
+stock(wh_phoenix, prod_gpu_rtx4070, 38).
+stock(wh_phoenix, prod_ram_16gb, 185).
+stock(wh_phoenix, prod_ssd_1tb, 145).
+stock(wh_phoenix, prod_psu_650w, 62).
+stock(wh_phoenix, prod_paper_a4, 850).
+stock(wh_phoenix, prod_paper_legal, 320).
+stock(wh_phoenix, prod_notebook_spiral, 185).
+stock(wh_phoenix, prod_stapler_heavy, 72).
+stock(wh_phoenix, prod_tape_packing, 145).
+stock(wh_phoenix, prod_desk_standard, 15).
+stock(wh_phoenix, prod_chair_ergonomic, 25).
+stock(wh_phoenix, prod_lamp_desk, 45).
+stock(wh_phoenix, prod_mat_chair, 38).
+stock(wh_phoenix, prod_box_small, 3200).
+stock(wh_phoenix, prod_box_medium, 2400).
+
+// --- Chicago Central Warehouse (wh_chicago) ---
+stock(wh_chicago, prod_laptop_pro, 58).
+stock(wh_chicago, prod_laptop_air, 78).
+stock(wh_chicago, prod_desktop_tower, 35).
+stock(wh_chicago, prod_monitor_27, 105).
+stock(wh_chicago, prod_monitor_32, 62).
+stock(wh_chicago, prod_keyboard_mech, 145).
+stock(wh_chicago, prod_keyboard_wireless, 175).
+stock(wh_chicago, prod_mouse_gaming, 135).
+stock(wh_chicago, prod_mouse_ergonomic, 165).
+stock(wh_chicago, prod_webcam_hd, 92).
+stock(wh_chicago, prod_headset_pro, 72).
+stock(wh_chicago, prod_speaker_bt, 85).
+stock(wh_chicago, prod_tablet_10, 32).
+stock(wh_chicago, prod_phone_flagship, 52).
+stock(wh_chicago, prod_smartwatch, 42).
+stock(wh_chicago, prod_cpu_i7, 215).
+stock(wh_chicago, prod_cpu_i9, 62).
+stock(wh_chicago, prod_cpu_ryzen7, 125).
+stock(wh_chicago, prod_gpu_rtx4070, 72).
+stock(wh_chicago, prod_gpu_rtx4090, 22).
+stock(wh_chicago, prod_ram_16gb, 420).
+stock(wh_chicago, prod_ram_32gb, 215).
+stock(wh_chicago, prod_ssd_512, 295).
+stock(wh_chicago, prod_ssd_1tb, 255).
+stock(wh_chicago, prod_ssd_2tb, 85).
+stock(wh_chicago, prod_psu_650w, 115).
+stock(wh_chicago, prod_psu_850w, 68).
+stock(wh_chicago, prod_motherboard_intel, 88).
+stock(wh_chicago, prod_motherboard_amd, 72).
+stock(wh_chicago, prod_case_mid, 98).
+stock(wh_chicago, prod_paper_a4, 1850).
+stock(wh_chicago, prod_paper_legal, 620).
+stock(wh_chicago, prod_pen_ballpoint, 680).
+stock(wh_chicago, prod_pen_gel, 420).
+stock(wh_chicago, prod_notebook_spiral, 285).
+stock(wh_chicago, prod_folder_manila, 195).
+stock(wh_chicago, prod_stapler_heavy, 95).
+stock(wh_chicago, prod_tape_packing, 215).
+stock(wh_chicago, prod_scissors_office, 125).
+stock(wh_chicago, prod_calculator_desk, 78).
+stock(wh_chicago, prod_desk_standing, 28).
+stock(wh_chicago, prod_desk_standard, 38).
+stock(wh_chicago, prod_chair_ergonomic, 48).
+stock(wh_chicago, prod_chair_executive, 12).
+stock(wh_chicago, prod_cabinet_filing, 22).
+stock(wh_chicago, prod_bookshelf_5tier, 32).
+stock(wh_chicago, prod_table_conference, 6).
+stock(wh_chicago, prod_lamp_desk, 65).
+stock(wh_chicago, prod_mat_chair, 52).
+stock(wh_chicago, prod_whiteboard_large, 18).
+stock(wh_chicago, prod_box_small, 6200).
+stock(wh_chicago, prod_box_medium, 4500).
+stock(wh_chicago, prod_box_large, 2800).
+stock(wh_chicago, prod_bubble_wrap, 115).
+stock(wh_chicago, prod_peanuts_foam, 72).
+
+// --- Dallas Distribution Point (wh_dallas) ---
+stock(wh_dallas, prod_laptop_pro, 32).
+stock(wh_dallas, prod_laptop_air, 48).
+stock(wh_dallas, prod_desktop_tower, 18).
+stock(wh_dallas, prod_monitor_27, 72).
+stock(wh_dallas, prod_monitor_32, 38).
+stock(wh_dallas, prod_keyboard_mech, 95).
+stock(wh_dallas, prod_keyboard_wireless, 115).
+stock(wh_dallas, prod_mouse_gaming, 88).
+stock(wh_dallas, prod_mouse_ergonomic, 105).
+stock(wh_dallas, prod_webcam_hd, 62).
+stock(wh_dallas, prod_headset_pro, 48).
+stock(wh_dallas, prod_speaker_bt, 55).
+stock(wh_dallas, prod_tablet_10, 18).
+stock(wh_dallas, prod_phone_flagship, 28).
+stock(wh_dallas, prod_smartwatch, 22).
+stock(wh_dallas, prod_cpu_i7, 135).
+stock(wh_dallas, prod_cpu_i9, 38).
+stock(wh_dallas, prod_cpu_ryzen7, 85).
+stock(wh_dallas, prod_gpu_rtx4070, 48).
+stock(wh_dallas, prod_gpu_rtx4090, 15).
+stock(wh_dallas, prod_ram_16gb, 285).
+stock(wh_dallas, prod_ram_32gb, 145).
+stock(wh_dallas, prod_ssd_512, 195).
+stock(wh_dallas, prod_ssd_1tb, 165).
+stock(wh_dallas, prod_ssd_2tb, 55).
+stock(wh_dallas, prod_psu_650w, 78).
+stock(wh_dallas, prod_psu_850w, 45).
+stock(wh_dallas, prod_motherboard_intel, 58).
+stock(wh_dallas, prod_motherboard_amd, 48).
+stock(wh_dallas, prod_case_mid, 68).
+stock(wh_dallas, prod_paper_a4, 1250).
+stock(wh_dallas, prod_paper_legal, 420).
+stock(wh_dallas, prod_pen_ballpoint, 485).
+stock(wh_dallas, prod_pen_gel, 295).
+stock(wh_dallas, prod_notebook_spiral, 195).
+stock(wh_dallas, prod_folder_manila, 135).
+stock(wh_dallas, prod_stapler_heavy, 65).
+stock(wh_dallas, prod_tape_packing, 155).
+stock(wh_dallas, prod_scissors_office, 88).
+stock(wh_dallas, prod_calculator_desk, 52).
+stock(wh_dallas, prod_desk_standing, 18).
+stock(wh_dallas, prod_desk_standard, 25).
+stock(wh_dallas, prod_chair_ergonomic, 35).
+stock(wh_dallas, prod_chair_executive, 8).
+stock(wh_dallas, prod_cabinet_filing, 15).
+stock(wh_dallas, prod_bookshelf_5tier, 22).
+stock(wh_dallas, prod_lamp_desk, 48).
+stock(wh_dallas, prod_mat_chair, 38).
+stock(wh_dallas, prod_whiteboard_large, 12).
+stock(wh_dallas, prod_box_small, 4200).
+stock(wh_dallas, prod_box_medium, 3100).
+stock(wh_dallas, prod_box_large, 1950).
+stock(wh_dallas, prod_bubble_wrap, 82).
+stock(wh_dallas, prod_peanuts_foam, 52).
+
+// --- Atlanta Logistics Center (wh_atlanta) ---
+stock(wh_atlanta, prod_laptop_pro, 42).
+stock(wh_atlanta, prod_laptop_air, 58).
+stock(wh_atlanta, prod_desktop_tower, 25).
+stock(wh_atlanta, prod_monitor_27, 88).
+stock(wh_atlanta, prod_monitor_32, 52).
+stock(wh_atlanta, prod_keyboard_mech, 125).
+stock(wh_atlanta, prod_keyboard_wireless, 148).
+stock(wh_atlanta, prod_mouse_gaming, 112).
+stock(wh_atlanta, prod_mouse_ergonomic, 138).
+stock(wh_atlanta, prod_webcam_hd, 78).
+stock(wh_atlanta, prod_headset_pro, 58).
+stock(wh_atlanta, prod_speaker_bt, 72).
+stock(wh_atlanta, prod_tablet_10, 28).
+stock(wh_atlanta, prod_phone_flagship, 42).
+stock(wh_atlanta, prod_smartwatch, 35).
+stock(wh_atlanta, prod_cpu_i7, 175).
+stock(wh_atlanta, prod_cpu_i9, 52).
+stock(wh_atlanta, prod_cpu_ryzen7, 105).
+stock(wh_atlanta, prod_gpu_rtx4070, 58).
+stock(wh_atlanta, prod_gpu_rtx4090, 18).
+stock(wh_atlanta, prod_ram_16gb, 345).
+stock(wh_atlanta, prod_ram_32gb, 175).
+stock(wh_atlanta, prod_ssd_512, 248).
+stock(wh_atlanta, prod_ssd_1tb, 212).
+stock(wh_atlanta, prod_ssd_2tb, 72).
+stock(wh_atlanta, prod_psu_650w, 95).
+stock(wh_atlanta, prod_psu_850w, 58).
+stock(wh_atlanta, prod_motherboard_intel, 72).
+stock(wh_atlanta, prod_motherboard_amd, 62).
+stock(wh_atlanta, prod_case_mid, 85).
+stock(wh_atlanta, prod_paper_a4, 1550).
+stock(wh_atlanta, prod_paper_legal, 520).
+stock(wh_atlanta, prod_pen_ballpoint, 585).
+stock(wh_atlanta, prod_pen_gel, 365).
+stock(wh_atlanta, prod_notebook_spiral, 238).
+stock(wh_atlanta, prod_folder_manila, 168).
+stock(wh_atlanta, prod_stapler_heavy, 82).
+stock(wh_atlanta, prod_tape_packing, 185).
+stock(wh_atlanta, prod_scissors_office, 108).
+stock(wh_atlanta, prod_calculator_desk, 65).
+stock(wh_atlanta, prod_desk_standing, 22).
+stock(wh_atlanta, prod_desk_standard, 32).
+stock(wh_atlanta, prod_chair_ergonomic, 42).
+stock(wh_atlanta, prod_chair_executive, 10).
+stock(wh_atlanta, prod_cabinet_filing, 18).
+stock(wh_atlanta, prod_bookshelf_5tier, 28).
+stock(wh_atlanta, prod_table_conference, 5).
+stock(wh_atlanta, prod_lamp_desk, 55).
+stock(wh_atlanta, prod_mat_chair, 45).
+stock(wh_atlanta, prod_whiteboard_large, 15).
+stock(wh_atlanta, prod_box_small, 5200).
+stock(wh_atlanta, prod_box_medium, 3800).
+stock(wh_atlanta, prod_box_large, 2400).
+stock(wh_atlanta, prod_bubble_wrap, 98).
+stock(wh_atlanta, prod_peanuts_foam, 62).
+
+// --- Newark East Coast Hub (wh_newark) ---
+stock(wh_newark, prod_laptop_pro, 68).
+stock(wh_newark, prod_laptop_air, 92).
+stock(wh_newark, prod_desktop_tower, 42).
+stock(wh_newark, prod_monitor_27, 125).
+stock(wh_newark, prod_monitor_32, 72).
+stock(wh_newark, prod_keyboard_mech, 165).
+stock(wh_newark, prod_keyboard_wireless, 198).
+stock(wh_newark, prod_mouse_gaming, 148).
+stock(wh_newark, prod_mouse_ergonomic, 185).
+stock(wh_newark, prod_webcam_hd, 105).
+stock(wh_newark, prod_headset_pro, 78).
+stock(wh_newark, prod_speaker_bt, 95).
+stock(wh_newark, prod_tablet_10, 38).
+stock(wh_newark, prod_phone_flagship, 58).
+stock(wh_newark, prod_smartwatch, 48).
+stock(wh_newark, prod_cpu_i7, 245).
+stock(wh_newark, prod_cpu_i9, 72).
+stock(wh_newark, prod_cpu_ryzen7, 142).
+stock(wh_newark, prod_gpu_rtx4070, 82).
+stock(wh_newark, prod_gpu_rtx4090, 28).
+stock(wh_newark, prod_ram_16gb, 465).
+stock(wh_newark, prod_ram_32gb, 238).
+stock(wh_newark, prod_ssd_512, 335).
+stock(wh_newark, prod_ssd_1tb, 285).
+stock(wh_newark, prod_ssd_2tb, 95).
+stock(wh_newark, prod_psu_650w, 128).
+stock(wh_newark, prod_psu_850w, 75).
+stock(wh_newark, prod_motherboard_intel, 98).
+stock(wh_newark, prod_motherboard_amd, 82).
+stock(wh_newark, prod_case_mid, 112).
+stock(wh_newark, prod_paper_a4, 2150).
+stock(wh_newark, prod_paper_legal, 720).
+stock(wh_newark, prod_pen_ballpoint, 765).
+stock(wh_newark, prod_pen_gel, 485).
+stock(wh_newark, prod_notebook_spiral, 318).
+stock(wh_newark, prod_folder_manila, 225).
+stock(wh_newark, prod_stapler_heavy, 108).
+stock(wh_newark, prod_tape_packing, 248).
+stock(wh_newark, prod_scissors_office, 142).
+stock(wh_newark, prod_calculator_desk, 88).
+stock(wh_newark, prod_desk_standing, 32).
+stock(wh_newark, prod_desk_standard, 45).
+stock(wh_newark, prod_chair_ergonomic, 55).
+stock(wh_newark, prod_chair_executive, 15).
+stock(wh_newark, prod_cabinet_filing, 25).
+stock(wh_newark, prod_bookshelf_5tier, 38).
+stock(wh_newark, prod_table_conference, 8).
+stock(wh_newark, prod_lamp_desk, 75).
+stock(wh_newark, prod_mat_chair, 62).
+stock(wh_newark, prod_whiteboard_large, 22).
+stock(wh_newark, prod_box_small, 7200).
+stock(wh_newark, prod_box_medium, 5200).
+stock(wh_newark, prod_box_large, 3200).
+stock(wh_newark, prod_bubble_wrap, 132).
+stock(wh_newark, prod_peanuts_foam, 85).
+
+// =============================================================================
+// BILL OF MATERIALS (BOM)
+// =============================================================================
+
+// ProBook Laptop 15 BOM
+bom(prod_laptop_pro, prod_cpu_i7, 1).
+bom(prod_laptop_pro, prod_ram_16gb, 2).
+bom(prod_laptop_pro, prod_ssd_1tb, 1).
+bom(prod_laptop_pro, prod_monitor_27, 1).
+bom(prod_laptop_pro, prod_keyboard_mech, 1).
+
+// AirBook Laptop 13 BOM
+bom(prod_laptop_air, prod_cpu_ryzen7, 1).
+bom(prod_laptop_air, prod_ram_16gb, 1).
+bom(prod_laptop_air, prod_ssd_512, 1).
+
+// PowerTower Desktop BOM
+bom(prod_desktop_tower, prod_cpu_i9, 1).
+bom(prod_desktop_tower, prod_gpu_rtx4090, 1).
+bom(prod_desktop_tower, prod_ram_32gb, 4).
+bom(prod_desktop_tower, prod_ssd_2tb, 2).
+bom(prod_desktop_tower, prod_psu_850w, 1).
+bom(prod_desktop_tower, prod_motherboard_intel, 1).
+bom(prod_desktop_tower, prod_case_mid, 1).
+
+// Motherboard sub-components (for recursive BOM)
+bom(prod_motherboard_intel, prod_cpu_i7, 1).
+bom(prod_motherboard_amd, prod_cpu_ryzen7, 1).
+
+// =============================================================================
+// RECURSIVE BOM EXPLOSION
+// =============================================================================
+
+// Exploded BOM: product, component, total_quantity
+pred bom_exploded(symbol, symbol, u32).
+
+// Base case: direct components
+bom_exploded(Product, Component, Qty) :- bom(Product, Component, Qty).
+
+// Recursive case: sub-components of components
+bom_exploded(Product, SubComponent, TotalQty) :-
+    bom(Product, Component, ParentQty),
+    bom_exploded(Component, SubComponent, ChildQty),
+    TotalQty is ParentQty * ChildQty.
+
+// =============================================================================
+// INVENTORY ANALYTICS
+// =============================================================================
+
+// Total stock per product across all warehouses
+pred total_stock(symbol, u64).
+total_stock(ProductId, sum(Qty)) :- stock(_, ProductId, Qty).
+
+// Inventory value per warehouse
+pred warehouse_value(symbol, u64).
+warehouse_value(WarehouseId, sum(Value)) :-
+    stock(WarehouseId, ProductId, Qty),
+    unit_cost(ProductId, Cost),
+    Value is Qty * Cost.
+
+// Low stock alert: product below reorder point at a warehouse
+pred low_stock_alert(symbol, symbol, u32, u32).
+low_stock_alert(WarehouseId, ProductId, CurrentQty, ReorderPt) :-
+    stock(WarehouseId, ProductId, CurrentQty),
+    reorder_point(ProductId, ReorderPt),
+    CurrentQty < ReorderPt.
+
+// Helper: compute 2-day threshold from daily demand
+pred two_day_threshold(symbol, u32, u32).
+two_day_threshold(ProductId, DailyDmd, Threshold) :-
+    daily_demand(ProductId, DailyDmd),
+    DailyDmd > 0,
+    Threshold is DailyDmd * cast(2, u32).
+
+// Critical stock: less than 2 days of stock
+pred critical_stock(symbol, symbol, u32, u32).
+critical_stock(WarehouseId, ProductId, CurrentQty, DailyDmd) :-
+    stock(WarehouseId, ProductId, CurrentQty),
+    two_day_threshold(ProductId, DailyDmd, Threshold),
+    CurrentQty < Threshold.

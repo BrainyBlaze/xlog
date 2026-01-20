@@ -1,0 +1,864 @@
+// =============================================================================
+// Match History Module
+// =============================================================================
+// Demonstrates: Large-scale fact storage, game modes, match results
+// Contains: 110 matches with kills/deaths/assists data
+// =============================================================================
+
+// --- Predicate Declarations ---
+pred game_mode(symbol, symbol).                        // mode_id, mode_name
+pred match_info(symbol, symbol, u32, u32).             // match_id, game_mode, duration_seconds, timestamp
+pred match_result(symbol, symbol, u32, u32, u32).      // match_id, player_id, kills, deaths, assists
+pred match_winner(symbol, symbol).                      // match_id, player_id (winner)
+
+// --- Private Helpers ---
+pred min_match_duration(u32).
+min_match_duration(300).  // Minimum 5 minutes for valid match
+
+// =============================================================================
+// GAME MODES (6 modes)
+// =============================================================================
+
+game_mode(dm, "Deathmatch").
+game_mode(tdm, "Team Deathmatch").
+game_mode(ctf, "Capture the Flag").
+game_mode(ranked, "Ranked Competitive").
+game_mode(casual, "Casual Play").
+game_mode(battle_royale, "Battle Royale").
+
+// =============================================================================
+// MATCH INFO (110 matches)
+// =============================================================================
+
+// January 2024 matches (m001-m030)
+match_info(m001, ranked, 1800, 20240115).
+match_info(m002, tdm, 900, 20240115).
+match_info(m003, ctf, 1200, 20240116).
+match_info(m004, ranked, 2100, 20240116).
+match_info(m005, casual, 600, 20240117).
+match_info(m006, ranked, 1950, 20240117).
+match_info(m007, dm, 450, 20240118).
+match_info(m008, ranked, 1700, 20240118).
+match_info(m009, tdm, 1100, 20240119).
+match_info(m010, ranked, 2000, 20240119).
+match_info(m011, battle_royale, 1500, 20240120).
+match_info(m012, ranked, 1850, 20240120).
+match_info(m013, ctf, 1400, 20240121).
+match_info(m014, casual, 550, 20240121).
+match_info(m015, ranked, 2200, 20240122).
+match_info(m016, tdm, 950, 20240122).
+match_info(m017, dm, 400, 20240123).
+match_info(m018, ranked, 1900, 20240123).
+match_info(m019, battle_royale, 1600, 20240124).
+match_info(m020, ranked, 2050, 20240124).
+match_info(m021, ctf, 1300, 20240125).
+match_info(m022, casual, 650, 20240125).
+match_info(m023, ranked, 1750, 20240126).
+match_info(m024, tdm, 1000, 20240126).
+match_info(m025, ranked, 1950, 20240127).
+match_info(m026, dm, 480, 20240127).
+match_info(m027, battle_royale, 1450, 20240128).
+match_info(m028, ranked, 2100, 20240128).
+match_info(m029, ctf, 1350, 20240129).
+match_info(m030, casual, 580, 20240129).
+
+// February 2024 matches (m031-m060)
+match_info(m031, ranked, 1820, 20240201).
+match_info(m032, tdm, 920, 20240201).
+match_info(m033, ranked, 2000, 20240202).
+match_info(m034, dm, 420, 20240202).
+match_info(m035, battle_royale, 1550, 20240203).
+match_info(m036, ranked, 1880, 20240203).
+match_info(m037, ctf, 1250, 20240204).
+match_info(m038, casual, 620, 20240204).
+match_info(m039, ranked, 2150, 20240205).
+match_info(m040, tdm, 980, 20240205).
+match_info(m041, ranked, 1720, 20240206).
+match_info(m042, dm, 460, 20240206).
+match_info(m043, battle_royale, 1480, 20240207).
+match_info(m044, ranked, 1970, 20240207).
+match_info(m045, ctf, 1320, 20240208).
+match_info(m046, casual, 590, 20240208).
+match_info(m047, ranked, 2080, 20240209).
+match_info(m048, tdm, 1050, 20240209).
+match_info(m049, ranked, 1800, 20240210).
+match_info(m050, dm, 440, 20240210).
+match_info(m051, battle_royale, 1520, 20240211).
+match_info(m052, ranked, 1930, 20240211).
+match_info(m053, ctf, 1280, 20240212).
+match_info(m054, casual, 640, 20240212).
+match_info(m055, ranked, 2120, 20240213).
+match_info(m056, tdm, 960, 20240213).
+match_info(m057, ranked, 1780, 20240214).
+match_info(m058, dm, 490, 20240214).
+match_info(m059, battle_royale, 1580, 20240215).
+match_info(m060, ranked, 1990, 20240215).
+
+// March 2024 matches (m061-m090)
+match_info(m061, ranked, 1860, 20240301).
+match_info(m062, tdm, 940, 20240301).
+match_info(m063, ctf, 1220, 20240302).
+match_info(m064, ranked, 2040, 20240302).
+match_info(m065, casual, 610, 20240303).
+match_info(m066, ranked, 1910, 20240303).
+match_info(m067, dm, 470, 20240304).
+match_info(m068, ranked, 1740, 20240304).
+match_info(m069, battle_royale, 1540, 20240305).
+match_info(m070, ranked, 2010, 20240305).
+match_info(m071, ctf, 1380, 20240306).
+match_info(m072, casual, 560, 20240306).
+match_info(m073, ranked, 2180, 20240307).
+match_info(m074, tdm, 1020, 20240307).
+match_info(m075, ranked, 1870, 20240308).
+match_info(m076, dm, 430, 20240308).
+match_info(m077, battle_royale, 1490, 20240309).
+match_info(m078, ranked, 1960, 20240309).
+match_info(m079, ctf, 1340, 20240310).
+match_info(m080, casual, 630, 20240310).
+match_info(m081, ranked, 2070, 20240311).
+match_info(m082, tdm, 990, 20240311).
+match_info(m083, ranked, 1790, 20240312).
+match_info(m084, dm, 450, 20240312).
+match_info(m085, battle_royale, 1570, 20240313).
+match_info(m086, ranked, 1940, 20240313).
+match_info(m087, ctf, 1260, 20240314).
+match_info(m088, casual, 600, 20240314).
+match_info(m089, ranked, 2130, 20240315).
+match_info(m090, tdm, 970, 20240315).
+
+// April 2024 matches (m091-m110)
+match_info(m091, ranked, 1840, 20240401).
+match_info(m092, battle_royale, 1510, 20240401).
+match_info(m093, ranked, 2020, 20240402).
+match_info(m094, dm, 410, 20240402).
+match_info(m095, ctf, 1290, 20240403).
+match_info(m096, casual, 670, 20240403).
+match_info(m097, ranked, 1980, 20240404).
+match_info(m098, tdm, 1030, 20240404).
+match_info(m099, ranked, 1760, 20240405).
+match_info(m100, battle_royale, 1530, 20240405).
+match_info(m101, ranked, 2090, 20240406).
+match_info(m102, dm, 480, 20240406).
+match_info(m103, ctf, 1360, 20240407).
+match_info(m104, casual, 580, 20240407).
+match_info(m105, ranked, 1920, 20240408).
+match_info(m106, tdm, 1010, 20240408).
+match_info(m107, ranked, 2060, 20240409).
+match_info(m108, battle_royale, 1560, 20240409).
+match_info(m109, ranked, 1830, 20240410).
+match_info(m110, dm, 500, 20240410).
+
+// =============================================================================
+// MATCH RESULTS (440 results - 4 players per match average)
+// =============================================================================
+
+// Match m001 - Ranked (top NA players)
+match_result(m001, p001, 25, 8, 12).
+match_result(m001, p002, 18, 15, 8).
+match_result(m001, p005, 22, 10, 15).
+match_result(m001, p008, 20, 12, 10).
+
+// Match m002 - TDM (EU players)
+match_result(m002, p016, 15, 10, 5).
+match_result(m002, p017, 12, 12, 8).
+match_result(m002, p025, 18, 8, 10).
+match_result(m002, p026, 10, 14, 6).
+
+// Match m003 - CTF (mixed regions)
+match_result(m003, p001, 8, 5, 20).
+match_result(m003, p007, 5, 8, 15).
+match_result(m003, p031, 10, 6, 18).
+match_result(m003, p032, 6, 10, 12).
+
+// Match m004 - Ranked (high intensity)
+match_result(m004, p002, 30, 5, 10).
+match_result(m004, p005, 28, 8, 12).
+match_result(m004, p016, 22, 12, 8).
+match_result(m004, p031, 15, 18, 6).
+
+// Match m005 - Casual
+match_result(m005, p003, 8, 5, 3).
+match_result(m005, p007, 6, 8, 5).
+match_result(m005, p046, 4, 6, 4).
+
+// Match m006 - Ranked
+match_result(m006, p001, 32, 6, 14).
+match_result(m006, p008, 25, 10, 12).
+match_result(m006, p033, 20, 18, 8).
+match_result(m006, p044, 18, 15, 10).
+
+// Match m007 - DM
+match_result(m007, p010, 12, 8, 0).
+match_result(m007, p011, 8, 12, 0).
+match_result(m007, p012, 15, 5, 0).
+
+// Match m008 - Ranked
+match_result(m008, p002, 22, 10, 8).
+match_result(m008, p016, 16, 14, 10).
+match_result(m008, p025, 20, 12, 12).
+
+// Match m009 - TDM
+match_result(m009, p001, 14, 8, 10).
+match_result(m009, p005, 18, 6, 8).
+match_result(m009, p007, 10, 12, 6).
+match_result(m009, p009, 12, 10, 8).
+
+// Match m010 - Ranked
+match_result(m010, p008, 28, 6, 12).
+match_result(m010, p014, 18, 15, 8).
+match_result(m010, p031, 24, 8, 10).
+match_result(m010, p032, 20, 12, 10).
+
+// Match m011 - Battle Royale
+match_result(m011, p001, 12, 1, 3).
+match_result(m011, p005, 15, 1, 2).
+match_result(m011, p016, 8, 1, 4).
+match_result(m011, p031, 18, 1, 1).
+match_result(m011, p033, 10, 1, 2).
+
+// Match m012 - Ranked
+match_result(m012, p002, 26, 9, 11).
+match_result(m012, p006, 19, 13, 9).
+match_result(m012, p017, 23, 11, 7).
+match_result(m012, p032, 21, 10, 8).
+
+// Match m013 - CTF
+match_result(m013, p003, 7, 6, 16).
+match_result(m013, p018, 9, 5, 14).
+match_result(m013, p034, 5, 8, 18).
+match_result(m013, p035, 8, 7, 12).
+
+// Match m014 - Casual
+match_result(m014, p004, 5, 4, 2).
+match_result(m014, p024, 3, 6, 3).
+match_result(m014, p039, 4, 5, 4).
+
+// Match m015 - Ranked (long match)
+match_result(m015, p001, 35, 7, 16).
+match_result(m015, p008, 30, 9, 14).
+match_result(m015, p033, 28, 11, 12).
+match_result(m015, p044, 25, 14, 10).
+
+// Match m016 - TDM
+match_result(m016, p009, 13, 11, 7).
+match_result(m016, p012, 16, 9, 5).
+match_result(m016, p021, 14, 10, 8).
+match_result(m016, p037, 11, 13, 6).
+
+// Match m017 - DM
+match_result(m017, p013, 10, 7, 0).
+match_result(m017, p020, 8, 9, 0).
+match_result(m017, p027, 11, 6, 0).
+
+// Match m018 - Ranked
+match_result(m018, p005, 27, 8, 13).
+match_result(m018, p017, 22, 12, 9).
+match_result(m018, p038, 19, 14, 11).
+match_result(m018, p043, 24, 10, 8).
+
+// Match m019 - Battle Royale
+match_result(m019, p002, 14, 1, 2).
+match_result(m019, p006, 9, 1, 3).
+match_result(m019, p025, 16, 1, 1).
+match_result(m019, p032, 11, 1, 4).
+match_result(m019, p046, 7, 1, 2).
+
+// Match m020 - Ranked
+match_result(m020, p001, 29, 7, 15).
+match_result(m020, p016, 24, 11, 10).
+match_result(m020, p031, 26, 9, 12).
+match_result(m020, p051, 20, 15, 8).
+
+// Match m021-m030 results
+match_result(m021, p003, 6, 7, 15).
+match_result(m021, p019, 8, 5, 17).
+match_result(m021, p036, 7, 6, 14).
+match_result(m021, p040, 5, 9, 16).
+
+match_result(m022, p007, 5, 4, 3).
+match_result(m022, p029, 4, 5, 2).
+match_result(m022, p049, 3, 6, 4).
+
+match_result(m023, p002, 24, 10, 9).
+match_result(m023, p017, 20, 13, 11).
+match_result(m023, p032, 22, 11, 8).
+match_result(m023, p047, 18, 15, 7).
+
+match_result(m024, p009, 15, 9, 6).
+match_result(m024, p022, 12, 11, 8).
+match_result(m024, p041, 14, 10, 7).
+match_result(m024, p052, 11, 13, 5).
+
+match_result(m025, p005, 31, 6, 14).
+match_result(m025, p025, 26, 10, 11).
+match_result(m025, p043, 28, 8, 9).
+match_result(m025, p051, 23, 14, 12).
+
+match_result(m026, p014, 13, 8, 0).
+match_result(m026, p028, 9, 11, 0).
+match_result(m026, p042, 11, 9, 0).
+
+match_result(m027, p001, 17, 1, 2).
+match_result(m027, p008, 13, 1, 3).
+match_result(m027, p031, 19, 1, 1).
+match_result(m027, p044, 15, 1, 2).
+match_result(m027, p053, 10, 1, 4).
+
+match_result(m028, p006, 25, 9, 12).
+match_result(m028, p021, 21, 13, 8).
+match_result(m028, p037, 23, 11, 10).
+match_result(m028, p048, 19, 16, 7).
+
+match_result(m029, p004, 5, 8, 13).
+match_result(m029, p023, 7, 6, 15).
+match_result(m029, p034, 6, 7, 14).
+match_result(m029, p055, 8, 5, 12).
+
+match_result(m030, p010, 4, 3, 2).
+match_result(m030, p030, 5, 4, 3).
+match_result(m030, p050, 3, 5, 4).
+
+// Match m031-m050 results
+match_result(m031, p001, 27, 8, 13).
+match_result(m031, p016, 23, 11, 10).
+match_result(m031, p033, 25, 9, 11).
+match_result(m031, p046, 20, 15, 9).
+
+match_result(m032, p002, 16, 10, 7).
+match_result(m032, p018, 13, 12, 8).
+match_result(m032, p035, 15, 11, 6).
+match_result(m032, p047, 12, 14, 5).
+
+match_result(m033, p005, 29, 7, 14).
+match_result(m033, p025, 24, 11, 11).
+match_result(m033, p031, 27, 8, 12).
+match_result(m033, p051, 22, 14, 10).
+
+match_result(m034, p007, 14, 7, 0).
+match_result(m034, p026, 11, 9, 0).
+match_result(m034, p038, 12, 8, 0).
+
+match_result(m035, p001, 16, 1, 3).
+match_result(m035, p017, 12, 1, 2).
+match_result(m035, p032, 18, 1, 1).
+match_result(m035, p043, 14, 1, 4).
+match_result(m035, p052, 9, 1, 2).
+
+match_result(m036, p008, 26, 9, 12).
+match_result(m036, p021, 22, 13, 9).
+match_result(m036, p044, 24, 11, 10).
+match_result(m036, p053, 19, 16, 8).
+
+match_result(m037, p003, 8, 6, 17).
+match_result(m037, p020, 6, 8, 15).
+match_result(m037, p036, 9, 5, 16).
+match_result(m037, p041, 7, 7, 14).
+
+match_result(m038, p011, 6, 5, 4).
+match_result(m038, p027, 4, 6, 3).
+match_result(m038, p040, 5, 4, 5).
+
+match_result(m039, p002, 32, 6, 15).
+match_result(m039, p016, 28, 10, 12).
+match_result(m039, p031, 30, 8, 13).
+match_result(m039, p044, 25, 14, 10).
+
+match_result(m040, p009, 14, 11, 8).
+match_result(m040, p022, 16, 10, 6).
+match_result(m040, p037, 13, 12, 7).
+match_result(m040, p048, 11, 14, 5).
+
+match_result(m041, p005, 24, 9, 11).
+match_result(m041, p026, 20, 13, 9).
+match_result(m041, p043, 22, 11, 10).
+match_result(m041, p055, 18, 15, 8).
+
+match_result(m042, p012, 13, 8, 0).
+match_result(m042, p028, 10, 10, 0).
+match_result(m042, p042, 12, 9, 0).
+
+match_result(m043, p001, 15, 1, 2).
+match_result(m043, p008, 17, 1, 3).
+match_result(m043, p025, 13, 1, 1).
+match_result(m043, p032, 19, 1, 2).
+match_result(m043, p046, 11, 1, 4).
+
+match_result(m044, p006, 27, 8, 13).
+match_result(m044, p017, 23, 12, 10).
+match_result(m044, p038, 25, 10, 11).
+match_result(m044, p051, 21, 15, 9).
+
+match_result(m045, p004, 7, 6, 14).
+match_result(m045, p019, 9, 5, 16).
+match_result(m045, p034, 6, 8, 15).
+match_result(m045, p052, 8, 7, 13).
+
+match_result(m046, p013, 5, 4, 3).
+match_result(m046, p029, 4, 5, 4).
+match_result(m046, p039, 3, 6, 2).
+
+match_result(m047, p001, 31, 7, 14).
+match_result(m047, p016, 27, 11, 11).
+match_result(m047, p033, 29, 9, 12).
+match_result(m047, p051, 24, 14, 10).
+
+match_result(m048, p002, 17, 10, 7).
+match_result(m048, p021, 14, 12, 8).
+match_result(m048, p040, 15, 11, 6).
+match_result(m048, p053, 12, 14, 5).
+
+match_result(m049, p005, 26, 8, 12).
+match_result(m049, p025, 22, 12, 10).
+match_result(m049, p044, 24, 10, 11).
+match_result(m049, p047, 20, 15, 9).
+
+match_result(m050, p007, 12, 9, 0).
+match_result(m050, p030, 10, 11, 0).
+match_result(m050, p041, 11, 10, 0).
+
+// Match m051-m070 results
+match_result(m051, p002, 16, 1, 3).
+match_result(m051, p008, 14, 1, 2).
+match_result(m051, p031, 18, 1, 1).
+match_result(m051, p043, 12, 1, 4).
+match_result(m051, p055, 10, 1, 2).
+
+match_result(m052, p001, 28, 8, 13).
+match_result(m052, p017, 24, 12, 10).
+match_result(m052, p032, 26, 10, 11).
+match_result(m052, p046, 21, 15, 9).
+
+match_result(m053, p003, 9, 5, 16).
+match_result(m053, p022, 7, 7, 14).
+match_result(m053, p035, 8, 6, 15).
+match_result(m053, p048, 6, 8, 13).
+
+match_result(m054, p010, 5, 4, 3).
+match_result(m054, p023, 4, 5, 4).
+match_result(m054, p042, 6, 4, 2).
+
+match_result(m055, p005, 33, 6, 15).
+match_result(m055, p016, 29, 10, 12).
+match_result(m055, p033, 31, 8, 13).
+match_result(m055, p051, 26, 14, 10).
+
+match_result(m056, p009, 15, 10, 7).
+match_result(m056, p018, 13, 12, 8).
+match_result(m056, p036, 14, 11, 6).
+match_result(m056, p052, 12, 13, 5).
+
+match_result(m057, p006, 23, 10, 11).
+match_result(m057, p026, 19, 14, 9).
+match_result(m057, p037, 21, 12, 10).
+match_result(m057, p050, 17, 16, 8).
+
+match_result(m058, p011, 11, 8, 0).
+match_result(m058, p027, 9, 10, 0).
+match_result(m058, p038, 12, 7, 0).
+
+match_result(m059, p001, 17, 1, 2).
+match_result(m059, p005, 19, 1, 3).
+match_result(m059, p025, 15, 1, 1).
+match_result(m059, p044, 13, 1, 4).
+match_result(m059, p053, 11, 1, 2).
+
+match_result(m060, p008, 27, 9, 12).
+match_result(m060, p021, 23, 13, 9).
+match_result(m060, p031, 25, 11, 10).
+match_result(m060, p047, 20, 16, 8).
+
+match_result(m061, p002, 25, 9, 12).
+match_result(m061, p017, 21, 13, 10).
+match_result(m061, p032, 23, 11, 11).
+match_result(m061, p055, 19, 16, 9).
+
+match_result(m062, p003, 14, 11, 7).
+match_result(m062, p019, 12, 13, 8).
+match_result(m062, p040, 15, 10, 6).
+match_result(m062, p048, 11, 14, 5).
+
+match_result(m063, p004, 8, 6, 15).
+match_result(m063, p020, 6, 8, 13).
+match_result(m063, p034, 7, 7, 16).
+match_result(m063, p041, 9, 5, 14).
+
+match_result(m064, p001, 30, 7, 14).
+match_result(m064, p016, 26, 11, 11).
+match_result(m064, p033, 28, 9, 12).
+match_result(m064, p046, 23, 15, 10).
+
+match_result(m065, p007, 6, 5, 4).
+match_result(m065, p024, 4, 6, 3).
+match_result(m065, p039, 5, 4, 5).
+
+match_result(m066, p005, 28, 8, 13).
+match_result(m066, p025, 24, 12, 10).
+match_result(m066, p043, 26, 10, 11).
+match_result(m066, p051, 22, 14, 9).
+
+match_result(m067, p012, 13, 7, 0).
+match_result(m067, p028, 10, 10, 0).
+match_result(m067, p036, 11, 9, 0).
+
+match_result(m068, p006, 22, 10, 10).
+match_result(m068, p022, 18, 14, 8).
+match_result(m068, p037, 20, 12, 9).
+match_result(m068, p052, 16, 16, 7).
+
+match_result(m069, p001, 18, 1, 2).
+match_result(m069, p008, 16, 1, 3).
+match_result(m069, p031, 20, 1, 1).
+match_result(m069, p044, 14, 1, 4).
+match_result(m069, p055, 12, 1, 2).
+
+match_result(m070, p002, 28, 8, 13).
+match_result(m070, p017, 24, 12, 10).
+match_result(m070, p032, 26, 10, 11).
+match_result(m070, p046, 21, 15, 9).
+
+// Match m071-m090 results
+match_result(m071, p003, 9, 5, 17).
+match_result(m071, p018, 7, 7, 15).
+match_result(m071, p035, 10, 4, 16).
+match_result(m071, p047, 8, 6, 14).
+
+match_result(m072, p009, 5, 4, 3).
+match_result(m072, p026, 4, 5, 4).
+match_result(m072, p040, 6, 4, 2).
+
+match_result(m073, p001, 34, 6, 15).
+match_result(m073, p016, 30, 10, 12).
+match_result(m073, p033, 32, 8, 13).
+match_result(m073, p051, 27, 14, 10).
+
+match_result(m074, p005, 17, 9, 7).
+match_result(m074, p021, 14, 12, 8).
+match_result(m074, p038, 15, 11, 6).
+match_result(m074, p053, 13, 13, 5).
+
+match_result(m075, p008, 25, 9, 12).
+match_result(m075, p022, 21, 13, 9).
+match_result(m075, p043, 23, 11, 10).
+match_result(m075, p055, 19, 16, 8).
+
+match_result(m076, p010, 11, 9, 0).
+match_result(m076, p027, 9, 11, 0).
+match_result(m076, p041, 12, 8, 0).
+
+match_result(m077, p002, 17, 1, 3).
+match_result(m077, p006, 13, 1, 2).
+match_result(m077, p025, 19, 1, 1).
+match_result(m077, p032, 15, 1, 4).
+match_result(m077, p046, 11, 1, 2).
+
+match_result(m078, p001, 27, 8, 13).
+match_result(m078, p017, 23, 12, 10).
+match_result(m078, p031, 25, 10, 11).
+match_result(m078, p047, 20, 15, 9).
+
+match_result(m079, p004, 8, 6, 14).
+match_result(m079, p019, 10, 4, 16).
+match_result(m079, p034, 7, 7, 15).
+match_result(m079, p048, 9, 5, 13).
+
+match_result(m080, p011, 6, 5, 4).
+match_result(m080, p028, 5, 5, 3).
+match_result(m080, p042, 4, 6, 5).
+
+match_result(m081, p005, 30, 7, 14).
+match_result(m081, p016, 26, 11, 11).
+match_result(m081, p033, 28, 9, 12).
+match_result(m081, p051, 23, 14, 10).
+
+match_result(m082, p009, 15, 11, 7).
+match_result(m082, p020, 13, 13, 8).
+match_result(m082, p036, 16, 10, 6).
+match_result(m082, p052, 12, 14, 5).
+
+match_result(m083, p006, 24, 10, 11).
+match_result(m083, p026, 20, 14, 9).
+match_result(m083, p037, 22, 12, 10).
+match_result(m083, p055, 18, 16, 8).
+
+match_result(m084, p012, 12, 8, 0).
+match_result(m084, p030, 10, 10, 0).
+match_result(m084, p038, 11, 9, 0).
+
+match_result(m085, p001, 19, 1, 2).
+match_result(m085, p008, 17, 1, 3).
+match_result(m085, p031, 21, 1, 1).
+match_result(m085, p044, 15, 1, 4).
+match_result(m085, p053, 13, 1, 2).
+
+match_result(m086, p002, 26, 9, 12).
+match_result(m086, p021, 22, 13, 9).
+match_result(m086, p032, 24, 11, 10).
+match_result(m086, p047, 19, 16, 8).
+
+match_result(m087, p003, 10, 4, 17).
+match_result(m087, p022, 8, 6, 15).
+match_result(m087, p035, 9, 5, 16).
+match_result(m087, p048, 7, 7, 14).
+
+match_result(m088, p007, 5, 5, 4).
+match_result(m088, p027, 4, 6, 3).
+match_result(m088, p040, 6, 4, 5).
+
+match_result(m089, p005, 32, 6, 15).
+match_result(m089, p016, 28, 10, 12).
+match_result(m089, p033, 30, 8, 13).
+match_result(m089, p051, 25, 14, 10).
+
+match_result(m090, p009, 16, 10, 7).
+match_result(m090, p018, 14, 12, 8).
+match_result(m090, p036, 15, 11, 6).
+match_result(m090, p052, 13, 13, 5).
+
+// Match m091-m110 results
+match_result(m091, p001, 26, 9, 12).
+match_result(m091, p017, 22, 13, 10).
+match_result(m091, p031, 24, 11, 11).
+match_result(m091, p046, 19, 16, 9).
+
+match_result(m092, p002, 18, 1, 3).
+match_result(m092, p006, 14, 1, 2).
+match_result(m092, p025, 20, 1, 1).
+match_result(m092, p032, 16, 1, 4).
+match_result(m092, p055, 12, 1, 2).
+
+match_result(m093, p005, 29, 7, 14).
+match_result(m093, p016, 25, 11, 11).
+match_result(m093, p033, 27, 9, 12).
+match_result(m093, p051, 22, 14, 10).
+
+match_result(m094, p010, 13, 8, 0).
+match_result(m094, p028, 11, 10, 0).
+match_result(m094, p041, 12, 9, 0).
+
+match_result(m095, p003, 9, 5, 16).
+match_result(m095, p019, 7, 7, 14).
+match_result(m095, p034, 10, 4, 17).
+match_result(m095, p047, 8, 6, 15).
+
+match_result(m096, p011, 6, 4, 3).
+match_result(m096, p026, 5, 5, 4).
+match_result(m096, p039, 4, 6, 2).
+
+match_result(m097, p008, 28, 8, 13).
+match_result(m097, p021, 24, 12, 10).
+match_result(m097, p043, 26, 10, 11).
+match_result(m097, p053, 21, 15, 9).
+
+match_result(m098, p009, 17, 10, 7).
+match_result(m098, p020, 14, 13, 8).
+match_result(m098, p037, 15, 12, 6).
+match_result(m098, p048, 13, 14, 5).
+
+match_result(m099, p006, 23, 10, 11).
+match_result(m099, p022, 19, 14, 9).
+match_result(m099, p044, 21, 12, 10).
+match_result(m099, p055, 17, 16, 8).
+
+match_result(m100, p001, 20, 1, 2).
+match_result(m100, p005, 22, 1, 3).
+match_result(m100, p025, 18, 1, 1).
+match_result(m100, p031, 24, 1, 4).
+match_result(m100, p046, 14, 1, 2).
+
+match_result(m101, p002, 30, 7, 14).
+match_result(m101, p016, 26, 11, 11).
+match_result(m101, p032, 28, 9, 12).
+match_result(m101, p051, 23, 14, 10).
+
+match_result(m102, p012, 14, 7, 0).
+match_result(m102, p030, 11, 10, 0).
+match_result(m102, p038, 12, 9, 0).
+
+match_result(m103, p004, 9, 5, 15).
+match_result(m103, p018, 7, 7, 13).
+match_result(m103, p035, 10, 4, 16).
+match_result(m103, p052, 8, 6, 14).
+
+match_result(m104, p007, 5, 5, 4).
+match_result(m104, p024, 4, 6, 3).
+match_result(m104, p040, 6, 4, 5).
+
+match_result(m105, p001, 27, 8, 13).
+match_result(m105, p017, 23, 12, 10).
+match_result(m105, p033, 25, 10, 11).
+match_result(m105, p047, 20, 15, 9).
+
+match_result(m106, p009, 16, 11, 7).
+match_result(m106, p021, 14, 13, 8).
+match_result(m106, p036, 17, 10, 6).
+match_result(m106, p053, 13, 14, 5).
+
+match_result(m107, p005, 31, 6, 15).
+match_result(m107, p016, 27, 10, 12).
+match_result(m107, p031, 29, 8, 13).
+match_result(m107, p051, 24, 14, 10).
+
+match_result(m108, p002, 19, 1, 3).
+match_result(m108, p008, 21, 1, 2).
+match_result(m108, p025, 17, 1, 1).
+match_result(m108, p032, 23, 1, 4).
+match_result(m108, p046, 13, 1, 2).
+
+match_result(m109, p006, 25, 9, 12).
+match_result(m109, p022, 21, 13, 9).
+match_result(m109, p044, 23, 11, 10).
+match_result(m109, p055, 19, 16, 8).
+
+match_result(m110, p010, 14, 8, 0).
+match_result(m110, p027, 12, 10, 0).
+match_result(m110, p041, 13, 9, 0).
+
+// =============================================================================
+// MATCH WINNERS (based on highest kills)
+// =============================================================================
+
+match_winner(m001, p001).
+match_winner(m002, p025).
+match_winner(m003, p031).
+match_winner(m004, p002).
+match_winner(m005, p003).
+match_winner(m006, p001).
+match_winner(m007, p012).
+match_winner(m008, p002).
+match_winner(m009, p005).
+match_winner(m010, p008).
+match_winner(m011, p031).
+match_winner(m012, p002).
+match_winner(m013, p018).
+match_winner(m014, p004).
+match_winner(m015, p001).
+match_winner(m016, p012).
+match_winner(m017, p027).
+match_winner(m018, p005).
+match_winner(m019, p025).
+match_winner(m020, p001).
+match_winner(m021, p019).
+match_winner(m022, p007).
+match_winner(m023, p002).
+match_winner(m024, p009).
+match_winner(m025, p005).
+match_winner(m026, p014).
+match_winner(m027, p031).
+match_winner(m028, p006).
+match_winner(m029, p055).
+match_winner(m030, p030).
+match_winner(m031, p001).
+match_winner(m032, p002).
+match_winner(m033, p005).
+match_winner(m034, p007).
+match_winner(m035, p032).
+match_winner(m036, p008).
+match_winner(m037, p036).
+match_winner(m038, p011).
+match_winner(m039, p002).
+match_winner(m040, p022).
+match_winner(m041, p005).
+match_winner(m042, p012).
+match_winner(m043, p032).
+match_winner(m044, p006).
+match_winner(m045, p019).
+match_winner(m046, p013).
+match_winner(m047, p001).
+match_winner(m048, p002).
+match_winner(m049, p005).
+match_winner(m050, p007).
+match_winner(m051, p031).
+match_winner(m052, p001).
+match_winner(m053, p003).
+match_winner(m054, p042).
+match_winner(m055, p005).
+match_winner(m056, p009).
+match_winner(m057, p006).
+match_winner(m058, p038).
+match_winner(m059, p005).
+match_winner(m060, p008).
+match_winner(m061, p002).
+match_winner(m062, p040).
+match_winner(m063, p041).
+match_winner(m064, p001).
+match_winner(m065, p007).
+match_winner(m066, p005).
+match_winner(m067, p012).
+match_winner(m068, p006).
+match_winner(m069, p031).
+match_winner(m070, p002).
+match_winner(m071, p035).
+match_winner(m072, p040).
+match_winner(m073, p001).
+match_winner(m074, p005).
+match_winner(m075, p008).
+match_winner(m076, p041).
+match_winner(m077, p025).
+match_winner(m078, p001).
+match_winner(m079, p019).
+match_winner(m080, p011).
+match_winner(m081, p005).
+match_winner(m082, p036).
+match_winner(m083, p006).
+match_winner(m084, p012).
+match_winner(m085, p031).
+match_winner(m086, p002).
+match_winner(m087, p003).
+match_winner(m088, p040).
+match_winner(m089, p005).
+match_winner(m090, p009).
+match_winner(m091, p001).
+match_winner(m092, p025).
+match_winner(m093, p005).
+match_winner(m094, p010).
+match_winner(m095, p034).
+match_winner(m096, p011).
+match_winner(m097, p008).
+match_winner(m098, p009).
+match_winner(m099, p006).
+match_winner(m100, p031).
+match_winner(m101, p002).
+match_winner(m102, p012).
+match_winner(m103, p035).
+match_winner(m104, p040).
+match_winner(m105, p001).
+match_winner(m106, p036).
+match_winner(m107, p005).
+match_winner(m108, p032).
+match_winner(m109, p006).
+match_winner(m110, p010).
+
+// =============================================================================
+// DERIVED PREDICATES
+// =============================================================================
+
+// Match participation count per player
+pred match_count(symbol, u64).
+match_count(PlayerId, count(MatchId)) :- match_result(MatchId, PlayerId, _, _, _).
+
+// Win count per player
+pred win_count(symbol, u64).
+win_count(PlayerId, count(MatchId)) :- match_winner(MatchId, PlayerId).
+
+// Total kills per player
+pred total_kills(symbol, u64).
+total_kills(PlayerId, sum(Kills)) :- match_result(_, PlayerId, Kills, _, _).
+
+// Total deaths per player
+pred total_deaths(symbol, u64).
+total_deaths(PlayerId, sum(Deaths)) :- match_result(_, PlayerId, _, Deaths, _).
+
+// Total assists per player
+pred total_assists(symbol, u64).
+total_assists(PlayerId, sum(Assists)) :- match_result(_, PlayerId, _, _, Assists).
+
+// Matches per game mode
+pred mode_match_count(symbol, u64).
+mode_match_count(ModeId, count(MatchId)) :- match_info(MatchId, ModeId, _, _).
+
+// Valid match check (meets minimum duration)
+pred valid_match(symbol).
+valid_match(MatchId) :-
+    match_info(MatchId, _, Duration, _),
+    min_match_duration(MinDuration),
+    Duration >= MinDuration.

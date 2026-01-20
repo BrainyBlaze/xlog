@@ -1,0 +1,577 @@
+// =============================================================================
+// Movie Domain Entities - Facts Database
+// =============================================================================
+// Contains all entity facts for the movie knowledge graph.
+//
+// Data categories:
+//   - 35 movies with full metadata
+//   - 30 people (actors, directors)
+//   - 12 genres
+//   - Studios, awards, relationships
+//
+// All identifiers use symbols for efficient joins.
+// =============================================================================
+
+use ontology/schema.
+
+// =============================================================================
+// PREDICATE DECLARATIONS
+// =============================================================================
+
+// Movie: id, title, release_year, rating (0-100), budget_millions, box_office_millions
+pred movie(symbol, symbol, u32, u32, u32, u32).
+
+// Person: id, name, birth_year, nationality
+pred person(symbol, symbol, u32, symbol).
+
+// Genre: id, name, description
+pred genre(symbol, symbol, symbol).
+
+// Studio: id, name, founded_year
+pred studio(symbol, symbol, u32).
+
+// Relationships
+pred directed(symbol, symbol).           // person_id, movie_id
+pred acted_in(symbol, symbol).           // person_id, movie_id
+pred movie_genre(symbol, symbol).        // movie_id, genre_id
+pred produced_by(symbol, symbol).        // movie_id, studio_id
+pred won_award(symbol, symbol, u32).     // movie_id, award_type, year
+pred nominated(symbol, symbol, u32).     // movie_id, award_type, year
+
+// =============================================================================
+// GENRES (12 genres)
+// =============================================================================
+
+genre(g_action, "Action", "High-energy films with physical stunts and combat").
+genre(g_drama, "Drama", "Character-driven narratives exploring human emotion").
+genre(g_comedy, "Comedy", "Films intended to make audiences laugh").
+genre(g_scifi, "Science Fiction", "Speculative fiction based on scientific concepts").
+genre(g_thriller, "Thriller", "Suspenseful films designed to create tension").
+genre(g_horror, "Horror", "Films designed to frighten and horrify viewers").
+genre(g_romance, "Romance", "Love stories and romantic relationships").
+genre(g_animation, "Animation", "Films created using animation techniques").
+genre(g_crime, "Crime", "Stories involving criminal acts and investigations").
+genre(g_fantasy, "Fantasy", "Films featuring magical or supernatural elements").
+genre(g_war, "War", "Films depicting armed conflict and military themes").
+genre(g_biography, "Biography", "Dramatized accounts of real people's lives").
+
+// Assign types from ontology
+entity_type(g_action, genre).
+entity_type(g_drama, genre).
+entity_type(g_comedy, genre).
+entity_type(g_scifi, genre).
+entity_type(g_thriller, genre).
+entity_type(g_horror, genre).
+entity_type(g_romance, genre).
+entity_type(g_animation, genre).
+entity_type(g_crime, genre).
+entity_type(g_fantasy, genre).
+entity_type(g_war, genre).
+entity_type(g_biography, genre).
+
+// =============================================================================
+// STUDIOS (8 studios)
+// =============================================================================
+
+studio(warner_bros, "Warner Bros. Pictures", 1923).
+studio(universal, "Universal Pictures", 1912).
+studio(paramount, "Paramount Pictures", 1912).
+studio(disney, "Walt Disney Studios", 1923).
+studio(columbia, "Columbia Pictures", 1924).
+studio(fox, "20th Century Studios", 1935).
+studio(mgm, "Metro-Goldwyn-Mayer", 1924).
+studio(lionsgate, "Lionsgate Films", 1997).
+
+entity_type(warner_bros, studio).
+entity_type(universal, studio).
+entity_type(paramount, studio).
+entity_type(disney, studio).
+entity_type(columbia, studio).
+entity_type(fox, studio).
+entity_type(mgm, studio).
+entity_type(lionsgate, studio).
+
+// =============================================================================
+// PEOPLE - DIRECTORS (15 directors)
+// =============================================================================
+
+person(d_nolan, "Christopher Nolan", 1970, british).
+person(d_spielberg, "Steven Spielberg", 1946, american).
+person(d_scorsese, "Martin Scorsese", 1942, american).
+person(d_tarantino, "Quentin Tarantino", 1963, american).
+person(d_fincher, "David Fincher", 1962, american).
+person(d_villeneuve, "Denis Villeneuve", 1967, canadian).
+person(d_cuaron, "Alfonso Cuaron", 1961, mexican).
+person(d_anderson, "Wes Anderson", 1969, american).
+person(d_coppola, "Francis Ford Coppola", 1939, american).
+person(d_kubrick, "Stanley Kubrick", 1928, american).
+person(d_cameron, "James Cameron", 1954, canadian).
+person(d_ridley, "Ridley Scott", 1937, british).
+person(d_peter_jackson, "Peter Jackson", 1961, new_zealander).
+person(d_inarritu, "Alejandro Gonzalez Inarritu", 1963, mexican).
+person(d_gerwig, "Greta Gerwig", 1983, american).
+
+entity_type(d_nolan, director).
+entity_type(d_spielberg, director).
+entity_type(d_scorsese, director).
+entity_type(d_tarantino, director).
+entity_type(d_fincher, director).
+entity_type(d_villeneuve, director).
+entity_type(d_cuaron, director).
+entity_type(d_anderson, director).
+entity_type(d_coppola, director).
+entity_type(d_kubrick, director).
+entity_type(d_cameron, director).
+entity_type(d_ridley, director).
+entity_type(d_peter_jackson, director).
+entity_type(d_inarritu, director).
+entity_type(d_gerwig, director).
+
+// =============================================================================
+// PEOPLE - ACTORS (15 actors)
+// =============================================================================
+
+person(a_dicaprio, "Leonardo DiCaprio", 1974, american).
+person(a_pitt, "Brad Pitt", 1963, american).
+person(a_bale, "Christian Bale", 1974, british).
+person(a_hanks, "Tom Hanks", 1956, american).
+person(a_denzel, "Denzel Washington", 1954, american).
+person(a_pacino, "Al Pacino", 1940, american).
+person(a_deniro, "Robert De Niro", 1943, american).
+person(a_clooney, "George Clooney", 1961, american).
+person(a_cruise, "Tom Cruise", 1962, american).
+person(a_phoenix, "Joaquin Phoenix", 1974, american).
+person(a_driver, "Adam Driver", 1983, american).
+person(a_chalamet, "Timothee Chalamet", 2000, american).
+person(a_streep, "Meryl Streep", 1949, american).
+person(a_blanchett, "Cate Blanchett", 1969, australian).
+person(a_robbie, "Margot Robbie", 1990, australian).
+
+entity_type(a_dicaprio, lead_actor).
+entity_type(a_pitt, lead_actor).
+entity_type(a_bale, lead_actor).
+entity_type(a_hanks, lead_actor).
+entity_type(a_denzel, lead_actor).
+entity_type(a_pacino, lead_actor).
+entity_type(a_deniro, lead_actor).
+entity_type(a_clooney, lead_actor).
+entity_type(a_cruise, lead_actor).
+entity_type(a_phoenix, lead_actor).
+entity_type(a_driver, lead_actor).
+entity_type(a_chalamet, lead_actor).
+entity_type(a_streep, lead_actor).
+entity_type(a_blanchett, lead_actor).
+entity_type(a_robbie, lead_actor).
+
+// =============================================================================
+// MOVIES (35 movies with full metadata)
+// =============================================================================
+
+// Format: movie(id, title, year, rating, budget_millions, box_office_millions)
+
+// Christopher Nolan films
+movie(m_inception, "Inception", 2010, 87, 160, 836).
+movie(m_interstellar, "Interstellar", 2014, 86, 165, 773).
+movie(m_dark_knight, "The Dark Knight", 2008, 94, 185, 1005).
+movie(m_dunkirk, "Dunkirk", 2017, 83, 100, 527).
+movie(m_tenet, "Tenet", 2020, 70, 200, 365).
+movie(m_oppenheimer, "Oppenheimer", 2023, 93, 100, 952).
+
+// Steven Spielberg films
+movie(m_schindlers_list, "Schindlers List", 1993, 97, 22, 322).
+movie(m_saving_private_ryan, "Saving Private Ryan", 1998, 93, 70, 482).
+movie(m_jurassic_park, "Jurassic Park", 1993, 81, 63, 1046).
+movie(m_et, "E.T. the Extra-Terrestrial", 1982, 88, 10, 793).
+
+// Martin Scorsese films
+movie(m_goodfellas, "Goodfellas", 1990, 96, 25, 47).
+movie(m_departed, "The Departed", 2006, 91, 90, 291).
+movie(m_wolf_wall_street, "The Wolf of Wall Street", 2013, 80, 100, 392).
+movie(m_irishman, "The Irishman", 2019, 84, 159, 8).
+
+// Quentin Tarantino films
+movie(m_pulp_fiction, "Pulp Fiction", 1994, 94, 8, 214).
+movie(m_kill_bill_1, "Kill Bill Vol. 1", 2003, 84, 30, 180).
+movie(m_django, "Django Unchained", 2012, 87, 100, 426).
+movie(m_once_hollywood, "Once Upon a Time in Hollywood", 2019, 85, 90, 374).
+
+// David Fincher films
+movie(m_fight_club, "Fight Club", 1999, 79, 63, 101).
+movie(m_social_network, "The Social Network", 2010, 96, 40, 225).
+movie(m_gone_girl, "Gone Girl", 2014, 79, 61, 369).
+
+// Denis Villeneuve films
+movie(m_blade_runner_2049, "Blade Runner 2049", 2017, 81, 150, 259).
+movie(m_dune_1, "Dune", 2021, 83, 165, 434).
+movie(m_dune_2, "Dune Part Two", 2024, 92, 190, 711).
+movie(m_arrival, "Arrival", 2016, 94, 47, 203).
+
+// James Cameron films
+movie(m_titanic, "Titanic", 1997, 88, 200, 2202).
+movie(m_avatar, "Avatar", 2009, 82, 237, 2923).
+movie(m_avatar_2, "Avatar: The Way of Water", 2022, 77, 350, 2320).
+movie(m_terminator_2, "Terminator 2: Judgment Day", 1991, 94, 102, 520).
+
+// Francis Ford Coppola films
+movie(m_godfather, "The Godfather", 1972, 98, 6, 287).
+movie(m_godfather_2, "The Godfather Part II", 1974, 97, 13, 93).
+movie(m_apocalypse_now, "Apocalypse Now", 1979, 95, 31, 120).
+
+// Additional modern films
+movie(m_joker, "Joker", 2019, 68, 55, 1074).
+movie(m_barbie, "Barbie", 2023, 80, 145, 1442).
+movie(m_everything_everywhere, "Everything Everywhere All at Once", 2022, 93, 25, 141).
+
+// Assign entity types
+entity_type(m_inception, scifi_movie).
+entity_type(m_interstellar, scifi_movie).
+entity_type(m_dark_knight, action_movie).
+entity_type(m_dunkirk, drama_movie).
+entity_type(m_tenet, scifi_movie).
+entity_type(m_oppenheimer, drama_movie).
+entity_type(m_schindlers_list, drama_movie).
+entity_type(m_saving_private_ryan, drama_movie).
+entity_type(m_jurassic_park, scifi_movie).
+entity_type(m_et, scifi_movie).
+entity_type(m_goodfellas, crime_movie).
+entity_type(m_departed, thriller_movie).
+entity_type(m_wolf_wall_street, comedy_movie).
+entity_type(m_irishman, crime_movie).
+entity_type(m_pulp_fiction, crime_movie).
+entity_type(m_kill_bill_1, action_movie).
+entity_type(m_django, drama_movie).
+entity_type(m_once_hollywood, comedy_movie).
+entity_type(m_fight_club, thriller_movie).
+entity_type(m_social_network, drama_movie).
+entity_type(m_gone_girl, thriller_movie).
+entity_type(m_blade_runner_2049, scifi_movie).
+entity_type(m_dune_1, scifi_movie).
+entity_type(m_dune_2, scifi_movie).
+entity_type(m_arrival, scifi_movie).
+entity_type(m_titanic, drama_movie).
+entity_type(m_avatar, scifi_movie).
+entity_type(m_avatar_2, scifi_movie).
+entity_type(m_terminator_2, action_movie).
+entity_type(m_godfather, crime_movie).
+entity_type(m_godfather_2, crime_movie).
+entity_type(m_apocalypse_now, drama_movie).
+entity_type(m_joker, drama_movie).
+entity_type(m_barbie, comedy_movie).
+entity_type(m_everything_everywhere, scifi_movie).
+
+// Crime movie subtype
+subclass_of(crime_movie, movie).
+type_label(crime_movie, "Crime Movie").
+
+// =============================================================================
+// DIRECTOR RELATIONSHIPS
+// =============================================================================
+
+// Christopher Nolan
+directed(d_nolan, m_inception).
+directed(d_nolan, m_interstellar).
+directed(d_nolan, m_dark_knight).
+directed(d_nolan, m_dunkirk).
+directed(d_nolan, m_tenet).
+directed(d_nolan, m_oppenheimer).
+
+// Steven Spielberg
+directed(d_spielberg, m_schindlers_list).
+directed(d_spielberg, m_saving_private_ryan).
+directed(d_spielberg, m_jurassic_park).
+directed(d_spielberg, m_et).
+
+// Martin Scorsese
+directed(d_scorsese, m_goodfellas).
+directed(d_scorsese, m_departed).
+directed(d_scorsese, m_wolf_wall_street).
+directed(d_scorsese, m_irishman).
+
+// Quentin Tarantino
+directed(d_tarantino, m_pulp_fiction).
+directed(d_tarantino, m_kill_bill_1).
+directed(d_tarantino, m_django).
+directed(d_tarantino, m_once_hollywood).
+
+// David Fincher
+directed(d_fincher, m_fight_club).
+directed(d_fincher, m_social_network).
+directed(d_fincher, m_gone_girl).
+
+// Denis Villeneuve
+directed(d_villeneuve, m_blade_runner_2049).
+directed(d_villeneuve, m_dune_1).
+directed(d_villeneuve, m_dune_2).
+directed(d_villeneuve, m_arrival).
+
+// James Cameron
+directed(d_cameron, m_titanic).
+directed(d_cameron, m_avatar).
+directed(d_cameron, m_avatar_2).
+directed(d_cameron, m_terminator_2).
+
+// Francis Ford Coppola
+directed(d_coppola, m_godfather).
+directed(d_coppola, m_godfather_2).
+directed(d_coppola, m_apocalypse_now).
+
+// Additional directors
+directed(d_inarritu, m_joker).
+directed(d_gerwig, m_barbie).
+
+// =============================================================================
+// ACTOR RELATIONSHIPS
+// =============================================================================
+
+// Leonardo DiCaprio
+acted_in(a_dicaprio, m_inception).
+acted_in(a_dicaprio, m_wolf_wall_street).
+acted_in(a_dicaprio, m_django).
+acted_in(a_dicaprio, m_titanic).
+acted_in(a_dicaprio, m_departed).
+acted_in(a_dicaprio, m_once_hollywood).
+
+// Brad Pitt
+acted_in(a_pitt, m_fight_club).
+acted_in(a_pitt, m_once_hollywood).
+
+// Christian Bale
+acted_in(a_bale, m_dark_knight).
+
+// Tom Hanks
+acted_in(a_hanks, m_saving_private_ryan).
+
+// Denzel Washington
+acted_in(a_denzel, m_django).
+
+// Al Pacino
+acted_in(a_pacino, m_godfather).
+acted_in(a_pacino, m_godfather_2).
+acted_in(a_pacino, m_irishman).
+
+// Robert De Niro
+acted_in(a_deniro, m_godfather_2).
+acted_in(a_deniro, m_goodfellas).
+acted_in(a_deniro, m_irishman).
+
+// Tom Cruise
+acted_in(a_cruise, m_terminator_2).
+
+// Joaquin Phoenix
+acted_in(a_phoenix, m_joker).
+
+// Timothee Chalamet
+acted_in(a_chalamet, m_dune_1).
+acted_in(a_chalamet, m_dune_2).
+
+// Margot Robbie
+acted_in(a_robbie, m_barbie).
+acted_in(a_robbie, m_once_hollywood).
+acted_in(a_robbie, m_wolf_wall_street).
+
+// Cate Blanchett
+acted_in(a_blanchett, m_titanic).
+
+// Adam Driver
+acted_in(a_driver, m_irishman).
+
+// Meryl Streep
+acted_in(a_streep, m_godfather_2).
+
+// =============================================================================
+// MOVIE-GENRE RELATIONSHIPS
+// =============================================================================
+
+// Multi-genre assignments (movies can have multiple genres)
+movie_genre(m_inception, g_scifi).
+movie_genre(m_inception, g_action).
+movie_genre(m_inception, g_thriller).
+
+movie_genre(m_interstellar, g_scifi).
+movie_genre(m_interstellar, g_drama).
+
+movie_genre(m_dark_knight, g_action).
+movie_genre(m_dark_knight, g_crime).
+movie_genre(m_dark_knight, g_thriller).
+
+movie_genre(m_dunkirk, g_war).
+movie_genre(m_dunkirk, g_drama).
+
+movie_genre(m_tenet, g_scifi).
+movie_genre(m_tenet, g_action).
+
+movie_genre(m_oppenheimer, g_biography).
+movie_genre(m_oppenheimer, g_drama).
+
+movie_genre(m_schindlers_list, g_biography).
+movie_genre(m_schindlers_list, g_drama).
+movie_genre(m_schindlers_list, g_war).
+
+movie_genre(m_saving_private_ryan, g_war).
+movie_genre(m_saving_private_ryan, g_drama).
+
+movie_genre(m_jurassic_park, g_scifi).
+movie_genre(m_jurassic_park, g_action).
+
+movie_genre(m_et, g_scifi).
+movie_genre(m_et, g_fantasy).
+
+movie_genre(m_goodfellas, g_crime).
+movie_genre(m_goodfellas, g_drama).
+
+movie_genre(m_departed, g_crime).
+movie_genre(m_departed, g_thriller).
+
+movie_genre(m_wolf_wall_street, g_comedy).
+movie_genre(m_wolf_wall_street, g_biography).
+movie_genre(m_wolf_wall_street, g_crime).
+
+movie_genre(m_irishman, g_crime).
+movie_genre(m_irishman, g_drama).
+
+movie_genre(m_pulp_fiction, g_crime).
+movie_genre(m_pulp_fiction, g_drama).
+
+movie_genre(m_kill_bill_1, g_action).
+movie_genre(m_kill_bill_1, g_crime).
+
+movie_genre(m_django, g_drama).
+movie_genre(m_django, g_action).
+
+movie_genre(m_once_hollywood, g_comedy).
+movie_genre(m_once_hollywood, g_drama).
+
+movie_genre(m_fight_club, g_drama).
+movie_genre(m_fight_club, g_thriller).
+
+movie_genre(m_social_network, g_biography).
+movie_genre(m_social_network, g_drama).
+
+movie_genre(m_gone_girl, g_thriller).
+movie_genre(m_gone_girl, g_drama).
+
+movie_genre(m_blade_runner_2049, g_scifi).
+movie_genre(m_blade_runner_2049, g_thriller).
+
+movie_genre(m_dune_1, g_scifi).
+movie_genre(m_dune_1, g_action).
+movie_genre(m_dune_1, g_drama).
+
+movie_genre(m_dune_2, g_scifi).
+movie_genre(m_dune_2, g_action).
+movie_genre(m_dune_2, g_drama).
+
+movie_genre(m_arrival, g_scifi).
+movie_genre(m_arrival, g_drama).
+
+movie_genre(m_titanic, g_romance).
+movie_genre(m_titanic, g_drama).
+
+movie_genre(m_avatar, g_scifi).
+movie_genre(m_avatar, g_action).
+movie_genre(m_avatar, g_fantasy).
+
+movie_genre(m_avatar_2, g_scifi).
+movie_genre(m_avatar_2, g_action).
+movie_genre(m_avatar_2, g_fantasy).
+
+movie_genre(m_terminator_2, g_action).
+movie_genre(m_terminator_2, g_scifi).
+
+movie_genre(m_godfather, g_crime).
+movie_genre(m_godfather, g_drama).
+
+movie_genre(m_godfather_2, g_crime).
+movie_genre(m_godfather_2, g_drama).
+
+movie_genre(m_apocalypse_now, g_war).
+movie_genre(m_apocalypse_now, g_drama).
+
+movie_genre(m_joker, g_drama).
+movie_genre(m_joker, g_thriller).
+movie_genre(m_joker, g_crime).
+
+movie_genre(m_barbie, g_comedy).
+movie_genre(m_barbie, g_fantasy).
+
+movie_genre(m_everything_everywhere, g_scifi).
+movie_genre(m_everything_everywhere, g_action).
+movie_genre(m_everything_everywhere, g_comedy).
+
+// =============================================================================
+// STUDIO RELATIONSHIPS
+// =============================================================================
+
+produced_by(m_inception, warner_bros).
+produced_by(m_interstellar, warner_bros).
+produced_by(m_dark_knight, warner_bros).
+produced_by(m_dunkirk, warner_bros).
+produced_by(m_tenet, warner_bros).
+produced_by(m_oppenheimer, universal).
+produced_by(m_schindlers_list, universal).
+produced_by(m_saving_private_ryan, paramount).
+produced_by(m_jurassic_park, universal).
+produced_by(m_et, universal).
+produced_by(m_goodfellas, warner_bros).
+produced_by(m_departed, warner_bros).
+produced_by(m_wolf_wall_street, paramount).
+produced_by(m_irishman, universal).
+produced_by(m_pulp_fiction, lionsgate).
+produced_by(m_kill_bill_1, lionsgate).
+produced_by(m_django, columbia).
+produced_by(m_once_hollywood, columbia).
+produced_by(m_fight_club, fox).
+produced_by(m_social_network, columbia).
+produced_by(m_gone_girl, fox).
+produced_by(m_blade_runner_2049, warner_bros).
+produced_by(m_dune_1, warner_bros).
+produced_by(m_dune_2, warner_bros).
+produced_by(m_arrival, paramount).
+produced_by(m_titanic, paramount).
+produced_by(m_avatar, fox).
+produced_by(m_avatar_2, disney).
+produced_by(m_terminator_2, universal).
+produced_by(m_godfather, paramount).
+produced_by(m_godfather_2, paramount).
+produced_by(m_apocalypse_now, paramount).
+produced_by(m_joker, warner_bros).
+produced_by(m_barbie, warner_bros).
+produced_by(m_everything_everywhere, lionsgate).
+
+// =============================================================================
+// AWARDS
+// =============================================================================
+
+// Oscar wins
+won_award(m_schindlers_list, oscar_best_picture, 1994).
+won_award(m_godfather, oscar_best_picture, 1973).
+won_award(m_godfather_2, oscar_best_picture, 1975).
+won_award(m_departed, oscar_best_picture, 2007).
+won_award(m_titanic, oscar_best_picture, 1998).
+won_award(m_oppenheimer, oscar_best_picture, 2024).
+won_award(m_everything_everywhere, oscar_best_picture, 2023).
+
+// Oscar nominations
+nominated(m_inception, oscar_best_picture, 2011).
+nominated(m_dark_knight, oscar_best_picture, 2009).
+nominated(m_dunkirk, oscar_best_picture, 2018).
+nominated(m_pulp_fiction, oscar_best_picture, 1995).
+nominated(m_goodfellas, oscar_best_picture, 1991).
+nominated(m_avatar, oscar_best_picture, 2010).
+nominated(m_social_network, oscar_best_picture, 2011).
+nominated(m_arrival, oscar_best_picture, 2017).
+nominated(m_joker, oscar_best_picture, 2020).
+nominated(m_dune_1, oscar_best_picture, 2022).
+nominated(m_barbie, oscar_best_picture, 2024).
+
+// Golden Globe wins
+won_award(m_titanic, golden_globe_drama, 1998).
+won_award(m_avatar, golden_globe_drama, 2010).
+won_award(m_social_network, golden_globe_drama, 2011).
+won_award(m_oppenheimer, golden_globe_drama, 2024).
+won_award(m_barbie, golden_globe_comedy, 2024).
+
+// Entity types for award symbols
+entity_type(oscar_best_picture, oscar).
+entity_type(golden_globe_drama, golden_globe).
+entity_type(golden_globe_comedy, golden_globe).

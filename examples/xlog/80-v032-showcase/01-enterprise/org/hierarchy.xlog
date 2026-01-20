@@ -105,7 +105,7 @@ management_chain(Emp, Mgr, 1) :- reports_to(Emp, Mgr).
 management_chain(Emp, TopMgr, Level) :-
     reports_to(Emp, Mgr),
     management_chain(Mgr, TopMgr, PrevLevel),
-    Level is PrevLevel + 1.
+    Level is PrevLevel + cast(1, u32).
 
 // Count direct reports
 pred direct_report_count(symbol, u64).

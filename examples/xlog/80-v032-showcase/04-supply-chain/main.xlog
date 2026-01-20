@@ -1,439 +1,219 @@
 // =============================================================================
-// Supply Chain Analytics - Complete Self-Contained Example
+// Supply Chain Analytics - Main Entry Point
 // =============================================================================
-// Demonstrates working features:
-//   - symbol type for product/supplier identifiers
-//   - Recursive rules for Bill of Materials (BOM) explosion
-//   - Aggregations for inventory and cost analysis
-//   - Arithmetic expressions for pricing calculations
-//   - Complex join patterns for supply chain optimization
+// Demonstrates v0.3.2 module system with modular supply chain management
 //
-// Domain: Manufacturing supply chain with products, suppliers, orders, warehouses
+// Features:
+//   - use imports: Import predicates from inventory, shipping, and cost modules
+//   - Cross-module queries: Combine data from all 3 modules
+//   - UDF usage: Apply cost calculation functions
+//   - Recursive predicates: BOM explosion, shipping reachability
+//   - Private predicates: Internal helpers with negation
 // =============================================================================
 
-// --- Core Entity Predicates ---
-pred product(symbol, symbol, symbol).        // product_id, name, category
-pred supplier(symbol, symbol, symbol).       // supplier_id, name, country
-pred warehouse(symbol, symbol, symbol).      // warehouse_id, name, region
-pred customer(symbol, symbol, symbol).       // customer_id, name, segment
-
-// --- Product Structure ---
-pred bom(symbol, symbol, u32).               // parent_product, component, quantity
-pred unit_cost(symbol, u32).                 // product_id, cost_cents
-pred lead_time_days(symbol, u32).            // product_id, days
-
-// --- Supplier Relations ---
-pred supplies(symbol, symbol, u32).          // supplier_id, product_id, price_cents
-pred supplier_rating(symbol, u32).           // supplier_id, rating (1-100)
-pred preferred_supplier(symbol, symbol).     // product_id, supplier_id
-
-// --- Inventory ---
-pred inventory(symbol, symbol, u32).         // warehouse_id, product_id, quantity
-pred reorder_point(symbol, u32).             // product_id, min_quantity
-pred safety_stock(symbol, u32).              // product_id, buffer_quantity
-
-// --- Orders and Shipping ---
-pred order(symbol, symbol, symbol, u32).     // order_id, customer_id, status, timestamp
-pred order_line(symbol, symbol, u32, u32).   // order_id, product_id, quantity, unit_price
-pred shipment(symbol, symbol, symbol, u32).  // shipment_id, order_id, warehouse_id, ship_date
-
-// --- Transportation ---
-pred route(symbol, symbol, u32, u32).        // from_warehouse, to_warehouse, distance_km, cost_cents
-pred transit_time(symbol, symbol, u32).      // from_warehouse, to_warehouse, days
-
 // =============================================================================
-// PRODUCT CATALOG
+// MODULE IMPORTS
 // =============================================================================
 
-product(p001, "Laptop X1", electronics).
-product(p002, "Display Panel 15in", components).
-product(p003, "CPU Chip A9", components).
-product(p004, "RAM Module 16GB", components).
-product(p005, "SSD Drive 512GB", components).
-product(p006, "Battery Pack", components).
-product(p007, "Keyboard Assembly", components).
-product(p008, "Motherboard", components).
-product(p009, "Smartphone S5", electronics).
-product(p010, "OLED Screen 6in", components).
-product(p011, "Camera Module", components).
-product(p012, "Power Adapter", accessories).
-product(p013, "USB Cable", accessories).
-product(p014, "Carrying Case", accessories).
-product(p015, "Wireless Mouse", accessories).
-
-unit_cost(p001, 80000).    // $800
-unit_cost(p002, 15000).    // $150
-unit_cost(p003, 25000).    // $250
-unit_cost(p004, 8000).     // $80
-unit_cost(p005, 12000).    // $120
-unit_cost(p006, 5000).     // $50
-unit_cost(p007, 3000).     // $30
-unit_cost(p008, 20000).    // $200
-unit_cost(p009, 60000).    // $600
-unit_cost(p010, 10000).    // $100
-unit_cost(p011, 4000).     // $40
-unit_cost(p012, 2500).     // $25
-unit_cost(p013, 500).      // $5
-unit_cost(p014, 4000).     // $40
-unit_cost(p015, 3500).     // $35
-
-lead_time_days(p001, 14).
-lead_time_days(p002, 7).
-lead_time_days(p003, 10).
-lead_time_days(p004, 5).
-lead_time_days(p005, 5).
-lead_time_days(p006, 7).
-lead_time_days(p007, 5).
-lead_time_days(p008, 10).
-lead_time_days(p009, 12).
-lead_time_days(p010, 8).
-lead_time_days(p011, 6).
-lead_time_days(p012, 3).
-lead_time_days(p013, 2).
-lead_time_days(p014, 4).
-lead_time_days(p015, 3).
+use inventory/stock.
+use shipping/routes.
+use cost/calculator.
 
 // =============================================================================
-// BILL OF MATERIALS (Hierarchical Structure)
+// CROSS-MODULE ANALYTICS
 // =============================================================================
 
-// Laptop X1 components
-bom(p001, p002, 1).  // 1 Display Panel
-bom(p001, p003, 1).  // 1 CPU Chip
-bom(p001, p004, 2).  // 2 RAM Modules
-bom(p001, p005, 1).  // 1 SSD Drive
-bom(p001, p006, 1).  // 1 Battery Pack
-bom(p001, p007, 1).  // 1 Keyboard
-bom(p001, p008, 1).  // 1 Motherboard
+// --- Inventory Health Analysis ---
 
-// Smartphone S5 components
-bom(p009, p010, 1).  // 1 OLED Screen
-bom(p009, p011, 2).  // 2 Camera Modules
-bom(p009, p003, 1).  // 1 CPU Chip (shared)
-bom(p009, p004, 1).  // 1 RAM Module
-bom(p009, p006, 1).  // 1 Battery Pack (shared)
-
-// Motherboard sub-components (nested BOM)
-bom(p008, p003, 1).  // CPU socket
-bom(p008, p004, 4).  // 4 RAM slots
-
-// =============================================================================
-// SUPPLIERS
-// =============================================================================
-
-supplier(s001, "TechParts Inc", usa).
-supplier(s002, "Global Components", china).
-supplier(s003, "EuroTech Supply", germany).
-supplier(s004, "AsiaChip Co", taiwan).
-supplier(s005, "QualityParts Ltd", japan).
-supplier(s006, "FastShip Logistics", usa).
-
-supplier_rating(s001, 85).
-supplier_rating(s002, 78).
-supplier_rating(s003, 92).
-supplier_rating(s004, 88).
-supplier_rating(s005, 95).
-supplier_rating(s006, 82).
-
-// Supplier-Product relationships with pricing
-supplies(s001, p002, 14000).
-supplies(s001, p007, 2800).
-supplies(s002, p002, 12000).
-supplies(s002, p003, 22000).
-supplies(s002, p004, 7000).
-supplies(s002, p005, 10000).
-supplies(s003, p003, 26000).
-supplies(s003, p008, 19000).
-supplies(s004, p003, 23000).
-supplies(s004, p004, 7500).
-supplies(s004, p010, 9000).
-supplies(s004, p011, 3500).
-supplies(s005, p005, 11500).
-supplies(s005, p006, 4800).
-supplies(s005, p010, 9500).
-supplies(s006, p012, 2400).
-supplies(s006, p013, 450).
-supplies(s006, p014, 3800).
-supplies(s006, p015, 3200).
-
-// Preferred suppliers (best price-quality balance)
-preferred_supplier(p002, s002).
-preferred_supplier(p003, s004).
-preferred_supplier(p004, s002).
-preferred_supplier(p005, s005).
-preferred_supplier(p006, s005).
-preferred_supplier(p007, s001).
-preferred_supplier(p008, s003).
-preferred_supplier(p010, s004).
-preferred_supplier(p011, s004).
-
-// =============================================================================
-// WAREHOUSES
-// =============================================================================
-
-warehouse(w001, "West Coast Hub", west).
-warehouse(w002, "East Coast Hub", east).
-warehouse(w003, "Central Distribution", central).
-warehouse(w004, "Europe Center", europe).
-
-// Routes between warehouses
-route(w001, w002, 4500, 15000).   // $150 shipping
-route(w001, w003, 1800, 8000).    // $80 shipping
-route(w002, w003, 1500, 7000).    // $70 shipping
-route(w003, w004, 8000, 25000).   // $250 shipping
-route(w001, w004, 9500, 30000).   // $300 shipping
-route(w002, w004, 7000, 22000).   // $220 shipping
-
-transit_time(w001, w002, 5).
-transit_time(w001, w003, 3).
-transit_time(w002, w003, 2).
-transit_time(w003, w004, 7).
-transit_time(w001, w004, 8).
-transit_time(w002, w004, 6).
-
-// =============================================================================
-// INVENTORY LEVELS
-// =============================================================================
-
-inventory(w001, p001, 50).
-inventory(w001, p002, 200).
-inventory(w001, p003, 150).
-inventory(w001, p004, 400).
-inventory(w001, p009, 80).
-inventory(w001, p012, 500).
-inventory(w001, p015, 300).
-
-inventory(w002, p001, 75).
-inventory(w002, p002, 180).
-inventory(w002, p005, 250).
-inventory(w002, p006, 300).
-inventory(w002, p009, 100).
-inventory(w002, p013, 1000).
-inventory(w002, p014, 200).
-
-inventory(w003, p001, 100).
-inventory(w003, p003, 200).
-inventory(w003, p004, 500).
-inventory(w003, p007, 350).
-inventory(w003, p008, 120).
-inventory(w003, p010, 180).
-inventory(w003, p011, 250).
-
-inventory(w004, p001, 40).
-inventory(w004, p009, 60).
-inventory(w004, p012, 300).
-inventory(w004, p013, 800).
-inventory(w004, p014, 150).
-inventory(w004, p015, 200).
-
-// Reorder points and safety stock
-reorder_point(p001, 30).
-reorder_point(p002, 100).
-reorder_point(p003, 80).
-reorder_point(p004, 200).
-reorder_point(p005, 120).
-reorder_point(p006, 150).
-reorder_point(p009, 40).
-
-safety_stock(p001, 10).
-safety_stock(p002, 50).
-safety_stock(p003, 30).
-safety_stock(p004, 100).
-safety_stock(p005, 50).
-safety_stock(p006, 75).
-safety_stock(p009, 20).
-
-// =============================================================================
-// CUSTOMERS
-// =============================================================================
-
-customer(c001, "TechRetail Corp", enterprise).
-customer(c002, "SmartBuy Inc", enterprise).
-customer(c003, "Consumer Direct", retail).
-customer(c004, "Government Services", government).
-customer(c005, "Education Systems", education).
-
-// =============================================================================
-// ORDERS
-// =============================================================================
-
-// Status: pending=1, processing=2, shipped=3, delivered=4
-order(o001, c001, pending, 20240115).
-order(o002, c002, processing, 20240114).
-order(o003, c003, shipped, 20240112).
-order(o004, c004, delivered, 20240110).
-order(o005, c001, processing, 20240116).
-order(o006, c005, pending, 20240117).
-
-order_line(o001, p001, 20, 95000).   // 20 Laptops @ $950 each
-order_line(o001, p012, 20, 3000).    // 20 Power Adapters @ $30
-order_line(o002, p009, 50, 70000).   // 50 Smartphones @ $700
-order_line(o002, p013, 50, 600).     // 50 USB Cables @ $6
-order_line(o003, p001, 10, 95000).   // 10 Laptops
-order_line(o003, p015, 10, 4000).    // 10 Wireless Mice
-order_line(o004, p001, 100, 85000).  // 100 Laptops @ $850 (bulk discount)
-order_line(o004, p014, 100, 3500).   // 100 Cases
-order_line(o005, p009, 30, 72000).   // 30 Smartphones
-order_line(o006, p001, 25, 90000).   // 25 Laptops
-
-// =============================================================================
-// SHIPMENTS
-// =============================================================================
-
-shipment(sh001, o003, w001, 20240113).
-shipment(sh002, o004, w002, 20240111).
-shipment(sh003, o002, w003, 20240115).
-
-// =============================================================================
-// BOM EXPLOSION (Recursive)
-// =============================================================================
-
-// Full BOM explosion - all components needed to build a product
-pred bom_exploded(symbol, symbol, u32).
-
-// Base case: direct components
-bom_exploded(Product, Component, Qty) :- bom(Product, Component, Qty).
-
-// Recursive case: sub-components of components
-pred bom_explosion_recursive(symbol, symbol, u32).
-bom_explosion_recursive(Product, SubComponent, TotalQty) :-
-    bom(Product, Component, ParentQty),
-    bom_exploded(Component, SubComponent, ChildQty),
-    TotalQty is ParentQty * ChildQty.
-
-// Combine direct and recursive BOMs
-pred full_bom(symbol, symbol, u32).
-full_bom(Product, Component, Qty) :- bom_exploded(Product, Component, Qty).
-full_bom(Product, Component, Qty) :- bom_explosion_recursive(Product, Component, Qty).
-
-// Total component demand for a product
-pred component_total(symbol, symbol, u64).
-component_total(Product, Component, sum(Qty)) :- full_bom(Product, Component, Qty).
-
-// =============================================================================
-// INVENTORY ANALYTICS
-// =============================================================================
-
-// Total inventory per product across warehouses
-pred total_inventory(symbol, u64).
-total_inventory(ProductId, sum(Qty)) :- inventory(_, ProductId, Qty).
-
-// Inventory value per warehouse
-pred warehouse_inventory_value(symbol, u64).
-warehouse_inventory_value(WarehouseId, sum(Value)) :-
-    inventory(WarehouseId, ProductId, Qty),
-    unit_cost(ProductId, Cost),
-    Value is Qty * Cost.
-
-// Low stock alerts (below reorder point)
-pred low_stock_alert(symbol, symbol, symbol, u32, u32).
-low_stock_alert(WarehouseName, ProductName, Category, CurrentQty, ReorderPt) :-
+// Calculate days of stock for each product in each warehouse
+pred inventory_days(symbol, symbol, symbol, u32, u32, u32).
+// warehouse_name, product_name, category, current_qty, daily_demand, days_remaining
+inventory_days(WarehouseName, ProductName, Category, Qty, DailyDmd, DaysRemaining) :-
     warehouse(WarehouseId, WarehouseName, _),
-    inventory(WarehouseId, ProductId, CurrentQty),
+    stock(WarehouseId, ProductId, Qty),
     product(ProductId, ProductName, Category),
-    reorder_point(ProductId, ReorderPt),
-    CurrentQty < ReorderPt.
+    daily_demand(ProductId, DailyDmd),
+    DaysRemaining is days_of_stock(Qty, DailyDmd).
 
-// =============================================================================
-// SUPPLIER ANALYTICS
-// =============================================================================
+// Reorder urgency report with priority levels
+pred reorder_report(symbol, symbol, symbol, u32, u32, u32).
+// warehouse_name, product_name, category, current_qty, days_remaining, urgency_level
+reorder_report(WarehouseName, ProductName, Category, Qty, DaysRemaining, Urgency) :-
+    inventory_days(WarehouseName, ProductName, Category, Qty, _, DaysRemaining),
+    Urgency is reorder_urgency(DaysRemaining).
 
-// Products per supplier
-pred supplier_product_count(symbol, u64).
-supplier_product_count(SupplierId, count(ProductId)) :- supplies(SupplierId, ProductId, _).
+// Critical inventory items (urgency level 1 or 2)
+pred critical_inventory(symbol, symbol, u32, u32).
+// warehouse_name, product_name, days_remaining, urgency_level
+critical_inventory(WarehouseName, ProductName, DaysRemaining, Urgency) :-
+    reorder_report(WarehouseName, ProductName, _, _, DaysRemaining, Urgency),
+    Urgency < 3.
 
-// Best price for each product
-pred min_supplier_price(symbol, u64).
-min_supplier_price(ProductId, sum(Price)) :- supplies(_, ProductId, Price).
+// --- Shipping Cost Analysis ---
 
-// High-rated suppliers (rating >= 85)
-pred premium_supplier(symbol, symbol, symbol, u32).
-premium_supplier(SupplierName, Country, SupplierId, Rating) :-
-    supplier(SupplierId, SupplierName, Country),
-    supplier_rating(SupplierId, Rating),
-    Rating >= 85.
+// Shipping options with full cost breakdown
+pred shipping_option(symbol, symbol, symbol, symbol, u32, u32, u32, u32).
+// origin, destination, carrier_name, service_level, base_cost, zone_surcharge, fuel_surcharge, total
+shipping_option(Origin, Dest, CarrierName, ServiceLevel, BaseCost, ZoneSurch, FuelSurch, TotalCost) :-
+    direct_route(Origin, Dest, CarrierId, _, BaseCost),
+    carrier(CarrierId, CarrierName, ServiceLevel),
+    carrier_rate(CarrierId, _, FuelSurch),
+    delivery_zone(Dest, ZoneId),
+    zone_surcharge(ZoneId, ZoneSurch),
+    TotalCost is total_cost(BaseCost, ZoneSurch, FuelSurch, cast(0, u32)).
 
-// Supplier diversity per product
-pred product_supplier_count(symbol, u64).
-product_supplier_count(ProductId, count(SupplierId)) :- supplies(SupplierId, ProductId, _).
+// Best shipping option (lowest cost) for each route
+pred best_shipping(symbol, symbol, symbol, u32).
+// origin, destination, carrier_name, total_cost
+best_shipping(Origin, Dest, CarrierName, TotalCost) :-
+    best_carrier_for_route(Origin, Dest, CarrierId, BaseCost),
+    carrier(CarrierId, CarrierName, _),
+    delivery_zone(Dest, ZoneId),
+    zone_surcharge(ZoneId, ZoneSurch),
+    carrier_rate(CarrierId, _, FuelSurch),
+    TotalCost is total_cost(BaseCost, ZoneSurch, FuelSurch, cast(0, u32)).
 
-// Single-source products (only 1 supplier - supply chain risk)
-pred single_source_product(symbol, symbol, u64).
-single_source_product(ProductName, Category, SupplierCount) :-
-    product(ProductId, ProductName, Category),
-    product_supplier_count(ProductId, SupplierCount),
-    SupplierCount < 2.
+// Fastest shipping option for each route
+pred fastest_shipping(symbol, symbol, symbol, u32).
+// origin, destination, carrier_name, transit_days
+fastest_shipping(Origin, Dest, CarrierName, Days) :-
+    fastest_carrier_for_route(Origin, Dest, CarrierId, Days),
+    carrier(CarrierId, CarrierName, _).
 
-// =============================================================================
-// ORDER ANALYTICS
-// =============================================================================
+// --- Volume Discount Analysis ---
 
-// Order line value
-pred order_line_value(symbol, u32).
-order_line_value(OrderId, LineValue) :-
-    order_line(OrderId, _, Qty, Price),
-    LineValue is Qty * Price.
+// Volume discount tiers for bulk orders
+// Use facts with pre-computed discount values
+pred bulk_order_discount(u32, u32).
+// quantity, discount_pct
+// 50 units: 5% discount, 100: 10%, 500: 10%, 1000: 20%, 5000: 20%
+bulk_order_discount(50, 5).
+bulk_order_discount(100, 10).
+bulk_order_discount(500, 10).
+bulk_order_discount(1000, 20).
+bulk_order_discount(5000, 20).
 
-// Total order value
-pred order_total(symbol, u64).
-order_total(OrderId, sum(LineValue)) :- order_line_value(OrderId, LineValue).
+// --- Warehouse Value Analysis ---
 
-// Orders by customer
-pred customer_order_count(symbol, u64).
-customer_order_count(CustomerId, count(OrderId)) :- order(OrderId, CustomerId, _, _).
-
-// Top customers (2+ orders)
-pred top_customer(symbol, symbol, symbol, u64).
-top_customer(CustomerName, Segment, CustomerId, OrderCount) :-
-    customer(CustomerId, CustomerName, Segment),
-    customer_order_count(CustomerId, OrderCount),
-    OrderCount >= 2.
-
-// Large orders (value > $5000)
-pred large_order(symbol, symbol, u64).
-large_order(OrderId, CustomerName, TotalValue) :-
-    order(OrderId, CustomerId, _, _),
-    customer(CustomerId, CustomerName, _),
-    order_total(OrderId, TotalValue),
-    TotalValue > 500000.
-
-// =============================================================================
-// REGIONAL ANALYTICS
-// =============================================================================
-
-// Warehouse product count
-pred warehouse_product_count(symbol, u64).
-warehouse_product_count(WarehouseId, count(ProductId)) :- inventory(WarehouseId, ProductId, _).
-
-// Well-stocked warehouses (5+ products)
-pred major_warehouse(symbol, symbol, symbol, u64, u64).
-major_warehouse(WarehouseName, Region, WarehouseId, ProductCount, InventoryValue) :-
+// Total inventory value per warehouse
+pred warehouse_summary(symbol, symbol, u64).
+// warehouse_name, region, total_value
+warehouse_summary(WarehouseName, Region, TotalValue) :-
     warehouse(WarehouseId, WarehouseName, Region),
-    warehouse_product_count(WarehouseId, ProductCount),
-    warehouse_inventory_value(WarehouseId, InventoryValue),
-    ProductCount >= 5.
+    warehouse_value(WarehouseId, TotalValue).
+
+// --- BOM Cost Analysis ---
+
+// Component cost for assembled products
+pred assembly_component_cost(symbol, symbol, u32, u32, u32).
+// assembly_product, component_name, quantity_needed, unit_cost, total_cost
+assembly_component_cost(AssemblyName, ComponentName, Qty, UnitCost, TotalCost) :-
+    product(AssemblyId, AssemblyName, _),
+    bom_exploded(AssemblyId, ComponentId, Qty),
+    product(ComponentId, ComponentName, _),
+    unit_cost(ComponentId, UnitCost),
+    TotalCost is Qty * UnitCost.
+
+// Total assembly cost (sum of all components)
+pred assembly_total_cost(symbol, u64).
+// assembly_name, total_component_cost
+assembly_total_cost(AssemblyName, sum(TotalCost)) :-
+    assembly_component_cost(AssemblyName, _, _, _, TotalCost).
+
+// --- Multi-Hop Shipping Analysis ---
+
+// Reachable destinations from each warehouse
+pred reachable_destinations(symbol, symbol).
+// origin_name, destination_name
+reachable_destinations(OriginName, DestName) :-
+    warehouse(OriginId, OriginName, _),
+    warehouse(DestId, DestName, _),
+    can_ship(OriginId, DestId),
+    OriginId != DestId.
+
+// Count of reachable destinations per warehouse
+pred warehouse_connectivity(symbol, u64).
+// warehouse_name, reachable_count
+warehouse_connectivity(WarehouseName, count(DestName)) :-
+    reachable_destinations(WarehouseName, DestName).
+
+// --- Carrier Coverage Analysis ---
+
+// Carriers available for each route
+pred route_carrier_options(symbol, symbol, u64).
+// origin, destination, carrier_count
+route_carrier_options(Origin, Dest, CarrierCount) :-
+    multi_carrier_route(Origin, Dest, CarrierCount).
+
+// Carrier service coverage (regions served)
+pred carrier_coverage(symbol, symbol, u64).
+// carrier_name, service_level, region_count
+carrier_coverage(CarrierName, ServiceLevel, count(Region)) :-
+    carrier(CarrierId, CarrierName, ServiceLevel),
+    carrier_serves(CarrierId, Region).
+
+// --- Product Category Analysis ---
+
+// Stock levels by category across all warehouses
+pred category_stock(symbol, u64).
+// category, total_units
+category_stock(Category, sum(Qty)) :-
+    product(ProductId, _, Category),
+    stock(_, ProductId, Qty).
+
+// Low stock products by category
+pred category_low_stock(symbol, symbol, symbol, u32, u32).
+// category, warehouse_name, product_name, current_qty, reorder_point
+category_low_stock(Category, WarehouseName, ProductName, Qty, ReorderPt) :-
+    product(ProductId, ProductName, Category),
+    warehouse(WarehouseId, WarehouseName, _),
+    low_stock_alert(WarehouseId, ProductId, Qty, ReorderPt).
 
 // =============================================================================
 // QUERIES
 // =============================================================================
 
-// Q1: Full BOM explosion for Laptop X1
-?- full_bom(p001, Component, Quantity).
+// Q1: BOM explosion for PowerTower Desktop - all components needed
+?- bom_exploded(prod_desktop_tower, Component, Quantity).
 
-// Q2: Low stock alerts
-?- low_stock_alert(Warehouse, Product, Category, CurrentQty, ReorderPoint).
+// Q2: Critical inventory alerts (urgency 1 or 2)
+?- critical_inventory(Warehouse, Product, DaysRemaining, Urgency).
 
-// Q3: Premium suppliers
-?- premium_supplier(SupplierName, Country, SupplierId, Rating).
+// Q3: Best shipping option for each route
+?- best_shipping(Origin, Dest, Carrier, Cost).
 
-// Q4: Single-source products (supply chain risk)
-?- single_source_product(ProductName, Category, SupplierCount).
+// Q4: Fastest shipping option for each route
+?- fastest_shipping(Origin, Dest, Carrier, Days).
 
-// Q5: Large orders
-?- large_order(OrderId, CustomerName, TotalValue).
+// Q5: Warehouse summary with total value
+?- warehouse_summary(Warehouse, Region, TotalValue).
 
-// Q6: Major warehouses with inventory value
-?- major_warehouse(WarehouseName, Region, WarehouseId, ProductCount, InventoryValue).
+// Q6: Assembly cost breakdown for ProBook Laptop 15
+?- assembly_component_cost("ProBook Laptop 15", Component, Qty, UnitCost, TotalCost).
 
-// Q7: Top customers
-?- top_customer(CustomerName, Segment, CustomerId, OrderCount).
+// Q7: Total assembly cost for all manufactured products
+?- assembly_total_cost(Assembly, TotalCost).
+
+// Q8: Shipping reachability from Seattle
+?- reachable_destinations("Seattle Distribution Center", Destination).
+
+// Q9: Warehouse connectivity (number of reachable destinations)
+?- warehouse_connectivity(Warehouse, ReachableCount).
+
+// Q10: Volume discount tiers
+?- bulk_order_discount(Quantity, DiscountPct).
+
+// Q11: Low stock alerts by category
+?- category_low_stock(Category, Warehouse, Product, CurrentQty, ReorderPoint).
+
+// Q12: Carrier coverage analysis
+?- carrier_coverage(Carrier, ServiceLevel, RegionCount).
+
+// Q13: Multi-carrier routes
+?- route_carrier_options(Origin, Dest, CarrierCount).
+
+// Q14: Category-wise stock totals
+?- category_stock(Category, TotalUnits).
+
+// Q15: Inventory days remaining report
+?- inventory_days(Warehouse, Product, Category, Qty, DailyDemand, DaysRemaining).

@@ -1,525 +1,227 @@
 // =============================================================================
-// Game Analytics - Complete Self-Contained Example
+// Game Analytics - Main Entry Point
 // =============================================================================
-// Demonstrates working features:
-//   - symbol type for player/item identifiers
-//   - Recursive rules for achievement chains and social graphs
-//   - Aggregations for leaderboards and statistics
-//   - Arithmetic expressions for scoring calculations
-//   - Complex join patterns for matchmaking analysis
+// Demonstrates v0.3.2 module system with comprehensive imports
 //
-// Domain: Multiplayer game with players, matches, achievements, and guilds
+// Features demonstrated:
+//   - use imports: Import predicates from 4 specialized modules
+//   - Cross-module queries: Combine player, match, achievement, and ranking data
+//   - Symbol types: Player IDs, usernames, countries, game modes
+//   - Recursive rules: Achievement prerequisites, friend-of-friend
+//   - User-Defined Functions: ELO calculations, achievement points, KDA
+//   - Aggregations: Leaderboards, statistics, distributions
+//   - Private predicates: Internal helpers hidden from other modules
+//
+// Module structure:
+//   players/profiles.xlog  - Player data, friendships, guilds
+//   matches/history.xlog   - Match results, game modes, statistics
+//   achievements/system.xlog - Achievement definitions, prerequisites, awards
+//   ranking/elo.xlog       - ELO ratings, tiers, win rates, UDFs
 // =============================================================================
 
-// --- Core Entity Predicates ---
-pred player(symbol, symbol, u32).         // player_id, username, level
-pred player_stats(symbol, u32, u32, u32). // player_id, total_xp, games_played, hours_played
-pred region(symbol, symbol).              // region_id, region_name
-pred player_region(symbol, symbol).       // player_id, region_id
-
-// --- Match/Session Predicates ---
-pred match_result(symbol, symbol, u32, u32, u32). // match_id, player_id, kills, deaths, assists
-pred match_info(symbol, symbol, u32, u32).        // match_id, game_mode, duration_seconds, timestamp
-pred game_mode(symbol, symbol).                   // mode_id, mode_name
-
-// --- Achievement System ---
-pred achievement(symbol, symbol, u32).     // achievement_id, name, points
-pred player_achievement(symbol, symbol).   // player_id, achievement_id
-pred achievement_requires(symbol, symbol). // achievement_id, prerequisite_id
-
-// --- Social Features ---
-pred friend(symbol, symbol).               // player1_id, player2_id (symmetric)
-pred guild(symbol, symbol, symbol).        // guild_id, guild_name, leader_id
-pred guild_member(symbol, symbol).         // guild_id, player_id
-pred guild_rank(symbol, symbol, u32).      // guild_id, player_id, rank (1=leader, 2=officer, 3=member)
-
-// --- Item/Inventory System ---
-pred item(symbol, symbol, u32, u32).       // item_id, name, rarity, base_value
-pred inventory(symbol, symbol, u32).       // player_id, item_id, quantity
-pred item_category(symbol, symbol).        // item_id, category_name
+// --- Module Imports ---
+use players/profiles.
+use matches/history.
+use achievements/system.
+use ranking/elo.
 
 // =============================================================================
-// REGIONS
+// PRIVATE HELPERS (internal to main module)
 // =============================================================================
 
-region(na, "North America").
-region(eu, "Europe").
-region(asia, "Asia Pacific").
-region(sa, "South America").
+// Current timestamp for time-based calculations
+pred current_timestamp(u32).
+current_timestamp(20240410).
+
+// Threshold for top player classification
+pred top_player_threshold(u32).
+top_player_threshold(2200).
 
 // =============================================================================
-// GAME MODES
+// CROSS-MODULE ANALYTICS
 // =============================================================================
 
-game_mode(dm, "Deathmatch").
-game_mode(tdm, "Team Deathmatch").
-game_mode(ctf, "Capture the Flag").
-game_mode(ranked, "Ranked Competitive").
-game_mode(casual, "Casual Play").
+// Comprehensive player profile combining all modules
+pred player_profile(symbol, symbol, symbol, u32, u32, u64, u64).
+// player_id, username, country, elo_rating, tier, achievement_points, total_kills
+player_profile(PlayerId, Username, Country, Rating, Tier, AchPoints, TotalKills) :-
+    player(PlayerId, Username, Country, active),
+    player_elo(PlayerId, Rating),
+    player_calculated_tier(PlayerId, Tier),
+    player_achievement_points(PlayerId, AchPoints),
+    total_kills(PlayerId, TotalKills).
 
-// =============================================================================
-// PLAYER DATA
-// =============================================================================
+// Top players combining ELO and achievements
+pred elite_player(symbol, symbol, u32, u64).
+elite_player(Username, Country, Rating, AchPoints) :-
+    player(PlayerId, Username, Country, active),
+    player_elo(PlayerId, Rating),
+    top_player_threshold(Threshold),
+    Rating >= Threshold,
+    player_achievement_points(PlayerId, AchPoints),
+    AchPoints >= 300.
 
-player(p001, "DragonSlayer99", 50).
-player(p002, "NightHawk", 45).
-player(p003, "ShadowMaster", 42).
-player(p004, "IronFist", 38).
-player(p005, "StormBringer", 55).
-player(p006, "FrostQueen", 48).
-player(p007, "BlazeFury", 35).
-player(p008, "VoidWalker", 52).
-player(p009, "ThunderStrike", 40).
-player(p010, "CrystalMage", 44).
-player(p011, "SteelWarrior", 36).
-player(p012, "MoonRider", 47).
-
-player_stats(p001, 125000, 500, 1200).
-player_stats(p002, 98000, 380, 950).
-player_stats(p003, 87000, 320, 800).
-player_stats(p004, 65000, 280, 650).
-player_stats(p005, 145000, 620, 1500).
-player_stats(p006, 110000, 450, 1100).
-player_stats(p007, 52000, 220, 500).
-player_stats(p008, 135000, 550, 1350).
-player_stats(p009, 72000, 300, 700).
-player_stats(p010, 95000, 400, 980).
-player_stats(p011, 48000, 200, 480).
-player_stats(p012, 105000, 430, 1050).
-
-player_region(p001, na).
-player_region(p002, na).
-player_region(p003, eu).
-player_region(p004, eu).
-player_region(p005, asia).
-player_region(p006, asia).
-player_region(p007, na).
-player_region(p008, eu).
-player_region(p009, asia).
-player_region(p010, sa).
-player_region(p011, sa).
-player_region(p012, na).
-
-// =============================================================================
-// MATCH HISTORY (Recent 10 matches)
-// =============================================================================
-
-match_info(m001, ranked, 1800, 20240115).
-match_info(m002, tdm, 900, 20240115).
-match_info(m003, ctf, 1200, 20240116).
-match_info(m004, ranked, 2100, 20240116).
-match_info(m005, casual, 600, 20240117).
-match_info(m006, ranked, 1950, 20240117).
-match_info(m007, dm, 450, 20240118).
-match_info(m008, ranked, 1700, 20240118).
-match_info(m009, tdm, 1100, 20240119).
-match_info(m010, ranked, 2000, 20240119).
-
-// Match results: (match_id, player_id, kills, deaths, assists)
-match_result(m001, p001, 25, 8, 12).
-match_result(m001, p002, 18, 15, 8).
-match_result(m001, p005, 22, 10, 15).
-match_result(m001, p008, 20, 12, 10).
-
-match_result(m002, p003, 15, 10, 5).
-match_result(m002, p004, 12, 12, 8).
-match_result(m002, p006, 18, 8, 10).
-match_result(m002, p009, 10, 14, 6).
-
-match_result(m003, p001, 8, 5, 20).
-match_result(m003, p007, 5, 8, 15).
-match_result(m003, p010, 10, 6, 18).
-match_result(m003, p011, 6, 10, 12).
-
-match_result(m004, p002, 30, 5, 10).
-match_result(m004, p005, 28, 8, 12).
-match_result(m004, p006, 22, 12, 8).
-match_result(m004, p012, 15, 18, 6).
-
-match_result(m005, p003, 8, 5, 3).
-match_result(m005, p007, 6, 8, 5).
-match_result(m005, p011, 4, 6, 4).
-
-match_result(m006, p001, 32, 6, 14).
-match_result(m006, p004, 18, 15, 10).
-match_result(m006, p008, 25, 10, 12).
-match_result(m006, p009, 20, 18, 8).
-
-match_result(m007, p010, 12, 8, 0).
-match_result(m007, p011, 8, 12, 0).
-match_result(m007, p012, 15, 5, 0).
-
-match_result(m008, p002, 22, 10, 8).
-match_result(m008, p003, 16, 14, 10).
-match_result(m008, p006, 20, 12, 12).
-
-match_result(m009, p001, 14, 8, 10).
-match_result(m009, p005, 18, 6, 8).
-match_result(m009, p007, 10, 12, 6).
-match_result(m009, p009, 12, 10, 8).
-
-match_result(m010, p004, 24, 8, 10).
-match_result(m010, p008, 28, 6, 12).
-match_result(m010, p010, 18, 15, 8).
-match_result(m010, p012, 20, 12, 10).
-
-// =============================================================================
-// ACHIEVEMENT SYSTEM
-// =============================================================================
-
-// Achievement definitions
-achievement(a001, "First Blood", 10).
-achievement(a002, "Killing Spree", 25).
-achievement(a003, "Unstoppable", 50).
-achievement(a004, "Legendary", 100).
-achievement(a005, "Team Player", 20).
-achievement(a006, "Support Master", 50).
-achievement(a007, "Veteran", 30).
-achievement(a008, "Elite", 75).
-achievement(a009, "Champion", 150).
-achievement(a010, "Beginner", 5).
-
-// Achievement prerequisites (chain)
-achievement_requires(a002, a001).  // Killing Spree requires First Blood
-achievement_requires(a003, a002).  // Unstoppable requires Killing Spree
-achievement_requires(a004, a003).  // Legendary requires Unstoppable
-achievement_requires(a006, a005).  // Support Master requires Team Player
-achievement_requires(a008, a007).  // Elite requires Veteran
-achievement_requires(a009, a008).  // Champion requires Elite
-
-// Player achievements
-player_achievement(p001, a001).
-player_achievement(p001, a002).
-player_achievement(p001, a003).
-player_achievement(p001, a005).
-player_achievement(p001, a007).
-player_achievement(p001, a008).
-player_achievement(p002, a001).
-player_achievement(p002, a002).
-player_achievement(p002, a005).
-player_achievement(p002, a007).
-player_achievement(p003, a001).
-player_achievement(p003, a005).
-player_achievement(p003, a010).
-player_achievement(p004, a001).
-player_achievement(p004, a010).
-player_achievement(p005, a001).
-player_achievement(p005, a002).
-player_achievement(p005, a003).
-player_achievement(p005, a004).
-player_achievement(p005, a005).
-player_achievement(p005, a006).
-player_achievement(p005, a007).
-player_achievement(p005, a008).
-player_achievement(p005, a009).
-player_achievement(p006, a001).
-player_achievement(p006, a002).
-player_achievement(p006, a005).
-player_achievement(p006, a006).
-player_achievement(p008, a001).
-player_achievement(p008, a002).
-player_achievement(p008, a003).
-player_achievement(p008, a007).
-player_achievement(p008, a008).
-
-// =============================================================================
-// GUILDS
-// =============================================================================
-
-guild(g001, "Dragon Knights", p001).
-guild(g002, "Shadow Legion", p005).
-guild(g003, "Frost Wolves", p008).
-
-guild_member(g001, p001).
-guild_member(g001, p002).
-guild_member(g001, p007).
-guild_member(g001, p012).
-
-guild_member(g002, p005).
-guild_member(g002, p006).
-guild_member(g002, p009).
-
-guild_member(g003, p008).
-guild_member(g003, p003).
-guild_member(g003, p004).
-
-guild_rank(g001, p001, 1).  // Leader
-guild_rank(g001, p002, 2).  // Officer
-guild_rank(g001, p007, 3).  // Member
-guild_rank(g001, p012, 3).  // Member
-
-guild_rank(g002, p005, 1).
-guild_rank(g002, p006, 2).
-guild_rank(g002, p009, 3).
-
-guild_rank(g003, p008, 1).
-guild_rank(g003, p003, 2).
-guild_rank(g003, p004, 3).
-
-// =============================================================================
-// FRIENDSHIPS (symmetric)
-// =============================================================================
-
-friend(p001, p002).
-friend(p002, p001).
-friend(p001, p005).
-friend(p005, p001).
-friend(p002, p005).
-friend(p005, p002).
-friend(p003, p004).
-friend(p004, p003).
-friend(p003, p008).
-friend(p008, p003).
-friend(p006, p009).
-friend(p009, p006).
-friend(p007, p012).
-friend(p012, p007).
-friend(p010, p011).
-friend(p011, p010).
-
-// =============================================================================
-// ITEMS
-// =============================================================================
-
-item(i001, "Steel Sword", 1, 100).
-item(i002, "Iron Shield", 1, 80).
-item(i003, "Flame Blade", 2, 500).
-item(i004, "Dragon Armor", 3, 2000).
-item(i005, "Healing Potion", 1, 25).
-item(i006, "Mana Crystal", 2, 150).
-item(i007, "Ancient Staff", 3, 1800).
-item(i008, "Shadow Cloak", 2, 400).
-item(i009, "Phoenix Feather", 4, 5000).
-item(i010, "Basic Bow", 1, 75).
-
-item_category(i001, weapon).
-item_category(i002, armor).
-item_category(i003, weapon).
-item_category(i004, armor).
-item_category(i005, consumable).
-item_category(i006, consumable).
-item_category(i007, weapon).
-item_category(i008, armor).
-item_category(i009, material).
-item_category(i010, weapon).
-
-// Player inventories
-inventory(p001, i001, 1).
-inventory(p001, i003, 1).
-inventory(p001, i004, 1).
-inventory(p001, i005, 10).
-inventory(p002, i001, 2).
-inventory(p002, i002, 1).
-inventory(p002, i005, 5).
-inventory(p003, i001, 1).
-inventory(p003, i008, 1).
-inventory(p003, i006, 3).
-inventory(p004, i010, 1).
-inventory(p004, i005, 8).
-inventory(p005, i003, 1).
-inventory(p005, i004, 1).
-inventory(p005, i007, 1).
-inventory(p005, i009, 2).
-inventory(p006, i007, 1).
-inventory(p006, i008, 1).
-inventory(p006, i006, 5).
-inventory(p008, i003, 1).
-inventory(p008, i004, 1).
-inventory(p008, i005, 15).
-
-// =============================================================================
-// DERIVED ANALYTICS
-// =============================================================================
-
-// KDA (Kill-Death-Assist) ratio calculation (scaled by 100 for precision)
-pred player_kda(symbol, symbol, u32).
-player_kda(PlayerId, Username, KDA) :-
-    player(PlayerId, Username, _),
-    match_result(_, PlayerId, Kills, Deaths, Assists),
-    // KDA = (K + A) / max(D, 1) * 100
-    KDA is (Kills + Assists) * cast(100, u32) / (Deaths + cast(1, u32)).
-
-// Average KDA per player
-pred avg_kda(symbol, u64).
-avg_kda(PlayerId, sum(KDA)) :-
-    player_kda(PlayerId, _, KDA).
-
-// Match participation count
-pred match_count(symbol, u64).
-match_count(PlayerId, count(MatchId)) :- match_result(MatchId, PlayerId, _, _, _).
-
-// Active players (played 3+ matches)
-pred active_player(symbol, symbol, u64).
-active_player(Username, RegionName, MatchCount) :-
-    player(PlayerId, Username, _),
+// Regional leaderboard by ELO
+pred regional_leader(symbol, symbol, symbol, u32).
+regional_leader(RegionName, Username, Country, Rating) :-
+    player(PlayerId, Username, Country, active),
     player_region(PlayerId, RegionId),
     region(RegionId, RegionName),
-    match_count(PlayerId, MatchCount),
-    MatchCount >= 3.
+    player_elo(PlayerId, Rating),
+    Rating >= 2000.
 
-// Total kills per player
-pred total_kills(symbol, u64).
-total_kills(PlayerId, sum(Kills)) :- match_result(_, PlayerId, Kills, _, _).
+// Match performance analysis
+pred match_performance(symbol, symbol, u32, u32, u32, u32).
+// player_id, match_id, kills, kda_scaled, elo_rating, tier
+match_performance(PlayerId, MatchId, Kills, KdaScaled, Rating, Tier) :-
+    match_result(MatchId, PlayerId, Kills, Deaths, Assists),
+    player_elo(PlayerId, Rating),
+    player_calculated_tier(PlayerId, Tier),
+    KdaScaled is kda_ratio(Kills, Deaths, Assists).
 
-// Top fraggers (20+ total kills)
-pred top_fragger(symbol, symbol, u64).
-top_fragger(Username, RegionName, TotalKills) :-
-    player(PlayerId, Username, _),
+// Guild power ranking (combines player stats)
+pred guild_power_ranking(symbol, symbol, u32, u64).
+// guild_name, leader_username, total_elo, total_achievements
+guild_power_ranking(GuildName, LeaderName, TotalElo, TotalAch) :-
+    guild(GuildId, GuildName, LeaderId),
+    player(LeaderId, LeaderName, _, _),
+    guild_total_elo(GuildId, TotalElo),
+    guild_total_achievements(GuildId, TotalAch).
+
+// Helper: sum of ELO for guild members
+pred guild_total_elo(symbol, u32).
+guild_total_elo(GuildId, sum(Rating)) :-
+    guild_member(GuildId, PlayerId),
+    player_elo(PlayerId, Rating).
+
+// Helper: sum of achievement points for guild members
+// Note: player_achievement_points returns u64, so this should use u64 input
+// But sum currently requires u32, so we need a workaround
+// For now, just count achievements per guild instead
+pred guild_total_achievements(symbol, u64).
+guild_total_achievements(GuildId, count(PlayerId)) :-
+    guild_member(GuildId, PlayerId),
+    player_achievement_points(PlayerId, _).
+
+// Top fraggers by region with ranking context
+pred top_fragger_by_region(symbol, symbol, u64, u32, u32).
+top_fragger_by_region(RegionName, Username, TotalKills, Rating, WinRate) :-
+    player(PlayerId, Username, _, active),
     player_region(PlayerId, RegionId),
     region(RegionId, RegionName),
     total_kills(PlayerId, TotalKills),
-    TotalKills >= 20.
+    player_elo(PlayerId, Rating),
+    player_win_rate(PlayerId, WinRate),
+    TotalKills >= 100.
 
-// =============================================================================
-// ACHIEVEMENT CHAIN (Recursive)
-// =============================================================================
+// Achievement progress with prerequisite analysis
+pred achievement_progress(symbol, symbol, u64, u64).
+// player_id, username, completed_count, total_points
+achievement_progress(PlayerId, Username, Count, Points) :-
+    player(PlayerId, Username, _, active),
+    player_achievement_count(PlayerId, Count),
+    player_achievement_points(PlayerId, Points).
 
-// All prerequisites for an achievement (transitive)
-pred all_prerequisites(symbol, symbol).
+// Friend network analysis with ELO comparison
+// Helper constant for skill gap threshold
+pred skill_gap_threshold(u32).
+skill_gap_threshold(200).
 
-// Base case: direct prerequisite
-all_prerequisites(AchId, PrereqId) :- achievement_requires(AchId, PrereqId).
-
-// Recursive case: transitive prerequisites
-all_prerequisites(AchId, TransPrereq) :-
-    achievement_requires(AchId, DirectPrereq),
-    all_prerequisites(DirectPrereq, TransPrereq).
-
-// Achievement points per player
-pred player_achievement_points(symbol, u64).
-player_achievement_points(PlayerId, sum(Points)) :-
-    player_achievement(PlayerId, AchId),
-    achievement(AchId, _, Points).
-
-// High achievers (100+ achievement points)
-pred high_achiever(symbol, symbol, u64).
-high_achiever(Username, RegionName, Points) :-
-    player(PlayerId, Username, _),
-    player_region(PlayerId, RegionId),
-    region(RegionId, RegionName),
-    player_achievement_points(PlayerId, Points),
-    Points >= 100.
-
-// =============================================================================
-// SOCIAL NETWORK ANALYSIS
-// =============================================================================
-
-// Friend of friend (2-hop connection)
-pred friend_of_friend(symbol, symbol).
-friend_of_friend(P1, P3) :-
+// Helper: compute ELO difference between friends
+pred friend_elo_diff(symbol, symbol, symbol, symbol, u32, u32, u32).
+friend_elo_diff(User1, User2, P1, P2, Elo1, Elo2, Diff) :-
+    player(P1, User1, _, active),
+    player(P2, User2, _, active),
     friend(P1, P2),
-    friend(P2, P3),
-    P1 != P3,
-    P1 != P2.
+    player_elo(P1, Elo1),
+    player_elo(P2, Elo2),
+    Elo1 >= Elo2,
+    Diff is Elo1 - Elo2.
 
-// Friend count per player
-pred friend_count(symbol, u64).
-friend_count(PlayerId, count(FriendId)) :- friend(PlayerId, FriendId).
+pred friend_comparison(symbol, symbol, u32, symbol, u32).
+// player1_username, player2_username, player1_elo, friend_type, elo_diff
+friend_comparison(User1, User2, Elo1, close_match, Diff) :-
+    friend_elo_diff(User1, User2, _, _, Elo1, _, Diff),
+    skill_gap_threshold(Threshold),
+    Diff < Threshold.
 
-// Popular players (3+ friends)
-pred popular_player(symbol, symbol, u64).
-popular_player(Username, RegionName, FriendCount) :-
-    player(PlayerId, Username, _),
-    player_region(PlayerId, RegionId),
-    region(RegionId, RegionName),
-    friend_count(PlayerId, FriendCount),
-    FriendCount >= 3.
+friend_comparison(User1, User2, Elo1, skill_gap, Diff) :-
+    friend_elo_diff(User1, User2, _, _, Elo1, _, Diff),
+    skill_gap_threshold(Threshold),
+    Diff >= Threshold.
 
-// =============================================================================
-// GUILD ANALYTICS
-// =============================================================================
+// Players who could be introduced (friend-of-friend with similar ELO)
+pred potential_friends(symbol, symbol, u32, u32).
+potential_friends(User1, User2, Elo1, Elo2) :-
+    player(P1, User1, _, active),
+    player(P2, User2, _, active),
+    friend_of_friend(P1, P2),
+    not friend(P1, P2),
+    player_elo(P1, Elo1),
+    player_elo(P2, Elo2).
 
-// Guild member count
-pred guild_size(symbol, u64).
-guild_size(GuildId, count(PlayerId)) :- guild_member(GuildId, PlayerId).
+// Match mode popularity
+pred mode_popularity(symbol, symbol, u64).
+mode_popularity(ModeName, ModeId, Count) :-
+    game_mode(ModeId, ModeName),
+    mode_match_count(ModeId, Count).
 
-// Guild total level (sum of member levels)
-pred guild_power(symbol, u64).
-guild_power(GuildId, sum(Level)) :-
-    guild_member(GuildId, PlayerId),
-    player(PlayerId, _, Level).
-
-// Top guilds (power >= 100)
-pred top_guild(symbol, symbol, u64, u64).
-top_guild(GuildName, LeaderName, MemberCount, Power) :-
-    guild(GuildId, GuildName, LeaderId),
-    player(LeaderId, LeaderName, _),
-    guild_size(GuildId, MemberCount),
-    guild_power(GuildId, Power),
-    Power >= 100.
-
-// =============================================================================
-// INVENTORY ANALYTICS
-// =============================================================================
-
-// Total inventory value per player
-pred inventory_value(symbol, u64).
-inventory_value(PlayerId, sum(TotalValue)) :-
-    inventory(PlayerId, ItemId, Quantity),
-    item(ItemId, _, _, BaseValue),
-    TotalValue is Quantity * BaseValue.
-
-// Wealthy players (inventory value >= 1000)
-pred wealthy_player(symbol, symbol, u64).
-wealthy_player(Username, RegionName, Value) :-
-    player(PlayerId, Username, _),
-    player_region(PlayerId, RegionId),
-    region(RegionId, RegionName),
-    inventory_value(PlayerId, Value),
-    Value >= 1000.
-
-// Rare item owners (rarity >= 3)
-pred rare_item_owner(symbol, symbol, symbol, u32).
-rare_item_owner(Username, ItemName, Category, Rarity) :-
-    player(PlayerId, Username, _),
-    inventory(PlayerId, ItemId, _),
-    item(ItemId, ItemName, Rarity, _),
-    item_category(ItemId, Category),
-    Rarity >= 3.
+// Players missing achievement prerequisites
+pred incomplete_chain(symbol, symbol, symbol, symbol).
+incomplete_chain(Username, AchName, PrereqName, Category) :-
+    player(PlayerId, Username, _, active),
+    player_achievement(PlayerId, AchId),
+    achievement(AchId, AchName, _),
+    all_prerequisites(AchId, PrereqId),
+    not player_achievement(PlayerId, PrereqId),
+    achievement(PrereqId, PrereqName, _),
+    achievement_category(PrereqId, Category).
 
 // =============================================================================
-// REGIONAL ANALYTICS
+// QUERIES - Cross-Module Analysis
 // =============================================================================
 
-// Players per region
-pred region_player_count(symbol, u64).
-region_player_count(RegionId, count(PlayerId)) :- player_region(PlayerId, RegionId).
+// Q1: Elite players with high ELO and achievement points
+?- elite_player(Username, Country, Rating, AchPoints).
 
-// Region total XP
-pred region_total_xp(symbol, u64).
-region_total_xp(RegionId, sum(XP)) :-
-    player_region(PlayerId, RegionId),
-    player_stats(PlayerId, XP, _, _).
+// Q2: Regional leaderboard (Master+ players by region)
+?- regional_leader(Region, Username, Country, Rating).
 
-// Active regions (50000+ total XP)
-pred active_region(symbol, symbol, u64, u64).
-active_region(RegionName, RegionId, PlayerCount, TotalXP) :-
-    region(RegionId, RegionName),
-    region_player_count(RegionId, PlayerCount),
-    region_total_xp(RegionId, TotalXP),
-    TotalXP >= 50000.
+// Q3: Top fraggers with ranking context
+?- top_fragger_by_region(Region, Username, TotalKills, Rating, WinRate).
 
-// =============================================================================
-// QUERIES
-// =============================================================================
+// Q4: Guild power rankings
+?- guild_power_ranking(GuildName, Leader, TotalElo, TotalAchievements).
 
-// Q1: Top fraggers by region
-?- top_fragger(Username, Region, TotalKills).
+// Q5: Grandmaster players
+?- grandmaster_player(PlayerId, Rating).
 
-// Q2: High achievers with achievement points
-?- high_achiever(Username, Region, Points).
+// Q6: Player tier distribution
+?- tier_distribution(Tier, PlayerCount).
 
-// Q3: Top guilds with power ratings
-?- top_guild(GuildName, LeaderName, Members, Power).
+// Q7: High win rate players (60%+)
+?- high_win_rate_player(PlayerId, WinRate, Elo).
 
-// Q4: Active regions with statistics
-?- active_region(RegionName, RegionId, PlayerCount, TotalXP).
+// Q8: Achievement progress by player
+?- achievement_progress(PlayerId, Username, AchievementCount, TotalPoints).
 
-// Q5: Wealthy players with inventory value
-?- wealthy_player(Username, Region, InventoryValue).
+// Q9: Legendary achievement holders
+?- legendary_holder(PlayerId, AchievementName).
 
-// Q6: Players with rare items
-?- rare_item_owner(Username, ItemName, Category, Rarity).
+// Q10: All prerequisites for the Perfectionist achievement (recursive)
+?- all_prerequisites(a025, PrereqId).
 
-// Q7: Achievement prerequisite chains
-?- all_prerequisites(a009, Prereq).
+// Q11: Friend network analysis
+?- friend_comparison(User1, User2, Elo1, FriendType, EloDiff).
+
+// Q12: Potential friend introductions (friends-of-friends)
+?- potential_friends(User1, User2, Elo1, Elo2).
+
+// Q13: Popular game modes
+?- mode_popularity(ModeName, ModeId, MatchCount).
+
+// Q14: Match performance with KDA analysis
+?- match_performance(PlayerId, MatchId, Kills, KdaScaled, EloRating, Tier).
+
+// Q15: Players with incomplete achievement chains
+?- incomplete_chain(Username, Achievement, MissingPrereq, Category).

@@ -1,0 +1,234 @@
+// =============================================================================
+// Cost Calculator Module
+// =============================================================================
+// User-defined functions for supply chain cost calculations
+//
+// Features:
+//   - 6+ UDFs with arithmetic and conditionals
+//   - Shipping cost calculations with surcharges
+//   - Volume discount tiers
+//   - Inventory management metrics (days of stock, reorder urgency)
+//   - Private predicates for internal helpers
+// =============================================================================
+
+// =============================================================================
+// USER-DEFINED FUNCTIONS (UDFs)
+// =============================================================================
+
+// --- Shipping Cost Functions ---
+
+// Base shipping cost: weight (grams) * rate per kg (cents) / 1000
+// Returns cost in cents
+func base_shipping_cost(Weight, RatePerKg) = Weight * RatePerKg / cast(1000, u32).
+
+// Apply percentage surcharge to a base cost
+// Returns: base + (base * surcharge% / 100)
+func apply_surcharge(BaseCost, SurchargePct) = BaseCost + (BaseCost * SurchargePct / cast(100, u32)).
+
+// Volume discount based on order quantity
+// >= 1000 units: 20% discount
+// >= 100 units: 10% discount
+// >= 10 units: 5% discount
+// < 10 units: no discount
+func volume_discount(Quantity) =
+    if Quantity >= cast(1000, u32) then cast(20, u32)
+    else if Quantity >= cast(100, u32) then cast(10, u32)
+    else if Quantity >= cast(10, u32) then cast(5, u32)
+    else cast(0, u32).
+
+// Total shipping cost with zone and fuel surcharges minus volume discount
+// Base + zone% + fuel% - discount%
+func total_cost(Base, ZoneSurcharge, FuelSurcharge, Discount) =
+    Base + (Base * ZoneSurcharge / cast(100, u32)) + (Base * FuelSurcharge / cast(100, u32)) - (Base * Discount / cast(100, u32)).
+
+// --- Inventory Management Functions ---
+
+// Calculate days of stock remaining
+// Returns 9999 if daily demand is 0 (effectively infinite)
+func days_of_stock(CurrentQty, DailyDemand) =
+    if DailyDemand > cast(0, u32) then CurrentQty / DailyDemand
+    else cast(9999, u32).
+
+// Reorder urgency level (1 = critical, 4 = normal)
+// < 3 days: CRITICAL (1)
+// < 7 days: HIGH (2)
+// < 14 days: MEDIUM (3)
+// >= 14 days: LOW (4)
+func reorder_urgency(DaysOfStock) =
+    if DaysOfStock < cast(3, u32) then cast(1, u32)
+    else if DaysOfStock < cast(7, u32) then cast(2, u32)
+    else if DaysOfStock < cast(14, u32) then cast(3, u32)
+    else cast(4, u32).
+
+// --- Additional Cost Functions ---
+
+// Weight-based shipping tier
+// > 50kg: heavy (tier 3)
+// > 10kg: medium (tier 2)
+// <= 10kg: light (tier 1)
+func weight_tier(WeightKg) =
+    if WeightKg > cast(50, u32) then cast(3, u32)
+    else if WeightKg > cast(10, u32) then cast(2, u32)
+    else cast(1, u32).
+
+// Dimensional weight calculation (L x W x H / 5000)
+// Standard dimensional weight factor for shipping
+func dimensional_weight(Length, Width, Height) = Length * Width * Height / cast(5000, u32).
+
+// Billable weight: max of actual weight and dimensional weight
+func billable_weight(ActualWeight, DimWeight) =
+    if ActualWeight > DimWeight then ActualWeight
+    else DimWeight.
+
+// Express shipping multiplier
+// Same day: 3x
+// Next day: 2x
+// 2-day: 1.5x (150%)
+// Standard: 1x (100%)
+func express_multiplier(ServiceLevel) =
+    if ServiceLevel = cast(1, u32) then cast(300, u32)
+    else if ServiceLevel = cast(2, u32) then cast(200, u32)
+    else if ServiceLevel = cast(3, u32) then cast(150, u32)
+    else cast(100, u32).
+
+// Handling fee based on product value (in cents)
+// > $1000: $25 handling
+// > $500: $15 handling
+// > $100: $10 handling
+// <= $100: $5 handling
+func handling_fee(ProductValue) =
+    if ProductValue > cast(100000, u32) then cast(2500, u32)
+    else if ProductValue > cast(50000, u32) then cast(1500, u32)
+    else if ProductValue > cast(10000, u32) then cast(1000, u32)
+    else cast(500, u32).
+
+// Insurance cost as percentage of declared value
+// > $5000: 2%
+// > $1000: 1.5%
+// > $100: 1%
+// <= $100: 0.5%
+func insurance_rate(DeclaredValue) =
+    if DeclaredValue > cast(500000, u32) then cast(2, u32)
+    else if DeclaredValue > cast(100000, u32) then cast(1, u32)
+    else if DeclaredValue > cast(10000, u32) then cast(1, u32)
+    else cast(0, u32).
+
+// Safety stock calculation: daily_demand * lead_time * safety_factor
+// Safety factor: 1.5 for critical items, 1.2 for normal
+func safety_stock_calc(DailyDemand, LeadTimeDays, IsCritical) =
+    if IsCritical = cast(1, u32) then DailyDemand * LeadTimeDays * cast(3, u32) / cast(2, u32)
+    else DailyDemand * LeadTimeDays * cast(6, u32) / cast(5, u32).
+
+// Economic Order Quantity approximation
+// Simplified: sqrt(2 * annual_demand * order_cost / holding_cost)
+// Using approximation for integer arithmetic
+func eoq_approx(AnnualDemand, OrderCost, HoldingCostPct) =
+    if HoldingCostPct > cast(0, u32) then AnnualDemand * OrderCost * cast(2, u32) / HoldingCostPct
+    else cast(0, u32).
+
+// =============================================================================
+// PREDICATES FOR COST ANALYSIS
+// =============================================================================
+
+// Order tier: classification based on order value
+pred order_tier(symbol).          // small, medium, large, enterprise
+
+// Shipping class: package classification
+pred shipping_class(symbol).      // standard, oversize, freight, hazmat
+
+// Priority level for shipping
+pred priority(symbol).            // economy, standard, express, overnight
+
+// =============================================================================
+// TIER DEFINITIONS
+// =============================================================================
+
+order_tier(small).       // < $100
+order_tier(medium).      // $100 - $999
+order_tier(large).       // $1000 - $9999
+order_tier(enterprise).  // >= $10000
+
+shipping_class(standard).   // Normal packages
+shipping_class(oversize).   // Large dimensions
+shipping_class(freight).    // Palletized freight
+shipping_class(hazmat).     // Hazardous materials
+
+priority(economy).    // 5-7 days
+priority(standard).   // 3-5 days
+priority(express).    // 2 days
+priority(overnight).  // Next day
+
+// =============================================================================
+// COST THRESHOLDS
+// =============================================================================
+
+// Free shipping threshold (in cents)
+pred free_shipping_threshold(symbol, u32).
+free_shipping_threshold(small, 5000).       // $50 for small orders
+free_shipping_threshold(medium, 10000).     // $100 for medium orders
+free_shipping_threshold(large, 25000).      // $250 for large orders
+free_shipping_threshold(enterprise, 0).     // Always free for enterprise
+
+// Minimum order value for tier (in cents)
+pred tier_minimum(symbol, u32).
+tier_minimum(small, 0).
+tier_minimum(medium, 10000).
+tier_minimum(large, 100000).
+tier_minimum(enterprise, 1000000).
+
+// Maximum order value for tier (in cents)
+pred tier_maximum(symbol, u32).
+tier_maximum(small, 9999).
+tier_maximum(medium, 99999).
+tier_maximum(large, 999999).
+tier_maximum(enterprise, 999999999).
+
+// =============================================================================
+// SURCHARGE RATES
+// =============================================================================
+
+// Residential delivery surcharge (cents)
+pred residential_surcharge(u32).
+residential_surcharge(500).  // $5.00
+
+// Signature required surcharge (cents)
+pred signature_surcharge(u32).
+signature_surcharge(350).    // $3.50
+
+// Saturday delivery surcharge (cents)
+pred saturday_surcharge(u32).
+saturday_surcharge(1600).    // $16.00
+
+// Address correction fee (cents)
+pred address_correction_fee(u32).
+address_correction_fee(1800). // $18.00
+
+// Fuel surcharge rates by carrier type (percentage)
+pred fuel_surcharge_rate(symbol, u32).
+fuel_surcharge_rate(ground, 12).
+fuel_surcharge_rate(air, 18).
+fuel_surcharge_rate(freight, 22).
+
+// =============================================================================
+// PRIVATE HELPERS FOR COST CALCULATIONS
+// =============================================================================
+
+// NOTE: qualifies_for_free_shipping and order_tier_for_value were removed
+// These predicates require a specific input value to match against tier ranges
+// Use the tier predicates directly in queries with concrete values
+
+// NOTE: Helper predicates for cost calculations were removed as they require
+// specific input values which XLOG's datalog semantics don't support
+// Use the UDFs directly in queries instead:
+// - For upgrade cost: compute ExpressCost - StandardCost directly
+// - For cost threshold: compute OrderValue / 5 directly
+// - For cost effective check: compare (ExpressCost - StandardCost) < (OrderValue / 5)
+
+// =============================================================================
+// DERIVED COST PREDICATES
+// =============================================================================
+
+// NOTE: The following predicates were removed as they were just placeholders:
+// - landed_cost_components: use UDFs directly in queries
+// - shipping_estimate: use base_shipping_cost UDF directly
+// - volume_discount_tier: use volume_discount UDF directly

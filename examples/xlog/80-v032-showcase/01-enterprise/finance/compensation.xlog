@@ -12,35 +12,35 @@ pred bonus_tier(symbol, u32).
 // Years of service calculation
 func years_of_service(HireYear, CurrentYear) = CurrentYear - HireYear.
 
-// Bonus multiplier based on tier (returns percentage)
+// Bonus multiplier based on tier (returns percentage as u32)
 func bonus_multiplier(Tier) =
-    if Tier = 1 then 20
-    else if Tier = 2 then 15
-    else if Tier = 3 then 10
-    else 5.
+    if Tier = cast(1, u32) then cast(20, u32)
+    else if Tier = cast(2, u32) then cast(15, u32)
+    else if Tier = cast(3, u32) then cast(10, u32)
+    else cast(5, u32).
 
 // Calculate bonus amount
-func calculate_bonus(BaseSalary, BonusPct) = BaseSalary * BonusPct / 100.
+func calculate_bonus(BaseSalary, BonusPct) = BaseSalary * BonusPct / cast(100, u32).
 
-// Tax bracket determination (returns percentage)
+// Tax bracket determination (returns percentage as u32)
 func tax_bracket(AnnualSalary) =
-    if AnnualSalary > 20000000 then 37
-    else if AnnualSalary > 15000000 then 32
-    else if AnnualSalary > 10000000 then 24
-    else if AnnualSalary > 5000000 then 22
-    else 12.
+    if AnnualSalary > cast(20000000, u32) then cast(37, u32)
+    else if AnnualSalary > cast(15000000, u32) then cast(32, u32)
+    else if AnnualSalary > cast(10000000, u32) then cast(24, u32)
+    else if AnnualSalary > cast(5000000, u32) then cast(22, u32)
+    else cast(12, u32).
 
 // Net salary after tax
-func net_after_tax(Gross, TaxPct) = Gross - (Gross * TaxPct / 100).
+func net_after_tax(Gross, TaxPct) = Gross - (Gross * TaxPct / cast(100, u32)).
 
 // Seniority bonus (additional % per year over 5)
 func seniority_bonus(YearsService) =
-    if YearsService > 5 then (YearsService - 5) * 2
-    else 0.
+    if YearsService > cast(5, u32) then (YearsService - cast(5, u32)) * cast(2, u32)
+    else cast(0, u32).
 
 // Total compensation calculation
 func total_comp(Base, BonusPct, SeniorityPct) =
-    Base + (Base * BonusPct / 100) + (Base * SeniorityPct / 100).
+    Base + (Base * BonusPct / cast(100, u32)) + (Base * SeniorityPct / cast(100, u32)).
 
 // --- Bonus tiers by department ---
 bonus_tier(eng, 1).       // Engineering: gold (20%)
