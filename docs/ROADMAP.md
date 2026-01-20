@@ -1,8 +1,9 @@
 # XLOG Development Roadmap
 
-> **Last Updated:** January 19, 2026
-> **Current Version:** v0.3.2
-> **Status:** v0.3.2 Complete — Module system, user-defined functions, reversible symbols, and showcase examples
+> **Last Updated:** January 20, 2026
+> **Current Version:** v0.3.2 (Released)
+> **Next Version:** v0.4.0 (Neural-Symbolic) — DeepProbLog parity, differentiable training
+> **Status:** Planning v0.4.0 — see `docs/plans/2026-01-20-v0.4.0-neural-symbolic-design.md`
 
 ---
 
@@ -304,7 +305,45 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 
 ---
 
-## Epistemic Logic (`xlog-elp`) — Phase 5
+## Neural-Symbolic Integration (`xlog-neural`) — Phase 5 / v0.4.0
+
+### Planned 📋
+
+**Neural Predicates:**
+- [ ] `nn/4` syntax for neural network integration
+- [ ] Network registry with optimizer/scheduler management
+- [ ] Term embeddings (learnable + pretrained)
+- [ ] Foreign tensor predicates (dot, cosine, rbf, sigmoid, softmax, etc.)
+- [ ] Tensor source registry for external data
+- [ ] Neural output caching
+- [ ] Deterministic vs non-deterministic modes
+
+**Training Infrastructure:**
+- [ ] PyTorch autograd integration (XLogLayer)
+- [ ] Semantic loss functions (logic-based supervision)
+- [ ] `train_model` API with DataLoader
+- [ ] Loss functions (NLL, MSE, semantic, infoloss)
+- [ ] Stop conditions (epochs, threshold, plateau)
+
+**Language Extensions:**
+- [ ] List syntax (`[H|T]`, `[a,b,c]`) and built-ins (member, select, append)
+- [ ] Meta-predicates (ground, var, `=..`, functor, findall, maplist)
+- [ ] Negation as failure (`\+`)
+
+**Inference Enhancements:**
+- [ ] Negation support in exact inference (program transformation)
+- [ ] Aggregate lifting for small domains
+- [ ] Alternative knowledge compilers (c2d, miniC2D)
+- [ ] Importance sampling for Monte Carlo
+- [ ] Approximate inference engine (geometric_mean, beam search)
+
+**Prerequisites:** v0.3.2 complete
+**Estimated effort:** 7 months
+**Design document:** `docs/plans/2026-01-20-v0.4.0-neural-symbolic-design.md`
+
+---
+
+## Epistemic Logic (`xlog-elp`) — Phase 6 / v0.5.0
 
 ### Planned 📋
 
@@ -315,7 +354,7 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 - [ ] Epistemic splitting for modular evaluation
 - [ ] Integration with probabilistic tier for epistemic-probabilistic programs
 
-**Prerequisites:** Phase 4 complete, solver integration
+**Prerequisites:** v0.4.0 complete, solver integration
 **Estimated effort:** 3–4 months
 
 ---
@@ -382,7 +421,7 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 
 ---
 
-## Multi-GPU & Distributed Execution — Phase 6
+## Multi-GPU & Distributed Execution — Phase 7 / v0.6+
 
 ### Planned 📋
 
@@ -458,10 +497,10 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 | v0.1.0 | Released | Deterministic Datalog, GPU joins/aggregations, basic CLI |
 | v0.2.0 | Released | Probabilistic reasoning (exact + MC), Python bindings, GPU-resident execution |
 | v0.3.1 | Released | Float predicates (IEEE 754 total ordering), benchmarks, `--stats` flag, fuzz testing, property-based testing |
-| v0.3.2 | **Current** | Module system, UDFs, reversible symbols, showcase examples, count→u64 fix |
-| v0.3.3–v0.3.5 | Planned | Probabilistic power, solver maturity, ecosystem ready (see v0.3.x-scope.md) |
-| v0.4–0.5 | Planned | Epistemic logic tier (Phase 5) |
-| v0.6+ | Planned | Multi-GPU support, distributed execution (Phase 6) |
+| v0.3.2 | Released | Module system, UDFs, reversible symbols, showcase examples, count→u64 fix |
+| v0.4.0 | **Planned** | Neural-symbolic integration, DeepProbLog parity, lists, meta-predicates (Phase 5) |
+| v0.5.0 | Planned | Epistemic logic tier (Phase 6) |
+| v0.6+ | Planned | Multi-GPU support, distributed execution (Phase 7) |
 
 ---
 
