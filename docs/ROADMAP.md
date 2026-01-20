@@ -47,7 +47,7 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 - [x] Aggregation operators: `count`, `sum`, `min`, `max`, `logsumexp`
 - [x] Wildcard variables (`_`) in rule bodies
 - [x] Predicate declarations with type annotations (`pred edge(u32, u32).`)
-- [x] Symbol type for string values (represented as `u32` hash — not reversible in current version)
+- [x] Symbol type for string values (reversible as of v0.3.2 — bidirectional string-to-ID mapping)
 - [x] Probabilistic facts (`0.7::rain.`) for Bernoulli random variables
 - [x] Annotated disjunctions (`0.3::a; 0.7::b.`) for categorical distributions
 - [x] Evidence declarations (`evidence(atom, true|false).`)

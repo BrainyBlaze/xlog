@@ -133,7 +133,7 @@ XLOG supports the following scalar types:
 | `f32` | 32-bit floating point | IEEE 754 single precision |
 | `f64` | 64-bit floating point | IEEE 754 double precision |
 | `bool` | Boolean | `true` or `false` |
-| `symbol` | Interned string | Represented as `u32` hash internally |
+| `symbol` | Interned string | Reversible `u32` ID with string table |
 
 ### Literals
 
@@ -758,10 +758,10 @@ XLOG supports organizing code into modules for reusability and encapsulation.
 
 ### Creating Modules
 
-A module is a `.xl` file. The filename (without extension) becomes the module name:
+A module is a `.xlog` file. The filename (without extension) becomes the module name:
 
 ```xlog
-// File: graph.xl
+// File: graph.xlog
 pred edge(u32, u32).
 edge(1, 2).
 edge(2, 3).
@@ -793,11 +793,11 @@ Module paths use `/` as the separator:
 
 ```
 project/
-  main.xl
-  graph.xl
+  main.xlog
+  graph.xlog
   utils/
-    math.xl
-    string.xl
+    math.xlog
+    string.xlog
 ```
 
 ```xlog
@@ -811,7 +811,7 @@ use utils/math.
 Predicates and functions are **public by default**. Use `private` to hide implementation details:
 
 ```xlog
-// File: graph.xl
+// File: graph.xlog
 
 // Public API
 pred edge(u32, u32).

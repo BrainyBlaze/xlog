@@ -230,7 +230,7 @@ total_weight(SUM(W)) :- edge(_, _, W).
 pred node(u32).
 pred edge(u32, u32).
 pred weight(u32, u32, f64).
-pred label(u32, symbol).  % symbol = hashed string
+pred label(u32, symbol).  % symbol = interned string (reversible)
 ```
 
 Supported types: `u32`, `u64`, `i32`, `i64`, `f32`, `f64`, `bool`, `symbol`
@@ -240,7 +240,7 @@ Supported types: `u32`, `u64`, `i32`, `i64`, `f32`, `f64`, `bool`, `symbol`
 Organize code into reusable modules with `use` imports and define custom functions with arithmetic, conditionals, and recursion. Symbol values display as readable strings for improved debugging.
 
 ```prolog
-% Module example (math.xl)
+% Module example (math.xlog)
 func abs(X) = if X < 0 then 0 - X else X.
 
 % Main program
@@ -258,7 +258,7 @@ result(Label, AbsVal) :- task(Label, Val), abs(Val) is AbsVal.
 
 **Features:**
 
-- **Modules**: Define functions in `.xl` files and import them with `use module::{func1, func2}`
+- **Modules**: Define functions in `.xlog` files and import them with `use module::{func1, func2}`
 - **User-Defined Functions**: Create reusable functions with `func name(args) = expression`
   - Arithmetic operations: `+`, `-`, `*`, `/`, `%`
   - Conditionals: `if condition then expr1 else expr2`
@@ -312,13 +312,17 @@ xlog run --help
 xlog/
 ├── crates/
 │   ├── xlog-core/       # Foundation types and traits
+│   ├── xlog-ir/         # Intermediate representations (RIR nodes)
 │   ├── xlog-logic/      # Parser, compiler, optimizer
 │   ├── xlog-runtime/    # Query executor
 │   ├── xlog-cuda/       # GPU kernels and memory management
+│   ├── xlog-stats/      # Runtime statistics and optimizer feedback
 │   ├── xlog-prob/       # Probabilistic inference
+│   ├── xlog-solve/      # Solver services (SAT/MaxSAT)
 │   ├── xlog-gpu/        # High-level Rust API
 │   ├── xlog-gpu-py/     # Python bindings
-│   └── xlog-cli/        # Command-line interface
+│   ├── xlog-cli/        # Command-line interface
+│   └── xlog-cuda-tests/ # CUDA certification suite
 ├── kernels/             # CUDA kernel sources (.cu)
 ├── examples/            # Example .xlog programs
 └── docs/                # Documentation

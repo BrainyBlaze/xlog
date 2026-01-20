@@ -37,14 +37,16 @@ Notes:
 
 Examples live under `examples/xlog/`, grouped by intent:
 
-- `00-basics/`: minimal, “learn the syntax” programs
+- `00-basics/`: minimal, "learn the syntax" programs
 - `10-arithmetic/`: `is` expressions and numeric reasoning patterns
+- `15-float-predicates/`: IEEE 754 float support with total ordering (v0.3.1)
 - `20-graphs/`: graph reachability and social-network style queries
 - `30-security/`: RBAC and policy derivations
 - `40-supply-chain/`: BOM explosion and dependency reasoning
 - `50-program-analysis/`: points-to and call graph construction
 - `60-database-style/`: realistic multi-way join patterns
 - `70-aggregates/`: aggregation queries (count/sum/min/max/logsumexp)
+- `80-v032-showcase/`: comprehensive v0.3.2 feature demonstrations (symbol type, recursion, aggregations)
 - `90-negative-tests/`: programs expected to fail (stratification/type errors)
 
 Phase 4 examples live under:
@@ -62,6 +64,13 @@ Phase 4 examples live under:
 **10-arithmetic/**
 - `examples/xlog/10-arithmetic/01_arithmetic_demo.xlog`: `is` + `abs()` + `cast()`
 - `examples/xlog/10-arithmetic/02_builtins_and_precedence.xlog`: full operator/builtin coverage (`+ - * / %`, `abs/min/max/pow/cast`)
+
+**15-float-predicates/** (IEEE 754 float support - v0.3.1)
+- `examples/xlog/15-float-predicates/01_nan_handling.xlog`: NaN detection and filtering
+- `examples/xlog/15-float-predicates/02_infinity_detection.xlog`: infinity handling
+- `examples/xlog/15-float-predicates/03_signed_zero.xlog`: signed zero (+0/-0) distinction
+- `examples/xlog/15-float-predicates/04_data_quality_pipeline.xlog`: data quality checks with floats
+- `examples/xlog/15-float-predicates/05_statistical_analysis.xlog`: statistical aggregations with floats
 
 **20-graphs/**
 - `examples/xlog/20-graphs/01_triangle_detection.xlog`: triangle detection + inequality constraints
@@ -91,6 +100,12 @@ Phase 4 examples live under:
 - `examples/xlog/70-aggregates/04_min_max_latency_stats.xlog`: `min()` + `max()`
 - `examples/xlog/70-aggregates/05_average_from_sum_count.xlog`: derived average via `sum`/`count` + `cast`
 
+**80-v032-showcase/** (v0.3.2 feature demonstrations)
+- `examples/xlog/80-v032-showcase/01-enterprise/`: HR analytics with org hierarchy, salary calculations
+- `examples/xlog/80-v032-showcase/02-knowledge-graph/`: Scientific ontology with type inheritance, citations
+- `examples/xlog/80-v032-showcase/03-game-analytics/`: Gaming platform with player stats, achievements, guilds
+- `examples/xlog/80-v032-showcase/04-supply-chain/`: Manufacturing with BOM explosion, inventory management
+
 **90-negative-tests/** (expected failures)
 - `examples/xlog/90-negative-tests/01_constraint_cycle_violation.xlog`: constraint violation at runtime
 - `examples/xlog/90-negative-tests/02_stratification_negation_cycle.xlog`: unstratifiable negation cycle (compile-time)
@@ -119,5 +134,5 @@ When a language feature is syntactically accepted but not yet executed end-to-en
 kept in `70-aggregates/` or `90-negative-tests/` and clearly marked.
 
 Additional runner/runtime notes:
-- `symbol` values are currently stored as a `u32` hash (MVP); outputs print the hashed value.
-- Some aggregate implementations currently have value-type restrictions (documented in `docs/ARCHITECTURE.md`).
+- `symbol` values are stored as `u32` IDs with a bidirectional string table; as of v0.3.2, symbols are **reversible** and display as readable strings in query output.
+- Some aggregate implementations have value-type restrictions (documented in `docs/ARCHITECTURE.md`).

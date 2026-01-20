@@ -367,7 +367,7 @@ pub enum ScalarType {
 }
 ```
 
-**Note**: `Symbol` values are currently stored as `u32` hashes. This is an MVP representation—the hash is not reversible to the original string in the current version.
+**Note**: `Symbol` values are stored as `u32` IDs that map bidirectionally to strings via a global string table. As of v0.3.2, symbols are **reversible** — the original string can be recovered for display in query output.
 
 ### Schema
 
@@ -664,6 +664,7 @@ Note: `RirNode::Fixpoint` exists and is interpreted by `Executor::execute_fixpoi
 
 | File | Kernels | Purpose |
 |------|---------|---------|
+| `arith.cu` | `arith_add_*`, `arith_sub_*`, `arith_mul_*`, `arith_div_*`, `arith_mod_*`, `arith_abs_*`, `arith_neg_*` | Arithmetic operations for `is` expressions |
 | `join.cu` | `hash_join_bucket_count_v2`, `hash_join_scatter_v2`, `hash_join_probe_v2`, `hash_join_semi`, `hash_join_anti`, `compute_composite_hash` | Hash joins (v2 with bucketed layout) + composite hashing |
 | `pack.cu` | `pack_keys`, `pack_and_hash_keys`, `hash_packed_keys`, `gather_packed_rows`, `compare_packed_keys` | Key packing/hashing + packed-row utilities |
 | `dedup.cu` | `mark_unique_*`, `compact_rows` | Sort-based deduplication |
