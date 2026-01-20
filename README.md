@@ -13,6 +13,9 @@
 |----------|--------------|
 | **Datalog** | Rules, facts, recursion (semi-naive), stratified negation, aggregation |
 | **Arithmetic** | Comparisons, `is` expressions, builtins (`abs`, `min`, `max`, `pow`, `cast`) |
+| **Modules** | `use` imports, `private` predicates, nested module paths, circular import detection |
+| **User-Defined Functions** | `func` syntax, `if-then-else` conditionals, recursive functions with base-case validation |
+| **Reversible Symbols** | Bidirectional string-to-ID mapping, readable query output, Arrow dictionary encoding |
 | **GPU Operators** | Hash joins, radix sort, filter, dedup, union, difference, groupby |
 | **Float Predicates** | IEEE 754 total ordering for `f32`/`f64` (`NaN > Inf > nums > +0 > -0 > -Inf`) |
 | **Probabilistic** | Exact inference (knowledge compilation), Monte Carlo sampling |
@@ -235,35 +238,107 @@ pred label(u32, symbol).  % symbol = interned string (reversible)
 
 Supported types: `u32`, `u64`, `i32`, `i64`, `f32`, `f64`, `bool`, `symbol`
 
-### Modules and Functions (v0.3.2)
+### Modules (v0.3.2)
 
-Organize code into reusable modules with `use` imports and define custom functions with arithmetic, conditionals, and recursion. Symbol values display as readable strings for improved debugging.
+Organize large programs into reusable, encapsulated modules:
 
 ```prolog
-% Module example (math.xlog)
-func abs(X) = if X < 0 then 0 - X else X.
+% finance/compensation.xlog
+pred base_salary(symbol, u32).
+func bonus_multiplier(Tier) = if Tier = cast(1, u32) then cast(20, u32) else cast(10, u32).
 
-% Main program
-use math::{abs}.
+% main.xlog
+use finance/compensation.
 
-pred task(symbol, f64).
-task(temperature, -5.0).
-
-pred result(symbol, f64).
-result(Label, AbsVal) :- task(Label, Val), abs(Val) is AbsVal.
-
-?- result(X, Y).
-% Output: result(temperature, 5.0).
+pred employee_bonus(symbol, u32).
+employee_bonus(EmpId, Bonus) :-
+    base_salary(EmpId, Salary),
+    Mult is bonus_multiplier(cast(1, u32)),
+    Bonus is Salary * Mult / cast(100, u32).
 ```
 
-**Features:**
+**Module features:**
+- `use module.` — import all public predicates and functions
+- `use module::{pred1, func1}.` — selective imports
+- `use nested/path/module.` — nested module paths
+- `private pred` / `private func` — hide implementation details
+- Circular import detection with clear error messages
 
-- **Modules**: Define functions in `.xlog` files and import them with `use module::{func1, func2}`
-- **User-Defined Functions**: Create reusable functions with `func name(args) = expression`
-  - Arithmetic operations: `+`, `-`, `*`, `/`, `%`
-  - Conditionals: `if condition then expr1 else expr2`
-  - Recursion: Functions can call themselves and other functions
-- **Reversible Symbols**: Symbol values round-trip through the string table, displaying as readable strings in query output
+### User-Defined Functions (v0.3.2)
+
+Create reusable calculation functions with arithmetic and conditionals:
+
+```prolog
+% Simple arithmetic
+func square(X) = X * X.
+func cube(X) = X * X * X.
+
+% Conditionals with if-then-else
+func rating_tier(Score) =
+    if Score >= cast(90, u32) then cast(1, u32)
+    else if Score >= cast(75, u32) then cast(2, u32)
+    else if Score >= cast(60, u32) then cast(3, u32)
+    else cast(4, u32).
+
+% Recursive functions (base case required)
+func factorial(N) = if N <= cast(1, u32) then cast(1, u32) else N * factorial(N - cast(1, u32)).
+
+% Usage in rules
+pred result(u32, u32).
+result(X, Y) :- input(X), Y is square(X).
+```
+
+**Function features:**
+- Arithmetic: `+`, `-`, `*`, `/`, `%`
+- Comparisons: `<`, `<=`, `>`, `>=`, `=`, `!=`
+- Conditionals: `if cond then expr1 else expr2`
+- Type casting: `cast(value, type)`
+- Recursion with mandatory base-case validation
+- Runtime depth limiting (`#pragma max_recursion_depth = 1000`)
+
+### Reversible Symbols (v0.3.2)
+
+Symbol values display as human-readable strings in query output:
+
+```prolog
+pred employee(symbol, symbol, symbol).
+employee(e001, "Alice Chen", eng).
+employee(e002, "Bob Smith", sales).
+
+pred department(symbol, symbol).
+department(eng, "Engineering").
+department(sales, "Sales").
+
+?- employee(Id, Name, Dept).
+% Output:
+%   Id=e001, Name=Alice Chen, Dept=eng
+%   Id=e002, Name=Bob Smith, Dept=sales
+```
+
+**Symbol features:**
+- Bidirectional string-to-ID mapping via global intern table
+- Sequential ID allocation (0, 1, 2...) for compact storage
+- Thread-safe concurrent access
+- Arrow dictionary encoding for efficient serialization
+
+---
+
+### Showcase Examples (v0.3.2)
+
+Four production-grade multi-module applications demonstrating all v0.3.2 features:
+
+| Domain | Description | Features |
+|--------|-------------|----------|
+| [01-enterprise](examples/xlog/80-v032-showcase/01-enterprise/) | HR, finance, org hierarchy | Recursive management chains, compensation UDFs |
+| [02-knowledge-graph](examples/xlog/80-v032-showcase/02-knowledge-graph/) | Movie database with semantic reasoning | Type hierarchies, ROI calculations, decade analytics |
+| [03-game-analytics](examples/xlog/80-v032-showcase/03-game-analytics/) | Gaming platform with ELO rankings | Achievement prerequisites, friend-of-friend, tier calculations |
+| [04-supply-chain](examples/xlog/80-v032-showcase/04-supply-chain/) | Logistics with BOM explosion | Shipping reachability, cost optimization, inventory alerts |
+
+**Run a showcase example:**
+```bash
+cargo run -p xlog-logic --release --example xlog_run -- \
+    examples/xlog/80-v032-showcase/01-enterprise/main.xlog
+```
 
 ---
 
@@ -296,12 +371,14 @@ xlog run --help
 
 | Document | Description |
 |----------|-------------|
+| [Language Reference](docs/language-reference.md) | Complete syntax guide: types, predicates, rules, modules, UDFs |
 | [Architecture](docs/ARCHITECTURE.md) | System design, crate structure, algorithms |
 | [Roadmap](docs/ROADMAP.md) | Feature status and development plans |
 | [Benchmarks](docs/BENCHMARKS.md) | Performance methodology and baseline metrics |
 | [Probabilistic Tier](docs/architecture/xlog-prob.md) | Exact and Monte Carlo inference |
 | [Data Interop](docs/architecture/cudf-interop.md) | Arrow and DLPack integration |
 | [Examples](examples/) | Annotated example programs |
+| [v0.3.2 Showcase](examples/xlog/80-v032-showcase/) | Production-grade multi-module examples |
 | [CUDA Certification](docs/certification/2026-01-14-cuda-certification-results.md) | Test coverage (140/140 passing) |
 
 ---
