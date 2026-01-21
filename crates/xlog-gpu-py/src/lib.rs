@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::os::raw::{c_char, c_void};
 use std::sync::Arc;
 
@@ -10,6 +10,7 @@ use xlog_core::{MemoryBudget, ScalarType, Schema};
 use xlog_cuda::{CudaDevice, CudaKernelProvider, DlpackManagedTensor, GpuMemoryManager};
 use ::xlog_gpu::logic as gpu_logic;
 use xlog_logic::ast::ProbEngine;
+use xlog_neural::{NetworkConfig, NetworkRegistry};
 use xlog_prob::exact::{ExactDdnnfProgram, ExactResultWithGrads, GpuConfig, QueryProbability};
 use xlog_prob::mc::{McEvalConfig, McProgram};
 
@@ -212,13 +213,20 @@ impl Program {
             memory_bytes: memory_mb * 1024 * 1024,
         };
 
+        // Parse the AST to get prob_engine and neural predicates
+        let ast = xlog_logic::parse_program(source)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+        // Extract declared neural network names
+        let declared_networks: HashSet<String> = ast
+            .neural_predicates
+            .iter()
+            .map(|np| np.network.clone())
+            .collect();
+
         let engine = match prob_engine {
             Some(s) => parse_prob_engine_override(&s)?,
-            None => {
-                let ast = xlog_logic::parse_program(source)
-                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-                ast.prob_engine()
-            }
+            None => ast.prob_engine(),
         };
 
         let program = match engine {
@@ -237,6 +245,8 @@ impl Program {
         Ok(CompiledProgram {
             program,
             output_provider: Arc::new(provider),
+            network_registry: NetworkRegistry::new(),
+            declared_networks,
         })
     }
 }
@@ -259,6 +269,10 @@ impl CompiledProbProgram {
 pub struct CompiledProgram {
     program: CompiledProbProgram,
     output_provider: Arc<CudaKernelProvider>,
+    /// Registry for neural networks
+    network_registry: NetworkRegistry,
+    /// Names of neural networks declared in the program (from nn() declarations)
+    declared_networks: HashSet<String>,
 }
 
 #[pymethods]
@@ -311,6 +325,89 @@ impl CompiledProgram {
                 self.pack_result_mc(py, result)
             }
         }
+    }
+
+    /// Register a PyTorch neural network with this program.
+    ///
+    /// The network name must match an `nn()` declaration in the program source.
+    ///
+    /// # Arguments
+    /// * `name` - Network name (must match nn() declaration)
+    /// * `module` - PyTorch nn.Module instance
+    /// * `optimizer` - PyTorch optimizer (e.g., Adam, SGD)
+    /// * `scheduler` - Optional learning rate scheduler
+    /// * `batching` - Whether to batch inputs for GPU efficiency (default: true)
+    /// * `k` - Top-k sampling: only consider top k outputs (default: None = all)
+    /// * `det` - Deterministic mode: use argmax instead of sampling (default: false)
+    /// * `cache` - Whether to cache network outputs (default: true)
+    /// * `cache_size` - Maximum cache entries (default: 10000)
+    #[pyo3(signature = (name, module, optimizer, scheduler=None, batching=true, k=None, det=false, cache=true, cache_size=10000))]
+    fn register_network(
+        &mut self,
+        name: String,
+        module: PyObject,
+        optimizer: PyObject,
+        scheduler: Option<PyObject>,
+        batching: bool,
+        k: Option<usize>,
+        det: bool,
+        cache: bool,
+        cache_size: usize,
+    ) -> PyResult<()> {
+        // Validate network name exists in neural predicates
+        if !self.declared_networks.contains(&name) {
+            return Err(PyValueError::new_err(format!(
+                "Network '{}' not declared in program. Declared networks: {:?}",
+                name,
+                self.declared_networks.iter().collect::<Vec<_>>()
+            )));
+        }
+
+        let config = NetworkConfig {
+            name: name.clone(),
+            batching,
+            k,
+            det,
+            cache_enabled: cache,
+            cache_size,
+        };
+
+        self.network_registry.register(config);
+
+        // Store PyTorch objects in the handle
+        if let Some(handle) = self.network_registry.get_mut(&name) {
+            handle.set_module(module);
+            handle.set_optimizer(optimizer);
+            if let Some(sched) = scheduler {
+                handle.set_scheduler(sched);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Get names of all registered neural networks.
+    fn network_names(&self) -> Vec<String> {
+        self.network_registry
+            .names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    /// Get names of all declared neural networks (from nn() declarations).
+    fn declared_network_names(&self) -> Vec<String> {
+        self.declared_networks.iter().cloned().collect()
+    }
+
+    /// Check if a network is declared in the program.
+    fn has_neural_predicate(&self, name: &str) -> bool {
+        self.declared_networks.contains(name)
+    }
+
+    /// Set training mode for all registered networks.
+    fn set_train_mode(&mut self, train: bool) {
+        self.network_registry.set_train_mode(train);
     }
 }
 

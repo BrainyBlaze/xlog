@@ -16,3 +16,4 @@ xlog-cuda = { path = "../xlog-cuda" }
 xlog-gpu = { path = "../xlog-gpu" }
 xlog-prob = { path = "../xlog-prob" }
 xlog-logic = { path = "../xlog-logic" }
+xlog-neural = { path = "../xlog-neural", features = ["python"] }
