@@ -148,6 +148,24 @@ impl NetworkHandle {
         self.scheduler = Some(scheduler);
     }
 
+    /// Get a reference to the PyTorch module.
+    #[cfg(feature = "python")]
+    pub fn module(&self) -> Option<&PyObject> {
+        self.module.as_ref()
+    }
+
+    /// Get a reference to the optimizer.
+    #[cfg(feature = "python")]
+    pub fn optimizer(&self) -> Option<&PyObject> {
+        self.optimizer.as_ref()
+    }
+
+    /// Get a reference to the scheduler.
+    #[cfg(feature = "python")]
+    pub fn scheduler(&self) -> Option<&PyObject> {
+        self.scheduler.as_ref()
+    }
+
     /// Clear the module and training state.
     #[cfg(feature = "python")]
     pub fn clear(&mut self) {

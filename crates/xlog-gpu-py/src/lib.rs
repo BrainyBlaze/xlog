@@ -608,9 +608,259 @@ impl CompiledProgram {
         let loss = self.nll_loss_batch(queries)?;
         create_torch_tensor(py, loss)
     }
+
+    // =========================================================================
+    // Backward Pass / Training Methods
+    // =========================================================================
+
+    /// Zero gradients for all registered networks.
+    ///
+    /// This should be called at the start of each training iteration
+    /// to clear accumulated gradients from previous iterations.
+    fn zero_grad(&self, py: Python<'_>) -> PyResult<()> {
+        for name in self.network_registry.names() {
+            if let Some(handle) = self.network_registry.get(name) {
+                if let Some(ref optimizer) = handle.optimizer() {
+                    optimizer.call_method0(py, "zero_grad")?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Perform optimizer step for all registered networks.
+    ///
+    /// This applies the accumulated gradients to update network parameters.
+    /// Should be called after forward_backward().
+    fn optimizer_step(&self, py: Python<'_>) -> PyResult<()> {
+        for name in self.network_registry.names() {
+            if let Some(handle) = self.network_registry.get(name) {
+                if let Some(ref optimizer) = handle.optimizer() {
+                    optimizer.call_method0(py, "step")?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Step the learning rate scheduler for all registered networks.
+    ///
+    /// This updates learning rates according to the scheduler policy.
+    /// Should be called once per epoch or as specified by the scheduler.
+    fn scheduler_step(&self, py: Python<'_>) -> PyResult<()> {
+        for name in self.network_registry.names() {
+            if let Some(handle) = self.network_registry.get(name) {
+                if let Some(ref scheduler) = handle.scheduler() {
+                    scheduler.call_method0(py, "step")?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Perform forward pass through neural network and backward pass for gradients.
+    ///
+    /// This is the core training method that:
+    /// 1. Extracts the neural network call from the query
+    /// 2. Runs the network forward pass with gradient tracking
+    /// 3. Computes NLL loss from the output probability
+    /// 4. Backpropagates gradients to network parameters
+    ///
+    /// # Arguments
+    /// * `query` - Query atom, e.g., "pred(0, a)" where pred is a neural predicate
+    ///
+    /// # Returns
+    /// The NLL loss value
+    ///
+    /// # Note
+    /// Call zero_grad() before this and optimizer_step() after.
+    fn forward_backward(&mut self, py: Python<'_>, query: &str) -> PyResult<f64> {
+        // Parse the query to extract network name, input index, and target label
+        let (network_name, input_idx, target_label) = self.parse_neural_query(query)?;
+
+        // Get the network handle
+        let handle = self.network_registry.get(&network_name).ok_or_else(|| {
+            PyValueError::new_err(format!("Network '{}' not registered", network_name))
+        })?;
+
+        let module = handle.module().ok_or_else(|| {
+            PyValueError::new_err(format!("Network '{}' has no module", network_name))
+        })?;
+
+        // Get input from tensor source
+        let input_tensor = self.get_input_tensor(py, input_idx)?;
+
+        // Forward pass through network (with gradient tracking)
+        let output = module.call_method1(py, "__call__", (input_tensor,))?;
+        let output_bound = output.bind(py);
+
+        // Get probability of target label
+        let label_idx = self.get_label_index(&network_name, &target_label)?;
+        let prob_tensor = output_bound.get_item(label_idx)?;
+        let prob: f64 = prob_tensor.extract()?;
+
+        // Compute NLL loss: -log(prob)
+        let loss = nll_loss_value(prob);
+
+        // Create loss tensor and backward
+        let torch = py.import_bound("torch")?;
+
+        // Create tensor with gradient tracking for the probability
+        let prob_tensor_grad = torch.call_method1("tensor", (prob,))?;
+        let prob_tensor_grad = prob_tensor_grad.call_method1("requires_grad_", (true,))?;
+
+        // Loss = -log(prob)
+        let log_prob = prob_tensor_grad.call_method0("log")?;
+        let neg_log_prob = log_prob.call_method1("__neg__", ())?;
+
+        // Backward pass
+        neg_log_prob.call_method0("backward")?;
+
+        // The network's output tensor has grad_fn, so calling backward on loss
+        // derived from it will flow gradients back. But we need to manually
+        // propagate the gradient to the network output.
+
+        // Get gradient of loss w.r.t. prob: d(-log(p))/dp = -1/p
+        let grad_prob = -1.0 / prob;
+
+        // Create gradient tensor for backward through network
+        let grad_tensor = self.create_output_gradient(py, output_bound, label_idx, grad_prob)?;
+
+        // Backward through network
+        output_bound.call_method1("backward", (grad_tensor,))?;
+
+        Ok(loss)
+    }
 }
 
 impl CompiledProgram {
+    /// Parse a neural predicate query to extract network name, input index, and label.
+    ///
+    /// E.g., "pred(0, a)" -> ("net_name", 0, "a") where pred is defined by nn(net_name, ...) :: pred(...).
+    fn parse_neural_query(&self, query: &str) -> PyResult<(String, usize, String)> {
+        // Simple parser for queries like "pred(idx, label)" or "pred(idx,label)"
+        let query = query.trim();
+
+        // Find predicate name and arguments
+        let paren_start = query.find('(').ok_or_else(|| {
+            PyValueError::new_err(format!("Invalid query format: {}", query))
+        })?;
+        let paren_end = query.rfind(')').ok_or_else(|| {
+            PyValueError::new_err(format!("Invalid query format: {}", query))
+        })?;
+
+        let pred_name = &query[..paren_start];
+        let args_str = &query[paren_start + 1..paren_end];
+
+        // Split arguments
+        let args: Vec<&str> = args_str.split(',').map(|s| s.trim()).collect();
+        if args.len() != 2 {
+            return Err(PyValueError::new_err(format!(
+                "Neural predicate query must have 2 arguments (index, label), got: {}",
+                query
+            )));
+        }
+
+        let input_idx: usize = args[0].parse().map_err(|_| {
+            PyValueError::new_err(format!("Invalid input index: {}", args[0]))
+        })?;
+        let target_label = args[1].to_string();
+
+        // Find network name for this predicate
+        // For now, we assume predicate name matches a declared network or there's a mapping
+        // In a full implementation, this would look up the nn() declaration
+        let network_name = self.find_network_for_predicate(pred_name)?;
+
+        Ok((network_name, input_idx, target_label))
+    }
+
+    /// Find the network name associated with a predicate.
+    fn find_network_for_predicate(&self, pred_name: &str) -> PyResult<String> {
+        // For v0.4.0-alpha, use simple heuristic: if only one network, use it
+        // Otherwise, look for matching predicate pattern
+        let network_names: Vec<_> = self.network_registry.names().iter().cloned().collect();
+
+        if network_names.len() == 1 {
+            return Ok(network_names[0].to_string());
+        }
+
+        // Try to find a network with matching name pattern
+        for name in &network_names {
+            if pred_name.contains(&**name) || name.contains(pred_name) {
+                return Ok(name.to_string());
+            }
+        }
+
+        // If no match, try the first declared network
+        if let Some(name) = self.declared_networks.iter().next() {
+            if self.network_registry.contains(name) {
+                return Ok(name.clone());
+            }
+        }
+
+        Err(PyValueError::new_err(format!(
+            "Could not find network for predicate '{}'. Registered networks: {:?}",
+            pred_name, network_names
+        )))
+    }
+
+    /// Get the label index for a given label string.
+    fn get_label_index(&self, _network_name: &str, label: &str) -> PyResult<usize> {
+        // Try to parse as integer first
+        if let Ok(idx) = label.parse::<usize>() {
+            return Ok(idx);
+        }
+
+        // For symbolic labels, we need to look up in the label list
+        // For v0.4.0-alpha, use simple mapping: a=0, b=1, c=2, etc.
+        if label.len() == 1 {
+            let c = label.chars().next().unwrap();
+            if c.is_ascii_lowercase() {
+                return Ok((c as usize) - ('a' as usize));
+            }
+        }
+
+        Err(PyValueError::new_err(format!(
+            "Could not resolve label '{}' to index",
+            label
+        )))
+    }
+
+    /// Get input tensor for a given index from the active tensor source.
+    fn get_input_tensor(&self, py: Python<'_>, index: usize) -> PyResult<PyObject> {
+        let tensor = self.tensor_sources.get_active().map_err(|e| {
+            PyValueError::new_err(format!("No active tensor source: {}", e))
+        })?;
+
+        // Index into the tensor: tensor[index]
+        let tensor_bound = tensor.bind(py);
+        let indexed = tensor_bound.get_item(index)?;
+        Ok(indexed.into())
+    }
+
+    /// Create gradient tensor for backward pass through network output.
+    fn create_output_gradient(
+        &self,
+        py: Python<'_>,
+        output: &Bound<'_, PyAny>,
+        target_idx: usize,
+        grad_value: f64,
+    ) -> PyResult<PyObject> {
+        let torch = py.import_bound("torch")?;
+
+        // Get output shape
+        let shape = output.getattr("shape")?;
+        let size: usize = shape.get_item(0)?.extract().unwrap_or(1);
+
+        // Create zero gradient tensor
+        let zeros = torch.call_method1("zeros", (size,))?;
+
+        // Set gradient at target index
+        zeros.set_item(target_idx, grad_value)?;
+
+        Ok(zeros.into())
+    }
+
     /// Evaluate probability of a single query by compiling a temporary program.
     fn evaluate_query_probability(&self, query: &str) -> PyResult<f64> {
         let probs = self.evaluate_query_probabilities(&[query.to_string()])?;
