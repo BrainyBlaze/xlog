@@ -914,16 +914,15 @@ impl CompiledProgram {
     /// - `addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.`
     /// - `nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).`
     ///
-    /// This method:
-    /// 1. Extracts input indices from the query (0 and 1)
-    /// 2. Runs neural networks on those inputs
-    /// 3. Generates annotated disjunctions with network output probabilities
-    /// 4. Compiles and evaluates the program with gradients
-    /// 5. Maps circuit gradients back to network outputs
-    /// 6. Backpropagates through networks
+    /// This method uses circuit caching to avoid D4 recompilation:
+    /// 1. Extracts input indices and runs neural networks
+    /// 2. Generates template cache key from query structure
+    /// 3. If cached: update weights and evaluate
+    /// 4. If not cached: compile circuit, cache it, evaluate
+    /// 5. Backpropagate gradients through networks
     fn forward_backward_complex(&mut self, py: Python<'_>, query: &str) -> PyResult<f64> {
         // Parse the query to extract input indices
-        let (input_indices, _pred_name) = self.extract_query_input_indices(query)?;
+        let (input_indices, pred_name) = self.extract_query_input_indices(query)?;
 
         if input_indices.is_empty() {
             return Err(PyValueError::new_err(format!(
@@ -958,42 +957,78 @@ impl CompiledProgram {
             let output_bound = output.bind(py);
             let output_squeezed = output_bound.call_method1("squeeze", (0i32,))?;
 
-            // Extract probabilities - convert tensor to list first
+            // Extract probabilities
             let probs_list = output_squeezed.call_method0("tolist")?;
             let probs: Vec<f64> = probs_list.extract()?;
 
-            // Store the output tensor for gradient backprop later
             network_outputs.push((input_idx, probs, output.clone()));
         }
 
-        // Generate expanded source with neural predicate probabilities as annotated disjunctions
-        let expanded_source = self.generate_expanded_source(&network_outputs, query)?;
+        // Get number of labels from first network output
+        let num_labels = if network_outputs.is_empty() {
+            return Err(PyValueError::new_err("No network outputs"));
+        } else {
+            network_outputs[0].1.len()
+        };
 
-        // Compile and evaluate with gradients
-        let program = ExactDdnnfProgram::compile_source_with_gpu(&expanded_source, self.gpu_config)
-            .map_err(|e| PyRuntimeError::new_err(format!("Query compilation error: {}", e)))?;
+        // Generate cache key
+        let cache_key = self.generate_cache_key(&pred_name, input_indices.len(), num_labels);
 
-        let result = program.evaluate_gpu_with_grads()
-            .map_err(|e| PyRuntimeError::new_err(format!("Query evaluation error: {}", e)))?;
+        // Check cache and evaluate
+        let (prob, grad_true, grad_false) = if let Some(cached) = self.circuit_cache.get(&cache_key) {
+            // CACHE HIT: Update weights and evaluate existing circuit
+            let weights = self.update_circuit_weights(cached, &network_outputs);
 
-        // Get the query probability
-        if result.query_grads.is_empty() {
-            return Err(PyRuntimeError::new_err("No query results returned"));
-        }
+            // Evaluate with updated weights
+            let result = cached.program.evaluate_gpu_with_grads_weights(&weights)
+                .map_err(|e| PyRuntimeError::new_err(format!("Cached eval error: {}", e)))?;
 
-        let query_grad = &result.query_grads[0];
-        let prob = query_grad.prob;
+            if result.query_grads.is_empty() {
+                return Err(PyRuntimeError::new_err("No query results from cached circuit"));
+            }
+
+            let qg = &result.query_grads[0];
+            (qg.prob, qg.grad_true.clone(), qg.grad_false.clone())
+        } else {
+            // CACHE MISS: Compile new circuit and cache it
+            let (program, weight_slots, num_labels) =
+                self.compile_circuit_for_template(&network_outputs, query)?;
+
+            // Evaluate the newly compiled circuit
+            let result = program.evaluate_gpu_with_grads()
+                .map_err(|e| PyRuntimeError::new_err(format!("Query evaluation error: {}", e)))?;
+
+            if result.query_grads.is_empty() {
+                return Err(PyRuntimeError::new_err("No query results returned"));
+            }
+
+            let qg = &result.query_grads[0];
+            let prob = qg.prob;
+            let grad_true = qg.grad_true.clone();
+            let grad_false = qg.grad_false.clone();
+
+            // Cache the circuit for future use
+            let cached = CachedCircuit {
+                program,
+                weight_slots,
+                num_labels,
+            };
+            self.circuit_cache.insert(cache_key, cached);
+
+            (prob, grad_true, grad_false)
+        };
+
         let loss = nll_loss_value(prob);
 
         // Compute d(loss)/d(prob) = -1/prob
         let dloss_dprob = -1.0 / prob.max(NLL_EPSILON);
 
-        // Map circuit gradients to neural network outputs and backpropagate
+        // Backpropagate circuit gradients through neural networks
         self.backprop_circuit_gradients(
             py,
             &network_outputs,
-            &query_grad.grad_true,
-            &query_grad.grad_false,
+            &grad_true,
+            &grad_false,
             dloss_dprob,
         )?;
 
