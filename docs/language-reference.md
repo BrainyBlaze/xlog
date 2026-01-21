@@ -1021,12 +1021,36 @@ XLOG supports two inference engines:
 | **Exact** | `--prob-engine exact_ddnnf` | Knowledge compilation via D4; exact probabilities |
 | **Monte Carlo** | `--prob-engine mc` | Sampling-based; approximate with confidence intervals |
 
-**Exact inference** requires positive-only rule bodies (no negation or aggregation in probabilistic derivations).
+**Exact inference** supports:
+- **Stratified negation**: Automatic layer detection and two-valued evaluation
+- **Non-monotone negation**: Well-Founded Semantics (WFS) for cyclic programs
+- **Gradients**: Correct gradient flow through negated literals
 
-**Monte Carlo** supports all programs including non-monotone recursion:
+**Exact inference** does not support aggregation in probabilistic rule bodies.
+
+**Monte Carlo** supports all programs including aggregation and non-monotone recursion:
 
 ```bash
 xlog prob program.xlog --prob-engine mc --samples 10000 --seed 42
+```
+
+### Negation in Probabilistic Programs
+
+Exact inference supports both stratified and non-monotone negation:
+
+```xlog
+// Stratified negation (layered evaluation)
+0.3::rain.
+dry :- not rain.
+query(dry).  // P(dry) = 0.7
+```
+
+```xlog
+// Non-monotone negation (WFS)
+0.5::bias.
+p :- bias, not q.
+q :- not p.
+query(p).  // WFS: atoms in cycle may be undefined
 ```
 
 ### Probabilistic Recursion
@@ -1049,14 +1073,28 @@ query(reach(1, 3)).
 The inference engine can be specified in the source file:
 
 ```xlog
-#pragma prob_engine = mc
+// Non-monotone negation works with exact inference (uses WFS)
+:- prob_engine = exact_ddnnf.
 
 0.5::flip.
 p :- flip.
 q :- not p.
 p :- not q.
 
-query(p).
+query(p).  // WFS: p is undefined in worlds where bias is false
+```
+
+For approximate inference with confidence intervals:
+
+```xlog
+:- prob_engine = mc.
+:- samples = 10000.
+
+0.5::flip.
+p :- flip.
+q :- not p.
+
+query(p).  // P(p) ≈ 0.5 ± CI
 ```
 
 ---

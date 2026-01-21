@@ -290,14 +290,22 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 - [x] Non-monotone SCC handling with skeptical semantics
 - [x] Configurable sample count and random seed
 
+### Implemented ✅ (Negation Support)
+
+- [x] Negation in exact inference via NNF transformation and WFS
+- [x] Stratified negation with automatic layer detection
+- [x] Non-monotone (cyclic) negation via Well-Founded Semantics
+- [x] Gradient computation through negated literals (sign flip)
+- [x] `NegLit` PIR node for negated probabilistic leaves
+- [x] Stratification analysis with edge polarity tracking
+
 ### Limitations (Current Version)
 
-- Exact inference requires positive-only rule bodies (no negation or aggregation)
-- Programs with negation/aggregation must use Monte Carlo engine
+- Exact inference does not support aggregation in rule bodies
+- Programs with aggregation must use Monte Carlo engine
 
 ### Planned 📋
 
-- [ ] Negation support in exact inference via program transformation
 - [ ] Aggregate support in probabilistic programs
 - [ ] Alternative knowledge compilers (c2d, miniC2D)
 - [ ] Importance sampling for rare-event queries
@@ -331,7 +339,7 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 - [ ] Negation as failure (`\+`)
 
 **Inference Enhancements:**
-- [ ] Negation support in exact inference (program transformation)
+- [x] Negation support in exact inference (NNF transformation + WFS) — **Implemented**
 - [ ] Aggregate lifting for small domains
 - [ ] Alternative knowledge compilers (c2d, miniC2D)
 - [ ] Importance sampling for Monte Carlo

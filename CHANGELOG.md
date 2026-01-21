@@ -2,6 +2,65 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased — Negation Support in Exact Inference
+
+Full negation support for the exact d-DNNF inference engine with gradient computation.
+
+### Added
+
+**Negation in Probabilistic Programs:**
+- `not` keyword in rule bodies for exact inference (`wet :- not rain.`)
+- Stratified negation with automatic layer detection
+- Non-monotone (cyclic) negation via Well-Founded Semantics (WFS)
+- Exact gradients flow through negated literals for neural-symbolic training
+
+**PIR Extension:**
+- `NegLit { leaf: LeafId }` node for negated probabilistic leaves
+- NNF (Negation Normal Form) transformation pushes negation to leaves
+- Weight semantics: `NegLit` uses complemented probability `(1-p, p)`
+
+**Stratification Analysis:**
+- `analyze_stratification()` function detects non-monotone SCCs
+- Edge polarity tracking in dependency graph (positive/negative edges)
+- Automatic classification: stratified SCCs use two-valued evaluation, non-monotone use WFS
+
+**Well-Founded Semantics (WFS):**
+- Three-valued logic: True, False, Undefined
+- Alternating fixed-point algorithm (unfounded set + consequence derivation)
+- Undefined atoms return probability 0 with zero gradient
+- Full 1,461-line implementation in `wfs.rs`
+
+**Gradient Computation:**
+- Sign flip for negated leaves: `∂(1-p)/∂p = -1`
+- Gradients propagate correctly through WFS-evaluated programs
+- Finite difference verification in test suite
+
+**Testing:**
+- 17 new Python tests across 5 test classes
+- Stratified negation tests (`test_simple_not`, `test_multi_layer_stratified`)
+- Non-monotone WFS tests (`test_classic_wfs_cycle`, `test_wfs_partial_definition`)
+- Gradient correctness tests (`test_negation_gradient_sign`, `test_finite_difference_negation`)
+- MC comparison tests for probability validation
+
+### Changed
+
+- Stratification analysis now tracks edge polarity for non-monotone detection
+- Provenance extraction routes non-monotone SCCs to WFS evaluation
+- CNF encoding emits Tseitin clauses for `NegLit` with negated polarity
+
+### Technical Details
+
+| Component | Change |
+|-----------|--------|
+| `pir.rs` | Added `NegLit` variant, `neg_lit()` builder |
+| `provenance.rs` | Removed negation blocker, added `negate_provenance()`, WFS integration |
+| `cnf.rs` | Tseitin encoding for `NegLit` with `v <-> !leaf_var` |
+| `stratify.rs` | `analyze_stratification()` with polarity tracking |
+| `wfs.rs` | Full WFS implementation (1,461 lines) |
+| `exact.rs` | Gradient sign flip for negated leaves |
+
+---
+
 ## v0.3.2 — 2026-01-19
 
 Module system, user-defined functions, reversible symbols, and comprehensive showcase examples for expressive, modular Datalog programs.

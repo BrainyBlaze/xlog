@@ -18,7 +18,7 @@
 | **Reversible Symbols** | Bidirectional string-to-ID mapping, readable query output, Arrow dictionary encoding |
 | **GPU Operators** | Hash joins, radix sort, filter, dedup, union, difference, groupby |
 | **Float Predicates** | IEEE 754 total ordering for `f32`/`f64` (`NaN > Inf > nums > +0 > -0 > -Inf`) |
-| **Probabilistic** | Exact inference (knowledge compilation), Monte Carlo sampling |
+| **Probabilistic** | Exact inference (knowledge compilation), Monte Carlo sampling, negation (stratified + WFS) |
 | **Interop** | Arrow IPC, DLPack (zero-copy), Python bindings |
 | **Profiling** | `--stats` flag for per-stratum/per-operation timing, memory tracking |
 
@@ -183,6 +183,30 @@ xlog prob weather.xlog --prob-engine exact_ddnnf
 xlog prob weather.xlog --prob-engine mc --samples 10000
 # P(wet) ≈ 0.301 ± 0.009 (95% CI)
 ```
+
+### Negation in Probabilistic Programs
+
+Exact inference supports negation with automatic stratification and Well-Founded Semantics:
+
+```prolog
+% Stratified negation (layered evaluation)
+0.3::rain.
+dry :- not rain.
+query(dry).
+% P(dry) = 0.7
+```
+
+```prolog
+% Non-monotone negation (cycles through negation)
+% Handled via Well-Founded Semantics
+0.5::bias.
+p :- bias, not q.
+q :- not p.
+query(p).
+% WFS: atoms in cycle may be undefined (probability 0)
+```
+
+Gradients flow correctly through negated literals for neural-symbolic training.
 
 ---
 

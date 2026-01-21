@@ -54,10 +54,14 @@ Supported constructs:
 **Primary goal:** compute exact conditional probabilities `P(Q|E)` and (optionally) gradients w.r.t. probabilistic leaf log-weights on GPU.
 
 **Current semantic constraints (enforced by implementation):**
-- Provenance extraction is **positive-only** for Phase 4 exact inference: rule bodies cannot contain negation or aggregation (`crates/xlog-prob/src/provenance.rs` rejects these).
-- Recursive programs are supported when they are monotone (positive recursion); provenance is constructed as an acyclic PIR by semi-naive, iteration-indexed unrolling.
+- **Negation is fully supported** via NNF transformation and Well-Founded Semantics:
+  - Stratified negation: automatic layer detection and two-valued evaluation
+  - Non-monotone (cyclic) negation: WFS three-valued semantics (True/False/Undefined)
+  - Gradients flow through negated literals with correct sign flip
+- Recursive programs are supported; provenance is constructed as an acyclic PIR by semi-naive, iteration-indexed unrolling.
+- **Aggregation is not supported** in exact inference rule bodies.
 
-If a program uses negation/aggregation, use `prob_engine=mc`.
+If a program uses aggregation, use `prob_engine=mc`.
 
 ### `prob_engine=mc` (approximate / P3)
 
