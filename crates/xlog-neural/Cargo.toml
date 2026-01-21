@@ -1,0 +1,20 @@
+[package]
+name = "xlog-neural"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Neural network integration for XLOG probabilistic logic"
+
+[features]
+default = []
+# Enable Python interop via PyO3 - use this when building with xlog-gpu-py
+python = ["pyo3"]
+
+[dependencies]
+thiserror = { workspace = true }
+lru = "0.12"
+# PyO3 is optional - only needed when integrating with Python
+pyo3 = { workspace = true, optional = true }
+
+[dev-dependencies]
