@@ -80,6 +80,7 @@ impl Relation {
 enum PirKey {
     Const(bool),
     Lit(LeafId),
+    NegLit(LeafId),
     And(Vec<PirNodeId>),
     Or(Vec<PirNodeId>),
     Decision {
@@ -98,6 +99,10 @@ impl Hash for PirKey {
             }
             PirKey::Lit(l) => {
                 1u8.hash(state);
+                l.hash(state);
+            }
+            PirKey::NegLit(l) => {
+                5u8.hash(state);
                 l.hash(state);
             }
             PirKey::And(children) => {
@@ -166,6 +171,16 @@ impl PirBuilder {
             return id;
         }
         let id = self.pir.lit(leaf);
+        self.intern.insert(key, id);
+        id
+    }
+
+    fn neg_lit(&mut self, leaf: LeafId) -> PirNodeId {
+        let key = PirKey::NegLit(leaf);
+        if let Some(&id) = self.intern.get(&key) {
+            return id;
+        }
+        let id = self.pir.neg_lit(leaf);
         self.intern.insert(key, id);
         id
     }
@@ -334,11 +349,7 @@ pub fn extract_from_program(program: &Program) -> Result<Provenance> {
                 "Provenance extraction does not support aggregation".to_string(),
             ));
         }
-        if rule.has_negation() {
-            return Err(XlogError::Compilation(
-                "Provenance extraction does not support negation".to_string(),
-            ));
-        }
+        // Note: Negation is now supported via stratified evaluation and negate_provenance()
         rules_by_head
             .entry(rule.head.predicate.clone())
             .or_default()
@@ -639,6 +650,55 @@ fn eval_recursive_scc(
     Ok(())
 }
 
+/// Negate a provenance formula, pushing negation to leaves (NNF form).
+///
+/// This implements the logical negation of a provenance formula by applying De Morgan's laws
+/// to push negations down to the leaves. At the leaf level:
+/// - `Lit { leaf }` becomes `NegLit { leaf }` (negated probabilistic fact)
+/// - `NegLit { leaf }` becomes `Lit { leaf }` (double negation elimination)
+/// - `Const(true)` becomes `Const(false)` and vice versa
+fn negate_provenance(prov: PirNodeId, builder: &mut PirBuilder) -> PirNodeId {
+    use crate::pir::PirNode;
+    match builder.pir.node(prov).cloned() {
+        Some(PirNode::Const(b)) => {
+            if b {
+                builder.const_false()
+            } else {
+                builder.const_true()
+            }
+        }
+        Some(PirNode::Lit { leaf }) => builder.neg_lit(leaf),
+        Some(PirNode::NegLit { leaf }) => builder.lit(leaf), // Double negation elimination
+        Some(PirNode::And { children }) => {
+            // De Morgan: not(A and B) = (not A) or (not B)
+            let neg_children: Vec<PirNodeId> = children
+                .iter()
+                .map(|&c| negate_provenance(c, builder))
+                .collect();
+            builder.or(neg_children)
+        }
+        Some(PirNode::Or { children }) => {
+            // De Morgan: not(A or B) = (not A) and (not B)
+            let neg_children: Vec<PirNodeId> = children
+                .iter()
+                .map(|&c| negate_provenance(c, builder))
+                .collect();
+            builder.and(neg_children)
+        }
+        Some(PirNode::Decision {
+            var,
+            child_false,
+            child_true,
+        }) => {
+            // Negate both branches
+            let neg_false = negate_provenance(child_false, builder);
+            let neg_true = negate_provenance(child_true, builder);
+            builder.decision(var, neg_false, neg_true)
+        }
+        None => prov,
+    }
+}
+
 /// Evaluate a single rule and produce a map from head tuples to proof formulas.
 ///
 /// `full_scc` is the per-SCC snapshot for recursive predicates; `delta_scc` is optional and
@@ -689,10 +749,70 @@ fn eval_rule(
                 }
             }
             BodyLiteral::Negated(atom) => {
-                return Err(XlogError::Compilation(format!(
-                    "Negation not supported in provenance extraction (found not {})",
-                    atom.predicate
-                )));
+                // Stratified negation: for each binding, check if any matching tuple exists.
+                // - If a matching tuple exists with provenance P, the negation has provenance "not P"
+                // - If no matching tuple exists, the negation succeeds trivially (closed-world assumption)
+                //
+                // For negated literals, we only use the global store and full_scc snapshot,
+                // never the delta (negation is evaluated against the complete relation).
+                let rel = if let Some(r) = full_scc.get(&atom.predicate) {
+                    r
+                } else if let Some(r) = global.get(&atom.predicate) {
+                    r
+                } else {
+                    // Predicate not found - closed world assumption: all negations succeed
+                    for (binding, prov) in states {
+                        // Ensure all variables in the negated atom are bound
+                        let all_bound = atom.terms.iter().all(|t| match t {
+                            Term::Variable(v) => binding.contains_key(v),
+                            _ => true,
+                        });
+                        if all_bound {
+                            next_states.push((binding, prov));
+                        }
+                    }
+                    states = next_states;
+                    if states.is_empty() {
+                        break;
+                    }
+                    continue;
+                };
+
+                for (binding, prov) in states {
+                    // First, check if all variables in the negated atom are bound.
+                    // Negation requires all variables to be bound (safety condition).
+                    let all_bound = atom.terms.iter().all(|t| match t {
+                        Term::Variable(v) => binding.contains_key(v),
+                        _ => true,
+                    });
+                    if !all_bound {
+                        // Skip this binding - variables must be bound before negation
+                        continue;
+                    }
+
+                    // Collect matching tuples and their provenances
+                    let mut matching_provs: Vec<PirNodeId> = Vec::new();
+                    for (tuple, tuple_prov) in &rel.tuples {
+                        let mut binding2 = binding.clone();
+                        if unify_atom(atom, tuple, &mut binding2)? {
+                            // A match was found; we need its negated provenance
+                            matching_provs.push(*tuple_prov);
+                        }
+                    }
+
+                    if matching_provs.is_empty() {
+                        // No matching tuples - closed world assumption: negation succeeds trivially
+                        next_states.push((binding, prov));
+                    } else {
+                        // For negation to succeed, ALL matching tuples must be "absent" (negated).
+                        // If tuple can exist via multiple provenances (disjunction), we negate that.
+                        // Negation of (P1 or P2 or ...) = (not P1) and (not P2) and ...
+                        let combined_tuple_prov = builder.or(matching_provs);
+                        let neg_prov = negate_provenance(combined_tuple_prov, builder);
+                        let new_prov = builder.and(vec![prov, neg_prov]);
+                        next_states.push((binding, new_prov));
+                    }
+                }
             }
         }
         states = next_states;
