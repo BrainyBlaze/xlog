@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::Bound;
 use pyo3::types::{PyDict, PySequence};
 
 use xlog_core::{MemoryBudget, ScalarType, Schema};
@@ -16,6 +17,26 @@ use xlog_prob::mc::{McEvalConfig, McProgram};
 
 const DLPACK_CAPSULE_NAME: &[u8] = b"dltensor\0";
 const USED_DLPACK_CAPSULE_NAME: &[u8] = b"used_dltensor\0";
+
+/// Epsilon value for numerical stability in log computations
+const NLL_EPSILON: f64 = 1e-38;
+
+/// Compute negative log-likelihood loss from probability.
+///
+/// NLL loss = -log(max(p, epsilon))
+///
+/// The epsilon prevents -log(0) = infinity.
+#[inline]
+fn nll_loss_value(probability: f64) -> f64 {
+    -(probability.max(NLL_EPSILON)).ln()
+}
+
+/// Create a PyTorch tensor from a scalar f64 value.
+fn create_torch_tensor(py: Python<'_>, value: f64) -> PyResult<PyObject> {
+    let torch = py.import_bound("torch")?;
+    let tensor = torch.call_method1("tensor", (value,))?;
+    Ok(tensor.into())
+}
 
 unsafe extern "C" fn dlpack_capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
     if capsule.is_null() {
@@ -248,6 +269,9 @@ impl Program {
             network_registry: NetworkRegistry::new(),
             declared_networks,
             tensor_sources: TensorSourceRegistry::new(),
+            source: source.to_string(),
+            gpu_config: config,
+            prob_engine: engine,
         })
     }
 }
@@ -276,6 +300,12 @@ pub struct CompiledProgram {
     declared_networks: HashSet<String>,
     /// Registry for tensor data sources (images, embeddings, etc.)
     tensor_sources: TensorSourceRegistry,
+    /// Original program source (for dynamic query compilation)
+    source: String,
+    /// GPU configuration
+    gpu_config: GpuConfig,
+    /// Probabilistic inference engine
+    prob_engine: ProbEngine,
 }
 
 #[pymethods]
@@ -483,9 +513,169 @@ impl CompiledProgram {
     fn has_tensor_source(&self, name: &str) -> bool {
         self.tensor_sources.contains(name)
     }
+
+    // =========================================================================
+    // NLL Loss Functions
+    // =========================================================================
+
+    /// Compute negative log-likelihood loss for a single query.
+    ///
+    /// NLL loss = -log(P(query))
+    ///
+    /// This is the fundamental training objective for neural-symbolic programs.
+    /// Lower loss means higher probability of the query being true.
+    ///
+    /// # Arguments
+    /// * `query` - Query atom as string, e.g., "digit(0, 5)" or "path(1, 3)"
+    ///
+    /// # Returns
+    /// The NLL loss value (always non-negative, 0 for certain facts)
+    fn nll_loss(&self, query: &str) -> PyResult<f64> {
+        let prob = self.evaluate_query_probability(query)?;
+        Ok(nll_loss_value(prob))
+    }
+
+    /// Compute sum of NLL losses for a batch of queries.
+    ///
+    /// Batch loss = Σ -log(P(query_i))
+    ///
+    /// More efficient than calling nll_loss repeatedly as all queries
+    /// are compiled and evaluated together.
+    ///
+    /// # Arguments
+    /// * `queries` - List of query atoms as strings
+    ///
+    /// # Returns
+    /// Sum of individual NLL losses (0.0 for empty batch)
+    fn nll_loss_batch(&self, queries: Vec<String>) -> PyResult<f64> {
+        if queries.is_empty() {
+            return Ok(0.0);
+        }
+
+        let probs = self.evaluate_query_probabilities(&queries)?;
+        Ok(probs.iter().map(|&p| nll_loss_value(p)).sum())
+    }
+
+    /// Compute mean NLL loss for a batch of queries.
+    ///
+    /// Mean loss = (1/n) Σ -log(P(query_i))
+    ///
+    /// Useful for comparing loss across batches of different sizes.
+    ///
+    /// # Arguments
+    /// * `queries` - List of query atoms as strings (must be non-empty)
+    ///
+    /// # Returns
+    /// Mean of individual NLL losses
+    ///
+    /// # Errors
+    /// Returns error if queries is empty
+    fn nll_loss_mean(&self, queries: Vec<String>) -> PyResult<f64> {
+        if queries.is_empty() {
+            return Err(PyValueError::new_err(
+                "Cannot compute mean NLL loss for empty query batch",
+            ));
+        }
+
+        let probs = self.evaluate_query_probabilities(&queries)?;
+        let sum: f64 = probs.iter().map(|&p| nll_loss_value(p)).sum();
+        Ok(sum / probs.len() as f64)
+    }
+
+    /// Compute NLL loss and return as PyTorch tensor.
+    ///
+    /// Returns a scalar tensor that can participate in autograd.
+    /// Use this when you need gradients to flow back through the loss.
+    ///
+    /// # Arguments
+    /// * `query` - Query atom as string
+    ///
+    /// # Returns
+    /// PyTorch scalar tensor containing the loss value
+    fn nll_loss_tensor(&self, py: Python<'_>, query: &str) -> PyResult<PyObject> {
+        let loss = self.nll_loss(query)?;
+        create_torch_tensor(py, loss)
+    }
+
+    /// Compute batch NLL loss and return as PyTorch tensor.
+    ///
+    /// # Arguments
+    /// * `queries` - List of query atoms as strings
+    ///
+    /// # Returns
+    /// PyTorch scalar tensor containing the sum of losses
+    fn nll_loss_batch_tensor(&self, py: Python<'_>, queries: Vec<String>) -> PyResult<PyObject> {
+        let loss = self.nll_loss_batch(queries)?;
+        create_torch_tensor(py, loss)
+    }
 }
 
 impl CompiledProgram {
+    /// Evaluate probability of a single query by compiling a temporary program.
+    fn evaluate_query_probability(&self, query: &str) -> PyResult<f64> {
+        let probs = self.evaluate_query_probabilities(&[query.to_string()])?;
+        probs.into_iter().next().ok_or_else(|| {
+            PyRuntimeError::new_err("Query evaluation returned no results")
+        })
+    }
+
+    /// Evaluate probabilities for multiple queries by compiling a temporary program.
+    fn evaluate_query_probabilities(&self, queries: &[String]) -> PyResult<Vec<f64>> {
+        // Build source with queries appended
+        let mut source_with_queries = self.source.clone();
+        for query in queries {
+            source_with_queries.push_str(&format!("\nquery({}).", query));
+        }
+
+        // Compile and evaluate the temporary program
+        let result = match self.prob_engine {
+            ProbEngine::ExactDdnnf => {
+                let program = ExactDdnnfProgram::compile_source_with_gpu(
+                    &source_with_queries,
+                    self.gpu_config,
+                ).map_err(|e| PyRuntimeError::new_err(format!("Query compilation error: {}", e)))?;
+
+                program
+                    .evaluate()
+                    .map_err(|e| PyRuntimeError::new_err(format!("Query evaluation error: {}", e)))?
+                    .query_probs
+            }
+            ProbEngine::Mc => {
+                let program = McProgram::compile_source_with_gpu(
+                    &source_with_queries,
+                    self.gpu_config,
+                ).map_err(|e| PyRuntimeError::new_err(format!("Query compilation error: {}", e)))?;
+
+                let cfg = McEvalConfig::default();
+                program
+                    .evaluate(cfg)
+                    .map_err(|e| PyRuntimeError::new_err(format!("Query evaluation error: {}", e)))?
+                    .query_estimates
+                    .into_iter()
+                    .map(|e| QueryProbability {
+                        atom: e.atom,
+                        prob: e.prob,
+                        log_prob: e.log_prob,
+                    })
+                    .collect()
+            }
+        };
+
+        // Extract probabilities in query order
+        // The results should be in the same order as queries were added
+        let probs: Vec<f64> = result.iter().map(|qp| qp.prob).collect();
+
+        if probs.len() != queries.len() {
+            return Err(PyRuntimeError::new_err(format!(
+                "Expected {} query results, got {}",
+                queries.len(),
+                probs.len()
+            )));
+        }
+
+        Ok(probs)
+    }
+
     fn pack_result_probs(&self, py: Python<'_>, query_probs: Vec<QueryProbability>) -> PyResult<EvalResult> {
         let mut atoms: Vec<String> = Vec::with_capacity(query_probs.len());
         let mut probs: Vec<f64> = Vec::with_capacity(query_probs.len());
