@@ -10,8 +10,9 @@ use xlog_core::{symbol, Result, ScalarType, XlogError};
 
 use crate::ast::{
     AggExpr, AggOp, AnnotatedDisjunction, ArithExpr, Atom, BodyLiteral, CompOp, Comparison,
-    CondExpr, Constraint, DomainDecl, Evidence, FuncBody, FuncDef, FuncParam, IsExpr, PredDecl,
-    ProbCache, ProbEngine, ProbFact, ProbQuery, Program, Query, Rule as AstRule, Term, UseDecl,
+    CondExpr, Constraint, DomainDecl, Evidence, FuncBody, FuncDef, FuncParam, IsExpr,
+    NeuralLabel, NeuralPredDecl, PredDecl, ProbCache, ProbEngine, ProbFact, ProbQuery, Program,
+    Query, Rule as AstRule, Term, UseDecl,
 };
 
 #[derive(Parser)]
@@ -108,6 +109,9 @@ fn build_statement(pair: Pair<'_, Rule>, program: &mut Program) -> Result<()> {
             }
             Rule::func_def => {
                 program.functions.push(parse_func_def(inner)?);
+            }
+            Rule::neural_pred_decl => {
+                program.neural_predicates.push(build_neural_pred_decl(inner)?);
             }
             _ => {}
         }
@@ -565,6 +569,81 @@ fn build_prob_query(pair: Pair<'_, Rule>) -> Result<ProbQuery> {
         .ok_or_else(|| XlogError::Parse("Missing query atom".to_string()))?;
     let atom = build_atom(atom_pair)?;
     Ok(ProbQuery { atom })
+}
+
+/// Build a neural predicate declaration
+/// Syntax: nn(network, [inputs], output, [labels]) :: pred(args).
+fn build_neural_pred_decl(pair: Pair<'_, Rule>) -> Result<NeuralPredDecl> {
+    let mut inner = pair.into_inner();
+
+    // Parse network name (ident)
+    let network = inner
+        .next()
+        .ok_or_else(|| XlogError::Parse("Missing network name in neural predicate".to_string()))?
+        .as_str()
+        .to_string();
+
+    // Parse input list
+    let input_list = inner
+        .next()
+        .ok_or_else(|| XlogError::Parse("Missing input list in neural predicate".to_string()))?;
+    let inputs: Vec<String> = input_list
+        .into_inner()
+        .map(|p| p.as_str().to_string())
+        .collect();
+
+    // Parse output variable
+    let output = inner
+        .next()
+        .ok_or_else(|| XlogError::Parse("Missing output variable in neural predicate".to_string()))?
+        .as_str()
+        .to_string();
+
+    // Check for optional label list or atom
+    let next = inner
+        .next()
+        .ok_or_else(|| XlogError::Parse("Missing predicate in neural predicate".to_string()))?;
+
+    let (labels, predicate) = if next.as_rule() == Rule::neural_label_list {
+        // Parse labels
+        let label_vec: Vec<NeuralLabel> = next
+            .into_inner()
+            .map(|label_pair| {
+                let label_inner = label_pair
+                    .into_inner()
+                    .next()
+                    .expect("neural_label must have inner");
+                match label_inner.as_rule() {
+                    Rule::integer => {
+                        let val: i64 = label_inner.as_str().parse().expect("valid integer");
+                        NeuralLabel::Integer(val)
+                    }
+                    Rule::ident => NeuralLabel::Symbol(label_inner.as_str().to_string()),
+                    _ => unreachable!("neural_label should be integer or ident"),
+                }
+            })
+            .collect();
+
+        // Parse atom
+        let atom_pair = inner.next().ok_or_else(|| {
+            XlogError::Parse("Missing predicate after labels in neural predicate".to_string())
+        })?;
+        let predicate = build_atom(atom_pair)?;
+
+        (Some(label_vec), predicate)
+    } else {
+        // No labels, next is the atom (embedding mode)
+        let predicate = build_atom(next)?;
+        (None, predicate)
+    };
+
+    Ok(NeuralPredDecl {
+        network,
+        inputs,
+        output,
+        labels,
+        predicate,
+    })
 }
 
 /// Build a head (atom that may contain aggregates)

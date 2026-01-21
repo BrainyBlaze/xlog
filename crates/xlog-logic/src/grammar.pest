@@ -90,6 +90,17 @@ prob_choice = { prob_num ~ "::" ~ atom }
 prob_fact = { prob_choice ~ "." }
 annotated_disjunction = { prob_choice ~ (";" ~ prob_choice)+ ~ "." }
 
+// Neural predicate declarations
+// nn(network, [inputs], output, [labels]) :: pred(args).
+// nn(network, [inputs], embedding) :: pred(args).  (embedding mode, no labels)
+neural_label = { integer | ident }
+neural_label_list = { "[" ~ (neural_label ~ ("," ~ neural_label)*)? ~ "]" }
+neural_input_list = { "[" ~ (variable ~ ("," ~ variable)*)? ~ "]" }
+neural_pred_decl = {
+    "nn" ~ "(" ~ ident ~ "," ~ neural_input_list ~ "," ~ variable ~ ("," ~ neural_label_list)? ~ ")"
+    ~ "::" ~ atom ~ "."
+}
+
 // Queries
 query = { "?-" ~ atom ~ "." }
 prob_query = { "query" ~ "(" ~ atom ~ ")" ~ "." }
@@ -154,6 +165,7 @@ statement = {
     | domain_decl
     | pred_decl
     | pragma
+    | neural_pred_decl
     | rule_def
     | prob_fact
     | annotated_disjunction

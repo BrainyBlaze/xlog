@@ -320,6 +320,43 @@ pub struct ProbFact {
     pub atom: Atom,
 }
 
+/// Neural predicate declaration
+///
+/// Neural predicates connect neural networks to probabilistic logic.
+/// Syntax: `nn(network, [inputs], output, [labels]) :: pred(args).`
+///
+/// The neural network produces probability distributions over labels,
+/// which become probabilistic facts in the logic program.
+///
+/// # Examples
+/// ```text
+/// nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
+/// nn(encoder, [Text], Embedding) :: encode(Text, Embedding).
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct NeuralPredDecl {
+    /// Name of the registered neural network
+    pub network: String,
+    /// Input variable names (bind to tensor sources)
+    pub inputs: Vec<String>,
+    /// Output variable name
+    pub output: String,
+    /// Optional classification labels (for classification networks)
+    /// If None, the network produces embeddings
+    pub labels: Option<Vec<NeuralLabel>>,
+    /// The predicate this neural network defines
+    pub predicate: Atom,
+}
+
+/// A label in a neural predicate classification
+///
+/// Labels can be integers or symbols (identifiers).
+#[derive(Debug, Clone, PartialEq)]
+pub enum NeuralLabel {
+    Integer(i64),
+    Symbol(String),
+}
+
 /// Annotated disjunction (`p1::a1; p2::a2.`)
 #[derive(Debug, Clone, PartialEq)]
 pub struct AnnotatedDisjunction {
@@ -430,6 +467,7 @@ pub struct Program {
     pub annotated_disjunctions: Vec<AnnotatedDisjunction>,
     pub evidence: Vec<Evidence>,
     pub prob_queries: Vec<ProbQuery>,
+    pub neural_predicates: Vec<NeuralPredDecl>,
     pub directives: Directives,
 }
 

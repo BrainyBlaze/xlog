@@ -497,6 +497,7 @@ pub fn expand_program_functions(program: &Program, max_depth: u32) -> Result<Pro
         annotated_disjunctions: program.annotated_disjunctions.clone(),
         evidence: program.evidence.clone(),
         prob_queries: program.prob_queries.clone(),
+        neural_predicates: program.neural_predicates.clone(),
     })
 }
 
