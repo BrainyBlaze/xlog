@@ -41,6 +41,7 @@ impl ChoiceVarId {
 pub enum PirNode {
     Const(bool),
     Lit { leaf: LeafId },
+    NegLit { leaf: LeafId },  // Negated leaf: weight (1-p, p)
     And { children: Vec<PirNodeId> },
     Or { children: Vec<PirNodeId> },
     Decision {
@@ -80,6 +81,10 @@ impl PirGraph {
 
     pub fn lit(&mut self, leaf: LeafId) -> PirNodeId {
         self.push_node(PirNode::Lit { leaf })
+    }
+
+    pub fn neg_lit(&mut self, leaf: LeafId) -> PirNodeId {
+        self.push_node(PirNode::NegLit { leaf })
     }
 
     pub fn and(&mut self, children: Vec<PirNodeId>) -> PirNodeId {
@@ -125,7 +130,7 @@ impl PirGraph {
             })?;
 
             let lvl = match node {
-                PirNode::Const(_) | PirNode::Lit { .. } => 0,
+                PirNode::Const(_) | PirNode::Lit { .. } | PirNode::NegLit { .. } => 0,
                 PirNode::And { children } | PirNode::Or { children } => {
                     let mut max_child = 0u32;
                     for &child in children {

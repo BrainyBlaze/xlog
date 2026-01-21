@@ -67,7 +67,7 @@ pub fn encode_cnf(pir: &PirGraph, roots: &[PirNodeId]) -> Result<CnfEncoding> {
 
         match node {
             PirNode::Const(_) => {}
-            PirNode::Lit { leaf } => {
+            PirNode::Lit { leaf } | PirNode::NegLit { leaf } => {
                 leaf_ids.insert(*leaf);
             }
             PirNode::And { children } | PirNode::Or { children } => {
@@ -113,7 +113,7 @@ pub fn encode_cnf(pir: &PirGraph, roots: &[PirNodeId]) -> Result<CnfEncoding> {
         })?;
 
         let var_id = match node {
-            PirNode::Lit { leaf } => *leaf_var.get(leaf).ok_or_else(|| {
+            PirNode::Lit { leaf } | PirNode::NegLit { leaf } => *leaf_var.get(leaf).ok_or_else(|| {
                 XlogError::Compilation(format!(
                     "Missing CNF var for PIR leaf {:?} referenced by node {:?}",
                     leaf, node_id
@@ -151,7 +151,7 @@ pub fn encode_cnf(pir: &PirGraph, roots: &[PirNodeId]) -> Result<CnfEncoding> {
             match node {
                 PirNode::Const(true) => clauses.push(vec![v]),
                 PirNode::Const(false) => clauses.push(vec![-v]),
-                PirNode::Lit { .. } => {}
+                PirNode::Lit { .. } | PirNode::NegLit { .. } => {}
                 PirNode::And { children } => {
                     if children.is_empty() {
                         clauses.push(vec![v]);

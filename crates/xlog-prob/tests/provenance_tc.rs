@@ -27,7 +27,7 @@ fn test_recursive_provenance_builds_acyclic_pir() {
         let node = prov.pir.node(id).unwrap();
         match node {
             PirNode::Const(_) => {}
-            PirNode::Lit { leaf } => {
+            PirNode::Lit { leaf } | PirNode::NegLit { leaf } => {
                 leaves.insert(*leaf);
             }
             PirNode::And { children } | PirNode::Or { children } => {
