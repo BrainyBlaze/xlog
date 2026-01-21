@@ -1,6 +1,6 @@
 //! Stratification analysis for negation and aggregation
 
-use crate::ast::{BodyLiteral, ProbEngine, Program};
+use crate::ast::{BodyLiteral, Program};
 use std::collections::{HashMap, HashSet};
 use xlog_core::{Result, XlogError};
 
@@ -211,16 +211,14 @@ pub fn stratify(program: &Program) -> Result<Vec<Stratum>> {
 
     for scc in &sccs {
         if let Some(cycle) = check_scc_for_negation_cycle(scc, &graph) {
-            if program.is_probabilistic_profile() && program.prob_engine() != ProbEngine::Mc {
-                return Err(XlogError::Compilation(format!(
-                    "Non-monotone recursion detected (cycle through negation/aggregation involving {:?}); requires P3 (`prob_engine=mc`)",
-                    cycle
-                )));
-            }
-
+            // Non-monotone programs are now supported for exact_ddnnf via WFS
+            // Only reject for non-probabilistic programs that require stratification
             if !program.is_probabilistic_profile() {
                 return Err(XlogError::StratificationCycle(cycle));
             }
+            // Probabilistic programs (both exact_ddnnf and mc) can handle non-monotone cycles:
+            // - exact_ddnnf uses WFS to compute well-founded model
+            // - mc uses sampling which naturally handles non-stratified programs
         }
     }
 
@@ -458,18 +456,17 @@ mod tests {
     }
 
     #[test]
-    fn test_stratify_probabilistic_non_monotone_requires_mc() {
+    fn test_stratify_probabilistic_non_monotone_allows_exact_ddnnf() {
+        // Non-monotone programs are now supported with exact_ddnnf via WFS
         let mut program = create_unstratifiable_program();
         program.directives.prob_engine = Some(ProbEngine::ExactDdnnf);
 
         let result = stratify(&program);
-        match result {
-            Err(XlogError::Compilation(msg)) => {
-                assert!(msg.contains("requires P3"), "msg={}", msg);
-                assert!(msg.contains("prob_engine=mc"), "msg={}", msg);
-            }
-            other => panic!("Expected Compilation error, got: {:?}", other),
-        }
+        assert!(
+            result.is_ok(),
+            "Expected exact_ddnnf to allow non-monotone recursion (via WFS), got: {:?}",
+            result.err()
+        );
     }
 
     #[test]

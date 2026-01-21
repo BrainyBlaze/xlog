@@ -5,7 +5,9 @@ use std::hash::{Hash, Hasher};
 
 use xlog_core::{Result, XlogError};
 use xlog_logic::ast::{AggExpr, AggOp, ArithExpr, Atom, BodyLiteral, CompOp, Evidence, ProbQuery, Program, Rule, Term};
-use xlog_logic::stratify::{build_dependency_graph, find_sccs_for_lowering, stratify};
+use xlog_logic::stratify::{analyze_stratification, build_dependency_graph, find_sccs_for_lowering, stratify};
+
+use crate::wfs::{WfsAtom, WfsConfig, WfsLiteral, WfsRule, evaluate_wfs_rules};
 
 use crate::pir::{ChoiceVarId, LeafId, PirGraph, PirNodeId};
 
@@ -340,7 +342,20 @@ pub fn extract_from_program(program: &Program) -> Result<Provenance> {
     for pred in &graph.predicates {
         store.entry(pred.clone()).or_insert_with(Relation::new);
     }
+
+    // Use analyze_stratification to detect non-monotone SCCs
+    let strat_result = analyze_stratification(program);
     let sccs = find_sccs_for_lowering(&graph);
+
+    // Build a set of SCC indices that are non-monotone
+    // We need to map the SCCs from find_sccs_for_lowering to analyze_stratification
+    // Both use the same SCC algorithm, so indices should match
+    let non_monotone_scc_preds: std::collections::HashSet<String> = strat_result.sccs
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| strat_result.non_monotone_sccs.contains(i))
+        .flat_map(|(_, scc)| scc.iter().cloned())
+        .collect();
 
     let mut rules_by_head: HashMap<String, Vec<Rule>> = HashMap::new();
     for rule in program.proper_rules() {
@@ -367,11 +382,19 @@ pub fn extract_from_program(program: &Program) -> Result<Provenance> {
             continue;
         }
 
-        let recursive = is_recursive_scc(&scc, &scc_rules);
-        if recursive {
-            eval_recursive_scc(&scc, &scc_rules, &mut store, &mut builder)?;
+        // Check if any predicate in this SCC is in a non-monotone cycle
+        let is_non_monotone = scc.iter().any(|p| non_monotone_scc_preds.contains(p));
+
+        if is_non_monotone {
+            // Use WFS for non-monotone SCCs (cycles through negation)
+            eval_non_monotone_scc_with_wfs(&scc, &scc_rules, &mut store, &mut builder)?;
         } else {
-            eval_non_recursive_scc(&scc_rules, &mut store, &mut builder)?;
+            let recursive = is_recursive_scc(&scc, &scc_rules);
+            if recursive {
+                eval_recursive_scc(&scc, &scc_rules, &mut store, &mut builder)?;
+            } else {
+                eval_non_recursive_scc(&scc_rules, &mut store, &mut builder)?;
+            }
         }
     }
 
@@ -648,6 +671,247 @@ fn eval_recursive_scc(
     }
 
     Ok(())
+}
+
+/// Evaluate a non-monotone SCC using Well-Founded Semantics.
+///
+/// This function handles SCCs that have cycles through negation. It:
+/// 1. Grounds the rules by enumerating all variable bindings from existing tuples
+/// 2. Converts ground rules to WFS rules
+/// 3. Calls WFS to compute the well-founded model
+/// 4. Stores the results (true atoms with provenance) back
+///
+/// Undefined atoms (those in a true cycle) get no provenance (probability 0).
+fn eval_non_monotone_scc_with_wfs(
+    scc: &[String],
+    rules: &[Rule],
+    store: &mut HashMap<String, Relation>,
+    builder: &mut PirBuilder,
+) -> Result<()> {
+    let scc_set: std::collections::HashSet<&str> = scc.iter().map(|s| s.as_str()).collect();
+
+    // Step 1: Ground all rules in the SCC
+    // We enumerate all possible variable bindings by iterating over existing tuples
+    let mut wfs_rules: Vec<WfsRule> = Vec::new();
+
+    for rule in rules {
+        // Ground this rule against the current store
+        let grounded = ground_rule_for_wfs(rule, store, &scc_set, builder)?;
+        wfs_rules.extend(grounded);
+    }
+
+    if wfs_rules.is_empty() {
+        // No ground rules, nothing to do
+        return Ok(());
+    }
+
+    // Step 2: Call WFS to compute the well-founded model
+    let wfs_result = evaluate_wfs_rules(&wfs_rules, &mut builder.pir, &WfsConfig::default())?;
+
+    // Step 3: Store the results back
+    // True atoms get their provenance, false/undefined atoms are not added
+    for (wfs_atom, prov) in wfs_result.true_set {
+        let rel = store.entry(wfs_atom.predicate.clone()).or_insert_with(Relation::new);
+        rel.insert_or(wfs_atom.args, prov, builder);
+    }
+
+    Ok(())
+}
+
+/// Ground a rule for WFS evaluation.
+///
+/// This generates all ground instances of a rule by iterating over existing tuples
+/// that match the body literals (excluding SCC predicates which are handled by WFS).
+fn ground_rule_for_wfs(
+    rule: &Rule,
+    store: &HashMap<String, Relation>,
+    scc_set: &std::collections::HashSet<&str>,
+    builder: &mut PirBuilder,
+) -> Result<Vec<WfsRule>> {
+    // Start with empty binding
+    let mut bindings: Vec<(HashMap<String, Value>, PirNodeId)> = vec![(HashMap::new(), builder.const_true())];
+
+    // Collect body literals that are in the SCC (will become WFS body literals)
+    // and non-SCC literals (will be grounded now)
+    let mut wfs_body_template: Vec<(usize, bool)> = Vec::new(); // (body_index, is_positive)
+
+    for (idx, lit) in rule.body.iter().enumerate() {
+        match lit {
+            BodyLiteral::Positive(atom) => {
+                if scc_set.contains(atom.predicate.as_str()) {
+                    // This will become a WFS body literal
+                    wfs_body_template.push((idx, true));
+                } else {
+                    // Ground now by iterating over existing tuples
+                    let rel = store.get(&atom.predicate);
+                    let mut next_bindings: Vec<(HashMap<String, Value>, PirNodeId)> = Vec::new();
+
+                    for (binding, prov) in bindings {
+                        if let Some(rel) = rel {
+                            for (tuple, tuple_prov) in &rel.tuples {
+                                let mut new_binding = binding.clone();
+                                if unify_atom(atom, tuple, &mut new_binding)? {
+                                    let new_prov = builder.and(vec![prov, *tuple_prov]);
+                                    next_bindings.push((new_binding, new_prov));
+                                }
+                            }
+                        }
+                        // If relation doesn't exist, no tuples match
+                    }
+                    bindings = next_bindings;
+                    if bindings.is_empty() {
+                        return Ok(Vec::new());
+                    }
+                }
+            }
+            BodyLiteral::Negated(atom) => {
+                if scc_set.contains(atom.predicate.as_str()) {
+                    // This will become a WFS negative body literal
+                    wfs_body_template.push((idx, false));
+                } else {
+                    // Ground now: negation of non-SCC predicate
+                    let rel = store.get(&atom.predicate);
+                    let mut next_bindings: Vec<(HashMap<String, Value>, PirNodeId)> = Vec::new();
+
+                    for (binding, prov) in bindings {
+                        // Check if all variables in the negated atom are bound
+                        let all_bound = atom.terms.iter().all(|t| match t {
+                            Term::Variable(v) => binding.contains_key(v),
+                            _ => true,
+                        });
+
+                        if !all_bound {
+                            // Skip unsafe negation
+                            continue;
+                        }
+
+                        if let Some(rel) = rel {
+                            // Collect matching tuples
+                            let mut matching_provs: Vec<PirNodeId> = Vec::new();
+                            for (tuple, tuple_prov) in &rel.tuples {
+                                let mut test_binding = binding.clone();
+                                if unify_atom(atom, tuple, &mut test_binding)? {
+                                    matching_provs.push(*tuple_prov);
+                                }
+                            }
+
+                            if matching_provs.is_empty() {
+                                // No matches - closed world: negation succeeds
+                                next_bindings.push((binding, prov));
+                            } else {
+                                // Negate the combined provenance
+                                let combined = builder.or(matching_provs);
+                                let neg_prov = negate_provenance(combined, builder);
+                                let new_prov = builder.and(vec![prov, neg_prov]);
+                                next_bindings.push((binding, new_prov));
+                            }
+                        } else {
+                            // Relation doesn't exist - closed world: negation succeeds
+                            next_bindings.push((binding, prov));
+                        }
+                    }
+                    bindings = next_bindings;
+                    if bindings.is_empty() {
+                        return Ok(Vec::new());
+                    }
+                }
+            }
+            BodyLiteral::Comparison(cmp) => {
+                let mut next_bindings: Vec<(HashMap<String, Value>, PirNodeId)> = Vec::new();
+                for (binding, prov) in bindings {
+                    if eval_comparison(cmp.op, &cmp.left, &cmp.right, &binding)? {
+                        next_bindings.push((binding, prov));
+                    }
+                }
+                bindings = next_bindings;
+                if bindings.is_empty() {
+                    return Ok(Vec::new());
+                }
+            }
+            BodyLiteral::IsExpr(is_expr) => {
+                let mut next_bindings: Vec<(HashMap<String, Value>, PirNodeId)> = Vec::new();
+                for (mut binding, prov) in bindings {
+                    if binding.contains_key(&is_expr.target) {
+                        return Err(XlogError::Compilation(format!(
+                            "Is-expression target {} is already bound",
+                            is_expr.target
+                        )));
+                    }
+                    let v = eval_arith_expr(&is_expr.expr, &binding)?;
+                    binding.insert(is_expr.target.clone(), v);
+                    next_bindings.push((binding, prov));
+                }
+                bindings = next_bindings;
+                if bindings.is_empty() {
+                    return Ok(Vec::new());
+                }
+            }
+        }
+    }
+
+    // Now create WFS rules for each binding
+    let mut result: Vec<WfsRule> = Vec::new();
+
+    for (binding, external_prov) in bindings {
+        // Build the WFS body from SCC literals
+        let mut wfs_body: Vec<WfsLiteral> = Vec::new();
+
+        for &(idx, is_positive) in &wfs_body_template {
+            let atom = match &rule.body[idx] {
+                BodyLiteral::Positive(a) | BodyLiteral::Negated(a) => a,
+                _ => continue,
+            };
+
+            // Ground the atom with the current binding
+            let mut args: Vec<Value> = Vec::new();
+            for term in &atom.terms {
+                match term {
+                    Term::Variable(name) => {
+                        if let Some(v) = binding.get(name) {
+                            args.push(v.clone());
+                        } else {
+                            // Variable not bound - this shouldn't happen for well-formed rules
+                            // Skip this ground instance
+                            continue;
+                        }
+                    }
+                    _ => {
+                        args.push(value_from_term(term)?);
+                    }
+                }
+            }
+
+            let wfs_atom = WfsAtom::new(atom.predicate.clone(), args);
+            if is_positive {
+                wfs_body.push(WfsLiteral::Positive(wfs_atom));
+            } else {
+                wfs_body.push(WfsLiteral::Negative(wfs_atom));
+            }
+        }
+
+        // Build the ground head
+        let mut head_args: Vec<Value> = Vec::new();
+        for term in &rule.head.terms {
+            match term {
+                Term::Variable(name) => {
+                    if let Some(v) = binding.get(name) {
+                        head_args.push(v.clone());
+                    } else {
+                        // Unbound head variable - skip this instance
+                        continue;
+                    }
+                }
+                _ => {
+                    head_args.push(value_from_term(term)?);
+                }
+            }
+        }
+
+        let wfs_head = WfsAtom::new(rule.head.predicate.clone(), head_args);
+        result.push(WfsRule::new(wfs_head, wfs_body, external_prov));
+    }
+
+    Ok(result)
 }
 
 /// Negate a provenance formula, pushing negation to leaves (NNF form).
