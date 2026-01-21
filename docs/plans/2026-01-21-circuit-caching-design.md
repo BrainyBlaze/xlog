@@ -20,19 +20,26 @@ Cache compiled circuits by **template signature**. Circuits with identical struc
 
 ## Cache Key Design
 
-Based on DeepProbLog examples analysis, cache key must handle:
-- Multiple networks with different label counts (HWF, CLUTRR, Forth)
+**v0.4.0-alpha scope:** Single network per program (matches existing `forward_backward_complex` limitation).
+
+Cache key must handle:
 - Variable input indices per query
 - Different query predicates
+- Different label counts (e.g., 10 for MNIST digits, 4 for operators)
 
-**Cache Key Format**:
+**Cache Key Format (v0.4.0-alpha)**:
+```
+{predicate}:{input_count}:{num_labels}
+```
+
+Example for `addition(0, 1, 7)` with 10-class MNIST:
+```
+addition:2:10
+```
+
+**Future multi-network format** (post v0.4.0):
 ```
 {predicate}:{input_count}:{network_signatures}
-```
-
-Example for `addition(0, 1, 7)`:
-```
-addition:2:mnist_net[10]
 ```
 
 Example for HWF `formula(0, 1, 2, 42)` (number, operator, number, result):
@@ -55,18 +62,19 @@ pub struct CachedCircuit {
     /// The compiled program (contains XGCF on GPU)
     program: ExactDdnnfProgram,
 
-    /// Mapping from network output index to leaf ID in circuit
+    /// Mapping from network output index to circuit variable
     /// Enables weight updates without recompilation
     weight_slots: Vec<WeightSlot>,
 }
 
+/// Maps a network output to a circuit variable (v0.4.0-alpha: single network)
 pub struct WeightSlot {
-    /// Which network produced this weight
-    network_name: String,
-    /// Index into network output (0-9 for digits)
-    output_index: usize,
-    /// Leaf ID in the XGCF circuit
-    leaf_id: LeafId,
+    /// Input index in the query (e.g., 0 or 1 for addition(0, 1, 7))
+    input_idx: usize,
+    /// Label index (0-9 for 10-class classification)
+    label_idx: usize,
+    /// Circuit variable index (1-indexed, DIMACS convention)
+    var_idx: u32,
 }
 ```
 
@@ -97,15 +105,23 @@ forward_backward_complex(query):
 ### Weight Update (No Recompilation)
 
 ```rust
-fn update_weights(
+fn update_circuit_weights(
     cached: &CachedCircuit,
-    network_outputs: &[(String, Vec<f64>)],  // (network_name, probs)
-) -> Vec<f64> {
-    let mut weights = vec![0.0; cached.weight_slots.len()];
+    network_outputs: &[(usize, Vec<f64>, PyObject)],  // (input_idx, probs, tensor)
+) -> Vec<(f64, f64)> {
+    let num_vars = cached.program.num_vars();
+    let mut weights: Vec<(f64, f64)> = vec![(0.0, 0.0); num_vars + 1];
 
     for slot in &cached.weight_slots {
-        let probs = network_outputs.get(&slot.network_name);
-        weights[slot.leaf_id] = probs[slot.output_index].ln();
+        if let Some((_, probs, _)) = network_outputs.iter()
+            .find(|(idx, _, _)| *idx == slot.input_idx)
+        {
+            let p = probs[slot.label_idx];
+            // Normalize and convert to log space
+            let sum: f64 = probs.iter().sum();
+            let normalized_p = (p * 0.9999999 / sum).max(1e-10);
+            weights[slot.var_idx as usize] = (normalized_p.ln(), (1.0 - normalized_p).ln());
+        }
     }
 
     weights

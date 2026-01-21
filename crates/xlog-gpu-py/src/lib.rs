@@ -289,9 +289,6 @@ struct CachedCircuit {
 
     /// Mapping from (input_idx, label_idx) to circuit variable index.
     weight_slots: Vec<WeightSlot>,
-
-    /// Number of labels per network (e.g., 10 for MNIST)
-    num_labels: usize,
 }
 
 /// Maps a network output to a circuit variable.
@@ -991,7 +988,7 @@ impl CompiledProgram {
             (qg.prob, qg.grad_true.clone(), qg.grad_false.clone())
         } else {
             // CACHE MISS: Compile new circuit and cache it
-            let (program, weight_slots, num_labels) =
+            let (program, weight_slots) =
                 self.compile_circuit_for_template(&network_outputs, query)?;
 
             // Evaluate the newly compiled circuit
@@ -1011,7 +1008,6 @@ impl CompiledProgram {
             let cached = CachedCircuit {
                 program,
                 weight_slots,
-                num_labels,
             };
             self.circuit_cache.insert(cache_key, cached);
 
@@ -1210,7 +1206,7 @@ impl CompiledProgram {
         &self,
         network_outputs: &[(usize, Vec<f64>, PyObject)],
         query: &str,
-    ) -> PyResult<(ExactDdnnfProgram, Vec<WeightSlot>, usize)> {
+    ) -> PyResult<(ExactDdnnfProgram, Vec<WeightSlot>)> {
         // Generate expanded source
         let expanded_source = self.generate_expanded_source(network_outputs, query)?;
 
@@ -1220,12 +1216,6 @@ impl CompiledProgram {
 
         // Build weight slot mappings
         // Variables are assigned sequentially: input 0 labels 0-9, then input 1 labels 0-9, etc.
-        let num_labels = if network_outputs.is_empty() {
-            0
-        } else {
-            network_outputs[0].1.len()
-        };
-
         let mut weight_slots = Vec::new();
         let mut var_idx: u32 = 1; // DIMACS variables are 1-indexed
 
@@ -1240,7 +1230,7 @@ impl CompiledProgram {
             }
         }
 
-        Ok((program, weight_slots, num_labels))
+        Ok((program, weight_slots))
     }
 
     /// Update weights in a cached circuit with new network outputs.
