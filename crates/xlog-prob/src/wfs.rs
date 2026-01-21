@@ -4,6 +4,22 @@
 //! - True: definitely derivable
 //! - False: definitely not derivable
 //! - Undefined: in cycle, neither provable
+//!
+//! # Algorithm Overview
+//!
+//! The WFS alternating fixed-point algorithm alternates between:
+//! 1. **Unfounded set computation**: Find atoms that cannot be supported
+//! 2. **Consequence derivation**: Derive atoms that must be true
+//!
+//! This continues until a fixed point is reached.
+//!
+//! # Gradient Treatment
+//!
+//! - True atoms: Normal probability and gradient computation
+//! - False atoms: Probability = 0, gradient = 0
+//! - Undefined atoms: Probability = 0, gradient = 0 (conservative)
+//!
+//! This matches ProbLog's behavior for non-stratified programs.
 
 use std::collections::{HashMap, HashSet};
 use xlog_core::{Result, XlogError};
@@ -60,17 +76,123 @@ impl Default for WfsResult {
     }
 }
 
+/// Configuration for WFS evaluation
+#[derive(Debug, Clone)]
+pub struct WfsConfig {
+    /// Maximum iterations before giving up
+    pub max_iterations: usize,
+}
+
+impl Default for WfsConfig {
+    fn default() -> Self {
+        Self {
+            max_iterations: 1000,
+        }
+    }
+}
+
+/// Compute the unfounded set: atoms that cannot be supported
+///
+/// An atom is unfounded if every rule that could derive it either:
+/// - Has a body literal that is false, or
+/// - Depends on atoms in the unfounded set itself (positive cycle)
+///
+/// This is a simplified placeholder - full implementation requires rule access.
+fn compute_unfounded_set(
+    _true_set: &HashMap<WfsAtom, PirNodeId>,
+    _false_set: &HashSet<WfsAtom>,
+    _scc_atoms: &HashSet<WfsAtom>,
+) -> HashSet<WfsAtom> {
+    // TODO: Implement greatest fixed-point computation for unfounded sets
+    // For now, return empty set (conservative - nothing is unfounded)
+    HashSet::new()
+}
+
+/// Derive new true atoms using the immediate consequence operator
+///
+/// An atom becomes true if there exists a rule where:
+/// - All positive body literals are in true_set
+/// - All negative body literals are in false_set
+///
+/// This is a simplified placeholder - full implementation requires rule access.
+fn derive_consequences(
+    _true_set: &HashMap<WfsAtom, PirNodeId>,
+    _false_set: &HashSet<WfsAtom>,
+    _pir: &mut PirGraph,
+) -> HashMap<WfsAtom, PirNodeId> {
+    // TODO: Implement immediate consequence operator
+    // For now, return empty map (no new consequences)
+    HashMap::new()
+}
+
 /// Evaluate a non-monotone SCC using Well-Founded Semantics
 ///
-/// Currently returns an error as WFS is not yet fully implemented.
-/// Non-monotone programs should use the MC engine instead.
+/// The alternating fixed-point algorithm:
+/// 1. Initialize: all atoms undefined
+/// 2. Loop until fixed point:
+///    a. Compute unfounded set (atoms that cannot be true)
+///    b. Add unfounded atoms to false_set
+///    c. Derive consequences (atoms that must be true given false_set)
+///    d. Add derived atoms to true_set
+/// 3. Remaining atoms stay undefined
+///
+/// # Current Status
+///
+/// WFS is not yet fully implemented. Non-monotone programs should use
+/// the MC engine (`prob_engine=mc`) which handles them via sampling.
 pub fn evaluate_wfs_scc(
-    _scc_predicates: &[String],
-    _pir: &mut PirGraph,
+    scc_predicates: &[String],
+    pir: &mut PirGraph,
 ) -> Result<WfsResult> {
-    // TODO: Implement alternating fixed-point algorithm
+    evaluate_wfs_scc_with_config(scc_predicates, pir, &WfsConfig::default())
+}
+
+/// Evaluate WFS with custom configuration
+pub fn evaluate_wfs_scc_with_config(
+    scc_predicates: &[String],
+    _pir: &mut PirGraph,
+    config: &WfsConfig,
+) -> Result<WfsResult> {
+    let true_set: HashMap<WfsAtom, PirNodeId> = HashMap::new();
+    let mut false_set: HashSet<WfsAtom> = HashSet::new();
+
+    // Collect all ground atoms in SCC (simplified - no actual grounding)
+    let scc_atoms: HashSet<WfsAtom> = scc_predicates
+        .iter()
+        .map(|p| WfsAtom { predicate: p.clone(), args: vec![] })
+        .collect();
+
+    for iteration in 0..config.max_iterations {
+        // Step 1: Compute unfounded set
+        let unfounded = compute_unfounded_set(&true_set, &false_set, &scc_atoms);
+        let new_false: Vec<_> = unfounded.into_iter()
+            .filter(|a| !false_set.contains(a))
+            .collect();
+
+        // Step 2: Derive consequences
+        // Note: This is where we'd need access to rules and proper grounding
+        // For now, this is a placeholder
+        let _new_true = derive_consequences(&true_set, &false_set, _pir);
+
+        if new_false.is_empty() {
+            // Fixed point reached
+            break;
+        }
+
+        false_set.extend(new_false);
+
+        if iteration == config.max_iterations - 1 {
+            return Err(XlogError::Execution(format!(
+                "WFS evaluation did not converge after {} iterations",
+                config.max_iterations
+            )));
+        }
+    }
+
+    // For now, still return an error since the algorithm isn't fully connected
+    // to the rule evaluation infrastructure
     Err(XlogError::Compilation(
-        "Well-Founded Semantics not yet implemented for non-monotone SCCs. \
+        "Well-Founded Semantics not yet fully implemented for non-monotone SCCs. \
          Use prob_engine=mc for programs with cycles through negation.".to_string()
     ))
 }
@@ -79,6 +201,12 @@ pub fn evaluate_wfs_scc(
 mod tests {
     use super::*;
     use crate::pir::LeafId;
+
+    #[test]
+    fn test_wfs_config_default() {
+        let config = WfsConfig::default();
+        assert_eq!(config.max_iterations, 1000);
+    }
 
     #[test]
     fn test_wfs_result_default() {
