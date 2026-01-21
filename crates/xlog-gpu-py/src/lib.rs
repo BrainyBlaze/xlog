@@ -1157,6 +1157,17 @@ impl CompiledProgram {
         )))
     }
 
+    /// Generate cache key for a query template.
+    ///
+    /// Format: `{predicate}:{num_inputs}:{num_labels}`
+    /// Example: `addition:2:10` for addition(0, 1, 7) with 10-class MNIST
+    ///
+    /// Queries with identical structure (same predicate, same number of inputs,
+    /// same network label count) share the same circuit - only weights differ.
+    fn generate_cache_key(&self, pred_name: &str, num_inputs: usize, num_labels: usize) -> String {
+        format!("{}:{}:{}", pred_name, num_inputs, num_labels)
+    }
+
     /// Get the label index for a given label string.
     fn get_label_index(&self, _network_name: &str, label: &str) -> PyResult<usize> {
         // Try to parse as integer first
