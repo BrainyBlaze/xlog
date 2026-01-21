@@ -2,11 +2,68 @@
 
 All notable changes to this project are documented in this file.
 
-## Unreleased — Negation Support in Exact Inference
+## v0.4.0-alpha — 2026-01-21 — Neural-Symbolic Integration
 
-Full negation support for the exact d-DNNF inference engine with gradient computation.
+First alpha release of the neural-symbolic integration layer, enabling DeepProbLog-style training where neural network outputs become probabilistic facts in logic programs.
 
 ### Added
+
+**Neural Predicates (`nn/4` syntax):**
+- `nn(network, [inputs], output, [labels]) :: predicate(args).` declaration syntax
+- Network-backed probabilistic facts with automatic annotated disjunction generation
+- Support for classification mode (with labels) and embedding mode (without)
+- Multiple input variables, symbol labels, and empty input lists
+
+**Network Registry:**
+- `register_network(name, module, optimizer, scheduler)` Python API
+- `NetworkConfig` with DeepProbLog options: batching, k (top-k), det (deterministic), cache
+- `NetworkHandle` with train/eval mode switching
+- Automatic validation against declared neural predicates
+
+**Tensor Source Registry:**
+- `add_tensor_source(name, tensor)` for external data (images, embeddings)
+- `set_active_tensor_source(name)` for switching between train/test
+- Index validation and bounds checking
+- Metadata tracking (size, shape, dtype)
+
+**Neural → Probability Bridge:**
+- Softmax outputs converted to annotated disjunctions
+- `NeuralBridge` for numerical stability (epsilon clamping, normalization)
+- Log probability computation for gradient stability
+- Circuit leaf generation for d-DNNF integration
+
+**Training Infrastructure:**
+- `forward_backward()` for single query training with gradient computation
+- `train_epoch()` for batch processing with configurable batch size
+- `train_model()` for multi-epoch training with shuffle and logging
+- `zero_grad()`, `optimizer_step()`, `scheduler_step()` for training loop control
+- `TrainingHistory` object with epoch losses and batch metrics
+
+**NLL Loss Functions:**
+- `nll_loss(prob)` — negative log-likelihood from probability
+- `nll_loss_batch(probs)` — batch NLL computation
+- `nll_loss_mean(probs)` — mean NLL over batch
+- `nll_loss_tensor(prob)` — PyTorch tensor output for autograd
+- Numerical stability via epsilon (1e-10) clamping
+
+**Backward Pass to Networks:**
+- `backprop_circuit_gradients()` propagates d-DNNF gradients through neural networks
+- Weight slot mapping for position-based gradient routing
+- PyTorch `.backward()` integration with gradient tensors
+- Support for multiple networks per query
+
+**Circuit Caching:**
+- `CachedCircuit` stores compiled d-DNNF circuits for reuse
+- `WeightSlot` maps circuit variables to network outputs by position
+- `evaluate_gpu_with_grads_weights()` for weight-only circuit evaluation
+- Cache key generation from query templates
+- Eliminates D4 recompilation bottleneck (100x+ speedup for repeated queries)
+
+**Minimal MNIST Addition Example:**
+- `examples/deepproblog/01_minimal/train.py` — complete working example
+- CNN network classifying MNIST digits
+- Training purely from addition supervision (no digit labels)
+- Demonstrates neural-symbolic gradient flow
 
 **Negation in Probabilistic Programs:**
 - `not` keyword in rule bodies for exact inference (`wet :- not rain.`)
@@ -30,18 +87,6 @@ Full negation support for the exact d-DNNF inference engine with gradient comput
 - Undefined atoms return probability 0 with zero gradient
 - Full 1,461-line implementation in `wfs.rs`
 
-**Gradient Computation:**
-- Sign flip for negated leaves: `∂(1-p)/∂p = -1`
-- Gradients propagate correctly through WFS-evaluated programs
-- Finite difference verification in test suite
-
-**Testing:**
-- 17 new Python tests across 5 test classes
-- Stratified negation tests (`test_simple_not`, `test_multi_layer_stratified`)
-- Non-monotone WFS tests (`test_classic_wfs_cycle`, `test_wfs_partial_definition`)
-- Gradient correctness tests (`test_negation_gradient_sign`, `test_finite_difference_negation`)
-- MC comparison tests for probability validation
-
 ### Changed
 
 - Stratification analysis now tracks edge polarity for non-monotone detection
@@ -50,14 +95,44 @@ Full negation support for the exact d-DNNF inference engine with gradient comput
 
 ### Technical Details
 
-| Component | Change |
-|-----------|--------|
-| `pir.rs` | Added `NegLit` variant, `neg_lit()` builder |
-| `provenance.rs` | Removed negation blocker, added `negate_provenance()`, WFS integration |
-| `cnf.rs` | Tseitin encoding for `NegLit` with `v <-> !leaf_var` |
-| `stratify.rs` | `analyze_stratification()` with polarity tracking |
-| `wfs.rs` | Full WFS implementation (1,461 lines) |
-| `exact.rs` | Gradient sign flip for negated leaves |
+| Component | Files | Purpose |
+|-----------|-------|---------|
+| Grammar | `grammar.pest:93-102` | `nn/4` syntax parsing |
+| AST | `ast.rs:323-358` | `NeuralPredDecl`, `NeuralLabel` |
+| Parser | `parser.rs:573-645` | `build_neural_pred_decl()` |
+| Registry | `xlog-neural/src/registry.rs` | `NetworkRegistry`, `NetworkConfig` |
+| Handle | `xlog-neural/src/handle.rs` | `NetworkHandle` with PyO3 objects |
+| Bridge | `xlog-neural/src/bridge.rs` | `NeuralBridge`, `NeuralOutput` |
+| Tensor | `xlog-neural/src/tensor_source.rs` | `TensorSourceRegistry` |
+| Python | `xlog-gpu-py/src/lib.rs` | Full training API |
+| PIR | `pir.rs` | `NegLit` variant |
+| WFS | `wfs.rs` | Well-Founded Semantics (1,461 lines) |
+| Exact | `exact.rs` | `random_var_indices()`, `evaluate_gpu_with_grads_weights()` |
+
+### Example: MNIST Addition Training
+
+```python
+import xlog_gpu
+import torch
+
+# Define neural predicate program
+program = xlog_gpu.Program.compile("""
+    nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
+    addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
+""")
+
+# Register PyTorch network
+net = MNISTNet()
+optimizer = torch.optim.Adam(net.parameters(), lr=1e-3)
+program.register_network("mnist_net", net, optimizer)
+
+# Add training data
+program.add_tensor_source("train", train_images)
+
+# Train on addition queries (no digit labels!)
+queries = ["addition(0, 1, 7)", "addition(2, 3, 5)", ...]
+history = xlog_gpu.train_model(program, queries, epochs=50, batch_size=32)
+```
 
 ---
 

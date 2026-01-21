@@ -1,9 +1,9 @@
 # XLOG Development Roadmap
 
-> **Last Updated:** January 20, 2026
-> **Current Version:** v0.3.2 (Released)
-> **Next Version:** v0.4.0 (Neural-Symbolic) — DeepProbLog parity, differentiable training
-> **Status:** Planning v0.4.0 — see `docs/plans/2026-01-20-v0.4.0-neural-symbolic-design.md`
+> **Last Updated:** January 21, 2026
+> **Current Version:** v0.4.0-alpha (Released)
+> **Next Version:** v0.4.0-beta — Extended DeepProbLog examples, term embeddings
+> **Status:** v0.4.0-alpha complete — neural-symbolic training operational
 
 ---
 
@@ -315,23 +315,46 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 
 ## Neural-Symbolic Integration (`xlog-neural`) — Phase 5 / v0.4.0
 
-### Planned 📋
+### Implemented ✅ (v0.4.0-alpha)
 
 **Neural Predicates:**
-- [ ] `nn/4` syntax for neural network integration
-- [ ] Network registry with optimizer/scheduler management
-- [ ] Term embeddings (learnable + pretrained)
-- [ ] Foreign tensor predicates (dot, cosine, rbf, sigmoid, softmax, etc.)
-- [ ] Tensor source registry for external data
-- [ ] Neural output caching
-- [ ] Deterministic vs non-deterministic modes
+- [x] `nn/4` syntax for neural network integration
+- [x] Network registry with optimizer/scheduler management
+- [x] Tensor source registry for external data (images, embeddings)
+- [x] Neural output to annotated disjunction conversion
+- [x] Deterministic vs non-deterministic modes (config options)
 
 **Training Infrastructure:**
-- [ ] PyTorch autograd integration (XLogLayer)
+- [x] PyTorch autograd integration (backward pass to networks)
+- [x] `register_network()` Python API with module/optimizer/scheduler
+- [x] `train_model()` API with batch processing
+- [x] NLL loss function with numerical stability
+- [x] `forward_backward()` for single query training
+- [x] `train_epoch()` for batch training
+- [x] Circuit caching for 100x+ speedup on repeated queries
+
+**Inference Enhancements:**
+- [x] Negation support in exact inference (NNF transformation + WFS)
+- [x] Stratified negation with automatic layer detection
+- [x] Non-monotone negation via Well-Founded Semantics
+- [x] Gradient flow through negated literals
+
+**Examples:**
+- [x] Minimal MNIST Addition example (`examples/deepproblog/01_minimal/`)
+
+### Planned 📋 (v0.4.0-beta and beyond)
+
+**Neural Predicates (Extended):**
+- [ ] Term embeddings (learnable + pretrained)
+- [ ] Foreign tensor predicates (dot, cosine, rbf, sigmoid, softmax, etc.)
+- [ ] Neural output caching with configurable size
+- [ ] Top-k deterministic mode
+
+**Training Infrastructure (Extended):**
 - [ ] Semantic loss functions (logic-based supervision)
-- [ ] `train_model` API with DataLoader
-- [ ] Loss functions (NLL, MSE, semantic, infoloss)
-- [ ] Stop conditions (epochs, threshold, plateau)
+- [ ] Loss functions (MSE, semantic, infoloss)
+- [ ] Stop conditions (threshold, plateau detection)
+- [ ] Learning rate schedulers
 
 **Language Extensions:**
 - [ ] List syntax (`[H|T]`, `[a,b,c]`) and built-ins (member, select, append)
@@ -339,15 +362,20 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 - [ ] Negation as failure (`\+`)
 
 **Inference Enhancements:**
-- [x] Negation support in exact inference (NNF transformation + WFS) — **Implemented**
 - [ ] Aggregate lifting for small domains
 - [ ] Alternative knowledge compilers (c2d, miniC2D)
 - [ ] Importance sampling for Monte Carlo
 - [ ] Approximate inference engine (geometric_mean, beam search)
 
-**Prerequisites:** v0.3.2 complete
-**Estimated effort:** 7 months
+**DeepProbLog Examples:**
+- [ ] Coins example (two coin classifiers)
+- [ ] MNIST multi-digit addition
+- [ ] HWF (Handwritten Formula recognition)
+- [ ] Poker (card rank classification)
+- [ ] CLUTRR (family relationship reasoning)
+
 **Design document:** `docs/plans/2026-01-20-v0.4.0-neural-symbolic-design.md`
+**Implementation plan:** `docs/plans/v0.4.0-alpha-implementation.md`
 
 ---
 
@@ -396,6 +424,18 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 - [x] Gradient output for learning applications
 - [x] Uncertainty metadata for Monte Carlo results
 - [x] `dlpack_roundtrip()` helper for interop validation
+
+### Implemented ✅ (v0.4.0-alpha Neural-Symbolic Training)
+
+- [x] `register_network(name, module, optimizer, scheduler)` — PyTorch network registration
+- [x] `add_tensor_source(name, tensor)` — external data registration
+- [x] `set_active_tensor_source(name)` — switch between train/test data
+- [x] `forward_backward(query)` — single query training with gradients
+- [x] `train_epoch(queries, batch_size)` — batch training epoch
+- [x] `train_model(program, queries, epochs, batch_size)` — full training loop
+- [x] `nll_loss(prob)`, `nll_loss_batch(probs)`, `nll_loss_tensor(prob)` — loss functions
+- [x] `zero_grad()`, `optimizer_step()`, `scheduler_step()` — training utilities
+- [x] `TrainingHistory` — epoch losses and batch metrics
 
 ### Planned 📋
 
@@ -506,7 +546,10 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 | v0.2.0 | Released | Probabilistic reasoning (exact + MC), Python bindings, GPU-resident execution |
 | v0.3.1 | Released | Float predicates (IEEE 754 total ordering), benchmarks, `--stats` flag, fuzz testing, property-based testing |
 | v0.3.2 | Released | Module system, UDFs, reversible symbols, showcase examples, count→u64 fix |
-| v0.4.0 | **Planned** | Neural-symbolic integration, DeepProbLog parity, lists, meta-predicates (Phase 5) |
+| v0.4.0-alpha | **Released** | Neural predicates (`nn/4`), network registry, tensor sources, NLL loss, training loop, circuit caching, negation (WFS), MNIST addition example |
+| v0.4.0-beta | Planned | Extended DeepProbLog examples (Coins, Poker, HWF, CLUTRR), term embeddings |
+| v0.4.0-rc | Planned | Lists, meta-predicates, semantic loss functions |
+| v0.4.0 | Planned | Full DeepProbLog parity, production-ready neural-symbolic training |
 | v0.5.0 | Planned | Epistemic logic tier (Phase 6) |
 | v0.6+ | Planned | Multi-GPU support, distributed execution (Phase 7) |
 
