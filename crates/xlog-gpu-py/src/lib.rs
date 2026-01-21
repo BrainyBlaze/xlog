@@ -1168,6 +1168,46 @@ impl CompiledProgram {
         format!("{}:{}:{}", pred_name, num_inputs, num_labels)
     }
 
+    /// Compile a circuit for a query template with given network outputs.
+    ///
+    /// Returns the compiled program and weight slot mappings.
+    fn compile_circuit_for_template(
+        &self,
+        network_outputs: &[(usize, Vec<f64>, PyObject)],
+        query: &str,
+    ) -> PyResult<(ExactDdnnfProgram, Vec<WeightSlot>, usize)> {
+        // Generate expanded source
+        let expanded_source = self.generate_expanded_source(network_outputs, query)?;
+
+        // Compile with D4 (expensive operation we want to cache)
+        let program = ExactDdnnfProgram::compile_source_with_gpu(&expanded_source, self.gpu_config)
+            .map_err(|e| PyRuntimeError::new_err(format!("Query compilation error: {}", e)))?;
+
+        // Build weight slot mappings
+        // Variables are assigned sequentially: input 0 labels 0-9, then input 1 labels 0-9, etc.
+        let num_labels = if network_outputs.is_empty() {
+            0
+        } else {
+            network_outputs[0].1.len()
+        };
+
+        let mut weight_slots = Vec::new();
+        let mut var_idx: u32 = 1; // DIMACS variables are 1-indexed
+
+        for (input_idx, probs, _) in network_outputs {
+            for label_idx in 0..probs.len() {
+                weight_slots.push(WeightSlot {
+                    input_idx: *input_idx,
+                    label_idx,
+                    var_idx,
+                });
+                var_idx += 1;
+            }
+        }
+
+        Ok((program, weight_slots, num_labels))
+    }
+
     /// Get the label index for a given label string.
     fn get_label_index(&self, _network_name: &str, label: &str) -> PyResult<usize> {
         // Try to parse as integer first
