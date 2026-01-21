@@ -27,10 +27,12 @@
 //! registry.set_train_mode(true);
 //! ```
 
+pub mod batch;
 pub mod bridge;
 pub mod handle;
 pub mod registry;
 
+pub use batch::{BatchCollector, BatchMapping, BatchResult, NeuralCall};
 pub use bridge::{ADProbability, CircuitLeaf, NeuralBridge, NeuralOutput};
 pub use handle::NetworkHandle;
 pub use registry::{NetworkConfig, NetworkRegistry};
