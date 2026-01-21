@@ -2142,6 +2142,7 @@ version = "0.3.2"
 dependencies = [
  "cudarc",
  "pyo3",
+ "rand 0.8.5",
  "xlog-core",
  "xlog-cuda",
  "xlog-gpu",

@@ -733,43 +733,36 @@ impl CompiledProgram {
         let input_tensor = self.get_input_tensor(py, input_idx)?;
 
         // Forward pass through network (with gradient tracking)
-        let output = module.call_method1(py, "__call__", (input_tensor,))?;
+        // Network expects batched input, so add batch dimension if needed
+        let input_bound = input_tensor.bind(py);
+        let input_unsqueezed = input_bound.call_method1("unsqueeze", (0i32,))?;
+
+        let output = module.call_method1(py, "__call__", (input_unsqueezed,))?;
         let output_bound = output.bind(py);
+
+        // Output shape is [batch=1, num_classes], squeeze to [num_classes]
+        let output_squeezed = output_bound.call_method1("squeeze", (0i32,))?;
 
         // Get probability of target label
         let label_idx = self.get_label_index(&network_name, &target_label)?;
-        let prob_tensor = output_bound.get_item(label_idx)?;
-        let prob: f64 = prob_tensor.extract()?;
+        let prob_tensor = output_squeezed.get_item(label_idx)?;
+        let prob: f64 = prob_tensor.call_method0("item")?.extract()?;
 
         // Compute NLL loss: -log(prob)
         let loss = nll_loss_value(prob);
-
-        // Create loss tensor and backward
-        let torch = py.import_bound("torch")?;
-
-        // Create tensor with gradient tracking for the probability
-        let prob_tensor_grad = torch.call_method1("tensor", (prob,))?;
-        let prob_tensor_grad = prob_tensor_grad.call_method1("requires_grad_", (true,))?;
-
-        // Loss = -log(prob)
-        let log_prob = prob_tensor_grad.call_method0("log")?;
-        let neg_log_prob = log_prob.call_method1("__neg__", ())?;
-
-        // Backward pass
-        neg_log_prob.call_method0("backward")?;
-
-        // The network's output tensor has grad_fn, so calling backward on loss
-        // derived from it will flow gradients back. But we need to manually
-        // propagate the gradient to the network output.
 
         // Get gradient of loss w.r.t. prob: d(-log(p))/dp = -1/p
         let grad_prob = -1.0 / prob;
 
         // Create gradient tensor for backward through network
-        let grad_tensor = self.create_output_gradient(py, output_bound, label_idx, grad_prob)?;
+        // The gradient is with respect to the squeezed output (shape [num_classes])
+        let grad_tensor = self.create_output_gradient(py, &output_squeezed, label_idx, grad_prob)?;
+
+        // Add batch dimension back for backward pass through network output
+        let grad_unsqueezed = grad_tensor.bind(py).call_method1("unsqueeze", (0i32,))?;
 
         // Backward through network
-        output_bound.call_method1("backward", (grad_tensor,))?;
+        output_bound.call_method1("backward", (grad_unsqueezed,))?;
 
         Ok(loss)
     }

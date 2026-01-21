@@ -1,0 +1,41 @@
+// Minimal MNIST Addition Example
+//
+// This program demonstrates neural-symbolic integration with XLOG.
+// Given two MNIST digit images, it computes the probability of their sum.
+//
+// The neural network classifies individual digits, and probabilistic
+// logic computes the sum. The network learns to classify digits purely
+// from supervision on the sums - never seeing individual digit labels.
+//
+// Example queries:
+//   ?- addition(0, 1, Sum).     // What is the sum of digit[0] + digit[1]?
+//   ?- addition(img1, img2, 7). // Is digit[img1] + digit[img2] = 7?
+//   ?- digit(0, D).             // What digit is at index 0?
+
+// Neural predicate declaration
+// nn(network_name, [input_vars], output_var, [output_labels]) :: predicate(args).
+//
+// This declares that:
+// - 'mnist_net' is the name of the neural network
+// - [X] means the network takes one input (image at index X)
+// - Y is the output variable (the classified digit)
+// - [0,1,2,3,4,5,6,7,8,9] are the possible output labels (digit classes)
+// - digit(X, Y) is the resulting predicate
+//
+// The network's softmax output becomes probabilistic facts:
+//   P(digit(0, 0)) = network_output[0]
+//   P(digit(0, 1)) = network_output[1]
+//   ...
+//   P(digit(0, 9)) = network_output[9]
+nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
+
+// Addition rule
+// The sum of two digits at indices X and Y is Z.
+//
+// This uses probabilistic inference:
+// P(addition(0, 1, 7)) = sum over all (d1, d2) where d1 + d2 = 7 of:
+//                        P(digit(0, d1)) * P(digit(1, d2))
+//
+// For example, with d1=3, d2=4:
+// P(addition(0, 1, 7)) includes P(digit(0, 3)) * P(digit(1, 4))
+addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
