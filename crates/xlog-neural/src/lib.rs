@@ -27,9 +27,11 @@
 //! registry.set_train_mode(true);
 //! ```
 
+pub mod bridge;
 pub mod handle;
 pub mod registry;
 
+pub use bridge::{ADProbability, CircuitLeaf, NeuralBridge, NeuralOutput};
 pub use handle::NetworkHandle;
 pub use registry::{NetworkConfig, NetworkRegistry};
 
