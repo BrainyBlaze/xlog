@@ -705,3 +705,54 @@ impl Drop for TempDirGuard {
         let _ = fs::remove_dir_all(&self.path);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_exact_negation_probability() {
+        // 0.3::rain(). dry() :- not rain().
+        // P(dry) = P(not rain) = 1 - 0.3 = 0.7
+        let source = r#"
+0.3::rain().
+dry() :- not rain().
+query(dry()).
+"#;
+
+        let program = ExactDdnnfProgram::compile_source(source).unwrap();
+        let result = program.evaluate().unwrap();
+
+        assert_eq!(result.query_probs.len(), 1);
+        let dry_prob = result.query_probs[0].prob;
+        assert!(
+            (dry_prob - 0.7).abs() < 1e-6,
+            "P(dry) should be 0.7, got {}",
+            dry_prob
+        );
+    }
+
+    #[test]
+    fn test_exact_multi_layer_negation() {
+        // 0.4::c(). b() :- not c(). a() :- not b().
+        // P(b) = P(not c) = 0.6
+        // P(a) = P(not b) = 0.4
+        let source = r#"
+0.4::c().
+b() :- not c().
+a() :- not b().
+query(a()).
+"#;
+
+        let program = ExactDdnnfProgram::compile_source(source).unwrap();
+        let result = program.evaluate().unwrap();
+
+        assert_eq!(result.query_probs.len(), 1);
+        let a_prob = result.query_probs[0].prob;
+        assert!(
+            (a_prob - 0.4).abs() < 1e-6,
+            "P(a) should be 0.4, got {}",
+            a_prob
+        );
+    }
+}
