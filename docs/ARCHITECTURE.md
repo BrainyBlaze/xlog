@@ -74,7 +74,7 @@ XLOG is a unified platform spanning four closely-related reasoning paradigms:
 | Subsystem | Purpose | Primary Inspirations |
 |-----------|---------|---------------------|
 | **xlog-logic** | Deterministic Datalog-style recursion and stratified negation | GPUlog (HISA indexing), VFLog (columnar GPU Datalog) |
-| **xlog-prob** | Probabilistic + differentiable reasoning (ProbLog/DeepProbLog-like) | ProbLog knowledge compilation (d-DNNF/SDD/BDD), WMC |
+| **xlog-prob** | Probabilistic + differentiable reasoning | ProbLog knowledge compilation (d-DNNF/SDD/BDD), WMC |
 | **xlog-elp** | Epistemic Logic Programming with world views (planned) | eclingo (G91 guess-check), FAEEL founded world views |
 | **xlog-solve** | SAT/MaxSAT solving services for GPU | ParaFROST certified GPU inprocessing, FastFourierSAT GPU CLS |
 
@@ -267,7 +267,7 @@ XLOG builds on established research in GPU-accelerated databases and probabilist
 | **[VFLog](https://arxiv.org/abs/2501.13051)** | Column-oriented GPU Datalog runtime. Demonstrates 200× gains over CPU column engines. |
 | **[mnmgDatalog](https://hpcrl.github.io/ICS2025-webpage/program/Proceedings_ICS25/ics25-71.pdf)** | Multi-node multi-GPU Datalog. Radix-hash partitioning, GPU-aware all-to-all. |
 | **[ProbLog](https://dtai.cs.kuleuven.be/problog/)** | Knowledge compilation approach to probabilistic logic. Compile-once evaluate-many pattern. |
-| **[DeepProbLog](https://papers.nips.cc/paper/7632-deepproblog-neural-probabilistic-logic-programming)** | Neural predicates integrated with probabilistic logic. End-to-end differentiable inference. XLOG implements the `nn/4` syntax and training infrastructure (v0.4.0-alpha). |
+| **Neural-symbolic AI** | Neural predicates integrated with probabilistic logic. End-to-end differentiable inference. XLOG implements the `nn/4` syntax and training infrastructure (v0.4.0-alpha). |
 | **[D4](https://www.ijcai.org/proceedings/2017/0093.pdf)** | State-of-the-art Decision-DNNF compiler for weighted model counting. |
 | **[eclingo](https://arxiv.org/abs/2008.02018)** | Epistemic logic solver implementing G91 semantics via guess-and-check. |
 | **[FAEEL](https://arxiv.org/abs/1907.09247)** | Founded Autoepistemic Equilibrium Logic. Avoids self-supported world views. |
@@ -314,7 +314,7 @@ xlog/
 │   └── xlog-cuda-tests/ # CUDA/PTX certification suite (not published)
 ├── kernels/             # CUDA source files (.cu) + embedded PTX (.ptx)
 ├── examples/
-│   └── deepproblog/     # Neural-symbolic training examples
+│   └── neural/          # Neural-symbolic training examples
 └── vendor/              # Vendored D4 + Boost (for exact probabilistic inference)
 ```
 

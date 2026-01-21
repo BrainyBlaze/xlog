@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file.
 
 ## v0.4.0-alpha — 2026-01-21 — Neural-Symbolic Integration
 
-First alpha release of the neural-symbolic integration layer, enabling DeepProbLog-style training where neural network outputs become probabilistic facts in logic programs.
+First alpha release of the neural-symbolic integration layer, enabling differentiable training where neural network outputs become probabilistic facts in logic programs.
 
 ### Added
 
@@ -16,7 +16,7 @@ First alpha release of the neural-symbolic integration layer, enabling DeepProbL
 
 **Network Registry:**
 - `register_network(name, module, optimizer, scheduler)` Python API
-- `NetworkConfig` with DeepProbLog options: batching, k (top-k), det (deterministic), cache
+- `NetworkConfig` with neural predicate options: batching, k (top-k), det (deterministic), cache
 - `NetworkHandle` with train/eval mode switching
 - Automatic validation against declared neural predicates
 
@@ -60,7 +60,7 @@ First alpha release of the neural-symbolic integration layer, enabling DeepProbL
 - Eliminates D4 recompilation bottleneck (100x+ speedup for repeated queries)
 
 **Minimal MNIST Addition Example:**
-- `examples/deepproblog/01_minimal/train.py` — complete working example
+- `examples/neural/01_minimal/train.py` — complete working example
 - CNN network classifying MNIST digits
 - Training purely from addition supervision (no digit labels)
 - Demonstrates neural-symbolic gradient flow

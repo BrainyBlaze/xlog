@@ -54,7 +54,7 @@ Phase 4 examples live under:
 - `examples/python/`: Python scripts exercising `xlog_gpu` via DLPack (Torch optional)
 
 Phase 5 (v0.4.0-alpha) neural-symbolic examples live under:
-- `examples/deepproblog/`: DeepProbLog-style neural-symbolic training examples
+- `examples/neural/`: Neural-symbolic training examples
 
 ## Example Index
 
@@ -115,18 +115,18 @@ Phase 5 (v0.4.0-alpha) neural-symbolic examples live under:
 - `examples/xlog/90-negative-tests/03_arithmetic_type_mismatch.xlog`: missing `cast()` type mismatch (compile-time)
 - `examples/xlog/90-negative-tests/04_is_target_already_bound.xlog`: invalid `is` target (compile-time)
 
-## DeepProbLog Examples (v0.4.0-alpha)
+## Neural-Symbolic Examples (v0.4.0-alpha)
 
-Neural-symbolic training examples demonstrating DeepProbLog-style integration where neural network
+Neural-symbolic training examples demonstrating integration where neural network
 outputs become probabilistic facts in logic programs.
 
-**deepproblog/01_minimal/** — MNIST Addition
+**neural/01_minimal/** — MNIST Addition
 - `train.py`: Train a CNN to classify MNIST digits using only addition supervision
 - Demonstrates: neural predicates (`nn/4`), network registration, tensor sources, gradient flow
 
 To run:
 ```bash
-cd examples/deepproblog/01_minimal
+cd examples/neural/01_minimal
 python train.py --epochs 10 --batch-size 32
 ```
 

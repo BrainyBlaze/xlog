@@ -2,7 +2,7 @@
 
 > **Last Updated:** January 21, 2026
 > **Current Version:** v0.4.0-alpha (Released)
-> **Next Version:** v0.4.0-beta — Extended DeepProbLog examples, term embeddings
+> **Next Version:** v0.4.0-beta — Extended neural-symbolic examples, term embeddings
 > **Status:** v0.4.0-alpha complete — neural-symbolic training operational
 
 ---
@@ -340,7 +340,7 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 - [x] Gradient flow through negated literals
 
 **Examples:**
-- [x] Minimal MNIST Addition example (`examples/deepproblog/01_minimal/`)
+- [x] Minimal MNIST Addition example (`examples/neural/01_minimal/`)
 
 ### Planned 📋 (v0.4.0-beta and beyond)
 
@@ -367,7 +367,7 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 - [ ] Importance sampling for Monte Carlo
 - [ ] Approximate inference engine (geometric_mean, beam search)
 
-**DeepProbLog Examples:**
+**Neural-Symbolic Examples:**
 - [ ] Coins example (two coin classifiers)
 - [ ] MNIST multi-digit addition
 - [ ] HWF (Handwritten Formula recognition)
@@ -547,9 +547,9 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 | v0.3.1 | Released | Float predicates (IEEE 754 total ordering), benchmarks, `--stats` flag, fuzz testing, property-based testing |
 | v0.3.2 | Released | Module system, UDFs, reversible symbols, showcase examples, count→u64 fix |
 | v0.4.0-alpha | **Released** | Neural predicates (`nn/4`), network registry, tensor sources, NLL loss, training loop, circuit caching, negation (WFS), MNIST addition example |
-| v0.4.0-beta | Planned | Extended DeepProbLog examples (Coins, Poker, HWF, CLUTRR), term embeddings |
+| v0.4.0-beta | Planned | Extended neural-symbolic examples (Coins, Poker, HWF, CLUTRR), term embeddings |
 | v0.4.0-rc | Planned | Lists, meta-predicates, semantic loss functions |
-| v0.4.0 | Planned | Full DeepProbLog parity, production-ready neural-symbolic training |
+| v0.4.0 | Planned | Full neural-symbolic feature set, production-ready training |
 | v0.5.0 | Planned | Epistemic logic tier (Phase 6) |
 | v0.6+ | Planned | Multi-GPU support, distributed execution (Phase 7) |
 

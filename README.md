@@ -214,7 +214,7 @@ Gradients flow correctly through negated literals for neural-symbolic training.
 
 ## Neural-Symbolic Training (v0.4.0-alpha)
 
-XLOG supports DeepProbLog-style neural-symbolic integration where neural network outputs become probabilistic facts in logic programs.
+XLOG supports neural-symbolic integration where neural network outputs become probabilistic facts in logic programs.
 
 ### Neural Predicates
 
@@ -513,7 +513,7 @@ xlog run --help
 | [Neural-Symbolic Design](docs/plans/2026-01-20-v0.4.0-neural-symbolic-design.md) | v0.4.0 neural-symbolic integration design |
 | [Data Interop](docs/architecture/cudf-interop.md) | Arrow and DLPack integration |
 | [Examples](examples/) | Annotated example programs |
-| [DeepProbLog Examples](examples/deepproblog/) | Neural-symbolic training examples |
+| [Neural Examples](examples/neural/) | Neural-symbolic training examples |
 | [v0.3.2 Showcase](examples/xlog/80-v032-showcase/) | Production-grade multi-module examples |
 | [CUDA Certification](docs/certification/2026-01-14-cuda-certification-results.md) | Test coverage (140/140 passing) |
 
@@ -542,7 +542,7 @@ xlog/
 │   ├── xlog/            # Deterministic Datalog examples
 │   ├── prob/            # Probabilistic examples
 │   ├── python/          # Python API examples
-│   └── deepproblog/     # Neural-symbolic training examples
+│   └── neural/          # Neural-symbolic training examples
 └── docs/                # Documentation
 ```
 
@@ -602,5 +602,4 @@ XLOG builds on research in GPU-accelerated Datalog, probabilistic logic programm
 - [GPUlog](https://dl.acm.org/doi/10.1145/3183713.3183727) — HISA indexing, parallel fixpoint
 - [VFLog](https://dl.acm.org/doi/10.1145/3639310) — Columnar GPU Datalog
 - [ProbLog](https://dtai.cs.kuleuven.be/problog/) — Knowledge compilation for probabilistic logic
-- [DeepProbLog](https://github.com/ML-KULeuven/deepproblog) — Neural-symbolic integration paradigm
 - [D4](https://github.com/crillab/d4) — Decision-DNNF compiler (vendored)

@@ -5,7 +5,7 @@ Trains a neural network to classify MNIST digits using only addition labels.
 The network never sees individual digit labels during training - it learns
 to classify digits purely from the supervision signal on sums.
 
-This demonstrates neural-symbolic integration following the DeepProbLog paradigm:
+This demonstrates neural-symbolic integration:
 - Neural network outputs become probabilistic facts
 - Probabilistic logic computes query probabilities
 - Gradients flow from loss through logic back to networks

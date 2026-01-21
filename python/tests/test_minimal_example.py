@@ -1,6 +1,6 @@
 """Integration test for the minimal MNIST addition example.
 
-This test verifies that the DeepProbLog-style MNIST addition example
+This test verifies that the MNIST addition example
 trains correctly with loss reduction.
 
 Run with: pytest python/tests/test_minimal_example.py -v
@@ -15,7 +15,7 @@ torch = pytest.importorskip("torch")
 xlog_gpu = pytest.importorskip("xlog_gpu")
 
 # Add examples path for imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../examples/deepproblog/01_minimal'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../examples/neural/01_minimal'))
 
 
 class TestMinimalExample:

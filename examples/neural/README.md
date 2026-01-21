@@ -1,6 +1,6 @@
-# DeepProbLog Examples
+# Neural-Symbolic Examples
 
-Neural-symbolic training examples demonstrating DeepProbLog-style integration where neural network outputs become probabilistic facts in logic programs.
+Neural-symbolic training examples demonstrating integration where neural network outputs become probabilistic facts in logic programs.
 
 ## Overview
 
@@ -16,10 +16,10 @@ These examples showcase XLOG's v0.4.0-alpha neural-symbolic capabilities:
 
 ### 01_minimal — MNIST Addition
 
-The classic DeepProbLog demonstration: train a CNN to classify MNIST digits using **only addition supervision**.
+Train a CNN to classify MNIST digits using **only addition supervision**.
 
 ```
-examples/deepproblog/01_minimal/
+examples/neural/01_minimal/
 ├── train.py       # Training script
 └── data/          # MNIST data (auto-downloaded)
 ```
@@ -28,7 +28,7 @@ examples/deepproblog/01_minimal/
 
 **Run:**
 ```bash
-cd examples/deepproblog/01_minimal
+cd examples/neural/01_minimal
 python train.py --epochs 50 --batch-size 32
 ```
 
@@ -49,7 +49,7 @@ history = xlog_gpu.train_model(program, queries, epochs=50, batch_size=32)
 
 ## Planned Examples
 
-The following DeepProbLog examples are planned for v0.4.0-beta:
+The following neural-symbolic examples are planned for v0.4.0-beta:
 
 | Example | Description |
 |---------|-------------|
@@ -113,6 +113,5 @@ print(f"Final loss: {history.epoch_losses[-1]}")
 
 ## References
 
-- [DeepProbLog Paper](https://arxiv.org/abs/1805.10872) — Neural Probabilistic Logic Programming
 - [XLOG Design Doc](../../docs/plans/2026-01-20-v0.4.0-neural-symbolic-design.md) — v0.4.0 neural-symbolic design
 - [Implementation Plan](../../docs/plans/v0.4.0-alpha-implementation.md) — v0.4.0-alpha implementation details
