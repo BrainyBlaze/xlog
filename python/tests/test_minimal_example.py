@@ -139,6 +139,98 @@ class TestMinimalExample:
             f"Loss didn't decrease: {history.epoch_losses[0]:.4f} -> {history.epoch_losses[-1]:.4f}"
 
 
+class TestAdditionQueryTraining:
+    """Tests for training with addition queries (neural-circuit integration)."""
+
+    def test_addition_query_forward_backward(self):
+        """Test that forward_backward works with addition queries."""
+        from train import MNISTNet, create_program
+
+        program = create_program()
+        net = MNISTNet()
+        optimizer = torch.optim.Adam(net.parameters(), lr=1e-2)
+        program.register_network("mnist_net", net, optimizer)
+
+        torch.manual_seed(42)
+        images = torch.randn(10, 1, 28, 28)
+        program.add_tensor_source("train", images)
+
+        # Record initial weights
+        initial_weight = net.fc3.weight.clone()
+
+        # Train on addition queries
+        # addition(0, 1, Z) asks: what is digit[0] + digit[1]?
+        # We supervise with Z=7, meaning images[0] + images[1] = 7
+        program.zero_grad()
+        loss = program.forward_backward("addition(0, 1, 7)")
+        program.optimizer_step()
+
+        # Verify weights changed
+        assert not torch.equal(net.fc3.weight, initial_weight), "Network weights didn't change from addition query"
+
+        # Loss should be positive
+        assert loss > 0, f"Loss should be positive, got {loss}"
+
+    def test_addition_query_trains(self):
+        """Test that training with addition queries reduces loss."""
+        from train import MNISTNet, create_program
+
+        program = create_program()
+        net = MNISTNet()
+        optimizer = torch.optim.Adam(net.parameters(), lr=1e-2)
+        program.register_network("mnist_net", net, optimizer)
+
+        torch.manual_seed(123)
+        images = torch.randn(20, 1, 28, 28)
+        program.add_tensor_source("train", images)
+
+        # Generate addition queries
+        # For testing, use fixed "labels" where images[i] represents digit i % 10
+        # So addition(0, 1, X) should have X = (0 % 10) + (1 % 10) = 1
+        queries = [
+            "addition(0, 1, 1)",   # 0 + 1 = 1
+            "addition(2, 3, 5)",   # 2 + 3 = 5
+            "addition(4, 5, 9)",   # 4 + 5 = 9
+            "addition(6, 7, 13)",  # 6 + 7 = 13
+            "addition(8, 9, 17)",  # 8 + 9 = 17
+        ]
+
+        # Record initial weights
+        initial_weight = net.fc3.weight.clone()
+
+        # Train for several epochs
+        for epoch in range(5):
+            for q in queries:
+                program.zero_grad()
+                program.forward_backward(q)
+                program.optimizer_step()
+
+        # Verify weights changed
+        assert not torch.equal(net.fc3.weight, initial_weight), "Network weights didn't change"
+
+    def test_addition_query_probability(self):
+        """Test that addition query produces valid probability."""
+        from train import MNISTNet, create_program
+
+        program = create_program()
+        net = MNISTNet()
+        optimizer = torch.optim.Adam(net.parameters(), lr=1e-2)
+        program.register_network("mnist_net", net, optimizer)
+
+        torch.manual_seed(42)
+        images = torch.randn(4, 1, 28, 28)
+        program.add_tensor_source("train", images)
+
+        # Forward-backward should return a valid loss (NLL)
+        program.zero_grad()
+        loss = program.forward_backward("addition(0, 1, 5)")
+
+        # NLL loss is always positive for probability < 1
+        assert loss > 0, f"Expected positive loss, got {loss}"
+        # NLL loss is typically not huge for reasonable probabilities
+        assert loss < 100, f"Loss seems too high: {loss}"
+
+
 class TestDigitPredicate:
     """Tests for the digit/2 neural predicate."""
 

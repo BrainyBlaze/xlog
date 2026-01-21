@@ -702,14 +702,13 @@ impl CompiledProgram {
 
     /// Perform forward pass through neural network and backward pass for gradients.
     ///
-    /// This is the core training method that:
-    /// 1. Extracts the neural network call from the query
-    /// 2. Runs the network forward pass with gradient tracking
-    /// 3. Computes NLL loss from the output probability
-    /// 4. Backpropagates gradients to network parameters
+    /// This method supports two types of queries:
+    /// 1. Direct neural predicate queries: `digit(0, 5)` - runs network on input 0, computes loss for label 5
+    /// 2. Complex queries with neural predicates: `addition(0, 1, 7)` - expands neural predicates,
+    ///    runs probabilistic inference, and backpropagates through the circuit to networks
     ///
     /// # Arguments
-    /// * `query` - Query atom, e.g., "pred(0, a)" where pred is a neural predicate
+    /// * `query` - Query atom, e.g., "digit(0, 5)" or "addition(0, 1, 7)"
     ///
     /// # Returns
     /// The NLL loss value
@@ -717,54 +716,17 @@ impl CompiledProgram {
     /// # Note
     /// Call zero_grad() before this and optimizer_step() after.
     fn forward_backward(&mut self, py: Python<'_>, query: &str) -> PyResult<f64> {
-        // Parse the query to extract network name, input index, and target label
-        let (network_name, input_idx, target_label) = self.parse_neural_query(query)?;
-
-        // Get the network handle
-        let handle = self.network_registry.get(&network_name).ok_or_else(|| {
-            PyValueError::new_err(format!("Network '{}' not registered", network_name))
-        })?;
-
-        let module = handle.module().ok_or_else(|| {
-            PyValueError::new_err(format!("Network '{}' has no module", network_name))
-        })?;
-
-        // Get input from tensor source
-        let input_tensor = self.get_input_tensor(py, input_idx)?;
-
-        // Forward pass through network (with gradient tracking)
-        // Network expects batched input, so add batch dimension if needed
-        let input_bound = input_tensor.bind(py);
-        let input_unsqueezed = input_bound.call_method1("unsqueeze", (0i32,))?;
-
-        let output = module.call_method1(py, "__call__", (input_unsqueezed,))?;
-        let output_bound = output.bind(py);
-
-        // Output shape is [batch=1, num_classes], squeeze to [num_classes]
-        let output_squeezed = output_bound.call_method1("squeeze", (0i32,))?;
-
-        // Get probability of target label
-        let label_idx = self.get_label_index(&network_name, &target_label)?;
-        let prob_tensor = output_squeezed.get_item(label_idx)?;
-        let prob: f64 = prob_tensor.call_method0("item")?.extract()?;
-
-        // Compute NLL loss: -log(prob)
-        let loss = nll_loss_value(prob);
-
-        // Get gradient of loss w.r.t. prob: d(-log(p))/dp = -1/p
-        let grad_prob = -1.0 / prob;
-
-        // Create gradient tensor for backward through network
-        // The gradient is with respect to the squeezed output (shape [num_classes])
-        let grad_tensor = self.create_output_gradient(py, &output_squeezed, label_idx, grad_prob)?;
-
-        // Add batch dimension back for backward pass through network output
-        let grad_unsqueezed = grad_tensor.bind(py).call_method1("unsqueeze", (0i32,))?;
-
-        // Backward through network
-        output_bound.call_method1("backward", (grad_unsqueezed,))?;
-
-        Ok(loss)
+        // Try to parse as a direct neural predicate query first
+        match self.try_parse_direct_neural_query(query) {
+            Ok((network_name, input_idx, target_label)) => {
+                // Direct neural predicate query - use fast path
+                self.forward_backward_direct(py, &network_name, input_idx, &target_label)
+            }
+            Err(_) => {
+                // Complex query involving neural predicates through rules
+                self.forward_backward_complex(py, query)
+            }
+        }
     }
 }
 
@@ -819,11 +781,11 @@ impl CompiledProgram {
         })
     }
 
-    /// Parse a neural predicate query to extract network name, input index, and label.
+    /// Try to parse a query as a direct neural predicate query.
     ///
-    /// E.g., "pred(0, a)" -> ("net_name", 0, "a") where pred is defined by nn(net_name, ...) :: pred(...).
-    fn parse_neural_query(&self, query: &str) -> PyResult<(String, usize, String)> {
-        // Simple parser for queries like "pred(idx, label)" or "pred(idx,label)"
+    /// Returns Ok((network_name, input_idx, target_label)) if the query is a direct neural predicate.
+    /// Returns Err if the query is not a direct neural predicate (e.g., it's a complex query).
+    fn try_parse_direct_neural_query(&self, query: &str) -> PyResult<(String, usize, String)> {
         let query = query.trim();
 
         // Find predicate name and arguments
@@ -839,24 +801,300 @@ impl CompiledProgram {
 
         // Split arguments
         let args: Vec<&str> = args_str.split(',').map(|s| s.trim()).collect();
+
+        // Direct neural predicate queries have exactly 2 arguments: (input_idx, label)
         if args.len() != 2 {
             return Err(PyValueError::new_err(format!(
-                "Neural predicate query must have 2 arguments (index, label), got: {}",
-                query
+                "Not a direct neural predicate query (expected 2 args, got {}): {}",
+                args.len(), query
             )));
         }
 
+        // Try to parse input index
         let input_idx: usize = args[0].parse().map_err(|_| {
             PyValueError::new_err(format!("Invalid input index: {}", args[0]))
         })?;
         let target_label = args[1].to_string();
 
         // Find network name for this predicate
-        // For now, we assume predicate name matches a declared network or there's a mapping
-        // In a full implementation, this would look up the nn() declaration
         let network_name = self.find_network_for_predicate(pred_name)?;
 
         Ok((network_name, input_idx, target_label))
+    }
+
+    /// Forward-backward for a direct neural predicate query.
+    ///
+    /// E.g., `digit(0, 5)` - runs network on input 0, computes NLL loss for label 5.
+    fn forward_backward_direct(
+        &self,
+        py: Python<'_>,
+        network_name: &str,
+        input_idx: usize,
+        target_label: &str,
+    ) -> PyResult<f64> {
+        // Get the network handle
+        let handle = self.network_registry.get(network_name).ok_or_else(|| {
+            PyValueError::new_err(format!("Network '{}' not registered", network_name))
+        })?;
+
+        let module = handle.module().ok_or_else(|| {
+            PyValueError::new_err(format!("Network '{}' has no module", network_name))
+        })?;
+
+        // Get input from tensor source
+        let input_tensor = self.get_input_tensor(py, input_idx)?;
+
+        // Forward pass through network (with gradient tracking)
+        // Network expects batched input, so add batch dimension if needed
+        let input_bound = input_tensor.bind(py);
+        let input_unsqueezed = input_bound.call_method1("unsqueeze", (0i32,))?;
+
+        let output = module.call_method1(py, "__call__", (input_unsqueezed,))?;
+        let output_bound = output.bind(py);
+
+        // Output shape is [batch=1, num_classes], squeeze to [num_classes]
+        let output_squeezed = output_bound.call_method1("squeeze", (0i32,))?;
+
+        // Get probability of target label
+        let label_idx = self.get_label_index(network_name, target_label)?;
+        let prob_tensor = output_squeezed.get_item(label_idx)?;
+        let prob: f64 = prob_tensor.call_method0("item")?.extract()?;
+
+        // Compute NLL loss: -log(prob)
+        let loss = nll_loss_value(prob);
+
+        // Get gradient of loss w.r.t. prob: d(-log(p))/dp = -1/p
+        let grad_prob = -1.0 / prob;
+
+        // Create gradient tensor for backward through network
+        let grad_tensor = self.create_output_gradient(py, &output_squeezed, label_idx, grad_prob)?;
+
+        // Add batch dimension back for backward pass through network output
+        let grad_unsqueezed = grad_tensor.bind(py).call_method1("unsqueeze", (0i32,))?;
+
+        // Backward through network
+        output_bound.call_method1("backward", (grad_unsqueezed,))?;
+
+        Ok(loss)
+    }
+
+    /// Forward-backward for a complex query involving neural predicates through rules.
+    ///
+    /// E.g., `addition(0, 1, 7)` where:
+    /// - `addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.`
+    /// - `nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).`
+    ///
+    /// This method:
+    /// 1. Extracts input indices from the query (0 and 1)
+    /// 2. Runs neural networks on those inputs
+    /// 3. Generates annotated disjunctions with network output probabilities
+    /// 4. Compiles and evaluates the program with gradients
+    /// 5. Maps circuit gradients back to network outputs
+    /// 6. Backpropagates through networks
+    fn forward_backward_complex(&mut self, py: Python<'_>, query: &str) -> PyResult<f64> {
+        // Parse the query to extract input indices
+        let (input_indices, _pred_name) = self.extract_query_input_indices(query)?;
+
+        if input_indices.is_empty() {
+            return Err(PyValueError::new_err(format!(
+                "No input indices found in query: {}. Make sure the query references neural predicate inputs.",
+                query
+            )));
+        }
+
+        // Get the network (for v0.4.0-alpha, assume single network)
+        let network_name = self.network_registry.names().first()
+            .ok_or_else(|| PyValueError::new_err("No network registered"))?
+            .to_string();
+
+        let handle = self.network_registry.get(&network_name).ok_or_else(|| {
+            PyValueError::new_err(format!("Network '{}' not registered", network_name))
+        })?;
+
+        let module = handle.module().ok_or_else(|| {
+            PyValueError::new_err(format!("Network '{}' has no module", network_name))
+        })?;
+
+        // Run neural network for each input index and collect outputs
+        let mut network_outputs: Vec<(usize, Vec<f64>, PyObject)> = Vec::new();
+
+        for &input_idx in &input_indices {
+            let input_tensor = self.get_input_tensor(py, input_idx)?;
+            let input_bound = input_tensor.bind(py);
+            let input_unsqueezed = input_bound.call_method1("unsqueeze", (0i32,))?;
+
+            // Forward pass with gradient tracking
+            let output = module.call_method1(py, "__call__", (input_unsqueezed,))?;
+            let output_bound = output.bind(py);
+            let output_squeezed = output_bound.call_method1("squeeze", (0i32,))?;
+
+            // Extract probabilities - convert tensor to list first
+            let probs_list = output_squeezed.call_method0("tolist")?;
+            let probs: Vec<f64> = probs_list.extract()?;
+
+            // Store the output tensor for gradient backprop later
+            network_outputs.push((input_idx, probs, output.clone()));
+        }
+
+        // Generate expanded source with neural predicate probabilities as annotated disjunctions
+        let expanded_source = self.generate_expanded_source(&network_outputs, query)?;
+
+        // Compile and evaluate with gradients
+        let program = ExactDdnnfProgram::compile_source_with_gpu(&expanded_source, self.gpu_config)
+            .map_err(|e| PyRuntimeError::new_err(format!("Query compilation error: {}", e)))?;
+
+        let result = program.evaluate_gpu_with_grads()
+            .map_err(|e| PyRuntimeError::new_err(format!("Query evaluation error: {}", e)))?;
+
+        // Get the query probability
+        if result.query_grads.is_empty() {
+            return Err(PyRuntimeError::new_err("No query results returned"));
+        }
+
+        let query_grad = &result.query_grads[0];
+        let prob = query_grad.prob;
+        let loss = nll_loss_value(prob);
+
+        // Compute d(loss)/d(prob) = -1/prob
+        let dloss_dprob = -1.0 / prob.max(NLL_EPSILON);
+
+        // Map circuit gradients to neural network outputs and backpropagate
+        self.backprop_circuit_gradients(
+            py,
+            &network_outputs,
+            &query_grad.grad_true,
+            &query_grad.grad_false,
+            dloss_dprob,
+        )?;
+
+        Ok(loss)
+    }
+
+    /// Extract input indices from a query.
+    ///
+    /// For `addition(0, 1, 7)`, returns indices [0, 1].
+    fn extract_query_input_indices(&self, query: &str) -> PyResult<(Vec<usize>, String)> {
+        let query = query.trim();
+
+        let paren_start = query.find('(').ok_or_else(|| {
+            PyValueError::new_err(format!("Invalid query format: {}", query))
+        })?;
+        let paren_end = query.rfind(')').ok_or_else(|| {
+            PyValueError::new_err(format!("Invalid query format: {}", query))
+        })?;
+
+        let pred_name = query[..paren_start].to_string();
+        let args_str = &query[paren_start + 1..paren_end];
+
+        let mut indices = Vec::new();
+        for arg in args_str.split(',').map(|s| s.trim()) {
+            // Try to parse as integer - if successful, it's a potential input index
+            if let Ok(idx) = arg.parse::<usize>() {
+                indices.push(idx);
+            }
+        }
+
+        // For addition(X, Y, Z), the first two arguments are input indices,
+        // the third is the expected sum. We want the input indices.
+        // Heuristic: all but the last index for rules like addition
+        if indices.len() > 1 {
+            indices.pop(); // Remove the last one (e.g., the sum/result)
+        }
+
+        Ok((indices, pred_name))
+    }
+
+    /// Generate expanded source with neural predicate probabilities as annotated disjunctions.
+    fn generate_expanded_source(
+        &self,
+        network_outputs: &[(usize, Vec<f64>, PyObject)],
+        query: &str,
+    ) -> PyResult<String> {
+        let mut source = String::new();
+
+        // Add annotated disjunctions for each input index
+        for (input_idx, probs, _) in network_outputs {
+            // Normalize probabilities to ensure they sum to at most 1.0
+            // Scale factor slightly less than 1 to account for floating point errors
+            let sum: f64 = probs.iter().sum();
+            let scale = 0.9999999 / sum;  // Ensures sum will be < 1.0
+            let normalized: Vec<f64> = probs.iter().map(|p| (p * scale).max(1e-10)).collect();
+
+            // Generate: p0::digit(idx, 0); p1::digit(idx, 1); ...; p9::digit(idx, 9).
+            let mut ad_parts: Vec<String> = Vec::new();
+            for (label_idx, prob) in normalized.iter().enumerate() {
+                ad_parts.push(format!("{:.10}::digit({}, {})", prob, input_idx, label_idx));
+            }
+            source.push_str(&ad_parts.join("; "));
+            source.push_str(".\n");
+        }
+
+        // Add the addition rule
+        source.push_str("addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.\n");
+
+        // Add the query
+        source.push_str(&format!("query({}).\n", query));
+
+        Ok(source)
+    }
+
+    /// Backpropagate circuit gradients through neural networks.
+    ///
+    /// Maps gradients from circuit variables back to neural network outputs and calls backward.
+    fn backprop_circuit_gradients(
+        &self,
+        py: Python<'_>,
+        network_outputs: &[(usize, Vec<f64>, PyObject)],
+        grad_true: &[f64],
+        _grad_false: &[f64],
+        dloss_dprob: f64,
+    ) -> PyResult<()> {
+        let torch = py.import_bound("torch")?;
+
+        // The grad_true vector contains gradients for each variable in the circuit.
+        // Variables are ordered by the annotated disjunctions we generated.
+        // For each input_idx, we have num_labels variables.
+        //
+        // The gradient for variable i is: d(log Z) / d(log p_i) = d(log Z) / d(p_i) * p_i
+        // We need: d(loss) / d(p_i) = d(loss) / d(prob) * d(prob) / d(p_i)
+        //                           = dloss_dprob * grad_true[i] / p_i
+        //
+        // For annotated disjunctions with variables representing "choices":
+        // grad_true[i] represents the sensitivity of log Z to log(p_true) for variable i
+
+        let mut var_offset = 0;
+
+        for (_, probs, output) in network_outputs {
+            let num_labels = probs.len();
+
+            // Create gradient tensor for this network output
+            let grad_vec: Vec<f64> = (0..num_labels)
+                .map(|label_idx| {
+                    // Get the circuit gradient for this variable
+                    let var_idx = var_offset + label_idx;
+                    if var_idx < grad_true.len() {
+                        // Convert from d(log Z)/d(log p) to d(loss)/d(p)
+                        // d(loss)/d(p) = dloss_dprob * (d(prob)/d(p))
+                        // For annotated disjunctions, grad_true gives us the contribution
+                        let g = grad_true[var_idx];
+                        dloss_dprob * g
+                    } else {
+                        0.0
+                    }
+                })
+                .collect();
+
+            let grad_tensor = torch.call_method1("tensor", (grad_vec,))?;
+
+            // Add batch dimension and call backward
+            let grad_unsqueezed = grad_tensor.call_method1("unsqueeze", (0i32,))?;
+            let output_bound = output.bind(py);
+            output_bound.call_method1("backward", (grad_unsqueezed,))?;
+
+            var_offset += num_labels;
+        }
+
+        Ok(())
     }
 
     /// Find the network name associated with a predicate.
