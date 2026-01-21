@@ -10,7 +10,7 @@ use xlog_core::{MemoryBudget, ScalarType, Schema};
 use xlog_cuda::{CudaDevice, CudaKernelProvider, DlpackManagedTensor, GpuMemoryManager};
 use ::xlog_gpu::logic as gpu_logic;
 use xlog_logic::ast::ProbEngine;
-use xlog_neural::{NetworkConfig, NetworkRegistry};
+use xlog_neural::{NetworkConfig, NetworkRegistry, TensorMetadata, TensorSourceRegistry};
 use xlog_prob::exact::{ExactDdnnfProgram, ExactResultWithGrads, GpuConfig, QueryProbability};
 use xlog_prob::mc::{McEvalConfig, McProgram};
 
@@ -247,6 +247,7 @@ impl Program {
             output_provider: Arc::new(provider),
             network_registry: NetworkRegistry::new(),
             declared_networks,
+            tensor_sources: TensorSourceRegistry::new(),
         })
     }
 }
@@ -273,6 +274,8 @@ pub struct CompiledProgram {
     network_registry: NetworkRegistry,
     /// Names of neural networks declared in the program (from nn() declarations)
     declared_networks: HashSet<String>,
+    /// Registry for tensor data sources (images, embeddings, etc.)
+    tensor_sources: TensorSourceRegistry,
 }
 
 #[pymethods]
@@ -408,6 +411,77 @@ impl CompiledProgram {
     /// Set training mode for all registered networks.
     fn set_train_mode(&mut self, train: bool) {
         self.network_registry.set_train_mode(train);
+    }
+
+    // =========================================================================
+    // Tensor Source Management
+    // =========================================================================
+
+    /// Add a tensor source (e.g., training images, test images).
+    ///
+    /// The tensor should be a PyTorch tensor where the first dimension
+    /// is the number of samples. Neural predicates will index into this
+    /// tensor by sample index.
+    ///
+    /// The first source added automatically becomes the active source.
+    ///
+    /// # Arguments
+    /// * `name` - Name for this source (e.g., "train", "test")
+    /// * `tensor` - PyTorch tensor with shape [N, ...]
+    fn add_tensor_source(&mut self, py: Python<'_>, name: String, tensor: PyObject) -> PyResult<()> {
+        // Extract size from tensor.shape[0]
+        // In PyO3 0.21, use .bind(py) to get Bound<PyAny> for method calls
+        let shape_obj = tensor.getattr(py, "shape")?;
+        let shape_bound = shape_obj.bind(py);
+        let size: usize = shape_bound.get_item(0)?.extract()?;
+
+        // Extract full shape for metadata
+        let shape_tuple: Vec<usize> = shape_bound.extract()?;
+        let sample_shape = if shape_tuple.len() > 1 {
+            shape_tuple[1..].to_vec()
+        } else {
+            vec![]
+        };
+
+        // Extract dtype
+        let dtype_obj = tensor.getattr(py, "dtype")?;
+        let dtype_str = dtype_obj.bind(py).str()?.to_string();
+
+        let metadata = TensorMetadata::with_dtype(size, sample_shape, &dtype_str);
+        self.tensor_sources.add(&name, tensor, metadata);
+
+        Ok(())
+    }
+
+    /// Set the active tensor source.
+    ///
+    /// The active source is used when neural predicates are evaluated.
+    fn set_active_tensor_source(&mut self, name: String) -> PyResult<()> {
+        self.tensor_sources
+            .set_active(&name)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// Get the name of the currently active tensor source.
+    fn active_tensor_source(&self) -> Option<String> {
+        self.tensor_sources.active_name().map(|s| s.to_string())
+    }
+
+    /// Get the size (number of samples) of the active tensor source.
+    fn active_tensor_source_size(&self) -> PyResult<usize> {
+        self.tensor_sources
+            .active_size()
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// Get names of all tensor sources.
+    fn tensor_source_names(&self) -> Vec<String> {
+        self.tensor_sources.source_names()
+    }
+
+    /// Check if a tensor source exists.
+    fn has_tensor_source(&self, name: &str) -> bool {
+        self.tensor_sources.contains(name)
     }
 }
 

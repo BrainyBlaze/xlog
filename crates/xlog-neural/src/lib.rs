@@ -31,11 +31,13 @@ pub mod batch;
 pub mod bridge;
 pub mod handle;
 pub mod registry;
+pub mod tensor_source;
 
 pub use batch::{BatchCollector, BatchMapping, BatchResult, NeuralCall};
 pub use bridge::{ADProbability, CircuitLeaf, NeuralBridge, NeuralOutput};
 pub use handle::NetworkHandle;
 pub use registry::{NetworkConfig, NetworkRegistry};
+pub use tensor_source::{TensorMetadata, TensorSourceError, TensorSourceRegistry};
 
 /// Re-export pyo3 when the python feature is enabled
 #[cfg(feature = "python")]
