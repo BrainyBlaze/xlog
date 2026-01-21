@@ -153,7 +153,6 @@ class TestNLLLossWithRules:
         expected = -math.log(0.75)
         assert abs(loss - expected) < 0.01
 
-    @pytest.mark.skip(reason="Negation not yet supported in probabilistic programs")
     def test_nll_loss_negation(self):
         """Test NLL loss with negation."""
         program = xlog_gpu.Program.compile("""
