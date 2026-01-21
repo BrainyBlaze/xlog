@@ -658,6 +658,48 @@ impl CompiledProgram {
         Ok(())
     }
 
+    // =========================================================================
+    // Training Methods
+    // =========================================================================
+
+    /// Train for one epoch over the given queries.
+    ///
+    /// This method:
+    /// 1. Processes queries in batches
+    /// 2. For each batch: zero_grad, forward_backward for each query, optimizer_step
+    /// 3. Returns statistics for the epoch
+    ///
+    /// # Arguments
+    /// * `queries` - List of query strings to train on
+    /// * `batch_size` - Number of queries per batch (default: 32)
+    ///
+    /// # Returns
+    /// EpochStats with avg_loss, num_batches, total_queries
+    #[pyo3(signature = (queries, batch_size=32))]
+    fn train_epoch(&mut self, py: Python<'_>, queries: Vec<String>, batch_size: usize) -> PyResult<EpochStats> {
+        let mut history = TrainingHistory::new();
+        self.train_epoch_internal(py, &queries, batch_size, usize::MAX, &mut history)
+    }
+
+    /// Evaluate mean NLL loss over queries without updating parameters.
+    ///
+    /// Useful for validation/test set evaluation.
+    ///
+    /// # Arguments
+    /// * `queries` - List of query strings to evaluate
+    ///
+    /// # Returns
+    /// Mean NLL loss over all queries
+    fn evaluate_loss(&self, queries: Vec<String>) -> PyResult<f64> {
+        if queries.is_empty() {
+            return Ok(0.0);
+        }
+
+        let probs = self.evaluate_query_probabilities(&queries)?;
+        let total_loss: f64 = probs.iter().map(|&p| nll_loss_value(p)).sum();
+        Ok(total_loss / queries.len() as f64)
+    }
+
     /// Perform forward pass through neural network and backward pass for gradients.
     ///
     /// This is the core training method that:
@@ -734,6 +776,56 @@ impl CompiledProgram {
 }
 
 impl CompiledProgram {
+    /// Internal implementation of train_epoch that tracks batch losses.
+    pub(crate) fn train_epoch_internal(
+        &mut self,
+        py: Python<'_>,
+        queries: &[String],
+        batch_size: usize,
+        log_iter: usize,
+        history: &mut TrainingHistory,
+    ) -> PyResult<EpochStats> {
+        if queries.is_empty() {
+            return Ok(EpochStats {
+                avg_loss: 0.0,
+                num_batches: 0,
+                total_queries: 0,
+            });
+        }
+
+        let num_batches = (queries.len() + batch_size - 1) / batch_size;
+        let mut total_loss = 0.0;
+
+        for (batch_idx, batch) in queries.chunks(batch_size).enumerate() {
+            // Zero gradients at start of batch
+            self.zero_grad(py)?;
+
+            // Forward-backward for each query in batch
+            let mut batch_loss = 0.0;
+            for query in batch {
+                batch_loss += self.forward_backward(py, query)?;
+            }
+            batch_loss /= batch.len() as f64;
+
+            // Update parameters
+            self.optimizer_step(py)?;
+
+            total_loss += batch_loss;
+            history.add_batch(batch_loss);
+
+            // Log progress periodically
+            if log_iter < usize::MAX && (batch_idx + 1) % log_iter == 0 {
+                println!("  Batch {}/{}: loss={:.6}", batch_idx + 1, num_batches, batch_loss);
+            }
+        }
+
+        Ok(EpochStats {
+            avg_loss: total_loss / num_batches as f64,
+            num_batches,
+            total_queries: queries.len(),
+        })
+    }
+
     /// Parse a neural predicate query to extract network name, input index, and label.
     ///
     /// E.g., "pred(0, a)" -> ("net_name", 0, "a") where pred is defined by nn(net_name, ...) :: pred(...).
@@ -1340,6 +1432,104 @@ pub struct EvalResult {
     pub nonmonotone_iteration_limit_hits: Option<usize>,
 }
 
+// =========================================================================
+// Training Infrastructure
+// =========================================================================
+
+/// Statistics for a single training epoch.
+#[pyclass]
+#[derive(Clone)]
+pub struct EpochStats {
+    /// Average loss across all batches in the epoch
+    #[pyo3(get)]
+    pub avg_loss: f64,
+    /// Number of batches processed
+    #[pyo3(get)]
+    pub num_batches: usize,
+    /// Total number of queries processed
+    #[pyo3(get)]
+    pub total_queries: usize,
+}
+
+/// Training history tracking loss over epochs and batches.
+#[pyclass]
+#[derive(Clone)]
+pub struct TrainingHistory {
+    /// Loss at the end of each epoch
+    #[pyo3(get)]
+    pub epoch_losses: Vec<f64>,
+    /// Loss for each batch across all epochs
+    #[pyo3(get)]
+    pub batch_losses: Vec<f64>,
+}
+
+impl TrainingHistory {
+    fn new() -> Self {
+        Self {
+            epoch_losses: Vec::new(),
+            batch_losses: Vec::new(),
+        }
+    }
+
+    fn add_epoch(&mut self, loss: f64) {
+        self.epoch_losses.push(loss);
+    }
+
+    fn add_batch(&mut self, loss: f64) {
+        self.batch_losses.push(loss);
+    }
+}
+
+/// Train a program for multiple epochs.
+///
+/// This is the main training entry point that runs the full training loop:
+/// - For each epoch: shuffle queries (optional), process batches, record stats
+/// - Supports learning rate scheduling via scheduler_step() after each epoch
+///
+/// # Arguments
+/// * `program` - Compiled program with registered networks
+/// * `queries` - Training queries (e.g., ["addition(0, 1, 5)", "addition(2, 3, 7)"])
+/// * `epochs` - Number of training epochs (default: 10)
+/// * `batch_size` - Number of queries per batch (default: 32)
+/// * `log_iter` - Log progress every N batches (default: 100)
+/// * `shuffle` - Whether to shuffle queries each epoch (default: true)
+///
+/// # Returns
+/// TrainingHistory with epoch and batch losses
+#[pyfunction]
+#[pyo3(signature = (program, queries, epochs=10, batch_size=32, log_iter=100, shuffle=true))]
+pub fn train_model(
+    py: Python<'_>,
+    program: &mut CompiledProgram,
+    queries: Vec<String>,
+    epochs: usize,
+    batch_size: usize,
+    log_iter: usize,
+    shuffle: bool,
+) -> PyResult<TrainingHistory> {
+    use rand::seq::SliceRandom;
+    use rand::thread_rng;
+
+    let mut history = TrainingHistory::new();
+
+    for epoch in 0..epochs {
+        let mut epoch_queries = queries.clone();
+
+        if shuffle {
+            let mut rng = thread_rng();
+            epoch_queries.shuffle(&mut rng);
+        }
+
+        let stats = program.train_epoch_internal(py, &epoch_queries, batch_size, log_iter, &mut history)?;
+        history.add_epoch(stats.avg_loss);
+
+        // Print epoch progress (visible in Python output)
+        println!("Epoch {}/{}: avg_loss={:.6}", epoch + 1, epochs, stats.avg_loss);
+    }
+
+    Ok(history)
+}
+
 #[pymodule]
 fn xlog_gpu(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
@@ -1350,6 +1540,10 @@ fn xlog_gpu(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<LogicQueryResult>()?;
     m.add_class::<LogicEvalResult>()?;
     m.add_class::<EvalResult>()?;
+    // Training infrastructure
+    m.add_class::<EpochStats>()?;
+    m.add_class::<TrainingHistory>()?;
+    m.add_function(wrap_pyfunction!(train_model, m)?)?;
     m.add_function(wrap_pyfunction!(dlpack_roundtrip, m)?)?;
     Ok(())
 }

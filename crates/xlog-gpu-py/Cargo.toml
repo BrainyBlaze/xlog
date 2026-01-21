@@ -11,6 +11,7 @@ doctest = false
 [dependencies]
 pyo3 = { workspace = true }
 cudarc = { workspace = true }
+rand = "0.8"
 xlog-core = { path = "../xlog-core" }
 xlog-cuda = { path = "../xlog-cuda" }
 xlog-gpu = { path = "../xlog-gpu" }
