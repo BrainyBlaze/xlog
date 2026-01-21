@@ -193,6 +193,17 @@ pub struct Stratum {
     pub predicates: Vec<String>,
 }
 
+/// Result of stratification analysis for probabilistic inference
+#[derive(Debug, Clone)]
+pub struct StratificationResult {
+    /// SCCs in evaluation order (dependencies first)
+    pub sccs: Vec<Vec<String>>,
+    /// Indices of SCCs that have cycles through negation (non-monotone)
+    pub non_monotone_sccs: HashSet<usize>,
+    /// Stratum number for each predicate (if fully stratified)
+    pub strata: HashMap<String, usize>,
+}
+
 /// Perform stratification analysis
 pub fn stratify(program: &Program) -> Result<Vec<Stratum>> {
     let graph = build_dependency_graph(program);
@@ -256,6 +267,53 @@ pub fn stratify(program: &Program) -> Result<Vec<Stratum>> {
     }
 
     Ok(strata)
+}
+
+/// Analyze stratification for probabilistic inference
+/// Returns detailed information about SCCs and which ones are non-monotone
+pub fn analyze_stratification(program: &Program) -> StratificationResult {
+    let graph = build_dependency_graph(program);
+    let sccs = find_sccs(&graph);
+
+    let mut non_monotone_sccs: HashSet<usize> = HashSet::new();
+    for (i, scc) in sccs.iter().enumerate() {
+        if check_scc_for_negation_cycle(scc, &graph).is_some() {
+            non_monotone_sccs.insert(i);
+        }
+    }
+
+    // Compute strata for predicates in stratified SCCs
+    let mut strata: HashMap<String, usize> = HashMap::new();
+    let mut max_stratum = 0;
+
+    for (scc_idx, scc) in sccs.iter().enumerate() {
+        if non_monotone_sccs.contains(&scc_idx) {
+            continue; // Skip non-monotone SCCs for stratum assignment
+        }
+
+        let mut min_stratum = 0;
+        for pred in scc {
+            for edge in graph.outgoing(pred) {
+                if let Some(&dep_stratum) = strata.get(&edge.to) {
+                    let required = match edge.dep_type {
+                        DepType::Positive => dep_stratum,
+                        DepType::Negative | DepType::Aggregate => dep_stratum + 1,
+                    };
+                    min_stratum = min_stratum.max(required);
+                }
+            }
+        }
+        for pred in scc {
+            strata.insert(pred.clone(), min_stratum);
+        }
+        max_stratum = max_stratum.max(min_stratum);
+    }
+
+    StratificationResult {
+        sccs,
+        non_monotone_sccs,
+        strata,
+    }
 }
 
 /// Find SCCs for the lowering phase
@@ -435,5 +493,34 @@ mod tests {
         assert!(graph.predicates.contains("reach"));
         let reach_deps = graph.outgoing("reach");
         assert!(!reach_deps.is_empty());
+    }
+
+    #[test]
+    fn test_analyze_stratification_detects_non_monotone() {
+        let program = create_unstratifiable_program(); // p :- not q. q :- not p.
+        let result = analyze_stratification(&program);
+
+        assert!(!result.non_monotone_sccs.is_empty(), "Should detect non-monotone SCC");
+        // The SCC containing p and q should be marked as non-monotone
+        let has_non_monotone = result.sccs.iter().enumerate().any(|(i, scc)| {
+            result.non_monotone_sccs.contains(&i) &&
+            (scc.contains(&"p".to_string()) || scc.contains(&"q".to_string()))
+        });
+        assert!(has_non_monotone, "SCC with p/q should be non-monotone");
+    }
+
+    #[test]
+    fn test_analyze_stratification_stratified_program() {
+        let program = create_isolated_program(); // isolated(X) :- node(X), not edge(X, Y).
+        let result = analyze_stratification(&program);
+
+        assert!(result.non_monotone_sccs.is_empty(), "Stratified program has no non-monotone SCCs");
+        assert!(result.strata.contains_key("isolated"), "isolated should have a stratum");
+        assert!(result.strata.contains_key("edge"), "edge should have a stratum");
+
+        // isolated depends negatively on edge, so isolated.stratum > edge.stratum
+        let isolated_stratum = result.strata.get("isolated").unwrap();
+        let edge_stratum = result.strata.get("edge").unwrap();
+        assert!(isolated_stratum > edge_stratum, "isolated should be in higher stratum than edge");
     }
 }
