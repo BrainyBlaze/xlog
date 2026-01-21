@@ -8,3 +8,4 @@ pub mod provenance;
 pub mod exact;
 pub mod gpu;
 pub mod mc;
+pub mod wfs;
