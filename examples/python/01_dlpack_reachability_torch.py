@@ -1,6 +1,6 @@
 import torch
 
-from xlog_gpu import LogicProgram
+from pyxlog import LogicProgram
 
 
 def main() -> None:

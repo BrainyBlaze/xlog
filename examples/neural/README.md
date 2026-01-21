@@ -44,7 +44,7 @@ addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
 queries = ["addition(0, 1, 7)", "addition(2, 3, 5)", ...]
 
 # NLL loss trains the network to maximize P(correct_sum)
-history = xlog_gpu.train_model(program, queries, epochs=50, batch_size=32)
+history = pyxlog.train_model(program, queries, epochs=50, batch_size=32)
 ```
 
 ## Planned Examples
@@ -73,15 +73,15 @@ The following neural-symbolic examples are planned for v0.4.0-beta:
 - Python 3.8+
 - PyTorch 2.0+
 - torchvision (for MNIST)
-- xlog_gpu (built with `maturin develop --release`)
+- pyxlog (built with `maturin develop --release`)
 
 ## API Reference
 
 ```python
-import xlog_gpu
+import pyxlog
 
 # Compile program with neural predicates
-program = xlog_gpu.Program.compile("""
+program = pyxlog.Program.compile("""
     nn(net_name, [X], Y, [0,1,...,9]) :: digit(X, Y).
     addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
 """)
@@ -99,7 +99,7 @@ prob, grads = program.forward_backward("addition(0, 1, 7)")
 avg_loss = program.train_epoch(queries, batch_size=32)
 
 # Full training loop
-history = xlog_gpu.train_model(
+history = pyxlog.train_model(
     program,
     queries,
     epochs=50,

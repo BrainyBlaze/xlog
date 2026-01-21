@@ -104,7 +104,7 @@ First alpha release of the neural-symbolic integration layer, enabling different
 | Handle | `xlog-neural/src/handle.rs` | `NetworkHandle` with PyO3 objects |
 | Bridge | `xlog-neural/src/bridge.rs` | `NeuralBridge`, `NeuralOutput` |
 | Tensor | `xlog-neural/src/tensor_source.rs` | `TensorSourceRegistry` |
-| Python | `xlog-gpu-py/src/lib.rs` | Full training API |
+| Python | `pyxlog/src/lib.rs` | Full training API |
 | PIR | `pir.rs` | `NegLit` variant |
 | WFS | `wfs.rs` | Well-Founded Semantics (1,461 lines) |
 | Exact | `exact.rs` | `random_var_indices()`, `evaluate_gpu_with_grads_weights()` |
@@ -112,11 +112,11 @@ First alpha release of the neural-symbolic integration layer, enabling different
 ### Example: MNIST Addition Training
 
 ```python
-import xlog_gpu
+import pyxlog
 import torch
 
 # Define neural predicate program
-program = xlog_gpu.Program.compile("""
+program = pyxlog.Program.compile("""
     nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
     addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
 """)
@@ -131,7 +131,7 @@ program.add_tensor_source("train", train_images)
 
 # Train on addition queries (no digit labels!)
 queries = ["addition(0, 1, 7)", "addition(2, 3, 5)", ...]
-history = xlog_gpu.train_model(program, queries, epochs=50, batch_size=32)
+history = pyxlog.train_model(program, queries, epochs=50, batch_size=32)
 ```
 
 ---
@@ -246,7 +246,7 @@ Phase 4 probabilistic logic programming (`xlog-prob`) merged into `main`; Python
 - `xlog-prob`: P3 Monte Carlo engine (`prob_engine=mc`) with GPU sampling, deterministic non-monotone SCC semantics, and uncertainty metadata.
 - New CUDA kernels: `kernels/circuit.ptx` (XGCF forward/backward) and `kernels/mc_sample.ptx` (MC sampling).
 - New examples: `examples/prob/` (probabilistic `.xlog`) and `examples/python/` (DLPack bindings).
-- `xlog-gpu` + `xlog-gpu-py`: `xlog_gpu` Python module (PyO3) with DLPack-first I/O for deterministic and probabilistic evaluation.
+- `xlog-gpu` + `pyxlog`: `pyxlog` Python module (PyO3) with DLPack-first I/O for deterministic and probabilistic evaluation.
 - New/updated docs: `docs/architecture/xlog-prob.md`, `docs/VALIDATION_REPORT.md`.
 
 ### Validation

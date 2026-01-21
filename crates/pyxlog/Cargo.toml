@@ -1,9 +1,10 @@
 [package]
-name = "xlog-gpu-py"
+name = "pyxlog"
 version.workspace = true
 edition.workspace = true
 
 [lib]
+name = "pyxlog"
 crate-type = ["cdylib"]
 test = false
 doctest = false

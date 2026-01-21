@@ -10,7 +10,7 @@ import pytest
 import time
 
 torch = pytest.importorskip("torch")
-xlog_gpu = pytest.importorskip("xlog_gpu")
+pyxlog = pytest.importorskip("pyxlog")
 
 
 class SimpleNet(torch.nn.Module):
@@ -34,7 +34,7 @@ class TestCircuitCache:
 nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
 addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
 """
-        program = xlog_gpu.Program.compile(source)
+        program = pyxlog.Program.compile(source)
 
         # Register network
         net = SimpleNet(10)
@@ -71,7 +71,7 @@ addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
 nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
 addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
 """
-        program = xlog_gpu.Program.compile(source)
+        program = pyxlog.Program.compile(source)
 
         net = SimpleNet(10)
         optimizer = torch.optim.Adam(net.parameters(), lr=0.001)
@@ -102,7 +102,7 @@ addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
         # Use deterministic initialization
         torch.manual_seed(42)
 
-        program = xlog_gpu.Program.compile(source)
+        program = pyxlog.Program.compile(source)
 
         net = SimpleNet(10)
         optimizer = torch.optim.Adam(net.parameters(), lr=0.001)
@@ -134,7 +134,7 @@ class TestCachePerformance:
 nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
 addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
 """
-        program = xlog_gpu.Program.compile(source)
+        program = pyxlog.Program.compile(source)
 
         net = SimpleNet(10)
         optimizer = torch.optim.Adam(net.parameters(), lr=0.001)

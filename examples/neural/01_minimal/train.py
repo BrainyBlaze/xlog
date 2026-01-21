@@ -27,7 +27,7 @@ Example:
 import argparse
 import torch
 import torch.nn as nn
-import xlog_gpu
+import pyxlog
 
 
 class MNISTNet(nn.Module):
@@ -71,7 +71,7 @@ def create_program():
     Returns:
         CompiledProgram ready for network registration
     """
-    return xlog_gpu.Program.compile("""
+    return pyxlog.Program.compile("""
         // Neural predicate: classify digit images
         // nn(network, [inputs], output, [labels]) :: predicate(args).
         nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
@@ -205,7 +205,7 @@ def main():
     print(f"  Device: {device}")
     print()
 
-    history = xlog_gpu.train_model(
+    history = pyxlog.train_model(
         program,
         queries,
         epochs=args.epochs,

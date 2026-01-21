@@ -48,7 +48,7 @@ The `xlog` CLI binary will be at `target/release/xlog`.
 ### Python Package
 
 ```bash
-cd crates/xlog-gpu-py
+cd crates/pyxlog
 pip install maturin
 maturin develop --release
 ```
@@ -127,7 +127,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### Run with Python
 
 ```python
-import xlog_gpu
+import pyxlog
 
 source = """
 pred edge(u32, u32).
@@ -141,7 +141,7 @@ reach(X, Z) :- reach(X, Y), edge(Y, Z).
 ?- reach(1, N).
 """
 
-program = xlog_gpu.LogicProgram.compile(source)
+program = pyxlog.LogicProgram.compile(source)
 results = program.evaluate()
 
 # Results are DLPack tensors (zero-copy GPU data)
@@ -233,7 +233,7 @@ addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
 Train neural networks using only logical constraints — no direct labels required:
 
 ```python
-import xlog_gpu
+import pyxlog
 import torch
 import torch.nn as nn
 
@@ -257,7 +257,7 @@ class MNISTNet(nn.Module):
         return torch.softmax(self.fc3(x), dim=-1)
 
 # Compile the neural-symbolic program
-program = xlog_gpu.Program.compile("""
+program = pyxlog.Program.compile("""
     nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
     addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
 """)
@@ -278,7 +278,7 @@ for i in range(0, len(train_labels), 2):
     queries.append(f"addition({i}, {i+1}, {expected_sum})")
 
 # Train the model
-history = xlog_gpu.train_model(
+history = pyxlog.train_model(
     program,
     queries,
     epochs=50,
@@ -309,7 +309,7 @@ prob, grads = program.forward_backward("addition(0, 1, 7)")
 avg_loss = program.train_epoch(queries, batch_size=32)
 
 # Full training loop with logging
-history = xlog_gpu.train_model(
+history = pyxlog.train_model(
     program,
     queries,
     epochs=50,
@@ -534,7 +534,7 @@ xlog/
 │   ├── xlog-neural/     # Neural-symbolic integration (v0.4.0)
 │   ├── xlog-solve/      # Solver services (SAT/MaxSAT)
 │   ├── xlog-gpu/        # High-level Rust API
-│   ├── xlog-gpu-py/     # Python bindings + training API
+│   ├── pyxlog/          # Python bindings + training API
 │   ├── xlog-cli/        # Command-line interface
 │   └── xlog-cuda-tests/ # CUDA certification suite
 ├── kernels/             # CUDA kernel sources (.cu)

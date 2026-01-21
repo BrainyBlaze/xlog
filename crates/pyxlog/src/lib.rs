@@ -1924,7 +1924,7 @@ pub fn train_model(
 }
 
 #[pymodule]
-fn xlog_gpu(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn pyxlog(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_class::<Program>()?;
     m.add_class::<CompiledProgram>()?;

@@ -9,9 +9,9 @@ Run with: pytest python/tests/test_loss.py -v
 import pytest
 import math
 
-# Skip all tests if xlog_gpu or torch not available
+# Skip all tests if pyxlog or torch not available
 torch = pytest.importorskip("torch")
-xlog_gpu = pytest.importorskip("xlog_gpu")
+pyxlog = pytest.importorskip("pyxlog")
 
 
 class TestNLLLossBasic:
@@ -19,7 +19,7 @@ class TestNLLLossBasic:
 
     def test_nll_loss_single_query(self):
         """Test NLL loss: -log(P(query))"""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             0.7::a().
         """)
 
@@ -31,7 +31,7 @@ class TestNLLLossBasic:
 
     def test_nll_loss_certain_fact(self):
         """Test NLL loss for certain facts (P=1.0, loss=0)."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             fact(x).
         """)
 
@@ -42,7 +42,7 @@ class TestNLLLossBasic:
 
     def test_nll_loss_low_probability(self):
         """Test NLL loss for low probability (high loss)."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             0.1::rare().
         """)
 
@@ -54,7 +54,7 @@ class TestNLLLossBasic:
 
     def test_nll_loss_impossible_query(self):
         """Test NLL loss for impossible query (should be clamped)."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             0.5::a().
             b() :- a(), c().
         """)
@@ -70,7 +70,7 @@ class TestNLLLossBatch:
 
     def test_nll_loss_batch_sum(self):
         """Test that batch loss is sum of individual losses."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             0.7::a().
             0.3::b().
         """)
@@ -87,7 +87,7 @@ class TestNLLLossBatch:
 
     def test_nll_loss_batch_path_queries(self):
         """Test NLL loss over path queries."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             0.8::edge(1,2).
             0.6::edge(2,3).
             path(X,Y) :- edge(X,Y).
@@ -102,7 +102,7 @@ class TestNLLLossBatch:
 
     def test_nll_loss_batch_empty(self):
         """Test NLL loss with empty batch returns 0."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             0.5::a().
         """)
 
@@ -111,7 +111,7 @@ class TestNLLLossBatch:
 
     def test_nll_loss_batch_single(self):
         """Test batch with single query equals single query loss."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             0.6::fact().
         """)
 
@@ -126,7 +126,7 @@ class TestNLLLossWithRules:
 
     def test_nll_loss_conjunction(self):
         """Test NLL loss for conjunction of probabilistic facts."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             0.8::a().
             0.9::b().
             both() :- a(), b().
@@ -140,7 +140,7 @@ class TestNLLLossWithRules:
 
     def test_nll_loss_disjunction(self):
         """Test NLL loss for disjunction via multiple rules."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             0.5::a().
             0.5::b().
             either() :- a().
@@ -155,7 +155,7 @@ class TestNLLLossWithRules:
 
     def test_nll_loss_negation(self):
         """Test NLL loss with negation."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             0.3::rain().
             dry() :- not rain().
         """)
@@ -172,7 +172,7 @@ class TestNLLLossNeuralIntegration:
 
     def test_nll_loss_with_neural_predicate_declared(self):
         """Test program with neural predicate can compute loss."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(digit_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
             0.9::correct(0).
         """)
@@ -188,7 +188,7 @@ class TestNLLLossMean:
 
     def test_nll_loss_mean(self):
         """Test mean NLL loss computation."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             0.7::a().
             0.3::b().
             0.5::c().
@@ -207,7 +207,7 @@ class TestNLLLossMean:
 
     def test_nll_loss_mean_empty_raises(self):
         """Test that mean NLL loss with empty batch raises error."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             0.5::a().
         """)
 
@@ -220,7 +220,7 @@ class TestNLLLossGradient:
 
     def test_nll_loss_tensor_output(self):
         """Test NLL loss can return PyTorch tensor for gradient computation."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             0.7::a().
         """)
 
@@ -233,7 +233,7 @@ class TestNLLLossGradient:
 
     def test_nll_loss_batch_tensor(self):
         """Test batch NLL loss returns tensor."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             0.7::a().
             0.3::b().
         """)

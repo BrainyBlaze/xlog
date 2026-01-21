@@ -10,9 +10,9 @@ Run with: pytest python/tests/test_training.py -v
 
 import pytest
 
-# Skip all tests if xlog_gpu or torch not available
+# Skip all tests if pyxlog or torch not available
 torch = pytest.importorskip("torch")
-xlog_gpu = pytest.importorskip("xlog_gpu")
+pyxlog = pytest.importorskip("pyxlog")
 
 
 class SimpleNet(torch.nn.Module):
@@ -31,7 +31,7 @@ class TestTrainEpoch:
 
     def test_train_epoch_basic(self):
         """Test basic train_epoch functionality."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(test_net, [X], Y, [a, b, c]) :: pred(X, Y).
         """)
 
@@ -55,7 +55,7 @@ class TestTrainEpoch:
 
     def test_train_epoch_updates_parameters(self):
         """Test that train_epoch actually updates network parameters."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(test_net, [X], Y, [a, b, c]) :: pred(X, Y).
         """)
 
@@ -76,7 +76,7 @@ class TestTrainEpoch:
 
     def test_train_epoch_batch_size_larger_than_queries(self):
         """Test train_epoch when batch_size > number of queries."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(test_net, [X], Y, [a, b, c]) :: pred(X, Y).
         """)
 
@@ -96,7 +96,7 @@ class TestTrainEpoch:
 
     def test_train_epoch_single_query(self):
         """Test train_epoch with a single query."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(test_net, [X], Y, [a, b, c]) :: pred(X, Y).
         """)
 
@@ -118,7 +118,7 @@ class TestTrainModel:
 
     def test_train_model_basic(self):
         """Test basic train_model functionality."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(test_net, [X], Y, [a, b, c]) :: pred(X, Y).
         """)
 
@@ -131,7 +131,7 @@ class TestTrainModel:
 
         queries = [f"pred({i}, a)" for i in range(10)]
 
-        history = xlog_gpu.train_model(
+        history = pyxlog.train_model(
             program,
             queries,
             epochs=3,
@@ -146,7 +146,7 @@ class TestTrainModel:
 
     def test_train_model_reduces_loss(self):
         """Test that train_model reduces loss over epochs."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(test_net, [X], Y, [a, b, c]) :: pred(X, Y).
         """)
 
@@ -160,7 +160,7 @@ class TestTrainModel:
 
         queries = [f"pred({i}, a)" for i in range(10)]
 
-        history = xlog_gpu.train_model(
+        history = pyxlog.train_model(
             program,
             queries,
             epochs=10,
@@ -173,7 +173,7 @@ class TestTrainModel:
 
     def test_train_model_shuffle(self):
         """Test train_model with shuffle enabled."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(test_net, [X], Y, [a, b, c]) :: pred(X, Y).
         """)
 
@@ -187,7 +187,7 @@ class TestTrainModel:
         queries = [f"pred({i}, a)" for i in range(10)]
 
         # Should work with shuffle=True (default)
-        history = xlog_gpu.train_model(
+        history = pyxlog.train_model(
             program,
             queries,
             epochs=2,
@@ -203,7 +203,7 @@ class TestEvaluateLoss:
 
     def test_evaluate_loss_basic(self):
         """Test basic evaluate_loss functionality."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(test_net, [X], Y, [a, b, c]) :: pred(X, Y).
         """)
 
@@ -223,7 +223,7 @@ class TestEvaluateLoss:
 
     def test_evaluate_loss_consistent_with_nll_loss(self):
         """Test that evaluate_loss is consistent with nll_loss_batch."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             0.7::a().
             0.3::b().
         """)
@@ -243,7 +243,7 @@ class TestTrainingWithScheduler:
 
     def test_train_with_scheduler(self):
         """Test training with a learning rate scheduler."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(test_net, [X], Y, [a, b, c]) :: pred(X, Y).
         """)
 
@@ -276,7 +276,7 @@ class TestTrainingMultipleNetworks:
     def test_train_multiple_networks(self):
         """Test training with multiple networks updates them when used."""
         # Use network names that match predicate patterns for proper routing
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(test_net, [X], Y, [0, 1]) :: pred(X, Y).
         """)
 
@@ -301,7 +301,7 @@ class TestTrainingEdgeCases:
 
     def test_train_empty_queries(self):
         """Test training with empty query list."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(test_net, [X], Y, [a, b, c]) :: pred(X, Y).
         """)
 
@@ -319,7 +319,7 @@ class TestTrainingEdgeCases:
 
     def test_train_different_labels(self):
         """Test training with different target labels."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(test_net, [X], Y, [a, b, c]) :: pred(X, Y).
         """)
 

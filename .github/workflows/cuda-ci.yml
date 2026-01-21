@@ -25,16 +25,16 @@ jobs:
       - name: Install maturin
         run: python -m pip install --upgrade pip maturin
       - name: Build wheel
-        working-directory: crates/xlog-gpu-py
+        working-directory: crates/pyxlog
         run: maturin build --release --out dist
       - name: Install wheel
-        working-directory: crates/xlog-gpu-py
+        working-directory: crates/pyxlog
         run: python -m pip install --force-reinstall dist/*.whl
       - name: Smoke test import + evaluate
         run: |
           python - <<'PY'
-          import xlog_gpu
-          print("xlog_gpu version:", xlog_gpu.__version__)
+          import pyxlog
+          print("pyxlog version:", pyxlog.__version__)
 
           logic_src = r"""
           pred edge(i64, i64).
@@ -49,7 +49,7 @@ jobs:
           ?- reach(X, Y).
           """.strip()
 
-          logic = xlog_gpu.LogicProgram.compile(logic_src, device=0, memory_mb=1024)
+          logic = pyxlog.LogicProgram.compile(logic_src, device=0, memory_mb=1024)
           logic_res = logic.evaluate()
           assert len(logic_res.queries) == 1
 
@@ -63,7 +63,7 @@ jobs:
           query(sprinkler()).
           """.strip()
 
-          prob = xlog_gpu.Program.compile(prob_src, device=0, memory_mb=1024)
+          prob = pyxlog.Program.compile(prob_src, device=0, memory_mb=1024)
           prob_res = prob.evaluate(return_grads=False)
           assert len(prob_res.atoms) == 2
 
@@ -80,7 +80,7 @@ jobs:
           query(flip()).
           """.strip()
 
-          mc = xlog_gpu.Program.compile(mc_src, device=0, memory_mb=1024)
+          mc = pyxlog.Program.compile(mc_src, device=0, memory_mb=1024)
           mc_res = mc.evaluate(return_grads=False, samples=20000, seed=123, confidence=0.95, max_nonmonotone_iterations=256)
           assert len(mc_res.atoms) == 2
           assert mc_res.approx is True

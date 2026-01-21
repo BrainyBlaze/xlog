@@ -51,7 +51,7 @@ Examples live under `examples/xlog/`, grouped by intent:
 
 Phase 4 examples live under:
 - `examples/prob/`: probabilistic `.xlog` programs (prob facts, AD, evidence/query, and `prob_engine=mc`)
-- `examples/python/`: Python scripts exercising `xlog_gpu` via DLPack (Torch optional)
+- `examples/python/`: Python scripts exercising `pyxlog` via DLPack (Torch optional)
 
 Phase 5 (v0.4.0-alpha) neural-symbolic examples live under:
 - `examples/neural/`: Neural-symbolic training examples

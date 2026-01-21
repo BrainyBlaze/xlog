@@ -412,11 +412,11 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 
 ---
 
-## Python Bindings (`xlog-gpu-py`)
+## Python Bindings (`pyxlog`)
 
 ### Implemented ✅
 
-- [x] PyO3-based extension module (`xlog_gpu`)
+- [x] PyO3-based extension module (`pyxlog`)
 - [x] DLPack capsule input/output for GPU tensor interchange
 - [x] `Program.compile()` for probabilistic programs
 - [x] `LogicProgram.compile()` for deterministic programs

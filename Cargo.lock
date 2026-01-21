@@ -1378,6 +1378,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "pyxlog"
+version = "0.3.2"
+dependencies = [
+ "cudarc",
+ "pyo3",
+ "rand 0.8.5",
+ "xlog-core",
+ "xlog-cuda",
+ "xlog-gpu",
+ "xlog-logic",
+ "xlog-neural",
+ "xlog-prob",
+]
+
+[[package]]
 name = "quick-error"
 version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2134,21 +2149,6 @@ dependencies = [
  "xlog-ir",
  "xlog-logic",
  "xlog-runtime",
-]
-
-[[package]]
-name = "xlog-gpu-py"
-version = "0.3.2"
-dependencies = [
- "cudarc",
- "pyo3",
- "rand 0.8.5",
- "xlog-core",
- "xlog-cuda",
- "xlog-gpu",
- "xlog-logic",
- "xlog-neural",
- "xlog-prob",
 ]
 
 [[package]]

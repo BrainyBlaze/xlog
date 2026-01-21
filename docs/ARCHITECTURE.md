@@ -310,7 +310,7 @@ xlog/
 │   ├── xlog-solve/      # Solver services (SAT/MaxSAT)
 │   ├── xlog-gpu/        # High-level GPU API (Rust)
 │   ├── xlog-cli/        # CLI binary (deterministic + probabilistic execution)
-│   ├── xlog-gpu-py/     # Python module (PyO3 + DLPack + training API)
+│   ├── pyxlog/     # Python module (PyO3 + DLPack + training API)
 │   └── xlog-cuda-tests/ # CUDA/PTX certification suite (not published)
 ├── kernels/             # CUDA source files (.cu) + embedded PTX (.ptx)
 ├── examples/
@@ -328,7 +328,7 @@ xlog-core  <──────────────────────�
 
 xlog-prob ────────────────> xlog-logic + xlog-cuda (+ xlog-core)
 xlog-gpu  ────────────────> xlog-logic + xlog-runtime + xlog-cuda
-xlog-gpu-py ──────────────> xlog-gpu + xlog-prob (+ xlog-cuda)
+pyxlog ──────────────> xlog-gpu + xlog-prob (+ xlog-cuda)
 xlog-cli  ────────────────> xlog-gpu + xlog-prob (+ xlog-cuda)
 
 xlog-solve ───────────────┬──────────────> xlog-cuda
@@ -352,7 +352,7 @@ xlog-cuda-tests ─────────────────────�
 | `xlog-solve` | Solver services (Continuous Local Search SAT/MaxSAT) |
 | `xlog-gpu` | High-level GPU API: deterministic execution + input/output buffers for integration layers |
 | `xlog-cli` | `xlog` CLI for deterministic and probabilistic execution with Arrow IPC I/O |
-| `xlog-gpu-py` | PyO3 extension (`xlog_gpu` Python module) exposing DLPack-first deterministic + probabilistic evaluation + neural-symbolic training API |
+| `pyxlog` | PyO3 extension (`pyxlog` Python module) exposing DLPack-first deterministic + probabilistic evaluation + neural-symbolic training API |
 | `xlog-cuda-tests` | CUDA/PTX certification suite (release gating; `publish = false`) |
 
 ---
@@ -990,7 +990,7 @@ println!("Reachable pairs: {} rows", reach.num_rows());
 ### High-Level API (xlog-gpu)
 
 ```rust
-use xlog_gpu::LogicProgram;
+use pyxlog::LogicProgram;
 
 let program = LogicProgram::compile(source)?;
 let results = program.run()?;
@@ -1022,10 +1022,10 @@ xlog run program.xlog --output arrow --output-dir ./results  # Arrow IPC files
 ### Python API
 
 ```python
-import xlog_gpu
+import pyxlog
 
 # Deterministic execution
-program = xlog_gpu.LogicProgram.compile(source)
+program = pyxlog.LogicProgram.compile(source)
 results = program.evaluate()
 
 # Results are DLPack capsules (zero-copy GPU tensors)
@@ -1035,12 +1035,12 @@ for name, capsule in results.items():
     print(f"{name}: {tensor.shape}")
 
 # Probabilistic execution
-prob_program = xlog_gpu.Program.compile(source, prob_engine="exact_ddnnf")
+prob_program = pyxlog.Program.compile(source, prob_engine="exact_ddnnf")
 prob_results = prob_program.evaluate()
 print(f"P(query) = {prob_results.prob}")
 
 # Neural-symbolic training (v0.4.0-alpha)
-program = xlog_gpu.Program.compile("""
+program = pyxlog.Program.compile("""
     nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
     addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
 """)
@@ -1052,7 +1052,7 @@ program.register_network("mnist_net", model, optimizer)
 program.add_tensor_source("train", images_tensor)
 
 # Train on addition queries
-history = xlog_gpu.train_model(program, queries, epochs=50, batch_size=32)
+history = pyxlog.train_model(program, queries, epochs=50, batch_size=32)
 print(f"Final loss: {history.epoch_losses[-1]}")
 ```
 
@@ -1267,4 +1267,4 @@ cargo test -p xlog-cuda-tests --test certification_suite --release -- --nocaptur
 | [Data Interoperability](architecture/cudf-interop.md) | Arrow IPC and DLPack integration |
 | [CUDA Certification](architecture/cuda-certification.md) | PTX kernel test suite (140 tests, 24 categories) |
 | [CLI Reference](architecture/cli-reference.md) | `xlog run` and `xlog prob` commands |
-| [Python Bindings](architecture/python-bindings.md) | PyO3 + DLPack API (`xlog_gpu` module) |
+| [Python Bindings](architecture/python-bindings.md) | PyO3 + DLPack API (`pyxlog` module) |
