@@ -256,17 +256,31 @@ query(flip()).
         # P(p) should also be close to 0.5 (true when flip is true)
         assert abs(p_prob - 0.5) < 0.05
 
-    def test_non_monotone_requires_mc(self):
-        """Non-monotone programs with exact engine should error."""
+    def test_non_monotone_wfs_returns_zero(self):
+        """Non-monotone programs with exact engine return 0 via WFS."""
         source = """
 p() :- not q().
 q() :- not p().
 query(p()).
 """
 
-        # Non-monotone programs should raise an error with exact engine
-        with pytest.raises(RuntimeError, match="Non-monotone recursion detected"):
-            xlog_gpu.Program.compile(source)
+        # Non-monotone programs are now handled by WFS
+        # Atoms in a cycle are undefined and return probability 0
+        program = xlog_gpu.Program.compile(source)
+        result = program.evaluate()
+
+        probs = torch.from_dlpack(result.prob)
+
+        # Find p() probability
+        p_prob = None
+        for i, atom in enumerate(result.atoms):
+            if atom == "p()":
+                p_prob = probs[i].item()
+                break
+
+        # WFS: p and q are both undefined (in cycle), so probability is 0
+        assert p_prob is not None, "p() not found in result atoms"
+        assert p_prob == 0.0, f"Expected 0.0 for undefined WFS atom, got {p_prob}"
 
 
 class TestNegationGradients:
