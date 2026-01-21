@@ -113,12 +113,18 @@ pub fn encode_cnf(pir: &PirGraph, roots: &[PirNodeId]) -> Result<CnfEncoding> {
         })?;
 
         let var_id = match node {
-            PirNode::Lit { leaf } | PirNode::NegLit { leaf } => *leaf_var.get(leaf).ok_or_else(|| {
+            PirNode::Lit { leaf } => *leaf_var.get(leaf).ok_or_else(|| {
                 XlogError::Compilation(format!(
                     "Missing CNF var for PIR leaf {:?} referenced by node {:?}",
                     leaf, node_id
                 ))
             })?,
+            PirNode::NegLit { .. } => {
+                // NegLit gets its own variable, which will be constrained to !leaf_var
+                let v = next_var;
+                next_var += 1;
+                v
+            }
             _ => {
                 let v = next_var;
                 next_var += 1;
@@ -151,7 +157,19 @@ pub fn encode_cnf(pir: &PirGraph, roots: &[PirNodeId]) -> Result<CnfEncoding> {
             match node {
                 PirNode::Const(true) => clauses.push(vec![v]),
                 PirNode::Const(false) => clauses.push(vec![-v]),
-                PirNode::Lit { .. } | PirNode::NegLit { .. } => {}
+                PirNode::Lit { .. } => {}
+                PirNode::NegLit { leaf } => {
+                    // NegLit uses opposite polarity: node_var <-> !leaf_var
+                    let leaf_v = *leaf_var.get(leaf).ok_or_else(|| {
+                        XlogError::Compilation(format!(
+                            "Missing CNF var for NegLit leaf {:?} at node {:?}",
+                            leaf, node_id
+                        ))
+                    })? as i32;
+                    // v <-> !leaf_v  means:  (v | leaf_v) & (!v | !leaf_v)
+                    clauses.push(vec![v, leaf_v]); // v=false -> leaf_v=true (contrapositive: !leaf_v -> v)
+                    clauses.push(vec![-v, -leaf_v]); // v=true -> leaf_v=false
+                }
                 PirNode::And { children } => {
                     if children.is_empty() {
                         clauses.push(vec![v]);
@@ -388,5 +406,35 @@ mod tests {
 
         assert!(dimacs.contains("\np cnf "));
         assert!(dimacs.lines().any(|l| l.ends_with('0')));
+    }
+
+    #[test]
+    fn test_tseitin_neg_lit_uses_negated_polarity() {
+        let mut pir = PirGraph::new();
+        let a = pir.neg_lit(LeafId::new(0)); // NegLit instead of Lit
+        let root = pir.or(vec![a]);
+
+        let encoding = encode_cnf(&pir, &[root]).unwrap();
+        let var_root = *encoding.node_var.get(&root).unwrap() as i32;
+        let var_a = *encoding.leaf_var.get(&LeafId::new(0)).unwrap() as i32;
+
+        // When NegLit node is true, the underlying leaf var should be FALSE
+        // (because NegLit represents "not leaf")
+        // So if root is true and NegLit(a) makes it true, leaf a must be false
+        assert!(
+            is_sat_with_unit_clauses(&encoding.cnf, &[var_root, -var_a]),
+            "root=true with leaf=false should be SAT"
+        );
+
+        // If leaf is true, then NegLit(leaf) is false, so root (which is Or of NegLit) should be false
+        // Actually wait - the Or node can be true or false. Let's think more carefully.
+        //
+        // The CNF encodes: root <-> Or(neg_lit_node)
+        //                  neg_lit_node <-> !leaf
+        // So: root=true requires neg_lit_node=true requires leaf=false
+        assert!(
+            !is_sat_with_unit_clauses(&encoding.cnf, &[var_root, var_a]),
+            "root=true with leaf=true should be UNSAT (NegLit of true leaf is false)"
+        );
     }
 }
