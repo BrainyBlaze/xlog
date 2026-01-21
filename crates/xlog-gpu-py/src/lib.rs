@@ -292,9 +292,11 @@ struct CachedCircuit {
 }
 
 /// Maps a network output to a circuit variable.
+#[derive(Clone)]
 struct WeightSlot {
-    /// Input index in the query (e.g., 0 or 1 for addition(0, 1, 7))
-    input_idx: usize,
+    /// Position in network_outputs array (0 = first input, 1 = second input, etc.)
+    /// This is NOT the actual input index from the query - it's the logical position.
+    input_position: usize,
     /// Label index (0-9 for 10-class classification)
     label_idx: usize,
     /// Circuit variable index (1-indexed, as per DIMACS CNF convention)
@@ -971,8 +973,8 @@ impl CompiledProgram {
         // Generate cache key
         let cache_key = self.generate_cache_key(&pred_name, input_indices.len(), num_labels);
 
-        // Check cache and evaluate
-        let (prob, grad_true, grad_false) = if let Some(cached) = self.circuit_cache.get(&cache_key) {
+        // Check cache and evaluate - returns (prob, grad_true, grad_false, weight_slots)
+        let (prob, grad_true, grad_false, weight_slots) = if let Some(cached) = self.circuit_cache.get(&cache_key) {
             // CACHE HIT: Update weights and evaluate existing circuit
             let weights = self.update_circuit_weights(cached, &network_outputs);
 
@@ -985,7 +987,7 @@ impl CompiledProgram {
             }
 
             let qg = &result.query_grads[0];
-            (qg.prob, qg.grad_true.clone(), qg.grad_false.clone())
+            (qg.prob, qg.grad_true.clone(), qg.grad_false.clone(), cached.weight_slots.clone())
         } else {
             // CACHE MISS: Compile new circuit and cache it
             let (program, weight_slots) =
@@ -1007,11 +1009,11 @@ impl CompiledProgram {
             // Cache the circuit for future use
             let cached = CachedCircuit {
                 program,
-                weight_slots,
+                weight_slots: weight_slots.clone(),
             };
             self.circuit_cache.insert(cache_key, cached);
 
-            (prob, grad_true, grad_false)
+            (prob, grad_true, grad_false, weight_slots)
         };
 
         let loss = nll_loss_value(prob);
@@ -1019,10 +1021,11 @@ impl CompiledProgram {
         // Compute d(loss)/d(prob) = -1/prob
         let dloss_dprob = -1.0 / prob.max(NLL_EPSILON);
 
-        // Backpropagate circuit gradients through neural networks
+        // Backpropagate circuit gradients through neural networks using weight_slots for correct indexing
         self.backprop_circuit_gradients(
             py,
             &network_outputs,
+            &weight_slots,
             &grad_true,
             &grad_false,
             dloss_dprob,
@@ -1102,57 +1105,57 @@ impl CompiledProgram {
     /// Backpropagate circuit gradients through neural networks.
     ///
     /// Maps gradients from circuit variables back to neural network outputs and calls backward.
+    /// Uses weight_slots to map actual CNF variable indices to network output positions.
     fn backprop_circuit_gradients(
         &self,
         py: Python<'_>,
         network_outputs: &[(usize, Vec<f64>, PyObject)],
+        weight_slots: &[WeightSlot],
         grad_true: &[f64],
         _grad_false: &[f64],
         dloss_dprob: f64,
     ) -> PyResult<()> {
         let torch = py.import_bound("torch")?;
 
-        // The grad_true vector contains gradients for each variable in the circuit.
-        // Variables are ordered by the annotated disjunctions we generated.
-        // For each input_idx, we have num_labels variables.
+        // The grad_true vector is indexed by actual CNF variable numbers (1-indexed).
+        // weight_slots tells us which variable index corresponds to which (input_position, label_idx).
         //
-        // The gradient for variable i is: d(log Z) / d(log p_i) = d(log Z) / d(p_i) * p_i
-        // We need: d(loss) / d(p_i) = d(loss) / d(prob) * d(prob) / d(p_i)
-        //                           = dloss_dprob * grad_true[i] / p_i
-        //
-        // For annotated disjunctions with variables representing "choices":
-        // grad_true[i] represents the sensitivity of log Z to log(p_true) for variable i
+        // The gradient for variable i is: d(log Z) / d(log p_i)
+        // We need: d(loss) / d(p_i) = dloss_dprob * grad_true[var_idx]
 
-        let mut var_offset = 0;
-
-        for (_, probs, output) in network_outputs {
+        for (input_position, (_, probs, output)) in network_outputs.iter().enumerate() {
             let num_labels = probs.len();
 
             // Create gradient tensor for this network output
             let grad_vec: Vec<f64> = (0..num_labels)
                 .map(|label_idx| {
-                    // Get the circuit gradient for this variable
-                    let var_idx = var_offset + label_idx;
-                    if var_idx < grad_true.len() {
-                        // Convert from d(log Z)/d(log p) to d(loss)/d(p)
-                        // d(loss)/d(p) = dloss_dprob * (d(prob)/d(p))
-                        // For annotated disjunctions, grad_true gives us the contribution
-                        let g = grad_true[var_idx];
-                        dloss_dprob * g
+                    // Find the weight slot for this (input_position, label_idx) to get actual var_idx
+                    if let Some(slot) = weight_slots.iter().find(|s| {
+                        s.input_position == input_position && s.label_idx == label_idx
+                    }) {
+                        let var_idx = slot.var_idx as usize;
+                        if var_idx < grad_true.len() {
+                            // Convert from d(log Z)/d(log p) to d(loss)/d(p)
+                            let g = grad_true[var_idx];
+                            dloss_dprob * g
+                        } else {
+                            0.0
+                        }
                     } else {
                         0.0
                     }
                 })
                 .collect();
 
+            // Create gradient tensor on the same device as the output
+            let output_bound = output.bind(py);
+            let output_device = output_bound.getattr("device")?;
             let grad_tensor = torch.call_method1("tensor", (grad_vec,))?;
+            let grad_tensor_device = grad_tensor.call_method1("to", (output_device,))?;
 
             // Add batch dimension and call backward
-            let grad_unsqueezed = grad_tensor.call_method1("unsqueeze", (0i32,))?;
-            let output_bound = output.bind(py);
+            let grad_unsqueezed = grad_tensor_device.call_method1("unsqueeze", (0i32,))?;
             output_bound.call_method1("backward", (grad_unsqueezed,))?;
-
-            var_offset += num_labels;
         }
 
         Ok(())
@@ -1214,19 +1217,29 @@ impl CompiledProgram {
         let program = ExactDdnnfProgram::compile_source_with_gpu(&expanded_source, self.gpu_config)
             .map_err(|e| PyRuntimeError::new_err(format!("Query compilation error: {}", e)))?;
 
-        // Build weight slot mappings
-        // Variables are assigned sequentially: input 0 labels 0-9, then input 1 labels 0-9, etc.
-        let mut weight_slots = Vec::new();
-        let mut var_idx: u32 = 1; // DIMACS variables are 1-indexed
+        // Get actual random variable indices from the compiled program.
+        // These are the variables with non-trivial weights (corresponding to annotated disjunctions).
+        // The order matches the order variables were assigned during CNF encoding.
+        let random_vars = program.random_var_indices();
 
-        for (input_idx, probs, _) in network_outputs {
+        // Build weight slot mappings using actual variable indices.
+        // The annotated disjunctions are generated in order: position 0 labels 0-9, then position 1 labels 0-9, etc.
+        // The random_vars should match this order.
+        // We use input_position (0, 1, 2...) not the actual input_idx from the query,
+        // so the cached slots work with any query that has the same structure.
+        let mut weight_slots = Vec::new();
+        let mut var_offset = 0;
+
+        for (input_position, (_, probs, _)) in network_outputs.iter().enumerate() {
             for label_idx in 0..probs.len() {
-                weight_slots.push(WeightSlot {
-                    input_idx: *input_idx,
-                    label_idx,
-                    var_idx,
-                });
-                var_idx += 1;
+                if var_offset < random_vars.len() {
+                    weight_slots.push(WeightSlot {
+                        input_position,
+                        label_idx,
+                        var_idx: random_vars[var_offset],
+                    });
+                    var_offset += 1;
+                }
             }
         }
 
@@ -1247,10 +1260,12 @@ impl CompiledProgram {
         // Initialize all weights to (0.0, 0.0) - neutral in log space
         let mut weights: Vec<(f64, f64)> = vec![(0.0, 0.0); num_vars + 1];
 
-        // Update weights from network outputs using slot mappings
+        // Update weights from network outputs using slot mappings.
+        // input_position indexes into network_outputs array directly.
         for slot in &cached.weight_slots {
-            // Find the network output for this input index
-            if let Some((_, probs, _)) = network_outputs.iter().find(|(idx, _, _)| *idx == slot.input_idx) {
+            // Use input_position as index into network_outputs
+            if slot.input_position < network_outputs.len() {
+                let (_, probs, _) = &network_outputs[slot.input_position];
                 if slot.label_idx < probs.len() {
                     let p = probs[slot.label_idx];
                     // Normalize to ensure sum < 1.0 (same as generate_expanded_source)

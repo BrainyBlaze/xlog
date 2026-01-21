@@ -187,6 +187,21 @@ impl ExactDdnnfProgram {
         self.evidence_log_weights.len()
     }
 
+    /// Returns the indices of random (probabilistic) variables in order.
+    ///
+    /// Random variables are those with non-trivial weights (not (0.0, 0.0)).
+    /// These correspond to annotated disjunctions in the source program.
+    /// The order matches the order variables were assigned during CNF encoding.
+    pub fn random_var_indices(&self) -> Vec<u32> {
+        self.evidence_log_weights
+            .iter()
+            .enumerate()
+            .skip(1) // Skip index 0 (DIMACS is 1-indexed)
+            .filter(|(_, (t, f))| (*t, *f) != (0.0, 0.0))
+            .map(|(idx, _)| idx as u32)
+            .collect()
+    }
+
     pub fn evaluate_gpu_with_grads(&self) -> Result<ExactResultWithGrads> {
         let Some(_circuit) = &self.circuit else {
             return Ok(ExactResultWithGrads {
