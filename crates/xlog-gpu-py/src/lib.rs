@@ -15,6 +15,8 @@ use xlog_neural::{NetworkConfig, NetworkRegistry, TensorMetadata, TensorSourceRe
 use xlog_prob::exact::{ExactDdnnfProgram, ExactResultWithGrads, GpuConfig, QueryProbability};
 use xlog_prob::mc::{McEvalConfig, McProgram};
 
+use std::collections::HashMap as StdHashMap;
+
 const DLPACK_CAPSULE_NAME: &[u8] = b"dltensor\0";
 const USED_DLPACK_CAPSULE_NAME: &[u8] = b"used_dltensor\0";
 
@@ -272,8 +274,34 @@ impl Program {
             source: source.to_string(),
             gpu_config: config,
             prob_engine: engine,
+            circuit_cache: StdHashMap::new(),
         })
     }
+}
+
+/// A cached circuit for a specific query template.
+///
+/// The circuit structure is immutable - only weights change between queries.
+/// Weight slots map network outputs to circuit variables.
+struct CachedCircuit {
+    /// The compiled program containing the GPU circuit
+    program: ExactDdnnfProgram,
+
+    /// Mapping from (input_idx, label_idx) to circuit variable index.
+    weight_slots: Vec<WeightSlot>,
+
+    /// Number of labels per network (e.g., 10 for MNIST)
+    num_labels: usize,
+}
+
+/// Maps a network output to a circuit variable.
+struct WeightSlot {
+    /// Input index in the query (e.g., 0 or 1 for addition(0, 1, 7))
+    input_idx: usize,
+    /// Label index (0-9 for 10-class classification)
+    label_idx: usize,
+    /// Circuit variable index (1-indexed, as per DIMACS CNF convention)
+    var_idx: u32,
 }
 
 enum CompiledProbProgram {
@@ -306,6 +334,8 @@ pub struct CompiledProgram {
     gpu_config: GpuConfig,
     /// Probabilistic inference engine
     prob_engine: ProbEngine,
+    /// Cache of compiled circuits by template signature
+    circuit_cache: StdHashMap<String, CachedCircuit>,
 }
 
 #[pymethods]
