@@ -1208,6 +1208,47 @@ impl CompiledProgram {
         Ok((program, weight_slots, num_labels))
     }
 
+    /// Update weights in a cached circuit with new network outputs.
+    ///
+    /// The circuit structure remains unchanged - only the probability weights
+    /// are updated to reflect current network predictions.
+    fn update_circuit_weights(
+        &self,
+        cached: &CachedCircuit,
+        network_outputs: &[(usize, Vec<f64>, PyObject)],
+    ) -> Vec<(f64, f64)> {
+        let num_vars = cached.program.num_vars();
+
+        // Initialize all weights to (0.0, 0.0) - neutral in log space
+        let mut weights: Vec<(f64, f64)> = vec![(0.0, 0.0); num_vars + 1];
+
+        // Update weights from network outputs using slot mappings
+        for slot in &cached.weight_slots {
+            // Find the network output for this input index
+            if let Some((_, probs, _)) = network_outputs.iter().find(|(idx, _, _)| *idx == slot.input_idx) {
+                if slot.label_idx < probs.len() {
+                    let p = probs[slot.label_idx];
+                    // Normalize to ensure sum < 1.0 (same as generate_expanded_source)
+                    let sum: f64 = probs.iter().sum();
+                    let scale = 0.9999999 / sum;
+                    let normalized_p = (p * scale).max(1e-10);
+
+                    // Log weights: (log(p), log(1-p))
+                    // For annotated disjunctions, the "false" weight represents
+                    // the probability of NOT choosing this option
+                    let log_true = normalized_p.ln();
+                    let log_false = (1.0 - normalized_p).ln();
+
+                    if (slot.var_idx as usize) < weights.len() {
+                        weights[slot.var_idx as usize] = (log_true, log_false);
+                    }
+                }
+            }
+        }
+
+        weights
+    }
+
     /// Get the label index for a given label string.
     fn get_label_index(&self, _network_name: &str, label: &str) -> PyResult<usize> {
         // Try to parse as integer first
