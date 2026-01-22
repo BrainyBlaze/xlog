@@ -6,6 +6,7 @@ pub mod g02_circuit_backward;
 pub mod g03_weight_injection;
 pub mod g04_transfer_efficiency;
 pub mod g05_circuit_cache;
+pub mod g06_ptx_robustness;
 pub mod c02_launch_config;
 pub mod c03_pointer_bounds;
 pub mod c04_address_space;
