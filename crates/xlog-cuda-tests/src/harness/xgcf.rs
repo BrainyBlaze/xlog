@@ -443,3 +443,377 @@ pub fn run_tiny_xgcf_backward(ctx: &TestContext, spec: &TinyXgcfSpec) -> Result<
         grad_false,
     })
 }
+
+/// Generate a single-literal circuit: root = Lit(+var)
+pub fn gen_single_lit_circuit(var: u32) -> TinyXgcfSpec {
+    const LIT: u8 = 2;
+
+    let num_nodes = 1;
+    let num_vars = var as usize;
+    let root = 0;
+
+    let node_type = vec![LIT];
+    let child_offsets = vec![0, 0];
+    let child_indices = vec![];
+    let lit = vec![var as i32];
+    let decision_var = vec![0];
+    let decision_child_false = vec![0];
+    let decision_child_true = vec![0];
+    let level_nodes = vec![0];
+    let levels = vec![(0, 1)];
+
+    let mut var_log_true = vec![0.0; num_vars + 1];
+    let mut var_log_false = vec![0.0; num_vars + 1];
+    var_log_true[var as usize] = 0.7_f64.ln();
+    var_log_false[var as usize] = 0.3_f64.ln();
+
+    let expected_values = vec![var_log_true[var as usize]];
+    let mut expected_grad_true = vec![0.0; num_vars + 1];
+    let expected_grad_false = vec![0.0; num_vars + 1];
+    expected_grad_true[var as usize] = 1.0;
+
+    TinyXgcfSpec {
+        num_nodes,
+        num_vars,
+        root,
+        node_type,
+        child_offsets,
+        child_indices,
+        lit,
+        decision_var,
+        decision_child_false,
+        decision_child_true,
+        level_nodes,
+        levels,
+        var_log_true,
+        var_log_false,
+        expected_values,
+        expected_grad_true,
+        expected_grad_false,
+    }
+}
+
+/// Generate an AND circuit: root = AND(Lit(+1), Lit(+2))
+pub fn gen_and_circuit() -> TinyXgcfSpec {
+    const LIT: u8 = 2;
+    const AND: u8 = 3;
+
+    let num_nodes = 3;
+    let num_vars = 2;
+    let root = 2;
+
+    let node_type = vec![LIT, LIT, AND];
+    let child_offsets = vec![0, 0, 0, 2];
+    let child_indices = vec![0, 1];
+    let lit = vec![1, 2, 0];
+    let decision_var = vec![0, 0, 0];
+    let decision_child_false = vec![0, 0, 0];
+    let decision_child_true = vec![0, 0, 0];
+    let level_nodes = vec![0, 1, 2];
+    let levels = vec![(0, 2), (2, 1)];
+
+    let p1 = 0.7_f64;
+    let p2 = 0.6_f64;
+    let var_log_true = vec![0.0, p1.ln(), p2.ln()];
+    let var_log_false = vec![0.0, (1.0 - p1).ln(), (1.0 - p2).ln()];
+
+    let v0 = var_log_true[1];
+    let v1 = var_log_true[2];
+    let v2 = v0 + v1;
+    let expected_values = vec![v0, v1, v2];
+    let expected_grad_true = vec![0.0, 1.0, 1.0];
+    let expected_grad_false = vec![0.0, 0.0, 0.0];
+
+    TinyXgcfSpec {
+        num_nodes,
+        num_vars,
+        root,
+        node_type,
+        child_offsets,
+        child_indices,
+        lit,
+        decision_var,
+        decision_child_false,
+        decision_child_true,
+        level_nodes,
+        levels,
+        var_log_true,
+        var_log_false,
+        expected_values,
+        expected_grad_true,
+        expected_grad_false,
+    }
+}
+
+/// Generate an OR circuit: root = OR(Lit(+1), Lit(+2))
+pub fn gen_or_circuit() -> TinyXgcfSpec {
+    const LIT: u8 = 2;
+    const OR: u8 = 4;
+
+    let num_nodes = 3;
+    let num_vars = 2;
+    let root = 2;
+
+    let node_type = vec![LIT, LIT, OR];
+    let child_offsets = vec![0, 0, 0, 2];
+    let child_indices = vec![0, 1];
+    let lit = vec![1, 2, 0];
+    let decision_var = vec![0, 0, 0];
+    let decision_child_false = vec![0, 0, 0];
+    let decision_child_true = vec![0, 0, 0];
+    let level_nodes = vec![0, 1, 2];
+    let levels = vec![(0, 2), (2, 1)];
+
+    let p1 = 0.7_f64;
+    let p2 = 0.6_f64;
+    let var_log_true = vec![0.0, p1.ln(), p2.ln()];
+    let var_log_false = vec![0.0, (1.0 - p1).ln(), (1.0 - p2).ln()];
+
+    let v0 = var_log_true[1];
+    let v1 = var_log_true[2];
+    let v2 = logsumexp2(v0, v1);
+    let expected_values = vec![v0, v1, v2];
+
+    let p_child0 = (v0 - v2).exp();
+    let p_child1 = (v1 - v2).exp();
+    let expected_grad_true = vec![0.0, p_child0, p_child1];
+    let expected_grad_false = vec![0.0, 0.0, 0.0];
+
+    TinyXgcfSpec {
+        num_nodes,
+        num_vars,
+        root,
+        node_type,
+        child_offsets,
+        child_indices,
+        lit,
+        decision_var,
+        decision_child_false,
+        decision_child_true,
+        level_nodes,
+        levels,
+        var_log_true,
+        var_log_false,
+        expected_values,
+        expected_grad_true,
+        expected_grad_false,
+    }
+}
+
+/// Generate a Decision circuit: root = Decision(var, false_child=Const1, true_child=Lit(+1))
+pub fn gen_decision_circuit() -> TinyXgcfSpec {
+    const CONST1: u8 = 1;
+    const LIT: u8 = 2;
+    const DECISION: u8 = 5;
+
+    let num_nodes = 3;
+    let num_vars = 2;
+    let root = 2;
+
+    let node_type = vec![CONST1, LIT, DECISION];
+    let child_offsets = vec![0, 0, 0, 0];
+    let child_indices = vec![];
+    let lit = vec![0, 1, 0];
+    let decision_var = vec![0, 0, 2];
+    let decision_child_false = vec![0, 0, 0];
+    let decision_child_true = vec![0, 0, 1];
+    let level_nodes = vec![0, 1, 2];
+    let levels = vec![(0, 2), (2, 1)];
+
+    let p1 = 0.7_f64;
+    let p2 = 0.6_f64;
+    let var_log_true = vec![0.0, p1.ln(), p2.ln()];
+    let var_log_false = vec![0.0, (1.0 - p1).ln(), (1.0 - p2).ln()];
+
+    let v0 = 0.0;
+    let v1 = var_log_true[1];
+    let v2 = logsumexp2(var_log_false[2] + v0, var_log_true[2] + v1);
+    let expected_values = vec![v0, v1, v2];
+
+    let p_false = (var_log_false[2] + v0 - v2).exp();
+    let p_true = (var_log_true[2] + v1 - v2).exp();
+
+    let expected_grad_true = vec![0.0, p_true, p_true];
+    let expected_grad_false = vec![0.0, 0.0, p_false];
+
+    TinyXgcfSpec {
+        num_nodes,
+        num_vars,
+        root,
+        node_type,
+        child_offsets,
+        child_indices,
+        lit,
+        decision_var,
+        decision_child_false,
+        decision_child_true,
+        level_nodes,
+        levels,
+        var_log_true,
+        var_log_false,
+        expected_values,
+        expected_grad_true,
+        expected_grad_false,
+    }
+}
+
+/// Generate a large circuit with N parallel literals under an OR node
+pub fn gen_large_or_circuit(num_vars: usize) -> TinyXgcfSpec {
+    const LIT: u8 = 2;
+    const OR: u8 = 4;
+
+    let num_nodes = num_vars + 1;
+    let root = num_vars as u32;
+
+    let mut node_type = vec![LIT; num_vars];
+    node_type.push(OR);
+
+    let mut child_offsets: Vec<u32> = (0..=num_vars).map(|_| 0).collect();
+    child_offsets.push(num_vars as u32);
+
+    let child_indices: Vec<u32> = (0..num_vars as u32).collect();
+
+    let mut lit: Vec<i32> = (1..=num_vars as i32).collect();
+    lit.push(0);
+
+    let decision_var = vec![0; num_nodes];
+    let decision_child_false = vec![0; num_nodes];
+    let decision_child_true = vec![0; num_nodes];
+
+    let mut level_nodes: Vec<u32> = (0..num_vars as u32).collect();
+    level_nodes.push(root);
+    let levels = vec![(0, num_vars as u32), (num_vars as u32, 1)];
+
+    let p = 0.5_f64;
+    let mut var_log_true = vec![0.0; num_vars + 1];
+    let mut var_log_false = vec![0.0; num_vars + 1];
+    for i in 1..=num_vars {
+        var_log_true[i] = p.ln();
+        var_log_false[i] = (1.0 - p).ln();
+    }
+
+    let lit_val = p.ln();
+    let mut expected_values = vec![lit_val; num_vars];
+    let or_val = lit_val + (num_vars as f64).ln();
+    expected_values.push(or_val);
+
+    let grad_per_lit = 1.0 / num_vars as f64;
+    let mut expected_grad_true = vec![0.0; num_vars + 1];
+    for i in 1..=num_vars {
+        expected_grad_true[i] = grad_per_lit;
+    }
+    let expected_grad_false = vec![0.0; num_vars + 1];
+
+    TinyXgcfSpec {
+        num_nodes,
+        num_vars,
+        root,
+        node_type,
+        child_offsets,
+        child_indices,
+        lit,
+        decision_var,
+        decision_child_false,
+        decision_child_true,
+        level_nodes,
+        levels,
+        var_log_true,
+        var_log_false,
+        expected_values,
+        expected_grad_true,
+        expected_grad_false,
+    }
+}
+
+/// Generate a deep chain circuit: AND(AND(AND(...Lit(1)...)))
+pub fn gen_deep_chain_circuit(depth: usize) -> TinyXgcfSpec {
+    const LIT: u8 = 2;
+    const AND: u8 = 3;
+
+    let num_nodes = depth + 1;
+    let num_vars = 1;
+    let root = depth as u32;
+
+    let mut node_type = vec![LIT];
+    for _ in 0..depth {
+        node_type.push(AND);
+    }
+
+    let mut child_offsets: Vec<u32> = vec![0];
+    let mut child_indices: Vec<u32> = vec![];
+    for i in 0..depth {
+        child_offsets.push(child_indices.len() as u32);
+        child_indices.push(i as u32);
+    }
+    child_offsets.push(child_indices.len() as u32);
+
+    let mut lit = vec![1i32];
+    lit.extend(vec![0i32; depth]);
+
+    let decision_var = vec![0; num_nodes];
+    let decision_child_false = vec![0; num_nodes];
+    let decision_child_true = vec![0; num_nodes];
+
+    let level_nodes: Vec<u32> = (0..num_nodes as u32).collect();
+    let levels: Vec<(u32, u32)> = (0..num_nodes).map(|i| (i as u32, 1)).collect();
+
+    let p = 0.7_f64;
+    let var_log_true = vec![0.0, p.ln()];
+    let var_log_false = vec![0.0, (1.0 - p).ln()];
+
+    let lit_val = p.ln();
+    let expected_values = vec![lit_val; num_nodes];
+
+    let expected_grad_true = vec![0.0, 1.0];
+    let expected_grad_false = vec![0.0, 0.0];
+
+    TinyXgcfSpec {
+        num_nodes,
+        num_vars,
+        root,
+        node_type,
+        child_offsets,
+        child_indices,
+        lit,
+        decision_var,
+        decision_child_false,
+        decision_child_true,
+        level_nodes,
+        levels,
+        var_log_true,
+        var_log_false,
+        expected_values,
+        expected_grad_true,
+        expected_grad_false,
+    }
+}
+
+/// Compute numerical gradient for verification
+pub fn numerical_gradient(
+    ctx: &TestContext,
+    spec: &TinyXgcfSpec,
+    var: usize,
+    eps: f64,
+) -> xlog_core::Result<(f64, f64)> {
+    let mut spec_plus = spec.clone();
+    let mut spec_minus = spec.clone();
+    spec_plus.var_log_true[var] += eps;
+    spec_minus.var_log_true[var] -= eps;
+
+    let values_plus = run_tiny_xgcf_forward(ctx, &spec_plus)?;
+    let values_minus = run_tiny_xgcf_forward(ctx, &spec_minus)?;
+
+    let grad_true = (values_plus[spec.root as usize] - values_minus[spec.root as usize]) / (2.0 * eps);
+
+    let mut spec_plus = spec.clone();
+    let mut spec_minus = spec.clone();
+    spec_plus.var_log_false[var] += eps;
+    spec_minus.var_log_false[var] -= eps;
+
+    let values_plus = run_tiny_xgcf_forward(ctx, &spec_plus)?;
+    let values_minus = run_tiny_xgcf_forward(ctx, &spec_minus)?;
+
+    let grad_false = (values_plus[spec.root as usize] - values_minus[spec.root as usize]) / (2.0 * eps);
+
+    Ok((grad_true, grad_false))
+}
