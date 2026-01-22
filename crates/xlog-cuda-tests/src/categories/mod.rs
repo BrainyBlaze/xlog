@@ -1,6 +1,7 @@
 //! Test category modules covering all 24 edge case categories.
 
 pub mod c01_toolchain;
+pub mod g01_circuit_forward;
 pub mod c02_launch_config;
 pub mod c03_pointer_bounds;
 pub mod c04_address_space;
