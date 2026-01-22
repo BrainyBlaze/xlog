@@ -38,7 +38,7 @@ fn run_full_certification() {
 
     let mut results = CertificationResults::new();
 
-    // Run all 24 categories sequentially
+    // Run all 31 categories sequentially (C01-C25 + G01-G06)
     println!("Running C01: Toolchain...");
     results.add_category(categories::c01_toolchain::run_all(&ctx));
 
@@ -113,6 +113,24 @@ fn run_full_certification() {
 
     println!("Running C25: Float Filter...");
     results.add_category(categories::c25_float_filter::run_all(&ctx));
+
+    println!("Running G01: Circuit Forward...");
+    results.add_category(categories::g01_circuit_forward::run_all(&ctx));
+
+    println!("Running G02: Circuit Backward...");
+    results.add_category(categories::g02_circuit_backward::run_all(&ctx));
+
+    println!("Running G03: Weight Injection...");
+    results.add_category(categories::g03_weight_injection::run_all(&ctx));
+
+    println!("Running G04: Transfer Efficiency...");
+    results.add_category(categories::g04_transfer_efficiency::run_all(&ctx));
+
+    println!("Running G05: Circuit Cache...");
+    results.add_category(categories::g05_circuit_cache::run_all(&ctx));
+
+    println!("Running G06: PTX Robustness...");
+    results.add_category(categories::g06_ptx_robustness::run_all(&ctx));
 
     // Finalize and print results
     results.finalize();
