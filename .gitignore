@@ -35,6 +35,10 @@ __pycache__/
 .pytest_cache/
 crates/pyxlog/dist/
 
+# Training data and model artifacts
+data/
+*.pt
+
 .docs/
 
 # Fuzz testing artifacts
