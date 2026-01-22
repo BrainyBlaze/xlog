@@ -2,6 +2,7 @@
 
 pub mod c01_toolchain;
 pub mod g01_circuit_forward;
+pub mod g02_circuit_backward;
 pub mod c02_launch_config;
 pub mod c03_pointer_bounds;
 pub mod c04_address_space;
