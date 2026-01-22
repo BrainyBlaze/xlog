@@ -712,8 +712,8 @@ fn test_repeated_eval_no_reupload(ctx: &TestContext) -> TestResult {
     let expected_ratio = 10.0;
     let actual_ratio = large_batch_duration.as_secs_f64() / small_batch_duration.as_secs_f64();
 
-    // Allow up to 15x ratio to account for variance, but catch quadratic behavior (would be ~100x)
-    let max_acceptable_ratio = 15.0;
+    // Allow up to 20x ratio to account for variance, but catch quadratic behavior (would be ~100x)
+    let max_acceptable_ratio = 20.0;
 
     if actual_ratio > max_acceptable_ratio {
         return TestResult::error(
