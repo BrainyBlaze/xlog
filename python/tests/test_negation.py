@@ -10,9 +10,9 @@ Run with: pytest python/tests/test_negation.py -v
 
 import pytest
 
-# Skip all tests if xlog_gpu or torch not available
+# Skip all tests if pyxlog or torch not available
 torch = pytest.importorskip("torch")
-xlog_gpu = pytest.importorskip("xlog_gpu")
+pyxlog = pytest.importorskip("pyxlog")
 
 
 class TestStratifiedNegation:
@@ -25,7 +25,7 @@ class TestStratifiedNegation:
 dry() :- not rain().
 query(dry()).
 """
-        program = xlog_gpu.Program.compile(source)
+        program = pyxlog.Program.compile(source)
         result = program.evaluate()
 
         # P(dry) = P(not rain) = 1 - 0.3 = 0.7
@@ -41,7 +41,7 @@ b() :- not c().
 a() :- not b().
 query(a()).
 """
-        program = xlog_gpu.Program.compile(source)
+        program = pyxlog.Program.compile(source)
         result = program.evaluate()
 
         # P(b) = P(not c) = 0.6
@@ -58,7 +58,7 @@ query(a()).
 comfortable() :- not rain(), umbrella().
 query(comfortable()).
 """
-        program = xlog_gpu.Program.compile(source)
+        program = pyxlog.Program.compile(source)
         result = program.evaluate()
 
         # P(comfortable) = P(not rain) * P(umbrella) = 0.7 * 0.8 = 0.56
@@ -75,7 +75,7 @@ c() :- a(), not b().
 c() :- b(), not a().
 query(c()).
 """
-        program = xlog_gpu.Program.compile(source)
+        program = pyxlog.Program.compile(source)
         result = program.evaluate()
 
         # P(c) = P(a AND not b) + P(b AND not a) - P(a AND not b AND b AND not a)
@@ -93,7 +93,7 @@ wet() :- rain().
 dry() :- not wet().
 query(dry()).
 """
-        program = xlog_gpu.Program.compile(source)
+        program = pyxlog.Program.compile(source)
         result = program.evaluate()
 
         # wet() is true when rain() is true, so P(wet) = P(rain) = 0.3
@@ -108,7 +108,7 @@ query(dry()).
 happy() :- not sad().
 query(happy()).
 """
-        program = xlog_gpu.Program.compile(source)
+        program = pyxlog.Program.compile(source)
         result = program.evaluate()
 
         # sad() is never defined, so P(sad) = 0 by closed world assumption
@@ -136,8 +136,8 @@ dry() :- not rain().
 query(dry()).
 """
 
-        program_exact = xlog_gpu.Program.compile(source_exact)
-        program_mc = xlog_gpu.Program.compile(source_mc)
+        program_exact = pyxlog.Program.compile(source_exact)
+        program_mc = pyxlog.Program.compile(source_mc)
 
         result_exact = program_exact.evaluate()
         result_mc = program_mc.evaluate()
@@ -167,8 +167,8 @@ c() :- a(), not b().
 query(c()).
 """
 
-        program_exact = xlog_gpu.Program.compile(source_exact)
-        program_mc = xlog_gpu.Program.compile(source_mc)
+        program_exact = pyxlog.Program.compile(source_exact)
+        program_mc = pyxlog.Program.compile(source_mc)
 
         result_exact = program_exact.evaluate()
         result_mc = program_mc.evaluate()
@@ -202,7 +202,7 @@ query(base()).
 
         # MC engine should handle non-monotone programs
         # Use prob_engine parameter to ensure MC is selected before stratification
-        program = xlog_gpu.Program.compile(source, prob_engine='mc')
+        program = pyxlog.Program.compile(source, prob_engine='mc')
         result = program.evaluate(samples=50000)
 
         probs = torch.from_dlpack(result.prob)
@@ -233,7 +233,7 @@ query(flip()).
 """
 
         # Use prob_engine parameter to enable MC before stratification
-        program = xlog_gpu.Program.compile(source, prob_engine='mc')
+        program = pyxlog.Program.compile(source, prob_engine='mc')
         result = program.evaluate(samples=50000)
 
         probs = torch.from_dlpack(result.prob)
@@ -266,7 +266,7 @@ query(p()).
 
         # Non-monotone programs are now handled by WFS
         # Atoms in a cycle are undefined and return probability 0
-        program = xlog_gpu.Program.compile(source)
+        program = pyxlog.Program.compile(source)
         result = program.evaluate()
 
         probs = torch.from_dlpack(result.prob)
@@ -293,7 +293,7 @@ class TestNegationGradients:
 dry() :- not rain().
 query(dry()).
 """
-        program = xlog_gpu.Program.compile(source)
+        program = pyxlog.Program.compile(source)
         result = program.evaluate(return_grads=True)
 
         # Check that gradients are returned
@@ -309,7 +309,7 @@ query(dry()).
 dry() :- not rain().
 query(dry()).
 """
-        program = xlog_gpu.Program.compile(source)
+        program = pyxlog.Program.compile(source)
         result = program.evaluate(return_grads=True)
 
         grad_true = torch.from_dlpack(result.grad_true[0])
@@ -332,7 +332,7 @@ class TestNegationEdgeCases:
 always() :- not never().
 query(always()).
 """
-        program = xlog_gpu.Program.compile(source)
+        program = pyxlog.Program.compile(source)
         result = program.evaluate()
 
         probs = torch.from_dlpack(result.prob)
@@ -346,7 +346,7 @@ query(always()).
 never() :- not always().
 query(never()).
 """
-        program = xlog_gpu.Program.compile(source)
+        program = pyxlog.Program.compile(source)
         result = program.evaluate()
 
         probs = torch.from_dlpack(result.prob)
@@ -361,7 +361,7 @@ b() :- not a().
 c() :- not b().
 query(c()).
 """
-        program = xlog_gpu.Program.compile(source)
+        program = pyxlog.Program.compile(source)
         result = program.evaluate()
 
         probs = torch.from_dlpack(result.prob)
@@ -378,7 +378,7 @@ dry() :- not rain().
 query(wet()).
 query(dry()).
 """
-        program = xlog_gpu.Program.compile(source)
+        program = pyxlog.Program.compile(source)
         result = program.evaluate()
 
         probs = torch.from_dlpack(result.prob)

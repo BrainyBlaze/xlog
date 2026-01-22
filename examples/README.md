@@ -51,7 +51,10 @@ Examples live under `examples/xlog/`, grouped by intent:
 
 Phase 4 examples live under:
 - `examples/prob/`: probabilistic `.xlog` programs (prob facts, AD, evidence/query, and `prob_engine=mc`)
-- `examples/python/`: Python scripts exercising `xlog_gpu` via DLPack (Torch optional)
+- `examples/python/`: Python scripts exercising `pyxlog` via DLPack (Torch optional)
+
+Phase 5 (v0.4.0-alpha) neural-symbolic examples live under:
+- `examples/neural/`: Neural-symbolic training examples
 
 ## Example Index
 
@@ -111,6 +114,25 @@ Phase 4 examples live under:
 - `examples/xlog/90-negative-tests/02_stratification_negation_cycle.xlog`: unstratifiable negation cycle (compile-time)
 - `examples/xlog/90-negative-tests/03_arithmetic_type_mismatch.xlog`: missing `cast()` type mismatch (compile-time)
 - `examples/xlog/90-negative-tests/04_is_target_already_bound.xlog`: invalid `is` target (compile-time)
+
+## Neural-Symbolic Examples (v0.4.0-alpha)
+
+Neural-symbolic training examples demonstrating integration where neural network
+outputs become probabilistic facts in logic programs.
+
+**neural/01_minimal/** — MNIST Addition
+- `train.py`: Train a CNN to classify MNIST digits using only addition supervision
+- Demonstrates: neural predicates (`nn/4`), network registration, tensor sources, gradient flow
+
+To run:
+```bash
+cd examples/neural/01_minimal
+python train.py --epochs 10 --batch-size 32
+```
+
+The network learns digit classification purely from sum labels — no individual digit labels provided!
+
+---
 
 ## Feature Coverage Goals
 

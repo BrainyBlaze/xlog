@@ -8,9 +8,9 @@ Run with: pytest python/tests/test_backward.py -v
 
 import pytest
 
-# Skip all tests if xlog_gpu or torch not available
+# Skip all tests if pyxlog or torch not available
 torch = pytest.importorskip("torch")
-xlog_gpu = pytest.importorskip("xlog_gpu")
+pyxlog = pytest.importorskip("pyxlog")
 
 
 class SimpleNet(torch.nn.Module):
@@ -29,7 +29,7 @@ class TestZeroGrad:
 
     def test_zero_grad_clears_gradients(self):
         """Test that zero_grad clears network parameter gradients."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(test_net, [X], Y, [a, b, c]) :: pred(X, Y).
         """)
 
@@ -50,7 +50,7 @@ class TestZeroGrad:
 
     def test_zero_grad_multiple_networks(self):
         """Test zero_grad works with multiple networks."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(net_a, [X], Y, [0, 1]) :: pred_a(X, Y).
             nn(net_b, [X], Y, [0, 1, 2]) :: pred_b(X, Y).
         """)
@@ -79,7 +79,7 @@ class TestOptimizerStep:
 
     def test_optimizer_step_updates_parameters(self):
         """Test that optimizer_step updates network parameters."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(test_net, [X], Y, [a, b, c]) :: pred(X, Y).
         """)
 
@@ -108,7 +108,7 @@ class TestOptimizerStep:
 
     def test_optimizer_step_multiple_networks(self):
         """Test optimizer_step updates all networks."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(net_a, [X], Y, [0, 1]) :: pred_a(X, Y).
             nn(net_b, [X], Y, [0, 1, 2]) :: pred_b(X, Y).
         """)
@@ -139,7 +139,7 @@ class TestForwardBackward:
 
     def test_forward_backward_returns_loss(self):
         """Test that forward_backward returns NLL loss value."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(test_net, [X], Y, [a, b, c]) :: pred(X, Y).
         """)
 
@@ -160,7 +160,7 @@ class TestForwardBackward:
 
     def test_forward_backward_produces_gradients(self):
         """Test that forward_backward produces gradients in network parameters."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(test_net, [X], Y, [a, b, c]) :: pred(X, Y).
         """)
 
@@ -184,7 +184,7 @@ class TestForwardBackward:
 
     def test_forward_backward_different_labels(self):
         """Test forward_backward with different target labels."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(test_net, [X], Y, [a, b, c]) :: pred(X, Y).
         """)
 
@@ -207,7 +207,7 @@ class TestTrainingStep:
 
     def test_complete_training_step(self):
         """Test a complete training iteration: zero_grad -> forward_backward -> step."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(test_net, [X], Y, [a, b, c]) :: pred(X, Y).
         """)
 
@@ -231,7 +231,7 @@ class TestTrainingStep:
 
     def test_multiple_training_steps_reduce_loss(self):
         """Test that multiple training steps reduce the loss."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(test_net, [X], Y, [a, b, c]) :: pred(X, Y).
         """)
 
@@ -261,7 +261,7 @@ class TestSchedulerStep:
 
     def test_scheduler_step(self):
         """Test that scheduler_step updates learning rate."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(test_net, [X], Y, [a, b, c]) :: pred(X, Y).
         """)
 

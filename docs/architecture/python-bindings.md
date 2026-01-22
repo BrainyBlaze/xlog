@@ -1,10 +1,10 @@
-# Python Bindings (xlog-gpu-py)
+# Python Bindings (pyxlog)
 
 This document describes the Python bindings for XLOG, implemented using PyO3 and exposing GPU tensors via DLPack for zero-copy interoperability.
 
 ## Overview
 
-The `xlog_gpu` Python module provides:
+The `pyxlog` Python module provides:
 
 - Deterministic Datalog execution via `LogicProgram`
 - Probabilistic inference via `Program`
@@ -13,7 +13,7 @@ The `xlog_gpu` Python module provides:
 ## Installation
 
 ```bash
-cd crates/xlog-gpu-py
+cd crates/pyxlog
 pip install maturin
 maturin develop --release
 ```
@@ -22,7 +22,7 @@ maturin develop --release
 
 | Attribute | Value |
 |-----------|-------|
-| Package name | `xlog-gpu` (PyPI: `xlog_gpu`) |
+| Package name | `pyxlog` |
 | Build system | PyO3 + maturin |
 | Platform | Linux x86_64 + CUDA only |
 | Interop | DLPack capsules (framework-agnostic) |
@@ -32,10 +32,10 @@ maturin develop --release
 ### LogicProgram (Deterministic)
 
 ```python
-import xlog_gpu
+import pyxlog
 
 # Compile a deterministic program
-program = xlog_gpu.LogicProgram.compile("""
+program = pyxlog.LogicProgram.compile("""
     pred edge(u32, u32).
     pred reach(u32, u32).
 
@@ -60,10 +60,10 @@ for name, capsule in results.items():
 ### Program (Probabilistic)
 
 ```python
-import xlog_gpu
+import pyxlog
 
 # Compile with exact inference
-program = xlog_gpu.Program.compile("""
+program = pyxlog.Program.compile("""
     0.3::rain.
     0.7::sprinkler.
 
@@ -86,7 +86,7 @@ print(f"Gradients: {result.gradients}")
 ### Monte Carlo Inference
 
 ```python
-program = xlog_gpu.Program.compile(source, prob_engine="mc")
+program = pyxlog.Program.compile(source, prob_engine="mc")
 
 result = program.evaluate(
     samples=10000,
@@ -112,13 +112,13 @@ All GPU data is exchanged via DLPack capsules, enabling zero-copy interop with:
 
 ```python
 import torch
-import xlog_gpu
+import pyxlog
 
 # Create GPU tensor
 edge_tensor = torch.tensor([[1, 2], [2, 3], [3, 4]], device='cuda')
 
 # Pass as input
-program = xlog_gpu.LogicProgram.compile(source)
+program = pyxlog.LogicProgram.compile(source)
 results = program.evaluate(dlpack_inputs={
     'edge': edge_tensor.__dlpack__()
 })
@@ -157,7 +157,7 @@ capsule2 = tensor.__dlpack__()
 ### LogicProgram.compile()
 
 ```python
-program = xlog_gpu.LogicProgram.compile(
+program = pyxlog.LogicProgram.compile(
     source,                    # str: Datalog source code
     device=0,                  # int: CUDA device index
     memory_mb=1024,           # int: GPU memory limit
@@ -167,7 +167,7 @@ program = xlog_gpu.LogicProgram.compile(
 ### Program.compile() (Probabilistic)
 
 ```python
-program = xlog_gpu.Program.compile(
+program = pyxlog.Program.compile(
     source,                    # str: Probabilistic Datalog source
     prob_engine="exact_ddnnf", # str: "exact_ddnnf" or "mc"
     device=0,                  # int: CUDA device index
@@ -206,14 +206,14 @@ Python exceptions are raised for errors:
 
 ```python
 try:
-    program = xlog_gpu.LogicProgram.compile(invalid_source)
-except xlog_gpu.ParseError as e:
+    program = pyxlog.LogicProgram.compile(invalid_source)
+except pyxlog.ParseError as e:
     print(f"Parse error: {e}")
-except xlog_gpu.CompilationError as e:
+except pyxlog.CompilationError as e:
     print(f"Compilation error: {e}")
-except xlog_gpu.ExecutionError as e:
+except pyxlog.ExecutionError as e:
     print(f"Execution error: {e}")
-except xlog_gpu.ResourceExhaustedError as e:
+except pyxlog.ResourceExhaustedError as e:
     print(f"OOM: {e}")
 ```
 
@@ -236,13 +236,13 @@ except xlog_gpu.ResourceExhaustedError as e:
 
 ```python
 import torch
-import xlog_gpu
+import pyxlog
 
 # Define a neural-symbolic model
 class XlogLayer(torch.nn.Module):
     def __init__(self, source):
         super().__init__()
-        self.program = xlog_gpu.Program.compile(source, prob_engine="exact_ddnnf")
+        self.program = pyxlog.Program.compile(source, prob_engine="exact_ddnnf")
         self.weights = torch.nn.Parameter(torch.tensor([0.3, 0.7]))
 
     def forward(self, evidence):

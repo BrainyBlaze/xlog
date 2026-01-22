@@ -9,7 +9,7 @@ Eliminate D4 recompilation bottleneck by caching compiled circuits and reusing t
 ## Problem
 
 ```
-forward_backward_complex() @ xlog-gpu-py/src/lib.rs:943
+forward_backward_complex() @ pyxlog/src/lib.rs:943
     → ExactDdnnfProgram::compile_source_with_gpu()  // D4 called EVERY time
     → 50 queries/epoch × 120ms = 6 seconds of CPU blocking
 ```
@@ -132,7 +132,7 @@ fn update_circuit_weights(
 
 | File | Change |
 |------|--------|
-| `crates/xlog-gpu-py/src/lib.rs` | Add cache to CompiledProgram, modify forward_backward_complex |
+| `crates/pyxlog/src/lib.rs` | Add cache to CompiledProgram, modify forward_backward_complex |
 | `crates/xlog-prob/src/exact.rs` | Add method to update weights without recompile |
 
 ## Performance Impact

@@ -13,18 +13,18 @@
 ## Task 1: Add CachedCircuit Data Structures
 
 **Files:**
-- Modify: `crates/xlog-gpu-py/src/lib.rs:1-30` (imports)
-- Modify: `crates/xlog-gpu-py/src/lib.rs:293-309` (CompiledProgram struct)
+- Modify: `crates/pyxlog/src/lib.rs:1-30` (imports)
+- Modify: `crates/pyxlog/src/lib.rs:293-309` (CompiledProgram struct)
 
 **Step 1: Write the test for CachedCircuit creation**
 
 Create test file:
 ```rust
-// In crates/xlog-gpu-py/tests/circuit_cache_test.rs
+// In crates/pyxlog/tests/circuit_cache_test.rs
 // Note: This is an integration test that will be run after implementation
 ```
 
-Since xlog-gpu-py is a Python extension, we'll test via Python tests later. First, add the structures.
+Since pyxlog is a Python extension, we'll test via Python tests later. First, add the structures.
 
 **Step 2: Add data structures to lib.rs**
 
@@ -91,13 +91,13 @@ In `Program::compile` (around line 266), add `circuit_cache: StdHashMap::new()` 
 
 **Step 5: Build and verify compilation**
 
-Run: `cd /home/dev/xlog/.worktrees/feature-circuit-caching && cargo build -p xlog-gpu-py --release 2>&1 | head -50`
+Run: `cd /home/dev/xlog/.worktrees/feature-circuit-caching && cargo build -p pyxlog --release 2>&1 | head -50`
 Expected: Compiles without errors
 
 **Step 6: Commit**
 
 ```bash
-git add crates/xlog-gpu-py/src/lib.rs
+git add crates/pyxlog/src/lib.rs
 git commit -m "feat(cache): add CachedCircuit data structures for circuit caching"
 ```
 
@@ -106,7 +106,7 @@ git commit -m "feat(cache): add CachedCircuit data structures for circuit cachin
 ## Task 2: Implement Cache Key Generation
 
 **Files:**
-- Modify: `crates/xlog-gpu-py/src/lib.rs` (add method to impl CompiledProgram)
+- Modify: `crates/pyxlog/src/lib.rs` (add method to impl CompiledProgram)
 
 **Step 1: Add generate_cache_key method**
 
@@ -127,13 +127,13 @@ fn generate_cache_key(&self, pred_name: &str, num_inputs: usize, num_labels: usi
 
 **Step 2: Build and verify**
 
-Run: `cd /home/dev/xlog/.worktrees/feature-circuit-caching && cargo build -p xlog-gpu-py --release 2>&1 | head -20`
+Run: `cd /home/dev/xlog/.worktrees/feature-circuit-caching && cargo build -p pyxlog --release 2>&1 | head -20`
 Expected: Compiles without errors
 
 **Step 3: Commit**
 
 ```bash
-git add crates/xlog-gpu-py/src/lib.rs
+git add crates/pyxlog/src/lib.rs
 git commit -m "feat(cache): add cache key generation for circuit templates"
 ```
 
@@ -142,7 +142,7 @@ git commit -m "feat(cache): add cache key generation for circuit templates"
 ## Task 3: Extract Circuit Compilation to Separate Method
 
 **Files:**
-- Modify: `crates/xlog-gpu-py/src/lib.rs:939-971` (forward_backward_complex)
+- Modify: `crates/pyxlog/src/lib.rs:939-971` (forward_backward_complex)
 
 **Step 1: Create compile_circuit_for_template method**
 
@@ -192,13 +192,13 @@ fn compile_circuit_for_template(
 
 **Step 2: Build and verify**
 
-Run: `cd /home/dev/xlog/.worktrees/feature-circuit-caching && cargo build -p xlog-gpu-py --release 2>&1 | head -20`
+Run: `cd /home/dev/xlog/.worktrees/feature-circuit-caching && cargo build -p pyxlog --release 2>&1 | head -20`
 Expected: Compiles without errors
 
 **Step 3: Commit**
 
 ```bash
-git add crates/xlog-gpu-py/src/lib.rs
+git add crates/pyxlog/src/lib.rs
 git commit -m "feat(cache): extract circuit compilation to separate method"
 ```
 
@@ -207,7 +207,7 @@ git commit -m "feat(cache): extract circuit compilation to separate method"
 ## Task 4: Implement Weight Update for Cached Circuits
 
 **Files:**
-- Modify: `crates/xlog-gpu-py/src/lib.rs`
+- Modify: `crates/pyxlog/src/lib.rs`
 
 **Step 1: Add update_circuit_weights method**
 
@@ -258,13 +258,13 @@ fn update_circuit_weights(
 
 **Step 2: Build and verify**
 
-Run: `cd /home/dev/xlog/.worktrees/feature-circuit-caching && cargo build -p xlog-gpu-py --release 2>&1 | head -20`
+Run: `cd /home/dev/xlog/.worktrees/feature-circuit-caching && cargo build -p pyxlog --release 2>&1 | head -20`
 Expected: Compiles without errors
 
 **Step 3: Commit**
 
 ```bash
-git add crates/xlog-gpu-py/src/lib.rs
+git add crates/pyxlog/src/lib.rs
 git commit -m "feat(cache): implement weight update for cached circuits"
 ```
 
@@ -273,7 +273,7 @@ git commit -m "feat(cache): implement weight update for cached circuits"
 ## Task 5: Modify forward_backward_complex to Use Cache
 
 **Files:**
-- Modify: `crates/xlog-gpu-py/src/lib.rs:894-971` (forward_backward_complex)
+- Modify: `crates/pyxlog/src/lib.rs:894-971` (forward_backward_complex)
 
 **Step 1: Rewrite forward_backward_complex with caching**
 
@@ -410,13 +410,13 @@ fn forward_backward_complex(&mut self, py: Python<'_>, query: &str) -> PyResult<
 
 **Step 2: Build and check for errors**
 
-Run: `cd /home/dev/xlog/.worktrees/feature-circuit-caching && cargo build -p xlog-gpu-py --release 2>&1`
+Run: `cd /home/dev/xlog/.worktrees/feature-circuit-caching && cargo build -p pyxlog --release 2>&1`
 Expected: Will fail because `evaluate_gpu_with_grads_weights` doesn't exist yet (Task 6)
 
 **Step 3: Commit partial progress**
 
 ```bash
-git add crates/xlog-gpu-py/src/lib.rs
+git add crates/pyxlog/src/lib.rs
 git commit -m "feat(cache): integrate circuit caching into forward_backward_complex"
 ```
 
@@ -561,12 +561,12 @@ Expected: All tests pass
 
 **Step 3: Build Python wheel**
 
-Run: `cd /home/dev/xlog/.worktrees/feature-circuit-caching && maturin build --release -m crates/xlog-gpu-py/Cargo.toml 2>&1 | tail -20`
+Run: `cd /home/dev/xlog/.worktrees/feature-circuit-caching && maturin build --release -m crates/pyxlog/Cargo.toml 2>&1 | tail -20`
 Expected: Wheel builds successfully
 
 **Step 4: Install wheel**
 
-Run: `pip install --force-reinstall /home/dev/xlog/.worktrees/feature-circuit-caching/target/wheels/xlog_gpu-*.whl`
+Run: `pip install --force-reinstall /home/dev/xlog/.worktrees/feature-circuit-caching/target/wheels/pyxlog-*.whl`
 Expected: Installs without errors
 
 ---
@@ -591,7 +591,7 @@ import pytest
 import time
 
 torch = pytest.importorskip("torch")
-xlog_gpu = pytest.importorskip("xlog_gpu")
+pyxlog = pytest.importorskip("pyxlog")
 
 
 class SimpleNet(torch.nn.Module):
@@ -615,7 +615,7 @@ class TestCircuitCache:
 nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
 addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
 """
-        program = xlog_gpu.Program.compile(source)
+        program = pyxlog.Program.compile(source)
 
         # Register network
         net = SimpleNet(10)
@@ -654,7 +654,7 @@ addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
 nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
 addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
 """
-        program = xlog_gpu.Program.compile(source)
+        program = pyxlog.Program.compile(source)
 
         net = SimpleNet(10)
         optimizer = torch.optim.Adam(net.parameters(), lr=0.001)
@@ -677,7 +677,7 @@ addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
         # Use deterministic initialization
         torch.manual_seed(42)
 
-        program = xlog_gpu.Program.compile(source)
+        program = pyxlog.Program.compile(source)
 
         net = SimpleNet(10)
         optimizer = torch.optim.Adam(net.parameters(), lr=0.001)
@@ -710,7 +710,7 @@ class TestCachePerformance:
 nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
 addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
 """
-        program = xlog_gpu.Program.compile(source)
+        program = pyxlog.Program.compile(source)
 
         net = SimpleNet(10)
         optimizer = torch.optim.Adam(net.parameters(), lr=0.001)

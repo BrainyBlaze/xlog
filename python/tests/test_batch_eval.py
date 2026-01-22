@@ -8,9 +8,9 @@ Run with: pytest python/tests/test_batch_eval.py -v
 
 import pytest
 
-# Skip all tests if xlog_gpu or torch not available
+# Skip all tests if pyxlog or torch not available
 torch = pytest.importorskip("torch")
-xlog_gpu = pytest.importorskip("xlog_gpu")
+pyxlog = pytest.importorskip("pyxlog")
 
 
 class MNISTNet(torch.nn.Module):
@@ -29,7 +29,7 @@ class TestBatchedEvaluation:
 
     def test_register_network_for_batching(self):
         """Test that networks can be registered with batching enabled."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
         """)
 
@@ -43,7 +43,7 @@ class TestBatchedEvaluation:
 
     def test_register_network_batching_disabled(self):
         """Test that networks can be registered with batching disabled."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(serial_net, [X], Y, [0,1]) :: classify(X, Y).
         """)
 
@@ -57,7 +57,7 @@ class TestBatchedEvaluation:
 
     def test_multiple_networks_batched(self):
         """Test that multiple networks can be batched independently."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(encoder, [X], E) :: encode(X, E).
             nn(classifier, [E], Y, [0,1,2]) :: classify(E, Y).
         """)
@@ -82,7 +82,7 @@ class TestBatchingConfiguration:
 
     def test_batch_with_top_k(self):
         """Test batching with top-k probability filtering."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(large_vocab, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: word(X, Y).
         """)
 
@@ -98,7 +98,7 @@ class TestBatchingConfiguration:
 
     def test_batch_deterministic_mode(self):
         """Test batching with deterministic (argmax) mode."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(det_net, [X], Y, [a, b]) :: pred(X, Y).
         """)
 
@@ -114,7 +114,7 @@ class TestBatchingConfiguration:
 
     def test_batch_with_cache(self):
         """Test batching with output caching."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(cached_net, [X], Y, [0,1]) :: cached_pred(X, Y).
         """)
 
@@ -137,7 +137,7 @@ class TestBatchedProgramStructure:
 
     def test_addition_program_structure(self):
         """Test the MNIST addition program structure."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(digit_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
             addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
         """)
@@ -148,7 +148,7 @@ class TestBatchedProgramStructure:
 
     def test_multi_digit_program(self):
         """Test multi-digit number recognition program."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(digit_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
             number(D1, D2, D3, N) :-
                 digit(D1, V1), digit(D2, V2), digit(D3, V3),
@@ -160,7 +160,7 @@ class TestBatchedProgramStructure:
 
     def test_sequence_labeling_structure(self):
         """Test sequence labeling program structure."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(tagger, [W], T, [noun, verb, adj]) :: tag(W, T).
             valid_sequence(W1, W2, W3) :-
                 tag(W1, T1), tag(W2, T2), tag(W3, T3),

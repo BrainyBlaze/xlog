@@ -8,7 +8,7 @@ description = "Neural network integration for XLOG probabilistic logic"
 
 [features]
 default = []
-# Enable Python interop via PyO3 - use this when building with xlog-gpu-py
+# Enable Python interop via PyO3 - use this when building with pyxlog
 python = ["pyo3"]
 
 [dependencies]

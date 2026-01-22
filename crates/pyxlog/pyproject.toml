@@ -3,9 +3,9 @@ requires = ["maturin>=1.5"]
 build-backend = "maturin"
 
 [project]
-name = "xlog-gpu"
-version = "0.2.0"
-description = "GPU-accelerated XLOG (PyO3 bindings)"
+name = "pyxlog"
+version = "0.4.0"
+description = "GPU-accelerated XLOG probabilistic logic programming (PyO3 bindings)"
 requires-python = ">=3.8"
 classifiers = [
   "Programming Language :: Rust",
@@ -14,5 +14,5 @@ classifiers = [
 ]
 
 [tool.maturin]
-module-name = "xlog_gpu"
+module-name = "pyxlog"
 features = ["pyo3/extension-module"]

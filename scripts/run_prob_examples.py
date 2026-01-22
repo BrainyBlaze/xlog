@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from xlog_gpu import Program
+from pyxlog import Program
 
 
 def main() -> None:

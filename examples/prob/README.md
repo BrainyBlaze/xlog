@@ -8,7 +8,7 @@ These `.xlog` files exercise the Phase 4 probabilistic surface:
 - probabilistic queries (`query(atom).`)
 - explicit P3 opt-in for non-monotone recursion (`#pragma prob_engine = mc`)
 
-Run them via the Python bindings (`crates/xlog-gpu-py`) or from a small Rust driver using:
+Run them via the Python bindings (`crates/pyxlog`) or from a small Rust driver using:
 
 - `xlog_prob::exact::ExactDdnnfProgram` (exact)
 - `xlog_prob::mc::McProgram` (approximate, explicit opt-in via `prob_engine=mc`)

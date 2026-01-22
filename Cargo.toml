@@ -8,7 +8,7 @@ members = [
     "crates/xlog-logic",
     "crates/xlog-prob",
     "crates/xlog-gpu",
-    "crates/xlog-gpu-py",
+    "crates/pyxlog",
     "crates/xlog-stats",
     "crates/xlog-solve",
     "crates/xlog-cuda-tests",

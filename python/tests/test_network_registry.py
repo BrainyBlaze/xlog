@@ -1,7 +1,7 @@
 """Tests for neural network registration API.
 
 These tests require:
-1. xlog_gpu Python module built and installed (maturin develop)
+1. pyxlog Python module built and installed (maturin develop)
 2. PyTorch installed
 
 Run with: pytest python/tests/test_network_registry.py -v
@@ -9,9 +9,9 @@ Run with: pytest python/tests/test_network_registry.py -v
 
 import pytest
 
-# Skip all tests if xlog_gpu or torch not available
+# Skip all tests if pyxlog or torch not available
 torch = pytest.importorskip("torch")
-xlog_gpu = pytest.importorskip("xlog_gpu")
+pyxlog = pytest.importorskip("pyxlog")
 
 
 class SimpleNet(torch.nn.Module):
@@ -41,7 +41,7 @@ class TestNetworkRegistration:
 
     def test_register_network_basic(self):
         """Test basic network registration."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(test_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
         """)
 
@@ -54,7 +54,7 @@ class TestNetworkRegistration:
 
     def test_register_network_with_scheduler(self):
         """Test network registration with learning rate scheduler."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(test_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
         """)
 
@@ -76,7 +76,7 @@ class TestNetworkRegistration:
 
     def test_register_network_deterministic(self):
         """Test network registration in deterministic mode."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(det_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
         """)
 
@@ -91,7 +91,7 @@ class TestNetworkRegistration:
 
     def test_register_network_undeclared_fails(self):
         """Test that registering an undeclared network fails."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(declared_net, [X], Y, [0,1]) :: pred(X, Y).
         """)
 
@@ -103,7 +103,7 @@ class TestNetworkRegistration:
 
     def test_register_multiple_networks(self):
         """Test registering multiple networks."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(net1, [X], Y1, [0,1,2,3,4,5,6,7,8,9]) :: digit1(X, Y1).
             nn(net2, [X], Y2, [0,1,2,3,4,5,6,7,8,9]) :: digit2(X, Y2).
             addition(X, Y, Z) :- digit1(X, D1), digit2(Y, D2), Z is D1 + D2.
@@ -124,7 +124,7 @@ class TestNetworkRegistration:
 
     def test_declared_network_names(self):
         """Test getting declared network names from nn() declarations."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(alpha, [X], Y, [0,1]) :: pred_a(X, Y).
             nn(beta, [X], Y, [0,1]) :: pred_b(X, Y).
             nn(gamma, [X], Y, [0,1]) :: pred_c(X, Y).
@@ -138,7 +138,7 @@ class TestNetworkRegistration:
 
     def test_has_neural_predicate(self):
         """Test checking if a network is declared."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(exists, [X], Y, [0,1]) :: pred(X, Y).
         """)
 
@@ -147,7 +147,7 @@ class TestNetworkRegistration:
 
     def test_set_train_mode(self):
         """Test setting training mode for all networks."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(train_net, [X], Y, [0,1]) :: pred(X, Y).
         """)
 
@@ -163,7 +163,7 @@ class TestNetworkRegistration:
 
     def test_embedding_network(self):
         """Test registering an embedding network (no labels)."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(encoder, [X], Embedding) :: encode(X, Embedding).
         """)
 
@@ -180,7 +180,7 @@ class TestNetworkRegistrationEdgeCases:
 
     def test_empty_program_no_networks(self):
         """Test that a program without nn() has no declared networks."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             edge(1, 2).
             reach(X, Y) :- edge(X, Y).
         """)
@@ -190,7 +190,7 @@ class TestNetworkRegistrationEdgeCases:
 
     def test_network_with_symbol_labels(self):
         """Test network with symbol labels."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(coin_net, [X], Y, [heads, tails]) :: coin(X, Y).
         """)
 
@@ -203,7 +203,7 @@ class TestNetworkRegistrationEdgeCases:
 
     def test_network_with_multiple_inputs(self):
         """Test network with multiple input variables."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(multi_net, [X, Y, Z], Out, [0,1,2]) :: classify(X, Y, Z, Out).
         """)
 

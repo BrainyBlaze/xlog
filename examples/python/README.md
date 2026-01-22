@@ -1,11 +1,11 @@
-# Python Examples (`xlog-gpu`)
+# Python Examples (`pyxlog`)
 
-These scripts demonstrate the `xlog_gpu` Python module (built from `crates/xlog-gpu-py`) using **DLPack** for GPU table interchange.
+These scripts demonstrate the `pyxlog` Python module (built from `crates/pyxlog`) using **DLPack** for GPU table interchange.
 
 ## Build (wheel) locally
 
 ```bash
-cd crates/xlog-gpu-py
+cd crates/pyxlog
 python -m pip install --upgrade pip maturin
 maturin develop --release
 ```

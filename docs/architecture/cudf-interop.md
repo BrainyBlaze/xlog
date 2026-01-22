@@ -44,7 +44,7 @@ print(df)
 DLPack provides a GPU-native interchange path that avoids host copies. The current implementation includes:
 - ✅ DLPack export (current): produces DLPack `DLManagedTensor` pointers for each column without copies
 - ✅ DLPack import (current): consumes DLPack `DLManagedTensor` pointers and wraps them without copies
-- ✅ Python capsule/FFI layer (Phase 4): `crates/xlog-gpu-py` builds a `xlog_gpu` module via `maturin` that:
+- ✅ Python capsule/FFI layer (Phase 4): `crates/pyxlog` builds a `pyxlog` module via `maturin` that:
   - accepts DLPack capsules / `__dlpack__` producers for input relations
   - returns DLPack capsules for query result columns
   - provides a `dlpack_roundtrip(...)` helper for low-level DLPack validation
@@ -56,7 +56,7 @@ This uses cuDF as a DLPack producer and round-trips a GPU column through XLOG’
 ```python
 import cupy as cp
 import cudf
-from xlog_gpu import dlpack_roundtrip
+from pyxlog import dlpack_roundtrip
 
 s = cudf.Series([1, 2, 3], dtype="int32")
 

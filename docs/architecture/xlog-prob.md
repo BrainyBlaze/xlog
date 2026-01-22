@@ -27,7 +27,7 @@ This document explains the implementation as it exists on `main` and points to c
 - `kernels/mc_sample.cu` / `kernels/mc_sample.ptx`: Bernoulli sampling kernel used by `mc`
 
 ### Python bindings (DLPack-first)
-- `crates/xlog-gpu-py/src/lib.rs`: `xlog_gpu` module (PyO3)
+- `crates/pyxlog/src/lib.rs`: `pyxlog` module (PyO3)
   - Probabilistic API: `Program.compile(..., prob_engine="exact_ddnnf"|"mc")`
   - Deterministic API: `LogicProgram.compile(...)`
 
@@ -170,9 +170,9 @@ For each query, `mc` estimates `P(Q|E)` as a binomial proportion and reports:
 
 ---
 
-## Python API (`xlog_gpu`)
+## Python API (`pyxlog`)
 
-The PyO3 extension `crates/xlog-gpu-py` exposes two entry points:
+The PyO3 extension `crates/pyxlog` exposes two entry points:
 
 - `Program.compile(source, device=0, memory_mb=1024, prob_engine=None) -> CompiledProgram`
   - `CompiledProgram.evaluate(return_grads=False, ...) -> EvalResult`
@@ -209,7 +209,7 @@ cargo test -p xlog-cuda-tests --test certification_suite --release -- --nocaptur
 ### Python examples (local wheel)
 
 ```bash
-cd crates/xlog-gpu-py
+cd crates/pyxlog
 python -m pip install --upgrade pip maturin
 maturin develop --release
 python ../../examples/python/03_prob_mc_nonmonotone_torch.py

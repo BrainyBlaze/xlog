@@ -8,9 +8,9 @@ Run with: pytest python/tests/test_tensor_source.py -v
 
 import pytest
 
-# Skip all tests if xlog_gpu or torch not available
+# Skip all tests if pyxlog or torch not available
 torch = pytest.importorskip("torch")
-xlog_gpu = pytest.importorskip("xlog_gpu")
+pyxlog = pytest.importorskip("pyxlog")
 
 
 class TestTensorSourceBasics:
@@ -18,7 +18,7 @@ class TestTensorSourceBasics:
 
     def test_add_tensor_source(self):
         """Test adding a tensor source."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(digit_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
         """)
 
@@ -30,7 +30,7 @@ class TestTensorSourceBasics:
 
     def test_first_source_becomes_active(self):
         """Test that the first source added becomes active automatically."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(net, [X], Y, [a, b]) :: pred(X, Y).
         """)
 
@@ -41,7 +41,7 @@ class TestTensorSourceBasics:
 
     def test_multiple_tensor_sources(self):
         """Test adding multiple tensor sources."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(classifier, [X], Y, [0,1,2]) :: classify(X, Y).
         """)
 
@@ -61,7 +61,7 @@ class TestTensorSourceBasics:
 
     def test_set_active_tensor_source(self):
         """Test switching the active tensor source."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(net, [X], Y, [0,1]) :: pred(X, Y).
         """)
 
@@ -81,7 +81,7 @@ class TestTensorSourceBasics:
 
     def test_set_invalid_active_source_raises(self):
         """Test that setting an invalid active source raises an error."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(net, [X], Y, [0,1]) :: pred(X, Y).
         """)
 
@@ -94,7 +94,7 @@ class TestTensorSourceMetadata:
 
     def test_active_tensor_source_size(self):
         """Test getting the size of the active source."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(net, [X], Y, [0,1]) :: pred(X, Y).
         """)
 
@@ -103,7 +103,7 @@ class TestTensorSourceMetadata:
 
     def test_tensor_source_size_with_switch(self):
         """Test size changes when switching active source."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(net, [X], Y, [0,1]) :: pred(X, Y).
         """)
 
@@ -117,7 +117,7 @@ class TestTensorSourceMetadata:
 
     def test_has_tensor_source(self):
         """Test checking if a tensor source exists."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(net, [X], Y, [0,1]) :: pred(X, Y).
         """)
 
@@ -134,7 +134,7 @@ class TestTensorSourceShapes:
 
     def test_1d_tensor(self):
         """Test 1D tensor (vector per sample)."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(net, [X], Y, [0,1]) :: pred(X, Y).
         """)
 
@@ -144,7 +144,7 @@ class TestTensorSourceShapes:
 
     def test_2d_tensor_grayscale(self):
         """Test 2D tensor (grayscale images)."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
         """)
 
@@ -154,7 +154,7 @@ class TestTensorSourceShapes:
 
     def test_3d_tensor_rgb(self):
         """Test 3D tensor (RGB images)."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(imagenet, [X], Y, [cat, dog, bird]) :: classify(X, Y).
         """)
 
@@ -168,7 +168,7 @@ class TestTensorSourceDtypes:
 
     def test_float32_tensor(self):
         """Test float32 tensor (default)."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(net, [X], Y, [0,1]) :: pred(X, Y).
         """)
 
@@ -178,7 +178,7 @@ class TestTensorSourceDtypes:
 
     def test_float64_tensor(self):
         """Test float64 tensor."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(net, [X], Y, [0,1]) :: pred(X, Y).
         """)
 
@@ -188,7 +188,7 @@ class TestTensorSourceDtypes:
 
     def test_int_tensor(self):
         """Test integer tensor (for label data)."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(net, [X], Y, [0,1]) :: pred(X, Y).
         """)
 
@@ -203,7 +203,7 @@ class TestTensorSourceIntegration:
 
     def test_mnist_addition_setup(self):
         """Test setting up tensor sources for MNIST addition."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(digit_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
             addition(I1, I2, Sum) :-
                 digit(I1, D1),
@@ -231,7 +231,7 @@ class TestTensorSourceIntegration:
 
     def test_sequence_labeling_setup(self):
         """Test setting up tensor sources for sequence labeling."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(tagger, [W], T, [noun, verb, adj, det]) :: pos_tag(W, T).
             valid_phrase(W1, W2, W3) :-
                 pos_tag(W1, det),
@@ -248,7 +248,7 @@ class TestTensorSourceIntegration:
 
     def test_multi_network_different_sources(self):
         """Test multiple networks with different tensor sources."""
-        program = xlog_gpu.Program.compile("""
+        program = pyxlog.Program.compile("""
             nn(image_encoder, [I], E) :: encode_image(I, E).
             nn(text_encoder, [T], E) :: encode_text(T, E).
             nn(classifier, [E], C, [match, no_match]) :: classify(E, C).

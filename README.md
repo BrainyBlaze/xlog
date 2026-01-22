@@ -2,8 +2,9 @@
 
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
 [![CUDA Tests](https://img.shields.io/badge/CUDA%20tests-140%2F140-brightgreen.svg)](docs/certification/2026-01-14-cuda-certification-results.md)
+[![Version](https://img.shields.io/badge/version-v0.4.0--alpha-blue.svg)](CHANGELOG.md)
 
-**XLOG** is a GPU-accelerated Datalog query engine. It compiles declarative logic programs into optimized relational plans and executes them on NVIDIA GPUs, achieving high throughput for recursive queries, graph analytics, and probabilistic inference.
+**XLOG** is a GPU-accelerated Datalog query engine with neural-symbolic integration. It compiles declarative logic programs into optimized relational plans and executes them on NVIDIA GPUs, achieving high throughput for recursive queries, graph analytics, probabilistic inference, and neural-symbolic training.
 
 ---
 
@@ -19,7 +20,8 @@
 | **GPU Operators** | Hash joins, radix sort, filter, dedup, union, difference, groupby |
 | **Float Predicates** | IEEE 754 total ordering for `f32`/`f64` (`NaN > Inf > nums > +0 > -0 > -Inf`) |
 | **Probabilistic** | Exact inference (knowledge compilation), Monte Carlo sampling, negation (stratified + WFS) |
-| **Interop** | Arrow IPC, DLPack (zero-copy), Python bindings |
+| **Neural-Symbolic** | Neural predicates (`nn/4`), PyTorch integration, differentiable training, circuit caching |
+| **Interop** | Arrow IPC, DLPack (zero-copy), Python bindings, PyTorch autograd |
 | **Profiling** | `--stats` flag for per-stratum/per-operation timing, memory tracking |
 
 ---
@@ -46,7 +48,7 @@ The `xlog` CLI binary will be at `target/release/xlog`.
 ### Python Package
 
 ```bash
-cd crates/xlog-gpu-py
+cd crates/pyxlog
 pip install maturin
 maturin develop --release
 ```
@@ -125,7 +127,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### Run with Python
 
 ```python
-import xlog_gpu
+import pyxlog
 
 source = """
 pred edge(u32, u32).
@@ -139,7 +141,7 @@ reach(X, Z) :- reach(X, Y), edge(Y, Z).
 ?- reach(1, N).
 """
 
-program = xlog_gpu.LogicProgram.compile(source)
+program = pyxlog.LogicProgram.compile(source)
 results = program.evaluate()
 
 # Results are DLPack tensors (zero-copy GPU data)
@@ -207,6 +209,114 @@ query(p).
 ```
 
 Gradients flow correctly through negated literals for neural-symbolic training.
+
+---
+
+## Neural-Symbolic Training (v0.4.0-alpha)
+
+XLOG supports neural-symbolic integration where neural network outputs become probabilistic facts in logic programs.
+
+### Neural Predicates
+
+Define neural networks as probabilistic fact generators:
+
+```prolog
+% Neural predicate: network outputs become probabilities for digit classification
+nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
+
+% Logic rule using neural outputs
+addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
+```
+
+### Training from Logic Supervision
+
+Train neural networks using only logical constraints — no direct labels required:
+
+```python
+import pyxlog
+import torch
+import torch.nn as nn
+
+# Define a CNN for MNIST
+class MNISTNet(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.conv1 = nn.Conv2d(1, 6, 5)
+        self.pool = nn.MaxPool2d(2, 2)
+        self.conv2 = nn.Conv2d(6, 16, 5)
+        self.fc1 = nn.Linear(16 * 4 * 4, 120)
+        self.fc2 = nn.Linear(120, 84)
+        self.fc3 = nn.Linear(84, 10)
+
+    def forward(self, x):
+        x = self.pool(torch.relu(self.conv1(x)))
+        x = self.pool(torch.relu(self.conv2(x)))
+        x = x.view(-1, 16 * 4 * 4)
+        x = torch.relu(self.fc1(x))
+        x = torch.relu(self.fc2(x))
+        return torch.softmax(self.fc3(x), dim=-1)
+
+# Compile the neural-symbolic program
+program = pyxlog.Program.compile("""
+    nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
+    addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
+""")
+
+# Register PyTorch network with optimizer
+net = MNISTNet().cuda()
+optimizer = torch.optim.Adam(net.parameters(), lr=1e-3)
+program.register_network("mnist_net", net, optimizer)
+
+# Load MNIST images as tensor source
+program.add_tensor_source("train", train_images)  # [60000, 1, 28, 28]
+
+# Generate training queries from addition labels
+# The network learns digit classification from sum supervision only!
+queries = []
+for i in range(0, len(train_labels), 2):
+    expected_sum = train_labels[i] + train_labels[i+1]
+    queries.append(f"addition({i}, {i+1}, {expected_sum})")
+
+# Train the model
+history = pyxlog.train_model(
+    program,
+    queries,
+    epochs=50,
+    batch_size=32,
+    log_iter=10
+)
+
+print(f"Initial loss: {history.epoch_losses[0]:.4f}")
+print(f"Final loss: {history.epoch_losses[-1]:.4f}")
+```
+
+### How It Works
+
+1. **Neural predicates** declare that a network provides probability distributions
+2. **Forward pass**: Network outputs become weights in annotated disjunctions
+3. **Knowledge compilation**: Logic program compiled to d-DNNF circuit
+4. **Weighted model counting**: Circuit evaluated for query probability
+5. **Backward pass**: Gradients flow from loss through circuit back to network
+6. **Circuit caching**: Compiled circuits reused across training iterations (100x+ speedup)
+
+### Training API
+
+```python
+# Single query forward-backward
+prob, grads = program.forward_backward("addition(0, 1, 7)")
+
+# Batch training with optimizer step
+avg_loss = program.train_epoch(queries, batch_size=32)
+
+# Full training loop with logging
+history = pyxlog.train_model(
+    program,
+    queries,
+    epochs=50,
+    batch_size=32,
+    log_iter=10,  # Log every 10 batches
+)
+```
 
 ---
 
@@ -400,8 +510,10 @@ xlog run --help
 | [Roadmap](docs/ROADMAP.md) | Feature status and development plans |
 | [Benchmarks](docs/BENCHMARKS.md) | Performance methodology and baseline metrics |
 | [Probabilistic Tier](docs/architecture/xlog-prob.md) | Exact and Monte Carlo inference |
+| [Neural-Symbolic Design](docs/plans/2026-01-20-v0.4.0-neural-symbolic-design.md) | v0.4.0 neural-symbolic integration design |
 | [Data Interop](docs/architecture/cudf-interop.md) | Arrow and DLPack integration |
 | [Examples](examples/) | Annotated example programs |
+| [Neural Examples](examples/neural/) | Neural-symbolic training examples |
 | [v0.3.2 Showcase](examples/xlog/80-v032-showcase/) | Production-grade multi-module examples |
 | [CUDA Certification](docs/certification/2026-01-14-cuda-certification-results.md) | Test coverage (140/140 passing) |
 
@@ -418,14 +530,19 @@ xlog/
 │   ├── xlog-runtime/    # Query executor
 │   ├── xlog-cuda/       # GPU kernels and memory management
 │   ├── xlog-stats/      # Runtime statistics and optimizer feedback
-│   ├── xlog-prob/       # Probabilistic inference
+│   ├── xlog-prob/       # Probabilistic inference (exact + MC)
+│   ├── xlog-neural/     # Neural-symbolic integration (v0.4.0)
 │   ├── xlog-solve/      # Solver services (SAT/MaxSAT)
 │   ├── xlog-gpu/        # High-level Rust API
-│   ├── xlog-gpu-py/     # Python bindings
+│   ├── pyxlog/          # Python bindings + training API
 │   ├── xlog-cli/        # Command-line interface
 │   └── xlog-cuda-tests/ # CUDA certification suite
 ├── kernels/             # CUDA kernel sources (.cu)
 ├── examples/            # Example .xlog programs
+│   ├── xlog/            # Deterministic Datalog examples
+│   ├── prob/            # Probabilistic examples
+│   ├── python/          # Python API examples
+│   └── neural/          # Neural-symbolic training examples
 └── docs/                # Documentation
 ```
 
@@ -480,7 +597,7 @@ at your option.
 
 ## Acknowledgments
 
-XLOG builds on research in GPU-accelerated Datalog and probabilistic logic programming:
+XLOG builds on research in GPU-accelerated Datalog, probabilistic logic programming, and neural-symbolic AI:
 
 - [GPUlog](https://dl.acm.org/doi/10.1145/3183713.3183727) — HISA indexing, parallel fixpoint
 - [VFLog](https://dl.acm.org/doi/10.1145/3639310) — Columnar GPU Datalog
