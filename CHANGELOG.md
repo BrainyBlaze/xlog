@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## v0.4.0-alpha — 2026-01-21 — Neural-Symbolic Integration
+## v0.4.0-alpha — 2026-01-22 — Neural-Symbolic Integration
 
 First alpha release of the neural-symbolic integration layer, enabling differentiable training where neural network outputs become probabilistic facts in logic programs.
 
@@ -71,6 +71,15 @@ First alpha release of the neural-symbolic integration layer, enabling different
 - Non-monotone (cyclic) negation via Well-Founded Semantics (WFS)
 - Exact gradients flow through negated literals for neural-symbolic training
 
+**GPU Certification Suite (G01-G06):**
+- G01: Circuit Forward Kernel tests (8 tests) — `xgcf_forward_level` PTX validation
+- G02: Circuit Backward Kernel tests (12 tests) — gradient computation verification
+- G03: Weight Injection tests (6 tests) — GPU weight buffer management
+- G04: Transfer Efficiency tests (8 tests) — 0% CPU bottleneck verification
+- G05: Circuit Cache tests (6 tests) — GpuXgcf reuse, D4 elimination
+- G06: PTX Robustness tests (10 tests) — large circuits, edge cases, numerical stability
+- Total: 50 new GPU-focused tests validating neural-symbolic kernel correctness
+
 **PIR Extension:**
 - `NegLit { leaf: LeafId }` node for negated probabilistic leaves
 - NNF (Negation Normal Form) transformation pushes negation to leaves
@@ -89,6 +98,10 @@ First alpha release of the neural-symbolic integration layer, enabling different
 
 ### Changed
 
+- **Python package renamed from `xlog-gpu` to `pyxlog`** — cleaner, more memorable name
+  - All imports: `import pyxlog` (was `import xlog_gpu`)
+  - Crate renamed: `crates/pyxlog` (was `crates/xlog-gpu-py`)
+  - PyPI package: `pyxlog` (was `xlog-gpu`)
 - Stratification analysis now tracks edge polarity for non-monotone detection
 - Provenance extraction routes non-monotone SCCs to WFS evaluation
 - CNF encoding emits Tseitin clauses for `NegLit` with negated polarity
@@ -104,10 +117,18 @@ First alpha release of the neural-symbolic integration layer, enabling different
 | Handle | `xlog-neural/src/handle.rs` | `NetworkHandle` with PyO3 objects |
 | Bridge | `xlog-neural/src/bridge.rs` | `NeuralBridge`, `NeuralOutput` |
 | Tensor | `xlog-neural/src/tensor_source.rs` | `TensorSourceRegistry` |
-| Python | `pyxlog/src/lib.rs` | Full training API |
+| Python | `crates/pyxlog/src/lib.rs` | Full training API |
 | PIR | `pir.rs` | `NegLit` variant |
 | WFS | `wfs.rs` | Well-Founded Semantics (1,461 lines) |
 | Exact | `exact.rs` | `random_var_indices()`, `evaluate_gpu_with_grads_weights()` |
+| G01-G06 | `xlog-cuda-tests/src/categories/g0*.rs` | GPU certification tests (50 tests) |
+
+### Validation
+
+- **CUDA Certification Suite:** 200/200 tests passed (C01-C25 + G01-G06)
+- **Python Tests:** 109/109 tests passed
+- **Spec Alignment:** All 50 G01-G06 tests match specification
+- **Code Quality:** No stubs, placeholders, or TODOs
 
 ### Example: MNIST Addition Training
 
