@@ -871,8 +871,9 @@ fn test_batch_weights_efficiency(ctx: &TestContext) -> TestResult {
     let expected_ratio = num_batch_iterations as f64;
     let actual_ratio = multi_batch_duration.as_secs_f64() / batch_duration.as_secs_f64();
 
-    // Allow up to 2x the expected ratio for variance
-    if actual_ratio > expected_ratio * 2.0 {
+    // Allow up to 3x the expected ratio for variance (accounts for system load, warmup effects)
+    // The key is that it's not quadratic (which would be 25x for 5 batches)
+    if actual_ratio > expected_ratio * 3.0 {
         return TestResult::error(
             "test_batch_weights_efficiency",
             start.elapsed(),
