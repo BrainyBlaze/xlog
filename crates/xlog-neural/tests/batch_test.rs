@@ -3,6 +3,8 @@
 //! BatchCollector groups neural predicate calls by network name,
 //! enabling efficient batched GPU evaluation.
 
+#![cfg(feature = "python")]
+
 use xlog_neural::batch::{BatchCollector, NeuralCall};
 
 #[test]

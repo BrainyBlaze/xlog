@@ -3,6 +3,8 @@
 //! The network registry manages PyTorch modules and their configurations
 //! for integration with probabilistic logic programs.
 
+#![cfg(feature = "python")]
+
 use xlog_neural::{NetworkConfig, NetworkRegistry};
 
 #[test]

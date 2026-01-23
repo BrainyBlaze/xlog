@@ -18,3 +18,24 @@ lru = "0.12"
 pyo3 = { workspace = true, optional = true }
 
 [dev-dependencies]
+
+# All tests require the python feature to be enabled
+[[test]]
+name = "registry_test"
+path = "tests/registry_test.rs"
+required-features = ["python"]
+
+[[test]]
+name = "tensor_source_test"
+path = "tests/tensor_source_test.rs"
+required-features = ["python"]
+
+[[test]]
+name = "batch_test"
+path = "tests/batch_test.rs"
+required-features = ["python"]
+
+[[test]]
+name = "bridge_test"
+path = "tests/bridge_test.rs"
+required-features = ["python"]

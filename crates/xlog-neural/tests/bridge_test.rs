@@ -3,6 +3,8 @@
 //! The bridge converts neural network outputs (softmax probabilities)
 //! into probabilistic logic constructs (annotated disjunctions, circuit leaves).
 
+#![cfg(feature = "python")]
+
 use xlog_neural::bridge::{NeuralBridge, NeuralOutput};
 
 #[test]

@@ -3,6 +3,8 @@
 //! The tensor source registry manages external data (images, embeddings, etc.)
 //! that can be indexed by neural predicates.
 
+#![cfg(feature = "python")]
+
 use xlog_neural::tensor_source::{TensorMetadata, TensorSourceError, TensorSourceRegistry};
 
 #[test]

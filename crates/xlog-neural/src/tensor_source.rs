@@ -104,6 +104,7 @@ impl TensorMetadata {
 }
 
 /// Internal storage for a tensor source.
+#[allow(dead_code)] // metadata field used only with python feature
 struct TensorSource {
     /// Metadata about the tensor
     metadata: TensorMetadata,

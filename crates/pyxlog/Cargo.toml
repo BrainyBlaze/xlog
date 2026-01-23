@@ -10,7 +10,7 @@ test = false
 doctest = false
 
 [dependencies]
-pyo3 = { workspace = true }
+pyo3 = { workspace = true, features = ["extension-module"] }
 cudarc = { workspace = true }
 rand = "0.8"
 xlog-core = { path = "../xlog-core" }
