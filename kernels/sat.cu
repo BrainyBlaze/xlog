@@ -1743,11 +1743,90 @@ extern "C" __global__ void sat_xgcf_cnf_counts(
     }
 }
 
+// Capture the last elements of the per-node count arrays (before in-place scans overwrite them).
+extern "C" __global__ void sat_xgcf_cnf_capture_last_counts(
+    const uint32_t* __restrict__ internal_counts,
+    const uint32_t* __restrict__ clause_counts,
+    const uint32_t* __restrict__ lit_counts,
+    uint32_t num_nodes,
+    uint32_t* __restrict__ out_internal_last, // len=1
+    uint32_t* __restrict__ out_clause_last,   // len=1
+    uint32_t* __restrict__ out_lit_last       // len=1
+) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) {
+        return;
+    }
+    if (num_nodes == 0u) {
+        out_internal_last[0] = 0u;
+        out_clause_last[0] = 0u;
+        out_lit_last[0] = 0u;
+        return;
+    }
+    uint32_t last = num_nodes - 1u;
+    out_internal_last[0] = internal_counts[last];
+    out_clause_last[0] = clause_counts[last];
+    out_lit_last[0] = lit_counts[last];
+}
+
+// Compute total counts after in-place exclusive scans and write them to device-resident scalars.
+extern "C" __global__ void sat_xgcf_cnf_compute_totals(
+    const uint32_t* __restrict__ internal_prefix,
+    const uint32_t* __restrict__ clause_base,
+    const uint32_t* __restrict__ lit_base,
+    const uint32_t* __restrict__ internal_last, // len=1
+    const uint32_t* __restrict__ clause_last,   // len=1
+    const uint32_t* __restrict__ lit_last,      // len=1
+    uint32_t num_nodes,
+    uint32_t base_num_vars,
+    uint32_t clause_cap,
+    uint32_t lit_cap,
+    uint32_t* __restrict__ out_num_vars,    // len=1
+    uint32_t* __restrict__ out_num_clauses, // len=1
+    uint32_t* __restrict__ out_num_lits     // len=1
+) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) {
+        return;
+    }
+    if (num_nodes == 0u) {
+        out_num_vars[0] = base_num_vars;
+        out_num_clauses[0] = 0u;
+        out_num_lits[0] = 0u;
+        return;
+    }
+
+    uint32_t last = num_nodes - 1u;
+
+    uint32_t internal_total = internal_prefix[last] + internal_last[0];
+    uint32_t clause_total = clause_base[last] + clause_last[0];
+    uint32_t lit_total = lit_base[last] + lit_last[0];
+
+    // Deterministic, fail-fast overflow semantics.
+    if (internal_total > num_nodes || clause_total > clause_cap || lit_total > lit_cap) {
+        sat_trap();
+    }
+
+    out_num_vars[0] = base_num_vars + internal_total;
+    out_num_clauses[0] = clause_total;
+    out_num_lits[0] = lit_total;
+}
+
+// Write CSR terminator offsets[num_clauses] = num_lits using device-resident totals.
+extern "C" __global__ void sat_cnf_write_terminator(
+    uint32_t* __restrict__ out_offsets,
+    const uint32_t* __restrict__ num_clauses, // len=1
+    const uint32_t* __restrict__ num_lits     // len=1
+) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) {
+        return;
+    }
+    out_offsets[num_clauses[0]] = num_lits[0];
+}
+
 // Emit Tseitin CNF clauses for internal XGCF nodes into CSR buffers.
 //
 // Preconditions:
 // - internal_prefix, clause_base, lit_base are exclusive scans of the corresponding count arrays.
-// - out_offsets has length total_clauses + 1; out_lits has length total_lits.
+// - out_offsets/out_lits have sufficient capacity for the emitted clauses.
 extern "C" __global__ void sat_xgcf_cnf_emit(
     const uint8_t* __restrict__ node_type,
     const uint32_t* __restrict__ child_offsets,
@@ -1761,8 +1840,6 @@ extern "C" __global__ void sat_xgcf_cnf_emit(
     const uint32_t* __restrict__ lit_base,
     uint32_t base_num_vars,
     uint32_t num_nodes,
-    uint32_t total_clauses,
-    uint32_t total_lits,
     uint32_t* __restrict__ out_offsets,
     int32_t* __restrict__ out_lits
 ) {
@@ -1877,10 +1954,6 @@ extern "C" __global__ void sat_xgcf_cnf_emit(
         }
     }
 
-    // Final CSR terminator.
-    if (blockIdx.x == 0 && threadIdx.x == 0) {
-        out_offsets[total_clauses] = total_lits;
-    }
 }
 
 // Shift CSR offsets by an additive constant and write into a destination offsets array.
