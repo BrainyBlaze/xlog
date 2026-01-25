@@ -8,7 +8,7 @@
 //! 5. Cached results are bit-identical to fresh evaluations
 
 use crate::harness::xgcf::{
-    gen_and_circuit, gen_or_circuit, run_tiny_xgcf_forward, tiny_xgcf_spec,
+    gen_and_circuit, gen_or_circuit, tiny_xgcf_spec, TinyXgcfDevice,
 };
 use crate::harness::{CategoryResult, TestContext, TestResult};
 use std::time::{Duration, Instant};
@@ -44,9 +44,19 @@ fn test_cache_hit_reuse(ctx: &TestContext) -> TestResult {
     let start = Instant::now();
 
     let spec = tiny_xgcf_spec();
+    let mut dev = match TinyXgcfDevice::upload(ctx, &spec) {
+        Ok(d) => d,
+        Err(e) => {
+            return TestResult::error(
+                "test_cache_hit_reuse",
+                start.elapsed(),
+                format!("Failed to upload circuit to device: {}", e),
+            );
+        }
+    };
 
     // First forward pass
-    let values_first = match run_tiny_xgcf_forward(ctx, &spec) {
+    let values_first = match dev.forward_download_values(ctx) {
         Ok(v) => v,
         Err(e) => {
             return TestResult::error(
@@ -57,16 +67,8 @@ fn test_cache_hit_reuse(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if let Err(e) = ctx.sync_and_check() {
-        return TestResult::error(
-            "test_cache_hit_reuse",
-            start.elapsed(),
-            format!("Sync failed after first pass: {}", e),
-        );
-    }
-
     // Second forward pass with same spec
-    let values_second = match run_tiny_xgcf_forward(ctx, &spec) {
+    let values_second = match dev.forward_download_values(ctx) {
         Ok(v) => v,
         Err(e) => {
             return TestResult::error(
@@ -76,14 +78,6 @@ fn test_cache_hit_reuse(ctx: &TestContext) -> TestResult {
             );
         }
     };
-
-    if let Err(e) = ctx.sync_and_check() {
-        return TestResult::error(
-            "test_cache_hit_reuse",
-            start.elapsed(),
-            format!("Sync failed after second pass: {}", e),
-        );
-    }
 
     // Verify both passes succeeded with same output size
     if values_first.len() != values_second.len() {
@@ -138,18 +132,25 @@ fn test_cache_hit_speedup(ctx: &TestContext) -> TestResult {
     let start = Instant::now();
 
     let spec = tiny_xgcf_spec();
+    let mut dev = match TinyXgcfDevice::upload(ctx, &spec) {
+        Ok(d) => d,
+        Err(e) => {
+            return TestResult::error(
+                "test_cache_hit_speedup",
+                start.elapsed(),
+                format!("Failed to upload circuit to device: {}", e),
+            );
+        }
+    };
 
     // Warm-up: run 10 times to establish baseline GPU state
     for i in 0..10 {
-        match run_tiny_xgcf_forward(ctx, &spec) {
-            Ok(_) => {}
-            Err(e) => {
-                return TestResult::error(
-                    "test_cache_hit_speedup",
-                    start.elapsed(),
-                    format!("Failed warm-up forward pass {}: {}", i, e),
-                );
-            }
+        if let Err(e) = dev.forward_launch(ctx) {
+            return TestResult::error(
+                "test_cache_hit_speedup",
+                start.elapsed(),
+                format!("Failed warm-up forward pass {}: {}", i, e),
+            );
         }
     }
 
@@ -164,15 +165,12 @@ fn test_cache_hit_speedup(ctx: &TestContext) -> TestResult {
     // Time the next 100 runs
     let timed_start = Instant::now();
     for i in 0..100 {
-        match run_tiny_xgcf_forward(ctx, &spec) {
-            Ok(_) => {}
-            Err(e) => {
-                return TestResult::error(
-                    "test_cache_hit_speedup",
-                    start.elapsed(),
-                    format!("Failed timed forward pass {}: {}", i, e),
-                );
-            }
+        if let Err(e) = dev.forward_launch(ctx) {
+            return TestResult::error(
+                "test_cache_hit_speedup",
+                start.elapsed(),
+                format!("Failed timed forward pass {}: {}", i, e),
+            );
         }
     }
 
@@ -237,8 +235,26 @@ fn test_cache_distinct_results(ctx: &TestContext) -> TestResult {
     spec_b.var_log_false[1] = 0.1_f64.ln(); // Was 0.3
     spec_b.var_log_false[2] = 0.2_f64.ln(); // Was 0.4
 
+    let mut dev = match TinyXgcfDevice::upload(ctx, &spec_a) {
+        Ok(d) => d,
+        Err(e) => {
+            return TestResult::error(
+                "test_cache_distinct_results",
+                start.elapsed(),
+                format!("Failed to upload circuit to device: {}", e),
+            );
+        }
+    };
+
     // First eval with weights A
-    let result_a = match run_tiny_xgcf_forward(ctx, &spec_a) {
+    if let Err(e) = dev.set_weights(ctx, &spec_a.var_log_true, &spec_a.var_log_false) {
+        return TestResult::error(
+            "test_cache_distinct_results",
+            start.elapsed(),
+            format!("Failed to upload weights A: {}", e),
+        );
+    }
+    let root_a = match dev.forward_download_root(ctx) {
         Ok(v) => v,
         Err(e) => {
             return TestResult::error(
@@ -249,16 +265,15 @@ fn test_cache_distinct_results(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if let Err(e) = ctx.sync_and_check() {
+    // Second eval with weights B (same structure, different weights)
+    if let Err(e) = dev.set_weights(ctx, &spec_b.var_log_true, &spec_b.var_log_false) {
         return TestResult::error(
             "test_cache_distinct_results",
             start.elapsed(),
-            format!("Sync failed after weights A: {}", e),
+            format!("Failed to upload weights B: {}", e),
         );
     }
-
-    // Second eval with weights B (same structure, different weights)
-    let result_b = match run_tiny_xgcf_forward(ctx, &spec_b) {
+    let root_b = match dev.forward_download_root(ctx) {
         Ok(v) => v,
         Err(e) => {
             return TestResult::error(
@@ -268,18 +283,6 @@ fn test_cache_distinct_results(ctx: &TestContext) -> TestResult {
             );
         }
     };
-
-    if let Err(e) = ctx.sync_and_check() {
-        return TestResult::error(
-            "test_cache_distinct_results",
-            start.elapsed(),
-            format!("Sync failed after weights B: {}", e),
-        );
-    }
-
-    // Extract root values
-    let root_a = result_a[spec_a.root as usize];
-    let root_b = result_b[spec_b.root as usize];
 
     // Verify results are different (weights properly updated)
     if root_a.to_bits() == root_b.to_bits() {
@@ -310,7 +313,14 @@ fn test_cache_distinct_results(ctx: &TestContext) -> TestResult {
     }
 
     // Re-run with weights A to ensure we get the original result back
-    let result_a2 = match run_tiny_xgcf_forward(ctx, &spec_a) {
+    if let Err(e) = dev.set_weights(ctx, &spec_a.var_log_true, &spec_a.var_log_false) {
+        return TestResult::error(
+            "test_cache_distinct_results",
+            start.elapsed(),
+            format!("Failed to upload weights A (rerun): {}", e),
+        );
+    }
+    let root_a2 = match dev.forward_download_root(ctx) {
         Ok(v) => v,
         Err(e) => {
             return TestResult::error(
@@ -320,8 +330,6 @@ fn test_cache_distinct_results(ctx: &TestContext) -> TestResult {
             );
         }
     };
-
-    let root_a2 = result_a2[spec_a.root as usize];
     if root_a.to_bits() != root_a2.to_bits() {
         return TestResult::error(
             "test_cache_distinct_results",
@@ -335,14 +343,6 @@ fn test_cache_distinct_results(ctx: &TestContext) -> TestResult {
                 root_a2,
                 root_a2.to_bits()
             ),
-        );
-    }
-
-    if let Err(e) = ctx.sync_and_check() {
-        return TestResult::error(
-            "test_cache_distinct_results",
-            start.elapsed(),
-            format!("Final sync failed: {}", e),
         );
     }
 
@@ -377,7 +377,17 @@ fn test_cache_key_same_structure(ctx: &TestContext) -> TestResult {
     }
 
     // Run forward on first spec
-    let result1 = match run_tiny_xgcf_forward(ctx, &spec1) {
+    let mut dev1 = match TinyXgcfDevice::upload(ctx, &spec1) {
+        Ok(d) => d,
+        Err(e) => {
+            return TestResult::error(
+                "test_cache_key_same_structure",
+                start.elapsed(),
+                format!("Failed to upload spec1 to device: {}", e),
+            );
+        }
+    };
+    let result1 = match dev1.forward_download_values(ctx) {
         Ok(v) => v,
         Err(e) => {
             return TestResult::error(
@@ -388,16 +398,18 @@ fn test_cache_key_same_structure(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if let Err(e) = ctx.sync_and_check() {
-        return TestResult::error(
-            "test_cache_key_same_structure",
-            start.elapsed(),
-            format!("Sync failed after spec1: {}", e),
-        );
-    }
-
     // Run forward on second spec (identical structure and weights)
-    let result2 = match run_tiny_xgcf_forward(ctx, &spec2) {
+    let mut dev2 = match TinyXgcfDevice::upload(ctx, &spec2) {
+        Ok(d) => d,
+        Err(e) => {
+            return TestResult::error(
+                "test_cache_key_same_structure",
+                start.elapsed(),
+                format!("Failed to upload spec2 to device: {}", e),
+            );
+        }
+    };
+    let result2 = match dev2.forward_download_values(ctx) {
         Ok(v) => v,
         Err(e) => {
             return TestResult::error(
@@ -407,14 +419,6 @@ fn test_cache_key_same_structure(ctx: &TestContext) -> TestResult {
             );
         }
     };
-
-    if let Err(e) = ctx.sync_and_check() {
-        return TestResult::error(
-            "test_cache_key_same_structure",
-            start.elapsed(),
-            format!("Sync failed after spec2: {}", e),
-        );
-    }
 
     // Verify output sizes match
     if result1.len() != result2.len() {
@@ -492,8 +496,17 @@ fn test_cache_different_circuits(ctx: &TestContext) -> TestResult {
         );
     }
 
-    // Run forward on AND circuit
-    let and_result = match run_tiny_xgcf_forward(ctx, &and_spec) {
+    let mut and_dev = match TinyXgcfDevice::upload(ctx, &and_spec) {
+        Ok(d) => d,
+        Err(e) => {
+            return TestResult::error(
+                "test_cache_different_circuits",
+                start.elapsed(),
+                format!("Failed to upload AND circuit: {}", e),
+            );
+        }
+    };
+    let and_root = match and_dev.forward_download_root(ctx) {
         Ok(v) => v,
         Err(e) => {
             return TestResult::error(
@@ -504,16 +517,17 @@ fn test_cache_different_circuits(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if let Err(e) = ctx.sync_and_check() {
-        return TestResult::error(
-            "test_cache_different_circuits",
-            start.elapsed(),
-            format!("Sync failed after AND circuit: {}", e),
-        );
-    }
-
-    // Run forward on OR circuit
-    let or_result = match run_tiny_xgcf_forward(ctx, &or_spec) {
+    let mut or_dev = match TinyXgcfDevice::upload(ctx, &or_spec) {
+        Ok(d) => d,
+        Err(e) => {
+            return TestResult::error(
+                "test_cache_different_circuits",
+                start.elapsed(),
+                format!("Failed to upload OR circuit: {}", e),
+            );
+        }
+    };
+    let or_root = match or_dev.forward_download_root(ctx) {
         Ok(v) => v,
         Err(e) => {
             return TestResult::error(
@@ -523,18 +537,6 @@ fn test_cache_different_circuits(ctx: &TestContext) -> TestResult {
             );
         }
     };
-
-    if let Err(e) = ctx.sync_and_check() {
-        return TestResult::error(
-            "test_cache_different_circuits",
-            start.elapsed(),
-            format!("Sync failed after OR circuit: {}", e),
-        );
-    }
-
-    // Extract root values
-    let and_root = and_result[and_spec.root as usize];
-    let or_root = or_result[or_spec.root as usize];
 
     // Verify results are different (AND vs OR should compute differently)
     if and_root.to_bits() == or_root.to_bits() {
@@ -603,9 +605,19 @@ fn test_cache_correctness(ctx: &TestContext) -> TestResult {
     let start = Instant::now();
 
     let spec = tiny_xgcf_spec();
+    let mut dev = match TinyXgcfDevice::upload(ctx, &spec) {
+        Ok(d) => d,
+        Err(e) => {
+            return TestResult::error(
+                "test_cache_correctness",
+                start.elapsed(),
+                format!("Failed to upload circuit to device: {}", e),
+            );
+        }
+    };
 
     // First evaluation (fresh)
-    let result_fresh = match run_tiny_xgcf_forward(ctx, &spec) {
+    let result_fresh = match dev.forward_download_values(ctx) {
         Ok(v) => v,
         Err(e) => {
             return TestResult::error(
@@ -616,16 +628,8 @@ fn test_cache_correctness(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if let Err(e) = ctx.sync_and_check() {
-        return TestResult::error(
-            "test_cache_correctness",
-            start.elapsed(),
-            format!("Sync failed after fresh evaluation: {}", e),
-        );
-    }
-
     // Second evaluation (potentially cached)
-    let result_cached = match run_tiny_xgcf_forward(ctx, &spec) {
+    let result_cached = match dev.forward_download_values(ctx) {
         Ok(v) => v,
         Err(e) => {
             return TestResult::error(
@@ -635,14 +639,6 @@ fn test_cache_correctness(ctx: &TestContext) -> TestResult {
             );
         }
     };
-
-    if let Err(e) = ctx.sync_and_check() {
-        return TestResult::error(
-            "test_cache_correctness",
-            start.elapsed(),
-            format!("Sync failed after cached evaluation: {}", e),
-        );
-    }
 
     // Verify output sizes match
     if result_fresh.len() != result_cached.len() {
@@ -677,7 +673,7 @@ fn test_cache_correctness(ctx: &TestContext) -> TestResult {
     }
 
     // Run a third time to verify continued correctness
-    let result_third = match run_tiny_xgcf_forward(ctx, &spec) {
+    let result_third = match dev.forward_download_values(ctx) {
         Ok(v) => v,
         Err(e) => {
             return TestResult::error(
@@ -687,14 +683,6 @@ fn test_cache_correctness(ctx: &TestContext) -> TestResult {
             );
         }
     };
-
-    if let Err(e) = ctx.sync_and_check() {
-        return TestResult::error(
-            "test_cache_correctness",
-            start.elapsed(),
-            format!("Sync failed after third evaluation: {}", e),
-        );
-    }
 
     // Verify third result matches
     for (idx, (&fresh, &third)) in result_fresh.iter().zip(result_third.iter()).enumerate() {
@@ -752,7 +740,8 @@ mod tests {
             let result = test_cache_hit_reuse(&ctx);
             assert!(
                 result.status.is_passed(),
-                "Test failed: {:?}",
+                "Test failed: status={:?} diagnostic={:?}",
+                result.status,
                 result.diagnostic
             );
         }
@@ -764,7 +753,8 @@ mod tests {
             let result = test_cache_hit_speedup(&ctx);
             assert!(
                 result.status.is_passed(),
-                "Test failed: {:?}",
+                "Test failed: status={:?} diagnostic={:?}",
+                result.status,
                 result.diagnostic
             );
         }
@@ -776,7 +766,8 @@ mod tests {
             let result = test_cache_distinct_results(&ctx);
             assert!(
                 result.status.is_passed(),
-                "Test failed: {:?}",
+                "Test failed: status={:?} diagnostic={:?}",
+                result.status,
                 result.diagnostic
             );
         }
@@ -788,7 +779,8 @@ mod tests {
             let result = test_cache_key_same_structure(&ctx);
             assert!(
                 result.status.is_passed(),
-                "Test failed: {:?}",
+                "Test failed: status={:?} diagnostic={:?}",
+                result.status,
                 result.diagnostic
             );
         }
@@ -800,7 +792,8 @@ mod tests {
             let result = test_cache_different_circuits(&ctx);
             assert!(
                 result.status.is_passed(),
-                "Test failed: {:?}",
+                "Test failed: status={:?} diagnostic={:?}",
+                result.status,
                 result.diagnostic
             );
         }
@@ -812,7 +805,8 @@ mod tests {
             let result = test_cache_correctness(&ctx);
             assert!(
                 result.status.is_passed(),
-                "Test failed: {:?}",
+                "Test failed: status={:?} diagnostic={:?}",
+                result.status,
                 result.diagnostic
             );
         }

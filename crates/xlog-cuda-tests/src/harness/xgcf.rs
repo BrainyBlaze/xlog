@@ -1,8 +1,9 @@
 //! Helpers for testing XGCF circuit CUDA kernels.
 
-use cudarc::driver::{CudaFunction, LaunchAsync, LaunchConfig};
+use cudarc::driver::{CudaFunction, DeviceSlice, LaunchAsync, LaunchConfig};
 use xlog_core::{Result, XlogError};
 use xlog_cuda::{circuit_kernels, CIRCUIT_MODULE};
+use xlog_cuda::memory::TrackedCudaSlice;
 
 use super::TestContext;
 
@@ -33,6 +34,359 @@ pub struct TinyXgcfRun {
     pub adj: Vec<f64>,
     pub grad_true: Vec<f64>,
     pub grad_false: Vec<f64>,
+}
+
+/// Device-resident XGCF circuit + reusable buffers.
+///
+/// This is used by certification categories that validate *transfer efficiency* and *circuit reuse*.
+/// The key property: circuit structure is uploaded once; repeated evaluations reuse device buffers.
+pub struct TinyXgcfDevice {
+    pub num_nodes: usize,
+    pub num_vars: usize,
+    pub root: u32,
+    levels: Vec<(u32, u32)>,
+
+    // Cached kernel handles for performance-sensitive certification categories.
+    forward_fn: CudaFunction,
+    backward_propagate_fn: CudaFunction,
+    backward_decision_grad_fn: CudaFunction,
+    backward_lit_grad_fn: CudaFunction,
+
+    // Circuit structure (device-resident).
+    d_node_type: TrackedCudaSlice<u8>,
+    d_child_offsets: TrackedCudaSlice<u32>,
+    d_child_indices: TrackedCudaSlice<u32>,
+    d_lit: TrackedCudaSlice<i32>,
+    d_decision_var: TrackedCudaSlice<u32>,
+    d_decision_child_false: TrackedCudaSlice<u32>,
+    d_decision_child_true: TrackedCudaSlice<u32>,
+    d_level_nodes: TrackedCudaSlice<u32>,
+
+    // Per-evaluation inputs (device-resident).
+    d_var_log_true: TrackedCudaSlice<f64>,
+    d_var_log_false: TrackedCudaSlice<f64>,
+
+    // Per-evaluation outputs / scratch (device-resident).
+    d_values: TrackedCudaSlice<f64>,
+    d_adj: TrackedCudaSlice<f64>,
+    d_grad_true: TrackedCudaSlice<f64>,
+    d_grad_false: TrackedCudaSlice<f64>,
+}
+
+impl TinyXgcfDevice {
+    pub fn upload(ctx: &TestContext, spec: &TinyXgcfSpec) -> Result<Self> {
+        let device = ctx.device.inner();
+
+        let forward_fn = device
+            .get_func(CIRCUIT_MODULE, circuit_kernels::XGCF_FORWARD_LEVEL)
+            .ok_or_else(|| {
+                XlogError::Kernel(format!(
+                    "Kernel {} not found in {}",
+                    circuit_kernels::XGCF_FORWARD_LEVEL,
+                    CIRCUIT_MODULE
+                ))
+            })?;
+        let backward_propagate_fn = device
+            .get_func(CIRCUIT_MODULE, circuit_kernels::XGCF_BACKWARD_LEVEL_PROPAGATE)
+            .ok_or_else(|| {
+                XlogError::Kernel(format!(
+                    "Kernel {} not found in {}",
+                    circuit_kernels::XGCF_BACKWARD_LEVEL_PROPAGATE,
+                    CIRCUIT_MODULE
+                ))
+            })?;
+        let backward_decision_grad_fn = device
+            .get_func(CIRCUIT_MODULE, circuit_kernels::XGCF_BACKWARD_LEVEL_DECISION_GRAD)
+            .ok_or_else(|| {
+                XlogError::Kernel(format!(
+                    "Kernel {} not found in {}",
+                    circuit_kernels::XGCF_BACKWARD_LEVEL_DECISION_GRAD,
+                    CIRCUIT_MODULE
+                ))
+            })?;
+        let backward_lit_grad_fn = device
+            .get_func(CIRCUIT_MODULE, circuit_kernels::XGCF_BACKWARD_LEVEL_LIT_GRAD)
+            .ok_or_else(|| {
+                XlogError::Kernel(format!(
+                    "Kernel {} not found in {}",
+                    circuit_kernels::XGCF_BACKWARD_LEVEL_LIT_GRAD,
+                    CIRCUIT_MODULE
+                ))
+            })?;
+
+        let mut d_node_type = ctx.memory.alloc::<u8>(spec.node_type.len())?;
+        device
+            .htod_sync_copy_into(&spec.node_type, &mut d_node_type)
+            .map_err(|e| XlogError::Kernel(format!("Failed to upload node_type: {}", e)))?;
+
+        let mut d_child_offsets = ctx.memory.alloc::<u32>(spec.child_offsets.len())?;
+        device
+            .htod_sync_copy_into(&spec.child_offsets, &mut d_child_offsets)
+            .map_err(|e| XlogError::Kernel(format!("Failed to upload child_offsets: {}", e)))?;
+
+        let mut d_child_indices = ctx.memory.alloc::<u32>(spec.child_indices.len())?;
+        device
+            .htod_sync_copy_into(&spec.child_indices, &mut d_child_indices)
+            .map_err(|e| XlogError::Kernel(format!("Failed to upload child_indices: {}", e)))?;
+
+        let mut d_lit = ctx.memory.alloc::<i32>(spec.lit.len())?;
+        device
+            .htod_sync_copy_into(&spec.lit, &mut d_lit)
+            .map_err(|e| XlogError::Kernel(format!("Failed to upload lit: {}", e)))?;
+
+        let mut d_decision_var = ctx.memory.alloc::<u32>(spec.decision_var.len())?;
+        device
+            .htod_sync_copy_into(&spec.decision_var, &mut d_decision_var)
+            .map_err(|e| XlogError::Kernel(format!("Failed to upload decision_var: {}", e)))?;
+
+        let mut d_decision_child_false = ctx.memory.alloc::<u32>(spec.decision_child_false.len())?;
+        device
+            .htod_sync_copy_into(&spec.decision_child_false, &mut d_decision_child_false)
+            .map_err(|e| XlogError::Kernel(format!("Failed to upload decision_child_false: {}", e)))?;
+
+        let mut d_decision_child_true = ctx.memory.alloc::<u32>(spec.decision_child_true.len())?;
+        device
+            .htod_sync_copy_into(&spec.decision_child_true, &mut d_decision_child_true)
+            .map_err(|e| XlogError::Kernel(format!("Failed to upload decision_child_true: {}", e)))?;
+
+        let mut d_level_nodes = ctx.memory.alloc::<u32>(spec.level_nodes.len())?;
+        device
+            .htod_sync_copy_into(&spec.level_nodes, &mut d_level_nodes)
+            .map_err(|e| XlogError::Kernel(format!("Failed to upload level_nodes: {}", e)))?;
+
+        let mut d_var_log_true = ctx.memory.alloc::<f64>(spec.var_log_true.len())?;
+        device
+            .htod_sync_copy_into(&spec.var_log_true, &mut d_var_log_true)
+            .map_err(|e| XlogError::Kernel(format!("Failed to upload var_log_true: {}", e)))?;
+
+        let mut d_var_log_false = ctx.memory.alloc::<f64>(spec.var_log_false.len())?;
+        device
+            .htod_sync_copy_into(&spec.var_log_false, &mut d_var_log_false)
+            .map_err(|e| XlogError::Kernel(format!("Failed to upload var_log_false: {}", e)))?;
+
+        let d_values = ctx.memory.alloc::<f64>(spec.num_nodes)?;
+        let d_adj = ctx.memory.alloc::<f64>(spec.num_nodes)?;
+        let d_grad_true = ctx.memory.alloc::<f64>(spec.num_vars + 1)?;
+        let d_grad_false = ctx.memory.alloc::<f64>(spec.num_vars + 1)?;
+
+        Ok(Self {
+            num_nodes: spec.num_nodes,
+            num_vars: spec.num_vars,
+            root: spec.root,
+            levels: spec.levels.clone(),
+            forward_fn,
+            backward_propagate_fn,
+            backward_decision_grad_fn,
+            backward_lit_grad_fn,
+            d_node_type,
+            d_child_offsets,
+            d_child_indices,
+            d_lit,
+            d_decision_var,
+            d_decision_child_false,
+            d_decision_child_true,
+            d_level_nodes,
+            d_var_log_true,
+            d_var_log_false,
+            d_values,
+            d_adj,
+            d_grad_true,
+            d_grad_false,
+        })
+    }
+
+    fn launch_level_cached<A>(
+        kernel: &CudaFunction,
+        num_level_nodes: u32,
+        args: A,
+    ) -> Result<()>
+    where
+        CudaFunction: LaunchAsync<A>,
+    {
+        if num_level_nodes == 0 {
+            return Ok(());
+        }
+        let block_size = 256u32;
+        let num_blocks = (num_level_nodes + block_size - 1) / block_size;
+        let config = LaunchConfig {
+            grid_dim: (num_blocks, 1, 1),
+            block_dim: (block_size, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        unsafe { kernel.clone().launch(config, args) }
+            .map_err(|e| XlogError::Kernel(format!("Failed to launch level kernel: {}", e)))?;
+        Ok(())
+    }
+
+    pub fn set_weights(&mut self, ctx: &TestContext, log_true: &[f64], log_false: &[f64]) -> Result<()> {
+        if log_true.len() != self.d_var_log_true.len() || log_false.len() != self.d_var_log_false.len()
+        {
+            return Err(XlogError::Kernel(format!(
+                "Weight length mismatch: got (true={}, false={}), expected (true={}, false={})",
+                log_true.len(),
+                log_false.len(),
+                self.d_var_log_true.len(),
+                self.d_var_log_false.len()
+            )));
+        }
+        let device = ctx.device.inner();
+        device
+            .htod_sync_copy_into(log_true, &mut self.d_var_log_true)
+            .map_err(|e| XlogError::Kernel(format!("Failed to upload var_log_true: {}", e)))?;
+        device
+            .htod_sync_copy_into(log_false, &mut self.d_var_log_false)
+            .map_err(|e| XlogError::Kernel(format!("Failed to upload var_log_false: {}", e)))?;
+        Ok(())
+    }
+
+    /// Launch forward kernels (no sync, no host transfers).
+    pub fn forward_launch(&mut self, _ctx: &TestContext) -> Result<()> {
+        for &(offset, len) in &self.levels {
+            let level_range: u64 = ((len as u64) << 32) | (offset as u64);
+            Self::launch_level_cached(
+                &self.forward_fn,
+                len,
+                (
+                    &self.d_node_type,
+                    &self.d_child_offsets,
+                    &self.d_child_indices,
+                    &self.d_lit,
+                    &self.d_decision_var,
+                    &self.d_decision_child_false,
+                    &self.d_decision_child_true,
+                    &self.d_level_nodes,
+                    level_range,
+                    &self.d_var_log_true,
+                    &self.d_var_log_false,
+                    &mut self.d_values,
+                ),
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn forward_download_values(&mut self, ctx: &TestContext) -> Result<Vec<f64>> {
+        self.forward_launch(ctx)?;
+        ctx.sync_and_check()?;
+        let device = ctx.device.inner();
+        device
+            .dtoh_sync_copy(&self.d_values)
+            .map_err(|e| XlogError::Kernel(format!("Failed to download values: {}", e)))
+    }
+
+    pub fn forward_download_root(&mut self, ctx: &TestContext) -> Result<f64> {
+        self.forward_launch(ctx)?;
+        ctx.sync_and_check()?;
+        let root_idx: usize = self.root as usize;
+        if root_idx >= self.num_nodes {
+            return Err(XlogError::Kernel(format!(
+                "Root {} out of bounds for num_nodes {}",
+                self.root, self.num_nodes
+            )));
+        }
+        let device = ctx.device.inner();
+        let root_view = self.d_values.slice(root_idx..(root_idx + 1));
+        let mut root_host = [0.0f64];
+        device
+            .dtoh_sync_copy_into(&root_view, &mut root_host)
+            .map_err(|e| XlogError::Kernel(format!("Failed to download root value: {}", e)))?;
+        Ok(root_host[0])
+    }
+
+    /// Launch backward kernels using existing `d_values` (no sync, no host transfers).
+    pub fn backward_only_launch(&mut self, ctx: &TestContext) -> Result<()> {
+        let device = ctx.device.inner();
+        device
+            .memset_zeros(&mut self.d_adj)
+            .map_err(|e| XlogError::Kernel(format!("Failed to zero adj: {}", e)))?;
+        device
+            .memset_zeros(&mut self.d_grad_true)
+            .map_err(|e| XlogError::Kernel(format!("Failed to zero grad_true: {}", e)))?;
+        device
+            .memset_zeros(&mut self.d_grad_false)
+            .map_err(|e| XlogError::Kernel(format!("Failed to zero grad_false: {}", e)))?;
+
+        let root_idx: usize = self.root as usize;
+        if root_idx >= self.num_nodes {
+            return Err(XlogError::Kernel(format!(
+                "Root {} out of bounds for num_nodes {}",
+                self.root, self.num_nodes
+            )));
+        }
+        let mut root_view = self.d_adj.slice_mut(root_idx..(root_idx + 1));
+        device
+            .htod_sync_copy_into(&[1.0f64], &mut root_view)
+            .map_err(|e| XlogError::Kernel(format!("Failed to set root adjoint: {}", e)))?;
+
+        for &(offset, len) in self.levels.iter().rev() {
+            let level_range: u64 = ((len as u64) << 32) | (offset as u64);
+            Self::launch_level_cached(
+                &self.backward_propagate_fn,
+                len,
+                (
+                    &self.d_node_type,
+                    &self.d_child_offsets,
+                    &self.d_child_indices,
+                    &self.d_decision_var,
+                    &self.d_decision_child_false,
+                    &self.d_decision_child_true,
+                    &self.d_level_nodes,
+                    level_range,
+                    &self.d_var_log_true,
+                    &self.d_var_log_false,
+                    &self.d_values,
+                    &mut self.d_adj,
+                ),
+            )?;
+        }
+
+        for &(offset, len) in self.levels.iter().rev() {
+            let level_range: u64 = ((len as u64) << 32) | (offset as u64);
+            Self::launch_level_cached(
+                &self.backward_decision_grad_fn,
+                len,
+                (
+                    &self.d_node_type,
+                    &self.d_decision_var,
+                    &self.d_decision_child_false,
+                    &self.d_decision_child_true,
+                    &self.d_level_nodes,
+                    level_range,
+                    &self.d_var_log_true,
+                    &self.d_var_log_false,
+                    &self.d_values,
+                    &self.d_adj,
+                    &mut self.d_grad_true,
+                    &mut self.d_grad_false,
+                ),
+            )?;
+        }
+
+        for &(offset, len) in self.levels.iter().rev() {
+            let level_range: u64 = ((len as u64) << 32) | (offset as u64);
+            Self::launch_level_cached(
+                &self.backward_lit_grad_fn,
+                len,
+                (
+                    &self.d_node_type,
+                    &self.d_lit,
+                    &self.d_level_nodes,
+                    level_range,
+                    &self.d_adj,
+                    &mut self.d_grad_true,
+                    &mut self.d_grad_false,
+                ),
+            )?;
+        }
+
+        Ok(())
+    }
+
+    /// Convenience helper: forward + backward in one launch sequence (no sync, no host transfers).
+    pub fn forward_then_backward_launch(&mut self, ctx: &TestContext) -> Result<()> {
+        self.forward_launch(ctx)?;
+        self.backward_only_launch(ctx)
+    }
 }
 
 fn logsumexp2(a: f64, b: f64) -> f64 {

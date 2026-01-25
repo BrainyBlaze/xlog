@@ -1,11 +1,22 @@
 //! Test context and provider setup for CUDA certification tests.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use xlog_core::{MemoryBudget, Result, XlogError};
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 
+fn gpu_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
 /// Test context providing CUDA resources for certification tests.
 pub struct TestContext {
+    // Hold a process-wide mutex for the lifetime of the context so GPU tests run serially.
+    // This prevents timing-based certification tests from producing false positives under
+    // parallel `cargo test` execution.
+    _lock: std::sync::MutexGuard<'static, ()>,
     pub provider: CudaKernelProvider,
     pub device: Arc<CudaDevice>,
     pub memory: Arc<GpuMemoryManager>,
@@ -14,6 +25,8 @@ pub struct TestContext {
 impl TestContext {
     /// Create test context with specific memory budget in bytes.
     pub fn with_budget(budget_bytes: usize) -> Result<Self> {
+        let lock = gpu_test_lock();
+
         // cudarc may panic on driver init failures in restricted containers; treat as a normal error.
         let device_count = std::panic::catch_unwind(|| cudarc::driver::CudaDevice::count())
             .map_err(|_| {
@@ -33,7 +46,12 @@ impl TestContext {
         let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
         let provider = CudaKernelProvider::new(device.clone(), memory.clone())?;
 
-        Ok(Self { provider, device, memory })
+        Ok(Self {
+            _lock: lock,
+            provider,
+            device,
+            memory,
+        })
     }
 
     /// Create test context with default 1GB memory budget.
