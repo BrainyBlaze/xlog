@@ -1,170 +1,123 @@
-# Circuit Caching for 100% GPU Training
+# Circuit Caching for 100% GPU Training (GPU Neural Fast-Path)
 
 ## Overview
 
-Eliminate D4 recompilation bottleneck by caching compiled circuits and reusing them across training iterations. Currently, every `forward_backward()` call invokes D4 (CPU), causing 50+ D4 compilations per epoch instead of 1.
+Eliminate repeated D4 compilation during training by caching compiled circuits by **template signature** and running a
+GPU-native weight+gradient update path per step.
 
-**Status**: Design ready for implementation
+**Status (Jan 25, 2026): Implemented** for the neural training fast-path:
+- Cached circuits are keyed by `{predicate}:{input_count}:{num_labels}`.
+- Neural outputs and gradients are exchanged as **CUDA tensors via DLPack** (no `.tolist()`, no host-side weight tables).
+- Annotated-disjunction conditional-chain weights and probability gradients are computed on GPU (see design §5.3).
+
+This plan covers the caching layer only; replacing CPU D4 with GPU D4 + GPU CDCL verifier is tracked separately in
+`docs/design/2026-01-22-gpu-native-compilation-design.md`.
+
+---
 
 ## Problem
 
-```
-forward_backward_complex() @ pyxlog/src/lib.rs:943
-    → ExactDdnnfProgram::compile_source_with_gpu()  // D4 called EVERY time
-    → 50 queries/epoch × 120ms = 6 seconds of CPU blocking
-```
+Without caching, `forward_backward_complex()` would invoke D4 on every call. Training loops typically call
+`forward_backward()` dozens of times per epoch, making D4 the dominant cost.
+
+---
 
 ## Solution
 
-Cache compiled circuits by **template signature**. Circuits with identical structure (same inputs, same label counts) share the same compiled DNNF - only weights differ.
+Cache compiled circuits by **template signature**. A template is defined by:
+- query predicate (e.g., `addition`)
+- number of neural inputs in the query (e.g., `2`)
+- neural label count (e.g., `10` for MNIST digits)
 
-## Cache Key Design
+At runtime:
+- neural probabilities arrive as device-resident tensors (Torch CUDA)
+- a cached device slot-map tells XLOG which CNF vars correspond to each probability slot
+- the GPU kernels fill log-weights and scatter probability gradients directly into device grad tensors
 
-**v0.4.0-alpha scope:** Single network per program (matches existing `forward_backward_complex` limitation).
+---
 
-Cache key must handle:
-- Variable input indices per query
-- Different query predicates
-- Different label counts (e.g., 10 for MNIST digits, 4 for operators)
+## Cache Key
 
-**Cache Key Format (v0.4.0-alpha)**:
+**v0.4.0-alpha scope:** single network per program.
+
 ```
 {predicate}:{input_count}:{num_labels}
 ```
 
-Example for `addition(0, 1, 7)` with 10-class MNIST:
+Example:
 ```
 addition:2:10
 ```
 
-**Future multi-network format** (post v0.4.0):
-```
-{predicate}:{input_count}:{network_signatures}
-```
-
-Example for HWF `formula(0, 1, 2, 42)` (number, operator, number, result):
-```
-formula:3:net1[10],net2[4],net1[10]
-```
+---
 
 ## Data Structures
 
 ```rust
-// Add to CompiledProgram struct
-pub struct CompiledProgram {
-    // ... existing fields ...
-
-    /// Cache of compiled circuits by template signature
-    circuit_cache: HashMap<String, CachedCircuit>,
-}
-
 pub struct CachedCircuit {
-    /// The compiled program (contains XGCF on GPU)
-    program: ExactDdnnfProgram,
-
-    /// Mapping from network output index to circuit variable
-    /// Enables weight updates without recompilation
-    weight_slots: Vec<WeightSlot>,
-}
-
-/// Maps a network output to a circuit variable (v0.4.0-alpha: single network)
-pub struct WeightSlot {
-    /// Input index in the query (e.g., 0 or 1 for addition(0, 1, 7))
-    input_idx: usize,
-    /// Label index (0-9 for 10-class classification)
-    label_idx: usize,
-    /// Circuit variable index (1-indexed, DIMACS convention)
-    var_idx: u32,
+    pub program: ExactDdnnfProgram,
+    pub slots: GpuWeightSlots,
+    pub num_labels: usize,
 }
 ```
 
-## Algorithm
+Where:
+- `program` owns the compiled circuit (GPU-resident once initialized).
+- `slots` is a **device-resident** mapping from neural output slots → CNF var ids (DIMACS, 1-based).
+- `num_labels` is used for template query indexing (e.g., sum range for `addition`).
 
-### Cache Lookup Flow
+---
+
+## Algorithm (Runtime)
 
 ```
 forward_backward_complex(query):
-    1. Parse query → extract input indices
-    2. Run neural networks → get output probabilities
-    3. Generate template key from (predicate, inputs, network signatures)
+  1) Parse query → (predicate, input_indices, target_value)
+  2) Run neural network for each input index → output_squeezed (CUDA, 1D, f32)
+  3) cache_key = {predicate}:{len(input_indices)}:{num_labels}
 
-    4. IF key in cache:
-         a. Get cached circuit
-         b. Update weight buffer with new network outputs
-         c. Evaluate on GPU (no D4!)
-         d. Return result
+  4) On cache miss:
+       a) Build template-expanded source with placeholder inputs 0..num_inputs-1
+       b) Use uniform dummy probabilities (sum < 1.0) to force an implicit "none" branch
+       c) Emit a query for each possible target value (so runtime selects by index)
+       d) Compile once with D4 and build/upload `GpuWeightSlots`
 
-    5. ELSE (first time):
-         a. Generate expanded source with annotated disjunctions
-         b. Compile with D4 (one-time cost)
-         c. Extract weight slot mapping
-         d. Store in cache
-         e. Evaluate and return
+  5) Allocate grad tensors `zeros_like(output_squeezed)` (CUDA)
+  6) Call:
+       ExactDdnnfProgram::neural_backward_nll_buffers_with_loss(
+         slots, query_idx, probs_dlpack, grads_dlpack
+       )
+     This:
+       - fills AD-chain weights on GPU from device probabilities
+       - runs GPU forward+backward twice (base + query-forced)
+       - scatters probability-space gradients on GPU into grad tensors
+       - returns scalar NLL loss
+  7) Call `output_squeezed.backward(grad_tensor)` for each input
 ```
 
-### Weight Update (No Recompilation)
+Notes:
+- No host-side `.tolist()` extraction.
+- No host-side construction of weight tables or gradient maps.
+- The only host-visible value required for the legacy API is the scalar NLL return value.
 
-```rust
-fn update_circuit_weights(
-    cached: &CachedCircuit,
-    network_outputs: &[(usize, Vec<f64>, PyObject)],  // (input_idx, probs, tensor)
-) -> Vec<(f64, f64)> {
-    let num_vars = cached.program.num_vars();
-    let mut weights: Vec<(f64, f64)> = vec![(0.0, 0.0); num_vars + 1];
+---
 
-    for slot in &cached.weight_slots {
-        if let Some((_, probs, _)) = network_outputs.iter()
-            .find(|(idx, _, _)| *idx == slot.input_idx)
-        {
-            let p = probs[slot.label_idx];
-            // Normalize and convert to log space
-            let sum: f64 = probs.iter().sum();
-            let normalized_p = (p * 0.9999999 / sum).max(1e-10);
-            weights[slot.var_idx as usize] = (normalized_p.ln(), (1.0 - normalized_p).ln());
-        }
-    }
+## Files
 
-    weights
-}
-```
+Implemented in:
+- `crates/pyxlog/src/lib.rs`
+- `crates/xlog-prob/src/exact.rs`
+- `crates/xlog-prob/src/neural_fast_path.rs`
+- `kernels/neural.cu` (+ provider wiring)
 
-## Files to Modify
+---
 
-| File | Change |
-|------|--------|
-| `crates/pyxlog/src/lib.rs` | Add cache to CompiledProgram, modify forward_backward_complex |
-| `crates/xlog-prob/src/exact.rs` | Add method to update weights without recompile |
+## Testing
 
-## Performance Impact
+- Python:
+  - `python/tests/test_circuit_cache.py` is CUDA-only and forbids `.tolist()` to enforce GPU-native behavior.
+- Rust:
+  - `crates/xlog-prob/tests/neural_fast_path.rs` checks GPU fast-path gradients and loss on a tiny AD program.
+  - `crates/xlog-prob/tests/no_dtoh_in_gpu_neural_fast_path.rs` guards against accidental device→host reads in the
+    slot-map module.
 
-| Metric | Before | After |
-|--------|--------|-------|
-| D4 calls/epoch (10 queries) | 50 | **1** |
-| Time per epoch | ~6.75s | **~0.87s** |
-| Speedup | - | **7.7x** |
-
-For 100 unique queries, 100 epochs:
-- Before: 10,000 D4 calls
-- After: ~10-20 D4 calls (one per unique structure)
-- **Speedup: 500-1000x** for D4 time
-
-## Edge Cases
-
-1. **Cache invalidation**: Not needed - circuit structure is immutable once compiled
-2. **Memory pressure**: Add optional `max_cache_size` with LRU eviction
-3. **Different query values**: Same key (structure matters, not specific values)
-
-## Testing Strategy
-
-1. Verify cache hit on repeated queries
-2. Verify different input indices → same cache entry
-3. Verify different label counts → different cache entries
-4. Benchmark: measure D4 calls before/after
-5. Correctness: probabilities match non-cached version
-
-## Success Criteria
-
-1. D4 called only once per unique circuit structure
-2. Training speed improved 5x+ on MNIST addition
-3. All existing tests pass
-4. Memory overhead < 10MB for typical workloads

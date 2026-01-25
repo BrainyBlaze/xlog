@@ -21,12 +21,14 @@ This document explains the implementation as it exists in the repository and poi
 - `crates/xlog-prob/src/kc/ddnnf.rs`: Decision-DNNF parser
 - `crates/xlog-prob/src/xgcf.rs`: XGCF (GPU circuit format) construction
 - `crates/xlog-prob/src/gpu.rs`: GPU upload + evaluation glue (`GpuXgcf`)
+- `crates/xlog-prob/src/neural_fast_path.rs`: GPU neural fast-path slot mapping + AD-chain glue
 - `crates/xlog-prob/src/compilation/validation.rs`: GPU-native equivalence verifier (`φ ≡ C`) using GPU CDCL (zero host reads)
 
 ### CUDA kernels
 - `kernels/circuit.cu` / `kernels/circuit.ptx`: forward + backward kernels for XGCF circuits
 - `kernels/mc_sample.cu` / `kernels/mc_sample.ptx`: Bernoulli sampling kernel used by `mc`
 - `kernels/sat.cu` / `kernels/sat.ptx`: GPU CDCL verifier + GPU-native equivalence query construction helpers
+- `kernels/neural.cu` / `kernels/neural.ptx`: neural fast-path AD weight fill + chain-rule gradient scatter (`xlog_neural`)
 
 ### Python bindings (DLPack-first)
 - `crates/pyxlog/src/lib.rs`: `pyxlog` module (PyO3)
@@ -207,6 +209,12 @@ The PyO3 extension `crates/pyxlog` exposes two entry points:
   - `CompiledLogicProgram.evaluate(dlpack_inputs={...}) -> LogicEvalResult`
 
 All GPU table interchange is via DLPack capsules (framework-agnostic). See `examples/python/` for end-to-end scripts.
+
+For training workloads with neural predicates, `pyxlog` uses the **GPU neural fast-path** described in
+`docs/design/2026-01-22-gpu-native-compilation-design.md` §5.3:
+- neural outputs are imported as CUDA tensors via DLPack (no `.tolist()`),
+- AD-chain weights and probability gradients are computed on GPU (`kernels/neural.cu`),
+- Torch receives device-resident gradients via `output.backward(grad)`.
 
 ---
 

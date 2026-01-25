@@ -793,10 +793,15 @@ pub struct GpuCircuitLayout {
 This is the critical path for training workloads where the logic structure is fixed but neural predictions
 change per batch.
 
-Current status (v0.3.x):
-- `crates/pyxlog/src/lib.rs` caches circuits, but still:
-  - compiles via **CPU D4** (expanded source text), and
-  - builds weights / gradient maps on CPU (including an AD-chain mismatch).
+Current status (Jan 25, 2026):
+- Implemented end-to-end GPU neural fast-path for cached circuits:
+  - CUDA kernels: `kernels/neural.cu` (module `xlog_neural`) with:
+    - `neural_fill_ad_chain_f32` (device weight fill; correct AD conditional chain),
+    - `neural_scatter_ad_chain_grads_f32` (device gradient scatter; correct chain rule using both grads).
+  - Device slot mapping: `crates/xlog-prob/src/neural_fast_path.rs` (`GpuWeightSlots`, `NeuralFastPathConfig`).
+  - Exact engine entrypoint: `ExactDdnnfProgram::{neural_backward_nll_buffers, neural_backward_nll_buffers_with_loss}`.
+  - Python training path: `crates/pyxlog/src/lib.rs` imports CUDA tensors via DLPack (no `.tolist()` / CPU loops),
+    fills weights and gradients on GPU, and calls `output.backward(grad)` with device-resident gradients.
 
 GPU-native design:
 
@@ -967,10 +972,11 @@ This appendix lists the concrete source files that must change to support the GP
 8. `crates/pyxlog/src/lib.rs`  
    - Current template circuit cache stores `ExactDdnnfProgram` compiled via CPU D4.
    - Must be updated to call the GPU-native compiler path and to avoid any host-side CNF/DDNNF materialization.
-   - Must make the neural cache path truly GPU-native:
-     - no `.tolist()` (CPU readback) for neural outputs; use DLPack device tensors,
-     - compute annotated-disjunction conditional chain probabilities on GPU (matches `compile_annotated_disjunction`),
-     - backprop using both `grad_true` and `grad_false` with the correct chain rule (see 5.3).
+   - Neural cache path (training fast-path) is GPU-native as of Jan 25, 2026:
+     - no `.tolist()` (CPU readback) for neural outputs; uses DLPack device tensors,
+     - annotated-disjunction conditional-chain weights are filled on GPU (`kernels/neural.cu`),
+     - probability-space gradients are scattered on GPU using both `grad_true` and `grad_false` (see 5.3),
+     - no host-side weight/grad table construction; Torch receives device-resident gradients via `output.backward(grad)`.
 
 9. `crates/xlog-cli/src/main.rs`  
    - `xlog prob --prob-engine exact_ddnnf` currently uses the CPU D4 path via `ExactDdnnfProgram`.
