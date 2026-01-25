@@ -2211,6 +2211,7 @@ name = "xlog-solve"
 version = "0.3.2"
 dependencies = [
  "criterion",
+ "cudarc",
  "xlog-core",
  "xlog-cuda",
 ]

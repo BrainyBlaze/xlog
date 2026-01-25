@@ -1,8 +1,8 @@
-//! GPU-native SAT/MaxSAT solver using Continuous Local Search (CLS).
+//! SAT solver services for XLOG.
 //!
-//! This crate implements a FastFourierSAT-style CLS solver that treats SAT as
-//! continuous optimization. Variables are relaxed to [0,1] values, and gradient
-//! descent with momentum finds satisfying assignments.
+//! This crate contains:
+//! - a CPU Continuous Local Search (CLS) solver (heuristic, not complete), and
+//! - a GPU-native CDCL solver (complete SAT/UNSAT) used as the production verifier.
 //!
 //! # Architecture
 //!
@@ -36,7 +36,9 @@
 mod instance;
 mod solver;
 mod proof;
+mod gpu_cnf;
 
 pub use instance::{SolveInstance, Clause, Literal, Objective};
 pub use solver::{Solver, SolverConfig, SolverState};
 pub use proof::{SolveProof, SolveResult, SolveStatus, SolveStats, compute_checksum};
+pub use gpu_cnf::GpuCnf;
