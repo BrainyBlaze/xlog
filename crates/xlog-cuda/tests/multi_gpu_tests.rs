@@ -8,33 +8,34 @@ use xlog_cuda::{GpuDevicePool, MultiGpuMemoryManager};
 
 #[test]
 fn test_device_pool_creation() {
-    let device_count = cudarc::driver::CudaDevice::count().unwrap_or(0);
-    if device_count == 0 {
-        eprintln!("Skipping: no CUDA device");
-        return;
-    }
+    let pool = match GpuDevicePool::new(1) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("Skipping: CUDA runtime unavailable: {}", e);
+            return;
+        }
+    };
 
-    let pool = GpuDevicePool::new(device_count as usize).unwrap();
-
-    assert_eq!(pool.device_count(), device_count as usize);
+    assert_eq!(pool.device_count(), 1);
     assert!(pool.get_device(0).is_some());
 }
 
 #[test]
 fn test_device_pool_round_robin() {
-    let device_count = cudarc::driver::CudaDevice::count().unwrap_or(0);
-    if device_count < 1 {
-        eprintln!("Skipping: no CUDA device");
-        return;
-    }
-
-    let pool = GpuDevicePool::new(device_count as usize).unwrap();
+    // Prefer a 2-device pool if available; otherwise fall back to 1.
+    let pool = match GpuDevicePool::new(2).or_else(|_| GpuDevicePool::new(1)) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("Skipping: CUDA runtime unavailable: {}", e);
+            return;
+        }
+    };
 
     // Round-robin should cycle through devices
     let d0 = pool.next_device_idx();
     let d1 = pool.next_device_idx();
 
-    if device_count > 1 {
+    if pool.device_count() > 1 {
         assert_ne!(d0, d1);
     }
 }
@@ -56,18 +57,18 @@ fn test_device_pool_zero_devices_error() {
 
 #[test]
 fn test_multi_gpu_memory_manager() {
-    let device_count = cudarc::driver::CudaDevice::count().unwrap_or(0);
-    if device_count == 0 {
-        eprintln!("Skipping: no CUDA device");
-        return;
-    }
-
-    let pool = Arc::new(GpuDevicePool::new(device_count as usize).unwrap());
+    let pool = match GpuDevicePool::new(1) {
+        Ok(p) => Arc::new(p),
+        Err(e) => {
+            eprintln!("Skipping: CUDA runtime unavailable: {}", e);
+            return;
+        }
+    };
     let budget = MemoryBudget::with_limit(1024 * 1024 * 1024); // 1GB per device
 
     let mgr = MultiGpuMemoryManager::new(pool.clone(), budget).unwrap();
 
-    assert_eq!(mgr.device_count(), device_count as usize);
+    assert_eq!(mgr.device_count(), 1);
 
     // Allocate on specific device
     let slice = mgr.alloc_on_device::<u32>(0, 256).unwrap();

@@ -7,7 +7,7 @@
 //! 3. Repeated evaluations are efficient (no quadratic scaling)
 
 use crate::harness::xgcf::{
-    gen_large_or_circuit, run_tiny_xgcf_backward, run_tiny_xgcf_forward,
+    gen_large_or_circuit, run_tiny_xgcf_backward, run_tiny_xgcf_forward, TinyXgcfDevice,
 };
 use crate::harness::{CategoryResult, TestContext, TestResult};
 use std::time::{Duration, Instant};
@@ -252,65 +252,93 @@ fn test_transfer_circuit_cached(ctx: &TestContext) -> TestResult {
 
     let num_vars = 100;
     let spec = gen_large_or_circuit(num_vars);
-
-    // Warm-up run to ensure any lazy initialization is complete
-    let _warmup = match run_tiny_xgcf_forward(ctx, &spec) {
-        Ok(v) => v,
+    let mut dev = match TinyXgcfDevice::upload(ctx, &spec) {
+        Ok(d) => d,
         Err(e) => {
             return TestResult::error(
                 "test_transfer_circuit_cached",
                 start.elapsed(),
-                format!("Failed warm-up run: {}", e),
+                format!("Failed to upload circuit to device: {}", e),
             );
         }
     };
 
+    // Warm-up to ensure any lazy initialization is complete (no host downloads).
+    for _ in 0..10 {
+        if let Err(e) = dev.forward_launch(ctx) {
+            return TestResult::error(
+                "test_transfer_circuit_cached",
+                start.elapsed(),
+                format!("Failed warm-up launch: {}", e),
+            );
+        }
+    }
     if let Err(e) = ctx.sync_and_check() {
         return TestResult::error(
             "test_transfer_circuit_cached",
             start.elapsed(),
-            format!("Sync failed after warmup: {}", e),
+            format!("Sync failed after warm-up: {}", e),
         );
     }
 
-    // First timed run
-    let first_start = Instant::now();
-    let values_first = match run_tiny_xgcf_forward(ctx, &spec) {
+    // Correctness: two evaluations must match exactly.
+    let values_first = match dev.forward_download_values(ctx) {
         Ok(v) => v,
         Err(e) => {
             return TestResult::error(
                 "test_transfer_circuit_cached",
                 start.elapsed(),
-                format!("Failed first run: {}", e),
+                format!("Failed first correctness run: {}", e),
             );
         }
     };
+    let values_second = match dev.forward_download_values(ctx) {
+        Ok(v) => v,
+        Err(e) => {
+            return TestResult::error(
+                "test_transfer_circuit_cached",
+                start.elapsed(),
+                format!("Failed second correctness run: {}", e),
+            );
+        }
+    };
+
+    // Performance: compare two *batched* runs to reduce timer noise.
+    let num_iterations = 200u32;
+    let first_start = Instant::now();
+    for _ in 0..num_iterations {
+        if let Err(e) = dev.forward_launch(ctx) {
+            return TestResult::error(
+                "test_transfer_circuit_cached",
+                start.elapsed(),
+                format!("Failed first timed launch: {}", e),
+            );
+        }
+    }
     if let Err(e) = ctx.sync_and_check() {
         return TestResult::error(
             "test_transfer_circuit_cached",
             start.elapsed(),
-            format!("Sync failed after first run: {}", e),
+            format!("Sync failed after first timed run: {}", e),
         );
     }
     let first_duration = first_start.elapsed();
 
-    // Second timed run with same circuit
     let second_start = Instant::now();
-    let values_second = match run_tiny_xgcf_forward(ctx, &spec) {
-        Ok(v) => v,
-        Err(e) => {
+    for _ in 0..num_iterations {
+        if let Err(e) = dev.forward_launch(ctx) {
             return TestResult::error(
                 "test_transfer_circuit_cached",
                 start.elapsed(),
-                format!("Failed second run: {}", e),
+                format!("Failed second timed launch: {}", e),
             );
         }
-    };
+    }
     if let Err(e) = ctx.sync_and_check() {
         return TestResult::error(
             "test_transfer_circuit_cached",
             start.elapsed(),
-            format!("Sync failed after second run: {}", e),
+            format!("Sync failed after second timed run: {}", e),
         );
     }
     let second_duration = second_start.elapsed();
@@ -341,10 +369,9 @@ fn test_transfer_circuit_cached(ctx: &TestContext) -> TestResult {
         }
     }
 
-    // Second run should not be significantly slower (allow 3x tolerance for variance)
-    // If circuit was being re-uploaded, second run would likely be slower or same
-    // We just verify it's not drastically slower which would indicate a problem
-    if second_duration > first_duration * 3 && second_duration > Duration::from_micros(100) {
+    // Second run should not be significantly slower (allow 3x tolerance for variance).
+    // This uses batched timings to avoid false positives from transient scheduling noise.
+    if second_duration > first_duration * 3 && second_duration > Duration::from_micros(500) {
         return TestResult::error(
             "test_transfer_circuit_cached",
             start.elapsed(),
@@ -371,13 +398,29 @@ fn test_transfer_compute_ratio_small(ctx: &TestContext) -> TestResult {
 
     let num_vars = 10;
     let spec = gen_large_or_circuit(num_vars);
+    let mut dev = match TinyXgcfDevice::upload(ctx, &spec) {
+        Ok(d) => d,
+        Err(e) => {
+            return TestResult::error(
+                "test_transfer_compute_ratio_small",
+                start.elapsed(),
+                format!("Failed to upload circuit to device: {}", e),
+            );
+        }
+    };
 
     // Run multiple iterations to get stable timing
     let num_iterations = 50;
 
     // Warmup
     for _ in 0..5 {
-        let _ = run_tiny_xgcf_forward(ctx, &spec);
+        if let Err(e) = dev.forward_launch(ctx) {
+            return TestResult::error(
+                "test_transfer_compute_ratio_small",
+                start.elapsed(),
+                format!("Warmup forward failed: {}", e),
+            );
+        }
     }
     if let Err(e) = ctx.sync_and_check() {
         return TestResult::error(
@@ -390,7 +433,13 @@ fn test_transfer_compute_ratio_small(ctx: &TestContext) -> TestResult {
     // Time forward passes
     let forward_start = Instant::now();
     for _ in 0..num_iterations {
-        let _ = run_tiny_xgcf_forward(ctx, &spec);
+        if let Err(e) = dev.forward_launch(ctx) {
+            return TestResult::error(
+                "test_transfer_compute_ratio_small",
+                start.elapsed(),
+                format!("Forward launch failed: {}", e),
+            );
+        }
     }
     if let Err(e) = ctx.sync_and_check() {
         return TestResult::error(
@@ -403,9 +452,30 @@ fn test_transfer_compute_ratio_small(ctx: &TestContext) -> TestResult {
     let forward_per_iter = forward_total / num_iterations as u32;
 
     // Time backward passes
+    // Compute forward values once; repeated backward passes reuse `d_values` to measure pure backward cost.
+    if let Err(e) = dev.forward_launch(ctx) {
+        return TestResult::error(
+            "test_transfer_compute_ratio_small",
+            start.elapsed(),
+            format!("Pre-backward forward launch failed: {}", e),
+        );
+    }
+    if let Err(e) = ctx.sync_and_check() {
+        return TestResult::error(
+            "test_transfer_compute_ratio_small",
+            start.elapsed(),
+            format!("Sync failed after pre-backward forward: {}", e),
+        );
+    }
     let backward_start = Instant::now();
     for _ in 0..num_iterations {
-        let _ = run_tiny_xgcf_backward(ctx, &spec);
+        if let Err(e) = dev.backward_only_launch(ctx) {
+            return TestResult::error(
+                "test_transfer_compute_ratio_small",
+                start.elapsed(),
+                format!("Backward launch failed: {}", e),
+            );
+        }
     }
     if let Err(e) = ctx.sync_and_check() {
         return TestResult::error(
@@ -455,12 +525,28 @@ fn test_transfer_compute_ratio_large(ctx: &TestContext) -> TestResult {
 
     let num_vars = 1000;
     let spec = gen_large_or_circuit(num_vars);
+    let mut dev = match TinyXgcfDevice::upload(ctx, &spec) {
+        Ok(d) => d,
+        Err(e) => {
+            return TestResult::error(
+                "test_transfer_compute_ratio_large",
+                start.elapsed(),
+                format!("Failed to upload circuit to device: {}", e),
+            );
+        }
+    };
 
     let num_iterations = 20;
 
     // Warmup
     for _ in 0..3 {
-        let _ = run_tiny_xgcf_forward(ctx, &spec);
+        if let Err(e) = dev.forward_launch(ctx) {
+            return TestResult::error(
+                "test_transfer_compute_ratio_large",
+                start.elapsed(),
+                format!("Warmup forward failed: {}", e),
+            );
+        }
     }
     if let Err(e) = ctx.sync_and_check() {
         return TestResult::error(
@@ -473,7 +559,13 @@ fn test_transfer_compute_ratio_large(ctx: &TestContext) -> TestResult {
     // Time forward passes
     let forward_start = Instant::now();
     for _ in 0..num_iterations {
-        let _ = run_tiny_xgcf_forward(ctx, &spec);
+        if let Err(e) = dev.forward_launch(ctx) {
+            return TestResult::error(
+                "test_transfer_compute_ratio_large",
+                start.elapsed(),
+                format!("Forward launch failed: {}", e),
+            );
+        }
     }
     if let Err(e) = ctx.sync_and_check() {
         return TestResult::error(
@@ -486,9 +578,29 @@ fn test_transfer_compute_ratio_large(ctx: &TestContext) -> TestResult {
     let forward_per_iter = forward_total / num_iterations as u32;
 
     // Time backward passes
+    if let Err(e) = dev.forward_launch(ctx) {
+        return TestResult::error(
+            "test_transfer_compute_ratio_large",
+            start.elapsed(),
+            format!("Pre-backward forward launch failed: {}", e),
+        );
+    }
+    if let Err(e) = ctx.sync_and_check() {
+        return TestResult::error(
+            "test_transfer_compute_ratio_large",
+            start.elapsed(),
+            format!("Sync failed after pre-backward forward: {}", e),
+        );
+    }
     let backward_start = Instant::now();
     for _ in 0..num_iterations {
-        let _ = run_tiny_xgcf_backward(ctx, &spec);
+        if let Err(e) = dev.backward_only_launch(ctx) {
+            return TestResult::error(
+                "test_transfer_compute_ratio_large",
+                start.elapsed(),
+                format!("Backward launch failed: {}", e),
+            );
+        }
     }
     if let Err(e) = ctx.sync_and_check() {
         return TestResult::error(
@@ -541,11 +653,26 @@ fn test_transfer_dominance_check(ctx: &TestContext) -> TestResult {
 
     let num_vars = 500;
     let spec = gen_large_or_circuit(num_vars);
+    let mut dev = match TinyXgcfDevice::upload(ctx, &spec) {
+        Ok(d) => d,
+        Err(e) => {
+            return TestResult::error(
+                "test_transfer_dominance_check",
+                start.elapsed(),
+                format!("Failed to upload circuit to device: {}", e),
+            );
+        }
+    };
 
     // Warmup to ensure fair timing
     for _ in 0..5 {
-        let _ = run_tiny_xgcf_forward(ctx, &spec);
-        let _ = run_tiny_xgcf_backward(ctx, &spec);
+        if let Err(e) = dev.forward_then_backward_launch(ctx) {
+            return TestResult::error(
+                "test_transfer_dominance_check",
+                start.elapsed(),
+                format!("Warmup forward+backward failed: {}", e),
+            );
+        }
     }
     if let Err(e) = ctx.sync_and_check() {
         return TestResult::error(
@@ -560,26 +687,12 @@ fn test_transfer_dominance_check(ctx: &TestContext) -> TestResult {
     let batch_start = Instant::now();
 
     for _ in 0..num_iterations {
-        match run_tiny_xgcf_forward(ctx, &spec) {
-            Ok(_) => {}
-            Err(e) => {
-                return TestResult::error(
-                    "test_transfer_dominance_check",
-                    start.elapsed(),
-                    format!("Forward pass failed: {}", e),
-                );
-            }
-        }
-
-        match run_tiny_xgcf_backward(ctx, &spec) {
-            Ok(_) => {}
-            Err(e) => {
-                return TestResult::error(
-                    "test_transfer_dominance_check",
-                    start.elapsed(),
-                    format!("Backward pass failed: {}", e),
-                );
-            }
+        if let Err(e) = dev.forward_then_backward_launch(ctx) {
+            return TestResult::error(
+                "test_transfer_dominance_check",
+                start.elapsed(),
+                format!("Forward+backward failed: {}", e),
+            );
         }
     }
 
@@ -643,10 +756,26 @@ fn test_repeated_eval_no_reupload(ctx: &TestContext) -> TestResult {
 
     let num_vars = 200;
     let mut spec = gen_large_or_circuit(num_vars);
+    let mut dev = match TinyXgcfDevice::upload(ctx, &spec) {
+        Ok(d) => d,
+        Err(e) => {
+            return TestResult::error(
+                "test_repeated_eval_no_reupload",
+                start.elapsed(),
+                format!("Failed to upload circuit to device: {}", e),
+            );
+        }
+    };
 
     // Warmup
     for _ in 0..5 {
-        let _ = run_tiny_xgcf_forward(ctx, &spec);
+        if let Err(e) = dev.forward_launch(ctx) {
+            return TestResult::error(
+                "test_repeated_eval_no_reupload",
+                start.elapsed(),
+                format!("Warmup forward failed: {}", e),
+            );
+        }
     }
     if let Err(e) = ctx.sync_and_check() {
         return TestResult::error(
@@ -661,16 +790,20 @@ fn test_repeated_eval_no_reupload(ctx: &TestContext) -> TestResult {
     for i in 0..10 {
         // Slightly modify weights to ensure we're actually computing
         spec.var_log_true[1] = (0.5 + 0.001 * i as f64).ln();
+        if let Err(e) = dev.set_weights(ctx, &spec.var_log_true, &spec.var_log_false) {
+            return TestResult::error(
+                "test_repeated_eval_no_reupload",
+                start.elapsed(),
+                format!("Weight upload failed: {}", e),
+            );
+        }
 
-        match run_tiny_xgcf_forward(ctx, &spec) {
-            Ok(_) => {}
-            Err(e) => {
-                return TestResult::error(
-                    "test_repeated_eval_no_reupload",
-                    start.elapsed(),
-                    format!("Forward pass {} failed: {}", i, e),
-                );
-            }
+        if let Err(e) = dev.forward_launch(ctx) {
+            return TestResult::error(
+                "test_repeated_eval_no_reupload",
+                start.elapsed(),
+                format!("Forward launch {} failed: {}", i, e),
+            );
         }
     }
     if let Err(e) = ctx.sync_and_check() {
@@ -686,16 +819,20 @@ fn test_repeated_eval_no_reupload(ctx: &TestContext) -> TestResult {
     let large_batch_start = Instant::now();
     for i in 0..100 {
         spec.var_log_true[1] = (0.5 + 0.001 * i as f64).ln();
+        if let Err(e) = dev.set_weights(ctx, &spec.var_log_true, &spec.var_log_false) {
+            return TestResult::error(
+                "test_repeated_eval_no_reupload",
+                start.elapsed(),
+                format!("Weight upload failed: {}", e),
+            );
+        }
 
-        match run_tiny_xgcf_forward(ctx, &spec) {
-            Ok(_) => {}
-            Err(e) => {
-                return TestResult::error(
-                    "test_repeated_eval_no_reupload",
-                    start.elapsed(),
-                    format!("Forward pass {} failed: {}", i, e),
-                );
-            }
+        if let Err(e) = dev.forward_launch(ctx) {
+            return TestResult::error(
+                "test_repeated_eval_no_reupload",
+                start.elapsed(),
+                format!("Forward launch {} failed: {}", i, e),
+            );
         }
     }
     if let Err(e) = ctx.sync_and_check() {
@@ -739,6 +876,16 @@ fn test_batch_weights_efficiency(ctx: &TestContext) -> TestResult {
 
     let num_vars = 300;
     let base_spec = gen_large_or_circuit(num_vars);
+    let mut dev = match TinyXgcfDevice::upload(ctx, &base_spec) {
+        Ok(d) => d,
+        Err(e) => {
+            return TestResult::error(
+                "test_batch_weights_efficiency",
+                start.elapsed(),
+                format!("Failed to upload circuit to device: {}", e),
+            );
+        }
+    };
 
     // Generate 10 different weight sets
     let num_weight_sets = 10;
@@ -758,10 +905,15 @@ fn test_batch_weights_efficiency(ctx: &TestContext) -> TestResult {
         weight_sets.push((log_true, log_false));
     }
 
-    // Warmup with first weight set
-    let mut spec = base_spec.clone();
+    // Warmup with initial weights
     for _ in 0..3 {
-        let _ = run_tiny_xgcf_forward(ctx, &spec);
+        if let Err(e) = dev.forward_launch(ctx) {
+            return TestResult::error(
+                "test_batch_weights_efficiency",
+                start.elapsed(),
+                format!("Warmup forward failed: {}", e),
+            );
+        }
     }
     if let Err(e) = ctx.sync_and_check() {
         return TestResult::error(
@@ -771,25 +923,23 @@ fn test_batch_weights_efficiency(ctx: &TestContext) -> TestResult {
         );
     }
 
-    // Time evaluation with all weight sets
+    // Time evaluation with all weight sets (no host downloads; measures GPU-side reuse)
     let batch_start = Instant::now();
-    let mut results: Vec<f64> = Vec::with_capacity(num_weight_sets);
 
     for (log_true, log_false) in &weight_sets {
-        spec.var_log_true = log_true.clone();
-        spec.var_log_false = log_false.clone();
-
-        match run_tiny_xgcf_forward(ctx, &spec) {
-            Ok(values) => {
-                results.push(values[spec.root as usize]);
-            }
-            Err(e) => {
-                return TestResult::error(
-                    "test_batch_weights_efficiency",
-                    start.elapsed(),
-                    format!("Forward pass failed: {}", e),
-                );
-            }
+        if let Err(e) = dev.set_weights(ctx, log_true, log_false) {
+            return TestResult::error(
+                "test_batch_weights_efficiency",
+                start.elapsed(),
+                format!("Weight upload failed: {}", e),
+            );
+        }
+        if let Err(e) = dev.forward_launch(ctx) {
+            return TestResult::error(
+                "test_batch_weights_efficiency",
+                start.elapsed(),
+                format!("Forward launch failed: {}", e),
+            );
         }
     }
 
@@ -801,6 +951,28 @@ fn test_batch_weights_efficiency(ctx: &TestContext) -> TestResult {
         );
     }
     let batch_duration = batch_start.elapsed();
+
+    // Correctness: verify different weights yield different roots (performed outside timing).
+    let mut results: Vec<f64> = Vec::with_capacity(num_weight_sets);
+    for (log_true, log_false) in &weight_sets {
+        if let Err(e) = dev.set_weights(ctx, log_true, log_false) {
+            return TestResult::error(
+                "test_batch_weights_efficiency",
+                start.elapsed(),
+                format!("Weight upload failed: {}", e),
+            );
+        }
+        match dev.forward_download_root(ctx) {
+            Ok(v) => results.push(v),
+            Err(e) => {
+                return TestResult::error(
+                    "test_batch_weights_efficiency",
+                    start.elapsed(),
+                    format!("Failed to compute root value: {}", e),
+                );
+            }
+        }
+    }
 
     // Verify we got distinct results (different weights should give different outputs)
     let unique_results: std::collections::HashSet<u64> = results
@@ -842,18 +1014,19 @@ fn test_batch_weights_efficiency(ctx: &TestContext) -> TestResult {
 
     for _ in 0..num_batch_iterations {
         for (log_true, log_false) in &weight_sets {
-            spec.var_log_true = log_true.clone();
-            spec.var_log_false = log_false.clone();
-
-            match run_tiny_xgcf_forward(ctx, &spec) {
-                Ok(_) => {}
-                Err(e) => {
-                    return TestResult::error(
-                        "test_batch_weights_efficiency",
-                        start.elapsed(),
-                        format!("Forward pass in multi-batch failed: {}", e),
-                    );
-                }
+            if let Err(e) = dev.set_weights(ctx, log_true, log_false) {
+                return TestResult::error(
+                    "test_batch_weights_efficiency",
+                    start.elapsed(),
+                    format!("Weight upload failed: {}", e),
+                );
+            }
+            if let Err(e) = dev.forward_launch(ctx) {
+                return TestResult::error(
+                    "test_batch_weights_efficiency",
+                    start.elapsed(),
+                    format!("Forward launch in multi-batch failed: {}", e),
+                );
             }
         }
     }
@@ -902,7 +1075,8 @@ mod tests {
             let result = test_transfer_weight_size(&ctx);
             assert!(
                 result.status.is_passed(),
-                "Test failed: {:?}",
+                "Test failed: status={:?} diagnostic={:?}",
+                result.status,
                 result.diagnostic
             );
         }
@@ -914,7 +1088,8 @@ mod tests {
             let result = test_transfer_gradient_size(&ctx);
             assert!(
                 result.status.is_passed(),
-                "Test failed: {:?}",
+                "Test failed: status={:?} diagnostic={:?}",
+                result.status,
                 result.diagnostic
             );
         }
@@ -926,7 +1101,8 @@ mod tests {
             let result = test_transfer_circuit_cached(&ctx);
             assert!(
                 result.status.is_passed(),
-                "Test failed: {:?}",
+                "Test failed: status={:?} diagnostic={:?}",
+                result.status,
                 result.diagnostic
             );
         }
@@ -938,7 +1114,8 @@ mod tests {
             let result = test_transfer_compute_ratio_small(&ctx);
             assert!(
                 result.status.is_passed(),
-                "Test failed: {:?}",
+                "Test failed: status={:?} diagnostic={:?}",
+                result.status,
                 result.diagnostic
             );
         }
@@ -950,7 +1127,8 @@ mod tests {
             let result = test_transfer_compute_ratio_large(&ctx);
             assert!(
                 result.status.is_passed(),
-                "Test failed: {:?}",
+                "Test failed: status={:?} diagnostic={:?}",
+                result.status,
                 result.diagnostic
             );
         }
@@ -962,7 +1140,8 @@ mod tests {
             let result = test_transfer_dominance_check(&ctx);
             assert!(
                 result.status.is_passed(),
-                "Test failed: {:?}",
+                "Test failed: status={:?} diagnostic={:?}",
+                result.status,
                 result.diagnostic
             );
         }
@@ -974,7 +1153,8 @@ mod tests {
             let result = test_repeated_eval_no_reupload(&ctx);
             assert!(
                 result.status.is_passed(),
-                "Test failed: {:?}",
+                "Test failed: status={:?} diagnostic={:?}",
+                result.status,
                 result.diagnostic
             );
         }
@@ -986,7 +1166,8 @@ mod tests {
             let result = test_batch_weights_efficiency(&ctx);
             assert!(
                 result.status.is_passed(),
-                "Test failed: {:?}",
+                "Test failed: status={:?} diagnostic={:?}",
+                result.status,
                 result.diagnostic
             );
         }

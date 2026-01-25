@@ -28,6 +28,7 @@ const PACK_PTX: &str = include_str!("../../../kernels/pack.ptx");
 const CIRCUIT_PTX: &str = include_str!("../../../kernels/circuit.ptx");
 const MC_SAMPLE_PTX: &str = include_str!("../../../kernels/mc_sample.ptx");
 const ARITH_PTX: &str = include_str!("../../../kernels/arith.ptx");
+const SAT_PTX: &str = include_str!("../../../kernels/sat.ptx");
 
 #[derive(Clone, Copy)]
 struct RawCudaView<'a, T> {
@@ -68,6 +69,7 @@ pub const PACK_MODULE: &str = "xlog_pack";
 pub const CIRCUIT_MODULE: &str = "xlog_circuit";
 pub const MC_SAMPLE_MODULE: &str = "xlog_mc_sample";
 pub const ARITH_MODULE: &str = "xlog_arith";
+pub const SAT_MODULE: &str = "xlog_sat";
 
 /// Kernel function names in the Monte Carlo sampling module
 pub mod mc_sample_kernels {
@@ -241,6 +243,25 @@ pub mod circuit_kernels {
     pub const XGCF_BACKWARD_LEVEL_PROPAGATE: &str = "xgcf_backward_level_propagate";
     pub const XGCF_BACKWARD_LEVEL_DECISION_GRAD: &str = "xgcf_backward_level_decision_grad";
     pub const XGCF_BACKWARD_LEVEL_LIT_GRAD: &str = "xgcf_backward_level_lit_grad";
+}
+
+/// Kernel function names in the SAT module
+pub mod sat_kernels {
+    pub const SAT_CDCL_SOLVE: &str = "sat_cdcl_solve";
+    pub const SAT_CHECK_MODEL: &str = "sat_check_model";
+    pub const SAT_PROOF_CHECK: &str = "sat_proof_check";
+    pub const SAT_ASSERT_STATUS: &str = "sat_assert_status";
+    pub const SAT_ASSERT_OK: &str = "sat_assert_ok";
+    pub const SAT_XGCF_CNF_COUNTS: &str = "sat_xgcf_cnf_counts";
+    pub const SAT_XGCF_CNF_EMIT: &str = "sat_xgcf_cnf_emit";
+    pub const SAT_XGCF_CNF_CAPTURE_LAST_COUNTS: &str = "sat_xgcf_cnf_capture_last_counts";
+    pub const SAT_XGCF_CNF_COMPUTE_TOTALS: &str = "sat_xgcf_cnf_compute_totals";
+    pub const SAT_CNF_WRITE_TERMINATOR: &str = "sat_cnf_write_terminator";
+    pub const SAT_CNF_COPY_INTO: &str = "sat_cnf_copy_into";
+    pub const SAT_SHIFT_OFFSETS: &str = "sat_shift_offsets";
+    pub const SAT_XGCF_WRITE_ROOT_UNIT_CLAUSE: &str = "sat_xgcf_write_root_unit_clause";
+    pub const SAT_NOT_PHI_COUNTS: &str = "sat_not_phi_counts";
+    pub const SAT_EMIT_NOT_PHI: &str = "sat_emit_not_phi";
 }
 
 /// Default maximum output size for join operations.
@@ -652,6 +673,32 @@ impl CudaKernelProvider {
                 ],
             )
             .map_err(|e| XlogError::Kernel(format!("Failed to load arith PTX: {}", e)))?;
+
+        // Load SAT module (GPU CDCL + on-GPU validation)
+        device
+            .inner()
+            .load_ptx(
+                Ptx::from_src(SAT_PTX),
+                SAT_MODULE,
+                &[
+                    sat_kernels::SAT_CDCL_SOLVE,
+                    sat_kernels::SAT_CHECK_MODEL,
+                    sat_kernels::SAT_PROOF_CHECK,
+                    sat_kernels::SAT_ASSERT_STATUS,
+                    sat_kernels::SAT_ASSERT_OK,
+                    sat_kernels::SAT_XGCF_CNF_COUNTS,
+                    sat_kernels::SAT_XGCF_CNF_EMIT,
+                    sat_kernels::SAT_XGCF_CNF_CAPTURE_LAST_COUNTS,
+                    sat_kernels::SAT_XGCF_CNF_COMPUTE_TOTALS,
+                    sat_kernels::SAT_CNF_WRITE_TERMINATOR,
+                    sat_kernels::SAT_CNF_COPY_INTO,
+                    sat_kernels::SAT_SHIFT_OFFSETS,
+                    sat_kernels::SAT_XGCF_WRITE_ROOT_UNIT_CLAUSE,
+                    sat_kernels::SAT_NOT_PHI_COUNTS,
+                    sat_kernels::SAT_EMIT_NOT_PHI,
+                ],
+            )
+            .map_err(|e| XlogError::Kernel(format!("Failed to load SAT PTX: {}", e)))?;
 
         Ok(Self {
             device,
@@ -2817,6 +2864,21 @@ impl CudaKernelProvider {
     ///
     /// # Errors
     /// Returns `XlogError::Kernel` if kernel execution fails
+    pub fn exclusive_scan_u32_inplace(
+        &self,
+        data: &mut crate::memory::TrackedCudaSlice<u32>,
+        n: u32,
+    ) -> Result<()> {
+        if n as usize > data.len() {
+            return Err(XlogError::Kernel(format!(
+                "exclusive_scan_u32_inplace: n={} exceeds slice len={}",
+                n,
+                data.len()
+            )));
+        }
+        self.multiblock_scan_u32_inplace(data, n)
+    }
+
     pub fn prefix_sum_mask(&self, mask: &[u8]) -> Result<(Vec<u32>, u32)> {
         if mask.is_empty() {
             return Ok((vec![], 0));
@@ -9083,7 +9145,7 @@ mod tests {
     use xlog_core::MemoryBudget;
 
     fn has_cuda_device() -> bool {
-        cudarc::driver::CudaDevice::count().unwrap_or(0) > 0
+        CudaDevice::new(0).is_ok()
     }
 
     #[test]
@@ -9094,6 +9156,7 @@ mod tests {
         assert!(!GROUPBY_PTX.is_empty(), "GROUPBY_PTX should not be empty");
         assert!(!CIRCUIT_PTX.is_empty(), "CIRCUIT_PTX should not be empty");
         assert!(!MC_SAMPLE_PTX.is_empty(), "MC_SAMPLE_PTX should not be empty");
+        assert!(!SAT_PTX.is_empty(), "SAT_PTX should not be empty");
 
         // Verify PTX contains expected kernel names
         assert!(
@@ -9152,6 +9215,66 @@ mod tests {
             MC_SAMPLE_PTX.contains("mc_sample_bernoulli"),
             "MC_SAMPLE_PTX should contain mc_sample_bernoulli"
         );
+        assert!(
+            SAT_PTX.contains("sat_cdcl_solve"),
+            "SAT_PTX should contain sat_cdcl_solve"
+        );
+        assert!(
+            SAT_PTX.contains("sat_check_model"),
+            "SAT_PTX should contain sat_check_model"
+        );
+        assert!(
+            SAT_PTX.contains("sat_proof_check"),
+            "SAT_PTX should contain sat_proof_check"
+        );
+        assert!(
+            SAT_PTX.contains("sat_assert_status"),
+            "SAT_PTX should contain sat_assert_status"
+        );
+        assert!(
+            SAT_PTX.contains("sat_assert_ok"),
+            "SAT_PTX should contain sat_assert_ok"
+        );
+        assert!(
+            SAT_PTX.contains("sat_xgcf_cnf_counts"),
+            "SAT_PTX should contain sat_xgcf_cnf_counts"
+        );
+        assert!(
+            SAT_PTX.contains("sat_xgcf_cnf_emit"),
+            "SAT_PTX should contain sat_xgcf_cnf_emit"
+        );
+        assert!(
+            SAT_PTX.contains("sat_xgcf_cnf_capture_last_counts"),
+            "SAT_PTX should contain sat_xgcf_cnf_capture_last_counts"
+        );
+        assert!(
+            SAT_PTX.contains("sat_xgcf_cnf_compute_totals"),
+            "SAT_PTX should contain sat_xgcf_cnf_compute_totals"
+        );
+        assert!(
+            SAT_PTX.contains("sat_cnf_write_terminator"),
+            "SAT_PTX should contain sat_cnf_write_terminator"
+        );
+        assert!(
+            SAT_PTX.contains("sat_cnf_copy_into"),
+            "SAT_PTX should contain sat_cnf_copy_into"
+        );
+        assert!(
+            SAT_PTX.contains("sat_shift_offsets"),
+            "SAT_PTX should contain sat_shift_offsets"
+        );
+        assert!(
+            SAT_PTX.contains("sat_xgcf_write_root_unit_clause"),
+            "SAT_PTX should contain sat_xgcf_write_root_unit_clause"
+        );
+        assert!(
+            SAT_PTX.contains("sat_not_phi_counts"),
+            "SAT_PTX should contain sat_not_phi_counts"
+        );
+        assert!(
+            SAT_PTX.contains("sat_emit_not_phi"),
+            "SAT_PTX should contain sat_emit_not_phi"
+        );
     }
 
     #[test]
@@ -9180,6 +9303,10 @@ mod tests {
         assert!(
             valid_targets.iter().any(|t| MC_SAMPLE_PTX.contains(t)),
             "MC_SAMPLE_PTX should target sm_70 or later"
+        );
+        assert!(
+            valid_targets.iter().any(|t| SAT_PTX.contains(t)),
+            "SAT_PTX should target sm_70 or later"
         );
     }
 

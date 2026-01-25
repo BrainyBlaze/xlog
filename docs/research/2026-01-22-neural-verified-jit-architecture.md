@@ -4,6 +4,12 @@
 **Innovation:** Neural prediction + GPU verification + JIT specialization
 **Goal:** First system with <5ms compilation, 100% correctness, pure GPU
 
+**Note (Jan 25, 2026):** This is an exploratory research document. The authoritative production direction for GPU-native
+knowledge compilation and verifier-grade correctness is `docs/design/2026-01-22-gpu-native-compilation-design.md` and
+the implemented verifier contract is `docs/plans/2026-01-25-zero-host-reads-gpu-verifier.md` (see also `docs/ROADMAP.md`).
+Some proposed fast paths (e.g., tensor-only evaluation, sampling verification) may be intentionally excluded from the
+current production design.
+
 ---
 
 ## 1. Architecture Overview

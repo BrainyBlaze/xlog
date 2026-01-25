@@ -47,10 +47,13 @@ fn kernels_dir() -> PathBuf {
 
 #[test]
 fn validate_all_ptx_files_load_and_resolve_all_entry_points() {
-    if cudarc::driver::CudaDevice::count().unwrap_or(0) == 0 {
-        eprintln!("Skipping PTX validation: no CUDA device available");
-        return;
-    }
+    let device = match CudaDevice::new(0) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("Skipping PTX validation: CUDA runtime unavailable: {}", e);
+            return;
+        }
+    };
 
     let kernels_dir = kernels_dir();
     let mut ptx_files: Vec<PathBuf> = fs::read_dir(&kernels_dir)
@@ -65,8 +68,6 @@ fn validate_all_ptx_files_load_and_resolve_all_entry_points() {
         "No PTX files found under {}",
         kernels_dir.display()
     );
-
-    let device = CudaDevice::new(0).expect("Failed to create CUDA device");
 
     for path in ptx_files {
         let filename = path.file_name().and_then(|s| s.to_str()).unwrap_or("<unknown>");

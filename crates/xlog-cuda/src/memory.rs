@@ -386,6 +386,16 @@ mod tests {
     use super::*;
     use xlog_core::ScalarType;
 
+    fn try_device() -> Option<Arc<CudaDevice>> {
+        match CudaDevice::new(0) {
+            Ok(d) => Some(Arc::new(d)),
+            Err(e) => {
+                eprintln!("Skipping test: CUDA runtime unavailable: {}", e);
+                None
+            }
+        }
+    }
+
     // Test CudaBuffer without requiring a GPU
     #[test]
     fn test_cuda_buffer_empty() {
@@ -420,12 +430,9 @@ mod tests {
     // Tests requiring GPU
     #[test]
     fn test_memory_manager_creation() {
-        if cudarc::driver::CudaDevice::count().unwrap_or(0) == 0 {
-            eprintln!("Skipping test: no CUDA device available");
+        let Some(device) = try_device() else {
             return;
-        }
-
-        let device = Arc::new(CudaDevice::new(0).expect("Failed to create device"));
+        };
         let budget = MemoryBudget::with_limit(1024 * 1024); // 1 MB
         let manager = Arc::new(GpuMemoryManager::new(device, budget));
 
@@ -436,12 +443,9 @@ mod tests {
 
     #[test]
     fn test_memory_manager_alloc() {
-        if cudarc::driver::CudaDevice::count().unwrap_or(0) == 0 {
-            eprintln!("Skipping test: no CUDA device available");
+        let Some(device) = try_device() else {
             return;
-        }
-
-        let device = Arc::new(CudaDevice::new(0).expect("Failed to create device"));
+        };
         let budget = MemoryBudget::with_limit(1024 * 1024); // 1 MB
         let manager = Arc::new(GpuMemoryManager::new(device, budget));
 
@@ -454,12 +458,9 @@ mod tests {
 
     #[test]
     fn test_memory_manager_budget_exceeded() {
-        if cudarc::driver::CudaDevice::count().unwrap_or(0) == 0 {
-            eprintln!("Skipping test: no CUDA device available");
+        let Some(device) = try_device() else {
             return;
-        }
-
-        let device = Arc::new(CudaDevice::new(0).expect("Failed to create device"));
+        };
         let budget = MemoryBudget::with_limit(1024); // 1 KB limit
         let manager = Arc::new(GpuMemoryManager::new(device, budget));
 
@@ -477,12 +478,9 @@ mod tests {
 
     #[test]
     fn test_memory_manager_check_budget() {
-        if cudarc::driver::CudaDevice::count().unwrap_or(0) == 0 {
-            eprintln!("Skipping test: no CUDA device available");
+        let Some(device) = try_device() else {
             return;
-        }
-
-        let device = Arc::new(CudaDevice::new(0).expect("Failed to create device"));
+        };
         let budget = MemoryBudget::with_limit(1000);
         let manager = Arc::new(GpuMemoryManager::new(device, budget));
 
@@ -495,12 +493,9 @@ mod tests {
 
     #[test]
     fn test_memory_manager_multiple_allocs() {
-        if cudarc::driver::CudaDevice::count().unwrap_or(0) == 0 {
-            eprintln!("Skipping test: no CUDA device available");
+        let Some(device) = try_device() else {
             return;
-        }
-
-        let device = Arc::new(CudaDevice::new(0).expect("Failed to create device"));
+        };
         let budget = MemoryBudget::with_limit(4096); // 4 KB
         let manager = Arc::new(GpuMemoryManager::new(device, budget));
 
@@ -522,12 +517,9 @@ mod tests {
 
     #[test]
     fn test_memory_manager_record_free() {
-        if cudarc::driver::CudaDevice::count().unwrap_or(0) == 0 {
-            eprintln!("Skipping test: no CUDA device available");
+        let Some(device) = try_device() else {
             return;
-        }
-
-        let device = Arc::new(CudaDevice::new(0).expect("Failed to create device"));
+        };
         let budget = MemoryBudget::with_limit(4096);
         let manager = Arc::new(GpuMemoryManager::new(device, budget));
 
@@ -543,12 +535,9 @@ mod tests {
 
     #[test]
     fn test_cuda_buffer_from_columns() {
-        if cudarc::driver::CudaDevice::count().unwrap_or(0) == 0 {
-            eprintln!("Skipping test: no CUDA device available");
+        let Some(device) = try_device() else {
             return;
-        }
-
-        let device = Arc::new(CudaDevice::new(0).expect("Failed to create device"));
+        };
         let budget = MemoryBudget::with_limit(1024 * 1024);
         let manager = Arc::new(GpuMemoryManager::new(device, budget));
 

@@ -26,6 +26,9 @@ Thumbs.db
 *.log
 .worktrees/
 
+# Local build shim artifacts (generated)
+tools/exdev-shim/*.so
+
 # Python (Phase 4 Python package work)
 __pycache__/
 *.pyc

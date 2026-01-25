@@ -4,10 +4,13 @@ use xlog_core::{MemoryBudget, Schema, ScalarType};
 use xlog_cuda::{CompareOp, CudaDevice, CudaKernelProvider, GpuMemoryManager};
 
 fn setup_provider() -> Option<CudaKernelProvider> {
-    if cudarc::driver::CudaDevice::count().unwrap_or(0) == 0 {
-        return None;
-    }
-    let device = Arc::new(CudaDevice::new(0).unwrap());
+    let device = match CudaDevice::new(0) {
+        Ok(d) => Arc::new(d),
+        Err(e) => {
+            eprintln!("Skipping: CUDA runtime unavailable: {}", e);
+            return None;
+        }
+    };
     let budget = MemoryBudget::with_limit(1024 * 1024 * 1024); // 1 GB
     let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
     Some(CudaKernelProvider::new(device, memory).unwrap())

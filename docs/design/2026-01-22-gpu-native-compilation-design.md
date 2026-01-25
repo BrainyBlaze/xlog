@@ -1,1866 +1,984 @@
-# GPU-Native Knowledge Compilation Design
-**Date:** January 22, 2026
-**Status:** Architecture Design Complete
+# GPU-Native Knowledge Compilation Design (GPU D4 + GPU CDCL Verifier)
+**Date:** January 22, 2026  
+**Status:** Revised for 100% GPU-native design  
 **Target Release:** v0.5.0
 
 ---
 
 ## Executive Summary
 
-This document presents the complete architecture for **GPU-Native Knowledge Compilation** in XLOG, eliminating the CPU bottleneck that currently limits performance. The hybrid Tensor + GPU D4 system achieves:
+This design defines a **100% GPU-native knowledge compilation pipeline** for XLOG with **zero CPU data transfers**. The runtime path is **single‑route**:
 
-- **10-100x compilation speedup** vs current CPU D4
-- **100% correctness** guaranteed through validation and fallback
-- **Zero API breaking changes** - drop-in replacement
-- **Publishable research** contribution (NeurIPS/ICML/IJCAI)
-- **Patentable** novel approach
+1. **GPU D4 compiler** (BFS-parallelized) builds an exact d-DNNF.
+2. **GPU CDCL verifier** proves equivalence by checking **two UNSAT queries**:
+   `UNSAT(φ ∧ ¬C)` and `UNSAT(C ∧ ¬φ)`.
+3. **GPU XGCF** is emitted and executed by existing GPU kernels.
 
-**Current Bottleneck:** `exact.rs:538` calls CPU D4, taking 100-5000ms per query.
-
-**Solution:** Two GPU-native compilation paths with automatic routing:
-- **Tensor Path**: Sparse matrix operations for small queries (<1K clauses) - 1-5ms
-- **GPU D4 Path**: BFS-parallelized tree search for large queries (≥1K clauses) - 5-50ms
-
-Both paths produce identical XGCF output compatible with existing battle-tested kernels (200/200 tests passing).
+There is **no CPU fallback**, no tensor path, and no randomized validation. Correctness is guaranteed by
+the GPU verifier. The CPU is used only for **control-plane kernel launches** and stream management, not
+for **data-plane** movement of CNF/circuit/weights/gradients.
 
 ---
 
 ## Table of Contents
 
-1. [Architecture Overview](#1-architecture-overview)
-2. [Tensor Path Design](#2-tensor-path-design)
-3. [GPU D4 Path Design](#3-gpu-d4-path-design)
-4. [Size Router & Integration](#4-size-router--integration)
-5. [Fallback Mechanisms](#5-fallback-mechanisms)
-6. [Performance Optimizations](#6-performance-optimizations)
-7. [API Integration](#7-api-integration)
-8. [Testing Strategy](#8-testing-strategy)
-9. [Implementation Roadmap](#9-implementation-roadmap)
-10. [Research & Publication](#10-research--publication)
+1. [Architecture Overview](#1-architecture-overview)  
+2. [GPU D4 Compiler](#2-gpu-d4-compiler)  
+3. [GPU CDCL Equivalence Verifier](#3-gpu-cdcl-equivalence-verifier)  
+4. [GPU-Resident Cache & Memory Model](#4-gpu-resident-cache--memory-model)  
+5. [Integration Points](#5-integration-points)  
+6. [Testing Strategy (GPU-Only)](#6-testing-strategy-gpu-only)  
+7. [Performance Targets](#7-performance-targets)  
+8. [Implementation Roadmap](#8-implementation-roadmap)  
+9. [Risks & Mitigations](#9-risks--mitigations)
 
 ---
 
 ## 1. Architecture Overview
 
-### 1.1 High-Level Flow
+### 1.1 Goals & Constraints
+
+- **100% GPU-native**: all CNF, circuits, and verification data stay on device.
+- **Zero CPU transfers (data-plane)**: no device↔host copies of CNF/circuit/weights/gradients in the
+  steady-state compilation+evaluation path.
+- **Soundness**: correctness proven by a GPU CDCL equivalence check.
+- **Compatibility**: output is XGCF, evaluated by existing GPU kernels.
+
+**Definition: “zero CPU transfers” in XLOG**
+- Inputs (CNF, weights, neural tensors) are provided as **device-resident buffers** (e.g., via DLPack).
+- Outputs (logZ, grads) are produced as **device-resident buffers** and can be
+  exported via DLPack.
+- The host is allowed to launch kernels and manage CUDA streams, but it should not need to memcpy
+  the data-plane arrays listed above.
+
+### 1.2 End-to-End Flow
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                         User Query                          │
-│                    "digit(X) :- nn(X)"                      │
-└────────────────────────┬────────────────────────────────────┘
-                         │
-                         ▼
-┌─────────────────────────────────────────────────────────────┐
-│                   CNF Formula (Rust)                        │
-│            (x₁ ∨ x₂) ∧ (¬x₁ ∨ x₃) ∧ ...                    │
-└────────────────────────┬────────────────────────────────────┘
-                         │
-                         ▼
-┌─────────────────────────────────────────────────────────────┐
-│                    Circuit Cache?                           │
-│                  (Hash-based lookup)                        │
-└─────────┬──────────────────────────────────┬────────────────┘
-          │ HIT                              │ MISS
-          ▼                                  ▼
-    ┌─────────┐              ┌───────────────────────────────┐
-    │ Return  │              │      Size Router              │
-    │ Cached  │              │  num_clauses < 1000?          │
-    │ XGCF    │              └─────────┬──────────┬──────────┘
-    └─────────┘                        │          │
-                            YES ◄──────┘          └──────► NO
-                             │                            │
-                ┌────────────▼─────────┐    ┌─────────────▼──────────┐
-                │   TENSOR PATH (GPU)  │    │   GPU D4 PATH (GPU)    │
-                │                      │    │                        │
-                │  CSR Sparse Matrix   │    │  BFS Tree Search       │
-                │  cuSPARSE Ops        │    │  Parallel DPLL         │
-                │  1-5ms               │    │  Component Caching     │
-                └──────────┬───────────┘    └────────────┬───────────┘
-                           │                             │
-                           │  Validation Failed?         │
-                           └──────────┬──────────────────┘
-                                      │ Fallback
-                                      ▼
-                           ┌──────────────────────┐
-                           │   CPU D4 (Fallback)  │
-                           │   100-5000ms         │
-                           └──────────┬───────────┘
-                                      │
-                ┌─────────────────────┴─────────────────────┐
-                │         Common Output: XGCF Circuit       │
-                │                                            │
-                │  - Tree-structured DAG (CSR layout)        │
-                │  - Compatible with existing kernels        │
-                │  - Cached for future queries               │
-                └─────────────────────┬──────────────────────┘
-                                      │
-                ┌─────────────────────┴─────────────────────┐
-                │       Existing GPU Execution Path         │
-                │                                            │
-                │  Forward:  xgcf_forward_level             │
-                │  Backward: xgcf_backward_level_*          │
-                │  Result:   log(WMC) + gradients           │
-                └────────────────────────────────────────────┘
+GPU-resident CNF (φ)
+        │
+        ▼
+GPU D4 Compiler (BFS parallel)
+        │  produces candidate circuit C (d-DNNF)
+        ▼
+GPU CDCL Verifier
+  check UNSAT(φ ∧ ¬C) and UNSAT(C ∧ ¬φ)
+        │
+   UNSAT? ✔
+        ▼
+GPU XGCF (device-resident)
+        │
+        ▼
+Existing GPU evaluation kernels
 ```
 
-### 1.2 Design Principles
+**Key property:** The verifier is complete. If both checks are UNSAT, the circuit is equivalent and safe.
+If either check is SAT, the circuit is rejected.
 
-**Correctness First**
-- Both paths validated against CPU D4 (gold standard)
-- Random assignment testing (1000 samples per circuit)
-- Fallback guarantees: Tensor → GPU D4 → CPU D4
-
-**Performance Second**
-- Target: <1ms compilation for 90% of queries
-- Minimize CPU-GPU transfers (weights stay resident)
-- Leverage existing battle-tested kernels (200/200 tests passing)
-
-**API Compatibility**
-- Drop-in replacement at `exact.rs:538`
-- No breaking changes to Python bindings
-- Existing cache mechanism preserved
-
-**Research Innovation**
-- First pure GPU-native logic programming system
-- Novel hybrid tensor-symbolic compilation
-- Publishable at NeurIPS/ICML/IJCAI
+For the **GPU D4 exact path**, a SAT result indicates a compiler bug; production behavior is **fail-fast**
+via a GPU trap / CUDA error (no silent fallback).
 
 ---
 
-## 2. Tensor Path Design
+## 2. GPU D4 Compiler
 
-### 2.1 Overview
+### 2.1 BFS Parallelization
 
-For **small queries (<1000 clauses)**, we bypass tree compilation entirely and use **sparse Boolean matrix operations**. This approach is inspired by "Boolean Matrix Logic Programming on the GPU" (2024), which showed 1-4 orders of magnitude speedup.
+D4’s recursive search is transformed into a **breadth‑first GPU work queue**. Each BFS level processes a batch of CNF subproblems in parallel:
 
-### 2.2 CNF to Sparse Matrix Conversion
+```
+Level 0:   [φ]
+Level 1:   [φ|x]   [φ|¬x]
+Level 2:   [φ|x,y] [φ|x,¬y] [φ|¬x,y] [φ|¬x,¬y] ...
+```
 
-A CNF formula is represented as a **Compressed Sparse Row (CSR) matrix**:
+### 2.2 GPU Data Structures
 
 ```rust
-// Example CNF: (x₁ ∨ x₂) ∧ (¬x₁ ∨ x₃) ∧ (x₂ ∨ ¬x₃)
-//
-// Matrix representation (3 clauses × 3 variables):
-//     x₁  x₂  x₃
-// C₁  [ 1   1   0 ]   OR clause
-// C₂  [-1   0   1 ]   OR clause
-// C₃  [ 0   1  -1 ]   OR clause
-// Result: AND all clauses
-
-struct GpuCsrCnf {
-    num_clauses: u32,        // 3
-    num_vars: u32,           // 3
-
-    // CSR format stores only non-zeros:
-    row_ptr: CudaSlice<u32>,      // [0, 2, 4, 6] - clause boundaries
-    col_idx: CudaSlice<u32>,      // [0, 1, 0, 2, 1, 2] - variable indices
-    values: CudaSlice<i8>,        // [1, 1, -1, 1, 1, -1] - literal signs
-}
-```
-
-**Memory Efficiency**: O(num_literals) instead of O(num_clauses × num_vars). For sparse CNF (typical), this is **10-100x smaller**.
-
-### 2.3 Forward Pass (Weighted Model Counting)
-
-Compute log P(CNF = true) using matrix operations:
-
-```rust
-fn tensor_forward_pass(cnf: &GpuCsrCnf, weights: &GpuWeights) -> Result<f64> {
-    // Step 1: Evaluate each literal
-    // lit_values[i] = log P(literal i is true)
-    let lit_values = evaluate_literals(cnf, weights)?;
-
-    // Step 2: Evaluate each clause (OR of literals)
-    // For clause C = (l₁ ∨ l₂ ∨ ... ∨ lₖ):
-    // log P(C) = logsumexp([log P(l₁), log P(l₂), ..., log P(lₖ)])
-    let clause_values = cusparse_or_reduction(cnf, &lit_values)?;
-
-    // Step 3: Evaluate CNF (AND of clauses)
-    // log P(CNF) = sum([log P(C₁), log P(C₂), ...])
-    let cnf_value = sum_log_probs(&clause_values)?;
-
-    Ok(cnf_value)
-}
-```
-
-**CUDA Implementation**:
-
-```cuda
-// Step 2: Clause evaluation using cuSPARSE
-// Each clause is a row in CSR matrix
-__global__ void evaluate_clauses_kernel(
-    int num_clauses,
-    const u32* row_ptr,      // CSR row pointers
-    const u32* col_idx,      // CSR column indices (variable IDs)
-    const i8* values,        // CSR values (literal signs: +1 or -1)
-    const f64* var_log_true, // log P(xᵢ = true) for each variable
-    const f64* var_log_false,// log P(xᵢ = false) for each variable
-    f64* clause_log_probs    // Output: log P(clause satisfied)
-) {
-    int clause_id = blockIdx.x * blockDim.x + threadIdx.x;
-    if (clause_id >= num_clauses) return;
-
-    int start = row_ptr[clause_id];
-    int end = row_ptr[clause_id + 1];
-
-    // Collect literal probabilities for this clause
-    f64 lit_probs[32];  // Max 32 literals per clause (typical)
-    int lit_count = end - start;
-
-    for (int i = 0; i < lit_count; i++) {
-        int var_id = col_idx[start + i];
-        int sign = values[start + i];
-
-        // Positive literal: use P(xᵢ = true), negative: use P(xᵢ = false)
-        lit_probs[i] = (sign > 0) ? var_log_true[var_id] : var_log_false[var_id];
-    }
-
-    // Compute OR: log(P(l₁) + P(l₂) + ... + P(lₖ))
-    clause_log_probs[clause_id] = logsumexp(lit_probs, lit_count);
-}
-```
-
-### 2.4 Backward Pass (Gradient Computation)
-
-Compute gradients ∂L/∂log(w_i) for each variable weight:
-
-```rust
-fn tensor_backward_pass(
-    cnf: &GpuCsrCnf,
-    weights: &GpuWeights,
-    clause_values: &CudaSlice<f64>,
-    upstream_grad: f64
-) -> Result<GpuGradients> {
-    // Gradient flows: Loss → CNF → Clauses → Literals → Variables
-
-    // Step 1: Gradient w.r.t. clauses (from AND operation)
-    // ∂L/∂log P(Cⱼ) = upstream_grad (all clauses equally contribute)
-    let clause_grads = broadcast_gradient(upstream_grad, cnf.num_clauses)?;
-
-    // Step 2: Gradient w.r.t. literals (from OR operations)
-    // ∂log P(C)/∂log P(lᵢ) = exp(log P(lᵢ) - log P(C))
-    let lit_grads = cusparse_or_backward(cnf, clause_values, &clause_grads)?;
-
-    // Step 3: Accumulate gradients for each variable
-    // Variables appear in multiple literals, sum their contributions
-    let var_grads = accumulate_variable_gradients(cnf, &lit_grads)?;
-
-    Ok(var_grads)
-}
-```
-
-**CUDA Implementation**:
-
-```cuda
-// Step 2: Backprop through OR operations
-__global__ void or_backward_kernel(
-    int num_clauses,
-    const u32* row_ptr,
-    const u32* col_idx,
-    const i8* values,
-    const f64* var_log_true,
-    const f64* var_log_false,
-    const f64* clause_log_probs,  // Forward pass results
-    const f64* clause_grads,       // Upstream gradients
-    f64* lit_grads                 // Output: gradient for each literal
-) {
-    int clause_id = blockIdx.x * blockDim.x + threadIdx.x;
-    if (clause_id >= num_clauses) return;
-
-    int start = row_ptr[clause_id];
-    int end = row_ptr[clause_id + 1];
-    f64 clause_log_prob = clause_log_probs[clause_id];
-    f64 upstream = clause_grads[clause_id];
-
-    for (int i = start; i < end; i++) {
-        int var_id = col_idx[i];
-        int sign = values[i];
-
-        f64 lit_log_prob = (sign > 0) ? var_log_true[var_id] : var_log_false[var_id];
-
-        // Gradient of logsumexp: ∂/∂xᵢ log(Σ exp(xⱼ)) = exp(xᵢ) / Σ exp(xⱼ)
-        //                                                = exp(xᵢ - log(Σ exp(xⱼ)))
-        lit_grads[i] = upstream * exp(lit_log_prob - clause_log_prob);
-    }
-}
-```
-
-### 2.5 Conversion to XGCF
-
-After matrix operations, convert to XGCF format for compatibility:
-
-```rust
-fn sparse_matrix_to_xgcf(cnf: &GpuCsrCnf) -> Result<GpuXgcf> {
-    // Build tree structure:
-    //
-    //           AND (root)
-    //          / | \
-    //        OR OR OR  (clauses)
-    //       /|  |   |\
-    //     L L   L   L L (literals)
-
-    let mut nodes = Vec::new();
-    let mut levels = Vec::new();
-
-    // Level 0: Literal nodes
-    for var in 0..cnf.num_vars {
-        nodes.push(Node::Lit { var, positive: true });
-        nodes.push(Node::Lit { var, positive: false });
-    }
-    levels.push(0..cnf.num_vars * 2);
-
-    // Level 1: Clause nodes (OR)
-    for clause_id in 0..cnf.num_clauses {
-        let start = cnf.row_ptr[clause_id];
-        let end = cnf.row_ptr[clause_id + 1];
-        let children: Vec<u32> = (start..end).map(|i| {
-            let var = cnf.col_idx[i];
-            let sign = cnf.values[i];
-            var * 2 + if sign > 0 { 0 } else { 1 }
-        }).collect();
-        nodes.push(Node::Or { children });
-    }
-    levels.push(cnf.num_vars * 2..(cnf.num_vars * 2 + cnf.num_clauses));
-
-    // Level 2: Root AND node
-    let clause_children: Vec<u32> = (0..cnf.num_clauses)
-        .map(|i| cnf.num_vars * 2 + i)
-        .collect();
-    nodes.push(Node::And { children: clause_children });
-    let root_id = nodes.len() - 1;
-    levels.push(root_id..root_id + 1);
-
-    // Convert to CSR XGCF format
-    to_xgcf_csr(&nodes, &levels, root_id as u32)
-}
-```
-
-**Result**: XGCF circuit that can use existing `xgcf_forward_level` and `xgcf_backward_level_*` kernels.
-
-### 2.6 Performance Characteristics
-
-**Time Complexity**:
-- Forward: O(num_literals) - single pass through CSR matrix
-- Backward: O(num_literals) - single pass with accumulation
-- **Total: 1-5ms for typical small CNFs**
-
-**Space Complexity**:
-- CSR matrix: O(num_literals) - sparse representation
-- Intermediate results: O(num_clauses + num_vars) - small
-- **Total GPU memory: <10MB for CNFs with <1K clauses**
-
-**When Tensor Path Fails**:
-- Very dense CNF (>50% non-zero) - matrix becomes inefficient
-- GPU memory exhaustion - large intermediate arrays
-- **Fallback**: Automatically route to GPU D4 Path
-
----
-
-## 3. GPU D4 Path Design
-
-### 3.1 Overview
-
-For **large queries (≥1000 clauses)** or when Tensor Path fails, we use **GPU-parallelized D4 compilation**. The classic D4 algorithm uses depth-first tree search (inherently sequential). We adapt it to **breadth-first search (BFS)** to expose parallelism.
-
-### 3.2 D4 Algorithm Background
-
-D4 compiles CNF → d-DNNF using top-down tree search with caching:
-
-```
-function D4(cnf):
-    1. Unit propagation: simplify CNF by forced assignments
-    2. Component decomposition: find independent subproblems
-    3. Check cache: have we solved this component before?
-    4. Base cases: empty CNF (TRUE) or unsatisfiable (FALSE)
-    5. Recursive case:
-       a. Select variable x to split on
-       b. Compile D4(cnf ∧ x)     (x = true branch)
-       c. Compile D4(cnf ∧ ¬x)    (x = false branch)
-       d. Return DECISION(x, left, right)
-    6. Cache result
-```
-
-**Key insight**: Steps 1-4 can run in parallel across multiple CNF instances. Step 5 generates new work items for next BFS level.
-
-### 3.3 GPU Data Structures
-
-```rust
-// CNF formula on GPU
 struct GpuCnf {
-    num_vars: u32,
-    num_clauses: u32,
+    // Host-known capacities (buffers are allocated to these sizes).
+    var_cap: u32,
+    clause_cap: u32,
+    lit_cap: u32,
 
-    // CSR format for clauses
-    clause_offsets: CudaSlice<u32>,  // Size: num_clauses + 1
-    literals: CudaSlice<i32>,         // Size: total_literals (positive/negative var IDs)
+    // Device-resident exact counts (len = 1 each).
+    num_vars: DeviceSlice<u32>,
+    num_clauses: DeviceSlice<u32>,
+    num_lits: DeviceSlice<u32>,
 
-    // Variable assignments (0 = unassigned, 1 = true, 2 = false)
-    assignment: CudaSlice<u8>,        // Size: num_vars
+    // CSR buffers sized by capacity.
+    clause_offsets: DeviceSlice<u32>, // len = clause_cap + 1
+    literals: DeviceSlice<i32>,       // len = lit_cap, signed DIMACS: ±var_id (1-based)
 }
 
-// Work item for BFS queue
+/// Per-work-item assignments live in a pooled buffer to avoid device malloc.
+/// The concrete encoding may be **dense tri-state bytes** or **compressed bitsets** (see 2.2.1).
+/// Layout shown here is the dense form: `assignments[work_id * stride + var]`,
+/// with `var` 1-indexed to match DIMACS.
+struct GpuAssignmentPool {
+    assignments: DeviceSlice<u8>, // 0=unassigned,1=true,2=false
+    stride: u32,                  // = num_vars + 1
+}
+
 struct D4WorkItem {
-    cnf_id: u32,              // Which CNF in batch
-    parent_node: u32,         // Parent in d-DNNF tree
-    branch: u8,               // 0 = left (true), 1 = right (false)
-    depth: u16,               // Tree depth (for debugging)
+    subproblem_id: u32,
+    parent_node: u32,
+    branch: u8,
+    depth: u16,
+    assignment_offset: u32, // base = subproblem_id * stride
 }
 
-// Dynamic work queue on GPU
 struct GpuWorkQueue {
-    items: CudaSlice<D4WorkItem>,    // Preallocated work items
+    items: DeviceSlice<D4WorkItem>,
     capacity: u32,
-    size: AtomicU32,                 // Current size (atomic for concurrent push)
+    /// Device-resident counter (implemented as a 1-element device slice updated via atomics).
+    size: DeviceSlice<u32>,
 }
 
-// Component cache (memoization)
 struct GpuComponentCache {
-    // Cuckoo hash table for O(1) lookup
-    keys: CudaSlice<u64>,            // Component hash
-    values: CudaSlice<u32>,          // Compiled circuit node ID
+    keys: DeviceSlice<u64>,
+    values: DeviceSlice<u32>,
     table_size: u32,
 }
-```
 
-### 3.4 BFS Parallelization Strategy
-
-Instead of recursive DFS, we maintain **explicit work queues** and process each level in parallel:
-
-```rust
-fn compile_gpu_d4(cnf: &Cnf) -> Result<GpuXgcf> {
-    // Initialize
-    let gpu_cnf = upload_cnf_to_gpu(cnf)?;
-    let current_queue = GpuWorkQueue::new(100_000)?;
-    let next_queue = GpuWorkQueue::new(100_000)?;
-    let cache = GpuComponentCache::new(1_000_000)?;
-    let circuit_builder = GpuCircuitBuilder::new()?;
-
-    // Seed with root work item
-    current_queue.push(D4WorkItem {
-        cnf_id: 0,
-        parent_node: INVALID_NODE,
-        branch: 0,
-        depth: 0,
-    })?;
-
-    // BFS loop
-    while !current_queue.is_empty() {
-        // Process entire level in parallel
-        launch_d4_iteration_kernel(
-            &gpu_cnf,
-            &current_queue,
-            &next_queue,
-            &cache,
-            &mut circuit_builder
-        )?;
-
-        // Swap queues for next iteration
-        std::mem::swap(&mut current_queue, &mut next_queue);
-        next_queue.clear();
-    }
-
-    // Assemble final XGCF from circuit builder
-    circuit_builder.to_xgcf()
+struct GpuCircuitBuilder {
+    node_type: DeviceSlice<u8>,
+    child_offsets: DeviceSlice<u32>,
+    child_indices: DeviceSlice<u32>,
+    lit: DeviceSlice<i32>,
+    decision_var: DeviceSlice<u32>,
+    decision_child_false: DeviceSlice<u32>,
+    decision_child_true: DeviceSlice<u32>,
 }
 ```
 
-### 3.5 GPU Kernels
+**Type note:** In this document, `DeviceSlice<T>` is shorthand for a GPU-resident,
+owned, tracked buffer such as `xlog_cuda::memory::TrackedCudaSlice<T>`.
 
-**Kernel 1: Unit Propagation**
+#### 2.2.1 Assignment Representation (Robust + Bandwidth-Conscious)
 
-Simplify CNF by forced assignments:
+The naive dense layout `assignments[subproblem_id][var]` is simple and fast for lookups, but it can be
+too large to copy/initialize at scale. The GPU D4 design therefore standardizes **two formats**:
 
-```cuda
-__global__ void unit_propagation_kernel(
-    GpuCnf* cnf,
-    u8* assignment,        // In/out: variable assignments
-    bool* changed          // Out: whether any assignment made
-) {
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+1) **Dense tri-state bytes (simple, fast)**  
+`u8` per var: `0=unassigned, 1=true, 2=false`. Best for small/medium `num_vars` and small frontiers.
 
-    // Each thread checks a subset of clauses for unit clauses
-    for (int clause_id = tid; clause_id < cnf->num_clauses; clause_id += gridDim.x * blockDim.x) {
-        int start = cnf->clause_offsets[clause_id];
-        int end = cnf->clause_offsets[clause_id + 1];
+2) **Compressed bitsets (recommended default)**  
+Two bitsets per subproblem: `true_bits[var]=1` and `false_bits[var]=1`. Unassigned iff both are 0.
+This reduces assignment memory by ~4x compared to `u8` and enables fast set/copy operations.
 
-        int unassigned_lit = 0;
-        int unassigned_count = 0;
-        bool satisfied = false;
+To avoid O(num_vars) device bandwidth per branch, the compiler uses a **frontier+worker** pattern:
+- Expand BFS only to a fixed depth `frontier_depth` (small, e.g., 6–10) to create enough independent work.
+- Store each frontier subproblem’s assignment in global memory (compressed bitsets).
+- For each frontier item, run **local DFS D4** inside one GPU block (shared-memory stack + propagation),
+  emitting circuit nodes into the global builder.
 
-        // Check clause status
-        for (int i = start; i < end; i++) {
-            int lit = cnf->literals[i];
-            int var = abs(lit) - 1;
-            u8 val = assignment[var];
+This keeps parallelism (many frontier items) while avoiding repeated dense assignment copies at deeper levels.
 
-            if (val == 0) {  // Unassigned
-                unassigned_lit = lit;
-                unassigned_count++;
-            } else {  // Assigned
-                bool lit_true = (lit > 0 && val == 1) || (lit < 0 && val == 2);
-                if (lit_true) {
-                    satisfied = true;
-                    break;
-                }
-            }
-        }
+### 2.3 Core Kernels (GPU)
 
-        // Unit clause: exactly one unassigned literal, others false
-        if (!satisfied && unassigned_count == 1) {
-            int var = abs(unassigned_lit) - 1;
-            u8 new_val = (unassigned_lit > 0) ? 1 : 2;
+- **Unit Propagation**: simplify each CNF instance.
+- **Component Decomposition**: union‑find over clauses sharing unassigned variables.
+- **Variable Selection**: GPU heuristic (e.g., VSIDS approximation).
+- **CNF Restriction**: branch on variable; emit children into `next_queue`.
+- **Circuit Assembly**: write nodes into device‑resident builder.
 
-            // Atomic update (multiple threads may find same unit clause)
-            u8 old = atomicCAS(&assignment[var], 0, new_val);
-            if (old == 0) {
-                *changed = true;
-            }
-        }
-    }
-}
+### 2.4 Output
+
+The compiler produces **device‑resident XGCF** (not host XGCF). A new constructor will be required:
+
+```
+GpuXgcf::from_device(builder: GpuCircuitBuilder, layout: GpuCircuitLayout)
 ```
 
-**Kernel 2: Component Decomposition**
+This avoids CPU copies and keeps the circuit resident for evaluation.
 
-Find independent subproblems using connected components:
+### 2.5 GPU Post-Processing Requirements (Smoothness + Free Vars)
 
-```cuda
-__global__ void component_decomposition_kernel(
-    GpuCnf* cnf,
-    const u8* assignment,
-    u32* component_ids,    // Out: component ID for each clause
-    u32* num_components    // Out: total number of components
-) {
-    // Use parallel union-find on clauses
-    // Two clauses in same component if they share unassigned variables
+The current CPU path performs two important correctness steps after compilation:
 
-    int clause_id = blockIdx.x * blockDim.x + threadIdx.x;
-    if (clause_id >= cnf->num_clauses) return;
+1) **Smoothness for random variables**  
+`crates/xlog-prob/src/xgcf.rs` implements `Xgcf::smooth_random_vars(&is_random_var)` to ensure
+the circuit is smooth w.r.t. random variables. This is required for correct WMC evaluation and
+gradients when evidence/queries force variables along different OR/DECISION branches.
 
-    // Initialize each clause as its own component
-    component_ids[clause_id] = clause_id;
-    __syncthreads();
+**GPU-native requirement:** either:
+- GPU D4 emits circuits that are already smooth w.r.t. random vars, or
+- a GPU smoothing pass exists and is applied before evaluation (and ideally before verification).
 
-    // Union-find with path compression
-    for (int iter = 0; iter < 10; iter++) {  // Fixed iterations for GPU
-        int start = cnf->clause_offsets[clause_id];
-        int end = cnf->clause_offsets[clause_id + 1];
+2) **Free-variable correction factor**  
+The current exact evaluator computes `free_vars` (vars absent from the compiled circuit and absent
+from CNF clauses) and adds `logsumexp2(t, f)` for each such var in `eval_log_z`.
 
-        // For each unassigned variable in this clause
-        for (int i = start; i < end; i++) {
-            int var = abs(cnf->literals[i]) - 1;
-            if (assignment[var] != 0) continue;  // Skip assigned vars
+**GPU-native requirement:** compute and apply the same correction factor on GPU, or enforce a
+compiler invariant that every CNF variable appears in the circuit (making `free_vars` empty).
 
-            // Find all clauses containing this variable
-            // (requires reverse index: var → clauses, built in preprocessing)
-            // Merge their components
+#### 2.5.1 GPU Smoothing Pass (Port of `Xgcf::smooth_random_vars`)
 
-            // Union operation: merge component IDs
-            // ... [implementation details omitted for brevity]
-        }
-        __syncthreads();
-    }
+XLOG’s reference smoother (`crates/xlog-prob/src/xgcf.rs`) works by:
+1) computing each node’s **random support set** (which random vars occur below it), and
+2) wrapping OR/DECISION children with ANDs that include missing vars as **tautology decisions**
+   (`Decision(var, Const1, Const1)`), so every branch mentions the same random vars.
 
-    // Count unique component IDs (parallel reduction)
-    // ... [implementation omitted]
-}
-```
+GPU-native implementation strategy:
+- Represent random supports as **bitsets over random vars only** (not all CNF vars).
+  - Build a device table `random_var_list[]` (CNF var ids) and `random_var_to_bit[var] -> bit_index`.
+- Compute support bitsets bottom-up in level order:
+  - `Lit(var)` / `Decision(var, ..)` add the bit for `var` iff `is_random_var[var]`.
+  - `And/Or` take bitwise OR of children supports.
+- Smooth:
+  - For each OR/DECISION node, compute `missing = parent_support \ child_support` and, if non-empty,
+    wrap the child in `And(child, tautology(var_1), ..., tautology(var_k))`.
 
-**Kernel 3: Variable Selection**
+To keep the pass linear-time and allocation-free:
+- Pre-create one tautology node per random var in a **tautology table** (device-resident), so wrapping does
+  not require hashing/interning.
+- Use a two-pass emitter:
+  - pass A: count how many wrapper AND nodes each child needs (bitcount of missing), prefix-sum to size buffers
+  - pass B: emit the augmented circuit into the `GpuCircuitBuilder` pools.
 
-Choose variable to split on using heuristics (VSIDS, Jeroslow-Wang, etc.):
+#### 2.5.2 GPU Free-Var Correction (Matches `exact.rs`)
 
-```cuda
-__global__ void variable_selection_kernel(
-    GpuCnf* cnf,
-    const u8* assignment,
-    u32* selected_vars     // Out: selected variable for each work item
-) {
-    int work_id = blockIdx.x;
-    int tid = threadIdx.x;
+After smoothing, compute the exact evaluator’s “free var” correction on device:
 
-    // Each block selects variable for one work item
-    // Using VSIDS heuristic: favor variables in small clauses
+- Compute `vars_in_clauses[var]` from `GpuCnf` literals (mark abs(lit)).
+- Compute `vars_in_circuit[var]` from XGCF `Lit` and `Decision` nodes.
+- `free_var[var] = !vars_in_clauses[var] && !vars_in_circuit[var]`.
 
-    __shared__ float scores[256];      // One per thread
-    __shared__ u32 vars[256];
+Then apply:
+- `logZ += sum_{free var v} logsumexp2(log_true[v], log_false[v])`
+- `grad_true[v] += softmax_true(log_true[v], log_false[v])`
+- `grad_false[v] += softmax_false(log_true[v], log_false[v])`
 
-    // Each thread scores a subset of variables
-    for (int var = tid; var < cnf->num_vars; var += blockDim.x) {
-        if (assignment[var] != 0) {
-            scores[tid] = -1.0f;  // Skip assigned variables
-            continue;
-        }
-
-        // Count occurrences in unsatisfied clauses (simplified VSIDS)
-        int count = 0;
-        // ... iterate through clauses containing var ...
-
-        scores[tid] = (float)count;
-        vars[tid] = var;
-    }
-    __syncthreads();
-
-    // Parallel reduction to find max score
-    for (int stride = blockDim.x / 2; stride > 0; stride /= 2) {
-        if (tid < stride) {
-            if (scores[tid + stride] > scores[tid]) {
-                scores[tid] = scores[tid + stride];
-                vars[tid] = vars[tid + stride];
-            }
-        }
-        __syncthreads();
-    }
-
-    if (tid == 0) {
-        selected_vars[work_id] = vars[0];
-    }
-}
-```
-
-**Kernel 4: CNF Restriction**
-
-Create child CNF with variable assignment:
-
-```cuda
-__global__ void cnf_restriction_kernel(
-    const GpuCnf* parent_cnf,
-    u8* assignment,        // In/out: variable assignment
-    u32 split_var,
-    bool value,            // true or false branch
-    GpuCnf* child_cnf      // Out: simplified CNF
-) {
-    // Assign split_var and simplify clauses
-    assignment[split_var] = value ? 1 : 2;
-
-    int clause_id = blockIdx.x * blockDim.x + threadIdx.x;
-    if (clause_id >= parent_cnf->num_clauses) return;
-
-    int start = parent_cnf->clause_offsets[clause_id];
-    int end = parent_cnf->clause_offsets[clause_id + 1];
-
-    bool satisfied = false;
-    int new_lits[32];
-    int new_lit_count = 0;
-
-    // Simplify clause under assignment
-    for (int i = start; i < end; i++) {
-        int lit = parent_cnf->literals[i];
-        int var = abs(lit) - 1;
-        u8 val = assignment[var];
-
-        if (val == 0) {
-            // Unassigned: keep literal
-            new_lits[new_lit_count++] = lit;
-        } else {
-            // Assigned: evaluate literal
-            bool lit_true = (lit > 0 && val == 1) || (lit < 0 && val == 2);
-            if (lit_true) {
-                satisfied = true;
-                break;
-            }
-            // If false, just omit literal
-        }
-    }
-
-    if (satisfied) {
-        // Clause satisfied: remove entirely
-        child_cnf->clause_offsets[clause_id] = 0;
-    } else {
-        // Write simplified clause
-        // ... [atomic allocation and write]
-    }
-}
-```
-
-### 3.6 BFS Main Loop (Host-Side Orchestration)
-
-```rust
-fn launch_d4_iteration_kernel(
-    gpu_cnf: &GpuCnf,
-    current_queue: &GpuWorkQueue,
-    next_queue: &GpuWorkQueue,
-    cache: &GpuComponentCache,
-    circuit_builder: &mut GpuCircuitBuilder
-) -> Result<()> {
-    let num_items = current_queue.size();
-
-    // Kernel 1: Unit propagation for all work items
-    launch_kernel!(unit_propagation_kernel, (num_items, 256), (
-        gpu_cnf,
-        current_queue,
-        cache
-    ))?;
-
-    // Kernel 2: Component decomposition
-    launch_kernel!(component_decomposition_kernel, (num_items, 256), (
-        gpu_cnf,
-        current_queue,
-        cache
-    ))?;
-
-    // Kernel 3: Variable selection
-    launch_kernel!(variable_selection_kernel, (num_items, 256), (
-        gpu_cnf,
-        current_queue
-    ))?;
-
-    // Kernel 4: CNF restriction and child generation
-    // This kernel creates work items for next_queue
-    launch_kernel!(cnf_restriction_kernel, (num_items, 256), (
-        gpu_cnf,
-        current_queue,
-        next_queue,
-        cache,
-        circuit_builder
-    ))?;
-
-    Ok(())
-}
-```
-
-### 3.7 XGCF Assembly
-
-After BFS completes, assemble d-DNNF into XGCF format:
-
-```rust
-impl GpuCircuitBuilder {
-    fn to_xgcf(&self) -> Result<GpuXgcf> {
-        // Circuit builder stores:
-        // - Node types: LIT, AND, OR, DECISION
-        // - Child relationships
-        // - Tree structure
-
-        // Convert to XGCF CSR layout
-        let (node_type, child_offsets, child_indices, lit, decision_var,
-             decision_child_false, decision_child_true) =
-            self.to_csr_layout()?;
-
-        // Compute levels (bottom-up topological sort)
-        let (level_nodes, level_offsets) = self.compute_levels()?;
-
-        Ok(GpuXgcf {
-            node_type,
-            child_offsets,
-            child_indices,
-            lit,
-            decision_var,
-            decision_child_false,
-            decision_child_true,
-            level_nodes,
-            level_offsets,
-            root: self.root_node_id,
-            max_var: self.max_var,
-            // Runtime state (allocated but not initialized)
-            var_log_true: allocate_gpu_slice(self.max_var)?,
-            var_log_false: allocate_gpu_slice(self.max_var)?,
-            values: allocate_gpu_slice(self.num_nodes)?,
-            adj: allocate_gpu_slice(self.num_nodes)?,
-            grad_true: allocate_gpu_slice(self.max_var)?,
-            grad_false: allocate_gpu_slice(self.max_var)?,
-        })
-    }
-}
-```
-
-### 3.8 Performance Characteristics
-
-**Time Complexity**:
-- Each BFS level: O(num_work_items × num_vars × num_clauses) worst case
-- Typical depth: O(log num_vars) due to component decomposition
-- **Total: 5-50ms for CNFs with 1K-10K clauses**
-
-**Space Complexity**:
-- Work queue: O(2^depth) in worst case, but component caching reduces
-- Circuit nodes: O(num_vars × depth) typical
-- **Total GPU memory: 100MB-1GB for large CNFs**
-
-**When GPU D4 Fails**:
-- Extremely hard CNF (exponential blowup)
-- GPU memory exhaustion
-- **Fallback**: CPU D4 (last resort, guaranteed to work)
+This is implemented as a GPU reduction over `v=1..max_var` with deterministic summation (pairwise reduction),
+so correctness does not depend on host post-processing.
 
 ---
 
-## 4. Size Router & Integration
+## 3. GPU CDCL Equivalence Verifier
 
-### 4.1 Routing Logic
+### 3.1 Verification Problem
 
-The router decides which path based on CNF size:
+We must prove `φ ≡ C`.
 
-```rust
-// In exact.rs, replacing the D4 call at line 538:
-pub fn compile_cnf_hybrid(&self, cnf: &Cnf) -> Result<GpuXgcf> {
-    const TENSOR_THRESHOLD: usize = 1000;
+**Operational form:** implement equivalence checking as **two UNSAT queries**:
 
-    // Check cache first (existing mechanism)
-    if let Some(cached) = self.cache.get(cnf.hash()) {
-        return Ok(cached.clone());
-    }
-
-    // Route based on size
-    let circuit = if cnf.num_clauses() < TENSOR_THRESHOLD {
-        // Small queries: use sparse matrix path
-        self.compile_tensor_path(cnf)?
-    } else {
-        // Large queries: use GPU D4 path
-        self.compile_gpu_d4_path(cnf)?
-    };
-
-    // Cache result
-    self.cache.insert(cnf.hash(), circuit.clone());
-    Ok(circuit)
-}
+```
+SAT( φ ∧ ¬C ) == UNSAT   and   SAT( C ∧ ¬φ ) == UNSAT
 ```
 
-**Why 1000 clauses?** Research shows sparse matrix operations have fixed overhead but scale linearly, while D4-style compilation has variable overhead but better asymptotic behavior for complex formulas. The crossover point is typically around 1K clauses.
+This works even when the CNF encoding does not assert a root; `φ` denotes the satisfaction predicate
+of the whole CNF constraint set.
 
-### 4.2 Cache Integration
+### 3.2 GPU CDCL Solver Requirements
 
-Both paths produce identical XGCF output format, so they integrate seamlessly with the existing cache:
+The verifier is a **complete SAT solver** (unlike CLS in `crates/xlog-solve`, which is incomplete and CPU‑only). It must:
 
-```rust
-pub struct CircuitCache {
-    // Existing cache structure unchanged
-    circuits: HashMap<u64, GpuXgcf>,
+- Implement watched literals and clause learning.
+- Perform conflict analysis (1‑UIP).
+- Support restart and clause database management.
+- For **SAT**, return a device‑resident assignment and **validate it on GPU** (all clauses satisfied).
+- For **UNSAT**, return a **GPU‑checkable certificate** and **validate it on GPU** before reporting UNSAT.
 
-    // Optional: track which path generated each circuit (for profiling)
-    metadata: HashMap<u64, CompilationMetadata>,
-}
+#### 3.2.5 UNSAT Certificate (Mandatory): Resolution‑Trace Proof
 
-struct CompilationMetadata {
-    path_used: CompilationPath,  // Tensor or GpuD4
-    compile_time_ms: f64,
-    cnf_stats: CnfStats,
-}
-```
+XLOG requires a **device‑side UNSAT check** with **no CPU proof checking**. DRAT/DRUP checking is not a good fit for GPU
+as a production baseline, so the verifier emits a **resolution‑trace proof** that can be replayed on GPU:
 
-The cache is **path-agnostic** — it doesn't care whether a circuit came from Tensor Path or GPU D4 Path. Both produce verified XGCF output that works with existing `xgcf_forward_level` and `xgcf_backward_level_*` kernels.
+- Each learned clause `L_i` stores:
+  - `conflict_clause_id` (base or earlier learned clause id), and
+  - `steps[] = [(var, reason_clause_id), ...]` corresponding to the conflict analysis resolution sequence.
+- The GPU proof checker replays resolution:
+  - Start from `conflict_clause_id`,
+  - for each step `(var, reason_clause_id)`, resolve on `var` with `reason_clause_id`,
+  - and verify the final resolvent equals the stored learned clause `L_i` (set‑equality, no tautologies).
 
-### 4.3 Threshold Tuning
+The **UNSAT certificate** is accepted only if the **last learned clause is empty** and all stored traces check on GPU.
 
-The 1000-clause threshold is configurable:
+#### 3.2.1 Execution Model (GPU)
 
-```rust
-pub struct CompilationConfig {
-    pub tensor_threshold: usize,  // Default: 1000
-}
+Equivalence verification runs only **a few** SAT instances per compilation (two checks), but each instance
+can be large. The design therefore favors **per-instance locality** over massive cross-instance batching:
 
-impl ExactDdnnfProgram {
-    pub fn set_compilation_config(&mut self, config: CompilationConfig) {
-        self.compilation_config = config;
-    }
-}
-```
+- **One thread-block per SAT instance** (or one block per component, if the instance decomposes).
+- A **persistent CDCL loop** inside the block (no host round-trips, no mid-solve device↔host copies).
+- A warp-synchronous implementation for the hot operations (BCP scan, reason inspection) to control divergence.
 
-This allows users to tune based on their workload characteristics.
+This matches XLOG’s design goal: keep compilation+verification on GPU even when the control flow is irregular.
+
+#### 3.2.2 Clause DB Layout (GPU-Friendly)
+
+Use a CSR-like clause database that mirrors how XLOG already stores CNFs/circuits on GPU:
+
+- `clause_offsets[clause_id]..clause_offsets[clause_id+1]` indexes into `literals[]`.
+- Literals are stored as signed `i32` DIMACS (`+v` / `-v`), with `0` unused.
+- Learned clauses live in a separate arena with the same layout and an eviction policy (e.g., LBD + activity).
+
+Watched literals are represented as:
+
+- `watch_pos[clause_id][0..2)` = indices into the clause’s literal slice (two watched positions)
+- `watch_lists[lit]` = list of clause_ids currently watching `lit` (device-side adjacency)
+
+To keep the solver deterministic and memory-bounded, all arenas are fixed-capacity and allocated from
+`GpuMemoryManager` pools; overflow is a hard error.
+
+#### 3.2.3 Determinism Contract
+
+XLOG’s GPU tier has explicit determinism testing (`crates/xlog-cuda-tests`, e.g. C15). The CDCL verifier must:
+
+- Use deterministic tie-breaking (literal selection, clause bump order, restart schedule).
+- Avoid nondeterministic “first writer wins” patterns for learned clause insertion.
+- When SAT is requested, return a deterministic device-resident assignment (useful for debugging solver/compiler bugs).
+
+#### 3.2.4 SAT Subsystem (`crates/xlog-solve`) Status
+
+As of **January 25, 2026**, `crates/xlog-solve` provides:
+
+- A **CPU Continuous Local Search (CLS)** solver (heuristic, incomplete) that can be used only as an *optional*
+  accelerator (e.g., SAT witness finding, or future CDCL seeding).
+- A **GPU-native CDCL solver** (complete SAT/UNSAT) used as the **production verifier**.
+
+The GPU CDCL verifier is implemented in `kernels/sat.cu` (compiled to `kernels/sat.ptx`), loaded by
+`crates/xlog-cuda`, and exposed as `xlog_solve::GpuCdclSolver` for verifier integrations (e.g., equivalence checking
+in `crates/xlog-prob`).
+
+### 3.3 GPU-Resident Equivalence Construction
+
+We construct the equivalence-check SAT instances on GPU:
+
+1. Encode `C` into CNF (device‑side Tseitin).
+2. Solve `SAT(φ ∧ ¬C)` with GPU CDCL.
+3. Solve `SAT(C ∧ ¬φ)` with GPU CDCL.
+
+All of this happens **on device** with no host transfer.
+
+**Verifier-grade constraint:** the equivalence path performs **zero device→host copies**, including scalar status/size reads.
+Exact CNF sizes are computed on GPU into device-resident scalars; buffers are allocated to host-known capacities and validated on device.
+
+#### 3.3.1 Encoding details (linear size, GPU-friendly)
+
+Let `φ` be the original CNF (CSR clause list). Let `C` be the compiled circuit with root node id `c_root`.
+Let `v_root` be the **Tseitin variable id** introduced for the circuit root when encoding `C` into CNF.
+
+- **CNF(C):** encode each circuit node with a Tseitin variable and local clauses.
+  Add a unit clause to force the desired polarity of the root:
+  - for `¬C`: add `(¬v_root)`
+  - for `C`: add `(v_root)`
+
+- **CNF(¬φ):** `¬φ` is the disjunction of unsatisfied clauses:
+  `¬(∧ clause_j) = ∨ (¬clause_j)`.
+  Encode this in CNF by introducing clause-satisfaction variables `s_j`:
+
+  - For each clause `j` with literals `(l1 ∨ ... ∨ lk)`:
+    - `(¬s_j ∨ l1 ∨ ... ∨ lk)`     // `s_j -> clause_j`
+    - For each literal `li`: `(s_j ∨ ¬li)`   // `li -> s_j`
+  - Add one clause: `(¬s_1 ∨ ¬s_2 ∨ ... ∨ ¬s_m)`  // at least one clause is unsatisfied
+
+This yields a **linear-size** encoding in total literals of `φ` and nodes of `C`.
+
+#### 3.3.2 Incremental GPU CDCL (recommended)
+
+For performance, run both checks using the same GPU-resident solver state:
+- load shared clauses for `φ` and `CNF(C)` once,
+- then solve with different **assumptions** (root polarity and the `¬φ` clause),
+so learned clauses are reused across both checks.
+
+### 3.4 Safety Contract
+
+- **UNSAT** → accept circuit.
+- **SAT** → reject circuit. For the exact GPU D4 path, treat this as a **compiler bug** and fail-fast (GPU trap / CUDA error).
+- **UNKNOWN** is not allowed in production; GPU CDCL must be complete.
+
+**Device-side validation rules (mandatory):**
+- Every **SAT** result must pass an on‑GPU model check for the solved CNF.
+- Every **UNSAT** result must pass an on‑GPU proof check (empty‑clause certificate).
+
+This is the sole correctness guarantee in the design.
 
 ---
 
-## 5. Fallback Mechanisms
+## 4. GPU-Resident Cache & Memory Model
 
-### 5.1 Fallback Strategy
+### 4.1 Circuit Cache (Device-Resident)
 
-The Tensor Path has limitations (e.g., memory constraints for very dense matrices). When it fails, we automatically fall back to GPU D4:
+Cache keyed by CNF hash (computed on GPU). The cache stores:
 
-```rust
-pub fn compile_tensor_path(&self, cnf: &Cnf) -> Result<GpuXgcf> {
-    // Try sparse matrix compilation
-    match self.compile_tensor_path_inner(cnf) {
-        Ok(circuit) => {
-            // Validate output before returning
-            if self.validate_circuit(&circuit, cnf)? {
-                Ok(circuit)
-            } else {
-                // Validation failed - fallback to GPU D4
-                warn!("Tensor path produced invalid circuit, falling back to GPU D4");
-                self.compile_gpu_d4_path(cnf)
-            }
-        }
-        Err(e) => {
-            // Tensor path failed - fallback to GPU D4
-            warn!("Tensor path failed: {}, falling back to GPU D4", e);
-            self.compile_gpu_d4_path(cnf)
-        }
-    }
-}
-```
+- `GpuXgcf` circuits
+- Optional metadata (compile time, node count, verification status)
 
-### 5.2 Error Handling Hierarchy
+Eviction uses GPU LRU with a fixed memory budget.
 
-1. **Tensor Path errors**: Matrix construction failure, GPU OOM, numerical issues → fallback to GPU D4
-2. **GPU D4 errors**: Work queue overflow, timeout → fallback to CPU D4 (last resort)
-3. **CPU D4 errors**: Fatal (this is the ultimate fallback, must succeed)
+### 4.2 Memory Pools
 
-```rust
-pub fn compile_cnf_hybrid(&self, cnf: &Cnf) -> Result<GpuXgcf> {
-    // Try Tensor Path (for small CNFs) or GPU D4 (for large)
-    match self.compile_primary_path(cnf) {
-        Ok(circuit) => Ok(circuit),
-        Err(e) => {
-            warn!("Primary path failed: {}, falling back to CPU D4", e);
-            // Ultimate fallback: CPU D4 (guaranteed to work)
-            self.compile_cpu_d4(cnf)
-        }
-    }
-}
-```
+All allocations use GPU memory pools to avoid expensive device malloc:
 
-### 5.3 Validation Mechanism
+- Work queues
+- Circuit builders
+- Clause DB for CDCL
+- Temporary buffers for CNF restriction
 
-After compilation, we validate the circuit using **random satisfying assignments**:
+### 4.3 Deterministic Budgeting & Overflow Semantics (No Fallback)
 
-```rust
-fn validate_circuit(&self, circuit: &GpuXgcf, cnf: &Cnf) -> Result<bool> {
-    // Generate 100 random satisfying assignments
-    let assignments = generate_random_assignments(cnf, 100);
+Because the design forbids CPU fallback, every memory limit must have a deterministic outcome:
 
-    for assignment in assignments {
-        // Evaluate CNF with assignment
-        let cnf_value = evaluate_cnf(cnf, &assignment);
+- All major arenas are **pre-sized** from `GpuCompileConfig` and the device `MemoryBudget`.
+- If any arena overflows (frontier queue, circuit node pool, learned clause pool, PIR intern table):
+  - return a hard `XlogError::Kernel`/`XlogError::Compilation` equivalent (no partial results),
+  - optionally preserve a small device-resident “failure record” (reason + counters) for debugging.
 
-        // Evaluate circuit with assignment
-        let circuit_value = circuit.evaluate(&assignment)?;
-
-        // Must match (within numerical tolerance)
-        if (cnf_value - circuit_value).abs() > 1e-9 {
-            return Ok(false);
-        }
-    }
-
-    Ok(true)
-}
-```
-
-This ensures **100% correctness** — no invalid circuits ever reach production execution.
+This makes failure modes reproducible and prevents silent correctness degradation.
 
 ---
 
-## 6. Performance Optimizations
+## 5. Integration Points
 
-### 6.1 Tensor Path Optimizations
+### 5.1 Exact Inference Path
 
-**CSR Format with cuSPARSE**
-
-We use Compressed Sparse Row format for maximum memory efficiency:
+Replace the CPU D4 call in `crates/xlog-prob/src/exact.rs:538`:
 
 ```rust
-// CNF to CSR: only store non-zero entries
-struct GpuCsrCnf {
-    num_clauses: u32,
-    num_vars: u32,
-    // CSR format: row_ptr[i] to row_ptr[i+1] gives clause i's literals
-    row_ptr: TrackedCudaSlice<u32>,     // Size: num_clauses + 1
-    col_idx: TrackedCudaSlice<u32>,     // Size: num_literals (sparse)
-    values: TrackedCudaSlice<f64>,      // Size: num_literals (log weights)
+// OLD: CPU D4 + file IO
+// d4.compile_ddnnf(&cnf_path, &out_path)?;
+
+// NEW: GPU-native compile + verify (device-resident)
+let gpu_circuit = compile_gpu_d4_and_verify(&gpu_cnf, provider.as_ref(), &config)?;
+```
+
+### 5.2 GPU CNF Generation
+
+To maintain **zero CPU transfers**, CNF creation must be GPU-native:
+
+- Either move PIR → CNF encoding to GPU, or
+- Ensure PIR is already GPU‑resident (e.g., via GPU datalog execution).
+
+**Runtime requirement:** `GpuCnf` is built on device, not uploaded from host.
+
+#### 5.2.0 GPU Provenance → GPU PIR (How PIR Becomes Device-Resident)
+
+Today, provenance extraction (`crates/xlog-prob/src/provenance.rs`) is CPU-only and uses a `PirBuilder`
+that performs hash-consing + simplifications for `And/Or/Decision/Lit/NegLit`.
+
+For the GPU-native design, provenance becomes a **first-class GPU column** in the relational executor:
+
+- Each derived tuple carries an extra `prov_id` column (a `PirNodeId::as_u32()`).
+- Relational operators update `prov_id` using the provenance semiring:
+  - **Join (rule body conjunction):** `prov_out = AND(prov_left, prov_right, ...)`
+  - **Union of derivations:** `prov_out = OR(prov_existing, prov_new)` (when dedup detects duplicates)
+  - **Deterministic facts:** `prov = Const(true)`
+  - **Probabilistic facts:** `prov = Lit(leaf_id)`
+  - **Annotated disjunctions:** `prov = AND(choice_lits...)` where each `choice_lit` is a `Decision`
+    node `Decision(var, ConstF, ConstT)` or `Decision(var, ConstT, ConstF)` matching
+    `PirBuilder::choice_lit` and `compile_annotated_disjunction`.
+  - **Negation:** use the CPU semantics exactly:
+    `not(A)` is implemented as `negate_provenance( OR(all matching provs for A) )`,
+    with De Morgan pushing to leaves (`Lit ↔ NegLit`, `And ↔ Or`, and branchwise `Decision` negation).
+
+**GPU hash-consing (device-side interning)**
+
+To keep PIR canonical and deterministic, every batch of newly created PIR nodes is interned on GPU:
+
+1) Build node keys in SoA form (`tag`, `payload`, `children range`) with children already sorted/deduped.
+2) Hash keys (stable hash) and sort by `(hash, key)` using existing GPU sort/dedup primitives.
+3) Assign new node ids for unique keys via prefix-sum and write them into the `GpuPirGraph` pools.
+4) Scatter the resulting node ids back to the `prov_id` output column.
+
+This makes PIR construction look like another relational operator: **pure GPU, batched, deterministic**.
+
+#### 5.2.1 GPU PIR layout aligned with `pir::PirNode`
+
+The current PIR is an enum in `crates/xlog-prob/src/pir.rs`:
+
+```
+PirNode::Const(bool)
+PirNode::Lit { leaf: LeafId }
+PirNode::NegLit { leaf: LeafId }
+PirNode::And { children: Vec<PirNodeId> }
+PirNode::Or { children: Vec<PirNodeId> }
+PirNode::Decision { var: ChoiceVarId, child_false, child_true }
+```
+
+The GPU mirror must preserve this exact shape. Use a **structure‑of‑arrays (SoA)** layout so kernels can read fields without indirection.
+
+Proposed device layout (new module: `crates/xlog-prob/src/compilation/gpu_pir.rs`):
+
+```rust
+/// Node type tags matching `PirNode` variants.
+pub const PIR_CONST: u8 = 0;
+pub const PIR_LIT: u8 = 1;
+pub const PIR_NEG_LIT: u8 = 2;
+pub const PIR_AND: u8 = 3;
+pub const PIR_OR: u8 = 4;
+pub const PIR_DECISION: u8 = 5;
+
+/// GPU-resident PIR graph (device-side mirror of `pir::PirGraph`).
+pub struct GpuPirGraph {
+    pub node_type: DeviceSlice<u8>,        // length = num_nodes
+    pub child_offsets: DeviceSlice<u32>,   // CSR for AND/OR children, len = num_nodes + 1
+    pub children: DeviceSlice<u32>,        // child node ids (PirNodeId::as_u32)
+    pub leaf_id: DeviceSlice<u32>,         // LeafId::as_u32 for LIT/NEG_LIT, else 0
+    pub decision_var: DeviceSlice<u32>,    // ChoiceVarId::as_u32 for DECISION, else 0
+    pub decision_child_false: DeviceSlice<u32>,
+    pub decision_child_true: DeviceSlice<u32>,
+}
+
+/// GPU-resident PIR root list.
+pub struct GpuPirRoots {
+    pub roots: DeviceSlice<u32>, // PirNodeId::as_u32
 }
 ```
 
-Memory usage: **O(num_literals)** not O(num_clauses × num_vars). For sparse CNF (typical case), this is **10-100x smaller** than dense representation.
+**Invariants:**
+- `child_offsets[i]..child_offsets[i+1]` is valid only for AND/OR nodes.
+- `leaf_id[i]` is non‑zero only for LIT/NEG_LIT nodes.
+- `decision_*[i]` is non‑zero only for DECISION nodes.
 
-**Batched Matrix Operations**
+**Mapping table (host PIR → GPU SoA):**
 
-Group operations to maximize GPU utilization:
+| `PirNode` variant | `node_type[i]` | `children` | `child_offsets` | `leaf_id[i]` | `decision_var[i]` | `decision_child_false[i]` | `decision_child_true[i]` |
+|---|---|---|---|---|---|---|---|
+| `Const(true/false)` | `PIR_CONST` | none | `child_offsets[i]=child_offsets[i+1]` | 0 | 0 | 0 | 0 |
+| `Lit { leaf }` | `PIR_LIT` | none | `child_offsets[i]=child_offsets[i+1]` | `leaf.as_u32()` | 0 | 0 | 0 |
+| `NegLit { leaf }` | `PIR_NEG_LIT` | none | `child_offsets[i]=child_offsets[i+1]` | `leaf.as_u32()` | 0 | 0 | 0 |
+| `And { children }` | `PIR_AND` | CSR range | `child_offsets[i]..child_offsets[i+1]` | 0 | 0 | 0 | 0 |
+| `Or { children }` | `PIR_OR` | CSR range | `child_offsets[i]..child_offsets[i+1]` | 0 | 0 | 0 | 0 |
+| `Decision { var, child_false, child_true }` | `PIR_DECISION` | none | `child_offsets[i]=child_offsets[i+1]` | 0 | `var.as_u32()` | `child_false.as_u32()` | `child_true.as_u32()` |
 
-```cuda
-// Single kernel call for all OR operations (entire level)
-cusparseStatus_t status = cusparseDcsrmm(
-    handle,
-    CUSPARSE_OPERATION_NON_TRANSPOSE,
-    num_clauses,        // rows
-    num_vars,           // cols
-    num_literals,       // nnz (non-zeros)
-    &alpha,
-    descr,
-    values,             // CSR values
-    row_ptr,            // CSR row pointers
-    col_idx,            // CSR column indices
-    var_weights,        // Dense input vector
-    num_vars,
-    &beta,
-    clause_results,     // Dense output vector
-    num_clauses
-);
-```
+#### 5.2.2 GPU CNF API (tied to current encoder)
 
-This evaluates **all clauses in parallel** in a single GPU call, leveraging Tensor Cores on modern GPUs (A100, H100).
-
-**Memory Transfer Minimization**
-
-Weights stay on GPU between forward/backward passes:
+The host CNF encoder (`encode_cnf(&PirGraph, roots)`) is re‑implemented on GPU to eliminate host transfers.
 
 ```rust
-// Upload once
-gpu_cnf.var_log_true.copy_from_host(&log_true_weights)?;
-gpu_cnf.var_log_false.copy_from_host(&log_false_weights)?;
+/// GPU-resident CNF (device-side mirror of `cnf::CnfFormula`).
+pub struct GpuCnf {
+    pub var_cap: u32,
+    pub clause_cap: u32,
+    pub lit_cap: u32,
 
-// Forward pass (pure GPU)
-tensor_forward_pass(&gpu_cnf)?;
+    pub num_vars: DeviceSlice<u32>,    // len=1
+    pub num_clauses: DeviceSlice<u32>, // len=1
+    pub num_lits: DeviceSlice<u32>,    // len=1
 
-// Backward pass (pure GPU)
-tensor_backward_pass(&gpu_cnf)?;
+    pub clause_offsets: DeviceSlice<u32>, // len = clause_cap + 1
+    pub literals: DeviceSlice<i32>,       // len = lit_cap, signed DIMACS
+}
 
-// Download only gradients
-gpu_cnf.grad_true.copy_to_host(&mut grad_true)?;
-gpu_cnf.grad_false.copy_to_host(&mut grad_false)?;
+/// GPU-resident CNF encoding bundle (CNF + var tables).
+pub struct GpuCnfEncoding {
+    pub cnf: GpuCnf,
+    pub vars: GpuCnfVarTables,
+}
+
+/// Encode CNF directly on GPU from a GPU PIR graph.
+pub fn encode_cnf_gpu(
+    pir: &GpuPirGraph,
+    roots: &GpuPirRoots,
+    provider: &CudaKernelProvider,
+) -> Result<GpuCnfEncoding>;
 ```
 
-Transfer size: **2 × num_vars × 8 bytes** each direction (minimal).
+**Notes:**
+- `encode_cnf_gpu` must perform **Tseitin encoding** for non‑literal nodes exactly as the CPU version does.
+- The GPU encoder produces the same variable numbering semantics (`DIMACS 1‑indexed`).
+- This removes all host file IO (`in.cnf`, `out.nnf`) from the exact path.
 
-### 6.2 GPU D4 Optimizations
+**GPU-side Tseitin encoding outline (mirrors `encode_cnf`):**
 
-**Work Queue Sizing**
+```
+// Inputs: GpuPirGraph + roots
+// Outputs: GpuCnf (CSR), plus node_var/leaf_var/choice_var tables on device
 
-Preallocate large work queues to avoid reallocation:
+1) Assign CNF variable IDs:
+   a) leaf_var[leaf_id] = next_var++
+   b) choice_var[var_id] = next_var++
+   c) node_var[node_id] =
+        - leaf_var[leaf] for LIT
+        - new var for NEG_LIT (constrained to !leaf_var)
+        - new var for CONST/AND/OR/DECISION
+
+2) Emit clauses per node in topological (level) order:
+   Const(true):   (v)
+   Const(false):  (¬v)
+
+   Lit(leaf):     // no clauses (uses leaf_var)
+
+   NegLit(leaf):  v ↔ ¬leaf_var
+      ( v ∨  leaf_var)
+      (¬v ∨ ¬leaf_var)
+
+   And(children):
+      For each child c: (¬v ∨ c)
+      (v ∨ ¬c1 ∨ ¬c2 ∨ ... ∨ ¬ck)
+
+   Or(children):
+      For each child c: (v ∨ ¬c)
+      (¬v ∨ c1 ∨ c2 ∨ ... ∨ ck)
+
+   Decision(var, f, t):
+      v ↔ ITE(var, t, f)
+      (¬var ∨ ¬t ∨ v)
+      ( var ∨ ¬f ∨ v)
+      (¬var ∨ t ∨ ¬v)
+      ( var ∨ f ∨ ¬v)
+
+3) No root assertion clause in XLOG.
+   Roots select which PIR subgraph is encoded; evidence/query are imposed by
+   forcing the corresponding CNF variables via weights (e.g., setting one side
+   to -INFINITY).
+```
+
+**Implementation detail:** all clause emission must be device‑side with
+prefix‑sum allocation into the CSR buffers to avoid host coordination.
+
+**Clause-count prepass (exact CSR sizing):**
+
+Let `deg(i)` be the number of children for node `i` (0 for non‑AND/OR).
+Let `is_const(i)`, `is_lit(i)`, `is_neglit(i)`, `is_and(i)`, `is_or(i)`, `is_dec(i)` be indicator functions.
+There are no asserted roots in the CNF encoding used by exact inference.
+
+Per node, the number of CNF clauses emitted is:
+
+```
+count(i) =
+  is_const(i) * 1 +
+  is_neglit(i) * 2 +
+  is_and(i) * (deg(i) + 1) +
+  is_or(i) * (deg(i) + 1) +
+  is_dec(i) * 4
+```
+
+Total clauses:
+
+```
+num_clauses = sum_i count(i)
+```
+
+Total literal entries (CSR nnz) is:
+
+```
+nnz(i) =
+  is_const(i) * 1 +
+  is_neglit(i) * 4 +              // two 2-literal clauses
+  is_and(i) * (3*deg(i) + 1) +
+  is_or(i) * (3*deg(i) + 1) +
+  is_dec(i) * 12                  // four 3-literal clauses
+
+nnz_total = sum_i nnz(i)
+```
+
+This prepass runs entirely on GPU to allocate `clause_offsets` and `literals`.
+
+**GPU kernel sequence for Tseitin encoding:**
+
+```
+// K0: Assign CNF variable IDs
+//   - leaf_var[leaf_id]
+//   - choice_var[var_id]
+//   - node_var[node_id]
+
+// K1: Count clauses + nnz per node
+//   - write count(i) and nnz(i) to device arrays
+
+// K2: Prefix-sum per-node counts to compute:
+//   - base clause index per node
+//   - base literal index per node
+//   - total num_clauses and nnz_total
+
+// K3: Emit clauses into CSR
+//   - each node writes its own clauses at the precomputed offsets
+//   - uses node_var/leaf_var/choice_var for literals
+//   - fills clause_offsets for the per-node clause block and writes literals
+```
+
+**Notes:**
+- K2 can reuse existing scan kernels in `kernels/scan.cu`.
+- K3 writes fixed‑width clauses for CONST/NEG_LIT/DECISION and variable‑width for AND/OR.
+
+#### 5.2.3 GPU-native weight tables
+
+Exact evaluation currently builds `var_log_true/false` on CPU (`exact.rs`) and uploads to GPU.
+To keep **zero transfers**, weights must also be GPU-resident:
 
 ```rust
-const INITIAL_QUEUE_SIZE: usize = 100_000;  // 100K work items
-const MAX_QUEUE_SIZE: usize = 10_000_000;   // 10M work items max
+/// Device-resident tables produced by `encode_cnf_gpu` for mapping PIR ids -> CNF var ids.
+pub struct GpuCnfVarTables {
+    pub node_var: DeviceSlice<u32>,   // PirNodeId -> CNF var id (DIMACS)
+    pub leaf_var: DeviceSlice<u32>,   // LeafId -> CNF var id (DIMACS)
+    pub choice_var: DeviceSlice<u32>, // ChoiceVarId -> CNF var id (DIMACS)
+    pub max_var: u32,
+}
 
-// Preallocate on GPU
-let work_queue = GpuWorkQueue::new(INITIAL_QUEUE_SIZE)?;
+pub struct GpuWeights {
+    pub log_true: DeviceSlice<f64>,
+    pub log_false: DeviceSlice<f64>,
+}
+
+pub fn build_weights_gpu(
+    vars: &GpuCnfVarTables,
+    leaf_probs: &DeviceSlice<f64>,          // indexed by LeafId
+    choice_probs: &DeviceSlice<(f64, f64)>, // indexed by ChoiceVarId (binary choice vars)
+    evidence: &DeviceSlice<u8>,             // indexed by CNF var id (DIMACS), 0/1/2
+    provider: &CudaKernelProvider,
+) -> Result<GpuWeights>;
 ```
 
-Reallocation is expensive on GPU, so we start large and only grow if needed.
+**Annotated disjunction correctness requirement (matches `compile_annotated_disjunction`)**
 
-**Component Cache with Perfect Hashing**
+The binary `choice_probs[var] = (p_true, p_false)` must match the conditional Bernoulli probabilities used
+by the current lowering in `crates/xlog-prob/src/provenance.rs`:
 
-Use GPU-optimized hash table for component memoization:
+```
+p_true[i] = p_outcome[i] / remaining[i]
+p_false[i] = 1 - p_true[i]
+remaining[i+1] = remaining[i] - p_outcome[i]
+```
 
-```cuda
-// CuckooHash for O(1) lookup on GPU
-__device__ bool lookup_component(
-    u64 hash,
-    ComponentCache* cache,
-    u32* result_node_id
-) {
-    // Two hash functions for cuckoo hashing
-    u32 pos1 = hash % cache->table_size;
-    u32 pos2 = (hash / cache->table_size) % cache->table_size;
+For neural predicates that provide an `L`-way softmax, the GPU runtime must therefore:
+- (optionally) scale the softmax so `sum(p_outcome) < 1` and create an explicit “none” branch,
+- compute the conditional chain `p_true[i]` on GPU, and
+- write `(ln p_true[i], ln(1-p_true[i]))` into `(log_true[var], log_false[var])` for the corresponding `ChoiceVarId`.
 
-    if (cache->keys[pos1] == hash) {
-        *result_node_id = cache->values[pos1];
-        return true;
-    }
-    if (cache->keys[pos2] == hash) {
-        *result_node_id = cache->values[pos2];
-        return true;
-    }
-    return false;  // Not found
+This integrates naturally with DLPack: neural outputs arrive as device tensors; the weight builder is a GPU kernel.
+
+#### 5.2.4 Core GPU compile/verify API (exact signatures)
+
+```rust
+/// Compile CNF on GPU, then verify equivalence with GPU CDCL.
+pub fn compile_gpu_d4_and_verify(
+    cnf: &GpuCnf,
+    provider: &CudaKernelProvider,
+    config: &GpuCompileConfig,
+) -> Result<GpuXgcf>;
+
+/// Configuration for GPU D4 + GPU CDCL.
+pub struct GpuCompileConfig {
+    /// BFS expansion depth before handing each frontier item to a per-block DFS worker.
+    pub frontier_depth: u16,
+    /// Hard cap on the number of frontier work items (overflow is a hard error).
+    pub max_frontier_items: u32,
+    /// Absolute depth cap (defensive); exceeding this is a hard error (no UNKNOWN).
+    pub max_depth: u16,
+
+    /// CDCL restart cadence (deterministic).
+    pub cdcl_restart_interval: u32,
+    /// Learned clause arena size (bytes) for the verifier instance.
+    pub cdcl_learned_bytes: u64,
+    /// Optional conflict budget for debug/profiling only; production must be unbounded.
+    pub cdcl_conflict_budget: Option<u64>,
+}
+
+/// Build a device-resident XGCF directly from device circuit buffers.
+impl GpuXgcf {
+    pub fn from_device(
+        builder: GpuCircuitBuilder,
+        layout: GpuCircuitLayout,
+        provider: &CudaKernelProvider,
+    ) -> Result<GpuXgcf>;
+}
+
+/// Device layout metadata for XGCF construction.
+pub struct GpuCircuitLayout {
+    pub num_nodes: u32,
+    pub num_levels: u32,
+    pub level_offsets: DeviceSlice<u32>,
+    pub level_nodes: DeviceSlice<u32>,
+    pub root: u32,
+    pub max_var: u32,
 }
 ```
-
-This gives **O(1) cache lookups** on GPU without lock contention.
-
-**Kernel Fusion**
-
-Combine multiple operations into single kernel launches:
-
-```cuda
-// Fused: unit propagation + component detection + variable selection
-__global__ void d4_iteration_kernel(
-    GpuCnf* cnf,
-    D4WorkItem* work_items,
-    u32 num_items,
-    GpuComponentCache* cache,
-    D4WorkItem* next_items,
-    u32* next_count
-) {
-    // Each block processes one work item
-    int item_id = blockIdx.x;
-    if (item_id >= num_items) return;
-
-    // Step 1: Unit propagation (all threads cooperate)
-    do_unit_propagation(&work_items[item_id], cnf);
-    __syncthreads();
-
-    // Step 2: Component detection
-    find_components(&work_items[item_id], cnf);
-    __syncthreads();
-
-    // Step 3: Variable selection
-    select_split_variable(&work_items[item_id]);
-    __syncthreads();
-
-    // Step 4: Generate child work items
-    generate_children(&work_items[item_id], next_items, next_count);
-}
-```
-
-This reduces kernel launch overhead (which can be 5-20μs per launch).
 
 ---
 
-## 7. API Integration
+### 5.3 GPU Neural Fast-Path (Template Circuits + Device Slot Mapping)
 
-### 7.1 Existing API Compatibility
+“GPU neural fast-path” in XLOG means: **compile once, then only update weights and run forward/backward**.
+This is the critical path for training workloads where the logic structure is fixed but neural predictions
+change per batch.
 
-The current API in `exact.rs` looks like this:
+Current status (v0.3.x):
+- `crates/pyxlog/src/lib.rs` caches circuits, but still:
+  - compiles via **CPU D4** (expanded source text), and
+  - builds weights / gradient maps on CPU (including an AD-chain mismatch).
 
-```rust
-impl ExactDdnnfProgram {
-    pub fn query(&self, query: &str) -> Result<f64> {
-        // Current flow:
-        // 1. Parse query to CNF
-        // 2. Call D4 (CPU) - LINE 538 BOTTLENECK
-        // 3. Load circuit to GPU
-        // 4. Execute forward pass
-        // 5. Return result
-    }
-}
-```
+GPU-native design:
 
-**Our change is a drop-in replacement** at line 538:
+1) **Template compilation (once per shape)**  
+Key by a template signature (predicate, arity, neural label count, etc.). Cache stores:
+- `GpuXgcf` (device-resident circuit),
+- `GpuCnfVarTables` (for weights),
+- a device-resident **slot map** from neural outputs to `ChoiceVarId`/CNF vars.
 
-```rust
-// OLD (line 538):
-d4.compile_ddnnf(&cnf_path, &out_path)?;
-let circuit = self.load_circuit_from_file(&out_path)?;
-
-// NEW (same signature, same result):
-let circuit = self.compile_cnf_hybrid(&cnf)?;
-```
-
-Everything else remains unchanged. The hybrid compiler returns the same `GpuXgcf` structure that existing code expects.
-
-### 7.2 PyTorch Integration (pyxlog)
-
-The Python bindings are completely unaffected:
-
-```python
-# Existing pyxlog code continues to work
-import pyxlog
-
-program = pyxlog.ExactDdnnfProgram()
-result = program.query("p(X)")  # Uses hybrid compilation internally
-
-# Neural integration unchanged
-network = pyxlog.NeuralNetwork("mnist_net")
-joint_prob = program.query_with_network("digit(X, Y)", network)
-```
-
-The hybrid compilation happens transparently inside the Rust layer.
-
-### 7.3 Neural-Symbolic Training Loop
-
-The training loop benefits automatically from the speedup:
-
-```python
-# Training loop from certification tests
-for epoch in range(num_epochs):
-    for batch in dataloader:
-        # Forward: query logic program (NOW FASTER with hybrid compilation)
-        probs = program.query_batch(batch_queries)
-
-        # Loss computation
-        loss = criterion(probs, targets)
-
-        # Backward: gradients flow through circuit (unchanged)
-        loss.backward()
-
-        # Update neural network
-        optimizer.step()
-```
-
-The speedup is **automatic** — no code changes needed in training loops.
-
-### 7.4 Cache API Extension
-
-We add optional profiling information without breaking existing cache users:
+2) **Device slot map**
 
 ```rust
-impl CircuitCache {
-    // Existing API unchanged
-    pub fn get(&self, hash: u64) -> Option<&GpuXgcf> { ... }
-    pub fn insert(&self, hash: u64, circuit: GpuXgcf) { ... }
-
-    // NEW: Optional profiling (doesn't affect existing users)
-    pub fn get_stats(&self, hash: u64) -> Option<CompilationStats> { ... }
-}
-
-pub struct CompilationStats {
-    pub path_used: CompilationPath,      // Tensor or GpuD4
-    pub compile_time_ms: f64,
-    pub cnf_clauses: usize,
-    pub cnf_variables: usize,
-    pub circuit_nodes: usize,
+/// One slot per neural “label probability” produced by a neural predicate instance.
+/// Slots are grouped by input_position (0..num_inputs).
+pub struct GpuWeightSlots {
+    pub group_offsets: DeviceSlice<u32>, // len = num_groups + 1
+    pub slot_cnf_var: DeviceSlice<u32>,  // len = num_slots, each is a DIMACS CNF var id
 }
 ```
 
-Existing code can ignore stats completely. New code can use them for profiling.
+3) **GPU weight fill (correct AD chain)**
 
-### 7.5 Configuration API
+Given a device tensor `p[label]` per group (typically softmax output), we must match
+`compile_annotated_disjunction`’s conditional chain:
 
-Add optional configuration without breaking defaults:
+- Choose an always-present “none” branch with small `eps` and scale: `p_outcome = (1-eps) * p`.
+  This guarantees `sum(p_outcome) < 1` and yields exactly `L` binary choice vars for `L` labels.
+- Compute `remaining[i] = 1 - sum_{k<i} p_outcome[k]`.
+- Compute `q[i] = p_outcome[i] / remaining[i]` and write:
+  - `log_true[var_i]  = ln(q[i])`
+  - `log_false[var_i] = ln(1-q[i])`
 
-```rust
-impl ExactDdnnfProgram {
-    // NEW: Configure hybrid behavior
-    pub fn set_compilation_config(&mut self, config: CompilationConfig) {
-        self.compilation_config = config;
-    }
-}
+All of this is a GPU kernel; no `.tolist()` and no host-side loops.
 
-pub struct CompilationConfig {
-    pub tensor_threshold: usize,         // Default: 1000 clauses
-    pub enable_tensor_path: bool,        // Default: true
-    pub enable_gpu_d4_path: bool,        // Default: true
-    pub fallback_to_cpu_d4: bool,        // Default: true
-    pub validate_circuits: bool,         // Default: true (debug), false (release)
-}
+4) **GPU gradient scatter (correct chain rule; uses both grad_true and grad_false)**
 
-impl Default for CompilationConfig {
-    fn default() -> Self {
-        CompilationConfig {
-            tensor_threshold: 1000,
-            enable_tensor_path: true,
-            enable_gpu_d4_path: true,
-            fallback_to_cpu_d4: true,
-            validate_circuits: cfg!(debug_assertions),
-        }
-    }
-}
-```
+The XGCF backward pass returns gradients w.r.t **independent log-weights**:
+`g_true[var] = ∂logP/∂ln(q)` and `g_false[var] = ∂logP/∂ln(1-q)`.
 
-Default behavior is optimal for most users. Power users can tune if needed.
+To backprop into neural probabilities, compute on GPU:
+
+- `dlogP/dq[i] = g_true[var_i] * (1/q[i]) + g_false[var_i] * (-1/(1-q[i]))`
+- `dlogP/dp_outcome[i] = (dlogP/dq[i])*(1/remaining[i]) + Σ_{j>i} (dlogP/dq[j])*(p_outcome[j]/remaining[j]^2)`
+- For NLL loss `L = -logP`, the probability-space gradient is `dL/dp = -dlogP/dp`.
+- Undo the `(1-eps)` scaling: `dL/dp_softmax = (1-eps) * dL/dp_outcome`.
+
+Finally, export the per-group gradient tensors via DLPack and call `output.backward(grad)` in Python without
+any CPU data transfers.
+
+This fast-path is fully compatible with the “GPU D4 + GPU CDCL verifier” compiler: the verifier guarantees the
+cached circuit is correct; the training loop only mutates weights.
+
+## 6. Testing Strategy (GPU-Only)
+
+All tests validate correctness **on GPU only**:
+
+- GPU D4 unit tests (small CNFs, component decomposition, branching).
+- GPU CDCL unit tests (SAT/UNSAT correctness).
+- End‑to‑end tests:
+  - Compile + verify + evaluate.
+  - For small `num_vars` (e.g., <= 20): brute-force enumerate assignments on GPU to compute exact WMC and compare.
+  - For larger instances: rely on the verifier (UNSAT) plus sanity checks and strict fail-fast on any SAT result.
+
+No CPU comparison is used in the runtime path or CI gating for production builds.
 
 ---
 
-## 8. Testing Strategy
+## 7. Performance Targets
 
-### 8.1 Three-Layer Testing Approach
+- **Compilation (GPU D4 + verification)**:
+  - 1K clauses: 5–20 ms
+  - 10K clauses: 20–100 ms
+- **Verification**: dominated by GPU CDCL, typically 5–50 ms
+- **Warm cache**: 0 ms compile, immediate evaluation
 
-**Layer 1: Unit Tests for Each Path**
-
-Test Tensor Path and GPU D4 Path independently:
-
-```rust
-#[test]
-fn test_tensor_path_simple_cnf() {
-    // (x1 ∨ x2) ∧ (¬x1 ∨ x3)
-    let cnf = simple_test_cnf();
-    let circuit = compile_tensor_path(&cnf).unwrap();
-
-    // Validate against CPU evaluation
-    assert_circuit_matches_cnf(&circuit, &cnf);
-}
-
-#[test]
-fn test_gpu_d4_path_simple_cnf() {
-    let cnf = simple_test_cnf();
-    let circuit = compile_gpu_d4_path(&cnf).unwrap();
-
-    // Validate against CPU D4 output
-    let cpu_circuit = compile_cpu_d4(&cnf).unwrap();
-    assert_circuits_equivalent(&circuit, &cpu_circuit);
-}
-```
-
-**Layer 2: Integration Tests for Hybrid System**
-
-Test routing logic and fallback mechanisms:
-
-```rust
-#[test]
-fn test_hybrid_routing_small_cnf() {
-    let small_cnf = generate_random_cnf(500, 100);  // 500 clauses
-    let circuit = compile_cnf_hybrid(&small_cnf).unwrap();
-
-    // Should use Tensor Path
-    let stats = get_compilation_stats(&circuit);
-    assert_eq!(stats.path_used, CompilationPath::Tensor);
-}
-
-#[test]
-fn test_hybrid_routing_large_cnf() {
-    let large_cnf = generate_random_cnf(5000, 500);  // 5000 clauses
-    let circuit = compile_cnf_hybrid(&large_cnf).unwrap();
-
-    // Should use GPU D4 Path
-    let stats = get_compilation_stats(&circuit);
-    assert_eq!(stats.path_used, CompilationPath::GpuD4);
-}
-
-#[test]
-fn test_fallback_mechanism() {
-    // Create pathological CNF that breaks Tensor Path
-    let pathological_cnf = create_dense_cnf(2000, 1000);  // Very dense
-
-    // Should fallback gracefully
-    let circuit = compile_cnf_hybrid(&pathological_cnf).unwrap();
-    assert!(circuit.is_valid());
-}
-```
-
-**Layer 3: Existing Certification Suite (200 Tests)**
-
-The existing G01-G06 certification tests run unchanged:
-
-```rust
-// G01: Circuit Forward (8 tests)
-// G02: Circuit Backward (8 tests)
-// G03: Numerical Stability (8 tests)
-// G04: Transfer Efficiency (8 tests)
-// G05: Neural Integration (9 tests)
-// G06: End-to-End Training (9 tests)
-
-// These tests use circuits from ExactDdnnfProgram.query()
-// They automatically validate hybrid-compiled circuits work correctly
-```
-
-All 200 tests must pass with hybrid compilation enabled.
-
-### 8.2 Correctness Validation
-
-**Gold Standard: CPU D4 Equivalence**
-
-Every compiled circuit is validated against CPU D4:
-
-```rust
-fn validate_hybrid_correctness(cnf: &Cnf) -> Result<()> {
-    // Compile with hybrid system
-    let hybrid_circuit = compile_cnf_hybrid(cnf)?;
-
-    // Compile with CPU D4 (ground truth)
-    let cpu_circuit = compile_cpu_d4(cnf)?;
-
-    // Generate 1000 random variable assignments
-    for _ in 0..1000 {
-        let assignment = random_assignment(cnf.num_vars());
-
-        let hybrid_result = hybrid_circuit.evaluate(&assignment)?;
-        let cpu_result = cpu_circuit.evaluate(&assignment)?;
-
-        // Must match within numerical tolerance
-        assert!((hybrid_result - cpu_result).abs() < 1e-9);
-    }
-
-    Ok(())
-}
-```
-
-This runs in CI for every commit.
-
-### 8.3 Performance Benchmarking
-
-**Benchmark Suite Structure**:
-
-```rust
-#[bench]
-fn bench_small_cnf_hybrid(b: &mut Bencher) {
-    let cnf = generate_cnf(100, 50);  // 100 clauses, 50 vars
-    b.iter(|| compile_cnf_hybrid(&cnf));
-}
-
-#[bench]
-fn bench_small_cnf_cpu_d4(b: &mut Bencher) {
-    let cnf = generate_cnf(100, 50);
-    b.iter(|| compile_cpu_d4(&cnf));
-}
-
-// Compare: should see 10-100x speedup for hybrid
-```
-
-Benchmark categories:
-- Small CNF (100-1K clauses): Tensor Path validation
-- Large CNF (1K-10K clauses): GPU D4 Path validation
-- Mixed workload: Realistic query distribution
-- Cache hit rate: Measure cache effectiveness
-
-### 8.4 New Test Categories
-
-Add 30 new tests to certification suite:
-
-```rust
-// crates/xlog-cuda-tests/src/categories/g07_tensor_path.rs (10 tests)
-// - test_tensor_simple_cnf
-// - test_tensor_sparse_matrix
-// - test_tensor_forward_backward
-// - test_tensor_memory_efficiency
-// - test_tensor_large_sparse
-// - test_tensor_numerical_stability
-// - test_tensor_cache_integration
-// - test_tensor_validation
-// - test_tensor_dense_fallback
-// - test_tensor_empty_cnf
-
-// crates/xlog-cuda-tests/src/categories/g08_gpu_d4_path.rs (10 tests)
-// - test_gpu_d4_simple_cnf
-// - test_gpu_d4_bfs_parallelism
-// - test_gpu_d4_unit_propagation
-// - test_gpu_d4_component_decomposition
-// - test_gpu_d4_variable_selection
-// - test_gpu_d4_component_cache
-// - test_gpu_d4_xgcf_assembly
-// - test_gpu_d4_large_cnf
-// - test_gpu_d4_deep_tree
-// - test_gpu_d4_memory_scaling
-
-// crates/xlog-cuda-tests/src/categories/g09_hybrid_system.rs (10 tests)
-// - test_hybrid_routing_small
-// - test_hybrid_routing_large
-// - test_hybrid_routing_threshold
-// - test_hybrid_fallback_tensor_to_gpu_d4
-// - test_hybrid_fallback_gpu_d4_to_cpu_d4
-// - test_hybrid_cache_integration
-// - test_hybrid_config_api
-// - test_hybrid_profiling_stats
-// - test_hybrid_mixed_workload
-// - test_hybrid_concurrent_queries
-```
-
-**Total test count**: 230 tests (200 existing + 30 new)
+These are realistic targets given GPU CDCL cost.
 
 ---
 
-## 9. Implementation Roadmap
+## 8. Implementation Roadmap
 
-### Phase 1: Foundation & Tensor Path (Week 1-2)
+### Phase 1: GPU D4 Core
+- BFS work queue + unit propagation + branching
+- GPU circuit builder and device‑resident XGCF output
 
-**Goals**:
-- Implement sparse matrix representation
-- Build Tensor Path compiler
-- Validate correctness against CPU D4
+### Phase 2: GPU CDCL Verifier
+- Clause DB, watched literals, conflict analysis
+- Equivalence checks for `φ` vs `C` (e.g., `SAT(φ ∧ ¬C)` and `SAT(C ∧ ¬φ)`)
+  - **Status:** Implemented (Jan 25, 2026): GPU CDCL + on-GPU model/proof validation + zero-host-read equivalence queries
 
-**Deliverables**:
-```rust
-// New files to create:
-crates/xlog-prob/src/compilation/
-  ├── mod.rs                    // Module exports
-  ├── tensor_path.rs            // Tensor Path compiler
-  ├── sparse_matrix.rs          // CSR matrix operations
-  └── validation.rs             // Correctness validation
+### Phase 3: GPU CNF Builder
+- Move PIR → CNF encoding to GPU
+- Ensure CNF never leaves device
 
-// Key functions:
-pub fn compile_tensor_path(cnf: &Cnf) -> Result<GpuXgcf> { ... }
-pub fn cnf_to_sparse_matrix(cnf: &Cnf) -> Result<GpuCsrCnf> { ... }
-pub fn sparse_matrix_to_xgcf(matrix: &GpuCsrCnf) -> Result<GpuXgcf> { ... }
-```
-
-**Success Criteria**:
-- ✅ 100 unit tests pass for Tensor Path
-- ✅ Correctness validated against CPU D4 (1000 random CNFs)
-- ✅ Speedup measured for small CNFs (<1K clauses)
-
-### Phase 2: GPU D4 Core Algorithm (Week 3-4)
-
-**Goals**:
-- Implement GPU D4 data structures
-- Build BFS parallelization infrastructure
-- Implement core kernels (unit propagation, component detection)
-
-**Deliverables**:
-```rust
-// New files:
-crates/xlog-prob/src/compilation/
-  ├── gpu_d4/
-  │   ├── mod.rs
-  │   ├── data_structures.rs    // GpuCnf, D4WorkItem, GpuWorkQueue
-  │   ├── kernels.rs             // Kernel wrappers
-  │   └── compiler.rs            // Main BFS loop
-
-// New CUDA kernels:
-kernels/d4_compilation.ptx        // GPU D4 kernels
-kernels/d4_compilation.cu         // CUDA source
-```
-
-**Success Criteria**:
-- ✅ GPU D4 compiles simple CNFs correctly
-- ✅ BFS parallelization works (verified on 100 test cases)
-- ✅ Component caching functional
-
-### Phase 3: GPU D4 Advanced Features (Week 5-6)
-
-**Goals**:
-- Implement variable selection heuristics
-- Add component cache with hash table
-- Optimize memory allocation
-- Complete XGCF assembly
-
-**Deliverables**:
-```rust
-// Extended GPU D4 implementation:
-crates/xlog-prob/src/compilation/gpu_d4/
-  ├── heuristics.rs              // Variable selection strategies
-  ├── cache.rs                   // Component caching
-  └── xgcf_builder.rs            // Build XGCF from D4 results
-```
-
-**Success Criteria**:
-- ✅ GPU D4 matches CPU D4 on all certification test CNFs
-- ✅ Speedup measured vs CPU D4 (should be 5-50x faster)
-- ✅ Memory usage validated (stays under 2GB for large CNFs)
-
-### Phase 4: Hybrid Integration (Week 7)
-
-**Goals**:
-- Implement routing logic
-- Add fallback mechanisms
-- Integrate with existing cache
-- Replace D4 call at `exact.rs:538`
-
-**Deliverables**:
-```rust
-// Modified file:
-crates/xlog-prob/src/exact.rs
-  - Replace line 538 with hybrid compilation call
-  - Add configuration API
-  - Add profiling/stats collection
-
-// New file:
-crates/xlog-prob/src/compilation/hybrid.rs
-  - Router logic
-  - Fallback handling
-  - Stats tracking
-```
-
-**Success Criteria**:
-- ✅ All 200 existing certification tests pass
-- ✅ Routing works correctly (small→Tensor, large→GPU D4)
-- ✅ Fallbacks work (Tensor failure → GPU D4 → CPU D4)
-- ✅ No API breaking changes
-
-### Phase 5: Optimization & Tuning (Week 8)
-
-**Goals**:
-- Profile both paths
-- Optimize hot paths
-- Tune threshold parameters
-- Memory optimizations
-
-**Tasks**:
-- Profile with `nvprof` / Nsight Compute
-- Optimize kernel occupancy
-- Tune work queue sizes
-- Tune routing threshold
-- Minimize memory transfers
-
-**Success Criteria**:
-- ✅ <1ms compilation for 90% of queries
-- ✅ 10-100x speedup vs CPU D4 demonstrated
-- ✅ Memory usage optimal
-
-### Phase 6: Testing & Validation (Week 9)
-
-**Goals**:
-- Comprehensive test coverage
-- Stress testing
-- Correctness validation at scale
-
-**Deliverables**:
-```rust
-// New test categories:
-crates/xlog-cuda-tests/src/categories/
-  ├── g07_tensor_path.rs         // 10 tests for Tensor Path
-  ├── g08_gpu_d4_path.rs         // 10 tests for GPU D4 Path
-  └── g09_hybrid_system.rs       // 10 tests for integration
-```
-
-**Success Criteria**:
-- ✅ 230 total tests pass (200 existing + 30 new)
-- ✅ 1000+ random CNFs validated against CPU D4
-- ✅ No crashes or memory leaks in 24hr stress test
-
-### Phase 7: Documentation & Release (Week 10)
-
-**Goals**:
-- Write design documentation
-- Update API docs
-- Prepare research paper draft
-- Release v0.5.0
-
-**Deliverables**:
-```
-docs/design/
-  └── gpu-native-compilation-design.md    // Architecture document (THIS FILE)
-
-docs/research/
-  └── gpu-native-compilation-paper.md     // Paper draft
-
-CHANGELOG.md                               // v0.5.0 release notes
-```
-
-**Success Criteria**:
-- ✅ Design document complete (architecture, performance, correctness)
-- ✅ API documentation updated
-- ✅ Paper draft ready for submission to NeurIPS/ICML
-- ✅ v0.5.0 tagged and released
-
-### Timeline Summary
-
-| Phase | Duration | Key Milestone |
-|-------|----------|---------------|
-| 1. Tensor Path | 2 weeks | Sparse matrix compilation working |
-| 2. GPU D4 Core | 2 weeks | BFS parallelization working |
-| 3. GPU D4 Advanced | 2 weeks | Full GPU D4 parity with CPU D4 |
-| 4. Integration | 1 week | Hybrid system integrated |
-| 5. Optimization | 1 week | 10-100x speedup achieved |
-| 6. Testing | 1 week | 230 tests passing |
-| 7. Documentation | 1 week | Paper ready, v0.5.0 released |
-| **Total** | **10 weeks** | **Production-ready GPU-native compilation** |
+### Phase 4: Cache + Integration
+- Device‑resident circuit cache
+- Replace CPU D4 call in `exact.rs`
 
 ---
 
-## 10. Research & Publication
+## 9. Risks & Mitigations
 
-### 10.1 Novel Contributions
+1. **GPU CDCL Complexity**
+   - Mitigation: start with a correctness-first CDCL (watched literals + 1-UIP + deterministic restarts),
+     then optimize; learned-clause eviction may be used, but the solver must remain complete (no “UNKNOWN”).
 
-**Contribution 1: First Pure GPU-Native Logic Programming System**
+2. **GPU Memory Pressure**
+   - Mitigation: strict memory pools + LRU circuit eviction.
 
-No existing system compiles logic programs entirely on GPU:
-- DeepProbLog, ProbLog: CPU compilation
-- Scallop: CPU Datalog compilation
-- Lobster: Mixed CPU/GPU pipeline
-- **XLOG (ours)**: End-to-end GPU compilation + execution
+3. **No CPU Fallback**
+   - Mitigation: verifier completeness is mandatory; reject any unknown outcome.
 
-**Contribution 2: Hybrid Tensor-Symbolic Compilation**
+4. **Annotated Disjunction (AD) Weight Semantics**
+   - Risk: incorrect mapping between multi-class probabilities and the binary conditional chain used by CNF lowering.
+   - Mitigation: implement the chain mapping on GPU exactly as `compile_annotated_disjunction` does, and add GPU-only
+     tests that compare the implied categorical distribution against expected probabilities.
 
-Novel combination:
-- Tensor operations for small queries (Boolean matrix approach)
-- Parallel tree search for large queries (GPU D4)
-- Automatic routing with fallback guarantees
-- **First system to combine both approaches**
+5. **Neural Gradient Mapping**
+   - Risk: using only `grad_true` or ignoring the chain rule yields incorrect training signals.
+   - Mitigation: GPU kernels compute `dL/dp` using both `grad_true` and `grad_false` and the conditional-chain Jacobian
+     (see 5.3), with unit tests on small circuits.
 
-**Contribution 3: BFS-Parallelized Knowledge Compilation**
-
-D4 algorithm adapted for GPU:
-- BFS instead of DFS (enables parallelism)
-- Dynamic work queue on GPU
-- Component caching with GPU hash table
-- **10-100x speedup over CPU D4**
-
-### 10.2 Target Venues
-
-**Tier 1 (Primary Targets)**:
-
-1. **NeurIPS 2026** (Neural Information Processing Systems)
-   - Deadline: May 2026
-   - Focus: Neuro-symbolic systems, GPU optimization
-   - Fit: Perfect - neural-symbolic integration + systems work
-
-2. **ICML 2026** (International Conference on Machine Learning)
-   - Deadline: January 2026
-   - Focus: ML systems, probabilistic inference
-   - Fit: Strong - probabilistic circuits + learning
-
-3. **IJCAI 2026** (International Joint Conference on AI)
-   - Deadline: January 2026
-   - Focus: Knowledge representation, logic programming
-   - Fit: Excellent - logic compilation breakthrough
-
-**Tier 2 (Alternative Venues)**:
-
-4. **AAAI 2027** (Association for Advancement of AI)
-   - Deadline: August 2026
-   - Focus: AI systems, symbolic reasoning
-
-5. **VLDB 2026** (Very Large Data Bases) - Systems Track
-   - Deadline: March 2026
-   - Focus: Query compilation, GPU databases
-
-### 10.3 Paper Structure
-
-**Title**: "GPU-Native Knowledge Compilation for Neuro-Symbolic Logic Programming"
-
-**Abstract** (250 words):
-- Problem: CPU bottleneck in neuro-symbolic systems
-- Solution: Hybrid tensor-symbolic compilation on GPU
-- Results: 10-100x speedup, 100% correctness, end-to-end GPU pipeline
-
-**Sections**:
-
-1. **Introduction** (2 pages)
-   - Neuro-symbolic systems need fast compilation
-   - Current systems bottlenecked by CPU compilation
-   - Our hybrid approach eliminates bottleneck
-
-2. **Background** (2 pages)
-   - Knowledge compilation (d-DNNF, D4)
-   - Probabilistic circuits
-   - GPU parallel algorithms
-
-3. **System Architecture** (3 pages)
-   - Tensor Path: Sparse matrix compilation
-   - GPU D4 Path: BFS-parallelized tree search
-   - Hybrid router with fallback
-
-4. **Implementation** (2 pages)
-   - CUDA kernel design
-   - Memory management
-   - Integration with PyTorch
-
-5. **Evaluation** (3 pages)
-   - Compilation speedup: 10-100x
-   - End-to-end training: 5-20x faster
-   - Correctness validation: 100% match with CPU D4
-   - Ablation studies: Tensor vs GPU D4 vs Hybrid
-
-6. **Related Work** (1 page)
-   - Compare to: PyJuice, Lobster, Boolean Matrix Logic, DeepProbLog
-
-7. **Conclusion** (0.5 pages)
-   - First pure GPU-native logic programming
-   - Opens path for real-time neuro-symbolic systems
-
-**Target Length**: 9-10 pages (NeurIPS format)
-
-### 10.4 Evaluation Benchmarks
-
-**Dataset 1: DeepProbLog Benchmarks**
-- MNIST addition (existing)
-- Warcraft shortest path
-- Family relationships
-- **Metric**: Training time with hybrid vs CPU D4
-
-**Dataset 2: Synthetic Workloads**
-- Random CNFs (100-10K clauses)
-- **Metric**: Compilation time distribution
-
-**Dataset 3: Real Logic Programs**
-- Prolog-style recursive queries
-- Constraint satisfaction problems
-- **Metric**: Query throughput (queries/second)
-
-**Baseline Comparisons**:
-- CPU D4 (current XLOG)
-- DeepProbLog (state-of-art neuro-symbolic)
-- Scallop + Lobster (recent GPU systems)
-- ProbLog (CPU probabilistic logic)
-
-**Key Graphs**:
-1. Compilation time vs CNF size (log-log plot)
-2. Training convergence curves (epochs vs accuracy)
-3. Throughput scaling (batch size vs queries/sec)
-4. Memory usage comparison
-
-### 10.5 Patent Strategy
-
-**Patent Title**: "Hybrid Tensor-Symbolic Compilation System for GPU-Native Logic Programming"
-
-**Claims**:
-1. Method for routing queries to tensor vs symbolic compilation paths
-2. BFS-parallelized knowledge compilation on GPU
-3. Component caching with GPU hash table for logic compilation
-4. Fallback mechanism ensuring correctness guarantees
-
-**Prior Art Analysis**:
-- No existing patents on GPU knowledge compilation
-- DeepProbLog/ProbLog: Not patented (academic)
-- Lobster: Open source (no patent protection)
-
-**Timeline**:
-- File provisional patent: Week 8 (before public disclosure)
-- File full patent: Within 12 months
-- Paper submission: After provisional filing
-
-### 10.6 Open Source Strategy
-
-**Repository**: `xlog-gpu` (already established)
-
-**Release Plan**:
-- v0.5.0: Hybrid compilation system
-- Documentation: Architecture design, API docs, tutorials
-- Benchmarks: Reproducible evaluation scripts
-- License: MIT (permissive)
-
-**Community Building**:
-- Announce on Twitter/Reddit/HN after paper acceptance
-- Tutorial at NeurIPS/ICML workshop
-- Integration guides for PyTorch users
-
-### 10.7 Expected Impact
-
-**Academic Impact**:
-- Establish XLOG as reference implementation for GPU logic programming
-- Enable new research in real-time neuro-symbolic systems
-- Citations from: ML systems, logic programming, probabilistic inference
-
-**Industrial Impact**:
-- Enable production neuro-symbolic applications (currently too slow)
-- Use cases: Explainable AI, constraint learning, structured prediction
-- Potential adopters: Google (TensorFlow), Meta (PyTorch), NVIDIA
-
-**Success Metrics**:
-- Paper accepted at NeurIPS/ICML/IJCAI (target: top tier)
-- 50+ citations within 2 years
-- 1000+ GitHub stars
-- Adoption by 3+ research groups
+6. **GPU Provenance (Negation / WFS) Complexity**
+   - Mitigation: implement provenance as a GPU column with batched hash-consing; stage non-monotone/WFS support behind
+     a feature gate until verified end-to-end on GPU.
 
 ---
 
-## Appendix A: Key Design Decisions
-
-### A.1 Why BFS over DFS for GPU D4?
-
-**DFS (original D4)**:
-- Depth-first tree search (recursive)
-- Hard to parallelize (stack-based, sequential dependencies)
-- Good cache locality on CPU
-
-**BFS (our adaptation)**:
-- Breadth-first tree search (iterative with queues)
-- Easy to parallelize (process entire level at once)
-- Better GPU utilization (thousands of parallel work items)
-
-**Trade-off**: BFS uses more memory (stores full level), but GPU has abundant memory and needs parallelism.
-
-### A.2 Why 1000 Clauses as Threshold?
-
-Based on Boolean Matrix Logic Programming paper and PyJuice research:
-- **<1K clauses**: Matrix operations dominated by fixed overhead, benefit from sparse representation
-- **≥1K clauses**: D4-style compilation benefits from tree structure and caching
-
-The threshold is **configurable** and can be tuned per workload.
-
-### A.3 Why Validate Instead of Formal Verification?
-
-**Formal verification** (proof of correctness):
-- Requires proving GPU kernels match mathematical specification
-- Extremely difficult for complex kernels (unit propagation, component detection)
-- Development time: months to years
-
-**Empirical validation** (testing with random assignments):
-- Fast to implement (days)
-- High confidence with 1000+ random tests
-- Standard practice in systems research
-
-We use **validation + fallback** for 100% correctness guarantee in practice.
-
-### A.4 Why Not JIT PTX Generation?
-
-Initial research suggested JIT compilation (runtime PTX generation). We rejected it because:
-- **NVRTC overhead**: 20-200ms per compilation (not 1-2ms as hoped)
-- **Code complexity**: PTX generation for arbitrary circuits is complex
-- **Existing kernels work**: Battle-tested `xgcf_forward_level` and `xgcf_backward_level_*` kernels already handle all XGCF circuits efficiently
-
-**Decision**: Use existing kernels, focus on fast compilation to XGCF.
+**Summary:** This design delivers a **strictly GPU-native, safe, and exact** compilation pipeline by combining **GPU D4**
+and a **GPU CDCL equivalence verifier**, with no CPU fallback paths and no data-plane transfers of CNF/circuit/weights/gradients.
 
 ---
 
-## Appendix B: References
+## Appendix A: Compatibility Impact (File-Level Changes)
 
-### Core Papers
+This appendix lists the concrete source files that must change to support the GPU-native design.
 
-1. [Scaling Tractable Probabilistic Circuits: A Systems Perspective](https://arxiv.org/abs/2406.00766) (PyJuice, 2024)
-2. [Boolean Matrix Logic Programming on the GPU](https://arxiv.org/html/2408.10369) (2024)
-3. [Lobster: A GPU-Accelerated Framework for Neurosymbolic Programming](https://arxiv.org/abs/2503.21937) (2025)
-4. [Theoretical Foundations of GPU-Native Compilation](https://arxiv.org/html/2512.11200v1) (2025)
-5. [KLay: Accelerating Sparse Arithmetic Circuits](https://pedrozudo.github.io/assets/documents/publications/2025/maene2025klaycolorai/maene2025klaycolorai.paper.pdf) (2025)
+1. `crates/xlog-prob/src/exact.rs`  
+   - Replace CPU D4 invocation at line ~538 with `compile_gpu_d4_and_verify(&GpuCnf, &CudaKernelProvider, &GpuCompileConfig)`.
+   - Remove temp file IO (`in.cnf`, `out.nnf`) and DDNNF parsing on CPU.
 
-### Knowledge Compilation
+2. `crates/xlog-prob/src/cnf.rs`  
+   - Keep host encoder for tooling/tests only.
+   - Add GPU PIR + CNF encoders in:
+     - `crates/xlog-prob/src/compilation/gpu_pir.rs`
+     - `crates/xlog-prob/src/compilation/gpu_cnf.rs`
 
-6. [An Improved Decision-DNNF Compiler (D4)](https://www.ijcai.org/proceedings/2017/0093.pdf) (2017)
-7. [A Top-Down Compiler for Sentential Decision Diagrams](https://dl.acm.org/doi/10.5555/2832581.2832687) (2015)
+3. `crates/xlog-prob/src/compilation/mod.rs`  
+   - Export `encode_cnf_gpu`, `compile_gpu_d4_and_verify`, and GPU CDCL verifier entrypoint.
 
-### Related Systems
+4. `crates/xlog-prob/src/gpu.rs`  
+   - Add `GpuXgcf::from_device(...)` constructor to build device-resident circuits.
+   - Add evaluation path that accepts `GpuWeights` without host uploads.
 
-8. DeepProbLog: [Neural-Symbolic Integration](https://arxiv.org/abs/1805.10872)
-9. Scallop: [Neurosymbolic Programming](https://arxiv.org/abs/2304.04812)
-10. ProbLog: [Probabilistic Logic Programming](https://dtai.cs.kuleuven.be/problog/)
+5. `crates/xlog-prob/src/provenance.rs` and `crates/xlog-prob/src/pir.rs`  
+   - Add GPU-resident PIR graph (`GpuPirGraph`) and GPU extraction path.
+   - Ensure provenance extraction can emit GPU PIR directly or via GPU executor.
 
----
+6. `crates/xlog-cuda/src/provider.rs` and `kernels/`  
+   - Add new PTX modules for GPU D4 kernels and GPU CDCL verifier.
+   - Wire kernel entry points into the provider (similar to existing circuit kernels).
 
-**Document Status**: Architecture Design Complete — Ready for Implementation
+7. `crates/xlog-solve/`  
+   - CLS solver remains CPU-only and **not used** for verification.
+   - GPU CNF + GPU CDCL verifier live here (`GpuCnf`, `GpuCdclSolver`) and are used by `xlog-prob` for equivalence
+     checking.
 
-**Next Steps**: Begin Phase 1 (Foundation & Tensor Path) implementation
+8. `crates/pyxlog/src/lib.rs`  
+   - Current template circuit cache stores `ExactDdnnfProgram` compiled via CPU D4.
+   - Must be updated to call the GPU-native compiler path and to avoid any host-side CNF/DDNNF materialization.
+   - Must make the neural cache path truly GPU-native:
+     - no `.tolist()` (CPU readback) for neural outputs; use DLPack device tensors,
+     - compute annotated-disjunction conditional chain probabilities on GPU (matches `compile_annotated_disjunction`),
+     - backprop using both `grad_true` and `grad_false` with the correct chain rule (see 5.3).
+
+9. `crates/xlog-cli/src/main.rs`  
+   - `xlog prob --prob-engine exact_ddnnf` currently uses the CPU D4 path via `ExactDdnnfProgram`.
+   - Must be updated to use the GPU-native compiler path.
+
+10. Tests  
+   - Add GPU-only integration tests in `crates/xlog-prob/tests/` for:
+     - GPU D4 compile + GPU CDCL verify
+     - Device-resident CNF builder
+     - Device-resident weight tables
+   - Optionally add CUDA certification categories for D4/CDCL kernels.

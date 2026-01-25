@@ -1,290 +1,147 @@
 # Solver Services (xlog-solve)
 
-This document describes XLOG's GPU-native SAT/MaxSAT solver based on Continuous Local Search (CLS), inspired by FastFourierSAT.
+This document describes XLOG's SAT solver services. The **production correctness path is GPU-native**: SAT/UNSAT is decided on device with a **complete CDCL solver**, and results are returned as **device-resident buffers**.
 
-## Overview
+## Why This Exists
 
-`xlog-solve` provides solver services for satisfiability and optimization problems. It treats SAT as continuous optimization, enabling GPU parallelism.
+XLOG uses SAT solving in multiple subsystems:
 
-## Core Concept
+- **Knowledge compilation verification** (`xlog-prob`): prove `φ ≡ C` by checking two UNSAT queries on GPU:
+  - `UNSAT(φ ∧ ¬C)`
+  - `UNSAT(C ∧ ¬φ)`
+- **D4-style compilation** (GPU D4): unit propagation, decomposition, and (optionally) SAT calls during compilation.
+- **ASP/ELP-style workflows** (future): candidate model checks and brave/cautious consequence checks.
 
-Traditional SAT solvers work with discrete boolean assignments. CLS instead:
+The verifier must be **complete**. Heuristic solvers (CLS, local search) are allowed only as *optional accelerators*, never as the final authority.
 
-1. Represents variables as continuous values in [0, 1]
-2. Expresses clauses as differentiable loss functions
-3. Uses gradient-like updates computed in parallel on GPU
-4. Discretizes to boolean when a solution is found
+## Zero CPU Transfers (Data-Plane Contract)
 
-## Data Structures
+In the GPU-native path:
 
-### Solve Instance
+- **CNF inputs are device-resident** (e.g., already on GPU from PIR/CNF building or imported via DLPack).
+- **Solver state is device-resident** (assignments, trail, learned clauses).
+- The host may launch kernels and synchronize streams (**control-plane**) but does not copy CNF/circuit/state back and forth (**data-plane**).
 
-```rust
-pub struct SolveInstance {
-    pub num_vars: u32,
-    pub clauses: Vec<Clause>,           // CNF clauses
-    pub weights: Option<Vec<f64>>,      // For MaxSAT/weighted
-    pub objective: Objective,           // SAT, MaxSAT, or MinUnsat
-}
+Verifier-grade integrations additionally enforce **zero device->host reads**: even the SAT/UNSAT status is not copied back. The host observes only CUDA success/failure while GPU-side assertion kernels validate the outcome and trap on mismatch.
 
-pub struct Clause {
-    pub literals: Vec<Literal>,         // Variable + polarity
-}
+## GPU CDCL Verifier (Required)
 
-pub struct Literal {
-    pub var: u32,
-    pub negated: bool,
-}
-```
+### Interface
 
-### GPU Solver State
+`xlog-solve` exposes a GPU solver that accepts **GPU CNF**. To support fully GPU-native construction (where exact sizes are computed on device), CNF size metadata is also device-resident:
 
 ```rust
-pub struct SolverState {
-    pub assignments: CudaSlice<f32>,    // Continuous [0,1] per variable
-    pub velocities: CudaSlice<f32>,     // Momentum for updates
-    pub clause_sat: CudaSlice<f32>,     // Satisfaction degree per clause
-    pub gradients: CudaSlice<f32>,      // dL/d(var)
+pub struct GpuCnf {
+    // Host-known capacities (buffers are allocated to these sizes).
+    pub var_cap: u32,
+    pub clause_cap: u32,
+    pub lit_cap: u32,
+
+    // Device-resident exact counts (len = 1 each).
+    pub num_vars: TrackedCudaSlice<u32>,
+    pub num_clauses: TrackedCudaSlice<u32>,
+    pub num_lits: TrackedCudaSlice<u32>,
+
+    // CSR buffers sized by capacity.
+    pub clause_offsets: TrackedCudaSlice<u32>, // len = clause_cap + 1
+    pub literals: TrackedCudaSlice<i32>,       // len = lit_cap, signed DIMACS: ±var_id (1-based)
+}
+
+pub struct GpuCdclSolver {
+    /* internal fields */
+}
+
+impl GpuCdclSolver {
+    pub fn new(provider: Arc<CudaKernelProvider>, config: GpuCdclConfig) -> Self;
+    pub fn solve_expect_sat(&self, cnf: &GpuCnf) -> xlog_core::Result<TrackedCudaSlice<i8>>;
+    pub fn solve_expect_unsat(&self, cnf: &GpuCnf) -> xlog_core::Result<()>;
 }
 ```
 
-### Configuration
+**Verifier semantics (zero host reads):**
+- `solve_expect_sat`: runs CDCL, asserts SAT on GPU, runs GPU model check, and returns the device-resident assignment.
+- `solve_expect_unsat`: runs CDCL, asserts UNSAT on GPU, runs GPU proof check, and returns `Ok(())`.
 
-```rust
-pub struct SolverConfig {
-    pub max_iterations: u32,            // Default: 10,000
-    pub learning_rate: f32,             // Step size
-    pub momentum: f32,                  // Velocity decay
-    pub discretize_threshold: f32,      // When to snap to 0/1
-}
-```
+If the solver returns the wrong status or produces an invalid model/proof, GPU-side assertion kernels trap so the host cannot continue silently.
 
-## Loss Function
+### Core Data Structures (Device)
 
-Each clause contributes to the loss:
+The CDCL implementation uses a fixed-capacity arena on GPU:
 
-```
-clause_loss(c) = prod(1 - lit_value(l)) for l in c
-```
+- **CNF (CSR):** `clause_offsets[]` and `literals[]`.
+- **Assignment:** `assign[var] ∈ {-1, 0, +1}` for false/unassigned/true.
+- **Trail:** `trail_vars[]`, `trail_len`.
+- **Decision levels:** `level[var]`, `level_start[level]`.
+- **Reasons:** `reason[var] = clause_id` for implied assignments, `-1` for decisions.
+- **Learned clause arena:** append-only `(offsets, lits)` with configurable capacity.
 
-Where `lit_value(l) = assignments[var]` if positive, or `1 - assignments[var]` if negated.
+The verifier prioritizes deterministic correctness over aggressive micro-optimizations:
 
-- Loss = 0 when clause is satisfied (at least one literal is 1)
-- Loss > 0 when clause is violated
+- **BCP:** watched literals with per-literal watch lists (deterministic traversal order).
+- **Conflict analysis:** 1-UIP clause learning and non-chronological backjumping.
+- **Heuristic:** deterministic variable selection (deterministic VSIDS-style scoring).
+- **SAT validation:** every SAT result must pass an on-GPU model check (`sat_check_model`).
+- **UNSAT validation:** every UNSAT result must pass an on-GPU proof check (`sat_proof_check`) using a solver-emitted
+  resolution-trace certificate (no CPU proof checking).
 
-Total loss = sum of clause losses (for SAT) or weighted sum (for MaxSAT).
+### Determinism Contract
 
-## GPU Kernels
+To keep verification reproducible, the solver must be deterministic for a fixed input CNF:
 
-The solver uses three phases per iteration:
+- Conflict clause selection uses a deterministic reducer (e.g., min clause id).
+- When multiple clauses imply the same literal, reason selection uses a deterministic rule (e.g., min clause id).
+- No random restarts; if restarts are used, they must be schedule-based and deterministic.
 
-### Phase 1: Evaluate Clause Satisfaction
+### CUDA Kernels
 
-```cuda
-__global__ void cls_evaluate_clauses(
-    const float* assignments,      // [num_vars]
-    const int32_t* clause_lits,    // Packed literals
-    const uint32_t* clause_offsets,// Start of each clause
-    uint32_t num_clauses,
-    float* clause_sat              // Output: satisfaction [0,1]
-) {
-    uint32_t c = blockIdx.x * blockDim.x + threadIdx.x;
-    if (c >= num_clauses) return;
+The solver is implemented as a GPU kernel entrypoint loaded by `xlog-cuda`:
 
-    float product = 1.0f;
-    for (uint32_t i = clause_offsets[c]; i < clause_offsets[c+1]; i++) {
-        int32_t lit = clause_lits[i];
-        uint32_t var = abs(lit) - 1;
-        float val = (lit > 0) ? assignments[var] : 1.0f - assignments[var];
-        product *= (1.0f - val);
-    }
-    clause_sat[c] = product;
-}
-```
+- `sat_cdcl_solve`: executes the CDCL loop on device and writes:
+  - `out_status` (SAT/UNSAT)
+  - `assign[]` (model when SAT)
+  - optional debugging counters and conflict stats
 
-### Phase 2: Compute Gradients
+The host launches this kernel and waits for completion. The solver’s internal loop does not require host-device memcpy.
 
-```cuda
-__global__ void cls_compute_gradients(
-    const float* assignments,
-    const float* clause_sat,
-    const int32_t* var_clauses,    // Which clauses mention var
-    const uint32_t* var_offsets,
-    uint32_t num_vars,
-    float* gradients               // Output: dL/d(var)
-) {
-    uint32_t v = blockIdx.x * blockDim.x + threadIdx.x;
-    if (v >= num_vars) return;
+The SAT PTX module also includes verifier helper kernels used by `xlog-solve` and `xlog-prob`:
 
-    float grad = 0.0f;
-    for (uint32_t i = var_offsets[v]; i < var_offsets[v+1]; i++) {
-        // Compute partial derivative contribution from each clause
-        grad += partial_derivative(v, var_clauses[i], ...);
-    }
-    gradients[v] = grad;
-}
-```
+- Assertion + validation: `sat_assert_status`, `sat_assert_ok`, `sat_check_model`, `sat_proof_check`
+- XGCF→CNF construction: `sat_xgcf_cnf_counts`, `sat_xgcf_cnf_emit`, `sat_xgcf_cnf_capture_last_counts`,
+  `sat_xgcf_cnf_compute_totals`, `sat_cnf_write_terminator`
+- Equivalence query construction: `sat_cnf_copy_into`, `sat_xgcf_write_root_unit_clause`, `sat_not_phi_counts`,
+  `sat_emit_not_phi`
 
-### Phase 3: Update Assignments
+## Continuous Local Search (Optional, Non-Verifying)
 
-```cuda
-__global__ void cls_update_assignments(
-    float* assignments,
-    float* velocities,
-    const float* gradients,
-    float learning_rate,
-    float momentum,
-    uint32_t num_vars
-) {
-    uint32_t v = blockIdx.x * blockDim.x + threadIdx.x;
-    if (v >= num_vars) return;
+`xlog-solve` also contains a Continuous Local Search (CLS) solver (FastFourierSAT-inspired) for:
 
-    velocities[v] = momentum * velocities[v] - learning_rate * gradients[v];
-    assignments[v] = clamp(assignments[v] + velocities[v], 0.0f, 1.0f);
-}
-```
+- fast best-effort SAT guesses
+- MaxSAT approximations
 
-## Proof Generation
+CLS is **not complete** and must never be used as the verifier. It may be used to seed CDCL (future) by providing an initial assignment on GPU.
 
-The solver produces verifiable proofs:
+## Integration Notes
 
-```rust
-pub enum SolveProof {
-    /// SAT: satisfying assignment is the proof
-    Satisfying {
-        assignment: Vec<bool>,
-        checksum: u64,
-    },
+### xlog-prob (GPU-Native Compilation)
 
-    /// UNSAT: resolution proof
-    Unsatisfiable {
-        learned_clauses: Vec<Clause>,
-        resolution_chain: Vec<ResolutionStep>,
-        checksum: u64,
-    },
+The verifier integration solves the two UNSAT queries for equivalence via `GpuCdclSolver::solve_expect_unsat`. A SAT result indicates a compiler bug and is handled as **fail-fast** (GPU trap / CUDA error), without copying any status or counters to the host.
 
-    /// Optimum: assignment + bound proof
-    Optimal {
-        assignment: Vec<bool>,
-        objective_value: f64,
-        bound_certificate: BoundCert,
-    },
+### SAT Subsystem Scope
 
-    /// Approximate: best-effort with quality metrics
-    Approximate {
-        assignment: Vec<bool>,
-        satisfied_clauses: u32,
-        total_clauses: u32,
-        iterations: u32,
-    },
-}
-```
+The SAT subsystem in XLOG is defined as:
 
-### GPU-Accelerated Verification
+- GPU-resident CNF encoding
+- GPU CDCL solver (complete SAT/UNSAT)
+- GPU equivalence checking helpers used by compilation and future non-monotone logic
 
-```rust
-pub fn verify_proof_gpu(
-    instance: &SolveInstance,
-    proof: &SolveProof,
-    provider: &CudaKernelProvider,
-) -> Result<VerifyResult> {
-    match proof {
-        SolveProof::Satisfying { assignment, checksum } => {
-            let sat_count = provider.count_satisfied_clauses(
-                &instance.clauses,
-                assignment,
-            )?;
-            Ok(sat_count == instance.clauses.len())
-        }
-        // ... other proof types
-    }
-}
-```
+## Testing Strategy (GPU-Only)
 
-## Solver API
-
-```rust
-pub struct Solver {
-    provider: Arc<CudaKernelProvider>,
-    stats: Arc<StatsManager>,
-    config: SolverConfig,
-}
-
-impl Solver {
-    /// Solve a SAT/MaxSAT instance
-    pub fn solve(&self, instance: SolveInstance) -> Result<SolveResult>;
-
-    /// Solve with timeout
-    pub fn solve_with_timeout(
-        &self,
-        instance: SolveInstance,
-        timeout: Duration,
-    ) -> Result<SolveResult>;
-
-    /// Batch solve multiple instances
-    pub fn solve_batch(
-        &self,
-        instances: Vec<SolveInstance>,
-    ) -> Result<Vec<SolveResult>>;
-
-    /// Incremental solving (add clauses to existing state)
-    pub fn solve_incremental(
-        &self,
-        state: &mut IncrementalState,
-        new_clauses: Vec<Clause>,
-    ) -> Result<SolveResult>;
-}
-
-pub struct SolveResult {
-    pub status: SolveStatus,
-    pub proof: SolveProof,
-    pub stats: SolveStats,
-}
-
-pub enum SolveStatus {
-    Sat,
-    Unsat,
-    Unknown,
-    Optimal(f64),
-}
-```
-
-## Integration with XLOG
-
-### xlog-prob Integration
-
-The solver supports knowledge compilation workflows:
-
-```
-PIR → CNF → Solver (preprocessing) → D4 (compilation) → XGCF
-```
-
-Solver preprocessing can simplify CNF before compilation.
-
-### xlog-elp Integration (Planned)
-
-For epistemic logic, the solver handles:
-- Guess validation (SAT checks for world-view candidates)
-- Propagation (unit propagation, pure literal elimination)
-- Test phase (brave/cautious consequence checking)
-
-## Performance Characteristics
-
-| Metric | Target |
-|--------|--------|
-| Variables | 10,000+ |
-| Clauses | 100,000+ |
-| Iterations/sec | 1,000+ |
-| GPU utilization | >80% |
-
-## Limitations
-
-Current implementation:
-- CLS is incomplete (may not find UNSAT proof)
-- Best for satisfiable instances
-- UNSAT detection requires fallback to CDCL (planned)
+- Unit tests: small SAT/UNSAT instances, determinism checks.
+- Property tests: random CNFs where results are cross-checked against a tiny CPU reference *in tests only*.
+- Kernel certification: add a SAT category to `xlog-cuda-tests` once the kernel API stabilizes.
 
 ## See Also
 
-- [Probabilistic Tier](xlog-prob.md) — Uses solver for preprocessing
-- [GPU Execution](gpu-execution.md) — Shared GPU infrastructure
+- `docs/design/2026-01-22-gpu-native-compilation-design.md`
+- `docs/research/2026-01-22-architecture-validation-and-refinement.md`
+- `crates/xlog-prob/src/compilation/` (GPU compilation + verification entrypoints)

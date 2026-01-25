@@ -1,7 +1,9 @@
 use xlog_prob::exact::ExactDdnnfProgram;
+use xlog_cuda::CudaDevice;
 
 fn has_cuda_device() -> bool {
-    cudarc::driver::CudaDevice::count().unwrap_or(0) > 0
+    // cudarc::driver::CudaDevice::count() may panic in restricted containers. Attempt real init instead.
+    CudaDevice::new(0).is_ok()
 }
 
 /// Verify that gradients through negation have the correct sign and magnitude.
@@ -208,4 +210,3 @@ query(b()).
     assert!((g.grad_true[2] - expected_b_true).abs() < 1e-9);
     assert!((g.grad_false[2] - expected_b_false).abs() < 1e-9);
 }
-
