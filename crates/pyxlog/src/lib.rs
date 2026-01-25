@@ -737,21 +737,31 @@ impl CompiledProgram {
     /// # Note
     /// Call zero_grad() before this and optimizer_step() after.
     fn forward_backward(&mut self, py: Python<'_>, query: &str) -> PyResult<f64> {
-        // Try to parse as a direct neural predicate query first
-        match self.try_parse_direct_neural_query(query) {
-            Ok((network_name, input_idx, target_label)) => {
-                // Direct neural predicate query - use fast path
-                self.forward_backward_direct(py, &network_name, input_idx, &target_label)
-            }
-            Err(_) => {
-                // Complex query involving neural predicates through rules
-                self.forward_backward_complex(py, query)
-            }
-        }
+        let loss = self.forward_backward_tensor_internal(py, query)?;
+        let loss_bound = loss.bind(py);
+        loss_bound.call_method0("item")?.extract()
+    }
+
+    /// GPU-native forward-backward that returns the scalar NLL loss as a CUDA tensor (no `.item()` / `.tolist()`).
+    ///
+    /// This is the preferred API for strict GPU-native training loops. If you need a host `f64`,
+    /// call `forward_backward(...)` which will read back a single scalar.
+    fn forward_backward_tensor(&mut self, py: Python<'_>, query: &str) -> PyResult<PyObject> {
+        self.forward_backward_tensor_internal(py, query)
     }
 }
 
 impl CompiledProgram {
+    fn forward_backward_tensor_internal(&mut self, py: Python<'_>, query: &str) -> PyResult<PyObject> {
+        // Try to parse as a direct neural predicate query first.
+        match self.try_parse_direct_neural_query(query) {
+            Ok((network_name, input_idx, target_label)) => {
+                self.forward_backward_direct_tensor(py, &network_name, input_idx, &target_label)
+            }
+            Err(_) => self.forward_backward_complex_tensor(py, query),
+        }
+    }
+
     /// Internal implementation of train_epoch that tracks batch losses.
     pub(crate) fn train_epoch_internal(
         &mut self,
@@ -846,13 +856,13 @@ impl CompiledProgram {
     /// Forward-backward for a direct neural predicate query.
     ///
     /// E.g., `digit(0, 5)` - runs network on input 0, computes NLL loss for label 5.
-    fn forward_backward_direct(
+    fn forward_backward_direct_tensor(
         &self,
         py: Python<'_>,
         network_name: &str,
         input_idx: usize,
         target_label: &str,
-    ) -> PyResult<f64> {
+    ) -> PyResult<PyObject> {
         // Get the network handle
         let handle = self.network_registry.get(network_name).ok_or_else(|| {
             PyValueError::new_err(format!("Network '{}' not registered", network_name))
@@ -865,8 +875,8 @@ impl CompiledProgram {
         // Get input from tensor source
         let input_tensor = self.get_input_tensor(py, input_idx)?;
 
-        // Forward pass through network (with gradient tracking)
-        // Network expects batched input, so add batch dimension if needed
+        // Forward pass through network (with gradient tracking).
+        // Network expects batched input, so add batch dimension if needed.
         let input_bound = input_tensor.bind(py);
         let input_unsqueezed = input_bound.call_method1("unsqueeze", (0i32,))?;
 
@@ -876,27 +886,22 @@ impl CompiledProgram {
         // Output shape is [batch=1, num_classes], squeeze to [num_classes]
         let output_squeezed = output_bound.call_method1("squeeze", (0i32,))?;
 
-        // Get probability of target label
+        // Select the target probability tensor and compute loss on GPU:
+        // loss = -log(clamp(prob, min=epsilon)).
         let label_idx = self.get_label_index(network_name, target_label)?;
         let prob_tensor = output_squeezed.get_item(label_idx)?;
-        let prob: f64 = prob_tensor.call_method0("item")?.extract()?;
 
-        // Compute NLL loss: -log(prob)
-        let loss = nll_loss_value(prob);
+        let clamp_kwargs = PyDict::new_bound(py);
+        clamp_kwargs.set_item("min", NLL_EPSILON)?;
+        let prob_clamped = prob_tensor.call_method("clamp", (), Some(&clamp_kwargs))?;
 
-        // Get gradient of loss w.r.t. prob: d(-log(p))/dp = -1/p
-        let grad_prob = -1.0 / prob;
+        let log_p = prob_clamped.call_method0("log")?;
+        let loss = log_p.call_method0("__neg__")?;
 
-        // Create gradient tensor for backward through network
-        let grad_tensor = self.create_output_gradient(py, &output_squeezed, label_idx, grad_prob)?;
+        // Backprop through the network.
+        loss.call_method0("backward")?;
 
-        // Add batch dimension back for backward pass through network output
-        let grad_unsqueezed = grad_tensor.bind(py).call_method1("unsqueeze", (0i32,))?;
-
-        // Backward through network
-        output_bound.call_method1("backward", (grad_unsqueezed,))?;
-
-        Ok(loss)
+        Ok(loss.into_py(py))
     }
 
     /// Forward-backward for a complex query involving neural predicates through rules.
@@ -911,7 +916,7 @@ impl CompiledProgram {
     /// 3. If cached: update weights and evaluate
     /// 4. If not cached: compile circuit, cache it, evaluate
     /// 5. Backpropagate gradients through networks
-    fn forward_backward_complex(&mut self, py: Python<'_>, query: &str) -> PyResult<f64> {
+    fn forward_backward_complex_tensor(&mut self, py: Python<'_>, query: &str) -> PyResult<PyObject> {
         // Parse query to extract (1) neural input indices and (2) template predicate name.
         let (input_indices, pred_name) = self.extract_query_input_indices(query)?;
         if input_indices.is_empty() {
@@ -943,6 +948,7 @@ impl CompiledProgram {
         // Run neural networks and import the outputs as device-resident buffers via DLPack (no .tolist()).
         let torch = py.import_bound("torch")?;
         let schema_f32 = Schema::new(vec![("col0".to_string(), ScalarType::F32)]);
+        let schema_f64 = Schema::new(vec![("col0".to_string(), ScalarType::F64)]);
 
         let mut out_tensors: Vec<PyObject> = Vec::with_capacity(input_indices.len());
         let mut grad_tensors: Vec<PyObject> = Vec::with_capacity(input_indices.len());
@@ -979,8 +985,12 @@ impl CompiledProgram {
                 num_labels = Some(n);
             }
 
+            // DLPack cannot export tensors that require grad. We detach here to read probabilities as
+            // values, while keeping the original `output_squeezed` for autograd.
+            let output_detached = output_squeezed.call_method0("detach")?;
+
             // Import prob tensor (1D F32 CUDA) as a zero-copy CudaBuffer.
-            let managed = dlpack_from_py(&output_squeezed)?;
+            let managed = dlpack_from_py(&output_detached)?;
             let prob_buf = self
                 .output_provider
                 .from_dlpack_tensors_with_schema(schema_f32.clone(), vec![managed])
@@ -988,6 +998,7 @@ impl CompiledProgram {
 
             // Allocate a grad tensor on the same device and import it as a writable buffer.
             let grad_tensor = torch.call_method1("zeros_like", (&output_squeezed,))?;
+            let grad_tensor = grad_tensor.call_method0("contiguous")?;
             let grad_managed = dlpack_from_py(&grad_tensor)?;
             let grad_buf = self
                 .output_provider
@@ -1041,8 +1052,8 @@ impl CompiledProgram {
             }
         };
 
-        // Robustness: ensure CUDA work is ordered correctly around DLPack import/consumption.
-        // This is control-plane synchronization only (no data-plane transfers).
+        // Robustness: order Torch stream work vs XLOG's CUDA work-stream (legacy default stream).
+        // Avoid global `cuda.synchronize()`; use stream-to-stream dependencies instead.
         if torch
             .getattr("cuda")
             .and_then(|c| c.call_method0("is_available"))
@@ -1050,14 +1061,34 @@ impl CompiledProgram {
             .unwrap_or(false)
         {
             let cuda = torch.getattr("cuda")?;
-            cuda.call_method0("synchronize")?;
+            let current = cuda.call_method0("current_stream")?;
+            let default_stream = cuda.call_method0("default_stream")?;
+            default_stream.call_method1("wait_stream", (current,))?;
         }
 
         let cfg = NeuralFastPathConfig::default();
-        let loss = cached
+        let loss_dev = cached
             .program
-            .neural_backward_nll_buffers_with_loss(&cached.slots, query_idx, &prob_bufs, &mut grad_bufs, cfg)
+            .neural_backward_nll_buffers_with_device_loss(
+                &cached.slots,
+                query_idx,
+                &prob_bufs,
+                &mut grad_bufs,
+                cfg,
+            )
             .map_err(|e| PyRuntimeError::new_err(format!("Neural fast-path error: {}", e)))?;
+
+        let loss_buf =
+            xlog_cuda::CudaBuffer::from_columns(vec![loss_dev.into_bytes().into()], 1, schema_f64);
+        let loss_dl = self
+            .output_provider
+            .to_dlpack_table(loss_buf)
+            .column(0)
+            .map_err(|e| PyRuntimeError::new_err(format!("DLPack export failed: {}", e)))?;
+        let loss_capsule = dlpack_capsule_from_tensor(py, loss_dl)?;
+        let loss_tensor = torch
+            .getattr("from_dlpack")?
+            .call1((loss_capsule,))?;
 
         if torch
             .getattr("cuda")
@@ -1066,7 +1097,9 @@ impl CompiledProgram {
             .unwrap_or(false)
         {
             let cuda = torch.getattr("cuda")?;
-            cuda.call_method0("synchronize")?;
+            let current = cuda.call_method0("current_stream")?;
+            let default_stream = cuda.call_method0("default_stream")?;
+            current.call_method1("wait_stream", (default_stream,))?;
         }
 
         // Backward through the networks using the device-resident gradients we filled on GPU.
@@ -1075,7 +1108,7 @@ impl CompiledProgram {
             out_bound.call_method1("backward", (grad.bind(py),))?;
         }
 
-        Ok(loss)
+        Ok(loss_tensor.into_py(py))
     }
 
     /// Extract input indices from a query.
@@ -1318,29 +1351,6 @@ impl CompiledProgram {
         let tensor_bound = tensor.bind(py);
         let indexed = tensor_bound.get_item(index)?;
         Ok(indexed.into())
-    }
-
-    /// Create gradient tensor for backward pass through network output.
-    fn create_output_gradient(
-        &self,
-        py: Python<'_>,
-        output: &Bound<'_, PyAny>,
-        target_idx: usize,
-        grad_value: f64,
-    ) -> PyResult<PyObject> {
-        let torch = py.import_bound("torch")?;
-
-        // Get output shape
-        let shape = output.getattr("shape")?;
-        let size: usize = shape.get_item(0)?.extract().unwrap_or(1);
-
-        // Create zero gradient tensor
-        let zeros = torch.call_method1("zeros", (size,))?;
-
-        // Set gradient at target index
-        zeros.set_item(target_idx, grad_value)?;
-
-        Ok(zeros.into())
     }
 
     /// Evaluate probability of a single query by compiling a temporary program.

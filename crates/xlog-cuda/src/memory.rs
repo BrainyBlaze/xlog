@@ -6,6 +6,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::ops::{Deref, DerefMut};
+use std::mem::ManuallyDrop;
 
 use cudarc::driver::CudaSlice;
 use xlog_core::{MemoryBudget, Result, Schema, XlogError};
@@ -62,6 +63,28 @@ impl<T: cudarc::driver::DeviceRepr> cudarc::driver::DevicePtr<T> for TrackedCuda
 impl<T: cudarc::driver::DeviceRepr> cudarc::driver::DevicePtrMut<T> for TrackedCudaSlice<T> {
     fn device_ptr_mut(&mut self) -> &mut cudarc::driver::sys::CUdeviceptr {
         cudarc::driver::DevicePtrMut::device_ptr_mut(&mut self.inner)
+    }
+}
+
+impl<T: cudarc::driver::DeviceRepr> TrackedCudaSlice<T> {
+    /// Reinterpret this typed allocation as a raw byte allocation.
+    ///
+    /// This is a zero-copy conversion used by XLOG's columnar `CudaBuffer` representation, which
+    /// stores device memory as untyped bytes + a schema.
+    pub fn into_bytes(self) -> TrackedCudaSlice<u8> {
+        let this = ManuallyDrop::new(self);
+        let bytes = this.bytes;
+        let manager = Arc::clone(&this.manager);
+        let ptr = *cudarc::driver::DevicePtr::device_ptr(&this.inner);
+
+        let len_bytes: usize = bytes
+            .try_into()
+            .expect("TrackedCudaSlice byte size must fit into usize");
+
+        let device = manager.device.inner().clone();
+        let inner = unsafe { device.upgrade_device_ptr::<u8>(ptr, len_bytes) };
+
+        TrackedCudaSlice { bytes, manager, inner }
     }
 }
 

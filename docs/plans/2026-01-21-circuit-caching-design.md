@@ -84,21 +84,22 @@ forward_backward_complex(query):
 
   5) Allocate grad tensors `zeros_like(output_squeezed)` (CUDA)
   6) Call:
-       ExactDdnnfProgram::neural_backward_nll_buffers_with_loss(
+       ExactDdnnfProgram::neural_backward_nll_buffers_with_device_loss(
          slots, query_idx, probs_dlpack, grads_dlpack
        )
      This:
        - fills AD-chain weights on GPU from device probabilities
        - runs GPU forward+backward twice (base + query-forced)
        - scatters probability-space gradients on GPU into grad tensors
-       - returns scalar NLL loss
+       - returns device-resident scalar NLL loss (no device->host reads required)
   7) Call `output_squeezed.backward(grad_tensor)` for each input
 ```
 
 Notes:
 - No host-side `.tolist()` extraction.
 - No host-side construction of weight tables or gradient maps.
-- The only host-visible value required for the legacy API is the scalar NLL return value.
+- The legacy `forward_backward(...) -> f64` API may still read back a single scalar loss for convenience, but the
+  strict GPU-native path returns a CUDA tensor loss via `forward_backward_tensor(...)`.
 
 ---
 
@@ -120,4 +121,3 @@ Implemented in:
   - `crates/xlog-prob/tests/neural_fast_path.rs` checks GPU fast-path gradients and loss on a tiny AD program.
   - `crates/xlog-prob/tests/no_dtoh_in_gpu_neural_fast_path.rs` guards against accidental device→host reads in the
     slot-map module.
-

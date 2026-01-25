@@ -8,6 +8,9 @@ All notable changes to this project are documented in this file.
 
 - **GPU CDCL verifier (complete SAT/UNSAT)** in `kernels/sat.cu` + `xlog-solve::GpuCdclSolver` with on-GPU SAT model
   checking and on-GPU UNSAT proof checking.
+- **GPU neural fast-path (AD chain)** in `kernels/neural.cu` + `xlog-prob` integration:
+  - device-side AD conditional-chain weight fill (`neural_fill_ad_chain_f32`)
+  - device-side probability-gradient scatter using both `grad_true` and `grad_false` (`neural_scatter_ad_chain_grads_f32`)
 - **Zero-host-read verifier API**: expectation-based methods `solve_expect_sat` / `solve_expect_unsat` that never
   download SAT/UNSAT status to the CPU (fail-fast via GPU trap / CUDA error).
 - **Device-resident CNF metadata** (`GpuCnf::{num_vars,num_clauses,num_lits}`) to support GPU-native CNF builders where
@@ -15,6 +18,10 @@ All notable changes to this project are documented in this file.
 - **GPU-native equivalence verification** (`xlog-prob::compilation`) proving `φ ≡ C` via two UNSAT checks on GPU:
   `UNSAT(φ ∧ ¬C)` and `UNSAT(C ∧ ¬φ)`, with zero device→host reads.
 - **Regression guardrails** enforcing “no device→host reads” in the production verifier modules.
+- **GPU-native loss output for neural fast-path**: `ExactDdnnfProgram::neural_backward_nll_buffers_with_device_loss`
+  returns the scalar NLL loss as a device-resident value (no dtoh).
+- **DLPack helper for typed allocations**: `TrackedCudaSlice::into_bytes()` enables wrapping typed device scalars into
+  `CudaBuffer` columns without copies (used to export scalar loss to Torch).
 
 ### Changed
 
@@ -26,6 +33,8 @@ All notable changes to this project are documented in this file.
 ### Fixed
 
 - Monte Carlo GPU initialization avoids reliance on CUDA device-count queries that can fail in restricted environments.
+- `pyxlog` DLPack interop: detach `requires_grad` tensors before exporting probabilities to DLPack.
+- `pyxlog` GPU neural fast-path ordering: replaced `torch.cuda.synchronize()` with stream-to-stream waits.
 
 ### Validation
 

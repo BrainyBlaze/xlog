@@ -233,6 +233,7 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 | `pack.cu` | Key packing, hashing, packed-row gather |
 | `set_ops.cu` | Concatenation, sorted difference marking |
 | `circuit.cu` | XGCF forward/backward evaluation for probabilistic inference |
+| `neural.cu` | Neural fast-path kernels: AD-chain weight fill + probability-gradient scatter |
 | `sat.cu` | GPU-native CDCL SAT solver + GPU verifier helpers (model/proof checks, CNF construction helpers) |
 | `mc_sample.cu` | Bernoulli sampling for Monte Carlo inference |
 
@@ -331,8 +332,10 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 - [x] `train_model()` API with batch processing
 - [x] NLL loss function with numerical stability
 - [x] `forward_backward()` for single query training
+- [x] `forward_backward_tensor()` for strict GPU-native training (returns CUDA tensor loss; no host reads)
 - [x] `train_epoch()` for batch training
 - [x] Circuit caching for 100x+ speedup on repeated queries
+- [x] GPU neural fast-path for cached circuits (device-side AD weight fill + chain-rule gradients; DLPack interop)
 
 **Inference Enhancements:**
 - [x] Negation support in exact inference (NNF transformation + WFS)

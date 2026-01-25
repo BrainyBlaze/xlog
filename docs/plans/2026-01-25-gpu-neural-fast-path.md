@@ -10,6 +10,11 @@ annotated-disjunction (AD) conditional-chain weights and probability gradients o
 (3) run XGCF forward+backward on GPU, (4) scatter chain-rule gradients back into per-output tensors on GPU and call
 `output.backward(grad)` (no `.tolist()`, no host weight/grad uploads, no device->host reads required).
 
+**Note (Jan 25, 2026):** the strict GPU-native fast-path exposes the NLL loss as a **device-resident scalar**
+(`ExactDdnnfProgram::neural_backward_nll_buffers_with_device_loss`) and `pyxlog` exposes a `forward_backward_tensor(...)`
+API that returns a CUDA tensor loss (no host reads). The legacy `forward_backward(...) -> f64` helper reads back a single
+scalar for convenience.
+
 **Tech Stack:** Rust, CUDA (`nvcc` PTX via `crates/xlog-cuda/build.rs`), `cudarc`, DLPack (`xlog-cuda::dlpack`),
 PyO3 (`crates/pyxlog`), Torch (Python side).
 
@@ -311,4 +316,3 @@ Document:
 git add docs/design/2026-01-22-gpu-native-compilation-design.md docs/plans/2026-01-21-circuit-caching-design.md docs/ARCHITECTURE.md docs/architecture/xlog-prob.md
 git commit -m "docs: align neural fast-path docs with GPU-native AD kernels"
 ```
-

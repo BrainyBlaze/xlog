@@ -134,7 +134,7 @@ query(pred(0, 2)).
 }
 
 #[test]
-fn test_neural_backward_nll_returns_loss_matches_analytic_single_outcome() {
+fn test_neural_backward_nll_device_loss_matches_analytic_single_outcome() {
     let provider = match try_provider() {
         Some(p) => p,
         None => return,
@@ -176,9 +176,17 @@ query(pred(0, 2)).
     let mut grads = vec![grad_buf];
 
     // Query index 1 corresponds to pred(0, 1) in the source above.
-    let loss = program
-        .neural_backward_nll_buffers_with_loss(&slots, 1, &probs, &mut grads, cfg)
+    let loss_dev = program
+        .neural_backward_nll_buffers_with_device_loss(&slots, 1, &probs, &mut grads, cfg)
         .unwrap();
+
+    let mut host = [0.0_f64];
+    provider
+        .device()
+        .inner()
+        .dtoh_sync_copy_into(&loss_dev, &mut host)
+        .unwrap();
+    let loss = host[0];
 
     let expected = -((1.0 - cfg.eps) * (p[1] as f64)).ln();
     let err = (loss - expected).abs();

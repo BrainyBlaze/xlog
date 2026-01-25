@@ -799,9 +799,10 @@ Current status (Jan 25, 2026):
     - `neural_fill_ad_chain_f32` (device weight fill; correct AD conditional chain),
     - `neural_scatter_ad_chain_grads_f32` (device gradient scatter; correct chain rule using both grads).
   - Device slot mapping: `crates/xlog-prob/src/neural_fast_path.rs` (`GpuWeightSlots`, `NeuralFastPathConfig`).
-  - Exact engine entrypoint: `ExactDdnnfProgram::{neural_backward_nll_buffers, neural_backward_nll_buffers_with_loss}`.
+  - Exact engine entrypoint: `ExactDdnnfProgram::{neural_backward_nll_buffers, neural_backward_nll_buffers_with_device_loss}` (device-resident scalar loss; no host reads).
   - Python training path: `crates/pyxlog/src/lib.rs` imports CUDA tensors via DLPack (no `.tolist()` / CPU loops),
-    fills weights and gradients on GPU, and calls `output.backward(grad)` with device-resident gradients.
+    fills weights and gradients on GPU, calls `output.backward(grad)` with device-resident gradients, and exposes
+    `forward_backward_tensor(...)` to return the NLL loss as a CUDA tensor (no host reads).
 
 GPU-native design:
 
