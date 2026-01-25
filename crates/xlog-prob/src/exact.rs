@@ -71,16 +71,6 @@ impl Default for GpuConfig {
 
 impl GpuExactState {
     fn new(circuit: &Xgcf, config: GpuConfig) -> Result<Self> {
-        let device_count = cudarc::driver::CudaDevice::count().unwrap_or(0) as usize;
-        if device_count == 0 {
-            return Err(XlogError::Kernel("No CUDA device available".to_string()));
-        }
-        if config.device_ordinal >= device_count {
-            return Err(XlogError::Kernel(format!(
-                "CUDA device ordinal {} out of range (count={})",
-                config.device_ordinal, device_count
-            )));
-        }
         if config.memory_bytes == 0 {
             return Err(XlogError::Kernel(
                 "GPU memory budget must be non-zero".to_string(),

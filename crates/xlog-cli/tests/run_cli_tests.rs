@@ -1,10 +1,12 @@
 use assert_cmd::cargo::cargo_bin_cmd;
-use cudarc::driver::CudaDevice;
 use std::path::Path;
+use xlog_cuda::CudaDevice;
 
 #[test]
 fn test_xlog_run_basic() {
-    if CudaDevice::count().unwrap_or(0) == 0 {
+    // cudarc panics on init when CUDA driver/runtime is unavailable; use xlog-cuda's safe wrapper.
+    if CudaDevice::new(0).is_err() {
+        eprintln!("Skipping test: CUDA runtime unavailable");
         return;
     }
 

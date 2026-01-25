@@ -7,17 +7,33 @@ use xlog_prob::gpu::GpuXgcf;
 use xlog_prob::kc::ddnnf::DecisionDnnf;
 use xlog_prob::xgcf::Xgcf;
 
-fn has_cuda_device() -> bool {
-    cudarc::driver::CudaDevice::count().unwrap_or(0) > 0
+fn try_provider() -> Option<CudaKernelProvider> {
+    let device = match CudaDevice::new(0) {
+        Ok(d) => Arc::new(d),
+        Err(e) => {
+            eprintln!("Skipping test: CUDA runtime unavailable: {}", e);
+            return None;
+        }
+    };
+    let memory = Arc::new(GpuMemoryManager::new(
+        device.clone(),
+        MemoryBudget::with_limit(1024 * 1024 * 1024),
+    ));
+    match CudaKernelProvider::new(device, memory) {
+        Ok(p) => Some(p),
+        Err(e) => {
+            eprintln!("Skipping test: failed to create CUDA kernel provider: {}", e);
+            None
+        }
+    }
 }
 
 #[test]
 fn test_gpu_xgcf_forward_matches_cpu() {
-    if !has_cuda_device() {
-        eprintln!("Skipping test: no CUDA device available");
-        return;
-    }
-
+    let provider = match try_provider() {
+        Some(p) => p,
+        None => return,
+    };
     // Formula: x1 OR x2, represented as a decision on x1, then x2.
     let nnf = r#"
 o 1 0
@@ -42,13 +58,6 @@ f 4 0
 
     let cpu = xgcf.eval_log_wmc(|var| weights[var as usize]).unwrap();
 
-    let device = Arc::new(CudaDevice::new(0).expect("Failed to create CUDA device"));
-    let memory = Arc::new(GpuMemoryManager::new(
-        device.clone(),
-        MemoryBudget::with_limit(1024 * 1024 * 1024),
-    ));
-    let provider = CudaKernelProvider::new(device, memory).expect("Failed to create kernel provider");
-
     let mut gpu_xgcf = GpuXgcf::upload(&provider, &xgcf).unwrap();
     let gpu = gpu_xgcf.eval_log_wmc(&provider, &weights).unwrap();
 
@@ -57,11 +66,10 @@ f 4 0
 
 #[test]
 fn test_gpu_xgcf_backward_gradients_match_cpu() {
-    if !has_cuda_device() {
-        eprintln!("Skipping test: no CUDA device available");
-        return;
-    }
-
+    let provider = match try_provider() {
+        Some(p) => p,
+        None => return,
+    };
     // Formula: x1 OR x2, represented as a decision on x1, then x2.
     let nnf = r#"
 o 1 0
@@ -85,13 +93,6 @@ f 4 0
     ];
 
     let (cpu_log_z, cpu_grad_true, cpu_grad_false) = xgcf.eval_log_wmc_and_grads(&weights).unwrap();
-
-    let device = Arc::new(CudaDevice::new(0).expect("Failed to create CUDA device"));
-    let memory = Arc::new(GpuMemoryManager::new(
-        device.clone(),
-        MemoryBudget::with_limit(1024 * 1024 * 1024),
-    ));
-    let provider = CudaKernelProvider::new(device, memory).expect("Failed to create kernel provider");
 
     let mut gpu_xgcf = GpuXgcf::upload(&provider, &xgcf).unwrap();
     let (gpu_log_z, gpu_grad_true, gpu_grad_false) =

@@ -1,7 +1,9 @@
 use xlog_prob::mc::{McEvalConfig, McProgram};
+use xlog_cuda::CudaDevice;
 
 fn has_cuda_device() -> bool {
-    cudarc::driver::CudaDevice::count().unwrap_or(0) > 0
+    // cudarc::driver::CudaDevice::count() may panic in restricted containers. Attempt real init instead.
+    CudaDevice::new(0).is_ok()
 }
 
 fn prob_of_atom(result: &xlog_prob::mc::McResult, predicate: &str) -> f64 {

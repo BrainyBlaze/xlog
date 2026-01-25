@@ -14,7 +14,14 @@ pub struct TestContext {
 impl TestContext {
     /// Create test context with specific memory budget in bytes.
     pub fn with_budget(budget_bytes: usize) -> Result<Self> {
-        let device_count = cudarc::driver::CudaDevice::count()
+        // cudarc may panic on driver init failures in restricted containers; treat as a normal error.
+        let device_count = std::panic::catch_unwind(|| cudarc::driver::CudaDevice::count())
+            .map_err(|_| {
+                XlogError::Kernel(
+                    "Failed to get device count: cudarc panicked during driver initialization"
+                        .to_string(),
+                )
+            })?
             .map_err(|e| XlogError::Kernel(format!("Failed to get device count: {}", e)))?;
 
         if device_count == 0 {
@@ -58,7 +65,10 @@ impl TestContext {
 
     /// Check if multi-GPU is available.
     pub fn multi_gpu_available(&self) -> bool {
-        cudarc::driver::CudaDevice::count().unwrap_or(0) > 1
+        match std::panic::catch_unwind(|| cudarc::driver::CudaDevice::count()) {
+            Ok(Ok(n)) => n > 1,
+            _ => false,
+        }
     }
 
     /// Get compute capability of current device.
