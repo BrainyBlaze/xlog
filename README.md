@@ -510,7 +510,9 @@ xlog run --help
 | [Roadmap](docs/ROADMAP.md) | Feature status and development plans |
 | [Benchmarks](docs/BENCHMARKS.md) | Performance methodology and baseline metrics |
 | [Probabilistic Tier](docs/architecture/xlog-prob.md) | Exact and Monte Carlo inference |
+| [Solver Services](docs/architecture/solver-services.md) | GPU CDCL verifier (zero host reads) + SAT/MaxSAT services |
 | [Neural-Symbolic Design](docs/plans/2026-01-20-v0.4.0-neural-symbolic-design.md) | v0.4.0 neural-symbolic integration design |
+| [GPU-Native Compilation Design](docs/design/2026-01-22-gpu-native-compilation-design.md) | v0.5.0 design for GPU D4 + GPU CDCL verifier |
 | [Data Interop](docs/architecture/cudf-interop.md) | Arrow and DLPack integration |
 | [Examples](examples/) | Annotated example programs |
 | [Neural Examples](examples/neural/) | Neural-symbolic training examples |

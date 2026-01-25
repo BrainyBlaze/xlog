@@ -885,6 +885,7 @@ These are realistic targets given GPU CDCL cost.
 ### Phase 2: GPU CDCL Verifier
 - Clause DB, watched literals, conflict analysis
 - Equivalence checks for `φ` vs `C` (e.g., `SAT(φ ∧ ¬C)` and `SAT(C ∧ ¬φ)`)
+  - **Status:** Implemented (Jan 25, 2026): GPU CDCL + on-GPU model/proof validation + zero-host-read equivalence queries
 
 ### Phase 3: GPU CNF Builder
 - Move PIR → CNF encoding to GPU

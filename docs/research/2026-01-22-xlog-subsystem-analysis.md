@@ -2,6 +2,10 @@
 **Date:** January 22, 2026
 **Purpose:** Comprehensive analysis of existing subsystems for GPU-native compilation design
 
+**Note (Jan 25, 2026):** This is an exploratory research document. For the authoritative production design and roadmap,
+see `docs/design/2026-01-22-gpu-native-compilation-design.md` and `docs/ROADMAP.md`. The verifier-grade solver contract
+(zero host reads; fail-fast) is specified/implemented per `docs/plans/2026-01-25-zero-host-reads-gpu-verifier.md`.
+
 ---
 
 ## Executive Summary

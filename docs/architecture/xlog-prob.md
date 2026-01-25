@@ -5,7 +5,7 @@
 - **Exactly** via knowledge compilation (`prob_engine=exact_ddnnf`): PIR → CNF → D4 → Decision-DNNF → GPU weighted model counting + gradients.
 - **Approximately** via Monte Carlo sampling (`prob_engine=mc`): GPU sampling of probabilistic leaves + deterministic evaluation per sampled world, with uncertainty reporting.
 
-This document explains the implementation as it exists on `main` and points to concrete entry points in the codebase.
+This document explains the implementation as it exists in the repository and points to concrete entry points in the codebase.
 
 ---
 
@@ -21,10 +21,12 @@ This document explains the implementation as it exists on `main` and points to c
 - `crates/xlog-prob/src/kc/ddnnf.rs`: Decision-DNNF parser
 - `crates/xlog-prob/src/xgcf.rs`: XGCF (GPU circuit format) construction
 - `crates/xlog-prob/src/gpu.rs`: GPU upload + evaluation glue (`GpuXgcf`)
+- `crates/xlog-prob/src/compilation/validation.rs`: GPU-native equivalence verifier (`φ ≡ C`) using GPU CDCL (zero host reads)
 
 ### CUDA kernels
 - `kernels/circuit.cu` / `kernels/circuit.ptx`: forward + backward kernels for XGCF circuits
 - `kernels/mc_sample.cu` / `kernels/mc_sample.ptx`: Bernoulli sampling kernel used by `mc`
+- `kernels/sat.cu` / `kernels/sat.ptx`: GPU CDCL verifier + GPU-native equivalence query construction helpers
 
 ### Python bindings (DLPack-first)
 - `crates/pyxlog/src/lib.rs`: `pyxlog` module (PyO3)
@@ -113,6 +115,28 @@ D4 is vendored under `vendor/d4` and built automatically by `crates/xlog-prob/bu
 - `D4Compiler::detect()` reads `XLOG_PROB_D4_PATH` and runs that binary for compilation.
 
 `ExactDdnnfProgram` writes CNF and reads the Decision-DNNF output via a temporary working directory.
+
+---
+
+## GPU-Native Compilation + Verification (v0.5.0 foundation)
+
+XLOG’s target architecture is a **100% GPU-native** compilation + verification path (GPU D4 + GPU CDCL verifier) with
+**zero data-plane host transfers**. The repository already contains the verifier-grade building blocks used by that
+design (see `docs/design/2026-01-22-gpu-native-compilation-design.md`):
+
+- `xlog_prob::compilation::validate_equivalence_gpu` proves `φ ≡ C` by solving two UNSAT queries on GPU:
+  - `UNSAT(φ ∧ ¬C)`
+  - `UNSAT(C ∧ ¬φ)`
+
+**Verifier contract:**
+- **Zero device→host reads** in the production verifier path (the host never downloads SAT/UNSAT status).
+- **Fail-fast on mismatch**: GPU-side assertion/validation kernels trap; the host observes only CUDA success/failure.
+- **Capacity-safe CNF handling**: CNF buffers may be allocated with capacity > exact size; all index math uses
+  device-resident `GpuCnf::{num_vars,num_clauses,num_lits}`.
+
+This verifier module is used by GPU-native compilation utilities in `crates/xlog-prob/src/compilation/`. Integration
+into the default `ExactDdnnfProgram` pipeline (which still shells out to CPU D4 and materializes CNF/DDNNF on host)
+is part of the v0.5.0 roadmap.
 
 ---
 
@@ -214,4 +238,3 @@ python -m pip install --upgrade pip maturin
 maturin develop --release
 python ../../examples/python/03_prob_mc_nonmonotone_torch.py
 ```
-

@@ -103,6 +103,14 @@ The solver is implemented as a GPU kernel entrypoint loaded by `xlog-cuda`:
 
 The host launches this kernel and waits for completion. The solver’s internal loop does not require host-device memcpy.
 
+The SAT PTX module also includes verifier helper kernels used by `xlog-solve` and `xlog-prob`:
+
+- Assertion + validation: `sat_assert_status`, `sat_assert_ok`, `sat_check_model`, `sat_proof_check`
+- XGCF→CNF construction: `sat_xgcf_cnf_counts`, `sat_xgcf_cnf_emit`, `sat_xgcf_cnf_capture_last_counts`,
+  `sat_xgcf_cnf_compute_totals`, `sat_cnf_write_terminator`
+- Equivalence query construction: `sat_cnf_copy_into`, `sat_xgcf_write_root_unit_clause`, `sat_not_phi_counts`,
+  `sat_emit_not_phi`
+
 ## Continuous Local Search (Optional, Non-Verifying)
 
 `xlog-solve` also contains a Continuous Local Search (CLS) solver (FastFourierSAT-inspired) for:

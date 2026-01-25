@@ -1,9 +1,9 @@
 # XLOG Development Roadmap
 
-> **Last Updated:** January 21, 2026
+> **Last Updated:** January 25, 2026
 > **Current Version:** v0.4.0-alpha (Released)
 > **Next Version:** v0.4.0-beta — Extended neural-symbolic examples, term embeddings
-> **Status:** v0.4.0-alpha complete — neural-symbolic training operational
+> **Status:** v0.4.0-alpha complete — neural-symbolic training operational; GPU CDCL verifier foundations complete (v0.5.0)
 
 ---
 
@@ -233,6 +233,7 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 | `pack.cu` | Key packing, hashing, packed-row gather |
 | `set_ops.cu` | Concatenation, sorted difference marking |
 | `circuit.cu` | XGCF forward/backward evaluation for probabilistic inference |
+| `sat.cu` | GPU-native CDCL SAT solver + GPU verifier helpers (model/proof checks, CNF construction helpers) |
 | `mc_sample.cu` | Bernoulli sampling for Monte Carlo inference |
 
 ### Planned 📋
@@ -379,7 +380,24 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 
 ---
 
-## Epistemic Logic (`xlog-elp`) — Phase 6 / v0.5.0
+## GPU-Native Knowledge Compilation (`xlog-prob` + `xlog-solve`) — Phase 6 / v0.5.0
+
+### Implemented ✅ (Foundations)
+
+- [x] GPU CDCL equivalence verifier with zero host reads (fail-fast, on-GPU SAT/UNSAT validation)
+- [x] Device-resident CNF size metadata (`GpuCnf::{num_vars,num_clauses,num_lits}`) to support GPU-native CNF builders
+- [x] GPU-native circuit→CNF encoding for XGCF circuits + query construction helpers for equivalence checking
+
+### Planned 📋
+
+- [ ] GPU D4 compiler: BFS work queues, unit propagation, decomposition, and device-resident circuit builder
+- [ ] GPU PIR→CNF encoder (`encode_cnf_gpu`) and elimination of host CNF/DDNNF materialization in the exact path
+- [ ] Integration: replace CPU D4 invocation in `ExactDdnnfProgram` with GPU compile+verify
+- [ ] Add SAT/CDCL kernel certification categories in `xlog-cuda-tests`
+
+---
+
+## Epistemic Logic (`xlog-elp`) — Phase 7 / v0.6.0
 
 ### Planned 📋
 
@@ -390,7 +408,7 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 - [ ] Epistemic splitting for modular evaluation
 - [ ] Integration with probabilistic tier for epistemic-probabilistic programs
 
-**Prerequisites:** v0.4.0 complete, solver integration
+**Prerequisites:** v0.5.0 complete (GPU-native compilation + verifier foundations), solver integration
 **Estimated effort:** 3–4 months
 
 ---
@@ -400,13 +418,15 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 ### Implemented ✅
 
 - [x] Clause and literal data structures
-- [x] CLS (Continuous Local Search) algorithm for SAT/MaxSAT
-- [x] Proof artifact generation
+- [x] GPU CDCL verifier (complete SAT/UNSAT) with on-GPU SAT model check + UNSAT proof check
+- [x] Expectation-based verifier API with zero device→host reads (`solve_expect_sat`, `solve_expect_unsat`)
+- [x] GPU-native equivalence-query construction helpers (`φ ∧ ¬C`, `C ∧ ¬φ`) used by `xlog-prob::compilation`
+- [x] CLS (Continuous Local Search) algorithm for SAT/MaxSAT (heuristic; non-verifying)
 
 ### Planned 📋
 
 - [ ] Integration with `xlog-logic` for constraint solving
-- [ ] CDCL-based exact solver implementation
+- [ ] Incremental/assumption interface for verifier reuse (single solver state across multiple related queries)
 - [ ] MaxSAT optimization with soft constraints
 - [ ] GPU-accelerated parallel portfolio solving
 
@@ -469,7 +489,7 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 
 ---
 
-## Multi-GPU & Distributed Execution — Phase 7 / v0.6+
+## Multi-GPU & Distributed Execution — Phase 8 / v0.7+
 
 ### Planned 📋
 
@@ -487,7 +507,7 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 - [ ] Distributed coordinator for query planning
 - [ ] Fault tolerance and recovery
 
-**Prerequisites:** Phases 4–5 complete, partitioning kernels
+**Prerequisites:** v0.6.0+ complete, partitioning kernels
 **Estimated effort:** 4–6 months
 
 ---
@@ -504,6 +524,7 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 - [x] Memory budget enforcement tests
 - [x] End-to-end Datalog query tests
 - [x] Probabilistic inference correctness tests
+- [x] GPU CDCL verifier tests (SAT/UNSAT) + zero-host-read guardrails for verifier integrations
 - [x] Performance regression benchmarks with CI tracking (Criterion.rs, `.github/workflows/bench.yml`)
 - [x] Fuzz testing for parser, compiler, and type inference (cargo-fuzz, ASAN, `.github/workflows/fuzz.yml`)
 - [x] Property-based testing for kernel correctness (proptest: sort stability, join correctness, filter idempotence, dedup determinism)
@@ -550,8 +571,9 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 | v0.4.0-beta | Planned | Extended neural-symbolic examples (Coins, Poker, HWF, CLUTRR), term embeddings |
 | v0.4.0-rc | Planned | Lists, meta-predicates, semantic loss functions |
 | v0.4.0 | Planned | Full neural-symbolic feature set, production-ready training |
-| v0.5.0 | Planned | Epistemic logic tier (Phase 6) |
-| v0.6+ | Planned | Multi-GPU support, distributed execution (Phase 7) |
+| v0.5.0 | Planned | GPU-native knowledge compilation (GPU D4 + GPU CDCL verifier), zero data-plane host transfers |
+| v0.6.0 | Planned | Epistemic logic tier (Phase 7) |
+| v0.7+ | Planned | Multi-GPU support, distributed execution (Phase 8) |
 
 ---
 

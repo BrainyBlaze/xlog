@@ -3,6 +3,12 @@
 **Date:** January 22, 2026
 **Purpose:** Rigorous analysis of proposed solution — identify flaws, validate assumptions, propose improvements
 
+**Note (Jan 25, 2026):** This is an exploratory research document. The authoritative production direction for GPU-native
+knowledge compilation and verifier-grade correctness is `docs/design/2026-01-22-gpu-native-compilation-design.md` and
+the implemented verifier contract is `docs/plans/2026-01-25-zero-host-reads-gpu-verifier.md` (see also `docs/ROADMAP.md`).
+Some ideas discussed here (e.g., sampling-based verification, tensor fast paths, fallback routes) may be intentionally
+excluded from the current production design.
+
 ---
 
 ## 1. Critical Analysis: What Could Go Wrong?

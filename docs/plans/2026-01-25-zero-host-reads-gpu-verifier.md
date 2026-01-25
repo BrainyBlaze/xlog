@@ -2,6 +2,11 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
+> **Status (Jan 25, 2026):** Implemented on branch `gpu-cdcl-solver` with an additional robustness requirement:
+> equivalence query construction must treat `GpuCnf::{var_cap,clause_cap,lit_cap}` as *capacities* only and must use
+> device-resident `GpuCnf::{num_vars,num_clauses,num_lits}` for all index math (supports GPU-native builders where
+> capacity > exact size).
+
 **Goal:** Make the GPU CDCL verifier + GPU equivalence validation run with **zero device→host memory transfers** (no `dtoh` reads), while preserving production-grade correctness guarantees (SAT model check, UNSAT proof check) fully on GPU.
 
 **Architecture:** Replace host-side branching/inspection with a GPU-only validation chain:
@@ -161,6 +166,14 @@ Rewrite circuit CNF construction to:
 - compute exact totals on GPU via Task 2 kernels
 - use device-resident totals for downstream kernel indices (unit clause placement, shift bases, etc.)
 
+**Additional requirement (hardening):** The verifier must support `GpuCnf` inputs where capacity > exact size.
+This requires GPU-side CNF concatenation and GPU-side size math for `¬φ`:
+
+- Add `sat_cnf_copy_into`: copy a CSR CNF into an output CNF at device-resident clause/lit bases.
+- Add `sat_not_phi_counts`: compute exact `¬φ` size contributions from device-resident `phi.num_*`.
+- Update `sat_xgcf_write_root_unit_clause` to take device-resident `clause_base/lit_base` and `extra_num_*` (len=1 each).
+- Add regression test: `crates/xlog-prob/tests/gpu_equivalence_padded_phi.rs` (phi cap > exact).
+
 **Step 2: Make `validate_equivalence_gpu` fail-fast without inspecting status on host**
 
 `validate_equivalence_gpu` should:
@@ -265,4 +278,3 @@ Run:
 - `cargo test --workspace`
 
 Expected: PASS.
-

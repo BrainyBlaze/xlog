@@ -2,6 +2,11 @@
 **Date:** January 22, 2026
 **Focus:** Eliminating CPU bottlenecks in neuro-symbolic logic programming
 
+**Note (Jan 25, 2026):** This is an exploratory research document. The authoritative production design for GPU-native
+knowledge compilation is `docs/design/2026-01-22-gpu-native-compilation-design.md`, and the verifier implementation/contract
+is `docs/plans/2026-01-25-zero-host-reads-gpu-verifier.md` (see also `docs/ROADMAP.md`). Not all surveyed approaches or
+system proposals here are part of the current production roadmap.
+
 ---
 
 ## Executive Summary

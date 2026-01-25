@@ -2,6 +2,35 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased — 2026-01-25
+
+### Added
+
+- **GPU CDCL verifier (complete SAT/UNSAT)** in `kernels/sat.cu` + `xlog-solve::GpuCdclSolver` with on-GPU SAT model
+  checking and on-GPU UNSAT proof checking.
+- **Zero-host-read verifier API**: expectation-based methods `solve_expect_sat` / `solve_expect_unsat` that never
+  download SAT/UNSAT status to the CPU (fail-fast via GPU trap / CUDA error).
+- **Device-resident CNF metadata** (`GpuCnf::{num_vars,num_clauses,num_lits}`) to support GPU-native CNF builders where
+  capacity > exact size.
+- **GPU-native equivalence verification** (`xlog-prob::compilation`) proving `φ ≡ C` via two UNSAT checks on GPU:
+  `UNSAT(φ ∧ ¬C)` and `UNSAT(C ∧ ¬φ)`, with zero device→host reads.
+- **Regression guardrails** enforcing “no device→host reads” in the production verifier modules.
+
+### Changed
+
+- `GpuCnf` literal storage field renamed to `literals` (DIMACS `i32`) to match the solver/kernel interface.
+- CUDA-dependent tests now skip cleanly when the CUDA runtime is unavailable (developer ergonomics).
+- Workspace testing avoids building the PyO3 `extension-module` target when running `cargo test --workspace`.
+- CUDA transfer/caching certification tests are stable under parallel test execution.
+
+### Fixed
+
+- Monte Carlo GPU initialization avoids reliance on CUDA device-count queries that can fail in restricted environments.
+
+### Validation
+
+- `cargo test --workspace` passes, including GPU verifier smoke tests (skipped when CUDA is unavailable).
+
 ## v0.4.0-alpha — 2026-01-22 — Neural-Symbolic Integration
 
 First alpha release of the neural-symbolic integration layer, enabling differentiable training where neural network outputs become probabilistic facts in logic programs.

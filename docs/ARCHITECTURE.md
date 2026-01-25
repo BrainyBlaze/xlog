@@ -76,7 +76,7 @@ XLOG is a unified platform spanning four closely-related reasoning paradigms:
 | **xlog-logic** | Deterministic Datalog-style recursion and stratified negation | GPUlog (HISA indexing), VFLog (columnar GPU Datalog) |
 | **xlog-prob** | Probabilistic + differentiable reasoning | ProbLog knowledge compilation (d-DNNF/SDD/BDD), WMC |
 | **xlog-elp** | Epistemic Logic Programming with world views (planned) | eclingo (G91 guess-check), FAEEL founded world views |
-| **xlog-solve** | SAT/MaxSAT solving services for GPU | ParaFROST certified GPU inprocessing, FastFourierSAT GPU CLS |
+| **xlog-solve** | SAT/MaxSAT solver services (GPU CDCL verifier + CLS) | Deterministic CDCL (watched literals + 1-UIP + on-GPU model/proof validation), FastFourierSAT-inspired CLS |
 
 ### Intermediate Representations
 
@@ -349,7 +349,7 @@ xlog-cuda-tests ─────────────────────�
 | `xlog-stats` | `StatsManager` + `StatsSnapshot` (compiler feedback + runtime tracking) |
 | `xlog-prob` | Probabilistic tier: provenance → CNF → D4 → XGCF; exact inference + Monte Carlo sampling + circuit caching |
 | `xlog-neural` | Neural-symbolic integration: `NetworkRegistry`, `NetworkHandle`, `TensorSourceRegistry`, `NeuralBridge` (v0.4.0) |
-| `xlog-solve` | Solver services (Continuous Local Search SAT/MaxSAT) |
+| `xlog-solve` | Solver services: GPU CDCL verifier (complete SAT/UNSAT, on-GPU validation) + CLS SAT/MaxSAT (heuristic) |
 | `xlog-gpu` | High-level GPU API: deterministic execution + input/output buffers for integration layers |
 | `xlog-cli` | `xlog` CLI for deterministic and probabilistic execution with Arrow IPC I/O |
 | `pyxlog` | PyO3 extension (`pyxlog` Python module) exposing DLPack-first deterministic + probabilistic evaluation + neural-symbolic training API |
@@ -678,6 +678,7 @@ Note: `RirNode::Fixpoint` exists and is interpreted by `Executor::execute_fixpoi
 | `scan.cu` | `exclusive_scan_mask`, `count_mask`, `multiblock_scan_*` | Prefix sum operations |
 | `set_ops.cu` | `concat_{u32,bytes}`, `sorted_diff_mark` | Union/difference operations |
 | `circuit.cu` | `xgcf_forward_level`, `xgcf_backward_level_*` | XGCF circuit eval + reverse-mode gradients (probabilistic) |
+| `sat.cu` | `sat_cdcl_solve`, `sat_check_model`, `sat_proof_check`, `sat_assert_*`, `sat_xgcf_cnf_*`, `sat_emit_not_phi` | GPU CDCL verifier + equivalence query construction helpers |
 | `mc_sample.cu` | `mc_sample_bernoulli` | Bernoulli sampling (Monte Carlo inference) |
 
 ### Hash Join Implementation (v2)
@@ -1261,7 +1262,7 @@ cargo test -p xlog-cuda-tests --test certification_suite --release -- --nocaptur
 | [Arithmetic Expressions](architecture/arithmetic-expressions.md) | `is` syntax, type inference, GPU evaluation |
 | [Probabilistic Tier](architecture/xlog-prob.md) | Exact inference (D4/XGCF) and Monte Carlo sampling |
 | [Neural-Symbolic Design](plans/2026-01-20-v0.4.0-neural-symbolic-design.md) | v0.4.0 neural-symbolic integration design |
-| [Solver Services](architecture/solver-services.md) | GPU-native CLS SAT/MaxSAT solver |
+| [Solver Services](architecture/solver-services.md) | GPU CDCL verifier (zero host reads) + CLS SAT/MaxSAT services |
 | [Adaptive Indexing](architecture/adaptive-indexing.md) | HISA-based heat tracking and index selection |
 | [Multi-GPU Joins](architecture/multi-gpu-join.md) | Distributed join design (planned) |
 | [Data Interoperability](architecture/cudf-interop.md) | Arrow IPC and DLPack integration |
