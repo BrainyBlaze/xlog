@@ -140,18 +140,29 @@ impl GpuCdclSolver {
             .get_func(SAT_MODULE, sat_kernels::SAT_CDCL_SOLVE)
             .ok_or_else(|| XlogError::Kernel("sat_cdcl_solve kernel not found".to_string()))?;
 
+        // IMPORTANT: When launching with an explicit `Vec<*mut c_void>` parameter list, scalar
+        // kernel arguments MUST be backed by stable host storage until `cuLaunchKernel` copies
+        // them. Do not pass temporaries like `self.config.restart_base.as_kernel_param()`.
+        let cnf_var_cap = cnf.var_cap;
+        let cnf_clause_cap = cnf.clause_cap;
+        let cfg_max_learned_clauses = self.config.max_learned_clauses;
+        let cfg_max_learned_lits = self.config.max_learned_lits;
+        let cfg_max_proof_u32 = self.config.max_proof_u32;
+        let cfg_restart_base = self.config.restart_base;
+        let cfg_reduce_interval = self.config.reduce_interval;
+
         let mut params: Vec<*mut c_void> = vec![
             (&cnf.clause_offsets).as_kernel_param(),
             (&cnf.literals).as_kernel_param(),
             (&cnf.num_vars).as_kernel_param(),
             (&cnf.num_clauses).as_kernel_param(),
-            cnf.var_cap.as_kernel_param(),
-            cnf.clause_cap.as_kernel_param(),
-            self.config.max_learned_clauses.as_kernel_param(),
-            self.config.max_learned_lits.as_kernel_param(),
-            self.config.max_proof_u32.as_kernel_param(),
-            self.config.restart_base.as_kernel_param(),
-            self.config.reduce_interval.as_kernel_param(),
+            cnf_var_cap.as_kernel_param(),
+            cnf_clause_cap.as_kernel_param(),
+            cfg_max_learned_clauses.as_kernel_param(),
+            cfg_max_learned_lits.as_kernel_param(),
+            cfg_max_proof_u32.as_kernel_param(),
+            cfg_restart_base.as_kernel_param(),
+            cfg_reduce_interval.as_kernel_param(),
             (&mut assign).as_kernel_param(),
             (&mut level).as_kernel_param(),
             (&mut reason).as_kernel_param(),

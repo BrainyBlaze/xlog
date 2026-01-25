@@ -414,13 +414,24 @@ fn build_phi_and_not_c(
         .ok_or_else(|| {
             XlogError::Kernel("sat_xgcf_write_root_unit_clause kernel not found".to_string())
         })?;
+
+    // IMPORTANT: When launching with an explicit `Vec<*mut c_void>` parameter list, scalar kernel
+    // arguments MUST be backed by stable host storage until `cuLaunchKernel` copies them. Do not
+    // pass temporaries like `circuit.root().as_kernel_param()` or `0i32.as_kernel_param()`.
+    let base_num_vars = phi.var_cap;
+    let root = circuit.root();
+    let force_true: i32 = 0;
+    let out_var_cap = var_cap;
+    let out_clause_cap = clause_cap;
+    let out_lit_cap = lit_cap;
+
     let mut params: Vec<*mut c_void> = vec![
         circuit.node_type().as_kernel_param(),
         circuit.lit().as_kernel_param(),
         (&circuit_cnf.internal_prefix).as_kernel_param(),
-        phi.var_cap.as_kernel_param(),
-        circuit.root().as_kernel_param(),
-        0i32.as_kernel_param(), // force_false
+        base_num_vars.as_kernel_param(),
+        root.as_kernel_param(),
+        force_true.as_kernel_param(), // force_false
         (&phi.num_clauses).as_kernel_param(),
         (&phi.num_lits).as_kernel_param(),
         (&circuit_cnf.cnf.num_vars).as_kernel_param(),
@@ -429,9 +440,9 @@ fn build_phi_and_not_c(
         (&d_zero).as_kernel_param(), // extra_num_vars
         (&d_zero).as_kernel_param(), // extra_num_clauses
         (&d_zero).as_kernel_param(), // extra_num_lits
-        var_cap.as_kernel_param(),
-        clause_cap.as_kernel_param(),
-        lit_cap.as_kernel_param(),
+        out_var_cap.as_kernel_param(),
+        out_clause_cap.as_kernel_param(),
+        out_lit_cap.as_kernel_param(),
         (&mut out_num_vars).as_kernel_param(),
         (&mut out_num_clauses).as_kernel_param(),
         (&mut out_num_lits).as_kernel_param(),
@@ -615,24 +626,32 @@ fn build_c_and_not_phi(
             XlogError::Kernel("sat_xgcf_write_root_unit_clause kernel not found".to_string())
         })?;
 
+    // IMPORTANT: See note in build_phi_and_not_c about stable scalar kernel parameters.
+    let base_num_vars = phi.var_cap;
+    let root = circuit.root();
+    let force_true: i32 = 1;
+    let out_var_cap = var_cap;
+    let out_clause_cap = clause_cap;
+    let out_lit_cap = lit_cap;
+
     let mut params: Vec<*mut c_void> = vec![
         circuit.node_type().as_kernel_param(),
         circuit.lit().as_kernel_param(),
         (&circuit_cnf.internal_prefix).as_kernel_param(),
-        phi.var_cap.as_kernel_param(),
-        circuit.root().as_kernel_param(),
-        1i32.as_kernel_param(),      // force_true
-        (&d_zero).as_kernel_param(), // clause_base
-        (&d_zero).as_kernel_param(), // lit_base
+        base_num_vars.as_kernel_param(),
+        root.as_kernel_param(),
+        force_true.as_kernel_param(), // force_true
+        (&d_zero).as_kernel_param(),  // clause_base
+        (&d_zero).as_kernel_param(),  // lit_base
         (&circuit_cnf.cnf.num_vars).as_kernel_param(),
         (&circuit_cnf.cnf.num_clauses).as_kernel_param(),
         (&circuit_cnf.cnf.num_lits).as_kernel_param(),
         (&d_extra_num_vars).as_kernel_param(), // extra_num_vars (u_j vars)
         (&d_extra_num_clauses).as_kernel_param(), // extra_num_clauses
         (&d_extra_num_lits).as_kernel_param(), // extra_num_lits
-        var_cap.as_kernel_param(),
-        clause_cap.as_kernel_param(),
-        lit_cap.as_kernel_param(),
+        out_var_cap.as_kernel_param(),
+        out_clause_cap.as_kernel_param(),
+        out_lit_cap.as_kernel_param(),
         (&mut out_num_vars).as_kernel_param(),
         (&mut out_num_clauses).as_kernel_param(),
         (&mut out_num_lits).as_kernel_param(),

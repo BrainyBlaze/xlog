@@ -35,6 +35,8 @@ All notable changes to this project are documented in this file.
 - Monte Carlo GPU initialization avoids reliance on CUDA device-count queries that can fail in restricted environments.
 - `pyxlog` DLPack interop: detach `requires_grad` tensors before exporting probabilities to DLPack.
 - `pyxlog` GPU neural fast-path ordering: replaced `torch.cuda.synchronize()` with stream-to-stream waits.
+- Release-mode CUDA crash in the GPU CDCL verifier/equivalence path caused by passing temporary scalar kernel arguments
+  via raw parameter vectors (now backed by stable locals before `cuLaunchKernel`).
 
 ### Validation
 
