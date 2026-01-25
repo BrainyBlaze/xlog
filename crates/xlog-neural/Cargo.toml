@@ -6,10 +6,20 @@ license.workspace = true
 repository.workspace = true
 description = "Neural network integration for XLOG probabilistic logic"
 
+[lib]
+# `pyxlog` enables `pyo3/extension-module`, which makes Rust test binaries that link `pyo3` fail to
+# link (they expect Python symbols to be provided by the embedding interpreter).
+# XLOG's Python surface is validated via `python/tests/`, so we disable Rust unit/doctests here to
+# keep `cargo test --workspace` green.
+test = false
+doctest = false
+
 [features]
 default = []
 # Enable Python interop via PyO3 - use this when building with pyxlog
 python = ["pyo3"]
+# Enable Rust integration tests that exercise the PyO3 layer (run separately from workspace tests).
+python-tests = ["python"]
 
 [dependencies]
 thiserror = { workspace = true }
@@ -23,19 +33,19 @@ pyo3 = { workspace = true, optional = true }
 [[test]]
 name = "registry_test"
 path = "tests/registry_test.rs"
-required-features = ["python"]
+required-features = ["python-tests"]
 
 [[test]]
 name = "tensor_source_test"
 path = "tests/tensor_source_test.rs"
-required-features = ["python"]
+required-features = ["python-tests"]
 
 [[test]]
 name = "batch_test"
 path = "tests/batch_test.rs"
-required-features = ["python"]
+required-features = ["python-tests"]
 
 [[test]]
 name = "bridge_test"
 path = "tests/bridge_test.rs"
-required-features = ["python"]
+required-features = ["python-tests"]
