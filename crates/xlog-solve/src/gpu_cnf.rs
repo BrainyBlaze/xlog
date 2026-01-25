@@ -16,13 +16,13 @@ pub struct GpuCnf {
     /// CSR offsets (len = num_clauses + 1).
     pub clause_offsets: TrackedCudaSlice<u32>,
     /// Flattened CSR literal array (len = num_literals).
-    pub clause_lits: TrackedCudaSlice<i32>,
+    pub literals: TrackedCudaSlice<i32>,
 }
 
 impl GpuCnf {
     #[inline]
     pub fn num_literals(&self) -> usize {
-        self.clause_lits.len()
+        self.literals.len()
     }
 
     /// Host -> device upload helper for tests and tooling.
@@ -48,7 +48,7 @@ impl GpuCnf {
         let mut clause_offsets: Vec<u32> = Vec::with_capacity(instance.clauses.len() + 1);
         clause_offsets.push(0);
 
-        let mut clause_lits: Vec<i32> = Vec::new();
+        let mut literals: Vec<i32> = Vec::new();
         for clause in &instance.clauses {
             let start = *clause_offsets.last().unwrap();
             let len = clause.literals.len() as u32;
@@ -62,7 +62,7 @@ impl GpuCnf {
                 if dimacs == 0 {
                     return Err(XlogError::Compilation("CNF contains DIMACS 0 literal".to_string()));
                 }
-                clause_lits.push(dimacs);
+                literals.push(dimacs);
             }
         }
 
@@ -74,7 +74,7 @@ impl GpuCnf {
 
         let memory = provider.memory();
         let mut d_offsets = memory.alloc::<u32>(clause_offsets.len())?;
-        let mut d_lits = memory.alloc::<i32>(clause_lits.len())?;
+        let mut d_lits = memory.alloc::<i32>(literals.len())?;
 
         provider
             .device()
@@ -84,14 +84,14 @@ impl GpuCnf {
         provider
             .device()
             .inner()
-            .htod_sync_copy_into(&clause_lits, &mut d_lits)
+            .htod_sync_copy_into(&literals, &mut d_lits)
             .map_err(|e| XlogError::Kernel(format!("Failed to upload CNF lits: {}", e)))?;
 
         Ok(Self {
             num_vars,
             num_clauses,
             clause_offsets: d_offsets,
-            clause_lits: d_lits,
+            literals: d_lits,
         })
     }
 }

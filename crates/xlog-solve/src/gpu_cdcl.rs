@@ -157,7 +157,7 @@ impl GpuCdclSolver {
 
         let mut params: Vec<*mut c_void> = vec![
             (&cnf.clause_offsets).as_kernel_param(),
-            (&cnf.clause_lits).as_kernel_param(),
+            (&cnf.literals).as_kernel_param(),
             num_vars_u32.as_kernel_param(),
             num_clauses_u32.as_kernel_param(),
             max_learned_clauses_u32.as_kernel_param(),
@@ -260,7 +260,7 @@ impl GpuCdclSolver {
                             },
                             (
                                 &cnf.clause_offsets,
-                                &cnf.clause_lits,
+                                &cnf.literals,
                                 cnf.num_clauses,
                                 &assign,
                                 &mut out_ok,
@@ -310,7 +310,7 @@ impl GpuCdclSolver {
                             },
                             (
                                 &cnf.clause_offsets,
-                                &cnf.clause_lits,
+                                &cnf.literals,
                                 cnf.num_clauses,
                                 &learned_offsets,
                                 &learned_lits,

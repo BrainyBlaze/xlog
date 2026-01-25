@@ -52,11 +52,10 @@ fn gpu_cnf_roundtrip_offsets_and_lits() {
     provider
         .device()
         .inner()
-        .dtoh_sync_copy_into(&cnf.clause_lits, &mut lits_host)
+        .dtoh_sync_copy_into(&cnf.literals, &mut lits_host)
         .expect("dtoh lits");
 
     assert_eq!(offsets_host, vec![0, 1, 3]);
     // DIMACS is 1-based.
     assert_eq!(lits_host, vec![1, -2, 3]);
 }
-

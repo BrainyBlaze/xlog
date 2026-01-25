@@ -208,7 +208,7 @@ fn build_circuit_cnf(provider: &Arc<CudaKernelProvider>, circuit: &GpuXgcf, base
             num_vars,
             num_clauses: clause_total,
             clause_offsets: d_offsets,
-            clause_lits: d_lits,
+            literals: d_lits,
         },
         internal_prefix: internal_counts,
     })
@@ -224,10 +224,10 @@ fn build_phi_and_not_c(
     let memory = provider.memory();
 
     let phi_clauses = phi.num_clauses as usize;
-    let phi_lits = phi.clause_lits.len();
+    let phi_lits = phi.literals.len();
 
     let c_clauses = circuit_cnf.cnf.num_clauses as usize;
-    let c_lits = circuit_cnf.cnf.clause_lits.len();
+    let c_lits = circuit_cnf.cnf.literals.len();
 
     let total_clauses = phi_clauses
         .checked_add(c_clauses)
@@ -257,7 +257,7 @@ fn build_phi_and_not_c(
     if phi_lits > 0 {
         let mut dst = out_lits.slice_mut(0..phi_lits);
         device
-            .dtod_copy(&phi.clause_lits, &mut dst)
+            .dtod_copy(&phi.literals, &mut dst)
             .map_err(|e| XlogError::Kernel(format!("Failed to copy phi lits: {}", e)))?;
     }
 
@@ -265,7 +265,7 @@ fn build_phi_and_not_c(
     if c_lits > 0 {
         let mut dst = out_lits.slice_mut(phi_lits..(phi_lits + c_lits));
         device
-            .dtod_copy(&circuit_cnf.cnf.clause_lits, &mut dst)
+            .dtod_copy(&circuit_cnf.cnf.literals, &mut dst)
             .map_err(|e| XlogError::Kernel(format!("Failed to copy CNF(C) lits: {}", e)))?;
     }
 
@@ -344,7 +344,7 @@ fn build_phi_and_not_c(
         num_vars: circuit_cnf.cnf.num_vars,
         num_clauses: total_clauses as u32,
         clause_offsets: out_offsets,
-        clause_lits: out_lits,
+        literals: out_lits,
     })
 }
 
@@ -358,10 +358,10 @@ fn build_c_and_not_phi(
     let memory = provider.memory();
 
     let c_clauses = circuit_cnf.cnf.num_clauses as usize;
-    let c_lits = circuit_cnf.cnf.clause_lits.len();
+    let c_lits = circuit_cnf.cnf.literals.len();
 
     let m = phi.num_clauses as usize;
-    let l = phi.clause_lits.len();
+    let l = phi.literals.len();
 
     // ¬phi encoding:
     // clauses_notphi = sum(len_j + 1) + 1 = L + m + 1
@@ -409,7 +409,7 @@ fn build_c_and_not_phi(
     if c_lits > 0 {
         let mut dst = out_lits.slice_mut(0..c_lits);
         device
-            .dtod_copy(&circuit_cnf.cnf.clause_lits, &mut dst)
+            .dtod_copy(&circuit_cnf.cnf.literals, &mut dst)
             .map_err(|e| XlogError::Kernel(format!("Failed to copy CNF(C) lits: {}", e)))?;
     }
 
@@ -481,7 +481,7 @@ fn build_c_and_not_phi(
             },
             (
                 &phi.clause_offsets,
-                &phi.clause_lits,
+                &phi.literals,
                 phi.num_clauses,
                 unsat_var_base,
                 out_clause_base,
@@ -499,7 +499,7 @@ fn build_c_and_not_phi(
         num_vars,
         num_clauses: total_clauses as u32,
         clause_offsets: out_offsets,
-        clause_lits: out_lits,
+        literals: out_lits,
     })
 }
 
