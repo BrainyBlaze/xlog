@@ -66,9 +66,12 @@ The CDCL implementation uses a fixed-capacity arena on GPU:
 
 The verifier prioritizes deterministic correctness over aggressive micro-optimizations:
 
-- **BCP:** scan-based unit propagation to a fixpoint (deterministic, massively parallel).
+- **BCP:** watched literals with per-literal watch lists (deterministic traversal order).
 - **Conflict analysis:** 1-UIP clause learning and non-chronological backjumping.
-- **Heuristic:** deterministic variable selection (upgradeable to deterministic VSIDS-style scoring).
+- **Heuristic:** deterministic variable selection (deterministic VSIDS-style scoring).
+- **SAT validation:** every SAT result must pass an on-GPU model check (`sat_check_model`).
+- **UNSAT validation:** every UNSAT result must pass an on-GPU proof check (`sat_proof_check`) using a solver-emitted
+  resolution-trace certificate (no CPU proof checking).
 
 ### Determinism Contract
 
@@ -123,4 +126,3 @@ The SAT subsystem in XLOG is defined as:
 - `docs/design/2026-01-22-gpu-native-compilation-design.md`
 - `docs/research/2026-01-22-architecture-validation-and-refinement.md`
 - `crates/xlog-prob/src/compilation/` (GPU compilation + verification entrypoints)
-
