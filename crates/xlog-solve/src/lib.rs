@@ -37,8 +37,10 @@ mod instance;
 mod solver;
 mod proof;
 mod gpu_cnf;
+mod gpu_cdcl;
 
 pub use instance::{SolveInstance, Clause, Literal, Objective};
 pub use solver::{Solver, SolverConfig, SolverState};
 pub use proof::{SolveProof, SolveResult, SolveStatus, SolveStats, compute_checksum};
 pub use gpu_cnf::GpuCnf;
+pub use gpu_cdcl::{GpuCdclConfig, GpuCdclResult, GpuCdclSolver, GpuSolveStatus};
