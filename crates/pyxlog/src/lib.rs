@@ -14,6 +14,7 @@ use xlog_logic::ast::ProbEngine;
 use xlog_neural::{NetworkConfig, NetworkRegistry, TensorMetadata, TensorSourceRegistry};
 use xlog_prob::exact::{ExactDdnnfProgram, ExactResultWithGrads, GpuConfig, QueryProbability};
 use xlog_prob::mc::{McEvalConfig, McProgram};
+use xlog_prob::neural_fast_path::{GpuWeightSlots, NeuralFastPathConfig};
 
 use std::collections::HashMap as StdHashMap;
 
@@ -287,20 +288,11 @@ struct CachedCircuit {
     /// The compiled program containing the GPU circuit
     program: ExactDdnnfProgram,
 
-    /// Mapping from (input_idx, label_idx) to circuit variable index.
-    weight_slots: Vec<WeightSlot>,
-}
+    /// Device-resident mapping from neural output slots to CNF variable ids.
+    slots: GpuWeightSlots,
 
-/// Maps a network output to a circuit variable.
-#[derive(Clone)]
-struct WeightSlot {
-    /// Position in network_outputs array (0 = first input, 1 = second input, etc.)
-    /// This is NOT the actual input index from the query - it's the logical position.
-    input_position: usize,
-    /// Label index (0-9 for 10-class classification)
-    label_idx: usize,
-    /// Circuit variable index (1-indexed, as per DIMACS CNF convention)
-    var_idx: u32,
+    /// Label count for each neural predicate instance in this template.
+    num_labels: usize,
 }
 
 enum CompiledProbProgram {
@@ -920,9 +912,8 @@ impl CompiledProgram {
     /// 4. If not cached: compile circuit, cache it, evaluate
     /// 5. Backpropagate gradients through networks
     fn forward_backward_complex(&mut self, py: Python<'_>, query: &str) -> PyResult<f64> {
-        // Parse the query to extract input indices
+        // Parse query to extract (1) neural input indices and (2) template predicate name.
         let (input_indices, pred_name) = self.extract_query_input_indices(query)?;
-
         if input_indices.is_empty() {
             return Err(PyValueError::new_err(format!(
                 "No input indices found in query: {}. Make sure the query references neural predicate inputs.",
@@ -930,8 +921,14 @@ impl CompiledProgram {
             )));
         }
 
-        // Get the network (for v0.4.0-alpha, assume single network)
-        let network_name = self.network_registry.names().first()
+        // Extract the target value (e.g., the sum in addition(X,Y,Z)).
+        let target_val = self.extract_query_target_int(query)?;
+
+        // Get the network (v0.4.0-alpha: assume single network).
+        let network_name = self
+            .network_registry
+            .names()
+            .first()
             .ok_or_else(|| PyValueError::new_err("No network registered"))?
             .to_string();
 
@@ -943,93 +940,140 @@ impl CompiledProgram {
             PyValueError::new_err(format!("Network '{}' has no module", network_name))
         })?;
 
-        // Run neural network for each input index and collect outputs
-        let mut network_outputs: Vec<(usize, Vec<f64>, PyObject)> = Vec::new();
+        // Run neural networks and import the outputs as device-resident buffers via DLPack (no .tolist()).
+        let torch = py.import_bound("torch")?;
+        let schema_f32 = Schema::new(vec![("col0".to_string(), ScalarType::F32)]);
+
+        let mut out_tensors: Vec<PyObject> = Vec::with_capacity(input_indices.len());
+        let mut grad_tensors: Vec<PyObject> = Vec::with_capacity(input_indices.len());
+        let mut prob_bufs: Vec<xlog_cuda::CudaBuffer> = Vec::with_capacity(input_indices.len());
+        let mut grad_bufs: Vec<xlog_cuda::CudaBuffer> = Vec::with_capacity(input_indices.len());
+
+        let mut num_labels: Option<usize> = None;
 
         for &input_idx in &input_indices {
             let input_tensor = self.get_input_tensor(py, input_idx)?;
             let input_bound = input_tensor.bind(py);
             let input_unsqueezed = input_bound.call_method1("unsqueeze", (0i32,))?;
 
-            // Forward pass with gradient tracking
+            // Forward pass with gradient tracking.
             let output = module.call_method1(py, "__call__", (input_unsqueezed,))?;
             let output_bound = output.bind(py);
             let output_squeezed = output_bound.call_method1("squeeze", (0i32,))?;
+            let output_squeezed = output_squeezed.call_method0("contiguous")?;
 
-            // Extract probabilities
-            let probs_list = output_squeezed.call_method0("tolist")?;
-            let probs: Vec<f64> = probs_list.extract()?;
+            // Determine label count.
+            let n: usize = output_squeezed
+                .call_method0("numel")?
+                .extract::<i64>()?
+                .try_into()
+                .map_err(|_| PyValueError::new_err("Invalid output numel"))?;
+            if let Some(prev) = num_labels {
+                if n != prev {
+                    return Err(PyValueError::new_err(format!(
+                        "Network outputs disagree on num_labels: {} vs {}",
+                        prev, n
+                    )));
+                }
+            } else {
+                num_labels = Some(n);
+            }
 
-            network_outputs.push((input_idx, probs, output.clone()));
+            // Import prob tensor (1D F32 CUDA) as a zero-copy CudaBuffer.
+            let managed = dlpack_from_py(&output_squeezed)?;
+            let prob_buf = self
+                .output_provider
+                .from_dlpack_tensors_with_schema(schema_f32.clone(), vec![managed])
+                .map_err(|e| PyRuntimeError::new_err(format!("DLPack import failed: {}", e)))?;
+
+            // Allocate a grad tensor on the same device and import it as a writable buffer.
+            let grad_tensor = torch.call_method1("zeros_like", (&output_squeezed,))?;
+            let grad_managed = dlpack_from_py(&grad_tensor)?;
+            let grad_buf = self
+                .output_provider
+                .from_dlpack_tensors_with_schema(schema_f32.clone(), vec![grad_managed])
+                .map_err(|e| PyRuntimeError::new_err(format!("DLPack import failed: {}", e)))?;
+
+            out_tensors.push(output_squeezed.into());
+            grad_tensors.push(grad_tensor.into());
+            prob_bufs.push(prob_buf);
+            grad_bufs.push(grad_buf);
         }
 
-        // Get number of labels from first network output
-        let num_labels = if network_outputs.is_empty() {
-            return Err(PyValueError::new_err("No network outputs"));
-        } else {
-            network_outputs[0].1.len()
-        };
+        let num_labels = num_labels.ok_or_else(|| PyValueError::new_err("No network outputs"))?;
 
-        // Generate cache key
+        // Ensure template circuit is available (compile-once per shape).
         let cache_key = self.generate_cache_key(&pred_name, input_indices.len(), num_labels);
+        if !self.circuit_cache.contains_key(&cache_key) {
+            let cached = self.compile_circuit_for_template(&pred_name, input_indices.len(), num_labels)?;
+            self.circuit_cache.insert(cache_key.clone(), cached);
+        }
 
-        // Check cache and evaluate - returns (prob, grad_true, grad_false, weight_slots)
-        let (prob, grad_true, grad_false, weight_slots) = if let Some(cached) = self.circuit_cache.get(&cache_key) {
-            // CACHE HIT: Update weights and evaluate existing circuit
-            let weights = self.update_circuit_weights(cached, &network_outputs);
+        let cached = self
+            .circuit_cache
+            .get(&cache_key)
+            .expect("cache populated above");
 
-            // Evaluate with updated weights
-            let result = cached.program.evaluate_gpu_with_grads_weights(&weights)
-                .map_err(|e| PyRuntimeError::new_err(format!("Cached eval error: {}", e)))?;
+        if cached.num_labels != num_labels {
+            return Err(PyRuntimeError::new_err(format!(
+                "Cached template num_labels {} != runtime num_labels {}",
+                cached.num_labels, num_labels
+            )));
+        }
 
-            if result.query_grads.is_empty() {
-                return Err(PyRuntimeError::new_err("No query results from cached circuit"));
+        let query_idx: usize = match pred_name.as_str() {
+            // Template queries are emitted in ascending sum order: query(addition(0,1,sum)).
+            "addition" => {
+                let max_sum = 2usize.saturating_mul(num_labels.saturating_sub(1));
+                if target_val > max_sum {
+                    return Err(PyValueError::new_err(format!(
+                        "Target sum {} out of range (max {})",
+                        target_val, max_sum
+                    )));
+                }
+                target_val
             }
-
-            let qg = &result.query_grads[0];
-            (qg.prob, qg.grad_true.clone(), qg.grad_false.clone(), cached.weight_slots.clone())
-        } else {
-            // CACHE MISS: Compile new circuit and cache it
-            let (program, weight_slots) =
-                self.compile_circuit_for_template(&network_outputs, query)?;
-
-            // Evaluate the newly compiled circuit
-            let result = program.evaluate_gpu_with_grads()
-                .map_err(|e| PyRuntimeError::new_err(format!("Query evaluation error: {}", e)))?;
-
-            if result.query_grads.is_empty() {
-                return Err(PyRuntimeError::new_err("No query results returned"));
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "Unsupported cached predicate '{}' for neural fast-path",
+                    other
+                )));
             }
-
-            let qg = &result.query_grads[0];
-            let prob = qg.prob;
-            let grad_true = qg.grad_true.clone();
-            let grad_false = qg.grad_false.clone();
-
-            // Cache the circuit for future use
-            let cached = CachedCircuit {
-                program,
-                weight_slots: weight_slots.clone(),
-            };
-            self.circuit_cache.insert(cache_key, cached);
-
-            (prob, grad_true, grad_false, weight_slots)
         };
 
-        let loss = nll_loss_value(prob);
+        // Robustness: ensure CUDA work is ordered correctly around DLPack import/consumption.
+        // This is control-plane synchronization only (no data-plane transfers).
+        if torch
+            .getattr("cuda")
+            .and_then(|c| c.call_method0("is_available"))
+            .and_then(|b| b.extract::<bool>())
+            .unwrap_or(false)
+        {
+            let cuda = torch.getattr("cuda")?;
+            cuda.call_method0("synchronize")?;
+        }
 
-        // Compute d(loss)/d(prob) = -1/prob
-        let dloss_dprob = -1.0 / prob.max(NLL_EPSILON);
+        let cfg = NeuralFastPathConfig::default();
+        let loss = cached
+            .program
+            .neural_backward_nll_buffers_with_loss(&cached.slots, query_idx, &prob_bufs, &mut grad_bufs, cfg)
+            .map_err(|e| PyRuntimeError::new_err(format!("Neural fast-path error: {}", e)))?;
 
-        // Backpropagate circuit gradients through neural networks using weight_slots for correct indexing
-        self.backprop_circuit_gradients(
-            py,
-            &network_outputs,
-            &weight_slots,
-            &grad_true,
-            &grad_false,
-            dloss_dprob,
-        )?;
+        if torch
+            .getattr("cuda")
+            .and_then(|c| c.call_method0("is_available"))
+            .and_then(|b| b.extract::<bool>())
+            .unwrap_or(false)
+        {
+            let cuda = torch.getattr("cuda")?;
+            cuda.call_method0("synchronize")?;
+        }
+
+        // Backward through the networks using the device-resident gradients we filled on GPU.
+        for (out, grad) in out_tensors.iter().zip(grad_tensors.iter()) {
+            let out_bound = out.bind(py);
+            out_bound.call_method1("backward", (grad.bind(py),))?;
+        }
 
         Ok(loss)
     }
@@ -1068,97 +1112,90 @@ impl CompiledProgram {
         Ok((indices, pred_name))
     }
 
-    /// Generate expanded source with neural predicate probabilities as annotated disjunctions.
-    fn generate_expanded_source(
+    /// Extract the final integer argument from a query (e.g., the sum in `addition(X,Y,Z)`).
+    fn extract_query_target_int(&self, query: &str) -> PyResult<usize> {
+        let query = query.trim();
+        let paren_start = query.find('(').ok_or_else(|| {
+            PyValueError::new_err(format!("Invalid query format: {}", query))
+        })?;
+        let paren_end = query.rfind(')').ok_or_else(|| {
+            PyValueError::new_err(format!("Invalid query format: {}", query))
+        })?;
+
+        let args_str = &query[paren_start + 1..paren_end];
+        let last = args_str
+            .split(',')
+            .map(|s| s.trim())
+            .last()
+            .ok_or_else(|| PyValueError::new_err(format!("Invalid query args: {}", query)))?;
+
+        last.parse::<usize>()
+            .map_err(|_| PyValueError::new_err(format!("Invalid target value: {}", last)))
+    }
+
+    /// Generate a template-expanded source program for a cached query shape.
+    ///
+    /// The output is independent of concrete input indices and target values:
+    /// - Uses placeholder inputs `0..num_inputs-1`
+    /// - Emits uniform dummy probabilities (sum < 1.0 to force an implicit "none" branch)
+    /// - Emits a query for each possible target (so runtime can select by index)
+    fn generate_template_source(
         &self,
-        network_outputs: &[(usize, Vec<f64>, PyObject)],
-        query: &str,
+        pred_name: &str,
+        num_inputs: usize,
+        num_labels: usize,
     ) -> PyResult<String> {
         let mut source = String::new();
 
-        // Add annotated disjunctions for each input index
-        for (input_idx, probs, _) in network_outputs {
-            // Normalize probabilities to ensure they sum to at most 1.0
-            // Scale factor slightly less than 1 to account for floating point errors
-            let sum: f64 = probs.iter().sum();
-            let scale = 0.9999999 / sum;  // Ensures sum will be < 1.0
-            let normalized: Vec<f64> = probs.iter().map(|p| (p * scale).max(1e-10)).collect();
+        if num_labels == 0 {
+            return Err(PyValueError::new_err("num_labels must be > 0"));
+        }
 
-            // Generate: p0::digit(idx, 0); p1::digit(idx, 1); ...; p9::digit(idx, 9).
+        // Dummy uniform probabilities (will be scaled to sum < 1.0).
+        let p = 1.0f64 / (num_labels as f64);
+        let sum = 1.0f64;
+        let scale = 0.9999999 / sum;
+        let normalized_p = (p * scale).max(1e-10);
+
+        // Add annotated disjunctions for each placeholder input index.
+        for input_pos in 0..num_inputs {
             let mut ad_parts: Vec<String> = Vec::new();
-            for (label_idx, prob) in normalized.iter().enumerate() {
-                ad_parts.push(format!("{:.10}::digit({}, {})", prob, input_idx, label_idx));
+            for label_idx in 0..num_labels {
+                ad_parts.push(format!(
+                    "{:.10}::digit({}, {})",
+                    normalized_p, input_pos, label_idx
+                ));
             }
             source.push_str(&ad_parts.join("; "));
             source.push_str(".\n");
         }
 
-        // Add the addition rule
-        source.push_str("addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.\n");
+        match pred_name {
+            "addition" => {
+                if num_inputs != 2 {
+                    return Err(PyValueError::new_err(format!(
+                        "addition expects exactly 2 inputs, got {}",
+                        num_inputs
+                    )));
+                }
 
-        // Add the query
-        source.push_str(&format!("query({}).\n", query));
+                source.push_str("addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.\n");
 
-        Ok(source)
-    }
-
-    /// Backpropagate circuit gradients through neural networks.
-    ///
-    /// Maps gradients from circuit variables back to neural network outputs and calls backward.
-    /// Uses weight_slots to map actual CNF variable indices to network output positions.
-    fn backprop_circuit_gradients(
-        &self,
-        py: Python<'_>,
-        network_outputs: &[(usize, Vec<f64>, PyObject)],
-        weight_slots: &[WeightSlot],
-        grad_true: &[f64],
-        _grad_false: &[f64],
-        dloss_dprob: f64,
-    ) -> PyResult<()> {
-        let torch = py.import_bound("torch")?;
-
-        // The grad_true vector is indexed by actual CNF variable numbers (1-indexed).
-        // weight_slots tells us which variable index corresponds to which (input_position, label_idx).
-        //
-        // The gradient for variable i is: d(log Z) / d(log p_i)
-        // We need: d(loss) / d(p_i) = dloss_dprob * grad_true[var_idx]
-
-        for (input_position, (_, probs, output)) in network_outputs.iter().enumerate() {
-            let num_labels = probs.len();
-
-            // Create gradient tensor for this network output
-            let grad_vec: Vec<f64> = (0..num_labels)
-                .map(|label_idx| {
-                    // Find the weight slot for this (input_position, label_idx) to get actual var_idx
-                    if let Some(slot) = weight_slots.iter().find(|s| {
-                        s.input_position == input_position && s.label_idx == label_idx
-                    }) {
-                        let var_idx = slot.var_idx as usize;
-                        if var_idx < grad_true.len() {
-                            // Convert from d(log Z)/d(log p) to d(loss)/d(p)
-                            let g = grad_true[var_idx];
-                            dloss_dprob * g
-                        } else {
-                            0.0
-                        }
-                    } else {
-                        0.0
-                    }
-                })
-                .collect();
-
-            // Create gradient tensor on the same device as the output
-            let output_bound = output.bind(py);
-            let output_device = output_bound.getattr("device")?;
-            let grad_tensor = torch.call_method1("tensor", (grad_vec,))?;
-            let grad_tensor_device = grad_tensor.call_method1("to", (output_device,))?;
-
-            // Add batch dimension and call backward
-            let grad_unsqueezed = grad_tensor_device.call_method1("unsqueeze", (0i32,))?;
-            output_bound.call_method1("backward", (grad_unsqueezed,))?;
+                // Emit queries in ascending sum order so query_idx == sum.
+                let max_sum = 2usize.saturating_mul(num_labels.saturating_sub(1));
+                for sum in 0..=max_sum {
+                    source.push_str(&format!("query(addition(0, 1, {})).\n", sum));
+                }
+            }
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "Unsupported template predicate '{}'",
+                    other
+                )));
+            }
         }
 
-        Ok(())
+        Ok(source)
     }
 
     /// Find the network name associated with a predicate.
@@ -1202,91 +1239,51 @@ impl CompiledProgram {
         format!("{}:{}:{}", pred_name, num_inputs, num_labels)
     }
 
-    /// Compile a circuit for a query template with given network outputs.
+    /// Compile and cache a template circuit (compile-once per `{predicate}:{num_inputs}:{num_labels}`).
     ///
-    /// Returns the compiled program and weight slot mappings.
+    /// The compiled template is independent of concrete input indices and target values; concrete targets are
+    /// handled by selecting a query index at runtime and forcing the corresponding query var on GPU.
     fn compile_circuit_for_template(
         &self,
-        network_outputs: &[(usize, Vec<f64>, PyObject)],
-        query: &str,
-    ) -> PyResult<(ExactDdnnfProgram, Vec<WeightSlot>)> {
-        // Generate expanded source
-        let expanded_source = self.generate_expanded_source(network_outputs, query)?;
+        pred_name: &str,
+        num_inputs: usize,
+        num_labels: usize,
+    ) -> PyResult<CachedCircuit> {
+        let expanded_source = self.generate_template_source(pred_name, num_inputs, num_labels)?;
 
-        // Compile with D4 (expensive operation we want to cache)
         let program = ExactDdnnfProgram::compile_source_with_gpu(&expanded_source, self.gpu_config)
             .map_err(|e| PyRuntimeError::new_err(format!("Query compilation error: {}", e)))?;
 
-        // Get actual random variable indices from the compiled program.
-        // These are the variables with non-trivial weights (corresponding to annotated disjunctions).
-        // The order matches the order variables were assigned during CNF encoding.
         let random_vars = program.random_var_indices();
+        let expected = num_inputs
+            .checked_mul(num_labels)
+            .ok_or_else(|| PyValueError::new_err("num_inputs*num_labels overflow"))?;
 
-        // Build weight slot mappings using actual variable indices.
-        // The annotated disjunctions are generated in order: position 0 labels 0-9, then position 1 labels 0-9, etc.
-        // The random_vars should match this order.
-        // We use input_position (0, 1, 2...) not the actual input_idx from the query,
-        // so the cached slots work with any query that has the same structure.
-        let mut weight_slots = Vec::new();
-        let mut var_offset = 0;
-
-        for (input_position, (_, probs, _)) in network_outputs.iter().enumerate() {
-            for label_idx in 0..probs.len() {
-                if var_offset < random_vars.len() {
-                    weight_slots.push(WeightSlot {
-                        input_position,
-                        label_idx,
-                        var_idx: random_vars[var_offset],
-                    });
-                    var_offset += 1;
-                }
-            }
+        if random_vars.len() != expected {
+            return Err(PyRuntimeError::new_err(format!(
+                "Template compilation produced {} random vars, expected {} (inputs={}, labels={})",
+                random_vars.len(),
+                expected,
+                num_inputs,
+                num_labels
+            )));
         }
 
-        Ok((program, weight_slots))
-    }
-
-    /// Update weights in a cached circuit with new network outputs.
-    ///
-    /// The circuit structure remains unchanged - only the probability weights
-    /// are updated to reflect current network predictions.
-    fn update_circuit_weights(
-        &self,
-        cached: &CachedCircuit,
-        network_outputs: &[(usize, Vec<f64>, PyObject)],
-    ) -> Vec<(f64, f64)> {
-        let num_vars = cached.program.num_vars();
-
-        // Initialize all weights to (0.0, 0.0) - neutral in log space
-        let mut weights: Vec<(f64, f64)> = vec![(0.0, 0.0); num_vars + 1];
-
-        // Update weights from network outputs using slot mappings.
-        // input_position indexes into network_outputs array directly.
-        for slot in &cached.weight_slots {
-            // Use input_position as index into network_outputs
-            if slot.input_position < network_outputs.len() {
-                let (_, probs, _) = &network_outputs[slot.input_position];
-                if slot.label_idx < probs.len() {
-                    let p = probs[slot.label_idx];
-                    // Normalize to ensure sum < 1.0 (same as generate_expanded_source)
-                    let sum: f64 = probs.iter().sum();
-                    let scale = 0.9999999 / sum;
-                    let normalized_p = (p * scale).max(1e-10);
-
-                    // Log weights: (log(p), log(1-p))
-                    // For annotated disjunctions, the "false" weight represents
-                    // the probability of NOT choosing this option
-                    let log_true = normalized_p.ln();
-                    let log_false = (1.0 - normalized_p).ln();
-
-                    if (slot.var_idx as usize) < weights.len() {
-                        weights[slot.var_idx as usize] = (log_true, log_false);
-                    }
-                }
-            }
+        let mut groups: Vec<Vec<u32>> = Vec::with_capacity(num_inputs);
+        for input_pos in 0..num_inputs {
+            let start = input_pos * num_labels;
+            let end = start + num_labels;
+            groups.push(random_vars[start..end].to_vec());
         }
 
-        weights
+        let slots = GpuWeightSlots::upload(self.output_provider.as_ref(), &groups)
+            .map_err(|e| PyRuntimeError::new_err(format!("Slot map upload error: {}", e)))?;
+
+        Ok(CachedCircuit {
+            program,
+            slots,
+            num_labels,
+        })
     }
 
     /// Get the label index for a given label string.

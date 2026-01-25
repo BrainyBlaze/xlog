@@ -144,15 +144,18 @@ class TestAdditionQueryTraining:
 
     def test_addition_query_forward_backward(self):
         """Test that forward_backward works with addition queries."""
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA not available")
+
         from train import MNISTNet, create_program
 
         program = create_program()
-        net = MNISTNet()
+        net = MNISTNet().cuda()
         optimizer = torch.optim.Adam(net.parameters(), lr=1e-2)
         program.register_network("mnist_net", net, optimizer)
 
         torch.manual_seed(42)
-        images = torch.randn(10, 1, 28, 28)
+        images = torch.randn(10, 1, 28, 28, device="cuda")
         program.add_tensor_source("train", images)
 
         # Record initial weights
@@ -173,15 +176,18 @@ class TestAdditionQueryTraining:
 
     def test_addition_query_trains(self):
         """Test that training with addition queries reduces loss."""
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA not available")
+
         from train import MNISTNet, create_program
 
         program = create_program()
-        net = MNISTNet()
+        net = MNISTNet().cuda()
         optimizer = torch.optim.Adam(net.parameters(), lr=1e-2)
         program.register_network("mnist_net", net, optimizer)
 
         torch.manual_seed(123)
-        images = torch.randn(20, 1, 28, 28)
+        images = torch.randn(20, 1, 28, 28, device="cuda")
         program.add_tensor_source("train", images)
 
         # Generate addition queries
@@ -210,15 +216,18 @@ class TestAdditionQueryTraining:
 
     def test_addition_query_probability(self):
         """Test that addition query produces valid probability."""
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA not available")
+
         from train import MNISTNet, create_program
 
         program = create_program()
-        net = MNISTNet()
+        net = MNISTNet().cuda()
         optimizer = torch.optim.Adam(net.parameters(), lr=1e-2)
         program.register_network("mnist_net", net, optimizer)
 
         torch.manual_seed(42)
-        images = torch.randn(4, 1, 28, 28)
+        images = torch.randn(4, 1, 28, 28, device="cuda")
         program.add_tensor_source("train", images)
 
         # Forward-backward should return a valid loss (NLL)

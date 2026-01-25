@@ -12,6 +12,9 @@ import time
 torch = pytest.importorskip("torch")
 pyxlog = pytest.importorskip("pyxlog")
 
+if not torch.cuda.is_available():
+    pytest.skip("CUDA not available", allow_module_level=True)
+
 
 class SimpleNet(torch.nn.Module):
     """Simple network that outputs softmax probabilities."""
@@ -28,7 +31,7 @@ class SimpleNet(torch.nn.Module):
 class TestCircuitCache:
     """Test circuit caching functionality."""
 
-    def test_cache_hit_same_structure(self):
+    def test_cache_hit_same_structure(self, monkeypatch):
         """Repeated queries with same structure should use cached circuit."""
         source = """
 nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
@@ -36,13 +39,19 @@ addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
 """
         program = pyxlog.Program.compile(source)
 
+        # Enforce GPU-native path: forbid any internal .tolist() (would force device->host transfer).
+        def _forbid_tolist(*_args, **_kwargs):
+            raise RuntimeError("torch.Tensor.tolist() is forbidden in GPU-native fast-path")
+
+        monkeypatch.setattr(torch.Tensor, "tolist", _forbid_tolist, raising=True)
+
         # Register network
-        net = SimpleNet(10)
+        net = SimpleNet(10).cuda()
         optimizer = torch.optim.Adam(net.parameters(), lr=0.001)
         program.register_network("mnist_net", net, optimizer)
 
         # Register dummy tensor source
-        dummy_images = torch.randn(100, 1, 28, 28)
+        dummy_images = torch.randn(100, 1, 28, 28, device="cuda")
         program.add_tensor_source("X", dummy_images)
 
         # First query - should compile circuit (cache miss)
@@ -73,11 +82,11 @@ addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
 """
         program = pyxlog.Program.compile(source)
 
-        net = SimpleNet(10)
+        net = SimpleNet(10).cuda()
         optimizer = torch.optim.Adam(net.parameters(), lr=0.001)
         program.register_network("mnist_net", net, optimizer)
 
-        dummy_images = torch.randn(100, 1, 28, 28)
+        dummy_images = torch.randn(100, 1, 28, 28, device="cuda")
         program.add_tensor_source("X", dummy_images)
 
         # First query - cache miss
@@ -104,13 +113,13 @@ addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
 
         program = pyxlog.Program.compile(source)
 
-        net = SimpleNet(10)
+        net = SimpleNet(10).cuda()
         optimizer = torch.optim.Adam(net.parameters(), lr=0.001)
         program.register_network("mnist_net", net, optimizer)
 
         # Use fixed input data
         torch.manual_seed(123)
-        dummy_images = torch.randn(100, 1, 28, 28)
+        dummy_images = torch.randn(100, 1, 28, 28, device="cuda")
         program.add_tensor_source("X", dummy_images)
 
         # Get losses for several queries
@@ -136,12 +145,12 @@ addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
 """
         program = pyxlog.Program.compile(source)
 
-        net = SimpleNet(10)
+        net = SimpleNet(10).cuda()
         optimizer = torch.optim.Adam(net.parameters(), lr=0.001)
         program.register_network("mnist_net", net, optimizer)
 
         torch.manual_seed(42)
-        dummy_images = torch.randn(100, 1, 28, 28)
+        dummy_images = torch.randn(100, 1, 28, 28, device="cuda")
         program.add_tensor_source("X", dummy_images)
 
         # Simulate training loop with 10 queries
