@@ -121,3 +121,76 @@ f 4 0
         );
     }
 }
+
+#[test]
+fn test_gpu_xgcf_eval_grads_inplace_matches_cpu() {
+    let provider = match try_provider() {
+        Some(p) => p,
+        None => return,
+    };
+
+    // Formula: x1 OR x2, represented as a decision on x1, then x2.
+    let nnf = r#"
+o 1 0
+o 2 0
+t 3 0
+f 4 0
+1 3 1 0
+1 2 -1 0
+2 3 2 0
+2 4 -2 0
+"#;
+    let ddnnf = DecisionDnnf::parse_str(nnf).unwrap();
+    let xgcf = Xgcf::from_ddnnf(&ddnnf).unwrap();
+
+    let p1 = 0.7_f64;
+    let p2 = 0.2_f64;
+    let weights: Vec<(f64, f64)> = vec![
+        (0.0, 0.0),
+        (p1.ln(), (1.0 - p1).ln()),
+        (p2.ln(), (1.0 - p2).ln()),
+    ];
+
+    let (cpu_log_z, cpu_grad_true, cpu_grad_false) = xgcf.eval_log_wmc_and_grads(&weights).unwrap();
+
+    let mut gpu_xgcf = GpuXgcf::upload(&provider, &xgcf).unwrap();
+    gpu_xgcf.set_base_weights(&provider, &weights).unwrap();
+    gpu_xgcf.eval_grads_inplace(&provider).unwrap();
+
+    // Download root value + gradients for verification (tests may read back).
+    let device = provider.device().inner();
+
+    let root_idx = gpu_xgcf.root() as usize;
+    let root_view = gpu_xgcf.values().slice(root_idx..(root_idx + 1));
+    let mut root_host = [0.0_f64];
+    device.dtoh_sync_copy_into(&root_view, &mut root_host).unwrap();
+    let gpu_log_z = root_host[0];
+
+    let mut gpu_grad_true = vec![0.0_f64; cpu_grad_true.len()];
+    let mut gpu_grad_false = vec![0.0_f64; cpu_grad_false.len()];
+    device.dtoh_sync_copy_into(gpu_xgcf.grad_true(), &mut gpu_grad_true).unwrap();
+    device.dtoh_sync_copy_into(gpu_xgcf.grad_false(), &mut gpu_grad_false).unwrap();
+
+    assert!(
+        (cpu_log_z - gpu_log_z).abs() < 1e-9,
+        "cpu_log_z={} gpu_log_z={}",
+        cpu_log_z,
+        gpu_log_z
+    );
+
+    assert_eq!(cpu_grad_true.len(), gpu_grad_true.len());
+    assert_eq!(cpu_grad_false.len(), gpu_grad_false.len());
+    for i in 0..cpu_grad_true.len() {
+        let dt = (cpu_grad_true[i] - gpu_grad_true[i]).abs();
+        let df = (cpu_grad_false[i] - gpu_grad_false[i]).abs();
+        assert!(
+            dt < 1e-9 && df < 1e-9,
+            "var={} cpu_t={} gpu_t={} cpu_f={} gpu_f={}",
+            i,
+            cpu_grad_true[i],
+            gpu_grad_true[i],
+            cpu_grad_false[i],
+            gpu_grad_false[i]
+        );
+    }
+}
