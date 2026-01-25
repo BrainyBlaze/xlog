@@ -38,6 +38,11 @@ static constexpr int32_t SAT_ERR_WATCH_OVERFLOW = 4;
 static constexpr int32_t SAT_ERR_INVALID_PROOF = 5;
 static constexpr int32_t SAT_ERR_INVALID_MODEL = 6;
 
+// Fail-fast trap. Used to enforce "verifier must not silently succeed" without host reads.
+__device__ __forceinline__ void sat_trap() {
+    asm volatile("trap;");
+}
+
 // ---------------------------------------------------------------------------
 // Literal helpers (DIMACS: +/- var_id, 1-based var ids; 0 unused)
 // ---------------------------------------------------------------------------
@@ -1508,7 +1513,7 @@ extern "C" __global__ void sat_proof_check(
     uint32_t num_clauses,
     const uint32_t* __restrict__ learned_offsets,
     const int32_t* __restrict__ learned_lits,
-    uint32_t learned_count,
+    const uint32_t* __restrict__ learned_count, // len=1
     const uint32_t* __restrict__ proof_offsets,
     const uint32_t* __restrict__ proof_data,
     // scratch buffers (two alternating clause buffers)
@@ -1522,20 +1527,21 @@ extern "C" __global__ void sat_proof_check(
     }
     out_ok[0] = 1;
 
-    if (learned_count == 0) {
+    uint32_t lc = learned_count[0];
+    if (lc == 0) {
         out_ok[0] = 0;
         return;
     }
 
     // Require last learned clause to be empty (unsat certificate).
-    uint32_t last_len = learned_offsets[learned_count] - learned_offsets[learned_count - 1u];
+    uint32_t last_len = learned_offsets[lc] - learned_offsets[lc - 1u];
     if (last_len != 0u) {
         out_ok[0] = 0;
         return;
     }
 
     // Verify each learned clause's resolution trace matches the stored learned clause.
-    for (uint32_t i = 0; i < learned_count; i++) {
+    for (uint32_t i = 0; i < lc; i++) {
         uint32_t poff = proof_offsets[i];
         uint32_t pend = proof_offsets[i + 1u];
         if (pend < poff + 2u) {
@@ -1617,6 +1623,34 @@ extern "C" __global__ void sat_proof_check(
             out_ok[0] = 0;
             return;
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Verifier enforcement kernels (no host reads)
+// ---------------------------------------------------------------------------
+
+extern "C" __global__ void sat_assert_status(
+    const int32_t* __restrict__ out_status, // len=1
+    const int32_t* __restrict__ out_error,  // len=1
+    int32_t expected_status
+) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) {
+        return;
+    }
+    int32_t st = out_status[0];
+    int32_t er = out_error[0];
+    if (er != 0 || st != expected_status) {
+        sat_trap();
+    }
+}
+
+extern "C" __global__ void sat_assert_ok(const int32_t* __restrict__ out_ok) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) {
+        return;
+    }
+    if (out_ok[0] != 1) {
+        sat_trap();
     }
 }
 

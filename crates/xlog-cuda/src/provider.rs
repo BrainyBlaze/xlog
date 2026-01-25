@@ -250,6 +250,8 @@ pub mod sat_kernels {
     pub const SAT_CDCL_SOLVE: &str = "sat_cdcl_solve";
     pub const SAT_CHECK_MODEL: &str = "sat_check_model";
     pub const SAT_PROOF_CHECK: &str = "sat_proof_check";
+    pub const SAT_ASSERT_STATUS: &str = "sat_assert_status";
+    pub const SAT_ASSERT_OK: &str = "sat_assert_ok";
     pub const SAT_XGCF_CNF_COUNTS: &str = "sat_xgcf_cnf_counts";
     pub const SAT_XGCF_CNF_EMIT: &str = "sat_xgcf_cnf_emit";
     pub const SAT_SHIFT_OFFSETS: &str = "sat_shift_offsets";
@@ -9212,6 +9214,14 @@ mod tests {
         assert!(
             SAT_PTX.contains("sat_proof_check"),
             "SAT_PTX should contain sat_proof_check"
+        );
+        assert!(
+            SAT_PTX.contains("sat_assert_status"),
+            "SAT_PTX should contain sat_assert_status"
+        );
+        assert!(
+            SAT_PTX.contains("sat_assert_ok"),
+            "SAT_PTX should contain sat_assert_ok"
         );
         assert!(
             SAT_PTX.contains("sat_xgcf_cnf_counts"),

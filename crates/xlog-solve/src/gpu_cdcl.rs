@@ -314,7 +314,7 @@ impl GpuCdclSolver {
                                 cnf.num_clauses,
                                 &learned_offsets,
                                 &learned_lits,
-                                learned_count,
+                                &out_learned_count,
                                 &proof_offsets,
                                 &proof_data,
                                 &mut scratch_a,
