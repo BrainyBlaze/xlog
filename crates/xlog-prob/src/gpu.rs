@@ -201,6 +201,16 @@ impl GpuXgcf {
         &mut self.var_log_false
     }
 
+    /// Mutable access to both log-weight tables (true/false) at once.
+    ///
+    /// This is useful when passing both slices to a single CUDA kernel launch, avoiding
+    /// overlapping mutable borrows of `self`.
+    pub fn var_log_weights_mut(
+        &mut self,
+    ) -> (&mut TrackedCudaSlice<f64>, &mut TrackedCudaSlice<f64>) {
+        (&mut self.var_log_true, &mut self.var_log_false)
+    }
+
     /// Upload a host weight table into the device-resident `var_log_true/var_log_false` buffers.
     ///
     /// This is intended for one-time initialization of static weights (evidence + non-neural facts).

@@ -5,15 +5,18 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use xlog_core::{MemoryBudget, Result, XlogError};
+use cudarc::driver::{DeviceSlice, LaunchAsync, LaunchConfig};
+use xlog_core::{MemoryBudget, Result, ScalarType, XlogError};
 
 use crate::cnf::encode_cnf;
 use crate::gpu::GpuXgcf;
 use crate::kc::d4::D4Compiler;
 use crate::kc::ddnnf::DecisionDnnf;
+use crate::neural_fast_path::{GpuWeightSlots, NeuralFastPathConfig};
 use crate::provenance::{extract_from_source, GroundAtom, Provenance};
 use crate::xgcf::{Xgcf, XgcfNodeType};
-use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_cuda::provider::{arith_kernels, neural_kernels, ARITH_MODULE, NEURAL_MODULE};
+use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager};
 
 #[derive(Debug, Clone)]
 pub struct QueryProbability {
@@ -70,7 +73,7 @@ impl Default for GpuConfig {
 }
 
 impl GpuExactState {
-    fn new(circuit: &Xgcf, config: GpuConfig) -> Result<Self> {
+    fn new(circuit: &Xgcf, config: GpuConfig, weights: &[(f64, f64)]) -> Result<Self> {
         if config.memory_bytes == 0 {
             return Err(XlogError::Kernel(
                 "GPU memory budget must be non-zero".to_string(),
@@ -83,7 +86,8 @@ impl GpuExactState {
             MemoryBudget::with_limit(config.memory_bytes),
         ));
         let provider = CudaKernelProvider::new(device, memory)?;
-        let gpu_xgcf = GpuXgcf::upload(&provider, circuit)?;
+        let mut gpu_xgcf = GpuXgcf::upload(&provider, circuit)?;
+        gpu_xgcf.set_base_weights(&provider, weights)?;
         Ok(Self {
             provider,
             circuit: Mutex::new(gpu_xgcf),
@@ -190,6 +194,296 @@ impl ExactDdnnfProgram {
             .filter(|(_, (t, f))| (*t, *f) != (0.0, 0.0))
             .map(|(idx, _)| idx as u32)
             .collect()
+    }
+
+    /// CNF variable id for the `idx`-th query formula (DIMACS, 1-based), if present.
+    pub fn query_var(&self, idx: usize) -> Option<u32> {
+        self.queries.get(idx).and_then(|q| q.var)
+    }
+
+    /// GPU neural fast-path: compute NLL gradients w.r.t. probability tensors (no host reads).
+    ///
+    /// This implements the design in `docs/design/2026-01-22-gpu-native-compilation-design.md` §5.3:
+    /// - Fill AD conditional-chain log-weights from device-resident `p[label]`.
+    /// - Run XGCF forward+backward on GPU.
+    /// - Scatter gradients back into probability-space via the correct chain rule (uses both grad_true + grad_false).
+    ///
+    /// The output gradient buffers are updated in-place:
+    /// - Base run: `out = dlogZ_base/dp`
+    /// - Query-forced run: `out -= dlogZ_query/dp`
+    /// Result: `out = dL/dp` for `L = -log P(query | evidence)` (NLL).
+    pub fn neural_backward_nll_buffers(
+        &self,
+        slots: &GpuWeightSlots,
+        query_idx: usize,
+        probs: &[CudaBuffer],
+        out_grads: &mut [CudaBuffer],
+        cfg: NeuralFastPathConfig,
+    ) -> Result<()> {
+        let Some(_circuit) = &self.circuit else {
+            return Err(XlogError::Execution(
+                "Neural fast-path error: program has no compiled circuit".to_string(),
+            ));
+        };
+
+        let query_var = self.query_var(query_idx).ok_or_else(|| {
+            XlogError::Execution(format!(
+                "Neural fast-path error: query {} has no CNF var",
+                query_idx
+            ))
+        })?;
+
+        if probs.len() != out_grads.len() {
+            return Err(XlogError::Compilation(format!(
+                "Neural fast-path error: probs len {} != out_grads len {}",
+                probs.len(),
+                out_grads.len()
+            )));
+        }
+        if probs.len() as u32 != slots.num_groups() {
+            return Err(XlogError::Compilation(format!(
+                "Neural fast-path error: expected {} groups, got {}",
+                slots.num_groups(),
+                probs.len()
+            )));
+        }
+
+        let state = self.gpu_state()?;
+        let device = state.provider.device().inner();
+
+        let fill = device
+            .get_func(NEURAL_MODULE, neural_kernels::NEURAL_FILL_AD_CHAIN_F32)
+            .ok_or_else(|| {
+                XlogError::Kernel("neural_fill_ad_chain_f32 kernel not found".to_string())
+            })?;
+        let scatter = device
+            .get_func(NEURAL_MODULE, neural_kernels::NEURAL_SCATTER_AD_CHAIN_GRADS_F32)
+            .ok_or_else(|| {
+                XlogError::Kernel("neural_scatter_ad_chain_grads_f32 kernel not found".to_string())
+            })?;
+        let fill_const = device
+            .get_func(ARITH_MODULE, arith_kernels::ARITH_FILL_CONST_F64)
+            .ok_or_else(|| XlogError::Kernel("arith_fill_const_f64 kernel not found".to_string()))?;
+
+        let mut gpu_xgcf = state
+            .circuit
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        // 1) Update AD chain weights from device-resident p[label].
+        for (g, prob_buf) in probs.iter().enumerate() {
+            if prob_buf.arity() != 1 {
+                return Err(XlogError::Compilation(
+                    "Neural fast-path expects 1-column prob buffers".to_string(),
+                ));
+            }
+            let ty = prob_buf
+                .schema()
+                .column_type(0)
+                .ok_or_else(|| XlogError::Compilation("Missing prob buffer schema".to_string()))?;
+            if ty != ScalarType::F32 {
+                return Err(XlogError::Compilation(format!(
+                    "Neural fast-path expects prob dtype F32, got {:?}",
+                    ty
+                )));
+            }
+
+            let slot_vars = slots.group_slot_cnf_var(g)?;
+            let labels = slot_vars.len() as u32;
+
+            if prob_buf.num_rows() != labels as u64 {
+                return Err(XlogError::Compilation(format!(
+                    "Neural fast-path prob rows {} != labels {}",
+                    prob_buf.num_rows(),
+                    labels
+                )));
+            }
+
+            let prob_col = prob_buf.column(0).ok_or_else(|| {
+                XlogError::Compilation("Neural fast-path missing prob column".to_string())
+            })?;
+
+            let (var_log_true, var_log_false) = gpu_xgcf.var_log_weights_mut();
+
+            unsafe {
+                fill.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (1, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        prob_col,
+                        labels,
+                        &slot_vars,
+                        cfg.eps,
+                        cfg.min_p,
+                        var_log_true,
+                        var_log_false,
+                    ),
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("neural_fill_ad_chain_f32 failed: {}", e)))?;
+        }
+
+        // 2) Base run: out = dlogZ_base/dp
+        gpu_xgcf.eval_grads_inplace(&state.provider)?;
+        for (g, prob_buf) in probs.iter().enumerate() {
+            let slot_vars = slots.group_slot_cnf_var(g)?;
+            let labels = slot_vars.len() as u32;
+
+            let out_buf = out_grads.get_mut(g).ok_or_else(|| {
+                XlogError::Compilation("Neural fast-path missing output grad buffer".to_string())
+            })?;
+            if out_buf.arity() != 1 {
+                return Err(XlogError::Compilation(
+                    "Neural fast-path expects 1-column grad buffers".to_string(),
+                ));
+            }
+            let out_ty = out_buf
+                .schema()
+                .column_type(0)
+                .ok_or_else(|| XlogError::Compilation("Missing grad buffer schema".to_string()))?;
+            if out_ty != ScalarType::F32 {
+                return Err(XlogError::Compilation(format!(
+                    "Neural fast-path expects grad dtype F32, got {:?}",
+                    out_ty
+                )));
+            }
+            if out_buf.num_rows() != labels as u64 {
+                return Err(XlogError::Compilation(format!(
+                    "Neural fast-path grad rows {} != labels {}",
+                    out_buf.num_rows(),
+                    labels
+                )));
+            }
+
+            let prob_col = prob_buf.column(0).ok_or_else(|| {
+                XlogError::Compilation("Neural fast-path missing prob column".to_string())
+            })?;
+            let out_col = out_buf
+                .columns
+                .get_mut(0)
+                .ok_or_else(|| XlogError::Compilation("Missing grad column".to_string()))?;
+
+            let shared_bytes: u32 = 3u64
+                .checked_mul(labels as u64)
+                .and_then(|n| n.checked_mul(std::mem::size_of::<f64>() as u64))
+                .and_then(|n| u32::try_from(n).ok())
+                .ok_or_else(|| {
+                    XlogError::Kernel("Neural scatter shared memory overflow".to_string())
+                })?;
+
+            unsafe {
+                scatter.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (1, 1, 1),
+                        shared_mem_bytes: shared_bytes,
+                    },
+                    (
+                        prob_col,
+                        labels,
+                        &slot_vars,
+                        cfg.eps,
+                        cfg.min_p,
+                        gpu_xgcf.grad_true(),
+                        gpu_xgcf.grad_false(),
+                        0u8,
+                        out_col,
+                    ),
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("neural_scatter (base) failed: {}", e)))?;
+        }
+
+        // 3) Query run: out -= dlogZ_query/dp
+        let q = query_var as usize;
+        if q >= self.evidence_log_weights.len() {
+            return Err(XlogError::Compilation(format!(
+                "Neural fast-path error: query var {} out of bounds (len={})",
+                query_var,
+                self.evidence_log_weights.len()
+            )));
+        }
+        let restore_false = self.evidence_log_weights[q].1;
+
+        {
+            let mut q_false_view = gpu_xgcf.var_log_false_mut().slice_mut(q..(q + 1));
+            unsafe {
+                fill_const.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (1, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (f64::NEG_INFINITY, 1u32, &mut q_false_view),
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("force query var failed: {}", e)))?;
+        }
+
+        gpu_xgcf.eval_grads_inplace(&state.provider)?;
+        for (g, prob_buf) in probs.iter().enumerate() {
+            let slot_vars = slots.group_slot_cnf_var(g)?;
+            let labels = slot_vars.len() as u32;
+
+            let prob_col = prob_buf.column(0).ok_or_else(|| {
+                XlogError::Compilation("Neural fast-path missing prob column".to_string())
+            })?;
+            let out_col = out_grads[g]
+                .columns
+                .get_mut(0)
+                .ok_or_else(|| XlogError::Compilation("Missing grad column".to_string()))?;
+
+            let shared_bytes: u32 = 3u64
+                .checked_mul(labels as u64)
+                .and_then(|n| n.checked_mul(std::mem::size_of::<f64>() as u64))
+                .and_then(|n| u32::try_from(n).ok())
+                .ok_or_else(|| {
+                    XlogError::Kernel("Neural scatter shared memory overflow".to_string())
+                })?;
+
+            unsafe {
+                scatter.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (1, 1, 1),
+                        shared_mem_bytes: shared_bytes,
+                    },
+                    (
+                        prob_col,
+                        labels,
+                        &slot_vars,
+                        cfg.eps,
+                        cfg.min_p,
+                        gpu_xgcf.grad_true(),
+                        gpu_xgcf.grad_false(),
+                        1u8,
+                        out_col,
+                    ),
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("neural_scatter (query) failed: {}", e)))?;
+        }
+
+        {
+            let mut q_false_view = gpu_xgcf.var_log_false_mut().slice_mut(q..(q + 1));
+            unsafe {
+                fill_const.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (1, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (restore_false, 1u32, &mut q_false_view),
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("restore query var failed: {}", e)))?;
+        }
+
+        state.provider.device().synchronize()?;
+        Ok(())
     }
 
     pub fn evaluate_gpu_with_grads(&self) -> Result<ExactResultWithGrads> {
@@ -679,7 +973,7 @@ impl ExactDdnnfProgram {
             return Ok(state);
         }
 
-        let state = GpuExactState::new(circuit, self.gpu_config)?;
+        let state = GpuExactState::new(circuit, self.gpu_config, &self.evidence_log_weights)?;
         let _ = self.gpu.set(state);
         Ok(self.gpu.get().expect("OnceLock set failed"))
     }

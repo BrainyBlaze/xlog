@@ -8,6 +8,23 @@ use xlog_core::{Result, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::CudaKernelProvider;
 
+#[derive(Debug, Clone, Copy)]
+pub struct NeuralFastPathConfig {
+    /// Probability mass reserved for the implicit "none" outcome.
+    pub eps: f64,
+    /// Minimum probability clamp used for numerical stability.
+    pub min_p: f64,
+}
+
+impl Default for NeuralFastPathConfig {
+    fn default() -> Self {
+        Self {
+            eps: 1e-7,
+            min_p: 1e-12,
+        }
+    }
+}
+
 /// Device-resident mapping from neural output slots to CNF variable ids.
 ///
 /// Slots are grouped (one group per neural predicate instance). Each slot is a
