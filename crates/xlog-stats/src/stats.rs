@@ -400,12 +400,7 @@ impl JoinSelectivity {
     /// * `left_rows` - Actual left cardinality
     /// * `right_rows` - Actual right cardinality
     /// * `output_rows` - Actual output cardinality
-    pub fn update_from_observation(
-        &mut self,
-        left_rows: u64,
-        right_rows: u64,
-        output_rows: u64,
-    ) {
+    pub fn update_from_observation(&mut self, left_rows: u64, right_rows: u64, output_rows: u64) {
         let product = left_rows as f64 * right_rows as f64;
         if product > 0.0 {
             self.selectivity = (output_rows as f64 / product).clamp(0.0, 1.0);

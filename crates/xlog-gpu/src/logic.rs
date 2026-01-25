@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use xlog_core::{Result, Schema, XlogError, symbol};
+use xlog_core::{symbol, Result, Schema, XlogError};
 use xlog_cuda::{CudaBuffer, CudaKernelProvider};
 use xlog_logic::{BodyLiteral, Compiler, Program, Query, Term};
 use xlog_runtime::{ExecutionStats, Executor};
@@ -129,10 +129,7 @@ impl LogicProgram {
                 ))
             })?;
             ensure_schema_type_compatible(schema, buffer.schema()).map_err(|e| {
-                XlogError::Execution(format!(
-                    "Input relation {} schema mismatch: {}",
-                    name, e
-                ))
+                XlogError::Execution(format!("Input relation {} schema mismatch: {}", name, e))
             })?;
             executor.store_mut().put(&name, buffer);
         }
@@ -199,9 +196,9 @@ impl LogicProgram {
             let mut columns: Vec<Vec<u8>> = vec![Vec::new(); schema.arity()];
             for row in rows {
                 for (col_idx, term) in row.iter().enumerate() {
-                    let typ = schema
-                        .column_type(col_idx)
-                        .ok_or_else(|| XlogError::Execution(format!("Missing type for column {}", col_idx)))?;
+                    let typ = schema.column_type(col_idx).ok_or_else(|| {
+                        XlogError::Execution(format!("Missing type for column {}", col_idx))
+                    })?;
                     push_term_bytes(&mut columns[col_idx], term, typ)?;
                 }
             }
@@ -223,7 +220,11 @@ impl LogicProgram {
         Ok(())
     }
 
-    fn enforce_constraints(&self, provider: &CudaKernelProvider, executor: &Executor) -> Result<()> {
+    fn enforce_constraints(
+        &self,
+        provider: &CudaKernelProvider,
+        executor: &Executor,
+    ) -> Result<()> {
         for i in 0..self.program.constraints.len() {
             let name = format!("__xlog_constraint_{}", i);
             let buf = executor.store().get(&name).ok_or_else(|| {
@@ -262,9 +263,9 @@ fn ensure_schema_type_compatible(expected: &Schema, actual: &Schema) -> Result<(
         )));
     }
     for i in 0..expected.arity() {
-        let exp = expected
-            .column_type(i)
-            .ok_or_else(|| XlogError::Execution(format!("Missing expected type for column {}", i)))?;
+        let exp = expected.column_type(i).ok_or_else(|| {
+            XlogError::Execution(format!("Missing expected type for column {}", i))
+        })?;
         let act = actual
             .column_type(i)
             .ok_or_else(|| XlogError::Execution(format!("Missing actual type for column {}", i)))?;
@@ -284,21 +285,18 @@ fn push_term_bytes(out: &mut Vec<u8>, term: &Term, typ: xlog_core::ScalarType) -
 
     match (typ, term) {
         (ScalarType::U32, Term::Integer(v)) => {
-            let v = u32::try_from(*v).map_err(|_| {
-                XlogError::Execution(format!("u32 out of range: {}", v))
-            })?;
+            let v = u32::try_from(*v)
+                .map_err(|_| XlogError::Execution(format!("u32 out of range: {}", v)))?;
             out.extend_from_slice(&v.to_le_bytes());
         }
         (ScalarType::U64, Term::Integer(v)) => {
-            let v = u64::try_from(*v).map_err(|_| {
-                XlogError::Execution(format!("u64 out of range: {}", v))
-            })?;
+            let v = u64::try_from(*v)
+                .map_err(|_| XlogError::Execution(format!("u64 out of range: {}", v)))?;
             out.extend_from_slice(&v.to_le_bytes());
         }
         (ScalarType::I32, Term::Integer(v)) => {
-            let v = i32::try_from(*v).map_err(|_| {
-                XlogError::Execution(format!("i32 out of range: {}", v))
-            })?;
+            let v = i32::try_from(*v)
+                .map_err(|_| XlogError::Execution(format!("i32 out of range: {}", v)))?;
             out.extend_from_slice(&v.to_le_bytes());
         }
         (ScalarType::I64, Term::Integer(v)) => {

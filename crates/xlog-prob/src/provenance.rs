@@ -4,10 +4,14 @@ use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
 
 use xlog_core::{Result, XlogError};
-use xlog_logic::ast::{AggExpr, AggOp, ArithExpr, Atom, BodyLiteral, CompOp, Evidence, ProbQuery, Program, Rule, Term};
-use xlog_logic::stratify::{analyze_stratification, build_dependency_graph, find_sccs_for_lowering, stratify};
+use xlog_logic::ast::{
+    AggExpr, AggOp, ArithExpr, Atom, BodyLiteral, CompOp, Evidence, ProbQuery, Program, Rule, Term,
+};
+use xlog_logic::stratify::{
+    analyze_stratification, build_dependency_graph, find_sccs_for_lowering, stratify,
+};
 
-use crate::wfs::{WfsAtom, WfsConfig, WfsLiteral, WfsRule, evaluate_wfs_rules};
+use crate::wfs::{evaluate_wfs_rules, WfsAtom, WfsConfig, WfsLiteral, WfsRule};
 
 use crate::pir::{ChoiceVarId, LeafId, PirGraph, PirNodeId};
 
@@ -73,7 +77,10 @@ impl Relation {
     }
 
     fn insert_or(&mut self, tuple: Vec<Value>, formula: PirNodeId, builder: &mut PirBuilder) {
-        let entry = self.tuples.entry(tuple).or_insert_with(|| builder.const_false());
+        let entry = self
+            .tuples
+            .entry(tuple)
+            .or_insert_with(|| builder.const_false());
         *entry = builder.or(vec![*entry, formula]);
     }
 }
@@ -237,7 +244,12 @@ impl PirBuilder {
         id
     }
 
-    fn decision(&mut self, var: ChoiceVarId, child_false: PirNodeId, child_true: PirNodeId) -> PirNodeId {
+    fn decision(
+        &mut self,
+        var: ChoiceVarId,
+        child_false: PirNodeId,
+        child_true: PirNodeId,
+    ) -> PirNodeId {
         if child_false == child_true {
             return child_true;
         }
@@ -301,7 +313,9 @@ pub fn extract_from_program(program: &Program) -> Result<Provenance> {
     // Deterministic facts.
     for fact in program.facts() {
         let key = atom_key_from_ground_atom(&fact.head)?;
-        let rel = store.entry(key.predicate.clone()).or_insert_with(Relation::new);
+        let rel = store
+            .entry(key.predicate.clone())
+            .or_insert_with(Relation::new);
         rel.insert_or(key.args.clone(), builder.const_true(), &mut builder);
     }
 
@@ -314,7 +328,9 @@ pub fn extract_from_program(program: &Program) -> Result<Provenance> {
         next_leaf = next_leaf.saturating_add(1);
         leaf_probs.insert(leaf, pf.prob);
 
-        let rel = store.entry(key.predicate.clone()).or_insert_with(Relation::new);
+        let rel = store
+            .entry(key.predicate.clone())
+            .or_insert_with(Relation::new);
         rel.insert_or(key.args.clone(), builder.lit(leaf), &mut builder);
     }
 
@@ -332,7 +348,9 @@ pub fn extract_from_program(program: &Program) -> Result<Provenance> {
 
         for (pf, formula) in ad.choices.iter().zip(outcome_formulas.into_iter()) {
             let key = atom_key_from_ground_atom(&pf.atom)?;
-            let rel = store.entry(key.predicate.clone()).or_insert_with(Relation::new);
+            let rel = store
+                .entry(key.predicate.clone())
+                .or_insert_with(Relation::new);
             rel.insert_or(key.args.clone(), formula, &mut builder);
         }
     }
@@ -350,7 +368,8 @@ pub fn extract_from_program(program: &Program) -> Result<Provenance> {
     // Build a set of SCC indices that are non-monotone
     // We need to map the SCCs from find_sccs_for_lowering to analyze_stratification
     // Both use the same SCC algorithm, so indices should match
-    let non_monotone_scc_preds: std::collections::HashSet<String> = strat_result.sccs
+    let non_monotone_scc_preds: std::collections::HashSet<String> = strat_result
+        .sccs
         .iter()
         .enumerate()
         .filter(|(i, _)| strat_result.non_monotone_sccs.contains(i))
@@ -499,7 +518,11 @@ fn compile_annotated_disjunction(
     let mut remaining = 1.0f64;
     for i in 0..(m - 1) {
         let p_i = probs[i];
-        let cond_true = if remaining <= 0.0 { 0.0 } else { p_i / remaining };
+        let cond_true = if remaining <= 0.0 {
+            0.0
+        } else {
+            p_i / remaining
+        };
         validate_prob(cond_true, "annotated disjunction conditional")?;
         let cond_false = 1.0 - cond_true;
         let var = ChoiceVarId::new(*next_choice);
@@ -557,7 +580,9 @@ fn eval_non_recursive_scc(
 ) -> Result<()> {
     for rule in rules {
         let derived = eval_rule(rule, store, &HashMap::new(), None, builder)?;
-        let rel = store.entry(rule.head.predicate.clone()).or_insert_with(Relation::new);
+        let rel = store
+            .entry(rule.head.predicate.clone())
+            .or_insert_with(Relation::new);
         for (tuple, formula) in derived {
             rel.insert_or(tuple, formula, builder);
         }
@@ -622,7 +647,8 @@ fn eval_recursive_scc(
                 .filter_map(|(i, lit)| match lit {
                     BodyLiteral::Positive(atom) if scc_set.contains(atom.predicate.as_str()) => {
                         let pred = &atom.predicate;
-                        let non_empty = delta_prev.get(pred).map(|r| !r.is_empty()).unwrap_or(false);
+                        let non_empty =
+                            delta_prev.get(pred).map(|r| !r.is_empty()).unwrap_or(false);
                         non_empty.then_some(i)
                     }
                     _ => None,
@@ -634,9 +660,12 @@ fn eval_recursive_scc(
 
             let mut derived_all: HashMap<Vec<Value>, PirNodeId> = HashMap::new();
             for idx in body_indices {
-                let derived = eval_rule(rule, store, &full_prev, Some((idx, &delta_prev)), builder)?;
+                let derived =
+                    eval_rule(rule, store, &full_prev, Some((idx, &delta_prev)), builder)?;
                 for (tuple, proof) in derived {
-                    let entry = derived_all.entry(tuple).or_insert_with(|| builder.const_false());
+                    let entry = derived_all
+                        .entry(tuple)
+                        .or_insert_with(|| builder.const_false());
                     *entry = builder.or(vec![*entry, proof]);
                 }
             }
@@ -711,7 +740,9 @@ fn eval_non_monotone_scc_with_wfs(
     // Step 3: Store the results back
     // True atoms get their provenance, false/undefined atoms are not added
     for (wfs_atom, prov) in wfs_result.true_set {
-        let rel = store.entry(wfs_atom.predicate.clone()).or_insert_with(Relation::new);
+        let rel = store
+            .entry(wfs_atom.predicate.clone())
+            .or_insert_with(Relation::new);
         rel.insert_or(wfs_atom.args, prov, builder);
     }
 
@@ -729,7 +760,8 @@ fn ground_rule_for_wfs(
     builder: &mut PirBuilder,
 ) -> Result<Vec<WfsRule>> {
     // Start with empty binding
-    let mut bindings: Vec<(HashMap<String, Value>, PirNodeId)> = vec![(HashMap::new(), builder.const_true())];
+    let mut bindings: Vec<(HashMap<String, Value>, PirNodeId)> =
+        vec![(HashMap::new(), builder.const_true())];
 
     // Collect body literals that are in the SCC (will become WFS body literals)
     // and non-SCC literals (will be grounded now)
@@ -1088,7 +1120,9 @@ fn eval_rule(
     let mut out: HashMap<Vec<Value>, PirNodeId> = HashMap::new();
     for (binding, prov) in states {
         let head_tuple = materialize_head(&rule.head, &binding)?;
-        let entry = out.entry(head_tuple).or_insert_with(|| builder.const_false());
+        let entry = out
+            .entry(head_tuple)
+            .or_insert_with(|| builder.const_false());
         *entry = builder.or(vec![*entry, prov]);
     }
     Ok(out)
@@ -1182,11 +1216,26 @@ fn materialize_head(head: &Atom, binding: &HashMap<String, Value>) -> Result<Vec
             Term::Integer(_) | Term::Float(_) | Term::String(_) | Term::Symbol(_) => {
                 out.push(value_from_term(term)?);
             }
-            Term::Aggregate(AggExpr { op: AggOp::Count, variable: _ })
-            | Term::Aggregate(AggExpr { op: AggOp::Sum, variable: _ })
-            | Term::Aggregate(AggExpr { op: AggOp::Min, variable: _ })
-            | Term::Aggregate(AggExpr { op: AggOp::Max, variable: _ })
-            | Term::Aggregate(AggExpr { op: AggOp::LogSumExp, variable: _ }) => {
+            Term::Aggregate(AggExpr {
+                op: AggOp::Count,
+                variable: _,
+            })
+            | Term::Aggregate(AggExpr {
+                op: AggOp::Sum,
+                variable: _,
+            })
+            | Term::Aggregate(AggExpr {
+                op: AggOp::Min,
+                variable: _,
+            })
+            | Term::Aggregate(AggExpr {
+                op: AggOp::Max,
+                variable: _,
+            })
+            | Term::Aggregate(AggExpr {
+                op: AggOp::LogSumExp,
+                variable: _,
+            }) => {
                 return Err(XlogError::Compilation(
                     "Aggregation not supported in provenance extraction".to_string(),
                 ));
@@ -1246,7 +1295,9 @@ pub(crate) fn resolve_term(term: &Term, binding: &HashMap<String, Value>) -> Res
         Term::Anonymous => Err(XlogError::Compilation(
             "Anonymous variable not allowed in comparison".to_string(),
         )),
-        Term::Integer(_) | Term::Float(_) | Term::String(_) | Term::Symbol(_) => value_from_term(term),
+        Term::Integer(_) | Term::Float(_) | Term::String(_) | Term::Symbol(_) => {
+            value_from_term(term)
+        }
         Term::Aggregate(_) => Err(XlogError::Compilation(
             "Aggregation not supported in provenance extraction".to_string(),
         )),
@@ -1271,7 +1322,9 @@ pub(crate) fn eval_arith_expr(expr: &ArithExpr, binding: &HashMap<String, Value>
                 let f = f64::from_bits(bits).abs();
                 Ok(Value::F64(f.to_bits()))
             }
-            _ => Err(XlogError::Compilation("abs() requires numeric input".to_string())),
+            _ => Err(XlogError::Compilation(
+                "abs() requires numeric input".to_string(),
+            )),
         },
         ArithExpr::Min(l, r) => eval_bin_op(l, r, binding, |a, b| a.min(b), |a, b| a.min(b)),
         ArithExpr::Max(l, r) => eval_bin_op(l, r, binding, |a, b| a.max(b), |a, b| a.max(b)),
@@ -1279,11 +1332,17 @@ pub(crate) fn eval_arith_expr(expr: &ArithExpr, binding: &HashMap<String, Value>
             let a = eval_arith_expr(l, binding)?;
             let b = eval_arith_expr(r, binding)?;
             match (a, b) {
-                (Value::I64(a), Value::I64(b)) => Ok(Value::I64(a.pow(u32::try_from(b).map_err(|_| {
-                    XlogError::Compilation("pow exponent must fit in u32".to_string())
-                })?))),
-                (Value::F64(a), Value::F64(b)) => Ok(Value::F64(f64::from_bits(a).powf(f64::from_bits(b)).to_bits())),
-                _ => Err(XlogError::Compilation("pow requires numeric inputs of same type".to_string())),
+                (Value::I64(a), Value::I64(b)) => {
+                    Ok(Value::I64(a.pow(u32::try_from(b).map_err(|_| {
+                        XlogError::Compilation("pow exponent must fit in u32".to_string())
+                    })?)))
+                }
+                (Value::F64(a), Value::F64(b)) => Ok(Value::F64(
+                    f64::from_bits(a).powf(f64::from_bits(b)).to_bits(),
+                )),
+                _ => Err(XlogError::Compilation(
+                    "pow requires numeric inputs of same type".to_string(),
+                )),
             }
         }
         ArithExpr::Cast(e, _ty) => {
@@ -1291,17 +1350,13 @@ pub(crate) fn eval_arith_expr(expr: &ArithExpr, binding: &HashMap<String, Value>
             // type system, but provenance needs only deterministic evaluation.
             eval_arith_expr(e, binding)
         }
-        ArithExpr::FuncCall { name, .. } => {
-            Err(XlogError::Compilation(format!(
-                "Function call `{}` must be expanded before provenance extraction",
-                name
-            )))
-        }
-        ArithExpr::Conditional { .. } => {
-            Err(XlogError::Compilation(
-                "Conditional expressions must be expanded before provenance extraction".to_string()
-            ))
-        }
+        ArithExpr::FuncCall { name, .. } => Err(XlogError::Compilation(format!(
+            "Function call `{}` must be expanded before provenance extraction",
+            name
+        ))),
+        ArithExpr::Conditional { .. } => Err(XlogError::Compilation(
+            "Conditional expressions must be expanded before provenance extraction".to_string(),
+        )),
     }
 }
 
@@ -1320,7 +1375,9 @@ where
     let b = eval_arith_expr(r, binding)?;
     match (a, b) {
         (Value::I64(a), Value::I64(b)) => Ok(Value::I64(op_int(a, b))),
-        (Value::F64(a), Value::F64(b)) => Ok(Value::F64(op_float(f64::from_bits(a), f64::from_bits(b)).to_bits())),
+        (Value::F64(a), Value::F64(b)) => Ok(Value::F64(
+            op_float(f64::from_bits(a), f64::from_bits(b)).to_bits(),
+        )),
         _ => Err(XlogError::Compilation(
             "Arithmetic operation requires matching numeric types".to_string(),
         )),

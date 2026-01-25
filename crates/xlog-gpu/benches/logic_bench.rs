@@ -13,7 +13,7 @@ use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criteri
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use xlog_core::{MemoryBudget, Schema, ScalarType};
+use xlog_core::{MemoryBudget, ScalarType, Schema};
 use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager};
 use xlog_gpu::logic::LogicProgram;
 
@@ -124,24 +124,19 @@ fn bench_transitive_closure_chain(c: &mut Criterion) {
         let program = LogicProgram::compile(TC_PROGRAM).expect("compile TC program");
 
         group.throughput(Throughput::Elements(*chain_len as u64));
-        group.bench_with_input(
-            BenchmarkId::new("depth", chain_len),
-            &edges,
-            |b, edges| {
-                b.iter_batched(
-                    || {
-                        let edge_buf = create_edge_buffer(&provider, edges).expect("create edge buffer");
-                        let mut inputs = HashMap::new();
-                        inputs.insert("edge".to_string(), edge_buf);
-                        inputs
-                    },
-                    |inputs| {
-                        program.evaluate(black_box(provider.clone()), black_box(inputs))
-                    },
-                    criterion::BatchSize::SmallInput,
-                );
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("depth", chain_len), &edges, |b, edges| {
+            b.iter_batched(
+                || {
+                    let edge_buf =
+                        create_edge_buffer(&provider, edges).expect("create edge buffer");
+                    let mut inputs = HashMap::new();
+                    inputs.insert("edge".to_string(), edge_buf);
+                    inputs
+                },
+                |inputs| program.evaluate(black_box(provider.clone()), black_box(inputs)),
+                criterion::BatchSize::SmallInput,
+            );
+        });
     }
 
     group.finish();
@@ -171,15 +166,13 @@ fn bench_transitive_closure_random(c: &mut Criterion) {
         group.throughput(Throughput::Elements(*num_edges as u64));
         group.bench_with_input(BenchmarkId::new("edges", label), &edges, |b, edges| {
             b.iter_batched(
-                || {
-                    match create_edge_buffer(&provider, edges) {
-                        Ok(buf) => {
-                            let mut inputs = HashMap::new();
-                            inputs.insert("edge".to_string(), buf);
-                            Some(inputs)
-                        }
-                        Err(_) => None,
+                || match create_edge_buffer(&provider, edges) {
+                    Ok(buf) => {
+                        let mut inputs = HashMap::new();
+                        inputs.insert("edge".to_string(), buf);
+                        Some(inputs)
                     }
+                    Err(_) => None,
                 },
                 |inputs| {
                     if let Some(inputs) = inputs {
@@ -217,15 +210,13 @@ fn bench_transitive_closure_dense(c: &mut Criterion) {
         group.throughput(Throughput::Elements(num_edges));
         group.bench_with_input(BenchmarkId::new("bipartite", n), &edges, |b, edges| {
             b.iter_batched(
-                || {
-                    match create_edge_buffer(&provider, edges) {
-                        Ok(buf) => {
-                            let mut inputs = HashMap::new();
-                            inputs.insert("edge".to_string(), buf);
-                            Some(inputs)
-                        }
-                        Err(_) => None,
+                || match create_edge_buffer(&provider, edges) {
+                    Ok(buf) => {
+                        let mut inputs = HashMap::new();
+                        inputs.insert("edge".to_string(), buf);
+                        Some(inputs)
                     }
+                    Err(_) => None,
                 },
                 |inputs| {
                     if let Some(inputs) = inputs {
@@ -353,10 +344,10 @@ fn bench_hash_join_selectivity(c: &mut Criterion) {
     // Test different join selectivities by varying key range
     // Smaller key range = more matches per key = higher selectivity
     for (label, key_range) in [
-        ("high_sel_100", 100u32),      // Very high selectivity
-        ("med_sel_1K", 1_000),         // Medium selectivity
-        ("low_sel_10K", 10_000),       // Low selectivity
-        ("very_low_100K", 100_000),    // Very low selectivity
+        ("high_sel_100", 100u32),   // Very high selectivity
+        ("med_sel_1K", 1_000),      // Medium selectivity
+        ("low_sel_10K", 10_000),    // Low selectivity
+        ("very_low_100K", 100_000), // Very low selectivity
     ]
     .iter()
     {

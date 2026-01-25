@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use xlog_core::{MemoryBudget, Result, XlogError};
 
-use crate::{GpuDevicePool, GpuMemoryManager};
 use crate::memory::TrackedCudaSlice;
+use crate::{GpuDevicePool, GpuMemoryManager};
 
 /// Memory manager for multiple GPU devices
 pub struct MultiGpuMemoryManager {
@@ -39,10 +39,10 @@ impl MultiGpuMemoryManager {
         device_idx: usize,
         len: usize,
     ) -> Result<TrackedCudaSlice<T>> {
-        let mgr = self.managers.get(device_idx)
-            .ok_or_else(|| XlogError::Kernel(format!(
-                "Device {} not found", device_idx
-            )))?;
+        let mgr = self
+            .managers
+            .get(device_idx)
+            .ok_or_else(|| XlogError::Kernel(format!("Device {} not found", device_idx)))?;
         mgr.alloc::<T>(len)
     }
 
@@ -63,7 +63,8 @@ impl MultiGpuMemoryManager {
 
     /// Get remaining bytes on a specific device
     pub fn remaining_bytes(&self, device_idx: usize) -> u64 {
-        self.managers.get(device_idx)
+        self.managers
+            .get(device_idx)
             .map(|m| m.remaining_bytes())
             .unwrap_or(0)
     }

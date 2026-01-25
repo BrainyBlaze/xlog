@@ -136,7 +136,10 @@ fn test_kernel_single_level(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_kernel_single_level",
             start.elapsed(),
-            format!("Expected 101 values (100 lits + 1 OR), got {}", values.len()),
+            format!(
+                "Expected 101 values (100 lits + 1 OR), got {}",
+                values.len()
+            ),
         );
     }
 
@@ -198,7 +201,10 @@ fn test_kernel_deep_circuit(ctx: &TestContext) -> TestResult {
             return TestResult::error(
                 "test_kernel_deep_circuit",
                 start.elapsed(),
-                format!("Failed to run forward pass on 100-level deep circuit: {}", e),
+                format!(
+                    "Failed to run forward pass on 100-level deep circuit: {}",
+                    e
+                ),
             );
         }
     };
@@ -208,7 +214,10 @@ fn test_kernel_deep_circuit(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_kernel_deep_circuit",
             start.elapsed(),
-            format!("Expected 101 values (1 Lit + 100 ANDs), got {}", values.len()),
+            format!(
+                "Expected 101 values (1 Lit + 100 ANDs), got {}",
+                values.len()
+            ),
         );
     }
 
@@ -387,8 +396,16 @@ fn test_kernel_max_variables(ctx: &TestContext) -> TestResult {
     let mut expected_values: Vec<f64> = (1..=num_vars).map(|i| var_log_true[i]).collect();
 
     // OR node: logsumexp of all literals
-    let max_val = expected_values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let or_val = max_val + expected_values.iter().map(|&v| (v - max_val).exp()).sum::<f64>().ln();
+    let max_val = expected_values
+        .iter()
+        .cloned()
+        .fold(f64::NEG_INFINITY, f64::max);
+    let or_val = max_val
+        + expected_values
+            .iter()
+            .map(|&v| (v - max_val).exp())
+            .sum::<f64>()
+            .ln();
     expected_values.push(or_val);
 
     let spec = TinyXgcfSpec {
@@ -522,7 +539,8 @@ fn test_kernel_sparse_variables(ctx: &TestContext) -> TestResult {
 
     // logsumexp for OR
     let max_val = v0.max(v1).max(v2);
-    let or_val = max_val + ((v0 - max_val).exp() + (v1 - max_val).exp() + (v2 - max_val).exp()).ln();
+    let or_val =
+        max_val + ((v0 - max_val).exp() + (v1 - max_val).exp() + (v2 - max_val).exp()).ln();
 
     let expected_values = vec![v0, v1, v2, or_val];
 
@@ -567,13 +585,9 @@ fn test_kernel_sparse_variables(ctx: &TestContext) -> TestResult {
     }
 
     // Verify each literal got the correct weight
-    for (i, (expected, name)) in [
-        (v0, "Lit(1)"),
-        (v1, "Lit(100)"),
-        (v2, "Lit(500)"),
-    ]
-    .iter()
-    .enumerate()
+    for (i, (expected, name)) in [(v0, "Lit(1)"), (v1, "Lit(100)"), (v2, "Lit(500)")]
+        .iter()
+        .enumerate()
     {
         let diff = (values[i] - expected).abs();
         if diff > 1e-10 {
@@ -888,7 +902,10 @@ fn test_kernel_logsumexp_stability(ctx: &TestContext) -> TestResult {
             return TestResult::error(
                 "test_kernel_logsumexp_stability",
                 start.elapsed(),
-                format!("Failed to run forward pass with extreme value differences: {}", e),
+                format!(
+                    "Failed to run forward pass with extreme value differences: {}",
+                    e
+                ),
             );
         }
     };

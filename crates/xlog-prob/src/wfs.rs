@@ -37,10 +37,10 @@
 //! It receives ground rules (after variable substitution) and returns the well-founded
 //! model with provenance formulas for true atoms.
 
-use std::collections::{HashMap, HashSet};
-use xlog_core::{Result, XlogError};
 use crate::pir::{PirGraph, PirNodeId};
 use crate::provenance::Value;
+use std::collections::{HashMap, HashSet};
+use xlog_core::{Result, XlogError};
 
 /// Ground atom representation for WFS
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -138,7 +138,11 @@ pub struct WfsRule {
 impl WfsRule {
     /// Create a new ground rule
     pub fn new(head: WfsAtom, body: Vec<WfsLiteral>, provenance: PirNodeId) -> Self {
-        Self { head, body, provenance }
+        Self {
+            head,
+            body,
+            provenance,
+        }
     }
 
     /// Check if rule body is satisfied under current interpretation
@@ -194,7 +198,11 @@ impl WfsRule {
     ///
     /// This can be used for early pruning in more advanced WFS implementations.
     #[allow(dead_code)]
-    pub fn is_definitely_unsatisfiable(&self, true_set: &HashSet<WfsAtom>, false_set: &HashSet<WfsAtom>) -> bool {
+    pub fn is_definitely_unsatisfiable(
+        &self,
+        true_set: &HashSet<WfsAtom>,
+        false_set: &HashSet<WfsAtom>,
+    ) -> bool {
         for lit in &self.body {
             match lit {
                 WfsLiteral::Positive(atom) => {
@@ -254,7 +262,10 @@ impl WfsResult {
     }
 
     /// Get all undefined atoms from a set of atoms
-    pub fn undefined_atoms<'a>(&self, atoms: impl Iterator<Item = &'a WfsAtom>) -> Vec<&'a WfsAtom> {
+    pub fn undefined_atoms<'a>(
+        &self,
+        atoms: impl Iterator<Item = &'a WfsAtom>,
+    ) -> Vec<&'a WfsAtom> {
         atoms.filter(|a| self.is_undefined(a)).collect()
     }
 }
@@ -303,10 +314,7 @@ impl<'a> WfsContext<'a> {
 
         for (i, rule) in rules.iter().enumerate() {
             scc_atoms.insert(rule.head.clone());
-            rules_by_head
-                .entry(rule.head.clone())
-                .or_default()
-                .push(i);
+            rules_by_head.entry(rule.head.clone()).or_default().push(i);
         }
 
         Self {
@@ -331,7 +339,8 @@ fn compute_unfounded_set(
     false_set: &HashSet<WfsAtom>,
 ) -> HashSet<WfsAtom> {
     // Start with all non-true atoms as potentially unfounded
-    let mut unfounded: HashSet<WfsAtom> = ctx.scc_atoms
+    let mut unfounded: HashSet<WfsAtom> = ctx
+        .scc_atoms
         .iter()
         .filter(|a| !true_set.contains(*a))
         .cloned()
@@ -347,7 +356,13 @@ fn compute_unfounded_set(
             if let Some(rule_indices) = ctx.rules_by_head.get(atom) {
                 for &rule_idx in rule_indices {
                     let rule = &ctx.rules[rule_idx];
-                    if rule_is_potentially_supporting(rule, true_set, false_set, &unfounded, &ctx.scc_atoms) {
+                    if rule_is_potentially_supporting(
+                        rule,
+                        true_set,
+                        false_set,
+                        &unfounded,
+                        &ctx.scc_atoms,
+                    ) {
                         to_remove.push(atom.clone());
                         changed = true;
                         break;
@@ -463,9 +478,9 @@ fn derive_consequences(
             };
 
             // Combine with any existing provenance for this atom (multiple rules)
-            let entry = new_true.entry(rule.head.clone()).or_insert_with(|| {
-                ctx.pir.const_false()
-            });
+            let entry = new_true
+                .entry(rule.head.clone())
+                .or_insert_with(|| ctx.pir.const_false());
             *entry = ctx.pir.or(vec![*entry, rule_prov]);
         }
     }
@@ -521,7 +536,8 @@ pub fn evaluate_wfs_rules(
         let unfounded = compute_unfounded_set(&ctx, &true_set, &false_set);
 
         // Add unfounded atoms to false set
-        let new_false: Vec<WfsAtom> = unfounded.into_iter()
+        let new_false: Vec<WfsAtom> = unfounded
+            .into_iter()
             .filter(|a| !false_set.contains(a))
             .collect();
         let new_false_count = new_false.len();
@@ -536,7 +552,9 @@ pub fn evaluate_wfs_rules(
             if !true_set.contains(&atom) {
                 true_set.insert(atom.clone());
                 // Combine provenance if atom becomes true via multiple rules
-                let entry = true_provenance.entry(atom).or_insert_with(|| ctx.pir.const_false());
+                let entry = true_provenance
+                    .entry(atom)
+                    .or_insert_with(|| ctx.pir.const_false());
                 *entry = ctx.pir.or(vec![*entry, prov]);
             }
         }
@@ -565,10 +583,7 @@ pub fn evaluate_wfs_rules(
 /// This is the original interface that takes predicate names. It creates
 /// propositional atoms (no arguments) for simple testing. For full integration
 /// with the provenance extractor, use `evaluate_wfs_rules` with proper grounding.
-pub fn evaluate_wfs_scc(
-    scc_predicates: &[String],
-    pir: &mut PirGraph,
-) -> Result<WfsResult> {
+pub fn evaluate_wfs_scc(scc_predicates: &[String], pir: &mut PirGraph) -> Result<WfsResult> {
     evaluate_wfs_scc_with_config(scc_predicates, pir, &WfsConfig::default())
 }
 
@@ -599,7 +614,7 @@ pub fn evaluate_wfs_scc_with_config(
     // Verify convergence by simulating one iteration
     // (Since we have no rules, this is trivially stable)
     let _ = config; // config would be used if we had rules
-    let _ = pir;    // pir would be used for provenance if we had rules
+    let _ = pir; // pir would be used for provenance if we had rules
 
     Ok(WfsResult {
         true_set: HashMap::new(),
@@ -614,10 +629,7 @@ pub fn evaluate_wfs_scc_with_config(
 /// 1. Detecting non-monotone SCCs
 /// 2. Grounding the rules in those SCCs
 /// 3. Providing the ground rules with their provenances
-pub fn evaluate_wfs_with_rules(
-    rules: Vec<WfsRule>,
-    pir: &mut PirGraph,
-) -> Result<WfsResult> {
+pub fn evaluate_wfs_with_rules(rules: Vec<WfsRule>, pir: &mut PirGraph) -> Result<WfsResult> {
     evaluate_wfs_rules(&rules, pir, &WfsConfig::default())
 }
 
@@ -703,9 +715,7 @@ mod tests {
         let mut pir = PirGraph::new();
         let const_true = pir.const_true();
 
-        let rules = vec![
-            WfsRule::new(prop("p"), vec![], const_true),
-        ];
+        let rules = vec![WfsRule::new(prop("p"), vec![], const_true)];
 
         let result = evaluate_wfs_rules(&rules, &mut pir, &WfsConfig::default()).unwrap();
 
@@ -722,16 +732,8 @@ mod tests {
         let const_true = pir.const_true();
 
         let rules = vec![
-            WfsRule::new(
-                prop("p"),
-                vec![WfsLiteral::Negative(prop("q"))],
-                const_true,
-            ),
-            WfsRule::new(
-                prop("q"),
-                vec![WfsLiteral::Negative(prop("p"))],
-                const_true,
-            ),
+            WfsRule::new(prop("p"), vec![WfsLiteral::Negative(prop("q"))], const_true),
+            WfsRule::new(prop("q"), vec![WfsLiteral::Negative(prop("p"))], const_true),
         ];
 
         let result = evaluate_wfs_rules(&rules, &mut pir, &WfsConfig::default()).unwrap();
@@ -749,11 +751,7 @@ mod tests {
         let const_true = pir.const_true();
 
         let rules = vec![
-            WfsRule::new(
-                prop("p"),
-                vec![WfsLiteral::Negative(prop("q"))],
-                const_true,
-            ),
+            WfsRule::new(prop("p"), vec![WfsLiteral::Negative(prop("q"))], const_true),
             WfsRule::new(prop("q"), vec![], const_true),
         ];
 
@@ -771,21 +769,9 @@ mod tests {
         let const_true = pir.const_true();
 
         let rules = vec![
-            WfsRule::new(
-                prop("p"),
-                vec![WfsLiteral::Negative(prop("q"))],
-                const_true,
-            ),
-            WfsRule::new(
-                prop("q"),
-                vec![WfsLiteral::Negative(prop("r"))],
-                const_true,
-            ),
-            WfsRule::new(
-                prop("r"),
-                vec![WfsLiteral::Negative(prop("p"))],
-                const_true,
-            ),
+            WfsRule::new(prop("p"), vec![WfsLiteral::Negative(prop("q"))], const_true),
+            WfsRule::new(prop("q"), vec![WfsLiteral::Negative(prop("r"))], const_true),
+            WfsRule::new(prop("r"), vec![WfsLiteral::Negative(prop("p"))], const_true),
         ];
 
         let result = evaluate_wfs_rules(&rules, &mut pir, &WfsConfig::default()).unwrap();
@@ -825,8 +811,14 @@ mod tests {
         let result = evaluate_wfs_rules(&rules, &mut pir, &WfsConfig::default()).unwrap();
 
         // Both win(1) and win(2) are undefined
-        assert_eq!(result.truth_value(&atom("win", &[1])), TruthValue::Undefined);
-        assert_eq!(result.truth_value(&atom("win", &[2])), TruthValue::Undefined);
+        assert_eq!(
+            result.truth_value(&atom("win", &[1])),
+            TruthValue::Undefined
+        );
+        assert_eq!(
+            result.truth_value(&atom("win", &[2])),
+            TruthValue::Undefined
+        );
     }
 
     #[test]
@@ -889,16 +881,8 @@ mod tests {
 
         let rules = vec![
             WfsRule::new(prop("a"), vec![], const_true),
-            WfsRule::new(
-                prop("b"),
-                vec![WfsLiteral::Negative(prop("a"))],
-                const_true,
-            ),
-            WfsRule::new(
-                prop("c"),
-                vec![WfsLiteral::Negative(prop("b"))],
-                const_true,
-            ),
+            WfsRule::new(prop("b"), vec![WfsLiteral::Negative(prop("a"))], const_true),
+            WfsRule::new(prop("c"), vec![WfsLiteral::Negative(prop("b"))], const_true),
         ];
 
         let result = evaluate_wfs_rules(&rules, &mut pir, &WfsConfig::default()).unwrap();
@@ -920,16 +904,8 @@ mod tests {
         let rules = vec![
             WfsRule::new(prop("q"), vec![], const_true),
             WfsRule::new(prop("r"), vec![], const_true),
-            WfsRule::new(
-                prop("p"),
-                vec![WfsLiteral::Positive(prop("q"))],
-                const_true,
-            ),
-            WfsRule::new(
-                prop("p"),
-                vec![WfsLiteral::Negative(prop("r"))],
-                const_true,
-            ),
+            WfsRule::new(prop("p"), vec![WfsLiteral::Positive(prop("q"))], const_true),
+            WfsRule::new(prop("p"), vec![WfsLiteral::Negative(prop("r"))], const_true),
         ];
 
         let result = evaluate_wfs_rules(&rules, &mut pir, &WfsConfig::default()).unwrap();
@@ -946,9 +922,7 @@ mod tests {
         let mut pir = PirGraph::new();
         let leaf = pir.lit(LeafId::new(42));
 
-        let rules = vec![
-            WfsRule::new(prop("p"), vec![], leaf),
-        ];
+        let rules = vec![WfsRule::new(prop("p"), vec![], leaf)];
 
         let result = evaluate_wfs_rules(&rules, &mut pir, &WfsConfig::default()).unwrap();
 
@@ -969,11 +943,7 @@ mod tests {
 
         let rules = vec![
             WfsRule::new(prop("q"), vec![], leaf_q),
-            WfsRule::new(
-                prop("p"),
-                vec![WfsLiteral::Positive(prop("q"))],
-                const_true,
-            ),
+            WfsRule::new(prop("p"), vec![WfsLiteral::Positive(prop("q"))], const_true),
         ];
 
         let result = evaluate_wfs_rules(&rules, &mut pir, &WfsConfig::default()).unwrap();
@@ -995,7 +965,8 @@ mod tests {
             &["p".to_string(), "q".to_string()],
             &mut PirGraph::new(),
             &WfsConfig::default(),
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(result.truth_value(&prop("p")), TruthValue::False);
         assert_eq!(result.truth_value(&prop("q")), TruthValue::False);
@@ -1009,16 +980,8 @@ mod tests {
         let const_true = pir.const_true();
 
         let rules = vec![
-            WfsRule::new(
-                prop("p"),
-                vec![WfsLiteral::Positive(prop("q"))],
-                const_true,
-            ),
-            WfsRule::new(
-                prop("q"),
-                vec![WfsLiteral::Positive(prop("p"))],
-                const_true,
-            ),
+            WfsRule::new(prop("p"), vec![WfsLiteral::Positive(prop("q"))], const_true),
+            WfsRule::new(prop("q"), vec![WfsLiteral::Positive(prop("p"))], const_true),
         ];
 
         let result = evaluate_wfs_rules(&rules, &mut pir, &WfsConfig::default()).unwrap();
@@ -1037,16 +1000,8 @@ mod tests {
 
         let rules = vec![
             WfsRule::new(prop("p"), vec![], const_true), // Base fact
-            WfsRule::new(
-                prop("p"),
-                vec![WfsLiteral::Positive(prop("q"))],
-                const_true,
-            ),
-            WfsRule::new(
-                prop("q"),
-                vec![WfsLiteral::Positive(prop("p"))],
-                const_true,
-            ),
+            WfsRule::new(prop("p"), vec![WfsLiteral::Positive(prop("q"))], const_true),
+            WfsRule::new(prop("q"), vec![WfsLiteral::Positive(prop("p"))], const_true),
         ];
 
         let result = evaluate_wfs_rules(&rules, &mut pir, &WfsConfig::default()).unwrap();
@@ -1071,16 +1026,8 @@ mod tests {
 
         let rules = vec![
             WfsRule::new(prop("a"), vec![], const_true),
-            WfsRule::new(
-                prop("b"),
-                vec![WfsLiteral::Positive(prop("a"))],
-                const_true,
-            ),
-            WfsRule::new(
-                prop("c"),
-                vec![WfsLiteral::Negative(prop("b"))],
-                const_true,
-            ),
+            WfsRule::new(prop("b"), vec![WfsLiteral::Positive(prop("a"))], const_true),
+            WfsRule::new(prop("c"), vec![WfsLiteral::Negative(prop("b"))], const_true),
             WfsRule::new(
                 prop("d"),
                 vec![
@@ -1089,11 +1036,7 @@ mod tests {
                 ],
                 const_true,
             ),
-            WfsRule::new(
-                prop("e"),
-                vec![WfsLiteral::Negative(prop("d"))],
-                const_true,
-            ),
+            WfsRule::new(prop("e"), vec![WfsLiteral::Negative(prop("d"))], const_true),
         ];
 
         let result = evaluate_wfs_rules(&rules, &mut pir, &WfsConfig::default()).unwrap();
@@ -1252,7 +1195,6 @@ mod tests {
             // Facts
             WfsRule::new(atom("penguin", &[1]), vec![], const_true), // tweety = 1
             WfsRule::new(atom("eagle", &[2]), vec![], const_true),   // sam = 2
-
             // bird(X) :- penguin(X)
             WfsRule::new(
                 atom("bird", &[1]),
@@ -1430,8 +1372,14 @@ mod tests {
 
         assert_eq!(result.truth_value(&atom("edge", &[1, 2])), TruthValue::True);
         // Both in and out are in a cycle through negation
-        assert_eq!(result.truth_value(&atom("in", &[1, 2])), TruthValue::Undefined);
-        assert_eq!(result.truth_value(&atom("out", &[1, 2])), TruthValue::Undefined);
+        assert_eq!(
+            result.truth_value(&atom("in", &[1, 2])),
+            TruthValue::Undefined
+        );
+        assert_eq!(
+            result.truth_value(&atom("out", &[1, 2])),
+            TruthValue::Undefined
+        );
     }
 
     #[test]
@@ -1442,13 +1390,11 @@ mod tests {
         let const_true = pir.const_true();
 
         // p :- q. (q has no rule, so it's external)
-        let rules = vec![
-            WfsRule::new(
-                prop("p"),
-                vec![WfsLiteral::Positive(prop("q"))],
-                const_true,
-            ),
-        ];
+        let rules = vec![WfsRule::new(
+            prop("p"),
+            vec![WfsLiteral::Positive(prop("q"))],
+            const_true,
+        )];
 
         let result = evaluate_wfs_rules(&rules, &mut pir, &WfsConfig::default()).unwrap();
 

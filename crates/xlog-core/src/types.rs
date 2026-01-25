@@ -69,10 +69,9 @@ impl ScalarType {
             ScalarType::I64 => DataType::Int64,
             ScalarType::F32 => DataType::Float32,
             ScalarType::F64 => DataType::Float64,
-            ScalarType::Symbol => DataType::Dictionary(
-                Box::new(DataType::UInt32),
-                Box::new(DataType::Utf8),
-            ),
+            ScalarType::Symbol => {
+                DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Utf8))
+            }
         }
     }
 
@@ -111,7 +110,10 @@ impl Schema {
     /// Create a new schema with all columns as keys
     pub fn new(columns: Vec<(String, ScalarType)>) -> Self {
         let key_columns = (0..columns.len()).collect();
-        Self { columns, key_columns }
+        Self {
+            columns,
+            key_columns,
+        }
     }
 
     /// Number of columns

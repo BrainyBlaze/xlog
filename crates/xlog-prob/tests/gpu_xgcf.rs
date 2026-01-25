@@ -22,7 +22,10 @@ fn try_provider() -> Option<CudaKernelProvider> {
     match CudaKernelProvider::new(device, memory) {
         Ok(p) => Some(p),
         Err(e) => {
-            eprintln!("Skipping test: failed to create CUDA kernel provider: {}", e);
+            eprintln!(
+                "Skipping test: failed to create CUDA kernel provider: {}",
+                e
+            );
             None
         }
     }
@@ -95,8 +98,9 @@ f 4 0
     let (cpu_log_z, cpu_grad_true, cpu_grad_false) = xgcf.eval_log_wmc_and_grads(&weights).unwrap();
 
     let mut gpu_xgcf = GpuXgcf::upload(&provider, &xgcf).unwrap();
-    let (gpu_log_z, gpu_grad_true, gpu_grad_false) =
-        gpu_xgcf.eval_log_wmc_and_grads(&provider, &weights).unwrap();
+    let (gpu_log_z, gpu_grad_true, gpu_grad_false) = gpu_xgcf
+        .eval_log_wmc_and_grads(&provider, &weights)
+        .unwrap();
 
     assert!(
         (cpu_log_z - gpu_log_z).abs() < 1e-9,
@@ -163,13 +167,19 @@ f 4 0
     let root_idx = gpu_xgcf.root() as usize;
     let root_view = gpu_xgcf.values().slice(root_idx..(root_idx + 1));
     let mut root_host = [0.0_f64];
-    device.dtoh_sync_copy_into(&root_view, &mut root_host).unwrap();
+    device
+        .dtoh_sync_copy_into(&root_view, &mut root_host)
+        .unwrap();
     let gpu_log_z = root_host[0];
 
     let mut gpu_grad_true = vec![0.0_f64; cpu_grad_true.len()];
     let mut gpu_grad_false = vec![0.0_f64; cpu_grad_false.len()];
-    device.dtoh_sync_copy_into(gpu_xgcf.grad_true(), &mut gpu_grad_true).unwrap();
-    device.dtoh_sync_copy_into(gpu_xgcf.grad_false(), &mut gpu_grad_false).unwrap();
+    device
+        .dtoh_sync_copy_into(gpu_xgcf.grad_true(), &mut gpu_grad_true)
+        .unwrap();
+    device
+        .dtoh_sync_copy_into(gpu_xgcf.grad_false(), &mut gpu_grad_false)
+        .unwrap();
 
     assert!(
         (cpu_log_z - gpu_log_z).abs() < 1e-9,

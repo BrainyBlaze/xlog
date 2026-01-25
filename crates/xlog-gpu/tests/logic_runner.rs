@@ -69,4 +69,3 @@ fn test_logic_program_runs_with_gpu_inputs() -> Result<()> {
     assert_eq!(got, expected);
     Ok(())
 }
-

@@ -18,7 +18,10 @@ fn try_provider() -> Option<Arc<CudaKernelProvider>> {
     match CudaKernelProvider::new(device, memory) {
         Ok(p) => Some(Arc::new(p)),
         Err(e) => {
-            eprintln!("Skipping test: failed to create CUDA kernel provider: {}", e);
+            eprintln!(
+                "Skipping test: failed to create CUDA kernel provider: {}",
+                e
+            );
             None
         }
     }

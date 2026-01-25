@@ -1,13 +1,13 @@
 //! Probabilistic reasoning tier for XLOG (Phase 4).
 
-pub mod pir;
 pub mod cnf;
-pub mod kc;
-pub mod xgcf;
-pub mod provenance;
+pub mod compilation;
 pub mod exact;
 pub mod gpu;
+pub mod kc;
 pub mod mc;
-pub mod wfs;
-pub mod compilation;
 pub mod neural_fast_path;
+pub mod pir;
+pub mod provenance;
+pub mod wfs;
+pub mod xgcf;

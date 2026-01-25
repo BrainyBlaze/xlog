@@ -125,11 +125,7 @@ fn parse_inputs(inputs: &[String]) -> Result<HashMap<String, PathBuf>> {
 fn run_deterministic(args: RunArgs) -> Result<()> {
     let provider = make_provider(args.device, args.memory_mb)?;
     let source = std::fs::read_to_string(&args.source).map_err(|e| {
-        XlogError::Execution(format!(
-            "Failed to read {}: {}",
-            args.source.display(),
-            e
-        ))
+        XlogError::Execution(format!("Failed to read {}: {}", args.source.display(), e))
     })?;
 
     // Check if the source has any imports that need resolution
@@ -137,9 +133,8 @@ fn run_deterministic(args: RunArgs) -> Result<()> {
 
     // Load and merge modules if there are imports
     let program = if has_imports {
-        let resolver = load_modules(&args.source, args.module_path.clone()).map_err(|e| {
-            XlogError::Execution(format!("Module resolution failed: {}", e))
-        })?;
+        let resolver = load_modules(&args.source, args.module_path.clone())
+            .map_err(|e| XlogError::Execution(format!("Module resolution failed: {}", e)))?;
         LogicProgram::compile_with_resolver(&source, &resolver)?
     } else {
         LogicProgram::compile(&source)?
@@ -182,18 +177,13 @@ fn run_deterministic(args: RunArgs) -> Result<()> {
 
 fn run_probabilistic(args: ProbArgs) -> Result<()> {
     let source = std::fs::read_to_string(&args.source).map_err(|e| {
-        XlogError::Execution(format!(
-            "Failed to read {}: {}",
-            args.source.display(),
-            e
-        ))
+        XlogError::Execution(format!("Failed to read {}: {}", args.source.display(), e))
     })?;
 
     // Validate module imports if any search paths are provided
     if !args.module_path.is_empty() {
-        let _ = load_modules(&args.source, args.module_path.clone()).map_err(|e| {
-            XlogError::Execution(format!("Module resolution failed: {}", e))
-        })?;
+        let _ = load_modules(&args.source, args.module_path.clone())
+            .map_err(|e| XlogError::Execution(format!("Module resolution failed: {}", e)))?;
     }
 
     let config = GpuConfig {
@@ -281,8 +271,7 @@ fn emit_prob_exact(
         ),
         (
             "log_prob",
-            Arc::new(arrow::array::Float64Array::from(log_probs))
-                as Arc<dyn arrow::array::Array>,
+            Arc::new(arrow::array::Float64Array::from(log_probs)) as Arc<dyn arrow::array::Array>,
         ),
     ])
     .map_err(|e| XlogError::Execution(format!("Failed to build prob batch: {}", e)))?;
@@ -321,23 +310,19 @@ fn emit_prob_mc(
         ),
         (
             "log_prob",
-            Arc::new(arrow::array::Float64Array::from(log_probs))
-                as Arc<dyn arrow::array::Array>,
+            Arc::new(arrow::array::Float64Array::from(log_probs)) as Arc<dyn arrow::array::Array>,
         ),
         (
             "stderr",
-            Arc::new(arrow::array::Float64Array::from(stderr))
-                as Arc<dyn arrow::array::Array>,
+            Arc::new(arrow::array::Float64Array::from(stderr)) as Arc<dyn arrow::array::Array>,
         ),
         (
             "ci_low",
-            Arc::new(arrow::array::Float64Array::from(ci_low))
-                as Arc<dyn arrow::array::Array>,
+            Arc::new(arrow::array::Float64Array::from(ci_low)) as Arc<dyn arrow::array::Array>,
         ),
         (
             "ci_high",
-            Arc::new(arrow::array::Float64Array::from(ci_high))
-                as Arc<dyn arrow::array::Array>,
+            Arc::new(arrow::array::Float64Array::from(ci_high)) as Arc<dyn arrow::array::Array>,
         ),
     ])
     .map_err(|e| XlogError::Execution(format!("Failed to build mc batch: {}", e)))?;
@@ -371,8 +356,9 @@ fn emit_batch(
             let dir = output_dir.unwrap_or_else(|| Path::new("."));
             let path = dir.join(format!("{}_prob.arrow", name));
             let mut out = Vec::new();
-            let mut writer = arrow::ipc::writer::StreamWriter::try_new(&mut out, &batch.schema())
-                .map_err(|e| XlogError::Execution(format!("Arrow writer failed: {}", e)))?;
+            let mut writer =
+                arrow::ipc::writer::StreamWriter::try_new(&mut out, &batch.schema())
+                    .map_err(|e| XlogError::Execution(format!("Arrow writer failed: {}", e)))?;
             writer
                 .write(batch)
                 .map_err(|e| XlogError::Execution(format!("Arrow write failed: {}", e)))?;

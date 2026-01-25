@@ -11,14 +11,8 @@ use xlog_neural::tensor_source::{TensorMetadata, TensorSourceError, TensorSource
 fn test_add_and_set_active_source() {
     let mut registry = TensorSourceRegistry::new();
 
-    registry.add_with_metadata(
-        "train",
-        TensorMetadata::new(1000, vec![1, 28, 28]),
-    );
-    registry.add_with_metadata(
-        "test",
-        TensorMetadata::new(200, vec![1, 28, 28]),
-    );
+    registry.add_with_metadata("train", TensorMetadata::new(1000, vec![1, 28, 28]));
+    registry.add_with_metadata("test", TensorMetadata::new(200, vec![1, 28, 28]));
 
     registry.set_active("train").unwrap();
     assert_eq!(registry.active_name(), Some("train"));

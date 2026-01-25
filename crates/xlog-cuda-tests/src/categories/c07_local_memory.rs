@@ -5,7 +5,7 @@
 
 use crate::harness::{CategoryResult, TestContext, TestResult};
 use std::time::Instant;
-use xlog_core::{Schema, ScalarType};
+use xlog_core::{ScalarType, Schema};
 
 /// Run all tests in this category.
 pub fn run_all(ctx: &TestContext) -> CategoryResult {
@@ -66,10 +66,10 @@ fn test_deep_sort_keys(ctx: &TestContext) -> TestResult {
     k4.reverse();
     val.reverse();
 
-    let buffer = match ctx.provider.create_buffer_from_u32_columns(
-        &[&k1, &k2, &k3, &k4, &val],
-        schema.clone(),
-    ) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_u32_columns(&[&k1, &k2, &k3, &k4, &val], schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -97,10 +97,7 @@ fn test_deep_sort_keys(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_deep_sort_keys",
             start.elapsed(),
-            format!(
-                "Sort returned {} rows, expected {}",
-                sorted.num_rows, SIZE
-            ),
+            format!("Sort returned {} rows, expected {}", sorted.num_rows, SIZE),
         );
     }
 
@@ -167,7 +164,8 @@ fn test_deep_sort_keys(ctx: &TestContext) -> TestResult {
             start.elapsed(),
             format!(
                 "Lost values during sort: {} unique values, expected {}",
-                val_set.len(), SIZE
+                val_set.len(),
+                SIZE
             ),
         );
     }
@@ -197,7 +195,10 @@ fn test_repeated_operations(ctx: &TestContext) -> TestResult {
     // Create initial buffer
     let data: Vec<u32> = (0..SIZE as u32).collect();
 
-    let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -305,27 +306,33 @@ fn test_variable_workload(ctx: &TestContext) -> TestResult {
 
     // Alternating small and large sizes
     let sizes: Vec<usize> = vec![
-        10,      // Tiny
-        100000,  // Large
-        100,     // Small
-        50000,   // Medium-large
-        50,      // Tiny
-        200000,  // Large
-        1000,    // Medium
-        10000,   // Medium
+        10,     // Tiny
+        100000, // Large
+        100,    // Small
+        50000,  // Medium-large
+        50,     // Tiny
+        200000, // Large
+        1000,   // Medium
+        10000,  // Medium
     ];
 
     for (i, &size) in sizes.iter().enumerate() {
         // Create data in reverse order
         let data: Vec<u32> = (0..size as u32).rev().collect();
 
-        let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_slice(&data, schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
                     "test_variable_workload",
                     start.elapsed(),
-                    format!("Test {}: failed to create buffer of size {}: {}", i, size, e),
+                    format!(
+                        "Test {}: failed to create buffer of size {}: {}",
+                        i, size, e
+                    ),
                 )
             }
         };
@@ -415,7 +422,10 @@ fn test_complex_filter_chains(ctx: &TestContext) -> TestResult {
     // Create sequential data
     let data: Vec<u32> = (0..SIZE as u32).collect();
 
-    let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -452,7 +462,9 @@ fn test_complex_filter_chains(ctx: &TestContext) -> TestResult {
     }
 
     // Filter 2: From filter1 result, keep every 4th (12500 remaining)
-    let mask2: Vec<u8> = (0..expected1).map(|i| if i % 4 == 0 { 1 } else { 0 }).collect();
+    let mask2: Vec<u8> = (0..expected1)
+        .map(|i| if i % 4 == 0 { 1 } else { 0 })
+        .collect();
     let filtered2 = match ctx.provider.filter_by_mask(&filtered1, &mask2) {
         Ok(f) => f,
         Err(e) => {
@@ -477,7 +489,9 @@ fn test_complex_filter_chains(ctx: &TestContext) -> TestResult {
     }
 
     // Filter 3: From filter2 result, keep every 5th (2500 remaining)
-    let mask3: Vec<u8> = (0..expected2).map(|i| if i % 5 == 0 { 1 } else { 0 }).collect();
+    let mask3: Vec<u8> = (0..expected2)
+        .map(|i| if i % 5 == 0 { 1 } else { 0 })
+        .collect();
     let filtered3 = match ctx.provider.filter_by_mask(&filtered2, &mask3) {
         Ok(f) => f,
         Err(e) => {
@@ -566,13 +580,19 @@ fn test_local_memory_stress(ctx: &TestContext) -> TestResult {
             // Create data
             let data: Vec<u32> = (0..size as u32).rev().collect();
 
-            let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+            let buffer = match ctx
+                .provider
+                .create_buffer_from_u32_slice(&data, schema.clone())
+            {
                 Ok(buf) => buf,
                 Err(e) => {
                     return TestResult::error(
                         "test_local_memory_stress",
                         start.elapsed(),
-                        format!("Iter {}, size {}: buffer creation failed: {}", iter, size, e),
+                        format!(
+                            "Iter {}, size {}: buffer creation failed: {}",
+                            iter, size, e
+                        ),
                     )
                 }
             };
@@ -602,7 +622,9 @@ fn test_local_memory_stress(ctx: &TestContext) -> TestResult {
             }
 
             // Filter half
-            let mask: Vec<u8> = (0..size).map(|i| if i < size / 2 { 1 } else { 0 }).collect();
+            let mask: Vec<u8> = (0..size)
+                .map(|i| if i < size / 2 { 1 } else { 0 })
+                .collect();
             let filtered = match ctx.provider.filter_by_mask(&sorted, &mask) {
                 Ok(f) => f,
                 Err(e) => {

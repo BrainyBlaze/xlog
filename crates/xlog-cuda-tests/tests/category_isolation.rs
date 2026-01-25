@@ -25,10 +25,7 @@ where
     let ctx = match TestContext::new() {
         Ok(ctx) => {
             println!("CUDA device initialized successfully");
-            println!(
-                "Memory budget: {} MB",
-                ctx.memory_budget() / (1024 * 1024)
-            );
+            println!("Memory budget: {} MB", ctx.memory_budget() / (1024 * 1024));
             match ctx.compute_capability() {
                 Ok((major, minor)) => println!("Compute capability: {}.{}", major, minor),
                 Err(e) => println!("Compute capability: <unavailable> ({})", e),
@@ -77,11 +74,7 @@ where
     println!("\n--- Summary ---");
     println!("Category: {}", result.name);
     println!("Duration: {:.2}s", duration.as_secs_f64());
-    println!(
-        "Passed: {}/{}",
-        result.passed_count(),
-        result.total_count()
-    );
+    println!("Passed: {}/{}", result.passed_count(), result.total_count());
     println!("Failed: {}", result.failed_count());
     println!("Skipped: {}", result.skipped_count());
     println!("========================================\n");
@@ -108,7 +101,10 @@ fn c02_launch_config() {
 
 #[test]
 fn c03_pointer_bounds() {
-    run_category("c03_pointer_bounds", categories::c03_pointer_bounds::run_all);
+    run_category(
+        "c03_pointer_bounds",
+        categories::c03_pointer_bounds::run_all,
+    );
 }
 
 #[test]

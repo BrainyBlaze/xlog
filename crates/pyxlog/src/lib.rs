@@ -4,12 +4,12 @@ use std::sync::Arc;
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::Bound;
 use pyo3::types::{PyDict, PySequence};
+use pyo3::Bound;
 
+use ::xlog_gpu::logic as gpu_logic;
 use xlog_core::{MemoryBudget, ScalarType, Schema};
 use xlog_cuda::{CudaDevice, CudaKernelProvider, DlpackManagedTensor, GpuMemoryManager};
-use ::xlog_gpu::logic as gpu_logic;
 use xlog_logic::ast::ProbEngine;
 use xlog_neural::{NetworkConfig, NetworkRegistry, TensorMetadata, TensorSourceRegistry};
 use xlog_prob::exact::{ExactDdnnfProgram, ExactResultWithGrads, GpuConfig, QueryProbability};
@@ -52,7 +52,8 @@ unsafe extern "C" fn dlpack_capsule_destructor(capsule: *mut pyo3::ffi::PyObject
         return;
     }
 
-    let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, DLPACK_CAPSULE_NAME.as_ptr() as *const c_char);
+    let ptr =
+        pyo3::ffi::PyCapsule_GetPointer(capsule, DLPACK_CAPSULE_NAME.as_ptr() as *const c_char);
     if ptr.is_null() {
         pyo3::ffi::PyErr_Clear();
         return;
@@ -479,7 +480,12 @@ impl CompiledProgram {
     /// # Arguments
     /// * `name` - Name for this source (e.g., "train", "test")
     /// * `tensor` - PyTorch tensor with shape [N, ...]
-    fn add_tensor_source(&mut self, py: Python<'_>, name: String, tensor: PyObject) -> PyResult<()> {
+    fn add_tensor_source(
+        &mut self,
+        py: Python<'_>,
+        name: String,
+        tensor: PyObject,
+    ) -> PyResult<()> {
         // Extract size from tensor.shape[0]
         // In PyO3 0.21, use .bind(py) to get Bound<PyAny> for method calls
         let shape_obj = tensor.getattr(py, "shape")?;
@@ -697,7 +703,12 @@ impl CompiledProgram {
     /// # Returns
     /// EpochStats with avg_loss, num_batches, total_queries
     #[pyo3(signature = (queries, batch_size=32))]
-    fn train_epoch(&mut self, py: Python<'_>, queries: Vec<String>, batch_size: usize) -> PyResult<EpochStats> {
+    fn train_epoch(
+        &mut self,
+        py: Python<'_>,
+        queries: Vec<String>,
+        batch_size: usize,
+    ) -> PyResult<EpochStats> {
         let mut history = TrainingHistory::new();
         self.train_epoch_internal(py, &queries, batch_size, usize::MAX, &mut history)
     }
@@ -752,7 +763,11 @@ impl CompiledProgram {
 }
 
 impl CompiledProgram {
-    fn forward_backward_tensor_internal(&mut self, py: Python<'_>, query: &str) -> PyResult<PyObject> {
+    fn forward_backward_tensor_internal(
+        &mut self,
+        py: Python<'_>,
+        query: &str,
+    ) -> PyResult<PyObject> {
         // Try to parse as a direct neural predicate query first.
         match self.try_parse_direct_neural_query(query) {
             Ok((network_name, input_idx, target_label)) => {
@@ -801,7 +816,12 @@ impl CompiledProgram {
 
             // Log progress periodically
             if log_iter < usize::MAX && (batch_idx + 1) % log_iter == 0 {
-                println!("  Batch {}/{}: loss={:.6}", batch_idx + 1, num_batches, batch_loss);
+                println!(
+                    "  Batch {}/{}: loss={:.6}",
+                    batch_idx + 1,
+                    num_batches,
+                    batch_loss
+                );
             }
         }
 
@@ -820,12 +840,12 @@ impl CompiledProgram {
         let query = query.trim();
 
         // Find predicate name and arguments
-        let paren_start = query.find('(').ok_or_else(|| {
-            PyValueError::new_err(format!("Invalid query format: {}", query))
-        })?;
-        let paren_end = query.rfind(')').ok_or_else(|| {
-            PyValueError::new_err(format!("Invalid query format: {}", query))
-        })?;
+        let paren_start = query
+            .find('(')
+            .ok_or_else(|| PyValueError::new_err(format!("Invalid query format: {}", query)))?;
+        let paren_end = query
+            .rfind(')')
+            .ok_or_else(|| PyValueError::new_err(format!("Invalid query format: {}", query)))?;
 
         let pred_name = &query[..paren_start];
         let args_str = &query[paren_start + 1..paren_end];
@@ -837,14 +857,15 @@ impl CompiledProgram {
         if args.len() != 2 {
             return Err(PyValueError::new_err(format!(
                 "Not a direct neural predicate query (expected 2 args, got {}): {}",
-                args.len(), query
+                args.len(),
+                query
             )));
         }
 
         // Try to parse input index
-        let input_idx: usize = args[0].parse().map_err(|_| {
-            PyValueError::new_err(format!("Invalid input index: {}", args[0]))
-        })?;
+        let input_idx: usize = args[0]
+            .parse()
+            .map_err(|_| PyValueError::new_err(format!("Invalid input index: {}", args[0])))?;
         let target_label = args[1].to_string();
 
         // Find network name for this predicate
@@ -916,7 +937,11 @@ impl CompiledProgram {
     /// 3. If cached: update weights and evaluate
     /// 4. If not cached: compile circuit, cache it, evaluate
     /// 5. Backpropagate gradients through networks
-    fn forward_backward_complex_tensor(&mut self, py: Python<'_>, query: &str) -> PyResult<PyObject> {
+    fn forward_backward_complex_tensor(
+        &mut self,
+        py: Python<'_>,
+        query: &str,
+    ) -> PyResult<PyObject> {
         // Parse query to extract (1) neural input indices and (2) template predicate name.
         let (input_indices, pred_name) = self.extract_query_input_indices(query)?;
         if input_indices.is_empty() {
@@ -1016,7 +1041,8 @@ impl CompiledProgram {
         // Ensure template circuit is available (compile-once per shape).
         let cache_key = self.generate_cache_key(&pred_name, input_indices.len(), num_labels);
         if !self.circuit_cache.contains_key(&cache_key) {
-            let cached = self.compile_circuit_for_template(&pred_name, input_indices.len(), num_labels)?;
+            let cached =
+                self.compile_circuit_for_template(&pred_name, input_indices.len(), num_labels)?;
             self.circuit_cache.insert(cache_key.clone(), cached);
         }
 
@@ -1086,9 +1112,7 @@ impl CompiledProgram {
             .column(0)
             .map_err(|e| PyRuntimeError::new_err(format!("DLPack export failed: {}", e)))?;
         let loss_capsule = dlpack_capsule_from_tensor(py, loss_dl)?;
-        let loss_tensor = torch
-            .getattr("from_dlpack")?
-            .call1((loss_capsule,))?;
+        let loss_tensor = torch.getattr("from_dlpack")?.call1((loss_capsule,))?;
 
         if torch
             .getattr("cuda")
@@ -1117,12 +1141,12 @@ impl CompiledProgram {
     fn extract_query_input_indices(&self, query: &str) -> PyResult<(Vec<usize>, String)> {
         let query = query.trim();
 
-        let paren_start = query.find('(').ok_or_else(|| {
-            PyValueError::new_err(format!("Invalid query format: {}", query))
-        })?;
-        let paren_end = query.rfind(')').ok_or_else(|| {
-            PyValueError::new_err(format!("Invalid query format: {}", query))
-        })?;
+        let paren_start = query
+            .find('(')
+            .ok_or_else(|| PyValueError::new_err(format!("Invalid query format: {}", query)))?;
+        let paren_end = query
+            .rfind(')')
+            .ok_or_else(|| PyValueError::new_err(format!("Invalid query format: {}", query)))?;
 
         let pred_name = query[..paren_start].to_string();
         let args_str = &query[paren_start + 1..paren_end];
@@ -1148,12 +1172,12 @@ impl CompiledProgram {
     /// Extract the final integer argument from a query (e.g., the sum in `addition(X,Y,Z)`).
     fn extract_query_target_int(&self, query: &str) -> PyResult<usize> {
         let query = query.trim();
-        let paren_start = query.find('(').ok_or_else(|| {
-            PyValueError::new_err(format!("Invalid query format: {}", query))
-        })?;
-        let paren_end = query.rfind(')').ok_or_else(|| {
-            PyValueError::new_err(format!("Invalid query format: {}", query))
-        })?;
+        let paren_start = query
+            .find('(')
+            .ok_or_else(|| PyValueError::new_err(format!("Invalid query format: {}", query)))?;
+        let paren_end = query
+            .rfind(')')
+            .ok_or_else(|| PyValueError::new_err(format!("Invalid query format: {}", query)))?;
 
         let args_str = &query[paren_start + 1..paren_end];
         let last = args_str
@@ -1343,9 +1367,10 @@ impl CompiledProgram {
 
     /// Get input tensor for a given index from the active tensor source.
     fn get_input_tensor(&self, py: Python<'_>, index: usize) -> PyResult<PyObject> {
-        let tensor = self.tensor_sources.get_active().map_err(|e| {
-            PyValueError::new_err(format!("No active tensor source: {}", e))
-        })?;
+        let tensor = self
+            .tensor_sources
+            .get_active()
+            .map_err(|e| PyValueError::new_err(format!("No active tensor source: {}", e)))?;
 
         // Index into the tensor: tensor[index]
         let tensor_bound = tensor.bind(py);
@@ -1356,9 +1381,10 @@ impl CompiledProgram {
     /// Evaluate probability of a single query by compiling a temporary program.
     fn evaluate_query_probability(&self, query: &str) -> PyResult<f64> {
         let probs = self.evaluate_query_probabilities(&[query.to_string()])?;
-        probs.into_iter().next().ok_or_else(|| {
-            PyRuntimeError::new_err("Query evaluation returned no results")
-        })
+        probs
+            .into_iter()
+            .next()
+            .ok_or_else(|| PyRuntimeError::new_err("Query evaluation returned no results"))
     }
 
     /// Evaluate probabilities for multiple queries by compiling a temporary program.
@@ -1375,7 +1401,8 @@ impl CompiledProgram {
                 let program = ExactDdnnfProgram::compile_source_with_gpu(
                     &source_with_queries,
                     self.gpu_config,
-                ).map_err(|e| PyRuntimeError::new_err(format!("Query compilation error: {}", e)))?;
+                )
+                .map_err(|e| PyRuntimeError::new_err(format!("Query compilation error: {}", e)))?;
 
                 program
                     .evaluate()
@@ -1383,10 +1410,11 @@ impl CompiledProgram {
                     .query_probs
             }
             ProbEngine::Mc => {
-                let program = McProgram::compile_source_with_gpu(
-                    &source_with_queries,
-                    self.gpu_config,
-                ).map_err(|e| PyRuntimeError::new_err(format!("Query compilation error: {}", e)))?;
+                let program =
+                    McProgram::compile_source_with_gpu(&source_with_queries, self.gpu_config)
+                        .map_err(|e| {
+                            PyRuntimeError::new_err(format!("Query compilation error: {}", e))
+                        })?;
 
                 let cfg = McEvalConfig::default();
                 program
@@ -1418,7 +1446,11 @@ impl CompiledProgram {
         Ok(probs)
     }
 
-    fn pack_result_probs(&self, py: Python<'_>, query_probs: Vec<QueryProbability>) -> PyResult<EvalResult> {
+    fn pack_result_probs(
+        &self,
+        py: Python<'_>,
+        query_probs: Vec<QueryProbability>,
+    ) -> PyResult<EvalResult> {
         let mut atoms: Vec<String> = Vec::with_capacity(query_probs.len());
         let mut probs: Vec<f64> = Vec::with_capacity(query_probs.len());
         let mut log_probs: Vec<f64> = Vec::with_capacity(query_probs.len());
@@ -1472,7 +1504,11 @@ impl CompiledProgram {
         })
     }
 
-    fn pack_result_with_grads(&self, py: Python<'_>, result: ExactResultWithGrads) -> PyResult<EvalResult> {
+    fn pack_result_with_grads(
+        &self,
+        py: Python<'_>,
+        result: ExactResultWithGrads,
+    ) -> PyResult<EvalResult> {
         let mut atoms: Vec<String> = Vec::with_capacity(result.query_grads.len());
         let mut probs: Vec<f64> = Vec::with_capacity(result.query_grads.len());
         let mut log_probs: Vec<f64> = Vec::with_capacity(result.query_grads.len());
@@ -1920,11 +1956,17 @@ pub fn train_model(
             epoch_queries.shuffle(&mut rng);
         }
 
-        let stats = program.train_epoch_internal(py, &epoch_queries, batch_size, log_iter, &mut history)?;
+        let stats =
+            program.train_epoch_internal(py, &epoch_queries, batch_size, log_iter, &mut history)?;
         history.add_epoch(stats.avg_loss);
 
         // Print epoch progress (visible in Python output)
-        println!("Epoch {}/{}: avg_loss={:.6}", epoch + 1, epochs, stats.avg_loss);
+        println!(
+            "Epoch {}/{}: avg_loss={:.6}",
+            epoch + 1,
+            epochs,
+            stats.avg_loss
+        );
     }
 
     Ok(history)

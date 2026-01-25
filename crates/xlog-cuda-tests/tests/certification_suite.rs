@@ -18,10 +18,7 @@ fn run_full_certification() {
     let ctx = match TestContext::new() {
         Ok(ctx) => {
             println!("CUDA device initialized successfully");
-            println!(
-                "Memory budget: {} MB",
-                ctx.memory_budget() / (1024 * 1024)
-            );
+            println!("Memory budget: {} MB", ctx.memory_budget() / (1024 * 1024));
             match ctx.compute_capability() {
                 Ok((major, minor)) => println!("Compute capability: {}.{}", major, minor),
                 Err(e) => println!("Compute capability: <unavailable> ({})", e),

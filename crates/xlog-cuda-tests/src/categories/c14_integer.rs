@@ -3,10 +3,10 @@
 //! Tests integer boundary conditions including overflow boundaries,
 //! full range coverage, signed comparison, and wraparound keys.
 
-use crate::harness::{CategoryResult, TestResult, TestContext};
+use crate::harness::{CategoryResult, TestContext, TestResult};
 use std::collections::HashSet;
 use std::time::Instant;
-use xlog_core::{Schema, ScalarType};
+use xlog_core::{ScalarType, Schema};
 
 /// Run all tests in this category.
 pub fn run_all(ctx: &TestContext) -> CategoryResult {
@@ -44,14 +44,17 @@ fn test_i64_overflow_boundaries(ctx: &TestContext) -> TestResult {
         2,
         i64::MIN / 2,
         i64::MAX / 2,
-        -i64::MAX,  // i64::MIN + 1
+        -i64::MAX, // i64::MIN + 1
         100,
         -100,
         1000000,
         -1000000,
     ];
 
-    let buffer = match ctx.provider.create_buffer_from_i64_slice(&data, schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_i64_slice(&data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -107,7 +110,9 @@ fn test_i64_overflow_boundaries(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Sort order incorrect at index {}: {} should be >= {}",
-                    i, sorted_data[i], sorted_data[i - 1]
+                    i,
+                    sorted_data[i],
+                    sorted_data[i - 1]
                 ),
             );
         }
@@ -118,7 +123,11 @@ fn test_i64_overflow_boundaries(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_i64_overflow_boundaries",
             start.elapsed(),
-            format!("First element should be i64::MIN ({}), got {}", i64::MIN, sorted_data[0]),
+            format!(
+                "First element should be i64::MIN ({}), got {}",
+                i64::MIN,
+                sorted_data[0]
+            ),
         );
     }
 
@@ -213,7 +222,7 @@ fn test_u64_overflow_boundaries(ctx: &TestContext) -> TestResult {
 
     // Create data with u64 boundary values
     let data: Vec<u64> = vec![
-        u64::MIN,           // 0
+        u64::MIN, // 0
         u64::MAX,
         1,
         u64::MAX - 1,
@@ -226,13 +235,16 @@ fn test_u64_overflow_boundaries(ctx: &TestContext) -> TestResult {
         1_000_000_000,
         1_000_000_000_000,
         // High bit patterns
-        0x8000_0000_0000_0000,  // Only high bit set
-        0xFFFF_FFFF_0000_0000,  // Upper 32 bits
-        0x0000_0000_FFFF_FFFF,  // Lower 32 bits
-        0xAAAA_AAAA_AAAA_AAAA,  // Alternating bits
+        0x8000_0000_0000_0000, // Only high bit set
+        0xFFFF_FFFF_0000_0000, // Upper 32 bits
+        0x0000_0000_FFFF_FFFF, // Lower 32 bits
+        0xAAAA_AAAA_AAAA_AAAA, // Alternating bits
     ];
 
-    let buffer = match ctx.provider.create_buffer_from_u64_slice(&data, schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_u64_slice(&data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -288,7 +300,9 @@ fn test_u64_overflow_boundaries(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Sort order incorrect at index {}: {} should be >= {}",
-                    i, sorted_data[i], sorted_data[i - 1]
+                    i,
+                    sorted_data[i],
+                    sorted_data[i - 1]
                 ),
             );
         }
@@ -367,7 +381,7 @@ fn test_u32_full_range(ctx: &TestContext) -> TestResult {
 
     // Create data spanning the full u32 range
     let mut data: Vec<u32> = vec![
-        u32::MIN,           // 0
+        u32::MIN, // 0
         u32::MAX,
         1,
         u32::MAX - 1,
@@ -380,11 +394,11 @@ fn test_u32_full_range(ctx: &TestContext) -> TestResult {
         0xFF_0000,
         0xFF00_0000,
         // Bit patterns
-        0x8000_0000,  // Only high bit set
-        0xFFFF_0000,  // Upper 16 bits
-        0x0000_FFFF,  // Lower 16 bits
-        0xAAAA_AAAA,  // Alternating bits
-        0x5555_5555,  // Inverted alternating bits
+        0x8000_0000, // Only high bit set
+        0xFFFF_0000, // Upper 16 bits
+        0x0000_FFFF, // Lower 16 bits
+        0xAAAA_AAAA, // Alternating bits
+        0x5555_5555, // Inverted alternating bits
     ];
 
     // Add evenly distributed values across the range
@@ -392,7 +406,10 @@ fn test_u32_full_range(ctx: &TestContext) -> TestResult {
         data.push((u32::MAX as u64 * i / 16) as u32);
     }
 
-    let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -448,7 +465,9 @@ fn test_u32_full_range(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Sort order incorrect at index {}: {} should be >= {}",
-                    i, sorted_data[i], sorted_data[i - 1]
+                    i,
+                    sorted_data[i],
+                    sorted_data[i - 1]
                 ),
             );
         }
@@ -478,7 +497,10 @@ fn test_u32_full_range(ctx: &TestContext) -> TestResult {
 
     // Test filter: keep only values in upper half of range
     let threshold = u32::MAX / 2;
-    let mask: Vec<u8> = data.iter().map(|&v| if v >= threshold { 1 } else { 0 }).collect();
+    let mask: Vec<u8> = data
+        .iter()
+        .map(|&v| if v >= threshold { 1 } else { 0 })
+        .collect();
     let filtered = match ctx.provider.filter_by_mask(&buffer, &mask) {
         Ok(f) => f,
         Err(e) => {
@@ -537,8 +559,8 @@ fn test_i64_signed_comparison(ctx: &TestContext) -> TestResult {
     // Create data that would sort differently if treated as unsigned
     // In unsigned interpretation, negative numbers have high bit set and would sort last
     let data: Vec<i64> = vec![
-        -1,             // 0xFFFF_FFFF_FFFF_FFFF as unsigned
-        -2,             // 0xFFFF_FFFF_FFFF_FFFE as unsigned
+        -1, // 0xFFFF_FFFF_FFFF_FFFF as unsigned
+        -2, // 0xFFFF_FFFF_FFFF_FFFE as unsigned
         -1000,
         -1_000_000,
         0,
@@ -546,11 +568,14 @@ fn test_i64_signed_comparison(ctx: &TestContext) -> TestResult {
         2,
         1000,
         1_000_000,
-        i64::MIN,       // 0x8000_0000_0000_0000 - would sort middle if unsigned
-        i64::MAX,       // 0x7FFF_FFFF_FFFF_FFFF - would sort before -1 if unsigned
+        i64::MIN, // 0x8000_0000_0000_0000 - would sort middle if unsigned
+        i64::MAX, // 0x7FFF_FFFF_FFFF_FFFF - would sort before -1 if unsigned
     ];
 
-    let buffer = match ctx.provider.create_buffer_from_i64_slice(&data, schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_i64_slice(&data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -593,7 +618,9 @@ fn test_i64_signed_comparison(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Signed sort order incorrect at index {}: {} should be >= {}",
-                    i, sorted_data[i], sorted_data[i - 1]
+                    i,
+                    sorted_data[i],
+                    sorted_data[i - 1]
                 ),
             );
         }
@@ -640,7 +667,8 @@ fn test_i64_signed_comparison(ctx: &TestContext) -> TestResult {
             start.elapsed(),
             format!(
                 "First element should be i64::MIN ({}), got {} - may be treated as unsigned",
-                i64::MIN, sorted_data[0]
+                i64::MIN,
+                sorted_data[0]
             ),
         );
     }
@@ -704,20 +732,13 @@ fn test_integer_wraparound_keys(ctx: &TestContext) -> TestResult {
     let left_vals: Vec<u32> = left_keys.iter().map(|&k| k.wrapping_add(100)).collect();
 
     // Right keys - subset of left keys
-    let right_keys: Vec<u32> = vec![
-        u32::MAX,
-        u32::MAX - 1,
-        0,
-        1,
-        u32::MAX / 2,
-        0x8000_0000,
-    ];
+    let right_keys: Vec<u32> = vec![u32::MAX, u32::MAX - 1, 0, 1, u32::MAX / 2, 0x8000_0000];
     let right_vals: Vec<u32> = right_keys.iter().map(|&k| k.wrapping_mul(10)).collect();
 
-    let left_buffer = match ctx.provider.create_buffer_from_u32_columns(
-        &[&left_keys, &left_vals],
-        left_schema.clone(),
-    ) {
+    let left_buffer = match ctx
+        .provider
+        .create_buffer_from_u32_columns(&[&left_keys, &left_vals], left_schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -728,10 +749,10 @@ fn test_integer_wraparound_keys(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let right_buffer = match ctx.provider.create_buffer_from_u32_columns(
-        &[&right_keys, &right_vals],
-        right_schema.clone(),
-    ) {
+    let right_buffer = match ctx
+        .provider
+        .create_buffer_from_u32_columns(&[&right_keys, &right_vals], right_schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -743,7 +764,10 @@ fn test_integer_wraparound_keys(ctx: &TestContext) -> TestResult {
     };
 
     // Perform hash join
-    let joined = match ctx.provider.hash_join(&left_buffer, &right_buffer, &[0], &[0]) {
+    let joined = match ctx
+        .provider
+        .hash_join(&left_buffer, &right_buffer, &[0], &[0])
+    {
         Ok(j) => j,
         Err(e) => {
             return TestResult::error(
@@ -756,7 +780,10 @@ fn test_integer_wraparound_keys(ctx: &TestContext) -> TestResult {
 
     // Calculate expected join count
     let right_key_set: HashSet<u32> = right_keys.iter().copied().collect();
-    let expected_matches = left_keys.iter().filter(|k| right_key_set.contains(k)).count();
+    let expected_matches = left_keys
+        .iter()
+        .filter(|k| right_key_set.contains(k))
+        .count();
 
     if joined.num_rows != expected_matches as u64 {
         return TestResult::error(
@@ -853,10 +880,7 @@ fn test_integer_wraparound_keys(ctx: &TestContext) -> TestResult {
             return TestResult::error(
                 "test_integer_wraparound_keys",
                 start.elapsed(),
-                format!(
-                    "Key {} should appear in join result but doesn't",
-                    rkey
-                ),
+                format!("Key {} should appear in join result but doesn't", rkey),
             );
         }
     }

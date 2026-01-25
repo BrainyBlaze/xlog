@@ -1893,7 +1893,10 @@ mod tests {
             if let RirNode::Filter { predicate, .. } = *right {
                 if let Expr::Compare { left, .. } = predicate {
                     if let Expr::Column(idx) = *left {
-                        assert_eq!(idx, 2, "Column should be remapped to 2 (5 - left_width(3) = 2)");
+                        assert_eq!(
+                            idx, 2,
+                            "Column should be remapped to 2 (5 - left_width(3) = 2)"
+                        );
                     } else {
                         panic!("Expected Column expression");
                     }

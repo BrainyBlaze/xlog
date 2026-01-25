@@ -3,8 +3,8 @@
 use cudarc::driver::{DeviceSlice, LaunchAsync, LaunchConfig};
 use xlog_core::{Result, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
-use xlog_cuda::{circuit_kernels, CudaKernelProvider, CIRCUIT_MODULE};
 use xlog_cuda::provider::{arith_kernels, ARITH_MODULE};
+use xlog_cuda::{circuit_kernels, CudaKernelProvider, CIRCUIT_MODULE};
 
 use crate::xgcf::{Xgcf, XgcfNodeType};
 
@@ -62,14 +62,18 @@ impl GpuXgcf {
             .map_err(|e| XlogError::Kernel(format!("Failed to upload circuit node_type: {}", e)))?;
 
         let mut d_child_offsets = memory.alloc::<u32>(circuit.child_offsets.len())?;
-        device.htod_sync_copy_into(&circuit.child_offsets, &mut d_child_offsets).map_err(|e| {
-            XlogError::Kernel(format!("Failed to upload circuit child_offsets: {}", e))
-        })?;
+        device
+            .htod_sync_copy_into(&circuit.child_offsets, &mut d_child_offsets)
+            .map_err(|e| {
+                XlogError::Kernel(format!("Failed to upload circuit child_offsets: {}", e))
+            })?;
 
         let mut d_child_indices = memory.alloc::<u32>(circuit.child_indices.len())?;
-        device.htod_sync_copy_into(&circuit.child_indices, &mut d_child_indices).map_err(|e| {
-            XlogError::Kernel(format!("Failed to upload circuit child_indices: {}", e))
-        })?;
+        device
+            .htod_sync_copy_into(&circuit.child_indices, &mut d_child_indices)
+            .map_err(|e| {
+                XlogError::Kernel(format!("Failed to upload circuit child_indices: {}", e))
+            })?;
 
         let mut d_lit = memory.alloc::<i32>(circuit.lit.len())?;
         device
@@ -77,28 +81,38 @@ impl GpuXgcf {
             .map_err(|e| XlogError::Kernel(format!("Failed to upload circuit lit: {}", e)))?;
 
         let mut d_decision_var = memory.alloc::<u32>(circuit.decision_var.len())?;
-        device.htod_sync_copy_into(&circuit.decision_var, &mut d_decision_var).map_err(|e| {
-            XlogError::Kernel(format!("Failed to upload circuit decision_var: {}", e))
-        })?;
+        device
+            .htod_sync_copy_into(&circuit.decision_var, &mut d_decision_var)
+            .map_err(|e| {
+                XlogError::Kernel(format!("Failed to upload circuit decision_var: {}", e))
+            })?;
 
         let mut d_decision_child_false = memory.alloc::<u32>(circuit.decision_child_false.len())?;
         device
             .htod_sync_copy_into(&circuit.decision_child_false, &mut d_decision_child_false)
             .map_err(|e| {
-                XlogError::Kernel(format!("Failed to upload circuit decision_child_false: {}", e))
+                XlogError::Kernel(format!(
+                    "Failed to upload circuit decision_child_false: {}",
+                    e
+                ))
             })?;
 
         let mut d_decision_child_true = memory.alloc::<u32>(circuit.decision_child_true.len())?;
         device
             .htod_sync_copy_into(&circuit.decision_child_true, &mut d_decision_child_true)
             .map_err(|e| {
-                XlogError::Kernel(format!("Failed to upload circuit decision_child_true: {}", e))
+                XlogError::Kernel(format!(
+                    "Failed to upload circuit decision_child_true: {}",
+                    e
+                ))
             })?;
 
         let mut d_level_nodes = memory.alloc::<u32>(circuit.level_nodes.len())?;
         device
             .htod_sync_copy_into(&circuit.level_nodes, &mut d_level_nodes)
-            .map_err(|e| XlogError::Kernel(format!("Failed to upload circuit level_nodes: {}", e)))?;
+            .map_err(|e| {
+                XlogError::Kernel(format!("Failed to upload circuit level_nodes: {}", e))
+            })?;
 
         let weights_len = (max_var as usize) + 1;
         let var_log_true = memory.alloc::<f64>(weights_len)?;
@@ -319,7 +333,9 @@ impl GpuXgcf {
         let mut root_adj_view = self.adj.slice_mut(root_idx..(root_idx + 1));
         let fill_const = device
             .get_func(ARITH_MODULE, arith_kernels::ARITH_FILL_CONST_F64)
-            .ok_or_else(|| XlogError::Kernel("arith_fill_const_f64 kernel not found".to_string()))?;
+            .ok_or_else(|| {
+                XlogError::Kernel("arith_fill_const_f64 kernel not found".to_string())
+            })?;
         unsafe {
             fill_const.clone().launch(
                 LaunchConfig {
@@ -333,19 +349,26 @@ impl GpuXgcf {
         .map_err(|e| XlogError::Kernel(format!("arith_fill_const_f64 failed: {}", e)))?;
 
         let propagate = device
-            .get_func(CIRCUIT_MODULE, circuit_kernels::XGCF_BACKWARD_LEVEL_PROPAGATE)
+            .get_func(
+                CIRCUIT_MODULE,
+                circuit_kernels::XGCF_BACKWARD_LEVEL_PROPAGATE,
+            )
             .ok_or_else(|| {
                 XlogError::Kernel("xgcf_backward_level_propagate kernel not found".to_string())
             })?;
         let decision_grad = device
-            .get_func(CIRCUIT_MODULE, circuit_kernels::XGCF_BACKWARD_LEVEL_DECISION_GRAD)
+            .get_func(
+                CIRCUIT_MODULE,
+                circuit_kernels::XGCF_BACKWARD_LEVEL_DECISION_GRAD,
+            )
             .ok_or_else(|| {
-                XlogError::Kernel(
-                    "xgcf_backward_level_decision_grad kernel not found".to_string(),
-                )
+                XlogError::Kernel("xgcf_backward_level_decision_grad kernel not found".to_string())
             })?;
         let lit_grad = device
-            .get_func(CIRCUIT_MODULE, circuit_kernels::XGCF_BACKWARD_LEVEL_LIT_GRAD)
+            .get_func(
+                CIRCUIT_MODULE,
+                circuit_kernels::XGCF_BACKWARD_LEVEL_LIT_GRAD,
+            )
             .ok_or_else(|| {
                 XlogError::Kernel("xgcf_backward_level_lit_grad kernel not found".to_string())
             })?;
@@ -385,7 +408,9 @@ impl GpuXgcf {
                     ),
                 )
             }
-            .map_err(|e| XlogError::Kernel(format!("xgcf_backward_level_propagate failed: {}", e)))?;
+            .map_err(|e| {
+                XlogError::Kernel(format!("xgcf_backward_level_propagate failed: {}", e))
+            })?;
 
             unsafe {
                 decision_grad.clone().launch(
@@ -424,7 +449,9 @@ impl GpuXgcf {
                     ),
                 )
             }
-            .map_err(|e| XlogError::Kernel(format!("xgcf_backward_level_lit_grad failed: {}", e)))?;
+            .map_err(|e| {
+                XlogError::Kernel(format!("xgcf_backward_level_lit_grad failed: {}", e))
+            })?;
         }
 
         provider.device().synchronize()?;
@@ -544,19 +571,26 @@ impl GpuXgcf {
             .map_err(|e| XlogError::Kernel(format!("Failed to set root adjoint: {}", e)))?;
 
         let propagate = device
-            .get_func(CIRCUIT_MODULE, circuit_kernels::XGCF_BACKWARD_LEVEL_PROPAGATE)
+            .get_func(
+                CIRCUIT_MODULE,
+                circuit_kernels::XGCF_BACKWARD_LEVEL_PROPAGATE,
+            )
             .ok_or_else(|| {
                 XlogError::Kernel("xgcf_backward_level_propagate kernel not found".to_string())
             })?;
         let decision_grad = device
-            .get_func(CIRCUIT_MODULE, circuit_kernels::XGCF_BACKWARD_LEVEL_DECISION_GRAD)
+            .get_func(
+                CIRCUIT_MODULE,
+                circuit_kernels::XGCF_BACKWARD_LEVEL_DECISION_GRAD,
+            )
             .ok_or_else(|| {
-                XlogError::Kernel(
-                    "xgcf_backward_level_decision_grad kernel not found".to_string(),
-                )
+                XlogError::Kernel("xgcf_backward_level_decision_grad kernel not found".to_string())
             })?;
         let lit_grad = device
-            .get_func(CIRCUIT_MODULE, circuit_kernels::XGCF_BACKWARD_LEVEL_LIT_GRAD)
+            .get_func(
+                CIRCUIT_MODULE,
+                circuit_kernels::XGCF_BACKWARD_LEVEL_LIT_GRAD,
+            )
             .ok_or_else(|| {
                 XlogError::Kernel("xgcf_backward_level_lit_grad kernel not found".to_string())
             })?;
@@ -598,7 +632,9 @@ impl GpuXgcf {
                     ),
                 )
             }
-            .map_err(|e| XlogError::Kernel(format!("xgcf_backward_level_propagate failed: {}", e)))?;
+            .map_err(|e| {
+                XlogError::Kernel(format!("xgcf_backward_level_propagate failed: {}", e))
+            })?;
 
             unsafe {
                 decision_grad.clone().launch(
@@ -637,7 +673,9 @@ impl GpuXgcf {
                     ),
                 )
             }
-            .map_err(|e| XlogError::Kernel(format!("xgcf_backward_level_lit_grad failed: {}", e)))?;
+            .map_err(|e| {
+                XlogError::Kernel(format!("xgcf_backward_level_lit_grad failed: {}", e))
+            })?;
         }
 
         provider.device().synchronize()?;

@@ -6,12 +6,28 @@ use std::process::Command;
 
 fn main() {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
-    let kernels_dir = Path::new(&manifest_dir).parent().unwrap().parent().unwrap().join("kernels");
+    let kernels_dir = Path::new(&manifest_dir)
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("kernels");
 
     // List of CUDA kernels to compile
     let kernels = [
-        "join", "dedup", "groupby", "scan", "sort", "filter", "pack", "set_ops", "circuit",
-        "mc_sample", "arith", "sat", "neural",
+        "join",
+        "dedup",
+        "groupby",
+        "scan",
+        "sort",
+        "filter",
+        "pack",
+        "set_ops",
+        "circuit",
+        "mc_sample",
+        "arith",
+        "sat",
+        "neural",
     ];
 
     for kernel in &kernels {
@@ -23,9 +39,7 @@ fn main() {
             let cu_meta = std::fs::metadata(&cu_path).ok();
             let ptx_meta = std::fs::metadata(&ptx_path).ok();
             match (cu_meta, ptx_meta) {
-                (Some(cu), Some(ptx)) => {
-                    cu.modified().ok() > ptx.modified().ok()
-                }
+                (Some(cu), Some(ptx)) => cu.modified().ok() > ptx.modified().ok(),
                 _ => true,
             }
         } else {

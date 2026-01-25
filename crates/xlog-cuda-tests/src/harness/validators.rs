@@ -7,12 +7,14 @@ pub mod reference {
     /// Hash join returning (left_idx, right_idx) pairs.
     pub fn hash_join_u32(left: &[u32], right: &[u32]) -> Vec<(usize, usize)> {
         let mut result = Vec::new();
-        let right_map: HashMap<u32, Vec<usize>> = right.iter()
-            .enumerate()
-            .fold(HashMap::new(), |mut acc, (idx, val)| {
-                acc.entry(*val).or_default().push(idx);
-                acc
-            });
+        let right_map: HashMap<u32, Vec<usize>> =
+            right
+                .iter()
+                .enumerate()
+                .fold(HashMap::new(), |mut acc, (idx, val)| {
+                    acc.entry(*val).or_default().push(idx);
+                    acc
+                });
 
         for (left_idx, left_val) in left.iter().enumerate() {
             if let Some(right_indices) = right_map.get(left_val) {
@@ -110,7 +112,8 @@ pub mod reference {
 
     /// Stable radix sort returning (sorted_data, permutation).
     pub fn radix_sort_u32(keys: &[u32]) -> (Vec<u32>, Vec<u32>) {
-        let mut indexed: Vec<(u32, u32)> = keys.iter()
+        let mut indexed: Vec<(u32, u32)> = keys
+            .iter()
             .enumerate()
             .map(|(i, &k)| (k, i as u32))
             .collect();
@@ -373,7 +376,13 @@ pub mod reference {
     }
 
     /// Unpack a column from packed rows.
-    pub fn unpack_column(packed: &[u8], row_size: usize, col_offset: usize, col_size: usize, num_rows: usize) -> Vec<u8> {
+    pub fn unpack_column(
+        packed: &[u8],
+        row_size: usize,
+        col_offset: usize,
+        col_size: usize,
+        num_rows: usize,
+    ) -> Vec<u8> {
         let mut result = vec![0u8; col_size * num_rows];
 
         for row in 0..num_rows {
@@ -427,7 +436,12 @@ pub mod compare {
     /// Assert u32 slices are equal with detailed diff on failure.
     pub fn assert_eq_u32(gpu: &[u32], cpu: &[u32], context: &str) {
         if gpu.len() != cpu.len() {
-            panic!("{}: length mismatch: GPU={}, CPU={}", context, gpu.len(), cpu.len());
+            panic!(
+                "{}: length mismatch: GPU={}, CPU={}",
+                context,
+                gpu.len(),
+                cpu.len()
+            );
         }
 
         let mut first_diff = None;
@@ -453,7 +467,12 @@ pub mod compare {
     /// Assert i64 slices are equal with detailed diff on failure.
     pub fn assert_eq_i64(gpu: &[i64], cpu: &[i64], context: &str) {
         if gpu.len() != cpu.len() {
-            panic!("{}: length mismatch: GPU={}, CPU={}", context, gpu.len(), cpu.len());
+            panic!(
+                "{}: length mismatch: GPU={}, CPU={}",
+                context,
+                gpu.len(),
+                cpu.len()
+            );
         }
 
         let mut first_diff = None;
@@ -479,7 +498,12 @@ pub mod compare {
     /// Assert u64 slices are equal with detailed diff on failure.
     pub fn assert_eq_u64(gpu: &[u64], cpu: &[u64], context: &str) {
         if gpu.len() != cpu.len() {
-            panic!("{}: length mismatch: GPU={}, CPU={}", context, gpu.len(), cpu.len());
+            panic!(
+                "{}: length mismatch: GPU={}, CPU={}",
+                context,
+                gpu.len(),
+                cpu.len()
+            );
         }
 
         let mut first_diff = None;
@@ -505,7 +529,12 @@ pub mod compare {
     /// Assert f64 slices are equal within ULP tolerance.
     pub fn assert_eq_f64_ulp(gpu: &[f64], cpu: &[f64], max_ulp: u64, context: &str) {
         if gpu.len() != cpu.len() {
-            panic!("{}: length mismatch: GPU={}, CPU={}", context, gpu.len(), cpu.len());
+            panic!(
+                "{}: length mismatch: GPU={}, CPU={}",
+                context,
+                gpu.len(),
+                cpu.len()
+            );
         }
 
         let mut first_diff = None;
@@ -532,7 +561,12 @@ pub mod compare {
     /// Assert f64 slices are equal within relative tolerance.
     pub fn assert_eq_f64_rel(gpu: &[f64], cpu: &[f64], rel_tol: f64, context: &str) {
         if gpu.len() != cpu.len() {
-            panic!("{}: length mismatch: GPU={}, CPU={}", context, gpu.len(), cpu.len());
+            panic!(
+                "{}: length mismatch: GPU={}, CPU={}",
+                context,
+                gpu.len(),
+                cpu.len()
+            );
         }
 
         let mut first_diff = None;
@@ -599,31 +633,50 @@ pub mod compare {
     /// Assert permutation is valid.
     pub fn assert_valid_permutation(perm: &[u32], len: usize, context: &str) {
         if perm.len() != len {
-            panic!("{}: permutation length {} != expected {}", context, perm.len(), len);
+            panic!(
+                "{}: permutation length {} != expected {}",
+                context,
+                perm.len(),
+                len
+            );
         }
 
         let mut seen = vec![false; len];
         for (i, &idx) in perm.iter().enumerate() {
             if idx as usize >= len {
-                panic!("{}: permutation index {} out of bounds at position {}", context, idx, i);
+                panic!(
+                    "{}: permutation index {} out of bounds at position {}",
+                    context, idx, i
+                );
             }
             if seen[idx as usize] {
-                panic!("{}: duplicate permutation index {} at position {}", context, idx, i);
+                panic!(
+                    "{}: duplicate permutation index {} at position {}",
+                    context, idx, i
+                );
             }
             seen[idx as usize] = true;
         }
     }
 
     /// Assert sort is stable (equal keys maintain relative order).
-    pub fn assert_stable_sort(original_keys: &[u32], original_vals: &[u32], sorted_keys: &[u32], sorted_vals: &[u32], context: &str) {
+    pub fn assert_stable_sort(
+        original_keys: &[u32],
+        original_vals: &[u32],
+        sorted_keys: &[u32],
+        sorted_vals: &[u32],
+        context: &str,
+    ) {
         // Group by key in original order
-        let mut key_to_vals: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
+        let mut key_to_vals: std::collections::HashMap<u32, Vec<u32>> =
+            std::collections::HashMap::new();
         for (&k, &v) in original_keys.iter().zip(original_vals.iter()) {
             key_to_vals.entry(k).or_default().push(v);
         }
 
         // Check sorted result maintains relative order within each key group
-        let mut key_to_idx: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+        let mut key_to_idx: std::collections::HashMap<u32, usize> =
+            std::collections::HashMap::new();
         for (&k, &v) in sorted_keys.iter().zip(sorted_vals.iter()) {
             let idx = key_to_idx.entry(k).or_insert(0);
             let expected_vals = key_to_vals.get(&k).unwrap();

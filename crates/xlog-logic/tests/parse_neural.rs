@@ -33,7 +33,8 @@ fn test_parse_neural_predicate_embedding() {
 
 #[test]
 fn test_parse_neural_predicate_multiple_inputs() {
-    let source = r#"nn(neural1, [I1, I2, Carry], O, [0,1,2,3,4,5,6,7,8,9]) :: result(I1, I2, Carry, O)."#;
+    let source =
+        r#"nn(neural1, [I1, I2, Carry], O, [0,1,2,3,4,5,6,7,8,9]) :: result(I1, I2, Carry, O)."#;
     let program = parse_program(source).expect("should parse");
     assert_eq!(program.neural_predicates.len(), 1);
 

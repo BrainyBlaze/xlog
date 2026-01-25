@@ -842,10 +842,7 @@ fn test_weight_sparse_nonzero(ctx: &TestContext) -> TestResult {
             return TestResult::error(
                 "test_weight_sparse_nonzero",
                 start.elapsed(),
-                format!(
-                    "Child {} should be -inf (log(0)), got {}",
-                    i, child_val
-                ),
+                format!("Child {} should be -inf (log(0)), got {}", i, child_val),
             );
         }
     }

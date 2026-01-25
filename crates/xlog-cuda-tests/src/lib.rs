@@ -12,10 +12,12 @@
 //! cargo test -p xlog-cuda-tests --test category_isolation c03 --release
 //! ```
 
-pub mod harness;
 pub mod categories;
+pub mod harness;
 pub mod properties;
 
-pub use harness::{TestContext, FailureDiagnostic, CertificationResults, CategoryResult, TestResult, TestStatus};
-pub use harness::generators::{SizeGen, Distribution, NumericEdges, AlignmentGen};
-pub use harness::validators::{reference, compare};
+pub use harness::generators::{AlignmentGen, Distribution, NumericEdges, SizeGen};
+pub use harness::validators::{compare, reference};
+pub use harness::{
+    CategoryResult, CertificationResults, FailureDiagnostic, TestContext, TestResult, TestStatus,
+};

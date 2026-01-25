@@ -497,11 +497,14 @@ mod tests {
         let program = create_unstratifiable_program(); // p :- not q. q :- not p.
         let result = analyze_stratification(&program);
 
-        assert!(!result.non_monotone_sccs.is_empty(), "Should detect non-monotone SCC");
+        assert!(
+            !result.non_monotone_sccs.is_empty(),
+            "Should detect non-monotone SCC"
+        );
         // The SCC containing p and q should be marked as non-monotone
         let has_non_monotone = result.sccs.iter().enumerate().any(|(i, scc)| {
-            result.non_monotone_sccs.contains(&i) &&
-            (scc.contains(&"p".to_string()) || scc.contains(&"q".to_string()))
+            result.non_monotone_sccs.contains(&i)
+                && (scc.contains(&"p".to_string()) || scc.contains(&"q".to_string()))
         });
         assert!(has_non_monotone, "SCC with p/q should be non-monotone");
     }
@@ -511,13 +514,25 @@ mod tests {
         let program = create_isolated_program(); // isolated(X) :- node(X), not edge(X, Y).
         let result = analyze_stratification(&program);
 
-        assert!(result.non_monotone_sccs.is_empty(), "Stratified program has no non-monotone SCCs");
-        assert!(result.strata.contains_key("isolated"), "isolated should have a stratum");
-        assert!(result.strata.contains_key("edge"), "edge should have a stratum");
+        assert!(
+            result.non_monotone_sccs.is_empty(),
+            "Stratified program has no non-monotone SCCs"
+        );
+        assert!(
+            result.strata.contains_key("isolated"),
+            "isolated should have a stratum"
+        );
+        assert!(
+            result.strata.contains_key("edge"),
+            "edge should have a stratum"
+        );
 
         // isolated depends negatively on edge, so isolated.stratum > edge.stratum
         let isolated_stratum = result.strata.get("isolated").unwrap();
         let edge_stratum = result.strata.get("edge").unwrap();
-        assert!(isolated_stratum > edge_stratum, "isolated should be in higher stratum than edge");
+        assert!(
+            isolated_stratum > edge_stratum,
+            "isolated should be in higher stratum than edge"
+        );
     }
 }

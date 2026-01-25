@@ -98,7 +98,10 @@ fn test_task_management_system() {
     assert_eq!(symbol::resolve(blocked), "blocked");
 
     // Verify priority functions
-    assert!(priorities.functions.iter().any(|f| f.name == "priority_score"));
+    assert!(priorities
+        .functions
+        .iter()
+        .any(|f| f.name == "priority_score"));
     assert!(priorities.functions.iter().any(|f| f.name == "is_critical"));
 
     // Verify priority_score has nested conditionals
@@ -125,15 +128,18 @@ fn test_task_management_system() {
         .iter()
         .find(|p| p.name == "internal_status")
         .expect("internal_status predicate should exist");
-    assert!(
-        private_pred.is_private,
-        "internal_status should be private"
-    );
+    assert!(private_pred.is_private, "internal_status should be private");
 
     // Verify main program imports
     assert_eq!(main.imports.len(), 2);
-    assert!(main.imports.iter().any(|i| i.module_path == vec!["priorities"]));
-    assert!(main.imports.iter().any(|i| i.module_path == vec!["statuses"]));
+    assert!(main
+        .imports
+        .iter()
+        .any(|i| i.module_path == vec!["priorities"]));
+    assert!(main
+        .imports
+        .iter()
+        .any(|i| i.module_path == vec!["statuses"]));
 
     // Verify main query
     assert!(!main.queries.is_empty());
@@ -289,7 +295,10 @@ fn test_inventory_warehouse_system() {
     assert_eq!(symbol::resolve(furniture), "furniture");
 
     // Verify functions
-    assert!(products.functions.iter().any(|f| f.name == "reorder_threshold"));
+    assert!(products
+        .functions
+        .iter()
+        .any(|f| f.name == "reorder_threshold"));
     assert!(products.functions.iter().any(|f| f.name == "safety_stock"));
 
     // Verify safety_stock has 2 parameters
@@ -410,8 +419,14 @@ fn test_analytics_metrics_system() {
 
     // Verify metric type symbols
     assert_eq!(symbol::resolve(symbol::intern("cpu_usage")), "cpu_usage");
-    assert_eq!(symbol::resolve(symbol::intern("request_count")), "request_count");
-    assert_eq!(symbol::resolve(symbol::intern("response_time")), "response_time");
+    assert_eq!(
+        symbol::resolve(symbol::intern("request_count")),
+        "request_count"
+    );
+    assert_eq!(
+        symbol::resolve(symbol::intern("response_time")),
+        "response_time"
+    );
     assert_eq!(symbol::resolve(symbol::intern("error_rate")), "error_rate");
 
     // Verify aggregation type symbols
@@ -425,11 +440,18 @@ fn test_analytics_metrics_system() {
     // Verify statistics functions
     assert!(statistics.functions.iter().any(|f| f.name == "normalize"));
     assert!(statistics.functions.iter().any(|f| f.name == "clamp"));
-    assert!(statistics.functions.iter().any(|f| f.name == "anomaly_score"));
+    assert!(statistics
+        .functions
+        .iter()
+        .any(|f| f.name == "anomaly_score"));
     assert!(statistics.functions.iter().any(|f| f.name == "abs_val"));
 
     // Verify private function
-    let abs_fn = statistics.functions.iter().find(|f| f.name == "abs_val").unwrap();
+    let abs_fn = statistics
+        .functions
+        .iter()
+        .find(|f| f.name == "abs_val")
+        .unwrap();
     assert!(abs_fn.is_private, "abs_val should be private");
 
     // Verify anomaly_score has 3 parameters
@@ -553,7 +575,10 @@ fn test_hierarchical_organization_structure() {
     let main = parse_program(main_src).unwrap();
 
     // Verify department symbols
-    assert_eq!(symbol::resolve(symbol::intern("engineering")), "engineering");
+    assert_eq!(
+        symbol::resolve(symbol::intern("engineering")),
+        "engineering"
+    );
     assert_eq!(symbol::resolve(symbol::intern("product")), "product");
     assert_eq!(symbol::resolve(symbol::intern("sales")), "sales");
     assert_eq!(symbol::resolve(symbol::intern("marketing")), "marketing");
@@ -591,7 +616,10 @@ fn test_hierarchical_organization_structure() {
     assert_eq!(role_level_facts.len(), 9);
 
     // Verify salary functions
-    assert!(roles.functions.iter().any(|f| f.name == "level_salary_base"));
+    assert!(roles
+        .functions
+        .iter()
+        .any(|f| f.name == "level_salary_base"));
     assert!(roles.functions.iter().any(|f| f.name == "level_bonus_rate"));
 
     // Verify level_salary_base has deeply nested conditionals
@@ -753,17 +781,35 @@ fn test_event_processing_pipeline() {
 
     // Verify event type symbols
     assert_eq!(symbol::resolve(symbol::intern("user_login")), "user_login");
-    assert_eq!(symbol::resolve(symbol::intern("user_logout")), "user_logout");
+    assert_eq!(
+        symbol::resolve(symbol::intern("user_logout")),
+        "user_logout"
+    );
     assert_eq!(symbol::resolve(symbol::intern("page_view")), "page_view");
-    assert_eq!(symbol::resolve(symbol::intern("button_click")), "button_click");
-    assert_eq!(symbol::resolve(symbol::intern("form_submit")), "form_submit");
-    assert_eq!(symbol::resolve(symbol::intern("error_occurred")), "error_occurred");
+    assert_eq!(
+        symbol::resolve(symbol::intern("button_click")),
+        "button_click"
+    );
+    assert_eq!(
+        symbol::resolve(symbol::intern("form_submit")),
+        "form_submit"
+    );
+    assert_eq!(
+        symbol::resolve(symbol::intern("error_occurred")),
+        "error_occurred"
+    );
     assert_eq!(symbol::resolve(symbol::intern("api_call")), "api_call");
 
     // Verify category symbols
-    assert_eq!(symbol::resolve(symbol::intern("authentication")), "authentication");
+    assert_eq!(
+        symbol::resolve(symbol::intern("authentication")),
+        "authentication"
+    );
     assert_eq!(symbol::resolve(symbol::intern("navigation")), "navigation");
-    assert_eq!(symbol::resolve(symbol::intern("interaction")), "interaction");
+    assert_eq!(
+        symbol::resolve(symbol::intern("interaction")),
+        "interaction"
+    );
     assert_eq!(symbol::resolve(symbol::intern("system")), "system");
 
     // Verify state symbols
@@ -787,10 +833,22 @@ fn test_event_processing_pipeline() {
     assert_eq!(category_facts.len(), 7);
 
     // Verify processing functions
-    assert!(event_processing.functions.iter().any(|f| f.name == "event_score"));
-    assert!(event_processing.functions.iter().any(|f| f.name == "should_alert"));
-    assert!(event_processing.functions.iter().any(|f| f.name == "time_bucket"));
-    assert!(event_processing.functions.iter().any(|f| f.name == "internal_weight"));
+    assert!(event_processing
+        .functions
+        .iter()
+        .any(|f| f.name == "event_score"));
+    assert!(event_processing
+        .functions
+        .iter()
+        .any(|f| f.name == "should_alert"));
+    assert!(event_processing
+        .functions
+        .iter()
+        .any(|f| f.name == "time_bucket"));
+    assert!(event_processing
+        .functions
+        .iter()
+        .any(|f| f.name == "internal_weight"));
 
     // Verify private function
     let internal_weight = event_processing
@@ -919,11 +977,26 @@ fn test_deeply_nested_module_paths() {
     assert_eq!(prog.imports.len(), 5);
 
     // Check nested paths
-    assert!(prog.imports.iter().any(|i| i.module_path == vec!["core", "utils", "math"]));
-    assert!(prog.imports.iter().any(|i| i.module_path == vec!["core", "utils", "string"]));
-    assert!(prog.imports.iter().any(|i| i.module_path == vec!["domain", "models", "user"]));
-    assert!(prog.imports.iter().any(|i| i.module_path == vec!["infra", "db", "postgres"]));
-    assert!(prog.imports.iter().any(|i| i.module_path == vec!["infra", "cache", "redis"]));
+    assert!(prog
+        .imports
+        .iter()
+        .any(|i| i.module_path == vec!["core", "utils", "math"]));
+    assert!(prog
+        .imports
+        .iter()
+        .any(|i| i.module_path == vec!["core", "utils", "string"]));
+    assert!(prog
+        .imports
+        .iter()
+        .any(|i| i.module_path == vec!["domain", "models", "user"]));
+    assert!(prog
+        .imports
+        .iter()
+        .any(|i| i.module_path == vec!["infra", "db", "postgres"]));
+    assert!(prog
+        .imports
+        .iter()
+        .any(|i| i.module_path == vec!["infra", "cache", "redis"]));
 
     // Check specific imports
     let math_import = prog
@@ -1110,10 +1183,16 @@ fn test_ecommerce_platform_full_integration() {
     let main = parse_program(main_src).unwrap();
 
     // Verify product category symbols
-    assert_eq!(symbol::resolve(symbol::intern("electronics")), "electronics");
+    assert_eq!(
+        symbol::resolve(symbol::intern("electronics")),
+        "electronics"
+    );
     assert_eq!(symbol::resolve(symbol::intern("clothing")), "clothing");
     assert_eq!(symbol::resolve(symbol::intern("books")), "books");
-    assert_eq!(symbol::resolve(symbol::intern("home_garden")), "home_garden");
+    assert_eq!(
+        symbol::resolve(symbol::intern("home_garden")),
+        "home_garden"
+    );
 
     // Verify product ID symbols
     assert_eq!(symbol::resolve(symbol::intern("prod_001")), "prod_001");
@@ -1364,10 +1443,7 @@ fn test_mixed_typed_untyped_functions() {
     assert!(mixed.params[1].typ.is_some());
 
     // Verify symbols
-    assert_eq!(
-        symbol::resolve(symbol::intern("sum_result")),
-        "sum_result"
-    );
+    assert_eq!(symbol::resolve(symbol::intern("sum_result")), "sum_result");
     assert_eq!(
         symbol::resolve(symbol::intern("product_result")),
         "product_result"

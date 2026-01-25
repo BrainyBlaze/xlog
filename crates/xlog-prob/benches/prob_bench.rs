@@ -82,8 +82,12 @@ fn generate_prob_grid_program(grid_size: usize, cell_prob: f64) -> String {
     }
 
     // Connectivity: can move between adjacent active cells
-    source.push_str("\nconnected(X1, Y1, X2, Y2) :- active(X1, Y1), active(X2, Y2), X2 is X1 + 1, Y1 = Y2.\n");
-    source.push_str("connected(X1, Y1, X2, Y2) :- active(X1, Y1), active(X2, Y2), X1 = X2, Y2 is Y1 + 1.\n");
+    source.push_str(
+        "\nconnected(X1, Y1, X2, Y2) :- active(X1, Y1), active(X2, Y2), X2 is X1 + 1, Y1 = Y2.\n",
+    );
+    source.push_str(
+        "connected(X1, Y1, X2, Y2) :- active(X1, Y1), active(X2, Y2), X1 = X2, Y2 is Y1 + 1.\n",
+    );
 
     // Reachability
     source.push_str("\nreachable(X, Y) :- X = 0, Y = 0, active(0, 0).\n");
@@ -122,9 +126,7 @@ fn generate_bayesian_network_program(num_vars: usize, num_edges: usize, seed: u6
             let prob = rng.next_prob();
             source.push_str(&format!(
                 "{:.2}::node({}) :- node({}).\n",
-                prob,
-                child,
-                parent
+                prob, child, parent
             ));
         }
     }
@@ -184,13 +186,9 @@ fn bench_exact_path(c: &mut Criterion) {
         let num_vars = program.num_vars();
 
         group.throughput(Throughput::Elements(num_vars as u64));
-        group.bench_with_input(
-            BenchmarkId::new("vars", num_vars),
-            &path_len,
-            |b, _| {
-                b.iter(|| program.evaluate());
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("vars", num_vars), &path_len, |b, _| {
+            b.iter(|| program.evaluate());
+        });
     }
 
     group.finish();
@@ -218,16 +216,15 @@ fn bench_exact_grid(c: &mut Criterion) {
         let num_vars = program.num_vars();
 
         group.throughput(Throughput::Elements(num_cells as u64));
-        group.bench_with_input(
-            BenchmarkId::new("cells", num_cells),
-            &grid_size,
-            |b, _| {
-                b.iter(|| program.evaluate());
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("cells", num_cells), &grid_size, |b, _| {
+            b.iter(|| program.evaluate());
+        });
 
         // Log circuit complexity
-        eprintln!("exact_grid {}x{}: {} vars in circuit", grid_size, grid_size, num_vars);
+        eprintln!(
+            "exact_grid {}x{}: {} vars in circuit",
+            grid_size, grid_size, num_vars
+        );
     }
 
     group.finish();
@@ -419,10 +416,7 @@ fn bench_mc_grid(c: &mut Criterion) {
         // Log stats
         eprintln!(
             "mc_grid {}x{}: {} vars, {} worlds evaluated",
-            grid_size,
-            grid_size,
-            num_vars,
-            mc_config.samples
+            grid_size, grid_size, num_vars, mc_config.samples
         );
     }
 
@@ -462,7 +456,9 @@ fn bench_mc_bayesian(c: &mut Criterion) {
 
         let actual_vars = program.num_vars();
 
-        group.throughput(Throughput::Elements((mc_config.samples * actual_vars) as u64));
+        group.throughput(Throughput::Elements(
+            (mc_config.samples * actual_vars) as u64,
+        ));
         group.bench_with_input(BenchmarkId::new("config", label), &label, |b, _| {
             b.iter(|| program.evaluate(black_box(mc_config.clone())));
         });
@@ -504,13 +500,9 @@ fn bench_exact_gradients(c: &mut Criterion) {
         let num_vars = program.num_vars();
 
         group.throughput(Throughput::Elements(num_vars as u64));
-        group.bench_with_input(
-            BenchmarkId::new("vars", num_vars),
-            &path_len,
-            |b, _| {
-                b.iter(|| program.evaluate_gpu_with_grads());
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("vars", num_vars), &path_len, |b, _| {
+            b.iter(|| program.evaluate_gpu_with_grads());
+        });
     }
 
     group.finish();

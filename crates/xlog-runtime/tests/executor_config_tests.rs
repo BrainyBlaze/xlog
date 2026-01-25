@@ -27,10 +27,7 @@ fn create_executor_with_config(
     Some((executor, provider))
 }
 
-fn create_edge_buffer(
-    provider: &CudaKernelProvider,
-    edges: &[(u32, u32)],
-) -> CudaBuffer {
+fn create_edge_buffer(provider: &CudaKernelProvider, edges: &[(u32, u32)]) -> CudaBuffer {
     let schema = Schema::new(vec![
         ("c0".to_string(), ScalarType::U32),
         ("c1".to_string(), ScalarType::U32),
@@ -46,13 +43,16 @@ fn create_edge_buffer(
         .iter()
         .flat_map(|(from, _)| from.to_le_bytes())
         .collect();
-    let col1_bytes: Vec<u8> = edges
-        .iter()
-        .flat_map(|(_, to)| to.to_le_bytes())
-        .collect();
+    let col1_bytes: Vec<u8> = edges.iter().flat_map(|(_, to)| to.to_le_bytes()).collect();
 
-    let mut col0 = provider.memory().alloc::<u8>(col0_bytes.len()).expect("alloc");
-    let mut col1 = provider.memory().alloc::<u8>(col1_bytes.len()).expect("alloc");
+    let mut col0 = provider
+        .memory()
+        .alloc::<u8>(col0_bytes.len())
+        .expect("alloc");
+    let mut col1 = provider
+        .memory()
+        .alloc::<u8>(col1_bytes.len())
+        .expect("alloc");
 
     provider
         .device()

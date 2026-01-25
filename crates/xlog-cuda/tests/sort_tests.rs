@@ -1,6 +1,6 @@
 // crates/xlog-cuda/tests/sort_tests.rs
 use std::sync::Arc;
-use xlog_core::{MemoryBudget, Schema, ScalarType};
+use xlog_core::{MemoryBudget, ScalarType, Schema};
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 
 fn setup_provider() -> Option<CudaKernelProvider> {

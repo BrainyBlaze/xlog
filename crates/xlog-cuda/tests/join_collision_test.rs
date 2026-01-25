@@ -5,7 +5,7 @@
 //! probability (~2^-64), joins must be mathematically correct.
 
 use std::sync::Arc;
-use xlog_core::{MemoryBudget, Schema, ScalarType};
+use xlog_core::{MemoryBudget, ScalarType, Schema};
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager, JoinType};
 
 fn setup_provider() -> Option<CudaKernelProvider> {

@@ -22,7 +22,10 @@ fn try_provider() -> Option<CudaKernelProvider> {
     match CudaKernelProvider::new(device, memory) {
         Ok(p) => Some(p),
         Err(e) => {
-            eprintln!("Skipping test: failed to create CUDA kernel provider: {}", e);
+            eprintln!(
+                "Skipping test: failed to create CUDA kernel provider: {}",
+                e
+            );
             None
         }
     }
@@ -89,7 +92,9 @@ query(pred(0, 2)).
     let p: [f32; 3] = [0.2, 0.3, 0.5];
 
     let schema = xlog_core::Schema::new(vec![("col0".to_string(), xlog_core::ScalarType::F32)]);
-    let prob_buf = provider.create_buffer_from_f32_slice(&p, schema.clone()).unwrap();
+    let prob_buf = provider
+        .create_buffer_from_f32_slice(&p, schema.clone())
+        .unwrap();
     let grad_buf = provider
         .create_buffer_from_f32_slice(&[0.0f32; 3], schema)
         .unwrap();
@@ -162,7 +167,9 @@ query(pred(0, 2)).
     let p: [f32; 3] = [0.2, 0.3, 0.5];
 
     let schema = xlog_core::Schema::new(vec![("col0".to_string(), xlog_core::ScalarType::F32)]);
-    let prob_buf = provider.create_buffer_from_f32_slice(&p, schema.clone()).unwrap();
+    let prob_buf = provider
+        .create_buffer_from_f32_slice(&p, schema.clone())
+        .unwrap();
     let grad_buf = provider
         .create_buffer_from_f32_slice(&[0.0f32; 3], schema)
         .unwrap();

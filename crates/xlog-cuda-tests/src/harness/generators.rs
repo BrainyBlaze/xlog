@@ -10,12 +10,9 @@ impl SizeGen {
     /// Standard edge case sizes covering block boundaries and common edge cases.
     pub fn edge_cases() -> Vec<usize> {
         vec![
-            0, 1, 2, 3, 7, 15, 16, 17, 31, 32, 33, 63, 64, 65,
-            127, 128, 129, 255, 256, 257, 511, 512, 513,
-            1023, 1024, 1025, 2047, 2048, 2049,
-            4095, 4096, 4097, 8191, 8192, 8193,
-            16383, 16384, 16385, 32767, 32768, 32769,
-            65535, 65536, 65537,
+            0, 1, 2, 3, 7, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 255, 256, 257, 511,
+            512, 513, 1023, 1024, 1025, 2047, 2048, 2049, 4095, 4096, 4097, 8191, 8192, 8193,
+            16383, 16384, 16385, 32767, 32768, 32769, 65535, 65536, 65537,
         ]
     }
 
@@ -30,11 +27,11 @@ impl SizeGen {
 
     /// Sizes that are prime numbers (worst case for some algorithms).
     pub fn primes() -> Vec<usize> {
-        vec![2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47,
-             53, 59, 61, 67, 71, 73, 79, 83, 89, 97, 101, 103, 107,
-             127, 131, 251, 257, 509, 521, 1021, 1031, 2039, 2053,
-             4093, 4099, 8191, 8209, 16381, 16411, 32749, 32771,
-             65521, 65537]
+        vec![
+            2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83,
+            89, 97, 101, 103, 107, 127, 131, 251, 257, 509, 521, 1021, 1031, 2039, 2053, 4093,
+            4099, 8191, 8209, 16381, 16411, 32749, 32771, 65521, 65537,
+        ]
     }
 
     /// Random sizes within a range using deterministic RNG.
@@ -46,19 +43,16 @@ impl SizeGen {
     /// Warp-related sizes (multiples of 32, and off-by-one).
     pub fn warp_related() -> Vec<usize> {
         vec![
-            31, 32, 33, 63, 64, 65, 95, 96, 97,
-            127, 128, 129, 159, 160, 161,
-            191, 192, 193, 223, 224, 225,
-            255, 256, 257, 287, 288, 289,
+            31, 32, 33, 63, 64, 65, 95, 96, 97, 127, 128, 129, 159, 160, 161, 191, 192, 193, 223,
+            224, 225, 255, 256, 257, 287, 288, 289,
         ]
     }
 
     /// Block-related sizes (multiples of 256, and off-by-one).
     pub fn block_related() -> Vec<usize> {
         vec![
-            255, 256, 257, 511, 512, 513,
-            767, 768, 769, 1023, 1024, 1025,
-            1279, 1280, 1281, 1535, 1536, 1537,
+            255, 256, 257, 511, 512, 513, 767, 768, 769, 1023, 1024, 1025, 1279, 1280, 1281, 1535,
+            1536, 1537,
         ]
     }
 }
@@ -100,24 +94,20 @@ impl Distribution {
             Distribution::AllUnique => (0..count as u32).collect(),
             Distribution::Sorted => (0..count as u32).collect(),
             Distribution::ReverseSorted => (0..count as u32).rev().collect(),
-            Distribution::Alternating => {
-                (0..count).map(|i| if i % 2 == 0 { 0 } else { u32::MAX }).collect()
-            }
-            Distribution::AdversarialHash => {
-                (0..count).map(|i| (i as u32) * 256).collect()
-            }
-            Distribution::Random => {
-                (0..count).map(|_| rng.gen()).collect()
-            }
-            Distribution::HalfAndHalf => {
-                (0..count).map(|i| if i < count / 2 { 0 } else { 1 }).collect()
-            }
-            Distribution::Sparse => {
-                (0..count).map(|i| if i % 10 == 0 { 1 } else { 0 }).collect()
-            }
-            Distribution::Dense => {
-                (0..count).map(|i| if i % 10 == 0 { 0 } else { 1 }).collect()
-            }
+            Distribution::Alternating => (0..count)
+                .map(|i| if i % 2 == 0 { 0 } else { u32::MAX })
+                .collect(),
+            Distribution::AdversarialHash => (0..count).map(|i| (i as u32) * 256).collect(),
+            Distribution::Random => (0..count).map(|_| rng.gen()).collect(),
+            Distribution::HalfAndHalf => (0..count)
+                .map(|i| if i < count / 2 { 0 } else { 1 })
+                .collect(),
+            Distribution::Sparse => (0..count)
+                .map(|i| if i % 10 == 0 { 1 } else { 0 })
+                .collect(),
+            Distribution::Dense => (0..count)
+                .map(|i| if i % 10 == 0 { 0 } else { 1 })
+                .collect(),
         }
     }
 
@@ -129,24 +119,20 @@ impl Distribution {
             Distribution::AllUnique => (0..count as i64).collect(),
             Distribution::Sorted => (0..count as i64).collect(),
             Distribution::ReverseSorted => (0..count as i64).rev().collect(),
-            Distribution::Alternating => {
-                (0..count).map(|i| if i % 2 == 0 { i64::MIN } else { i64::MAX }).collect()
-            }
-            Distribution::AdversarialHash => {
-                (0..count).map(|i| (i as i64) * 256).collect()
-            }
-            Distribution::Random => {
-                (0..count).map(|_| rng.gen()).collect()
-            }
-            Distribution::HalfAndHalf => {
-                (0..count).map(|i| if i < count / 2 { -1 } else { 1 }).collect()
-            }
-            Distribution::Sparse => {
-                (0..count).map(|i| if i % 10 == 0 { 1 } else { 0 }).collect()
-            }
-            Distribution::Dense => {
-                (0..count).map(|i| if i % 10 == 0 { 0 } else { 1 }).collect()
-            }
+            Distribution::Alternating => (0..count)
+                .map(|i| if i % 2 == 0 { i64::MIN } else { i64::MAX })
+                .collect(),
+            Distribution::AdversarialHash => (0..count).map(|i| (i as i64) * 256).collect(),
+            Distribution::Random => (0..count).map(|_| rng.gen()).collect(),
+            Distribution::HalfAndHalf => (0..count)
+                .map(|i| if i < count / 2 { -1 } else { 1 })
+                .collect(),
+            Distribution::Sparse => (0..count)
+                .map(|i| if i % 10 == 0 { 1 } else { 0 })
+                .collect(),
+            Distribution::Dense => (0..count)
+                .map(|i| if i % 10 == 0 { 0 } else { 1 })
+                .collect(),
         }
     }
 
@@ -158,24 +144,20 @@ impl Distribution {
             Distribution::AllUnique => (0..count).map(|i| i as f64).collect(),
             Distribution::Sorted => (0..count).map(|i| i as f64).collect(),
             Distribution::ReverseSorted => (0..count).map(|i| (count - 1 - i) as f64).collect(),
-            Distribution::Alternating => {
-                (0..count).map(|i| if i % 2 == 0 { f64::MIN } else { f64::MAX }).collect()
-            }
-            Distribution::AdversarialHash => {
-                (0..count).map(|i| (i as f64) * 256.0).collect()
-            }
-            Distribution::Random => {
-                (0..count).map(|_| rng.gen_range(-1e10..1e10)).collect()
-            }
-            Distribution::HalfAndHalf => {
-                (0..count).map(|i| if i < count / 2 { -1.0 } else { 1.0 }).collect()
-            }
-            Distribution::Sparse => {
-                (0..count).map(|i| if i % 10 == 0 { 1.0 } else { 0.0 }).collect()
-            }
-            Distribution::Dense => {
-                (0..count).map(|i| if i % 10 == 0 { 0.0 } else { 1.0 }).collect()
-            }
+            Distribution::Alternating => (0..count)
+                .map(|i| if i % 2 == 0 { f64::MIN } else { f64::MAX })
+                .collect(),
+            Distribution::AdversarialHash => (0..count).map(|i| (i as f64) * 256.0).collect(),
+            Distribution::Random => (0..count).map(|_| rng.gen_range(-1e10..1e10)).collect(),
+            Distribution::HalfAndHalf => (0..count)
+                .map(|i| if i < count / 2 { -1.0 } else { 1.0 })
+                .collect(),
+            Distribution::Sparse => (0..count)
+                .map(|i| if i % 10 == 0 { 1.0 } else { 0.0 })
+                .collect(),
+            Distribution::Dense => (0..count)
+                .map(|i| if i % 10 == 0 { 0.0 } else { 1.0 })
+                .collect(),
         }
     }
 
@@ -185,14 +167,26 @@ impl Distribution {
         match self {
             Distribution::AllEqual => vec![1u8; count],
             Distribution::AllUnique => (0..count).map(|i| (i % 2) as u8).collect(),
-            Distribution::Sorted => (0..count).map(|i| if i < count / 2 { 0 } else { 1 }).collect(),
-            Distribution::ReverseSorted => (0..count).map(|i| if i < count / 2 { 1 } else { 0 }).collect(),
+            Distribution::Sorted => (0..count)
+                .map(|i| if i < count / 2 { 0 } else { 1 })
+                .collect(),
+            Distribution::ReverseSorted => (0..count)
+                .map(|i| if i < count / 2 { 1 } else { 0 })
+                .collect(),
             Distribution::Alternating => (0..count).map(|i| (i % 2) as u8).collect(),
             Distribution::AdversarialHash => (0..count).map(|i| (i % 2) as u8).collect(),
-            Distribution::Random => (0..count).map(|_| if rng.gen_bool(0.5) { 1 } else { 0 }).collect(),
-            Distribution::HalfAndHalf => (0..count).map(|i| if i < count / 2 { 0 } else { 1 }).collect(),
-            Distribution::Sparse => (0..count).map(|i| if i % 10 == 0 { 1 } else { 0 }).collect(),
-            Distribution::Dense => (0..count).map(|i| if i % 10 == 0 { 0 } else { 1 }).collect(),
+            Distribution::Random => (0..count)
+                .map(|_| if rng.gen_bool(0.5) { 1 } else { 0 })
+                .collect(),
+            Distribution::HalfAndHalf => (0..count)
+                .map(|i| if i < count / 2 { 0 } else { 1 })
+                .collect(),
+            Distribution::Sparse => (0..count)
+                .map(|i| if i % 10 == 0 { 1 } else { 0 })
+                .collect(),
+            Distribution::Dense => (0..count)
+                .map(|i| if i % 10 == 0 { 0 } else { 1 })
+                .collect(),
         }
     }
 }
@@ -219,22 +213,46 @@ impl NumericEdges {
 
     pub fn f32_edges() -> Vec<f32> {
         vec![
-            f32::NEG_INFINITY, f32::MIN, -1.0, -f32::MIN_POSITIVE, -0.0,
-            0.0, f32::MIN_POSITIVE, 1.0, f32::MAX, f32::INFINITY, f32::NAN,
+            f32::NEG_INFINITY,
+            f32::MIN,
+            -1.0,
+            -f32::MIN_POSITIVE,
+            -0.0,
+            0.0,
+            f32::MIN_POSITIVE,
+            1.0,
+            f32::MAX,
+            f32::INFINITY,
+            f32::NAN,
         ]
     }
 
     pub fn f64_edges() -> Vec<f64> {
         vec![
-            f64::NEG_INFINITY, f64::MIN, -1.0, -f64::MIN_POSITIVE, -0.0,
-            0.0, f64::MIN_POSITIVE, 1.0, f64::MAX, f64::INFINITY, f64::NAN,
+            f64::NEG_INFINITY,
+            f64::MIN,
+            -1.0,
+            -f64::MIN_POSITIVE,
+            -0.0,
+            0.0,
+            f64::MIN_POSITIVE,
+            1.0,
+            f64::MAX,
+            f64::INFINITY,
+            f64::NAN,
         ]
     }
 
     pub fn f64_subnormals() -> Vec<f64> {
         vec![
-            5e-324, 1e-323, 1e-320, 1e-310, f64::MIN_POSITIVE / 2.0,
-            -5e-324, -1e-323, -f64::MIN_POSITIVE / 2.0,
+            5e-324,
+            1e-323,
+            1e-320,
+            1e-310,
+            f64::MIN_POSITIVE / 2.0,
+            -5e-324,
+            -1e-323,
+            -f64::MIN_POSITIVE / 2.0,
         ]
     }
 
@@ -254,8 +272,14 @@ pub struct AlignmentGen;
 impl AlignmentGen {
     pub fn offsets() -> Vec<(usize, &'static str)> {
         vec![
-            (0, "aligned"), (1, "off-by-1"), (2, "off-by-2"), (3, "off-by-3"),
-            (4, "off-by-4"), (5, "off-by-5"), (6, "off-by-6"), (7, "off-by-7"),
+            (0, "aligned"),
+            (1, "off-by-1"),
+            (2, "off-by-2"),
+            (3, "off-by-3"),
+            (4, "off-by-4"),
+            (5, "off-by-5"),
+            (6, "off-by-6"),
+            (7, "off-by-7"),
         ]
     }
 
@@ -269,7 +293,11 @@ pub struct KeyDistribution;
 
 impl KeyDistribution {
     /// Generate key pairs for join testing. Returns (left_keys, right_keys, expected_match_count).
-    pub fn join_test_data(size: usize, overlap_ratio: f64, seed: u64) -> (Vec<u32>, Vec<u32>, usize) {
+    pub fn join_test_data(
+        size: usize,
+        overlap_ratio: f64,
+        seed: u64,
+    ) -> (Vec<u32>, Vec<u32>, usize) {
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
         let overlap_size = (size as f64 * overlap_ratio) as usize;
         let common: Vec<u32> = (0..overlap_size as u32).collect();
@@ -295,6 +323,8 @@ impl KeyDistribution {
     /// Generate keys for groupby testing with specified group count.
     pub fn groupby_keys(total_rows: usize, num_groups: usize, seed: u64) -> Vec<u32> {
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
-        (0..total_rows).map(|_| rng.gen_range(0..num_groups as u32)).collect()
+        (0..total_rows)
+            .map(|_| rng.gen_range(0..num_groups as u32))
+            .collect()
     }
 }

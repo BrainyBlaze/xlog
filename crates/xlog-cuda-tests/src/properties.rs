@@ -16,7 +16,7 @@
 
 use crate::harness::TestContext;
 use std::collections::{HashMap, HashSet};
-use xlog_core::{Schema, ScalarType};
+use xlog_core::{ScalarType, Schema};
 use xlog_cuda::CompareOp;
 
 // =============================================================================
@@ -28,7 +28,11 @@ use xlog_cuda::CompareOp;
 ///
 /// For each group of equal keys, if row A appeared before row B in the input,
 /// row A should appear before row B in the output.
-pub fn prop_sort_stability(ctx: &TestContext, keys: Vec<u32>, vals: Vec<u32>) -> Result<(), String> {
+pub fn prop_sort_stability(
+    ctx: &TestContext,
+    keys: Vec<u32>,
+    vals: Vec<u32>,
+) -> Result<(), String> {
     if keys.is_empty() || keys.len() != vals.len() {
         return Ok(()); // Trivially true for empty or mismatched inputs
     }
@@ -137,7 +141,10 @@ pub fn prop_join_correctness(
                 .map_err(|e| format!("Join failed: {}", e))?;
 
             if joined.num_rows != 0 {
-                return Err(format!("Empty tables should produce 0 rows, got {}", joined.num_rows));
+                return Err(format!(
+                    "Empty tables should produce 0 rows, got {}",
+                    joined.num_rows
+                ));
             }
             return Ok(());
         }
@@ -153,7 +160,10 @@ pub fn prop_join_correctness(
             .map_err(|e| format!("Join failed: {}", e))?;
 
         if joined.num_rows != 0 {
-            return Err(format!("Empty left should produce 0 rows, got {}", joined.num_rows));
+            return Err(format!(
+                "Empty left should produce 0 rows, got {}",
+                joined.num_rows
+            ));
         }
         return Ok(());
     }
@@ -174,7 +184,10 @@ pub fn prop_join_correctness(
             .map_err(|e| format!("Join failed: {}", e))?;
 
         if joined.num_rows != 0 {
-            return Err(format!("Empty right should produce 0 rows, got {}", joined.num_rows));
+            return Err(format!(
+                "Empty right should produce 0 rows, got {}",
+                joined.num_rows
+            ));
         }
         return Ok(());
     }
@@ -334,7 +347,9 @@ pub fn prop_filter_idempotence(
     }
 
     if once_data != twice_data {
-        return Err("Filter idempotence violated: data differs after second application".to_string());
+        return Err(
+            "Filter idempotence violated: data differs after second application".to_string(),
+        );
     }
 
     // Also verify the first filter was correct
@@ -358,7 +373,11 @@ pub fn prop_filter_idempotence(
 ///
 /// Running dedup multiple times on identical input should produce identical output.
 /// The set of unique keys should match, and the number of rows should be correct.
-pub fn prop_dedup_determinism(ctx: &TestContext, keys: Vec<u32>, vals: Vec<u32>) -> Result<(), String> {
+pub fn prop_dedup_determinism(
+    ctx: &TestContext,
+    keys: Vec<u32>,
+    vals: Vec<u32>,
+) -> Result<(), String> {
     if keys.is_empty() || keys.len() != vals.len() {
         return Ok(()); // Trivially true for empty or mismatched inputs
     }
@@ -474,10 +493,14 @@ mod tests {
     // -------------------------------------------------------------------------
 
     /// Strategy for generating key-value pairs for sort tests.
-    fn sort_data_strategy(max_rows: usize, max_key: u32) -> impl Strategy<Value = (Vec<u32>, Vec<u32>)> {
+    fn sort_data_strategy(
+        max_rows: usize,
+        max_key: u32,
+    ) -> impl Strategy<Value = (Vec<u32>, Vec<u32>)> {
         prop::collection::vec(0..max_key, 1..=max_rows).prop_flat_map(move |keys| {
             let len = keys.len();
-            prop::collection::vec(any::<u32>(), len..=len).prop_map(move |vals| (keys.clone(), vals))
+            prop::collection::vec(any::<u32>(), len..=len)
+                .prop_map(move |vals| (keys.clone(), vals))
         })
     }
 
@@ -504,16 +527,23 @@ mod tests {
     }
 
     /// Strategy for generating filter test data.
-    fn filter_data_strategy(max_rows: usize, max_val: u32) -> impl Strategy<Value = (Vec<u32>, u32)> {
+    fn filter_data_strategy(
+        max_rows: usize,
+        max_val: u32,
+    ) -> impl Strategy<Value = (Vec<u32>, u32)> {
         prop::collection::vec(0..max_val, 1..=max_rows)
             .prop_flat_map(move |data| (Just(data), 0..max_val))
     }
 
     /// Strategy for generating dedup test data with varying duplicate patterns.
-    fn dedup_data_strategy(max_rows: usize, max_key: u32) -> impl Strategy<Value = (Vec<u32>, Vec<u32>)> {
+    fn dedup_data_strategy(
+        max_rows: usize,
+        max_key: u32,
+    ) -> impl Strategy<Value = (Vec<u32>, Vec<u32>)> {
         prop::collection::vec(0..max_key, 1..=max_rows).prop_flat_map(|keys| {
             let len = keys.len();
-            prop::collection::vec(any::<u32>(), len..=len).prop_map(move |vals| (keys.clone(), vals))
+            prop::collection::vec(any::<u32>(), len..=len)
+                .prop_map(move |vals| (keys.clone(), vals))
         })
     }
 

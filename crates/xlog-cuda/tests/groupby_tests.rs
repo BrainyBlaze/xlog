@@ -1,7 +1,7 @@
 // crates/xlog-cuda/tests/groupby_tests.rs
 //! Tests for multi-aggregation groupby operations
 use std::sync::Arc;
-use xlog_core::{AggOp, MemoryBudget, Schema, ScalarType};
+use xlog_core::{AggOp, MemoryBudget, ScalarType, Schema};
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 
 fn setup_provider() -> Option<CudaKernelProvider> {
@@ -411,7 +411,11 @@ fn create_keyed_f64_buffer(
         .htod_sync_copy_into(&val_bytes, &mut val_col)
         .expect("upload val");
 
-    xlog_cuda::CudaBuffer::from_columns(vec![key_col.into(), val_col.into()], keys.len() as u64, schema)
+    xlog_cuda::CudaBuffer::from_columns(
+        vec![key_col.into(), val_col.into()],
+        keys.len() as u64,
+        schema,
+    )
 }
 
 #[test]
@@ -435,7 +439,9 @@ fn test_groupby_logsumexp_single_element_groups() {
 
     assert_eq!(result.num_rows(), 5, "Should have 5 single-element groups");
 
-    let result_values = provider.download_column_f64(&result, 1).expect("download result");
+    let result_values = provider
+        .download_column_f64(&result, 1)
+        .expect("download result");
 
     // For single element groups, logsumexp(x) = x
     let tolerance = 1e-10;
@@ -488,7 +494,9 @@ fn test_groupby_logsumexp_mixed_positive_negative() {
 
     assert_eq!(result.num_rows(), 3);
 
-    let result_values = provider.download_column_f64(&result, 1).expect("download result");
+    let result_values = provider
+        .download_column_f64(&result, 1)
+        .expect("download result");
 
     let tolerance = 1e-5;
 
@@ -533,8 +541,10 @@ fn test_groupby_logsumexp_infinity() {
     // Group 2: normal values -> should return normal result
     let keys: Vec<u32> = vec![1, 1, 2, 2];
     let values: Vec<f64> = vec![
-        f64::INFINITY, 1.0,  // group 1: has infinity
-        2.0, 3.0,            // group 2: normal values
+        f64::INFINITY,
+        1.0, // group 1: has infinity
+        2.0,
+        3.0, // group 2: normal values
     ];
 
     let buffer = create_keyed_f64_buffer(&provider, &keys, &values);
@@ -545,13 +555,21 @@ fn test_groupby_logsumexp_infinity() {
 
     assert_eq!(result.num_rows(), 2);
 
-    let result_values = provider.download_column_f64(&result, 1).expect("download result");
+    let result_values = provider
+        .download_column_f64(&result, 1)
+        .expect("download result");
 
     // Group 1 should be +INFINITY
-    assert!(result_values[0].is_infinite() && result_values[0] > 0.0,
-        "Group with +INFINITY should return +INFINITY, got {}", result_values[0]);
+    assert!(
+        result_values[0].is_infinite() && result_values[0] > 0.0,
+        "Group with +INFINITY should return +INFINITY, got {}",
+        result_values[0]
+    );
 
     // Group 2 should be finite (logsumexp(2, 3) ≈ 3.3133)
-    assert!(result_values[1].is_finite(),
-        "Group with normal values should return finite, got {}", result_values[1]);
+    assert!(
+        result_values[1].is_finite(),
+        "Group with normal values should return finite, got {}",
+        result_values[1]
+    );
 }

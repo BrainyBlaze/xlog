@@ -64,11 +64,15 @@ fn create_symbol_buffer(
 }
 
 fn read_column_u32(provider: &CudaKernelProvider, buffer: &CudaBuffer, col: usize) -> Vec<u32> {
-    provider.download_column_u32(buffer, col).unwrap_or_default()
+    provider
+        .download_column_u32(buffer, col)
+        .unwrap_or_default()
 }
 
 fn read_column_i64(provider: &CudaKernelProvider, buffer: &CudaBuffer, col: usize) -> Vec<i64> {
-    provider.download_column_i64(buffer, col).unwrap_or_default()
+    provider
+        .download_column_i64(buffer, col)
+        .unwrap_or_default()
 }
 
 // =============================================================================
@@ -139,8 +143,8 @@ fn test_gpu_symbol_join() -> Result<()> {
 
     let knows_buf = create_symbol_buffer(
         &provider,
-        &[alice, bob],   // A knows B
-        &[bob, carol],   // B knows C
+        &[alice, bob], // A knows B
+        &[bob, carol], // B knows C
     )?;
 
     let mut inputs = HashMap::new();

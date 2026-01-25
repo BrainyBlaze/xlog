@@ -278,8 +278,10 @@ impl StatsManager {
                     .unwrap_or(0);
 
                 if left_distinct > 0 && right_distinct > 0 {
-                    let selectivity =
-                        JoinSelectivity::estimate_selectivity_from_stats(left_distinct, right_distinct);
+                    let selectivity = JoinSelectivity::estimate_selectivity_from_stats(
+                        left_distinct,
+                        right_distinct,
+                    );
                     return ((left_card as f64 * right_card as f64 * selectivity) as u64).max(1);
                 }
             }
@@ -340,7 +342,8 @@ impl StatsManager {
         // Exponential moving average for selectivity
         const EMA_OLD_WEIGHT: f64 = 0.7;
         const EMA_NEW_WEIGHT: f64 = 0.3;
-        entry.selectivity = entry.selectivity * EMA_OLD_WEIGHT + observed_selectivity * EMA_NEW_WEIGHT;
+        entry.selectivity =
+            entry.selectivity * EMA_OLD_WEIGHT + observed_selectivity * EMA_NEW_WEIGHT;
     }
 
     /// Set (or overwrite) the join selectivity between two relations.
@@ -380,7 +383,11 @@ impl StatsManager {
     /// # Returns
     ///
     /// A reference to the cached selectivity if present
-    pub fn get_join_selectivity(&self, left_rel: RelId, right_rel: RelId) -> Option<&JoinSelectivity> {
+    pub fn get_join_selectivity(
+        &self,
+        left_rel: RelId,
+        right_rel: RelId,
+    ) -> Option<&JoinSelectivity> {
         let key = Self::canonical_join_key(left_rel, right_rel);
         self.join_selectivities.get(&key)
     }
@@ -750,11 +757,17 @@ mod tests {
 
         // First observation
         mgr.record_join_result(RelId(1), RelId(2), vec![0], vec![0], 1000, 100);
-        let sel1 = mgr.get_join_selectivity(RelId(1), RelId(2)).unwrap().selectivity;
+        let sel1 = mgr
+            .get_join_selectivity(RelId(1), RelId(2))
+            .unwrap()
+            .selectivity;
 
         // Second observation with different selectivity
         mgr.record_join_result(RelId(1), RelId(2), vec![0], vec![0], 1000, 500);
-        let sel2 = mgr.get_join_selectivity(RelId(1), RelId(2)).unwrap().selectivity;
+        let sel2 = mgr
+            .get_join_selectivity(RelId(1), RelId(2))
+            .unwrap()
+            .selectivity;
 
         // Selectivity should have moved via EMA
         assert!(sel2 != sel1);
@@ -948,8 +961,17 @@ mod tests {
 
     #[test]
     fn test_canonical_join_key() {
-        assert_eq!(StatsManager::canonical_join_key(RelId(1), RelId(2)), (RelId(1), RelId(2)));
-        assert_eq!(StatsManager::canonical_join_key(RelId(2), RelId(1)), (RelId(1), RelId(2)));
-        assert_eq!(StatsManager::canonical_join_key(RelId(5), RelId(5)), (RelId(5), RelId(5)));
+        assert_eq!(
+            StatsManager::canonical_join_key(RelId(1), RelId(2)),
+            (RelId(1), RelId(2))
+        );
+        assert_eq!(
+            StatsManager::canonical_join_key(RelId(2), RelId(1)),
+            (RelId(1), RelId(2))
+        );
+        assert_eq!(
+            StatsManager::canonical_join_key(RelId(5), RelId(5)),
+            (RelId(5), RelId(5))
+        );
     }
 }

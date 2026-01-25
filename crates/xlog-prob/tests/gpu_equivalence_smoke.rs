@@ -3,9 +3,9 @@ use std::sync::Arc;
 use xlog_core::MemoryBudget;
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 
+use xlog_prob::compilation::{validate_equivalence_gpu, GpuEquivalenceConfig};
 use xlog_prob::gpu::GpuXgcf;
 use xlog_prob::xgcf::{Xgcf, XgcfNodeType};
-use xlog_prob::compilation::{validate_equivalence_gpu, GpuEquivalenceConfig};
 
 use xlog_solve::{Clause, GpuCnf, Literal, SolveInstance};
 
@@ -22,7 +22,10 @@ fn try_provider() -> Option<Arc<CudaKernelProvider>> {
     match CudaKernelProvider::new(device, memory) {
         Ok(p) => Some(Arc::new(p)),
         Err(e) => {
-            eprintln!("Skipping test: failed to create CUDA kernel provider: {}", e);
+            eprintln!(
+                "Skipping test: failed to create CUDA kernel provider: {}",
+                e
+            );
             None
         }
     }
@@ -56,4 +59,3 @@ fn gpu_equivalence_smoke_phi_is_lit() {
     validate_equivalence_gpu(&phi, &circuit, &provider, GpuEquivalenceConfig::default())
         .expect("equivalence should hold");
 }
-

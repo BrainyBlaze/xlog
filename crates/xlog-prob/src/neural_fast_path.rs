@@ -56,7 +56,9 @@ impl GpuWeightSlots {
         let mut d_offsets = memory.alloc::<u32>(offsets.len())?;
         device
             .htod_sync_copy_into(&offsets, &mut d_offsets)
-            .map_err(|e| XlogError::Kernel(format!("Failed to upload weight slot offsets: {}", e)))?;
+            .map_err(|e| {
+                XlogError::Kernel(format!("Failed to upload weight slot offsets: {}", e))
+            })?;
 
         let mut d_vars = memory.alloc::<u32>(flat.len())?;
         device
@@ -79,10 +81,7 @@ impl GpuWeightSlots {
     }
 
     pub fn total_slots(&self) -> u32 {
-        self.group_offsets_host
-            .last()
-            .copied()
-            .unwrap_or(0)
+        self.group_offsets_host.last().copied().unwrap_or(0)
     }
 
     pub fn group_offsets(&self) -> &TrackedCudaSlice<u32> {

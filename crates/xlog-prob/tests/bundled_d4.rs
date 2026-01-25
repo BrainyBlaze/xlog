@@ -22,4 +22,3 @@ fn test_bundled_d4_is_built_and_runnable() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
-

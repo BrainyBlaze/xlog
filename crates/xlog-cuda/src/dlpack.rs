@@ -190,7 +190,9 @@ unsafe fn dlpack_tensor_info(
 ) -> Result<(u64, ScalarType, cudarc::driver::sys::CUdeviceptr, usize)> {
     let ptr = tensor.as_ptr();
     if ptr.is_null() {
-        return Err(XlogError::Kernel("Null DLManagedTensor pointer".to_string()));
+        return Err(XlogError::Kernel(
+            "Null DLManagedTensor pointer".to_string(),
+        ));
     }
 
     let dl = unsafe { &(*ptr).dl_tensor };
@@ -247,7 +249,9 @@ unsafe fn dlpack_tensor_info(
     }
 
     if dl.data.is_null() && num_rows > 0 {
-        return Err(XlogError::Kernel("DLPack tensor data pointer is null".to_string()));
+        return Err(XlogError::Kernel(
+            "DLPack tensor data pointer is null".to_string(),
+        ));
     }
 
     let base = dl.data as usize;
@@ -279,11 +283,10 @@ pub struct DlpackTable {
 
 impl DlpackTable {
     pub fn column(&self, col_idx: usize) -> Result<DlpackManagedTensor> {
-        let dtype = self
-            .buffer
-            .schema()
-            .column_type(col_idx)
-            .ok_or_else(|| XlogError::Kernel(format!("Column index {} out of bounds", col_idx)))?;
+        let dtype =
+            self.buffer.schema().column_type(col_idx).ok_or_else(|| {
+                XlogError::Kernel(format!("Column index {} out of bounds", col_idx))
+            })?;
 
         let col = self
             .buffer
@@ -393,9 +396,9 @@ impl CudaKernelProvider {
 
         for (i, tensor) in tensors.into_iter().enumerate() {
             let (rows, ty, ptr, len_bytes) = unsafe { dlpack_tensor_info(self, &tensor)? };
-            let expected = schema
-                .column_type(i)
-                .ok_or_else(|| XlogError::Kernel(format!("Missing schema type for column {}", i)))?;
+            let expected = schema.column_type(i).ok_or_else(|| {
+                XlogError::Kernel(format!("Missing schema type for column {}", i))
+            })?;
             if ty != expected {
                 return Err(XlogError::Kernel(format!(
                     "DLPack column {} dtype {:?} does not match schema {:?}",
@@ -416,6 +419,10 @@ impl CudaKernelProvider {
             columns.push(CudaColumn::dlpack(ptr, len_bytes, tensor));
         }
 
-        Ok(CudaBuffer::from_columns(columns, num_rows.unwrap_or(0), schema))
+        Ok(CudaBuffer::from_columns(
+            columns,
+            num_rows.unwrap_or(0),
+            schema,
+        ))
     }
 }

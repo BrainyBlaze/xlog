@@ -720,13 +720,7 @@ pub mod job_shop {
                 for &(sj, so, t) in schedule {
                     if sj == j && so == o {
                         let op = &job.operations[o];
-                        print!(
-                            "Op{} (M{}, t={}..{}) ",
-                            o,
-                            op.machine,
-                            t,
-                            t + op.duration
-                        );
+                        print!("Op{} (M{}, t={}..{}) ", o, op.machine, t, t + op.duration);
                         break;
                     }
                 }
@@ -751,35 +745,74 @@ pub mod job_shop {
             jobs: vec![
                 Job {
                     operations: vec![
-                        Operation { machine: 0, duration: 3 },
-                        Operation { machine: 1, duration: 2 },
-                        Operation { machine: 2, duration: 2 },
+                        Operation {
+                            machine: 0,
+                            duration: 3,
+                        },
+                        Operation {
+                            machine: 1,
+                            duration: 2,
+                        },
+                        Operation {
+                            machine: 2,
+                            duration: 2,
+                        },
                     ],
                 },
                 Job {
                     operations: vec![
-                        Operation { machine: 0, duration: 2 },
-                        Operation { machine: 2, duration: 1 },
-                        Operation { machine: 1, duration: 4 },
+                        Operation {
+                            machine: 0,
+                            duration: 2,
+                        },
+                        Operation {
+                            machine: 2,
+                            duration: 1,
+                        },
+                        Operation {
+                            machine: 1,
+                            duration: 4,
+                        },
                     ],
                 },
                 Job {
                     operations: vec![
-                        Operation { machine: 1, duration: 4 },
-                        Operation { machine: 2, duration: 3 },
+                        Operation {
+                            machine: 1,
+                            duration: 4,
+                        },
+                        Operation {
+                            machine: 2,
+                            duration: 3,
+                        },
                     ],
                 },
                 Job {
                     operations: vec![
-                        Operation { machine: 2, duration: 2 },
-                        Operation { machine: 0, duration: 3 },
-                        Operation { machine: 1, duration: 1 },
+                        Operation {
+                            machine: 2,
+                            duration: 2,
+                        },
+                        Operation {
+                            machine: 0,
+                            duration: 3,
+                        },
+                        Operation {
+                            machine: 1,
+                            duration: 1,
+                        },
                     ],
                 },
                 Job {
                     operations: vec![
-                        Operation { machine: 1, duration: 3 },
-                        Operation { machine: 0, duration: 2 },
+                        Operation {
+                            machine: 1,
+                            duration: 3,
+                        },
+                        Operation {
+                            machine: 0,
+                            duration: 2,
+                        },
                     ],
                 },
             ],
@@ -1392,14 +1425,26 @@ fn main() {
         jobs: vec![
             job_shop::Job {
                 operations: vec![
-                    job_shop::Operation { machine: 0, duration: 2 },
-                    job_shop::Operation { machine: 1, duration: 1 },
+                    job_shop::Operation {
+                        machine: 0,
+                        duration: 2,
+                    },
+                    job_shop::Operation {
+                        machine: 1,
+                        duration: 1,
+                    },
                 ],
             },
             job_shop::Job {
                 operations: vec![
-                    job_shop::Operation { machine: 1, duration: 2 },
-                    job_shop::Operation { machine: 0, duration: 1 },
+                    job_shop::Operation {
+                        machine: 1,
+                        duration: 2,
+                    },
+                    job_shop::Operation {
+                        machine: 0,
+                        duration: 1,
+                    },
                 ],
             },
         ],
@@ -1465,7 +1510,10 @@ fn main() {
         edges: vec![(0, 1), (1, 2), (2, 3), (3, 0)],
     };
     let num_colors = 2;
-    println!("Square graph (4 vertices, 4 edges) with {} colors:", num_colors);
+    println!(
+        "Square graph (4 vertices, 4 edges) with {} colors:",
+        num_colors
+    );
     println!("  Edges: 0-1, 1-2, 2-3, 3-0");
     println!();
 
@@ -1523,7 +1571,10 @@ fn main() {
 
     if let Some(assignment) = result.assignment() {
         let inputs = circuit_sat::decode_inputs(&simple_circuit, assignment);
-        println!("Found inputs: a={}, b={}, c={}", inputs[0], inputs[1], inputs[2]);
+        println!(
+            "Found inputs: a={}, b={}, c={}",
+            inputs[0], inputs[1], inputs[2]
+        );
 
         let output = simple_circuit.evaluate(&inputs);
         println!("Circuit output: {}", output);

@@ -229,10 +229,7 @@ fn test_backward_or_propagate(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_backward_or_propagate",
             start.elapsed(),
-            format!(
-                "OR softmax weights should sum to 1.0, got {}",
-                softmax_sum
-            ),
+            format!("OR softmax weights should sum to 1.0, got {}", softmax_sum),
         );
     }
 
@@ -708,7 +705,10 @@ fn test_backward_vs_numerical_diff(ctx: &TestContext) -> TestResult {
                 return TestResult::error(
                     "test_backward_vs_numerical_diff",
                     start.elapsed(),
-                    format!("Failed to compute numerical gradient for var {}: {}", var, e),
+                    format!(
+                        "Failed to compute numerical gradient for var {}: {}",
+                        var, e
+                    ),
                 );
             }
         };
@@ -884,7 +884,11 @@ fn test_backward_gradient_stability(ctx: &TestContext) -> TestResult {
         // Extreme value: log(1e-300) for var1
         var_log_true: vec![0.0, 1e-300_f64.ln(), 0.5_f64.ln()],
         var_log_false: vec![0.0, (1.0 - 1e-300_f64).ln(), 0.5_f64.ln()],
-        expected_values: vec![1e-300_f64.ln(), 0.5_f64.ln(), 1e-300_f64.ln() + 0.5_f64.ln()],
+        expected_values: vec![
+            1e-300_f64.ln(),
+            0.5_f64.ln(),
+            1e-300_f64.ln() + 0.5_f64.ln(),
+        ],
         expected_grad_true: vec![0.0, 1.0, 1.0],
         expected_grad_false: vec![0.0, 0.0, 0.0],
     };

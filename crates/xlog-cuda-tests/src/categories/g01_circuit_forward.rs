@@ -76,10 +76,7 @@ fn test_forward_const_nodes(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_forward_const_nodes",
             start.elapsed(),
-            format!(
-                "CONST0 should evaluate to -inf, got {}",
-                values[0]
-            ),
+            format!("CONST0 should evaluate to -inf, got {}", values[0]),
         );
     }
 
@@ -88,10 +85,7 @@ fn test_forward_const_nodes(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_forward_const_nodes",
             start.elapsed(),
-            format!(
-                "CONST1 should evaluate to 0.0, got {}",
-                values[1]
-            ),
+            format!("CONST1 should evaluate to 0.0, got {}", values[1]),
         );
     }
 
@@ -355,7 +349,7 @@ fn test_forward_decision_basic(ctx: &TestContext) -> TestResult {
 
     // Verify decision node semantics: logsumexp(log_false + val_false, log_true + val_true)
     let val_false_child = values[0]; // CONST1 = 0.0
-    let val_true_child = values[1];  // LIT(+1)
+    let val_true_child = values[1]; // LIT(+1)
     let decision_val = values[2];
     let log_false = spec.var_log_false[2];
     let log_true = spec.var_log_true[2];
@@ -414,10 +408,7 @@ fn test_forward_decision_chain(ctx: &TestContext) -> TestResult {
                 return TestResult::error(
                     "test_forward_decision_chain",
                     start.elapsed(),
-                    format!(
-                        "Node {} should be -inf, got {}",
-                        i, actual
-                    ),
+                    format!("Node {} should be -inf, got {}", i, actual),
                 );
             }
             continue;
@@ -441,11 +432,7 @@ fn test_forward_decision_chain(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_forward_decision_chain",
             start.elapsed(),
-            format!(
-                "Expected {} nodes, got {}",
-                spec.num_nodes,
-                values.len()
-            ),
+            format!("Expected {} nodes, got {}", spec.num_nodes, values.len()),
         );
     }
 
@@ -498,11 +485,7 @@ fn test_forward_multi_level(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_forward_multi_level",
             start.elapsed(),
-            format!(
-                "Expected {} nodes, got {}",
-                spec.num_nodes,
-                values.len()
-            ),
+            format!("Expected {} nodes, got {}", spec.num_nodes, values.len()),
         );
     }
 
@@ -573,11 +556,7 @@ fn test_forward_parallel_same_level(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_forward_parallel_same_level",
             start.elapsed(),
-            format!(
-                "Expected {} nodes, got {}",
-                spec.num_nodes,
-                values.len()
-            ),
+            format!("Expected {} nodes, got {}", spec.num_nodes, values.len()),
         );
     }
 

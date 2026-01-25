@@ -1,2 +1,2 @@
-pub mod ddnnf;
 pub mod d4;
+pub mod ddnnf;

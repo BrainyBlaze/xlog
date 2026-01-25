@@ -7,7 +7,7 @@
 //! - Graph Coloring
 //! - Circuit SAT
 
-use xlog_solve::{Clause, Literal, SolveInstance, Solver, SolverConfig, SolveStatus};
+use xlog_solve::{Clause, Literal, SolveInstance, SolveStatus, Solver, SolverConfig};
 
 // =============================================================================
 // Sudoku Tests
@@ -225,7 +225,7 @@ fn test_sudoku_encoding_size() {
     let instance = sudoku::encode(&puzzle);
 
     assert_eq!(instance.num_vars, 729); // 9 * 9 * 9
-    // Clauses: 81 at-least-one + 81*36 at-most-one + 81*2 row constraints + ...
+                                        // Clauses: 81 at-least-one + 81*36 at-most-one + 81*2 row constraints + ...
     assert!(instance.num_clauses() > 0);
 }
 
@@ -703,14 +703,26 @@ mod job_shop {
             jobs: vec![
                 Job {
                     operations: vec![
-                        Operation { machine: 0, duration: 2 },
-                        Operation { machine: 1, duration: 1 },
+                        Operation {
+                            machine: 0,
+                            duration: 2,
+                        },
+                        Operation {
+                            machine: 1,
+                            duration: 1,
+                        },
                     ],
                 },
                 Job {
                     operations: vec![
-                        Operation { machine: 1, duration: 2 },
-                        Operation { machine: 0, duration: 1 },
+                        Operation {
+                            machine: 1,
+                            duration: 2,
+                        },
+                        Operation {
+                            machine: 0,
+                            duration: 1,
+                        },
                     ],
                 },
             ],
@@ -856,9 +868,21 @@ mod graph_coloring {
         Graph {
             num_vertices: 10,
             edges: vec![
-                (0, 1), (1, 2), (2, 3), (3, 4), (4, 0),
-                (5, 7), (7, 9), (9, 6), (6, 8), (8, 5),
-                (0, 5), (1, 6), (2, 7), (3, 8), (4, 9),
+                (0, 1),
+                (1, 2),
+                (2, 3),
+                (3, 4),
+                (4, 0),
+                (5, 7),
+                (7, 9),
+                (9, 6),
+                (6, 8),
+                (8, 5),
+                (0, 5),
+                (1, 6),
+                (2, 7),
+                (3, 8),
+                (4, 9),
             ],
         }
     }
@@ -1038,14 +1062,26 @@ mod circuit_sat {
                 Gate::Input => {}
                 Gate::Not { input } => {
                     let inp = *input as u32;
-                    clauses.push(Clause::binary(Literal::positive(out), Literal::positive(inp)));
-                    clauses.push(Clause::binary(Literal::negative(out), Literal::negative(inp)));
+                    clauses.push(Clause::binary(
+                        Literal::positive(out),
+                        Literal::positive(inp),
+                    ));
+                    clauses.push(Clause::binary(
+                        Literal::negative(out),
+                        Literal::negative(inp),
+                    ));
                 }
                 Gate::And { input1, input2 } => {
                     let in1 = *input1 as u32;
                     let in2 = *input2 as u32;
-                    clauses.push(Clause::binary(Literal::negative(out), Literal::positive(in1)));
-                    clauses.push(Clause::binary(Literal::negative(out), Literal::positive(in2)));
+                    clauses.push(Clause::binary(
+                        Literal::negative(out),
+                        Literal::positive(in1),
+                    ));
+                    clauses.push(Clause::binary(
+                        Literal::negative(out),
+                        Literal::positive(in2),
+                    ));
                     clauses.push(Clause::ternary(
                         Literal::positive(out),
                         Literal::negative(in1),
@@ -1055,8 +1091,14 @@ mod circuit_sat {
                 Gate::Or { input1, input2 } => {
                     let in1 = *input1 as u32;
                     let in2 = *input2 as u32;
-                    clauses.push(Clause::binary(Literal::positive(out), Literal::negative(in1)));
-                    clauses.push(Clause::binary(Literal::positive(out), Literal::negative(in2)));
+                    clauses.push(Clause::binary(
+                        Literal::positive(out),
+                        Literal::negative(in1),
+                    ));
+                    clauses.push(Clause::binary(
+                        Literal::positive(out),
+                        Literal::negative(in2),
+                    ));
                     clauses.push(Clause::ternary(
                         Literal::negative(out),
                         Literal::positive(in1),
@@ -1245,7 +1287,10 @@ fn test_solver_handles_large_instance() {
     let result = solver.solve(instance);
 
     // Should get some result (may or may not find solution with fast config)
-    assert!(matches!(result.status, SolveStatus::Sat | SolveStatus::Unknown));
+    assert!(matches!(
+        result.status,
+        SolveStatus::Sat | SolveStatus::Unknown
+    ));
 }
 
 #[test]

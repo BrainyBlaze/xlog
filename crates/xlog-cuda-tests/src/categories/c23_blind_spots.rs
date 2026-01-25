@@ -4,11 +4,11 @@
 //! misaligned boundaries, near-overflow indices, alternating patterns,
 //! and empty/single element cases.
 
-use crate::harness::{CategoryResult, TestResult, TestContext};
 use crate::harness::generators::SizeGen;
+use crate::harness::{CategoryResult, TestContext, TestResult};
 use std::collections::HashSet;
 use std::time::Instant;
-use xlog_core::{Schema, ScalarType};
+use xlog_core::{ScalarType, Schema};
 
 /// Run all tests in this category.
 pub fn run_all(ctx: &TestContext) -> CategoryResult {
@@ -40,7 +40,10 @@ fn test_non_power_of_two_sizes(ctx: &TestContext) -> TestResult {
         // Create data
         let data: Vec<u32> = (0..size as u32).collect();
 
-        let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_slice(&data, schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -105,13 +108,15 @@ fn test_non_power_of_two_sizes(ctx: &TestContext) -> TestResult {
             ("key".to_string(), ScalarType::U32),
             ("val".to_string(), ScalarType::U32),
         ]);
-        let dedup_keys: Vec<u32> = (0..size as u32).map(|i| i % ((size / 2).max(1) as u32)).collect();
+        let dedup_keys: Vec<u32> = (0..size as u32)
+            .map(|i| i % ((size / 2).max(1) as u32))
+            .collect();
         let dedup_vals: Vec<u32> = (0..size as u32).collect();
 
-        let dedup_buffer = match ctx.provider.create_buffer_from_u32_columns(
-            &[&dedup_keys, &dedup_vals],
-            dedup_schema.clone(),
-        ) {
+        let dedup_buffer = match ctx
+            .provider
+            .create_buffer_from_u32_columns(&[&dedup_keys, &dedup_vals], dedup_schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -141,7 +146,9 @@ fn test_non_power_of_two_sizes(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Dedup for size {} returned {} rows, expected {}",
-                    size, deduped.num_rows, unique_keys.len()
+                    size,
+                    deduped.num_rows,
+                    unique_keys.len()
                 ),
             );
         }
@@ -153,7 +160,10 @@ fn test_non_power_of_two_sizes(ctx: &TestContext) -> TestResult {
     for &size in &odd_sizes {
         let data: Vec<u32> = (0..size as u32).collect();
 
-        let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_slice(&data, schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -212,7 +222,10 @@ fn test_misaligned_boundaries(ctx: &TestContext) -> TestResult {
     for &size in &warp_related {
         let data: Vec<u32> = (0..size as u32).rev().collect(); // Reverse sorted for sorting test
 
-        let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_slice(&data, schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -253,7 +266,10 @@ fn test_misaligned_boundaries(ctx: &TestContext) -> TestResult {
                     start.elapsed(),
                     format!(
                         "Sort order incorrect at index {} for warp size {}: {} < {}",
-                        i, size, sorted_data[i], sorted_data[i - 1]
+                        i,
+                        size,
+                        sorted_data[i],
+                        sorted_data[i - 1]
                     ),
                 );
             }
@@ -270,7 +286,10 @@ fn test_misaligned_boundaries(ctx: &TestContext) -> TestResult {
         let mask: Vec<u8> = (0..size).map(|i| if i % 3 == 0 { 1 } else { 0 }).collect();
         let expected_count: usize = mask.iter().map(|&m| m as usize).sum();
 
-        let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_slice(&data, schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -336,7 +355,10 @@ fn test_near_overflow_indices(ctx: &TestContext) -> TestResult {
         u32::MAX / 2 + 1,
     ];
 
-    let buffer = match ctx.provider.create_buffer_from_u32_slice(&edge_values, schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&edge_values, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -377,7 +399,9 @@ fn test_near_overflow_indices(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Sort order incorrect at index {}: {} < {}",
-                    i, sorted_data[i], sorted_data[i - 1]
+                    i,
+                    sorted_data[i],
+                    sorted_data[i - 1]
                 ),
             );
         }
@@ -398,17 +422,12 @@ fn test_near_overflow_indices(ctx: &TestContext) -> TestResult {
 
     // Test i64 values near overflow boundaries
     let i64_schema = Schema::new(vec![("val".to_string(), ScalarType::I64)]);
-    let i64_edge_values: Vec<i64> = vec![
-        i64::MIN,
-        i64::MIN + 1,
-        -1,
-        0,
-        1,
-        i64::MAX - 1,
-        i64::MAX,
-    ];
+    let i64_edge_values: Vec<i64> = vec![i64::MIN, i64::MIN + 1, -1, 0, 1, i64::MAX - 1, i64::MAX];
 
-    let i64_buffer = match ctx.provider.create_buffer_from_i64_slice(&i64_edge_values, i64_schema.clone()) {
+    let i64_buffer = match ctx
+        .provider
+        .create_buffer_from_i64_slice(&i64_edge_values, i64_schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -448,7 +467,8 @@ fn test_near_overflow_indices(ctx: &TestContext) -> TestResult {
             start.elapsed(),
             format!(
                 "First i64 element should be i64::MIN ({}), got {}",
-                i64::MIN, i64_sorted_data[0]
+                i64::MIN,
+                i64_sorted_data[0]
             ),
         );
     }
@@ -470,7 +490,10 @@ fn test_near_overflow_indices(ctx: &TestContext) -> TestResult {
     let large_size: usize = 100000;
     let large_data: Vec<u32> = (0..large_size as u32).collect();
 
-    let large_buffer = match ctx.provider.create_buffer_from_u32_slice(&large_data, schema.clone()) {
+    let large_buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&large_data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -482,9 +505,9 @@ fn test_near_overflow_indices(ctx: &TestContext) -> TestResult {
     };
 
     // Filter to keep last few elements (high indices)
-    let mask: Vec<u8> = (0..large_size).map(|i| {
-        if i >= large_size - 100 { 1 } else { 0 }
-    }).collect();
+    let mask: Vec<u8> = (0..large_size)
+        .map(|i| if i >= large_size - 100 { 1 } else { 0 })
+        .collect();
 
     let filtered = match ctx.provider.filter_by_mask(&large_buffer, &mask) {
         Ok(f) => f,
@@ -553,11 +576,14 @@ fn test_alternating_patterns(ctx: &TestContext) -> TestResult {
     const SIZE: usize = 10000;
 
     // Pattern 1: Alternating 0 and MAX
-    let alternating_extreme: Vec<u32> = (0..SIZE).map(|i| {
-        if i % 2 == 0 { 0 } else { u32::MAX }
-    }).collect();
+    let alternating_extreme: Vec<u32> = (0..SIZE)
+        .map(|i| if i % 2 == 0 { 0 } else { u32::MAX })
+        .collect();
 
-    let buffer1 = match ctx.provider.create_buffer_from_u32_slice(&alternating_extreme, schema.clone()) {
+    let buffer1 = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&alternating_extreme, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -609,11 +635,14 @@ fn test_alternating_patterns(ctx: &TestContext) -> TestResult {
     }
 
     // Pattern 2: Alternating bits (checkerboard)
-    let checkerboard: Vec<u32> = (0..SIZE).map(|i| {
-        if i % 2 == 0 { 0xAAAAAAAA } else { 0x55555555 }
-    }).collect();
+    let checkerboard: Vec<u32> = (0..SIZE)
+        .map(|i| if i % 2 == 0 { 0xAAAAAAAA } else { 0x55555555 })
+        .collect();
 
-    let buffer2 = match ctx.provider.create_buffer_from_u32_slice(&checkerboard, schema.clone()) {
+    let buffer2 = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&checkerboard, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -651,15 +680,18 @@ fn test_alternating_patterns(ctx: &TestContext) -> TestResult {
     }
 
     // Pattern 3: Stride pattern (every 3rd element differs)
-    let stride3: Vec<u32> = (0..SIZE).map(|i| {
-        match i % 3 {
+    let stride3: Vec<u32> = (0..SIZE)
+        .map(|i| match i % 3 {
             0 => 0,
             1 => 100,
             _ => 200,
-        }
-    }).collect();
+        })
+        .collect();
 
-    let _buffer3 = match ctx.provider.create_buffer_from_u32_slice(&stride3, schema.clone()) {
+    let _buffer3 = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&stride3, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -677,10 +709,10 @@ fn test_alternating_patterns(ctx: &TestContext) -> TestResult {
     ]);
     let stride3_vals: Vec<u32> = (0..SIZE as u32).collect();
 
-    let dedup_buffer = match ctx.provider.create_buffer_from_u32_columns(
-        &[&stride3, &stride3_vals],
-        dedup_schema.clone(),
-    ) {
+    let dedup_buffer = match ctx
+        .provider
+        .create_buffer_from_u32_columns(&[&stride3, &stride3_vals], dedup_schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -706,7 +738,10 @@ fn test_alternating_patterns(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_alternating_patterns",
             start.elapsed(),
-            format!("Stride3 dedup should return 3 unique rows, got {}", deduped3.num_rows),
+            format!(
+                "Stride3 dedup should return 3 unique rows, got {}",
+                deduped3.num_rows
+            ),
         );
     }
 
@@ -721,7 +756,10 @@ fn test_alternating_patterns(ctx: &TestContext) -> TestResult {
         vals
     };
 
-    let buffer4 = match ctx.provider.create_buffer_from_u32_slice(&lcg_pattern, schema.clone()) {
+    let buffer4 = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&lcg_pattern, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -762,7 +800,9 @@ fn test_alternating_patterns(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "LCG sort order incorrect at index {}: {} < {}",
-                    i, sorted_data4[i], sorted_data4[i - 1]
+                    i,
+                    sorted_data4[i],
+                    sorted_data4[i - 1]
                 ),
             );
         }
@@ -790,7 +830,10 @@ fn test_empty_and_single(ctx: &TestContext) -> TestResult {
     // Test empty buffer
     let empty_data: Vec<u32> = vec![];
 
-    let empty_buffer = match ctx.provider.create_buffer_from_u32_slice(&empty_data, schema.clone()) {
+    let empty_buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&empty_data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -817,7 +860,10 @@ fn test_empty_and_single(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_empty_and_single",
             start.elapsed(),
-            format!("Sort on empty buffer should return 0 rows, got {}", sorted_empty.num_rows),
+            format!(
+                "Sort on empty buffer should return 0 rows, got {}",
+                sorted_empty.num_rows
+            ),
         );
     }
 
@@ -838,14 +884,20 @@ fn test_empty_and_single(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_empty_and_single",
             start.elapsed(),
-            format!("Filter on empty buffer should return 0 rows, got {}", filtered_empty.num_rows),
+            format!(
+                "Filter on empty buffer should return 0 rows, got {}",
+                filtered_empty.num_rows
+            ),
         );
     }
 
     // Test single element
     let single_data: Vec<u32> = vec![42];
 
-    let single_buffer = match ctx.provider.create_buffer_from_u32_slice(&single_data, schema.clone()) {
+    let single_buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&single_data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -872,7 +924,10 @@ fn test_empty_and_single(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_empty_and_single",
             start.elapsed(),
-            format!("Sort on single-element buffer should return 1 row, got {}", sorted_single.num_rows),
+            format!(
+                "Sort on single-element buffer should return 1 row, got {}",
+                sorted_single.num_rows
+            ),
         );
     }
 
@@ -891,7 +946,10 @@ fn test_empty_and_single(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_empty_and_single",
             start.elapsed(),
-            format!("Single element should remain 42 after sort, got {:?}", sorted_single_data),
+            format!(
+                "Single element should remain 42 after sort, got {:?}",
+                sorted_single_data
+            ),
         );
     }
 
@@ -912,7 +970,10 @@ fn test_empty_and_single(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_empty_and_single",
             start.elapsed(),
-            format!("Filter (keep) on single-element should return 1 row, got {}", filtered_keep.num_rows),
+            format!(
+                "Filter (keep) on single-element should return 1 row, got {}",
+                filtered_keep.num_rows
+            ),
         );
     }
 
@@ -933,7 +994,10 @@ fn test_empty_and_single(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_empty_and_single",
             start.elapsed(),
-            format!("Filter (discard) on single-element should return 0 rows, got {}", filtered_discard.num_rows),
+            format!(
+                "Filter (discard) on single-element should return 0 rows, got {}",
+                filtered_discard.num_rows
+            ),
         );
     }
 
@@ -943,10 +1007,10 @@ fn test_empty_and_single(ctx: &TestContext) -> TestResult {
         ("val".to_string(), ScalarType::U32),
     ]);
 
-    let single_dedup_buffer = match ctx.provider.create_buffer_from_u32_columns(
-        &[&single_data, &single_data],
-        dedup_schema.clone(),
-    ) {
+    let single_dedup_buffer = match ctx
+        .provider
+        .create_buffer_from_u32_columns(&[&single_data, &single_data], dedup_schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -972,7 +1036,10 @@ fn test_empty_and_single(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_empty_and_single",
             start.elapsed(),
-            format!("Dedup on single-element should return 1 row, got {}", deduped_single.num_rows),
+            format!(
+                "Dedup on single-element should return 1 row, got {}",
+                deduped_single.num_rows
+            ),
         );
     }
 
@@ -982,10 +1049,10 @@ fn test_empty_and_single(ctx: &TestContext) -> TestResult {
         ("val".to_string(), ScalarType::U32),
     ]);
 
-    let left_single = match ctx.provider.create_buffer_from_u32_columns(
-        &[&vec![42u32], &vec![100u32]],
-        join_schema.clone(),
-    ) {
+    let left_single = match ctx
+        .provider
+        .create_buffer_from_u32_columns(&[&vec![42u32], &vec![100u32]], join_schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -996,10 +1063,10 @@ fn test_empty_and_single(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let right_matching = match ctx.provider.create_buffer_from_u32_columns(
-        &[&vec![42u32], &vec![200u32]],
-        join_schema.clone(),
-    ) {
+    let right_matching = match ctx
+        .provider
+        .create_buffer_from_u32_columns(&[&vec![42u32], &vec![200u32]], join_schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -1011,7 +1078,10 @@ fn test_empty_and_single(ctx: &TestContext) -> TestResult {
     };
 
     // Join two single-element tables with matching key
-    let joined_match = match ctx.provider.hash_join(&left_single, &right_matching, &[0], &[0]) {
+    let joined_match = match ctx
+        .provider
+        .hash_join(&left_single, &right_matching, &[0], &[0])
+    {
         Ok(j) => j,
         Err(e) => {
             return TestResult::error(
@@ -1026,15 +1096,18 @@ fn test_empty_and_single(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_empty_and_single",
             start.elapsed(),
-            format!("Join of single matching elements should return 1 row, got {}", joined_match.num_rows),
+            format!(
+                "Join of single matching elements should return 1 row, got {}",
+                joined_match.num_rows
+            ),
         );
     }
 
     // Join two single-element tables with non-matching key
-    let right_nonmatch = match ctx.provider.create_buffer_from_u32_columns(
-        &[&vec![99u32], &vec![200u32]],
-        join_schema.clone(),
-    ) {
+    let right_nonmatch = match ctx
+        .provider
+        .create_buffer_from_u32_columns(&[&vec![99u32], &vec![200u32]], join_schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -1045,7 +1118,10 @@ fn test_empty_and_single(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let joined_nomatch = match ctx.provider.hash_join(&left_single, &right_nonmatch, &[0], &[0]) {
+    let joined_nomatch = match ctx
+        .provider
+        .hash_join(&left_single, &right_nonmatch, &[0], &[0])
+    {
         Ok(j) => j,
         Err(e) => {
             return TestResult::error(
@@ -1060,7 +1136,10 @@ fn test_empty_and_single(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_empty_and_single",
             start.elapsed(),
-            format!("Join of single non-matching elements should return 0 rows, got {}", joined_nomatch.num_rows),
+            format!(
+                "Join of single non-matching elements should return 0 rows, got {}",
+                joined_nomatch.num_rows
+            ),
         );
     }
 

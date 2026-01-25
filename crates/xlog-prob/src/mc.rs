@@ -18,8 +18,8 @@ use std::sync::Arc;
 use xlog_core::{MemoryBudget, Result, XlogError};
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 use xlog_logic::ast::{
-    AggExpr, AggOp, AnnotatedDisjunction, Atom, BodyLiteral, Evidence, ProbFact, ProbQuery, Program,
-    Rule, Term,
+    AggExpr, AggOp, AnnotatedDisjunction, Atom, BodyLiteral, Evidence, ProbFact, ProbQuery,
+    Program, Rule, Term,
 };
 use xlog_logic::stratify::{build_dependency_graph, find_sccs_for_lowering};
 
@@ -200,8 +200,11 @@ impl McProgram {
             let mut store = self.base_store.clone();
             self.apply_sample_facts(&mut store, sample_bits)?;
 
-            let sample_stats =
-                evaluate_program_inplace(&self.scc_plans, &mut store, cfg.max_nonmonotone_iterations)?;
+            let sample_stats = evaluate_program_inplace(
+                &self.scc_plans,
+                &mut store,
+                cfg.max_nonmonotone_iterations,
+            )?;
             stats.nonmonotone_sccs += sample_stats.nonmonotone_sccs;
             stats.nonmonotone_cycles += sample_stats.nonmonotone_cycles;
             stats.nonmonotone_iteration_limit_hits += sample_stats.nonmonotone_iteration_limit_hits;
@@ -381,7 +384,9 @@ impl McProgram {
 
             if let Some(outcome_idx) = outcome {
                 let atom = ad.choices.get(outcome_idx).ok_or_else(|| {
-                    XlogError::Compilation("Annotated disjunction outcome index out of range".to_string())
+                    XlogError::Compilation(
+                        "Annotated disjunction outcome index out of range".to_string(),
+                    )
                 })?;
                 store
                     .entry(atom.predicate.clone())
@@ -447,7 +452,11 @@ fn compile_sampling_plan(
             let mut remaining = 1.0f64;
             for i in 0..(m - 1) {
                 let p_i = probs_full[i];
-                let cond_true = if remaining <= 0.0 { 0.0 } else { p_i / remaining };
+                let cond_true = if remaining <= 0.0 {
+                    0.0
+                } else {
+                    p_i / remaining
+                };
                 validate_prob(cond_true, "annotated disjunction conditional")?;
                 probs.push(cond_true as f32);
                 decision_vars.push(probs.len() - 1);
@@ -494,7 +503,9 @@ fn build_scc_plans(program: &Program) -> Result<Vec<SccPlan>> {
         let nonmonotone = scc_rules.iter().any(|rule| {
             rule.body.iter().any(|lit| match lit {
                 BodyLiteral::Negated(atom) => predicate_set.contains(&atom.predicate),
-                BodyLiteral::Positive(atom) if rule.has_aggregation() => predicate_set.contains(&atom.predicate),
+                BodyLiteral::Positive(atom) if rule.has_aggregation() => {
+                    predicate_set.contains(&atom.predicate)
+                }
                 _ => false,
             })
         });
@@ -692,10 +703,7 @@ fn eval_nonmonotone_scc(
     seen.entry(hash_scc_state(&history[0])).or_default().push(0);
 
     for _iter in 0..max_iters {
-        let current = history
-            .last()
-            .expect("history non-empty")
-            .clone();
+        let current = history.last().expect("history non-empty").clone();
 
         let mut next: HashMap<String, Relation> = base.clone();
 
@@ -758,7 +766,12 @@ fn intersect_states(states: &[HashMap<String, Relation>]) -> HashMap<String, Rel
                 break;
             }
         }
-        out.insert(pred.clone(), Relation { tuples: intersection });
+        out.insert(
+            pred.clone(),
+            Relation {
+                tuples: intersection,
+            },
+        );
     }
 
     out
@@ -871,19 +884,26 @@ fn select_relation<'a>(
     if let Some((delta_index, delta_map)) = delta_scc {
         if delta_index == body_index {
             return delta_map.get(&atom.predicate).ok_or_else(|| {
-                XlogError::Compilation(format!("Missing delta relation for predicate {}", atom.predicate))
+                XlogError::Compilation(format!(
+                    "Missing delta relation for predicate {}",
+                    atom.predicate
+                ))
             });
         }
     }
     if let Some(rel) = full_scc.get(&atom.predicate) {
         return Ok(rel);
     }
-    global.get(&atom.predicate).ok_or_else(|| {
-        XlogError::Compilation(format!("Unknown predicate {}", atom.predicate))
-    })
+    global
+        .get(&atom.predicate)
+        .ok_or_else(|| XlogError::Compilation(format!("Unknown predicate {}", atom.predicate)))
 }
 
-fn negated_atom_holds(atom: &Atom, rel: &Relation, binding: &HashMap<String, Value>) -> Result<bool> {
+fn negated_atom_holds(
+    atom: &Atom,
+    rel: &Relation,
+    binding: &HashMap<String, Value>,
+) -> Result<bool> {
     // Safety: all variables in a negated atom must be bound already (otherwise domain is unknown).
     for term in &atom.terms {
         if let Term::Variable(name) = term {
@@ -901,7 +921,11 @@ fn negated_atom_holds(atom: &Atom, rel: &Relation, binding: &HashMap<String, Val
     Ok(true)
 }
 
-fn atom_matches_bound(atom: &Atom, tuple: &[Value], binding: &HashMap<String, Value>) -> Result<bool> {
+fn atom_matches_bound(
+    atom: &Atom,
+    tuple: &[Value],
+    binding: &HashMap<String, Value>,
+) -> Result<bool> {
     if atom.terms.len() != tuple.len() {
         return Err(XlogError::Compilation(format!(
             "Arity mismatch for {}: atom has {}, tuple has {}",
@@ -936,7 +960,10 @@ fn atom_matches_bound(atom: &Atom, tuple: &[Value], binding: &HashMap<String, Va
     Ok(true)
 }
 
-fn materialize_head_non_aggregate(head: &Atom, binding: &HashMap<String, Value>) -> Result<Vec<Value>> {
+fn materialize_head_non_aggregate(
+    head: &Atom,
+    binding: &HashMap<String, Value>,
+) -> Result<Vec<Value>> {
     let mut out = Vec::with_capacity(head.terms.len());
     for term in &head.terms {
         match term {
@@ -1109,15 +1136,15 @@ impl AggState {
     fn finish(&self, op: AggOp) -> Result<Value> {
         match (op, self) {
             (AggOp::Count, AggState::Count(c)) => {
-                let v: i64 = (*c).try_into().map_err(|_| {
-                    XlogError::Compilation("count() overflowed i64".to_string())
-                })?;
+                let v: i64 = (*c)
+                    .try_into()
+                    .map_err(|_| XlogError::Compilation("count() overflowed i64".to_string()))?;
                 Ok(Value::I64(v))
             }
             (AggOp::Sum, AggState::SumI128(acc)) => {
-                let v: i64 = (*acc).try_into().map_err(|_| {
-                    XlogError::Compilation("sum() overflowed i64".to_string())
-                })?;
+                let v: i64 = (*acc)
+                    .try_into()
+                    .map_err(|_| XlogError::Compilation("sum() overflowed i64".to_string()))?;
                 Ok(Value::I64(v))
             }
             (AggOp::Sum, AggState::SumF64(v)) => Ok(Value::F64(v.to_bits())),
@@ -1152,7 +1179,10 @@ fn value_le(a: &Value, b: &Value) -> Result<bool> {
     }
 }
 
-fn eval_aggregate_head(head: &Atom, states: Vec<HashMap<String, Value>>) -> Result<Vec<Vec<Value>>> {
+fn eval_aggregate_head(
+    head: &Atom,
+    states: Vec<HashMap<String, Value>>,
+) -> Result<Vec<Vec<Value>>> {
     // Collect unique group keys (variables) in head order.
     let mut key_vars: Vec<String> = Vec::new();
     let mut key_var_to_pos: HashMap<String, usize> = HashMap::new();
@@ -1198,7 +1228,9 @@ fn eval_aggregate_head(head: &Atom, states: Vec<HashMap<String, Value>>) -> Resu
     for binding in states {
         let mut key: Vec<Value> = Vec::with_capacity(key_vars.len());
         for name in &key_vars {
-            let v = binding.get(name).ok_or_else(|| XlogError::UnsafeVariable(name.clone()))?;
+            let v = binding
+                .get(name)
+                .ok_or_else(|| XlogError::UnsafeVariable(name.clone()))?;
             key.push(v.clone());
         }
 
@@ -1208,7 +1240,9 @@ fn eval_aggregate_head(head: &Atom, states: Vec<HashMap<String, Value>>) -> Resu
         });
 
         for (idx, (op, var)) in agg_specs.iter().enumerate() {
-            let v = binding.get(var).ok_or_else(|| XlogError::UnsafeVariable(var.clone()))?;
+            let v = binding
+                .get(var)
+                .ok_or_else(|| XlogError::UnsafeVariable(var.clone()))?;
             entry.aggs[idx].update(*op, v)?;
         }
     }

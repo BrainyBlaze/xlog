@@ -168,7 +168,10 @@ impl SolveProof {
     #[inline]
     pub fn satisfying(assignment: Vec<bool>) -> Self {
         let checksum = compute_checksum(&assignment);
-        Self::Satisfying { assignment, checksum }
+        Self::Satisfying {
+            assignment,
+            checksum,
+        }
     }
 
     /// Creates an unsatisfiability proof.
@@ -304,9 +307,10 @@ impl SolveProof {
     #[inline]
     pub fn verify_checksum(&self) -> Option<bool> {
         match self {
-            Self::Satisfying { assignment, checksum } => {
-                Some(compute_checksum(assignment) == *checksum)
-            }
+            Self::Satisfying {
+                assignment,
+                checksum,
+            } => Some(compute_checksum(assignment) == *checksum),
             _ => None,
         }
     }
@@ -327,7 +331,11 @@ impl SolveProof {
     #[inline]
     pub fn satisfaction_ratio(&self) -> Option<f64> {
         match self {
-            Self::Approximate { satisfied_clauses, total_clauses, .. } => {
+            Self::Approximate {
+                satisfied_clauses,
+                total_clauses,
+                ..
+            } => {
                 if *total_clauses == 0 {
                     Some(0.0)
                 } else {
@@ -817,7 +825,12 @@ impl SolveResult {
     ) -> Self {
         Self {
             status: SolveStatus::Unknown,
-            proof: SolveProof::approximate(assignment, satisfied_clauses, total_clauses, iterations),
+            proof: SolveProof::approximate(
+                assignment,
+                satisfied_clauses,
+                total_clauses,
+                iterations,
+            ),
             stats: SolveStats::default().with_iterations(iterations),
         }
     }
@@ -949,7 +962,10 @@ mod tests {
         let assignment = vec![true, false, true];
         let proof = SolveProof::satisfying(assignment.clone());
         match proof {
-            SolveProof::Satisfying { assignment: a, checksum } => {
+            SolveProof::Satisfying {
+                assignment: a,
+                checksum,
+            } => {
                 assert_eq!(a, assignment);
                 assert_ne!(checksum, 0); // Checksum should be computed
             }
@@ -1100,7 +1116,10 @@ mod tests {
         let empty = SolveProof::approximate(vec![], 0, 0, 100);
         assert_eq!(empty.satisfaction_ratio(), Some(0.0));
 
-        assert_eq!(SolveProof::satisfying(vec![true]).satisfaction_ratio(), None);
+        assert_eq!(
+            SolveProof::satisfying(vec![true]).satisfaction_ratio(),
+            None
+        );
     }
 
     #[test]

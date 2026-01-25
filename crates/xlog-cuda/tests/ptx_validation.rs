@@ -70,7 +70,10 @@ fn validate_all_ptx_files_load_and_resolve_all_entry_points() {
     );
 
     for path in ptx_files {
-        let filename = path.file_name().and_then(|s| s.to_str()).unwrap_or("<unknown>");
+        let filename = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("<unknown>");
         let module_name = format!(
             "validate_{}",
             path.file_stem().and_then(|s| s.to_str()).unwrap_or("ptx")

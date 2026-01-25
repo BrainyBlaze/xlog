@@ -42,10 +42,14 @@ impl CudaDevice {
                     ordinal
                 ))
             })?
-            .map_err(|e| XlogError::Kernel(format!("Failed to create CUDA device {}: {}", ordinal, e)))?;
+            .map_err(|e| {
+                XlogError::Kernel(format!("Failed to create CUDA device {}: {}", ordinal, e))
+            })?;
 
         let stream = std::panic::catch_unwind(|| device.fork_default_stream())
-            .map_err(|_| XlogError::Kernel("Failed to create CUDA stream: cudarc panicked".to_string()))?
+            .map_err(|_| {
+                XlogError::Kernel("Failed to create CUDA stream: cudarc panicked".to_string())
+            })?
             .map_err(|e| XlogError::Kernel(format!("Failed to create CUDA stream: {}", e)))?;
 
         Ok(Self { device, stream })
@@ -59,7 +63,8 @@ impl CudaDevice {
     /// # Errors
     /// Returns `XlogError::Kernel` if synchronization fails
     pub fn synchronize(&self) -> Result<()> {
-        self.device.synchronize()
+        self.device
+            .synchronize()
             .map_err(|e| XlogError::Kernel(format!("Failed to synchronize device: {}", e)))
     }
 

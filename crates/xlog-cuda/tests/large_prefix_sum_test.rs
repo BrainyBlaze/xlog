@@ -1,8 +1,8 @@
 //! Test prefix sum with more than 256 elements
 
+use std::sync::Arc;
 use xlog_core::MemoryBudget;
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
-use std::sync::Arc;
 
 fn create_test_provider() -> Option<CudaKernelProvider> {
     let device = match CudaDevice::new(0) {
@@ -33,7 +33,11 @@ fn test_prefix_sum_1000_elements() {
     let mask: Vec<u8> = (0..1000).map(|i| (i % 2) as u8).collect();
 
     let result = provider.prefix_sum_mask(&mask);
-    assert!(result.is_ok(), "prefix_sum_mask should work with 1000 elements, got: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "prefix_sum_mask should work with 1000 elements, got: {:?}",
+        result
+    );
 
     let (prefix_sum, count) = result.unwrap();
     assert_eq!(count, 500, "Should count 500 ones");
@@ -60,7 +64,10 @@ fn test_prefix_sum_10000_elements() {
     let mask: Vec<u8> = (0..10000).map(|i| if i % 3 == 0 { 1 } else { 0 }).collect();
 
     let result = provider.prefix_sum_mask(&mask);
-    assert!(result.is_ok(), "prefix_sum_mask should work with 10000 elements");
+    assert!(
+        result.is_ok(),
+        "prefix_sum_mask should work with 10000 elements"
+    );
 
     let (_prefix_sum, count) = result.unwrap();
     let expected_count = (10000 + 2) / 3; // ceil(10000/3) = 3334
@@ -81,7 +88,11 @@ fn test_prefix_sum_all_ones_large() {
     let mask: Vec<u8> = vec![1u8; n];
 
     let result = provider.prefix_sum_mask(&mask);
-    assert!(result.is_ok(), "prefix_sum_mask should work with {} elements", n);
+    assert!(
+        result.is_ok(),
+        "prefix_sum_mask should work with {} elements",
+        n
+    );
 
     let (prefix_sum, count) = result.unwrap();
     assert_eq!(count, n as u32);
@@ -106,7 +117,11 @@ fn test_prefix_sum_257_elements() {
     let mask: Vec<u8> = (0..257).map(|i| (i % 2) as u8).collect();
 
     let result = provider.prefix_sum_mask(&mask);
-    assert!(result.is_ok(), "prefix_sum_mask should work with 257 elements, got: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "prefix_sum_mask should work with 257 elements, got: {:?}",
+        result
+    );
 
     let (prefix_sum, count) = result.unwrap();
     // 257 elements, alternating 0,1,0,1... starting with 0
@@ -136,7 +151,11 @@ fn test_prefix_sum_exact_block_boundary() {
     let mask: Vec<u8> = vec![1u8; n];
 
     let result = provider.prefix_sum_mask(&mask);
-    assert!(result.is_ok(), "prefix_sum_mask should work with {} elements", n);
+    assert!(
+        result.is_ok(),
+        "prefix_sum_mask should work with {} elements",
+        n
+    );
 
     let (prefix_sum, count) = result.unwrap();
     assert_eq!(count, n as u32);

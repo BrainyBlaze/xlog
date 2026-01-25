@@ -88,7 +88,9 @@ impl QueryStatistics {
 
     pub fn heat(&self, relation: &str) -> u64 {
         let scan_heat = self.scan_count(relation);
-        let join_heat: u64 = self.join_stats.iter()
+        let join_heat: u64 = self
+            .join_stats
+            .iter()
             .filter(|((l, r), _)| l == relation || r == relation)
             .map(|(_, stats)| stats.count * 2)
             .sum();
@@ -96,7 +98,9 @@ impl QueryStatistics {
     }
 
     pub fn relations_by_heat(&self) -> Vec<(String, u64)> {
-        let mut relations: Vec<_> = self.scan_counts.keys()
+        let mut relations: Vec<_> = self
+            .scan_counts
+            .keys()
             .map(|r| (r.clone(), self.heat(r)))
             .collect();
 

@@ -234,19 +234,13 @@ impl<'a> ExpansionContext<'a> {
         subst: &HashMap<String, ArithExpr>,
     ) -> BodyLiteral {
         match lit {
-            BodyLiteral::Positive(atom) => {
-                BodyLiteral::Positive(self.substitute_atom(atom, subst))
-            }
-            BodyLiteral::Negated(atom) => {
-                BodyLiteral::Negated(self.substitute_atom(atom, subst))
-            }
-            BodyLiteral::Comparison(cmp) => {
-                BodyLiteral::Comparison(Comparison {
-                    left: self.substitute_term(&cmp.left, subst),
-                    op: cmp.op,
-                    right: self.substitute_term(&cmp.right, subst),
-                })
-            }
+            BodyLiteral::Positive(atom) => BodyLiteral::Positive(self.substitute_atom(atom, subst)),
+            BodyLiteral::Negated(atom) => BodyLiteral::Negated(self.substitute_atom(atom, subst)),
+            BodyLiteral::Comparison(cmp) => BodyLiteral::Comparison(Comparison {
+                left: self.substitute_term(&cmp.left, subst),
+                op: cmp.op,
+                right: self.substitute_term(&cmp.right, subst),
+            }),
             BodyLiteral::IsExpr(is_expr) => {
                 // Substitute in both the target variable and the expression
                 let target = self.substitute_var(&is_expr.target, subst);
@@ -297,9 +291,7 @@ impl<'a> ExpansionContext<'a> {
         subst: &HashMap<String, ArithExpr>,
     ) -> ArithExpr {
         match expr {
-            ArithExpr::Variable(name) => {
-                subst.get(name).cloned().unwrap_or_else(|| expr.clone())
-            }
+            ArithExpr::Variable(name) => subst.get(name).cloned().unwrap_or_else(|| expr.clone()),
             ArithExpr::Integer(_) | ArithExpr::Float(_) => expr.clone(),
             ArithExpr::Add(l, r) => ArithExpr::Add(
                 Box::new(self.substitute_arith_expr(l, subst)),
@@ -321,9 +313,7 @@ impl<'a> ExpansionContext<'a> {
                 Box::new(self.substitute_arith_expr(l, subst)),
                 Box::new(self.substitute_arith_expr(r, subst)),
             ),
-            ArithExpr::Abs(e) => {
-                ArithExpr::Abs(Box::new(self.substitute_arith_expr(e, subst)))
-            }
+            ArithExpr::Abs(e) => ArithExpr::Abs(Box::new(self.substitute_arith_expr(e, subst))),
             ArithExpr::Min(l, r) => ArithExpr::Min(
                 Box::new(self.substitute_arith_expr(l, subst)),
                 Box::new(self.substitute_arith_expr(r, subst)),
@@ -388,10 +378,8 @@ impl<'a> ExpansionContext<'a> {
             }
             ArithExpr::FuncCall { name, args } => {
                 // First expand arguments
-                let expanded_args: Result<Vec<_>, _> = args
-                    .iter()
-                    .map(|a| self.expand_expr_fully(a))
-                    .collect();
+                let expanded_args: Result<Vec<_>, _> =
+                    args.iter().map(|a| self.expand_expr_fully(a)).collect();
                 let expanded_args = expanded_args?;
 
                 // Then expand the function call if it's a UDF
@@ -438,10 +426,7 @@ impl<'a> ExpansionContext<'a> {
                 Box::new(self.expand_expr_fully(l)?),
                 Box::new(self.expand_expr_fully(r)?),
             )),
-            ArithExpr::Cast(e, t) => Ok(ArithExpr::Cast(
-                Box::new(self.expand_expr_fully(e)?),
-                *t,
-            )),
+            ArithExpr::Cast(e, t) => Ok(ArithExpr::Cast(Box::new(self.expand_expr_fully(e)?), *t)),
             ArithExpr::Conditional {
                 cond_left,
                 cond_op,
@@ -463,7 +448,10 @@ use crate::ast::{Program, Rule};
 
 /// Expand all user-defined function calls in a program.
 /// Returns a new program with all UDF calls replaced by their expanded bodies.
-pub fn expand_program_functions(program: &Program, max_depth: u32) -> Result<Program, FunctionError> {
+pub fn expand_program_functions(
+    program: &Program,
+    max_depth: u32,
+) -> Result<Program, FunctionError> {
     // Build function registry from program
     let mut registry = FunctionRegistry::new();
     for func in &program.functions {
@@ -502,10 +490,7 @@ pub fn expand_program_functions(program: &Program, max_depth: u32) -> Result<Pro
 }
 
 /// Expand function calls in a single rule.
-fn expand_rule_functions(
-    ctx: &mut ExpansionContext,
-    rule: &Rule,
-) -> Result<Rule, FunctionError> {
+fn expand_rule_functions(ctx: &mut ExpansionContext, rule: &Rule) -> Result<Rule, FunctionError> {
     let expanded_body: Result<Vec<BodyLiteral>, FunctionError> = rule
         .body
         .iter()

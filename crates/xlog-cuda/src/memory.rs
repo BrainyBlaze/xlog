@@ -3,16 +3,16 @@
 //! This module provides GPU memory management with budget enforcement.
 //! It wraps cudarc's allocation functions and tracks total allocated memory.
 
+use std::mem::ManuallyDrop;
+use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::ops::{Deref, DerefMut};
-use std::mem::ManuallyDrop;
 
 use cudarc::driver::CudaSlice;
 use xlog_core::{MemoryBudget, Result, Schema, XlogError};
 
-use crate::CudaDevice;
 use crate::dlpack::DlpackManagedTensor;
+use crate::CudaDevice;
 
 /// GPU memory manager with budget enforcement
 ///
@@ -84,7 +84,11 @@ impl<T: cudarc::driver::DeviceRepr> TrackedCudaSlice<T> {
         let device = manager.device.inner().clone();
         let inner = unsafe { device.upgrade_device_ptr::<u8>(ptr, len_bytes) };
 
-        TrackedCudaSlice { bytes, manager, inner }
+        TrackedCudaSlice {
+            bytes,
+            manager,
+            inner,
+        }
     }
 }
 
@@ -268,7 +272,11 @@ impl CudaColumn {
         Self::Owned(slice)
     }
 
-    pub fn dlpack(ptr: cudarc::driver::sys::CUdeviceptr, len_bytes: usize, tensor: DlpackManagedTensor) -> Self {
+    pub fn dlpack(
+        ptr: cudarc::driver::sys::CUdeviceptr,
+        len_bytes: usize,
+        tensor: DlpackManagedTensor,
+    ) -> Self {
         Self::Dlpack(DlpackColumn {
             ptr,
             len_bytes,
@@ -473,7 +481,9 @@ mod tests {
         let manager = Arc::new(GpuMemoryManager::new(device, budget));
 
         // Allocate 256 u32 values = 1024 bytes
-        let _slice = manager.alloc::<u32>(256).expect("Allocation should succeed");
+        let _slice = manager
+            .alloc::<u32>(256)
+            .expect("Allocation should succeed");
 
         assert_eq!(manager.allocated_bytes(), 1024);
         assert_eq!(manager.remaining_bytes(), 1024 * 1024 - 1024);
@@ -491,7 +501,12 @@ mod tests {
         let result = manager.alloc::<u32>(512);
 
         assert!(result.is_err());
-        if let Err(XlogError::ResourceExhausted { estimated_bytes, budget_bytes, .. }) = result {
+        if let Err(XlogError::ResourceExhausted {
+            estimated_bytes,
+            budget_bytes,
+            ..
+        }) = result
+        {
             assert_eq!(estimated_bytes, 2048);
             assert_eq!(budget_bytes, 1024);
         } else {
@@ -523,11 +538,15 @@ mod tests {
         let manager = Arc::new(GpuMemoryManager::new(device, budget));
 
         // First allocation: 256 u32 = 1024 bytes
-        let _slice1 = manager.alloc::<u32>(256).expect("First allocation should succeed");
+        let _slice1 = manager
+            .alloc::<u32>(256)
+            .expect("First allocation should succeed");
         assert_eq!(manager.allocated_bytes(), 1024);
 
         // Second allocation: 256 u32 = 1024 bytes
-        let _slice2 = manager.alloc::<u32>(256).expect("Second allocation should succeed");
+        let _slice2 = manager
+            .alloc::<u32>(256)
+            .expect("Second allocation should succeed");
         assert_eq!(manager.allocated_bytes(), 2048);
 
         // Third allocation that would exceed budget
@@ -547,7 +566,9 @@ mod tests {
         let manager = Arc::new(GpuMemoryManager::new(device, budget));
 
         // Allocate
-        let slice = manager.alloc::<u32>(256).expect("Allocation should succeed");
+        let slice = manager
+            .alloc::<u32>(256)
+            .expect("Allocation should succeed");
         assert_eq!(manager.allocated_bytes(), 1024);
 
         // Drop should automatically update tracking

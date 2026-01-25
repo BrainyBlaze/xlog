@@ -6,7 +6,7 @@
 
 use crate::harness::{CategoryResult, TestContext, TestResult};
 use std::time::Instant;
-use xlog_core::{Schema, ScalarType};
+use xlog_core::{ScalarType, Schema};
 
 /// Run all tests in this category.
 pub fn run_all(ctx: &TestContext) -> CategoryResult {
@@ -42,7 +42,9 @@ fn test_single_block_operations(ctx: &TestContext) -> TestResult {
         let keys: Vec<u32> = (0..size as u32).rev().collect();
         let vals: Vec<u32> = (0..size as u32).collect();
 
-        let buffer = match ctx.provider.create_buffer_from_u32_columns(&[&keys, &vals], schema.clone())
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_columns(&[&keys, &vals], schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -94,7 +96,10 @@ fn test_single_block_operations(ctx: &TestContext) -> TestResult {
                 return TestResult::error(
                     "test_single_block_operations",
                     start.elapsed(),
-                    format!("Size {}: sorted_keys[{}] = {}, expected {}", size, i, key, i),
+                    format!(
+                        "Size {}: sorted_keys[{}] = {}, expected {}",
+                        size, i, key, i
+                    ),
                 );
             }
         }
@@ -176,7 +181,10 @@ fn test_multi_block_operations(ctx: &TestContext) -> TestResult {
         // Create reverse-sorted data
         let data: Vec<u32> = (0..size as u32).rev().collect();
 
-        let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_slice(&data, schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -227,7 +235,10 @@ fn test_multi_block_operations(ctx: &TestContext) -> TestResult {
             return TestResult::error(
                 "test_multi_block_operations",
                 start.elapsed(),
-                format!("Size {}: first element is {}, expected 0", size, sorted_data[0]),
+                format!(
+                    "Size {}: first element is {}, expected 0",
+                    size, sorted_data[0]
+                ),
             );
         }
 
@@ -257,7 +268,15 @@ fn test_multi_block_operations(ctx: &TestContext) -> TestResult {
 
         // Verify sorted order by sampling
         let mut prev = sorted_data[0];
-        for &idx in &[100, 1000, size / 4, size / 2, size * 3 / 4, size - 100, size - 1] {
+        for &idx in &[
+            100,
+            1000,
+            size / 4,
+            size / 2,
+            size * 3 / 4,
+            size - 100,
+            size - 1,
+        ] {
             if idx < size {
                 if sorted_data[idx] < prev {
                     return TestResult::error(
@@ -326,7 +345,10 @@ fn test_block_boundary_correctness(ctx: &TestContext) -> TestResult {
         // Create reverse-sorted data to maximize data movement
         let data: Vec<u32> = (0..size as u32).rev().collect();
 
-        let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_slice(&data, schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -470,7 +492,10 @@ fn test_grid_stride_correctness(ctx: &TestContext) -> TestResult {
         // Create data with repeating pattern (modulo) to limit value range
         let data: Vec<u32> = (0..size).map(|i| (i % 10000) as u32).collect();
 
-        let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_slice(&data, schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -521,7 +546,10 @@ fn test_grid_stride_correctness(ctx: &TestContext) -> TestResult {
             return TestResult::error(
                 "test_grid_stride_correctness",
                 start.elapsed(),
-                format!("Size {}: first element is {}, expected 0", size, sorted_data[0]),
+                format!(
+                    "Size {}: first element is {}, expected 0",
+                    size, sorted_data[0]
+                ),
             );
         }
 
@@ -540,7 +568,15 @@ fn test_grid_stride_correctness(ctx: &TestContext) -> TestResult {
 
         // Verify sorted order by sampling
         let mut prev = sorted_data[0];
-        for idx in [1000, 100000, 1000000, 2500000, 4000000, size - 1000, size - 1] {
+        for idx in [
+            1000,
+            100000,
+            1000000,
+            2500000,
+            4000000,
+            size - 1000,
+            size - 1,
+        ] {
             if idx < size {
                 if sorted_data[idx] < prev {
                     return TestResult::error(
@@ -572,7 +608,9 @@ fn test_grid_stride_correctness(ctx: &TestContext) -> TestResult {
         }
 
         // Test filter across grid-stride iterations
-        let mask: Vec<u8> = (0..size).map(|i| if i % 100 == 0 { 1 } else { 0 }).collect();
+        let mask: Vec<u8> = (0..size)
+            .map(|i| if i % 100 == 0 { 1 } else { 0 })
+            .collect();
         let expected_count = (size + 99) / 100;
 
         let filtered = match ctx.provider.filter_by_mask(&buffer, &mask) {
@@ -649,10 +687,10 @@ fn test_cross_block_data_patterns(ctx: &TestContext) -> TestResult {
         }
     }
 
-    let left_buffer = match ctx.provider.create_buffer_from_u32_columns(
-        &[&left_keys, &left_vals],
-        left_schema.clone(),
-    ) {
+    let left_buffer = match ctx
+        .provider
+        .create_buffer_from_u32_columns(&[&left_keys, &left_vals], left_schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -663,10 +701,10 @@ fn test_cross_block_data_patterns(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let right_buffer = match ctx.provider.create_buffer_from_u32_columns(
-        &[&right_keys, &right_vals],
-        right_schema.clone(),
-    ) {
+    let right_buffer = match ctx
+        .provider
+        .create_buffer_from_u32_columns(&[&right_keys, &right_vals], right_schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -678,7 +716,10 @@ fn test_cross_block_data_patterns(ctx: &TestContext) -> TestResult {
     };
 
     // Hash join with keys spanning block boundaries
-    let joined = match ctx.provider.hash_join(&left_buffer, &right_buffer, &[0], &[0]) {
+    let joined = match ctx
+        .provider
+        .hash_join(&left_buffer, &right_buffer, &[0], &[0])
+    {
         Ok(j) => j,
         Err(e) => {
             return TestResult::error(
@@ -786,17 +827,19 @@ fn test_cross_block_data_patterns(ctx: &TestContext) -> TestResult {
         })
         .collect();
 
-    let sort_buffer =
-        match ctx.provider.create_buffer_from_u32_slice(&cross_block_data, sort_schema.clone()) {
-            Ok(buf) => buf,
-            Err(e) => {
-                return TestResult::error(
-                    "test_cross_block_data_patterns",
-                    start.elapsed(),
-                    format!("Failed to create cross-block sort buffer: {}", e),
-                )
-            }
-        };
+    let sort_buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&cross_block_data, sort_schema.clone())
+    {
+        Ok(buf) => buf,
+        Err(e) => {
+            return TestResult::error(
+                "test_cross_block_data_patterns",
+                start.elapsed(),
+                format!("Failed to create cross-block sort buffer: {}", e),
+            )
+        }
+    };
 
     let sorted = match ctx.provider.sort(&sort_buffer, &[0]) {
         Ok(s) => s,

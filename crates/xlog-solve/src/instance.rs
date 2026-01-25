@@ -72,7 +72,10 @@ impl Literal {
     /// ```
     #[inline]
     pub const fn positive(var: u32) -> Self {
-        Self { var, negated: false }
+        Self {
+            var,
+            negated: false,
+        }
     }
 
     /// Creates a negative literal (negated variable).
@@ -148,7 +151,11 @@ impl Literal {
     #[inline]
     pub fn eval(self, assignment: &[bool]) -> bool {
         let value = assignment[self.var as usize];
-        if self.negated { !value } else { value }
+        if self.negated {
+            !value
+        } else {
+            value
+        }
     }
 
     /// Converts this literal to DIMACS format.
@@ -171,7 +178,11 @@ impl Literal {
     #[inline]
     pub fn to_dimacs(self) -> i32 {
         let var_1indexed = (self.var + 1) as i32;
-        if self.negated { -var_1indexed } else { var_1indexed }
+        if self.negated {
+            -var_1indexed
+        } else {
+            var_1indexed
+        }
     }
 
     /// Creates a literal from DIMACS format.
@@ -308,7 +319,9 @@ impl Clause {
     /// * `literal` - The single literal in this clause
     #[inline]
     pub fn unit(literal: Literal) -> Self {
-        Self { literals: vec![literal] }
+        Self {
+            literals: vec![literal],
+        }
     }
 
     /// Creates a binary clause (two literals).
@@ -321,7 +334,9 @@ impl Clause {
     /// * `b` - The second literal
     #[inline]
     pub fn binary(a: Literal, b: Literal) -> Self {
-        Self { literals: vec![a, b] }
+        Self {
+            literals: vec![a, b],
+        }
     }
 
     /// Creates a ternary clause (three literals).
@@ -333,7 +348,9 @@ impl Clause {
     /// * `c` - The third literal
     #[inline]
     pub fn ternary(a: Literal, b: Literal, c: Literal) -> Self {
-        Self { literals: vec![a, b, c] }
+        Self {
+            literals: vec![a, b, c],
+        }
     }
 
     /// Returns the number of literals in this clause.
@@ -392,7 +409,10 @@ impl Clause {
     /// The number of literals that evaluate to true.
     #[inline]
     pub fn count_satisfied(&self, assignment: &[bool]) -> usize {
-        self.literals.iter().filter(|lit| lit.eval(assignment)).count()
+        self.literals
+            .iter()
+            .filter(|lit| lit.eval(assignment))
+            .count()
     }
 
     /// Returns an iterator over the literals in this clause.
@@ -428,7 +448,9 @@ impl<'a> IntoIterator for &'a Clause {
 
 impl FromIterator<Literal> for Clause {
     fn from_iter<I: IntoIterator<Item = Literal>>(iter: I) -> Self {
-        Self { literals: iter.into_iter().collect() }
+        Self {
+            literals: iter.into_iter().collect(),
+        }
     }
 }
 
@@ -672,7 +694,9 @@ impl SolveInstance {
     /// ```
     #[inline]
     pub fn is_satisfied(&self, assignment: &[bool]) -> bool {
-        self.clauses.iter().all(|clause| clause.is_satisfied(assignment))
+        self.clauses
+            .iter()
+            .all(|clause| clause.is_satisfied(assignment))
     }
 
     /// Counts how many clauses are satisfied by the given assignment.
@@ -686,7 +710,10 @@ impl SolveInstance {
     /// The number of satisfied clauses.
     #[inline]
     pub fn count_satisfied(&self, assignment: &[bool]) -> usize {
-        self.clauses.iter().filter(|clause| clause.is_satisfied(assignment)).count()
+        self.clauses
+            .iter()
+            .filter(|clause| clause.is_satisfied(assignment))
+            .count()
     }
 
     /// Computes the weighted satisfaction score for the given assignment.
@@ -704,14 +731,13 @@ impl SolveInstance {
     #[inline]
     pub fn weighted_satisfaction(&self, assignment: &[bool]) -> f64 {
         match &self.weights {
-            Some(weights) => {
-                self.clauses
-                    .iter()
-                    .zip(weights.iter())
-                    .filter(|(clause, _)| clause.is_satisfied(assignment))
-                    .map(|(_, weight)| *weight)
-                    .sum()
-            }
+            Some(weights) => self
+                .clauses
+                .iter()
+                .zip(weights.iter())
+                .filter(|(clause, _)| clause.is_satisfied(assignment))
+                .map(|(_, weight)| *weight)
+                .sum(),
             None => self.count_satisfied(assignment) as f64,
         }
     }
@@ -770,9 +796,9 @@ impl SolveInstance {
     ///
     /// `true` if all variable indices are less than `num_vars`, `false` otherwise.
     pub fn validate(&self) -> bool {
-        self.clauses.iter().all(|clause| {
-            clause.literals.iter().all(|lit| lit.var < self.num_vars)
-        })
+        self.clauses
+            .iter()
+            .all(|clause| clause.literals.iter().all(|lit| lit.var < self.num_vars))
     }
 
     /// Returns the maximum variable index used in any clause.
@@ -845,7 +871,7 @@ mod tests {
         let neg = Literal::negative(7);
 
         // DIMACS uses 1-indexed variables
-        assert_eq!(pos.to_dimacs(), 4);  // var 3 -> 4 in DIMACS (1-indexed)
+        assert_eq!(pos.to_dimacs(), 4); // var 3 -> 4 in DIMACS (1-indexed)
         assert_eq!(neg.to_dimacs(), -8); // var 7 negated -> -8 in DIMACS
     }
 
@@ -864,20 +890,14 @@ mod tests {
 
     #[test]
     fn test_clause_new() {
-        let clause = Clause::new(vec![
-            Literal::positive(1),
-            Literal::negative(2),
-        ]);
+        let clause = Clause::new(vec![Literal::positive(1), Literal::negative(2)]);
         assert_eq!(clause.literals.len(), 2);
     }
 
     #[test]
     fn test_clause_is_satisfied() {
         // Clause: (x0 OR NOT x1)
-        let clause = Clause::new(vec![
-            Literal::positive(0),
-            Literal::negative(1),
-        ]);
+        let clause = Clause::new(vec![Literal::positive(0), Literal::negative(1)]);
 
         // x0=true, x1=false -> satisfied (both literals true)
         assert!(clause.is_satisfied(&[true, false]));
@@ -940,20 +960,26 @@ mod tests {
     #[test]
     fn test_instance_from_cnf() {
         // (x1 OR NOT x2) AND (x2 OR x3)
-        let instance = SolveInstance::new(3, vec![
-            Clause::new(vec![Literal::positive(0), Literal::negative(1)]),
-            Clause::new(vec![Literal::positive(1), Literal::positive(2)]),
-        ]);
+        let instance = SolveInstance::new(
+            3,
+            vec![
+                Clause::new(vec![Literal::positive(0), Literal::negative(1)]),
+                Clause::new(vec![Literal::positive(1), Literal::positive(2)]),
+            ],
+        );
         assert_eq!(instance.num_vars, 3);
         assert_eq!(instance.clauses.len(), 2);
     }
 
     #[test]
     fn test_instance_is_satisfied() {
-        let instance = SolveInstance::new(3, vec![
-            Clause::new(vec![Literal::positive(0), Literal::negative(1)]),
-            Clause::new(vec![Literal::positive(1), Literal::positive(2)]),
-        ]);
+        let instance = SolveInstance::new(
+            3,
+            vec![
+                Clause::new(vec![Literal::positive(0), Literal::negative(1)]),
+                Clause::new(vec![Literal::positive(1), Literal::positive(2)]),
+            ],
+        );
 
         // x0=true, x1=false, x2=true should satisfy both clauses
         let assignment = vec![true, false, true];
@@ -966,11 +992,14 @@ mod tests {
 
     #[test]
     fn test_instance_count_satisfied() {
-        let instance = SolveInstance::new(3, vec![
-            Clause::new(vec![Literal::positive(0), Literal::negative(1)]),
-            Clause::new(vec![Literal::positive(1), Literal::positive(2)]),
-            Clause::new(vec![Literal::negative(0), Literal::negative(2)]),
-        ]);
+        let instance = SolveInstance::new(
+            3,
+            vec![
+                Clause::new(vec![Literal::positive(0), Literal::negative(1)]),
+                Clause::new(vec![Literal::positive(1), Literal::positive(2)]),
+                Clause::new(vec![Literal::negative(0), Literal::negative(2)]),
+            ],
+        );
 
         // x0=true, x1=false, x2=true
         // Clause 1: x0=T or NOT x1=T -> satisfied
@@ -1006,9 +1035,9 @@ mod tests {
         let instance = SolveInstance::with_weights(
             3,
             vec![
-                Clause::new(vec![Literal::positive(0)]),  // weight 1.0
-                Clause::new(vec![Literal::positive(1)]),  // weight 2.0
-                Clause::new(vec![Literal::positive(2)]),  // weight 3.0
+                Clause::new(vec![Literal::positive(0)]), // weight 1.0
+                Clause::new(vec![Literal::positive(1)]), // weight 2.0
+                Clause::new(vec![Literal::positive(2)]), // weight 3.0
             ],
             vec![1.0, 2.0, 3.0],
         );
@@ -1026,10 +1055,13 @@ mod tests {
     #[test]
     fn test_instance_weighted_satisfaction_unweighted() {
         // When no weights provided, each clause has implicit weight 1.0
-        let instance = SolveInstance::new(2, vec![
-            Clause::new(vec![Literal::positive(0)]),
-            Clause::new(vec![Literal::positive(1)]),
-        ]);
+        let instance = SolveInstance::new(
+            2,
+            vec![
+                Clause::new(vec![Literal::positive(0)]),
+                Clause::new(vec![Literal::positive(1)]),
+            ],
+        );
 
         assert_eq!(instance.weighted_satisfaction(&[true, true]), 2.0);
         assert_eq!(instance.weighted_satisfaction(&[true, false]), 1.0);
@@ -1083,9 +1115,7 @@ mod tests {
 
     #[test]
     fn test_instance_add_clause() {
-        let mut instance = SolveInstance::new(3, vec![
-            Clause::new(vec![Literal::positive(0)]),
-        ]);
+        let mut instance = SolveInstance::new(3, vec![Clause::new(vec![Literal::positive(0)])]);
         assert_eq!(instance.clauses.len(), 1);
 
         instance.add_clause(Clause::new(vec![Literal::positive(1)]));
@@ -1106,21 +1136,27 @@ mod tests {
         assert_eq!(instance.total_weight(), 6.0);
 
         // Unweighted instance: total weight = number of clauses
-        let unweighted = SolveInstance::new(2, vec![
-            Clause::new(vec![Literal::positive(0)]),
-            Clause::new(vec![Literal::positive(1)]),
-        ]);
+        let unweighted = SolveInstance::new(
+            2,
+            vec![
+                Clause::new(vec![Literal::positive(0)]),
+                Clause::new(vec![Literal::positive(1)]),
+            ],
+        );
         assert_eq!(unweighted.total_weight(), 2.0);
     }
 
     #[test]
     fn test_instance_satisfaction_ratio() {
-        let instance = SolveInstance::new(3, vec![
-            Clause::new(vec![Literal::positive(0)]),
-            Clause::new(vec![Literal::positive(1)]),
-            Clause::new(vec![Literal::positive(2)]),
-            Clause::new(vec![Literal::negative(0)]),
-        ]);
+        let instance = SolveInstance::new(
+            3,
+            vec![
+                Clause::new(vec![Literal::positive(0)]),
+                Clause::new(vec![Literal::positive(1)]),
+                Clause::new(vec![Literal::positive(2)]),
+                Clause::new(vec![Literal::negative(0)]),
+            ],
+        );
 
         // x0=true satisfies clauses 0, but not 3 -> 1 satisfied
         // x1, x2 satisfy clauses 1, 2
@@ -1134,8 +1170,8 @@ mod tests {
         let b = Literal::positive(2);
         let c = Literal::negative(1);
 
-        assert!(a < b);  // Lower var comes first
-        assert!(a < c);  // Same var, positive before negative
+        assert!(a < b); // Lower var comes first
+        assert!(a < c); // Same var, positive before negative
     }
 
     #[test]
@@ -1154,10 +1190,13 @@ mod tests {
 
     #[test]
     fn test_instance_num_clauses() {
-        let instance = SolveInstance::new(3, vec![
-            Clause::new(vec![Literal::positive(0)]),
-            Clause::new(vec![Literal::positive(1)]),
-        ]);
+        let instance = SolveInstance::new(
+            3,
+            vec![
+                Clause::new(vec![Literal::positive(0)]),
+                Clause::new(vec![Literal::positive(1)]),
+            ],
+        );
         assert_eq!(instance.num_clauses(), 2);
     }
 }

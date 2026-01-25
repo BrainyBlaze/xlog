@@ -10,9 +10,9 @@ use xlog_core::{symbol, Result, ScalarType, XlogError};
 
 use crate::ast::{
     AggExpr, AggOp, AnnotatedDisjunction, ArithExpr, Atom, BodyLiteral, CompOp, Comparison,
-    CondExpr, Constraint, DomainDecl, Evidence, FuncBody, FuncDef, FuncParam, IsExpr,
-    NeuralLabel, NeuralPredDecl, PredDecl, ProbCache, ProbEngine, ProbFact, ProbQuery, Program,
-    Query, Rule as AstRule, Term, UseDecl,
+    CondExpr, Constraint, DomainDecl, Evidence, FuncBody, FuncDef, FuncParam, IsExpr, NeuralLabel,
+    NeuralPredDecl, PredDecl, ProbCache, ProbEngine, ProbFact, ProbQuery, Program, Query,
+    Rule as AstRule, Term, UseDecl,
 };
 
 #[derive(Parser)]
@@ -111,7 +111,9 @@ fn build_statement(pair: Pair<'_, Rule>, program: &mut Program) -> Result<()> {
                 program.functions.push(parse_func_def(inner)?);
             }
             Rule::neural_pred_decl => {
-                program.neural_predicates.push(build_neural_pred_decl(inner)?);
+                program
+                    .neural_predicates
+                    .push(build_neural_pred_decl(inner)?);
             }
             _ => {}
         }

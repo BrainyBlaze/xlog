@@ -109,9 +109,7 @@ pub enum ConstValue {
 #[derive(Debug, Clone)]
 pub enum RirNode {
     /// Scan a base relation
-    Scan {
-        rel: RelId,
-    },
+    Scan { rel: RelId },
 
     /// Filter rows by predicate
     Filter {
@@ -143,9 +141,7 @@ pub enum RirNode {
     },
 
     /// Union multiple inputs
-    Union {
-        inputs: Vec<RirNode>,
-    },
+    Union { inputs: Vec<RirNode> },
 
     /// Remove duplicates
     Distinct {
@@ -292,7 +288,10 @@ mod tests {
     #[test]
     fn test_project_expr_computed() {
         let proj = ProjectExpr::Computed(
-            Expr::Add(Box::new(Expr::Column(0)), Box::new(Expr::Const(ConstValue::I64(1)))),
+            Expr::Add(
+                Box::new(Expr::Column(0)),
+                Box::new(Expr::Const(ConstValue::I64(1))),
+            ),
             ScalarType::I64,
         );
         assert!(matches!(proj, ProjectExpr::Computed(_, _)));

@@ -7,9 +7,7 @@
 //! 4. Different circuit structures produce different results
 //! 5. Cached results are bit-identical to fresh evaluations
 
-use crate::harness::xgcf::{
-    gen_and_circuit, gen_or_circuit, tiny_xgcf_spec, TinyXgcfDevice,
-};
+use crate::harness::xgcf::{gen_and_circuit, gen_or_circuit, tiny_xgcf_spec, TinyXgcfDevice};
 use crate::harness::{CategoryResult, TestContext, TestResult};
 use std::time::{Duration, Instant};
 

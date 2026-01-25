@@ -540,8 +540,8 @@ impl Solver {
         }
 
         // Return best effort
-        let final_discrete = best_assignment
-            .unwrap_or_else(|| state.discretize(self.config.discretize_threshold));
+        let final_discrete =
+            best_assignment.unwrap_or_else(|| state.discretize(self.config.discretize_threshold));
         let final_satisfied = instance.count_satisfied(&final_discrete) as u32;
 
         SolveResult {
@@ -645,9 +645,8 @@ impl Solver {
     fn update_assignments(&self, state: &mut SolverState) {
         for i in 0..state.assignments.len() {
             // Momentum update: accumulate velocity
-            state.velocities[i] =
-                self.config.momentum * state.velocities[i]
-                    - self.config.learning_rate * state.gradients[i];
+            state.velocities[i] = self.config.momentum * state.velocities[i]
+                - self.config.learning_rate * state.gradients[i];
 
             // Update assignment
             state.assignments[i] += state.velocities[i];
@@ -816,10 +815,7 @@ mod tests {
     #[test]
     fn test_solver_simple_sat() {
         // (x0) - trivially satisfiable
-        let instance = SolveInstance::new(
-            1,
-            vec![Clause::new(vec![Literal::positive(0)])],
-        );
+        let instance = SolveInstance::new(1, vec![Clause::new(vec![Literal::positive(0)])]);
         let solver = Solver::new_cpu();
         let result = solver.solve(instance);
         assert!(matches!(result.status, SolveStatus::Sat));
@@ -909,10 +905,7 @@ mod tests {
     #[test]
     fn test_solver_negative_unit() {
         // (NOT x0) - must set x0=false
-        let instance = SolveInstance::new(
-            1,
-            vec![Clause::new(vec![Literal::negative(0)])],
-        );
+        let instance = SolveInstance::new(1, vec![Clause::new(vec![Literal::negative(0)])]);
         let solver = Solver::new_cpu();
         let result = solver.solve(instance);
         assert!(matches!(result.status, SolveStatus::Sat));
@@ -1041,10 +1034,7 @@ mod tests {
 
     #[test]
     fn test_solver_stats() {
-        let instance = SolveInstance::new(
-            1,
-            vec![Clause::new(vec![Literal::positive(0)])],
-        );
+        let instance = SolveInstance::new(1, vec![Clause::new(vec![Literal::positive(0)])]);
         let solver = Solver::new_cpu();
         let result = solver.solve(instance);
 
@@ -1081,10 +1071,7 @@ mod tests {
     #[test]
     fn test_compute_gradients_single_positive() {
         // (x0) - gradient should push x0 towards 1
-        let instance = SolveInstance::new(
-            1,
-            vec![Clause::new(vec![Literal::positive(0)])],
-        );
+        let instance = SolveInstance::new(1, vec![Clause::new(vec![Literal::positive(0)])]);
         let solver = Solver::new_cpu();
         let mut state = SolverState::with_assignments(vec![0.5]);
 
@@ -1097,10 +1084,7 @@ mod tests {
     #[test]
     fn test_compute_gradients_single_negative() {
         // (NOT x0) - gradient should push x0 towards 0
-        let instance = SolveInstance::new(
-            1,
-            vec![Clause::new(vec![Literal::negative(0)])],
-        );
+        let instance = SolveInstance::new(1, vec![Clause::new(vec![Literal::negative(0)])]);
         let solver = Solver::new_cpu();
         let mut state = SolverState::with_assignments(vec![0.5]);
 
@@ -1113,10 +1097,7 @@ mod tests {
     #[test]
     fn test_compute_gradients_satisfied_clause() {
         // (x0) with x0=1.0 - clause is satisfied, gradient should be near zero
-        let instance = SolveInstance::new(
-            1,
-            vec![Clause::new(vec![Literal::positive(0)])],
-        );
+        let instance = SolveInstance::new(1, vec![Clause::new(vec![Literal::positive(0)])]);
         let solver = Solver::new_cpu();
         let mut state = SolverState::with_assignments(vec![1.0]);
 

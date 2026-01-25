@@ -145,21 +145,81 @@ fn test_3sat_satisfiable() {
 fn test_3sat_dense() {
     // 5 variables, 15 clauses (ratio 3.0, harder but still likely SAT)
     let clauses: Vec<Clause> = vec![
-        Clause::ternary(Literal::positive(0), Literal::positive(1), Literal::positive(2)),
-        Clause::ternary(Literal::negative(0), Literal::positive(1), Literal::positive(3)),
-        Clause::ternary(Literal::positive(0), Literal::negative(1), Literal::positive(4)),
-        Clause::ternary(Literal::negative(0), Literal::negative(1), Literal::positive(2)),
-        Clause::ternary(Literal::positive(1), Literal::positive(2), Literal::negative(3)),
-        Clause::ternary(Literal::negative(1), Literal::positive(2), Literal::positive(4)),
-        Clause::ternary(Literal::positive(0), Literal::negative(2), Literal::positive(3)),
-        Clause::ternary(Literal::negative(0), Literal::negative(2), Literal::negative(4)),
-        Clause::ternary(Literal::positive(2), Literal::positive(3), Literal::positive(4)),
-        Clause::ternary(Literal::negative(2), Literal::negative(3), Literal::positive(0)),
-        Clause::ternary(Literal::positive(3), Literal::negative(4), Literal::positive(1)),
-        Clause::ternary(Literal::negative(3), Literal::positive(4), Literal::negative(0)),
-        Clause::ternary(Literal::positive(0), Literal::positive(3), Literal::negative(4)),
-        Clause::ternary(Literal::negative(1), Literal::negative(3), Literal::negative(4)),
-        Clause::ternary(Literal::positive(1), Literal::positive(4), Literal::negative(2)),
+        Clause::ternary(
+            Literal::positive(0),
+            Literal::positive(1),
+            Literal::positive(2),
+        ),
+        Clause::ternary(
+            Literal::negative(0),
+            Literal::positive(1),
+            Literal::positive(3),
+        ),
+        Clause::ternary(
+            Literal::positive(0),
+            Literal::negative(1),
+            Literal::positive(4),
+        ),
+        Clause::ternary(
+            Literal::negative(0),
+            Literal::negative(1),
+            Literal::positive(2),
+        ),
+        Clause::ternary(
+            Literal::positive(1),
+            Literal::positive(2),
+            Literal::negative(3),
+        ),
+        Clause::ternary(
+            Literal::negative(1),
+            Literal::positive(2),
+            Literal::positive(4),
+        ),
+        Clause::ternary(
+            Literal::positive(0),
+            Literal::negative(2),
+            Literal::positive(3),
+        ),
+        Clause::ternary(
+            Literal::negative(0),
+            Literal::negative(2),
+            Literal::negative(4),
+        ),
+        Clause::ternary(
+            Literal::positive(2),
+            Literal::positive(3),
+            Literal::positive(4),
+        ),
+        Clause::ternary(
+            Literal::negative(2),
+            Literal::negative(3),
+            Literal::positive(0),
+        ),
+        Clause::ternary(
+            Literal::positive(3),
+            Literal::negative(4),
+            Literal::positive(1),
+        ),
+        Clause::ternary(
+            Literal::negative(3),
+            Literal::positive(4),
+            Literal::negative(0),
+        ),
+        Clause::ternary(
+            Literal::positive(0),
+            Literal::positive(3),
+            Literal::negative(4),
+        ),
+        Clause::ternary(
+            Literal::negative(1),
+            Literal::negative(3),
+            Literal::negative(4),
+        ),
+        Clause::ternary(
+            Literal::positive(1),
+            Literal::positive(4),
+            Literal::negative(2),
+        ),
     ];
 
     let instance = SolveInstance::new(5, clauses);
@@ -248,19 +308,46 @@ fn test_pigeonhole_unsat_3_2() {
     let mut clauses = Vec::new();
 
     // Each pigeon must be in some hole
-    clauses.push(Clause::new(vec![Literal::positive(0), Literal::positive(1)])); // P0
-    clauses.push(Clause::new(vec![Literal::positive(2), Literal::positive(3)])); // P1
-    clauses.push(Clause::new(vec![Literal::positive(4), Literal::positive(5)])); // P2
+    clauses.push(Clause::new(vec![
+        Literal::positive(0),
+        Literal::positive(1),
+    ])); // P0
+    clauses.push(Clause::new(vec![
+        Literal::positive(2),
+        Literal::positive(3),
+    ])); // P1
+    clauses.push(Clause::new(vec![
+        Literal::positive(4),
+        Literal::positive(5),
+    ])); // P2
 
     // At most one pigeon per hole
     // Hole 0: at most one of vars 0, 2, 4
-    clauses.push(Clause::new(vec![Literal::negative(0), Literal::negative(2)]));
-    clauses.push(Clause::new(vec![Literal::negative(0), Literal::negative(4)]));
-    clauses.push(Clause::new(vec![Literal::negative(2), Literal::negative(4)]));
+    clauses.push(Clause::new(vec![
+        Literal::negative(0),
+        Literal::negative(2),
+    ]));
+    clauses.push(Clause::new(vec![
+        Literal::negative(0),
+        Literal::negative(4),
+    ]));
+    clauses.push(Clause::new(vec![
+        Literal::negative(2),
+        Literal::negative(4),
+    ]));
     // Hole 1: at most one of vars 1, 3, 5
-    clauses.push(Clause::new(vec![Literal::negative(1), Literal::negative(3)]));
-    clauses.push(Clause::new(vec![Literal::negative(1), Literal::negative(5)]));
-    clauses.push(Clause::new(vec![Literal::negative(3), Literal::negative(5)]));
+    clauses.push(Clause::new(vec![
+        Literal::negative(1),
+        Literal::negative(3),
+    ]));
+    clauses.push(Clause::new(vec![
+        Literal::negative(1),
+        Literal::negative(5),
+    ]));
+    clauses.push(Clause::new(vec![
+        Literal::negative(3),
+        Literal::negative(5),
+    ]));
 
     let instance = SolveInstance::new(6, clauses);
     let solver = Solver::new_cpu();
@@ -336,7 +423,10 @@ fn test_graph_coloring_triangle_3colors() {
     }
     // Edge (0,2)
     for k in 0..3u32 {
-        clauses.push(Clause::binary(Literal::negative(k), Literal::negative(6 + k)));
+        clauses.push(Clause::binary(
+            Literal::negative(k),
+            Literal::negative(6 + k),
+        ));
     }
 
     let instance = SolveInstance::new(9, clauses);
@@ -428,8 +518,16 @@ fn test_solver_determinism() {
         vec![
             Clause::new(vec![Literal::positive(0), Literal::positive(1)]),
             Clause::new(vec![Literal::negative(0), Literal::positive(2)]),
-            Clause::new(vec![Literal::positive(1), Literal::negative(2), Literal::positive(3)]),
-            Clause::new(vec![Literal::negative(1), Literal::positive(3), Literal::positive(4)]),
+            Clause::new(vec![
+                Literal::positive(1),
+                Literal::negative(2),
+                Literal::positive(3),
+            ]),
+            Clause::new(vec![
+                Literal::negative(1),
+                Literal::positive(3),
+                Literal::positive(4),
+            ]),
             Clause::new(vec![Literal::negative(3), Literal::negative(4)]),
         ],
     );
@@ -682,7 +780,10 @@ fn test_solver_large_instance() {
     }
 
     // Verify stats were recorded
-    assert!(result.stats.iterations > 0, "Should have performed iterations");
+    assert!(
+        result.stats.iterations > 0,
+        "Should have performed iterations"
+    );
 }
 
 /// Test solver with many variables but few constraints (underconstrained).
@@ -765,7 +866,10 @@ fn test_maxsat_weighted() {
     if let Some(assignment) = result.assignment() {
         let weighted_sat = instance.weighted_satisfaction(assignment);
         // Should prefer satisfying high-weight clause (x0=true)
-        assert!(weighted_sat >= 10.0, "Should satisfy at least the high-weight clause");
+        assert!(
+            weighted_sat >= 10.0,
+            "Should satisfy at least the high-weight clause"
+        );
     }
 }
 
@@ -792,7 +896,10 @@ fn test_satisfaction_ratio() {
     assert_eq!(instance.count_satisfied(&assignment3), 2);
 
     let ratio = instance.satisfaction_ratio(&assignment1);
-    assert!((ratio - 0.5).abs() < 0.001, "Satisfaction ratio should be 0.5");
+    assert!(
+        (ratio - 0.5).abs() < 0.001,
+        "Satisfaction ratio should be 0.5"
+    );
 }
 
 // =============================================================================
@@ -838,9 +945,18 @@ fn test_proof_checksum_uniqueness() {
     let checksum2 = compute_checksum(&[false, true, false]);
     let checksum3 = compute_checksum(&[true, true, true]);
 
-    assert_ne!(checksum1, checksum2, "Different assignments should have different checksums");
-    assert_ne!(checksum2, checksum3, "Different assignments should have different checksums");
-    assert_ne!(checksum1, checksum3, "Different assignments should have different checksums");
+    assert_ne!(
+        checksum1, checksum2,
+        "Different assignments should have different checksums"
+    );
+    assert_ne!(
+        checksum2, checksum3,
+        "Different assignments should have different checksums"
+    );
+    assert_ne!(
+        checksum1, checksum3,
+        "Different assignments should have different checksums"
+    );
 }
 
 // =============================================================================
@@ -970,7 +1086,10 @@ fn test_tautological_clause() {
     let solver = Solver::new_cpu();
     let result = solver.solve(instance.clone());
 
-    assert!(result.is_sat(), "Tautological clause should not prevent SAT");
+    assert!(
+        result.is_sat(),
+        "Tautological clause should not prevent SAT"
+    );
     if let Some(assignment) = result.assignment() {
         assert!(instance.is_satisfied(assignment));
     }
@@ -1124,9 +1243,7 @@ fn test_at_most_one() {
     let mut clauses = Vec::new();
 
     // At least one: x0 OR x1 OR x2 OR x3 OR x4
-    clauses.push(Clause::new(
-        (0..n as u32).map(Literal::positive).collect(),
-    ));
+    clauses.push(Clause::new((0..n as u32).map(Literal::positive).collect()));
 
     // At most one: for each pair (i,j), NOT xi OR NOT xj
     for i in 0..n {

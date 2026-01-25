@@ -79,7 +79,7 @@ fn test_prefix_sum_mask_max_size() {
     let (prefix_sum, count) = provider.prefix_sum_mask(&mask).unwrap();
 
     assert_eq!(count, 3);
-    assert_eq!(prefix_sum[0], 0);   // First 1 at index 0
+    assert_eq!(prefix_sum[0], 0); // First 1 at index 0
     assert_eq!(prefix_sum[127], 1); // Second 1 at index 127
     assert_eq!(prefix_sum[255], 2); // Third 1 at index 255
 }
@@ -95,7 +95,10 @@ fn test_prefix_sum_mask_over_256() {
     let mask = vec![1u8; 257];
     let result = provider.prefix_sum_mask(&mask);
 
-    assert!(result.is_ok(), "prefix_sum_mask should work with 257 elements");
+    assert!(
+        result.is_ok(),
+        "prefix_sum_mask should work with 257 elements"
+    );
     let (prefix_sum, count) = result.unwrap();
     assert_eq!(count, 257);
     // Verify exclusive prefix sum: [0, 1, 2, ..., 256]

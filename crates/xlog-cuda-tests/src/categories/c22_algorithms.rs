@@ -3,11 +3,11 @@
 //! Tests specific algorithm behaviors with edge cases including sort variants,
 //! join patterns, dedup edge cases, and groupby scenarios.
 
-use crate::harness::{CategoryResult, TestResult, TestContext};
 use crate::harness::xgcf;
+use crate::harness::{CategoryResult, TestContext, TestResult};
 use std::collections::HashSet;
 use std::time::Instant;
-use xlog_core::{AggOp, Schema, ScalarType};
+use xlog_core::{AggOp, ScalarType, Schema};
 
 /// Run all tests in this category.
 pub fn run_all(ctx: &TestContext) -> CategoryResult {
@@ -78,7 +78,10 @@ fn test_mc_sample_matches_cpu_reference(ctx: &TestContext) -> TestResult {
     let seed = 123456789u64;
 
     let expected = mc_sample_cpu_reference(&probs, num_samples, seed);
-    let got = match ctx.provider.sample_bernoulli_matrix(&probs, num_samples, seed) {
+    let got = match ctx
+        .provider
+        .sample_bernoulli_matrix(&probs, num_samples, seed)
+    {
         Ok(v) => v,
         Err(e) => {
             return TestResult::error(
@@ -211,7 +214,12 @@ fn test_xgcf_backward_tiny_matches_expected(ctx: &TestContext) -> TestResult {
             ),
         );
     }
-    for (i, (&got, &expected)) in run.values.iter().zip(spec.expected_values.iter()).enumerate() {
+    for (i, (&got, &expected)) in run
+        .values
+        .iter()
+        .zip(spec.expected_values.iter())
+        .enumerate()
+    {
         if expected.is_infinite() && expected.is_sign_negative() {
             if !(got.is_infinite() && got.is_sign_negative()) {
                 return TestResult::error(
@@ -305,7 +313,10 @@ fn test_sort_all_equal(ctx: &TestContext) -> TestResult {
     // Create data where all values are the same
     let data: Vec<u32> = vec![VALUE; SIZE];
 
-    let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -384,7 +395,10 @@ fn test_sort_already_sorted(ctx: &TestContext) -> TestResult {
     // Create already-sorted data
     let data: Vec<u32> = (0..SIZE as u32).collect();
 
-    let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -437,10 +451,7 @@ fn test_sort_already_sorted(ctx: &TestContext) -> TestResult {
             return TestResult::error(
                 "test_sort_already_sorted",
                 start.elapsed(),
-                format!(
-                    "Value at index {} is {}, expected {}",
-                    i, actual, expected
-                ),
+                format!("Value at index {} is {}, expected {}", i, actual, expected),
             );
         }
     }
@@ -453,7 +464,9 @@ fn test_sort_already_sorted(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Sort order incorrect at index {}: {} < {}",
-                    i, sorted_data[i], sorted_data[i - 1]
+                    i,
+                    sorted_data[i],
+                    sorted_data[i - 1]
                 ),
             );
         }
@@ -483,7 +496,10 @@ fn test_sort_reverse_sorted(ctx: &TestContext) -> TestResult {
     // Create reverse-sorted data
     let data: Vec<u32> = (0..SIZE as u32).rev().collect();
 
-    let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -523,7 +539,11 @@ fn test_sort_reverse_sorted(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_sort_reverse_sorted",
             start.elapsed(),
-            format!("Sort returned {} rows, expected {}", sorted_data.len(), SIZE),
+            format!(
+                "Sort returned {} rows, expected {}",
+                sorted_data.len(),
+                SIZE
+            ),
         );
     }
 
@@ -535,7 +555,9 @@ fn test_sort_reverse_sorted(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Sort order incorrect at index {}: {} < {}",
-                    i, sorted_data[i], sorted_data[i - 1]
+                    i,
+                    sorted_data[i],
+                    sorted_data[i - 1]
                 ),
             );
         }
@@ -610,10 +632,10 @@ fn test_join_no_matches(ctx: &TestContext) -> TestResult {
     let right_keys: Vec<u32> = (SIZE as u32..(2 * SIZE) as u32).collect();
     let right_vals: Vec<u32> = right_keys.iter().map(|&k| k * 100).collect();
 
-    let left_buffer = match ctx.provider.create_buffer_from_u32_columns(
-        &[&left_keys, &left_vals],
-        left_schema.clone(),
-    ) {
+    let left_buffer = match ctx
+        .provider
+        .create_buffer_from_u32_columns(&[&left_keys, &left_vals], left_schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -624,10 +646,10 @@ fn test_join_no_matches(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let right_buffer = match ctx.provider.create_buffer_from_u32_columns(
-        &[&right_keys, &right_vals],
-        right_schema.clone(),
-    ) {
+    let right_buffer = match ctx
+        .provider
+        .create_buffer_from_u32_columns(&[&right_keys, &right_vals], right_schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -639,7 +661,10 @@ fn test_join_no_matches(ctx: &TestContext) -> TestResult {
     };
 
     // Perform hash join
-    let joined = match ctx.provider.hash_join(&left_buffer, &right_buffer, &[0], &[0]) {
+    let joined = match ctx
+        .provider
+        .hash_join(&left_buffer, &right_buffer, &[0], &[0])
+    {
         Ok(j) => j,
         Err(e) => {
             return TestResult::error(
@@ -701,10 +726,10 @@ fn test_join_all_matches(ctx: &TestContext) -> TestResult {
     let right_keys: Vec<u32> = vec![COMMON_KEY; RIGHT_SIZE];
     let right_vals: Vec<u32> = (0..RIGHT_SIZE as u32).map(|v| v * 100).collect();
 
-    let left_buffer = match ctx.provider.create_buffer_from_u32_columns(
-        &[&left_keys, &left_vals],
-        left_schema.clone(),
-    ) {
+    let left_buffer = match ctx
+        .provider
+        .create_buffer_from_u32_columns(&[&left_keys, &left_vals], left_schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -715,10 +740,10 @@ fn test_join_all_matches(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let right_buffer = match ctx.provider.create_buffer_from_u32_columns(
-        &[&right_keys, &right_vals],
-        right_schema.clone(),
-    ) {
+    let right_buffer = match ctx
+        .provider
+        .create_buffer_from_u32_columns(&[&right_keys, &right_vals], right_schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -730,7 +755,10 @@ fn test_join_all_matches(ctx: &TestContext) -> TestResult {
     };
 
     // Perform hash join
-    let joined = match ctx.provider.hash_join(&left_buffer, &right_buffer, &[0], &[0]) {
+    let joined = match ctx
+        .provider
+        .hash_join(&left_buffer, &right_buffer, &[0], &[0])
+    {
         Ok(j) => j,
         Err(e) => {
             return TestResult::error(
@@ -859,10 +887,10 @@ fn test_join_high_cardinality(ctx: &TestContext) -> TestResult {
     let right_keys: Vec<u32> = (OVERLAP_START..(OVERLAP_START + SIZE as u32)).collect();
     let right_vals: Vec<u32> = right_keys.iter().map(|&k| k * 100).collect();
 
-    let left_buffer = match ctx.provider.create_buffer_from_u32_columns(
-        &[&left_keys, &left_vals],
-        left_schema.clone(),
-    ) {
+    let left_buffer = match ctx
+        .provider
+        .create_buffer_from_u32_columns(&[&left_keys, &left_vals], left_schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -873,10 +901,10 @@ fn test_join_high_cardinality(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let right_buffer = match ctx.provider.create_buffer_from_u32_columns(
-        &[&right_keys, &right_vals],
-        right_schema.clone(),
-    ) {
+    let right_buffer = match ctx
+        .provider
+        .create_buffer_from_u32_columns(&[&right_keys, &right_vals], right_schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -888,7 +916,10 @@ fn test_join_high_cardinality(ctx: &TestContext) -> TestResult {
     };
 
     // Perform hash join
-    let joined = match ctx.provider.hash_join(&left_buffer, &right_buffer, &[0], &[0]) {
+    let joined = match ctx
+        .provider
+        .hash_join(&left_buffer, &right_buffer, &[0], &[0])
+    {
         Ok(j) => j,
         Err(e) => {
             return TestResult::error(
@@ -1027,7 +1058,10 @@ fn test_dedup_all_unique(ctx: &TestContext) -> TestResult {
     let keys: Vec<u32> = (0..SIZE as u32).collect();
     let vals: Vec<u32> = keys.iter().map(|&k| k * 10).collect();
 
-    let buffer = match ctx.provider.create_buffer_from_u32_columns(&[&keys, &vals], schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_u32_columns(&[&keys, &vals], schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -1114,7 +1148,10 @@ fn test_dedup_all_same(ctx: &TestContext) -> TestResult {
     let keys: Vec<u32> = vec![COMMON_KEY; SIZE];
     let vals: Vec<u32> = (0..SIZE as u32).collect();
 
-    let buffer = match ctx.provider.create_buffer_from_u32_columns(&[&keys, &vals], schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_u32_columns(&[&keys, &vals], schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -1165,10 +1202,7 @@ fn test_dedup_all_same(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_dedup_all_same",
             start.elapsed(),
-            format!(
-                "Expected single key {}, got {:?}",
-                COMMON_KEY, deduped_keys
-            ),
+            format!("Expected single key {}, got {:?}", COMMON_KEY, deduped_keys),
         );
     }
 
@@ -1201,7 +1235,10 @@ fn test_groupby_single_group(ctx: &TestContext) -> TestResult {
     // Values: 1, 2, 3, ..., SIZE
     let vals: Vec<u32> = (1..=SIZE as u32).collect();
 
-    let buffer = match ctx.provider.create_buffer_from_u32_columns(&[&keys, &vals], schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_u32_columns(&[&keys, &vals], schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -1213,7 +1250,10 @@ fn test_groupby_single_group(ctx: &TestContext) -> TestResult {
     };
 
     // Test Count aggregation
-    let count_result = match ctx.provider.groupby_multi_agg(&buffer, &[0], &[(1, AggOp::Count)]) {
+    let count_result = match ctx
+        .provider
+        .groupby_multi_agg(&buffer, &[0], &[(1, AggOp::Count)])
+    {
         Ok(r) => r,
         Err(e) => {
             return TestResult::error(
@@ -1275,7 +1315,10 @@ fn test_groupby_single_group(ctx: &TestContext) -> TestResult {
     }
 
     // Test Sum aggregation
-    let sum_result = match ctx.provider.groupby_multi_agg(&buffer, &[0], &[(1, AggOp::Sum)]) {
+    let sum_result = match ctx
+        .provider
+        .groupby_multi_agg(&buffer, &[0], &[(1, AggOp::Sum)])
+    {
         Ok(r) => r,
         Err(e) => {
             return TestResult::error(
@@ -1308,7 +1351,10 @@ fn test_groupby_single_group(ctx: &TestContext) -> TestResult {
     }
 
     // Test Min aggregation
-    let min_result = match ctx.provider.groupby_multi_agg(&buffer, &[0], &[(1, AggOp::Min)]) {
+    let min_result = match ctx
+        .provider
+        .groupby_multi_agg(&buffer, &[0], &[(1, AggOp::Min)])
+    {
         Ok(r) => r,
         Err(e) => {
             return TestResult::error(
@@ -1339,7 +1385,10 @@ fn test_groupby_single_group(ctx: &TestContext) -> TestResult {
     }
 
     // Test Max aggregation
-    let max_result = match ctx.provider.groupby_multi_agg(&buffer, &[0], &[(1, AggOp::Max)]) {
+    let max_result = match ctx
+        .provider
+        .groupby_multi_agg(&buffer, &[0], &[(1, AggOp::Max)])
+    {
         Ok(r) => r,
         Err(e) => {
             return TestResult::error(
@@ -1396,7 +1445,10 @@ fn test_groupby_all_unique_keys(ctx: &TestContext) -> TestResult {
     let keys: Vec<u32> = (0..SIZE as u32).collect();
     let vals: Vec<u32> = keys.iter().map(|&k| k * 10).collect();
 
-    let buffer = match ctx.provider.create_buffer_from_u32_columns(&[&keys, &vals], schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_u32_columns(&[&keys, &vals], schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -1408,7 +1460,10 @@ fn test_groupby_all_unique_keys(ctx: &TestContext) -> TestResult {
     };
 
     // Test Count aggregation - each group should have count=1
-    let count_result = match ctx.provider.groupby_multi_agg(&buffer, &[0], &[(1, AggOp::Count)]) {
+    let count_result = match ctx
+        .provider
+        .groupby_multi_agg(&buffer, &[0], &[(1, AggOp::Count)])
+    {
         Ok(r) => r,
         Err(e) => {
             return TestResult::error(
@@ -1477,7 +1532,10 @@ fn test_groupby_all_unique_keys(ctx: &TestContext) -> TestResult {
     }
 
     // Test Sum aggregation - each sum should equal the corresponding val
-    let sum_result = match ctx.provider.groupby_multi_agg(&buffer, &[0], &[(1, AggOp::Sum)]) {
+    let sum_result = match ctx
+        .provider
+        .groupby_multi_agg(&buffer, &[0], &[(1, AggOp::Sum)])
+    {
         Ok(r) => r,
         Err(e) => {
             return TestResult::error(
@@ -1519,10 +1577,7 @@ fn test_groupby_all_unique_keys(ctx: &TestContext) -> TestResult {
             return TestResult::error(
                 "test_groupby_all_unique_keys",
                 start.elapsed(),
-                format!(
-                    "Sum for key {} should be {}, got {}",
-                    key, expected, sum
-                ),
+                format!("Sum for key {} should be {}, got {}", key, expected, sum),
             );
         }
     }

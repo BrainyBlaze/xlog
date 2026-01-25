@@ -1,12 +1,6 @@
 //! Test category modules covering all 24 edge case categories.
 
 pub mod c01_toolchain;
-pub mod g01_circuit_forward;
-pub mod g02_circuit_backward;
-pub mod g03_weight_injection;
-pub mod g04_transfer_efficiency;
-pub mod g05_circuit_cache;
-pub mod g06_ptx_robustness;
 pub mod c02_launch_config;
 pub mod c03_pointer_bounds;
 pub mod c04_address_space;
@@ -31,3 +25,9 @@ pub mod c22_algorithms;
 pub mod c23_blind_spots;
 pub mod c24_edge_matrix;
 pub mod c25_float_filter;
+pub mod g01_circuit_forward;
+pub mod g02_circuit_backward;
+pub mod g03_weight_injection;
+pub mod g04_transfer_efficiency;
+pub mod g05_circuit_cache;
+pub mod g06_ptx_robustness;

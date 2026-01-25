@@ -74,7 +74,8 @@ pub fn count() -> usize {
 pub fn memory_usage() -> usize {
     let reg = registry().read().unwrap();
     let string_bytes: usize = reg.to_string.iter().map(|s| s.len()).sum();
-    let map_overhead = reg.to_id.len() * (std::mem::size_of::<String>() + std::mem::size_of::<u32>());
+    let map_overhead =
+        reg.to_id.len() * (std::mem::size_of::<String>() + std::mem::size_of::<u32>());
     string_bytes + map_overhead
 }
 
@@ -84,26 +85,20 @@ pub fn to_arrow(ids: &[u32]) -> DictionaryArray<UInt32Type> {
 
     // Collect unique IDs preserving order
     let mut seen = HashSet::new();
-    let unique_ids: Vec<u32> = ids.iter()
-        .filter(|id| seen.insert(**id))
-        .copied()
-        .collect();
+    let unique_ids: Vec<u32> = ids.iter().filter(|id| seen.insert(**id)).copied().collect();
 
     // Build string dictionary
-    let dict_strings: Vec<String> = unique_ids.iter()
-        .map(|&id| resolve(id))
-        .collect();
+    let dict_strings: Vec<String> = unique_ids.iter().map(|&id| resolve(id)).collect();
     let dictionary = StringArray::from(dict_strings);
 
     // Map original IDs to dictionary indices
-    let id_to_index: HashMap<u32, u32> = unique_ids.iter()
+    let id_to_index: HashMap<u32, u32> = unique_ids
+        .iter()
         .enumerate()
         .map(|(i, &id)| (id, i as u32))
         .collect();
 
-    let keys: Vec<u32> = ids.iter()
-        .map(|id| *id_to_index.get(id).unwrap())
-        .collect();
+    let keys: Vec<u32> = ids.iter().map(|id| *id_to_index.get(id).unwrap()).collect();
     let keys_array = UInt32Array::from(keys);
 
     DictionaryArray::try_new(keys_array, Arc::new(dictionary)).unwrap()
@@ -111,16 +106,21 @@ pub fn to_arrow(ids: &[u32]) -> DictionaryArray<UInt32Type> {
 
 /// Convert Arrow DictionaryArray back to symbol IDs.
 pub fn from_arrow(arr: &DictionaryArray<UInt32Type>) -> Vec<u32> {
-    let dict = arr.values().as_any().downcast_ref::<StringArray>()
+    let dict = arr
+        .values()
+        .as_any()
+        .downcast_ref::<StringArray>()
         .expect("dictionary values must be StringArray");
 
     // Intern all dictionary values
-    let dict_to_symbol: Vec<u32> = dict.iter()
+    let dict_to_symbol: Vec<u32> = dict
+        .iter()
         .map(|s| intern(s.expect("null not supported in symbols")))
         .collect();
 
     // Map keys through dictionary
-    arr.keys().iter()
+    arr.keys()
+        .iter()
         .map(|k| {
             let idx = k.expect("null keys not supported") as usize;
             dict_to_symbol[idx]

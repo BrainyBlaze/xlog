@@ -175,7 +175,10 @@ impl ExactDdnnfProgram {
             });
         }
 
-        Ok(ExactResult { log_z_e, query_probs })
+        Ok(ExactResult {
+            log_z_e,
+            query_probs,
+        })
     }
 
     pub fn num_vars(&self) -> usize {
@@ -238,7 +241,14 @@ impl ExactDdnnfProgram {
     ) -> Result<TrackedCudaSlice<f64>> {
         let state = self.gpu_state()?;
         let mut loss = state.provider.memory().alloc::<f64>(1)?;
-        self.neural_backward_nll_buffers_inner(slots, query_idx, probs, out_grads, cfg, Some(&mut loss))?;
+        self.neural_backward_nll_buffers_inner(
+            slots,
+            query_idx,
+            probs,
+            out_grads,
+            cfg,
+            Some(&mut loss),
+        )?;
         Ok(loss)
     }
 
@@ -288,13 +298,18 @@ impl ExactDdnnfProgram {
                 XlogError::Kernel("neural_fill_ad_chain_f32 kernel not found".to_string())
             })?;
         let scatter = device
-            .get_func(NEURAL_MODULE, neural_kernels::NEURAL_SCATTER_AD_CHAIN_GRADS_F32)
+            .get_func(
+                NEURAL_MODULE,
+                neural_kernels::NEURAL_SCATTER_AD_CHAIN_GRADS_F32,
+            )
             .ok_or_else(|| {
                 XlogError::Kernel("neural_scatter_ad_chain_grads_f32 kernel not found".to_string())
             })?;
         let fill_const = device
             .get_func(ARITH_MODULE, arith_kernels::ARITH_FILL_CONST_F64)
-            .ok_or_else(|| XlogError::Kernel("arith_fill_const_f64 kernel not found".to_string()))?;
+            .ok_or_else(|| {
+                XlogError::Kernel("arith_fill_const_f64 kernel not found".to_string())
+            })?;
         let binary_f64 = device
             .get_func(ARITH_MODULE, arith_kernels::ARITH_BINARY_F64)
             .ok_or_else(|| XlogError::Kernel("arith_binary_f64 kernel not found".to_string()))?;
@@ -374,9 +389,9 @@ impl ExactDdnnfProgram {
         gpu_xgcf.eval_grads_inplace(&state.provider)?;
         if let Some(base) = base_log_z.as_mut() {
             let root_view = gpu_xgcf.values().slice(root_idx..(root_idx + 1));
-            device
-                .dtod_copy(&root_view, base)
-                .map_err(|e| XlogError::Kernel(format!("Failed to copy base logZ on GPU: {}", e)))?;
+            device.dtod_copy(&root_view, base).map_err(|e| {
+                XlogError::Kernel(format!("Failed to copy base logZ on GPU: {}", e))
+            })?;
         }
         for (g, prob_buf) in probs.iter().enumerate() {
             let slot_vars = slots.group_slot_cnf_var(g)?;
@@ -475,7 +490,9 @@ impl ExactDdnnfProgram {
 
         gpu_xgcf.eval_grads_inplace(&state.provider)?;
         if let Some(out) = out_loss {
-            let base = base_log_z.as_ref().expect("base_log_z allocated when out_loss requested");
+            let base = base_log_z
+                .as_ref()
+                .expect("base_log_z allocated when out_loss requested");
             let root_view = gpu_xgcf.values().slice(root_idx..(root_idx + 1));
             unsafe {
                 binary_f64.clone().launch(
@@ -561,8 +578,7 @@ impl ExactDdnnfProgram {
 
         let mut weights: Vec<(f64, f64)> = self.evidence_log_weights.clone();
 
-        let (log_z_e, grad_true_e, grad_false_e) =
-            self.eval_log_z_and_grads_gpu(&weights)?;
+        let (log_z_e, grad_true_e, grad_false_e) = self.eval_log_z_and_grads_gpu(&weights)?;
 
         if log_z_e.is_infinite() && log_z_e.is_sign_negative() {
             return Err(XlogError::Execution(
@@ -618,7 +634,8 @@ impl ExactDdnnfProgram {
                 prob = 1.0;
             }
 
-            if grad_true_eq.len() != grad_true_e.len() || grad_false_eq.len() != grad_false_e.len() {
+            if grad_true_eq.len() != grad_true_e.len() || grad_false_eq.len() != grad_false_e.len()
+            {
                 return Err(XlogError::Execution(
                     "Exact inference error: gradient length mismatch".to_string(),
                 ));
@@ -640,7 +657,10 @@ impl ExactDdnnfProgram {
             });
         }
 
-        Ok(ExactResultWithGrads { log_z_e, query_grads })
+        Ok(ExactResultWithGrads {
+            log_z_e,
+            query_grads,
+        })
     }
 
     /// Evaluate on GPU with gradients using externally provided weights.
@@ -662,8 +682,7 @@ impl ExactDdnnfProgram {
         // Use external weights instead of self.evidence_log_weights
         let weights = external_weights;
 
-        let (log_z_e, grad_true_e, grad_false_e) =
-            self.eval_log_z_and_grads_gpu(weights)?;
+        let (log_z_e, grad_true_e, grad_false_e) = self.eval_log_z_and_grads_gpu(weights)?;
 
         if log_z_e.is_infinite() && log_z_e.is_sign_negative() {
             return Err(XlogError::Execution(
@@ -718,7 +737,8 @@ impl ExactDdnnfProgram {
                 prob = 1.0;
             }
 
-            if grad_true_eq.len() != grad_true_e.len() || grad_false_eq.len() != grad_false_e.len() {
+            if grad_true_eq.len() != grad_true_e.len() || grad_false_eq.len() != grad_false_e.len()
+            {
                 return Err(XlogError::Execution(
                     "Exact inference error: gradient length mismatch".to_string(),
                 ));
@@ -740,7 +760,10 @@ impl ExactDdnnfProgram {
             });
         }
 
-        Ok(ExactResultWithGrads { log_z_e, query_grads })
+        Ok(ExactResultWithGrads {
+            log_z_e,
+            query_grads,
+        })
     }
 
     fn compile_provenance(provenance: Provenance) -> Result<Self> {

@@ -1,5 +1,5 @@
-use xlog_prob::exact::ExactDdnnfProgram;
 use xlog_cuda::CudaDevice;
+use xlog_prob::exact::ExactDdnnfProgram;
 
 fn has_cuda_device() -> bool {
     // cudarc::driver::CudaDevice::count() may panic in restricted containers. Attempt real init instead.
@@ -157,14 +157,8 @@ query(dry()).
     );
 
     // Verify the sign relationship (key test for negation)
-    assert!(
-        rain_grad_true < 0.0,
-        "grad_true[rain] should be negative"
-    );
-    assert!(
-        rain_grad_false > 0.0,
-        "grad_false[rain] should be positive"
-    );
+    assert!(rain_grad_true < 0.0, "grad_true[rain] should be negative");
+    assert!(rain_grad_false > 0.0, "grad_false[rain] should be positive");
 }
 
 #[test]

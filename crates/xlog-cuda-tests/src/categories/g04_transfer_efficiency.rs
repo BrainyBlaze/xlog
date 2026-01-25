@@ -76,7 +76,9 @@ fn test_transfer_weight_size(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "var_log_true length mismatch for num_vars={}: expected {}, got {}",
-                    num_vars, expected_buffer_len, spec.var_log_true.len()
+                    num_vars,
+                    expected_buffer_len,
+                    spec.var_log_true.len()
                 ),
             );
         }
@@ -87,7 +89,9 @@ fn test_transfer_weight_size(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "var_log_false length mismatch for num_vars={}: expected {}, got {}",
-                    num_vars, expected_buffer_len, spec.var_log_false.len()
+                    num_vars,
+                    expected_buffer_len,
+                    spec.var_log_false.len()
                 ),
             );
         }
@@ -95,8 +99,8 @@ fn test_transfer_weight_size(ctx: &TestContext) -> TestResult {
         // Calculate expected transfer size in bytes
         // 2 buffers * (num_vars + 1) elements * 8 bytes per f64
         let expected_bytes = 2 * expected_buffer_len * std::mem::size_of::<f64>();
-        let calculated_bytes = (spec.var_log_true.len() + spec.var_log_false.len())
-            * std::mem::size_of::<f64>();
+        let calculated_bytes =
+            (spec.var_log_true.len() + spec.var_log_false.len()) * std::mem::size_of::<f64>();
 
         if calculated_bytes != expected_bytes {
             return TestResult::error(
@@ -131,7 +135,9 @@ fn test_transfer_weight_size(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Output size mismatch for num_vars={}: expected {} nodes, got {}",
-                    num_vars, spec.num_nodes, values.len()
+                    num_vars,
+                    spec.num_nodes,
+                    values.len()
                 ),
             );
         }
@@ -185,7 +191,9 @@ fn test_transfer_gradient_size(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "grad_true length mismatch for num_vars={}: expected {}, got {}",
-                    num_vars, expected_grad_len, run_result.grad_true.len()
+                    num_vars,
+                    expected_grad_len,
+                    run_result.grad_true.len()
                 ),
             );
         }
@@ -196,15 +204,17 @@ fn test_transfer_gradient_size(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "grad_false length mismatch for num_vars={}: expected {}, got {}",
-                    num_vars, expected_grad_len, run_result.grad_false.len()
+                    num_vars,
+                    expected_grad_len,
+                    run_result.grad_false.len()
                 ),
             );
         }
 
         // Calculate expected transfer size for gradients
         let expected_bytes = 2 * expected_grad_len * std::mem::size_of::<f64>();
-        let calculated_bytes = (run_result.grad_true.len() + run_result.grad_false.len())
-            * std::mem::size_of::<f64>();
+        let calculated_bytes =
+            (run_result.grad_true.len() + run_result.grad_false.len()) * std::mem::size_of::<f64>();
 
         if calculated_bytes != expected_bytes {
             return TestResult::error(
@@ -975,10 +985,8 @@ fn test_batch_weights_efficiency(ctx: &TestContext) -> TestResult {
     }
 
     // Verify we got distinct results (different weights should give different outputs)
-    let unique_results: std::collections::HashSet<u64> = results
-        .iter()
-        .map(|&r| r.to_bits())
-        .collect();
+    let unique_results: std::collections::HashSet<u64> =
+        results.iter().map(|&r| r.to_bits()).collect();
 
     if unique_results.len() < num_weight_sets / 2 {
         return TestResult::error(

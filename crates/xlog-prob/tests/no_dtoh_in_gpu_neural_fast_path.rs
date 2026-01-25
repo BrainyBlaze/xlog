@@ -31,4 +31,3 @@ fn no_device_to_host_reads_in_gpu_neural_fast_path() {
         path.display()
     );
 }
-

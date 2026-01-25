@@ -42,4 +42,3 @@ fn test_bundled_d4_compiles_real_ddnnf() {
 
     fs::remove_dir_all(&dir).ok();
 }
-

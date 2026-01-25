@@ -4,9 +4,9 @@
 //! integrity, large transfers, repeated small transfers, memory lifecycle,
 //! and memory budget limits.
 
-use crate::harness::{CategoryResult, TestResult, TestContext};
+use crate::harness::{CategoryResult, TestContext, TestResult};
 use std::time::Instant;
-use xlog_core::{Schema, ScalarType};
+use xlog_core::{ScalarType, Schema};
 
 /// Run all tests in this category.
 pub fn run_all(ctx: &TestContext) -> CategoryResult {
@@ -38,13 +38,26 @@ fn test_upload_download_integrity(ctx: &TestContext) -> TestResult {
         ("max_values", vec![u32::MAX; 10000]),
         ("sequential", (0..10000u32).collect()),
         ("reverse", (0..10000u32).rev().collect()),
-        ("alternating", (0..10000).map(|i| if i % 2 == 0 { 0 } else { u32::MAX }).collect()),
-        ("random_lcg", (0..10000u32).map(|i| i.wrapping_mul(1103515245).wrapping_add(12345)).collect()),
+        (
+            "alternating",
+            (0..10000)
+                .map(|i| if i % 2 == 0 { 0 } else { u32::MAX })
+                .collect(),
+        ),
+        (
+            "random_lcg",
+            (0..10000u32)
+                .map(|i| i.wrapping_mul(1103515245).wrapping_add(12345))
+                .collect(),
+        ),
     ];
 
     for (name, data) in test_patterns {
         // Upload
-        let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_slice(&data, schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -74,7 +87,9 @@ fn test_upload_download_integrity(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Pattern '{}': size mismatch - uploaded {}, downloaded {}",
-                    name, data.len(), downloaded.len()
+                    name,
+                    data.len(),
+                    downloaded.len()
                 ),
             );
         }
@@ -205,7 +220,10 @@ fn test_large_transfer(ctx: &TestContext) -> TestResult {
         .collect();
 
     // Upload
-    let buffer = match ctx.provider.create_buffer_from_u32_slice(&large_data, schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&large_data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -221,7 +239,10 @@ fn test_large_transfer(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_large_transfer",
             start.elapsed(),
-            format!("Buffer has {} rows, expected {}", buffer.num_rows, LARGE_SIZE),
+            format!(
+                "Buffer has {} rows, expected {}",
+                buffer.num_rows, LARGE_SIZE
+            ),
         );
     }
 
@@ -241,7 +262,11 @@ fn test_large_transfer(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_large_transfer",
             start.elapsed(),
-            format!("Downloaded {} values, expected {}", downloaded.len(), LARGE_SIZE),
+            format!(
+                "Downloaded {} values, expected {}",
+                downloaded.len(),
+                LARGE_SIZE
+            ),
         );
     }
 
@@ -281,7 +306,9 @@ fn test_large_transfer(ctx: &TestContext) -> TestResult {
     }
 
     // Perform an operation on large data
-    let mask: Vec<u8> = (0..LARGE_SIZE).map(|i| if i % 10 == 0 { 1 } else { 0 }).collect();
+    let mask: Vec<u8> = (0..LARGE_SIZE)
+        .map(|i| if i % 10 == 0 { 1 } else { 0 })
+        .collect();
     let filtered = match ctx.provider.filter_by_mask(&buffer, &mask) {
         Ok(f) => f,
         Err(e) => {
@@ -361,7 +388,10 @@ fn test_repeated_transfer(ctx: &TestContext) -> TestResult {
             .map(|j| ((j + i * SMALL_SIZE) % 1000000) as u32)
             .collect();
 
-        let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_slice(&data, schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -390,7 +420,9 @@ fn test_repeated_transfer(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Iteration {}: size mismatch - {} vs {}",
-                    i, data.len(), downloaded.len()
+                    i,
+                    data.len(),
+                    downloaded.len()
                 ),
             );
         }
@@ -408,7 +440,10 @@ fn test_repeated_transfer(ctx: &TestContext) -> TestResult {
     for i in 0..NUM_TRANSFERS {
         let data: Vec<u32> = (0..SMALL_SIZE as u32).collect();
 
-        let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_slice(&data, schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -461,8 +496,13 @@ fn test_repeated_transfer(ctx: &TestContext) -> TestResult {
     // Interleaved upload-operate-download
     for i in 0..100 {
         // Upload
-        let data: Vec<u32> = (0..SMALL_SIZE).map(|j| ((j * (i + 1)) % 10000) as u32).collect();
-        let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+        let data: Vec<u32> = (0..SMALL_SIZE)
+            .map(|j| ((j * (i + 1)) % 10000) as u32)
+            .collect();
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_slice(&data, schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -474,7 +514,9 @@ fn test_repeated_transfer(ctx: &TestContext) -> TestResult {
         };
 
         // Operate
-        let mask: Vec<u8> = (0..SMALL_SIZE).map(|j| if j % 2 == 0 { 1 } else { 0 }).collect();
+        let mask: Vec<u8> = (0..SMALL_SIZE)
+            .map(|j| if j % 2 == 0 { 1 } else { 0 })
+            .collect();
         let filtered = match ctx.provider.filter_by_mask(&buffer, &mask) {
             Ok(f) => f,
             Err(e) => {
@@ -505,7 +547,9 @@ fn test_repeated_transfer(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Interleaved {}: expected {} rows, got {}",
-                    i, expected_count, result.len()
+                    i,
+                    expected_count,
+                    result.len()
                 ),
             );
         }
@@ -542,9 +586,14 @@ fn test_memory_lifecycle(ctx: &TestContext) -> TestResult {
         let mut buffers = Vec::new();
 
         for i in 0..5 {
-            let data: Vec<u32> = (0..SIZE).map(|j| ((j + i * SIZE + cycle * SIZE * 5) % 1000000) as u32).collect();
+            let data: Vec<u32> = (0..SIZE)
+                .map(|j| ((j + i * SIZE + cycle * SIZE * 5) % 1000000) as u32)
+                .collect();
 
-            let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+            let buffer = match ctx
+                .provider
+                .create_buffer_from_u32_slice(&data, schema.clone())
+            {
                 Ok(buf) => buf,
                 Err(e) => {
                     return TestResult::error(
@@ -589,7 +638,10 @@ fn test_memory_lifecycle(ctx: &TestContext) -> TestResult {
                     return TestResult::error(
                         "test_memory_lifecycle",
                         start.elapsed(),
-                        format!("Cycle {}, buffer {}: sort incorrect at index {}", cycle, i, j),
+                        format!(
+                            "Cycle {}, buffer {}: sort incorrect at index {}",
+                            cycle, i, j
+                        ),
                     );
                 }
             }
@@ -601,7 +653,10 @@ fn test_memory_lifecycle(ctx: &TestContext) -> TestResult {
                 return TestResult::error(
                     "test_memory_lifecycle",
                     start.elapsed(),
-                    format!("Cycle {}, buffer {}: sorted data doesn't match expected", cycle, i),
+                    format!(
+                        "Cycle {}, buffer {}: sorted data doesn't match expected",
+                        cycle, i
+                    ),
                 );
             }
         }
@@ -623,7 +678,10 @@ fn test_memory_lifecycle(ctx: &TestContext) -> TestResult {
     for i in 0..20 {
         let data: Vec<u32> = (0..SIZE as u32).collect();
 
-        let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_slice(&data, schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -662,7 +720,10 @@ fn test_memory_lifecycle(ctx: &TestContext) -> TestResult {
     for (i, &size) in varying_sizes.iter().enumerate() {
         let data: Vec<u32> = (0..size as u32).collect();
 
-        let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_slice(&data, schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -688,7 +749,10 @@ fn test_memory_lifecycle(ctx: &TestContext) -> TestResult {
             return TestResult::error(
                 "test_memory_lifecycle",
                 start.elapsed(),
-                format!("Varying {}: expected {} rows, got {}", i, size, sorted.num_rows),
+                format!(
+                    "Varying {}: expected {} rows, got {}",
+                    i, size, sorted.num_rows
+                ),
             );
         }
     }
@@ -726,7 +790,10 @@ fn test_memory_budget_limits(ctx: &TestContext) -> TestResult {
         .map(|i| ((i * 1103515245 + 12345) % small_fraction) as u32)
         .collect();
 
-    let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -781,7 +848,10 @@ fn test_memory_budget_limits(ctx: &TestContext) -> TestResult {
             .map(|j| ((j + i * per_buffer_size) % per_buffer_size) as u32)
             .collect();
 
-        match ctx.provider.create_buffer_from_u32_slice(&buf_data, schema.clone()) {
+        match ctx
+            .provider
+            .create_buffer_from_u32_slice(&buf_data, schema.clone())
+        {
             Ok(buf) => buffers.push(buf),
             Err(_) => {
                 // Expected to fail at some point due to memory limits
@@ -792,7 +862,9 @@ fn test_memory_budget_limits(ctx: &TestContext) -> TestResult {
 
     // Verify operations still work on allocated buffers
     for (i, buf) in buffers.iter().enumerate() {
-        let mask: Vec<u8> = (0..per_buffer_size).map(|j| if j % 2 == 0 { 1 } else { 0 }).collect();
+        let mask: Vec<u8> = (0..per_buffer_size)
+            .map(|j| if j % 2 == 0 { 1 } else { 0 })
+            .collect();
 
         let filtered = match ctx.provider.filter_by_mask(buf, &mask) {
             Ok(f) => f,
@@ -831,7 +903,10 @@ fn test_memory_budget_limits(ctx: &TestContext) -> TestResult {
 
     // Should be able to allocate again after releasing
     let new_data: Vec<u32> = (0..per_buffer_size as u32).collect();
-    let new_buffer = match ctx.provider.create_buffer_from_u32_slice(&new_data, schema.clone()) {
+    let new_buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&new_data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(

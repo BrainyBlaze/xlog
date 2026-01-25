@@ -5,7 +5,7 @@
 
 use crate::harness::{CategoryResult, TestContext, TestResult};
 use std::time::Instant;
-use xlog_core::{Schema, ScalarType};
+use xlog_core::{ScalarType, Schema};
 
 /// Run all tests in this category.
 pub fn run_all(ctx: &TestContext) -> CategoryResult {
@@ -48,10 +48,10 @@ fn test_hash_join_atomics(ctx: &TestContext) -> TestResult {
     let right_keys: Vec<u32> = (0..RIGHT_SIZE as u32).map(|i| i * 2).collect();
     let right_vals: Vec<u32> = (0..RIGHT_SIZE as u32).map(|i| i * 100).collect();
 
-    let left_buffer = match ctx.provider.create_buffer_from_u32_columns(
-        &[&left_keys, &left_vals],
-        left_schema.clone(),
-    ) {
+    let left_buffer = match ctx
+        .provider
+        .create_buffer_from_u32_columns(&[&left_keys, &left_vals], left_schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -62,10 +62,10 @@ fn test_hash_join_atomics(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let right_buffer = match ctx.provider.create_buffer_from_u32_columns(
-        &[&right_keys, &right_vals],
-        right_schema.clone(),
-    ) {
+    let right_buffer = match ctx
+        .provider
+        .create_buffer_from_u32_columns(&[&right_keys, &right_vals], right_schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -77,7 +77,10 @@ fn test_hash_join_atomics(ctx: &TestContext) -> TestResult {
     };
 
     // Perform hash join
-    let joined = match ctx.provider.hash_join(&left_buffer, &right_buffer, &[0], &[0]) {
+    let joined = match ctx
+        .provider
+        .hash_join(&left_buffer, &right_buffer, &[0], &[0])
+    {
         Ok(j) => j,
         Err(e) => {
             return TestResult::error(
@@ -210,7 +213,10 @@ fn test_filter_scan_sync(ctx: &TestContext) -> TestResult {
         // Create sequential data
         let data: Vec<u32> = (0..size as u32).collect();
 
-        let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_slice(&data, schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -222,7 +228,9 @@ fn test_filter_scan_sync(ctx: &TestContext) -> TestResult {
         };
 
         // Create mask based on predicate
-        let mask: Vec<u8> = (0..size).map(|i| if predicate(i) { 1 } else { 0 }).collect();
+        let mask: Vec<u8> = (0..size)
+            .map(|i| if predicate(i) { 1 } else { 0 })
+            .collect();
         let expected_count: usize = mask.iter().map(|&m| m as usize).sum();
 
         let filtered = match ctx.provider.filter_by_mask(&buffer, &mask) {
@@ -315,21 +323,39 @@ fn test_sort_barrier_correctness(ctx: &TestContext) -> TestResult {
     // Test patterns that stress synchronization
     let test_patterns: Vec<(&str, Vec<u32>)> = vec![
         ("reverse", (0..10000u32).rev().collect()),
-        ("alternating", (0..10000u32).map(|i| if i % 2 == 0 { i } else { 10000 - i }).collect()),
+        (
+            "alternating",
+            (0..10000u32)
+                .map(|i| if i % 2 == 0 { i } else { 10000 - i })
+                .collect(),
+        ),
         ("sawtooth", (0..10000u32).map(|i| i % 100).collect()),
-        ("random_lcg", (0..10000usize).map(|i| ((i * 1103515245 + 12345) % 10000) as u32).collect()),
-        ("blocks_reversed", (0..10000u32).map(|i| {
-            let block = i / 256;
-            let offset = i % 256;
-            block * 256 + (255 - offset)
-        }).collect()),
+        (
+            "random_lcg",
+            (0..10000usize)
+                .map(|i| ((i * 1103515245 + 12345) % 10000) as u32)
+                .collect(),
+        ),
+        (
+            "blocks_reversed",
+            (0..10000u32)
+                .map(|i| {
+                    let block = i / 256;
+                    let offset = i % 256;
+                    block * 256 + (255 - offset)
+                })
+                .collect(),
+        ),
     ];
 
     for (name, keys) in test_patterns {
         let size = keys.len();
         let vals: Vec<u32> = (0..size as u32).collect();
 
-        let buffer = match ctx.provider.create_buffer_from_u32_columns(&[&keys, &vals], schema.clone()) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_columns(&[&keys, &vals], schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -384,7 +410,10 @@ fn test_sort_barrier_correctness(ctx: &TestContext) -> TestResult {
                     start.elapsed(),
                     format!(
                         "Pattern {}: sort order incorrect at {}: {} > {}",
-                        name, i, sorted_keys[i - 1], sorted_keys[i]
+                        name,
+                        i,
+                        sorted_keys[i - 1],
+                        sorted_keys[i]
                     ),
                 );
             }
@@ -427,11 +456,7 @@ fn test_dedup_atomic_marking(ctx: &TestContext) -> TestResult {
     // Test various duplicate patterns
     let test_cases: Vec<(&str, Vec<u32>, Vec<u32>)> = vec![
         // (name, keys, vals)
-        (
-            "all_same",
-            vec![42; 10000],
-            (0..10000u32).collect(),
-        ),
+        ("all_same", vec![42; 10000], (0..10000u32).collect()),
         (
             "pairs",
             (0..5000u32).flat_map(|i| vec![i, i]).collect(),
@@ -439,14 +464,13 @@ fn test_dedup_atomic_marking(ctx: &TestContext) -> TestResult {
         ),
         (
             "triples",
-            (0..3333u32).flat_map(|i| vec![i, i, i]).take(9999).collect(),
+            (0..3333u32)
+                .flat_map(|i| vec![i, i, i])
+                .take(9999)
+                .collect(),
             (0..9999u32).collect(),
         ),
-        (
-            "no_dups",
-            (0..10000u32).collect(),
-            (0..10000u32).collect(),
-        ),
+        ("no_dups", (0..10000u32).collect(), (0..10000u32).collect()),
         (
             "many_dups",
             (0..10000u32).map(|i| i % 100).collect(),
@@ -455,7 +479,10 @@ fn test_dedup_atomic_marking(ctx: &TestContext) -> TestResult {
     ];
 
     for (name, keys, vals) in test_cases {
-        let buffer = match ctx.provider.create_buffer_from_u32_columns(&[&keys, &vals], schema.clone()) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_columns(&[&keys, &vals], schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -562,7 +589,10 @@ fn test_concurrent_operations(ctx: &TestContext) -> TestResult {
             .map(|j| ((j * (i + 1) * 7 + i * 13) % BUFFER_SIZE) as u32)
             .collect();
 
-        let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_slice(&data, schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -594,7 +624,9 @@ fn test_concurrent_operations(ctx: &TestContext) -> TestResult {
     results.push(("sort", sorted0));
 
     // Buffer 1: Filter (keep first half)
-    let mask1: Vec<u8> = (0..BUFFER_SIZE).map(|i| if i < BUFFER_SIZE / 2 { 1 } else { 0 }).collect();
+    let mask1: Vec<u8> = (0..BUFFER_SIZE)
+        .map(|i| if i < BUFFER_SIZE / 2 { 1 } else { 0 })
+        .collect();
     let filtered1 = match ctx.provider.filter_by_mask(&buffers[1], &mask1) {
         Ok(f) => f,
         Err(e) => {
@@ -621,7 +653,9 @@ fn test_concurrent_operations(ctx: &TestContext) -> TestResult {
     results.push(("sort", sorted2));
 
     // Buffer 3: Filter (keep even indices)
-    let mask3: Vec<u8> = (0..BUFFER_SIZE).map(|i| if i % 2 == 0 { 1 } else { 0 }).collect();
+    let mask3: Vec<u8> = (0..BUFFER_SIZE)
+        .map(|i| if i % 2 == 0 { 1 } else { 0 })
+        .collect();
     let filtered3 = match ctx.provider.filter_by_mask(&buffers[3], &mask3) {
         Ok(f) => f,
         Err(e) => {
@@ -683,7 +717,10 @@ fn test_concurrent_operations(ctx: &TestContext) -> TestResult {
                     start.elapsed(),
                     format!(
                         "Buffer {}: sort order incorrect at {}: {} > {}",
-                        idx, i, sorted_data[i - 1], sorted_data[i]
+                        idx,
+                        i,
+                        sorted_data[i - 1],
+                        sorted_data[i]
                     ),
                 );
             }
@@ -711,7 +748,8 @@ fn test_concurrent_operations(ctx: &TestContext) -> TestResult {
             start.elapsed(),
             format!(
                 "Buffer 1: filter returned {} rows, expected {}",
-                result1.num_rows, BUFFER_SIZE / 2
+                result1.num_rows,
+                BUFFER_SIZE / 2
             ),
         );
     }
@@ -725,7 +763,8 @@ fn test_concurrent_operations(ctx: &TestContext) -> TestResult {
             start.elapsed(),
             format!(
                 "Buffer 3: filter returned {} rows, expected {}",
-                result3.num_rows, (BUFFER_SIZE + 1) / 2
+                result3.num_rows,
+                (BUFFER_SIZE + 1) / 2
             ),
         );
     }

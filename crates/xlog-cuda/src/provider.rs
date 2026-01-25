@@ -3,18 +3,19 @@
 //! This module provides the `CudaKernelProvider` which manages pre-compiled
 //! PTX kernels for GPU execution of relational operations (join, dedup, groupby).
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::marker::PhantomData;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
-use cudarc::driver::{
-    CudaViewMut, DevicePtr, DeviceRepr, DeviceSlice, LaunchAsync, LaunchConfig,
-};
+use cudarc::driver::{CudaViewMut, DevicePtr, DeviceRepr, DeviceSlice, LaunchAsync, LaunchConfig};
 use cudarc::nvrtc::Ptx;
 use std::ffi::c_void;
 use xlog_core::{AggOp, Result, ScalarType, Schema, XlogError};
 
-use crate::{memory::{CudaColumn, TrackedCudaSlice}, CudaBuffer, CudaDevice, GpuMemoryManager};
+use crate::{
+    memory::{CudaColumn, TrackedCudaSlice},
+    CudaBuffer, CudaDevice, GpuMemoryManager,
+};
 
 // Embedded PTX sources (pre-compiled from .cu files with nvcc -ptx -arch=sm_70)
 const JOIN_PTX: &str = include_str!("../../../kernels/join.ptx");
@@ -838,16 +839,17 @@ impl CudaKernelProvider {
 
         // SAFETY: mc_sample_bernoulli(out, probs, num_vars, num_samples, seed)
         unsafe {
-            kernel
-                .clone()
-                .launch(config, (&mut d_out, &d_probs, num_vars_u32, num_samples_u32, seed))
+            kernel.clone().launch(
+                config,
+                (&mut d_out, &d_probs, num_vars_u32, num_samples_u32, seed),
+            )
         }
         .map_err(|e| XlogError::Kernel(format!("Failed to launch mc_sample_bernoulli: {}", e)))?;
 
         let mut host: Vec<u8> = vec![0u8; total];
-        device
-            .dtoh_sync_copy_into(&d_out, &mut host)
-            .map_err(|e| XlogError::Kernel(format!("Failed to download Bernoulli samples: {}", e)))?;
+        device.dtoh_sync_copy_into(&d_out, &mut host).map_err(|e| {
+            XlogError::Kernel(format!("Failed to download Bernoulli samples: {}", e))
+        })?;
 
         Ok(host)
     }
@@ -2369,18 +2371,16 @@ impl CudaKernelProvider {
 
         // SAFETY: Kernel parameters match expected signature
         unsafe {
-            boundary_func
-                .clone()
-                .launch(
-                    config,
-                    (
-                        &packed_u32,
-                        num_rows,
-                        segments_per_row as u32,
-                        segments_per_row as u32,
-                        &boundaries,
-                    ),
-                )
+            boundary_func.clone().launch(
+                config,
+                (
+                    &packed_u32,
+                    num_rows,
+                    segments_per_row as u32,
+                    segments_per_row as u32,
+                    &boundaries,
+                ),
+            )
         }
         .map_err(|e| XlogError::Kernel(format!("detect_group_boundaries failed: {}", e)))?;
 
@@ -2474,26 +2474,23 @@ impl CudaKernelProvider {
             })?;
         let group_start_fn = device
             .get_func(GROUPBY_MODULE, groupby_kernels::GROUP_START_INDICES)
-            .ok_or_else(|| {
-                XlogError::Kernel("group_start_indices kernel not found".to_string())
-            })?;
+            .ok_or_else(|| XlogError::Kernel("group_start_indices kernel not found".to_string()))?;
 
         // SAFETY: group_ids_from_boundaries(boundaries, boundary_pos, num_rows, group_ids)
         unsafe {
-            group_ids_fn
-                .clone()
-                .launch(config, (&boundaries, &d_boundary_pos, num_rows, &mut group_ids))
+            group_ids_fn.clone().launch(
+                config,
+                (&boundaries, &d_boundary_pos, num_rows, &mut group_ids),
+            )
         }
         .map_err(|e| XlogError::Kernel(format!("group_ids_from_boundaries failed: {}", e)))?;
 
         // SAFETY: group_start_indices(boundaries, boundary_pos, num_rows, group_first_idx)
         unsafe {
-            group_start_fn
-                .clone()
-                .launch(
-                    config,
-                    (&boundaries, &d_boundary_pos, num_rows, &mut group_first_idx),
-                )
+            group_start_fn.clone().launch(
+                config,
+                (&boundaries, &d_boundary_pos, num_rows, &mut group_first_idx),
+            )
         }
         .map_err(|e| XlogError::Kernel(format!("group_start_indices failed: {}", e)))?;
 
@@ -2511,14 +2508,14 @@ impl CudaKernelProvider {
                 AggOp::Count => {
                     let output_bytes = num_groups_usize
                         .checked_mul(std::mem::size_of::<u64>())
-                        .ok_or_else(|| XlogError::Kernel("Count output size overflow".to_string()))?;
+                        .ok_or_else(|| {
+                            XlogError::Kernel("Count output size overflow".to_string())
+                        })?;
                     let mut output = self.memory.alloc::<u8>(output_bytes)?;
                     if num_groups_u32 > 0 {
-                        device
-                            .memset_zeros(&mut output)
-                            .map_err(|e| {
-                                XlogError::Kernel(format!("Failed to zero count output: {}", e))
-                            })?;
+                        device.memset_zeros(&mut output).map_err(|e| {
+                            XlogError::Kernel(format!("Failed to zero count output: {}", e))
+                        })?;
                     }
 
                     let count_func = device
@@ -2545,11 +2542,9 @@ impl CudaKernelProvider {
                         .ok_or_else(|| XlogError::Kernel("Sum output size overflow".to_string()))?;
                     let mut output = self.memory.alloc::<u8>(output_bytes)?;
                     if num_groups_u32 > 0 {
-                        device
-                            .memset_zeros(&mut output)
-                            .map_err(|e| {
-                                XlogError::Kernel(format!("Failed to zero sum output: {}", e))
-                            })?;
+                        device.memset_zeros(&mut output).map_err(|e| {
+                            XlogError::Kernel(format!("Failed to zero sum output: {}", e))
+                        })?;
                     }
 
                     let sum_func = device
@@ -2586,9 +2581,7 @@ impl CudaKernelProvider {
                             .clone()
                             .launch(fill_config, (u32::MAX, num_groups_u32, &mut output))
                     }
-                    .map_err(|e| {
-                        XlogError::Kernel(format!("Failed to init min output: {}", e))
-                    })?;
+                    .map_err(|e| XlogError::Kernel(format!("Failed to init min output: {}", e)))?;
 
                     let min_func = device
                         .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_MIN)
@@ -2614,11 +2607,9 @@ impl CudaKernelProvider {
                         .ok_or_else(|| XlogError::Kernel("Max output size overflow".to_string()))?;
                     let mut output = self.memory.alloc::<u8>(output_bytes)?;
                     if num_groups_u32 > 0 {
-                        device
-                            .memset_zeros(&mut output)
-                            .map_err(|e| {
-                                XlogError::Kernel(format!("Failed to zero max output: {}", e))
-                            })?;
+                        device.memset_zeros(&mut output).map_err(|e| {
+                            XlogError::Kernel(format!("Failed to zero max output: {}", e))
+                        })?;
                     }
 
                     let max_func = device
@@ -2656,18 +2647,15 @@ impl CudaKernelProvider {
                         })?;
                     let fill_config = LaunchConfig::for_num_elems(num_groups_u32);
                     unsafe {
-                        fill_f64.clone().launch(
-                            fill_config,
-                            (f64::NEG_INFINITY, num_groups_u32, &mut maxs),
-                        )
+                        fill_f64
+                            .clone()
+                            .launch(fill_config, (f64::NEG_INFINITY, num_groups_u32, &mut maxs))
                     }
                     .map_err(|e| XlogError::Kernel(format!("Failed to init maxs: {}", e)))?;
                     if num_groups_u32 > 0 {
-                        device
-                            .memset_zeros(&mut sumexps)
-                            .map_err(|e| {
-                                XlogError::Kernel(format!("Failed to init sumexps: {}", e))
-                            })?;
+                        device.memset_zeros(&mut sumexps).map_err(|e| {
+                            XlogError::Kernel(format!("Failed to init sumexps: {}", e))
+                        })?;
                     }
 
                     let max_func = device
@@ -2698,10 +2686,7 @@ impl CudaKernelProvider {
                     unsafe {
                         sumexp_func
                             .clone()
-                            .launch(
-                                config,
-                                (&values_f64, &group_ids, &maxs, num_rows, &sumexps),
-                            )
+                            .launch(config, (&values_f64, &group_ids, &maxs, num_rows, &sumexps))
                     }
                     .map_err(|e| {
                         XlogError::Kernel(format!("groupby_logsumexp_sumexp failed: {}", e))
@@ -2734,8 +2719,7 @@ impl CudaKernelProvider {
         }
 
         // Step 5: Build output buffer with keys and aggregated values.
-        let mut result_columns: Vec<CudaColumn> =
-            Vec::with_capacity(key_cols.len() + aggs.len());
+        let mut result_columns: Vec<CudaColumn> = Vec::with_capacity(key_cols.len() + aggs.len());
 
         let group_packed_bytes = (num_groups_usize)
             .checked_mul(packed.key_bytes as usize)
@@ -2744,9 +2728,7 @@ impl CudaKernelProvider {
 
         let gather_fn = device
             .get_func(PACK_MODULE, pack_kernels::GATHER_PACKED_ROWS)
-            .ok_or_else(|| {
-                XlogError::Kernel("gather_packed_rows kernel not found".to_string())
-            })?;
+            .ok_or_else(|| XlogError::Kernel("gather_packed_rows kernel not found".to_string()))?;
         let gather_config = LaunchConfig::for_num_elems(num_groups_u32);
 
         // SAFETY: gather_packed_rows(src_packed, row_size, indices, num_indices, dst_packed)
@@ -4256,8 +4238,11 @@ impl CudaKernelProvider {
             .get_func(FILTER_MODULE, kernel)
             .ok_or_else(|| XlogError::Kernel("filter compare kernel not found".into()))?;
 
-        unsafe { func.clone().launch(config, (col_data, value, num_rows, op as u8, &mut d_mask)) }
-            .map_err(|e| XlogError::Kernel(format!("filter compare failed: {}", e)))?;
+        unsafe {
+            func.clone()
+                .launch(config, (col_data, value, num_rows, op as u8, &mut d_mask))
+        }
+        .map_err(|e| XlogError::Kernel(format!("filter compare failed: {}", e)))?;
 
         Ok(d_mask)
     }
@@ -4348,8 +4333,10 @@ impl CudaKernelProvider {
             .ok_or_else(|| XlogError::Kernel("filter compare kernel not found".into()))?;
 
         unsafe {
-            func.clone()
-                .launch(config, (left_col, right_col, num_rows, op as u8, &mut d_mask))
+            func.clone().launch(
+                config,
+                (left_col, right_col, num_rows, op as u8, &mut d_mask),
+            )
         }
         .map_err(|e| XlogError::Kernel(format!("filter compare failed: {}", e)))?;
 
@@ -5751,7 +5738,11 @@ impl CudaKernelProvider {
     }
 
     /// Reinterpret a `CudaBuffer` column as a `u32` slice for kernel access.
-    fn column_as_u32_view<'a>(&self, col: &'a CudaColumn, num_elements: usize) -> Result<RawCudaView<'a, u32>> {
+    fn column_as_u32_view<'a>(
+        &self,
+        col: &'a CudaColumn,
+        num_elements: usize,
+    ) -> Result<RawCudaView<'a, u32>> {
         let required_bytes = num_elements * std::mem::size_of::<u32>();
         if col.num_bytes() < required_bytes {
             return Err(XlogError::Kernel(format!(
@@ -5774,7 +5765,11 @@ impl CudaKernelProvider {
         })
     }
 
-    fn column_as_u64_view<'a>(&self, col: &'a CudaColumn, num_elements: usize) -> Result<RawCudaView<'a, u64>> {
+    fn column_as_u64_view<'a>(
+        &self,
+        col: &'a CudaColumn,
+        num_elements: usize,
+    ) -> Result<RawCudaView<'a, u64>> {
         let required_bytes = num_elements * std::mem::size_of::<u64>();
         if col.num_bytes() < required_bytes {
             return Err(XlogError::Kernel(format!(
@@ -5798,7 +5793,11 @@ impl CudaKernelProvider {
     }
 
     /// Reinterpret a `CudaBuffer` column as an `f64` slice for kernel access.
-    fn column_as_f64_view<'a>(&self, col: &'a CudaColumn, num_elements: usize) -> Result<RawCudaView<'a, f64>> {
+    fn column_as_f64_view<'a>(
+        &self,
+        col: &'a CudaColumn,
+        num_elements: usize,
+    ) -> Result<RawCudaView<'a, f64>> {
         let required_bytes = num_elements * std::mem::size_of::<f64>();
         if col.num_bytes() < required_bytes {
             return Err(XlogError::Kernel(format!(
@@ -5951,7 +5950,11 @@ impl CudaKernelProvider {
     }
 
     /// Build a cached join index for the right/build side of v2 hash join.
-    pub fn build_join_index_v2(&self, right: &CudaBuffer, right_keys: &[usize]) -> Result<JoinIndexV2> {
+    pub fn build_join_index_v2(
+        &self,
+        right: &CudaBuffer,
+        right_keys: &[usize],
+    ) -> Result<JoinIndexV2> {
         if right.is_empty() {
             return Err(XlogError::Kernel(
                 "Cannot build join index for empty relation".to_string(),
@@ -6069,7 +6072,9 @@ impl CudaKernelProvider {
         }
 
         match join_type {
-            JoinType::Inner => self.hash_join_inner_v2_indexed(left, right, left_keys, index, max_output),
+            JoinType::Inner => {
+                self.hash_join_inner_v2_indexed(left, right, left_keys, index, max_output)
+            }
             JoinType::Semi => self.hash_join_semi_indexed(left, left_keys, index),
             JoinType::Anti => self.hash_join_anti_indexed(left, right, left_keys, index),
             JoinType::LeftOuter => {
@@ -8047,7 +8052,11 @@ impl CudaKernelProvider {
             .map_err(|e| XlogError::Kernel(format!("Failed to copy column: {}", e)))?;
 
         let schema = Schema::new(vec![("col".to_string(), col_type)]);
-        Ok(CudaBuffer::from_columns(vec![dst_col.into()], num_rows, schema))
+        Ok(CudaBuffer::from_columns(
+            vec![dst_col.into()],
+            num_rows,
+            schema,
+        ))
     }
 
     /// Create a column filled with a constant value
@@ -8100,9 +8109,7 @@ impl CudaKernelProvider {
                     .device
                     .inner()
                     .get_func(ARITH_MODULE, $kernel)
-                    .ok_or_else(|| {
-                        XlogError::Kernel("arith fill kernel not found".to_string())
-                    })?;
+                    .ok_or_else(|| XlogError::Kernel("arith fill kernel not found".to_string()))?;
                 let config = LaunchConfig::for_num_elems(n);
                 unsafe { func.clone().launch(config, ($value, n, &mut dst_col)) }
                     .map_err(|e| XlogError::Kernel(format!("fill const failed: {}", e)))?;
@@ -8143,7 +8150,11 @@ impl CudaKernelProvider {
         self.device.synchronize()?;
 
         let schema = Schema::new(vec![("const".to_string(), col_type)]);
-        Ok(CudaBuffer::from_columns(vec![dst_col.into()], num_rows, schema))
+        Ok(CudaBuffer::from_columns(
+            vec![dst_col.into()],
+            num_rows,
+            schema,
+        ))
     }
 
     /// Element-wise addition of two single-column buffers
@@ -8165,42 +8176,24 @@ impl CudaKernelProvider {
     /// - Type is not supported for arithmetic
     pub fn add_columns(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
         match a.schema().column_type(0) {
-            Some(ScalarType::I64) => self.binary_arith_op_device::<i64>(
-                a,
-                b,
-                0,
-                arith_kernels::ARITH_BINARY_I64,
-            ),
-            Some(ScalarType::I32) => self.binary_arith_op_device::<i32>(
-                a,
-                b,
-                0,
-                arith_kernels::ARITH_BINARY_I32,
-            ),
-            Some(ScalarType::U64) => self.binary_arith_op_device::<u64>(
-                a,
-                b,
-                0,
-                arith_kernels::ARITH_BINARY_U64,
-            ),
-            Some(ScalarType::U32 | ScalarType::Symbol) => self.binary_arith_op_device::<u32>(
-                a,
-                b,
-                0,
-                arith_kernels::ARITH_BINARY_U32,
-            ),
-            Some(ScalarType::F64) => self.binary_arith_op_device::<f64>(
-                a,
-                b,
-                0,
-                arith_kernels::ARITH_BINARY_F64,
-            ),
-            Some(ScalarType::F32) => self.binary_arith_op_device::<f32>(
-                a,
-                b,
-                0,
-                arith_kernels::ARITH_BINARY_F32,
-            ),
+            Some(ScalarType::I64) => {
+                self.binary_arith_op_device::<i64>(a, b, 0, arith_kernels::ARITH_BINARY_I64)
+            }
+            Some(ScalarType::I32) => {
+                self.binary_arith_op_device::<i32>(a, b, 0, arith_kernels::ARITH_BINARY_I32)
+            }
+            Some(ScalarType::U64) => {
+                self.binary_arith_op_device::<u64>(a, b, 0, arith_kernels::ARITH_BINARY_U64)
+            }
+            Some(ScalarType::U32 | ScalarType::Symbol) => {
+                self.binary_arith_op_device::<u32>(a, b, 0, arith_kernels::ARITH_BINARY_U32)
+            }
+            Some(ScalarType::F64) => {
+                self.binary_arith_op_device::<f64>(a, b, 0, arith_kernels::ARITH_BINARY_F64)
+            }
+            Some(ScalarType::F32) => {
+                self.binary_arith_op_device::<f32>(a, b, 0, arith_kernels::ARITH_BINARY_F32)
+            }
             other => Err(XlogError::Kernel(format!(
                 "Arithmetic not supported for {:?}",
                 other
@@ -8227,42 +8220,24 @@ impl CudaKernelProvider {
     /// - Type is not supported for arithmetic
     pub fn sub_columns(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
         match a.schema().column_type(0) {
-            Some(ScalarType::I64) => self.binary_arith_op_device::<i64>(
-                a,
-                b,
-                1,
-                arith_kernels::ARITH_BINARY_I64,
-            ),
-            Some(ScalarType::I32) => self.binary_arith_op_device::<i32>(
-                a,
-                b,
-                1,
-                arith_kernels::ARITH_BINARY_I32,
-            ),
-            Some(ScalarType::U64) => self.binary_arith_op_device::<u64>(
-                a,
-                b,
-                1,
-                arith_kernels::ARITH_BINARY_U64,
-            ),
-            Some(ScalarType::U32 | ScalarType::Symbol) => self.binary_arith_op_device::<u32>(
-                a,
-                b,
-                1,
-                arith_kernels::ARITH_BINARY_U32,
-            ),
-            Some(ScalarType::F64) => self.binary_arith_op_device::<f64>(
-                a,
-                b,
-                1,
-                arith_kernels::ARITH_BINARY_F64,
-            ),
-            Some(ScalarType::F32) => self.binary_arith_op_device::<f32>(
-                a,
-                b,
-                1,
-                arith_kernels::ARITH_BINARY_F32,
-            ),
+            Some(ScalarType::I64) => {
+                self.binary_arith_op_device::<i64>(a, b, 1, arith_kernels::ARITH_BINARY_I64)
+            }
+            Some(ScalarType::I32) => {
+                self.binary_arith_op_device::<i32>(a, b, 1, arith_kernels::ARITH_BINARY_I32)
+            }
+            Some(ScalarType::U64) => {
+                self.binary_arith_op_device::<u64>(a, b, 1, arith_kernels::ARITH_BINARY_U64)
+            }
+            Some(ScalarType::U32 | ScalarType::Symbol) => {
+                self.binary_arith_op_device::<u32>(a, b, 1, arith_kernels::ARITH_BINARY_U32)
+            }
+            Some(ScalarType::F64) => {
+                self.binary_arith_op_device::<f64>(a, b, 1, arith_kernels::ARITH_BINARY_F64)
+            }
+            Some(ScalarType::F32) => {
+                self.binary_arith_op_device::<f32>(a, b, 1, arith_kernels::ARITH_BINARY_F32)
+            }
             other => Err(XlogError::Kernel(format!(
                 "Arithmetic not supported for {:?}",
                 other
@@ -8289,42 +8264,24 @@ impl CudaKernelProvider {
     /// - Type is not supported for arithmetic
     pub fn mul_columns(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
         match a.schema().column_type(0) {
-            Some(ScalarType::I64) => self.binary_arith_op_device::<i64>(
-                a,
-                b,
-                2,
-                arith_kernels::ARITH_BINARY_I64,
-            ),
-            Some(ScalarType::I32) => self.binary_arith_op_device::<i32>(
-                a,
-                b,
-                2,
-                arith_kernels::ARITH_BINARY_I32,
-            ),
-            Some(ScalarType::U64) => self.binary_arith_op_device::<u64>(
-                a,
-                b,
-                2,
-                arith_kernels::ARITH_BINARY_U64,
-            ),
-            Some(ScalarType::U32 | ScalarType::Symbol) => self.binary_arith_op_device::<u32>(
-                a,
-                b,
-                2,
-                arith_kernels::ARITH_BINARY_U32,
-            ),
-            Some(ScalarType::F64) => self.binary_arith_op_device::<f64>(
-                a,
-                b,
-                2,
-                arith_kernels::ARITH_BINARY_F64,
-            ),
-            Some(ScalarType::F32) => self.binary_arith_op_device::<f32>(
-                a,
-                b,
-                2,
-                arith_kernels::ARITH_BINARY_F32,
-            ),
+            Some(ScalarType::I64) => {
+                self.binary_arith_op_device::<i64>(a, b, 2, arith_kernels::ARITH_BINARY_I64)
+            }
+            Some(ScalarType::I32) => {
+                self.binary_arith_op_device::<i32>(a, b, 2, arith_kernels::ARITH_BINARY_I32)
+            }
+            Some(ScalarType::U64) => {
+                self.binary_arith_op_device::<u64>(a, b, 2, arith_kernels::ARITH_BINARY_U64)
+            }
+            Some(ScalarType::U32 | ScalarType::Symbol) => {
+                self.binary_arith_op_device::<u32>(a, b, 2, arith_kernels::ARITH_BINARY_U32)
+            }
+            Some(ScalarType::F64) => {
+                self.binary_arith_op_device::<f64>(a, b, 2, arith_kernels::ARITH_BINARY_F64)
+            }
+            Some(ScalarType::F32) => {
+                self.binary_arith_op_device::<f32>(a, b, 2, arith_kernels::ARITH_BINARY_F32)
+            }
             other => Err(XlogError::Kernel(format!(
                 "Arithmetic not supported for {:?}",
                 other
@@ -8353,42 +8310,24 @@ impl CudaKernelProvider {
     /// - Type is not supported for arithmetic
     pub fn div_columns(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
         match a.schema().column_type(0) {
-            Some(ScalarType::I64) => self.binary_arith_op_device::<i64>(
-                a,
-                b,
-                3,
-                arith_kernels::ARITH_BINARY_I64,
-            ),
-            Some(ScalarType::I32) => self.binary_arith_op_device::<i32>(
-                a,
-                b,
-                3,
-                arith_kernels::ARITH_BINARY_I32,
-            ),
-            Some(ScalarType::U64) => self.binary_arith_op_device::<u64>(
-                a,
-                b,
-                3,
-                arith_kernels::ARITH_BINARY_U64,
-            ),
-            Some(ScalarType::U32 | ScalarType::Symbol) => self.binary_arith_op_device::<u32>(
-                a,
-                b,
-                3,
-                arith_kernels::ARITH_BINARY_U32,
-            ),
-            Some(ScalarType::F64) => self.binary_arith_op_device::<f64>(
-                a,
-                b,
-                3,
-                arith_kernels::ARITH_BINARY_F64,
-            ),
-            Some(ScalarType::F32) => self.binary_arith_op_device::<f32>(
-                a,
-                b,
-                3,
-                arith_kernels::ARITH_BINARY_F32,
-            ),
+            Some(ScalarType::I64) => {
+                self.binary_arith_op_device::<i64>(a, b, 3, arith_kernels::ARITH_BINARY_I64)
+            }
+            Some(ScalarType::I32) => {
+                self.binary_arith_op_device::<i32>(a, b, 3, arith_kernels::ARITH_BINARY_I32)
+            }
+            Some(ScalarType::U64) => {
+                self.binary_arith_op_device::<u64>(a, b, 3, arith_kernels::ARITH_BINARY_U64)
+            }
+            Some(ScalarType::U32 | ScalarType::Symbol) => {
+                self.binary_arith_op_device::<u32>(a, b, 3, arith_kernels::ARITH_BINARY_U32)
+            }
+            Some(ScalarType::F64) => {
+                self.binary_arith_op_device::<f64>(a, b, 3, arith_kernels::ARITH_BINARY_F64)
+            }
+            Some(ScalarType::F32) => {
+                self.binary_arith_op_device::<f32>(a, b, 3, arith_kernels::ARITH_BINARY_F32)
+            }
             other => Err(XlogError::Kernel(format!(
                 "Arithmetic not supported for {:?}",
                 other
@@ -8416,42 +8355,24 @@ impl CudaKernelProvider {
     /// - Type is not supported for arithmetic
     pub fn mod_columns(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
         match a.schema().column_type(0) {
-            Some(ScalarType::I64) => self.binary_arith_op_device::<i64>(
-                a,
-                b,
-                4,
-                arith_kernels::ARITH_BINARY_I64,
-            ),
-            Some(ScalarType::I32) => self.binary_arith_op_device::<i32>(
-                a,
-                b,
-                4,
-                arith_kernels::ARITH_BINARY_I32,
-            ),
-            Some(ScalarType::U64) => self.binary_arith_op_device::<u64>(
-                a,
-                b,
-                4,
-                arith_kernels::ARITH_BINARY_U64,
-            ),
-            Some(ScalarType::U32 | ScalarType::Symbol) => self.binary_arith_op_device::<u32>(
-                a,
-                b,
-                4,
-                arith_kernels::ARITH_BINARY_U32,
-            ),
-            Some(ScalarType::F64) => self.binary_arith_op_device::<f64>(
-                a,
-                b,
-                4,
-                arith_kernels::ARITH_BINARY_F64,
-            ),
-            Some(ScalarType::F32) => self.binary_arith_op_device::<f32>(
-                a,
-                b,
-                4,
-                arith_kernels::ARITH_BINARY_F32,
-            ),
+            Some(ScalarType::I64) => {
+                self.binary_arith_op_device::<i64>(a, b, 4, arith_kernels::ARITH_BINARY_I64)
+            }
+            Some(ScalarType::I32) => {
+                self.binary_arith_op_device::<i32>(a, b, 4, arith_kernels::ARITH_BINARY_I32)
+            }
+            Some(ScalarType::U64) => {
+                self.binary_arith_op_device::<u64>(a, b, 4, arith_kernels::ARITH_BINARY_U64)
+            }
+            Some(ScalarType::U32 | ScalarType::Symbol) => {
+                self.binary_arith_op_device::<u32>(a, b, 4, arith_kernels::ARITH_BINARY_U32)
+            }
+            Some(ScalarType::F64) => {
+                self.binary_arith_op_device::<f64>(a, b, 4, arith_kernels::ARITH_BINARY_F64)
+            }
+            Some(ScalarType::F32) => {
+                self.binary_arith_op_device::<f32>(a, b, 4, arith_kernels::ARITH_BINARY_F32)
+            }
             other => Err(XlogError::Kernel(format!(
                 "Arithmetic not supported for {:?}",
                 other
@@ -8517,7 +8438,11 @@ impl CudaKernelProvider {
                 unsafe { func.clone().launch(config, (col, n, &mut out)) }
                     .map_err(|e| XlogError::Kernel(format!("abs_i64 failed: {}", e)))?;
                 self.device.synchronize()?;
-                Ok(CudaBuffer::from_columns(vec![out.into()], a.num_rows(), a.schema.clone()))
+                Ok(CudaBuffer::from_columns(
+                    vec![out.into()],
+                    a.num_rows(),
+                    a.schema.clone(),
+                ))
             }
             Some(ScalarType::I32) => {
                 let expected_bytes = (n as usize)
@@ -8540,7 +8465,11 @@ impl CudaKernelProvider {
                 unsafe { func.clone().launch(config, (col, n, &mut out)) }
                     .map_err(|e| XlogError::Kernel(format!("abs_i32 failed: {}", e)))?;
                 self.device.synchronize()?;
-                Ok(CudaBuffer::from_columns(vec![out.into()], a.num_rows(), a.schema.clone()))
+                Ok(CudaBuffer::from_columns(
+                    vec![out.into()],
+                    a.num_rows(),
+                    a.schema.clone(),
+                ))
             }
             Some(ScalarType::F64) => {
                 let expected_bytes = (n as usize)
@@ -8563,7 +8492,11 @@ impl CudaKernelProvider {
                 unsafe { func.clone().launch(config, (col, n, &mut out)) }
                     .map_err(|e| XlogError::Kernel(format!("abs_f64 failed: {}", e)))?;
                 self.device.synchronize()?;
-                Ok(CudaBuffer::from_columns(vec![out.into()], a.num_rows(), a.schema.clone()))
+                Ok(CudaBuffer::from_columns(
+                    vec![out.into()],
+                    a.num_rows(),
+                    a.schema.clone(),
+                ))
             }
             Some(ScalarType::F32) => {
                 let expected_bytes = (n as usize)
@@ -8586,7 +8519,11 @@ impl CudaKernelProvider {
                 unsafe { func.clone().launch(config, (col, n, &mut out)) }
                     .map_err(|e| XlogError::Kernel(format!("abs_f32 failed: {}", e)))?;
                 self.device.synchronize()?;
-                Ok(CudaBuffer::from_columns(vec![out.into()], a.num_rows(), a.schema.clone()))
+                Ok(CudaBuffer::from_columns(
+                    vec![out.into()],
+                    a.num_rows(),
+                    a.schema.clone(),
+                ))
             }
             Some(ScalarType::U32 | ScalarType::U64 | ScalarType::Bool | ScalarType::Symbol) => {
                 self.clone_buffer(a)
@@ -8616,42 +8553,24 @@ impl CudaKernelProvider {
     /// - Type is not supported for arithmetic
     pub fn min_columns(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
         match a.schema().column_type(0) {
-            Some(ScalarType::I64) => self.binary_arith_op_device::<i64>(
-                a,
-                b,
-                5,
-                arith_kernels::ARITH_BINARY_I64,
-            ),
-            Some(ScalarType::I32) => self.binary_arith_op_device::<i32>(
-                a,
-                b,
-                5,
-                arith_kernels::ARITH_BINARY_I32,
-            ),
-            Some(ScalarType::U64) => self.binary_arith_op_device::<u64>(
-                a,
-                b,
-                5,
-                arith_kernels::ARITH_BINARY_U64,
-            ),
-            Some(ScalarType::U32 | ScalarType::Symbol) => self.binary_arith_op_device::<u32>(
-                a,
-                b,
-                5,
-                arith_kernels::ARITH_BINARY_U32,
-            ),
-            Some(ScalarType::F64) => self.binary_arith_op_device::<f64>(
-                a,
-                b,
-                5,
-                arith_kernels::ARITH_BINARY_F64,
-            ),
-            Some(ScalarType::F32) => self.binary_arith_op_device::<f32>(
-                a,
-                b,
-                5,
-                arith_kernels::ARITH_BINARY_F32,
-            ),
+            Some(ScalarType::I64) => {
+                self.binary_arith_op_device::<i64>(a, b, 5, arith_kernels::ARITH_BINARY_I64)
+            }
+            Some(ScalarType::I32) => {
+                self.binary_arith_op_device::<i32>(a, b, 5, arith_kernels::ARITH_BINARY_I32)
+            }
+            Some(ScalarType::U64) => {
+                self.binary_arith_op_device::<u64>(a, b, 5, arith_kernels::ARITH_BINARY_U64)
+            }
+            Some(ScalarType::U32 | ScalarType::Symbol) => {
+                self.binary_arith_op_device::<u32>(a, b, 5, arith_kernels::ARITH_BINARY_U32)
+            }
+            Some(ScalarType::F64) => {
+                self.binary_arith_op_device::<f64>(a, b, 5, arith_kernels::ARITH_BINARY_F64)
+            }
+            Some(ScalarType::F32) => {
+                self.binary_arith_op_device::<f32>(a, b, 5, arith_kernels::ARITH_BINARY_F32)
+            }
             other => Err(XlogError::Kernel(format!(
                 "Arithmetic not supported for {:?}",
                 other
@@ -8677,42 +8596,24 @@ impl CudaKernelProvider {
     /// - Type is not supported for arithmetic
     pub fn max_columns(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
         match a.schema().column_type(0) {
-            Some(ScalarType::I64) => self.binary_arith_op_device::<i64>(
-                a,
-                b,
-                6,
-                arith_kernels::ARITH_BINARY_I64,
-            ),
-            Some(ScalarType::I32) => self.binary_arith_op_device::<i32>(
-                a,
-                b,
-                6,
-                arith_kernels::ARITH_BINARY_I32,
-            ),
-            Some(ScalarType::U64) => self.binary_arith_op_device::<u64>(
-                a,
-                b,
-                6,
-                arith_kernels::ARITH_BINARY_U64,
-            ),
-            Some(ScalarType::U32 | ScalarType::Symbol) => self.binary_arith_op_device::<u32>(
-                a,
-                b,
-                6,
-                arith_kernels::ARITH_BINARY_U32,
-            ),
-            Some(ScalarType::F64) => self.binary_arith_op_device::<f64>(
-                a,
-                b,
-                6,
-                arith_kernels::ARITH_BINARY_F64,
-            ),
-            Some(ScalarType::F32) => self.binary_arith_op_device::<f32>(
-                a,
-                b,
-                6,
-                arith_kernels::ARITH_BINARY_F32,
-            ),
+            Some(ScalarType::I64) => {
+                self.binary_arith_op_device::<i64>(a, b, 6, arith_kernels::ARITH_BINARY_I64)
+            }
+            Some(ScalarType::I32) => {
+                self.binary_arith_op_device::<i32>(a, b, 6, arith_kernels::ARITH_BINARY_I32)
+            }
+            Some(ScalarType::U64) => {
+                self.binary_arith_op_device::<u64>(a, b, 6, arith_kernels::ARITH_BINARY_U64)
+            }
+            Some(ScalarType::U32 | ScalarType::Symbol) => {
+                self.binary_arith_op_device::<u32>(a, b, 6, arith_kernels::ARITH_BINARY_U32)
+            }
+            Some(ScalarType::F64) => {
+                self.binary_arith_op_device::<f64>(a, b, 6, arith_kernels::ARITH_BINARY_F64)
+            }
+            Some(ScalarType::F32) => {
+                self.binary_arith_op_device::<f32>(a, b, 6, arith_kernels::ARITH_BINARY_F32)
+            }
             other => Err(XlogError::Kernel(format!(
                 "Arithmetic not supported for {:?}",
                 other
@@ -8799,8 +8700,11 @@ impl CudaKernelProvider {
             .ok_or_else(|| XlogError::Kernel("arith_pow_f64 not found".into()))?;
         let config = LaunchConfig::for_num_elems(n);
 
-        unsafe { func.clone().launch(config, (base_col, exp_col, n, &mut out)) }
-            .map_err(|e| XlogError::Kernel(format!("pow_f64 failed: {}", e)))?;
+        unsafe {
+            func.clone()
+                .launch(config, (base_col, exp_col, n, &mut out))
+        }
+        .map_err(|e| XlogError::Kernel(format!("pow_f64 failed: {}", e)))?;
 
         self.device.synchronize()?;
 
@@ -8905,8 +8809,11 @@ impl CudaKernelProvider {
             .ok_or_else(|| XlogError::Kernel(format!("{} not found", kernel_name)))?;
         let config = LaunchConfig::for_num_elems(n);
 
-        unsafe { func.clone().launch(config, (mask_col, then_col, else_col, n, &mut out)) }
-            .map_err(|e| XlogError::Kernel(format!("select kernel failed: {}", e)))?;
+        unsafe {
+            func.clone()
+                .launch(config, (mask_col, then_col, else_col, n, &mut out))
+        }
+        .map_err(|e| XlogError::Kernel(format!("select kernel failed: {}", e)))?;
 
         self.device.synchronize()?;
 
@@ -9000,14 +8907,26 @@ impl CudaKernelProvider {
         let config = LaunchConfig::for_num_elems(n);
 
         unsafe {
-            func.clone()
-                .launch(config, (src_col, &mut out, n, source_type.to_code(), target.to_code()))
+            func.clone().launch(
+                config,
+                (
+                    src_col,
+                    &mut out,
+                    n,
+                    source_type.to_code(),
+                    target.to_code(),
+                ),
+            )
         }
         .map_err(|e| XlogError::Kernel(format!("cast failed: {}", e)))?;
 
         self.device.synchronize()?;
 
-        Ok(CudaBuffer::from_columns(vec![out.into()], a.num_rows(), schema))
+        Ok(CudaBuffer::from_columns(
+            vec![out.into()],
+            a.num_rows(),
+            schema,
+        ))
     }
 
     /// Helper for binary arithmetic operations on device.
@@ -9176,7 +9095,10 @@ mod tests {
         assert!(!DEDUP_PTX.is_empty(), "DEDUP_PTX should not be empty");
         assert!(!GROUPBY_PTX.is_empty(), "GROUPBY_PTX should not be empty");
         assert!(!CIRCUIT_PTX.is_empty(), "CIRCUIT_PTX should not be empty");
-        assert!(!MC_SAMPLE_PTX.is_empty(), "MC_SAMPLE_PTX should not be empty");
+        assert!(
+            !MC_SAMPLE_PTX.is_empty(),
+            "MC_SAMPLE_PTX should not be empty"
+        );
         assert!(!SAT_PTX.is_empty(), "SAT_PTX should not be empty");
         assert!(!NEURAL_PTX.is_empty(), "NEURAL_PTX should not be empty");
 
@@ -9450,13 +9372,15 @@ mod tests {
             "xgcf_forward_level function should be accessible"
         );
 
-        let xgcf_backward_propagate = inner.get_func(CIRCUIT_MODULE, "xgcf_backward_level_propagate");
+        let xgcf_backward_propagate =
+            inner.get_func(CIRCUIT_MODULE, "xgcf_backward_level_propagate");
         assert!(
             xgcf_backward_propagate.is_some(),
             "xgcf_backward_level_propagate function should be accessible"
         );
 
-        let xgcf_backward_decision_grad = inner.get_func(CIRCUIT_MODULE, "xgcf_backward_level_decision_grad");
+        let xgcf_backward_decision_grad =
+            inner.get_func(CIRCUIT_MODULE, "xgcf_backward_level_decision_grad");
         assert!(
             xgcf_backward_decision_grad.is_some(),
             "xgcf_backward_level_decision_grad function should be accessible"

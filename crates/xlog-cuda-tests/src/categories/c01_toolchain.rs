@@ -175,7 +175,11 @@ fn test_kernel_function_resolution(ctx: &TestContext) -> TestResult {
             return TestResult::error(
                 "test_kernel_function_resolution",
                 start.elapsed(),
-                format!("Failed to read kernels dir {}: {}", kernels_dir.display(), e),
+                format!(
+                    "Failed to read kernels dir {}: {}",
+                    kernels_dir.display(),
+                    e
+                ),
             );
         }
     };

@@ -40,10 +40,18 @@ impl ChoiceVarId {
 #[derive(Debug, Clone, PartialEq)]
 pub enum PirNode {
     Const(bool),
-    Lit { leaf: LeafId },
-    NegLit { leaf: LeafId },  // Negated leaf: weight (1-p, p)
-    And { children: Vec<PirNodeId> },
-    Or { children: Vec<PirNodeId> },
+    Lit {
+        leaf: LeafId,
+    },
+    NegLit {
+        leaf: LeafId,
+    }, // Negated leaf: weight (1-p, p)
+    And {
+        children: Vec<PirNodeId>,
+    },
+    Or {
+        children: Vec<PirNodeId>,
+    },
     Decision {
         var: ChoiceVarId,
         child_false: PirNodeId,
@@ -95,7 +103,12 @@ impl PirGraph {
         self.push_node(PirNode::Or { children })
     }
 
-    pub fn decision(&mut self, var: ChoiceVarId, child_false: PirNodeId, child_true: PirNodeId) -> PirNodeId {
+    pub fn decision(
+        &mut self,
+        var: ChoiceVarId,
+        child_false: PirNodeId,
+        child_true: PirNodeId,
+    ) -> PirNodeId {
         self.push_node(PirNode::Decision {
             var,
             child_false,

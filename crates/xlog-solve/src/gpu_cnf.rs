@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use cudarc::driver::DeviceSlice;
 use xlog_core::{Result, XlogError};
-use xlog_cuda::CudaKernelProvider;
 use xlog_cuda::memory::TrackedCudaSlice;
+use xlog_cuda::CudaKernelProvider;
 
 use crate::instance::SolveInstance;
 
@@ -75,7 +75,9 @@ impl GpuCnf {
             for &lit in &clause.literals {
                 let dimacs = lit.to_dimacs();
                 if dimacs == 0 {
-                    return Err(XlogError::Compilation("CNF contains DIMACS 0 literal".to_string()));
+                    return Err(XlogError::Compilation(
+                        "CNF contains DIMACS 0 literal".to_string(),
+                    ));
                 }
                 literals.push(dimacs);
             }

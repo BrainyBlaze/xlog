@@ -4,9 +4,9 @@
 //! recovery after errors, stress operations, memory pressure, and sustained
 //! operation stability.
 
-use crate::harness::{CategoryResult, TestResult, TestContext};
+use crate::harness::{CategoryResult, TestContext, TestResult};
 use std::time::Instant;
-use xlog_core::{Schema, ScalarType};
+use xlog_core::{ScalarType, Schema};
 
 /// Run all tests in this category.
 pub fn run_all(ctx: &TestContext) -> CategoryResult {
@@ -34,7 +34,10 @@ fn test_error_detection(ctx: &TestContext) -> TestResult {
     // Test 1: Successful operation should not trigger error
     let data: Vec<u32> = (0..10000u32).collect();
 
-    let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -82,7 +85,10 @@ fn test_error_detection(ctx: &TestContext) -> TestResult {
             return TestResult::error(
                 "test_error_detection",
                 start.elapsed(),
-                format!("Result incorrect at index {}: expected {}, got {}", i, i, val),
+                format!(
+                    "Result incorrect at index {}: expected {}, got {}",
+                    i, i, val
+                ),
             );
         }
     }
@@ -91,7 +97,10 @@ fn test_error_detection(ctx: &TestContext) -> TestResult {
     for i in 0..5 {
         let check_data: Vec<u32> = (0..1000u32).map(|j| j + i * 1000).collect();
 
-        let check_buffer = match ctx.provider.create_buffer_from_u32_slice(&check_data, schema.clone()) {
+        let check_buffer = match ctx
+            .provider
+            .create_buffer_from_u32_slice(&check_data, schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -124,7 +133,10 @@ fn test_error_detection(ctx: &TestContext) -> TestResult {
 
     // Test 3: Empty buffer operations should not cause errors
     let empty_data: Vec<u32> = vec![];
-    let empty_buffer = match ctx.provider.create_buffer_from_u32_slice(&empty_data, schema.clone()) {
+    let empty_buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&empty_data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -156,7 +168,10 @@ fn test_error_detection(ctx: &TestContext) -> TestResult {
 
     // Test 4: Single element operations
     let single_data: Vec<u32> = vec![42];
-    let single_buffer = match ctx.provider.create_buffer_from_u32_slice(&single_data, schema.clone()) {
+    let single_buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&single_data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -227,7 +242,10 @@ fn test_recovery_after_error(ctx: &TestContext) -> TestResult {
     // Test 1: Recover after handling edge cases
     // First, do a valid operation
     let data1: Vec<u32> = (0..5000u32).collect();
-    let buffer1 = match ctx.provider.create_buffer_from_u32_slice(&data1, schema.clone()) {
+    let buffer1 = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&data1, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -259,7 +277,10 @@ fn test_recovery_after_error(ctx: &TestContext) -> TestResult {
 
     // Try an edge case operation (mismatched mask size - may error or be handled)
     let edge_data: Vec<u32> = vec![1, 2, 3, 4, 5];
-    let edge_buffer = match ctx.provider.create_buffer_from_u32_slice(&edge_data, schema.clone()) {
+    let edge_buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&edge_data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -279,7 +300,10 @@ fn test_recovery_after_error(ctx: &TestContext) -> TestResult {
 
     // Test 2: Verify system recovered - operations should work again
     let data2: Vec<u32> = (0..10000u32).collect();
-    let buffer2 = match ctx.provider.create_buffer_from_u32_slice(&data2, schema.clone()) {
+    let buffer2 = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&data2, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -338,7 +362,10 @@ fn test_recovery_after_error(ctx: &TestContext) -> TestResult {
     for cycle in 0..3 {
         // Valid operation
         let valid_data: Vec<u32> = (0..1000u32).map(|j| j + cycle * 1000).collect();
-        let valid_buffer = match ctx.provider.create_buffer_from_u32_slice(&valid_data, schema.clone()) {
+        let valid_buffer = match ctx
+            .provider
+            .create_buffer_from_u32_slice(&valid_data, schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -384,7 +411,11 @@ fn test_recovery_after_error(ctx: &TestContext) -> TestResult {
             return TestResult::error(
                 "test_recovery_after_error",
                 start.elapsed(),
-                format!("Cycle {}: expected 1000 rows, got {}", cycle, valid_result.len()),
+                format!(
+                    "Cycle {}: expected 1000 rows, got {}",
+                    cycle,
+                    valid_result.len()
+                ),
             );
         }
     }
@@ -442,7 +473,10 @@ fn test_stress_operations(ctx: &TestContext) -> TestResult {
             .map(|j| ((j * (i + 1) * 1103515245 + 12345) % DATA_SIZE) as u32)
             .collect();
 
-        let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_slice(&data, schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -499,7 +533,10 @@ fn test_stress_operations(ctx: &TestContext) -> TestResult {
 
     // Stress test: many filter operations
     let filter_data: Vec<u32> = (0..DATA_SIZE as u32).collect();
-    let filter_buffer = match ctx.provider.create_buffer_from_u32_slice(&filter_data, schema.clone()) {
+    let filter_buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&filter_data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -513,7 +550,13 @@ fn test_stress_operations(ctx: &TestContext) -> TestResult {
     for i in 0..NUM_OPERATIONS {
         let selectivity = (i % 10 + 1) * 10; // 10%, 20%, ..., 100%
         let mask: Vec<u8> = (0..DATA_SIZE)
-            .map(|j| if (j * 100 / DATA_SIZE) < selectivity { 1 } else { 0 })
+            .map(|j| {
+                if (j * 100 / DATA_SIZE) < selectivity {
+                    1
+                } else {
+                    0
+                }
+            })
             .collect();
 
         let filtered = match ctx.provider.filter_by_mask(&filter_buffer, &mask) {
@@ -539,7 +582,9 @@ fn test_stress_operations(ctx: &TestContext) -> TestResult {
                     start.elapsed(),
                     format!(
                         "Stress filter {}: got {} rows, expected ~{}",
-                        i, count, DATA_SIZE * selectivity / 100
+                        i,
+                        count,
+                        DATA_SIZE * selectivity / 100
                     ),
                 );
             }
@@ -565,10 +610,10 @@ fn test_stress_operations(ctx: &TestContext) -> TestResult {
         let dedup_keys: Vec<u32> = (0..DATA_SIZE).map(|j| (j % 100) as u32).collect();
         let dedup_vals: Vec<u32> = (0..DATA_SIZE as u32).collect();
 
-        let dedup_buffer = match ctx.provider.create_buffer_from_u32_columns(
-            &[&dedup_keys, &dedup_vals],
-            schema2.clone(),
-        ) {
+        let dedup_buffer = match ctx
+            .provider
+            .create_buffer_from_u32_columns(&[&dedup_keys, &dedup_vals], schema2.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -594,10 +639,7 @@ fn test_stress_operations(ctx: &TestContext) -> TestResult {
             return TestResult::error(
                 "test_stress_operations",
                 start.elapsed(),
-                format!(
-                    "Stress dedup {}: expected 100, got {}",
-                    i, deduped.num_rows
-                ),
+                format!("Stress dedup {}: expected 100, got {}", i, deduped.num_rows),
             );
         }
 
@@ -653,7 +695,10 @@ fn test_memory_pressure(ctx: &TestContext) -> TestResult {
             .map(|j| ((j + i * buffer_size) % buffer_size) as u32)
             .collect();
 
-        match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+        match ctx
+            .provider
+            .create_buffer_from_u32_slice(&data, schema.clone())
+        {
             Ok(buf) => {
                 buffers.push(buf);
                 successful_allocations += 1;
@@ -721,7 +766,9 @@ fn test_memory_pressure(ctx: &TestContext) -> TestResult {
 
     // Test filter under pressure
     for (i, buffer) in buffers.iter().enumerate() {
-        let mask: Vec<u8> = (0..buffer_size).map(|j| if j % 2 == 0 { 1 } else { 0 }).collect();
+        let mask: Vec<u8> = (0..buffer_size)
+            .map(|j| if j % 2 == 0 { 1 } else { 0 })
+            .collect();
 
         let filtered = match ctx.provider.filter_by_mask(buffer, &mask) {
             Ok(f) => f,
@@ -760,7 +807,10 @@ fn test_memory_pressure(ctx: &TestContext) -> TestResult {
 
     // New operations should work after release
     let fresh_data: Vec<u32> = (0..10000u32).collect();
-    let fresh_buffer = match ctx.provider.create_buffer_from_u32_slice(&fresh_data, schema.clone()) {
+    let fresh_buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&fresh_data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -831,7 +881,10 @@ fn test_sustained_operation(ctx: &TestContext) -> TestResult {
     while Instant::now() < deadline {
         let data: Vec<u32> = reference_data.clone();
 
-        let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_slice(&data, schema.clone())
+        {
             Ok(buf) => buf,
             Err(_) => {
                 error_count += 1;
@@ -907,7 +960,10 @@ fn test_sustained_operation(ctx: &TestContext) -> TestResult {
 
     // Run sustained filter operations
     let filter_data: Vec<u32> = (0..SIZE as u32).collect();
-    let filter_buffer = match ctx.provider.create_buffer_from_u32_slice(&filter_data, schema.clone()) {
+    let filter_buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&filter_data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -949,7 +1005,9 @@ fn test_sustained_operation(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Sustained filter {}: got {} rows, expected ~{}",
-                    filter_count, count, SIZE * selectivity / 100
+                    filter_count,
+                    count,
+                    SIZE * selectivity / 100
                 ),
             );
         }
@@ -969,10 +1027,10 @@ fn test_sustained_operation(ctx: &TestContext) -> TestResult {
     let right_keys: Vec<u32> = (0..500u32).map(|i| i * 2).collect();
     let right_vals: Vec<u32> = right_keys.iter().map(|&k| k * 3).collect();
 
-    let left_buffer = match ctx.provider.create_buffer_from_u32_columns(
-        &[&left_keys, &left_vals],
-        schema2.clone(),
-    ) {
+    let left_buffer = match ctx
+        .provider
+        .create_buffer_from_u32_columns(&[&left_keys, &left_vals], schema2.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -983,10 +1041,10 @@ fn test_sustained_operation(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let right_buffer = match ctx.provider.create_buffer_from_u32_columns(
-        &[&right_keys, &right_vals],
-        schema2,
-    ) {
+    let right_buffer = match ctx
+        .provider
+        .create_buffer_from_u32_columns(&[&right_keys, &right_vals], schema2)
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -1001,7 +1059,10 @@ fn test_sustained_operation(ctx: &TestContext) -> TestResult {
     let mut join_count = 0;
 
     while Instant::now() < deadline3 {
-        let joined = match ctx.provider.hash_join(&left_buffer, &right_buffer, &[0], &[0]) {
+        let joined = match ctx
+            .provider
+            .hash_join(&left_buffer, &right_buffer, &[0], &[0])
+        {
             Ok(j) => j,
             Err(e) => {
                 return TestResult::error(

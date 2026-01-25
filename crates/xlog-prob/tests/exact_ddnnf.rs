@@ -11,7 +11,12 @@ fn prob_of(result: &ExactResult, predicate: &str, args: &[Value]) -> f64 {
         .query_probs
         .iter()
         .find(|q| q.atom.predicate == predicate && q.atom.args == args)
-        .unwrap_or_else(|| panic!("missing query result for {} with args {:?}", predicate, args))
+        .unwrap_or_else(|| {
+            panic!(
+                "missing query result for {} with args {:?}",
+                predicate, args
+            )
+        })
         .prob
 }
 
@@ -88,7 +93,11 @@ query(sprinkler()).
     let got_rain = prob0(&result, "rain");
     let got_sprinkler = prob0(&result, "sprinkler");
 
-    assert!((got_rain - expected_rain).abs() < 1e-9, "got_rain={}", got_rain);
+    assert!(
+        (got_rain - expected_rain).abs() < 1e-9,
+        "got_rain={}",
+        got_rain
+    );
     assert!(
         (got_sprinkler - expected_sprinkler).abs() < 1e-9,
         "got_sprinkler={}",
@@ -170,7 +179,11 @@ query(rain()).
     let err = compiled.evaluate().unwrap_err();
     let msg = err.to_string();
     assert!(msg.contains("evidence"), "msg={}", msg);
-    assert!(msg.contains("P(E)=0") || msg.contains("zero"), "msg={}", msg);
+    assert!(
+        msg.contains("P(E)=0") || msg.contains("zero"),
+        "msg={}",
+        msg
+    );
 }
 
 #[test]
@@ -277,8 +290,16 @@ query(q()).
     // Undefined atoms have probability 0
     let p_prob = prob0(&result, "p");
     let q_prob = prob0(&result, "q");
-    assert!(p_prob < 1e-9, "P(p) should be 0 (undefined), got {}", p_prob);
-    assert!(q_prob < 1e-9, "P(q) should be 0 (undefined), got {}", q_prob);
+    assert!(
+        p_prob < 1e-9,
+        "P(p) should be 0 (undefined), got {}",
+        p_prob
+    );
+    assert!(
+        q_prob < 1e-9,
+        "P(q) should be 0 (undefined), got {}",
+        q_prob
+    );
 }
 
 #[test]
@@ -305,14 +326,26 @@ query(base()).
 
     // base() has probability 0.5 as expected
     let base_prob = prob0(&result, "base");
-    assert!((base_prob - 0.5).abs() < 1e-9, "P(base) should be 0.5, got {}", base_prob);
+    assert!(
+        (base_prob - 0.5).abs() < 1e-9,
+        "P(base) should be 0.5, got {}",
+        base_prob
+    );
 
     // Both p and q are in a cycle through negation, so both are undefined
     // Undefined atoms have probability 0
     let p_prob = prob0(&result, "p");
     let q_prob = prob0(&result, "q");
-    assert!(p_prob < 1e-9, "P(p) should be 0 (undefined), got {}", p_prob);
-    assert!(q_prob < 1e-9, "P(q) should be 0 (undefined), got {}", q_prob);
+    assert!(
+        p_prob < 1e-9,
+        "P(p) should be 0 (undefined), got {}",
+        p_prob
+    );
+    assert!(
+        q_prob < 1e-9,
+        "P(q) should be 0 (undefined), got {}",
+        q_prob
+    );
 }
 
 #[test]
@@ -337,7 +370,11 @@ query(q()).
     let q_prob = prob0(&result, "q");
 
     // q is a fact, so P(q) = 1
-    assert!((q_prob - 1.0).abs() < 1e-9, "P(q) should be 1.0, got {}", q_prob);
+    assert!(
+        (q_prob - 1.0).abs() < 1e-9,
+        "P(q) should be 1.0, got {}",
+        q_prob
+    );
     // p depends on not q, and q is true, so p is false
     assert!(p_prob < 1e-9, "P(p) should be 0, got {}", p_prob);
 }
@@ -368,7 +405,15 @@ query(c()).
     let b_prob = prob0(&result, "b");
     let c_prob = prob0(&result, "c");
 
-    assert!((a_prob - 1.0).abs() < 1e-9, "P(a) should be 1.0, got {}", a_prob);
+    assert!(
+        (a_prob - 1.0).abs() < 1e-9,
+        "P(a) should be 1.0, got {}",
+        a_prob
+    );
     assert!(b_prob < 1e-9, "P(b) should be 0, got {}", b_prob);
-    assert!((c_prob - 1.0).abs() < 1e-9, "P(c) should be 1.0, got {}", c_prob);
+    assert!(
+        (c_prob - 1.0).abs() < 1e-9,
+        "P(c) should be 1.0, got {}",
+        c_prob
+    );
 }

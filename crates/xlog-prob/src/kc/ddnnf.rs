@@ -206,7 +206,8 @@ impl DecisionDnnf {
             [only] => *only,
             [] => {
                 return Err(XlogError::Compilation(
-                    "Decision-DNNF parse error: could not infer root (no root candidates)".to_string(),
+                    "Decision-DNNF parse error: could not infer root (no root candidates)"
+                        .to_string(),
                 ))
             }
             many => {

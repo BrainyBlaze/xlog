@@ -23,7 +23,9 @@ impl GpuDevicePool {
     /// Create a new device pool with the specified number of devices
     pub fn new(device_count: usize) -> Result<Self> {
         if device_count == 0 {
-            return Err(XlogError::Kernel("Device pool requires at least one device".to_string()));
+            return Err(XlogError::Kernel(
+                "Device pool requires at least one device".to_string(),
+            ));
         }
 
         // cudarc may panic on driver init failures in restricted containers; treat as a normal error.
@@ -45,10 +47,9 @@ impl GpuDevicePool {
 
         let mut devices = Vec::with_capacity(device_count);
         for ordinal in 0..device_count {
-            let device = CudaDevice::new(ordinal)
-                .map_err(|e| XlogError::Kernel(format!(
-                    "Failed to create device {}: {}", ordinal, e
-                )))?;
+            let device = CudaDevice::new(ordinal).map_err(|e| {
+                XlogError::Kernel(format!("Failed to create device {}: {}", ordinal, e))
+            })?;
             devices.push(Arc::new(device));
         }
 
@@ -83,10 +84,9 @@ impl GpuDevicePool {
     /// Synchronize all devices
     pub fn synchronize_all(&self) -> Result<()> {
         for (i, device) in self.devices.iter().enumerate() {
-            device.synchronize()
-                .map_err(|e| XlogError::Kernel(format!(
-                    "Failed to sync device {}: {}", i, e
-                )))?;
+            device
+                .synchronize()
+                .map_err(|e| XlogError::Kernel(format!("Failed to sync device {}: {}", i, e)))?;
         }
         Ok(())
     }

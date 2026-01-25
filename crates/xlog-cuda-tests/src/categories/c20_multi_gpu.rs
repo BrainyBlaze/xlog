@@ -4,9 +4,9 @@
 //! primary device operations, and capability queries. Tests are skipped
 //! if only one GPU is available.
 
-use crate::harness::{CategoryResult, TestResult, TestContext};
+use crate::harness::{CategoryResult, TestContext, TestResult};
 use std::time::Instant;
-use xlog_core::{Schema, ScalarType};
+use xlog_core::{ScalarType, Schema};
 
 /// Run all tests in this category.
 pub fn run_all(ctx: &TestContext) -> CategoryResult {
@@ -39,7 +39,10 @@ fn test_single_gpu_baseline(ctx: &TestContext) -> TestResult {
         .collect();
 
     // Upload
-    let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -130,7 +133,10 @@ fn test_single_gpu_baseline(ctx: &TestContext) -> TestResult {
     let keys: Vec<u32> = (0..SIZE).map(|i| (i % 1000) as u32).collect();
     let vals: Vec<u32> = (0..SIZE as u32).collect();
 
-    let buffer2 = match ctx.provider.create_buffer_from_u32_columns(&[&keys, &vals], schema2) {
+    let buffer2 = match ctx
+        .provider
+        .create_buffer_from_u32_columns(&[&keys, &vals], schema2)
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -176,10 +182,10 @@ fn test_single_gpu_baseline(ctx: &TestContext) -> TestResult {
     let right_keys: Vec<u32> = (0..500u32).map(|i| i * 2).collect();
     let right_vals: Vec<u32> = right_keys.iter().map(|&k| k * 3).collect();
 
-    let left_buffer = match ctx.provider.create_buffer_from_u32_columns(
-        &[&left_keys, &left_vals],
-        left_schema,
-    ) {
+    let left_buffer = match ctx
+        .provider
+        .create_buffer_from_u32_columns(&[&left_keys, &left_vals], left_schema)
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -190,10 +196,10 @@ fn test_single_gpu_baseline(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let right_buffer = match ctx.provider.create_buffer_from_u32_columns(
-        &[&right_keys, &right_vals],
-        right_schema,
-    ) {
+    let right_buffer = match ctx
+        .provider
+        .create_buffer_from_u32_columns(&[&right_keys, &right_vals], right_schema)
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -204,7 +210,10 @@ fn test_single_gpu_baseline(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let joined = match ctx.provider.hash_join(&left_buffer, &right_buffer, &[0], &[0]) {
+    let joined = match ctx
+        .provider
+        .hash_join(&left_buffer, &right_buffer, &[0], &[0])
+    {
         Ok(j) => j,
         Err(e) => {
             return TestResult::error(
@@ -328,10 +337,7 @@ fn test_device_enumeration(ctx: &TestContext) -> TestResult {
     };
 
     if device_count == 0 {
-        return TestResult::skipped(
-            "test_device_enumeration",
-            "No CUDA devices available",
-        );
+        return TestResult::skipped("test_device_enumeration", "No CUDA devices available");
     }
 
     // Verify device count is reasonable
@@ -353,7 +359,10 @@ fn test_device_enumeration(ctx: &TestContext) -> TestResult {
         if test_num == 0 {
             let data: Vec<u32> = (0..1000u32).collect();
 
-            let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+            let buffer = match ctx
+                .provider
+                .create_buffer_from_u32_slice(&data, schema.clone())
+            {
                 Ok(buf) => buf,
                 Err(e) => {
                     return TestResult::error(
@@ -379,7 +388,10 @@ fn test_device_enumeration(ctx: &TestContext) -> TestResult {
                 return TestResult::error(
                     "test_device_enumeration",
                     start.elapsed(),
-                    format!("Device {}: sort returned {} rows", test_num, sorted.num_rows),
+                    format!(
+                        "Device {}: sort returned {} rows",
+                        test_num, sorted.num_rows
+                    ),
                 );
             }
         }
@@ -434,7 +446,10 @@ fn test_primary_device_operations(ctx: &TestContext) -> TestResult {
         .map(|i| ((i * 1103515245 + 12345) % 10000000) as u32)
         .collect();
 
-    let large_buffer = match ctx.provider.create_buffer_from_u32_slice(&large_data, schema.clone()) {
+    let large_buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&large_data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -481,7 +496,10 @@ fn test_primary_device_operations(ctx: &TestContext) -> TestResult {
     // Test 2: Chained operations
     let chain_data: Vec<u32> = (0..10000).map(|i| (i % 1000) as u32).collect();
 
-    let chain_buffer = match ctx.provider.create_buffer_from_u32_slice(&chain_data, schema.clone()) {
+    let chain_buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&chain_data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -515,7 +533,10 @@ fn test_primary_device_operations(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let mask: Vec<u8> = step1_data.iter().map(|&v| if v < 500 { 1 } else { 0 }).collect();
+    let mask: Vec<u8> = step1_data
+        .iter()
+        .map(|&v| if v < 500 { 1 } else { 0 })
+        .collect();
 
     let step2 = match ctx.provider.filter_by_mask(&step1, &mask) {
         Ok(f) => f,
@@ -577,7 +598,10 @@ fn test_primary_device_operations(ctx: &TestContext) -> TestResult {
     for i in 0..5 {
         let data: Vec<u32> = (0..5000).map(|j| ((j + i * 5000) % 10000) as u32).collect();
 
-        let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_slice(&data, schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -691,10 +715,7 @@ fn test_device_capability_query(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_device_capability_query",
             start.elapsed(),
-            format!(
-                "Memory used ({}) exceeds budget ({})",
-                used, budget
-            ),
+            format!("Memory used ({}) exceeds budget ({})", used, budget),
         );
     }
 
@@ -713,10 +734,7 @@ fn test_device_capability_query(ctx: &TestContext) -> TestResult {
     let data: Vec<u32> = (0..test_size)
         .map(|i| {
             // Use u64 + wrapping arithmetic so debug builds don't panic on overflow.
-            let v = (i as u64)
-                .wrapping_mul(1103515245)
-                .wrapping_add(12345)
-                % (test_size as u64);
+            let v = (i as u64).wrapping_mul(1103515245).wrapping_add(12345) % (test_size as u64);
             v as u32
         })
         .collect();
@@ -727,7 +745,10 @@ fn test_device_capability_query(ctx: &TestContext) -> TestResult {
             return TestResult::error(
                 "test_device_capability_query",
                 start.elapsed(),
-                format!("Buffer creation failed for capability {}.{}: {}", major, minor, e),
+                format!(
+                    "Buffer creation failed for capability {}.{}: {}",
+                    major, minor, e
+                ),
             )
         }
     };

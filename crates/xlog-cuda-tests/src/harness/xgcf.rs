@@ -2,8 +2,8 @@
 
 use cudarc::driver::{CudaFunction, DeviceSlice, LaunchAsync, LaunchConfig};
 use xlog_core::{Result, XlogError};
-use xlog_cuda::{circuit_kernels, CIRCUIT_MODULE};
 use xlog_cuda::memory::TrackedCudaSlice;
+use xlog_cuda::{circuit_kernels, CIRCUIT_MODULE};
 
 use super::TestContext;
 
@@ -87,7 +87,10 @@ impl TinyXgcfDevice {
                 ))
             })?;
         let backward_propagate_fn = device
-            .get_func(CIRCUIT_MODULE, circuit_kernels::XGCF_BACKWARD_LEVEL_PROPAGATE)
+            .get_func(
+                CIRCUIT_MODULE,
+                circuit_kernels::XGCF_BACKWARD_LEVEL_PROPAGATE,
+            )
             .ok_or_else(|| {
                 XlogError::Kernel(format!(
                     "Kernel {} not found in {}",
@@ -96,7 +99,10 @@ impl TinyXgcfDevice {
                 ))
             })?;
         let backward_decision_grad_fn = device
-            .get_func(CIRCUIT_MODULE, circuit_kernels::XGCF_BACKWARD_LEVEL_DECISION_GRAD)
+            .get_func(
+                CIRCUIT_MODULE,
+                circuit_kernels::XGCF_BACKWARD_LEVEL_DECISION_GRAD,
+            )
             .ok_or_else(|| {
                 XlogError::Kernel(format!(
                     "Kernel {} not found in {}",
@@ -105,7 +111,10 @@ impl TinyXgcfDevice {
                 ))
             })?;
         let backward_lit_grad_fn = device
-            .get_func(CIRCUIT_MODULE, circuit_kernels::XGCF_BACKWARD_LEVEL_LIT_GRAD)
+            .get_func(
+                CIRCUIT_MODULE,
+                circuit_kernels::XGCF_BACKWARD_LEVEL_LIT_GRAD,
+            )
             .ok_or_else(|| {
                 XlogError::Kernel(format!(
                     "Kernel {} not found in {}",
@@ -139,15 +148,20 @@ impl TinyXgcfDevice {
             .htod_sync_copy_into(&spec.decision_var, &mut d_decision_var)
             .map_err(|e| XlogError::Kernel(format!("Failed to upload decision_var: {}", e)))?;
 
-        let mut d_decision_child_false = ctx.memory.alloc::<u32>(spec.decision_child_false.len())?;
+        let mut d_decision_child_false =
+            ctx.memory.alloc::<u32>(spec.decision_child_false.len())?;
         device
             .htod_sync_copy_into(&spec.decision_child_false, &mut d_decision_child_false)
-            .map_err(|e| XlogError::Kernel(format!("Failed to upload decision_child_false: {}", e)))?;
+            .map_err(|e| {
+                XlogError::Kernel(format!("Failed to upload decision_child_false: {}", e))
+            })?;
 
         let mut d_decision_child_true = ctx.memory.alloc::<u32>(spec.decision_child_true.len())?;
         device
             .htod_sync_copy_into(&spec.decision_child_true, &mut d_decision_child_true)
-            .map_err(|e| XlogError::Kernel(format!("Failed to upload decision_child_true: {}", e)))?;
+            .map_err(|e| {
+                XlogError::Kernel(format!("Failed to upload decision_child_true: {}", e))
+            })?;
 
         let mut d_level_nodes = ctx.memory.alloc::<u32>(spec.level_nodes.len())?;
         device
@@ -195,11 +209,7 @@ impl TinyXgcfDevice {
         })
     }
 
-    fn launch_level_cached<A>(
-        kernel: &CudaFunction,
-        num_level_nodes: u32,
-        args: A,
-    ) -> Result<()>
+    fn launch_level_cached<A>(kernel: &CudaFunction, num_level_nodes: u32, args: A) -> Result<()>
     where
         CudaFunction: LaunchAsync<A>,
     {
@@ -218,8 +228,14 @@ impl TinyXgcfDevice {
         Ok(())
     }
 
-    pub fn set_weights(&mut self, ctx: &TestContext, log_true: &[f64], log_false: &[f64]) -> Result<()> {
-        if log_true.len() != self.d_var_log_true.len() || log_false.len() != self.d_var_log_false.len()
+    pub fn set_weights(
+        &mut self,
+        ctx: &TestContext,
+        log_true: &[f64],
+        log_false: &[f64],
+    ) -> Result<()> {
+        if log_true.len() != self.d_var_log_true.len()
+            || log_false.len() != self.d_var_log_false.len()
         {
             return Err(XlogError::Kernel(format!(
                 "Weight length mismatch: got (true={}, false={}), expected (true={}, false={})",
@@ -500,7 +516,12 @@ where
     let device = ctx.device.inner();
     let kernel = device
         .get_func(CIRCUIT_MODULE, kernel_name)
-        .ok_or_else(|| XlogError::Kernel(format!("Kernel {} not found in {}", kernel_name, CIRCUIT_MODULE)))?;
+        .ok_or_else(|| {
+            XlogError::Kernel(format!(
+                "Kernel {} not found in {}",
+                kernel_name, CIRCUIT_MODULE
+            ))
+        })?;
 
     let block_size = 256u32;
     let num_blocks = (num_level_nodes + block_size - 1) / block_size;
@@ -1157,7 +1178,8 @@ pub fn numerical_gradient(
     let values_plus = run_tiny_xgcf_forward(ctx, &spec_plus)?;
     let values_minus = run_tiny_xgcf_forward(ctx, &spec_minus)?;
 
-    let grad_true = (values_plus[spec.root as usize] - values_minus[spec.root as usize]) / (2.0 * eps);
+    let grad_true =
+        (values_plus[spec.root as usize] - values_minus[spec.root as usize]) / (2.0 * eps);
 
     let mut spec_plus = spec.clone();
     let mut spec_minus = spec.clone();
@@ -1167,7 +1189,8 @@ pub fn numerical_gradient(
     let values_plus = run_tiny_xgcf_forward(ctx, &spec_plus)?;
     let values_minus = run_tiny_xgcf_forward(ctx, &spec_minus)?;
 
-    let grad_false = (values_plus[spec.root as usize] - values_minus[spec.root as usize]) / (2.0 * eps);
+    let grad_false =
+        (values_plus[spec.root as usize] - values_minus[spec.root as usize]) / (2.0 * eps);
 
     Ok((grad_true, grad_false))
 }

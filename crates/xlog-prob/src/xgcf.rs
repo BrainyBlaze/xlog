@@ -124,7 +124,11 @@ impl Xgcf {
                         }
                         let var = lit.unsigned_abs();
                         let (t, f) = var_log_weights(var);
-                        if lit > 0 { t } else { f }
+                        if lit > 0 {
+                            t
+                        } else {
+                            f
+                        }
                     }
                     XgcfNodeType::And => {
                         let c0 = self.child_offsets[idx] as usize;
@@ -273,7 +277,11 @@ impl Xgcf {
                         }
                         let var = lit.unsigned_abs();
                         let (t, f) = var_log_weights[var as usize];
-                        if lit > 0 { t } else { f }
+                        if lit > 0 {
+                            t
+                        } else {
+                            f
+                        }
                     }
                     XgcfNodeType::And => {
                         let c0 = self.child_offsets[idx] as usize;
@@ -857,8 +865,7 @@ impl<'a> XgcfSmoothBuilder<'a> {
                         let new_false = if missing.is_empty() {
                             child_false_new
                         } else {
-                            let mut and_children: Vec<u32> =
-                                Vec::with_capacity(1 + missing.len());
+                            let mut and_children: Vec<u32> = Vec::with_capacity(1 + missing.len());
                             and_children.push(child_false_new);
                             for &v in &missing {
                                 let v_usize = v as usize;
@@ -873,8 +880,7 @@ impl<'a> XgcfSmoothBuilder<'a> {
                         let new_true = if missing.is_empty() {
                             child_true_new
                         } else {
-                            let mut and_children: Vec<u32> =
-                                Vec::with_capacity(1 + missing.len());
+                            let mut and_children: Vec<u32> = Vec::with_capacity(1 + missing.len());
                             and_children.push(child_true_new);
                             for &v in &missing {
                                 let v_usize = v as usize;
@@ -1084,10 +1090,7 @@ impl<'a> XgcfBuilder<'a> {
             return Ok(idx);
         }
         let kind = self.ddnnf.node_kind(node_id).ok_or_else(|| {
-            XlogError::Compilation(format!(
-                "XGCF build error: unknown DDNNF node {}",
-                node_id
-            ))
+            XlogError::Compilation(format!("XGCF build error: unknown DDNNF node {}", node_id))
         })?;
 
         let idx = match kind {
@@ -1115,16 +1118,10 @@ impl<'a> XgcfBuilder<'a> {
                 })?;
                 if out.len() == 2 {
                     let e0 = self.ddnnf.edge(out[0]).ok_or_else(|| {
-                        XlogError::Compilation(format!(
-                            "XGCF build error: missing edge {}",
-                            out[0]
-                        ))
+                        XlogError::Compilation(format!("XGCF build error: missing edge {}", out[0]))
                     })?;
                     let e1 = self.ddnnf.edge(out[1]).ok_or_else(|| {
-                        XlogError::Compilation(format!(
-                            "XGCF build error: missing edge {}",
-                            out[1]
-                        ))
+                        XlogError::Compilation(format!("XGCF build error: missing edge {}", out[1]))
                     })?;
 
                     if let Some((var, edge_true, edge_false)) = infer_decision_var(e0, e1)? {
@@ -1315,8 +1312,7 @@ fn infer_decision_var(e0: &DdnnfEdge, e1: &DdnnfEdge) -> Result<Option<(u32, usi
                 if prev != sign {
                     return Err(XlogError::Compilation(format!(
                         "XGCF build error: conflicting literals {} and {} in same branch",
-                        var,
-                        lit
+                        var, lit
                     )));
                 }
             }

@@ -513,7 +513,11 @@ impl Program {
     /// # Arguments
     /// * `other` - The program to merge from
     /// * `imported_items` - Optional set of specific items to import. If None, imports all public items.
-    pub fn merge_from(&mut self, other: &Program, imported_items: Option<&std::collections::HashSet<String>>) {
+    pub fn merge_from(
+        &mut self,
+        other: &Program,
+        imported_items: Option<&std::collections::HashSet<String>>,
+    ) {
         use std::collections::HashSet;
 
         // Track which predicates are private in the source

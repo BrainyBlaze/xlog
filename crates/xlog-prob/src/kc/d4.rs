@@ -91,7 +91,9 @@ impl D4Compiler {
                     let is_text_file_busy = e.raw_os_error() == Some(26);
                     if is_text_file_busy && attempt < 7 {
                         last_spawn_err = Some(e);
-                        std::thread::sleep(std::time::Duration::from_millis(10 * (attempt as u64 + 1)));
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            10 * (attempt as u64 + 1),
+                        ));
                         continue;
                     }
                     return Err(XlogError::Execution(format!(
@@ -135,15 +137,15 @@ impl D4Compiler {
 }
 
 #[cfg(test)]
-    mod tests {
-        use super::*;
-        use crate::kc::ddnnf::DecisionDnnf;
-        use crate::xgcf::Xgcf;
-        use std::fs;
-        use std::fs::OpenOptions;
-        use std::os::unix::fs::PermissionsExt;
-        use std::path::{Path, PathBuf};
-        use std::time::Duration;
+mod tests {
+    use super::*;
+    use crate::kc::ddnnf::DecisionDnnf;
+    use crate::xgcf::Xgcf;
+    use std::fs;
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
 
     fn make_temp_dir(prefix: &str) -> PathBuf {
         let pid = std::process::id();
@@ -216,8 +218,8 @@ EOF
     }
 
     #[test]
-        fn test_d4_compile_reports_failure() {
-            let dir = make_temp_dir("xlog-d4-fail-test");
+    fn test_d4_compile_reports_failure() {
+        let dir = make_temp_dir("xlog-d4-fail-test");
 
         let d4_path = dir.join("d4");
         write_executable_script(
@@ -237,17 +239,17 @@ exit 7
         let msg = err.to_string();
         assert!(msg.contains("boom"), "msg={}", msg);
 
-            fs::remove_dir_all(&dir).ok();
-        }
+        fs::remove_dir_all(&dir).ok();
+    }
 
-        #[test]
-        fn test_d4_compile_retries_text_file_busy() {
-            let dir = make_temp_dir("xlog-d4-busy-test");
+    #[test]
+    fn test_d4_compile_retries_text_file_busy() {
+        let dir = make_temp_dir("xlog-d4-busy-test");
 
-            let d4_path = dir.join("d4");
-            write_executable_script(
-                &d4_path,
-                r#"#!/usr/bin/env bash
+        let d4_path = dir.join("d4");
+        write_executable_script(
+            &d4_path,
+            r#"#!/usr/bin/env bash
 set -euo pipefail
 out=""
 for arg in "$@"; do
@@ -267,24 +269,24 @@ f 3 0
 1 3 -1 0
 EOF
 "#,
-            );
+        );
 
-            let cnf_path = dir.join("in.cnf");
-            fs::write(&cnf_path, "c test\np cnf 1 1\n1 0\n").unwrap();
-            let out_path = dir.join("out.nnf");
+        let cnf_path = dir.join("in.cnf");
+        fs::write(&cnf_path, "c test\np cnf 1 1\n1 0\n").unwrap();
+        let out_path = dir.join("out.nnf");
 
-            let hold = OpenOptions::new().write(true).open(&d4_path).unwrap();
-            let release = std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(50));
-                drop(hold);
-            });
+        let hold = OpenOptions::new().write(true).open(&d4_path).unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            drop(hold);
+        });
 
-            let compiler = D4Compiler::new(d4_path);
-            let result = compiler.compile_ddnnf(&cnf_path, &out_path);
+        let compiler = D4Compiler::new(d4_path);
+        let result = compiler.compile_ddnnf(&cnf_path, &out_path);
 
-            release.join().unwrap();
-            result.unwrap();
+        release.join().unwrap();
+        result.unwrap();
 
-            fs::remove_dir_all(&dir).ok();
-        }
+        fs::remove_dir_all(&dir).ok();
     }
+}

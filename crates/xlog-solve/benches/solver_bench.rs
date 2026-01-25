@@ -148,16 +148,10 @@ fn bench_solve_random_3sat(c: &mut Criterion) {
         let instance = generate_random_3sat(*num_vars, num_clauses, 42);
 
         group.throughput(Throughput::Elements(*num_vars as u64));
-        group.bench_with_input(
-            BenchmarkId::new("vars", num_vars),
-            num_vars,
-            |b, _| {
-                let solver = Solver::with_config_cpu(
-                    SolverConfig::default().with_max_iterations(1000),
-                );
-                b.iter(|| solver.solve(black_box(instance.clone())));
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("vars", num_vars), num_vars, |b, _| {
+            let solver = Solver::with_config_cpu(SolverConfig::default().with_max_iterations(1000));
+            b.iter(|| solver.solve(black_box(instance.clone())));
+        });
     }
 
     group.finish();
@@ -172,9 +166,7 @@ fn bench_solve_hard(c: &mut Criterion) {
 
         group.throughput(Throughput::Elements(*size as u64));
         group.bench_with_input(BenchmarkId::new("vars", size), size, |b, _| {
-            let solver = Solver::with_config_cpu(
-                SolverConfig::default().with_max_iterations(500),
-            );
+            let solver = Solver::with_config_cpu(SolverConfig::default().with_max_iterations(500));
             b.iter(|| solver.solve(black_box(instance.clone())));
         });
     }
@@ -288,29 +280,21 @@ fn bench_state_operations(c: &mut Criterion) {
     for size in [1000, 10000].iter() {
         let size_u32 = *size as u32;
 
-        group.bench_with_input(
-            BenchmarkId::new("reset_velocities", size),
-            size,
-            |b, _| {
-                let mut state = SolverState::new(size_u32);
-                state.velocities.fill(1.0);
-                b.iter(|| {
-                    black_box(&mut state).reset_velocities();
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("reset_velocities", size), size, |b, _| {
+            let mut state = SolverState::new(size_u32);
+            state.velocities.fill(1.0);
+            b.iter(|| {
+                black_box(&mut state).reset_velocities();
+            });
+        });
 
-        group.bench_with_input(
-            BenchmarkId::new("clear_gradients", size),
-            size,
-            |b, _| {
-                let mut state = SolverState::new(size_u32);
-                state.gradients.fill(1.0);
-                b.iter(|| {
-                    black_box(&mut state).clear_gradients();
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("clear_gradients", size), size, |b, _| {
+            let mut state = SolverState::new(size_u32);
+            state.gradients.fill(1.0);
+            b.iter(|| {
+                black_box(&mut state).clear_gradients();
+            });
+        });
     }
 
     group.finish();
@@ -418,7 +402,12 @@ fn bench_literal_operations(c: &mut Criterion) {
 
     group.bench_function("to_packed_batch", |b| {
         // Use a wider accumulator so debug builds don't panic on overflow.
-        b.iter(|| literals.iter().map(|lit| lit.to_packed() as u64).sum::<u64>());
+        b.iter(|| {
+            literals
+                .iter()
+                .map(|lit| lit.to_packed() as u64)
+                .sum::<u64>()
+        });
     });
 
     group.bench_function("from_packed_batch", |b| {
@@ -433,7 +422,12 @@ fn bench_literal_operations(c: &mut Criterion) {
 
     group.bench_function("to_dimacs_batch", |b| {
         // Use a wider accumulator so debug builds don't panic on overflow.
-        b.iter(|| literals.iter().map(|lit| lit.to_dimacs() as i64).sum::<i64>());
+        b.iter(|| {
+            literals
+                .iter()
+                .map(|lit| lit.to_dimacs() as i64)
+                .sum::<i64>()
+        });
     });
 
     group.finish();
@@ -451,10 +445,7 @@ criterion_group!(
     bench_solve_hard,
 );
 
-criterion_group!(
-    gradient_benches,
-    bench_gradient_computation,
-);
+criterion_group!(gradient_benches, bench_gradient_computation,);
 
 criterion_group!(
     state_benches,
@@ -470,4 +461,9 @@ criterion_group!(
     bench_literal_operations,
 );
 
-criterion_main!(solver_benches, gradient_benches, state_benches, instance_benches);
+criterion_main!(
+    solver_benches,
+    gradient_benches,
+    state_benches,
+    instance_benches
+);

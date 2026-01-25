@@ -10,7 +10,7 @@
 
 use crate::harness::{CategoryResult, TestContext, TestResult};
 use std::time::Instant;
-use xlog_core::{Schema, ScalarType};
+use xlog_core::{ScalarType, Schema};
 
 /// Run all tests in this category.
 pub fn run_all(ctx: &TestContext) -> CategoryResult {
@@ -125,10 +125,7 @@ fn test_zero_elements_no_launch(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "zero_elements_no_launch",
             start.elapsed(),
-            format!(
-                "Empty buffer has {} rows, expected 0",
-                empty.num_rows
-            ),
+            format!("Empty buffer has {} rows, expected 0", empty.num_rows),
         );
     }
 
@@ -199,7 +196,10 @@ fn test_single_element(ctx: &TestContext) -> TestResult {
 
     // Create buffer with exactly 1 element
     let data: Vec<u32> = vec![42];
-    let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -215,7 +215,10 @@ fn test_single_element(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "single_element",
             start.elapsed(),
-            format!("Single element buffer has {} rows, expected 1", buffer.num_rows),
+            format!(
+                "Single element buffer has {} rows, expected 1",
+                buffer.num_rows
+            ),
         );
     }
 
@@ -360,7 +363,10 @@ fn test_warp_boundary_sizes(ctx: &TestContext) -> TestResult {
         // Create reverse-sorted data: size-1, size-2, ..., 1, 0
         let data: Vec<u32> = (0..size as u32).rev().collect();
 
-        let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_slice(&data, schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -413,10 +419,7 @@ fn test_warp_boundary_sizes(ctx: &TestContext) -> TestResult {
                 return TestResult::error(
                     "warp_boundary_sizes",
                     start.elapsed(),
-                    format!(
-                        "Size {}: sorted[{}] = {}, expected {}",
-                        size, i, val, i
-                    ),
+                    format!("Size {}: sorted[{}] = {}, expected {}", size, i, val, i),
                 );
             }
         }
@@ -442,13 +445,18 @@ fn test_block_boundary_sizes(ctx: &TestContext) -> TestResult {
     let schema = Schema::new(vec![("val".to_string(), ScalarType::U32)]);
 
     // Use sizes from SizeGen - subset around block boundaries
-    let sizes: Vec<usize> = vec![255, 256, 257, 511, 512, 513, 767, 768, 769, 1023, 1024, 1025];
+    let sizes: Vec<usize> = vec![
+        255, 256, 257, 511, 512, 513, 767, 768, 769, 1023, 1024, 1025,
+    ];
 
     for size in sizes {
         // Create reverse-sorted data
         let data: Vec<u32> = (0..size as u32).rev().collect();
 
-        let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_slice(&data, schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -501,10 +509,7 @@ fn test_block_boundary_sizes(ctx: &TestContext) -> TestResult {
                 return TestResult::error(
                     "block_boundary_sizes",
                     start.elapsed(),
-                    format!(
-                        "Size {}: sorted[{}] = {}, expected {}",
-                        size, i, val, i
-                    ),
+                    format!("Size {}: sorted[{}] = {}, expected {}", size, i, val, i),
                 );
             }
         }
@@ -536,7 +541,10 @@ fn test_non_power_of_two_sizes(ctx: &TestContext) -> TestResult {
         // Create reverse-sorted data
         let data: Vec<u32> = (0..size as u32).rev().collect();
 
-        let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_slice(&data, schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -589,10 +597,7 @@ fn test_non_power_of_two_sizes(ctx: &TestContext) -> TestResult {
                 return TestResult::error(
                     "non_power_of_two_sizes",
                     start.elapsed(),
-                    format!(
-                        "Size {}: sorted[{}] = {}, expected {}",
-                        size, i, val, i
-                    ),
+                    format!("Size {}: sorted[{}] = {}, expected {}", size, i, val, i),
                 );
             }
         }
@@ -622,7 +627,10 @@ fn test_large_grid_sizes(ctx: &TestContext) -> TestResult {
     // Create reverse-sorted data: size-1, size-2, ..., 1, 0
     let data: Vec<u32> = (0..size as u32).rev().collect();
 
-    let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -650,10 +658,7 @@ fn test_large_grid_sizes(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "large_grid_sizes",
             start.elapsed(),
-            format!(
-                "Sort returned {} rows, expected {}",
-                sorted.num_rows, size
-            ),
+            format!("Sort returned {} rows, expected {}", sorted.num_rows, size),
         );
     }
 
@@ -746,7 +751,10 @@ fn test_max_practical_size(ctx: &TestContext) -> TestResult {
     // This creates a pattern where values repeat: 0, 1, 2, ..., 999, 0, 1, 2, ...
     let data: Vec<u32> = (0..size).map(|i| (i % 1000) as u32).collect();
 
-    let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -774,10 +782,7 @@ fn test_max_practical_size(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "max_practical_size",
             start.elapsed(),
-            format!(
-                "Sort returned {} rows, expected {}",
-                sorted.num_rows, size
-            ),
+            format!("Sort returned {} rows, expected {}", sorted.num_rows, size),
         );
     }
 
@@ -812,10 +817,7 @@ fn test_max_practical_size(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "max_practical_size",
             start.elapsed(),
-            format!(
-                "Last element is {}, expected 999",
-                sorted_data[last_idx]
-            ),
+            format!("Last element is {}, expected 999", sorted_data[last_idx]),
         );
     }
 

@@ -1,6 +1,6 @@
 // crates/xlog-cuda/tests/filter_tests.rs
 use std::sync::Arc;
-use xlog_core::{MemoryBudget, Schema, ScalarType};
+use xlog_core::{MemoryBudget, ScalarType, Schema};
 use xlog_cuda::{CompareOp, CudaDevice, CudaKernelProvider, GpuMemoryManager};
 
 fn setup_provider() -> Option<CudaKernelProvider> {
@@ -114,7 +114,9 @@ fn test_filter_u32_large() {
     let col0: Vec<u32> = (0..300).collect();
     let schema = Schema::new(vec![("col0".to_string(), ScalarType::U32)]);
 
-    let buffer = provider.create_buffer_from_u32_slice(&col0, schema).unwrap();
+    let buffer = provider
+        .create_buffer_from_u32_slice(&col0, schema)
+        .unwrap();
     let result = provider.filter_u32_eq(&buffer, 0, 100);
 
     assert!(result.is_ok(), "Filter should work with > 256 rows");
@@ -132,7 +134,9 @@ fn test_filter_u32_all_ops() {
 
     let col0: Vec<u32> = vec![1, 2, 3, 4, 5];
     let schema = Schema::new(vec![("col0".to_string(), ScalarType::U32)]);
-    let buffer = provider.create_buffer_from_u32_slice(&col0, schema).unwrap();
+    let buffer = provider
+        .create_buffer_from_u32_slice(&col0, schema)
+        .unwrap();
 
     // Test Lt (less than 3): [1, 2]
     let filtered = provider.filter_u32(&buffer, 0, 3, CompareOp::Lt).unwrap();
@@ -158,22 +162,37 @@ fn test_filter_u32_all_ops() {
 // ============== F64 Filter Tests ==============
 
 /// Helper to create an F64 test buffer from a slice of f64 values
-fn create_f64_buffer(provider: &CudaKernelProvider, values: &[f64], name: &str) -> xlog_cuda::CudaBuffer {
+fn create_f64_buffer(
+    provider: &CudaKernelProvider,
+    values: &[f64],
+    name: &str,
+) -> xlog_cuda::CudaBuffer {
     let schema = Schema::new(vec![(name.to_string(), ScalarType::F64)]);
-    provider.create_buffer_from_f64_slice(values, schema).unwrap()
+    provider
+        .create_buffer_from_f64_slice(values, schema)
+        .unwrap()
 }
 
 /// Helper to download F64 column from GPU
-fn download_f64_column(provider: &CudaKernelProvider, buffer: &xlog_cuda::CudaBuffer, col_idx: usize) -> Vec<f64> {
+fn download_f64_column(
+    provider: &CudaKernelProvider,
+    buffer: &xlog_cuda::CudaBuffer,
+    col_idx: usize,
+) -> Vec<f64> {
     let col = buffer.column(col_idx).unwrap();
     if buffer.num_rows() == 0 {
         return vec![];
     }
     let num_bytes = (buffer.num_rows() as usize) * std::mem::size_of::<f64>();
     let mut bytes = vec![0u8; num_bytes];
-    provider.device().inner().dtoh_sync_copy_into(col, &mut bytes).unwrap();
+    provider
+        .device()
+        .inner()
+        .dtoh_sync_copy_into(col, &mut bytes)
+        .unwrap();
 
-    bytes.chunks_exact(8)
+    bytes
+        .chunks_exact(8)
         .map(|c| f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
         .collect()
 }
@@ -240,7 +259,9 @@ fn test_filter_i32_u64_f32_bool_and_column_column_compare() {
     let buf_f32 = provider
         .create_buffer_from_f32_slice(&[1.0, -1.5, 2.5], schema_f32)
         .unwrap();
-    let filtered_f32 = provider.filter_f32(&buf_f32, 0, 0.0, CompareOp::Gt).unwrap();
+    let filtered_f32 = provider
+        .filter_f32(&buf_f32, 0, 0.0, CompareOp::Gt)
+        .unwrap();
     let vals_f32 = provider.download_column_f32(&filtered_f32, 0).unwrap();
     assert_eq!(vals_f32.len(), 2);
 
@@ -248,7 +269,9 @@ fn test_filter_i32_u64_f32_bool_and_column_column_compare() {
     let buf_bool = provider
         .create_buffer_from_u8_slice(&[0, 1, 1, 0], schema_bool)
         .unwrap();
-    let filtered_bool = provider.filter_bool(&buf_bool, 0, true, CompareOp::Eq).unwrap();
+    let filtered_bool = provider
+        .filter_bool(&buf_bool, 0, true, CompareOp::Eq)
+        .unwrap();
     let vals_bool = provider.download_column_u8(&filtered_bool, 0).unwrap();
     assert_eq!(vals_bool, vec![1, 1]);
 
@@ -339,8 +362,13 @@ fn test_filter_f64_type_validation() {
     // Create a U32 buffer and try to filter with F64 - should fail
     let col0: Vec<u32> = vec![1, 2, 3];
     let schema = Schema::new(vec![("col0".to_string(), ScalarType::U32)]);
-    let buffer = provider.create_buffer_from_u32_slice(&col0, schema).unwrap();
+    let buffer = provider
+        .create_buffer_from_u32_slice(&col0, schema)
+        .unwrap();
 
     let result = provider.filter_f64(&buffer, 0, 2.0, CompareOp::Eq);
-    assert!(result.is_err(), "Should fail when filtering U32 column with F64 filter");
+    assert!(
+        result.is_err(),
+        "Should fail when filtering U32 column with F64 filter"
+    );
 }

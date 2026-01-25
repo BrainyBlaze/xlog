@@ -2,7 +2,7 @@
 //! Tests for GPU-native set operations (union, diff)
 
 use std::sync::Arc;
-use xlog_core::{MemoryBudget, Schema, ScalarType};
+use xlog_core::{MemoryBudget, ScalarType, Schema};
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 
 fn setup_provider() -> Option<CudaKernelProvider> {
@@ -406,8 +406,12 @@ fn test_union_u64() {
     let a_vals: Vec<u64> = vec![1, 2, 3];
     let b_vals: Vec<u64> = vec![2, 3, 4];
 
-    let a_buf = provider.create_buffer_from_u64_slice(&a_vals, schema.clone()).unwrap();
-    let b_buf = provider.create_buffer_from_u64_slice(&b_vals, schema).unwrap();
+    let a_buf = provider
+        .create_buffer_from_u64_slice(&a_vals, schema.clone())
+        .unwrap();
+    let b_buf = provider
+        .create_buffer_from_u64_slice(&b_vals, schema)
+        .unwrap();
 
     let result = provider.union_gpu(&a_buf, &b_buf).unwrap();
     assert_eq!(result.num_rows(), 4); // 1, 2, 3, 4
@@ -429,8 +433,12 @@ fn test_union_u64_with_duplicates() {
     let a_vals: Vec<u64> = vec![1, 1, 2];
     let b_vals: Vec<u64> = vec![2, 3, 3];
 
-    let a_buf = provider.create_buffer_from_u64_slice(&a_vals, schema.clone()).unwrap();
-    let b_buf = provider.create_buffer_from_u64_slice(&b_vals, schema).unwrap();
+    let a_buf = provider
+        .create_buffer_from_u64_slice(&a_vals, schema.clone())
+        .unwrap();
+    let b_buf = provider
+        .create_buffer_from_u64_slice(&b_vals, schema)
+        .unwrap();
 
     let result = provider.union_gpu(&a_buf, &b_buf).unwrap();
     assert_eq!(result.num_rows(), 3); // 1, 2, 3
@@ -451,7 +459,9 @@ fn test_union_u64_empty_a() {
     let b_vals: Vec<u64> = vec![1, 2, 3];
 
     let a_buf = provider.create_empty_buffer(schema.clone()).unwrap();
-    let b_buf = provider.create_buffer_from_u64_slice(&b_vals, schema).unwrap();
+    let b_buf = provider
+        .create_buffer_from_u64_slice(&b_vals, schema)
+        .unwrap();
 
     let result = provider.union_gpu(&a_buf, &b_buf).unwrap();
     assert_eq!(result.num_rows(), 3);
@@ -474,8 +484,12 @@ fn test_diff_u64() {
     let a_vals: Vec<u64> = vec![1, 2, 3, 4];
     let b_vals: Vec<u64> = vec![2, 4];
 
-    let a_buf = provider.create_buffer_from_u64_slice(&a_vals, schema.clone()).unwrap();
-    let b_buf = provider.create_buffer_from_u64_slice(&b_vals, schema).unwrap();
+    let a_buf = provider
+        .create_buffer_from_u64_slice(&a_vals, schema.clone())
+        .unwrap();
+    let b_buf = provider
+        .create_buffer_from_u64_slice(&b_vals, schema)
+        .unwrap();
 
     let result = provider.diff_gpu(&a_buf, &b_buf).unwrap();
     assert_eq!(result.num_rows(), 2); // 1, 3
@@ -496,8 +510,12 @@ fn test_diff_u64_no_overlap() {
     let a_vals: Vec<u64> = vec![1, 2, 3];
     let b_vals: Vec<u64> = vec![4, 5, 6];
 
-    let a_buf = provider.create_buffer_from_u64_slice(&a_vals, schema.clone()).unwrap();
-    let b_buf = provider.create_buffer_from_u64_slice(&b_vals, schema).unwrap();
+    let a_buf = provider
+        .create_buffer_from_u64_slice(&a_vals, schema.clone())
+        .unwrap();
+    let b_buf = provider
+        .create_buffer_from_u64_slice(&b_vals, schema)
+        .unwrap();
 
     let result = provider.diff_gpu(&a_buf, &b_buf).unwrap();
     assert_eq!(result.num_rows(), 3); // All remain
@@ -518,8 +536,12 @@ fn test_diff_u64_complete_overlap() {
     let a_vals: Vec<u64> = vec![1, 2, 3];
     let b_vals: Vec<u64> = vec![1, 2, 3];
 
-    let a_buf = provider.create_buffer_from_u64_slice(&a_vals, schema.clone()).unwrap();
-    let b_buf = provider.create_buffer_from_u64_slice(&b_vals, schema).unwrap();
+    let a_buf = provider
+        .create_buffer_from_u64_slice(&a_vals, schema.clone())
+        .unwrap();
+    let b_buf = provider
+        .create_buffer_from_u64_slice(&b_vals, schema)
+        .unwrap();
 
     let result = provider.diff_gpu(&a_buf, &b_buf).unwrap();
     assert_eq!(result.num_rows(), 0); // All removed
@@ -536,7 +558,9 @@ fn test_diff_u64_empty_b() {
 
     let a_vals: Vec<u64> = vec![1, 2, 3];
 
-    let a_buf = provider.create_buffer_from_u64_slice(&a_vals, schema.clone()).unwrap();
+    let a_buf = provider
+        .create_buffer_from_u64_slice(&a_vals, schema.clone())
+        .unwrap();
     let b_buf = provider.create_empty_buffer(schema).unwrap();
 
     let result = provider.diff_gpu(&a_buf, &b_buf).unwrap();
@@ -564,7 +588,9 @@ fn test_union_i64() {
     let a = provider
         .create_buffer_from_i64_slice(&a_vals, schema.clone())
         .unwrap();
-    let b = provider.create_buffer_from_i64_slice(&b_vals, schema).unwrap();
+    let b = provider
+        .create_buffer_from_i64_slice(&b_vals, schema)
+        .unwrap();
 
     let result = provider.union_gpu(&a, &b).unwrap();
     assert_eq!(result.num_rows(), 6); // -10, -5, 0, 5, 10, 20
@@ -585,7 +611,9 @@ fn test_union_i64_with_duplicates() {
     let a = provider
         .create_buffer_from_i64_slice(&a_vals, schema.clone())
         .unwrap();
-    let b = provider.create_buffer_from_i64_slice(&b_vals, schema).unwrap();
+    let b = provider
+        .create_buffer_from_i64_slice(&b_vals, schema)
+        .unwrap();
 
     let result = provider.union_gpu(&a, &b).unwrap();
     assert_eq!(result.num_rows(), 3); // -5, 0, 5
@@ -608,7 +636,9 @@ fn test_union_f64() {
     let a = provider
         .create_buffer_from_f64_slice(&a_vals, schema.clone())
         .unwrap();
-    let b = provider.create_buffer_from_f64_slice(&b_vals, schema).unwrap();
+    let b = provider
+        .create_buffer_from_f64_slice(&b_vals, schema)
+        .unwrap();
 
     let result = provider.union_gpu(&a, &b).unwrap();
     assert_eq!(result.num_rows(), 4); // 1.5, 2.5, 3.5, 4.5
@@ -629,7 +659,9 @@ fn test_union_f64_with_duplicates() {
     let a = provider
         .create_buffer_from_f64_slice(&a_vals, schema.clone())
         .unwrap();
-    let b = provider.create_buffer_from_f64_slice(&b_vals, schema).unwrap();
+    let b = provider
+        .create_buffer_from_f64_slice(&b_vals, schema)
+        .unwrap();
 
     let result = provider.union_gpu(&a, &b).unwrap();
     assert_eq!(result.num_rows(), 3); // 1.5, 2.5, 3.5
@@ -652,7 +684,9 @@ fn test_diff_i64() {
     let a = provider
         .create_buffer_from_i64_slice(&a_vals, schema.clone())
         .unwrap();
-    let b = provider.create_buffer_from_i64_slice(&b_vals, schema).unwrap();
+    let b = provider
+        .create_buffer_from_i64_slice(&b_vals, schema)
+        .unwrap();
 
     let result = provider.diff_gpu(&a, &b).unwrap();
     assert_eq!(result.num_rows(), 3); // -10, 0, 10
@@ -673,7 +707,9 @@ fn test_diff_i64_no_overlap() {
     let a = provider
         .create_buffer_from_i64_slice(&a_vals, schema.clone())
         .unwrap();
-    let b = provider.create_buffer_from_i64_slice(&b_vals, schema).unwrap();
+    let b = provider
+        .create_buffer_from_i64_slice(&b_vals, schema)
+        .unwrap();
 
     let result = provider.diff_gpu(&a, &b).unwrap();
     assert_eq!(result.num_rows(), 3); // All remain: -10, -5, 0
@@ -696,7 +732,9 @@ fn test_diff_f64() {
     let a = provider
         .create_buffer_from_f64_slice(&a_vals, schema.clone())
         .unwrap();
-    let b = provider.create_buffer_from_f64_slice(&b_vals, schema).unwrap();
+    let b = provider
+        .create_buffer_from_f64_slice(&b_vals, schema)
+        .unwrap();
 
     let result = provider.diff_gpu(&a, &b).unwrap();
     assert_eq!(result.num_rows(), 2); // 1.5, 3.5
@@ -717,7 +755,9 @@ fn test_diff_f64_no_overlap() {
     let a = provider
         .create_buffer_from_f64_slice(&a_vals, schema.clone())
         .unwrap();
-    let b = provider.create_buffer_from_f64_slice(&b_vals, schema).unwrap();
+    let b = provider
+        .create_buffer_from_f64_slice(&b_vals, schema)
+        .unwrap();
 
     let result = provider.diff_gpu(&a, &b).unwrap();
     assert_eq!(result.num_rows(), 3); // All remain: 1.5, 2.5, 3.5

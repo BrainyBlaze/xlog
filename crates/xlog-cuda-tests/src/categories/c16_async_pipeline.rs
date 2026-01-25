@@ -4,9 +4,9 @@
 //! operation dependencies, synchronization, error propagation, and
 //! large batch operations.
 
-use crate::harness::{CategoryResult, TestResult, TestContext};
+use crate::harness::{CategoryResult, TestContext, TestResult};
 use std::time::Instant;
-use xlog_core::{Schema, ScalarType};
+use xlog_core::{ScalarType, Schema};
 
 /// Run all tests in this category.
 pub fn run_all(ctx: &TestContext) -> CategoryResult {
@@ -39,7 +39,10 @@ fn test_sequential_operations(ctx: &TestContext) -> TestResult {
         // Create unique data for each iteration
         let data: Vec<u32> = (0..SIZE).map(|j| ((j + i * 1000) % 10000) as u32).collect();
 
-        let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_slice(&data, schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -80,10 +83,7 @@ fn test_sequential_operations(ctx: &TestContext) -> TestResult {
                 return TestResult::error(
                     "test_sequential_operations",
                     start.elapsed(),
-                    format!(
-                        "Iteration {}: sort incorrect at index {}",
-                        i, j
-                    ),
+                    format!("Iteration {}: sort incorrect at index {}", i, j),
                 );
             }
         }
@@ -91,7 +91,10 @@ fn test_sequential_operations(ctx: &TestContext) -> TestResult {
 
     // Run many sequential filter operations
     let filter_data: Vec<u32> = (0..SIZE as u32).collect();
-    let filter_buffer = match ctx.provider.create_buffer_from_u32_slice(&filter_data, schema.clone()) {
+    let filter_buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&filter_data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -105,7 +108,9 @@ fn test_sequential_operations(ctx: &TestContext) -> TestResult {
     for i in 0..NUM_OPERATIONS {
         // Create different masks each time
         let threshold = (i * 10) % SIZE;
-        let mask: Vec<u8> = (0..SIZE).map(|j| if j >= threshold { 1 } else { 0 }).collect();
+        let mask: Vec<u8> = (0..SIZE)
+            .map(|j| if j >= threshold { 1 } else { 0 })
+            .collect();
         let expected_count = SIZE - threshold;
 
         let filtered = match ctx.provider.filter_by_mask(&filter_buffer, &mask) {
@@ -155,7 +160,10 @@ fn test_operation_dependencies(ctx: &TestContext) -> TestResult {
     // Create initial data
     let data: Vec<u32> = (0..SIZE).map(|i| ((i * 17 + 13) % 1000) as u32).collect();
 
-    let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -202,7 +210,10 @@ fn test_operation_dependencies(ctx: &TestContext) -> TestResult {
     }
 
     // Step 2: Filter (keep values >= 500)
-    let step2_mask: Vec<u8> = step1_data.iter().map(|&v| if v >= 500 { 1 } else { 0 }).collect();
+    let step2_mask: Vec<u8> = step1_data
+        .iter()
+        .map(|&v| if v >= 500 { 1 } else { 0 })
+        .collect();
     let step2 = match ctx.provider.filter_by_mask(&step1, &step2_mask) {
         Ok(f) => f,
         Err(e) => {
@@ -260,7 +271,10 @@ fn test_operation_dependencies(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let step4_mask: Vec<u8> = step3_data.iter().map(|&v| if v < 800 { 1 } else { 0 }).collect();
+    let step4_mask: Vec<u8> = step3_data
+        .iter()
+        .map(|&v| if v < 800 { 1 } else { 0 })
+        .collect();
     let step4 = match ctx.provider.filter_by_mask(&step3, &step4_mask) {
         Ok(f) => f,
         Err(e) => {
@@ -372,7 +386,10 @@ fn test_sync_between_operations(ctx: &TestContext) -> TestResult {
     // Create data
     let data: Vec<u32> = (0..SIZE).map(|i| ((i * 31337) % 1000000) as u32).collect();
 
-    let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -428,7 +445,10 @@ fn test_sync_between_operations(ctx: &TestContext) -> TestResult {
     }
 
     // Operation 2: Filter (use result of operation 1)
-    let mask: Vec<u8> = sorted_data.iter().map(|&v| if v % 2 == 0 { 1 } else { 0 }).collect();
+    let mask: Vec<u8> = sorted_data
+        .iter()
+        .map(|&v| if v % 2 == 0 { 1 } else { 0 })
+        .collect();
     let filtered = match ctx.provider.filter_by_mask(&sorted, &mask) {
         Ok(f) => f,
         Err(e) => {
@@ -481,7 +501,10 @@ fn test_sync_between_operations(ctx: &TestContext) -> TestResult {
     let keys: Vec<u32> = (0..1000u32).collect();
     let vals: Vec<u32> = keys.iter().map(|&k| k * 10).collect();
 
-    let buffer2 = match ctx.provider.create_buffer_from_u32_columns(&[&keys, &vals], schema2.clone()) {
+    let buffer2 = match ctx
+        .provider
+        .create_buffer_from_u32_columns(&[&keys, &vals], schema2.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -584,7 +607,10 @@ fn test_error_propagation(ctx: &TestContext) -> TestResult {
 
     // Test 1: Empty buffer operations should work
     let empty_data: Vec<u32> = vec![];
-    let empty_buffer = match ctx.provider.create_buffer_from_u32_slice(&empty_data, schema.clone()) {
+    let empty_buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&empty_data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -611,13 +637,19 @@ fn test_error_propagation(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_error_propagation",
             start.elapsed(),
-            format!("Sort on empty buffer returned {} rows, expected 0", sorted_empty.num_rows),
+            format!(
+                "Sort on empty buffer returned {} rows, expected 0",
+                sorted_empty.num_rows
+            ),
         );
     }
 
     // Test 2: Mismatched mask length should error
     let data: Vec<u32> = vec![1, 2, 3, 4, 5];
-    let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -667,7 +699,10 @@ fn test_error_propagation(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_error_propagation",
             start.elapsed(),
-            format!("Valid filter returned {} rows, expected 3", filtered.num_rows),
+            format!(
+                "Valid filter returned {} rows, expected 3",
+                filtered.num_rows
+            ),
         );
     }
 
@@ -680,7 +715,10 @@ fn test_error_propagation(ctx: &TestContext) -> TestResult {
     let keys: Vec<u32> = (0..100u32).collect();
     let vals: Vec<u32> = keys.iter().map(|&k| k * 2).collect();
 
-    let buffer2 = match ctx.provider.create_buffer_from_u32_columns(&[&keys, &vals], schema2.clone()) {
+    let buffer2 = match ctx
+        .provider
+        .create_buffer_from_u32_columns(&[&keys, &vals], schema2.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -717,7 +755,10 @@ fn test_error_propagation(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_error_propagation",
             start.elapsed(),
-            format!("Sort after recovery has {} rows, expected 100", sorted_keys.len()),
+            format!(
+                "Sort after recovery has {} rows, expected 100",
+                sorted_keys.len()
+            ),
         );
     }
 
@@ -750,9 +791,14 @@ fn test_large_batch_operations(ctx: &TestContext) -> TestResult {
 
     // Batch 1: Many sort operations
     for i in 0..BATCH_SIZE {
-        let data: Vec<u32> = (0..OPERATION_SIZE).map(|j| ((j * (i + 1) * 7) % 100000) as u32).collect();
+        let data: Vec<u32> = (0..OPERATION_SIZE)
+            .map(|j| ((j * (i + 1) * 7) % 100000) as u32)
+            .collect();
 
-        let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_slice(&data, schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -810,7 +856,10 @@ fn test_large_batch_operations(ctx: &TestContext) -> TestResult {
 
     // Batch 2: Many filter operations
     let filter_data: Vec<u32> = (0..OPERATION_SIZE as u32).collect();
-    let filter_buffer = match ctx.provider.create_buffer_from_u32_slice(&filter_data, schema.clone()) {
+    let filter_buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&filter_data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -824,7 +873,10 @@ fn test_large_batch_operations(ctx: &TestContext) -> TestResult {
     for i in 0..BATCH_SIZE {
         // Different filter patterns
         let threshold = (i * OPERATION_SIZE / BATCH_SIZE) as u32;
-        let mask: Vec<u8> = filter_data.iter().map(|&v| if v >= threshold { 1 } else { 0 }).collect();
+        let mask: Vec<u8> = filter_data
+            .iter()
+            .map(|&v| if v >= threshold { 1 } else { 0 })
+            .collect();
 
         let filtered = match ctx.provider.filter_by_mask(&filter_buffer, &mask) {
             Ok(f) => f,
@@ -863,10 +915,15 @@ fn test_large_batch_operations(ctx: &TestContext) -> TestResult {
     for i in 0..BATCH_SIZE / 2 {
         // Create data with varying duplicate patterns
         let num_unique = 100 + i * 10;
-        let keys: Vec<u32> = (0..OPERATION_SIZE).map(|j| (j % num_unique) as u32).collect();
+        let keys: Vec<u32> = (0..OPERATION_SIZE)
+            .map(|j| (j % num_unique) as u32)
+            .collect();
         let vals: Vec<u32> = (0..OPERATION_SIZE as u32).collect();
 
-        let buffer = match ctx.provider.create_buffer_from_u32_columns(&[&keys, &vals], schema2.clone()) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_columns(&[&keys, &vals], schema2.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -927,10 +984,10 @@ fn test_large_batch_operations(ctx: &TestContext) -> TestResult {
         let right_keys: Vec<u32> = (0..300u32).map(|j| j * 2).collect();
         let right_vals: Vec<u32> = right_keys.iter().map(|&k| k * 10).collect();
 
-        let left_buffer = match ctx.provider.create_buffer_from_u32_columns(
-            &[&left_keys, &left_vals],
-            left_schema.clone(),
-        ) {
+        let left_buffer = match ctx
+            .provider
+            .create_buffer_from_u32_columns(&[&left_keys, &left_vals], left_schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -941,10 +998,10 @@ fn test_large_batch_operations(ctx: &TestContext) -> TestResult {
             }
         };
 
-        let right_buffer = match ctx.provider.create_buffer_from_u32_columns(
-            &[&right_keys, &right_vals],
-            right_schema.clone(),
-        ) {
+        let right_buffer = match ctx
+            .provider
+            .create_buffer_from_u32_columns(&[&right_keys, &right_vals], right_schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -955,7 +1012,10 @@ fn test_large_batch_operations(ctx: &TestContext) -> TestResult {
             }
         };
 
-        let joined = match ctx.provider.hash_join(&left_buffer, &right_buffer, &[0], &[0]) {
+        let joined = match ctx
+            .provider
+            .hash_join(&left_buffer, &right_buffer, &[0], &[0])
+        {
             Ok(j) => j,
             Err(e) => {
                 return TestResult::error(

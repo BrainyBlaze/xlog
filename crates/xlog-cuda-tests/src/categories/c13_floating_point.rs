@@ -3,9 +3,9 @@
 //! Tests floating-point special values and precision including infinity,
 //! NaN handling, zero signs, subnormal values, and precision extremes.
 
-use crate::harness::{CategoryResult, TestResult, TestContext};
+use crate::harness::{CategoryResult, TestContext, TestResult};
 use std::time::Instant;
-use xlog_core::{Schema, ScalarType};
+use xlog_core::{ScalarType, Schema};
 
 /// Run all tests in this category.
 pub fn run_all(ctx: &TestContext) -> CategoryResult {
@@ -46,7 +46,10 @@ fn test_f64_infinity(ctx: &TestContext) -> TestResult {
         f64::MIN,
     ];
 
-    let buffer = match ctx.provider.create_buffer_from_f64_slice(&data, schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_f64_slice(&data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -102,7 +105,9 @@ fn test_f64_infinity(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Sort order incorrect at index {}: {} should be >= {}",
-                    i, sorted_data[i], sorted_data[i - 1]
+                    i,
+                    sorted_data[i],
+                    sorted_data[i - 1]
                 ),
             );
         }
@@ -211,7 +216,10 @@ fn test_f64_nan_handling(ctx: &TestContext) -> TestResult {
         f64::INFINITY,
     ];
 
-    let buffer = match ctx.provider.create_buffer_from_f64_slice(&data, schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_f64_slice(&data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -266,16 +274,17 @@ fn test_f64_nan_handling(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_f64_nan_handling",
             start.elapsed(),
-            format!(
-                "NaN count changed: {} -> {}",
-                expected_nan_count, nan_count
-            ),
+            format!("NaN count changed: {} -> {}", expected_nan_count, nan_count),
         );
     }
 
     // Verify non-NaN values are sorted correctly
     // Using total_cmp which treats NaN consistently
-    let non_nan: Vec<f64> = sorted_data.iter().copied().filter(|v| !v.is_nan()).collect();
+    let non_nan: Vec<f64> = sorted_data
+        .iter()
+        .copied()
+        .filter(|v| !v.is_nan())
+        .collect();
     for i in 1..non_nan.len() {
         if non_nan[i].total_cmp(&non_nan[i - 1]) == std::cmp::Ordering::Less {
             return TestResult::error(
@@ -283,7 +292,9 @@ fn test_f64_nan_handling(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Non-NaN sort order incorrect at index {}: {} should be >= {}",
-                    i, non_nan[i], non_nan[i - 1]
+                    i,
+                    non_nan[i],
+                    non_nan[i - 1]
                 ),
             );
         }
@@ -330,20 +341,12 @@ fn test_f64_zero_signs(ctx: &TestContext) -> TestResult {
     let schema = Schema::new(vec![("val".to_string(), ScalarType::F64)]);
 
     // Create data with positive and negative zeros
-    let data: Vec<f64> = vec![
-        0.0,
-        -0.0,
-        1.0,
-        -0.0,
-        0.0,
-        -1.0,
-        0.0,
-        -0.0,
-        0.5,
-        -0.5,
-    ];
+    let data: Vec<f64> = vec![0.0, -0.0, 1.0, -0.0, 0.0, -1.0, 0.0, -0.0, 0.5, -0.5];
 
-    let buffer = match ctx.provider.create_buffer_from_f64_slice(&data, schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_f64_slice(&data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -399,7 +402,9 @@ fn test_f64_zero_signs(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Sort order incorrect at index {}: {} should be >= {}",
-                    i, sorted_data[i], sorted_data[i - 1]
+                    i,
+                    sorted_data[i],
+                    sorted_data[i - 1]
                 ),
             );
         }
@@ -434,8 +439,14 @@ fn test_f64_zero_signs(ctx: &TestContext) -> TestResult {
     }
 
     // Count negative zeros using bit representation
-    let neg_zero_count_original = data.iter().filter(|&&v| v.to_bits() == (-0.0f64).to_bits()).count();
-    let neg_zero_count_sorted = sorted_data.iter().filter(|&&v| v.to_bits() == (-0.0f64).to_bits()).count();
+    let neg_zero_count_original = data
+        .iter()
+        .filter(|&&v| v.to_bits() == (-0.0f64).to_bits())
+        .count();
+    let neg_zero_count_sorted = sorted_data
+        .iter()
+        .filter(|&&v| v.to_bits() == (-0.0f64).to_bits())
+        .count();
 
     // The count of negative zeros should be preserved
     if neg_zero_count_sorted != neg_zero_count_original {
@@ -478,10 +489,10 @@ fn test_f64_subnormal(ctx: &TestContext) -> TestResult {
         0.0,
         smallest_subnormal,
         mid_subnormal,
-        f64::MIN_POSITIVE,              // Smallest normal
-        f64::MIN_POSITIVE * 0.5,        // Subnormal (half of min normal)
-        f64::MIN_POSITIVE * 0.25,       // Smaller subnormal
-        f64::MIN_POSITIVE * 0.125,      // Even smaller subnormal
+        f64::MIN_POSITIVE,         // Smallest normal
+        f64::MIN_POSITIVE * 0.5,   // Subnormal (half of min normal)
+        f64::MIN_POSITIVE * 0.25,  // Smaller subnormal
+        f64::MIN_POSITIVE * 0.125, // Even smaller subnormal
         -smallest_subnormal,
         -mid_subnormal,
         -f64::MIN_POSITIVE,
@@ -489,7 +500,10 @@ fn test_f64_subnormal(ctx: &TestContext) -> TestResult {
         -1.0,
     ];
 
-    let buffer = match ctx.provider.create_buffer_from_f64_slice(&data, schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_f64_slice(&data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -545,15 +559,23 @@ fn test_f64_subnormal(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Sort order incorrect at index {}: {:e} should be >= {:e}",
-                    i, sorted_data[i], sorted_data[i - 1]
+                    i,
+                    sorted_data[i],
+                    sorted_data[i - 1]
                 ),
             );
         }
     }
 
     // Verify subnormal values are preserved (not flushed to zero)
-    let subnormal_count_original = data.iter().filter(|&&v| v != 0.0 && v.abs() < f64::MIN_POSITIVE).count();
-    let subnormal_count_sorted = sorted_data.iter().filter(|&&v| v != 0.0 && v.abs() < f64::MIN_POSITIVE).count();
+    let subnormal_count_original = data
+        .iter()
+        .filter(|&&v| v != 0.0 && v.abs() < f64::MIN_POSITIVE)
+        .count();
+    let subnormal_count_sorted = sorted_data
+        .iter()
+        .filter(|&&v| v != 0.0 && v.abs() < f64::MIN_POSITIVE)
+        .count();
 
     if subnormal_count_sorted != subnormal_count_original {
         return TestResult::error(
@@ -572,7 +594,10 @@ fn test_f64_subnormal(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_f64_subnormal",
             start.elapsed(),
-            format!("Smallest subnormal {:e} not found in output", smallest_subnormal),
+            format!(
+                "Smallest subnormal {:e} not found in output",
+                smallest_subnormal
+            ),
         );
     }
 
@@ -597,15 +622,15 @@ fn test_f64_precision_extremes(ctx: &TestContext) -> TestResult {
 
     // Create data spanning the full f64 range
     let data: Vec<f64> = vec![
-        f64::MAX,                       // Largest positive
-        f64::MIN,                       // Most negative (largest magnitude negative)
-        f64::MIN_POSITIVE,              // Smallest positive normal
-        -f64::MIN_POSITIVE,             // Smallest magnitude negative normal
-        1e308,                          // Very large
-        -1e308,                         // Very large negative
-        1e-308,                         // Very small positive
-        -1e-308,                        // Very small negative
-        1.0,                            // Unity
+        f64::MAX,           // Largest positive
+        f64::MIN,           // Most negative (largest magnitude negative)
+        f64::MIN_POSITIVE,  // Smallest positive normal
+        -f64::MIN_POSITIVE, // Smallest magnitude negative normal
+        1e308,              // Very large
+        -1e308,             // Very large negative
+        1e-308,             // Very small positive
+        -1e-308,            // Very small negative
+        1.0,                // Unity
         -1.0,
         0.0,
         1e100,
@@ -617,7 +642,10 @@ fn test_f64_precision_extremes(ctx: &TestContext) -> TestResult {
         f64::MIN * 0.99,
     ];
 
-    let buffer = match ctx.provider.create_buffer_from_f64_slice(&data, schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_f64_slice(&data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -673,7 +701,9 @@ fn test_f64_precision_extremes(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Sort order incorrect at index {}: {:e} should be >= {:e}",
-                    i, sorted_data[i], sorted_data[i - 1]
+                    i,
+                    sorted_data[i],
+                    sorted_data[i - 1]
                 ),
             );
         }
@@ -735,7 +765,7 @@ fn test_f64_sort_ordering(ctx: &TestContext) -> TestResult {
     let data: Vec<f64> = vec![
         // Negative special values
         f64::NEG_INFINITY,
-        f64::MIN,                       // Most negative finite
+        f64::MIN, // Most negative finite
         -f64::MAX * 0.5,
         -1e200,
         -1e100,
@@ -750,11 +780,11 @@ fn test_f64_sort_ordering(ctx: &TestContext) -> TestResult {
         -1e-100,
         -1e-200,
         -f64::MIN_POSITIVE,
-        -f64::MIN_POSITIVE * 0.5,       // Negative subnormal
+        -f64::MIN_POSITIVE * 0.5, // Negative subnormal
         -0.0,
         // Positive values
         0.0,
-        f64::MIN_POSITIVE * 0.5,        // Positive subnormal
+        f64::MIN_POSITIVE * 0.5, // Positive subnormal
         f64::MIN_POSITIVE,
         1e-200,
         1e-100,
@@ -781,7 +811,10 @@ fn test_f64_sort_ordering(ctx: &TestContext) -> TestResult {
         shuffled.swap(i, j);
     }
 
-    let buffer = match ctx.provider.create_buffer_from_f64_slice(&shuffled, schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_f64_slice(&shuffled, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -838,7 +871,9 @@ fn test_f64_sort_ordering(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Total ordering violated at index {}: {:e} < {:e}",
-                    i, sorted_data[i], sorted_data[i - 1]
+                    i,
+                    sorted_data[i],
+                    sorted_data[i - 1]
                 ),
             );
         }

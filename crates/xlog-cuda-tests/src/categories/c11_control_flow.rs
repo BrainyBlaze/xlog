@@ -6,7 +6,7 @@
 
 use crate::harness::{CategoryResult, TestContext, TestResult};
 use std::time::Instant;
-use xlog_core::{Schema, ScalarType};
+use xlog_core::{ScalarType, Schema};
 
 /// Run all tests in this category.
 pub fn run_all(ctx: &TestContext) -> CategoryResult {
@@ -40,7 +40,10 @@ fn test_filter_all_pass(ctx: &TestContext) -> TestResult {
         // Create sequential data
         let data: Vec<u32> = (0..size as u32).collect();
 
-        let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_slice(&data, schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -124,7 +127,10 @@ fn test_filter_none_pass(ctx: &TestContext) -> TestResult {
         // Create sequential data
         let data: Vec<u32> = (0..size as u32).collect();
 
-        let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_slice(&data, schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -188,7 +194,10 @@ fn test_filter_half_pass(ctx: &TestContext) -> TestResult {
         // Create sequential data
         let data: Vec<u32> = (0..size as u32).collect();
 
-        let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_slice(&data, schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -200,7 +209,9 @@ fn test_filter_half_pass(ctx: &TestContext) -> TestResult {
         };
 
         // Keep first half
-        let mask: Vec<u8> = (0..size).map(|i| if i < size / 2 { 1 } else { 0 }).collect();
+        let mask: Vec<u8> = (0..size)
+            .map(|i| if i < size / 2 { 1 } else { 0 })
+            .collect();
         let expected_count = size / 2;
 
         let filtered = match ctx.provider.filter_by_mask(&buffer, &mask) {
@@ -275,7 +286,10 @@ fn test_sparse_predicate(ctx: &TestContext) -> TestResult {
         // Create sequential data
         let data: Vec<u32> = (0..size as u32).collect();
 
-        let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_slice(&data, schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -287,7 +301,9 @@ fn test_sparse_predicate(ctx: &TestContext) -> TestResult {
         };
 
         // Keep every 100th element (~1% selectivity)
-        let mask: Vec<u8> = (0..size).map(|i| if i % 100 == 0 { 1 } else { 0 }).collect();
+        let mask: Vec<u8> = (0..size)
+            .map(|i| if i % 100 == 0 { 1 } else { 0 })
+            .collect();
         let expected_count: usize = mask.iter().map(|&m| m as usize).sum();
 
         let filtered = match ctx.provider.filter_by_mask(&buffer, &mask) {
@@ -366,7 +382,10 @@ fn test_dense_predicate(ctx: &TestContext) -> TestResult {
         // Create sequential data
         let data: Vec<u32> = (0..size as u32).collect();
 
-        let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_slice(&data, schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -378,7 +397,9 @@ fn test_dense_predicate(ctx: &TestContext) -> TestResult {
         };
 
         // Keep all except every 100th element (~99% selectivity)
-        let mask: Vec<u8> = (0..size).map(|i| if i % 100 != 0 { 1 } else { 0 }).collect();
+        let mask: Vec<u8> = (0..size)
+            .map(|i| if i % 100 != 0 { 1 } else { 0 })
+            .collect();
         let expected_count: usize = mask.iter().map(|&m| m as usize).sum();
 
         let filtered = match ctx.provider.filter_by_mask(&buffer, &mask) {
@@ -466,7 +487,10 @@ fn test_alternating_predicate(ctx: &TestContext) -> TestResult {
         // Create sequential data
         let data: Vec<u32> = (0..size as u32).collect();
 
-        let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_slice(&data, schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -609,7 +633,10 @@ fn test_random_predicate_distribution(ctx: &TestContext) -> TestResult {
         // Create sequential data
         let data: Vec<u32> = (0..size as u32).collect();
 
-        let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_slice(&data, schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -625,7 +652,11 @@ fn test_random_predicate_distribution(ctx: &TestContext) -> TestResult {
         let mask1: Vec<u8> = (0..size)
             .map(|i| {
                 let hash = ((i as u64 * 1103515245 + 12345) >> 16) & 0x7FFF;
-                if hash % 2 == 0 { 1 } else { 0 }
+                if hash % 2 == 0 {
+                    1
+                } else {
+                    0
+                }
             })
             .collect();
         let expected_count1: usize = mask1.iter().map(|&m| m as usize).sum();
@@ -685,7 +716,11 @@ fn test_random_predicate_distribution(ctx: &TestContext) -> TestResult {
                     .wrapping_mul(6364136223846793005)
                     .wrapping_add(1442695040888963407);
                 let digit = (hash >> 40) % 10;
-                if digit < 3 { 1 } else { 0 }
+                if digit < 3 {
+                    1
+                } else {
+                    0
+                }
             })
             .collect();
         let expected_count2: usize = mask2.iter().map(|&m| m as usize).sum();
@@ -716,7 +751,11 @@ fn test_random_predicate_distribution(ctx: &TestContext) -> TestResult {
         let mask3: Vec<u8> = (0..size)
             .map(|i| {
                 let group = (i / 17) % 5; // Groups of 17, 5 phases
-                if group < 2 { 1 } else { 0 } // 2/5 = 40% selectivity
+                if group < 2 {
+                    1
+                } else {
+                    0
+                } // 2/5 = 40% selectivity
             })
             .collect();
         let expected_count3: usize = mask3.iter().map(|&m| m as usize).sum();

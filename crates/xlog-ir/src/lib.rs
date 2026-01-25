@@ -1,9 +1,9 @@
 //! Intermediate representations for XLOG
 
-pub mod rir;
 pub mod metadata;
 pub mod plan;
+pub mod rir;
 
-pub use rir::{RirNode, JoinType, Expr, CompareOp, ConstValue, ProjectExpr};
-pub use metadata::{RirMeta, LayoutHint, SkewSignature};
-pub use plan::{ExecutionPlan, Scc, Stratum, CompiledRule, PlanBuilder};
+pub use metadata::{LayoutHint, RirMeta, SkewSignature};
+pub use plan::{CompiledRule, ExecutionPlan, PlanBuilder, Scc, Stratum};
+pub use rir::{CompareOp, ConstValue, Expr, JoinType, ProjectExpr, RirNode};

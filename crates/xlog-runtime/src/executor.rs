@@ -97,7 +97,9 @@ impl JoinIndexCache {
     }
 
     fn evict_until_fits(&mut self, additional_bytes: u64) {
-        while !self.entries.is_empty() && self.total_bytes.saturating_add(additional_bytes) > self.max_bytes {
+        while !self.entries.is_empty()
+            && self.total_bytes.saturating_add(additional_bytes) > self.max_bytes
+        {
             let mut oldest_key: Option<JoinIndexKey> = None;
             let mut oldest_clock = u64::MAX;
 
@@ -182,8 +184,8 @@ impl Executor {
     /// Create a new executor with the given kernel provider and runtime config
     pub fn new_with_config(provider: Arc<CudaKernelProvider>, config: RuntimeConfig) -> Self {
         const DEFAULT_JOIN_INDEX_CACHE_BYTES: u64 = 256 * 1024 * 1024;
-        let max_index_cache_bytes = (provider.memory().budget().device_bytes / 4)
-            .min(DEFAULT_JOIN_INDEX_CACHE_BYTES);
+        let max_index_cache_bytes =
+            (provider.memory().budget().device_bytes / 4).min(DEFAULT_JOIN_INDEX_CACHE_BYTES);
         Self {
             provider,
             store: RelationStore::new(),
@@ -202,7 +204,8 @@ impl Executor {
     pub fn set_profiling(&mut self, enabled: bool) {
         self.profiler = Profiler::new(enabled);
         if enabled {
-            self.profiler.set_memory_budget(self.provider.memory().budget().device_bytes);
+            self.profiler
+                .set_memory_budget(self.provider.memory().budget().device_bytes);
         }
     }
 
@@ -346,12 +349,9 @@ impl Executor {
             return Ok(());
         }
 
-        let has_deletes = deltas.values().any(|d| {
-            d.delete
-                .as_ref()
-                .map(|b| !b.is_empty())
-                .unwrap_or(false)
-        });
+        let has_deletes = deltas
+            .values()
+            .any(|d| d.delete.as_ref().map(|b| !b.is_empty()).unwrap_or(false));
 
         // 1) Apply EDB updates.
         for (name, delta) in deltas {
@@ -456,9 +456,9 @@ impl Executor {
                         || contains_non_monotonic_ops(left)
                         || contains_non_monotonic_ops(right)
                 }
-                RirNode::Fixpoint { base, recursive, .. } => {
-                    contains_non_monotonic_ops(base) || contains_non_monotonic_ops(recursive)
-                }
+                RirNode::Fixpoint {
+                    base, recursive, ..
+                } => contains_non_monotonic_ops(base) || contains_non_monotonic_ops(recursive),
             }
         }
 
@@ -592,7 +592,8 @@ impl Executor {
                 let result = self.execute_scan(*rel)?;
                 if let Some(start) = start {
                     let mem = self.provider.memory().allocated_bytes();
-                    self.profiler.record_op("scan", 0, result.num_rows(), start, mem);
+                    self.profiler
+                        .record_op("scan", 0, result.num_rows(), start, mem);
                     self.profiler.record_peak_memory(mem);
                 }
                 Ok(result)
@@ -605,7 +606,8 @@ impl Executor {
                 let result = self.execute_filter(&input_buf, predicate)?;
                 if let Some(start) = start {
                     let mem = self.provider.memory().allocated_bytes();
-                    self.profiler.record_op("filter", input_rows, result.num_rows(), start, mem);
+                    self.profiler
+                        .record_op("filter", input_rows, result.num_rows(), start, mem);
                     self.profiler.record_peak_memory(mem);
                 }
                 Ok(result)
@@ -618,7 +620,8 @@ impl Executor {
                 let result = self.execute_project(&input_buf, columns)?;
                 if let Some(start) = start {
                     let mem = self.provider.memory().allocated_bytes();
-                    self.profiler.record_op("project", input_rows, result.num_rows(), start, mem);
+                    self.profiler
+                        .record_op("project", input_rows, result.num_rows(), start, mem);
                     self.profiler.record_peak_memory(mem);
                 }
                 Ok(result)
@@ -648,7 +651,8 @@ impl Executor {
                 )?;
                 if let Some(start) = start {
                     let mem = self.provider.memory().allocated_bytes();
-                    self.profiler.record_op("join", input_rows, result.num_rows(), start, mem);
+                    self.profiler
+                        .record_op("join", input_rows, result.num_rows(), start, mem);
                     self.profiler.record_peak_memory(mem);
                 }
                 Ok(result)
@@ -665,7 +669,8 @@ impl Executor {
                 let result = self.execute_groupby(&input_buf, key_cols, aggs)?;
                 if let Some(start) = start {
                     let mem = self.provider.memory().allocated_bytes();
-                    self.profiler.record_op("groupby", input_rows, result.num_rows(), start, mem);
+                    self.profiler
+                        .record_op("groupby", input_rows, result.num_rows(), start, mem);
                     self.profiler.record_peak_memory(mem);
                 }
                 Ok(result)
@@ -683,7 +688,8 @@ impl Executor {
                 let result = self.execute_union(&buffers)?;
                 if let Some(start) = start {
                     let mem = self.provider.memory().allocated_bytes();
-                    self.profiler.record_op("union", input_rows, result.num_rows(), start, mem);
+                    self.profiler
+                        .record_op("union", input_rows, result.num_rows(), start, mem);
                     self.profiler.record_peak_memory(mem);
                 }
                 Ok(result)
@@ -696,7 +702,8 @@ impl Executor {
                 let result = self.execute_distinct(&input_buf, key_cols)?;
                 if let Some(start) = start {
                     let mem = self.provider.memory().allocated_bytes();
-                    self.profiler.record_op("dedup", input_rows, result.num_rows(), start, mem);
+                    self.profiler
+                        .record_op("dedup", input_rows, result.num_rows(), start, mem);
                     self.profiler.record_peak_memory(mem);
                 }
                 Ok(result)
@@ -710,7 +717,8 @@ impl Executor {
                 let result = self.execute_diff(&left_buf, &right_buf)?;
                 if let Some(start) = start {
                     let mem = self.provider.memory().allocated_bytes();
-                    self.profiler.record_op("diff", input_rows, result.num_rows(), start, mem);
+                    self.profiler
+                        .record_op("diff", input_rows, result.num_rows(), start, mem);
                     self.profiler.record_peak_memory(mem);
                 }
                 Ok(result)
@@ -757,7 +765,13 @@ impl Executor {
                             let merged = self.provider.union(existing, &result)?;
                             if let Some(start) = start {
                                 let mem = self.provider.memory().allocated_bytes();
-                                self.profiler.record_op("union", union_input_rows, merged.num_rows(), start, mem);
+                                self.profiler.record_op(
+                                    "union",
+                                    union_input_rows,
+                                    merged.num_rows(),
+                                    start,
+                                    mem,
+                                );
                                 self.profiler.record_peak_memory(mem);
                             }
 
@@ -770,7 +784,13 @@ impl Executor {
                                 let result = self.provider.dedup(&merged, &key_cols)?;
                                 if let Some(start) = start {
                                     let mem = self.provider.memory().allocated_bytes();
-                                    self.profiler.record_op("dedup", dedup_input_rows, result.num_rows(), start, mem);
+                                    self.profiler.record_op(
+                                        "dedup",
+                                        dedup_input_rows,
+                                        result.num_rows(),
+                                        start,
+                                        mem,
+                                    );
                                     self.profiler.record_peak_memory(mem);
                                 }
                                 result
@@ -786,7 +806,13 @@ impl Executor {
                                 let deduped = self.provider.dedup(&result, &key_cols)?;
                                 if let Some(start) = start {
                                     let mem = self.provider.memory().allocated_bytes();
-                                    self.profiler.record_op("dedup", dedup_input_rows, deduped.num_rows(), start, mem);
+                                    self.profiler.record_op(
+                                        "dedup",
+                                        dedup_input_rows,
+                                        deduped.num_rows(),
+                                        start,
+                                        mem,
+                                    );
                                     self.profiler.record_peak_memory(mem);
                                 }
                                 deduped
@@ -863,7 +889,8 @@ impl Executor {
                 let merged = self.provider.union(acc, &result)?;
                 if let Some(start) = start {
                     let mem = self.provider.memory().allocated_bytes();
-                    self.profiler.record_op("union", union_input, merged.num_rows(), start, mem);
+                    self.profiler
+                        .record_op("union", union_input, merged.num_rows(), start, mem);
                     self.profiler.record_peak_memory(mem);
                 }
                 *acc = merged;
@@ -892,7 +919,8 @@ impl Executor {
             let merged = self.provider.union(&full_old, &derived)?;
             if let Some(start) = start {
                 let mem = self.provider.memory().allocated_bytes();
-                self.profiler.record_op("union", union_input, merged.num_rows(), start, mem);
+                self.profiler
+                    .record_op("union", union_input, merged.num_rows(), start, mem);
                 self.profiler.record_peak_memory(mem);
             }
 
@@ -905,7 +933,8 @@ impl Executor {
                 let deduped = self.provider.dedup(&merged, &key_cols)?;
                 if let Some(start) = start {
                     let mem = self.provider.memory().allocated_bytes();
-                    self.profiler.record_op("dedup", dedup_input, deduped.num_rows(), start, mem);
+                    self.profiler
+                        .record_op("dedup", dedup_input, deduped.num_rows(), start, mem);
                     self.profiler.record_peak_memory(mem);
                 }
                 deduped
@@ -923,7 +952,8 @@ impl Executor {
                 let diffed = self.provider.diff_gpu(&full_new, &full_old)?;
                 if let Some(start) = start {
                     let mem = self.provider.memory().allocated_bytes();
-                    self.profiler.record_op("diff", diff_input, diffed.num_rows(), start, mem);
+                    self.profiler
+                        .record_op("diff", diff_input, diffed.num_rows(), start, mem);
                     self.profiler.record_peak_memory(mem);
                 }
                 diffed
@@ -1009,7 +1039,13 @@ impl Executor {
                         let merged = self.provider.union(&acc, &out)?;
                         if let Some(start) = start {
                             let mem = self.provider.memory().allocated_bytes();
-                            self.profiler.record_op("union", union_input, merged.num_rows(), start, mem);
+                            self.profiler.record_op(
+                                "union",
+                                union_input,
+                                merged.num_rows(),
+                                start,
+                                mem,
+                            );
                             self.profiler.record_peak_memory(mem);
                         }
                         merged
@@ -1025,7 +1061,13 @@ impl Executor {
                         let merged = self.provider.union(acc, &rule_out)?;
                         if let Some(start) = start {
                             let mem = self.provider.memory().allocated_bytes();
-                            self.profiler.record_op("union", union_input, merged.num_rows(), start, mem);
+                            self.profiler.record_op(
+                                "union",
+                                union_input,
+                                merged.num_rows(),
+                                start,
+                                mem,
+                            );
                             self.profiler.record_peak_memory(mem);
                         }
                         *acc = merged;
@@ -1054,7 +1096,13 @@ impl Executor {
                         let diffed = self.provider.diff_gpu(&delta_raw, full)?;
                         if let Some(start) = start {
                             let mem = self.provider.memory().allocated_bytes();
-                            self.profiler.record_op("diff", diff_input, diffed.num_rows(), start, mem);
+                            self.profiler.record_op(
+                                "diff",
+                                diff_input,
+                                diffed.num_rows(),
+                                start,
+                                mem,
+                            );
                             self.profiler.record_peak_memory(mem);
                         }
                         diffed
@@ -1103,7 +1151,8 @@ impl Executor {
                 let merged = self.provider.union(&full_old, &delta)?;
                 if let Some(start) = start {
                     let mem = self.provider.memory().allocated_bytes();
-                    self.profiler.record_op("union", union_input, merged.num_rows(), start, mem);
+                    self.profiler
+                        .record_op("union", union_input, merged.num_rows(), start, mem);
                     self.profiler.record_peak_memory(mem);
                 }
 
@@ -1116,7 +1165,13 @@ impl Executor {
                     let deduped = self.provider.dedup(&merged, &key_cols)?;
                     if let Some(start) = start {
                         let mem = self.provider.memory().allocated_bytes();
-                        self.profiler.record_op("dedup", dedup_input, deduped.num_rows(), start, mem);
+                        self.profiler.record_op(
+                            "dedup",
+                            dedup_input,
+                            deduped.num_rows(),
+                            start,
+                            mem,
+                        );
                         self.profiler.record_peak_memory(mem);
                     }
                     deduped
@@ -1433,14 +1488,17 @@ impl Executor {
 
         match expr {
             Expr::Column(col_idx) => {
-                let col_type = input.schema().column_type(*col_idx).ok_or_else(|| {
-                    XlogError::Execution(format!("Column {} not found", col_idx))
-                })?;
+                let col_type = input
+                    .schema()
+                    .column_type(*col_idx)
+                    .ok_or_else(|| XlogError::Execution(format!("Column {} not found", col_idx)))?;
                 if col_type == ScalarType::Bool {
                     let col_buf = self.wrap_single_column(input, *col_idx)?;
-                    let zero = self
-                        .provider
-                        .create_constant_column(&[0u8], ScalarType::Bool, input.num_rows())?;
+                    let zero = self.provider.create_constant_column(
+                        &[0u8],
+                        ScalarType::Bool,
+                        input.num_rows(),
+                    )?;
                     return self.compare_buffers_mask(&col_buf, &zero, CompareOp::Ne);
                 }
                 self.mask_filled(n, 1)
@@ -1575,8 +1633,13 @@ impl Executor {
             .ok_or_else(|| XlogError::Execution("filter compare kernel not found".into()))?;
         let config = LaunchConfig::for_num_elems(num_rows);
 
-        unsafe { func.clone().launch(config, (left_col, right_col, num_rows, op as u8, &mut d_mask)) }
-            .map_err(|e| XlogError::Execution(format!("filter compare failed: {}", e)))?;
+        unsafe {
+            func.clone().launch(
+                config,
+                (left_col, right_col, num_rows, op as u8, &mut d_mask),
+            )
+        }
+        .map_err(|e| XlogError::Execution(format!("filter compare failed: {}", e)))?;
 
         Ok(d_mask)
     }
@@ -2181,7 +2244,8 @@ impl Executor {
                 let else_buf = self.evaluate_arith_expr(else_expr, input)?;
 
                 // Select based on mask
-                self.provider.select_columns(&mask_buffer, &then_buf, &else_buf)
+                self.provider
+                    .select_columns(&mask_buffer, &then_buf, &else_buf)
             }
             _ => Err(XlogError::Execution(format!(
                 "Unsupported expression in arithmetic evaluation: {:?}",
@@ -2200,9 +2264,10 @@ impl Executor {
             ConstValue::F32(v) => (v.to_le_bytes().to_vec(), ScalarType::F32),
             ConstValue::F64(v) => (v.to_le_bytes().to_vec(), ScalarType::F64),
             ConstValue::Bool(v) => (vec![if *v { 1u8 } else { 0u8 }], ScalarType::Bool),
-            ConstValue::Symbol(s) => {
-                (xlog_core::symbol::intern(s).to_le_bytes().to_vec(), ScalarType::Symbol)
-            }
+            ConstValue::Symbol(s) => (
+                xlog_core::symbol::intern(s).to_le_bytes().to_vec(),
+                ScalarType::Symbol,
+            ),
         }
     }
 
@@ -2342,9 +2407,8 @@ impl Executor {
             };
             let has_room = remaining_bytes >= est_index_bytes.saturating_add(budget_bytes / 10);
 
-            let should_index = build_heat >= heat_threshold
-                && est_index_bytes <= cache_budget
-                && has_room;
+            let should_index =
+                build_heat >= heat_threshold && est_index_bytes <= cache_budget && has_room;
 
             if let Some(build_name) = self.get_rel_name(build_rel).map(|s| s.to_string()) {
                 if let Some(version) = self.store.version(&build_name) {
@@ -2378,7 +2442,9 @@ impl Executor {
                                         None,
                                     )?;
                                     self.join_index_cache.insert(key, index);
-                                    if let Some(stats) = self.stats.get_relation_stats_mut(build_rel) {
+                                    if let Some(stats) =
+                                        self.stats.get_relation_stats_mut(build_rel)
+                                    {
                                         stats.has_index = true;
                                     }
                                     out = Some(joined);
@@ -2395,9 +2461,10 @@ impl Executor {
 
         let out = match out {
             Some(buf) => buf,
-            None => self
-                .provider
-                .hash_join_v2(left, right, left_keys, right_keys, cuda_join_type)?,
+            None => {
+                self.provider
+                    .hash_join_v2(left, right, left_keys, right_keys, cuda_join_type)?
+            }
         };
 
         if let (Some(l), Some(r)) = (left_rel, right_rel) {
@@ -3704,7 +3771,10 @@ mod tests {
             .apply_deltas_and_recompute(&plan, &deltas)
             .expect("apply_deltas_and_recompute");
 
-        let out = executor.store().get("output").expect("output missing after recompute");
+        let out = executor
+            .store()
+            .get("output")
+            .expect("output missing after recompute");
         let vals = read_buffer_u32(&executor, out, 0);
         assert_eq!(vals, vec![3, 4, 10]);
     }
@@ -3797,7 +3867,10 @@ mod tests {
             .apply_deltas_and_recompute(&plan, &deltas)
             .expect("apply_deltas_and_recompute");
 
-        let out = executor.store().get("out").expect("out missing after update");
+        let out = executor
+            .store()
+            .get("out")
+            .expect("out missing after update");
         let vals = read_buffer_u32(&executor, out, 0);
         assert_eq!(vals, vec![1, 3, 5]);
     }

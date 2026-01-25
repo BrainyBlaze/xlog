@@ -6,9 +6,9 @@
 //!
 //! Total ordering: -Inf < negative numbers < -0.0 < +0.0 < positive numbers < +Inf < NaN
 
-use crate::harness::{CategoryResult, TestResult, TestContext};
+use crate::harness::{CategoryResult, TestContext, TestResult};
 use std::time::Instant;
-use xlog_core::{Schema, ScalarType};
+use xlog_core::{ScalarType, Schema};
 use xlog_cuda::CompareOp;
 
 /// Run all tests in this category.
@@ -43,15 +43,18 @@ fn test_f64_nan_greater_than_inf(ctx: &TestContext) -> TestResult {
 
     // Data with NaN and Infinity values
     let data: Vec<f64> = vec![
-        f64::NAN,           // index 0: should pass (NaN > Inf)
-        f64::INFINITY,      // index 1: should NOT pass (Inf > Inf is false)
-        f64::NEG_INFINITY,  // index 2: should NOT pass
-        f64::NAN,           // index 3: should pass (NaN > Inf)
-        1.0,                // index 4: should NOT pass
-        f64::INFINITY,      // index 5: should NOT pass
+        f64::NAN,          // index 0: should pass (NaN > Inf)
+        f64::INFINITY,     // index 1: should NOT pass (Inf > Inf is false)
+        f64::NEG_INFINITY, // index 2: should NOT pass
+        f64::NAN,          // index 3: should pass (NaN > Inf)
+        1.0,               // index 4: should NOT pass
+        f64::INFINITY,     // index 5: should NOT pass
     ];
 
-    let buffer = match ctx.provider.create_buffer_from_f64_slice(&data, schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_f64_slice(&data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -65,7 +68,10 @@ fn test_f64_nan_greater_than_inf(ctx: &TestContext) -> TestResult {
     // Filter for values > INFINITY using CompareOp::Gt
     // Under total ordering, NaN > INFINITY is TRUE
     // So 2 NaN values should pass this filter
-    let filtered = match ctx.provider.filter_f64(&buffer, 0, f64::INFINITY, CompareOp::Gt) {
+    let filtered = match ctx
+        .provider
+        .filter_f64(&buffer, 0, f64::INFINITY, CompareOp::Gt)
+    {
         Ok(f) => f,
         Err(e) => {
             return TestResult::error(
@@ -108,15 +114,18 @@ fn test_f64_negative_zero_less_than_positive_zero(ctx: &TestContext) -> TestResu
 
     // Data with negative and positive zeros
     let data: Vec<f64> = vec![
-        -0.0,   // index 0: should pass (-0.0 < +0.0)
-        0.0,    // index 1: should NOT pass (+0.0 < +0.0 is false)
-        -0.0,   // index 2: should pass (-0.0 < +0.0)
-        0.0,    // index 3: should NOT pass
-        1.0,    // index 4: should NOT pass
-        -1.0,   // index 5: should pass (-1.0 < +0.0)
+        -0.0, // index 0: should pass (-0.0 < +0.0)
+        0.0,  // index 1: should NOT pass (+0.0 < +0.0 is false)
+        -0.0, // index 2: should pass (-0.0 < +0.0)
+        0.0,  // index 3: should NOT pass
+        1.0,  // index 4: should NOT pass
+        -1.0, // index 5: should pass (-1.0 < +0.0)
     ];
 
-    let buffer = match ctx.provider.create_buffer_from_f64_slice(&data, schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_f64_slice(&data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -163,7 +172,10 @@ fn test_f64_negative_zero_less_than_positive_zero(ctx: &TestContext) -> TestResu
         );
     }
 
-    TestResult::passed("test_f64_negative_zero_less_than_positive_zero", start.elapsed())
+    TestResult::passed(
+        "test_f64_negative_zero_less_than_positive_zero",
+        start.elapsed(),
+    )
 }
 
 /// Test 3: f64 NaN == NaN should return FALSE, NaN != NaN should return TRUE (IEEE 754).
@@ -174,16 +186,12 @@ fn test_f64_nan_equality_ieee(ctx: &TestContext) -> TestResult {
     let schema = Schema::new(vec![("val".to_string(), ScalarType::F64)]);
 
     // Data with NaN values
-    let data: Vec<f64> = vec![
-        f64::NAN,
-        1.0,
-        f64::NAN,
-        2.0,
-        f64::NAN,
-        3.0,
-    ];
+    let data: Vec<f64> = vec![f64::NAN, 1.0, f64::NAN, 2.0, f64::NAN, 3.0];
 
-    let buffer = match ctx.provider.create_buffer_from_f64_slice(&data, schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_f64_slice(&data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -261,7 +269,10 @@ fn test_f64_nan_ordering_total(ctx: &TestContext) -> TestResult {
     // Data: just NaN values
     let data: Vec<f64> = vec![f64::NAN, f64::NAN, f64::NAN];
 
-    let buffer = match ctx.provider.create_buffer_from_f64_slice(&data, schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_f64_slice(&data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -372,16 +383,19 @@ fn test_f64_total_ordering_comprehensive(ctx: &TestContext) -> TestResult {
 
     // Data covering the full ordering spectrum
     let data: Vec<f64> = vec![
-        f64::NEG_INFINITY,  // index 0
-        -1.0,               // index 1
-        -0.0,               // index 2
-        0.0,                // index 3 (+0.0)
-        1.0,                // index 4
-        f64::INFINITY,      // index 5
-        f64::NAN,           // index 6
+        f64::NEG_INFINITY, // index 0
+        -1.0,              // index 1
+        -0.0,              // index 2
+        0.0,               // index 3 (+0.0)
+        1.0,               // index 4
+        f64::INFINITY,     // index 5
+        f64::NAN,          // index 6
     ];
 
-    let buffer = match ctx.provider.create_buffer_from_f64_slice(&data, schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_f64_slice(&data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -408,12 +422,18 @@ fn test_f64_total_ordering_comprehensive(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_f64_total_ordering_comprehensive",
             start.elapsed(),
-            format!("Expected 3 values < +0.0 (-Inf, -1.0, -0.0), got {}", lt_zero.num_rows()),
+            format!(
+                "Expected 3 values < +0.0 (-Inf, -1.0, -0.0), got {}",
+                lt_zero.num_rows()
+            ),
         );
     }
 
     // Test: values > +Inf should include only NaN = 1 value
-    let gt_inf = match ctx.provider.filter_f64(&buffer, 0, f64::INFINITY, CompareOp::Gt) {
+    let gt_inf = match ctx
+        .provider
+        .filter_f64(&buffer, 0, f64::INFINITY, CompareOp::Gt)
+    {
         Ok(f) => f,
         Err(e) => {
             return TestResult::error(
@@ -448,12 +468,18 @@ fn test_f64_total_ordering_comprehensive(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_f64_total_ordering_comprehensive",
             start.elapsed(),
-            format!("Expected 1 value >= NaN (only NaN itself), got {}", ge_nan.num_rows()),
+            format!(
+                "Expected 1 value >= NaN (only NaN itself), got {}",
+                ge_nan.num_rows()
+            ),
         );
     }
 
     // Test: values <= -Inf should include only -Inf = 1 value
-    let le_neg_inf = match ctx.provider.filter_f64(&buffer, 0, f64::NEG_INFINITY, CompareOp::Le) {
+    let le_neg_inf = match ctx
+        .provider
+        .filter_f64(&buffer, 0, f64::NEG_INFINITY, CompareOp::Le)
+    {
         Ok(f) => f,
         Err(e) => {
             return TestResult::error(
@@ -468,7 +494,10 @@ fn test_f64_total_ordering_comprehensive(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_f64_total_ordering_comprehensive",
             start.elapsed(),
-            format!("Expected 1 value <= -Inf (only -Inf itself), got {}", le_neg_inf.num_rows()),
+            format!(
+                "Expected 1 value <= -Inf (only -Inf itself), got {}",
+                le_neg_inf.num_rows()
+            ),
         );
     }
 
@@ -492,15 +521,18 @@ fn test_f32_nan_greater_than_inf(ctx: &TestContext) -> TestResult {
 
     // Data with NaN and Infinity values
     let data: Vec<f32> = vec![
-        f32::NAN,           // index 0: should pass (NaN > Inf)
-        f32::INFINITY,      // index 1: should NOT pass (Inf > Inf is false)
-        f32::NEG_INFINITY,  // index 2: should NOT pass
-        f32::NAN,           // index 3: should pass (NaN > Inf)
-        1.0f32,             // index 4: should NOT pass
-        f32::INFINITY,      // index 5: should NOT pass
+        f32::NAN,          // index 0: should pass (NaN > Inf)
+        f32::INFINITY,     // index 1: should NOT pass (Inf > Inf is false)
+        f32::NEG_INFINITY, // index 2: should NOT pass
+        f32::NAN,          // index 3: should pass (NaN > Inf)
+        1.0f32,            // index 4: should NOT pass
+        f32::INFINITY,     // index 5: should NOT pass
     ];
 
-    let buffer = match ctx.provider.create_buffer_from_f32_slice(&data, schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_f32_slice(&data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -514,7 +546,10 @@ fn test_f32_nan_greater_than_inf(ctx: &TestContext) -> TestResult {
     // Filter for values > INFINITY using CompareOp::Gt
     // Under total ordering, NaN > INFINITY is TRUE
     // So 2 NaN values should pass this filter
-    let filtered = match ctx.provider.filter_f32(&buffer, 0, f32::INFINITY, CompareOp::Gt) {
+    let filtered = match ctx
+        .provider
+        .filter_f32(&buffer, 0, f32::INFINITY, CompareOp::Gt)
+    {
         Ok(f) => f,
         Err(e) => {
             return TestResult::error(
@@ -557,15 +592,18 @@ fn test_f32_negative_zero_less_than_positive_zero(ctx: &TestContext) -> TestResu
 
     // Data with negative and positive zeros
     let data: Vec<f32> = vec![
-        -0.0f32,   // index 0: should pass (-0.0 < +0.0)
-        0.0f32,    // index 1: should NOT pass (+0.0 < +0.0 is false)
-        -0.0f32,   // index 2: should pass (-0.0 < +0.0)
-        0.0f32,    // index 3: should NOT pass
-        1.0f32,    // index 4: should NOT pass
-        -1.0f32,   // index 5: should pass (-1.0 < +0.0)
+        -0.0f32, // index 0: should pass (-0.0 < +0.0)
+        0.0f32,  // index 1: should NOT pass (+0.0 < +0.0 is false)
+        -0.0f32, // index 2: should pass (-0.0 < +0.0)
+        0.0f32,  // index 3: should NOT pass
+        1.0f32,  // index 4: should NOT pass
+        -1.0f32, // index 5: should pass (-1.0 < +0.0)
     ];
 
-    let buffer = match ctx.provider.create_buffer_from_f32_slice(&data, schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_f32_slice(&data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -612,7 +650,10 @@ fn test_f32_negative_zero_less_than_positive_zero(ctx: &TestContext) -> TestResu
         );
     }
 
-    TestResult::passed("test_f32_negative_zero_less_than_positive_zero", start.elapsed())
+    TestResult::passed(
+        "test_f32_negative_zero_less_than_positive_zero",
+        start.elapsed(),
+    )
 }
 
 /// Test 8: f32 NaN == NaN should return FALSE, NaN != NaN should return TRUE (IEEE 754).
@@ -623,16 +664,12 @@ fn test_f32_nan_equality_ieee(ctx: &TestContext) -> TestResult {
     let schema = Schema::new(vec![("val".to_string(), ScalarType::F32)]);
 
     // Data with NaN values
-    let data: Vec<f32> = vec![
-        f32::NAN,
-        1.0f32,
-        f32::NAN,
-        2.0f32,
-        f32::NAN,
-        3.0f32,
-    ];
+    let data: Vec<f32> = vec![f32::NAN, 1.0f32, f32::NAN, 2.0f32, f32::NAN, 3.0f32];
 
-    let buffer = match ctx.provider.create_buffer_from_f32_slice(&data, schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_f32_slice(&data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -710,7 +747,10 @@ fn test_f32_nan_ordering_total(ctx: &TestContext) -> TestResult {
     // Data: just NaN values
     let data: Vec<f32> = vec![f32::NAN, f32::NAN, f32::NAN];
 
-    let buffer = match ctx.provider.create_buffer_from_f32_slice(&data, schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_f32_slice(&data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -821,16 +861,19 @@ fn test_f32_total_ordering_comprehensive(ctx: &TestContext) -> TestResult {
 
     // Data covering the full ordering spectrum
     let data: Vec<f32> = vec![
-        f32::NEG_INFINITY,  // index 0
-        -1.0f32,            // index 1
-        -0.0f32,            // index 2
-        0.0f32,             // index 3 (+0.0)
-        1.0f32,             // index 4
-        f32::INFINITY,      // index 5
-        f32::NAN,           // index 6
+        f32::NEG_INFINITY, // index 0
+        -1.0f32,           // index 1
+        -0.0f32,           // index 2
+        0.0f32,            // index 3 (+0.0)
+        1.0f32,            // index 4
+        f32::INFINITY,     // index 5
+        f32::NAN,          // index 6
     ];
 
-    let buffer = match ctx.provider.create_buffer_from_f32_slice(&data, schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_f32_slice(&data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -857,12 +900,18 @@ fn test_f32_total_ordering_comprehensive(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_f32_total_ordering_comprehensive",
             start.elapsed(),
-            format!("Expected 3 values < +0.0 (-Inf, -1.0, -0.0), got {}", lt_zero.num_rows()),
+            format!(
+                "Expected 3 values < +0.0 (-Inf, -1.0, -0.0), got {}",
+                lt_zero.num_rows()
+            ),
         );
     }
 
     // Test: values > +Inf should include only NaN = 1 value
-    let gt_inf = match ctx.provider.filter_f32(&buffer, 0, f32::INFINITY, CompareOp::Gt) {
+    let gt_inf = match ctx
+        .provider
+        .filter_f32(&buffer, 0, f32::INFINITY, CompareOp::Gt)
+    {
         Ok(f) => f,
         Err(e) => {
             return TestResult::error(
@@ -897,12 +946,18 @@ fn test_f32_total_ordering_comprehensive(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_f32_total_ordering_comprehensive",
             start.elapsed(),
-            format!("Expected 1 value >= NaN (only NaN itself), got {}", ge_nan.num_rows()),
+            format!(
+                "Expected 1 value >= NaN (only NaN itself), got {}",
+                ge_nan.num_rows()
+            ),
         );
     }
 
     // Test: values <= -Inf should include only -Inf = 1 value
-    let le_neg_inf = match ctx.provider.filter_f32(&buffer, 0, f32::NEG_INFINITY, CompareOp::Le) {
+    let le_neg_inf = match ctx
+        .provider
+        .filter_f32(&buffer, 0, f32::NEG_INFINITY, CompareOp::Le)
+    {
         Ok(f) => f,
         Err(e) => {
             return TestResult::error(
@@ -917,7 +972,10 @@ fn test_f32_total_ordering_comprehensive(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_f32_total_ordering_comprehensive",
             start.elapsed(),
-            format!("Expected 1 value <= -Inf (only -Inf itself), got {}", le_neg_inf.num_rows()),
+            format!(
+                "Expected 1 value <= -Inf (only -Inf itself), got {}",
+                le_neg_inf.num_rows()
+            ),
         );
     }
 

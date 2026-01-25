@@ -63,7 +63,12 @@ impl OpStats {
     }
 
     /// Create OpStats for an operation with no memory tracking
-    pub fn timed(op_name: impl Into<String>, input_rows: u64, output_rows: u64, duration_us: u64) -> Self {
+    pub fn timed(
+        op_name: impl Into<String>,
+        input_rows: u64,
+        output_rows: u64,
+        duration_us: u64,
+    ) -> Self {
         Self {
             op_name: op_name.into(),
             input_rows,
@@ -172,7 +177,10 @@ impl ExecutionStats {
             "\nMemory: {:.0} MB peak / {:.0} MB budget\n",
             peak_mb, budget_mb
         ));
-        output.push_str(&format!("Output: {} rows\n", format_rows(self.total_output_rows)));
+        output.push_str(&format!(
+            "Output: {} rows\n",
+            format_rows(self.total_output_rows)
+        ));
 
         output
     }
@@ -298,7 +306,8 @@ impl Profiler {
         }
         self.current_stratum = Some(stratum_id);
         self.stratum_start = Some(Instant::now());
-        self.strata.push(StratumStats::new(stratum_id, num_rules, is_recursive));
+        self.strata
+            .push(StratumStats::new(stratum_id, num_rules, is_recursive));
     }
 
     /// End timing the current stratum
@@ -306,7 +315,8 @@ impl Profiler {
         if !self.enabled {
             return;
         }
-        if let (Some(start), Some(_idx)) = (self.stratum_start.take(), self.current_stratum.take()) {
+        if let (Some(start), Some(_idx)) = (self.stratum_start.take(), self.current_stratum.take())
+        {
             let duration = start.elapsed();
             if let Some(stratum) = self.strata.last_mut() {
                 stratum.duration_us = duration.as_micros() as u64;
@@ -478,7 +488,10 @@ impl Profiler {
         let mut output = String::new();
         output.push_str("=== Execution Profile ===\n");
         output.push_str(&format!("Operations: {}\n", self.stats.len()));
-        output.push_str(&format!("Total duration: {:.3} ms ({} us)\n", total_duration_ms, total_duration_us));
+        output.push_str(&format!(
+            "Total duration: {:.3} ms ({} us)\n",
+            total_duration_ms, total_duration_us
+        ));
         output.push_str(&format!("Total memory: {} bytes\n", total_memory));
         output.push_str(&format!("Peak memory: {} bytes\n", peak_memory));
         output.push_str("\n--- Operations ---\n");
@@ -935,7 +948,13 @@ mod tests {
         let mut profiler = Profiler::new(false);
 
         for i in 0..1000 {
-            profiler.record(OpStats::new(format!("op_{}", i), i as u64, i as u64, i as u64, i as u64));
+            profiler.record(OpStats::new(
+                format!("op_{}", i),
+                i as u64,
+                i as u64,
+                i as u64,
+                i as u64,
+            ));
         }
 
         // Should have zero stats

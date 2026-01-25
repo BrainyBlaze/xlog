@@ -5,7 +5,7 @@
 
 use crate::harness::{CategoryResult, TestContext, TestResult};
 use std::time::Instant;
-use xlog_core::{Schema, ScalarType};
+use xlog_core::{ScalarType, Schema};
 
 /// Run all tests in this category.
 pub fn run_all(ctx: &TestContext) -> CategoryResult {
@@ -50,7 +50,10 @@ fn test_global_u32_correctness(ctx: &TestContext) -> TestResult {
         1000000,
     ];
 
-    let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -164,7 +167,10 @@ fn test_global_u64_correctness(ctx: &TestContext) -> TestResult {
         (u32::MAX as u64) + 1,
     ];
 
-    let buffer = match ctx.provider.create_buffer_from_u64_slice(&data, schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_u64_slice(&data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -289,7 +295,10 @@ fn test_global_i64_correctness(ctx: &TestContext) -> TestResult {
         -42,
     ];
 
-    let buffer = match ctx.provider.create_buffer_from_i64_slice(&data, schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_i64_slice(&data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -440,7 +449,10 @@ fn test_global_f64_correctness(ctx: &TestContext) -> TestResult {
         -42.5,
     ];
 
-    let buffer = match ctx.provider.create_buffer_from_f64_slice(&data, schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_f64_slice(&data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -670,7 +682,9 @@ fn test_multi_buffer_isolation(ctx: &TestContext) -> TestResult {
     }
 
     // Now filter buffer A and verify B and C are still fine
-    let mask_a: Vec<u8> = (0..data_a.len()).map(|i| if i % 2 == 0 { 1 } else { 0 }).collect();
+    let mask_a: Vec<u8> = (0..data_a.len())
+        .map(|i| if i % 2 == 0 { 1 } else { 0 })
+        .collect();
     let filtered_a = match ctx.provider.filter_by_mask(&buffer_a, &mask_a) {
         Ok(f) => f,
         Err(e) => {
@@ -714,7 +728,9 @@ fn test_multi_buffer_isolation(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let expected_filtered_a: Vec<u32> = data_a.iter().enumerate()
+    let expected_filtered_a: Vec<u32> = data_a
+        .iter()
+        .enumerate()
         .filter(|(i, _)| i % 2 == 0)
         .map(|(_, &v)| v)
         .collect();

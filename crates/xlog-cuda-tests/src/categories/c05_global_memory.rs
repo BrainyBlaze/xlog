@@ -6,7 +6,7 @@
 
 use crate::harness::{CategoryResult, TestContext, TestResult};
 use std::time::Instant;
-use xlog_core::{Schema, ScalarType};
+use xlog_core::{ScalarType, Schema};
 
 /// Run all tests in this category.
 pub fn run_all(ctx: &TestContext) -> CategoryResult {
@@ -36,7 +36,10 @@ fn test_large_allocation(ctx: &TestContext) -> TestResult {
     // Create large sequential data
     let data: Vec<u32> = (0..SIZE as u32).collect();
 
-    let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -52,15 +55,14 @@ fn test_large_allocation(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_large_allocation",
             start.elapsed(),
-            format!(
-                "Buffer has {} rows, expected {}",
-                buffer.num_rows, SIZE
-            ),
+            format!("Buffer has {} rows, expected {}", buffer.num_rows, SIZE),
         );
     }
 
     // Apply a filter to exercise the buffer (keep elements divisible by 1000)
-    let mask: Vec<u8> = (0..SIZE).map(|i| if i % 1000 == 0 { 1 } else { 0 }).collect();
+    let mask: Vec<u8> = (0..SIZE)
+        .map(|i| if i % 1000 == 0 { 1 } else { 0 })
+        .collect();
     let expected_count = SIZE / 1000;
 
     let filtered = match ctx.provider.filter_by_mask(&buffer, &mask) {
@@ -144,7 +146,10 @@ fn test_aligned_access_patterns(ctx: &TestContext) -> TestResult {
         // Create data where value = index
         let data: Vec<u32> = (0..size as u32).collect();
 
-        let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_slice(&data, schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -184,10 +189,7 @@ fn test_aligned_access_patterns(ctx: &TestContext) -> TestResult {
             return TestResult::error(
                 "test_aligned_access_patterns",
                 start.elapsed(),
-                format!(
-                    "Size {}: data corrupted after sort",
-                    size
-                ),
+                format!("Size {}: data corrupted after sort", size),
             );
         }
     }
@@ -223,7 +225,10 @@ fn test_coalesced_access(ctx: &TestContext) -> TestResult {
     // Values match original key positions
     let vals: Vec<u32> = (0..SIZE as u32).collect();
 
-    let buffer = match ctx.provider.create_buffer_from_u32_columns(&[&keys, &vals], schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_u32_columns(&[&keys, &vals], schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -322,7 +327,10 @@ fn test_repeated_access(ctx: &TestContext) -> TestResult {
     // Create buffer with random-ish but deterministic data
     let data: Vec<u32> = (0..SIZE).map(|i| ((i * 7 + 13) % 1000) as u32).collect();
 
-    let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -492,7 +500,10 @@ fn test_buffer_reuse(ctx: &TestContext) -> TestResult {
     // Create initial buffer
     let data: Vec<u32> = (0..SIZE as u32).collect();
 
-    let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -621,7 +632,9 @@ fn test_buffer_reuse(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let expected_filtered: Vec<u32> = data.iter().enumerate()
+    let expected_filtered: Vec<u32> = data
+        .iter()
+        .enumerate()
         .filter(|(i, _)| i % 3 == 0)
         .map(|(_, &v)| v)
         .collect();

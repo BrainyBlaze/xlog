@@ -25,4 +25,3 @@ fn no_device_to_host_reads_in_gpu_cdcl() {
         path.display()
     );
 }
-

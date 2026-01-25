@@ -4,11 +4,11 @@
 //! Verifies that GPU operations produce identical results when run with
 //! the same inputs.
 
-use crate::harness::{CategoryResult, TestResult, TestContext};
 use crate::harness::xgcf;
+use crate::harness::{CategoryResult, TestContext, TestResult};
 use std::collections::HashSet;
 use std::time::Instant;
-use xlog_core::{Schema, ScalarType};
+use xlog_core::{ScalarType, Schema};
 
 /// Run all tests in this category.
 pub fn run_all(ctx: &TestContext) -> CategoryResult {
@@ -36,7 +36,10 @@ fn test_mc_sample_reproducibility(ctx: &TestContext) -> TestResult {
     let num_samples = 4096usize;
     let seed = 424242u64;
 
-    let a = match ctx.provider.sample_bernoulli_matrix(&probs, num_samples, seed) {
+    let a = match ctx
+        .provider
+        .sample_bernoulli_matrix(&probs, num_samples, seed)
+    {
         Ok(v) => v,
         Err(e) => {
             return TestResult::error(
@@ -46,7 +49,10 @@ fn test_mc_sample_reproducibility(ctx: &TestContext) -> TestResult {
             )
         }
     };
-    let b = match ctx.provider.sample_bernoulli_matrix(&probs, num_samples, seed) {
+    let b = match ctx
+        .provider
+        .sample_bernoulli_matrix(&probs, num_samples, seed)
+    {
         Ok(v) => v,
         Err(e) => {
             return TestResult::error(
@@ -61,7 +67,10 @@ fn test_mc_sample_reproducibility(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_mc_sample_reproducibility",
             start.elapsed(),
-            format!("MC sampling not deterministic: outputs differ (len={})", a.len()),
+            format!(
+                "MC sampling not deterministic: outputs differ (len={})",
+                a.len()
+            ),
         );
     }
 
@@ -131,7 +140,11 @@ fn test_xgcf_backward_reproducibility(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if a.values != b.values || a.adj != b.adj || a.grad_true != b.grad_true || a.grad_false != b.grad_false {
+    if a.values != b.values
+        || a.adj != b.adj
+        || a.grad_true != b.grad_true
+        || a.grad_false != b.grad_false
+    {
         return TestResult::error(
             "test_xgcf_backward_reproducibility",
             start.elapsed(),
@@ -154,9 +167,14 @@ fn test_sort_reproducibility(ctx: &TestContext) -> TestResult {
     const NUM_ITERATIONS: usize = 5;
 
     // Create deterministic but unsorted data
-    let data: Vec<u32> = (0..SIZE).map(|i| ((i * 1103515245 + 12345) % 1000000) as u32).collect();
+    let data: Vec<u32> = (0..SIZE)
+        .map(|i| ((i * 1103515245 + 12345) % 1000000) as u32)
+        .collect();
 
-    let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -198,7 +216,9 @@ fn test_sort_reproducibility(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "First sort result not sorted at index {}: {} < {}",
-                    i, first_result[i], first_result[i - 1]
+                    i,
+                    first_result[i],
+                    first_result[i - 1]
                 ),
             );
         }
@@ -257,7 +277,10 @@ fn test_sort_reproducibility(ctx: &TestContext) -> TestResult {
     }
 
     // Also test with a fresh buffer to ensure no caching effects
-    let buffer2 = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+    let buffer2 = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -324,9 +347,14 @@ fn test_filter_reproducibility(ctx: &TestContext) -> TestResult {
     let data: Vec<u32> = (0..SIZE as u32).collect();
 
     // Create filter mask - keep ~30% of values
-    let mask: Vec<u8> = (0..SIZE).map(|i| if (i * 7 + 3) % 10 < 3 { 1 } else { 0 }).collect();
+    let mask: Vec<u8> = (0..SIZE)
+        .map(|i| if (i * 7 + 3) % 10 < 3 { 1 } else { 0 })
+        .collect();
 
-    let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -417,9 +445,18 @@ fn test_filter_reproducibility(ctx: &TestContext) -> TestResult {
 
     // Test with different selectivities
     let test_masks: Vec<(String, Vec<u8>)> = vec![
-        ("10%".to_string(), (0..SIZE).map(|i| if i % 10 == 0 { 1 } else { 0 }).collect()),
-        ("50%".to_string(), (0..SIZE).map(|i| if i % 2 == 0 { 1 } else { 0 }).collect()),
-        ("90%".to_string(), (0..SIZE).map(|i| if i % 10 != 0 { 1 } else { 0 }).collect()),
+        (
+            "10%".to_string(),
+            (0..SIZE).map(|i| if i % 10 == 0 { 1 } else { 0 }).collect(),
+        ),
+        (
+            "50%".to_string(),
+            (0..SIZE).map(|i| if i % 2 == 0 { 1 } else { 0 }).collect(),
+        ),
+        (
+            "90%".to_string(),
+            (0..SIZE).map(|i| if i % 10 != 0 { 1 } else { 0 }).collect(),
+        ),
     ];
 
     for (name, test_mask) in test_masks {
@@ -516,10 +553,10 @@ fn test_join_reproducibility(ctx: &TestContext) -> TestResult {
     let right_keys: Vec<u32> = (0..RIGHT_SIZE).map(|i| (i * 5) as u32).collect();
     let right_vals: Vec<u32> = right_keys.iter().map(|&k| k * 100).collect();
 
-    let left_buffer = match ctx.provider.create_buffer_from_u32_columns(
-        &[&left_keys, &left_vals],
-        left_schema.clone(),
-    ) {
+    let left_buffer = match ctx
+        .provider
+        .create_buffer_from_u32_columns(&[&left_keys, &left_vals], left_schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -530,10 +567,10 @@ fn test_join_reproducibility(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let right_buffer = match ctx.provider.create_buffer_from_u32_columns(
-        &[&right_keys, &right_vals],
-        right_schema.clone(),
-    ) {
+    let right_buffer = match ctx
+        .provider
+        .create_buffer_from_u32_columns(&[&right_keys, &right_vals], right_schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -545,7 +582,10 @@ fn test_join_reproducibility(ctx: &TestContext) -> TestResult {
     };
 
     // First join - establish baseline
-    let first_joined = match ctx.provider.hash_join(&left_buffer, &right_buffer, &[0], &[0]) {
+    let first_joined = match ctx
+        .provider
+        .hash_join(&left_buffer, &right_buffer, &[0], &[0])
+    {
         Ok(j) => j,
         Err(e) => {
             return TestResult::error(
@@ -591,7 +631,10 @@ fn test_join_reproducibility(ctx: &TestContext) -> TestResult {
 
     // Run join multiple times and compare
     for iteration in 1..NUM_ITERATIONS {
-        let joined = match ctx.provider.hash_join(&left_buffer, &right_buffer, &[0], &[0]) {
+        let joined = match ctx
+            .provider
+            .hash_join(&left_buffer, &right_buffer, &[0], &[0])
+        {
             Ok(j) => j,
             Err(e) => {
                 return TestResult::error(
@@ -705,7 +748,10 @@ fn test_dedup_reproducibility(ctx: &TestContext) -> TestResult {
     let keys: Vec<u32> = (0..SIZE).map(|i| (i % 1000) as u32).collect();
     let vals: Vec<u32> = (0..SIZE as u32).collect();
 
-    let buffer = match ctx.provider.create_buffer_from_u32_columns(&[&keys, &vals], schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_u32_columns(&[&keys, &vals], schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -819,15 +865,20 @@ fn test_dedup_reproducibility(ctx: &TestContext) -> TestResult {
     let test_patterns: Vec<(&str, Vec<u32>)> = vec![
         ("all_same", vec![42; 5000]),
         ("pairs", (0..2500u32).flat_map(|i| vec![i, i]).collect()),
-        ("random_dups", (0..5000usize).map(|i| ((i * 1103515245 + 12345) % 500) as u32).collect()),
+        (
+            "random_dups",
+            (0..5000usize)
+                .map(|i| ((i * 1103515245 + 12345) % 500) as u32)
+                .collect(),
+        ),
     ];
 
     for (name, pattern_keys) in test_patterns {
         let pattern_vals: Vec<u32> = (0..pattern_keys.len() as u32).collect();
-        let pattern_buffer = match ctx.provider.create_buffer_from_u32_columns(
-            &[&pattern_keys, &pattern_vals],
-            schema.clone(),
-        ) {
+        let pattern_buffer = match ctx
+            .provider
+            .create_buffer_from_u32_columns(&[&pattern_keys, &pattern_vals], schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -929,7 +980,10 @@ fn test_stable_sort_order(ctx: &TestContext) -> TestResult {
         }
     }
 
-    let buffer = match ctx.provider.create_buffer_from_u32_columns(&[&keys, &vals], schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_u32_columns(&[&keys, &vals], schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -982,7 +1036,9 @@ fn test_stable_sort_order(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Keys not sorted at index {}: {} < {}",
-                    i, sorted_keys[i], sorted_keys[i - 1]
+                    i,
+                    sorted_keys[i],
+                    sorted_keys[i - 1]
                 ),
             );
         }
@@ -1082,7 +1138,8 @@ fn test_stable_sort_order(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_stable_sort_order",
             start.elapsed(),
-            "Two sorts produced different val orderings (sort may not be deterministic)".to_string(),
+            "Two sorts produced different val orderings (sort may not be deterministic)"
+                .to_string(),
         );
     }
 

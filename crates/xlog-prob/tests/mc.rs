@@ -1,5 +1,5 @@
-use xlog_prob::mc::{McEvalConfig, McProgram};
 use xlog_cuda::CudaDevice;
+use xlog_prob::mc::{McEvalConfig, McProgram};
 
 fn has_cuda_device() -> bool {
     // cudarc::driver::CudaDevice::count() may panic in restricted containers. Attempt real init instead.
@@ -74,7 +74,11 @@ query(sprinkler()).
     let got_rain = prob_of_atom(&result, "rain");
     let got_sprinkler = prob_of_atom(&result, "sprinkler");
 
-    assert!((got_rain - expected_rain).abs() < 0.02, "got_rain={}", got_rain);
+    assert!(
+        (got_rain - expected_rain).abs() < 0.02,
+        "got_rain={}",
+        got_rain
+    );
     assert!(
         (got_sprinkler - expected_sprinkler).abs() < 0.02,
         "got_sprinkler={}",

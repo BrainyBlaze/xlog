@@ -45,8 +45,8 @@ pub use ast::{
     ProbEngine, ProbFact, ProbQuery, Program, Query, Rule, Term,
 };
 pub use compile::{compile, Compiler};
+pub use expand::expand_program_functions;
 pub use lower::Lowerer;
 pub use optimizer::{Optimizer, OptimizerConfig, PlanCost};
 pub use parser::{parse_program, parse_statement};
-pub use expand::expand_program_functions;
 pub use stratify::{find_sccs_for_lowering, stratify, DependencyGraph, Stratum};

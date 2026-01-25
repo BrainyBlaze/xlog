@@ -406,12 +406,7 @@ impl Lowerer {
 
     fn split_body_literals(
         body: &[BodyLiteral],
-    ) -> (
-        Vec<&Atom>,
-        Vec<&Atom>,
-        Vec<&Comparison>,
-        Vec<&IsExpr>,
-    ) {
+    ) -> (Vec<&Atom>, Vec<&Atom>, Vec<&Comparison>, Vec<&IsExpr>) {
         let mut positive_atoms: Vec<&Atom> = Vec::new();
         let mut negated_atoms: Vec<&Atom> = Vec::new();
         let mut comparisons: Vec<&Comparison> = Vec::new();
@@ -2669,9 +2664,20 @@ mod tests {
         lowerer.infer_schemas(&program);
 
         // Verify schema has correct types
-        let schema = lowerer.schemas.get("count_data").expect("schema for count_data");
-        assert_eq!(schema.column_type(0), Some(ScalarType::Symbol), "First column should be Symbol");
-        assert_eq!(schema.column_type(1), Some(ScalarType::U64), "Second column should be U64");
+        let schema = lowerer
+            .schemas
+            .get("count_data")
+            .expect("schema for count_data");
+        assert_eq!(
+            schema.column_type(0),
+            Some(ScalarType::Symbol),
+            "First column should be Symbol"
+        );
+        assert_eq!(
+            schema.column_type(1),
+            Some(ScalarType::U64),
+            "Second column should be U64"
+        );
 
         // Now test lowering the rule with comparison
         lowerer.set_strata(vec![
@@ -2682,7 +2688,11 @@ mod tests {
 
         let rule = &program.rules[1]; // big_count rule
         let result = lowerer.lower_rule(rule);
-        assert!(result.is_ok(), "Lowering should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Lowering should succeed: {:?}",
+            result.err()
+        );
 
         // Check that the filter has the correct constant type
         fn find_compare_const(node: &RirNode) -> Option<&ConstValue> {
@@ -2814,9 +2824,20 @@ mod tests {
         lowerer.infer_schemas(&program);
 
         // Verify schema has correct types
-        let schema = lowerer.schemas.get("direct_count").expect("schema for direct_count");
-        assert_eq!(schema.column_type(0), Some(ScalarType::Symbol), "First column should be Symbol");
-        assert_eq!(schema.column_type(1), Some(ScalarType::U64), "Second column should be U64");
+        let schema = lowerer
+            .schemas
+            .get("direct_count")
+            .expect("schema for direct_count");
+        assert_eq!(
+            schema.column_type(0),
+            Some(ScalarType::Symbol),
+            "First column should be Symbol"
+        );
+        assert_eq!(
+            schema.column_type(1),
+            Some(ScalarType::U64),
+            "Second column should be U64"
+        );
 
         lowerer.set_strata(vec![
             vec!["reports_to".to_string()],
@@ -2828,7 +2849,11 @@ mod tests {
         // Lower the big_manager rule (index 3: after 2 facts + aggregation rule)
         let big_manager_rule = &program.rules[3];
         let result = lowerer.lower_rule(big_manager_rule);
-        assert!(result.is_ok(), "Lowering should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Lowering should succeed: {:?}",
+            result.err()
+        );
 
         // Check that the filter has the correct constant type
         fn find_compare_const(node: &RirNode) -> Option<&ConstValue> {

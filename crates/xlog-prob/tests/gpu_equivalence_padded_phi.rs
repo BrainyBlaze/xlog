@@ -22,7 +22,10 @@ fn try_provider() -> Option<Arc<CudaKernelProvider>> {
     match CudaKernelProvider::new(device, memory) {
         Ok(p) => Some(Arc::new(p)),
         Err(e) => {
-            eprintln!("Skipping test: failed to create CUDA kernel provider: {}", e);
+            eprintln!(
+                "Skipping test: failed to create CUDA kernel provider: {}",
+                e
+            );
             None
         }
     }
@@ -102,4 +105,3 @@ fn gpu_equivalence_accepts_padded_phi_caps() {
     validate_equivalence_gpu(&phi, &circuit, &provider, GpuEquivalenceConfig::default())
         .expect("equivalence should hold even when phi capacities exceed exact sizes");
 }
-

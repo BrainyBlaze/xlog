@@ -66,7 +66,9 @@ impl TestContext {
 
     /// Force device synchronization and check for async errors.
     pub fn sync_and_check(&self) -> Result<()> {
-        self.device.inner().synchronize()
+        self.device
+            .inner()
+            .synchronize()
             .map_err(|e| XlogError::Kernel(format!("Sync failed: {}", e)))?;
         Ok(())
     }
@@ -97,12 +99,16 @@ impl TestContext {
             .device
             .inner()
             .attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)
-            .map_err(|e| XlogError::Kernel(format!("Failed to query compute capability major: {}", e)))?;
+            .map_err(|e| {
+                XlogError::Kernel(format!("Failed to query compute capability major: {}", e))
+            })?;
         let minor = self
             .device
             .inner()
             .attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR)
-            .map_err(|e| XlogError::Kernel(format!("Failed to query compute capability minor: {}", e)))?;
+            .map_err(|e| {
+                XlogError::Kernel(format!("Failed to query compute capability minor: {}", e))
+            })?;
 
         let major_u32: u32 = major.try_into().map_err(|_| {
             XlogError::Kernel(format!(
@@ -127,8 +133,8 @@ macro_rules! gpu_test {
     ($name:ident, $body:expr) => {
         #[test]
         fn $name() {
-            let ctx = $crate::harness::TestContext::new()
-                .expect("CUDA device required for this test");
+            let ctx =
+                $crate::harness::TestContext::new().expect("CUDA device required for this test");
             $body(&ctx);
         }
     };

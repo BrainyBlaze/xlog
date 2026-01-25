@@ -5,7 +5,7 @@
 
 use crate::harness::{CategoryResult, TestContext, TestResult};
 use std::time::Instant;
-use xlog_core::{Schema, ScalarType};
+use xlog_core::{ScalarType, Schema};
 
 /// Run all tests in this category.
 pub fn run_all(ctx: &TestContext) -> CategoryResult {
@@ -37,7 +37,10 @@ fn test_warp_size_operations(ctx: &TestContext) -> TestResult {
         // Create reverse-sorted data to force data movement
         let data: Vec<u32> = (0..size as u32).rev().collect();
 
-        let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_slice(&data, schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -145,7 +148,10 @@ fn test_partial_warp_correctness(ctx: &TestContext) -> TestResult {
         // Create reverse-sorted data
         let data: Vec<u32> = (0..size as u32).rev().collect();
 
-        let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_slice(&data, schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -249,10 +255,19 @@ fn test_warp_divergence_patterns(ctx: &TestContext) -> TestResult {
     // Pattern 1: Alternating high/low values - maximizes divergence in comparisons
     const SIZE: usize = 1024;
     let alternating: Vec<u32> = (0..SIZE)
-        .map(|i| if i % 2 == 0 { i as u32 } else { (SIZE - i) as u32 })
+        .map(|i| {
+            if i % 2 == 0 {
+                i as u32
+            } else {
+                (SIZE - i) as u32
+            }
+        })
         .collect();
 
-    let buffer1 = match ctx.provider.create_buffer_from_u32_slice(&alternating, schema.clone()) {
+    let buffer1 = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&alternating, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -311,7 +326,10 @@ fn test_warp_divergence_patterns(ctx: &TestContext) -> TestResult {
         })
         .collect();
 
-    let buffer2 = match ctx.provider.create_buffer_from_u32_slice(&warp_chaos, schema.clone()) {
+    let buffer2 = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&warp_chaos, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -372,7 +390,10 @@ fn test_warp_divergence_patterns(ctx: &TestContext) -> TestResult {
         })
         .collect();
 
-    let buffer3 = match ctx.provider.create_buffer_from_u32_slice(&sawtooth, schema.clone()) {
+    let buffer3 = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&sawtooth, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -444,7 +465,10 @@ fn test_warp_uniform_patterns(ctx: &TestContext) -> TestResult {
     const SIZE: usize = 1024; // 32 warps
     let warp_uniform: Vec<u32> = (0..SIZE).map(|i| (i / 32) as u32).collect();
 
-    let buffer1 = match ctx.provider.create_buffer_from_u32_slice(&warp_uniform, schema.clone()) {
+    let buffer1 = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&warp_uniform, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -479,8 +503,7 @@ fn test_warp_uniform_patterns(ctx: &TestContext) -> TestResult {
     };
 
     // Verify sorted and count values
-    let mut value_counts: std::collections::HashMap<u32, usize> =
-        std::collections::HashMap::new();
+    let mut value_counts: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
     for &val in &sorted_data1 {
         *value_counts.entry(val).or_insert(0) += 1;
     }
@@ -541,7 +564,10 @@ fn test_warp_uniform_patterns(ctx: &TestContext) -> TestResult {
     // Pattern 3: All same value - extreme uniform case
     let all_same: Vec<u32> = vec![42; SIZE];
 
-    let buffer2 = match ctx.provider.create_buffer_from_u32_slice(&all_same, schema.clone()) {
+    let buffer2 = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&all_same, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -604,7 +630,9 @@ fn test_multi_warp_coordination(ctx: &TestContext) -> TestResult {
         let keys: Vec<u32> = (0..size as u32).rev().collect();
         let vals: Vec<u32> = (0..size as u32).collect();
 
-        let buffer = match ctx.provider.create_buffer_from_u32_columns(&[&keys, &vals], schema.clone())
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_columns(&[&keys, &vals], schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -667,7 +695,10 @@ fn test_multi_warp_coordination(ctx: &TestContext) -> TestResult {
                 return TestResult::error(
                     "test_multi_warp_coordination",
                     start.elapsed(),
-                    format!("Size {}: sorted_keys[{}] = {}, expected {}", size, i, key, i),
+                    format!(
+                        "Size {}: sorted_keys[{}] = {}, expected {}",
+                        size, i, key, i
+                    ),
                 );
             }
         }
@@ -697,10 +728,18 @@ fn test_multi_warp_coordination(ctx: &TestContext) -> TestResult {
                 let warp_id = i / 32;
                 if warp_id % 2 == 0 {
                     // Even warps: keep every 3rd element
-                    if i % 3 == 0 { 1 } else { 0 }
+                    if i % 3 == 0 {
+                        1
+                    } else {
+                        0
+                    }
                 } else {
                     // Odd warps: keep first half of warp
-                    if (i % 32) < 16 { 1 } else { 0 }
+                    if (i % 32) < 16 {
+                        1
+                    } else {
+                        0
+                    }
                 }
             })
             .collect();

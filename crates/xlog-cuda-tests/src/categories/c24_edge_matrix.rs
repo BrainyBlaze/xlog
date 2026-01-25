@@ -4,11 +4,11 @@
 //! test category, systematically combining different sizes, data distributions,
 //! and operations.
 
-use crate::harness::{CategoryResult, TestResult, TestContext};
 use crate::harness::generators::Distribution;
+use crate::harness::{CategoryResult, TestContext, TestResult};
 use std::collections::HashSet;
 use std::time::Instant;
-use xlog_core::{Schema, ScalarType};
+use xlog_core::{ScalarType, Schema};
 
 /// Run all tests in this category.
 pub fn run_all(ctx: &TestContext) -> CategoryResult {
@@ -49,7 +49,10 @@ fn test_size_distribution_matrix_u32(ctx: &TestContext) -> TestResult {
             // Generate data
             let data = dist.generate_u32(size, 42);
 
-            let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+            let buffer = match ctx
+                .provider
+                .create_buffer_from_u32_slice(&data, schema.clone())
+            {
                 Ok(buf) => buf,
                 Err(e) => {
                     return TestResult::error(
@@ -70,10 +73,7 @@ fn test_size_distribution_matrix_u32(ctx: &TestContext) -> TestResult {
                     return TestResult::error(
                         "test_size_distribution_matrix_u32",
                         start.elapsed(),
-                        format!(
-                            "Sort failed for size={}, dist={:?}: {}",
-                            size, dist, e
-                        ),
+                        format!("Sort failed for size={}, dist={:?}: {}", size, dist, e),
                     )
                 }
             };
@@ -114,7 +114,11 @@ fn test_size_distribution_matrix_u32(ctx: &TestContext) -> TestResult {
                             start.elapsed(),
                             format!(
                                 "Sort order incorrect at index {} for size={}, dist={:?}: {} < {}",
-                                i, size, dist, sorted_data[i], sorted_data[i - 1]
+                                i,
+                                size,
+                                dist,
+                                sorted_data[i],
+                                sorted_data[i - 1]
                             ),
                         );
                     }
@@ -169,9 +173,15 @@ fn test_size_distribution_matrix_u64(ctx: &TestContext) -> TestResult {
         for dist in &distributions {
             // Generate U64 data (convert from u32 generator)
             let u32_data = dist.generate_u32(size, 42);
-            let data: Vec<u64> = u32_data.iter().map(|&v| v as u64 * 0x100000001u64).collect();
+            let data: Vec<u64> = u32_data
+                .iter()
+                .map(|&v| v as u64 * 0x100000001u64)
+                .collect();
 
-            let buffer = match ctx.provider.create_buffer_from_u64_slice(&data, schema.clone()) {
+            let buffer = match ctx
+                .provider
+                .create_buffer_from_u64_slice(&data, schema.clone())
+            {
                 Ok(buf) => buf,
                 Err(e) => {
                     return TestResult::error(
@@ -192,10 +202,7 @@ fn test_size_distribution_matrix_u64(ctx: &TestContext) -> TestResult {
                     return TestResult::error(
                         "test_size_distribution_matrix_u64",
                         start.elapsed(),
-                        format!(
-                            "U64 sort failed for size={}, dist={:?}: {}",
-                            size, dist, e
-                        ),
+                        format!("U64 sort failed for size={}, dist={:?}: {}", size, dist, e),
                     )
                 }
             };
@@ -279,7 +286,10 @@ fn test_size_distribution_matrix_i64(ctx: &TestContext) -> TestResult {
             // Generate I64 data using the built-in generator
             let data = dist.generate_i64(size, 42);
 
-            let buffer = match ctx.provider.create_buffer_from_i64_slice(&data, schema.clone()) {
+            let buffer = match ctx
+                .provider
+                .create_buffer_from_i64_slice(&data, schema.clone())
+            {
                 Ok(buf) => buf,
                 Err(e) => {
                     return TestResult::error(
@@ -300,10 +310,7 @@ fn test_size_distribution_matrix_i64(ctx: &TestContext) -> TestResult {
                     return TestResult::error(
                         "test_size_distribution_matrix_i64",
                         start.elapsed(),
-                        format!(
-                            "I64 sort failed for size={}, dist={:?}: {}",
-                            size, dist, e
-                        ),
+                        format!("I64 sort failed for size={}, dist={:?}: {}", size, dist, e),
                     )
                 }
             };
@@ -412,7 +419,10 @@ fn test_size_distribution_matrix_f64(ctx: &TestContext) -> TestResult {
             // Generate F64 data using the built-in generator
             let data = dist.generate_f64(size, 42);
 
-            let buffer = match ctx.provider.create_buffer_from_f64_slice(&data, schema.clone()) {
+            let buffer = match ctx
+                .provider
+                .create_buffer_from_f64_slice(&data, schema.clone())
+            {
                 Ok(buf) => buf,
                 Err(e) => {
                     return TestResult::error(
@@ -433,10 +443,7 @@ fn test_size_distribution_matrix_f64(ctx: &TestContext) -> TestResult {
                     return TestResult::error(
                         "test_size_distribution_matrix_f64",
                         start.elapsed(),
-                        format!(
-                            "F64 sort failed for size={}, dist={:?}: {}",
-                            size, dist, e
-                        ),
+                        format!("F64 sort failed for size={}, dist={:?}: {}", size, dist, e),
                     )
                 }
             };
@@ -500,7 +507,10 @@ fn test_size_distribution_matrix_f64(ctx: &TestContext) -> TestResult {
         f64::INFINITY,
     ];
 
-    let edge_buffer = match ctx.provider.create_buffer_from_f64_slice(&edge_values, schema.clone()) {
+    let edge_buffer = match ctx
+        .provider
+        .create_buffer_from_f64_slice(&edge_values, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -551,7 +561,10 @@ fn test_size_distribution_matrix_f64(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_size_distribution_matrix_f64",
             start.elapsed(),
-            format!("F64 edge values: last element should be INFINITY, got {}", last),
+            format!(
+                "F64 edge values: last element should be INFINITY, got {}",
+                last
+            ),
         );
     }
 
@@ -577,17 +590,16 @@ fn test_operation_matrix(ctx: &TestContext) -> TestResult {
     let sizes: Vec<usize> = vec![100, 1000, 10000];
 
     // Filter selectivities: 0%, 50%, 100%
-    let selectivities: Vec<(f64, &str)> = vec![
-        (0.0, "0%"),
-        (0.5, "50%"),
-        (1.0, "100%"),
-    ];
+    let selectivities: Vec<(f64, &str)> = vec![(0.0, "0%"), (0.5, "50%"), (1.0, "100%")];
 
     for &size in &sizes {
         // Create random data for this size
         let data = Distribution::Random.generate_u32(size, 12345);
 
-        let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_slice(&data, schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -639,7 +651,10 @@ fn test_operation_matrix(ctx: &TestContext) -> TestResult {
                     start.elapsed(),
                     format!(
                         "Sort order incorrect at index {} for size {}: {} < {}",
-                        i, size, sorted_data[i], sorted_data[i - 1]
+                        i,
+                        size,
+                        sorted_data[i],
+                        sorted_data[i - 1]
                     ),
                 );
             }
@@ -664,10 +679,7 @@ fn test_operation_matrix(ctx: &TestContext) -> TestResult {
                     return TestResult::error(
                         "test_operation_matrix",
                         start.elapsed(),
-                        format!(
-                            "Filter {} failed for size {}: {}",
-                            name, size, e
-                        ),
+                        format!("Filter {} failed for size {}: {}", name, size, e),
                     )
                 }
             };
@@ -694,10 +706,10 @@ fn test_operation_matrix(ctx: &TestContext) -> TestResult {
         let dedup_keys: Vec<u32> = (0..size as u32).map(|i| i % 100).collect();
         let dedup_vals: Vec<u32> = (0..size as u32).collect();
 
-        let dedup_buffer = match ctx.provider.create_buffer_from_u32_columns(
-            &[&dedup_keys, &dedup_vals],
-            dedup_schema.clone(),
-        ) {
+        let dedup_buffer = match ctx
+            .provider
+            .create_buffer_from_u32_columns(&[&dedup_keys, &dedup_vals], dedup_schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -751,7 +763,9 @@ fn test_operation_matrix(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Dedup result contains duplicates for size {}: {} unique out of {}",
-                    size, key_set.len(), deduped_keys.len()
+                    size,
+                    key_set.len(),
+                    deduped_keys.len()
                 ),
             );
         }
@@ -761,7 +775,10 @@ fn test_operation_matrix(ctx: &TestContext) -> TestResult {
     for &size in &sizes {
         let data = Distribution::Random.generate_u32(size, 54321);
 
-        let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_slice(&data, schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -817,7 +834,10 @@ fn test_operation_matrix(ctx: &TestContext) -> TestResult {
                 return TestResult::error(
                     "test_operation_matrix",
                     start.elapsed(),
-                    format!("Failed to download chain filtered data for size {}: {}", size, e),
+                    format!(
+                        "Failed to download chain filtered data for size {}: {}",
+                        size, e
+                    ),
                 )
             }
         };
@@ -830,7 +850,10 @@ fn test_operation_matrix(ctx: &TestContext) -> TestResult {
                     start.elapsed(),
                     format!(
                         "Chain: filtered data not sorted at index {} for size {}: {} < {}",
-                        i, size, filtered_data[i], filtered_data[i - 1]
+                        i,
+                        size,
+                        filtered_data[i],
+                        filtered_data[i - 1]
                     ),
                 );
             }

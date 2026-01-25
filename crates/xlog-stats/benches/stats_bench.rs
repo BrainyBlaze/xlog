@@ -142,10 +142,7 @@ fn bench_update_byte_size(c: &mut Criterion) {
             |b, &num| {
                 b.iter(|| {
                     for i in 0..num {
-                        mgr.update_byte_size(
-                            black_box(RelId(i as u32)),
-                            black_box(1024 * 1024),
-                        );
+                        mgr.update_byte_size(black_box(RelId(i as u32)), black_box(1024 * 1024));
                     }
                 });
             },
@@ -625,9 +622,7 @@ fn bench_join_selectivity_operations(c: &mut Criterion) {
     });
 
     group.bench_function("update_from_observation", |b| {
-        b.iter(|| {
-            js.update_from_observation(black_box(10000), black_box(5000), black_box(25000))
-        });
+        b.iter(|| js.update_from_observation(black_box(10000), black_box(5000), black_box(25000)));
     });
 
     group.finish();

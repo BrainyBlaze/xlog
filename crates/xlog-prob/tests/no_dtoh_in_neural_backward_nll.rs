@@ -36,4 +36,3 @@ fn no_device_to_host_reads_in_neural_backward_nll() {
         path.display()
     );
 }
-

@@ -182,16 +182,14 @@ impl GpuCdclSolver {
         ];
 
         unsafe {
-            sat_fn
-                .clone()
-                .launch(
-                    LaunchConfig {
-                        grid_dim: (1, 1, 1),
-                        block_dim: (1, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
-                    &mut params,
-                )
+            sat_fn.clone().launch(
+                LaunchConfig {
+                    grid_dim: (1, 1, 1),
+                    block_dim: (1, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                &mut params,
+            )
         }
         .map_err(|e| XlogError::Kernel(format!("Failed to launch SAT solver kernel: {}", e)))?;
 
@@ -228,7 +226,9 @@ impl GpuCdclSolver {
                     },
                     (&run.out_status, &run.out_error, SAT_STATUS_SAT),
                 )
-                .map_err(|e| XlogError::Kernel(format!("Failed to launch sat_assert_status: {}", e)))?;
+                .map_err(|e| {
+                    XlogError::Kernel(format!("Failed to launch sat_assert_status: {}", e))
+                })?;
         }
         // Fail-fast if the solver did not produce SAT.
         self.provider.device().synchronize()?;
@@ -254,7 +254,9 @@ impl GpuCdclSolver {
                         &mut out_ok,
                     ),
                 )
-                .map_err(|e| XlogError::Kernel(format!("Failed to launch SAT model check: {}", e)))?;
+                .map_err(|e| {
+                    XlogError::Kernel(format!("Failed to launch SAT model check: {}", e))
+                })?;
         }
 
         let assert_ok_fn = device
@@ -299,7 +301,9 @@ impl GpuCdclSolver {
                     },
                     (&run.out_status, &run.out_error, SAT_STATUS_UNSAT),
                 )
-                .map_err(|e| XlogError::Kernel(format!("Failed to launch sat_assert_status: {}", e)))?;
+                .map_err(|e| {
+                    XlogError::Kernel(format!("Failed to launch sat_assert_status: {}", e))
+                })?;
         }
         // Fail-fast if the solver did not produce UNSAT.
         self.provider.device().synchronize()?;
@@ -336,7 +340,9 @@ impl GpuCdclSolver {
                         &mut out_ok,
                     ),
                 )
-                .map_err(|e| XlogError::Kernel(format!("Failed to launch SAT proof check: {}", e)))?;
+                .map_err(|e| {
+                    XlogError::Kernel(format!("Failed to launch SAT proof check: {}", e))
+                })?;
         }
 
         let assert_ok_fn = device

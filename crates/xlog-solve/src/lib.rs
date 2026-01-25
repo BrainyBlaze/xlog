@@ -33,14 +33,14 @@
 //! }
 //! ```
 
-mod instance;
-mod solver;
-mod proof;
-mod gpu_cnf;
 mod gpu_cdcl;
+mod gpu_cnf;
+mod instance;
+mod proof;
+mod solver;
 
-pub use instance::{SolveInstance, Clause, Literal, Objective};
-pub use solver::{Solver, SolverConfig, SolverState};
-pub use proof::{SolveProof, SolveResult, SolveStatus, SolveStats, compute_checksum};
-pub use gpu_cnf::GpuCnf;
 pub use gpu_cdcl::{GpuCdclConfig, GpuCdclSolver};
+pub use gpu_cnf::GpuCnf;
+pub use instance::{Clause, Literal, Objective, SolveInstance};
+pub use proof::{compute_checksum, SolveProof, SolveResult, SolveStats, SolveStatus};
+pub use solver::{Solver, SolverConfig, SolverState};

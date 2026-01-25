@@ -62,7 +62,10 @@ pub fn encode_cnf(pir: &PirGraph, roots: &[PirNodeId]) -> Result<CnfEncoding> {
         }
 
         let node = pir.node(node_id).ok_or_else(|| {
-            XlogError::Compilation(format!("Invalid PIR node id while encoding CNF: {:?}", node_id))
+            XlogError::Compilation(format!(
+                "Invalid PIR node id while encoding CNF: {:?}",
+                node_id
+            ))
         })?;
 
         match node {
@@ -109,7 +112,10 @@ pub fn encode_cnf(pir: &PirGraph, roots: &[PirNodeId]) -> Result<CnfEncoding> {
     let mut node_var: BTreeMap<PirNodeId, u32> = BTreeMap::new();
     for node_id in node_ids {
         let node = pir.node(node_id).ok_or_else(|| {
-            XlogError::Compilation(format!("Invalid PIR node id while encoding CNF: {:?}", node_id))
+            XlogError::Compilation(format!(
+                "Invalid PIR node id while encoding CNF: {:?}",
+                node_id
+            ))
         })?;
 
         let var_id = match node {

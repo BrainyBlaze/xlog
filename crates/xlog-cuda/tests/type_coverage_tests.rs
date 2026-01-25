@@ -5,7 +5,7 @@
 //! focusing on what's actually supported: filter, join, sort, groupby, union, and diff.
 
 use std::sync::Arc;
-use xlog_core::{AggOp, MemoryBudget, Schema, ScalarType};
+use xlog_core::{AggOp, MemoryBudget, ScalarType, Schema};
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager, JoinType};
 
 // ============== Test Setup ==============
@@ -650,7 +650,16 @@ fn test_buffer_operations_with_groupby() {
 
     // Test groupby with multiple aggregations
     let grouped = provider
-        .groupby_multi_agg(&buffer, &[0], &[(1, AggOp::Count), (1, AggOp::Sum), (1, AggOp::Min), (1, AggOp::Max)])
+        .groupby_multi_agg(
+            &buffer,
+            &[0],
+            &[
+                (1, AggOp::Count),
+                (1, AggOp::Sum),
+                (1, AggOp::Min),
+                (1, AggOp::Max),
+            ],
+        )
         .unwrap();
     assert_eq!(grouped.num_rows(), 3); // 3 unique keys
 

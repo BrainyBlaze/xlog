@@ -17,8 +17,8 @@
 // The actual tests are defined in src/properties.rs using proptest! macros.
 // This file makes them runnable as a separate test target.
 
-use xlog_cuda_tests::properties::*;
 use xlog_cuda_tests::harness::TestContext;
+use xlog_cuda_tests::properties::*;
 
 /// Convenience function to get a test context.
 fn get_context() -> Option<TestContext> {
@@ -98,7 +98,10 @@ fn integration_filter_idempotence() {
     // Test with various thresholds
     for threshold in [0, 100, 500, 900, 1000, 2000] {
         if let Err(e) = prop_filter_idempotence(&ctx, data.clone(), threshold) {
-            panic!("Filter idempotence failed at threshold {}: {}", threshold, e);
+            panic!(
+                "Filter idempotence failed at threshold {}: {}",
+                threshold, e
+            );
         }
     }
 

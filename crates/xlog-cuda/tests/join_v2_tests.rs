@@ -2,7 +2,7 @@
 //! Tests for hash_join_v2 with multi-column keys and typed join support
 
 use std::sync::Arc;
-use xlog_core::{MemoryBudget, Schema, ScalarType};
+use xlog_core::{MemoryBudget, ScalarType, Schema};
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager, JoinType};
 
 fn setup_provider() -> Option<CudaKernelProvider> {

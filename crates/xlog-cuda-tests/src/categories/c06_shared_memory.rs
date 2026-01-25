@@ -5,7 +5,7 @@
 
 use crate::harness::{CategoryResult, TestContext, TestResult};
 use std::time::Instant;
-use xlog_core::{Schema, ScalarType};
+use xlog_core::{ScalarType, Schema};
 
 /// Run all tests in this category.
 pub fn run_all(ctx: &TestContext) -> CategoryResult {
@@ -46,7 +46,10 @@ fn test_sort_uses_shared_memory(ctx: &TestContext) -> TestResult {
         // Create reverse-sorted data (worst case for many sort algorithms)
         let data: Vec<u32> = (0..size as u32).rev().collect();
 
-        let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_slice(&data, schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -99,10 +102,7 @@ fn test_sort_uses_shared_memory(ctx: &TestContext) -> TestResult {
                 return TestResult::error(
                     "test_sort_uses_shared_memory",
                     start.elapsed(),
-                    format!(
-                        "Size {}: sorted[{}] = {}, expected {}",
-                        size, i, val, i
-                    ),
+                    format!("Size {}: sorted[{}] = {}, expected {}", size, i, val, i),
                 );
             }
         }
@@ -133,7 +133,10 @@ fn test_sort_bank_conflicts(ctx: &TestContext) -> TestResult {
     // Pattern 1: All same value (could cause serialization)
     let data_same: Vec<u32> = vec![42; SIZE];
 
-    let buffer_same = match ctx.provider.create_buffer_from_u32_slice(&data_same, schema.clone()) {
+    let buffer_same = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&data_same, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -176,9 +179,14 @@ fn test_sort_bank_conflicts(ctx: &TestContext) -> TestResult {
 
     // Pattern 2: Values that map to same bank (stride of 32)
     // This pattern could cause bank conflicts during comparison/swap
-    let data_stride: Vec<u32> = (0..SIZE).map(|i| ((i % 32) * 1000 + i / 32) as u32).collect();
+    let data_stride: Vec<u32> = (0..SIZE)
+        .map(|i| ((i % 32) * 1000 + i / 32) as u32)
+        .collect();
 
-    let buffer_stride = match ctx.provider.create_buffer_from_u32_slice(&data_stride, schema.clone()) {
+    let buffer_stride = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&data_stride, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -219,7 +227,9 @@ fn test_sort_bank_conflicts(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Stride sort order incorrect at {}: {} > {}",
-                    i, downloaded_stride[i - 1], downloaded_stride[i]
+                    i,
+                    downloaded_stride[i - 1],
+                    downloaded_stride[i]
                 ),
             );
         }
@@ -228,7 +238,10 @@ fn test_sort_bank_conflicts(ctx: &TestContext) -> TestResult {
     // Pattern 3: Power-of-2 values (many duplicate keys with specific bit patterns)
     let data_pow2: Vec<u32> = (0..SIZE).map(|i| 1u32 << (i % 16)).collect();
 
-    let buffer_pow2 = match ctx.provider.create_buffer_from_u32_slice(&data_pow2, schema.clone()) {
+    let buffer_pow2 = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&data_pow2, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -269,7 +282,9 @@ fn test_sort_bank_conflicts(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Pow2 sort order incorrect at {}: {} > {}",
-                    i, downloaded_pow2[i - 1], downloaded_pow2[i]
+                    i,
+                    downloaded_pow2[i - 1],
+                    downloaded_pow2[i]
                 ),
             );
         }
@@ -312,7 +327,10 @@ fn test_sort_multiple_passes(ctx: &TestContext) -> TestResult {
         .collect();
     let vals: Vec<u32> = (0..SIZE as u32).collect();
 
-    let buffer = match ctx.provider.create_buffer_from_u32_columns(&[&keys, &vals], schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_u32_columns(&[&keys, &vals], schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -340,10 +358,7 @@ fn test_sort_multiple_passes(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_sort_multiple_passes",
             start.elapsed(),
-            format!(
-                "Sort returned {} rows, expected {}",
-                sorted.num_rows, SIZE
-            ),
+            format!("Sort returned {} rows, expected {}", sorted.num_rows, SIZE),
         );
     }
 
@@ -367,7 +382,9 @@ fn test_sort_multiple_passes(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Sort order incorrect at {}: {} > {}",
-                    i, sorted_keys[i - 1], sorted_keys[i]
+                    i,
+                    sorted_keys[i - 1],
+                    sorted_keys[i]
                 ),
             );
         }
@@ -406,18 +423,21 @@ fn test_block_boundary_shared_mem(ctx: &TestContext) -> TestResult {
 
     // Sizes at and around typical block sizes
     let boundary_sizes: Vec<usize> = vec![
-        255, 256, 257,     // Around 256-thread block
-        511, 512, 513,     // Around 512-thread block
-        1023, 1024, 1025,  // Around 1024-thread block
-        2047, 2048, 2049,  // Around 2048-element tile
-        4095, 4096, 4097,  // Around 4096-element tile
+        255, 256, 257, // Around 256-thread block
+        511, 512, 513, // Around 512-thread block
+        1023, 1024, 1025, // Around 1024-thread block
+        2047, 2048, 2049, // Around 2048-element tile
+        4095, 4096, 4097, // Around 4096-element tile
     ];
 
     for size in boundary_sizes {
         // Create reverse-sorted data
         let data: Vec<u32> = (0..size as u32).rev().collect();
 
-        let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_slice(&data, schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -470,10 +490,7 @@ fn test_block_boundary_shared_mem(ctx: &TestContext) -> TestResult {
                 return TestResult::error(
                     "test_block_boundary_shared_mem",
                     start.elapsed(),
-                    format!(
-                        "Size {}: sorted[{}] = {}, expected {}",
-                        size, i, val, i
-                    ),
+                    format!("Size {}: sorted[{}] = {}, expected {}", size, i, val, i),
                 );
             }
         }
@@ -506,11 +523,11 @@ fn test_shared_mem_size_limits(ctx: &TestContext) -> TestResult {
     // 12288 u32s = 48KB (at limit of standard shared memory)
     // 16384 u32s = 64KB (exceeds standard, requires extended shared memory)
     let stress_sizes: Vec<usize> = vec![
-        8192,   // 32KB with 2 columns = 64KB total row data
-        12288,  // 48KB with 2 columns = 96KB
-        16384,  // 64KB with 2 columns = 128KB
-        32768,  // 128KB with 2 columns = 256KB
-        65536,  // Forces multi-block coordination
+        8192,  // 32KB with 2 columns = 64KB total row data
+        12288, // 48KB with 2 columns = 96KB
+        16384, // 64KB with 2 columns = 128KB
+        32768, // 128KB with 2 columns = 256KB
+        65536, // Forces multi-block coordination
     ];
 
     for size in stress_sizes {
@@ -518,7 +535,10 @@ fn test_shared_mem_size_limits(ctx: &TestContext) -> TestResult {
         let keys: Vec<u32> = (0..size as u32).rev().collect();
         let vals: Vec<u32> = (0..size as u32).collect();
 
-        let buffer = match ctx.provider.create_buffer_from_u32_columns(&[&keys, &vals], schema.clone()) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_columns(&[&keys, &vals], schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(

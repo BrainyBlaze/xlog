@@ -293,12 +293,13 @@ impl ModuleResolver {
     pub fn merge_imports(&self, mut program: Program) -> Result<Program, ModuleError> {
         for use_decl in &program.imports.clone() {
             let path_key = module_path_to_string(&use_decl.module_path);
-            let loaded_module = self.loaded.get(&path_key).ok_or_else(|| {
-                ModuleError::NotFound {
-                    path: use_decl.module_path.clone(),
-                    searched: vec![],
-                }
-            })?;
+            let loaded_module =
+                self.loaded
+                    .get(&path_key)
+                    .ok_or_else(|| ModuleError::NotFound {
+                        path: use_decl.module_path.clone(),
+                        searched: vec![],
+                    })?;
 
             // Determine which items to import
             let imported_items = match &use_decl.imports {

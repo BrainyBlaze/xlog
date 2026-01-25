@@ -3,9 +3,9 @@
 //! Tests cache behavior and coherence, including cache line access patterns,
 //! cache reuse, cache thrashing scenarios, memory locality, and L2 cache effects.
 
-use crate::harness::{CategoryResult, TestResult, TestContext};
+use crate::harness::{CategoryResult, TestContext, TestResult};
 use std::time::Instant;
-use xlog_core::{Schema, ScalarType};
+use xlog_core::{ScalarType, Schema};
 
 /// Run all tests in this category.
 pub fn run_all(ctx: &TestContext) -> CategoryResult {
@@ -35,19 +35,24 @@ fn test_cache_line_access(ctx: &TestContext) -> TestResult {
 
     // Test various cache line aligned sizes
     let test_sizes = [
-        CACHE_LINE_U32S,          // 1 cache line
-        CACHE_LINE_U32S * 2,      // 2 cache lines
-        CACHE_LINE_U32S * 4,      // 4 cache lines
-        CACHE_LINE_U32S * 16,     // 16 cache lines
-        CACHE_LINE_U32S * 64,     // 64 cache lines
-        CACHE_LINE_U32S * 256,    // 256 cache lines
+        CACHE_LINE_U32S,       // 1 cache line
+        CACHE_LINE_U32S * 2,   // 2 cache lines
+        CACHE_LINE_U32S * 4,   // 4 cache lines
+        CACHE_LINE_U32S * 16,  // 16 cache lines
+        CACHE_LINE_U32S * 64,  // 64 cache lines
+        CACHE_LINE_U32S * 256, // 256 cache lines
     ];
 
     for &size in &test_sizes {
         // Create data aligned to cache line size
-        let data: Vec<u32> = (0..size).map(|i| ((i * 1103515245 + 12345) % 1000000) as u32).collect();
+        let data: Vec<u32> = (0..size)
+            .map(|i| ((i * 1103515245 + 12345) % 1000000) as u32)
+            .collect();
 
-        let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_slice(&data, schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -86,7 +91,12 @@ fn test_cache_line_access(ctx: &TestContext) -> TestResult {
             return TestResult::error(
                 "test_cache_line_access",
                 start.elapsed(),
-                format!("Size {}: expected {} rows, got {}", size, size, sorted_data.len()),
+                format!(
+                    "Size {}: expected {} rows, got {}",
+                    size,
+                    size,
+                    sorted_data.len()
+                ),
             );
         }
 
@@ -97,7 +107,10 @@ fn test_cache_line_access(ctx: &TestContext) -> TestResult {
                     start.elapsed(),
                     format!(
                         "Size {}: sort incorrect at index {}: {} < {}",
-                        size, i, sorted_data[i], sorted_data[i - 1]
+                        size,
+                        i,
+                        sorted_data[i],
+                        sorted_data[i - 1]
                     ),
                 );
             }
@@ -140,13 +153,19 @@ fn test_cache_line_access(ctx: &TestContext) -> TestResult {
     for &size in &non_aligned_sizes {
         let data: Vec<u32> = (0..size).map(|i| ((i * 31337) % 100000) as u32).collect();
 
-        let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_slice(&data, schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
                     "test_cache_line_access",
                     start.elapsed(),
-                    format!("Failed to create non-aligned buffer of size {}: {}", size, e),
+                    format!(
+                        "Failed to create non-aligned buffer of size {}: {}",
+                        size, e
+                    ),
                 )
             }
         };
@@ -209,7 +228,10 @@ fn test_cache_reuse(ctx: &TestContext) -> TestResult {
     // Create data that should fit in cache after first access
     let data: Vec<u32> = (0..SIZE).map(|i| ((i * 17 + 13) % 10000) as u32).collect();
 
-    let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -311,7 +333,10 @@ fn test_cache_reuse(ctx: &TestContext) -> TestResult {
     let keys: Vec<u32> = (0..SIZE).map(|i| (i % 1000) as u32).collect();
     let vals: Vec<u32> = (0..SIZE as u32).collect();
 
-    let buffer2 = match ctx.provider.create_buffer_from_u32_columns(&[&keys, &vals], schema2) {
+    let buffer2 = match ctx
+        .provider
+        .create_buffer_from_u32_columns(&[&keys, &vals], schema2)
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -375,7 +400,10 @@ fn test_cache_thrashing(ctx: &TestContext) -> TestResult {
         .map(|i| ((i * 1103515245 + 12345) % 10000000) as u32)
         .collect();
 
-    let large_buffer = match ctx.provider.create_buffer_from_u32_slice(&large_data, schema.clone()) {
+    let large_buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&large_data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -414,7 +442,11 @@ fn test_cache_thrashing(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_cache_thrashing",
             start.elapsed(),
-            format!("Large sort: expected {} rows, got {}", LARGE_SIZE, sorted_data.len()),
+            format!(
+                "Large sort: expected {} rows, got {}",
+                LARGE_SIZE,
+                sorted_data.len()
+            ),
         );
     }
 
@@ -426,7 +458,9 @@ fn test_cache_thrashing(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Large sort incorrect at index {}: {} < {}",
-                    i, sorted_data[i], sorted_data[i - 1]
+                    i,
+                    sorted_data[i],
+                    sorted_data[i - 1]
                 ),
             );
         }
@@ -460,7 +494,10 @@ fn test_cache_thrashing(ctx: &TestContext) -> TestResult {
         .map(|i| ((i * 31337) % 1000000) as u32)
         .collect();
 
-    let medium_buffer = match ctx.provider.create_buffer_from_u32_slice(&medium_data, schema.clone()) {
+    let medium_buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&medium_data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -504,7 +541,9 @@ fn test_cache_thrashing(ctx: &TestContext) -> TestResult {
     }
 
     // Filter on large data
-    let large_mask: Vec<u8> = (0..LARGE_SIZE).map(|i| if i % 4 == 0 { 1 } else { 0 }).collect();
+    let large_mask: Vec<u8> = (0..LARGE_SIZE)
+        .map(|i| if i % 4 == 0 { 1 } else { 0 })
+        .collect();
     let filtered = match ctx.provider.filter_by_mask(&large_buffer, &large_mask) {
         Ok(f) => f,
         Err(e) => {
@@ -552,7 +591,10 @@ fn test_memory_locality(ctx: &TestContext) -> TestResult {
     // Good locality: sequential data
     let sequential_data: Vec<u32> = (0..SIZE as u32).collect();
 
-    let seq_buffer = match ctx.provider.create_buffer_from_u32_slice(&sequential_data, schema.clone()) {
+    let seq_buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&sequential_data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -603,7 +645,10 @@ fn test_memory_locality(ctx: &TestContext) -> TestResult {
     // Bad locality: reverse sorted data
     let reverse_data: Vec<u32> = (0..SIZE as u32).rev().collect();
 
-    let rev_buffer = match ctx.provider.create_buffer_from_u32_slice(&reverse_data, schema.clone()) {
+    let rev_buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&reverse_data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -655,7 +700,10 @@ fn test_memory_locality(ctx: &TestContext) -> TestResult {
         .map(|i| ((i * 1103515245 + 12345) % SIZE) as u32)
         .collect();
 
-    let rand_buffer = match ctx.provider.create_buffer_from_u32_slice(&random_data, schema.clone()) {
+    let rand_buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&random_data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -696,7 +744,9 @@ fn test_memory_locality(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Random sort incorrect at index {}: {} < {}",
-                    i, rand_result[i], rand_result[i - 1]
+                    i,
+                    rand_result[i],
+                    rand_result[i - 1]
                 ),
             );
         }
@@ -704,7 +754,9 @@ fn test_memory_locality(ctx: &TestContext) -> TestResult {
 
     // Test filter with different locality patterns
     // Sequential mask pattern (good locality)
-    let seq_mask: Vec<u8> = (0..SIZE).map(|i| if i < SIZE / 2 { 1 } else { 0 }).collect();
+    let seq_mask: Vec<u8> = (0..SIZE)
+        .map(|i| if i < SIZE / 2 { 1 } else { 0 })
+        .collect();
     let filtered_seq = match ctx.provider.filter_by_mask(&seq_buffer, &seq_mask) {
         Ok(f) => f,
         Err(e) => {
@@ -722,7 +774,8 @@ fn test_memory_locality(ctx: &TestContext) -> TestResult {
             start.elapsed(),
             format!(
                 "Sequential filter: expected {} rows, got {}",
-                SIZE / 2, filtered_seq.num_rows
+                SIZE / 2,
+                filtered_seq.num_rows
             ),
         );
     }
@@ -753,7 +806,9 @@ fn test_memory_locality(ctx: &TestContext) -> TestResult {
     }
 
     // Sparse mask (bad locality for output)
-    let sparse_mask: Vec<u8> = (0..SIZE).map(|i| if i % 100 == 0 { 1 } else { 0 }).collect();
+    let sparse_mask: Vec<u8> = (0..SIZE)
+        .map(|i| if i % 100 == 0 { 1 } else { 0 })
+        .collect();
     let filtered_sparse = match ctx.provider.filter_by_mask(&seq_buffer, &sparse_mask) {
         Ok(f) => f,
         Err(e) => {
@@ -801,16 +856,19 @@ fn test_l2_cache_effects(ctx: &TestContext) -> TestResult {
     // Medium: might fit in L2 (2MB = 512K u32s)
     // Large: definitely exceeds L2 (20MB = 5M u32s)
 
-    const SMALL_SIZE: usize = 64_000;      // ~256KB
-    const MEDIUM_SIZE: usize = 512_000;    // ~2MB
-    const LARGE_SIZE: usize = 2_000_000;   // ~8MB
+    const SMALL_SIZE: usize = 64_000; // ~256KB
+    const MEDIUM_SIZE: usize = 512_000; // ~2MB
+    const LARGE_SIZE: usize = 2_000_000; // ~8MB
 
     // Test small (L2 resident)
     let small_data: Vec<u32> = (0..SMALL_SIZE)
         .map(|i| ((i * 17 + 13) % SMALL_SIZE) as u32)
         .collect();
 
-    let small_buffer = match ctx.provider.create_buffer_from_u32_slice(&small_data, schema.clone()) {
+    let small_buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&small_data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -861,7 +919,10 @@ fn test_l2_cache_effects(ctx: &TestContext) -> TestResult {
         .map(|i| ((i * 31337) % MEDIUM_SIZE) as u32)
         .collect();
 
-    let medium_buffer = match ctx.provider.create_buffer_from_u32_slice(&medium_data, schema.clone()) {
+    let medium_buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&medium_data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -909,7 +970,10 @@ fn test_l2_cache_effects(ctx: &TestContext) -> TestResult {
         .map(|i| ((i * 1103515245 + 12345) % LARGE_SIZE) as u32)
         .collect();
 
-    let large_buffer = match ctx.provider.create_buffer_from_u32_slice(&large_data, schema.clone()) {
+    let large_buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&large_data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -956,7 +1020,10 @@ fn test_l2_cache_effects(ctx: &TestContext) -> TestResult {
     // Test interleaved operations at different cache levels
     // This exercises cache replacement policies
     let small2_data: Vec<u32> = (0..SMALL_SIZE).map(|i| (i * 3) as u32).collect();
-    let small2_buffer = match ctx.provider.create_buffer_from_u32_slice(&small2_data, schema.clone()) {
+    let small2_buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&small2_data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(

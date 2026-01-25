@@ -1,12 +1,12 @@
 //! Core types and traits for XLOG
 
-pub mod error;
 pub mod config;
-pub mod types;
-pub mod traits;
+pub mod error;
 pub mod symbol;
+pub mod traits;
+pub mod types;
 
-pub use error::{XlogError, Result};
 pub use config::{MemoryBudget, RuntimeConfig};
-pub use types::{ScalarType, Schema, RelId, AggOp};
+pub use error::{Result, XlogError};
 pub use traits::{GpuBuffer, KernelProvider, RelationStore};
+pub use types::{AggOp, RelId, ScalarType, Schema};

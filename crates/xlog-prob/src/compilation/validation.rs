@@ -34,7 +34,11 @@ struct CircuitCnf {
     internal_prefix: TrackedCudaSlice<u32>,
 }
 
-fn build_circuit_cnf(provider: &Arc<CudaKernelProvider>, circuit: &GpuXgcf, base_num_vars: u32) -> Result<CircuitCnf> {
+fn build_circuit_cnf(
+    provider: &Arc<CudaKernelProvider>,
+    circuit: &GpuXgcf,
+    base_num_vars: u32,
+) -> Result<CircuitCnf> {
     if base_num_vars == 0 {
         return Err(XlogError::Compilation(
             "GPU equivalence verifier requires base_num_vars > 0".to_string(),
@@ -74,18 +78,21 @@ fn build_circuit_cnf(provider: &Arc<CudaKernelProvider>, circuit: &GpuXgcf, base
     let n64 = num_nodes as u64;
     let e64 = num_edges as u64;
 
-    let var_cap = u32::try_from((base_num_vars as u64).saturating_add(n64)).map_err(|_| {
-        XlogError::Kernel("Circuit CNF var capacity exceeds u32::MAX".to_string())
-    })?;
-    let clause_cap = u32::try_from(
-        e64.checked_add(4u64.saturating_mul(n64))
-            .ok_or_else(|| XlogError::Kernel("Circuit CNF clause capacity overflow".to_string()))?,
-    )
-    .map_err(|_| XlogError::Kernel("Circuit CNF clause capacity exceeds u32::MAX".to_string()))?;
+    let var_cap = u32::try_from((base_num_vars as u64).saturating_add(n64))
+        .map_err(|_| XlogError::Kernel("Circuit CNF var capacity exceeds u32::MAX".to_string()))?;
+    let clause_cap =
+        u32::try_from(e64.checked_add(4u64.saturating_mul(n64)).ok_or_else(|| {
+            XlogError::Kernel("Circuit CNF clause capacity overflow".to_string())
+        })?)
+        .map_err(|_| {
+            XlogError::Kernel("Circuit CNF clause capacity exceeds u32::MAX".to_string())
+        })?;
     let lit_cap = u32::try_from(
         (3u64.saturating_mul(e64))
             .checked_add(12u64.saturating_mul(n64))
-            .ok_or_else(|| XlogError::Kernel("Circuit CNF literal capacity overflow".to_string()))?,
+            .ok_or_else(|| {
+                XlogError::Kernel("Circuit CNF literal capacity overflow".to_string())
+            })?,
     )
     .map_err(|_| XlogError::Kernel("Circuit CNF literal capacity exceeds u32::MAX".to_string()))?;
 
@@ -142,24 +149,22 @@ fn build_circuit_cnf(provider: &Arc<CudaKernelProvider>, circuit: &GpuXgcf, base
         })?;
     // SAFETY: sat_xgcf_cnf_capture_last_counts(internal_counts, clause_counts, lit_counts, num_nodes, out_internal_last, out_clause_last, out_lit_last)
     unsafe {
-        capture_last_fn
-            .clone()
-            .launch(
-                LaunchConfig {
-                    grid_dim: (1, 1, 1),
-                    block_dim: (1, 1, 1),
-                    shared_mem_bytes: 0,
-                },
-                (
-                    &internal_prefix,
-                    &clause_base,
-                    &lit_base,
-                    num_nodes_u32,
-                    &mut internal_last,
-                    &mut clause_last,
-                    &mut lit_last,
-                ),
-            )
+        capture_last_fn.clone().launch(
+            LaunchConfig {
+                grid_dim: (1, 1, 1),
+                block_dim: (1, 1, 1),
+                shared_mem_bytes: 0,
+            },
+            (
+                &internal_prefix,
+                &clause_base,
+                &lit_base,
+                num_nodes_u32,
+                &mut internal_last,
+                &mut clause_last,
+                &mut lit_last,
+            ),
+        )
     }
     .map_err(|e| XlogError::Kernel(format!("sat_xgcf_cnf_capture_last_counts failed: {}", e)))?;
 
@@ -177,7 +182,9 @@ fn build_circuit_cnf(provider: &Arc<CudaKernelProvider>, circuit: &GpuXgcf, base
 
     let totals_fn = device
         .get_func(SAT_MODULE, sat_kernels::SAT_XGCF_CNF_COMPUTE_TOTALS)
-        .ok_or_else(|| XlogError::Kernel("sat_xgcf_cnf_compute_totals kernel not found".to_string()))?;
+        .ok_or_else(|| {
+            XlogError::Kernel("sat_xgcf_cnf_compute_totals kernel not found".to_string())
+        })?;
     // SAFETY: sat_xgcf_cnf_compute_totals(internal_prefix, clause_base, lit_base, internal_last*, clause_last*, lit_last*, num_nodes, base_num_vars, clause_cap, lit_cap, out_num_vars*, out_num_clauses*, out_num_lits*)
     let mut totals_params: Vec<*mut c_void> = vec![
         (&internal_prefix).as_kernel_param(),
@@ -244,7 +251,9 @@ fn build_circuit_cnf(provider: &Arc<CudaKernelProvider>, circuit: &GpuXgcf, base
     // sat_xgcf_cnf_emit does not write the CSR terminator; finalize deterministically on device.
     let term_fn = device
         .get_func(SAT_MODULE, sat_kernels::SAT_CNF_WRITE_TERMINATOR)
-        .ok_or_else(|| XlogError::Kernel("sat_cnf_write_terminator kernel not found".to_string()))?;
+        .ok_or_else(|| {
+            XlogError::Kernel("sat_cnf_write_terminator kernel not found".to_string())
+        })?;
     // SAFETY: sat_cnf_write_terminator(out_offsets, num_clauses*, num_lits*)
     unsafe {
         term_fn.clone().launch(
@@ -360,7 +369,14 @@ fn build_phi_and_not_c(
     .map_err(|e| XlogError::Kernel(format!("sat_cnf_copy_into(phi) failed: {}", e)))?;
 
     // Copy CNF(C) after phi using device-resident bases (phi.num_clauses/phi.num_lits).
-    let mut grid_c = (circuit_cnf.cnf.clause_cap.saturating_add(1).max(circuit_cnf.cnf.lit_cap) + block - 1) / block;
+    let mut grid_c = (circuit_cnf
+        .cnf
+        .clause_cap
+        .saturating_add(1)
+        .max(circuit_cnf.cnf.lit_cap)
+        + block
+        - 1)
+        / block;
     if grid_c == 0 {
         grid_c = 1;
     }
@@ -427,16 +443,14 @@ fn build_phi_and_not_c(
     ];
 
     unsafe {
-        unit_fn
-            .clone()
-            .launch(
-                LaunchConfig {
-                    grid_dim: (1, 1, 1),
-                    block_dim: (1, 1, 1),
-                    shared_mem_bytes: 0,
-                },
-                &mut params,
-            )
+        unit_fn.clone().launch(
+            LaunchConfig {
+                grid_dim: (1, 1, 1),
+                block_dim: (1, 1, 1),
+                shared_mem_bytes: 0,
+            },
+            &mut params,
+        )
     }
     .map_err(|e| XlogError::Kernel(format!("sat_xgcf_write_root_unit_clause failed: {}", e)))?;
 
@@ -607,15 +621,15 @@ fn build_c_and_not_phi(
         (&circuit_cnf.internal_prefix).as_kernel_param(),
         phi.var_cap.as_kernel_param(),
         circuit.root().as_kernel_param(),
-        1i32.as_kernel_param(), // force_true
+        1i32.as_kernel_param(),      // force_true
         (&d_zero).as_kernel_param(), // clause_base
         (&d_zero).as_kernel_param(), // lit_base
         (&circuit_cnf.cnf.num_vars).as_kernel_param(),
         (&circuit_cnf.cnf.num_clauses).as_kernel_param(),
         (&circuit_cnf.cnf.num_lits).as_kernel_param(),
-        (&d_extra_num_vars).as_kernel_param(),    // extra_num_vars (u_j vars)
+        (&d_extra_num_vars).as_kernel_param(), // extra_num_vars (u_j vars)
         (&d_extra_num_clauses).as_kernel_param(), // extra_num_clauses
-        (&d_extra_num_lits).as_kernel_param(),    // extra_num_lits
+        (&d_extra_num_lits).as_kernel_param(), // extra_num_lits
         var_cap.as_kernel_param(),
         clause_cap.as_kernel_param(),
         lit_cap.as_kernel_param(),
@@ -630,16 +644,14 @@ fn build_c_and_not_phi(
     ];
 
     unsafe {
-        unit_fn
-            .clone()
-            .launch(
-                LaunchConfig {
-                    grid_dim: (1, 1, 1),
-                    block_dim: (1, 1, 1),
-                    shared_mem_bytes: 0,
-                },
-                &mut params,
-            )
+        unit_fn.clone().launch(
+            LaunchConfig {
+                grid_dim: (1, 1, 1),
+                block_dim: (1, 1, 1),
+                shared_mem_bytes: 0,
+            },
+            &mut params,
+        )
     }
     .map_err(|e| XlogError::Kernel(format!("sat_xgcf_write_root_unit_clause failed: {}", e)))?;
 
@@ -659,25 +671,23 @@ fn build_c_and_not_phi(
 
     // SAFETY: sat_emit_not_phi(phi_offsets, phi_lits, phi_num_clauses*, unsat_var_base*, out_clause_base*, out_lit_base*, out_offsets, out_lits)
     unsafe {
-        not_phi_fn
-            .clone()
-            .launch(
-                LaunchConfig {
-                    grid_dim: (grid, 1, 1),
-                    block_dim: (block, 1, 1),
-                    shared_mem_bytes: 0,
-                },
-                (
-                    &phi.clause_offsets,
-                    &phi.literals,
-                    &phi.num_clauses,
-                    &d_unsat_var_base,
-                    &d_notphi_clause_base,
-                    &d_notphi_lit_base,
-                    &mut out_offsets,
-                    &mut out_lits,
-                ),
-            )
+        not_phi_fn.clone().launch(
+            LaunchConfig {
+                grid_dim: (grid, 1, 1),
+                block_dim: (block, 1, 1),
+                shared_mem_bytes: 0,
+            },
+            (
+                &phi.clause_offsets,
+                &phi.literals,
+                &phi.num_clauses,
+                &d_unsat_var_base,
+                &d_notphi_clause_base,
+                &d_notphi_lit_base,
+                &mut out_offsets,
+                &mut out_lits,
+            ),
+        )
     }
     .map_err(|e| XlogError::Kernel(format!("sat_emit_not_phi failed: {}", e)))?;
 

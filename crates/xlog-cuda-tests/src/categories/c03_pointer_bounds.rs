@@ -9,10 +9,10 @@
 //! - Boundary index correctness (first/last element selection)
 //! - Multi-column stride handling
 
-use crate::harness::{CategoryResult, TestContext, TestResult};
 use crate::harness::generators::SizeGen;
+use crate::harness::{CategoryResult, TestContext, TestResult};
 use std::time::Instant;
-use xlog_core::{Schema, ScalarType};
+use xlog_core::{ScalarType, Schema};
 
 /// Run all tests in this category.
 pub fn run_all(ctx: &TestContext) -> CategoryResult {
@@ -52,7 +52,10 @@ fn test_edge_case_sizes(ctx: &TestContext) -> TestResult {
         // Create sequential data: 0, 1, 2, ..., size-1
         let data: Vec<u32> = (0..size as u32).collect();
 
-        let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_slice(&data, schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -143,7 +146,10 @@ fn test_off_by_one_filter(ctx: &TestContext) -> TestResult {
         // Create sequential data: 0, 1, 2, ..., size-1
         let data: Vec<u32> = (0..size as u32).collect();
 
-        let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_slice(&data, schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -255,10 +261,10 @@ fn test_off_by_one_sort(ctx: &TestContext) -> TestResult {
         // Create values: i * 10 (so val[i] = i * 10 for original index i)
         let vals: Vec<u32> = (0..size as u32).map(|i| i * 10).collect();
 
-        let buffer = match ctx.provider.create_buffer_from_u32_columns(
-            &[&keys, &vals],
-            schema.clone(),
-        ) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_columns(&[&keys, &vals], schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -389,7 +395,10 @@ fn test_grid_stride_loop(ctx: &TestContext) -> TestResult {
         // Create sequential data
         let data: Vec<u32> = (0..size as u32).collect();
 
-        let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_slice(&data, schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -510,7 +519,10 @@ fn test_tail_handling_filter(ctx: &TestContext) -> TestResult {
         // Create sequential data: 0, 1, 2, ..., size-1
         let data: Vec<u32> = (0..size as u32).collect();
 
-        let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_slice(&data, schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -564,10 +576,7 @@ fn test_tail_handling_filter(ctx: &TestContext) -> TestResult {
                 return TestResult::error(
                     "test_tail_handling_filter",
                     start.elapsed(),
-                    format!(
-                        "Size {}: filtered[{}] = {}, expected {}",
-                        size, i, val, i
-                    ),
+                    format!("Size {}: filtered[{}] = {}, expected {}", size, i, val, i),
                 );
             }
         }
@@ -599,7 +608,10 @@ fn test_tail_handling_sort(ctx: &TestContext) -> TestResult {
         // Create reverse-sorted data: size-1, size-2, ..., 1, 0
         let data: Vec<u32> = (0..size as u32).rev().collect();
 
-        let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_slice(&data, schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -651,10 +663,7 @@ fn test_tail_handling_sort(ctx: &TestContext) -> TestResult {
                 return TestResult::error(
                     "test_tail_handling_sort",
                     start.elapsed(),
-                    format!(
-                        "Size {}: sorted[{}] = {}, expected {}",
-                        size, i, val, i
-                    ),
+                    format!("Size {}: sorted[{}] = {}, expected {}", size, i, val, i),
                 );
             }
         }
@@ -684,7 +693,10 @@ fn test_boundary_indices(ctx: &TestContext) -> TestResult {
     // Create sequential data: 0, 1, 2, ..., 999
     let data: Vec<u32> = (0..size as u32).collect();
 
-    let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+    let buffer = match ctx
+        .provider
+        .create_buffer_from_u32_slice(&data, schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -736,10 +748,7 @@ fn test_boundary_indices(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_boundary_indices",
             start.elapsed(),
-            format!(
-                "Filter first: result is {:?}, expected [0]",
-                first_data
-            ),
+            format!("Filter first: result is {:?}, expected [0]", first_data),
         );
     }
 
@@ -784,10 +793,7 @@ fn test_boundary_indices(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_boundary_indices",
             start.elapsed(),
-            format!(
-                "Filter last: result is {:?}, expected [999]",
-                last_data
-            ),
+            format!("Filter last: result is {:?}, expected [999]", last_data),
         );
     }
 
@@ -826,7 +832,10 @@ fn test_multi_column_strides(ctx: &TestContext) -> TestResult {
 
             let column_refs: Vec<&[u32]> = columns.iter().map(|c| c.as_slice()).collect();
 
-            let buffer = match ctx.provider.create_buffer_from_u32_columns(&column_refs, schema.clone()) {
+            let buffer = match ctx
+                .provider
+                .create_buffer_from_u32_columns(&column_refs, schema.clone())
+            {
                 Ok(buf) => buf,
                 Err(e) => {
                     return TestResult::error(
@@ -850,10 +859,7 @@ fn test_multi_column_strides(ctx: &TestContext) -> TestResult {
                     return TestResult::error(
                         "test_multi_column_strides",
                         start.elapsed(),
-                        format!(
-                            "Filter failed for {} cols, size {}: {}",
-                            num_cols, size, e
-                        ),
+                        format!("Filter failed for {} cols, size {}: {}", num_cols, size, e),
                     )
                 }
             };

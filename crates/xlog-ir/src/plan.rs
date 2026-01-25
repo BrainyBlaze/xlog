@@ -1,7 +1,7 @@
 //! Execution plan representation
 
-use crate::rir::RirNode;
 use crate::metadata::RirMeta;
+use crate::rir::RirNode;
 
 /// Strongly Connected Component in the dependency graph
 #[derive(Debug, Clone)]
@@ -143,8 +143,14 @@ mod tests {
     #[test]
     fn test_stratum_assignment() {
         let strata = vec![
-            Stratum { id: 0, sccs: vec![0, 1] },
-            Stratum { id: 1, sccs: vec![2] },
+            Stratum {
+                id: 0,
+                sccs: vec![0, 1],
+            },
+            Stratum {
+                id: 1,
+                sccs: vec![2],
+            },
         ];
         assert_eq!(strata[0].sccs.len(), 2);
     }
@@ -157,7 +163,10 @@ mod tests {
             predicates: vec!["p".into()],
             is_recursive: false,
         });
-        builder.add_stratum(Stratum { id: 0, sccs: vec![0] });
+        builder.add_stratum(Stratum {
+            id: 0,
+            sccs: vec![0],
+        });
         let plan = builder.build();
         assert_eq!(plan.sccs.len(), 1);
         assert_eq!(plan.strata.len(), 1);

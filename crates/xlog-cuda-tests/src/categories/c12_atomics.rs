@@ -6,7 +6,7 @@
 use crate::harness::{CategoryResult, TestContext, TestResult};
 use std::collections::HashSet;
 use std::time::Instant;
-use xlog_core::{Schema, ScalarType};
+use xlog_core::{ScalarType, Schema};
 
 /// Run all tests in this category.
 pub fn run_all(ctx: &TestContext) -> CategoryResult {
@@ -41,10 +41,10 @@ fn test_hash_join_atomic_correctness(ctx: &TestContext) -> TestResult {
 
     // Test with various sizes to exercise atomic contention
     let test_cases: Vec<(usize, usize, f64)> = vec![
-        (1000, 500, 0.5),    // 50% match rate
-        (5000, 2500, 0.5),   // 50% match rate, larger
-        (10000, 1000, 1.0),  // All right keys match
-        (10000, 5000, 0.8),  // 80% match rate
+        (1000, 500, 0.5),   // 50% match rate
+        (5000, 2500, 0.5),  // 50% match rate, larger
+        (10000, 1000, 1.0), // All right keys match
+        (10000, 5000, 0.8), // 80% match rate
     ];
 
     for (left_size, right_size, match_rate) in test_cases {
@@ -70,10 +70,10 @@ fn test_hash_join_atomic_correctness(ctx: &TestContext) -> TestResult {
             right_vals.push(key * 100);
         }
 
-        let left_buffer = match ctx.provider.create_buffer_from_u32_columns(
-            &[&left_keys, &left_vals],
-            left_schema.clone(),
-        ) {
+        let left_buffer = match ctx
+            .provider
+            .create_buffer_from_u32_columns(&[&left_keys, &left_vals], left_schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -84,10 +84,10 @@ fn test_hash_join_atomic_correctness(ctx: &TestContext) -> TestResult {
             }
         };
 
-        let right_buffer = match ctx.provider.create_buffer_from_u32_columns(
-            &[&right_keys, &right_vals],
-            right_schema.clone(),
-        ) {
+        let right_buffer = match ctx
+            .provider
+            .create_buffer_from_u32_columns(&[&right_keys, &right_vals], right_schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -99,7 +99,10 @@ fn test_hash_join_atomic_correctness(ctx: &TestContext) -> TestResult {
         };
 
         // Perform hash join
-        let joined = match ctx.provider.hash_join(&left_buffer, &right_buffer, &[0], &[0]) {
+        let joined = match ctx
+            .provider
+            .hash_join(&left_buffer, &right_buffer, &[0], &[0])
+        {
             Ok(j) => j,
             Err(e) => {
                 return TestResult::error(
@@ -231,11 +234,7 @@ fn test_dedup_atomic_correctness(ctx: &TestContext) -> TestResult {
     // Test various duplicate patterns
     let test_cases: Vec<(&str, Vec<u32>, Vec<u32>)> = vec![
         // (name, keys, vals)
-        (
-            "all_same",
-            vec![42; 10000],
-            (0..10000u32).collect(),
-        ),
+        ("all_same", vec![42; 10000], (0..10000u32).collect()),
         (
             "pairs",
             (0..5000u32).flat_map(|i| vec![i, i]).collect(),
@@ -263,7 +262,9 @@ fn test_dedup_atomic_correctness(ctx: &TestContext) -> TestResult {
     ];
 
     for (name, keys, vals) in test_cases {
-        let buffer = match ctx.provider.create_buffer_from_u32_columns(&[&keys, &vals], schema.clone())
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_columns(&[&keys, &vals], schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -372,10 +373,10 @@ fn test_high_contention_join(ctx: &TestContext) -> TestResult {
     let left_vals: Vec<u32> = collision_keys.iter().map(|&k| k + 1).collect();
     let right_vals: Vec<u32> = collision_keys.iter().map(|&k| k + 2).collect();
 
-    let left_buffer = match ctx.provider.create_buffer_from_u32_columns(
-        &[&collision_keys, &left_vals],
-        left_schema.clone(),
-    ) {
+    let left_buffer = match ctx
+        .provider
+        .create_buffer_from_u32_columns(&[&collision_keys, &left_vals], left_schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -386,10 +387,10 @@ fn test_high_contention_join(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let right_buffer = match ctx.provider.create_buffer_from_u32_columns(
-        &[&collision_keys, &right_vals],
-        right_schema.clone(),
-    ) {
+    let right_buffer = match ctx
+        .provider
+        .create_buffer_from_u32_columns(&[&collision_keys, &right_vals], right_schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -401,7 +402,10 @@ fn test_high_contention_join(ctx: &TestContext) -> TestResult {
     };
 
     // Perform hash join with collision-prone keys
-    let joined = match ctx.provider.hash_join(&left_buffer, &right_buffer, &[0], &[0]) {
+    let joined = match ctx
+        .provider
+        .hash_join(&left_buffer, &right_buffer, &[0], &[0])
+    {
         Ok(j) => j,
         Err(e) => {
             return TestResult::error(
@@ -512,10 +516,10 @@ fn test_high_contention_join(ctx: &TestContext) -> TestResult {
     let same_key_right: Vec<u32> = vec![12345; 100];
     let same_key_right_vals: Vec<u32> = (0..100u32).map(|i| i * 1000).collect();
 
-    let left_same = match ctx.provider.create_buffer_from_u32_columns(
-        &[&same_key_left, &same_key_left_vals],
-        left_schema.clone(),
-    ) {
+    let left_same = match ctx
+        .provider
+        .create_buffer_from_u32_columns(&[&same_key_left, &same_key_left_vals], left_schema.clone())
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -608,15 +612,17 @@ fn test_atomic_counting(ctx: &TestContext) -> TestResult {
     // Test prefix_sum_mask directly (if available) and verify through filter
     let test_cases: Vec<(usize, Box<dyn Fn(usize) -> bool>)> = vec![
         // (size, predicate)
-        (1000, Box::new(|i| i % 2 == 0)),       // 50% selectivity
-        (10000, Box::new(|i| i % 10 == 0)),     // 10% selectivity
-        (50000, Box::new(|i| i < 10000)),       // First 20%
-        (100000, Box::new(|i| i % 7 == 0)),     // ~14% selectivity
+        (1000, Box::new(|i| i % 2 == 0)),   // 50% selectivity
+        (10000, Box::new(|i| i % 10 == 0)), // 10% selectivity
+        (50000, Box::new(|i| i < 10000)),   // First 20%
+        (100000, Box::new(|i| i % 7 == 0)), // ~14% selectivity
     ];
 
     for (size, predicate) in test_cases {
         // Create mask
-        let mask: Vec<u8> = (0..size).map(|i| if predicate(i) { 1 } else { 0 }).collect();
+        let mask: Vec<u8> = (0..size)
+            .map(|i| if predicate(i) { 1 } else { 0 })
+            .collect();
         let expected_count: usize = mask.iter().map(|&m| m as usize).sum();
 
         // Test prefix_sum_mask
@@ -674,7 +680,10 @@ fn test_atomic_counting(ctx: &TestContext) -> TestResult {
         // Also verify through filter operation
         let data: Vec<u32> = (0..size as u32).collect();
 
-        let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema.clone()) {
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_slice(&data, schema.clone())
+        {
             Ok(buf) => buf,
             Err(e) => {
                 return TestResult::error(
@@ -779,7 +788,9 @@ fn test_concurrent_atomic_updates(ctx: &TestContext) -> TestResult {
         let keys: Vec<u32> = (0..SIZE).map(|i| (i + iteration * 1000) as u32).collect();
         let vals: Vec<u32> = keys.iter().map(|&k| k * 10).collect();
 
-        let buffer = match ctx.provider.create_buffer_from_u32_columns(&[&keys, &vals], schema.clone())
+        let buffer = match ctx
+            .provider
+            .create_buffer_from_u32_columns(&[&keys, &vals], schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -873,7 +884,10 @@ fn test_concurrent_atomic_updates(ctx: &TestContext) -> TestResult {
                 return TestResult::error(
                     "test_concurrent_atomic_updates",
                     start.elapsed(),
-                    format!("Iteration {}: failed to download join keys: {}", iteration, e),
+                    format!(
+                        "Iteration {}: failed to download join keys: {}",
+                        iteration, e
+                    ),
                 )
             }
         };

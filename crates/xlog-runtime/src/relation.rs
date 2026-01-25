@@ -87,9 +87,7 @@ impl RelationStore {
 
     /// Get a relation by name along with its current version.
     pub fn get_with_version(&self, name: &str) -> Option<(&CudaBuffer, u64)> {
-        self.relations
-            .get(name)
-            .map(|e| (&e.buffer, e.version))
+        self.relations.get(name).map(|e| (&e.buffer, e.version))
     }
 
     /// Get the current version for a relation.
@@ -110,10 +108,8 @@ impl RelationStore {
             .get(name)
             .map(|e| e.version.saturating_add(1))
             .unwrap_or(1);
-        self.relations.insert(
-            name.to_string(),
-            VersionedCudaBuffer { buffer, version },
-        );
+        self.relations
+            .insert(name.to_string(), VersionedCudaBuffer { buffer, version });
     }
 
     /// Get a relation by name, or insert an empty buffer with the given schema
@@ -129,16 +125,17 @@ impl RelationStore {
     /// # Returns
     /// A reference to the existing buffer, or the newly inserted empty buffer
     pub fn get_or_insert_empty(&mut self, name: &str, schema: &Schema) -> &CudaBuffer {
-        let entry = self.relations.entry(name.to_string()).or_insert_with(|| {
-            VersionedCudaBuffer {
+        let entry = self
+            .relations
+            .entry(name.to_string())
+            .or_insert_with(|| VersionedCudaBuffer {
                 buffer: CudaBuffer {
                     columns: Vec::new(),
                     num_rows: 0,
                     schema: schema.clone(),
                 },
                 version: 1,
-            }
-        });
+            });
         &entry.buffer
     }
 
@@ -155,16 +152,17 @@ impl RelationStore {
     /// # Returns
     /// A mutable reference to the existing buffer, or the newly inserted empty buffer
     pub fn get_or_insert_empty_mut(&mut self, name: &str, schema: &Schema) -> &mut CudaBuffer {
-        let entry = self.relations.entry(name.to_string()).or_insert_with(|| {
-            VersionedCudaBuffer {
+        let entry = self
+            .relations
+            .entry(name.to_string())
+            .or_insert_with(|| VersionedCudaBuffer {
                 buffer: CudaBuffer {
                     columns: Vec::new(),
                     num_rows: 0,
                     schema: schema.clone(),
                 },
                 version: 1,
-            }
-        });
+            });
         entry.version = entry.version.saturating_add(1);
         &mut entry.buffer
     }

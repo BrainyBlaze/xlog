@@ -1,5 +1,5 @@
-use xlog_prob::provenance::Provenance;
 use xlog_prob::pir::{LeafId, PirNode};
+use xlog_prob::provenance::Provenance;
 
 #[test]
 fn test_recursive_provenance_builds_acyclic_pir() {

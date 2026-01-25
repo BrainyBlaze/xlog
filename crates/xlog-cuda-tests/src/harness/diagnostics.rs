@@ -44,7 +44,13 @@ impl FailureDiagnostic {
     }
 
     /// Add expected/actual samples.
-    pub fn with_comparison(mut self, expected: String, actual: String, first_diff: Option<usize>, diff_count: usize) -> Self {
+    pub fn with_comparison(
+        mut self,
+        expected: String,
+        actual: String,
+        first_diff: Option<usize>,
+        diff_count: usize,
+    ) -> Self {
         self.expected_sample = expected;
         self.actual_sample = actual;
         self.first_diff_index = first_diff;
@@ -55,7 +61,10 @@ impl FailureDiagnostic {
     /// Generate human-readable failure report.
     pub fn report(&self) -> String {
         let mut report = String::new();
-        report.push_str(&format!("=== FAILURE: {}/{} ===\n", self.category, self.test_name));
+        report.push_str(&format!(
+            "=== FAILURE: {}/{} ===\n",
+            self.category, self.test_name
+        ));
         report.push_str(&format!("Input size: {}\n", self.input_size));
         report.push_str(&format!("Error: {}\n", self.error_message));
 
@@ -177,7 +186,10 @@ impl CategoryResult {
     }
 
     pub fn skipped_count(&self) -> usize {
-        self.tests.iter().filter(|t| matches!(t.status, TestStatus::Skipped { .. })).count()
+        self.tests
+            .iter()
+            .filter(|t| matches!(t.status, TestStatus::Skipped { .. }))
+            .count()
     }
 
     pub fn total_count(&self) -> usize {
@@ -185,7 +197,9 @@ impl CategoryResult {
     }
 
     pub fn all_passed(&self) -> bool {
-        self.tests.iter().all(|t| t.status.is_passed() || matches!(t.status, TestStatus::Skipped { .. }))
+        self.tests
+            .iter()
+            .all(|t| t.status.is_passed() || matches!(t.status, TestStatus::Skipped { .. }))
     }
 }
 

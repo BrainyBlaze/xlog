@@ -34,4 +34,3 @@ fn compilation_module_contains_no_unimplemented_stubs() {
         );
     }
 }
-
