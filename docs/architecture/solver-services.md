@@ -22,20 +22,29 @@ In the GPU-native path:
 - **Solver state is device-resident** (assignments, trail, learned clauses).
 - The host may launch kernels and synchronize streams (**control-plane**) but does not copy CNF/circuit/state back and forth (**data-plane**).
 
-The solver may optionally export a final SAT model or UNSAT certificate, but the default verifier integration consumes device-resident outputs directly.
+Verifier-grade integrations additionally enforce **zero device->host reads**: even the SAT/UNSAT status is not copied back. The host observes only CUDA success/failure while GPU-side assertion kernels validate the outcome and trap on mismatch.
 
 ## GPU CDCL Verifier (Required)
 
 ### Interface
 
-`xlog-solve` exposes a GPU solver that accepts **GPU CNF** and produces a SAT/UNSAT decision:
+`xlog-solve` exposes a GPU solver that accepts **GPU CNF**. To support fully GPU-native construction (where exact sizes are computed on device), CNF size metadata is also device-resident:
 
 ```rust
 pub struct GpuCnf {
-    pub num_vars: u32,
-    pub num_clauses: u32,
-    pub clause_offsets: TrackedCudaSlice<u32>, // len = num_clauses + 1
-    pub literals: TrackedCudaSlice<i32>,       // signed DIMACS: ±var_id (1-based)
+    // Host-known capacities (buffers are allocated to these sizes).
+    pub var_cap: u32,
+    pub clause_cap: u32,
+    pub lit_cap: u32,
+
+    // Device-resident exact counts (len = 1 each).
+    pub num_vars: TrackedCudaSlice<u32>,
+    pub num_clauses: TrackedCudaSlice<u32>,
+    pub num_lits: TrackedCudaSlice<u32>,
+
+    // CSR buffers sized by capacity.
+    pub clause_offsets: TrackedCudaSlice<u32>, // len = clause_cap + 1
+    pub literals: TrackedCudaSlice<i32>,       // len = lit_cap, signed DIMACS: ±var_id (1-based)
 }
 
 pub struct GpuCdclSolver {
@@ -44,19 +53,16 @@ pub struct GpuCdclSolver {
 
 impl GpuCdclSolver {
     pub fn new(provider: Arc<CudaKernelProvider>, config: GpuCdclConfig) -> Self;
-    pub fn solve(&self, cnf: &GpuCnf) -> xlog_core::Result<GpuCdclResult>;
-}
-
-pub enum GpuSolveStatus { Sat, Unsat }
-
-pub struct GpuCdclResult {
-    pub status: GpuSolveStatus,
-    pub assignment: TrackedCudaSlice<i8>, // len = num_vars + 1, values {-1,0,1}
-    pub learned_count: u32,
+    pub fn solve_expect_sat(&self, cnf: &GpuCnf) -> xlog_core::Result<TrackedCudaSlice<i8>>;
+    pub fn solve_expect_unsat(&self, cnf: &GpuCnf) -> xlog_core::Result<()>;
 }
 ```
 
-**Note:** `assignment` stays on device; higher-level verifiers can keep it device-resident or export it.
+**Verifier semantics (zero host reads):**
+- `solve_expect_sat`: runs CDCL, asserts SAT on GPU, runs GPU model check, and returns the device-resident assignment.
+- `solve_expect_unsat`: runs CDCL, asserts UNSAT on GPU, runs GPU proof check, and returns `Ok(())`.
+
+If the solver returns the wrong status or produces an invalid model/proof, GPU-side assertion kernels trap so the host cannot continue silently.
 
 ### Core Data Structures (Device)
 
@@ -110,7 +116,7 @@ CLS is **not complete** and must never be used as the verifier. It may be used t
 
 ### xlog-prob (GPU-Native Compilation)
 
-The verifier integration uses `GpuCdclSolver` to solve the two UNSAT queries for equivalence. If a query is SAT, the solver returns a **device-resident counterexample assignment** for debugging (no silent fallback).
+The verifier integration solves the two UNSAT queries for equivalence via `GpuCdclSolver::solve_expect_unsat`. A SAT result indicates a compiler bug and is handled as **fail-fast** (GPU trap / CUDA error), without copying any status or counters to the host.
 
 ### SAT Subsystem Scope
 

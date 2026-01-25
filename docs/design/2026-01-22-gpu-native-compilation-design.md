@@ -46,7 +46,7 @@ for **data-plane** movement of CNF/circuit/weights/gradients.
 
 **Definition: “zero CPU transfers” in XLOG**
 - Inputs (CNF, weights, neural tensors) are provided as **device-resident buffers** (e.g., via DLPack).
-- Outputs (logZ, grads, SAT counterexamples) are produced as **device-resident buffers** and can be
+- Outputs (logZ, grads) are produced as **device-resident buffers** and can be
   exported via DLPack.
 - The host is allowed to launch kernels and manage CUDA streams, but it should not need to memcpy
   the data-plane arrays listed above.
@@ -75,7 +75,7 @@ Existing GPU evaluation kernels
 If either check is SAT, the circuit is rejected.
 
 For the **GPU D4 exact path**, a SAT result indicates a compiler bug; production behavior is **fail-fast**
-with an optional device-resident counterexample assignment for debugging (no silent fallback).
+via a GPU trap / CUDA error (no silent fallback).
 
 ---
 
@@ -95,10 +95,19 @@ Level 2:   [φ|x,y] [φ|x,¬y] [φ|¬x,y] [φ|¬x,¬y] ...
 
 ```rust
 struct GpuCnf {
-    num_vars: u32,
-    num_clauses: u32,
-    clause_offsets: DeviceSlice<u32>, // CSR row_ptr
-    literals: DeviceSlice<i32>,       // CSR col_idx with sign
+    // Host-known capacities (buffers are allocated to these sizes).
+    var_cap: u32,
+    clause_cap: u32,
+    lit_cap: u32,
+
+    // Device-resident exact counts (len = 1 each).
+    num_vars: DeviceSlice<u32>,
+    num_clauses: DeviceSlice<u32>,
+    num_lits: DeviceSlice<u32>,
+
+    // CSR buffers sized by capacity.
+    clause_offsets: DeviceSlice<u32>, // len = clause_cap + 1
+    literals: DeviceSlice<i32>,       // len = lit_cap, signed DIMACS: ±var_id (1-based)
 }
 
 /// Per-work-item assignments live in a pooled buffer to avoid device malloc.
@@ -318,7 +327,7 @@ XLOG’s GPU tier has explicit determinism testing (`crates/xlog-cuda-tests`, e.
 
 - Use deterministic tie-breaking (literal selection, clause bump order, restart schedule).
 - Avoid nondeterministic “first writer wins” patterns for learned clause insertion.
-- Return a stable counterexample assignment for SAT outcomes (useful for debugging compiler bugs).
+- When SAT is requested, return a deterministic device-resident assignment (useful for debugging solver/compiler bugs).
 
 #### 3.2.4 SAT Subsystem (`crates/xlog-solve`) Status
 
@@ -341,6 +350,9 @@ We construct the equivalence-check SAT instances on GPU:
 3. Solve `SAT(C ∧ ¬φ)` with GPU CDCL.
 
 All of this happens **on device** with no host transfer.
+
+**Verifier-grade constraint:** the equivalence path performs **zero device→host copies**, including scalar status/size reads.
+Exact CNF sizes are computed on GPU into device-resident scalars; buffers are allocated to host-known capacities and validated on device.
 
 #### 3.3.1 Encoding details (linear size, GPU-friendly)
 
@@ -373,8 +385,7 @@ so learned clauses are reused across both checks.
 ### 3.4 Safety Contract
 
 - **UNSAT** → accept circuit.
-- **SAT** → reject circuit. For the exact GPU D4 path, treat this as a **compiler bug** and fail-fast
-  (optionally returning a device-resident counterexample assignment for debugging).
+- **SAT** → reject circuit. For the exact GPU D4 path, treat this as a **compiler bug** and fail-fast (GPU trap / CUDA error).
 - **UNKNOWN** is not allowed in production; GPU CDCL must be complete.
 
 **Device-side validation rules (mandatory):**
@@ -538,10 +549,16 @@ The host CNF encoder (`encode_cnf(&PirGraph, roots)`) is re‑implemented on GPU
 ```rust
 /// GPU-resident CNF (device-side mirror of `cnf::CnfFormula`).
 pub struct GpuCnf {
-    pub num_vars: u32,
-    pub num_clauses: u32,
-    pub clause_offsets: DeviceSlice<u32>, // CSR row_ptr
-    pub literals: DeviceSlice<i32>,       // CSR col_idx with sign
+    pub var_cap: u32,
+    pub clause_cap: u32,
+    pub lit_cap: u32,
+
+    pub num_vars: DeviceSlice<u32>,    // len=1
+    pub num_clauses: DeviceSlice<u32>, // len=1
+    pub num_lits: DeviceSlice<u32>,    // len=1
+
+    pub clause_offsets: DeviceSlice<u32>, // len = clause_cap + 1
+    pub literals: DeviceSlice<i32>,       // len = lit_cap, signed DIMACS
 }
 
 /// GPU-resident CNF encoding bundle (CNF + var tables).
@@ -841,7 +858,7 @@ All tests validate correctness **on GPU only**:
 - End‑to‑end tests:
   - Compile + verify + evaluate.
   - For small `num_vars` (e.g., <= 20): brute-force enumerate assignments on GPU to compute exact WMC and compare.
-  - For larger instances: rely on the verifier (UNSAT) plus sanity checks (e.g., counterexample assignments when SAT).
+  - For larger instances: rely on the verifier (UNSAT) plus sanity checks and strict fail-fast on any SAT result.
 
 No CPU comparison is used in the runtime path or CI gating for production builds.
 
