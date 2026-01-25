@@ -117,7 +117,11 @@ Implemented in:
 
 - Python:
   - `python/tests/test_circuit_cache.py` is CUDA-only and forbids `.tolist()` to enforce GPU-native behavior.
+  - `python/tests/test_gpu_native_forward_backward_returns_tensor.py` is CUDA-only and forbids `.tolist()` and
+    `.item()` to enforce the strict GPU-native API: `forward_backward_tensor(...) -> torch.Tensor`.
 - Rust:
   - `crates/xlog-prob/tests/neural_fast_path.rs` checks GPU fast-path gradients and loss on a tiny AD program.
   - `crates/xlog-prob/tests/no_dtoh_in_gpu_neural_fast_path.rs` guards against accidental device→host reads in the
     slot-map module.
+  - `crates/xlog-prob/tests/no_dtoh_in_neural_backward_nll.rs` guards against accidental device→host reads in the
+    end-to-end neural fast-path entrypoint.

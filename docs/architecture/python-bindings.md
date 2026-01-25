@@ -74,13 +74,21 @@ program = pyxlog.Program.compile("""
     query(wet).
 """, prob_engine="exact_ddnnf")
 
-# Evaluate
+# Evaluate (probabilities are returned as DLPack capsules)
 result = program.evaluate()
-print(f"P(wet | not sprinkler) = {result.prob}")
+import torch
+prob = torch.from_dlpack(result.prob)       # f64 CUDA tensor, shape [num_queries]
+log_prob = torch.from_dlpack(result.log_prob)
+print(list(zip(result.atoms, prob.tolist())))  # host read for printing
 
-# With gradients (for learning)
+# If you need a single host scalar (e.g., for logging), read it explicitly:
+p0 = float(prob[0].item())  # host read
+print(f"P(wet | not sprinkler) = {p0}")
+
+# With gradients (exact engine only; per-query grad vectors are DLPack too)
 result = program.evaluate(return_grads=True)
-print(f"Gradients: {result.gradients}")
+grad_true0 = torch.from_dlpack(result.grad_true[0])   # f64 CUDA tensor, shape [num_vars]
+grad_false0 = torch.from_dlpack(result.grad_false[0]) # f64 CUDA tensor, shape [num_vars]
 ```
 
 ### Monte Carlo Inference
@@ -94,8 +102,13 @@ result = program.evaluate(
     confidence=0.95
 )
 
-print(f"P(query) = {result.prob} ± {result.stderr}")
-print(f"95% CI: [{result.ci_low}, {result.ci_high}]")
+import torch
+prob = torch.from_dlpack(result.prob)
+stderr = torch.from_dlpack(result.stderr)
+ci_low = torch.from_dlpack(result.ci_low)
+ci_high = torch.from_dlpack(result.ci_high)
+print(f"P(query) = {float(prob[0].item())} ± {float(stderr[0].item())}")  # host reads
+print(f"95% CI: [{float(ci_low[0].item())}, {float(ci_high[0].item())}]") # host reads
 ```
 
 ## DLPack Integration
@@ -188,16 +201,23 @@ results = program.evaluate()
 
 ```python
 result = program.evaluate()
-result.prob          # float: query probability
-result.log_prob      # float: log probability
-result.gradients     # dict[str, float]: gradients w.r.t. weights (if return_grads=True)
+result.atoms         # list[str]: query atoms (stringified)
+result.prob          # PyCapsule: DLPack f64 vector of probabilities (len = num_queries)
+result.log_prob      # PyCapsule: DLPack f64 vector of log-probabilities (len = num_queries)
+result.num_vars      # int: number of CNF variables in the compiled program
+
+# Exact-only (when return_grads=True):
+result.grad_true     # Optional[list[PyCapsule]]: per-query DLPack f64 vector (len = num_vars)
+result.grad_false    # Optional[list[PyCapsule]]: per-query DLPack f64 vector (len = num_vars)
 
 # Monte Carlo only:
-result.stderr        # float: standard error
-result.ci_low        # float: confidence interval lower bound
-result.ci_high       # float: confidence interval upper bound
-result.samples       # int: number of samples used
-result.seed          # int: random seed used
+result.stderr        # Optional[PyCapsule]: DLPack f64 vector (len = num_queries)
+result.ci_low        # Optional[PyCapsule]: DLPack f64 vector (len = num_queries)
+result.ci_high       # Optional[PyCapsule]: DLPack f64 vector (len = num_queries)
+result.samples       # Optional[int]
+result.evidence_samples # Optional[int]
+result.seed          # Optional[int]
+result.confidence    # Optional[float]
 ```
 
 ## Error Handling
@@ -207,14 +227,10 @@ Python exceptions are raised for errors:
 ```python
 try:
     program = pyxlog.LogicProgram.compile(invalid_source)
-except pyxlog.ParseError as e:
-    print(f"Parse error: {e}")
-except pyxlog.CompilationError as e:
-    print(f"Compilation error: {e}")
-except pyxlog.ExecutionError as e:
-    print(f"Execution error: {e}")
-except pyxlog.ResourceExhaustedError as e:
-    print(f"OOM: {e}")
+except ValueError as e:
+    print(f"Invalid input: {e}")
+except RuntimeError as e:
+    print(f"XLOG error: {e}")
 ```
 
 ## Memory Management
@@ -238,20 +254,33 @@ except pyxlog.ResourceExhaustedError as e:
 import torch
 import pyxlog
 
-# Define a neural-symbolic model
-class XlogLayer(torch.nn.Module):
-    def __init__(self, source):
-        super().__init__()
-        self.program = pyxlog.Program.compile(source, prob_engine="exact_ddnnf")
-        self.weights = torch.nn.Parameter(torch.tensor([0.3, 0.7]))
+# Neural-symbolic training loop (v0.4.0-alpha):
+# - neural predicate outputs (CUDA tensors) are imported via DLPack
+# - XLOG computes NLL gradients on GPU and calls output.backward(grad) internally
 
-    def forward(self, evidence):
-        result = self.program.evaluate(
-            weights={'rain': self.weights[0], 'sprinkler': self.weights[1]},
-            evidence=evidence,
-            return_grads=True
-        )
-        return result.prob
+source = """
+nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
+addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
+"""
+program = pyxlog.Program.compile(source, prob_engine="exact_ddnnf")
+
+net = torch.nn.Sequential(
+    torch.nn.Flatten(),
+    torch.nn.Linear(28 * 28, 10),
+    torch.nn.Softmax(dim=-1),
+).cuda()
+optimizer = torch.optim.Adam(net.parameters(), lr=1e-3)
+program.register_network("mnist_net", net, optimizer)
+
+images = torch.randn(128, 1, 28, 28, device="cuda")
+program.add_tensor_source("train", images)
+
+program.zero_grad()
+loss = program.forward_backward_tensor("addition(0, 1, 7)")  # CUDA scalar tensor (no host reads required)
+program.optimizer_step()
+
+# Optional host read for logging:
+print(float(loss.item()))
 ```
 
 ### Batch Processing

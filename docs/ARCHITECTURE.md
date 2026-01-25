@@ -1038,7 +1038,12 @@ for name, capsule in results.items():
 # Probabilistic execution
 prob_program = pyxlog.Program.compile(source, prob_engine="exact_ddnnf")
 prob_results = prob_program.evaluate()
-print(f"P(query) = {prob_results.prob}")
+import torch
+prob = torch.from_dlpack(prob_results.prob)  # f64 CUDA tensor, shape [num_queries]
+print(prob_results.atoms)
+print(prob)
+# Optional host read for a single scalar:
+print(float(prob[0].item()))
 
 # Neural-symbolic training (v0.4.0-alpha)
 program = pyxlog.Program.compile("""

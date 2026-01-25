@@ -215,6 +215,9 @@ For training workloads with neural predicates, `pyxlog` uses the **GPU neural fa
 - neural outputs are imported as CUDA tensors via DLPack (no `.tolist()`),
 - AD-chain weights and probability gradients are computed on GPU (`kernels/neural.cu`),
 - Torch receives device-resident gradients via `output.backward(grad)`.
+- The strict GPU-native entrypoint is `CompiledProgram.forward_backward_tensor(query) -> torch.Tensor` which returns a
+  CUDA scalar loss (no device->host reads required). The legacy `forward_backward(query) -> f64` helper reads back a
+  single scalar for convenience.
 
 ---
 

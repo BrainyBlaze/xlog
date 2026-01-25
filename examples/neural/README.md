@@ -93,10 +93,14 @@ program.register_network("net_name", model, optimizer, scheduler=None)
 program.add_tensor_source("train", images_tensor)
 
 # Single query training
-prob, grads = program.forward_backward("addition(0, 1, 7)")
+loss = program.forward_backward("addition(0, 1, 7)")  # host scalar (convenience)
+
+# Strict GPU-native training (returns CUDA tensor loss; no host reads required)
+loss_t = program.forward_backward_tensor("addition(0, 1, 7)")
 
 # Batch training
-avg_loss = program.train_epoch(queries, batch_size=32)
+stats = program.train_epoch(queries, batch_size=32)
+avg_loss = stats.avg_loss
 
 # Full training loop
 history = pyxlog.train_model(
