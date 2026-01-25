@@ -220,6 +220,40 @@ impl ExactDdnnfProgram {
         out_grads: &mut [CudaBuffer],
         cfg: NeuralFastPathConfig,
     ) -> Result<()> {
+        self.neural_backward_nll_buffers_inner(slots, query_idx, probs, out_grads, cfg, None)
+    }
+
+    /// Same as [`Self::neural_backward_nll_buffers`], but also returns the scalar NLL loss:
+    /// `L = -log P(query | evidence)`.
+    pub fn neural_backward_nll_buffers_with_loss(
+        &self,
+        slots: &GpuWeightSlots,
+        query_idx: usize,
+        probs: &[CudaBuffer],
+        out_grads: &mut [CudaBuffer],
+        cfg: NeuralFastPathConfig,
+    ) -> Result<f64> {
+        let mut loss = 0.0f64;
+        self.neural_backward_nll_buffers_inner(
+            slots,
+            query_idx,
+            probs,
+            out_grads,
+            cfg,
+            Some(&mut loss),
+        )?;
+        Ok(loss)
+    }
+
+    fn neural_backward_nll_buffers_inner(
+        &self,
+        slots: &GpuWeightSlots,
+        query_idx: usize,
+        probs: &[CudaBuffer],
+        out_grads: &mut [CudaBuffer],
+        cfg: NeuralFastPathConfig,
+        out_loss: Option<&mut f64>,
+    ) -> Result<()> {
         let Some(_circuit) = &self.circuit else {
             return Err(XlogError::Execution(
                 "Neural fast-path error: program has no compiled circuit".to_string(),
@@ -269,6 +303,10 @@ impl ExactDdnnfProgram {
             .circuit
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let root_idx = gpu_xgcf.root() as usize;
+        let mut log_z_base = 0.0f64;
+        let mut log_z_query = 0.0f64;
 
         // 1) Update AD chain weights from device-resident p[label].
         for (g, prob_buf) in probs.iter().enumerate() {
@@ -328,6 +366,16 @@ impl ExactDdnnfProgram {
 
         // 2) Base run: out = dlogZ_base/dp
         gpu_xgcf.eval_grads_inplace(&state.provider)?;
+        if out_loss.is_some() {
+            let root_view = gpu_xgcf.values().slice(root_idx..(root_idx + 1));
+            let mut host = [0.0_f64];
+            device
+                .dtoh_sync_copy_into(&root_view, &mut host)
+                .map_err(|e| {
+                    XlogError::Kernel(format!("Failed to read base logZ from GPU: {}", e))
+                })?;
+            log_z_base = host[0];
+        }
         for (g, prob_buf) in probs.iter().enumerate() {
             let slot_vars = slots.group_slot_cnf_var(g)?;
             let labels = slot_vars.len() as u32;
@@ -424,6 +472,16 @@ impl ExactDdnnfProgram {
         }
 
         gpu_xgcf.eval_grads_inplace(&state.provider)?;
+        if out_loss.is_some() {
+            let root_view = gpu_xgcf.values().slice(root_idx..(root_idx + 1));
+            let mut host = [0.0_f64];
+            device
+                .dtoh_sync_copy_into(&root_view, &mut host)
+                .map_err(|e| {
+                    XlogError::Kernel(format!("Failed to read query logZ from GPU: {}", e))
+                })?;
+            log_z_query = host[0];
+        }
         for (g, prob_buf) in probs.iter().enumerate() {
             let slot_vars = slots.group_slot_cnf_var(g)?;
             let labels = slot_vars.len() as u32;
@@ -480,6 +538,10 @@ impl ExactDdnnfProgram {
                 )
             }
             .map_err(|e| XlogError::Kernel(format!("restore query var failed: {}", e)))?;
+        }
+
+        if let Some(out) = out_loss {
+            *out = log_z_base - log_z_query;
         }
 
         state.provider.device().synchronize()?;

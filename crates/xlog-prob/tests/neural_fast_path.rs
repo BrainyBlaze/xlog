@@ -132,3 +132,61 @@ query(pred(0, 2)).
         );
     }
 }
+
+#[test]
+fn test_neural_backward_nll_returns_loss_matches_analytic_single_outcome() {
+    let provider = match try_provider() {
+        Some(p) => p,
+        None => return,
+    };
+
+    let source = r#"
+0.33::pred(0, 0); 0.33::pred(0, 1); 0.33::pred(0, 2).
+query(pred(0, 0)).
+query(pred(0, 1)).
+query(pred(0, 2)).
+"#;
+
+    let cfg = GpuConfig {
+        device_ordinal: 0,
+        memory_bytes: 1024 * 1024 * 1024,
+    };
+    let program = ExactDdnnfProgram::compile_source_with_gpu(source, cfg).unwrap();
+
+    let vars = program.random_var_indices();
+    assert_eq!(vars.len(), 3, "expected exactly 3 AD chain vars");
+
+    let groups: Vec<Vec<u32>> = vec![vars];
+    let slots = GpuWeightSlots::upload(&provider, &groups).unwrap();
+
+    let p: [f32; 3] = [0.2, 0.3, 0.5];
+
+    let schema = xlog_core::Schema::new(vec![("col0".to_string(), xlog_core::ScalarType::F32)]);
+    let prob_buf = provider.create_buffer_from_f32_slice(&p, schema.clone()).unwrap();
+    let grad_buf = provider
+        .create_buffer_from_f32_slice(&[0.0f32; 3], schema)
+        .unwrap();
+
+    let cfg = NeuralFastPathConfig {
+        eps: 1e-7,
+        min_p: 1e-12,
+    };
+
+    let probs = vec![prob_buf];
+    let mut grads = vec![grad_buf];
+
+    // Query index 1 corresponds to pred(0, 1) in the source above.
+    let loss = program
+        .neural_backward_nll_buffers_with_loss(&slots, 1, &probs, &mut grads, cfg)
+        .unwrap();
+
+    let expected = -((1.0 - cfg.eps) * (p[1] as f64)).ln();
+    let err = (loss - expected).abs();
+    assert!(
+        err < 1e-6,
+        "loss expected {} got {} (err={})",
+        expected,
+        loss,
+        err
+    );
+}
