@@ -250,6 +250,11 @@ pub mod sat_kernels {
     pub const SAT_CDCL_SOLVE: &str = "sat_cdcl_solve";
     pub const SAT_CHECK_MODEL: &str = "sat_check_model";
     pub const SAT_PROOF_CHECK: &str = "sat_proof_check";
+    pub const SAT_XGCF_CNF_COUNTS: &str = "sat_xgcf_cnf_counts";
+    pub const SAT_XGCF_CNF_EMIT: &str = "sat_xgcf_cnf_emit";
+    pub const SAT_SHIFT_OFFSETS: &str = "sat_shift_offsets";
+    pub const SAT_XGCF_WRITE_ROOT_UNIT_CLAUSE: &str = "sat_xgcf_write_root_unit_clause";
+    pub const SAT_EMIT_NOT_PHI: &str = "sat_emit_not_phi";
 }
 
 /// Default maximum output size for join operations.
@@ -672,6 +677,11 @@ impl CudaKernelProvider {
                     sat_kernels::SAT_CDCL_SOLVE,
                     sat_kernels::SAT_CHECK_MODEL,
                     sat_kernels::SAT_PROOF_CHECK,
+                    sat_kernels::SAT_XGCF_CNF_COUNTS,
+                    sat_kernels::SAT_XGCF_CNF_EMIT,
+                    sat_kernels::SAT_SHIFT_OFFSETS,
+                    sat_kernels::SAT_XGCF_WRITE_ROOT_UNIT_CLAUSE,
+                    sat_kernels::SAT_EMIT_NOT_PHI,
                 ],
             )
             .map_err(|e| XlogError::Kernel(format!("Failed to load SAT PTX: {}", e)))?;
@@ -2840,6 +2850,21 @@ impl CudaKernelProvider {
     ///
     /// # Errors
     /// Returns `XlogError::Kernel` if kernel execution fails
+    pub fn exclusive_scan_u32_inplace(
+        &self,
+        data: &mut crate::memory::TrackedCudaSlice<u32>,
+        n: u32,
+    ) -> Result<()> {
+        if n as usize > data.len() {
+            return Err(XlogError::Kernel(format!(
+                "exclusive_scan_u32_inplace: n={} exceeds slice len={}",
+                n,
+                data.len()
+            )));
+        }
+        self.multiblock_scan_u32_inplace(data, n)
+    }
+
     pub fn prefix_sum_mask(&self, mask: &[u8]) -> Result<(Vec<u32>, u32)> {
         if mask.is_empty() {
             return Ok((vec![], 0));
@@ -9187,6 +9212,26 @@ mod tests {
         assert!(
             SAT_PTX.contains("sat_proof_check"),
             "SAT_PTX should contain sat_proof_check"
+        );
+        assert!(
+            SAT_PTX.contains("sat_xgcf_cnf_counts"),
+            "SAT_PTX should contain sat_xgcf_cnf_counts"
+        );
+        assert!(
+            SAT_PTX.contains("sat_xgcf_cnf_emit"),
+            "SAT_PTX should contain sat_xgcf_cnf_emit"
+        );
+        assert!(
+            SAT_PTX.contains("sat_shift_offsets"),
+            "SAT_PTX should contain sat_shift_offsets"
+        );
+        assert!(
+            SAT_PTX.contains("sat_xgcf_write_root_unit_clause"),
+            "SAT_PTX should contain sat_xgcf_write_root_unit_clause"
+        );
+        assert!(
+            SAT_PTX.contains("sat_emit_not_phi"),
+            "SAT_PTX should contain sat_emit_not_phi"
         );
     }
 

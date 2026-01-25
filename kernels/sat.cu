@@ -1619,3 +1619,341 @@ extern "C" __global__ void sat_proof_check(
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// GPU CNF construction helpers for equivalence checking (XGCF -> CNF, ¬CNF)
+//
+// These kernels support the "GPU CDCL verifier" by building:
+// - CNF(C) from a device-resident XGCF circuit (Tseitin encoding for internal nodes)
+// - CNF(¬phi) from a device-resident CNF phi (unsatisfied-clause OR encoding)
+// - simple CSR offset shifting for concatenation
+//
+// All outputs are DIMACS signed i32 literals with 1-based var ids.
+// ---------------------------------------------------------------------------
+
+// XGCF node type tags (must match crates/xlog-prob/src/xgcf.rs).
+static constexpr uint8_t XGCF_CONST0 = 0;
+static constexpr uint8_t XGCF_CONST1 = 1;
+static constexpr uint8_t XGCF_LIT = 2;
+static constexpr uint8_t XGCF_AND = 3;
+static constexpr uint8_t XGCF_OR = 4;
+static constexpr uint8_t XGCF_DECISION = 5;
+
+__device__ __forceinline__ int32_t xgcf_node_lit(
+    uint32_t node,
+    const uint8_t* __restrict__ node_type,
+    const int32_t* __restrict__ lit,
+    const uint32_t* __restrict__ internal_prefix,
+    uint32_t base_num_vars
+) {
+    // Literals are stored directly as signed DIMACS.
+    if (node_type[node] == XGCF_LIT) {
+        return lit[node];
+    }
+    // Internal node truth is represented by a fresh Tseitin variable:
+    // v(node) = base_num_vars + internal_index(node) + 1.
+    uint32_t v = base_num_vars + internal_prefix[node] + 1u;
+    return static_cast<int32_t>(v);
+}
+
+// Compute per-node counts for Tseitin CNF encoding of an XGCF circuit.
+//
+// Outputs arrays are length num_nodes and are intended to be exclusive-scanned on device:
+// - internal_counts[i] = 1 if node i is internal, else 0.
+// - clause_counts[i] = number of CNF clauses emitted for node i (0 for Lit nodes).
+// - lit_counts[i] = total number of literals emitted across those clauses (0 for Lit nodes).
+extern "C" __global__ void sat_xgcf_cnf_counts(
+    const uint8_t* __restrict__ node_type,
+    const uint32_t* __restrict__ child_offsets,
+    uint32_t num_nodes,
+    uint32_t* __restrict__ internal_counts,
+    uint32_t* __restrict__ clause_counts,
+    uint32_t* __restrict__ lit_counts
+) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    for (uint32_t i = tid; i < num_nodes; i += blockDim.x * gridDim.x) {
+        uint8_t ty = node_type[i];
+        if (ty == XGCF_LIT) {
+            internal_counts[i] = 0u;
+            clause_counts[i] = 0u;
+            lit_counts[i] = 0u;
+            continue;
+        }
+
+        internal_counts[i] = 1u;
+
+        uint32_t cc = 0u;
+        uint32_t lc = 0u;
+        if (ty == XGCF_CONST0 || ty == XGCF_CONST1) {
+            cc = 1u;
+            lc = 1u;
+        } else if (ty == XGCF_AND || ty == XGCF_OR) {
+            uint32_t deg = child_offsets[i + 1u] - child_offsets[i];
+            if (deg == 0u) {
+                // AND([])=true, OR([])=false.
+                cc = 1u;
+                lc = 1u;
+            } else {
+                // For AND/OR: deg binary clauses + 1 long clause.
+                cc = deg + 1u;
+                // Total lits: 2*deg (binary) + (deg+1) (long) = 3*deg + 1.
+                lc = 3u * deg + 1u;
+            }
+        } else if (ty == XGCF_DECISION) {
+            cc = 4u;
+            lc = 12u;
+        }
+
+        clause_counts[i] = cc;
+        lit_counts[i] = lc;
+    }
+}
+
+// Emit Tseitin CNF clauses for internal XGCF nodes into CSR buffers.
+//
+// Preconditions:
+// - internal_prefix, clause_base, lit_base are exclusive scans of the corresponding count arrays.
+// - out_offsets has length total_clauses + 1; out_lits has length total_lits.
+extern "C" __global__ void sat_xgcf_cnf_emit(
+    const uint8_t* __restrict__ node_type,
+    const uint32_t* __restrict__ child_offsets,
+    const uint32_t* __restrict__ child_indices,
+    const int32_t* __restrict__ lit,
+    const uint32_t* __restrict__ decision_var,
+    const uint32_t* __restrict__ decision_child_false,
+    const uint32_t* __restrict__ decision_child_true,
+    const uint32_t* __restrict__ internal_prefix,
+    const uint32_t* __restrict__ clause_base,
+    const uint32_t* __restrict__ lit_base,
+    uint32_t base_num_vars,
+    uint32_t num_nodes,
+    uint32_t total_clauses,
+    uint32_t total_lits,
+    uint32_t* __restrict__ out_offsets,
+    int32_t* __restrict__ out_lits
+) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+
+    for (uint32_t node = tid; node < num_nodes; node += blockDim.x * gridDim.x) {
+        uint8_t ty = node_type[node];
+        if (ty == XGCF_LIT) {
+            continue;
+        }
+
+        int32_t v = static_cast<int32_t>(base_num_vars + internal_prefix[node] + 1u);
+        uint32_t c0 = clause_base[node];
+        uint32_t l0 = lit_base[node];
+
+        if (ty == XGCF_CONST0) {
+            // v is forced false.
+            out_offsets[c0] = l0;
+            out_lits[l0] = -v;
+            continue;
+        }
+        if (ty == XGCF_CONST1) {
+            // v is forced true.
+            out_offsets[c0] = l0;
+            out_lits[l0] = v;
+            continue;
+        }
+
+        if (ty == XGCF_AND || ty == XGCF_OR) {
+            uint32_t s = child_offsets[node];
+            uint32_t e = child_offsets[node + 1u];
+            uint32_t deg = e - s;
+            if (deg == 0u) {
+                out_offsets[c0] = l0;
+                out_lits[l0] = (ty == XGCF_AND) ? v : -v;
+                continue;
+            }
+
+            // Emit binary implications.
+            for (uint32_t i = 0; i < deg; i++) {
+                uint32_t child = child_indices[s + i];
+                int32_t c_lit = xgcf_node_lit(child, node_type, lit, internal_prefix, base_num_vars);
+
+                out_offsets[c0 + i] = l0 + 2u * i;
+                if (ty == XGCF_AND) {
+                    // v -> child : (¬v ∨ child)
+                    out_lits[l0 + 2u * i + 0u] = -v;
+                    out_lits[l0 + 2u * i + 1u] = c_lit;
+                } else {
+                    // child -> v : (¬child ∨ v)
+                    out_lits[l0 + 2u * i + 0u] = -c_lit;
+                    out_lits[l0 + 2u * i + 1u] = v;
+                }
+            }
+
+            // Emit long clause.
+            uint32_t long_clause_idx = c0 + deg;
+            uint32_t long_lit_idx = l0 + 2u * deg;
+            out_offsets[long_clause_idx] = long_lit_idx;
+            if (ty == XGCF_AND) {
+                // (c1 ∧ ... ∧ ck) -> v  becomes  (v ∨ ¬c1 ∨ ... ∨ ¬ck)
+                out_lits[long_lit_idx + 0u] = v;
+                for (uint32_t i = 0; i < deg; i++) {
+                    uint32_t child = child_indices[s + i];
+                    int32_t c_lit = xgcf_node_lit(child, node_type, lit, internal_prefix, base_num_vars);
+                    out_lits[long_lit_idx + 1u + i] = -c_lit;
+                }
+            } else {
+                // v -> (c1 ∨ ... ∨ ck) becomes (¬v ∨ c1 ∨ ... ∨ ck)
+                out_lits[long_lit_idx + 0u] = -v;
+                for (uint32_t i = 0; i < deg; i++) {
+                    uint32_t child = child_indices[s + i];
+                    int32_t c_lit = xgcf_node_lit(child, node_type, lit, internal_prefix, base_num_vars);
+                    out_lits[long_lit_idx + 1u + i] = c_lit;
+                }
+            }
+            continue;
+        }
+
+        if (ty == XGCF_DECISION) {
+            uint32_t x = decision_var[node];
+            uint32_t f = decision_child_false[node];
+            uint32_t t = decision_child_true[node];
+            int32_t f_lit = xgcf_node_lit(f, node_type, lit, internal_prefix, base_num_vars);
+            int32_t t_lit = xgcf_node_lit(t, node_type, lit, internal_prefix, base_num_vars);
+
+            // Clause order matches CPU encoder for determinism.
+            // (-x ∨ -t ∨ v)
+            out_offsets[c0 + 0u] = l0 + 0u;
+            out_lits[l0 + 0u] = -static_cast<int32_t>(x);
+            out_lits[l0 + 1u] = -t_lit;
+            out_lits[l0 + 2u] = v;
+
+            // (x ∨ -f ∨ v)
+            out_offsets[c0 + 1u] = l0 + 3u;
+            out_lits[l0 + 3u] = static_cast<int32_t>(x);
+            out_lits[l0 + 4u] = -f_lit;
+            out_lits[l0 + 5u] = v;
+
+            // (-x ∨ t ∨ -v)
+            out_offsets[c0 + 2u] = l0 + 6u;
+            out_lits[l0 + 6u] = -static_cast<int32_t>(x);
+            out_lits[l0 + 7u] = t_lit;
+            out_lits[l0 + 8u] = -v;
+
+            // (x ∨ f ∨ -v)
+            out_offsets[c0 + 3u] = l0 + 9u;
+            out_lits[l0 + 9u] = static_cast<int32_t>(x);
+            out_lits[l0 + 10u] = f_lit;
+            out_lits[l0 + 11u] = -v;
+            continue;
+        }
+    }
+
+    // Final CSR terminator.
+    if (blockIdx.x == 0 && threadIdx.x == 0) {
+        out_offsets[total_clauses] = total_lits;
+    }
+}
+
+// Shift CSR offsets by an additive constant and write into a destination offsets array.
+extern "C" __global__ void sat_shift_offsets(
+    const uint32_t* __restrict__ src_offsets,
+    uint32_t n,
+    uint32_t add,
+    uint32_t dst_base,
+    uint32_t* __restrict__ dst_offsets
+) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    for (uint32_t i = tid; i < n; i += blockDim.x * gridDim.x) {
+        dst_offsets[dst_base + i] = src_offsets[i] + add;
+    }
+}
+
+// Write a unit clause asserting the XGCF root to true/false.
+//
+// This is used when constructing SAT instances for equivalence checking:
+// - CNF(phi ∧ ¬C): force_true=0
+// - CNF(C ∧ ¬phi): force_true=1
+extern "C" __global__ void sat_xgcf_write_root_unit_clause(
+    const uint8_t* __restrict__ node_type,
+    const int32_t* __restrict__ lit,
+    const uint32_t* __restrict__ internal_prefix,
+    uint32_t base_num_vars,
+    uint32_t root,
+    int32_t force_true, // 1=true, 0=false
+    uint32_t unit_clause_idx,
+    uint32_t unit_lit_idx,
+    uint32_t* __restrict__ out_offsets,
+    int32_t* __restrict__ out_lits
+) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) {
+        return;
+    }
+
+    int32_t root_lit = xgcf_node_lit(root, node_type, lit, internal_prefix, base_num_vars);
+    int32_t unit_lit = force_true ? root_lit : -root_lit;
+
+    out_offsets[unit_clause_idx] = unit_lit_idx;
+    out_lits[unit_lit_idx] = unit_lit;
+    out_offsets[unit_clause_idx + 1u] = unit_lit_idx + 1u;
+}
+
+// Emit CNF encoding of ¬phi where phi is a CNF in CSR form.
+//
+// Uses one fresh variable per clause j: u_j means "clause j is unsatisfied".
+// Enforces:
+// - u_j -> ¬l for each literal l in clause j
+// - (¬l1 ∧ ... ∧ ¬lk) -> u_j
+// - OR_j u_j   (at least one clause is unsatisfied)
+extern "C" __global__ void sat_emit_not_phi(
+    const uint32_t* __restrict__ phi_offsets,
+    const int32_t* __restrict__ phi_lits,
+    uint32_t num_clauses,
+    uint32_t unsat_var_base,  // u_j = unsat_var_base + j
+    uint32_t out_clause_base, // clause index base in out_offsets
+    uint32_t out_lit_base,    // literal index base in out_lits
+    uint32_t* __restrict__ out_offsets,
+    int32_t* __restrict__ out_lits
+) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+
+    for (uint32_t j = tid; j < num_clauses; j += blockDim.x * gridDim.x) {
+        uint32_t s = phi_offsets[j];
+        uint32_t e = phi_offsets[j + 1u];
+        uint32_t len = e - s;
+
+        uint32_t local_clause_base = s + j;
+        uint32_t local_lit_base = 3u * s + j;
+        uint32_t clause_base = out_clause_base + local_clause_base;
+        uint32_t lit_base = out_lit_base + local_lit_base;
+
+        int32_t u = static_cast<int32_t>(unsat_var_base + j);
+
+        // Binary clauses: (¬u ∨ ¬l_i)
+        for (uint32_t i = 0; i < len; i++) {
+            uint32_t clause_idx = clause_base + i;
+            uint32_t lit_idx = lit_base + 2u * i;
+            int32_t l = phi_lits[s + i];
+
+            out_offsets[clause_idx] = lit_idx;
+            out_lits[lit_idx + 0u] = -u;
+            out_lits[lit_idx + 1u] = -l;
+        }
+
+        // Long clause: (u ∨ l1 ∨ ... ∨ lk)
+        uint32_t clause_idx = clause_base + len;
+        uint32_t lit_idx = lit_base + 2u * len;
+        out_offsets[clause_idx] = lit_idx;
+        out_lits[lit_idx + 0u] = u;
+        for (uint32_t i = 0; i < len; i++) {
+            out_lits[lit_idx + 1u + i] = phi_lits[s + i];
+        }
+    }
+
+    // Emit final OR over all unsatisfied-clause vars, and set CSR terminator.
+    if (blockIdx.x == 0 && threadIdx.x == 0) {
+        uint32_t total_phi_lits = phi_offsets[num_clauses];
+        uint32_t big_clause_idx = out_clause_base + (total_phi_lits + num_clauses);
+        uint32_t big_lit_idx = out_lit_base + (3u * total_phi_lits + num_clauses);
+
+        out_offsets[big_clause_idx] = big_lit_idx;
+        for (uint32_t j = 0; j < num_clauses; j++) {
+            out_lits[big_lit_idx + j] = static_cast<int32_t>(unsat_var_base + j);
+        }
+        out_offsets[big_clause_idx + 1u] = big_lit_idx + num_clauses;
+    }
+}
