@@ -43,4 +43,4 @@ pub use instance::{SolveInstance, Clause, Literal, Objective};
 pub use solver::{Solver, SolverConfig, SolverState};
 pub use proof::{SolveProof, SolveResult, SolveStatus, SolveStats, compute_checksum};
 pub use gpu_cnf::GpuCnf;
-pub use gpu_cdcl::{GpuCdclConfig, GpuCdclResult, GpuCdclSolver, GpuSolveStatus};
+pub use gpu_cdcl::{GpuCdclConfig, GpuCdclSolver};

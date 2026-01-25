@@ -3,7 +3,7 @@ use std::sync::Arc;
 use xlog_core::MemoryBudget;
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 
-use xlog_solve::{Clause, GpuCdclConfig, GpuCdclSolver, GpuCnf, GpuSolveStatus, Literal, SolveInstance};
+use xlog_solve::{Clause, GpuCdclConfig, GpuCdclSolver, GpuCnf, Literal, SolveInstance};
 
 fn try_provider() -> Option<Arc<CudaKernelProvider>> {
     let device = match CudaDevice::new(0) {
@@ -35,15 +35,14 @@ fn gpu_cdcl_sat_unit_clause() {
     let cnf = GpuCnf::from_host(&instance, &provider).expect("GpuCnf upload");
 
     let solver = GpuCdclSolver::new(provider.clone(), GpuCdclConfig::default());
-    let res = solver.solve(&cnf).expect("solve");
-    assert_eq!(res.status, GpuSolveStatus::Sat);
+    let assignment = solver.solve_expect_sat(&cnf).expect("solve_expect_sat");
 
     // Download assignment and sanity check x0=true (DIMACS var 1).
     let mut assign_host = vec![0i8; 2];
     provider
         .device()
         .inner()
-        .dtoh_sync_copy_into(&res.assignment, &mut assign_host)
+        .dtoh_sync_copy_into(&assignment, &mut assign_host)
         .expect("dtoh assignment");
     assert_eq!(assign_host[1], 1);
 }
@@ -65,8 +64,5 @@ fn gpu_cdcl_unsat_contradictory_units() {
     let cnf = GpuCnf::from_host(&instance, &provider).expect("GpuCnf upload");
 
     let solver = GpuCdclSolver::new(provider.clone(), GpuCdclConfig::default());
-    let res = solver.solve(&cnf).expect("solve");
-    assert_eq!(res.status, GpuSolveStatus::Unsat);
-    assert!(res.learned_count > 0);
+    solver.solve_expect_unsat(&cnf).expect("solve_expect_unsat");
 }
-

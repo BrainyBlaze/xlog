@@ -1,38 +1,29 @@
-use std::sync::Arc;
-
 use std::ffi::c_void;
+use std::sync::Arc;
 
 use cudarc::driver::{DeviceRepr, LaunchAsync, LaunchConfig};
 use xlog_core::{Result, XlogError};
-use xlog_cuda::CudaKernelProvider;
 use xlog_cuda::memory::TrackedCudaSlice;
-use xlog_cuda::provider::{SAT_MODULE, sat_kernels};
+use xlog_cuda::provider::{sat_kernels, SAT_MODULE};
+use xlog_cuda::CudaKernelProvider;
 
 use crate::gpu_cnf::GpuCnf;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GpuSolveStatus {
-    Sat,
-    Unsat,
-}
+// Must match kernels/sat.cu.
+const SAT_STATUS_UNSAT: i32 = 0;
+const SAT_STATUS_SAT: i32 = 1;
 
-pub struct GpuCdclResult {
-    pub status: GpuSolveStatus,
-    /// Device-resident assignment (len = num_vars + 1, values in {-1,0,1}).
-    ///
-    /// For SAT, this is a total model. For UNSAT, contents are unspecified.
-    pub assignment: TrackedCudaSlice<i8>,
-    /// Number of learned clauses produced by the solver kernel.
-    pub learned_count: u32,
-}
+struct GpuCdclRun {
+    assignment: TrackedCudaSlice<i8>,
 
-impl std::fmt::Debug for GpuCdclResult {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("GpuCdclResult")
-            .field("status", &self.status)
-            .field("learned_count", &self.learned_count)
-            .finish()
-    }
+    learned_offsets: TrackedCudaSlice<u32>,
+    learned_lits: TrackedCudaSlice<i32>,
+    proof_offsets: TrackedCudaSlice<u32>,
+    proof_data: TrackedCudaSlice<u32>,
+
+    out_status: TrackedCudaSlice<i32>,
+    out_error: TrackedCudaSlice<i32>,
+    out_learned_count: TrackedCudaSlice<u32>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -66,12 +57,14 @@ impl GpuCdclSolver {
         Self { provider, config }
     }
 
-    pub fn solve(&self, cnf: &GpuCnf) -> Result<GpuCdclResult> {
+    fn launch_cdcl(&self, cnf: &GpuCnf) -> Result<GpuCdclRun> {
         let num_vars = cnf.num_vars as usize;
         let num_clauses = cnf.num_clauses as usize;
 
         if num_vars == 0 {
-            return Err(XlogError::Compilation("GpuCdclSolver requires num_vars > 0".to_string()));
+            return Err(XlogError::Compilation(
+                "GpuCdclSolver requires num_vars > 0".to_string(),
+            ));
         }
         if self.config.max_learned_clauses == 0 {
             return Err(XlogError::Compilation(
@@ -135,7 +128,7 @@ impl GpuCdclSolver {
         let mut proof_offsets = memory.alloc::<u32>(max_learned_clauses + 1)?;
         let mut proof_data = memory.alloc::<u32>(max_proof_u32)?;
 
-        // Outputs
+        // Device-resident outputs
         let mut out_status = memory.alloc::<i32>(1)?;
         let mut out_error = memory.alloc::<i32>(1)?;
         let mut out_learned_count = memory.alloc::<u32>(1)?;
@@ -147,24 +140,16 @@ impl GpuCdclSolver {
             .get_func(SAT_MODULE, sat_kernels::SAT_CDCL_SOLVE)
             .ok_or_else(|| XlogError::Kernel("sat_cdcl_solve kernel not found".to_string()))?;
 
-        let num_vars_u32 = cnf.num_vars;
-        let num_clauses_u32 = cnf.num_clauses;
-        let max_learned_clauses_u32 = self.config.max_learned_clauses;
-        let max_learned_lits_u32 = self.config.max_learned_lits;
-        let max_proof_u32_u32 = self.config.max_proof_u32;
-        let restart_base_u32 = self.config.restart_base;
-        let reduce_interval_u32 = self.config.reduce_interval;
-
         let mut params: Vec<*mut c_void> = vec![
             (&cnf.clause_offsets).as_kernel_param(),
             (&cnf.literals).as_kernel_param(),
-            num_vars_u32.as_kernel_param(),
-            num_clauses_u32.as_kernel_param(),
-            max_learned_clauses_u32.as_kernel_param(),
-            max_learned_lits_u32.as_kernel_param(),
-            max_proof_u32_u32.as_kernel_param(),
-            restart_base_u32.as_kernel_param(),
-            reduce_interval_u32.as_kernel_param(),
+            cnf.num_vars.as_kernel_param(),
+            cnf.num_clauses.as_kernel_param(),
+            self.config.max_learned_clauses.as_kernel_param(),
+            self.config.max_learned_lits.as_kernel_param(),
+            self.config.max_proof_u32.as_kernel_param(),
+            self.config.restart_base.as_kernel_param(),
+            self.config.reduce_interval.as_kernel_param(),
             (&mut assign).as_kernel_param(),
             (&mut level).as_kernel_param(),
             (&mut reason).as_kernel_param(),
@@ -207,146 +192,169 @@ impl GpuCdclSolver {
                 )
         }
         .map_err(|e| XlogError::Kernel(format!("Failed to launch SAT solver kernel: {}", e)))?;
+
+        Ok(GpuCdclRun {
+            assignment: assign,
+            learned_offsets,
+            learned_lits,
+            proof_offsets,
+            proof_data,
+            out_status,
+            out_error,
+            out_learned_count,
+        })
+    }
+
+    /// Solve and enforce SAT entirely on GPU (no device->host reads).
+    pub fn solve_expect_sat(&self, cnf: &GpuCnf) -> Result<TrackedCudaSlice<i8>> {
+        let run = self.launch_cdcl(cnf)?;
+
+        let device = self.provider.device().inner();
+        let memory = self.provider.memory();
+
+        let assert_status_fn = device
+            .get_func(SAT_MODULE, sat_kernels::SAT_ASSERT_STATUS)
+            .ok_or_else(|| XlogError::Kernel("sat_assert_status kernel not found".to_string()))?;
+        unsafe {
+            assert_status_fn
+                .clone()
+                .launch(
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (1, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (&run.out_status, &run.out_error, SAT_STATUS_SAT),
+                )
+                .map_err(|e| XlogError::Kernel(format!("Failed to launch sat_assert_status: {}", e)))?;
+        }
+        // Fail-fast if the solver did not produce SAT.
         self.provider.device().synchronize()?;
 
-        let mut status_host = [0i32];
-        let mut error_host = [0i32];
-        let mut learned_count_host = [0u32];
-        self.provider
-            .device()
-            .inner()
-            .dtoh_sync_copy_into(&out_status, &mut status_host)
-            .map_err(|e| XlogError::Kernel(format!("Failed to copy SAT status: {}", e)))?;
-        self.provider
-            .device()
-            .inner()
-            .dtoh_sync_copy_into(&out_error, &mut error_host)
-            .map_err(|e| XlogError::Kernel(format!("Failed to copy SAT error: {}", e)))?;
-        self.provider
-            .device()
-            .inner()
-            .dtoh_sync_copy_into(&out_learned_count, &mut learned_count_host)
-            .map_err(|e| XlogError::Kernel(format!("Failed to copy learned_count: {}", e)))?;
-
-        let status_host = status_host[0];
-        let error_host = error_host[0];
-        let learned_count = learned_count_host[0];
-
-        if error_host != 0 || status_host == -1 {
-            return Err(XlogError::Kernel(format!(
-                "GPU CDCL solver failed: status={} error_code={}",
-                status_host, error_host
-            )));
+        let mut out_ok = memory.alloc::<i32>(1)?;
+        let check_fn = device
+            .get_func(SAT_MODULE, sat_kernels::SAT_CHECK_MODEL)
+            .ok_or_else(|| XlogError::Kernel("sat_check_model kernel not found".to_string()))?;
+        unsafe {
+            check_fn
+                .clone()
+                .launch(
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (256, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        &cnf.clause_offsets,
+                        &cnf.literals,
+                        cnf.num_clauses,
+                        &run.assignment,
+                        &mut out_ok,
+                    ),
+                )
+                .map_err(|e| XlogError::Kernel(format!("Failed to launch SAT model check: {}", e)))?;
         }
 
-        match status_host {
-            1 => {
-                // SAT: validate model on GPU.
-                let mut out_ok = memory.alloc::<i32>(1)?;
-                let check_fn = self
-                    .provider
-                    .device()
-                    .inner()
-                    .get_func(SAT_MODULE, sat_kernels::SAT_CHECK_MODEL)
-                    .ok_or_else(|| XlogError::Kernel("sat_check_model kernel not found".to_string()))?;
-                unsafe {
-                    check_fn
-                        .clone()
-                        .launch(
-                            LaunchConfig {
-                                grid_dim: (1, 1, 1),
-                                block_dim: (256, 1, 1),
-                                shared_mem_bytes: 0,
-                            },
-                            (
-                                &cnf.clause_offsets,
-                                &cnf.literals,
-                                cnf.num_clauses,
-                                &assign,
-                                &mut out_ok,
-                            ),
-                        )
-                        .map_err(|e| XlogError::Kernel(format!("Failed to launch SAT model-check kernel: {}", e)))?;
-                }
-                self.provider.device().synchronize()?;
-                let mut ok_host = [0i32];
-                self.provider
-                    .device()
-                    .inner()
-                    .dtoh_sync_copy_into(&out_ok, &mut ok_host)
-                    .map_err(|e| XlogError::Kernel(format!("Failed to copy SAT model-check result: {}", e)))?;
-                if ok_host[0] != 1 {
-                    return Err(XlogError::Kernel(
-                        "GPU CDCL solver returned SAT but model check failed".to_string(),
-                    ));
-                }
-                Ok(GpuCdclResult {
-                    status: GpuSolveStatus::Sat,
-                    assignment: assign,
-                    learned_count,
-                })
-            }
-            0 => {
-                // UNSAT: validate proof on GPU.
-                let mut out_ok = memory.alloc::<i32>(1)?;
-                let scratch_cap = (cnf.num_vars as usize) + 1;
-                let mut scratch_a = memory.alloc::<i32>(scratch_cap)?;
-                let mut scratch_b = memory.alloc::<i32>(scratch_cap)?;
-
-                let proof_fn = self
-                    .provider
-                    .device()
-                    .inner()
-                    .get_func(SAT_MODULE, sat_kernels::SAT_PROOF_CHECK)
-                    .ok_or_else(|| XlogError::Kernel("sat_proof_check kernel not found".to_string()))?;
-                unsafe {
-                    proof_fn
-                        .clone()
-                        .launch(
-                            LaunchConfig {
-                                grid_dim: (1, 1, 1),
-                                block_dim: (1, 1, 1),
-                                shared_mem_bytes: 0,
-                            },
-                            (
-                                &cnf.clause_offsets,
-                                &cnf.literals,
-                                cnf.num_clauses,
-                                &learned_offsets,
-                                &learned_lits,
-                                &out_learned_count,
-                                &proof_offsets,
-                                &proof_data,
-                                &mut scratch_a,
-                                &mut scratch_b,
-                                scratch_cap as u32,
-                                &mut out_ok,
-                            ),
-                        )
-                        .map_err(|e| XlogError::Kernel(format!("Failed to launch SAT proof-check kernel: {}", e)))?;
-                }
-                self.provider.device().synchronize()?;
-                let mut ok_host = [0i32];
-                self.provider
-                    .device()
-                    .inner()
-                    .dtoh_sync_copy_into(&out_ok, &mut ok_host)
-                    .map_err(|e| XlogError::Kernel(format!("Failed to copy SAT proof-check result: {}", e)))?;
-                if ok_host[0] != 1 {
-                    return Err(XlogError::Kernel(
-                        "GPU CDCL solver returned UNSAT but proof check failed".to_string(),
-                    ));
-                }
-                Ok(GpuCdclResult {
-                    status: GpuSolveStatus::Unsat,
-                    assignment: assign,
-                    learned_count,
-                })
-            }
-            other => Err(XlogError::Kernel(format!(
-                "GPU CDCL solver returned invalid status {}",
-                other
-            ))),
+        let assert_ok_fn = device
+            .get_func(SAT_MODULE, sat_kernels::SAT_ASSERT_OK)
+            .ok_or_else(|| XlogError::Kernel("sat_assert_ok kernel not found".to_string()))?;
+        unsafe {
+            assert_ok_fn
+                .clone()
+                .launch(
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (1, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (&out_ok,),
+                )
+                .map_err(|e| XlogError::Kernel(format!("Failed to launch sat_assert_ok: {}", e)))?;
         }
+        self.provider.device().synchronize()?;
+
+        Ok(run.assignment)
+    }
+
+    /// Solve and enforce UNSAT entirely on GPU (no device->host reads).
+    pub fn solve_expect_unsat(&self, cnf: &GpuCnf) -> Result<()> {
+        let run = self.launch_cdcl(cnf)?;
+
+        let device = self.provider.device().inner();
+        let memory = self.provider.memory();
+
+        let assert_status_fn = device
+            .get_func(SAT_MODULE, sat_kernels::SAT_ASSERT_STATUS)
+            .ok_or_else(|| XlogError::Kernel("sat_assert_status kernel not found".to_string()))?;
+        unsafe {
+            assert_status_fn
+                .clone()
+                .launch(
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (1, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (&run.out_status, &run.out_error, SAT_STATUS_UNSAT),
+                )
+                .map_err(|e| XlogError::Kernel(format!("Failed to launch sat_assert_status: {}", e)))?;
+        }
+        // Fail-fast if the solver did not produce UNSAT.
+        self.provider.device().synchronize()?;
+
+        let mut out_ok = memory.alloc::<i32>(1)?;
+        let scratch_cap = (cnf.num_vars as usize) + 1;
+        let mut scratch_a = memory.alloc::<i32>(scratch_cap)?;
+        let mut scratch_b = memory.alloc::<i32>(scratch_cap)?;
+
+        let proof_fn = device
+            .get_func(SAT_MODULE, sat_kernels::SAT_PROOF_CHECK)
+            .ok_or_else(|| XlogError::Kernel("sat_proof_check kernel not found".to_string()))?;
+        unsafe {
+            proof_fn
+                .clone()
+                .launch(
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (1, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        &cnf.clause_offsets,
+                        &cnf.literals,
+                        cnf.num_clauses,
+                        &run.learned_offsets,
+                        &run.learned_lits,
+                        &run.out_learned_count,
+                        &run.proof_offsets,
+                        &run.proof_data,
+                        &mut scratch_a,
+                        &mut scratch_b,
+                        scratch_cap as u32,
+                        &mut out_ok,
+                    ),
+                )
+                .map_err(|e| XlogError::Kernel(format!("Failed to launch SAT proof check: {}", e)))?;
+        }
+
+        let assert_ok_fn = device
+            .get_func(SAT_MODULE, sat_kernels::SAT_ASSERT_OK)
+            .ok_or_else(|| XlogError::Kernel("sat_assert_ok kernel not found".to_string()))?;
+        unsafe {
+            assert_ok_fn
+                .clone()
+                .launch(
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (1, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (&out_ok,),
+                )
+                .map_err(|e| XlogError::Kernel(format!("Failed to launch sat_assert_ok: {}", e)))?;
+        }
+        self.provider.device().synchronize()?;
+
+        Ok(())
     }
 }

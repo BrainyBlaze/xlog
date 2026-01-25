@@ -679,6 +679,8 @@ impl CudaKernelProvider {
                     sat_kernels::SAT_CDCL_SOLVE,
                     sat_kernels::SAT_CHECK_MODEL,
                     sat_kernels::SAT_PROOF_CHECK,
+                    sat_kernels::SAT_ASSERT_STATUS,
+                    sat_kernels::SAT_ASSERT_OK,
                     sat_kernels::SAT_XGCF_CNF_COUNTS,
                     sat_kernels::SAT_XGCF_CNF_EMIT,
                     sat_kernels::SAT_SHIFT_OFFSETS,
