@@ -10,3 +10,4 @@ pub mod gpu;
 pub mod mc;
 pub mod wfs;
 pub mod compilation;
+pub mod neural_fast_path;
