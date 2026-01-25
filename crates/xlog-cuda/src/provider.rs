@@ -28,6 +28,7 @@ const PACK_PTX: &str = include_str!("../../../kernels/pack.ptx");
 const CIRCUIT_PTX: &str = include_str!("../../../kernels/circuit.ptx");
 const MC_SAMPLE_PTX: &str = include_str!("../../../kernels/mc_sample.ptx");
 const ARITH_PTX: &str = include_str!("../../../kernels/arith.ptx");
+const SAT_PTX: &str = include_str!("../../../kernels/sat.ptx");
 
 #[derive(Clone, Copy)]
 struct RawCudaView<'a, T> {
@@ -68,6 +69,7 @@ pub const PACK_MODULE: &str = "xlog_pack";
 pub const CIRCUIT_MODULE: &str = "xlog_circuit";
 pub const MC_SAMPLE_MODULE: &str = "xlog_mc_sample";
 pub const ARITH_MODULE: &str = "xlog_arith";
+pub const SAT_MODULE: &str = "xlog_sat";
 
 /// Kernel function names in the Monte Carlo sampling module
 pub mod mc_sample_kernels {
@@ -241,6 +243,13 @@ pub mod circuit_kernels {
     pub const XGCF_BACKWARD_LEVEL_PROPAGATE: &str = "xgcf_backward_level_propagate";
     pub const XGCF_BACKWARD_LEVEL_DECISION_GRAD: &str = "xgcf_backward_level_decision_grad";
     pub const XGCF_BACKWARD_LEVEL_LIT_GRAD: &str = "xgcf_backward_level_lit_grad";
+}
+
+/// Kernel function names in the SAT module
+pub mod sat_kernels {
+    pub const SAT_CDCL_SOLVE: &str = "sat_cdcl_solve";
+    pub const SAT_CHECK_MODEL: &str = "sat_check_model";
+    pub const SAT_PROOF_CHECK: &str = "sat_proof_check";
 }
 
 /// Default maximum output size for join operations.
@@ -652,6 +661,20 @@ impl CudaKernelProvider {
                 ],
             )
             .map_err(|e| XlogError::Kernel(format!("Failed to load arith PTX: {}", e)))?;
+
+        // Load SAT module (GPU CDCL + on-GPU validation)
+        device
+            .inner()
+            .load_ptx(
+                Ptx::from_src(SAT_PTX),
+                SAT_MODULE,
+                &[
+                    sat_kernels::SAT_CDCL_SOLVE,
+                    sat_kernels::SAT_CHECK_MODEL,
+                    sat_kernels::SAT_PROOF_CHECK,
+                ],
+            )
+            .map_err(|e| XlogError::Kernel(format!("Failed to load SAT PTX: {}", e)))?;
 
         Ok(Self {
             device,
@@ -9083,7 +9106,7 @@ mod tests {
     use xlog_core::MemoryBudget;
 
     fn has_cuda_device() -> bool {
-        cudarc::driver::CudaDevice::count().unwrap_or(0) > 0
+        CudaDevice::new(0).is_ok()
     }
 
     #[test]
@@ -9094,6 +9117,7 @@ mod tests {
         assert!(!GROUPBY_PTX.is_empty(), "GROUPBY_PTX should not be empty");
         assert!(!CIRCUIT_PTX.is_empty(), "CIRCUIT_PTX should not be empty");
         assert!(!MC_SAMPLE_PTX.is_empty(), "MC_SAMPLE_PTX should not be empty");
+        assert!(!SAT_PTX.is_empty(), "SAT_PTX should not be empty");
 
         // Verify PTX contains expected kernel names
         assert!(
@@ -9152,6 +9176,18 @@ mod tests {
             MC_SAMPLE_PTX.contains("mc_sample_bernoulli"),
             "MC_SAMPLE_PTX should contain mc_sample_bernoulli"
         );
+        assert!(
+            SAT_PTX.contains("sat_cdcl_solve"),
+            "SAT_PTX should contain sat_cdcl_solve"
+        );
+        assert!(
+            SAT_PTX.contains("sat_check_model"),
+            "SAT_PTX should contain sat_check_model"
+        );
+        assert!(
+            SAT_PTX.contains("sat_proof_check"),
+            "SAT_PTX should contain sat_proof_check"
+        );
     }
 
     #[test]
@@ -9180,6 +9216,10 @@ mod tests {
         assert!(
             valid_targets.iter().any(|t| MC_SAMPLE_PTX.contains(t)),
             "MC_SAMPLE_PTX should target sm_70 or later"
+        );
+        assert!(
+            valid_targets.iter().any(|t| SAT_PTX.contains(t)),
+            "SAT_PTX should target sm_70 or later"
         );
     }
 
