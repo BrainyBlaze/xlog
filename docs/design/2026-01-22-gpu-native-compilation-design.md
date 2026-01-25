@@ -300,7 +300,7 @@ This matches XLOG’s design goal: keep compilation+verification on GPU even whe
 
 Use a CSR-like clause database that mirrors how XLOG already stores CNFs/circuits on GPU:
 
-- `clause_offsets[clause_id]..clause_offsets[clause_id+1]` indexes into `clause_lits[]`.
+- `clause_offsets[clause_id]..clause_offsets[clause_id+1]` indexes into `literals[]`.
 - Literals are stored as signed `i32` DIMACS (`+v` / `-v`), with `0` unused.
 - Learned clauses live in a separate arena with the same layout and an eviction policy (e.g., LBD + activity).
 
@@ -322,15 +322,15 @@ XLOG’s GPU tier has explicit determinism testing (`crates/xlog-cuda-tests`, e.
 
 #### 3.2.4 SAT Subsystem (`crates/xlog-solve`) Status
 
-XLOG already contains a “SAT subsystem” (`crates/xlog-solve`), but it is:
+As of **January 25, 2026**, `crates/xlog-solve` provides:
 
-- **CPU-only** today (no CUDA kernels),
-- **incomplete** (Continuous Local Search / optimization-style SAT; cannot reliably prove UNSAT).
+- A **CPU Continuous Local Search (CLS)** solver (heuristic, incomplete) that can be used only as an *optional*
+  accelerator (e.g., SAT witness finding, or future CDCL seeding).
+- A **GPU-native CDCL solver** (complete SAT/UNSAT) used as the **production verifier**.
 
-It therefore cannot serve as the equivalence verifier. It can still be reused for:
-- DIMACS literal conventions/types, and
-- optional **SAT-witness fast rejection** in debug builds (find a counterexample quickly), while CDCL remains the
-  sole complete verifier.
+The GPU CDCL verifier is implemented in `kernels/sat.cu` (compiled to `kernels/sat.ptx`), loaded by
+`crates/xlog-cuda`, and exposed as `xlog_solve::GpuCdclSolver` for verifier integrations (e.g., equivalence checking
+in `crates/xlog-prob`).
 
 ### 3.3 GPU-Resident Equivalence Construction
 
@@ -943,7 +943,8 @@ This appendix lists the concrete source files that must change to support the GP
 
 7. `crates/xlog-solve/`  
    - CLS solver remains CPU-only and **not used** for verification.
-   - If reusing naming, add a new GPU CDCL module under `crates/xlog-prob/src/compilation/`.
+   - GPU CNF + GPU CDCL verifier live here (`GpuCnf`, `GpuCdclSolver`) and are used by `xlog-prob` for equivalence
+     checking.
 
 8. `crates/pyxlog/src/lib.rs`  
    - Current template circuit cache stores `ExactDdnnfProgram` compiled via CPU D4.

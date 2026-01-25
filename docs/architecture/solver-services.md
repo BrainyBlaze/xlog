@@ -39,15 +39,20 @@ pub struct GpuCnf {
 }
 
 pub struct GpuCdclSolver {
-    pub provider: Arc<CudaKernelProvider>,
-    pub config: GpuCdclConfig,
+    /* internal fields */
+}
+
+impl GpuCdclSolver {
+    pub fn new(provider: Arc<CudaKernelProvider>, config: GpuCdclConfig) -> Self;
+    pub fn solve(&self, cnf: &GpuCnf) -> xlog_core::Result<GpuCdclResult>;
 }
 
 pub enum GpuSolveStatus { Sat, Unsat }
 
 pub struct GpuCdclResult {
     pub status: GpuSolveStatus,
-    pub assignment: TrackedCudaSlice<i32>, // len = num_vars + 1, values {-1,0,1}
+    pub assignment: TrackedCudaSlice<i8>, // len = num_vars + 1, values {-1,0,1}
+    pub learned_count: u32,
 }
 ```
 
