@@ -1971,6 +1971,51 @@ extern "C" __global__ void sat_xgcf_cnf_emit(
 
 }
 
+// Copy a CNF (CSR) into a destination CNF buffer at the given clause/literal base.
+//
+// This is a GPU-native building block used by the verifier path to concatenate CNFs without
+// reading exact sizes on the host. It relies on device-resident `num_clauses/num_lits`.
+extern "C" __global__ void sat_cnf_copy_into(
+    const uint32_t* __restrict__ src_offsets,
+    const int32_t* __restrict__ src_lits,
+    const uint32_t* __restrict__ src_num_clauses, // len=1
+    const uint32_t* __restrict__ src_num_lits,    // len=1
+    uint32_t src_clause_cap,
+    uint32_t src_lit_cap,
+    const uint32_t* __restrict__ dst_clause_base, // len=1
+    const uint32_t* __restrict__ dst_lit_base,    // len=1
+    uint32_t dst_clause_cap,
+    uint32_t dst_lit_cap,
+    uint32_t* __restrict__ dst_offsets,
+    int32_t* __restrict__ dst_lits
+) {
+    uint32_t m = src_num_clauses[0];
+    uint32_t L = src_num_lits[0];
+    uint32_t c0 = dst_clause_base[0];
+    uint32_t l0 = dst_lit_base[0];
+
+    // Bounds checks to avoid silent OOB reads/writes on malformed inputs.
+    if (m > src_clause_cap || L > src_lit_cap) {
+        sat_trap();
+    }
+    uint64_t dst_offsets_needed = static_cast<uint64_t>(c0) + static_cast<uint64_t>(m);
+    uint64_t dst_lits_needed = static_cast<uint64_t>(l0) + static_cast<uint64_t>(L);
+    if (dst_offsets_needed > static_cast<uint64_t>(dst_clause_cap)
+        || dst_lits_needed > static_cast<uint64_t>(dst_lit_cap)) {
+        sat_trap();
+    }
+
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+
+    for (uint32_t i = tid; i < L; i += blockDim.x * gridDim.x) {
+        dst_lits[l0 + i] = src_lits[i];
+    }
+    uint32_t n = m + 1u;
+    for (uint32_t i = tid; i < n; i += blockDim.x * gridDim.x) {
+        dst_offsets[c0 + i] = src_offsets[i] + l0;
+    }
+}
+
 // Shift CSR offsets by an additive constant and write into a destination offsets array.
 extern "C" __global__ void sat_shift_offsets(
     const uint32_t* __restrict__ src_offsets,
@@ -1991,6 +2036,9 @@ extern "C" __global__ void sat_shift_offsets(
 // This is used when constructing SAT instances for equivalence checking:
 // - CNF(phi ∧ ¬C): force_true=0
 // - CNF(C ∧ ¬phi): force_true=1
+//
+// Note: `clause_base/lit_base` and `extra_num_*` are device-resident scalars (len=1 each) so the
+// host never needs to read exact sizes to place the unit clause.
 extern "C" __global__ void sat_xgcf_write_root_unit_clause(
     const uint8_t* __restrict__ node_type,
     const int32_t* __restrict__ lit,
@@ -1998,14 +2046,14 @@ extern "C" __global__ void sat_xgcf_write_root_unit_clause(
     uint32_t base_num_vars,
     uint32_t root,
     int32_t force_true, // 1=true, 0=false
-    uint32_t clause_base,
-    uint32_t lit_base,
+    const uint32_t* __restrict__ clause_base, // len=1
+    const uint32_t* __restrict__ lit_base,    // len=1
     const uint32_t* __restrict__ c_num_vars,    // len=1
     const uint32_t* __restrict__ c_num_clauses, // len=1
     const uint32_t* __restrict__ c_num_lits,    // len=1
-    uint32_t extra_num_vars,
-    uint32_t extra_num_clauses,
-    uint32_t extra_num_lits,
+    const uint32_t* __restrict__ extra_num_vars,    // len=1
+    const uint32_t* __restrict__ extra_num_clauses, // len=1
+    const uint32_t* __restrict__ extra_num_lits,    // len=1
     uint32_t out_var_cap,
     uint32_t out_clause_cap,
     uint32_t out_lit_cap,
@@ -2026,11 +2074,17 @@ extern "C" __global__ void sat_xgcf_write_root_unit_clause(
     uint32_t cnc = c_num_clauses[0];
     uint32_t cnl = c_num_lits[0];
 
-    uint64_t total_vars64 = static_cast<uint64_t>(cnv) + static_cast<uint64_t>(extra_num_vars);
-    uint64_t total_clauses64 = static_cast<uint64_t>(clause_base) + static_cast<uint64_t>(cnc) + 1ull
-        + static_cast<uint64_t>(extra_num_clauses);
-    uint64_t total_lits64 = static_cast<uint64_t>(lit_base) + static_cast<uint64_t>(cnl) + 1ull
-        + static_cast<uint64_t>(extra_num_lits);
+    uint32_t cb = clause_base[0];
+    uint32_t lb = lit_base[0];
+    uint32_t ev = extra_num_vars[0];
+    uint32_t ec = extra_num_clauses[0];
+    uint32_t el = extra_num_lits[0];
+
+    uint64_t total_vars64 = static_cast<uint64_t>(cnv) + static_cast<uint64_t>(ev);
+    uint64_t total_clauses64 = static_cast<uint64_t>(cb) + static_cast<uint64_t>(cnc) + 1ull
+        + static_cast<uint64_t>(ec);
+    uint64_t total_lits64 = static_cast<uint64_t>(lb) + static_cast<uint64_t>(cnl) + 1ull
+        + static_cast<uint64_t>(el);
 
     if (total_vars64 > static_cast<uint64_t>(out_var_cap)
         || total_clauses64 > static_cast<uint64_t>(out_clause_cap)
@@ -2042,8 +2096,8 @@ extern "C" __global__ void sat_xgcf_write_root_unit_clause(
     uint32_t total_clauses = static_cast<uint32_t>(total_clauses64);
     uint32_t total_lits = static_cast<uint32_t>(total_lits64);
 
-    uint32_t unit_clause_idx = clause_base + cnc;
-    uint32_t unit_lit_idx = lit_base + cnl;
+    uint32_t unit_clause_idx = cb + cnc;
+    uint32_t unit_lit_idx = lb + cnl;
 
     int32_t root_lit = xgcf_node_lit(root, node_type, lit, internal_prefix, base_num_vars);
     int32_t unit_lit = force_true ? root_lit : -root_lit;
@@ -2065,6 +2119,36 @@ extern "C" __global__ void sat_xgcf_write_root_unit_clause(
 
     // CSR terminator for the whole query CNF.
     out_offsets[total_clauses] = total_lits;
+}
+
+// Compute the exact CNF size contributions for the ¬phi encoding, using device-resident phi counts.
+//
+// ¬phi encoding:
+//   clauses_notphi = sum_j(len_j + 1) + 1 = L + m + 1
+//   lits_notphi    = sum_j(3*len_j + 1) + m = 3L + 2m
+extern "C" __global__ void sat_not_phi_counts(
+    const uint32_t* __restrict__ phi_num_clauses, // len=1
+    const uint32_t* __restrict__ phi_num_lits,    // len=1
+    uint32_t* __restrict__ out_extra_num_vars,    // len=1
+    uint32_t* __restrict__ out_extra_num_clauses, // len=1
+    uint32_t* __restrict__ out_extra_num_lits     // len=1
+) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) {
+        return;
+    }
+    uint32_t m = phi_num_clauses[0];
+    uint32_t L = phi_num_lits[0];
+
+    uint64_t clauses64 = static_cast<uint64_t>(L) + static_cast<uint64_t>(m) + 1ull;
+    uint64_t lits64 = 3ull * static_cast<uint64_t>(L) + 2ull * static_cast<uint64_t>(m);
+
+    if (clauses64 > 0xffffffffull || lits64 > 0xffffffffull) {
+        sat_trap();
+    }
+
+    out_extra_num_vars[0] = m;
+    out_extra_num_clauses[0] = static_cast<uint32_t>(clauses64);
+    out_extra_num_lits[0] = static_cast<uint32_t>(lits64);
 }
 
 // Emit CNF encoding of ¬phi where phi is a CNF in CSR form.

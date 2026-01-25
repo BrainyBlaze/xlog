@@ -257,8 +257,10 @@ pub mod sat_kernels {
     pub const SAT_XGCF_CNF_CAPTURE_LAST_COUNTS: &str = "sat_xgcf_cnf_capture_last_counts";
     pub const SAT_XGCF_CNF_COMPUTE_TOTALS: &str = "sat_xgcf_cnf_compute_totals";
     pub const SAT_CNF_WRITE_TERMINATOR: &str = "sat_cnf_write_terminator";
+    pub const SAT_CNF_COPY_INTO: &str = "sat_cnf_copy_into";
     pub const SAT_SHIFT_OFFSETS: &str = "sat_shift_offsets";
     pub const SAT_XGCF_WRITE_ROOT_UNIT_CLAUSE: &str = "sat_xgcf_write_root_unit_clause";
+    pub const SAT_NOT_PHI_COUNTS: &str = "sat_not_phi_counts";
     pub const SAT_EMIT_NOT_PHI: &str = "sat_emit_not_phi";
 }
 
@@ -689,8 +691,10 @@ impl CudaKernelProvider {
                     sat_kernels::SAT_XGCF_CNF_CAPTURE_LAST_COUNTS,
                     sat_kernels::SAT_XGCF_CNF_COMPUTE_TOTALS,
                     sat_kernels::SAT_CNF_WRITE_TERMINATOR,
+                    sat_kernels::SAT_CNF_COPY_INTO,
                     sat_kernels::SAT_SHIFT_OFFSETS,
                     sat_kernels::SAT_XGCF_WRITE_ROOT_UNIT_CLAUSE,
+                    sat_kernels::SAT_NOT_PHI_COUNTS,
                     sat_kernels::SAT_EMIT_NOT_PHI,
                 ],
             )
@@ -9252,12 +9256,20 @@ mod tests {
             "SAT_PTX should contain sat_cnf_write_terminator"
         );
         assert!(
+            SAT_PTX.contains("sat_cnf_copy_into"),
+            "SAT_PTX should contain sat_cnf_copy_into"
+        );
+        assert!(
             SAT_PTX.contains("sat_shift_offsets"),
             "SAT_PTX should contain sat_shift_offsets"
         );
         assert!(
             SAT_PTX.contains("sat_xgcf_write_root_unit_clause"),
             "SAT_PTX should contain sat_xgcf_write_root_unit_clause"
+        );
+        assert!(
+            SAT_PTX.contains("sat_not_phi_counts"),
+            "SAT_PTX should contain sat_not_phi_counts"
         );
         assert!(
             SAT_PTX.contains("sat_emit_not_phi"),

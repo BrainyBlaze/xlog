@@ -283,18 +283,18 @@ fn build_phi_and_not_c(
     let device = provider.device().inner();
     let memory = provider.memory();
 
-    let phi_clauses = phi.clause_cap;
-    let phi_lits = phi.lit_cap;
+    let phi_clause_cap = phi.clause_cap;
+    let phi_lit_cap = phi.lit_cap;
 
     let clause_cap = u32::try_from(
-        (phi_clauses as u64)
+        (phi_clause_cap as u64)
             .checked_add(circuit_cnf.cnf.clause_cap as u64)
             .and_then(|v| v.checked_add(1))
             .ok_or_else(|| XlogError::Kernel("phi ∧ ¬C clause capacity overflow".to_string()))?,
     )
     .map_err(|_| XlogError::Kernel("phi ∧ ¬C clause capacity exceeds u32::MAX".to_string()))?;
     let lit_cap = u32::try_from(
-        (phi_lits as u64)
+        (phi_lit_cap as u64)
             .checked_add(circuit_cnf.cnf.lit_cap as u64)
             .and_then(|v| v.checked_add(1))
             .ok_or_else(|| XlogError::Kernel("phi ∧ ¬C literal capacity overflow".to_string()))?,
@@ -310,43 +310,20 @@ fn build_phi_and_not_c(
     let mut d_unused1 = memory.alloc::<u32>(1)?;
     let mut d_unused2 = memory.alloc::<u32>(1)?;
 
+    let mut d_zero = memory.alloc::<u32>(1)?;
+    device
+        .htod_sync_copy_into(&[0u32], &mut d_zero)
+        .map_err(|e| XlogError::Kernel(format!("Failed to upload zero: {}", e)))?;
+
     let mut out_offsets = memory.alloc::<u32>((clause_cap as usize) + 1)?;
     let mut out_lits = memory.alloc::<i32>(lit_cap as usize)?;
 
-    // Copy phi into the front.
-    {
-        let mut dst = out_offsets.slice_mut(0..((phi_clauses as usize) + 1));
-        device
-            .dtod_copy(&phi.clause_offsets, &mut dst)
-            .map_err(|e| XlogError::Kernel(format!("Failed to copy phi offsets: {}", e)))?;
-    }
-    if phi_lits > 0 {
-        let mut dst = out_lits.slice_mut(0..(phi_lits as usize));
-        device
-            .dtod_copy(&phi.literals, &mut dst)
-            .map_err(|e| XlogError::Kernel(format!("Failed to copy phi lits: {}", e)))?;
-    }
-
-    // Copy CNF(C) literals after phi (capacity copy; solver reads only up to device-resident totals).
-    if circuit_cnf.cnf.lit_cap > 0 {
-        let start = phi_lits as usize;
-        let end = start + (circuit_cnf.cnf.lit_cap as usize);
-        let mut dst = out_lits.slice_mut(start..end);
-        device
-            .dtod_copy(&circuit_cnf.cnf.literals, &mut dst)
-            .map_err(|e| XlogError::Kernel(format!("Failed to copy CNF(C) lits: {}", e)))?;
-    }
-
-    // Shift and write CNF(C) offsets after phi (dynamic length via device-resident c_num_clauses).
-    let shift_fn = device
-        .get_func(SAT_MODULE, sat_kernels::SAT_SHIFT_OFFSETS)
-        .ok_or_else(|| XlogError::Kernel("sat_shift_offsets kernel not found".to_string()))?;
-    let add = phi_lits;
-    let dst_base = phi_clauses;
-    let n_cap = circuit_cnf.cnf.clause_cap.saturating_add(1);
+    let copy_fn = device
+        .get_func(SAT_MODULE, sat_kernels::SAT_CNF_COPY_INTO)
+        .ok_or_else(|| XlogError::Kernel("sat_cnf_copy_into kernel not found".to_string()))?;
 
     let block = 256u32;
-    let mut grid = (n_cap + block - 1) / block;
+    let mut grid = (phi_clause_cap.saturating_add(1).max(phi_lit_cap) + block - 1) / block;
     if grid == 0 {
         grid = 1;
     }
@@ -354,26 +331,66 @@ fn build_phi_and_not_c(
         grid = 65_535;
     }
 
-    // SAFETY: sat_shift_offsets(src_offsets, src_num_clauses*, add, dst_base, dst_offsets)
+    // Copy phi (exact sizes) into the front.
+    // sat_cnf_copy_into(src_offsets, src_lits, src_num_clauses*, src_num_lits*, src_clause_cap, src_lit_cap,
+    //                  dst_clause_base*, dst_lit_base*, dst_clause_cap, dst_lit_cap, dst_offsets, dst_lits)
     unsafe {
-        shift_fn
-            .clone()
-            .launch(
-                LaunchConfig {
-                    grid_dim: (grid, 1, 1),
-                    block_dim: (block, 1, 1),
-                    shared_mem_bytes: 0,
-                },
-                (
-                    &circuit_cnf.cnf.clause_offsets,
-                    &circuit_cnf.cnf.num_clauses,
-                    add,
-                    dst_base,
-                    &mut out_offsets,
-                ),
-            )
+        copy_fn.clone().launch(
+            LaunchConfig {
+                grid_dim: (grid, 1, 1),
+                block_dim: (block, 1, 1),
+                shared_mem_bytes: 0,
+            },
+            (
+                &phi.clause_offsets,
+                &phi.literals,
+                &phi.num_clauses,
+                &phi.num_lits,
+                phi.clause_cap,
+                phi.lit_cap,
+                &d_zero,
+                &d_zero,
+                clause_cap,
+                lit_cap,
+                &mut out_offsets,
+                &mut out_lits,
+            ),
+        )
     }
-    .map_err(|e| XlogError::Kernel(format!("sat_shift_offsets failed: {}", e)))?;
+    .map_err(|e| XlogError::Kernel(format!("sat_cnf_copy_into(phi) failed: {}", e)))?;
+
+    // Copy CNF(C) after phi using device-resident bases (phi.num_clauses/phi.num_lits).
+    let mut grid_c = (circuit_cnf.cnf.clause_cap.saturating_add(1).max(circuit_cnf.cnf.lit_cap) + block - 1) / block;
+    if grid_c == 0 {
+        grid_c = 1;
+    }
+    if grid_c > 65_535 {
+        grid_c = 65_535;
+    }
+    unsafe {
+        copy_fn.clone().launch(
+            LaunchConfig {
+                grid_dim: (grid_c, 1, 1),
+                block_dim: (block, 1, 1),
+                shared_mem_bytes: 0,
+            },
+            (
+                &circuit_cnf.cnf.clause_offsets,
+                &circuit_cnf.cnf.literals,
+                &circuit_cnf.cnf.num_clauses,
+                &circuit_cnf.cnf.num_lits,
+                circuit_cnf.cnf.clause_cap,
+                circuit_cnf.cnf.lit_cap,
+                &phi.num_clauses,
+                &phi.num_lits,
+                clause_cap,
+                lit_cap,
+                &mut out_offsets,
+                &mut out_lits,
+            ),
+        )
+    }
+    .map_err(|e| XlogError::Kernel(format!("sat_cnf_copy_into(C) failed: {}", e)))?;
 
     // Finalize: append unit clause forcing root false + write device-resident totals for the combined query.
     let unit_fn = device
@@ -388,14 +405,14 @@ fn build_phi_and_not_c(
         phi.var_cap.as_kernel_param(),
         circuit.root().as_kernel_param(),
         0i32.as_kernel_param(), // force_false
-        phi_clauses.as_kernel_param(),
-        phi_lits.as_kernel_param(),
+        (&phi.num_clauses).as_kernel_param(),
+        (&phi.num_lits).as_kernel_param(),
         (&circuit_cnf.cnf.num_vars).as_kernel_param(),
         (&circuit_cnf.cnf.num_clauses).as_kernel_param(),
         (&circuit_cnf.cnf.num_lits).as_kernel_param(),
-        0u32.as_kernel_param(), // extra_num_vars
-        0u32.as_kernel_param(), // extra_num_clauses
-        0u32.as_kernel_param(), // extra_num_lits
+        (&d_zero).as_kernel_param(), // extra_num_vars
+        (&d_zero).as_kernel_param(), // extra_num_clauses
+        (&d_zero).as_kernel_param(), // extra_num_lits
         var_cap.as_kernel_param(),
         clause_cap.as_kernel_param(),
         lit_cap.as_kernel_param(),
@@ -446,23 +463,23 @@ fn build_c_and_not_phi(
     let device = provider.device().inner();
     let memory = provider.memory();
 
-    let m = phi.clause_cap;
-    let l = phi.lit_cap;
+    let phi_clause_cap = phi.clause_cap;
+    let phi_lit_cap = phi.lit_cap;
 
     // ¬phi encoding:
     // clauses_notphi = sum(len_j + 1) + 1 = L + m + 1
     // lits_notphi = sum(3*len_j + 1) + m = 3L + 2m
-    let notphi_clauses = u32::try_from(
-        (l as u64)
-            .checked_add(m as u64)
+    let notphi_clause_cap = u32::try_from(
+        (phi_lit_cap as u64)
+            .checked_add(phi_clause_cap as u64)
             .and_then(|v| v.checked_add(1))
             .ok_or_else(|| XlogError::Kernel("¬phi clause count overflow".to_string()))?,
     )
     .map_err(|_| XlogError::Kernel("¬phi clause count exceeds u32::MAX".to_string()))?;
-    let notphi_lits = u32::try_from(
-        (l as u64)
+    let notphi_lit_cap = u32::try_from(
+        (phi_lit_cap as u64)
             .checked_mul(3)
-            .and_then(|v| v.checked_add(2u64.saturating_mul(m as u64)))
+            .and_then(|v| v.checked_add(2u64.saturating_mul(phi_clause_cap as u64)))
             .ok_or_else(|| XlogError::Kernel("¬phi literal count overflow".to_string()))?,
     )
     .map_err(|_| XlogError::Kernel("¬phi literal count exceeds u32::MAX".to_string()))?;
@@ -470,19 +487,19 @@ fn build_c_and_not_phi(
     let var_cap = circuit_cnf
         .cnf
         .var_cap
-        .checked_add(m)
+        .checked_add(phi_clause_cap)
         .ok_or_else(|| XlogError::Kernel("C ∧ ¬phi var capacity overflow".to_string()))?;
     let clause_cap = u32::try_from(
         (circuit_cnf.cnf.clause_cap as u64)
             .checked_add(1)
-            .and_then(|v| v.checked_add(notphi_clauses as u64))
+            .and_then(|v| v.checked_add(notphi_clause_cap as u64))
             .ok_or_else(|| XlogError::Kernel("C ∧ ¬phi clause capacity overflow".to_string()))?,
     )
     .map_err(|_| XlogError::Kernel("C ∧ ¬phi clause capacity exceeds u32::MAX".to_string()))?;
     let lit_cap = u32::try_from(
         (circuit_cnf.cnf.lit_cap as u64)
             .checked_add(1)
-            .and_then(|v| v.checked_add(notphi_lits as u64))
+            .and_then(|v| v.checked_add(notphi_lit_cap as u64))
             .ok_or_else(|| XlogError::Kernel("C ∧ ¬phi literal capacity overflow".to_string()))?,
     )
     .map_err(|_| XlogError::Kernel("C ∧ ¬phi literal capacity exceeds u32::MAX".to_string()))?;
@@ -491,6 +508,16 @@ fn build_c_and_not_phi(
     let mut out_num_clauses = memory.alloc::<u32>(1)?;
     let mut out_num_lits = memory.alloc::<u32>(1)?;
 
+    let mut d_zero = memory.alloc::<u32>(1)?;
+    device
+        .htod_sync_copy_into(&[0u32], &mut d_zero)
+        .map_err(|e| XlogError::Kernel(format!("Failed to upload zero: {}", e)))?;
+
+    // Device-resident exact extras for ¬phi (computed from phi.num_*).
+    let mut d_extra_num_vars = memory.alloc::<u32>(1)?;
+    let mut d_extra_num_clauses = memory.alloc::<u32>(1)?;
+    let mut d_extra_num_lits = memory.alloc::<u32>(1)?;
+
     let mut d_unsat_var_base = memory.alloc::<u32>(1)?;
     let mut d_notphi_clause_base = memory.alloc::<u32>(1)?;
     let mut d_notphi_lit_base = memory.alloc::<u32>(1)?;
@@ -498,19 +525,74 @@ fn build_c_and_not_phi(
     let mut out_offsets = memory.alloc::<u32>((clause_cap as usize) + 1)?;
     let mut out_lits = memory.alloc::<i32>(lit_cap as usize)?;
 
-    // Copy CNF(C) into the front (capacity copy; all query indices are computed from device-resident totals).
-    if circuit_cnf.cnf.clause_cap > 0 {
-        let mut dst = out_offsets.slice_mut(0..((circuit_cnf.cnf.clause_cap as usize) + 1));
-        device
-            .dtod_copy(&circuit_cnf.cnf.clause_offsets, &mut dst)
-            .map_err(|e| XlogError::Kernel(format!("Failed to copy CNF(C) offsets: {}", e)))?;
+    let copy_fn = device
+        .get_func(SAT_MODULE, sat_kernels::SAT_CNF_COPY_INTO)
+        .ok_or_else(|| XlogError::Kernel("sat_cnf_copy_into kernel not found".to_string()))?;
+
+    // Copy CNF(C) into the front (exact sizes).
+    let block = 256u32;
+    let mut grid = (circuit_cnf
+        .cnf
+        .clause_cap
+        .saturating_add(1)
+        .max(circuit_cnf.cnf.lit_cap)
+        + block
+        - 1)
+        / block;
+    if grid == 0 {
+        grid = 1;
     }
-    if circuit_cnf.cnf.lit_cap > 0 {
-        let mut dst = out_lits.slice_mut(0..(circuit_cnf.cnf.lit_cap as usize));
-        device
-            .dtod_copy(&circuit_cnf.cnf.literals, &mut dst)
-            .map_err(|e| XlogError::Kernel(format!("Failed to copy CNF(C) lits: {}", e)))?;
+    if grid > 65_535 {
+        grid = 65_535;
     }
+    // sat_cnf_copy_into(...)
+    unsafe {
+        copy_fn.clone().launch(
+            LaunchConfig {
+                grid_dim: (grid, 1, 1),
+                block_dim: (block, 1, 1),
+                shared_mem_bytes: 0,
+            },
+            (
+                &circuit_cnf.cnf.clause_offsets,
+                &circuit_cnf.cnf.literals,
+                &circuit_cnf.cnf.num_clauses,
+                &circuit_cnf.cnf.num_lits,
+                circuit_cnf.cnf.clause_cap,
+                circuit_cnf.cnf.lit_cap,
+                &d_zero,
+                &d_zero,
+                clause_cap,
+                lit_cap,
+                &mut out_offsets,
+                &mut out_lits,
+            ),
+        )
+    }
+    .map_err(|e| XlogError::Kernel(format!("sat_cnf_copy_into(C) failed: {}", e)))?;
+
+    // Compute exact ¬phi size contributions on GPU.
+    let notphi_counts_fn = device
+        .get_func(SAT_MODULE, sat_kernels::SAT_NOT_PHI_COUNTS)
+        .ok_or_else(|| XlogError::Kernel("sat_not_phi_counts kernel not found".to_string()))?;
+    // SAFETY: sat_not_phi_counts(phi_num_clauses*, phi_num_lits*, out_extra_num_vars*, out_extra_num_clauses*, out_extra_num_lits*)
+    unsafe {
+        notphi_counts_fn.clone().launch(
+            LaunchConfig {
+                grid_dim: (1, 1, 1),
+                block_dim: (1, 1, 1),
+                shared_mem_bytes: 0,
+            },
+            (
+                &phi.num_clauses,
+                &phi.num_lits,
+                &mut d_extra_num_vars,
+                &mut d_extra_num_clauses,
+                &mut d_extra_num_lits,
+            ),
+        )
+    }
+    .map_err(|e| XlogError::Kernel(format!("sat_not_phi_counts failed: {}", e)))?;
 
     // Prepare: insert unit clause forcing root true and compute device-resident totals / bases.
     let unit_fn = device
@@ -526,14 +608,14 @@ fn build_c_and_not_phi(
         phi.var_cap.as_kernel_param(),
         circuit.root().as_kernel_param(),
         1i32.as_kernel_param(), // force_true
-        0u32.as_kernel_param(), // clause_base
-        0u32.as_kernel_param(), // lit_base
+        (&d_zero).as_kernel_param(), // clause_base
+        (&d_zero).as_kernel_param(), // lit_base
         (&circuit_cnf.cnf.num_vars).as_kernel_param(),
         (&circuit_cnf.cnf.num_clauses).as_kernel_param(),
         (&circuit_cnf.cnf.num_lits).as_kernel_param(),
-        m.as_kernel_param(),              // extra_num_vars (u_j vars)
-        notphi_clauses.as_kernel_param(), // extra_num_clauses
-        notphi_lits.as_kernel_param(),    // extra_num_lits
+        (&d_extra_num_vars).as_kernel_param(),    // extra_num_vars (u_j vars)
+        (&d_extra_num_clauses).as_kernel_param(), // extra_num_clauses
+        (&d_extra_num_lits).as_kernel_param(),    // extra_num_lits
         var_cap.as_kernel_param(),
         clause_cap.as_kernel_param(),
         lit_cap.as_kernel_param(),
@@ -567,7 +649,7 @@ fn build_c_and_not_phi(
         .ok_or_else(|| XlogError::Kernel("sat_emit_not_phi kernel not found".to_string()))?;
 
     let block = 256u32;
-    let mut grid = (m + block - 1) / block;
+    let mut grid = (phi_clause_cap + block - 1) / block;
     if grid == 0 {
         grid = 1;
     }
