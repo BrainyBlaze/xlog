@@ -2,6 +2,8 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
+**Update (Jan 25, 2026):** This work is implemented on branch `gpu-cdcl-solver`, and the verifier contract is now stricter than this original plan: the verifier path performs **zero device->host reads** (even scalar SAT/UNSAT status). See `docs/plans/2026-01-25-zero-host-reads-gpu-verifier.md` for the finalized contract and implementation plan.
+
 **Goal:** Make `xlog-solve` provide a deterministic, complete **GPU-native CDCL SAT solver** (SAT/UNSAT) suitable as the verifier required by `docs/design/2026-01-22-gpu-native-compilation-design.md`.
 
 **Architecture:** Add a new CUDA PTX module (`kernels/sat.ptx`) loaded by `xlog-cuda` and expose a `GpuCdclSolver` in `xlog-solve` that solves **device-resident CNF** with no data-plane host transfers during solve (host is control-plane only).
@@ -149,7 +151,11 @@ git commit -m "cuda: add GPU CDCL SAT solver + on-GPU proof checking"
 **Step 1: Implement `GpuCnf`**
 
 Create:
-- `GpuCnf { num_vars, num_clauses, clause_offsets: TrackedCudaSlice<u32>, literals: TrackedCudaSlice<i32> }`
+- `GpuCnf` with host-known capacities and device-resident exact sizes:
+  - `var_cap`, `clause_cap`, `lit_cap`
+  - `num_vars`, `num_clauses`, `num_lits` as `TrackedCudaSlice<u32>` (len=1)
+  - `clause_offsets` sized to `clause_cap + 1`
+  - `literals` sized to `lit_cap`
 - `GpuCnf::from_host(instance, &CudaKernelProvider) -> Result<GpuCnf>` (host->device copy for tests/tools)
 
 **Step 2: Export from crate**
@@ -216,12 +222,10 @@ Add `sat_kernels::{SAT_CDCL_SOLVE,SAT_CHECK_MODEL,SAT_PROOF_CHECK}` and load the
 
 In `crates/xlog-solve/src/gpu_cdcl.rs`:
 - `GpuCdclConfig` (caps for learned clauses/lits, optional conflict limit)
-- `GpuCdclSolver::solve(&self, cnf: &GpuCnf) -> Result<GpuCdclResult>`
-  - Allocates device state arrays
-  - Launches `sat_cdcl_solve`
-  - If SAT: launches `sat_check_model` and requires success
-  - If UNSAT: launches `sat_proof_check` and requires success
-  - Returns `GpuCdclResult { status, assignment_dev }` (device-resident assignment)
+- Expectation-based verifier API (no device->host reads):
+  - `GpuCdclSolver::solve_expect_sat(&self, cnf: &GpuCnf) -> Result<TrackedCudaSlice<i8>>`
+  - `GpuCdclSolver::solve_expect_unsat(&self, cnf: &GpuCnf) -> Result<()>`
+  - Uses GPU-side assertion kernels + trap semantics so the host observes only CUDA success/failure.
 
 **Step 5: Make tests pass**
 
