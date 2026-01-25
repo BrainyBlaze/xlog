@@ -58,10 +58,10 @@ impl GpuCdclSolver {
     }
 
     fn launch_cdcl(&self, cnf: &GpuCnf) -> Result<GpuCdclRun> {
-        let num_vars = cnf.num_vars as usize;
-        let num_clauses = cnf.num_clauses as usize;
+        let num_vars_cap = cnf.var_cap as usize;
+        let num_clauses_cap = cnf.clause_cap as usize;
 
-        if num_vars == 0 {
+        if cnf.var_cap == 0 {
             return Err(XlogError::Compilation(
                 "GpuCdclSolver requires num_vars > 0".to_string(),
             ));
@@ -86,33 +86,33 @@ impl GpuCdclSolver {
         let max_learned_lits = self.config.max_learned_lits as usize;
         let max_proof_u32 = self.config.max_proof_u32 as usize;
 
-        let max_total_clauses = num_clauses
+        let max_total_clauses = num_clauses_cap
             .checked_add(max_learned_clauses)
             .ok_or_else(|| XlogError::Kernel("SAT clause capacity overflow".to_string()))?;
 
         let memory = self.provider.memory();
 
         // Variable state
-        let mut assign = memory.alloc::<i8>(num_vars + 1)?;
-        let mut level = memory.alloc::<u32>(num_vars + 1)?;
-        let mut reason = memory.alloc::<i32>(num_vars + 1)?;
-        let mut var_activity = memory.alloc::<u32>(num_vars + 1)?;
-        let mut var_phase = memory.alloc::<i8>(num_vars + 1)?;
+        let mut assign = memory.alloc::<i8>(num_vars_cap + 1)?;
+        let mut level = memory.alloc::<u32>(num_vars_cap + 1)?;
+        let mut reason = memory.alloc::<i32>(num_vars_cap + 1)?;
+        let mut var_activity = memory.alloc::<u32>(num_vars_cap + 1)?;
+        let mut var_phase = memory.alloc::<i8>(num_vars_cap + 1)?;
 
         // Trail / levels
-        let mut trail = memory.alloc::<i32>(num_vars + 1)?;
-        let mut trail_lim = memory.alloc::<u32>(num_vars + 1)?;
+        let mut trail = memory.alloc::<i32>(num_vars_cap + 1)?;
+        let mut trail_lim = memory.alloc::<u32>(num_vars_cap + 1)?;
 
         // Analysis scratch
-        let mut seen = memory.alloc::<u8>(num_vars + 1)?;
-        let mut learnt_tmp = memory.alloc::<i32>(num_vars + 1)?;
-        let mut proof_vars_tmp = memory.alloc::<u32>(num_vars + 1)?;
-        let mut proof_reason_tmp = memory.alloc::<u32>(num_vars + 1)?;
+        let mut seen = memory.alloc::<u8>(num_vars_cap + 1)?;
+        let mut learnt_tmp = memory.alloc::<i32>(num_vars_cap + 1)?;
+        let mut proof_vars_tmp = memory.alloc::<u32>(num_vars_cap + 1)?;
+        let mut proof_reason_tmp = memory.alloc::<u32>(num_vars_cap + 1)?;
 
         // Watched literals
         let mut watch0_pos = memory.alloc::<u32>(max_total_clauses)?;
         let mut watch1_pos = memory.alloc::<u32>(max_total_clauses)?;
-        let mut watch_head = memory.alloc::<i32>(2 * num_vars)?;
+        let mut watch_head = memory.alloc::<i32>(2 * num_vars_cap)?;
         let mut watch_next = memory.alloc::<i32>(2 * max_total_clauses)?;
         let mut watch_prev = memory.alloc::<i32>(2 * max_total_clauses)?;
 
@@ -143,8 +143,10 @@ impl GpuCdclSolver {
         let mut params: Vec<*mut c_void> = vec![
             (&cnf.clause_offsets).as_kernel_param(),
             (&cnf.literals).as_kernel_param(),
-            cnf.num_vars.as_kernel_param(),
-            cnf.num_clauses.as_kernel_param(),
+            (&cnf.num_vars).as_kernel_param(),
+            (&cnf.num_clauses).as_kernel_param(),
+            cnf.var_cap.as_kernel_param(),
+            cnf.clause_cap.as_kernel_param(),
             self.config.max_learned_clauses.as_kernel_param(),
             self.config.max_learned_lits.as_kernel_param(),
             self.config.max_proof_u32.as_kernel_param(),
@@ -247,7 +249,7 @@ impl GpuCdclSolver {
                     (
                         &cnf.clause_offsets,
                         &cnf.literals,
-                        cnf.num_clauses,
+                        &cnf.num_clauses,
                         &run.assignment,
                         &mut out_ok,
                     ),
@@ -303,7 +305,7 @@ impl GpuCdclSolver {
         self.provider.device().synchronize()?;
 
         let mut out_ok = memory.alloc::<i32>(1)?;
-        let scratch_cap = (cnf.num_vars as usize) + 1;
+        let scratch_cap = (cnf.var_cap as usize) + 1;
         let mut scratch_a = memory.alloc::<i32>(scratch_cap)?;
         let mut scratch_b = memory.alloc::<i32>(scratch_cap)?;
 
@@ -322,7 +324,7 @@ impl GpuCdclSolver {
                     (
                         &cnf.clause_offsets,
                         &cnf.literals,
-                        cnf.num_clauses,
+                        &cnf.num_clauses,
                         &run.learned_offsets,
                         &run.learned_lits,
                         &run.out_learned_count,

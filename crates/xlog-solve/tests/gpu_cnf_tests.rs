@@ -41,14 +41,14 @@ fn gpu_cnf_roundtrip_offsets_and_lits() {
 
     let cnf = GpuCnf::from_host(&instance, &provider).expect("GpuCnf upload should succeed");
 
-    let mut offsets_host = vec![0u32; (cnf.num_clauses as usize) + 1];
+    let mut offsets_host = vec![0u32; (cnf.clause_cap as usize) + 1];
     provider
         .device()
         .inner()
         .dtoh_sync_copy_into(&cnf.clause_offsets, &mut offsets_host)
         .expect("dtoh offsets");
 
-    let mut lits_host = vec![0i32; cnf.num_literals()];
+    let mut lits_host = vec![0i32; cnf.num_literals_cap()];
     provider
         .device()
         .inner()

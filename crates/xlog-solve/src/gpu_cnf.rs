@@ -11,18 +11,33 @@ use crate::instance::SolveInstance;
 ///
 /// This is the solver-facing CNF representation used by the GPU CDCL verifier.
 pub struct GpuCnf {
-    pub num_vars: u32,
-    pub num_clauses: u32,
-    /// CSR offsets (len = num_clauses + 1).
+    /// Variable capacity (>= num_vars).
+    pub var_cap: u32,
+    /// Clause capacity (>= num_clauses).
+    pub clause_cap: u32,
+    /// Literal capacity (>= num_lits).
+    pub lit_cap: u32,
+    /// Device-resident num_vars (len = 1).
+    pub num_vars: TrackedCudaSlice<u32>,
+    /// Device-resident num_clauses (len = 1).
+    pub num_clauses: TrackedCudaSlice<u32>,
+    /// Device-resident num_lits (len = 1).
+    pub num_lits: TrackedCudaSlice<u32>,
+    /// CSR offsets (len = clause_cap + 1).
     pub clause_offsets: TrackedCudaSlice<u32>,
-    /// Flattened CSR literal array (len = num_literals).
+    /// Flattened CSR literal array (len = lit_cap).
     pub literals: TrackedCudaSlice<i32>,
 }
 
 impl GpuCnf {
     #[inline]
-    pub fn num_literals(&self) -> usize {
-        self.literals.len()
+    pub fn offsets_len(&self) -> usize {
+        self.clause_offsets.len()
+    }
+
+    #[inline]
+    pub fn num_literals_cap(&self) -> usize {
+        self.lit_cap as usize
     }
 
     /// Host -> device upload helper for tests and tooling.
@@ -73,6 +88,23 @@ impl GpuCnf {
         }
 
         let memory = provider.memory();
+
+        // Device scalars (len=1 each).
+        let mut d_num_vars = memory.alloc::<u32>(1)?;
+        let mut d_num_clauses = memory.alloc::<u32>(1)?;
+        let mut d_num_lits = memory.alloc::<u32>(1)?;
+
+        provider
+            .device()
+            .inner()
+            .htod_sync_copy_into(&[num_vars], &mut d_num_vars)
+            .map_err(|e| XlogError::Kernel(format!("Failed to upload CNF num_vars: {}", e)))?;
+        provider
+            .device()
+            .inner()
+            .htod_sync_copy_into(&[num_clauses], &mut d_num_clauses)
+            .map_err(|e| XlogError::Kernel(format!("Failed to upload CNF num_clauses: {}", e)))?;
+
         let mut d_offsets = memory.alloc::<u32>(clause_offsets.len())?;
         let mut d_lits = memory.alloc::<i32>(literals.len())?;
 
@@ -87,9 +119,19 @@ impl GpuCnf {
             .htod_sync_copy_into(&literals, &mut d_lits)
             .map_err(|e| XlogError::Kernel(format!("Failed to upload CNF lits: {}", e)))?;
 
+        provider
+            .device()
+            .inner()
+            .htod_sync_copy_into(&[literals.len() as u32], &mut d_num_lits)
+            .map_err(|e| XlogError::Kernel(format!("Failed to upload CNF num_lits: {}", e)))?;
+
         Ok(Self {
-            num_vars,
-            num_clauses,
+            var_cap: num_vars,
+            clause_cap: num_clauses,
+            lit_cap: literals.len() as u32,
+            num_vars: d_num_vars,
+            num_clauses: d_num_clauses,
+            num_lits: d_num_lits,
             clause_offsets: d_offsets,
             literals: d_lits,
         })

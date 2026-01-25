@@ -37,6 +37,7 @@ static constexpr int32_t SAT_ERR_PROOF_OVERFLOW = 3;
 static constexpr int32_t SAT_ERR_WATCH_OVERFLOW = 4;
 static constexpr int32_t SAT_ERR_INVALID_PROOF = 5;
 static constexpr int32_t SAT_ERR_INVALID_MODEL = 6;
+static constexpr int32_t SAT_ERR_INVALID_INPUT = 7;
 
 // Fail-fast trap. Used to enforce "verifier must not silently succeed" without host reads.
 __device__ __forceinline__ void sat_trap() {
@@ -782,8 +783,10 @@ extern "C" __global__ void sat_cdcl_solve(
     // Base CNF (CSR)
     const uint32_t* __restrict__ clause_offsets,
     const int32_t* __restrict__ clause_lits,
-    uint32_t num_vars,
-    uint32_t num_clauses,
+    const uint32_t* __restrict__ num_vars,    // len=1
+    const uint32_t* __restrict__ num_clauses, // len=1
+    uint32_t var_cap,
+    uint32_t clause_cap,
     // Solver configuration
     uint32_t max_learned_clauses,
     uint32_t max_learned_lits,
@@ -833,13 +836,22 @@ extern "C" __global__ void sat_cdcl_solve(
         return;
     }
 
+    uint32_t nv = num_vars[0];
+    uint32_t nc = num_clauses[0];
+
     // Initialize outputs.
     out_status[0] = SAT_STATUS_ERROR;
     out_error[0] = SAT_ERR_OK;
     out_learned_count[0] = 0;
 
+    if (nv == 0u || nv > var_cap || nc > clause_cap) {
+        out_status[0] = SAT_STATUS_ERROR;
+        out_error[0] = SAT_ERR_INVALID_INPUT;
+        return;
+    }
+
     // Initialize variable arrays.
-    for (uint32_t v = 0; v <= num_vars; v++) {
+    for (uint32_t v = 0; v <= nv; v++) {
         assign[v] = SAT_VAL_UNASSIGNED;
         level[v] = 0;
         reason[v] = SAT_REASON_UNASSIGNED;
@@ -855,7 +867,7 @@ extern "C" __global__ void sat_cdcl_solve(
     uint32_t assigned_count = 0;
 
     trail_lim[0] = 0;
-    for (uint32_t i = 1; i <= num_vars; i++) {
+    for (uint32_t i = 1; i <= nv; i++) {
         trail_lim[i] = 0;
     }
 
@@ -874,17 +886,17 @@ extern "C" __global__ void sat_cdcl_solve(
     }
 
     // Initialize watch lists.
-    for (uint32_t i = 0; i < 2u * num_vars; i++) {
+    for (uint32_t i = 0; i < 2u * nv; i++) {
         watch_head[i] = -1;
     }
-    uint32_t max_total_clauses = num_clauses + max_learned_clauses;
+    uint32_t max_total_clauses = nc + max_learned_clauses;
     for (uint32_t i = 0; i < 2u * max_total_clauses; i++) {
         watch_next[i] = -1;
         watch_prev[i] = -1;
     }
 
     // Initialize base clause watches deterministically in clause_id order.
-    for (uint32_t c = 0; c < num_clauses; c++) {
+    for (uint32_t c = 0; c < nc; c++) {
         uint32_t s = clause_offsets[c];
         uint32_t e = clause_offsets[c + 1u];
         uint32_t len = e - s;
@@ -946,10 +958,10 @@ extern "C" __global__ void sat_cdcl_solve(
                 uint32_t proof_steps = 0;
                 bool ok = sat_analyze_level0_unsat(
                     static_cast<int32_t>(c),
-                    clause_offsets, clause_lits, num_clauses,
+                    clause_offsets, clause_lits, nc,
                     learned_offsets, learned_lits, learned_deleted,
                     learned_count,
-                    num_vars,
+                    nv,
                     reason,
                     trail, trail_len,
                     seen,
@@ -1001,7 +1013,7 @@ extern "C" __global__ void sat_cdcl_solve(
 
     // Initial propagation.
     int32_t confl = sat_propagate(
-        clause_offsets, clause_lits, num_vars, num_clauses,
+        clause_offsets, clause_lits, nv, nc,
         learned_offsets, learned_lits, learned_deleted, learned_activity,
         watch0_pos, watch1_pos,
         watch_head, watch_next, watch_prev,
@@ -1014,10 +1026,10 @@ extern "C" __global__ void sat_cdcl_solve(
         uint32_t proof_steps = 0;
         bool ok = sat_analyze_level0_unsat(
             confl,
-            clause_offsets, clause_lits, num_clauses,
+            clause_offsets, clause_lits, nc,
             learned_offsets, learned_lits, learned_deleted,
             learned_count,
-            num_vars,
+            nv,
             reason,
             trail, trail_len,
             seen,
@@ -1075,7 +1087,7 @@ extern "C" __global__ void sat_cdcl_solve(
     for (;;) {
         // Propagate.
         confl = sat_propagate(
-            clause_offsets, clause_lits, num_vars, num_clauses,
+            clause_offsets, clause_lits, nv, nc,
             learned_offsets, learned_lits, learned_deleted, learned_activity,
             watch0_pos, watch1_pos,
             watch_head, watch_next, watch_prev,
@@ -1092,10 +1104,10 @@ extern "C" __global__ void sat_cdcl_solve(
                 uint32_t proof_steps = 0;
                 bool ok = sat_analyze_level0_unsat(
                     confl,
-                    clause_offsets, clause_lits, num_clauses,
+                    clause_offsets, clause_lits, nc,
                     learned_offsets, learned_lits, learned_deleted,
                     learned_count,
-                    num_vars,
+                    nv,
                     reason,
                     trail, trail_len,
                     seen,
@@ -1149,7 +1161,7 @@ extern "C" __global__ void sat_cdcl_solve(
             uint32_t proof_steps = 0;
             bool ok = sat_analyze(
                 confl,
-                clause_offsets, clause_lits, num_clauses,
+                clause_offsets, clause_lits, nc,
                 learned_offsets, learned_lits, learned_deleted,
                 learned_count,
                 decision_level,
@@ -1166,16 +1178,16 @@ extern "C" __global__ void sat_cdcl_solve(
             }
 
             // Bump learned clause activity for clauses that participate in this conflict analysis.
-            if (confl >= static_cast<int32_t>(num_clauses)) {
-                uint32_t lid = static_cast<uint32_t>(confl) - num_clauses;
+            if (confl >= static_cast<int32_t>(nc)) {
+                uint32_t lid = static_cast<uint32_t>(confl) - nc;
                 if (lid < learned_count) {
                     learned_activity[lid] += 1u;
                 }
             }
             for (uint32_t i = 0; i < proof_steps; i++) {
                 uint32_t rc = proof_reason_tmp[i];
-                if (rc >= num_clauses) {
-                    uint32_t lid = rc - num_clauses;
+                if (rc >= nc) {
+                    uint32_t lid = rc - nc;
                     if (lid < learned_count) {
                         learned_activity[lid] += 1u;
                     }
@@ -1189,10 +1201,10 @@ extern "C" __global__ void sat_cdcl_solve(
             }
             // Increase bump slowly (integer approximation).
             var_bump += var_bump >> 5; // +3.125%
-            sat_maybe_rescale_activities(num_vars, var_activity);
+            sat_maybe_rescale_activities(nv, var_activity);
 
             // Backjump.
-            sat_backtrack(bt, &decision_level, num_vars + 1u, trail_lim, &qhead,
+            sat_backtrack(bt, &decision_level, nv + 1u, trail_lim, &qhead,
                           trail, &trail_len, &assigned_count, assign, level, reason);
 
             // Learn clause (append to arena).
@@ -1203,7 +1215,7 @@ extern "C" __global__ void sat_cdcl_solve(
                 return;
             }
             uint32_t lid = learned_count;
-            uint32_t clause_id = num_clauses + lid;
+            uint32_t clause_id = nc + lid;
             learned_offsets[lid] = learned_lit_count;
             if (learned_lit_count + learnt_len > max_learned_lits) {
                 out_status[0] = SAT_STATUS_ERROR;
@@ -1263,7 +1275,7 @@ extern "C" __global__ void sat_cdcl_solve(
         }
 
         // No conflict. Check SAT.
-        if (assigned_count == num_vars) {
+        if (assigned_count == nv) {
             out_status[0] = SAT_STATUS_SAT;
             out_error[0] = SAT_ERR_OK;
             out_learned_count[0] = learned_count;
@@ -1272,7 +1284,7 @@ extern "C" __global__ void sat_cdcl_solve(
 
         // Restart (deterministic schedule).
         if (conflicts >= next_restart && decision_level > 0) {
-            sat_backtrack(0, &decision_level, num_vars + 1u, trail_lim, &qhead,
+            sat_backtrack(0, &decision_level, nv + 1u, trail_lim, &qhead,
                           trail, &trail_len, &assigned_count, assign, level, reason);
             restart_iter++;
             next_restart = restart_base * sat_luby(restart_iter);
@@ -1300,10 +1312,10 @@ extern "C" __global__ void sat_cdcl_solve(
             for (uint32_t i = 0; i < learned_count; i++) {
                 learned_locked[i] = 0;
             }
-            for (uint32_t v = 1; v <= num_vars; v++) {
+            for (uint32_t v = 1; v <= nv; v++) {
                 int32_t r = reason[v];
-                if (r >= static_cast<int32_t>(num_clauses)) {
-                    uint32_t lid = static_cast<uint32_t>(r) - num_clauses;
+                if (r >= static_cast<int32_t>(nc)) {
+                    uint32_t lid = static_cast<uint32_t>(r) - nc;
                     if (lid < learned_count) {
                         learned_locked[lid] = 1;
                     }
@@ -1324,11 +1336,11 @@ extern "C" __global__ void sat_cdcl_solve(
                 if (learned_activity[i] < thr) {
                     learned_deleted[i] = 1;
                     // Remove watch nodes for this learned clause.
-                    uint32_t clause_id = num_clauses + i;
+                    uint32_t clause_id = nc + i;
                     int32_t node0 = static_cast<int32_t>(clause_id * 2u);
                     int32_t node1 = static_cast<int32_t>(clause_id * 2u + 1u);
                     // Remove using current watch positions to find literal indices.
-                    SatClauseView cv = sat_get_clause(static_cast<int32_t>(clause_id), clause_offsets, clause_lits, num_clauses,
+                    SatClauseView cv = sat_get_clause(static_cast<int32_t>(clause_id), clause_offsets, clause_lits, nc,
                                                       learned_offsets, learned_lits);
                     if (cv.len > 0) {
                         int32_t l0 = cv.lits[watch0_pos[clause_id]];
@@ -1344,7 +1356,7 @@ extern "C" __global__ void sat_cdcl_solve(
         }
 
         // Decide next branch.
-        uint32_t next_v = sat_pick_branch_var(num_vars, assign, var_activity);
+        uint32_t next_v = sat_pick_branch_var(nv, assign, var_activity);
         if (next_v == 0) {
             // No unassigned vars but assigned_count != num_vars: inconsistent accounting.
             out_status[0] = SAT_STATUS_ERROR;
@@ -1376,17 +1388,18 @@ extern "C" __global__ void sat_cdcl_solve(
 extern "C" __global__ void sat_check_model(
     const uint32_t* __restrict__ clause_offsets,
     const int32_t* __restrict__ clause_lits,
-    uint32_t num_clauses,
+    const uint32_t* __restrict__ num_clauses, // len=1
     const int8_t* __restrict__ assign,
     int32_t* __restrict__ out_ok // 1 ok, 0 fail
 ) {
+    uint32_t nc = num_clauses[0];
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid == 0) {
         out_ok[0] = 1;
     }
     __syncthreads();
 
-    for (uint32_t c = tid; c < num_clauses; c += blockDim.x * gridDim.x) {
+    for (uint32_t c = tid; c < nc; c += blockDim.x * gridDim.x) {
         uint32_t s = clause_offsets[c];
         uint32_t e = clause_offsets[c + 1u];
         bool sat = false;
@@ -1510,7 +1523,7 @@ __device__ __forceinline__ bool sat_clause_equal_set(
 extern "C" __global__ void sat_proof_check(
     const uint32_t* __restrict__ base_offsets,
     const int32_t* __restrict__ base_lits,
-    uint32_t num_clauses,
+    const uint32_t* __restrict__ num_clauses, // len=1
     const uint32_t* __restrict__ learned_offsets,
     const int32_t* __restrict__ learned_lits,
     const uint32_t* __restrict__ learned_count, // len=1
@@ -1526,6 +1539,8 @@ extern "C" __global__ void sat_proof_check(
         return;
     }
     out_ok[0] = 1;
+
+    uint32_t nc = num_clauses[0];
 
     uint32_t lc = learned_count[0];
     if (lc == 0) {
@@ -1556,14 +1571,14 @@ extern "C" __global__ void sat_proof_check(
             return;
         }
 
-        if (conflict_clause >= num_clauses + i) {
+        if (conflict_clause >= nc + i) {
             out_ok[0] = 0;
             return;
         }
 
         // Load initial clause into scratch_a.
         SatClauseView c0 = sat_get_clause(static_cast<int32_t>(conflict_clause),
-                                          base_offsets, base_lits, num_clauses,
+                                          base_offsets, base_lits, nc,
                                           learned_offsets, learned_lits);
         if (c0.len > scratch_cap) {
             out_ok[0] = 0;
@@ -1583,13 +1598,13 @@ extern "C" __global__ void sat_proof_check(
                 out_ok[0] = 0;
                 return;
             }
-            if (reason_clause >= num_clauses + i) {
+            if (reason_clause >= nc + i) {
                 out_ok[0] = 0;
                 return;
             }
 
             SatClauseView rc = sat_get_clause(static_cast<int32_t>(reason_clause),
-                                              base_offsets, base_lits, num_clauses,
+                                              base_offsets, base_lits, nc,
                                               learned_offsets, learned_lits);
 
             int32_t ok = 1;
@@ -1959,11 +1974,12 @@ extern "C" __global__ void sat_xgcf_cnf_emit(
 // Shift CSR offsets by an additive constant and write into a destination offsets array.
 extern "C" __global__ void sat_shift_offsets(
     const uint32_t* __restrict__ src_offsets,
-    uint32_t n,
+    const uint32_t* __restrict__ src_num_clauses, // len=1
     uint32_t add,
     uint32_t dst_base,
     uint32_t* __restrict__ dst_offsets
 ) {
+    uint32_t n = src_num_clauses[0] + 1u;
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     for (uint32_t i = tid; i < n; i += blockDim.x * gridDim.x) {
         dst_offsets[dst_base + i] = src_offsets[i] + add;
@@ -1982,8 +1998,23 @@ extern "C" __global__ void sat_xgcf_write_root_unit_clause(
     uint32_t base_num_vars,
     uint32_t root,
     int32_t force_true, // 1=true, 0=false
-    uint32_t unit_clause_idx,
-    uint32_t unit_lit_idx,
+    uint32_t clause_base,
+    uint32_t lit_base,
+    const uint32_t* __restrict__ c_num_vars,    // len=1
+    const uint32_t* __restrict__ c_num_clauses, // len=1
+    const uint32_t* __restrict__ c_num_lits,    // len=1
+    uint32_t extra_num_vars,
+    uint32_t extra_num_clauses,
+    uint32_t extra_num_lits,
+    uint32_t out_var_cap,
+    uint32_t out_clause_cap,
+    uint32_t out_lit_cap,
+    uint32_t* __restrict__ out_num_vars,    // len=1
+    uint32_t* __restrict__ out_num_clauses, // len=1
+    uint32_t* __restrict__ out_num_lits,    // len=1
+    uint32_t* __restrict__ out_unsat_var_base,    // len=1
+    uint32_t* __restrict__ out_extra_clause_base, // len=1
+    uint32_t* __restrict__ out_extra_lit_base,    // len=1
     uint32_t* __restrict__ out_offsets,
     int32_t* __restrict__ out_lits
 ) {
@@ -1991,12 +2022,49 @@ extern "C" __global__ void sat_xgcf_write_root_unit_clause(
         return;
     }
 
+    uint32_t cnv = c_num_vars[0];
+    uint32_t cnc = c_num_clauses[0];
+    uint32_t cnl = c_num_lits[0];
+
+    uint64_t total_vars64 = static_cast<uint64_t>(cnv) + static_cast<uint64_t>(extra_num_vars);
+    uint64_t total_clauses64 = static_cast<uint64_t>(clause_base) + static_cast<uint64_t>(cnc) + 1ull
+        + static_cast<uint64_t>(extra_num_clauses);
+    uint64_t total_lits64 = static_cast<uint64_t>(lit_base) + static_cast<uint64_t>(cnl) + 1ull
+        + static_cast<uint64_t>(extra_num_lits);
+
+    if (total_vars64 > static_cast<uint64_t>(out_var_cap)
+        || total_clauses64 > static_cast<uint64_t>(out_clause_cap)
+        || total_lits64 > static_cast<uint64_t>(out_lit_cap)) {
+        sat_trap();
+    }
+
+    uint32_t total_vars = static_cast<uint32_t>(total_vars64);
+    uint32_t total_clauses = static_cast<uint32_t>(total_clauses64);
+    uint32_t total_lits = static_cast<uint32_t>(total_lits64);
+
+    uint32_t unit_clause_idx = clause_base + cnc;
+    uint32_t unit_lit_idx = lit_base + cnl;
+
     int32_t root_lit = xgcf_node_lit(root, node_type, lit, internal_prefix, base_num_vars);
     int32_t unit_lit = force_true ? root_lit : -root_lit;
 
     out_offsets[unit_clause_idx] = unit_lit_idx;
     out_lits[unit_lit_idx] = unit_lit;
     out_offsets[unit_clause_idx + 1u] = unit_lit_idx + 1u;
+
+    uint32_t extra_clause_base = unit_clause_idx + 1u;
+    uint32_t extra_lit_base = unit_lit_idx + 1u;
+
+    out_unsat_var_base[0] = cnv + 1u;
+    out_extra_clause_base[0] = extra_clause_base;
+    out_extra_lit_base[0] = extra_lit_base;
+
+    out_num_vars[0] = total_vars;
+    out_num_clauses[0] = total_clauses;
+    out_num_lits[0] = total_lits;
+
+    // CSR terminator for the whole query CNF.
+    out_offsets[total_clauses] = total_lits;
 }
 
 // Emit CNF encoding of ¬phi where phi is a CNF in CSR form.
@@ -2009,26 +2077,31 @@ extern "C" __global__ void sat_xgcf_write_root_unit_clause(
 extern "C" __global__ void sat_emit_not_phi(
     const uint32_t* __restrict__ phi_offsets,
     const int32_t* __restrict__ phi_lits,
-    uint32_t num_clauses,
-    uint32_t unsat_var_base,  // u_j = unsat_var_base + j
-    uint32_t out_clause_base, // clause index base in out_offsets
-    uint32_t out_lit_base,    // literal index base in out_lits
+    const uint32_t* __restrict__ num_clauses,     // len=1
+    const uint32_t* __restrict__ unsat_var_base,  // len=1, u_j = unsat_var_base + j
+    const uint32_t* __restrict__ out_clause_base, // len=1, clause index base in out_offsets
+    const uint32_t* __restrict__ out_lit_base,    // len=1, literal index base in out_lits
     uint32_t* __restrict__ out_offsets,
     int32_t* __restrict__ out_lits
 ) {
+    uint32_t m = num_clauses[0];
+    uint32_t u0 = unsat_var_base[0];
+    uint32_t c0 = out_clause_base[0];
+    uint32_t l0 = out_lit_base[0];
+
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
 
-    for (uint32_t j = tid; j < num_clauses; j += blockDim.x * gridDim.x) {
+    for (uint32_t j = tid; j < m; j += blockDim.x * gridDim.x) {
         uint32_t s = phi_offsets[j];
         uint32_t e = phi_offsets[j + 1u];
         uint32_t len = e - s;
 
         uint32_t local_clause_base = s + j;
         uint32_t local_lit_base = 3u * s + j;
-        uint32_t clause_base = out_clause_base + local_clause_base;
-        uint32_t lit_base = out_lit_base + local_lit_base;
+        uint32_t clause_base = c0 + local_clause_base;
+        uint32_t lit_base = l0 + local_lit_base;
 
-        int32_t u = static_cast<int32_t>(unsat_var_base + j);
+        int32_t u = static_cast<int32_t>(u0 + j);
 
         // Binary clauses: (¬u ∨ ¬l_i)
         for (uint32_t i = 0; i < len; i++) {
@@ -2053,14 +2126,14 @@ extern "C" __global__ void sat_emit_not_phi(
 
     // Emit final OR over all unsatisfied-clause vars, and set CSR terminator.
     if (blockIdx.x == 0 && threadIdx.x == 0) {
-        uint32_t total_phi_lits = phi_offsets[num_clauses];
-        uint32_t big_clause_idx = out_clause_base + (total_phi_lits + num_clauses);
-        uint32_t big_lit_idx = out_lit_base + (3u * total_phi_lits + num_clauses);
+        uint32_t total_phi_lits = phi_offsets[m];
+        uint32_t big_clause_idx = c0 + (total_phi_lits + m);
+        uint32_t big_lit_idx = l0 + (3u * total_phi_lits + m);
 
         out_offsets[big_clause_idx] = big_lit_idx;
-        for (uint32_t j = 0; j < num_clauses; j++) {
-            out_lits[big_lit_idx + j] = static_cast<int32_t>(unsat_var_base + j);
+        for (uint32_t j = 0; j < m; j++) {
+            out_lits[big_lit_idx + j] = static_cast<int32_t>(u0 + j);
         }
-        out_offsets[big_clause_idx + 1u] = big_lit_idx + num_clauses;
+        out_offsets[big_clause_idx + 1u] = big_lit_idx + m;
     }
 }

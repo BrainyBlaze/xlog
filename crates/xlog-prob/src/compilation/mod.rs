@@ -8,4 +8,4 @@ pub mod sparse_matrix;
 pub mod validation;
 
 pub use sparse_matrix::GpuCsrCnf;
-pub use validation::{check_equivalence_gpu, validate_equivalence_gpu, GpuEquivalenceCheck, GpuEquivalenceConfig};
+pub use validation::{check_equivalence_gpu, validate_equivalence_gpu, GpuEquivalenceConfig};
