@@ -2192,6 +2192,7 @@ dependencies = [
  "xlog-core",
  "xlog-cuda",
  "xlog-logic",
+ "xlog-solve",
 ]
 
 [[package]]

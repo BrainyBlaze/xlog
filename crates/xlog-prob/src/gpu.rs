@@ -1,6 +1,6 @@
 //! GPU evaluator for XGCF circuits (CUDA).
 
-use cudarc::driver::{LaunchAsync, LaunchConfig};
+use cudarc::driver::{DeviceSlice, LaunchAsync, LaunchConfig};
 use xlog_core::{Result, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::{circuit_kernels, CudaKernelProvider, CIRCUIT_MODULE};
@@ -130,6 +130,49 @@ impl GpuXgcf {
 
     pub fn max_var(&self) -> u32 {
         self.max_var
+    }
+
+    /// Root node id of the circuit (XGCF requires exactly one root for evaluation/verification).
+    pub fn root(&self) -> u32 {
+        self.root
+    }
+
+    /// Number of XGCF nodes in the circuit.
+    pub fn num_nodes(&self) -> usize {
+        self.node_type.len()
+    }
+
+    /// Device-resident node type tags (see `XgcfNodeType`).
+    pub fn node_type(&self) -> &TrackedCudaSlice<u8> {
+        &self.node_type
+    }
+
+    /// Device-resident CSR child offsets for AND/OR nodes (len = num_nodes + 1).
+    pub fn child_offsets(&self) -> &TrackedCudaSlice<u32> {
+        &self.child_offsets
+    }
+
+    /// Device-resident CSR child indices for AND/OR nodes.
+    pub fn child_indices(&self) -> &TrackedCudaSlice<u32> {
+        &self.child_indices
+    }
+
+    /// Device-resident literals for LIT nodes (signed DIMACS, 1-based var ids).
+    pub fn lit(&self) -> &TrackedCudaSlice<i32> {
+        &self.lit
+    }
+
+    /// Device-resident decision var ids for DECISION nodes (0 for non-decision).
+    pub fn decision_var(&self) -> &TrackedCudaSlice<u32> {
+        &self.decision_var
+    }
+
+    pub fn decision_child_false(&self) -> &TrackedCudaSlice<u32> {
+        &self.decision_child_false
+    }
+
+    pub fn decision_child_true(&self) -> &TrackedCudaSlice<u32> {
+        &self.decision_child_true
     }
 
     pub fn eval_log_wmc(
