@@ -29,6 +29,7 @@ const CIRCUIT_PTX: &str = include_str!("../../../kernels/circuit.ptx");
 const MC_SAMPLE_PTX: &str = include_str!("../../../kernels/mc_sample.ptx");
 const ARITH_PTX: &str = include_str!("../../../kernels/arith.ptx");
 const SAT_PTX: &str = include_str!("../../../kernels/sat.ptx");
+const NEURAL_PTX: &str = include_str!("../../../kernels/neural.ptx");
 
 #[derive(Clone, Copy)]
 struct RawCudaView<'a, T> {
@@ -70,6 +71,7 @@ pub const CIRCUIT_MODULE: &str = "xlog_circuit";
 pub const MC_SAMPLE_MODULE: &str = "xlog_mc_sample";
 pub const ARITH_MODULE: &str = "xlog_arith";
 pub const SAT_MODULE: &str = "xlog_sat";
+pub const NEURAL_MODULE: &str = "xlog_neural";
 
 /// Kernel function names in the Monte Carlo sampling module
 pub mod mc_sample_kernels {
@@ -104,6 +106,12 @@ pub mod arith_kernels {
     pub const ARITH_SELECT_U32: &str = "arith_select_u32";
     pub const ARITH_SELECT_F64: &str = "arith_select_f64";
     pub const ARITH_SELECT_F32: &str = "arith_select_f32";
+}
+
+/// Kernel function names in the neural fast-path module.
+pub mod neural_kernels {
+    pub const NEURAL_FILL_AD_CHAIN_F32: &str = "neural_fill_ad_chain_f32";
+    pub const NEURAL_SCATTER_AD_CHAIN_GRADS_F32: &str = "neural_scatter_ad_chain_grads_f32";
 }
 
 /// Kernel function names in the join module
@@ -699,6 +707,19 @@ impl CudaKernelProvider {
                 ],
             )
             .map_err(|e| XlogError::Kernel(format!("Failed to load SAT PTX: {}", e)))?;
+
+        // Load neural fast-path module (AD chain weight fill + gradient scatter)
+        device
+            .inner()
+            .load_ptx(
+                Ptx::from_src(NEURAL_PTX),
+                NEURAL_MODULE,
+                &[
+                    neural_kernels::NEURAL_FILL_AD_CHAIN_F32,
+                    neural_kernels::NEURAL_SCATTER_AD_CHAIN_GRADS_F32,
+                ],
+            )
+            .map_err(|e| XlogError::Kernel(format!("Failed to load neural PTX: {}", e)))?;
 
         Ok(Self {
             device,
@@ -9157,6 +9178,7 @@ mod tests {
         assert!(!CIRCUIT_PTX.is_empty(), "CIRCUIT_PTX should not be empty");
         assert!(!MC_SAMPLE_PTX.is_empty(), "MC_SAMPLE_PTX should not be empty");
         assert!(!SAT_PTX.is_empty(), "SAT_PTX should not be empty");
+        assert!(!NEURAL_PTX.is_empty(), "NEURAL_PTX should not be empty");
 
         // Verify PTX contains expected kernel names
         assert!(
@@ -9275,6 +9297,15 @@ mod tests {
             SAT_PTX.contains("sat_emit_not_phi"),
             "SAT_PTX should contain sat_emit_not_phi"
         );
+
+        assert!(
+            NEURAL_PTX.contains("neural_fill_ad_chain_f32"),
+            "NEURAL_PTX should contain neural_fill_ad_chain_f32"
+        );
+        assert!(
+            NEURAL_PTX.contains("neural_scatter_ad_chain_grads_f32"),
+            "NEURAL_PTX should contain neural_scatter_ad_chain_grads_f32"
+        );
     }
 
     #[test]
@@ -9307,6 +9338,10 @@ mod tests {
         assert!(
             valid_targets.iter().any(|t| SAT_PTX.contains(t)),
             "SAT_PTX should target sm_70 or later"
+        );
+        assert!(
+            valid_targets.iter().any(|t| NEURAL_PTX.contains(t)),
+            "NEURAL_PTX should target sm_70 or later"
         );
     }
 
@@ -9431,6 +9466,18 @@ mod tests {
         assert!(
             xgcf_backward_lit_grad.is_some(),
             "xgcf_backward_level_lit_grad function should be accessible"
+        );
+
+        // Neural fast-path kernels (AD chain weight fill + gradient scatter)
+        let neural_fill = inner.get_func("xlog_neural", "neural_fill_ad_chain_f32");
+        assert!(
+            neural_fill.is_some(),
+            "neural_fill_ad_chain_f32 function should be accessible"
+        );
+        let neural_scatter = inner.get_func("xlog_neural", "neural_scatter_ad_chain_grads_f32");
+        assert!(
+            neural_scatter.is_some(),
+            "neural_scatter_ad_chain_grads_f32 function should be accessible"
         );
     }
 

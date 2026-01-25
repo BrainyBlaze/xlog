@@ -155,3 +155,12 @@ fn validate_arith_ptx_contains_expected_kernels() {
     assert!(ptx.contains("arith_cast"));
     assert!(ptx.contains("arith_fill_const_u32"));
 }
+
+#[test]
+fn validate_neural_ptx_contains_expected_kernels() {
+    let ptx_path = kernels_dir().join("neural.ptx");
+    let ptx = fs::read_to_string(&ptx_path)
+        .unwrap_or_else(|e| panic!("neural.ptx should exist after build: {}", e));
+    assert!(ptx.contains("neural_fill_ad_chain_f32"));
+    assert!(ptx.contains("neural_scatter_ad_chain_grads_f32"));
+}
