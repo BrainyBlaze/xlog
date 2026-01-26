@@ -287,6 +287,9 @@ pub mod circuit_kernels {
     pub const XGCF_BACKWARD_LEVEL_PROPAGATE: &str = "xgcf_backward_level_propagate";
     pub const XGCF_BACKWARD_LEVEL_DECISION_GRAD: &str = "xgcf_backward_level_decision_grad";
     pub const XGCF_BACKWARD_LEVEL_LIT_GRAD: &str = "xgcf_backward_level_lit_grad";
+    pub const XGCF_FREE_VAR_APPLY_GRAD: &str = "xgcf_free_var_apply_grad";
+    pub const XGCF_FREE_VAR_REDUCE_STAGE: &str = "xgcf_free_var_reduce_stage";
+    pub const XGCF_ADD_SCALAR: &str = "xgcf_add_scalar";
 }
 
 /// Kernel function names in the SAT module
@@ -667,6 +670,9 @@ impl CudaKernelProvider {
                     circuit_kernels::XGCF_BACKWARD_LEVEL_PROPAGATE,
                     circuit_kernels::XGCF_BACKWARD_LEVEL_DECISION_GRAD,
                     circuit_kernels::XGCF_BACKWARD_LEVEL_LIT_GRAD,
+                    circuit_kernels::XGCF_FREE_VAR_APPLY_GRAD,
+                    circuit_kernels::XGCF_FREE_VAR_REDUCE_STAGE,
+                    circuit_kernels::XGCF_ADD_SCALAR,
                 ],
             )
             .map_err(|e| XlogError::Kernel(format!("Failed to load circuit PTX: {}", e)))?;

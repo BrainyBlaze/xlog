@@ -4,7 +4,7 @@ use std::sync::Arc;
 use xlog_core::MemoryBudget;
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 use xlog_prob::compilation::gpu_d4::compute_free_var_mask_gpu;
-use xlog_prob::gpu::GpuXgcf;
+use xlog_prob::gpu::{GpuCircuitBuilder, GpuCircuitLayout, GpuXgcf};
 use xlog_prob::kc::ddnnf::DecisionDnnf;
 use xlog_prob::xgcf::{Xgcf, XgcfNodeType};
 use xlog_solve::{Clause, GpuCnf, Literal, SolveInstance};
@@ -31,6 +31,89 @@ fn try_provider() -> Option<CudaKernelProvider> {
             None
         }
     }
+}
+
+fn build_device_lit_circuit(
+    provider: &Arc<CudaKernelProvider>,
+    lit_var: u32,
+    max_var: u32,
+) -> GpuXgcf {
+    let device = provider.device().inner();
+    let memory = provider.memory();
+
+    let node_type = [
+        XgcfNodeType::Const0 as u8,
+        XgcfNodeType::Const1 as u8,
+        XgcfNodeType::Lit as u8,
+    ];
+    let child_offsets = [0u32, 0u32, 0u32, 0u32];
+    let lit = [0i32, 0i32, lit_var as i32];
+    let decision_var = [0u32, 0u32, 0u32];
+    let decision_child_false = [0u32, 0u32, 0u32];
+    let decision_child_true = [0u32, 0u32, 0u32];
+    let level_nodes = [0u32, 1u32, 2u32];
+    let level_offsets = [0u32, 2u32, 3u32];
+
+    let mut d_node_type = memory.alloc::<u8>(node_type.len()).unwrap();
+    device
+        .htod_sync_copy_into(&node_type, &mut d_node_type)
+        .unwrap();
+
+    let mut d_child_offsets = memory.alloc::<u32>(child_offsets.len()).unwrap();
+    device
+        .htod_sync_copy_into(&child_offsets, &mut d_child_offsets)
+        .unwrap();
+
+    let d_child_indices = memory.alloc::<u32>(0).unwrap();
+
+    let mut d_lit = memory.alloc::<i32>(lit.len()).unwrap();
+    device.htod_sync_copy_into(&lit, &mut d_lit).unwrap();
+
+    let mut d_decision_var = memory.alloc::<u32>(decision_var.len()).unwrap();
+    device
+        .htod_sync_copy_into(&decision_var, &mut d_decision_var)
+        .unwrap();
+
+    let mut d_decision_child_false = memory.alloc::<u32>(decision_child_false.len()).unwrap();
+    device
+        .htod_sync_copy_into(&decision_child_false, &mut d_decision_child_false)
+        .unwrap();
+
+    let mut d_decision_child_true = memory.alloc::<u32>(decision_child_true.len()).unwrap();
+    device
+        .htod_sync_copy_into(&decision_child_true, &mut d_decision_child_true)
+        .unwrap();
+
+    let mut d_level_nodes = memory.alloc::<u32>(level_nodes.len()).unwrap();
+    device
+        .htod_sync_copy_into(&level_nodes, &mut d_level_nodes)
+        .unwrap();
+
+    let mut d_level_offsets = memory.alloc::<u32>(level_offsets.len()).unwrap();
+    device
+        .htod_sync_copy_into(&level_offsets, &mut d_level_offsets)
+        .unwrap();
+
+    let builder = GpuCircuitBuilder {
+        node_type: d_node_type,
+        child_offsets: d_child_offsets,
+        child_indices: d_child_indices,
+        lit: d_lit,
+        decision_var: d_decision_var,
+        decision_child_false: d_decision_child_false,
+        decision_child_true: d_decision_child_true,
+    };
+
+    let layout = GpuCircuitLayout {
+        num_nodes: node_type.len() as u32,
+        num_levels: 2,
+        level_offsets: d_level_offsets,
+        level_nodes: d_level_nodes,
+        root: 2,
+        max_var,
+    };
+
+    GpuXgcf::from_device(builder, layout, provider).expect("GpuXgcf from_device")
 }
 
 #[test]
@@ -346,4 +429,99 @@ fn test_gpu_free_var_mask_matches_cpu() {
     }
 
     assert_eq!(host_mask, expected);
+}
+
+#[test]
+fn test_gpu_free_var_correction_matches_cpu() {
+    let provider = match try_provider() {
+        Some(p) => Arc::new(p),
+        None => return,
+    };
+
+    // CNF with 2 vars where only var1 appears in clauses (var2 is free).
+    let instance = SolveInstance::new(2, vec![Clause::new(vec![Literal::positive(0)])]);
+    let cnf = GpuCnf::from_host(&instance, &provider).expect("GpuCnf upload");
+
+    // Host circuit (var1 only) for CPU baseline.
+    let xgcf = Xgcf {
+        node_type: vec![XgcfNodeType::Const0, XgcfNodeType::Const1, XgcfNodeType::Lit],
+        child_offsets: vec![0, 0, 0, 0],
+        child_indices: vec![],
+        lit: vec![0, 0, 1],
+        decision_var: vec![0, 0, 0],
+        decision_child_false: vec![0, 0, 0],
+        decision_child_true: vec![0, 0, 0],
+        roots: vec![2],
+        level_offsets: vec![0, 2, 3],
+        level_nodes: vec![0, 1, 2],
+    };
+
+    let p1 = 0.7_f64;
+    let p2 = 0.2_f64;
+    let weights: Vec<(f64, f64)> = vec![
+        (0.0, 0.0),
+        (p1.ln(), (1.0 - p1).ln()),
+        (p2.ln(), (1.0 - p2).ln()),
+    ];
+
+    let (base_log_z, base_grad_true, base_grad_false) =
+        xgcf.eval_log_wmc_and_grads(&weights).unwrap();
+
+    let logsumexp2_with_grads = |t: f64, f: f64| -> (f64, f64, f64) {
+        let m = if t > f { t } else { f };
+        if m.is_infinite() && m.is_sign_negative() {
+            return (m, 0.0, 0.0);
+        }
+        let et = (t - m).exp();
+        let ef = (f - m).exp();
+        let sum = et + ef;
+        let log_z = m + sum.ln();
+        let pt = et / sum;
+        let pf = ef / sum;
+        (log_z, pt, pf)
+    };
+
+    let (free_log_z, free_pt, free_pf) =
+        logsumexp2_with_grads(weights[2].0, weights[2].1);
+
+    let mut expected_grad_true = vec![0.0_f64; weights.len()];
+    let mut expected_grad_false = vec![0.0_f64; weights.len()];
+    expected_grad_true[..base_grad_true.len()].copy_from_slice(&base_grad_true);
+    expected_grad_false[..base_grad_false.len()].copy_from_slice(&base_grad_false);
+    expected_grad_true[2] += free_pt;
+    expected_grad_false[2] += free_pf;
+    let expected_log_z = base_log_z + free_log_z;
+
+    let mut gpu_xgcf = build_device_lit_circuit(&provider, 1, cnf.var_cap);
+    let free_mask = compute_free_var_mask_gpu(&cnf, &gpu_xgcf, &provider)
+        .expect("compute_free_var_mask_gpu");
+    gpu_xgcf
+        .set_free_var_mask_device(free_mask)
+        .expect("set_free_var_mask_device");
+
+    let (gpu_log_z, gpu_grad_true, gpu_grad_false) = gpu_xgcf
+        .eval_log_wmc_and_grads(&provider, &weights)
+        .unwrap();
+
+    assert!(
+        (gpu_log_z - expected_log_z).abs() < 1e-9,
+        "expected_log_z={} gpu_log_z={}",
+        expected_log_z,
+        gpu_log_z
+    );
+    assert_eq!(gpu_grad_true.len(), expected_grad_true.len());
+    assert_eq!(gpu_grad_false.len(), expected_grad_false.len());
+    for i in 0..expected_grad_true.len() {
+        let dt = (expected_grad_true[i] - gpu_grad_true[i]).abs();
+        let df = (expected_grad_false[i] - gpu_grad_false[i]).abs();
+        assert!(
+            dt < 1e-9 && df < 1e-9,
+            "var={} exp_t={} gpu_t={} exp_f={} gpu_f={}",
+            i,
+            expected_grad_true[i],
+            gpu_grad_true[i],
+            expected_grad_false[i],
+            gpu_grad_false[i]
+        );
+    }
 }

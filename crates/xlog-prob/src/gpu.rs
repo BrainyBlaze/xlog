@@ -57,6 +57,7 @@ pub struct GpuXgcf {
     adj: TrackedCudaSlice<f64>,
     grad_true: TrackedCudaSlice<f64>,
     grad_false: TrackedCudaSlice<f64>,
+    free_var_mask: Option<TrackedCudaSlice<u8>>,
 }
 
 impl GpuXgcf {
@@ -141,6 +142,7 @@ impl GpuXgcf {
             adj,
             grad_true,
             grad_false,
+            free_var_mask: None,
         })
     }
 
@@ -824,6 +826,7 @@ impl GpuXgcf {
             adj,
             grad_true,
             grad_false,
+            free_var_mask: None,
         })
     }
 
@@ -909,6 +912,48 @@ impl GpuXgcf {
         (&mut self.var_log_true, &mut self.var_log_false)
     }
 
+    /// Attach a device-resident free-variable mask (length = max_var + 1).
+    pub fn set_free_var_mask_device(
+        &mut self,
+        mask: TrackedCudaSlice<u8>,
+    ) -> Result<()> {
+        if mask.len() != self.var_log_true.len() {
+            return Err(XlogError::Compilation(format!(
+                "GPU free-var mask len {} != weights len {}",
+                mask.len(),
+                self.var_log_true.len()
+            )));
+        }
+        self.free_var_mask = Some(mask);
+        Ok(())
+    }
+
+    /// Upload a host free-variable mask (length = max_var + 1).
+    pub fn set_free_var_mask_from_host(
+        &mut self,
+        provider: &CudaKernelProvider,
+        mask: &[u8],
+    ) -> Result<()> {
+        if mask.len() != self.var_log_true.len() {
+            return Err(XlogError::Compilation(format!(
+                "GPU free-var mask len {} != weights len {}",
+                mask.len(),
+                self.var_log_true.len()
+            )));
+        }
+        let memory = provider.memory();
+        let mut d_mask = memory.alloc::<u8>(mask.len())?;
+        provider
+            .device()
+            .inner()
+            .htod_sync_copy_into(mask, &mut d_mask)
+            .map_err(|e| {
+                XlogError::Kernel(format!("Failed to upload free_var_mask: {}", e))
+            })?;
+        self.free_var_mask = Some(d_mask);
+        Ok(())
+    }
+
     /// Upload a host weight table into the device-resident `var_log_true/var_log_false` buffers.
     ///
     /// This is intended for one-time initialization of static weights (evidence + non-neural facts).
@@ -942,6 +987,149 @@ impl GpuXgcf {
         device
             .htod_sync_copy_into(&host_false, &mut self.var_log_false)
             .map_err(|e| XlogError::Kernel(format!("Failed to upload log_false weights: {}", e)))?;
+
+        Ok(())
+    }
+
+    fn apply_free_var_correction(
+        &mut self,
+        provider: &CudaKernelProvider,
+        apply_log_z: bool,
+        apply_grads: bool,
+    ) -> Result<()> {
+        let Some(mask) = self.free_var_mask.as_ref() else {
+            return Ok(());
+        };
+
+        if mask.len() != self.var_log_true.len() {
+            return Err(XlogError::Compilation(format!(
+                "GPU free-var mask len {} != weights len {}",
+                mask.len(),
+                self.var_log_true.len()
+            )));
+        }
+
+        let n = u32::try_from(mask.len()).map_err(|_| {
+            XlogError::Compilation("GPU free-var mask length overflow".to_string())
+        })?;
+        if n == 0 {
+            return Ok(());
+        }
+
+        let device = provider.device().inner();
+        let block_dim = 256u32;
+        let grid_dim = (n + block_dim - 1) / block_dim;
+
+        if apply_grads {
+            let apply_grad = device
+                .get_func(
+                    CIRCUIT_MODULE,
+                    circuit_kernels::XGCF_FREE_VAR_APPLY_GRAD,
+                )
+                .ok_or_else(|| {
+                    XlogError::Kernel(
+                        "xgcf_free_var_apply_grad kernel not found".to_string(),
+                    )
+                })?;
+            unsafe {
+                apply_grad.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (grid_dim, 1, 1),
+                        block_dim: (block_dim, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        mask,
+                        &self.var_log_true,
+                        &self.var_log_false,
+                        n,
+                        &mut self.grad_true,
+                        &mut self.grad_false,
+                    ),
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("xgcf_free_var_apply_grad failed: {}", e)))?;
+        }
+
+        if apply_log_z {
+            let reduce_stage = device
+                .get_func(
+                    CIRCUIT_MODULE,
+                    circuit_kernels::XGCF_FREE_VAR_REDUCE_STAGE,
+                )
+                .ok_or_else(|| {
+                    XlogError::Kernel(
+                        "xgcf_free_var_reduce_stage kernel not found".to_string(),
+                    )
+                })?;
+            let add_scalar = device
+                .get_func(CIRCUIT_MODULE, circuit_kernels::XGCF_ADD_SCALAR)
+                .ok_or_else(|| {
+                    XlogError::Kernel("xgcf_add_scalar kernel not found".to_string())
+                })?;
+
+            let memory = provider.memory();
+            let mut buf_a = memory.alloc::<f64>(mask.len())?;
+            let mut buf_b = memory.alloc::<f64>(mask.len())?;
+
+            let mut stage_n = n;
+            let mut stage0 = true;
+            let mut output_is_a = true;
+            loop {
+                let out_len = (stage_n + 1) / 2;
+                let stage_grid = (out_len + block_dim - 1) / block_dim;
+
+                let (in_buf, out_buf): (&TrackedCudaSlice<f64>, &mut TrackedCudaSlice<f64>) =
+                    if output_is_a {
+                        (&buf_b, &mut buf_a)
+                    } else {
+                        (&buf_a, &mut buf_b)
+                    };
+                let mode = if stage0 { 0u32 } else { 1u32 };
+
+                unsafe {
+                    reduce_stage.clone().launch(
+                        LaunchConfig {
+                            grid_dim: (stage_grid, 1, 1),
+                            block_dim: (block_dim, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        (
+                            mask,
+                            &self.var_log_true,
+                            &self.var_log_false,
+                            in_buf,
+                            stage_n,
+                            mode,
+                            out_buf,
+                        ),
+                    )
+                }
+                .map_err(|e| {
+                    XlogError::Kernel(format!("xgcf_free_var_reduce_stage failed: {}", e))
+                })?;
+
+                if out_len == 1 {
+                    let result_buf = if output_is_a { &buf_a } else { &buf_b };
+                    unsafe {
+                        add_scalar.clone().launch(
+                            LaunchConfig {
+                                grid_dim: (1, 1, 1),
+                                block_dim: (1, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            (&mut self.values, self.root, result_buf),
+                        )
+                    }
+                    .map_err(|e| XlogError::Kernel(format!("xgcf_add_scalar failed: {}", e)))?;
+                    break;
+                }
+
+                stage_n = out_len;
+                stage0 = false;
+                output_is_a = !output_is_a;
+            }
+        }
 
         Ok(())
     }
@@ -1133,6 +1321,7 @@ impl GpuXgcf {
             })?;
         }
 
+        self.apply_free_var_correction(provider, true, true)?;
         provider.device().synchronize()?;
         Ok(())
     }
@@ -1142,30 +1331,8 @@ impl GpuXgcf {
         provider: &CudaKernelProvider,
         var_log_weights: &[(f64, f64)],
     ) -> Result<f64> {
+        self.set_base_weights(provider, var_log_weights)?;
         let device = provider.device().inner();
-
-        let weights_len = (self.max_var as usize) + 1;
-        if var_log_weights.len() < weights_len {
-            return Err(XlogError::Compilation(format!(
-                "GPU XGCF eval expects weight table len >= {}, got {}",
-                weights_len,
-                var_log_weights.len()
-            )));
-        }
-
-        let mut host_true: Vec<f64> = Vec::with_capacity(weights_len);
-        let mut host_false: Vec<f64> = Vec::with_capacity(weights_len);
-        for &(t, f) in &var_log_weights[..weights_len] {
-            host_true.push(t);
-            host_false.push(f);
-        }
-
-        device
-            .htod_sync_copy_into(&host_true, &mut self.var_log_true)
-            .map_err(|e| XlogError::Kernel(format!("Failed to upload log_true weights: {}", e)))?;
-        device
-            .htod_sync_copy_into(&host_false, &mut self.var_log_false)
-            .map_err(|e| XlogError::Kernel(format!("Failed to upload log_false weights: {}", e)))?;
 
         let func = device
             .get_func(CIRCUIT_MODULE, circuit_kernels::XGCF_FORWARD_LEVEL)
@@ -1211,6 +1378,7 @@ impl GpuXgcf {
                 .map_err(|e| XlogError::Kernel(format!("xgcf_forward_level failed: {}", e)))?;
         }
 
+        self.apply_free_var_correction(provider, true, false)?;
         provider.device().synchronize()?;
 
         let root_idx = self.root as usize;
@@ -1227,135 +1395,21 @@ impl GpuXgcf {
         provider: &CudaKernelProvider,
         var_log_weights: &[(f64, f64)],
     ) -> Result<(f64, Vec<f64>, Vec<f64>)> {
-        let log_z = self.eval_log_wmc(provider, var_log_weights)?;
+        self.set_base_weights(provider, var_log_weights)?;
+        self.eval_grads_inplace(provider)?;
 
         let device = provider.device().inner();
-
-        device
-            .memset_zeros(&mut self.adj)
-            .map_err(|e| XlogError::Kernel(format!("Failed to zero adj buffer: {}", e)))?;
-        device
-            .memset_zeros(&mut self.grad_true)
-            .map_err(|e| XlogError::Kernel(format!("Failed to zero grad_true buffer: {}", e)))?;
-        device
-            .memset_zeros(&mut self.grad_false)
-            .map_err(|e| XlogError::Kernel(format!("Failed to zero grad_false buffer: {}", e)))?;
-
-        let root_idx = self.root as usize;
-        let mut root_adj_view = self.adj.slice_mut(root_idx..(root_idx + 1));
-        device
-            .htod_sync_copy_into(&[1.0_f64], &mut root_adj_view)
-            .map_err(|e| XlogError::Kernel(format!("Failed to set root adjoint: {}", e)))?;
-
-        let propagate = device
-            .get_func(
-                CIRCUIT_MODULE,
-                circuit_kernels::XGCF_BACKWARD_LEVEL_PROPAGATE,
-            )
-            .ok_or_else(|| {
-                XlogError::Kernel("xgcf_backward_level_propagate kernel not found".to_string())
-            })?;
-        let decision_grad = device
-            .get_func(
-                CIRCUIT_MODULE,
-                circuit_kernels::XGCF_BACKWARD_LEVEL_DECISION_GRAD,
-            )
-            .ok_or_else(|| {
-                XlogError::Kernel("xgcf_backward_level_decision_grad kernel not found".to_string())
-            })?;
-        let lit_grad = device
-            .get_func(
-                CIRCUIT_MODULE,
-                circuit_kernels::XGCF_BACKWARD_LEVEL_LIT_GRAD,
-            )
-            .ok_or_else(|| {
-                XlogError::Kernel("xgcf_backward_level_lit_grad kernel not found".to_string())
-            })?;
-
-        let block_size: u32 = 256;
-        let num_levels: usize = self.num_levels as usize;
-        for level in (0..num_levels).rev() {
-            let num_level_nodes: usize = match self.level_offsets_host.as_ref() {
-                Some(off) => (off[level + 1].saturating_sub(off[level])) as usize,
-                None => self.level_nodes.len(),
-            };
-            if num_level_nodes == 0 {
-                continue;
-            }
-
-            let num_blocks = ((num_level_nodes as u32) + block_size - 1) / block_size;
-            let config = LaunchConfig {
-                grid_dim: (num_blocks, 1, 1),
-                block_dim: (block_size, 1, 1),
-                shared_mem_bytes: 0,
-            };
-            let level_u32: u32 = level as u32;
-
-            let mut params: Vec<*mut c_void> = vec![
-                (&self.node_type).as_kernel_param(),
-                (&self.child_offsets).as_kernel_param(),
-                (&self.child_indices).as_kernel_param(),
-                (&self.decision_var).as_kernel_param(),
-                (&self.decision_child_false).as_kernel_param(),
-                (&self.decision_child_true).as_kernel_param(),
-                (&self.level_nodes).as_kernel_param(),
-                (&self.level_offsets).as_kernel_param(),
-                level_u32.as_kernel_param(),
-                (&self.var_log_true).as_kernel_param(),
-                (&self.var_log_false).as_kernel_param(),
-                (&self.values).as_kernel_param(),
-                (&mut self.adj).as_kernel_param(),
-            ];
-
-            unsafe { propagate.clone().launch(config, &mut params) }.map_err(|e| {
-                XlogError::Kernel(format!("xgcf_backward_level_propagate failed: {}", e))
-            })?;
-
-            let mut params: Vec<*mut c_void> = vec![
-                (&self.node_type).as_kernel_param(),
-                (&self.decision_var).as_kernel_param(),
-                (&self.decision_child_false).as_kernel_param(),
-                (&self.decision_child_true).as_kernel_param(),
-                (&self.level_nodes).as_kernel_param(),
-                (&self.level_offsets).as_kernel_param(),
-                level_u32.as_kernel_param(),
-                (&self.var_log_true).as_kernel_param(),
-                (&self.var_log_false).as_kernel_param(),
-                (&self.values).as_kernel_param(),
-                (&self.adj).as_kernel_param(),
-                (&mut self.grad_true).as_kernel_param(),
-                (&mut self.grad_false).as_kernel_param(),
-            ];
-
-            unsafe { decision_grad.clone().launch(config, &mut params) }.map_err(|e| {
-                XlogError::Kernel(format!("xgcf_backward_level_decision_grad failed: {}", e))
-            })?;
-
-            unsafe {
-                lit_grad.clone().launch(
-                    config,
-                    (
-                        &self.node_type,
-                        &self.lit,
-                        &self.level_nodes,
-                        &self.level_offsets,
-                        level_u32,
-                        &self.adj,
-                        &self.grad_true,
-                        &self.grad_false,
-                    ),
-                )
-            }
-            .map_err(|e| {
-                XlogError::Kernel(format!("xgcf_backward_level_lit_grad failed: {}", e))
-            })?;
-        }
-
-        provider.device().synchronize()?;
 
         let weights_len = (self.max_var as usize) + 1;
         let mut host_grad_true: Vec<f64> = vec![0.0; weights_len];
         let mut host_grad_false: Vec<f64> = vec![0.0; weights_len];
+
+        let root_idx = self.root as usize;
+        let root_view = self.values.slice(root_idx..(root_idx + 1));
+        let mut log_z = [0.0_f64];
+        device
+            .dtoh_sync_copy_into(&root_view, &mut log_z)
+            .map_err(|e| XlogError::Kernel(format!("Failed to read circuit root value: {}", e)))?;
 
         device
             .dtoh_sync_copy_into(&self.grad_true, &mut host_grad_true)
@@ -1364,6 +1418,6 @@ impl GpuXgcf {
             .dtoh_sync_copy_into(&self.grad_false, &mut host_grad_false)
             .map_err(|e| XlogError::Kernel(format!("Failed to download grad_false: {}", e)))?;
 
-        Ok((log_z, host_grad_true, host_grad_false))
+        Ok((log_z[0], host_grad_true, host_grad_false))
     }
 }

@@ -358,3 +358,102 @@ extern "C" __global__ void xgcf_backward_level_lit_grad(
         atomicAdd(&grad_false[var], a);
     }
 }
+
+/**
+ * Apply free-variable gradient corrections on device.
+ *
+ * For each var with free_var_mask[var] != 0:
+ *   grad_true[var]  += softmax_true(log_true[var], log_false[var])
+ *   grad_false[var] += softmax_false(log_true[var], log_false[var])
+ */
+extern "C" __global__ void xgcf_free_var_apply_grad(
+    const uint8_t* __restrict__ free_var_mask,
+    const double* __restrict__ var_log_true,
+    const double* __restrict__ var_log_false,
+    uint32_t n,
+    double* __restrict__ grad_true,
+    double* __restrict__ grad_false
+) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    for (uint32_t var = tid; var < n; var += blockDim.x * gridDim.x) {
+        if (var == 0u || free_var_mask[var] == 0u) {
+            continue;
+        }
+        double t = var_log_true[var];
+        double f = var_log_false[var];
+        double m = (t > f) ? t : f;
+        if (isinf(m) && m < 0.0) {
+            continue;
+        }
+        double et = exp(t - m);
+        double ef = exp(f - m);
+        double sum = et + ef;
+        if (sum == 0.0) {
+            continue;
+        }
+        double pt = et / sum;
+        double pf = ef / sum;
+        grad_true[var] += pt;
+        grad_false[var] += pf;
+    }
+}
+
+/**
+ * Deterministic pairwise reduction for free-variable logZ correction.
+ *
+ * mode = 0: compute terms from (mask, weights), ignore in_vals.
+ * mode = 1: reduce in_vals pairwise, ignore mask/weights.
+ */
+extern "C" __global__ void xgcf_free_var_reduce_stage(
+    const uint8_t* __restrict__ free_var_mask,
+    const double* __restrict__ var_log_true,
+    const double* __restrict__ var_log_false,
+    const double* __restrict__ in_vals,
+    uint32_t n,
+    uint32_t mode,
+    double* __restrict__ out_vals
+) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    uint32_t out_len = (n + 1u) / 2u;
+    if (tid >= out_len) {
+        return;
+    }
+
+    uint32_t i0 = tid * 2u;
+    uint32_t i1 = i0 + 1u;
+
+    double a = 0.0;
+    double b = 0.0;
+
+    if (mode == 0u) {
+        if (i0 < n && i0 != 0u && free_var_mask[i0] != 0u) {
+            a = logsumexp2(var_log_true[i0], var_log_false[i0]);
+        }
+        if (i1 < n && i1 != 0u && free_var_mask[i1] != 0u) {
+            b = logsumexp2(var_log_true[i1], var_log_false[i1]);
+        }
+    } else {
+        if (i0 < n) {
+            a = in_vals[i0];
+        }
+        if (i1 < n) {
+            b = in_vals[i1];
+        }
+    }
+
+    out_vals[tid] = a + b;
+}
+
+/**
+ * Add a device scalar to a single values[index].
+ */
+extern "C" __global__ void xgcf_add_scalar(
+    double* __restrict__ values,
+    uint32_t index,
+    const double* __restrict__ scalar
+) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) {
+        return;
+    }
+    values[index] += scalar[0];
+}
