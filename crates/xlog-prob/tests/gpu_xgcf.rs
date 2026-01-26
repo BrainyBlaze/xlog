@@ -525,3 +525,95 @@ fn test_gpu_free_var_correction_matches_cpu() {
         );
     }
 }
+
+#[test]
+fn test_gpu_xgcf_device_logz_into_matches_cpu() {
+    let provider = match try_provider() {
+        Some(p) => p,
+        None => return,
+    };
+    let memory = provider.memory();
+    let device = provider.device().inner();
+
+    // Formula: x1 OR x2, represented as a decision on x1, then x2.
+    let nnf = r#"
+o 1 0
+o 2 0
+t 3 0
+f 4 0
+1 3 1 0
+1 2 -1 0
+2 3 2 0
+2 4 -2 0
+"#;
+    let ddnnf = DecisionDnnf::parse_str(nnf).unwrap();
+    let xgcf = Xgcf::from_ddnnf(&ddnnf).unwrap();
+
+    let p1 = 0.7_f64;
+    let p2 = 0.2_f64;
+    let weights: Vec<(f64, f64)> = vec![
+        (0.0, 0.0),
+        (p1.ln(), (1.0 - p1).ln()),
+        (p2.ln(), (1.0 - p2).ln()),
+    ];
+
+    let cpu = xgcf.eval_log_wmc(|var| weights[var as usize]).unwrap();
+
+    let mut gpu_xgcf = GpuXgcf::upload(&provider, &xgcf).unwrap();
+    let mut out_log_z = memory.alloc::<f64>(1).unwrap();
+    gpu_xgcf
+        .eval_log_wmc_device_into(&provider, &weights, &mut out_log_z)
+        .unwrap();
+
+    let mut host = [0.0_f64];
+    device
+        .dtoh_sync_copy_into(&out_log_z, &mut host)
+        .unwrap();
+
+    assert!((cpu - host[0]).abs() < 1e-9, "cpu={} gpu={}", cpu, host[0]);
+}
+
+#[test]
+fn test_gpu_xgcf_device_logz_alloc_matches_cpu() {
+    let provider = match try_provider() {
+        Some(p) => p,
+        None => return,
+    };
+    let device = provider.device().inner();
+
+    // Formula: x1 OR x2, represented as a decision on x1, then x2.
+    let nnf = r#"
+o 1 0
+o 2 0
+t 3 0
+f 4 0
+1 3 1 0
+1 2 -1 0
+2 3 2 0
+2 4 -2 0
+"#;
+    let ddnnf = DecisionDnnf::parse_str(nnf).unwrap();
+    let xgcf = Xgcf::from_ddnnf(&ddnnf).unwrap();
+
+    let p1 = 0.7_f64;
+    let p2 = 0.2_f64;
+    let weights: Vec<(f64, f64)> = vec![
+        (0.0, 0.0),
+        (p1.ln(), (1.0 - p1).ln()),
+        (p2.ln(), (1.0 - p2).ln()),
+    ];
+
+    let cpu = xgcf.eval_log_wmc(|var| weights[var as usize]).unwrap();
+
+    let mut gpu_xgcf = GpuXgcf::upload(&provider, &xgcf).unwrap();
+    let out_log_z = gpu_xgcf
+        .eval_log_wmc_device(&provider, &weights)
+        .unwrap();
+
+    let mut host = [0.0_f64];
+    device
+        .dtoh_sync_copy_into(&out_log_z, &mut host)
+        .unwrap();
+
+    assert!((cpu - host[0]).abs() < 1e-9, "cpu={} gpu={}", cpu, host[0]);
+}

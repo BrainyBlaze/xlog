@@ -991,6 +991,101 @@ impl GpuXgcf {
         Ok(())
     }
 
+    /// Evaluate logZ on the device using the currently loaded weights and write it into `out_log_z`.
+    ///
+    /// This method performs no device->host transfers.
+    pub fn eval_log_wmc_device_inplace(
+        &mut self,
+        provider: &CudaKernelProvider,
+        out_log_z: &mut TrackedCudaSlice<f64>,
+    ) -> Result<()> {
+        if out_log_z.len() != 1 {
+            return Err(XlogError::Compilation(format!(
+                "GPU device logZ output len {} != 1",
+                out_log_z.len()
+            )));
+        }
+
+        let device = provider.device().inner();
+        let func = device
+            .get_func(CIRCUIT_MODULE, circuit_kernels::XGCF_FORWARD_LEVEL)
+            .ok_or_else(|| XlogError::Kernel("xgcf_forward_level kernel not found".to_string()))?;
+
+        let block_size: u32 = 256;
+        let num_levels: usize = self.num_levels as usize;
+        for level in 0..num_levels {
+            let num_level_nodes: usize = match self.level_offsets_host.as_ref() {
+                Some(off) => (off[level + 1].saturating_sub(off[level])) as usize,
+                None => self.level_nodes.len(),
+            };
+            if num_level_nodes == 0 {
+                continue;
+            }
+
+            let num_blocks = ((num_level_nodes as u32) + block_size - 1) / block_size;
+            let config = LaunchConfig {
+                grid_dim: (num_blocks, 1, 1),
+                block_dim: (block_size, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            let level_u32: u32 = level as u32;
+
+            let mut params: Vec<*mut c_void> = vec![
+                (&self.node_type).as_kernel_param(),
+                (&self.child_offsets).as_kernel_param(),
+                (&self.child_indices).as_kernel_param(),
+                (&self.lit).as_kernel_param(),
+                (&self.decision_var).as_kernel_param(),
+                (&self.decision_child_false).as_kernel_param(),
+                (&self.decision_child_true).as_kernel_param(),
+                (&self.level_nodes).as_kernel_param(),
+                (&self.level_offsets).as_kernel_param(),
+                level_u32.as_kernel_param(),
+                (&self.var_log_true).as_kernel_param(),
+                (&self.var_log_false).as_kernel_param(),
+                (&mut self.values).as_kernel_param(),
+            ];
+
+            // SAFETY: xgcf_forward_level(...) writes values for the provided level nodes.
+            unsafe { func.clone().launch(config, &mut params) }
+                .map_err(|e| XlogError::Kernel(format!("xgcf_forward_level failed: {}", e)))?;
+        }
+
+        self.apply_free_var_correction(provider, true, false)?;
+
+        let root_idx = self.root as usize;
+        let root_view = self.values.slice(root_idx..(root_idx + 1));
+        device.dtod_copy(&root_view, out_log_z).map_err(|e| {
+            XlogError::Kernel(format!("Failed to copy device logZ: {}", e))
+        })?;
+
+        provider.device().synchronize()?;
+        Ok(())
+    }
+
+    /// Evaluate logZ on the device and write it into `out_log_z` (uploads weights from host).
+    pub fn eval_log_wmc_device_into(
+        &mut self,
+        provider: &CudaKernelProvider,
+        var_log_weights: &[(f64, f64)],
+        out_log_z: &mut TrackedCudaSlice<f64>,
+    ) -> Result<()> {
+        self.set_base_weights(provider, var_log_weights)?;
+        self.eval_log_wmc_device_inplace(provider, out_log_z)
+    }
+
+    /// Evaluate logZ on the device and return a device-resident scalar (uploads weights from host).
+    pub fn eval_log_wmc_device(
+        &mut self,
+        provider: &CudaKernelProvider,
+        var_log_weights: &[(f64, f64)],
+    ) -> Result<TrackedCudaSlice<f64>> {
+        let memory = provider.memory();
+        let mut out_log_z = memory.alloc::<f64>(1)?;
+        self.eval_log_wmc_device_into(provider, var_log_weights, &mut out_log_z)?;
+        Ok(out_log_z)
+    }
+
     fn apply_free_var_correction(
         &mut self,
         provider: &CudaKernelProvider,
@@ -1331,63 +1426,15 @@ impl GpuXgcf {
         provider: &CudaKernelProvider,
         var_log_weights: &[(f64, f64)],
     ) -> Result<f64> {
-        self.set_base_weights(provider, var_log_weights)?;
         let device = provider.device().inner();
+        let mut out_log_z = provider.memory().alloc::<f64>(1)?;
+        self.eval_log_wmc_device_into(provider, var_log_weights, &mut out_log_z)?;
 
-        let func = device
-            .get_func(CIRCUIT_MODULE, circuit_kernels::XGCF_FORWARD_LEVEL)
-            .ok_or_else(|| XlogError::Kernel("xgcf_forward_level kernel not found".to_string()))?;
-
-        let block_size: u32 = 256;
-        let num_levels: usize = self.num_levels as usize;
-        for level in 0..num_levels {
-            let num_level_nodes: usize = match self.level_offsets_host.as_ref() {
-                Some(off) => (off[level + 1].saturating_sub(off[level])) as usize,
-                None => self.level_nodes.len(),
-            };
-            if num_level_nodes == 0 {
-                continue;
-            }
-
-            let num_blocks = ((num_level_nodes as u32) + block_size - 1) / block_size;
-            let config = LaunchConfig {
-                grid_dim: (num_blocks, 1, 1),
-                block_dim: (block_size, 1, 1),
-                shared_mem_bytes: 0,
-            };
-            let level_u32: u32 = level as u32;
-
-            let mut params: Vec<*mut c_void> = vec![
-                (&self.node_type).as_kernel_param(),
-                (&self.child_offsets).as_kernel_param(),
-                (&self.child_indices).as_kernel_param(),
-                (&self.lit).as_kernel_param(),
-                (&self.decision_var).as_kernel_param(),
-                (&self.decision_child_false).as_kernel_param(),
-                (&self.decision_child_true).as_kernel_param(),
-                (&self.level_nodes).as_kernel_param(),
-                (&self.level_offsets).as_kernel_param(),
-                level_u32.as_kernel_param(),
-                (&self.var_log_true).as_kernel_param(),
-                (&self.var_log_false).as_kernel_param(),
-                (&mut self.values).as_kernel_param(),
-            ];
-
-            // SAFETY: xgcf_forward_level(...) writes values for the provided level nodes.
-            unsafe { func.clone().launch(config, &mut params) }
-                .map_err(|e| XlogError::Kernel(format!("xgcf_forward_level failed: {}", e)))?;
-        }
-
-        self.apply_free_var_correction(provider, true, false)?;
-        provider.device().synchronize()?;
-
-        let root_idx = self.root as usize;
-        let root_view = self.values.slice(root_idx..(root_idx + 1));
-        let mut out = [0.0_f64];
+        let mut host = [0.0_f64];
         device
-            .dtoh_sync_copy_into(&root_view, &mut out)
+            .dtoh_sync_copy_into(&out_log_z, &mut host)
             .map_err(|e| XlogError::Kernel(format!("Failed to read circuit root value: {}", e)))?;
-        Ok(out[0])
+        Ok(host[0])
     }
 
     pub fn eval_log_wmc_and_grads(
