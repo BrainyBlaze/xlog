@@ -46,4 +46,3 @@ fn gpu_d4_validate_cnf_accepts_well_formed_cnf() {
 
     validate_cnf_gpu(&cnf, &provider).expect("CNF validation should succeed");
 }
-

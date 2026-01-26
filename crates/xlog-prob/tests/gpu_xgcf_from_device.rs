@@ -50,7 +50,9 @@ fn gpu_xgcf_from_device_const1_matches_true_cnf() {
         .unwrap();
 
     let mut d_child_offsets = memory.alloc::<u32>(2).unwrap();
-    device.htod_sync_copy_into(&[0u32, 0u32], &mut d_child_offsets).unwrap();
+    device
+        .htod_sync_copy_into(&[0u32, 0u32], &mut d_child_offsets)
+        .unwrap();
 
     let d_child_indices = memory.alloc::<u32>(0).unwrap();
 
@@ -58,7 +60,9 @@ fn gpu_xgcf_from_device_const1_matches_true_cnf() {
     device.htod_sync_copy_into(&[0i32], &mut d_lit).unwrap();
 
     let mut d_decision_var = memory.alloc::<u32>(1).unwrap();
-    device.htod_sync_copy_into(&[0u32], &mut d_decision_var).unwrap();
+    device
+        .htod_sync_copy_into(&[0u32], &mut d_decision_var)
+        .unwrap();
 
     let mut d_decision_child_false = memory.alloc::<u32>(1).unwrap();
     device
@@ -71,7 +75,9 @@ fn gpu_xgcf_from_device_const1_matches_true_cnf() {
         .unwrap();
 
     let mut d_level_nodes = memory.alloc::<u32>(1).unwrap();
-    device.htod_sync_copy_into(&[0u32], &mut d_level_nodes).unwrap();
+    device
+        .htod_sync_copy_into(&[0u32], &mut d_level_nodes)
+        .unwrap();
 
     let mut d_level_offsets = memory.alloc::<u32>(2).unwrap();
     device

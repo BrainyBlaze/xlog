@@ -435,7 +435,7 @@ impl GpuXgcf {
 
             // SAFETY: xgcf_forward_level(...) writes values for the provided level nodes.
             unsafe { func.clone().launch(config, &mut params) }
-            .map_err(|e| XlogError::Kernel(format!("xgcf_forward_level failed: {}", e)))?;
+                .map_err(|e| XlogError::Kernel(format!("xgcf_forward_level failed: {}", e)))?;
         }
 
         // Backward pass buffers.
@@ -528,8 +528,7 @@ impl GpuXgcf {
                 (&mut self.adj).as_kernel_param(),
             ];
 
-            unsafe { propagate.clone().launch(config, &mut params) }
-            .map_err(|e| {
+            unsafe { propagate.clone().launch(config, &mut params) }.map_err(|e| {
                 XlogError::Kernel(format!("xgcf_backward_level_propagate failed: {}", e))
             })?;
 
@@ -549,8 +548,7 @@ impl GpuXgcf {
                 (&mut self.grad_false).as_kernel_param(),
             ];
 
-            unsafe { decision_grad.clone().launch(config, &mut params) }
-            .map_err(|e| {
+            unsafe { decision_grad.clone().launch(config, &mut params) }.map_err(|e| {
                 XlogError::Kernel(format!("xgcf_backward_level_decision_grad failed: {}", e))
             })?;
 
@@ -649,7 +647,7 @@ impl GpuXgcf {
 
             // SAFETY: xgcf_forward_level(...) writes values for the provided level nodes.
             unsafe { func.clone().launch(config, &mut params) }
-            .map_err(|e| XlogError::Kernel(format!("xgcf_forward_level failed: {}", e)))?;
+                .map_err(|e| XlogError::Kernel(format!("xgcf_forward_level failed: {}", e)))?;
         }
 
         provider.device().synchronize()?;
@@ -748,8 +746,7 @@ impl GpuXgcf {
                 (&mut self.adj).as_kernel_param(),
             ];
 
-            unsafe { propagate.clone().launch(config, &mut params) }
-            .map_err(|e| {
+            unsafe { propagate.clone().launch(config, &mut params) }.map_err(|e| {
                 XlogError::Kernel(format!("xgcf_backward_level_propagate failed: {}", e))
             })?;
 
@@ -769,8 +766,7 @@ impl GpuXgcf {
                 (&mut self.grad_false).as_kernel_param(),
             ];
 
-            unsafe { decision_grad.clone().launch(config, &mut params) }
-            .map_err(|e| {
+            unsafe { decision_grad.clone().launch(config, &mut params) }.map_err(|e| {
                 XlogError::Kernel(format!("xgcf_backward_level_decision_grad failed: {}", e))
             })?;
 

@@ -253,7 +253,11 @@ impl TinyXgcfDevice {
         })
     }
 
-    fn launch_level_cached(kernel: &CudaFunction, num_level_nodes: u32, params: &mut Vec<*mut c_void>) -> Result<()> {
+    fn launch_level_cached(
+        kernel: &CudaFunction,
+        num_level_nodes: u32,
+        params: &mut Vec<*mut c_void>,
+    ) -> Result<()> {
         if num_level_nodes == 0 {
             return Ok(());
         }
@@ -613,9 +617,10 @@ pub fn run_tiny_xgcf_forward(ctx: &TestContext, spec: &TinyXgcfSpec) -> Result<V
     for &(offset, _len) in &spec.levels {
         level_offsets.push(offset);
     }
-    let (last_offset, last_len) = *spec.levels.last().ok_or_else(|| {
-        XlogError::Kernel("TinyXgcfSpec requires non-empty levels".to_string())
-    })?;
+    let (last_offset, last_len) = *spec
+        .levels
+        .last()
+        .ok_or_else(|| XlogError::Kernel("TinyXgcfSpec requires non-empty levels".to_string()))?;
     level_offsets.push(last_offset + last_len);
     if level_offsets[0] != 0 {
         return Err(XlogError::Kernel(
@@ -631,9 +636,10 @@ pub fn run_tiny_xgcf_forward(ctx: &TestContext, spec: &TinyXgcfSpec) -> Result<V
     for &(offset, _len) in &spec.levels {
         level_offsets.push(offset);
     }
-    let (last_offset, last_len) = *spec.levels.last().ok_or_else(|| {
-        XlogError::Kernel("TinyXgcfSpec requires non-empty levels".to_string())
-    })?;
+    let (last_offset, last_len) = *spec
+        .levels
+        .last()
+        .ok_or_else(|| XlogError::Kernel("TinyXgcfSpec requires non-empty levels".to_string()))?;
     level_offsets.push(last_offset + last_len);
     if level_offsets[0] != 0 {
         return Err(XlogError::Kernel(
@@ -735,9 +741,10 @@ pub fn run_tiny_xgcf_backward(ctx: &TestContext, spec: &TinyXgcfSpec) -> Result<
     for &(offset, _len) in &spec.levels {
         level_offsets.push(offset);
     }
-    let (last_offset, last_len) = *spec.levels.last().ok_or_else(|| {
-        XlogError::Kernel("TinyXgcfSpec requires non-empty levels".to_string())
-    })?;
+    let (last_offset, last_len) = *spec
+        .levels
+        .last()
+        .ok_or_else(|| XlogError::Kernel("TinyXgcfSpec requires non-empty levels".to_string()))?;
     level_offsets.push(last_offset + last_len);
     if level_offsets[0] != 0 {
         return Err(XlogError::Kernel(
@@ -827,7 +834,12 @@ pub fn run_tiny_xgcf_backward(ctx: &TestContext, spec: &TinyXgcfSpec) -> Result<
             (&d_values).as_kernel_param(),
             (&mut d_adj).as_kernel_param(),
         ];
-        launch_level(ctx, circuit_kernels::XGCF_BACKWARD_LEVEL_PROPAGATE, len, &mut params)?;
+        launch_level(
+            ctx,
+            circuit_kernels::XGCF_BACKWARD_LEVEL_PROPAGATE,
+            len,
+            &mut params,
+        )?;
     }
 
     for (level, &(_offset, len)) in spec.levels.iter().enumerate().rev() {
@@ -867,7 +879,12 @@ pub fn run_tiny_xgcf_backward(ctx: &TestContext, spec: &TinyXgcfSpec) -> Result<
             (&mut d_grad_true).as_kernel_param(),
             (&mut d_grad_false).as_kernel_param(),
         ];
-        launch_level(ctx, circuit_kernels::XGCF_BACKWARD_LEVEL_LIT_GRAD, len, &mut params)?;
+        launch_level(
+            ctx,
+            circuit_kernels::XGCF_BACKWARD_LEVEL_LIT_GRAD,
+            len,
+            &mut params,
+        )?;
     }
 
     ctx.sync_and_check()?;

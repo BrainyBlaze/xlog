@@ -129,20 +129,20 @@ fn exclusive_scan_u32_inplace(
     let block_size = 256u32;
 
     if n <= block_size {
-        let phase2 = device.get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE2).ok_or_else(
-            || XlogError::Kernel("multiblock_scan_phase2 kernel not found".to_string()),
-        )?;
+        let phase2 = device
+            .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE2)
+            .ok_or_else(|| {
+                XlogError::Kernel("multiblock_scan_phase2 kernel not found".to_string())
+            })?;
         unsafe {
-            phase2
-                .clone()
-                .launch(
-                    LaunchConfig {
-                        grid_dim: (1, 1, 1),
-                        block_dim: (block_size, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
-                    (&mut *data, n),
-                )
+            phase2.clone().launch(
+                LaunchConfig {
+                    grid_dim: (1, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (&mut *data, n),
+            )
         }
         .map_err(|e| XlogError::Kernel(format!("multiblock_scan_phase2 failed: {}", e)))?;
         return Ok(());
@@ -299,24 +299,24 @@ pub fn build_frontier_bitset(
     let mut pick_var = memory.alloc::<u32>(max_frontier_items as usize)?;
 
     // Initialize: one root work item at index 0 with an empty assignment.
-    device.memset_zeros(&mut cur_true).map_err(|e| {
-        XlogError::Kernel(format!("Failed to zero bitset true pool: {}", e))
-    })?;
-    device.memset_zeros(&mut cur_false).map_err(|e| {
-        XlogError::Kernel(format!("Failed to zero bitset false pool: {}", e))
-    })?;
-    device.memset_zeros(&mut next_true).map_err(|e| {
-        XlogError::Kernel(format!("Failed to zero bitset next_true pool: {}", e))
-    })?;
-    device.memset_zeros(&mut next_false).map_err(|e| {
-        XlogError::Kernel(format!("Failed to zero bitset next_false pool: {}", e))
-    })?;
-    device.memset_zeros(&mut counts).map_err(|e| {
-        XlogError::Kernel(format!("Failed to zero frontier counts: {}", e))
-    })?;
-    device.memset_zeros(&mut pick_var).map_err(|e| {
-        XlogError::Kernel(format!("Failed to zero frontier pick_var: {}", e))
-    })?;
+    device
+        .memset_zeros(&mut cur_true)
+        .map_err(|e| XlogError::Kernel(format!("Failed to zero bitset true pool: {}", e)))?;
+    device
+        .memset_zeros(&mut cur_false)
+        .map_err(|e| XlogError::Kernel(format!("Failed to zero bitset false pool: {}", e)))?;
+    device
+        .memset_zeros(&mut next_true)
+        .map_err(|e| XlogError::Kernel(format!("Failed to zero bitset next_true pool: {}", e)))?;
+    device
+        .memset_zeros(&mut next_false)
+        .map_err(|e| XlogError::Kernel(format!("Failed to zero bitset next_false pool: {}", e)))?;
+    device
+        .memset_zeros(&mut counts)
+        .map_err(|e| XlogError::Kernel(format!("Failed to zero frontier counts: {}", e)))?;
+    device
+        .memset_zeros(&mut pick_var)
+        .map_err(|e| XlogError::Kernel(format!("Failed to zero frontier pick_var: {}", e)))?;
 
     // Provide a defined default layout for all slots; only `cur_size` items are considered active.
     let mut host_items: Vec<D4WorkItem> = Vec::with_capacity(max_frontier_items as usize);
@@ -338,9 +338,9 @@ pub fn build_frontier_bitset(
     device
         .htod_sync_copy_into(&[1u32], &mut cur_size)
         .map_err(|e| XlogError::Kernel(format!("Failed to upload frontier size: {}", e)))?;
-    device.memset_zeros(&mut next_size).map_err(|e| {
-        XlogError::Kernel(format!("Failed to zero next_size: {}", e))
-    })?;
+    device
+        .memset_zeros(&mut next_size)
+        .map_err(|e| XlogError::Kernel(format!("Failed to zero next_size: {}", e)))?;
 
     let prep = device
         .get_func(D4_MODULE, d4_kernels::D4_FRONTIER_PREPARE)
@@ -374,11 +374,7 @@ pub fn build_frontier_bitset(
         unsafe {
             prep.clone().launch(
                 LaunchConfig {
-                    grid_dim: (
-                        (max_frontier_items_u32 + 127) / 128,
-                        1,
-                        1,
-                    ),
+                    grid_dim: ((max_frontier_items_u32 + 127) / 128, 1, 1),
                     block_dim: (128, 1, 1),
                     shared_mem_bytes: 0,
                 },
@@ -411,11 +407,7 @@ pub fn build_frontier_bitset(
         unsafe {
             expand.clone().launch(
                 LaunchConfig {
-                    grid_dim: (
-                        (max_frontier_items_u32 + 127) / 128,
-                        1,
-                        1,
-                    ),
+                    grid_dim: ((max_frontier_items_u32 + 127) / 128, 1, 1),
                     block_dim: (128, 1, 1),
                     shared_mem_bytes: 0,
                 },
@@ -479,18 +471,18 @@ pub fn build_frontier_dense(
     let mut prefix = memory.alloc::<u32>(max_frontier_items as usize)?;
     let mut pick_var = memory.alloc::<u32>(max_frontier_items as usize)?;
 
-    device.memset_zeros(&mut cur_assign).map_err(|e| {
-        XlogError::Kernel(format!("Failed to zero dense assignment pool: {}", e))
-    })?;
+    device
+        .memset_zeros(&mut cur_assign)
+        .map_err(|e| XlogError::Kernel(format!("Failed to zero dense assignment pool: {}", e)))?;
     device.memset_zeros(&mut next_assign).map_err(|e| {
         XlogError::Kernel(format!("Failed to zero dense next assignment pool: {}", e))
     })?;
-    device.memset_zeros(&mut counts).map_err(|e| {
-        XlogError::Kernel(format!("Failed to zero frontier counts: {}", e))
-    })?;
-    device.memset_zeros(&mut pick_var).map_err(|e| {
-        XlogError::Kernel(format!("Failed to zero frontier pick_var: {}", e))
-    })?;
+    device
+        .memset_zeros(&mut counts)
+        .map_err(|e| XlogError::Kernel(format!("Failed to zero frontier counts: {}", e)))?;
+    device
+        .memset_zeros(&mut pick_var)
+        .map_err(|e| XlogError::Kernel(format!("Failed to zero frontier pick_var: {}", e)))?;
 
     let mut host_items: Vec<D4WorkItem> = Vec::with_capacity(max_frontier_items as usize);
     for i in 0..max_frontier_items {
@@ -511,9 +503,9 @@ pub fn build_frontier_dense(
     device
         .htod_sync_copy_into(&[1u32], &mut cur_size)
         .map_err(|e| XlogError::Kernel(format!("Failed to upload frontier size: {}", e)))?;
-    device.memset_zeros(&mut next_size).map_err(|e| {
-        XlogError::Kernel(format!("Failed to zero next_size: {}", e))
-    })?;
+    device
+        .memset_zeros(&mut next_size)
+        .map_err(|e| XlogError::Kernel(format!("Failed to zero next_size: {}", e)))?;
 
     let prep = device
         .get_func(D4_MODULE, d4_kernels::D4_FRONTIER_PREPARE_DENSE)
@@ -549,11 +541,7 @@ pub fn build_frontier_dense(
         unsafe {
             prep.clone().launch(
                 LaunchConfig {
-                    grid_dim: (
-                        (max_frontier_items_u32 + 127) / 128,
-                        1,
-                        1,
-                    ),
+                    grid_dim: ((max_frontier_items_u32 + 127) / 128, 1, 1),
                     block_dim: (128, 1, 1),
                     shared_mem_bytes: 0,
                 },
@@ -583,11 +571,7 @@ pub fn build_frontier_dense(
         unsafe {
             expand.clone().launch(
                 LaunchConfig {
-                    grid_dim: (
-                        (max_frontier_items_u32 + 127) / 128,
-                        1,
-                        1,
-                    ),
+                    grid_dim: ((max_frontier_items_u32 + 127) / 128, 1, 1),
                     block_dim: (128, 1, 1),
                     shared_mem_bytes: 0,
                 },
@@ -635,7 +619,10 @@ mod tests {
         match CudaKernelProvider::new(device, memory) {
             Ok(p) => Some(Arc::new(p)),
             Err(e) => {
-                eprintln!("Skipping test: failed to create CUDA kernel provider: {}", e);
+                eprintln!(
+                    "Skipping test: failed to create CUDA kernel provider: {}",
+                    e
+                );
                 None
             }
         }
@@ -643,9 +630,7 @@ mod tests {
 
     fn words_per_item(var_cap: u32) -> u32 {
         // Bit 0 is unused (DIMACS vars are 1-based), so we allocate var_cap+1 bits.
-        let bits = var_cap
-            .checked_add(1)
-            .expect("var_cap+1 overflow in test");
+        let bits = var_cap.checked_add(1).expect("var_cap+1 overflow in test");
         (bits + 31) / 32
     }
 
@@ -658,17 +643,18 @@ mod tests {
         let memory = provider.memory();
 
         // CNF: (x1). Unit propagation should assign x1=true and mark the instance satisfied.
-        let instance = SolveInstance::new(
-            1,
-            vec![Clause::new(vec![Literal::positive(0)])],
-        );
+        let instance = SolveInstance::new(1, vec![Clause::new(vec![Literal::positive(0)])]);
         let cnf = GpuCnf::from_host(&instance, &provider).expect("GpuCnf upload");
 
         let max_frontier_items: u32 = 8;
         let wpi = words_per_item(cnf.var_cap);
 
-        let mut cur_items = memory.alloc::<D4WorkItem>(max_frontier_items as usize).unwrap();
-        let mut next_items = memory.alloc::<D4WorkItem>(max_frontier_items as usize).unwrap();
+        let mut cur_items = memory
+            .alloc::<D4WorkItem>(max_frontier_items as usize)
+            .unwrap();
+        let mut next_items = memory
+            .alloc::<D4WorkItem>(max_frontier_items as usize)
+            .unwrap();
         let mut cur_size = memory.alloc::<u32>(1).unwrap();
         let mut next_size = memory.alloc::<u32>(1).unwrap();
 
@@ -700,7 +686,9 @@ mod tests {
             };
             max_frontier_items as usize
         ];
-        device.htod_sync_copy_into(&host_items, &mut cur_items).unwrap();
+        device
+            .htod_sync_copy_into(&host_items, &mut cur_items)
+            .unwrap();
         device.htod_sync_copy_into(&[1u32], &mut cur_size).unwrap();
         device.memset_zeros(&mut next_size).unwrap();
 
@@ -847,15 +835,22 @@ mod tests {
         // CNF: (x1 ∨ x2). No unit propagation initially; branch on x1 deterministically.
         let instance = SolveInstance::new(
             2,
-            vec![Clause::new(vec![Literal::positive(0), Literal::positive(1)])],
+            vec![Clause::new(vec![
+                Literal::positive(0),
+                Literal::positive(1),
+            ])],
         );
         let cnf = GpuCnf::from_host(&instance, &provider).expect("GpuCnf upload");
 
         let max_frontier_items: u32 = 8;
         let wpi = words_per_item(cnf.var_cap);
 
-        let mut cur_items = memory.alloc::<D4WorkItem>(max_frontier_items as usize).unwrap();
-        let mut next_items = memory.alloc::<D4WorkItem>(max_frontier_items as usize).unwrap();
+        let mut cur_items = memory
+            .alloc::<D4WorkItem>(max_frontier_items as usize)
+            .unwrap();
+        let mut next_items = memory
+            .alloc::<D4WorkItem>(max_frontier_items as usize)
+            .unwrap();
         let mut cur_size = memory.alloc::<u32>(1).unwrap();
         let mut next_size = memory.alloc::<u32>(1).unwrap();
 
@@ -884,7 +879,9 @@ mod tests {
             };
             max_frontier_items as usize
         ];
-        device.htod_sync_copy_into(&host_items, &mut cur_items).unwrap();
+        device
+            .htod_sync_copy_into(&host_items, &mut cur_items)
+            .unwrap();
         device.htod_sync_copy_into(&[1u32], &mut cur_size).unwrap();
         device.memset_zeros(&mut next_size).unwrap();
 
@@ -1086,7 +1083,13 @@ mod tests {
                         block_dim: (1, 1, 1),
                         shared_mem_bytes: 0,
                     },
-                    (&frontier.assignments, frontier.stride_bytes, 0u32, 1u32, 2u32),
+                    (
+                        &frontier.assignments,
+                        frontier.stride_bytes,
+                        0u32,
+                        1u32,
+                        2u32,
+                    ),
                 )
                 .unwrap();
         }
@@ -1099,7 +1102,13 @@ mod tests {
                         block_dim: (1, 1, 1),
                         shared_mem_bytes: 0,
                     },
-                    (&frontier.assignments, frontier.stride_bytes, 0u32, 2u32, 1u32),
+                    (
+                        &frontier.assignments,
+                        frontier.stride_bytes,
+                        0u32,
+                        2u32,
+                        1u32,
+                    ),
                 )
                 .unwrap();
         }
@@ -1112,7 +1121,13 @@ mod tests {
                         block_dim: (1, 1, 1),
                         shared_mem_bytes: 0,
                     },
-                    (&frontier.assignments, frontier.stride_bytes, 0u32, 3u32, 2u32),
+                    (
+                        &frontier.assignments,
+                        frontier.stride_bytes,
+                        0u32,
+                        3u32,
+                        2u32,
+                    ),
                 )
                 .unwrap();
         }
@@ -1127,7 +1142,13 @@ mod tests {
                         block_dim: (1, 1, 1),
                         shared_mem_bytes: 0,
                     },
-                    (&frontier.assignments, frontier.stride_bytes, 1u32, 1u32, 2u32),
+                    (
+                        &frontier.assignments,
+                        frontier.stride_bytes,
+                        1u32,
+                        1u32,
+                        2u32,
+                    ),
                 )
                 .unwrap();
         }
@@ -1140,7 +1161,13 @@ mod tests {
                         block_dim: (1, 1, 1),
                         shared_mem_bytes: 0,
                     },
-                    (&frontier.assignments, frontier.stride_bytes, 1u32, 2u32, 1u32),
+                    (
+                        &frontier.assignments,
+                        frontier.stride_bytes,
+                        1u32,
+                        2u32,
+                        1u32,
+                    ),
                 )
                 .unwrap();
         }
@@ -1153,7 +1180,13 @@ mod tests {
                         block_dim: (1, 1, 1),
                         shared_mem_bytes: 0,
                     },
-                    (&frontier.assignments, frontier.stride_bytes, 1u32, 3u32, 1u32),
+                    (
+                        &frontier.assignments,
+                        frontier.stride_bytes,
+                        1u32,
+                        3u32,
+                        1u32,
+                    ),
                 )
                 .unwrap();
         }
@@ -1168,7 +1201,13 @@ mod tests {
                         block_dim: (1, 1, 1),
                         shared_mem_bytes: 0,
                     },
-                    (&frontier.assignments, frontier.stride_bytes, 2u32, 1u32, 1u32),
+                    (
+                        &frontier.assignments,
+                        frontier.stride_bytes,
+                        2u32,
+                        1u32,
+                        1u32,
+                    ),
                 )
                 .unwrap();
         }
@@ -1181,7 +1220,13 @@ mod tests {
                         block_dim: (1, 1, 1),
                         shared_mem_bytes: 0,
                     },
-                    (&frontier.assignments, frontier.stride_bytes, 2u32, 2u32, 0u32),
+                    (
+                        &frontier.assignments,
+                        frontier.stride_bytes,
+                        2u32,
+                        2u32,
+                        0u32,
+                    ),
                 )
                 .unwrap();
         }
@@ -1194,7 +1239,13 @@ mod tests {
                         block_dim: (1, 1, 1),
                         shared_mem_bytes: 0,
                     },
-                    (&frontier.assignments, frontier.stride_bytes, 2u32, 3u32, 2u32),
+                    (
+                        &frontier.assignments,
+                        frontier.stride_bytes,
+                        2u32,
+                        3u32,
+                        2u32,
+                    ),
                 )
                 .unwrap();
         }
@@ -1209,7 +1260,13 @@ mod tests {
                         block_dim: (1, 1, 1),
                         shared_mem_bytes: 0,
                     },
-                    (&frontier.assignments, frontier.stride_bytes, 3u32, 1u32, 1u32),
+                    (
+                        &frontier.assignments,
+                        frontier.stride_bytes,
+                        3u32,
+                        1u32,
+                        1u32,
+                    ),
                 )
                 .unwrap();
         }
@@ -1222,7 +1279,13 @@ mod tests {
                         block_dim: (1, 1, 1),
                         shared_mem_bytes: 0,
                     },
-                    (&frontier.assignments, frontier.stride_bytes, 3u32, 2u32, 0u32),
+                    (
+                        &frontier.assignments,
+                        frontier.stride_bytes,
+                        3u32,
+                        2u32,
+                        0u32,
+                    ),
                 )
                 .unwrap();
         }
@@ -1235,7 +1298,13 @@ mod tests {
                         block_dim: (1, 1, 1),
                         shared_mem_bytes: 0,
                     },
-                    (&frontier.assignments, frontier.stride_bytes, 3u32, 3u32, 1u32),
+                    (
+                        &frontier.assignments,
+                        frontier.stride_bytes,
+                        3u32,
+                        3u32,
+                        1u32,
+                    ),
                 )
                 .unwrap();
         }
@@ -1269,8 +1338,8 @@ mod tests {
             cdcl_conflict_budget: None,
         };
 
-        let frontier = super::build_frontier_bitset(&cnf, &provider, &config)
-            .expect("build_frontier_bitset");
+        let frontier =
+            super::build_frontier_bitset(&cnf, &provider, &config).expect("build_frontier_bitset");
 
         let assert_u32 = device
             .get_func(D4_MODULE, "d4_assert_u32_eq")
