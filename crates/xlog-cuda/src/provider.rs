@@ -30,6 +30,7 @@ const CIRCUIT_PTX: &str = include_str!("../../../kernels/circuit.ptx");
 const MC_SAMPLE_PTX: &str = include_str!("../../../kernels/mc_sample.ptx");
 const ARITH_PTX: &str = include_str!("../../../kernels/arith.ptx");
 const SAT_PTX: &str = include_str!("../../../kernels/sat.ptx");
+const D4_PTX: &str = include_str!("../../../kernels/d4.ptx");
 const NEURAL_PTX: &str = include_str!("../../../kernels/neural.ptx");
 
 #[derive(Clone, Copy)]
@@ -72,6 +73,7 @@ pub const CIRCUIT_MODULE: &str = "xlog_circuit";
 pub const MC_SAMPLE_MODULE: &str = "xlog_mc_sample";
 pub const ARITH_MODULE: &str = "xlog_arith";
 pub const SAT_MODULE: &str = "xlog_sat";
+pub const D4_MODULE: &str = "xlog_d4";
 pub const NEURAL_MODULE: &str = "xlog_neural";
 
 /// Kernel function names in the Monte Carlo sampling module
@@ -113,6 +115,13 @@ pub mod arith_kernels {
 pub mod neural_kernels {
     pub const NEURAL_FILL_AD_CHAIN_F32: &str = "neural_fill_ad_chain_f32";
     pub const NEURAL_SCATTER_AD_CHAIN_GRADS_F32: &str = "neural_scatter_ad_chain_grads_f32";
+}
+
+/// Kernel function names in the GPU D4 module (CNF validation + circuit levelization).
+pub mod d4_kernels {
+    pub const D4_VALIDATE_CNF: &str = "d4_validate_cnf";
+    pub const D4_LEVELIZE_COUNTS: &str = "d4_levelize_counts";
+    pub const D4_LEVELIZE_EMIT: &str = "d4_levelize_emit";
 }
 
 /// Kernel function names in the join module
@@ -708,6 +717,20 @@ impl CudaKernelProvider {
                 ],
             )
             .map_err(|e| XlogError::Kernel(format!("Failed to load SAT PTX: {}", e)))?;
+
+        // Load D4 module (GPU D4 compiler support: CNF validation + circuit levelization)
+        device
+            .inner()
+            .load_ptx(
+                Ptx::from_src(D4_PTX),
+                D4_MODULE,
+                &[
+                    d4_kernels::D4_VALIDATE_CNF,
+                    d4_kernels::D4_LEVELIZE_COUNTS,
+                    d4_kernels::D4_LEVELIZE_EMIT,
+                ],
+            )
+            .map_err(|e| XlogError::Kernel(format!("Failed to load D4 PTX: {}", e)))?;
 
         // Load neural fast-path module (AD chain weight fill + gradient scatter)
         device

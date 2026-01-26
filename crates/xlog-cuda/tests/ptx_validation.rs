@@ -167,3 +167,16 @@ fn validate_neural_ptx_contains_expected_kernels() {
     assert!(ptx.contains("neural_fill_ad_chain_f32"));
     assert!(ptx.contains("neural_scatter_ad_chain_grads_f32"));
 }
+
+#[test]
+fn validate_d4_ptx_contains_expected_kernels() {
+    let ptx_path = kernels_dir().join("d4.ptx");
+    let ptx = fs::read_to_string(&ptx_path)
+        .unwrap_or_else(|e| panic!("d4.ptx should exist after build: {}", e));
+
+    // D4 module entrypoints.
+    // Phase 1 will add compilation kernels, but we start with invariant validation + levelization.
+    assert!(ptx.contains("d4_validate_cnf"));
+    assert!(ptx.contains("d4_levelize_counts"));
+    assert!(ptx.contains("d4_levelize_emit"));
+}

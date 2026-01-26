@@ -27,6 +27,7 @@ fn main() {
         "mc_sample",
         "arith",
         "sat",
+        "d4",
         "neural",
     ];
 
