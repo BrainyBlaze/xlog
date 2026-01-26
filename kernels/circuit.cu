@@ -59,14 +59,15 @@ extern "C" __global__ void xgcf_forward_level(
     const uint32_t* __restrict__ decision_child_false,
     const uint32_t* __restrict__ decision_child_true,
     const uint32_t* __restrict__ level_nodes,
-    uint64_t level_range,
+    const uint32_t* __restrict__ level_offsets,
+    uint32_t level,
     const double* __restrict__ var_log_true,
     const double* __restrict__ var_log_false,
     double* __restrict__ values
 ) {
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    uint32_t level_offset = static_cast<uint32_t>(level_range & 0xFFFFFFFFull);
-    uint32_t num_level_nodes = static_cast<uint32_t>(level_range >> 32);
+    uint32_t level_offset = level_offsets[level];
+    uint32_t num_level_nodes = level_offsets[level + 1] - level_offset;
     if (tid >= num_level_nodes) {
         return;
     }
@@ -159,15 +160,16 @@ extern "C" __global__ void xgcf_backward_level_propagate(
     const uint32_t* __restrict__ decision_child_false,
     const uint32_t* __restrict__ decision_child_true,
     const uint32_t* __restrict__ level_nodes,
-    uint64_t level_range,
+    const uint32_t* __restrict__ level_offsets,
+    uint32_t level,
     const double* __restrict__ var_log_true,
     const double* __restrict__ var_log_false,
     const double* __restrict__ values,
     double* __restrict__ adj
 ) {
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    uint32_t level_offset = static_cast<uint32_t>(level_range & 0xFFFFFFFFull);
-    uint32_t num_level_nodes = static_cast<uint32_t>(level_range >> 32);
+    uint32_t level_offset = level_offsets[level];
+    uint32_t num_level_nodes = level_offsets[level + 1] - level_offset;
     if (tid >= num_level_nodes) {
         return;
     }
@@ -257,7 +259,8 @@ extern "C" __global__ void xgcf_backward_level_decision_grad(
     const uint32_t* __restrict__ decision_child_false,
     const uint32_t* __restrict__ decision_child_true,
     const uint32_t* __restrict__ level_nodes,
-    uint64_t level_range,
+    const uint32_t* __restrict__ level_offsets,
+    uint32_t level,
     const double* __restrict__ var_log_true,
     const double* __restrict__ var_log_false,
     const double* __restrict__ values,
@@ -266,8 +269,8 @@ extern "C" __global__ void xgcf_backward_level_decision_grad(
     double* __restrict__ grad_false
 ) {
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    uint32_t level_offset = static_cast<uint32_t>(level_range & 0xFFFFFFFFull);
-    uint32_t num_level_nodes = static_cast<uint32_t>(level_range >> 32);
+    uint32_t level_offset = level_offsets[level];
+    uint32_t num_level_nodes = level_offsets[level + 1] - level_offset;
     if (tid >= num_level_nodes) {
         return;
     }
@@ -324,14 +327,15 @@ extern "C" __global__ void xgcf_backward_level_lit_grad(
     const uint8_t* __restrict__ node_type,
     const int32_t* __restrict__ lit,
     const uint32_t* __restrict__ level_nodes,
-    uint64_t level_range,
+    const uint32_t* __restrict__ level_offsets,
+    uint32_t level,
     const double* __restrict__ adj,
     double* __restrict__ grad_true,
     double* __restrict__ grad_false
 ) {
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    uint32_t level_offset = static_cast<uint32_t>(level_range & 0xFFFFFFFFull);
-    uint32_t num_level_nodes = static_cast<uint32_t>(level_range >> 32);
+    uint32_t level_offset = level_offsets[level];
+    uint32_t num_level_nodes = level_offsets[level + 1] - level_offset;
     if (tid >= num_level_nodes) {
         return;
     }

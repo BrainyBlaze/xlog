@@ -1,6 +1,8 @@
 //! Helpers for testing XGCF circuit CUDA kernels.
 
-use cudarc::driver::{CudaFunction, DeviceSlice, LaunchAsync, LaunchConfig};
+use std::ffi::c_void;
+
+use cudarc::driver::{CudaFunction, DeviceRepr, DeviceSlice, LaunchAsync, LaunchConfig};
 use xlog_core::{Result, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::{circuit_kernels, CIRCUIT_MODULE};
@@ -61,6 +63,7 @@ pub struct TinyXgcfDevice {
     d_decision_child_false: TrackedCudaSlice<u32>,
     d_decision_child_true: TrackedCudaSlice<u32>,
     d_level_nodes: TrackedCudaSlice<u32>,
+    d_level_offsets: TrackedCudaSlice<u32>,
 
     // Per-evaluation inputs (device-resident).
     d_var_log_true: TrackedCudaSlice<f64>,
@@ -168,6 +171,46 @@ impl TinyXgcfDevice {
             .htod_sync_copy_into(&spec.level_nodes, &mut d_level_nodes)
             .map_err(|e| XlogError::Kernel(format!("Failed to upload level_nodes: {}", e)))?;
 
+        // Device-resident level offsets (len = num_levels + 1) for level-aware kernels.
+        if spec.levels.is_empty() {
+            return Err(XlogError::Kernel(
+                "TinyXgcfSpec requires non-empty levels".to_string(),
+            ));
+        }
+        let mut level_offsets: Vec<u32> = Vec::with_capacity(spec.levels.len() + 1);
+        for &(offset, _len) in &spec.levels {
+            level_offsets.push(offset);
+        }
+        let (last_offset, last_len) = *spec.levels.last().unwrap();
+        level_offsets.push(last_offset + last_len);
+
+        if level_offsets[0] != 0 {
+            return Err(XlogError::Kernel(
+                "TinyXgcfSpec level_offsets must start at 0".to_string(),
+            ));
+        }
+        for (i, &(offset, len)) in spec.levels.iter().enumerate() {
+            let expected_next = offset + len;
+            if level_offsets[i] != offset || level_offsets[i + 1] != expected_next {
+                return Err(XlogError::Kernel(
+                    "TinyXgcfSpec levels must be contiguous and match offsets".to_string(),
+                ));
+            }
+        }
+        let total = *level_offsets.last().unwrap() as usize;
+        if total != spec.level_nodes.len() {
+            return Err(XlogError::Kernel(format!(
+                "TinyXgcfSpec level_nodes len {} != level_offsets.last {}",
+                spec.level_nodes.len(),
+                total
+            )));
+        }
+
+        let mut d_level_offsets = ctx.memory.alloc::<u32>(level_offsets.len())?;
+        device
+            .htod_sync_copy_into(&level_offsets, &mut d_level_offsets)
+            .map_err(|e| XlogError::Kernel(format!("Failed to upload level_offsets: {}", e)))?;
+
         let mut d_var_log_true = ctx.memory.alloc::<f64>(spec.var_log_true.len())?;
         device
             .htod_sync_copy_into(&spec.var_log_true, &mut d_var_log_true)
@@ -200,6 +243,7 @@ impl TinyXgcfDevice {
             d_decision_child_false,
             d_decision_child_true,
             d_level_nodes,
+            d_level_offsets,
             d_var_log_true,
             d_var_log_false,
             d_values,
@@ -209,10 +253,7 @@ impl TinyXgcfDevice {
         })
     }
 
-    fn launch_level_cached<A>(kernel: &CudaFunction, num_level_nodes: u32, args: A) -> Result<()>
-    where
-        CudaFunction: LaunchAsync<A>,
-    {
+    fn launch_level_cached(kernel: &CudaFunction, num_level_nodes: u32, params: &mut Vec<*mut c_void>) -> Result<()> {
         if num_level_nodes == 0 {
             return Ok(());
         }
@@ -223,7 +264,7 @@ impl TinyXgcfDevice {
             block_dim: (block_size, 1, 1),
             shared_mem_bytes: 0,
         };
-        unsafe { kernel.clone().launch(config, args) }
+        unsafe { kernel.clone().launch(config, params) }
             .map_err(|e| XlogError::Kernel(format!("Failed to launch level kernel: {}", e)))?;
         Ok(())
     }
@@ -257,26 +298,24 @@ impl TinyXgcfDevice {
 
     /// Launch forward kernels (no sync, no host transfers).
     pub fn forward_launch(&mut self, _ctx: &TestContext) -> Result<()> {
-        for &(offset, len) in &self.levels {
-            let level_range: u64 = ((len as u64) << 32) | (offset as u64);
-            Self::launch_level_cached(
-                &self.forward_fn,
-                len,
-                (
-                    &self.d_node_type,
-                    &self.d_child_offsets,
-                    &self.d_child_indices,
-                    &self.d_lit,
-                    &self.d_decision_var,
-                    &self.d_decision_child_false,
-                    &self.d_decision_child_true,
-                    &self.d_level_nodes,
-                    level_range,
-                    &self.d_var_log_true,
-                    &self.d_var_log_false,
-                    &mut self.d_values,
-                ),
-            )?;
+        for (level, &(_offset, len)) in self.levels.iter().enumerate() {
+            let level_u32 = level as u32;
+            let mut params: Vec<*mut c_void> = vec![
+                (&self.d_node_type).as_kernel_param(),
+                (&self.d_child_offsets).as_kernel_param(),
+                (&self.d_child_indices).as_kernel_param(),
+                (&self.d_lit).as_kernel_param(),
+                (&self.d_decision_var).as_kernel_param(),
+                (&self.d_decision_child_false).as_kernel_param(),
+                (&self.d_decision_child_true).as_kernel_param(),
+                (&self.d_level_nodes).as_kernel_param(),
+                (&self.d_level_offsets).as_kernel_param(),
+                level_u32.as_kernel_param(),
+                (&self.d_var_log_true).as_kernel_param(),
+                (&self.d_var_log_false).as_kernel_param(),
+                (&mut self.d_values).as_kernel_param(),
+            ];
+            Self::launch_level_cached(&self.forward_fn, len, &mut params)?;
         }
         Ok(())
     }
@@ -334,65 +373,59 @@ impl TinyXgcfDevice {
             .htod_sync_copy_into(&[1.0f64], &mut root_view)
             .map_err(|e| XlogError::Kernel(format!("Failed to set root adjoint: {}", e)))?;
 
-        for &(offset, len) in self.levels.iter().rev() {
-            let level_range: u64 = ((len as u64) << 32) | (offset as u64);
-            Self::launch_level_cached(
-                &self.backward_propagate_fn,
-                len,
-                (
-                    &self.d_node_type,
-                    &self.d_child_offsets,
-                    &self.d_child_indices,
-                    &self.d_decision_var,
-                    &self.d_decision_child_false,
-                    &self.d_decision_child_true,
-                    &self.d_level_nodes,
-                    level_range,
-                    &self.d_var_log_true,
-                    &self.d_var_log_false,
-                    &self.d_values,
-                    &mut self.d_adj,
-                ),
-            )?;
+        for (level, &(_offset, len)) in self.levels.iter().enumerate().rev() {
+            let level_u32 = level as u32;
+            let mut params: Vec<*mut c_void> = vec![
+                (&self.d_node_type).as_kernel_param(),
+                (&self.d_child_offsets).as_kernel_param(),
+                (&self.d_child_indices).as_kernel_param(),
+                (&self.d_decision_var).as_kernel_param(),
+                (&self.d_decision_child_false).as_kernel_param(),
+                (&self.d_decision_child_true).as_kernel_param(),
+                (&self.d_level_nodes).as_kernel_param(),
+                (&self.d_level_offsets).as_kernel_param(),
+                level_u32.as_kernel_param(),
+                (&self.d_var_log_true).as_kernel_param(),
+                (&self.d_var_log_false).as_kernel_param(),
+                (&self.d_values).as_kernel_param(),
+                (&mut self.d_adj).as_kernel_param(),
+            ];
+            Self::launch_level_cached(&self.backward_propagate_fn, len, &mut params)?;
         }
 
-        for &(offset, len) in self.levels.iter().rev() {
-            let level_range: u64 = ((len as u64) << 32) | (offset as u64);
-            Self::launch_level_cached(
-                &self.backward_decision_grad_fn,
-                len,
-                (
-                    &self.d_node_type,
-                    &self.d_decision_var,
-                    &self.d_decision_child_false,
-                    &self.d_decision_child_true,
-                    &self.d_level_nodes,
-                    level_range,
-                    &self.d_var_log_true,
-                    &self.d_var_log_false,
-                    &self.d_values,
-                    &self.d_adj,
-                    &mut self.d_grad_true,
-                    &mut self.d_grad_false,
-                ),
-            )?;
+        for (level, &(_offset, len)) in self.levels.iter().enumerate().rev() {
+            let level_u32 = level as u32;
+            let mut params: Vec<*mut c_void> = vec![
+                (&self.d_node_type).as_kernel_param(),
+                (&self.d_decision_var).as_kernel_param(),
+                (&self.d_decision_child_false).as_kernel_param(),
+                (&self.d_decision_child_true).as_kernel_param(),
+                (&self.d_level_nodes).as_kernel_param(),
+                (&self.d_level_offsets).as_kernel_param(),
+                level_u32.as_kernel_param(),
+                (&self.d_var_log_true).as_kernel_param(),
+                (&self.d_var_log_false).as_kernel_param(),
+                (&self.d_values).as_kernel_param(),
+                (&self.d_adj).as_kernel_param(),
+                (&mut self.d_grad_true).as_kernel_param(),
+                (&mut self.d_grad_false).as_kernel_param(),
+            ];
+            Self::launch_level_cached(&self.backward_decision_grad_fn, len, &mut params)?;
         }
 
-        for &(offset, len) in self.levels.iter().rev() {
-            let level_range: u64 = ((len as u64) << 32) | (offset as u64);
-            Self::launch_level_cached(
-                &self.backward_lit_grad_fn,
-                len,
-                (
-                    &self.d_node_type,
-                    &self.d_lit,
-                    &self.d_level_nodes,
-                    level_range,
-                    &self.d_adj,
-                    &mut self.d_grad_true,
-                    &mut self.d_grad_false,
-                ),
-            )?;
+        for (level, &(_offset, len)) in self.levels.iter().enumerate().rev() {
+            let level_u32 = level as u32;
+            let mut params: Vec<*mut c_void> = vec![
+                (&self.d_node_type).as_kernel_param(),
+                (&self.d_lit).as_kernel_param(),
+                (&self.d_level_nodes).as_kernel_param(),
+                (&self.d_level_offsets).as_kernel_param(),
+                level_u32.as_kernel_param(),
+                (&self.d_adj).as_kernel_param(),
+                (&mut self.d_grad_true).as_kernel_param(),
+                (&mut self.d_grad_false).as_kernel_param(),
+            ];
+            Self::launch_level_cached(&self.backward_lit_grad_fn, len, &mut params)?;
         }
 
         Ok(())
@@ -501,15 +534,12 @@ pub fn tiny_xgcf_spec() -> TinyXgcfSpec {
     }
 }
 
-fn launch_level<A>(
+fn launch_level(
     ctx: &TestContext,
     kernel_name: &str,
     num_level_nodes: u32,
-    args: A,
-) -> Result<()>
-where
-    CudaFunction: LaunchAsync<A>,
-{
+    params: &mut Vec<*mut c_void>,
+) -> Result<()> {
     if num_level_nodes == 0 {
         return Ok(());
     }
@@ -531,7 +561,7 @@ where
         shared_mem_bytes: 0,
     };
 
-    unsafe { kernel.clone().launch(config, args) }
+    unsafe { kernel.clone().launch(config, params) }
         .map_err(|e| XlogError::Kernel(format!("Failed to launch {}: {}", kernel_name, e)))?;
     Ok(())
 }
@@ -579,6 +609,42 @@ pub fn run_tiny_xgcf_forward(ctx: &TestContext, spec: &TinyXgcfSpec) -> Result<V
         .htod_sync_copy_into(&spec.level_nodes, &mut d_level_nodes)
         .map_err(|e| XlogError::Kernel(format!("Failed to upload level_nodes: {}", e)))?;
 
+    let mut level_offsets: Vec<u32> = Vec::with_capacity(spec.levels.len() + 1);
+    for &(offset, _len) in &spec.levels {
+        level_offsets.push(offset);
+    }
+    let (last_offset, last_len) = *spec.levels.last().ok_or_else(|| {
+        XlogError::Kernel("TinyXgcfSpec requires non-empty levels".to_string())
+    })?;
+    level_offsets.push(last_offset + last_len);
+    if level_offsets[0] != 0 {
+        return Err(XlogError::Kernel(
+            "TinyXgcfSpec level_offsets must start at 0".to_string(),
+        ));
+    }
+    let mut d_level_offsets = ctx.memory.alloc::<u32>(level_offsets.len())?;
+    device
+        .htod_sync_copy_into(&level_offsets, &mut d_level_offsets)
+        .map_err(|e| XlogError::Kernel(format!("Failed to upload level_offsets: {}", e)))?;
+
+    let mut level_offsets: Vec<u32> = Vec::with_capacity(spec.levels.len() + 1);
+    for &(offset, _len) in &spec.levels {
+        level_offsets.push(offset);
+    }
+    let (last_offset, last_len) = *spec.levels.last().ok_or_else(|| {
+        XlogError::Kernel("TinyXgcfSpec requires non-empty levels".to_string())
+    })?;
+    level_offsets.push(last_offset + last_len);
+    if level_offsets[0] != 0 {
+        return Err(XlogError::Kernel(
+            "TinyXgcfSpec level_offsets must start at 0".to_string(),
+        ));
+    }
+    let mut d_level_offsets = ctx.memory.alloc::<u32>(level_offsets.len())?;
+    device
+        .htod_sync_copy_into(&level_offsets, &mut d_level_offsets)
+        .map_err(|e| XlogError::Kernel(format!("Failed to upload level_offsets: {}", e)))?;
+
     let mut d_var_log_true = ctx.memory.alloc::<f64>(spec.var_log_true.len())?;
     device
         .htod_sync_copy_into(&spec.var_log_true, &mut d_var_log_true)
@@ -595,27 +661,24 @@ pub fn run_tiny_xgcf_forward(ctx: &TestContext, spec: &TinyXgcfSpec) -> Result<V
         .htod_sync_copy_into(&init_values, &mut d_values)
         .map_err(|e| XlogError::Kernel(format!("Failed to init values: {}", e)))?;
 
-    for &(offset, len) in &spec.levels {
-        let level_range: u64 = ((len as u64) << 32) | (offset as u64);
-        launch_level(
-            ctx,
-            circuit_kernels::XGCF_FORWARD_LEVEL,
-            len,
-            (
-                &d_node_type,
-                &d_child_offsets,
-                &d_child_indices,
-                &d_lit,
-                &d_decision_var,
-                &d_decision_child_false,
-                &d_decision_child_true,
-                &d_level_nodes,
-                level_range,
-                &d_var_log_true,
-                &d_var_log_false,
-                &mut d_values,
-            ),
-        )?;
+    for (level, &(_offset, len)) in spec.levels.iter().enumerate() {
+        let level_u32 = level as u32;
+        let mut params: Vec<*mut c_void> = vec![
+            (&d_node_type).as_kernel_param(),
+            (&d_child_offsets).as_kernel_param(),
+            (&d_child_indices).as_kernel_param(),
+            (&d_lit).as_kernel_param(),
+            (&d_decision_var).as_kernel_param(),
+            (&d_decision_child_false).as_kernel_param(),
+            (&d_decision_child_true).as_kernel_param(),
+            (&d_level_nodes).as_kernel_param(),
+            (&d_level_offsets).as_kernel_param(),
+            level_u32.as_kernel_param(),
+            (&d_var_log_true).as_kernel_param(),
+            (&d_var_log_false).as_kernel_param(),
+            (&mut d_values).as_kernel_param(),
+        ];
+        launch_level(ctx, circuit_kernels::XGCF_FORWARD_LEVEL, len, &mut params)?;
     }
 
     ctx.sync_and_check()?;
@@ -668,6 +731,24 @@ pub fn run_tiny_xgcf_backward(ctx: &TestContext, spec: &TinyXgcfSpec) -> Result<
         .htod_sync_copy_into(&spec.level_nodes, &mut d_level_nodes)
         .map_err(|e| XlogError::Kernel(format!("Failed to upload level_nodes: {}", e)))?;
 
+    let mut level_offsets: Vec<u32> = Vec::with_capacity(spec.levels.len() + 1);
+    for &(offset, _len) in &spec.levels {
+        level_offsets.push(offset);
+    }
+    let (last_offset, last_len) = *spec.levels.last().ok_or_else(|| {
+        XlogError::Kernel("TinyXgcfSpec requires non-empty levels".to_string())
+    })?;
+    level_offsets.push(last_offset + last_len);
+    if level_offsets[0] != 0 {
+        return Err(XlogError::Kernel(
+            "TinyXgcfSpec level_offsets must start at 0".to_string(),
+        ));
+    }
+    let mut d_level_offsets = ctx.memory.alloc::<u32>(level_offsets.len())?;
+    device
+        .htod_sync_copy_into(&level_offsets, &mut d_level_offsets)
+        .map_err(|e| XlogError::Kernel(format!("Failed to upload level_offsets: {}", e)))?;
+
     let mut d_var_log_true = ctx.memory.alloc::<f64>(spec.var_log_true.len())?;
     device
         .htod_sync_copy_into(&spec.var_log_true, &mut d_var_log_true)
@@ -684,27 +765,24 @@ pub fn run_tiny_xgcf_backward(ctx: &TestContext, spec: &TinyXgcfSpec) -> Result<
         .htod_sync_copy_into(&init_values, &mut d_values)
         .map_err(|e| XlogError::Kernel(format!("Failed to init values: {}", e)))?;
 
-    for &(offset, len) in &spec.levels {
-        let level_range: u64 = ((len as u64) << 32) | (offset as u64);
-        launch_level(
-            ctx,
-            circuit_kernels::XGCF_FORWARD_LEVEL,
-            len,
-            (
-                &d_node_type,
-                &d_child_offsets,
-                &d_child_indices,
-                &d_lit,
-                &d_decision_var,
-                &d_decision_child_false,
-                &d_decision_child_true,
-                &d_level_nodes,
-                level_range,
-                &d_var_log_true,
-                &d_var_log_false,
-                &mut d_values,
-            ),
-        )?;
+    for (level, &(_offset, len)) in spec.levels.iter().enumerate() {
+        let level_u32 = level as u32;
+        let mut params: Vec<*mut c_void> = vec![
+            (&d_node_type).as_kernel_param(),
+            (&d_child_offsets).as_kernel_param(),
+            (&d_child_indices).as_kernel_param(),
+            (&d_lit).as_kernel_param(),
+            (&d_decision_var).as_kernel_param(),
+            (&d_decision_child_false).as_kernel_param(),
+            (&d_decision_child_true).as_kernel_param(),
+            (&d_level_nodes).as_kernel_param(),
+            (&d_level_offsets).as_kernel_param(),
+            level_u32.as_kernel_param(),
+            (&d_var_log_true).as_kernel_param(),
+            (&d_var_log_false).as_kernel_param(),
+            (&mut d_values).as_kernel_param(),
+        ];
+        launch_level(ctx, circuit_kernels::XGCF_FORWARD_LEVEL, len, &mut params)?;
     }
 
     // adj[root] = 1, others 0
@@ -732,68 +810,64 @@ pub fn run_tiny_xgcf_backward(ctx: &TestContext, spec: &TinyXgcfSpec) -> Result<
         .htod_sync_copy_into(&grad_init, &mut d_grad_false)
         .map_err(|e| XlogError::Kernel(format!("Failed to init grad_false: {}", e)))?;
 
-    for &(offset, len) in spec.levels.iter().rev() {
-        let level_range: u64 = ((len as u64) << 32) | (offset as u64);
-        launch_level(
-            ctx,
-            circuit_kernels::XGCF_BACKWARD_LEVEL_PROPAGATE,
-            len,
-            (
-                &d_node_type,
-                &d_child_offsets,
-                &d_child_indices,
-                &d_decision_var,
-                &d_decision_child_false,
-                &d_decision_child_true,
-                &d_level_nodes,
-                level_range,
-                &d_var_log_true,
-                &d_var_log_false,
-                &d_values,
-                &mut d_adj,
-            ),
-        )?;
+    for (level, &(_offset, len)) in spec.levels.iter().enumerate().rev() {
+        let level_u32 = level as u32;
+        let mut params: Vec<*mut c_void> = vec![
+            (&d_node_type).as_kernel_param(),
+            (&d_child_offsets).as_kernel_param(),
+            (&d_child_indices).as_kernel_param(),
+            (&d_decision_var).as_kernel_param(),
+            (&d_decision_child_false).as_kernel_param(),
+            (&d_decision_child_true).as_kernel_param(),
+            (&d_level_nodes).as_kernel_param(),
+            (&d_level_offsets).as_kernel_param(),
+            level_u32.as_kernel_param(),
+            (&d_var_log_true).as_kernel_param(),
+            (&d_var_log_false).as_kernel_param(),
+            (&d_values).as_kernel_param(),
+            (&mut d_adj).as_kernel_param(),
+        ];
+        launch_level(ctx, circuit_kernels::XGCF_BACKWARD_LEVEL_PROPAGATE, len, &mut params)?;
     }
 
-    for &(offset, len) in spec.levels.iter().rev() {
-        let level_range: u64 = ((len as u64) << 32) | (offset as u64);
+    for (level, &(_offset, len)) in spec.levels.iter().enumerate().rev() {
+        let level_u32 = level as u32;
+        let mut params: Vec<*mut c_void> = vec![
+            (&d_node_type).as_kernel_param(),
+            (&d_decision_var).as_kernel_param(),
+            (&d_decision_child_false).as_kernel_param(),
+            (&d_decision_child_true).as_kernel_param(),
+            (&d_level_nodes).as_kernel_param(),
+            (&d_level_offsets).as_kernel_param(),
+            level_u32.as_kernel_param(),
+            (&d_var_log_true).as_kernel_param(),
+            (&d_var_log_false).as_kernel_param(),
+            (&d_values).as_kernel_param(),
+            (&d_adj).as_kernel_param(),
+            (&mut d_grad_true).as_kernel_param(),
+            (&mut d_grad_false).as_kernel_param(),
+        ];
         launch_level(
             ctx,
             circuit_kernels::XGCF_BACKWARD_LEVEL_DECISION_GRAD,
             len,
-            (
-                &d_node_type,
-                &d_decision_var,
-                &d_decision_child_false,
-                &d_decision_child_true,
-                &d_level_nodes,
-                level_range,
-                &d_var_log_true,
-                &d_var_log_false,
-                &d_values,
-                &d_adj,
-                &mut d_grad_true,
-                &mut d_grad_false,
-            ),
+            &mut params,
         )?;
     }
 
-    for &(offset, len) in spec.levels.iter().rev() {
-        let level_range: u64 = ((len as u64) << 32) | (offset as u64);
-        launch_level(
-            ctx,
-            circuit_kernels::XGCF_BACKWARD_LEVEL_LIT_GRAD,
-            len,
-            (
-                &d_node_type,
-                &d_lit,
-                &d_level_nodes,
-                level_range,
-                &d_adj,
-                &mut d_grad_true,
-                &mut d_grad_false,
-            ),
-        )?;
+    for (level, &(_offset, len)) in spec.levels.iter().enumerate().rev() {
+        let level_u32 = level as u32;
+        let mut params: Vec<*mut c_void> = vec![
+            (&d_node_type).as_kernel_param(),
+            (&d_lit).as_kernel_param(),
+            (&d_level_nodes).as_kernel_param(),
+            (&d_level_offsets).as_kernel_param(),
+            level_u32.as_kernel_param(),
+            (&d_adj).as_kernel_param(),
+            (&mut d_grad_true).as_kernel_param(),
+            (&mut d_grad_false).as_kernel_param(),
+        ];
+        launch_level(ctx, circuit_kernels::XGCF_BACKWARD_LEVEL_LIT_GRAD, len, &mut params)?;
     }
 
     ctx.sync_and_check()?;
