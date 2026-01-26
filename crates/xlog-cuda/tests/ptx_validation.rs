@@ -179,4 +179,15 @@ fn validate_d4_ptx_contains_expected_kernels() {
     assert!(ptx.contains("d4_validate_cnf"));
     assert!(ptx.contains("d4_levelize_counts"));
     assert!(ptx.contains("d4_levelize_emit"));
+
+    // BFS frontier expansion (Task 4).
+    assert!(ptx.contains("d4_frontier_prepare"));
+    assert!(ptx.contains("d4_frontier_expand"));
+    assert!(ptx.contains("d4_frontier_prepare_dense"));
+    assert!(ptx.contains("d4_frontier_expand_dense"));
+
+    // GPU-only assertion helpers (used for tests/invariants without device->host reads).
+    assert!(ptx.contains("d4_assert_u32_eq"));
+    assert!(ptx.contains("d4_assert_bitset_var"));
+    assert!(ptx.contains("d4_assert_dense_var"));
 }

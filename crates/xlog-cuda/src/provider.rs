@@ -122,6 +122,15 @@ pub mod d4_kernels {
     pub const D4_VALIDATE_CNF: &str = "d4_validate_cnf";
     pub const D4_LEVELIZE_COUNTS: &str = "d4_levelize_counts";
     pub const D4_LEVELIZE_EMIT: &str = "d4_levelize_emit";
+    // Task 4: BFS frontier expansion + unit propagation.
+    pub const D4_FRONTIER_PREPARE: &str = "d4_frontier_prepare";
+    pub const D4_FRONTIER_EXPAND: &str = "d4_frontier_expand";
+    pub const D4_FRONTIER_PREPARE_DENSE: &str = "d4_frontier_prepare_dense";
+    pub const D4_FRONTIER_EXPAND_DENSE: &str = "d4_frontier_expand_dense";
+    // GPU-only assertions (tests + invariant enforcement without host reads).
+    pub const D4_ASSERT_U32_EQ: &str = "d4_assert_u32_eq";
+    pub const D4_ASSERT_BITSET_VAR: &str = "d4_assert_bitset_var";
+    pub const D4_ASSERT_DENSE_VAR: &str = "d4_assert_dense_var";
 }
 
 /// Kernel function names in the join module
@@ -728,6 +737,13 @@ impl CudaKernelProvider {
                     d4_kernels::D4_VALIDATE_CNF,
                     d4_kernels::D4_LEVELIZE_COUNTS,
                     d4_kernels::D4_LEVELIZE_EMIT,
+                    d4_kernels::D4_FRONTIER_PREPARE,
+                    d4_kernels::D4_FRONTIER_EXPAND,
+                    d4_kernels::D4_FRONTIER_PREPARE_DENSE,
+                    d4_kernels::D4_FRONTIER_EXPAND_DENSE,
+                    d4_kernels::D4_ASSERT_U32_EQ,
+                    d4_kernels::D4_ASSERT_BITSET_VAR,
+                    d4_kernels::D4_ASSERT_DENSE_VAR,
                 ],
             )
             .map_err(|e| XlogError::Kernel(format!("Failed to load D4 PTX: {}", e)))?;
