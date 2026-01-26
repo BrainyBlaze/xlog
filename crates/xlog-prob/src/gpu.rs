@@ -5,10 +5,11 @@ use std::ffi::c_void;
 use cudarc::driver::{DeviceRepr, DeviceSlice, LaunchAsync, LaunchConfig};
 use xlog_core::{Result, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
-use xlog_cuda::provider::{arith_kernels, ARITH_MODULE};
+use xlog_cuda::provider::{arith_kernels, d4_kernels, ARITH_MODULE, D4_MODULE};
 use xlog_cuda::{circuit_kernels, CudaKernelProvider, CIRCUIT_MODULE};
 
 use crate::xgcf::{Xgcf, XgcfNodeType};
+use crate::compilation::gpu_d4::exclusive_scan_u32_inplace;
 
 /// Device-resident circuit buffers produced by the GPU compiler.
 ///
@@ -141,6 +142,566 @@ impl GpuXgcf {
             grad_true,
             grad_false,
         })
+    }
+
+    /// GPU-native smoothing pass for random variables.
+    ///
+    /// Returns a new device-resident circuit that is smooth w.r.t. `random_var_list`.
+    /// This method performs no device->host data-plane transfers and traps on capacity overflow.
+    pub fn smooth_random_vars_device(
+        &self,
+        provider: &CudaKernelProvider,
+        random_var_list: &[u32],
+        smooth_node_cap: u32,
+        smooth_edge_cap: u32,
+    ) -> Result<GpuXgcf> {
+        if smooth_node_cap == 0 || smooth_edge_cap == 0 {
+            return Err(XlogError::Compilation(
+                "GPU smoothing requires non-zero node/edge caps".to_string(),
+            ));
+        }
+
+        let num_nodes = u32::try_from(self.node_type.len()).map_err(|_| {
+            XlogError::Compilation("GPU smoothing: node count exceeds u32".to_string())
+        })?;
+        if self.child_offsets.len() != (num_nodes as usize + 1) {
+            return Err(XlogError::Compilation(
+                "GPU smoothing: child_offsets len mismatch".to_string(),
+            ));
+        }
+        let num_edges = u32::try_from(self.child_indices.len()).map_err(|_| {
+            XlogError::Compilation("GPU smoothing: edge count exceeds u32".to_string())
+        })?;
+
+        let num_random_vars = u32::try_from(random_var_list.len()).map_err(|_| {
+            XlogError::Compilation("GPU smoothing: random var count exceeds u32".to_string())
+        })?;
+
+        let base_node = 2u32
+            .checked_add(num_random_vars)
+            .ok_or_else(|| XlogError::Compilation("GPU smoothing: base node overflow".to_string()))?;
+        let base_nodes = (base_node as u64)
+            .checked_add(num_nodes as u64)
+            .ok_or_else(|| XlogError::Compilation("GPU smoothing: base node overflow".to_string()))?;
+        if base_nodes > smooth_node_cap as u64 {
+            return Err(XlogError::Compilation(format!(
+                "GPU smoothing: base nodes {} exceed smooth_node_cap {}",
+                base_nodes, smooth_node_cap
+            )));
+        }
+
+        let words_per_support = ((num_random_vars + 31) / 32).max(1);
+
+        let map_len = (self.max_var as usize)
+            .checked_add(1)
+            .ok_or_else(|| XlogError::Compilation("GPU smoothing: max_var overflow".to_string()))?;
+        let mut random_var_to_bit = vec![u32::MAX; map_len];
+        for (bit, &var) in random_var_list.iter().enumerate() {
+            if var == 0 || var > self.max_var {
+                return Err(XlogError::Compilation(format!(
+                    "GPU smoothing: random var {} out of bounds (max_var={})",
+                    var, self.max_var
+                )));
+            }
+            let idx = var as usize;
+            if random_var_to_bit[idx] != u32::MAX {
+                return Err(XlogError::Compilation(format!(
+                    "GPU smoothing: duplicate random var {}",
+                    var
+                )));
+            }
+            random_var_to_bit[idx] = bit as u32;
+        }
+
+        let support_len = (num_nodes as u64)
+            .checked_mul(words_per_support as u64)
+            .and_then(|v| usize::try_from(v).ok())
+            .ok_or_else(|| XlogError::Compilation("GPU smoothing: support size overflow".to_string()))?;
+
+        let dec_entries = (num_nodes as u64)
+            .checked_mul(2)
+            .and_then(|v| usize::try_from(v).ok())
+            .ok_or_else(|| XlogError::Compilation("GPU smoothing: decision array overflow".to_string()))?;
+        let dec_entries_u32 = u32::try_from(dec_entries).map_err(|_| {
+            XlogError::Compilation("GPU smoothing: decision entries exceed u32".to_string())
+        })?;
+
+        let device = provider.device().inner();
+        let memory = provider.memory();
+
+        let rand_alloc_len = random_var_list.len().max(1);
+        let mut d_random_list = memory.alloc::<u32>(rand_alloc_len)?;
+        if !random_var_list.is_empty() {
+            device
+                .htod_sync_copy_into(random_var_list, &mut d_random_list)
+                .map_err(|e| {
+                    XlogError::Kernel(format!("Failed to upload random var list: {}", e))
+                })?;
+        }
+
+        let mut d_random_map = memory.alloc::<u32>(random_var_to_bit.len())?;
+        if !random_var_to_bit.is_empty() {
+            device
+                .htod_sync_copy_into(&random_var_to_bit, &mut d_random_map)
+                .map_err(|e| {
+                    XlogError::Kernel(format!("Failed to upload random var map: {}", e))
+                })?;
+        }
+
+        let mut support = memory.alloc::<u32>(support_len)?;
+        device
+            .memset_zeros(&mut support)
+            .map_err(|e| XlogError::Kernel(format!("Failed to zero support: {}", e)))?;
+
+        let support_kernel = device
+            .get_func(D4_MODULE, d4_kernels::D4_SUPPORT_LEVEL)
+            .ok_or_else(|| XlogError::Kernel("d4_support_level kernel not found".to_string()))?;
+
+        let block_size: u32 = 256;
+        let num_levels = self.num_levels as usize;
+        let random_map_len = u32::try_from(random_var_to_bit.len()).map_err(|_| {
+            XlogError::Compilation("GPU smoothing: random map len exceeds u32".to_string())
+        })?;
+        for level in 0..num_levels {
+            let num_level_nodes: usize = match self.level_offsets_host.as_ref() {
+                Some(off) => (off[level + 1].saturating_sub(off[level])) as usize,
+                None => self.level_nodes.len(),
+            };
+            if num_level_nodes == 0 {
+                continue;
+            }
+            let num_blocks = ((num_level_nodes as u32) + block_size - 1) / block_size;
+            let config = LaunchConfig {
+                grid_dim: (num_blocks, 1, 1),
+                block_dim: (block_size, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            let level_u32 = level as u32;
+            let mut params: Vec<*mut c_void> = vec![
+                (&self.node_type).as_kernel_param(),
+                (&self.child_offsets).as_kernel_param(),
+                (&self.child_indices).as_kernel_param(),
+                (&self.lit).as_kernel_param(),
+                (&self.decision_var).as_kernel_param(),
+                (&self.decision_child_false).as_kernel_param(),
+                (&self.decision_child_true).as_kernel_param(),
+                (&self.level_nodes).as_kernel_param(),
+                (&self.level_offsets).as_kernel_param(),
+                level_u32.as_kernel_param(),
+                (&d_random_map).as_kernel_param(),
+                random_map_len.as_kernel_param(),
+                words_per_support.as_kernel_param(),
+                (&mut support).as_kernel_param(),
+            ];
+            unsafe { support_kernel.clone().launch(config, &mut params) }
+                .map_err(|e| XlogError::Kernel(format!("d4_support_level failed: {}", e)))?;
+        }
+
+        let mut wrap_prefix_or = memory.alloc::<u32>(num_edges as usize)?;
+        let mut wrap_missing_or = memory.alloc::<u32>(num_edges as usize)?;
+        let mut wrap_prefix_dec = memory.alloc::<u32>(dec_entries)?;
+        let mut wrap_missing_dec = memory.alloc::<u32>(dec_entries)?;
+
+        device
+            .memset_zeros(&mut wrap_prefix_or)
+            .map_err(|e| XlogError::Kernel(format!("Failed to zero wrap_prefix_or: {}", e)))?;
+        device
+            .memset_zeros(&mut wrap_missing_or)
+            .map_err(|e| XlogError::Kernel(format!("Failed to zero wrap_missing_or: {}", e)))?;
+        device
+            .memset_zeros(&mut wrap_prefix_dec)
+            .map_err(|e| XlogError::Kernel(format!("Failed to zero wrap_prefix_dec: {}", e)))?;
+        device
+            .memset_zeros(&mut wrap_missing_dec)
+            .map_err(|e| XlogError::Kernel(format!("Failed to zero wrap_missing_dec: {}", e)))?;
+
+        let mut out_edge_counts = memory.alloc::<u32>(smooth_node_cap as usize)?;
+        device
+            .memset_zeros(&mut out_edge_counts)
+            .map_err(|e| XlogError::Kernel(format!("Failed to zero edge_counts: {}", e)))?;
+
+        let count_kernel = device
+            .get_func(D4_MODULE, d4_kernels::D4_SMOOTH_COUNT)
+            .ok_or_else(|| XlogError::Kernel("d4_smooth_count kernel not found".to_string()))?;
+        let num_blocks = (num_nodes + block_size - 1) / block_size;
+        let mut params: Vec<*mut c_void> = vec![
+            (&self.node_type).as_kernel_param(),
+            (&self.child_offsets).as_kernel_param(),
+            (&self.child_indices).as_kernel_param(),
+            (&self.decision_var).as_kernel_param(),
+            (&self.decision_child_false).as_kernel_param(),
+            (&self.decision_child_true).as_kernel_param(),
+            num_nodes.as_kernel_param(),
+            (&support).as_kernel_param(),
+            words_per_support.as_kernel_param(),
+            (&d_random_map).as_kernel_param(),
+            random_map_len.as_kernel_param(),
+            (&mut wrap_prefix_or).as_kernel_param(),
+            (&mut wrap_missing_or).as_kernel_param(),
+            (&mut wrap_prefix_dec).as_kernel_param(),
+            (&mut wrap_missing_dec).as_kernel_param(),
+            (&mut out_edge_counts).as_kernel_param(),
+            base_node.as_kernel_param(),
+            smooth_node_cap.as_kernel_param(),
+        ];
+        unsafe {
+            count_kernel
+                .clone()
+                .launch(
+                    LaunchConfig {
+                        grid_dim: (num_blocks, 1, 1),
+                        block_dim: (block_size, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    &mut params,
+                )
+        }
+        .map_err(|e| XlogError::Kernel(format!("d4_smooth_count failed: {}", e)))?;
+
+        exclusive_scan_u32_inplace(provider, &mut wrap_prefix_or, num_edges)?;
+        exclusive_scan_u32_inplace(provider, &mut wrap_prefix_dec, dec_entries_u32)?;
+
+        let mut wrap_counts = memory.alloc::<u32>(3)?;
+        device
+            .memset_zeros(&mut wrap_counts)
+            .map_err(|e| XlogError::Kernel(format!("Failed to zero wrap_counts: {}", e)))?;
+
+        let counts_kernel = device
+            .get_func(D4_MODULE, d4_kernels::D4_SMOOTH_WRAPPER_COUNTS)
+            .ok_or_else(|| {
+                XlogError::Kernel("d4_smooth_wrapper_counts kernel not found".to_string())
+            })?;
+        unsafe {
+            counts_kernel.clone().launch(
+                LaunchConfig {
+                    grid_dim: (1, 1, 1),
+                    block_dim: (1, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (
+                    &wrap_prefix_or,
+                    &wrap_missing_or,
+                    num_edges,
+                    &wrap_prefix_dec,
+                    &wrap_missing_dec,
+                    dec_entries_u32,
+                    base_node,
+                    num_nodes,
+                    smooth_node_cap,
+                    &mut wrap_counts,
+                ),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("d4_smooth_wrapper_counts failed: {}", e)))?;
+
+        let wrapper_base = base_node
+            .checked_add(num_nodes)
+            .ok_or_else(|| XlogError::Compilation("GPU smoothing: wrapper base overflow".to_string()))?;
+
+        let wrap_or_kernel = device
+            .get_func(D4_MODULE, d4_kernels::D4_SMOOTH_WRAPPER_EDGE_COUNTS_OR)
+            .ok_or_else(|| {
+                XlogError::Kernel(
+                    "d4_smooth_wrapper_edge_counts_or kernel not found".to_string(),
+                )
+            })?;
+        if num_edges > 0 {
+            let num_blocks = (num_edges + block_size - 1) / block_size;
+            unsafe {
+                wrap_or_kernel.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (num_blocks, 1, 1),
+                        block_dim: (block_size, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        &wrap_prefix_or,
+                        &wrap_missing_or,
+                        num_edges,
+                        wrapper_base,
+                        smooth_node_cap,
+                        &mut out_edge_counts,
+                    ),
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!("d4_smooth_wrapper_edge_counts_or failed: {}", e))
+            })?;
+        }
+
+        let wrap_dec_kernel = device
+            .get_func(D4_MODULE, d4_kernels::D4_SMOOTH_WRAPPER_EDGE_COUNTS_DEC)
+            .ok_or_else(|| {
+                XlogError::Kernel(
+                    "d4_smooth_wrapper_edge_counts_dec kernel not found".to_string(),
+                )
+            })?;
+        if dec_entries > 0 {
+            let num_blocks = (dec_entries_u32 + block_size - 1) / block_size;
+            unsafe {
+                wrap_dec_kernel.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (num_blocks, 1, 1),
+                        block_dim: (block_size, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        &wrap_prefix_dec,
+                        &wrap_missing_dec,
+                        dec_entries_u32,
+                        wrapper_base,
+                        &wrap_counts,
+                        smooth_node_cap,
+                        &mut out_edge_counts,
+                    ),
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!("d4_smooth_wrapper_edge_counts_dec failed: {}", e))
+            })?;
+        }
+
+        let mut out_child_offsets = memory.alloc::<u32>((smooth_node_cap as usize) + 1)?;
+        device
+            .memset_zeros(&mut out_child_offsets)
+            .map_err(|e| XlogError::Kernel(format!("Failed to zero child_offsets: {}", e)))?;
+        if smooth_node_cap > 0 {
+            device
+                .dtod_copy(
+                    &out_edge_counts,
+                    &mut out_child_offsets.slice_mut(0..smooth_node_cap as usize),
+                )
+                .map_err(|e| XlogError::Kernel(format!("Failed to copy edge_counts: {}", e)))?;
+        }
+        let child_scan_len = smooth_node_cap
+            .checked_add(1)
+            .ok_or_else(|| XlogError::Compilation("GPU smoothing: child offset scan overflow".to_string()))?;
+        exclusive_scan_u32_inplace(provider, &mut out_child_offsets, child_scan_len)?;
+
+        let edge_cap_check = device
+            .get_func(D4_MODULE, d4_kernels::D4_SMOOTH_CHECK_EDGE_CAP)
+            .ok_or_else(|| {
+                XlogError::Kernel("d4_smooth_check_edge_cap kernel not found".to_string())
+            })?;
+        unsafe {
+            edge_cap_check.clone().launch(
+                LaunchConfig {
+                    grid_dim: (1, 1, 1),
+                    block_dim: (1, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (&out_child_offsets, smooth_node_cap, smooth_edge_cap),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("d4_smooth_check_edge_cap failed: {}", e)))?;
+
+        let mut out_node_type = memory.alloc::<u8>(smooth_node_cap as usize)?;
+        let mut out_child_indices = memory.alloc::<u32>(smooth_edge_cap as usize)?;
+        let mut out_lit = memory.alloc::<i32>(smooth_node_cap as usize)?;
+        let mut out_decision_var = memory.alloc::<u32>(smooth_node_cap as usize)?;
+        let mut out_decision_child_false = memory.alloc::<u32>(smooth_node_cap as usize)?;
+        let mut out_decision_child_true = memory.alloc::<u32>(smooth_node_cap as usize)?;
+        let mut out_node_level = memory.alloc::<u32>(smooth_node_cap as usize)?;
+
+        device
+            .memset_zeros(&mut out_node_type)
+            .map_err(|e| XlogError::Kernel(format!("Failed to zero node_type: {}", e)))?;
+        device
+            .memset_zeros(&mut out_child_indices)
+            .map_err(|e| XlogError::Kernel(format!("Failed to zero child_indices: {}", e)))?;
+        device
+            .memset_zeros(&mut out_lit)
+            .map_err(|e| XlogError::Kernel(format!("Failed to zero lit: {}", e)))?;
+        device
+            .memset_zeros(&mut out_decision_var)
+            .map_err(|e| XlogError::Kernel(format!("Failed to zero decision_var: {}", e)))?;
+        device
+            .memset_zeros(&mut out_decision_child_false)
+            .map_err(|e| XlogError::Kernel(format!("Failed to zero decision_child_false: {}", e)))?;
+        device
+            .memset_zeros(&mut out_decision_child_true)
+            .map_err(|e| XlogError::Kernel(format!("Failed to zero decision_child_true: {}", e)))?;
+        device
+            .memset_zeros(&mut out_node_level)
+            .map_err(|e| XlogError::Kernel(format!("Failed to zero node_level: {}", e)))?;
+
+        let init_kernel = device
+            .get_func(D4_MODULE, d4_kernels::D4_SMOOTH_INIT_NODES)
+            .ok_or_else(|| XlogError::Kernel("d4_smooth_init_nodes kernel not found".to_string()))?;
+        let init_blocks = ((num_random_vars.max(1)) + block_size - 1) / block_size;
+        unsafe {
+            init_kernel.clone().launch(
+                LaunchConfig {
+                    grid_dim: (init_blocks, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (
+                    &d_random_list,
+                    num_random_vars,
+                    smooth_node_cap,
+                    &mut out_node_type,
+                    &mut out_lit,
+                    &mut out_decision_var,
+                    &mut out_decision_child_false,
+                    &mut out_decision_child_true,
+                    &mut out_node_level,
+                ),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("d4_smooth_init_nodes failed: {}", e)))?;
+
+        let num_levels_out = self
+            .num_levels
+            .saturating_mul(2)
+            .saturating_add(4);
+
+        let emit_kernel = device
+            .get_func(D4_MODULE, d4_kernels::D4_SMOOTH_EMIT_LEVEL)
+            .ok_or_else(|| XlogError::Kernel("d4_smooth_emit_level kernel not found".to_string()))?;
+        for level in 0..num_levels {
+            let num_level_nodes: usize = match self.level_offsets_host.as_ref() {
+                Some(off) => (off[level + 1].saturating_sub(off[level])) as usize,
+                None => self.level_nodes.len(),
+            };
+            if num_level_nodes == 0 {
+                continue;
+            }
+            let num_blocks = ((num_level_nodes as u32) + block_size - 1) / block_size;
+            let mut params: Vec<*mut c_void> = vec![
+                (&self.node_type).as_kernel_param(),
+                (&self.child_offsets).as_kernel_param(),
+                (&self.child_indices).as_kernel_param(),
+                (&self.lit).as_kernel_param(),
+                (&self.decision_var).as_kernel_param(),
+                (&self.decision_child_false).as_kernel_param(),
+                (&self.decision_child_true).as_kernel_param(),
+                (&self.level_nodes).as_kernel_param(),
+                (&self.level_offsets).as_kernel_param(),
+                (level as u32).as_kernel_param(),
+                (&support).as_kernel_param(),
+                words_per_support.as_kernel_param(),
+                (&wrap_prefix_or).as_kernel_param(),
+                (&wrap_missing_or).as_kernel_param(),
+                (&wrap_prefix_dec).as_kernel_param(),
+                (&wrap_missing_dec).as_kernel_param(),
+                base_node.as_kernel_param(),
+                wrapper_base.as_kernel_param(),
+                (&wrap_counts).as_kernel_param(),
+                num_random_vars.as_kernel_param(),
+                num_levels_out.as_kernel_param(),
+                (&mut out_node_type).as_kernel_param(),
+                (&out_child_offsets).as_kernel_param(),
+                (&mut out_child_indices).as_kernel_param(),
+                (&mut out_lit).as_kernel_param(),
+                (&mut out_decision_var).as_kernel_param(),
+                (&mut out_decision_child_false).as_kernel_param(),
+                (&mut out_decision_child_true).as_kernel_param(),
+                (&mut out_node_level).as_kernel_param(),
+            ];
+            unsafe {
+                emit_kernel
+                    .clone()
+                    .launch(
+                        LaunchConfig {
+                            grid_dim: (num_blocks, 1, 1),
+                            block_dim: (block_size, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        &mut params,
+                    )
+            }
+            .map_err(|e| XlogError::Kernel(format!("d4_smooth_emit_level failed: {}", e)))?;
+        }
+
+        let mut level_counts = memory.alloc::<u32>(num_levels_out as usize)?;
+        let mut level_offsets = memory.alloc::<u32>((num_levels_out as usize) + 1)?;
+        let mut level_cursors = memory.alloc::<u32>(num_levels_out as usize)?;
+        let mut level_nodes = memory.alloc::<u32>(smooth_node_cap as usize)?;
+
+        device
+            .memset_zeros(&mut level_counts)
+            .map_err(|e| XlogError::Kernel(format!("Failed to zero level_counts: {}", e)))?;
+        device
+            .memset_zeros(&mut level_offsets)
+            .map_err(|e| XlogError::Kernel(format!("Failed to zero level_offsets: {}", e)))?;
+        device
+            .memset_zeros(&mut level_cursors)
+            .map_err(|e| XlogError::Kernel(format!("Failed to zero level_cursors: {}", e)))?;
+        device
+            .memset_zeros(&mut level_nodes)
+            .map_err(|e| XlogError::Kernel(format!("Failed to zero level_nodes: {}", e)))?;
+
+        let levelize_counts = device
+            .get_func(D4_MODULE, d4_kernels::D4_LEVELIZE_COUNTS)
+            .ok_or_else(|| XlogError::Kernel("d4_levelize_counts kernel not found".to_string()))?;
+        let num_blocks = (smooth_node_cap + block_size - 1) / block_size;
+        unsafe {
+            levelize_counts.clone().launch(
+                LaunchConfig {
+                    grid_dim: (num_blocks, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (&out_node_level, smooth_node_cap, num_levels_out, &mut level_counts),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("d4_levelize_counts failed: {}", e)))?;
+
+        device
+            .dtod_copy(
+                &level_counts,
+                &mut level_offsets.slice_mut(0..num_levels_out as usize),
+            )
+            .map_err(|e| XlogError::Kernel(format!("Failed to copy level_counts: {}", e)))?;
+        let level_scan_len = num_levels_out
+            .checked_add(1)
+            .ok_or_else(|| XlogError::Compilation("GPU smoothing: level offset scan overflow".to_string()))?;
+        exclusive_scan_u32_inplace(provider, &mut level_offsets, level_scan_len)?;
+
+        let levelize_emit = device
+            .get_func(D4_MODULE, d4_kernels::D4_LEVELIZE_EMIT)
+            .ok_or_else(|| XlogError::Kernel("d4_levelize_emit kernel not found".to_string()))?;
+        unsafe {
+            levelize_emit.clone().launch(
+                LaunchConfig {
+                    grid_dim: (num_blocks, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (
+                    &out_node_level,
+                    smooth_node_cap,
+                    num_levels_out,
+                    &level_offsets,
+                    &mut level_cursors,
+                    &mut level_nodes,
+                ),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("d4_levelize_emit failed: {}", e)))?;
+
+        provider.device().synchronize()?;
+
+        let builder = GpuCircuitBuilder {
+            node_type: out_node_type,
+            child_offsets: out_child_offsets,
+            child_indices: out_child_indices,
+            lit: out_lit,
+            decision_var: out_decision_var,
+            decision_child_false: out_decision_child_false,
+            decision_child_true: out_decision_child_true,
+        };
+        let layout = GpuCircuitLayout {
+            num_nodes: smooth_node_cap,
+            num_levels: num_levels_out,
+            level_offsets,
+            level_nodes,
+            root: base_node + self.root,
+            max_var: self.max_var,
+        };
+
+        GpuXgcf::from_device(builder, layout, provider)
     }
 
     pub fn upload(provider: &CudaKernelProvider, circuit: &Xgcf) -> Result<Self> {

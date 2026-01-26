@@ -120,7 +120,7 @@ fn checked_pool_len_usize(max_items: u32, stride: u32, context: &str) -> Result<
     Ok(len_u32 as usize)
 }
 
-fn exclusive_scan_u32_inplace(
+pub(crate) fn exclusive_scan_u32_inplace(
     provider: &CudaKernelProvider,
     data: &mut TrackedCudaSlice<u32>,
     n: u32,

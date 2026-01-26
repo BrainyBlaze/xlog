@@ -1930,6 +1930,697 @@ extern "C" __global__ void d4_compile_emit(
 }
 
 // ---------------------------------------------------------------------------
+// GPU smoothing pass (random-var support + wrapper emission)
+// ---------------------------------------------------------------------------
+
+static constexpr uint32_t D4_INVALID_BIT = 0xFFFFFFFFu;
+
+__device__ __forceinline__ uint64_t d4_support_index(
+    uint32_t node,
+    uint32_t word,
+    uint32_t words_per_support
+) {
+    return (static_cast<uint64_t>(node) * static_cast<uint64_t>(words_per_support)) + word;
+}
+
+__device__ __forceinline__ uint32_t d4_support_at(
+    const uint32_t* __restrict__ support,
+    uint32_t node,
+    uint32_t word,
+    uint32_t words_per_support
+) {
+    return support[d4_support_index(node, word, words_per_support)];
+}
+
+__device__ __forceinline__ void d4_support_set(
+    uint32_t* __restrict__ support,
+    uint32_t node,
+    uint32_t word,
+    uint32_t words_per_support,
+    uint32_t value
+) {
+    support[d4_support_index(node, word, words_per_support)] = value;
+}
+
+__device__ __forceinline__ void d4_support_set_bit(
+    uint32_t* __restrict__ support,
+    uint32_t node,
+    uint32_t bit,
+    uint32_t words_per_support
+) {
+    uint32_t word = bit >> 5;
+    if (word >= words_per_support) {
+        d4_trap();
+    }
+    uint32_t mask = 1u << (bit & 31u);
+    uint64_t idx = d4_support_index(node, word, words_per_support);
+    support[idx] |= mask;
+}
+
+extern "C" __global__ void d4_support_level(
+    const uint8_t* __restrict__ node_type,
+    const uint32_t* __restrict__ child_offsets,
+    const uint32_t* __restrict__ child_indices,
+    const int32_t* __restrict__ lit,
+    const uint32_t* __restrict__ decision_var,
+    const uint32_t* __restrict__ decision_child_false,
+    const uint32_t* __restrict__ decision_child_true,
+    const uint32_t* __restrict__ level_nodes,
+    const uint32_t* __restrict__ level_offsets,
+    uint32_t level,
+    const uint32_t* __restrict__ random_var_to_bit,
+    uint32_t random_map_len,
+    uint32_t words_per_support,
+    uint32_t* __restrict__ support
+) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    uint32_t level_offset = level_offsets[level];
+    uint32_t num_level_nodes = level_offsets[level + 1u] - level_offset;
+    if (tid >= num_level_nodes) {
+        return;
+    }
+
+    uint32_t node = level_nodes[level_offset + tid];
+    uint8_t ty = node_type[node];
+
+    for (uint32_t w = 0; w < words_per_support; w++) {
+        d4_support_set(support, node, w, words_per_support, 0u);
+    }
+
+    if (ty == XGCF_CONST0 || ty == XGCF_CONST1) {
+        return;
+    }
+
+    if (ty == XGCF_LIT) {
+        int32_t l = lit[node];
+        uint32_t var = (l > 0) ? static_cast<uint32_t>(l) : static_cast<uint32_t>(-l);
+        if (var >= random_map_len) {
+            d4_trap();
+        }
+        uint32_t bit = random_var_to_bit[var];
+        if (bit != D4_INVALID_BIT) {
+            d4_support_set_bit(support, node, bit, words_per_support);
+        }
+        return;
+    }
+
+    if (ty == XGCF_DECISION) {
+        uint32_t child_f = decision_child_false[node];
+        uint32_t child_t = decision_child_true[node];
+        for (uint32_t w = 0; w < words_per_support; w++) {
+            uint32_t sf = d4_support_at(support, child_f, w, words_per_support);
+            uint32_t st = d4_support_at(support, child_t, w, words_per_support);
+            d4_support_set(support, node, w, words_per_support, sf | st);
+        }
+        uint32_t var = decision_var[node];
+        if (var >= random_map_len) {
+            d4_trap();
+        }
+        uint32_t bit = random_var_to_bit[var];
+        if (bit != D4_INVALID_BIT) {
+            d4_support_set_bit(support, node, bit, words_per_support);
+        }
+        return;
+    }
+
+    // AND / OR: union of children supports.
+    uint32_t c0 = child_offsets[node];
+    uint32_t c1 = child_offsets[node + 1u];
+    for (uint32_t w = 0; w < words_per_support; w++) {
+        uint32_t acc = 0u;
+        for (uint32_t i = c0; i < c1; i++) {
+            uint32_t child = child_indices[i];
+            acc |= d4_support_at(support, child, w, words_per_support);
+        }
+        d4_support_set(support, node, w, words_per_support, acc);
+    }
+}
+
+extern "C" __global__ void d4_smooth_count(
+    const uint8_t* __restrict__ node_type,
+    const uint32_t* __restrict__ child_offsets,
+    const uint32_t* __restrict__ child_indices,
+    const uint32_t* __restrict__ decision_var,
+    const uint32_t* __restrict__ decision_child_false,
+    const uint32_t* __restrict__ decision_child_true,
+    uint32_t num_nodes,
+    const uint32_t* __restrict__ support,
+    uint32_t words_per_support,
+    const uint32_t* __restrict__ random_var_to_bit,
+    uint32_t random_map_len,
+    uint32_t* __restrict__ wrap_prefix_or,
+    uint32_t* __restrict__ wrap_missing_or,
+    uint32_t* __restrict__ wrap_prefix_dec,
+    uint32_t* __restrict__ wrap_missing_dec,
+    uint32_t* __restrict__ out_edge_counts,
+    uint32_t base_node,
+    uint32_t smooth_node_cap
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= num_nodes) {
+        return;
+    }
+
+    uint32_t new_id = base_node + gid;
+    if (new_id >= smooth_node_cap) {
+        d4_trap();
+    }
+
+    uint8_t ty = node_type[gid];
+    uint32_t edge_count = 0u;
+    if (ty == XGCF_AND || ty == XGCF_OR) {
+        uint32_t c0 = child_offsets[gid];
+        uint32_t c1 = child_offsets[gid + 1u];
+        if (c1 < c0) {
+            d4_trap();
+        }
+        edge_count = c1 - c0;
+    }
+    out_edge_counts[new_id] = edge_count;
+
+    if (ty == XGCF_OR) {
+        uint32_t c0 = child_offsets[gid];
+        uint32_t c1 = child_offsets[gid + 1u];
+        for (uint32_t e = c0; e < c1; e++) {
+            uint32_t child = child_indices[e];
+            uint32_t missing = 0u;
+            for (uint32_t w = 0; w < words_per_support; w++) {
+                uint32_t parent_bits = d4_support_at(support, gid, w, words_per_support);
+                uint32_t child_bits = d4_support_at(support, child, w, words_per_support);
+                uint32_t diff = parent_bits & ~child_bits;
+                missing += __popc(diff);
+            }
+            wrap_missing_or[e] = missing;
+            wrap_prefix_or[e] = (missing > 0u) ? 1u : 0u;
+        }
+        return;
+    }
+
+    if (ty == XGCF_DECISION) {
+        uint32_t child_f = decision_child_false[gid];
+        uint32_t child_t = decision_child_true[gid];
+        uint32_t var = decision_var[gid];
+        if (var >= random_map_len) {
+            d4_trap();
+        }
+        uint32_t bit = random_var_to_bit[var];
+
+        uint32_t missing_f = 0u;
+        uint32_t missing_t = 0u;
+        for (uint32_t w = 0; w < words_per_support; w++) {
+            uint32_t sf = d4_support_at(support, child_f, w, words_per_support);
+            uint32_t st = d4_support_at(support, child_t, w, words_per_support);
+            uint32_t uni = sf | st;
+            if (bit != D4_INVALID_BIT && (bit >> 5) == w) {
+                if ((uni & (1u << (bit & 31u))) != 0u) {
+                    d4_trap();
+                }
+            }
+            missing_f += __popc(uni & ~sf);
+            missing_t += __popc(uni & ~st);
+        }
+
+        uint32_t idx_f = gid * 2u;
+        uint32_t idx_t = idx_f + 1u;
+        wrap_missing_dec[idx_f] = missing_f;
+        wrap_missing_dec[idx_t] = missing_t;
+        wrap_prefix_dec[idx_f] = (missing_f > 0u) ? 1u : 0u;
+        wrap_prefix_dec[idx_t] = (missing_t > 0u) ? 1u : 0u;
+    }
+}
+
+extern "C" __global__ void d4_smooth_wrapper_counts(
+    const uint32_t* __restrict__ wrap_prefix_or,
+    const uint32_t* __restrict__ wrap_missing_or,
+    uint32_t num_edges,
+    const uint32_t* __restrict__ wrap_prefix_dec,
+    const uint32_t* __restrict__ wrap_missing_dec,
+    uint32_t num_dec_entries,
+    uint32_t base_node,
+    uint32_t num_nodes,
+    uint32_t smooth_node_cap,
+    uint32_t* __restrict__ out_counts // len >= 3
+) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) {
+        return;
+    }
+
+    uint32_t num_or = 0u;
+    if (num_edges > 0u) {
+        uint32_t last = num_edges - 1u;
+        num_or = wrap_prefix_or[last] + ((wrap_missing_or[last] > 0u) ? 1u : 0u);
+    }
+
+    uint32_t num_dec = 0u;
+    if (num_dec_entries > 0u) {
+        uint32_t last = num_dec_entries - 1u;
+        num_dec = wrap_prefix_dec[last] + ((wrap_missing_dec[last] > 0u) ? 1u : 0u);
+    }
+
+    uint64_t base = static_cast<uint64_t>(base_node) + static_cast<uint64_t>(num_nodes);
+    uint64_t total = base + static_cast<uint64_t>(num_or) + static_cast<uint64_t>(num_dec);
+    if (total > smooth_node_cap) {
+        d4_trap();
+    }
+
+    out_counts[0] = num_or;
+    out_counts[1] = num_dec;
+    out_counts[2] = static_cast<uint32_t>(total);
+}
+
+extern "C" __global__ void d4_smooth_wrapper_edge_counts_or(
+    const uint32_t* __restrict__ wrap_prefix_or,
+    const uint32_t* __restrict__ wrap_missing_or,
+    uint32_t num_edges,
+    uint32_t wrapper_base,
+    uint32_t smooth_node_cap,
+    uint32_t* __restrict__ out_edge_counts
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= num_edges) {
+        return;
+    }
+    uint32_t missing = wrap_missing_or[gid];
+    if (missing == 0u) {
+        return;
+    }
+    uint32_t id = wrapper_base + wrap_prefix_or[gid];
+    if (id >= smooth_node_cap) {
+        d4_trap();
+    }
+    out_edge_counts[id] = 1u + missing;
+}
+
+extern "C" __global__ void d4_smooth_wrapper_edge_counts_dec(
+    const uint32_t* __restrict__ wrap_prefix_dec,
+    const uint32_t* __restrict__ wrap_missing_dec,
+    uint32_t num_dec_entries,
+    uint32_t wrapper_base,
+    const uint32_t* __restrict__ wrap_counts,
+    uint32_t smooth_node_cap,
+    uint32_t* __restrict__ out_edge_counts
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= num_dec_entries) {
+        return;
+    }
+    uint32_t missing = wrap_missing_dec[gid];
+    if (missing == 0u) {
+        return;
+    }
+    uint32_t num_or = wrap_counts[0];
+    uint32_t id = wrapper_base + num_or + wrap_prefix_dec[gid];
+    if (id >= smooth_node_cap) {
+        d4_trap();
+    }
+    out_edge_counts[id] = 1u + missing;
+}
+
+extern "C" __global__ void d4_smooth_init_nodes(
+    const uint32_t* __restrict__ random_var_list,
+    uint32_t num_random_vars,
+    uint32_t smooth_node_cap,
+    uint8_t* __restrict__ node_type,
+    int32_t* __restrict__ lit,
+    uint32_t* __restrict__ decision_var,
+    uint32_t* __restrict__ decision_child_false,
+    uint32_t* __restrict__ decision_child_true,
+    uint32_t* __restrict__ node_level
+) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid == 0u) {
+        if (smooth_node_cap < 2u) {
+            d4_trap();
+        }
+        node_type[0] = XGCF_CONST0;
+        node_type[1] = XGCF_CONST1;
+        lit[0] = 0;
+        lit[1] = 0;
+        decision_var[0] = 0u;
+        decision_var[1] = 0u;
+        decision_child_false[0] = 0u;
+        decision_child_true[0] = 0u;
+        decision_child_false[1] = 0u;
+        decision_child_true[1] = 0u;
+        node_level[0] = 0u;
+        node_level[1] = 0u;
+    }
+    if (tid >= num_random_vars) {
+        return;
+    }
+    uint32_t idx = 2u + tid;
+    if (idx >= smooth_node_cap) {
+        d4_trap();
+    }
+    uint32_t var = random_var_list[tid];
+    if (var == 0u) {
+        d4_trap();
+    }
+    node_type[idx] = XGCF_DECISION;
+    lit[idx] = 0;
+    decision_var[idx] = var;
+    decision_child_false[idx] = 1u;
+    decision_child_true[idx] = 1u;
+    node_level[idx] = 1u;
+}
+
+extern "C" __global__ void d4_smooth_emit_level(
+    const uint8_t* __restrict__ node_type_in,
+    const uint32_t* __restrict__ child_offsets_in,
+    const uint32_t* __restrict__ child_indices_in,
+    const int32_t* __restrict__ lit_in,
+    const uint32_t* __restrict__ decision_var_in,
+    const uint32_t* __restrict__ decision_child_false_in,
+    const uint32_t* __restrict__ decision_child_true_in,
+    const uint32_t* __restrict__ level_nodes,
+    const uint32_t* __restrict__ level_offsets,
+    uint32_t level,
+    const uint32_t* __restrict__ support,
+    uint32_t words_per_support,
+    const uint32_t* __restrict__ wrap_prefix_or,
+    const uint32_t* __restrict__ wrap_missing_or,
+    const uint32_t* __restrict__ wrap_prefix_dec,
+    const uint32_t* __restrict__ wrap_missing_dec,
+    uint32_t base_node,
+    uint32_t wrapper_base,
+    const uint32_t* __restrict__ wrap_counts,
+    uint32_t num_random_vars,
+    uint32_t num_levels_out,
+    uint8_t* __restrict__ node_type_out,
+    const uint32_t* __restrict__ child_offsets_out,
+    uint32_t* __restrict__ child_indices_out,
+    int32_t* __restrict__ lit_out,
+    uint32_t* __restrict__ decision_var_out,
+    uint32_t* __restrict__ decision_child_false_out,
+    uint32_t* __restrict__ decision_child_true_out,
+    uint32_t* __restrict__ node_level_out
+) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    uint32_t level_offset = level_offsets[level];
+    uint32_t num_level_nodes = level_offsets[level + 1u] - level_offset;
+    if (tid >= num_level_nodes) {
+        return;
+    }
+
+    uint32_t node = level_nodes[level_offset + tid];
+    uint32_t new_id = base_node + node;
+    uint8_t ty = node_type_in[node];
+
+    if (ty == XGCF_CONST0 || ty == XGCF_CONST1) {
+        node_type_out[new_id] = ty;
+        lit_out[new_id] = 0;
+        decision_var_out[new_id] = 0u;
+        decision_child_false_out[new_id] = 0u;
+        decision_child_true_out[new_id] = 0u;
+        node_level_out[new_id] = 0u;
+        return;
+    }
+
+    if (ty == XGCF_LIT) {
+        node_type_out[new_id] = XGCF_LIT;
+        lit_out[new_id] = lit_in[node];
+        decision_var_out[new_id] = 0u;
+        decision_child_false_out[new_id] = 0u;
+        decision_child_true_out[new_id] = 0u;
+        node_level_out[new_id] = 0u;
+        return;
+    }
+
+    if (ty == XGCF_AND) {
+        node_type_out[new_id] = XGCF_AND;
+        lit_out[new_id] = 0;
+        decision_var_out[new_id] = 0u;
+        decision_child_false_out[new_id] = 0u;
+        decision_child_true_out[new_id] = 0u;
+
+        uint32_t c0 = child_offsets_in[node];
+        uint32_t c1 = child_offsets_in[node + 1u];
+        uint32_t out_c0 = child_offsets_out[new_id];
+        uint32_t out_c1 = child_offsets_out[new_id + 1u];
+        if (out_c1 - out_c0 != c1 - c0) {
+            d4_trap();
+        }
+        uint32_t max_lvl = 0u;
+        for (uint32_t i = 0; i < (c1 - c0); i++) {
+            uint32_t child = child_indices_in[c0 + i];
+            uint32_t mapped = base_node + child;
+            child_indices_out[out_c0 + i] = mapped;
+            uint32_t lvl = node_level_out[mapped];
+            if (lvl > max_lvl) {
+                max_lvl = lvl;
+            }
+        }
+        uint32_t lvl = max_lvl + 1u;
+        if (lvl >= num_levels_out) {
+            d4_trap();
+        }
+        node_level_out[new_id] = lvl;
+        return;
+    }
+
+    if (ty == XGCF_OR) {
+        node_type_out[new_id] = XGCF_OR;
+        lit_out[new_id] = 0;
+        decision_var_out[new_id] = 0u;
+        decision_child_false_out[new_id] = 0u;
+        decision_child_true_out[new_id] = 0u;
+
+        uint32_t c0 = child_offsets_in[node];
+        uint32_t c1 = child_offsets_in[node + 1u];
+        uint32_t out_c0 = child_offsets_out[new_id];
+        uint32_t out_c1 = child_offsets_out[new_id + 1u];
+        if (out_c1 - out_c0 != c1 - c0) {
+            d4_trap();
+        }
+        uint32_t max_lvl = 0u;
+        for (uint32_t i = 0; i < (c1 - c0); i++) {
+            uint32_t edge = c0 + i;
+            uint32_t child = child_indices_in[edge];
+            uint32_t missing = wrap_missing_or[edge];
+            uint32_t child_id = 0u;
+            if (missing > 0u) {
+                uint32_t wrap_id = wrapper_base + wrap_prefix_or[edge];
+                child_id = wrap_id;
+                node_type_out[wrap_id] = XGCF_AND;
+                lit_out[wrap_id] = 0;
+                decision_var_out[wrap_id] = 0u;
+                decision_child_false_out[wrap_id] = 0u;
+                decision_child_true_out[wrap_id] = 0u;
+
+                uint32_t w_c0 = child_offsets_out[wrap_id];
+                uint32_t w_c1 = child_offsets_out[wrap_id + 1u];
+                if (w_c1 - w_c0 != missing + 1u) {
+                    d4_trap();
+                }
+                uint32_t mapped_child = base_node + child;
+                child_indices_out[w_c0] = mapped_child;
+                uint32_t max_wlvl = node_level_out[mapped_child];
+                uint32_t out_idx = w_c0 + 1u;
+                for (uint32_t w = 0; w < words_per_support; w++) {
+                    uint32_t parent_bits = d4_support_at(support, node, w, words_per_support);
+                    uint32_t child_bits = d4_support_at(support, child, w, words_per_support);
+                    uint32_t diff = parent_bits & ~child_bits;
+                    while (diff != 0u) {
+                        uint32_t bit = __ffs(diff) - 1u;
+                        uint32_t bit_index = (w << 5) + bit;
+                        if (bit_index >= num_random_vars) {
+                            d4_trap();
+                        }
+                        uint32_t taut_id = 2u + bit_index;
+                        child_indices_out[out_idx++] = taut_id;
+                        uint32_t lvl = node_level_out[taut_id];
+                        if (lvl > max_wlvl) {
+                            max_wlvl = lvl;
+                        }
+                        diff &= (diff - 1u);
+                    }
+                }
+                if (out_idx - (w_c0 + 1u) != missing) {
+                    d4_trap();
+                }
+                uint32_t wlvl = max_wlvl + 1u;
+                if (wlvl >= num_levels_out) {
+                    d4_trap();
+                }
+                node_level_out[wrap_id] = wlvl;
+                if (wlvl > max_lvl) {
+                    max_lvl = wlvl;
+                }
+            } else {
+                uint32_t mapped_child = base_node + child;
+                child_id = mapped_child;
+                uint32_t lvl = node_level_out[mapped_child];
+                if (lvl > max_lvl) {
+                    max_lvl = lvl;
+                }
+            }
+            child_indices_out[out_c0 + i] = child_id;
+        }
+        uint32_t lvl = max_lvl + 1u;
+        if (lvl >= num_levels_out) {
+            d4_trap();
+        }
+        node_level_out[new_id] = lvl;
+        return;
+    }
+
+    if (ty == XGCF_DECISION) {
+        node_type_out[new_id] = XGCF_DECISION;
+        lit_out[new_id] = 0;
+
+        uint32_t child_f = decision_child_false_in[node];
+        uint32_t child_t = decision_child_true_in[node];
+        uint32_t var = decision_var_in[node];
+        decision_var_out[new_id] = var;
+
+        uint32_t num_or = wrap_counts[0];
+        uint32_t idx_f = node * 2u;
+        uint32_t idx_t = idx_f + 1u;
+
+        uint32_t missing_f = wrap_missing_dec[idx_f];
+        uint32_t missing_t = wrap_missing_dec[idx_t];
+
+        uint32_t max_lvl = 0u;
+
+        uint32_t child_id_f = 0u;
+        if (missing_f > 0u) {
+            uint32_t wrap_id = wrapper_base + num_or + wrap_prefix_dec[idx_f];
+            child_id_f = wrap_id;
+            node_type_out[wrap_id] = XGCF_AND;
+            lit_out[wrap_id] = 0;
+            decision_var_out[wrap_id] = 0u;
+            decision_child_false_out[wrap_id] = 0u;
+            decision_child_true_out[wrap_id] = 0u;
+
+            uint32_t w_c0 = child_offsets_out[wrap_id];
+            uint32_t w_c1 = child_offsets_out[wrap_id + 1u];
+            if (w_c1 - w_c0 != missing_f + 1u) {
+                d4_trap();
+            }
+            uint32_t mapped_child = base_node + child_f;
+            child_indices_out[w_c0] = mapped_child;
+            uint32_t max_wlvl = node_level_out[mapped_child];
+            uint32_t out_idx = w_c0 + 1u;
+            for (uint32_t w = 0; w < words_per_support; w++) {
+                uint32_t sf = d4_support_at(support, child_f, w, words_per_support);
+                uint32_t st = d4_support_at(support, child_t, w, words_per_support);
+                uint32_t uni = sf | st;
+                uint32_t diff = uni & ~sf;
+                while (diff != 0u) {
+                    uint32_t bit = __ffs(diff) - 1u;
+                    uint32_t bit_index = (w << 5) + bit;
+                    if (bit_index >= num_random_vars) {
+                        d4_trap();
+                    }
+                    uint32_t taut_id = 2u + bit_index;
+                    child_indices_out[out_idx++] = taut_id;
+                    uint32_t lvl = node_level_out[taut_id];
+                    if (lvl > max_wlvl) {
+                        max_wlvl = lvl;
+                    }
+                    diff &= (diff - 1u);
+                }
+            }
+            if (out_idx - (w_c0 + 1u) != missing_f) {
+                d4_trap();
+            }
+            uint32_t wlvl = max_wlvl + 1u;
+            if (wlvl >= num_levels_out) {
+                d4_trap();
+            }
+            node_level_out[wrap_id] = wlvl;
+            max_lvl = wlvl;
+        } else {
+            uint32_t mapped_child = base_node + child_f;
+            child_id_f = mapped_child;
+            uint32_t lvl = node_level_out[mapped_child];
+            max_lvl = lvl;
+        }
+
+        uint32_t child_id_t = 0u;
+        if (missing_t > 0u) {
+            uint32_t wrap_id = wrapper_base + num_or + wrap_prefix_dec[idx_t];
+            child_id_t = wrap_id;
+            node_type_out[wrap_id] = XGCF_AND;
+            lit_out[wrap_id] = 0;
+            decision_var_out[wrap_id] = 0u;
+            decision_child_false_out[wrap_id] = 0u;
+            decision_child_true_out[wrap_id] = 0u;
+
+            uint32_t w_c0 = child_offsets_out[wrap_id];
+            uint32_t w_c1 = child_offsets_out[wrap_id + 1u];
+            if (w_c1 - w_c0 != missing_t + 1u) {
+                d4_trap();
+            }
+            uint32_t mapped_child = base_node + child_t;
+            child_indices_out[w_c0] = mapped_child;
+            uint32_t max_wlvl = node_level_out[mapped_child];
+            uint32_t out_idx = w_c0 + 1u;
+            for (uint32_t w = 0; w < words_per_support; w++) {
+                uint32_t sf = d4_support_at(support, child_f, w, words_per_support);
+                uint32_t st = d4_support_at(support, child_t, w, words_per_support);
+                uint32_t uni = sf | st;
+                uint32_t diff = uni & ~st;
+                while (diff != 0u) {
+                    uint32_t bit = __ffs(diff) - 1u;
+                    uint32_t bit_index = (w << 5) + bit;
+                    if (bit_index >= num_random_vars) {
+                        d4_trap();
+                    }
+                    uint32_t taut_id = 2u + bit_index;
+                    child_indices_out[out_idx++] = taut_id;
+                    uint32_t lvl = node_level_out[taut_id];
+                    if (lvl > max_wlvl) {
+                        max_wlvl = lvl;
+                    }
+                    diff &= (diff - 1u);
+                }
+            }
+            if (out_idx - (w_c0 + 1u) != missing_t) {
+                d4_trap();
+            }
+            uint32_t wlvl = max_wlvl + 1u;
+            if (wlvl >= num_levels_out) {
+                d4_trap();
+            }
+            node_level_out[wrap_id] = wlvl;
+            if (wlvl > max_lvl) {
+                max_lvl = wlvl;
+            }
+        } else {
+            uint32_t mapped_child = base_node + child_t;
+            child_id_t = mapped_child;
+            uint32_t lvl = node_level_out[mapped_child];
+            if (lvl > max_lvl) {
+                max_lvl = lvl;
+            }
+        }
+
+        decision_child_false_out[new_id] = child_id_f;
+        decision_child_true_out[new_id] = child_id_t;
+        uint32_t lvl = max_lvl + 1u;
+        if (lvl >= num_levels_out) {
+            d4_trap();
+        }
+        node_level_out[new_id] = lvl;
+    }
+}
+
+extern "C" __global__ void d4_smooth_check_edge_cap(
+    const uint32_t* __restrict__ child_offsets,
+    uint32_t smooth_node_cap,
+    uint32_t smooth_edge_cap
+) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) {
+        return;
+    }
+    uint32_t total_edges = child_offsets[smooth_node_cap];
+    if (total_edges > smooth_edge_cap) {
+        d4_trap();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // GPU-only assertion helpers (used by tests and invariant enforcement)
 // ---------------------------------------------------------------------------
 

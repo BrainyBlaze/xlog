@@ -130,6 +130,15 @@ pub mod d4_kernels {
     // Task 5: per-frontier D4 DFS worker (count+emit).
     pub const D4_COMPILE_COUNT: &str = "d4_compile_count";
     pub const D4_COMPILE_EMIT: &str = "d4_compile_emit";
+    // Task 6: GPU smoothing (random-var support + wrapper emission).
+    pub const D4_SUPPORT_LEVEL: &str = "d4_support_level";
+    pub const D4_SMOOTH_COUNT: &str = "d4_smooth_count";
+    pub const D4_SMOOTH_WRAPPER_COUNTS: &str = "d4_smooth_wrapper_counts";
+    pub const D4_SMOOTH_WRAPPER_EDGE_COUNTS_OR: &str = "d4_smooth_wrapper_edge_counts_or";
+    pub const D4_SMOOTH_WRAPPER_EDGE_COUNTS_DEC: &str = "d4_smooth_wrapper_edge_counts_dec";
+    pub const D4_SMOOTH_INIT_NODES: &str = "d4_smooth_init_nodes";
+    pub const D4_SMOOTH_EMIT_LEVEL: &str = "d4_smooth_emit_level";
+    pub const D4_SMOOTH_CHECK_EDGE_CAP: &str = "d4_smooth_check_edge_cap";
     // GPU-only assertions (tests + invariant enforcement without host reads).
     pub const D4_ASSERT_U32_EQ: &str = "d4_assert_u32_eq";
     pub const D4_ASSERT_BITSET_VAR: &str = "d4_assert_bitset_var";
@@ -747,6 +756,14 @@ impl CudaKernelProvider {
                     d4_kernels::D4_FRONTIER_EXPAND_DENSE,
                     d4_kernels::D4_COMPILE_COUNT,
                     d4_kernels::D4_COMPILE_EMIT,
+                    d4_kernels::D4_SUPPORT_LEVEL,
+                    d4_kernels::D4_SMOOTH_COUNT,
+                    d4_kernels::D4_SMOOTH_WRAPPER_COUNTS,
+                    d4_kernels::D4_SMOOTH_WRAPPER_EDGE_COUNTS_OR,
+                    d4_kernels::D4_SMOOTH_WRAPPER_EDGE_COUNTS_DEC,
+                    d4_kernels::D4_SMOOTH_INIT_NODES,
+                    d4_kernels::D4_SMOOTH_EMIT_LEVEL,
+                    d4_kernels::D4_SMOOTH_CHECK_EDGE_CAP,
                     d4_kernels::D4_ASSERT_U32_EQ,
                     d4_kernels::D4_ASSERT_BITSET_VAR,
                     d4_kernels::D4_ASSERT_DENSE_VAR,
