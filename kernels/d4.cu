@@ -2621,6 +2621,99 @@ extern "C" __global__ void d4_smooth_check_edge_cap(
 }
 
 // ---------------------------------------------------------------------------
+// GPU free-var mask computation (vars in CNF vs circuit)
+// ---------------------------------------------------------------------------
+
+extern "C" __global__ void d4_mark_vars_in_clauses(
+    uint32_t var_cap,
+    uint32_t lit_cap,
+    const uint32_t* __restrict__ num_vars, // len=1
+    const uint32_t* __restrict__ num_lits, // len=1
+    const int32_t* __restrict__ literals,
+    uint32_t* __restrict__ vars_in_clauses
+) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    uint32_t nv = num_vars[0];
+    uint32_t nl = num_lits[0];
+    if (nv > var_cap || nl > lit_cap) {
+        d4_trap();
+    }
+    for (uint32_t i = tid; i < nl; i += blockDim.x * gridDim.x) {
+        int32_t lit = literals[i];
+        if (lit == 0) {
+            d4_trap();
+        }
+        uint32_t v = d4_var(lit);
+        if (v == 0u || v > nv || v > var_cap) {
+            d4_trap();
+        }
+        atomicExch(&vars_in_clauses[v], 1u);
+    }
+}
+
+extern "C" __global__ void d4_mark_vars_in_circuit(
+    const uint8_t* __restrict__ node_type,
+    const int32_t* __restrict__ lit,
+    const uint32_t* __restrict__ decision_var,
+    uint32_t num_nodes,
+    const uint32_t* __restrict__ num_vars, // len=1
+    uint32_t var_cap,
+    uint32_t* __restrict__ vars_in_circuit
+) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    uint32_t nv = num_vars[0];
+    if (nv > var_cap) {
+        d4_trap();
+    }
+    for (uint32_t node = tid; node < num_nodes; node += blockDim.x * gridDim.x) {
+        uint8_t ty = node_type[node];
+        if (ty == XGCF_LIT) {
+            int32_t l = lit[node];
+            if (l == 0) {
+                d4_trap();
+            }
+            uint32_t v = d4_var(l);
+            if (v == 0u || v > nv || v > var_cap) {
+                d4_trap();
+            }
+            atomicExch(&vars_in_circuit[v], 1u);
+        } else if (ty == XGCF_DECISION) {
+            uint32_t v = decision_var[node];
+            if (v == 0u || v > nv || v > var_cap) {
+                d4_trap();
+            }
+            atomicExch(&vars_in_circuit[v], 1u);
+        }
+    }
+}
+
+extern "C" __global__ void d4_build_free_var_mask(
+    const uint32_t* __restrict__ num_vars, // len=1
+    uint32_t var_cap,
+    const uint32_t* __restrict__ vars_in_clauses,
+    const uint32_t* __restrict__ vars_in_circuit,
+    uint8_t* __restrict__ free_var_mask
+) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    uint32_t nv = num_vars[0];
+    if (nv > var_cap) {
+        d4_trap();
+    }
+    for (uint32_t v = tid; v <= var_cap; v += blockDim.x * gridDim.x) {
+        if (v == 0u || v > nv) {
+            free_var_mask[v] = 0u;
+            continue;
+        }
+        bool in_clauses = vars_in_clauses[v] != 0u;
+        bool in_circuit = vars_in_circuit[v] != 0u;
+        if (in_clauses && !in_circuit) {
+            d4_trap();
+        }
+        free_var_mask[v] = (!in_clauses && !in_circuit) ? 1u : 0u;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // GPU-only assertion helpers (used by tests and invariant enforcement)
 // ---------------------------------------------------------------------------
 

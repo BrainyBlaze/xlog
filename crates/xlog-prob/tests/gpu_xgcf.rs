@@ -3,9 +3,11 @@ use std::sync::Arc;
 
 use xlog_core::MemoryBudget;
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_prob::compilation::gpu_d4::compute_free_var_mask_gpu;
 use xlog_prob::gpu::GpuXgcf;
 use xlog_prob::kc::ddnnf::DecisionDnnf;
-use xlog_prob::xgcf::Xgcf;
+use xlog_prob::xgcf::{Xgcf, XgcfNodeType};
+use xlog_solve::{Clause, GpuCnf, Literal, SolveInstance};
 
 fn try_provider() -> Option<CudaKernelProvider> {
     let device = match CudaDevice::new(0) {
@@ -34,7 +36,7 @@ fn try_provider() -> Option<CudaKernelProvider> {
 #[test]
 fn test_gpu_xgcf_forward_matches_cpu() {
     let provider = match try_provider() {
-        Some(p) => p,
+        Some(p) => Arc::new(p),
         None => return,
     };
     // Formula: x1 OR x2, represented as a decision on x1, then x2.
@@ -70,7 +72,7 @@ f 4 0
 #[test]
 fn test_gpu_xgcf_backward_gradients_match_cpu() {
     let provider = match try_provider() {
-        Some(p) => p,
+        Some(p) => Arc::new(p),
         None => return,
     };
     // Formula: x1 OR x2, represented as a decision on x1, then x2.
@@ -275,4 +277,73 @@ fn test_gpu_xgcf_smoothing_matches_cpu_gradients() {
             gpu_grad_false[i]
         );
     }
+}
+
+#[test]
+fn test_gpu_free_var_mask_matches_cpu() {
+    let provider = match try_provider() {
+        Some(p) => Arc::new(p),
+        None => return,
+    };
+
+    // CNF with 2 vars where only var1 appears in clauses (var2 is free).
+    let instance = SolveInstance::new(2, vec![Clause::new(vec![Literal::positive(0)])]);
+    let cnf = GpuCnf::from_host(&instance, &provider).expect("GpuCnf upload");
+
+    // Circuit uses only var1 (DIMACS 1).
+    let xgcf = Xgcf {
+        node_type: vec![XgcfNodeType::Const0, XgcfNodeType::Const1, XgcfNodeType::Lit],
+        child_offsets: vec![0, 0, 0, 0],
+        child_indices: vec![],
+        lit: vec![0, 0, 1],
+        decision_var: vec![0, 0, 0],
+        decision_child_false: vec![0, 0, 0],
+        decision_child_true: vec![0, 0, 0],
+        roots: vec![2],
+        level_offsets: vec![0, 2, 3],
+        level_nodes: vec![0, 1, 2],
+    };
+    let gpu_xgcf = GpuXgcf::upload(&provider, &xgcf).expect("GpuXgcf upload");
+
+    let free_mask = compute_free_var_mask_gpu(&cnf, &gpu_xgcf, &provider)
+        .expect("compute_free_var_mask_gpu");
+
+    let mut host_mask = vec![0u8; (cnf.var_cap as usize) + 1];
+    provider
+        .device()
+        .inner()
+        .dtoh_sync_copy_into(&free_mask, &mut host_mask)
+        .expect("free_var_mask dtoh");
+
+    let mut vars_in_clauses = vec![false; host_mask.len()];
+    for clause in &instance.clauses {
+        for lit in &clause.literals {
+            let var = lit.to_dimacs().unsigned_abs() as usize;
+            vars_in_clauses[var] = true;
+        }
+    }
+
+    let mut vars_in_circuit = vec![false; host_mask.len()];
+    for (idx, ty) in xgcf.node_type.iter().enumerate() {
+        match ty {
+            XgcfNodeType::Lit => {
+                let var = xgcf.lit[idx].unsigned_abs() as usize;
+                vars_in_circuit[var] = true;
+            }
+            XgcfNodeType::Decision => {
+                let var = xgcf.decision_var[idx] as usize;
+                vars_in_circuit[var] = true;
+            }
+            _ => {}
+        }
+    }
+
+    let mut expected = vec![0u8; host_mask.len()];
+    for var in 1..=instance.num_vars as usize {
+        if !vars_in_clauses[var] && !vars_in_circuit[var] {
+            expected[var] = 1u8;
+        }
+    }
+
+    assert_eq!(host_mask, expected);
 }

@@ -139,6 +139,10 @@ pub mod d4_kernels {
     pub const D4_SMOOTH_INIT_NODES: &str = "d4_smooth_init_nodes";
     pub const D4_SMOOTH_EMIT_LEVEL: &str = "d4_smooth_emit_level";
     pub const D4_SMOOTH_CHECK_EDGE_CAP: &str = "d4_smooth_check_edge_cap";
+    // Task 6: GPU free-var mask (vars in clauses vs circuit).
+    pub const D4_MARK_VARS_IN_CLAUSES: &str = "d4_mark_vars_in_clauses";
+    pub const D4_MARK_VARS_IN_CIRCUIT: &str = "d4_mark_vars_in_circuit";
+    pub const D4_BUILD_FREE_VAR_MASK: &str = "d4_build_free_var_mask";
     // GPU-only assertions (tests + invariant enforcement without host reads).
     pub const D4_ASSERT_U32_EQ: &str = "d4_assert_u32_eq";
     pub const D4_ASSERT_BITSET_VAR: &str = "d4_assert_bitset_var";
@@ -764,6 +768,9 @@ impl CudaKernelProvider {
                     d4_kernels::D4_SMOOTH_INIT_NODES,
                     d4_kernels::D4_SMOOTH_EMIT_LEVEL,
                     d4_kernels::D4_SMOOTH_CHECK_EDGE_CAP,
+                    d4_kernels::D4_MARK_VARS_IN_CLAUSES,
+                    d4_kernels::D4_MARK_VARS_IN_CIRCUIT,
+                    d4_kernels::D4_BUILD_FREE_VAR_MASK,
                     d4_kernels::D4_ASSERT_U32_EQ,
                     d4_kernels::D4_ASSERT_BITSET_VAR,
                     d4_kernels::D4_ASSERT_DENSE_VAR,

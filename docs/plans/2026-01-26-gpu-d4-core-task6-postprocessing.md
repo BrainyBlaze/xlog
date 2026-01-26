@@ -100,15 +100,15 @@ git commit -m "feat(d4): add gpu smoothing count+emit kernels"
 **Step 1: Write failing tests**
 
 Add a GPU test in `crates/xlog-prob/tests/gpu_xgcf.rs`:
-- `test_gpu_free_var_correction_matches_cpu`
+- `test_gpu_free_var_mask_matches_cpu`
   - Circuit where var2 is absent from CNF/circuit.
-  - Set free_var mask on GPU and run eval_log_wmc_and_grads.
-  - Assert logZ and grads match CPU correction (manual or CPU eval + correction).
+  - Compute free_var mask on GPU.
+  - Assert mask matches CPU-computed free vars.
 
 **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p xlog-prob test_gpu_free_var_correction_matches_cpu -- --nocapture --test-threads=1`
-Expected: FAIL (free-var mask + correction missing).
+Run: `cargo test -p xlog-prob test_gpu_free_var_mask_matches_cpu -- --nocapture --test-threads=1`
+Expected: FAIL (GPU free-var mask missing).
 
 **Step 3: Implement minimal code**
 
@@ -124,7 +124,7 @@ Add Rust helper in `crates/xlog-prob/src/compilation/gpu_d4.rs`:
 
 **Step 4: Run test to verify it passes**
 
-Run: `cargo test -p xlog-prob test_gpu_free_var_correction_matches_cpu -- --nocapture --test-threads=1`
+Run: `cargo test -p xlog-prob test_gpu_free_var_mask_matches_cpu -- --nocapture --test-threads=1`
 Expected: PASS.
 
 **Step 5: Commit**
@@ -145,7 +145,11 @@ git commit -m "feat(d4): add gpu free-var mask computation"
 
 **Step 1: Write failing test**
 
-Reuse `test_gpu_free_var_correction_matches_cpu` from Task 3 (should still fail until correction applied).
+Add GPU test in `crates/xlog-prob/tests/gpu_xgcf.rs`:
+- `test_gpu_free_var_correction_matches_cpu`
+  - Circuit where var2 is absent from CNF/circuit.
+  - Set free_var mask on GPU and run eval_log_wmc_and_grads.
+  - Assert logZ and grads match CPU correction (manual or CPU eval + correction).
 
 **Step 2: Run test to verify it fails**
 

@@ -14,6 +14,8 @@ use xlog_cuda::provider::{d4_kernels, scan_kernels, D4_MODULE, SCAN_MODULE};
 use xlog_cuda::CudaKernelProvider;
 use xlog_solve::GpuCnf;
 
+use crate::gpu::GpuXgcf;
+
 /// Configuration for GPU D4 + GPU CDCL.
 ///
 /// This is the public control-plane contract for the GPU-native compilation pipeline.
@@ -75,6 +77,153 @@ pub fn validate_cnf_gpu(cnf: &GpuCnf, provider: &CudaKernelProvider) -> Result<(
     .map_err(|e| XlogError::Kernel(format!("d4_validate_cnf failed: {}", e)))?;
 
     Ok(())
+}
+
+/// Compute free-variable mask on device (vars absent from CNF and circuit).
+///
+/// Returns a device-resident u8 mask of length var_cap+1 where mask[v]=1 means
+/// var v is free. Traps on device if a variable appears in CNF clauses but is
+/// missing from the circuit.
+pub fn compute_free_var_mask_gpu(
+    cnf: &GpuCnf,
+    circuit: &GpuXgcf,
+    provider: &CudaKernelProvider,
+) -> Result<TrackedCudaSlice<u8>> {
+    if cnf.var_cap == 0 {
+        return Err(XlogError::Compilation(
+            "compute_free_var_mask_gpu requires var_cap > 0".to_string(),
+        ));
+    }
+    if circuit.max_var() > cnf.var_cap {
+        return Err(XlogError::Compilation(format!(
+            "compute_free_var_mask_gpu: circuit max_var {} exceeds CNF var_cap {}",
+            circuit.max_var(),
+            cnf.var_cap
+        )));
+    }
+
+    let num_nodes = u32::try_from(circuit.num_nodes()).map_err(|_| {
+        XlogError::Compilation("compute_free_var_mask_gpu: num_nodes overflow".to_string())
+    })?;
+
+    let mask_len = (cnf.var_cap as u64)
+        .checked_add(1)
+        .and_then(|v| usize::try_from(v).ok())
+        .ok_or_else(|| {
+            XlogError::Compilation("compute_free_var_mask_gpu: mask length overflow".to_string())
+        })?;
+
+    let memory = provider.memory();
+    let device = provider.device().inner();
+
+    let mut vars_in_clauses = memory.alloc::<u32>(mask_len)?;
+    let mut vars_in_circuit = memory.alloc::<u32>(mask_len)?;
+    let mut free_var_mask = memory.alloc::<u8>(mask_len)?;
+
+    device
+        .memset_zeros(&mut vars_in_clauses)
+        .map_err(|e| {
+            XlogError::Kernel(format!("compute_free_var_mask_gpu: zero vars_in_clauses: {}", e))
+        })?;
+    device
+        .memset_zeros(&mut vars_in_circuit)
+        .map_err(|e| {
+            XlogError::Kernel(format!("compute_free_var_mask_gpu: zero vars_in_circuit: {}", e))
+        })?;
+    device
+        .memset_zeros(&mut free_var_mask)
+        .map_err(|e| {
+            XlogError::Kernel(format!("compute_free_var_mask_gpu: zero free_var_mask: {}", e))
+        })?;
+
+    let block_dim = 256u32;
+
+    if cnf.lit_cap > 0 {
+        let grid_dim = (cnf.lit_cap + block_dim - 1) / block_dim;
+        let mark_clauses = device
+            .get_func(D4_MODULE, d4_kernels::D4_MARK_VARS_IN_CLAUSES)
+            .ok_or_else(|| {
+                XlogError::Kernel("d4_mark_vars_in_clauses kernel not found".to_string())
+            })?;
+        unsafe {
+            mark_clauses.clone().launch(
+                LaunchConfig {
+                    grid_dim: (grid_dim, 1, 1),
+                    block_dim: (block_dim, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (
+                    cnf.var_cap,
+                    cnf.lit_cap,
+                    &cnf.num_vars,
+                    &cnf.num_lits,
+                    &cnf.literals,
+                    &mut vars_in_clauses,
+                ),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("d4_mark_vars_in_clauses failed: {}", e)))?;
+    }
+
+    if num_nodes > 0 {
+        let grid_dim = (num_nodes + block_dim - 1) / block_dim;
+        let mark_circuit = device
+            .get_func(D4_MODULE, d4_kernels::D4_MARK_VARS_IN_CIRCUIT)
+            .ok_or_else(|| {
+                XlogError::Kernel("d4_mark_vars_in_circuit kernel not found".to_string())
+            })?;
+        unsafe {
+            mark_circuit.clone().launch(
+                LaunchConfig {
+                    grid_dim: (grid_dim, 1, 1),
+                    block_dim: (block_dim, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (
+                    circuit.node_type(),
+                    circuit.lit(),
+                    circuit.decision_var(),
+                    num_nodes,
+                    &cnf.num_vars,
+                    cnf.var_cap,
+                    &mut vars_in_circuit,
+                ),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("d4_mark_vars_in_circuit failed: {}", e)))?;
+    }
+
+    let mask_len_u32 = cnf
+        .var_cap
+        .checked_add(1)
+        .ok_or_else(|| {
+            XlogError::Compilation("compute_free_var_mask_gpu: mask length overflow".to_string())
+        })?;
+    let grid_dim = (mask_len_u32 + block_dim - 1) / block_dim;
+    let build_mask = device
+        .get_func(D4_MODULE, d4_kernels::D4_BUILD_FREE_VAR_MASK)
+        .ok_or_else(|| {
+            XlogError::Kernel("d4_build_free_var_mask kernel not found".to_string())
+        })?;
+    unsafe {
+        build_mask.clone().launch(
+            LaunchConfig {
+                grid_dim: (grid_dim, 1, 1),
+                block_dim: (block_dim, 1, 1),
+                shared_mem_bytes: 0,
+            },
+            (
+                &cnf.num_vars,
+                cnf.var_cap,
+                &vars_in_clauses,
+                &vars_in_circuit,
+                &mut free_var_mask,
+            ),
+        )
+    }
+    .map_err(|e| XlogError::Kernel(format!("d4_build_free_var_mask failed: {}", e)))?;
+
+    Ok(free_var_mask)
 }
 
 // ---------------------------------------------------------------------------
