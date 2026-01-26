@@ -668,9 +668,6 @@ __device__ __forceinline__ bool sat_analyze(
             }
             uint32_t v = sat_var(q);
             uint32_t lv = level[v];
-            if (lv == 0) {
-                continue;
-            }
             if (seen[v]) {
                 continue;
             }
@@ -1633,7 +1630,7 @@ extern "C" __global__ void sat_proof_check(
         lc.lits = learned_lits + learned_offsets[i];
         lc.len = learned_offsets[i + 1u] - learned_offsets[i];
 
-        const int32_t* final_clause = use_a ? scratch_b : scratch_a;
+        const int32_t* final_clause = use_a ? scratch_a : scratch_b;
         if (!sat_clause_equal_set(final_clause, cur_len, lc.lits, lc.len)) {
             out_ok[0] = 0;
             return;
