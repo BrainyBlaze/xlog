@@ -25,6 +25,10 @@ pub struct GpuCompileConfig {
     pub max_frontier_items: u32,
     /// Absolute depth cap (defensive); exceeding this is a hard error (no UNKNOWN).
     pub max_depth: u16,
+    /// Hard cap on nodes emitted by the GPU smoothing pass.
+    pub smooth_node_cap: u32,
+    /// Hard cap on edges emitted by the GPU smoothing pass.
+    pub smooth_edge_cap: u32,
 
     /// CDCL restart cadence (deterministic).
     pub cdcl_restart_interval: u32,
@@ -659,6 +663,22 @@ mod tests {
     }
 
     #[test]
+    fn gpu_d4_compile_config_requires_smoothing_caps() {
+        let config = super::GpuCompileConfig {
+            frontier_depth: 0,
+            max_frontier_items: 1,
+            max_depth: 8,
+            cdcl_restart_interval: 128,
+            cdcl_learned_bytes: 1 << 20,
+            cdcl_conflict_budget: None,
+            smooth_node_cap: 256,
+            smooth_edge_cap: 512,
+        };
+        assert!(config.smooth_node_cap > 0);
+        assert!(config.smooth_edge_cap > 0);
+    }
+
+    #[test]
     fn gpu_d4_frontier_prepare_and_expand_unit_clause_prunes_branching() {
         let Some(provider) = try_provider() else {
             return;
@@ -1067,6 +1087,8 @@ mod tests {
             frontier_depth: 2,
             max_frontier_items: 8,
             max_depth: 32,
+            smooth_node_cap: 1024,
+            smooth_edge_cap: 4096,
             cdcl_restart_interval: 64,
             cdcl_learned_bytes: 1 << 20,
             cdcl_conflict_budget: None,
@@ -1357,6 +1379,8 @@ mod tests {
             frontier_depth: 2,
             max_frontier_items: 8,
             max_depth: 32,
+            smooth_node_cap: 1024,
+            smooth_edge_cap: 4096,
             cdcl_restart_interval: 64,
             cdcl_learned_bytes: 1 << 20,
             cdcl_conflict_budget: None,
@@ -1654,6 +1678,8 @@ mod tests {
             frontier_depth: 0,
             max_frontier_items: 8,
             max_depth: 32,
+            smooth_node_cap: 1024,
+            smooth_edge_cap: 4096,
             cdcl_restart_interval: 32,
             cdcl_learned_bytes: 4 * 1024 * 1024,
             cdcl_conflict_budget: None,
@@ -1919,6 +1945,8 @@ mod tests {
             frontier_depth: 0,
             max_frontier_items: 8,
             max_depth: 32,
+            smooth_node_cap: 1024,
+            smooth_edge_cap: 4096,
             cdcl_restart_interval: 32,
             cdcl_learned_bytes: 4 * 1024 * 1024,
             cdcl_conflict_budget: None,
@@ -2181,6 +2209,8 @@ mod tests {
             frontier_depth: 0,
             max_frontier_items: 8,
             max_depth: 32,
+            smooth_node_cap: 1024,
+            smooth_edge_cap: 4096,
             cdcl_restart_interval: 32,
             cdcl_learned_bytes: 4 * 1024 * 1024,
             cdcl_conflict_budget: None,
@@ -2438,6 +2468,8 @@ mod tests {
             frontier_depth: 2,
             max_frontier_items: 8,
             max_depth: 32,
+            smooth_node_cap: 1024,
+            smooth_edge_cap: 4096,
             cdcl_restart_interval: 32,
             cdcl_learned_bytes: 4 * 1024 * 1024,
             cdcl_conflict_budget: None,
@@ -2692,6 +2724,8 @@ let builder = crate::gpu::GpuCircuitBuilder {
             frontier_depth: 0,
             max_frontier_items: 1,
             max_depth: 32,
+            smooth_node_cap: 1024,
+            smooth_edge_cap: 4096,
             cdcl_restart_interval: 32,
             cdcl_learned_bytes: 4 * 1024 * 1024,
             cdcl_conflict_budget: None,
