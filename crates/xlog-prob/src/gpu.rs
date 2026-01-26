@@ -8,8 +8,8 @@ use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::provider::{arith_kernels, d4_kernels, ARITH_MODULE, D4_MODULE};
 use xlog_cuda::{circuit_kernels, CudaKernelProvider, CIRCUIT_MODULE};
 
-use crate::xgcf::{Xgcf, XgcfNodeType};
 use crate::compilation::gpu_d4::exclusive_scan_u32_inplace;
+use crate::xgcf::{Xgcf, XgcfNodeType};
 
 /// Device-resident circuit buffers produced by the GPU compiler.
 ///
@@ -179,12 +179,14 @@ impl GpuXgcf {
             XlogError::Compilation("GPU smoothing: random var count exceeds u32".to_string())
         })?;
 
-        let base_node = 2u32
-            .checked_add(num_random_vars)
-            .ok_or_else(|| XlogError::Compilation("GPU smoothing: base node overflow".to_string()))?;
+        let base_node = 2u32.checked_add(num_random_vars).ok_or_else(|| {
+            XlogError::Compilation("GPU smoothing: base node overflow".to_string())
+        })?;
         let base_nodes = (base_node as u64)
             .checked_add(num_nodes as u64)
-            .ok_or_else(|| XlogError::Compilation("GPU smoothing: base node overflow".to_string()))?;
+            .ok_or_else(|| {
+                XlogError::Compilation("GPU smoothing: base node overflow".to_string())
+            })?;
         if base_nodes > smooth_node_cap as u64 {
             return Err(XlogError::Compilation(format!(
                 "GPU smoothing: base nodes {} exceed smooth_node_cap {}",
@@ -218,12 +220,16 @@ impl GpuXgcf {
         let support_len = (num_nodes as u64)
             .checked_mul(words_per_support as u64)
             .and_then(|v| usize::try_from(v).ok())
-            .ok_or_else(|| XlogError::Compilation("GPU smoothing: support size overflow".to_string()))?;
+            .ok_or_else(|| {
+                XlogError::Compilation("GPU smoothing: support size overflow".to_string())
+            })?;
 
         let dec_entries = (num_nodes as u64)
             .checked_mul(2)
             .and_then(|v| usize::try_from(v).ok())
-            .ok_or_else(|| XlogError::Compilation("GPU smoothing: decision array overflow".to_string()))?;
+            .ok_or_else(|| {
+                XlogError::Compilation("GPU smoothing: decision array overflow".to_string())
+            })?;
         let dec_entries_u32 = u32::try_from(dec_entries).map_err(|_| {
             XlogError::Compilation("GPU smoothing: decision entries exceed u32".to_string())
         })?;
@@ -347,16 +353,14 @@ impl GpuXgcf {
             smooth_node_cap.as_kernel_param(),
         ];
         unsafe {
-            count_kernel
-                .clone()
-                .launch(
-                    LaunchConfig {
-                        grid_dim: (num_blocks, 1, 1),
-                        block_dim: (block_size, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
-                    &mut params,
-                )
+            count_kernel.clone().launch(
+                LaunchConfig {
+                    grid_dim: (num_blocks, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                &mut params,
+            )
         }
         .map_err(|e| XlogError::Kernel(format!("d4_smooth_count failed: {}", e)))?;
 
@@ -396,16 +400,14 @@ impl GpuXgcf {
         }
         .map_err(|e| XlogError::Kernel(format!("d4_smooth_wrapper_counts failed: {}", e)))?;
 
-        let wrapper_base = base_node
-            .checked_add(num_nodes)
-            .ok_or_else(|| XlogError::Compilation("GPU smoothing: wrapper base overflow".to_string()))?;
+        let wrapper_base = base_node.checked_add(num_nodes).ok_or_else(|| {
+            XlogError::Compilation("GPU smoothing: wrapper base overflow".to_string())
+        })?;
 
         let wrap_or_kernel = device
             .get_func(D4_MODULE, d4_kernels::D4_SMOOTH_WRAPPER_EDGE_COUNTS_OR)
             .ok_or_else(|| {
-                XlogError::Kernel(
-                    "d4_smooth_wrapper_edge_counts_or kernel not found".to_string(),
-                )
+                XlogError::Kernel("d4_smooth_wrapper_edge_counts_or kernel not found".to_string())
             })?;
         if num_edges > 0 {
             let num_blocks = (num_edges + block_size - 1) / block_size;
@@ -434,9 +436,7 @@ impl GpuXgcf {
         let wrap_dec_kernel = device
             .get_func(D4_MODULE, d4_kernels::D4_SMOOTH_WRAPPER_EDGE_COUNTS_DEC)
             .ok_or_else(|| {
-                XlogError::Kernel(
-                    "d4_smooth_wrapper_edge_counts_dec kernel not found".to_string(),
-                )
+                XlogError::Kernel("d4_smooth_wrapper_edge_counts_dec kernel not found".to_string())
             })?;
         if dec_entries > 0 {
             let num_blocks = (dec_entries_u32 + block_size - 1) / block_size;
@@ -475,9 +475,9 @@ impl GpuXgcf {
                 )
                 .map_err(|e| XlogError::Kernel(format!("Failed to copy edge_counts: {}", e)))?;
         }
-        let child_scan_len = smooth_node_cap
-            .checked_add(1)
-            .ok_or_else(|| XlogError::Compilation("GPU smoothing: child offset scan overflow".to_string()))?;
+        let child_scan_len = smooth_node_cap.checked_add(1).ok_or_else(|| {
+            XlogError::Compilation("GPU smoothing: child offset scan overflow".to_string())
+        })?;
         exclusive_scan_u32_inplace(provider, &mut out_child_offsets, child_scan_len)?;
 
         let edge_cap_check = device
@@ -519,7 +519,9 @@ impl GpuXgcf {
             .map_err(|e| XlogError::Kernel(format!("Failed to zero decision_var: {}", e)))?;
         device
             .memset_zeros(&mut out_decision_child_false)
-            .map_err(|e| XlogError::Kernel(format!("Failed to zero decision_child_false: {}", e)))?;
+            .map_err(|e| {
+                XlogError::Kernel(format!("Failed to zero decision_child_false: {}", e))
+            })?;
         device
             .memset_zeros(&mut out_decision_child_true)
             .map_err(|e| XlogError::Kernel(format!("Failed to zero decision_child_true: {}", e)))?;
@@ -529,7 +531,9 @@ impl GpuXgcf {
 
         let init_kernel = device
             .get_func(D4_MODULE, d4_kernels::D4_SMOOTH_INIT_NODES)
-            .ok_or_else(|| XlogError::Kernel("d4_smooth_init_nodes kernel not found".to_string()))?;
+            .ok_or_else(|| {
+                XlogError::Kernel("d4_smooth_init_nodes kernel not found".to_string())
+            })?;
         let init_blocks = ((num_random_vars.max(1)) + block_size - 1) / block_size;
         unsafe {
             init_kernel.clone().launch(
@@ -553,14 +557,13 @@ impl GpuXgcf {
         }
         .map_err(|e| XlogError::Kernel(format!("d4_smooth_init_nodes failed: {}", e)))?;
 
-        let num_levels_out = self
-            .num_levels
-            .saturating_mul(2)
-            .saturating_add(4);
+        let num_levels_out = self.num_levels.saturating_mul(2).saturating_add(4);
 
         let emit_kernel = device
             .get_func(D4_MODULE, d4_kernels::D4_SMOOTH_EMIT_LEVEL)
-            .ok_or_else(|| XlogError::Kernel("d4_smooth_emit_level kernel not found".to_string()))?;
+            .ok_or_else(|| {
+                XlogError::Kernel("d4_smooth_emit_level kernel not found".to_string())
+            })?;
         for level in 0..num_levels {
             let num_level_nodes: usize = match self.level_offsets_host.as_ref() {
                 Some(off) => (off[level + 1].saturating_sub(off[level])) as usize,
@@ -570,6 +573,7 @@ impl GpuXgcf {
                 continue;
             }
             let num_blocks = ((num_level_nodes as u32) + block_size - 1) / block_size;
+            let level_u32 = level as u32;
             let mut params: Vec<*mut c_void> = vec![
                 (&self.node_type).as_kernel_param(),
                 (&self.child_offsets).as_kernel_param(),
@@ -580,7 +584,7 @@ impl GpuXgcf {
                 (&self.decision_child_true).as_kernel_param(),
                 (&self.level_nodes).as_kernel_param(),
                 (&self.level_offsets).as_kernel_param(),
-                (level as u32).as_kernel_param(),
+                level_u32.as_kernel_param(),
                 (&support).as_kernel_param(),
                 words_per_support.as_kernel_param(),
                 (&wrap_prefix_or).as_kernel_param(),
@@ -602,16 +606,14 @@ impl GpuXgcf {
                 (&mut out_node_level).as_kernel_param(),
             ];
             unsafe {
-                emit_kernel
-                    .clone()
-                    .launch(
-                        LaunchConfig {
-                            grid_dim: (num_blocks, 1, 1),
-                            block_dim: (block_size, 1, 1),
-                            shared_mem_bytes: 0,
-                        },
-                        &mut params,
-                    )
+                emit_kernel.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (num_blocks, 1, 1),
+                        block_dim: (block_size, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    &mut params,
+                )
             }
             .map_err(|e| XlogError::Kernel(format!("d4_smooth_emit_level failed: {}", e)))?;
         }
@@ -645,7 +647,12 @@ impl GpuXgcf {
                     block_dim: (block_size, 1, 1),
                     shared_mem_bytes: 0,
                 },
-                (&out_node_level, smooth_node_cap, num_levels_out, &mut level_counts),
+                (
+                    &out_node_level,
+                    smooth_node_cap,
+                    num_levels_out,
+                    &mut level_counts,
+                ),
             )
         }
         .map_err(|e| XlogError::Kernel(format!("d4_levelize_counts failed: {}", e)))?;
@@ -656,9 +663,9 @@ impl GpuXgcf {
                 &mut level_offsets.slice_mut(0..num_levels_out as usize),
             )
             .map_err(|e| XlogError::Kernel(format!("Failed to copy level_counts: {}", e)))?;
-        let level_scan_len = num_levels_out
-            .checked_add(1)
-            .ok_or_else(|| XlogError::Compilation("GPU smoothing: level offset scan overflow".to_string()))?;
+        let level_scan_len = num_levels_out.checked_add(1).ok_or_else(|| {
+            XlogError::Compilation("GPU smoothing: level offset scan overflow".to_string())
+        })?;
         exclusive_scan_u32_inplace(provider, &mut level_offsets, level_scan_len)?;
 
         let levelize_emit = device
@@ -913,10 +920,7 @@ impl GpuXgcf {
     }
 
     /// Attach a device-resident free-variable mask (length = max_var + 1).
-    pub fn set_free_var_mask_device(
-        &mut self,
-        mask: TrackedCudaSlice<u8>,
-    ) -> Result<()> {
+    pub fn set_free_var_mask_device(&mut self, mask: TrackedCudaSlice<u8>) -> Result<()> {
         if mask.len() != self.var_log_true.len() {
             return Err(XlogError::Compilation(format!(
                 "GPU free-var mask len {} != weights len {}",
@@ -947,9 +951,7 @@ impl GpuXgcf {
             .device()
             .inner()
             .htod_sync_copy_into(mask, &mut d_mask)
-            .map_err(|e| {
-                XlogError::Kernel(format!("Failed to upload free_var_mask: {}", e))
-            })?;
+            .map_err(|e| XlogError::Kernel(format!("Failed to upload free_var_mask: {}", e)))?;
         self.free_var_mask = Some(d_mask);
         Ok(())
     }
@@ -1055,9 +1057,9 @@ impl GpuXgcf {
 
         let root_idx = self.root as usize;
         let root_view = self.values.slice(root_idx..(root_idx + 1));
-        device.dtod_copy(&root_view, out_log_z).map_err(|e| {
-            XlogError::Kernel(format!("Failed to copy device logZ: {}", e))
-        })?;
+        device
+            .dtod_copy(&root_view, out_log_z)
+            .map_err(|e| XlogError::Kernel(format!("Failed to copy device logZ: {}", e)))?;
 
         provider.device().synchronize()?;
         Ok(())
@@ -1104,9 +1106,8 @@ impl GpuXgcf {
             )));
         }
 
-        let n = u32::try_from(mask.len()).map_err(|_| {
-            XlogError::Compilation("GPU free-var mask length overflow".to_string())
-        })?;
+        let n = u32::try_from(mask.len())
+            .map_err(|_| XlogError::Compilation("GPU free-var mask length overflow".to_string()))?;
         if n == 0 {
             return Ok(());
         }
@@ -1117,14 +1118,9 @@ impl GpuXgcf {
 
         if apply_grads {
             let apply_grad = device
-                .get_func(
-                    CIRCUIT_MODULE,
-                    circuit_kernels::XGCF_FREE_VAR_APPLY_GRAD,
-                )
+                .get_func(CIRCUIT_MODULE, circuit_kernels::XGCF_FREE_VAR_APPLY_GRAD)
                 .ok_or_else(|| {
-                    XlogError::Kernel(
-                        "xgcf_free_var_apply_grad kernel not found".to_string(),
-                    )
+                    XlogError::Kernel("xgcf_free_var_apply_grad kernel not found".to_string())
                 })?;
             unsafe {
                 apply_grad.clone().launch(
@@ -1148,20 +1144,13 @@ impl GpuXgcf {
 
         if apply_log_z {
             let reduce_stage = device
-                .get_func(
-                    CIRCUIT_MODULE,
-                    circuit_kernels::XGCF_FREE_VAR_REDUCE_STAGE,
-                )
+                .get_func(CIRCUIT_MODULE, circuit_kernels::XGCF_FREE_VAR_REDUCE_STAGE)
                 .ok_or_else(|| {
-                    XlogError::Kernel(
-                        "xgcf_free_var_reduce_stage kernel not found".to_string(),
-                    )
+                    XlogError::Kernel("xgcf_free_var_reduce_stage kernel not found".to_string())
                 })?;
             let add_scalar = device
                 .get_func(CIRCUIT_MODULE, circuit_kernels::XGCF_ADD_SCALAR)
-                .ok_or_else(|| {
-                    XlogError::Kernel("xgcf_add_scalar kernel not found".to_string())
-                })?;
+                .ok_or_else(|| XlogError::Kernel("xgcf_add_scalar kernel not found".to_string()))?;
 
             let memory = provider.memory();
             let mut buf_a = memory.alloc::<f64>(mask.len())?;

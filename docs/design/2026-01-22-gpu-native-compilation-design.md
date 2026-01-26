@@ -744,7 +744,7 @@ This integrates naturally with DLPack: neural outputs arrive as device tensors; 
 /// Compile CNF on GPU, then verify equivalence with GPU CDCL.
 pub fn compile_gpu_d4_and_verify(
     cnf: &GpuCnf,
-    provider: &CudaKernelProvider,
+    provider: &Arc<CudaKernelProvider>,
     config: &GpuCompileConfig,
 ) -> Result<GpuXgcf>;
 
@@ -756,6 +756,11 @@ pub struct GpuCompileConfig {
     pub max_frontier_items: u32,
     /// Absolute depth cap (defensive); exceeding this is a hard error (no UNKNOWN).
     pub max_depth: u16,
+
+    /// Hard cap on nodes emitted by the GPU smoothing pass (also used as base circuit capacity).
+    pub smooth_node_cap: u32,
+    /// Hard cap on edges emitted by the GPU smoothing pass (also used as base circuit capacity).
+    pub smooth_edge_cap: u32,
 
     /// CDCL restart cadence (deterministic).
     pub cdcl_restart_interval: u32,
@@ -784,6 +789,15 @@ pub struct GpuCircuitLayout {
     pub max_var: u32,
 }
 ```
+
+**Verifier sizing note:** the GPU CDCL verifier derives `GpuCdclConfig` deterministically from
+`cdcl_learned_bytes` assuming an average learned clause length of 4, plus metadata/proof overhead.
+If `cdcl_conflict_budget` is set, the production verifier rejects the configuration (budgeting is a
+debug-only concern and is not supported by the GPU CDCL kernel).
+
+**Smoothing note:** `compile_gpu_d4_and_verify` returns the base circuit. When probabilistic evaluation
+is required, the caller must invoke `GpuXgcf::smooth_random_vars_device(...)` with the random-var list
+derived from weights before WMC evaluation.
 
 ---
 

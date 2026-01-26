@@ -375,7 +375,11 @@ fn test_gpu_free_var_mask_matches_cpu() {
 
     // Circuit uses only var1 (DIMACS 1).
     let xgcf = Xgcf {
-        node_type: vec![XgcfNodeType::Const0, XgcfNodeType::Const1, XgcfNodeType::Lit],
+        node_type: vec![
+            XgcfNodeType::Const0,
+            XgcfNodeType::Const1,
+            XgcfNodeType::Lit,
+        ],
         child_offsets: vec![0, 0, 0, 0],
         child_indices: vec![],
         lit: vec![0, 0, 1],
@@ -388,8 +392,8 @@ fn test_gpu_free_var_mask_matches_cpu() {
     };
     let gpu_xgcf = GpuXgcf::upload(&provider, &xgcf).expect("GpuXgcf upload");
 
-    let free_mask = compute_free_var_mask_gpu(&cnf, &gpu_xgcf, &provider)
-        .expect("compute_free_var_mask_gpu");
+    let free_mask =
+        compute_free_var_mask_gpu(&cnf, &gpu_xgcf, &provider).expect("compute_free_var_mask_gpu");
 
     let mut host_mask = vec![0u8; (cnf.var_cap as usize) + 1];
     provider
@@ -444,7 +448,11 @@ fn test_gpu_free_var_correction_matches_cpu() {
 
     // Host circuit (var1 only) for CPU baseline.
     let xgcf = Xgcf {
-        node_type: vec![XgcfNodeType::Const0, XgcfNodeType::Const1, XgcfNodeType::Lit],
+        node_type: vec![
+            XgcfNodeType::Const0,
+            XgcfNodeType::Const1,
+            XgcfNodeType::Lit,
+        ],
         child_offsets: vec![0, 0, 0, 0],
         child_indices: vec![],
         lit: vec![0, 0, 1],
@@ -481,8 +489,7 @@ fn test_gpu_free_var_correction_matches_cpu() {
         (log_z, pt, pf)
     };
 
-    let (free_log_z, free_pt, free_pf) =
-        logsumexp2_with_grads(weights[2].0, weights[2].1);
+    let (free_log_z, free_pt, free_pf) = logsumexp2_with_grads(weights[2].0, weights[2].1);
 
     let mut expected_grad_true = vec![0.0_f64; weights.len()];
     let mut expected_grad_false = vec![0.0_f64; weights.len()];
@@ -493,8 +500,8 @@ fn test_gpu_free_var_correction_matches_cpu() {
     let expected_log_z = base_log_z + free_log_z;
 
     let mut gpu_xgcf = build_device_lit_circuit(&provider, 1, cnf.var_cap);
-    let free_mask = compute_free_var_mask_gpu(&cnf, &gpu_xgcf, &provider)
-        .expect("compute_free_var_mask_gpu");
+    let free_mask =
+        compute_free_var_mask_gpu(&cnf, &gpu_xgcf, &provider).expect("compute_free_var_mask_gpu");
     gpu_xgcf
         .set_free_var_mask_device(free_mask)
         .expect("set_free_var_mask_device");
@@ -566,9 +573,7 @@ f 4 0
         .unwrap();
 
     let mut host = [0.0_f64];
-    device
-        .dtoh_sync_copy_into(&out_log_z, &mut host)
-        .unwrap();
+    device.dtoh_sync_copy_into(&out_log_z, &mut host).unwrap();
 
     assert!((cpu - host[0]).abs() < 1e-9, "cpu={} gpu={}", cpu, host[0]);
 }
@@ -606,14 +611,10 @@ f 4 0
     let cpu = xgcf.eval_log_wmc(|var| weights[var as usize]).unwrap();
 
     let mut gpu_xgcf = GpuXgcf::upload(&provider, &xgcf).unwrap();
-    let out_log_z = gpu_xgcf
-        .eval_log_wmc_device(&provider, &weights)
-        .unwrap();
+    let out_log_z = gpu_xgcf.eval_log_wmc_device(&provider, &weights).unwrap();
 
     let mut host = [0.0_f64];
-    device
-        .dtoh_sync_copy_into(&out_log_z, &mut host)
-        .unwrap();
+    device.dtoh_sync_copy_into(&out_log_z, &mut host).unwrap();
 
     assert!((cpu - host[0]).abs() < 1e-9, "cpu={} gpu={}", cpu, host[0]);
 }

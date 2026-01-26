@@ -6,6 +6,7 @@
 //! Primary spec: docs/design/2026-01-22-gpu-native-compilation-design.md (Section 5.2.4).
 
 use std::ffi::c_void;
+use std::sync::Arc;
 
 use cudarc::driver::{DeviceRepr, DeviceSlice, LaunchAsync, LaunchConfig};
 use xlog_core::{Result, XlogError};
@@ -14,7 +15,7 @@ use xlog_cuda::provider::{d4_kernels, scan_kernels, D4_MODULE, SCAN_MODULE};
 use xlog_cuda::CudaKernelProvider;
 use xlog_solve::GpuCnf;
 
-use crate::gpu::GpuXgcf;
+use crate::gpu::{GpuCircuitBuilder, GpuCircuitLayout, GpuXgcf};
 
 /// Configuration for GPU D4 + GPU CDCL.
 ///
@@ -120,21 +121,24 @@ pub fn compute_free_var_mask_gpu(
     let mut vars_in_circuit = memory.alloc::<u32>(mask_len)?;
     let mut free_var_mask = memory.alloc::<u8>(mask_len)?;
 
-    device
-        .memset_zeros(&mut vars_in_clauses)
-        .map_err(|e| {
-            XlogError::Kernel(format!("compute_free_var_mask_gpu: zero vars_in_clauses: {}", e))
-        })?;
-    device
-        .memset_zeros(&mut vars_in_circuit)
-        .map_err(|e| {
-            XlogError::Kernel(format!("compute_free_var_mask_gpu: zero vars_in_circuit: {}", e))
-        })?;
-    device
-        .memset_zeros(&mut free_var_mask)
-        .map_err(|e| {
-            XlogError::Kernel(format!("compute_free_var_mask_gpu: zero free_var_mask: {}", e))
-        })?;
+    device.memset_zeros(&mut vars_in_clauses).map_err(|e| {
+        XlogError::Kernel(format!(
+            "compute_free_var_mask_gpu: zero vars_in_clauses: {}",
+            e
+        ))
+    })?;
+    device.memset_zeros(&mut vars_in_circuit).map_err(|e| {
+        XlogError::Kernel(format!(
+            "compute_free_var_mask_gpu: zero vars_in_circuit: {}",
+            e
+        ))
+    })?;
+    device.memset_zeros(&mut free_var_mask).map_err(|e| {
+        XlogError::Kernel(format!(
+            "compute_free_var_mask_gpu: zero free_var_mask: {}",
+            e
+        ))
+    })?;
 
     let block_dim = 256u32;
 
@@ -193,18 +197,13 @@ pub fn compute_free_var_mask_gpu(
         .map_err(|e| XlogError::Kernel(format!("d4_mark_vars_in_circuit failed: {}", e)))?;
     }
 
-    let mask_len_u32 = cnf
-        .var_cap
-        .checked_add(1)
-        .ok_or_else(|| {
-            XlogError::Compilation("compute_free_var_mask_gpu: mask length overflow".to_string())
-        })?;
+    let mask_len_u32 = cnf.var_cap.checked_add(1).ok_or_else(|| {
+        XlogError::Compilation("compute_free_var_mask_gpu: mask length overflow".to_string())
+    })?;
     let grid_dim = (mask_len_u32 + block_dim - 1) / block_dim;
     let build_mask = device
         .get_func(D4_MODULE, d4_kernels::D4_BUILD_FREE_VAR_MASK)
-        .ok_or_else(|| {
-            XlogError::Kernel("d4_build_free_var_mask kernel not found".to_string())
-        })?;
+        .ok_or_else(|| XlogError::Kernel("d4_build_free_var_mask kernel not found".to_string()))?;
     unsafe {
         build_mask.clone().launch(
             LaunchConfig {
@@ -745,6 +744,367 @@ pub fn build_frontier_dense(
         stride_bytes,
         max_frontier_items,
     })
+}
+
+fn alloc_component_scratch(
+    provider: &CudaKernelProvider,
+    max_items: u32,
+    var_cap: u32,
+) -> Result<(
+    TrackedCudaSlice<u32>,
+    TrackedCudaSlice<u32>,
+    TrackedCudaSlice<u32>,
+    u32,
+)> {
+    let uf_stride = var_cap
+        .checked_add(1)
+        .ok_or_else(|| XlogError::Kernel("component scratch var_cap+1 overflow".to_string()))?;
+    let uf_len = checked_pool_len_usize(max_items, uf_stride, "component scratch")?;
+    let memory = provider.memory();
+    let device = provider.device().inner();
+
+    let mut uf_parent = memory.alloc::<u32>(uf_len)?;
+    let mut uf_aux = memory.alloc::<u32>(uf_len)?;
+    let mut comp_list = memory.alloc::<u32>(uf_len)?;
+    device.memset_zeros(&mut uf_parent).map_err(|e| {
+        XlogError::Kernel(format!("Failed to zero component scratch uf_parent: {}", e))
+    })?;
+    device.memset_zeros(&mut uf_aux).map_err(|e| {
+        XlogError::Kernel(format!("Failed to zero component scratch uf_aux: {}", e))
+    })?;
+    device.memset_zeros(&mut comp_list).map_err(|e| {
+        XlogError::Kernel(format!("Failed to zero component scratch comp_list: {}", e))
+    })?;
+    Ok((uf_parent, uf_aux, comp_list, uf_stride))
+}
+
+/// Compile a device-resident CNF into a device-resident XGCF circuit (Phase 1).
+pub fn compile_gpu_d4(
+    cnf: &GpuCnf,
+    provider: &Arc<CudaKernelProvider>,
+    config: &GpuCompileConfig,
+) -> Result<GpuXgcf> {
+    if config.max_frontier_items == 0 {
+        return Err(XlogError::Compilation(
+            "GpuCompileConfig.max_frontier_items must be > 0".to_string(),
+        ));
+    }
+    if config.frontier_depth > config.max_depth {
+        return Err(XlogError::Compilation(
+            "GpuCompileConfig.frontier_depth must be <= max_depth".to_string(),
+        ));
+    }
+    if config.smooth_node_cap == 0 || config.smooth_edge_cap == 0 {
+        return Err(XlogError::Compilation(
+            "GpuCompileConfig smooth_node_cap/smooth_edge_cap must be > 0".to_string(),
+        ));
+    }
+    if cnf.var_cap == 0 {
+        return Err(XlogError::Compilation(
+            "compile_gpu_d4 requires var_cap > 0".to_string(),
+        ));
+    }
+
+    validate_cnf_gpu(cnf, provider)?;
+
+    let frontier = build_frontier_bitset(cnf, provider, config)?;
+    provider
+        .device()
+        .synchronize()
+        .map_err(|e| XlogError::Kernel(format!("sync after build_frontier failed: {}", e)))?;
+
+    let max_items = config.max_frontier_items;
+    let words_per_item = frontier.words_per_item();
+    let node_cap = config.smooth_node_cap;
+    let edge_cap = config.smooth_edge_cap;
+
+    if node_cap < 3 {
+        return Err(XlogError::Compilation(
+            "GpuCompileConfig.smooth_node_cap must be >= 3".to_string(),
+        ));
+    }
+    if edge_cap < max_items {
+        return Err(XlogError::Compilation(format!(
+            "GpuCompileConfig.smooth_edge_cap {} < max_frontier_items {}",
+            edge_cap, max_items
+        )));
+    }
+
+    let trail_stride = cnf
+        .var_cap
+        .checked_add(1)
+        .ok_or_else(|| XlogError::Kernel("trail stride var_cap+1 overflow".to_string()))?;
+    let trail_len = checked_pool_len_usize(max_items, trail_stride, "trail")?;
+
+    let memory = provider.memory();
+    let device = provider.device().inner();
+
+    let mut scratch_trail = memory.alloc::<i32>(trail_len)?;
+    device
+        .memset_zeros(&mut scratch_trail)
+        .map_err(|e| XlogError::Kernel(format!("Failed to zero scratch_trail: {}", e)))?;
+    let (mut uf_parent, mut uf_aux, mut comp_list, uf_stride) =
+        alloc_component_scratch(provider, max_items, cnf.var_cap)?;
+
+    let mut node_counts = memory.alloc::<u32>(max_items as usize)?;
+    let mut edge_counts = memory.alloc::<u32>(max_items as usize)?;
+    device
+        .memset_zeros(&mut node_counts)
+        .map_err(|e| XlogError::Kernel(format!("Failed to zero node_counts: {}", e)))?;
+    device
+        .memset_zeros(&mut edge_counts)
+        .map_err(|e| XlogError::Kernel(format!("Failed to zero edge_counts: {}", e)))?;
+
+    let compile_count = device
+        .get_func(D4_MODULE, d4_kernels::D4_COMPILE_COUNT)
+        .ok_or_else(|| XlogError::Kernel("d4_compile_count kernel not found".to_string()))?;
+
+    let max_depth = config.max_depth as u32;
+    let max_items_u32 = max_items;
+    let words_per_item_u32 = words_per_item;
+    let trail_stride_u32 = trail_stride;
+    let uf_stride_u32 = uf_stride;
+
+    let mut count_params: Vec<*mut c_void> = vec![
+        max_depth.as_kernel_param(),
+        (&cnf.clause_offsets).as_kernel_param(),
+        (&cnf.literals).as_kernel_param(),
+        (&cnf.num_vars).as_kernel_param(),
+        (&cnf.num_clauses).as_kernel_param(),
+        (&frontier.items).as_kernel_param(),
+        frontier.size_device().as_kernel_param(),
+        frontier.true_bits_device().as_kernel_param(),
+        frontier.false_bits_device().as_kernel_param(),
+        words_per_item_u32.as_kernel_param(),
+        (&mut scratch_trail).as_kernel_param(),
+        trail_stride_u32.as_kernel_param(),
+        (&mut uf_parent).as_kernel_param(),
+        (&mut uf_aux).as_kernel_param(),
+        (&mut comp_list).as_kernel_param(),
+        uf_stride_u32.as_kernel_param(),
+        (&mut node_counts).as_kernel_param(),
+        (&mut edge_counts).as_kernel_param(),
+    ];
+
+    unsafe {
+        compile_count.clone().launch(
+            LaunchConfig {
+                grid_dim: (max_items_u32, 1, 1),
+                block_dim: (128, 1, 1),
+                shared_mem_bytes: 0,
+            },
+            &mut count_params,
+        )
+    }
+    .map_err(|e| XlogError::Kernel(format!("d4_compile_count failed: {}", e)))?;
+    provider
+        .device()
+        .synchronize()
+        .map_err(|e| XlogError::Kernel(format!("sync after d4_compile_count failed: {}", e)))?;
+
+    let mut node_offsets = memory.alloc::<u32>(max_items as usize)?;
+    let mut edge_offsets = memory.alloc::<u32>(max_items as usize)?;
+    device
+        .dtod_copy(&node_counts, &mut node_offsets)
+        .map_err(|e| XlogError::Kernel(format!("dtod_copy(node_counts) failed: {}", e)))?;
+    device
+        .dtod_copy(&edge_counts, &mut edge_offsets)
+        .map_err(|e| XlogError::Kernel(format!("dtod_copy(edge_counts) failed: {}", e)))?;
+    exclusive_scan_u32_inplace(provider, &mut node_offsets, max_items_u32)?;
+    exclusive_scan_u32_inplace(provider, &mut edge_offsets, max_items_u32)?;
+
+    let node_cap_usize = usize::try_from(node_cap)
+        .map_err(|_| XlogError::Compilation("smooth_node_cap exceeds usize::MAX".to_string()))?;
+    let edge_cap_usize = usize::try_from(edge_cap)
+        .map_err(|_| XlogError::Compilation("smooth_edge_cap exceeds usize::MAX".to_string()))?;
+    let offsets_len = node_cap_usize
+        .checked_add(1)
+        .ok_or_else(|| XlogError::Compilation("child_offsets length overflow".to_string()))?;
+
+    let mut node_type = memory.alloc::<u8>(node_cap_usize)?;
+    let mut child_offsets = memory.alloc::<u32>(offsets_len)?;
+    let mut child_indices = memory.alloc::<u32>(edge_cap_usize)?;
+    let mut lit = memory.alloc::<i32>(node_cap_usize)?;
+    let mut decision_var = memory.alloc::<u32>(node_cap_usize)?;
+    let mut decision_child_false = memory.alloc::<u32>(node_cap_usize)?;
+    let mut decision_child_true = memory.alloc::<u32>(node_cap_usize)?;
+    let mut node_level = memory.alloc::<u32>(node_cap_usize)?;
+
+    device
+        .memset_zeros(&mut node_type)
+        .map_err(|e| XlogError::Kernel(format!("Failed to zero node_type: {}", e)))?;
+    device
+        .memset_zeros(&mut child_offsets)
+        .map_err(|e| XlogError::Kernel(format!("Failed to zero child_offsets: {}", e)))?;
+    device
+        .memset_zeros(&mut child_indices)
+        .map_err(|e| XlogError::Kernel(format!("Failed to zero child_indices: {}", e)))?;
+    device
+        .memset_zeros(&mut lit)
+        .map_err(|e| XlogError::Kernel(format!("Failed to zero lit: {}", e)))?;
+    device
+        .memset_zeros(&mut decision_var)
+        .map_err(|e| XlogError::Kernel(format!("Failed to zero decision_var: {}", e)))?;
+    device
+        .memset_zeros(&mut decision_child_false)
+        .map_err(|e| XlogError::Kernel(format!("Failed to zero decision_child_false: {}", e)))?;
+    device
+        .memset_zeros(&mut decision_child_true)
+        .map_err(|e| XlogError::Kernel(format!("Failed to zero decision_child_true: {}", e)))?;
+    device
+        .memset_zeros(&mut node_level)
+        .map_err(|e| XlogError::Kernel(format!("Failed to zero node_level: {}", e)))?;
+
+    let compile_emit = device
+        .get_func(D4_MODULE, d4_kernels::D4_COMPILE_EMIT)
+        .ok_or_else(|| XlogError::Kernel("d4_compile_emit kernel not found".to_string()))?;
+
+    let max_items_u32 = max_items;
+    let node_cap_u32 = node_cap;
+    let edge_cap_u32 = edge_cap;
+    let mut emit_params: Vec<*mut c_void> = vec![
+        max_depth.as_kernel_param(),
+        max_items_u32.as_kernel_param(),
+        node_cap_u32.as_kernel_param(),
+        edge_cap_u32.as_kernel_param(),
+        (&cnf.clause_offsets).as_kernel_param(),
+        (&cnf.literals).as_kernel_param(),
+        (&cnf.num_vars).as_kernel_param(),
+        (&cnf.num_clauses).as_kernel_param(),
+        (&frontier.items).as_kernel_param(),
+        frontier.size_device().as_kernel_param(),
+        frontier.true_bits_device().as_kernel_param(),
+        frontier.false_bits_device().as_kernel_param(),
+        words_per_item_u32.as_kernel_param(),
+        (&mut scratch_trail).as_kernel_param(),
+        trail_stride_u32.as_kernel_param(),
+        (&mut uf_parent).as_kernel_param(),
+        (&mut uf_aux).as_kernel_param(),
+        (&mut comp_list).as_kernel_param(),
+        uf_stride_u32.as_kernel_param(),
+        (&node_counts).as_kernel_param(),
+        (&edge_counts).as_kernel_param(),
+        (&node_offsets).as_kernel_param(),
+        (&edge_offsets).as_kernel_param(),
+        (&mut node_type).as_kernel_param(),
+        (&mut child_offsets).as_kernel_param(),
+        (&mut child_indices).as_kernel_param(),
+        (&mut lit).as_kernel_param(),
+        (&mut decision_var).as_kernel_param(),
+        (&mut decision_child_false).as_kernel_param(),
+        (&mut decision_child_true).as_kernel_param(),
+        (&mut node_level).as_kernel_param(),
+    ];
+    unsafe {
+        compile_emit.clone().launch(
+            LaunchConfig {
+                grid_dim: (max_items_u32, 1, 1),
+                block_dim: (128, 1, 1),
+                shared_mem_bytes: 0,
+            },
+            &mut emit_params,
+        )
+    }
+    .map_err(|e| XlogError::Kernel(format!("d4_compile_emit failed: {}", e)))?;
+    provider
+        .device()
+        .synchronize()
+        .map_err(|e| XlogError::Kernel(format!("sync after d4_compile_emit failed: {}", e)))?;
+
+    let num_levels = (max_depth as u32)
+        .checked_mul(2)
+        .and_then(|v| v.checked_add(8))
+        .ok_or_else(|| XlogError::Compilation("num_levels overflow".to_string()))?;
+
+    let mut level_counts = memory.alloc::<u32>(num_levels as usize)?;
+    let mut level_offsets = memory.alloc::<u32>((num_levels as usize) + 1)?;
+    let mut level_nodes = memory.alloc::<u32>(node_cap_usize)?;
+    let mut level_cursors = memory.alloc::<u32>(num_levels as usize)?;
+    device
+        .memset_zeros(&mut level_counts)
+        .map_err(|e| XlogError::Kernel(format!("Failed to zero level_counts: {}", e)))?;
+    device
+        .memset_zeros(&mut level_offsets)
+        .map_err(|e| XlogError::Kernel(format!("Failed to zero level_offsets: {}", e)))?;
+    device
+        .memset_zeros(&mut level_nodes)
+        .map_err(|e| XlogError::Kernel(format!("Failed to zero level_nodes: {}", e)))?;
+    device
+        .memset_zeros(&mut level_cursors)
+        .map_err(|e| XlogError::Kernel(format!("Failed to zero level_cursors: {}", e)))?;
+
+    let lvl_counts = device
+        .get_func(D4_MODULE, d4_kernels::D4_LEVELIZE_COUNTS)
+        .ok_or_else(|| XlogError::Kernel("d4_levelize_counts kernel not found".to_string()))?;
+    let mut grid = (node_cap_u32 + 255) / 256;
+    if grid == 0 {
+        grid = 1;
+    }
+    unsafe {
+        lvl_counts.clone().launch(
+            LaunchConfig {
+                grid_dim: (grid, 1, 1),
+                block_dim: (256, 1, 1),
+                shared_mem_bytes: 0,
+            },
+            (&node_level, node_cap_u32, num_levels, &mut level_counts),
+        )
+    }
+    .map_err(|e| XlogError::Kernel(format!("d4_levelize_counts failed: {}", e)))?;
+
+    device
+        .dtod_copy(
+            &level_counts,
+            &mut level_offsets.slice_mut(0..num_levels as usize),
+        )
+        .map_err(|e| XlogError::Kernel(format!("dtod_copy(level_counts) failed: {}", e)))?;
+    exclusive_scan_u32_inplace(provider, &mut level_offsets, num_levels + 1)?;
+
+    let lvl_emit = device
+        .get_func(D4_MODULE, d4_kernels::D4_LEVELIZE_EMIT)
+        .ok_or_else(|| XlogError::Kernel("d4_levelize_emit kernel not found".to_string()))?;
+    unsafe {
+        lvl_emit.clone().launch(
+            LaunchConfig {
+                grid_dim: (grid, 1, 1),
+                block_dim: (256, 1, 1),
+                shared_mem_bytes: 0,
+            },
+            (
+                &node_level,
+                node_cap_u32,
+                num_levels,
+                &level_offsets,
+                &mut level_cursors,
+                &mut level_nodes,
+            ),
+        )
+    }
+    .map_err(|e| XlogError::Kernel(format!("d4_levelize_emit failed: {}", e)))?;
+    provider
+        .device()
+        .synchronize()
+        .map_err(|e| XlogError::Kernel(format!("sync after d4_levelize_emit failed: {}", e)))?;
+
+    let builder = GpuCircuitBuilder {
+        node_type,
+        child_offsets,
+        child_indices,
+        lit,
+        decision_var,
+        decision_child_false,
+        decision_child_true,
+    };
+    let layout = GpuCircuitLayout {
+        num_nodes: node_cap_u32,
+        num_levels,
+        level_offsets,
+        level_nodes,
+        root: 2,
+        max_var: cnf.var_cap,
+    };
+
+    GpuXgcf::from_device(builder, layout, provider)
 }
 
 #[cfg(test)]
@@ -1844,12 +2204,13 @@ mod tests {
             .synchronize()
             .expect("sync after build_frontier_bitset must succeed");
         let max_items = cfg.max_frontier_items;
+        let max_depth_u32 = cfg.max_depth as u32;
         let wpi = frontier.words_per_item;
 
         // Circuit pool sizing for this test (small CNFs only).
         let node_cap: u32 = 256;
         let edge_cap: u32 = 512;
-        let num_levels: u32 = (cfg.max_depth as u32) * 2u32 + 8u32;
+        let num_levels: u32 = max_depth_u32 * 2u32 + 8u32;
 
         let mut node_type = memory.alloc::<u8>(node_cap as usize).unwrap();
         let mut child_offsets = memory.alloc::<u32>((node_cap as usize) + 1).unwrap();
@@ -1888,7 +2249,7 @@ mod tests {
             .get_func(D4_MODULE, "d4_compile_count")
             .expect("d4_compile_count must exist");
         let mut count_params: Vec<*mut c_void> = vec![
-            (cfg.max_depth as u32).as_kernel_param(),
+            max_depth_u32.as_kernel_param(),
             (&phi.clause_offsets).as_kernel_param(),
             (&phi.literals).as_kernel_param(),
             (&phi.num_vars).as_kernel_param(),
@@ -1936,7 +2297,7 @@ mod tests {
             .get_func(D4_MODULE, "d4_compile_emit")
             .expect("d4_compile_emit must exist");
         let mut emit_params: Vec<*mut c_void> = vec![
-            (cfg.max_depth as u32).as_kernel_param(),
+            max_depth_u32.as_kernel_param(),
             max_items.as_kernel_param(),
             node_cap.as_kernel_param(),
             edge_cap.as_kernel_param(),
@@ -2009,7 +2370,10 @@ mod tests {
                 .unwrap();
         }
         device
-            .dtod_copy(&level_counts, &mut level_offsets.slice_mut(0..num_levels as usize))
+            .dtod_copy(
+                &level_counts,
+                &mut level_offsets.slice_mut(0..num_levels as usize),
+            )
             .unwrap();
         super::exclusive_scan_u32_inplace(&provider, &mut level_offsets, num_levels + 1)
             .expect("level scan must succeed");
@@ -2105,11 +2469,12 @@ mod tests {
         let frontier = super::build_frontier_bitset(&phi, &provider, &cfg)
             .expect("build_frontier_bitset must succeed");
         let max_items = cfg.max_frontier_items;
+        let max_depth_u32 = cfg.max_depth as u32;
         let wpi = frontier.words_per_item;
 
         let node_cap: u32 = 512;
         let edge_cap: u32 = 2048;
-        let num_levels: u32 = (cfg.max_depth as u32) * 2u32 + 8u32;
+        let num_levels: u32 = max_depth_u32 * 2u32 + 8u32;
 
         let mut node_type = memory.alloc::<u8>(node_cap as usize).unwrap();
         let mut child_offsets = memory.alloc::<u32>((node_cap as usize) + 1).unwrap();
@@ -2148,7 +2513,7 @@ mod tests {
             .get_func(D4_MODULE, d4_kernels::D4_COMPILE_COUNT)
             .expect("d4_compile_count must exist");
         let mut count_params: Vec<*mut c_void> = vec![
-            (cfg.max_depth as u32).as_kernel_param(),
+            max_depth_u32.as_kernel_param(),
             (&phi.clause_offsets).as_kernel_param(),
             (&phi.literals).as_kernel_param(),
             (&phi.num_vars).as_kernel_param(),
@@ -2201,7 +2566,7 @@ mod tests {
             .get_func(D4_MODULE, d4_kernels::D4_COMPILE_EMIT)
             .expect("d4_compile_emit must exist");
         let mut emit_params: Vec<*mut c_void> = vec![
-            (cfg.max_depth as u32).as_kernel_param(),
+            max_depth_u32.as_kernel_param(),
             max_items.as_kernel_param(),
             node_cap.as_kernel_param(),
             edge_cap.as_kernel_param(),
@@ -2279,7 +2644,10 @@ mod tests {
         }
         provider.device().synchronize().unwrap();
         device
-            .dtod_copy(&level_counts, &mut level_offsets.slice_mut(0..num_levels as usize))
+            .dtod_copy(
+                &level_counts,
+                &mut level_offsets.slice_mut(0..num_levels as usize),
+            )
             .unwrap();
         super::exclusive_scan_u32_inplace(&provider, &mut level_offsets, num_levels + 1).unwrap();
 
@@ -2369,11 +2737,12 @@ mod tests {
         let frontier = super::build_frontier_bitset(&phi, &provider, &cfg)
             .expect("build_frontier_bitset must succeed");
         let max_items = cfg.max_frontier_items;
+        let max_depth_u32 = cfg.max_depth as u32;
         let wpi = frontier.words_per_item;
 
         let node_cap: u32 = 128;
         let edge_cap: u32 = 512;
-        let num_levels: u32 = (cfg.max_depth as u32) * 2u32 + 8u32;
+        let num_levels: u32 = max_depth_u32 * 2u32 + 8u32;
 
         let mut node_type = memory.alloc::<u8>(node_cap as usize).unwrap();
         let mut child_offsets = memory.alloc::<u32>((node_cap as usize) + 1).unwrap();
@@ -2412,7 +2781,7 @@ mod tests {
             .get_func(D4_MODULE, d4_kernels::D4_COMPILE_COUNT)
             .expect("d4_compile_count must exist");
         let mut count_params: Vec<*mut c_void> = vec![
-            (cfg.max_depth as u32).as_kernel_param(),
+            max_depth_u32.as_kernel_param(),
             (&phi.clause_offsets).as_kernel_param(),
             (&phi.literals).as_kernel_param(),
             (&phi.num_vars).as_kernel_param(),
@@ -2456,7 +2825,7 @@ mod tests {
             .get_func(D4_MODULE, d4_kernels::D4_COMPILE_EMIT)
             .expect("d4_compile_emit must exist");
         let mut emit_params: Vec<*mut c_void> = vec![
-            (cfg.max_depth as u32).as_kernel_param(),
+            max_depth_u32.as_kernel_param(),
             max_items.as_kernel_param(),
             node_cap.as_kernel_param(),
             edge_cap.as_kernel_param(),
@@ -2531,7 +2900,10 @@ mod tests {
             .synchronize()
             .expect("sync after d4_levelize_counts must succeed");
         device
-            .dtod_copy(&level_counts, &mut level_offsets.slice_mut(0..num_levels as usize))
+            .dtod_copy(
+                &level_counts,
+                &mut level_offsets.slice_mut(0..num_levels as usize),
+            )
             .unwrap();
         super::exclusive_scan_u32_inplace(&provider, &mut level_offsets, num_levels + 1).unwrap();
         provider
@@ -2628,11 +3000,12 @@ mod tests {
         let frontier = super::build_frontier_bitset(&phi, &provider, &cfg)
             .expect("build_frontier_bitset must succeed");
         let max_items = cfg.max_frontier_items;
+        let max_depth_u32 = cfg.max_depth as u32;
         let wpi = frontier.words_per_item;
 
         let node_cap: u32 = 4096;
         let edge_cap: u32 = 16384;
-        let num_levels: u32 = (cfg.max_depth as u32) * 2u32 + 8u32;
+        let num_levels: u32 = max_depth_u32 * 2u32 + 8u32;
 
         let mut node_type = memory.alloc::<u8>(node_cap as usize).unwrap();
         let mut child_offsets = memory.alloc::<u32>((node_cap as usize) + 1).unwrap();
@@ -2671,7 +3044,7 @@ mod tests {
             .get_func(D4_MODULE, d4_kernels::D4_COMPILE_COUNT)
             .expect("d4_compile_count must exist");
         let mut count_params: Vec<*mut c_void> = vec![
-            (cfg.max_depth as u32).as_kernel_param(),
+            max_depth_u32.as_kernel_param(),
             (&phi.clause_offsets).as_kernel_param(),
             (&phi.literals).as_kernel_param(),
             (&phi.num_vars).as_kernel_param(),
@@ -2715,7 +3088,7 @@ mod tests {
             .get_func(D4_MODULE, d4_kernels::D4_COMPILE_EMIT)
             .expect("d4_compile_emit must exist");
         let mut emit_params: Vec<*mut c_void> = vec![
-            (cfg.max_depth as u32).as_kernel_param(),
+            max_depth_u32.as_kernel_param(),
             max_items.as_kernel_param(),
             node_cap.as_kernel_param(),
             edge_cap.as_kernel_param(),
@@ -2787,7 +3160,10 @@ mod tests {
                 .unwrap();
         }
         device
-            .dtod_copy(&level_counts, &mut level_offsets.slice_mut(0..num_levels as usize))
+            .dtod_copy(
+                &level_counts,
+                &mut level_offsets.slice_mut(0..num_levels as usize),
+            )
             .unwrap();
         super::exclusive_scan_u32_inplace(&provider, &mut level_offsets, num_levels + 1).unwrap();
 
@@ -2815,7 +3191,7 @@ mod tests {
                 .unwrap();
         }
 
-let builder = crate::gpu::GpuCircuitBuilder {
+        let builder = crate::gpu::GpuCircuitBuilder {
             node_type,
             child_offsets,
             child_indices,
@@ -2888,6 +3264,7 @@ let builder = crate::gpu::GpuCircuitBuilder {
             .synchronize()
             .expect("sync after build_frontier_bitset must succeed");
         let max_items = cfg.max_frontier_items;
+        let max_depth_u32 = cfg.max_depth as u32;
         let wpi = frontier.words_per_item;
 
         let node_cap: u32 = 4096;
@@ -2930,7 +3307,7 @@ let builder = crate::gpu::GpuCircuitBuilder {
             .get_func(D4_MODULE, d4_kernels::D4_COMPILE_COUNT)
             .expect("d4_compile_count must exist");
         let mut count_params: Vec<*mut c_void> = vec![
-            (cfg.max_depth as u32).as_kernel_param(),
+            max_depth_u32.as_kernel_param(),
             (&phi.clause_offsets).as_kernel_param(),
             (&phi.literals).as_kernel_param(),
             (&phi.num_vars).as_kernel_param(),
@@ -2982,7 +3359,7 @@ let builder = crate::gpu::GpuCircuitBuilder {
             .get_func(D4_MODULE, d4_kernels::D4_COMPILE_EMIT)
             .expect("d4_compile_emit must exist");
         let mut emit_params: Vec<*mut c_void> = vec![
-            (cfg.max_depth as u32).as_kernel_param(),
+            max_depth_u32.as_kernel_param(),
             max_items.as_kernel_param(),
             node_cap.as_kernel_param(),
             edge_cap.as_kernel_param(),

@@ -17,7 +17,11 @@ All notable changes to this project are documented in this file.
   capacity > exact size.
 - **GPU-native equivalence verification** (`xlog-prob::compilation`) proving `φ ≡ C` via two UNSAT checks on GPU:
   `UNSAT(φ ∧ ¬C)` and `UNSAT(C ∧ ¬φ)`, with zero device→host reads.
+- **GPU D4 compile+verify entrypoint** (`compile_gpu_d4_and_verify`) that compiles CNF to device-resident XGCF and
+  validates equivalence via the GPU CDCL verifier.
 - **Regression guardrails** enforcing “no device→host reads” in the production verifier modules.
+- **Device-only logZ outputs** for GPU XGCF evaluation (`eval_log_wmc_device_*`) plus a guard test to prevent
+  device→host reads inside device-only evaluation paths.
 - **GPU-native loss output for neural fast-path**: `ExactDdnnfProgram::neural_backward_nll_buffers_with_device_loss`
   returns the scalar NLL loss as a device-resident value (no dtoh).
 - **DLPack helper for typed allocations**: `TrackedCudaSlice::into_bytes()` enables wrapping typed device scalars into
@@ -37,6 +41,8 @@ All notable changes to this project are documented in this file.
 - `pyxlog` GPU neural fast-path ordering: replaced `torch.cuda.synchronize()` with stream-to-stream waits.
 - Release-mode CUDA crash in the GPU CDCL verifier/equivalence path caused by passing temporary scalar kernel arguments
   via raw parameter vectors (now backed by stable locals before `cuLaunchKernel`).
+- Release-mode CUDA launch failures in GPU D4 tests and smoothing due to temporary scalar kernel arguments (now backed
+  by stable locals before `cuLaunchKernel`).
 
 ### Validation
 
