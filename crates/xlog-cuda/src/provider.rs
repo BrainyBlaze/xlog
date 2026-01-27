@@ -32,6 +32,7 @@ const ARITH_PTX: &str = include_str!("../../../kernels/arith.ptx");
 const SAT_PTX: &str = include_str!("../../../kernels/sat.ptx");
 const D4_PTX: &str = include_str!("../../../kernels/d4.ptx");
 const NEURAL_PTX: &str = include_str!("../../../kernels/neural.ptx");
+const PIR_PTX: &str = include_str!("../../../kernels/pir.ptx");
 
 #[derive(Clone, Copy)]
 struct RawCudaView<'a, T> {
@@ -75,6 +76,7 @@ pub const ARITH_MODULE: &str = "xlog_arith";
 pub const SAT_MODULE: &str = "xlog_sat";
 pub const D4_MODULE: &str = "xlog_d4";
 pub const NEURAL_MODULE: &str = "xlog_neural";
+pub const PIR_MODULE: &str = "xlog_pir";
 
 /// Kernel function names in the Monte Carlo sampling module
 pub mod mc_sample_kernels {
@@ -115,6 +117,13 @@ pub mod arith_kernels {
 pub mod neural_kernels {
     pub const NEURAL_FILL_AD_CHAIN_F32: &str = "neural_fill_ad_chain_f32";
     pub const NEURAL_SCATTER_AD_CHAIN_GRADS_F32: &str = "neural_scatter_ad_chain_grads_f32";
+}
+
+/// Kernel function names in the PIR interning module.
+pub mod pir_kernels {
+    pub const PIR_PACK_KEYS: &str = "pir_pack_keys";
+    pub const PIR_HASH_KEYS: &str = "pir_hash_keys";
+    pub const PIR_MARK_UNIQUE: &str = "pir_mark_unique";
 }
 
 /// Kernel function names in the GPU D4 module (CNF validation + circuit levelization).
@@ -658,6 +667,20 @@ impl CudaKernelProvider {
                 ],
             )
             .map_err(|e| XlogError::Kernel(format!("Failed to load pack PTX: {}", e)))?;
+
+        // Load PIR interning module (GPU PIR key packing + hashing + unique marking)
+        device
+            .inner()
+            .load_ptx(
+                Ptx::from_src(PIR_PTX),
+                PIR_MODULE,
+                &[
+                    pir_kernels::PIR_PACK_KEYS,
+                    pir_kernels::PIR_HASH_KEYS,
+                    pir_kernels::PIR_MARK_UNIQUE,
+                ],
+            )
+            .map_err(|e| XlogError::Kernel(format!("Failed to load PIR PTX: {}", e)))?;
 
         // Load circuit module (XGCF circuit evaluation)
         device

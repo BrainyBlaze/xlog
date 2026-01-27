@@ -1,0 +1,40 @@
+use std::sync::Arc;
+
+use xlog_core::MemoryBudget;
+use xlog_cuda::provider::{pir_kernels, PIR_MODULE};
+use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+
+fn setup_provider() -> Option<CudaKernelProvider> {
+    let device = match CudaDevice::new(0) {
+        Ok(d) => Arc::new(d),
+        Err(e) => {
+            eprintln!("Skipping: CUDA runtime unavailable: {}", e);
+            return None;
+        }
+    };
+    let budget = MemoryBudget::with_limit(1024 * 1024 * 1024);
+    let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
+    Some(CudaKernelProvider::new(device, memory).unwrap())
+}
+
+#[test]
+fn test_provider_loads_pir_module_entrypoints() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    let device = provider.device().inner();
+    assert!(
+        device.get_func(PIR_MODULE, pir_kernels::PIR_PACK_KEYS).is_some(),
+        "expected provider to load PIR module and expose pir_pack_keys"
+    );
+    assert!(
+        device.get_func(PIR_MODULE, pir_kernels::PIR_HASH_KEYS).is_some(),
+        "expected provider to load PIR module and expose pir_hash_keys"
+    );
+    assert!(
+        device.get_func(PIR_MODULE, pir_kernels::PIR_MARK_UNIQUE).is_some(),
+        "expected provider to load PIR module and expose pir_mark_unique"
+    );
+}

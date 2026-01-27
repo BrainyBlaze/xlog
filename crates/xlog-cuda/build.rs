@@ -29,6 +29,7 @@ fn main() {
         "sat",
         "d4",
         "neural",
+        "pir",
     ];
 
     for kernel in &kernels {
