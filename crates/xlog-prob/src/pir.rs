@@ -69,6 +69,18 @@ impl PirGraph {
         Self { nodes: Vec::new() }
     }
 
+    pub fn len(&self) -> usize {
+        self.nodes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
+
+    pub fn nodes(&self) -> &[PirNode] {
+        &self.nodes
+    }
+
     pub fn node(&self, id: PirNodeId) -> Option<&PirNode> {
         self.nodes.get(id.0 as usize)
     }
