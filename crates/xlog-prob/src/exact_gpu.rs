@@ -3,12 +3,16 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
+use cudarc::driver::DeviceSlice;
 use xlog_core::{MemoryBudget, Result, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 
 use crate::compilation::gpu_cache::{GpuCircuitCache, GpuCircuitCacheHandle};
-use crate::compilation::gpu_weights::{build_evidence_by_var_gpu, build_weights_gpu, map_nodes_to_vars_gpu, GpuWeights};
+use crate::compilation::gpu_weights::{
+    apply_query_vars_device, build_evidence_by_var_gpu, build_weights_gpu,
+    map_nodes_to_vars_gpu, restore_query_vars_device, GpuWeights,
+};
 use crate::compilation::{compile_gpu_d4_and_verify_cached, encode_cnf_gpu, GpuPirGraph, GpuPirRoots};
 use crate::exact::{
     build_weight_sources, collect_random_vars_host, default_cache_config, default_compile_config,
@@ -75,6 +79,49 @@ impl ExactGpuState {
 
     pub fn queries(&self) -> &[GroundAtom] {
         &self.queries
+    }
+
+    pub fn allocate_query_restore(
+        &self,
+    ) -> Result<Option<TrackedCudaSlice<f64>>> {
+        let Some(provider) = self.provider.as_ref() else {
+            return Ok(None);
+        };
+        let Some(query_vars) = self.query_vars_device.as_ref() else {
+            return Ok(None);
+        };
+        let buf = provider.memory().alloc::<f64>(query_vars.len())?;
+        Ok(Some(buf))
+    }
+
+    pub fn apply_query_vars(
+        &self,
+        cache: &mut GpuCircuitCache,
+        saved: &mut TrackedCudaSlice<f64>,
+    ) -> Result<()> {
+        let Some(provider) = self.provider.as_ref() else {
+            return Ok(());
+        };
+        let Some(query_vars) = self.query_vars_device.as_ref() else {
+            return Ok(());
+        };
+        let (_, log_false) = cache.var_log_weights_mut();
+        apply_query_vars_device(provider, query_vars, self.max_var, log_false, saved)
+    }
+
+    pub fn restore_query_vars(
+        &self,
+        cache: &mut GpuCircuitCache,
+        saved: &TrackedCudaSlice<f64>,
+    ) -> Result<()> {
+        let Some(provider) = self.provider.as_ref() else {
+            return Ok(());
+        };
+        let Some(query_vars) = self.query_vars_device.as_ref() else {
+            return Ok(());
+        };
+        let (_, log_false) = cache.var_log_weights_mut();
+        restore_query_vars_device(provider, query_vars, self.max_var, log_false, saved)
     }
 }
 

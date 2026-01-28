@@ -164,3 +164,45 @@ extern "C" __global__ void weights_restore_var_false(
     }
     log_false[var] = restore[0];
 }
+
+extern "C" __global__ void weights_apply_query_vars(
+    const uint32_t* __restrict__ query_vars,
+    uint32_t count,
+    uint32_t var_cap,
+    double* __restrict__ log_false,
+    double* __restrict__ saved
+) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    for (uint32_t idx = tid; idx < count; idx += blockDim.x * gridDim.x) {
+        uint32_t var = query_vars[idx];
+        if (var == 0u) {
+            saved[idx] = 0.0;
+            continue;
+        }
+        if (var > var_cap) {
+            weights_trap();
+        }
+        saved[idx] = log_false[var];
+        log_false[var] = -INFINITY;
+    }
+}
+
+extern "C" __global__ void weights_restore_query_vars(
+    const uint32_t* __restrict__ query_vars,
+    uint32_t count,
+    uint32_t var_cap,
+    double* __restrict__ log_false,
+    const double* __restrict__ saved
+) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    for (uint32_t idx = tid; idx < count; idx += blockDim.x * gridDim.x) {
+        uint32_t var = query_vars[idx];
+        if (var == 0u) {
+            continue;
+        }
+        if (var > var_cap) {
+            weights_trap();
+        }
+        log_false[var] = saved[idx];
+    }
+}

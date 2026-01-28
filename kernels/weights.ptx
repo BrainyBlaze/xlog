@@ -1156,4 +1156,147 @@ $L__BB6_2:
 	ret;
 
 }
+	// .globl	weights_apply_query_vars
+.visible .entry weights_apply_query_vars(
+	.param .u64 weights_apply_query_vars_param_0,
+	.param .u32 weights_apply_query_vars_param_1,
+	.param .u32 weights_apply_query_vars_param_2,
+	.param .u64 weights_apply_query_vars_param_3,
+	.param .u64 weights_apply_query_vars_param_4
+)
+{
+	.reg .pred 	%p<5>;
+	.reg .b32 	%r<15>;
+	.reg .f64 	%fd<2>;
+	.reg .b64 	%rd<17>;
+
+
+	ld.param.u64 	%rd7, [weights_apply_query_vars_param_0];
+	ld.param.u32 	%r6, [weights_apply_query_vars_param_1];
+	ld.param.u32 	%r7, [weights_apply_query_vars_param_2];
+	ld.param.u64 	%rd8, [weights_apply_query_vars_param_3];
+	ld.param.u64 	%rd9, [weights_apply_query_vars_param_4];
+	mov.u32 	%r1, %ntid.x;
+	mov.u32 	%r8, %ctaid.x;
+	mov.u32 	%r9, %tid.x;
+	mad.lo.s32 	%r14, %r8, %r1, %r9;
+	setp.ge.u32 	%p1, %r14, %r6;
+	@%p1 bra 	$L__BB7_8;
+
+	mov.u32 	%r10, %nctaid.x;
+	mul.lo.s32 	%r3, %r1, %r10;
+	cvta.to.global.u64 	%rd1, %rd7;
+	cvta.to.global.u64 	%rd2, %rd8;
+	cvta.to.global.u64 	%rd3, %rd9;
+
+$L__BB7_2:
+	cvt.u64.u32 	%rd4, %r14;
+	mul.wide.u32 	%rd10, %r14, 4;
+	add.s64 	%rd11, %rd1, %rd10;
+	ld.global.nc.u32 	%r11, [%rd11];
+	cvt.u64.u32 	%rd5, %r11;
+	setp.eq.s32 	%p2, %r11, 0;
+	mul.wide.u32 	%rd12, %r14, 8;
+	add.s64 	%rd6, %rd3, %rd12;
+	@%p2 bra 	$L__BB7_6;
+
+	cvt.u32.u64 	%r12, %rd5;
+	setp.le.u32 	%p3, %r12, %r7;
+	@%p3 bra 	$L__BB7_5;
+
+	// begin inline asm
+	trap;
+	// end inline asm
+
+$L__BB7_5:
+	shl.b64 	%rd13, %rd5, 3;
+	add.s64 	%rd14, %rd2, %rd13;
+	ld.global.f64 	%fd1, [%rd14];
+	st.global.f64 	[%rd6], %fd1;
+	mov.u64 	%rd15, -4503599627370496;
+	st.global.u64 	[%rd14], %rd15;
+	bra.uni 	$L__BB7_7;
+
+$L__BB7_6:
+	mov.u64 	%rd16, 0;
+	st.global.u64 	[%rd6], %rd16;
+
+$L__BB7_7:
+	cvt.u32.u64 	%r13, %rd4;
+	add.s32 	%r14, %r13, %r3;
+	setp.lt.u32 	%p4, %r14, %r6;
+	@%p4 bra 	$L__BB7_2;
+
+$L__BB7_8:
+	ret;
+
+}
+	// .globl	weights_restore_query_vars
+.visible .entry weights_restore_query_vars(
+	.param .u64 weights_restore_query_vars_param_0,
+	.param .u32 weights_restore_query_vars_param_1,
+	.param .u32 weights_restore_query_vars_param_2,
+	.param .u64 weights_restore_query_vars_param_3,
+	.param .u64 weights_restore_query_vars_param_4
+)
+{
+	.reg .pred 	%p<5>;
+	.reg .b32 	%r<15>;
+	.reg .f64 	%fd<2>;
+	.reg .b64 	%rd<15>;
+
+
+	ld.param.u64 	%rd6, [weights_restore_query_vars_param_0];
+	ld.param.u32 	%r6, [weights_restore_query_vars_param_1];
+	ld.param.u32 	%r7, [weights_restore_query_vars_param_2];
+	ld.param.u64 	%rd7, [weights_restore_query_vars_param_3];
+	ld.param.u64 	%rd8, [weights_restore_query_vars_param_4];
+	mov.u32 	%r1, %ntid.x;
+	mov.u32 	%r8, %ctaid.x;
+	mov.u32 	%r9, %tid.x;
+	mad.lo.s32 	%r14, %r8, %r1, %r9;
+	setp.ge.u32 	%p1, %r14, %r6;
+	@%p1 bra 	$L__BB8_7;
+
+	mov.u32 	%r10, %nctaid.x;
+	mul.lo.s32 	%r3, %r1, %r10;
+	cvta.to.global.u64 	%rd1, %rd6;
+	cvta.to.global.u64 	%rd2, %rd8;
+	cvta.to.global.u64 	%rd3, %rd7;
+
+$L__BB8_2:
+	cvt.u64.u32 	%rd4, %r14;
+	mul.wide.u32 	%rd9, %r14, 4;
+	add.s64 	%rd10, %rd1, %rd9;
+	ld.global.nc.u32 	%r11, [%rd10];
+	cvt.u64.u32 	%rd5, %r11;
+	setp.eq.s32 	%p2, %r11, 0;
+	@%p2 bra 	$L__BB8_6;
+
+	cvt.u32.u64 	%r12, %rd5;
+	setp.le.u32 	%p3, %r12, %r7;
+	@%p3 bra 	$L__BB8_5;
+
+	// begin inline asm
+	trap;
+	// end inline asm
+
+$L__BB8_5:
+	shl.b64 	%rd11, %rd4, 3;
+	add.s64 	%rd12, %rd2, %rd11;
+	ld.global.nc.f64 	%fd1, [%rd12];
+	shl.b64 	%rd13, %rd5, 3;
+	add.s64 	%rd14, %rd3, %rd13;
+	st.global.f64 	[%rd14], %fd1;
+
+$L__BB8_6:
+	cvt.u32.u64 	%r13, %rd4;
+	add.s32 	%r14, %r13, %r3;
+	setp.lt.u32 	%p4, %r14, %r6;
+	@%p4 bra 	$L__BB8_2;
+
+$L__BB8_7:
+	ret;
+
+}
 

@@ -126,6 +126,112 @@ pub fn map_nodes_to_vars_gpu(
     Ok(out)
 }
 
+pub fn apply_query_vars_device(
+    provider: &Arc<CudaKernelProvider>,
+    query_vars: &TrackedCudaSlice<u32>,
+    var_cap: u32,
+    log_false: &mut TrackedCudaSlice<f64>,
+    saved: &mut TrackedCudaSlice<f64>,
+) -> Result<()> {
+    let count = query_vars.len();
+    if saved.len() < count {
+        return Err(XlogError::Compilation(format!(
+            "query restore buffer len {} < query vars len {}",
+            saved.len(),
+            count
+        )));
+    }
+    let weights_len = (var_cap as usize)
+        .checked_add(1)
+        .ok_or_else(|| XlogError::Compilation("query var_cap overflow".to_string()))?;
+    if log_false.len() < weights_len {
+        return Err(XlogError::Compilation(format!(
+            "log_false len {} < var_cap+1 {}",
+            log_false.len(),
+            weights_len
+        )));
+    }
+    if count == 0 {
+        return Ok(());
+    }
+
+    let device = provider.device().inner();
+    let func = device
+        .get_func(WEIGHTS_MODULE, weights_kernels::WEIGHTS_APPLY_QUERY_VARS)
+        .ok_or_else(|| {
+            XlogError::Kernel("weights_apply_query_vars kernel not found".to_string())
+        })?;
+
+    let block = 256u32;
+    let grid = grid_for(count as u32, block);
+    unsafe {
+        func.clone().launch(
+            LaunchConfig {
+                grid_dim: (grid.max(1), 1, 1),
+                block_dim: (block, 1, 1),
+                shared_mem_bytes: 0,
+            },
+            (query_vars, count as u32, var_cap, log_false, saved),
+        )
+    }
+    .map_err(|e| XlogError::Kernel(format!("weights_apply_query_vars failed: {}", e)))?;
+    provider.device().synchronize()?;
+    Ok(())
+}
+
+pub fn restore_query_vars_device(
+    provider: &Arc<CudaKernelProvider>,
+    query_vars: &TrackedCudaSlice<u32>,
+    var_cap: u32,
+    log_false: &mut TrackedCudaSlice<f64>,
+    saved: &TrackedCudaSlice<f64>,
+) -> Result<()> {
+    let count = query_vars.len();
+    if saved.len() < count {
+        return Err(XlogError::Compilation(format!(
+            "query restore buffer len {} < query vars len {}",
+            saved.len(),
+            count
+        )));
+    }
+    let weights_len = (var_cap as usize)
+        .checked_add(1)
+        .ok_or_else(|| XlogError::Compilation("query var_cap overflow".to_string()))?;
+    if log_false.len() < weights_len {
+        return Err(XlogError::Compilation(format!(
+            "log_false len {} < var_cap+1 {}",
+            log_false.len(),
+            weights_len
+        )));
+    }
+    if count == 0 {
+        return Ok(());
+    }
+
+    let device = provider.device().inner();
+    let func = device
+        .get_func(WEIGHTS_MODULE, weights_kernels::WEIGHTS_RESTORE_QUERY_VARS)
+        .ok_or_else(|| {
+            XlogError::Kernel("weights_restore_query_vars kernel not found".to_string())
+        })?;
+
+    let block = 256u32;
+    let grid = grid_for(count as u32, block);
+    unsafe {
+        func.clone().launch(
+            LaunchConfig {
+                grid_dim: (grid.max(1), 1, 1),
+                block_dim: (block, 1, 1),
+                shared_mem_bytes: 0,
+            },
+            (query_vars, count as u32, var_cap, log_false, saved),
+        )
+    }
+    .map_err(|e| XlogError::Kernel(format!("weights_restore_query_vars failed: {}", e)))?;
+    provider.device().synchronize()?;
+    Ok(())
+}
+
 pub fn build_weights_gpu(
     vars: &GpuCnfVarTables,
     leaf_probs: &TrackedCudaSlice<f64>,

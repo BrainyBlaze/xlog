@@ -28,7 +28,10 @@ pub use gpu_pir::{
     GpuPirGraph, GpuPirRoots, PIR_AND, PIR_CONST, PIR_DECISION, PIR_LIT, PIR_NEG_LIT, PIR_OR,
 };
 pub use gpu_pir_intern::{GpuPirInterner, PirBatch};
-pub use gpu_weights::{build_evidence_by_var_gpu, build_weights_gpu, map_nodes_to_vars_gpu, GpuWeights};
+pub use gpu_weights::{
+    apply_query_vars_device, build_evidence_by_var_gpu, build_weights_gpu, map_nodes_to_vars_gpu,
+    restore_query_vars_device, GpuWeights,
+};
 pub use sparse_matrix::GpuCsrCnf;
 pub use validation::{
     check_equivalence_gpu, check_equivalence_gpu_gated, validate_equivalence_gpu,

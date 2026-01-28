@@ -211,6 +211,8 @@ pub mod weights_kernels {
     pub const WEIGHTS_MAP_NODES_TO_VARS: &str = "weights_map_nodes_to_vars";
     pub const WEIGHTS_FORCE_VAR_FALSE: &str = "weights_force_var_false";
     pub const WEIGHTS_RESTORE_VAR_FALSE: &str = "weights_restore_var_false";
+    pub const WEIGHTS_APPLY_QUERY_VARS: &str = "weights_apply_query_vars";
+    pub const WEIGHTS_RESTORE_QUERY_VARS: &str = "weights_restore_query_vars";
 }
 
 /// Kernel function names in the GPU D4 module (CNF validation + circuit levelization).
@@ -871,6 +873,8 @@ impl CudaKernelProvider {
                     weights_kernels::WEIGHTS_MAP_NODES_TO_VARS,
                     weights_kernels::WEIGHTS_FORCE_VAR_FALSE,
                     weights_kernels::WEIGHTS_RESTORE_VAR_FALSE,
+                    weights_kernels::WEIGHTS_APPLY_QUERY_VARS,
+                    weights_kernels::WEIGHTS_RESTORE_QUERY_VARS,
                 ],
             )
             .map_err(|e| XlogError::Kernel(format!("Failed to load weights PTX: {}", e)))?;
