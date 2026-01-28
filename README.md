@@ -507,6 +507,9 @@ xlog run --help
 
 ## Documentation
 
+GPU-native compilation status: Phase 3 (GPU PIR→CNF encoding) is implemented in `xlog-prob::compilation` with
+device-resident CNF output; Phase 4 integration into the default exact path remains on the roadmap.
+
 | Document | Description |
 |----------|-------------|
 | [Language Reference](docs/language-reference.md) | Complete syntax guide: types, predicates, rules, modules, UDFs |

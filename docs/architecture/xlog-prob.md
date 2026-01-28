@@ -17,6 +17,9 @@ This document explains the implementation as it exists in the repository and poi
 - `crates/xlog-prob/src/provenance.rs`: provenance extraction + grounding + probabilistic lowering
 - `crates/xlog-prob/src/pir.rs`: PIR graph data model
 - `crates/xlog-prob/src/cnf.rs`: Tseitin encoding + CNF var mapping
+- `crates/xlog-prob/src/compilation/gpu_pir.rs`: GPU PIR graph layout (device-resident SoA)
+- `crates/xlog-prob/src/compilation/gpu_pir_intern.rs`: GPU PIR interner (deterministic, memory-bounded)
+- `crates/xlog-prob/src/compilation/gpu_cnf.rs`: GPU PIR→CNF encoder (`encode_cnf_gpu`)
 - `crates/xlog-prob/src/kc/d4.rs`: D4 compiler wrapper (runs vendored `d4`)
 - `crates/xlog-prob/src/kc/ddnnf.rs`: Decision-DNNF parser
 - `crates/xlog-prob/src/xgcf.rs`: XGCF (GPU circuit format) construction
@@ -26,6 +29,7 @@ This document explains the implementation as it exists in the repository and poi
 
 ### CUDA kernels
 - `kernels/circuit.cu` / `kernels/circuit.ptx`: forward + backward kernels for XGCF circuits
+- `kernels/cnf.cu` / `kernels/cnf.ptx`: GPU PIR→CNF encoding kernels (`xlog_cnf`)
 - `kernels/mc_sample.cu` / `kernels/mc_sample.ptx`: Bernoulli sampling kernel used by `mc`
 - `kernels/sat.cu` / `kernels/sat.ptx`: GPU CDCL verifier + GPU-native equivalence query construction helpers
 - `kernels/neural.cu` / `kernels/neural.ptx`: neural fast-path AD weight fill + chain-rule gradient scatter (`xlog_neural`)
@@ -118,6 +122,10 @@ D4 is vendored under `vendor/d4` and built automatically by `crates/xlog-prob/bu
 
 `ExactDdnnfProgram` writes CNF and reads the Decision-DNNF output via a temporary working directory.
 
+The GPU-native encoder (`encode_cnf_gpu`) lives in `crates/xlog-prob/src/compilation/gpu_cnf.rs` and produces a
+device-resident `GpuCnf` for the GPU D4/CDCL pipeline; it is not yet wired into the default `ExactDdnnfProgram`
+path (see roadmap).
+
 ---
 
 ## GPU-Native Compilation + Verification (v0.5.0 foundation)
@@ -139,6 +147,9 @@ design (see `docs/design/2026-01-22-gpu-native-compilation-design.md`):
 This verifier module is used by GPU-native compilation utilities in `crates/xlog-prob/src/compilation/`. Integration
 into the default `ExactDdnnfProgram` pipeline (which still shells out to CPU D4 and materializes CNF/DDNNF on host)
 is part of the v0.5.0 roadmap.
+
+**Phase 3 status:** GPU PIR→CNF encoding is implemented and tested via `encode_cnf_gpu` + `kernels/cnf.cu` with
+device-resident counts and CSR emission; equivalence tests live in `crates/xlog-prob/tests/gpu_cnf.rs`.
 
 ---
 

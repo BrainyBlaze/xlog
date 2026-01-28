@@ -2,12 +2,14 @@
 
 All notable changes to this project are documented in this file.
 
-## Unreleased — 2026-01-25
+## Unreleased — 2026-01-28
 
 ### Added
 
 - **GPU CDCL verifier (complete SAT/UNSAT)** in `kernels/sat.cu` + `xlog-solve::GpuCdclSolver` with on-GPU SAT model
   checking and on-GPU UNSAT proof checking.
+- **GPU PIR→CNF encoder** (`encode_cnf_gpu`) with device-resident CSR emission, deterministic var numbering, and GPU
+  reachability (zero host reads in the production path), plus CNF kernels in `kernels/cnf.cu`.
 - **GPU neural fast-path (AD chain)** in `kernels/neural.cu` + `xlog-prob` integration:
   - device-side AD conditional-chain weight fill (`neural_fill_ad_chain_f32`)
   - device-side probability-gradient scatter using both `grad_true` and `grad_false` (`neural_scatter_ad_chain_grads_f32`)
@@ -39,6 +41,8 @@ All notable changes to this project are documented in this file.
 - Monte Carlo GPU initialization avoids reliance on CUDA device-count queries that can fail in restricted environments.
 - `pyxlog` DLPack interop: detach `requires_grad` tensors before exporting probabilities to DLPack.
 - `pyxlog` GPU neural fast-path ordering: replaced `torch.cuda.synchronize()` with stream-to-stream waits.
+- GPU CNF reachability worklist hardened to avoid consuming uninitialized queue entries under concurrent expansion.
+- nvcc deprecation warnings for `sm_70` offline PTX builds are suppressed in `kernels/CMakeLists.txt`.
 - Release-mode CUDA crash in the GPU CDCL verifier/equivalence path caused by passing temporary scalar kernel arguments
   via raw parameter vectors (now backed by stable locals before `cuLaunchKernel`).
 - Release-mode CUDA launch failures in GPU D4 tests and smoothing due to temporary scalar kernel arguments (now backed

@@ -691,6 +691,8 @@ This prepass runs entirely on GPU to allocate `clause_offsets` and `literals`.
 **Notes:**
 - K2 can reuse existing scan kernels in `kernels/scan.cu`.
 - K3 writes fixed‑width clauses for CONST/NEG_LIT/DECISION and variable‑width for AND/OR.
+- Implementation hardening: reachability uses a device worklist with per-slot ready flags and an in-flight counter to
+  avoid consuming uninitialized queue entries while the tail grows.
 
 #### 5.2.3 GPU-native weight tables
 
@@ -910,6 +912,9 @@ These are realistic targets given GPU CDCL cost.
 ### Phase 3: GPU CNF Builder
 - Move PIR → CNF encoding to GPU
 - Ensure CNF never leaves device
+- **Status (2026-01-28): Implemented** in `crates/xlog-prob/src/compilation/gpu_cnf.rs` and `kernels/cnf.cu`
+  (`xlog_cnf` PTX module). Uses device-side reachability, deterministic var assignment, device-resident counts, and
+  CSR emission; correctness tests live in `crates/xlog-prob/tests/gpu_cnf.rs`.
 
 ### Phase 4: Cache + Integration
 - Device‑resident circuit cache

@@ -18,6 +18,11 @@ Baseline verification (already run in worktree):
 - `cargo build -q` => PASS
 - `cargo test -q` => PASS
 
+## Implementation Status (2026-01-28)
+- **Completed:** Task 1 (GPU PIR layout + tests), Task 2 (PIR kernel module plumbing), Task 3 (GPU PIR interner),
+  Task 6 (GPU CNF encoder + tests).
+- **Pending:** Task 4 (provenance-aware runtime execution mode) and Task 5 (GPU provenance extraction path).
+
 ---
 
 ## Task 1: Add GPU PIR data structures + tests

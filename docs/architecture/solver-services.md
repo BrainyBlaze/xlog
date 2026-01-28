@@ -19,6 +19,8 @@ The verifier must be **complete**. Heuristic solvers (CLS, local search) are all
 In the GPU-native path:
 
 - **CNF inputs are device-resident** (e.g., already on GPU from PIR/CNF building or imported via DLPack).
+- Device-resident CNF sources include `xlog_prob::compilation::encode_cnf_gpu` (PIR→CNF) and the XGCF helpers
+  in `kernels/sat.cu` (`sat_xgcf_cnf_*`), both of which keep exact sizes on device.
 - **Solver state is device-resident** (assignments, trail, learned clauses).
 - The host may launch kernels and synchronize streams (**control-plane**) but does not copy CNF/circuit/state back and forth (**data-plane**).
 

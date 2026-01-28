@@ -389,14 +389,14 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 
 - [x] GPU CDCL equivalence verifier with zero host reads (fail-fast, on-GPU SAT/UNSAT validation)
 - [x] Device-resident CNF size metadata (`GpuCnf::{num_vars,num_clauses,num_lits}`) to support GPU-native CNF builders
+- [x] GPU PIR→CNF encoder (`encode_cnf_gpu`) with device-resident CSR emission and deterministic variable numbering
 - [x] GPU-native circuit→CNF encoding for XGCF circuits + query construction helpers for equivalence checking
 - [x] GPU D4 compiler core (frontier expansion + per-frontier DFS) with device-resident circuit builder
 - [x] GPU D4 compile+verify entrypoint (`compile_gpu_d4_and_verify`)
 
 ### Planned 📋
 
-- [ ] GPU PIR→CNF encoder (`encode_cnf_gpu`) and elimination of host CNF/DDNNF materialization in the exact path
-- [ ] Integration: replace CPU D4 invocation in `ExactDdnnfProgram` with GPU compile+verify
+- [ ] Integration: replace CPU D4 invocation in `ExactDdnnfProgram` with GPU compile+verify (eliminates host CNF/DDNNF materialization)
 - [ ] Add SAT/CDCL kernel certification categories in `xlog-cuda-tests`
 
 ---

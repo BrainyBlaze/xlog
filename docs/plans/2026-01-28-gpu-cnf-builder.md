@@ -8,6 +8,10 @@
 
 **Tech Stack:** Rust (xlog-prob/xlog-solve), CUDA kernels in `kernels/cnf.cu`, cudarc, existing scan kernels in `kernels/scan.cu`.
 
+**Status (2026-01-28): Implemented** — `encode_cnf_gpu` in `crates/xlog-prob/src/compilation/gpu_cnf.rs`, kernels in
+`kernels/cnf.cu` (PTX module `xlog_cnf`), device-resident counts and CSR emission, reachability worklist hardened with
+queue-ready + in-flight guards, tests in `crates/xlog-prob/tests/gpu_cnf.rs`.
+
 ---
 
 ### Task 1: GPU CNF tests (CPU vs GPU equivalence)
