@@ -3,6 +3,7 @@
 pub mod cnf;
 pub mod compilation;
 pub mod exact;
+pub mod exact_gpu;
 pub mod gpu;
 pub mod kc;
 pub mod mc;

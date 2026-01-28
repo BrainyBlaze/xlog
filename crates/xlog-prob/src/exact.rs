@@ -1105,7 +1105,7 @@ fn restore_query_var_false(
     Ok(())
 }
 
-fn default_compile_config(
+pub(crate) fn default_compile_config(
     cnf: &xlog_solve::GpuCnf,
     memory_bytes: u64,
 ) -> Result<GpuCompileConfig> {
@@ -1143,7 +1143,7 @@ fn default_compile_config(
     })
 }
 
-fn default_cache_config(
+pub(crate) fn default_cache_config(
     cnf: &xlog_solve::GpuCnf,
     compile: &GpuCompileConfig,
 ) -> Result<GpuCircuitCacheConfig> {
@@ -1162,7 +1162,9 @@ fn default_cache_config(
     })
 }
 
-fn build_weight_sources(provenance: &Provenance) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>)> {
+pub(crate) fn build_weight_sources(
+    provenance: &Provenance,
+) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>)> {
     let max_leaf = provenance
         .leaf_probs
         .keys()
@@ -1218,7 +1220,7 @@ fn build_weight_sources(provenance: &Provenance) -> Result<(Vec<f64>, Vec<f64>, 
     Ok((leaf_probs, choice_true, choice_false))
 }
 
-fn upload_u32(
+pub(crate) fn upload_u32(
     provider: &Arc<CudaKernelProvider>,
     host: &[u32],
 ) -> Result<TrackedCudaSlice<u32>> {
@@ -1232,7 +1234,7 @@ fn upload_u32(
     Ok(buf)
 }
 
-fn upload_u8(
+pub(crate) fn upload_u8(
     provider: &Arc<CudaKernelProvider>,
     host: &[u8],
 ) -> Result<TrackedCudaSlice<u8>> {
@@ -1246,7 +1248,7 @@ fn upload_u8(
     Ok(buf)
 }
 
-fn upload_f64(
+pub(crate) fn upload_f64(
     provider: &Arc<CudaKernelProvider>,
     host: &[f64],
 ) -> Result<TrackedCudaSlice<f64>> {
@@ -1260,7 +1262,7 @@ fn upload_f64(
     Ok(buf)
 }
 
-fn collect_random_vars_host(
+pub(crate) fn collect_random_vars_host(
     provider: &Arc<CudaKernelProvider>,
     vars: &GpuCnfVarTables,
 ) -> Result<Vec<u32>> {
