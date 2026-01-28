@@ -18,19 +18,10 @@ fn gpu_cache_compile_reuses_slot() {
     let memory = Arc::new(GpuMemoryManager::new(device.clone(), MemoryBudget::with_limit(1 << 30)));
     let provider = Arc::new(CudaKernelProvider::new(device, memory).expect("provider"));
 
-    let clauses = vec![Clause::new(vec![Literal::new(1, true)])];
+    let clauses = vec![Clause::new(vec![Literal::positive(0)])];
     let instance = SolveInstance::new(1, clauses);
     let cnf = GpuCnf::from_host(&instance, &provider).unwrap();
 
-    let config = GpuCircuitCacheConfig {
-        num_slots: 1,
-        table_size: 4,
-        node_cap: 64,
-        edge_cap: 128,
-        level_cap: 64,
-        var_cap: 32,
-    };
-    let mut cache = GpuCircuitCache::new(&provider, config).unwrap();
     let compile_config = GpuCompileConfig {
         frontier_depth: 0,
         max_frontier_items: 8,
@@ -41,6 +32,19 @@ fn gpu_cache_compile_reuses_slot() {
         cdcl_learned_bytes: 4 * 1024 * 1024,
         cdcl_conflict_budget: None,
     };
+    let level_cap = u32::from(compile_config.max_depth)
+        .checked_mul(2)
+        .and_then(|v| v.checked_add(8))
+        .expect("level_cap overflow");
+    let config = GpuCircuitCacheConfig {
+        num_slots: 1,
+        table_size: 4,
+        node_cap: compile_config.smooth_node_cap,
+        edge_cap: compile_config.smooth_edge_cap,
+        level_cap,
+        var_cap: cnf.var_cap,
+    };
+    let mut cache = GpuCircuitCache::new(&provider, config).unwrap();
 
     let h1 = compile_gpu_d4_and_verify_cached(&cnf, &provider, &compile_config, &mut cache)
         .expect("compile 1");
