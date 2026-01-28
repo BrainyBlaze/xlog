@@ -378,6 +378,8 @@ pub mod circuit_kernels {
 /// Kernel function names in the cache module
 pub mod cache_kernels {
     pub const CACHE_CNF_HASH: &str = "cache_cnf_hash";
+    pub const CACHE_LOOKUP_OR_INSERT: &str = "cache_lookup_or_insert";
+    pub const CACHE_EVICT_LRU: &str = "cache_evict_lru";
 }
 
 /// Kernel function names in the SAT module
@@ -813,7 +815,11 @@ impl CudaKernelProvider {
             .load_ptx(
                 Ptx::from_src(CACHE_PTX),
                 CACHE_MODULE,
-                &[cache_kernels::CACHE_CNF_HASH],
+                &[
+                    cache_kernels::CACHE_CNF_HASH,
+                    cache_kernels::CACHE_LOOKUP_OR_INSERT,
+                    cache_kernels::CACHE_EVICT_LRU,
+                ],
             )
             .map_err(|e| XlogError::Kernel(format!("Failed to load cache PTX: {}", e)))?;
 
