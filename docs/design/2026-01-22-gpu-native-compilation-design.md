@@ -225,6 +225,9 @@ GPU-native implementation strategy:
 - Compute support bitsets bottom-up in level order:
   - `Lit(var)` / `Decision(var, ..)` add the bit for `var` iff `is_random_var[var]`.
   - `And/Or` take bitwise OR of children supports.
+- **Seed the root support with *all* random vars** (set all random-var bits on the root) so globally
+  missing random variables are still wrapped under the root. This is required for correct query/evidence
+  handling when a random fact does not appear in the CNF (otherwise it would be “free” but unconnected).
 - Smooth:
   - For each OR/DECISION node, compute `missing = parent_support \ child_support` and, if non-empty,
     wrap the child in `And(child, tautology(var_1), ..., tautology(var_k))`.
@@ -235,6 +238,8 @@ To keep the pass linear-time and allocation-free:
 - Use a two-pass emitter:
   - pass A: count how many wrapper AND nodes each child needs (bitcount of missing), prefix-sum to size buffers
   - pass B: emit the augmented circuit into the `GpuCircuitBuilder` pools.
+- **Levelize the smoothed circuit using the *actual emitted node count*** (not the capacity) so
+  evaluation only traverses real nodes and does not under-launch kernels for dense levels.
 
 #### 2.5.2 GPU Free-Var Correction (Matches `exact.rs`)
 
@@ -919,6 +924,11 @@ These are realistic targets given GPU CDCL cost.
 ### Phase 4: Cache + Integration
 - Device‑resident circuit cache
 - Replace CPU D4 call in `exact.rs`
+- **Status (2026-01-28): Implemented** — GPU cache + exact-path integration complete:
+  - `crates/xlog-prob/src/compilation/gpu_cache.rs` + `kernels/cache.cu` (CNF hash, device lookup/insert, LRU)
+  - Cache‑aware evaluation kernels in `kernels/circuit.cu`
+  - GPU‑only exact compilation path via `compile_gpu_d4_and_verify_cached`
+  - Device‑resident weight building + evidence application in `kernels/weights.cu` / `gpu_weights.rs`
 
 ---
 

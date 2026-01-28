@@ -29,10 +29,13 @@ This document explains the implementation as it exists in the repository and poi
 
 ### CUDA kernels
 - `kernels/circuit.cu` / `kernels/circuit.ptx`: forward + backward kernels for XGCF circuits
+- `kernels/cache.cu` / `kernels/cache.ptx`: CNF hashing + cache lookup/insert + cache store helpers
 - `kernels/cnf.cu` / `kernels/cnf.ptx`: GPU PIR→CNF encoding kernels (`xlog_cnf`)
+- `kernels/d4.cu` / `kernels/d4.ptx`: GPU D4 compilation kernels (frontier expansion, smoothing, build)
 - `kernels/mc_sample.cu` / `kernels/mc_sample.ptx`: Bernoulli sampling kernel used by `mc`
 - `kernels/sat.cu` / `kernels/sat.ptx`: GPU CDCL verifier + GPU-native equivalence query construction helpers
 - `kernels/neural.cu` / `kernels/neural.ptx`: neural fast-path AD weight fill + chain-rule gradient scatter (`xlog_neural`)
+- `kernels/weights.cu` / `kernels/weights.ptx`: GPU-native weight/evidence builders for exact inference
 
 ### Python bindings (DLPack-first)
 - `crates/pyxlog/src/lib.rs`: `pyxlog` module (PyO3)
@@ -92,10 +95,10 @@ If a program uses aggregation, use `prob_engine=mc`.
    - probabilistic facts become PIR leaf literals with probabilities (`leaf_probs`)
    - annotated disjunctions become a chain of Bernoulli decision variables (`choice_probs`)
    - derived tuples map to PIR formulas (`tuple_formulas`)
-3. **Tseitin encoding** (PIR → CNF) with a stable var map (`crates/xlog-prob/src/cnf.rs`).
-4. **Knowledge compilation (D4)**: CNF → Decision-DNNF (`crates/xlog-prob/src/kc/d4.rs`).
-5. **Lower to XGCF**: Decision-DNNF → GPU circuit format (`crates/xlog-prob/src/xgcf.rs`).
-6. **GPU evaluation** (`crates/xlog-prob/src/gpu.rs` + `kernels/circuit.ptx`):
+3. **GPU PIR → CNF** (`encode_cnf_gpu`, `crates/xlog-prob/src/compilation/gpu_cnf.rs`) with a device-resident var map.
+4. **GPU D4 compile + verify**: CNF → device-resident XGCF with cache storage
+   (`compile_gpu_d4_and_verify_cached`, `crates/xlog-prob/src/compilation/` + `kernels/d4.ptx` + `kernels/sat.ptx`).
+5. **GPU evaluation** via cache-aware kernels (`crates/xlog-prob/src/compilation/gpu_cache.rs` + `kernels/circuit.ptx`):
    - forward pass computes `log WMC(...)` in log-space
    - backward pass computes gradients w.r.t. leaf log-weights
 
@@ -111,28 +114,26 @@ This is implemented in `crates/xlog-prob/src/exact.rs` (`ExactDdnnfProgram::eval
 
 ### GPU state and caching
 
-`ExactDdnnfProgram` stores the compiled `Xgcf` in memory and lazily initializes GPU state in a `OnceLock` (`GpuExactState`). The first evaluation uploads the circuit to the configured CUDA device (`GpuConfig { device_ordinal, memory_bytes }`), and subsequent evaluations reuse it.
+`ExactDdnnfProgram` compiles CNF on the GPU, invokes GPU D4 + GPU CDCL verification, and stores the resulting circuit in a
+device-resident `GpuCircuitCache`. The program holds a cache handle and CUDA provider in `GpuExactState`; evaluations reuse
+the cached slot and run cache-aware XGCF kernels with no CPU D4 invocation and no CNF/DDNNF host materialization.
 
-### Vendored D4 build and invocation
+### Legacy CPU D4 (tests/tools only)
 
-D4 is vendored under `vendor/d4` and built automatically by `crates/xlog-prob/build.rs` during `cargo build` / `cargo test`:
+D4 remains vendored under `vendor/d4` and is still built by `crates/xlog-prob/build.rs` for legacy tools/tests that
+exercise the CPU pipeline. The default exact inference path no longer shells out to D4 or materializes CNF/DDNNF on host.
 
-- Output binary is staged into Cargo `OUT_DIR` and exported as `XLOG_PROB_D4_PATH`.
-- `D4Compiler::detect()` reads `XLOG_PROB_D4_PATH` and runs that binary for compilation.
-
-`ExactDdnnfProgram` writes CNF and reads the Decision-DNNF output via a temporary working directory.
-
-The GPU-native encoder (`encode_cnf_gpu`) lives in `crates/xlog-prob/src/compilation/gpu_cnf.rs` and produces a
-device-resident `GpuCnf` for the GPU D4/CDCL pipeline; it is not yet wired into the default `ExactDdnnfProgram`
-path (see roadmap).
+The GPU-native encoder (`encode_cnf_gpu`) in `crates/xlog-prob/src/compilation/gpu_cnf.rs` produces a device-resident
+`GpuCnf` for the GPU D4/CDCL pipeline and is now wired into `ExactDdnnfProgram` via
+`compile_gpu_d4_and_verify_cached` with a device-resident `GpuCircuitCache`.
 
 ---
 
 ## GPU-Native Compilation + Verification (v0.5.0 foundation)
 
 XLOG’s target architecture is a **100% GPU-native** compilation + verification path (GPU D4 + GPU CDCL verifier) with
-**zero data-plane host transfers**. The repository already contains the verifier-grade building blocks used by that
-design (see `docs/design/2026-01-22-gpu-native-compilation-design.md`):
+**zero data-plane host transfers**. This path is now integrated into `ExactDdnnfProgram` (see
+`docs/design/2026-01-22-gpu-native-compilation-design.md`):
 
 - `xlog_prob::compilation::validate_equivalence_gpu` proves `φ ≡ C` by solving two UNSAT queries on GPU:
   - `UNSAT(φ ∧ ¬C)`
@@ -144,12 +145,15 @@ design (see `docs/design/2026-01-22-gpu-native-compilation-design.md`):
 - **Capacity-safe CNF handling**: CNF buffers may be allocated with capacity > exact size; all index math uses
   device-resident `GpuCnf::{num_vars,num_clauses,num_lits}`.
 
-This verifier module is used by GPU-native compilation utilities in `crates/xlog-prob/src/compilation/`. Integration
-into the default `ExactDdnnfProgram` pipeline (which still shells out to CPU D4 and materializes CNF/DDNNF on host)
-is part of the v0.5.0 roadmap.
+This verifier module is used by GPU-native compilation utilities in `crates/xlog-prob/src/compilation/` and now powers
+the default `ExactDdnnfProgram` pipeline with a device-resident `GpuCircuitCache`.
 
 **Phase 3 status:** GPU PIR→CNF encoding is implemented and tested via `encode_cnf_gpu` + `kernels/cnf.cu` with
 device-resident counts and CSR emission; equivalence tests live in `crates/xlog-prob/tests/gpu_cnf.rs`.
+
+**Phase 4 status:** Cache + integration is implemented: GPU-resident cache (`gpu_cache.rs` + `kernels/cache.cu`),
+cache-aware XGCF evaluation, GPU-only exact compilation (`compile_gpu_d4_and_verify_cached`), and guardrails enforcing
+no device→host reads in the cache path.
 
 ---
 

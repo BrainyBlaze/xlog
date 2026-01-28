@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
-mod test_utils;
+#[path = "utils/scan.rs"]
+mod scan_utils;
 
 // Guardrail: device-only eval APIs must not perform device->host reads.
 #[test]
@@ -17,7 +18,7 @@ fn no_device_to_host_reads_in_gpu_eval_device() {
         "eval_log_wmc_device",
     ];
     for name in fn_names {
-        let body = test_utils::extract_fn_body(&text, name)
+        let body = scan_utils::extract_fn_body(&text, name)
             .unwrap_or_else(|| panic!("missing function {}", name));
         assert!(
             !body.contains("dtoh_sync_copy_into"),

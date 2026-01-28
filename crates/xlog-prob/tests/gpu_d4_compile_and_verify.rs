@@ -48,6 +48,6 @@ fn gpu_d4_compile_and_verify_unit_clause() {
     };
 
     let circuit =
-        compile_gpu_d4_and_verify(&phi, &provider, &config).expect("compile must succeed");
+        compile_gpu_d4_and_verify(&phi, &provider, &config, &[]).expect("compile must succeed");
     assert!(circuit.num_nodes() > 0);
 }

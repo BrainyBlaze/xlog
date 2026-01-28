@@ -18,6 +18,7 @@ pub mod gpu_cache;
 pub mod gpu_cnf;
 pub mod gpu_pir;
 pub mod gpu_pir_intern;
+pub mod gpu_weights;
 pub mod sparse_matrix;
 pub mod validation;
 
@@ -27,6 +28,7 @@ pub use gpu_pir::{
     GpuPirGraph, GpuPirRoots, PIR_AND, PIR_CONST, PIR_DECISION, PIR_LIT, PIR_NEG_LIT, PIR_OR,
 };
 pub use gpu_pir_intern::{GpuPirInterner, PirBatch};
+pub use gpu_weights::{build_evidence_by_var_gpu, build_weights_gpu, map_nodes_to_vars_gpu, GpuWeights};
 pub use sparse_matrix::GpuCsrCnf;
 pub use validation::{
     check_equivalence_gpu, check_equivalence_gpu_gated, validate_equivalence_gpu,
@@ -38,13 +40,23 @@ pub fn compile_gpu_d4_and_verify(
     cnf: &GpuCnf,
     provider: &Arc<CudaKernelProvider>,
     config: &GpuCompileConfig,
+    random_vars: &[u32],
 ) -> Result<GpuXgcf> {
     if config.cdcl_conflict_budget.is_some() {
         return Err(XlogError::Compilation(
             "cdcl_conflict_budget is not supported by the GPU CDCL verifier".to_string(),
         ));
     }
-    let circuit = gpu_d4::compile_gpu_d4(cnf, provider, config)?;
+    let d4_config = d4_config_for_smoothing(config, random_vars)?;
+    let mut circuit = gpu_d4::compile_gpu_d4(cnf, provider, &d4_config)?;
+    if !random_vars.is_empty() {
+        circuit = circuit.smooth_random_vars_device(
+            provider,
+            random_vars,
+            config.smooth_node_cap,
+            config.smooth_edge_cap,
+        )?;
+    }
     let cdcl = cdcl_config_from_compile(config)?;
     validate_equivalence_gpu(cnf, &circuit, provider, GpuEquivalenceConfig { cdcl })?;
     Ok(circuit)
@@ -56,6 +68,7 @@ pub fn compile_gpu_d4_and_verify_cached(
     provider: &Arc<CudaKernelProvider>,
     config: &GpuCompileConfig,
     cache: &mut GpuCircuitCache,
+    random_vars: &[u32],
 ) -> Result<GpuCircuitCacheHandle> {
     if config.cdcl_conflict_budget.is_some() {
         return Err(XlogError::Compilation(
@@ -67,8 +80,35 @@ pub fn compile_gpu_d4_and_verify_cached(
     let lookup = cache.lookup_or_insert_device(&key)?;
     let mut handle = lookup.into_handle();
 
-    let circuit =
-        gpu_d4::compile_gpu_d4_gated(cnf, provider, config, handle.compile_needed_device())?;
+    let mut compile_needed_host = [0u32; 1];
+    provider
+        .device()
+        .inner()
+        .dtoh_sync_copy_into(handle.compile_needed_device(), &mut compile_needed_host)
+        .map_err(|e| XlogError::Kernel(format!("Failed to read compile_needed: {}", e)))?;
+    if compile_needed_host[0] == 0 {
+        load_cache_handle_meta(cache, &mut handle)?;
+        return Ok(handle);
+    }
+
+    let d4_config = d4_config_for_smoothing(config, random_vars)?;
+    let circuit = gpu_d4::compile_gpu_d4_gated(
+        cnf,
+        provider,
+        &d4_config,
+        handle.compile_needed_device(),
+    )?;
+    let circuit = if random_vars.is_empty() {
+        circuit
+    } else {
+        let smoothed = circuit.smooth_random_vars_device(
+            provider,
+            random_vars,
+            config.smooth_node_cap,
+            config.smooth_edge_cap,
+        )?;
+        smoothed
+    };
     cache.store_from_xgcf(&mut handle, &circuit)?;
 
     let free_var_mask =
@@ -84,6 +124,87 @@ pub fn compile_gpu_d4_and_verify_cached(
         handle.compile_needed_device(),
     )?;
     Ok(handle)
+}
+
+fn load_cache_handle_meta(
+    cache: &GpuCircuitCache,
+    handle: &mut GpuCircuitCacheHandle,
+) -> Result<()> {
+    let device = cache.provider().device().inner();
+    let mut slot_host = [0u32; 1];
+    device
+        .dtoh_sync_copy_into(handle.slot_device(), &mut slot_host)
+        .map_err(|e| XlogError::Kernel(format!("Failed to read cache slot: {}", e)))?;
+    let slot = slot_host[0] as usize;
+    if slot >= cache.num_slots() as usize {
+        return Err(XlogError::Compilation(format!(
+            "GpuCircuitCache meta slot {} out of bounds (num_slots={})",
+            slot,
+            cache.num_slots()
+        )));
+    }
+
+    let mut num_nodes = [0u32; 1];
+    let mut num_levels = [0u32; 1];
+    let mut root = [0u32; 1];
+    let mut max_var = [0u32; 1];
+
+    let nodes_view = cache.meta_num_nodes_device().slice(slot..slot + 1);
+    let levels_view = cache.meta_num_levels_device().slice(slot..slot + 1);
+    let root_view = cache.meta_root_device().slice(slot..slot + 1);
+    let var_view = cache.meta_max_var_device().slice(slot..slot + 1);
+
+    device
+        .dtoh_sync_copy_into(&nodes_view, &mut num_nodes)
+        .map_err(|e| XlogError::Kernel(format!("Failed to read cache num_nodes: {}", e)))?;
+    device
+        .dtoh_sync_copy_into(&levels_view, &mut num_levels)
+        .map_err(|e| XlogError::Kernel(format!("Failed to read cache num_levels: {}", e)))?;
+    device
+        .dtoh_sync_copy_into(&root_view, &mut root)
+        .map_err(|e| XlogError::Kernel(format!("Failed to read cache root: {}", e)))?;
+    device
+        .dtoh_sync_copy_into(&var_view, &mut max_var)
+        .map_err(|e| XlogError::Kernel(format!("Failed to read cache max_var: {}", e)))?;
+
+    if num_nodes[0] == 0 || num_levels[0] == 0 {
+        return Err(XlogError::Compilation(
+            "GpuCircuitCache meta missing for slot".to_string(),
+        ));
+    }
+
+    handle.set_meta(num_nodes[0], num_levels[0], root[0], max_var[0]);
+    Ok(())
+}
+
+fn d4_config_for_smoothing(
+    config: &GpuCompileConfig,
+    random_vars: &[u32],
+) -> Result<GpuCompileConfig> {
+    if random_vars.is_empty() {
+        return Ok(*config);
+    }
+    let headroom = 2u32
+        .checked_add(random_vars.len() as u32)
+        .ok_or_else(|| XlogError::Compilation("smooth headroom overflow".to_string()))?;
+    if config.smooth_node_cap <= headroom {
+        return Err(XlogError::Compilation(format!(
+            "GpuCompileConfig smooth_node_cap {} too small for smoothing headroom {}",
+            config.smooth_node_cap, headroom
+        )));
+    }
+    let base_cap = config
+        .smooth_node_cap
+        .checked_sub(headroom)
+        .ok_or_else(|| XlogError::Compilation("smooth node cap underflow".to_string()))?;
+    if base_cap < 3 {
+        return Err(XlogError::Compilation(
+            "GpuCompileConfig smooth_node_cap leaves <3 base nodes".to_string(),
+        ));
+    }
+    let mut out = *config;
+    out.smooth_node_cap = base_cap;
+    Ok(out)
 }
 
 fn cdcl_config_from_compile(config: &GpuCompileConfig) -> Result<GpuCdclConfig> {

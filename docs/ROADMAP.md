@@ -1,9 +1,9 @@
 # XLOG Development Roadmap
 
-> **Last Updated:** January 25, 2026
+> **Last Updated:** January 28, 2026
 > **Current Version:** v0.4.0-alpha (Released)
 > **Next Version:** v0.4.0-beta — Extended neural-symbolic examples, term embeddings
-> **Status:** v0.4.0-alpha complete — neural-symbolic training operational; GPU CDCL verifier + GPU D4 core implemented (v0.5.0)
+> **Status:** v0.4.0-alpha complete — neural-symbolic training operational; GPU-native exact path integrated (GPU D4 + GPU CDCL + cache)
 
 ---
 
@@ -233,9 +233,13 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 | `pack.cu` | Key packing, hashing, packed-row gather |
 | `set_ops.cu` | Concatenation, sorted difference marking |
 | `circuit.cu` | XGCF forward/backward evaluation for probabilistic inference |
+| `cache.cu` | GPU circuit cache kernels (CNF hash, lookup/insert, cache store) |
+| `cnf.cu` | GPU PIR→CNF encoding kernels |
+| `d4.cu` | GPU D4 compilation kernels (frontier expansion, smoothing, build) |
 | `neural.cu` | Neural fast-path kernels: AD-chain weight fill + probability-gradient scatter |
 | `sat.cu` | GPU-native CDCL SAT solver + GPU verifier helpers (model/proof checks, CNF construction helpers) |
 | `mc_sample.cu` | Bernoulli sampling for Monte Carlo inference |
+| `weights.cu` | GPU-native weight/evidence builders for exact inference |
 
 ### Planned 📋
 
@@ -393,10 +397,12 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 - [x] GPU-native circuit→CNF encoding for XGCF circuits + query construction helpers for equivalence checking
 - [x] GPU D4 compiler core (frontier expansion + per-frontier DFS) with device-resident circuit builder
 - [x] GPU D4 compile+verify entrypoint (`compile_gpu_d4_and_verify`)
+- [x] Device-resident circuit cache + cache-aware evaluation (`GpuCircuitCache`, `compile_gpu_d4_and_verify_cached`)
+- [x] Integration: replace CPU D4 invocation in `ExactDdnnfProgram` with GPU compile+verify (no host CNF/DDNNF materialization)
+- [x] GPU smoothing seeds root support with all random vars (unconditional facts/evidence remain correct)
 
 ### Planned 📋
 
-- [ ] Integration: replace CPU D4 invocation in `ExactDdnnfProgram` with GPU compile+verify (eliminates host CNF/DDNNF materialization)
 - [ ] Add SAT/CDCL kernel certification categories in `xlog-cuda-tests`
 
 ---

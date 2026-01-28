@@ -35,6 +35,7 @@ const NEURAL_PTX: &str = include_str!("../../../kernels/neural.ptx");
 const PIR_PTX: &str = include_str!("../../../kernels/pir.ptx");
 const CNF_PTX: &str = include_str!("../../../kernels/cnf.ptx");
 const CACHE_PTX: &str = include_str!("../../../kernels/cache.ptx");
+const WEIGHTS_PTX: &str = include_str!("../../../kernels/weights.ptx");
 
 #[derive(Clone, Copy)]
 struct RawCudaView<'a, T> {
@@ -121,6 +122,7 @@ pub const NEURAL_MODULE: &str = "xlog_neural";
 pub const PIR_MODULE: &str = "xlog_pir";
 pub const CNF_MODULE: &str = "xlog_cnf";
 pub const CACHE_MODULE: &str = "xlog_cache";
+pub const WEIGHTS_MODULE: &str = "xlog_weights";
 
 /// Kernel function names in the Monte Carlo sampling module
 pub mod mc_sample_kernels {
@@ -198,6 +200,17 @@ pub mod cnf_kernels {
     pub const CNF_ASSIGN_NODE_VAR: &str = "cnf_assign_node_var";
     pub const CNF_EMIT_CLAUSES: &str = "cnf_emit_clauses";
     pub const CNF_SET_CLAUSE_END: &str = "cnf_set_clause_end";
+}
+
+/// Kernel function names in the weights module.
+pub mod weights_kernels {
+    pub const WEIGHTS_FILL_LEAF: &str = "weights_fill_leaf";
+    pub const WEIGHTS_FILL_CHOICE: &str = "weights_fill_choice";
+    pub const WEIGHTS_SET_EVIDENCE_FROM_NODES: &str = "weights_set_evidence_from_nodes";
+    pub const WEIGHTS_APPLY_EVIDENCE: &str = "weights_apply_evidence";
+    pub const WEIGHTS_MAP_NODES_TO_VARS: &str = "weights_map_nodes_to_vars";
+    pub const WEIGHTS_FORCE_VAR_FALSE: &str = "weights_force_var_false";
+    pub const WEIGHTS_RESTORE_VAR_FALSE: &str = "weights_restore_var_false";
 }
 
 /// Kernel function names in the GPU D4 module (CNF validation + circuit levelization).
@@ -841,6 +854,24 @@ impl CudaKernelProvider {
                 ],
             )
             .map_err(|e| XlogError::Kernel(format!("Failed to load cache PTX: {}", e)))?;
+
+        // Load weights module (GPU weight table builders)
+        device
+            .inner()
+            .load_ptx(
+                Ptx::from_src(WEIGHTS_PTX),
+                WEIGHTS_MODULE,
+                &[
+                    weights_kernels::WEIGHTS_FILL_LEAF,
+                    weights_kernels::WEIGHTS_FILL_CHOICE,
+                    weights_kernels::WEIGHTS_SET_EVIDENCE_FROM_NODES,
+                    weights_kernels::WEIGHTS_APPLY_EVIDENCE,
+                    weights_kernels::WEIGHTS_MAP_NODES_TO_VARS,
+                    weights_kernels::WEIGHTS_FORCE_VAR_FALSE,
+                    weights_kernels::WEIGHTS_RESTORE_VAR_FALSE,
+                ],
+            )
+            .map_err(|e| XlogError::Kernel(format!("Failed to load weights PTX: {}", e)))?;
 
         // Load circuit module (XGCF circuit evaluation)
         device

@@ -46,9 +46,9 @@ fn gpu_cache_compile_reuses_slot() {
     };
     let mut cache = GpuCircuitCache::new(&provider, config).unwrap();
 
-    let h1 = compile_gpu_d4_and_verify_cached(&cnf, &provider, &compile_config, &mut cache)
+    let h1 = compile_gpu_d4_and_verify_cached(&cnf, &provider, &compile_config, &mut cache, &[])
         .expect("compile 1");
-    let h2 = compile_gpu_d4_and_verify_cached(&cnf, &provider, &compile_config, &mut cache)
+    let h2 = compile_gpu_d4_and_verify_cached(&cnf, &provider, &compile_config, &mut cache, &[])
         .expect("compile 2");
 
     let mut slot1 = vec![0u32; 1];

@@ -258,12 +258,11 @@ query(c()).
     let compiled = ExactDdnnfProgram::compile_source(source).unwrap();
     let _ = compiled.evaluate().unwrap();
 
-    let count: u32 = fs::read_to_string(&count_path)
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
-    assert_eq!(count, 1, "count={}", count);
+    let count: u32 = match fs::read_to_string(&count_path) {
+        Ok(text) => text.trim().parse().unwrap(),
+        Err(_) => 0,
+    };
+    assert_eq!(count, 0, "count={}", count);
 
     fs::remove_dir_all(&dir).ok();
 }

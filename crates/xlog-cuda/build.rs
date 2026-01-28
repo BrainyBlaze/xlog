@@ -31,6 +31,7 @@ fn main() {
         "neural",
         "pir",
         "cache",
+        "weights",
     ];
 
     for kernel in &kernels {

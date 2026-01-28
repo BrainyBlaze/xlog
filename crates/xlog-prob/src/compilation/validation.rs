@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use std::ffi::c_void;
 
-use cudarc::driver::{DeviceRepr, DeviceSlice, LaunchAsync, LaunchConfig};
+use cudarc::driver::{DeviceRepr, LaunchAsync, LaunchConfig};
 use xlog_core::{Result, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::provider::sat_kernels;
@@ -74,7 +74,7 @@ fn build_circuit_cnf(
     })?;
 
     // Safe, host-known upper bounds (no device->host reads required).
-    let num_edges = circuit.child_indices().len();
+    let num_edges = circuit.num_edges();
     let n64 = num_nodes as u64;
     let e64 = num_edges as u64;
 

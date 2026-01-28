@@ -28,6 +28,7 @@ pub struct GpuCircuitBuilder {
 /// Device layout metadata for XGCF construction.
 pub struct GpuCircuitLayout {
     pub num_nodes: u32,
+    pub num_edges: u32,
     pub num_levels: u32,
     pub level_offsets: TrackedCudaSlice<u32>,
     pub level_nodes: TrackedCudaSlice<u32>,
@@ -48,6 +49,8 @@ pub struct GpuXgcf {
     /// Optional host mirror for efficient per-level launch sizing when the circuit was uploaded
     /// from host (`GpuXgcf::upload`). GPU-native compilation paths do not populate this.
     level_offsets_host: Option<Vec<u32>>,
+    num_nodes: u32,
+    num_edges: u32,
     num_levels: u32,
     root: u32,
     max_var: u32,
@@ -84,15 +87,26 @@ impl GpuXgcf {
         }
 
         let num_nodes = layout.num_nodes as usize;
-        if builder.node_type.len() != num_nodes
-            || builder.child_offsets.len() != num_nodes + 1
-            || builder.lit.len() != num_nodes
-            || builder.decision_var.len() != num_nodes
-            || builder.decision_child_false.len() != num_nodes
-            || builder.decision_child_true.len() != num_nodes
+        let num_edges = layout.num_edges as usize;
+        let node_cap = builder.node_type.len();
+        if num_nodes == 0 || num_nodes > node_cap {
+            return Err(XlogError::Compilation(
+                "GpuXgcf::from_device: num_nodes out of bounds".to_string(),
+            ));
+        }
+        if builder.child_offsets.len() != node_cap + 1
+            || builder.lit.len() != node_cap
+            || builder.decision_var.len() != node_cap
+            || builder.decision_child_false.len() != node_cap
+            || builder.decision_child_true.len() != node_cap
         {
             return Err(XlogError::Compilation(
                 "GpuXgcf::from_device: circuit buffer length mismatch".to_string(),
+            ));
+        }
+        if num_edges > builder.child_indices.len() {
+            return Err(XlogError::Compilation(
+                "GpuXgcf::from_device: num_edges out of bounds".to_string(),
             ));
         }
 
@@ -104,9 +118,9 @@ impl GpuXgcf {
                 num_levels + 1
             )));
         }
-        if layout.level_nodes.len() != num_nodes {
+        if layout.level_nodes.len() < num_nodes {
             return Err(XlogError::Compilation(format!(
-                "GpuXgcf::from_device: level_nodes len {} != num_nodes ({})",
+                "GpuXgcf::from_device: level_nodes len {} < num_nodes ({})",
                 layout.level_nodes.len(),
                 num_nodes
             )));
@@ -133,6 +147,8 @@ impl GpuXgcf {
             level_nodes: layout.level_nodes,
             level_offsets: layout.level_offsets,
             level_offsets_host: None,
+            num_nodes: layout.num_nodes,
+            num_edges: layout.num_edges,
             num_levels: layout.num_levels,
             root: layout.root,
             max_var: layout.max_var,
@@ -163,17 +179,23 @@ impl GpuXgcf {
             ));
         }
 
-        let num_nodes = u32::try_from(self.node_type.len()).map_err(|_| {
-            XlogError::Compilation("GPU smoothing: node count exceeds u32".to_string())
-        })?;
-        if self.child_offsets.len() != (num_nodes as usize + 1) {
+        let num_nodes = self.num_nodes;
+        if num_nodes == 0 {
+            return Err(XlogError::Compilation(
+                "GPU smoothing: num_nodes must be > 0".to_string(),
+            ));
+        }
+        if self.child_offsets.len() < (num_nodes as usize + 1) {
             return Err(XlogError::Compilation(
                 "GPU smoothing: child_offsets len mismatch".to_string(),
             ));
         }
-        let num_edges = u32::try_from(self.child_indices.len()).map_err(|_| {
-            XlogError::Compilation("GPU smoothing: edge count exceeds u32".to_string())
-        })?;
+        let num_edges = self.num_edges;
+        if num_edges == 0 {
+            return Err(XlogError::Compilation(
+                "GPU smoothing: num_edges must be > 0".to_string(),
+            ));
+        }
 
         let num_random_vars = u32::try_from(random_var_list.len()).map_err(|_| {
             XlogError::Compilation("GPU smoothing: random var count exceeds u32".to_string())
@@ -305,6 +327,45 @@ impl GpuXgcf {
                 .map_err(|e| XlogError::Kernel(format!("d4_support_level failed: {}", e)))?;
         }
 
+        if num_random_vars > 0 {
+            let words_per_support_usize = usize::try_from(words_per_support).map_err(|_| {
+                XlogError::Compilation("GPU smoothing: words_per_support exceeds usize".to_string())
+            })?;
+            let root_offset = (self.root as usize)
+                .checked_mul(words_per_support_usize)
+                .ok_or_else(|| {
+                    XlogError::Compilation("GPU smoothing: root support offset overflow".to_string())
+                })?;
+            let end = root_offset
+                .checked_add(words_per_support_usize)
+                .ok_or_else(|| {
+                    XlogError::Compilation("GPU smoothing: root support end overflow".to_string())
+                })?;
+            if end > support.len() {
+                return Err(XlogError::Compilation(
+                    "GPU smoothing: root support slice out of bounds".to_string(),
+                ));
+            }
+
+            let mut root_bits = vec![0u32; words_per_support_usize];
+            let full_words = (num_random_vars / 32) as usize;
+            let rem = (num_random_vars % 32) as u32;
+            for word in root_bits.iter_mut().take(full_words) {
+                *word = u32::MAX;
+            }
+            if rem > 0 {
+                root_bits[full_words] = (1u32 << rem) - 1u32;
+            }
+            device
+                .htod_sync_copy_into(
+                    &root_bits,
+                    &mut support.slice_mut(root_offset..end),
+                )
+                .map_err(|e| {
+                    XlogError::Kernel(format!("Failed to set root support bits: {}", e))
+                })?;
+        }
+
         let mut wrap_prefix_or = memory.alloc::<u32>(num_edges as usize)?;
         let mut wrap_missing_or = memory.alloc::<u32>(num_edges as usize)?;
         let mut wrap_prefix_dec = memory.alloc::<u32>(dec_entries)?;
@@ -393,12 +454,24 @@ impl GpuXgcf {
                     dec_entries_u32,
                     base_node,
                     num_nodes,
-                    smooth_node_cap,
+                    u32::MAX,
                     &mut wrap_counts,
                 ),
             )
         }
         .map_err(|e| XlogError::Kernel(format!("d4_smooth_wrapper_counts failed: {}", e)))?;
+
+        let mut wrap_counts_host = [0u32; 3];
+        device
+            .dtoh_sync_copy_into(&wrap_counts, &mut wrap_counts_host)
+            .map_err(|e| XlogError::Kernel(format!("Failed to read wrap_counts: {}", e)))?;
+        let total_nodes = wrap_counts_host[2];
+        if total_nodes > smooth_node_cap {
+            return Err(XlogError::Compilation(format!(
+                "GPU smoothing: required nodes {} exceed smooth_node_cap {}",
+                total_nodes, smooth_node_cap
+            )));
+        }
 
         let wrapper_base = base_node.checked_add(num_nodes).ok_or_else(|| {
             XlogError::Compilation("GPU smoothing: wrapper base overflow".to_string())
@@ -496,6 +569,18 @@ impl GpuXgcf {
             )
         }
         .map_err(|e| XlogError::Kernel(format!("d4_smooth_check_edge_cap failed: {}", e)))?;
+
+        let mut total_edges_host = [0u32; 1];
+        let edge_view = out_child_offsets.slice(total_nodes as usize..total_nodes as usize + 1);
+        device
+            .dtoh_sync_copy_into(&edge_view, &mut total_edges_host)
+            .map_err(|e| XlogError::Kernel(format!("Failed to read smoothed edges: {}", e)))?;
+        let total_edges = total_edges_host[0];
+        if total_edges == 0 {
+            return Err(XlogError::Compilation(
+                "GPU smoothing: total_edges must be > 0".to_string(),
+            ));
+        }
 
         let mut out_node_type = memory.alloc::<u8>(smooth_node_cap as usize)?;
         let mut out_child_indices = memory.alloc::<u32>(smooth_edge_cap as usize)?;
@@ -621,7 +706,7 @@ impl GpuXgcf {
         let mut level_counts = memory.alloc::<u32>(num_levels_out as usize)?;
         let mut level_offsets = memory.alloc::<u32>((num_levels_out as usize) + 1)?;
         let mut level_cursors = memory.alloc::<u32>(num_levels_out as usize)?;
-        let mut level_nodes = memory.alloc::<u32>(smooth_node_cap as usize)?;
+        let mut level_nodes = memory.alloc::<u32>(total_nodes as usize)?;
 
         device
             .memset_zeros(&mut level_counts)
@@ -636,10 +721,15 @@ impl GpuXgcf {
             .memset_zeros(&mut level_nodes)
             .map_err(|e| XlogError::Kernel(format!("Failed to zero level_nodes: {}", e)))?;
 
+        let mut compile_needed = memory.alloc::<u32>(1)?;
+        device
+            .htod_sync_copy_into(&[1u32], &mut compile_needed)
+            .map_err(|e| XlogError::Kernel(format!("Failed to upload compile_needed: {}", e)))?;
+
         let levelize_counts = device
             .get_func(D4_MODULE, d4_kernels::D4_LEVELIZE_COUNTS)
             .ok_or_else(|| XlogError::Kernel("d4_levelize_counts kernel not found".to_string()))?;
-        let num_blocks = (smooth_node_cap + block_size - 1) / block_size;
+        let num_blocks = (total_nodes + block_size - 1) / block_size;
         unsafe {
             levelize_counts.clone().launch(
                 LaunchConfig {
@@ -648,8 +738,9 @@ impl GpuXgcf {
                     shared_mem_bytes: 0,
                 },
                 (
+                    &compile_needed,
                     &out_node_level,
-                    smooth_node_cap,
+                    total_nodes,
                     num_levels_out,
                     &mut level_counts,
                 ),
@@ -679,8 +770,9 @@ impl GpuXgcf {
                     shared_mem_bytes: 0,
                 },
                 (
+                    &compile_needed,
                     &out_node_level,
-                    smooth_node_cap,
+                    total_nodes,
                     num_levels_out,
                     &level_offsets,
                     &mut level_cursors,
@@ -702,7 +794,8 @@ impl GpuXgcf {
             decision_child_true: out_decision_child_true,
         };
         let layout = GpuCircuitLayout {
-            num_nodes: smooth_node_cap,
+            num_nodes: total_nodes,
+            num_edges: total_edges,
             num_levels: num_levels_out,
             level_offsets,
             level_nodes,
@@ -824,6 +917,8 @@ impl GpuXgcf {
             level_nodes: d_level_nodes,
             level_offsets: d_level_offsets,
             level_offsets_host: Some(circuit.level_offsets.clone()),
+            num_nodes: n as u32,
+            num_edges: circuit.child_indices.len() as u32,
             num_levels: (circuit.level_offsets.len().saturating_sub(1)) as u32,
             root: circuit.roots[0],
             max_var,
@@ -848,7 +943,12 @@ impl GpuXgcf {
 
     /// Number of XGCF nodes in the circuit.
     pub fn num_nodes(&self) -> usize {
-        self.node_type.len()
+        self.num_nodes as usize
+    }
+
+    /// Number of XGCF edges in the circuit.
+    pub fn num_edges(&self) -> usize {
+        self.num_edges as usize
     }
 
     /// Number of topological levels in the circuit.

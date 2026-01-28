@@ -21,7 +21,13 @@ All notable changes to this project are documented in this file.
   `UNSAT(φ ∧ ¬C)` and `UNSAT(C ∧ ¬φ)`, with zero device→host reads.
 - **GPU D4 compile+verify entrypoint** (`compile_gpu_d4_and_verify`) that compiles CNF to device-resident XGCF and
   validates equivalence via the GPU CDCL verifier.
+- **Device-resident circuit cache + cache-aware evaluation** (`GpuCircuitCache`, `compile_gpu_d4_and_verify_cached`,
+  `kernels/cache.cu`) enabling zero-recompile warm-cache inference.
+- **GPU-native exact inference path**: `ExactDdnnfProgram` now uses GPU D4 + GPU CDCL + cache (no CPU D4, no CNF/DDNNF
+  host materialization in production).
+- **GPU weight/evidence builders** (`kernels/weights.cu` + `gpu_weights.rs`) for device-resident weight tables.
 - **Regression guardrails** enforcing “no device→host reads” in the production verifier modules.
+- **Cache DTOH guardrails + integration tests** (`no_dtoh_in_gpu_cache`, `gpu_exact_cache_integration`, `gpu_weights`).
 - **Device-only logZ outputs** for GPU XGCF evaluation (`eval_log_wmc_device_*`) plus a guard test to prevent
   device→host reads inside device-only evaluation paths.
 - **GPU-native loss output for neural fast-path**: `ExactDdnnfProgram::neural_backward_nll_buffers_with_device_loss`
@@ -47,6 +53,9 @@ All notable changes to this project are documented in this file.
   via raw parameter vectors (now backed by stable locals before `cuLaunchKernel`).
 - Release-mode CUDA launch failures in GPU D4 tests and smoothing due to temporary scalar kernel arguments (now backed
   by stable locals before `cuLaunchKernel`).
+- GPU smoothing now seeds root support with all random vars and levelizes with the emitted node count, ensuring
+  unconditional probabilistic facts/evidence are handled correctly and preventing under-launched levels.
+- GPU cache meta loading moved out of `gpu_cache.rs` to preserve dtoh-free guardrails for the cache module.
 
 ### Validation
 

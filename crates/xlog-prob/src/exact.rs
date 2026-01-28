@@ -1,22 +1,21 @@
 //! Exact probabilistic inference via Decision-DNNF (D4) + weighted model counting.
 
 use std::collections::HashSet;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use cudarc::driver::{DeviceSlice, LaunchAsync, LaunchConfig};
 use xlog_core::{MemoryBudget, Result, ScalarType, XlogError};
 
-use crate::cnf::encode_cnf;
-use crate::gpu::GpuXgcf;
-use crate::kc::d4::D4Compiler;
-use crate::kc::ddnnf::DecisionDnnf;
+use crate::compilation::gpu_cache::{GpuCircuitCache, GpuCircuitCacheConfig, GpuCircuitCacheHandle};
+use crate::compilation::gpu_cnf::GpuCnfVarTables;
+use crate::compilation::gpu_weights::{
+    build_evidence_by_var_gpu, build_weights_gpu, map_nodes_to_vars_gpu, upload_weights_from_host,
+};
+use crate::compilation::{compile_gpu_d4_and_verify_cached, encode_cnf_gpu, GpuCompileConfig, GpuPirGraph, GpuPirRoots};
 use crate::neural_fast_path::{GpuWeightSlots, NeuralFastPathConfig};
 use crate::provenance::{extract_from_source, GroundAtom, Provenance};
-use crate::xgcf::{Xgcf, XgcfNodeType};
 use xlog_cuda::memory::TrackedCudaSlice;
-use xlog_cuda::provider::{arith_kernels, neural_kernels, ARITH_MODULE, NEURAL_MODULE};
+use xlog_cuda::provider::{arith_kernels, neural_kernels, weights_kernels, ARITH_MODULE, NEURAL_MODULE, WEIGHTS_MODULE};
 use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager};
 
 #[derive(Debug, Clone)]
@@ -54,8 +53,9 @@ struct QuerySpec {
 }
 
 struct GpuExactState {
-    provider: CudaKernelProvider,
-    circuit: Mutex<GpuXgcf>,
+    provider: Arc<CudaKernelProvider>,
+    cache: Mutex<GpuCircuitCache>,
+    handle: GpuCircuitCacheHandle,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -74,53 +74,53 @@ impl Default for GpuConfig {
 }
 
 impl GpuExactState {
-    fn new(circuit: &Xgcf, config: GpuConfig, weights: &[(f64, f64)]) -> Result<Self> {
-        if config.memory_bytes == 0 {
-            return Err(XlogError::Kernel(
-                "GPU memory budget must be non-zero".to_string(),
-            ));
-        }
-
-        let device = Arc::new(CudaDevice::new(config.device_ordinal)?);
-        let memory = Arc::new(GpuMemoryManager::new(
-            device.clone(),
-            MemoryBudget::with_limit(config.memory_bytes),
-        ));
-        let provider = CudaKernelProvider::new(device, memory)?;
-        let mut gpu_xgcf = GpuXgcf::upload(&provider, circuit)?;
-        gpu_xgcf.set_base_weights(&provider, weights)?;
+    fn new(
+        provider: Arc<CudaKernelProvider>,
+        cache: GpuCircuitCache,
+        handle: GpuCircuitCacheHandle,
+    ) -> Result<Self> {
         Ok(Self {
             provider,
-            circuit: Mutex::new(gpu_xgcf),
+            cache: Mutex::new(cache),
+            handle,
         })
+    }
+
+    fn provider(&self) -> &Arc<CudaKernelProvider> {
+        &self.provider
+    }
+
+    fn handle(&self) -> &GpuCircuitCacheHandle {
+        &self.handle
     }
 }
 
 #[derive(Clone)]
 pub struct ExactDdnnfProgram {
-    circuit: Option<Xgcf>,
-    evidence_log_weights: Vec<(f64, f64)>,
-    free_vars: Vec<u32>,
+    gpu: Option<Arc<GpuExactState>>,
     queries: Vec<QuerySpec>,
+    random_vars: Vec<u32>,
+    max_var: u32,
     gpu_config: GpuConfig,
-    gpu: Arc<OnceLock<GpuExactState>>,
 }
 
 impl ExactDdnnfProgram {
     pub fn compile_source(source: &str) -> Result<Self> {
         let provenance = extract_from_source(source)?;
-        Self::compile_provenance(provenance)
+        Self::compile_provenance_with_gpu(provenance, GpuConfig::default())
     }
 
     pub fn compile_source_with_gpu(source: &str, config: GpuConfig) -> Result<Self> {
-        let mut program = Self::compile_source(source)?;
-        program.gpu_config = config;
-        program.gpu = Arc::new(OnceLock::new());
-        Ok(program)
+        let provenance = extract_from_source(source)?;
+        Self::compile_provenance_with_gpu(provenance, config)
+    }
+
+    pub fn gpu_config(&self) -> GpuConfig {
+        self.gpu_config
     }
 
     pub fn evaluate(&self) -> Result<ExactResult> {
-        let Some(_circuit) = &self.circuit else {
+        if self.gpu.is_none() {
             let mut query_probs: Vec<QueryProbability> = Vec::with_capacity(self.queries.len());
             for query in &self.queries {
                 query_probs.push(QueryProbability {
@@ -133,9 +133,9 @@ impl ExactDdnnfProgram {
                 log_z_e: 0.0,
                 query_probs,
             });
-        };
+        }
 
-        let log_z_e = self.eval_log_z(None)?;
+        let log_z_e = self.eval_log_z_gpu(None)?;
         if log_z_e.is_infinite() && log_z_e.is_sign_negative() {
             return Err(XlogError::Execution(
                 "Exact inference error: evidence is inconsistent (P(E)=0)".to_string(),
@@ -147,7 +147,7 @@ impl ExactDdnnfProgram {
             let (log_prob, prob) = match query.var {
                 None => (f64::NEG_INFINITY, 0.0),
                 Some(var) => {
-                    let log_z_eq = self.eval_log_z(Some(var))?;
+                    let log_z_eq = self.eval_log_z_gpu(Some(var))?;
                     let log_prob = log_z_eq - log_z_e;
                     let mut prob = if log_prob.is_infinite() && log_prob.is_sign_negative() {
                         0.0
@@ -182,7 +182,11 @@ impl ExactDdnnfProgram {
     }
 
     pub fn num_vars(&self) -> usize {
-        self.evidence_log_weights.len()
+        if self.max_var == 0 {
+            0
+        } else {
+            (self.max_var as usize) + 1
+        }
     }
 
     /// Returns the indices of random (probabilistic) variables in order.
@@ -191,13 +195,7 @@ impl ExactDdnnfProgram {
     /// These correspond to annotated disjunctions in the source program.
     /// The order matches the order variables were assigned during CNF encoding.
     pub fn random_var_indices(&self) -> Vec<u32> {
-        self.evidence_log_weights
-            .iter()
-            .enumerate()
-            .skip(1) // Skip index 0 (DIMACS is 1-indexed)
-            .filter(|(_, (t, f))| (*t, *f) != (0.0, 0.0))
-            .map(|(idx, _)| idx as u32)
-            .collect()
+        self.random_vars.clone()
     }
 
     /// CNF variable id for the `idx`-th query formula (DIMACS, 1-based), if present.
@@ -261,11 +259,11 @@ impl ExactDdnnfProgram {
         cfg: NeuralFastPathConfig,
         out_loss: Option<&mut TrackedCudaSlice<f64>>,
     ) -> Result<()> {
-        let Some(_circuit) = &self.circuit else {
+        if self.gpu.is_none() {
             return Err(XlogError::Execution(
                 "Neural fast-path error: program has no compiled circuit".to_string(),
             ));
-        };
+        }
 
         let query_var = self.query_var(query_idx).ok_or_else(|| {
             XlogError::Execution(format!(
@@ -305,21 +303,16 @@ impl ExactDdnnfProgram {
             .ok_or_else(|| {
                 XlogError::Kernel("neural_scatter_ad_chain_grads_f32 kernel not found".to_string())
             })?;
-        let fill_const = device
-            .get_func(ARITH_MODULE, arith_kernels::ARITH_FILL_CONST_F64)
-            .ok_or_else(|| {
-                XlogError::Kernel("arith_fill_const_f64 kernel not found".to_string())
-            })?;
         let binary_f64 = device
             .get_func(ARITH_MODULE, arith_kernels::ARITH_BINARY_F64)
             .ok_or_else(|| XlogError::Kernel("arith_binary_f64 kernel not found".to_string()))?;
 
-        let mut gpu_xgcf = state
-            .circuit
+        let mut cache = state
+            .cache
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        let root_idx = gpu_xgcf.root() as usize;
+        let root_idx = state.handle().root() as usize;
 
         // If the caller requested the scalar loss, keep the base logZ on device so we can compute
         // loss = logZ_base - logZ_query without any host reads.
@@ -362,7 +355,7 @@ impl ExactDdnnfProgram {
                 XlogError::Compilation("Neural fast-path missing prob column".to_string())
             })?;
 
-            let (var_log_true, var_log_false) = gpu_xgcf.var_log_weights_mut();
+            let (var_log_true, var_log_false) = cache.var_log_weights_mut();
 
             unsafe {
                 fill.clone().launch(
@@ -386,9 +379,9 @@ impl ExactDdnnfProgram {
         }
 
         // 2) Base run: out = dlogZ_base/dp
-        gpu_xgcf.eval_grads_inplace(&state.provider)?;
+        cache.eval_grads_inplace(state.handle())?;
         if let Some(base) = base_log_z.as_mut() {
-            let root_view = gpu_xgcf.values().slice(root_idx..(root_idx + 1));
+            let root_view = cache.values().slice(root_idx..(root_idx + 1));
             device.dtod_copy(&root_view, base).map_err(|e| {
                 XlogError::Kernel(format!("Failed to copy base logZ on GPU: {}", e))
             })?;
@@ -452,8 +445,8 @@ impl ExactDdnnfProgram {
                         &slot_vars,
                         cfg.eps,
                         cfg.min_p,
-                        gpu_xgcf.grad_true(),
-                        gpu_xgcf.grad_false(),
+                        cache.grad_true(),
+                        cache.grad_false(),
                         0u8,
                         out_col,
                     ),
@@ -463,37 +456,25 @@ impl ExactDdnnfProgram {
         }
 
         // 3) Query run: out -= dlogZ_query/dp
-        let q = query_var as usize;
-        if q >= self.evidence_log_weights.len() {
+        if query_var == 0 || query_var > self.max_var {
             return Err(XlogError::Compilation(format!(
-                "Neural fast-path error: query var {} out of bounds (len={})",
-                query_var,
-                self.evidence_log_weights.len()
+                "Neural fast-path error: query var {} out of bounds (max_var={})",
+                query_var, self.max_var
             )));
         }
-        let restore_false = self.evidence_log_weights[q].1;
 
+        let mut restore = state.provider.memory().alloc::<f64>(1)?;
         {
-            let mut q_false_view = gpu_xgcf.var_log_false_mut().slice_mut(q..(q + 1));
-            unsafe {
-                fill_const.clone().launch(
-                    LaunchConfig {
-                        grid_dim: (1, 1, 1),
-                        block_dim: (1, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
-                    (f64::NEG_INFINITY, 1u32, &mut q_false_view),
-                )
-            }
-            .map_err(|e| XlogError::Kernel(format!("force query var failed: {}", e)))?;
+            let (_, var_log_false) = cache.var_log_weights_mut();
+            force_query_var_false(state.provider(), var_log_false, query_var, &mut restore)?;
         }
 
-        gpu_xgcf.eval_grads_inplace(&state.provider)?;
+        cache.eval_grads_inplace(state.handle())?;
         if let Some(out) = out_loss {
             let base = base_log_z
                 .as_ref()
                 .expect("base_log_z allocated when out_loss requested");
-            let root_view = gpu_xgcf.values().slice(root_idx..(root_idx + 1));
+            let root_view = cache.values().slice(root_idx..(root_idx + 1));
             unsafe {
                 binary_f64.clone().launch(
                     LaunchConfig {
@@ -539,8 +520,8 @@ impl ExactDdnnfProgram {
                         &slot_vars,
                         cfg.eps,
                         cfg.min_p,
-                        gpu_xgcf.grad_true(),
-                        gpu_xgcf.grad_false(),
+                        cache.grad_true(),
+                        cache.grad_false(),
                         1u8,
                         out_col,
                     ),
@@ -548,20 +529,9 @@ impl ExactDdnnfProgram {
             }
             .map_err(|e| XlogError::Kernel(format!("neural_scatter (query) failed: {}", e)))?;
         }
-
         {
-            let mut q_false_view = gpu_xgcf.var_log_false_mut().slice_mut(q..(q + 1));
-            unsafe {
-                fill_const.clone().launch(
-                    LaunchConfig {
-                        grid_dim: (1, 1, 1),
-                        block_dim: (1, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
-                    (restore_false, 1u32, &mut q_false_view),
-                )
-            }
-            .map_err(|e| XlogError::Kernel(format!("restore query var failed: {}", e)))?;
+            let (_, var_log_false) = cache.var_log_weights_mut();
+            restore_query_var_false(state.provider(), var_log_false, query_var, &restore)?;
         }
 
         state.provider.device().synchronize()?;
@@ -569,16 +539,20 @@ impl ExactDdnnfProgram {
     }
 
     pub fn evaluate_gpu_with_grads(&self) -> Result<ExactResultWithGrads> {
-        let Some(_circuit) = &self.circuit else {
+        if self.gpu.is_none() {
             return Ok(ExactResultWithGrads {
                 log_z_e: 0.0,
                 query_grads: Vec::new(),
             });
+        }
+
+        let weights_len = if self.max_var == 0 {
+            0
+        } else {
+            (self.max_var as usize) + 1
         };
 
-        let mut weights: Vec<(f64, f64)> = self.evidence_log_weights.clone();
-
-        let (log_z_e, grad_true_e, grad_false_e) = self.eval_log_z_and_grads_gpu(&weights)?;
+        let (log_z_e, grad_true_e, grad_false_e) = self.eval_log_z_and_grads_gpu_cached(None)?;
 
         if log_z_e.is_infinite() && log_z_e.is_sign_negative() {
             return Err(XlogError::Execution(
@@ -594,28 +568,23 @@ impl ExactDdnnfProgram {
                     atom: query.atom.clone(),
                     log_prob: f64::NEG_INFINITY,
                     prob: 0.0,
-                    grad_true: vec![0.0; weights.len()],
-                    grad_false: vec![0.0; weights.len()],
+                    grad_true: vec![0.0; weights_len],
+                    grad_false: vec![0.0; weights_len],
                 });
                 continue;
             };
 
             let idx = var as usize;
-            if idx >= weights.len() {
+            if idx >= weights_len {
                 return Err(XlogError::Compilation(format!(
                     "Exact inference error: query var {} out of bounds (len={})",
                     var,
-                    weights.len()
+                    weights_len
                 )));
             }
 
-            let prev = weights[idx];
-            weights[idx].1 = f64::NEG_INFINITY;
-
             let (log_z_eq, grad_true_eq, grad_false_eq) =
-                self.eval_log_z_and_grads_gpu(&weights)?;
-
-            weights[idx] = prev;
+                self.eval_log_z_and_grads_gpu_cached(Some(var))?;
 
             let log_prob = log_z_eq - log_z_e;
             let mut prob = if log_prob.is_infinite() && log_prob.is_sign_negative() {
@@ -672,17 +641,32 @@ impl ExactDdnnfProgram {
         &self,
         external_weights: &[(f64, f64)],
     ) -> Result<ExactResultWithGrads> {
-        let Some(_circuit) = &self.circuit else {
+        if self.gpu.is_none() {
             return Ok(ExactResultWithGrads {
                 log_z_e: 0.0,
                 query_grads: Vec::new(),
             });
-        };
+        }
 
-        // Use external weights instead of self.evidence_log_weights
-        let weights = external_weights;
+        let weights_len = external_weights.len();
+        if self.max_var != 0 && weights_len <= self.max_var as usize {
+            return Err(XlogError::Compilation(format!(
+                "Exact inference error: external weights len {} <= max_var {}",
+                weights_len, self.max_var
+            )));
+        }
 
-        let (log_z_e, grad_true_e, grad_false_e) = self.eval_log_z_and_grads_gpu(weights)?;
+        let state = self.gpu_state()?;
+        let weights = upload_weights_from_host(state.provider(), external_weights)?;
+        {
+            let mut cache = state
+                .cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            cache.overwrite_weights(state.handle(), &weights.log_true, &weights.log_false)?;
+        }
+
+        let (log_z_e, grad_true_e, grad_false_e) = self.eval_log_z_and_grads_gpu_cached(None)?;
 
         if log_z_e.is_infinite() && log_z_e.is_sign_negative() {
             return Err(XlogError::Execution(
@@ -698,27 +682,23 @@ impl ExactDdnnfProgram {
                     atom: query.atom.clone(),
                     log_prob: f64::NEG_INFINITY,
                     prob: 0.0,
-                    grad_true: vec![0.0; weights.len()],
-                    grad_false: vec![0.0; weights.len()],
+                    grad_true: vec![0.0; weights_len],
+                    grad_false: vec![0.0; weights_len],
                 });
                 continue;
             };
 
             let idx = var as usize;
-            if idx >= weights.len() {
+            if idx >= weights_len {
                 return Err(XlogError::Compilation(format!(
                     "Exact inference error: query var {} out of bounds (len={})",
                     var,
-                    weights.len()
+                    weights_len
                 )));
             }
 
-            // Create modified weights with query var set to true
-            let mut query_weights: Vec<(f64, f64)> = weights.to_vec();
-            query_weights[idx].1 = f64::NEG_INFINITY;
-
             let (log_z_eq, grad_true_eq, grad_false_eq) =
-                self.eval_log_z_and_grads_gpu(&query_weights)?;
+                self.eval_log_z_and_grads_gpu_cached(Some(var))?;
 
             let log_prob = log_z_eq - log_z_e;
             let mut prob = if log_prob.is_infinite() && log_prob.is_sign_negative() {
@@ -766,13 +746,28 @@ impl ExactDdnnfProgram {
         })
     }
 
-    fn compile_provenance(provenance: Provenance) -> Result<Self> {
-        let d4 = D4Compiler::detect()?;
+    fn compile_provenance_with_gpu(provenance: Provenance, config: GpuConfig) -> Result<Self> {
+        if config.memory_bytes == 0 {
+            return Err(XlogError::Kernel(
+                "GPU memory budget must be non-zero".to_string(),
+            ));
+        }
 
         let mut roots_set: HashSet<crate::pir::PirNodeId> = HashSet::new();
 
         let mut evidence_formulas: Vec<(crate::pir::PirNodeId, bool, GroundAtom)> = Vec::new();
+        let mut evidence_atoms: std::collections::HashMap<GroundAtom, bool> =
+            std::collections::HashMap::new();
         for (atom, value) in &provenance.evidence {
+            if let Some(prev) = evidence_atoms.insert(atom.clone(), *value) {
+                if prev != *value {
+                    return Err(XlogError::Execution(format!(
+                        "Exact inference error: conflicting evidence for {}",
+                        display_atom(atom)
+                    )));
+                }
+            }
+
             let formula = provenance.query_formula(&atom.predicate, &atom.args);
             match formula {
                 Some(id) => {
@@ -791,10 +786,12 @@ impl ExactDdnnfProgram {
         }
 
         let mut queries: Vec<QuerySpec> = Vec::new();
+        let mut query_nodes: Vec<(usize, crate::pir::PirNodeId)> = Vec::new();
         for atom in &provenance.queries {
             let formula = provenance.query_formula(&atom.predicate, &atom.args);
             if let Some(id) = formula {
                 roots_set.insert(id);
+                query_nodes.push((queries.len(), id));
             }
             queries.push(QuerySpec {
                 atom: atom.clone(),
@@ -807,361 +804,485 @@ impl ExactDdnnfProgram {
 
         if roots.is_empty() {
             return Ok(Self {
-                circuit: None,
-                evidence_log_weights: vec![(0.0, 0.0)],
-                free_vars: Vec::new(),
+                gpu: None,
                 queries,
-                gpu_config: GpuConfig::default(),
-                gpu: Arc::new(OnceLock::new()),
+                random_vars: Vec::new(),
+                max_var: 0,
+                gpu_config: config,
             });
         }
 
-        let encoding = encode_cnf(&provenance.pir, &roots)?;
+        let device = Arc::new(CudaDevice::new(config.device_ordinal)?);
+        let memory = Arc::new(GpuMemoryManager::new(
+            device.clone(),
+            MemoryBudget::with_limit(config.memory_bytes),
+        ));
+        let provider = Arc::new(CudaKernelProvider::new(device, memory)?);
 
-        let mut base_log_weights: Vec<(f64, f64)> =
-            vec![(0.0, 0.0); (encoding.cnf.num_vars() as usize) + 1];
-        for (leaf, var) in &encoding.leaf_var {
-            let p = *provenance.leaf_probs.get(leaf).ok_or_else(|| {
-                XlogError::Compilation(format!(
-                    "Exact inference error: missing probability for leaf {:?}",
-                    leaf
-                ))
-            })?;
-            let t = ln_prob(p);
-            let f = ln_prob(1.0 - p);
-            base_log_weights[*var as usize] = (t, f);
-        }
-        for (choice, var) in &encoding.choice_var {
-            let (pt, pf) = *provenance.choice_probs.get(choice).ok_or_else(|| {
-                XlogError::Compilation(format!(
-                    "Exact inference error: missing probability for choice {:?}",
-                    choice
-                ))
-            })?;
-            base_log_weights[*var as usize] = (ln_prob(pt), ln_prob(pf));
-        }
-
-        let mut evidence_assign: Vec<u8> = vec![0u8; base_log_weights.len()];
-        for (formula, value, atom) in evidence_formulas {
-            let var = *encoding.node_var.get(&formula).ok_or_else(|| {
-                XlogError::Compilation(format!(
-                    "Exact inference error: missing CNF variable for evidence formula {:?}",
-                    formula
-                ))
-            })?;
-
-            let idx = var as usize;
-            if idx >= evidence_assign.len() {
-                return Err(XlogError::Compilation(format!(
-                    "Exact inference error: evidence var {} out of bounds (len={})",
-                    var,
-                    evidence_assign.len()
-                )));
-            }
-            let enc = if value { 1u8 } else { 2u8 };
-            match evidence_assign[idx] {
-                0 => evidence_assign[idx] = enc,
-                prev if prev == enc => {}
-                _ => {
-                    return Err(XlogError::Execution(format!(
-                        "Exact inference error: conflicting evidence for {}",
-                        display_atom(&atom)
-                    )));
-                }
-            }
-        }
-
-        let mut evidence_log_weights: Vec<(f64, f64)> = base_log_weights.clone();
-        for (idx, &enc) in evidence_assign.iter().enumerate().skip(1) {
-            if enc == 1 {
-                evidence_log_weights[idx].1 = f64::NEG_INFINITY;
-            } else if enc == 2 {
-                evidence_log_weights[idx].0 = f64::NEG_INFINITY;
-            }
-        }
-
-        for query in &mut queries {
-            let formula = provenance.query_formula(&query.atom.predicate, &query.atom.args);
-            let Some(formula) = formula else {
-                query.var = None;
-                continue;
-            };
-            let var = *encoding.node_var.get(&formula).ok_or_else(|| {
-                XlogError::Compilation(format!(
-                    "Exact inference error: missing CNF variable for query formula {:?}",
-                    formula
-                ))
-            })?;
-            query.var = Some(var);
-        }
-
-        let dir = TempDirGuard::new("xlog-prob-exact-ddnnf")?;
-        let cnf_path = dir.path().join("in.cnf");
-        let out_path = dir.path().join("out.nnf");
-
-        fs::write(&cnf_path, encoding.cnf.to_dimacs()).map_err(|e| {
-            XlogError::Execution(format!(
-                "Exact inference error: failed to write CNF file {}: {}",
-                cnf_path.display(),
-                e
-            ))
-        })?;
-
-        d4.compile_ddnnf(&cnf_path, &out_path)?;
-
-        let nnf = fs::read_to_string(&out_path).map_err(|e| {
-            XlogError::Execution(format!(
-                "Exact inference error: failed to read DDNNF output {}: {}",
-                out_path.display(),
-                e
-            ))
-        })?;
-        let ddnnf = DecisionDnnf::parse_str(&nnf)?;
-        if ddnnf.max_var() > encoding.cnf.num_vars() {
+        let gpu_pir = GpuPirGraph::from_host(&provenance.pir, &provider)?;
+        let gpu_roots = GpuPirRoots::from_host(&roots, &provider)?;
+        let encoding = encode_cnf_gpu(&gpu_pir, &gpu_roots, &provider)?;
+        if encoding.vars.max_var != encoding.cnf.var_cap {
             return Err(XlogError::Compilation(format!(
-                "Exact inference error: DDNNF references var {} but CNF has only {} vars",
-                ddnnf.max_var(),
-                encoding.cnf.num_vars()
+                "Exact inference error: CNF var_cap {} != vars.max_var {}",
+                encoding.cnf.var_cap, encoding.vars.max_var
             )));
         }
 
-        if (ddnnf.max_var() as usize) >= base_log_weights.len() {
-            return Err(XlogError::Compilation(format!(
-                "Exact inference error: var {} out of bounds for weight table (len={})",
-                ddnnf.max_var(),
-                base_log_weights.len()
-            )));
-        }
-        if evidence_assign.len() != base_log_weights.len() {
-            return Err(XlogError::Compilation(format!(
-                "Exact inference error: evidence table len {} != weight table len {}",
-                evidence_assign.len(),
-                base_log_weights.len()
-            )));
-        }
+        let (leaf_probs_host, choice_true_host, choice_false_host) =
+            build_weight_sources(&provenance)?;
 
-        let mut is_random_var: Vec<bool> = vec![false; base_log_weights.len()];
-        for (idx, &(t, f)) in base_log_weights.iter().enumerate().skip(1) {
-            if (t, f) != (0.0, 0.0) {
-                is_random_var[idx] = true;
+        let leaf_probs = upload_f64(&provider, &leaf_probs_host)?;
+        let choice_true = upload_f64(&provider, &choice_true_host)?;
+        let choice_false = upload_f64(&provider, &choice_false_host)?;
+
+        let evidence_by_var = if evidence_formulas.is_empty() {
+            let mut evidence = provider
+                .memory()
+                .alloc::<u8>((encoding.vars.max_var as usize) + 1)?;
+            provider
+                .device()
+                .inner()
+                .memset_zeros(&mut evidence)
+                .map_err(|e| XlogError::Kernel(format!("Failed to zero evidence buffer: {}", e)))?;
+            evidence
+        } else {
+            let mut nodes: Vec<u32> = Vec::with_capacity(evidence_formulas.len());
+            let mut vals: Vec<u8> = Vec::with_capacity(evidence_formulas.len());
+            for (node, value, _atom) in &evidence_formulas {
+                nodes.push(node.as_u32());
+                vals.push(if *value { 1u8 } else { 2u8 });
+            }
+            let evidence_nodes = upload_u32(&provider, &nodes)?;
+            let evidence_vals = upload_u8(&provider, &vals)?;
+            build_evidence_by_var_gpu(
+                &encoding.vars.node_var,
+                &evidence_nodes,
+                &evidence_vals,
+                encoding.vars.max_var,
+                &provider,
+            )?
+        };
+
+        let weights = build_weights_gpu(
+            &encoding.vars,
+            &leaf_probs,
+            &choice_true,
+            &choice_false,
+            &evidence_by_var,
+            &provider,
+        )?;
+
+        let random_vars = collect_random_vars_host(&provider, &encoding.vars)?;
+
+        let compile_config = default_compile_config(&encoding.cnf, config.memory_bytes)?;
+        let cache_config = default_cache_config(&encoding.cnf, &compile_config)?;
+
+        let mut cache = GpuCircuitCache::new(&provider, cache_config)?;
+        let handle = compile_gpu_d4_and_verify_cached(
+            &encoding.cnf,
+            &provider,
+            &compile_config,
+            &mut cache,
+            &random_vars,
+        )?;
+        cache.store_weights(&handle, &weights.log_true, &weights.log_false)?;
+
+        if !query_nodes.is_empty() {
+            let mut node_ids: Vec<u32> = Vec::with_capacity(query_nodes.len());
+            for (_idx, node) in &query_nodes {
+                node_ids.push(node.as_u32());
+            }
+            let node_ids_device = upload_u32(&provider, &node_ids)?;
+            let vars_device = map_nodes_to_vars_gpu(
+                &encoding.vars.node_var,
+                &node_ids_device,
+                encoding.vars.max_var,
+                &provider,
+            )?;
+
+            let mut vars_host = vec![0u32; vars_device.len()];
+            provider
+                .device()
+                .inner()
+                .dtoh_sync_copy_into(&vars_device, &mut vars_host)
+                .map_err(|e| XlogError::Kernel(format!("Failed to read query vars: {}", e)))?;
+
+            for (i, (query_idx, _)) in query_nodes.iter().enumerate() {
+                let var = vars_host[i];
+                queries[*query_idx].var = Some(var);
             }
         }
 
-        let circuit = Xgcf::from_ddnnf(&ddnnf)?.smooth_random_vars(&is_random_var)?;
-
-        let num_vars = encoding.cnf.num_vars() as usize;
-        let mut vars_in_clauses: Vec<bool> = vec![false; num_vars + 1];
-        for clause in encoding.cnf.clauses() {
-            for &lit in clause {
-                let var = lit.unsigned_abs() as usize;
-                if var == 0 || var > num_vars {
-                    return Err(XlogError::Compilation(format!(
-                        "Exact inference error: CNF clause references invalid var {} (num_vars={})",
-                        var, num_vars
-                    )));
-                }
-                vars_in_clauses[var] = true;
-            }
-        }
-
-        let mut vars_in_circuit: Vec<bool> = vec![false; num_vars + 1];
-        for (idx, node_type) in circuit.node_type.iter().enumerate() {
-            match node_type {
-                XgcfNodeType::Lit => {
-                    let lit = circuit.lit[idx];
-                    let var = lit.unsigned_abs() as usize;
-                    if var == 0 || var > num_vars {
-                        return Err(XlogError::Compilation(format!(
-                            "Exact inference error: circuit literal references invalid var {} (num_vars={})",
-                            var, num_vars
-                        )));
-                    }
-                    vars_in_circuit[var] = true;
-                }
-                XgcfNodeType::Decision => {
-                    let var = circuit.decision_var[idx] as usize;
-                    if var == 0 || var > num_vars {
-                        return Err(XlogError::Compilation(format!(
-                            "Exact inference error: circuit decision references invalid var {} (num_vars={})",
-                            var, num_vars
-                        )));
-                    }
-                    vars_in_circuit[var] = true;
-                }
-                _ => {}
-            }
-        }
-
-        let mut free_vars: Vec<u32> = Vec::new();
-        for var in 1..=num_vars {
-            if vars_in_circuit[var] {
-                continue;
-            }
-            if vars_in_clauses[var] {
-                return Err(XlogError::Compilation(format!(
-                    "Exact inference error: DDNNF/circuit omitted var {} which appears in CNF clauses",
-                    var
-                )));
-            }
-            free_vars.push(var as u32);
-        }
+        let state = GpuExactState::new(provider, cache, handle)?;
 
         Ok(Self {
-            circuit: Some(circuit),
-            evidence_log_weights,
-            free_vars,
+            gpu: Some(Arc::new(state)),
             queries,
-            gpu_config: GpuConfig::default(),
-            gpu: Arc::new(OnceLock::new()),
+            random_vars,
+            max_var: encoding.vars.max_var,
+            gpu_config: config,
         })
     }
 
-    fn eval_log_z(&self, query_true: Option<u32>) -> Result<f64> {
-        let Some(circuit) = &self.circuit else {
-            return Ok(0.0);
-        };
-
-        let weights = &self.evidence_log_weights;
-
-        let base_log_z = circuit.eval_log_wmc(|var| {
-            let idx = var as usize;
-            let (t, mut f) = weights[idx];
-            if let Some(q) = query_true {
-                if var == q {
-                    f = f64::NEG_INFINITY;
-                }
-            }
-            (t, f)
-        })?;
-
-        let mut log_z = base_log_z;
-
-        for &var in &self.free_vars {
-            let idx = var as usize;
-            let (t, mut f) = weights[idx];
-            if let Some(q) = query_true {
-                if var == q {
-                    f = f64::NEG_INFINITY;
-                }
-            }
-            log_z += logsumexp2(t, f);
-        }
-
-        Ok(log_z)
-    }
-
-    fn gpu_state(&self) -> Result<&GpuExactState> {
-        let Some(circuit) = &self.circuit else {
-            return Err(XlogError::Execution(
-                "Exact inference GPU error: program has no compiled circuit".to_string(),
-            ));
-        };
-
-        if let Some(state) = self.gpu.get() {
-            return Ok(state);
-        }
-
-        let state = GpuExactState::new(circuit, self.gpu_config, &self.evidence_log_weights)?;
-        let _ = self.gpu.set(state);
-        Ok(self.gpu.get().expect("OnceLock set failed"))
-    }
-
-    fn eval_log_z_and_grads_gpu(
-        &self,
-        weights: &[(f64, f64)],
-    ) -> Result<(f64, Vec<f64>, Vec<f64>)> {
-        let Some(_circuit) = &self.circuit else {
-            return Ok((0.0, vec![0.0], vec![0.0]));
-        };
+    fn eval_log_z_gpu(&self, query_true: Option<u32>) -> Result<f64> {
         let state = self.gpu_state()?;
+        let mut cache = state
+            .cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        let (base_log_z, grad_true_base, grad_false_base) = {
-            let mut gpu_xgcf = state
-                .circuit
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            gpu_xgcf.eval_log_wmc_and_grads(&state.provider, weights)?
-        };
-
-        if grad_true_base.len() > weights.len() || grad_false_base.len() > weights.len() {
-            return Err(XlogError::Execution(
-                "Exact inference error: circuit gradient exceeds weight table".to_string(),
-            ));
-        }
-
-        let mut log_z = base_log_z;
-
-        let mut grad_true: Vec<f64> = vec![0.0; weights.len()];
-        let mut grad_false: Vec<f64> = vec![0.0; weights.len()];
-        grad_true[..grad_true_base.len()].copy_from_slice(&grad_true_base);
-        grad_false[..grad_false_base.len()].copy_from_slice(&grad_false_base);
-
-        for &var in &self.free_vars {
-            let idx = var as usize;
-            if idx >= weights.len() {
-                return Err(XlogError::Execution(format!(
-                    "Exact inference error: free var {} out of bounds (len={})",
-                    var,
-                    weights.len()
+        if let Some(var) = query_true {
+            if var == 0 || var > self.max_var {
+                return Err(XlogError::Compilation(format!(
+                    "Exact inference error: query var {} out of bounds (max_var={})",
+                    var, self.max_var
                 )));
             }
-            let (t, f) = weights[idx];
-            let (ls, pt, pf) = logsumexp2_with_grads(t, f);
-            log_z += ls;
-            grad_true[idx] += pt;
-            grad_false[idx] += pf;
         }
 
-        Ok((log_z, grad_true, grad_false))
+        let mut restore = None;
+        if let Some(var) = query_true {
+            let mut buf = state.provider.memory().alloc::<f64>(1)?;
+            {
+                let (_, var_log_false) = cache.var_log_weights_mut();
+                force_query_var_false(state.provider(), var_log_false, var, &mut buf)?;
+            }
+            restore = Some((var, buf));
+        }
+
+        let mut out_log_z = state.provider.memory().alloc::<f64>(1)?;
+        let eval_result = cache.eval_log_wmc_device_inplace(state.handle(), &mut out_log_z);
+
+        if let Some((var, buf)) = restore {
+            let (_, var_log_false) = cache.var_log_weights_mut();
+            let restore_result =
+                restore_query_var_false(state.provider(), var_log_false, var, &buf);
+            if let Err(err) = eval_result {
+                restore_result?;
+                return Err(err);
+            }
+            restore_result?;
+        } else {
+            eval_result?;
+        }
+
+        let mut host = [0.0f64];
+        state
+            .provider
+            .device()
+            .inner()
+            .dtoh_sync_copy_into(&out_log_z, &mut host)
+            .map_err(|e| XlogError::Kernel(format!("Failed to read logZ: {}", e)))?;
+        Ok(host[0])
+    }
+
+    fn gpu_state(&self) -> Result<Arc<GpuExactState>> {
+        self.gpu.clone().ok_or_else(|| {
+            XlogError::Execution("Exact inference GPU error: program has no compiled circuit".to_string())
+        })
+    }
+
+    fn eval_log_z_and_grads_gpu_cached(
+        &self,
+        query_true: Option<u32>,
+    ) -> Result<(f64, Vec<f64>, Vec<f64>)> {
+        let state = self.gpu_state()?;
+        let mut cache = state
+            .cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        if let Some(var) = query_true {
+            if var == 0 || var > self.max_var {
+                return Err(XlogError::Compilation(format!(
+                    "Exact inference error: query var {} out of bounds (max_var={})",
+                    var, self.max_var
+                )));
+            }
+        }
+
+        let mut restore = None;
+        if let Some(var) = query_true {
+            let mut buf = state.provider.memory().alloc::<f64>(1)?;
+            {
+                let (_, var_log_false) = cache.var_log_weights_mut();
+                force_query_var_false(state.provider(), var_log_false, var, &mut buf)?;
+            }
+            restore = Some((var, buf));
+        }
+
+        let eval_result = cache.eval_grads_inplace(state.handle());
+
+        if let Some((var, buf)) = restore {
+            let (_, var_log_false) = cache.var_log_weights_mut();
+            let restore_result =
+                restore_query_var_false(state.provider(), var_log_false, var, &buf);
+            if let Err(err) = eval_result {
+                restore_result?;
+                return Err(err);
+            }
+            restore_result?;
+        } else {
+            eval_result?;
+        }
+
+        let weights_len = if self.max_var == 0 {
+            0
+        } else {
+            (self.max_var as usize) + 1
+        };
+
+        let device = state.provider.device().inner();
+        let mut host_grad_true: Vec<f64> = vec![0.0; weights_len];
+        let mut host_grad_false: Vec<f64> = vec![0.0; weights_len];
+
+        let root_idx = state.handle().root() as usize;
+        let root_view = cache.values().slice(root_idx..(root_idx + 1));
+        let mut log_z = [0.0_f64];
+        device
+            .dtoh_sync_copy_into(&root_view, &mut log_z)
+            .map_err(|e| XlogError::Kernel(format!("Failed to read logZ: {}", e)))?;
+
+        device
+            .dtoh_sync_copy_into(cache.grad_true(), &mut host_grad_true)
+            .map_err(|e| XlogError::Kernel(format!("Failed to download grad_true: {}", e)))?;
+        device
+            .dtoh_sync_copy_into(cache.grad_false(), &mut host_grad_false)
+            .map_err(|e| XlogError::Kernel(format!("Failed to download grad_false: {}", e)))?;
+
+        Ok((log_z[0], host_grad_true, host_grad_false))
     }
 }
 
-fn logsumexp2(a: f64, b: f64) -> f64 {
-    let m = if a > b { a } else { b };
-    if m.is_infinite() && m.is_sign_negative() {
-        return m;
+fn force_query_var_false(
+    provider: &Arc<CudaKernelProvider>,
+    log_false: &mut TrackedCudaSlice<f64>,
+    var: u32,
+    restore: &mut TrackedCudaSlice<f64>,
+) -> Result<()> {
+    let device = provider.device().inner();
+    let func = device
+        .get_func(WEIGHTS_MODULE, weights_kernels::WEIGHTS_FORCE_VAR_FALSE)
+        .ok_or_else(|| XlogError::Kernel("weights_force_var_false kernel not found".to_string()))?;
+    unsafe {
+        func.clone().launch(
+            LaunchConfig {
+                grid_dim: (1, 1, 1),
+                block_dim: (1, 1, 1),
+                shared_mem_bytes: 0,
+            },
+            (var, log_false, restore),
+        )
     }
-    m + ((a - m).exp() + (b - m).exp()).ln()
+    .map_err(|e| XlogError::Kernel(format!("weights_force_var_false failed: {}", e)))?;
+    Ok(())
 }
 
-fn logsumexp2_with_grads(a: f64, b: f64) -> (f64, f64, f64) {
-    let m = if a > b { a } else { b };
-    if m.is_infinite() && m.is_sign_negative() {
-        return (m, 0.0, 0.0);
+fn restore_query_var_false(
+    provider: &Arc<CudaKernelProvider>,
+    log_false: &mut TrackedCudaSlice<f64>,
+    var: u32,
+    restore: &TrackedCudaSlice<f64>,
+) -> Result<()> {
+    let device = provider.device().inner();
+    let func = device
+        .get_func(WEIGHTS_MODULE, weights_kernels::WEIGHTS_RESTORE_VAR_FALSE)
+        .ok_or_else(|| {
+            XlogError::Kernel("weights_restore_var_false kernel not found".to_string())
+        })?;
+    unsafe {
+        func.clone().launch(
+            LaunchConfig {
+                grid_dim: (1, 1, 1),
+                block_dim: (1, 1, 1),
+                shared_mem_bytes: 0,
+            },
+            (var, log_false, restore),
+        )
     }
-    if a.is_infinite() && a.is_sign_negative() {
-        return (b, 0.0, 1.0);
-    }
-    if b.is_infinite() && b.is_sign_negative() {
-        return (a, 1.0, 0.0);
-    }
-
-    let ea = (a - m).exp();
-    let eb = (b - m).exp();
-    let sum = ea + eb;
-    let ls = m + sum.ln();
-    let pa = ea / sum;
-    let pb = eb / sum;
-    (ls, pa, pb)
+    .map_err(|e| XlogError::Kernel(format!("weights_restore_var_false failed: {}", e)))?;
+    Ok(())
 }
 
-fn ln_prob(p: f64) -> f64 {
-    if p == 0.0 {
-        f64::NEG_INFINITY
-    } else {
-        p.ln()
+fn default_compile_config(
+    cnf: &xlog_solve::GpuCnf,
+    memory_bytes: u64,
+) -> Result<GpuCompileConfig> {
+    let var_cap = cnf.var_cap.max(1);
+    let trail_bytes_per_item = (var_cap as u64)
+        .checked_add(1)
+        .and_then(|v| v.checked_mul(std::mem::size_of::<i32>() as u64))
+        .ok_or_else(|| XlogError::Compilation("trail size overflow".to_string()))?;
+    let denom = trail_bytes_per_item.saturating_mul(8).max(1);
+    let max_items_by_trail = memory_bytes / denom;
+    let max_frontier_items = max_items_by_trail
+        .clamp(8, 4096)
+        .min(u64::from(u32::MAX)) as u32;
+
+    let smooth_node_cap = cnf.var_cap.saturating_mul(4).max(1024);
+    let mut smooth_edge_cap = cnf.lit_cap.saturating_mul(4).max(4096);
+    if smooth_edge_cap < max_frontier_items {
+        smooth_edge_cap = max_frontier_items;
     }
+
+    let mut cdcl_learned_bytes = memory_bytes / 16;
+    if cdcl_learned_bytes < 4 * 1024 * 1024 {
+        cdcl_learned_bytes = 4 * 1024 * 1024;
+    }
+
+    Ok(GpuCompileConfig {
+        frontier_depth: 6,
+        max_frontier_items,
+        max_depth: 128,
+        smooth_node_cap,
+        smooth_edge_cap,
+        cdcl_restart_interval: 64,
+        cdcl_learned_bytes,
+        cdcl_conflict_budget: None,
+    })
 }
 
-fn make_temp_dir(prefix: &str) -> PathBuf {
-    let pid = std::process::id();
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!("{}-{}-{}", prefix, pid, nanos));
-    fs::create_dir_all(&dir).expect("failed to create temp dir");
-    dir
+fn default_cache_config(
+    cnf: &xlog_solve::GpuCnf,
+    compile: &GpuCompileConfig,
+) -> Result<GpuCircuitCacheConfig> {
+    if compile.smooth_node_cap == 0 || compile.smooth_edge_cap == 0 {
+        return Err(XlogError::Compilation(
+            "GPU cache config requires non-zero smoothing caps".to_string(),
+        ));
+    }
+    Ok(GpuCircuitCacheConfig {
+        num_slots: 1,
+        table_size: 1,
+        node_cap: compile.smooth_node_cap,
+        edge_cap: compile.smooth_edge_cap,
+        level_cap: compile.smooth_node_cap,
+        var_cap: cnf.var_cap,
+    })
+}
+
+fn build_weight_sources(provenance: &Provenance) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>)> {
+    let max_leaf = provenance
+        .leaf_probs
+        .keys()
+        .map(|leaf| leaf.as_u32())
+        .max();
+    let leaf_len = max_leaf.map(|v| v as usize + 1).unwrap_or(0);
+    let mut leaf_probs = vec![0.0f64; leaf_len];
+    let mut leaf_seen = vec![false; leaf_len];
+    for (leaf, p) in &provenance.leaf_probs {
+        let idx = leaf.as_u32() as usize;
+        if idx >= leaf_len {
+            return Err(XlogError::Compilation(
+                "leaf probability index out of bounds".to_string(),
+            ));
+        }
+        leaf_probs[idx] = *p;
+        leaf_seen[idx] = true;
+    }
+    if let Some((idx, _)) = leaf_seen.iter().enumerate().find(|(_, seen)| !**seen) {
+        return Err(XlogError::Compilation(format!(
+            "missing probability for leaf {}",
+            idx
+        )));
+    }
+
+    let max_choice = provenance
+        .choice_probs
+        .keys()
+        .map(|choice| choice.as_u32())
+        .max();
+    let choice_len = max_choice.map(|v| v as usize + 1).unwrap_or(0);
+    let mut choice_true = vec![0.0f64; choice_len];
+    let mut choice_false = vec![0.0f64; choice_len];
+    let mut choice_seen = vec![false; choice_len];
+    for (choice, (pt, pf)) in &provenance.choice_probs {
+        let idx = choice.as_u32() as usize;
+        if idx >= choice_len {
+            return Err(XlogError::Compilation(
+                "choice probability index out of bounds".to_string(),
+            ));
+        }
+        choice_true[idx] = *pt;
+        choice_false[idx] = *pf;
+        choice_seen[idx] = true;
+    }
+    if let Some((idx, _)) = choice_seen.iter().enumerate().find(|(_, seen)| !**seen) {
+        return Err(XlogError::Compilation(format!(
+            "missing probability for choice {}",
+            idx
+        )));
+    }
+
+    Ok((leaf_probs, choice_true, choice_false))
+}
+
+fn upload_u32(
+    provider: &Arc<CudaKernelProvider>,
+    host: &[u32],
+) -> Result<TrackedCudaSlice<u32>> {
+    let memory = provider.memory();
+    let mut buf = memory.alloc::<u32>(host.len())?;
+    provider
+        .device()
+        .inner()
+        .htod_sync_copy_into(host, &mut buf)
+        .map_err(|e| XlogError::Kernel(format!("Failed to upload u32 buffer: {}", e)))?;
+    Ok(buf)
+}
+
+fn upload_u8(
+    provider: &Arc<CudaKernelProvider>,
+    host: &[u8],
+) -> Result<TrackedCudaSlice<u8>> {
+    let memory = provider.memory();
+    let mut buf = memory.alloc::<u8>(host.len())?;
+    provider
+        .device()
+        .inner()
+        .htod_sync_copy_into(host, &mut buf)
+        .map_err(|e| XlogError::Kernel(format!("Failed to upload u8 buffer: {}", e)))?;
+    Ok(buf)
+}
+
+fn upload_f64(
+    provider: &Arc<CudaKernelProvider>,
+    host: &[f64],
+) -> Result<TrackedCudaSlice<f64>> {
+    let memory = provider.memory();
+    let mut buf = memory.alloc::<f64>(host.len())?;
+    provider
+        .device()
+        .inner()
+        .htod_sync_copy_into(host, &mut buf)
+        .map_err(|e| XlogError::Kernel(format!("Failed to upload f64 buffer: {}", e)))?;
+    Ok(buf)
+}
+
+fn collect_random_vars_host(
+    provider: &Arc<CudaKernelProvider>,
+    vars: &GpuCnfVarTables,
+) -> Result<Vec<u32>> {
+    let device = provider.device().inner();
+    let mut leaf_host = vec![0u32; vars.leaf_var.len()];
+    let mut choice_host = vec![0u32; vars.choice_var.len()];
+
+    device
+        .dtoh_sync_copy_into(&vars.leaf_var, &mut leaf_host)
+        .map_err(|e| XlogError::Kernel(format!("Failed to read leaf_var table: {}", e)))?;
+    device
+        .dtoh_sync_copy_into(&vars.choice_var, &mut choice_host)
+        .map_err(|e| XlogError::Kernel(format!("Failed to read choice_var table: {}", e)))?;
+
+    let mut random_vars: Vec<u32> = Vec::new();
+    for v in leaf_host.into_iter().chain(choice_host.into_iter()) {
+        if v != 0 {
+            random_vars.push(v);
+        }
+    }
+    random_vars.sort_unstable();
+    Ok(random_vars)
 }
 
 fn display_atom(atom: &GroundAtom) -> String {
@@ -1172,33 +1293,17 @@ fn display_atom(atom: &GroundAtom) -> String {
     }
 }
 
-struct TempDirGuard {
-    path: PathBuf,
-}
-
-impl TempDirGuard {
-    fn new(prefix: &str) -> Result<Self> {
-        let path = make_temp_dir(prefix);
-        Ok(Self { path })
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for TempDirGuard {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use xlog_cuda::CudaDevice;
 
     #[test]
     fn test_exact_negation_probability() {
+        if CudaDevice::new(0).is_err() {
+            eprintln!("Skipping test: CUDA runtime unavailable");
+            return;
+        }
         // 0.3::rain(). dry() :- not rain().
         // P(dry) = P(not rain) = 1 - 0.3 = 0.7
         let source = r#"
@@ -1221,6 +1326,10 @@ query(dry()).
 
     #[test]
     fn test_exact_multi_layer_negation() {
+        if CudaDevice::new(0).is_err() {
+            eprintln!("Skipping test: CUDA runtime unavailable");
+            return;
+        }
         // 0.4::c(). b() :- not c(). a() :- not b().
         // P(b) = P(not c) = 0.6
         // P(a) = P(not b) = 0.4
@@ -1240,6 +1349,70 @@ query(a()).
             (a_prob - 0.4).abs() < 1e-6,
             "P(a) should be 0.4, got {}",
             a_prob
+        );
+    }
+
+    #[test]
+    fn test_eval_log_z_changes_for_sprinkler_given_wet() {
+        if CudaDevice::new(0).is_err() {
+            eprintln!("Skipping test: CUDA runtime unavailable");
+            return;
+        }
+
+        let source = r#"
+0.7::rain().
+0.2::sprinkler().
+wet() :- rain().
+wet() :- sprinkler().
+evidence(wet(), true).
+query(rain()).
+query(sprinkler()).
+"#;
+
+        let program = ExactDdnnfProgram::compile_source(source).unwrap();
+        let log_z_e = program.eval_log_z_gpu(None).unwrap();
+        let sprinkler_var = program.query_var(1).unwrap();
+        let log_z_eq = program.eval_log_z_gpu(Some(sprinkler_var)).unwrap();
+
+        let state = program.gpu_state().unwrap();
+        let mut cache = state.cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (_, var_log_false) = cache.var_log_weights_mut();
+
+        let mut before = [0.0f64];
+        let view = var_log_false.slice(sprinkler_var as usize..(sprinkler_var as usize + 1));
+        state
+            .provider
+            .device()
+            .inner()
+            .dtoh_sync_copy_into(&view, &mut before)
+            .unwrap();
+
+        let mut restore = state.provider.memory().alloc::<f64>(1).unwrap();
+        force_query_var_false(state.provider(), var_log_false, sprinkler_var, &mut restore)
+            .unwrap();
+
+        let mut after = [0.0f64];
+        let view_after = var_log_false.slice(sprinkler_var as usize..(sprinkler_var as usize + 1));
+        state
+            .provider
+            .device()
+            .inner()
+            .dtoh_sync_copy_into(&view_after, &mut after)
+            .unwrap();
+
+        restore_query_var_false(state.provider(), var_log_false, sprinkler_var, &restore).unwrap();
+
+        assert!(before[0].is_finite(), "expected finite log_false before forcing");
+        assert!(
+            after[0].is_infinite() && after[0].is_sign_negative(),
+            "expected -inf log_false after forcing, got {}",
+            after[0]
+        );
+        assert!(
+            log_z_eq < log_z_e,
+            "conditioning on sprinkler should reduce logZ (log_z_e={}, log_z_eq={})",
+            log_z_e,
+            log_z_eq
         );
     }
 }

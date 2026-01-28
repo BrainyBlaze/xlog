@@ -6,6 +6,31 @@ use xlog_prob::compilation::gpu_cache::{GpuCircuitCache, GpuCircuitCacheConfig};
 use xlog_prob::gpu::GpuXgcf;
 use xlog_prob::xgcf::{Xgcf, XgcfNodeType};
 
+fn read_u32_at(
+    provider: &Arc<CudaKernelProvider>,
+    slice: &xlog_cuda::memory::TrackedCudaSlice<u32>,
+    idx: usize,
+) -> u32 {
+    let view = slice.slice(idx..idx + 1);
+    let mut host = [0u32; 1];
+    provider
+        .device()
+        .inner()
+        .dtoh_sync_copy_into(&view, &mut host)
+        .expect("dtoh u32");
+    host[0]
+}
+
+fn read_slot(provider: &Arc<CudaKernelProvider>, handle: &xlog_prob::compilation::gpu_cache::GpuCircuitCacheHandle) -> usize {
+    let mut host = [0u32; 1];
+    provider
+        .device()
+        .inner()
+        .dtoh_sync_copy_into(handle.slot_device(), &mut host)
+        .expect("dtoh slot");
+    host[0] as usize
+}
+
 #[test]
 fn cache_store_writes_metadata() {
     let device = match CudaDevice::new(0) {
@@ -50,8 +75,12 @@ fn cache_store_writes_metadata() {
     let mut handle = cache.claim_slot(0xabcdu64).expect("claim");
     cache.store_from_xgcf(&mut handle, &direct).expect("store");
 
-    let meta = cache.read_meta_host(&handle).expect("meta");
-    assert!(meta.num_nodes > 0);
-    assert!(meta.num_levels > 0);
-    assert!(meta.max_var > 0);
+    let slot = read_slot(&provider, &handle);
+    let num_nodes = read_u32_at(&provider, cache.meta_num_nodes_device(), slot);
+    let num_levels = read_u32_at(&provider, cache.meta_num_levels_device(), slot);
+    let max_var = read_u32_at(&provider, cache.meta_max_var_device(), slot);
+
+    assert!(num_nodes > 0);
+    assert!(num_levels > 0);
+    assert!(max_var > 0);
 }

@@ -10,7 +10,7 @@ The certification suite is implemented in the `xlog-cuda-tests` crate and provid
 |--------|-------|
 | Total tests | 140 |
 | Categories | 24 |
-| PTX modules | 10 |
+| PTX modules | 18 |
 | Execution mode | GPU-only (requires CUDA hardware) |
 
 ## Crate Structure
@@ -99,7 +99,13 @@ Category C01 enumerates every `.entry` in each PTX module and verifies resolutio
 | `sort.ptx` | `radix_histogram`, `radix_scatter_*`, `init_indices`, `apply_permutation_*`, `gather_keys_*` |
 | `set_ops.ptx` | `concat_{u32,bytes}`, `sorted_diff_mark` |
 | `circuit.ptx` | `xgcf_forward_level`, `xgcf_backward_level_*` |
+| `cache.ptx` | `cache_cnf_hash`, `cache_lookup_or_insert`, `cache_store_*`, `cache_evict_lru` |
+| `cnf.ptx` | `cnf_reachability_*`, `cnf_count_clauses`, `cnf_emit_clauses` |
+| `d4.ptx` | `d4_frontier_*`, `d4_compile_*`, `d4_smooth_*` |
+| `neural.ptx` | `neural_fill_ad_chain_f32`, `neural_scatter_ad_chain_grads_f32` |
 | `mc_sample.ptx` | `mc_sample_bernoulli` |
+| `sat.ptx` | `sat_*`, `cdcl_*` |
+| `weights.ptx` | `weights_fill_*`, `weights_apply_evidence`, `weights_map_nodes_to_vars` |
 
 ## Test Harness
 

@@ -96,6 +96,7 @@ fn gpu_xgcf_from_device_const1_matches_true_cnf() {
 
     let layout = GpuCircuitLayout {
         num_nodes: 1,
+        num_edges: 0,
         num_levels: 1,
         level_offsets: d_level_offsets,
         level_nodes: d_level_nodes,

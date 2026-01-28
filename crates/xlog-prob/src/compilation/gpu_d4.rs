@@ -534,7 +534,7 @@ pub fn build_frontier_bitset(
     // Expand exactly `frontier_depth` steps. Terminal items carry forward unchanged.
     for _step in 0..frontier_depth_u32 {
         let mut prep_params: Vec<*mut c_void> = vec![
-            compile_needed.as_kernel_param(),
+            (&compile_needed).as_kernel_param(),
             frontier_depth_u32.as_kernel_param(),
             max_depth_u32.as_kernel_param(),
             (&cnf.clause_offsets).as_kernel_param(),
@@ -568,7 +568,7 @@ pub fn build_frontier_bitset(
         exclusive_scan_u32_inplace(provider, &mut prefix, max_frontier_items_u32)?;
 
         let mut expand_params: Vec<*mut c_void> = vec![
-            compile_needed.as_kernel_param(),
+            (&compile_needed).as_kernel_param(),
             (&cur_size).as_kernel_param(),
             (&cur_items).as_kernel_param(),
             (&counts).as_kernel_param(),
@@ -705,7 +705,7 @@ pub fn build_frontier_dense(
 
     for _step in 0..frontier_depth_u32 {
         let mut prep_params: Vec<*mut c_void> = vec![
-            compile_needed.as_kernel_param(),
+            (&compile_needed).as_kernel_param(),
             frontier_depth_u32.as_kernel_param(),
             max_depth_u32.as_kernel_param(),
             (&cnf.clause_offsets).as_kernel_param(),
@@ -737,7 +737,7 @@ pub fn build_frontier_dense(
         exclusive_scan_u32_inplace(provider, &mut prefix, max_frontier_items_u32)?;
 
         let mut expand_params: Vec<*mut c_void> = vec![
-            compile_needed.as_kernel_param(),
+            (&compile_needed).as_kernel_param(),
             (&cur_size).as_kernel_param(),
             (&cur_items).as_kernel_param(),
             (&counts).as_kernel_param(),
@@ -1064,6 +1064,60 @@ fn compile_gpu_d4_with_gate(
         .synchronize()
         .map_err(|e| XlogError::Kernel(format!("sync after d4_compile_emit failed: {}", e)))?;
 
+    let last = max_items_u32
+        .checked_sub(1)
+        .ok_or_else(|| XlogError::Compilation("max_frontier_items underflow".to_string()))?
+        as usize;
+
+    let mut last_node_offset = [0u32; 1];
+    let mut last_node_count = [0u32; 1];
+    let mut last_edge_offset = [0u32; 1];
+    let mut last_edge_count = [0u32; 1];
+    device
+        .dtoh_sync_copy_into(&node_offsets.slice(last..last + 1), &mut last_node_offset)
+        .map_err(|e| XlogError::Kernel(format!("read last node_offset: {}", e)))?;
+    device
+        .dtoh_sync_copy_into(&node_counts.slice(last..last + 1), &mut last_node_count)
+        .map_err(|e| XlogError::Kernel(format!("read last node_count: {}", e)))?;
+    device
+        .dtoh_sync_copy_into(&edge_offsets.slice(last..last + 1), &mut last_edge_offset)
+        .map_err(|e| XlogError::Kernel(format!("read last edge_offset: {}", e)))?;
+    device
+        .dtoh_sync_copy_into(&edge_counts.slice(last..last + 1), &mut last_edge_count)
+        .map_err(|e| XlogError::Kernel(format!("read last edge_count: {}", e)))?;
+
+    let mut frontier_size_host = [0u32; 1];
+    device
+        .dtoh_sync_copy_into(frontier.size_device(), &mut frontier_size_host)
+        .map_err(|e| XlogError::Kernel(format!("read frontier size: {}", e)))?;
+
+    let reserved_nodes = 3u32;
+    let reserved_edges = frontier_size_host[0];
+    let total_nodes = last_node_offset[0]
+        .checked_add(last_node_count[0])
+        .ok_or_else(|| XlogError::Compilation("total_nodes overflow".to_string()))?;
+    let total_edges = last_edge_offset[0]
+        .checked_add(last_edge_count[0])
+        .ok_or_else(|| XlogError::Compilation("total_edges overflow".to_string()))?;
+    let actual_nodes = reserved_nodes
+        .checked_add(total_nodes)
+        .ok_or_else(|| XlogError::Compilation("actual_nodes overflow".to_string()))?;
+    let actual_edges = reserved_edges
+        .checked_add(total_edges)
+        .ok_or_else(|| XlogError::Compilation("actual_edges overflow".to_string()))?;
+    if actual_nodes > node_cap_u32 {
+        return Err(XlogError::Compilation(format!(
+            "D4 emitted {} nodes (cap {})",
+            actual_nodes, node_cap_u32
+        )));
+    }
+    if actual_edges > edge_cap_u32 {
+        return Err(XlogError::Compilation(format!(
+            "D4 emitted {} edges (cap {})",
+            actual_edges, edge_cap_u32
+        )));
+    }
+
     let num_levels = (max_depth as u32)
         .checked_mul(2)
         .and_then(|v| v.checked_add(8))
@@ -1089,7 +1143,7 @@ fn compile_gpu_d4_with_gate(
     let lvl_counts = device
         .get_func(D4_MODULE, d4_kernels::D4_LEVELIZE_COUNTS)
         .ok_or_else(|| XlogError::Kernel("d4_levelize_counts kernel not found".to_string()))?;
-    let mut grid = (node_cap_u32 + 255) / 256;
+    let mut grid = (actual_nodes + 255) / 256;
     if grid == 0 {
         grid = 1;
     }
@@ -1103,7 +1157,7 @@ fn compile_gpu_d4_with_gate(
             (
                 compile_needed,
                 &node_level,
-                node_cap_u32,
+                actual_nodes,
                 num_levels,
                 &mut level_counts,
             ),
@@ -1132,7 +1186,7 @@ fn compile_gpu_d4_with_gate(
             (
                 compile_needed,
                 &node_level,
-                node_cap_u32,
+                actual_nodes,
                 num_levels,
                 &level_offsets,
                 &mut level_cursors,
@@ -1156,7 +1210,8 @@ fn compile_gpu_d4_with_gate(
         decision_child_true,
     };
     let layout = GpuCircuitLayout {
-        num_nodes: node_cap_u32,
+        num_nodes: actual_nodes,
+        num_edges: actual_edges,
         num_levels,
         level_offsets,
         level_nodes,
@@ -1258,6 +1313,7 @@ mod tests {
         // CNF: (x1). Unit propagation should assign x1=true and mark the instance satisfied.
         let instance = SolveInstance::new(1, vec![Clause::new(vec![Literal::positive(0)])]);
         let cnf = GpuCnf::from_host(&instance, &provider).expect("GpuCnf upload");
+        let compile_needed = super::alloc_compile_gate(&provider, 1).expect("compile gate");
 
         let max_frontier_items: u32 = 8;
         let wpi = words_per_item(cnf.var_cap);
@@ -1312,6 +1368,7 @@ mod tests {
         let max_depth_u32 = 32u32;
         let wpi_u32 = wpi;
         let mut prep_params: Vec<*mut c_void> = vec![
+            (&compile_needed).as_kernel_param(),
             frontier_depth_u32.as_kernel_param(),
             max_depth_u32.as_kernel_param(),
             (&cnf.clause_offsets).as_kernel_param(),
@@ -1365,6 +1422,7 @@ mod tests {
             .expect("d4_frontier_expand must exist");
         let max_frontier_items_u32 = max_frontier_items;
         let mut expand_params: Vec<*mut c_void> = vec![
+            (&compile_needed).as_kernel_param(),
             (&cur_size).as_kernel_param(),
             (&cur_items).as_kernel_param(),
             (&counts).as_kernel_param(), // per-item counts (1 or 2)
@@ -1454,6 +1512,7 @@ mod tests {
             ])],
         );
         let cnf = GpuCnf::from_host(&instance, &provider).expect("GpuCnf upload");
+        let compile_needed = super::alloc_compile_gate(&provider, 1).expect("compile gate");
 
         let max_frontier_items: u32 = 8;
         let wpi = words_per_item(cnf.var_cap);
@@ -1505,6 +1564,7 @@ mod tests {
         let max_depth_u32 = 32u32;
         let wpi_u32 = wpi;
         let mut prep_params: Vec<*mut c_void> = vec![
+            (&compile_needed).as_kernel_param(),
             frontier_depth_u32.as_kernel_param(),
             max_depth_u32.as_kernel_param(),
             (&cnf.clause_offsets).as_kernel_param(),
@@ -1557,6 +1617,7 @@ mod tests {
             .expect("d4_frontier_expand must exist");
         let max_frontier_items_u32 = max_frontier_items;
         let mut expand_params: Vec<*mut c_void> = vec![
+            (&compile_needed).as_kernel_param(),
             (&cur_size).as_kernel_param(),
             (&cur_items).as_kernel_param(),
             (&counts).as_kernel_param(), // per-item counts (1 or 2)
@@ -2312,6 +2373,7 @@ mod tests {
             .get_func(D4_MODULE, "d4_compile_count")
             .expect("d4_compile_count must exist");
         let mut count_params: Vec<*mut c_void> = vec![
+            (&compile_needed).as_kernel_param(),
             max_depth_u32.as_kernel_param(),
             (&phi.clause_offsets).as_kernel_param(),
             (&phi.literals).as_kernel_param(),
@@ -2360,6 +2422,7 @@ mod tests {
             .get_func(D4_MODULE, "d4_compile_emit")
             .expect("d4_compile_emit must exist");
         let mut emit_params: Vec<*mut c_void> = vec![
+            (&compile_needed).as_kernel_param(),
             max_depth_u32.as_kernel_param(),
             max_items.as_kernel_param(),
             node_cap.as_kernel_param(),
@@ -2428,7 +2491,13 @@ mod tests {
                         block_dim: (256, 1, 1),
                         shared_mem_bytes: 0,
                     },
-                    (&node_level, node_cap, num_levels, &mut level_counts),
+                    (
+                        &compile_needed,
+                        &node_level,
+                        node_cap,
+                        num_levels,
+                        &mut level_counts,
+                    ),
                 )
                 .unwrap();
         }
@@ -2454,6 +2523,7 @@ mod tests {
                         shared_mem_bytes: 0,
                     },
                     (
+                        &compile_needed,
                         &node_level,
                         node_cap,
                         num_levels,
@@ -2480,6 +2550,7 @@ mod tests {
         };
         let layout = crate::gpu::GpuCircuitLayout {
             num_nodes: node_cap,
+            num_edges: edge_cap,
             num_levels,
             level_offsets,
             level_nodes,
@@ -2577,6 +2648,7 @@ mod tests {
             .get_func(D4_MODULE, d4_kernels::D4_COMPILE_COUNT)
             .expect("d4_compile_count must exist");
         let mut count_params: Vec<*mut c_void> = vec![
+            (&compile_needed).as_kernel_param(),
             max_depth_u32.as_kernel_param(),
             (&phi.clause_offsets).as_kernel_param(),
             (&phi.literals).as_kernel_param(),
@@ -2630,6 +2702,7 @@ mod tests {
             .get_func(D4_MODULE, d4_kernels::D4_COMPILE_EMIT)
             .expect("d4_compile_emit must exist");
         let mut emit_params: Vec<*mut c_void> = vec![
+            (&compile_needed).as_kernel_param(),
             max_depth_u32.as_kernel_param(),
             max_items.as_kernel_param(),
             node_cap.as_kernel_param(),
@@ -2702,7 +2775,13 @@ mod tests {
                         block_dim: (256, 1, 1),
                         shared_mem_bytes: 0,
                     },
-                    (&node_level, node_cap, num_levels, &mut level_counts),
+                    (
+                        &compile_needed,
+                        &node_level,
+                        node_cap,
+                        num_levels,
+                        &mut level_counts,
+                    ),
                 )
                 .unwrap();
         }
@@ -2728,6 +2807,7 @@ mod tests {
                         shared_mem_bytes: 0,
                     },
                     (
+                        &compile_needed,
                         &node_level,
                         node_cap,
                         num_levels,
@@ -2751,6 +2831,7 @@ mod tests {
         };
         let layout = crate::gpu::GpuCircuitLayout {
             num_nodes: node_cap,
+            num_edges: edge_cap,
             num_levels,
             level_offsets,
             level_nodes,
@@ -2846,6 +2927,7 @@ mod tests {
             .get_func(D4_MODULE, d4_kernels::D4_COMPILE_COUNT)
             .expect("d4_compile_count must exist");
         let mut count_params: Vec<*mut c_void> = vec![
+            (&compile_needed).as_kernel_param(),
             max_depth_u32.as_kernel_param(),
             (&phi.clause_offsets).as_kernel_param(),
             (&phi.literals).as_kernel_param(),
@@ -2890,6 +2972,7 @@ mod tests {
             .get_func(D4_MODULE, d4_kernels::D4_COMPILE_EMIT)
             .expect("d4_compile_emit must exist");
         let mut emit_params: Vec<*mut c_void> = vec![
+            (&compile_needed).as_kernel_param(),
             max_depth_u32.as_kernel_param(),
             max_items.as_kernel_param(),
             node_cap.as_kernel_param(),
@@ -2956,7 +3039,13 @@ mod tests {
                         block_dim: (256, 1, 1),
                         shared_mem_bytes: 0,
                     },
-                    (&node_level, node_cap, num_levels, &mut level_counts),
+                    (
+                        &compile_needed,
+                        &node_level,
+                        node_cap,
+                        num_levels,
+                        &mut level_counts,
+                    ),
                 )
                 .unwrap();
         }
@@ -2989,6 +3078,7 @@ mod tests {
                         shared_mem_bytes: 0,
                     },
                     (
+                        &compile_needed,
                         &node_level,
                         node_cap,
                         num_levels,
@@ -3015,6 +3105,7 @@ mod tests {
         };
         let layout = crate::gpu::GpuCircuitLayout {
             num_nodes: node_cap,
+            num_edges: edge_cap,
             num_levels,
             level_offsets,
             level_nodes,
@@ -3110,6 +3201,7 @@ mod tests {
             .get_func(D4_MODULE, d4_kernels::D4_COMPILE_COUNT)
             .expect("d4_compile_count must exist");
         let mut count_params: Vec<*mut c_void> = vec![
+            (&compile_needed).as_kernel_param(),
             max_depth_u32.as_kernel_param(),
             (&phi.clause_offsets).as_kernel_param(),
             (&phi.literals).as_kernel_param(),
@@ -3154,6 +3246,7 @@ mod tests {
             .get_func(D4_MODULE, d4_kernels::D4_COMPILE_EMIT)
             .expect("d4_compile_emit must exist");
         let mut emit_params: Vec<*mut c_void> = vec![
+            (&compile_needed).as_kernel_param(),
             max_depth_u32.as_kernel_param(),
             max_items.as_kernel_param(),
             node_cap.as_kernel_param(),
@@ -3221,7 +3314,13 @@ mod tests {
                         block_dim: (256, 1, 1),
                         shared_mem_bytes: 0,
                     },
-                    (&node_level, node_cap, num_levels, &mut level_counts),
+                    (
+                        &compile_needed,
+                        &node_level,
+                        node_cap,
+                        num_levels,
+                        &mut level_counts,
+                    ),
                 )
                 .unwrap();
         }
@@ -3246,6 +3345,7 @@ mod tests {
                         shared_mem_bytes: 0,
                     },
                     (
+                        &compile_needed,
                         &node_level,
                         node_cap,
                         num_levels,
@@ -3268,6 +3368,7 @@ mod tests {
         };
         let layout = crate::gpu::GpuCircuitLayout {
             num_nodes: node_cap,
+            num_edges: edge_cap,
             num_levels,
             level_offsets,
             level_nodes,
@@ -3374,6 +3475,7 @@ mod tests {
             .get_func(D4_MODULE, d4_kernels::D4_COMPILE_COUNT)
             .expect("d4_compile_count must exist");
         let mut count_params: Vec<*mut c_void> = vec![
+            (&compile_needed).as_kernel_param(),
             max_depth_u32.as_kernel_param(),
             (&phi.clause_offsets).as_kernel_param(),
             (&phi.literals).as_kernel_param(),
@@ -3426,6 +3528,7 @@ mod tests {
             .get_func(D4_MODULE, d4_kernels::D4_COMPILE_EMIT)
             .expect("d4_compile_emit must exist");
         let mut emit_params: Vec<*mut c_void> = vec![
+            (&compile_needed).as_kernel_param(),
             max_depth_u32.as_kernel_param(),
             max_items.as_kernel_param(),
             node_cap.as_kernel_param(),

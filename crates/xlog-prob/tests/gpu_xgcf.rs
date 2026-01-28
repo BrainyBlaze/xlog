@@ -106,6 +106,7 @@ fn build_device_lit_circuit(
 
     let layout = GpuCircuitLayout {
         num_nodes: node_type.len() as u32,
+        num_edges: 0,
         num_levels: 2,
         level_offsets: d_level_offsets,
         level_nodes: d_level_nodes,
