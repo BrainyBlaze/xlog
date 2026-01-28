@@ -98,8 +98,10 @@ pub fn encode_cnf_gpu(
 
     let mut reachable = memory.alloc::<u32>(num_nodes)?;
     let mut queue = memory.alloc::<u32>(num_nodes)?;
+    let mut queue_ready = memory.alloc::<u32>(num_nodes)?;
     let mut head = memory.alloc::<u32>(1)?;
     let mut tail = memory.alloc::<u32>(1)?;
+    let mut in_flight = memory.alloc::<u32>(1)?;
 
     let mut leaf_used = memory.alloc::<u32>(leaf_cap as usize)?;
     let mut choice_used = memory.alloc::<u32>(choice_cap as usize)?;
@@ -138,11 +140,17 @@ pub fn encode_cnf_gpu(
         .memset_zeros(&mut queue)
         .map_err(|e| XlogError::Kernel(format!("zero queue: {}", e)))?;
     device
+        .memset_zeros(&mut queue_ready)
+        .map_err(|e| XlogError::Kernel(format!("zero queue_ready: {}", e)))?;
+    device
         .memset_zeros(&mut head)
         .map_err(|e| XlogError::Kernel(format!("zero head: {}", e)))?;
     device
         .memset_zeros(&mut tail)
         .map_err(|e| XlogError::Kernel(format!("zero tail: {}", e)))?;
+    device
+        .memset_zeros(&mut in_flight)
+        .map_err(|e| XlogError::Kernel(format!("zero in_flight: {}", e)))?;
     device
         .memset_zeros(&mut leaf_used)
         .map_err(|e| XlogError::Kernel(format!("zero leaf_used: {}", e)))?;
@@ -226,8 +234,10 @@ pub fn encode_cnf_gpu(
                 num_nodes_u32,
                 &mut reachable,
                 &mut queue,
+                &mut queue_ready,
                 &mut head,
                 &mut tail,
+                &mut in_flight,
             ),
         )
     }
@@ -250,8 +260,10 @@ pub fn encode_cnf_gpu(
                 num_nodes_u32,
                 &mut reachable,
                 &mut queue,
+                &mut queue_ready,
                 &mut head,
                 &mut tail,
+                &mut in_flight,
             ),
         )
     }

@@ -246,7 +246,7 @@ pub fn encode_cnf_gpu(
 - Allocate `GpuCnf` buffers to host-known capacities; totals remain device-resident (no host reads).
 - Emit clauses and set `clause_offsets[num_clauses]=num_lits`.
 - Fill `cnf.num_vars/num_clauses/num_lits` device scalars.
-- Return `GpuCnfEncoding` with `max_var = num_vars`.
+- Return `GpuCnfEncoding` with `max_var = var_cap` (actual counts stay device-resident in `cnf.num_vars`).
 
 **Step 5: Run tests**
 

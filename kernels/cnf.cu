@@ -24,8 +24,10 @@ extern "C" __global__ void cnf_reachability_init(
     uint32_t num_nodes,
     uint32_t* __restrict__ reachable,
     uint32_t* __restrict__ queue,
+    uint32_t* __restrict__ queue_ready,
     uint32_t* __restrict__ head,
-    uint32_t* __restrict__ tail
+    uint32_t* __restrict__ tail,
+    uint32_t* __restrict__ in_flight
 ) {
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     for (uint32_t i = tid; i < num_roots; i += blockDim.x * gridDim.x) {
@@ -39,12 +41,15 @@ extern "C" __global__ void cnf_reachability_init(
                 cnf_trap();
             }
             queue[pos] = r;
+            __threadfence();
+            queue_ready[pos] = 1u;
         }
     }
 
     // Ensure head is zeroed on device; host should also memset it before launch.
     if (blockIdx.x == 0 && threadIdx.x == 0) {
         head[0] = 0u;
+        in_flight[0] = 0u;
     }
 }
 
@@ -57,16 +62,27 @@ extern "C" __global__ void cnf_reachability_bfs(
     uint32_t num_nodes,
     uint32_t* __restrict__ reachable,
     uint32_t* __restrict__ queue,
+    uint32_t* __restrict__ queue_ready,
     uint32_t* __restrict__ head,
-    uint32_t* __restrict__ tail
+    uint32_t* __restrict__ tail,
+    uint32_t* __restrict__ in_flight
 ) {
     for (;;) {
-        uint32_t idx = atomicAdd(reinterpret_cast<unsigned int*>(head), 1u);
-        uint32_t tail_snapshot = cnf_atomic_load_u32(tail);
-        if (idx >= tail_snapshot) {
-            break;
+        uint32_t h = cnf_atomic_load_u32(head);
+        uint32_t t = cnf_atomic_load_u32(tail);
+        if (h >= t) {
+            if (cnf_atomic_load_u32(in_flight) == 0u) {
+                break;
+            }
+            continue;
         }
-        uint32_t node = queue[idx];
+        if (atomicCAS(reinterpret_cast<unsigned int*>(head), h, h + 1u) != h) {
+            continue;
+        }
+        atomicAdd(reinterpret_cast<unsigned int*>(in_flight), 1u);
+        while (cnf_atomic_load_u32(&queue_ready[h]) == 0u) {
+        }
+        uint32_t node = queue[h];
         if (node >= num_nodes) {
             cnf_trap();
         }
@@ -85,6 +101,8 @@ extern "C" __global__ void cnf_reachability_bfs(
                         cnf_trap();
                     }
                     queue[pos] = child;
+                    __threadfence();
+                    queue_ready[pos] = 1u;
                 }
             }
         } else if (tag == PIR_DECISION) {
@@ -99,6 +117,8 @@ extern "C" __global__ void cnf_reachability_bfs(
                     cnf_trap();
                 }
                 queue[pos] = f;
+                __threadfence();
+                queue_ready[pos] = 1u;
             }
             if (atomicExch(reinterpret_cast<unsigned int*>(&reachable[t]), 1u) == 0u) {
                 uint32_t pos = atomicAdd(reinterpret_cast<unsigned int*>(tail), 1u);
@@ -106,8 +126,11 @@ extern "C" __global__ void cnf_reachability_bfs(
                     cnf_trap();
                 }
                 queue[pos] = t;
+                __threadfence();
+                queue_ready[pos] = 1u;
             }
         }
+        atomicSub(reinterpret_cast<unsigned int*>(in_flight), 1u);
     }
 }
 
@@ -578,4 +601,3 @@ extern "C" __global__ void cnf_set_clause_end(
     }
     clause_offsets[num_clauses[0]] = num_lits[0];
 }
-
