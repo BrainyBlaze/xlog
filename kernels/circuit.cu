@@ -581,6 +581,143 @@ extern "C" __global__ void xgcf_forward_level_cached(
     values_s[node] = v;
 }
 
+// Evaluate all levels in a single kernel (cached layout).
+extern "C" __global__ void xgcf_eval_all_levels_cached(
+    const uint32_t* __restrict__ active_slot,
+    uint32_t node_cap,
+    uint32_t edge_cap,
+    uint32_t level_cap,
+    uint32_t var_cap,
+    const uint8_t* __restrict__ node_type,
+    const uint32_t* __restrict__ child_offsets,
+    const uint32_t* __restrict__ child_indices,
+    const int32_t* __restrict__ lit,
+    const uint32_t* __restrict__ decision_var,
+    const uint32_t* __restrict__ decision_child_false,
+    const uint32_t* __restrict__ decision_child_true,
+    const uint32_t* __restrict__ level_nodes,
+    const uint32_t* __restrict__ level_offsets,
+    const double* __restrict__ var_log_true,
+    const double* __restrict__ var_log_false,
+    double* __restrict__ values,
+    const uint32_t* __restrict__ meta_num_levels
+) {
+    if (blockIdx.x != 0) {
+        return;
+    }
+    uint32_t slot = active_slot[0];
+    size_t node_base = slot_offset(slot, node_cap);
+    size_t edge_base = slot_offset(slot, edge_cap);
+    size_t offset_base = slot_offset(slot, node_cap + 1u);
+    size_t level_base = slot_offset(slot, node_cap);
+    size_t level_offset_base = slot_offset(slot, level_cap + 1u);
+    size_t var_base = slot_offset(slot, var_cap + 1u);
+
+    const uint8_t* node_type_s = node_type + node_base;
+    const uint32_t* child_offsets_s = child_offsets + offset_base;
+    const uint32_t* child_indices_s = child_indices + edge_base;
+    const int32_t* lit_s = lit + node_base;
+    const uint32_t* decision_var_s = decision_var + node_base;
+    const uint32_t* decision_child_false_s = decision_child_false + node_base;
+    const uint32_t* decision_child_true_s = decision_child_true + node_base;
+    const uint32_t* level_nodes_s = level_nodes + level_base;
+    const uint32_t* level_offsets_s = level_offsets + level_offset_base;
+    const double* var_log_true_s = var_log_true + var_base;
+    const double* var_log_false_s = var_log_false + var_base;
+    double* values_s = values + node_base;
+
+    uint32_t num_levels = meta_num_levels[slot];
+    for (uint32_t level = 0; level < num_levels; ++level) {
+        uint32_t level_offset = level_offsets_s[level];
+        uint32_t num_level_nodes = level_offsets_s[level + 1] - level_offset;
+        for (uint32_t idx = threadIdx.x; idx < num_level_nodes; idx += blockDim.x) {
+            uint32_t node = level_nodes_s[level_offset + idx];
+            uint8_t ty = node_type_s[node];
+
+            double v;
+            switch (ty) {
+                case XGCF_CONST0:
+                    v = -INFINITY;
+                    break;
+                case XGCF_CONST1:
+                    v = 0.0;
+                    break;
+                case XGCF_LIT: {
+                    int32_t l = lit_s[node];
+                    uint32_t var = (l > 0) ? static_cast<uint32_t>(l) : static_cast<uint32_t>(-l);
+                    v = (l > 0) ? var_log_true_s[var] : var_log_false_s[var];
+                    break;
+                }
+                case XGCF_AND: {
+                    uint32_t c0 = child_offsets_s[node];
+                    uint32_t c1 = child_offsets_s[node + 1];
+                    double acc = 0.0;
+                    for (uint32_t i = c0; i < c1; i++) {
+                        uint32_t child = child_indices_s[i];
+                        acc += values_s[child];
+                    }
+                    v = acc;
+                    break;
+                }
+                case XGCF_OR: {
+                    uint32_t c0 = child_offsets_s[node];
+                    uint32_t c1 = child_offsets_s[node + 1];
+                    double maxv = -INFINITY;
+                    for (uint32_t i = c0; i < c1; i++) {
+                        uint32_t child = child_indices_s[i];
+                        double cv = values_s[child];
+                        if (cv > maxv) {
+                            maxv = cv;
+                        }
+                    }
+                    if (isinf(maxv) && maxv < 0.0) {
+                        v = maxv;
+                    } else {
+                        double sum = 0.0;
+                        for (uint32_t i = c0; i < c1; i++) {
+                            uint32_t child = child_indices_s[i];
+                            sum += exp(values_s[child] - maxv);
+                        }
+                        v = maxv + log(sum);
+                    }
+                    break;
+                }
+                case XGCF_DECISION: {
+                    uint32_t var = decision_var_s[node];
+                    uint32_t child_f = decision_child_false_s[node];
+                    uint32_t child_t = decision_child_true_s[node];
+                    double t = var_log_true_s[var];
+                    double f = var_log_false_s[var];
+                    v = logsumexp2(f + values_s[child_f], t + values_s[child_t]);
+                    break;
+                }
+                default:
+                    v = -INFINITY;
+                    break;
+            }
+
+            values_s[node] = v;
+        }
+        __syncthreads();
+    }
+}
+
+extern "C" __global__ void xgcf_copy_root_cached_meta(
+    const uint32_t* __restrict__ active_slot,
+    uint32_t node_cap,
+    const double* __restrict__ values,
+    const uint32_t* __restrict__ meta_root,
+    double* __restrict__ out_log_z
+) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) {
+        return;
+    }
+    uint32_t slot = active_slot[0];
+    uint32_t root = meta_root[slot];
+    size_t node_base = slot_offset(slot, node_cap);
+    out_log_z[0] = values[node_base + root];
+}
+
 extern "C" __global__ void xgcf_backward_level_propagate_cached(
     const uint32_t* __restrict__ active_slot,
     uint32_t node_cap,

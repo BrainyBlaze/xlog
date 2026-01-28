@@ -387,6 +387,7 @@ pub mod circuit_kernels {
     pub const XGCF_FREE_VAR_REDUCE_STAGE: &str = "xgcf_free_var_reduce_stage";
     pub const XGCF_ADD_SCALAR: &str = "xgcf_add_scalar";
     pub const XGCF_FORWARD_LEVEL_CACHED: &str = "xgcf_forward_level_cached";
+    pub const XGCF_EVAL_ALL_LEVELS_CACHED: &str = "xgcf_eval_all_levels_cached";
     pub const XGCF_BACKWARD_LEVEL_PROPAGATE_CACHED: &str = "xgcf_backward_level_propagate_cached";
     pub const XGCF_BACKWARD_LEVEL_DECISION_GRAD_CACHED: &str =
         "xgcf_backward_level_decision_grad_cached";
@@ -395,6 +396,7 @@ pub mod circuit_kernels {
     pub const XGCF_FREE_VAR_REDUCE_STAGE_CACHED: &str = "xgcf_free_var_reduce_stage_cached";
     pub const XGCF_ADD_SCALAR_CACHED: &str = "xgcf_add_scalar_cached";
     pub const XGCF_COPY_ROOT_CACHED: &str = "xgcf_copy_root_cached";
+    pub const XGCF_COPY_ROOT_CACHED_META: &str = "xgcf_copy_root_cached_meta";
 }
 
 /// Kernel function names in the cache module
@@ -888,6 +890,7 @@ impl CudaKernelProvider {
                     circuit_kernels::XGCF_FREE_VAR_REDUCE_STAGE,
                     circuit_kernels::XGCF_ADD_SCALAR,
                     circuit_kernels::XGCF_FORWARD_LEVEL_CACHED,
+                    circuit_kernels::XGCF_EVAL_ALL_LEVELS_CACHED,
                     circuit_kernels::XGCF_BACKWARD_LEVEL_PROPAGATE_CACHED,
                     circuit_kernels::XGCF_BACKWARD_LEVEL_DECISION_GRAD_CACHED,
                     circuit_kernels::XGCF_BACKWARD_LEVEL_LIT_GRAD_CACHED,
@@ -895,6 +898,7 @@ impl CudaKernelProvider {
                     circuit_kernels::XGCF_FREE_VAR_REDUCE_STAGE_CACHED,
                     circuit_kernels::XGCF_ADD_SCALAR_CACHED,
                     circuit_kernels::XGCF_COPY_ROOT_CACHED,
+                    circuit_kernels::XGCF_COPY_ROOT_CACHED_META,
                 ],
             )
             .map_err(|e| XlogError::Kernel(format!("Failed to load circuit PTX: {}", e)))?;

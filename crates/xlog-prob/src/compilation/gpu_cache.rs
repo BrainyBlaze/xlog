@@ -1343,6 +1343,99 @@ impl GpuCircuitCache {
         Ok(())
     }
 
+    pub fn eval_log_wmc_device_only(
+        &mut self,
+        handle: &GpuCircuitCacheHandle,
+        out_log_z: &mut TrackedCudaSlice<f64>,
+    ) -> Result<()> {
+        if out_log_z.len() != 1 {
+            return Err(XlogError::Compilation(format!(
+                "GPU cache logZ output len {} != 1",
+                out_log_z.len()
+            )));
+        }
+
+        {
+            let device = self.provider.device().inner();
+            let eval_all = device
+                .get_func(
+                    xlog_cuda::CIRCUIT_MODULE,
+                    xlog_cuda::circuit_kernels::XGCF_EVAL_ALL_LEVELS_CACHED,
+                )
+                .ok_or_else(|| {
+                    XlogError::Kernel("xgcf_eval_all_levels_cached kernel not found".to_string())
+                })?;
+
+            let block_size: u32 = 256;
+            let mut params: Vec<*mut std::ffi::c_void> = vec![
+                handle.slot_device().as_kernel_param(),
+                self.node_cap.as_kernel_param(),
+                self.edge_cap.as_kernel_param(),
+                self.level_cap.as_kernel_param(),
+                self.var_cap.as_kernel_param(),
+                (&self.node_type).as_kernel_param(),
+                (&self.child_offsets).as_kernel_param(),
+                (&self.child_indices).as_kernel_param(),
+                (&self.lit).as_kernel_param(),
+                (&self.decision_var).as_kernel_param(),
+                (&self.decision_child_false).as_kernel_param(),
+                (&self.decision_child_true).as_kernel_param(),
+                (&self.level_nodes).as_kernel_param(),
+                (&self.level_offsets).as_kernel_param(),
+                (&self.var_log_true).as_kernel_param(),
+                (&self.var_log_false).as_kernel_param(),
+                (&mut self.values).as_kernel_param(),
+                handle.meta_num_levels_device().as_kernel_param(),
+            ];
+            unsafe {
+                eval_all.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (block_size, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    &mut params,
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("xgcf_eval_all_levels_cached failed: {}", e)))?;
+        }
+
+        self.apply_free_var_correction_cached(handle, true, false)?;
+
+        let device = self.provider.device().inner();
+        let copy_root = device
+            .get_func(
+                xlog_cuda::CIRCUIT_MODULE,
+                xlog_cuda::circuit_kernels::XGCF_COPY_ROOT_CACHED_META,
+            )
+            .ok_or_else(|| {
+                XlogError::Kernel("xgcf_copy_root_cached_meta kernel not found".to_string())
+            })?;
+        unsafe {
+            copy_root.clone().launch(
+                LaunchConfig {
+                    grid_dim: (1, 1, 1),
+                    block_dim: (1, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (
+                    handle.slot_device(),
+                    self.node_cap,
+                    &self.values,
+                    handle.meta_root_device(),
+                    out_log_z,
+                ),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("xgcf_copy_root_cached_meta failed: {}", e)))?;
+
+        self.provider
+            .device()
+            .synchronize()
+            .map_err(|e| XlogError::Kernel(format!("cache eval sync failed: {}", e)))?;
+        Ok(())
+    }
+
     pub fn eval_grads_inplace(&mut self, handle: &GpuCircuitCacheHandle) -> Result<()> {
         if handle.num_nodes == 0 || handle.num_levels == 0 {
             return Err(XlogError::Compilation(
@@ -1691,8 +1784,8 @@ impl GpuCircuitCache {
         if !self.has_free_var_mask {
             return Ok(());
         }
-        let n = handle
-            .max_var
+        let n = self
+            .var_cap
             .checked_add(1)
             .ok_or_else(|| XlogError::Compilation("GPU cache free-var overflow".to_string()))?;
         if n == 0 {
