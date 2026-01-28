@@ -49,9 +49,10 @@ fn main() {
             true
         };
 
-        if needs_compile {
-            println!("cargo:warning=Compiling {} to PTX", kernel);
+        // Tell Cargo to rerun this script if the .cu file changes
+        println!("cargo:rerun-if-changed={}", cu_path.display());
 
+        if needs_compile {
             let status = Command::new("nvcc")
                 .args([
                     "-ptx",
@@ -70,7 +71,5 @@ fn main() {
             }
         }
 
-        // Tell Cargo to rerun this script if the .cu file changes
-        println!("cargo:rerun-if-changed={}", cu_path.display());
     }
 }
