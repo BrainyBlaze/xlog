@@ -34,6 +34,7 @@ const D4_PTX: &str = include_str!("../../../kernels/d4.ptx");
 const NEURAL_PTX: &str = include_str!("../../../kernels/neural.ptx");
 const PIR_PTX: &str = include_str!("../../../kernels/pir.ptx");
 const CNF_PTX: &str = include_str!("../../../kernels/cnf.ptx");
+const CACHE_PTX: &str = include_str!("../../../kernels/cache.ptx");
 
 #[derive(Clone, Copy)]
 struct RawCudaView<'a, T> {
@@ -119,6 +120,7 @@ pub const D4_MODULE: &str = "xlog_d4";
 pub const NEURAL_MODULE: &str = "xlog_neural";
 pub const PIR_MODULE: &str = "xlog_pir";
 pub const CNF_MODULE: &str = "xlog_cnf";
+pub const CACHE_MODULE: &str = "xlog_cache";
 
 /// Kernel function names in the Monte Carlo sampling module
 pub mod mc_sample_kernels {
@@ -371,6 +373,11 @@ pub mod circuit_kernels {
     pub const XGCF_FREE_VAR_APPLY_GRAD: &str = "xgcf_free_var_apply_grad";
     pub const XGCF_FREE_VAR_REDUCE_STAGE: &str = "xgcf_free_var_reduce_stage";
     pub const XGCF_ADD_SCALAR: &str = "xgcf_add_scalar";
+}
+
+/// Kernel function names in the cache module
+pub mod cache_kernels {
+    pub const CACHE_CNF_HASH: &str = "cache_cnf_hash";
 }
 
 /// Kernel function names in the SAT module
@@ -799,6 +806,16 @@ impl CudaKernelProvider {
                 ],
             )
             .map_err(|e| XlogError::Kernel(format!("Failed to load CNF PTX: {}", e)))?;
+
+        // Load cache module (CNF hash + cache helpers)
+        device
+            .inner()
+            .load_ptx(
+                Ptx::from_src(CACHE_PTX),
+                CACHE_MODULE,
+                &[cache_kernels::CACHE_CNF_HASH],
+            )
+            .map_err(|e| XlogError::Kernel(format!("Failed to load cache PTX: {}", e)))?;
 
         // Load circuit module (XGCF circuit evaluation)
         device

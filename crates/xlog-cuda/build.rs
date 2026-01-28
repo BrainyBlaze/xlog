@@ -30,6 +30,7 @@ fn main() {
         "d4",
         "neural",
         "pir",
+        "cache",
     ];
 
     for kernel in &kernels {

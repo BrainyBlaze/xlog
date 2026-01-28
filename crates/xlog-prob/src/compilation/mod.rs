@@ -13,6 +13,7 @@ use xlog_solve::{GpuCdclConfig, GpuCnf};
 use crate::gpu::GpuXgcf;
 
 pub mod gpu_d4;
+pub mod gpu_cache;
 pub mod gpu_cnf;
 pub mod gpu_pir;
 pub mod gpu_pir_intern;
