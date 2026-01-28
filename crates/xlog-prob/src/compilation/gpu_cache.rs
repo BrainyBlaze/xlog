@@ -50,6 +50,10 @@ pub struct GpuCircuitCache {
     adj: TrackedCudaSlice<f64>,
     grad_true: TrackedCudaSlice<f64>,
     grad_false: TrackedCudaSlice<f64>,
+    meta_num_nodes: TrackedCudaSlice<u32>,
+    meta_num_levels: TrackedCudaSlice<u32>,
+    meta_root: TrackedCudaSlice<u32>,
+    meta_max_var: TrackedCudaSlice<u32>,
     always_on: TrackedCudaSlice<u32>,
     zero_f64: TrackedCudaSlice<f64>,
     one_f64: TrackedCudaSlice<f64>,
@@ -127,6 +131,13 @@ impl GpuCircuitCacheHandle {
     pub fn max_var(&self) -> u32 {
         self.max_var
     }
+}
+
+pub struct GpuCircuitCacheMeta {
+    pub num_nodes: u32,
+    pub num_levels: u32,
+    pub root: u32,
+    pub max_var: u32,
 }
 
 /// Compute a deterministic CNF hash on the GPU.
@@ -264,6 +275,10 @@ impl GpuCircuitCache {
         let mut grad_true = memory.alloc::<f64>(var_slots)?;
         let mut grad_false = memory.alloc::<f64>(var_slots)?;
         let mut free_var_mask = memory.alloc::<u8>(var_slots)?;
+        let mut meta_num_nodes = memory.alloc::<u32>(slot_len)?;
+        let mut meta_num_levels = memory.alloc::<u32>(slot_len)?;
+        let mut meta_root = memory.alloc::<u32>(slot_len)?;
+        let mut meta_max_var = memory.alloc::<u32>(slot_len)?;
         let mut always_on = memory.alloc::<u32>(1)?;
         let zero_len = node_cap.max(var_cap + 1);
         let mut zero_f64 = memory.alloc::<f64>(zero_len)?;
@@ -342,6 +357,18 @@ impl GpuCircuitCache {
         device.memset_zeros(&mut free_var_mask).map_err(|e| {
             XlogError::Kernel(format!("GpuCircuitCache zero free_var_mask failed: {}", e))
         })?;
+        device.memset_zeros(&mut meta_num_nodes).map_err(|e| {
+            XlogError::Kernel(format!("GpuCircuitCache zero meta_num_nodes failed: {}", e))
+        })?;
+        device.memset_zeros(&mut meta_num_levels).map_err(|e| {
+            XlogError::Kernel(format!("GpuCircuitCache zero meta_num_levels failed: {}", e))
+        })?;
+        device.memset_zeros(&mut meta_root).map_err(|e| {
+            XlogError::Kernel(format!("GpuCircuitCache zero meta_root failed: {}", e))
+        })?;
+        device.memset_zeros(&mut meta_max_var).map_err(|e| {
+            XlogError::Kernel(format!("GpuCircuitCache zero meta_max_var failed: {}", e))
+        })?;
         device.memset_zeros(&mut zero_f64).map_err(|e| {
             XlogError::Kernel(format!("GpuCircuitCache zero zero_f64 failed: {}", e))
         })?;
@@ -381,6 +408,10 @@ impl GpuCircuitCache {
             adj,
             grad_true,
             grad_false,
+            meta_num_nodes,
+            meta_num_levels,
+            meta_root,
+            meta_max_var,
             always_on,
             zero_f64,
             one_f64,
@@ -545,6 +576,9 @@ impl GpuCircuitCache {
         let store_f64 = device
             .get_func(CACHE_MODULE, cache_kernels::CACHE_STORE_F64)
             .ok_or_else(|| XlogError::Kernel("cache_store_f64 kernel not found".to_string()))?;
+        let store_meta = device
+            .get_func(CACHE_MODULE, cache_kernels::CACHE_STORE_META)
+            .ok_or_else(|| XlogError::Kernel("cache_store_meta kernel not found".to_string()))?;
 
         let block_dim = 256u32;
         let grid_for = |count: u32| -> u32 {
@@ -809,12 +843,81 @@ impl GpuCircuitCache {
             .map_err(|e| XlogError::Kernel(format!("cache_store_var_log_false failed: {}", e)))?;
         }
 
+        unsafe {
+            store_meta.clone().launch(
+                LaunchConfig {
+                    grid_dim: (1, 1, 1),
+                    block_dim: (1, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (
+                    handle.slot_device(),
+                    handle.compile_needed_device(),
+                    self.num_slots,
+                    num_nodes,
+                    num_levels,
+                    root,
+                    max_var,
+                    &mut self.meta_num_nodes,
+                    &mut self.meta_num_levels,
+                    &mut self.meta_root,
+                    &mut self.meta_max_var,
+                ),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("cache_store_meta failed: {}", e)))?;
+
         self.provider
             .device()
             .synchronize()
             .map_err(|e| XlogError::Kernel(format!("cache store sync failed: {}", e)))?;
 
         Ok(())
+    }
+
+    pub fn read_meta_host(&self, handle: &GpuCircuitCacheHandle) -> Result<GpuCircuitCacheMeta> {
+        let device = self.provider.device().inner();
+        let mut slot_host = [0u32; 1];
+        device
+            .dtoh_sync_copy_into(handle.slot_device(), &mut slot_host)
+            .map_err(|e| XlogError::Kernel(format!("cache meta read slot failed: {}", e)))?;
+        let slot = slot_host[0] as usize;
+        if slot >= self.num_slots as usize {
+            return Err(XlogError::Compilation(format!(
+                "GpuCircuitCache meta read: slot {} out of bounds (num_slots={})",
+                slot, self.num_slots
+            )));
+        }
+
+        let mut num_nodes = [0u32; 1];
+        let mut num_levels = [0u32; 1];
+        let mut root = [0u32; 1];
+        let mut max_var = [0u32; 1];
+
+        let num_nodes_view = self.meta_num_nodes.slice(slot..slot + 1);
+        let num_levels_view = self.meta_num_levels.slice(slot..slot + 1);
+        let root_view = self.meta_root.slice(slot..slot + 1);
+        let max_var_view = self.meta_max_var.slice(slot..slot + 1);
+
+        device
+            .dtoh_sync_copy_into(&num_nodes_view, &mut num_nodes)
+            .map_err(|e| XlogError::Kernel(format!("cache meta read num_nodes failed: {}", e)))?;
+        device
+            .dtoh_sync_copy_into(&num_levels_view, &mut num_levels)
+            .map_err(|e| XlogError::Kernel(format!("cache meta read num_levels failed: {}", e)))?;
+        device
+            .dtoh_sync_copy_into(&root_view, &mut root)
+            .map_err(|e| XlogError::Kernel(format!("cache meta read root failed: {}", e)))?;
+        device
+            .dtoh_sync_copy_into(&max_var_view, &mut max_var)
+            .map_err(|e| XlogError::Kernel(format!("cache meta read max_var failed: {}", e)))?;
+
+        Ok(GpuCircuitCacheMeta {
+            num_nodes: num_nodes[0],
+            num_levels: num_levels[0],
+            root: root[0],
+            max_var: max_var[0],
+        })
     }
 
     pub fn eval_log_wmc_device_inplace(

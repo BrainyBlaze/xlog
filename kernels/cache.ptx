@@ -1037,4 +1037,72 @@ $L__BB6_4:
 	ret;
 
 }
+	// .globl	cache_store_meta
+.visible .entry cache_store_meta(
+	.param .u64 cache_store_meta_param_0,
+	.param .u64 cache_store_meta_param_1,
+	.param .u32 cache_store_meta_param_2,
+	.param .u32 cache_store_meta_param_3,
+	.param .u32 cache_store_meta_param_4,
+	.param .u32 cache_store_meta_param_5,
+	.param .u32 cache_store_meta_param_6,
+	.param .u64 cache_store_meta_param_7,
+	.param .u64 cache_store_meta_param_8,
+	.param .u64 cache_store_meta_param_9,
+	.param .u64 cache_store_meta_param_10
+)
+{
+	.reg .pred 	%p<4>;
+	.reg .b32 	%r<11>;
+	.reg .b64 	%rd<18>;
+
+
+	ld.param.u64 	%rd1, [cache_store_meta_param_0];
+	ld.param.u64 	%rd2, [cache_store_meta_param_1];
+	ld.param.u32 	%r2, [cache_store_meta_param_2];
+	ld.param.u32 	%r3, [cache_store_meta_param_3];
+	ld.param.u32 	%r4, [cache_store_meta_param_4];
+	ld.param.u32 	%r5, [cache_store_meta_param_5];
+	ld.param.u32 	%r6, [cache_store_meta_param_6];
+	ld.param.u64 	%rd3, [cache_store_meta_param_7];
+	ld.param.u64 	%rd4, [cache_store_meta_param_8];
+	ld.param.u64 	%rd5, [cache_store_meta_param_9];
+	ld.param.u64 	%rd6, [cache_store_meta_param_10];
+	mov.u32 	%r7, %tid.x;
+	mov.u32 	%r8, %ctaid.x;
+	or.b32  	%r9, %r7, %r8;
+	setp.ne.s32 	%p1, %r9, 0;
+	@%p1 bra 	$L__BB7_4;
+	bra.uni 	$L__BB7_1;
+
+$L__BB7_4:
+	ret;
+
+$L__BB7_1:
+	cvta.to.global.u64 	%rd7, %rd2;
+	ld.global.nc.u32 	%r10, [%rd7];
+	setp.eq.s32 	%p2, %r10, 0;
+	@%p2 bra 	$L__BB7_4;
+
+	cvta.to.global.u64 	%rd8, %rd1;
+	ld.global.nc.u32 	%r1, [%rd8];
+	setp.ge.u32 	%p3, %r1, %r2;
+	@%p3 bra 	$L__BB7_4;
+
+	cvta.to.global.u64 	%rd9, %rd3;
+	mul.wide.u32 	%rd10, %r1, 4;
+	add.s64 	%rd11, %rd9, %rd10;
+	st.global.u32 	[%rd11], %r3;
+	cvta.to.global.u64 	%rd12, %rd4;
+	add.s64 	%rd13, %rd12, %rd10;
+	st.global.u32 	[%rd13], %r4;
+	cvta.to.global.u64 	%rd14, %rd5;
+	add.s64 	%rd15, %rd14, %rd10;
+	st.global.u32 	[%rd15], %r5;
+	cvta.to.global.u64 	%rd16, %rd6;
+	add.s64 	%rd17, %rd16, %rd10;
+	st.global.u32 	[%rd17], %r6;
+	bra.uni 	$L__BB7_4;
+
+}
 

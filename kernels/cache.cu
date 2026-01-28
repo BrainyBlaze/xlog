@@ -1,6 +1,7 @@
 // GPU cache helpers for CNF hashing and circuit cache management.
 
 #include <cstdint>
+#include <cstddef>
 
 // FNV-1a 64-bit constants
 #define FNV_OFFSET 0xcbf29ce484222325ULL
@@ -310,4 +311,33 @@ extern "C" __global__ void cache_store_f64(
     for (uint32_t idx = tid; idx < count; idx += blockDim.x * gridDim.x) {
         dst[base + idx] = src[idx];
     }
+}
+
+extern "C" __global__ void cache_store_meta(
+    const uint32_t* __restrict__ active_slot,
+    const uint32_t* __restrict__ compile_needed,
+    uint32_t num_slots,
+    uint32_t num_nodes,
+    uint32_t num_levels,
+    uint32_t root,
+    uint32_t max_var,
+    uint32_t* __restrict__ meta_num_nodes,
+    uint32_t* __restrict__ meta_num_levels,
+    uint32_t* __restrict__ meta_root,
+    uint32_t* __restrict__ meta_max_var
+) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) {
+        return;
+    }
+    if (compile_needed[0] == 0u) {
+        return;
+    }
+    uint32_t slot = active_slot[0];
+    if (slot >= num_slots) {
+        return;
+    }
+    meta_num_nodes[slot] = num_nodes;
+    meta_num_levels[slot] = num_levels;
+    meta_root[slot] = root;
+    meta_max_var[slot] = max_var;
 }

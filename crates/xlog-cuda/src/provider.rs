@@ -393,6 +393,7 @@ pub mod cache_kernels {
     pub const CACHE_STORE_U32: &str = "cache_store_u32";
     pub const CACHE_STORE_I32: &str = "cache_store_i32";
     pub const CACHE_STORE_F64: &str = "cache_store_f64";
+    pub const CACHE_STORE_META: &str = "cache_store_meta";
 }
 
 /// Kernel function names in the SAT module
@@ -836,6 +837,7 @@ impl CudaKernelProvider {
                     cache_kernels::CACHE_STORE_U32,
                     cache_kernels::CACHE_STORE_I32,
                     cache_kernels::CACHE_STORE_F64,
+                    cache_kernels::CACHE_STORE_META,
                 ],
             )
             .map_err(|e| XlogError::Kernel(format!("Failed to load cache PTX: {}", e)))?;
