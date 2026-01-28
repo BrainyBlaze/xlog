@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use cudarc::driver::DeviceSlice;
 use xlog_core::MemoryBudget;
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 use xlog_prob::cnf::encode_cnf;
@@ -118,6 +117,32 @@ fn gpu_cnf_prunes_unreachable_nodes() {
 
     let gpu_pir = GpuPirGraph::from_host(&pir, &provider).unwrap();
     let roots = GpuPirRoots::from_host(&[r1], &provider).unwrap();
+    let gpu = encode_cnf_gpu(&gpu_pir, &roots, &provider).unwrap();
+
+    let (gpu_vars, gpu_clauses) = gpu_cnf_to_host(&provider, &gpu.cnf);
+    assert_eq!(gpu_vars, cpu.cnf.num_vars());
+    assert_eq!(
+        canonicalize(gpu_clauses),
+        canonicalize(cpu.cnf.clauses().to_vec())
+    );
+}
+
+#[test]
+fn gpu_cnf_handles_empty_and_or_and_neglit() {
+    let Some(provider) = try_provider() else {
+        return;
+    };
+
+    let mut pir = PirGraph::new();
+    let a = pir.neg_lit(LeafId::new(0));
+    let and0 = pir.and(vec![]);
+    let or0 = pir.or(vec![]);
+    let root = pir.or(vec![a, and0, or0]);
+
+    let cpu = encode_cnf(&pir, &[root]).unwrap();
+
+    let gpu_pir = GpuPirGraph::from_host(&pir, &provider).unwrap();
+    let roots = GpuPirRoots::from_host(&[root], &provider).unwrap();
     let gpu = encode_cnf_gpu(&gpu_pir, &roots, &provider).unwrap();
 
     let (gpu_vars, gpu_clauses) = gpu_cnf_to_host(&provider, &gpu.cnf);
