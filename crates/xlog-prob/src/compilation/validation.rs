@@ -741,6 +741,24 @@ pub fn check_equivalence_gpu(
     Ok(())
 }
 
+pub fn check_equivalence_gpu_gated(
+    phi: &GpuCnf,
+    circuit: &GpuXgcf,
+    provider: &Arc<CudaKernelProvider>,
+    config: GpuEquivalenceConfig,
+    compile_needed: &TrackedCudaSlice<u32>,
+) -> Result<()> {
+    let circuit_cnf = build_circuit_cnf(provider, circuit, phi.var_cap)?;
+
+    let q1 = build_phi_and_not_c(provider, phi, circuit, &circuit_cnf)?;
+    let q2 = build_c_and_not_phi(provider, phi, circuit, &circuit_cnf)?;
+
+    let solver = GpuCdclSolver::new(provider.clone(), config.cdcl);
+    solver.solve_expect_unsat_gated(&q1, compile_needed)?;
+    solver.solve_expect_unsat_gated(&q2, compile_needed)?;
+    Ok(())
+}
+
 pub fn validate_equivalence_gpu(
     phi: &GpuCnf,
     circuit: &GpuXgcf,
@@ -748,4 +766,14 @@ pub fn validate_equivalence_gpu(
     config: GpuEquivalenceConfig,
 ) -> Result<()> {
     check_equivalence_gpu(phi, circuit, provider, config)
+}
+
+pub fn validate_equivalence_gpu_gated(
+    phi: &GpuCnf,
+    circuit: &GpuXgcf,
+    provider: &Arc<CudaKernelProvider>,
+    config: GpuEquivalenceConfig,
+    compile_needed: &TrackedCudaSlice<u32>,
+) -> Result<()> {
+    check_equivalence_gpu_gated(phi, circuit, provider, config, compile_needed)
 }

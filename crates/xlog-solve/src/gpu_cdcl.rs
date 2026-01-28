@@ -57,7 +57,22 @@ impl GpuCdclSolver {
         Self { provider, config }
     }
 
-    fn launch_cdcl(&self, cnf: &GpuCnf) -> Result<GpuCdclRun> {
+    fn alloc_compile_gate(&self, value: u32) -> Result<TrackedCudaSlice<u32>> {
+        let memory = self.provider.memory();
+        let mut gate = memory.alloc::<u32>(1)?;
+        self.provider
+            .device()
+            .inner()
+            .htod_sync_copy_into(&[value], &mut gate)
+            .map_err(|e| XlogError::Kernel(format!("GpuCdclSolver gate upload failed: {}", e)))?;
+        Ok(gate)
+    }
+
+    fn launch_cdcl_gated(
+        &self,
+        cnf: &GpuCnf,
+        compile_needed: &TrackedCudaSlice<u32>,
+    ) -> Result<GpuCdclRun> {
         let num_vars_cap = cnf.var_cap as usize;
         let num_clauses_cap = cnf.clause_cap as usize;
 
@@ -152,6 +167,7 @@ impl GpuCdclSolver {
         let cfg_reduce_interval = self.config.reduce_interval;
 
         let mut params: Vec<*mut c_void> = vec![
+            compile_needed.as_kernel_param(),
             (&cnf.clause_offsets).as_kernel_param(),
             (&cnf.literals).as_kernel_param(),
             (&cnf.num_vars).as_kernel_param(),
@@ -218,7 +234,18 @@ impl GpuCdclSolver {
 
     /// Solve and enforce SAT entirely on GPU (no device->host reads).
     pub fn solve_expect_sat(&self, cnf: &GpuCnf) -> Result<TrackedCudaSlice<i8>> {
-        let run = self.launch_cdcl(cnf)?;
+        let compile_needed = self.alloc_compile_gate(1)?;
+        self.solve_expect_sat_gated(cnf, &compile_needed)
+    }
+
+    /// Solve and enforce SAT entirely on GPU (no device->host reads),
+    /// skipping all GPU work if `compile_needed` is 0.
+    pub fn solve_expect_sat_gated(
+        &self,
+        cnf: &GpuCnf,
+        compile_needed: &TrackedCudaSlice<u32>,
+    ) -> Result<TrackedCudaSlice<i8>> {
+        let run = self.launch_cdcl_gated(cnf, compile_needed)?;
 
         let device = self.provider.device().inner();
         let memory = self.provider.memory();
@@ -235,7 +262,7 @@ impl GpuCdclSolver {
                         block_dim: (1, 1, 1),
                         shared_mem_bytes: 0,
                     },
-                    (&run.out_status, &run.out_error, SAT_STATUS_SAT),
+                    (compile_needed, &run.out_status, &run.out_error, SAT_STATUS_SAT),
                 )
                 .map_err(|e| {
                     XlogError::Kernel(format!("Failed to launch sat_assert_status: {}", e))
@@ -258,6 +285,7 @@ impl GpuCdclSolver {
                         shared_mem_bytes: 0,
                     },
                     (
+                        compile_needed,
                         &cnf.clause_offsets,
                         &cnf.literals,
                         &cnf.num_clauses,
@@ -282,7 +310,7 @@ impl GpuCdclSolver {
                         block_dim: (1, 1, 1),
                         shared_mem_bytes: 0,
                     },
-                    (&out_ok,),
+                    (compile_needed, &out_ok),
                 )
                 .map_err(|e| XlogError::Kernel(format!("Failed to launch sat_assert_ok: {}", e)))?;
         }
@@ -293,7 +321,18 @@ impl GpuCdclSolver {
 
     /// Solve and enforce UNSAT entirely on GPU (no device->host reads).
     pub fn solve_expect_unsat(&self, cnf: &GpuCnf) -> Result<()> {
-        let run = self.launch_cdcl(cnf)?;
+        let compile_needed = self.alloc_compile_gate(1)?;
+        self.solve_expect_unsat_gated(cnf, &compile_needed)
+    }
+
+    /// Solve and enforce UNSAT entirely on GPU (no device->host reads),
+    /// skipping all GPU work if `compile_needed` is 0.
+    pub fn solve_expect_unsat_gated(
+        &self,
+        cnf: &GpuCnf,
+        compile_needed: &TrackedCudaSlice<u32>,
+    ) -> Result<()> {
+        let run = self.launch_cdcl_gated(cnf, compile_needed)?;
 
         let device = self.provider.device().inner();
         let memory = self.provider.memory();
@@ -310,7 +349,7 @@ impl GpuCdclSolver {
                         block_dim: (1, 1, 1),
                         shared_mem_bytes: 0,
                     },
-                    (&run.out_status, &run.out_error, SAT_STATUS_UNSAT),
+                    (compile_needed, &run.out_status, &run.out_error, SAT_STATUS_UNSAT),
                 )
                 .map_err(|e| {
                     XlogError::Kernel(format!("Failed to launch sat_assert_status: {}", e))
@@ -327,6 +366,22 @@ impl GpuCdclSolver {
         let proof_fn = device
             .get_func(SAT_MODULE, sat_kernels::SAT_PROOF_CHECK)
             .ok_or_else(|| XlogError::Kernel("sat_proof_check kernel not found".to_string()))?;
+        let scratch_cap_u32 = scratch_cap as u32;
+        let mut proof_params: Vec<*mut c_void> = vec![
+            compile_needed.as_kernel_param(),
+            (&cnf.clause_offsets).as_kernel_param(),
+            (&cnf.literals).as_kernel_param(),
+            (&cnf.num_clauses).as_kernel_param(),
+            (&run.learned_offsets).as_kernel_param(),
+            (&run.learned_lits).as_kernel_param(),
+            (&run.out_learned_count).as_kernel_param(),
+            (&run.proof_offsets).as_kernel_param(),
+            (&run.proof_data).as_kernel_param(),
+            (&mut scratch_a).as_kernel_param(),
+            (&mut scratch_b).as_kernel_param(),
+            scratch_cap_u32.as_kernel_param(),
+            (&mut out_ok).as_kernel_param(),
+        ];
         unsafe {
             proof_fn
                 .clone()
@@ -336,20 +391,7 @@ impl GpuCdclSolver {
                         block_dim: (1, 1, 1),
                         shared_mem_bytes: 0,
                     },
-                    (
-                        &cnf.clause_offsets,
-                        &cnf.literals,
-                        &cnf.num_clauses,
-                        &run.learned_offsets,
-                        &run.learned_lits,
-                        &run.out_learned_count,
-                        &run.proof_offsets,
-                        &run.proof_data,
-                        &mut scratch_a,
-                        &mut scratch_b,
-                        scratch_cap as u32,
-                        &mut out_ok,
-                    ),
+                    &mut proof_params,
                 )
                 .map_err(|e| {
                     XlogError::Kernel(format!("Failed to launch SAT proof check: {}", e))
@@ -368,7 +410,7 @@ impl GpuCdclSolver {
                         block_dim: (1, 1, 1),
                         shared_mem_bytes: 0,
                     },
-                    (&out_ok,),
+                    (compile_needed, &out_ok),
                 )
                 .map_err(|e| XlogError::Kernel(format!("Failed to launch sat_assert_ok: {}", e)))?;
         }

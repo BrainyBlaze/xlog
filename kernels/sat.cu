@@ -777,6 +777,7 @@ __device__ __forceinline__ uint32_t sat_luby(uint32_t i) {
 // ---------------------------------------------------------------------------
 
 extern "C" __global__ void sat_cdcl_solve(
+    const uint32_t* __restrict__ compile_needed,
     // Base CNF (CSR)
     const uint32_t* __restrict__ clause_offsets,
     const int32_t* __restrict__ clause_lits,
@@ -830,6 +831,9 @@ extern "C" __global__ void sat_cdcl_solve(
         return;
     }
     if (threadIdx.x != 0) {
+        return;
+    }
+    if (compile_needed[0] == 0u) {
         return;
     }
 
@@ -1383,12 +1387,16 @@ extern "C" __global__ void sat_cdcl_solve(
 // ---------------------------------------------------------------------------
 
 extern "C" __global__ void sat_check_model(
+    const uint32_t* __restrict__ compile_needed,
     const uint32_t* __restrict__ clause_offsets,
     const int32_t* __restrict__ clause_lits,
     const uint32_t* __restrict__ num_clauses, // len=1
     const int8_t* __restrict__ assign,
     int32_t* __restrict__ out_ok // 1 ok, 0 fail
 ) {
+    if (compile_needed[0] == 0u) {
+        return;
+    }
     uint32_t nc = num_clauses[0];
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid == 0) {
@@ -1518,6 +1526,7 @@ __device__ __forceinline__ bool sat_clause_equal_set(
 }
 
 extern "C" __global__ void sat_proof_check(
+    const uint32_t* __restrict__ compile_needed,
     const uint32_t* __restrict__ base_offsets,
     const int32_t* __restrict__ base_lits,
     const uint32_t* __restrict__ num_clauses, // len=1
@@ -1533,6 +1542,9 @@ extern "C" __global__ void sat_proof_check(
     int32_t* __restrict__ out_ok // 1 ok, 0 fail
 ) {
     if (blockIdx.x != 0 || threadIdx.x != 0) {
+        return;
+    }
+    if (compile_needed[0] == 0u) {
         return;
     }
     out_ok[0] = 1;
@@ -1643,11 +1655,15 @@ extern "C" __global__ void sat_proof_check(
 // ---------------------------------------------------------------------------
 
 extern "C" __global__ void sat_assert_status(
+    const uint32_t* __restrict__ compile_needed,
     const int32_t* __restrict__ out_status, // len=1
     const int32_t* __restrict__ out_error,  // len=1
     int32_t expected_status
 ) {
     if (blockIdx.x != 0 || threadIdx.x != 0) {
+        return;
+    }
+    if (compile_needed[0] == 0u) {
         return;
     }
     int32_t st = out_status[0];
@@ -1657,8 +1673,14 @@ extern "C" __global__ void sat_assert_status(
     }
 }
 
-extern "C" __global__ void sat_assert_ok(const int32_t* __restrict__ out_ok) {
+extern "C" __global__ void sat_assert_ok(
+    const uint32_t* __restrict__ compile_needed,
+    const int32_t* __restrict__ out_ok
+) {
     if (blockIdx.x != 0 || threadIdx.x != 0) {
+        return;
+    }
+    if (compile_needed[0] == 0u) {
         return;
     }
     if (out_ok[0] != 1) {

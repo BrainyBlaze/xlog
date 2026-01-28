@@ -422,6 +422,20 @@ impl GpuCircuitCache {
 
     pub fn lookup_or_insert(&mut self, key: u64) -> Result<GpuCacheLookup> {
         let memory = self.provider.memory();
+        let mut key_device = memory.alloc::<u64>(1)?;
+        self.provider
+            .device()
+            .inner()
+            .htod_sync_copy_into(&[key], &mut key_device)
+            .map_err(|e| XlogError::Kernel(format!("cache upload key failed: {}", e)))?;
+        self.lookup_or_insert_device(&key_device)
+    }
+
+    pub fn lookup_or_insert_device(
+        &mut self,
+        key_device: &TrackedCudaSlice<u64>,
+    ) -> Result<GpuCacheLookup> {
+        let memory = self.provider.memory();
         let mut out_slot = memory.alloc::<u32>(1)?;
         let mut out_compile_needed = memory.alloc::<u32>(1)?;
 
@@ -442,7 +456,7 @@ impl GpuCircuitCache {
                     shared_mem_bytes: 0,
                 },
                 (
-                    key,
+                    key_device,
                     self.table_size,
                     self.num_slots,
                     &mut self.keys,
@@ -872,6 +886,74 @@ impl GpuCircuitCache {
             .synchronize()
             .map_err(|e| XlogError::Kernel(format!("cache store sync failed: {}", e)))?;
 
+        Ok(())
+    }
+
+    pub fn store_free_var_mask(
+        &mut self,
+        handle: &GpuCircuitCacheHandle,
+        mask: &TrackedCudaSlice<u8>,
+    ) -> Result<()> {
+        let mask_len = u32::try_from(mask.len()).map_err(|_| {
+            XlogError::Compilation("GpuCircuitCache free_var_mask len overflow".to_string())
+        })?;
+        let expected_len = handle
+            .max_var
+            .checked_add(1)
+            .ok_or_else(|| XlogError::Compilation("GpuCircuitCache free_var_mask max_var overflow".to_string()))?;
+        if mask_len != expected_len {
+            return Err(XlogError::Compilation(format!(
+                "GpuCircuitCache free_var_mask len {} != expected {}",
+                mask_len, expected_len
+            )));
+        }
+        let var_stride = self
+            .var_cap
+            .checked_add(1)
+            .ok_or_else(|| XlogError::Compilation("GpuCircuitCache free_var_mask var_cap overflow".to_string()))?;
+        if expected_len > var_stride {
+            return Err(XlogError::Compilation(format!(
+                "GpuCircuitCache free_var_mask len {} exceeds var_cap+1 {}",
+                expected_len, var_stride
+            )));
+        }
+
+        let device = self.provider.device().inner();
+        let store_u8 = device
+            .get_func(CACHE_MODULE, cache_kernels::CACHE_STORE_U8)
+            .ok_or_else(|| XlogError::Kernel("cache_store_u8 kernel not found".to_string()))?;
+
+        let block_dim = 256u32;
+        let grid_dim = (mask_len + block_dim - 1) / block_dim;
+        if grid_dim == 0 {
+            return Ok(());
+        }
+
+        unsafe {
+            store_u8.clone().launch(
+                LaunchConfig {
+                    grid_dim: (grid_dim, 1, 1),
+                    block_dim: (block_dim, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (
+                    handle.slot_device(),
+                    handle.compile_needed_device(),
+                    var_stride,
+                    mask,
+                    &mut self.free_var_mask,
+                    mask_len,
+                ),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("cache_store_free_var_mask failed: {}", e)))?;
+
+        self.provider
+            .device()
+            .synchronize()
+            .map_err(|e| XlogError::Kernel(format!("cache store free_var_mask sync failed: {}", e)))?;
+
+        self.has_free_var_mask = true;
         Ok(())
     }
 

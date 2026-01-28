@@ -11,6 +11,7 @@ use xlog_cuda::CudaKernelProvider;
 use xlog_solve::{GpuCdclConfig, GpuCnf};
 
 use crate::gpu::GpuXgcf;
+use crate::compilation::gpu_cache::{GpuCircuitCache, GpuCircuitCacheHandle};
 
 pub mod gpu_d4;
 pub mod gpu_cache;
@@ -27,7 +28,10 @@ pub use gpu_pir::{
 };
 pub use gpu_pir_intern::{GpuPirInterner, PirBatch};
 pub use sparse_matrix::GpuCsrCnf;
-pub use validation::{check_equivalence_gpu, validate_equivalence_gpu, GpuEquivalenceConfig};
+pub use validation::{
+    check_equivalence_gpu, check_equivalence_gpu_gated, validate_equivalence_gpu,
+    validate_equivalence_gpu_gated, GpuEquivalenceConfig,
+};
 
 /// Compile CNF on GPU, then verify equivalence with GPU CDCL.
 pub fn compile_gpu_d4_and_verify(
@@ -44,6 +48,42 @@ pub fn compile_gpu_d4_and_verify(
     let cdcl = cdcl_config_from_compile(config)?;
     validate_equivalence_gpu(cnf, &circuit, provider, GpuEquivalenceConfig { cdcl })?;
     Ok(circuit)
+}
+
+/// Compile CNF on GPU, cache the circuit, then verify equivalence with GPU CDCL.
+pub fn compile_gpu_d4_and_verify_cached(
+    cnf: &GpuCnf,
+    provider: &Arc<CudaKernelProvider>,
+    config: &GpuCompileConfig,
+    cache: &mut GpuCircuitCache,
+) -> Result<GpuCircuitCacheHandle> {
+    if config.cdcl_conflict_budget.is_some() {
+        return Err(XlogError::Compilation(
+            "cdcl_conflict_budget is not supported by the GPU CDCL verifier".to_string(),
+        ));
+    }
+
+    let key = gpu_cache::hash_cnf_gpu(cnf, provider)?;
+    let lookup = cache.lookup_or_insert_device(&key)?;
+    let mut handle = lookup.into_handle();
+
+    let circuit =
+        gpu_d4::compile_gpu_d4_gated(cnf, provider, config, handle.compile_needed_device())?;
+    cache.store_from_xgcf(&mut handle, &circuit)?;
+
+    let free_var_mask =
+        gpu_d4::compute_free_var_mask_gpu_gated(cnf, &circuit, provider, handle.compile_needed_device())?;
+    cache.store_free_var_mask(&mut handle, &free_var_mask)?;
+
+    let cdcl = cdcl_config_from_compile(config)?;
+    validate_equivalence_gpu_gated(
+        cnf,
+        &circuit,
+        provider,
+        GpuEquivalenceConfig { cdcl },
+        handle.compile_needed_device(),
+    )?;
+    Ok(handle)
 }
 
 fn cdcl_config_from_compile(config: &GpuCompileConfig) -> Result<GpuCdclConfig> {

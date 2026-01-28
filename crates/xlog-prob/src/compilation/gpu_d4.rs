@@ -17,6 +17,17 @@ use xlog_solve::GpuCnf;
 
 use crate::gpu::{GpuCircuitBuilder, GpuCircuitLayout, GpuXgcf};
 
+fn alloc_compile_gate(provider: &CudaKernelProvider, value: u32) -> Result<TrackedCudaSlice<u32>> {
+    let memory = provider.memory();
+    let mut gate = memory.alloc::<u32>(1)?;
+    provider
+        .device()
+        .inner()
+        .htod_sync_copy_into(&[value], &mut gate)
+        .map_err(|e| XlogError::Kernel(format!("compile gate upload failed: {}", e)))?;
+    Ok(gate)
+}
+
 /// Configuration for GPU D4 + GPU CDCL.
 ///
 /// This is the public control-plane contract for the GPU-native compilation pipeline.
@@ -90,6 +101,16 @@ pub fn compute_free_var_mask_gpu(
     circuit: &GpuXgcf,
     provider: &CudaKernelProvider,
 ) -> Result<TrackedCudaSlice<u8>> {
+    let compile_needed = alloc_compile_gate(provider, 1)?;
+    compute_free_var_mask_gpu_gated(cnf, circuit, provider, &compile_needed)
+}
+
+pub fn compute_free_var_mask_gpu_gated(
+    cnf: &GpuCnf,
+    circuit: &GpuXgcf,
+    provider: &CudaKernelProvider,
+    compile_needed: &TrackedCudaSlice<u32>,
+) -> Result<TrackedCudaSlice<u8>> {
     if cnf.var_cap == 0 {
         return Err(XlogError::Compilation(
             "compute_free_var_mask_gpu requires var_cap > 0".to_string(),
@@ -157,6 +178,7 @@ pub fn compute_free_var_mask_gpu(
                     shared_mem_bytes: 0,
                 },
                 (
+                    compile_needed,
                     cnf.var_cap,
                     cnf.lit_cap,
                     &cnf.num_vars,
@@ -184,6 +206,7 @@ pub fn compute_free_var_mask_gpu(
                     shared_mem_bytes: 0,
                 },
                 (
+                    compile_needed,
                     circuit.node_type(),
                     circuit.lit(),
                     circuit.decision_var(),
@@ -212,6 +235,7 @@ pub fn compute_free_var_mask_gpu(
                 shared_mem_bytes: 0,
             },
             (
+                compile_needed,
                 &cnf.num_vars,
                 cnf.var_cap,
                 &vars_in_clauses,
@@ -417,6 +441,7 @@ pub fn build_frontier_bitset(
     cnf: &GpuCnf,
     provider: &CudaKernelProvider,
     config: &GpuCompileConfig,
+    compile_needed: &TrackedCudaSlice<u32>,
 ) -> Result<GpuFrontierBitset> {
     if config.max_frontier_items == 0 {
         return Err(XlogError::Compilation(
@@ -509,6 +534,7 @@ pub fn build_frontier_bitset(
     // Expand exactly `frontier_depth` steps. Terminal items carry forward unchanged.
     for _step in 0..frontier_depth_u32 {
         let mut prep_params: Vec<*mut c_void> = vec![
+            compile_needed.as_kernel_param(),
             frontier_depth_u32.as_kernel_param(),
             max_depth_u32.as_kernel_param(),
             (&cnf.clause_offsets).as_kernel_param(),
@@ -542,6 +568,7 @@ pub fn build_frontier_bitset(
         exclusive_scan_u32_inplace(provider, &mut prefix, max_frontier_items_u32)?;
 
         let mut expand_params: Vec<*mut c_void> = vec![
+            compile_needed.as_kernel_param(),
             (&cur_size).as_kernel_param(),
             (&cur_items).as_kernel_param(),
             (&counts).as_kernel_param(),
@@ -589,6 +616,7 @@ pub fn build_frontier_dense(
     cnf: &GpuCnf,
     provider: &CudaKernelProvider,
     config: &GpuCompileConfig,
+    compile_needed: &TrackedCudaSlice<u32>,
 ) -> Result<GpuFrontierDense> {
     if config.max_frontier_items == 0 {
         return Err(XlogError::Compilation(
@@ -677,6 +705,7 @@ pub fn build_frontier_dense(
 
     for _step in 0..frontier_depth_u32 {
         let mut prep_params: Vec<*mut c_void> = vec![
+            compile_needed.as_kernel_param(),
             frontier_depth_u32.as_kernel_param(),
             max_depth_u32.as_kernel_param(),
             (&cnf.clause_offsets).as_kernel_param(),
@@ -708,6 +737,7 @@ pub fn build_frontier_dense(
         exclusive_scan_u32_inplace(provider, &mut prefix, max_frontier_items_u32)?;
 
         let mut expand_params: Vec<*mut c_void> = vec![
+            compile_needed.as_kernel_param(),
             (&cur_size).as_kernel_param(),
             (&cur_items).as_kernel_param(),
             (&counts).as_kernel_param(),
@@ -784,6 +814,27 @@ pub fn compile_gpu_d4(
     provider: &Arc<CudaKernelProvider>,
     config: &GpuCompileConfig,
 ) -> Result<GpuXgcf> {
+    let compile_needed = alloc_compile_gate(provider, 1)?;
+    compile_gpu_d4_with_gate(cnf, provider, config, &compile_needed)
+}
+
+/// Compile a device-resident CNF into a device-resident XGCF circuit (Phase 1),
+/// skipping work on the device when `compile_needed` is 0.
+pub fn compile_gpu_d4_gated(
+    cnf: &GpuCnf,
+    provider: &Arc<CudaKernelProvider>,
+    config: &GpuCompileConfig,
+    compile_needed: &TrackedCudaSlice<u32>,
+) -> Result<GpuXgcf> {
+    compile_gpu_d4_with_gate(cnf, provider, config, compile_needed)
+}
+
+fn compile_gpu_d4_with_gate(
+    cnf: &GpuCnf,
+    provider: &Arc<CudaKernelProvider>,
+    config: &GpuCompileConfig,
+    compile_needed: &TrackedCudaSlice<u32>,
+) -> Result<GpuXgcf> {
     if config.max_frontier_items == 0 {
         return Err(XlogError::Compilation(
             "GpuCompileConfig.max_frontier_items must be > 0".to_string(),
@@ -807,7 +858,7 @@ pub fn compile_gpu_d4(
 
     validate_cnf_gpu(cnf, provider)?;
 
-    let frontier = build_frontier_bitset(cnf, provider, config)?;
+    let frontier = build_frontier_bitset(cnf, provider, config, compile_needed)?;
     provider
         .device()
         .synchronize()
@@ -866,6 +917,7 @@ pub fn compile_gpu_d4(
     let uf_stride_u32 = uf_stride;
 
     let mut count_params: Vec<*mut c_void> = vec![
+        compile_needed.as_kernel_param(),
         max_depth.as_kernel_param(),
         (&cnf.clause_offsets).as_kernel_param(),
         (&cnf.literals).as_kernel_param(),
@@ -963,6 +1015,7 @@ pub fn compile_gpu_d4(
     let node_cap_u32 = node_cap;
     let edge_cap_u32 = edge_cap;
     let mut emit_params: Vec<*mut c_void> = vec![
+        compile_needed.as_kernel_param(),
         max_depth.as_kernel_param(),
         max_items_u32.as_kernel_param(),
         node_cap_u32.as_kernel_param(),
@@ -1047,7 +1100,13 @@ pub fn compile_gpu_d4(
                 block_dim: (256, 1, 1),
                 shared_mem_bytes: 0,
             },
-            (&node_level, node_cap_u32, num_levels, &mut level_counts),
+            (
+                compile_needed,
+                &node_level,
+                node_cap_u32,
+                num_levels,
+                &mut level_counts,
+            ),
         )
     }
     .map_err(|e| XlogError::Kernel(format!("d4_levelize_counts failed: {}", e)))?;
@@ -1071,6 +1130,7 @@ pub fn compile_gpu_d4(
                 shared_mem_bytes: 0,
             },
             (
+                compile_needed,
                 &node_level,
                 node_cap_u32,
                 num_levels,
@@ -1603,8 +1663,9 @@ mod tests {
             cdcl_conflict_budget: None,
         };
 
-        let frontier =
-            super::build_frontier_dense(&cnf, &provider, &config).expect("build_frontier_dense");
+        let compile_needed = super::alloc_compile_gate(&provider, 1).expect("compile gate");
+        let frontier = super::build_frontier_dense(&cnf, &provider, &config, &compile_needed)
+            .expect("build_frontier_dense");
 
         let assert_u32 = device
             .get_func(D4_MODULE, "d4_assert_u32_eq")
@@ -1895,8 +1956,9 @@ mod tests {
             cdcl_conflict_budget: None,
         };
 
-        let frontier =
-            super::build_frontier_bitset(&cnf, &provider, &config).expect("build_frontier_bitset");
+        let compile_needed = super::alloc_compile_gate(&provider, 1).expect("compile gate");
+        let frontier = super::build_frontier_bitset(&cnf, &provider, &config, &compile_needed)
+            .expect("build_frontier_bitset");
 
         let assert_u32 = device
             .get_func(D4_MODULE, "d4_assert_u32_eq")
@@ -2197,7 +2259,8 @@ mod tests {
         super::validate_cnf_gpu(&phi, &provider).expect("CNF validation must succeed");
 
         // One frontier item (root) with empty assignment; DFS must handle unit propagation.
-        let frontier = super::build_frontier_bitset(&phi, &provider, &cfg)
+        let compile_needed = super::alloc_compile_gate(&provider, 1).expect("compile gate");
+        let frontier = super::build_frontier_bitset(&phi, &provider, &cfg, &compile_needed)
             .expect("build_frontier_bitset must succeed");
         provider
             .device()
@@ -2466,7 +2529,8 @@ mod tests {
         };
 
         super::validate_cnf_gpu(&phi, &provider).expect("CNF validation must succeed");
-        let frontier = super::build_frontier_bitset(&phi, &provider, &cfg)
+        let compile_needed = super::alloc_compile_gate(&provider, 1).expect("compile gate");
+        let frontier = super::build_frontier_bitset(&phi, &provider, &cfg, &compile_needed)
             .expect("build_frontier_bitset must succeed");
         let max_items = cfg.max_frontier_items;
         let max_depth_u32 = cfg.max_depth as u32;
@@ -2734,7 +2798,8 @@ mod tests {
         };
 
         super::validate_cnf_gpu(&phi, &provider).expect("CNF validation must succeed");
-        let frontier = super::build_frontier_bitset(&phi, &provider, &cfg)
+        let compile_needed = super::alloc_compile_gate(&provider, 1).expect("compile gate");
+        let frontier = super::build_frontier_bitset(&phi, &provider, &cfg, &compile_needed)
             .expect("build_frontier_bitset must succeed");
         let max_items = cfg.max_frontier_items;
         let max_depth_u32 = cfg.max_depth as u32;
@@ -2997,7 +3062,8 @@ mod tests {
         };
 
         super::validate_cnf_gpu(&phi, &provider).expect("CNF validation must succeed");
-        let frontier = super::build_frontier_bitset(&phi, &provider, &cfg)
+        let compile_needed = super::alloc_compile_gate(&provider, 1).expect("compile gate");
+        let frontier = super::build_frontier_bitset(&phi, &provider, &cfg, &compile_needed)
             .expect("build_frontier_bitset must succeed");
         let max_items = cfg.max_frontier_items;
         let max_depth_u32 = cfg.max_depth as u32;
@@ -3257,7 +3323,8 @@ mod tests {
         };
 
         super::validate_cnf_gpu(&phi, &provider).expect("CNF validation must succeed");
-        let frontier = super::build_frontier_bitset(&phi, &provider, &cfg)
+        let compile_needed = super::alloc_compile_gate(&provider, 1).expect("compile gate");
+        let frontier = super::build_frontier_bitset(&phi, &provider, &cfg, &compile_needed)
             .expect("build_frontier_bitset must succeed");
         provider
             .device()

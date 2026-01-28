@@ -107,11 +107,15 @@ extern "C" __global__ void d4_validate_cnf(
 // The output `level_counts[level]` is intended to be exclusive-scanned on device
 // to form `level_offsets` for XGCF evaluation.
 extern "C" __global__ void d4_levelize_counts(
+    const uint32_t* __restrict__ compile_needed,
     const uint32_t* __restrict__ node_level,
     uint32_t num_nodes,
     uint32_t num_levels,
     uint32_t* __restrict__ level_counts
 ) {
+    if (compile_needed[0] == 0u) {
+        return;
+    }
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     for (uint32_t node = tid; node < num_nodes; node += blockDim.x * gridDim.x) {
         uint32_t lvl = node_level[node];
@@ -129,6 +133,7 @@ extern "C" __global__ void d4_levelize_counts(
 // - `level_cursors` must be initialized to 0 before launch (len = num_levels).
 // - Emission order within a level is unspecified; correctness does not depend on it.
 extern "C" __global__ void d4_levelize_emit(
+    const uint32_t* __restrict__ compile_needed,
     const uint32_t* __restrict__ node_level,
     uint32_t num_nodes,
     uint32_t num_levels,
@@ -136,6 +141,9 @@ extern "C" __global__ void d4_levelize_emit(
     uint32_t* __restrict__ level_cursors,       // len = num_levels (must start at 0)
     uint32_t* __restrict__ level_nodes          // len = num_nodes
 ) {
+    if (compile_needed[0] == 0u) {
+        return;
+    }
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     for (uint32_t node = tid; node < num_nodes; node += blockDim.x * gridDim.x) {
         uint32_t lvl = node_level[node];
@@ -278,6 +286,7 @@ __device__ __forceinline__ bool d4_assign_var_dense(
 // - counts[tid] in {1,2} (or 0 for tid>=size).
 // - pick_var[tid] = chosen var id for counts==2, else 0.
 extern "C" __global__ void d4_frontier_prepare(
+    const uint32_t* __restrict__ compile_needed,
     uint32_t frontier_depth,
     uint32_t max_depth,
     const uint32_t* __restrict__ clause_offsets,
@@ -292,6 +301,9 @@ extern "C" __global__ void d4_frontier_prepare(
     uint32_t* __restrict__ counts,
     uint32_t* __restrict__ pick_var
 ) {
+    if (compile_needed[0] == 0u) {
+        return;
+    }
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     uint32_t n = cur_size[0];
     if (tid >= n) {
@@ -429,6 +441,7 @@ extern "C" __global__ void d4_frontier_prepare(
 }
 
 extern "C" __global__ void d4_frontier_expand(
+    const uint32_t* __restrict__ compile_needed,
     const uint32_t* __restrict__ cur_size, // len=1
     const D4WorkItem* __restrict__ cur_items,
     const uint32_t* __restrict__ counts,         // per-item output counts (len >= cur_size)
@@ -443,6 +456,12 @@ extern "C" __global__ void d4_frontier_expand(
     uint32_t* __restrict__ next_false_bits,
     uint32_t max_frontier_items
 ) {
+    if (compile_needed[0] == 0u) {
+        if (blockIdx.x == 0 && threadIdx.x == 0) {
+            next_size[0] = 0u;
+        }
+        return;
+    }
     // Compute next_size deterministically.
     if (blockIdx.x == 0 && threadIdx.x == 0) {
         uint32_t n = cur_size[0];
@@ -530,6 +549,7 @@ extern "C" __global__ void d4_frontier_expand(
 // Dense assignment variants (tri-state bytes). These are used for small/medium var counts where
 // byte-per-var storage is acceptable and can be faster for random access.
 extern "C" __global__ void d4_frontier_prepare_dense(
+    const uint32_t* __restrict__ compile_needed,
     uint32_t frontier_depth,
     uint32_t max_depth,
     const uint32_t* __restrict__ clause_offsets,
@@ -543,6 +563,9 @@ extern "C" __global__ void d4_frontier_prepare_dense(
     uint32_t* __restrict__ counts,
     uint32_t* __restrict__ pick_var
 ) {
+    if (compile_needed[0] == 0u) {
+        return;
+    }
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     uint32_t n = cur_size[0];
     if (tid >= n) {
@@ -666,6 +689,7 @@ extern "C" __global__ void d4_frontier_prepare_dense(
 }
 
 extern "C" __global__ void d4_frontier_expand_dense(
+    const uint32_t* __restrict__ compile_needed,
     const uint32_t* __restrict__ cur_size, // len=1
     const D4WorkItem* __restrict__ cur_items,
     const uint32_t* __restrict__ counts,         // per-item output counts (len >= cur_size)
@@ -678,6 +702,12 @@ extern "C" __global__ void d4_frontier_expand_dense(
     uint8_t* __restrict__ next_assign,
     uint32_t max_frontier_items
 ) {
+    if (compile_needed[0] == 0u) {
+        if (blockIdx.x == 0 && threadIdx.x == 0) {
+            next_size[0] = 0u;
+        }
+        return;
+    }
     if (blockIdx.x == 0 && threadIdx.x == 0) {
         uint32_t n = cur_size[0];
         uint32_t out = (n == 0u) ? 0u : (prefix_offsets[n - 1u] + counts[n - 1u]);
@@ -1709,6 +1739,7 @@ __device__ __forceinline__ uint32_t d4_compile_leaf(
 }
 
 extern "C" __global__ void d4_compile_count(
+    const uint32_t* __restrict__ compile_needed,
     uint32_t max_depth,
     const uint32_t* __restrict__ clause_offsets,
     const int32_t* __restrict__ literals,
@@ -1728,6 +1759,9 @@ extern "C" __global__ void d4_compile_count(
     uint32_t* __restrict__ out_node_counts,
     uint32_t* __restrict__ out_edge_counts
 ) {
+    if (compile_needed[0] == 0u) {
+        return;
+    }
     if (threadIdx.x != 0u) {
         return;
     }
@@ -1782,6 +1816,7 @@ extern "C" __global__ void d4_compile_count(
 }
 
 extern "C" __global__ void d4_compile_emit(
+    const uint32_t* __restrict__ compile_needed,
     uint32_t max_depth,
     uint32_t max_frontier_items,
     uint32_t node_cap,
@@ -1814,6 +1849,9 @@ extern "C" __global__ void d4_compile_emit(
     uint32_t* __restrict__ decision_child_true,
     uint32_t* __restrict__ node_level
 ) {
+    if (compile_needed[0] == 0u) {
+        return;
+    }
     uint32_t n = frontier_size[0];
     if (n > max_frontier_items) {
         d4_trap();
@@ -2625,6 +2663,7 @@ extern "C" __global__ void d4_smooth_check_edge_cap(
 // ---------------------------------------------------------------------------
 
 extern "C" __global__ void d4_mark_vars_in_clauses(
+    const uint32_t* __restrict__ compile_needed,
     uint32_t var_cap,
     uint32_t lit_cap,
     const uint32_t* __restrict__ num_vars, // len=1
@@ -2632,6 +2671,9 @@ extern "C" __global__ void d4_mark_vars_in_clauses(
     const int32_t* __restrict__ literals,
     uint32_t* __restrict__ vars_in_clauses
 ) {
+    if (compile_needed[0] == 0u) {
+        return;
+    }
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     uint32_t nv = num_vars[0];
     uint32_t nl = num_lits[0];
@@ -2652,6 +2694,7 @@ extern "C" __global__ void d4_mark_vars_in_clauses(
 }
 
 extern "C" __global__ void d4_mark_vars_in_circuit(
+    const uint32_t* __restrict__ compile_needed,
     const uint8_t* __restrict__ node_type,
     const int32_t* __restrict__ lit,
     const uint32_t* __restrict__ decision_var,
@@ -2660,6 +2703,9 @@ extern "C" __global__ void d4_mark_vars_in_circuit(
     uint32_t var_cap,
     uint32_t* __restrict__ vars_in_circuit
 ) {
+    if (compile_needed[0] == 0u) {
+        return;
+    }
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     uint32_t nv = num_vars[0];
     if (nv > var_cap) {
@@ -2688,12 +2734,16 @@ extern "C" __global__ void d4_mark_vars_in_circuit(
 }
 
 extern "C" __global__ void d4_build_free_var_mask(
+    const uint32_t* __restrict__ compile_needed,
     const uint32_t* __restrict__ num_vars, // len=1
     uint32_t var_cap,
     const uint32_t* __restrict__ vars_in_clauses,
     const uint32_t* __restrict__ vars_in_circuit,
     uint8_t* __restrict__ free_var_mask
 ) {
+    if (compile_needed[0] == 0u) {
+        return;
+    }
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     uint32_t nv = num_vars[0];
     if (nv > var_cap) {

@@ -102,7 +102,7 @@ __device__ __forceinline__ int cache_evict_lru_entry(
 
 // Lookup or insert a cache key. Outputs: selected slot id and compile_needed (0=hit, 1=miss+insert).
 extern "C" __global__ void cache_lookup_or_insert(
-    uint64_t key,
+    const uint64_t* __restrict__ key,
     uint32_t table_size,
     uint32_t num_slots,
     uint64_t* __restrict__ keys,
@@ -124,8 +124,9 @@ extern "C" __global__ void cache_lookup_or_insert(
         return;
     }
 
+    uint64_t key_val = key[0];
     uint64_t now = atomicAdd(reinterpret_cast<unsigned long long*>(clock), 1ULL) + 1ULL;
-    uint32_t start = static_cast<uint32_t>(key % table_size);
+    uint32_t start = static_cast<uint32_t>(key_val % table_size);
 
     for (uint32_t probe = 0; probe < table_size; probe++) {
         uint32_t idx = (start + probe);
@@ -155,7 +156,7 @@ extern "C" __global__ void cache_lookup_or_insert(
                 slot = evict_slot;
             }
 
-            keys[idx] = key;
+            keys[idx] = key_val;
             slots[idx] = slot;
             state[idx] = 1;
             last_used[idx] = now;
@@ -164,7 +165,7 @@ extern "C" __global__ void cache_lookup_or_insert(
             return;
         }
 
-        if (keys[idx] == key) {
+        if (keys[idx] == key_val) {
             last_used[idx] = now;
             out_slot[0] = slots[idx];
             out_compile_needed[0] = 0;
@@ -189,7 +190,7 @@ extern "C" __global__ void cache_lookup_or_insert(
         return;
     }
 
-    keys[evict_idx] = key;
+    keys[evict_idx] = key_val;
     slots[evict_idx] = evict_slot;
     state[evict_idx] = 1;
     last_used[evict_idx] = now;
