@@ -7,6 +7,9 @@ set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 # Generate PTX for common architectures
 set(CMAKE_CUDA_ARCHITECTURES 70 75 80 86 89 90)
 
+# Suppress nvcc deprecation warnings for sm_70 offline PTX compilation.
+add_compile_options($<$<COMPILE_LANGUAGE:CUDA>:-Wno-deprecated-gpu-targets>)
+
 # Compile to PTX only (no object files)
 set(CUDA_PTXAS_FLAGS "-v")
 

@@ -351,7 +351,7 @@ Network .backward() (PyTorch)
 
 **CUDA Ecosystem:**
 - `cudarc` (Rust CUDA bindings): Device, memory, kernel dispatch
-- Pre-compiled PTX (nvcc -ptx -arch=sm_70)
+- Pre-compiled PTX (nvcc -ptx -arch=sm_70 -Wno-deprecated-gpu-targets)
 
 **D4 Compiler:**
 - External binary (CPU-only)
@@ -366,7 +366,7 @@ Network .backward() (PyTorch)
 
 **PTX Generation:**
 ```bash
-nvcc -ptx -arch=sm_70 kernels/circuit.cu -o kernels/circuit.ptx
+nvcc -ptx -arch=sm_70 -Wno-deprecated-gpu-targets kernels/circuit.cu -o kernels/circuit.ptx
 ```
 
 **PTX Embedding:**

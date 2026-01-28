@@ -148,6 +148,17 @@ fn validate_all_ptx_files_load_and_resolve_all_entry_points() {
 }
 
 #[test]
+fn validate_kernel_build_flags_suppress_deprecated_gpu_targets() {
+    let cmake_path = kernels_dir().join("CMakeLists.txt");
+    let cmake = fs::read_to_string(&cmake_path)
+        .unwrap_or_else(|e| panic!("Failed to read {}: {}", cmake_path.display(), e));
+    assert!(
+        cmake.contains("-Wno-deprecated-gpu-targets"),
+        "kernels/CMakeLists.txt must include -Wno-deprecated-gpu-targets to silence nvcc warnings for sm_70"
+    );
+}
+
+#[test]
 fn validate_arith_ptx_contains_expected_kernels() {
     let ptx_path = kernels_dir().join("arith.ptx");
     let ptx = fs::read_to_string(&ptx_path)
