@@ -19,6 +19,7 @@ set(KERNEL_SOURCES
     filter.cu
     pack.cu
     pir.cu
+    cnf.cu
     sort.cu
     set_ops.cu
     circuit.cu
@@ -43,6 +44,7 @@ install(FILES
     $<TARGET_OBJECTS:filter_ptx>
     $<TARGET_OBJECTS:pack_ptx>
     $<TARGET_OBJECTS:pir_ptx>
+    $<TARGET_OBJECTS:cnf_ptx>
     $<TARGET_OBJECTS:sort_ptx>
     $<TARGET_OBJECTS:set_ops_ptx>
     $<TARGET_OBJECTS:circuit_ptx>

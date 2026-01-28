@@ -33,6 +33,7 @@ const SAT_PTX: &str = include_str!("../../../kernels/sat.ptx");
 const D4_PTX: &str = include_str!("../../../kernels/d4.ptx");
 const NEURAL_PTX: &str = include_str!("../../../kernels/neural.ptx");
 const PIR_PTX: &str = include_str!("../../../kernels/pir.ptx");
+const CNF_PTX: &str = include_str!("../../../kernels/cnf.ptx");
 
 #[derive(Clone, Copy)]
 struct RawCudaView<'a, T> {
@@ -117,6 +118,7 @@ pub const SAT_MODULE: &str = "xlog_sat";
 pub const D4_MODULE: &str = "xlog_d4";
 pub const NEURAL_MODULE: &str = "xlog_neural";
 pub const PIR_MODULE: &str = "xlog_pir";
+pub const CNF_MODULE: &str = "xlog_cnf";
 
 /// Kernel function names in the Monte Carlo sampling module
 pub mod mc_sample_kernels {
@@ -177,6 +179,23 @@ pub mod pir_kernels {
     pub const PIR_SUM_COUNTS: &str = "pir_sum_counts";
     pub const PIR_EMIT_NODES_AND_IDS: &str = "pir_emit_nodes_and_ids";
     pub const PIR_UPDATE_COUNTS: &str = "pir_update_counts";
+}
+
+/// Kernel function names in the GPU CNF encoder module.
+pub mod cnf_kernels {
+    pub const CNF_REACHABILITY_INIT: &str = "cnf_reachability_init";
+    pub const CNF_REACHABILITY_BFS: &str = "cnf_reachability_bfs";
+    pub const CNF_MARK_LEAF_CHOICE: &str = "cnf_mark_leaf_choice";
+    pub const CNF_ASSIGN_LEAF_VAR: &str = "cnf_assign_leaf_var";
+    pub const CNF_ASSIGN_CHOICE_VAR: &str = "cnf_assign_choice_var";
+    pub const CNF_MARK_NODE_VARS: &str = "cnf_mark_node_vars";
+    pub const CNF_COUNT_CLAUSES: &str = "cnf_count_clauses";
+    pub const CNF_CAPTURE_LAST_COUNTS: &str = "cnf_capture_last_counts";
+    pub const CNF_COMPUTE_LEAF_CHOICE_TOTALS: &str = "cnf_compute_leaf_choice_totals";
+    pub const CNF_COMPUTE_TOTALS: &str = "cnf_compute_totals";
+    pub const CNF_ASSIGN_NODE_VAR: &str = "cnf_assign_node_var";
+    pub const CNF_EMIT_CLAUSES: &str = "cnf_emit_clauses";
+    pub const CNF_SET_CLAUSE_END: &str = "cnf_set_clause_end";
 }
 
 /// Kernel function names in the GPU D4 module (CNF validation + circuit levelization).
@@ -756,6 +775,30 @@ impl CudaKernelProvider {
                 ],
             )
             .map_err(|e| XlogError::Kernel(format!("Failed to load PIR PTX: {}", e)))?;
+
+        // Load GPU CNF encoder module (PIR -> Tseitin CNF on device)
+        device
+            .inner()
+            .load_ptx(
+                Ptx::from_src(CNF_PTX),
+                CNF_MODULE,
+                &[
+                    cnf_kernels::CNF_REACHABILITY_INIT,
+                    cnf_kernels::CNF_REACHABILITY_BFS,
+                    cnf_kernels::CNF_MARK_LEAF_CHOICE,
+                    cnf_kernels::CNF_ASSIGN_LEAF_VAR,
+                    cnf_kernels::CNF_ASSIGN_CHOICE_VAR,
+                    cnf_kernels::CNF_MARK_NODE_VARS,
+                    cnf_kernels::CNF_COUNT_CLAUSES,
+                    cnf_kernels::CNF_CAPTURE_LAST_COUNTS,
+                    cnf_kernels::CNF_COMPUTE_LEAF_CHOICE_TOTALS,
+                    cnf_kernels::CNF_COMPUTE_TOTALS,
+                    cnf_kernels::CNF_ASSIGN_NODE_VAR,
+                    cnf_kernels::CNF_EMIT_CLAUSES,
+                    cnf_kernels::CNF_SET_CLAUSE_END,
+                ],
+            )
+            .map_err(|e| XlogError::Kernel(format!("Failed to load CNF PTX: {}", e)))?;
 
         // Load circuit module (XGCF circuit evaluation)
         device

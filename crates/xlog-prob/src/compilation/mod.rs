@@ -13,12 +13,14 @@ use xlog_solve::{GpuCdclConfig, GpuCnf};
 use crate::gpu::GpuXgcf;
 
 pub mod gpu_d4;
+pub mod gpu_cnf;
 pub mod gpu_pir;
 pub mod gpu_pir_intern;
 pub mod sparse_matrix;
 pub mod validation;
 
 pub use gpu_d4::GpuCompileConfig;
+pub use gpu_cnf::{encode_cnf_gpu, GpuCnfEncoding, GpuCnfVarTables};
 pub use gpu_pir::{
     GpuPirGraph, GpuPirRoots, PIR_AND, PIR_CONST, PIR_DECISION, PIR_LIT, PIR_NEG_LIT, PIR_OR,
 };

@@ -202,7 +202,9 @@ pub fn encode_cnf_gpu(
   - `cnf_mark_node_vars`
   - `cnf_assign_node_var`
   - `cnf_count_clauses`
-  - `cnf_sum_counts`
+  - `cnf_capture_last_counts`
+  - `cnf_compute_leaf_choice_totals`
+  - `cnf_compute_totals`
   - `cnf_emit_clauses`
   - `cnf_set_clause_end`
 
@@ -240,8 +242,8 @@ pub fn encode_cnf_gpu(
 - Launch reachability init + BFS.
 - Assign leaf/choice vars via scans and kernels; compute `num_leaf`/`num_choice` via count mask, then base offsets for node vars.
 - Assign node vars.
-- Count clauses/lits, scan to compute bases, sum totals.
-- Read totals to host (u32) to allocate `GpuCnf` buffers.
+- Count clauses/lits, scan to compute bases, compute totals on device.
+- Allocate `GpuCnf` buffers to host-known capacities; totals remain device-resident (no host reads).
 - Emit clauses and set `clause_offsets[num_clauses]=num_lits`.
 - Fill `cnf.num_vars/num_clauses/num_lits` device scalars.
 - Return `GpuCnfEncoding` with `max_var = num_vars`.
