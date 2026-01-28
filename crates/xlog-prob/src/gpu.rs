@@ -851,6 +851,21 @@ impl GpuXgcf {
         self.node_type.len()
     }
 
+    /// Number of topological levels in the circuit.
+    pub fn num_levels(&self) -> u32 {
+        self.num_levels
+    }
+
+    /// Device-resident level -> node index mapping (len = num_nodes).
+    pub fn level_nodes(&self) -> &TrackedCudaSlice<u32> {
+        &self.level_nodes
+    }
+
+    /// Device-resident offsets for each level (len = num_levels + 1).
+    pub fn level_offsets(&self) -> &TrackedCudaSlice<u32> {
+        &self.level_offsets
+    }
+
     /// Device-resident node type tags (see `XgcfNodeType`).
     pub fn node_type(&self) -> &TrackedCudaSlice<u8> {
         &self.node_type
@@ -897,6 +912,16 @@ impl GpuXgcf {
     /// Device-resident gradient buffer for ln(false-weight) per CNF variable.
     pub fn grad_false(&self) -> &TrackedCudaSlice<f64> {
         &self.grad_false
+    }
+
+    /// Device-resident log(true-weight) table.
+    pub fn var_log_true(&self) -> &TrackedCudaSlice<f64> {
+        &self.var_log_true
+    }
+
+    /// Device-resident log(false-weight) table.
+    pub fn var_log_false(&self) -> &TrackedCudaSlice<f64> {
+        &self.var_log_false
     }
 
     /// Mutable access to device-resident log(true-weight) table.

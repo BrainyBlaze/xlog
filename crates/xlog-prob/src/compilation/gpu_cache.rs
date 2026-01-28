@@ -2,23 +2,59 @@
 
 use std::sync::Arc;
 
-use cudarc::driver::{LaunchAsync, LaunchConfig};
+use cudarc::driver::{DeviceRepr, DeviceSlice, LaunchAsync, LaunchConfig};
 use xlog_core::{Result, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::provider::{cache_kernels, CACHE_MODULE};
 use xlog_cuda::CudaKernelProvider;
 use xlog_solve::GpuCnf;
 
+use crate::gpu::GpuXgcf;
+
+#[derive(Debug, Clone, Copy)]
+pub struct GpuCircuitCacheConfig {
+    pub num_slots: u32,
+    pub table_size: u32,
+    pub node_cap: u32,
+    pub edge_cap: u32,
+    pub level_cap: u32,
+    pub var_cap: u32,
+}
+
 pub struct GpuCircuitCache {
     provider: Arc<CudaKernelProvider>,
     table_size: u32,
     num_slots: u32,
+    node_cap: u32,
+    edge_cap: u32,
+    level_cap: u32,
+    var_cap: u32,
     keys: TrackedCudaSlice<u64>,
     slots: TrackedCudaSlice<u32>,
     state: TrackedCudaSlice<u32>,
     last_used: TrackedCudaSlice<u64>,
     slot_states: TrackedCudaSlice<u32>,
     clock: TrackedCudaSlice<u64>,
+    node_type: TrackedCudaSlice<u8>,
+    child_offsets: TrackedCudaSlice<u32>,
+    child_indices: TrackedCudaSlice<u32>,
+    lit: TrackedCudaSlice<i32>,
+    decision_var: TrackedCudaSlice<u32>,
+    decision_child_false: TrackedCudaSlice<u32>,
+    decision_child_true: TrackedCudaSlice<u32>,
+    level_nodes: TrackedCudaSlice<u32>,
+    level_offsets: TrackedCudaSlice<u32>,
+    var_log_true: TrackedCudaSlice<f64>,
+    var_log_false: TrackedCudaSlice<f64>,
+    values: TrackedCudaSlice<f64>,
+    adj: TrackedCudaSlice<f64>,
+    grad_true: TrackedCudaSlice<f64>,
+    grad_false: TrackedCudaSlice<f64>,
+    always_on: TrackedCudaSlice<u32>,
+    zero_f64: TrackedCudaSlice<f64>,
+    one_f64: TrackedCudaSlice<f64>,
+    free_var_mask: TrackedCudaSlice<u8>,
+    has_free_var_mask: bool,
 }
 
 pub struct GpuCacheLookup {
@@ -38,6 +74,58 @@ impl GpuCacheLookup {
 
     pub fn provider(&self) -> &Arc<CudaKernelProvider> {
         &self.provider
+    }
+
+    pub fn into_handle(self) -> GpuCircuitCacheHandle {
+        GpuCircuitCacheHandle {
+            provider: self.provider,
+            slot: self.slot,
+            compile_needed: self.compile_needed,
+            num_nodes: 0,
+            num_levels: 0,
+            root: 0,
+            max_var: 0,
+        }
+    }
+}
+
+pub struct GpuCircuitCacheHandle {
+    provider: Arc<CudaKernelProvider>,
+    slot: TrackedCudaSlice<u32>,
+    compile_needed: TrackedCudaSlice<u32>,
+    num_nodes: u32,
+    num_levels: u32,
+    root: u32,
+    max_var: u32,
+}
+
+impl GpuCircuitCacheHandle {
+    pub fn slot_device(&self) -> &TrackedCudaSlice<u32> {
+        &self.slot
+    }
+
+    pub fn compile_needed_device(&self) -> &TrackedCudaSlice<u32> {
+        &self.compile_needed
+    }
+
+    pub fn provider(&self) -> &Arc<CudaKernelProvider> {
+        &self.provider
+    }
+
+    pub fn num_nodes(&self) -> u32 {
+        self.num_nodes
+    }
+
+    pub fn num_levels(&self) -> u32 {
+        self.num_levels
+    }
+
+    pub fn root(&self) -> u32 {
+        self.root
+    }
+
+    pub fn max_var(&self) -> u32 {
+        self.max_var
     }
 }
 
@@ -86,37 +174,100 @@ pub fn hash_cnf_gpu(
 }
 
 impl GpuCircuitCache {
-    pub fn new(
-        provider: &Arc<CudaKernelProvider>,
-        num_slots: u32,
-        table_size: u32,
-    ) -> Result<Self> {
-        if num_slots == 0 {
+    pub fn new(provider: &Arc<CudaKernelProvider>, config: GpuCircuitCacheConfig) -> Result<Self> {
+        if config.num_slots == 0 {
             return Err(XlogError::Compilation(
                 "GpuCircuitCache requires num_slots > 0".to_string(),
             ));
         }
-        if table_size == 0 {
+        if config.table_size == 0 {
             return Err(XlogError::Compilation(
                 "GpuCircuitCache requires table_size > 0".to_string(),
             ));
         }
-        if table_size < num_slots {
+        if config.table_size < config.num_slots {
             return Err(XlogError::Compilation(format!(
                 "GpuCircuitCache table_size {} < num_slots {}",
-                table_size, num_slots
+                config.table_size, config.num_slots
             )));
+        }
+        if config.node_cap == 0
+            || config.edge_cap == 0
+            || config.level_cap == 0
+            || config.var_cap == 0
+        {
+            return Err(XlogError::Compilation(
+                "GpuCircuitCache requires non-zero caps".to_string(),
+            ));
         }
 
         let memory = provider.memory();
         let device = provider.device().inner();
 
-        let mut keys = memory.alloc::<u64>(table_size as usize)?;
-        let mut slots = memory.alloc::<u32>(table_size as usize)?;
-        let mut state = memory.alloc::<u32>(table_size as usize)?;
-        let mut last_used = memory.alloc::<u64>(table_size as usize)?;
-        let mut slot_states = memory.alloc::<u32>(num_slots as usize)?;
+        let table_len = usize::try_from(config.table_size).map_err(|_| {
+            XlogError::Compilation("GpuCircuitCache table_size overflow".to_string())
+        })?;
+        let slot_len = usize::try_from(config.num_slots).map_err(|_| {
+            XlogError::Compilation("GpuCircuitCache num_slots overflow".to_string())
+        })?;
+
+        let node_cap = usize::try_from(config.node_cap).map_err(|_| {
+            XlogError::Compilation("GpuCircuitCache node_cap overflow".to_string())
+        })?;
+        let edge_cap = usize::try_from(config.edge_cap).map_err(|_| {
+            XlogError::Compilation("GpuCircuitCache edge_cap overflow".to_string())
+        })?;
+        let level_cap = usize::try_from(config.level_cap).map_err(|_| {
+            XlogError::Compilation("GpuCircuitCache level_cap overflow".to_string())
+        })?;
+        let var_cap = usize::try_from(config.var_cap).map_err(|_| {
+            XlogError::Compilation("GpuCircuitCache var_cap overflow".to_string())
+        })?;
+
+        let node_slots = slot_len
+            .checked_mul(node_cap)
+            .ok_or_else(|| XlogError::Compilation("GpuCircuitCache node slots overflow".to_string()))?;
+        let edge_slots = slot_len
+            .checked_mul(edge_cap)
+            .ok_or_else(|| XlogError::Compilation("GpuCircuitCache edge slots overflow".to_string()))?;
+        let var_slots = slot_len
+            .checked_mul(var_cap + 1)
+            .ok_or_else(|| XlogError::Compilation("GpuCircuitCache var slots overflow".to_string()))?;
+        let node_offsets = slot_len
+            .checked_mul(node_cap + 1)
+            .ok_or_else(|| XlogError::Compilation("GpuCircuitCache offset slots overflow".to_string()))?;
+        let level_offsets = slot_len
+            .checked_mul(level_cap + 1)
+            .ok_or_else(|| XlogError::Compilation("GpuCircuitCache level offsets overflow".to_string()))?;
+
+        let mut keys = memory.alloc::<u64>(table_len)?;
+        let mut slots = memory.alloc::<u32>(table_len)?;
+        let mut state = memory.alloc::<u32>(table_len)?;
+        let mut last_used = memory.alloc::<u64>(table_len)?;
+        let mut slot_states = memory.alloc::<u32>(slot_len)?;
         let mut clock = memory.alloc::<u64>(1)?;
+
+        let mut node_type = memory.alloc::<u8>(node_slots)?;
+        let mut child_offsets = memory.alloc::<u32>(node_offsets)?;
+        let mut child_indices = memory.alloc::<u32>(edge_slots)?;
+        let mut lit = memory.alloc::<i32>(node_slots)?;
+        let mut decision_var = memory.alloc::<u32>(node_slots)?;
+        let mut decision_child_false = memory.alloc::<u32>(node_slots)?;
+        let mut decision_child_true = memory.alloc::<u32>(node_slots)?;
+        let mut level_nodes = memory.alloc::<u32>(node_slots)?;
+        let mut level_offsets = memory.alloc::<u32>(level_offsets)?;
+
+        let mut var_log_true = memory.alloc::<f64>(var_slots)?;
+        let mut var_log_false = memory.alloc::<f64>(var_slots)?;
+        let mut values = memory.alloc::<f64>(node_slots)?;
+        let mut adj = memory.alloc::<f64>(node_slots)?;
+        let mut grad_true = memory.alloc::<f64>(var_slots)?;
+        let mut grad_false = memory.alloc::<f64>(var_slots)?;
+        let mut free_var_mask = memory.alloc::<u8>(var_slots)?;
+        let mut always_on = memory.alloc::<u32>(1)?;
+        let zero_len = node_cap.max(var_cap + 1);
+        let mut zero_f64 = memory.alloc::<f64>(zero_len)?;
+        let mut one_f64 = memory.alloc::<f64>(1)?;
 
         device.memset_zeros(&mut keys).map_err(|e| {
             XlogError::Kernel(format!("GpuCircuitCache zero keys failed: {}", e))
@@ -137,16 +288,104 @@ impl GpuCircuitCache {
             XlogError::Kernel(format!("GpuCircuitCache zero clock failed: {}", e))
         })?;
 
+        device.memset_zeros(&mut node_type).map_err(|e| {
+            XlogError::Kernel(format!("GpuCircuitCache zero node_type failed: {}", e))
+        })?;
+        device.memset_zeros(&mut child_offsets).map_err(|e| {
+            XlogError::Kernel(format!("GpuCircuitCache zero child_offsets failed: {}", e))
+        })?;
+        device.memset_zeros(&mut child_indices).map_err(|e| {
+            XlogError::Kernel(format!("GpuCircuitCache zero child_indices failed: {}", e))
+        })?;
+        device.memset_zeros(&mut lit).map_err(|e| {
+            XlogError::Kernel(format!("GpuCircuitCache zero lit failed: {}", e))
+        })?;
+        device.memset_zeros(&mut decision_var).map_err(|e| {
+            XlogError::Kernel(format!("GpuCircuitCache zero decision_var failed: {}", e))
+        })?;
+        device.memset_zeros(&mut decision_child_false).map_err(|e| {
+            XlogError::Kernel(format!(
+                "GpuCircuitCache zero decision_child_false failed: {}",
+                e
+            ))
+        })?;
+        device.memset_zeros(&mut decision_child_true).map_err(|e| {
+            XlogError::Kernel(format!(
+                "GpuCircuitCache zero decision_child_true failed: {}",
+                e
+            ))
+        })?;
+        device.memset_zeros(&mut level_nodes).map_err(|e| {
+            XlogError::Kernel(format!("GpuCircuitCache zero level_nodes failed: {}", e))
+        })?;
+        device.memset_zeros(&mut level_offsets).map_err(|e| {
+            XlogError::Kernel(format!("GpuCircuitCache zero level_offsets failed: {}", e))
+        })?;
+        device.memset_zeros(&mut var_log_true).map_err(|e| {
+            XlogError::Kernel(format!("GpuCircuitCache zero var_log_true failed: {}", e))
+        })?;
+        device.memset_zeros(&mut var_log_false).map_err(|e| {
+            XlogError::Kernel(format!("GpuCircuitCache zero var_log_false failed: {}", e))
+        })?;
+        device.memset_zeros(&mut values).map_err(|e| {
+            XlogError::Kernel(format!("GpuCircuitCache zero values failed: {}", e))
+        })?;
+        device.memset_zeros(&mut adj).map_err(|e| {
+            XlogError::Kernel(format!("GpuCircuitCache zero adj failed: {}", e))
+        })?;
+        device.memset_zeros(&mut grad_true).map_err(|e| {
+            XlogError::Kernel(format!("GpuCircuitCache zero grad_true failed: {}", e))
+        })?;
+        device.memset_zeros(&mut grad_false).map_err(|e| {
+            XlogError::Kernel(format!("GpuCircuitCache zero grad_false failed: {}", e))
+        })?;
+        device.memset_zeros(&mut free_var_mask).map_err(|e| {
+            XlogError::Kernel(format!("GpuCircuitCache zero free_var_mask failed: {}", e))
+        })?;
+        device.memset_zeros(&mut zero_f64).map_err(|e| {
+            XlogError::Kernel(format!("GpuCircuitCache zero zero_f64 failed: {}", e))
+        })?;
+        device
+            .htod_sync_copy_into(&[1u32], &mut always_on)
+            .map_err(|e| XlogError::Kernel(format!("GpuCircuitCache init always_on failed: {}", e)))?;
+        device
+            .htod_sync_copy_into(&[1.0f64], &mut one_f64)
+            .map_err(|e| XlogError::Kernel(format!("GpuCircuitCache init one_f64 failed: {}", e)))?;
+
         Ok(Self {
             provider: provider.clone(),
-            table_size,
-            num_slots,
+            table_size: config.table_size,
+            num_slots: config.num_slots,
+            node_cap: config.node_cap,
+            edge_cap: config.edge_cap,
+            level_cap: config.level_cap,
+            var_cap: config.var_cap,
             keys,
             slots,
             state,
             last_used,
             slot_states,
             clock,
+            node_type,
+            child_offsets,
+            child_indices,
+            lit,
+            decision_var,
+            decision_child_false,
+            decision_child_true,
+            level_nodes,
+            level_offsets,
+            var_log_true,
+            var_log_false,
+            values,
+            adj,
+            grad_true,
+            grad_false,
+            always_on,
+            zero_f64,
+            one_f64,
+            free_var_mask,
+            has_free_var_mask: false,
         })
     }
 
@@ -198,5 +437,994 @@ impl GpuCircuitCache {
             slot: out_slot,
             compile_needed: out_compile_needed,
         })
+    }
+
+    pub fn claim_slot(&mut self, key: u64) -> Result<GpuCircuitCacheHandle> {
+        let lookup = self.lookup_or_insert(key)?;
+        Ok(lookup.into_handle())
+    }
+
+    pub fn store_from_xgcf(
+        &mut self,
+        handle: &mut GpuCircuitCacheHandle,
+        xgcf: &GpuXgcf,
+    ) -> Result<()> {
+        let num_nodes = u32::try_from(xgcf.num_nodes()).map_err(|_| {
+            XlogError::Compilation("GpuCircuitCache store: num_nodes overflow".to_string())
+        })?;
+        if num_nodes == 0 {
+            return Err(XlogError::Compilation(
+                "GpuCircuitCache store: num_nodes must be > 0".to_string(),
+            ));
+        }
+        if num_nodes > self.node_cap {
+            return Err(XlogError::Compilation(format!(
+                "GpuCircuitCache store: num_nodes {} exceeds node_cap {}",
+                num_nodes, self.node_cap
+            )));
+        }
+
+        let num_edges = u32::try_from(xgcf.child_indices().len()).map_err(|_| {
+            XlogError::Compilation("GpuCircuitCache store: num_edges overflow".to_string())
+        })?;
+        if num_edges > self.edge_cap {
+            return Err(XlogError::Compilation(format!(
+                "GpuCircuitCache store: num_edges {} exceeds edge_cap {}",
+                num_edges, self.edge_cap
+            )));
+        }
+
+        let num_levels = xgcf.num_levels();
+        if num_levels == 0 {
+            return Err(XlogError::Compilation(
+                "GpuCircuitCache store: num_levels must be > 0".to_string(),
+            ));
+        }
+        if num_levels > self.level_cap {
+            return Err(XlogError::Compilation(format!(
+                "GpuCircuitCache store: num_levels {} exceeds level_cap {}",
+                num_levels, self.level_cap
+            )));
+        }
+
+        let root = xgcf.root();
+        if root >= num_nodes {
+            return Err(XlogError::Compilation(format!(
+                "GpuCircuitCache store: root {} out of bounds (num_nodes={})",
+                root, num_nodes
+            )));
+        }
+
+        let max_var = xgcf.max_var();
+        if max_var > self.var_cap {
+            return Err(XlogError::Compilation(format!(
+                "GpuCircuitCache store: max_var {} exceeds var_cap {}",
+                max_var, self.var_cap
+            )));
+        }
+
+        let expected_child_offsets = (num_nodes as usize) + 1;
+        if xgcf.child_offsets().len() != expected_child_offsets {
+            return Err(XlogError::Compilation(format!(
+                "GpuCircuitCache store: child_offsets len {} != num_nodes+1 {}",
+                xgcf.child_offsets().len(),
+                expected_child_offsets
+            )));
+        }
+        if xgcf.level_nodes().len() != num_nodes as usize {
+            return Err(XlogError::Compilation(format!(
+                "GpuCircuitCache store: level_nodes len {} != num_nodes {}",
+                xgcf.level_nodes().len(),
+                num_nodes
+            )));
+        }
+        let expected_level_offsets = (num_levels as usize) + 1;
+        if xgcf.level_offsets().len() != expected_level_offsets {
+            return Err(XlogError::Compilation(format!(
+                "GpuCircuitCache store: level_offsets len {} != num_levels+1 {}",
+                xgcf.level_offsets().len(),
+                expected_level_offsets
+            )));
+        }
+
+        handle.num_nodes = num_nodes;
+        handle.num_levels = num_levels;
+        handle.root = root;
+        handle.max_var = max_var;
+
+        let device = self.provider.device().inner();
+        let store_u8 = device
+            .get_func(CACHE_MODULE, cache_kernels::CACHE_STORE_U8)
+            .ok_or_else(|| XlogError::Kernel("cache_store_u8 kernel not found".to_string()))?;
+        let store_u32 = device
+            .get_func(CACHE_MODULE, cache_kernels::CACHE_STORE_U32)
+            .ok_or_else(|| XlogError::Kernel("cache_store_u32 kernel not found".to_string()))?;
+        let store_i32 = device
+            .get_func(CACHE_MODULE, cache_kernels::CACHE_STORE_I32)
+            .ok_or_else(|| XlogError::Kernel("cache_store_i32 kernel not found".to_string()))?;
+        let store_f64 = device
+            .get_func(CACHE_MODULE, cache_kernels::CACHE_STORE_F64)
+            .ok_or_else(|| XlogError::Kernel("cache_store_f64 kernel not found".to_string()))?;
+
+        let block_dim = 256u32;
+        let grid_for = |count: u32| -> u32 {
+            if count == 0 {
+                0
+            } else {
+                (count + block_dim - 1) / block_dim
+            }
+        };
+
+        let node_stride = self.node_cap;
+        let offset_stride = self
+            .node_cap
+            .checked_add(1)
+            .ok_or_else(|| XlogError::Compilation("GpuCircuitCache store: node_cap overflow".to_string()))?;
+        let level_offset_stride = self
+            .level_cap
+            .checked_add(1)
+            .ok_or_else(|| XlogError::Compilation("GpuCircuitCache store: level_cap overflow".to_string()))?;
+        let var_stride = self
+            .var_cap
+            .checked_add(1)
+            .ok_or_else(|| XlogError::Compilation("GpuCircuitCache store: var_cap overflow".to_string()))?;
+
+        let num_nodes_plus1 = num_nodes
+            .checked_add(1)
+            .ok_or_else(|| XlogError::Compilation("GpuCircuitCache store: num_nodes overflow".to_string()))?;
+        let num_levels_plus1 = num_levels
+            .checked_add(1)
+            .ok_or_else(|| XlogError::Compilation("GpuCircuitCache store: num_levels overflow".to_string()))?;
+        let weights_len = max_var
+            .checked_add(1)
+            .ok_or_else(|| XlogError::Compilation("GpuCircuitCache store: max_var overflow".to_string()))?;
+
+        let grid_nodes = grid_for(num_nodes);
+        if grid_nodes != 0 {
+            unsafe {
+                store_u8.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (grid_nodes, 1, 1),
+                        block_dim: (block_dim, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        handle.slot_device(),
+                        handle.compile_needed_device(),
+                        node_stride,
+                        xgcf.node_type(),
+                        &mut self.node_type,
+                        num_nodes,
+                    ),
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("cache_store_u8 failed: {}", e)))?;
+        }
+
+        let grid_offsets = grid_for(num_nodes_plus1);
+        if grid_offsets != 0 {
+            unsafe {
+                store_u32.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (grid_offsets, 1, 1),
+                        block_dim: (block_dim, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        handle.slot_device(),
+                        handle.compile_needed_device(),
+                        offset_stride,
+                        xgcf.child_offsets(),
+                        &mut self.child_offsets,
+                        num_nodes_plus1,
+                    ),
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("cache_store_child_offsets failed: {}", e)))?;
+        }
+
+        let grid_edges = grid_for(num_edges);
+        if grid_edges != 0 {
+            unsafe {
+                store_u32.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (grid_edges, 1, 1),
+                        block_dim: (block_dim, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        handle.slot_device(),
+                        handle.compile_needed_device(),
+                        self.edge_cap,
+                        xgcf.child_indices(),
+                        &mut self.child_indices,
+                        num_edges,
+                    ),
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("cache_store_child_indices failed: {}", e)))?;
+        }
+
+        if grid_nodes != 0 {
+            unsafe {
+                store_i32.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (grid_nodes, 1, 1),
+                        block_dim: (block_dim, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        handle.slot_device(),
+                        handle.compile_needed_device(),
+                        node_stride,
+                        xgcf.lit(),
+                        &mut self.lit,
+                        num_nodes,
+                    ),
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("cache_store_lit failed: {}", e)))?;
+
+            unsafe {
+                store_u32.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (grid_nodes, 1, 1),
+                        block_dim: (block_dim, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        handle.slot_device(),
+                        handle.compile_needed_device(),
+                        node_stride,
+                        xgcf.decision_var(),
+                        &mut self.decision_var,
+                        num_nodes,
+                    ),
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("cache_store_decision_var failed: {}", e)))?;
+
+            unsafe {
+                store_u32.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (grid_nodes, 1, 1),
+                        block_dim: (block_dim, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        handle.slot_device(),
+                        handle.compile_needed_device(),
+                        node_stride,
+                        xgcf.decision_child_false(),
+                        &mut self.decision_child_false,
+                        num_nodes,
+                    ),
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!("cache_store_decision_child_false failed: {}", e))
+            })?;
+
+            unsafe {
+                store_u32.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (grid_nodes, 1, 1),
+                        block_dim: (block_dim, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        handle.slot_device(),
+                        handle.compile_needed_device(),
+                        node_stride,
+                        xgcf.decision_child_true(),
+                        &mut self.decision_child_true,
+                        num_nodes,
+                    ),
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!("cache_store_decision_child_true failed: {}", e))
+            })?;
+
+            unsafe {
+                store_u32.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (grid_nodes, 1, 1),
+                        block_dim: (block_dim, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        handle.slot_device(),
+                        handle.compile_needed_device(),
+                        node_stride,
+                        xgcf.level_nodes(),
+                        &mut self.level_nodes,
+                        num_nodes,
+                    ),
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("cache_store_level_nodes failed: {}", e)))?;
+        }
+
+        let grid_levels = grid_for(num_levels_plus1);
+        if grid_levels != 0 {
+            unsafe {
+                store_u32.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (grid_levels, 1, 1),
+                        block_dim: (block_dim, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        handle.slot_device(),
+                        handle.compile_needed_device(),
+                        level_offset_stride,
+                        xgcf.level_offsets(),
+                        &mut self.level_offsets,
+                        num_levels_plus1,
+                    ),
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("cache_store_level_offsets failed: {}", e)))?;
+        }
+
+        let grid_weights = grid_for(weights_len);
+        if grid_weights != 0 {
+            unsafe {
+                store_f64.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (grid_weights, 1, 1),
+                        block_dim: (block_dim, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        handle.slot_device(),
+                        handle.compile_needed_device(),
+                        var_stride,
+                        xgcf.var_log_true(),
+                        &mut self.var_log_true,
+                        weights_len,
+                    ),
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("cache_store_var_log_true failed: {}", e)))?;
+
+            unsafe {
+                store_f64.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (grid_weights, 1, 1),
+                        block_dim: (block_dim, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        handle.slot_device(),
+                        handle.compile_needed_device(),
+                        var_stride,
+                        xgcf.var_log_false(),
+                        &mut self.var_log_false,
+                        weights_len,
+                    ),
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("cache_store_var_log_false failed: {}", e)))?;
+        }
+
+        self.provider
+            .device()
+            .synchronize()
+            .map_err(|e| XlogError::Kernel(format!("cache store sync failed: {}", e)))?;
+
+        Ok(())
+    }
+
+    pub fn eval_log_wmc_device_inplace(
+        &mut self,
+        handle: &GpuCircuitCacheHandle,
+        out_log_z: &mut TrackedCudaSlice<f64>,
+    ) -> Result<()> {
+        if out_log_z.len() != 1 {
+            return Err(XlogError::Compilation(format!(
+                "GPU cache logZ output len {} != 1",
+                out_log_z.len()
+            )));
+        }
+        if handle.num_nodes == 0 || handle.num_levels == 0 {
+            return Err(XlogError::Compilation(
+                "GPU cache eval requires non-zero circuit metadata".to_string(),
+            ));
+        }
+        if handle.num_nodes > self.node_cap {
+            return Err(XlogError::Compilation(format!(
+                "GPU cache eval num_nodes {} exceeds node_cap {}",
+                handle.num_nodes, self.node_cap
+            )));
+        }
+        if handle.num_levels > self.level_cap {
+            return Err(XlogError::Compilation(format!(
+                "GPU cache eval num_levels {} exceeds level_cap {}",
+                handle.num_levels, self.level_cap
+            )));
+        }
+        if handle.root >= handle.num_nodes {
+            return Err(XlogError::Compilation(format!(
+                "GPU cache eval root {} out of bounds (num_nodes={})",
+                handle.root, handle.num_nodes
+            )));
+        }
+        if handle.max_var > self.var_cap {
+            return Err(XlogError::Compilation(format!(
+                "GPU cache eval max_var {} exceeds var_cap {}",
+                handle.max_var, self.var_cap
+            )));
+        }
+
+        let block_size: u32 = 256;
+        let num_blocks = (handle.num_nodes + block_size - 1) / block_size;
+        let num_levels = handle.num_levels as usize;
+        {
+            let device = self.provider.device().inner();
+            let forward = device
+                .get_func(
+                    xlog_cuda::CIRCUIT_MODULE,
+                    xlog_cuda::circuit_kernels::XGCF_FORWARD_LEVEL_CACHED,
+                )
+                .ok_or_else(|| {
+                    XlogError::Kernel("xgcf_forward_level_cached kernel not found".to_string())
+                })?;
+
+            for level in 0..num_levels {
+                if num_blocks == 0 {
+                    continue;
+                }
+                let level_u32: u32 = level as u32;
+                let mut params: Vec<*mut std::ffi::c_void> = vec![
+                    handle.slot_device().as_kernel_param(),
+                    self.node_cap.as_kernel_param(),
+                    self.edge_cap.as_kernel_param(),
+                    self.level_cap.as_kernel_param(),
+                    self.var_cap.as_kernel_param(),
+                    (&self.node_type).as_kernel_param(),
+                    (&self.child_offsets).as_kernel_param(),
+                    (&self.child_indices).as_kernel_param(),
+                    (&self.lit).as_kernel_param(),
+                    (&self.decision_var).as_kernel_param(),
+                    (&self.decision_child_false).as_kernel_param(),
+                    (&self.decision_child_true).as_kernel_param(),
+                    (&self.level_nodes).as_kernel_param(),
+                    (&self.level_offsets).as_kernel_param(),
+                    level_u32.as_kernel_param(),
+                    (&self.var_log_true).as_kernel_param(),
+                    (&self.var_log_false).as_kernel_param(),
+                    (&self.values).as_kernel_param(),
+                ];
+
+                unsafe {
+                    forward.clone().launch(
+                        LaunchConfig {
+                            grid_dim: (num_blocks, 1, 1),
+                            block_dim: (block_size, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        &mut params,
+                    )
+                }
+                .map_err(|e| {
+                    XlogError::Kernel(format!("xgcf_forward_level_cached failed: {}", e))
+                })?;
+            }
+        }
+
+        self.apply_free_var_correction_cached(handle, true, false)?;
+
+        let device = self.provider.device().inner();
+        let copy_root = device
+            .get_func(
+                xlog_cuda::CIRCUIT_MODULE,
+                xlog_cuda::circuit_kernels::XGCF_COPY_ROOT_CACHED,
+            )
+            .ok_or_else(|| {
+                XlogError::Kernel("xgcf_copy_root_cached kernel not found".to_string())
+            })?;
+        unsafe {
+            copy_root.clone().launch(
+                LaunchConfig {
+                    grid_dim: (1, 1, 1),
+                    block_dim: (1, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (
+                    handle.slot_device(),
+                    self.node_cap,
+                    &self.values,
+                    handle.root,
+                    out_log_z,
+                ),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("xgcf_copy_root_cached failed: {}", e)))?;
+
+        self.provider
+            .device()
+            .synchronize()
+            .map_err(|e| XlogError::Kernel(format!("cache eval sync failed: {}", e)))?;
+        Ok(())
+    }
+
+    pub fn eval_grads_inplace(&mut self, handle: &GpuCircuitCacheHandle) -> Result<()> {
+        if handle.num_nodes == 0 || handle.num_levels == 0 {
+            return Err(XlogError::Compilation(
+                "GPU cache eval_grads requires non-zero circuit metadata".to_string(),
+            ));
+        }
+        if handle.num_nodes > self.node_cap {
+            return Err(XlogError::Compilation(format!(
+                "GPU cache eval_grads num_nodes {} exceeds node_cap {}",
+                handle.num_nodes, self.node_cap
+            )));
+        }
+        if handle.num_levels > self.level_cap {
+            return Err(XlogError::Compilation(format!(
+                "GPU cache eval_grads num_levels {} exceeds level_cap {}",
+                handle.num_levels, self.level_cap
+            )));
+        }
+        if handle.root >= handle.num_nodes {
+            return Err(XlogError::Compilation(format!(
+                "GPU cache eval_grads root {} out of bounds (num_nodes={})",
+                handle.root, handle.num_nodes
+            )));
+        }
+        if handle.max_var > self.var_cap {
+            return Err(XlogError::Compilation(format!(
+                "GPU cache eval_grads max_var {} exceeds var_cap {}",
+                handle.max_var, self.var_cap
+            )));
+        }
+
+        let block_size: u32 = 256;
+        let num_blocks = (handle.num_nodes + block_size - 1) / block_size;
+        let num_levels = handle.num_levels as usize;
+        {
+            let device = self.provider.device().inner();
+            let forward = device
+                .get_func(
+                    xlog_cuda::CIRCUIT_MODULE,
+                    xlog_cuda::circuit_kernels::XGCF_FORWARD_LEVEL_CACHED,
+                )
+                .ok_or_else(|| {
+                    XlogError::Kernel("xgcf_forward_level_cached kernel not found".to_string())
+                })?;
+
+            for level in 0..num_levels {
+                if num_blocks == 0 {
+                    continue;
+                }
+                let level_u32: u32 = level as u32;
+                let mut params: Vec<*mut std::ffi::c_void> = vec![
+                    handle.slot_device().as_kernel_param(),
+                    self.node_cap.as_kernel_param(),
+                    self.edge_cap.as_kernel_param(),
+                    self.level_cap.as_kernel_param(),
+                    self.var_cap.as_kernel_param(),
+                    (&self.node_type).as_kernel_param(),
+                    (&self.child_offsets).as_kernel_param(),
+                    (&self.child_indices).as_kernel_param(),
+                    (&self.lit).as_kernel_param(),
+                    (&self.decision_var).as_kernel_param(),
+                    (&self.decision_child_false).as_kernel_param(),
+                    (&self.decision_child_true).as_kernel_param(),
+                    (&self.level_nodes).as_kernel_param(),
+                    (&self.level_offsets).as_kernel_param(),
+                    level_u32.as_kernel_param(),
+                    (&self.var_log_true).as_kernel_param(),
+                    (&self.var_log_false).as_kernel_param(),
+                    (&self.values).as_kernel_param(),
+                ];
+
+                unsafe {
+                    forward.clone().launch(
+                        LaunchConfig {
+                            grid_dim: (num_blocks, 1, 1),
+                            block_dim: (block_size, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        &mut params,
+                    )
+                }
+                .map_err(|e| {
+                    XlogError::Kernel(format!("xgcf_forward_level_cached failed: {}", e))
+                })?;
+            }
+        }
+
+        let device = self.provider.device().inner();
+        let store_f64 = device
+            .get_func(CACHE_MODULE, cache_kernels::CACHE_STORE_F64)
+            .ok_or_else(|| XlogError::Kernel("cache_store_f64 kernel not found".to_string()))?;
+
+        let grid_for = |count: u32| -> u32 {
+            if count == 0 {
+                0
+            } else {
+                (count + block_size - 1) / block_size
+            }
+        };
+        let node_stride = self.node_cap;
+        let var_stride = self
+            .var_cap
+            .checked_add(1)
+            .ok_or_else(|| XlogError::Compilation("GPU cache eval_grads var_cap overflow".to_string()))?;
+        let weights_len = handle
+            .max_var
+            .checked_add(1)
+            .ok_or_else(|| XlogError::Compilation("GPU cache eval_grads max_var overflow".to_string()))?;
+
+        let grid_nodes = grid_for(handle.num_nodes);
+        if grid_nodes != 0 {
+            unsafe {
+                store_f64.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (grid_nodes, 1, 1),
+                        block_dim: (block_size, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        handle.slot_device(),
+                        &self.always_on,
+                        node_stride,
+                        &self.zero_f64,
+                        &mut self.adj,
+                        handle.num_nodes,
+                    ),
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("cache zero adj failed: {}", e)))?;
+        }
+
+        let grid_weights = grid_for(weights_len);
+        if grid_weights != 0 {
+            unsafe {
+                store_f64.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (grid_weights, 1, 1),
+                        block_dim: (block_size, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        handle.slot_device(),
+                        &self.always_on,
+                        var_stride,
+                        &self.zero_f64,
+                        &mut self.grad_true,
+                        weights_len,
+                    ),
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("cache zero grad_true failed: {}", e)))?;
+
+            unsafe {
+                store_f64.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (grid_weights, 1, 1),
+                        block_dim: (block_size, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        handle.slot_device(),
+                        &self.always_on,
+                        var_stride,
+                        &self.zero_f64,
+                        &mut self.grad_false,
+                        weights_len,
+                    ),
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("cache zero grad_false failed: {}", e)))?;
+        }
+
+        let add_scalar = device
+            .get_func(
+                xlog_cuda::CIRCUIT_MODULE,
+                xlog_cuda::circuit_kernels::XGCF_ADD_SCALAR_CACHED,
+            )
+            .ok_or_else(|| {
+                XlogError::Kernel("xgcf_add_scalar_cached kernel not found".to_string())
+            })?;
+        unsafe {
+            add_scalar.clone().launch(
+                LaunchConfig {
+                    grid_dim: (1, 1, 1),
+                    block_dim: (1, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (
+                    handle.slot_device(),
+                    self.node_cap,
+                    &mut self.adj,
+                    handle.root,
+                    &self.one_f64,
+                ),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("xgcf_add_scalar_cached (adj) failed: {}", e)))?;
+
+        let propagate = device
+            .get_func(
+                xlog_cuda::CIRCUIT_MODULE,
+                xlog_cuda::circuit_kernels::XGCF_BACKWARD_LEVEL_PROPAGATE_CACHED,
+            )
+            .ok_or_else(|| {
+                XlogError::Kernel("xgcf_backward_level_propagate_cached kernel not found".to_string())
+            })?;
+        let decision_grad = device
+            .get_func(
+                xlog_cuda::CIRCUIT_MODULE,
+                xlog_cuda::circuit_kernels::XGCF_BACKWARD_LEVEL_DECISION_GRAD_CACHED,
+            )
+            .ok_or_else(|| {
+                XlogError::Kernel(
+                    "xgcf_backward_level_decision_grad_cached kernel not found".to_string(),
+                )
+            })?;
+        let lit_grad = device
+            .get_func(
+                xlog_cuda::CIRCUIT_MODULE,
+                xlog_cuda::circuit_kernels::XGCF_BACKWARD_LEVEL_LIT_GRAD_CACHED,
+            )
+            .ok_or_else(|| {
+                XlogError::Kernel("xgcf_backward_level_lit_grad_cached kernel not found".to_string())
+            })?;
+
+        for level in (0..num_levels).rev() {
+            if num_blocks == 0 {
+                continue;
+            }
+            let level_u32: u32 = level as u32;
+            let mut params: Vec<*mut std::ffi::c_void> = vec![
+                handle.slot_device().as_kernel_param(),
+                self.node_cap.as_kernel_param(),
+                self.edge_cap.as_kernel_param(),
+                self.level_cap.as_kernel_param(),
+                self.var_cap.as_kernel_param(),
+                (&self.node_type).as_kernel_param(),
+                (&self.child_offsets).as_kernel_param(),
+                (&self.child_indices).as_kernel_param(),
+                (&self.decision_var).as_kernel_param(),
+                (&self.decision_child_false).as_kernel_param(),
+                (&self.decision_child_true).as_kernel_param(),
+                (&self.level_nodes).as_kernel_param(),
+                (&self.level_offsets).as_kernel_param(),
+                level_u32.as_kernel_param(),
+                (&self.var_log_true).as_kernel_param(),
+                (&self.var_log_false).as_kernel_param(),
+                (&self.values).as_kernel_param(),
+                (&mut self.adj).as_kernel_param(),
+            ];
+
+            unsafe {
+                propagate.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (num_blocks, 1, 1),
+                        block_dim: (block_size, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    &mut params,
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!("xgcf_backward_level_propagate_cached failed: {}", e))
+            })?;
+
+            let mut params: Vec<*mut std::ffi::c_void> = vec![
+                handle.slot_device().as_kernel_param(),
+                self.node_cap.as_kernel_param(),
+                self.edge_cap.as_kernel_param(),
+                self.level_cap.as_kernel_param(),
+                self.var_cap.as_kernel_param(),
+                (&self.node_type).as_kernel_param(),
+                (&self.decision_var).as_kernel_param(),
+                (&self.decision_child_false).as_kernel_param(),
+                (&self.decision_child_true).as_kernel_param(),
+                (&self.level_nodes).as_kernel_param(),
+                (&self.level_offsets).as_kernel_param(),
+                level_u32.as_kernel_param(),
+                (&self.var_log_true).as_kernel_param(),
+                (&self.var_log_false).as_kernel_param(),
+                (&self.values).as_kernel_param(),
+                (&self.adj).as_kernel_param(),
+                (&mut self.grad_true).as_kernel_param(),
+                (&mut self.grad_false).as_kernel_param(),
+            ];
+
+            unsafe {
+                decision_grad.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (num_blocks, 1, 1),
+                        block_dim: (block_size, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    &mut params,
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "xgcf_backward_level_decision_grad_cached failed: {}",
+                    e
+                ))
+            })?;
+
+            let mut params: Vec<*mut std::ffi::c_void> = vec![
+                handle.slot_device().as_kernel_param(),
+                self.node_cap.as_kernel_param(),
+                self.edge_cap.as_kernel_param(),
+                self.level_cap.as_kernel_param(),
+                self.var_cap.as_kernel_param(),
+                (&self.node_type).as_kernel_param(),
+                (&self.lit).as_kernel_param(),
+                (&self.level_nodes).as_kernel_param(),
+                (&self.level_offsets).as_kernel_param(),
+                level_u32.as_kernel_param(),
+                (&self.adj).as_kernel_param(),
+                (&self.grad_true).as_kernel_param(),
+                (&self.grad_false).as_kernel_param(),
+            ];
+
+            unsafe {
+                lit_grad.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (num_blocks, 1, 1),
+                        block_dim: (block_size, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    &mut params,
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!("xgcf_backward_level_lit_grad_cached failed: {}", e))
+            })?;
+        }
+
+        self.apply_free_var_correction_cached(handle, true, true)?;
+        self.provider.device().synchronize()?;
+        Ok(())
+    }
+
+    fn apply_free_var_correction_cached(
+        &mut self,
+        handle: &GpuCircuitCacheHandle,
+        apply_log_z: bool,
+        apply_grads: bool,
+    ) -> Result<()> {
+        if !self.has_free_var_mask {
+            return Ok(());
+        }
+        let n = handle
+            .max_var
+            .checked_add(1)
+            .ok_or_else(|| XlogError::Compilation("GPU cache free-var overflow".to_string()))?;
+        if n == 0 {
+            return Ok(());
+        }
+
+        let device = self.provider.device().inner();
+        let block_dim = 256u32;
+        let grid_dim = (n + block_dim - 1) / block_dim;
+
+        if apply_grads {
+            let apply_grad = device
+                .get_func(xlog_cuda::CIRCUIT_MODULE, xlog_cuda::circuit_kernels::XGCF_FREE_VAR_APPLY_GRAD_CACHED)
+                .ok_or_else(|| {
+                    XlogError::Kernel("xgcf_free_var_apply_grad_cached kernel not found".to_string())
+                })?;
+            unsafe {
+                apply_grad.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (grid_dim, 1, 1),
+                        block_dim: (block_dim, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        handle.slot_device(),
+                        self.var_cap,
+                        &self.free_var_mask,
+                        &self.var_log_true,
+                        &self.var_log_false,
+                        n,
+                        &mut self.grad_true,
+                        &mut self.grad_false,
+                    ),
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!("xgcf_free_var_apply_grad_cached failed: {}", e))
+            })?;
+        }
+
+        if apply_log_z {
+            let reduce_stage = device
+                .get_func(xlog_cuda::CIRCUIT_MODULE, xlog_cuda::circuit_kernels::XGCF_FREE_VAR_REDUCE_STAGE_CACHED)
+                .ok_or_else(|| {
+                    XlogError::Kernel("xgcf_free_var_reduce_stage_cached kernel not found".to_string())
+                })?;
+            let add_scalar = device
+                .get_func(xlog_cuda::CIRCUIT_MODULE, xlog_cuda::circuit_kernels::XGCF_ADD_SCALAR_CACHED)
+                .ok_or_else(|| {
+                    XlogError::Kernel("xgcf_add_scalar_cached kernel not found".to_string())
+                })?;
+
+            let memory = self.provider.memory();
+            let mut buf_a = memory.alloc::<f64>(n as usize)?;
+            let mut buf_b = memory.alloc::<f64>(n as usize)?;
+
+            let mut stage_n = n;
+            let mut stage0 = true;
+            let mut output_is_a = true;
+            loop {
+                let out_len = (stage_n + 1) / 2;
+                let stage_grid = (out_len + block_dim - 1) / block_dim;
+
+                let (in_buf, out_buf): (&TrackedCudaSlice<f64>, &mut TrackedCudaSlice<f64>) =
+                    if output_is_a {
+                        (&buf_b, &mut buf_a)
+                    } else {
+                        (&buf_a, &mut buf_b)
+                    };
+                let mode = if stage0 { 0u32 } else { 1u32 };
+
+                unsafe {
+                    reduce_stage.clone().launch(
+                        LaunchConfig {
+                            grid_dim: (stage_grid, 1, 1),
+                            block_dim: (block_dim, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        (
+                            handle.slot_device(),
+                            self.var_cap,
+                            &self.free_var_mask,
+                            &self.var_log_true,
+                            &self.var_log_false,
+                            in_buf,
+                            stage_n,
+                            mode,
+                            out_buf,
+                        ),
+                    )
+                }
+                .map_err(|e| {
+                    XlogError::Kernel(format!("xgcf_free_var_reduce_stage_cached failed: {}", e))
+                })?;
+
+                if out_len == 1 {
+                    let result_buf = if output_is_a { &buf_a } else { &buf_b };
+                    unsafe {
+                        add_scalar.clone().launch(
+                            LaunchConfig {
+                                grid_dim: (1, 1, 1),
+                                block_dim: (1, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            (
+                                handle.slot_device(),
+                                self.node_cap,
+                                &mut self.values,
+                                handle.root,
+                                result_buf,
+                            ),
+                        )
+                    }
+                    .map_err(|e| {
+                        XlogError::Kernel(format!("xgcf_add_scalar_cached failed: {}", e))
+                    })?;
+                    break;
+                }
+
+                stage_n = out_len;
+                stage0 = false;
+                output_is_a = !output_is_a;
+            }
+        }
+
+        Ok(())
     }
 }

@@ -373,6 +373,15 @@ pub mod circuit_kernels {
     pub const XGCF_FREE_VAR_APPLY_GRAD: &str = "xgcf_free_var_apply_grad";
     pub const XGCF_FREE_VAR_REDUCE_STAGE: &str = "xgcf_free_var_reduce_stage";
     pub const XGCF_ADD_SCALAR: &str = "xgcf_add_scalar";
+    pub const XGCF_FORWARD_LEVEL_CACHED: &str = "xgcf_forward_level_cached";
+    pub const XGCF_BACKWARD_LEVEL_PROPAGATE_CACHED: &str = "xgcf_backward_level_propagate_cached";
+    pub const XGCF_BACKWARD_LEVEL_DECISION_GRAD_CACHED: &str =
+        "xgcf_backward_level_decision_grad_cached";
+    pub const XGCF_BACKWARD_LEVEL_LIT_GRAD_CACHED: &str = "xgcf_backward_level_lit_grad_cached";
+    pub const XGCF_FREE_VAR_APPLY_GRAD_CACHED: &str = "xgcf_free_var_apply_grad_cached";
+    pub const XGCF_FREE_VAR_REDUCE_STAGE_CACHED: &str = "xgcf_free_var_reduce_stage_cached";
+    pub const XGCF_ADD_SCALAR_CACHED: &str = "xgcf_add_scalar_cached";
+    pub const XGCF_COPY_ROOT_CACHED: &str = "xgcf_copy_root_cached";
 }
 
 /// Kernel function names in the cache module
@@ -380,6 +389,10 @@ pub mod cache_kernels {
     pub const CACHE_CNF_HASH: &str = "cache_cnf_hash";
     pub const CACHE_LOOKUP_OR_INSERT: &str = "cache_lookup_or_insert";
     pub const CACHE_EVICT_LRU: &str = "cache_evict_lru";
+    pub const CACHE_STORE_U8: &str = "cache_store_u8";
+    pub const CACHE_STORE_U32: &str = "cache_store_u32";
+    pub const CACHE_STORE_I32: &str = "cache_store_i32";
+    pub const CACHE_STORE_F64: &str = "cache_store_f64";
 }
 
 /// Kernel function names in the SAT module
@@ -819,6 +832,10 @@ impl CudaKernelProvider {
                     cache_kernels::CACHE_CNF_HASH,
                     cache_kernels::CACHE_LOOKUP_OR_INSERT,
                     cache_kernels::CACHE_EVICT_LRU,
+                    cache_kernels::CACHE_STORE_U8,
+                    cache_kernels::CACHE_STORE_U32,
+                    cache_kernels::CACHE_STORE_I32,
+                    cache_kernels::CACHE_STORE_F64,
                 ],
             )
             .map_err(|e| XlogError::Kernel(format!("Failed to load cache PTX: {}", e)))?;
@@ -837,6 +854,14 @@ impl CudaKernelProvider {
                     circuit_kernels::XGCF_FREE_VAR_APPLY_GRAD,
                     circuit_kernels::XGCF_FREE_VAR_REDUCE_STAGE,
                     circuit_kernels::XGCF_ADD_SCALAR,
+                    circuit_kernels::XGCF_FORWARD_LEVEL_CACHED,
+                    circuit_kernels::XGCF_BACKWARD_LEVEL_PROPAGATE_CACHED,
+                    circuit_kernels::XGCF_BACKWARD_LEVEL_DECISION_GRAD_CACHED,
+                    circuit_kernels::XGCF_BACKWARD_LEVEL_LIT_GRAD_CACHED,
+                    circuit_kernels::XGCF_FREE_VAR_APPLY_GRAD_CACHED,
+                    circuit_kernels::XGCF_FREE_VAR_REDUCE_STAGE_CACHED,
+                    circuit_kernels::XGCF_ADD_SCALAR_CACHED,
+                    circuit_kernels::XGCF_COPY_ROOT_CACHED,
                 ],
             )
             .map_err(|e| XlogError::Kernel(format!("Failed to load circuit PTX: {}", e)))?;

@@ -231,3 +231,83 @@ extern "C" __global__ void cache_evict_lru(
     out_slot[0] = evict_slot;
     out_evicted[0] = 1;
 }
+
+__device__ __forceinline__ size_t slot_offset(uint32_t slot, uint32_t stride) {
+    return static_cast<size_t>(slot) * static_cast<size_t>(stride);
+}
+
+extern "C" __global__ void cache_store_u8(
+    const uint32_t* __restrict__ active_slot,
+    const uint32_t* __restrict__ compile_needed,
+    uint32_t stride,
+    const uint8_t* __restrict__ src,
+    uint8_t* __restrict__ dst,
+    uint32_t count
+) {
+    if (compile_needed[0] == 0u) {
+        return;
+    }
+    uint32_t slot = active_slot[0];
+    size_t base = slot_offset(slot, stride);
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    for (uint32_t idx = tid; idx < count; idx += blockDim.x * gridDim.x) {
+        dst[base + idx] = src[idx];
+    }
+}
+
+extern "C" __global__ void cache_store_u32(
+    const uint32_t* __restrict__ active_slot,
+    const uint32_t* __restrict__ compile_needed,
+    uint32_t stride,
+    const uint32_t* __restrict__ src,
+    uint32_t* __restrict__ dst,
+    uint32_t count
+) {
+    if (compile_needed[0] == 0u) {
+        return;
+    }
+    uint32_t slot = active_slot[0];
+    size_t base = slot_offset(slot, stride);
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    for (uint32_t idx = tid; idx < count; idx += blockDim.x * gridDim.x) {
+        dst[base + idx] = src[idx];
+    }
+}
+
+extern "C" __global__ void cache_store_i32(
+    const uint32_t* __restrict__ active_slot,
+    const uint32_t* __restrict__ compile_needed,
+    uint32_t stride,
+    const int32_t* __restrict__ src,
+    int32_t* __restrict__ dst,
+    uint32_t count
+) {
+    if (compile_needed[0] == 0u) {
+        return;
+    }
+    uint32_t slot = active_slot[0];
+    size_t base = slot_offset(slot, stride);
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    for (uint32_t idx = tid; idx < count; idx += blockDim.x * gridDim.x) {
+        dst[base + idx] = src[idx];
+    }
+}
+
+extern "C" __global__ void cache_store_f64(
+    const uint32_t* __restrict__ active_slot,
+    const uint32_t* __restrict__ compile_needed,
+    uint32_t stride,
+    const double* __restrict__ src,
+    double* __restrict__ dst,
+    uint32_t count
+) {
+    if (compile_needed[0] == 0u) {
+        return;
+    }
+    uint32_t slot = active_slot[0];
+    size_t base = slot_offset(slot, stride);
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    for (uint32_t idx = tid; idx < count; idx += blockDim.x * gridDim.x) {
+        dst[base + idx] = src[idx];
+    }
+}
