@@ -28,3 +28,9 @@ cudarc = { version = "0.12", features = ["cuda-12060"] }
 pest = "2.7"
 pest_derive = "2.7"
 pyo3 = { version = "0.21.2" }
+
+[profile.dev]
+incremental = false
+
+[profile.test]
+incremental = false
