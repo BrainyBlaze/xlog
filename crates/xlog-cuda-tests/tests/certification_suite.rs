@@ -35,7 +35,7 @@ fn run_full_certification() {
 
     let mut results = CertificationResults::new();
 
-    // Run all 31 categories sequentially (C01-C25 + G01-G06)
+    // Run all 32 categories sequentially (C01-C25 + G01-G07)
     println!("Running C01: Toolchain...");
     results.add_category(categories::c01_toolchain::run_all(&ctx));
 
@@ -128,6 +128,9 @@ fn run_full_certification() {
 
     println!("Running G06: PTX Robustness...");
     results.add_category(categories::g06_ptx_robustness::run_all(&ctx));
+
+    println!("Running G07: SAT/CDCL...");
+    results.add_category(categories::g07_sat_cdcl::run_all(&ctx));
 
     // Finalize and print results
     results.finalize();
