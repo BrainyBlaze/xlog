@@ -80,17 +80,6 @@ pub fn compile_gpu_d4_and_verify_cached(
     let lookup = cache.lookup_or_insert_device(&key)?;
     let mut handle = lookup.into_handle();
 
-    let mut compile_needed_host = [0u32; 1];
-    provider
-        .device()
-        .inner()
-        .dtoh_sync_copy_into(handle.compile_needed_device(), &mut compile_needed_host)
-        .map_err(|e| XlogError::Kernel(format!("Failed to read compile_needed: {}", e)))?;
-    if compile_needed_host[0] == 0 {
-        load_cache_handle_meta(cache, &mut handle)?;
-        return Ok(handle);
-    }
-
     let d4_config = d4_config_for_smoothing(config, random_vars)?;
     let circuit = gpu_d4::compile_gpu_d4_gated(
         cnf,
@@ -98,6 +87,9 @@ pub fn compile_gpu_d4_and_verify_cached(
         &d4_config,
         handle.compile_needed_device(),
     )?;
+    if circuit.num_nodes() == 0 || circuit.num_levels() == 0 {
+        return Ok(handle);
+    }
     let circuit = if random_vars.is_empty() {
         circuit
     } else {
@@ -124,57 +116,6 @@ pub fn compile_gpu_d4_and_verify_cached(
         handle.compile_needed_device(),
     )?;
     Ok(handle)
-}
-
-fn load_cache_handle_meta(
-    cache: &GpuCircuitCache,
-    handle: &mut GpuCircuitCacheHandle,
-) -> Result<()> {
-    let device = cache.provider().device().inner();
-    let mut slot_host = [0u32; 1];
-    device
-        .dtoh_sync_copy_into(handle.slot_device(), &mut slot_host)
-        .map_err(|e| XlogError::Kernel(format!("Failed to read cache slot: {}", e)))?;
-    let slot = slot_host[0] as usize;
-    if slot >= cache.num_slots() as usize {
-        return Err(XlogError::Compilation(format!(
-            "GpuCircuitCache meta slot {} out of bounds (num_slots={})",
-            slot,
-            cache.num_slots()
-        )));
-    }
-
-    let mut num_nodes = [0u32; 1];
-    let mut num_levels = [0u32; 1];
-    let mut root = [0u32; 1];
-    let mut max_var = [0u32; 1];
-
-    let nodes_view = cache.meta_num_nodes_device().slice(slot..slot + 1);
-    let levels_view = cache.meta_num_levels_device().slice(slot..slot + 1);
-    let root_view = cache.meta_root_device().slice(slot..slot + 1);
-    let var_view = cache.meta_max_var_device().slice(slot..slot + 1);
-
-    device
-        .dtoh_sync_copy_into(&nodes_view, &mut num_nodes)
-        .map_err(|e| XlogError::Kernel(format!("Failed to read cache num_nodes: {}", e)))?;
-    device
-        .dtoh_sync_copy_into(&levels_view, &mut num_levels)
-        .map_err(|e| XlogError::Kernel(format!("Failed to read cache num_levels: {}", e)))?;
-    device
-        .dtoh_sync_copy_into(&root_view, &mut root)
-        .map_err(|e| XlogError::Kernel(format!("Failed to read cache root: {}", e)))?;
-    device
-        .dtoh_sync_copy_into(&var_view, &mut max_var)
-        .map_err(|e| XlogError::Kernel(format!("Failed to read cache max_var: {}", e)))?;
-
-    if num_nodes[0] == 0 || num_levels[0] == 0 {
-        return Err(XlogError::Compilation(
-            "GpuCircuitCache meta missing for slot".to_string(),
-        ));
-    }
-
-    handle.set_meta(num_nodes[0], num_levels[0], root[0], max_var[0]);
-    Ok(())
 }
 
 fn d4_config_for_smoothing(
