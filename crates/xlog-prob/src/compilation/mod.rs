@@ -14,6 +14,7 @@ use crate::gpu::GpuXgcf;
 
 pub mod gpu_d4;
 pub mod gpu_pir;
+pub mod gpu_pir_intern;
 pub mod sparse_matrix;
 pub mod validation;
 
@@ -21,6 +22,7 @@ pub use gpu_d4::GpuCompileConfig;
 pub use gpu_pir::{
     GpuPirGraph, GpuPirRoots, PIR_AND, PIR_CONST, PIR_DECISION, PIR_LIT, PIR_NEG_LIT, PIR_OR,
 };
+pub use gpu_pir_intern::{GpuPirInterner, PirBatch};
 pub use sparse_matrix::GpuCsrCnf;
 pub use validation::{check_equivalence_gpu, validate_equivalence_gpu, GpuEquivalenceConfig};
 

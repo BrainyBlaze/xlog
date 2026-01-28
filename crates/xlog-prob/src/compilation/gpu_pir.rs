@@ -62,9 +62,9 @@ impl GpuPirGraph {
             })?;
 
             match node {
-                PirNode::Const(_) => {
+                PirNode::Const(value) => {
                     node_type.push(PIR_CONST);
-                    leaf_id.push(0);
+                    leaf_id.push(u32::from(*value));
                     decision_var.push(0);
                     decision_child_false.push(0);
                     decision_child_true.push(0);

@@ -61,6 +61,46 @@ unsafe impl<'a, T: DeviceRepr> DeviceRepr for &RawCudaView<'a, T> {
     }
 }
 
+/// Scratch buffers for stable radix sorting of u32 key/value pairs.
+pub struct RadixSortScratch {
+    keys_b: TrackedCudaSlice<u32>,
+    values_b: TrackedCudaSlice<u32>,
+    hist: TrackedCudaSlice<u32>,
+    prefix: TrackedCudaSlice<u32>,
+    ranks: TrackedCudaSlice<u32>,
+    len: u32,
+}
+
+impl RadixSortScratch {
+    pub fn new(provider: &CudaKernelProvider, n: u32) -> Result<Self> {
+        let memory = provider.memory();
+        let len = n.max(1);
+        let keys_b = memory.alloc::<u32>(len as usize)?;
+        let values_b = memory.alloc::<u32>(len as usize)?;
+        let ranks = memory.alloc::<u32>(len as usize)?;
+        let block_size = CudaKernelProvider::SORT_BLOCK_SIZE;
+        let grid_size = ((len + block_size - 1) / block_size).max(1);
+        let hist = memory.alloc::<u32>((grid_size as usize) * 16)?;
+        let prefix = memory.alloc::<u32>(16)?;
+        Ok(Self {
+            keys_b,
+            values_b,
+            hist,
+            prefix,
+            ranks,
+            len,
+        })
+    }
+
+    pub fn ensure_capacity(&mut self, provider: &CudaKernelProvider, n: u32) -> Result<()> {
+        if n <= self.len {
+            return Ok(());
+        }
+        *self = Self::new(provider, n)?;
+        Ok(())
+    }
+}
+
 /// Module names for loaded PTX modules
 pub const JOIN_MODULE: &str = "xlog_join";
 pub const DEDUP_MODULE: &str = "xlog_dedup";
@@ -124,6 +164,19 @@ pub mod pir_kernels {
     pub const PIR_PACK_KEYS: &str = "pir_pack_keys";
     pub const PIR_HASH_KEYS: &str = "pir_hash_keys";
     pub const PIR_MARK_UNIQUE: &str = "pir_mark_unique";
+    pub const PIR_FIND_EXISTING: &str = "pir_find_existing";
+    pub const PIR_MARK_NEW_GROUPS: &str = "pir_mark_new_groups";
+    pub const PIR_BUILD_GROUP_IDS: &str = "pir_build_group_ids";
+    pub const PIR_FILL_CHILD_PARENTS: &str = "pir_fill_child_parents";
+    pub const PIR_MARK_UNIQUE_PAIRS: &str = "pir_mark_unique_pairs";
+    pub const PIR_COMPACT_PAIRS: &str = "pir_compact_pairs";
+    pub const PIR_COUNT_CHILDREN: &str = "pir_count_children";
+    pub const PIR_WRITE_CHILD_OFFSETS: &str = "pir_write_child_offsets";
+    pub const PIR_GATHER_CHILDREN: &str = "pir_gather_children";
+    pub const PIR_BUILD_GRAPH_CHILD_COUNTS: &str = "pir_build_graph_child_counts";
+    pub const PIR_SUM_COUNTS: &str = "pir_sum_counts";
+    pub const PIR_EMIT_NODES_AND_IDS: &str = "pir_emit_nodes_and_ids";
+    pub const PIR_UPDATE_COUNTS: &str = "pir_update_counts";
 }
 
 /// Kernel function names in the GPU D4 module (CNF validation + circuit levelization).
@@ -365,6 +418,15 @@ struct JoinHashTableV2 {
     bucket_entries: crate::memory::TrackedCudaSlice<u32>,
     bucket_entry_hashes: crate::memory::TrackedCudaSlice<u64>,
     bucket_mask: u32,
+}
+
+/// Bucketed hash table for u64 hashes.
+pub struct HashTableU64 {
+    pub bucket_counts: crate::memory::TrackedCudaSlice<u32>,
+    pub bucket_offsets: crate::memory::TrackedCudaSlice<u32>,
+    pub bucket_entries: crate::memory::TrackedCudaSlice<u32>,
+    pub bucket_entry_hashes: crate::memory::TrackedCudaSlice<u64>,
+    pub bucket_mask: u32,
 }
 
 /// Cached build-side join index for v2 hash join.
@@ -678,6 +740,19 @@ impl CudaKernelProvider {
                     pir_kernels::PIR_PACK_KEYS,
                     pir_kernels::PIR_HASH_KEYS,
                     pir_kernels::PIR_MARK_UNIQUE,
+                    pir_kernels::PIR_FIND_EXISTING,
+                    pir_kernels::PIR_MARK_NEW_GROUPS,
+                    pir_kernels::PIR_BUILD_GROUP_IDS,
+                    pir_kernels::PIR_FILL_CHILD_PARENTS,
+                    pir_kernels::PIR_MARK_UNIQUE_PAIRS,
+                    pir_kernels::PIR_COMPACT_PAIRS,
+                    pir_kernels::PIR_COUNT_CHILDREN,
+                    pir_kernels::PIR_WRITE_CHILD_OFFSETS,
+                    pir_kernels::PIR_GATHER_CHILDREN,
+                    pir_kernels::PIR_BUILD_GRAPH_CHILD_COUNTS,
+                    pir_kernels::PIR_SUM_COUNTS,
+                    pir_kernels::PIR_EMIT_NODES_AND_IDS,
+                    pir_kernels::PIR_UPDATE_COUNTS,
                 ],
             )
             .map_err(|e| XlogError::Kernel(format!("Failed to load PIR PTX: {}", e)))?;
@@ -3711,6 +3786,265 @@ impl CudaKernelProvider {
         Ok(())
     }
 
+    /// Initialize indices array with 0..n-1 on device.
+    pub fn init_indices(
+        &self,
+        indices: &mut crate::memory::TrackedCudaSlice<u32>,
+        n: u32,
+    ) -> Result<()> {
+        if n == 0 {
+            return Ok(());
+        }
+        if n as usize > indices.len() {
+            return Err(XlogError::Kernel(format!(
+                "init_indices: n={} exceeds indices len={}",
+                n,
+                indices.len()
+            )));
+        }
+        let device = self.device.inner();
+        let block_size = Self::SORT_BLOCK_SIZE;
+        let grid_size = (n + block_size - 1) / block_size;
+        let config = LaunchConfig {
+            grid_dim: (grid_size, 1, 1),
+            block_dim: (block_size, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let init_fn = device
+            .get_func(SORT_MODULE, sort_kernels::INIT_INDICES)
+            .ok_or_else(|| XlogError::Kernel("init_indices kernel not found".to_string()))?;
+        // SAFETY: init_indices(indices, n)
+        unsafe { init_fn.clone().launch(config, (&mut *indices, n)) }
+            .map_err(|e| XlogError::Kernel(format!("init_indices failed: {}", e)))?;
+        Ok(())
+    }
+
+    /// Gather u32 keys by permutation: out[i] = input[indices[i]].
+    pub fn gather_u32_by_indices(
+        &self,
+        input: &crate::memory::TrackedCudaSlice<u32>,
+        indices: &crate::memory::TrackedCudaSlice<u32>,
+        output: &mut crate::memory::TrackedCudaSlice<u32>,
+        n: u32,
+    ) -> Result<()> {
+        if n == 0 {
+            return Ok(());
+        }
+        if n as usize > output.len() {
+            return Err(XlogError::Kernel(format!(
+                "gather_u32_by_indices: n={} exceeds output len={}",
+                n,
+                output.len()
+            )));
+        }
+        let device = self.device.inner();
+        let block_size = Self::SORT_BLOCK_SIZE;
+        let grid_size = (n + block_size - 1) / block_size;
+        let config = LaunchConfig {
+            grid_dim: (grid_size, 1, 1),
+            block_dim: (block_size, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let gather_fn = device
+            .get_func(SORT_MODULE, sort_kernels::APPLY_PERMUTATION_U32)
+            .ok_or_else(|| {
+                XlogError::Kernel("apply_permutation_u32 kernel not found".to_string())
+            })?;
+        // SAFETY: apply_permutation_u32(input, output, permutation, n)
+        unsafe { gather_fn.clone().launch(config, (input, output, indices, n)) }
+            .map_err(|e| XlogError::Kernel(format!("gather_u32_by_indices failed: {}", e)))?;
+        Ok(())
+    }
+
+    /// Gather u8 values by permutation: out[i] = input[indices[i]].
+    pub fn gather_u8_by_indices(
+        &self,
+        input: &crate::memory::TrackedCudaSlice<u8>,
+        indices: &crate::memory::TrackedCudaSlice<u32>,
+        output: &mut crate::memory::TrackedCudaSlice<u8>,
+        n: u32,
+    ) -> Result<()> {
+        if n == 0 {
+            return Ok(());
+        }
+        if n as usize > output.len() {
+            return Err(XlogError::Kernel(format!(
+                "gather_u8_by_indices: n={} exceeds output len={}",
+                n,
+                output.len()
+            )));
+        }
+        let device = self.device.inner();
+        let block_size = Self::SORT_BLOCK_SIZE;
+        let grid_size = (n + block_size - 1) / block_size;
+        let config = LaunchConfig {
+            grid_dim: (grid_size, 1, 1),
+            block_dim: (block_size, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let gather_fn = device
+            .get_func(SORT_MODULE, sort_kernels::APPLY_PERMUTATION_BYTES)
+            .ok_or_else(|| {
+                XlogError::Kernel("apply_permutation_bytes kernel not found".to_string())
+            })?;
+        // SAFETY: apply_permutation_bytes(input, output, permutation, num_rows, elem_size)
+        unsafe {
+            gather_fn
+                .clone()
+                .launch(config, (input, output, indices, n, 1u32))
+        }
+        .map_err(|e| XlogError::Kernel(format!("gather_u8_by_indices failed: {}", e)))?;
+        Ok(())
+    }
+
+    /// Gather low 32 bits of u64 values by permutation.
+    pub fn gather_u64_lo_by_indices(
+        &self,
+        input: &crate::memory::TrackedCudaSlice<u64>,
+        indices: &crate::memory::TrackedCudaSlice<u32>,
+        output: &mut crate::memory::TrackedCudaSlice<u32>,
+        n: u32,
+    ) -> Result<()> {
+        if n == 0 {
+            return Ok(());
+        }
+        let device = self.device.inner();
+        let block_size = Self::SORT_BLOCK_SIZE;
+        let grid_size = (n + block_size - 1) / block_size;
+        let config = LaunchConfig {
+            grid_dim: (grid_size, 1, 1),
+            block_dim: (block_size, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let gather_fn = device
+            .get_func(SORT_MODULE, sort_kernels::GATHER_KEYS_U64_LO_U32)
+            .ok_or_else(|| XlogError::Kernel("gather_keys_u64_lo_u32 not found".to_string()))?;
+        // SAFETY: gather_keys_u64_lo_u32(vals, permutation, num_rows, out_keys)
+        unsafe { gather_fn.clone().launch(config, (input, indices, n, output)) }
+            .map_err(|e| XlogError::Kernel(format!("gather_u64_lo_by_indices failed: {}", e)))?;
+        Ok(())
+    }
+
+    /// Gather high 32 bits of u64 values by permutation.
+    pub fn gather_u64_hi_by_indices(
+        &self,
+        input: &crate::memory::TrackedCudaSlice<u64>,
+        indices: &crate::memory::TrackedCudaSlice<u32>,
+        output: &mut crate::memory::TrackedCudaSlice<u32>,
+        n: u32,
+    ) -> Result<()> {
+        if n == 0 {
+            return Ok(());
+        }
+        let device = self.device.inner();
+        let block_size = Self::SORT_BLOCK_SIZE;
+        let grid_size = (n + block_size - 1) / block_size;
+        let config = LaunchConfig {
+            grid_dim: (grid_size, 1, 1),
+            block_dim: (block_size, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let gather_fn = device
+            .get_func(SORT_MODULE, sort_kernels::GATHER_KEYS_U64_HI_U32)
+            .ok_or_else(|| XlogError::Kernel("gather_keys_u64_hi_u32 not found".to_string()))?;
+        // SAFETY: gather_keys_u64_hi_u32(vals, permutation, num_rows, out_keys)
+        unsafe { gather_fn.clone().launch(config, (input, indices, n, output)) }
+            .map_err(|e| XlogError::Kernel(format!("gather_u64_hi_by_indices failed: {}", e)))?;
+        Ok(())
+    }
+
+    /// Stable radix sort of (key, value) u32 pairs using reusable scratch.
+    pub fn radix_sort_u32_pairs(
+        &self,
+        keys: &mut crate::memory::TrackedCudaSlice<u32>,
+        values: &mut crate::memory::TrackedCudaSlice<u32>,
+        n: u32,
+        scratch: &mut RadixSortScratch,
+    ) -> Result<()> {
+        if n == 0 {
+            return Ok(());
+        }
+        scratch.ensure_capacity(self, n)?;
+        self.radix_sort_u32_pairs_with_scratch(
+            keys,
+            &mut scratch.keys_b,
+            values,
+            &mut scratch.values_b,
+            &mut scratch.hist,
+            &mut scratch.prefix,
+            &mut scratch.ranks,
+            n,
+        )
+    }
+
+    /// Compute exclusive prefix sum of u8 mask on device (no host reads).
+    pub fn scan_u8_mask_device(
+        &self,
+        mask: &crate::memory::TrackedCudaSlice<u8>,
+        n: u32,
+    ) -> Result<crate::memory::TrackedCudaSlice<u32>> {
+        if n == 0 {
+            return self.memory.alloc::<u32>(0);
+        }
+        if n as usize > mask.len() {
+            return Err(XlogError::Kernel(format!(
+                "scan_u8_mask_device: n={} exceeds mask len={}",
+                n,
+                mask.len()
+            )));
+        }
+        let device = self.device.inner();
+        let block_size = 256u32;
+        let num_blocks = (n + block_size - 1) / block_size;
+
+        let mut prefix_sum = self.memory.alloc::<u32>(n as usize)?;
+        let mut block_sums = self.memory.alloc::<u32>(num_blocks as usize)?;
+
+        let phase1_fn = device
+            .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE1)
+            .ok_or_else(|| {
+                XlogError::Kernel("multiblock_scan_phase1 kernel not found".to_string())
+            })?;
+
+        // SAFETY: multiblock_scan_phase1(mask, prefix_sum, block_sums, n)
+        unsafe {
+            phase1_fn.clone().launch(
+                LaunchConfig {
+                    grid_dim: (num_blocks, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (mask, &mut prefix_sum, &mut block_sums, n),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("multiblock_scan_phase1 failed: {}", e)))?;
+
+        if num_blocks > 1 {
+            self.multiblock_scan_u32_inplace(&mut block_sums, num_blocks)?;
+
+            let phase3_fn = device
+                .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE3)
+                .ok_or_else(|| {
+                    XlogError::Kernel("multiblock_scan_phase3 kernel not found".to_string())
+                })?;
+
+            // SAFETY: multiblock_scan_phase3(prefix_sum, block_offsets, n)
+            unsafe {
+                phase3_fn.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (num_blocks, 1, 1),
+                        block_dim: (block_size, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (&mut prefix_sum, &block_sums, n),
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("multiblock_scan_phase3 failed: {}", e)))?;
+        }
+
+        Ok(prefix_sum)
+    }
+
     /// Apply permutation to reorder all columns in buffer using GPU
     fn apply_permutation_gpu(
         &self,
@@ -6574,6 +6908,28 @@ impl CudaKernelProvider {
 
         self.device.synchronize()?;
         Ok(JoinHashTableV2 {
+            bucket_counts,
+            bucket_offsets,
+            bucket_entries,
+            bucket_entry_hashes,
+            bucket_mask,
+        })
+    }
+
+    /// Build a bucketed hash table from a u64 hash array.
+    pub fn build_hash_table_u64(
+        &self,
+        hashes: &crate::memory::TrackedCudaSlice<u64>,
+        num_rows: u32,
+    ) -> Result<HashTableU64> {
+        let JoinHashTableV2 {
+            bucket_counts,
+            bucket_offsets,
+            bucket_entries,
+            bucket_entry_hashes,
+            bucket_mask,
+        } = self.build_hash_table_v2(&*hashes, num_rows)?;
+        Ok(HashTableU64 {
             bucket_counts,
             bucket_offsets,
             bucket_entries,
