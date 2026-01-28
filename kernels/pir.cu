@@ -377,7 +377,8 @@ extern "C" __global__ void pir_find_existing(
     if (idx >= num_nodes) return;
 
     uint64_t h = hashes[idx];
-    uint32_t bucket = (uint32_t)h & bucket_mask;
+    uint32_t h32 = (uint32_t)(h ^ (h >> 32));
+    uint32_t bucket = h32 & bucket_mask;
     uint32_t start = bucket_offsets[bucket];
     uint32_t count = bucket_counts[bucket];
     uint32_t limit = graph_num_nodes[0];
