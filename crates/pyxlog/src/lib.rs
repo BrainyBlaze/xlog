@@ -24,6 +24,13 @@ const USED_DLPACK_CAPSULE_NAME: &[u8] = b"used_dltensor\0";
 /// Epsilon value for numerical stability in log computations
 const NLL_EPSILON: f64 = 1e-38;
 
+#[cfg(not(feature = "host-io"))]
+fn host_io_disabled_pyerr() -> PyErr {
+    PyRuntimeError::new_err(
+        "Host output is disabled (feature \"host-io\" is OFF). Use device-resident APIs (DLPack) or rebuild with --features host-io.",
+    )
+}
+
 /// Compute negative log-likelihood loss from probability.
 ///
 /// NLL loss = -log(max(p, epsilon))
@@ -349,16 +356,24 @@ impl CompiledProgram {
                         "samples/seed are only supported for prob_engine='mc'",
                     ));
                 }
-                if return_grads {
-                    let result = program
-                        .evaluate_gpu_with_grads()
-                        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-                    self.pack_result_with_grads(py, result)
-                } else {
-                    let result = program
-                        .evaluate()
-                        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-                    self.pack_result_probs(py, result.query_probs)
+                #[cfg(feature = "host-io")]
+                {
+                    if return_grads {
+                        let result = program
+                            .evaluate_gpu_with_grads()
+                            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                        self.pack_result_with_grads(py, result)
+                    } else {
+                        let result = program
+                            .evaluate()
+                            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                        self.pack_result_probs(py, result.query_probs)
+                    }
+                }
+                #[cfg(not(feature = "host-io"))]
+                {
+                    let _ = return_grads;
+                    Err(host_io_disabled_pyerr())
                 }
             }
             CompiledProbProgram::Mc(program) => {
@@ -374,10 +389,18 @@ impl CompiledProgram {
                     confidence,
                     max_nonmonotone_iterations,
                 };
-                let result = program
-                    .evaluate(cfg)
-                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-                self.pack_result_mc(py, result)
+                #[cfg(feature = "host-io")]
+                {
+                    let result = program
+                        .evaluate(cfg)
+                        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                    self.pack_result_mc(py, result)
+                }
+                #[cfg(not(feature = "host-io"))]
+                {
+                    let _ = cfg;
+                    Err(host_io_disabled_pyerr())
+                }
             }
         }
     }
@@ -1311,26 +1334,33 @@ impl CompiledProgram {
         let program = ExactDdnnfProgram::compile_source_with_gpu(&expanded_source, self.gpu_config)
             .map_err(|e| PyRuntimeError::new_err(format!("Query compilation error: {}", e)))?;
 
-        let random_vars = program.random_var_indices();
-        let expected = num_inputs
-            .checked_mul(num_labels)
-            .ok_or_else(|| PyValueError::new_err("num_inputs*num_labels overflow"))?;
-
-        if random_vars.len() != expected {
-            return Err(PyRuntimeError::new_err(format!(
-                "Template compilation produced {} random vars, expected {} (inputs={}, labels={})",
-                random_vars.len(),
-                expected,
-                num_inputs,
-                num_labels
-            )));
-        }
-
         let mut groups: Vec<Vec<u32>> = Vec::with_capacity(num_inputs);
-        for input_pos in 0..num_inputs {
-            let start = input_pos * num_labels;
-            let end = start + num_labels;
-            groups.push(random_vars[start..end].to_vec());
+        #[cfg(feature = "host-io")]
+        {
+            let random_vars = program.random_var_indices();
+            let expected = num_inputs
+                .checked_mul(num_labels)
+                .ok_or_else(|| PyValueError::new_err("num_inputs*num_labels overflow"))?;
+
+            if random_vars.len() != expected {
+                return Err(PyRuntimeError::new_err(format!(
+                    "Template compilation produced {} random vars, expected {} (inputs={}, labels={})",
+                    random_vars.len(),
+                    expected,
+                    num_inputs,
+                    num_labels
+                )));
+            }
+
+            for input_pos in 0..num_inputs {
+                let start = input_pos * num_labels;
+                let end = start + num_labels;
+                groups.push(random_vars[start..end].to_vec());
+            }
+        }
+        #[cfg(not(feature = "host-io"))]
+        {
+            return Err(host_io_disabled_pyerr());
         }
 
         let slots = GpuWeightSlots::upload(self.output_provider.as_ref(), &groups)
@@ -1404,10 +1434,19 @@ impl CompiledProgram {
                 )
                 .map_err(|e| PyRuntimeError::new_err(format!("Query compilation error: {}", e)))?;
 
-                program
-                    .evaluate()
-                    .map_err(|e| PyRuntimeError::new_err(format!("Query evaluation error: {}", e)))?
-                    .query_probs
+                #[cfg(feature = "host-io")]
+                {
+                    program
+                        .evaluate()
+                        .map_err(|e| {
+                            PyRuntimeError::new_err(format!("Query evaluation error: {}", e))
+                        })?
+                        .query_probs
+                }
+                #[cfg(not(feature = "host-io"))]
+                {
+                    return Err(host_io_disabled_pyerr());
+                }
             }
             ProbEngine::Mc => {
                 let program =
@@ -1417,17 +1456,27 @@ impl CompiledProgram {
                         })?;
 
                 let cfg = McEvalConfig::default();
-                program
-                    .evaluate(cfg)
-                    .map_err(|e| PyRuntimeError::new_err(format!("Query evaluation error: {}", e)))?
-                    .query_estimates
-                    .into_iter()
-                    .map(|e| QueryProbability {
-                        atom: e.atom,
-                        prob: e.prob,
-                        log_prob: e.log_prob,
-                    })
-                    .collect()
+                #[cfg(feature = "host-io")]
+                {
+                    program
+                        .evaluate(cfg)
+                        .map_err(|e| {
+                            PyRuntimeError::new_err(format!("Query evaluation error: {}", e))
+                        })?
+                        .query_estimates
+                        .into_iter()
+                        .map(|e| QueryProbability {
+                            atom: e.atom,
+                            prob: e.prob,
+                            log_prob: e.log_prob,
+                        })
+                        .collect()
+                }
+                #[cfg(not(feature = "host-io"))]
+                {
+                    let _ = cfg;
+                    return Err(host_io_disabled_pyerr());
+                }
             }
         };
 

@@ -8,9 +8,9 @@ use xlog_core::{MemoryBudget, Result, ScalarType, XlogError};
 
 use crate::compilation::gpu_cache::{GpuCircuitCache, GpuCircuitCacheConfig, GpuCircuitCacheHandle};
 use crate::compilation::gpu_cnf::GpuCnfVarTables;
-use crate::compilation::gpu_weights::{
-    build_evidence_by_var_gpu, build_weights_gpu, map_nodes_to_vars_gpu, upload_weights_from_host,
-};
+use crate::compilation::gpu_weights::{build_evidence_by_var_gpu, build_weights_gpu};
+#[cfg(feature = "host-io")]
+use crate::compilation::gpu_weights::{map_nodes_to_vars_gpu, upload_weights_from_host};
 use crate::compilation::{
     compile_gpu_d4_and_verify_cached, encode_cnf_gpu, DeviceRandomVarList, GpuCompileConfig,
     GpuPirGraph, GpuPirRoots,
@@ -54,6 +54,7 @@ pub struct ExactResultWithGrads {
 
 #[derive(Debug, Clone)]
 struct QuerySpec {
+    #[cfg_attr(not(feature = "host-io"), allow(dead_code))]
     atom: GroundAtom,
     var: Option<u32>,
 }
@@ -105,6 +106,7 @@ impl GpuExactState {
 pub struct ExactDdnnfProgram {
     gpu: Option<Arc<GpuExactState>>,
     queries: Vec<QuerySpec>,
+    #[cfg_attr(not(feature = "host-io"), allow(dead_code))]
     random_vars: Option<Arc<DeviceRandomVarList>>,
     max_var: u32,
     gpu_config: GpuConfig,
@@ -125,6 +127,7 @@ impl ExactDdnnfProgram {
         self.gpu_config
     }
 
+    #[cfg(feature = "host-io")]
     pub fn evaluate(&self) -> Result<ExactResult> {
         if self.gpu.is_none() {
             let mut query_probs: Vec<QueryProbability> = Vec::with_capacity(self.queries.len());
@@ -200,6 +203,7 @@ impl ExactDdnnfProgram {
     /// Random variables are those with non-trivial weights (not (0.0, 0.0)).
     /// These correspond to annotated disjunctions in the source program.
     /// The order matches the order variables were assigned during CNF encoding.
+    #[cfg(feature = "host-io")]
     pub fn random_var_indices(&self) -> Vec<u32> {
         let Some(state) = self.gpu.as_ref() else {
             return Vec::new();
@@ -565,6 +569,7 @@ impl ExactDdnnfProgram {
         Ok(())
     }
 
+    #[cfg(feature = "host-io")]
     pub fn evaluate_gpu_with_grads(&self) -> Result<ExactResultWithGrads> {
         if self.gpu.is_none() {
             return Ok(ExactResultWithGrads {
@@ -664,6 +669,7 @@ impl ExactDdnnfProgram {
     /// This enables circuit reuse: the same compiled circuit can be evaluated
     /// with different weights (from updated neural network outputs) without
     /// recompiling the circuit.
+    #[cfg(feature = "host-io")]
     pub fn evaluate_gpu_with_grads_weights(
         &self,
         external_weights: &[(f64, f64)],
@@ -813,12 +819,16 @@ impl ExactDdnnfProgram {
         }
 
         let mut queries: Vec<QuerySpec> = Vec::new();
+        #[cfg(feature = "host-io")]
         let mut query_nodes: Vec<(usize, crate::pir::PirNodeId)> = Vec::new();
         for atom in &provenance.queries {
             let formula = provenance.query_formula(&atom.predicate, &atom.args);
             if let Some(id) = formula {
                 roots_set.insert(id);
-                query_nodes.push((queries.len(), id));
+                #[cfg(feature = "host-io")]
+                {
+                    query_nodes.push((queries.len(), id));
+                }
             }
             queries.push(QuerySpec {
                 atom: atom.clone(),
@@ -926,6 +936,7 @@ impl ExactDdnnfProgram {
         )?;
         cache.store_weights(&handle, &weights.log_true, &weights.log_false)?;
 
+        #[cfg(feature = "host-io")]
         if !query_nodes.is_empty() {
             let mut node_ids: Vec<u32> = Vec::with_capacity(query_nodes.len());
             for (_idx, node) in &query_nodes {
@@ -963,6 +974,7 @@ impl ExactDdnnfProgram {
         })
     }
 
+    #[cfg(feature = "host-io")]
     fn eval_log_z_gpu(&self, query_true: Option<u32>) -> Result<f64> {
         let state = self.gpu_state()?;
         let mut cache = state
@@ -1021,6 +1033,7 @@ impl ExactDdnnfProgram {
         })
     }
 
+    #[cfg(feature = "host-io")]
     fn eval_log_z_and_grads_gpu_cached(
         &self,
         query_true: Option<u32>,
@@ -1445,7 +1458,7 @@ fn display_atom(atom: &GroundAtom) -> String {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "host-io"))]
 mod tests {
     use super::*;
     use xlog_cuda::CudaDevice;

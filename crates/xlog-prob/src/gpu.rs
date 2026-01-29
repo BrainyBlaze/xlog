@@ -1579,6 +1579,7 @@ impl GpuXgcf {
         Ok(())
     }
 
+    #[cfg(feature = "host-io")]
     pub fn eval_log_wmc(
         &mut self,
         provider: &CudaKernelProvider,
@@ -1595,6 +1596,7 @@ impl GpuXgcf {
         Ok(host[0])
     }
 
+    #[cfg(feature = "host-io")]
     pub fn eval_log_wmc_and_grads(
         &mut self,
         provider: &CudaKernelProvider,

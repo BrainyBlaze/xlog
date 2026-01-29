@@ -1,3 +1,5 @@
+#![cfg(feature = "host-io")]
+
 use xlog_cuda::CudaDevice;
 use xlog_prob::mc::{McEvalConfig, McProgram};
 

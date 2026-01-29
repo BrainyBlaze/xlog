@@ -15,6 +15,10 @@ cudarc = { workspace = true }
 [dev-dependencies]
 criterion = "0.5"
 
+[features]
+default = []
+host-io = []
+
 [[bench]]
 name = "prob_bench"
 harness = false

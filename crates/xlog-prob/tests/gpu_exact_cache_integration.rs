@@ -1,3 +1,5 @@
+#![cfg(feature = "host-io")]
+
 use std::sync::Arc;
 
 use xlog_core::MemoryBudget;

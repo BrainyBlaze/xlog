@@ -194,8 +194,17 @@ fn run_probabilistic(args: ProbArgs) -> Result<()> {
     match args.prob_engine {
         ProbEngineCli::ExactDdnnf => {
             let prog = ExactDdnnfProgram::compile_source_with_gpu(&source, config)?;
-            let result = prog.evaluate()?;
-            emit_prob_exact(result, args.output, args.output_dir.as_deref())
+            #[cfg(feature = "host-io")]
+            {
+                let result = prog.evaluate()?;
+                emit_prob_exact(result, args.output, args.output_dir.as_deref())
+            }
+            #[cfg(not(feature = "host-io"))]
+            {
+                Err(XlogError::Execution(
+                    "Host output is disabled (feature \"host-io\" is OFF). Use device-resident APIs (DLPack) or rebuild with --features host-io.".to_string(),
+                ))
+            }
         }
         ProbEngineCli::Mc => {
             let prog = McProgram::compile_source_with_gpu(&source, config)?;
@@ -205,8 +214,17 @@ fn run_probabilistic(args: ProbArgs) -> Result<()> {
                 confidence: args.confidence,
                 ..Default::default()
             };
-            let result = prog.evaluate(cfg)?;
-            emit_prob_mc(result, args.output, args.output_dir.as_deref())
+            #[cfg(feature = "host-io")]
+            {
+                let result = prog.evaluate(cfg)?;
+                emit_prob_mc(result, args.output, args.output_dir.as_deref())
+            }
+            #[cfg(not(feature = "host-io"))]
+            {
+                Err(XlogError::Execution(
+                    "Host output is disabled (feature \"host-io\" is OFF). Use device-resident APIs (DLPack) or rebuild with --features host-io.".to_string(),
+                ))
+            }
         }
     }
 }

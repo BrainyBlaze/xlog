@@ -1,8 +1,11 @@
 #![allow(clippy::arc_with_non_send_sync)]
+#![cfg(feature = "host-io")]
+
 use std::sync::Arc;
 
 use xlog_core::MemoryBudget;
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+
 use xlog_prob::exact::{ExactDdnnfProgram, GpuConfig};
 use xlog_prob::neural_fast_path::GpuWeightSlots;
 use xlog_prob::neural_fast_path::NeuralFastPathConfig;

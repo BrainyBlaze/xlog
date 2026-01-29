@@ -78,3 +78,16 @@ fn random_var_collection_no_dtoh_in_source() {
         "host random-var collection still present"
     );
 }
+
+#[test]
+fn host_io_feature_required_for_dtoh_apis() {
+    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    path.push("src");
+    path.push("gpu.rs");
+
+    let text = std::fs::read_to_string(&path).expect("read gpu.rs");
+    assert!(
+        text.contains("cfg(feature = \"host-io\")"),
+        "host-io feature gates missing for host DTOH APIs"
+    );
+}

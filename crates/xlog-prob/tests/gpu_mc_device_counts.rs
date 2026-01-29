@@ -1,3 +1,5 @@
+#![cfg(feature = "host-io")]
+
 use std::sync::Arc;
 use cudarc::driver::DeviceSlice;
 use xlog_core::{MemoryBudget, Result};

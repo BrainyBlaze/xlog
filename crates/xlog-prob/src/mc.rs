@@ -12,6 +12,7 @@
 //!   count while remaining fully deterministic and explicit.
 
 use std::collections::{HashMap, HashSet};
+#[cfg(feature = "host-io")]
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
@@ -20,19 +21,24 @@ use xlog_core::{MemoryBudget, RelId, Result, ScalarType, Schema, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::provider::{mc_eval_kernels, MC_EVAL_MODULE};
 use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager};
+#[cfg(feature = "host-io")]
+use xlog_logic::ast::AggExpr;
 use xlog_logic::ast::{
-    AggExpr, AggOp, AnnotatedDisjunction, Atom, BodyLiteral, Evidence, PredDecl, ProbFact,
-    ProbQuery, Program, Rule, Term,
+    AggOp, AnnotatedDisjunction, Atom, BodyLiteral, Evidence, PredDecl, ProbFact, ProbQuery,
+    Program, Term,
 };
+#[cfg(feature = "host-io")]
+use xlog_logic::ast::Rule;
 use xlog_logic::compile::Compiler;
-use xlog_logic::stratify::{analyze_stratification, build_dependency_graph, find_sccs_for_lowering};
+use xlog_logic::stratify::analyze_stratification;
+#[cfg(feature = "host-io")]
+use xlog_logic::stratify::{build_dependency_graph, find_sccs_for_lowering};
 use xlog_runtime::Executor;
 
 use crate::exact::GpuConfig;
-use crate::provenance::{
-    atom_key_from_ground_atom, eval_arith_expr, eval_comparison, unify_atom, validate_prob,
-    value_from_term, GroundAtom, Value,
-};
+#[cfg(feature = "host-io")]
+use crate::provenance::{eval_arith_expr, eval_comparison, unify_atom, value_from_term};
+use crate::provenance::{atom_key_from_ground_atom, validate_prob, GroundAtom, Value};
 
 /// Phase 4 semantics for non-monotone SCC evaluation inside MC sampling.
 pub const NONMONOTONE_SEMANTICS: &str = "Synchronous iteration per SCC; if a fixpoint is reached, use it; if a cycle is detected, use the intersection of all states in the cycle (skeptical tuples only); if the iteration budget is exceeded, use the intersection across all visited states (conservative).";
@@ -151,11 +157,13 @@ struct AdTableDevice {
     choice_positions: TrackedCudaSlice<u32>,
 }
 
+#[cfg(feature = "host-io")]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Relation {
     tuples: HashSet<Vec<Value>>,
 }
 
+#[cfg(feature = "host-io")]
 impl Relation {
     fn insert_tuple(&mut self, tuple: Vec<Value>) {
         self.tuples.insert(tuple);
@@ -170,6 +178,7 @@ impl Relation {
     }
 }
 
+#[cfg(feature = "host-io")]
 #[derive(Debug, Clone)]
 enum SccKind {
     MonotoneNonRecursive,
@@ -177,6 +186,7 @@ enum SccKind {
     NonMonotone,
 }
 
+#[cfg(feature = "host-io")]
 #[derive(Debug, Clone)]
 struct SccPlan {
     predicates: Vec<String>,
@@ -195,7 +205,9 @@ struct EvalStats {
 pub struct McProgram {
     gpu_config: GpuConfig,
     program: Program,
+    #[cfg(feature = "host-io")]
     base_store: HashMap<String, Relation>,
+    #[cfg(feature = "host-io")]
     scc_plans: Vec<SccPlan>,
     queries: Vec<GroundAtom>,
     evidence: Vec<(GroundAtom, bool)>,
@@ -220,6 +232,7 @@ impl McProgram {
         self.bernoulli_probs.len()
     }
 
+    #[cfg(feature = "host-io")]
     pub fn evaluate(&self, cfg: McEvalConfig) -> Result<McResult> {
         if cfg.samples == 0 {
             return Err(XlogError::Execution(
@@ -327,6 +340,7 @@ impl McProgram {
         })
     }
 
+    #[cfg(feature = "host-io")]
     pub fn evaluate_gpu(&self, cfg: McEvalConfig) -> Result<McResult> {
         let provider = Arc::new(self.provider()?);
         let (query_counts, evidence_samples, stats) =
@@ -724,6 +738,7 @@ impl McProgram {
         Ok(stats)
     }
 
+    #[cfg(feature = "host-io")]
     fn evaluate_gpu_counts(
         &self,
         cfg: &McEvalConfig,
@@ -773,55 +788,65 @@ impl McProgram {
         let (bernoulli_probs, prob_facts, annotated_disjunctions) =
             compile_sampling_plan(&prob_facts, &program.annotated_disjunctions)?;
 
+        #[cfg(feature = "host-io")]
         let mut base_store: HashMap<String, Relation> = HashMap::new();
 
         // Deterministic facts.
-        for fact in program.facts() {
-            let atom = atom_key_from_ground_atom(&fact.head)?;
-            base_store
-                .entry(atom.predicate.clone())
-                .or_default()
-                .insert_tuple(atom.args);
+        #[cfg(feature = "host-io")]
+        {
+            for fact in program.facts() {
+                let atom = atom_key_from_ground_atom(&fact.head)?;
+                base_store
+                    .entry(atom.predicate.clone())
+                    .or_default()
+                    .insert_tuple(atom.args);
+            }
         }
 
         // Ensure relations exist for all referenced predicates so evaluation treats missing as empty,
-        // but never errors due to an unknown predicate.
-        let mut referenced: HashSet<String> = HashSet::new();
-        for rule in &program.rules {
-            referenced.insert(rule.head.predicate.clone());
-            for lit in &rule.body {
-                match lit {
-                    BodyLiteral::Positive(a) | BodyLiteral::Negated(a) => {
-                        referenced.insert(a.predicate.clone());
+        // but never errors due to an unknown predicate (CPU eval path only).
+        #[cfg(feature = "host-io")]
+        {
+            let mut referenced: HashSet<String> = HashSet::new();
+            for rule in &program.rules {
+                referenced.insert(rule.head.predicate.clone());
+                for lit in &rule.body {
+                    match lit {
+                        BodyLiteral::Positive(a) | BodyLiteral::Negated(a) => {
+                            referenced.insert(a.predicate.clone());
+                        }
+                        BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) => {}
                     }
-                    BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) => {}
                 }
             }
-        }
-        for pf in &program.prob_facts {
-            referenced.insert(pf.atom.predicate.clone());
-        }
-        for ad in &program.annotated_disjunctions {
-            for pf in &ad.choices {
+            for pf in &program.prob_facts {
                 referenced.insert(pf.atom.predicate.clone());
             }
-        }
-        for q in &queries {
-            referenced.insert(q.predicate.clone());
-        }
-        for (e, _) in &evidence {
-            referenced.insert(e.predicate.clone());
-        }
-        for pred in referenced {
-            base_store.entry(pred).or_default();
+            for ad in &program.annotated_disjunctions {
+                for pf in &ad.choices {
+                    referenced.insert(pf.atom.predicate.clone());
+                }
+            }
+            for q in &queries {
+                referenced.insert(q.predicate.clone());
+            }
+            for (e, _) in &evidence {
+                referenced.insert(e.predicate.clone());
+            }
+            for pred in referenced {
+                base_store.entry(pred).or_default();
+            }
         }
 
+        #[cfg(feature = "host-io")]
         let scc_plans = build_scc_plans(program)?;
 
         Ok(Self {
             gpu_config: GpuConfig::default(),
             program: program.clone(),
+            #[cfg(feature = "host-io")]
             base_store,
+            #[cfg(feature = "host-io")]
             scc_plans,
             queries,
             evidence,
@@ -846,6 +871,7 @@ impl McProgram {
         CudaKernelProvider::new(device, memory)
     }
 
+    #[cfg(feature = "host-io")]
     fn apply_sample_facts(&self, store: &mut HashMap<String, Relation>, bits: &[u8]) -> Result<()> {
         for pf in &self.prob_facts {
             if bits.get(pf.var_idx).copied().unwrap_or(0) == 0 {
@@ -1543,6 +1569,7 @@ fn buffer_intersection(
     provider.diff_gpu(a, &diff)
 }
 
+#[cfg(feature = "host-io")]
 fn check_evidence(executor: &Executor, evidence: &[(String, bool)]) -> Result<bool> {
     for (pred, expected) in evidence {
         let holds = executor
@@ -2023,6 +2050,7 @@ fn compile_sampling_plan(
     Ok((probs, fact_specs, ad_specs))
 }
 
+#[cfg(feature = "host-io")]
 fn build_scc_plans(program: &Program) -> Result<Vec<SccPlan>> {
     let graph = build_dependency_graph(program);
     let sccs = find_sccs_for_lowering(&graph);
@@ -2077,6 +2105,7 @@ fn build_scc_plans(program: &Program) -> Result<Vec<SccPlan>> {
     Ok(plans)
 }
 
+#[cfg(feature = "host-io")]
 fn is_recursive_scc(scc: &[String], rules: &[Rule]) -> bool {
     if scc.len() > 1 {
         return true;
@@ -2096,6 +2125,7 @@ fn is_recursive_scc(scc: &[String], rules: &[Rule]) -> bool {
     false
 }
 
+#[cfg(feature = "host-io")]
 fn evaluate_program_inplace(
     scc_plans: &[SccPlan],
     store: &mut HashMap<String, Relation>,
@@ -2138,6 +2168,7 @@ fn evaluate_program_inplace(
     Ok(stats)
 }
 
+#[cfg(feature = "host-io")]
 fn eval_monotone_recursive_scc(
     scc: &[String],
     rules: &[Rule],
@@ -2234,6 +2265,7 @@ fn eval_monotone_recursive_scc(
     Ok(())
 }
 
+#[cfg(feature = "host-io")]
 fn eval_nonmonotone_scc(
     scc: &[String],
     rules: &[Rule],
@@ -2299,6 +2331,7 @@ fn eval_nonmonotone_scc(
     Ok((false, true))
 }
 
+#[cfg(feature = "host-io")]
 fn intersect_states(states: &[HashMap<String, Relation>]) -> HashMap<String, Relation> {
     let mut out: HashMap<String, Relation> = HashMap::new();
     let Some(first) = states.first() else {
@@ -2326,6 +2359,7 @@ fn intersect_states(states: &[HashMap<String, Relation>]) -> HashMap<String, Rel
     out
 }
 
+#[cfg(feature = "host-io")]
 fn hash_scc_state(state: &HashMap<String, Relation>) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     let mut hasher = DefaultHasher::new();
@@ -2353,6 +2387,7 @@ fn hash_scc_state(state: &HashMap<String, Relation>) -> u64 {
 ///
 /// `full_scc` is a per-SCC snapshot (used for SCC predicates), and `delta_scc` optionally provides
 /// a delta relation for a specific body literal index (semi-naive).
+#[cfg(feature = "host-io")]
 fn eval_rule(
     rule: &Rule,
     global: &HashMap<String, Relation>,
@@ -2423,6 +2458,7 @@ fn eval_rule(
     }
 }
 
+#[cfg(feature = "host-io")]
 fn select_relation<'a>(
     atom: &Atom,
     body_index: usize,
@@ -2448,6 +2484,7 @@ fn select_relation<'a>(
         .ok_or_else(|| XlogError::Compilation(format!("Unknown predicate {}", atom.predicate)))
 }
 
+#[cfg(feature = "host-io")]
 fn negated_atom_holds(
     atom: &Atom,
     rel: &Relation,
@@ -2470,6 +2507,7 @@ fn negated_atom_holds(
     Ok(true)
 }
 
+#[cfg(feature = "host-io")]
 fn atom_matches_bound(
     atom: &Atom,
     tuple: &[Value],
@@ -2509,6 +2547,7 @@ fn atom_matches_bound(
     Ok(true)
 }
 
+#[cfg(feature = "host-io")]
 fn materialize_head_non_aggregate(
     head: &Atom,
     binding: &HashMap<String, Value>,
@@ -2545,6 +2584,7 @@ fn materialize_head_non_aggregate(
 }
 
 #[derive(Debug, Clone)]
+#[cfg(feature = "host-io")]
 enum AggState {
     Count(u64),
     SumI128(i128),
@@ -2554,6 +2594,7 @@ enum AggState {
     LogSumExp { max: f64, sumexp: f64, init: bool },
 }
 
+#[cfg(feature = "host-io")]
 impl AggState {
     fn new(op: AggOp) -> Self {
         match op {
@@ -2716,6 +2757,7 @@ impl AggState {
     }
 }
 
+#[cfg(feature = "host-io")]
 fn value_le(a: &Value, b: &Value) -> Result<bool> {
     match (a, b) {
         (Value::I64(x), Value::I64(y)) => Ok(x <= y),
@@ -2728,6 +2770,7 @@ fn value_le(a: &Value, b: &Value) -> Result<bool> {
     }
 }
 
+#[cfg(feature = "host-io")]
 fn eval_aggregate_head(
     head: &Atom,
     states: Vec<HashMap<String, Value>>,
@@ -2828,6 +2871,7 @@ fn eval_aggregate_head(
     Ok(out)
 }
 
+#[cfg(feature = "host-io")]
 fn atom_holds(store: &HashMap<String, Relation>, atom: &GroundAtom) -> bool {
     store
         .get(&atom.predicate)
@@ -2835,6 +2879,7 @@ fn atom_holds(store: &HashMap<String, Relation>, atom: &GroundAtom) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(feature = "host-io")]
 fn evidence_satisfied(store: &HashMap<String, Relation>, evidence: &[(GroundAtom, bool)]) -> bool {
     for (atom, value) in evidence {
         let holds = atom_holds(store, atom);
@@ -2845,6 +2890,7 @@ fn evidence_satisfied(store: &HashMap<String, Relation>, evidence: &[(GroundAtom
     true
 }
 
+#[cfg(feature = "host-io")]
 fn binomial_estimate(k: usize, n: usize, z: f64) -> (f64, f64, f64, f64) {
     if n == 0 {
         return (0.0, 0.0, 0.0, 0.0);
@@ -2870,6 +2916,7 @@ fn binomial_estimate(k: usize, n: usize, z: f64) -> (f64, f64, f64, f64) {
 }
 
 // Acklam's inverse normal CDF approximation.
+#[cfg(feature = "host-io")]
 fn normal_quantile(p: f64) -> f64 {
     if !(0.0 < p && p < 1.0) || p.is_nan() {
         return f64::NAN;

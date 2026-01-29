@@ -1,3 +1,4 @@
+#![cfg(feature = "host-io")]
 //! Performance benchmarks for XLOG probabilistic inference.
 //!
 //! Run with: `cargo bench -p xlog-prob`

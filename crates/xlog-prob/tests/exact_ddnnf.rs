@@ -1,3 +1,5 @@
+#![cfg(feature = "host-io")]
+
 use xlog_prob::exact::{ExactDdnnfProgram, ExactResult};
 use xlog_prob::provenance::Value;
 
