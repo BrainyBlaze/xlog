@@ -209,6 +209,52 @@ extern "C" __global__ void pack_and_hash_keys(
 }
 
 /**
+ * Fused pack + hash for arbitrary column counts.
+ *
+ * This kernel supports any number of key columns by consuming a device array
+ * of column pointers and sizes. Each thread processes one row.
+ *
+ * @param col_ptrs Device array of column base pointers (as uint64_t addresses)
+ * @param col_sizes Device array of element sizes per column
+ * @param num_cols Number of columns to pack
+ * @param num_rows Number of rows to process
+ * @param row_size Total size of packed row in bytes
+ * @param packed_output Output buffer for packed rows
+ * @param hashes Output hash values (one uint64_t per row)
+ */
+extern "C" __global__ void pack_and_hash_keys_generic(
+    const uint64_t* __restrict__ col_ptrs,
+    const uint32_t* __restrict__ col_sizes,
+    uint32_t num_cols,
+    uint32_t num_rows,
+    uint32_t row_size,
+    uint8_t* __restrict__ packed_output,
+    uint64_t* __restrict__ hashes
+) {
+    uint32_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= num_rows) return;
+
+    uint8_t* out_row = packed_output + (uint64_t)row * row_size;
+    uint64_t hash = FNV_OFFSET;
+    uint32_t offset = 0;
+
+    for (uint32_t c = 0; c < num_cols; c++) {
+        const uint8_t* col_data = reinterpret_cast<const uint8_t*>(col_ptrs[c]);
+        uint32_t sz = col_sizes[c];
+        const uint8_t* src = col_data + (uint64_t)row * sz;
+        for (uint32_t i = 0; i < sz; i++) {
+            uint8_t b = src[i];
+            out_row[offset + i] = b;
+            hash ^= b;
+            hash *= FNV_PRIME;
+        }
+        offset += sz;
+    }
+
+    hashes[row] = hash;
+}
+
+/**
  * Vectorized pack for 8-byte aligned columns (optimized path).
  *
  * When all column sizes are multiples of 8 bytes and properly aligned,
