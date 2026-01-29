@@ -63,6 +63,23 @@ extern "C" __global__ void group_start_indices(
     }
 }
 
+// Capture total number of groups from boundary prefix sum and flags.
+extern "C" __global__ void capture_num_groups(
+    const uint32_t* __restrict__ boundary_pos,
+    const uint8_t* __restrict__ boundaries,
+    uint32_t num_rows,
+    uint32_t* __restrict__ out_groups
+) {
+    if (blockIdx.x == 0 && threadIdx.x == 0) {
+        if (num_rows == 0) {
+            out_groups[0] = 0;
+            return;
+        }
+        uint32_t last = num_rows - 1;
+        out_groups[0] = boundary_pos[last] + (boundaries[last] ? 1u : 0u);
+    }
+}
+
 // Count aggregation per group (outputs u64 to match predicate declarations)
 extern "C" __global__ void groupby_count(
     const uint8_t* __restrict__ is_boundary,
@@ -211,11 +228,15 @@ extern "C" __global__ void groupby_logsumexp_sumexp(
 extern "C" __global__ void groupby_logsumexp_final(
     const double* __restrict__ maxs,
     const double* __restrict__ sumexps,
-    uint32_t num_groups,
+    const uint32_t* __restrict__ num_groups,
+    uint32_t capacity_groups,
     double* __restrict__ results
 ) {
     uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (gid >= num_groups) return;
+    if (gid >= capacity_groups) return;
+
+    uint32_t groups = num_groups[0];
+    if (gid >= groups) return;
 
     double max_val = maxs[gid];
     // If max is +INFINITY, result is +INFINITY regardless of sumexp

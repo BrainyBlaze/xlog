@@ -338,6 +338,33 @@ extern "C" __global__ void unpack_column(
 }
 
 /**
+ * Unpack single column with device-resident row count.
+ *
+ * Uses capacity_rows for grid bounds and a device-resident row count to
+ * avoid host-side sizing.
+ */
+extern "C" __global__ void unpack_column_counted(
+    const uint8_t* __restrict__ packed_input,
+    uint32_t row_size,
+    uint32_t col_offset,
+    uint32_t col_size,
+    const uint32_t* __restrict__ num_rows,
+    uint32_t capacity_rows,
+    uint8_t* __restrict__ col_output
+) {
+    uint32_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= capacity_rows) return;
+    if (row >= num_rows[0]) return;
+
+    const uint8_t* src = packed_input + (uint64_t)row * row_size + col_offset;
+    uint8_t* dst = col_output + (uint64_t)row * col_size;
+
+    for (uint32_t i = 0; i < col_size; i++) {
+        dst[i] = src[i];
+    }
+}
+
+/**
  * Gather rows from packed data based on index array.
  *
  * Given an array of row indices, copies those rows from source packed
@@ -364,6 +391,37 @@ extern "C" __global__ void gather_packed_rows(
     uint8_t* dst = dst_packed + (uint64_t)out_row * row_size;
 
     // Copy row data - use vectorized loads where possible
+    uint32_t i = 0;
+    for (; i + 8 <= row_size; i += 8) {
+        *((uint64_t*)(dst + i)) = *((const uint64_t*)(src + i));
+    }
+    for (; i < row_size; i++) {
+        dst[i] = src[i];
+    }
+}
+
+/**
+ * Gather rows with device-resident row count.
+ *
+ * Uses capacity_rows for grid bounds and a device-resident row count to
+ * avoid host-side sizing.
+ */
+extern "C" __global__ void gather_packed_rows_counted(
+    const uint8_t* __restrict__ src_packed,
+    uint32_t row_size,
+    const uint32_t* __restrict__ indices,
+    const uint32_t* __restrict__ num_rows,
+    uint32_t capacity_rows,
+    uint8_t* __restrict__ dst_packed
+) {
+    uint32_t out_row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (out_row >= capacity_rows) return;
+    if (out_row >= num_rows[0]) return;
+
+    uint32_t src_row = indices[out_row];
+    const uint8_t* src = src_packed + (uint64_t)src_row * row_size;
+    uint8_t* dst = dst_packed + (uint64_t)out_row * row_size;
+
     uint32_t i = 0;
     for (; i + 8 <= row_size; i += 8) {
         *((uint64_t*)(dst + i)) = *((const uint64_t*)(src + i));

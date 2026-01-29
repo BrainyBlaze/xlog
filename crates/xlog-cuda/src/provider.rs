@@ -285,6 +285,7 @@ pub mod groupby_kernels {
     pub const EXTRACT_GROUP_KEYS: &str = "extract_group_keys";
     pub const GROUP_IDS_FROM_BOUNDARIES: &str = "group_ids_from_boundaries";
     pub const GROUP_START_INDICES: &str = "group_start_indices";
+    pub const CAPTURE_NUM_GROUPS: &str = "capture_num_groups";
     pub const GROUPBY_COUNT: &str = "groupby_count";
     pub const GROUPBY_SUM: &str = "groupby_sum";
     pub const GROUPBY_MIN: &str = "groupby_min";
@@ -380,8 +381,12 @@ pub mod pack_kernels {
     pub const PACK_KEYS_ALIGNED: &str = "pack_keys_aligned";
     /// Unpack single column from packed row data
     pub const UNPACK_COLUMN: &str = "unpack_column";
+    /// Unpack single column with device-resident row count
+    pub const UNPACK_COLUMN_COUNTED: &str = "unpack_column_counted";
     /// Gather rows from packed data based on index array
     pub const GATHER_PACKED_ROWS: &str = "gather_packed_rows";
+    /// Gather rows with device-resident row count
+    pub const GATHER_PACKED_ROWS_COUNTED: &str = "gather_packed_rows_counted";
     /// Scatter write: distribute packed rows to non-contiguous output positions
     pub const SCATTER_PACKED_ROWS: &str = "scatter_packed_rows";
     /// Compare packed keys for equality
@@ -672,6 +677,7 @@ impl CudaKernelProvider {
                     groupby_kernels::EXTRACT_GROUP_KEYS,
                     groupby_kernels::GROUP_IDS_FROM_BOUNDARIES,
                     groupby_kernels::GROUP_START_INDICES,
+                    groupby_kernels::CAPTURE_NUM_GROUPS,
                     groupby_kernels::GROUPBY_COUNT,
                     groupby_kernels::GROUPBY_SUM,
                     groupby_kernels::GROUPBY_MIN,
@@ -792,7 +798,9 @@ impl CudaKernelProvider {
                     pack_kernels::PACK_AND_HASH_KEYS,
                     pack_kernels::PACK_KEYS_ALIGNED,
                     pack_kernels::UNPACK_COLUMN,
+                    pack_kernels::UNPACK_COLUMN_COUNTED,
                     pack_kernels::GATHER_PACKED_ROWS,
+                    pack_kernels::GATHER_PACKED_ROWS_COUNTED,
                     pack_kernels::SCATTER_PACKED_ROWS,
                     pack_kernels::COMPARE_PACKED_KEYS,
                 ],
@@ -1836,15 +1844,11 @@ impl CudaKernelProvider {
 
         // Read keys to host for filtering (set difference requires iterating)
         let mut a_keys_host = vec![0u8; (num_a as usize) * 4];
-        self.device
-            .inner()
-            .dtoh_sync_copy_into(a_key_col, &mut a_keys_host)
+        self.dtoh_sync_copy_into_tracked(a_key_col, &mut a_keys_host)
             .map_err(|e| XlogError::Kernel(format!("Failed to read a keys: {}", e)))?;
 
         let mut b_keys_host = vec![0u8; (num_b as usize) * 4];
-        self.device
-            .inner()
-            .dtoh_sync_copy_into(b_key_col, &mut b_keys_host)
+        self.dtoh_sync_copy_into_tracked(b_key_col, &mut b_keys_host)
             .map_err(|e| XlogError::Kernel(format!("Failed to read b keys: {}", e)))?;
 
         // Build lookup set from b
@@ -1888,9 +1892,7 @@ impl CudaKernelProvider {
                 // Read column data
                 let a_col_bytes = (num_a as usize) * col_type_size;
                 let mut a_col_host = vec![0u8; a_col_bytes];
-                self.device
-                    .inner()
-                    .dtoh_sync_copy_into(a_col, &mut a_col_host)
+                self.dtoh_sync_copy_into_tracked(a_col, &mut a_col_host)
                     .map_err(|e| XlogError::Kernel(format!("Failed to read column: {}", e)))?;
 
                 // Select rows matching diff indices
@@ -2183,399 +2185,7 @@ impl CudaKernelProvider {
         agg: AggOp,
         value_col: usize,
     ) -> Result<CudaBuffer> {
-        if input.is_empty() {
-            // Return empty buffer with appropriate schema
-            let result_schema = self.groupby_result_schema(input.schema(), key_cols, agg);
-            return self.create_empty_buffer(result_schema);
-        }
-
-        if key_cols.is_empty() {
-            return Err(XlogError::Kernel(
-                "GroupBy requires at least one key column".to_string(),
-            ));
-        }
-
-        // Verify value column exists
-        if value_col >= input.arity() {
-            return Err(XlogError::Kernel(format!(
-                "Value column {} out of bounds",
-                value_col
-            )));
-        }
-
-        let num_rows = input.num_rows() as u32;
-        let num_key_cols = key_cols.len() as u32;
-        // For column-based storage with single key column, row_stride = 1
-        // since we pass a single contiguous column view
-        let row_stride = 1u32;
-
-        // Get boundary detection kernel
-        let boundary_func = self
-            .device
-            .inner()
-            .get_func(GROUPBY_MODULE, groupby_kernels::DETECT_GROUP_BOUNDARIES)
-            .ok_or_else(|| {
-                XlogError::Kernel("detect_group_boundaries kernel not found".to_string())
-            })?;
-
-        // Allocate is_boundary mask
-        let is_boundary = self.memory.alloc::<u8>(num_rows as usize)?;
-
-        // Prepare sorted keys buffer (MVP: use first key column)
-        let sorted_keys = input
-            .column(key_cols[0])
-            .ok_or_else(|| XlogError::Kernel("Key column not found".to_string()))?;
-        let sorted_keys_view = self.column_as_u32_view(sorted_keys, num_rows as usize)?;
-
-        // Launch boundary detection
-        let block_size = 256u32;
-        let grid_size = (num_rows + block_size - 1) / block_size;
-        let config = LaunchConfig {
-            grid_dim: (grid_size, 1, 1),
-            block_dim: (block_size, 1, 1),
-            shared_mem_bytes: 0,
-        };
-
-        // SAFETY: Kernel parameters match expected signature
-        unsafe {
-            boundary_func
-                .clone()
-                .launch(
-                    config,
-                    (
-                        &sorted_keys_view,
-                        num_rows,
-                        num_key_cols,
-                        row_stride,
-                        &is_boundary,
-                    ),
-                )
-                .map_err(|e| XlogError::Kernel(format!("detect_group_boundaries failed: {}", e)))?;
-        }
-
-        // Compute group IDs from boundaries (CPU for MVP)
-        self.device.synchronize()?;
-
-        let mut boundary_host = vec![0u8; num_rows as usize];
-        self.device
-            .inner()
-            .dtoh_sync_copy_into(&is_boundary, &mut boundary_host)
-            .map_err(|e| XlogError::Kernel(format!("Failed to read boundaries: {}", e)))?;
-
-        // Compute group IDs: cumulative sum of boundaries - 1
-        let mut group_ids_host = vec![0u32; num_rows as usize];
-        let mut current_group = 0u32;
-        for i in 0..num_rows as usize {
-            if i > 0 && boundary_host[i] == 1 {
-                current_group += 1;
-            }
-            group_ids_host[i] = current_group;
-        }
-        let num_groups = current_group + 1;
-
-        // Upload group IDs
-        let mut group_ids = self.memory.alloc::<u32>(num_rows as usize)?;
-        self.device
-            .inner()
-            .htod_sync_copy_into(&group_ids_host, &mut group_ids)
-            .map_err(|e| XlogError::Kernel(format!("Failed to upload group IDs: {}", e)))?;
-
-        // Get value column
-        let values = input
-            .column(value_col)
-            .ok_or_else(|| XlogError::Kernel("Value column not found".to_string()))?;
-
-        // Allocate and initialize output based on aggregation type
-        // Return output as bytes via host for consistent handling
-        let (output_bytes, _result_type): (Vec<u8>, ScalarType) = match agg {
-            AggOp::Count => {
-                let mut output = self.memory.alloc::<u64>(num_groups as usize)?;
-                // Initialize to 0
-                self.device
-                    .inner()
-                    .htod_sync_copy_into(&vec![0u64; num_groups as usize], &mut output)
-                    .map_err(|e| {
-                        XlogError::Kernel(format!("Failed to init count output: {}", e))
-                    })?;
-
-                let count_func = self
-                    .device
-                    .inner()
-                    .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_COUNT)
-                    .ok_or_else(|| {
-                        XlogError::Kernel("groupby_count kernel not found".to_string())
-                    })?;
-
-                // SAFETY: Kernel parameters match expected signature
-                unsafe {
-                    count_func
-                        .clone()
-                        .launch(config, (&is_boundary, &group_ids, num_rows, &output))
-                        .map_err(|e| XlogError::Kernel(format!("groupby_count failed: {}", e)))?;
-                }
-
-                self.device.synchronize()?;
-
-                // Read back as bytes
-                let mut host_output = vec![0u64; num_groups as usize];
-                self.device
-                    .inner()
-                    .dtoh_sync_copy_into(&output, &mut host_output)
-                    .map_err(|e| {
-                        XlogError::Kernel(format!("Failed to read count output: {}", e))
-                    })?;
-                let bytes: Vec<u8> = host_output.iter().flat_map(|v| v.to_le_bytes()).collect();
-                (bytes, ScalarType::U64)
-            }
-            AggOp::Sum => {
-                let mut output = self.memory.alloc::<u64>(num_groups as usize)?;
-                // Initialize to 0
-                self.device
-                    .inner()
-                    .htod_sync_copy_into(&vec![0u64; num_groups as usize], &mut output)
-                    .map_err(|e| XlogError::Kernel(format!("Failed to init sum output: {}", e)))?;
-
-                let sum_func = self
-                    .device
-                    .inner()
-                    .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_SUM)
-                    .ok_or_else(|| XlogError::Kernel("groupby_sum kernel not found".to_string()))?;
-
-                // SAFETY: Kernel parameters match expected signature
-                unsafe {
-                    sum_func
-                        .clone()
-                        .launch(config, (values, &group_ids, num_rows, &output))
-                        .map_err(|e| XlogError::Kernel(format!("groupby_sum failed: {}", e)))?;
-                }
-
-                self.device.synchronize()?;
-
-                // Read back as bytes
-                let mut host_output = vec![0u64; num_groups as usize];
-                self.device
-                    .inner()
-                    .dtoh_sync_copy_into(&output, &mut host_output)
-                    .map_err(|e| XlogError::Kernel(format!("Failed to read sum output: {}", e)))?;
-                let bytes: Vec<u8> = host_output.iter().flat_map(|v| v.to_le_bytes()).collect();
-                (bytes, ScalarType::U64)
-            }
-            AggOp::Min => {
-                let mut output = self.memory.alloc::<u32>(num_groups as usize)?;
-                // Initialize to MAX
-                self.device
-                    .inner()
-                    .htod_sync_copy_into(&vec![u32::MAX; num_groups as usize], &mut output)
-                    .map_err(|e| XlogError::Kernel(format!("Failed to init min output: {}", e)))?;
-
-                let min_func = self
-                    .device
-                    .inner()
-                    .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_MIN)
-                    .ok_or_else(|| XlogError::Kernel("groupby_min kernel not found".to_string()))?;
-
-                // SAFETY: Kernel parameters match expected signature
-                unsafe {
-                    min_func
-                        .clone()
-                        .launch(config, (values, &group_ids, num_rows, &output))
-                        .map_err(|e| XlogError::Kernel(format!("groupby_min failed: {}", e)))?;
-                }
-
-                self.device.synchronize()?;
-
-                // Read back as bytes
-                let mut host_output = vec![0u32; num_groups as usize];
-                self.device
-                    .inner()
-                    .dtoh_sync_copy_into(&output, &mut host_output)
-                    .map_err(|e| XlogError::Kernel(format!("Failed to read min output: {}", e)))?;
-                let bytes: Vec<u8> = host_output.iter().flat_map(|v| v.to_le_bytes()).collect();
-                (bytes, ScalarType::U32)
-            }
-            AggOp::Max => {
-                let mut output = self.memory.alloc::<u32>(num_groups as usize)?;
-                // Initialize to 0
-                self.device
-                    .inner()
-                    .htod_sync_copy_into(&vec![0u32; num_groups as usize], &mut output)
-                    .map_err(|e| XlogError::Kernel(format!("Failed to init max output: {}", e)))?;
-
-                let max_func = self
-                    .device
-                    .inner()
-                    .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_MAX)
-                    .ok_or_else(|| XlogError::Kernel("groupby_max kernel not found".to_string()))?;
-
-                // SAFETY: Kernel parameters match expected signature
-                unsafe {
-                    max_func
-                        .clone()
-                        .launch(config, (values, &group_ids, num_rows, &output))
-                        .map_err(|e| XlogError::Kernel(format!("groupby_max failed: {}", e)))?;
-                }
-
-                self.device.synchronize()?;
-
-                // Read back as bytes
-                let mut host_output = vec![0u32; num_groups as usize];
-                self.device
-                    .inner()
-                    .dtoh_sync_copy_into(&output, &mut host_output)
-                    .map_err(|e| XlogError::Kernel(format!("Failed to read max output: {}", e)))?;
-                let bytes: Vec<u8> = host_output.iter().flat_map(|v| v.to_le_bytes()).collect();
-                (bytes, ScalarType::U32)
-            }
-            AggOp::LogSumExp => {
-                // LogSumExp requires F64 values, use 3-pass algorithm:
-                // 1. Find max per group
-                // 2. Compute sum of exp(x - max) per group
-                // 3. Compute log(sum) + max per group
-
-                // Get values as f64 view
-                let values_f64 = self.column_as_f64_view(values, num_rows as usize)?;
-
-                // Allocate buffers for intermediate results
-                let mut maxs = self.memory.alloc::<f64>(num_groups as usize)?;
-                let mut sumexps = self.memory.alloc::<f64>(num_groups as usize)?;
-                let results = self.memory.alloc::<f64>(num_groups as usize)?;
-
-                // Initialize maxs to -INFINITY
-                self.device
-                    .inner()
-                    .htod_sync_copy_into(&vec![f64::NEG_INFINITY; num_groups as usize], &mut maxs)
-                    .map_err(|e| XlogError::Kernel(format!("Failed to init maxs: {}", e)))?;
-
-                // Initialize sumexps to 0.0
-                self.device
-                    .inner()
-                    .htod_sync_copy_into(&vec![0.0f64; num_groups as usize], &mut sumexps)
-                    .map_err(|e| XlogError::Kernel(format!("Failed to init sumexps: {}", e)))?;
-
-                // Pass 1: Find max per group
-                let max_func = self
-                    .device
-                    .inner()
-                    .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_LOGSUMEXP_MAX)
-                    .ok_or_else(|| {
-                        XlogError::Kernel("groupby_logsumexp_max kernel not found".to_string())
-                    })?;
-
-                // SAFETY: Kernel parameters match expected signature
-                unsafe {
-                    max_func
-                        .clone()
-                        .launch(config, (&values_f64, &group_ids, num_rows, &maxs))
-                        .map_err(|e| {
-                            XlogError::Kernel(format!("groupby_logsumexp_max failed: {}", e))
-                        })?;
-                }
-                self.device.synchronize()?;
-
-                // Pass 2: Compute sum of exp(x - max) per group
-                let sumexp_func = self
-                    .device
-                    .inner()
-                    .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_LOGSUMEXP_SUMEXP)
-                    .ok_or_else(|| {
-                        XlogError::Kernel("groupby_logsumexp_sumexp kernel not found".to_string())
-                    })?;
-
-                // SAFETY: Kernel parameters match expected signature
-                unsafe {
-                    sumexp_func
-                        .clone()
-                        .launch(config, (&values_f64, &group_ids, &maxs, num_rows, &sumexps))
-                        .map_err(|e| {
-                            XlogError::Kernel(format!("groupby_logsumexp_sumexp failed: {}", e))
-                        })?;
-                }
-                self.device.synchronize()?;
-
-                // Pass 3: Compute final result = max + log(sumexp)
-                let final_config = LaunchConfig::for_num_elems(num_groups);
-                let final_func = self
-                    .device
-                    .inner()
-                    .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_LOGSUMEXP_FINAL)
-                    .ok_or_else(|| {
-                        XlogError::Kernel("groupby_logsumexp_final kernel not found".to_string())
-                    })?;
-
-                // SAFETY: Kernel parameters match expected signature
-                unsafe {
-                    final_func
-                        .clone()
-                        .launch(final_config, (&maxs, &sumexps, num_groups, &results))
-                        .map_err(|e| {
-                            XlogError::Kernel(format!("groupby_logsumexp_final failed: {}", e))
-                        })?;
-                }
-                self.device.synchronize()?;
-
-                // Read back as bytes
-                let mut host_output = vec![0.0f64; num_groups as usize];
-                self.device
-                    .inner()
-                    .dtoh_sync_copy_into(&results, &mut host_output)
-                    .map_err(|e| {
-                        XlogError::Kernel(format!("Failed to read logsumexp output: {}", e))
-                    })?;
-                let bytes: Vec<u8> = host_output.iter().flat_map(|v| v.to_le_bytes()).collect();
-                (bytes, ScalarType::F64)
-            }
-        };
-
-        self.device.synchronize()?;
-
-        // Extract first key value for each group (CPU for MVP)
-        let mut key_col_host = vec![0u8; (num_rows as usize) * 4];
-        self.device
-            .inner()
-            .dtoh_sync_copy_into(sorted_keys, &mut key_col_host)
-            .map_err(|e| XlogError::Kernel(format!("Failed to read keys: {}", e)))?;
-
-        // Get first row index of each group
-        let mut group_first_indices = vec![0usize; num_groups as usize];
-        for (i, &boundary) in boundary_host.iter().enumerate() {
-            if boundary == 1 {
-                let group = group_ids_host[i] as usize;
-                group_first_indices[group] = i;
-            }
-        }
-        // First element is always a boundary
-        group_first_indices[0] = 0;
-
-        // Extract key values for result
-        let mut result_keys = Vec::with_capacity((num_groups as usize) * 4);
-        for &idx in &group_first_indices {
-            let start = idx * 4;
-            let end = start + 4;
-            result_keys.extend_from_slice(&key_col_host[start..end]);
-        }
-
-        // Upload result key column
-        let mut result_key_col = self.memory.alloc::<u8>(result_keys.len())?;
-        self.device
-            .inner()
-            .htod_sync_copy_into(&result_keys, &mut result_key_col)
-            .map_err(|e| XlogError::Kernel(format!("Failed to upload result keys: {}", e)))?;
-
-        // Upload output bytes as u8 column
-        let mut output_col_u8 = self.memory.alloc::<u8>(output_bytes.len())?;
-        self.device
-            .inner()
-            .htod_sync_copy_into(&output_bytes, &mut output_col_u8)
-            .map_err(|e| XlogError::Kernel(format!("Failed to upload output: {}", e)))?;
-
-        // Build result schema: key columns + aggregation result
-        let result_schema = self.groupby_result_schema(input.schema(), key_cols, agg);
-
-        self.buffer_from_columns(
-            vec![result_key_col.into(), output_col_u8.into()],
-            num_groups as u64,
-            result_schema,
-        )
+        self.groupby_multi_agg(input, key_cols, &[(value_col, agg)])
     }
 
     /// Multi-aggregation groupby
@@ -2780,37 +2390,13 @@ impl CudaKernelProvider {
         }
 
         self.device.synchronize()?;
-
-        let last_idx = (num_rows as usize).checked_sub(1).ok_or_else(|| {
-            XlogError::Kernel("GroupBy: unexpected empty input after boundary scan".to_string())
-        })?;
-
-        let last_prefix_view = d_boundary_pos.slice(last_idx..(last_idx + 1));
-        let last_boundary_view = boundaries.slice(last_idx..(last_idx + 1));
-        let mut last_prefix = [0u32];
-        let mut last_boundary = [0u8];
-        self.dtoh_sync_copy_into_tracked(&last_prefix_view, &mut last_prefix)
-            .map_err(|e| XlogError::Kernel(format!("Failed to read last prefix sum: {}", e)))?;
-        self.dtoh_sync_copy_into_tracked(&last_boundary_view, &mut last_boundary)
-            .map_err(|e| XlogError::Kernel(format!("Failed to read last boundary: {}", e)))?;
-
-        let num_groups = (last_prefix[0] as u64) + (last_boundary[0] as u64);
-        if num_groups == 0 {
-            let result_schema =
-                self.groupby_multi_agg_result_schema(buffer.schema(), key_cols, aggs);
-            return self.create_empty_buffer(result_schema);
-        }
-
-        let num_groups_u32 = u32::try_from(num_groups).map_err(|_| {
-            XlogError::Kernel(format!(
-                "GroupBy produced {} groups, exceeding u32::MAX",
-                num_groups
-            ))
-        })?;
-        let num_groups_usize = num_groups_u32 as usize;
+        let d_num_groups = self.capture_num_groups(&d_boundary_pos, &boundaries, num_rows)?;
+        let row_cap = num_rows as u64;
+        let row_cap_usize = num_rows as usize;
+        let row_cap_u32 = num_rows;
 
         let mut group_ids = self.memory.alloc::<u32>(num_rows as usize)?;
-        let mut group_first_idx = self.memory.alloc::<u32>(num_groups_usize)?;
+        let mut group_first_idx = self.memory.alloc::<u32>(row_cap_usize)?;
 
         let group_ids_fn = device
             .get_func(GROUPBY_MODULE, groupby_kernels::GROUP_IDS_FROM_BOUNDARIES)
@@ -2851,17 +2437,13 @@ impl CudaKernelProvider {
 
             match agg_op {
                 AggOp::Count => {
-                    let output_bytes = num_groups_usize
+                    let output_bytes = row_cap_usize
                         .checked_mul(std::mem::size_of::<u64>())
-                        .ok_or_else(|| {
-                            XlogError::Kernel("Count output size overflow".to_string())
-                        })?;
+                        .ok_or_else(|| XlogError::Kernel("Count output size overflow".to_string()))?;
                     let mut output = self.memory.alloc::<u8>(output_bytes)?;
-                    if num_groups_u32 > 0 {
-                        device.memset_zeros(&mut output).map_err(|e| {
-                            XlogError::Kernel(format!("Failed to zero count output: {}", e))
-                        })?;
-                    }
+                    device.memset_zeros(&mut output).map_err(|e| {
+                        XlogError::Kernel(format!("Failed to zero count output: {}", e))
+                    })?;
 
                     let count_func = device
                         .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_COUNT)
@@ -2882,15 +2464,13 @@ impl CudaKernelProvider {
                 }
                 AggOp::Sum => {
                     let values_view = self.column_as_u32_view(values, num_rows as usize)?;
-                    let output_bytes = num_groups_usize
+                    let output_bytes = row_cap_usize
                         .checked_mul(std::mem::size_of::<u64>())
                         .ok_or_else(|| XlogError::Kernel("Sum output size overflow".to_string()))?;
                     let mut output = self.memory.alloc::<u8>(output_bytes)?;
-                    if num_groups_u32 > 0 {
-                        device.memset_zeros(&mut output).map_err(|e| {
-                            XlogError::Kernel(format!("Failed to zero sum output: {}", e))
-                        })?;
-                    }
+                    device.memset_zeros(&mut output).map_err(|e| {
+                        XlogError::Kernel(format!("Failed to zero sum output: {}", e))
+                    })?;
 
                     let sum_func = device
                         .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_SUM)
@@ -2911,7 +2491,7 @@ impl CudaKernelProvider {
                 }
                 AggOp::Min => {
                     let values_view = self.column_as_u32_view(values, num_rows as usize)?;
-                    let output_bytes = num_groups_usize
+                    let output_bytes = row_cap_usize
                         .checked_mul(std::mem::size_of::<u32>())
                         .ok_or_else(|| XlogError::Kernel("Min output size overflow".to_string()))?;
                     let mut output = self.memory.alloc::<u8>(output_bytes)?;
@@ -2920,11 +2500,11 @@ impl CudaKernelProvider {
                         .ok_or_else(|| {
                             XlogError::Kernel("arith_fill_const_u32 not found".to_string())
                         })?;
-                    let fill_config = LaunchConfig::for_num_elems(num_groups_u32);
+                    let fill_config = LaunchConfig::for_num_elems(row_cap_u32);
                     unsafe {
                         fill_fn
                             .clone()
-                            .launch(fill_config, (u32::MAX, num_groups_u32, &mut output))
+                            .launch(fill_config, (u32::MAX, row_cap_u32, &mut output))
                     }
                     .map_err(|e| XlogError::Kernel(format!("Failed to init min output: {}", e)))?;
 
@@ -2947,15 +2527,13 @@ impl CudaKernelProvider {
                 }
                 AggOp::Max => {
                     let values_view = self.column_as_u32_view(values, num_rows as usize)?;
-                    let output_bytes = num_groups_usize
+                    let output_bytes = row_cap_usize
                         .checked_mul(std::mem::size_of::<u32>())
                         .ok_or_else(|| XlogError::Kernel("Max output size overflow".to_string()))?;
                     let mut output = self.memory.alloc::<u8>(output_bytes)?;
-                    if num_groups_u32 > 0 {
-                        device.memset_zeros(&mut output).map_err(|e| {
-                            XlogError::Kernel(format!("Failed to zero max output: {}", e))
-                        })?;
-                    }
+                    device.memset_zeros(&mut output).map_err(|e| {
+                        XlogError::Kernel(format!("Failed to zero max output: {}", e))
+                    })?;
 
                     let max_func = device
                         .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_MAX)
@@ -2976,7 +2554,7 @@ impl CudaKernelProvider {
                 }
                 AggOp::LogSumExp => {
                     let values_f64 = self.column_as_f64_view(values, num_rows as usize)?;
-                    let output_bytes = num_groups_usize
+                    let output_bytes = row_cap_usize
                         .checked_mul(std::mem::size_of::<f64>())
                         .ok_or_else(|| {
                             XlogError::Kernel("LogSumExp output size overflow".to_string())
@@ -2990,18 +2568,16 @@ impl CudaKernelProvider {
                         .ok_or_else(|| {
                             XlogError::Kernel("arith_fill_const_f64 not found".to_string())
                         })?;
-                    let fill_config = LaunchConfig::for_num_elems(num_groups_u32);
+                    let fill_config = LaunchConfig::for_num_elems(row_cap_u32);
                     unsafe {
                         fill_f64
                             .clone()
-                            .launch(fill_config, (f64::NEG_INFINITY, num_groups_u32, &mut maxs))
+                            .launch(fill_config, (f64::NEG_INFINITY, row_cap_u32, &mut maxs))
                     }
                     .map_err(|e| XlogError::Kernel(format!("Failed to init maxs: {}", e)))?;
-                    if num_groups_u32 > 0 {
-                        device.memset_zeros(&mut sumexps).map_err(|e| {
-                            XlogError::Kernel(format!("Failed to init sumexps: {}", e))
-                        })?;
-                    }
+                    device.memset_zeros(&mut sumexps).map_err(|e| {
+                        XlogError::Kernel(format!("Failed to init sumexps: {}", e))
+                    })?;
 
                     let max_func = device
                         .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_LOGSUMEXP_MAX)
@@ -3039,7 +2615,7 @@ impl CudaKernelProvider {
 
                     self.device.synchronize()?;
 
-                    let final_config = LaunchConfig::for_num_elems(num_groups_u32);
+                    let final_config = LaunchConfig::for_num_elems(row_cap_u32);
                     let final_func = device
                         .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_LOGSUMEXP_FINAL)
                         .ok_or_else(|| {
@@ -3051,7 +2627,10 @@ impl CudaKernelProvider {
                     unsafe {
                         final_func
                             .clone()
-                            .launch(final_config, (&maxs, &sumexps, num_groups_u32, &results))
+                            .launch(
+                                final_config,
+                                (&maxs, &sumexps, &d_num_groups, row_cap_u32, &results),
+                            )
                     }
                     .map_err(|e| {
                         XlogError::Kernel(format!("groupby_logsumexp_final failed: {}", e))
@@ -3066,17 +2645,19 @@ impl CudaKernelProvider {
         // Step 5: Build output buffer with keys and aggregated values.
         let mut result_columns: Vec<CudaColumn> = Vec::with_capacity(key_cols.len() + aggs.len());
 
-        let group_packed_bytes = (num_groups_usize)
+        let group_packed_bytes = row_cap_usize
             .checked_mul(packed.key_bytes as usize)
             .ok_or_else(|| XlogError::Kernel("GroupBy packed size overflow".to_string()))?;
         let mut group_packed = self.memory.alloc::<u8>(group_packed_bytes)?;
 
         let gather_fn = device
-            .get_func(PACK_MODULE, pack_kernels::GATHER_PACKED_ROWS)
-            .ok_or_else(|| XlogError::Kernel("gather_packed_rows kernel not found".to_string()))?;
-        let gather_config = LaunchConfig::for_num_elems(num_groups_u32);
+            .get_func(PACK_MODULE, pack_kernels::GATHER_PACKED_ROWS_COUNTED)
+            .ok_or_else(|| {
+                XlogError::Kernel("gather_packed_rows_counted kernel not found".to_string())
+            })?;
+        let gather_config = LaunchConfig::for_num_elems(row_cap_u32);
 
-        // SAFETY: gather_packed_rows(src_packed, row_size, indices, num_indices, dst_packed)
+        // SAFETY: gather_packed_rows_counted(src_packed, row_size, indices, num_rows, capacity_rows, dst_packed)
         unsafe {
             gather_fn.clone().launch(
                 gather_config,
@@ -3084,7 +2665,8 @@ impl CudaKernelProvider {
                     &packed.packed_keys,
                     packed.key_bytes,
                     &group_first_idx,
-                    num_groups_u32,
+                    &d_num_groups,
+                    row_cap_u32,
                     &mut group_packed,
                 ),
             )
@@ -3108,19 +2690,21 @@ impl CudaKernelProvider {
         }
 
         let unpack_fn = device
-            .get_func(PACK_MODULE, pack_kernels::UNPACK_COLUMN)
-            .ok_or_else(|| XlogError::Kernel("unpack_column kernel not found".to_string()))?;
-        let unpack_config = LaunchConfig::for_num_elems(num_groups_u32);
+            .get_func(PACK_MODULE, pack_kernels::UNPACK_COLUMN_COUNTED)
+            .ok_or_else(|| {
+                XlogError::Kernel("unpack_column_counted kernel not found".to_string())
+            })?;
+        let unpack_config = LaunchConfig::for_num_elems(row_cap_u32);
 
         for idx in 0..key_cols.len() {
             let col_size = col_sizes[idx];
             let col_offset = col_offsets[idx];
-            let out_bytes = (num_groups_usize)
+            let out_bytes = row_cap_usize
                 .checked_mul(col_size as usize)
                 .ok_or_else(|| XlogError::Kernel("GroupBy key column overflow".to_string()))?;
             let mut out_col = self.memory.alloc::<u8>(out_bytes)?;
 
-            // SAFETY: unpack_column(packed_input, row_size, col_offset, col_size, num_rows, col_output)
+            // SAFETY: unpack_column_counted(packed_input, row_size, col_offset, col_size, num_rows, capacity_rows, col_output)
             unsafe {
                 unpack_fn.clone().launch(
                     unpack_config,
@@ -3129,7 +2713,8 @@ impl CudaKernelProvider {
                         packed.key_bytes,
                         col_offset,
                         col_size,
-                        num_groups_u32,
+                        &d_num_groups,
+                        row_cap_u32,
                         &mut out_col,
                     ),
                 )
@@ -3143,7 +2728,38 @@ impl CudaKernelProvider {
 
         let result_schema = self.groupby_multi_agg_result_schema(buffer.schema(), key_cols, aggs);
 
-        self.buffer_from_columns(result_columns, num_groups as u64, result_schema)
+        Ok(CudaBuffer::from_columns(
+            result_columns,
+            row_cap,
+            d_num_groups,
+            result_schema,
+        ))
+    }
+
+    fn capture_num_groups(
+        &self,
+        boundary_pos: &TrackedCudaSlice<u32>,
+        boundaries: &TrackedCudaSlice<u8>,
+        num_rows: u32,
+    ) -> Result<TrackedCudaSlice<u32>> {
+        let mut d_num_groups = self.memory.alloc::<u32>(1)?;
+        let capture_fn = self
+            .device
+            .inner()
+            .get_func(GROUPBY_MODULE, groupby_kernels::CAPTURE_NUM_GROUPS)
+            .ok_or_else(|| XlogError::Kernel("capture_num_groups kernel not found".to_string()))?;
+        unsafe {
+            capture_fn.clone().launch(
+                LaunchConfig {
+                    grid_dim: (1, 1, 1),
+                    block_dim: (1, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (boundary_pos, boundaries, num_rows, &mut d_num_groups),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("capture_num_groups failed: {}", e)))?;
+        Ok(d_num_groups)
     }
 
     /// Create result schema for multi-aggregation groupby
@@ -6530,33 +6146,6 @@ impl CudaKernelProvider {
         true
     }
 
-    /// Create result schema for groupby aggregation
-    fn groupby_result_schema(&self, input: &Schema, key_cols: &[usize], agg: AggOp) -> Schema {
-        let mut columns: Vec<(String, ScalarType)> = key_cols
-            .iter()
-            .filter_map(|&i| input.columns.get(i).cloned())
-            .collect();
-
-        // Count and Sum use u64 to match predicate declarations and prevent overflow
-        let agg_type = match agg {
-            AggOp::Count => ScalarType::U64,
-            AggOp::Sum => ScalarType::U64,
-            AggOp::Min | AggOp::Max => ScalarType::U32,
-            AggOp::LogSumExp => ScalarType::F64,
-        };
-
-        let agg_name = match agg {
-            AggOp::Count => "count",
-            AggOp::Sum => "sum",
-            AggOp::Min => "min",
-            AggOp::Max => "max",
-            AggOp::LogSumExp => "logsumexp",
-        };
-
-        columns.push((agg_name.to_string(), agg_type));
-        Schema::new(columns)
-    }
-
     // ============== Hash Join V2 Implementation ==============
 
     /// Multi-column hash join with support for different join types.
@@ -6938,9 +6527,7 @@ impl CudaKernelProvider {
 
             let bytes = (num_rows as usize) * elem_size;
             let mut host_data = vec![0u8; bytes];
-            self.device
-                .inner()
-                .dtoh_sync_copy_into(col, &mut host_data)
+            self.dtoh_sync_copy_into_tracked(col, &mut host_data)
                 .map_err(|e| XlogError::Kernel(format!("Failed to read key column: {}", e)))?;
 
             col_sizes.push(elem_size as u32);
@@ -7282,9 +6869,7 @@ impl CudaKernelProvider {
         self.device.synchronize()?;
 
         let mut count_host = vec![0u32];
-        self.device
-            .inner()
-            .dtoh_sync_copy_into(&d_count_only, &mut count_host)
+        self.dtoh_sync_copy_into_tracked(&d_count_only, &mut count_host)
             .map_err(|e| XlogError::Kernel(format!("Failed to read output count: {}", e)))?;
 
         let full_count = count_host[0] as u64;
@@ -7346,9 +6931,7 @@ impl CudaKernelProvider {
 
         // Get output count
         let mut count_host = vec![0u32];
-        self.device
-            .inner()
-            .dtoh_sync_copy_into(&d_output_count, &mut count_host)
+        self.dtoh_sync_copy_into_tracked(&d_output_count, &mut count_host)
             .map_err(|e| XlogError::Kernel(format!("Failed to read output count: {}", e)))?;
         // Clamp result count to max_output to prevent buffer overflow
         // (kernel atomically increments before bounds check, so count can exceed max_output)
@@ -7451,9 +7034,7 @@ impl CudaKernelProvider {
         self.device.synchronize()?;
 
         let mut count_host = vec![0u32];
-        self.device
-            .inner()
-            .dtoh_sync_copy_into(&d_count_only, &mut count_host)
+        self.dtoh_sync_copy_into_tracked(&d_count_only, &mut count_host)
             .map_err(|e| XlogError::Kernel(format!("Failed to read output count: {}", e)))?;
 
         let full_count = count_host[0] as u64;
@@ -7510,9 +7091,7 @@ impl CudaKernelProvider {
 
         // Get output count.
         let mut count_host = vec![0u32];
-        self.device
-            .inner()
-            .dtoh_sync_copy_into(&d_output_count, &mut count_host)
+        self.dtoh_sync_copy_into_tracked(&d_output_count, &mut count_host)
             .map_err(|e| XlogError::Kernel(format!("Failed to read output count: {}", e)))?;
 
         let result_count = (count_host[0] as u64).min(max_output as u64);
@@ -7974,9 +7553,7 @@ impl CudaKernelProvider {
         self.device.synchronize()?;
 
         let mut count_host = vec![0u32];
-        self.device
-            .inner()
-            .dtoh_sync_copy_into(&d_count_only, &mut count_host)
+        self.dtoh_sync_copy_into_tracked(&d_count_only, &mut count_host)
             .map_err(|e| XlogError::Kernel(format!("Failed to read output count: {}", e)))?;
 
         let full_inner = count_host[0] as u64;
@@ -8029,8 +7606,7 @@ impl CudaKernelProvider {
         let device = self.device.inner();
 
         let mut count_host = vec![0u32];
-        device
-            .dtoh_sync_copy_into(&d_output_count, &mut count_host)
+        self.dtoh_sync_copy_into_tracked(&d_output_count, &mut count_host)
             .map_err(|e| XlogError::Kernel(format!("Failed to read output count: {}", e)))?;
         let inner_count = count_host[0].min(max_output) as u32;
 
@@ -8338,9 +7914,7 @@ impl CudaKernelProvider {
         self.device.synchronize()?;
 
         let mut count_host = vec![0u32];
-        self.device
-            .inner()
-            .dtoh_sync_copy_into(&d_count_only, &mut count_host)
+        self.dtoh_sync_copy_into_tracked(&d_count_only, &mut count_host)
             .map_err(|e| XlogError::Kernel(format!("Failed to read output count: {}", e)))?;
 
         let full_inner = count_host[0] as u64;
@@ -8399,8 +7973,7 @@ impl CudaKernelProvider {
 
         // Read inner join result count.
         let mut count_host = vec![0u32];
-        device
-            .dtoh_sync_copy_into(&d_output_count, &mut count_host)
+        self.dtoh_sync_copy_into_tracked(&d_output_count, &mut count_host)
             .map_err(|e| XlogError::Kernel(format!("Failed to read output count: {}", e)))?;
         // Clamp inner count to max_output to prevent buffer overflow
         // (kernel atomically increments before bounds check, so count can exceed max_output).
@@ -8695,9 +8268,7 @@ impl CudaKernelProvider {
 
         // Copy via host
         let mut host_data = vec![0u8; bytes];
-        self.device
-            .inner()
-            .dtoh_sync_copy_into(src_col, &mut host_data)
+        self.dtoh_sync_copy_into_tracked(src_col, &mut host_data)
             .map_err(|e| XlogError::Kernel(format!("Failed to read column: {}", e)))?;
 
         let mut dst_col = self.memory.alloc::<u8>(bytes)?;
@@ -9675,9 +9246,7 @@ impl CudaKernelProvider {
 
             // Copy via host
             let mut host_data = vec![0u8; bytes];
-            self.device
-                .inner()
-                .dtoh_sync_copy_into(src_col, &mut host_data)
+            self.dtoh_sync_copy_into_tracked(src_col, &mut host_data)
                 .map_err(|e| XlogError::Kernel(format!("Failed to read column {}: {}", i, e)))?;
 
             let mut dst_col = self.memory.alloc::<u8>(bytes)?;
@@ -10617,17 +10186,20 @@ mod tests {
         ]);
 
         // Count result schema (u64 to match predicate declarations)
-        let count_schema = provider.groupby_result_schema(&input, &[0], AggOp::Count);
+        let count_schema =
+            provider.groupby_multi_agg_result_schema(&input, &[0], &[(1, AggOp::Count)]);
         assert_eq!(count_schema.arity(), 2);
         assert_eq!(count_schema.column_type(1), Some(ScalarType::U64));
 
         // Sum result schema
-        let sum_schema = provider.groupby_result_schema(&input, &[0], AggOp::Sum);
+        let sum_schema =
+            provider.groupby_multi_agg_result_schema(&input, &[0], &[(1, AggOp::Sum)]);
         assert_eq!(sum_schema.arity(), 2);
         assert_eq!(sum_schema.column_type(1), Some(ScalarType::U64));
 
         // Min/Max result schema
-        let min_schema = provider.groupby_result_schema(&input, &[0], AggOp::Min);
+        let min_schema =
+            provider.groupby_multi_agg_result_schema(&input, &[0], &[(1, AggOp::Min)]);
         assert_eq!(min_schema.arity(), 2);
         assert_eq!(min_schema.column_type(1), Some(ScalarType::U32));
     }
