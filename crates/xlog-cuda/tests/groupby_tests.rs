@@ -2,7 +2,7 @@
 //! Tests for multi-aggregation groupby operations
 use std::sync::Arc;
 use xlog_core::{AggOp, MemoryBudget, ScalarType, Schema};
-use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager};
 
 fn setup_provider() -> Option<CudaKernelProvider> {
     let device = match CudaDevice::new(0) {
@@ -15,6 +15,16 @@ fn setup_provider() -> Option<CudaKernelProvider> {
     let budget = MemoryBudget::with_limit(1024 * 1024 * 1024); // 1 GB
     let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
     Some(CudaKernelProvider::new(device, memory).unwrap())
+}
+
+fn device_row_count(provider: &CudaKernelProvider, buffer: &CudaBuffer) -> u32 {
+    let mut host_rows = [0u32];
+    provider
+        .device()
+        .inner()
+        .dtoh_sync_copy_into(buffer.num_rows_device(), &mut host_rows)
+        .expect("device row count copy");
+    host_rows[0]
 }
 
 #[test]
@@ -43,7 +53,7 @@ fn test_groupby_count() {
         .unwrap();
 
     // Result should have 2 rows (2 groups)
-    assert_eq!(result.num_rows(), 2);
+    assert_eq!(device_row_count(&provider, &result), 2);
 
     // Download and verify results
     let result_keys = provider.download_column_u32(&result, 0).unwrap();
@@ -80,7 +90,7 @@ fn test_groupby_sum() {
         .groupby_multi_agg(&buffer, &[0], &[(1, AggOp::Sum)])
         .unwrap();
 
-    assert_eq!(result.num_rows(), 2);
+    assert_eq!(device_row_count(&provider, &result), 2);
 
     let result_keys = provider.download_column_u32(&result, 0).unwrap();
     // Sum results are u64 (to prevent overflow)
@@ -116,7 +126,7 @@ fn test_groupby_min_max() {
         .groupby_multi_agg(&buffer, &[0], &[(1, AggOp::Min)])
         .unwrap();
 
-    assert_eq!(result_min.num_rows(), 2);
+    assert_eq!(device_row_count(&provider, &result_min), 2);
     let result_keys = provider.download_column_u32(&result_min, 0).unwrap();
     let result_mins = provider.download_column_u32(&result_min, 1).unwrap();
 
@@ -128,7 +138,7 @@ fn test_groupby_min_max() {
         .groupby_multi_agg(&buffer, &[0], &[(1, AggOp::Max)])
         .unwrap();
 
-    assert_eq!(result_max.num_rows(), 2);
+    assert_eq!(device_row_count(&provider, &result_max), 2);
     let result_keys = provider.download_column_u32(&result_max, 0).unwrap();
     let result_maxs = provider.download_column_u32(&result_max, 1).unwrap();
 
@@ -172,7 +182,7 @@ fn test_groupby_multi_agg() {
         .unwrap();
 
     // Result: key, sum, count, min, max = 5 columns
-    assert_eq!(result.num_rows(), 2);
+    assert_eq!(device_row_count(&provider, &result), 2);
     assert_eq!(result.arity(), 5);
 
     let result_keys = provider.download_column_u32(&result, 0).unwrap();
@@ -207,7 +217,7 @@ fn test_groupby_empty_input() {
         .groupby_multi_agg(&buffer, &[0], &[(1, AggOp::Sum)])
         .unwrap();
 
-    assert_eq!(result.num_rows(), 0);
+    assert_eq!(device_row_count(&provider, &result), 0);
 }
 
 #[test]
@@ -233,7 +243,7 @@ fn test_groupby_single_group() {
         .groupby_multi_agg(&buffer, &[0], &[(1, AggOp::Sum), (1, AggOp::Count)])
         .unwrap();
 
-    assert_eq!(result.num_rows(), 1);
+    assert_eq!(device_row_count(&provider, &result), 1);
 
     let result_keys = provider.download_column_u32(&result, 0).unwrap();
     // Sum and Count results are u64
@@ -272,7 +282,7 @@ fn test_groupby_unsorted_input() {
         .groupby_multi_agg(&buffer, &[0], &[(1, AggOp::Sum)])
         .unwrap();
 
-    assert_eq!(result.num_rows(), 2);
+    assert_eq!(device_row_count(&provider, &result), 2);
 
     let result_keys = provider.download_column_u32(&result, 0).unwrap();
     // Sum results are u64 (to prevent overflow)
@@ -352,7 +362,7 @@ fn test_groupby_many_groups() {
         .groupby_multi_agg(&buffer, &[0], &[(1, AggOp::Sum), (1, AggOp::Count)])
         .unwrap();
 
-    assert_eq!(result.num_rows(), 5);
+    assert_eq!(device_row_count(&provider, &result), 5);
 
     let result_keys = provider.download_column_u32(&result, 0).unwrap();
     // Sum results are u64 (to prevent overflow)
@@ -413,7 +423,11 @@ fn test_groupby_logsumexp_single_element_groups() {
         .groupby_multi_agg(&buffer, &[0], &[(1, AggOp::LogSumExp)])
         .expect("groupby_multi_agg should succeed");
 
-    assert_eq!(result.num_rows(), 5, "Should have 5 single-element groups");
+    assert_eq!(
+        device_row_count(&provider, &result),
+        5,
+        "Should have 5 single-element groups"
+    );
 
     let result_values = provider
         .download_column_f64(&result, 1)
@@ -468,7 +482,7 @@ fn test_groupby_logsumexp_mixed_positive_negative() {
         .groupby_multi_agg(&buffer, &[0], &[(1, AggOp::LogSumExp)])
         .expect("groupby_multi_agg should succeed");
 
-    assert_eq!(result.num_rows(), 3);
+    assert_eq!(device_row_count(&provider, &result), 3);
 
     let result_values = provider
         .download_column_f64(&result, 1)
@@ -529,7 +543,7 @@ fn test_groupby_logsumexp_infinity() {
         .groupby_multi_agg(&buffer, &[0], &[(1, AggOp::LogSumExp)])
         .expect("groupby_multi_agg should succeed");
 
-    assert_eq!(result.num_rows(), 2);
+    assert_eq!(device_row_count(&provider, &result), 2);
 
     let result_values = provider
         .download_column_f64(&result, 1)
