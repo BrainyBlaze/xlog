@@ -49,6 +49,12 @@ impl JoinIndexCache {
         }
     }
 
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.clock = 0;
+        self.total_bytes = 0;
+    }
+
     fn get(&mut self, key: &JoinIndexKey) -> Option<&JoinIndexV2> {
         let entry = self.entries.get_mut(key)?;
         self.clock = self.clock.saturating_add(1);
@@ -187,8 +193,8 @@ impl Executor {
         let max_index_cache_bytes =
             (provider.memory().budget().device_bytes / 4).min(DEFAULT_JOIN_INDEX_CACHE_BYTES);
         Self {
-            provider,
-            store: RelationStore::new(),
+            provider: provider.clone(),
+            store: RelationStore::new(provider.clone()),
             rel_names: HashMap::new(),
             name_to_rel: HashMap::new(),
             stats: StatsManager::new(),
@@ -231,9 +237,22 @@ impl Executor {
         &mut self.store
     }
 
+    /// Store a relation buffer and invalidate join indices.
+    pub fn put_relation(&mut self, name: &str, buffer: CudaBuffer) {
+        self.store_put(name, buffer);
+    }
+
     /// Get a reference to the runtime statistics manager
     pub fn stats(&self) -> &StatsManager {
         &self.stats
+    }
+
+    /// Reset executor state for Monte Carlo sampling.
+    ///
+    /// Clears relation storage and join index cache while preserving relation registrations.
+    pub fn reset_for_mc(&mut self) {
+        self.store.clear();
+        self.join_index_cache.clear();
     }
 
     /// Get a mutable reference to the runtime statistics manager
@@ -333,7 +352,7 @@ impl Executor {
         }
 
         // If there are no strata, return empty buffer
-        Ok(CudaBuffer::empty())
+        self.provider.create_empty_buffer(Schema::new(vec![]))
     }
 
     /// Apply base-relation deltas and recompute affected SCCs (no recompilation).
@@ -546,19 +565,19 @@ impl Executor {
         Ok(())
     }
 
-    fn execute_non_recursive_scc(&mut self, rules: &[xlog_ir::CompiledRule]) -> Result<()> {
+    pub fn execute_non_recursive_scc(
+        &mut self,
+        rules: &[xlog_ir::CompiledRule],
+    ) -> Result<()> {
         for rule in rules {
             let result = self.execute_node(&rule.body)?;
 
             if let Some(existing) = self.store.get(&rule.head) {
-                let merged = self.provider.union(existing, &result)?;
-                let key_cols: Vec<usize> = (0..merged.arity()).collect();
-                let deduped = if merged.is_empty() {
-                    merged
-                } else {
-                    self.provider.dedup(&merged, &key_cols)?
-                };
-                self.store_put(&rule.head, deduped);
+                if result.is_empty() {
+                    continue;
+                }
+                let merged = self.provider.union_gpu(existing, &result)?;
+                self.store_put(&rule.head, merged);
             } else {
                 let key_cols: Vec<usize> = (0..result.arity()).collect();
                 let deduped = if result.is_empty() {
@@ -762,7 +781,7 @@ impl Executor {
                         if let Some(existing) = self.store.get(&rule.head) {
                             let union_input_rows = existing.num_rows() + result.num_rows();
                             let start = self.profiler.start_op();
-                            let merged = self.provider.union(existing, &result)?;
+                            let merged = self.provider.union_gpu(existing, &result)?;
                             if let Some(start) = start {
                                 let mem = self.provider.memory().allocated_bytes();
                                 self.profiler.record_op(
@@ -774,28 +793,7 @@ impl Executor {
                                 );
                                 self.profiler.record_peak_memory(mem);
                             }
-
-                            let key_cols: Vec<usize> = (0..merged.arity()).collect();
-                            let deduped = if merged.is_empty() {
-                                merged
-                            } else {
-                                let dedup_input_rows = merged.num_rows();
-                                let start = self.profiler.start_op();
-                                let result = self.provider.dedup(&merged, &key_cols)?;
-                                if let Some(start) = start {
-                                    let mem = self.provider.memory().allocated_bytes();
-                                    self.profiler.record_op(
-                                        "dedup",
-                                        dedup_input_rows,
-                                        result.num_rows(),
-                                        start,
-                                        mem,
-                                    );
-                                    self.profiler.record_peak_memory(mem);
-                                }
-                                result
-                            };
-                            self.store_put(&rule.head, deduped);
+                            self.store_put(&rule.head, merged);
                         } else {
                             let key_cols: Vec<usize> = (0..result.arity()).collect();
                             let deduped = if result.is_empty() {
@@ -834,7 +832,10 @@ impl Executor {
     /// 2. Track which relations changed (delta)
     /// 3. Re-execute rules, using delta from previous iteration
     /// 4. Repeat until no changes (fixpoint reached)
-    fn execute_recursive_scc(&mut self, rules: &[xlog_ir::CompiledRule]) -> Result<()> {
+    pub fn execute_recursive_scc(
+        &mut self,
+        rules: &[xlog_ir::CompiledRule],
+    ) -> Result<()> {
         // Identify SCC predicates from rule heads (these are the recursive IDBs).
         let mut recursive_preds: HashSet<String> = HashSet::new();
         let mut schema_by_pred: HashMap<String, Schema> = HashMap::new();
@@ -886,7 +887,7 @@ impl Executor {
             if let Some(acc) = derived_initial.get_mut(&rule.head) {
                 let union_input = acc.num_rows() + result.num_rows();
                 let start = self.profiler.start_op();
-                let merged = self.provider.union(acc, &result)?;
+                let merged = self.provider.union_gpu(acc, &result)?;
                 if let Some(start) = start {
                     let mem = self.provider.memory().allocated_bytes();
                     self.profiler
@@ -910,13 +911,14 @@ impl Executor {
                 .remove(pred)
                 .ok_or_else(|| XlogError::Execution(format!("Missing relation: {}", pred)))?;
 
-            let derived = derived_initial
-                .remove(pred)
-                .unwrap_or_else(|| CudaBuffer::empty());
+            let derived = match derived_initial.remove(pred) {
+                Some(buf) => buf,
+                None => self.create_empty_buffer(full_old.schema().clone())?,
+            };
 
             let union_input = full_old.num_rows() + derived.num_rows();
             let start = self.profiler.start_op();
-            let merged = self.provider.union(&full_old, &derived)?;
+            let merged = self.provider.union_gpu(&full_old, &derived)?;
             if let Some(start) = start {
                 let mem = self.provider.memory().allocated_bytes();
                 self.profiler
@@ -930,7 +932,7 @@ impl Executor {
             } else {
                 let dedup_input = merged.num_rows();
                 let start = self.profiler.start_op();
-                let deduped = self.provider.dedup(&merged, &key_cols)?;
+                let deduped = self.provider.dedup_sorted(&merged, &key_cols)?;
                 if let Some(start) = start {
                     let mem = self.provider.memory().allocated_bytes();
                     self.profiler
@@ -1036,7 +1038,7 @@ impl Executor {
                     rule_delta_raw = Some(if let Some(acc) = rule_delta_raw {
                         let union_input = acc.num_rows() + out.num_rows();
                         let start = self.profiler.start_op();
-                        let merged = self.provider.union(&acc, &out)?;
+                        let merged = self.provider.union_gpu(&acc, &out)?;
                         if let Some(start) = start {
                             let mem = self.provider.memory().allocated_bytes();
                             self.profiler.record_op(
@@ -1058,7 +1060,7 @@ impl Executor {
                     if let Some(acc) = delta_new_raw_by_head.get_mut(&rule.head) {
                         let union_input = acc.num_rows() + rule_out.num_rows();
                         let start = self.profiler.start_op();
-                        let merged = self.provider.union(acc, &rule_out)?;
+                        let merged = self.provider.union_gpu(acc, &rule_out)?;
                         if let Some(start) = start {
                             let mem = self.provider.memory().allocated_bytes();
                             self.profiler.record_op(
@@ -1148,7 +1150,7 @@ impl Executor {
 
                 let union_input = full_old.num_rows() + delta.num_rows();
                 let start = self.profiler.start_op();
-                let merged = self.provider.union(&full_old, &delta)?;
+                let merged = self.provider.union_gpu(&full_old, &delta)?;
                 if let Some(start) = start {
                     let mem = self.provider.memory().allocated_bytes();
                     self.profiler
@@ -1162,7 +1164,7 @@ impl Executor {
                 } else {
                     let dedup_input = merged.num_rows();
                     let start = self.profiler.start_op();
-                    let deduped = self.provider.dedup(&merged, &key_cols)?;
+                    let deduped = self.provider.dedup_sorted(&merged, &key_cols)?;
                     if let Some(start) = start {
                         let mem = self.provider.memory().allocated_bytes();
                         self.profiler.record_op(
@@ -2153,9 +2155,11 @@ impl Executor {
                 .map_err(|e| XlogError::Execution(format!("Failed to copy column: {}", e)))?;
         }
 
+        let d_num_rows = self.clone_device_row_count(buffer)?;
         Ok(CudaBuffer::from_columns(
             vec![dst_col.into()],
             num_rows,
+            d_num_rows,
             schema,
         ))
     }
@@ -2233,9 +2237,11 @@ impl Executor {
                 let mask_slice = self.eval_predicate_mask_gpu(condition, input)?;
 
                 // Convert mask slice to a CudaBuffer for select_columns
+                let d_num_rows = self.clone_device_row_count(input)?;
                 let mask_buffer = CudaBuffer::from_columns(
                     vec![mask_slice.into()],
                     input.num_rows(),
+                    d_num_rows,
                     Schema::new(vec![("mask".to_string(), ScalarType::Bool)]),
                 );
 
@@ -2505,7 +2511,7 @@ impl Executor {
     /// Combines multiple input buffers into one using GPU-native operation.
     fn execute_union(&self, inputs: &[CudaBuffer]) -> Result<CudaBuffer> {
         if inputs.is_empty() {
-            return Ok(CudaBuffer::empty());
+            return self.provider.create_empty_buffer(Schema::new(vec![]));
         }
 
         if inputs.len() == 1 {
@@ -2609,7 +2615,7 @@ impl Executor {
             })?;
 
             // Compute delta_new = delta_new_raw - R (remove already-known tuples)
-            let delta_new = self.provider.diff(&delta_new_raw, current_r)?;
+            let delta_new = self.provider.diff_gpu(&delta_new_raw, current_r)?;
 
             // Check for fixpoint: if delta_new is empty, we're done
             if delta_new.is_empty() {
@@ -2625,7 +2631,7 @@ impl Executor {
             }
 
             // Not at fixpoint yet: R = R union delta_new
-            let new_r = self.provider.union(current_r, &delta_new)?;
+            let new_r = self.provider.union_gpu(current_r, &delta_new)?;
 
             // Update relations for next iteration
             // delta = delta_new (the newly discovered tuples)
@@ -2655,14 +2661,10 @@ impl Executor {
 
     /// Create an empty buffer with the given schema
     fn create_empty_buffer(&self, schema: Schema) -> Result<CudaBuffer> {
-        let mut columns = Vec::with_capacity(schema.arity());
-        for _ in 0..schema.arity() {
-            columns.push(self.provider.memory().alloc::<u8>(0)?.into());
-        }
-        Ok(CudaBuffer::from_columns(columns, 0, schema))
+        self.provider.create_empty_buffer(schema)
     }
 
-    /// Clone a buffer (deep copy via host)
+    /// Clone a buffer (device-to-device copy)
     fn clone_buffer(&self, buffer: &CudaBuffer) -> Result<CudaBuffer> {
         if buffer.is_empty() {
             return self.create_empty_buffer(buffer.schema().clone());
@@ -2679,31 +2681,40 @@ impl Executor {
             let bytes = (buffer.num_rows() as usize) * col_type_size;
 
             if let Some(src_col) = buffer.column(col_idx) {
-                let mut host_data = vec![0u8; bytes];
-                self.provider
-                    .device()
-                    .inner()
-                    .dtoh_sync_copy_into(src_col, &mut host_data)
-                    .map_err(|e| {
-                        XlogError::Execution(format!("Failed to read column for clone: {}", e))
-                    })?;
-
                 let mut dst_col = self.provider.memory().alloc::<u8>(bytes)?;
-                self.provider
-                    .device()
-                    .inner()
-                    .htod_sync_copy_into(&host_data, &mut dst_col)
-                    .map_err(|e| XlogError::Execution(format!("Failed to clone column: {}", e)))?;
-
+                if bytes > 0 {
+                    self.provider
+                        .device()
+                        .inner()
+                        .dtod_copy(src_col, &mut dst_col)
+                        .map_err(|e| {
+                            XlogError::Execution(format!(
+                                "Failed to clone column on device: {}",
+                                e
+                            ))
+                        })?;
+                }
                 result_columns.push(dst_col.into());
             }
         }
 
+        let d_num_rows = self.clone_device_row_count(buffer)?;
         Ok(CudaBuffer::from_columns(
             result_columns,
             buffer.num_rows(),
+            d_num_rows,
             buffer.schema().clone(),
         ))
+    }
+
+    fn clone_device_row_count(&self, buffer: &CudaBuffer) -> Result<TrackedCudaSlice<u32>> {
+        let mut d_num_rows = self.provider.memory().alloc::<u32>(1)?;
+        self.provider
+            .device()
+            .inner()
+            .dtod_copy(buffer.num_rows_device(), &mut d_num_rows)
+            .map_err(|e| XlogError::Execution(format!("Failed to copy row count: {}", e)))?;
+        Ok(d_num_rows)
     }
 }
 

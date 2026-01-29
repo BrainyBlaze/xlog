@@ -5,9 +5,10 @@
 //! execution.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use xlog_core::Schema;
-use xlog_cuda::CudaBuffer;
+use xlog_cuda::{CudaBuffer, CudaKernelProvider};
 
 /// Storage for named relations as GPU buffers
 ///
@@ -27,7 +28,7 @@ use xlog_cuda::CudaBuffer;
 /// use xlog_cuda::CudaBuffer;
 /// use xlog_core::Schema;
 ///
-/// let mut store = RelationStore::new();
+/// let mut store = RelationStore::new(provider);
 ///
 /// // Add a relation
 /// store.put("edge", buffer);
@@ -41,6 +42,8 @@ use xlog_cuda::CudaBuffer;
 /// let removed = store.remove("edge");
 /// ```
 pub struct RelationStore {
+    /// CUDA kernel provider for GPU allocations
+    provider: Arc<CudaKernelProvider>,
     /// Map of relation names to GPU buffers
     relations: HashMap<String, VersionedCudaBuffer>,
 }
@@ -52,8 +55,9 @@ struct VersionedCudaBuffer {
 
 impl RelationStore {
     /// Create a new empty relation store
-    pub fn new() -> Self {
+    pub fn new(provider: Arc<CudaKernelProvider>) -> Self {
         Self {
+            provider,
             relations: HashMap::new(),
         }
     }
@@ -124,19 +128,26 @@ impl RelationStore {
     ///
     /// # Returns
     /// A reference to the existing buffer, or the newly inserted empty buffer
-    pub fn get_or_insert_empty(&mut self, name: &str, schema: &Schema) -> &CudaBuffer {
-        let entry = self
-            .relations
-            .entry(name.to_string())
-            .or_insert_with(|| VersionedCudaBuffer {
-                buffer: CudaBuffer {
-                    columns: Vec::new(),
-                    num_rows: 0,
-                    schema: schema.clone(),
+    pub fn get_or_insert_empty(
+        &mut self,
+        name: &str,
+        schema: &Schema,
+    ) -> xlog_core::Result<&CudaBuffer> {
+        if !self.relations.contains_key(name) {
+            let buffer = self.provider.create_empty_buffer(schema.clone())?;
+            self.relations.insert(
+                name.to_string(),
+                VersionedCudaBuffer {
+                    buffer,
+                    version: 1,
                 },
-                version: 1,
-            });
-        &entry.buffer
+            );
+        }
+        Ok(&self
+            .relations
+            .get(name)
+            .expect("Relation must exist after insertion")
+            .buffer)
     }
 
     /// Get a mutable reference to a relation, or insert an empty buffer with the given schema
@@ -151,20 +162,27 @@ impl RelationStore {
     ///
     /// # Returns
     /// A mutable reference to the existing buffer, or the newly inserted empty buffer
-    pub fn get_or_insert_empty_mut(&mut self, name: &str, schema: &Schema) -> &mut CudaBuffer {
+    pub fn get_or_insert_empty_mut(
+        &mut self,
+        name: &str,
+        schema: &Schema,
+    ) -> xlog_core::Result<&mut CudaBuffer> {
+        if !self.relations.contains_key(name) {
+            let buffer = self.provider.create_empty_buffer(schema.clone())?;
+            self.relations.insert(
+                name.to_string(),
+                VersionedCudaBuffer {
+                    buffer,
+                    version: 1,
+                },
+            );
+        }
         let entry = self
             .relations
-            .entry(name.to_string())
-            .or_insert_with(|| VersionedCudaBuffer {
-                buffer: CudaBuffer {
-                    columns: Vec::new(),
-                    num_rows: 0,
-                    schema: schema.clone(),
-                },
-                version: 1,
-            });
+            .get_mut(name)
+            .expect("Relation must exist after insertion");
         entry.version = entry.version.saturating_add(1);
-        &mut entry.buffer
+        Ok(&mut entry.buffer)
     }
 
     /// Check if a relation exists in the store
@@ -213,16 +231,34 @@ impl RelationStore {
     }
 }
 
-impl Default for RelationStore {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xlog_core::ScalarType;
+    use std::sync::Arc;
+    use xlog_core::{MemoryBudget, ScalarType};
+    use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+
+    fn setup_provider() -> Option<Arc<CudaKernelProvider>> {
+        let device = match CudaDevice::new(0) {
+            Ok(d) => Arc::new(d),
+            Err(e) => {
+                eprintln!("Skipping: CUDA runtime unavailable: {}", e);
+                return None;
+            }
+        };
+        let memory = Arc::new(GpuMemoryManager::new(
+            device.clone(),
+            MemoryBudget::with_limit(1024 * 1024 * 1024),
+        ));
+        CudaKernelProvider::new(device, memory).ok().map(Arc::new)
+    }
+
+    fn setup_store() -> Option<(RelationStore, Arc<CudaKernelProvider>)> {
+        let provider = setup_provider()?;
+        let store = RelationStore::new(provider.clone());
+        Some((store, provider))
+    }
 
     fn test_schema() -> Schema {
         Schema::new(vec![
@@ -231,23 +267,53 @@ mod tests {
         ])
     }
 
+    fn device_row_count(provider: &CudaKernelProvider, buffer: &CudaBuffer) -> u32 {
+        let mut host_rows = [0u32];
+        provider
+            .device()
+            .inner()
+            .dtoh_sync_copy_into(buffer.num_rows_device(), &mut host_rows)
+            .expect("dtoh row count");
+        host_rows[0]
+    }
+
+    fn make_buffer(provider: &CudaKernelProvider, schema: Schema, rows: usize) -> CudaBuffer {
+        if rows == 0 {
+            return provider
+                .create_empty_buffer(schema)
+                .expect("empty buffer");
+        }
+        let mut columns: Vec<Vec<u8>> = Vec::with_capacity(schema.arity());
+        for col_idx in 0..schema.arity() {
+            let size = schema
+                .column_type(col_idx)
+                .map(|t| t.size_bytes())
+                .unwrap_or(4);
+            columns.push(vec![0u8; rows * size]);
+        }
+        let slices: Vec<&[u8]> = columns.iter().map(|c| c.as_slice()).collect();
+        provider
+            .create_buffer_from_slices(&slices, schema)
+            .expect("buffer")
+    }
+
     #[test]
     fn test_new_store_is_empty() {
-        let store = RelationStore::new();
+        let Some((store, _provider)) = setup_store() else {
+            return;
+        };
         assert!(store.is_empty());
         assert_eq!(store.len(), 0);
     }
 
     #[test]
-    fn test_default_store_is_empty() {
-        let store = RelationStore::default();
-        assert!(store.is_empty());
-    }
-
-    #[test]
     fn test_put_and_get() {
-        let mut store = RelationStore::new();
-        let buffer = CudaBuffer::empty();
+        let Some((mut store, provider)) = setup_store() else {
+            return;
+        };
+        let buffer = provider
+            .create_empty_buffer(Schema::new(vec![]))
+            .expect("empty");
 
         store.put("test_rel", buffer);
 
@@ -261,17 +327,26 @@ mod tests {
 
     #[test]
     fn test_get_nonexistent() {
-        let store = RelationStore::new();
+        let Some((store, _provider)) = setup_store() else {
+            return;
+        };
         assert!(store.get("nonexistent").is_none());
     }
 
     #[test]
     fn test_contains() {
-        let mut store = RelationStore::new();
+        let Some((mut store, provider)) = setup_store() else {
+            return;
+        };
 
         assert!(!store.contains("test"));
 
-        store.put("test", CudaBuffer::empty());
+        store.put(
+            "test",
+            provider
+                .create_empty_buffer(Schema::new(vec![]))
+                .expect("empty"),
+        );
 
         assert!(store.contains("test"));
         assert!(!store.contains("other"));
@@ -279,8 +354,15 @@ mod tests {
 
     #[test]
     fn test_remove() {
-        let mut store = RelationStore::new();
-        store.put("test", CudaBuffer::empty());
+        let Some((mut store, provider)) = setup_store() else {
+            return;
+        };
+        store.put(
+            "test",
+            provider
+                .create_empty_buffer(Schema::new(vec![]))
+                .expect("empty"),
+        );
 
         assert!(store.contains("test"));
 
@@ -292,17 +374,34 @@ mod tests {
 
     #[test]
     fn test_remove_nonexistent() {
-        let mut store = RelationStore::new();
+        let Some((mut store, _provider)) = setup_store() else {
+            return;
+        };
         let removed = store.remove("nonexistent");
         assert!(removed.is_none());
     }
 
     #[test]
     fn test_clear() {
-        let mut store = RelationStore::new();
-        store.put("rel1", CudaBuffer::empty());
-        store.put("rel2", CudaBuffer::empty());
-        store.put("rel3", CudaBuffer::empty());
+        let Some((mut store, provider)) = setup_store() else {
+            return;
+        };
+        let empty = provider
+            .create_empty_buffer(Schema::new(vec![]))
+            .expect("empty");
+        store.put("rel1", empty);
+        store.put(
+            "rel2",
+            provider
+                .create_empty_buffer(Schema::new(vec![]))
+                .expect("empty"),
+        );
+        store.put(
+            "rel3",
+            provider
+                .create_empty_buffer(Schema::new(vec![]))
+                .expect("empty"),
+        );
 
         assert_eq!(store.len(), 3);
 
@@ -314,120 +413,129 @@ mod tests {
 
     #[test]
     fn test_get_or_insert_empty_existing() {
-        let mut store = RelationStore::new();
+        let Some((mut store, provider)) = setup_store() else {
+            return;
+        };
         let schema = test_schema();
 
-        // Create a buffer with some metadata
-        let buffer = CudaBuffer {
-            columns: Vec::new(),
-            num_rows: 100,
-            schema: schema.clone(),
-        };
-
+        let buffer = make_buffer(&provider, schema.clone(), 100);
         store.put("existing", buffer);
 
-        // Should return a reference to the existing buffer (not insert a new one)
-        let result = store.get_or_insert_empty("existing", &schema);
-        assert_eq!(result.num_rows, 100);
-        assert_eq!(result.schema, schema);
-
-        // Verify store still has only one relation
+        let result = store.get_or_insert_empty("existing", &schema).unwrap();
+        assert_eq!(device_row_count(&provider, result), 100);
+        assert_eq!(result.schema(), &schema);
         assert_eq!(store.len(), 1);
     }
 
     #[test]
     fn test_get_or_insert_empty_nonexistent() {
-        let mut store = RelationStore::new();
+        let Some((mut store, provider)) = setup_store() else {
+            return;
+        };
         let schema = test_schema();
 
-        // Store should be empty initially
         assert!(store.is_empty());
 
-        // Should insert an empty buffer and return a reference to it
-        let result = store.get_or_insert_empty("nonexistent", &schema);
-        assert_eq!(result.num_rows, 0);
-        assert_eq!(result.schema, schema);
+        let result = store.get_or_insert_empty("nonexistent", &schema).unwrap();
+        assert_eq!(device_row_count(&provider, result), 0);
+        assert_eq!(result.schema(), &schema);
         assert!(result.is_empty());
 
-        // Verify the buffer was actually inserted into the store
         assert!(store.contains("nonexistent"));
         assert_eq!(store.len(), 1);
     }
 
     #[test]
     fn test_get_mut() {
-        let mut store = RelationStore::new();
-        let buffer = CudaBuffer {
-            columns: Vec::new(),
-            num_rows: 10,
-            schema: Schema::new(vec![]),
+        let Some((mut store, provider)) = setup_store() else {
+            return;
         };
-
+        let buffer = make_buffer(&provider, Schema::new(vec![]), 10);
         store.put("test", buffer);
 
-        // Modify via get_mut
         {
             let buf_mut = store.get_mut("test").unwrap();
-            buf_mut.num_rows = 50;
+            buf_mut.row_cap = 50;
+            provider
+                .device()
+                .inner()
+                .htod_sync_copy_into(&[50u32], &mut buf_mut.d_num_rows)
+                .expect("htod row count");
         }
 
-        // Verify the change persisted
-        assert_eq!(store.get("test").unwrap().num_rows, 50);
+        assert_eq!(device_row_count(&provider, store.get("test").unwrap()), 50);
     }
 
     #[test]
     fn test_get_mut_nonexistent() {
-        let mut store = RelationStore::new();
+        let Some((mut store, _provider)) = setup_store() else {
+            return;
+        };
         assert!(store.get_mut("nonexistent").is_none());
     }
 
     #[test]
     fn test_get_or_insert_empty_mut() {
-        let mut store = RelationStore::new();
+        let Some((mut store, provider)) = setup_store() else {
+            return;
+        };
         let schema = test_schema();
 
-        // Get mutable reference to a new empty buffer
         {
-            let buf_mut = store.get_or_insert_empty_mut("new_rel", &schema);
-            assert_eq!(buf_mut.num_rows, 0);
-            buf_mut.num_rows = 42;
+            let buf_mut = store.get_or_insert_empty_mut("new_rel", &schema).unwrap();
+            assert_eq!(device_row_count(&provider, buf_mut), 0);
+            buf_mut.row_cap = 42;
+            provider
+                .device()
+                .inner()
+                .htod_sync_copy_into(&[42u32], &mut buf_mut.d_num_rows)
+                .expect("htod row count");
         }
 
-        // Verify the change persisted and the buffer is in the store
         assert!(store.contains("new_rel"));
-        assert_eq!(store.get("new_rel").unwrap().num_rows, 42);
+        assert_eq!(device_row_count(&provider, store.get("new_rel").unwrap()), 42);
     }
 
     #[test]
     fn test_put_replaces_existing() {
-        let mut store = RelationStore::new();
-
-        let buffer1 = CudaBuffer {
-            columns: Vec::new(),
-            num_rows: 10,
-            schema: Schema::new(vec![]),
+        let Some((mut store, provider)) = setup_store() else {
+            return;
         };
 
-        let buffer2 = CudaBuffer {
-            columns: Vec::new(),
-            num_rows: 20,
-            schema: Schema::new(vec![]),
-        };
+        let buffer1 = make_buffer(&provider, Schema::new(vec![]), 10);
+        let buffer2 = make_buffer(&provider, Schema::new(vec![]), 20);
 
         store.put("test", buffer1);
-        assert_eq!(store.get("test").unwrap().num_rows, 10);
+        assert_eq!(device_row_count(&provider, store.get("test").unwrap()), 10);
 
         store.put("test", buffer2);
-        assert_eq!(store.get("test").unwrap().num_rows, 20);
+        assert_eq!(device_row_count(&provider, store.get("test").unwrap()), 20);
         assert_eq!(store.len(), 1);
     }
 
     #[test]
     fn test_names_iterator() {
-        let mut store = RelationStore::new();
-        store.put("alpha", CudaBuffer::empty());
-        store.put("beta", CudaBuffer::empty());
-        store.put("gamma", CudaBuffer::empty());
+        let Some((mut store, provider)) = setup_store() else {
+            return;
+        };
+        store.put(
+            "alpha",
+            provider
+                .create_empty_buffer(Schema::new(vec![]))
+                .expect("empty"),
+        );
+        store.put(
+            "beta",
+            provider
+                .create_empty_buffer(Schema::new(vec![]))
+                .expect("empty"),
+        );
+        store.put(
+            "gamma",
+            provider
+                .create_empty_buffer(Schema::new(vec![]))
+                .expect("empty"),
+        );
 
         let mut names: Vec<&str> = store.names().collect();
         names.sort();
@@ -437,32 +545,36 @@ mod tests {
 
     #[test]
     fn test_multiple_operations() {
-        let mut store = RelationStore::new();
+        let Some((mut store, provider)) = setup_store() else {
+            return;
+        };
 
-        // Add some relations
-        store.put("a", CudaBuffer::empty());
-        store.put("b", CudaBuffer::empty());
-        store.put("c", CudaBuffer::empty());
+        let empty = provider
+            .create_empty_buffer(Schema::new(vec![]))
+            .expect("empty");
+        store.put("a", empty);
+        store.put(
+            "b",
+            provider
+                .create_empty_buffer(Schema::new(vec![]))
+                .expect("empty"),
+        );
+        store.put(
+            "c",
+            provider
+                .create_empty_buffer(Schema::new(vec![]))
+                .expect("empty"),
+        );
         assert_eq!(store.len(), 3);
 
-        // Remove one
         store.remove("b");
         assert_eq!(store.len(), 2);
         assert!(!store.contains("b"));
 
-        // Replace one
-        store.put(
-            "a",
-            CudaBuffer {
-                columns: Vec::new(),
-                num_rows: 50,
-                schema: Schema::new(vec![]),
-            },
-        );
+        store.put("a", make_buffer(&provider, Schema::new(vec![]), 50));
         assert_eq!(store.len(), 2);
-        assert_eq!(store.get("a").unwrap().num_rows, 50);
+        assert_eq!(device_row_count(&provider, store.get("a").unwrap()), 50);
 
-        // Clear all
         store.clear();
         assert!(store.is_empty());
     }

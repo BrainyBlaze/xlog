@@ -135,6 +135,7 @@ pub mod mc_sample_kernels {
 pub mod mc_eval_kernels {
     pub const MC_EVAL_MASK_VAR: &str = "mc_eval_mask_var";
     pub const MC_EVAL_MASK_AD: &str = "mc_eval_mask_ad_choice";
+    pub const MC_EVAL_ACCUMULATE_COUNTS: &str = "mc_accumulate_counts";
 }
 
 /// Kernel function names in the arithmetic module
@@ -947,6 +948,7 @@ impl CudaKernelProvider {
                 &[
                     mc_eval_kernels::MC_EVAL_MASK_VAR,
                     mc_eval_kernels::MC_EVAL_MASK_AD,
+                    mc_eval_kernels::MC_EVAL_ACCUMULATE_COUNTS,
                 ],
             )
             .map_err(|e| XlogError::Kernel(format!("Failed to load MC eval PTX: {}", e)))?;
