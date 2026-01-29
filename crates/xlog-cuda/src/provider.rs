@@ -355,6 +355,7 @@ pub mod filter_kernels {
     pub const COMPACT_I64_BY_MASK: &str = "compact_i64_by_mask";
     pub const COMPACT_F64_BY_MASK: &str = "compact_f64_by_mask";
     pub const COMPACT_BYTES_BY_MASK: &str = "compact_bytes_by_mask";
+    pub const CAPTURE_COMPACT_COUNT: &str = "capture_compact_count";
     pub const MASK_AND: &str = "mask_and";
     pub const MASK_OR: &str = "mask_or";
     pub const MASK_NOT: &str = "mask_not";
@@ -757,6 +758,7 @@ impl CudaKernelProvider {
                     filter_kernels::COMPACT_I64_BY_MASK,
                     filter_kernels::COMPACT_F64_BY_MASK,
                     filter_kernels::COMPACT_BYTES_BY_MASK,
+                    filter_kernels::CAPTURE_COMPACT_COUNT,
                     filter_kernels::MASK_AND,
                     filter_kernels::MASK_OR,
                     filter_kernels::MASK_NOT,
@@ -1598,28 +1600,13 @@ impl CudaKernelProvider {
 
         self.device.synchronize()?;
 
-        let last_idx = (num_rows as usize)
-            .checked_sub(1)
-            .ok_or_else(|| XlogError::Kernel("Dedup: unexpected empty input".to_string()))?;
-        let last_prefix_view = d_prefix_sum.slice(last_idx..(last_idx + 1));
-        let last_mask_view = d_unique_mask.slice(last_idx..(last_idx + 1));
-
-        let mut last_prefix_host = [0u32];
-        let mut last_mask_host = [0u8];
-        device
-            .dtoh_sync_copy_into(&last_prefix_view, &mut last_prefix_host)
-            .map_err(|e| XlogError::Kernel(format!("Failed to read last prefix sum: {}", e)))?;
-        device
-            .dtoh_sync_copy_into(&last_mask_view, &mut last_mask_host)
-            .map_err(|e| XlogError::Kernel(format!("Failed to read last unique mask: {}", e)))?;
-
-        let output_count = (last_prefix_host[0] as u64) + (last_mask_host[0] as u64);
-
-        if output_count == 0 {
-            return self.create_empty_buffer(input.schema().clone());
-        }
-
-        self.compact_buffer_by_device_mask(input, &d_unique_mask, &d_prefix_sum, output_count)
+        let d_out_count = self.capture_compact_count(&d_prefix_sum, &d_unique_mask, num_rows)?;
+        self.compact_buffer_by_device_mask_device_count(
+            input,
+            &d_unique_mask,
+            &d_prefix_sum,
+            d_out_count,
+        )
     }
 
     /// Compute union of two buffers (GPU-native, deduped)
@@ -2140,29 +2127,13 @@ impl CudaKernelProvider {
 
         self.device.synchronize()?;
 
-        let last_idx = (num_a as usize)
-            .checked_sub(1)
-            .ok_or_else(|| XlogError::Kernel("Diff: unexpected empty input".to_string()))?;
-
-        let last_prefix_view = d_prefix_sum.slice(last_idx..(last_idx + 1));
-        let last_mask_view = diff_mask.slice(last_idx..(last_idx + 1));
-
-        let mut last_prefix_host = [0u32];
-        let mut last_mask_host = [0u8];
-        device
-            .dtoh_sync_copy_into(&last_prefix_view, &mut last_prefix_host)
-            .map_err(|e| XlogError::Kernel(format!("Failed to read last prefix sum: {}", e)))?;
-        device
-            .dtoh_sync_copy_into(&last_mask_view, &mut last_mask_host)
-            .map_err(|e| XlogError::Kernel(format!("Failed to read last diff mask: {}", e)))?;
-
-        let output_count = (last_prefix_host[0] as u64) + (last_mask_host[0] as u64);
-
-        if output_count == 0 {
-            return self.create_empty_buffer(a.schema().clone());
-        }
-
-        self.compact_buffer_by_device_mask(&deduped_a, &diff_mask, &d_prefix_sum, output_count)
+        let d_out_count = self.capture_compact_count(&d_prefix_sum, &diff_mask, num_a)?;
+        self.compact_buffer_by_device_mask_device_count(
+            &deduped_a,
+            &diff_mask,
+            &d_prefix_sum,
+            d_out_count,
+        )
     }
 
     /// Multi-column diff using anti-join
@@ -4546,27 +4517,8 @@ impl CudaKernelProvider {
 
         self.device.synchronize()?;
 
-        let last_idx = (n as usize)
-            .checked_sub(1)
-            .ok_or_else(|| XlogError::Kernel("filter_u32: unexpected empty input".to_string()))?;
-        let last_prefix_view = d_prefix_sum.slice(last_idx..(last_idx + 1));
-        let last_mask_view = d_mask.slice(last_idx..(last_idx + 1));
-
-        let mut last_prefix_host = [0u32];
-        let mut last_mask_host = [0u8];
-        device
-            .dtoh_sync_copy_into(&last_prefix_view, &mut last_prefix_host)
-            .map_err(|e| XlogError::Kernel(format!("Failed to read last prefix sum: {}", e)))?;
-        device
-            .dtoh_sync_copy_into(&last_mask_view, &mut last_mask_host)
-            .map_err(|e| XlogError::Kernel(format!("Failed to read last mask: {}", e)))?;
-
-        let output_count = (last_prefix_host[0] as u64) + (last_mask_host[0] as u64);
-        if output_count == 0 {
-            return self.create_empty_buffer(input.schema.clone());
-        }
-
-        self.compact_buffer_by_device_mask(input, &d_mask, &d_prefix_sum, output_count)
+        let d_out_count = self.capture_compact_count(&d_prefix_sum, &d_mask, num_rows)?;
+        self.compact_buffer_by_device_mask_device_count(input, &d_mask, &d_prefix_sum, d_out_count)
     }
 
     /// Filter i32 column with comparison operator.
@@ -5132,27 +5084,8 @@ impl CudaKernelProvider {
 
         self.device.synchronize()?;
 
-        let last_idx = (n as usize)
-            .checked_sub(1)
-            .ok_or_else(|| XlogError::Kernel("filter_f64: unexpected empty input".to_string()))?;
-        let last_prefix_view = d_prefix_sum.slice(last_idx..(last_idx + 1));
-        let last_mask_view = d_mask.slice(last_idx..(last_idx + 1));
-
-        let mut last_prefix_host = [0u32];
-        let mut last_mask_host = [0u8];
-        device
-            .dtoh_sync_copy_into(&last_prefix_view, &mut last_prefix_host)
-            .map_err(|e| XlogError::Kernel(format!("Failed to read last prefix sum: {}", e)))?;
-        device
-            .dtoh_sync_copy_into(&last_mask_view, &mut last_mask_host)
-            .map_err(|e| XlogError::Kernel(format!("Failed to read last mask: {}", e)))?;
-
-        let output_count = (last_prefix_host[0] as u64) + (last_mask_host[0] as u64);
-        if output_count == 0 {
-            return self.create_empty_buffer(input.schema.clone());
-        }
-
-        self.compact_buffer_by_device_mask(input, &d_mask, &d_prefix_sum, output_count)
+        let d_out_count = self.capture_compact_count(&d_prefix_sum, &d_mask, num_rows)?;
+        self.compact_buffer_by_device_mask_device_count(input, &d_mask, &d_prefix_sum, d_out_count)
     }
 
     /// Filter buffer by pre-computed mask.
@@ -5211,8 +5144,7 @@ impl CudaKernelProvider {
 
     /// Compact a buffer using a device-resident mask.
     ///
-    /// Computes prefix sum on-device and determines output count by reading the final prefix
-    /// and mask entry (minimal device->host transfer).
+    /// Computes prefix sum and output count fully on-device.
     pub fn compact_buffer_by_device_mask_counted(
         &self,
         input: &CudaBuffer,
@@ -5279,20 +5211,99 @@ impl CudaKernelProvider {
             .map_err(|e| XlogError::Kernel(format!("multiblock_scan_phase3 failed: {}", e)))?;
         }
 
-        let last_idx = (n - 1) as usize;
-        let last_prefix_view = d_prefix_sum.slice(last_idx..(last_idx + 1));
-        let last_mask_view = d_mask.slice(last_idx..(last_idx + 1));
-        let mut last_prefix_host = [0u32];
-        let mut last_mask_host = [0u8];
-        self.dtoh_sync_copy_into_tracked(&last_prefix_view, &mut last_prefix_host)?;
-        self.dtoh_sync_copy_into_tracked(&last_mask_view, &mut last_mask_host)?;
+        let d_out_count = self.capture_compact_count(&d_prefix_sum, d_mask, n)?;
 
-        let output_count = (last_prefix_host[0] as u64) + (last_mask_host[0] as u64);
-        if output_count == 0 {
-            return self.create_empty_buffer(input.schema.clone());
+        self.compact_buffer_by_device_mask_device_count(input, d_mask, &d_prefix_sum, d_out_count)
+    }
+
+    fn capture_compact_count(
+        &self,
+        d_prefix_sum: &cudarc::driver::CudaSlice<u32>,
+        d_mask: &cudarc::driver::CudaSlice<u8>,
+        n: u32,
+    ) -> Result<TrackedCudaSlice<u32>> {
+        let mut d_out_count = self.memory.alloc::<u32>(1)?;
+        let device = self.device.inner();
+        let capture_fn = device
+            .get_func(FILTER_MODULE, filter_kernels::CAPTURE_COMPACT_COUNT)
+            .ok_or_else(|| {
+                XlogError::Kernel("capture_compact_count kernel not found".to_string())
+            })?;
+        unsafe {
+            capture_fn.clone().launch(
+                LaunchConfig {
+                    grid_dim: (1, 1, 1),
+                    block_dim: (1, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (d_prefix_sum, d_mask, n, &mut d_out_count),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("capture_compact_count failed: {}", e)))?;
+        Ok(d_out_count)
+    }
+
+    fn compact_buffer_by_device_mask_device_count(
+        &self,
+        input: &CudaBuffer,
+        d_mask: &cudarc::driver::CudaSlice<u8>,
+        d_prefix_sum: &cudarc::driver::CudaSlice<u32>,
+        d_out_count: TrackedCudaSlice<u32>,
+    ) -> Result<CudaBuffer> {
+        let n = input.num_rows() as u32;
+        let device = self.device.inner();
+
+        let compact_fn = device
+            .get_func(FILTER_MODULE, filter_kernels::COMPACT_BYTES_BY_MASK)
+            .ok_or_else(|| {
+                XlogError::Kernel("compact_bytes_by_mask kernel not found".to_string())
+            })?;
+
+        let block_size = 256u32;
+        let grid_size = (n + block_size - 1) / block_size;
+        let config = LaunchConfig {
+            grid_dim: (grid_size, 1, 1),
+            block_dim: (block_size, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        let row_cap = n as u64;
+        let mut new_columns = Vec::with_capacity(input.columns.len());
+        for col_idx in 0..input.columns.len() {
+            let src_col = input
+                .column(col_idx)
+                .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
+
+            let elem_size = input
+                .schema
+                .column_type(col_idx)
+                .map(|t| t.size_bytes())
+                .unwrap_or(4) as u32;
+
+            let output_bytes = (row_cap as usize) * (elem_size as usize);
+            let dst_col = self.memory.alloc::<u8>(output_bytes)?;
+
+            // SAFETY: Kernel signature matches:
+            // compact_bytes_by_mask(input, mask, prefix_sum, num_rows, elem_size, output)
+            unsafe {
+                compact_fn.clone().launch(
+                    config,
+                    (src_col, d_mask, d_prefix_sum, n, elem_size, &dst_col),
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("compact_bytes_by_mask failed: {}", e)))?;
+
+            new_columns.push(dst_col.into());
         }
 
-        self.compact_buffer_by_device_mask(input, d_mask, &d_prefix_sum, output_count)
+        self.device.synchronize()?;
+
+        Ok(CudaBuffer::from_columns(
+            new_columns,
+            row_cap,
+            d_out_count,
+            input.schema.clone(),
+        ))
     }
 
     fn compact_buffer_by_device_mask(
@@ -5424,29 +5435,8 @@ impl CudaKernelProvider {
 
         self.device.synchronize()?;
 
-        let last_idx = (n as usize).checked_sub(1).ok_or_else(|| {
-            XlogError::Kernel("Device-mask filtering: unexpected empty input".to_string())
-        })?;
-
-        let last_prefix_view = d_prefix_sum.slice(last_idx..(last_idx + 1));
-        let last_mask_view = d_mask.slice(last_idx..(last_idx + 1));
-
-        let mut last_prefix_host = [0u32];
-        let mut last_mask_host = [0u8];
-        device
-            .dtoh_sync_copy_into(&last_prefix_view, &mut last_prefix_host)
-            .map_err(|e| XlogError::Kernel(format!("Failed to read last prefix sum: {}", e)))?;
-        device
-            .dtoh_sync_copy_into(&last_mask_view, &mut last_mask_host)
-            .map_err(|e| XlogError::Kernel(format!("Failed to read last mask: {}", e)))?;
-
-        let output_count = (last_prefix_host[0] as u64) + (last_mask_host[0] as u64);
-
-        if output_count == 0 {
-            return self.create_empty_buffer(input.schema().clone());
-        }
-
-        self.compact_buffer_by_device_mask(input, d_mask, &d_prefix_sum, output_count)
+        let d_out_count = self.capture_compact_count(&d_prefix_sum, d_mask, n)?;
+        self.compact_buffer_by_device_mask_device_count(input, d_mask, &d_prefix_sum, d_out_count)
     }
 
     // ============== Buffer Helper Methods ==============

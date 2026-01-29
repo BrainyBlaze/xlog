@@ -755,3 +755,26 @@ extern "C" __global__ void compact_bytes_by_mask(
         }
     }
 }
+
+/**
+ * Capture compacted row count from prefix sum + mask on device.
+ * @param prefix_sum Exclusive prefix sum of mask
+ * @param mask Filter mask
+ * @param num_rows Number of rows
+ * @param out_count Output: compacted row count
+ */
+extern "C" __global__ void capture_compact_count(
+    const uint32_t* __restrict__ prefix_sum,
+    const uint8_t* __restrict__ mask,
+    uint32_t num_rows,
+    uint32_t* __restrict__ out_count
+) {
+    if (blockIdx.x == 0 && threadIdx.x == 0) {
+        if (num_rows == 0) {
+            out_count[0] = 0;
+            return;
+        }
+        uint32_t last = num_rows - 1;
+        out_count[0] = prefix_sum[last] + (mask[last] ? 1u : 0u);
+    }
+}
