@@ -160,7 +160,7 @@ fn test_union_gpu_both_empty() {
 
     let result = provider.union_gpu(&buf_a, &buf_b).unwrap();
 
-    assert_eq!(result.num_rows, 0);
+    assert_eq!(result.num_rows(), 0);
 }
 
 #[test]
@@ -265,7 +265,7 @@ fn test_diff_gpu_complete_overlap() {
 
     let result = provider.diff_gpu(&buf_a, &buf_b).unwrap();
 
-    assert_eq!(result.num_rows, 0);
+    assert_eq!(result.num_rows(), 0);
 }
 
 #[test]
@@ -287,7 +287,7 @@ fn test_diff_gpu_empty_a() {
 
     let result = provider.diff_gpu(&buf_a, &buf_b).unwrap();
 
-    assert_eq!(result.num_rows, 0);
+    assert_eq!(result.num_rows(), 0);
 }
 
 #[test]
@@ -335,7 +335,7 @@ fn test_diff_gpu_b_superset() {
 
     let result = provider.diff_gpu(&buf_a, &buf_b).unwrap();
 
-    assert_eq!(result.num_rows, 0);
+    assert_eq!(result.num_rows(), 0);
 }
 
 #[test]

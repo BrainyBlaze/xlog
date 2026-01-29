@@ -28,6 +28,7 @@ const SET_OPS_PTX: &str = include_str!("../../../kernels/set_ops.ptx");
 const PACK_PTX: &str = include_str!("../../../kernels/pack.ptx");
 const CIRCUIT_PTX: &str = include_str!("../../../kernels/circuit.ptx");
 const MC_SAMPLE_PTX: &str = include_str!("../../../kernels/mc_sample.ptx");
+const MC_EVAL_PTX: &str = include_str!("../../../kernels/mc_eval.ptx");
 const ARITH_PTX: &str = include_str!("../../../kernels/arith.ptx");
 const SAT_PTX: &str = include_str!("../../../kernels/sat.ptx");
 const D4_PTX: &str = include_str!("../../../kernels/d4.ptx");
@@ -115,6 +116,7 @@ pub const SET_OPS_MODULE: &str = "xlog_set_ops";
 pub const PACK_MODULE: &str = "xlog_pack";
 pub const CIRCUIT_MODULE: &str = "xlog_circuit";
 pub const MC_SAMPLE_MODULE: &str = "xlog_mc_sample";
+pub const MC_EVAL_MODULE: &str = "xlog_mc_eval";
 pub const ARITH_MODULE: &str = "xlog_arith";
 pub const SAT_MODULE: &str = "xlog_sat";
 pub const D4_MODULE: &str = "xlog_d4";
@@ -127,6 +129,12 @@ pub const WEIGHTS_MODULE: &str = "xlog_weights";
 /// Kernel function names in the Monte Carlo sampling module
 pub mod mc_sample_kernels {
     pub const MC_SAMPLE_BERNOULLI: &str = "mc_sample_bernoulli";
+}
+
+/// Kernel function names in the Monte Carlo evaluation module
+pub mod mc_eval_kernels {
+    pub const MC_EVAL_MASK_VAR: &str = "mc_eval_mask_var";
+    pub const MC_EVAL_MASK_AD: &str = "mc_eval_mask_ad_choice";
 }
 
 /// Kernel function names in the arithmetic module
@@ -917,6 +925,19 @@ impl CudaKernelProvider {
             )
             .map_err(|e| XlogError::Kernel(format!("Failed to load MC sample PTX: {}", e)))?;
 
+        // Load Monte Carlo evaluation module (mask construction)
+        device
+            .inner()
+            .load_ptx(
+                Ptx::from_src(MC_EVAL_PTX),
+                MC_EVAL_MODULE,
+                &[
+                    mc_eval_kernels::MC_EVAL_MASK_VAR,
+                    mc_eval_kernels::MC_EVAL_MASK_AD,
+                ],
+            )
+            .map_err(|e| XlogError::Kernel(format!("Failed to load MC eval PTX: {}", e)))?;
+
         // Load arithmetic module
         let arith_module = Ptx::from_src(ARITH_PTX);
         let _arith = device
@@ -1160,6 +1181,74 @@ impl CudaKernelProvider {
         Ok(host)
     }
 
+    /// Sample Bernoulli matrix on GPU and return device-resident output.
+    ///
+    /// Returns a row-major [num_samples][num_vars] matrix of 0/1 bytes on device.
+    pub fn sample_bernoulli_matrix_device(
+        &self,
+        probs: &[f32],
+        num_samples: usize,
+        seed: u64,
+    ) -> Result<TrackedCudaSlice<u8>> {
+        if probs.is_empty() || num_samples == 0 {
+            return self.memory.alloc::<u8>(0).map_err(|e| {
+                XlogError::Kernel(format!("Failed to allocate empty sample matrix: {}", e))
+            });
+        }
+
+        let num_vars_u32: u32 = probs.len().try_into().map_err(|_| {
+            XlogError::Kernel(format!(
+                "sample_bernoulli_matrix_device: num_vars {} exceeds u32::MAX",
+                probs.len()
+            ))
+        })?;
+        let num_samples_u32: u32 = num_samples.try_into().map_err(|_| {
+            XlogError::Kernel(format!(
+                "sample_bernoulli_matrix_device: num_samples {} exceeds u32::MAX",
+                num_samples
+            ))
+        })?;
+
+        let total = probs.len().saturating_mul(num_samples);
+        let device = self.device.inner();
+
+        let mut d_probs = self.memory.alloc::<f32>(probs.len())?;
+        device
+            .htod_sync_copy_into(probs, &mut d_probs)
+            .map_err(|e| XlogError::Kernel(format!("Failed to upload Bernoulli probs: {}", e)))?;
+
+        let mut d_out = self.memory.alloc::<u8>(total)?;
+
+        let block_size = 256u32;
+        let total_u32: u32 = total.try_into().map_err(|_| {
+            XlogError::Kernel(format!(
+                "sample_bernoulli_matrix_device: total {} exceeds u32::MAX",
+                total
+            ))
+        })?;
+        let num_blocks = (total_u32 + block_size - 1) / block_size;
+        let config = LaunchConfig {
+            grid_dim: (num_blocks, 1, 1),
+            block_dim: (block_size, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        let kernel = device
+            .get_func(MC_SAMPLE_MODULE, mc_sample_kernels::MC_SAMPLE_BERNOULLI)
+            .ok_or_else(|| XlogError::Kernel("mc_sample_bernoulli kernel not found".to_string()))?;
+
+        // SAFETY: mc_sample_bernoulli(out, probs, num_vars, num_samples, seed)
+        unsafe {
+            kernel.clone().launch(
+                config,
+                (&mut d_out, &d_probs, num_vars_u32, num_samples_u32, seed),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("Failed to launch mc_sample_bernoulli: {}", e)))?;
+
+        Ok(d_out)
+    }
+
     /// Perform a hash join between two buffers
     ///
     /// Uses a two-phase hash join:
@@ -1277,7 +1366,8 @@ impl CudaKernelProvider {
 
         let CudaBuffer {
             columns: combined_columns,
-            num_rows,
+            row_cap,
+            d_num_rows,
             schema: _,
         } = combined;
 
@@ -1309,7 +1399,8 @@ impl CudaKernelProvider {
 
         Ok(CudaBuffer::from_columns(
             output_columns,
-            num_rows,
+            row_cap,
+            d_num_rows,
             result_schema,
         ))
     }
@@ -1671,7 +1762,7 @@ impl CudaKernelProvider {
 
         self.device.synchronize()?;
 
-        Ok(CudaBuffer::from_columns(result_columns, total_rows, schema))
+        self.buffer_from_columns(result_columns, total_rows, schema)
     }
 
     /// Compute set difference (a - b)
@@ -1857,7 +1948,7 @@ impl CudaKernelProvider {
             }
         }
 
-        Ok(CudaBuffer::from_columns(result_columns, diff_count, schema))
+        self.buffer_from_columns(result_columns, diff_count, schema)
     }
 
     // ============== GPU-Native Set Operations ==============
@@ -2532,11 +2623,11 @@ impl CudaKernelProvider {
         // Build result schema: key columns + aggregation result
         let result_schema = self.groupby_result_schema(input.schema(), key_cols, agg);
 
-        Ok(CudaBuffer::from_columns(
+        self.buffer_from_columns(
             vec![result_key_col.into(), output_col_u8.into()],
             num_groups as u64,
             result_schema,
-        ))
+        )
     }
 
     /// Multi-aggregation groupby
@@ -3104,11 +3195,7 @@ impl CudaKernelProvider {
 
         let result_schema = self.groupby_multi_agg_result_schema(buffer.schema(), key_cols, aggs);
 
-        Ok(CudaBuffer::from_columns(
-            result_columns,
-            num_groups as u64,
-            result_schema,
-        ))
+        self.buffer_from_columns(result_columns, num_groups as u64, result_schema)
     }
 
     /// Create result schema for multi-aggregation groupby
@@ -3495,7 +3582,7 @@ impl CudaKernelProvider {
     /// - Input has more than `u32::MAX` rows
     /// - Download/upload or kernel execution fails
     pub fn sort(&self, input: &CudaBuffer, key_cols: &[usize]) -> Result<CudaBuffer> {
-        if input.num_rows == 0 {
+        if input.num_rows() == 0 {
             return self.create_empty_buffer(input.schema.clone());
         }
 
@@ -3505,11 +3592,11 @@ impl CudaKernelProvider {
             ));
         }
 
-        if input.num_rows > u32::MAX as u64 {
+        if input.num_rows() > u32::MAX as u64 {
             return Err(XlogError::Kernel(format!(
                 "Sort supports at most {} rows, got {}",
                 u32::MAX,
-                input.num_rows
+                input.num_rows()
             )));
         }
 
@@ -3523,7 +3610,7 @@ impl CudaKernelProvider {
             }
         }
 
-        let n = input.num_rows as u32;
+        let n = input.num_rows() as u32;
         let device = self.device.inner();
 
         let block_size = Self::SORT_BLOCK_SIZE;
@@ -4183,7 +4270,7 @@ impl CudaKernelProvider {
         input: &CudaBuffer,
         permutation: &cudarc::driver::CudaSlice<u32>,
     ) -> Result<CudaBuffer> {
-        let n = input.num_rows as u32;
+        let n = input.num_rows() as u32;
         let device = self.device.inner();
 
         let grid_size = (n + Self::SORT_BLOCK_SIZE - 1) / Self::SORT_BLOCK_SIZE;
@@ -4241,11 +4328,7 @@ impl CudaKernelProvider {
 
         self.device.synchronize()?;
 
-        Ok(CudaBuffer {
-            columns: new_columns,
-            num_rows: input.num_rows,
-            schema: input.schema.clone(),
-        })
+        self.buffer_from_columns(new_columns, input.num_rows(), input.schema.clone())
     }
 
     /// Gather rows by explicit indices on GPU: output[i] = input[indices[i]].
@@ -4299,14 +4382,14 @@ impl CudaKernelProvider {
                 })?
                 .size_bytes() as u32;
 
-            let expected_src_bytes = (input.num_rows as usize) * (elem_size as usize);
+            let expected_src_bytes = (input.num_rows() as usize) * (elem_size as usize);
             if src_col.num_bytes() != expected_src_bytes {
                 return Err(XlogError::Kernel(format!(
                     "Column {} has {} bytes but expected {} (num_rows={}, elem_size={})",
                     col_idx,
                     src_col.num_bytes(),
                     expected_src_bytes,
-                    input.num_rows,
+                    input.num_rows(),
                     elem_size
                 )));
             }
@@ -4328,11 +4411,7 @@ impl CudaKernelProvider {
 
         self.device.synchronize()?;
 
-        Ok(CudaBuffer {
-            columns: new_columns,
-            num_rows: output_rows as u64,
-            schema: input.schema.clone(),
-        })
+        self.buffer_from_columns(new_columns, output_rows as u64, input.schema.clone())
     }
 
     // ============== Filter Methods ==============
@@ -4386,7 +4465,7 @@ impl CudaKernelProvider {
         value: u32,
         op: CompareOp,
     ) -> Result<CudaBuffer> {
-        if input.num_rows == 0 {
+        if input.num_rows() == 0 {
             return self.create_empty_buffer(input.schema.clone());
         }
 
@@ -4398,8 +4477,8 @@ impl CudaKernelProvider {
             )));
         }
 
-        let n = input.num_rows as usize;
-        let num_rows = input.num_rows as u32;
+        let n = input.num_rows() as usize;
+        let num_rows = input.num_rows() as u32;
         let device = self.device.inner();
 
         // Validate column index
@@ -4973,7 +5052,7 @@ impl CudaKernelProvider {
         value: f64,
         op: CompareOp,
     ) -> Result<CudaBuffer> {
-        if input.num_rows == 0 {
+        if input.num_rows() == 0 {
             return self.create_empty_buffer(input.schema.clone());
         }
 
@@ -4985,8 +5064,8 @@ impl CudaKernelProvider {
             )));
         }
 
-        let n = input.num_rows as usize;
-        let num_rows = input.num_rows as u32;
+        let n = input.num_rows() as usize;
+        let num_rows = input.num_rows() as u32;
         let device = self.device.inner();
 
         // Validate column index
@@ -5108,11 +5187,11 @@ impl CudaKernelProvider {
     /// # Errors
     /// Returns error if mask length doesn't match buffer rows.
     pub fn filter_by_mask(&self, input: &CudaBuffer, mask: &[u8]) -> Result<CudaBuffer> {
-        if input.num_rows == 0 {
+        if input.num_rows() == 0 {
             return self.create_empty_buffer(input.schema.clone());
         }
 
-        let n = input.num_rows as usize;
+        let n = input.num_rows() as usize;
         if mask.len() != n {
             return Err(XlogError::Kernel(format!(
                 "Mask length {} doesn't match buffer rows {}",
@@ -5153,6 +5232,92 @@ impl CudaKernelProvider {
         self.compact_buffer_by_device_mask(input, &d_mask, &d_prefix_sum, output_count)
     }
 
+    /// Compact a buffer using a device-resident mask.
+    ///
+    /// Computes prefix sum on-device and determines output count by reading the final prefix
+    /// and mask entry (minimal device->host transfer).
+    pub fn compact_buffer_by_device_mask_counted(
+        &self,
+        input: &CudaBuffer,
+        d_mask: &TrackedCudaSlice<u8>,
+    ) -> Result<CudaBuffer> {
+        let n = input.num_rows() as u32;
+        if n == 0 {
+            return self.create_empty_buffer(input.schema.clone());
+        }
+        if n as usize > d_mask.len() {
+            return Err(XlogError::Kernel(format!(
+                "compact_buffer_by_device_mask_counted: mask len {} < rows {}",
+                d_mask.len(),
+                n
+            )));
+        }
+
+        let device = self.device.inner();
+        let block_size = 256u32;
+        let num_blocks = (n + block_size - 1) / block_size;
+
+        let d_prefix_sum = self.memory.alloc::<u32>(n as usize)?;
+        let mut d_block_sums = self.memory.alloc::<u32>(num_blocks as usize)?;
+
+        let phase1_fn = device
+            .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE1)
+            .ok_or_else(|| {
+                XlogError::Kernel("Failed to get multiblock_scan_phase1 kernel".to_string())
+            })?;
+
+        // SAFETY: multiblock_scan_phase1(const uint8_t* mask, uint32_t* prefix_sum, uint32_t* block_sums, uint32_t n)
+        unsafe {
+            phase1_fn.clone().launch(
+                LaunchConfig {
+                    grid_dim: (num_blocks, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (d_mask, &d_prefix_sum, &d_block_sums, n),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("multiblock_scan_phase1 failed: {}", e)))?;
+
+        if num_blocks > 1 {
+            self.multiblock_scan_u32_inplace(&mut d_block_sums, num_blocks)?;
+
+            let phase3_fn = device
+                .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE3)
+                .ok_or_else(|| {
+                    XlogError::Kernel("Failed to get multiblock_scan_phase3 kernel".to_string())
+                })?;
+
+            // SAFETY: multiblock_scan_phase3(prefix_sum, block_offsets, n)
+            unsafe {
+                phase3_fn.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (num_blocks, 1, 1),
+                        block_dim: (block_size, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (&d_prefix_sum, &d_block_sums, n),
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("multiblock_scan_phase3 failed: {}", e)))?;
+        }
+
+        let last_idx = (n - 1) as usize;
+        let last_prefix_view = d_prefix_sum.slice(last_idx..(last_idx + 1));
+        let last_mask_view = d_mask.slice(last_idx..(last_idx + 1));
+        let mut last_prefix_host = [0u32];
+        let mut last_mask_host = [0u8];
+        self.dtoh_sync_copy_into_tracked(&last_prefix_view, &mut last_prefix_host)?;
+        self.dtoh_sync_copy_into_tracked(&last_mask_view, &mut last_mask_host)?;
+
+        let output_count = (last_prefix_host[0] as u64) + (last_mask_host[0] as u64);
+        if output_count == 0 {
+            return self.create_empty_buffer(input.schema.clone());
+        }
+
+        self.compact_buffer_by_device_mask(input, d_mask, &d_prefix_sum, output_count)
+    }
+
     fn compact_buffer_by_device_mask(
         &self,
         input: &CudaBuffer,
@@ -5160,7 +5325,7 @@ impl CudaKernelProvider {
         d_prefix_sum: &cudarc::driver::CudaSlice<u32>,
         output_count: u64,
     ) -> Result<CudaBuffer> {
-        let n = input.num_rows as u32;
+        let n = input.num_rows() as u32;
         let device = self.device.inner();
 
         // Get compact kernel
@@ -5209,11 +5374,7 @@ impl CudaKernelProvider {
 
         self.device.synchronize()?;
 
-        Ok(CudaBuffer {
-            columns: new_columns,
-            num_rows: output_count,
-            schema: input.schema.clone(),
-        })
+        self.buffer_from_columns(new_columns, output_count, input.schema.clone())
     }
 
     pub fn filter_by_device_mask(
@@ -5332,11 +5493,7 @@ impl CudaKernelProvider {
             .htod_sync_copy_into(&bytes, &mut col)
             .map_err(|e| XlogError::Kernel(format!("Failed to upload data: {}", e)))?;
 
-        Ok(CudaBuffer::from_columns(
-            vec![col.into()],
-            data.len() as u64,
-            schema,
-        ))
+        self.buffer_from_columns(vec![col.into()], data.len() as u64, schema)
     }
 
     /// Create a CudaBuffer from multiple u32 column slices
@@ -5382,11 +5539,7 @@ impl CudaKernelProvider {
             cuda_columns.push(col.into());
         }
 
-        Ok(CudaBuffer::from_columns(
-            cuda_columns,
-            num_rows as u64,
-            schema,
-        ))
+        self.buffer_from_columns(cuda_columns, num_rows as u64, schema)
     }
 
     /// Create a CudaBuffer from a u64 slice (single column)
@@ -5408,11 +5561,7 @@ impl CudaKernelProvider {
             .htod_sync_copy_into(&bytes, &mut col)
             .map_err(|e| XlogError::Kernel(format!("Failed to upload data: {}", e)))?;
 
-        Ok(CudaBuffer::from_columns(
-            vec![col.into()],
-            data.len() as u64,
-            schema,
-        ))
+        self.buffer_from_columns(vec![col.into()], data.len() as u64, schema)
     }
 
     /// Create a CudaBuffer from an i64 slice (single column)
@@ -5434,11 +5583,7 @@ impl CudaKernelProvider {
             .htod_sync_copy_into(&bytes, &mut col)
             .map_err(|e| XlogError::Kernel(format!("Failed to upload data: {}", e)))?;
 
-        Ok(CudaBuffer::from_columns(
-            vec![col.into()],
-            data.len() as u64,
-            schema,
-        ))
+        self.buffer_from_columns(vec![col.into()], data.len() as u64, schema)
     }
 
     /// Create a CudaBuffer from an i32 slice (single column)
@@ -5460,11 +5605,7 @@ impl CudaKernelProvider {
             .htod_sync_copy_into(&bytes, &mut col)
             .map_err(|e| XlogError::Kernel(format!("Failed to upload data: {}", e)))?;
 
-        Ok(CudaBuffer::from_columns(
-            vec![col.into()],
-            data.len() as u64,
-            schema,
-        ))
+        self.buffer_from_columns(vec![col.into()], data.len() as u64, schema)
     }
 
     /// Create a CudaBuffer from an f64 slice (single column)
@@ -5486,11 +5627,7 @@ impl CudaKernelProvider {
             .htod_sync_copy_into(&bytes, &mut col)
             .map_err(|e| XlogError::Kernel(format!("Failed to upload data: {}", e)))?;
 
-        Ok(CudaBuffer::from_columns(
-            vec![col.into()],
-            data.len() as u64,
-            schema,
-        ))
+        self.buffer_from_columns(vec![col.into()], data.len() as u64, schema)
     }
 
     /// Create a CudaBuffer from an f32 slice (single column)
@@ -5512,11 +5649,7 @@ impl CudaKernelProvider {
             .htod_sync_copy_into(&bytes, &mut col)
             .map_err(|e| XlogError::Kernel(format!("Failed to upload data: {}", e)))?;
 
-        Ok(CudaBuffer::from_columns(
-            vec![col.into()],
-            data.len() as u64,
-            schema,
-        ))
+        self.buffer_from_columns(vec![col.into()], data.len() as u64, schema)
     }
 
     /// Create a CudaBuffer from a u8 slice (single column)
@@ -5537,11 +5670,7 @@ impl CudaKernelProvider {
             .htod_sync_copy_into(data, &mut col)
             .map_err(|e| XlogError::Kernel(format!("Failed to upload data: {}", e)))?;
 
-        Ok(CudaBuffer::from_columns(
-            vec![col.into()],
-            data.len() as u64,
-            schema,
-        ))
+        self.buffer_from_columns(vec![col.into()], data.len() as u64, schema)
     }
 
     /// Create a buffer from multiple column slices (raw bytes)
@@ -5613,7 +5742,7 @@ impl CudaKernelProvider {
             columns.push(col.into());
         }
 
-        Ok(CudaBuffer::from_columns(columns, num_rows as u64, schema))
+        self.buffer_from_columns(columns, num_rows as u64, schema)
     }
 
     /// Export CudaBuffer to Arrow RecordBatch
@@ -5638,7 +5767,12 @@ impl CudaKernelProvider {
         use arrow::array::*;
         use arrow::datatypes::{Field, Schema as ArrowSchema};
 
-        let num_rows = buffer.num_rows as usize;
+        let mut host_rows = [0u32];
+        self.device
+            .inner()
+            .dtoh_sync_copy_into(buffer.num_rows_device(), &mut host_rows)
+            .map_err(|e| XlogError::Kernel(format!("Failed to read row count: {}", e)))?;
+        let num_rows = host_rows[0] as usize;
 
         let fields: Vec<Field> = buffer
             .schema
@@ -5836,11 +5970,7 @@ impl CudaKernelProvider {
             schema_cols.push((field.name().clone(), scalar_type));
         }
 
-        Ok(CudaBuffer::from_columns(
-            columns,
-            num_rows,
-            Schema::new(schema_cols),
-        ))
+        self.buffer_from_columns(columns, num_rows, Schema::new(schema_cols))
     }
 
     /// Export a CudaBuffer to an Arrow IPC stream (RecordBatchStream) as bytes.
@@ -5944,18 +6074,18 @@ impl CudaKernelProvider {
             .column(col_idx)
             .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
 
-        if buffer.num_rows == 0 {
+        if buffer.num_rows() == 0 {
             return Ok(vec![]);
         }
 
-        let num_bytes = (buffer.num_rows as usize) * std::mem::size_of::<u32>();
+        let num_bytes = (buffer.num_rows() as usize) * std::mem::size_of::<u32>();
         if col.num_bytes() != num_bytes {
             return Err(XlogError::Kernel(format!(
                 "Column {} has {} bytes but expected {} for {} rows",
                 col_idx,
                 col.num_bytes(),
                 num_bytes,
-                buffer.num_rows
+                buffer.num_rows()
             )));
         }
         let mut bytes = vec![0u8; num_bytes];
@@ -5988,18 +6118,18 @@ impl CudaKernelProvider {
             .column(col_idx)
             .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
 
-        if buffer.num_rows == 0 {
+        if buffer.num_rows() == 0 {
             return Ok(vec![]);
         }
 
-        let num_bytes = buffer.num_rows as usize;
+        let num_bytes = buffer.num_rows() as usize;
         if col.num_bytes() != num_bytes {
             return Err(XlogError::Kernel(format!(
                 "Column {} has {} bytes but expected {} for {} rows",
                 col_idx,
                 col.num_bytes(),
                 num_bytes,
-                buffer.num_rows
+                buffer.num_rows()
             )));
         }
 
@@ -6030,18 +6160,18 @@ impl CudaKernelProvider {
             .column(col_idx)
             .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
 
-        if buffer.num_rows == 0 {
+        if buffer.num_rows() == 0 {
             return Ok(vec![]);
         }
 
-        let num_bytes = (buffer.num_rows as usize) * std::mem::size_of::<u64>();
+        let num_bytes = (buffer.num_rows() as usize) * std::mem::size_of::<u64>();
         if col.num_bytes() != num_bytes {
             return Err(XlogError::Kernel(format!(
                 "Column {} has {} bytes but expected {} for {} rows",
                 col_idx,
                 col.num_bytes(),
                 num_bytes,
-                buffer.num_rows
+                buffer.num_rows()
             )));
         }
         let mut bytes = vec![0u8; num_bytes];
@@ -6074,18 +6204,18 @@ impl CudaKernelProvider {
             .column(col_idx)
             .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
 
-        if buffer.num_rows == 0 {
+        if buffer.num_rows() == 0 {
             return Ok(vec![]);
         }
 
-        let num_bytes = (buffer.num_rows as usize) * std::mem::size_of::<f64>();
+        let num_bytes = (buffer.num_rows() as usize) * std::mem::size_of::<f64>();
         if col.num_bytes() != num_bytes {
             return Err(XlogError::Kernel(format!(
                 "Column {} has {} bytes but expected {} for {} rows",
                 col_idx,
                 col.num_bytes(),
                 num_bytes,
-                buffer.num_rows
+                buffer.num_rows()
             )));
         }
         let mut bytes = vec![0u8; num_bytes];
@@ -6118,18 +6248,18 @@ impl CudaKernelProvider {
             .column(col_idx)
             .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
 
-        if buffer.num_rows == 0 {
+        if buffer.num_rows() == 0 {
             return Ok(vec![]);
         }
 
-        let num_bytes = buffer.num_rows as usize;
+        let num_bytes = buffer.num_rows() as usize;
         if col.num_bytes() != num_bytes {
             return Err(XlogError::Kernel(format!(
                 "Column {} has {} bytes but expected {} for {} rows",
                 col_idx,
                 col.num_bytes(),
                 num_bytes,
-                buffer.num_rows
+                buffer.num_rows()
             )));
         }
         let mut bytes = vec![0u8; num_bytes];
@@ -6159,18 +6289,18 @@ impl CudaKernelProvider {
             .column(col_idx)
             .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
 
-        if buffer.num_rows == 0 {
+        if buffer.num_rows() == 0 {
             return Ok(vec![]);
         }
 
-        let num_bytes = (buffer.num_rows as usize) * std::mem::size_of::<i32>();
+        let num_bytes = (buffer.num_rows() as usize) * std::mem::size_of::<i32>();
         if col.num_bytes() != num_bytes {
             return Err(XlogError::Kernel(format!(
                 "Column {} has {} bytes but expected {} for {} rows",
                 col_idx,
                 col.num_bytes(),
                 num_bytes,
-                buffer.num_rows
+                buffer.num_rows()
             )));
         }
         let mut bytes = vec![0u8; num_bytes];
@@ -6203,18 +6333,18 @@ impl CudaKernelProvider {
             .column(col_idx)
             .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
 
-        if buffer.num_rows == 0 {
+        if buffer.num_rows() == 0 {
             return Ok(vec![]);
         }
 
-        let num_bytes = (buffer.num_rows as usize) * std::mem::size_of::<i64>();
+        let num_bytes = (buffer.num_rows() as usize) * std::mem::size_of::<i64>();
         if col.num_bytes() != num_bytes {
             return Err(XlogError::Kernel(format!(
                 "Column {} has {} bytes but expected {} for {} rows",
                 col_idx,
                 col.num_bytes(),
                 num_bytes,
-                buffer.num_rows
+                buffer.num_rows()
             )));
         }
         let mut bytes = vec![0u8; num_bytes];
@@ -6247,18 +6377,18 @@ impl CudaKernelProvider {
             .column(col_idx)
             .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
 
-        if buffer.num_rows == 0 {
+        if buffer.num_rows() == 0 {
             return Ok(vec![]);
         }
 
-        let num_bytes = (buffer.num_rows as usize) * std::mem::size_of::<f32>();
+        let num_bytes = (buffer.num_rows() as usize) * std::mem::size_of::<f32>();
         if col.num_bytes() != num_bytes {
             return Err(XlogError::Kernel(format!(
                 "Column {} has {} bytes but expected {} for {} rows",
                 col_idx,
                 col.num_bytes(),
                 num_bytes,
-                buffer.num_rows
+                buffer.num_rows()
             )));
         }
         let mut bytes = vec![0u8; num_bytes];
@@ -6401,7 +6531,29 @@ impl CudaKernelProvider {
             // Allocate zero-length column
             columns.push(self.memory.alloc::<u8>(0)?.into());
         }
-        Ok(CudaBuffer::from_columns(columns, 0, schema))
+        self.buffer_from_columns(columns, 0, schema)
+    }
+
+    pub(crate) fn buffer_from_columns(
+        &self,
+        columns: Vec<CudaColumn>,
+        row_cap: u64,
+        schema: Schema,
+    ) -> Result<CudaBuffer> {
+        let row_u32 = u32::try_from(row_cap).map_err(|_| {
+            XlogError::Kernel(format!(
+                "Row capacity {} exceeds u32::MAX",
+                row_cap
+            ))
+        })?;
+        let mut d_num_rows = self.memory.alloc::<u32>(1)?;
+        self.device
+            .inner()
+            .htod_sync_copy_into(&[row_u32], &mut d_num_rows)
+            .map_err(|e| XlogError::Kernel(format!("Failed to set row count: {}", e)))?;
+        Ok(CudaBuffer::from_columns(
+            columns, row_cap, d_num_rows, schema,
+        ))
     }
 
     /// Combine schemas from left and right buffers for join result
@@ -7267,11 +7419,7 @@ impl CudaKernelProvider {
         result_columns.extend(gathered_left.columns.into_iter());
         result_columns.extend(gathered_right.columns.into_iter());
 
-        Ok(CudaBuffer::from_columns(
-            result_columns,
-            result_count,
-            combined_schema,
-        ))
+        self.buffer_from_columns(result_columns, result_count, combined_schema)
     }
 
     fn hash_join_inner_v2_indexed(
@@ -7433,11 +7581,7 @@ impl CudaKernelProvider {
         result_columns.extend(gathered_left.columns.into_iter());
         result_columns.extend(gathered_right.columns.into_iter());
 
-        Ok(CudaBuffer::from_columns(
-            result_columns,
-            result_count,
-            combined_schema,
-        ))
+        self.buffer_from_columns(result_columns, result_count, combined_schema)
     }
 
     /// Semi-join implementation: return left rows that have matches in right
@@ -7970,11 +8114,11 @@ impl CudaKernelProvider {
             let mut result_columns = Vec::with_capacity(combined_schema.arity());
             result_columns.extend(inner_left.columns.into_iter());
             result_columns.extend(inner_right.columns.into_iter());
-            return Ok(CudaBuffer::from_columns(
+            return self.buffer_from_columns(
                 result_columns,
                 inner_count as u64,
                 combined_schema,
-            ));
+            );
         }
 
         if inner_count == 0 {
@@ -8006,11 +8150,7 @@ impl CudaKernelProvider {
             }
 
             self.device.synchronize()?;
-            return Ok(CudaBuffer::from_columns(
-                result_columns,
-                unmatched_rows,
-                combined_schema,
-            ));
+            return self.buffer_from_columns(result_columns, unmatched_rows, combined_schema);
         }
 
         let mut result_columns = Vec::with_capacity(combined_schema.arity());
@@ -8103,11 +8243,7 @@ impl CudaKernelProvider {
 
         self.device.synchronize()?;
 
-        Ok(CudaBuffer::from_columns(
-            result_columns,
-            total_rows,
-            combined_schema,
-        ))
+        self.buffer_from_columns(result_columns, total_rows, combined_schema)
     }
 
     /// Left outer join implementation: return all left rows with matched right columns or nulls
@@ -8353,11 +8489,11 @@ impl CudaKernelProvider {
             let mut result_columns = Vec::with_capacity(combined_schema.arity());
             result_columns.extend(inner_left.columns.into_iter());
             result_columns.extend(inner_right.columns.into_iter());
-            return Ok(CudaBuffer::from_columns(
+            return self.buffer_from_columns(
                 result_columns,
                 inner_count as u64,
                 combined_schema,
-            ));
+            );
         }
 
         if inner_count == 0 {
@@ -8389,11 +8525,7 @@ impl CudaKernelProvider {
             }
 
             self.device.synchronize()?;
-            return Ok(CudaBuffer::from_columns(
-                result_columns,
-                unmatched_rows,
-                combined_schema,
-            ));
+            return self.buffer_from_columns(result_columns, unmatched_rows, combined_schema);
         }
 
         // Concatenate: matched rows followed by unmatched rows (null-extended on right).
@@ -8489,11 +8621,7 @@ impl CudaKernelProvider {
 
         self.device.synchronize()?;
 
-        Ok(CudaBuffer::from_columns(
-            result_columns,
-            total_rows,
-            combined_schema,
-        ))
+        self.buffer_from_columns(result_columns, total_rows, combined_schema)
     }
 
     /// Helper for left outer join with empty right: all left rows with null right columns
@@ -8548,11 +8676,7 @@ impl CudaKernelProvider {
 
         self.device.synchronize()?;
 
-        Ok(CudaBuffer::from_columns(
-            result_columns,
-            num_rows,
-            combined_schema,
-        ))
+        self.buffer_from_columns(result_columns, num_rows, combined_schema)
     }
 
     /// Clone a buffer (deep copy) via host (MVP simplification)
@@ -8586,11 +8710,7 @@ impl CudaKernelProvider {
             }
         }
 
-        Ok(CudaBuffer::from_columns(
-            result_columns,
-            buffer.num_rows(),
-            buffer.schema().clone(),
-        ))
+        self.buffer_from_columns(result_columns, buffer.num_rows(), buffer.schema().clone())
     }
 
     // ============== Arithmetic Operations (GPU) ==============
@@ -8639,11 +8759,7 @@ impl CudaKernelProvider {
             .map_err(|e| XlogError::Kernel(format!("Failed to copy column: {}", e)))?;
 
         let schema = Schema::new(vec![("col".to_string(), col_type)]);
-        Ok(CudaBuffer::from_columns(
-            vec![dst_col.into()],
-            num_rows,
-            schema,
-        ))
+        self.buffer_from_columns(vec![dst_col.into()], num_rows, schema)
     }
 
     /// Create a column filled with a constant value
@@ -8737,11 +8853,7 @@ impl CudaKernelProvider {
         self.device.synchronize()?;
 
         let schema = Schema::new(vec![("const".to_string(), col_type)]);
-        Ok(CudaBuffer::from_columns(
-            vec![dst_col.into()],
-            num_rows,
-            schema,
-        ))
+        self.buffer_from_columns(vec![dst_col.into()], num_rows, schema)
     }
 
     /// Element-wise addition of two single-column buffers
@@ -9025,11 +9137,7 @@ impl CudaKernelProvider {
                 unsafe { func.clone().launch(config, (col, n, &mut out)) }
                     .map_err(|e| XlogError::Kernel(format!("abs_i64 failed: {}", e)))?;
                 self.device.synchronize()?;
-                Ok(CudaBuffer::from_columns(
-                    vec![out.into()],
-                    a.num_rows(),
-                    a.schema.clone(),
-                ))
+                self.buffer_from_columns(vec![out.into()], a.num_rows(), a.schema.clone())
             }
             Some(ScalarType::I32) => {
                 let expected_bytes = (n as usize)
@@ -9052,11 +9160,7 @@ impl CudaKernelProvider {
                 unsafe { func.clone().launch(config, (col, n, &mut out)) }
                     .map_err(|e| XlogError::Kernel(format!("abs_i32 failed: {}", e)))?;
                 self.device.synchronize()?;
-                Ok(CudaBuffer::from_columns(
-                    vec![out.into()],
-                    a.num_rows(),
-                    a.schema.clone(),
-                ))
+                self.buffer_from_columns(vec![out.into()], a.num_rows(), a.schema.clone())
             }
             Some(ScalarType::F64) => {
                 let expected_bytes = (n as usize)
@@ -9079,11 +9183,7 @@ impl CudaKernelProvider {
                 unsafe { func.clone().launch(config, (col, n, &mut out)) }
                     .map_err(|e| XlogError::Kernel(format!("abs_f64 failed: {}", e)))?;
                 self.device.synchronize()?;
-                Ok(CudaBuffer::from_columns(
-                    vec![out.into()],
-                    a.num_rows(),
-                    a.schema.clone(),
-                ))
+                self.buffer_from_columns(vec![out.into()], a.num_rows(), a.schema.clone())
             }
             Some(ScalarType::F32) => {
                 let expected_bytes = (n as usize)
@@ -9106,11 +9206,7 @@ impl CudaKernelProvider {
                 unsafe { func.clone().launch(config, (col, n, &mut out)) }
                     .map_err(|e| XlogError::Kernel(format!("abs_f32 failed: {}", e)))?;
                 self.device.synchronize()?;
-                Ok(CudaBuffer::from_columns(
-                    vec![out.into()],
-                    a.num_rows(),
-                    a.schema.clone(),
-                ))
+                self.buffer_from_columns(vec![out.into()], a.num_rows(), a.schema.clone())
             }
             Some(ScalarType::U32 | ScalarType::U64 | ScalarType::Bool | ScalarType::Symbol) => {
                 self.clone_buffer(a)
@@ -9296,11 +9392,7 @@ impl CudaKernelProvider {
         self.device.synchronize()?;
 
         let schema = Schema::new(vec![("result".to_string(), ScalarType::F64)]);
-        Ok(CudaBuffer::from_columns(
-            vec![out.into()],
-            base.num_rows(),
-            schema,
-        ))
+        self.buffer_from_columns(vec![out.into()], base.num_rows(), schema)
     }
 
     /// Conditional select between two single-column buffers based on a boolean mask.
@@ -9405,11 +9497,7 @@ impl CudaKernelProvider {
         self.device.synchronize()?;
 
         let schema = Schema::new(vec![("result".to_string(), result_type)]);
-        Ok(CudaBuffer::from_columns(
-            vec![out.into()],
-            mask.num_rows(),
-            schema,
-        ))
+        self.buffer_from_columns(vec![out.into()], mask.num_rows(), schema)
     }
 
     /// Helper for select_columns when result type is Bool
@@ -9509,11 +9597,7 @@ impl CudaKernelProvider {
 
         self.device.synchronize()?;
 
-        Ok(CudaBuffer::from_columns(
-            vec![out.into()],
-            a.num_rows(),
-            schema,
-        ))
+        self.buffer_from_columns(vec![out.into()], a.num_rows(), schema)
     }
 
     /// Helper for binary arithmetic operations on device.
@@ -9579,11 +9663,7 @@ impl CudaKernelProvider {
             .map_err(|e| XlogError::Kernel(format!("arith binary failed: {}", e)))?;
 
         self.device.synchronize()?;
-        Ok(CudaBuffer::from_columns(
-            vec![out.into()],
-            a.num_rows(),
-            a.schema.clone(),
-        ))
+        self.buffer_from_columns(vec![out.into()], a.num_rows(), a.schema.clone())
     }
 
     /// Combine multiple single-column buffers into a multi-column buffer
@@ -9600,7 +9680,13 @@ impl CudaKernelProvider {
         types: Vec<ScalarType>,
     ) -> Result<CudaBuffer> {
         if columns.is_empty() {
-            return Ok(CudaBuffer::empty());
+            let schema_cols: Vec<(String, ScalarType)> = types
+                .iter()
+                .enumerate()
+                .map(|(i, t)| (format!("col_{}", i), *t))
+                .collect();
+            let schema = Schema::new(schema_cols);
+            return self.create_empty_buffer(schema);
         }
 
         let num_rows = columns[0].num_rows();
@@ -9662,7 +9748,7 @@ impl CudaKernelProvider {
             .collect();
         let schema = Schema::new(schema_cols);
 
-        Ok(CudaBuffer::from_columns(result_columns, num_rows, schema))
+        self.buffer_from_columns(result_columns, num_rows, schema)
     }
 }
 
@@ -9745,6 +9831,14 @@ mod tests {
         assert!(
             MC_SAMPLE_PTX.contains("mc_sample_bernoulli"),
             "MC_SAMPLE_PTX should contain mc_sample_bernoulli"
+        );
+        assert!(
+            MC_EVAL_PTX.contains("mc_eval_mask_var"),
+            "MC_EVAL_PTX should contain mc_eval_mask_var"
+        );
+        assert!(
+            MC_EVAL_PTX.contains("mc_eval_mask_ad_choice"),
+            "MC_EVAL_PTX should contain mc_eval_mask_ad_choice"
         );
         assert!(
             SAT_PTX.contains("sat_cdcl_solve"),
@@ -9843,6 +9937,10 @@ mod tests {
         assert!(
             valid_targets.iter().any(|t| MC_SAMPLE_PTX.contains(t)),
             "MC_SAMPLE_PTX should target sm_70 or later"
+        );
+        assert!(
+            valid_targets.iter().any(|t| MC_EVAL_PTX.contains(t)),
+            "MC_EVAL_PTX should target sm_70 or later"
         );
         assert!(
             valid_targets.iter().any(|t| SAT_PTX.contains(t)),
@@ -10027,7 +10125,9 @@ mod tests {
             .htod_sync_copy_into(&bytes, &mut col)
             .expect("htod");
 
-        CudaBuffer::from_columns(vec![col.into()], data.len() as u64, schema)
+        provider
+            .buffer_from_columns(vec![col.into()], data.len() as u64, schema)
+            .expect("buffer")
     }
 
     // Helper function to create an empty buffer with correct column count
@@ -10036,7 +10136,9 @@ mod tests {
         for _ in 0..schema.arity() {
             columns.push(provider.memory().alloc::<u8>(0).expect("alloc").into());
         }
-        CudaBuffer::from_columns(columns, 0, schema)
+        provider
+            .buffer_from_columns(columns, 0, schema)
+            .expect("buffer")
     }
 
     // Helper function to read U32 data from CudaBuffer
@@ -10366,7 +10468,9 @@ mod tests {
             .inner()
             .htod_sync_copy_into(&bytes_2col[8..], &mut col1)
             .expect("htod");
-        let buffer_2col = CudaBuffer::from_columns(vec![col0.into(), col1.into()], 2, schema_2col);
+        let buffer_2col = provider
+            .buffer_from_columns(vec![col0.into(), col1.into()], 2, schema_2col)
+            .expect("buffer");
 
         let buffer_1col = create_test_buffer(&provider, &[1, 2], "c0");
 
@@ -10460,7 +10564,9 @@ mod tests {
             .htod_sync_copy_into(&val_bytes, &mut val_col)
             .expect("upload val");
 
-        let buffer = CudaBuffer::from_columns(vec![key_col.into(), val_col.into()], 4, schema);
+        let buffer = provider
+            .buffer_from_columns(vec![key_col.into(), val_col.into()], 4, schema)
+            .expect("buffer");
 
         // Run LogSumExp aggregation grouped by key column (0), aggregating value column (1)
         let result = provider.groupby_agg(&buffer, &[0], AggOp::LogSumExp, 1);

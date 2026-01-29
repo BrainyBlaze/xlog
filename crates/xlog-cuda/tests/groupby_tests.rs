@@ -387,35 +387,11 @@ fn create_keyed_f64_buffer(
         ("value".to_string(), ScalarType::F64),
     ]);
 
-    // Create key column
     let key_bytes: Vec<u8> = keys.iter().flat_map(|v| v.to_le_bytes()).collect();
-    let mut key_col = provider
-        .memory()
-        .alloc::<u8>(key_bytes.len())
-        .expect("alloc key");
-    provider
-        .device()
-        .inner()
-        .htod_sync_copy_into(&key_bytes, &mut key_col)
-        .expect("upload key");
-
-    // Create value column
     let val_bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
-    let mut val_col = provider
-        .memory()
-        .alloc::<u8>(val_bytes.len())
-        .expect("alloc val");
     provider
-        .device()
-        .inner()
-        .htod_sync_copy_into(&val_bytes, &mut val_col)
-        .expect("upload val");
-
-    xlog_cuda::CudaBuffer::from_columns(
-        vec![key_col.into(), val_col.into()],
-        keys.len() as u64,
-        schema,
-    )
+        .create_buffer_from_slices(&[&key_bytes, &val_bytes], schema)
+        .expect("buffer")
 }
 
 #[test]

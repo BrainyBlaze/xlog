@@ -53,7 +53,7 @@ fn test_hash_join_v2_single_key() {
 
     // Expected: rows with matching keys 2 and 3
     // Result should have 4 columns: left.key, left.payload, right.key, right.value
-    assert_eq!(result.num_rows, 2);
+    assert_eq!(result.num_rows(), 2);
     assert_eq!(result.arity(), 4);
 }
 
@@ -85,7 +85,7 @@ fn test_semi_join() {
 
     let vals = provider.download_column_u32(&result, 0).unwrap();
     // Order may vary, just check count and values
-    assert_eq!(result.num_rows, 2);
+    assert_eq!(result.num_rows(), 2);
     assert!(vals.contains(&2));
     assert!(vals.contains(&4));
 }
@@ -117,7 +117,7 @@ fn test_anti_join() {
         .unwrap();
 
     let vals = provider.download_column_u32(&result, 0).unwrap();
-    assert_eq!(result.num_rows, 2);
+    assert_eq!(result.num_rows(), 2);
     assert!(vals.contains(&1));
     assert!(vals.contains(&3));
 }
@@ -146,7 +146,7 @@ fn test_join_no_matches() {
         .hash_join_v2(&left_buf, &right_buf, &[0], &[0], JoinType::Inner)
         .unwrap();
 
-    assert_eq!(result.num_rows, 0);
+    assert_eq!(result.num_rows(), 0);
 }
 
 #[test]
@@ -176,7 +176,7 @@ fn test_inner_join_with_duplicates() {
         .unwrap();
 
     // 2 matching left rows x 2 matching right rows = 4
-    assert_eq!(result.num_rows, 4);
+    assert_eq!(result.num_rows(), 4);
 }
 
 #[test]
@@ -208,7 +208,7 @@ fn test_semi_join_preserves_left_columns() {
 
     // Semi-join keeps left schema
     assert_eq!(result.arity(), 2);
-    assert_eq!(result.num_rows, 2);
+    assert_eq!(result.num_rows(), 2);
 
     let keys = provider.download_column_u32(&result, 0).unwrap();
     let payloads = provider.download_column_u32(&result, 1).unwrap();
@@ -256,7 +256,7 @@ fn test_left_outer_join() {
         .unwrap();
 
     // Should have 3 rows (all left rows preserved)
-    assert_eq!(result.num_rows, 3);
+    assert_eq!(result.num_rows(), 3);
     assert_eq!(result.arity(), 2);
 
     let left_vals = provider.download_column_u32(&result, 0).unwrap();
@@ -304,7 +304,7 @@ fn test_left_outer_all_unmatched() {
         .hash_join_v2(&left_buf, &right_buf, &[0], &[0], JoinType::LeftOuter)
         .unwrap();
 
-    assert_eq!(result.num_rows, 3);
+    assert_eq!(result.num_rows(), 3);
 
     let right_vals = provider.download_column_u32(&result, 1).unwrap();
     // All right values should be 0 (null)
@@ -360,7 +360,7 @@ fn test_multi_column_join() {
     // (1, 20, 200) joins (1, 20, 3000) -> result row
     // (2, 10, 300) joins (2, 10, 2000) -> result row
     assert_eq!(
-        result.num_rows, 3,
+        result.num_rows(), 3,
         "Should have 3 matches for multi-column join"
     );
 }
@@ -391,7 +391,7 @@ fn test_left_outer_empty_right() {
         .unwrap();
 
     // All left rows should be returned with null right columns
-    assert_eq!(result.num_rows, 3);
+    assert_eq!(result.num_rows(), 3);
     assert_eq!(result.arity(), 2);
 
     let right_vals = provider.download_column_u32(&result, 1).unwrap();

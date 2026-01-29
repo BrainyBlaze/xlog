@@ -7,7 +7,7 @@ use std::ffi::c_void;
 use std::sync::Arc;
 
 use cudarc::driver::DevicePtr;
-use xlog_core::{Result, ScalarType, XlogError};
+use xlog_core::{Result, ScalarType, Schema, XlogError};
 
 use crate::memory::{CudaBuffer, CudaColumn};
 use crate::provider::CudaKernelProvider;
@@ -343,7 +343,7 @@ impl CudaKernelProvider {
     /// The returned buffer owns the DLPack tensors and will call their deleters on drop.
     pub fn from_dlpack_tensors(&self, tensors: Vec<DlpackManagedTensor>) -> Result<CudaBuffer> {
         if tensors.is_empty() {
-            return Ok(CudaBuffer::empty());
+            return self.create_empty_buffer(Schema::new(vec![]));
         }
 
         let mut columns = Vec::with_capacity(tensors.len());
@@ -366,11 +366,8 @@ impl CudaKernelProvider {
             columns.push(CudaColumn::dlpack(ptr, len_bytes, tensor));
         }
 
-        Ok(CudaBuffer::from_columns(
-            columns,
-            num_rows.unwrap_or(0),
-            xlog_core::Schema::new(schema_cols),
-        ))
+        let schema = xlog_core::Schema::new(schema_cols);
+        self.buffer_from_columns(columns, num_rows.unwrap_or(0), schema)
     }
 
     /// Import DLPack column tensors with an explicit schema (type-checked).
@@ -388,7 +385,7 @@ impl CudaKernelProvider {
         }
 
         if tensors.is_empty() {
-            return Ok(CudaBuffer::from_columns(Vec::new(), 0, schema));
+            return self.create_empty_buffer(schema);
         }
 
         let mut columns = Vec::with_capacity(tensors.len());
@@ -419,10 +416,6 @@ impl CudaKernelProvider {
             columns.push(CudaColumn::dlpack(ptr, len_bytes, tensor));
         }
 
-        Ok(CudaBuffer::from_columns(
-            columns,
-            num_rows.unwrap_or(0),
-            schema,
-        ))
+        self.buffer_from_columns(columns, num_rows.unwrap_or(0), schema)
     }
 }

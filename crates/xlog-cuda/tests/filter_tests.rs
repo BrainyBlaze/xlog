@@ -80,7 +80,7 @@ fn test_filter_no_matches() {
         .unwrap();
     let filtered = provider.filter_u32_eq(&buffer, 0, 99).unwrap();
 
-    assert_eq!(filtered.num_rows, 0);
+    assert_eq!(filtered.num_rows(), 0);
 }
 
 #[test]

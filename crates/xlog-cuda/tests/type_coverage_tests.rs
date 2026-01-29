@@ -46,28 +46,19 @@ fn test_filter_i64_by_mask() {
     let bytes: Vec<u8> = data.iter().flat_map(|v| v.to_le_bytes()).collect();
     let schema = make_schema(&[("val", ScalarType::I64)]);
 
-    // Allocate and upload
-    let mut col = provider
-        .memory()
-        .alloc::<u8>(bytes.len())
-        .expect("alloc failed");
-    provider
-        .device()
-        .inner()
-        .htod_sync_copy_into(&bytes, &mut col)
-        .expect("upload failed");
-
-    let buffer = xlog_cuda::CudaBuffer::from_columns(vec![col.into()], data.len() as u64, schema);
+    let buffer = provider
+        .create_buffer_from_slices(&[&bytes], schema)
+        .expect("buffer");
 
     // Apply filter by mask
     let filtered = provider.filter_by_mask(&buffer, &mask).unwrap();
 
     // Verify result
-    assert_eq!(filtered.num_rows, 3);
+    assert_eq!(filtered.num_rows(), 3);
 
     // Download and check values
     let result_col = filtered.column(0).unwrap();
-    let mut result_bytes = vec![0u8; (filtered.num_rows as usize) * 8];
+    let mut result_bytes = vec![0u8; (filtered.num_rows() as usize) * 8];
     provider
         .device()
         .inner()
@@ -97,23 +88,15 @@ fn test_filter_f64_by_mask() {
     let bytes: Vec<u8> = data.iter().flat_map(|v| v.to_le_bytes()).collect();
     let schema = make_schema(&[("val", ScalarType::F64)]);
 
-    let mut col = provider
-        .memory()
-        .alloc::<u8>(bytes.len())
-        .expect("alloc failed");
-    provider
-        .device()
-        .inner()
-        .htod_sync_copy_into(&bytes, &mut col)
-        .expect("upload failed");
-
-    let buffer = xlog_cuda::CudaBuffer::from_columns(vec![col.into()], data.len() as u64, schema);
+    let buffer = provider
+        .create_buffer_from_slices(&[&bytes], schema)
+        .expect("buffer");
     let filtered = provider.filter_by_mask(&buffer, &mask).unwrap();
 
-    assert_eq!(filtered.num_rows, 3);
+    assert_eq!(filtered.num_rows(), 3);
 
     let result_col = filtered.column(0).unwrap();
-    let mut result_bytes = vec![0u8; (filtered.num_rows as usize) * 8];
+    let mut result_bytes = vec![0u8; (filtered.num_rows() as usize) * 8];
     provider
         .device()
         .inner()
@@ -142,23 +125,15 @@ fn test_filter_i32_by_mask() {
     let bytes: Vec<u8> = data.iter().flat_map(|v| v.to_le_bytes()).collect();
     let schema = make_schema(&[("val", ScalarType::I32)]);
 
-    let mut col = provider
-        .memory()
-        .alloc::<u8>(bytes.len())
-        .expect("alloc failed");
-    provider
-        .device()
-        .inner()
-        .htod_sync_copy_into(&bytes, &mut col)
-        .expect("upload failed");
-
-    let buffer = xlog_cuda::CudaBuffer::from_columns(vec![col.into()], data.len() as u64, schema);
+    let buffer = provider
+        .create_buffer_from_slices(&[&bytes], schema)
+        .expect("buffer");
     let filtered = provider.filter_by_mask(&buffer, &mask).unwrap();
 
-    assert_eq!(filtered.num_rows, 3);
+    assert_eq!(filtered.num_rows(), 3);
 
     let result_col = filtered.column(0).unwrap();
-    let mut result_bytes = vec![0u8; (filtered.num_rows as usize) * 4];
+    let mut result_bytes = vec![0u8; (filtered.num_rows() as usize) * 4];
     provider
         .device()
         .inner()
@@ -187,23 +162,15 @@ fn test_filter_f32_by_mask() {
     let bytes: Vec<u8> = data.iter().flat_map(|v| v.to_le_bytes()).collect();
     let schema = make_schema(&[("val", ScalarType::F32)]);
 
-    let mut col = provider
-        .memory()
-        .alloc::<u8>(bytes.len())
-        .expect("alloc failed");
-    provider
-        .device()
-        .inner()
-        .htod_sync_copy_into(&bytes, &mut col)
-        .expect("upload failed");
-
-    let buffer = xlog_cuda::CudaBuffer::from_columns(vec![col.into()], data.len() as u64, schema);
+    let buffer = provider
+        .create_buffer_from_slices(&[&bytes], schema)
+        .expect("buffer");
     let filtered = provider.filter_by_mask(&buffer, &mask).unwrap();
 
-    assert_eq!(filtered.num_rows, 2);
+    assert_eq!(filtered.num_rows(), 2);
 
     let result_col = filtered.column(0).unwrap();
-    let mut result_bytes = vec![0u8; (filtered.num_rows as usize) * 4];
+    let mut result_bytes = vec![0u8; (filtered.num_rows() as usize) * 4];
     provider
         .device()
         .inner()
@@ -297,7 +264,7 @@ fn test_join_u32_keys_inner() {
         .unwrap();
 
     // Should have 2 matches: key 2 and key 3
-    assert_eq!(result.num_rows, 2);
+    assert_eq!(result.num_rows(), 2);
     assert_eq!(result.arity(), 4);
 }
 
@@ -326,7 +293,7 @@ fn test_join_u32_keys_semi() {
         .hash_join_v2(&left_buf, &right_buf, &[0], &[0], JoinType::Semi)
         .unwrap();
 
-    assert_eq!(result.num_rows, 2);
+    assert_eq!(result.num_rows(), 2);
     let vals = provider.download_column_u32(&result, 0).unwrap();
     assert!(vals.contains(&2));
     assert!(vals.contains(&4));
@@ -357,7 +324,7 @@ fn test_join_u32_keys_anti() {
         .hash_join_v2(&left_buf, &right_buf, &[0], &[0], JoinType::Anti)
         .unwrap();
 
-    assert_eq!(result.num_rows, 2);
+    assert_eq!(result.num_rows(), 2);
     let vals = provider.download_column_u32(&result, 0).unwrap();
     assert!(vals.contains(&1));
     assert!(vals.contains(&3));
@@ -586,17 +553,17 @@ fn test_operations_empty_buffer() {
     // Filter empty buffer with mask
     let mask: Vec<u8> = vec![];
     let filtered = provider.filter_by_mask(&empty, &mask).unwrap();
-    assert_eq!(filtered.num_rows, 0);
+    assert_eq!(filtered.num_rows(), 0);
 
     // Sort empty buffer
     let sorted = provider.sort(&empty, &[0]).unwrap();
-    assert_eq!(sorted.num_rows, 0);
+    assert_eq!(sorted.num_rows(), 0);
 
     // Join with empty buffer
     let join_result = provider
         .hash_join_v2(&empty, &non_empty_buf, &[0], &[0], JoinType::Inner)
         .unwrap();
-    assert_eq!(join_result.num_rows, 0);
+    assert_eq!(join_result.num_rows(), 0);
 
     // Union with empty buffer
     let union_result = provider.union_gpu(&empty, &non_empty_buf).unwrap();
@@ -610,7 +577,7 @@ fn test_operations_empty_buffer() {
 
     // Diff from empty buffer
     let diff_result2 = provider.diff_gpu(&empty, &non_empty_buf).unwrap();
-    assert_eq!(diff_result2.num_rows, 0);
+    assert_eq!(diff_result2.num_rows(), 0);
 }
 
 /// Test groupby with empty input
@@ -696,7 +663,7 @@ fn test_sort_operation() {
         .unwrap();
 
     let sorted = provider.sort(&buffer, &[0]).unwrap();
-    assert_eq!(sorted.num_rows, 10);
+    assert_eq!(sorted.num_rows(), 10);
 
     // Verify sorted order
     let sorted_keys = provider.download_column_u32(&sorted, 0).unwrap();
@@ -734,7 +701,7 @@ fn test_large_union() {
     let result = provider.union_gpu(&buf_a, &buf_b).unwrap();
 
     // Union should have 7500 unique values (0..7500)
-    assert_eq!(result.num_rows, 7500);
+    assert_eq!(result.num_rows(), 7500);
 }
 
 /// Test diff operation with moderate size
@@ -761,7 +728,7 @@ fn test_moderate_diff() {
     let result = provider.diff_gpu(&buf_a, &buf_b).unwrap();
 
     // Diff should have 50 values (0..50)
-    assert_eq!(result.num_rows, 50);
+    assert_eq!(result.num_rows(), 50);
 }
 
 /// Test multi-column filter by mask with mixed types
@@ -779,42 +746,19 @@ fn test_filter_multi_column_mixed_types() {
 
     let schema = make_schema(&[("u32_col", ScalarType::U32), ("u64_col", ScalarType::U64)]);
 
-    // Upload u32 column
+    // Build buffer from host slices
     let col0_bytes: Vec<u8> = col0.iter().flat_map(|v| v.to_le_bytes()).collect();
-    let mut cuda_col0 = provider
-        .memory()
-        .alloc::<u8>(col0_bytes.len())
-        .expect("alloc failed");
-    provider
-        .device()
-        .inner()
-        .htod_sync_copy_into(&col0_bytes, &mut cuda_col0)
-        .expect("upload failed");
-
-    // Upload u64 column
     let col1_bytes: Vec<u8> = col1.iter().flat_map(|v| v.to_le_bytes()).collect();
-    let mut cuda_col1 = provider
-        .memory()
-        .alloc::<u8>(col1_bytes.len())
-        .expect("alloc failed");
-    provider
-        .device()
-        .inner()
-        .htod_sync_copy_into(&col1_bytes, &mut cuda_col1)
-        .expect("upload failed");
-
-    let buffer = xlog_cuda::CudaBuffer::from_columns(
-        vec![cuda_col0.into(), cuda_col1.into()],
-        col0.len() as u64,
-        schema,
-    );
+    let buffer = provider
+        .create_buffer_from_slices(&[&col0_bytes, &col1_bytes], schema)
+        .expect("buffer");
 
     let filtered = provider.filter_by_mask(&buffer, &mask).unwrap();
-    assert_eq!(filtered.num_rows, 3);
+    assert_eq!(filtered.num_rows(), 3);
 
     // Download and verify u32 column
     let result_col0 = filtered.column(0).unwrap();
-    let mut result0_bytes = vec![0u8; (filtered.num_rows as usize) * 4];
+    let mut result0_bytes = vec![0u8; (filtered.num_rows() as usize) * 4];
     provider
         .device()
         .inner()
@@ -828,7 +772,7 @@ fn test_filter_multi_column_mixed_types() {
 
     // Download and verify u64 column
     let result_col1 = filtered.column(1).unwrap();
-    let mut result1_bytes = vec![0u8; (filtered.num_rows as usize) * 8];
+    let mut result1_bytes = vec![0u8; (filtered.num_rows() as usize) * 8];
     provider
         .device()
         .inner()
@@ -863,11 +807,11 @@ fn test_single_element_buffer() {
 
     // Filter with mask=1
     let filtered = provider.filter_by_mask(&buffer, &[1]).unwrap();
-    assert_eq!(filtered.num_rows, 1);
+    assert_eq!(filtered.num_rows(), 1);
 
     // Filter with mask=0
     let filtered0 = provider.filter_by_mask(&buffer, &[0]).unwrap();
-    assert_eq!(filtered0.num_rows, 0);
+    assert_eq!(filtered0.num_rows(), 0);
 }
 
 /// Test all mask values are 1 (select all)
@@ -909,7 +853,7 @@ fn test_filter_select_none() {
         .unwrap();
 
     let filtered = provider.filter_by_mask(&buffer, &mask).unwrap();
-    assert_eq!(filtered.num_rows, 0);
+    assert_eq!(filtered.num_rows(), 0);
 }
 
 #[test]

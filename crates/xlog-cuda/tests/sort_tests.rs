@@ -77,7 +77,7 @@ fn test_sort_empty() {
     let buffer = provider.create_empty_buffer(schema.clone()).unwrap();
     let sorted = provider.sort(&buffer, &[0]).unwrap();
 
-    assert_eq!(sorted.num_rows, 0);
+    assert_eq!(sorted.num_rows(), 0);
 }
 
 #[test]

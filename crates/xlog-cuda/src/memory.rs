@@ -341,32 +341,31 @@ unsafe impl cudarc::driver::DeviceRepr for &mut CudaColumn {
 pub struct CudaBuffer {
     /// Column data stored as raw bytes
     pub columns: Vec<CudaColumn>,
-    /// Number of rows in the buffer
-    pub num_rows: u64,
+    /// Row capacity for allocated columns
+    pub row_cap: u64,
+    /// Device-resident row count (len = 1)
+    pub d_num_rows: TrackedCudaSlice<u32>,
     /// Schema describing the column types
     pub schema: Schema,
 }
 
 impl CudaBuffer {
-    /// Create an empty buffer with no columns or rows
-    pub fn empty() -> Self {
-        Self {
-            columns: Vec::new(),
-            num_rows: 0,
-            schema: Schema::new(vec![]),
-        }
-    }
-
     /// Create a buffer from existing columns
     ///
     /// # Arguments
     /// * `columns` - Pre-allocated column data
-    /// * `num_rows` - Number of rows in the buffer
+    /// * `row_cap` - Row capacity for the buffer
+    /// * `d_num_rows` - Device-resident row count
     /// * `schema` - Schema describing the columns
     ///
     /// # Panics
     /// Panics if the number of columns doesn't match the schema arity
-    pub fn from_columns(columns: Vec<CudaColumn>, num_rows: u64, schema: Schema) -> Self {
+    pub fn from_columns(
+        columns: Vec<CudaColumn>,
+        row_cap: u64,
+        d_num_rows: TrackedCudaSlice<u32>,
+        schema: Schema,
+    ) -> Self {
         assert_eq!(
             columns.len(),
             schema.arity(),
@@ -376,19 +375,25 @@ impl CudaBuffer {
         );
         Self {
             columns,
-            num_rows,
+            row_cap,
+            d_num_rows,
             schema,
         }
     }
 
-    /// Get the number of rows
+    /// Get the row capacity
     pub fn num_rows(&self) -> u64 {
-        self.num_rows
+        self.row_cap
     }
 
-    /// Check if the buffer is empty (has no rows)
+    /// Get the device-resident row count
+    pub fn num_rows_device(&self) -> &TrackedCudaSlice<u32> {
+        &self.d_num_rows
+    }
+
+    /// Check if the buffer has zero row capacity
     pub fn is_empty(&self) -> bool {
-        self.num_rows == 0
+        self.row_cap == 0
     }
 
     /// Get the schema
@@ -403,7 +408,7 @@ impl CudaBuffer {
 
     /// Estimated memory usage in bytes
     pub fn estimated_bytes(&self) -> u64 {
-        self.num_rows * self.schema.row_size_bytes() as u64
+        self.row_cap * self.schema.row_size_bytes() as u64
     }
 
     /// Get a reference to a specific column by index
@@ -430,7 +435,18 @@ mod tests {
     // Test CudaBuffer without requiring a GPU
     #[test]
     fn test_cuda_buffer_empty() {
-        let buffer = CudaBuffer::empty();
+        let Some(device) = try_device() else {
+            return;
+        };
+        let budget = MemoryBudget::with_limit(1024 * 1024);
+        let manager = Arc::new(GpuMemoryManager::new(device, budget));
+        let mut d_num_rows = manager.alloc::<u32>(1).unwrap();
+        manager
+            .device()
+            .inner()
+            .htod_sync_copy_into(&[0u32], &mut d_num_rows)
+            .unwrap();
+        let buffer = CudaBuffer::from_columns(Vec::new(), 0, d_num_rows, Schema::new(vec![]));
         assert!(buffer.is_empty());
         assert_eq!(buffer.num_rows(), 0);
         assert_eq!(buffer.arity(), 0);
@@ -444,10 +460,22 @@ mod tests {
             ("b".to_string(), ScalarType::U64),
         ]);
 
-        // Create an empty buffer with schema but no columns (simulating)
+        let Some(device) = try_device() else {
+            return;
+        };
+        let budget = MemoryBudget::with_limit(1024 * 1024);
+        let manager = Arc::new(GpuMemoryManager::new(device, budget));
+        let mut d_num_rows = manager.alloc::<u32>(1).unwrap();
+        manager
+            .device()
+            .inner()
+            .htod_sync_copy_into(&[100u32], &mut d_num_rows)
+            .unwrap();
+
         let buffer = CudaBuffer {
             columns: Vec::new(),
-            num_rows: 100,
+            row_cap: 100,
+            d_num_rows,
             schema: schema.clone(),
         };
 
@@ -594,7 +622,14 @@ mod tests {
         let col1 = manager.alloc::<u8>(400).expect("Alloc col1");
         let col2 = manager.alloc::<u8>(400).expect("Alloc col2");
 
-        let buffer = CudaBuffer::from_columns(vec![col1.into(), col2.into()], 100, schema);
+        let mut d_num_rows = manager.alloc::<u32>(1).expect("Alloc row count");
+        manager
+            .device()
+            .inner()
+            .htod_sync_copy_into(&[100u32], &mut d_num_rows)
+            .expect("Upload row count");
+        let buffer =
+            CudaBuffer::from_columns(vec![col1.into(), col2.into()], 100, d_num_rows, schema);
 
         assert_eq!(buffer.num_rows(), 100);
         assert_eq!(buffer.arity(), 2);
@@ -613,6 +648,17 @@ mod tests {
         ]);
 
         // This should panic: 0 columns but schema has 2
-        CudaBuffer::from_columns(vec![], 100, schema);
+        let Some(device) = try_device() else {
+            return;
+        };
+        let budget = MemoryBudget::with_limit(1024 * 1024);
+        let manager = Arc::new(GpuMemoryManager::new(device, budget));
+        let mut d_num_rows = manager.alloc::<u32>(1).expect("Alloc row count");
+        manager
+            .device()
+            .inner()
+            .htod_sync_copy_into(&[100u32], &mut d_num_rows)
+            .expect("Upload row count");
+        CudaBuffer::from_columns(vec![], 100, d_num_rows, schema);
     }
 }
