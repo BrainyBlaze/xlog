@@ -340,11 +340,11 @@ fn test_sort_all_equal(ctx: &TestContext) -> TestResult {
     };
 
     // Verify row count
-    if sorted.num_rows != SIZE as u64 {
+    if ctx.device_row_count(&sorted) != SIZE as u64 {
         return TestResult::error(
             "test_sort_all_equal",
             start.elapsed(),
-            format!("Sort returned {} rows, expected {}", sorted.num_rows, SIZE),
+            format!("Sort returned {} rows, expected {}", ctx.device_row_count(&sorted), SIZE),
         );
     }
 
@@ -676,13 +676,13 @@ fn test_join_no_matches(ctx: &TestContext) -> TestResult {
     };
 
     // Verify result is empty
-    if joined.num_rows != 0 {
+    if ctx.device_row_count(&joined) != 0 {
         return TestResult::error(
             "test_join_no_matches",
             start.elapsed(),
             format!(
                 "Join with no matching keys should return 0 rows, got {}",
-                joined.num_rows
+                ctx.device_row_count(&joined)
             ),
         );
     }
@@ -771,13 +771,13 @@ fn test_join_all_matches(ctx: &TestContext) -> TestResult {
 
     // Verify Cartesian product size
     let expected_rows = LEFT_SIZE * RIGHT_SIZE;
-    if joined.num_rows != expected_rows as u64 {
+    if ctx.device_row_count(&joined) != expected_rows as u64 {
         return TestResult::error(
             "test_join_all_matches",
             start.elapsed(),
             format!(
                 "Join should produce {} rows ({}x{}), got {}",
-                expected_rows, LEFT_SIZE, RIGHT_SIZE, joined.num_rows
+                expected_rows, LEFT_SIZE, RIGHT_SIZE, ctx.device_row_count(&joined)
             ),
         );
     }
@@ -932,13 +932,13 @@ fn test_join_high_cardinality(ctx: &TestContext) -> TestResult {
 
     // Calculate expected overlap: keys from OVERLAP_START to SIZE-1
     let expected_matches = SIZE - OVERLAP_START as usize;
-    if joined.num_rows != expected_matches as u64 {
+    if ctx.device_row_count(&joined) != expected_matches as u64 {
         return TestResult::error(
             "test_join_high_cardinality",
             start.elapsed(),
             format!(
                 "Join should produce {} rows, got {}",
-                expected_matches, joined.num_rows
+                expected_matches, ctx.device_row_count(&joined)
             ),
         );
     }
@@ -978,7 +978,7 @@ fn test_join_high_cardinality(ctx: &TestContext) -> TestResult {
     };
 
     // Verify each joined row is correct
-    for i in 0..joined.num_rows as usize {
+    for i in 0..ctx.device_row_count(&joined) as usize {
         let key = joined_keys[i];
         let lval = joined_lvals[i];
         let rval = joined_rvals[i];
@@ -1085,13 +1085,13 @@ fn test_dedup_all_unique(ctx: &TestContext) -> TestResult {
     };
 
     // Should return all rows since all keys are unique
-    if deduped.num_rows != SIZE as u64 {
+    if ctx.device_row_count(&deduped) != SIZE as u64 {
         return TestResult::error(
             "test_dedup_all_unique",
             start.elapsed(),
             format!(
                 "Dedup should return all {} rows when all unique, got {}",
-                SIZE, deduped.num_rows
+                SIZE, ctx.device_row_count(&deduped)
             ),
         );
     }
@@ -1175,13 +1175,13 @@ fn test_dedup_all_same(ctx: &TestContext) -> TestResult {
     };
 
     // Should return exactly 1 row since all keys are the same
-    if deduped.num_rows != 1 {
+    if ctx.device_row_count(&deduped) != 1 {
         return TestResult::error(
             "test_dedup_all_same",
             start.elapsed(),
             format!(
                 "Dedup should return 1 row when all keys are same, got {}",
-                deduped.num_rows
+                ctx.device_row_count(&deduped)
             ),
         );
     }
@@ -1264,13 +1264,13 @@ fn test_groupby_single_group(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if count_result.num_rows() != 1 {
+    if ctx.device_row_count(&count_result) != 1 {
         return TestResult::error(
             "test_groupby_single_group",
             start.elapsed(),
             format!(
                 "Groupby count should return 1 group, got {}",
-                count_result.num_rows()
+                ctx.device_row_count(&count_result)
             ),
         );
     }
@@ -1474,14 +1474,14 @@ fn test_groupby_all_unique_keys(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if count_result.num_rows() != SIZE as u64 {
+    if ctx.device_row_count(&count_result) != SIZE as u64 {
         return TestResult::error(
             "test_groupby_all_unique_keys",
             start.elapsed(),
             format!(
                 "Groupby count should return {} groups, got {}",
                 SIZE,
-                count_result.num_rows()
+                ctx.device_row_count(&count_result)
             ),
         );
     }

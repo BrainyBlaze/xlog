@@ -68,13 +68,13 @@ fn test_single_block_operations(ctx: &TestContext) -> TestResult {
             }
         };
 
-        if sorted.num_rows != size as u64 {
+        if ctx.device_row_count(&sorted) != size as u64 {
             return TestResult::error(
                 "test_single_block_operations",
                 start.elapsed(),
                 format!(
                     "Size {}: sort returned {} rows, expected {}",
-                    size, sorted.num_rows, size
+                    size, ctx.device_row_count(&sorted), size
                 ),
             );
         }
@@ -119,13 +119,13 @@ fn test_single_block_operations(ctx: &TestContext) -> TestResult {
             }
         };
 
-        if filtered.num_rows != expected_count as u64 {
+        if ctx.device_row_count(&filtered) != expected_count as u64 {
             return TestResult::error(
                 "test_single_block_operations",
                 start.elapsed(),
                 format!(
                     "Size {}: filter returned {} rows, expected {}",
-                    size, filtered.num_rows, expected_count
+                    size, ctx.device_row_count(&filtered), expected_count
                 ),
             );
         }
@@ -143,13 +143,13 @@ fn test_single_block_operations(ctx: &TestContext) -> TestResult {
         };
 
         // All values unique
-        if deduped.num_rows != size as u64 {
+        if ctx.device_row_count(&deduped) != size as u64 {
             return TestResult::error(
                 "test_single_block_operations",
                 start.elapsed(),
                 format!(
                     "Size {}: dedup returned {} rows, expected {}",
-                    size, deduped.num_rows, size
+                    size, ctx.device_row_count(&deduped), size
                 ),
             );
         }
@@ -207,13 +207,13 @@ fn test_multi_block_operations(ctx: &TestContext) -> TestResult {
             }
         };
 
-        if sorted.num_rows != size as u64 {
+        if ctx.device_row_count(&sorted) != size as u64 {
             return TestResult::error(
                 "test_multi_block_operations",
                 start.elapsed(),
                 format!(
                     "Size {}: sort returned {} rows, expected {}",
-                    size, sorted.num_rows, size
+                    size, ctx.device_row_count(&sorted), size
                 ),
             );
         }
@@ -307,13 +307,13 @@ fn test_multi_block_operations(ctx: &TestContext) -> TestResult {
             }
         };
 
-        if filtered.num_rows != expected_count as u64 {
+        if ctx.device_row_count(&filtered) != expected_count as u64 {
             return TestResult::error(
                 "test_multi_block_operations",
                 start.elapsed(),
                 format!(
                     "Size {}: filter returned {} rows, expected {}",
-                    size, filtered.num_rows, expected_count
+                    size, ctx.device_row_count(&filtered), expected_count
                 ),
             );
         }
@@ -371,13 +371,13 @@ fn test_block_boundary_correctness(ctx: &TestContext) -> TestResult {
             }
         };
 
-        if sorted.num_rows != size as u64 {
+        if ctx.device_row_count(&sorted) != size as u64 {
             return TestResult::error(
                 "test_block_boundary_correctness",
                 start.elapsed(),
                 format!(
                     "Size {}: sort returned {} rows, expected {}",
-                    size, sorted.num_rows, size
+                    size, ctx.device_row_count(&sorted), size
                 ),
             );
         }
@@ -429,13 +429,13 @@ fn test_block_boundary_correctness(ctx: &TestContext) -> TestResult {
             }
         };
 
-        if filtered.num_rows != expected_count as u64 {
+        if ctx.device_row_count(&filtered) != expected_count as u64 {
             return TestResult::error(
                 "test_block_boundary_correctness",
                 start.elapsed(),
                 format!(
                     "Size {}: filter returned {} rows, expected {}",
-                    size, filtered.num_rows, expected_count
+                    size, ctx.device_row_count(&filtered), expected_count
                 ),
             );
         }
@@ -518,13 +518,13 @@ fn test_grid_stride_correctness(ctx: &TestContext) -> TestResult {
             }
         };
 
-        if sorted.num_rows != size as u64 {
+        if ctx.device_row_count(&sorted) != size as u64 {
             return TestResult::error(
                 "test_grid_stride_correctness",
                 start.elapsed(),
                 format!(
                     "Size {}: sort returned {} rows, expected {}",
-                    size, sorted.num_rows, size
+                    size, ctx.device_row_count(&sorted), size
                 ),
             );
         }
@@ -624,13 +624,13 @@ fn test_grid_stride_correctness(ctx: &TestContext) -> TestResult {
             }
         };
 
-        if filtered.num_rows != expected_count as u64 {
+        if ctx.device_row_count(&filtered) != expected_count as u64 {
             return TestResult::error(
                 "test_grid_stride_correctness",
                 start.elapsed(),
                 format!(
                     "Size {}: filter returned {} rows, expected {}",
-                    size, filtered.num_rows, expected_count
+                    size, ctx.device_row_count(&filtered), expected_count
                 ),
             );
         }
@@ -731,13 +731,13 @@ fn test_cross_block_data_patterns(ctx: &TestContext) -> TestResult {
     };
 
     // Verify join count equals right table size (all right keys have matches)
-    if joined.num_rows != right_keys.len() as u64 {
+    if ctx.device_row_count(&joined) != right_keys.len() as u64 {
         return TestResult::error(
             "test_cross_block_data_patterns",
             start.elapsed(),
             format!(
                 "Join returned {} rows, expected {}",
-                joined.num_rows,
+                ctx.device_row_count(&joined),
                 right_keys.len()
             ),
         );
@@ -778,7 +778,7 @@ fn test_cross_block_data_patterns(ctx: &TestContext) -> TestResult {
     };
 
     // Verify each join result
-    for i in 0..joined.num_rows as usize {
+    for i in 0..ctx.device_row_count(&joined) as usize {
         let key = joined_keys[i];
         let lval = joined_lvals[i];
         let rval = joined_rvals[i];

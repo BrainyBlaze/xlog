@@ -140,10 +140,10 @@ pub fn prop_join_correctness(
                 .hash_join(&left_buffer, &right_buffer, &[0], &[0])
                 .map_err(|e| format!("Join failed: {}", e))?;
 
-            if joined.num_rows != 0 {
+            if ctx.device_row_count(&joined) != 0 {
                 return Err(format!(
                     "Empty tables should produce 0 rows, got {}",
-                    joined.num_rows
+                    ctx.device_row_count(&joined)
                 ));
             }
             return Ok(());
@@ -159,10 +159,10 @@ pub fn prop_join_correctness(
             .hash_join(&left_buffer, &right_buffer, &[0], &[0])
             .map_err(|e| format!("Join failed: {}", e))?;
 
-        if joined.num_rows != 0 {
+        if ctx.device_row_count(&joined) != 0 {
             return Err(format!(
                 "Empty left should produce 0 rows, got {}",
-                joined.num_rows
+                ctx.device_row_count(&joined)
             ));
         }
         return Ok(());
@@ -183,10 +183,10 @@ pub fn prop_join_correctness(
             .hash_join(&left_buffer, &right_buffer, &[0], &[0])
             .map_err(|e| format!("Join failed: {}", e))?;
 
-        if joined.num_rows != 0 {
+        if ctx.device_row_count(&joined) != 0 {
             return Err(format!(
                 "Empty right should produce 0 rows, got {}",
-                joined.num_rows
+                ctx.device_row_count(&joined)
             ));
         }
         return Ok(());
@@ -420,10 +420,10 @@ pub fn prop_dedup_determinism(
         .map_err(|e| format!("Download dedup2 keys failed: {}", e))?;
 
     // Row counts should match
-    if dedup1.num_rows != dedup2.num_rows {
+    if ctx.device_row_count(&dedup1) != ctx.device_row_count(&dedup2) {
         return Err(format!(
             "Dedup row count differs: {} vs {}",
-            dedup1.num_rows, dedup2.num_rows
+            ctx.device_row_count(&dedup1), ctx.device_row_count(&dedup2)
         ));
     }
 

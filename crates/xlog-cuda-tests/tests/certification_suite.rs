@@ -35,7 +35,7 @@ fn run_full_certification() {
 
     let mut results = CertificationResults::new();
 
-    // Run all 32 categories sequentially (C01-C25 + G01-G07)
+    // Run all 33 categories sequentially (C01-C25 + G01-G08)
     println!("Running C01: Toolchain...");
     results.add_category(categories::c01_toolchain::run_all(&ctx));
 
@@ -131,6 +131,9 @@ fn run_full_certification() {
 
     println!("Running G07: SAT/CDCL...");
     results.add_category(categories::g07_sat_cdcl::run_all(&ctx));
+
+    println!("Running G08: Device Counts...");
+    results.add_category(categories::g08_device_counts::run_all(&ctx));
 
     // Finalize and print results
     results.finalize();

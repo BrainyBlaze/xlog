@@ -69,13 +69,13 @@ fn test_filter_all_pass(ctx: &TestContext) -> TestResult {
         };
 
         // All elements should pass
-        if filtered.num_rows != size as u64 {
+        if ctx.device_row_count(&filtered) != size as u64 {
             return TestResult::error(
                 "test_filter_all_pass",
                 start.elapsed(),
                 format!(
                     "Size {}: filter returned {} rows, expected {} (100% selectivity)",
-                    size, filtered.num_rows, size
+                    size, ctx.device_row_count(&filtered), size
                 ),
             );
         }
@@ -156,13 +156,13 @@ fn test_filter_none_pass(ctx: &TestContext) -> TestResult {
         };
 
         // No elements should pass
-        if filtered.num_rows != 0 {
+        if ctx.device_row_count(&filtered) != 0 {
             return TestResult::error(
                 "test_filter_none_pass",
                 start.elapsed(),
                 format!(
                     "Size {}: filter returned {} rows, expected 0 (0% selectivity)",
-                    size, filtered.num_rows
+                    size, ctx.device_row_count(&filtered)
                 ),
             );
         }
@@ -225,13 +225,13 @@ fn test_filter_half_pass(ctx: &TestContext) -> TestResult {
             }
         };
 
-        if filtered.num_rows != expected_count as u64 {
+        if ctx.device_row_count(&filtered) != expected_count as u64 {
             return TestResult::error(
                 "test_filter_half_pass",
                 start.elapsed(),
                 format!(
                     "Size {}: filter returned {} rows, expected {} (50% selectivity)",
-                    size, filtered.num_rows, expected_count
+                    size, ctx.device_row_count(&filtered), expected_count
                 ),
             );
         }
@@ -317,13 +317,13 @@ fn test_sparse_predicate(ctx: &TestContext) -> TestResult {
             }
         };
 
-        if filtered.num_rows != expected_count as u64 {
+        if ctx.device_row_count(&filtered) != expected_count as u64 {
             return TestResult::error(
                 "test_sparse_predicate",
                 start.elapsed(),
                 format!(
                     "Size {}: filter returned {} rows, expected {} (~1% selectivity)",
-                    size, filtered.num_rows, expected_count
+                    size, ctx.device_row_count(&filtered), expected_count
                 ),
             );
         }
@@ -413,13 +413,13 @@ fn test_dense_predicate(ctx: &TestContext) -> TestResult {
             }
         };
 
-        if filtered.num_rows != expected_count as u64 {
+        if ctx.device_row_count(&filtered) != expected_count as u64 {
             return TestResult::error(
                 "test_dense_predicate",
                 start.elapsed(),
                 format!(
                     "Size {}: filter returned {} rows, expected {} (~99% selectivity)",
-                    size, filtered.num_rows, expected_count
+                    size, ctx.device_row_count(&filtered), expected_count
                 ),
             );
         }
@@ -516,13 +516,13 @@ fn test_alternating_predicate(ctx: &TestContext) -> TestResult {
             }
         };
 
-        if filtered.num_rows != expected_count as u64 {
+        if ctx.device_row_count(&filtered) != expected_count as u64 {
             return TestResult::error(
                 "test_alternating_predicate",
                 start.elapsed(),
                 format!(
                     "Size {}: filter returned {} rows, expected {} (alternating)",
-                    size, filtered.num_rows, expected_count
+                    size, ctx.device_row_count(&filtered), expected_count
                 ),
             );
         }
@@ -569,13 +569,13 @@ fn test_alternating_predicate(ctx: &TestContext) -> TestResult {
             }
         };
 
-        if filtered2.num_rows != expected_count2 as u64 {
+        if ctx.device_row_count(&filtered2) != expected_count2 as u64 {
             return TestResult::error(
                 "test_alternating_predicate",
                 start.elapsed(),
                 format!(
                     "Size {}: second filter returned {} rows, expected {}",
-                    size, filtered2.num_rows, expected_count2
+                    size, ctx.device_row_count(&filtered2), expected_count2
                 ),
             );
         }
@@ -672,13 +672,13 @@ fn test_random_predicate_distribution(ctx: &TestContext) -> TestResult {
             }
         };
 
-        if filtered1.num_rows != expected_count1 as u64 {
+        if ctx.device_row_count(&filtered1) != expected_count1 as u64 {
             return TestResult::error(
                 "test_random_predicate_distribution",
                 start.elapsed(),
                 format!(
                     "Size {}: first filter returned {} rows, expected {}",
-                    size, filtered1.num_rows, expected_count1
+                    size, ctx.device_row_count(&filtered1), expected_count1
                 ),
             );
         }
@@ -736,13 +736,13 @@ fn test_random_predicate_distribution(ctx: &TestContext) -> TestResult {
             }
         };
 
-        if filtered2.num_rows != expected_count2 as u64 {
+        if ctx.device_row_count(&filtered2) != expected_count2 as u64 {
             return TestResult::error(
                 "test_random_predicate_distribution",
                 start.elapsed(),
                 format!(
                     "Size {}: second filter returned {} rows, expected {}",
-                    size, filtered2.num_rows, expected_count2
+                    size, ctx.device_row_count(&filtered2), expected_count2
                 ),
             );
         }
@@ -771,13 +771,13 @@ fn test_random_predicate_distribution(ctx: &TestContext) -> TestResult {
             }
         };
 
-        if filtered3.num_rows != expected_count3 as u64 {
+        if ctx.device_row_count(&filtered3) != expected_count3 as u64 {
             return TestResult::error(
                 "test_random_predicate_distribution",
                 start.elapsed(),
                 format!(
                     "Size {}: third filter returned {} rows, expected {}",
-                    size, filtered3.num_rows, expected_count3
+                    size, ctx.device_row_count(&filtered3), expected_count3
                 ),
             );
         }

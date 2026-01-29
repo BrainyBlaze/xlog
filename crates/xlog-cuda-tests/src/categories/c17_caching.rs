@@ -130,13 +130,13 @@ fn test_cache_line_access(ctx: &TestContext) -> TestResult {
         };
 
         let expected_count = (size + 1) / 2;
-        if filtered.num_rows != expected_count as u64 {
+        if ctx.device_row_count(&filtered) != expected_count as u64 {
             return TestResult::error(
                 "test_cache_line_access",
                 start.elapsed(),
                 format!(
                     "Size {}: filter expected {} rows, got {}",
-                    size, expected_count, filtered.num_rows
+                    size, expected_count, ctx.device_row_count(&filtered)
                 ),
             );
         }
@@ -312,13 +312,13 @@ fn test_cache_reuse(ctx: &TestContext) -> TestResult {
             }
         };
 
-        if filtered.num_rows != expected_count as u64 {
+        if ctx.device_row_count(&filtered) != expected_count as u64 {
             return TestResult::error(
                 "test_cache_reuse",
                 start.elapsed(),
                 format!(
                     "Filter iteration {}: expected {} rows, got {}",
-                    i, expected_count, filtered.num_rows
+                    i, expected_count, ctx.device_row_count(&filtered)
                 ),
             );
         }
@@ -359,13 +359,13 @@ fn test_cache_reuse(ctx: &TestContext) -> TestResult {
             }
         };
 
-        if deduped.num_rows != 1000 {
+        if ctx.device_row_count(&deduped) != 1000 {
             return TestResult::error(
                 "test_cache_reuse",
                 start.elapsed(),
                 format!(
                     "Dedup iteration {}: expected 1000 rows, got {}",
-                    i, deduped.num_rows
+                    i, ctx.device_row_count(&deduped)
                 ),
             );
         }
@@ -556,13 +556,13 @@ fn test_cache_thrashing(ctx: &TestContext) -> TestResult {
     };
 
     let expected_count = (LARGE_SIZE + 3) / 4;
-    if filtered.num_rows != expected_count as u64 {
+    if ctx.device_row_count(&filtered) != expected_count as u64 {
         return TestResult::error(
             "test_cache_thrashing",
             start.elapsed(),
             format!(
                 "Large filter: expected {} rows, got {}",
-                expected_count, filtered.num_rows
+                expected_count, ctx.device_row_count(&filtered)
             ),
         );
     }
@@ -768,14 +768,14 @@ fn test_memory_locality(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if filtered_seq.num_rows != (SIZE / 2) as u64 {
+    if ctx.device_row_count(&filtered_seq) != (SIZE / 2) as u64 {
         return TestResult::error(
             "test_memory_locality",
             start.elapsed(),
             format!(
                 "Sequential filter: expected {} rows, got {}",
                 SIZE / 2,
-                filtered_seq.num_rows
+                ctx.device_row_count(&filtered_seq)
             ),
         );
     }
@@ -794,13 +794,13 @@ fn test_memory_locality(ctx: &TestContext) -> TestResult {
     };
 
     let expected_alt = (SIZE + 1) / 2;
-    if filtered_alt.num_rows != expected_alt as u64 {
+    if ctx.device_row_count(&filtered_alt) != expected_alt as u64 {
         return TestResult::error(
             "test_memory_locality",
             start.elapsed(),
             format!(
                 "Alternating filter: expected {} rows, got {}",
-                expected_alt, filtered_alt.num_rows
+                expected_alt, ctx.device_row_count(&filtered_alt)
             ),
         );
     }
@@ -821,13 +821,13 @@ fn test_memory_locality(ctx: &TestContext) -> TestResult {
     };
 
     let expected_sparse = (SIZE + 99) / 100;
-    if filtered_sparse.num_rows != expected_sparse as u64 {
+    if ctx.device_row_count(&filtered_sparse) != expected_sparse as u64 {
         return TestResult::error(
             "test_memory_locality",
             start.elapsed(),
             format!(
                 "Sparse filter: expected {} rows, got {}",
-                expected_sparse, filtered_sparse.num_rows
+                expected_sparse, ctx.device_row_count(&filtered_sparse)
             ),
         );
     }
@@ -1061,24 +1061,24 @@ fn test_l2_cache_effects(ctx: &TestContext) -> TestResult {
         };
 
         // Verify both completed correctly
-        if small_sorted.num_rows != SMALL_SIZE as u64 {
+        if ctx.device_row_count(&small_sorted) != SMALL_SIZE as u64 {
             return TestResult::error(
                 "test_l2_cache_effects",
                 start.elapsed(),
                 format!(
                     "Interleaved {}: small has {} rows, expected {}",
-                    i, small_sorted.num_rows, SMALL_SIZE
+                    i, ctx.device_row_count(&small_sorted), SMALL_SIZE
                 ),
             );
         }
 
-        if medium_sorted.num_rows != MEDIUM_SIZE as u64 {
+        if ctx.device_row_count(&medium_sorted) != MEDIUM_SIZE as u64 {
             return TestResult::error(
                 "test_l2_cache_effects",
                 start.elapsed(),
                 format!(
                     "Interleaved {}: medium has {} rows, expected {}",
-                    i, medium_sorted.num_rows, MEDIUM_SIZE
+                    i, ctx.device_row_count(&medium_sorted), MEDIUM_SIZE
                 ),
             );
         }

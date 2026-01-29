@@ -66,13 +66,13 @@ fn test_non_power_of_two_sizes(ctx: &TestContext) -> TestResult {
             }
         };
 
-        if sorted.num_rows != size as u64 {
+        if ctx.device_row_count(&sorted) != size as u64 {
             return TestResult::error(
                 "test_non_power_of_two_sizes",
                 start.elapsed(),
                 format!(
                     "Sort for size {} returned {} rows, expected {}",
-                    size, sorted.num_rows, size
+                    size, ctx.device_row_count(&sorted), size
                 ),
             );
         }
@@ -92,13 +92,13 @@ fn test_non_power_of_two_sizes(ctx: &TestContext) -> TestResult {
             }
         };
 
-        if filtered.num_rows != expected_filtered as u64 {
+        if ctx.device_row_count(&filtered) != expected_filtered as u64 {
             return TestResult::error(
                 "test_non_power_of_two_sizes",
                 start.elapsed(),
                 format!(
                     "Filter for size {} returned {} rows, expected {}",
-                    size, filtered.num_rows, expected_filtered
+                    size, ctx.device_row_count(&filtered), expected_filtered
                 ),
             );
         }
@@ -140,14 +140,14 @@ fn test_non_power_of_two_sizes(ctx: &TestContext) -> TestResult {
 
         // Should have at most (size/2) unique keys, but at least 1
         let unique_keys: HashSet<u32> = dedup_keys.iter().copied().collect();
-        if deduped.num_rows != unique_keys.len() as u64 {
+        if ctx.device_row_count(&deduped) != unique_keys.len() as u64 {
             return TestResult::error(
                 "test_non_power_of_two_sizes",
                 start.elapsed(),
                 format!(
                     "Dedup for size {} returned {} rows, expected {}",
                     size,
-                    deduped.num_rows,
+                    ctx.device_row_count(&deduped),
                     unique_keys.len()
                 ),
             );
@@ -185,13 +185,13 @@ fn test_non_power_of_two_sizes(ctx: &TestContext) -> TestResult {
             }
         };
 
-        if sorted.num_rows != size as u64 {
+        if ctx.device_row_count(&sorted) != size as u64 {
             return TestResult::error(
                 "test_non_power_of_two_sizes",
                 start.elapsed(),
                 format!(
                     "Sort for odd size {} returned {} rows, expected {}",
-                    size, sorted.num_rows, size
+                    size, ctx.device_row_count(&sorted), size
                 ),
             );
         }
@@ -311,13 +311,13 @@ fn test_misaligned_boundaries(ctx: &TestContext) -> TestResult {
             }
         };
 
-        if filtered.num_rows != expected_count as u64 {
+        if ctx.device_row_count(&filtered) != expected_count as u64 {
             return TestResult::error(
                 "test_misaligned_boundaries",
                 start.elapsed(),
                 format!(
                     "Filter for block size {} returned {} rows, expected {}",
-                    size, filtered.num_rows, expected_count
+                    size, ctx.device_row_count(&filtered), expected_count
                 ),
             );
         }
@@ -520,11 +520,11 @@ fn test_near_overflow_indices(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if filtered.num_rows != 100 {
+    if ctx.device_row_count(&filtered) != 100 {
         return TestResult::error(
             "test_near_overflow_indices",
             start.elapsed(),
-            format!("Filter should return 100 rows, got {}", filtered.num_rows),
+            format!("Filter should return 100 rows, got {}", ctx.device_row_count(&filtered)),
         );
     }
 
@@ -667,14 +667,14 @@ fn test_alternating_patterns(ctx: &TestContext) -> TestResult {
     };
 
     // Should keep odd indices (0x55555555 values)
-    if filtered2.num_rows != (SIZE / 2) as u64 {
+    if ctx.device_row_count(&filtered2) != (SIZE / 2) as u64 {
         return TestResult::error(
             "test_alternating_patterns",
             start.elapsed(),
             format!(
                 "Alternating filter should keep {} rows, got {}",
                 SIZE / 2,
-                filtered2.num_rows
+                ctx.device_row_count(&filtered2)
             ),
         );
     }
@@ -734,13 +734,13 @@ fn test_alternating_patterns(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if deduped3.num_rows != 3 {
+    if ctx.device_row_count(&deduped3) != 3 {
         return TestResult::error(
             "test_alternating_patterns",
             start.elapsed(),
             format!(
                 "Stride3 dedup should return 3 unique rows, got {}",
-                deduped3.num_rows
+                ctx.device_row_count(&deduped3)
             ),
         );
     }
@@ -856,13 +856,13 @@ fn test_empty_and_single(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if sorted_empty.num_rows != 0 {
+    if ctx.device_row_count(&sorted_empty) != 0 {
         return TestResult::error(
             "test_empty_and_single",
             start.elapsed(),
             format!(
                 "Sort on empty buffer should return 0 rows, got {}",
-                sorted_empty.num_rows
+                ctx.device_row_count(&sorted_empty)
             ),
         );
     }
@@ -880,13 +880,13 @@ fn test_empty_and_single(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if filtered_empty.num_rows != 0 {
+    if ctx.device_row_count(&filtered_empty) != 0 {
         return TestResult::error(
             "test_empty_and_single",
             start.elapsed(),
             format!(
                 "Filter on empty buffer should return 0 rows, got {}",
-                filtered_empty.num_rows
+                ctx.device_row_count(&filtered_empty)
             ),
         );
     }
@@ -920,13 +920,13 @@ fn test_empty_and_single(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if sorted_single.num_rows != 1 {
+    if ctx.device_row_count(&sorted_single) != 1 {
         return TestResult::error(
             "test_empty_and_single",
             start.elapsed(),
             format!(
                 "Sort on single-element buffer should return 1 row, got {}",
-                sorted_single.num_rows
+                ctx.device_row_count(&sorted_single)
             ),
         );
     }
@@ -966,13 +966,13 @@ fn test_empty_and_single(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if filtered_keep.num_rows != 1 {
+    if ctx.device_row_count(&filtered_keep) != 1 {
         return TestResult::error(
             "test_empty_and_single",
             start.elapsed(),
             format!(
                 "Filter (keep) on single-element should return 1 row, got {}",
-                filtered_keep.num_rows
+                ctx.device_row_count(&filtered_keep)
             ),
         );
     }
@@ -990,13 +990,13 @@ fn test_empty_and_single(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if filtered_discard.num_rows != 0 {
+    if ctx.device_row_count(&filtered_discard) != 0 {
         return TestResult::error(
             "test_empty_and_single",
             start.elapsed(),
             format!(
                 "Filter (discard) on single-element should return 0 rows, got {}",
-                filtered_discard.num_rows
+                ctx.device_row_count(&filtered_discard)
             ),
         );
     }
@@ -1032,13 +1032,13 @@ fn test_empty_and_single(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if deduped_single.num_rows != 1 {
+    if ctx.device_row_count(&deduped_single) != 1 {
         return TestResult::error(
             "test_empty_and_single",
             start.elapsed(),
             format!(
                 "Dedup on single-element should return 1 row, got {}",
-                deduped_single.num_rows
+                ctx.device_row_count(&deduped_single)
             ),
         );
     }
@@ -1092,13 +1092,13 @@ fn test_empty_and_single(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if joined_match.num_rows != 1 {
+    if ctx.device_row_count(&joined_match) != 1 {
         return TestResult::error(
             "test_empty_and_single",
             start.elapsed(),
             format!(
                 "Join of single matching elements should return 1 row, got {}",
-                joined_match.num_rows
+                ctx.device_row_count(&joined_match)
             ),
         );
     }
@@ -1132,13 +1132,13 @@ fn test_empty_and_single(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if joined_nomatch.num_rows != 0 {
+    if ctx.device_row_count(&joined_nomatch) != 0 {
         return TestResult::error(
             "test_empty_and_single",
             start.elapsed(),
             format!(
                 "Join of single non-matching elements should return 0 rows, got {}",
-                joined_nomatch.num_rows
+                ctx.device_row_count(&joined_nomatch)
             ),
         );
     }

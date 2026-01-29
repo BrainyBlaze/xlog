@@ -73,13 +73,13 @@ fn test_sort_uses_shared_memory(ctx: &TestContext) -> TestResult {
         };
 
         // Verify row count
-        if sorted.num_rows != size as u64 {
+        if ctx.device_row_count(&sorted) != size as u64 {
             return TestResult::error(
                 "test_sort_uses_shared_memory",
                 start.elapsed(),
                 format!(
                     "Size {}: sort returned {} rows, expected {}",
-                    size, sorted.num_rows, size
+                    size, ctx.device_row_count(&sorted), size
                 ),
             );
         }
@@ -354,11 +354,11 @@ fn test_sort_multiple_passes(ctx: &TestContext) -> TestResult {
     };
 
     // Verify row count
-    if sorted.num_rows != SIZE as u64 {
+    if ctx.device_row_count(&sorted) != SIZE as u64 {
         return TestResult::error(
             "test_sort_multiple_passes",
             start.elapsed(),
-            format!("Sort returned {} rows, expected {}", sorted.num_rows, SIZE),
+            format!("Sort returned {} rows, expected {}", ctx.device_row_count(&sorted), SIZE),
         );
     }
 
@@ -461,13 +461,13 @@ fn test_block_boundary_shared_mem(ctx: &TestContext) -> TestResult {
         };
 
         // Verify row count
-        if sorted.num_rows != size as u64 {
+        if ctx.device_row_count(&sorted) != size as u64 {
             return TestResult::error(
                 "test_block_boundary_shared_mem",
                 start.elapsed(),
                 format!(
                     "Size {}: sort returned {} rows, expected {}",
-                    size, sorted.num_rows, size
+                    size, ctx.device_row_count(&sorted), size
                 ),
             );
         }
@@ -562,13 +562,13 @@ fn test_shared_mem_size_limits(ctx: &TestContext) -> TestResult {
         };
 
         // Verify row count
-        if sorted.num_rows != size as u64 {
+        if ctx.device_row_count(&sorted) != size as u64 {
             return TestResult::error(
                 "test_shared_mem_size_limits",
                 start.elapsed(),
                 format!(
                     "Size {}: sort returned {} rows, expected {}",
-                    size, sorted.num_rows, size
+                    size, ctx.device_row_count(&sorted), size
                 ),
             );
         }

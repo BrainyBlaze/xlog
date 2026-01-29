@@ -121,24 +121,24 @@ fn test_zero_elements_no_launch(ctx: &TestContext) -> TestResult {
     };
 
     // Verify empty buffer has 0 rows
-    if empty.num_rows != 0 {
+    if ctx.device_row_count(&empty) != 0 {
         return TestResult::error(
             "zero_elements_no_launch",
             start.elapsed(),
-            format!("Empty buffer has {} rows, expected 0", empty.num_rows),
+            format!("Empty buffer has {} rows, expected 0", ctx.device_row_count(&empty)),
         );
     }
 
     // Sort empty - should return empty, not crash
     match ctx.provider.sort(&empty, &[0]) {
         Ok(sorted) => {
-            if sorted.num_rows != 0 {
+            if ctx.device_row_count(&sorted) != 0 {
                 return TestResult::error(
                     "zero_elements_no_launch",
                     start.elapsed(),
                     format!(
                         "Sort of empty buffer returned {} rows, expected 0",
-                        sorted.num_rows
+                        ctx.device_row_count(&sorted)
                     ),
                 );
             }
@@ -155,13 +155,13 @@ fn test_zero_elements_no_launch(ctx: &TestContext) -> TestResult {
     // Filter empty with empty mask - should return empty, not crash
     match ctx.provider.filter_by_mask(&empty, &[]) {
         Ok(filtered) => {
-            if filtered.num_rows != 0 {
+            if ctx.device_row_count(&filtered) != 0 {
                 return TestResult::error(
                     "zero_elements_no_launch",
                     start.elapsed(),
                     format!(
                         "Filter of empty buffer returned {} rows, expected 0",
-                        filtered.num_rows
+                        ctx.device_row_count(&filtered)
                     ),
                 );
             }
@@ -211,13 +211,13 @@ fn test_single_element(ctx: &TestContext) -> TestResult {
     };
 
     // Verify buffer has 1 row
-    if buffer.num_rows != 1 {
+    if ctx.device_row_count(&buffer) != 1 {
         return TestResult::error(
             "single_element",
             start.elapsed(),
             format!(
                 "Single element buffer has {} rows, expected 1",
-                buffer.num_rows
+                ctx.device_row_count(&buffer)
             ),
         );
     }
@@ -234,13 +234,13 @@ fn test_single_element(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if sorted.num_rows != 1 {
+    if ctx.device_row_count(&sorted) != 1 {
         return TestResult::error(
             "single_element",
             start.elapsed(),
             format!(
                 "Sort of single element returned {} rows, expected 1",
-                sorted.num_rows
+                ctx.device_row_count(&sorted)
             ),
         );
     }
@@ -280,13 +280,13 @@ fn test_single_element(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if filtered_keep.num_rows != 1 {
+    if ctx.device_row_count(&filtered_keep) != 1 {
         return TestResult::error(
             "single_element",
             start.elapsed(),
             format!(
                 "Filter with mask=[1] returned {} rows, expected 1",
-                filtered_keep.num_rows
+                ctx.device_row_count(&filtered_keep)
             ),
         );
     }
@@ -326,13 +326,13 @@ fn test_single_element(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if filtered_drop.num_rows != 0 {
+    if ctx.device_row_count(&filtered_drop) != 0 {
         return TestResult::error(
             "single_element",
             start.elapsed(),
             format!(
                 "Filter with mask=[0] returned {} rows, expected 0",
-                filtered_drop.num_rows
+                ctx.device_row_count(&filtered_drop)
             ),
         );
     }
@@ -390,13 +390,13 @@ fn test_warp_boundary_sizes(ctx: &TestContext) -> TestResult {
         };
 
         // Verify row count
-        if sorted.num_rows != size as u64 {
+        if ctx.device_row_count(&sorted) != size as u64 {
             return TestResult::error(
                 "warp_boundary_sizes",
                 start.elapsed(),
                 format!(
                     "Size {}: sort returned {} rows, expected {}",
-                    size, sorted.num_rows, size
+                    size, ctx.device_row_count(&sorted), size
                 ),
             );
         }
@@ -480,13 +480,13 @@ fn test_block_boundary_sizes(ctx: &TestContext) -> TestResult {
         };
 
         // Verify row count
-        if sorted.num_rows != size as u64 {
+        if ctx.device_row_count(&sorted) != size as u64 {
             return TestResult::error(
                 "block_boundary_sizes",
                 start.elapsed(),
                 format!(
                     "Size {}: sort returned {} rows, expected {}",
-                    size, sorted.num_rows, size
+                    size, ctx.device_row_count(&sorted), size
                 ),
             );
         }
@@ -568,13 +568,13 @@ fn test_non_power_of_two_sizes(ctx: &TestContext) -> TestResult {
         };
 
         // Verify row count matches
-        if sorted.num_rows != size as u64 {
+        if ctx.device_row_count(&sorted) != size as u64 {
             return TestResult::error(
                 "non_power_of_two_sizes",
                 start.elapsed(),
                 format!(
                     "Size {}: sort returned {} rows, expected {}",
-                    size, sorted.num_rows, size
+                    size, ctx.device_row_count(&sorted), size
                 ),
             );
         }
@@ -654,11 +654,11 @@ fn test_large_grid_sizes(ctx: &TestContext) -> TestResult {
     };
 
     // Verify row count
-    if sorted.num_rows != size as u64 {
+    if ctx.device_row_count(&sorted) != size as u64 {
         return TestResult::error(
             "large_grid_sizes",
             start.elapsed(),
-            format!("Sort returned {} rows, expected {}", sorted.num_rows, size),
+            format!("Sort returned {} rows, expected {}", ctx.device_row_count(&sorted), size),
         );
     }
 
@@ -778,11 +778,11 @@ fn test_max_practical_size(ctx: &TestContext) -> TestResult {
     };
 
     // Verify row count is preserved
-    if sorted.num_rows != size as u64 {
+    if ctx.device_row_count(&sorted) != size as u64 {
         return TestResult::error(
             "max_practical_size",
             start.elapsed(),
-            format!("Sort returned {} rows, expected {}", sorted.num_rows, size),
+            format!("Sort returned {} rows, expected {}", ctx.device_row_count(&sorted), size),
         );
     }
 

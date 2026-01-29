@@ -93,13 +93,13 @@ fn test_hash_join_atomics(ctx: &TestContext) -> TestResult {
 
     // Expected: matches for keys 0, 2, 4, ..., 9998 = 5000 matches
     let expected_matches = RIGHT_SIZE;
-    if joined.num_rows != expected_matches as u64 {
+    if ctx.device_row_count(&joined) != expected_matches as u64 {
         return TestResult::error(
             "test_hash_join_atomics",
             start.elapsed(),
             format!(
                 "Join returned {} rows, expected {}",
-                joined.num_rows, expected_matches
+                ctx.device_row_count(&joined), expected_matches
             ),
         );
     }
@@ -139,7 +139,7 @@ fn test_hash_join_atomics(ctx: &TestContext) -> TestResult {
     };
 
     // Verify that all joined rows have matching keys and correct values
-    for i in 0..joined.num_rows as usize {
+    for i in 0..ctx.device_row_count(&joined) as usize {
         let key = joined_keys[i];
         let lval = joined_lvals[i];
         let rval = joined_rvals[i];
@@ -245,13 +245,13 @@ fn test_filter_scan_sync(ctx: &TestContext) -> TestResult {
         };
 
         // Verify count
-        if filtered.num_rows != expected_count as u64 {
+        if ctx.device_row_count(&filtered) != expected_count as u64 {
             return TestResult::error(
                 "test_filter_scan_sync",
                 start.elapsed(),
                 format!(
                     "Size {}: filter returned {} rows, expected {}",
-                    size, filtered.num_rows, expected_count
+                    size, ctx.device_row_count(&filtered), expected_count
                 ),
             );
         }
@@ -379,13 +379,13 @@ fn test_sort_barrier_correctness(ctx: &TestContext) -> TestResult {
         };
 
         // Verify row count
-        if sorted.num_rows != size as u64 {
+        if ctx.device_row_count(&sorted) != size as u64 {
             return TestResult::error(
                 "test_sort_barrier_correctness",
                 start.elapsed(),
                 format!(
                     "Pattern {}: sort returned {} rows, expected {}",
-                    name, sorted.num_rows, size
+                    name, ctx.device_row_count(&sorted), size
                 ),
             );
         }
@@ -512,13 +512,13 @@ fn test_dedup_atomic_marking(ctx: &TestContext) -> TestResult {
         }
         let expected_unique = unique_keys.len();
 
-        if deduped.num_rows != expected_unique as u64 {
+        if ctx.device_row_count(&deduped) != expected_unique as u64 {
             return TestResult::error(
                 "test_dedup_atomic_marking",
                 start.elapsed(),
                 format!(
                     "Pattern {}: dedup returned {} rows, expected {}",
-                    name, deduped.num_rows, expected_unique
+                    name, ctx.device_row_count(&deduped), expected_unique
                 ),
             );
         }
@@ -687,13 +687,13 @@ fn test_concurrent_operations(ctx: &TestContext) -> TestResult {
         let (op, ref result) = results[idx];
         assert!(op == "sort");
 
-        if result.num_rows != BUFFER_SIZE as u64 {
+        if ctx.device_row_count(&result) != BUFFER_SIZE as u64 {
             return TestResult::error(
                 "test_concurrent_operations",
                 start.elapsed(),
                 format!(
                     "Buffer {}: {} returned {} rows, expected {}",
-                    idx, op, result.num_rows, BUFFER_SIZE
+                    idx, op, ctx.device_row_count(&result), BUFFER_SIZE
                 ),
             );
         }
@@ -742,13 +742,13 @@ fn test_concurrent_operations(ctx: &TestContext) -> TestResult {
     // Buffer 1: first half
     let (op1, ref result1) = results[1];
     assert!(op1 == "filter");
-    if result1.num_rows != (BUFFER_SIZE / 2) as u64 {
+    if ctx.device_row_count(&result1) != (BUFFER_SIZE / 2) as u64 {
         return TestResult::error(
             "test_concurrent_operations",
             start.elapsed(),
             format!(
                 "Buffer 1: filter returned {} rows, expected {}",
-                result1.num_rows,
+                ctx.device_row_count(&result1),
                 BUFFER_SIZE / 2
             ),
         );
@@ -757,13 +757,13 @@ fn test_concurrent_operations(ctx: &TestContext) -> TestResult {
     // Buffer 3: even indices
     let (op3, ref result3) = results[3];
     assert!(op3 == "filter");
-    if result3.num_rows != ((BUFFER_SIZE + 1) / 2) as u64 {
+    if ctx.device_row_count(&result3) != ((BUFFER_SIZE + 1) / 2) as u64 {
         return TestResult::error(
             "test_concurrent_operations",
             start.elapsed(),
             format!(
                 "Buffer 3: filter returned {} rows, expected {}",
-                result3.num_rows,
+                ctx.device_row_count(&result3),
                 (BUFFER_SIZE + 1) / 2
             ),
         );

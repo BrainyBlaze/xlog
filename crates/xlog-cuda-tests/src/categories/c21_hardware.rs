@@ -575,7 +575,7 @@ fn test_stress_operations(ctx: &TestContext) -> TestResult {
             let expected_min = (DATA_SIZE * selectivity / 100).saturating_sub(DATA_SIZE / 20);
             let expected_max = (DATA_SIZE * selectivity / 100) + DATA_SIZE / 20 + 1;
 
-            let count = filtered.num_rows as usize;
+            let count = ctx.device_row_count(&filtered) as usize;
             if count < expected_min || count > expected_max {
                 return TestResult::error(
                     "test_stress_operations",
@@ -635,11 +635,11 @@ fn test_stress_operations(ctx: &TestContext) -> TestResult {
             }
         };
 
-        if deduped.num_rows != 100 {
+        if ctx.device_row_count(&deduped) != 100 {
             return TestResult::error(
                 "test_stress_operations",
                 start.elapsed(),
-                format!("Stress dedup {}: expected 100, got {}", i, deduped.num_rows),
+                format!("Stress dedup {}: expected 100, got {}", i, ctx.device_row_count(&deduped)),
             );
         }
 
@@ -782,13 +782,13 @@ fn test_memory_pressure(ctx: &TestContext) -> TestResult {
         };
 
         let expected = (buffer_size + 1) / 2;
-        if filtered.num_rows != expected as u64 {
+        if ctx.device_row_count(&filtered) != expected as u64 {
             return TestResult::error(
                 "test_memory_pressure",
                 start.elapsed(),
                 format!(
                     "Buffer {}: filter expected {} rows, got {}",
-                    i, expected, filtered.num_rows
+                    i, expected, ctx.device_row_count(&filtered)
                 ),
             );
         }
@@ -832,13 +832,13 @@ fn test_memory_pressure(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if fresh_sorted.num_rows != 10000 {
+    if ctx.device_row_count(&fresh_sorted) != 10000 {
         return TestResult::error(
             "test_memory_pressure",
             start.elapsed(),
             format!(
                 "Fresh result after pressure: expected 10000, got {}",
-                fresh_sorted.num_rows
+                ctx.device_row_count(&fresh_sorted)
             ),
         );
     }
@@ -998,7 +998,7 @@ fn test_sustained_operation(ctx: &TestContext) -> TestResult {
         let expected_min = (SIZE * selectivity / 100).saturating_sub(SIZE / 10);
         let expected_max = (SIZE * selectivity / 100) + SIZE / 10 + 1;
 
-        let count = filtered.num_rows as usize;
+        let count = ctx.device_row_count(&filtered) as usize;
         if count < expected_min || count > expected_max {
             return TestResult::error(
                 "test_sustained_operation",
@@ -1073,13 +1073,13 @@ fn test_sustained_operation(ctx: &TestContext) -> TestResult {
             }
         };
 
-        if joined.num_rows != 500 {
+        if ctx.device_row_count(&joined) != 500 {
             return TestResult::error(
                 "test_sustained_operation",
                 start.elapsed(),
                 format!(
                     "Sustained join {}: expected 500 rows, got {}",
-                    join_count, joined.num_rows
+                    join_count, ctx.device_row_count(&joined)
                 ),
             );
         }

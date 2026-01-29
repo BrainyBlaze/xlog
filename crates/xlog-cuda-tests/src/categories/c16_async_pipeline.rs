@@ -124,13 +124,13 @@ fn test_sequential_operations(ctx: &TestContext) -> TestResult {
             }
         };
 
-        if filtered.num_rows != expected_count as u64 {
+        if ctx.device_row_count(&filtered) != expected_count as u64 {
             return TestResult::error(
                 "test_sequential_operations",
                 start.elapsed(),
                 format!(
                     "Filter iteration {}: expected {} rows, got {}",
-                    i, expected_count, filtered.num_rows
+                    i, expected_count, ctx.device_row_count(&filtered)
                 ),
             );
         }
@@ -633,13 +633,13 @@ fn test_error_propagation(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if sorted_empty.num_rows != 0 {
+    if ctx.device_row_count(&sorted_empty) != 0 {
         return TestResult::error(
             "test_error_propagation",
             start.elapsed(),
             format!(
                 "Sort on empty buffer returned {} rows, expected 0",
-                sorted_empty.num_rows
+                ctx.device_row_count(&sorted_empty)
             ),
         );
     }
@@ -695,13 +695,13 @@ fn test_error_propagation(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if filtered.num_rows != 3 {
+    if ctx.device_row_count(&filtered) != 3 {
         return TestResult::error(
             "test_error_propagation",
             start.elapsed(),
             format!(
                 "Valid filter returned {} rows, expected 3",
-                filtered.num_rows
+                ctx.device_row_count(&filtered)
             ),
         );
     }
@@ -890,13 +890,13 @@ fn test_large_batch_operations(ctx: &TestContext) -> TestResult {
         };
 
         let expected_count = OPERATION_SIZE - (i * OPERATION_SIZE / BATCH_SIZE);
-        if filtered.num_rows != expected_count as u64 {
+        if ctx.device_row_count(&filtered) != expected_count as u64 {
             return TestResult::error(
                 "test_large_batch_operations",
                 start.elapsed(),
                 format!(
                     "Batch 2 iter {}: expected {} rows, got {}",
-                    i, expected_count, filtered.num_rows
+                    i, expected_count, ctx.device_row_count(&filtered)
                 ),
             );
         }
@@ -945,13 +945,13 @@ fn test_large_batch_operations(ctx: &TestContext) -> TestResult {
             }
         };
 
-        if deduped.num_rows != num_unique as u64 {
+        if ctx.device_row_count(&deduped) != num_unique as u64 {
             return TestResult::error(
                 "test_large_batch_operations",
                 start.elapsed(),
                 format!(
                     "Batch 3 iter {}: expected {} unique, got {}",
-                    i, num_unique, deduped.num_rows
+                    i, num_unique, ctx.device_row_count(&deduped)
                 ),
             );
         }
@@ -1030,13 +1030,13 @@ fn test_large_batch_operations(ctx: &TestContext) -> TestResult {
         // Left keys are 0, 1, 2, ..., 499
         // Matches: 0, 2, 4, ..., 498 (250 matches)
         let expected_matches = 250;
-        if joined.num_rows != expected_matches {
+        if ctx.device_row_count(&joined) != expected_matches {
             return TestResult::error(
                 "test_large_batch_operations",
                 start.elapsed(),
                 format!(
                     "Batch 4 iter {}: join returned {} rows, expected {}",
-                    i, joined.num_rows, expected_matches
+                    i, ctx.device_row_count(&joined), expected_matches
                 ),
             );
         }

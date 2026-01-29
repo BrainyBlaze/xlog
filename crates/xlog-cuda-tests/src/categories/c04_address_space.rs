@@ -77,13 +77,13 @@ fn test_global_u32_correctness(ctx: &TestContext) -> TestResult {
     };
 
     // Verify row count preserved
-    if sorted.num_rows != data.len() as u64 {
+    if ctx.device_row_count(&sorted) != data.len() as u64 {
         return TestResult::error(
             "test_global_u32_correctness",
             start.elapsed(),
             format!(
                 "Sort returned {} rows, expected {}",
-                sorted.num_rows,
+                ctx.device_row_count(&sorted),
                 data.len()
             ),
         );
@@ -194,13 +194,13 @@ fn test_global_u64_correctness(ctx: &TestContext) -> TestResult {
     };
 
     // Verify row count preserved
-    if sorted.num_rows != data.len() as u64 {
+    if ctx.device_row_count(&sorted) != data.len() as u64 {
         return TestResult::error(
             "test_global_u64_correctness",
             start.elapsed(),
             format!(
                 "Sort returned {} rows, expected {}",
-                sorted.num_rows,
+                ctx.device_row_count(&sorted),
                 data.len()
             ),
         );
@@ -322,13 +322,13 @@ fn test_global_i64_correctness(ctx: &TestContext) -> TestResult {
     };
 
     // Verify row count preserved
-    if sorted.num_rows != data.len() as u64 {
+    if ctx.device_row_count(&sorted) != data.len() as u64 {
         return TestResult::error(
             "test_global_i64_correctness",
             start.elapsed(),
             format!(
                 "Sort returned {} rows, expected {}",
-                sorted.num_rows,
+                ctx.device_row_count(&sorted),
                 data.len()
             ),
         );
@@ -476,13 +476,13 @@ fn test_global_f64_correctness(ctx: &TestContext) -> TestResult {
     };
 
     // Verify row count preserved
-    if sorted.num_rows != data.len() as u64 {
+    if ctx.device_row_count(&sorted) != data.len() as u64 {
         return TestResult::error(
             "test_global_f64_correctness",
             start.elapsed(),
             format!(
                 "Sort returned {} rows, expected {}",
-                sorted.num_rows,
+                ctx.device_row_count(&sorted),
                 data.len()
             ),
         );

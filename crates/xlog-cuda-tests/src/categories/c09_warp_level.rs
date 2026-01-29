@@ -63,13 +63,13 @@ fn test_warp_size_operations(ctx: &TestContext) -> TestResult {
             }
         };
 
-        if sorted.num_rows != size as u64 {
+        if ctx.device_row_count(&sorted) != size as u64 {
             return TestResult::error(
                 "test_warp_size_operations",
                 start.elapsed(),
                 format!(
                     "Size {}: sort returned {} rows, expected {}",
-                    size, sorted.num_rows, size
+                    size, ctx.device_row_count(&sorted), size
                 ),
             );
         }
@@ -112,13 +112,13 @@ fn test_warp_size_operations(ctx: &TestContext) -> TestResult {
             }
         };
 
-        if filtered.num_rows != expected_count as u64 {
+        if ctx.device_row_count(&filtered) != expected_count as u64 {
             return TestResult::error(
                 "test_warp_size_operations",
                 start.elapsed(),
                 format!(
                     "Size {}: filter returned {} rows, expected {}",
-                    size, filtered.num_rows, expected_count
+                    size, ctx.device_row_count(&filtered), expected_count
                 ),
             );
         }
@@ -174,13 +174,13 @@ fn test_partial_warp_correctness(ctx: &TestContext) -> TestResult {
             }
         };
 
-        if sorted.num_rows != size as u64 {
+        if ctx.device_row_count(&sorted) != size as u64 {
             return TestResult::error(
                 "test_partial_warp_correctness",
                 start.elapsed(),
                 format!(
                     "Size {}: sort returned {} rows, expected {}",
-                    size, sorted.num_rows, size
+                    size, ctx.device_row_count(&sorted), size
                 ),
             );
         }
@@ -221,13 +221,13 @@ fn test_partial_warp_correctness(ctx: &TestContext) -> TestResult {
         };
 
         // All elements should be unique
-        if deduped.num_rows != size as u64 {
+        if ctx.device_row_count(&deduped) != size as u64 {
             return TestResult::error(
                 "test_partial_warp_correctness",
                 start.elapsed(),
                 format!(
                     "Size {}: dedup returned {} rows, expected {}",
-                    size, deduped.num_rows, size
+                    size, ctx.device_row_count(&deduped), size
                 ),
             );
         }
@@ -550,13 +550,13 @@ fn test_warp_uniform_patterns(ctx: &TestContext) -> TestResult {
 
     // Should have exactly 32 unique values (one per warp)
     let expected_unique = SIZE / 32;
-    if deduped.num_rows != expected_unique as u64 {
+    if ctx.device_row_count(&deduped) != expected_unique as u64 {
         return TestResult::error(
             "test_warp_uniform_patterns",
             start.elapsed(),
             format!(
                 "Dedup returned {} unique, expected {}",
-                deduped.num_rows, expected_unique
+                ctx.device_row_count(&deduped), expected_unique
             ),
         );
     }
@@ -589,13 +589,13 @@ fn test_warp_uniform_patterns(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if deduped2.num_rows != 1 {
+    if ctx.device_row_count(&deduped2) != 1 {
         return TestResult::error(
             "test_warp_uniform_patterns",
             start.elapsed(),
             format!(
                 "Dedup of all-same returned {} rows, expected 1",
-                deduped2.num_rows
+                ctx.device_row_count(&deduped2)
             ),
         );
     }
@@ -656,13 +656,13 @@ fn test_multi_warp_coordination(ctx: &TestContext) -> TestResult {
             }
         };
 
-        if sorted.num_rows != size as u64 {
+        if ctx.device_row_count(&sorted) != size as u64 {
             return TestResult::error(
                 "test_multi_warp_coordination",
                 start.elapsed(),
                 format!(
                     "Size {}: sort returned {} rows, expected {}",
-                    size, sorted.num_rows, size
+                    size, ctx.device_row_count(&sorted), size
                 ),
             );
         }
@@ -757,13 +757,13 @@ fn test_multi_warp_coordination(ctx: &TestContext) -> TestResult {
             }
         };
 
-        if filtered.num_rows != expected_count as u64 {
+        if ctx.device_row_count(&filtered) != expected_count as u64 {
             return TestResult::error(
                 "test_multi_warp_coordination",
                 start.elapsed(),
                 format!(
                     "Size {}: filter returned {} rows, expected {}",
-                    size, filtered.num_rows, expected_count
+                    size, ctx.device_row_count(&filtered), expected_count
                 ),
             );
         }

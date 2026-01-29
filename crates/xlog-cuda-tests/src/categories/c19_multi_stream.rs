@@ -141,13 +141,13 @@ fn test_sequential_batch_operations(ctx: &TestContext) -> TestResult {
     // Verify filter results
     for (i, (filtered, mask)) in filtered_buffers.iter().zip(masks.iter()).enumerate() {
         let expected_count: usize = mask.iter().map(|&m| m as usize).sum();
-        if filtered.num_rows != expected_count as u64 {
+        if ctx.device_row_count(&filtered) != expected_count as u64 {
             return TestResult::error(
                 "test_sequential_batch_operations",
                 start.elapsed(),
                 format!(
                     "Filter {}: expected {} rows, got {}",
-                    i, expected_count, filtered.num_rows
+                    i, expected_count, ctx.device_row_count(&filtered)
                 ),
             );
         }
@@ -293,7 +293,7 @@ fn test_interleaved_operations(ctx: &TestContext) -> TestResult {
         let expected_min = (SIZE * selectivity / 100).saturating_sub(SIZE / 20);
         let expected_max = (SIZE * selectivity / 100) + SIZE / 20 + 1;
 
-        let count = filtered.num_rows as usize;
+        let count = ctx.device_row_count(&filtered) as usize;
         if count < expected_min || count > expected_max {
             return TestResult::error(
                 "test_interleaved_operations",
@@ -661,7 +661,7 @@ fn test_batch_completion(ctx: &TestContext) -> TestResult {
                 )
             }
         };
-        mixed_ops.push(("sort", sorted.num_rows, SIZE as u64));
+        mixed_ops.push(("sort", ctx.device_row_count(&sorted), SIZE as u64));
 
         let mask: Vec<u8> = (0..SIZE)
             .map(|j| if j % (i + 2) == 0 { 1 } else { 0 })
@@ -678,7 +678,7 @@ fn test_batch_completion(ctx: &TestContext) -> TestResult {
                 )
             }
         };
-        mixed_ops.push(("filter", filtered.num_rows, expected_filtered as u64));
+        mixed_ops.push(("filter", ctx.device_row_count(&filtered), expected_filtered as u64));
     }
 
     // Sync
@@ -930,7 +930,7 @@ fn test_dependency_chain(ctx: &TestContext) -> TestResult {
     };
 
     // Verify join produced results
-    if joined.num_rows == 0 {
+    if ctx.device_row_count(&joined) == 0 {
         return TestResult::error(
             "test_dependency_chain",
             start.elapsed(),

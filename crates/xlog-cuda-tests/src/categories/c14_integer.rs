@@ -785,13 +785,13 @@ fn test_integer_wraparound_keys(ctx: &TestContext) -> TestResult {
         .filter(|k| right_key_set.contains(k))
         .count();
 
-    if joined.num_rows != expected_matches as u64 {
+    if ctx.device_row_count(&joined) != expected_matches as u64 {
         return TestResult::error(
             "test_integer_wraparound_keys",
             start.elapsed(),
             format!(
                 "Join returned {} rows, expected {}",
-                joined.num_rows, expected_matches
+                ctx.device_row_count(&joined), expected_matches
             ),
         );
     }
@@ -831,7 +831,7 @@ fn test_integer_wraparound_keys(ctx: &TestContext) -> TestResult {
     };
 
     // Verify each joined row
-    for i in 0..joined.num_rows as usize {
+    for i in 0..ctx.device_row_count(&joined) as usize {
         let key = joined_keys[i];
         let lval = joined_lvals[i];
         let rval = joined_rvals[i];

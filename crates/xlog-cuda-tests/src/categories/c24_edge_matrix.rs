@@ -79,13 +79,13 @@ fn test_size_distribution_matrix_u32(ctx: &TestContext) -> TestResult {
             };
 
             // Verify row count
-            if sorted.num_rows != size as u64 {
+            if ctx.device_row_count(&sorted) != size as u64 {
                 return TestResult::error(
                     "test_size_distribution_matrix_u32",
                     start.elapsed(),
                     format!(
                         "Sort returned {} rows for size={}, dist={:?}, expected {}",
-                        sorted.num_rows, size, dist, size
+                        ctx.device_row_count(&sorted), size, dist, size
                     ),
                 );
             }
@@ -208,13 +208,13 @@ fn test_size_distribution_matrix_u64(ctx: &TestContext) -> TestResult {
             };
 
             // Verify row count
-            if sorted.num_rows != size as u64 {
+            if ctx.device_row_count(&sorted) != size as u64 {
                 return TestResult::error(
                     "test_size_distribution_matrix_u64",
                     start.elapsed(),
                     format!(
                         "U64 sort returned {} rows for size={}, dist={:?}, expected {}",
-                        sorted.num_rows, size, dist, size
+                        ctx.device_row_count(&sorted), size, dist, size
                     ),
                 );
             }
@@ -316,13 +316,13 @@ fn test_size_distribution_matrix_i64(ctx: &TestContext) -> TestResult {
             };
 
             // Verify row count
-            if sorted.num_rows != size as u64 {
+            if ctx.device_row_count(&sorted) != size as u64 {
                 return TestResult::error(
                     "test_size_distribution_matrix_i64",
                     start.elapsed(),
                     format!(
                         "I64 sort returned {} rows for size={}, dist={:?}, expected {}",
-                        sorted.num_rows, size, dist, size
+                        ctx.device_row_count(&sorted), size, dist, size
                     ),
                 );
             }
@@ -449,13 +449,13 @@ fn test_size_distribution_matrix_f64(ctx: &TestContext) -> TestResult {
             };
 
             // Verify row count
-            if sorted.num_rows != size as u64 {
+            if ctx.device_row_count(&sorted) != size as u64 {
                 return TestResult::error(
                     "test_size_distribution_matrix_f64",
                     start.elapsed(),
                     format!(
                         "F64 sort returned {} rows for size={}, dist={:?}, expected {}",
-                        sorted.num_rows, size, dist, size
+                        ctx.device_row_count(&sorted), size, dist, size
                     ),
                 );
             }
@@ -622,13 +622,13 @@ fn test_operation_matrix(ctx: &TestContext) -> TestResult {
             }
         };
 
-        if sorted.num_rows != size as u64 {
+        if ctx.device_row_count(&sorted) != size as u64 {
             return TestResult::error(
                 "test_operation_matrix",
                 start.elapsed(),
                 format!(
                     "Sort returned {} rows for size {}, expected {}",
-                    sorted.num_rows, size, size
+                    ctx.device_row_count(&sorted), size, size
                 ),
             );
         }
@@ -684,13 +684,13 @@ fn test_operation_matrix(ctx: &TestContext) -> TestResult {
                 }
             };
 
-            if filtered.num_rows != expected_count as u64 {
+            if ctx.device_row_count(&filtered) != expected_count as u64 {
                 return TestResult::error(
                     "test_operation_matrix",
                     start.elapsed(),
                     format!(
                         "Filter {} returned {} rows for size {}, expected {}",
-                        name, filtered.num_rows, size, expected_count
+                        name, ctx.device_row_count(&filtered), size, expected_count
                     ),
                 );
             }
@@ -733,13 +733,13 @@ fn test_operation_matrix(ctx: &TestContext) -> TestResult {
 
         // Should have exactly 100 unique keys (or size if size < 100)
         let expected_unique = std::cmp::min(100, size);
-        if deduped.num_rows != expected_unique as u64 {
+        if ctx.device_row_count(&deduped) != expected_unique as u64 {
             return TestResult::error(
                 "test_operation_matrix",
                 start.elapsed(),
                 format!(
                     "Dedup returned {} rows for size {}, expected {}",
-                    deduped.num_rows, size, expected_unique
+                    ctx.device_row_count(&deduped), size, expected_unique
                 ),
             );
         }
@@ -815,13 +815,13 @@ fn test_operation_matrix(ctx: &TestContext) -> TestResult {
         };
 
         let expected_after_filter = (size + 1) / 2; // Ceiling division for odd sizes
-        if filtered.num_rows != expected_after_filter as u64 {
+        if ctx.device_row_count(&filtered) != expected_after_filter as u64 {
             return TestResult::error(
                 "test_operation_matrix",
                 start.elapsed(),
                 format!(
                     "Chain filter returned {} rows for size {}, expected {}",
-                    filtered.num_rows, size, expected_after_filter
+                    ctx.device_row_count(&filtered), size, expected_after_filter
                 ),
             );
         }

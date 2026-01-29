@@ -32,3 +32,4 @@ pub mod g04_transfer_efficiency;
 pub mod g05_circuit_cache;
 pub mod g06_ptx_robustness;
 pub mod g07_sat_cdcl;
+pub mod g08_device_counts;

@@ -81,13 +81,13 @@ fn test_edge_case_sizes(ctx: &TestContext) -> TestResult {
             }
         };
 
-        if filtered.num_rows != expected_count as u64 {
+        if ctx.device_row_count(&filtered) != expected_count as u64 {
             return TestResult::error(
                 "test_edge_case_sizes",
                 start.elapsed(),
                 format!(
                     "Size {}: filter returned {} rows, expected {}",
-                    size, filtered.num_rows, expected_count
+                    size, ctx.device_row_count(&filtered), expected_count
                 ),
             );
         }
@@ -176,14 +176,14 @@ fn test_off_by_one_filter(ctx: &TestContext) -> TestResult {
         };
 
         // Should have size-1 rows
-        if filtered.num_rows != (size - 1) as u64 {
+        if ctx.device_row_count(&filtered) != (size - 1) as u64 {
             return TestResult::error(
                 "test_off_by_one_filter",
                 start.elapsed(),
                 format!(
                     "Size {}: filter returned {} rows, expected {}",
                     size,
-                    filtered.num_rows,
+                    ctx.device_row_count(&filtered),
                     size - 1
                 ),
             );
@@ -288,13 +288,13 @@ fn test_off_by_one_sort(ctx: &TestContext) -> TestResult {
         };
 
         // Verify all elements present
-        if sorted.num_rows != size as u64 {
+        if ctx.device_row_count(&sorted) != size as u64 {
             return TestResult::error(
                 "test_off_by_one_sort",
                 start.elapsed(),
                 format!(
                     "Size {}: sort returned {} rows, expected {}",
-                    size, sorted.num_rows, size
+                    size, ctx.device_row_count(&sorted), size
                 ),
             );
         }
@@ -425,13 +425,13 @@ fn test_grid_stride_loop(ctx: &TestContext) -> TestResult {
         };
 
         // Verify count = size / 2
-        if filtered.num_rows != expected_count as u64 {
+        if ctx.device_row_count(&filtered) != expected_count as u64 {
             return TestResult::error(
                 "test_grid_stride_loop",
                 start.elapsed(),
                 format!(
                     "Size {}: filter returned {} rows, expected {}",
-                    size, filtered.num_rows, expected_count
+                    size, ctx.device_row_count(&filtered), expected_count
                 ),
             );
         }
@@ -548,13 +548,13 @@ fn test_tail_handling_filter(ctx: &TestContext) -> TestResult {
         };
 
         // All elements should be present
-        if filtered.num_rows != size as u64 {
+        if ctx.device_row_count(&filtered) != size as u64 {
             return TestResult::error(
                 "test_tail_handling_filter",
                 start.elapsed(),
                 format!(
                     "Size {}: filter returned {} rows, expected {}",
-                    size, filtered.num_rows, size
+                    size, ctx.device_row_count(&filtered), size
                 ),
             );
         }
@@ -635,13 +635,13 @@ fn test_tail_handling_sort(ctx: &TestContext) -> TestResult {
         };
 
         // Verify row count
-        if sorted.num_rows != size as u64 {
+        if ctx.device_row_count(&sorted) != size as u64 {
             return TestResult::error(
                 "test_tail_handling_sort",
                 start.elapsed(),
                 format!(
                     "Size {}: sort returned {} rows, expected {}",
-                    size, sorted.num_rows, size
+                    size, ctx.device_row_count(&sorted), size
                 ),
             );
         }
@@ -722,13 +722,13 @@ fn test_boundary_indices(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if filtered_first.num_rows != 1 {
+    if ctx.device_row_count(&filtered_first) != 1 {
         return TestResult::error(
             "test_boundary_indices",
             start.elapsed(),
             format!(
                 "Filter first: returned {} rows, expected 1",
-                filtered_first.num_rows
+                ctx.device_row_count(&filtered_first)
             ),
         );
     }
@@ -767,13 +767,13 @@ fn test_boundary_indices(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if filtered_last.num_rows != 1 {
+    if ctx.device_row_count(&filtered_last) != 1 {
         return TestResult::error(
             "test_boundary_indices",
             start.elapsed(),
             format!(
                 "Filter last: returned {} rows, expected 1",
-                filtered_last.num_rows
+                ctx.device_row_count(&filtered_last)
             ),
         );
     }
@@ -864,13 +864,13 @@ fn test_multi_column_strides(ctx: &TestContext) -> TestResult {
                 }
             };
 
-            if filtered.num_rows != expected_count as u64 {
+            if ctx.device_row_count(&filtered) != expected_count as u64 {
                 return TestResult::error(
                     "test_multi_column_strides",
                     start.elapsed(),
                     format!(
                         "{} cols, size {}: filter returned {} rows, expected {}",
-                        num_cols, size, filtered.num_rows, expected_count
+                        num_cols, size, ctx.device_row_count(&filtered), expected_count
                     ),
                 );
             }

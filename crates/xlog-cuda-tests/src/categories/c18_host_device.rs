@@ -235,13 +235,13 @@ fn test_large_transfer(ctx: &TestContext) -> TestResult {
     };
 
     // Verify size
-    if buffer.num_rows != LARGE_SIZE as u64 {
+    if ctx.device_row_count(&buffer) != LARGE_SIZE as u64 {
         return TestResult::error(
             "test_large_transfer",
             start.elapsed(),
             format!(
                 "Buffer has {} rows, expected {}",
-                buffer.num_rows, LARGE_SIZE
+                ctx.device_row_count(&buffer), LARGE_SIZE
             ),
         );
     }
@@ -321,13 +321,13 @@ fn test_large_transfer(ctx: &TestContext) -> TestResult {
     };
 
     let expected_filtered = (LARGE_SIZE + 9) / 10;
-    if filtered.num_rows != expected_filtered as u64 {
+    if ctx.device_row_count(&filtered) != expected_filtered as u64 {
         return TestResult::error(
             "test_large_transfer",
             start.elapsed(),
             format!(
                 "Filter returned {} rows, expected {}",
-                filtered.num_rows, expected_filtered
+                ctx.device_row_count(&filtered), expected_filtered
             ),
         );
     }
@@ -703,11 +703,11 @@ fn test_memory_lifecycle(ctx: &TestContext) -> TestResult {
             }
         };
 
-        if sorted.num_rows != SIZE as u64 {
+        if ctx.device_row_count(&sorted) != SIZE as u64 {
             return TestResult::error(
                 "test_memory_lifecycle",
                 start.elapsed(),
-                format!("Realloc {}: wrong row count: {}", i, sorted.num_rows),
+                format!("Realloc {}: wrong row count: {}", i, ctx.device_row_count(&sorted)),
             );
         }
 
@@ -745,13 +745,13 @@ fn test_memory_lifecycle(ctx: &TestContext) -> TestResult {
             }
         };
 
-        if sorted.num_rows != size as u64 {
+        if ctx.device_row_count(&sorted) != size as u64 {
             return TestResult::error(
                 "test_memory_lifecycle",
                 start.elapsed(),
                 format!(
                     "Varying {}: expected {} rows, got {}",
-                    i, size, sorted.num_rows
+                    i, size, ctx.device_row_count(&sorted)
                 ),
             );
         }
@@ -878,13 +878,13 @@ fn test_memory_budget_limits(ctx: &TestContext) -> TestResult {
         };
 
         let expected = (per_buffer_size + 1) / 2;
-        if filtered.num_rows != expected as u64 {
+        if ctx.device_row_count(&filtered) != expected as u64 {
             return TestResult::error(
                 "test_memory_budget_limits",
                 start.elapsed(),
                 format!(
                     "Buffer {}: filter expected {} rows, got {}",
-                    i, expected, filtered.num_rows
+                    i, expected, ctx.device_row_count(&filtered)
                 ),
             );
         }
@@ -928,13 +928,13 @@ fn test_memory_budget_limits(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if new_sorted.num_rows != per_buffer_size as u64 {
+    if ctx.device_row_count(&new_sorted) != per_buffer_size as u64 {
         return TestResult::error(
             "test_memory_budget_limits",
             start.elapsed(),
             format!(
                 "Reallocated buffer: expected {} rows, got {}",
-                per_buffer_size, new_sorted.num_rows
+                per_buffer_size, ctx.device_row_count(&new_sorted)
             ),
         );
     }

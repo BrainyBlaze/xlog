@@ -113,13 +113,13 @@ fn test_single_gpu_baseline(ctx: &TestContext) -> TestResult {
     };
 
     let expected_count = (SIZE + 2) / 3;
-    if filtered.num_rows != expected_count as u64 {
+    if ctx.device_row_count(&filtered) != expected_count as u64 {
         return TestResult::error(
             "test_single_gpu_baseline",
             start.elapsed(),
             format!(
                 "Filter: expected {} rows, got {}",
-                expected_count, filtered.num_rows
+                expected_count, ctx.device_row_count(&filtered)
             ),
         );
     }
@@ -158,11 +158,11 @@ fn test_single_gpu_baseline(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if deduped.num_rows != 1000 {
+    if ctx.device_row_count(&deduped) != 1000 {
         return TestResult::error(
             "test_single_gpu_baseline",
             start.elapsed(),
-            format!("Dedup: expected 1000 unique, got {}", deduped.num_rows),
+            format!("Dedup: expected 1000 unique, got {}", ctx.device_row_count(&deduped)),
         );
     }
 
@@ -225,11 +225,11 @@ fn test_single_gpu_baseline(ctx: &TestContext) -> TestResult {
     };
 
     // Should have 500 matches (even keys 0-998)
-    if joined.num_rows != 500 {
+    if ctx.device_row_count(&joined) != 500 {
         return TestResult::error(
             "test_single_gpu_baseline",
             start.elapsed(),
-            format!("Join: expected 500 rows, got {}", joined.num_rows),
+            format!("Join: expected 500 rows, got {}", ctx.device_row_count(&joined)),
         );
     }
 
@@ -298,11 +298,11 @@ fn test_multi_gpu_detection(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if sorted.num_rows != 1000 {
+    if ctx.device_row_count(&sorted) != 1000 {
         return TestResult::error(
             "test_multi_gpu_detection",
             start.elapsed(),
-            format!("Sort returned {} rows, expected 1000", sorted.num_rows),
+            format!("Sort returned {} rows, expected 1000", ctx.device_row_count(&sorted)),
         );
     }
 
@@ -384,13 +384,13 @@ fn test_device_enumeration(ctx: &TestContext) -> TestResult {
                 }
             };
 
-            if sorted.num_rows != 1000 {
+            if ctx.device_row_count(&sorted) != 1000 {
                 return TestResult::error(
                     "test_device_enumeration",
                     start.elapsed(),
                     format!(
                         "Device {}: sort returned {} rows",
-                        test_num, sorted.num_rows
+                        test_num, ctx.device_row_count(&sorted)
                     ),
                 );
             }

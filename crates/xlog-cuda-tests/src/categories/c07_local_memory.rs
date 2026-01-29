@@ -93,11 +93,11 @@ fn test_deep_sort_keys(ctx: &TestContext) -> TestResult {
     };
 
     // Verify row count
-    if sorted.num_rows != SIZE as u64 {
+    if ctx.device_row_count(&sorted) != SIZE as u64 {
         return TestResult::error(
             "test_deep_sort_keys",
             start.elapsed(),
-            format!("Sort returned {} rows, expected {}", sorted.num_rows, SIZE),
+            format!("Sort returned {} rows, expected {}", ctx.device_row_count(&sorted), SIZE),
         );
     }
 
@@ -223,13 +223,13 @@ fn test_repeated_operations(ctx: &TestContext) -> TestResult {
         };
 
         // Verify row count
-        if sorted.num_rows != SIZE as u64 {
+        if ctx.device_row_count(&sorted) != SIZE as u64 {
             return TestResult::error(
                 "test_repeated_operations",
                 start.elapsed(),
                 format!(
                     "Iteration {}: sort returned {} rows, expected {}",
-                    iter, sorted.num_rows, SIZE
+                    iter, ctx.device_row_count(&sorted), SIZE
                 ),
             );
         }
@@ -273,13 +273,13 @@ fn test_repeated_operations(ctx: &TestContext) -> TestResult {
         };
 
         let expected_count = (SIZE + 1) / 2;
-        if filtered.num_rows != expected_count as u64 {
+        if ctx.device_row_count(&filtered) != expected_count as u64 {
             return TestResult::error(
                 "test_repeated_operations",
                 start.elapsed(),
                 format!(
                     "Filter iteration {}: returned {} rows, expected {}",
-                    iter, filtered.num_rows, expected_count
+                    iter, ctx.device_row_count(&filtered), expected_count
                 ),
             );
         }
@@ -350,13 +350,13 @@ fn test_variable_workload(ctx: &TestContext) -> TestResult {
         };
 
         // Verify row count
-        if sorted.num_rows != size as u64 {
+        if ctx.device_row_count(&sorted) != size as u64 {
             return TestResult::error(
                 "test_variable_workload",
                 start.elapsed(),
                 format!(
                     "Test {}: size {} returned {} rows",
-                    i, size, sorted.num_rows
+                    i, size, ctx.device_row_count(&sorted)
                 ),
             );
         }
@@ -450,13 +450,13 @@ fn test_complex_filter_chains(ctx: &TestContext) -> TestResult {
     };
 
     let expected1 = (SIZE + 1) / 2;
-    if filtered1.num_rows != expected1 as u64 {
+    if ctx.device_row_count(&filtered1) != expected1 as u64 {
         return TestResult::error(
             "test_complex_filter_chains",
             start.elapsed(),
             format!(
                 "Filter 1: returned {} rows, expected {}",
-                filtered1.num_rows, expected1
+                ctx.device_row_count(&filtered1), expected1
             ),
         );
     }
@@ -477,13 +477,13 @@ fn test_complex_filter_chains(ctx: &TestContext) -> TestResult {
     };
 
     let expected2 = (expected1 + 3) / 4;
-    if filtered2.num_rows != expected2 as u64 {
+    if ctx.device_row_count(&filtered2) != expected2 as u64 {
         return TestResult::error(
             "test_complex_filter_chains",
             start.elapsed(),
             format!(
                 "Filter 2: returned {} rows, expected {}",
-                filtered2.num_rows, expected2
+                ctx.device_row_count(&filtered2), expected2
             ),
         );
     }
@@ -504,13 +504,13 @@ fn test_complex_filter_chains(ctx: &TestContext) -> TestResult {
     };
 
     let expected3 = (expected2 + 4) / 5;
-    if filtered3.num_rows != expected3 as u64 {
+    if ctx.device_row_count(&filtered3) != expected3 as u64 {
         return TestResult::error(
             "test_complex_filter_chains",
             start.elapsed(),
             format!(
                 "Filter 3: returned {} rows, expected {}",
-                filtered3.num_rows, expected3
+                ctx.device_row_count(&filtered3), expected3
             ),
         );
     }
@@ -610,13 +610,13 @@ fn test_local_memory_stress(ctx: &TestContext) -> TestResult {
             };
 
             // Quick verify
-            if sorted.num_rows != size as u64 {
+            if ctx.device_row_count(&sorted) != size as u64 {
                 return TestResult::error(
                     "test_local_memory_stress",
                     start.elapsed(),
                     format!(
                         "Iter {}, size {}: wrong row count {}",
-                        iter, size, sorted.num_rows
+                        iter, size, ctx.device_row_count(&sorted)
                     ),
                 );
             }
@@ -636,13 +636,13 @@ fn test_local_memory_stress(ctx: &TestContext) -> TestResult {
                 }
             };
 
-            if filtered.num_rows != (size / 2) as u64 {
+            if ctx.device_row_count(&filtered) != (size / 2) as u64 {
                 return TestResult::error(
                     "test_local_memory_stress",
                     start.elapsed(),
                     format!(
                         "Iter {}, size {}: filter returned {} rows",
-                        iter, size, filtered.num_rows
+                        iter, size, ctx.device_row_count(&filtered)
                     ),
                 );
             }

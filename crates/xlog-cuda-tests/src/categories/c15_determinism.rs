@@ -646,13 +646,13 @@ fn test_join_reproducibility(ctx: &TestContext) -> TestResult {
         };
 
         // Row count should match
-        if joined.num_rows != first_joined.num_rows {
+        if ctx.device_row_count(&joined) != ctx.device_row_count(&first_joined) {
             return TestResult::error(
                 "test_join_reproducibility",
                 start.elapsed(),
                 format!(
                     "Iteration {} returned {} rows, first returned {}",
-                    iteration, joined.num_rows, first_joined.num_rows
+                    iteration, ctx.device_row_count(&joined), ctx.device_row_count(&first_joined)
                 ),
             );
         }
@@ -823,13 +823,13 @@ fn test_dedup_reproducibility(ctx: &TestContext) -> TestResult {
         };
 
         // Row count should match
-        if deduped.num_rows != first_deduped.num_rows {
+        if ctx.device_row_count(&deduped) != ctx.device_row_count(&first_deduped) {
             return TestResult::error(
                 "test_dedup_reproducibility",
                 start.elapsed(),
                 format!(
                     "Iteration {} returned {} rows, first returned {}",
-                    iteration, deduped.num_rows, first_deduped.num_rows
+                    iteration, ctx.device_row_count(&deduped), ctx.device_row_count(&first_deduped)
                 ),
             );
         }

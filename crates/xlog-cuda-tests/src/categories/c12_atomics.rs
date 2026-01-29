@@ -114,13 +114,13 @@ fn test_hash_join_atomic_correctness(ctx: &TestContext) -> TestResult {
         };
 
         // Verify join count matches expected
-        if joined.num_rows != matching_right as u64 {
+        if ctx.device_row_count(&joined) != matching_right as u64 {
             return TestResult::error(
                 "test_hash_join_atomic_correctness",
                 start.elapsed(),
                 format!(
                     "Join ({}x{}) returned {} rows, expected {}",
-                    left_size, right_size, joined.num_rows, matching_right
+                    left_size, right_size, ctx.device_row_count(&joined), matching_right
                 ),
             );
         }
@@ -160,7 +160,7 @@ fn test_hash_join_atomic_correctness(ctx: &TestContext) -> TestResult {
         };
 
         // Verify each joined row
-        for i in 0..joined.num_rows as usize {
+        for i in 0..ctx.device_row_count(&joined) as usize {
             let key = joined_keys[i];
             let lval = joined_lvals[i];
             let rval = joined_rvals[i];
@@ -292,13 +292,13 @@ fn test_dedup_atomic_correctness(ctx: &TestContext) -> TestResult {
         let unique_keys: HashSet<u32> = keys.iter().cloned().collect();
         let expected_unique = unique_keys.len();
 
-        if deduped.num_rows != expected_unique as u64 {
+        if ctx.device_row_count(&deduped) != expected_unique as u64 {
             return TestResult::error(
                 "test_dedup_atomic_correctness",
                 start.elapsed(),
                 format!(
                     "Pattern {}: dedup returned {} rows, expected {}",
-                    name, deduped.num_rows, expected_unique
+                    name, ctx.device_row_count(&deduped), expected_unique
                 ),
             );
         }
@@ -417,13 +417,13 @@ fn test_high_contention_join(ctx: &TestContext) -> TestResult {
     };
 
     // All keys should match
-    if joined.num_rows != SIZE as u64 {
+    if ctx.device_row_count(&joined) != SIZE as u64 {
         return TestResult::error(
             "test_high_contention_join",
             start.elapsed(),
             format!(
                 "Collision join returned {} rows, expected {}",
-                joined.num_rows, SIZE
+                ctx.device_row_count(&joined), SIZE
             ),
         );
     }
@@ -463,7 +463,7 @@ fn test_high_contention_join(ctx: &TestContext) -> TestResult {
     };
 
     // Verify all key-value relationships
-    for i in 0..joined.num_rows as usize {
+    for i in 0..ctx.device_row_count(&joined) as usize {
         let key = joined_keys[i];
         let lval = joined_lvals[i];
         let rval = joined_rvals[i];
@@ -557,13 +557,13 @@ fn test_high_contention_join(ctx: &TestContext) -> TestResult {
     };
 
     let expected_same = 1000 * 100;
-    if same_joined.num_rows != expected_same as u64 {
+    if ctx.device_row_count(&same_joined) != expected_same as u64 {
         return TestResult::error(
             "test_high_contention_join",
             start.elapsed(),
             format!(
                 "Same-key join returned {} rows, expected {} (Cartesian)",
-                same_joined.num_rows, expected_same
+                ctx.device_row_count(&same_joined), expected_same
             ),
         );
     }
@@ -705,13 +705,13 @@ fn test_atomic_counting(ctx: &TestContext) -> TestResult {
             }
         };
 
-        if filtered.num_rows != expected_count as u64 {
+        if ctx.device_row_count(&filtered) != expected_count as u64 {
             return TestResult::error(
                 "test_atomic_counting",
                 start.elapsed(),
                 format!(
                     "Size {}: filter returned {} rows, expected {}",
-                    size, filtered.num_rows, expected_count
+                    size, ctx.device_row_count(&filtered), expected_count
                 ),
             );
         }
@@ -815,13 +815,13 @@ fn test_concurrent_atomic_updates(ctx: &TestContext) -> TestResult {
         };
 
         // All keys are unique, so dedup should return same count
-        if deduped.num_rows != SIZE as u64 {
+        if ctx.device_row_count(&deduped) != SIZE as u64 {
             return TestResult::error(
                 "test_concurrent_atomic_updates",
                 start.elapsed(),
                 format!(
                     "Iteration {}: dedup returned {} rows, expected {}",
-                    iteration, deduped.num_rows, SIZE
+                    iteration, ctx.device_row_count(&deduped), SIZE
                 ),
             );
         }
@@ -841,13 +841,13 @@ fn test_concurrent_atomic_updates(ctx: &TestContext) -> TestResult {
             }
         };
 
-        if filtered.num_rows != expected_filter as u64 {
+        if ctx.device_row_count(&filtered) != expected_filter as u64 {
             return TestResult::error(
                 "test_concurrent_atomic_updates",
                 start.elapsed(),
                 format!(
                     "Iteration {}: filter returned {} rows, expected {}",
-                    iteration, filtered.num_rows, expected_filter
+                    iteration, ctx.device_row_count(&filtered), expected_filter
                 ),
             );
         }
@@ -866,13 +866,13 @@ fn test_concurrent_atomic_updates(ctx: &TestContext) -> TestResult {
         };
 
         // Self-join should return SIZE rows (each key matches exactly once)
-        if joined.num_rows != SIZE as u64 {
+        if ctx.device_row_count(&joined) != SIZE as u64 {
             return TestResult::error(
                 "test_concurrent_atomic_updates",
                 start.elapsed(),
                 format!(
                     "Iteration {}: self-join returned {} rows, expected {}",
-                    iteration, joined.num_rows, SIZE
+                    iteration, ctx.device_row_count(&joined), SIZE
                 ),
             );
         }
@@ -921,13 +921,13 @@ fn test_concurrent_atomic_updates(ctx: &TestContext) -> TestResult {
             }
         };
 
-        if deduped2.num_rows != SIZE as u64 {
+        if ctx.device_row_count(&deduped2) != SIZE as u64 {
             return TestResult::error(
                 "test_concurrent_atomic_updates",
                 start.elapsed(),
                 format!(
                     "Iteration {}: second dedup returned {} rows, expected {} (atomics may not have reset)",
-                    iteration, deduped2.num_rows, SIZE
+                    iteration, ctx.device_row_count(&deduped2), SIZE
                 ),
             );
         }

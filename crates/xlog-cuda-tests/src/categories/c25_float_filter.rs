@@ -83,13 +83,13 @@ fn test_f64_nan_greater_than_inf(ctx: &TestContext) -> TestResult {
     };
 
     // 2 NaN values should be greater than INFINITY under total ordering
-    if filtered.num_rows() != 2 {
+    if ctx.device_row_count(&filtered) != 2 {
         return TestResult::error(
             "test_f64_nan_greater_than_inf",
             start.elapsed(),
             format!(
                 "Expected 2 rows where val > INFINITY (the NaN values), got {} (NaN > Inf should be true per total ordering)",
-                filtered.num_rows()
+                ctx.device_row_count(&filtered)
             ),
         );
     }
@@ -152,14 +152,14 @@ fn test_f64_negative_zero_less_than_positive_zero(ctx: &TestContext) -> TestResu
 
     // -0.0 (x2) and -1.0 should pass = 3 values
     let expected_count = 3;
-    if filtered.num_rows() as usize != expected_count {
+    if ctx.device_row_count(&filtered) as usize != expected_count {
         return TestResult::error(
             "test_f64_negative_zero_less_than_positive_zero",
             start.elapsed(),
             format!(
                 "Expected {} rows where val < 0.0, got {} (-0.0 < +0.0 should be true per total ordering)",
                 expected_count,
-                filtered.num_rows()
+                ctx.device_row_count(&filtered)
             ),
         );
     }
@@ -214,13 +214,13 @@ fn test_f64_nan_equality_ieee(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if eq_result.num_rows() != 0 {
+    if ctx.device_row_count(&eq_result) != 0 {
         return TestResult::error(
             "test_f64_nan_equality_ieee",
             start.elapsed(),
             format!(
                 "Expected 0 rows where val == NaN, got {} (NaN == NaN should be false per IEEE 754)",
-                eq_result.num_rows()
+                ctx.device_row_count(&eq_result)
             ),
         );
     }
@@ -237,13 +237,13 @@ fn test_f64_nan_equality_ieee(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if ne_result.num_rows() != 6 {
+    if ctx.device_row_count(&ne_result) != 6 {
         return TestResult::error(
             "test_f64_nan_equality_ieee",
             start.elapsed(),
             format!(
                 "Expected 6 rows where val != NaN (all values), got {} (x != NaN should be true for all x per IEEE 754)",
-                ne_result.num_rows()
+                ctx.device_row_count(&ne_result)
             ),
         );
     }
@@ -295,11 +295,11 @@ fn test_f64_nan_ordering_total(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if lt_result.num_rows() != 0 {
+    if ctx.device_row_count(&lt_result) != 0 {
         return TestResult::error(
             "test_f64_nan_ordering_total",
             start.elapsed(),
-            format!("NaN < 0.0 should be false (NaN > everything in total ordering), but got {} matches", lt_result.num_rows()),
+            format!("NaN < 0.0 should be false (NaN > everything in total ordering), but got {} matches", ctx.device_row_count(&lt_result)),
         );
     }
 
@@ -315,11 +315,11 @@ fn test_f64_nan_ordering_total(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if gt_result.num_rows() != 3 {
+    if ctx.device_row_count(&gt_result) != 3 {
         return TestResult::error(
             "test_f64_nan_ordering_total",
             start.elapsed(),
-            format!("NaN > 0.0 should be true for all 3 NaN values (total ordering), but got {} matches", gt_result.num_rows()),
+            format!("NaN > 0.0 should be true for all 3 NaN values (total ordering), but got {} matches", ctx.device_row_count(&gt_result)),
         );
     }
 
@@ -335,11 +335,11 @@ fn test_f64_nan_ordering_total(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if le_result.num_rows() != 0 {
+    if ctx.device_row_count(&le_result) != 0 {
         return TestResult::error(
             "test_f64_nan_ordering_total",
             start.elapsed(),
-            format!("NaN <= 0.0 should be false (NaN > everything in total ordering), but got {} matches", le_result.num_rows()),
+            format!("NaN <= 0.0 should be false (NaN > everything in total ordering), but got {} matches", ctx.device_row_count(&le_result)),
         );
     }
 
@@ -355,11 +355,11 @@ fn test_f64_nan_ordering_total(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if ge_result.num_rows() != 3 {
+    if ctx.device_row_count(&ge_result) != 3 {
         return TestResult::error(
             "test_f64_nan_ordering_total",
             start.elapsed(),
-            format!("NaN >= 0.0 should be true for all 3 NaN values (total ordering), but got {} matches", ge_result.num_rows()),
+            format!("NaN >= 0.0 should be true for all 3 NaN values (total ordering), but got {} matches", ctx.device_row_count(&ge_result)),
         );
     }
 
@@ -418,13 +418,13 @@ fn test_f64_total_ordering_comprehensive(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if lt_zero.num_rows() != 3 {
+    if ctx.device_row_count(&lt_zero) != 3 {
         return TestResult::error(
             "test_f64_total_ordering_comprehensive",
             start.elapsed(),
             format!(
                 "Expected 3 values < +0.0 (-Inf, -1.0, -0.0), got {}",
-                lt_zero.num_rows()
+                ctx.device_row_count(&lt_zero)
             ),
         );
     }
@@ -444,11 +444,11 @@ fn test_f64_total_ordering_comprehensive(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if gt_inf.num_rows() != 1 {
+    if ctx.device_row_count(&gt_inf) != 1 {
         return TestResult::error(
             "test_f64_total_ordering_comprehensive",
             start.elapsed(),
-            format!("Expected 1 value > +Inf (NaN), got {}", gt_inf.num_rows()),
+            format!("Expected 1 value > +Inf (NaN), got {}", ctx.device_row_count(&gt_inf)),
         );
     }
 
@@ -464,13 +464,13 @@ fn test_f64_total_ordering_comprehensive(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if ge_nan.num_rows() != 1 {
+    if ctx.device_row_count(&ge_nan) != 1 {
         return TestResult::error(
             "test_f64_total_ordering_comprehensive",
             start.elapsed(),
             format!(
                 "Expected 1 value >= NaN (only NaN itself), got {}",
-                ge_nan.num_rows()
+                ctx.device_row_count(&ge_nan)
             ),
         );
     }
@@ -490,13 +490,13 @@ fn test_f64_total_ordering_comprehensive(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if le_neg_inf.num_rows() != 1 {
+    if ctx.device_row_count(&le_neg_inf) != 1 {
         return TestResult::error(
             "test_f64_total_ordering_comprehensive",
             start.elapsed(),
             format!(
                 "Expected 1 value <= -Inf (only -Inf itself), got {}",
-                le_neg_inf.num_rows()
+                ctx.device_row_count(&le_neg_inf)
             ),
         );
     }
@@ -561,13 +561,13 @@ fn test_f32_nan_greater_than_inf(ctx: &TestContext) -> TestResult {
     };
 
     // 2 NaN values should be greater than INFINITY under total ordering
-    if filtered.num_rows() != 2 {
+    if ctx.device_row_count(&filtered) != 2 {
         return TestResult::error(
             "test_f32_nan_greater_than_inf",
             start.elapsed(),
             format!(
                 "Expected 2 rows where val > INFINITY (the NaN values), got {} (NaN > Inf should be true per total ordering)",
-                filtered.num_rows()
+                ctx.device_row_count(&filtered)
             ),
         );
     }
@@ -630,14 +630,14 @@ fn test_f32_negative_zero_less_than_positive_zero(ctx: &TestContext) -> TestResu
 
     // -0.0 (x2) and -1.0 should pass = 3 values
     let expected_count = 3;
-    if filtered.num_rows() as usize != expected_count {
+    if ctx.device_row_count(&filtered) as usize != expected_count {
         return TestResult::error(
             "test_f32_negative_zero_less_than_positive_zero",
             start.elapsed(),
             format!(
                 "Expected {} rows where val < 0.0, got {} (-0.0 < +0.0 should be true per total ordering)",
                 expected_count,
-                filtered.num_rows()
+                ctx.device_row_count(&filtered)
             ),
         );
     }
@@ -692,13 +692,13 @@ fn test_f32_nan_equality_ieee(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if eq_result.num_rows() != 0 {
+    if ctx.device_row_count(&eq_result) != 0 {
         return TestResult::error(
             "test_f32_nan_equality_ieee",
             start.elapsed(),
             format!(
                 "Expected 0 rows where val == NaN, got {} (NaN == NaN should be false per IEEE 754)",
-                eq_result.num_rows()
+                ctx.device_row_count(&eq_result)
             ),
         );
     }
@@ -715,13 +715,13 @@ fn test_f32_nan_equality_ieee(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if ne_result.num_rows() != 6 {
+    if ctx.device_row_count(&ne_result) != 6 {
         return TestResult::error(
             "test_f32_nan_equality_ieee",
             start.elapsed(),
             format!(
                 "Expected 6 rows where val != NaN (all values), got {} (x != NaN should be true for all x per IEEE 754)",
-                ne_result.num_rows()
+                ctx.device_row_count(&ne_result)
             ),
         );
     }
@@ -773,11 +773,11 @@ fn test_f32_nan_ordering_total(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if lt_result.num_rows() != 0 {
+    if ctx.device_row_count(&lt_result) != 0 {
         return TestResult::error(
             "test_f32_nan_ordering_total",
             start.elapsed(),
-            format!("NaN < 0.0 should be false (NaN > everything in total ordering), but got {} matches", lt_result.num_rows()),
+            format!("NaN < 0.0 should be false (NaN > everything in total ordering), but got {} matches", ctx.device_row_count(&lt_result)),
         );
     }
 
@@ -793,11 +793,11 @@ fn test_f32_nan_ordering_total(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if gt_result.num_rows() != 3 {
+    if ctx.device_row_count(&gt_result) != 3 {
         return TestResult::error(
             "test_f32_nan_ordering_total",
             start.elapsed(),
-            format!("NaN > 0.0 should be true for all 3 NaN values (total ordering), but got {} matches", gt_result.num_rows()),
+            format!("NaN > 0.0 should be true for all 3 NaN values (total ordering), but got {} matches", ctx.device_row_count(&gt_result)),
         );
     }
 
@@ -813,11 +813,11 @@ fn test_f32_nan_ordering_total(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if le_result.num_rows() != 0 {
+    if ctx.device_row_count(&le_result) != 0 {
         return TestResult::error(
             "test_f32_nan_ordering_total",
             start.elapsed(),
-            format!("NaN <= 0.0 should be false (NaN > everything in total ordering), but got {} matches", le_result.num_rows()),
+            format!("NaN <= 0.0 should be false (NaN > everything in total ordering), but got {} matches", ctx.device_row_count(&le_result)),
         );
     }
 
@@ -833,11 +833,11 @@ fn test_f32_nan_ordering_total(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if ge_result.num_rows() != 3 {
+    if ctx.device_row_count(&ge_result) != 3 {
         return TestResult::error(
             "test_f32_nan_ordering_total",
             start.elapsed(),
-            format!("NaN >= 0.0 should be true for all 3 NaN values (total ordering), but got {} matches", ge_result.num_rows()),
+            format!("NaN >= 0.0 should be true for all 3 NaN values (total ordering), but got {} matches", ctx.device_row_count(&ge_result)),
         );
     }
 
@@ -896,13 +896,13 @@ fn test_f32_total_ordering_comprehensive(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if lt_zero.num_rows() != 3 {
+    if ctx.device_row_count(&lt_zero) != 3 {
         return TestResult::error(
             "test_f32_total_ordering_comprehensive",
             start.elapsed(),
             format!(
                 "Expected 3 values < +0.0 (-Inf, -1.0, -0.0), got {}",
-                lt_zero.num_rows()
+                ctx.device_row_count(&lt_zero)
             ),
         );
     }
@@ -922,11 +922,11 @@ fn test_f32_total_ordering_comprehensive(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if gt_inf.num_rows() != 1 {
+    if ctx.device_row_count(&gt_inf) != 1 {
         return TestResult::error(
             "test_f32_total_ordering_comprehensive",
             start.elapsed(),
-            format!("Expected 1 value > +Inf (NaN), got {}", gt_inf.num_rows()),
+            format!("Expected 1 value > +Inf (NaN), got {}", ctx.device_row_count(&gt_inf)),
         );
     }
 
@@ -942,13 +942,13 @@ fn test_f32_total_ordering_comprehensive(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if ge_nan.num_rows() != 1 {
+    if ctx.device_row_count(&ge_nan) != 1 {
         return TestResult::error(
             "test_f32_total_ordering_comprehensive",
             start.elapsed(),
             format!(
                 "Expected 1 value >= NaN (only NaN itself), got {}",
-                ge_nan.num_rows()
+                ctx.device_row_count(&ge_nan)
             ),
         );
     }
@@ -968,13 +968,13 @@ fn test_f32_total_ordering_comprehensive(ctx: &TestContext) -> TestResult {
         }
     };
 
-    if le_neg_inf.num_rows() != 1 {
+    if ctx.device_row_count(&le_neg_inf) != 1 {
         return TestResult::error(
             "test_f32_total_ordering_comprehensive",
             start.elapsed(),
             format!(
                 "Expected 1 value <= -Inf (only -Inf itself), got {}",
-                le_neg_inf.num_rows()
+                ctx.device_row_count(&le_neg_inf)
             ),
         );
     }

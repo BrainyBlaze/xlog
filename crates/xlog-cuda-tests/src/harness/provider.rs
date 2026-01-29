@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex, OnceLock};
 use xlog_core::{MemoryBudget, Result, XlogError};
-use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager};
 
 fn gpu_test_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -124,6 +124,18 @@ impl TestContext {
         })?;
 
         Ok((major_u32, minor_u32))
+    }
+
+    /// Read device-resident row count for a buffer.
+    ///
+    /// Panics if the count cannot be read; certification tests treat this as fatal.
+    pub fn device_row_count(&self, buffer: &CudaBuffer) -> u64 {
+        let mut host_rows = [0u32];
+        self.device
+            .inner()
+            .dtoh_sync_copy_into(buffer.num_rows_device(), &mut host_rows)
+            .unwrap_or_else(|e| panic!("Failed to read device row count: {}", e));
+        host_rows[0] as u64
     }
 }
 
