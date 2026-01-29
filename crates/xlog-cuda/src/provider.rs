@@ -5734,12 +5734,7 @@ impl CudaKernelProvider {
         use arrow::array::*;
         use arrow::datatypes::{Field, Schema as ArrowSchema};
 
-        let mut host_rows = [0u32];
-        self.device
-            .inner()
-            .dtoh_sync_copy_into(buffer.num_rows_device(), &mut host_rows)
-            .map_err(|e| XlogError::Kernel(format!("Failed to read row count: {}", e)))?;
-        let num_rows = host_rows[0] as usize;
+        let num_rows = self.device_row_count(buffer)?;
 
         let fields: Vec<Field> = buffer
             .schema
@@ -5772,10 +5767,15 @@ impl CudaKernelProvider {
                 continue;
             }
 
-            let mut bytes = vec![0u8; col.len()];
+            let elem_size = scalar_type.size_bytes();
+            let num_bytes = num_rows
+                .checked_mul(elem_size)
+                .ok_or_else(|| XlogError::Kernel("Row byte size overflow".to_string()))?;
+            let mut bytes = vec![0u8; num_bytes];
+            let col_view = self.column_bytes_view(col, num_bytes)?;
             self.device
                 .inner()
-                .dtoh_sync_copy_into(col, &mut bytes)
+                .dtoh_sync_copy_into(&col_view, &mut bytes)
                 .map_err(|e| XlogError::Kernel(format!("Failed to download column: {}", e)))?;
 
             let array: Arc<dyn Array> = match scalar_type {
@@ -6041,24 +6041,19 @@ impl CudaKernelProvider {
             .column(col_idx)
             .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
 
-        if buffer.num_rows() == 0 {
+        let num_rows = self.device_row_count(buffer)?;
+        if num_rows == 0 {
             return Ok(vec![]);
         }
 
-        let num_bytes = (buffer.num_rows() as usize) * std::mem::size_of::<u32>();
-        if col.num_bytes() != num_bytes {
-            return Err(XlogError::Kernel(format!(
-                "Column {} has {} bytes but expected {} for {} rows",
-                col_idx,
-                col.num_bytes(),
-                num_bytes,
-                buffer.num_rows()
-            )));
-        }
+        let num_bytes = num_rows
+            .checked_mul(std::mem::size_of::<u32>())
+            .ok_or_else(|| XlogError::Kernel("Row byte size overflow".to_string()))?;
+        let col_view = self.column_bytes_view(col, num_bytes)?;
         let mut bytes = vec![0u8; num_bytes];
         self.device
             .inner()
-            .dtoh_sync_copy_into(col, &mut bytes)
+            .dtoh_sync_copy_into(&col_view, &mut bytes)
             .map_err(|e| XlogError::Kernel(format!("Failed to download column: {}", e)))?;
 
         Ok(bytes
@@ -6085,25 +6080,17 @@ impl CudaKernelProvider {
             .column(col_idx)
             .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
 
-        if buffer.num_rows() == 0 {
+        let num_rows = self.device_row_count(buffer)?;
+        if num_rows == 0 {
             return Ok(vec![]);
         }
 
-        let num_bytes = buffer.num_rows() as usize;
-        if col.num_bytes() != num_bytes {
-            return Err(XlogError::Kernel(format!(
-                "Column {} has {} bytes but expected {} for {} rows",
-                col_idx,
-                col.num_bytes(),
-                num_bytes,
-                buffer.num_rows()
-            )));
-        }
-
+        let num_bytes = num_rows;
+        let col_view = self.column_bytes_view(col, num_bytes)?;
         let mut bytes = vec![0u8; num_bytes];
         self.device
             .inner()
-            .dtoh_sync_copy_into(col, &mut bytes)
+            .dtoh_sync_copy_into(&col_view, &mut bytes)
             .map_err(|e| XlogError::Kernel(format!("Failed to download column: {}", e)))?;
 
         Ok(bytes)
@@ -6127,24 +6114,19 @@ impl CudaKernelProvider {
             .column(col_idx)
             .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
 
-        if buffer.num_rows() == 0 {
+        let num_rows = self.device_row_count(buffer)?;
+        if num_rows == 0 {
             return Ok(vec![]);
         }
 
-        let num_bytes = (buffer.num_rows() as usize) * std::mem::size_of::<u64>();
-        if col.num_bytes() != num_bytes {
-            return Err(XlogError::Kernel(format!(
-                "Column {} has {} bytes but expected {} for {} rows",
-                col_idx,
-                col.num_bytes(),
-                num_bytes,
-                buffer.num_rows()
-            )));
-        }
+        let num_bytes = num_rows
+            .checked_mul(std::mem::size_of::<u64>())
+            .ok_or_else(|| XlogError::Kernel("Row byte size overflow".to_string()))?;
+        let col_view = self.column_bytes_view(col, num_bytes)?;
         let mut bytes = vec![0u8; num_bytes];
         self.device
             .inner()
-            .dtoh_sync_copy_into(col, &mut bytes)
+            .dtoh_sync_copy_into(&col_view, &mut bytes)
             .map_err(|e| XlogError::Kernel(format!("Failed to download column: {}", e)))?;
 
         Ok(bytes
@@ -6171,24 +6153,19 @@ impl CudaKernelProvider {
             .column(col_idx)
             .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
 
-        if buffer.num_rows() == 0 {
+        let num_rows = self.device_row_count(buffer)?;
+        if num_rows == 0 {
             return Ok(vec![]);
         }
 
-        let num_bytes = (buffer.num_rows() as usize) * std::mem::size_of::<f64>();
-        if col.num_bytes() != num_bytes {
-            return Err(XlogError::Kernel(format!(
-                "Column {} has {} bytes but expected {} for {} rows",
-                col_idx,
-                col.num_bytes(),
-                num_bytes,
-                buffer.num_rows()
-            )));
-        }
+        let num_bytes = num_rows
+            .checked_mul(std::mem::size_of::<f64>())
+            .ok_or_else(|| XlogError::Kernel("Row byte size overflow".to_string()))?;
+        let col_view = self.column_bytes_view(col, num_bytes)?;
         let mut bytes = vec![0u8; num_bytes];
         self.device
             .inner()
-            .dtoh_sync_copy_into(col, &mut bytes)
+            .dtoh_sync_copy_into(&col_view, &mut bytes)
             .map_err(|e| XlogError::Kernel(format!("Failed to download column: {}", e)))?;
 
         Ok(bytes
@@ -6215,24 +6192,17 @@ impl CudaKernelProvider {
             .column(col_idx)
             .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
 
-        if buffer.num_rows() == 0 {
+        let num_rows = self.device_row_count(buffer)?;
+        if num_rows == 0 {
             return Ok(vec![]);
         }
 
-        let num_bytes = buffer.num_rows() as usize;
-        if col.num_bytes() != num_bytes {
-            return Err(XlogError::Kernel(format!(
-                "Column {} has {} bytes but expected {} for {} rows",
-                col_idx,
-                col.num_bytes(),
-                num_bytes,
-                buffer.num_rows()
-            )));
-        }
+        let num_bytes = num_rows;
+        let col_view = self.column_bytes_view(col, num_bytes)?;
         let mut bytes = vec![0u8; num_bytes];
         self.device
             .inner()
-            .dtoh_sync_copy_into(col, &mut bytes)
+            .dtoh_sync_copy_into(&col_view, &mut bytes)
             .map_err(|e| XlogError::Kernel(format!("Failed to download column: {}", e)))?;
 
         Ok(bytes.into_iter().map(|b| b != 0).collect())
@@ -6256,24 +6226,19 @@ impl CudaKernelProvider {
             .column(col_idx)
             .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
 
-        if buffer.num_rows() == 0 {
+        let num_rows = self.device_row_count(buffer)?;
+        if num_rows == 0 {
             return Ok(vec![]);
         }
 
-        let num_bytes = (buffer.num_rows() as usize) * std::mem::size_of::<i32>();
-        if col.num_bytes() != num_bytes {
-            return Err(XlogError::Kernel(format!(
-                "Column {} has {} bytes but expected {} for {} rows",
-                col_idx,
-                col.num_bytes(),
-                num_bytes,
-                buffer.num_rows()
-            )));
-        }
+        let num_bytes = num_rows
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or_else(|| XlogError::Kernel("Row byte size overflow".to_string()))?;
+        let col_view = self.column_bytes_view(col, num_bytes)?;
         let mut bytes = vec![0u8; num_bytes];
         self.device
             .inner()
-            .dtoh_sync_copy_into(col, &mut bytes)
+            .dtoh_sync_copy_into(&col_view, &mut bytes)
             .map_err(|e| XlogError::Kernel(format!("Failed to download column: {}", e)))?;
 
         Ok(bytes
@@ -6300,24 +6265,19 @@ impl CudaKernelProvider {
             .column(col_idx)
             .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
 
-        if buffer.num_rows() == 0 {
+        let num_rows = self.device_row_count(buffer)?;
+        if num_rows == 0 {
             return Ok(vec![]);
         }
 
-        let num_bytes = (buffer.num_rows() as usize) * std::mem::size_of::<i64>();
-        if col.num_bytes() != num_bytes {
-            return Err(XlogError::Kernel(format!(
-                "Column {} has {} bytes but expected {} for {} rows",
-                col_idx,
-                col.num_bytes(),
-                num_bytes,
-                buffer.num_rows()
-            )));
-        }
+        let num_bytes = num_rows
+            .checked_mul(std::mem::size_of::<i64>())
+            .ok_or_else(|| XlogError::Kernel("Row byte size overflow".to_string()))?;
+        let col_view = self.column_bytes_view(col, num_bytes)?;
         let mut bytes = vec![0u8; num_bytes];
         self.device
             .inner()
-            .dtoh_sync_copy_into(col, &mut bytes)
+            .dtoh_sync_copy_into(&col_view, &mut bytes)
             .map_err(|e| XlogError::Kernel(format!("Failed to download column: {}", e)))?;
 
         Ok(bytes
@@ -6344,24 +6304,19 @@ impl CudaKernelProvider {
             .column(col_idx)
             .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
 
-        if buffer.num_rows() == 0 {
+        let num_rows = self.device_row_count(buffer)?;
+        if num_rows == 0 {
             return Ok(vec![]);
         }
 
-        let num_bytes = (buffer.num_rows() as usize) * std::mem::size_of::<f32>();
-        if col.num_bytes() != num_bytes {
-            return Err(XlogError::Kernel(format!(
-                "Column {} has {} bytes but expected {} for {} rows",
-                col_idx,
-                col.num_bytes(),
-                num_bytes,
-                buffer.num_rows()
-            )));
-        }
+        let num_bytes = num_rows
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| XlogError::Kernel("Row byte size overflow".to_string()))?;
+        let col_view = self.column_bytes_view(col, num_bytes)?;
         let mut bytes = vec![0u8; num_bytes];
         self.device
             .inner()
-            .dtoh_sync_copy_into(col, &mut bytes)
+            .dtoh_sync_copy_into(&col_view, &mut bytes)
             .map_err(|e| XlogError::Kernel(format!("Failed to download column: {}", e)))?;
 
         Ok(bytes
@@ -6371,6 +6326,35 @@ impl CudaKernelProvider {
     }
 
     // ============== Internal Helper Methods ==============
+
+    fn device_row_count(&self, buffer: &CudaBuffer) -> Result<usize> {
+        let mut host_rows = [0u32];
+        self.device
+            .inner()
+            .dtoh_sync_copy_into(buffer.num_rows_device(), &mut host_rows)
+            .map_err(|e| XlogError::Kernel(format!("Failed to read row count: {}", e)))?;
+        Ok(host_rows[0] as usize)
+    }
+
+    fn column_bytes_view<'a>(
+        &self,
+        col: &'a CudaColumn,
+        num_bytes: usize,
+    ) -> Result<RawCudaView<'a, u8>> {
+        if col.num_bytes() < num_bytes {
+            return Err(XlogError::Kernel(format!(
+                "Column has {} bytes but {} required",
+                col.num_bytes(),
+                num_bytes
+            )));
+        }
+        let ptr = *cudarc::driver::DevicePtr::device_ptr(col);
+        Ok(RawCudaView {
+            ptr,
+            len: num_bytes,
+            _marker: PhantomData,
+        })
+    }
 
     fn bytes_as_u32_view<'a>(
         &self,
