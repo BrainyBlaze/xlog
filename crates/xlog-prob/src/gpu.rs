@@ -5,7 +5,7 @@ use std::ffi::c_void;
 use cudarc::driver::{DeviceRepr, DeviceSlice, LaunchAsync, LaunchConfig};
 use xlog_core::{Result, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
-use xlog_cuda::provider::{arith_kernels, d4_kernels, ARITH_MODULE, D4_MODULE};
+use xlog_cuda::provider::{arith_kernels, d4_kernels, filter_kernels, ARITH_MODULE, D4_MODULE, FILTER_MODULE};
 use xlog_cuda::{circuit_kernels, CudaKernelProvider, CIRCUIT_MODULE};
 
 use crate::compilation::gpu_d4::exclusive_scan_u32_inplace;
@@ -204,7 +204,8 @@ impl GpuXgcf {
     pub fn smooth_random_vars_device(
         &self,
         provider: &CudaKernelProvider,
-        random_var_list: &[u32],
+        random_var_list: &TrackedCudaSlice<u32>,
+        random_var_count: u32,
         smooth_node_cap: u32,
         smooth_edge_cap: u32,
     ) -> Result<GpuXgcf> {
@@ -232,9 +233,16 @@ impl GpuXgcf {
             ));
         }
 
-        let num_random_vars = u32::try_from(random_var_list.len()).map_err(|_| {
-            XlogError::Compilation("GPU smoothing: random var count exceeds u32".to_string())
+        let list_len = u32::try_from(random_var_list.len()).map_err(|_| {
+            XlogError::Compilation("GPU smoothing: random var list len exceeds u32".to_string())
         })?;
+        let num_random_vars = random_var_count;
+        if num_random_vars > list_len {
+            return Err(XlogError::Compilation(format!(
+                "GPU smoothing: random var count {} exceeds list len {}",
+                num_random_vars, list_len
+            )));
+        }
 
         let base_node = 2u32.checked_add(num_random_vars).ok_or_else(|| {
             XlogError::Compilation("GPU smoothing: base node overflow".to_string())
@@ -252,27 +260,6 @@ impl GpuXgcf {
         }
 
         let words_per_support = ((num_random_vars + 31) / 32).max(1);
-
-        let map_len = (self.max_var as usize)
-            .checked_add(1)
-            .ok_or_else(|| XlogError::Compilation("GPU smoothing: max_var overflow".to_string()))?;
-        let mut random_var_to_bit = vec![u32::MAX; map_len];
-        for (bit, &var) in random_var_list.iter().enumerate() {
-            if var == 0 || var > self.max_var {
-                return Err(XlogError::Compilation(format!(
-                    "GPU smoothing: random var {} out of bounds (max_var={})",
-                    var, self.max_var
-                )));
-            }
-            let idx = var as usize;
-            if random_var_to_bit[idx] != u32::MAX {
-                return Err(XlogError::Compilation(format!(
-                    "GPU smoothing: duplicate random var {}",
-                    var
-                )));
-            }
-            random_var_to_bit[idx] = bit as u32;
-        }
 
         let support_len = (num_nodes as u64)
             .checked_mul(words_per_support as u64)
@@ -293,24 +280,54 @@ impl GpuXgcf {
 
         let device = provider.device().inner();
         let memory = provider.memory();
+        let block_size: u32 = 256;
 
-        let rand_alloc_len = random_var_list.len().max(1);
-        let mut d_random_list = memory.alloc::<u32>(rand_alloc_len)?;
-        if !random_var_list.is_empty() {
-            device
-                .htod_sync_copy_into(random_var_list, &mut d_random_list)
-                .map_err(|e| {
-                    XlogError::Kernel(format!("Failed to upload random var list: {}", e))
+        let map_len = (self.max_var as usize)
+            .checked_add(1)
+            .ok_or_else(|| XlogError::Compilation("GPU smoothing: max_var overflow".to_string()))?;
+        let map_len_u32 = u32::try_from(map_len).map_err(|_| {
+            XlogError::Compilation("GPU smoothing: random map len exceeds u32".to_string())
+        })?;
+        let mut d_random_map = memory.alloc::<u32>(map_len)?;
+        if map_len > 0 {
+            let fill_const = device
+                .get_func(FILTER_MODULE, filter_kernels::FILL_U32_CONST)
+                .ok_or_else(|| {
+                    XlogError::Kernel("fill_u32_const kernel not found".to_string())
                 })?;
+            let grid = (map_len_u32 + block_size - 1) / block_size;
+            unsafe {
+                fill_const.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (grid, 1, 1),
+                        block_dim: (block_size, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (&mut d_random_map, map_len_u32, u32::MAX),
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("fill_u32_const failed: {}", e)))?;
         }
-
-        let mut d_random_map = memory.alloc::<u32>(random_var_to_bit.len())?;
-        if !random_var_to_bit.is_empty() {
-            device
-                .htod_sync_copy_into(&random_var_to_bit, &mut d_random_map)
-                .map_err(|e| {
-                    XlogError::Kernel(format!("Failed to upload random var map: {}", e))
+        if num_random_vars > 0 {
+            let map_kernel = device
+                .get_func(FILTER_MODULE, filter_kernels::RANDOM_VAR_TO_BIT_FROM_LIST)
+                .ok_or_else(|| {
+                    XlogError::Kernel("random_var_to_bit_from_list kernel not found".to_string())
                 })?;
+            let grid = (num_random_vars + block_size - 1) / block_size;
+            unsafe {
+                map_kernel.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (grid, 1, 1),
+                        block_dim: (block_size, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (random_var_list, num_random_vars, map_len_u32, &mut d_random_map),
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!("random_var_to_bit_from_list failed: {}", e))
+            })?;
         }
 
         let mut support = memory.alloc::<u32>(support_len)?;
@@ -322,11 +339,8 @@ impl GpuXgcf {
             .get_func(D4_MODULE, d4_kernels::D4_SUPPORT_LEVEL)
             .ok_or_else(|| XlogError::Kernel("d4_support_level kernel not found".to_string()))?;
 
-        let block_size: u32 = 256;
         let num_levels = self.num_levels as usize;
-        let random_map_len = u32::try_from(random_var_to_bit.len()).map_err(|_| {
-            XlogError::Compilation("GPU smoothing: random map len exceeds u32".to_string())
-        })?;
+        let random_map_len = map_len_u32;
         for level in 0..num_levels {
             let num_level_nodes: usize = match self.level_offsets_host.as_ref() {
                 Some(off) => (off[level + 1].saturating_sub(off[level])) as usize,
@@ -363,42 +377,26 @@ impl GpuXgcf {
         }
 
         if num_random_vars > 0 {
-            let words_per_support_usize = usize::try_from(words_per_support).map_err(|_| {
-                XlogError::Compilation("GPU smoothing: words_per_support exceeds usize".to_string())
-            })?;
-            let root_offset = (self.root as usize)
-                .checked_mul(words_per_support_usize)
+            let root_kernel = device
+                .get_func(D4_MODULE, d4_kernels::D4_SUPPORT_SET_ROOT_BITS)
                 .ok_or_else(|| {
-                    XlogError::Compilation("GPU smoothing: root support offset overflow".to_string())
+                    XlogError::Kernel("d4_support_set_root_bits kernel not found".to_string())
                 })?;
-            let end = root_offset
-                .checked_add(words_per_support_usize)
-                .ok_or_else(|| {
-                    XlogError::Compilation("GPU smoothing: root support end overflow".to_string())
-                })?;
-            if end > support.len() {
-                return Err(XlogError::Compilation(
-                    "GPU smoothing: root support slice out of bounds".to_string(),
-                ));
-            }
-
-            let mut root_bits = vec![0u32; words_per_support_usize];
-            let full_words = (num_random_vars / 32) as usize;
-            let rem = (num_random_vars % 32) as u32;
-            for word in root_bits.iter_mut().take(full_words) {
-                *word = u32::MAX;
-            }
-            if rem > 0 {
-                root_bits[full_words] = (1u32 << rem) - 1u32;
-            }
-            device
-                .htod_sync_copy_into(
-                    &root_bits,
-                    &mut support.slice_mut(root_offset..end),
+            let num_words = (num_random_vars + 31) / 32;
+            let grid = (num_words + block_size - 1) / block_size;
+            unsafe {
+                root_kernel.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (grid, 1, 1),
+                        block_dim: (block_size, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (self.root, num_random_vars, words_per_support, &mut support),
                 )
-                .map_err(|e| {
-                    XlogError::Kernel(format!("Failed to set root support bits: {}", e))
-                })?;
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!("d4_support_set_root_bits failed: {}", e))
+            })?;
         }
 
         let mut wrap_prefix_or = memory.alloc::<u32>(num_edges as usize)?;
@@ -652,7 +650,7 @@ impl GpuXgcf {
                     shared_mem_bytes: 0,
                 },
                 (
-                    &d_random_list,
+                    random_var_list,
                     num_random_vars,
                     smooth_node_cap,
                     &mut out_node_type,

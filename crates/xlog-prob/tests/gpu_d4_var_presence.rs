@@ -4,7 +4,8 @@ use cudarc::driver::DeviceSlice;
 use xlog_core::MemoryBudget;
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 use xlog_prob::compilation::{
-    compile_gpu_d4_and_verify, encode_cnf_gpu, GpuCompileConfig, GpuPirGraph, GpuPirRoots,
+    compile_gpu_d4_and_verify, encode_cnf_gpu, DeviceRandomVarList, GpuCompileConfig,
+    GpuPirGraph, GpuPirRoots,
 };
 use xlog_prob::compilation::gpu_d4::compute_free_var_mask_gpu;
 use xlog_prob::provenance::extract_from_source;
@@ -84,8 +85,10 @@ query(sprinkler()).
     }
     random_vars.sort_unstable();
 
+    let random_vars_device =
+        DeviceRandomVarList::from_host(provider.as_ref(), &random_vars).unwrap();
     let circuit =
-        compile_gpu_d4_and_verify(&encoding.cnf, &provider, &config, &random_vars).unwrap();
+        compile_gpu_d4_and_verify(&encoding.cnf, &provider, &config, &random_vars_device).unwrap();
 
     let mut node_vars = vec![0u32; encoding.vars.node_var.len()];
     provider

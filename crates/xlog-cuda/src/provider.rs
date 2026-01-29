@@ -240,6 +240,7 @@ pub mod d4_kernels {
     pub const D4_CAPTURE_EMIT_META: &str = "d4_capture_emit_meta";
     // Task 6: GPU smoothing (random-var support + wrapper emission).
     pub const D4_SUPPORT_LEVEL: &str = "d4_support_level";
+    pub const D4_SUPPORT_SET_ROOT_BITS: &str = "d4_support_set_root_bits";
     pub const D4_SMOOTH_COUNT: &str = "d4_smooth_count";
     pub const D4_SMOOTH_WRAPPER_COUNTS: &str = "d4_smooth_wrapper_counts";
     pub const D4_SMOOTH_WRAPPER_EDGE_COUNTS_OR: &str = "d4_smooth_wrapper_edge_counts_or";
@@ -354,6 +355,11 @@ pub mod filter_kernels {
     pub const FILTER_COMPARE_F32_COL: &str = "filter_compare_f32_col";
     pub const FILTER_COMPARE_F64_COL: &str = "filter_compare_f64_col";
     pub const FILTER_COMPARE_U8_COL: &str = "filter_compare_u8_col";
+    pub const FILL_U32_IOTA: &str = "fill_u32_iota";
+    pub const FILL_U32_CONST: &str = "fill_u32_const";
+    pub const MARK_RANDOM_VARS: &str = "mark_random_vars";
+    pub const RANDOM_VAR_TO_BIT_FROM_LIST: &str = "random_var_to_bit_from_list";
+    pub const CHECK_RANDOM_VAR_COUNT: &str = "check_random_var_count";
     pub const COMPACT_U32_BY_MASK: &str = "compact_u32_by_mask";
     pub const COMPACT_I64_BY_MASK: &str = "compact_i64_by_mask";
     pub const COMPACT_F64_BY_MASK: &str = "compact_f64_by_mask";
@@ -764,6 +770,11 @@ impl CudaKernelProvider {
                     filter_kernels::FILTER_COMPARE_F32_COL,
                     filter_kernels::FILTER_COMPARE_F64_COL,
                     filter_kernels::FILTER_COMPARE_U8_COL,
+                    filter_kernels::FILL_U32_IOTA,
+                    filter_kernels::FILL_U32_CONST,
+                    filter_kernels::MARK_RANDOM_VARS,
+                    filter_kernels::RANDOM_VAR_TO_BIT_FROM_LIST,
+                    filter_kernels::CHECK_RANDOM_VAR_COUNT,
                     filter_kernels::COMPACT_U32_BY_MASK,
                     filter_kernels::COMPACT_I64_BY_MASK,
                     filter_kernels::COMPACT_F64_BY_MASK,
@@ -1035,6 +1046,7 @@ impl CudaKernelProvider {
                     d4_kernels::D4_COMPILE_EMIT,
                     d4_kernels::D4_CAPTURE_EMIT_META,
                     d4_kernels::D4_SUPPORT_LEVEL,
+                    d4_kernels::D4_SUPPORT_SET_ROOT_BITS,
                     d4_kernels::D4_SMOOTH_COUNT,
                     d4_kernels::D4_SMOOTH_WRAPPER_COUNTS,
                     d4_kernels::D4_SMOOTH_WRAPPER_EDGE_COUNTS_OR,

@@ -2256,6 +2256,245 @@ $L__BB19_2:
 	ret;
 
 }
+	// .globl	fill_u32_iota
+.visible .entry fill_u32_iota(
+	.param .u64 fill_u32_iota_param_0,
+	.param .u32 fill_u32_iota_param_1,
+	.param .u32 fill_u32_iota_param_2
+)
+{
+	.reg .pred 	%p<3>;
+	.reg .b32 	%r<7>;
+	.reg .b64 	%rd<8>;
+
+
+	ld.param.u64 	%rd3, [fill_u32_iota_param_0];
+	ld.param.u32 	%r3, [fill_u32_iota_param_1];
+	ld.param.u32 	%r2, [fill_u32_iota_param_2];
+	mov.u32 	%r4, %ntid.x;
+	mov.u32 	%r5, %ctaid.x;
+	mov.u32 	%r6, %tid.x;
+	mad.lo.s32 	%r1, %r5, %r4, %r6;
+	setp.ge.u32 	%p1, %r1, %r3;
+	@%p1 bra 	$L__BB20_4;
+
+	cvt.u64.u32 	%rd4, %r2;
+	cvt.u64.u32 	%rd1, %r1;
+	add.s64 	%rd2, %rd4, %rd1;
+	setp.lt.u64 	%p2, %rd2, 4294967296;
+	@%p2 bra 	$L__BB20_3;
+
+	// begin inline asm
+	trap;
+	// end inline asm
+
+$L__BB20_3:
+	cvta.to.global.u64 	%rd5, %rd3;
+	shl.b64 	%rd6, %rd1, 2;
+	add.s64 	%rd7, %rd5, %rd6;
+	st.global.u32 	[%rd7], %rd2;
+
+$L__BB20_4:
+	ret;
+
+}
+	// .globl	fill_u32_const
+.visible .entry fill_u32_const(
+	.param .u64 fill_u32_const_param_0,
+	.param .u32 fill_u32_const_param_1,
+	.param .u32 fill_u32_const_param_2
+)
+{
+	.reg .pred 	%p<2>;
+	.reg .b32 	%r<7>;
+	.reg .b64 	%rd<5>;
+
+
+	ld.param.u64 	%rd1, [fill_u32_const_param_0];
+	ld.param.u32 	%r3, [fill_u32_const_param_1];
+	ld.param.u32 	%r2, [fill_u32_const_param_2];
+	mov.u32 	%r4, %ctaid.x;
+	mov.u32 	%r5, %ntid.x;
+	mov.u32 	%r6, %tid.x;
+	mad.lo.s32 	%r1, %r4, %r5, %r6;
+	setp.ge.u32 	%p1, %r1, %r3;
+	@%p1 bra 	$L__BB21_2;
+
+	cvta.to.global.u64 	%rd2, %rd1;
+	mul.wide.u32 	%rd3, %r1, 4;
+	add.s64 	%rd4, %rd2, %rd3;
+	st.global.u32 	[%rd4], %r2;
+
+$L__BB21_2:
+	ret;
+
+}
+	// .globl	mark_random_vars
+.visible .entry mark_random_vars(
+	.param .u64 mark_random_vars_param_0,
+	.param .u64 mark_random_vars_param_1,
+	.param .u32 mark_random_vars_param_2,
+	.param .u32 mark_random_vars_param_3,
+	.param .u64 mark_random_vars_param_4,
+	.param .u32 mark_random_vars_param_5
+)
+{
+	.reg .pred 	%p<7>;
+	.reg .b16 	%rs<3>;
+	.reg .b32 	%r<12>;
+	.reg .b64 	%rd<15>;
+
+
+	ld.param.u64 	%rd4, [mark_random_vars_param_0];
+	ld.param.u64 	%rd5, [mark_random_vars_param_1];
+	ld.param.u32 	%r4, [mark_random_vars_param_2];
+	ld.param.u32 	%r2, [mark_random_vars_param_3];
+	ld.param.u64 	%rd6, [mark_random_vars_param_4];
+	ld.param.u32 	%r3, [mark_random_vars_param_5];
+	cvta.to.global.u64 	%rd1, %rd6;
+	mov.u32 	%r5, %ntid.x;
+	mov.u32 	%r6, %ctaid.x;
+	mov.u32 	%r7, %tid.x;
+	mad.lo.s32 	%r1, %r6, %r5, %r7;
+	setp.ge.u32 	%p1, %r1, %r4;
+	@%p1 bra 	$L__BB22_5;
+
+	cvta.to.global.u64 	%rd7, %rd4;
+	mul.wide.u32 	%rd8, %r1, 4;
+	add.s64 	%rd9, %rd7, %rd8;
+	ld.global.nc.u32 	%r8, [%rd9];
+	cvt.u64.u32 	%rd2, %r8;
+	setp.lt.u32 	%p2, %r8, %r3;
+	@%p2 bra 	$L__BB22_3;
+
+	// begin inline asm
+	trap;
+	// end inline asm
+
+$L__BB22_3:
+	cvt.u32.u64 	%r9, %rd2;
+	setp.eq.s32 	%p3, %r9, 0;
+	@%p3 bra 	$L__BB22_5;
+
+	add.s64 	%rd10, %rd1, %rd2;
+	mov.u16 	%rs1, 1;
+	st.global.u8 	[%rd10], %rs1;
+
+$L__BB22_5:
+	setp.ge.u32 	%p4, %r1, %r2;
+	@%p4 bra 	$L__BB22_10;
+
+	cvta.to.global.u64 	%rd11, %rd5;
+	mul.wide.u32 	%rd12, %r1, 4;
+	add.s64 	%rd13, %rd11, %rd12;
+	ld.global.nc.u32 	%r10, [%rd13];
+	cvt.u64.u32 	%rd3, %r10;
+	setp.lt.u32 	%p5, %r10, %r3;
+	@%p5 bra 	$L__BB22_8;
+
+	// begin inline asm
+	trap;
+	// end inline asm
+
+$L__BB22_8:
+	cvt.u32.u64 	%r11, %rd3;
+	setp.eq.s32 	%p6, %r11, 0;
+	@%p6 bra 	$L__BB22_10;
+
+	add.s64 	%rd14, %rd1, %rd3;
+	mov.u16 	%rs2, 1;
+	st.global.u8 	[%rd14], %rs2;
+
+$L__BB22_10:
+	ret;
+
+}
+	// .globl	random_var_to_bit_from_list
+.visible .entry random_var_to_bit_from_list(
+	.param .u64 random_var_to_bit_from_list_param_0,
+	.param .u32 random_var_to_bit_from_list_param_1,
+	.param .u32 random_var_to_bit_from_list_param_2,
+	.param .u64 random_var_to_bit_from_list_param_3
+)
+{
+	.reg .pred 	%p<6>;
+	.reg .b32 	%r<10>;
+	.reg .b64 	%rd<9>;
+
+
+	ld.param.u64 	%rd1, [random_var_to_bit_from_list_param_0];
+	ld.param.u32 	%r4, [random_var_to_bit_from_list_param_1];
+	ld.param.u32 	%r3, [random_var_to_bit_from_list_param_2];
+	ld.param.u64 	%rd2, [random_var_to_bit_from_list_param_3];
+	mov.u32 	%r5, %ntid.x;
+	mov.u32 	%r6, %ctaid.x;
+	mov.u32 	%r7, %tid.x;
+	mad.lo.s32 	%r1, %r6, %r5, %r7;
+	setp.ge.u32 	%p1, %r1, %r4;
+	@%p1 bra 	$L__BB23_5;
+
+	cvta.to.global.u64 	%rd3, %rd1;
+	mul.wide.u32 	%rd4, %r1, 4;
+	add.s64 	%rd5, %rd3, %rd4;
+	ld.global.nc.u32 	%r2, [%rd5];
+	setp.ne.s32 	%p2, %r2, 0;
+	setp.lt.u32 	%p3, %r2, %r3;
+	and.pred  	%p4, %p2, %p3;
+	@%p4 bra 	$L__BB23_3;
+
+	// begin inline asm
+	trap;
+	// end inline asm
+
+$L__BB23_3:
+	cvta.to.global.u64 	%rd6, %rd2;
+	mul.wide.u32 	%rd7, %r2, 4;
+	add.s64 	%rd8, %rd6, %rd7;
+	mov.u32 	%r8, -1;
+	atom.global.cas.b32 	%r9, [%rd8], %r8, %r1;
+	setp.eq.s32 	%p5, %r9, -1;
+	@%p5 bra 	$L__BB23_5;
+
+	// begin inline asm
+	trap;
+	// end inline asm
+
+$L__BB23_5:
+	ret;
+
+}
+	// .globl	check_random_var_count
+.visible .entry check_random_var_count(
+	.param .u64 check_random_var_count_param_0,
+	.param .u32 check_random_var_count_param_1
+)
+{
+	.reg .pred 	%p<3>;
+	.reg .b32 	%r<6>;
+	.reg .b64 	%rd<3>;
+
+
+	ld.param.u64 	%rd1, [check_random_var_count_param_0];
+	ld.param.u32 	%r1, [check_random_var_count_param_1];
+	mov.u32 	%r2, %ctaid.x;
+	mov.u32 	%r3, %tid.x;
+	or.b32  	%r4, %r2, %r3;
+	setp.ne.s32 	%p1, %r4, 0;
+	@%p1 bra 	$L__BB24_3;
+
+	cvta.to.global.u64 	%rd2, %rd1;
+	ld.global.nc.u32 	%r5, [%rd2];
+	setp.eq.s32 	%p2, %r5, %r1;
+	@%p2 bra 	$L__BB24_3;
+
+	// begin inline asm
+	trap;
+	// end inline asm
+
+$L__BB24_3:
+	ret;
+
+}
 	// .globl	compact_u32_by_mask
 .visible .entry compact_u32_by_mask(
 	.param .u64 compact_u32_by_mask_param_0,
@@ -2281,14 +2520,14 @@ $L__BB19_2:
 	mov.u32 	%r5, %tid.x;
 	mad.lo.s32 	%r1, %r4, %r3, %r5;
 	setp.ge.u32 	%p1, %r1, %r2;
-	@%p1 bra 	$L__BB20_3;
+	@%p1 bra 	$L__BB25_3;
 
 	cvta.to.global.u64 	%rd6, %rd3;
 	cvt.u64.u32 	%rd1, %r1;
 	add.s64 	%rd7, %rd6, %rd1;
 	ld.global.nc.u8 	%rs1, [%rd7];
 	setp.eq.s16 	%p2, %rs1, 0;
-	@%p2 bra 	$L__BB20_3;
+	@%p2 bra 	$L__BB25_3;
 
 	cvta.to.global.u64 	%rd8, %rd4;
 	shl.b64 	%rd9, %rd1, 2;
@@ -2302,7 +2541,7 @@ $L__BB19_2:
 	add.s64 	%rd15, %rd13, %rd14;
 	st.global.u32 	[%rd15], %r6;
 
-$L__BB20_3:
+$L__BB25_3:
 	ret;
 
 }
@@ -2331,14 +2570,14 @@ $L__BB20_3:
 	mov.u32 	%r5, %tid.x;
 	mad.lo.s32 	%r1, %r4, %r3, %r5;
 	setp.ge.u32 	%p1, %r1, %r2;
-	@%p1 bra 	$L__BB21_3;
+	@%p1 bra 	$L__BB26_3;
 
 	cvta.to.global.u64 	%rd6, %rd3;
 	cvt.u64.u32 	%rd1, %r1;
 	add.s64 	%rd7, %rd6, %rd1;
 	ld.global.nc.u8 	%rs1, [%rd7];
 	setp.eq.s16 	%p2, %rs1, 0;
-	@%p2 bra 	$L__BB21_3;
+	@%p2 bra 	$L__BB26_3;
 
 	cvta.to.global.u64 	%rd8, %rd4;
 	shl.b64 	%rd9, %rd1, 2;
@@ -2353,7 +2592,7 @@ $L__BB20_3:
 	add.s64 	%rd17, %rd15, %rd16;
 	st.global.u64 	[%rd17], %rd14;
 
-$L__BB21_3:
+$L__BB26_3:
 	ret;
 
 }
@@ -2383,14 +2622,14 @@ $L__BB21_3:
 	mov.u32 	%r5, %tid.x;
 	mad.lo.s32 	%r1, %r4, %r3, %r5;
 	setp.ge.u32 	%p1, %r1, %r2;
-	@%p1 bra 	$L__BB22_3;
+	@%p1 bra 	$L__BB27_3;
 
 	cvta.to.global.u64 	%rd6, %rd3;
 	cvt.u64.u32 	%rd1, %r1;
 	add.s64 	%rd7, %rd6, %rd1;
 	ld.global.nc.u8 	%rs1, [%rd7];
 	setp.eq.s16 	%p2, %rs1, 0;
-	@%p2 bra 	$L__BB22_3;
+	@%p2 bra 	$L__BB27_3;
 
 	cvta.to.global.u64 	%rd8, %rd4;
 	shl.b64 	%rd9, %rd1, 2;
@@ -2405,7 +2644,7 @@ $L__BB21_3:
 	add.s64 	%rd16, %rd14, %rd15;
 	st.global.f64 	[%rd16], %fd1;
 
-$L__BB22_3:
+$L__BB27_3:
 	ret;
 
 }
@@ -2438,17 +2677,17 @@ $L__BB22_3:
 	mov.u32 	%r29, %tid.x;
 	mad.lo.s32 	%r1, %r28, %r27, %r29;
 	setp.ge.u32 	%p1, %r1, %r26;
-	@%p1 bra 	$L__BB23_9;
+	@%p1 bra 	$L__BB28_9;
 
 	cvta.to.global.u64 	%rd8, %rd4;
 	cvt.u64.u32 	%rd3, %r1;
 	add.s64 	%rd9, %rd8, %rd3;
 	ld.global.nc.u8 	%rs1, [%rd9];
 	setp.eq.s16 	%p2, %rs1, 0;
-	@%p2 bra 	$L__BB23_9;
+	@%p2 bra 	$L__BB28_9;
 
 	setp.eq.s32 	%p3, %r25, 0;
-	@%p3 bra 	$L__BB23_9;
+	@%p3 bra 	$L__BB28_9;
 
 	cvta.to.global.u64 	%rd10, %rd5;
 	shl.b64 	%rd11, %rd3, 2;
@@ -2460,7 +2699,7 @@ $L__BB22_3:
 	add.s32 	%r32, %r25, -1;
 	setp.lt.u32 	%p4, %r32, 3;
 	mov.u32 	%r44, 0;
-	@%p4 bra 	$L__BB23_6;
+	@%p4 bra 	$L__BB28_6;
 
 	add.s32 	%r42, %r3, 3;
 	add.s32 	%r41, %r2, 3;
@@ -2469,7 +2708,7 @@ $L__BB22_3:
 	sub.s32 	%r9, %r47, %r25;
 	mov.u32 	%r44, 0;
 
-$L__BB23_5:
+$L__BB28_5:
 	add.s32 	%r34, %r2, %r44;
 	cvt.u64.u32 	%rd13, %r34;
 	add.s64 	%rd14, %rd2, %rd13;
@@ -2505,16 +2744,16 @@ $L__BB23_5:
 	add.s32 	%r44, %r44, 4;
 	add.s32 	%r40, %r9, %r44;
 	setp.ne.s32 	%p5, %r40, 0;
-	@%p5 bra 	$L__BB23_5;
+	@%p5 bra 	$L__BB28_5;
 
-$L__BB23_6:
+$L__BB28_6:
 	setp.eq.s32 	%p6, %r47, 0;
-	@%p6 bra 	$L__BB23_9;
+	@%p6 bra 	$L__BB28_9;
 
 	add.s32 	%r46, %r44, %r3;
 	add.s32 	%r45, %r44, %r2;
 
-$L__BB23_8:
+$L__BB28_8:
 	.pragma "nounroll";
 	cvt.u64.u32 	%rd29, %r45;
 	add.s64 	%rd30, %rd2, %rd29;
@@ -2526,9 +2765,9 @@ $L__BB23_8:
 	add.s32 	%r45, %r45, 1;
 	add.s32 	%r47, %r47, -1;
 	setp.ne.s32 	%p7, %r47, 0;
-	@%p7 bra 	$L__BB23_8;
+	@%p7 bra 	$L__BB28_8;
 
-$L__BB23_9:
+$L__BB28_9:
 	ret;
 
 }
@@ -2555,10 +2794,10 @@ $L__BB23_9:
 	mov.u32 	%r3, %ctaid.x;
 	or.b32  	%r4, %r3, %r2;
 	setp.ne.s32 	%p1, %r4, 0;
-	@%p1 bra 	$L__BB24_4;
+	@%p1 bra 	$L__BB29_4;
 
 	setp.eq.s32 	%p2, %r1, 0;
-	@%p2 bra 	$L__BB24_3;
+	@%p2 bra 	$L__BB29_3;
 
 	add.s32 	%r5, %r1, -1;
 	cvt.u64.u32 	%rd5, %r5;
@@ -2573,13 +2812,13 @@ $L__BB23_9:
 	ld.global.nc.u32 	%r7, [%rd8];
 	add.s32 	%r8, %r7, %r6;
 	st.global.u32 	[%rd1], %r8;
-	bra.uni 	$L__BB24_4;
+	bra.uni 	$L__BB29_4;
 
-$L__BB24_3:
+$L__BB29_3:
 	mov.u32 	%r9, 0;
 	st.global.u32 	[%rd1], %r9;
 
-$L__BB24_4:
+$L__BB29_4:
 	ret;
 
 }

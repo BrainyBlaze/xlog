@@ -736,10 +736,15 @@ extern "C" __global__ void xgcf_backward_level_propagate_cached(
     const double* __restrict__ var_log_true,
     const double* __restrict__ var_log_false,
     const double* __restrict__ values,
-    double* __restrict__ adj
+    double* __restrict__ adj,
+    const uint32_t* __restrict__ meta_num_levels
 ) {
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     uint32_t slot = active_slot[0];
+    uint32_t num_levels = meta_num_levels[slot];
+    if (level >= num_levels) {
+        return;
+    }
     size_t node_base = slot_offset(slot, node_cap);
     size_t edge_base = slot_offset(slot, edge_cap);
     size_t offset_base = slot_offset(slot, node_cap + 1u);
@@ -853,10 +858,15 @@ extern "C" __global__ void xgcf_backward_level_decision_grad_cached(
     const double* __restrict__ values,
     const double* __restrict__ adj,
     double* __restrict__ grad_true,
-    double* __restrict__ grad_false
+    double* __restrict__ grad_false,
+    const uint32_t* __restrict__ meta_num_levels
 ) {
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     uint32_t slot = active_slot[0];
+    uint32_t num_levels = meta_num_levels[slot];
+    if (level >= num_levels) {
+        return;
+    }
     size_t node_base = slot_offset(slot, node_cap);
     size_t level_base = slot_offset(slot, node_cap);
     size_t level_offset_base = slot_offset(slot, level_cap + 1u);
@@ -935,10 +945,15 @@ extern "C" __global__ void xgcf_backward_level_lit_grad_cached(
     uint32_t level,
     const double* __restrict__ adj,
     double* __restrict__ grad_true,
-    double* __restrict__ grad_false
+    double* __restrict__ grad_false,
+    const uint32_t* __restrict__ meta_num_levels
 ) {
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     uint32_t slot = active_slot[0];
+    uint32_t num_levels = meta_num_levels[slot];
+    if (level >= num_levels) {
+        return;
+    }
     size_t node_base = slot_offset(slot, node_cap);
     size_t level_base = slot_offset(slot, node_cap);
     size_t level_offset_base = slot_offset(slot, level_cap + 1u);
@@ -1071,13 +1086,14 @@ extern "C" __global__ void xgcf_add_scalar_cached(
     const uint32_t* __restrict__ active_slot,
     uint32_t node_cap,
     double* __restrict__ values,
-    uint32_t index,
+    const uint32_t* __restrict__ meta_root,
     const double* __restrict__ scalar
 ) {
     if (blockIdx.x != 0 || threadIdx.x != 0) {
         return;
     }
     uint32_t slot = active_slot[0];
+    uint32_t index = meta_root[slot];
     size_t node_base = slot_offset(slot, node_cap);
     values[node_base + index] += scalar[0];
 }

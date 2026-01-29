@@ -25,6 +25,12 @@
 
 #define BLOCK_SIZE 256
 
+static constexpr uint32_t FILTER_INVALID_BIT = 0xFFFFFFFFu;
+
+__device__ __forceinline__ void filter_trap() {
+    asm("trap;");
+}
+
 /**
  * Transform f64 to comparable i64 for total ordering.
  *
@@ -653,6 +659,122 @@ extern "C" __global__ void mask_not(
     uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
     if (gid < n) {
         out[gid] = a[gid] ? 0 : 1;
+    }
+}
+
+/**
+ * Fill output with a contiguous iota sequence.
+ * @param out Output array
+ * @param n Number of elements
+ * @param base Starting value
+ */
+extern "C" __global__ void fill_u32_iota(
+    uint32_t* __restrict__ out,
+    uint32_t n,
+    uint32_t base
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= n) return;
+    uint64_t val = static_cast<uint64_t>(base) + static_cast<uint64_t>(gid);
+    if (val > 0xFFFFFFFFu) {
+        filter_trap();
+    }
+    out[gid] = static_cast<uint32_t>(val);
+}
+
+/**
+ * Fill output with a constant value.
+ * @param out Output array
+ * @param n Number of elements
+ * @param value Constant value
+ */
+extern "C" __global__ void fill_u32_const(
+    uint32_t* __restrict__ out,
+    uint32_t n,
+    uint32_t value
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= n) return;
+    out[gid] = value;
+}
+
+/**
+ * Mark random variables in a mask based on leaf/choice var tables.
+ * @param leaf_var Leaf var table
+ * @param choice_var Choice var table
+ * @param leaf_len Length of leaf_var
+ * @param choice_len Length of choice_var
+ * @param out_mask Output mask (len >= mask_len)
+ * @param mask_len Mask length (max_var + 1)
+ */
+extern "C" __global__ void mark_random_vars(
+    const uint32_t* __restrict__ leaf_var,
+    const uint32_t* __restrict__ choice_var,
+    uint32_t leaf_len,
+    uint32_t choice_len,
+    uint8_t* __restrict__ out_mask,
+    uint32_t mask_len
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid < leaf_len) {
+        uint32_t v = leaf_var[gid];
+        if (v >= mask_len) {
+            filter_trap();
+        }
+        if (v != 0u) {
+            out_mask[v] = 1u;
+        }
+    }
+    if (gid < choice_len) {
+        uint32_t v = choice_var[gid];
+        if (v >= mask_len) {
+            filter_trap();
+        }
+        if (v != 0u) {
+            out_mask[v] = 1u;
+        }
+    }
+}
+
+/**
+ * Build random_var_to_bit map from random_var_list.
+ * @param random_var_list Device list of random vars
+ * @param random_var_count Number of random vars
+ * @param map_len Length of random_var_to_bit (max_var + 1)
+ * @param random_var_to_bit Output mapping (initialized to FILTER_INVALID_BIT)
+ */
+extern "C" __global__ void random_var_to_bit_from_list(
+    const uint32_t* __restrict__ random_var_list,
+    uint32_t random_var_count,
+    uint32_t map_len,
+    uint32_t* __restrict__ random_var_to_bit
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= random_var_count) {
+        return;
+    }
+    uint32_t v = random_var_list[gid];
+    if (v == 0u || v >= map_len) {
+        filter_trap();
+    }
+    unsigned int* slot = reinterpret_cast<unsigned int*>(&random_var_to_bit[v]);
+    unsigned int prev = atomicCAS(slot, FILTER_INVALID_BIT, gid);
+    if (prev != FILTER_INVALID_BIT) {
+        filter_trap();
+    }
+}
+
+/**
+ * Check device random-var count against expected host count.
+ */
+extern "C" __global__ void check_random_var_count(
+    const uint32_t* __restrict__ device_count,
+    uint32_t expected
+) {
+    if (blockIdx.x == 0 && threadIdx.x == 0) {
+        if (device_count[0] != expected) {
+            filter_trap();
+        }
     }
 }
 

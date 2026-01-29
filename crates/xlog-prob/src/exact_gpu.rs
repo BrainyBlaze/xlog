@@ -13,9 +13,11 @@ use crate::compilation::gpu_weights::{
     apply_query_vars_device, build_evidence_by_var_gpu, build_weights_gpu,
     map_nodes_to_vars_gpu, restore_query_vars_device, GpuWeights,
 };
-use crate::compilation::{compile_gpu_d4_and_verify_cached, encode_cnf_gpu, GpuPirGraph, GpuPirRoots};
+use crate::compilation::{
+    compile_gpu_d4_and_verify_cached, encode_cnf_gpu, DeviceRandomVarList, GpuPirGraph, GpuPirRoots,
+};
 use crate::exact::{
-    build_weight_sources, collect_random_vars_host, default_cache_config, default_compile_config,
+    build_weight_sources, collect_random_vars_device, default_cache_config, default_compile_config,
     upload_f64, upload_u32, upload_u8, GpuConfig,
 };
 use crate::provenance::{GroundAtom, Provenance};
@@ -243,7 +245,15 @@ pub fn compile_provenance_gpu_only(
         &provider,
     )?;
 
-    let random_vars = collect_random_vars_host(&provider, &encoding.vars)?;
+    let random_var_count = leaf_probs_host
+        .len()
+        .checked_add(choice_true_host.len())
+        .ok_or_else(|| XlogError::Compilation("random var count overflow".to_string()))?;
+    let random_var_count = u32::try_from(random_var_count)
+        .map_err(|_| XlogError::Compilation("random var count exceeds u32".to_string()))?;
+    let random_var_list =
+        collect_random_vars_device(&provider, &encoding.vars, random_var_count)?;
+    let random_vars = DeviceRandomVarList::from_device(random_var_list, random_var_count)?;
     let compile_config = default_compile_config(&encoding.cnf, config.memory_bytes)?;
     let cache_config = default_cache_config(&encoding.cnf, &compile_config)?;
 

@@ -11,11 +11,17 @@ use crate::compilation::gpu_cnf::GpuCnfVarTables;
 use crate::compilation::gpu_weights::{
     build_evidence_by_var_gpu, build_weights_gpu, map_nodes_to_vars_gpu, upload_weights_from_host,
 };
-use crate::compilation::{compile_gpu_d4_and_verify_cached, encode_cnf_gpu, GpuCompileConfig, GpuPirGraph, GpuPirRoots};
+use crate::compilation::{
+    compile_gpu_d4_and_verify_cached, encode_cnf_gpu, DeviceRandomVarList, GpuCompileConfig,
+    GpuPirGraph, GpuPirRoots,
+};
 use crate::neural_fast_path::{GpuWeightSlots, NeuralFastPathConfig};
 use crate::provenance::{extract_from_source, GroundAtom, Provenance};
 use xlog_cuda::memory::TrackedCudaSlice;
-use xlog_cuda::provider::{arith_kernels, neural_kernels, weights_kernels, ARITH_MODULE, NEURAL_MODULE, WEIGHTS_MODULE};
+use xlog_cuda::provider::{
+    arith_kernels, filter_kernels, neural_kernels, weights_kernels, ARITH_MODULE, FILTER_MODULE,
+    NEURAL_MODULE, WEIGHTS_MODULE,
+};
 use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager};
 
 #[derive(Debug, Clone)]
@@ -99,7 +105,7 @@ impl GpuExactState {
 pub struct ExactDdnnfProgram {
     gpu: Option<Arc<GpuExactState>>,
     queries: Vec<QuerySpec>,
-    random_vars: Vec<u32>,
+    random_vars: Option<Arc<DeviceRandomVarList>>,
     max_var: u32,
     gpu_config: GpuConfig,
 }
@@ -195,7 +201,28 @@ impl ExactDdnnfProgram {
     /// These correspond to annotated disjunctions in the source program.
     /// The order matches the order variables were assigned during CNF encoding.
     pub fn random_var_indices(&self) -> Vec<u32> {
-        self.random_vars.clone()
+        let Some(state) = self.gpu.as_ref() else {
+            return Vec::new();
+        };
+        let Some(random_vars) = self.random_vars.as_ref() else {
+            return Vec::new();
+        };
+        if random_vars.is_empty() {
+            return Vec::new();
+        }
+        let count = random_vars.count() as usize;
+        let mut host = vec![0u32; count];
+        let view = random_vars.list().slice(0..count);
+        if let Err(e) = state
+            .provider()
+            .device()
+            .inner()
+            .dtoh_sync_copy_into(&view, &mut host)
+        {
+            eprintln!("Failed to read random var list: {}", e);
+            return Vec::new();
+        }
+        host
     }
 
     /// CNF variable id for the `idx`-th query formula (DIMACS, 1-based), if present.
@@ -806,7 +833,7 @@ impl ExactDdnnfProgram {
             return Ok(Self {
                 gpu: None,
                 queries,
-                random_vars: Vec::new(),
+                random_vars: None,
                 max_var: 0,
                 gpu_config: config,
             });
@@ -873,7 +900,18 @@ impl ExactDdnnfProgram {
             &provider,
         )?;
 
-        let random_vars = collect_random_vars_host(&provider, &encoding.vars)?;
+        let random_var_count = leaf_probs_host
+            .len()
+            .checked_add(choice_true_host.len())
+            .ok_or_else(|| {
+                XlogError::Compilation("random var count overflow".to_string())
+            })?;
+        let random_var_count = u32::try_from(random_var_count).map_err(|_| {
+            XlogError::Compilation("random var count exceeds u32".to_string())
+        })?;
+        let random_var_list =
+            collect_random_vars_device(&provider, &encoding.vars, random_var_count)?;
+        let random_vars = DeviceRandomVarList::from_device(random_var_list, random_var_count)?;
 
         let compile_config = default_compile_config(&encoding.cnf, config.memory_bytes)?;
         let cache_config = default_cache_config(&encoding.cnf, &compile_config)?;
@@ -919,7 +957,7 @@ impl ExactDdnnfProgram {
         Ok(Self {
             gpu: Some(Arc::new(state)),
             queries,
-            random_vars,
+            random_vars: Some(Arc::new(random_vars)),
             max_var: encoding.vars.max_var,
             gpu_config: config,
         })
@@ -1262,29 +1300,141 @@ pub(crate) fn upload_f64(
     Ok(buf)
 }
 
-pub(crate) fn collect_random_vars_host(
+fn capture_compact_count_device(
+    provider: &Arc<CudaKernelProvider>,
+    prefix_sum: &TrackedCudaSlice<u32>,
+    mask: &TrackedCudaSlice<u8>,
+    n: u32,
+) -> Result<TrackedCudaSlice<u32>> {
+    let mut out = provider.memory().alloc::<u32>(1)?;
+    let device = provider.device().inner();
+    let capture_fn = device
+        .get_func(FILTER_MODULE, filter_kernels::CAPTURE_COMPACT_COUNT)
+        .ok_or_else(|| {
+            XlogError::Kernel("capture_compact_count kernel not found".to_string())
+        })?;
+    unsafe {
+        capture_fn.clone().launch(
+            LaunchConfig {
+                grid_dim: (1, 1, 1),
+                block_dim: (1, 1, 1),
+                shared_mem_bytes: 0,
+            },
+            (prefix_sum, mask, n, &mut out),
+        )
+    }
+    .map_err(|e| XlogError::Kernel(format!("capture_compact_count failed: {}", e)))?;
+    Ok(out)
+}
+
+pub(crate) fn collect_random_vars_device(
     provider: &Arc<CudaKernelProvider>,
     vars: &GpuCnfVarTables,
-) -> Result<Vec<u32>> {
+    expected_count: u32,
+) -> Result<TrackedCudaSlice<u32>> {
     let device = provider.device().inner();
-    let mut leaf_host = vec![0u32; vars.leaf_var.len()];
-    let mut choice_host = vec![0u32; vars.choice_var.len()];
+    let memory = provider.memory();
 
-    device
-        .dtoh_sync_copy_into(&vars.leaf_var, &mut leaf_host)
-        .map_err(|e| XlogError::Kernel(format!("Failed to read leaf_var table: {}", e)))?;
-    device
-        .dtoh_sync_copy_into(&vars.choice_var, &mut choice_host)
-        .map_err(|e| XlogError::Kernel(format!("Failed to read choice_var table: {}", e)))?;
+    let mask_len = vars
+        .max_var
+        .checked_add(1)
+        .ok_or_else(|| XlogError::Compilation("random var mask_len overflow".to_string()))?;
+    let mask_len_usize = usize::try_from(mask_len).map_err(|_| {
+        XlogError::Compilation("random var mask_len exceeds usize".to_string())
+    })?;
 
-    let mut random_vars: Vec<u32> = Vec::new();
-    for v in leaf_host.into_iter().chain(choice_host.into_iter()) {
-        if v != 0 {
-            random_vars.push(v);
-        }
+    let mut mask = memory.alloc::<u8>(mask_len_usize)?;
+    device
+        .memset_zeros(&mut mask)
+        .map_err(|e| XlogError::Kernel(format!("Failed to zero random var mask: {}", e)))?;
+
+    let mut iota = memory.alloc::<u32>(mask_len_usize)?;
+    let fill_iota = device
+        .get_func(FILTER_MODULE, filter_kernels::FILL_U32_IOTA)
+        .ok_or_else(|| XlogError::Kernel("fill_u32_iota kernel not found".to_string()))?;
+    let block_size = 256u32;
+    let grid = (mask_len + block_size - 1) / block_size;
+    unsafe {
+        fill_iota.clone().launch(
+            LaunchConfig {
+                grid_dim: (grid, 1, 1),
+                block_dim: (block_size, 1, 1),
+                shared_mem_bytes: 0,
+            },
+            (&mut iota, mask_len, 0u32),
+        )
     }
-    random_vars.sort_unstable();
-    Ok(random_vars)
+    .map_err(|e| XlogError::Kernel(format!("fill_u32_iota failed: {}", e)))?;
+
+    let leaf_len = u32::try_from(vars.leaf_var.len()).map_err(|_| {
+        XlogError::Compilation("leaf_var len exceeds u32".to_string())
+    })?;
+    let choice_len = u32::try_from(vars.choice_var.len()).map_err(|_| {
+        XlogError::Compilation("choice_var len exceeds u32".to_string())
+    })?;
+    let mark_kernel = device
+        .get_func(FILTER_MODULE, filter_kernels::MARK_RANDOM_VARS)
+        .ok_or_else(|| XlogError::Kernel("mark_random_vars kernel not found".to_string()))?;
+    let mark_n = leaf_len.max(choice_len);
+    if mark_n > 0 {
+        let grid = (mark_n + block_size - 1) / block_size;
+        unsafe {
+            mark_kernel.clone().launch(
+                LaunchConfig {
+                    grid_dim: (grid, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (
+                    &vars.leaf_var,
+                    &vars.choice_var,
+                    leaf_len,
+                    choice_len,
+                    &mut mask,
+                    mask_len,
+                ),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("mark_random_vars failed: {}", e)))?;
+    }
+
+    let prefix_sum = provider.scan_u8_mask_device(&mask, mask_len)?;
+    let count_device = capture_compact_count_device(provider, &prefix_sum, &mask, mask_len)?;
+
+    let check_kernel = device
+        .get_func(FILTER_MODULE, filter_kernels::CHECK_RANDOM_VAR_COUNT)
+        .ok_or_else(|| {
+            XlogError::Kernel("check_random_var_count kernel not found".to_string())
+        })?;
+    unsafe {
+        check_kernel.clone().launch(
+            LaunchConfig {
+                grid_dim: (1, 1, 1),
+                block_dim: (1, 1, 1),
+                shared_mem_bytes: 0,
+            },
+            (&count_device, expected_count),
+        )
+    }
+    .map_err(|e| XlogError::Kernel(format!("check_random_var_count failed: {}", e)))?;
+
+    let mut out = memory.alloc::<u32>(mask_len_usize)?;
+    let compact_fn = device
+        .get_func(FILTER_MODULE, filter_kernels::COMPACT_U32_BY_MASK)
+        .ok_or_else(|| XlogError::Kernel("compact_u32_by_mask kernel not found".to_string()))?;
+    unsafe {
+        compact_fn.clone().launch(
+            LaunchConfig {
+                grid_dim: (grid, 1, 1),
+                block_dim: (block_size, 1, 1),
+                shared_mem_bytes: 0,
+            },
+            (&iota, &mask, &prefix_sum, mask_len, &mut out),
+        )
+    }
+    .map_err(|e| XlogError::Kernel(format!("compact_u32_by_mask failed: {}", e)))?;
+
+    Ok(out)
 }
 
 fn display_atom(atom: &GroundAtom) -> String {

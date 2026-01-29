@@ -6,7 +6,9 @@
 
 use std::sync::Arc;
 
+use cudarc::driver::DeviceSlice;
 use xlog_core::{Result, XlogError};
+use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::CudaKernelProvider;
 use xlog_solve::{GpuCdclConfig, GpuCnf};
 
@@ -38,24 +40,79 @@ pub use validation::{
     validate_equivalence_gpu_gated, GpuEquivalenceConfig,
 };
 
+/// Device-resident random-variable list for GPU smoothing.
+pub struct DeviceRandomVarList {
+    list: TrackedCudaSlice<u32>,
+    count: u32,
+}
+
+impl DeviceRandomVarList {
+    pub fn from_device(list: TrackedCudaSlice<u32>, count: u32) -> Result<Self> {
+        let len = u32::try_from(list.len()).map_err(|_| {
+            XlogError::Compilation("DeviceRandomVarList: list length exceeds u32".to_string())
+        })?;
+        if count > len {
+            return Err(XlogError::Compilation(format!(
+                "DeviceRandomVarList: count {} exceeds list len {}",
+                count, len
+            )));
+        }
+        Ok(Self { list, count })
+    }
+
+    pub fn from_host(
+        provider: &CudaKernelProvider,
+        host: &[u32],
+    ) -> Result<Self> {
+        let memory = provider.memory();
+        let mut list = memory.alloc::<u32>(host.len())?;
+        if !host.is_empty() {
+            provider
+                .device()
+                .inner()
+                .htod_sync_copy_into(host, &mut list)
+                .map_err(|e| {
+                    XlogError::Kernel(format!("DeviceRandomVarList upload failed: {}", e))
+                })?;
+        }
+        let count = u32::try_from(host.len()).map_err(|_| {
+            XlogError::Compilation("DeviceRandomVarList: host len exceeds u32".to_string())
+        })?;
+        Ok(Self { list, count })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    pub fn count(&self) -> u32 {
+        self.count
+    }
+
+    pub fn list(&self) -> &TrackedCudaSlice<u32> {
+        &self.list
+    }
+}
+
 /// Compile CNF on GPU, then verify equivalence with GPU CDCL.
 pub fn compile_gpu_d4_and_verify(
     cnf: &GpuCnf,
     provider: &Arc<CudaKernelProvider>,
     config: &GpuCompileConfig,
-    random_vars: &[u32],
+    random_vars: &DeviceRandomVarList,
 ) -> Result<GpuXgcf> {
     if config.cdcl_conflict_budget.is_some() {
         return Err(XlogError::Compilation(
             "cdcl_conflict_budget is not supported by the GPU CDCL verifier".to_string(),
         ));
     }
-    let d4_config = d4_config_for_smoothing(config, random_vars)?;
+    let d4_config = d4_config_for_smoothing(config, random_vars.count())?;
     let mut circuit = gpu_d4::compile_gpu_d4(cnf, provider, &d4_config)?;
     if !random_vars.is_empty() {
         circuit = circuit.smooth_random_vars_device(
             provider,
-            random_vars,
+            random_vars.list(),
+            random_vars.count(),
             config.smooth_node_cap,
             config.smooth_edge_cap,
         )?;
@@ -71,7 +128,7 @@ pub fn compile_gpu_d4_and_verify_cached(
     provider: &Arc<CudaKernelProvider>,
     config: &GpuCompileConfig,
     cache: &mut GpuCircuitCache,
-    random_vars: &[u32],
+    random_vars: &DeviceRandomVarList,
 ) -> Result<GpuCircuitCacheHandle> {
     if config.cdcl_conflict_budget.is_some() {
         return Err(XlogError::Compilation(
@@ -83,7 +140,7 @@ pub fn compile_gpu_d4_and_verify_cached(
     let lookup = cache.lookup_or_insert_device(&key)?;
     let mut handle = lookup.into_handle();
 
-    let d4_config = d4_config_for_smoothing(config, random_vars)?;
+    let d4_config = d4_config_for_smoothing(config, random_vars.count())?;
     let circuit = gpu_d4::compile_gpu_d4_gated(
         cnf,
         provider,
@@ -98,7 +155,8 @@ pub fn compile_gpu_d4_and_verify_cached(
     } else {
         let smoothed = circuit.smooth_random_vars_device(
             provider,
-            random_vars,
+            random_vars.list(),
+            random_vars.count(),
             config.smooth_node_cap,
             config.smooth_edge_cap,
         )?;
@@ -121,15 +179,12 @@ pub fn compile_gpu_d4_and_verify_cached(
     Ok(handle)
 }
 
-fn d4_config_for_smoothing(
-    config: &GpuCompileConfig,
-    random_vars: &[u32],
-) -> Result<GpuCompileConfig> {
-    if random_vars.is_empty() {
+fn d4_config_for_smoothing(config: &GpuCompileConfig, random_var_count: u32) -> Result<GpuCompileConfig> {
+    if random_var_count == 0 {
         return Ok(*config);
     }
     let headroom = 2u32
-        .checked_add(random_vars.len() as u32)
+        .checked_add(random_var_count)
         .ok_or_else(|| XlogError::Compilation("smooth headroom overflow".to_string()))?;
     if config.smooth_node_cap <= headroom {
         return Err(XlogError::Compilation(format!(

@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use xlog_core::MemoryBudget;
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
-use xlog_prob::compilation::gpu_d4::compute_free_var_mask_gpu;
+use xlog_prob::compilation::{gpu_d4::compute_free_var_mask_gpu, DeviceRandomVarList};
 use xlog_prob::gpu::{GpuCircuitBuilder, GpuCircuitLayout, GpuXgcf};
 use xlog_prob::kc::ddnnf::DecisionDnnf;
 use xlog_prob::xgcf::{Xgcf, XgcfNodeType};
@@ -335,8 +335,16 @@ fn test_gpu_xgcf_smoothing_matches_cpu_gradients() {
 
     let gpu_xgcf = GpuXgcf::upload(&provider, &xgcf).unwrap();
     let random_vars = vec![1u32, 2u32];
+    let random_vars_device =
+        DeviceRandomVarList::from_host(&provider, &random_vars).unwrap();
     let mut gpu_smoothed = gpu_xgcf
-        .smooth_random_vars_device(&provider, &random_vars, 64, 256)
+        .smooth_random_vars_device(
+            &provider,
+            random_vars_device.list(),
+            random_vars_device.count(),
+            64,
+            256,
+        )
         .unwrap();
     let (gpu_log_z, gpu_grad_true, gpu_grad_false) = gpu_smoothed
         .eval_log_wmc_and_grads(&provider, &weights)

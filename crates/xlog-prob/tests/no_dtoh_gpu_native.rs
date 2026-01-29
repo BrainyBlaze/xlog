@@ -65,3 +65,16 @@ fn smoothing_no_dtoh_calls_in_source() {
         "gpu.rs still performs device->host reads during smoothing"
     );
 }
+
+#[test]
+fn random_var_collection_no_dtoh_in_source() {
+    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    path.push("src");
+    path.push("exact.rs");
+
+    let text = std::fs::read_to_string(&path).expect("read exact.rs");
+    assert!(
+        !text.contains("collect_random_vars_host"),
+        "host random-var collection still present"
+    );
+}

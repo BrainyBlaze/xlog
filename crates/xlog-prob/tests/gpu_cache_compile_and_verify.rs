@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use xlog_core::MemoryBudget;
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
-use xlog_prob::compilation::{compile_gpu_d4_and_verify_cached, GpuCompileConfig};
+use xlog_prob::compilation::{
+    compile_gpu_d4_and_verify_cached, DeviceRandomVarList, GpuCompileConfig,
+};
 use xlog_prob::compilation::gpu_cache::{GpuCircuitCache, GpuCircuitCacheConfig};
 use xlog_solve::{Clause, GpuCnf, Literal, SolveInstance};
 
@@ -46,10 +48,24 @@ fn gpu_cache_compile_reuses_slot() {
     };
     let mut cache = GpuCircuitCache::new(&provider, config).unwrap();
 
-    let h1 = compile_gpu_d4_and_verify_cached(&cnf, &provider, &compile_config, &mut cache, &[])
-        .expect("compile 1");
-    let h2 = compile_gpu_d4_and_verify_cached(&cnf, &provider, &compile_config, &mut cache, &[])
-        .expect("compile 2");
+    let random_vars =
+        DeviceRandomVarList::from_host(provider.as_ref(), &[]).expect("random vars upload");
+    let h1 = compile_gpu_d4_and_verify_cached(
+        &cnf,
+        &provider,
+        &compile_config,
+        &mut cache,
+        &random_vars,
+    )
+    .expect("compile 1");
+    let h2 = compile_gpu_d4_and_verify_cached(
+        &cnf,
+        &provider,
+        &compile_config,
+        &mut cache,
+        &random_vars,
+    )
+    .expect("compile 2");
 
     let mut slot1 = vec![0u32; 1];
     let mut slot2 = vec![0u32; 1];

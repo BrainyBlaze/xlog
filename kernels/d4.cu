@@ -2145,6 +2145,30 @@ extern "C" __global__ void d4_support_level(
     }
 }
 
+extern "C" __global__ void d4_support_set_root_bits(
+    uint32_t root,
+    uint32_t num_random_vars,
+    uint32_t words_per_support,
+    uint32_t* __restrict__ support
+) {
+    if (num_random_vars == 0u) {
+        return;
+    }
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    uint32_t num_words = (num_random_vars + 31u) >> 5;
+    if (tid >= num_words) {
+        return;
+    }
+    uint32_t val = 0xFFFFFFFFu;
+    if (tid == num_words - 1u) {
+        uint32_t rem = num_random_vars & 31u;
+        if (rem != 0u) {
+            val = (1u << rem) - 1u;
+        }
+    }
+    d4_support_set(support, root, tid, words_per_support, val);
+}
+
 extern "C" __global__ void d4_smooth_count(
     const uint8_t* __restrict__ node_type,
     const uint32_t* __restrict__ child_offsets,

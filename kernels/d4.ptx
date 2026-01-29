@@ -15430,6 +15430,56 @@ $L__BB10_41:
 	ret;
 
 }
+	// .globl	d4_support_set_root_bits
+.visible .entry d4_support_set_root_bits(
+	.param .u32 d4_support_set_root_bits_param_0,
+	.param .u32 d4_support_set_root_bits_param_1,
+	.param .u32 d4_support_set_root_bits_param_2,
+	.param .u64 d4_support_set_root_bits_param_3
+)
+{
+	.reg .pred 	%p<6>;
+	.reg .b32 	%r<16>;
+	.reg .b64 	%rd<8>;
+
+
+	ld.param.u32 	%r3, [d4_support_set_root_bits_param_0];
+	ld.param.u32 	%r4, [d4_support_set_root_bits_param_1];
+	ld.param.u32 	%r5, [d4_support_set_root_bits_param_2];
+	ld.param.u64 	%rd1, [d4_support_set_root_bits_param_3];
+	setp.eq.s32 	%p1, %r4, 0;
+	@%p1 bra 	$L__BB11_3;
+
+	mov.u32 	%r6, %ctaid.x;
+	mov.u32 	%r7, %ntid.x;
+	mov.u32 	%r8, %tid.x;
+	mad.lo.s32 	%r1, %r6, %r7, %r8;
+	add.s32 	%r9, %r4, 31;
+	shr.u32 	%r2, %r9, 5;
+	setp.ge.u32 	%p2, %r1, %r2;
+	@%p2 bra 	$L__BB11_3;
+
+	add.s32 	%r10, %r2, -1;
+	mov.u32 	%r11, -1;
+	setp.eq.s32 	%p3, %r1, %r10;
+	and.b32  	%r12, %r4, 31;
+	setp.ne.s32 	%p4, %r12, 0;
+	shl.b32 	%r13, %r11, %r12;
+	not.b32 	%r14, %r13;
+	and.pred  	%p5, %p4, %p3;
+	selp.b32 	%r15, %r14, -1, %p5;
+	mul.wide.u32 	%rd2, %r5, %r3;
+	cvt.u64.u32 	%rd3, %r1;
+	add.s64 	%rd4, %rd2, %rd3;
+	cvta.to.global.u64 	%rd5, %rd1;
+	shl.b64 	%rd6, %rd4, 2;
+	add.s64 	%rd7, %rd5, %rd6;
+	st.global.u32 	[%rd7], %r15;
+
+$L__BB11_3:
+	ret;
+
+}
 	// .globl	d4_smooth_count
 .visible .entry d4_smooth_count(
 	.param .u64 d4_smooth_count_param_0,
@@ -15486,17 +15536,17 @@ $L__BB10_41:
 	cvta.to.global.u64 	%rd32, %rd28;
 	ld.global.nc.u32 	%r89, [%rd32];
 	setp.ge.u32 	%p1, %r1, %r89;
-	@%p1 bra 	$L__BB11_44;
+	@%p1 bra 	$L__BB12_44;
 
 	add.s32 	%r2, %r1, %r84;
 	setp.lt.u32 	%p2, %r2, %r85;
-	@%p2 bra 	$L__BB11_3;
+	@%p2 bra 	$L__BB12_3;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB11_3:
+$L__BB12_3:
 	cvta.to.global.u64 	%rd33, %rd19;
 	cvt.u64.u32 	%rd4, %r1;
 	cvta.to.global.u64 	%rd34, %rd18;
@@ -15511,46 +15561,46 @@ $L__BB11_3:
 	mul.wide.u32 	%rd37, %r91, 4;
 	add.s64 	%rd6, %rd33, %rd37;
 	mov.u32 	%r204, 0;
-	@%p3 bra 	$L__BB11_7;
+	@%p3 bra 	$L__BB12_7;
 
 	ld.global.nc.u32 	%r3, [%rd5];
 	ld.global.nc.u32 	%r4, [%rd6];
 	setp.ge.u32 	%p4, %r4, %r3;
-	@%p4 bra 	$L__BB11_6;
+	@%p4 bra 	$L__BB12_6;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB11_6:
+$L__BB12_6:
 	sub.s32 	%r204, %r4, %r3;
 
-$L__BB11_7:
+$L__BB12_7:
 	cvta.to.global.u64 	%rd38, %rd27;
 	mul.wide.u32 	%rd39, %r2, 4;
 	add.s64 	%rd40, %rd38, %rd39;
 	st.global.u32 	[%rd40], %r204;
 	setp.eq.s16 	%p5, %rs1, 4;
-	@%p5 bra 	$L__BB11_28;
-	bra.uni 	$L__BB11_8;
+	@%p5 bra 	$L__BB12_28;
+	bra.uni 	$L__BB12_8;
 
-$L__BB11_28:
+$L__BB12_28:
 	ld.global.nc.u32 	%r220, [%rd5];
 	ld.global.nc.u32 	%r55, [%rd6];
 	setp.le.u32 	%p40, %r55, %r220;
-	@%p40 bra 	$L__BB11_44;
+	@%p40 bra 	$L__BB12_44;
 
 	setp.eq.s32 	%p41, %r82, 0;
 	cvt.u64.u32 	%rd11, %r82;
 	mul.lo.s64 	%rd12, %rd11, %rd4;
-	@%p41 bra 	$L__BB11_39;
+	@%p41 bra 	$L__BB12_39;
 
 	add.s32 	%r56, %r82, -1;
 	and.b32  	%r57, %r82, 3;
 	sub.s32 	%r58, %r82, %r57;
 	cvta.to.global.u64 	%rd13, %rd20;
 
-$L__BB11_31:
+$L__BB12_31:
 	cvt.u64.u32 	%rd14, %r220;
 	mul.wide.u32 	%rd68, %r220, 4;
 	add.s64 	%rd69, %rd13, %rd68;
@@ -15560,12 +15610,12 @@ $L__BB11_31:
 	setp.lt.u32 	%p42, %r56, 3;
 	mov.u32 	%r225, 0;
 	mov.u32 	%r227, %r225;
-	@%p42 bra 	$L__BB11_34;
+	@%p42 bra 	$L__BB12_34;
 
 	mov.u32 	%r225, 0;
 	mov.u32 	%r223, %r58;
 
-$L__BB11_33:
+$L__BB12_33:
 	cvt.u64.u32 	%rd71, %r225;
 	add.s64 	%rd72, %rd12, %rd71;
 	shl.b64 	%rd73, %rd72, 2;
@@ -15600,11 +15650,11 @@ $L__BB11_33:
 	add.s32 	%r225, %r225, 4;
 	add.s32 	%r223, %r223, -4;
 	setp.ne.s32 	%p43, %r223, 0;
-	@%p43 bra 	$L__BB11_33;
+	@%p43 bra 	$L__BB12_33;
 
-$L__BB11_34:
+$L__BB12_34:
 	setp.eq.s32 	%p44, %r57, 0;
-	@%p44 bra 	$L__BB11_38;
+	@%p44 bra 	$L__BB12_38;
 
 	setp.eq.s32 	%p45, %r57, 1;
 	cvt.u64.u32 	%rd78, %r225;
@@ -15620,7 +15670,7 @@ $L__BB11_34:
 	and.b32  	%r182, %r181, %r180;
 	popc.b32 	%r183, %r182;
 	add.s32 	%r227, %r183, %r227;
-	@%p45 bra 	$L__BB11_38;
+	@%p45 bra 	$L__BB12_38;
 
 	setp.eq.s32 	%p46, %r57, 2;
 	ld.global.nc.u32 	%r184, [%rd17+4];
@@ -15629,7 +15679,7 @@ $L__BB11_34:
 	and.b32  	%r187, %r186, %r185;
 	popc.b32 	%r188, %r187;
 	add.s32 	%r227, %r188, %r227;
-	@%p46 bra 	$L__BB11_38;
+	@%p46 bra 	$L__BB12_38;
 
 	ld.global.nc.u32 	%r189, [%rd17+8];
 	not.b32 	%r190, %r189;
@@ -15638,7 +15688,7 @@ $L__BB11_34:
 	popc.b32 	%r193, %r192;
 	add.s32 	%r227, %r193, %r227;
 
-$L__BB11_38:
+$L__BB12_38:
 	shl.b64 	%rd83, %rd14, 2;
 	add.s64 	%rd84, %rd2, %rd83;
 	st.global.u32 	[%rd84], %r227;
@@ -15649,12 +15699,12 @@ $L__BB11_38:
 	cvt.u32.u64 	%r195, %rd14;
 	add.s32 	%r220, %r195, 1;
 	setp.lt.u32 	%p48, %r220, %r55;
-	@%p48 bra 	$L__BB11_31;
-	bra.uni 	$L__BB11_44;
+	@%p48 bra 	$L__BB12_31;
+	bra.uni 	$L__BB12_44;
 
-$L__BB11_8:
+$L__BB12_8:
 	setp.ne.s16 	%p6, %rs1, 5;
-	@%p6 bra 	$L__BB11_44;
+	@%p6 bra 	$L__BB12_44;
 
 	cvta.to.global.u64 	%rd41, %rd22;
 	shl.b64 	%rd42, %rd4, 2;
@@ -15667,13 +15717,13 @@ $L__BB11_8:
 	add.s64 	%rd47, %rd46, %rd42;
 	ld.global.nc.u32 	%r9, [%rd47];
 	setp.lt.u32 	%p7, %r9, %r83;
-	@%p7 bra 	$L__BB11_11;
+	@%p7 bra 	$L__BB12_11;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB11_11:
+$L__BB12_11:
 	cvta.to.global.u64 	%rd48, %rd24;
 	mul.wide.u32 	%rd49, %r9, 4;
 	add.s64 	%rd50, %rd48, %rd49;
@@ -15681,7 +15731,7 @@ $L__BB11_11:
 	setp.eq.s32 	%p8, %r82, 0;
 	mov.u32 	%r218, 0;
 	mov.u32 	%r219, %r218;
-	@%p8 bra 	$L__BB11_27;
+	@%p8 bra 	$L__BB12_27;
 
 	mul.wide.u32 	%rd7, %r7, %r82;
 	mul.wide.u32 	%rd8, %r8, %r82;
@@ -15695,12 +15745,12 @@ $L__BB11_11:
 	mov.u32 	%r211, 0;
 	mov.u32 	%r219, %r211;
 	mov.u32 	%r218, %r211;
-	@%p9 bra 	$L__BB11_23;
+	@%p9 bra 	$L__BB12_23;
 
 	sub.s32 	%r208, %r82, %r217;
 	mov.u32 	%r211, 0;
 
-$L__BB11_14:
+$L__BB12_14:
 	cvt.u64.u32 	%rd51, %r211;
 	add.s64 	%rd52, %rd7, %rd51;
 	shl.b64 	%rd53, %rd52, 2;
@@ -15717,13 +15767,13 @@ $L__BB11_14:
 	and.b32  	%r105, %r104, %r12;
 	setp.eq.s32 	%p13, %r105, 0;
 	or.pred  	%p14, %p13, %p12;
-	@%p14 bra 	$L__BB11_16;
+	@%p14 bra 	$L__BB12_16;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB11_16:
+$L__BB12_16:
 	not.b32 	%r106, %r20;
 	and.b32  	%r107, %r19, %r106;
 	popc.b32 	%r108, %r107;
@@ -15741,13 +15791,13 @@ $L__BB11_16:
 	and.b32  	%r114, %r112, %r12;
 	setp.eq.s32 	%p18, %r114, 0;
 	or.pred  	%p19, %p18, %p17;
-	@%p19 bra 	$L__BB11_18;
+	@%p19 bra 	$L__BB12_18;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB11_18:
+$L__BB12_18:
 	not.b32 	%r115, %r24;
 	and.b32  	%r116, %r23, %r115;
 	popc.b32 	%r117, %r116;
@@ -15765,13 +15815,13 @@ $L__BB11_18:
 	and.b32  	%r123, %r121, %r12;
 	setp.eq.s32 	%p23, %r123, 0;
 	or.pred  	%p24, %p23, %p22;
-	@%p24 bra 	$L__BB11_20;
+	@%p24 bra 	$L__BB12_20;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB11_20:
+$L__BB12_20:
 	not.b32 	%r124, %r28;
 	and.b32  	%r125, %r27, %r124;
 	popc.b32 	%r126, %r125;
@@ -15789,13 +15839,13 @@ $L__BB11_20:
 	and.b32  	%r132, %r130, %r12;
 	setp.eq.s32 	%p28, %r132, 0;
 	or.pred  	%p29, %p28, %p27;
-	@%p29 bra 	$L__BB11_22;
+	@%p29 bra 	$L__BB12_22;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB11_22:
+$L__BB12_22:
 	not.b32 	%r133, %r32;
 	and.b32  	%r134, %r31, %r133;
 	popc.b32 	%r135, %r134;
@@ -15807,13 +15857,13 @@ $L__BB11_22:
 	add.s32 	%r211, %r211, 4;
 	add.s32 	%r208, %r208, -4;
 	setp.ne.s32 	%p30, %r208, 0;
-	@%p30 bra 	$L__BB11_14;
+	@%p30 bra 	$L__BB12_14;
 
-$L__BB11_23:
+$L__BB12_23:
 	setp.eq.s32 	%p31, %r217, 0;
-	@%p31 bra 	$L__BB11_27;
+	@%p31 bra 	$L__BB12_27;
 
-$L__BB11_24:
+$L__BB12_24:
 	.pragma "nounroll";
 	cvt.u64.u32 	%rd56, %r211;
 	add.s64 	%rd57, %rd7, %rd56;
@@ -15831,13 +15881,13 @@ $L__BB11_24:
 	and.b32  	%r140, %r139, %r12;
 	setp.eq.s32 	%p35, %r140, 0;
 	or.pred  	%p36, %p35, %p34;
-	@%p36 bra 	$L__BB11_26;
+	@%p36 bra 	$L__BB12_26;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB11_26:
+$L__BB12_26:
 	not.b32 	%r141, %r47;
 	and.b32  	%r142, %r46, %r141;
 	popc.b32 	%r143, %r142;
@@ -15849,9 +15899,9 @@ $L__BB11_26:
 	add.s32 	%r211, %r211, 1;
 	add.s32 	%r217, %r217, -1;
 	setp.ne.s32 	%p37, %r217, 0;
-	@%p37 bra 	$L__BB11_24;
+	@%p37 bra 	$L__BB12_24;
 
-$L__BB11_27:
+$L__BB12_27:
 	shl.b32 	%r147, %r1, 1;
 	cvta.to.global.u64 	%rd63, %rd26;
 	mul.wide.u32 	%rd64, %r147, 4;
@@ -15867,19 +15917,19 @@ $L__BB11_27:
 	selp.u32 	%r149, 1, 0, %p39;
 	st.global.u32 	[%rd67+4], %r149;
 
-$L__BB11_44:
+$L__BB12_44:
 	ret;
 
-$L__BB11_39:
+$L__BB12_39:
 	sub.s32 	%r196, %r55, %r220;
 	and.b32  	%r229, %r196, 3;
 	setp.eq.s32 	%p49, %r229, 0;
 	mov.u32 	%r230, %r220;
-	@%p49 bra 	$L__BB11_42;
+	@%p49 bra 	$L__BB12_42;
 
 	mov.u32 	%r230, %r220;
 
-$L__BB11_41:
+$L__BB12_41:
 	.pragma "nounroll";
 	mul.wide.u32 	%rd86, %r230, 4;
 	add.s64 	%rd87, %rd2, %rd86;
@@ -15890,15 +15940,15 @@ $L__BB11_41:
 	add.s32 	%r230, %r230, 1;
 	add.s32 	%r229, %r229, -1;
 	setp.ne.s32 	%p50, %r229, 0;
-	@%p50 bra 	$L__BB11_41;
+	@%p50 bra 	$L__BB12_41;
 
-$L__BB11_42:
+$L__BB12_42:
 	not.b32 	%r198, %r220;
 	add.s32 	%r199, %r55, %r198;
 	setp.lt.u32 	%p51, %r199, 3;
-	@%p51 bra 	$L__BB11_44;
+	@%p51 bra 	$L__BB12_44;
 
-$L__BB11_43:
+$L__BB12_43:
 	mul.wide.u32 	%rd89, %r230, 4;
 	add.s64 	%rd90, %rd2, %rd89;
 	mov.u32 	%r200, 0;
@@ -15925,8 +15975,8 @@ $L__BB11_43:
 	st.global.u32 	[%rd100], %r200;
 	add.s32 	%r230, %r230, 4;
 	setp.lt.u32 	%p52, %r230, %r55;
-	@%p52 bra 	$L__BB11_43;
-	bra.uni 	$L__BB11_44;
+	@%p52 bra 	$L__BB12_43;
+	bra.uni 	$L__BB12_44;
 
 }
 	// .globl	d4_smooth_wrapper_counts
@@ -15962,12 +16012,12 @@ $L__BB11_43:
 	mov.u32 	%r10, %ctaid.x;
 	or.b32  	%r11, %r9, %r10;
 	setp.ne.s32 	%p1, %r11, 0;
-	@%p1 bra 	$L__BB12_8;
+	@%p1 bra 	$L__BB13_8;
 
 	setp.eq.s32 	%p2, %r5, 0;
 	mov.u32 	%r24, 0;
 	mov.u32 	%r23, %r24;
-	@%p2 bra 	$L__BB12_3;
+	@%p2 bra 	$L__BB13_3;
 
 	add.s32 	%r13, %r5, -1;
 	cvta.to.global.u64 	%rd8, %rd2;
@@ -15981,9 +16031,9 @@ $L__BB11_43:
 	ld.global.nc.u32 	%r16, [%rd10];
 	add.s32 	%r23, %r16, %r15;
 
-$L__BB12_3:
+$L__BB13_3:
 	setp.eq.s32 	%p4, %r6, 0;
-	@%p4 bra 	$L__BB12_5;
+	@%p4 bra 	$L__BB13_5;
 
 	add.s32 	%r18, %r6, -1;
 	cvta.to.global.u64 	%rd13, %rd4;
@@ -15997,7 +16047,7 @@ $L__BB12_3:
 	ld.global.nc.u32 	%r21, [%rd15];
 	add.s32 	%r24, %r21, %r20;
 
-$L__BB12_5:
+$L__BB13_5:
 	cvta.to.global.u64 	%rd18, %rd6;
 	ld.global.nc.u32 	%r22, [%rd18];
 	cvt.u64.u32 	%rd19, %r22;
@@ -16009,19 +16059,19 @@ $L__BB12_5:
 	add.s64 	%rd1, %rd24, %rd19;
 	cvt.u64.u32 	%rd25, %r8;
 	setp.le.u64 	%p6, %rd1, %rd25;
-	@%p6 bra 	$L__BB12_7;
+	@%p6 bra 	$L__BB13_7;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB12_7:
+$L__BB13_7:
 	cvta.to.global.u64 	%rd26, %rd7;
 	st.global.u32 	[%rd26], %r23;
 	st.global.u32 	[%rd26+4], %r24;
 	st.global.u32 	[%rd26+8], %rd1;
 
-$L__BB12_8:
+$L__BB13_8:
 	ret;
 
 }
@@ -16053,7 +16103,7 @@ $L__BB12_8:
 	mov.u32 	%r9, %tid.x;
 	mad.lo.s32 	%r1, %r8, %r7, %r9;
 	setp.ge.u32 	%p1, %r1, %r6;
-	@%p1 bra 	$L__BB13_7;
+	@%p1 bra 	$L__BB14_7;
 
 	cvta.to.global.u64 	%rd7, %rd5;
 	ld.global.nc.u32 	%r10, [%rd7];
@@ -16062,20 +16112,20 @@ $L__BB12_8:
 	add.s64 	%rd1, %rd8, %rd9;
 	cvt.u64.u32 	%rd10, %r5;
 	setp.lt.u64 	%p2, %rd1, %rd10;
-	@%p2 bra 	$L__BB13_3;
+	@%p2 bra 	$L__BB14_3;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB13_3:
+$L__BB14_3:
 	cvt.u64.u32 	%rd2, %r1;
 	cvta.to.global.u64 	%rd11, %rd4;
 	mul.wide.u32 	%rd12, %r1, 4;
 	add.s64 	%rd13, %rd11, %rd12;
 	ld.global.nc.u32 	%r2, [%rd13];
 	setp.eq.s32 	%p3, %r2, 0;
-	@%p3 bra 	$L__BB13_7;
+	@%p3 bra 	$L__BB14_7;
 
 	cvt.u32.u64 	%r11, %rd1;
 	cvta.to.global.u64 	%rd14, %rd3;
@@ -16084,20 +16134,20 @@ $L__BB13_3:
 	ld.global.nc.u32 	%r12, [%rd16];
 	add.s32 	%r3, %r12, %r11;
 	setp.lt.u32 	%p4, %r3, %r5;
-	@%p4 bra 	$L__BB13_6;
+	@%p4 bra 	$L__BB14_6;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB13_6:
+$L__BB14_6:
 	add.s32 	%r13, %r2, 1;
 	cvta.to.global.u64 	%rd17, %rd6;
 	mul.wide.u32 	%rd18, %r3, 4;
 	add.s64 	%rd19, %rd17, %rd18;
 	st.global.u32 	[%rd19], %r13;
 
-$L__BB13_7:
+$L__BB14_7:
 	ret;
 
 }
@@ -16131,7 +16181,7 @@ $L__BB13_7:
 	mov.u32 	%r9, %tid.x;
 	mad.lo.s32 	%r1, %r8, %r7, %r9;
 	setp.ge.u32 	%p1, %r1, %r6;
-	@%p1 bra 	$L__BB14_7;
+	@%p1 bra 	$L__BB15_7;
 
 	cvta.to.global.u64 	%rd8, %rd5;
 	ld.global.nc.u32 	%r10, [%rd8];
@@ -16140,20 +16190,20 @@ $L__BB13_7:
 	add.s64 	%rd1, %rd9, %rd10;
 	cvt.u64.u32 	%rd11, %r5;
 	setp.lt.u64 	%p2, %rd1, %rd11;
-	@%p2 bra 	$L__BB14_3;
+	@%p2 bra 	$L__BB15_3;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB14_3:
+$L__BB15_3:
 	cvt.u64.u32 	%rd2, %r1;
 	cvta.to.global.u64 	%rd12, %rd4;
 	mul.wide.u32 	%rd13, %r1, 4;
 	add.s64 	%rd14, %rd12, %rd13;
 	ld.global.nc.u32 	%r2, [%rd14];
 	setp.eq.s32 	%p3, %r2, 0;
-	@%p3 bra 	$L__BB14_7;
+	@%p3 bra 	$L__BB15_7;
 
 	cvt.u32.u64 	%r11, %rd1;
 	cvta.to.global.u64 	%rd15, %rd6;
@@ -16165,20 +16215,20 @@ $L__BB14_3:
 	ld.global.nc.u32 	%r14, [%rd18];
 	add.s32 	%r3, %r13, %r14;
 	setp.lt.u32 	%p4, %r3, %r5;
-	@%p4 bra 	$L__BB14_6;
+	@%p4 bra 	$L__BB15_6;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB14_6:
+$L__BB15_6:
 	add.s32 	%r15, %r2, 1;
 	cvta.to.global.u64 	%rd19, %rd7;
 	mul.wide.u32 	%rd20, %r3, 4;
 	add.s64 	%rd21, %rd19, %rd20;
 	st.global.u32 	[%rd21], %r15;
 
-$L__BB14_7:
+$L__BB15_7:
 	ret;
 
 }
@@ -16221,16 +16271,16 @@ $L__BB14_7:
 	mov.u32 	%r8, %tid.x;
 	mad.lo.s32 	%r1, %r7, %r6, %r8;
 	setp.ne.s32 	%p1, %r1, 0;
-	@%p1 bra 	$L__BB15_4;
+	@%p1 bra 	$L__BB16_4;
 
 	setp.gt.u32 	%p2, %r5, 1;
-	@%p2 bra 	$L__BB15_3;
+	@%p2 bra 	$L__BB16_3;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB15_3:
+$L__BB16_3:
 	mov.u16 	%rs1, 0;
 	st.global.u8 	[%rd6], %rs1;
 	mov.u16 	%rs2, 1;
@@ -16247,31 +16297,31 @@ $L__BB15_3:
 	st.global.u32 	[%rd1], %r9;
 	st.global.u32 	[%rd1+4], %r9;
 
-$L__BB15_4:
+$L__BB16_4:
 	setp.ge.u32 	%p3, %r1, %r4;
-	@%p3 bra 	$L__BB15_10;
+	@%p3 bra 	$L__BB16_10;
 
 	add.s32 	%r2, %r1, 2;
 	setp.lt.u32 	%p4, %r2, %r5;
-	@%p4 bra 	$L__BB15_7;
+	@%p4 bra 	$L__BB16_7;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB15_7:
+$L__BB16_7:
 	cvta.to.global.u64 	%rd14, %rd7;
 	mul.wide.u32 	%rd15, %r1, 4;
 	add.s64 	%rd16, %rd14, %rd15;
 	ld.global.nc.u32 	%r3, [%rd16];
 	setp.ne.s32 	%p5, %r3, 0;
-	@%p5 bra 	$L__BB15_9;
+	@%p5 bra 	$L__BB16_9;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB15_9:
+$L__BB16_9:
 	cvt.u64.u32 	%rd17, %r2;
 	add.s64 	%rd18, %rd6, %rd17;
 	mov.u16 	%rs3, 5;
@@ -16290,7 +16340,7 @@ $L__BB15_9:
 	add.s64 	%rd24, %rd1, %rd19;
 	st.global.u32 	[%rd24], %r11;
 
-$L__BB15_10:
+$L__BB16_10:
 	ret;
 
 }
@@ -16380,7 +16430,7 @@ $L__BB15_10:
 	ld.global.nc.u32 	%r3, [%rd72];
 	sub.s32 	%r133, %r132, %r3;
 	setp.ge.u32 	%p1, %r1, %r133;
-	@%p1 bra 	$L__BB16_84;
+	@%p1 bra 	$L__BB17_84;
 
 	ld.param.u64 	%rd248, [d4_smooth_emit_level_param_7];
 	cvta.to.global.u64 	%rd75, %rd248;
@@ -16398,10 +16448,10 @@ $L__BB15_10:
 	add.s64 	%rd13, %rd10, %rd12;
 	mul.wide.u32 	%rd80, %r4, 4;
 	add.s64 	%rd14, %rd9, %rd80;
-	@%p2 bra 	$L__BB16_83;
-	bra.uni 	$L__BB16_2;
+	@%p2 bra 	$L__BB17_83;
+	bra.uni 	$L__BB17_2;
 
-$L__BB16_83:
+$L__BB17_83:
 	st.global.u8 	[%rd13], %rs1;
 	mov.u32 	%r267, 0;
 	st.global.u32 	[%rd14], %r267;
@@ -16414,14 +16464,14 @@ $L__BB16_83:
 	st.global.u32 	[%rd242], %r267;
 	add.s64 	%rd243, %rd3, %rd239;
 	st.global.u32 	[%rd243], %r267;
-	bra.uni 	$L__BB16_84;
+	bra.uni 	$L__BB17_84;
 
-$L__BB16_2:
+$L__BB17_2:
 	setp.eq.s16 	%p3, %rs1, 2;
-	@%p3 bra 	$L__BB16_82;
-	bra.uni 	$L__BB16_3;
+	@%p3 bra 	$L__BB17_82;
+	bra.uni 	$L__BB17_3;
 
-$L__BB16_82:
+$L__BB17_82:
 	mov.u16 	%rs13, 2;
 	st.global.u8 	[%rd13], %rs13;
 	cvta.to.global.u64 	%rd231, %rd47;
@@ -16438,9 +16488,9 @@ $L__BB16_82:
 	st.global.u32 	[%rd237], %r266;
 	add.s64 	%rd238, %rd3, %rd80;
 	st.global.u32 	[%rd238], %r266;
-	bra.uni 	$L__BB16_84;
+	bra.uni 	$L__BB17_84;
 
-$L__BB16_3:
+$L__BB17_3:
 	ld.param.u64 	%rd249, [d4_smooth_emit_level_param_1];
 	cvta.to.global.u64 	%rd81, %rd249;
 	setp.eq.s16 	%p4, %rs1, 3;
@@ -16454,10 +16504,10 @@ $L__BB16_3:
 	add.s32 	%r138, %r4, 1;
 	mul.wide.u32 	%rd85, %r138, 4;
 	add.s64 	%rd19, %rd5, %rd85;
-	@%p4 bra 	$L__BB16_69;
-	bra.uni 	$L__BB16_4;
+	@%p4 bra 	$L__BB17_69;
+	bra.uni 	$L__BB17_4;
 
-$L__BB16_69:
+$L__BB17_69:
 	mov.u16 	%rs12, 3;
 	st.global.u8 	[%rd13], %rs12;
 	mov.u32 	%r225, 0;
@@ -16476,16 +16526,16 @@ $L__BB16_69:
 	ld.global.nc.u32 	%r96, [%rd15];
 	sub.s32 	%r97, %r95, %r96;
 	setp.eq.s32 	%p39, %r227, %r97;
-	@%p39 bra 	$L__BB16_71;
+	@%p39 bra 	$L__BB17_71;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB16_71:
+$L__BB17_71:
 	setp.eq.s32 	%p40, %r97, 0;
 	mov.u32 	%r322, 1;
-	@%p40 bra 	$L__BB16_79;
+	@%p40 bra 	$L__BB17_79;
 
 	not.b32 	%r232, %r96;
 	add.s32 	%r233, %r95, %r232;
@@ -16493,12 +16543,12 @@ $L__BB16_71:
 	setp.lt.u32 	%p41, %r233, 3;
 	mov.u32 	%r315, 0;
 	mov.u32 	%r321, %r315;
-	@%p41 bra 	$L__BB16_75;
+	@%p41 bra 	$L__BB17_75;
 
 	sub.s32 	%r313, %r97, %r320;
 	mov.u32 	%r315, 0;
 
-$L__BB16_74:
+$L__BB17_74:
 	add.s32 	%r236, %r315, %r96;
 	mul.wide.u32 	%rd199, %r236, 4;
 	add.s64 	%rd200, %rd1, %rd199;
@@ -16557,16 +16607,16 @@ $L__BB16_74:
 	add.s32 	%r315, %r315, 4;
 	add.s32 	%r313, %r313, -4;
 	setp.ne.s32 	%p42, %r313, 0;
-	@%p42 bra 	$L__BB16_74;
+	@%p42 bra 	$L__BB17_74;
 
-$L__BB16_75:
+$L__BB17_75:
 	setp.eq.s32 	%p43, %r320, 0;
-	@%p43 bra 	$L__BB16_78;
+	@%p43 bra 	$L__BB17_78;
 
 	add.s32 	%r318, %r315, %r94;
 	add.s32 	%r317, %r315, %r96;
 
-$L__BB16_77:
+$L__BB17_77:
 	.pragma "nounroll";
 	mul.wide.u32 	%rd223, %r317, 4;
 	add.s64 	%rd224, %rd1, %rd223;
@@ -16583,30 +16633,30 @@ $L__BB16_77:
 	add.s32 	%r317, %r317, 1;
 	add.s32 	%r320, %r320, -1;
 	setp.ne.s32 	%p44, %r320, 0;
-	@%p44 bra 	$L__BB16_77;
+	@%p44 bra 	$L__BB17_77;
 
-$L__BB16_78:
+$L__BB17_78:
 	add.s32 	%r322, %r321, 1;
 
-$L__BB16_79:
+$L__BB17_79:
 	setp.lt.u32 	%p45, %r322, %r125;
-	@%p45 bra 	$L__BB16_81;
+	@%p45 bra 	$L__BB17_81;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB16_81:
+$L__BB17_81:
 	add.s64 	%rd230, %rd3, %rd195;
 	st.global.u32 	[%rd230], %r322;
-	bra.uni 	$L__BB16_84;
+	bra.uni 	$L__BB17_84;
 
-$L__BB16_4:
+$L__BB17_4:
 	setp.eq.s16 	%p5, %rs1, 4;
-	@%p5 bra 	$L__BB16_43;
-	bra.uni 	$L__BB16_5;
+	@%p5 bra 	$L__BB17_43;
+	bra.uni 	$L__BB17_5;
 
-$L__BB16_43:
+$L__BB17_43:
 	mov.u16 	%rs10, 4;
 	st.global.u8 	[%rd13], %rs10;
 	mov.u32 	%r193, 0;
@@ -16624,16 +16674,16 @@ $L__BB16_43:
 	ld.global.nc.u32 	%r60, [%rd15];
 	sub.s32 	%r61, %r196, %r60;
 	setp.eq.s32 	%p26, %r195, %r61;
-	@%p26 bra 	$L__BB16_45;
+	@%p26 bra 	$L__BB17_45;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB16_45:
+$L__BB17_45:
 	setp.eq.s32 	%p27, %r61, 0;
 	mov.u32 	%r310, 1;
-	@%p27 bra 	$L__BB16_66;
+	@%p27 bra 	$L__BB17_66;
 
 	ld.param.u64 	%rd252, [d4_smooth_emit_level_param_13];
 	cvt.u64.u32 	%rd35, %r122;
@@ -16643,7 +16693,7 @@ $L__BB16_45:
 	mov.u32 	%r296, 0;
 	mov.u32 	%r297, %r296;
 
-$L__BB16_47:
+$L__BB17_47:
 	add.s32 	%r200, %r296, %r60;
 	cvt.u64.u32 	%rd39, %r200;
 	mul.wide.u32 	%rd161, %r200, 4;
@@ -16656,7 +16706,7 @@ $L__BB16_47:
 	add.s32 	%r308, %r201, %r123;
 	mul.wide.u32 	%rd164, %r308, 4;
 	add.s64 	%rd41, %rd3, %rd164;
-	@%p28 bra 	$L__BB16_63;
+	@%p28 bra 	$L__BB17_63;
 
 	shl.b64 	%rd165, %rd39, 2;
 	add.s64 	%rd166, %rd38, %rd165;
@@ -16686,13 +16736,13 @@ $L__BB16_47:
 	sub.s32 	%r207, %r206, %r204;
 	add.s32 	%r208, %r64, 1;
 	setp.eq.s32 	%p29, %r207, %r208;
-	@%p29 bra 	$L__BB16_50;
+	@%p29 bra 	$L__BB17_50;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB16_50:
+$L__BB17_50:
 	cvt.u32.u64 	%r209, %rd43;
 	cvt.u32.u64 	%r210, %rd40;
 	add.s32 	%r211, %r210, %r123;
@@ -16702,12 +16752,12 @@ $L__BB16_50:
 	ld.global.u32 	%r304, [%rd41];
 	add.s32 	%r305, %r209, 1;
 	setp.eq.s32 	%p30, %r122, 0;
-	@%p30 bra 	$L__BB16_58;
+	@%p30 bra 	$L__BB17_58;
 
 	mul.lo.s64 	%rd44, %rd40, %rd35;
 	mov.u32 	%r298, 0;
 
-$L__BB16_52:
+$L__BB17_52:
 	cvt.u64.u32 	%rd178, %r298;
 	add.s64 	%rd179, %rd36, %rd178;
 	shl.b64 	%rd180, %rd179, 2;
@@ -16720,23 +16770,23 @@ $L__BB16_52:
 	ld.global.nc.u32 	%r215, [%rd181];
 	and.b32  	%r301, %r215, %r214;
 	setp.eq.s32 	%p31, %r301, 0;
-	@%p31 bra 	$L__BB16_57;
+	@%p31 bra 	$L__BB17_57;
 
 	shl.b32 	%r73, %r298, 5;
 	mov.u32 	%r302, %r305;
 
-$L__BB16_54:
+$L__BB17_54:
 	brev.b32 	%r216, %r301;
 	bfind.shiftamt.u32 	%r217, %r216;
 	add.s32 	%r77, %r217, %r73;
 	setp.lt.u32 	%p32, %r77, %r124;
-	@%p32 bra 	$L__BB16_56;
+	@%p32 bra 	$L__BB17_56;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB16_56:
+$L__BB17_56:
 	add.s32 	%r218, %r77, 2;
 	add.s32 	%r305, %r302, 1;
 	mul.wide.u32 	%rd185, %r302, 4;
@@ -16750,43 +16800,43 @@ $L__BB16_56:
 	and.b32  	%r301, %r220, %r301;
 	setp.ne.s32 	%p33, %r301, 0;
 	mov.u32 	%r302, %r305;
-	@%p33 bra 	$L__BB16_54;
+	@%p33 bra 	$L__BB17_54;
 
-$L__BB16_57:
+$L__BB17_57:
 	add.s32 	%r298, %r298, 1;
 	setp.lt.u32 	%p34, %r298, %r122;
-	@%p34 bra 	$L__BB16_52;
+	@%p34 bra 	$L__BB17_52;
 
-$L__BB16_58:
+$L__BB17_58:
 	not.b32 	%r222, %r209;
 	add.s32 	%r223, %r305, %r222;
 	setp.eq.s32 	%p35, %r223, %r64;
-	@%p35 bra 	$L__BB16_60;
+	@%p35 bra 	$L__BB17_60;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB16_60:
+$L__BB17_60:
 	add.s32 	%r309, %r304, 1;
 	setp.lt.u32 	%p36, %r309, %r125;
-	@%p36 bra 	$L__BB16_62;
+	@%p36 bra 	$L__BB17_62;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB16_62:
+$L__BB17_62:
 	shl.b64 	%rd189, %rd42, 2;
 	add.s64 	%rd190, %rd3, %rd189;
 	add.s32 	%r271, %r304, 1;
 	st.global.u32 	[%rd190], %r271;
-	bra.uni 	$L__BB16_64;
+	bra.uni 	$L__BB17_64;
 
-$L__BB16_63:
+$L__BB17_63:
 	ld.global.u32 	%r309, [%rd41];
 
-$L__BB16_64:
+$L__BB17_64:
 	max.u32 	%r297, %r309, %r297;
 	add.s32 	%r224, %r296, %r59;
 	mul.wide.u32 	%rd191, %r224, 4;
@@ -16794,27 +16844,27 @@ $L__BB16_64:
 	st.global.u32 	[%rd192], %r308;
 	add.s32 	%r296, %r296, 1;
 	setp.lt.u32 	%p37, %r296, %r61;
-	@%p37 bra 	$L__BB16_47;
+	@%p37 bra 	$L__BB17_47;
 
 	add.s32 	%r310, %r297, 1;
 
-$L__BB16_66:
+$L__BB17_66:
 	setp.lt.u32 	%p38, %r310, %r125;
-	@%p38 bra 	$L__BB16_68;
+	@%p38 bra 	$L__BB17_68;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB16_68:
+$L__BB17_68:
 	shl.b64 	%rd193, %rd12, 2;
 	add.s64 	%rd194, %rd3, %rd193;
 	st.global.u32 	[%rd194], %r310;
-	bra.uni 	$L__BB16_84;
+	bra.uni 	$L__BB17_84;
 
-$L__BB16_5:
+$L__BB17_5:
 	setp.ne.s16 	%p6, %rs1, 5;
-	@%p6 bra 	$L__BB16_84;
+	@%p6 bra 	$L__BB17_84;
 
 	ld.param.u64 	%rd251, [d4_smooth_emit_level_param_14];
 	ld.param.u64 	%rd250, [d4_smooth_emit_level_param_15];
@@ -16853,7 +16903,7 @@ $L__BB16_5:
 	add.s32 	%r283, %r141, %r123;
 	mul.wide.u32 	%rd100, %r283, 4;
 	add.s64 	%rd24, %rd3, %rd100;
-	@%p7 bra 	$L__BB16_22;
+	@%p7 bra 	$L__BB17_22;
 
 	add.s32 	%r145, %r5, %r2;
 	ld.global.nc.u32 	%r146, [%rd23];
@@ -16881,13 +16931,13 @@ $L__BB16_5:
 	sub.s32 	%r151, %r150, %r148;
 	add.s32 	%r152, %r7, 1;
 	setp.eq.s32 	%p8, %r151, %r152;
-	@%p8 bra 	$L__BB16_9;
+	@%p8 bra 	$L__BB17_9;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB16_9:
+$L__BB17_9:
 	cvt.u32.u64 	%r153, %rd26;
 	cvt.u32.u64 	%r154, %rd20;
 	add.s32 	%r155, %r154, %r123;
@@ -16897,14 +16947,14 @@ $L__BB16_9:
 	ld.global.u32 	%r278, [%rd24];
 	add.s32 	%r279, %r153, 1;
 	setp.eq.s32 	%p9, %r122, 0;
-	@%p9 bra 	$L__BB16_17;
+	@%p9 bra 	$L__BB17_17;
 
 	cvt.u64.u32 	%rd112, %r122;
 	mul.lo.s64 	%rd27, %rd20, %rd112;
 	mul.lo.s64 	%rd28, %rd21, %rd112;
 	mov.u32 	%r272, 0;
 
-$L__BB16_11:
+$L__BB17_11:
 	cvt.u64.u32 	%rd113, %r272;
 	add.s64 	%rd114, %rd27, %rd113;
 	shl.b64 	%rd115, %rd114, 2;
@@ -16917,23 +16967,23 @@ $L__BB16_11:
 	ld.global.nc.u32 	%r159, [%rd119];
 	and.b32  	%r275, %r159, %r158;
 	setp.eq.s32 	%p10, %r275, 0;
-	@%p10 bra 	$L__BB16_16;
+	@%p10 bra 	$L__BB17_16;
 
 	shl.b32 	%r16, %r272, 5;
 	mov.u32 	%r276, %r279;
 
-$L__BB16_13:
+$L__BB17_13:
 	brev.b32 	%r160, %r275;
 	bfind.shiftamt.u32 	%r161, %r160;
 	add.s32 	%r20, %r161, %r16;
 	setp.lt.u32 	%p11, %r20, %r124;
-	@%p11 bra 	$L__BB16_15;
+	@%p11 bra 	$L__BB17_15;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB16_15:
+$L__BB17_15:
 	add.s32 	%r162, %r20, 2;
 	add.s32 	%r279, %r276, 1;
 	mul.wide.u32 	%rd120, %r276, 4;
@@ -16947,49 +16997,49 @@ $L__BB16_15:
 	and.b32  	%r275, %r164, %r275;
 	setp.ne.s32 	%p12, %r275, 0;
 	mov.u32 	%r276, %r279;
-	@%p12 bra 	$L__BB16_13;
+	@%p12 bra 	$L__BB17_13;
 
-$L__BB16_16:
+$L__BB17_16:
 	add.s32 	%r272, %r272, 1;
 	setp.lt.u32 	%p13, %r272, %r122;
-	@%p13 bra 	$L__BB16_11;
+	@%p13 bra 	$L__BB17_11;
 
-$L__BB16_17:
+$L__BB17_17:
 	not.b32 	%r166, %r153;
 	add.s32 	%r167, %r279, %r166;
 	setp.eq.s32 	%p14, %r167, %r7;
-	@%p14 bra 	$L__BB16_19;
+	@%p14 bra 	$L__BB17_19;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB16_19:
+$L__BB17_19:
 	add.s32 	%r282, %r278, 1;
 	setp.lt.u32 	%p15, %r282, %r125;
-	@%p15 bra 	$L__BB16_21;
+	@%p15 bra 	$L__BB17_21;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB16_21:
+$L__BB17_21:
 	shl.b64 	%rd124, %rd25, 2;
 	add.s64 	%rd125, %rd3, %rd124;
 	add.s32 	%r268, %r278, 1;
 	st.global.u32 	[%rd125], %r268;
-	bra.uni 	$L__BB16_23;
+	bra.uni 	$L__BB17_23;
 
-$L__BB16_22:
+$L__BB17_22:
 	ld.global.u32 	%r282, [%rd24];
 
-$L__BB16_23:
+$L__BB17_23:
 	cvt.u32.u64 	%r168, %rd21;
 	add.s32 	%r294, %r168, %r123;
 	mul.wide.u32 	%rd126, %r294, 4;
 	add.s64 	%rd29, %rd3, %rd126;
 	setp.eq.s32 	%p16, %r6, 0;
-	@%p16 bra 	$L__BB16_39;
+	@%p16 bra 	$L__BB17_39;
 
 	add.s32 	%r169, %r5, %r2;
 	ld.global.nc.u32 	%r170, [%rd23+4];
@@ -17018,13 +17068,13 @@ $L__BB16_23:
 	sub.s32 	%r175, %r174, %r172;
 	add.s32 	%r176, %r6, 1;
 	setp.eq.s32 	%p17, %r175, %r176;
-	@%p17 bra 	$L__BB16_26;
+	@%p17 bra 	$L__BB17_26;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB16_26:
+$L__BB17_26:
 	cvt.u32.u64 	%r177, %rd31;
 	add.s32 	%r179, %r168, %r123;
 	shl.b64 	%rd136, %rd31, 2;
@@ -17033,14 +17083,14 @@ $L__BB16_26:
 	ld.global.u32 	%r290, [%rd29];
 	add.s32 	%r291, %r177, 1;
 	setp.eq.s32 	%p18, %r122, 0;
-	@%p18 bra 	$L__BB16_34;
+	@%p18 bra 	$L__BB17_34;
 
 	cvt.u64.u32 	%rd138, %r122;
 	mul.lo.s64 	%rd32, %rd20, %rd138;
 	mul.lo.s64 	%rd33, %rd21, %rd138;
 	mov.u32 	%r284, 0;
 
-$L__BB16_28:
+$L__BB17_28:
 	cvt.u64.u32 	%rd139, %r284;
 	add.s64 	%rd140, %rd32, %rd139;
 	shl.b64 	%rd141, %rd140, 2;
@@ -17053,23 +17103,23 @@ $L__BB16_28:
 	ld.global.nc.u32 	%r183, [%rd142];
 	and.b32  	%r287, %r183, %r182;
 	setp.eq.s32 	%p19, %r287, 0;
-	@%p19 bra 	$L__BB16_33;
+	@%p19 bra 	$L__BB17_33;
 
 	shl.b32 	%r41, %r284, 5;
 	mov.u32 	%r288, %r291;
 
-$L__BB16_30:
+$L__BB17_30:
 	brev.b32 	%r184, %r287;
 	bfind.shiftamt.u32 	%r185, %r184;
 	add.s32 	%r45, %r185, %r41;
 	setp.lt.u32 	%p20, %r45, %r124;
-	@%p20 bra 	$L__BB16_32;
+	@%p20 bra 	$L__BB17_32;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB16_32:
+$L__BB17_32:
 	add.s32 	%r186, %r45, 2;
 	add.s32 	%r291, %r288, 1;
 	mul.wide.u32 	%rd146, %r288, 4;
@@ -17083,43 +17133,43 @@ $L__BB16_32:
 	and.b32  	%r287, %r188, %r287;
 	setp.ne.s32 	%p21, %r287, 0;
 	mov.u32 	%r288, %r291;
-	@%p21 bra 	$L__BB16_30;
+	@%p21 bra 	$L__BB17_30;
 
-$L__BB16_33:
+$L__BB17_33:
 	add.s32 	%r284, %r284, 1;
 	setp.lt.u32 	%p22, %r284, %r122;
-	@%p22 bra 	$L__BB16_28;
+	@%p22 bra 	$L__BB17_28;
 
-$L__BB16_34:
+$L__BB17_34:
 	not.b32 	%r190, %r177;
 	add.s32 	%r191, %r291, %r190;
 	setp.eq.s32 	%p23, %r191, %r6;
-	@%p23 bra 	$L__BB16_36;
+	@%p23 bra 	$L__BB17_36;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB16_36:
+$L__BB17_36:
 	add.s32 	%r295, %r290, 1;
 	setp.lt.u32 	%p24, %r295, %r125;
-	@%p24 bra 	$L__BB16_38;
+	@%p24 bra 	$L__BB17_38;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB16_38:
+$L__BB17_38:
 	shl.b64 	%rd150, %rd30, 2;
 	add.s64 	%rd151, %rd3, %rd150;
 	add.s32 	%r269, %r290, 1;
 	st.global.u32 	[%rd151], %r269;
-	bra.uni 	$L__BB16_40;
+	bra.uni 	$L__BB17_40;
 
-$L__BB16_39:
+$L__BB17_39:
 	ld.global.u32 	%r295, [%rd29];
 
-$L__BB16_40:
+$L__BB17_40:
 	max.u32 	%r192, %r295, %r282;
 	shl.b64 	%rd152, %rd12, 2;
 	add.s64 	%rd153, %rd7, %rd152;
@@ -17128,18 +17178,18 @@ $L__BB16_40:
 	st.global.u32 	[%rd154], %r294;
 	add.s32 	%r58, %r192, 1;
 	setp.lt.u32 	%p25, %r58, %r125;
-	@%p25 bra 	$L__BB16_42;
+	@%p25 bra 	$L__BB17_42;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB16_42:
+$L__BB17_42:
 	add.s64 	%rd156, %rd3, %rd152;
 	add.s32 	%r270, %r192, 1;
 	st.global.u32 	[%rd156], %r270;
 
-$L__BB16_84:
+$L__BB17_84:
 	ret;
 
 }
@@ -17168,7 +17218,7 @@ $L__BB16_84:
 	mov.u32 	%r6, %ctaid.x;
 	or.b32  	%r7, %r5, %r6;
 	setp.ne.s32 	%p1, %r7, 0;
-	@%p1 bra 	$L__BB17_6;
+	@%p1 bra 	$L__BB18_6;
 
 	cvta.to.global.u64 	%rd5, %rd1;
 	mul.wide.u32 	%rd6, %r3, 4;
@@ -17176,30 +17226,30 @@ $L__BB16_84:
 	ld.global.nc.u32 	%r1, [%rd7];
 	add.s32 	%r8, %r1, -1;
 	setp.lt.u32 	%p2, %r8, %r4;
-	@%p2 bra 	$L__BB17_3;
+	@%p2 bra 	$L__BB18_3;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB17_3:
+$L__BB18_3:
 	cvta.to.global.u64 	%rd8, %rd2;
 	ld.global.nc.u32 	%r2, [%rd8+8];
 	add.s32 	%r9, %r2, -1;
 	setp.lt.u32 	%p3, %r9, %r3;
-	@%p3 bra 	$L__BB17_5;
+	@%p3 bra 	$L__BB18_5;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB17_5:
+$L__BB18_5:
 	cvta.to.global.u64 	%rd9, %rd3;
 	st.global.u32 	[%rd9], %r2;
 	cvta.to.global.u64 	%rd10, %rd4;
 	st.global.u32 	[%rd10], %r1;
 
-$L__BB17_6:
+$L__BB18_6:
 	ret;
 
 }
@@ -17229,7 +17279,7 @@ $L__BB17_6:
 	cvta.to.global.u64 	%rd8, %rd7;
 	ld.global.nc.u32 	%r12, [%rd8];
 	setp.eq.s32 	%p1, %r12, 0;
-	@%p1 bra 	$L__BB18_10;
+	@%p1 bra 	$L__BB19_10;
 
 	cvta.to.global.u64 	%rd9, %rd3;
 	mov.u32 	%r1, %ntid.x;
@@ -17242,53 +17292,53 @@ $L__BB17_6:
 	ld.global.nc.u32 	%r4, [%rd10];
 	setp.le.u32 	%p3, %r4, %r11;
 	and.pred  	%p4, %p2, %p3;
-	@%p4 bra 	$L__BB18_3;
+	@%p4 bra 	$L__BB19_3;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB18_3:
+$L__BB19_3:
 	setp.ge.u32 	%p5, %r18, %r4;
-	@%p5 bra 	$L__BB18_10;
+	@%p5 bra 	$L__BB19_10;
 
 	mov.u32 	%r15, %nctaid.x;
 	mul.lo.s32 	%r5, %r1, %r15;
 	cvta.to.global.u64 	%rd1, %rd5;
 	cvta.to.global.u64 	%rd2, %rd6;
 
-$L__BB18_5:
+$L__BB19_5:
 	mul.wide.u32 	%rd11, %r18, 4;
 	add.s64 	%rd12, %rd1, %rd11;
 	ld.global.nc.u32 	%r7, [%rd12];
 	setp.ne.s32 	%p6, %r7, 0;
-	@%p6 bra 	$L__BB18_7;
+	@%p6 bra 	$L__BB19_7;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB18_7:
+$L__BB19_7:
 	abs.s32 	%r8, %r7;
 	add.s32 	%r16, %r8, -1;
 	setp.lt.u32 	%p7, %r16, %r3;
 	setp.le.u32 	%p8, %r8, %r10;
 	and.pred  	%p9, %p8, %p7;
-	@%p9 bra 	$L__BB18_9;
+	@%p9 bra 	$L__BB19_9;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB18_9:
+$L__BB19_9:
 	mul.wide.u32 	%rd13, %r8, 4;
 	add.s64 	%rd14, %rd2, %rd13;
 	atom.global.exch.b32 	%r17, [%rd14], 1;
 	add.s32 	%r18, %r18, %r5;
 	setp.lt.u32 	%p10, %r18, %r4;
-	@%p10 bra 	$L__BB18_5;
+	@%p10 bra 	$L__BB19_5;
 
-$L__BB18_10:
+$L__BB19_10:
 	ret;
 
 }
@@ -17322,7 +17372,7 @@ $L__BB18_10:
 	cvta.to.global.u64 	%rd13, %rd11;
 	ld.global.nc.u32 	%r12, [%rd13];
 	setp.eq.s32 	%p1, %r12, 0;
-	@%p1 bra 	$L__BB19_16;
+	@%p1 bra 	$L__BB20_16;
 
 	cvta.to.global.u64 	%rd14, %rd9;
 	ld.global.nc.u32 	%r1, [%rd14];
@@ -17333,15 +17383,15 @@ $L__BB18_10:
 	cvta.to.global.u64 	%rd15, %rd10;
 	ld.global.nc.u32 	%r4, [%rd15];
 	setp.le.u32 	%p2, %r4, %r11;
-	@%p2 bra 	$L__BB19_3;
+	@%p2 bra 	$L__BB20_3;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB19_3:
+$L__BB20_3:
 	setp.ge.u32 	%p3, %r21, %r1;
-	@%p3 bra 	$L__BB19_16;
+	@%p3 bra 	$L__BB20_16;
 
 	mov.u32 	%r15, %nctaid.x;
 	mul.lo.s32 	%r5, %r2, %r15;
@@ -17349,46 +17399,46 @@ $L__BB19_3:
 	cvta.to.global.u64 	%rd3, %rd8;
 	cvta.to.global.u64 	%rd4, %rd7;
 
-$L__BB19_5:
+$L__BB20_5:
 	cvt.u64.u32 	%rd5, %r21;
 	add.s64 	%rd16, %rd2, %rd5;
 	ld.global.nc.u8 	%rs1, [%rd16];
 	setp.eq.s16 	%p4, %rs1, 2;
-	@%p4 bra 	$L__BB19_10;
-	bra.uni 	$L__BB19_6;
+	@%p4 bra 	$L__BB20_10;
+	bra.uni 	$L__BB20_6;
 
-$L__BB19_10:
+$L__BB20_10:
 	shl.b64 	%rd21, %rd5, 2;
 	add.s64 	%rd22, %rd4, %rd21;
 	ld.global.nc.u32 	%r8, [%rd22];
 	setp.ne.s32 	%p9, %r8, 0;
-	@%p9 bra 	$L__BB19_12;
+	@%p9 bra 	$L__BB20_12;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB19_12:
+$L__BB20_12:
 	abs.s32 	%r9, %r8;
 	add.s32 	%r18, %r9, -1;
 	setp.lt.u32 	%p10, %r18, %r4;
 	setp.le.u32 	%p11, %r9, %r11;
 	and.pred  	%p12, %p11, %p10;
-	@%p12 bra 	$L__BB19_14;
+	@%p12 bra 	$L__BB20_14;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB19_14:
+$L__BB20_14:
 	mul.wide.u32 	%rd23, %r9, 4;
 	add.s64 	%rd24, %rd1, %rd23;
 	atom.global.exch.b32 	%r19, [%rd24], 1;
-	bra.uni 	$L__BB19_15;
+	bra.uni 	$L__BB20_15;
 
-$L__BB19_6:
+$L__BB20_6:
 	setp.ne.s16 	%p5, %rs1, 5;
-	@%p5 bra 	$L__BB19_15;
+	@%p5 bra 	$L__BB20_15;
 
 	shl.b64 	%rd17, %rd5, 2;
 	add.s64 	%rd18, %rd3, %rd17;
@@ -17397,24 +17447,24 @@ $L__BB19_6:
 	setp.lt.u32 	%p6, %r16, %r4;
 	setp.le.u32 	%p7, %r7, %r11;
 	and.pred  	%p8, %p7, %p6;
-	@%p8 bra 	$L__BB19_9;
+	@%p8 bra 	$L__BB20_9;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB19_9:
+$L__BB20_9:
 	mul.wide.u32 	%rd19, %r7, 4;
 	add.s64 	%rd20, %rd1, %rd19;
 	atom.global.exch.b32 	%r17, [%rd20], 1;
 
-$L__BB19_15:
+$L__BB20_15:
 	cvt.u32.u64 	%r20, %rd5;
 	add.s32 	%r21, %r20, %r5;
 	setp.lt.u32 	%p13, %r21, %r1;
-	@%p13 bra 	$L__BB19_5;
+	@%p13 bra 	$L__BB20_5;
 
-$L__BB19_16:
+$L__BB20_16:
 	ret;
 
 }
@@ -17443,7 +17493,7 @@ $L__BB19_16:
 	cvta.to.global.u64 	%rd11, %rd10;
 	ld.global.nc.u32 	%r10, [%rd11];
 	setp.eq.s32 	%p1, %r10, 0;
-	@%p1 bra 	$L__BB20_11;
+	@%p1 bra 	$L__BB21_11;
 
 	cvta.to.global.u64 	%rd12, %rd6;
 	mov.u32 	%r1, %ntid.x;
@@ -17452,15 +17502,15 @@ $L__BB19_16:
 	mad.lo.s32 	%r17, %r11, %r1, %r12;
 	ld.global.nc.u32 	%r3, [%rd12];
 	setp.le.u32 	%p2, %r3, %r9;
-	@%p2 bra 	$L__BB20_3;
+	@%p2 bra 	$L__BB21_3;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB20_3:
+$L__BB21_3:
 	setp.gt.u32 	%p3, %r17, %r9;
-	@%p3 bra 	$L__BB20_11;
+	@%p3 bra 	$L__BB21_11;
 
 	mov.u32 	%r13, %nctaid.x;
 	mul.lo.s32 	%r4, %r1, %r13;
@@ -17468,15 +17518,15 @@ $L__BB20_3:
 	cvta.to.global.u64 	%rd2, %rd7;
 	cvta.to.global.u64 	%rd3, %rd8;
 
-$L__BB20_5:
+$L__BB21_5:
 	add.s32 	%r14, %r17, -1;
 	setp.lt.u32 	%p4, %r14, %r3;
 	cvt.u64.u32 	%rd4, %r17;
 	add.s64 	%rd5, %rd1, %rd4;
-	@%p4 bra 	$L__BB20_7;
-	bra.uni 	$L__BB20_6;
+	@%p4 bra 	$L__BB21_7;
+	bra.uni 	$L__BB21_6;
 
-$L__BB20_7:
+$L__BB21_7:
 	shl.b64 	%rd13, %rd4, 2;
 	add.s64 	%rd14, %rd2, %rd13;
 	ld.global.nc.u32 	%r6, [%rd14];
@@ -17485,30 +17535,30 @@ $L__BB20_7:
 	ld.global.nc.u32 	%r7, [%rd15];
 	setp.ne.s32 	%p6, %r7, 0;
 	or.pred  	%p7, %p5, %p6;
-	@%p7 bra 	$L__BB20_9;
+	@%p7 bra 	$L__BB21_9;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB20_9:
+$L__BB21_9:
 	or.b32  	%r15, %r7, %r6;
 	setp.eq.s32 	%p8, %r15, 0;
 	selp.u16 	%rs2, 1, 0, %p8;
 	st.global.u8 	[%rd5], %rs2;
-	bra.uni 	$L__BB20_10;
+	bra.uni 	$L__BB21_10;
 
-$L__BB20_6:
+$L__BB21_6:
 	mov.u16 	%rs1, 0;
 	st.global.u8 	[%rd5], %rs1;
 
-$L__BB20_10:
+$L__BB21_10:
 	cvt.u32.u64 	%r16, %rd4;
 	add.s32 	%r17, %r16, %r4;
 	setp.le.u32 	%p9, %r17, %r9;
-	@%p9 bra 	$L__BB20_5;
+	@%p9 bra 	$L__BB21_5;
 
-$L__BB20_11:
+$L__BB21_11:
 	ret;
 
 }
@@ -17529,18 +17579,18 @@ $L__BB20_11:
 	mov.u32 	%r3, %tid.x;
 	or.b32  	%r4, %r3, %r2;
 	setp.ne.s32 	%p1, %r4, 0;
-	@%p1 bra 	$L__BB21_3;
+	@%p1 bra 	$L__BB22_3;
 
 	cvta.to.global.u64 	%rd2, %rd1;
 	ld.global.nc.u32 	%r5, [%rd2];
 	setp.eq.s32 	%p2, %r5, %r1;
-	@%p2 bra 	$L__BB21_3;
+	@%p2 bra 	$L__BB22_3;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB21_3:
+$L__BB22_3:
 	ret;
 
 }
@@ -17569,17 +17619,17 @@ $L__BB21_3:
 	mov.u32 	%r9, %ctaid.x;
 	or.b32  	%r10, %r8, %r9;
 	setp.ne.s32 	%p1, %r10, 0;
-	@%p1 bra 	$L__BB22_7;
+	@%p1 bra 	$L__BB23_7;
 
 	shr.u32 	%r1, %r6, 5;
 	setp.lt.u32 	%p2, %r1, %r4;
-	@%p2 bra 	$L__BB22_3;
+	@%p2 bra 	$L__BB23_3;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB22_3:
+$L__BB23_3:
 	and.b32  	%r11, %r6, 31;
 	mov.u32 	%r12, 1;
 	shl.b32 	%r13, %r12, %r11;
@@ -17596,25 +17646,25 @@ $L__BB22_3:
 	and.b32  	%r3, %r16, %r13;
 	setp.eq.s32 	%p4, %r3, 0;
 	or.pred  	%p5, %p3, %p4;
-	@%p5 bra 	$L__BB22_5;
+	@%p5 bra 	$L__BB23_5;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB22_5:
+$L__BB23_5:
 	setp.ne.s32 	%p6, %r3, 0;
 	selp.b32 	%r17, 2, 0, %p6;
 	setp.ne.s32 	%p7, %r2, 0;
 	selp.b32 	%r18, 1, %r17, %p7;
 	setp.eq.s32 	%p8, %r18, %r7;
-	@%p8 bra 	$L__BB22_7;
+	@%p8 bra 	$L__BB23_7;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB22_7:
+$L__BB23_7:
 	ret;
 
 }
@@ -17642,24 +17692,24 @@ $L__BB22_7:
 	mov.u32 	%r6, %ctaid.x;
 	or.b32  	%r7, %r5, %r6;
 	setp.ne.s32 	%p1, %r7, 0;
-	@%p1 bra 	$L__BB23_7;
+	@%p1 bra 	$L__BB24_7;
 
 	setp.lt.u32 	%p2, %r4, 3;
-	@%p2 bra 	$L__BB23_3;
+	@%p2 bra 	$L__BB24_3;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB23_3:
+$L__BB24_3:
 	setp.lt.u32 	%p3, %r3, %r1;
-	@%p3 bra 	$L__BB23_5;
+	@%p3 bra 	$L__BB24_5;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB23_5:
+$L__BB24_5:
 	mad.lo.s32 	%r8, %r2, %r1, %r3;
 	cvt.u64.u32 	%rd2, %r8;
 	cvta.to.global.u64 	%rd3, %rd1;
@@ -17668,13 +17718,13 @@ $L__BB23_5:
 	and.b16  	%rs2, %rs1, 255;
 	ld.global.nc.u8 	%rs3, [%rd4];
 	setp.eq.s16 	%p4, %rs3, %rs2;
-	@%p4 bra 	$L__BB23_7;
+	@%p4 bra 	$L__BB24_7;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB23_7:
+$L__BB24_7:
 	ret;
 
 }
@@ -17704,7 +17754,7 @@ $L__BB23_7:
 	mov.u32 	%r6, %ctaid.x;
 	or.b32  	%r7, %r5, %r6;
 	setp.ne.s32 	%p1, %r7, 0;
-	@%p1 bra 	$L__BB24_7;
+	@%p1 bra 	$L__BB25_7;
 
 	cvta.to.global.u64 	%rd5, %rd4;
 	mul.wide.u32 	%rd6, %r3, 4;
@@ -17713,24 +17763,24 @@ $L__BB23_7:
 	cvt.u64.u32 	%rd1, %r8;
 	add.s32 	%r1, %r8, 1;
 	setp.lt.u32 	%p2, %r1, %r2;
-	@%p2 bra 	$L__BB24_3;
+	@%p2 bra 	$L__BB25_3;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB24_3:
+$L__BB25_3:
 	cvta.to.global.u64 	%rd8, %rd2;
 	add.s64 	%rd9, %rd8, %rd1;
 	ld.global.nc.u8 	%rs1, [%rd9];
 	setp.eq.s16 	%p3, %rs1, 3;
-	@%p3 bra 	$L__BB24_5;
+	@%p3 bra 	$L__BB25_5;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB24_5:
+$L__BB25_5:
 	cvta.to.global.u64 	%rd10, %rd3;
 	mul.wide.u32 	%rd11, %r1, 4;
 	add.s64 	%rd12, %rd10, %rd11;
@@ -17740,13 +17790,13 @@ $L__BB24_5:
 	ld.global.nc.u32 	%r10, [%rd12];
 	sub.s32 	%r11, %r10, %r9;
 	setp.eq.s32 	%p4, %r11, %r4;
-	@%p4 bra 	$L__BB24_7;
+	@%p4 bra 	$L__BB25_7;
 
 	// begin inline asm
 	trap;
 	// end inline asm
 
-$L__BB24_7:
+$L__BB25_7:
 	ret;
 
 }
