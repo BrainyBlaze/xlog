@@ -210,7 +210,7 @@ pub fn compute_free_var_mask_gpu_gated(
                     circuit.node_type(),
                     circuit.lit(),
                     circuit.decision_var(),
-                    num_nodes,
+                    circuit.num_nodes_device(),
                     &cnf.num_vars,
                     cnf.var_cap,
                     &mut vars_in_circuit,
@@ -1010,10 +1010,25 @@ fn compile_gpu_d4_with_gate(
     let compile_emit = device
         .get_func(D4_MODULE, d4_kernels::D4_COMPILE_EMIT)
         .ok_or_else(|| XlogError::Kernel("d4_compile_emit kernel not found".to_string()))?;
+    let capture_meta = device
+        .get_func(D4_MODULE, d4_kernels::D4_CAPTURE_EMIT_META)
+        .ok_or_else(|| XlogError::Kernel("d4_capture_emit_meta kernel not found".to_string()))?;
 
     let max_items_u32 = max_items;
     let node_cap_u32 = node_cap;
     let edge_cap_u32 = edge_cap;
+    let mut meta_num_nodes = memory.alloc::<u32>(1)?;
+    let mut meta_num_edges = memory.alloc::<u32>(1)?;
+    let mut meta_frontier = memory.alloc::<u32>(1)?;
+    device
+        .memset_zeros(&mut meta_num_nodes)
+        .map_err(|e| XlogError::Kernel(format!("Failed to zero meta_num_nodes: {}", e)))?;
+    device
+        .memset_zeros(&mut meta_num_edges)
+        .map_err(|e| XlogError::Kernel(format!("Failed to zero meta_num_edges: {}", e)))?;
+    device
+        .memset_zeros(&mut meta_frontier)
+        .map_err(|e| XlogError::Kernel(format!("Failed to zero meta_frontier: {}", e)))?;
     let mut emit_params: Vec<*mut c_void> = vec![
         compile_needed.as_kernel_param(),
         max_depth.as_kernel_param(),
@@ -1063,60 +1078,30 @@ fn compile_gpu_d4_with_gate(
         .device()
         .synchronize()
         .map_err(|e| XlogError::Kernel(format!("sync after d4_compile_emit failed: {}", e)))?;
-
-    let last = max_items_u32
-        .checked_sub(1)
-        .ok_or_else(|| XlogError::Compilation("max_frontier_items underflow".to_string()))?
-        as usize;
-
-    let mut last_node_offset = [0u32; 1];
-    let mut last_node_count = [0u32; 1];
-    let mut last_edge_offset = [0u32; 1];
-    let mut last_edge_count = [0u32; 1];
-    device
-        .dtoh_sync_copy_into(&node_offsets.slice(last..last + 1), &mut last_node_offset)
-        .map_err(|e| XlogError::Kernel(format!("read last node_offset: {}", e)))?;
-    device
-        .dtoh_sync_copy_into(&node_counts.slice(last..last + 1), &mut last_node_count)
-        .map_err(|e| XlogError::Kernel(format!("read last node_count: {}", e)))?;
-    device
-        .dtoh_sync_copy_into(&edge_offsets.slice(last..last + 1), &mut last_edge_offset)
-        .map_err(|e| XlogError::Kernel(format!("read last edge_offset: {}", e)))?;
-    device
-        .dtoh_sync_copy_into(&edge_counts.slice(last..last + 1), &mut last_edge_count)
-        .map_err(|e| XlogError::Kernel(format!("read last edge_count: {}", e)))?;
-
-    let mut frontier_size_host = [0u32; 1];
-    device
-        .dtoh_sync_copy_into(frontier.size_device(), &mut frontier_size_host)
-        .map_err(|e| XlogError::Kernel(format!("read frontier size: {}", e)))?;
-
-    let reserved_nodes = 3u32;
-    let reserved_edges = frontier_size_host[0];
-    let total_nodes = last_node_offset[0]
-        .checked_add(last_node_count[0])
-        .ok_or_else(|| XlogError::Compilation("total_nodes overflow".to_string()))?;
-    let total_edges = last_edge_offset[0]
-        .checked_add(last_edge_count[0])
-        .ok_or_else(|| XlogError::Compilation("total_edges overflow".to_string()))?;
-    let actual_nodes = reserved_nodes
-        .checked_add(total_nodes)
-        .ok_or_else(|| XlogError::Compilation("actual_nodes overflow".to_string()))?;
-    let actual_edges = reserved_edges
-        .checked_add(total_edges)
-        .ok_or_else(|| XlogError::Compilation("actual_edges overflow".to_string()))?;
-    if actual_nodes > node_cap_u32 {
-        return Err(XlogError::Compilation(format!(
-            "D4 emitted {} nodes (cap {})",
-            actual_nodes, node_cap_u32
-        )));
+    unsafe {
+        capture_meta.clone().launch(
+            LaunchConfig {
+                grid_dim: (1, 1, 1),
+                block_dim: (1, 1, 1),
+                shared_mem_bytes: 0,
+            },
+            (
+                compile_needed,
+                max_items_u32,
+                &node_offsets,
+                &node_counts,
+                &edge_offsets,
+                &edge_counts,
+                frontier.size_device(),
+                node_cap_u32,
+                edge_cap_u32,
+                &mut meta_num_nodes,
+                &mut meta_num_edges,
+                &mut meta_frontier,
+            ),
+        )
     }
-    if actual_edges > edge_cap_u32 {
-        return Err(XlogError::Compilation(format!(
-            "D4 emitted {} edges (cap {})",
-            actual_edges, edge_cap_u32
-        )));
-    }
+    .map_err(|e| XlogError::Kernel(format!("d4_capture_emit_meta failed: {}", e)))?;
 
     let num_levels = (max_depth as u32)
         .checked_mul(2)
@@ -1143,7 +1128,7 @@ fn compile_gpu_d4_with_gate(
     let lvl_counts = device
         .get_func(D4_MODULE, d4_kernels::D4_LEVELIZE_COUNTS)
         .ok_or_else(|| XlogError::Kernel("d4_levelize_counts kernel not found".to_string()))?;
-    let mut grid = (actual_nodes + 255) / 256;
+    let mut grid = (node_cap_u32 + 255) / 256;
     if grid == 0 {
         grid = 1;
     }
@@ -1157,7 +1142,7 @@ fn compile_gpu_d4_with_gate(
             (
                 compile_needed,
                 &node_level,
-                actual_nodes,
+                &meta_num_nodes,
                 num_levels,
                 &mut level_counts,
             ),
@@ -1186,7 +1171,7 @@ fn compile_gpu_d4_with_gate(
             (
                 compile_needed,
                 &node_level,
-                actual_nodes,
+                &meta_num_nodes,
                 num_levels,
                 &level_offsets,
                 &mut level_cursors,
@@ -1210,13 +1195,15 @@ fn compile_gpu_d4_with_gate(
         decision_child_true,
     };
     let layout = GpuCircuitLayout {
-        num_nodes: actual_nodes,
-        num_edges: actual_edges,
+        num_nodes: node_cap_u32,
+        num_edges: edge_cap_u32,
         num_levels,
         level_offsets,
         level_nodes,
         root: 2,
         max_var: cnf.var_cap,
+        num_nodes_device: Some(meta_num_nodes),
+        num_edges_device: Some(meta_num_edges),
     };
 
     GpuXgcf::from_device(builder, layout, provider)
@@ -2478,6 +2465,10 @@ mod tests {
         device.memset_zeros(&mut level_offsets).unwrap();
         device.memset_zeros(&mut level_nodes).unwrap();
         device.memset_zeros(&mut level_cursors).unwrap();
+        let mut num_nodes_device = memory.alloc::<u32>(1).unwrap();
+        device
+            .htod_sync_copy_into(&[node_cap], &mut num_nodes_device)
+            .unwrap();
 
         let lvl_counts = device
             .get_func(D4_MODULE, d4_kernels::D4_LEVELIZE_COUNTS)
@@ -2494,7 +2485,7 @@ mod tests {
                     (
                         &compile_needed,
                         &node_level,
-                        node_cap,
+                        &num_nodes_device,
                         num_levels,
                         &mut level_counts,
                     ),
@@ -2522,15 +2513,15 @@ mod tests {
                         block_dim: (256, 1, 1),
                         shared_mem_bytes: 0,
                     },
-                    (
-                        &compile_needed,
-                        &node_level,
-                        node_cap,
-                        num_levels,
-                        &level_offsets,
-                        &mut level_cursors,
-                        &mut level_nodes,
-                    ),
+                (
+                    &compile_needed,
+                    &node_level,
+                    &num_nodes_device,
+                    num_levels,
+                    &level_offsets,
+                    &mut level_cursors,
+                    &mut level_nodes,
+                ),
                 )
                 .unwrap();
         }
@@ -2556,6 +2547,8 @@ mod tests {
             level_nodes,
             root: 2, // reserved root OR (see d4_compile_emit contract)
             max_var: phi.var_cap,
+            num_nodes_device: None,
+            num_edges_device: None,
         };
 
         let circuit = crate::gpu::GpuXgcf::from_device(builder, layout, &provider)
@@ -2762,6 +2755,10 @@ mod tests {
         device.memset_zeros(&mut level_offsets).unwrap();
         device.memset_zeros(&mut level_nodes).unwrap();
         device.memset_zeros(&mut level_cursors).unwrap();
+        let mut num_nodes_device = memory.alloc::<u32>(1).unwrap();
+        device
+            .htod_sync_copy_into(&[node_cap], &mut num_nodes_device)
+            .unwrap();
 
         let lvl_counts = device
             .get_func(D4_MODULE, d4_kernels::D4_LEVELIZE_COUNTS)
@@ -2778,7 +2775,7 @@ mod tests {
                     (
                         &compile_needed,
                         &node_level,
-                        node_cap,
+                        &num_nodes_device,
                         num_levels,
                         &mut level_counts,
                     ),
@@ -2806,15 +2803,15 @@ mod tests {
                         block_dim: (256, 1, 1),
                         shared_mem_bytes: 0,
                     },
-                    (
-                        &compile_needed,
-                        &node_level,
-                        node_cap,
-                        num_levels,
-                        &level_offsets,
-                        &mut level_cursors,
-                        &mut level_nodes,
-                    ),
+                (
+                    &compile_needed,
+                    &node_level,
+                    &num_nodes_device,
+                    num_levels,
+                    &level_offsets,
+                    &mut level_cursors,
+                    &mut level_nodes,
+                ),
                 )
                 .unwrap();
         }
@@ -2837,6 +2834,8 @@ mod tests {
             level_nodes,
             root: 2,
             max_var: phi.var_cap,
+            num_nodes_device: None,
+            num_edges_device: None,
         };
         let circuit = crate::gpu::GpuXgcf::from_device(builder, layout, &provider).unwrap();
 
@@ -3026,6 +3025,10 @@ mod tests {
         device.memset_zeros(&mut level_offsets).unwrap();
         device.memset_zeros(&mut level_nodes).unwrap();
         device.memset_zeros(&mut level_cursors).unwrap();
+        let mut num_nodes_device = memory.alloc::<u32>(1).unwrap();
+        device
+            .htod_sync_copy_into(&[node_cap], &mut num_nodes_device)
+            .unwrap();
 
         let lvl_counts = device
             .get_func(D4_MODULE, d4_kernels::D4_LEVELIZE_COUNTS)
@@ -3042,7 +3045,7 @@ mod tests {
                     (
                         &compile_needed,
                         &node_level,
-                        node_cap,
+                        &num_nodes_device,
                         num_levels,
                         &mut level_counts,
                     ),
@@ -3077,15 +3080,15 @@ mod tests {
                         block_dim: (256, 1, 1),
                         shared_mem_bytes: 0,
                     },
-                    (
-                        &compile_needed,
-                        &node_level,
-                        node_cap,
-                        num_levels,
-                        &level_offsets,
-                        &mut level_cursors,
-                        &mut level_nodes,
-                    ),
+                (
+                    &compile_needed,
+                    &node_level,
+                    &num_nodes_device,
+                    num_levels,
+                    &level_offsets,
+                    &mut level_cursors,
+                    &mut level_nodes,
+                ),
                 )
                 .unwrap();
         }
@@ -3111,6 +3114,8 @@ mod tests {
             level_nodes,
             root: 2,
             max_var: phi.var_cap,
+            num_nodes_device: None,
+            num_edges_device: None,
         };
         let circuit = crate::gpu::GpuXgcf::from_device(builder, layout, &provider).unwrap();
 
@@ -3301,6 +3306,10 @@ mod tests {
         device.memset_zeros(&mut level_offsets).unwrap();
         device.memset_zeros(&mut level_nodes).unwrap();
         device.memset_zeros(&mut level_cursors).unwrap();
+        let mut num_nodes_device = memory.alloc::<u32>(1).unwrap();
+        device
+            .htod_sync_copy_into(&[node_cap], &mut num_nodes_device)
+            .unwrap();
 
         let lvl_counts = device
             .get_func(D4_MODULE, d4_kernels::D4_LEVELIZE_COUNTS)
@@ -3317,7 +3326,7 @@ mod tests {
                     (
                         &compile_needed,
                         &node_level,
-                        node_cap,
+                        &num_nodes_device,
                         num_levels,
                         &mut level_counts,
                     ),
@@ -3344,15 +3353,15 @@ mod tests {
                         block_dim: (256, 1, 1),
                         shared_mem_bytes: 0,
                     },
-                    (
-                        &compile_needed,
-                        &node_level,
-                        node_cap,
-                        num_levels,
-                        &level_offsets,
-                        &mut level_cursors,
-                        &mut level_nodes,
-                    ),
+                (
+                    &compile_needed,
+                    &node_level,
+                    &num_nodes_device,
+                    num_levels,
+                    &level_offsets,
+                    &mut level_cursors,
+                    &mut level_nodes,
+                ),
                 )
                 .unwrap();
         }
@@ -3374,6 +3383,8 @@ mod tests {
             level_nodes,
             root: 2,
             max_var: phi.var_cap,
+            num_nodes_device: None,
+            num_edges_device: None,
         };
         let circuit = crate::gpu::GpuXgcf::from_device(builder, layout, &provider).unwrap();
         provider

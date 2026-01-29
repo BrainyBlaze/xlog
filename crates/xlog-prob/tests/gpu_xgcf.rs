@@ -112,6 +112,8 @@ fn build_device_lit_circuit(
         level_nodes: d_level_nodes,
         root: 2,
         max_var,
+        num_nodes_device: None,
+        num_edges_device: None,
     };
 
     GpuXgcf::from_device(builder, layout, provider).expect("GpuXgcf from_device")

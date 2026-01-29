@@ -102,6 +102,8 @@ fn gpu_xgcf_from_device_const1_matches_true_cnf() {
         level_nodes: d_level_nodes,
         root: 0,
         max_var: 0,
+        num_nodes_device: None,
+        num_edges_device: None,
     };
 
     let circuit = GpuXgcf::from_device(builder, layout, &provider).expect("GpuXgcf from_device");

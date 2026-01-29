@@ -109,15 +109,16 @@ extern "C" __global__ void d4_validate_cnf(
 extern "C" __global__ void d4_levelize_counts(
     const uint32_t* __restrict__ compile_needed,
     const uint32_t* __restrict__ node_level,
-    uint32_t num_nodes,
+    const uint32_t* __restrict__ num_nodes,
     uint32_t num_levels,
     uint32_t* __restrict__ level_counts
 ) {
     if (compile_needed[0] == 0u) {
         return;
     }
+    uint32_t nn = num_nodes[0];
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    for (uint32_t node = tid; node < num_nodes; node += blockDim.x * gridDim.x) {
+    for (uint32_t node = tid; node < nn; node += blockDim.x * gridDim.x) {
         uint32_t lvl = node_level[node];
         if (lvl >= num_levels) {
             d4_trap();
@@ -135,7 +136,7 @@ extern "C" __global__ void d4_levelize_counts(
 extern "C" __global__ void d4_levelize_emit(
     const uint32_t* __restrict__ compile_needed,
     const uint32_t* __restrict__ node_level,
-    uint32_t num_nodes,
+    const uint32_t* __restrict__ num_nodes,
     uint32_t num_levels,
     const uint32_t* __restrict__ level_offsets, // len = num_levels + 1
     uint32_t* __restrict__ level_cursors,       // len = num_levels (must start at 0)
@@ -144,15 +145,16 @@ extern "C" __global__ void d4_levelize_emit(
     if (compile_needed[0] == 0u) {
         return;
     }
+    uint32_t nn = num_nodes[0];
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    for (uint32_t node = tid; node < num_nodes; node += blockDim.x * gridDim.x) {
+    for (uint32_t node = tid; node < nn; node += blockDim.x * gridDim.x) {
         uint32_t lvl = node_level[node];
         if (lvl >= num_levels) {
             d4_trap();
         }
         uint32_t idx = atomicAdd(&level_cursors[lvl], 1u);
         uint32_t pos = level_offsets[lvl] + idx;
-        if (pos >= level_offsets[lvl + 1u] || pos >= num_nodes) {
+        if (pos >= level_offsets[lvl + 1u] || pos >= nn) {
             d4_trap();
         }
         level_nodes[pos] = node;
@@ -1967,6 +1969,55 @@ extern "C" __global__ void d4_compile_emit(
     }
 }
 
+extern "C" __global__ void d4_capture_emit_meta(
+    const uint32_t* __restrict__ compile_needed,
+    uint32_t max_frontier_items,
+    const uint32_t* __restrict__ node_offsets,
+    const uint32_t* __restrict__ node_counts,
+    const uint32_t* __restrict__ edge_offsets,
+    const uint32_t* __restrict__ edge_counts,
+    const uint32_t* __restrict__ frontier_size, // len=1
+    uint32_t node_cap,
+    uint32_t edge_cap,
+    uint32_t* __restrict__ out_num_nodes, // len=1
+    uint32_t* __restrict__ out_num_edges, // len=1
+    uint32_t* __restrict__ out_frontier   // len=1
+) {
+    if (blockIdx.x != 0u || threadIdx.x != 0u) {
+        return;
+    }
+    if (compile_needed[0] == 0u) {
+        out_num_nodes[0] = 0u;
+        out_num_edges[0] = 0u;
+        out_frontier[0] = 0u;
+        return;
+    }
+    if (max_frontier_items == 0u) {
+        d4_trap();
+    }
+
+    uint32_t n = frontier_size[0];
+    if (n > max_frontier_items) {
+        d4_trap();
+    }
+
+    uint32_t last = max_frontier_items - 1u;
+    uint32_t total_nodes = node_offsets[last] + node_counts[last];
+    uint32_t total_edges = edge_offsets[last] + edge_counts[last];
+
+    uint32_t reserved_nodes = 3u;
+    uint32_t reserved_edges = n;
+    uint32_t actual_nodes = reserved_nodes + total_nodes;
+    uint32_t actual_edges = reserved_edges + total_edges;
+    if (actual_nodes > node_cap || actual_edges > edge_cap) {
+        d4_trap();
+    }
+
+    out_num_nodes[0] = actual_nodes;
+    out_num_edges[0] = actual_edges;
+    out_frontier[0] = n;
+}
+
 // ---------------------------------------------------------------------------
 // GPU smoothing pass (random-var support + wrapper emission)
 // ---------------------------------------------------------------------------
@@ -2101,7 +2152,7 @@ extern "C" __global__ void d4_smooth_count(
     const uint32_t* __restrict__ decision_var,
     const uint32_t* __restrict__ decision_child_false,
     const uint32_t* __restrict__ decision_child_true,
-    uint32_t num_nodes,
+    const uint32_t* __restrict__ num_nodes,
     const uint32_t* __restrict__ support,
     uint32_t words_per_support,
     const uint32_t* __restrict__ random_var_to_bit,
@@ -2114,8 +2165,9 @@ extern "C" __global__ void d4_smooth_count(
     uint32_t base_node,
     uint32_t smooth_node_cap
 ) {
+    uint32_t nn = num_nodes[0];
     uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (gid >= num_nodes) {
+    if (gid >= nn) {
         return;
     }
 
@@ -2195,7 +2247,7 @@ extern "C" __global__ void d4_smooth_wrapper_counts(
     const uint32_t* __restrict__ wrap_missing_dec,
     uint32_t num_dec_entries,
     uint32_t base_node,
-    uint32_t num_nodes,
+    const uint32_t* __restrict__ num_nodes,
     uint32_t smooth_node_cap,
     uint32_t* __restrict__ out_counts // len >= 3
 ) {
@@ -2215,7 +2267,7 @@ extern "C" __global__ void d4_smooth_wrapper_counts(
         num_dec = wrap_prefix_dec[last] + ((wrap_missing_dec[last] > 0u) ? 1u : 0u);
     }
 
-    uint64_t base = static_cast<uint64_t>(base_node) + static_cast<uint64_t>(num_nodes);
+    uint64_t base = static_cast<uint64_t>(base_node) + static_cast<uint64_t>(num_nodes[0]);
     uint64_t total = base + static_cast<uint64_t>(num_or) + static_cast<uint64_t>(num_dec);
     if (total > smooth_node_cap) {
         d4_trap();
@@ -2698,7 +2750,7 @@ extern "C" __global__ void d4_mark_vars_in_circuit(
     const uint8_t* __restrict__ node_type,
     const int32_t* __restrict__ lit,
     const uint32_t* __restrict__ decision_var,
-    uint32_t num_nodes,
+    const uint32_t* __restrict__ num_nodes,
     const uint32_t* __restrict__ num_vars, // len=1
     uint32_t var_cap,
     uint32_t* __restrict__ vars_in_circuit
@@ -2706,12 +2758,13 @@ extern "C" __global__ void d4_mark_vars_in_circuit(
     if (compile_needed[0] == 0u) {
         return;
     }
+    uint32_t nn = num_nodes[0];
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     uint32_t nv = num_vars[0];
     if (nv > var_cap) {
         d4_trap();
     }
-    for (uint32_t node = tid; node < num_nodes; node += blockDim.x * gridDim.x) {
+    for (uint32_t node = tid; node < nn; node += blockDim.x * gridDim.x) {
         uint8_t ty = node_type[node];
         if (ty == XGCF_LIT) {
             int32_t l = lit[node];

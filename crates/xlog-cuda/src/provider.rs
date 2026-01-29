@@ -237,6 +237,7 @@ pub mod d4_kernels {
     // Task 5: per-frontier D4 DFS worker (count+emit).
     pub const D4_COMPILE_COUNT: &str = "d4_compile_count";
     pub const D4_COMPILE_EMIT: &str = "d4_compile_emit";
+    pub const D4_CAPTURE_EMIT_META: &str = "d4_capture_emit_meta";
     // Task 6: GPU smoothing (random-var support + wrapper emission).
     pub const D4_SUPPORT_LEVEL: &str = "d4_support_level";
     pub const D4_SMOOTH_COUNT: &str = "d4_smooth_count";
@@ -1032,6 +1033,7 @@ impl CudaKernelProvider {
                     d4_kernels::D4_FRONTIER_EXPAND_DENSE,
                     d4_kernels::D4_COMPILE_COUNT,
                     d4_kernels::D4_COMPILE_EMIT,
+                    d4_kernels::D4_CAPTURE_EMIT_META,
                     d4_kernels::D4_SUPPORT_LEVEL,
                     d4_kernels::D4_SMOOTH_COUNT,
                     d4_kernels::D4_SMOOTH_WRAPPER_COUNTS,

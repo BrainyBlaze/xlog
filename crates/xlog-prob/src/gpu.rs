@@ -34,6 +34,8 @@ pub struct GpuCircuitLayout {
     pub level_nodes: TrackedCudaSlice<u32>,
     pub root: u32,
     pub max_var: u32,
+    pub num_nodes_device: Option<TrackedCudaSlice<u32>>,
+    pub num_edges_device: Option<TrackedCudaSlice<u32>>,
 }
 
 pub struct GpuXgcf {
@@ -49,11 +51,13 @@ pub struct GpuXgcf {
     /// Optional host mirror for efficient per-level launch sizing when the circuit was uploaded
     /// from host (`GpuXgcf::upload`). GPU-native compilation paths do not populate this.
     level_offsets_host: Option<Vec<u32>>,
-    num_nodes: u32,
-    num_edges: u32,
+    node_cap: u32,
+    edge_cap: u32,
     num_levels: u32,
     root: u32,
     max_var: u32,
+    meta_num_nodes: TrackedCudaSlice<u32>,
+    meta_num_edges: TrackedCudaSlice<u32>,
     var_log_true: TrackedCudaSlice<f64>,
     var_log_false: TrackedCudaSlice<f64>,
     values: TrackedCudaSlice<f64>,
@@ -136,6 +140,35 @@ impl GpuXgcf {
         let grad_true = memory.alloc::<f64>(weights_len)?;
         let grad_false = memory.alloc::<f64>(weights_len)?;
 
+        let meta_num_nodes = match layout.num_nodes_device {
+            Some(meta) => meta,
+            None => {
+                let mut meta = memory.alloc::<u32>(1)?;
+                provider
+                    .device()
+                    .inner()
+                    .htod_sync_copy_into(&[layout.num_nodes], &mut meta)
+                    .map_err(|e| {
+                        XlogError::Kernel(format!("Failed to upload num_nodes meta: {}", e))
+                    })?;
+                meta
+            }
+        };
+        let meta_num_edges = match layout.num_edges_device {
+            Some(meta) => meta,
+            None => {
+                let mut meta = memory.alloc::<u32>(1)?;
+                provider
+                    .device()
+                    .inner()
+                    .htod_sync_copy_into(&[layout.num_edges], &mut meta)
+                    .map_err(|e| {
+                        XlogError::Kernel(format!("Failed to upload num_edges meta: {}", e))
+                    })?;
+                meta
+            }
+        };
+
         Ok(Self {
             node_type: builder.node_type,
             child_offsets: builder.child_offsets,
@@ -147,11 +180,13 @@ impl GpuXgcf {
             level_nodes: layout.level_nodes,
             level_offsets: layout.level_offsets,
             level_offsets_host: None,
-            num_nodes: layout.num_nodes,
-            num_edges: layout.num_edges,
+            node_cap: layout.num_nodes,
+            edge_cap: layout.num_edges,
             num_levels: layout.num_levels,
             root: layout.root,
             max_var: layout.max_var,
+            meta_num_nodes,
+            meta_num_edges,
             var_log_true,
             var_log_false,
             values,
@@ -179,7 +214,7 @@ impl GpuXgcf {
             ));
         }
 
-        let num_nodes = self.num_nodes;
+        let num_nodes = self.node_cap;
         if num_nodes == 0 {
             return Err(XlogError::Compilation(
                 "GPU smoothing: num_nodes must be > 0".to_string(),
@@ -190,7 +225,7 @@ impl GpuXgcf {
                 "GPU smoothing: child_offsets len mismatch".to_string(),
             ));
         }
-        let num_edges = self.num_edges;
+        let num_edges = self.edge_cap;
         if num_edges == 0 {
             return Err(XlogError::Compilation(
                 "GPU smoothing: num_edges must be > 0".to_string(),
@@ -400,7 +435,7 @@ impl GpuXgcf {
             (&self.decision_var).as_kernel_param(),
             (&self.decision_child_false).as_kernel_param(),
             (&self.decision_child_true).as_kernel_param(),
-            num_nodes.as_kernel_param(),
+            (&self.meta_num_nodes).as_kernel_param(),
             (&support).as_kernel_param(),
             words_per_support.as_kernel_param(),
             (&d_random_map).as_kernel_param(),
@@ -453,7 +488,7 @@ impl GpuXgcf {
                     &wrap_missing_dec,
                     dec_entries_u32,
                     base_node,
-                    num_nodes,
+                    &self.meta_num_nodes,
                     u32::MAX,
                     &mut wrap_counts,
                 ),
@@ -729,6 +764,12 @@ impl GpuXgcf {
         let levelize_counts = device
             .get_func(D4_MODULE, d4_kernels::D4_LEVELIZE_COUNTS)
             .ok_or_else(|| XlogError::Kernel("d4_levelize_counts kernel not found".to_string()))?;
+        let mut total_nodes_device = memory.alloc::<u32>(1)?;
+        device
+            .htod_sync_copy_into(&[total_nodes], &mut total_nodes_device)
+            .map_err(|e| {
+                XlogError::Kernel(format!("Failed to upload smoothed num_nodes: {}", e))
+            })?;
         let num_blocks = (total_nodes + block_size - 1) / block_size;
         unsafe {
             levelize_counts.clone().launch(
@@ -740,7 +781,7 @@ impl GpuXgcf {
                 (
                     &compile_needed,
                     &out_node_level,
-                    total_nodes,
+                    &total_nodes_device,
                     num_levels_out,
                     &mut level_counts,
                 ),
@@ -772,7 +813,7 @@ impl GpuXgcf {
                 (
                     &compile_needed,
                     &out_node_level,
-                    total_nodes,
+                    &total_nodes_device,
                     num_levels_out,
                     &level_offsets,
                     &mut level_cursors,
@@ -801,6 +842,8 @@ impl GpuXgcf {
             level_nodes,
             root: base_node + self.root,
             max_var: self.max_var,
+            num_nodes_device: None,
+            num_edges_device: None,
         };
 
         GpuXgcf::from_device(builder, layout, provider)
@@ -905,6 +948,14 @@ impl GpuXgcf {
         let adj = memory.alloc::<f64>(n)?;
         let grad_true = memory.alloc::<f64>(weights_len)?;
         let grad_false = memory.alloc::<f64>(weights_len)?;
+        let mut meta_num_nodes = memory.alloc::<u32>(1)?;
+        device
+            .htod_sync_copy_into(&[n as u32], &mut meta_num_nodes)
+            .map_err(|e| XlogError::Kernel(format!("Failed to upload num_nodes meta: {}", e)))?;
+        let mut meta_num_edges = memory.alloc::<u32>(1)?;
+        device
+            .htod_sync_copy_into(&[circuit.child_indices.len() as u32], &mut meta_num_edges)
+            .map_err(|e| XlogError::Kernel(format!("Failed to upload num_edges meta: {}", e)))?;
 
         Ok(Self {
             node_type: d_node_type,
@@ -917,11 +968,13 @@ impl GpuXgcf {
             level_nodes: d_level_nodes,
             level_offsets: d_level_offsets,
             level_offsets_host: Some(circuit.level_offsets.clone()),
-            num_nodes: n as u32,
-            num_edges: circuit.child_indices.len() as u32,
+            node_cap: n as u32,
+            edge_cap: circuit.child_indices.len() as u32,
             num_levels: (circuit.level_offsets.len().saturating_sub(1)) as u32,
             root: circuit.roots[0],
             max_var,
+            meta_num_nodes,
+            meta_num_edges,
             var_log_true,
             var_log_false,
             values,
@@ -941,19 +994,29 @@ impl GpuXgcf {
         self.root
     }
 
-    /// Number of XGCF nodes in the circuit.
+    /// Capacity (upper bound) for XGCF nodes in the circuit buffers.
     pub fn num_nodes(&self) -> usize {
-        self.num_nodes as usize
+        self.node_cap as usize
     }
 
-    /// Number of XGCF edges in the circuit.
+    /// Capacity (upper bound) for XGCF edges in the circuit buffers.
     pub fn num_edges(&self) -> usize {
-        self.num_edges as usize
+        self.edge_cap as usize
     }
 
     /// Number of topological levels in the circuit.
     pub fn num_levels(&self) -> u32 {
         self.num_levels
+    }
+
+    /// Device-resident actual node count (len = 1).
+    pub fn num_nodes_device(&self) -> &TrackedCudaSlice<u32> {
+        &self.meta_num_nodes
+    }
+
+    /// Device-resident actual edge count (len = 1).
+    pub fn num_edges_device(&self) -> &TrackedCudaSlice<u32> {
+        &self.meta_num_edges
     }
 
     /// Device-resident level -> node index mapping (len = num_nodes).
