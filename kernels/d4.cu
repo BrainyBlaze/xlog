@@ -2282,7 +2282,8 @@ extern "C" __global__ void d4_smooth_wrapper_edge_counts_or(
     const uint32_t* __restrict__ wrap_prefix_or,
     const uint32_t* __restrict__ wrap_missing_or,
     uint32_t num_edges,
-    uint32_t wrapper_base,
+    uint32_t base_node,
+    const uint32_t* __restrict__ num_nodes,
     uint32_t smooth_node_cap,
     uint32_t* __restrict__ out_edge_counts
 ) {
@@ -2290,6 +2291,11 @@ extern "C" __global__ void d4_smooth_wrapper_edge_counts_or(
     if (gid >= num_edges) {
         return;
     }
+    uint64_t base = static_cast<uint64_t>(base_node) + static_cast<uint64_t>(num_nodes[0]);
+    if (base >= static_cast<uint64_t>(smooth_node_cap)) {
+        d4_trap();
+    }
+    uint32_t wrapper_base = static_cast<uint32_t>(base);
     uint32_t missing = wrap_missing_or[gid];
     if (missing == 0u) {
         return;
@@ -2305,7 +2311,8 @@ extern "C" __global__ void d4_smooth_wrapper_edge_counts_dec(
     const uint32_t* __restrict__ wrap_prefix_dec,
     const uint32_t* __restrict__ wrap_missing_dec,
     uint32_t num_dec_entries,
-    uint32_t wrapper_base,
+    uint32_t base_node,
+    const uint32_t* __restrict__ num_nodes,
     const uint32_t* __restrict__ wrap_counts,
     uint32_t smooth_node_cap,
     uint32_t* __restrict__ out_edge_counts
@@ -2314,6 +2321,11 @@ extern "C" __global__ void d4_smooth_wrapper_edge_counts_dec(
     if (gid >= num_dec_entries) {
         return;
     }
+    uint64_t base = static_cast<uint64_t>(base_node) + static_cast<uint64_t>(num_nodes[0]);
+    if (base >= static_cast<uint64_t>(smooth_node_cap)) {
+        d4_trap();
+    }
+    uint32_t wrapper_base = static_cast<uint32_t>(base);
     uint32_t missing = wrap_missing_dec[gid];
     if (missing == 0u) {
         return;
@@ -2392,7 +2404,7 @@ extern "C" __global__ void d4_smooth_emit_level(
     const uint32_t* __restrict__ wrap_prefix_dec,
     const uint32_t* __restrict__ wrap_missing_dec,
     uint32_t base_node,
-    uint32_t wrapper_base,
+    const uint32_t* __restrict__ num_nodes,
     const uint32_t* __restrict__ wrap_counts,
     uint32_t num_random_vars,
     uint32_t num_levels_out,
@@ -2406,6 +2418,8 @@ extern "C" __global__ void d4_smooth_emit_level(
     uint32_t* __restrict__ node_level_out
 ) {
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    uint64_t base = static_cast<uint64_t>(base_node) + static_cast<uint64_t>(num_nodes[0]);
+    uint32_t wrapper_base = static_cast<uint32_t>(base);
     uint32_t level_offset = level_offsets[level];
     uint32_t num_level_nodes = level_offsets[level + 1u] - level_offset;
     if (tid >= num_level_nodes) {
@@ -2699,15 +2713,24 @@ extern "C" __global__ void d4_smooth_emit_level(
 extern "C" __global__ void d4_smooth_check_edge_cap(
     const uint32_t* __restrict__ child_offsets,
     uint32_t smooth_node_cap,
-    uint32_t smooth_edge_cap
+    uint32_t smooth_edge_cap,
+    const uint32_t* __restrict__ wrap_counts,
+    uint32_t* __restrict__ out_num_nodes,
+    uint32_t* __restrict__ out_num_edges
 ) {
     if (blockIdx.x != 0 || threadIdx.x != 0) {
         return;
     }
     uint32_t total_edges = child_offsets[smooth_node_cap];
-    if (total_edges > smooth_edge_cap) {
+    if (total_edges == 0u || total_edges > smooth_edge_cap) {
         d4_trap();
     }
+    uint32_t total_nodes = wrap_counts[2];
+    if (total_nodes == 0u || total_nodes > smooth_node_cap) {
+        d4_trap();
+    }
+    out_num_nodes[0] = total_nodes;
+    out_num_edges[0] = total_edges;
 }
 
 // ---------------------------------------------------------------------------

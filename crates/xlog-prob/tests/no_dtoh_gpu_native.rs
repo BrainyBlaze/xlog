@@ -35,3 +35,33 @@ fn mc_gpu_device_eval_avoids_host_query_truth() {
         "evaluate_gpu_device must not upload host query_truth arrays"
     );
 }
+
+#[test]
+fn smoothing_no_dtoh_calls_in_source() {
+    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    path.push("src");
+    path.push("gpu.rs");
+
+    let text = std::fs::read_to_string(&path).expect("read gpu.rs");
+    let body = text
+        .split("fn smooth_random_vars_device")
+        .nth(1)
+        .expect("smooth_random_vars_device not found");
+    let body = body
+        .split("pub fn upload")
+        .next()
+        .unwrap_or(body)
+        .to_string();
+    assert!(
+        !body.contains("wrap_counts_host"),
+        "gpu.rs still uses host wrap_counts for smoothing"
+    );
+    assert!(
+        !body.contains("Failed to read smoothed edges"),
+        "gpu.rs still reads smoothed edges on host"
+    );
+    assert!(
+        !body.contains("dtoh_sync_copy_into"),
+        "gpu.rs still performs device->host reads during smoothing"
+    );
+}
