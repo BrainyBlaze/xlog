@@ -160,6 +160,60 @@ impl Lowerer {
                 self.schemas.insert(pred.clone(), Schema::new(columns));
             }
         }
+
+        // Also infer from rule bodies for EDB predicates that only appear in bodies
+        for rule in &program.rules {
+            for lit in &rule.body {
+                let atom = match lit {
+                    BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) => atom,
+                    BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) => continue,
+                };
+                let pred = &atom.predicate;
+                if self.schemas.contains_key(pred) {
+                    continue;
+                }
+                let columns: Vec<(String, ScalarType)> = atom
+                    .terms
+                    .iter()
+                    .enumerate()
+                    .map(|(i, term)| (format!("c{}", i), infer_term_type(term)))
+                    .collect();
+                self.schemas.insert(pred.clone(), Schema::new(columns));
+            }
+        }
+
+        // Ensure schemas exist for probabilistic facts and annotated disjunctions
+        for pf in &program.prob_facts {
+            let pred = &pf.atom.predicate;
+            if self.schemas.contains_key(pred) {
+                continue;
+            }
+            let columns: Vec<(String, ScalarType)> = pf
+                .atom
+                .terms
+                .iter()
+                .enumerate()
+                .map(|(i, term)| (format!("c{}", i), infer_term_type(term)))
+                .collect();
+            self.schemas.insert(pred.clone(), Schema::new(columns));
+        }
+
+        for ad in &program.annotated_disjunctions {
+            for choice in &ad.choices {
+                let pred = &choice.atom.predicate;
+                if self.schemas.contains_key(pred) {
+                    continue;
+                }
+                let columns: Vec<(String, ScalarType)> = choice
+                    .atom
+                    .terms
+                    .iter()
+                    .enumerate()
+                    .map(|(i, term)| (format!("c{}", i), infer_term_type(term)))
+                    .collect();
+                self.schemas.insert(pred.clone(), Schema::new(columns));
+            }
+        }
     }
 
     fn infer_head_term_type_from_body(&self, rule: &Rule, var_name: &str) -> Option<ScalarType> {

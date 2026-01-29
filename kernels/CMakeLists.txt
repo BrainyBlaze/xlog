@@ -27,6 +27,7 @@ set(KERNEL_SOURCES
     set_ops.cu
     circuit.cu
     mc_sample.cu
+    mc_eval.cu
 )
 
 # Create PTX for each kernel
@@ -52,5 +53,6 @@ install(FILES
     $<TARGET_OBJECTS:set_ops_ptx>
     $<TARGET_OBJECTS:circuit_ptx>
     $<TARGET_OBJECTS:mc_sample_ptx>
+    $<TARGET_OBJECTS:mc_eval_ptx>
     DESTINATION ptx
 )

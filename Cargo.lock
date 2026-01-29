@@ -2192,7 +2192,9 @@ dependencies = [
  "cudarc",
  "xlog-core",
  "xlog-cuda",
+ "xlog-ir",
  "xlog-logic",
+ "xlog-runtime",
  "xlog-solve",
 ]
 
