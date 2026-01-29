@@ -1622,42 +1622,19 @@ impl CudaKernelProvider {
         self.compact_buffer_by_device_mask(input, &d_unique_mask, &d_prefix_sum, output_count)
     }
 
-    /// Compute union of two buffers
-    ///
-    /// MVP: Simple concatenation without deduplication.
-    /// A full implementation would dedup the result.
+    /// Compute union of two buffers (GPU-native, deduped)
     ///
     /// # Arguments
     /// * `a` - First buffer
     /// * `b` - Second buffer
     ///
     /// # Returns
-    /// A buffer containing all rows from both inputs
+    /// A buffer containing the deduplicated union of both inputs
     ///
     /// # Errors
     /// Returns `XlogError::Kernel` if schemas don't match or operation fails
     pub fn union(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
-        // Handle empty cases
-        if a.is_empty() && b.is_empty() {
-            return self.create_empty_buffer(a.schema().clone());
-        }
-        if a.is_empty() {
-            return self.clone_buffer(b);
-        }
-        if b.is_empty() {
-            return self.clone_buffer(a);
-        }
-
-        // Verify schemas have compatible types (ignore column names for Datalog union)
-        if !self.schemas_type_compatible(a.schema(), b.schema()) {
-            return Err(XlogError::Kernel(format!(
-                "Union requires compatible schemas: {:?} vs {:?}",
-                a.schema(),
-                b.schema()
-            )));
-        }
-
-        self.concat_buffers_gpu(a, b)
+        self.union_gpu(a, b)
     }
 
     fn concat_buffers_gpu(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
@@ -8679,38 +8656,35 @@ impl CudaKernelProvider {
         self.buffer_from_columns(result_columns, num_rows, combined_schema)
     }
 
-    /// Clone a buffer (deep copy) via host (MVP simplification)
+    /// Clone a buffer (deep copy) on-device
     fn clone_buffer(&self, buffer: &CudaBuffer) -> Result<CudaBuffer> {
         let mut result_columns = Vec::with_capacity(buffer.arity());
+        let device = self.device.inner();
 
         for col_idx in 0..buffer.arity() {
-            let col_type_size = buffer
-                .schema()
-                .column_type(col_idx)
-                .map(|t| t.size_bytes())
-                .unwrap_or(4);
-            let bytes = (buffer.num_rows() as usize) * col_type_size;
-
-            if let Some(src_col) = buffer.column(col_idx) {
-                // Copy via host to avoid type mismatch
-                let mut host_data = vec![0u8; bytes];
-                self.device
-                    .inner()
-                    .dtoh_sync_copy_into(src_col, &mut host_data)
-                    .map_err(|e| {
-                        XlogError::Kernel(format!("Failed to read column for clone: {}", e))
-                    })?;
-
-                let mut dst_col = self.memory.alloc::<u8>(bytes)?;
-                self.device
-                    .inner()
-                    .htod_sync_copy_into(&host_data, &mut dst_col)
+            let src_col = buffer
+                .column(col_idx)
+                .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
+            let mut dst_col = self.memory.alloc::<u8>(src_col.len())?;
+            if !src_col.is_empty() {
+                device
+                    .dtod_copy(src_col, &mut dst_col)
                     .map_err(|e| XlogError::Kernel(format!("Failed to clone column: {}", e)))?;
-                result_columns.push(dst_col.into());
             }
+            result_columns.push(dst_col.into());
         }
 
-        self.buffer_from_columns(result_columns, buffer.num_rows(), buffer.schema().clone())
+        let mut d_num_rows = self.memory.alloc::<u32>(1)?;
+        device
+            .dtod_copy(buffer.num_rows_device(), &mut d_num_rows)
+            .map_err(|e| XlogError::Kernel(format!("Failed to clone row count: {}", e)))?;
+
+        Ok(CudaBuffer::from_columns(
+            result_columns,
+            buffer.row_cap,
+            d_num_rows,
+            buffer.schema().clone(),
+        ))
     }
 
     // ============== Arithmetic Operations (GPU) ==============
@@ -10157,6 +10131,33 @@ mod tests {
             .chunks_exact(4)
             .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect()
+    }
+
+    #[test]
+    fn test_clone_buffer_preserves_device_count() {
+        let provider = match create_test_provider() {
+            Some(p) => p,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+
+        let schema = Schema::new(vec![("id".to_string(), ScalarType::U32)]);
+        let ids: Vec<u32> = vec![10, 20, 30];
+        let buffer = provider
+            .create_buffer_from_slices(&[bytemuck::cast_slice(&ids)], schema)
+            .unwrap();
+
+        let cloned = provider.clone_buffer(&buffer).unwrap();
+
+        let mut host_count = [0u32];
+        provider
+            .device()
+            .inner()
+            .dtoh_sync_copy_into(cloned.num_rows_device(), &mut host_count)
+            .unwrap();
+        assert_eq!(host_count[0], 3);
     }
 
     // ============== Hash Join Tests ==============
