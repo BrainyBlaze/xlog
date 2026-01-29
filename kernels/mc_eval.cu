@@ -61,20 +61,54 @@ extern "C" __global__ void mc_eval_mask_ad_choice(
     out_mask[gid] = selected ? 1u : 0u;
 }
 
+extern "C" __global__ void mc_eval_query_evidence_truth(
+    const uint64_t* __restrict__ query_counts_ptrs,
+    uint32_t query_count,
+    const uint64_t* __restrict__ evidence_counts_ptrs,
+    const uint8_t* __restrict__ evidence_expected,
+    uint32_t evidence_count,
+    uint8_t* __restrict__ out_query_flags,
+    uint8_t* __restrict__ out_evidence_ok
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (gid < query_count) {
+        const uint32_t* count_ptr =
+            reinterpret_cast<const uint32_t*>(query_counts_ptrs[gid]);
+        const uint32_t count = count_ptr ? *count_ptr : 0u;
+        out_query_flags[gid] = count > 0 ? 1u : 0u;
+    }
+
+    if (gid == 0) {
+        uint8_t ok = 1u;
+        for (uint32_t i = 0; i < evidence_count; i++) {
+            const uint32_t* count_ptr =
+                reinterpret_cast<const uint32_t*>(evidence_counts_ptrs[i]);
+            const uint32_t count = count_ptr ? *count_ptr : 0u;
+            const uint8_t holds = count > 0 ? 1u : 0u;
+            if (holds != evidence_expected[i]) {
+                ok = 0u;
+                break;
+            }
+        }
+        out_evidence_ok[0] = ok;
+    }
+}
+
 extern "C" __global__ void mc_accumulate_counts(
-    const uint8_t* __restrict__ query_truth,
+    const uint8_t* __restrict__ query_flags,
     uint32_t num_queries,
-    uint8_t evidence_ok,
+    const uint8_t* __restrict__ evidence_ok,
     uint32_t* __restrict__ query_counts,
     uint32_t* __restrict__ evidence_count
 ) {
     if (blockIdx.x == 0 && threadIdx.x == 0) {
-        if (!evidence_ok) {
+        if (!evidence_ok[0]) {
             return;
         }
         atomicAdd(evidence_count, 1u);
         for (uint32_t i = 0; i < num_queries; i++) {
-            if (query_truth[i]) {
+            if (query_flags[i]) {
                 atomicAdd(&query_counts[i], 1u);
             }
         }

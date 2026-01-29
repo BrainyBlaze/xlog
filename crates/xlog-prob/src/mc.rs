@@ -15,7 +15,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use cudarc::driver::{CudaView, DeviceSlice, LaunchAsync, LaunchConfig};
+use cudarc::driver::{CudaView, DevicePtr, DeviceSlice, LaunchAsync, LaunchConfig};
 use xlog_core::{MemoryBudget, RelId, Result, ScalarType, Schema, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::provider::{mc_eval_kernels, MC_EVAL_MODULE};
@@ -36,6 +36,22 @@ use crate::provenance::{
 
 /// Phase 4 semantics for non-monotone SCC evaluation inside MC sampling.
 pub const NONMONOTONE_SEMANTICS: &str = "Synchronous iteration per SCC; if a fixpoint is reached, use it; if a cycle is detected, use the intersection of all states in the cycle (skeptical tuples only); if the iteration budget is exceeded, use the intersection across all visited states (conservative).";
+
+fn upload_slice<T: cudarc::driver::DeviceRepr>(
+    provider: &Arc<CudaKernelProvider>,
+    src: &[T],
+    dst: &mut TrackedCudaSlice<T>,
+    label: &str,
+) -> Result<()> {
+    if src.is_empty() {
+        return Ok(());
+    }
+    provider
+        .device()
+        .inner()
+        .htod_sync_copy_into(src, dst)
+        .map_err(|e| XlogError::Kernel(format!("Failed to upload {}: {}", label, e)))
+}
 
 #[derive(Debug, Clone)]
 pub struct McEvalConfig {
@@ -362,6 +378,20 @@ impl McProgram {
     pub fn evaluate_gpu_device(&self, cfg: McEvalConfig) -> Result<McDeviceResult> {
         let provider = Arc::new(self.provider()?);
         let prob_query_count = self.queries.len();
+        let evidence_count = self.evidence.len();
+        let prob_query_count_u32 = u32::try_from(prob_query_count).map_err(|_| {
+            XlogError::Execution(format!(
+                "MC inference requires queries <= u32::MAX (got {})",
+                prob_query_count
+            ))
+        })?;
+        let evidence_count_u32 = u32::try_from(evidence_count).map_err(|_| {
+            XlogError::Execution(format!(
+                "MC inference requires evidence <= u32::MAX (got {})",
+                evidence_count
+            ))
+        })?;
+
         let mut d_query_counts = provider.memory().alloc::<u32>(prob_query_count)?;
         if prob_query_count > 0 {
             provider
@@ -379,7 +409,42 @@ impl McProgram {
             .memset_zeros(&mut d_evidence_count)
             .map_err(|e| XlogError::Kernel(format!("Failed to zero MC evidence count: {}", e)))?;
 
-        let mut d_query_truth = provider.memory().alloc::<u8>(prob_query_count)?;
+        let mut d_query_flags = provider.memory().alloc::<u8>(prob_query_count)?;
+        let mut d_evidence_ok = provider.memory().alloc::<u8>(1)?;
+        let mut d_query_ptrs = provider.memory().alloc::<u64>(prob_query_count)?;
+        let mut d_evidence_ptrs = provider.memory().alloc::<u64>(evidence_count)?;
+        let mut d_evidence_expected = provider.memory().alloc::<u8>(evidence_count)?;
+        let mut d_zero_count = provider.memory().alloc::<u32>(1)?;
+        provider
+            .device()
+            .inner()
+            .memset_zeros(&mut d_zero_count)
+            .map_err(|e| XlogError::Kernel(format!("Failed to zero MC zero-count: {}", e)))?;
+
+        if evidence_count > 0 {
+            let expected: Vec<u8> = self
+                .evidence
+                .iter()
+                .map(|(_, v)| if *v { 1u8 } else { 0u8 })
+                .collect();
+            upload_slice(
+                &provider,
+                &expected,
+                &mut d_evidence_expected,
+                "MC evidence expected",
+            )?;
+        }
+
+        let truth_fn = provider
+            .device()
+            .inner()
+            .get_func(
+                MC_EVAL_MODULE,
+                mc_eval_kernels::MC_EVAL_QUERY_EVIDENCE_TRUTH,
+            )
+            .ok_or_else(|| {
+                XlogError::Kernel("mc_eval_query_evidence_truth kernel not found".to_string())
+            })?;
         let accum_fn = provider
             .device()
             .inner()
@@ -387,38 +452,85 @@ impl McProgram {
             .ok_or_else(|| {
                 XlogError::Kernel("mc_accumulate_counts kernel not found".to_string())
             })?;
-        let config = LaunchConfig {
+        let accum_config = LaunchConfig {
             grid_dim: (1, 1, 1),
             block_dim: (1, 1, 1),
             shared_mem_bytes: 0,
         };
 
-        let stats = self.evaluate_gpu_counts_with(&cfg, provider.clone(), |query_truth, evidence_ok| {
-            if !evidence_ok {
-                return Ok(());
+        let stats = self.evaluate_gpu_counts_with(&cfg, provider.clone(), |executor, plan, count| {
+            let zero_ptr = *d_zero_count.device_ptr() as u64;
+
+            let mut query_ptrs: Vec<u64> = Vec::with_capacity(count);
+            for rel_name in plan.query_rel_names.iter().take(count) {
+                let ptr = executor
+                    .store()
+                    .get(rel_name)
+                    .map(|buf| *buf.num_rows_device().device_ptr() as u64)
+                    .unwrap_or(zero_ptr);
+                query_ptrs.push(ptr);
             }
-            if prob_query_count > 0 {
-                provider
-                    .device()
-                    .inner()
-                    .htod_sync_copy_into(query_truth, &mut d_query_truth)
+            upload_slice(
+                &provider,
+                &query_ptrs,
+                &mut d_query_ptrs,
+                "MC query count ptrs",
+            )?;
+
+            let mut evidence_ptrs: Vec<u64> = Vec::with_capacity(evidence_count);
+            for (rel_name, _) in plan.evidence_rel_specs.iter() {
+                let ptr = executor
+                    .store()
+                    .get(rel_name)
+                    .map(|buf| *buf.num_rows_device().device_ptr() as u64)
+                    .unwrap_or(zero_ptr);
+                evidence_ptrs.push(ptr);
+            }
+            upload_slice(
+                &provider,
+                &evidence_ptrs,
+                &mut d_evidence_ptrs,
+                "MC evidence count ptrs",
+            )?;
+
+            let block_dim = 128u32;
+            let threads = if count == 0 { 1 } else { count as u32 };
+            let grid_dim = (threads + block_dim - 1) / block_dim;
+            unsafe {
+                truth_fn
+                    .clone()
+                    .launch(
+                        LaunchConfig {
+                            grid_dim: (grid_dim, 1, 1),
+                            block_dim: (block_dim, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        (
+                            &d_query_ptrs,
+                            prob_query_count_u32,
+                            &d_evidence_ptrs,
+                            &d_evidence_expected,
+                            evidence_count_u32,
+                            &mut d_query_flags,
+                            &mut d_evidence_ok,
+                        ),
+                    )
                     .map_err(|e| {
                         XlogError::Kernel(format!(
-                            "Failed to upload MC query truth flags: {}",
+                            "mc_eval_query_evidence_truth failed: {}",
                             e
                         ))
                     })?;
             }
-            let evidence_flag = if evidence_ok { 1u8 } else { 0u8 };
             unsafe {
                 accum_fn
                     .clone()
                     .launch(
-                        config,
+                        accum_config,
                         (
-                            &d_query_truth,
-                            prob_query_count as u32,
-                            evidence_flag,
+                            &d_query_flags,
+                            prob_query_count_u32,
+                            &d_evidence_ok,
                             &mut d_query_counts,
                             &mut d_evidence_count,
                         ),
@@ -505,7 +617,7 @@ impl McProgram {
         mut on_sample: F,
     ) -> Result<EvalStats>
     where
-        F: FnMut(&[u8], bool) -> Result<()>,
+        F: FnMut(&Executor, &GpuMcPlan, usize) -> Result<()>,
     {
         if cfg.samples == 0 {
             return Err(XlogError::Execution(
@@ -563,7 +675,6 @@ impl McProgram {
 
         let mut stats = EvalStats::default();
         let num_vars = self.bernoulli_probs.len();
-        let mut query_truth = vec![0u8; prob_query_count];
 
         for sample_idx in 0..cfg.samples {
             executor.reset_for_mc();
@@ -607,21 +718,7 @@ impl McProgram {
             stats.nonmonotone_iteration_limit_hits +=
                 sample_stats.nonmonotone_iteration_limit_hits;
 
-            let evidence_ok = check_evidence(&executor, &gpu_plan.evidence_rel_specs)?;
-            query_truth.fill(0);
-            for (idx, rel_name) in gpu_plan.query_rel_names.iter().take(prob_query_count).enumerate()
-            {
-                let holds = executor
-                    .store()
-                    .get(rel_name)
-                    .map(|b| !b.is_empty())
-                    .unwrap_or(false);
-                if holds {
-                    query_truth[idx] = 1;
-                }
-            }
-
-            on_sample(&query_truth, evidence_ok)?;
+            on_sample(&executor, &gpu_plan, prob_query_count)?;
         }
 
         Ok(stats)
@@ -636,14 +733,22 @@ impl McProgram {
         let mut query_counts = vec![0u32; prob_query_count];
         let mut evidence_samples: u32 = 0;
 
-        let stats = self.evaluate_gpu_counts_with(cfg, provider, |query_truth, evidence_ok| {
+        let stats = self.evaluate_gpu_counts_with(cfg, provider, |executor, plan, count| {
+            let evidence_ok = check_evidence(executor, &plan.evidence_rel_specs)?;
             if !evidence_ok {
                 return Ok(());
             }
             evidence_samples = evidence_samples.saturating_add(1);
-            for (count, &holds) in query_counts.iter_mut().zip(query_truth.iter()) {
-                if holds != 0 {
-                    *count = count.saturating_add(1);
+            for (idx, rel_name) in plan.query_rel_names.iter().take(count).enumerate() {
+                let holds = executor
+                    .store()
+                    .get(rel_name)
+                    .map(|b| !b.is_empty())
+                    .unwrap_or(false);
+                if holds {
+                    if let Some(slot) = query_counts.get_mut(idx) {
+                        *slot = slot.saturating_add(1);
+                    }
                 }
             }
             Ok(())
@@ -936,15 +1041,7 @@ fn build_prob_tables_device(
 
         let buffer = build_buffer_from_rows(provider, &schema, &tuples)?;
         let mut d_var_idx = provider.memory().alloc::<u32>(var_idx.len())?;
-        if !var_idx.is_empty() {
-            provider
-                .device()
-                .inner()
-                .htod_sync_copy_into(&var_idx, &mut d_var_idx)
-                .map_err(|e| {
-                    XlogError::Kernel(format!("Failed to upload prob var indices: {}", e))
-                })?;
-        }
+        upload_slice(provider, &var_idx, &mut d_var_idx, "prob var indices")?;
 
         prob_tables.push(ProbTableDevice {
             predicate: pred,
@@ -1013,30 +1110,9 @@ fn build_prob_tables_device(
         let mut d_offsets = provider.memory().alloc::<u32>(offsets.len())?;
         let mut d_lengths = provider.memory().alloc::<u32>(lengths.len())?;
         let mut d_positions = provider.memory().alloc::<u32>(positions.len())?;
-
-        if !offsets.is_empty() {
-            provider
-                .device()
-                .inner()
-                .htod_sync_copy_into(&offsets, &mut d_offsets)
-                .map_err(|e| {
-                    XlogError::Kernel(format!("Failed to upload AD offsets: {}", e))
-                })?;
-            provider
-                .device()
-                .inner()
-                .htod_sync_copy_into(&lengths, &mut d_lengths)
-                .map_err(|e| {
-                    XlogError::Kernel(format!("Failed to upload AD lengths: {}", e))
-                })?;
-            provider
-                .device()
-                .inner()
-                .htod_sync_copy_into(&positions, &mut d_positions)
-                .map_err(|e| {
-                    XlogError::Kernel(format!("Failed to upload AD positions: {}", e))
-                })?;
-        }
+        upload_slice(provider, &offsets, &mut d_offsets, "AD offsets")?;
+        upload_slice(provider, &lengths, &mut d_lengths, "AD lengths")?;
+        upload_slice(provider, &positions, &mut d_positions, "AD positions")?;
 
         ad_tables.push(AdTableDevice {
             predicate: pred,
@@ -1048,13 +1124,12 @@ fn build_prob_tables_device(
     }
 
     let mut d_decision_vars = provider.memory().alloc::<u32>(decision_vars_flat.len())?;
-    if !decision_vars_flat.is_empty() {
-        provider
-            .device()
-            .inner()
-            .htod_sync_copy_into(&decision_vars_flat, &mut d_decision_vars)
-            .map_err(|e| XlogError::Kernel(format!("Failed to upload AD vars: {}", e)))?;
-    }
+    upload_slice(
+        provider,
+        &decision_vars_flat,
+        &mut d_decision_vars,
+        "AD decision vars",
+    )?;
 
     Ok((
         prob_tables,

@@ -25,6 +25,7 @@ fn main() {
         "set_ops",
         "circuit",
         "mc_sample",
+        "mc_eval",
         "arith",
         "sat",
         "d4",

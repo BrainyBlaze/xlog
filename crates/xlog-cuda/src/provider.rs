@@ -135,6 +135,7 @@ pub mod mc_sample_kernels {
 pub mod mc_eval_kernels {
     pub const MC_EVAL_MASK_VAR: &str = "mc_eval_mask_var";
     pub const MC_EVAL_MASK_AD: &str = "mc_eval_mask_ad_choice";
+    pub const MC_EVAL_QUERY_EVIDENCE_TRUTH: &str = "mc_eval_query_evidence_truth";
     pub const MC_EVAL_ACCUMULATE_COUNTS: &str = "mc_accumulate_counts";
 }
 
@@ -960,6 +961,7 @@ impl CudaKernelProvider {
                 &[
                     mc_eval_kernels::MC_EVAL_MASK_VAR,
                     mc_eval_kernels::MC_EVAL_MASK_AD,
+                    mc_eval_kernels::MC_EVAL_QUERY_EVIDENCE_TRUTH,
                     mc_eval_kernels::MC_EVAL_ACCUMULATE_COUNTS,
                 ],
             )
@@ -9341,6 +9343,10 @@ mod tests {
         assert!(
             MC_EVAL_PTX.contains("mc_eval_mask_ad_choice"),
             "MC_EVAL_PTX should contain mc_eval_mask_ad_choice"
+        );
+        assert!(
+            MC_EVAL_PTX.contains("mc_eval_query_evidence_truth"),
+            "MC_EVAL_PTX should contain mc_eval_query_evidence_truth"
         );
         assert!(
             SAT_PTX.contains("sat_cdcl_solve"),
