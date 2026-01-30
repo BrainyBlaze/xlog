@@ -22,7 +22,7 @@ fn gpu_mc_matches_cpu_on_small_program() {
         max_nonmonotone_iterations: 128,
     };
 
-    let cpu = prog.evaluate(cfg.clone()).unwrap();
+    let cpu = prog.evaluate_cpu(cfg.clone()).unwrap();
     let gpu = prog.evaluate_gpu(cfg).unwrap();
 
     let cpu_p = cpu.query_estimates[0].prob;

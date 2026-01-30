@@ -37,6 +37,19 @@ fn mc_gpu_device_eval_avoids_host_query_truth() {
 }
 
 #[test]
+fn mc_gpu_path_avoids_host_sampling() {
+    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    path.push("src");
+    path.push("mc.rs");
+
+    let text = std::fs::read_to_string(&path).expect("read mc.rs");
+    assert!(
+        !text.contains("sample_bernoulli_matrix("),
+        "mc.rs still calls host sample_bernoulli_matrix (GPU path must avoid host sampling)"
+    );
+}
+
+#[test]
 fn smoothing_no_dtoh_calls_in_source() {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     path.push("src");

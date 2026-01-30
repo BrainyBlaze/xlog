@@ -5000,7 +5000,35 @@ impl CudaKernelProvider {
         d_prefix_sum: &cudarc::driver::CudaSlice<u32>,
         d_out_count: TrackedCudaSlice<u32>,
     ) -> Result<CudaBuffer> {
-        let n = input.num_rows() as u32;
+        let mask_len = u32::try_from(d_mask.len()).map_err(|_| {
+            XlogError::Kernel(format!(
+                "compact_buffer_by_device_mask_device_count: mask len {} exceeds u32::MAX",
+                d_mask.len()
+            ))
+        })?;
+        let prefix_len = u32::try_from(d_prefix_sum.len()).map_err(|_| {
+            XlogError::Kernel(format!(
+                "compact_buffer_by_device_mask_device_count: prefix sum len {} exceeds u32::MAX",
+                d_prefix_sum.len()
+            ))
+        })?;
+        if prefix_len < mask_len {
+            return Err(XlogError::Kernel(format!(
+                "compact_buffer_by_device_mask_device_count: prefix sum len {} < mask len {}",
+                prefix_len, mask_len
+            )));
+        }
+        if mask_len as u64 > input.num_rows() {
+            return Err(XlogError::Kernel(format!(
+                "compact_buffer_by_device_mask_device_count: mask len {} > row cap {}",
+                mask_len,
+                input.num_rows()
+            )));
+        }
+        if mask_len == 0 {
+            return self.create_empty_buffer(input.schema.clone());
+        }
+        let n = mask_len;
         let device = self.device.inner();
 
         let compact_fn = device
@@ -10068,6 +10096,71 @@ mod tests {
             .chunks_exact(4)
             .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect()
+    }
+
+    #[test]
+    fn test_compact_device_mask_respects_mask_len_smaller_than_row_cap() {
+        let provider = match create_test_provider() {
+            Some(p) => p,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+
+        let schema = Schema::new(vec![("id".to_string(), ScalarType::U32)]);
+        let base = create_test_buffer(&provider, &[1, 2, 3, 4, 5, 6, 7, 8], "id");
+
+        let row_cap = 16u64;
+        let data: Vec<u32> = (0..row_cap as u32).collect();
+        let bytes: Vec<u8> = data.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let mut col = provider
+            .memory()
+            .alloc::<u8>(bytes.len())
+            .expect("alloc");
+        provider
+            .device()
+            .inner()
+            .htod_sync_copy_into(&bytes, &mut col)
+            .expect("htod");
+        let expanded = provider
+            .buffer_from_columns_with_device_count(vec![col.into()], row_cap, schema, &base)
+            .expect("buffer");
+
+        let mask: Vec<u8> = vec![1, 0, 1, 0, 1, 0, 1, 0];
+        let (prefix_sum, count) = provider.prefix_sum_mask(&mask).expect("prefix sum");
+
+        let mut d_mask = provider.memory().alloc::<u8>(mask.len()).expect("alloc");
+        provider
+            .device()
+            .inner()
+            .htod_sync_copy_into(&mask, &mut d_mask)
+            .expect("mask htod");
+
+        let mut d_prefix = provider
+            .memory()
+            .alloc::<u32>(prefix_sum.len())
+            .expect("alloc");
+        provider
+            .device()
+            .inner()
+            .htod_sync_copy_into(&prefix_sum, &mut d_prefix)
+            .expect("prefix htod");
+
+        let mut d_out_count = provider.memory().alloc::<u32>(1).expect("alloc");
+        provider
+            .device()
+            .inner()
+            .htod_sync_copy_into(&[count], &mut d_out_count)
+            .expect("count htod");
+
+        let compacted = provider
+            .compact_buffer_by_device_mask_device_count(&expanded, &d_mask, &d_prefix, d_out_count)
+            .expect("compact");
+
+        assert_eq!(compacted.num_rows(), mask.len() as u64);
+        let device_rows = provider.device_row_count(&compacted).expect("row count");
+        assert_eq!(device_rows as u32, count);
     }
 
     #[test]

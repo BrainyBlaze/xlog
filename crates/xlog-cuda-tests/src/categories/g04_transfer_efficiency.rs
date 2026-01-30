@@ -795,69 +795,83 @@ fn test_repeated_eval_no_reupload(ctx: &TestContext) -> TestResult {
         );
     }
 
-    // Time 10 evaluations
-    let small_batch_start = Instant::now();
-    for i in 0..10 {
-        // Slightly modify weights to ensure we're actually computing
-        spec.var_log_true[1] = (0.5 + 0.001 * i as f64).ln();
-        if let Err(e) = dev.set_weights(ctx, &spec.var_log_true, &spec.var_log_false) {
-            return TestResult::error(
-                "test_repeated_eval_no_reupload",
-                start.elapsed(),
-                format!("Weight upload failed: {}", e),
-            );
-        }
+    let weight_bytes = (num_vars as u64 + 1) * 2 * std::mem::size_of::<f64>() as u64;
 
-        if let Err(e) = dev.forward_launch(ctx) {
+    ctx.reset_transfer_counters();
+    let small_gpu_ms = match ctx.measure_gpu_ms(|| {
+        for i in 0..10 {
+            spec.var_log_true[1] = (0.5 + 0.001 * i as f64).ln();
+            dev.set_weights(ctx, &spec.var_log_true, &spec.var_log_false)?;
+            dev.forward_launch(ctx)?;
+        }
+        Ok(())
+    }) {
+        Ok(ms) => ms,
+        Err(e) => {
             return TestResult::error(
                 "test_repeated_eval_no_reupload",
                 start.elapsed(),
-                format!("Forward launch {} failed: {}", i, e),
+                format!("GPU timing failed for small batch: {}", e),
             );
         }
-    }
-    if let Err(e) = ctx.sync_and_check() {
+    };
+    let (htod_small, dtoh_small) = ctx.transfer_counters();
+    if htod_small != weight_bytes * 10 || dtoh_small != 0 {
         return TestResult::error(
             "test_repeated_eval_no_reupload",
             start.elapsed(),
-            format!("Sync failed after small batch: {}", e),
+            format!(
+                "Unexpected transfers for 10 evals: htod={} dtoh={} (expected htod={}, dtoh=0)",
+                htod_small,
+                dtoh_small,
+                weight_bytes * 10
+            ),
         );
     }
-    let small_batch_duration = small_batch_start.elapsed();
 
-    // Time 100 evaluations
-    let large_batch_start = Instant::now();
-    for i in 0..100 {
-        spec.var_log_true[1] = (0.5 + 0.001 * i as f64).ln();
-        if let Err(e) = dev.set_weights(ctx, &spec.var_log_true, &spec.var_log_false) {
+    ctx.reset_transfer_counters();
+    let large_gpu_ms = match ctx.measure_gpu_ms(|| {
+        for i in 0..100 {
+            spec.var_log_true[1] = (0.5 + 0.001 * i as f64).ln();
+            dev.set_weights(ctx, &spec.var_log_true, &spec.var_log_false)?;
+            dev.forward_launch(ctx)?;
+        }
+        Ok(())
+    }) {
+        Ok(ms) => ms,
+        Err(e) => {
             return TestResult::error(
                 "test_repeated_eval_no_reupload",
                 start.elapsed(),
-                format!("Weight upload failed: {}", e),
+                format!("GPU timing failed for large batch: {}", e),
             );
         }
-
-        if let Err(e) = dev.forward_launch(ctx) {
-            return TestResult::error(
-                "test_repeated_eval_no_reupload",
-                start.elapsed(),
-                format!("Forward launch {} failed: {}", i, e),
-            );
-        }
-    }
-    if let Err(e) = ctx.sync_and_check() {
+    };
+    let (htod_large, dtoh_large) = ctx.transfer_counters();
+    if htod_large != weight_bytes * 100 || dtoh_large != 0 {
         return TestResult::error(
             "test_repeated_eval_no_reupload",
             start.elapsed(),
-            format!("Sync failed after large batch: {}", e),
+            format!(
+                "Unexpected transfers for 100 evals: htod={} dtoh={} (expected htod={}, dtoh=0)",
+                htod_large,
+                dtoh_large,
+                weight_bytes * 100
+            ),
         );
     }
-    let large_batch_duration = large_batch_start.elapsed();
 
     // 100 evaluations should take ~10x the time of 10 evaluations (linear scaling)
     // If circuit was re-uploaded each time quadratically, 100 evals would be 100x slower
     let expected_ratio = 10.0;
-    let actual_ratio = large_batch_duration.as_secs_f64() / small_batch_duration.as_secs_f64();
+    if small_gpu_ms <= 0.0 {
+        return TestResult::error(
+            "test_repeated_eval_no_reupload",
+            start.elapsed(),
+            "GPU timing reported non-positive duration for small batch".to_string(),
+        );
+    }
+    let actual_ratio = (large_gpu_ms as f64) / (small_gpu_ms as f64);
 
     // Allow up to 20x ratio to account for variance, but catch quadratic behavior (would be ~100x)
     let max_acceptable_ratio = 20.0;
@@ -868,8 +882,8 @@ fn test_repeated_eval_no_reupload(ctx: &TestContext) -> TestResult {
             start.elapsed(),
             format!(
                 "Non-linear scaling detected: 100 evals took {:.1}x longer than 10 evals (expected ~{:.1}x). \
-                 10 evals: {:?}, 100 evals: {:?}. Suggests circuit re-upload on each call.",
-                actual_ratio, expected_ratio, small_batch_duration, large_batch_duration
+                 10 evals GPU time: {:.3} ms, 100 evals GPU time: {:.3} ms. Suggests circuit re-upload on each call.",
+                actual_ratio, expected_ratio, small_gpu_ms, large_gpu_ms
             ),
         );
     }
@@ -933,36 +947,40 @@ fn test_batch_weights_efficiency(ctx: &TestContext) -> TestResult {
         );
     }
 
-    // Time evaluation with all weight sets (no host downloads; measures GPU-side reuse)
-    let batch_start = Instant::now();
+    let weight_bytes = (num_vars as u64 + 1) * 2 * std::mem::size_of::<f64>() as u64;
 
-    for (log_true, log_false) in &weight_sets {
-        if let Err(e) = dev.set_weights(ctx, log_true, log_false) {
+    ctx.reset_transfer_counters();
+    let batch_gpu_ms = match ctx.measure_gpu_ms(|| {
+        for (log_true, log_false) in &weight_sets {
+            dev.set_weights(ctx, log_true, log_false)?;
+            dev.forward_launch(ctx)?;
+        }
+        Ok(())
+    }) {
+        Ok(ms) => ms,
+        Err(e) => {
             return TestResult::error(
                 "test_batch_weights_efficiency",
                 start.elapsed(),
-                format!("Weight upload failed: {}", e),
+                format!("GPU timing failed for batch: {}", e),
             );
         }
-        if let Err(e) = dev.forward_launch(ctx) {
-            return TestResult::error(
-                "test_batch_weights_efficiency",
-                start.elapsed(),
-                format!("Forward launch failed: {}", e),
-            );
-        }
-    }
-
-    if let Err(e) = ctx.sync_and_check() {
+    };
+    let (htod_batch, dtoh_batch) = ctx.transfer_counters();
+    let expected_htod = weight_bytes * num_weight_sets as u64;
+    if htod_batch != expected_htod || dtoh_batch != 0 {
         return TestResult::error(
             "test_batch_weights_efficiency",
             start.elapsed(),
-            format!("Sync failed after batch: {}", e),
+            format!(
+                "Unexpected transfers for batch: htod={} dtoh={} (expected htod={}, dtoh=0)",
+                htod_batch, dtoh_batch, expected_htod
+            ),
         );
     }
-    let batch_duration = batch_start.elapsed();
 
     // Correctness: verify different weights yield different roots (performed outside timing).
+    ctx.reset_transfer_counters();
     let mut results: Vec<f64> = Vec::with_capacity(num_weight_sets);
     for (log_true, log_false) in &weight_sets {
         if let Err(e) = dev.set_weights(ctx, log_true, log_false) {
@@ -1001,56 +1019,64 @@ fn test_batch_weights_efficiency(ctx: &TestContext) -> TestResult {
 
     // 10 weight set evaluations should complete quickly
     // If we were re-uploading circuit each time, this would be much slower
-    let per_weight_set = batch_duration / num_weight_sets as u32;
-    let max_acceptable = Duration::from_millis(20);
-
-    if per_weight_set > max_acceptable {
+    let per_weight_set_ms = batch_gpu_ms / num_weight_sets as f32;
+    let max_acceptable_ms = 20.0;
+    if per_weight_set_ms > max_acceptable_ms {
         return TestResult::error(
             "test_batch_weights_efficiency",
             start.elapsed(),
             format!(
-                "Per-weight-set evaluation too slow ({:?}), expected < {:?}. \
+                "Per-weight-set GPU time too high ({:.3} ms), expected < {:.3} ms. \
                  Suggests circuit structure being re-uploaded with weights.",
-                per_weight_set, max_acceptable
+                per_weight_set_ms, max_acceptable_ms
             ),
         );
     }
 
     // Run multiple iterations of the entire batch to verify consistency
     let num_batch_iterations = 5;
-    let multi_batch_start = Instant::now();
-
-    for _ in 0..num_batch_iterations {
-        for (log_true, log_false) in &weight_sets {
-            if let Err(e) = dev.set_weights(ctx, log_true, log_false) {
-                return TestResult::error(
-                    "test_batch_weights_efficiency",
-                    start.elapsed(),
-                    format!("Weight upload failed: {}", e),
-                );
-            }
-            if let Err(e) = dev.forward_launch(ctx) {
-                return TestResult::error(
-                    "test_batch_weights_efficiency",
-                    start.elapsed(),
-                    format!("Forward launch in multi-batch failed: {}", e),
-                );
+    ctx.reset_transfer_counters();
+    let multi_batch_gpu_ms = match ctx.measure_gpu_ms(|| {
+        for _ in 0..num_batch_iterations {
+            for (log_true, log_false) in &weight_sets {
+                dev.set_weights(ctx, log_true, log_false)?;
+                dev.forward_launch(ctx)?;
             }
         }
-    }
-
-    if let Err(e) = ctx.sync_and_check() {
+        Ok(())
+    }) {
+        Ok(ms) => ms,
+        Err(e) => {
+            return TestResult::error(
+                "test_batch_weights_efficiency",
+                start.elapsed(),
+                format!("GPU timing failed for multi-batch: {}", e),
+            );
+        }
+    };
+    let (htod_multi, dtoh_multi) = ctx.transfer_counters();
+    let expected_multi_htod = weight_bytes * num_weight_sets as u64 * num_batch_iterations as u64;
+    if htod_multi != expected_multi_htod || dtoh_multi != 0 {
         return TestResult::error(
             "test_batch_weights_efficiency",
             start.elapsed(),
-            format!("Sync failed after multi-batch: {}", e),
+            format!(
+                "Unexpected transfers for multi-batch: htod={} dtoh={} (expected htod={}, dtoh=0)",
+                htod_multi, dtoh_multi, expected_multi_htod
+            ),
         );
     }
-    let multi_batch_duration = multi_batch_start.elapsed();
 
     // Verify linear scaling: 5 batches should take ~5x one batch
     let expected_ratio = num_batch_iterations as f64;
-    let actual_ratio = multi_batch_duration.as_secs_f64() / batch_duration.as_secs_f64();
+    if batch_gpu_ms <= 0.0 {
+        return TestResult::error(
+            "test_batch_weights_efficiency",
+            start.elapsed(),
+            "GPU timing reported non-positive duration for batch".to_string(),
+        );
+    }
+    let actual_ratio = (multi_batch_gpu_ms as f64) / (batch_gpu_ms as f64);
 
     // Allow up to 3x the expected ratio for variance (accounts for system load, warmup effects)
     // The key is that it's not quadratic (which would be 25x for 5 batches)

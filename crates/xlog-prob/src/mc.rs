@@ -233,7 +233,76 @@ impl McProgram {
     }
 
     #[cfg(feature = "host-io")]
+    #[cfg(feature = "host-io")]
     pub fn evaluate(&self, cfg: McEvalConfig) -> Result<McResult> {
+        let provider = Arc::new(self.provider()?);
+        let cfg_clone = cfg.clone();
+        let device_result = self.evaluate_gpu_device_with_provider(cfg_clone, provider.clone())?;
+
+        let mut host_counts = vec![0u32; device_result.query_counts.len()];
+        if !host_counts.is_empty() {
+            provider
+                .device()
+                .inner()
+                .dtoh_sync_copy_into(&device_result.query_counts, &mut host_counts)
+                .map_err(|e| {
+                    XlogError::Kernel(format!("Failed to download MC query counts: {}", e))
+                })?;
+        }
+
+        let mut host_evidence = [0u32];
+        provider
+            .device()
+            .inner()
+            .dtoh_sync_copy_into(&device_result.evidence_count, &mut host_evidence)
+            .map_err(|e| {
+                XlogError::Kernel(format!("Failed to download MC evidence count: {}", e))
+            })?;
+
+        let evidence_samples = if self.evidence.is_empty() {
+            cfg.samples
+        } else {
+            host_evidence[0] as usize
+        };
+
+        if !self.evidence.is_empty() && evidence_samples == 0 {
+            return Err(XlogError::Execution(format!(
+                "MC inference error: evidence was never satisfied across {} samples (seed={})",
+                cfg.samples, cfg.seed
+            )));
+        }
+
+        let z = normal_quantile(0.5 + cfg.confidence / 2.0);
+        let mut query_estimates: Vec<McQueryEstimate> = Vec::with_capacity(self.queries.len());
+        for (i, atom) in self.queries.iter().enumerate() {
+            let k = host_counts.get(i).copied().unwrap_or(0) as usize;
+            let (p, stderr, ci_low, ci_high) = binomial_estimate(k, evidence_samples, z);
+            let log_prob = if p == 0.0 { f64::NEG_INFINITY } else { p.ln() };
+
+            query_estimates.push(McQueryEstimate {
+                atom: atom.clone(),
+                prob: p,
+                log_prob,
+                stderr,
+                ci_low,
+                ci_high,
+            });
+        }
+
+        Ok(McResult {
+            total_samples: cfg.samples,
+            evidence_samples,
+            seed: cfg.seed,
+            confidence: cfg.confidence,
+            query_estimates,
+            nonmonotone_sccs: device_result.nonmonotone_sccs,
+            nonmonotone_cycles: device_result.nonmonotone_cycles,
+            nonmonotone_iteration_limit_hits: device_result.nonmonotone_iteration_limit_hits,
+        })
+    }
+
+    #[cfg(feature = "host-io")]
+    pub fn evaluate_cpu(&self, cfg: McEvalConfig) -> Result<McResult> {
         if cfg.samples == 0 {
             return Err(XlogError::Execution(
                 "MC inference requires samples > 0".to_string(),
@@ -259,8 +328,26 @@ impl McProgram {
         let samples_matrix: Vec<u8> = if num_vars == 0 {
             Vec::new()
         } else {
-            let provider = self.provider()?;
-            provider.sample_bernoulli_matrix(&self.bernoulli_probs, cfg.samples, cfg.seed)?
+            let total = num_vars
+                .checked_mul(cfg.samples)
+                .ok_or_else(|| XlogError::Execution("MC sample matrix overflow".to_string()))?;
+            let provider = Arc::new(self.provider()?);
+            let samples_device = provider.sample_bernoulli_matrix_device(
+                &self.bernoulli_probs,
+                cfg.samples,
+                cfg.seed,
+            )?;
+            let mut host = vec![0u8; total];
+            if !host.is_empty() {
+                provider
+                    .device()
+                    .inner()
+                    .dtoh_sync_copy_into(&samples_device, &mut host)
+                    .map_err(|e| {
+                        XlogError::Kernel(format!("Failed to download MC samples: {}", e))
+                    })?;
+            }
+            host
         };
 
         for sample_idx in 0..cfg.samples {
@@ -342,55 +429,19 @@ impl McProgram {
 
     #[cfg(feature = "host-io")]
     pub fn evaluate_gpu(&self, cfg: McEvalConfig) -> Result<McResult> {
-        let provider = Arc::new(self.provider()?);
-        let (query_counts, evidence_samples, stats) =
-            self.evaluate_gpu_counts(&cfg, provider)?;
-
-        if !self.evidence.is_empty() && evidence_samples == 0 {
-            return Err(XlogError::Execution(format!(
-                "MC inference error: evidence was never satisfied across {} samples (seed={})",
-                cfg.samples, cfg.seed
-            )));
-        }
-
-        let denom = if self.evidence.is_empty() {
-            cfg.samples
-        } else {
-            evidence_samples as usize
-        };
-
-        let z = normal_quantile(0.5 + cfg.confidence / 2.0);
-
-        let mut query_estimates: Vec<McQueryEstimate> = Vec::with_capacity(self.queries.len());
-        for (i, atom) in self.queries.iter().enumerate() {
-            let k = query_counts.get(i).copied().unwrap_or(0) as usize;
-            let (p, stderr, ci_low, ci_high) = binomial_estimate(k, denom, z);
-            let log_prob = if p == 0.0 { f64::NEG_INFINITY } else { p.ln() };
-
-            query_estimates.push(McQueryEstimate {
-                atom: atom.clone(),
-                prob: p,
-                log_prob,
-                stderr,
-                ci_low,
-                ci_high,
-            });
-        }
-
-        Ok(McResult {
-            total_samples: cfg.samples,
-            evidence_samples: denom,
-            seed: cfg.seed,
-            confidence: cfg.confidence,
-            query_estimates,
-            nonmonotone_sccs: stats.nonmonotone_sccs,
-            nonmonotone_cycles: stats.nonmonotone_cycles,
-            nonmonotone_iteration_limit_hits: stats.nonmonotone_iteration_limit_hits,
-        })
+        self.evaluate(cfg)
     }
 
     pub fn evaluate_gpu_device(&self, cfg: McEvalConfig) -> Result<McDeviceResult> {
         let provider = Arc::new(self.provider()?);
+        self.evaluate_gpu_device_with_provider(cfg, provider)
+    }
+
+    pub fn evaluate_gpu_device_with_provider(
+        &self,
+        cfg: McEvalConfig,
+        provider: Arc<CudaKernelProvider>,
+    ) -> Result<McDeviceResult> {
         let prob_query_count = self.queries.len();
         let evidence_count = self.evidence.len();
         let prob_query_count_u32 = u32::try_from(prob_query_count).map_err(|_| {
@@ -712,10 +763,7 @@ impl McProgram {
                 }
                 let merged = match executor.store().get(&pred) {
                     Some(existing) if !existing.is_empty() => provider.union_gpu(existing, &buf)?,
-                    _ => {
-                        let key_cols: Vec<usize> = (0..buf.arity()).collect();
-                        provider.dedup(&buf, &key_cols)?
-                    }
+                    _ => dedup_relation(&provider, &buf)?,
                 };
                 executor.put_relation(&pred, merged);
             }
@@ -736,40 +784,6 @@ impl McProgram {
         }
 
         Ok(stats)
-    }
-
-    #[cfg(feature = "host-io")]
-    fn evaluate_gpu_counts(
-        &self,
-        cfg: &McEvalConfig,
-        provider: Arc<CudaKernelProvider>,
-    ) -> Result<(Vec<u32>, u32, EvalStats)> {
-        let prob_query_count = self.queries.len();
-        let mut query_counts = vec![0u32; prob_query_count];
-        let mut evidence_samples: u32 = 0;
-
-        let stats = self.evaluate_gpu_counts_with(cfg, provider, |executor, plan, count| {
-            let evidence_ok = check_evidence(executor, &plan.evidence_rel_specs)?;
-            if !evidence_ok {
-                return Ok(());
-            }
-            evidence_samples = evidence_samples.saturating_add(1);
-            for (idx, rel_name) in plan.query_rel_names.iter().take(count).enumerate() {
-                let holds = executor
-                    .store()
-                    .get(rel_name)
-                    .map(|b| !b.is_empty())
-                    .unwrap_or(false);
-                if holds {
-                    if let Some(slot) = query_counts.get_mut(idx) {
-                        *slot = slot.saturating_add(1);
-                    }
-                }
-            }
-            Ok(())
-        })?;
-
-        Ok((query_counts, evidence_samples, stats))
     }
 
     fn compile_program(program: &Program) -> Result<Self> {
@@ -943,12 +957,7 @@ fn load_deterministic_facts(
             ))
         })?;
         let buffer = build_buffer_from_rows(provider, schema, &rows)?;
-        let key_cols: Vec<usize> = (0..schema.arity()).collect();
-        let deduped = if buffer.is_empty() {
-            buffer
-        } else {
-            provider.dedup(&buffer, &key_cols)?
-        };
+        let deduped = dedup_relation(provider, &buffer)?;
         executor.put_relation(&pred, deduped);
     }
 
@@ -1036,6 +1045,39 @@ fn clone_buffer_device(
         d_num_rows,
         buffer.schema().clone(),
     ))
+}
+
+fn build_zero_arity_buffer(
+    provider: &Arc<CudaKernelProvider>,
+    row_count: u32,
+    schema: &Schema,
+) -> Result<CudaBuffer> {
+    let mut d_num_rows = provider.memory().alloc::<u32>(1)?;
+    provider
+        .device()
+        .inner()
+        .htod_sync_copy_into(&[row_count], &mut d_num_rows)
+        .map_err(|e| XlogError::Kernel(format!("Failed to set row count: {}", e)))?;
+    Ok(CudaBuffer::from_columns(
+        Vec::new(),
+        row_count as u64,
+        d_num_rows,
+        schema.clone(),
+    ))
+}
+
+fn dedup_relation(
+    provider: &Arc<CudaKernelProvider>,
+    buffer: &CudaBuffer,
+) -> Result<CudaBuffer> {
+    if buffer.is_empty() {
+        return provider.create_empty_buffer(buffer.schema().clone());
+    }
+    if buffer.arity() == 0 {
+        return build_zero_arity_buffer(provider, 1u32, buffer.schema());
+    }
+    let key_cols: Vec<usize> = (0..buffer.arity()).collect();
+    provider.dedup(buffer, &key_cols)
 }
 
 fn build_prob_tables_device(
@@ -1220,8 +1262,7 @@ fn build_sample_buffers(
         if filtered.is_empty() {
             continue;
         }
-        let key_cols: Vec<usize> = (0..filtered.arity()).collect();
-        let deduped = provider.dedup(&filtered, &key_cols)?;
+        let deduped = dedup_relation(provider, &filtered)?;
         if !deduped.is_empty() {
             out.push((table.predicate.clone(), deduped));
         }
@@ -1274,8 +1315,7 @@ fn build_sample_buffers(
         if filtered.is_empty() {
             continue;
         }
-        let key_cols: Vec<usize> = (0..filtered.arity()).collect();
-        let deduped = provider.dedup(&filtered, &key_cols)?;
+        let deduped = dedup_relation(provider, &filtered)?;
         if !deduped.is_empty() {
             out.push((table.predicate.clone(), deduped));
         }
@@ -1378,8 +1418,7 @@ fn execute_nonmonotone_scc_gpu(
             if result.is_empty() {
                 continue;
             }
-            let key_cols: Vec<usize> = (0..result.arity()).collect();
-            result = provider.dedup(&result, &key_cols)?;
+            result = dedup_relation(provider, &result)?;
             if result.is_empty() {
                 continue;
             }
@@ -1569,26 +1608,31 @@ fn buffer_intersection(
     provider.diff_gpu(a, &diff)
 }
 
-#[cfg(feature = "host-io")]
-fn check_evidence(executor: &Executor, evidence: &[(String, bool)]) -> Result<bool> {
-    for (pred, expected) in evidence {
-        let holds = executor
-            .store()
-            .get(pred)
-            .map(|b| !b.is_empty())
-            .unwrap_or(false);
-        if holds != *expected {
-            return Ok(false);
-        }
-    }
-    Ok(true)
-}
-
 fn build_buffer_from_rows(
     provider: &Arc<CudaKernelProvider>,
     schema: &Schema,
     rows: &[Vec<Value>],
 ) -> Result<CudaBuffer> {
+    if schema.arity() == 0 {
+        for row in rows {
+            if !row.is_empty() {
+                return Err(XlogError::Execution(
+                    "Zero-arity buffer row should be empty".to_string(),
+                ));
+            }
+        }
+        if rows.is_empty() {
+            return provider.create_empty_buffer(schema.clone());
+        }
+        let row_count = u32::try_from(rows.len()).map_err(|_| {
+            XlogError::Execution(format!(
+                "Row count {} exceeds u32::MAX for zero-arity buffer",
+                rows.len()
+            ))
+        })?;
+        return build_zero_arity_buffer(provider, row_count, schema);
+    }
+
     if rows.is_empty() {
         return provider.create_empty_buffer(schema.clone());
     }
