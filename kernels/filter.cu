@@ -443,6 +443,7 @@ extern "C" __global__ void filter_compare_u32_scan_phase1(
     const uint32_t* __restrict__ column,
     uint32_t constant,
     uint32_t num_rows,
+    const uint32_t* __restrict__ num_rows_device,
     uint8_t op,
     uint8_t* __restrict__ mask,
     uint32_t* __restrict__ prefix_sum,
@@ -455,18 +456,25 @@ extern "C" __global__ void filter_compare_u32_scan_phase1(
 
     uint32_t val = 0;
     if (gid < num_rows) {
-        uint32_t col_val = column[gid];
-        bool result;
-        switch (op) {
-            case OP_EQ: result = (col_val == constant); break;
-            case OP_NE: result = (col_val != constant); break;
-            case OP_LT: result = (col_val < constant); break;
-            case OP_LE: result = (col_val <= constant); break;
-            case OP_GT: result = (col_val > constant); break;
-            case OP_GE: result = (col_val >= constant); break;
-            default: result = false;
+        uint32_t actual = num_rows_device[0];
+        if (actual > num_rows) {
+            actual = num_rows;
         }
-        uint8_t out = result ? 1 : 0;
+        uint8_t out = 0;
+        if (gid < actual) {
+            uint32_t col_val = column[gid];
+            bool result;
+            switch (op) {
+                case OP_EQ: result = (col_val == constant); break;
+                case OP_NE: result = (col_val != constant); break;
+                case OP_LT: result = (col_val < constant); break;
+                case OP_LE: result = (col_val <= constant); break;
+                case OP_GT: result = (col_val > constant); break;
+                case OP_GE: result = (col_val >= constant); break;
+                default: result = false;
+            }
+            out = result ? 1 : 0;
+        }
         mask[gid] = out;
         val = (uint32_t)out;
     }
@@ -510,6 +518,7 @@ extern "C" __global__ void filter_compare_f64_scan_phase1(
     const double* __restrict__ column,
     double constant,
     uint32_t num_rows,
+    const uint32_t* __restrict__ num_rows_device,
     uint8_t op,
     uint8_t* __restrict__ mask,
     uint32_t* __restrict__ prefix_sum,
@@ -522,18 +531,25 @@ extern "C" __global__ void filter_compare_f64_scan_phase1(
 
     uint32_t val = 0;
     if (gid < num_rows) {
-        double col_val = column[gid];
-        bool result;
-        switch (op) {
-            case OP_EQ: result = (col_val == constant); break;
-            case OP_NE: result = (col_val != constant); break;
-            case OP_LT: result = (float_to_ordered_f64(col_val) < float_to_ordered_f64(constant)); break;
-            case OP_LE: result = (float_to_ordered_f64(col_val) <= float_to_ordered_f64(constant)); break;
-            case OP_GT: result = (float_to_ordered_f64(col_val) > float_to_ordered_f64(constant)); break;
-            case OP_GE: result = (float_to_ordered_f64(col_val) >= float_to_ordered_f64(constant)); break;
-            default: result = false;
+        uint32_t actual = num_rows_device[0];
+        if (actual > num_rows) {
+            actual = num_rows;
         }
-        uint8_t out = result ? 1 : 0;
+        uint8_t out = 0;
+        if (gid < actual) {
+            double col_val = column[gid];
+            bool result;
+            switch (op) {
+                case OP_EQ: result = (col_val == constant); break;
+                case OP_NE: result = (col_val != constant); break;
+                case OP_LT: result = (float_to_ordered_f64(col_val) < float_to_ordered_f64(constant)); break;
+                case OP_LE: result = (float_to_ordered_f64(col_val) <= float_to_ordered_f64(constant)); break;
+                case OP_GT: result = (float_to_ordered_f64(col_val) > float_to_ordered_f64(constant)); break;
+                case OP_GE: result = (float_to_ordered_f64(col_val) >= float_to_ordered_f64(constant)); break;
+                default: result = false;
+            }
+            out = result ? 1 : 0;
+        }
         mask[gid] = out;
         val = (uint32_t)out;
     }
@@ -571,6 +587,7 @@ extern "C" __global__ void filter_compare_f32_scan_phase1(
     const float* __restrict__ column,
     float constant,
     uint32_t num_rows,
+    const uint32_t* __restrict__ num_rows_device,
     uint8_t op,
     uint8_t* __restrict__ mask,
     uint32_t* __restrict__ prefix_sum,
@@ -583,18 +600,25 @@ extern "C" __global__ void filter_compare_f32_scan_phase1(
 
     uint32_t val = 0;
     if (gid < num_rows) {
-        float col_val = column[gid];
-        bool result;
-        switch (op) {
-            case OP_EQ: result = (col_val == constant); break;
-            case OP_NE: result = (col_val != constant); break;
-            case OP_LT: result = (float_to_ordered_f32(col_val) < float_to_ordered_f32(constant)); break;
-            case OP_LE: result = (float_to_ordered_f32(col_val) <= float_to_ordered_f32(constant)); break;
-            case OP_GT: result = (float_to_ordered_f32(col_val) > float_to_ordered_f32(constant)); break;
-            case OP_GE: result = (float_to_ordered_f32(col_val) >= float_to_ordered_f32(constant)); break;
-            default: result = false;
+        uint32_t actual = num_rows_device[0];
+        if (actual > num_rows) {
+            actual = num_rows;
         }
-        uint8_t out = result ? 1 : 0;
+        uint8_t out = 0;
+        if (gid < actual) {
+            float col_val = column[gid];
+            bool result;
+            switch (op) {
+                case OP_EQ: result = (col_val == constant); break;
+                case OP_NE: result = (col_val != constant); break;
+                case OP_LT: result = (float_to_ordered_f32(col_val) < float_to_ordered_f32(constant)); break;
+                case OP_LE: result = (float_to_ordered_f32(col_val) <= float_to_ordered_f32(constant)); break;
+                case OP_GT: result = (float_to_ordered_f32(col_val) > float_to_ordered_f32(constant)); break;
+                case OP_GE: result = (float_to_ordered_f32(col_val) >= float_to_ordered_f32(constant)); break;
+                default: result = false;
+            }
+            out = result ? 1 : 0;
+        }
         mask[gid] = out;
         val = (uint32_t)out;
     }
@@ -622,6 +646,22 @@ extern "C" __global__ void filter_compare_f32_scan_phase1(
     if (tid == BLOCK_SIZE - 1) {
         block_sums[blockIdx.x] = inclusive;
     }
+}
+
+/** Clamp a mask to the device row count (rows >= actual count become 0). */
+extern "C" __global__ void mask_clamp_rows(
+    const uint8_t* __restrict__ in_mask,
+    const uint32_t* __restrict__ num_rows_device,
+    uint32_t row_cap,
+    uint8_t* __restrict__ out_mask
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= row_cap) return;
+    uint32_t actual = num_rows_device[0];
+    if (actual > row_cap) {
+        actual = row_cap;
+    }
+    out_mask[gid] = (gid < actual) ? in_mask[gid] : 0;
 }
 
 /** Combine two masks with AND */

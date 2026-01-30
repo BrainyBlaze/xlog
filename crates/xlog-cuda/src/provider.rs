@@ -366,6 +366,7 @@ pub mod filter_kernels {
     pub const COMPACT_F64_BY_MASK: &str = "compact_f64_by_mask";
     pub const COMPACT_BYTES_BY_MASK: &str = "compact_bytes_by_mask";
     pub const CAPTURE_COMPACT_COUNT: &str = "capture_compact_count";
+    pub const MASK_CLAMP_ROWS: &str = "mask_clamp_rows";
     pub const MASK_AND: &str = "mask_and";
     pub const MASK_OR: &str = "mask_or";
     pub const MASK_NOT: &str = "mask_not";
@@ -781,6 +782,7 @@ impl CudaKernelProvider {
                     filter_kernels::COMPACT_F64_BY_MASK,
                     filter_kernels::COMPACT_BYTES_BY_MASK,
                     filter_kernels::CAPTURE_COMPACT_COUNT,
+                    filter_kernels::MASK_CLAMP_ROWS,
                     filter_kernels::MASK_AND,
                     filter_kernels::MASK_OR,
                     filter_kernels::MASK_NOT,
@@ -4112,7 +4114,7 @@ impl CudaKernelProvider {
                 XlogError::Kernel("filter_compare_u32_scan_phase1 kernel not found".to_string())
             })?;
 
-        // SAFETY: filter_compare_u32_scan_phase1(column, constant, num_rows, op, mask, prefix_sum, block_sums)
+        // SAFETY: filter_compare_u32_scan_phase1(column, constant, num_rows, num_rows_device, op, mask, prefix_sum, block_sums)
         unsafe {
             filter_scan_fn.clone().launch(
                 config,
@@ -4120,6 +4122,7 @@ impl CudaKernelProvider {
                     &col_view,
                     value,
                     num_rows,
+                    input.num_rows_device(),
                     op as u8,
                     &d_mask,
                     &d_prefix_sum,
@@ -4679,7 +4682,7 @@ impl CudaKernelProvider {
                 XlogError::Kernel("filter_compare_f64_scan_phase1 kernel not found".to_string())
             })?;
 
-        // SAFETY: filter_compare_f64_scan_phase1(column, constant, num_rows, op, mask, prefix_sum, block_sums)
+        // SAFETY: filter_compare_f64_scan_phase1(column, constant, num_rows, num_rows_device, op, mask, prefix_sum, block_sums)
         unsafe {
             filter_scan_fn.clone().launch(
                 config,
@@ -4687,6 +4690,7 @@ impl CudaKernelProvider {
                     &col_view,
                     value,
                     num_rows,
+                    input.num_rows_device(),
                     op as u8,
                     &d_mask,
                     &d_prefix_sum,
@@ -4803,6 +4807,24 @@ impl CudaKernelProvider {
         let block_size = 256u32;
         let num_blocks = (n + block_size - 1) / block_size;
 
+        let mut d_mask_clamped = self.memory.alloc::<u8>(n as usize)?;
+        let clamp_fn = device
+            .get_func(FILTER_MODULE, filter_kernels::MASK_CLAMP_ROWS)
+            .ok_or_else(|| XlogError::Kernel("mask_clamp_rows kernel not found".to_string()))?;
+
+        // SAFETY: mask_clamp_rows(in_mask, num_rows_device, row_cap, out_mask)
+        unsafe {
+            clamp_fn.clone().launch(
+                LaunchConfig {
+                    grid_dim: (num_blocks, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (d_mask, input.num_rows_device(), n, &mut d_mask_clamped),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("mask_clamp_rows failed: {}", e)))?;
+
         let d_prefix_sum = self.memory.alloc::<u32>(n as usize)?;
         let mut d_block_sums = self.memory.alloc::<u32>(num_blocks as usize)?;
 
@@ -4820,7 +4842,7 @@ impl CudaKernelProvider {
                     block_dim: (block_size, 1, 1),
                     shared_mem_bytes: 0,
                 },
-                (d_mask, &d_prefix_sum, &d_block_sums, n),
+                (&d_mask_clamped, &d_prefix_sum, &d_block_sums, n),
             )
         }
         .map_err(|e| XlogError::Kernel(format!("multiblock_scan_phase1 failed: {}", e)))?;
@@ -5025,6 +5047,24 @@ impl CudaKernelProvider {
         let block_size = 256u32;
         let num_blocks = (n + block_size - 1) / block_size;
 
+        let mut d_mask_clamped = self.memory.alloc::<u8>(n as usize)?;
+        let clamp_fn = device
+            .get_func(FILTER_MODULE, filter_kernels::MASK_CLAMP_ROWS)
+            .ok_or_else(|| XlogError::Kernel("mask_clamp_rows kernel not found".to_string()))?;
+
+        // SAFETY: mask_clamp_rows(in_mask, num_rows_device, row_cap, out_mask)
+        unsafe {
+            clamp_fn.clone().launch(
+                LaunchConfig {
+                    grid_dim: (num_blocks, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (d_mask, input.num_rows_device(), n, &mut d_mask_clamped),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("mask_clamp_rows failed: {}", e)))?;
+
         let d_prefix_sum = self.memory.alloc::<u32>(n as usize)?;
         let mut d_block_sums = self.memory.alloc::<u32>(num_blocks as usize)?;
 
@@ -5042,7 +5082,7 @@ impl CudaKernelProvider {
                     block_dim: (block_size, 1, 1),
                     shared_mem_bytes: 0,
                 },
-                (d_mask, &d_prefix_sum, &d_block_sums, n),
+                (&d_mask_clamped, &d_prefix_sum, &d_block_sums, n),
             )
         }
         .map_err(|e| XlogError::Kernel(format!("multiblock_scan_phase1 failed: {}", e)))?;
@@ -5072,8 +5112,13 @@ impl CudaKernelProvider {
 
         self.device.synchronize()?;
 
-        let d_out_count = self.capture_compact_count(&d_prefix_sum, d_mask, n)?;
-        self.compact_buffer_by_device_mask_device_count(input, d_mask, &d_prefix_sum, d_out_count)
+        let d_out_count = self.capture_compact_count(&d_prefix_sum, &d_mask_clamped, n)?;
+        self.compact_buffer_by_device_mask_device_count(
+            input,
+            &d_mask_clamped,
+            &d_prefix_sum,
+            d_out_count,
+        )
     }
 
     // ============== Buffer Helper Methods ==============
