@@ -54,22 +54,8 @@ fn test_filter_i64_by_mask() {
     let filtered = provider.filter_by_mask(&buffer, &mask).unwrap();
 
     // Verify result
-    assert_eq!(filtered.num_rows(), 3);
-
-    // Download and check values
-    let result_col = filtered.column(0).unwrap();
-    let mut result_bytes = vec![0u8; (filtered.num_rows() as usize) * 8];
-    provider
-        .device()
-        .inner()
-        .dtoh_sync_copy_into(result_col, &mut result_bytes)
-        .expect("download failed");
-
-    let result: Vec<i64> = result_bytes
-        .chunks_exact(8)
-        .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
-        .collect();
-
+    let result = provider.download_column_i64(&filtered, 0).unwrap();
+    assert_eq!(result.len(), 3);
     assert_eq!(result, vec![100, 300, 500]);
 }
 
@@ -93,21 +79,8 @@ fn test_filter_f64_by_mask() {
         .expect("buffer");
     let filtered = provider.filter_by_mask(&buffer, &mask).unwrap();
 
-    assert_eq!(filtered.num_rows(), 3);
-
-    let result_col = filtered.column(0).unwrap();
-    let mut result_bytes = vec![0u8; (filtered.num_rows() as usize) * 8];
-    provider
-        .device()
-        .inner()
-        .dtoh_sync_copy_into(result_col, &mut result_bytes)
-        .expect("download failed");
-
-    let result: Vec<f64> = result_bytes
-        .chunks_exact(8)
-        .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
-        .collect();
-
+    let result = provider.download_column_f64(&filtered, 0).unwrap();
+    assert_eq!(result.len(), 3);
     assert_eq!(result, vec![2.5, 3.5, 5.5]);
 }
 
@@ -130,21 +103,8 @@ fn test_filter_i32_by_mask() {
         .expect("buffer");
     let filtered = provider.filter_by_mask(&buffer, &mask).unwrap();
 
-    assert_eq!(filtered.num_rows(), 3);
-
-    let result_col = filtered.column(0).unwrap();
-    let mut result_bytes = vec![0u8; (filtered.num_rows() as usize) * 4];
-    provider
-        .device()
-        .inner()
-        .dtoh_sync_copy_into(result_col, &mut result_bytes)
-        .expect("download failed");
-
-    let result: Vec<i32> = result_bytes
-        .chunks_exact(4)
-        .map(|c| i32::from_le_bytes(c.try_into().unwrap()))
-        .collect();
-
+    let result = provider.download_column_i32(&filtered, 0).unwrap();
+    assert_eq!(result.len(), 3);
     assert_eq!(result, vec![-10, 20, -50]);
 }
 
@@ -167,21 +127,8 @@ fn test_filter_f32_by_mask() {
         .expect("buffer");
     let filtered = provider.filter_by_mask(&buffer, &mask).unwrap();
 
-    assert_eq!(filtered.num_rows(), 2);
-
-    let result_col = filtered.column(0).unwrap();
-    let mut result_bytes = vec![0u8; (filtered.num_rows() as usize) * 4];
-    provider
-        .device()
-        .inner()
-        .dtoh_sync_copy_into(result_col, &mut result_bytes)
-        .expect("download failed");
-
-    let result: Vec<f32> = result_bytes
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
-        .collect();
-
+    let result = provider.download_column_f32(&filtered, 0).unwrap();
+    assert_eq!(result.len(), 2);
     assert!((result[0] - 1.1).abs() < 0.001);
     assert!((result[1] - 3.3).abs() < 0.001);
 }
@@ -264,7 +211,8 @@ fn test_join_u32_keys_inner() {
         .unwrap();
 
     // Should have 2 matches: key 2 and key 3
-    assert_eq!(result.num_rows(), 2);
+    let result_keys = provider.download_column_u32(&result, 0).unwrap();
+    assert_eq!(result_keys.len(), 2);
     assert_eq!(result.arity(), 4);
 }
 
@@ -293,8 +241,8 @@ fn test_join_u32_keys_semi() {
         .hash_join_v2(&left_buf, &right_buf, &[0], &[0], JoinType::Semi)
         .unwrap();
 
-    assert_eq!(result.num_rows(), 2);
     let vals = provider.download_column_u32(&result, 0).unwrap();
+    assert_eq!(vals.len(), 2);
     assert!(vals.contains(&2));
     assert!(vals.contains(&4));
 }
@@ -324,8 +272,8 @@ fn test_join_u32_keys_anti() {
         .hash_join_v2(&left_buf, &right_buf, &[0], &[0], JoinType::Anti)
         .unwrap();
 
-    assert_eq!(result.num_rows(), 2);
     let vals = provider.download_column_u32(&result, 0).unwrap();
+    assert_eq!(vals.len(), 2);
     assert!(vals.contains(&1));
     assert!(vals.contains(&3));
 }
@@ -352,10 +300,9 @@ fn test_groupby_sum_u32() {
         .groupby_multi_agg(&buffer, &[0], &[(1, AggOp::Sum)])
         .unwrap();
 
-    assert_eq!(result.num_rows(), 2);
-
     let result_keys = provider.download_column_u32(&result, 0).unwrap();
     let result_sums = provider.download_column_u64(&result, 1).unwrap();
+    assert_eq!(result_keys.len(), 2);
 
     assert_eq!(result_keys, vec![1, 2]);
     assert_eq!(result_sums, vec![30u64, 45u64]);
@@ -381,11 +328,10 @@ fn test_groupby_count_u32() {
         .groupby_multi_agg(&buffer, &[0], &[(1, AggOp::Count)])
         .unwrap();
 
-    assert_eq!(result.num_rows(), 3);
-
     let result_keys = provider.download_column_u32(&result, 0).unwrap();
     // Count results are u64 (to match predicate declaration types)
     let result_counts = provider.download_column_u64(&result, 1).unwrap();
+    assert_eq!(result_keys.len(), 3);
 
     assert_eq!(result_keys, vec![1, 2, 3]);
     assert_eq!(result_counts, vec![2u64, 3u64, 1u64]);
@@ -553,17 +499,20 @@ fn test_operations_empty_buffer() {
     // Filter empty buffer with mask
     let mask: Vec<u8> = vec![];
     let filtered = provider.filter_by_mask(&empty, &mask).unwrap();
-    assert_eq!(filtered.num_rows(), 0);
+    let filtered_vals = provider.download_column_u32(&filtered, 0).unwrap();
+    assert!(filtered_vals.is_empty());
 
     // Sort empty buffer
     let sorted = provider.sort(&empty, &[0]).unwrap();
-    assert_eq!(sorted.num_rows(), 0);
+    let sorted_vals = provider.download_column_u32(&sorted, 0).unwrap();
+    assert!(sorted_vals.is_empty());
 
     // Join with empty buffer
     let join_result = provider
         .hash_join_v2(&empty, &non_empty_buf, &[0], &[0], JoinType::Inner)
         .unwrap();
-    assert_eq!(join_result.num_rows(), 0);
+    let join_vals = provider.download_column_u32(&join_result, 0).unwrap();
+    assert!(join_vals.is_empty());
 
     // Union with empty buffer
     let union_result = provider.union_gpu(&empty, &non_empty_buf).unwrap();
@@ -577,7 +526,8 @@ fn test_operations_empty_buffer() {
 
     // Diff from empty buffer
     let diff_result2 = provider.diff_gpu(&empty, &non_empty_buf).unwrap();
-    assert_eq!(diff_result2.num_rows(), 0);
+    let diff_data2 = provider.download_column_u32(&diff_result2, 0).unwrap();
+    assert!(diff_data2.is_empty());
 }
 
 /// Test groupby with empty input
@@ -595,7 +545,8 @@ fn test_groupby_empty_input() {
         .groupby_multi_agg(&empty, &[0], &[(1, AggOp::Sum)])
         .unwrap();
 
-    assert_eq!(result.num_rows(), 0);
+    let result_keys = provider.download_column_u32(&result, 0).unwrap();
+    assert!(result_keys.is_empty());
 }
 
 /// Test buffer operations with multiple aggregations
@@ -628,10 +579,10 @@ fn test_buffer_operations_with_groupby() {
             ],
         )
         .unwrap();
-    assert_eq!(grouped.num_rows(), 3); // 3 unique keys
+    let result_keys = provider.download_column_u32(&grouped, 0).unwrap();
+    assert_eq!(result_keys.len(), 3); // 3 unique keys
 
     // Verify results
-    let result_keys = provider.download_column_u32(&grouped, 0).unwrap();
     // Count results are u64 (to match predicate declaration types)
     let result_counts = provider.download_column_u64(&grouped, 1).unwrap();
     let result_sums = provider.download_column_u64(&grouped, 2).unwrap();
@@ -663,10 +614,10 @@ fn test_sort_operation() {
         .unwrap();
 
     let sorted = provider.sort(&buffer, &[0]).unwrap();
-    assert_eq!(sorted.num_rows(), 10);
+    let sorted_keys = provider.download_column_u32(&sorted, 0).unwrap();
+    assert_eq!(sorted_keys.len(), 10);
 
     // Verify sorted order
-    let sorted_keys = provider.download_column_u32(&sorted, 0).unwrap();
     for i in 1..sorted_keys.len() {
         assert!(
             sorted_keys[i - 1] <= sorted_keys[i],
@@ -701,7 +652,8 @@ fn test_large_union() {
     let result = provider.union_gpu(&buf_a, &buf_b).unwrap();
 
     // Union should have 7500 unique values (0..7500)
-    assert_eq!(result.num_rows(), 7500);
+    let result_data = provider.download_column_u32(&result, 0).unwrap();
+    assert_eq!(result_data.len(), 7500);
 }
 
 /// Test diff operation with moderate size
@@ -728,7 +680,8 @@ fn test_moderate_diff() {
     let result = provider.diff_gpu(&buf_a, &buf_b).unwrap();
 
     // Diff should have 50 values (0..50)
-    assert_eq!(result.num_rows(), 50);
+    let result_data = provider.download_column_u32(&result, 0).unwrap();
+    assert_eq!(result_data.len(), 50);
 }
 
 /// Test multi-column filter by mask with mixed types
@@ -754,34 +707,10 @@ fn test_filter_multi_column_mixed_types() {
         .expect("buffer");
 
     let filtered = provider.filter_by_mask(&buffer, &mask).unwrap();
-    assert_eq!(filtered.num_rows(), 3);
-
-    // Download and verify u32 column
-    let result_col0 = filtered.column(0).unwrap();
-    let mut result0_bytes = vec![0u8; (filtered.num_rows() as usize) * 4];
-    provider
-        .device()
-        .inner()
-        .dtoh_sync_copy_into(result_col0, &mut result0_bytes)
-        .expect("download failed");
-    let result0: Vec<u32> = result0_bytes
-        .chunks_exact(4)
-        .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
-        .collect();
+    let result0 = provider.download_column_u32(&filtered, 0).unwrap();
+    let result1 = provider.download_column_u64(&filtered, 1).unwrap();
+    assert_eq!(result0.len(), 3);
     assert_eq!(result0, vec![1, 3, 5]);
-
-    // Download and verify u64 column
-    let result_col1 = filtered.column(1).unwrap();
-    let mut result1_bytes = vec![0u8; (filtered.num_rows() as usize) * 8];
-    provider
-        .device()
-        .inner()
-        .dtoh_sync_copy_into(result_col1, &mut result1_bytes)
-        .expect("download failed");
-    let result1: Vec<u64> = result1_bytes
-        .chunks_exact(8)
-        .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
-        .collect();
     assert_eq!(result1, vec![100, 300, 500]);
 }
 
@@ -807,11 +736,13 @@ fn test_single_element_buffer() {
 
     // Filter with mask=1
     let filtered = provider.filter_by_mask(&buffer, &[1]).unwrap();
-    assert_eq!(filtered.num_rows(), 1);
+    let filtered_vals = provider.download_column_u32(&filtered, 0).unwrap();
+    assert_eq!(filtered_vals, vec![42]);
 
     // Filter with mask=0
     let filtered0 = provider.filter_by_mask(&buffer, &[0]).unwrap();
-    assert_eq!(filtered0.num_rows(), 0);
+    let filtered0_vals = provider.download_column_u32(&filtered0, 0).unwrap();
+    assert!(filtered0_vals.is_empty());
 }
 
 /// Test all mask values are 1 (select all)
@@ -853,7 +784,8 @@ fn test_filter_select_none() {
         .unwrap();
 
     let filtered = provider.filter_by_mask(&buffer, &mask).unwrap();
-    assert_eq!(filtered.num_rows(), 0);
+    let filtered_vals = provider.download_column_u32(&filtered, 0).unwrap();
+    assert!(filtered_vals.is_empty());
 }
 
 #[test]

@@ -27,6 +27,17 @@ fn create_executor_with_config(
     Some((executor, provider))
 }
 
+fn device_row_count(provider: &CudaKernelProvider, rows: u64) -> xlog_cuda::memory::TrackedCudaSlice<u32> {
+    let rows_u32 = u32::try_from(rows).expect("row count fits u32");
+    let mut d_num_rows = provider.memory().alloc::<u32>(1).expect("alloc");
+    provider
+        .device()
+        .inner()
+        .htod_sync_copy_into(&[rows_u32], &mut d_num_rows)
+        .expect("htod");
+    d_num_rows
+}
+
 fn create_edge_buffer(provider: &CudaKernelProvider, edges: &[(u32, u32)]) -> CudaBuffer {
     let schema = Schema::new(vec![
         ("c0".to_string(), ScalarType::U32),
@@ -36,7 +47,8 @@ fn create_edge_buffer(provider: &CudaKernelProvider, edges: &[(u32, u32)]) -> Cu
     if edges.is_empty() {
         let col0 = provider.memory().alloc::<u8>(0).expect("alloc");
         let col1 = provider.memory().alloc::<u8>(0).expect("alloc");
-        return CudaBuffer::from_columns(vec![col0.into(), col1.into()], 0, schema);
+        let d_num_rows = device_row_count(provider, 0);
+        return CudaBuffer::from_columns(vec![col0.into(), col1.into()], 0, d_num_rows, schema);
     }
 
     let col0_bytes: Vec<u8> = edges
@@ -65,7 +77,9 @@ fn create_edge_buffer(provider: &CudaKernelProvider, edges: &[(u32, u32)]) -> Cu
         .htod_sync_copy_into(&col1_bytes, &mut col1)
         .expect("htod");
 
-    CudaBuffer::from_columns(vec![col0.into(), col1.into()], edges.len() as u64, schema)
+    let rows = edges.len() as u64;
+    let d_num_rows = device_row_count(provider, rows);
+    CudaBuffer::from_columns(vec![col0.into(), col1.into()], rows, d_num_rows, schema)
 }
 
 fn setup_executor_with_facts(

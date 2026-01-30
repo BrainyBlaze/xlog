@@ -9,7 +9,11 @@ use xlog_core::{symbol, MemoryBudget, Result, XlogError};
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 use xlog_gpu::logic::LogicProgram;
 use xlog_logic::compile::load_modules;
-use xlog_prob::exact::{ExactDdnnfProgram, GpuConfig};
+#[cfg(feature = "host-io")]
+use xlog_prob::exact::GpuConfig;
+#[cfg(feature = "host-io")]
+use xlog_prob::exact::ExactDdnnfProgram;
+#[cfg(feature = "host-io")]
 use xlog_prob::mc::{McEvalConfig, McProgram};
 
 #[derive(Parser)]
@@ -176,54 +180,47 @@ fn run_deterministic(args: RunArgs) -> Result<()> {
 }
 
 fn run_probabilistic(args: ProbArgs) -> Result<()> {
-    let source = std::fs::read_to_string(&args.source).map_err(|e| {
-        XlogError::Execution(format!("Failed to read {}: {}", args.source.display(), e))
-    })?;
-
-    // Validate module imports if any search paths are provided
-    if !args.module_path.is_empty() {
-        let _ = load_modules(&args.source, args.module_path.clone())
-            .map_err(|e| XlogError::Execution(format!("Module resolution failed: {}", e)))?;
+    #[cfg(not(feature = "host-io"))]
+    {
+        let _ = args;
+        return Err(XlogError::Execution(
+            "Host output is disabled (feature \"host-io\" is OFF). Use device-resident APIs (DLPack) or rebuild with --features host-io.".to_string(),
+        ));
     }
 
-    let config = GpuConfig {
-        device_ordinal: args.device,
-        memory_bytes: args.memory_mb * 1024 * 1024,
-    };
+    #[cfg(feature = "host-io")]
+    {
+        let source = std::fs::read_to_string(&args.source).map_err(|e| {
+            XlogError::Execution(format!("Failed to read {}: {}", args.source.display(), e))
+        })?;
 
-    match args.prob_engine {
-        ProbEngineCli::ExactDdnnf => {
-            let prog = ExactDdnnfProgram::compile_source_with_gpu(&source, config)?;
-            #[cfg(feature = "host-io")]
-            {
+        // Validate module imports if any search paths are provided
+        if !args.module_path.is_empty() {
+            let _ = load_modules(&args.source, args.module_path.clone())
+                .map_err(|e| XlogError::Execution(format!("Module resolution failed: {}", e)))?;
+        }
+
+        let config = GpuConfig {
+            device_ordinal: args.device,
+            memory_bytes: args.memory_mb * 1024 * 1024,
+        };
+
+        match args.prob_engine {
+            ProbEngineCli::ExactDdnnf => {
+                let prog = ExactDdnnfProgram::compile_source_with_gpu(&source, config)?;
                 let result = prog.evaluate()?;
                 emit_prob_exact(result, args.output, args.output_dir.as_deref())
             }
-            #[cfg(not(feature = "host-io"))]
-            {
-                Err(XlogError::Execution(
-                    "Host output is disabled (feature \"host-io\" is OFF). Use device-resident APIs (DLPack) or rebuild with --features host-io.".to_string(),
-                ))
-            }
-        }
-        ProbEngineCli::Mc => {
-            let prog = McProgram::compile_source_with_gpu(&source, config)?;
-            let cfg = McEvalConfig {
-                samples: args.samples,
-                seed: args.seed,
-                confidence: args.confidence,
-                ..Default::default()
-            };
-            #[cfg(feature = "host-io")]
-            {
+            ProbEngineCli::Mc => {
+                let prog = McProgram::compile_source_with_gpu(&source, config)?;
+                let cfg = McEvalConfig {
+                    samples: args.samples,
+                    seed: args.seed,
+                    confidence: args.confidence,
+                    ..Default::default()
+                };
                 let result = prog.evaluate(cfg)?;
                 emit_prob_mc(result, args.output, args.output_dir.as_deref())
-            }
-            #[cfg(not(feature = "host-io"))]
-            {
-                Err(XlogError::Execution(
-                    "Host output is disabled (feature \"host-io\" is OFF). Use device-resident APIs (DLPack) or rebuild with --features host-io.".to_string(),
-                ))
             }
         }
     }
@@ -264,6 +261,7 @@ fn emit_logic_results(
     Ok(())
 }
 
+#[cfg(feature = "host-io")]
 fn emit_prob_exact(
     result: xlog_prob::exact::ExactResult,
     format: OutputFormat,
@@ -297,6 +295,7 @@ fn emit_prob_exact(
     emit_batch("prob", &batch, format, output_dir)
 }
 
+#[cfg(feature = "host-io")]
 fn emit_prob_mc(
     result: xlog_prob::mc::McResult,
     format: OutputFormat,
@@ -348,6 +347,7 @@ fn emit_prob_mc(
     emit_batch("prob", &batch, format, output_dir)
 }
 
+#[cfg(feature = "host-io")]
 fn emit_batch(
     name: &str,
     batch: &arrow::record_batch::RecordBatch,
@@ -391,6 +391,7 @@ fn emit_batch(
     Ok(())
 }
 
+#[cfg(feature = "host-io")]
 fn atom_to_string(atom: &xlog_prob::provenance::GroundAtom) -> String {
     use xlog_prob::provenance::Value;
 

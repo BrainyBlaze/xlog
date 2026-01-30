@@ -278,6 +278,21 @@ mod tests {
     }
 
     fn make_buffer(provider: &CudaKernelProvider, schema: Schema, rows: usize) -> CudaBuffer {
+        if schema.arity() == 0 {
+            if rows == 0 {
+                return provider
+                    .create_empty_buffer(schema)
+                    .expect("empty buffer");
+            }
+            let rows_u32 = u32::try_from(rows).expect("row count fits u32");
+            let mut d_num_rows = provider.memory().alloc::<u32>(1).expect("alloc");
+            provider
+                .device()
+                .inner()
+                .htod_sync_copy_into(&[rows_u32], &mut d_num_rows)
+                .expect("htod row count");
+            return CudaBuffer::from_columns(Vec::new(), rows as u64, d_num_rows, schema);
+        }
         if rows == 0 {
             return provider
                 .create_empty_buffer(schema)

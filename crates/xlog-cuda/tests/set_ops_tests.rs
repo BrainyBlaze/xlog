@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 use xlog_core::{MemoryBudget, ScalarType, Schema};
-use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager};
 
 fn setup_provider() -> Option<CudaKernelProvider> {
     let device = match CudaDevice::new(0) {
@@ -16,6 +16,45 @@ fn setup_provider() -> Option<CudaKernelProvider> {
     let budget = MemoryBudget::with_limit(1024 * 1024 * 1024); // 1 GB
     let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
     Some(CudaKernelProvider::new(device, memory).unwrap())
+}
+
+fn device_row_count(provider: &CudaKernelProvider, rows: u32) -> xlog_cuda::memory::TrackedCudaSlice<u32> {
+    let mut d_num_rows = provider.memory().alloc::<u32>(1).expect("alloc");
+    provider
+        .device()
+        .inner()
+        .htod_sync_copy_into(&[rows], &mut d_num_rows)
+        .expect("htod row count");
+    d_num_rows
+}
+
+fn buffer_with_row_cap(
+    provider: &CudaKernelProvider,
+    data: &[u32],
+    row_cap: u64,
+    actual_rows: u32,
+    schema: Schema,
+) -> CudaBuffer {
+    assert!(row_cap as usize >= data.len(), "row_cap must fit data");
+    assert!(actual_rows as u64 <= row_cap, "actual_rows must be <= row_cap");
+
+    let mut bytes = Vec::with_capacity((row_cap as usize) * 4);
+    for &v in data {
+        bytes.extend_from_slice(&v.to_le_bytes());
+    }
+    while bytes.len() < (row_cap as usize) * 4 {
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+    }
+
+    let mut col = provider.memory().alloc::<u8>(bytes.len()).expect("alloc");
+    provider
+        .device()
+        .inner()
+        .htod_sync_copy_into(&bytes, &mut col)
+        .expect("htod data");
+
+    let d_num_rows = device_row_count(provider, actual_rows);
+    CudaBuffer::from_columns(vec![col.into()], row_cap, d_num_rows, schema)
 }
 
 // ============== Union Tests ==============
@@ -159,8 +198,8 @@ fn test_union_gpu_both_empty() {
     let buf_b = provider.create_empty_buffer(schema.clone()).unwrap();
 
     let result = provider.union_gpu(&buf_a, &buf_b).unwrap();
-
-    assert_eq!(result.num_rows(), 0);
+    let result_data = provider.download_column_u32(&result, 0).unwrap();
+    assert!(result_data.is_empty());
 }
 
 #[test]
@@ -187,6 +226,25 @@ fn test_union_gpu_with_duplicates_in_input() {
     let result_data = provider.download_column_u32(&result, 0).unwrap();
 
     assert_eq!(result_data, vec![1, 2, 3]);
+}
+
+#[test]
+fn test_union_gpu_uses_device_row_count() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    let schema = Schema::new(vec![("val".to_string(), ScalarType::U32)]);
+    let data = vec![1u32, 2, 99, 100];
+
+    let buf_a = buffer_with_row_cap(&provider, &data, 4, 2, schema.clone());
+    let buf_b = buffer_with_row_cap(&provider, &data, 4, 2, schema.clone());
+
+    let result = provider.union_gpu(&buf_a, &buf_b).unwrap();
+    let result_data = provider.download_column_u32(&result, 0).unwrap();
+
+    assert_eq!(result_data, vec![1, 2]);
 }
 
 // ============== Diff Tests ==============
@@ -264,8 +322,8 @@ fn test_diff_gpu_complete_overlap() {
         .unwrap();
 
     let result = provider.diff_gpu(&buf_a, &buf_b).unwrap();
-
-    assert_eq!(result.num_rows(), 0);
+    let result_data = provider.download_column_u32(&result, 0).unwrap();
+    assert!(result_data.is_empty());
 }
 
 #[test]
@@ -286,8 +344,8 @@ fn test_diff_gpu_empty_a() {
         .unwrap();
 
     let result = provider.diff_gpu(&buf_a, &buf_b).unwrap();
-
-    assert_eq!(result.num_rows(), 0);
+    let result_data = provider.download_column_u32(&result, 0).unwrap();
+    assert!(result_data.is_empty());
 }
 
 #[test]
@@ -334,8 +392,8 @@ fn test_diff_gpu_b_superset() {
         .unwrap();
 
     let result = provider.diff_gpu(&buf_a, &buf_b).unwrap();
-
-    assert_eq!(result.num_rows(), 0);
+    let result_data = provider.download_column_u32(&result, 0).unwrap();
+    assert!(result_data.is_empty());
 }
 
 #[test]
@@ -414,9 +472,8 @@ fn test_union_u64() {
         .unwrap();
 
     let result = provider.union_gpu(&a_buf, &b_buf).unwrap();
-    assert_eq!(result.num_rows(), 4); // 1, 2, 3, 4
-
     let result_data = provider.download_column_u64(&result, 0).unwrap();
+    assert_eq!(result_data.len(), 4); // 1, 2, 3, 4
     assert_eq!(result_data, vec![1, 2, 3, 4]);
 }
 
@@ -441,9 +498,8 @@ fn test_union_u64_with_duplicates() {
         .unwrap();
 
     let result = provider.union_gpu(&a_buf, &b_buf).unwrap();
-    assert_eq!(result.num_rows(), 3); // 1, 2, 3
-
     let result_data = provider.download_column_u64(&result, 0).unwrap();
+    assert_eq!(result_data.len(), 3); // 1, 2, 3
     assert_eq!(result_data, vec![1, 2, 3]);
 }
 
@@ -464,9 +520,8 @@ fn test_union_u64_empty_a() {
         .unwrap();
 
     let result = provider.union_gpu(&a_buf, &b_buf).unwrap();
-    assert_eq!(result.num_rows(), 3);
-
     let result_data = provider.download_column_u64(&result, 0).unwrap();
+    assert_eq!(result_data.len(), 3);
     assert_eq!(result_data, vec![1, 2, 3]);
 }
 
@@ -492,9 +547,8 @@ fn test_diff_u64() {
         .unwrap();
 
     let result = provider.diff_gpu(&a_buf, &b_buf).unwrap();
-    assert_eq!(result.num_rows(), 2); // 1, 3
-
     let result_data = provider.download_column_u64(&result, 0).unwrap();
+    assert_eq!(result_data.len(), 2); // 1, 3
     assert_eq!(result_data, vec![1, 3]);
 }
 
@@ -518,9 +572,8 @@ fn test_diff_u64_no_overlap() {
         .unwrap();
 
     let result = provider.diff_gpu(&a_buf, &b_buf).unwrap();
-    assert_eq!(result.num_rows(), 3); // All remain
-
     let result_data = provider.download_column_u64(&result, 0).unwrap();
+    assert_eq!(result_data.len(), 3); // All remain
     assert_eq!(result_data, vec![1, 2, 3]);
 }
 
@@ -544,7 +597,8 @@ fn test_diff_u64_complete_overlap() {
         .unwrap();
 
     let result = provider.diff_gpu(&a_buf, &b_buf).unwrap();
-    assert_eq!(result.num_rows(), 0); // All removed
+    let result_data = provider.download_column_u64(&result, 0).unwrap();
+    assert!(result_data.is_empty()); // All removed
 }
 
 #[test]
@@ -564,9 +618,8 @@ fn test_diff_u64_empty_b() {
     let b_buf = provider.create_empty_buffer(schema).unwrap();
 
     let result = provider.diff_gpu(&a_buf, &b_buf).unwrap();
-    assert_eq!(result.num_rows(), 3); // All remain
-
     let result_data = provider.download_column_u64(&result, 0).unwrap();
+    assert_eq!(result_data.len(), 3); // All remain
     assert_eq!(result_data, vec![1, 2, 3]);
 }
 
@@ -593,7 +646,9 @@ fn test_union_i64() {
         .unwrap();
 
     let result = provider.union_gpu(&a, &b).unwrap();
-    assert_eq!(result.num_rows(), 6); // -10, -5, 0, 5, 10, 20
+    let result_data = provider.download_column_i64(&result, 0).unwrap();
+    assert_eq!(result_data.len(), 6); // -10, -5, 0, 5, 10, 20
+    assert_eq!(result_data, vec![-10, -5, 0, 5, 10, 20]);
 }
 
 #[test]
@@ -616,7 +671,9 @@ fn test_union_i64_with_duplicates() {
         .unwrap();
 
     let result = provider.union_gpu(&a, &b).unwrap();
-    assert_eq!(result.num_rows(), 3); // -5, 0, 5
+    let result_data = provider.download_column_i64(&result, 0).unwrap();
+    assert_eq!(result_data.len(), 3); // -5, 0, 5
+    assert_eq!(result_data, vec![-5, 0, 5]);
 }
 
 // ============== F64 Union Tests ==============
@@ -641,7 +698,9 @@ fn test_union_f64() {
         .unwrap();
 
     let result = provider.union_gpu(&a, &b).unwrap();
-    assert_eq!(result.num_rows(), 4); // 1.5, 2.5, 3.5, 4.5
+    let result_data = provider.download_column_f64(&result, 0).unwrap();
+    assert_eq!(result_data.len(), 4); // 1.5, 2.5, 3.5, 4.5
+    assert_eq!(result_data, vec![1.5, 2.5, 3.5, 4.5]);
 }
 
 #[test]
@@ -664,7 +723,9 @@ fn test_union_f64_with_duplicates() {
         .unwrap();
 
     let result = provider.union_gpu(&a, &b).unwrap();
-    assert_eq!(result.num_rows(), 3); // 1.5, 2.5, 3.5
+    let result_data = provider.download_column_f64(&result, 0).unwrap();
+    assert_eq!(result_data.len(), 3); // 1.5, 2.5, 3.5
+    assert_eq!(result_data, vec![1.5, 2.5, 3.5]);
 }
 
 // ============== I64 Diff Tests ==============
@@ -689,7 +750,9 @@ fn test_diff_i64() {
         .unwrap();
 
     let result = provider.diff_gpu(&a, &b).unwrap();
-    assert_eq!(result.num_rows(), 3); // -10, 0, 10
+    let result_data = provider.download_column_i64(&result, 0).unwrap();
+    assert_eq!(result_data.len(), 3); // -10, 0, 10
+    assert_eq!(result_data, vec![-10, 0, 10]);
 }
 
 #[test]
@@ -712,7 +775,9 @@ fn test_diff_i64_no_overlap() {
         .unwrap();
 
     let result = provider.diff_gpu(&a, &b).unwrap();
-    assert_eq!(result.num_rows(), 3); // All remain: -10, -5, 0
+    let result_data = provider.download_column_i64(&result, 0).unwrap();
+    assert_eq!(result_data.len(), 3); // All remain: -10, -5, 0
+    assert_eq!(result_data, vec![-10, -5, 0]);
 }
 
 // ============== F64 Diff Tests ==============
@@ -737,7 +802,9 @@ fn test_diff_f64() {
         .unwrap();
 
     let result = provider.diff_gpu(&a, &b).unwrap();
-    assert_eq!(result.num_rows(), 2); // 1.5, 3.5
+    let result_data = provider.download_column_f64(&result, 0).unwrap();
+    assert_eq!(result_data.len(), 2); // 1.5, 3.5
+    assert_eq!(result_data, vec![1.5, 3.5]);
 }
 
 #[test]
@@ -760,5 +827,7 @@ fn test_diff_f64_no_overlap() {
         .unwrap();
 
     let result = provider.diff_gpu(&a, &b).unwrap();
-    assert_eq!(result.num_rows(), 3); // All remain: 1.5, 2.5, 3.5
+    let result_data = provider.download_column_f64(&result, 0).unwrap();
+    assert_eq!(result_data.len(), 3); // All remain: 1.5, 2.5, 3.5
+    assert_eq!(result_data, vec![1.5, 2.5, 3.5]);
 }

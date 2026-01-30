@@ -1,3 +1,5 @@
+#![cfg(feature = "host-io")]
+
 use assert_cmd::cargo::cargo_bin_cmd;
 use std::path::Path;
 use xlog_cuda::CudaDevice;

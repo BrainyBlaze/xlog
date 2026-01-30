@@ -131,8 +131,9 @@ fn test_join_verifies_multi_column_keys() {
         .hash_join_v2(&left, &right, &[0, 1], &[0, 1], JoinType::Inner)
         .unwrap();
 
+    let rows = provider.download_column_u32(&result, 0).unwrap();
     assert_eq!(
-        result.num_rows(),
+        rows.len() as u64,
         0,
         "Multi-column join should verify all key columns, not just hash"
     );
@@ -163,8 +164,9 @@ fn test_semi_join_verifies_keys() {
         .hash_join_v2(&left, &right, &[0], &[0], JoinType::Semi)
         .unwrap();
 
+    let rows = provider.download_column_u32(&result, 0).unwrap();
     assert_eq!(
-        result.num_rows(),
+        rows.len() as u64,
         0,
         "Semi-join should verify keys, not just hashes"
     );
@@ -195,8 +197,9 @@ fn test_anti_join_verifies_keys() {
         .hash_join_v2(&left, &right, &[0], &[0], JoinType::Anti)
         .unwrap();
 
+    let rows = provider.download_column_u32(&result, 0).unwrap();
     assert_eq!(
-        result.num_rows(),
+        rows.len() as u64,
         2,
         "Anti-join should verify keys and return all rows when none match"
     );

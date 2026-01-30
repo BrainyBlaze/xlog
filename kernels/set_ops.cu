@@ -73,13 +73,29 @@ extern "C" __global__ void concat_bytes(
  */
 extern "C" __global__ void sorted_diff_mark(
     const uint32_t* __restrict__ a,
-    uint32_t a_len,
+    const uint32_t* __restrict__ a_len_device,
+    uint32_t a_cap,
     const uint32_t* __restrict__ b,
-    uint32_t b_len,
+    const uint32_t* __restrict__ b_len_device,
+    uint32_t b_cap,
     uint8_t* __restrict__ in_diff  // 1 if a[i] not in b
 ) {
     uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (gid >= a_len) return;
+    if (gid >= a_cap) return;
+
+    uint32_t a_len = *a_len_device;
+    if (a_len > a_cap) {
+        a_len = a_cap;
+    }
+    if (gid >= a_len) {
+        in_diff[gid] = 0;
+        return;
+    }
+
+    uint32_t b_len = *b_len_device;
+    if (b_len > b_cap) {
+        b_len = b_cap;
+    }
 
     uint32_t val = a[gid];
 

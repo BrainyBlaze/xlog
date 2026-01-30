@@ -45,6 +45,17 @@ fn create_test_executor() -> Option<(Executor, Arc<CudaKernelProvider>)> {
     Some((executor, provider))
 }
 
+fn device_row_count(provider: &CudaKernelProvider, rows: u64) -> xlog_cuda::memory::TrackedCudaSlice<u32> {
+    let rows_u32 = u32::try_from(rows).expect("row count fits u32");
+    let mut d_num_rows = provider.memory().alloc::<u32>(1).expect("alloc");
+    provider
+        .device()
+        .inner()
+        .htod_sync_copy_into(&[rows_u32], &mut d_num_rows)
+        .expect("htod");
+    d_num_rows
+}
+
 /// Create a CudaBuffer with 2-column U32 data (for edge relations)
 fn create_edge_buffer(provider: &CudaKernelProvider, edges: &[(u32, u32)]) -> CudaBuffer {
     let schema = Schema::new(vec![
@@ -55,7 +66,8 @@ fn create_edge_buffer(provider: &CudaKernelProvider, edges: &[(u32, u32)]) -> Cu
     if edges.is_empty() {
         let col0 = provider.memory().alloc::<u8>(0).expect("alloc");
         let col1 = provider.memory().alloc::<u8>(0).expect("alloc");
-        return CudaBuffer::from_columns(vec![col0.into(), col1.into()], 0, schema);
+        let d_num_rows = device_row_count(provider, 0);
+        return CudaBuffer::from_columns(vec![col0.into(), col1.into()], 0, d_num_rows, schema);
     }
 
     let col0_bytes: Vec<u8> = edges
@@ -84,7 +96,9 @@ fn create_edge_buffer(provider: &CudaKernelProvider, edges: &[(u32, u32)]) -> Cu
         .htod_sync_copy_into(&col1_bytes, &mut col1)
         .expect("htod");
 
-    CudaBuffer::from_columns(vec![col0.into(), col1.into()], edges.len() as u64, schema)
+    let rows = edges.len() as u64;
+    let d_num_rows = device_row_count(provider, rows);
+    CudaBuffer::from_columns(vec![col0.into(), col1.into()], rows, d_num_rows, schema)
 }
 
 /// Create a CudaBuffer with 1-column U32 data (for node relations)
@@ -93,7 +107,8 @@ fn create_node_buffer(provider: &CudaKernelProvider, nodes: &[u32]) -> CudaBuffe
 
     if nodes.is_empty() {
         let col = provider.memory().alloc::<u8>(0).expect("alloc");
-        return CudaBuffer::from_columns(vec![col.into()], 0, schema);
+        let d_num_rows = device_row_count(provider, 0);
+        return CudaBuffer::from_columns(vec![col.into()], 0, d_num_rows, schema);
     }
 
     let col_bytes: Vec<u8> = nodes.iter().flat_map(|n| n.to_le_bytes()).collect();
@@ -107,7 +122,9 @@ fn create_node_buffer(provider: &CudaKernelProvider, nodes: &[u32]) -> CudaBuffe
         .htod_sync_copy_into(&col_bytes, &mut col)
         .expect("htod");
 
-    CudaBuffer::from_columns(vec![col.into()], nodes.len() as u64, schema)
+    let rows = nodes.len() as u64;
+    let d_num_rows = device_row_count(provider, rows);
+    CudaBuffer::from_columns(vec![col.into()], rows, d_num_rows, schema)
 }
 
 /// Create a CudaBuffer with 3-column U32 data
@@ -122,7 +139,13 @@ fn create_triple_buffer(provider: &CudaKernelProvider, rows: &[(u32, u32, u32)])
         let col0 = provider.memory().alloc::<u8>(0).expect("alloc");
         let col1 = provider.memory().alloc::<u8>(0).expect("alloc");
         let col2 = provider.memory().alloc::<u8>(0).expect("alloc");
-        return CudaBuffer::from_columns(vec![col0.into(), col1.into(), col2.into()], 0, schema);
+        let d_num_rows = device_row_count(provider, 0);
+        return CudaBuffer::from_columns(
+            vec![col0.into(), col1.into(), col2.into()],
+            0,
+            d_num_rows,
+            schema,
+        );
     }
 
     let col0_bytes: Vec<u8> = rows.iter().flat_map(|(a, _, _)| a.to_le_bytes()).collect();
@@ -158,29 +181,21 @@ fn create_triple_buffer(provider: &CudaKernelProvider, rows: &[(u32, u32, u32)])
         .htod_sync_copy_into(&col2_bytes, &mut col2)
         .expect("htod");
 
+    let row_count = rows.len() as u64;
+    let d_num_rows = device_row_count(provider, row_count);
     CudaBuffer::from_columns(
         vec![col0.into(), col1.into(), col2.into()],
-        rows.len() as u64,
+        row_count,
+        d_num_rows,
         schema,
     )
 }
 
 /// Read a single column of U32 values from a CudaBuffer
 fn read_buffer_u32(provider: &CudaKernelProvider, buffer: &CudaBuffer, col: usize) -> Vec<u32> {
-    if buffer.is_empty() || buffer.column(col).is_none() {
-        return vec![];
-    }
-    let num_rows = buffer.num_rows() as usize;
-    let mut bytes = vec![0u8; num_rows * 4];
     provider
-        .device()
-        .inner()
-        .dtoh_sync_copy_into(buffer.column(col).unwrap(), &mut bytes)
-        .expect("dtoh");
-    bytes
-        .chunks_exact(4)
-        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect()
+        .download_column_u32(buffer, col)
+        .unwrap_or_default()
 }
 
 /// Read a 2-column buffer as pairs
@@ -821,7 +836,8 @@ fn create_sensor_buffer_f64(provider: &CudaKernelProvider, data: &[(u32, f64)]) 
     if data.is_empty() {
         let col0 = provider.memory().alloc::<u8>(0).expect("alloc");
         let col1 = provider.memory().alloc::<u8>(0).expect("alloc");
-        return CudaBuffer::from_columns(vec![col0.into(), col1.into()], 0, schema);
+        let d_num_rows = device_row_count(provider, 0);
+        return CudaBuffer::from_columns(vec![col0.into(), col1.into()], 0, d_num_rows, schema);
     }
 
     let col0_bytes: Vec<u8> = data.iter().flat_map(|(id, _)| id.to_le_bytes()).collect();
@@ -847,7 +863,9 @@ fn create_sensor_buffer_f64(provider: &CudaKernelProvider, data: &[(u32, f64)]) 
         .htod_sync_copy_into(&col1_bytes, &mut col1)
         .expect("htod");
 
-    CudaBuffer::from_columns(vec![col0.into(), col1.into()], data.len() as u64, schema)
+    let rows = data.len() as u64;
+    let d_num_rows = device_row_count(provider, rows);
+    CudaBuffer::from_columns(vec![col0.into(), col1.into()], rows, d_num_rows, schema)
 }
 
 /// Create a CudaBuffer with (u32, f32) data
@@ -860,7 +878,8 @@ fn create_sensor_buffer_f32(provider: &CudaKernelProvider, data: &[(u32, f32)]) 
     if data.is_empty() {
         let col0 = provider.memory().alloc::<u8>(0).expect("alloc");
         let col1 = provider.memory().alloc::<u8>(0).expect("alloc");
-        return CudaBuffer::from_columns(vec![col0.into(), col1.into()], 0, schema);
+        let d_num_rows = device_row_count(provider, 0);
+        return CudaBuffer::from_columns(vec![col0.into(), col1.into()], 0, d_num_rows, schema);
     }
 
     let col0_bytes: Vec<u8> = data.iter().flat_map(|(id, _)| id.to_le_bytes()).collect();
@@ -886,25 +905,16 @@ fn create_sensor_buffer_f32(provider: &CudaKernelProvider, data: &[(u32, f32)]) 
         .htod_sync_copy_into(&col1_bytes, &mut col1)
         .expect("htod");
 
-    CudaBuffer::from_columns(vec![col0.into(), col1.into()], data.len() as u64, schema)
+    let rows = data.len() as u64;
+    let d_num_rows = device_row_count(provider, rows);
+    CudaBuffer::from_columns(vec![col0.into(), col1.into()], rows, d_num_rows, schema)
 }
 
 /// Read f64 values from a buffer column
 fn read_buffer_f64(provider: &CudaKernelProvider, buffer: &CudaBuffer, col: usize) -> Vec<f64> {
-    if buffer.is_empty() || buffer.column(col).is_none() {
-        return vec![];
-    }
-    let num_rows = buffer.num_rows() as usize;
-    let mut bytes = vec![0u8; num_rows * 8];
     provider
-        .device()
-        .inner()
-        .dtoh_sync_copy_into(buffer.column(col).unwrap(), &mut bytes)
-        .expect("dtoh");
-    bytes
-        .chunks_exact(8)
-        .map(|c| f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
-        .collect()
+        .download_column_f64(buffer, col)
+        .unwrap_or_default()
 }
 
 /// Test 1: Sensor data with NaN values (missing readings)
@@ -1422,7 +1432,7 @@ fn test_float_predicate_computed_nan_via_division() {
     let result_vals = read_buffer_f64(&provider, &result_query.buffer, 1);
     println!("result ids: {:?}", result_ids);
     println!("result vals: {:?}", result_vals);
-    assert_eq!(result_query.buffer.num_rows(), 4, "Expected 4 result rows");
+    assert_eq!(result_ids.len(), 4, "Expected 4 result rows");
 
     // Verify NaN and Inf were computed correctly
     let id_1_idx = result_ids
@@ -1458,7 +1468,7 @@ fn test_float_predicate_computed_nan_via_division() {
     println!("gt_five vals: {:?}", gt_five_vals);
 
     assert_eq!(
-        gt_five_query.buffer.num_rows(),
+        gt_five_ids.len(),
         3,
         "Expected 3 gt_five rows (NaN, Inf, 10.0)"
     );

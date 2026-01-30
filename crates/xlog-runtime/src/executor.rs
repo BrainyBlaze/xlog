@@ -351,6 +351,9 @@ impl Executor {
             self.profiler.end_stratum();
         }
 
+        // Ensure all GPU work completes before returning control to callers.
+        self.provider.device().synchronize()?;
+
         // If there are no strata, return empty buffer
         self.provider.create_empty_buffer(Schema::new(vec![]))
     }
@@ -525,13 +528,29 @@ impl Executor {
                 if changed_preds.contains(pred.as_str()) {
                     continue;
                 }
-                let schema = plan
-                    .rules_by_scc
-                    .get(*scc_id as usize)
-                    .and_then(|rules| rules.iter().find(|r| r.head == pred.as_str()))
-                    .map(|r| r.meta.schema.clone())
-                    .or_else(|| self.store.get(pred).map(|b| b.schema().clone()))
-                    .unwrap_or_else(|| Schema::new(vec![]));
+                let schema = self
+                    .store
+                    .get(pred)
+                    .map(|b| b.schema().clone())
+                    .or_else(|| {
+                        plan.rules_by_scc
+                            .get(*scc_id as usize)
+                            .and_then(|rules| rules.iter().find(|r| r.head == pred.as_str()))
+                            .and_then(|r| {
+                                let schema = r.meta.schema.clone();
+                                if schema.arity() > 0 {
+                                    Some(schema)
+                                } else {
+                                    None
+                                }
+                            })
+                    })
+                    .ok_or_else(|| {
+                        XlogError::Execution(format!(
+                            "Missing schema for predicate {} during recompute",
+                            pred
+                        ))
+                    })?;
 
                 let empty = self.create_empty_buffer(schema)?;
                 self.store_put(pred, empty);
@@ -841,9 +860,11 @@ impl Executor {
         let mut schema_by_pred: HashMap<String, Schema> = HashMap::new();
         for rule in rules {
             recursive_preds.insert(rule.head.clone());
-            schema_by_pred
-                .entry(rule.head.clone())
-                .or_insert_with(|| rule.meta.schema.clone());
+            if rule.meta.schema.arity() > 0 {
+                schema_by_pred
+                    .entry(rule.head.clone())
+                    .or_insert_with(|| rule.meta.schema.clone());
+            }
         }
 
         // Ensure all recursive predicates exist in the store so scans never fail
@@ -853,7 +874,13 @@ impl Executor {
                 let schema = schema_by_pred
                     .get(pred)
                     .cloned()
-                    .unwrap_or_else(|| Schema::new(vec![]));
+                    .or_else(|| self.store.get(pred).map(|b| b.schema().clone()))
+                    .ok_or_else(|| {
+                        XlogError::Execution(format!(
+                            "Missing schema for recursive predicate {}",
+                            pred
+                        ))
+                    })?;
                 let empty = self.create_empty_buffer(schema)?;
                 self.store_put(pred, empty);
             }
@@ -1496,10 +1523,11 @@ impl Executor {
                     .ok_or_else(|| XlogError::Execution(format!("Column {} not found", col_idx)))?;
                 if col_type == ScalarType::Bool {
                     let col_buf = self.wrap_single_column(input, *col_idx)?;
-                    let zero = self.provider.create_constant_column(
+                    let zero = self.provider.create_constant_column_with_device_count(
                         &[0u8],
                         ScalarType::Bool,
                         input.num_rows(),
+                        input.num_rows_device(),
                     )?;
                     return self.compare_buffers_mask(&col_buf, &zero, CompareOp::Ne);
                 }
@@ -2178,7 +2206,12 @@ impl Executor {
                 // Create a column filled with the constant value
                 let (bytes, col_type) = self.const_to_bytes_and_type(val);
                 self.provider
-                    .create_constant_column(&bytes, col_type, input.num_rows())
+                    .create_constant_column_with_device_count(
+                        &bytes,
+                        col_type,
+                        input.num_rows(),
+                        input.num_rows_device(),
+                    )
             }
             Expr::Add(l, r) => {
                 let left = self.evaluate_arith_expr(l, input)?;
@@ -2584,8 +2617,8 @@ impl Executor {
         // Step 1: Compute base case R = eval(base)
         let r_initial = self.execute_node(base)?;
 
-        // Handle empty base case
-        if r_initial.is_empty() {
+        // Handle empty base case using device-resident row count
+        if self.buffer_row_count(&r_initial)? == 0 {
             return Ok(r_initial);
         }
 
@@ -2618,7 +2651,7 @@ impl Executor {
             let delta_new = self.provider.diff_gpu(&delta_new_raw, current_r)?;
 
             // Check for fixpoint: if delta_new is empty, we're done
-            if delta_new.is_empty() {
+            if self.buffer_row_count(&delta_new)? == 0 {
                 // Fixpoint reached - return final R
                 let final_r = self.store_remove(&full_name).ok_or_else(|| {
                     XlogError::Execution("Full relation lost during fixpoint".to_string())
@@ -2716,6 +2749,16 @@ impl Executor {
             .map_err(|e| XlogError::Execution(format!("Failed to copy row count: {}", e)))?;
         Ok(d_num_rows)
     }
+
+    fn buffer_row_count(&self, buffer: &CudaBuffer) -> Result<u32> {
+        let mut host_rows = [0u32];
+        self.provider
+            .device()
+            .inner()
+            .dtoh_sync_copy_into(buffer.num_rows_device(), &mut host_rows)
+            .map_err(|e| XlogError::Execution(format!("Failed to read row count: {}", e)))?;
+        Ok(host_rows[0])
+    }
 }
 
 #[cfg(test)]
@@ -2741,6 +2784,18 @@ mod tests {
         Some(Executor::new(provider))
     }
 
+    fn device_row_count(executor: &Executor, rows: u64) -> TrackedCudaSlice<u32> {
+        let rows_u32 = u32::try_from(rows).expect("row count fits u32");
+        let mut d_num_rows = executor.provider.memory().alloc::<u32>(1).expect("alloc");
+        executor
+            .provider
+            .device()
+            .inner()
+            .htod_sync_copy_into(&[rows_u32], &mut d_num_rows)
+            .expect("htod");
+        d_num_rows
+    }
+
     fn create_test_buffer(executor: &Executor, data: &[u32], col_name: &str) -> CudaBuffer {
         let schema = Schema::new(vec![(col_name.to_string(), ScalarType::U32)]);
         let bytes: Vec<u8> = data.iter().flat_map(|v| v.to_le_bytes()).collect();
@@ -2757,25 +2812,27 @@ mod tests {
             .htod_sync_copy_into(&bytes, &mut col)
             .expect("htod");
 
-        CudaBuffer::from_columns(vec![col.into()], data.len() as u64, schema)
+        let rows = data.len() as u64;
+        let d_num_rows = device_row_count(executor, rows);
+        CudaBuffer::from_columns(vec![col.into()], rows, d_num_rows, schema)
     }
 
     fn read_buffer_u32(executor: &Executor, buffer: &CudaBuffer, col: usize) -> Vec<u32> {
-        if buffer.is_empty() || buffer.column(col).is_none() {
-            return vec![];
-        }
-        let num_rows = buffer.num_rows() as usize;
-        let mut bytes = vec![0u8; num_rows * 4];
+        executor
+            .provider
+            .download_column_u32(buffer, col)
+            .unwrap_or_default()
+    }
+
+    fn buffer_row_count(executor: &Executor, buffer: &CudaBuffer) -> u32 {
+        let mut host_rows = [0u32];
         executor
             .provider
             .device()
             .inner()
-            .dtoh_sync_copy_into(buffer.column(col).unwrap(), &mut bytes)
-            .expect("dtoh");
-        bytes
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect()
+            .dtoh_sync_copy_into(buffer.num_rows_device(), &mut host_rows)
+            .expect("dtoh row count");
+        host_rows[0]
     }
 
     fn to_f64_column_bytes(values: &[f64]) -> Vec<u8> {
@@ -2951,7 +3008,7 @@ mod tests {
 
         assert!(result.is_ok());
         let result = result.unwrap();
-        assert_eq!(result.num_rows(), 5);
+        assert_eq!(buffer_row_count(&executor, &result), 5);
 
         let values = read_buffer_u32(&executor, &result, 0);
         assert_eq!(values, vec![1, 2, 3, 4, 5]);
@@ -2976,7 +3033,8 @@ mod tests {
         let result = executor.execute_filter(&empty, &predicate);
 
         assert!(result.is_ok());
-        assert!(result.unwrap().is_empty());
+        let result = result.unwrap();
+        assert_eq!(buffer_row_count(&executor, &result), 0);
     }
 
     #[test]
@@ -2996,7 +3054,7 @@ mod tests {
         assert!(result.is_ok());
 
         let result = result.unwrap();
-        assert_eq!(result.num_rows(), 5);
+        assert_eq!(buffer_row_count(&executor, &result), 5);
     }
 
     #[test]
@@ -3014,7 +3072,8 @@ mod tests {
 
         let result = executor.execute_filter(&buffer, &predicate);
         assert!(result.is_ok());
-        assert!(result.unwrap().is_empty());
+        let result = result.unwrap();
+        assert_eq!(buffer_row_count(&executor, &result), 0);
     }
 
     #[test]
@@ -3040,7 +3099,7 @@ mod tests {
         assert!(result.is_ok());
 
         let result = result.unwrap();
-        assert_eq!(result.num_rows(), 2);
+        assert_eq!(buffer_row_count(&executor, &result), 2);
 
         let values = read_buffer_u32(&executor, &result, 0);
         assert_eq!(values, vec![4, 5]);
@@ -3076,7 +3135,7 @@ mod tests {
         assert!(result.is_ok());
 
         let result = result.unwrap();
-        assert_eq!(result.num_rows(), 3);
+        assert_eq!(buffer_row_count(&executor, &result), 3);
 
         let values = read_buffer_u32(&executor, &result, 0);
         assert_eq!(values, vec![2, 3, 4]);
@@ -3104,7 +3163,7 @@ mod tests {
         assert!(result.is_ok());
 
         let result = result.unwrap();
-        assert!(result.is_empty());
+        assert_eq!(buffer_row_count(&executor, &result), 0);
         assert_eq!(result.arity(), 1);
     }
 
@@ -3154,7 +3213,8 @@ mod tests {
             .htod_sync_copy_into(&b_data, &mut col_b)
             .unwrap();
 
-        let buffer = CudaBuffer::from_columns(vec![col_a.into(), col_b.into()], 3, schema);
+        let d_num_rows = device_row_count(&executor, 3);
+        let buffer = CudaBuffer::from_columns(vec![col_a.into(), col_b.into()], 3, d_num_rows, schema);
 
         // Project: [b, a] (reverse order)
         let result =
@@ -3162,7 +3222,7 @@ mod tests {
         assert!(result.is_ok());
 
         let result = result.unwrap();
-        assert_eq!(result.num_rows(), 3);
+        assert_eq!(buffer_row_count(&executor, &result), 3);
         assert_eq!(result.arity(), 2);
 
         // First column should be b's values
@@ -3222,7 +3282,8 @@ mod tests {
             .htod_sync_copy_into(&b_data, &mut col_b)
             .unwrap();
 
-        let buffer = CudaBuffer::from_columns(vec![col_a.into(), col_b.into()], 3, schema);
+        let d_num_rows = device_row_count(&executor, 3);
+        let buffer = CudaBuffer::from_columns(vec![col_a.into(), col_b.into()], 3, d_num_rows, schema);
 
         // Project with computed expression: a + b
         let add_expr = Expr::Add(Box::new(Expr::Column(0)), Box::new(Expr::Column(1)));
@@ -3239,7 +3300,7 @@ mod tests {
         match result {
             Ok(res) => {
                 // Wiring worked and arithmetic kernels are available
-                assert_eq!(res.num_rows(), 3);
+                assert_eq!(buffer_row_count(&executor, &res), 3);
                 assert_eq!(res.arity(), 2);
 
                 // First column should be a's values (pass-through)
@@ -3282,7 +3343,8 @@ mod tests {
 
         let result = executor.execute_union(&[]);
         assert!(result.is_ok());
-        assert!(result.unwrap().is_empty());
+        let result = result.unwrap();
+        assert_eq!(buffer_row_count(&executor, &result), 0);
     }
 
     #[test]
@@ -3301,7 +3363,7 @@ mod tests {
         assert!(result.is_ok());
 
         let result = result.unwrap();
-        assert_eq!(result.num_rows(), 3);
+        assert_eq!(buffer_row_count(&executor, &result), 3);
 
         let values = read_buffer_u32(&executor, &result, 0);
         assert_eq!(values, vec![1, 2, 3]);
@@ -3325,7 +3387,7 @@ mod tests {
         assert!(result.is_ok());
 
         let result = result.unwrap();
-        assert_eq!(result.num_rows(), 5);
+        assert_eq!(buffer_row_count(&executor, &result), 5);
     }
 
     // ============== Distinct Node Tests ==============
@@ -3345,7 +3407,8 @@ mod tests {
 
         let result = executor.execute_distinct(&empty, &[0]);
         assert!(result.is_ok());
-        assert!(result.unwrap().is_empty());
+        let result = result.unwrap();
+        assert_eq!(buffer_row_count(&executor, &result), 0);
     }
 
     // ============== Diff Node Tests ==============
@@ -3367,7 +3430,7 @@ mod tests {
         assert!(result.is_ok());
 
         let result = result.unwrap();
-        assert_eq!(result.num_rows(), 3);
+        assert_eq!(buffer_row_count(&executor, &result), 3);
 
         let values = read_buffer_u32(&executor, &result, 0);
         assert_eq!(values, vec![1, 3, 5]);
@@ -3416,7 +3479,7 @@ mod tests {
 
         // Should return base case since recursive produces nothing
         let result = result.unwrap();
-        assert_eq!(result.num_rows(), 3);
+        assert_eq!(buffer_row_count(&executor, &result), 3);
         let values = read_buffer_u32(&executor, &result, 0);
         assert_eq!(values, vec![1, 2, 3]);
     }
@@ -3458,7 +3521,8 @@ mod tests {
         assert!(result.is_ok());
 
         // Should return empty since base is empty
-        assert!(result.unwrap().is_empty());
+        let result = result.unwrap();
+        assert_eq!(buffer_row_count(&executor, &result), 0);
     }
 
     #[test]
@@ -3501,7 +3565,7 @@ mod tests {
 
         let result = result.unwrap();
         // Result should be [1, 2, 3]
-        assert_eq!(result.num_rows(), 3);
+        assert_eq!(buffer_row_count(&executor, &result), 3);
     }
 
     #[test]
@@ -3552,7 +3616,7 @@ mod tests {
 
         let result = result.unwrap();
         // Result should be union of [1] and [2] = [1, 2]
-        assert_eq!(result.num_rows(), 2);
+        assert_eq!(buffer_row_count(&executor, &result), 2);
     }
 
     #[test]
@@ -3592,7 +3656,7 @@ mod tests {
         assert!(result.is_ok());
 
         let result = result.unwrap();
-        assert_eq!(result.num_rows(), 3);
+        assert_eq!(buffer_row_count(&executor, &result), 3);
     }
 
     #[test]
@@ -3654,7 +3718,8 @@ mod tests {
 
         let result = executor.execute_plan(&plan);
         assert!(result.is_ok());
-        assert!(result.unwrap().is_empty());
+        let result = result.unwrap();
+        assert_eq!(buffer_row_count(&executor, &result), 0);
     }
 
     #[test]
@@ -3703,7 +3768,7 @@ mod tests {
         // Verify output relation was created
         assert!(executor.store().contains("output"));
         let output = executor.store().get("output").unwrap();
-        assert_eq!(output.num_rows(), 5);
+        assert_eq!(buffer_row_count(&executor, output), 5);
     }
 
     #[test]
@@ -3922,7 +3987,7 @@ mod tests {
         assert!(result.is_ok());
 
         let result = result.unwrap();
-        assert_eq!(result.num_rows(), 3);
+        assert_eq!(buffer_row_count(&executor, &result), 3);
 
         let values = read_buffer_u32(&executor, &result, 0);
         assert_eq!(values, vec![3, 4, 5]);

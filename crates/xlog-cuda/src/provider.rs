@@ -1588,7 +1588,9 @@ impl CudaKernelProvider {
                 XlogError::Kernel("mark_unique_and_scan_columnar kernel not found".to_string())
             })?;
 
-        // SAFETY: mark_unique_and_scan_columnar(col_ptrs, col_sizes, col_types, num_key_cols, num_rows, unique_mask, prefix_sum, block_sums)
+        // SAFETY: mark_unique_and_scan_columnar(col_ptrs, col_sizes, col_types, num_key_cols,
+        //                                       num_rows_device, row_cap,
+        //                                       unique_mask, prefix_sum, block_sums)
         unsafe {
             mark_and_scan_fn.clone().launch(
                 config,
@@ -1597,6 +1599,7 @@ impl CudaKernelProvider {
                     &d_col_sizes,
                     &d_col_types,
                     num_key_cols,
+                    input.num_rows_device(),
                     num_rows,
                     &d_unique_mask,
                     &d_prefix_sum,
@@ -1656,16 +1659,6 @@ impl CudaKernelProvider {
     }
 
     fn concat_buffers_gpu(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
-        if a.is_empty() && b.is_empty() {
-            return self.create_empty_buffer(a.schema().clone());
-        }
-        if a.is_empty() {
-            return self.clone_buffer(b);
-        }
-        if b.is_empty() {
-            return self.clone_buffer(a);
-        }
-
         if !self.schemas_type_compatible(a.schema(), b.schema()) {
             return Err(XlogError::Kernel(format!(
                 "Concat requires compatible schemas: {:?} vs {:?}",
@@ -1675,7 +1668,20 @@ impl CudaKernelProvider {
         }
 
         let schema = a.schema().clone();
-        let total_rows = a.num_rows() + b.num_rows();
+        let a_rows = self.device_row_count(a)? as u64;
+        let b_rows = self.device_row_count(b)? as u64;
+
+        if a_rows == 0 && b_rows == 0 {
+            return self.create_empty_buffer(schema);
+        }
+        if a_rows == 0 {
+            return self.clone_buffer(b);
+        }
+        if b_rows == 0 {
+            return self.clone_buffer(a);
+        }
+
+        let total_rows = a_rows + b_rows;
         if total_rows > u32::MAX as u64 {
             return Err(XlogError::Kernel(format!(
                 "Concat supports at most {} rows, got {}",
@@ -1691,11 +1697,11 @@ impl CudaKernelProvider {
 
         let block_size = 256u32;
 
-        let a_rows = usize::try_from(a.num_rows()).map_err(|_| {
-            XlogError::Kernel(format!("Concat: a has too many rows: {}", a.num_rows()))
+        let a_rows = usize::try_from(a_rows).map_err(|_| {
+            XlogError::Kernel(format!("Concat: a has too many rows: {}", a_rows))
         })?;
-        let b_rows = usize::try_from(b.num_rows()).map_err(|_| {
-            XlogError::Kernel(format!("Concat: b has too many rows: {}", b.num_rows()))
+        let b_rows = usize::try_from(b_rows).map_err(|_| {
+            XlogError::Kernel(format!("Concat: b has too many rows: {}", b_rows))
         })?;
 
         let mut result_columns = Vec::with_capacity(schema.arity());
@@ -1775,11 +1781,22 @@ impl CudaKernelProvider {
     /// # Errors
     /// Returns `XlogError::Kernel` if schemas don't match or operation fails
     pub fn diff(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
+        let num_a = self.device_row_count(a)?;
+        let num_b = self.device_row_count(b)?;
+        if num_a > u32::MAX as usize || num_b > u32::MAX as usize {
+            return Err(XlogError::Kernel(format!(
+                "Diff supports at most {} rows per side (a={}, b={})",
+                u32::MAX,
+                num_a,
+                num_b
+            )));
+        }
+
         // Handle empty cases
-        if a.is_empty() {
+        if num_a == 0 {
             return self.create_empty_buffer(a.schema().clone());
         }
-        if b.is_empty() {
+        if num_b == 0 {
             return self.clone_buffer(a);
         }
 
@@ -1799,8 +1816,8 @@ impl CudaKernelProvider {
             ));
         }
 
-        let num_b = b.num_rows() as u32;
-        let num_a = a.num_rows() as u32;
+        let num_b = num_b as u32;
+        let num_a = num_a as u32;
 
         // Build hash table from b
         let hash_table_size = (num_b as usize * 2).max(1024) as u32;
@@ -1959,10 +1976,6 @@ impl CudaKernelProvider {
     /// # Errors
     /// Returns `XlogError::Kernel` if schemas don't match or operation fails
     pub fn union_gpu(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
-        if a.is_empty() && b.is_empty() {
-            return self.create_empty_buffer(a.schema().clone());
-        }
-
         // Verify schemas have compatible types (ignore column names for Datalog union).
         if !self.schemas_type_compatible(a.schema(), b.schema()) {
             return Err(XlogError::Kernel(format!(
@@ -1980,11 +1993,17 @@ impl CudaKernelProvider {
             ));
         }
 
+        let a_rows = self.device_row_count(a)?;
+        let b_rows = self.device_row_count(b)?;
+        if a_rows == 0 && b_rows == 0 {
+            return self.create_empty_buffer(schema);
+        }
+
         // Set semantics require dedup even when one side is empty.
-        if a.is_empty() {
+        if a_rows == 0 {
             return self.dedup(b, &key_cols);
         }
-        if b.is_empty() {
+        if b_rows == 0 {
             return self.dedup(a, &key_cols);
         }
 
@@ -2011,7 +2030,18 @@ impl CudaKernelProvider {
     /// # Errors
     /// Returns `XlogError::Kernel` if schemas don't match or operation fails
     pub fn diff_gpu(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
-        if a.is_empty() {
+        let num_a = self.device_row_count(a)?;
+        let num_b = self.device_row_count(b)?;
+        if num_a > u32::MAX as usize || num_b > u32::MAX as usize {
+            return Err(XlogError::Kernel(format!(
+                "Diff supports at most {} rows per side (a={}, b={})",
+                u32::MAX,
+                num_a,
+                num_b
+            )));
+        }
+
+        if num_a == 0 {
             return self.create_empty_buffer(a.schema().clone());
         }
 
@@ -2036,7 +2066,7 @@ impl CudaKernelProvider {
             .ok_or_else(|| XlogError::Kernel("No columns".to_string()))?;
 
         // Keep the single-column U32 fast path; all other cases use hash-based anti-join.
-        if a.arity() == 1 && matches!(col_type, ScalarType::U32) && !b.is_empty() {
+        if a.arity() == 1 && matches!(col_type, ScalarType::U32) && num_b != 0 {
             return self.diff_gpu_u32(a, b);
         }
 
@@ -2057,12 +2087,23 @@ impl CudaKernelProvider {
         let sorted_b = self.sort(b, &[0])?;
         let deduped_b = self.dedup_sorted(&sorted_b, &[0])?;
 
-        if deduped_a.is_empty() {
+        let num_a = self.device_row_count(&deduped_a)?;
+        let num_b = self.device_row_count(&deduped_b)?;
+        if num_a > u32::MAX as usize || num_b > u32::MAX as usize {
+            return Err(XlogError::Kernel(format!(
+                "Diff supports at most {} rows per side (a={}, b={})",
+                u32::MAX,
+                num_a,
+                num_b
+            )));
+        }
+
+        if num_a == 0 {
             return self.create_empty_buffer(a.schema().clone());
         }
 
-        let num_a = deduped_a.num_rows() as u32;
-        let num_b = deduped_b.num_rows() as u32;
+        let num_a = num_a as u32;
+        let num_b = num_b as u32;
 
         // Step 2: Mark elements in a not in b using sorted_diff_mark kernel
         let diff_mark_fn = self
@@ -2094,11 +2135,23 @@ impl CudaKernelProvider {
             shared_mem_bytes: 0,
         };
 
-        // SAFETY: Kernel signature matches: sorted_diff_mark(a, a_len, b, b_len, in_diff)
+        // SAFETY: Kernel signature matches:
+        // sorted_diff_mark(a, a_len_device, a_cap, b, b_len_device, b_cap, in_diff)
         unsafe {
             diff_mark_fn
                 .clone()
-                .launch(config, (&a_view, num_a, &b_view, num_b, &diff_mask))
+                .launch(
+                    config,
+                    (
+                        &a_view,
+                        deduped_a.num_rows_device(),
+                        num_a,
+                        &b_view,
+                        deduped_b.num_rows_device(),
+                        num_b,
+                        &diff_mask,
+                    ),
+                )
         }
         .map_err(|e| XlogError::Kernel(format!("sorted_diff_mark failed: {}", e)))?;
 
@@ -2173,11 +2226,13 @@ impl CudaKernelProvider {
         let deduped_a = self.dedup(a, &all_cols)?;
         let deduped_b = self.dedup(b, &all_cols)?;
 
-        if deduped_a.is_empty() {
+        let a_rows = self.device_row_count(&deduped_a)?;
+        let b_rows = self.device_row_count(&deduped_b)?;
+        if a_rows == 0 {
             return self.create_empty_buffer(a.schema().clone());
         }
 
-        if deduped_b.is_empty() {
+        if b_rows == 0 {
             return Ok(deduped_a);
         }
 
@@ -2244,11 +2299,18 @@ impl CudaKernelProvider {
         key_cols: &[usize],
         aggs: &[(usize, AggOp)],
     ) -> Result<CudaBuffer> {
-        // Handle empty input
-        if buffer.is_empty() {
+        let num_rows = self.device_row_count(buffer)?;
+        if num_rows == 0 {
             let result_schema =
                 self.groupby_multi_agg_result_schema(buffer.schema(), key_cols, aggs);
             return self.create_empty_buffer(result_schema);
+        }
+        if num_rows > u32::MAX as usize {
+            return Err(XlogError::Kernel(format!(
+                "GroupBy supports at most {} rows, got {}",
+                u32::MAX,
+                num_rows
+            )));
         }
 
         // Validate inputs
@@ -2309,7 +2371,7 @@ impl CudaKernelProvider {
             }
         }
 
-        let num_rows = buffer.num_rows() as u32;
+        let num_rows = num_rows as u32;
 
         // Step 1: Sort buffer by key columns
         let sorted = self.sort(buffer, key_cols)?;
@@ -3198,6 +3260,7 @@ impl CudaKernelProvider {
         }
 
         let n = input.num_rows() as u32;
+        let d_num_rows = input.num_rows_device();
         let device = self.device.inner();
 
         let block_size = Self::SORT_BLOCK_SIZE;
@@ -3216,8 +3279,8 @@ impl CudaKernelProvider {
         let mut indices_a = self.memory.alloc::<u32>(n as usize)?;
         let mut indices_b = self.memory.alloc::<u32>(n as usize)?;
 
-        // SAFETY: init_indices(uint32_t* indices, uint32_t n)
-        unsafe { init_fn.clone().launch(launch_config, (&mut indices_a, n)) }
+        // SAFETY: init_indices(indices, num_rows_device, row_cap)
+        unsafe { init_fn.clone().launch(launch_config, (&mut indices_a, d_num_rows, n)) }
             .map_err(|e| XlogError::Kernel(format!("init_indices failed: {}", e)))?;
 
         // Working key buffers (u32 words).
@@ -3248,11 +3311,11 @@ impl CudaKernelProvider {
                             XlogError::Kernel("apply_permutation_u32 kernel not found".to_string())
                         })?;
 
-                    // SAFETY: apply_permutation_u32(input, output, permutation, n)
+                    // SAFETY: apply_permutation_u32(input, output, permutation, num_rows_device, row_cap)
                     unsafe {
                         gather_fn
                             .clone()
-                            .launch(launch_config, (&col_view, &mut keys_a, &indices_a, n))
+                            .launch(launch_config, (&col_view, &mut keys_a, &indices_a, d_num_rows, n))
                     }
                     .map_err(|e| {
                         XlogError::Kernel(format!("apply_permutation_u32 failed: {}", e))
@@ -3266,6 +3329,7 @@ impl CudaKernelProvider {
                         &mut d_hist,
                         &mut d_prefix,
                         &mut d_ranks,
+                        d_num_rows,
                         n,
                     )?;
                 }
@@ -3279,11 +3343,11 @@ impl CudaKernelProvider {
                             )
                         })?;
 
-                    // SAFETY: gather_keys_i32_ordered_u32(i32_bits, permutation, num_rows, out_keys)
+                    // SAFETY: gather_keys_i32_ordered_u32(i32_bits, permutation, num_rows_device, row_cap, out_keys)
                     unsafe {
                         gather_fn
                             .clone()
-                            .launch(launch_config, (&col_bits, &indices_a, n, &mut keys_a))
+                            .launch(launch_config, (&col_bits, &indices_a, d_num_rows, n, &mut keys_a))
                     }
                     .map_err(|e| {
                         XlogError::Kernel(format!("gather_keys_i32_ordered_u32 failed: {}", e))
@@ -3297,6 +3361,7 @@ impl CudaKernelProvider {
                         &mut d_hist,
                         &mut d_prefix,
                         &mut d_ranks,
+                        d_num_rows,
                         n,
                     )?;
                 }
@@ -3310,11 +3375,11 @@ impl CudaKernelProvider {
                             )
                         })?;
 
-                    // SAFETY: gather_keys_f32_ordered_u32(f32_bits, permutation, num_rows, out_keys)
+                    // SAFETY: gather_keys_f32_ordered_u32(f32_bits, permutation, num_rows_device, row_cap, out_keys)
                     unsafe {
                         gather_fn
                             .clone()
-                            .launch(launch_config, (&col_bits, &indices_a, n, &mut keys_a))
+                            .launch(launch_config, (&col_bits, &indices_a, d_num_rows, n, &mut keys_a))
                     }
                     .map_err(|e| {
                         XlogError::Kernel(format!("gather_keys_f32_ordered_u32 failed: {}", e))
@@ -3328,6 +3393,7 @@ impl CudaKernelProvider {
                         &mut d_hist,
                         &mut d_prefix,
                         &mut d_ranks,
+                        d_num_rows,
                         n,
                     )?;
                 }
@@ -3349,11 +3415,11 @@ impl CudaKernelProvider {
                             )
                         })?;
 
-                    // SAFETY: gather_keys_bool_ordered_u32(bools, permutation, num_rows, out_keys)
+                    // SAFETY: gather_keys_bool_ordered_u32(bools, permutation, num_rows_device, row_cap, out_keys)
                     unsafe {
                         gather_fn
                             .clone()
-                            .launch(launch_config, (col, &indices_a, n, &mut keys_a))
+                            .launch(launch_config, (col, &indices_a, d_num_rows, n, &mut keys_a))
                     }
                     .map_err(|e| {
                         XlogError::Kernel(format!("gather_keys_bool_ordered_u32 failed: {}", e))
@@ -3367,6 +3433,7 @@ impl CudaKernelProvider {
                         &mut d_hist,
                         &mut d_prefix,
                         &mut d_ranks,
+                        d_num_rows,
                         n,
                     )?;
                 }
@@ -3380,11 +3447,11 @@ impl CudaKernelProvider {
                             XlogError::Kernel(format!("{} kernel not found", word))
                         })?;
 
-                        // SAFETY: gather_keys_u64_*_u32(vals, permutation, num_rows, out_keys)
+                        // SAFETY: gather_keys_u64_*_u32(vals, permutation, num_rows_device, row_cap, out_keys)
                         unsafe {
                             gather_fn
                                 .clone()
-                                .launch(launch_config, (&col_bits, &indices_a, n, &mut keys_a))
+                                .launch(launch_config, (&col_bits, &indices_a, d_num_rows, n, &mut keys_a))
                         }
                         .map_err(|e| XlogError::Kernel(format!("{} failed: {}", word, e)))?;
 
@@ -3396,6 +3463,7 @@ impl CudaKernelProvider {
                             &mut d_hist,
                             &mut d_prefix,
                             &mut d_ranks,
+                            d_num_rows,
                             n,
                         )?;
                     }
@@ -3410,11 +3478,11 @@ impl CudaKernelProvider {
                             XlogError::Kernel(format!("{} kernel not found", word))
                         })?;
 
-                        // SAFETY: gather_keys_i64_*_u32(i64_bits, permutation, num_rows, out_keys)
+                        // SAFETY: gather_keys_i64_*_u32(i64_bits, permutation, num_rows_device, row_cap, out_keys)
                         unsafe {
                             gather_fn
                                 .clone()
-                                .launch(launch_config, (&col_bits, &indices_a, n, &mut keys_a))
+                                .launch(launch_config, (&col_bits, &indices_a, d_num_rows, n, &mut keys_a))
                         }
                         .map_err(|e| XlogError::Kernel(format!("{} failed: {}", word, e)))?;
 
@@ -3426,6 +3494,7 @@ impl CudaKernelProvider {
                             &mut d_hist,
                             &mut d_prefix,
                             &mut d_ranks,
+                            d_num_rows,
                             n,
                         )?;
                     }
@@ -3440,11 +3509,11 @@ impl CudaKernelProvider {
                             XlogError::Kernel(format!("{} kernel not found", word))
                         })?;
 
-                        // SAFETY: gather_keys_f64_*_u32(f64_bits, permutation, num_rows, out_keys)
+                        // SAFETY: gather_keys_f64_*_u32(f64_bits, permutation, num_rows_device, row_cap, out_keys)
                         unsafe {
                             gather_fn
                                 .clone()
-                                .launch(launch_config, (&col_bits, &indices_a, n, &mut keys_a))
+                                .launch(launch_config, (&col_bits, &indices_a, d_num_rows, n, &mut keys_a))
                         }
                         .map_err(|e| XlogError::Kernel(format!("{} failed: {}", word, e)))?;
 
@@ -3456,6 +3525,7 @@ impl CudaKernelProvider {
                             &mut d_hist,
                             &mut d_prefix,
                             &mut d_ranks,
+                            d_num_rows,
                             n,
                         )?;
                     }
@@ -3475,15 +3545,16 @@ impl CudaKernelProvider {
         hist: &mut crate::memory::TrackedCudaSlice<u32>,
         prefix: &mut crate::memory::TrackedCudaSlice<u32>,
         ranks: &mut crate::memory::TrackedCudaSlice<u32>,
-        n: u32,
+        num_rows_device: &crate::memory::TrackedCudaSlice<u32>,
+        row_cap: u32,
     ) -> Result<()> {
-        if n == 0 {
+        if row_cap == 0 {
             return Ok(());
         }
 
         let device = self.device.inner();
         let block_size = Self::SORT_BLOCK_SIZE;
-        let grid_size = (n + block_size - 1) / block_size;
+        let grid_size = (row_cap + block_size - 1) / block_size;
 
         let sort_config = LaunchConfig {
             grid_dim: (grid_size, 1, 1),
@@ -3525,11 +3596,11 @@ impl CudaKernelProvider {
             };
 
             // Histogram (digit-major): hist[digit * grid_size + block] = count
-            // SAFETY: radix_histogram(keys, num_rows, histograms, shift)
+            // SAFETY: radix_histogram(keys, num_rows_device, row_cap, histograms, shift)
             unsafe {
                 histogram_fn
                     .clone()
-                    .launch(sort_config, (keys_in, n, &mut *hist, shift))
+                    .launch(sort_config, (keys_in, num_rows_device, row_cap, &mut *hist, shift))
             }
             .map_err(|e| XlogError::Kernel(format!("radix_histogram failed: {}", e)))?;
 
@@ -3551,16 +3622,16 @@ impl CudaKernelProvider {
             }
 
             // Compute per-element ranks for stability.
-            // SAFETY: compute_ranks(keys, num_rows, ranks, shift)
+            // SAFETY: compute_ranks(keys, num_rows_device, row_cap, ranks, shift)
             unsafe {
                 ranks_fn
                     .clone()
-                    .launch(sort_config, (keys_in, n, &mut *ranks, shift))
+                    .launch(sort_config, (keys_in, num_rows_device, row_cap, &mut *ranks, shift))
             }
             .map_err(|e| XlogError::Kernel(format!("compute_ranks failed: {}", e)))?;
 
             // Stable scatter using digit prefix + per-block offsets + ranks.
-            // SAFETY: radix_scatter_stable(keys_in, indices_in, ranks, keys_out, indices_out, prefix_sums, block_offsets, num_rows, shift)
+            // SAFETY: radix_scatter_stable(keys_in, indices_in, ranks, keys_out, indices_out, prefix_sums, block_offsets, num_rows_device, row_cap, shift)
             unsafe {
                 scatter_fn.clone().launch(
                     sort_config,
@@ -3572,7 +3643,8 @@ impl CudaKernelProvider {
                         indices_out,
                         &*prefix,
                         &*hist,
-                        n,
+                        num_rows_device,
+                        row_cap,
                         shift,
                     ),
                 )
@@ -3619,8 +3691,9 @@ impl CudaKernelProvider {
         let init_fn = device
             .get_func(SORT_MODULE, sort_kernels::INIT_INDICES)
             .ok_or_else(|| XlogError::Kernel("init_indices kernel not found".to_string()))?;
-        // SAFETY: init_indices(indices, n)
-        unsafe { init_fn.clone().launch(config, (&mut *indices, n)) }
+        let d_num_rows = self.upload_device_row_count(n)?;
+        // SAFETY: init_indices(indices, num_rows_device, row_cap)
+        unsafe { init_fn.clone().launch(config, (&mut *indices, &d_num_rows, n)) }
             .map_err(|e| XlogError::Kernel(format!("init_indices failed: {}", e)))?;
         Ok(())
     }
@@ -3656,8 +3729,9 @@ impl CudaKernelProvider {
             .ok_or_else(|| {
                 XlogError::Kernel("apply_permutation_u32 kernel not found".to_string())
             })?;
-        // SAFETY: apply_permutation_u32(input, output, permutation, n)
-        unsafe { gather_fn.clone().launch(config, (input, output, indices, n)) }
+        let d_num_rows = self.upload_device_row_count(n)?;
+        // SAFETY: apply_permutation_u32(input, output, permutation, num_rows_device, row_cap)
+        unsafe { gather_fn.clone().launch(config, (input, output, indices, &d_num_rows, n)) }
             .map_err(|e| XlogError::Kernel(format!("gather_u32_by_indices failed: {}", e)))?;
         Ok(())
     }
@@ -3693,11 +3767,12 @@ impl CudaKernelProvider {
             .ok_or_else(|| {
                 XlogError::Kernel("apply_permutation_bytes kernel not found".to_string())
             })?;
-        // SAFETY: apply_permutation_bytes(input, output, permutation, num_rows, elem_size)
+        let d_num_rows = self.upload_device_row_count(n)?;
+        // SAFETY: apply_permutation_bytes(input, output, permutation, num_rows_device, row_cap, elem_size)
         unsafe {
             gather_fn
                 .clone()
-                .launch(config, (input, output, indices, n, 1u32))
+                .launch(config, (input, output, indices, &d_num_rows, n, 1u32))
         }
         .map_err(|e| XlogError::Kernel(format!("gather_u8_by_indices failed: {}", e)))?;
         Ok(())
@@ -3725,8 +3800,9 @@ impl CudaKernelProvider {
         let gather_fn = device
             .get_func(SORT_MODULE, sort_kernels::GATHER_KEYS_U64_LO_U32)
             .ok_or_else(|| XlogError::Kernel("gather_keys_u64_lo_u32 not found".to_string()))?;
-        // SAFETY: gather_keys_u64_lo_u32(vals, permutation, num_rows, out_keys)
-        unsafe { gather_fn.clone().launch(config, (input, indices, n, output)) }
+        let d_num_rows = self.upload_device_row_count(n)?;
+        // SAFETY: gather_keys_u64_lo_u32(vals, permutation, num_rows_device, row_cap, out_keys)
+        unsafe { gather_fn.clone().launch(config, (input, indices, &d_num_rows, n, output)) }
             .map_err(|e| XlogError::Kernel(format!("gather_u64_lo_by_indices failed: {}", e)))?;
         Ok(())
     }
@@ -3753,8 +3829,9 @@ impl CudaKernelProvider {
         let gather_fn = device
             .get_func(SORT_MODULE, sort_kernels::GATHER_KEYS_U64_HI_U32)
             .ok_or_else(|| XlogError::Kernel("gather_keys_u64_hi_u32 not found".to_string()))?;
-        // SAFETY: gather_keys_u64_hi_u32(vals, permutation, num_rows, out_keys)
-        unsafe { gather_fn.clone().launch(config, (input, indices, n, output)) }
+        let d_num_rows = self.upload_device_row_count(n)?;
+        // SAFETY: gather_keys_u64_hi_u32(vals, permutation, num_rows_device, row_cap, out_keys)
+        unsafe { gather_fn.clone().launch(config, (input, indices, &d_num_rows, n, output)) }
             .map_err(|e| XlogError::Kernel(format!("gather_u64_hi_by_indices failed: {}", e)))?;
         Ok(())
     }
@@ -3771,6 +3848,7 @@ impl CudaKernelProvider {
             return Ok(());
         }
         scratch.ensure_capacity(self, n)?;
+        let d_num_rows = self.upload_device_row_count(n)?;
         self.radix_sort_u32_pairs_with_scratch(
             keys,
             &mut scratch.keys_b,
@@ -3779,6 +3857,7 @@ impl CudaKernelProvider {
             &mut scratch.hist,
             &mut scratch.prefix,
             &mut scratch.ranks,
+            &d_num_rows,
             n,
         )
     }
@@ -3857,10 +3936,11 @@ impl CudaKernelProvider {
         input: &CudaBuffer,
         permutation: &cudarc::driver::CudaSlice<u32>,
     ) -> Result<CudaBuffer> {
-        let n = input.num_rows() as u32;
+        let row_cap = input.num_rows() as u32;
+        let d_num_rows = input.num_rows_device();
         let device = self.device.inner();
 
-        let grid_size = (n + Self::SORT_BLOCK_SIZE - 1) / Self::SORT_BLOCK_SIZE;
+        let grid_size = (row_cap + Self::SORT_BLOCK_SIZE - 1) / Self::SORT_BLOCK_SIZE;
         let launch_config = LaunchConfig {
             grid_dim: (grid_size, 1, 1),
             block_dim: (Self::SORT_BLOCK_SIZE, 1, 1),
@@ -3888,24 +3968,24 @@ impl CudaKernelProvider {
                 })?
                 .size_bytes() as u32;
 
-            let output_bytes = (n as usize) * (elem_size as usize);
+            let output_bytes = (row_cap as usize) * (elem_size as usize);
             if src_col.num_bytes() != output_bytes {
                 return Err(XlogError::Kernel(format!(
                     "Column {} has {} bytes but expected {} (num_rows={}, elem_size={})",
                     col_idx,
                     src_col.num_bytes(),
                     output_bytes,
-                    n,
+                    row_cap,
                     elem_size
                 )));
             }
             let dst_col = self.memory.alloc::<u8>(output_bytes)?;
 
-            // SAFETY: Kernel signature matches: apply_permutation_bytes(input, output, permutation, num_rows, elem_size)
+            // SAFETY: Kernel signature matches: apply_permutation_bytes(input, output, permutation, num_rows_device, row_cap, elem_size)
             unsafe {
                 apply_perm_fn.clone().launch(
                     launch_config,
-                    (src_col, &dst_col, permutation, n, elem_size),
+                    (src_col, &dst_col, permutation, d_num_rows, row_cap, elem_size),
                 )
             }
             .map_err(|e| XlogError::Kernel(format!("apply_permutation_bytes failed: {}", e)))?;
@@ -3915,7 +3995,12 @@ impl CudaKernelProvider {
 
         self.device.synchronize()?;
 
-        self.buffer_from_columns(new_columns, input.num_rows(), input.schema.clone())
+        self.buffer_from_columns_with_device_count(
+            new_columns,
+            input.num_rows(),
+            input.schema.clone(),
+            input,
+        )
     }
 
     /// Gather rows by explicit indices on GPU: output[i] = input[indices[i]].
@@ -3940,6 +4025,7 @@ impl CudaKernelProvider {
             )));
         }
 
+        let d_output_rows = self.upload_device_row_count(output_rows)?;
         let device = self.device.inner();
         let block_size = 256u32;
         let grid_size = (output_rows + block_size - 1) / block_size;
@@ -3984,11 +4070,11 @@ impl CudaKernelProvider {
             let dst_bytes = (output_rows as usize) * (elem_size as usize);
             let dst_col = self.memory.alloc::<u8>(dst_bytes)?;
 
-            // SAFETY: Kernel signature matches: apply_permutation_bytes(input, output, permutation, num_rows, elem_size)
+            // SAFETY: Kernel signature matches: apply_permutation_bytes(input, output, permutation, num_rows_device, row_cap, elem_size)
             unsafe {
                 gather_fn.clone().launch(
                     launch_config,
-                    (src_col, &dst_col, indices, output_rows, elem_size),
+                    (src_col, &dst_col, indices, &d_output_rows, output_rows, elem_size),
                 )
             }
             .map_err(|e| XlogError::Kernel(format!("apply_permutation_bytes failed: {}", e)))?;
@@ -3998,7 +4084,12 @@ impl CudaKernelProvider {
 
         self.device.synchronize()?;
 
-        self.buffer_from_columns(new_columns, output_rows as u64, input.schema.clone())
+        Ok(CudaBuffer::from_columns(
+            new_columns,
+            output_rows as u64,
+            d_output_rows,
+            input.schema.clone(),
+        ))
     }
 
     // ============== Filter Methods ==============
@@ -6018,6 +6109,35 @@ impl CudaKernelProvider {
         Ok(host_rows[0] as usize)
     }
 
+    fn clone_device_row_count(&self, buffer: &CudaBuffer) -> Result<TrackedCudaSlice<u32>> {
+        let mut d_num_rows = self.memory.alloc::<u32>(1)?;
+        self.device
+            .inner()
+            .dtod_copy(buffer.num_rows_device(), &mut d_num_rows)
+            .map_err(|e| XlogError::Kernel(format!("Failed to copy row count: {}", e)))?;
+        Ok(d_num_rows)
+    }
+
+    fn upload_device_row_count(&self, row_count: u32) -> Result<TrackedCudaSlice<u32>> {
+        let mut d_num_rows = self.memory.alloc::<u32>(1)?;
+        self.device
+            .inner()
+            .htod_sync_copy_into(&[row_count], &mut d_num_rows)
+            .map_err(|e| XlogError::Kernel(format!("Failed to upload row count: {}", e)))?;
+        Ok(d_num_rows)
+    }
+
+    fn buffer_from_columns_with_device_count(
+        &self,
+        columns: Vec<CudaColumn>,
+        row_cap: u64,
+        schema: Schema,
+        src: &CudaBuffer,
+    ) -> Result<CudaBuffer> {
+        let d_num_rows = self.clone_device_row_count(src)?;
+        Ok(CudaBuffer::from_columns(columns, row_cap, d_num_rows, schema))
+    }
+
     fn column_bytes_view<'a>(
         &self,
         col: &'a CudaColumn,
@@ -6278,10 +6398,18 @@ impl CudaKernelProvider {
         right: &CudaBuffer,
         right_keys: &[usize],
     ) -> Result<JoinIndexV2> {
-        if right.is_empty() {
+        let num_right = self.device_row_count(right)?;
+        if num_right == 0 {
             return Err(XlogError::Kernel(
                 "Cannot build join index for empty relation".to_string(),
             ));
+        }
+        if num_right > u32::MAX as usize {
+            return Err(XlogError::Kernel(format!(
+                "Join index supports at most {} rows, got {}",
+                u32::MAX,
+                num_right
+            )));
         }
         if right_keys.is_empty() {
             return Err(XlogError::Kernel(
@@ -6298,7 +6426,7 @@ impl CudaKernelProvider {
             }
         }
 
-        let num_right = right.num_rows() as u32;
+        let num_right = num_right as u32;
         let right_packed = self.compute_hashes_and_pack_keys(right, right_keys)?;
         let table = self.build_hash_table_v2(&right_packed.hashes, num_right)?;
 
@@ -6324,8 +6452,19 @@ impl CudaKernelProvider {
         index: &JoinIndexV2,
         max_output: Option<usize>,
     ) -> Result<CudaBuffer> {
+        let left_rows = self.device_row_count(left)?;
+        let right_rows = self.device_row_count(right)?;
+        if left_rows > u32::MAX as usize || right_rows > u32::MAX as usize {
+            return Err(XlogError::Kernel(format!(
+                "Join supports at most {} rows per side (left={}, right={})",
+                u32::MAX,
+                left_rows,
+                right_rows
+            )));
+        }
+
         // Handle empty inputs early.
-        if left.is_empty() {
+        if left_rows == 0 {
             return match join_type {
                 JoinType::Inner | JoinType::LeftOuter => {
                     let combined_schema = self.combine_schemas(left.schema(), right.schema());
@@ -6334,7 +6473,7 @@ impl CudaKernelProvider {
                 JoinType::Semi | JoinType::Anti => self.create_empty_buffer(left.schema().clone()),
             };
         }
-        if right.is_empty() {
+        if right_rows == 0 {
             return match join_type {
                 JoinType::Inner => {
                     let combined_schema = self.combine_schemas(left.schema(), right.schema());
@@ -6383,7 +6522,7 @@ impl CudaKernelProvider {
         }
 
         // Validate index matches the right side.
-        if index.right_num_rows != right.num_rows() as u32 {
+        if index.right_num_rows != right_rows as u32 {
             return Err(XlogError::Kernel(
                 "Join index row count does not match right relation".to_string(),
             ));
@@ -6437,7 +6576,15 @@ impl CudaKernelProvider {
             ));
         }
 
-        let num_rows = buffer.num_rows() as u32;
+        let num_rows = self.device_row_count(buffer)?;
+        if num_rows > u32::MAX as usize {
+            return Err(XlogError::Kernel(format!(
+                "pack_keys_gpu supports at most {} rows, got {}",
+                u32::MAX,
+                num_rows
+            )));
+        }
+        let num_rows = num_rows as u32;
         if num_rows == 0 {
             // Handle empty buffer case
             return Ok(PackedKeyData {
@@ -6545,7 +6692,15 @@ impl CudaKernelProvider {
             ));
         }
 
-        let num_rows = buffer.num_rows() as u32;
+        let num_rows = self.device_row_count(buffer)?;
+        if num_rows > u32::MAX as usize {
+            return Err(XlogError::Kernel(format!(
+                "pack_keys_gpu_generic supports at most {} rows, got {}",
+                u32::MAX,
+                num_rows
+            )));
+        }
+        let num_rows = num_rows as u32;
         if num_rows == 0 {
             return Ok(PackedKeyData {
                 hashes: self.memory.alloc::<u64>(0)?,
@@ -6801,8 +6956,19 @@ impl CudaKernelProvider {
         right_keys: &[usize],
         max_output: Option<usize>,
     ) -> Result<CudaBuffer> {
+        let num_left = self.device_row_count(left)?;
+        let num_right = self.device_row_count(right)?;
+        if num_left > u32::MAX as usize || num_right > u32::MAX as usize {
+            return Err(XlogError::Kernel(format!(
+                "Join supports at most {} rows per side (left={}, right={})",
+                u32::MAX,
+                num_left,
+                num_right
+            )));
+        }
+
         // Handle empty inputs
-        if left.is_empty() || right.is_empty() {
+        if num_left == 0 || num_right == 0 {
             let combined_schema = self.combine_schemas(left.schema(), right.schema());
             return self.create_empty_buffer(combined_schema);
         }
@@ -6831,8 +6997,8 @@ impl CudaKernelProvider {
             }
         }
 
-        let num_left = left.num_rows() as u32;
-        let num_right = right.num_rows() as u32;
+        let num_left = num_left as u32;
+        let num_right = num_right as u32;
 
         // Compute composite hashes and pack keys for both sides
         let left_packed = self.compute_hashes_and_pack_keys(left, left_keys)?;
@@ -6996,13 +7162,24 @@ impl CudaKernelProvider {
         index: &JoinIndexV2,
         max_output: Option<usize>,
     ) -> Result<CudaBuffer> {
+        let num_left = self.device_row_count(left)?;
+        let num_right = self.device_row_count(right)?;
+        if num_left > u32::MAX as usize || num_right > u32::MAX as usize {
+            return Err(XlogError::Kernel(format!(
+                "Join supports at most {} rows per side (left={}, right={})",
+                u32::MAX,
+                num_left,
+                num_right
+            )));
+        }
+
         // Handle empty inputs.
-        if left.is_empty() || right.is_empty() {
+        if num_left == 0 || num_right == 0 {
             let combined_schema = self.combine_schemas(left.schema(), right.schema());
             return self.create_empty_buffer(combined_schema);
         }
 
-        let num_left = left.num_rows() as u32;
+        let num_left = num_left as u32;
 
         // Compute composite hashes and pack probe keys.
         let left_packed = self.compute_hashes_and_pack_keys(left, left_keys)?;
@@ -7154,11 +7331,22 @@ impl CudaKernelProvider {
         left_keys: &[usize],
         right_keys: &[usize],
     ) -> Result<CudaBuffer> {
+        let num_left = self.device_row_count(left)?;
+        let num_right = self.device_row_count(right)?;
+        if num_left > u32::MAX as usize || num_right > u32::MAX as usize {
+            return Err(XlogError::Kernel(format!(
+                "Join supports at most {} rows per side (left={}, right={})",
+                u32::MAX,
+                num_left,
+                num_right
+            )));
+        }
+
         // Handle empty inputs
-        if left.is_empty() {
+        if num_left == 0 {
             return self.create_empty_buffer(left.schema().clone());
         }
-        if right.is_empty() {
+        if num_right == 0 {
             // No matches possible - return empty with left schema
             return self.create_empty_buffer(left.schema().clone());
         }
@@ -7187,8 +7375,8 @@ impl CudaKernelProvider {
             }
         }
 
-        let num_left = left.num_rows() as u32;
-        let num_right = right.num_rows() as u32;
+        let num_left = num_left as u32;
+        let num_right = num_right as u32;
 
         // Compute composite hashes and pack keys for both sides
         let left_packed = self.compute_hashes_and_pack_keys(left, left_keys)?;
@@ -7249,15 +7437,24 @@ impl CudaKernelProvider {
         left_keys: &[usize],
         index: &JoinIndexV2,
     ) -> Result<CudaBuffer> {
+        let num_left = self.device_row_count(left)?;
+        if num_left > u32::MAX as usize {
+            return Err(XlogError::Kernel(format!(
+                "Join supports at most {} rows on left side (left={})",
+                u32::MAX,
+                num_left
+            )));
+        }
+
         // Handle empty inputs.
-        if left.is_empty() {
+        if num_left == 0 {
             return self.create_empty_buffer(left.schema().clone());
         }
         if index.right_num_rows == 0 {
             return self.create_empty_buffer(left.schema().clone());
         }
 
-        let num_left = left.num_rows() as u32;
+        let num_left = num_left as u32;
 
         let left_packed = self.compute_hashes_and_pack_keys(left, left_keys)?;
         if left_packed.key_bytes != index.key_bytes {
@@ -7318,11 +7515,22 @@ impl CudaKernelProvider {
         left_keys: &[usize],
         right_keys: &[usize],
     ) -> Result<CudaBuffer> {
+        let num_left = self.device_row_count(left)?;
+        let num_right = self.device_row_count(right)?;
+        if num_left > u32::MAX as usize || num_right > u32::MAX as usize {
+            return Err(XlogError::Kernel(format!(
+                "Join supports at most {} rows per side (left={}, right={})",
+                u32::MAX,
+                num_left,
+                num_right
+            )));
+        }
+
         // Handle empty inputs
-        if left.is_empty() {
+        if num_left == 0 {
             return self.create_empty_buffer(left.schema().clone());
         }
-        if right.is_empty() {
+        if num_right == 0 {
             // No matches possible - return all left rows
             return self.clone_buffer(left);
         }
@@ -7351,8 +7559,8 @@ impl CudaKernelProvider {
             }
         }
 
-        let num_left = left.num_rows() as u32;
-        let num_right = right.num_rows() as u32;
+        let num_left = num_left as u32;
+        let num_right = num_right as u32;
 
         // Compute composite hashes and pack keys for both sides
         let left_packed = self.compute_hashes_and_pack_keys(left, left_keys)?;
@@ -7414,14 +7622,24 @@ impl CudaKernelProvider {
         left_keys: &[usize],
         index: &JoinIndexV2,
     ) -> Result<CudaBuffer> {
-        if left.is_empty() {
+        let num_left = self.device_row_count(left)?;
+        let num_right = self.device_row_count(right)?;
+        if num_left > u32::MAX as usize || num_right > u32::MAX as usize {
+            return Err(XlogError::Kernel(format!(
+                "Join supports at most {} rows per side (left={}, right={})",
+                u32::MAX,
+                num_left,
+                num_right
+            )));
+        }
+        if num_left == 0 {
             return self.create_empty_buffer(left.schema().clone());
         }
-        if right.is_empty() {
+        if num_right == 0 {
             return self.clone_buffer(left);
         }
 
-        let num_left = left.num_rows() as u32;
+        let num_left = num_left as u32;
 
         let left_packed = self.compute_hashes_and_pack_keys(left, left_keys)?;
         if left_packed.key_bytes != index.key_bytes {
@@ -7481,17 +7699,28 @@ impl CudaKernelProvider {
         index: &JoinIndexV2,
         max_output: Option<usize>,
     ) -> Result<CudaBuffer> {
+        let num_left = self.device_row_count(left)?;
+        let num_right = self.device_row_count(right)?;
+        if num_left > u32::MAX as usize || num_right > u32::MAX as usize {
+            return Err(XlogError::Kernel(format!(
+                "Join supports at most {} rows per side (left={}, right={})",
+                u32::MAX,
+                num_left,
+                num_right
+            )));
+        }
+
         // Handle empty left - return empty with combined schema.
-        if left.is_empty() {
+        if num_left == 0 {
             let combined_schema = self.combine_schemas(left.schema(), right.schema());
             return self.create_empty_buffer(combined_schema);
         }
         // Handle empty right - return left rows with null right columns.
-        if right.is_empty() {
+        if num_right == 0 {
             return self.left_outer_with_nulls(left, right);
         }
 
-        let num_left = left.num_rows() as u32;
+        let num_left = num_left as u32;
 
         let left_packed = self.compute_hashes_and_pack_keys(left, left_keys)?;
         if left_packed.key_bytes != index.key_bytes {
@@ -7657,7 +7886,7 @@ impl CudaKernelProvider {
 
         let unmatched_left = self.filter_by_device_mask(left, &d_no_match)?;
 
-        let unmatched_rows = unmatched_left.num_rows();
+        let unmatched_rows = self.device_row_count(&unmatched_left)? as u64;
         let total_rows = (inner_count as u64) + unmatched_rows;
 
         let combined_schema = self.combine_schemas(left.schema(), right.schema());
@@ -7751,8 +7980,9 @@ impl CudaKernelProvider {
             }
             if unmatched_bytes > 0 {
                 let mut out_view = out_col.slice_mut(inner_bytes..total_bytes);
+                let unmatched_view = self.column_bytes_view(&unmatched_col, unmatched_bytes)?;
                 device
-                    .dtod_copy(&unmatched_col, &mut out_view)
+                    .dtod_copy(&unmatched_view, &mut out_view)
                     .map_err(|e| {
                         XlogError::Kernel(format!("Failed to copy unmatched left column: {}", e))
                     })?;
@@ -7814,14 +8044,25 @@ impl CudaKernelProvider {
         right_keys: &[usize],
         max_output: Option<usize>,
     ) -> Result<CudaBuffer> {
+        let num_left = self.device_row_count(left)?;
+        let num_right = self.device_row_count(right)?;
+        if num_left > u32::MAX as usize || num_right > u32::MAX as usize {
+            return Err(XlogError::Kernel(format!(
+                "Join supports at most {} rows per side (left={}, right={})",
+                u32::MAX,
+                num_left,
+                num_right
+            )));
+        }
+
         // Handle empty left - return empty with combined schema
-        if left.is_empty() {
+        if num_left == 0 {
             let combined_schema = self.combine_schemas(left.schema(), right.schema());
             return self.create_empty_buffer(combined_schema);
         }
 
         // Handle empty right - return left rows with null right columns
-        if right.is_empty() {
+        if num_right == 0 {
             return self.left_outer_with_nulls(left, right);
         }
 
@@ -7849,8 +8090,8 @@ impl CudaKernelProvider {
             }
         }
 
-        let num_left = left.num_rows() as u32;
-        let num_right = right.num_rows() as u32;
+        let num_left = num_left as u32;
+        let num_right = num_right as u32;
 
         // Compute composite hashes and pack keys for both sides
         let left_packed = self.compute_hashes_and_pack_keys(left, left_keys)?;
@@ -8028,7 +8269,7 @@ impl CudaKernelProvider {
 
         let unmatched_left = self.filter_by_device_mask(left, &d_no_match)?;
 
-        let unmatched_rows = unmatched_left.num_rows();
+        let unmatched_rows = self.device_row_count(&unmatched_left)? as u64;
         let total_rows = (inner_count as u64) + unmatched_rows;
 
         let combined_schema = self.combine_schemas(left.schema(), right.schema());
@@ -8125,8 +8366,9 @@ impl CudaKernelProvider {
             }
             if unmatched_bytes > 0 {
                 let mut out_view = out_col.slice_mut(inner_bytes..total_bytes);
+                let unmatched_view = self.column_bytes_view(&unmatched_col, unmatched_bytes)?;
                 device
-                    .dtod_copy(&unmatched_col, &mut out_view)
+                    .dtod_copy(&unmatched_view, &mut out_view)
                     .map_err(|e| {
                         XlogError::Kernel(format!("Failed to copy unmatched left column: {}", e))
                     })?;
@@ -8183,7 +8425,10 @@ impl CudaKernelProvider {
     /// Helper for left outer join with empty right: all left rows with null right columns
     fn left_outer_with_nulls(&self, left: &CudaBuffer, right: &CudaBuffer) -> Result<CudaBuffer> {
         let combined_schema = self.combine_schemas(left.schema(), right.schema());
-        let num_rows = left.num_rows();
+        let num_rows = self.device_row_count(left)? as u64;
+        if num_rows == 0 {
+            return self.create_empty_buffer(combined_schema);
+        }
         let device = self.device.inner();
 
         let mut result_columns = Vec::with_capacity(combined_schema.arity());
@@ -8203,8 +8448,9 @@ impl CudaKernelProvider {
             let bytes = (num_rows as usize) * elem_size;
             let mut dst_col = self.memory.alloc::<u8>(bytes)?;
             if bytes > 0 {
+                let src_view = self.column_bytes_view(col, bytes)?;
                 device
-                    .dtod_copy(col, &mut dst_col)
+                    .dtod_copy(&src_view, &mut dst_col)
                     .map_err(|e| XlogError::Kernel(format!("Failed to copy left column: {}", e)))?;
             }
 
@@ -8290,27 +8536,29 @@ impl CudaKernelProvider {
             .schema()
             .column_type(col_idx)
             .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
-        let col_type_size = col_type.size_bytes();
-        let num_rows = buffer.num_rows();
-        let bytes = (num_rows as usize) * col_type_size;
-
         let src_col = buffer
             .column(col_idx)
             .ok_or_else(|| XlogError::Kernel(format!("Column {} not found in buffer", col_idx)))?;
+        let mut dst_col = self.memory.alloc::<u8>(src_col.len())?;
+        let device = self.device.inner();
+        if !src_col.is_empty() {
+            device
+                .dtod_copy(src_col, &mut dst_col)
+                .map_err(|e| XlogError::Kernel(format!("Failed to copy column: {}", e)))?;
+        }
 
-        // Copy via host
-        let mut host_data = vec![0u8; bytes];
-        self.dtoh_sync_copy_into_tracked(src_col, &mut host_data)
-            .map_err(|e| XlogError::Kernel(format!("Failed to read column: {}", e)))?;
-
-        let mut dst_col = self.memory.alloc::<u8>(bytes)?;
-        self.device
-            .inner()
-            .htod_sync_copy_into(&host_data, &mut dst_col)
-            .map_err(|e| XlogError::Kernel(format!("Failed to copy column: {}", e)))?;
+        let mut d_num_rows = self.memory.alloc::<u32>(1)?;
+        device
+            .dtod_copy(buffer.num_rows_device(), &mut d_num_rows)
+            .map_err(|e| XlogError::Kernel(format!("Failed to copy row count: {}", e)))?;
 
         let schema = Schema::new(vec![("col".to_string(), col_type)]);
-        self.buffer_from_columns(vec![dst_col.into()], num_rows, schema)
+        Ok(CudaBuffer::from_columns(
+            vec![dst_col.into()],
+            buffer.row_cap,
+            d_num_rows,
+            schema,
+        ))
     }
 
     /// Create a column filled with a constant value
@@ -8405,6 +8653,104 @@ impl CudaKernelProvider {
 
         let schema = Schema::new(vec![("const".to_string(), col_type)]);
         self.buffer_from_columns(vec![dst_col.into()], num_rows, schema)
+    }
+
+    /// Create a constant column sized to `row_cap` while preserving device row count from `d_num_rows_src`.
+    pub fn create_constant_column_with_device_count(
+        &self,
+        value_bytes: &[u8],
+        col_type: ScalarType,
+        row_cap: u64,
+        d_num_rows_src: &TrackedCudaSlice<u32>,
+    ) -> Result<CudaBuffer> {
+        if row_cap == 0 {
+            let schema = Schema::new(vec![("const".to_string(), col_type)]);
+            return self.create_empty_buffer(schema);
+        }
+
+        let elem_size = col_type.size_bytes();
+        if value_bytes.len() != elem_size {
+            return Err(XlogError::Kernel(format!(
+                "Value bytes length {} doesn't match type size {}",
+                value_bytes.len(),
+                elem_size
+            )));
+        }
+
+        if row_cap > u32::MAX as u64 {
+            return Err(XlogError::Kernel(format!(
+                "Constant column supports at most {} rows, got {}",
+                u32::MAX,
+                row_cap
+            )));
+        }
+
+        let total_bytes = (row_cap as usize)
+            .checked_mul(elem_size)
+            .ok_or_else(|| XlogError::Kernel("Constant column size overflow".to_string()))?;
+
+        let mut dst_col = self.memory.alloc::<u8>(total_bytes)?;
+        let n = row_cap as u32;
+
+        macro_rules! launch_fill_const {
+            ($kernel:expr, $value:expr) => {{
+                let func = self
+                    .device
+                    .inner()
+                    .get_func(ARITH_MODULE, $kernel)
+                    .ok_or_else(|| XlogError::Kernel("arith fill kernel not found".to_string()))?;
+                let config = LaunchConfig::for_num_elems(n);
+                unsafe { func.clone().launch(config, ($value, n, &mut dst_col)) }
+                    .map_err(|e| XlogError::Kernel(format!("fill const failed: {}", e)))?;
+            }};
+        }
+
+        match col_type {
+            ScalarType::U32 | ScalarType::Symbol => {
+                let value = u32::from_le_bytes(value_bytes.try_into().unwrap());
+                launch_fill_const!(arith_kernels::ARITH_FILL_CONST_U32, value);
+            }
+            ScalarType::U64 => {
+                let value = u64::from_le_bytes(value_bytes.try_into().unwrap());
+                launch_fill_const!(arith_kernels::ARITH_FILL_CONST_U64, value);
+            }
+            ScalarType::I64 => {
+                let value = i64::from_le_bytes(value_bytes.try_into().unwrap());
+                launch_fill_const!(arith_kernels::ARITH_FILL_CONST_I64, value);
+            }
+            ScalarType::I32 => {
+                let value = i32::from_le_bytes(value_bytes.try_into().unwrap());
+                launch_fill_const!(arith_kernels::ARITH_FILL_CONST_I32, value);
+            }
+            ScalarType::F64 => {
+                let value = f64::from_le_bytes(value_bytes.try_into().unwrap());
+                launch_fill_const!(arith_kernels::ARITH_FILL_CONST_F64, value);
+            }
+            ScalarType::F32 => {
+                let value = f32::from_le_bytes(value_bytes.try_into().unwrap());
+                launch_fill_const!(arith_kernels::ARITH_FILL_CONST_F32, value);
+            }
+            ScalarType::Bool => {
+                let value = value_bytes[0];
+                launch_fill_const!(arith_kernels::ARITH_FILL_CONST_U8, value);
+            }
+        }
+
+        self.device.synchronize()?;
+
+        let schema = Schema::new(vec![("const".to_string(), col_type)]);
+        let mut d_num_rows = self.memory.alloc::<u32>(1)?;
+        self.device
+            .inner()
+            .dtod_copy(d_num_rows_src, &mut d_num_rows)
+            .map_err(|e| XlogError::Kernel(format!("Failed to copy row count: {}", e)))?;
+
+        Ok(CudaBuffer::from_columns(
+            vec![dst_col.into()],
+            row_cap,
+            d_num_rows,
+            schema,
+        ))
     }
 
     /// Element-wise addition of two single-column buffers
@@ -8688,7 +9034,12 @@ impl CudaKernelProvider {
                 unsafe { func.clone().launch(config, (col, n, &mut out)) }
                     .map_err(|e| XlogError::Kernel(format!("abs_i64 failed: {}", e)))?;
                 self.device.synchronize()?;
-                self.buffer_from_columns(vec![out.into()], a.num_rows(), a.schema.clone())
+                self.buffer_from_columns_with_device_count(
+                    vec![out.into()],
+                    a.num_rows(),
+                    a.schema.clone(),
+                    a,
+                )
             }
             Some(ScalarType::I32) => {
                 let expected_bytes = (n as usize)
@@ -8711,7 +9062,12 @@ impl CudaKernelProvider {
                 unsafe { func.clone().launch(config, (col, n, &mut out)) }
                     .map_err(|e| XlogError::Kernel(format!("abs_i32 failed: {}", e)))?;
                 self.device.synchronize()?;
-                self.buffer_from_columns(vec![out.into()], a.num_rows(), a.schema.clone())
+                self.buffer_from_columns_with_device_count(
+                    vec![out.into()],
+                    a.num_rows(),
+                    a.schema.clone(),
+                    a,
+                )
             }
             Some(ScalarType::F64) => {
                 let expected_bytes = (n as usize)
@@ -8734,7 +9090,12 @@ impl CudaKernelProvider {
                 unsafe { func.clone().launch(config, (col, n, &mut out)) }
                     .map_err(|e| XlogError::Kernel(format!("abs_f64 failed: {}", e)))?;
                 self.device.synchronize()?;
-                self.buffer_from_columns(vec![out.into()], a.num_rows(), a.schema.clone())
+                self.buffer_from_columns_with_device_count(
+                    vec![out.into()],
+                    a.num_rows(),
+                    a.schema.clone(),
+                    a,
+                )
             }
             Some(ScalarType::F32) => {
                 let expected_bytes = (n as usize)
@@ -8757,7 +9118,12 @@ impl CudaKernelProvider {
                 unsafe { func.clone().launch(config, (col, n, &mut out)) }
                     .map_err(|e| XlogError::Kernel(format!("abs_f32 failed: {}", e)))?;
                 self.device.synchronize()?;
-                self.buffer_from_columns(vec![out.into()], a.num_rows(), a.schema.clone())
+                self.buffer_from_columns_with_device_count(
+                    vec![out.into()],
+                    a.num_rows(),
+                    a.schema.clone(),
+                    a,
+                )
             }
             Some(ScalarType::U32 | ScalarType::U64 | ScalarType::Bool | ScalarType::Symbol) => {
                 self.clone_buffer(a)
@@ -8943,7 +9309,7 @@ impl CudaKernelProvider {
         self.device.synchronize()?;
 
         let schema = Schema::new(vec![("result".to_string(), ScalarType::F64)]);
-        self.buffer_from_columns(vec![out.into()], base.num_rows(), schema)
+        self.buffer_from_columns_with_device_count(vec![out.into()], base.num_rows(), schema, base)
     }
 
     /// Conditional select between two single-column buffers based on a boolean mask.
@@ -9048,7 +9414,7 @@ impl CudaKernelProvider {
         self.device.synchronize()?;
 
         let schema = Schema::new(vec![("result".to_string(), result_type)]);
-        self.buffer_from_columns(vec![out.into()], mask.num_rows(), schema)
+        self.buffer_from_columns_with_device_count(vec![out.into()], mask.num_rows(), schema, mask)
     }
 
     /// Helper for select_columns when result type is Bool
@@ -9148,7 +9514,7 @@ impl CudaKernelProvider {
 
         self.device.synchronize()?;
 
-        self.buffer_from_columns(vec![out.into()], a.num_rows(), schema)
+        self.buffer_from_columns_with_device_count(vec![out.into()], a.num_rows(), schema, a)
     }
 
     /// Helper for binary arithmetic operations on device.
@@ -9214,7 +9580,7 @@ impl CudaKernelProvider {
             .map_err(|e| XlogError::Kernel(format!("arith binary failed: {}", e)))?;
 
         self.device.synchronize()?;
-        self.buffer_from_columns(vec![out.into()], a.num_rows(), a.schema.clone())
+        self.buffer_from_columns_with_device_count(vec![out.into()], a.num_rows(), a.schema.clone(), a)
     }
 
     /// Combine multiple single-column buffers into a multi-column buffer
@@ -9240,54 +9606,41 @@ impl CudaKernelProvider {
             return self.create_empty_buffer(schema);
         }
 
-        let num_rows = columns[0].num_rows();
+        let row_cap = columns[0].row_cap;
 
-        // Verify all columns have the same number of rows
+        // Verify all columns have the same row capacity and are single-column
         for (i, col) in columns.iter().enumerate() {
-            if col.num_rows() != num_rows {
+            if col.row_cap != row_cap {
                 return Err(XlogError::Kernel(format!(
-                    "Column {} has {} rows, expected {}",
+                    "Column {} has row capacity {}, expected {}",
                     i,
-                    col.num_rows(),
-                    num_rows
+                    col.row_cap,
+                    row_cap
+                )));
+            }
+            if col.arity() != 1 {
+                return Err(XlogError::Kernel(format!(
+                    "Column {} buffer has {} columns, expected 1",
+                    i,
+                    col.arity()
                 )));
             }
         }
 
-        if num_rows == 0 {
-            let schema_cols: Vec<(String, ScalarType)> = types
-                .iter()
-                .enumerate()
-                .map(|(i, t)| (format!("col_{}", i), *t))
-                .collect();
-            let schema = Schema::new(schema_cols);
-            return self.create_empty_buffer(schema);
-        }
+        let device = self.device.inner();
+        let mut d_num_rows = self.memory.alloc::<u32>(1)?;
+        device
+            .dtod_copy(columns[0].num_rows_device(), &mut d_num_rows)
+            .map_err(|e| XlogError::Kernel(format!("Failed to copy row count: {}", e)))?;
 
-        // Extract each single-column buffer's data
         let mut result_columns = Vec::with_capacity(columns.len());
-        for (i, col_buf) in columns.iter().enumerate() {
-            let col_type = types.get(i).copied().unwrap_or(ScalarType::U64);
-            let col_type_size = col_type.size_bytes();
-            let bytes = (num_rows as usize) * col_type_size;
-
-            // Each input buffer should have exactly one column
+        for (i, col_buf) in columns.into_iter().enumerate() {
             let src_col = col_buf
-                .column(0)
+                .columns
+                .into_iter()
+                .next()
                 .ok_or_else(|| XlogError::Kernel(format!("Column {} buffer has no data", i)))?;
-
-            // Copy via host
-            let mut host_data = vec![0u8; bytes];
-            self.dtoh_sync_copy_into_tracked(src_col, &mut host_data)
-                .map_err(|e| XlogError::Kernel(format!("Failed to read column {}: {}", i, e)))?;
-
-            let mut dst_col = self.memory.alloc::<u8>(bytes)?;
-            self.device
-                .inner()
-                .htod_sync_copy_into(&host_data, &mut dst_col)
-                .map_err(|e| XlogError::Kernel(format!("Failed to copy column {}: {}", i, e)))?;
-
-            result_columns.push(dst_col.into());
+            result_columns.push(src_col);
         }
 
         let schema_cols: Vec<(String, ScalarType)> = types
@@ -9297,7 +9650,12 @@ impl CudaKernelProvider {
             .collect();
         let schema = Schema::new(schema_cols);
 
-        self.buffer_from_columns(result_columns, num_rows, schema)
+        Ok(CudaBuffer::from_columns(
+            result_columns,
+            row_cap,
+            d_num_rows,
+            schema,
+        ))
     }
 }
 
@@ -9833,7 +10191,10 @@ mod tests {
         let buffer = create_test_buffer(&provider, &[3, 1, 2, 1, 3, 2], "key");
         let deduped = provider.dedup(&buffer, &[0]).unwrap();
 
-        assert_eq!(deduped.num_rows(), 3, "Should have 3 unique values");
+        let dedup_count = provider
+            .device_row_count(&deduped)
+            .expect("read dedup row count");
+        assert_eq!(dedup_count, 3, "Should have 3 unique values");
 
         let result = provider.download_column_u32(&deduped, 0).unwrap();
         // Result should be sorted and deduped
@@ -9858,8 +10219,11 @@ mod tests {
         let buffer = create_test_buffer(&provider, &input, "key");
         let deduped = provider.dedup(&buffer, &[0]).unwrap();
 
+        let dedup_count = provider
+            .device_row_count(&deduped)
+            .expect("read dedup row count");
         assert_eq!(
-            deduped.num_rows(),
+            dedup_count,
             750,
             "Should have 750 unique values (0..750)"
         );
@@ -10157,7 +10521,10 @@ mod tests {
         );
 
         let result = result.unwrap();
-        assert_eq!(result.num_rows(), 2, "Should have 2 groups");
+        let group_count = provider
+            .device_row_count(&result)
+            .expect("read group count");
+        assert_eq!(group_count, 2, "Should have 2 groups");
 
         // Download results
         let result_values = provider

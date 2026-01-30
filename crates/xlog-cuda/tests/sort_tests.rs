@@ -121,6 +121,35 @@ fn test_sort_duplicates() {
 }
 
 #[test]
+fn test_sort_respects_device_row_count_after_filter() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    let schema = Schema::new(vec![("key".to_string(), ScalarType::U32)]);
+    let keys: Vec<u32> = vec![3, 1, 2];
+    let buffer = provider
+        .create_buffer_from_u32_slice(&keys, schema)
+        .unwrap();
+
+    let mask: Vec<u8> = vec![0, 1, 1];
+    let d_mask = provider
+        .device()
+        .inner()
+        .htod_sync_copy(&mask)
+        .unwrap();
+    let filtered = provider.filter_by_device_mask(&buffer, &d_mask).unwrap();
+
+    let filtered_vals = provider.download_column_u32(&filtered, 0).unwrap();
+    assert_eq!(filtered_vals, vec![1, 2]);
+
+    let sorted = provider.sort(&filtered, &[0]).unwrap();
+    let sorted_vals = provider.download_column_u32(&sorted, 0).unwrap();
+    assert_eq!(sorted_vals, vec![1, 2]);
+}
+
+#[test]
 fn test_sort_reverse() {
     let Some(provider) = setup_provider() else {
         eprintln!("Skipping: no CUDA device");

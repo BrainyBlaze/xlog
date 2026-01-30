@@ -26,7 +26,8 @@
  */
 extern "C" __global__ void radix_histogram(
     const uint32_t* __restrict__ keys,
-    uint32_t num_rows,
+    const uint32_t* __restrict__ num_rows_device,
+    uint32_t row_cap,
     uint32_t* __restrict__ histograms,  // [RADIX_SIZE * grid_size] (digit-major)
     uint32_t shift
 ) {
@@ -38,8 +39,12 @@ extern "C" __global__ void radix_histogram(
     }
     __syncthreads();
 
+    uint32_t actual = num_rows_device[0];
+    if (actual > row_cap) {
+        actual = row_cap;
+    }
     uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (gid < num_rows) {
+    if (gid < actual) {
         uint32_t digit = (keys[gid] >> shift) & (RADIX_SIZE - 1);
         atomicAdd(&local_hist[digit], 1);
     }
@@ -101,20 +106,25 @@ extern "C" __global__ void compute_digit_prefix_sums(
  */
 extern "C" __global__ void compute_ranks(
     const uint32_t* __restrict__ keys,
-    uint32_t num_rows,
+    const uint32_t* __restrict__ num_rows_device,
+    uint32_t row_cap,
     uint32_t* __restrict__ ranks,
     uint32_t shift
 ) {
     __shared__ uint32_t block_digits[BLOCK_SIZE];
 
+    uint32_t actual = num_rows_device[0];
+    if (actual > row_cap) {
+        actual = row_cap;
+    }
     uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
     uint32_t block_start = blockIdx.x * blockDim.x;
-    uint32_t block_end = min(block_start + BLOCK_SIZE, num_rows);
+    uint32_t block_end = min(block_start + BLOCK_SIZE, actual);
     uint32_t block_count = block_end - block_start;
 
     // Load this thread's digit into shared memory
     uint32_t my_digit = 0;
-    if (gid < num_rows) {
+    if (gid < actual) {
         my_digit = (keys[gid] >> shift) & (RADIX_SIZE - 1);
         block_digits[threadIdx.x] = my_digit;
     }
@@ -149,11 +159,16 @@ extern "C" __global__ void radix_scatter_stable(
     uint32_t* __restrict__ indices_out,
     const uint32_t* __restrict__ prefix_sums,     // [RADIX_SIZE] global prefix sums
     const uint32_t* __restrict__ block_offsets,   // [RADIX_SIZE * grid_size] digit-major, exclusive offsets
-    uint32_t num_rows,
+    const uint32_t* __restrict__ num_rows_device,
+    uint32_t row_cap,
     uint32_t shift
 ) {
+    uint32_t actual = num_rows_device[0];
+    if (actual > row_cap) {
+        actual = row_cap;
+    }
     uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (gid >= num_rows) return;
+    if (gid >= actual) return;
 
     uint32_t key = keys_in[gid];
     uint32_t digit = (key >> shift) & (RADIX_SIZE - 1);
@@ -181,7 +196,8 @@ extern "C" __global__ void radix_scatter(
     uint32_t* __restrict__ indices_out,
     const uint32_t* __restrict__ prefix_sums,
     uint32_t* __restrict__ local_offsets,
-    uint32_t num_rows,
+    const uint32_t* __restrict__ num_rows_device,
+    uint32_t row_cap,
     uint32_t shift
 ) {
     __shared__ uint32_t local_prefix[RADIX_SIZE];
@@ -194,8 +210,12 @@ extern "C" __global__ void radix_scatter(
     }
     __syncthreads();
 
+    uint32_t actual = num_rows_device[0];
+    if (actual > row_cap) {
+        actual = row_cap;
+    }
     uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (gid < num_rows) {
+    if (gid < actual) {
         uint32_t key = keys_in[gid];
         uint32_t digit = (key >> shift) & (RADIX_SIZE - 1);
         uint32_t pos = atomicAdd(&local_prefix[digit], 1);
@@ -207,10 +227,15 @@ extern "C" __global__ void radix_scatter(
 /** Initialize identity permutation: indices[i] = i */
 extern "C" __global__ void init_indices(
     uint32_t* __restrict__ indices,
-    uint32_t n
+    const uint32_t* __restrict__ num_rows_device,
+    uint32_t row_cap
 ) {
     uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (gid < n) {
+    uint32_t actual = num_rows_device[0];
+    if (actual > row_cap) {
+        actual = row_cap;
+    }
+    if (gid < actual) {
         indices[gid] = gid;
     }
 }
@@ -220,10 +245,15 @@ extern "C" __global__ void apply_permutation_u32(
     const uint32_t* __restrict__ input,
     uint32_t* __restrict__ output,
     const uint32_t* __restrict__ permutation,
-    uint32_t n
+    const uint32_t* __restrict__ num_rows_device,
+    uint32_t row_cap
 ) {
     uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (gid < n) {
+    uint32_t actual = num_rows_device[0];
+    if (actual > row_cap) {
+        actual = row_cap;
+    }
+    if (gid < actual) {
         output[gid] = input[permutation[gid]];
     }
 }
@@ -233,11 +263,16 @@ extern "C" __global__ void apply_permutation_bytes(
     const uint8_t* __restrict__ input,
     uint8_t* __restrict__ output,
     const uint32_t* __restrict__ permutation,
-    uint32_t num_rows,
+    const uint32_t* __restrict__ num_rows_device,
+    uint32_t row_cap,
     uint32_t elem_size
 ) {
     uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (gid < num_rows) {
+    uint32_t actual = num_rows_device[0];
+    if (actual > row_cap) {
+        actual = row_cap;
+    }
+    if (gid < actual) {
         uint32_t src_idx = permutation[gid];
         for (uint32_t b = 0; b < elem_size; b++) {
             output[gid * elem_size + b] = input[src_idx * elem_size + b];
@@ -265,11 +300,16 @@ __device__ __forceinline__ uint64_t f64_to_ordered_u64(uint64_t bits) {
 extern "C" __global__ void gather_keys_i32_ordered_u32(
     const uint32_t* __restrict__ i32_bits,     // raw bits of i32 values
     const uint32_t* __restrict__ permutation,  // output row -> input row
-    uint32_t num_rows,
+    const uint32_t* __restrict__ num_rows_device,
+    uint32_t row_cap,
     uint32_t* __restrict__ out_keys
 ) {
+    uint32_t actual = num_rows_device[0];
+    if (actual > row_cap) {
+        actual = row_cap;
+    }
     uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (gid >= num_rows) return;
+    if (gid >= actual) return;
     uint32_t src = permutation[gid];
     // Flip sign bit to make signed order match unsigned compare.
     out_keys[gid] = i32_bits[src] ^ 0x80000000u;
@@ -278,11 +318,16 @@ extern "C" __global__ void gather_keys_i32_ordered_u32(
 extern "C" __global__ void gather_keys_f32_ordered_u32(
     const uint32_t* __restrict__ f32_bits,     // raw bits of f32 values
     const uint32_t* __restrict__ permutation,  // output row -> input row
-    uint32_t num_rows,
+    const uint32_t* __restrict__ num_rows_device,
+    uint32_t row_cap,
     uint32_t* __restrict__ out_keys
 ) {
+    uint32_t actual = num_rows_device[0];
+    if (actual > row_cap) {
+        actual = row_cap;
+    }
     uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (gid >= num_rows) return;
+    if (gid >= actual) return;
     uint32_t src = permutation[gid];
     out_keys[gid] = f32_to_ordered_u32(f32_bits[src]);
 }
@@ -290,11 +335,16 @@ extern "C" __global__ void gather_keys_f32_ordered_u32(
 extern "C" __global__ void gather_keys_bool_ordered_u32(
     const uint8_t* __restrict__ bools,         // 0/1 bytes
     const uint32_t* __restrict__ permutation,  // output row -> input row
-    uint32_t num_rows,
+    const uint32_t* __restrict__ num_rows_device,
+    uint32_t row_cap,
     uint32_t* __restrict__ out_keys
 ) {
+    uint32_t actual = num_rows_device[0];
+    if (actual > row_cap) {
+        actual = row_cap;
+    }
     uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (gid >= num_rows) return;
+    if (gid >= actual) return;
     uint32_t src = permutation[gid];
     out_keys[gid] = bools[src] ? 1u : 0u;
 }
@@ -302,11 +352,16 @@ extern "C" __global__ void gather_keys_bool_ordered_u32(
 extern "C" __global__ void gather_keys_u64_lo_u32(
     const uint64_t* __restrict__ vals,
     const uint32_t* __restrict__ permutation,
-    uint32_t num_rows,
+    const uint32_t* __restrict__ num_rows_device,
+    uint32_t row_cap,
     uint32_t* __restrict__ out_keys
 ) {
+    uint32_t actual = num_rows_device[0];
+    if (actual > row_cap) {
+        actual = row_cap;
+    }
     uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (gid >= num_rows) return;
+    if (gid >= actual) return;
     uint64_t v = vals[permutation[gid]];
     out_keys[gid] = (uint32_t)(v & 0xFFFFFFFFull);
 }
@@ -314,11 +369,16 @@ extern "C" __global__ void gather_keys_u64_lo_u32(
 extern "C" __global__ void gather_keys_u64_hi_u32(
     const uint64_t* __restrict__ vals,
     const uint32_t* __restrict__ permutation,
-    uint32_t num_rows,
+    const uint32_t* __restrict__ num_rows_device,
+    uint32_t row_cap,
     uint32_t* __restrict__ out_keys
 ) {
+    uint32_t actual = num_rows_device[0];
+    if (actual > row_cap) {
+        actual = row_cap;
+    }
     uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (gid >= num_rows) return;
+    if (gid >= actual) return;
     uint64_t v = vals[permutation[gid]];
     out_keys[gid] = (uint32_t)(v >> 32);
 }
@@ -326,11 +386,16 @@ extern "C" __global__ void gather_keys_u64_hi_u32(
 extern "C" __global__ void gather_keys_i64_lo_u32(
     const uint64_t* __restrict__ i64_bits,
     const uint32_t* __restrict__ permutation,
-    uint32_t num_rows,
+    const uint32_t* __restrict__ num_rows_device,
+    uint32_t row_cap,
     uint32_t* __restrict__ out_keys
 ) {
+    uint32_t actual = num_rows_device[0];
+    if (actual > row_cap) {
+        actual = row_cap;
+    }
     uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (gid >= num_rows) return;
+    if (gid >= actual) return;
     uint64_t bits = i64_bits[permutation[gid]] ^ 0x8000000000000000ull;
     out_keys[gid] = (uint32_t)(bits & 0xFFFFFFFFull);
 }
@@ -338,11 +403,16 @@ extern "C" __global__ void gather_keys_i64_lo_u32(
 extern "C" __global__ void gather_keys_i64_hi_u32(
     const uint64_t* __restrict__ i64_bits,
     const uint32_t* __restrict__ permutation,
-    uint32_t num_rows,
+    const uint32_t* __restrict__ num_rows_device,
+    uint32_t row_cap,
     uint32_t* __restrict__ out_keys
 ) {
+    uint32_t actual = num_rows_device[0];
+    if (actual > row_cap) {
+        actual = row_cap;
+    }
     uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (gid >= num_rows) return;
+    if (gid >= actual) return;
     uint64_t bits = i64_bits[permutation[gid]] ^ 0x8000000000000000ull;
     out_keys[gid] = (uint32_t)(bits >> 32);
 }
@@ -350,11 +420,16 @@ extern "C" __global__ void gather_keys_i64_hi_u32(
 extern "C" __global__ void gather_keys_f64_lo_u32(
     const uint64_t* __restrict__ f64_bits,
     const uint32_t* __restrict__ permutation,
-    uint32_t num_rows,
+    const uint32_t* __restrict__ num_rows_device,
+    uint32_t row_cap,
     uint32_t* __restrict__ out_keys
 ) {
+    uint32_t actual = num_rows_device[0];
+    if (actual > row_cap) {
+        actual = row_cap;
+    }
     uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (gid >= num_rows) return;
+    if (gid >= actual) return;
     uint64_t ord = f64_to_ordered_u64(f64_bits[permutation[gid]]);
     out_keys[gid] = (uint32_t)(ord & 0xFFFFFFFFull);
 }
@@ -362,11 +437,16 @@ extern "C" __global__ void gather_keys_f64_lo_u32(
 extern "C" __global__ void gather_keys_f64_hi_u32(
     const uint64_t* __restrict__ f64_bits,
     const uint32_t* __restrict__ permutation,
-    uint32_t num_rows,
+    const uint32_t* __restrict__ num_rows_device,
+    uint32_t row_cap,
     uint32_t* __restrict__ out_keys
 ) {
+    uint32_t actual = num_rows_device[0];
+    if (actual > row_cap) {
+        actual = row_cap;
+    }
     uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (gid >= num_rows) return;
+    if (gid >= actual) return;
     uint64_t ord = f64_to_ordered_u64(f64_bits[permutation[gid]]);
     out_keys[gid] = (uint32_t)(ord >> 32);
 }

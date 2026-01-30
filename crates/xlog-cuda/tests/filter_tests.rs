@@ -80,7 +80,8 @@ fn test_filter_no_matches() {
         .unwrap();
     let filtered = provider.filter_u32_eq(&buffer, 0, 99).unwrap();
 
-    assert_eq!(filtered.num_rows(), 0);
+    let result = provider.download_column_u32(&filtered, 0).unwrap();
+    assert!(result.is_empty());
 }
 
 #[test]
@@ -179,22 +180,7 @@ fn download_f64_column(
     buffer: &xlog_cuda::CudaBuffer,
     col_idx: usize,
 ) -> Vec<f64> {
-    let col = buffer.column(col_idx).unwrap();
-    if buffer.num_rows() == 0 {
-        return vec![];
-    }
-    let num_bytes = (buffer.num_rows() as usize) * std::mem::size_of::<f64>();
-    let mut bytes = vec![0u8; num_bytes];
-    provider
-        .device()
-        .inner()
-        .dtoh_sync_copy_into(col, &mut bytes)
-        .unwrap();
-
-    bytes
-        .chunks_exact(8)
-        .map(|c| f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
-        .collect()
+    provider.download_column_f64(buffer, col_idx).unwrap()
 }
 
 #[test]
@@ -349,7 +335,8 @@ fn test_filter_f64_no_matches() {
     let buffer = create_f64_buffer(&provider, &values, "col0");
 
     let filtered = provider.filter_f64_eq(&buffer, 0, 99.0).unwrap();
-    assert_eq!(filtered.num_rows(), 0);
+    let result = provider.download_column_f64(&filtered, 0).unwrap();
+    assert!(result.is_empty());
 }
 
 #[test]

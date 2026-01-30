@@ -38,11 +38,21 @@ extern "C" __global__ void mark_unique_columnar(
     const uint32_t* __restrict__ col_sizes,
     const uint8_t* __restrict__ col_types,
     uint32_t num_key_cols,
-    uint32_t num_rows,
+    const uint32_t* __restrict__ num_rows_device,
+    uint32_t row_cap,
     uint8_t* __restrict__ unique_mask
 ) {
     uint32_t row = blockIdx.x * blockDim.x + threadIdx.x;
-    if (row >= num_rows) return;
+    if (row >= row_cap) return;
+
+    uint32_t num_rows = *num_rows_device;
+    if (num_rows > row_cap) {
+        num_rows = row_cap;
+    }
+    if (row >= num_rows) {
+        unique_mask[row] = 0;
+        return;
+    }
 
     if (row == 0) {
         unique_mask[0] = 1;
@@ -118,7 +128,8 @@ extern "C" __global__ void mark_unique_and_scan_columnar(
     const uint32_t* __restrict__ col_sizes,
     const uint8_t* __restrict__ col_types,
     uint32_t num_key_cols,
-    uint32_t num_rows,
+    const uint32_t* __restrict__ num_rows_device,
+    uint32_t row_cap,
     uint8_t* __restrict__ unique_mask,
     uint32_t* __restrict__ prefix_sum,
     uint32_t* __restrict__ block_sums
@@ -129,69 +140,78 @@ extern "C" __global__ void mark_unique_and_scan_columnar(
     uint32_t row = blockIdx.x * blockDim.x + threadIdx.x;
 
     uint32_t val = 0;
-    if (row < num_rows) {
-        uint8_t unique = 0;
-        if (row == 0) {
-            unique = 1;
-        } else {
-            bool is_dup = true;
-            for (uint32_t c = 0; c < num_key_cols; c++) {
-                uint8_t ty = col_types[c];
-                uint64_t base = col_ptrs[c];
+    if (row < row_cap) {
+        uint32_t num_rows = *num_rows_device;
+        if (num_rows > row_cap) {
+            num_rows = row_cap;
+        }
+        if (row < num_rows) {
+            uint8_t unique = 0;
+            if (row == 0) {
+                unique = 1;
+            } else {
+                bool is_dup = true;
+                for (uint32_t c = 0; c < num_key_cols; c++) {
+                    uint8_t ty = col_types[c];
+                    uint64_t base = col_ptrs[c];
 
-                if (ty == XLOG_TY_F64) {
-                    const uint64_t* col = (const uint64_t*)(uintptr_t)base;
-                    uint64_t a = col[row - 1];
-                    uint64_t b = col[row];
-                    if (!xlog_f64_equal(a, b)) {
-                        is_dup = false;
-                        break;
-                    }
-                } else if (ty == XLOG_TY_F32) {
-                    const uint32_t* col = (const uint32_t*)(uintptr_t)base;
-                    uint32_t a = col[row - 1];
-                    uint32_t b = col[row];
-                    if (!xlog_f32_equal(a, b)) {
-                        is_dup = false;
-                        break;
-                    }
-                } else if (ty == XLOG_TY_U64 || ty == XLOG_TY_I64) {
-                    const uint64_t* col = (const uint64_t*)(uintptr_t)base;
-                    if (col[row - 1] != col[row]) {
-                        is_dup = false;
-                        break;
-                    }
-                } else if (ty == XLOG_TY_U32 || ty == XLOG_TY_I32 || ty == XLOG_TY_SYMBOL) {
-                    const uint32_t* col = (const uint32_t*)(uintptr_t)base;
-                    if (col[row - 1] != col[row]) {
-                        is_dup = false;
-                        break;
-                    }
-                } else if (ty == XLOG_TY_BOOL) {
-                    const uint8_t* col = (const uint8_t*)(uintptr_t)base;
-                    if (col[row - 1] != col[row]) {
-                        is_dup = false;
-                        break;
-                    }
-                } else {
-                    const uint8_t* col = (const uint8_t*)(uintptr_t)base;
-                    uint32_t sz = col_sizes[c];
-                    const uint8_t* a = col + (uint64_t)(row - 1) * sz;
-                    const uint8_t* b = col + (uint64_t)row * sz;
-                    for (uint32_t i = 0; i < sz; i++) {
-                        if (a[i] != b[i]) {
+                    if (ty == XLOG_TY_F64) {
+                        const uint64_t* col = (const uint64_t*)(uintptr_t)base;
+                        uint64_t a = col[row - 1];
+                        uint64_t b = col[row];
+                        if (!xlog_f64_equal(a, b)) {
                             is_dup = false;
                             break;
                         }
+                    } else if (ty == XLOG_TY_F32) {
+                        const uint32_t* col = (const uint32_t*)(uintptr_t)base;
+                        uint32_t a = col[row - 1];
+                        uint32_t b = col[row];
+                        if (!xlog_f32_equal(a, b)) {
+                            is_dup = false;
+                            break;
+                        }
+                    } else if (ty == XLOG_TY_U64 || ty == XLOG_TY_I64) {
+                        const uint64_t* col = (const uint64_t*)(uintptr_t)base;
+                        if (col[row - 1] != col[row]) {
+                            is_dup = false;
+                            break;
+                        }
+                    } else if (ty == XLOG_TY_U32 || ty == XLOG_TY_I32 || ty == XLOG_TY_SYMBOL) {
+                        const uint32_t* col = (const uint32_t*)(uintptr_t)base;
+                        if (col[row - 1] != col[row]) {
+                            is_dup = false;
+                            break;
+                        }
+                    } else if (ty == XLOG_TY_BOOL) {
+                        const uint8_t* col = (const uint8_t*)(uintptr_t)base;
+                        if (col[row - 1] != col[row]) {
+                            is_dup = false;
+                            break;
+                        }
+                    } else {
+                        const uint8_t* col = (const uint8_t*)(uintptr_t)base;
+                        uint32_t sz = col_sizes[c];
+                        const uint8_t* a = col + (uint64_t)(row - 1) * sz;
+                        const uint8_t* b = col + (uint64_t)row * sz;
+                        for (uint32_t i = 0; i < sz; i++) {
+                            if (a[i] != b[i]) {
+                                is_dup = false;
+                                break;
+                            }
+                        }
+                        if (!is_dup) break;
                     }
-                    if (!is_dup) break;
                 }
+                unique = is_dup ? 0 : 1;
             }
-            unique = is_dup ? 0 : 1;
-        }
 
-        unique_mask[row] = unique;
-        val = (uint32_t)unique;
+            unique_mask[row] = unique;
+            val = (uint32_t)unique;
+        } else {
+            unique_mask[row] = 0;
+            val = 0;
+        }
     }
 
     temp[tid] = val;
@@ -211,7 +231,7 @@ extern "C" __global__ void mark_unique_and_scan_columnar(
     uint32_t inclusive = temp[tid];
     uint32_t exclusive = (tid == 0) ? 0 : temp[tid - 1];
 
-    if (row < num_rows) {
+    if (row < row_cap) {
         prefix_sum[row] = exclusive;
     }
 
