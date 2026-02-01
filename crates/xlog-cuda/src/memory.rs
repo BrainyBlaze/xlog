@@ -664,14 +664,12 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Number of columns")]
     fn test_cuda_buffer_from_columns_mismatch() {
         let schema = Schema::new(vec![
             ("col1".to_string(), ScalarType::U32),
             ("col2".to_string(), ScalarType::U32),
         ]);
 
-        // This should panic: 0 columns but schema has 2
         let Some(device) = try_device() else {
             return;
         };
@@ -683,6 +681,11 @@ mod tests {
             .inner()
             .htod_sync_copy_into(&[100u32], &mut d_num_rows)
             .expect("Upload row count");
-        CudaBuffer::from_columns(vec![], 100, d_num_rows, schema);
+
+        // This should panic: 0 columns but schema has 2.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            CudaBuffer::from_columns(vec![], 100, d_num_rows, schema);
+        }));
+        assert!(result.is_err(), "Expected from_columns to panic on schema mismatch");
     }
 }
