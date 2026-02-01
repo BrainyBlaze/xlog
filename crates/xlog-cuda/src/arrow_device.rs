@@ -148,8 +148,11 @@ impl ArrowDeviceArrayOwned {
             drop(Box::from_raw(ptr));
         }
 
-        let array = std::ptr::read(array_ptr);
-        let schema = std::ptr::read(schema_ptr);
+        // Take ownership of the exported FFI structs and free the heap allocations
+        // that held them. The returned values will run their own `Drop` (calling
+        // the Arrow C-Data release callbacks) when eventually dropped.
+        let array = *Box::from_raw(array_ptr);
+        let schema = *Box::from_raw(schema_ptr);
         (device_type, device_id, array, schema)
     }
 }
