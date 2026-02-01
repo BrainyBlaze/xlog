@@ -11,6 +11,7 @@ use std::sync::Arc;
 use cudarc::driver::CudaSlice;
 use xlog_core::{MemoryBudget, Result, Schema, XlogError};
 
+use crate::arrow_device::ArrowDeviceImport;
 use crate::dlpack::DlpackManagedTensor;
 use crate::CudaDevice;
 
@@ -255,16 +256,24 @@ impl GpuMemoryManager {
 /// Column data stored in device memory.
 ///
 /// Most columns are owned by XLOG (`Owned`) and tracked against the memory budget. Columns may
-/// also be imported via DLPack (`Dlpack`) without copies; these are freed via the DLPack deleter.
+/// also be imported via DLPack (`Dlpack`) or Arrow device (`ArrowDevice`) without copies; these are
+/// freed via the DLPack deleter or Arrow release callback.
 pub enum CudaColumn {
     Owned(TrackedCudaSlice<u8>),
     Dlpack(DlpackColumn),
+    ArrowDevice(ArrowDeviceColumn),
 }
 
 pub struct DlpackColumn {
     ptr: cudarc::driver::sys::CUdeviceptr,
     len_bytes: usize,
     _tensor: DlpackManagedTensor,
+}
+
+pub struct ArrowDeviceColumn {
+    ptr: cudarc::driver::sys::CUdeviceptr,
+    len_bytes: usize,
+    _import: Arc<ArrowDeviceImport>,
 }
 
 impl CudaColumn {
@@ -283,6 +292,18 @@ impl CudaColumn {
             _tensor: tensor,
         })
     }
+
+    pub fn arrow_device(
+        ptr: cudarc::driver::sys::CUdeviceptr,
+        len_bytes: usize,
+        import: Arc<ArrowDeviceImport>,
+    ) -> Self {
+        Self::ArrowDevice(ArrowDeviceColumn {
+            ptr,
+            len_bytes,
+            _import: import,
+        })
+    }
 }
 
 impl From<TrackedCudaSlice<u8>> for CudaColumn {
@@ -296,6 +317,7 @@ impl cudarc::driver::DeviceSlice<u8> for CudaColumn {
         match self {
             CudaColumn::Owned(slice) => slice.len(),
             CudaColumn::Dlpack(col) => col.len_bytes,
+            CudaColumn::ArrowDevice(col) => col.len_bytes,
         }
     }
 }
@@ -305,6 +327,7 @@ impl cudarc::driver::DevicePtr<u8> for CudaColumn {
         match self {
             CudaColumn::Owned(slice) => cudarc::driver::DevicePtr::device_ptr(slice),
             CudaColumn::Dlpack(col) => &col.ptr,
+            CudaColumn::ArrowDevice(col) => &col.ptr,
         }
     }
 }
@@ -314,6 +337,7 @@ impl cudarc::driver::DevicePtrMut<u8> for CudaColumn {
         match self {
             CudaColumn::Owned(slice) => cudarc::driver::DevicePtrMut::device_ptr_mut(slice),
             CudaColumn::Dlpack(col) => &mut col.ptr,
+            CudaColumn::ArrowDevice(col) => &mut col.ptr,
         }
     }
 }

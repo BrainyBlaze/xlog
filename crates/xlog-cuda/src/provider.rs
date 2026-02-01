@@ -5602,6 +5602,121 @@ impl CudaKernelProvider {
         ))
     }
 
+    /// Import Arrow C Data Interface (device-resident) into a CudaBuffer (zero-copy).
+    ///
+    /// This is an experimental API gated behind the `arrow-device-import` feature.
+    #[cfg(feature = "arrow-device-import")]
+    pub fn from_arrow_device_record_batch(
+        &self,
+        device_array: crate::arrow_device::ArrowDeviceArrayOwned,
+    ) -> Result<CudaBuffer> {
+        use arrow::array::ArrayData;
+        use arrow::datatypes::DataType;
+        use arrow::ffi::from_ffi;
+        use std::sync::Arc;
+
+        use crate::arrow_device::{ArrowDeviceImport, ARROW_DEVICE_CUDA};
+
+        let (device_type, device_id, ffi_array, ffi_schema) =
+            unsafe { device_array.into_ffi_parts() };
+
+        if device_type != ARROW_DEVICE_CUDA {
+            return Err(XlogError::Kernel(format!(
+                "Arrow device import requires CUDA device type={}, got {}",
+                ARROW_DEVICE_CUDA, device_type
+            )));
+        }
+        if device_id != self.device.ordinal() as i32 {
+            return Err(XlogError::Kernel(format!(
+                "Arrow device import device id mismatch: expected {}, got {}",
+                self.device.ordinal(),
+                device_id
+            )));
+        }
+
+        let data: ArrayData = unsafe { from_ffi(ffi_array, &ffi_schema) }
+            .map_err(|e| XlogError::Kernel(format!("Arrow device import failed: {}", e)))?;
+
+        let (fields, children) = match data.data_type() {
+            DataType::Struct(fields) => (fields.clone(), data.child_data().to_vec()),
+            other => {
+                return Err(XlogError::Kernel(format!(
+                    "Arrow device import expects Struct, got {:?}",
+                    other
+                )))
+            }
+        };
+
+        if data.offset() != 0 {
+            return Err(XlogError::Kernel(
+                "Arrow device import does not support non-zero offsets".to_string(),
+            ));
+        }
+        if data.null_count() > 0 || data.nulls().is_some() {
+            return Err(XlogError::Kernel(
+                "Arrow device import does not support nulls".to_string(),
+            ));
+        }
+
+        let num_rows = data.len();
+        if fields.len() != children.len() {
+            return Err(XlogError::Kernel(
+                "Arrow device import field/child length mismatch".to_string(),
+            ));
+        }
+
+        let keepalive = Arc::new(ArrowDeviceImport::new(data));
+        let mut columns = Vec::with_capacity(children.len());
+        let mut schema_cols = Vec::with_capacity(children.len());
+
+        for (field, child) in fields.iter().zip(children.iter()) {
+            if child.len() != num_rows {
+                return Err(XlogError::Kernel(
+                    "Arrow device import child length mismatch".to_string(),
+                ));
+            }
+            if child.offset() != 0 {
+                return Err(XlogError::Kernel(
+                    "Arrow device import does not support child offsets".to_string(),
+                ));
+            }
+            if child.null_count() > 0 || child.nulls().is_some() {
+                return Err(XlogError::Kernel(
+                    "Arrow device import does not support child nulls".to_string(),
+                ));
+            }
+
+            let (scalar_type, elem_size) = Self::scalar_type_from_arrow_field(field)?;
+            let buffers = child.buffers();
+            let buf = buffers.get(0).ok_or_else(|| {
+                XlogError::Kernel("Arrow device import missing value buffer".to_string())
+            })?;
+            let len_bytes = buf.len();
+            let expected_bytes = num_rows
+                .checked_mul(elem_size)
+                .ok_or_else(|| XlogError::Kernel("Arrow device import size overflow".to_string()))?;
+            if len_bytes != expected_bytes {
+                return Err(XlogError::Kernel(format!(
+                    "Arrow device import buffer size mismatch: expected {}, got {}",
+                    expected_bytes, len_bytes
+                )));
+            }
+
+            let ptr = buf.as_ptr();
+            if ptr.is_null() && len_bytes > 0 {
+                return Err(XlogError::Kernel(
+                    "Arrow device import got null buffer pointer".to_string(),
+                ));
+            }
+            let device_ptr = ptr as usize as cudarc::driver::sys::CUdeviceptr;
+            columns.push(CudaColumn::arrow_device(device_ptr, len_bytes, keepalive.clone()));
+            schema_cols.push((field.name().to_string(), scalar_type));
+        }
+
+        let schema = Schema::new(schema_cols);
+        self.buffer_from_columns(columns, num_rows as u64, schema)
+    }
+
     /// Export CudaBuffer to Arrow RecordBatch
     ///
     /// Downloads data from GPU and converts it to an Arrow RecordBatch for
@@ -5833,6 +5948,40 @@ impl CudaKernelProvider {
             .map_err(|e| XlogError::Kernel(format!("Arrow device export failed: {}", e)))?;
 
         Ok((field, data))
+    }
+
+    #[cfg(feature = "arrow-device-import")]
+    fn scalar_type_from_arrow_field(field: &arrow::datatypes::Field) -> Result<(ScalarType, usize)> {
+        use arrow::datatypes::DataType;
+
+        // Arrow's Field metadata is a map (possibly empty), not an Option.
+        let is_symbol = field
+            .metadata()
+            .get("xlog.symbol")
+            .map(|v| v == "true")
+            .unwrap_or(false);
+
+        let scalar = match field.data_type() {
+            DataType::Boolean => {
+                return Err(XlogError::Kernel(
+                    "Arrow device import does not support bit-packed bool yet".to_string(),
+                ))
+            }
+            DataType::UInt32 if is_symbol => ScalarType::Symbol,
+            dt => ScalarType::from_arrow_type(dt).ok_or_else(|| {
+                XlogError::Kernel(format!(
+                    "Arrow device import unsupported type {:?}",
+                    dt
+                ))
+            })?,
+        };
+
+        let elem_size = match scalar {
+            ScalarType::Symbol => 4usize,
+            _ => scalar.size_bytes(),
+        };
+
+        Ok((scalar, elem_size))
     }
 
     /// Import Arrow RecordBatch to CudaBuffer

@@ -111,3 +111,45 @@ impl ArrowDeviceArray {
         }
     }
 }
+
+/// Keepalive wrapper for imported Arrow device arrays.
+///
+/// Holds the Arrow ArrayData so the FFI buffers remain alive until all
+/// device-backed columns are dropped.
+pub struct ArrowDeviceImport {
+    _data: arrow::array::ArrayData,
+}
+
+impl ArrowDeviceImport {
+    pub fn new(data: arrow::array::ArrayData) -> Self {
+        Self { _data: data }
+    }
+}
+
+impl ArrowDeviceArrayOwned {
+    /// Take ownership of the underlying FFI array + schema.
+    ///
+    /// # Safety
+    /// The caller must ensure the returned FFI objects are eventually released.
+    pub unsafe fn into_ffi_parts(self) -> (i32, i32, FFI_ArrowArray, FFI_ArrowSchema) {
+        let ptr = self.into_raw();
+        let dev = &mut *ptr;
+        let device_type = dev.device_type;
+        let device_id = dev.device_id;
+
+        let array_ptr = dev.array;
+        let schema_ptr = dev.schema;
+        dev.array = std::ptr::null_mut();
+        dev.schema = std::ptr::null_mut();
+
+        if let Some(release) = dev.release {
+            release(ptr);
+        } else {
+            drop(Box::from_raw(ptr));
+        }
+
+        let array = std::ptr::read(array_ptr);
+        let schema = std::ptr::read(schema_ptr);
+        (device_type, device_id, array, schema)
+    }
+}

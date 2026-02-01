@@ -10,3 +10,7 @@ arrow = { version = "53", default-features = false, features = ["ffi", "ipc"] }
 
 [dev-dependencies]
 bytemuck = "1.14"
+
+[features]
+default = []
+arrow-device-import = []
