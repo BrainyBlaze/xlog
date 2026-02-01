@@ -24,6 +24,7 @@ Thumbs.db
 
 # Debug
 *.log
+.worktrees
 .worktrees/
 
 # Local build shim artifacts (generated)
