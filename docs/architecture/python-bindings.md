@@ -8,7 +8,11 @@ The `pyxlog` Python module provides:
 
 - Deterministic Datalog execution via `LogicProgram`
 - Probabilistic inference via `Program`
-- Zero-copy GPU tensor exchange via DLPack
+- Zero-copy GPU tensor exchange via DLPack (primary interop boundary)
+- Optional experimental Arrow C Device interop (feature-gated)
+
+Host-read convenience outputs (probabilities, gradients, confidence intervals) are behind a `host-io`
+Cargo feature so GPU-native call sites can enforce a "no DTOH for results" contract.
 
 ## Installation
 
@@ -16,6 +20,18 @@ The `pyxlog` Python module provides:
 cd crates/pyxlog
 pip install maturin
 maturin develop --release
+```
+
+### Build Features
+
+- `host-io`: enable host-read convenience APIs (e.g. `CompiledProgram.evaluate(...)`)
+- `arrow-device-import`: enable experimental Arrow C Device export/import helpers
+
+Example:
+
+```bash
+maturin develop --release -m crates/pyxlog/Cargo.toml --features host-io
+maturin develop --release -m crates/pyxlog/Cargo.toml --features arrow-device-import
 ```
 
 ## Package Details
@@ -33,6 +49,7 @@ maturin develop --release
 
 ```python
 import pyxlog
+import torch
 
 # Compile a deterministic program
 program = pyxlog.LogicProgram.compile("""
@@ -48,13 +65,36 @@ program = pyxlog.LogicProgram.compile("""
 """)
 
 # Execute and get results
-results = program.evaluate()
+result = program.evaluate()
 
-# Results are DLPack capsules
-for name, capsule in results.items():
-    import torch
-    tensor = torch.from_dlpack(capsule)
-    print(f"{name}: {tensor}")
+# Results are a list of query outputs (relations) with per-column DLPack tensors
+for q in result.queries:
+    print(q.relation_name, q.columns, q.num_rows, q.is_true)
+    cols = [torch.from_dlpack(t) for t in q.tensors]
+    print(cols)
+```
+
+#### Supplying Input Relations (DLPack)
+
+`CompiledLogicProgram.evaluate(dlpack_inputs=...)` accepts a dict mapping relation name to a
+sequence of DLPack columns.
+
+```python
+import pyxlog
+import torch
+
+program = pyxlog.LogicProgram.compile("""
+    pred edge(u32, u32).
+    pred reach(u32, u32).
+    reach(X, Y) :- edge(X, Y).
+    ?- reach(1, N).
+""")
+
+# Two 1D columns, not a 2D tensor.
+edge_a = torch.tensor([1, 2, 3], device="cuda", dtype=torch.int32)
+edge_b = torch.tensor([2, 3, 4], device="cuda", dtype=torch.int32)
+
+result = program.evaluate(dlpack_inputs={"edge": [edge_a, edge_b]})
 ```
 
 ### Program (Probabilistic)
@@ -74,7 +114,14 @@ program = pyxlog.Program.compile("""
     query(wet).
 """, prob_engine="exact_ddnnf")
 
-# Evaluate (probabilities are returned as DLPack capsules)
+```
+
+#### Host Outputs (Requires `host-io`)
+
+When built with `--features host-io`, you can call `CompiledProgram.evaluate(...)` to get host-derived
+probability outputs as device tensors (DLPack):
+
+```python
 result = program.evaluate()
 import torch
 prob = torch.from_dlpack(result.prob)       # f64 CUDA tensor, shape [num_queries]
@@ -91,7 +138,29 @@ grad_true0 = torch.from_dlpack(result.grad_true[0])   # f64 CUDA tensor, shape [
 grad_false0 = torch.from_dlpack(result.grad_false[0]) # f64 CUDA tensor, shape [num_vars]
 ```
 
-### Monte Carlo Inference
+#### Monte Carlo Inference (Device-Only)
+
+For GPU-native workflows, prefer `CompiledProgram.evaluate_device(...)` (no host reads for results).
+
+```python
+program = pyxlog.Program.compile(source, prob_engine="mc")
+
+device_result = program.evaluate_device(
+    samples=10000,
+    seed=42,
+    confidence=0.95,
+)
+
+import torch
+query_counts = torch.from_dlpack(device_result.query_counts)       # int32 CUDA tensor, shape [num_queries]
+evidence_count = torch.from_dlpack(device_result.evidence_count)   # int32 CUDA tensor, shape [1]
+print(device_result.total_samples, device_result.seed, device_result.confidence)
+```
+
+#### Monte Carlo Inference (Host Outputs, Requires `host-io`)
+
+When built with `--features host-io`, `CompiledProgram.evaluate(...)` computes probabilities and
+confidence intervals and uploads them as device tensors (DLPack):
 
 ```python
 program = pyxlog.Program.compile(source, prob_engine="mc")
@@ -111,6 +180,17 @@ print(f"P(query) = {float(prob[0].item())} ± {float(stderr[0].item())}")  # hos
 print(f"95% CI: [{float(ci_low[0].item())}, {float(ci_high[0].item())}]") # host reads
 ```
 
+### Experimental Arrow C Device Interop (Feature `arrow-device-import`)
+
+When built with `--features arrow-device-import`, `pyxlog` exposes:
+
+- `pyxlog.export_arrow_device(...) -> PyCapsule` (name `arrow_device_array`)
+- `pyxlog.import_arrow_device(...) -> (dlpack_tensors, names, num_rows)`
+
+These helpers exist to bridge between DLPack columns and Arrow's C Device interface without host
+copies. This is experimental and currently rejects nulls; import does not yet support bit-packed
+`Bool`.
+
 ## DLPack Integration
 
 All GPU data is exchanged via DLPack capsules, enabling zero-copy interop with:
@@ -127,30 +207,29 @@ All GPU data is exchanged via DLPack capsules, enabling zero-copy interop with:
 import torch
 import pyxlog
 
-# Create GPU tensor
-edge_tensor = torch.tensor([[1, 2], [2, 3], [3, 4]], device='cuda')
+# Create GPU columns
+edge_a = torch.tensor([1, 2, 3], device="cuda", dtype=torch.int32)
+edge_b = torch.tensor([2, 3, 4], device="cuda", dtype=torch.int32)
 
-# Pass as input
+# Pass as input (relation name -> sequence of columns)
 program = pyxlog.LogicProgram.compile(source)
-results = program.evaluate(dlpack_inputs={
-    'edge': edge_tensor.__dlpack__()
-})
+result = program.evaluate(dlpack_inputs={"edge": [edge_a, edge_b]})
 ```
 
 ### Output via DLPack
 
 ```python
-results = program.evaluate()
+result = program.evaluate()
 
 # Convert to PyTorch
 import torch
-for name, capsule in results.items():
-    tensor = torch.from_dlpack(capsule)
+for q in result.queries:
+    cols = [torch.from_dlpack(t) for t in q.tensors]
 
 # Convert to CuPy
 import cupy
-for name, capsule in results.items():
-    array = cupy.from_dlpack(capsule)
+for q in result.queries:
+    cols = [cupy.from_dlpack(t) for t in q.tensors]
 ```
 
 ### dlpack_roundtrip Helper
@@ -193,14 +272,19 @@ program = pyxlog.Program.compile(
 ### Deterministic Results
 
 ```python
-results = program.evaluate()
-# dict[str, PyCapsule]: relation name → DLPack capsule
+result = program.evaluate()
+
+result.queries             # list[LogicQueryResult]
+result.queries[0].tensors  # list[PyCapsule] (DLPack), one per column
+result.queries[0].columns  # list[str]
+result.queries[0].num_rows # int
+result.queries[0].is_true  # bool
 ```
 
 ### Probabilistic Results
 
 ```python
-result = program.evaluate()
+result = program.evaluate()  # requires host-io
 result.atoms         # list[str]: query atoms (stringified)
 result.prob          # PyCapsule: DLPack f64 vector of probabilities (len = num_queries)
 result.log_prob      # PyCapsule: DLPack f64 vector of log-probabilities (len = num_queries)
@@ -218,6 +302,17 @@ result.samples       # Optional[int]
 result.evidence_samples # Optional[int]
 result.seed          # Optional[int]
 result.confidence    # Optional[float]
+```
+
+### Device-Only MC Results
+
+```python
+device_result = program.evaluate_device(...)
+device_result.query_counts    # PyCapsule: DLPack int32 vector (len = num_queries)
+device_result.evidence_count  # PyCapsule: DLPack int32 vector (len = 1)
+device_result.total_samples   # int
+device_result.seed            # int
+device_result.confidence      # float
 ```
 
 ## Error Handling
