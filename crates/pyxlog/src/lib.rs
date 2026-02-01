@@ -1127,8 +1127,24 @@ impl CompiledProgram {
             )
             .map_err(|e| PyRuntimeError::new_err(format!("Neural fast-path error: {}", e)))?;
 
-        let loss_buf =
-            xlog_cuda::CudaBuffer::from_columns(vec![loss_dev.into_bytes().into()], 1, schema_f64);
+        // `CudaBuffer` carries the row count on-device. For a single scalar loss, upload 1.
+        let mut d_num_rows = self
+            .output_provider
+            .memory()
+            .alloc::<u32>(1)
+            .map_err(|e| PyRuntimeError::new_err(format!("GPU allocation failed: {}", e)))?;
+        self.output_provider
+            .device()
+            .inner()
+            .htod_sync_copy_into(&[1u32], &mut d_num_rows)
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to set row count: {}", e)))?;
+
+        let loss_buf = xlog_cuda::CudaBuffer::from_columns(
+            vec![loss_dev.into_bytes().into()],
+            1,
+            d_num_rows,
+            schema_f64,
+        );
         let loss_dl = self
             .output_provider
             .to_dlpack_table(loss_buf)
@@ -1329,14 +1345,23 @@ impl CompiledProgram {
         num_inputs: usize,
         num_labels: usize,
     ) -> PyResult<CachedCircuit> {
-        let expanded_source = self.generate_template_source(pred_name, num_inputs, num_labels)?;
+        #[cfg(not(feature = "host-io"))]
+        {
+            let _ = (pred_name, num_inputs, num_labels);
+            return Err(host_io_disabled_pyerr());
+        }
 
-        let program = ExactDdnnfProgram::compile_source_with_gpu(&expanded_source, self.gpu_config)
-            .map_err(|e| PyRuntimeError::new_err(format!("Query compilation error: {}", e)))?;
-
-        let mut groups: Vec<Vec<u32>> = Vec::with_capacity(num_inputs);
         #[cfg(feature = "host-io")]
         {
+            let expanded_source =
+                self.generate_template_source(pred_name, num_inputs, num_labels)?;
+
+            let program =
+                ExactDdnnfProgram::compile_source_with_gpu(&expanded_source, self.gpu_config)
+                    .map_err(|e| {
+                        PyRuntimeError::new_err(format!("Query compilation error: {}", e))
+                    })?;
+
             let random_vars = program.random_var_indices();
             let expected = num_inputs
                 .checked_mul(num_labels)
@@ -1352,25 +1377,22 @@ impl CompiledProgram {
                 )));
             }
 
+            let mut groups: Vec<Vec<u32>> = Vec::with_capacity(num_inputs);
             for input_pos in 0..num_inputs {
                 let start = input_pos * num_labels;
                 let end = start + num_labels;
                 groups.push(random_vars[start..end].to_vec());
             }
-        }
-        #[cfg(not(feature = "host-io"))]
-        {
-            return Err(host_io_disabled_pyerr());
-        }
 
-        let slots = GpuWeightSlots::upload(self.output_provider.as_ref(), &groups)
-            .map_err(|e| PyRuntimeError::new_err(format!("Slot map upload error: {}", e)))?;
+            let slots = GpuWeightSlots::upload(self.output_provider.as_ref(), &groups)
+                .map_err(|e| PyRuntimeError::new_err(format!("Slot map upload error: {}", e)))?;
 
-        Ok(CachedCircuit {
-            program,
-            slots,
-            num_labels,
-        })
+            Ok(CachedCircuit {
+                program,
+                slots,
+                num_labels,
+            })
+        }
     }
 
     /// Get the label index for a given label string.
@@ -1419,23 +1441,31 @@ impl CompiledProgram {
 
     /// Evaluate probabilities for multiple queries by compiling a temporary program.
     fn evaluate_query_probabilities(&self, queries: &[String]) -> PyResult<Vec<f64>> {
-        // Build source with queries appended
-        let mut source_with_queries = self.source.clone();
-        for query in queries {
-            source_with_queries.push_str(&format!("\nquery({}).", query));
+        #[cfg(not(feature = "host-io"))]
+        {
+            let _ = queries;
+            return Err(host_io_disabled_pyerr());
         }
 
-        // Compile and evaluate the temporary program
-        let result = match self.prob_engine {
-            ProbEngine::ExactDdnnf => {
-                let program = ExactDdnnfProgram::compile_source_with_gpu(
-                    &source_with_queries,
-                    self.gpu_config,
-                )
-                .map_err(|e| PyRuntimeError::new_err(format!("Query compilation error: {}", e)))?;
+        #[cfg(feature = "host-io")]
+        {
+            // Build source with queries appended
+            let mut source_with_queries = self.source.clone();
+            for query in queries {
+                source_with_queries.push_str(&format!("\nquery({}).", query));
+            }
 
-                #[cfg(feature = "host-io")]
-                {
+            // Compile and evaluate the temporary program
+            let result: Vec<QueryProbability> = match self.prob_engine {
+                ProbEngine::ExactDdnnf => {
+                    let program = ExactDdnnfProgram::compile_source_with_gpu(
+                        &source_with_queries,
+                        self.gpu_config,
+                    )
+                    .map_err(|e| {
+                        PyRuntimeError::new_err(format!("Query compilation error: {}", e))
+                    })?;
+
                     program
                         .evaluate()
                         .map_err(|e| {
@@ -1443,21 +1473,14 @@ impl CompiledProgram {
                         })?
                         .query_probs
                 }
-                #[cfg(not(feature = "host-io"))]
-                {
-                    return Err(host_io_disabled_pyerr());
-                }
-            }
-            ProbEngine::Mc => {
-                let program =
-                    McProgram::compile_source_with_gpu(&source_with_queries, self.gpu_config)
-                        .map_err(|e| {
-                            PyRuntimeError::new_err(format!("Query compilation error: {}", e))
-                        })?;
+                ProbEngine::Mc => {
+                    let program =
+                        McProgram::compile_source_with_gpu(&source_with_queries, self.gpu_config)
+                            .map_err(|e| {
+                                PyRuntimeError::new_err(format!("Query compilation error: {}", e))
+                            })?;
 
-                let cfg = McEvalConfig::default();
-                #[cfg(feature = "host-io")]
-                {
+                    let cfg = McEvalConfig::default();
                     program
                         .evaluate(cfg)
                         .map_err(|e| {
@@ -1472,27 +1495,22 @@ impl CompiledProgram {
                         })
                         .collect()
                 }
-                #[cfg(not(feature = "host-io"))]
-                {
-                    let _ = cfg;
-                    return Err(host_io_disabled_pyerr());
-                }
+            };
+
+            // Extract probabilities in query order
+            // The results should be in the same order as queries were added
+            let probs: Vec<f64> = result.iter().map(|qp| qp.prob).collect();
+
+            if probs.len() != queries.len() {
+                return Err(PyRuntimeError::new_err(format!(
+                    "Expected {} query results, got {}",
+                    queries.len(),
+                    probs.len()
+                )));
             }
-        };
 
-        // Extract probabilities in query order
-        // The results should be in the same order as queries were added
-        let probs: Vec<f64> = result.iter().map(|qp| qp.prob).collect();
-
-        if probs.len() != queries.len() {
-            return Err(PyRuntimeError::new_err(format!(
-                "Expected {} query results, got {}",
-                queries.len(),
-                probs.len()
-            )));
+            Ok(probs)
         }
-
-        Ok(probs)
     }
 
     fn pack_result_probs(
