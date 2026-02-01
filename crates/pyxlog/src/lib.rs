@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::os::raw::{c_char, c_void};
 use std::sync::Arc;
 
+use cudarc::driver::DeviceSlice;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PySequence};
@@ -590,6 +591,105 @@ impl CompiledProgram {
                 }
             }
         }
+    }
+
+    /// Evaluate Monte Carlo programs and return device-only result counts via DLPack.
+    ///
+    /// This is the primary GPU-native API surface for MC inference. It never performs
+    /// device->host reads for result data (only returns device buffers).
+    #[pyo3(signature = (samples=None, seed=None, confidence=0.95, max_nonmonotone_iterations=1024))]
+    pub fn evaluate_device(
+        &self,
+        py: Python<'_>,
+        samples: Option<usize>,
+        seed: Option<u64>,
+        confidence: f64,
+        max_nonmonotone_iterations: usize,
+    ) -> PyResult<McDeviceEvalResult> {
+        let (query_counts, evidence_count, total_samples, seed, confidence, nonmonotone_sccs, nonmonotone_cycles, nonmonotone_iteration_limit_hits) =
+            match &self.program {
+                CompiledProbProgram::Mc(program) => {
+                    let cfg = McEvalConfig {
+                        samples: samples.unwrap_or(10000),
+                        seed: seed.unwrap_or(0),
+                        confidence,
+                        max_nonmonotone_iterations,
+                    };
+
+                    let result = program
+                        .evaluate_gpu_device_with_provider(cfg, self.output_provider.clone())
+                        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+                    (
+                        result.query_counts,
+                        result.evidence_count,
+                        result.total_samples,
+                        result.seed,
+                        result.confidence,
+                        result.nonmonotone_sccs,
+                        result.nonmonotone_cycles,
+                        result.nonmonotone_iteration_limit_hits,
+                    )
+                }
+                _ => {
+                    return Err(PyValueError::new_err(
+                        "evaluate_device is only supported for prob_engine='mc'",
+                    ))
+                }
+            };
+
+        // PyTorch does not support unsigned 32-bit types. Export as i32 (bitwise identical for
+        // counts < 2^31) for maximum DLPack consumer compatibility.
+        let schema_i32 = Schema::new(vec![("col0".to_string(), ScalarType::I32)]);
+
+        let make_count_tensor = |counts: xlog_cuda::memory::TrackedCudaSlice<u32>,
+                                 rows: u64|
+         -> PyResult<PyObject> {
+            let rows_u32 = u32::try_from(rows).map_err(|_| {
+                PyValueError::new_err(format!("Row count {} exceeds u32::MAX", rows))
+            })?;
+
+            let mut d_num_rows = self
+                .output_provider
+                .memory()
+                .alloc::<u32>(1)
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            self.output_provider
+                .device()
+                .inner()
+                .htod_sync_copy_into(&[rows_u32], &mut d_num_rows)
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+            let buffer = xlog_cuda::CudaBuffer::from_columns(
+                vec![counts.into_bytes().into()],
+                rows,
+                d_num_rows,
+                schema_i32.clone(),
+            );
+            let tensor = self
+                .output_provider
+                .to_dlpack_table(buffer)
+                .column(0)
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            dlpack_capsule_from_tensor(py, tensor)
+        };
+
+        let query_rows = u64::try_from(query_counts.len())
+            .map_err(|_| PyValueError::new_err("query_counts length overflow"))?;
+        let query_counts_capsule = make_count_tensor(query_counts, query_rows)?;
+        let evidence_count_capsule = make_count_tensor(evidence_count, 1)?;
+
+        Ok(McDeviceEvalResult {
+            query_counts: query_counts_capsule,
+            evidence_count: evidence_count_capsule,
+            total_samples,
+            seed,
+            confidence,
+            nonmonotone_semantics: xlog_prob::mc::NONMONOTONE_SEMANTICS.to_string(),
+            nonmonotone_sccs,
+            nonmonotone_cycles,
+            nonmonotone_iteration_limit_hits,
+        })
     }
 
     /// Register a PyTorch neural network with this program.
@@ -2083,6 +2183,30 @@ pub struct LogicEvalResult {
 }
 
 #[pyclass]
+pub struct McDeviceEvalResult {
+    /// Per-query satisfying-sample counts. DLPack int32 tensor on CUDA.
+    #[pyo3(get)]
+    pub query_counts: PyObject,
+    /// Evidence satisfying-sample count. DLPack int32 tensor with shape [1] on CUDA.
+    #[pyo3(get)]
+    pub evidence_count: PyObject,
+    #[pyo3(get)]
+    pub total_samples: usize,
+    #[pyo3(get)]
+    pub seed: u64,
+    #[pyo3(get)]
+    pub confidence: f64,
+    #[pyo3(get)]
+    pub nonmonotone_semantics: String,
+    #[pyo3(get)]
+    pub nonmonotone_sccs: usize,
+    #[pyo3(get)]
+    pub nonmonotone_cycles: usize,
+    #[pyo3(get)]
+    pub nonmonotone_iteration_limit_hits: usize,
+}
+
+#[pyclass]
 pub struct EvalResult {
     #[pyo3(get)]
     pub atoms: Vec<String>,
@@ -2235,6 +2359,7 @@ fn pyxlog(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<CompiledLogicProgram>()?;
     m.add_class::<LogicQueryResult>()?;
     m.add_class::<LogicEvalResult>()?;
+    m.add_class::<McDeviceEvalResult>()?;
     m.add_class::<EvalResult>()?;
     // Training infrastructure
     m.add_class::<EpochStats>()?;
