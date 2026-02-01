@@ -10,6 +10,8 @@ use pyo3::Bound;
 use ::xlog_gpu::logic as gpu_logic;
 use xlog_core::{MemoryBudget, ScalarType, Schema};
 use xlog_cuda::{CudaDevice, CudaKernelProvider, DlpackManagedTensor, GpuMemoryManager};
+#[cfg(feature = "arrow-device-import")]
+use xlog_cuda::{ArrowDeviceArray, ArrowDeviceArrayOwned};
 use xlog_logic::ast::ProbEngine;
 use xlog_neural::{NetworkConfig, NetworkRegistry, TensorMetadata, TensorSourceRegistry};
 use xlog_prob::exact::{ExactDdnnfProgram, ExactResultWithGrads, GpuConfig, QueryProbability};
@@ -20,6 +22,11 @@ use std::collections::HashMap as StdHashMap;
 
 const DLPACK_CAPSULE_NAME: &[u8] = b"dltensor\0";
 const USED_DLPACK_CAPSULE_NAME: &[u8] = b"used_dltensor\0";
+
+#[cfg(feature = "arrow-device-import")]
+const ARROW_DEVICE_ARRAY_CAPSULE_NAME: &[u8] = b"arrow_device_array\0";
+#[cfg(feature = "arrow-device-import")]
+const USED_ARROW_DEVICE_ARRAY_CAPSULE_NAME: &[u8] = b"used_arrow_device_array\0";
 
 /// Epsilon value for numerical stability in log computations
 const NLL_EPSILON: f64 = 1e-38;
@@ -88,6 +95,98 @@ fn dlpack_capsule_from_tensor(py: Python<'_>, tensor: DlpackManagedTensor) -> Py
     }
     let obj: Py<PyAny> = unsafe { Py::from_owned_ptr(py, capsule) };
     Ok(obj.into_py(py))
+}
+
+#[cfg(feature = "arrow-device-import")]
+unsafe extern "C" fn arrow_device_array_capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
+    if capsule.is_null() {
+        return;
+    }
+
+    let valid = pyo3::ffi::PyCapsule_IsValid(
+        capsule,
+        ARROW_DEVICE_ARRAY_CAPSULE_NAME.as_ptr() as *const c_char,
+    );
+    if valid == 0 {
+        return;
+    }
+
+    let ptr = pyo3::ffi::PyCapsule_GetPointer(
+        capsule,
+        ARROW_DEVICE_ARRAY_CAPSULE_NAME.as_ptr() as *const c_char,
+    );
+    if ptr.is_null() {
+        pyo3::ffi::PyErr_Clear();
+        return;
+    }
+
+    drop(ArrowDeviceArrayOwned::from_raw(ptr as *mut ArrowDeviceArray));
+}
+
+#[cfg(feature = "arrow-device-import")]
+fn arrow_device_capsule_from_device_array(
+    py: Python<'_>,
+    device_array: ArrowDeviceArrayOwned,
+) -> PyResult<PyObject> {
+    let raw = device_array.into_raw();
+    let ptr = raw as *mut c_void;
+    let capsule = unsafe {
+        pyo3::ffi::PyCapsule_New(
+            ptr,
+            ARROW_DEVICE_ARRAY_CAPSULE_NAME.as_ptr() as *const c_char,
+            Some(arrow_device_array_capsule_destructor),
+        )
+    };
+    if capsule.is_null() {
+        unsafe {
+            drop(ArrowDeviceArrayOwned::from_raw(raw));
+        }
+        return Err(PyRuntimeError::new_err("Failed to create Arrow device array capsule"));
+    }
+    let obj: Py<PyAny> = unsafe { Py::from_owned_ptr(py, capsule) };
+    Ok(obj.into_py(py))
+}
+
+#[cfg(feature = "arrow-device-import")]
+fn arrow_device_from_py(obj: &Bound<'_, PyAny>) -> PyResult<ArrowDeviceArrayOwned> {
+    if unsafe {
+        pyo3::ffi::PyCapsule_IsValid(
+            obj.as_ptr(),
+            ARROW_DEVICE_ARRAY_CAPSULE_NAME.as_ptr() as *const c_char,
+        )
+    } == 0
+    {
+        return Err(PyValueError::new_err(
+            "Expected an Arrow device array capsule (arrow_device_array)",
+        ));
+    }
+
+    let ptr = unsafe {
+        pyo3::ffi::PyCapsule_GetPointer(
+            obj.as_ptr(),
+            ARROW_DEVICE_ARRAY_CAPSULE_NAME.as_ptr() as *const c_char,
+        )
+    };
+    if ptr.is_null() {
+        return Err(PyRuntimeError::new_err(
+            "Failed to get Arrow device array pointer",
+        ));
+    }
+
+    // Mark consumed so the capsule destructor doesn't free the pointer we now own.
+    let rc = unsafe {
+        pyo3::ffi::PyCapsule_SetName(
+            obj.as_ptr(),
+            USED_ARROW_DEVICE_ARRAY_CAPSULE_NAME.as_ptr() as *const c_char,
+        )
+    };
+    if rc != 0 {
+        return Err(PyRuntimeError::new_err(
+            "Failed to mark Arrow device array capsule as consumed",
+        ));
+    }
+
+    Ok(unsafe { ArrowDeviceArrayOwned::from_raw(ptr as *mut ArrowDeviceArray) })
 }
 
 fn atom_to_string(atom: &xlog_prob::provenance::GroundAtom) -> String {
@@ -194,6 +293,94 @@ fn dlpack_from_py(obj: &Bound<'_, PyAny>) -> PyResult<DlpackManagedTensor> {
     }
 
     Ok(unsafe { DlpackManagedTensor::from_raw(ptr as *mut xlog_cuda::DLManagedTensor) })
+}
+
+/// Export one (struct) Arrow C Device array from one or more DLPack columns (zero-copy).
+///
+/// EXPERIMENTAL: Requires building `pyxlog` with `--features arrow-device-import`.
+#[cfg(feature = "arrow-device-import")]
+#[pyfunction]
+#[pyo3(signature = (dlpack_columns, device=0, memory_mb=1024))]
+fn export_arrow_device(
+    py: Python<'_>,
+    dlpack_columns: &Bound<'_, PyAny>,
+    device: usize,
+    memory_mb: u64,
+) -> PyResult<PyObject> {
+    if memory_mb == 0 {
+        return Err(PyValueError::new_err("memory_mb must be > 0"));
+    }
+
+    let config = GpuConfig {
+        device_ordinal: device,
+        memory_bytes: memory_mb * 1024 * 1024,
+    };
+    let provider =
+        provider_from_config(config).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+    let tensors: Vec<DlpackManagedTensor> = match dlpack_columns.downcast::<PySequence>() {
+        Ok(seq) => {
+            let mut out = Vec::with_capacity(seq.len()? as usize);
+            for item in seq.iter()? {
+                out.push(dlpack_from_py(&item?)?);
+            }
+            out
+        }
+        Err(_) => vec![dlpack_from_py(dlpack_columns)?],
+    };
+
+    let buffer = provider
+        .from_dlpack_tensors(tensors)
+        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+    let device_array = provider
+        .to_arrow_device_record_batch(buffer)
+        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+    arrow_device_capsule_from_device_array(py, device_array)
+}
+
+/// Import an Arrow C Device array (device-resident) into DLPack columns (zero-copy).
+///
+/// EXPERIMENTAL: Requires building `pyxlog` with `--features arrow-device-import`.
+#[cfg(feature = "arrow-device-import")]
+#[pyfunction]
+#[pyo3(signature = (device_array, device=0, memory_mb=1024))]
+fn import_arrow_device(
+    py: Python<'_>,
+    device_array: &Bound<'_, PyAny>,
+    device: usize,
+    memory_mb: u64,
+) -> PyResult<(Vec<PyObject>, Vec<String>, usize)> {
+    if memory_mb == 0 {
+        return Err(PyValueError::new_err("memory_mb must be > 0"));
+    }
+
+    let config = GpuConfig {
+        device_ordinal: device,
+        memory_bytes: memory_mb * 1024 * 1024,
+    };
+    let provider =
+        provider_from_config(config).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+    let device_array = arrow_device_from_py(device_array)?;
+
+    let buffer = provider
+        .from_arrow_device_record_batch(device_array)
+        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+    let names: Vec<String> = buffer.schema.columns.iter().map(|(n, _)| n.clone()).collect();
+    let num_rows = buffer.num_rows() as usize;
+    let arity = buffer.arity();
+
+    let table = provider.to_dlpack_table(buffer);
+    let mut tensors: Vec<PyObject> = Vec::with_capacity(arity);
+    for col_idx in 0..arity {
+        let tensor = table
+            .column(col_idx)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        tensors.push(dlpack_capsule_from_tensor(py, tensor)?);
+    }
+
+    Ok((tensors, names, num_rows))
 }
 
 #[pyfunction]
@@ -2054,5 +2241,9 @@ fn pyxlog(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<TrainingHistory>()?;
     m.add_function(wrap_pyfunction!(train_model, m)?)?;
     m.add_function(wrap_pyfunction!(dlpack_roundtrip, m)?)?;
+    #[cfg(feature = "arrow-device-import")]
+    m.add_function(wrap_pyfunction!(export_arrow_device, m)?)?;
+    #[cfg(feature = "arrow-device-import")]
+    m.add_function(wrap_pyfunction!(import_arrow_device, m)?)?;
     Ok(())
 }
