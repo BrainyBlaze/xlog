@@ -403,6 +403,8 @@ pub mod pack_kernels {
     pub const SCATTER_PACKED_ROWS: &str = "scatter_packed_rows";
     /// Compare packed keys for equality
     pub const COMPARE_PACKED_KEYS: &str = "compare_packed_keys";
+    /// Pack u8 bools into Arrow bitmap bytes
+    pub const PACK_BOOLS_TO_BITMAP: &str = "pack_bools_to_bitmap";
 }
 
 /// Kernel function names in the circuit module
@@ -822,6 +824,7 @@ impl CudaKernelProvider {
                     pack_kernels::GATHER_PACKED_ROWS_COUNTED,
                     pack_kernels::SCATTER_PACKED_ROWS,
                     pack_kernels::COMPARE_PACKED_KEYS,
+                    pack_kernels::PACK_BOOLS_TO_BITMAP,
                 ],
             )
             .map_err(|e| XlogError::Kernel(format!("Failed to load pack PTX: {}", e)))?;
@@ -5513,6 +5516,92 @@ impl CudaKernelProvider {
         self.buffer_from_columns(columns, num_rows as u64, schema)
     }
 
+    /// Export CudaBuffer to Arrow C Data Interface (device-resident).
+    ///
+    /// This is a zero-copy export: column buffers remain on device, and the
+    /// returned ArrowDeviceArray describes CUDA-resident memory.
+    ///
+    /// The export requires that the device row count matches the host row_cap
+    /// (GPU-asserted). If they diverge, the GPU asserts and the export fails.
+    pub fn to_arrow_device_record_batch(
+        &self,
+        buffer: CudaBuffer,
+    ) -> Result<crate::arrow_device::ArrowDeviceArrayOwned> {
+        use arrow::array::ArrayData;
+        use arrow::datatypes::{DataType, Field};
+        use arrow::ffi::to_ffi;
+
+        use crate::arrow_device::{ArrowDeviceArray, ARROW_DEVICE_CUDA};
+
+        let buffer = Arc::new(buffer);
+        let row_cap = buffer.num_rows();
+        let num_rows_u32 = u32::try_from(row_cap).map_err(|_| {
+            XlogError::Kernel(format!(
+                "Arrow device export supports at most {} rows, got {}",
+                u32::MAX,
+                row_cap
+            ))
+        })?;
+
+        // GPU-side assertion: device row count must match row_cap (no host reads).
+        let assert_fn = self
+            .device
+            .inner()
+            .get_func(D4_MODULE, d4_kernels::D4_ASSERT_U32_EQ)
+            .ok_or_else(|| XlogError::Kernel("d4_assert_u32_eq kernel not found".to_string()))?;
+        unsafe {
+            assert_fn
+                .clone()
+                .launch(
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (1, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (buffer.num_rows_device(), num_rows_u32),
+                )
+        }
+        .map_err(|e| XlogError::Kernel(format!("d4_assert_u32_eq failed: {}", e)))?;
+        self.device.synchronize()?;
+
+        let num_rows = usize::try_from(num_rows_u32)
+            .map_err(|_| XlogError::Kernel("Arrow device export row count overflow".to_string()))?;
+
+        let mut fields: Vec<Field> = Vec::with_capacity(buffer.arity());
+        let mut children: Vec<ArrayData> = Vec::with_capacity(buffer.arity());
+
+        for (col_idx, (name, scalar_type)) in buffer.schema().columns.iter().enumerate() {
+            let (field, child) = self.build_arrow_device_child(
+                &buffer,
+                col_idx,
+                name,
+                *scalar_type,
+                num_rows,
+            )?;
+            fields.push(field);
+            children.push(child);
+        }
+
+        let struct_type = DataType::Struct(fields.into());
+        let struct_data = ArrayData::builder(struct_type)
+            .len(num_rows)
+            .child_data(children)
+            .build()
+            .map_err(|e| XlogError::Kernel(format!("Arrow device export failed: {}", e)))?;
+
+        let (ffi_array, ffi_schema) =
+            to_ffi(&struct_data).map_err(|e| XlogError::Kernel(format!("{}", e)))?;
+        let array_ptr = Box::into_raw(Box::new(ffi_array));
+        let schema_ptr = Box::into_raw(Box::new(ffi_schema));
+
+        Ok(ArrowDeviceArray::new(
+            ARROW_DEVICE_CUDA,
+            self.device.ordinal() as i32,
+            array_ptr,
+            schema_ptr,
+        ))
+    }
+
     /// Export CudaBuffer to Arrow RecordBatch
     ///
     /// Downloads data from GPU and converts it to an Arrow RecordBatch for
@@ -5645,6 +5734,105 @@ impl CudaKernelProvider {
 
         arrow::record_batch::RecordBatch::try_new(arrow_schema, arrays)
             .map_err(|e| XlogError::Kernel(format!("Failed to create RecordBatch: {}", e)))
+    }
+
+    fn build_arrow_device_child(
+        &self,
+        buffer: &Arc<CudaBuffer>,
+        col_idx: usize,
+        name: &str,
+        scalar_type: ScalarType,
+        num_rows: usize,
+    ) -> Result<(arrow::datatypes::Field, arrow::array::ArrayData)> {
+        use arrow::array::ArrayData;
+        use arrow::buffer::Buffer;
+        use arrow::datatypes::{DataType, Field};
+        use std::collections::HashMap;
+        use std::ptr::NonNull;
+
+        use crate::arrow_device::ArrowCudaAllocation;
+
+        let col = buffer
+            .column(col_idx)
+            .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
+
+        let (dtype, metadata) = if scalar_type == ScalarType::Symbol {
+            let mut meta = HashMap::new();
+            meta.insert("xlog.symbol".to_string(), "true".to_string());
+            meta.insert("xlog.symbol_encoding".to_string(), "u32".to_string());
+            (DataType::UInt32, Some(meta))
+        } else {
+            (scalar_type.to_arrow_type(), None)
+        };
+
+        let field = match metadata {
+            Some(meta) => Field::new(name, dtype.clone(), false).with_metadata(meta),
+            None => Field::new(name, dtype.clone(), false),
+        };
+
+        let elem_size = match scalar_type {
+            ScalarType::Symbol => 4usize,
+            _ => scalar_type.size_bytes(),
+        };
+
+        let len_bytes = num_rows
+            .checked_mul(elem_size)
+            .ok_or_else(|| XlogError::Kernel("Arrow device export size overflow".to_string()))?;
+
+        let mut extra = Vec::new();
+        let (ptr, len) = match scalar_type {
+            ScalarType::Bool => {
+                let packed_len = (num_rows + 7) / 8;
+                let mut packed = self.memory.alloc::<u8>(packed_len)?;
+                let pack_fn = self
+                    .device
+                    .inner()
+                    .get_func(PACK_MODULE, pack_kernels::PACK_BOOLS_TO_BITMAP)
+                    .ok_or_else(|| {
+                        XlogError::Kernel("pack_bools_to_bitmap kernel not found".to_string())
+                    })?;
+                let block_size = 256u32;
+                let grid_size =
+                    (packed_len as u32 + block_size - 1) / block_size;
+                unsafe {
+                    pack_fn.clone().launch(
+                        LaunchConfig {
+                            grid_dim: (grid_size, 1, 1),
+                            block_dim: (block_size, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        (col, num_rows as u32, &mut packed),
+                    )
+                }
+                .map_err(|e| XlogError::Kernel(format!("pack_bools_to_bitmap failed: {}", e)))?;
+                self.device.synchronize()?;
+                let ptr = *cudarc::driver::DevicePtr::device_ptr(&packed) as usize as *mut u8;
+                extra.push(packed);
+                (ptr, packed_len)
+            }
+            _ => {
+                let ptr = *cudarc::driver::DevicePtr::device_ptr(col) as usize as *mut u8;
+                (ptr, len_bytes)
+            }
+        };
+
+        let alloc = Arc::new(ArrowCudaAllocation::new(Arc::clone(buffer), extra));
+        let nn = if len == 0 {
+            NonNull::dangling()
+        } else {
+            NonNull::new(ptr).ok_or_else(|| {
+                XlogError::Kernel("Arrow device export got null device pointer".to_string())
+            })?
+        };
+        let buf = unsafe { Buffer::from_custom_allocation(nn, len, alloc) };
+
+        let data = ArrayData::builder(dtype)
+            .len(num_rows)
+            .add_buffer(buf)
+            .build()
+            .map_err(|e| XlogError::Kernel(format!("Arrow device export failed: {}", e)))?;
+
+        Ok((field, data))
     }
 
     /// Import Arrow RecordBatch to CudaBuffer

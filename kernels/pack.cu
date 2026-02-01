@@ -208,6 +208,31 @@ extern "C" __global__ void pack_and_hash_keys(
     hashes[row] = hash;
 }
 
+// Pack u8 bools (0/1) into Arrow-compatible bitmap (LSB-first).
+extern "C" __global__ void pack_bools_to_bitmap(
+    const uint8_t* __restrict__ input,
+    uint32_t num_rows,
+    uint8_t* __restrict__ out_bitmap
+) {
+    uint32_t byte_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    uint32_t num_bytes = (num_rows + 7u) >> 3;
+    if (byte_idx >= num_bytes) {
+        return;
+    }
+
+    uint32_t base = byte_idx << 3;
+    uint8_t byte = 0;
+    #pragma unroll
+    for (uint32_t b = 0; b < 8; b++) {
+        uint32_t idx = base + b;
+        if (idx < num_rows) {
+            uint8_t v = input[idx] != 0 ? 1u : 0u;
+            byte |= (uint8_t)(v << b);
+        }
+    }
+    out_bitmap[byte_idx] = byte;
+}
+
 /**
  * Fused pack + hash for arbitrary column counts.
  *

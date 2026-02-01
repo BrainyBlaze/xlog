@@ -2,6 +2,7 @@
 
 pub mod device;
 pub mod device_pool;
+pub mod arrow_device;
 pub mod dlpack;
 pub mod memory;
 pub mod multi_gpu_memory;
@@ -9,6 +10,7 @@ pub mod provider;
 
 pub use device::CudaDevice;
 pub use device_pool::GpuDevicePool;
+pub use arrow_device::{ArrowDeviceArray, ArrowDeviceArrayOwned, ARROW_DEVICE_CUDA};
 pub use dlpack::{DLManagedTensor, DlpackManagedTensor, DlpackTable};
 pub use memory::{CudaBuffer, CudaColumn, GpuMemoryManager};
 pub use multi_gpu_memory::MultiGpuMemoryManager;
