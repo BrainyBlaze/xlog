@@ -2,10 +2,15 @@
 
 All notable changes to this project are documented in this file.
 
-## Unreleased — 2026-01-28
+## Unreleased — 2026-02-01
 
 ### Added
 
+- **Arrow C Data Interface device export** for `CudaBuffer` record batches (`to_arrow_device_record_batch`) returning
+  `ArrowDeviceArrayOwned` handles with CUDA device descriptors and zero host transfers (export-only; import remains
+  DLPack).
+- **Arrow device export support for Bool/Symbol**: on-device boolean bit-packing and symbol metadata keys
+  (`xlog.symbol=true`, `xlog.symbol_encoding=u32`) for downstream consumers.
 - **GPU CDCL verifier (complete SAT/UNSAT)** in `kernels/sat.cu` + `xlog-solve::GpuCdclSolver` with on-GPU SAT model
   checking and on-GPU UNSAT proof checking.
 - **GPU PIR→CNF encoder** (`encode_cnf_gpu`) with device-resident CSR emission, deterministic var numbering, and GPU

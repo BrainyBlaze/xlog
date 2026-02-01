@@ -1,6 +1,6 @@
 # XLOG Development Roadmap
 
-> **Last Updated:** January 28, 2026
+> **Last Updated:** February 1, 2026
 > **Current Version:** v0.4.0-alpha (Released)
 > **Next Version:** v0.4.0-beta — Extended neural-symbolic examples, term embeddings
 > **Status:** v0.4.0-alpha complete — neural-symbolic training operational; GPU-native exact path integrated (GPU D4 + GPU CDCL + cache)
@@ -25,6 +25,7 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 | **D4** | A state-of-the-art knowledge compiler that converts CNF formulas to Decision-DNNF circuits |
 | **DLPack** | A cross-framework tensor interchange standard enabling zero-copy GPU data sharing |
 | **Arrow IPC** | Apache Arrow Inter-Process Communication format for columnar data serialization |
+| **Arrow C Data Interface** | A zero-copy Arrow FFI format for sharing arrays (including device memory pointers) |
 | **Semi-Naive** | An optimization for recursive Datalog that only processes new (delta) tuples each iteration |
 | **HISA** | Heat-based Index Selection Algorithm — adaptive indexing based on query access patterns |
 | **LRU** | Least Recently Used — a cache eviction policy |
@@ -190,6 +191,10 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 - [x] Functions: min, max, pow, cast
 - [x] Type promotion and casting
 
+**Interop:**
+- [x] DLPack export/import for device-resident columns (zero-copy)
+- [x] Arrow C Data Interface device export (zero-copy, export-only)
+
 ### Planned 📋
 
 - [ ] Partitioning kernels for multi-GPU distribution
@@ -256,6 +261,7 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 - [x] Export to Arrow RecordBatch (device → host copy)
 - [x] Import from Arrow RecordBatch (host → device copy)
 - [x] Arrow IPC stream read/write for file-based interchange
+- [x] Arrow C Data Interface device export (zero-copy, export-only)
 
 **DLPack (Zero-Copy):**
 - [x] Export columns as DLPack managed tensors
@@ -265,7 +271,6 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 
 ### Planned 📋
 
-- [ ] Zero-copy Arrow device memory extension
 - [ ] Direct cuDF DataFrame interchange
 - [ ] Parquet file reading (GPU-accelerated)
 

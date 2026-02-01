@@ -6,7 +6,8 @@ This enables interoperability with the RAPIDS ecosystem (cuDF) and other Arrow-n
 ## Current State
 
 - Export/import is **compatible** with Arrow and cuDF workflows.
-- Arrow export/import is **not zero-copy** today: export downloads GPU → host; import uploads host → GPU.
+- Arrow IPC export/import is **not zero-copy** today: export downloads GPU → host; import uploads host → GPU.
+- Arrow C Data Interface **device export is zero-copy** and keeps buffers on GPU (export-only).
 - A **zero-copy** path exists via DLPack export/import (per-column) from device memory (contiguous 1D columns).
 
 ## Rust API
@@ -17,6 +18,8 @@ This enables interoperability with the RAPIDS ecosystem (cuDF) and other Arrow-n
 - `xlog_cuda::CudaKernelProvider::from_arrow_ipc_stream`
 - `xlog_cuda::CudaKernelProvider::write_arrow_ipc_stream_file`
 - `xlog_cuda::CudaKernelProvider::read_arrow_ipc_stream_file`
+- `xlog_cuda::CudaKernelProvider::to_arrow_device_record_batch`
+- `xlog_cuda::ArrowDeviceArray` / `xlog_cuda::ArrowDeviceArrayOwned`
 - `xlog_cuda::CudaKernelProvider::to_dlpack_table` (zero-copy export)
 - `xlog_cuda::CudaKernelProvider::from_dlpack_tensors` (zero-copy import, infers schema)
 - `xlog_cuda::CudaKernelProvider::from_dlpack_tensors_with_schema` (zero-copy import, checks schema)
@@ -44,10 +47,20 @@ print(df)
 DLPack provides a GPU-native interchange path that avoids host copies. The current implementation includes:
 - ✅ DLPack export (current): produces DLPack `DLManagedTensor` pointers for each column without copies
 - ✅ DLPack import (current): consumes DLPack `DLManagedTensor` pointers and wraps them without copies
-- ✅ Python capsule/FFI layer (Phase 4): `crates/pyxlog` builds a `pyxlog` module via `maturin` that:
+- ✅ Python capsule/FFI layer: `crates/pyxlog` builds a `pyxlog` module via `maturin` that:
   - accepts DLPack capsules / `__dlpack__` producers for input relations
   - returns DLPack capsules for query result columns
   - provides a `dlpack_roundtrip(...)` helper for low-level DLPack validation
+
+## Zero-Copy (Arrow C Data Interface, device export)
+
+The CUDA backend can export a device-resident Arrow C Data Interface handle without host transfers:
+
+- **Export-only**: produces an `ArrowDeviceArray` with CUDA device pointers; import remains DLPack.
+- **Device descriptor**: `device_type = ARROW_DEVICE_CUDA`, `device_id = <cuda device>`.
+- **Supported types**: `U32`, `U64`, `I32`, `I64`, `F32`, `F64`, `Bool` (bit-packed), and `Symbol` (exported as `UInt32`).
+- **Symbol metadata**: schema fields include `xlog.symbol=true` and `xlog.symbol_encoding=u32`.
+- **Ownership**: `ArrowDeviceArrayOwned` keeps GPU buffers alive; releasing the FFI handle frees keepalive state.
 
 ## Python cuDF Example (via DLPack)
 

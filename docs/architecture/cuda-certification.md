@@ -95,7 +95,7 @@ Category C01 enumerates every `.entry` in each PTX module and verifies resolutio
 | `groupby.ptx` | `detect_group_boundaries`, `extract_group_keys`, `groupby_*`, `groupby_logsumexp_*` |
 | `scan.ptx` | `exclusive_scan_mask`, `count_mask`, `multiblock_scan_*` |
 | `filter.ptx` | `filter_compare_*`, `compact_*_by_mask`, `mask_{and,or,not}` |
-| `pack.ptx` | `pack_keys`, `pack_and_hash_keys`, `hash_packed_keys`, `gather_packed_rows`, `compare_packed_keys` |
+| `pack.ptx` | `pack_keys`, `pack_and_hash_keys`, `hash_packed_keys`, `gather_packed_rows`, `compare_packed_keys`, `pack_bools_to_bitmap` |
 | `sort.ptx` | `radix_histogram`, `radix_scatter_*`, `init_indices`, `apply_permutation_*`, `gather_keys_*` |
 | `set_ops.ptx` | `concat_{u32,bytes}`, `sorted_diff_mark` |
 | `circuit.ptx` | `xgcf_forward_level`, `xgcf_backward_level_*` |
