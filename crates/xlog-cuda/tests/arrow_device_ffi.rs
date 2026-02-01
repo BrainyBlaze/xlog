@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
 use arrow::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
+use cudarc::driver::safe::{DevicePtr, DeviceSlice};
+use cudarc::driver::sys;
 use xlog_core::{MemoryBudget, ScalarType, Schema};
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 
@@ -16,6 +18,23 @@ struct RawArrowArray {
     dictionary: *mut FFI_ArrowArray,
     release: Option<unsafe extern "C" fn(*mut FFI_ArrowArray)>,
     private_data: *mut std::ffi::c_void,
+}
+
+struct RawDeviceSlice {
+    ptr: sys::CUdeviceptr,
+    len: usize,
+}
+
+impl DeviceSlice<u8> for RawDeviceSlice {
+    fn len(&self) -> usize {
+        self.len
+    }
+}
+
+impl DevicePtr<u8> for RawDeviceSlice {
+    fn device_ptr(&self) -> &sys::CUdeviceptr {
+        &self.ptr
+    }
 }
 
 fn setup_provider() -> Option<CudaKernelProvider> {
@@ -140,8 +159,10 @@ fn test_arrow_device_export_bool_bitpacked() {
         let packed_len = (flags.len() + 7) / 8;
         let mut host = vec![0u8; packed_len];
         let device = provider.device().inner();
-        let dev_slice =
-            device.upgrade_device_ptr::<u8>(values_ptr as u64, packed_len);
+        let dev_slice = RawDeviceSlice {
+            ptr: values_ptr as u64,
+            len: packed_len,
+        };
         device
             .dtoh_sync_copy_into(&dev_slice, &mut host)
             .unwrap();
