@@ -349,7 +349,7 @@ except RuntimeError as e:
 import torch
 import pyxlog
 
-# Neural-symbolic training loop (v0.4.0-alpha):
+# Neural-symbolic training loop (unreleased; targeting v0.4.0-alpha):
 # - neural predicate outputs (CUDA tensors) are imported via DLPack
 # - XLOG computes NLL gradients on GPU and calls output.backward(grad) internally
 

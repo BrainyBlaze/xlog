@@ -6,11 +6,13 @@ This document describes the XLOG CUDA/PTX kernel certification test suite, which
 
 The certification suite is implemented in the `xlog-cuda-tests` crate and provides comprehensive coverage of all CUDA kernel operations.
 
+**As of:** February 3, 2026 (`main` / current HEAD)
+
 | Metric | Value |
 |--------|-------|
-| Total tests | 140 |
-| Categories | 24 |
-| PTX modules | 18 |
+| Total tests | 206 |
+| Categories | 33 (C01-C25 + G01-G08) |
+| PTX modules | 19 |
 | Execution mode | GPU-only (requires CUDA hardware) |
 
 ## Crate Structure
@@ -30,8 +32,9 @@ crates/xlog-cuda-tests/
 │       ├── mod.rs                # Category registry
 │       ├── c01_toolchain.rs      # Category 1: Toolchain/PTX/SASS
 │       ├── c02_launch_config.rs  # Category 2: Launch configuration
-│       ... (all 24 categories)
-│       └── c24_edge_matrix.rs    # Category 24: Edge case matrix
+│       ... (C01-C25 + G01-G08)
+│       ├── c25_float_filter.rs   # Category 25: Float filter semantics
+│       └── g08_device_counts.rs  # GPU category: device-count / row-count invariants
 └── tests/
     ├── certification_suite.rs    # Full certification runner
     ├── quick_smoke.rs            # Fast subset for CI
@@ -76,13 +79,29 @@ crates/xlog-cuda-tests/
 | C20 | Multi-GPU | Device enumeration, P2P, context switching |
 | C21 | Hardware Reliability | Timeout, reset, error reporting |
 
-### Comprehensive (C22-C24)
+### Comprehensive (C22-C25)
 
 | Category | Name | Focus |
 |----------|------|-------|
 | C22 | Algorithm-Specific | Reduction, sort, join, groupby edge cases |
 | C23 | Testing Blind Spots | Non-power-of-two, misaligned, stress tests |
 | C24 | Edge Case Matrix | Size x Distribution x Type cross-product |
+| C25 | Float Filter | Float predicate semantics and total ordering edge cases |
+
+### GPU Tier (G01-G08)
+
+These categories cover probabilistic/neural/solver kernels that sit above the core relational operator suite.
+
+| Category | Name | Focus |
+|----------|------|-------|
+| G01 | Circuit Forward | XGCF forward evaluation correctness |
+| G02 | Circuit Backward | XGCF backward/gradient correctness |
+| G03 | Weight Injection | GPU weight/evidence buffer correctness |
+| G04 | Transfer Efficiency | Guardrails for host↔device transfers in critical paths |
+| G05 | Circuit Cache | Cache hit/miss correctness and reuse properties |
+| G06 | PTX Robustness | Large-scale + numerical edge cases for circuit kernels |
+| G07 | SAT/CDCL | GPU CDCL SAT/UNSAT verifier correctness |
+| G08 | Device Counts | Device-resident row-count invariants and related helpers |
 
 ## PTX Module Coverage
 
@@ -95,15 +114,18 @@ Category C01 enumerates every `.entry` in each PTX module and verifies resolutio
 | `groupby.ptx` | `detect_group_boundaries`, `extract_group_keys`, `groupby_*`, `groupby_logsumexp_*` |
 | `scan.ptx` | `exclusive_scan_mask`, `count_mask`, `multiblock_scan_*` |
 | `filter.ptx` | `filter_compare_*`, `compact_*_by_mask`, `mask_{and,or,not}` |
+| `arith.ptx` | `arith_*` |
 | `pack.ptx` | `pack_keys`, `pack_and_hash_keys`, `hash_packed_keys`, `gather_packed_rows`, `compare_packed_keys`, `pack_bools_to_bitmap` |
 | `sort.ptx` | `radix_histogram`, `radix_scatter_*`, `init_indices`, `apply_permutation_*`, `gather_keys_*` |
 | `set_ops.ptx` | `concat_{u32,bytes}`, `sorted_diff_mark` |
 | `circuit.ptx` | `xgcf_forward_level`, `xgcf_backward_level_*` |
 | `cache.ptx` | `cache_cnf_hash`, `cache_lookup_or_insert`, `cache_store_*`, `cache_evict_lru` |
 | `cnf.ptx` | `cnf_reachability_*`, `cnf_count_clauses`, `cnf_emit_clauses` |
+| `pir.ptx` | `pir_*` |
 | `d4.ptx` | `d4_frontier_*`, `d4_compile_*`, `d4_smooth_*` |
 | `neural.ptx` | `neural_fill_ad_chain_f32`, `neural_scatter_ad_chain_grads_f32` |
 | `mc_sample.ptx` | `mc_sample_bernoulli` |
+| `mc_eval.ptx` | `mc_eval_*` |
 | `sat.ptx` | `sat_*`, `cdcl_*` |
 | `weights.ptx` | `weights_fill_*`, `weights_apply_evidence`, `weights_map_nodes_to_vars` |
 
@@ -154,13 +176,9 @@ CPU reference implementations for all operations:
 
 | Category Group | Tests |
 |----------------|-------|
-| Infrastructure | 13 |
-| Memory Hierarchy | 33 |
-| Execution Model | 22 |
-| Numeric Correctness | 24 |
-| System Integration | 25 |
-| Algorithms & Edge Cases | 23 |
-| **Total** | **140** |
+| Core CUDA kernels (C01-C25) | 150 |
+| Probabilistic/Neural/Solver kernels (G01-G08) | 56 |
+| **Total** | **206** |
 
 ## Key Correctness Tests
 
@@ -182,8 +200,8 @@ Tests verify that radix sort maintains stable ordering (equal keys preserve orig
 
 ## Adding New Tests
 
-1. Identify the appropriate category (C01-C24)
-2. Add test function in `src/categories/cXX_*.rs`
+1. Identify the appropriate category (core: C01-C25; probabilistic/neural/solver: G01-G08)
+2. Add test function in `src/categories/{cXX,gXX}_*.rs`
 3. Use generators for edge case coverage
 4. Implement CPU reference validator
 5. Register in category module

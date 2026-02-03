@@ -5,7 +5,12 @@
 **Branch (snapshot):** feature/arithmetic-expressions
 **Total Tests (snapshot):** 388 passing
 
-> **Addendum (2026-01-14 / `main`):** Phase 4 is implemented on `main`, including `xlog-prob` (exact `exact_ddnnf` + P3 `mc`) and Python `xlog_gpu` (package name `xlog-gpu`). The CUDA kernel set includes `circuit.ptx` and `mc_sample.ptx`, and the CUDA certification suite passes **140/140** tests (see `docs/plans/2026-01-14-cuda-certification-results.md`). See `docs/VALIDATION_REPORT.md` for the current validated state.
+> **Addendum (2026-01-14 / `main`, historical):** At the time of writing, Phase 4 work was integrated on `main`,
+> including `xlog-prob` (exact `exact_ddnnf` + P3 `mc`) and a Python package that was then called `xlog-gpu`
+> (now `pyxlog`). The CUDA kernel set included `circuit.ptx` and `mc_sample.ptx`, and the certification suite passed
+> **140/140** tests for that snapshot (see `docs/plans/2026-01-14-cuda-certification-results.md`).
+>
+> For the current validated state of `main` (including the expanded certification suite), see `docs/VALIDATION_REPORT.md`.
 
 ---
 

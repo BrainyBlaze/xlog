@@ -1,8 +1,14 @@
 # XLOG
 
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
-[![CUDA Tests](https://img.shields.io/badge/CUDA%20tests-140%2F140-brightgreen.svg)](docs/certification/2026-01-14-cuda-certification-results.md)
-[![Version](https://img.shields.io/badge/version-v0.4.0--alpha-blue.svg)](CHANGELOG.md)
+[![CUDA Tests](https://img.shields.io/badge/CUDA%20tests-206%2F206-brightgreen.svg)](docs/architecture/cuda-certification.md)
+[![Version](https://img.shields.io/badge/version-v0.3.2-blue.svg)](CHANGELOG.md)
+
+> **Release status:** Latest tagged release is `v0.3.2`. The `main` branch is ahead of `v0.3.2` and contains
+> unreleased work (GPU-native knowledge compilation, GPU CDCL verifier + cache integration, and neural-symbolic
+> training APIs). The originally planned `v0.4.0-alpha` milestone is **not yet achieved**: it remains gated on
+> end-to-end validation of *all* examples and additional neural examples beyond `examples/neural/01_minimal`.
+> See `docs/ROADMAP.md` and `docs/VALIDATION_REPORT.md`.
 
 **XLOG** is a GPU-accelerated Datalog query engine with neural-symbolic integration. It compiles declarative logic programs into optimized relational plans and executes them on NVIDIA GPUs, achieving high throughput for recursive queries, graph analytics, probabilistic inference, and neural-symbolic training.
 
@@ -212,9 +218,11 @@ Gradients flow correctly through negated literals for neural-symbolic training.
 
 ---
 
-## Neural-Symbolic Training (v0.4.0-alpha)
+## Neural-Symbolic Training (unreleased; target v0.4.0-alpha)
 
 XLOG supports neural-symbolic integration where neural network outputs become probabilistic facts in logic programs.
+This infrastructure exists in the current codebase, but the `v0.4.0-alpha` milestone is not yet release-gated (see
+the release status note at the top of this README).
 
 ### Neural Predicates
 
@@ -507,8 +515,9 @@ xlog run --help
 
 ## Documentation
 
-GPU-native compilation status: Phase 3 (GPU PIR→CNF encoding) is implemented in `xlog-prob::compilation` with
-device-resident CNF output; Phase 4 integration into the default exact path remains on the roadmap.
+GPU-native compilation status: the GPU-native exact path is implemented end-to-end:
+PIR → GPU CNF (`encode_cnf_gpu`) → GPU D4 compile → GPU CDCL equivalence verification → XGCF + GPU cache-aware eval.
+The legacy CPU D4 vendor pipeline is removed.
 
 | Document | Description |
 |----------|-------------|
@@ -524,7 +533,7 @@ device-resident CNF output; Phase 4 integration into the default exact path rema
 | [Examples](examples/) | Annotated example programs |
 | [Neural Examples](examples/neural/) | Neural-symbolic training examples |
 | [v0.3.2 Showcase](examples/xlog/80-v032-showcase/) | Production-grade multi-module examples |
-| [CUDA Certification](docs/certification/2026-01-14-cuda-certification-results.md) | Test coverage (140/140 passing) |
+| [CUDA Certification](docs/architecture/cuda-certification.md) | Certification suite coverage (current HEAD) |
 
 ---
 

@@ -2,13 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
-## Unreleased — 2026-02-01
+## Unreleased — 2026-02-03
 
 ### Added
 
 - **Arrow C Data Interface device export** for `CudaBuffer` record batches (`to_arrow_device_record_batch`) returning
-  `ArrowDeviceArrayOwned` handles with CUDA device descriptors and zero host transfers (export-only; import remains
-  DLPack).
+  `ArrowDeviceArrayOwned` handles with CUDA device descriptors and zero host transfers (import exists but is
+  experimental + feature-gated: `arrow-device-import`).
 - **Arrow device export support for Bool/Symbol**: on-device boolean bit-packing and symbol metadata keys
   (`xlog.symbol=true`, `xlog.symbol_encoding=u32`) for downstream consumers.
 - **GPU CDCL verifier (complete SAT/UNSAT)** in `kernels/sat.cu` + `xlog-solve::GpuCdclSolver` with on-GPU SAT model
@@ -50,6 +50,7 @@ All notable changes to this project are documented in this file.
 ### Fixed
 
 - Monte Carlo GPU initialization avoids reliance on CUDA device-count queries that can fail in restricted environments.
+- GPU set operations + MC evaluation handle 0-arity (nullary) relations correctly (device row counts, not `row_cap`).
 - `pyxlog` DLPack interop: detach `requires_grad` tensors before exporting probabilities to DLPack.
 - `pyxlog` GPU neural fast-path ordering: replaced `torch.cuda.synchronize()` with stream-to-stream waits.
 - GPU CNF reachability worklist hardened to avoid consuming uninitialized queue entries under concurrent expansion.
@@ -62,13 +63,20 @@ All notable changes to this project are documented in this file.
   unconditional probabilistic facts/evidence are handled correctly and preventing under-launched levels.
 - GPU cache meta loading moved out of `gpu_cache.rs` to preserve dtoh-free guardrails for the cache module.
 
+### Removed
+
+- Vendored CPU D4/Boost toolchain (`vendor/`) and the CPU-based exact compilation pipeline (GPU-native only).
+
 ### Validation
 
-- `cargo test --workspace` passes, including GPU verifier smoke tests (skipped when CUDA is unavailable).
+- Workspace tests pass (CUDA-dependent tests skip cleanly when CUDA is unavailable).
+- CUDA certification suite passes (C01-C25 + G01-G08): 206/206.
 
-## v0.4.0-alpha — 2026-01-22 — Neural-Symbolic Integration
+## Neural-Symbolic Integration Milestone (unreleased; targeting v0.4.0-alpha) — 2026-01-22
 
-First alpha release of the neural-symbolic integration layer, enabling differentiable training where neural network outputs become probabilistic facts in logic programs.
+Milestone snapshot of the neural-symbolic integration layer (training APIs + GPU circuit evaluation/gradients). This is
+not a tagged release: the latest tagged release remains `v0.3.2`, and the `v0.4.0-alpha` milestone remains gated on
+end-to-end example validation + additional neural examples.
 
 ### Added
 

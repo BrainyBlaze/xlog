@@ -1,6 +1,8 @@
 # XLOG System Validation Report (Archived Snapshot)
 
-> Archived from `docs/VALIDATION_REPORT.md` for historical reference. Current validation lives at `docs/VALIDATION_REPORT.md` and CUDA certification results at `docs/plans/2026-01-14-cuda-certification-results.md`.
+> Archived from `docs/VALIDATION_REPORT.md` for historical reference. Current validation lives at `docs/VALIDATION_REPORT.md`.
+> The current CUDA certification suite is described in `docs/architecture/cuda-certification.md` (historical 2026-01-14
+> results live at `docs/plans/2026-01-14-cuda-certification-results.md`).
 
 **Date:** January 9, 2026
 **Version:** Phase 3 Complete + P1/P2 Fixes
