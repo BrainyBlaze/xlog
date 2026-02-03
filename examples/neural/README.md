@@ -4,7 +4,7 @@ Neural-symbolic training examples demonstrating integration where neural network
 
 ## Overview
 
-These examples showcase XLOG's v0.4.0-alpha neural-symbolic capabilities:
+These examples exercise XLOG's **unreleased** neural-symbolic milestone work (target: `v0.4.0-alpha`):
 
 - **Neural Predicates**: `nn(network, [inputs], output, [labels]) :: predicate(args).`
 - **Network Registration**: PyTorch networks with optimizers and schedulers
@@ -47,9 +47,9 @@ queries = ["addition(0, 1, 7)", "addition(2, 3, 5)", ...]
 history = pyxlog.train_model(program, queries, epochs=50, batch_size=32)
 ```
 
-## Planned Examples
+## Planned Examples (Required For `v0.4.0-alpha`)
 
-The following neural-symbolic examples are planned for v0.4.0-beta:
+The following neural-symbolic examples are required to claim `v0.4.0-alpha`:
 
 | Example | Description |
 |---------|-------------|

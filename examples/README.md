@@ -53,7 +53,7 @@ Phase 4 examples live under:
 - `examples/prob/`: probabilistic `.xlog` programs (prob facts, AD, evidence/query, and `prob_engine=mc`)
 - `examples/python/`: Python scripts exercising `pyxlog` via DLPack (Torch optional)
 
-Phase 5 (v0.4.0-alpha) neural-symbolic examples live under:
+Phase 5 (target `v0.4.0-alpha`, unreleased) neural-symbolic examples live under:
 - `examples/neural/`: Neural-symbolic training examples
 
 ## Example Index
@@ -115,7 +115,7 @@ Phase 5 (v0.4.0-alpha) neural-symbolic examples live under:
 - `examples/xlog/90-negative-tests/03_arithmetic_type_mismatch.xlog`: missing `cast()` type mismatch (compile-time)
 - `examples/xlog/90-negative-tests/04_is_target_already_bound.xlog`: invalid `is` target (compile-time)
 
-## Neural-Symbolic Examples (v0.4.0-alpha)
+## Neural-Symbolic Examples (Target `v0.4.0-alpha`, Unreleased)
 
 Neural-symbolic training examples demonstrating integration where neural network
 outputs become probabilistic facts in logic programs.
