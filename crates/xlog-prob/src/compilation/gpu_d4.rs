@@ -8,7 +8,7 @@
 use std::ffi::c_void;
 use std::sync::Arc;
 
-use cudarc::driver::{DeviceRepr, DeviceSlice, LaunchAsync, LaunchConfig};
+use cudarc::driver::{DevicePtr, DeviceRepr, DeviceSlice, LaunchAsync, LaunchConfig};
 use xlog_core::{Result, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::provider::{d4_kernels, scan_kernels, D4_MODULE, SCAN_MODULE};
@@ -26,6 +26,20 @@ fn alloc_compile_gate(provider: &CudaKernelProvider, value: u32) -> Result<Track
         .htod_sync_copy_into(&[value], &mut gate)
         .map_err(|e| XlogError::Kernel(format!("compile gate upload failed: {}", e)))?;
     Ok(gate)
+}
+
+fn memset_u8_sync(
+    device: &Arc<cudarc::driver::CudaDevice>,
+    dst: &mut TrackedCudaSlice<u8>,
+    value: u8,
+) -> Result<()> {
+    device
+        .bind_to_thread()
+        .map_err(|e| XlogError::Kernel(format!("bind_to_thread failed: {}", e)))?;
+    let dptr = *DevicePtr::device_ptr(&*dst);
+    unsafe { cudarc::driver::result::memset_d8_sync(dptr, value, dst.len()) }
+        .map_err(|e| XlogError::Kernel(format!("memset_d8_sync failed: {}", e)))?;
+    Ok(())
 }
 
 /// Configuration for GPU D4 + GPU CDCL.
@@ -87,6 +101,13 @@ pub fn validate_cnf_gpu(cnf: &GpuCnf, provider: &CudaKernelProvider) -> Result<(
         )
     }
     .map_err(|e| XlogError::Kernel(format!("d4_validate_cnf failed: {}", e)))?;
+
+    // `d4_validate_cnf` uses a device-side trap for fail-fast invariants. If it trips, we must
+    // surface that error here; otherwise it will show up later as a panicking `CudaSlice` drop.
+    provider
+        .device()
+        .synchronize()
+        .map_err(|e| XlogError::Kernel(format!("sync after d4_validate_cnf failed: {}", e)))?;
 
     Ok(())
 }
@@ -856,9 +877,15 @@ fn compile_gpu_d4_with_gate(
         ));
     }
 
+    #[cfg(debug_assertions)]
+    eprintln!("[xlog-prob] gpu_d4: validate_cnf_gpu");
     validate_cnf_gpu(cnf, provider)?;
 
+    #[cfg(debug_assertions)]
+    eprintln!("[xlog-prob] gpu_d4: build_frontier_bitset");
     let frontier = build_frontier_bitset(cnf, provider, config, compile_needed)?;
+    #[cfg(debug_assertions)]
+    eprintln!("[xlog-prob] gpu_d4: sync after build_frontier");
     provider
         .device()
         .synchronize()
@@ -938,6 +965,8 @@ fn compile_gpu_d4_with_gate(
         (&mut edge_counts).as_kernel_param(),
     ];
 
+    #[cfg(debug_assertions)]
+    eprintln!("[xlog-prob] gpu_d4: launch d4_compile_count");
     unsafe {
         compile_count.clone().launch(
             LaunchConfig {
@@ -949,6 +978,8 @@ fn compile_gpu_d4_with_gate(
         )
     }
     .map_err(|e| XlogError::Kernel(format!("d4_compile_count failed: {}", e)))?;
+    #[cfg(debug_assertions)]
+    eprintln!("[xlog-prob] gpu_d4: sync after d4_compile_count");
     provider
         .device()
         .synchronize()
@@ -962,8 +993,16 @@ fn compile_gpu_d4_with_gate(
     device
         .dtod_copy(&edge_counts, &mut edge_offsets)
         .map_err(|e| XlogError::Kernel(format!("dtod_copy(edge_counts) failed: {}", e)))?;
+    #[cfg(debug_assertions)]
+    eprintln!("[xlog-prob] gpu_d4: scan node_offsets/edge_offsets");
     exclusive_scan_u32_inplace(provider, &mut node_offsets, max_items_u32)?;
     exclusive_scan_u32_inplace(provider, &mut edge_offsets, max_items_u32)?;
+    #[cfg(debug_assertions)]
+    eprintln!("[xlog-prob] gpu_d4: sync after node_offsets/edge_offsets scan");
+    provider
+        .device()
+        .synchronize()
+        .map_err(|e| XlogError::Kernel(format!("sync after node_offsets/edge_offsets scan failed: {}", e)))?;
 
     let node_cap_usize = usize::try_from(node_cap)
         .map_err(|_| XlogError::Compilation("smooth_node_cap exceeds usize::MAX".to_string()))?;
@@ -982,9 +1021,11 @@ fn compile_gpu_d4_with_gate(
     let mut decision_child_true = memory.alloc::<u32>(node_cap_usize)?;
     let mut node_level = memory.alloc::<u32>(node_cap_usize)?;
 
-    device
-        .memset_zeros(&mut node_type)
-        .map_err(|e| XlogError::Kernel(format!("Failed to zero node_type: {}", e)))?;
+    // Important: unused nodes in the capacity tail must not contribute clauses in the equivalence
+    // verifier. We default them to `LIT` so SAT CNF encoding skips them; `d4_compile_emit`
+    // overwrites the prefix [0..meta_num_nodes) with real tags.
+    const XGCF_LIT: u8 = 2;
+    memset_u8_sync(device, &mut node_type, XGCF_LIT)?;
     device
         .memset_zeros(&mut child_offsets)
         .map_err(|e| XlogError::Kernel(format!("Failed to zero child_offsets: {}", e)))?;
@@ -1063,6 +1104,8 @@ fn compile_gpu_d4_with_gate(
         (&mut decision_child_true).as_kernel_param(),
         (&mut node_level).as_kernel_param(),
     ];
+    #[cfg(debug_assertions)]
+    eprintln!("[xlog-prob] gpu_d4: launch d4_compile_emit");
     unsafe {
         compile_emit.clone().launch(
             LaunchConfig {
@@ -1074,10 +1117,14 @@ fn compile_gpu_d4_with_gate(
         )
     }
     .map_err(|e| XlogError::Kernel(format!("d4_compile_emit failed: {}", e)))?;
+    #[cfg(debug_assertions)]
+    eprintln!("[xlog-prob] gpu_d4: sync after d4_compile_emit");
     provider
         .device()
         .synchronize()
         .map_err(|e| XlogError::Kernel(format!("sync after d4_compile_emit failed: {}", e)))?;
+    #[cfg(debug_assertions)]
+    eprintln!("[xlog-prob] gpu_d4: launch d4_capture_emit_meta");
     unsafe {
         capture_meta.clone().launch(
             LaunchConfig {
@@ -1102,6 +1149,12 @@ fn compile_gpu_d4_with_gate(
         )
     }
     .map_err(|e| XlogError::Kernel(format!("d4_capture_emit_meta failed: {}", e)))?;
+    #[cfg(debug_assertions)]
+    eprintln!("[xlog-prob] gpu_d4: sync after d4_capture_emit_meta");
+    provider
+        .device()
+        .synchronize()
+        .map_err(|e| XlogError::Kernel(format!("sync after d4_capture_emit_meta failed: {}", e)))?;
 
     let num_levels = (max_depth as u32)
         .checked_mul(2)
@@ -1132,6 +1185,8 @@ fn compile_gpu_d4_with_gate(
     if grid == 0 {
         grid = 1;
     }
+    #[cfg(debug_assertions)]
+    eprintln!("[xlog-prob] gpu_d4: launch d4_levelize_counts");
     unsafe {
         lvl_counts.clone().launch(
             LaunchConfig {
@@ -2556,6 +2611,7 @@ mod tests {
 
         crate::compilation::validate_equivalence_gpu(
             &phi,
+            &phi.num_vars,
             &circuit,
             &provider,
             crate::compilation::GpuEquivalenceConfig::default(),
@@ -2841,6 +2897,7 @@ mod tests {
 
         crate::compilation::validate_equivalence_gpu(
             &phi,
+            &phi.num_vars,
             &circuit,
             &provider,
             crate::compilation::GpuEquivalenceConfig::default(),
@@ -3121,6 +3178,7 @@ mod tests {
 
         crate::compilation::validate_equivalence_gpu(
             &phi,
+            &phi.num_vars,
             &circuit,
             &provider,
             crate::compilation::GpuEquivalenceConfig::default(),
@@ -3394,6 +3452,7 @@ mod tests {
 
         crate::compilation::validate_equivalence_gpu(
             &phi,
+            &phi.num_vars,
             &circuit,
             &provider,
             crate::compilation::GpuEquivalenceConfig::default(),

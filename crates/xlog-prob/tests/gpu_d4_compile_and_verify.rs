@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use xlog_core::MemoryBudget;
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
-use xlog_prob::compilation::{compile_gpu_d4_and_verify, DeviceRandomVarList, GpuCompileConfig};
+use xlog_prob::compilation::{compile_gpu_d4_and_verify, GpuCompileConfig};
 use xlog_solve::{Clause, GpuCnf, Literal, SolveInstance};
 
 fn try_provider() -> Option<Arc<CudaKernelProvider>> {
@@ -47,9 +47,7 @@ fn gpu_d4_compile_and_verify_unit_clause() {
         cdcl_conflict_budget: None,
     };
 
-    let random_vars =
-        DeviceRandomVarList::from_host(provider.as_ref(), &[]).expect("random vars upload");
-    let circuit = compile_gpu_d4_and_verify(&phi, &provider, &config, &random_vars)
-        .expect("compile must succeed");
+    let circuit =
+        compile_gpu_d4_and_verify(&phi, &phi.num_vars, &provider, &config).expect("compile must succeed");
     assert!(circuit.num_nodes() > 0);
 }

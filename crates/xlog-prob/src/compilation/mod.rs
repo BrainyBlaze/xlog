@@ -36,8 +36,9 @@ pub use gpu_weights::{
 };
 pub use sparse_matrix::GpuCsrCnf;
 pub use validation::{
-    check_equivalence_gpu, check_equivalence_gpu_gated, validate_equivalence_gpu,
-    validate_equivalence_gpu_gated, GpuEquivalenceConfig,
+    build_equivalence_queries_gpu, check_equivalence_gpu, check_equivalence_gpu_gated,
+    validate_equivalence_gpu, validate_equivalence_gpu_gated, GpuEquivalenceConfig,
+    GpuEquivalenceQueries,
 };
 
 /// Device-resident random-variable list for GPU smoothing.
@@ -97,34 +98,31 @@ impl DeviceRandomVarList {
 /// Compile CNF on GPU, then verify equivalence with GPU CDCL.
 pub fn compile_gpu_d4_and_verify(
     cnf: &GpuCnf,
+    decision_var_limit: &TrackedCudaSlice<u32>,
     provider: &Arc<CudaKernelProvider>,
     config: &GpuCompileConfig,
-    random_vars: &DeviceRandomVarList,
 ) -> Result<GpuXgcf> {
     if config.cdcl_conflict_budget.is_some() {
         return Err(XlogError::Compilation(
             "cdcl_conflict_budget is not supported by the GPU CDCL verifier".to_string(),
         ));
     }
-    let d4_config = d4_config_for_smoothing(config, random_vars.count())?;
-    let mut circuit = gpu_d4::compile_gpu_d4(cnf, provider, &d4_config)?;
-    if !random_vars.is_empty() {
-        circuit = circuit.smooth_random_vars_device(
-            provider,
-            random_vars.list(),
-            random_vars.count(),
-            config.smooth_node_cap,
-            config.smooth_edge_cap,
-        )?;
-    }
+    let circuit = gpu_d4::compile_gpu_d4(cnf, provider, config)?;
     let cdcl = cdcl_config_from_compile(config)?;
-    validate_equivalence_gpu(cnf, &circuit, provider, GpuEquivalenceConfig { cdcl })?;
+    validate_equivalence_gpu(
+        cnf,
+        decision_var_limit,
+        &circuit,
+        provider,
+        GpuEquivalenceConfig { cdcl },
+    )?;
     Ok(circuit)
 }
 
 /// Compile CNF on GPU, cache the circuit, then verify equivalence with GPU CDCL.
 pub fn compile_gpu_d4_and_verify_cached(
     cnf: &GpuCnf,
+    decision_var_limit: &TrackedCudaSlice<u32>,
     provider: &Arc<CudaKernelProvider>,
     config: &GpuCompileConfig,
     cache: &mut GpuCircuitCache,
@@ -136,46 +134,112 @@ pub fn compile_gpu_d4_and_verify_cached(
         ));
     }
 
+    #[cfg(debug_assertions)]
+    eprintln!("[xlog-prob] compile_gpu_d4_and_verify_cached: hash_cnf_gpu");
     let key = gpu_cache::hash_cnf_gpu(cnf, provider)?;
+    #[cfg(debug_assertions)]
+    {
+        provider
+            .device()
+            .synchronize()
+            .map_err(|e| XlogError::Kernel(format!("sync after hash_cnf_gpu failed: {}", e)))?;
+    }
+    #[cfg(debug_assertions)]
+    eprintln!("[xlog-prob] compile_gpu_d4_and_verify_cached: lookup_or_insert_device");
     let lookup = cache.lookup_or_insert_device(&key)?;
     let mut handle = lookup.into_handle();
 
     let d4_config = d4_config_for_smoothing(config, random_vars.count())?;
-    let circuit = gpu_d4::compile_gpu_d4_gated(
+    #[cfg(debug_assertions)]
+    eprintln!("[xlog-prob] compile_gpu_d4_and_verify_cached: compile_gpu_d4_gated");
+    let circuit_base = gpu_d4::compile_gpu_d4_gated(
         cnf,
         provider,
         &d4_config,
         handle.compile_needed_device(),
     )?;
-    if circuit.num_nodes() == 0 || circuit.num_levels() == 0 {
+    #[cfg(debug_assertions)]
+    {
+        provider
+            .device()
+            .synchronize()
+            .map_err(|e| XlogError::Kernel(format!("sync after compile_gpu_d4_gated failed: {}", e)))?;
+    }
+    if circuit_base.num_nodes() == 0 || circuit_base.num_levels() == 0 {
         return Ok(handle);
     }
-    let circuit = if random_vars.is_empty() {
-        circuit
+
+    // Verify equivalence on the *base* circuit (pre-smoothing) to keep the verifier CNFs minimal.
+    let cdcl = cdcl_config_from_compile(config)?;
+    #[cfg(debug_assertions)]
+    eprintln!("[xlog-prob] compile_gpu_d4_and_verify_cached: validate_equivalence_gpu_gated");
+    validate_equivalence_gpu_gated(
+        cnf,
+        decision_var_limit,
+        &circuit_base,
+        provider,
+        GpuEquivalenceConfig { cdcl },
+        handle.compile_needed_device(),
+    )?;
+    #[cfg(debug_assertions)]
+    {
+        provider.device().synchronize().map_err(|e| {
+            XlogError::Kernel(format!("sync after validate_equivalence_gpu_gated failed: {}", e))
+        })?;
+    }
+
+    // Smoothing is evaluation-only (WMC/grad correctness); it is semantics-preserving and does not
+    // need to participate in the equivalence check.
+    let circuit_eval = if random_vars.is_empty() {
+        circuit_base
     } else {
-        let smoothed = circuit.smooth_random_vars_device(
+        #[cfg(debug_assertions)]
+        eprintln!("[xlog-prob] compile_gpu_d4_and_verify_cached: smooth_random_vars_device");
+        let smoothed = circuit_base.smooth_random_vars_device(
             provider,
             random_vars.list(),
             random_vars.count(),
             config.smooth_node_cap,
             config.smooth_edge_cap,
         )?;
+        #[cfg(debug_assertions)]
+        {
+            provider.device().synchronize().map_err(|e| {
+                XlogError::Kernel(format!("sync after smooth_random_vars_device failed: {}", e))
+            })?;
+        }
         smoothed
     };
-    cache.store_from_xgcf(&mut handle, &circuit)?;
+    #[cfg(debug_assertions)]
+    eprintln!("[xlog-prob] compile_gpu_d4_and_verify_cached: store_from_xgcf");
+    cache.store_from_xgcf(&mut handle, &circuit_eval)?;
+    #[cfg(debug_assertions)]
+    {
+        provider
+            .device()
+            .synchronize()
+            .map_err(|e| XlogError::Kernel(format!("sync after store_from_xgcf failed: {}", e)))?;
+    }
 
+    #[cfg(debug_assertions)]
+    eprintln!("[xlog-prob] compile_gpu_d4_and_verify_cached: compute_free_var_mask_gpu_gated");
     let free_var_mask =
-        gpu_d4::compute_free_var_mask_gpu_gated(cnf, &circuit, provider, handle.compile_needed_device())?;
+        gpu_d4::compute_free_var_mask_gpu_gated(cnf, &circuit_eval, provider, handle.compile_needed_device())?;
+    #[cfg(debug_assertions)]
+    {
+        provider.device().synchronize().map_err(|e| {
+            XlogError::Kernel(format!("sync after compute_free_var_mask_gpu_gated failed: {}", e))
+        })?;
+    }
+    #[cfg(debug_assertions)]
+    eprintln!("[xlog-prob] compile_gpu_d4_and_verify_cached: store_free_var_mask");
     cache.store_free_var_mask(&mut handle, &free_var_mask)?;
-
-    let cdcl = cdcl_config_from_compile(config)?;
-    validate_equivalence_gpu_gated(
-        cnf,
-        &circuit,
-        provider,
-        GpuEquivalenceConfig { cdcl },
-        handle.compile_needed_device(),
-    )?;
+    #[cfg(debug_assertions)]
+    {
+        provider.device().synchronize().map_err(|e| {
+            XlogError::Kernel(format!("sync after store_free_var_mask failed: {}", e))
+        })?;
+    }
     Ok(handle)
 }
 

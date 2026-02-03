@@ -110,7 +110,7 @@ fn gpu_xgcf_from_device_const1_matches_true_cnf() {
 
     let circuit = GpuXgcf::from_device(builder, layout, &provider).expect("GpuXgcf from_device");
 
-    validate_equivalence_gpu(&phi, &circuit, &provider, GpuEquivalenceConfig::default())
+    validate_equivalence_gpu(&phi, &phi.num_vars, &circuit, &provider, GpuEquivalenceConfig::default())
         .expect("equivalence should hold");
 
     // Device-only layout should still be evaluatable (no host level_offsets required).

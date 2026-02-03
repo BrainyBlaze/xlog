@@ -8,8 +8,15 @@
 // - Memory-bounded (fixed-capacity arenas; overflow => hard error)
 // - GPU-native data-plane (host is control-plane only)
 
-#include <cstdint>
-#include <cstddef>
+// NOTE: This file is compiled to PTX and embedded in the repo.
+// To keep regeneration possible in environments that only have NVRTC (no full host C++ headers),
+// we avoid libstdc++ includes and define the fixed-width integer aliases we need.
+typedef unsigned char uint8_t;
+typedef signed char int8_t;
+typedef unsigned int uint32_t;
+typedef int int32_t;
+typedef unsigned long long uint64_t;
+typedef long long int64_t;
 
 // ---------------------------------------------------------------------------
 // Encoding / constants
@@ -38,6 +45,7 @@ static constexpr int32_t SAT_ERR_WATCH_OVERFLOW = 4;
 static constexpr int32_t SAT_ERR_INVALID_PROOF = 5;
 static constexpr int32_t SAT_ERR_INVALID_MODEL = 6;
 static constexpr int32_t SAT_ERR_INVALID_INPUT = 7;
+static constexpr int32_t SAT_ERR_DECISION_EXHAUSTED = 8;
 
 // Fail-fast trap. Used to enforce "verifier must not silently succeed" without host reads.
 __device__ __forceinline__ void sat_trap() {
@@ -172,56 +180,166 @@ __device__ __forceinline__ void sat_watch_insert_head(
 // Deterministic VSIDS-style activity (integer, monotone bump + rescale)
 // ---------------------------------------------------------------------------
 
-__device__ __forceinline__ void sat_bump_var(uint32_t v, uint32_t* __restrict__ var_activity, uint32_t bump) {
+__device__ __forceinline__ uint32_t sat_bump_var(uint32_t v, uint32_t* __restrict__ var_activity, uint32_t bump) {
     uint32_t a = var_activity[v];
     uint32_t na = a + bump;
+    if (na < a) {
+        // Saturate on overflow; rescaling will bring values back down.
+        na = 0xFFFFFFFFu;
+    }
     var_activity[v] = na;
+    return na;
 }
 
-// Rescale activities when close to overflow.
-__device__ __forceinline__ void sat_maybe_rescale_activities(
-    uint32_t num_vars,
-    uint32_t* __restrict__ var_activity
-) {
-    // Rescale if any activity is very large (scan deterministically).
-    uint32_t maxv = 0;
-    for (uint32_t v = 1; v <= num_vars; v++) {
-        uint32_t a = var_activity[v];
-        if (a > maxv) {
-            maxv = a;
-        }
-    }
-    if (maxv < 0xF0000000u) {
-        return;
-    }
-    for (uint32_t v = 1; v <= num_vars; v++) {
-        var_activity[v] >>= 8;
-    }
-}
+// ---------------------------------------------------------------------------
+// Decision heap (unassigned vars only), deterministic max-heap by (activity desc, var id asc)
+// ---------------------------------------------------------------------------
 
-__device__ __forceinline__ uint32_t sat_pick_branch_var(
-    uint32_t num_vars,
-    const int8_t* __restrict__ assign,
+static constexpr uint32_t SAT_HEAP_NONE = 0xFFFFFFFFu;
+
+__device__ __forceinline__ bool sat_heap_better(
+    uint32_t a,
+    uint32_t b,
     const uint32_t* __restrict__ var_activity
 ) {
-    uint32_t best_v = 0;
-    uint32_t best_a = 0;
-    for (uint32_t v = 1; v <= num_vars; v++) {
-        if (assign[v] != SAT_VAL_UNASSIGNED) {
-            continue;
+    uint32_t aa = var_activity[a];
+    uint32_t bb = var_activity[b];
+    if (aa != bb) {
+        return aa > bb;
+    }
+    return a < b;
+}
+
+__device__ __forceinline__ void sat_heap_swap(
+    uint32_t i,
+    uint32_t j,
+    uint32_t* __restrict__ heap,
+    uint32_t* __restrict__ heap_pos
+) {
+    uint32_t vi = heap[i];
+    uint32_t vj = heap[j];
+    heap[i] = vj;
+    heap[j] = vi;
+    heap_pos[vi] = j;
+    heap_pos[vj] = i;
+}
+
+__device__ __forceinline__ void sat_heap_sift_up(
+    uint32_t i,
+    uint32_t* __restrict__ heap,
+    uint32_t* __restrict__ heap_pos,
+    const uint32_t* __restrict__ var_activity
+) {
+    while (i > 0) {
+        uint32_t p = (i - 1u) >> 1;
+        uint32_t vp = heap[p];
+        uint32_t vi = heap[i];
+        if (sat_heap_better(vp, vi, var_activity)) {
+            break;
         }
-        uint32_t a = var_activity[v];
-        if (best_v == 0 || a > best_a || (a == best_a && v < best_v)) {
-            best_v = v;
-            best_a = a;
+        sat_heap_swap(p, i, heap, heap_pos);
+        i = p;
+    }
+}
+
+__device__ __forceinline__ void sat_heap_sift_down(
+    uint32_t i,
+    uint32_t heap_size,
+    uint32_t* __restrict__ heap,
+    uint32_t* __restrict__ heap_pos,
+    const uint32_t* __restrict__ var_activity
+) {
+    for (;;) {
+        uint32_t l = (i << 1) + 1u;
+        if (l >= heap_size) {
+            return;
+        }
+        uint32_t r = l + 1u;
+        uint32_t best = l;
+        if (r < heap_size) {
+            if (sat_heap_better(heap[r], heap[l], var_activity)) {
+                best = r;
+            }
+        }
+        uint32_t vi = heap[i];
+        uint32_t vb = heap[best];
+        if (sat_heap_better(vi, vb, var_activity)) {
+            return;
+        }
+        sat_heap_swap(i, best, heap, heap_pos);
+        i = best;
+    }
+}
+
+__device__ __forceinline__ void sat_heap_remove(
+    uint32_t v,
+    uint32_t* __restrict__ heap_size,
+    uint32_t* __restrict__ heap,
+    uint32_t* __restrict__ heap_pos,
+    const uint32_t* __restrict__ var_activity
+) {
+    uint32_t sz = *heap_size;
+    uint32_t i = heap_pos[v];
+    // Defensive: if heap_pos is corrupted but v is the current root, treat it as a root removal.
+    // This prevents infinite loops in stale-root cleanup paths.
+    if ((i == SAT_HEAP_NONE || i >= sz) && sz > 0u && heap[0] == v) {
+        i = 0u;
+    }
+    if (i == SAT_HEAP_NONE || i >= sz) {
+        return;
+    }
+    sz -= 1u;
+    *heap_size = sz;
+    heap_pos[v] = SAT_HEAP_NONE;
+    if (i == sz) {
+        return;
+    }
+    uint32_t mv = heap[sz];
+    heap[i] = mv;
+    heap_pos[mv] = i;
+    // Restore heap property.
+    if (i > 0) {
+        uint32_t p = (i - 1u) >> 1;
+        if (!sat_heap_better(heap[p], heap[i], var_activity)) {
+            sat_heap_sift_up(i, heap, heap_pos, var_activity);
+            return;
         }
     }
-    return best_v;
+    sat_heap_sift_down(i, sz, heap, heap_pos, var_activity);
+}
+
+__device__ __forceinline__ void sat_heap_insert(
+    uint32_t v,
+    uint32_t* __restrict__ heap_size,
+    uint32_t* __restrict__ heap,
+    uint32_t* __restrict__ heap_pos,
+    const uint32_t* __restrict__ var_activity
+) {
+    uint32_t i = *heap_size;
+    heap[i] = v;
+    heap_pos[v] = i;
+    *heap_size = i + 1u;
+    sat_heap_sift_up(i, heap, heap_pos, var_activity);
 }
 
 // ---------------------------------------------------------------------------
 // CDCL core helpers (enqueue, propagate, analyze, backtrack)
 // ---------------------------------------------------------------------------
+
+__device__ __forceinline__ bool sat_is_decision_var(
+    uint32_t v,
+    uint32_t base_limit,
+    uint32_t extra_base,
+    uint32_t extra_end_excl
+) {
+    if (v == 0u) {
+        return false;
+    }
+    if (v <= base_limit) {
+        return true;
+    }
+    return (v >= extra_base && v < extra_end_excl);
+}
 
 __device__ __forceinline__ bool sat_enqueue(
     int32_t lit,
@@ -233,7 +351,14 @@ __device__ __forceinline__ bool sat_enqueue(
     int32_t* __restrict__ trail,
     uint32_t* __restrict__ trail_len,
     uint32_t* __restrict__ assigned_count,
-    int8_t* __restrict__ phase
+    int8_t* __restrict__ phase,
+    uint32_t decision_base_limit,
+    uint32_t decision_extra_base,
+    uint32_t decision_extra_end_excl,
+    uint32_t* __restrict__ decision_heap,
+    uint32_t* __restrict__ decision_heap_pos,
+    uint32_t* __restrict__ decision_heap_size,
+    const uint32_t* __restrict__ var_activity
 ) {
     uint32_t v = sat_var(lit);
     int8_t val = sat_lit_sign(lit);
@@ -246,6 +371,9 @@ __device__ __forceinline__ bool sat_enqueue(
         trail[*trail_len] = lit;
         *trail_len = *trail_len + 1u;
         *assigned_count = *assigned_count + 1u;
+        if (sat_is_decision_var(v, decision_base_limit, decision_extra_base, decision_extra_end_excl)) {
+            sat_heap_remove(v, decision_heap_size, decision_heap, decision_heap_pos, var_activity);
+        }
         return true;
     }
     return cur == val;
@@ -255,12 +383,22 @@ __device__ __forceinline__ void sat_unassign_lit(
     int32_t lit,
     int8_t* __restrict__ assign,
     uint32_t* __restrict__ level,
-    int32_t* __restrict__ reason
+    int32_t* __restrict__ reason,
+    uint32_t decision_base_limit,
+    uint32_t decision_extra_base,
+    uint32_t decision_extra_end_excl,
+    uint32_t* __restrict__ decision_heap_size,
+    uint32_t* __restrict__ decision_heap,
+    uint32_t* __restrict__ decision_heap_pos,
+    const uint32_t* __restrict__ var_activity
 ) {
     uint32_t v = sat_var(lit);
     assign[v] = SAT_VAL_UNASSIGNED;
     level[v] = 0;
     reason[v] = SAT_REASON_UNASSIGNED;
+    if (sat_is_decision_var(v, decision_base_limit, decision_extra_base, decision_extra_end_excl)) {
+        sat_heap_insert(v, decision_heap_size, decision_heap, decision_heap_pos, var_activity);
+    }
 }
 
 __device__ __forceinline__ void sat_backtrack(
@@ -274,7 +412,14 @@ __device__ __forceinline__ void sat_backtrack(
     uint32_t* __restrict__ assigned_count,
     int8_t* __restrict__ assign,
     uint32_t* __restrict__ level,
-    int32_t* __restrict__ reason
+    int32_t* __restrict__ reason,
+    uint32_t decision_base_limit,
+    uint32_t decision_extra_base,
+    uint32_t decision_extra_end_excl,
+    uint32_t* __restrict__ decision_heap_size,
+    uint32_t* __restrict__ decision_heap,
+    uint32_t* __restrict__ decision_heap_pos,
+    const uint32_t* __restrict__ var_activity
 ) {
     uint32_t cur_level = *decision_level;
     if (back_level >= cur_level) {
@@ -289,7 +434,18 @@ __device__ __forceinline__ void sat_backtrack(
     // Unassign in reverse order (deterministic).
     for (uint32_t i = *trail_len; i > cut; i--) {
         int32_t lit = trail[i - 1u];
-        sat_unassign_lit(lit, assign, level, reason);
+        sat_unassign_lit(
+            lit,
+            assign,
+            level,
+            reason,
+            decision_base_limit,
+            decision_extra_base,
+            decision_extra_end_excl,
+            decision_heap_size,
+            decision_heap,
+            decision_heap_pos,
+            var_activity);
         *assigned_count = *assigned_count - 1u;
     }
     *trail_len = cut;
@@ -306,6 +462,11 @@ __device__ __forceinline__ void sat_backtrack(
 }
 
 // Propagation returns conflict clause id (>=0) or -1 if none.
+//
+// Block-parallel execution model:
+// - Thread 0 owns all global solver mutations (trail, assignments, watch list relinking).
+// - The whole block participates in clause inspection for watched-literal propagation.
+// - Thread 0 commits updates deterministically.
 __device__ __forceinline__ int32_t sat_propagate(
     const uint32_t* __restrict__ base_offsets,
     const int32_t* __restrict__ base_lits,
@@ -328,105 +489,238 @@ __device__ __forceinline__ int32_t sat_propagate(
     int32_t* __restrict__ trail,
     uint32_t* __restrict__ trail_len,
     uint32_t* __restrict__ assigned_count,
-    int8_t* __restrict__ phase
+    int8_t* __restrict__ phase,
+    uint32_t decision_base_limit,
+    uint32_t decision_extra_base,
+    uint32_t decision_extra_end_excl,
+    uint32_t* __restrict__ decision_heap_size,
+    uint32_t* __restrict__ decision_heap,
+    uint32_t* __restrict__ decision_heap_pos,
+    const uint32_t* __restrict__ var_activity
 ) {
-    while (*qhead < *trail_len) {
-        int32_t p = trail[*qhead];
-        *qhead = *qhead + 1u;
+    static constexpr uint32_t SAT_PROP_CHUNK = 256u;
 
-        // Clauses watching the falsified literal (~p) must be processed.
+    static constexpr uint8_t SAT_ACT_SKIP = 0;
+    static constexpr uint8_t SAT_ACT_MOVE = 1;
+    static constexpr uint8_t SAT_ACT_UNIT = 2;
+    static constexpr uint8_t SAT_ACT_CONFLICT = 3;
+    static constexpr uint8_t SAT_ACT_DELETE = 4;
+
+    __shared__ int32_t sh_result;
+    __shared__ uint32_t sh_has_p;
+    __shared__ int32_t sh_p;
+    __shared__ int32_t sh_list_cursor;
+    __shared__ uint32_t sh_chunk_n;
+    __shared__ int32_t sh_nodes[SAT_PROP_CHUNK];
+    __shared__ uint8_t sh_act[SAT_PROP_CHUNK];
+    __shared__ uint32_t sh_move_pos[SAT_PROP_CHUNK];
+    __shared__ uint32_t sh_move_idx[SAT_PROP_CHUNK];
+    __shared__ int32_t sh_unit_lit[SAT_PROP_CHUNK];
+
+    if (threadIdx.x == 0) {
+        sh_result = -1;
+    }
+    __syncthreads();
+
+    for (;;) {
+        // Pop next literal to propagate (thread 0), broadcast to block.
+        if (threadIdx.x == 0) {
+            if (*qhead < *trail_len) {
+                sh_p = trail[*qhead];
+                *qhead = *qhead + 1u;
+                sh_has_p = 1u;
+            } else {
+                sh_has_p = 0u;
+            }
+        }
+        __syncthreads();
+
+        if (sh_has_p == 0u) {
+            break;
+        }
+
+        int32_t p = sh_p;
         uint32_t fals_idx = sat_lit_index(-p);
 
-        int32_t node = watch_head[fals_idx];
-        while (node >= 0) {
-            int32_t next_node = watch_next[node]; // save before possible move
-            int32_t clause_id = node / 2;
-            uint32_t slot = static_cast<uint32_t>(node & 1);
+        // Walk the watch list for fals_idx in fixed-size chunks.
+        if (threadIdx.x == 0) {
+            sh_list_cursor = watch_head[fals_idx];
+        }
+        __syncthreads();
 
-            // Skip deleted learned clauses.
-            if (clause_id >= static_cast<int32_t>(num_base_clauses)) {
-                uint32_t lid = static_cast<uint32_t>(clause_id) - num_base_clauses;
-                if (learned_deleted[lid] != 0) {
-                    // Remove stale watch nodes deterministically.
-                    sat_watch_remove(node, watch_head, watch_next, watch_prev, fals_idx);
-                    node = next_node;
-                    continue;
+        for (;;) {
+            if (sh_list_cursor < 0 || sh_result >= 0) {
+                break;
+            }
+
+            // Stage up to chunk_cap nodes from the watch list without modifying it.
+            if (threadIdx.x == 0) {
+                uint32_t chunk_cap = static_cast<uint32_t>(blockDim.x);
+                if (chunk_cap > SAT_PROP_CHUNK) {
+                    chunk_cap = SAT_PROP_CHUNK;
                 }
-            }
 
-            SatClauseView cv = sat_get_clause(
-                clause_id, base_offsets, base_lits, num_base_clauses, learned_offsets, learned_lits);
-            uint32_t w0 = watch0_pos[static_cast<uint32_t>(clause_id)];
-            uint32_t w1 = watch1_pos[static_cast<uint32_t>(clause_id)];
-            uint32_t wpos_false = (slot == 0) ? w0 : w1;
-            uint32_t wpos_other = (slot == 0) ? w1 : w0;
-
-            // Unit clause case: both watches may be identical.
-            int32_t other_lit = (wpos_other < cv.len) ? cv.lits[wpos_other] : 0;
-            if (cv.len == 0) {
-                return clause_id; // empty clause => immediate conflict
-            }
-            if (other_lit == 0) {
-                // Defensive: malformed clause.
-                return clause_id;
-            }
-
-            // If other watch is satisfied, clause is satisfied.
-            if (sat_eval_lit(other_lit, assign) == SAT_VAL_TRUE) {
-                node = next_node;
-                continue;
-            }
-
-            // Try to find a new watch in this clause that is not falsified.
-            bool moved = false;
-            for (uint32_t k = 0; k < cv.len; k++) {
-                if (k == wpos_other || k == wpos_false) {
-                    continue;
+                uint32_t n = 0;
+                int32_t node = sh_list_cursor;
+                while (node >= 0 && n < chunk_cap) {
+                    sh_nodes[n++] = node;
+                    node = watch_next[node];
                 }
-                int32_t lit = cv.lits[k];
-                if (sat_eval_lit(lit, assign) != SAT_VAL_FALSE) {
-                    // Move the false watch to this literal.
-                    uint32_t new_idx = sat_lit_index(lit);
-                    // Remove from current falsified list and insert into new list.
-                    sat_watch_remove(node, watch_head, watch_next, watch_prev, fals_idx);
-                    sat_watch_insert_head(node, watch_head, watch_next, watch_prev, new_idx);
-                    // Update watch position for this clause slot.
-                    if (slot == 0) {
-                        // slot 0 corresponds to watch0_pos
-                        watch0_pos[static_cast<uint32_t>(clause_id)] = k;
-                    } else {
-                        watch1_pos[static_cast<uint32_t>(clause_id)] = k;
+                sh_chunk_n = n;
+                sh_list_cursor = node;
+            }
+            __syncthreads();
+
+            uint32_t n = sh_chunk_n;
+            uint32_t t = static_cast<uint32_t>(threadIdx.x);
+            if (t < n) {
+                int32_t node = sh_nodes[t];
+                int32_t clause_id = node / 2;
+                uint32_t slot = static_cast<uint32_t>(node & 1);
+
+                uint8_t act = SAT_ACT_SKIP;
+                uint32_t move_pos = 0;
+                uint32_t move_idx = 0;
+                int32_t unit_lit = 0;
+
+                // Skip deleted learned clauses (but remove stale watch nodes deterministically).
+                if (clause_id >= static_cast<int32_t>(num_base_clauses)) {
+                    uint32_t lid = static_cast<uint32_t>(clause_id) - num_base_clauses;
+                    if (learned_deleted[lid] != 0) {
+                        act = SAT_ACT_DELETE;
                     }
-                    moved = true;
-                    break;
+                }
+
+                if (act != SAT_ACT_DELETE) {
+                    SatClauseView cv = sat_get_clause(
+                        clause_id, base_offsets, base_lits, num_base_clauses, learned_offsets, learned_lits);
+                    uint32_t w0 = watch0_pos[static_cast<uint32_t>(clause_id)];
+                    uint32_t w1 = watch1_pos[static_cast<uint32_t>(clause_id)];
+                    uint32_t wpos_false = (slot == 0) ? w0 : w1;
+                    uint32_t wpos_other = (slot == 0) ? w1 : w0;
+
+                    if (cv.len == 0) {
+                        act = SAT_ACT_CONFLICT;
+                    } else {
+                        // Unit clause case: both watches may be identical.
+                        int32_t other_lit = (wpos_other < cv.len) ? cv.lits[wpos_other] : 0;
+                        if (other_lit == 0) {
+                            act = SAT_ACT_CONFLICT;
+                        } else if (sat_eval_lit(other_lit, assign) == SAT_VAL_TRUE) {
+                            act = SAT_ACT_SKIP;
+                        } else {
+                            // Try to find a new watch in this clause that is not falsified.
+                            bool moved = false;
+                            for (uint32_t k = 0; k < cv.len; k++) {
+                                if (k == wpos_other || k == wpos_false) {
+                                    continue;
+                                }
+                                int32_t lit = cv.lits[k];
+                                if (sat_eval_lit(lit, assign) != SAT_VAL_FALSE) {
+                                    moved = true;
+                                    act = SAT_ACT_MOVE;
+                                    move_pos = k;
+                                    move_idx = sat_lit_index(lit);
+                                    break;
+                                }
+                            }
+
+                            if (!moved) {
+                                // No new watch found: clause is unit or conflicting.
+                                int8_t other_eval = sat_eval_lit(other_lit, assign);
+                                if (other_eval == SAT_VAL_FALSE) {
+                                    act = SAT_ACT_CONFLICT;
+                                } else {
+                                    act = SAT_ACT_UNIT;
+                                    unit_lit = other_lit;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                sh_act[t] = act;
+                sh_move_pos[t] = move_pos;
+                sh_move_idx[t] = move_idx;
+                sh_unit_lit[t] = unit_lit;
+            }
+            __syncthreads();
+
+            // Deterministic commit: apply actions on thread 0 only.
+            if (threadIdx.x == 0) {
+                int32_t conflict = -1;
+                for (uint32_t i = 0; i < n; i++) {
+                    int32_t node = sh_nodes[i];
+                    int32_t clause_id = node / 2;
+                    uint32_t slot = static_cast<uint32_t>(node & 1);
+                    uint8_t act = sh_act[i];
+
+                    switch (act) {
+                    case SAT_ACT_SKIP:
+                        break;
+                    case SAT_ACT_DELETE:
+                        sat_watch_remove(node, watch_head, watch_next, watch_prev, fals_idx);
+                        break;
+                    case SAT_ACT_MOVE: {
+                        uint32_t new_idx = sh_move_idx[i];
+                        sat_watch_remove(node, watch_head, watch_next, watch_prev, fals_idx);
+                        sat_watch_insert_head(node, watch_head, watch_next, watch_prev, new_idx);
+                        if (slot == 0) {
+                            watch0_pos[static_cast<uint32_t>(clause_id)] = sh_move_pos[i];
+                        } else {
+                            watch1_pos[static_cast<uint32_t>(clause_id)] = sh_move_pos[i];
+                        }
+                        break;
+                    }
+                    case SAT_ACT_CONFLICT:
+                        if (conflict < 0 || clause_id < conflict) {
+                            conflict = clause_id;
+                        }
+                        break;
+                    case SAT_ACT_UNIT: {
+                        int32_t unit_lit = sh_unit_lit[i];
+                        if (!sat_enqueue(unit_lit, clause_id, decision_level, assign, level, reason, trail, trail_len,
+                                         assigned_count, phase,
+                                         decision_base_limit,
+                                         decision_extra_base,
+                                         decision_extra_end_excl,
+                                         decision_heap, decision_heap_pos, decision_heap_size, var_activity)) {
+                            if (conflict < 0 || clause_id < conflict) {
+                                conflict = clause_id;
+                            }
+                        } else if (clause_id >= static_cast<int32_t>(num_base_clauses)) {
+                            uint32_t lid = static_cast<uint32_t>(clause_id) - num_base_clauses;
+                            learned_activity[lid] += 1u;
+                        }
+                        break;
+                    }
+                    default:
+                        // Defensive: unknown action.
+                        sat_trap();
+                        break;
+                    }
+                }
+
+                if (conflict >= 0) {
+                    sh_result = conflict;
                 }
             }
+            __syncthreads();
 
-            if (moved) {
-                node = next_node;
-                continue;
+            if (sh_result >= 0) {
+                break;
             }
+        }
 
-            // No new watch found: clause is unit or conflicting.
-            int8_t other_eval = sat_eval_lit(other_lit, assign);
-            if (other_eval == SAT_VAL_FALSE) {
-                // Conflict.
-                return clause_id;
-            }
-            // Unit: enqueue other_lit.
-            if (!sat_enqueue(other_lit, clause_id, decision_level, assign, level, reason, trail, trail_len,
-                             assigned_count, phase)) {
-                return clause_id; // conflict assigning unit
-            }
-            if (clause_id >= static_cast<int32_t>(num_base_clauses)) {
-                uint32_t lid = static_cast<uint32_t>(clause_id) - num_base_clauses;
-                learned_activity[lid] += 1u;
-            }
+        __syncthreads();
 
-            node = next_node;
+        if (sh_result >= 0) {
+            break;
         }
     }
-    return -1;
+
+    __syncthreads();
+    return sh_result;
 }
 
 // Compute LBD (Literal Block Distance) for learned clause: number of distinct decision levels.
@@ -783,6 +1077,9 @@ extern "C" __global__ void sat_cdcl_solve(
     const int32_t* __restrict__ clause_lits,
     const uint32_t* __restrict__ num_vars,    // len=1
     const uint32_t* __restrict__ num_clauses, // len=1
+    const uint32_t* __restrict__ decision_base_limit,  // len=1
+    const uint32_t* __restrict__ decision_extra_base,  // len=1
+    const uint32_t* __restrict__ decision_extra_count, // len=1
     uint32_t var_cap,
     uint32_t clause_cap,
     // Solver configuration
@@ -797,6 +1094,9 @@ extern "C" __global__ void sat_cdcl_solve(
     int32_t* __restrict__ reason,     // len = num_vars+1
     uint32_t* __restrict__ var_activity, // len = num_vars+1
     int8_t* __restrict__ var_phase,   // len = num_vars+1
+    // Decision heap (unassigned vars only)
+    uint32_t* __restrict__ decision_heap,     // len = var_cap+1
+    uint32_t* __restrict__ decision_heap_pos, // len = var_cap+1
     // Trail / levels
     int32_t* __restrict__ trail,      // len = num_vars+1
     uint32_t* __restrict__ trail_lim, // len = num_vars+1 (trail_lim[0]=0)
@@ -830,29 +1130,90 @@ extern "C" __global__ void sat_cdcl_solve(
     if (blockIdx.x != 0) {
         return;
     }
-    if (threadIdx.x != 0) {
-        return;
-    }
     if (compile_needed[0] == 0u) {
         return;
     }
 
-    uint32_t nv = num_vars[0];
-    uint32_t nc = num_clauses[0];
+    __shared__ uint32_t sh_nv;
+    __shared__ uint32_t sh_nc;
+    __shared__ uint32_t sh_decision_base;
+    __shared__ uint32_t sh_decision_extra_base;
+    __shared__ uint32_t sh_decision_extra_end_excl;
+    __shared__ uint32_t sh_done;
+    __shared__ int32_t sh_final_status;
+    __shared__ int32_t sh_final_error;
+    __shared__ uint32_t sh_final_learned_count;
 
-    // Initialize outputs.
-    out_status[0] = SAT_STATUS_ERROR;
-    out_error[0] = SAT_ERR_OK;
-    out_learned_count[0] = 0;
+    if (threadIdx.x == 0) {
+        sh_nv = num_vars[0];
+        sh_nc = num_clauses[0];
+        sh_decision_base = decision_base_limit[0];
+        uint32_t eb = decision_extra_base[0];
+        uint32_t ec = decision_extra_count[0];
+        uint32_t ee = eb + ec;
+        sh_decision_extra_base = eb;
+        sh_decision_extra_end_excl = ee;
+        sh_done = 0u;
+        sh_final_status = SAT_STATUS_ERROR;
+        sh_final_error = SAT_ERR_OK;
+        sh_final_learned_count = 0u;
+    }
+    __syncthreads();
 
-    if (nv == 0u || nv > var_cap || nc > clause_cap) {
-        out_status[0] = SAT_STATUS_ERROR;
-        out_error[0] = SAT_ERR_INVALID_INPUT;
+    uint32_t nv = sh_nv;
+    uint32_t nc = sh_nc;
+    uint32_t decision_base = sh_decision_base;
+    uint32_t decision_extra_base_v = sh_decision_extra_base;
+    uint32_t decision_extra_end_excl = sh_decision_extra_end_excl;
+
+    // Validate inputs once and coordinate a single exit path for the whole block.
+    if (threadIdx.x == 0) {
+        bool ok = true;
+        if (nv == 0u || nv > var_cap || nc > clause_cap) {
+            ok = false;
+        }
+        if (decision_base == 0u || decision_base > nv) {
+            ok = false;
+        }
+        // If decision_extra_count overflowed, ee < eb.
+        if (decision_extra_end_excl < decision_extra_base_v) {
+            ok = false;
+        }
+        // If an extra decision range is configured, validate it is within 1..=nv.
+        if (decision_extra_end_excl != decision_extra_base_v) {
+            if (decision_extra_base_v == 0u) {
+                ok = false;
+            }
+            // extra_end_excl may equal nv+1 when the range ends at nv.
+            if (decision_extra_end_excl > nv + 1u) {
+                ok = false;
+            }
+        }
+        if (!ok) {
+            sh_done = 1u;
+            sh_final_status = SAT_STATUS_ERROR;
+            sh_final_error = SAT_ERR_INVALID_INPUT;
+        }
+    }
+    __syncthreads();
+    if (sh_done) {
+        if (threadIdx.x == 0) {
+            out_status[0] = sh_final_status;
+            out_error[0] = sh_final_error;
+            out_learned_count[0] = sh_final_learned_count;
+        }
         return;
     }
 
-    // Initialize variable arrays.
-    for (uint32_t v = 0; v <= nv; v++) {
+    // Initialize outputs (thread 0 only).
+    if (threadIdx.x == 0) {
+        out_status[0] = SAT_STATUS_ERROR;
+        out_error[0] = SAT_ERR_OK;
+        out_learned_count[0] = 0;
+    }
+
+    // Initialize variable arrays (block-parallel, deterministic).
+    for (uint32_t v = static_cast<uint32_t>(threadIdx.x); v <= nv; v += static_cast<uint32_t>(blockDim.x)) {
         assign[v] = SAT_VAL_UNASSIGNED;
         level[v] = 0;
         reason[v] = SAT_REASON_UNASSIGNED;
@@ -860,6 +1221,63 @@ extern "C" __global__ void sat_cdcl_solve(
         var_phase[v] = SAT_VAL_FALSE; // deterministic default: false
         seen[v] = 0;
     }
+    __syncthreads();
+
+    // Seed initial variable activity from literal occurrence counts, and derive a deterministic
+    // starting phase. We reuse `level[v]` as a temporary counter for negative occurrences, then
+    // reset it to 0 before starting the solve.
+    if (threadIdx.x == 0) {
+        for (uint32_t c = 0; c < nc; c++) {
+            uint32_t s = clause_offsets[c];
+            uint32_t e = clause_offsets[c + 1u];
+            for (uint32_t i = s; i < e; i++) {
+                int32_t lit = clause_lits[i];
+                uint32_t v = sat_var(lit);
+                if (v == 0u || v > nv) {
+                    continue;
+                }
+                uint32_t a = var_activity[v];
+                if (a != 0xFFFFFFFFu) {
+                    var_activity[v] = a + 1u;
+                }
+                if (lit < 0) {
+                    uint32_t n = level[v];
+                    if (n != 0xFFFFFFFFu) {
+                        level[v] = n + 1u;
+                    }
+                }
+            }
+        }
+    }
+    __syncthreads();
+    for (uint32_t v = static_cast<uint32_t>(threadIdx.x); v <= nv; v += static_cast<uint32_t>(blockDim.x)) {
+        if (v == 0u) {
+            level[v] = 0;
+            var_phase[v] = SAT_VAL_FALSE;
+            continue;
+        }
+        uint32_t total = var_activity[v];
+        uint32_t neg = level[v];
+        // pos >= neg  <=>  (pos + neg) >= 2*neg  <=>  total >= 2*neg
+        var_phase[v] = (total >= (neg << 1)) ? SAT_VAL_TRUE : SAT_VAL_FALSE;
+        level[v] = 0;
+    }
+    __syncthreads();
+
+    // Equivalence-verifier specific: encourage branching on the ¬phi selector vars first by
+    // forcing their saved phase to TRUE and giving them maximal initial activity.
+    // (If the extra range is empty, this is a no-op.)
+    if (decision_extra_end_excl > decision_extra_base_v) {
+        for (uint32_t v = decision_extra_base_v + static_cast<uint32_t>(threadIdx.x);
+             v < decision_extra_end_excl;
+             v += static_cast<uint32_t>(blockDim.x)) {
+            if (v >= 1u && v <= nv) {
+                var_phase[v] = SAT_VAL_TRUE;
+                var_activity[v] = 0xFFFFFFFFu;
+            }
+        }
+    }
+    __syncthreads();
 
     // Initialize trail.
     uint32_t trail_len = 0;
@@ -867,124 +1285,100 @@ extern "C" __global__ void sat_cdcl_solve(
     uint32_t decision_level = 0;
     uint32_t assigned_count = 0;
 
-    trail_lim[0] = 0;
-    for (uint32_t i = 1; i <= nv; i++) {
+    // trail_lim is indexed by decision level (0..). Clear deterministically.
+    for (uint32_t i = static_cast<uint32_t>(threadIdx.x); i <= nv; i += static_cast<uint32_t>(blockDim.x)) {
         trail_lim[i] = 0;
     }
+    __syncthreads();
+
+    // Initialize decision heap with branchable variables.
+    // Heap ordering is deterministic: higher activity first, ties by smaller var id.
+    uint32_t decision_heap_size = 0;
+    if (threadIdx.x == 0) {
+        decision_heap_pos[0] = SAT_HEAP_NONE;
+        for (uint32_t v = 1; v <= nv; v++) {
+            if (sat_is_decision_var(v, decision_base, decision_extra_base_v, decision_extra_end_excl)) {
+                decision_heap[decision_heap_size] = v;
+                decision_heap_pos[v] = decision_heap_size;
+                decision_heap_size++;
+            } else {
+                decision_heap_pos[v] = SAT_HEAP_NONE;
+            }
+        }
+        // Heapify bottom-up (deterministic).
+        for (int32_t i = (static_cast<int32_t>(decision_heap_size) >> 1) - 1; i >= 0; i--) {
+            sat_heap_sift_down(
+                static_cast<uint32_t>(i),
+                decision_heap_size,
+                decision_heap,
+                decision_heap_pos,
+                var_activity);
+        }
+    }
+    __syncthreads();
 
     // Initialize learned arena.
     uint32_t learned_count = 0;
     uint32_t learned_lit_count = 0;
-    learned_offsets[0] = 0;
-    proof_offsets[0] = 0;
     uint32_t proof_len = 0;
 
-    for (uint32_t i = 0; i < max_learned_clauses; i++) {
+    if (threadIdx.x == 0) {
+        learned_offsets[0] = 0;
+        proof_offsets[0] = 0;
+    }
+    for (uint32_t i = static_cast<uint32_t>(threadIdx.x); i < max_learned_clauses; i += static_cast<uint32_t>(blockDim.x)) {
         learned_deleted[i] = 0;
         learned_lbd[i] = 0;
         learned_activity[i] = 0;
         learned_locked[i] = 0;
     }
+    __syncthreads();
 
     // Initialize watch lists.
-    for (uint32_t i = 0; i < 2u * nv; i++) {
+    for (uint32_t i = static_cast<uint32_t>(threadIdx.x); i < 2u * nv; i += static_cast<uint32_t>(blockDim.x)) {
         watch_head[i] = -1;
     }
     uint32_t max_total_clauses = nc + max_learned_clauses;
-    for (uint32_t i = 0; i < 2u * max_total_clauses; i++) {
+    for (uint32_t i = static_cast<uint32_t>(threadIdx.x); i < 2u * max_total_clauses; i += static_cast<uint32_t>(blockDim.x)) {
         watch_next[i] = -1;
         watch_prev[i] = -1;
     }
+    __syncthreads();
 
     // Initialize base clause watches deterministically in clause_id order.
-    for (uint32_t c = 0; c < nc; c++) {
-        uint32_t s = clause_offsets[c];
-        uint32_t e = clause_offsets[c + 1u];
-        uint32_t len = e - s;
-        uint32_t w0 = 0;
-        uint32_t w1 = (len > 1u) ? 1u : 0u;
-        watch0_pos[c] = w0;
-        watch1_pos[c] = w1;
-
-        // Insert both watch nodes.
-        int32_t lit0 = (len > 0u) ? clause_lits[s + w0] : 0;
-        int32_t lit1 = (len > 0u) ? clause_lits[s + w1] : 0;
-
-        if (len == 0u) {
-            // Empty clause => UNSAT at level 0. Emit an empty learned clause with a trivial proof trace.
-            if (learned_count >= max_learned_clauses) {
-                out_status[0] = SAT_STATUS_ERROR;
-                out_error[0] = SAT_ERR_LEARNED_CLAUSES_OVERFLOW;
-                out_learned_count[0] = learned_count;
-                return;
+    if (threadIdx.x == 0) {
+        for (uint32_t c = 0; c < nc; c++) {
+            if (sh_done) {
+                break;
             }
-            if (proof_len + 2u > max_proof_u32) {
-                out_status[0] = SAT_STATUS_ERROR;
-                out_error[0] = SAT_ERR_PROOF_OVERFLOW;
-                out_learned_count[0] = learned_count;
-                return;
-            }
-            uint32_t lid = learned_count;
-            learned_offsets[lid] = learned_lit_count;
-            learned_offsets[lid + 1u] = learned_lit_count;
-            learned_deleted[lid] = 0;
-            learned_lbd[lid] = 0;
-            learned_activity[lid] = 0;
-            learned_locked[lid] = 0;
-            learned_count++;
 
-            proof_offsets[lid] = proof_len;
-            proof_data[proof_len++] = c;
-            proof_data[proof_len++] = 0; // steps
-            proof_offsets[lid + 1u] = proof_len;
+            uint32_t s = clause_offsets[c];
+            uint32_t e = clause_offsets[c + 1u];
+            uint32_t len = e - s;
+            uint32_t w0 = 0;
+            uint32_t w1 = (len > 1u) ? 1u : 0u;
+            watch0_pos[c] = w0;
+            watch1_pos[c] = w1;
 
-            out_status[0] = SAT_STATUS_UNSAT;
-            out_error[0] = SAT_ERR_OK;
-            out_learned_count[0] = learned_count;
-            return;
-        }
+            // Insert both watch nodes.
+            int32_t lit0 = (len > 0u) ? clause_lits[s + w0] : 0;
+            int32_t lit1 = (len > 0u) ? clause_lits[s + w1] : 0;
 
-        uint32_t idx0 = sat_lit_index(lit0);
-        uint32_t idx1 = sat_lit_index(lit1);
-        int32_t node0 = static_cast<int32_t>(c * 2u);
-        int32_t node1 = static_cast<int32_t>(c * 2u + 1u);
-        sat_watch_insert_head(node0, watch_head, watch_next, watch_prev, idx0);
-        sat_watch_insert_head(node1, watch_head, watch_next, watch_prev, idx1);
-
-        // If unit clause, enqueue immediately at level 0.
-        if (len == 1u) {
-            if (!sat_enqueue(lit0, static_cast<int32_t>(c), 0, assign, level, reason, trail, &trail_len,
-                             &assigned_count, var_phase)) {
-                // Contradictory unit clauses at level 0. Emit an empty learned clause + resolution trace.
-                uint32_t proof_steps = 0;
-                bool ok = sat_analyze_level0_unsat(
-                    static_cast<int32_t>(c),
-                    clause_offsets, clause_lits, nc,
-                    learned_offsets, learned_lits, learned_deleted,
-                    learned_count,
-                    nv,
-                    reason,
-                    trail, trail_len,
-                    seen,
-                    proof_vars_tmp, proof_reason_tmp, &proof_steps);
-                if (!ok) {
-                    out_status[0] = SAT_STATUS_ERROR;
-                    out_error[0] = SAT_ERR_INVALID_PROOF;
-                    out_learned_count[0] = learned_count;
-                    return;
-                }
-
+            if (len == 0u) {
+                // Empty clause => UNSAT at level 0. Emit an empty learned clause with a trivial proof trace.
                 if (learned_count >= max_learned_clauses) {
-                    out_status[0] = SAT_STATUS_ERROR;
-                    out_error[0] = SAT_ERR_LEARNED_CLAUSES_OVERFLOW;
-                    out_learned_count[0] = learned_count;
-                    return;
+                    sh_done = 1u;
+                    sh_final_status = SAT_STATUS_ERROR;
+                    sh_final_error = SAT_ERR_LEARNED_CLAUSES_OVERFLOW;
+                    sh_final_learned_count = learned_count;
+                    break;
                 }
-                if (proof_len + 2u + 2u * proof_steps > max_proof_u32) {
-                    out_status[0] = SAT_STATUS_ERROR;
-                    out_error[0] = SAT_ERR_PROOF_OVERFLOW;
-                    out_learned_count[0] = learned_count;
-                    return;
+                if (proof_len + 2u > max_proof_u32) {
+                    sh_done = 1u;
+                    sh_final_status = SAT_STATUS_ERROR;
+                    sh_final_error = SAT_ERR_PROOF_OVERFLOW;
+                    sh_final_learned_count = learned_count;
+                    break;
                 }
                 uint32_t lid = learned_count;
                 learned_offsets[lid] = learned_lit_count;
@@ -997,19 +1391,100 @@ extern "C" __global__ void sat_cdcl_solve(
 
                 proof_offsets[lid] = proof_len;
                 proof_data[proof_len++] = c;
-                proof_data[proof_len++] = proof_steps;
-                for (uint32_t i = 0; i < proof_steps; i++) {
-                    proof_data[proof_len++] = proof_vars_tmp[i];
-                    proof_data[proof_len++] = proof_reason_tmp[i];
-                }
+                proof_data[proof_len++] = 0; // steps
                 proof_offsets[lid + 1u] = proof_len;
 
-                out_status[0] = SAT_STATUS_UNSAT;
-                out_error[0] = SAT_ERR_OK;
-                out_learned_count[0] = learned_count;
-                return;
+                sh_done = 1u;
+                sh_final_status = SAT_STATUS_UNSAT;
+                sh_final_error = SAT_ERR_OK;
+                sh_final_learned_count = learned_count;
+                break;
+            }
+
+            uint32_t idx0 = sat_lit_index(lit0);
+            uint32_t idx1 = sat_lit_index(lit1);
+            int32_t node0 = static_cast<int32_t>(c * 2u);
+            int32_t node1 = static_cast<int32_t>(c * 2u + 1u);
+            sat_watch_insert_head(node0, watch_head, watch_next, watch_prev, idx0);
+            sat_watch_insert_head(node1, watch_head, watch_next, watch_prev, idx1);
+
+            // If unit clause, enqueue immediately at level 0.
+            if (len == 1u) {
+                if (!sat_enqueue(lit0, static_cast<int32_t>(c), 0, assign, level, reason, trail, &trail_len,
+                                 &assigned_count, var_phase,
+                                 decision_base,
+                                 decision_extra_base_v,
+                                 decision_extra_end_excl,
+                                 decision_heap, decision_heap_pos, &decision_heap_size, var_activity)) {
+                    // Contradictory unit clauses at level 0. Emit an empty learned clause + resolution trace.
+                    uint32_t proof_steps = 0;
+                    bool ok = sat_analyze_level0_unsat(
+                        static_cast<int32_t>(c),
+                        clause_offsets, clause_lits, nc,
+                        learned_offsets, learned_lits, learned_deleted,
+                        learned_count,
+                        nv,
+                        reason,
+                        trail, trail_len,
+                        seen,
+                        proof_vars_tmp, proof_reason_tmp, &proof_steps);
+                    if (!ok) {
+                        sh_done = 1u;
+                        sh_final_status = SAT_STATUS_ERROR;
+                        sh_final_error = SAT_ERR_INVALID_PROOF;
+                        sh_final_learned_count = learned_count;
+                        break;
+                    }
+
+                    if (learned_count >= max_learned_clauses) {
+                        sh_done = 1u;
+                        sh_final_status = SAT_STATUS_ERROR;
+                        sh_final_error = SAT_ERR_LEARNED_CLAUSES_OVERFLOW;
+                        sh_final_learned_count = learned_count;
+                        break;
+                    }
+                    if (proof_len + 2u + 2u * proof_steps > max_proof_u32) {
+                        sh_done = 1u;
+                        sh_final_status = SAT_STATUS_ERROR;
+                        sh_final_error = SAT_ERR_PROOF_OVERFLOW;
+                        sh_final_learned_count = learned_count;
+                        break;
+                    }
+                    uint32_t lid = learned_count;
+                    learned_offsets[lid] = learned_lit_count;
+                    learned_offsets[lid + 1u] = learned_lit_count;
+                    learned_deleted[lid] = 0;
+                    learned_lbd[lid] = 0;
+                    learned_activity[lid] = 0;
+                    learned_locked[lid] = 0;
+                    learned_count++;
+
+                    proof_offsets[lid] = proof_len;
+                    proof_data[proof_len++] = c;
+                    proof_data[proof_len++] = proof_steps;
+                    for (uint32_t i = 0; i < proof_steps; i++) {
+                        proof_data[proof_len++] = proof_vars_tmp[i];
+                        proof_data[proof_len++] = proof_reason_tmp[i];
+                    }
+                    proof_offsets[lid + 1u] = proof_len;
+
+                    sh_done = 1u;
+                    sh_final_status = SAT_STATUS_UNSAT;
+                    sh_final_error = SAT_ERR_OK;
+                    sh_final_learned_count = learned_count;
+                    break;
+                }
             }
         }
+    }
+    __syncthreads();
+    if (sh_done) {
+        if (threadIdx.x == 0) {
+            out_status[0] = sh_final_status;
+            out_error[0] = sh_final_error;
+            out_learned_count[0] = sh_final_learned_count;
+        }
+        return;
     }
 
     // Initial propagation.
@@ -1021,117 +1496,41 @@ extern "C" __global__ void sat_cdcl_solve(
         &qhead, decision_level,
         assign, level, reason,
         trail, &trail_len, &assigned_count,
-        var_phase);
-    if (confl >= 0) {
-        // Conflict at level 0 => UNSAT. Emit an empty learned clause + resolution trace certificate.
-        uint32_t proof_steps = 0;
-        bool ok = sat_analyze_level0_unsat(
-            confl,
-            clause_offsets, clause_lits, nc,
-            learned_offsets, learned_lits, learned_deleted,
-            learned_count,
-            nv,
-            reason,
-            trail, trail_len,
-            seen,
-            proof_vars_tmp, proof_reason_tmp, &proof_steps);
-        if (!ok) {
-            out_status[0] = SAT_STATUS_ERROR;
-            out_error[0] = SAT_ERR_INVALID_PROOF;
-            out_learned_count[0] = learned_count;
-            return;
-        }
-
-        if (learned_count >= max_learned_clauses) {
-            out_status[0] = SAT_STATUS_ERROR;
-            out_error[0] = SAT_ERR_LEARNED_CLAUSES_OVERFLOW;
-            out_learned_count[0] = learned_count;
-            return;
-        }
-        if (proof_len + 2u + 2u * proof_steps > max_proof_u32) {
-            out_status[0] = SAT_STATUS_ERROR;
-            out_error[0] = SAT_ERR_PROOF_OVERFLOW;
-            out_learned_count[0] = learned_count;
-            return;
-        }
-        uint32_t lid = learned_count;
-        learned_offsets[lid] = learned_lit_count;
-        learned_offsets[lid + 1u] = learned_lit_count; // empty clause
-        learned_deleted[lid] = 0;
-        learned_lbd[lid] = 0;
-        learned_activity[lid] = 0;
-        learned_locked[lid] = 0;
-        learned_count++;
-
-        proof_offsets[lid] = proof_len;
-        proof_data[proof_len++] = static_cast<uint32_t>(confl);
-        proof_data[proof_len++] = proof_steps;
-        for (uint32_t i = 0; i < proof_steps; i++) {
-            proof_data[proof_len++] = proof_vars_tmp[i];
-            proof_data[proof_len++] = proof_reason_tmp[i];
-        }
-        proof_offsets[lid + 1u] = proof_len;
-
-        out_status[0] = SAT_STATUS_UNSAT;
-        out_error[0] = SAT_ERR_OK;
-        out_learned_count[0] = learned_count;
-        return;
-    }
-
-    // CDCL loop.
-    uint32_t conflicts = 0;
-    uint32_t next_reduce = reduce_interval;
-    uint32_t restart_iter = 1;
-    uint32_t next_restart = restart_base * sat_luby(restart_iter);
-    uint32_t var_bump = 1u << 24;
-
-    for (;;) {
-        // Propagate.
-        confl = sat_propagate(
-            clause_offsets, clause_lits, nv, nc,
-            learned_offsets, learned_lits, learned_deleted, learned_activity,
-            watch0_pos, watch1_pos,
-            watch_head, watch_next, watch_prev,
-            &qhead, decision_level,
-            assign, level, reason,
-            trail, &trail_len, &assigned_count,
-            var_phase);
-
+        var_phase,
+        decision_base,
+        decision_extra_base_v,
+        decision_extra_end_excl,
+        &decision_heap_size, decision_heap, decision_heap_pos, var_activity);
+    if (threadIdx.x == 0) {
         if (confl >= 0) {
-            // Conflict.
-            conflicts++;
-            if (decision_level == 0) {
-                // UNSAT. Emit an empty learned clause + resolution trace certificate.
-                uint32_t proof_steps = 0;
-                bool ok = sat_analyze_level0_unsat(
-                    confl,
-                    clause_offsets, clause_lits, nc,
-                    learned_offsets, learned_lits, learned_deleted,
-                    learned_count,
-                    nv,
-                    reason,
-                    trail, trail_len,
-                    seen,
-                    proof_vars_tmp, proof_reason_tmp, &proof_steps);
-                if (!ok) {
-                    out_status[0] = SAT_STATUS_ERROR;
-                    out_error[0] = SAT_ERR_INVALID_PROOF;
-                    out_learned_count[0] = learned_count;
-                    return;
-                }
-
-                if (learned_count >= max_learned_clauses) {
-                    out_status[0] = SAT_STATUS_ERROR;
-                    out_error[0] = SAT_ERR_LEARNED_CLAUSES_OVERFLOW;
-                    out_learned_count[0] = learned_count;
-                    return;
-                }
-                if (proof_len + 2u + 2u * proof_steps > max_proof_u32) {
-                    out_status[0] = SAT_STATUS_ERROR;
-                    out_error[0] = SAT_ERR_PROOF_OVERFLOW;
-                    out_learned_count[0] = learned_count;
-                    return;
-                }
+            // Conflict at level 0 => UNSAT. Emit an empty learned clause + resolution trace certificate.
+            uint32_t proof_steps = 0;
+            bool ok = sat_analyze_level0_unsat(
+                confl,
+                clause_offsets, clause_lits, nc,
+                learned_offsets, learned_lits, learned_deleted,
+                learned_count,
+                nv,
+                reason,
+                trail, trail_len,
+                seen,
+                proof_vars_tmp, proof_reason_tmp, &proof_steps);
+            if (!ok) {
+                sh_done = 1u;
+                sh_final_status = SAT_STATUS_ERROR;
+                sh_final_error = SAT_ERR_INVALID_PROOF;
+                sh_final_learned_count = learned_count;
+            } else if (learned_count >= max_learned_clauses) {
+                sh_done = 1u;
+                sh_final_status = SAT_STATUS_ERROR;
+                sh_final_error = SAT_ERR_LEARNED_CLAUSES_OVERFLOW;
+                sh_final_learned_count = learned_count;
+            } else if (proof_len + 2u + 2u * proof_steps > max_proof_u32) {
+                sh_done = 1u;
+                sh_final_status = SAT_STATUS_ERROR;
+                sh_final_error = SAT_ERR_PROOF_OVERFLOW;
+                sh_final_learned_count = learned_count;
+            } else {
                 uint32_t lid = learned_count;
                 learned_offsets[lid] = learned_lit_count;
                 learned_offsets[lid + 1u] = learned_lit_count; // empty clause
@@ -1150,236 +1549,383 @@ extern "C" __global__ void sat_cdcl_solve(
                 }
                 proof_offsets[lid + 1u] = proof_len;
 
-                out_status[0] = SAT_STATUS_UNSAT;
-                out_error[0] = SAT_ERR_OK;
-                out_learned_count[0] = learned_count;
-                return;
+                sh_done = 1u;
+                sh_final_status = SAT_STATUS_UNSAT;
+                sh_final_error = SAT_ERR_OK;
+                sh_final_learned_count = learned_count;
             }
+        }
+    }
+    __syncthreads();
+    if (sh_done) {
+        if (threadIdx.x == 0) {
+            out_status[0] = sh_final_status;
+            out_error[0] = sh_final_error;
+            out_learned_count[0] = sh_final_learned_count;
+        }
+        return;
+    }
 
-            // Analyze.
-            uint32_t learnt_len = 0;
-            uint32_t bt = 0;
-            uint32_t proof_steps = 0;
-            bool ok = sat_analyze(
-                confl,
-                clause_offsets, clause_lits, nc,
-                learned_offsets, learned_lits, learned_deleted,
-                learned_count,
-                decision_level,
-                assign, level, reason,
-                trail, trail_len,
-                seen, learnt_tmp,
-                &learnt_len, &bt,
-                proof_vars_tmp, proof_reason_tmp, &proof_steps);
-            if (!ok) {
-                out_status[0] = SAT_STATUS_ERROR;
-                out_error[0] = SAT_ERR_INVALID_PROOF;
-                out_learned_count[0] = learned_count;
-                return;
-            }
+    // CDCL loop.
+    uint32_t conflicts = 0;
+    uint32_t next_reduce = reduce_interval;
+    uint32_t restart_iter = 1;
+    uint32_t next_restart = restart_base * sat_luby(restart_iter);
+    // Deterministic variable activity bump. Keep the bump constant to avoid frequent global
+    // rescale + heap rebuild costs on large instances; saturation is handled in sat_bump_var.
+    uint32_t var_bump = 1u;
 
-            // Bump learned clause activity for clauses that participate in this conflict analysis.
-            if (confl >= static_cast<int32_t>(nc)) {
-                uint32_t lid = static_cast<uint32_t>(confl) - nc;
-                if (lid < learned_count) {
-                    learned_activity[lid] += 1u;
+    for (;;) {
+        // Propagate (block-parallel).
+        confl = sat_propagate(
+            clause_offsets, clause_lits, nv, nc,
+            learned_offsets, learned_lits, learned_deleted, learned_activity,
+            watch0_pos, watch1_pos,
+            watch_head, watch_next, watch_prev,
+            &qhead, decision_level,
+            assign, level, reason,
+            trail, &trail_len, &assigned_count,
+            var_phase,
+            decision_base,
+            decision_extra_base_v,
+            decision_extra_end_excl,
+            &decision_heap_size, decision_heap, decision_heap_pos, var_activity);
+
+        if (threadIdx.x == 0) {
+            if (confl >= 0) {
+                // Conflict.
+                conflicts++;
+                if (decision_level == 0) {
+                    // UNSAT. Emit an empty learned clause + resolution trace certificate.
+                    uint32_t proof_steps = 0;
+                    bool ok = sat_analyze_level0_unsat(
+                        confl,
+                        clause_offsets, clause_lits, nc,
+                        learned_offsets, learned_lits, learned_deleted,
+                        learned_count,
+                        nv,
+                        reason,
+                        trail, trail_len,
+                        seen,
+                        proof_vars_tmp, proof_reason_tmp, &proof_steps);
+                    if (!ok) {
+                        sh_done = 1u;
+                        sh_final_status = SAT_STATUS_ERROR;
+                        sh_final_error = SAT_ERR_INVALID_PROOF;
+                        sh_final_learned_count = learned_count;
+                        goto iter_done;
+                    }
+
+                    if (learned_count >= max_learned_clauses) {
+                        sh_done = 1u;
+                        sh_final_status = SAT_STATUS_ERROR;
+                        sh_final_error = SAT_ERR_LEARNED_CLAUSES_OVERFLOW;
+                        sh_final_learned_count = learned_count;
+                        goto iter_done;
+                    }
+                    if (proof_len + 2u + 2u * proof_steps > max_proof_u32) {
+                        sh_done = 1u;
+                        sh_final_status = SAT_STATUS_ERROR;
+                        sh_final_error = SAT_ERR_PROOF_OVERFLOW;
+                        sh_final_learned_count = learned_count;
+                        goto iter_done;
+                    }
+                    uint32_t lid = learned_count;
+                    learned_offsets[lid] = learned_lit_count;
+                    learned_offsets[lid + 1u] = learned_lit_count; // empty clause
+                    learned_deleted[lid] = 0;
+                    learned_lbd[lid] = 0;
+                    learned_activity[lid] = 0;
+                    learned_locked[lid] = 0;
+                    learned_count++;
+
+                    proof_offsets[lid] = proof_len;
+                    proof_data[proof_len++] = static_cast<uint32_t>(confl);
+                    proof_data[proof_len++] = proof_steps;
+                    for (uint32_t i = 0; i < proof_steps; i++) {
+                        proof_data[proof_len++] = proof_vars_tmp[i];
+                        proof_data[proof_len++] = proof_reason_tmp[i];
+                    }
+                    proof_offsets[lid + 1u] = proof_len;
+
+                    sh_done = 1u;
+                    sh_final_status = SAT_STATUS_UNSAT;
+                    sh_final_error = SAT_ERR_OK;
+                    sh_final_learned_count = learned_count;
+                    goto iter_done;
                 }
-            }
-            for (uint32_t i = 0; i < proof_steps; i++) {
-                uint32_t rc = proof_reason_tmp[i];
-                if (rc >= nc) {
-                    uint32_t lid = rc - nc;
+
+                // Analyze.
+                uint32_t learnt_len = 0;
+                uint32_t bt = 0;
+                uint32_t proof_steps = 0;
+                bool ok = sat_analyze(
+                    confl,
+                    clause_offsets, clause_lits, nc,
+                    learned_offsets, learned_lits, learned_deleted,
+                    learned_count,
+                    decision_level,
+                    assign, level, reason,
+                    trail, trail_len,
+                    seen, learnt_tmp,
+                    &learnt_len, &bt,
+                    proof_vars_tmp, proof_reason_tmp, &proof_steps);
+                if (!ok) {
+                    sh_done = 1u;
+                    sh_final_status = SAT_STATUS_ERROR;
+                    sh_final_error = SAT_ERR_INVALID_PROOF;
+                    sh_final_learned_count = learned_count;
+                    goto iter_done;
+                }
+
+                // Bump learned clause activity for clauses that participate in this conflict analysis.
+                if (confl >= static_cast<int32_t>(nc)) {
+                    uint32_t lid = static_cast<uint32_t>(confl) - nc;
                     if (lid < learned_count) {
                         learned_activity[lid] += 1u;
                     }
                 }
-            }
-
-            // Bump variables in learned clause (deterministic).
-            for (uint32_t i = 0; i < learnt_len; i++) {
-                uint32_t v = sat_var(learnt_tmp[i]);
-                sat_bump_var(v, var_activity, var_bump);
-            }
-            // Increase bump slowly (integer approximation).
-            var_bump += var_bump >> 5; // +3.125%
-            sat_maybe_rescale_activities(nv, var_activity);
-
-            // Backjump.
-            sat_backtrack(bt, &decision_level, nv + 1u, trail_lim, &qhead,
-                          trail, &trail_len, &assigned_count, assign, level, reason);
-
-            // Learn clause (append to arena).
-            if (learned_count >= max_learned_clauses) {
-                out_status[0] = SAT_STATUS_ERROR;
-                out_error[0] = SAT_ERR_LEARNED_CLAUSES_OVERFLOW;
-                out_learned_count[0] = learned_count;
-                return;
-            }
-            uint32_t lid = learned_count;
-            uint32_t clause_id = nc + lid;
-            learned_offsets[lid] = learned_lit_count;
-            if (learned_lit_count + learnt_len > max_learned_lits) {
-                out_status[0] = SAT_STATUS_ERROR;
-                out_error[0] = SAT_ERR_LEARNED_LITS_OVERFLOW;
-                out_learned_count[0] = learned_count;
-                return;
-            }
-            for (uint32_t i = 0; i < learnt_len; i++) {
-                learned_lits[learned_lit_count + i] = learnt_tmp[i];
-            }
-            learned_lit_count += learnt_len;
-            learned_offsets[lid + 1u] = learned_lit_count;
-            learned_deleted[lid] = 0;
-            learned_lbd[lid] = sat_compute_lbd(learnt_tmp, learnt_len, level);
-            learned_activity[lid] = 0;
-            learned_locked[lid] = 0;
-            learned_count++;
-
-            // Record proof trace for this learned clause.
-            if (proof_len + 2u + 2u * proof_steps > max_proof_u32) {
-                out_status[0] = SAT_STATUS_ERROR;
-                out_error[0] = SAT_ERR_PROOF_OVERFLOW;
-                out_learned_count[0] = learned_count;
-                return;
-            }
-            proof_offsets[lid] = proof_len;
-            proof_data[proof_len++] = static_cast<uint32_t>(confl);
-            proof_data[proof_len++] = proof_steps;
-            for (uint32_t i = 0; i < proof_steps; i++) {
-                proof_data[proof_len++] = proof_vars_tmp[i];
-                proof_data[proof_len++] = proof_reason_tmp[i];
-            }
-            proof_offsets[lid + 1u] = proof_len;
-
-            // Initialize watches for learned clause.
-            uint32_t w0 = 0;
-            uint32_t w1 = (learnt_len > 1u) ? 1u : 0u;
-            watch0_pos[clause_id] = w0;
-            watch1_pos[clause_id] = w1;
-            // Insert watch nodes for learned clause.
-            int32_t lit0 = learnt_tmp[w0];
-            int32_t lit1 = learnt_tmp[w1];
-            uint32_t idx0 = sat_lit_index(lit0);
-            uint32_t idx1 = sat_lit_index(lit1);
-            int32_t node0 = static_cast<int32_t>(clause_id * 2u);
-            int32_t node1 = static_cast<int32_t>(clause_id * 2u + 1u);
-            sat_watch_insert_head(node0, watch_head, watch_next, watch_prev, idx0);
-            sat_watch_insert_head(node1, watch_head, watch_next, watch_prev, idx1);
-
-            // Enqueue asserting literal with reason = clause_id.
-            if (!sat_enqueue(learnt_tmp[0], static_cast<int32_t>(clause_id), decision_level, assign, level, reason,
-                             trail, &trail_len, &assigned_count, var_phase)) {
-                // Immediate contradiction after learning is still valid UNSAT only if at level 0,
-                // otherwise treat as conflict at this level on next propagate.
-            }
-            continue;
-        }
-
-        // No conflict. Check SAT.
-        if (assigned_count == nv) {
-            out_status[0] = SAT_STATUS_SAT;
-            out_error[0] = SAT_ERR_OK;
-            out_learned_count[0] = learned_count;
-            return;
-        }
-
-        // Restart (deterministic schedule).
-        if (conflicts >= next_restart && decision_level > 0) {
-            sat_backtrack(0, &decision_level, nv + 1u, trail_lim, &qhead,
-                          trail, &trail_len, &assigned_count, assign, level, reason);
-            restart_iter++;
-            next_restart = restart_base * sat_luby(restart_iter);
-        }
-
-        // Periodic clause DB management (deterministic heuristic).
-        if (reduce_interval != 0 && conflicts >= next_reduce && learned_count > 0) {
-            // Simple reduction: delete half of learned clauses with LBD > 2 and low activity, excluding locked.
-            // Compute activity threshold among deletable clauses.
-            uint64_t sum = 0;
-            uint32_t cnt = 0;
-            for (uint32_t i = 0; i < learned_count; i++) {
-                if (learned_deleted[i] != 0) {
-                    continue;
-                }
-                if (learned_lbd[i] <= 2u) {
-                    continue;
-                }
-                sum += static_cast<uint64_t>(learned_activity[i]);
-                cnt++;
-            }
-            uint32_t thr = (cnt > 0) ? static_cast<uint32_t>(sum / cnt) : 0;
-
-            // Mark locked learned clauses (used as a reason for any assignment).
-            for (uint32_t i = 0; i < learned_count; i++) {
-                learned_locked[i] = 0;
-            }
-            for (uint32_t v = 1; v <= nv; v++) {
-                int32_t r = reason[v];
-                if (r >= static_cast<int32_t>(nc)) {
-                    uint32_t lid = static_cast<uint32_t>(r) - nc;
-                    if (lid < learned_count) {
-                        learned_locked[lid] = 1;
+                for (uint32_t i = 0; i < proof_steps; i++) {
+                    uint32_t rc = proof_reason_tmp[i];
+                    if (rc >= nc) {
+                        uint32_t lid = rc - nc;
+                        if (lid < learned_count) {
+                            learned_activity[lid] += 1u;
+                        }
                     }
                 }
-            }
 
-            uint32_t deleted = 0;
-            for (uint32_t i = 0; i < learned_count; i++) {
-                if (learned_deleted[i] != 0) {
-                    continue;
-                }
-                if (learned_lbd[i] <= 2u) {
-                    continue;
-                }
-                if (learned_locked[i] != 0) {
-                    continue;
-                }
-                if (learned_activity[i] < thr) {
-                    learned_deleted[i] = 1;
-                    // Remove watch nodes for this learned clause.
-                    uint32_t clause_id = nc + i;
-                    int32_t node0 = static_cast<int32_t>(clause_id * 2u);
-                    int32_t node1 = static_cast<int32_t>(clause_id * 2u + 1u);
-                    // Remove using current watch positions to find literal indices.
-                    SatClauseView cv = sat_get_clause(static_cast<int32_t>(clause_id), clause_offsets, clause_lits, nc,
-                                                      learned_offsets, learned_lits);
-                    if (cv.len > 0) {
-                        int32_t l0 = cv.lits[watch0_pos[clause_id]];
-                        int32_t l1 = cv.lits[watch1_pos[clause_id]];
-                        sat_watch_remove(node0, watch_head, watch_next, watch_prev, sat_lit_index(l0));
-                        sat_watch_remove(node1, watch_head, watch_next, watch_prev, sat_lit_index(l1));
+                // Bump variables in learned clause (deterministic).
+                for (uint32_t i = 0; i < learnt_len; i++) {
+                    uint32_t v = sat_var(learnt_tmp[i]);
+                    (void)sat_bump_var(v, var_activity, var_bump);
+                    // If v is currently unassigned (present in the decision heap), restore heap order.
+                    uint32_t pos = decision_heap_pos[v];
+                    if (pos != SAT_HEAP_NONE && pos < decision_heap_size) {
+                        sat_heap_sift_up(pos, decision_heap, decision_heap_pos, var_activity);
                     }
-                    deleted++;
+                }
+
+                // Backjump.
+                sat_backtrack(bt, &decision_level, nv + 1u, trail_lim, &qhead,
+                              trail, &trail_len, &assigned_count, assign, level, reason,
+                              decision_base,
+                              decision_extra_base_v,
+                              decision_extra_end_excl,
+                              &decision_heap_size, decision_heap, decision_heap_pos, var_activity);
+
+                // Learn clause (append to arena).
+                if (learned_count >= max_learned_clauses) {
+                    sh_done = 1u;
+                    sh_final_status = SAT_STATUS_ERROR;
+                    sh_final_error = SAT_ERR_LEARNED_CLAUSES_OVERFLOW;
+                    sh_final_learned_count = learned_count;
+                    goto iter_done;
+                }
+                uint32_t lid = learned_count;
+                uint32_t clause_id = nc + lid;
+                learned_offsets[lid] = learned_lit_count;
+                if (learned_lit_count + learnt_len > max_learned_lits) {
+                    sh_done = 1u;
+                    sh_final_status = SAT_STATUS_ERROR;
+                    sh_final_error = SAT_ERR_LEARNED_LITS_OVERFLOW;
+                    sh_final_learned_count = learned_count;
+                    goto iter_done;
+                }
+                for (uint32_t i = 0; i < learnt_len; i++) {
+                    learned_lits[learned_lit_count + i] = learnt_tmp[i];
+                }
+                learned_lit_count += learnt_len;
+                learned_offsets[lid + 1u] = learned_lit_count;
+                learned_deleted[lid] = 0;
+                learned_lbd[lid] = sat_compute_lbd(learnt_tmp, learnt_len, level);
+                learned_activity[lid] = 0;
+                learned_locked[lid] = 0;
+                learned_count++;
+
+                // Record proof trace for this learned clause.
+                if (proof_len + 2u + 2u * proof_steps > max_proof_u32) {
+                    sh_done = 1u;
+                    sh_final_status = SAT_STATUS_ERROR;
+                    sh_final_error = SAT_ERR_PROOF_OVERFLOW;
+                    sh_final_learned_count = learned_count;
+                    goto iter_done;
+                }
+                proof_offsets[lid] = proof_len;
+                proof_data[proof_len++] = static_cast<uint32_t>(confl);
+                proof_data[proof_len++] = proof_steps;
+                for (uint32_t i = 0; i < proof_steps; i++) {
+                    proof_data[proof_len++] = proof_vars_tmp[i];
+                    proof_data[proof_len++] = proof_reason_tmp[i];
+                }
+                proof_offsets[lid + 1u] = proof_len;
+
+                // Initialize watches for learned clause.
+                uint32_t w0 = 0;
+                uint32_t w1 = (learnt_len > 1u) ? 1u : 0u;
+                watch0_pos[clause_id] = w0;
+                watch1_pos[clause_id] = w1;
+                // Insert watch nodes for learned clause.
+                int32_t lit0 = learnt_tmp[w0];
+                int32_t lit1 = learnt_tmp[w1];
+                uint32_t idx0 = sat_lit_index(lit0);
+                uint32_t idx1 = sat_lit_index(lit1);
+                int32_t node0 = static_cast<int32_t>(clause_id * 2u);
+                int32_t node1 = static_cast<int32_t>(clause_id * 2u + 1u);
+                sat_watch_insert_head(node0, watch_head, watch_next, watch_prev, idx0);
+                sat_watch_insert_head(node1, watch_head, watch_next, watch_prev, idx1);
+
+                // Enqueue asserting literal with reason = clause_id.
+                (void)sat_enqueue(learnt_tmp[0], static_cast<int32_t>(clause_id), decision_level, assign, level, reason,
+                                 trail, &trail_len, &assigned_count, var_phase,
+                                 decision_base,
+                                 decision_extra_base_v,
+                                 decision_extra_end_excl,
+                                 decision_heap, decision_heap_pos, &decision_heap_size, var_activity);
+            } else {
+                // No conflict. Check SAT.
+                if (assigned_count == nv) {
+                    sh_done = 1u;
+                    sh_final_status = SAT_STATUS_SAT;
+                    sh_final_error = SAT_ERR_OK;
+                    sh_final_learned_count = learned_count;
+                    goto iter_done;
+                }
+
+                // Restart (deterministic schedule).
+                if (conflicts >= next_restart && decision_level > 0) {
+                    sat_backtrack(0, &decision_level, nv + 1u, trail_lim, &qhead,
+                                  trail, &trail_len, &assigned_count, assign, level, reason,
+                                  decision_base,
+                                  decision_extra_base_v,
+                                  decision_extra_end_excl,
+                                  &decision_heap_size, decision_heap, decision_heap_pos, var_activity);
+                    restart_iter++;
+                    next_restart = restart_base * sat_luby(restart_iter);
+                }
+
+                // Periodic clause DB management (deterministic heuristic).
+                if (reduce_interval != 0 && conflicts >= next_reduce && learned_count > 0) {
+                    // Simple reduction: delete half of learned clauses with LBD > 2 and low activity, excluding locked.
+                    // Compute activity threshold among deletable clauses.
+                    uint64_t sum = 0;
+                    uint32_t cnt = 0;
+                    for (uint32_t i = 0; i < learned_count; i++) {
+                        if (learned_deleted[i] != 0) {
+                            continue;
+                        }
+                        if (learned_lbd[i] <= 2u) {
+                            continue;
+                        }
+                        sum += static_cast<uint64_t>(learned_activity[i]);
+                        cnt++;
+                    }
+                    uint32_t thr = (cnt > 0) ? static_cast<uint32_t>(sum / cnt) : 0;
+
+                    // Mark locked learned clauses (used as a reason for any assignment).
+                    for (uint32_t i = 0; i < learned_count; i++) {
+                        learned_locked[i] = 0;
+                    }
+                    for (uint32_t v = 1; v <= nv; v++) {
+                        int32_t r = reason[v];
+                        if (r >= static_cast<int32_t>(nc)) {
+                            uint32_t lid = static_cast<uint32_t>(r) - nc;
+                            if (lid < learned_count) {
+                                learned_locked[lid] = 1;
+                            }
+                        }
+                    }
+
+                    uint32_t deleted = 0;
+                    for (uint32_t i = 0; i < learned_count; i++) {
+                        if (learned_deleted[i] != 0) {
+                            continue;
+                        }
+                        if (learned_lbd[i] <= 2u) {
+                            continue;
+                        }
+                        if (learned_locked[i] != 0) {
+                            continue;
+                        }
+                        if (learned_activity[i] < thr) {
+                            learned_deleted[i] = 1;
+                            // Remove watch nodes for this learned clause.
+                            uint32_t clause_id = nc + i;
+                            int32_t node0 = static_cast<int32_t>(clause_id * 2u);
+                            int32_t node1 = static_cast<int32_t>(clause_id * 2u + 1u);
+                            // Remove using current watch positions to find literal indices.
+                            SatClauseView cv = sat_get_clause(static_cast<int32_t>(clause_id), clause_offsets, clause_lits, nc,
+                                                              learned_offsets, learned_lits);
+                            if (cv.len > 0) {
+                                int32_t l0 = cv.lits[watch0_pos[clause_id]];
+                                int32_t l1 = cv.lits[watch1_pos[clause_id]];
+                                sat_watch_remove(node0, watch_head, watch_next, watch_prev, sat_lit_index(l0));
+                                sat_watch_remove(node1, watch_head, watch_next, watch_prev, sat_lit_index(l1));
+                            }
+                            deleted++;
+                        }
+                    }
+                    (void)deleted;
+                    next_reduce += reduce_interval;
+                }
+
+                // Decide next branch from the decision heap (unassigned vars only).
+                uint32_t next_v = 0;
+                while (decision_heap_size > 0) {
+                    uint32_t v = decision_heap[0];
+                    if (v >= 1u && v <= nv && assign[v] == SAT_VAL_UNASSIGNED) {
+                        next_v = v;
+                        break;
+                    }
+                    // Defensive: drop stale heap entries deterministically.
+                    sat_heap_remove(v, &decision_heap_size, decision_heap, decision_heap_pos, var_activity);
+                }
+                if (next_v == 0) {
+                    // No eligible decision variables remain, but we have not proven SAT/UNSAT.
+                    // In verifier mode this indicates a bug in the encoding or decision set.
+                    sh_done = 1u;
+                    sh_final_status = SAT_STATUS_ERROR;
+                    sh_final_error = SAT_ERR_DECISION_EXHAUSTED;
+                    sh_final_learned_count = learned_count;
+                    goto iter_done;
+                }
+                decision_level++;
+                trail_lim[decision_level] = trail_len;
+                qhead = trail_len;
+
+                int8_t ph = var_phase[next_v];
+                int32_t decision_lit = (ph == SAT_VAL_TRUE) ? static_cast<int32_t>(next_v) : -static_cast<int32_t>(next_v);
+                if (!sat_enqueue(decision_lit, SAT_REASON_NONE, decision_level, assign, level, reason, trail, &trail_len,
+                                 &assigned_count, var_phase,
+                                 decision_base,
+                                 decision_extra_base_v,
+                                 decision_extra_end_excl,
+                                 decision_heap, decision_heap_pos, &decision_heap_size, var_activity)) {
+                    // Should never conflict on decision enqueue; treat as error.
+                    sh_done = 1u;
+                    sh_final_status = SAT_STATUS_ERROR;
+                    sh_final_error = SAT_ERR_INVALID_MODEL;
+                    sh_final_learned_count = learned_count;
+                    goto iter_done;
                 }
             }
-            (void)deleted;
-            next_reduce += reduce_interval;
+
+iter_done:
+            ;
         }
 
-        // Decide next branch.
-        uint32_t next_v = sat_pick_branch_var(nv, assign, var_activity);
-        if (next_v == 0) {
-            // No unassigned vars but assigned_count != num_vars: inconsistent accounting.
-            out_status[0] = SAT_STATUS_ERROR;
-            out_error[0] = SAT_ERR_INVALID_MODEL;
-            out_learned_count[0] = learned_count;
-            return;
-        }
-        decision_level++;
-        trail_lim[decision_level] = trail_len;
-        qhead = trail_len;
-
-        int8_t ph = var_phase[next_v];
-        int32_t decision_lit = (ph == SAT_VAL_TRUE) ? static_cast<int32_t>(next_v) : -static_cast<int32_t>(next_v);
-        if (!sat_enqueue(decision_lit, SAT_REASON_NONE, decision_level, assign, level, reason, trail, &trail_len,
-                         &assigned_count, var_phase)) {
-            // Should never conflict on decision enqueue; treat as error.
-            out_status[0] = SAT_STATUS_ERROR;
-            out_error[0] = SAT_ERR_INVALID_MODEL;
-            out_learned_count[0] = learned_count;
-            return;
+        __syncthreads();
+        if (sh_done) {
+            break;
         }
     }
+
+    if (threadIdx.x == 0) {
+        out_status[0] = sh_final_status;
+        out_error[0] = sh_final_error;
+        out_learned_count[0] = sh_final_learned_count;
+    }
+    return;
 }
 
 // ---------------------------------------------------------------------------
@@ -1525,6 +2071,176 @@ __device__ __forceinline__ bool sat_clause_equal_set(
     return true;
 }
 
+// Compute the dependency closure of the final (empty) learned clause proof.
+//
+// Marks `needed[i]=1` for learned clauses that appear in the final empty-clause derivation chain
+// (as either a conflict clause or a reason clause), transitively. This is a single-pass reverse scan
+// because each proof trace references only earlier clauses (`reason_clause < nc + i`).
+extern "C" __global__ void sat_proof_mark_needed(
+    const uint32_t* __restrict__ compile_needed,
+    const uint32_t* __restrict__ num_clauses,   // len=1
+    const uint32_t* __restrict__ learned_count, // len=1
+    const uint32_t* __restrict__ proof_offsets,
+    const uint32_t* __restrict__ proof_data,
+    uint32_t needed_cap,
+    uint8_t* __restrict__ needed // len >= needed_cap
+) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) {
+        return;
+    }
+    if (compile_needed[0] == 0u) {
+        return;
+    }
+
+    uint32_t nc = num_clauses[0];
+    uint32_t lc = learned_count[0];
+    if (lc == 0u) {
+        return;
+    }
+    if (lc > needed_cap) {
+        sat_trap();
+    }
+
+    // Seed with the final learned clause (the UNSAT certificate).
+    needed[lc - 1u] = 1u;
+
+    // Reverse scan: whenever clause i is needed, mark any referenced learned clauses as needed.
+    for (int64_t ii = static_cast<int64_t>(lc) - 1; ii >= 0; ii--) {
+        uint32_t i = static_cast<uint32_t>(ii);
+        if (needed[i] == 0u) {
+            continue;
+        }
+
+        uint32_t poff = proof_offsets[i];
+        uint32_t pend = proof_offsets[i + 1u];
+        if (pend < poff + 2u) {
+            sat_trap();
+        }
+        uint32_t conflict_clause = proof_data[poff + 0u];
+        uint32_t steps = proof_data[poff + 1u];
+        uint32_t expect = 2u + 2u * steps;
+        if (poff + expect != pend) {
+            sat_trap();
+        }
+
+        // Mark learned dependencies (clause ids >= nc).
+        auto mark_clause = [&](uint32_t clause_id) {
+            if (clause_id < nc) {
+                return;
+            }
+            uint32_t lid = clause_id - nc;
+            if (lid >= lc) {
+                sat_trap();
+            }
+            needed[lid] = 1u;
+        };
+
+        mark_clause(conflict_clause);
+        for (uint32_t s = 0; s < steps; s++) {
+            uint32_t reason_clause = proof_data[poff + 2u + 2u * s + 1u];
+            if (reason_clause == 0xFFFFFFFFu) {
+                sat_trap();
+            }
+            mark_clause(reason_clause);
+        }
+    }
+}
+
+__device__ __forceinline__ void sat_mark_clear_clause(
+    const int32_t* __restrict__ lits,
+    uint32_t len,
+    uint8_t* __restrict__ mark
+) {
+    for (uint32_t i = 0; i < len; i++) {
+        uint32_t v = sat_var(lits[i]);
+        if (v != 0u) {
+            mark[v] = 0u;
+        }
+    }
+}
+
+// Resolve two clauses on variable v, using a per-block mark array to avoid O(n^2) duplicate scans.
+//
+// Mark encoding:
+// - 0: absent
+// - 1: positive literal present
+// - 2: negative literal present
+__device__ __forceinline__ uint32_t sat_resolve_on_var_mark(
+    uint32_t v,
+    const int32_t* __restrict__ a_lits,
+    uint32_t a_len,
+    const int32_t* __restrict__ b_lits,
+    uint32_t b_len,
+    int32_t* __restrict__ out_buf,
+    uint32_t out_cap,
+    uint8_t* __restrict__ mark,
+    int32_t* __restrict__ ok
+) {
+    bool a_pos = false, a_neg = false, b_pos = false, b_neg = false;
+    uint32_t out_len = 0;
+
+    for (uint32_t i = 0; i < a_len; i++) {
+        int32_t lit = a_lits[i];
+        uint32_t lv = sat_var(lit);
+        if (lv == v) {
+            if (lit > 0) a_pos = true;
+            else a_neg = true;
+            continue;
+        }
+        if (lv == 0u) {
+            continue;
+        }
+        uint8_t sign = (lit > 0) ? 1u : 2u;
+        uint8_t cur = mark[lv];
+        if (cur == 0u) {
+            if (out_len >= out_cap) {
+                *ok = 0;
+                return 0;
+            }
+            mark[lv] = sign;
+            out_buf[out_len++] = lit;
+        } else if (cur != sign) {
+            // Tautology detected.
+            *ok = 0;
+            return 0;
+        }
+    }
+
+    for (uint32_t i = 0; i < b_len; i++) {
+        int32_t lit = b_lits[i];
+        uint32_t lv = sat_var(lit);
+        if (lv == v) {
+            if (lit > 0) b_pos = true;
+            else b_neg = true;
+            continue;
+        }
+        if (lv == 0u) {
+            continue;
+        }
+        uint8_t sign = (lit > 0) ? 1u : 2u;
+        uint8_t cur = mark[lv];
+        if (cur == 0u) {
+            if (out_len >= out_cap) {
+                *ok = 0;
+                return 0;
+            }
+            mark[lv] = sign;
+            out_buf[out_len++] = lit;
+        } else if (cur != sign) {
+            *ok = 0;
+            return 0;
+        }
+    }
+
+    // Determine required complementary literals exist.
+    if (!((a_pos && b_neg) || (a_neg && b_pos))) {
+        *ok = 0;
+        return 0;
+    }
+
+    return out_len;
+}
+
 extern "C" __global__ void sat_proof_check(
     const uint32_t* __restrict__ compile_needed,
     const uint32_t* __restrict__ base_offsets,
@@ -1535,116 +2251,328 @@ extern "C" __global__ void sat_proof_check(
     const uint32_t* __restrict__ learned_count, // len=1
     const uint32_t* __restrict__ proof_offsets,
     const uint32_t* __restrict__ proof_data,
-    // scratch buffers (two alternating clause buffers)
+    const uint8_t* __restrict__ needed, // len = needed_cap
+    uint32_t needed_cap,
+    // scratch buffers: two clause literal buffers + per-var stamp/sign map
     int32_t* __restrict__ scratch_a,
     int32_t* __restrict__ scratch_b,
+    uint32_t* __restrict__ scratch_map,
     uint32_t scratch_cap,
     int32_t* __restrict__ out_ok // 1 ok, 0 fail
 ) {
-    if (blockIdx.x != 0 || threadIdx.x != 0) {
-        return;
-    }
     if (compile_needed[0] == 0u) {
         return;
     }
-    out_ok[0] = 1;
 
     uint32_t nc = num_clauses[0];
 
     uint32_t lc = learned_count[0];
-    if (lc == 0) {
-        out_ok[0] = 0;
+    // Only thread 0 performs the global UNSAT-certificate sanity checks.
+    if (threadIdx.x == 0) {
+        if (lc == 0u || lc > needed_cap) {
+            atomicExch(out_ok, 0);
+        } else {
+            // Require last learned clause to be empty (unsat certificate).
+            uint32_t last_len = learned_offsets[lc] - learned_offsets[lc - 1u];
+            if (last_len != 0u) {
+                atomicExch(out_ok, 0);
+            }
+        }
+    }
+    __syncthreads();
+    if (out_ok[0] == 0) {
         return;
     }
 
-    // Require last learned clause to be empty (unsat certificate).
-    uint32_t last_len = learned_offsets[lc] - learned_offsets[lc - 1u];
-    if (last_len != 0u) {
-        out_ok[0] = 0;
-        return;
+    // Each block uses a disjoint scratch region:
+    //   scratch_{a,b,map}[blockIdx.x * scratch_cap .. (blockIdx.x+1) * scratch_cap)
+    uint64_t scratch_off =
+        static_cast<uint64_t>(blockIdx.x) * static_cast<uint64_t>(scratch_cap);
+    int32_t* buf0 = scratch_a + scratch_off;
+    int32_t* buf1 = scratch_b + scratch_off;
+    uint32_t* map = scratch_map + scratch_off;
+
+    // Shared state for a single learned clause proof replay.
+    __shared__ uint32_t stamp;
+    __shared__ uint32_t cur_len;
+    __shared__ unsigned int out_len;
+    __shared__ unsigned int pivot_flags;
+    __shared__ int ping;      // 0 => buf0 is current, 1 => buf1 is current
+    __shared__ int block_fail;
+    __shared__ int stop;
+    __shared__ uint32_t poff;
+    __shared__ uint32_t pend;
+    __shared__ uint32_t conflict_clause;
+    __shared__ uint32_t steps;
+    __shared__ uint32_t pivot_var;
+    __shared__ const int32_t* clause_lits;
+    __shared__ uint32_t clause_len;
+
+    if (threadIdx.x == 0) {
+        stamp = 1u;
     }
+    __syncthreads();
 
-    // Verify each learned clause's resolution trace matches the stored learned clause.
-    for (uint32_t i = 0; i < lc; i++) {
-        uint32_t poff = proof_offsets[i];
-        uint32_t pend = proof_offsets[i + 1u];
-        if (pend < poff + 2u) {
-            out_ok[0] = 0;
-            return;
-        }
-        uint32_t conflict_clause = proof_data[poff + 0u];
-        uint32_t steps = proof_data[poff + 1u];
-        uint32_t expect = 2u + 2u * steps;
-        if (poff + expect != pend) {
-            out_ok[0] = 0;
-            return;
-        }
+    const uint32_t STAMP_MAX = 0x3FFFFFFFu; // 30-bit stamp (packed <<2)
 
-        if (conflict_clause >= nc + i) {
-            out_ok[0] = 0;
-            return;
-        }
+    auto mark_fail = [&]() {
+        atomicExch(&block_fail, 1);
+    };
 
-        // Load initial clause into scratch_a.
-        SatClauseView c0 = sat_get_clause(static_cast<int32_t>(conflict_clause),
-                                          base_offsets, base_lits, nc,
-                                          learned_offsets, learned_lits);
-        if (c0.len > scratch_cap) {
-            out_ok[0] = 0;
-            return;
-        }
-        for (uint32_t k = 0; k < c0.len; k++) {
-            scratch_a[k] = c0.lits[k];
-        }
-        uint32_t cur_len = c0.len;
-
-        bool use_a = true;
-        for (uint32_t s = 0; s < steps; s++) {
-            uint32_t var = proof_data[poff + 2u + 2u * s];
-            uint32_t reason_clause = proof_data[poff + 2u + 2u * s + 1u];
-            if (reason_clause == 0xFFFFFFFFu) {
-                // Decision (no reason) shouldn't appear in a valid resolution trace.
-                out_ok[0] = 0;
+    auto map_insert_lit = [&](uint32_t v, uint32_t sign, int32_t lit, int32_t* out_buf) {
+        // `map[v] = (stamp<<2) | sign`, with sign in {1=pos,2=neg}.
+        // Absent iff (map[v]>>2) != stamp.
+        uint32_t new_val = (stamp << 2) | sign;
+        for (;;) {
+            uint32_t old = map[v];
+            if ((old >> 2) == stamp) {
+                if ((old & 3u) != sign) {
+                    mark_fail();
+                }
                 return;
             }
-            if (reason_clause >= nc + i) {
-                out_ok[0] = 0;
-                return;
-            }
-
-            SatClauseView rc = sat_get_clause(static_cast<int32_t>(reason_clause),
-                                              base_offsets, base_lits, nc,
-                                              learned_offsets, learned_lits);
-
-            int32_t ok = 1;
-            if (use_a) {
-                uint32_t out_len = sat_resolve_on_var(var, scratch_a, cur_len, rc.lits, rc.len,
-                                                      scratch_b, scratch_cap, &ok);
-                if (!ok) {
-                    out_ok[0] = 0;
+            uint32_t prev = atomicCAS(map + v, old, new_val);
+            if (prev == old) {
+                unsigned int idx = atomicAdd(&out_len, 1u);
+                if (idx >= scratch_cap) {
+                    mark_fail();
                     return;
                 }
-                cur_len = out_len;
+                out_buf[idx] = lit;
+                return;
+            }
+        }
+    };
+
+    for (uint32_t i = blockIdx.x; i < lc; i += gridDim.x) {
+        // Cooperative stop: once any verifier fails it will set out_ok=0.
+        if (threadIdx.x == 0) {
+            stop = (out_ok[0] == 0);
+        }
+        __syncthreads();
+        if (stop) {
+            return;
+        }
+        if (needed[i] == 0u) {
+            continue;
+        }
+
+        // Parse proof header for learned clause i.
+        if (threadIdx.x == 0) {
+            block_fail = 0;
+            poff = proof_offsets[i];
+            pend = proof_offsets[i + 1u];
+            if (pend < poff + 2u) {
+                block_fail = 1;
             } else {
-                uint32_t out_len = sat_resolve_on_var(var, scratch_b, cur_len, rc.lits, rc.len,
-                                                      scratch_a, scratch_cap, &ok);
-                if (!ok) {
-                    out_ok[0] = 0;
-                    return;
+                conflict_clause = proof_data[poff + 0u];
+                steps = proof_data[poff + 1u];
+                uint32_t expect = 2u + 2u * steps;
+                if (poff + expect != pend) {
+                    block_fail = 1;
+                } else if (conflict_clause >= nc + i) {
+                    block_fail = 1;
                 }
-                cur_len = out_len;
             }
-            use_a = !use_a;
+            // Start each learned-clause replay with buf0 as the current buffer.
+            ping = 0;
+        }
+        __syncthreads();
+        if (block_fail) {
+            if (threadIdx.x == 0) {
+                atomicExch(out_ok, 0);
+            }
+            __syncthreads();
+            return;
         }
 
-        // Compare with stored learned clause i.
-        SatClauseView lc;
-        lc.lits = learned_lits + learned_offsets[i];
-        lc.len = learned_offsets[i + 1u] - learned_offsets[i];
+        // Load and normalize the initial conflict clause into buf0 under a fresh stamp.
+        if (threadIdx.x == 0) {
+            if (stamp >= STAMP_MAX - 2u) {
+                block_fail = 1;
+            } else {
+                stamp++;
+                out_len = 0;
+                SatClauseView c0 = sat_get_clause(static_cast<int32_t>(conflict_clause),
+                                                  base_offsets, base_lits, nc,
+                                                  learned_offsets, learned_lits);
+                clause_lits = c0.lits;
+                clause_len = c0.len;
+                if (clause_len > scratch_cap) {
+                    block_fail = 1;
+                }
+            }
+        }
+        __syncthreads();
+        if (block_fail) {
+            if (threadIdx.x == 0) {
+                atomicExch(out_ok, 0);
+            }
+            __syncthreads();
+            return;
+        }
 
-        const int32_t* final_clause = use_a ? scratch_a : scratch_b;
-        if (!sat_clause_equal_set(final_clause, cur_len, lc.lits, lc.len)) {
-            out_ok[0] = 0;
+        for (uint32_t k = threadIdx.x; k < clause_len; k += blockDim.x) {
+            int32_t lit = clause_lits[k];
+            uint32_t v = sat_var(lit);
+            if (v == 0u || v >= scratch_cap) {
+                mark_fail();
+                continue;
+            }
+            uint32_t sign = (lit > 0) ? 1u : 2u;
+            map_insert_lit(v, sign, lit, buf0);
+        }
+        __syncthreads();
+        if (threadIdx.x == 0) {
+            cur_len = out_len;
+            if (block_fail) {
+                atomicExch(out_ok, 0);
+            }
+        }
+        __syncthreads();
+        if (threadIdx.x == 0) {
+            stop = (out_ok[0] == 0);
+        }
+        __syncthreads();
+        if (stop) {
+            return;
+        }
+
+        // Replay each resolution step, ping-ponging between buf0 and buf1.
+        for (uint32_t s = 0; s < steps; s++) {
+            if (threadIdx.x == 0) {
+                pivot_flags = 0;
+                out_len = 0;
+                if (stamp >= STAMP_MAX - 2u) {
+                    block_fail = 1;
+                } else {
+                    stamp++;
+                    pivot_var = proof_data[poff + 2u + 2u * s];
+                    uint32_t reason_clause = proof_data[poff + 2u + 2u * s + 1u];
+                    if (reason_clause == 0xFFFFFFFFu) {
+                        block_fail = 1;
+                    } else if (reason_clause >= nc + i) {
+                        block_fail = 1;
+                    } else {
+                        SatClauseView rc = sat_get_clause(static_cast<int32_t>(reason_clause),
+                                                          base_offsets, base_lits, nc,
+                                                          learned_offsets, learned_lits);
+                        clause_lits = rc.lits;
+                        clause_len = rc.len;
+                        if (clause_len > scratch_cap) {
+                            block_fail = 1;
+                        }
+                    }
+                }
+            }
+            __syncthreads();
+            if (block_fail) {
+                if (threadIdx.x == 0) {
+                    atomicExch(out_ok, 0);
+                }
+                __syncthreads();
+                return;
+            }
+
+            int32_t* cur_buf = (ping == 0) ? buf0 : buf1;
+            int32_t* next_buf = (ping == 0) ? buf1 : buf0;
+
+            // Merge current clause excluding pivot literals.
+            for (uint32_t t = threadIdx.x; t < cur_len; t += blockDim.x) {
+                int32_t lit = cur_buf[t];
+                uint32_t v = sat_var(lit);
+                if (v == pivot_var) {
+                    atomicOr(&pivot_flags, (lit > 0) ? 1u : 2u);
+                    continue;
+                }
+                if (v == 0u || v >= scratch_cap) {
+                    mark_fail();
+                    continue;
+                }
+                uint32_t sign = (lit > 0) ? 1u : 2u;
+                map_insert_lit(v, sign, lit, next_buf);
+            }
+
+            // Merge reason clause excluding pivot literals.
+            for (uint32_t t = threadIdx.x; t < clause_len; t += blockDim.x) {
+                int32_t lit = clause_lits[t];
+                uint32_t v = sat_var(lit);
+                if (v == pivot_var) {
+                    atomicOr(&pivot_flags, (lit > 0) ? 4u : 8u);
+                    continue;
+                }
+                if (v == 0u || v >= scratch_cap) {
+                    mark_fail();
+                    continue;
+                }
+                uint32_t sign = (lit > 0) ? 1u : 2u;
+                map_insert_lit(v, sign, lit, next_buf);
+            }
+
+            __syncthreads();
+            if (threadIdx.x == 0) {
+                // Determine required complementary pivot literals exist.
+                bool ok =
+                    ((pivot_flags & 1u) != 0u && (pivot_flags & 8u) != 0u) ||
+                    ((pivot_flags & 2u) != 0u && (pivot_flags & 4u) != 0u);
+                if (!ok) {
+                    block_fail = 1;
+                }
+                cur_len = out_len;
+                ping ^= 1;
+                if (block_fail) {
+                    atomicExch(out_ok, 0);
+                }
+            }
+            __syncthreads();
+            if (threadIdx.x == 0) {
+                stop = (out_ok[0] == 0);
+            }
+            __syncthreads();
+            if (stop) {
+                return;
+            }
+        }
+
+        // Compare with stored learned clause i (set equality via stamp map).
+        if (threadIdx.x == 0) {
+            clause_lits = learned_lits + learned_offsets[i];
+            clause_len = learned_offsets[i + 1u] - learned_offsets[i];
+            if (clause_len != cur_len) {
+                atomicExch(out_ok, 0);
+            }
+        }
+        __syncthreads();
+        if (threadIdx.x == 0) {
+            stop = (out_ok[0] == 0);
+        }
+        __syncthreads();
+        if (stop) {
+            return;
+        }
+        for (uint32_t k = threadIdx.x; k < clause_len; k += blockDim.x) {
+            int32_t lit = clause_lits[k];
+            uint32_t v = sat_var(lit);
+            if (v == 0u || v >= scratch_cap) {
+                mark_fail();
+                continue;
+            }
+            uint32_t expected = (lit > 0) ? 1u : 2u;
+            uint32_t st = map[v];
+            if ((st >> 2) != stamp || (st & 3u) != expected) {
+                mark_fail();
+            }
+        }
+        __syncthreads();
+        if (threadIdx.x == 0 && block_fail) {
+            atomicExch(out_ok, 0);
+        }
+        __syncthreads();
+        if (threadIdx.x == 0) {
+            stop = (out_ok[0] == 0);
+        }
+        __syncthreads();
+        if (stop) {
             return;
         }
     }
@@ -1716,7 +2644,13 @@ __device__ __forceinline__ int32_t xgcf_node_lit(
 ) {
     // Literals are stored directly as signed DIMACS.
     if (node_type[node] == XGCF_LIT) {
-        return lit[node];
+        int32_t dim = lit[node];
+        uint32_t v = (dim > 0) ? static_cast<uint32_t>(dim) : static_cast<uint32_t>(-dim);
+        // Fail-fast: circuit leaves must refer to CNF vars in 1..=base_num_vars.
+        if (v == 0u || v > base_num_vars) {
+            sat_trap();
+        }
+        return dim;
     }
     // Internal node truth is represented by a fresh Tseitin variable:
     // v(node) = base_num_vars + internal_index(node) + 1.
@@ -1731,6 +2665,7 @@ __device__ __forceinline__ int32_t xgcf_node_lit(
 // - clause_counts[i] = number of CNF clauses emitted for node i (0 for Lit nodes).
 // - lit_counts[i] = total number of literals emitted across those clauses (0 for Lit nodes).
 extern "C" __global__ void sat_xgcf_cnf_counts(
+    const uint32_t* __restrict__ compile_needed,
     const uint8_t* __restrict__ node_type,
     const uint32_t* __restrict__ child_offsets,
     uint32_t num_nodes,
@@ -1738,7 +2673,18 @@ extern "C" __global__ void sat_xgcf_cnf_counts(
     uint32_t* __restrict__ clause_counts,
     uint32_t* __restrict__ lit_counts
 ) {
+    uint32_t needed = compile_needed[0];
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (needed == 0u) {
+        // Cache hit / compile not needed: do not touch the circuit buffers. Still produce
+        // deterministic zeroed count arrays so downstream scans and totals remain valid.
+        for (uint32_t i = tid; i < num_nodes; i += blockDim.x * gridDim.x) {
+            internal_counts[i] = 0u;
+            clause_counts[i] = 0u;
+            lit_counts[i] = 0u;
+        }
+        return;
+    }
     for (uint32_t i = tid; i < num_nodes; i += blockDim.x * gridDim.x) {
         uint8_t ty = node_type[i];
         if (ty == XGCF_LIT) {
@@ -1811,7 +2757,7 @@ extern "C" __global__ void sat_xgcf_cnf_compute_totals(
     const uint32_t* __restrict__ clause_last,   // len=1
     const uint32_t* __restrict__ lit_last,      // len=1
     uint32_t num_nodes,
-    uint32_t base_num_vars,
+    const uint32_t* __restrict__ base_num_vars, // len=1
     uint32_t clause_cap,
     uint32_t lit_cap,
     uint32_t* __restrict__ out_num_vars,    // len=1
@@ -1822,7 +2768,7 @@ extern "C" __global__ void sat_xgcf_cnf_compute_totals(
         return;
     }
     if (num_nodes == 0u) {
-        out_num_vars[0] = base_num_vars;
+        out_num_vars[0] = base_num_vars[0];
         out_num_clauses[0] = 0u;
         out_num_lits[0] = 0u;
         return;
@@ -1839,7 +2785,11 @@ extern "C" __global__ void sat_xgcf_cnf_compute_totals(
         sat_trap();
     }
 
-    out_num_vars[0] = base_num_vars + internal_total;
+    uint32_t base = base_num_vars[0];
+    if (base == 0u) {
+        sat_trap();
+    }
+    out_num_vars[0] = base + internal_total;
     out_num_clauses[0] = clause_total;
     out_num_lits[0] = lit_total;
 }
@@ -1862,6 +2812,7 @@ extern "C" __global__ void sat_cnf_write_terminator(
 // - internal_prefix, clause_base, lit_base are exclusive scans of the corresponding count arrays.
 // - out_offsets/out_lits have sufficient capacity for the emitted clauses.
 extern "C" __global__ void sat_xgcf_cnf_emit(
+    const uint32_t* __restrict__ compile_needed,
     const uint8_t* __restrict__ node_type,
     const uint32_t* __restrict__ child_offsets,
     const uint32_t* __restrict__ child_indices,
@@ -1872,12 +2823,20 @@ extern "C" __global__ void sat_xgcf_cnf_emit(
     const uint32_t* __restrict__ internal_prefix,
     const uint32_t* __restrict__ clause_base,
     const uint32_t* __restrict__ lit_base,
-    uint32_t base_num_vars,
+    const uint32_t* __restrict__ base_num_vars, // len=1
     uint32_t num_nodes,
     uint32_t* __restrict__ out_offsets,
     int32_t* __restrict__ out_lits
 ) {
+    if (compile_needed[0] == 0u) {
+        // Cache hit / compile not needed: do not touch circuit buffers or write output CNF.
+        return;
+    }
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    uint32_t base = base_num_vars[0];
+    if (base == 0u) {
+        sat_trap();
+    }
 
     for (uint32_t node = tid; node < num_nodes; node += blockDim.x * gridDim.x) {
         uint8_t ty = node_type[node];
@@ -1885,7 +2844,7 @@ extern "C" __global__ void sat_xgcf_cnf_emit(
             continue;
         }
 
-        int32_t v = static_cast<int32_t>(base_num_vars + internal_prefix[node] + 1u);
+        int32_t v = static_cast<int32_t>(base + internal_prefix[node] + 1u);
         uint32_t c0 = clause_base[node];
         uint32_t l0 = lit_base[node];
 
@@ -1915,7 +2874,7 @@ extern "C" __global__ void sat_xgcf_cnf_emit(
             // Emit binary implications.
             for (uint32_t i = 0; i < deg; i++) {
                 uint32_t child = child_indices[s + i];
-                int32_t c_lit = xgcf_node_lit(child, node_type, lit, internal_prefix, base_num_vars);
+                int32_t c_lit = xgcf_node_lit(child, node_type, lit, internal_prefix, base);
 
                 out_offsets[c0 + i] = l0 + 2u * i;
                 if (ty == XGCF_AND) {
@@ -1938,7 +2897,7 @@ extern "C" __global__ void sat_xgcf_cnf_emit(
                 out_lits[long_lit_idx + 0u] = v;
                 for (uint32_t i = 0; i < deg; i++) {
                     uint32_t child = child_indices[s + i];
-                    int32_t c_lit = xgcf_node_lit(child, node_type, lit, internal_prefix, base_num_vars);
+                    int32_t c_lit = xgcf_node_lit(child, node_type, lit, internal_prefix, base);
                     out_lits[long_lit_idx + 1u + i] = -c_lit;
                 }
             } else {
@@ -1946,7 +2905,7 @@ extern "C" __global__ void sat_xgcf_cnf_emit(
                 out_lits[long_lit_idx + 0u] = -v;
                 for (uint32_t i = 0; i < deg; i++) {
                     uint32_t child = child_indices[s + i];
-                    int32_t c_lit = xgcf_node_lit(child, node_type, lit, internal_prefix, base_num_vars);
+                    int32_t c_lit = xgcf_node_lit(child, node_type, lit, internal_prefix, base);
                     out_lits[long_lit_idx + 1u + i] = c_lit;
                 }
             }
@@ -1957,8 +2916,12 @@ extern "C" __global__ void sat_xgcf_cnf_emit(
             uint32_t x = decision_var[node];
             uint32_t f = decision_child_false[node];
             uint32_t t = decision_child_true[node];
-            int32_t f_lit = xgcf_node_lit(f, node_type, lit, internal_prefix, base_num_vars);
-            int32_t t_lit = xgcf_node_lit(t, node_type, lit, internal_prefix, base_num_vars);
+            // Fail-fast: decision variables are original CNF vars in 1..=base.
+            if (x == 0u || x > base) {
+                sat_trap();
+            }
+            int32_t f_lit = xgcf_node_lit(f, node_type, lit, internal_prefix, base);
+            int32_t t_lit = xgcf_node_lit(t, node_type, lit, internal_prefix, base);
 
             // Clause order matches CPU encoder for determinism.
             // (-x ∨ -t ∨ v)
@@ -2059,10 +3022,11 @@ extern "C" __global__ void sat_shift_offsets(
 // Note: `clause_base/lit_base` and `extra_num_*` are device-resident scalars (len=1 each) so the
 // host never needs to read exact sizes to place the unit clause.
 extern "C" __global__ void sat_xgcf_write_root_unit_clause(
+    const uint32_t* __restrict__ compile_needed,
     const uint8_t* __restrict__ node_type,
     const int32_t* __restrict__ lit,
     const uint32_t* __restrict__ internal_prefix,
-    uint32_t base_num_vars,
+    const uint32_t* __restrict__ base_num_vars, // len=1
     uint32_t root,
     int32_t force_true, // 1=true, 0=false
     const uint32_t* __restrict__ clause_base, // len=1
@@ -2089,6 +3053,8 @@ extern "C" __global__ void sat_xgcf_write_root_unit_clause(
         return;
     }
 
+    uint32_t needed = compile_needed[0];
+
     uint32_t cnv = c_num_vars[0];
     uint32_t cnc = c_num_clauses[0];
     uint32_t cnl = c_num_lits[0];
@@ -2098,6 +3064,45 @@ extern "C" __global__ void sat_xgcf_write_root_unit_clause(
     uint32_t ev = extra_num_vars[0];
     uint32_t ec = extra_num_clauses[0];
     uint32_t el = extra_num_lits[0];
+
+    if (cnc == 0u && cnl != 0u) {
+        sat_trap();
+    }
+
+    // Cache hit / compile not needed: do not reference the circuit and do not write a unit clause.
+    // Still compute deterministic device-resident totals/bases so CSR invariants remain valid and
+    // downstream kernels can be no-ops.
+    if (needed == 0u) {
+        uint64_t total_vars64 = static_cast<uint64_t>(cnv) + static_cast<uint64_t>(ev);
+        uint64_t total_clauses64 =
+            static_cast<uint64_t>(cb) + static_cast<uint64_t>(cnc) + static_cast<uint64_t>(ec);
+        uint64_t total_lits64 =
+            static_cast<uint64_t>(lb) + static_cast<uint64_t>(cnl) + static_cast<uint64_t>(el);
+
+        if (total_vars64 > static_cast<uint64_t>(out_var_cap)
+            || total_clauses64 > static_cast<uint64_t>(out_clause_cap)
+            || total_lits64 > static_cast<uint64_t>(out_lit_cap)) {
+            sat_trap();
+        }
+
+        uint32_t total_vars = static_cast<uint32_t>(total_vars64);
+        uint32_t total_clauses = static_cast<uint32_t>(total_clauses64);
+        uint32_t total_lits = static_cast<uint32_t>(total_lits64);
+
+        uint32_t extra_clause_base = cb + cnc;
+        uint32_t extra_lit_base = lb + cnl;
+
+        out_unsat_var_base[0] = cnv + 1u;
+        out_extra_clause_base[0] = extra_clause_base;
+        out_extra_lit_base[0] = extra_lit_base;
+
+        out_num_vars[0] = total_vars;
+        out_num_clauses[0] = total_clauses;
+        out_num_lits[0] = total_lits;
+
+        out_offsets[total_clauses] = total_lits;
+        return;
+    }
 
     uint64_t total_vars64 = static_cast<uint64_t>(cnv) + static_cast<uint64_t>(ev);
     uint64_t total_clauses64 = static_cast<uint64_t>(cb) + static_cast<uint64_t>(cnc) + 1ull
@@ -2118,7 +3123,11 @@ extern "C" __global__ void sat_xgcf_write_root_unit_clause(
     uint32_t unit_clause_idx = cb + cnc;
     uint32_t unit_lit_idx = lb + cnl;
 
-    int32_t root_lit = xgcf_node_lit(root, node_type, lit, internal_prefix, base_num_vars);
+    uint32_t base = base_num_vars[0];
+    if (base == 0u) {
+        sat_trap();
+    }
+    int32_t root_lit = xgcf_node_lit(root, node_type, lit, internal_prefix, base);
     int32_t unit_lit = force_true ? root_lit : -root_lit;
 
     out_offsets[unit_clause_idx] = unit_lit_idx;
@@ -2142,10 +3151,19 @@ extern "C" __global__ void sat_xgcf_write_root_unit_clause(
 
 // Compute the exact CNF size contributions for the ¬phi encoding, using device-resident phi counts.
 //
-// ¬phi encoding:
-//   clauses_notphi = sum_j(len_j + 1) + 1 = L + m + 1
-//   lits_notphi    = sum_j(3*len_j + 1) + m = 3L + 2m
+// ¬phi encoding (witness vars w_j):
+//   - w_j -> ¬l for each literal l in clause j  (binary clauses only)
+//   - OR_j w_j
+//
+// This encoding is SAT iff at least one clause of phi is unsatisfied, but avoids introducing the
+// reverse implication (all literals false -> w_j). The witness vars are used as explicit decision
+// variables in q2 so the solver can pick a violated clause early.
+//
+// Let m = #clauses in phi, L = #literals in phi (sum_j len_j):
+//   clauses_notphi = L + 1
+//   lits_notphi    = 2L + m
 extern "C" __global__ void sat_not_phi_counts(
+    const uint32_t* __restrict__ compile_needed,
     const uint32_t* __restrict__ phi_num_clauses, // len=1
     const uint32_t* __restrict__ phi_num_lits,    // len=1
     uint32_t* __restrict__ out_extra_num_vars,    // len=1
@@ -2155,11 +3173,17 @@ extern "C" __global__ void sat_not_phi_counts(
     if (blockIdx.x != 0 || threadIdx.x != 0) {
         return;
     }
+    if (compile_needed[0] == 0u) {
+        out_extra_num_vars[0] = 0u;
+        out_extra_num_clauses[0] = 0u;
+        out_extra_num_lits[0] = 0u;
+        return;
+    }
     uint32_t m = phi_num_clauses[0];
     uint32_t L = phi_num_lits[0];
 
-    uint64_t clauses64 = static_cast<uint64_t>(L) + static_cast<uint64_t>(m) + 1ull;
-    uint64_t lits64 = 3ull * static_cast<uint64_t>(L) + 2ull * static_cast<uint64_t>(m);
+    uint64_t clauses64 = static_cast<uint64_t>(L) + 1ull;
+    uint64_t lits64 = 2ull * static_cast<uint64_t>(L) + static_cast<uint64_t>(m);
 
     if (clauses64 > 0xffffffffull || lits64 > 0xffffffffull) {
         sat_trap();
@@ -2172,12 +3196,15 @@ extern "C" __global__ void sat_not_phi_counts(
 
 // Emit CNF encoding of ¬phi where phi is a CNF in CSR form.
 //
-// Uses one fresh variable per clause j: u_j means "clause j is unsatisfied".
+// Uses one fresh variable per clause j: w_j is a witness that selects clause j to be unsatisfied.
 // Enforces:
-// - u_j -> ¬l for each literal l in clause j
-// - (¬l1 ∧ ... ∧ ¬lk) -> u_j
-// - OR_j u_j   (at least one clause is unsatisfied)
+// - w_j -> ¬l for each literal l in clause j
+// - OR_j w_j   (at least one clause is selected as a witness)
+//
+// This is SAT iff phi is falsifiable, but keeps the witness vars as a pure selection mechanism
+// (no reverse implication), which is more solver-friendly in the q2 equivalence query.
 extern "C" __global__ void sat_emit_not_phi(
+    const uint32_t* __restrict__ compile_needed,
     const uint32_t* __restrict__ phi_offsets,
     const int32_t* __restrict__ phi_lits,
     const uint32_t* __restrict__ num_clauses,     // len=1
@@ -2187,6 +3214,9 @@ extern "C" __global__ void sat_emit_not_phi(
     uint32_t* __restrict__ out_offsets,
     int32_t* __restrict__ out_lits
 ) {
+    if (compile_needed[0] == 0u) {
+        return;
+    }
     uint32_t m = num_clauses[0];
     uint32_t u0 = unsat_var_base[0];
     uint32_t c0 = out_clause_base[0];
@@ -2199,39 +3229,31 @@ extern "C" __global__ void sat_emit_not_phi(
         uint32_t e = phi_offsets[j + 1u];
         uint32_t len = e - s;
 
-        uint32_t local_clause_base = s + j;
-        uint32_t local_lit_base = 3u * s + j;
+        // Each literal contributes one binary clause and 2 literals.
+        uint32_t local_clause_base = s;
+        uint32_t local_lit_base = 2u * s;
         uint32_t clause_base = c0 + local_clause_base;
         uint32_t lit_base = l0 + local_lit_base;
 
-        int32_t u = static_cast<int32_t>(u0 + j);
+        int32_t w = static_cast<int32_t>(u0 + j);
 
-        // Binary clauses: (¬u ∨ ¬l_i)
+        // Binary clauses: (¬w ∨ ¬l_i)
         for (uint32_t i = 0; i < len; i++) {
             uint32_t clause_idx = clause_base + i;
             uint32_t lit_idx = lit_base + 2u * i;
             int32_t l = phi_lits[s + i];
 
             out_offsets[clause_idx] = lit_idx;
-            out_lits[lit_idx + 0u] = -u;
+            out_lits[lit_idx + 0u] = -w;
             out_lits[lit_idx + 1u] = -l;
-        }
-
-        // Long clause: (u ∨ l1 ∨ ... ∨ lk)
-        uint32_t clause_idx = clause_base + len;
-        uint32_t lit_idx = lit_base + 2u * len;
-        out_offsets[clause_idx] = lit_idx;
-        out_lits[lit_idx + 0u] = u;
-        for (uint32_t i = 0; i < len; i++) {
-            out_lits[lit_idx + 1u + i] = phi_lits[s + i];
         }
     }
 
-    // Emit final OR over all unsatisfied-clause vars, and set CSR terminator.
+    // Emit final OR over all witness vars, and set CSR terminator.
     if (blockIdx.x == 0 && threadIdx.x == 0) {
         uint32_t total_phi_lits = phi_offsets[m];
-        uint32_t big_clause_idx = c0 + (total_phi_lits + m);
-        uint32_t big_lit_idx = l0 + (3u * total_phi_lits + m);
+        uint32_t big_clause_idx = c0 + total_phi_lits;
+        uint32_t big_lit_idx = l0 + (2u * total_phi_lits);
 
         out_offsets[big_clause_idx] = big_lit_idx;
         for (uint32_t j = 0; j < m; j++) {

@@ -58,13 +58,15 @@ query(sprinkler()).
         frontier_depth: 6,
         max_frontier_items: 128,
         max_depth: 128,
-        smooth_node_cap: 1024,
-        smooth_edge_cap: 4096,
+        smooth_node_cap: 2048,
+        smooth_edge_cap: 8192,
         cdcl_restart_interval: 64,
         cdcl_learned_bytes: 4 * 1024 * 1024,
         cdcl_conflict_budget: None,
     };
 
+    // Collect the random-var list for smoothing (device-side compaction is tested elsewhere).
+    // This test uses host reads only for assertions.
     let mut leaf_vars = vec![0u32; encoding.vars.leaf_var.len()];
     let mut choice_vars = vec![0u32; encoding.vars.choice_var.len()];
     provider
@@ -84,11 +86,30 @@ query(sprinkler()).
         }
     }
     random_vars.sort_unstable();
-
     let random_vars_device =
         DeviceRandomVarList::from_host(provider.as_ref(), &random_vars).unwrap();
-    let circuit =
-        compile_gpu_d4_and_verify(&encoding.cnf, &provider, &config, &random_vars_device).unwrap();
+
+    // Reserve the same smoothing headroom as the production cached path.
+    let mut base_config = config;
+    if !random_vars_device.is_empty() {
+        let headroom = 2u32.checked_add(random_vars_device.count()).unwrap();
+        base_config.smooth_node_cap = base_config.smooth_node_cap.checked_sub(headroom).unwrap();
+    }
+
+    let mut circuit =
+        compile_gpu_d4_and_verify(&encoding.cnf, &encoding.decision_var_limit, &provider, &base_config)
+            .unwrap();
+    if !random_vars_device.is_empty() {
+        circuit = circuit
+            .smooth_random_vars_device(
+                &provider,
+                random_vars_device.list(),
+                random_vars_device.count(),
+                config.smooth_node_cap,
+                config.smooth_edge_cap,
+            )
+            .unwrap();
+    }
 
     let mut node_vars = vec![0u32; encoding.vars.node_var.len()];
     provider

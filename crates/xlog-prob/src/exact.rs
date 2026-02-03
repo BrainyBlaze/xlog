@@ -929,6 +929,7 @@ impl ExactDdnnfProgram {
         let mut cache = GpuCircuitCache::new(&provider, cache_config)?;
         let handle = compile_gpu_d4_and_verify_cached(
             &encoding.cnf,
+            &encoding.decision_var_limit,
             &provider,
             &compile_config,
             &mut cache,
@@ -1160,6 +1161,10 @@ pub(crate) fn default_compile_config(
     cnf: &xlog_solve::GpuCnf,
     memory_bytes: u64,
 ) -> Result<GpuCompileConfig> {
+    // Must match the default GPU D4 configuration expected by the Python training paths.
+    // Sizing is conservative and strictly bounded by `GpuCompileConfig::{smooth_node_cap,smooth_edge_cap}`.
+    let frontier_depth: u16 = 6;
+
     let var_cap = cnf.var_cap.max(1);
     let trail_bytes_per_item = (var_cap as u64)
         .checked_add(1)
@@ -1171,19 +1176,42 @@ pub(crate) fn default_compile_config(
         .clamp(8, 4096)
         .min(u64::from(u32::MAX)) as u32;
 
-    let smooth_node_cap = cnf.var_cap.saturating_mul(4).max(1024);
-    let mut smooth_edge_cap = cnf.lit_cap.saturating_mul(4).max(4096);
+    // The Phase 1 D4 compiler emits one leaf circuit per frontier item; caps must scale with the
+    // maximum frontier size (up to 2^frontier_depth, bounded by max_frontier_items).
+    let frontier_cap_factor = (1u64
+        .checked_shl(frontier_depth as u32)
+        .unwrap_or(u64::from(u32::MAX)))
+    .min(u64::from(max_frontier_items)) as u32;
+
+    let per_item_nodes = cnf
+        .var_cap
+        .checked_mul(5)
+        .ok_or_else(|| XlogError::Compilation("smooth_node_cap overflow".to_string()))?
+        .max(1024);
+    let smooth_node_cap = per_item_nodes
+        .checked_mul(frontier_cap_factor)
+        .ok_or_else(|| XlogError::Compilation("smooth_node_cap overflow".to_string()))?;
+
+    // Edge capacity scales with node capacity; AND/OR fanout grows edges but stays within a small
+    // multiple of nodes for the compiler's Phase 1 emission patterns.
+    let mut smooth_edge_cap = smooth_node_cap
+        .checked_mul(2)
+        .ok_or_else(|| XlogError::Compilation("smooth_edge_cap overflow".to_string()))?;
     if smooth_edge_cap < max_frontier_items {
         smooth_edge_cap = max_frontier_items;
     }
 
-    let mut cdcl_learned_bytes = memory_bytes / 16;
+    // The verifier's UNSAT certificate (resolution trace) can be large even when the source CNF
+    // is small, because equivalence checking builds CNF(C) with many Tseitin variables/clauses.
+    // Allocate a larger share of the budget to the GPU CDCL arenas to avoid deterministic
+    // overflow errors in production verifier paths.
+    let mut cdcl_learned_bytes = memory_bytes / 8;
     if cdcl_learned_bytes < 4 * 1024 * 1024 {
         cdcl_learned_bytes = 4 * 1024 * 1024;
     }
 
     Ok(GpuCompileConfig {
-        frontier_depth: 6,
+        frontier_depth,
         max_frontier_items,
         max_depth: 128,
         smooth_node_cap,

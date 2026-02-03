@@ -12,6 +12,9 @@ use xlog_cuda::provider::SAT_MODULE;
 use xlog_cuda::CudaKernelProvider;
 use xlog_solve::{GpuCdclConfig, GpuCdclSolver, GpuCnf};
 
+#[cfg(debug_assertions)]
+use crate::compilation::gpu_d4::validate_cnf_gpu;
+
 use crate::gpu::GpuXgcf;
 
 #[derive(Debug, Clone, Copy)]
@@ -27,6 +30,14 @@ impl Default for GpuEquivalenceConfig {
     }
 }
 
+/// GPU-resident equivalence queries + device metadata required to solve them without host reads.
+pub struct GpuEquivalenceQueries {
+    pub q1: GpuCnf,
+    pub q2: GpuCnf,
+    /// Base variable id for the ¬phi selector vars in q2 (len=1, device-resident).
+    pub q2_unsat_var_base: TrackedCudaSlice<u32>,
+}
+
 struct CircuitCnf {
     cnf: GpuCnf,
     /// Exclusive prefix sum over `is_internal(node)` (len = num_nodes).
@@ -37,18 +48,20 @@ struct CircuitCnf {
 fn build_circuit_cnf(
     provider: &Arc<CudaKernelProvider>,
     circuit: &GpuXgcf,
-    base_num_vars: u32,
+    base_num_vars: &TrackedCudaSlice<u32>,
+    base_var_cap: u32,
+    compile_needed: &TrackedCudaSlice<u32>,
 ) -> Result<CircuitCnf> {
-    if base_num_vars == 0 {
+    if base_var_cap == 0 {
         return Err(XlogError::Compilation(
-            "GPU equivalence verifier requires base_num_vars > 0".to_string(),
+            "GPU equivalence verifier requires base_var_cap > 0".to_string(),
         ));
     }
-    if circuit.max_var() > base_num_vars {
+    if circuit.max_var() > base_var_cap {
         return Err(XlogError::Compilation(format!(
             "Circuit references var {} but base CNF has only {} vars",
             circuit.max_var(),
-            base_num_vars
+            base_var_cap
         )));
     }
 
@@ -78,7 +91,7 @@ fn build_circuit_cnf(
     let n64 = num_nodes as u64;
     let e64 = num_edges as u64;
 
-    let var_cap = u32::try_from((base_num_vars as u64).saturating_add(n64))
+    let var_cap = u32::try_from((base_var_cap as u64).saturating_add(n64))
         .map_err(|_| XlogError::Kernel("Circuit CNF var capacity exceeds u32::MAX".to_string()))?;
     let clause_cap =
         u32::try_from(e64.checked_add(4u64.saturating_mul(n64)).ok_or_else(|| {
@@ -117,7 +130,7 @@ fn build_circuit_cnf(
         grid = 65_535;
     }
 
-    // SAFETY: sat_xgcf_cnf_counts(node_type, child_offsets, num_nodes, internal_counts, clause_counts, lit_counts)
+    // SAFETY: sat_xgcf_cnf_counts(compile_needed, node_type, child_offsets, num_nodes, internal_counts, clause_counts, lit_counts)
     unsafe {
         counts_fn.clone().launch(
             LaunchConfig {
@@ -126,6 +139,7 @@ fn build_circuit_cnf(
                 shared_mem_bytes: 0,
             },
             (
+                compile_needed,
                 circuit.node_type(),
                 circuit.child_offsets(),
                 num_nodes_u32,
@@ -194,7 +208,7 @@ fn build_circuit_cnf(
         (&clause_last).as_kernel_param(),
         (&lit_last).as_kernel_param(),
         num_nodes_u32.as_kernel_param(),
-        base_num_vars.as_kernel_param(),
+        (base_num_vars).as_kernel_param(),
         clause_cap.as_kernel_param(),
         lit_cap.as_kernel_param(),
         (&mut d_num_vars).as_kernel_param(),
@@ -220,6 +234,7 @@ fn build_circuit_cnf(
     // sat_xgcf_cnf_emit(...) exceeds cudarc's tuple-arity impls for LaunchAsync, so launch with
     // an explicit parameter list.
     let mut params: Vec<*mut c_void> = vec![
+        compile_needed.as_kernel_param(),
         circuit.node_type().as_kernel_param(),
         circuit.child_offsets().as_kernel_param(),
         circuit.child_indices().as_kernel_param(),
@@ -230,7 +245,7 @@ fn build_circuit_cnf(
         (&internal_prefix).as_kernel_param(),
         (&clause_base).as_kernel_param(),
         (&lit_base).as_kernel_param(),
-        base_num_vars.as_kernel_param(),
+        (base_num_vars).as_kernel_param(),
         num_nodes_u32.as_kernel_param(),
         (&mut d_offsets).as_kernel_param(),
         (&mut d_lits).as_kernel_param(),
@@ -288,6 +303,7 @@ fn build_phi_and_not_c(
     phi: &GpuCnf,
     circuit: &GpuXgcf,
     circuit_cnf: &CircuitCnf,
+    compile_needed: &TrackedCudaSlice<u32>,
 ) -> Result<GpuCnf> {
     let device = provider.device().inner();
     let memory = provider.memory();
@@ -418,7 +434,6 @@ fn build_phi_and_not_c(
     // IMPORTANT: When launching with an explicit `Vec<*mut c_void>` parameter list, scalar kernel
     // arguments MUST be backed by stable host storage until `cuLaunchKernel` copies them. Do not
     // pass temporaries like `circuit.root().as_kernel_param()` or `0i32.as_kernel_param()`.
-    let base_num_vars = phi.var_cap;
     let root = circuit.root();
     let force_true: i32 = 0;
     let out_var_cap = var_cap;
@@ -426,10 +441,11 @@ fn build_phi_and_not_c(
     let out_lit_cap = lit_cap;
 
     let mut params: Vec<*mut c_void> = vec![
+        compile_needed.as_kernel_param(),
         circuit.node_type().as_kernel_param(),
         circuit.lit().as_kernel_param(),
         (&circuit_cnf.internal_prefix).as_kernel_param(),
-        base_num_vars.as_kernel_param(),
+        (&phi.num_vars).as_kernel_param(),
         root.as_kernel_param(),
         force_true.as_kernel_param(), // force_false
         (&phi.num_clauses).as_kernel_param(),
@@ -484,7 +500,8 @@ fn build_c_and_not_phi(
     phi: &GpuCnf,
     circuit: &GpuXgcf,
     circuit_cnf: &CircuitCnf,
-) -> Result<GpuCnf> {
+    compile_needed: &TrackedCudaSlice<u32>,
+) -> Result<(GpuCnf, TrackedCudaSlice<u32>)> {
     let device = provider.device().inner();
     let memory = provider.memory();
 
@@ -609,6 +626,7 @@ fn build_c_and_not_phi(
                 shared_mem_bytes: 0,
             },
             (
+                compile_needed,
                 &phi.num_clauses,
                 &phi.num_lits,
                 &mut d_extra_num_vars,
@@ -627,7 +645,6 @@ fn build_c_and_not_phi(
         })?;
 
     // IMPORTANT: See note in build_phi_and_not_c about stable scalar kernel parameters.
-    let base_num_vars = phi.var_cap;
     let root = circuit.root();
     let force_true: i32 = 1;
     let out_var_cap = var_cap;
@@ -635,10 +652,11 @@ fn build_c_and_not_phi(
     let out_lit_cap = lit_cap;
 
     let mut params: Vec<*mut c_void> = vec![
+        compile_needed.as_kernel_param(),
         circuit.node_type().as_kernel_param(),
         circuit.lit().as_kernel_param(),
         (&circuit_cnf.internal_prefix).as_kernel_param(),
-        base_num_vars.as_kernel_param(),
+        (&phi.num_vars).as_kernel_param(),
         root.as_kernel_param(),
         force_true.as_kernel_param(), // force_true
         (&d_zero).as_kernel_param(),  // clause_base
@@ -697,6 +715,7 @@ fn build_c_and_not_phi(
                 shared_mem_bytes: 0,
             },
             (
+                compile_needed,
                 &phi.clause_offsets,
                 &phi.literals,
                 &phi.num_clauses,
@@ -712,68 +731,191 @@ fn build_c_and_not_phi(
 
     provider.device().synchronize()?;
 
-    Ok(GpuCnf {
-        var_cap,
-        clause_cap,
-        lit_cap,
-        num_vars: out_num_vars,
-        num_clauses: out_num_clauses,
-        num_lits: out_num_lits,
-        clause_offsets: out_offsets,
-        literals: out_lits,
-    })
+    Ok((
+        GpuCnf {
+            var_cap,
+            clause_cap,
+            lit_cap,
+            num_vars: out_num_vars,
+            num_clauses: out_num_clauses,
+            num_lits: out_num_lits,
+            clause_offsets: out_offsets,
+            literals: out_lits,
+        },
+        d_unsat_var_base,
+    ))
 }
 
 pub fn check_equivalence_gpu(
     phi: &GpuCnf,
+    phi_decision_var_limit: &TrackedCudaSlice<u32>,
     circuit: &GpuXgcf,
     provider: &Arc<CudaKernelProvider>,
     config: GpuEquivalenceConfig,
 ) -> Result<()> {
-    let circuit_cnf = build_circuit_cnf(provider, circuit, phi.var_cap)?;
+    let queries = build_equivalence_queries_gpu(phi, circuit, provider)?;
 
-    let q1 = build_phi_and_not_c(provider, phi, circuit, &circuit_cnf)?;
-    let q2 = build_c_and_not_phi(provider, phi, circuit, &circuit_cnf)?;
+    #[cfg(debug_assertions)]
+    {
+        // Fail-fast: if query CNFs are malformed, the solver may hang or misbehave.
+        validate_cnf_gpu(&queries.q1, provider.as_ref())?;
+        validate_cnf_gpu(&queries.q2, provider.as_ref())?;
+    }
 
     let solver = GpuCdclSolver::new(provider.clone(), config.cdcl);
-    solver.solve_expect_unsat(&q1)?;
-    solver.solve_expect_unsat(&q2)?;
+    // q1: decisions only on semantically meaningful phi vars (exclude internal/Tseitin vars).
+    solver.solve_expect_unsat_with_branch_limit(&queries.q1, phi_decision_var_limit)?;
+    // q2: decisions on semantically meaningful phi vars + ¬phi selector vars.
+    solver.solve_expect_unsat_with_decision_ranges(
+        &queries.q2,
+        phi_decision_var_limit,
+        &queries.q2_unsat_var_base,
+        &phi.num_clauses,
+    )?;
     Ok(())
+}
+
+/// Build the two equivalence-check queries on GPU:
+/// - q1 = φ ∧ ¬C
+/// - q2 = C ∧ ¬φ
+///
+/// This helper exists so tests and tooling can inspect query CNFs without duplicating kernel
+/// orchestration logic.
+pub fn build_equivalence_queries_gpu(
+    phi: &GpuCnf,
+    circuit: &GpuXgcf,
+    provider: &Arc<CudaKernelProvider>,
+) -> Result<GpuEquivalenceQueries> {
+    // Non-gated path: force compilation/verification on.
+    let memory = provider.memory();
+    let device = provider.device().inner();
+    let mut compile_needed = memory.alloc::<u32>(1)?;
+    device
+        .htod_sync_copy_into(&[1u32], &mut compile_needed)
+        .map_err(|e| XlogError::Kernel(format!("Failed to upload compile_needed=1: {}", e)))?;
+
+    let circuit_cnf = build_circuit_cnf(provider, circuit, &phi.num_vars, phi.var_cap, &compile_needed)?;
+    let q1 = build_phi_and_not_c(provider, phi, circuit, &circuit_cnf, &compile_needed)?;
+    let (q2, q2_unsat_var_base) = build_c_and_not_phi(provider, phi, circuit, &circuit_cnf, &compile_needed)?;
+    Ok(GpuEquivalenceQueries {
+        q1,
+        q2,
+        q2_unsat_var_base,
+    })
 }
 
 pub fn check_equivalence_gpu_gated(
     phi: &GpuCnf,
+    phi_decision_var_limit: &TrackedCudaSlice<u32>,
     circuit: &GpuXgcf,
     provider: &Arc<CudaKernelProvider>,
     config: GpuEquivalenceConfig,
     compile_needed: &TrackedCudaSlice<u32>,
 ) -> Result<()> {
-    let circuit_cnf = build_circuit_cnf(provider, circuit, phi.var_cap)?;
+    #[cfg(debug_assertions)]
+    eprintln!("[xlog-prob] equivalence: build_circuit_cnf");
+    let circuit_cnf = build_circuit_cnf(provider, circuit, &phi.num_vars, phi.var_cap, compile_needed)?;
+    #[cfg(debug_assertions)]
+    {
+        provider
+            .device()
+            .synchronize()
+            .map_err(|e| XlogError::Kernel(format!("sync after build_circuit_cnf failed: {}", e)))?;
+        eprintln!("[xlog-prob] equivalence: build_phi_and_not_c");
+    }
 
-    let q1 = build_phi_and_not_c(provider, phi, circuit, &circuit_cnf)?;
-    let q2 = build_c_and_not_phi(provider, phi, circuit, &circuit_cnf)?;
+    let q1 = build_phi_and_not_c(provider, phi, circuit, &circuit_cnf, compile_needed)?;
+    #[cfg(debug_assertions)]
+    {
+        provider
+            .device()
+            .synchronize()
+            .map_err(|e| XlogError::Kernel(format!("sync after build_phi_and_not_c failed: {}", e)))?;
+        eprintln!("[xlog-prob] equivalence: build_c_and_not_phi");
+    }
+    let (q2, q2_unsat_var_base) = build_c_and_not_phi(provider, phi, circuit, &circuit_cnf, compile_needed)?;
+    #[cfg(debug_assertions)]
+    {
+        provider
+            .device()
+            .synchronize()
+            .map_err(|e| XlogError::Kernel(format!("sync after build_c_and_not_phi failed: {}", e)))?;
+        eprintln!(
+            "[xlog-prob] equivalence: caps: phi(v={} c={} l={}) circuit_cnf(v={} c={} l={}) q1(v={} c={} l={}) q2(v={} c={} l={})",
+            phi.var_cap,
+            phi.clause_cap,
+            phi.lit_cap,
+            circuit_cnf.cnf.var_cap,
+            circuit_cnf.cnf.clause_cap,
+            circuit_cnf.cnf.lit_cap,
+            q1.var_cap,
+            q1.clause_cap,
+            q1.lit_cap,
+            q2.var_cap,
+            q2.clause_cap,
+            q2.lit_cap,
+        );
+        eprintln!("[xlog-prob] equivalence: solve_expect_unsat q1");
+    }
+
+    #[cfg(debug_assertions)]
+    {
+        validate_cnf_gpu(&q1, provider.as_ref())?;
+        validate_cnf_gpu(&q2, provider.as_ref())?;
+    }
 
     let solver = GpuCdclSolver::new(provider.clone(), config.cdcl);
-    solver.solve_expect_unsat_gated(&q1, compile_needed)?;
-    solver.solve_expect_unsat_gated(&q2, compile_needed)?;
+    solver.solve_expect_unsat_with_branch_limit_gated(&q1, compile_needed, phi_decision_var_limit)?;
+    #[cfg(debug_assertions)]
+    {
+        provider
+            .device()
+            .synchronize()
+            .map_err(|e| XlogError::Kernel(format!("sync after solve_expect_unsat(q1) failed: {}", e)))?;
+        eprintln!("[xlog-prob] equivalence: solve_expect_unsat q2");
+    }
+    solver.solve_expect_unsat_with_decision_ranges_gated(
+        &q2,
+        compile_needed,
+        phi_decision_var_limit,
+        &q2_unsat_var_base,
+        &phi.num_clauses,
+    )?;
+    #[cfg(debug_assertions)]
+    {
+        provider
+            .device()
+            .synchronize()
+            .map_err(|e| XlogError::Kernel(format!("sync after solve_expect_unsat(q2) failed: {}", e)))?;
+        eprintln!("[xlog-prob] equivalence: done");
+    }
     Ok(())
 }
 
 pub fn validate_equivalence_gpu(
     phi: &GpuCnf,
+    phi_decision_var_limit: &TrackedCudaSlice<u32>,
     circuit: &GpuXgcf,
     provider: &Arc<CudaKernelProvider>,
     config: GpuEquivalenceConfig,
 ) -> Result<()> {
-    check_equivalence_gpu(phi, circuit, provider, config)
+    check_equivalence_gpu(phi, phi_decision_var_limit, circuit, provider, config)
 }
 
 pub fn validate_equivalence_gpu_gated(
     phi: &GpuCnf,
+    phi_decision_var_limit: &TrackedCudaSlice<u32>,
     circuit: &GpuXgcf,
     provider: &Arc<CudaKernelProvider>,
     config: GpuEquivalenceConfig,
     compile_needed: &TrackedCudaSlice<u32>,
 ) -> Result<()> {
-    check_equivalence_gpu_gated(phi, circuit, provider, config, compile_needed)
+    check_equivalence_gpu_gated(
+        phi,
+        phi_decision_var_limit,
+        circuit,
+        provider,
+        config,
+        compile_needed,
+    )
 }

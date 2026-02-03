@@ -1,7 +1,15 @@
 // GPU CNF encoding kernels for PIR -> Tseitin CNF.
 // Implements reachability, variable assignment, clause counting, and clause emission.
 
-#include <cstdint>
+// NOTE: This file is compiled to PTX and embedded in the repo. To keep regeneration possible in
+// environments that only have NVRTC available (no host C++ standard library headers), avoid
+// libstdc++ includes and define the fixed-width integer aliases we need.
+typedef unsigned char uint8_t;
+typedef signed char int8_t;
+typedef unsigned int uint32_t;
+typedef int int32_t;
+typedef unsigned long long uint64_t;
+typedef long long int64_t;
 
 #define PIR_CONST    0
 #define PIR_LIT      1
@@ -29,27 +37,30 @@ extern "C" __global__ void cnf_reachability_init(
     uint32_t* __restrict__ tail,
     uint32_t* __restrict__ in_flight
 ) {
-    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    for (uint32_t i = tid; i < num_roots; i += blockDim.x * gridDim.x) {
+    // Deterministic, single-thread initialization. Reachability is a correctness-critical
+    // preprocessing step; keep it simple and race-free.
+    if (blockIdx.x != 0 || threadIdx.x != 0) {
+        return;
+    }
+    head[0] = 0u;
+    tail[0] = 0u;
+    in_flight[0] = 0u;
+
+    for (uint32_t i = 0; i < num_roots; i++) {
         uint32_t r = roots[i];
         if (r >= num_nodes) {
             cnf_trap();
         }
-        if (atomicExch(reinterpret_cast<unsigned int*>(&reachable[r]), 1u) == 0u) {
-            uint32_t pos = atomicAdd(reinterpret_cast<unsigned int*>(tail), 1u);
+        if (reachable[r] == 0u) {
+            reachable[r] = 1u;
+            uint32_t pos = tail[0];
             if (pos >= num_nodes) {
                 cnf_trap();
             }
             queue[pos] = r;
-            __threadfence();
             queue_ready[pos] = 1u;
+            tail[0] = pos + 1u;
         }
-    }
-
-    // Ensure head is zeroed on device; host should also memset it before launch.
-    if (blockIdx.x == 0 && threadIdx.x == 0) {
-        head[0] = 0u;
-        in_flight[0] = 0u;
     }
 }
 
@@ -67,22 +78,23 @@ extern "C" __global__ void cnf_reachability_bfs(
     uint32_t* __restrict__ tail,
     uint32_t* __restrict__ in_flight
 ) {
+    // Deterministic, single-thread reachability closure. The reachable set is order-independent,
+    // but parallel work-stealing variants are extremely easy to get wrong; prefer correctness.
+    if (blockIdx.x != 0 || threadIdx.x != 0) {
+        return;
+    }
+
     for (;;) {
-        uint32_t h = cnf_atomic_load_u32(head);
-        uint32_t t = cnf_atomic_load_u32(tail);
+        uint32_t h = head[0];
+        uint32_t t = tail[0];
         if (h >= t) {
-            if (cnf_atomic_load_u32(in_flight) == 0u) {
-                break;
-            }
-            continue;
+            break;
         }
-        if (atomicCAS(reinterpret_cast<unsigned int*>(head), h, h + 1u) != h) {
-            continue;
-        }
-        atomicAdd(reinterpret_cast<unsigned int*>(in_flight), 1u);
-        while (cnf_atomic_load_u32(&queue_ready[h]) == 0u) {
+        while (queue_ready[h] == 0u) {
         }
         uint32_t node = queue[h];
+        head[0] = h + 1u;
+
         if (node >= num_nodes) {
             cnf_trap();
         }
@@ -95,42 +107,44 @@ extern "C" __global__ void cnf_reachability_bfs(
                 if (child >= num_nodes) {
                     cnf_trap();
                 }
-                if (atomicExch(reinterpret_cast<unsigned int*>(&reachable[child]), 1u) == 0u) {
-                    uint32_t pos = atomicAdd(reinterpret_cast<unsigned int*>(tail), 1u);
+                if (reachable[child] == 0u) {
+                    reachable[child] = 1u;
+                    uint32_t pos = tail[0];
                     if (pos >= num_nodes) {
                         cnf_trap();
                     }
                     queue[pos] = child;
-                    __threadfence();
                     queue_ready[pos] = 1u;
+                    tail[0] = pos + 1u;
                 }
             }
         } else if (tag == PIR_DECISION) {
             uint32_t f = decision_child_false[node];
-            uint32_t t = decision_child_true[node];
-            if (f >= num_nodes || t >= num_nodes) {
+            uint32_t tt = decision_child_true[node];
+            if (f >= num_nodes || tt >= num_nodes) {
                 cnf_trap();
             }
-            if (atomicExch(reinterpret_cast<unsigned int*>(&reachable[f]), 1u) == 0u) {
-                uint32_t pos = atomicAdd(reinterpret_cast<unsigned int*>(tail), 1u);
+            if (reachable[f] == 0u) {
+                reachable[f] = 1u;
+                uint32_t pos = tail[0];
                 if (pos >= num_nodes) {
                     cnf_trap();
                 }
                 queue[pos] = f;
-                __threadfence();
                 queue_ready[pos] = 1u;
+                tail[0] = pos + 1u;
             }
-            if (atomicExch(reinterpret_cast<unsigned int*>(&reachable[t]), 1u) == 0u) {
-                uint32_t pos = atomicAdd(reinterpret_cast<unsigned int*>(tail), 1u);
+            if (reachable[tt] == 0u) {
+                reachable[tt] = 1u;
+                uint32_t pos = tail[0];
                 if (pos >= num_nodes) {
                     cnf_trap();
                 }
-                queue[pos] = t;
-                __threadfence();
+                queue[pos] = tt;
                 queue_ready[pos] = 1u;
+                tail[0] = pos + 1u;
             }
         }
-        atomicSub(reinterpret_cast<unsigned int*>(in_flight), 1u);
     }
 }
 
@@ -302,7 +316,8 @@ extern "C" __global__ void cnf_compute_leaf_choice_totals(
     uint32_t* __restrict__ out_num_leaf,
     uint32_t* __restrict__ out_num_choice,
     uint32_t* __restrict__ out_base_choice,
-    uint32_t* __restrict__ out_base_node
+    uint32_t* __restrict__ out_base_node,
+    uint32_t* __restrict__ out_decision_var_limit
 ) {
     if (blockIdx.x != 0 || threadIdx.x != 0) {
         return;
@@ -329,6 +344,7 @@ extern "C" __global__ void cnf_compute_leaf_choice_totals(
     out_num_choice[0] = choice_total;
     out_base_choice[0] = static_cast<uint32_t>(base_choice);
     out_base_node[0] = static_cast<uint32_t>(base_node);
+    out_decision_var_limit[0] = static_cast<uint32_t>(base_node - 1ull);
 }
 
 extern "C" __global__ void cnf_compute_totals(

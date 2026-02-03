@@ -445,6 +445,7 @@ pub mod cache_kernels {
 pub mod sat_kernels {
     pub const SAT_CDCL_SOLVE: &str = "sat_cdcl_solve";
     pub const SAT_CHECK_MODEL: &str = "sat_check_model";
+    pub const SAT_PROOF_MARK_NEEDED: &str = "sat_proof_mark_needed";
     pub const SAT_PROOF_CHECK: &str = "sat_proof_check";
     pub const SAT_ASSERT_STATUS: &str = "sat_assert_status";
     pub const SAT_ASSERT_OK: &str = "sat_assert_ok";
@@ -1018,6 +1019,7 @@ impl CudaKernelProvider {
                 &[
                     sat_kernels::SAT_CDCL_SOLVE,
                     sat_kernels::SAT_CHECK_MODEL,
+                    sat_kernels::SAT_PROOF_MARK_NEEDED,
                     sat_kernels::SAT_PROOF_CHECK,
                     sat_kernels::SAT_ASSERT_STATUS,
                     sat_kernels::SAT_ASSERT_OK,
@@ -10123,6 +10125,10 @@ mod tests {
         assert!(
             SAT_PTX.contains("sat_check_model"),
             "SAT_PTX should contain sat_check_model"
+        );
+        assert!(
+            SAT_PTX.contains("sat_proof_mark_needed"),
+            "SAT_PTX should contain sat_proof_mark_needed"
         );
         assert!(
             SAT_PTX.contains("sat_proof_check"),

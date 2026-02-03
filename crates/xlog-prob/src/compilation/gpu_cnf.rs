@@ -25,6 +25,12 @@ pub struct GpuCnfVarTables {
 pub struct GpuCnfEncoding {
     pub cnf: GpuCnf,
     pub vars: GpuCnfVarTables,
+    /// Largest variable id that is semantically meaningful and should be eligible for branching
+    /// in the GPU CDCL verifier (len = 1, device-resident).
+    ///
+    /// For PIR Tseitin encodings this is the end of the leaf+choice var range, excluding internal
+    /// node Tseitin vars which are propagation-only.
+    pub decision_var_limit: TrackedCudaSlice<u32>,
 }
 
 fn grid_dim(n: u32, block: u32) -> u32 {
@@ -125,6 +131,7 @@ pub fn encode_cnf_gpu(
     let mut num_choice = memory.alloc::<u32>(1)?;
     let mut base_choice = memory.alloc::<u32>(1)?;
     let mut base_node = memory.alloc::<u32>(1)?;
+    let mut decision_var_limit = memory.alloc::<u32>(1)?;
 
     let mut d_num_vars = memory.alloc::<u32>(1)?;
     let mut d_num_clauses = memory.alloc::<u32>(1)?;
@@ -322,6 +329,7 @@ pub fn encode_cnf_gpu(
                 &mut num_choice,
                 &mut base_choice,
                 &mut base_node,
+                &mut decision_var_limit,
             ),
         )
     }
@@ -533,5 +541,6 @@ pub fn encode_cnf_gpu(
             choice_var,
             max_var: var_cap,
         },
+        decision_var_limit,
     })
 }
