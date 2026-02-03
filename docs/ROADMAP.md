@@ -284,8 +284,9 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 - [x] Provenance extraction from positive Datalog programs
 - [x] PIR (Provenance IR) graph construction
 - [x] Tseitin encoding to CNF with stable variable mapping
-- [x] D4 integration for knowledge compilation (vendored build)
-- [x] Decision-DNNF parsing and validation
+- [x] GPU D4 integration for knowledge compilation (`kernels/d4.ptx`)
+- [x] GPU CDCL equivalence verifier for circuit correctness (`kernels/sat.ptx`)
+- [x] Decision-DNNF parsing retained for tests/fixtures (not used by production exact inference)
 - [x] XGCF (GPU circuit format) construction with level-by-level layout
 - [x] GPU forward pass for log-space weighted model counting
 - [x] GPU backward pass for gradient computation
@@ -531,7 +532,7 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 
 ### Implemented ✅
 
-- [x] Workspace test suite: `cargo test --workspace --all-targets --release`
+- [x] Workspace test suite: `cargo test --workspace --all-targets --exclude pyxlog --release`
 - [x] CUDA certification suite: 140/140 tests passing (100%)
 - [x] Hash join collision safety tests
 - [x] Aggregation overflow/truncation tests
@@ -610,8 +611,8 @@ See the individual architecture documents in `docs/architecture/` for detailed d
 
 **Build & Test:**
 ```bash
-# Full workspace test (release mode recommended)
-cargo test --workspace --all-targets --release
+# Full workspace test (release mode recommended; exclude the PyO3 extension crate)
+cargo test --workspace --all-targets --exclude pyxlog --release
 
 # CUDA certification suite
 cargo test -p xlog-cuda-tests --test certification_suite --release

@@ -4,6 +4,10 @@
 **Status:** Implemented (merged into `main`)  
 **Targets:** Linux x86_64 + CUDA-only  
 
+> **Update (2026-02-03):** The CPU D4/DDNNF compilation pipeline has been removed. Exact inference is GPU-native (GPU D4 +
+> GPU CDCL verifier), with no vendored D4 snapshot and no shell-out to an external `d4` binary. Any references below to a
+> vendored CPU D4 are obsolete.
+
 This document captures the **integrated Phase 4** design: deliver `xlog-prob` (probabilistic + differentiable reasoning) while completing/solidifying the Phase 4 substrate items in `docs/ROADMAP.md` (CuDF/Arrow/DLPack interop, optimizer, incremental maintenance, adaptive indexing) and shipping a user-visible Python package.
 
 > **Implementation note (2026-01-14):** This design is implemented and merged into `main` (merged from the Phase 4 integration development branch/worktree).
@@ -24,8 +28,8 @@ This document captures the **integrated Phase 4** design: deliver `xlog-prob` (p
 - **Platform:** Linux x86_64 + CUDA-only (Phase 4).
 
 ### 1.2 Knowledge compilation backend
-- **D4 is vendored** in-repo and built as part of the workspace/tooling.
-- No external system dependency on a preinstalled `d4` binary.
+- Exact inference uses the **GPU-native** compiler (`kernels/d4.ptx`) and verifier (`kernels/sat.ptx`).
+- No vendored D4 snapshot; no external `d4` binary.
 
 ### 1.3 Exactness / Tier contracts (xlog-prob)
 - **P1/P2 exact** for programs that can be compiled into tractable decomposable circuits (Decision-DNNF) and evaluated on GPU.
@@ -74,7 +78,7 @@ MVP surface (subject to naming refinement):
                │
                ▼
            xlog-prob
-    (PIR → (W)CNF → D4 → XGCF)
+    (PIR → GPU CNF → GPU D4 → XGCF)
                │
                ▼
      GPU circuit eval + autodiff

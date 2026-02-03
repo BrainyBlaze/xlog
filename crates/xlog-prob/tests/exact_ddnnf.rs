@@ -3,9 +3,6 @@
 use xlog_prob::exact::{ExactDdnnfProgram, ExactResult};
 use xlog_prob::provenance::Value;
 
-use std::fs;
-use std::path::{Path, PathBuf};
-
 static EXACT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn prob_of(result: &ExactResult, predicate: &str, args: &[Value]) -> f64 {
@@ -24,49 +21,6 @@ fn prob_of(result: &ExactResult, predicate: &str, args: &[Value]) -> f64 {
 
 fn prob0(result: &ExactResult, predicate: &str) -> f64 {
     prob_of(result, predicate, &[])
-}
-
-fn make_temp_dir(prefix: &str) -> PathBuf {
-    let pid = std::process::id();
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!("{}-{}-{}", prefix, pid, nanos));
-    fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
-#[cfg(unix)]
-fn write_executable_script(path: &Path, script: &str) {
-    use std::os::unix::fs::PermissionsExt;
-
-    let tmp = path.with_extension("tmp");
-    fs::write(&tmp, script).unwrap();
-    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755)).unwrap();
-    fs::rename(&tmp, path).unwrap();
-}
-
-struct EnvGuard {
-    key: &'static str,
-    prev: Option<String>,
-}
-
-impl EnvGuard {
-    fn set(key: &'static str, value: impl AsRef<str>) -> Self {
-        let prev = std::env::var(key).ok();
-        std::env::set_var(key, value.as_ref());
-        Self { key, prev }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        match &self.prev {
-            Some(v) => std::env::set_var(self.key, v),
-            None => std::env::remove_var(self.key),
-        }
-    }
 }
 
 #[test]
@@ -210,63 +164,6 @@ query(reach(1,3)).
     let p13 = prob_of(&result, "reach", &[Value::from(1_i64), Value::from(3_i64)]);
     assert!((p12 - 0.5).abs() < 1e-9, "p12={}", p12);
     assert!((p13 - 0.25).abs() < 1e-9, "p13={}", p13);
-}
-
-#[test]
-fn test_exact_ddnnf_invokes_d4_only_once_per_program() {
-    let _lock = EXACT_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-    let dir = make_temp_dir("xlog-d4-count");
-    let count_path = dir.join("count.txt");
-    let wrapper_path = dir.join("d4-wrapper");
-
-    let bundled = xlog_prob::kc::d4::D4Compiler::bundled().unwrap();
-    let real_d4 = bundled.d4_path().to_path_buf();
-
-    write_executable_script(
-        &wrapper_path,
-        r#"#!/usr/bin/env bash
-set -euo pipefail
-count_file="${XLOG_D4_COUNT_FILE:?}"
-real="${REAL_D4:?}"
-
-n=0
-if [[ -f "$count_file" ]]; then
-  n="$(cat "$count_file")"
-fi
-echo $((n + 1)) > "$count_file"
-
-exec "$real" "$@"
-"#,
-    );
-
-    let _g1 = EnvGuard::set("XLOG_D4_PATH", wrapper_path.to_string_lossy());
-    let _g2 = EnvGuard::set("REAL_D4", real_d4.to_string_lossy());
-    let _g3 = EnvGuard::set("XLOG_D4_COUNT_FILE", count_path.to_string_lossy());
-
-    let source = r#"
-0.5::a().
-0.5::b().
-c() :- a().
-c() :- b().
-evidence(c(), true).
-query(a()).
-query(b()).
-query(c()).
-"#;
-
-    let compiled = ExactDdnnfProgram::compile_source(source).unwrap();
-    let _ = compiled.evaluate().unwrap();
-
-    let count: u32 = match fs::read_to_string(&count_path) {
-        Ok(text) => text.trim().parse().unwrap(),
-        Err(_) => 0,
-    };
-    assert_eq!(count, 0, "count={}", count);
-
-    fs::remove_dir_all(&dir).ok();
 }
 
 #[test]

@@ -170,12 +170,22 @@ pub fn compile_gpu_d4_and_verify_cached(
     }
 
     // Verify equivalence on the *base* circuit (pre-smoothing) to keep the verifier CNFs minimal.
+    //
+    // `encode_cnf_gpu` sets `decision_var_limit` to the end of the leaf+choice var range. For
+    // deterministic programs with no probabilistic vars, this range is empty (limit=0). In that
+    // case, the verifier must still be able to branch, so fall back to `cnf.num_vars` (all CNF
+    // vars are semantically meaningful when there is no probabilistic decision set).
+    let verifier_decision_var_limit = if random_vars.is_empty() {
+        &cnf.num_vars
+    } else {
+        decision_var_limit
+    };
     let cdcl = cdcl_config_from_compile(config)?;
     #[cfg(debug_assertions)]
     eprintln!("[xlog-prob] compile_gpu_d4_and_verify_cached: validate_equivalence_gpu_gated");
     validate_equivalence_gpu_gated(
         cnf,
-        decision_var_limit,
+        verifier_decision_var_limit,
         &circuit_base,
         provider,
         GpuEquivalenceConfig { cdcl },

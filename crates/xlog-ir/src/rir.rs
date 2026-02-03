@@ -108,6 +108,13 @@ pub enum ConstValue {
 /// Relational IR node types
 #[derive(Debug, Clone)]
 pub enum RirNode {
+    /// A 0-arity relation containing exactly one empty tuple ({()}).
+    ///
+    /// This is the identity element for joins and the natural seed for rules whose bodies
+    /// contain no positive atoms (e.g. `p() :- not q().`), allowing negation-only rules to
+    /// be lowered as set difference against a unit relation.
+    Unit,
+
     /// Scan a base relation
     Scan { rel: RelId },
 
@@ -185,6 +192,7 @@ impl RirNode {
 
     fn collect_relations(&self, rels: &mut Vec<RelId>) {
         match self {
+            RirNode::Unit => {}
             RirNode::Scan { rel } => rels.push(*rel),
             RirNode::Filter { input, .. } | RirNode::Project { input, .. } => {
                 input.collect_relations(rels);

@@ -1462,6 +1462,15 @@ impl CudaKernelProvider {
         }
 
         if key_cols.is_empty() {
+            if input.arity() == 0 {
+                // A 0-arity relation is either empty or {()}, and dedup collapses any
+                // non-empty multiplicity to a single empty tuple.
+                let rows = self.device_row_count(input)?;
+                if rows == 0 {
+                    return self.create_empty_buffer(input.schema().clone());
+                }
+                return self.buffer_from_columns(Vec::new(), 1, input.schema().clone());
+            }
             return Err(XlogError::Kernel(
                 "Dedup requires at least one key column".to_string(),
             ));
@@ -1488,6 +1497,13 @@ impl CudaKernelProvider {
         }
 
         if key_cols.is_empty() {
+            if input.arity() == 0 {
+                let rows = self.device_row_count(input)?;
+                if rows == 0 {
+                    return self.create_empty_buffer(input.schema().clone());
+                }
+                return self.buffer_from_columns(Vec::new(), 1, input.schema().clone());
+            }
             return Err(XlogError::Kernel(
                 "Dedup requires at least one key column".to_string(),
             ));
@@ -1991,15 +2007,17 @@ impl CudaKernelProvider {
         }
 
         let schema = a.schema().clone();
-        let key_cols: Vec<usize> = (0..schema.arity()).collect();
-        if key_cols.is_empty() {
-            return Err(XlogError::Kernel(
-                "Union requires at least one column".to_string(),
-            ));
-        }
-
         let a_rows = self.device_row_count(a)?;
         let b_rows = self.device_row_count(b)?;
+        if schema.arity() == 0 {
+            // 0-arity set union: empty ∪ empty = empty; otherwise {()}.
+            if a_rows == 0 && b_rows == 0 {
+                return self.create_empty_buffer(schema);
+            }
+            return self.buffer_from_columns(Vec::new(), 1, schema);
+        }
+
+        let key_cols: Vec<usize> = (0..schema.arity()).collect();
         if a_rows == 0 && b_rows == 0 {
             return self.create_empty_buffer(schema);
         }
@@ -2060,9 +2078,11 @@ impl CudaKernelProvider {
         }
 
         if a.arity() == 0 {
-            return Err(XlogError::Kernel(
-                "Diff requires at least one column".to_string(),
-            ));
+            // 0-arity set difference: {()} - empty = {()}, {()} - {()} = empty.
+            if num_b == 0 {
+                return self.buffer_from_columns(Vec::new(), 1, a.schema().clone());
+            }
+            return self.create_empty_buffer(a.schema().clone());
         }
 
         let col_type = a

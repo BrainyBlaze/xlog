@@ -462,7 +462,7 @@ impl Executor {
 
         fn contains_non_monotonic_ops(node: &RirNode) -> bool {
             match node {
-                RirNode::Scan { .. } => false,
+                RirNode::Unit | RirNode::Scan { .. } => false,
                 RirNode::Filter { input, .. }
                 | RirNode::Project { input, .. }
                 | RirNode::Distinct { input, .. } => contains_non_monotonic_ops(input),
@@ -625,6 +625,22 @@ impl Executor {
     /// Returns an error if the node execution fails
     pub fn execute_node(&mut self, node: &RirNode) -> Result<CudaBuffer> {
         match node {
+            RirNode::Unit => {
+                // Materialize the relational "unit" ({()}) as a 0-arity buffer with one row.
+                let mut d_num_rows = self.provider.memory().alloc::<u32>(1)?;
+                self.provider
+                    .device()
+                    .inner()
+                    .htod_sync_copy_into(&[1u32], &mut d_num_rows)
+                    .map_err(|e| XlogError::Kernel(format!("Failed to create unit row count: {}", e)))?;
+                Ok(CudaBuffer::from_columns(
+                    Vec::new(),
+                    1,
+                    d_num_rows,
+                    Schema::new(vec![]),
+                ))
+            }
+
             RirNode::Scan { rel } => {
                 let start = self.profiler.start_op();
                 let result = self.execute_scan(*rel)?;
@@ -1232,6 +1248,7 @@ impl Executor {
 
     fn collect_scan_rels(node: &RirNode, out: &mut Vec<RelId>) {
         match node {
+            RirNode::Unit => {}
             RirNode::Scan { rel } => out.push(*rel),
             RirNode::Filter { input, .. } | RirNode::Project { input, .. } => {
                 Self::collect_scan_rels(input, out);
@@ -1276,6 +1293,7 @@ impl Executor {
         replacement: RelId,
     ) -> (RirNode, bool) {
         match node {
+            RirNode::Unit => (RirNode::Unit, false),
             RirNode::Scan { rel } => {
                 if *rel == target {
                     if *remaining == 0 {

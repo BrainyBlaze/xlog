@@ -2,7 +2,7 @@
 
 `xlog-prob` is XLOG’s probabilistic reasoning tier. It consumes a probabilistic `.xlog` program (probabilistic facts, annotated disjunctions, evidence, and probabilistic queries) and evaluates query probabilities either:
 
-- **Exactly** via knowledge compilation (`prob_engine=exact_ddnnf`): PIR → CNF → D4 → Decision-DNNF → GPU weighted model counting + gradients.
+- **Exactly** via GPU-native knowledge compilation (`prob_engine=exact_ddnnf`): PIR → GPU CNF → GPU D4 compiler → XGCF circuit → GPU weighted model counting + gradients.
 - **Approximately** via Monte Carlo sampling (`prob_engine=mc`): GPU sampling of probabilistic leaves + deterministic evaluation per sampled world, with uncertainty reporting.
 
 This document explains the implementation as it exists in the repository and points to concrete entry points in the codebase.
@@ -20,8 +20,7 @@ This document explains the implementation as it exists in the repository and poi
 - `crates/xlog-prob/src/compilation/gpu_pir.rs`: GPU PIR graph layout (device-resident SoA)
 - `crates/xlog-prob/src/compilation/gpu_pir_intern.rs`: GPU PIR interner (deterministic, memory-bounded)
 - `crates/xlog-prob/src/compilation/gpu_cnf.rs`: GPU PIR→CNF encoder (`encode_cnf_gpu`)
-- `crates/xlog-prob/src/kc/d4.rs`: D4 compiler wrapper (runs vendored `d4`)
-- `crates/xlog-prob/src/kc/ddnnf.rs`: Decision-DNNF parser
+- `crates/xlog-prob/src/kc/ddnnf.rs`: Decision-DNNF parser (tests/fixtures only; no CPU D4 compilation)
 - `crates/xlog-prob/src/xgcf.rs`: XGCF (GPU circuit format) construction
 - `crates/xlog-prob/src/gpu.rs`: GPU upload + evaluation glue (`GpuXgcf`)
 - `crates/xlog-prob/src/neural_fast_path.rs`: GPU neural fast-path slot mapping + AD-chain glue
@@ -118,10 +117,14 @@ This is implemented in `crates/xlog-prob/src/exact.rs` (`ExactDdnnfProgram::eval
 device-resident `GpuCircuitCache`. The program holds a cache handle and CUDA provider in `GpuExactState`; evaluations reuse
 the cached slot and run cache-aware XGCF kernels with no CPU D4 invocation and no CNF/DDNNF host materialization.
 
-### Legacy CPU D4 (tests/tools only)
+### CPU D4/DDNNF compilation (removed)
 
-D4 remains vendored under `vendor/d4` and is still built by `crates/xlog-prob/build.rs` for legacy tools/tests that
-exercise the CPU pipeline. The default exact inference path no longer shells out to D4 or materializes CNF/DDNNF on host.
+The repository no longer includes a CPU D4/DDNNF compilation pipeline:
+- No vendored D4 snapshot.
+- No shell-out to an external `d4` binary.
+
+Decision-DNNF parsing (`crates/xlog-prob/src/kc/ddnnf.rs`) remains available for tests/fixtures only; production exact
+inference uses the GPU-native compiler + verifier and device-resident circuits.
 
 The GPU-native encoder (`encode_cnf_gpu`) in `crates/xlog-prob/src/compilation/gpu_cnf.rs` produces a device-resident
 `GpuCnf` for the GPU D4/CDCL pipeline and is now wired into `ExactDdnnfProgram` via
@@ -172,27 +175,24 @@ This compilation is implemented in `crates/xlog-prob/src/mc.rs` (`compile_sampli
 
 ### GPU sampling
 
-Sampling uses `CudaKernelProvider::sample_bernoulli_matrix(...)`, which calls `kernels/mc_sample.ptx` to generate a row-major `[samples][num_vars]` matrix of 0/1 bytes on the GPU and copies it back to host memory for evaluation.
+Sampling uses `CudaKernelProvider::sample_bernoulli_matrix_device(...)`, which calls `kernels/mc_sample.ptx` to generate a row-major `[samples][num_vars]` matrix of 0/1 bytes on the GPU. Sampling is deterministic given `seed`.
 
-Sampling is deterministic given `seed`.
+### Device-only evaluation (GPU-native counts)
 
-### Deterministic evaluation per world
+The primary GPU-native API is:
 
-For each sample:
+- `McProgram::evaluate_gpu_device(...) -> McDeviceResult`
 
-1. Clone the base EDB store (deterministic facts), apply sampled probabilistic facts and AD outcomes.
-2. Evaluate the program SCC-by-SCC using a CPU relation store (`HashMap<String, Relation>` where `Relation` is a set of tuples).
+It evaluates each sampled world on the GPU (host control-plane launches only) and returns device-resident count buffers:
 
-SCC evaluation strategy:
+- `query_counts: DeviceSlice<u32>` (one per query atom)
+- `evidence_count: DeviceSlice<u32>` (samples satisfying all evidence)
 
-- **Monotone non-recursive**: single forward pass over rules.
-- **Monotone recursive**: semi-naive fixpoint with per-rule delta selection.
-- **Non-monotone SCCs** (cycles through `not` and/or aggregates): synchronous iteration with explicit cycle detection:
-  - if a fixpoint is reached, use it
-  - if a cycle is detected, use the intersection of all states in the cycle (skeptical tuples only)
-  - if the iteration budget is exceeded, use the intersection across all visited states (conservative)
+Internally (`crates/xlog-prob/src/mc.rs`), MC evaluation:
 
-This is implemented in `crates/xlog-prob/src/mc.rs` (`evaluate_program_inplace`, `eval_monotone_recursive_scc`, `eval_nonmonotone_scc`).
+1. Keeps the sample matrix on device and builds per-sample probabilistic fact buffers on the GPU.
+2. Evaluates the deterministic core using `xlog-runtime::Executor` (GPU relation store + GPU operators).
+3. Computes query/evidence truth flags and accumulates counts on-device (`kernels/mc_eval.cu`).
 
 ### Evidence conditioning and uncertainty reporting
 
@@ -208,6 +208,14 @@ For each query, `mc` estimates `P(Q|E)` as a binomial proportion and reports:
 - two-sided confidence interval (`ci_low`, `ci_high`) for the configured `confidence`
 - `samples`, `evidence_samples`, `seed`
 - non-monotone SCC diagnostics (`nonmonotone_sccs`, `nonmonotone_cycles`, `nonmonotone_iteration_limit_hits`)
+
+### Host outputs and CPU validation (feature-gated)
+
+Host-readable probability outputs are behind `--features host-io`:
+
+- `McProgram::evaluate(...) -> McResult` downloads the device counts and computes probabilities + confidence intervals.
+- `McProgram::evaluate_cpu(...) -> McResult` is a validation/debug path that downloads the sample matrix and evaluates via
+  a CPU relation store.
 
 ---
 
@@ -241,7 +249,7 @@ For training workloads with neural predicates, `pyxlog` uses the **GPU neural fa
 ### Rust (workspace)
 
 ```bash
-cargo test --workspace --all-targets --release
+cargo test --workspace --all-targets --exclude pyxlog --release
 ```
 
 ### Rust (`xlog-prob` focused)

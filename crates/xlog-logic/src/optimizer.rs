@@ -258,6 +258,7 @@ impl Optimizer {
     fn predicate_pushdown(&self, node: RirNode) -> RirNode {
         match node {
             // Base case: scan nodes cannot be transformed further
+            RirNode::Unit => RirNode::Unit,
             RirNode::Scan { rel } => RirNode::Scan { rel },
 
             // Filter on top of another node: try to push down
@@ -567,6 +568,7 @@ impl Optimizer {
     /// Estimates the output width (number of columns) of a plan node.
     fn estimate_width(&self, node: &RirNode) -> usize {
         match node {
+            RirNode::Unit => 0,
             RirNode::Scan { rel } => {
                 // Use schema if available, otherwise stats, otherwise default
                 if let Some(schema) = self.schemas.get(rel) {
@@ -765,6 +767,12 @@ impl Optimizer {
     /// A [`PlanCost`] with estimated rows, CPU cost, GPU memory, and transfers
     pub fn estimate_cost(&self, node: &RirNode) -> PlanCost {
         match node {
+            RirNode::Unit => PlanCost {
+                rows: 1,
+                cpu_cost: 0.0,
+                gpu_mem: 0,
+                transfers: 0,
+            },
             RirNode::Scan { rel } => self.estimate_scan_cost(*rel),
 
             RirNode::Filter { input, predicate } => {

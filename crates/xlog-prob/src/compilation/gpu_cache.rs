@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use cudarc::driver::{CudaSlice, DeviceRepr, DeviceSlice, LaunchAsync, LaunchConfig};
+use cudarc::driver::{DeviceRepr, DeviceSlice, LaunchAsync, LaunchConfig};
 use xlog_core::{Result, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::provider::{cache_kernels, CACHE_MODULE};
@@ -65,10 +65,6 @@ pub struct GpuCacheLookup {
     provider: Arc<CudaKernelProvider>,
     slot: TrackedCudaSlice<u32>,
     compile_needed: TrackedCudaSlice<u32>,
-    meta_num_nodes: CudaSlice<u32>,
-    meta_num_levels: CudaSlice<u32>,
-    meta_root: CudaSlice<u32>,
-    meta_max_var: CudaSlice<u32>,
 }
 
 impl GpuCacheLookup {
@@ -89,10 +85,6 @@ impl GpuCacheLookup {
             provider: self.provider,
             slot: self.slot,
             compile_needed: self.compile_needed,
-            meta_num_nodes: self.meta_num_nodes,
-            meta_num_levels: self.meta_num_levels,
-            meta_root: self.meta_root,
-            meta_max_var: self.meta_max_var,
             num_nodes: 0,
             num_levels: 0,
             root: 0,
@@ -105,10 +97,6 @@ pub struct GpuCircuitCacheHandle {
     provider: Arc<CudaKernelProvider>,
     slot: TrackedCudaSlice<u32>,
     compile_needed: TrackedCudaSlice<u32>,
-    meta_num_nodes: CudaSlice<u32>,
-    meta_num_levels: CudaSlice<u32>,
-    meta_root: CudaSlice<u32>,
-    meta_max_var: CudaSlice<u32>,
     num_nodes: u32,
     num_levels: u32,
     root: u32,
@@ -126,22 +114,6 @@ impl GpuCircuitCacheHandle {
 
     pub fn provider(&self) -> &Arc<CudaKernelProvider> {
         &self.provider
-    }
-
-    pub fn meta_num_nodes_device(&self) -> &CudaSlice<u32> {
-        &self.meta_num_nodes
-    }
-
-    pub fn meta_num_levels_device(&self) -> &CudaSlice<u32> {
-        &self.meta_num_levels
-    }
-
-    pub fn meta_root_device(&self) -> &CudaSlice<u32> {
-        &self.meta_root
-    }
-
-    pub fn meta_max_var_device(&self) -> &CudaSlice<u32> {
-        &self.meta_max_var
     }
 
     pub fn num_nodes(&self) -> u32 {
@@ -554,10 +526,6 @@ impl GpuCircuitCache {
             provider: self.provider.clone(),
             slot: out_slot,
             compile_needed: out_compile_needed,
-            meta_num_nodes: self.meta_num_nodes.clone(),
-            meta_num_levels: self.meta_num_levels.clone(),
-            meta_root: self.meta_root.clone(),
-            meta_max_var: self.meta_max_var.clone(),
         })
     }
 
@@ -1260,7 +1228,7 @@ impl GpuCircuitCache {
                 (&self.var_log_true).as_kernel_param(),
                 (&self.var_log_false).as_kernel_param(),
                 (&mut self.values).as_kernel_param(),
-                handle.meta_num_levels_device().as_kernel_param(),
+                (&self.meta_num_levels).as_kernel_param(),
             ];
             unsafe {
                 eval_all.clone().launch(
@@ -1297,7 +1265,7 @@ impl GpuCircuitCache {
                     handle.slot_device(),
                     self.node_cap,
                     &self.values,
-                    handle.meta_root_device(),
+                    &self.meta_root,
                     out_log_z,
                 ),
             )
@@ -1340,7 +1308,7 @@ impl GpuCircuitCache {
             (&self.var_log_true).as_kernel_param(),
             (&self.var_log_false).as_kernel_param(),
             (&mut self.values).as_kernel_param(),
-            handle.meta_num_levels_device().as_kernel_param(),
+            (&self.meta_num_levels).as_kernel_param(),
         ];
         unsafe {
             eval_all.clone().launch(
@@ -1458,7 +1426,7 @@ impl GpuCircuitCache {
                     handle.slot_device(),
                     self.node_cap,
                     &mut self.adj,
-                    handle.meta_root_device(),
+                    &self.meta_root,
                     &self.one_f64,
                 ),
             )
@@ -1518,7 +1486,7 @@ impl GpuCircuitCache {
                 (&self.var_log_false).as_kernel_param(),
                 (&self.values).as_kernel_param(),
                 (&mut self.adj).as_kernel_param(),
-                handle.meta_num_levels_device().as_kernel_param(),
+                (&self.meta_num_levels).as_kernel_param(),
             ];
 
             unsafe {
@@ -1554,7 +1522,7 @@ impl GpuCircuitCache {
                 (&self.adj).as_kernel_param(),
                 (&mut self.grad_true).as_kernel_param(),
                 (&mut self.grad_false).as_kernel_param(),
-                handle.meta_num_levels_device().as_kernel_param(),
+                (&self.meta_num_levels).as_kernel_param(),
             ];
 
             unsafe {
@@ -1588,7 +1556,7 @@ impl GpuCircuitCache {
                 (&self.adj).as_kernel_param(),
                 (&self.grad_true).as_kernel_param(),
                 (&self.grad_false).as_kernel_param(),
-                handle.meta_num_levels_device().as_kernel_param(),
+                (&self.meta_num_levels).as_kernel_param(),
             ];
 
             unsafe {
@@ -1730,7 +1698,7 @@ impl GpuCircuitCache {
                                 handle.slot_device(),
                                 self.node_cap,
                                 &mut self.values,
-                                handle.meta_root_device(),
+                                &self.meta_root,
                                 result_buf,
                             ),
                         )

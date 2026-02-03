@@ -28,6 +28,22 @@ fn device_row_count(provider: &CudaKernelProvider, rows: u32) -> xlog_cuda::memo
     d_num_rows
 }
 
+fn host_row_count(provider: &CudaKernelProvider, buffer: &CudaBuffer) -> u32 {
+    let mut host = [0u32];
+    provider
+        .device()
+        .inner()
+        .dtoh_sync_copy_into(buffer.num_rows_device(), &mut host)
+        .expect("dtoh row count");
+    host[0]
+}
+
+fn zero_arity_buffer(provider: &CudaKernelProvider, rows: u32) -> CudaBuffer {
+    let schema = Schema::new(vec![]);
+    let d_num_rows = device_row_count(provider, rows);
+    CudaBuffer::from_columns(Vec::new(), rows as u64, d_num_rows, schema)
+}
+
 fn buffer_with_row_cap(
     provider: &CudaKernelProvider,
     data: &[u32],
@@ -58,6 +74,30 @@ fn buffer_with_row_cap(
 }
 
 // ============== Union Tests ==============
+
+#[test]
+fn test_union_gpu_zero_arity() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    let empty = zero_arity_buffer(&provider, 0);
+    let unit = zero_arity_buffer(&provider, 1);
+
+    let u1 = provider.union_gpu(&empty, &unit).unwrap();
+    assert_eq!(host_row_count(&provider, &u1), 1);
+
+    let u2 = provider.union_gpu(&unit, &empty).unwrap();
+    assert_eq!(host_row_count(&provider, &u2), 1);
+
+    let u3 = provider.union_gpu(&unit, &unit).unwrap();
+    assert_eq!(host_row_count(&provider, &u3), 1);
+
+    let u4 = provider.union_gpu(&empty, &empty).unwrap();
+    assert_eq!(host_row_count(&provider, &u4), 0);
+    assert!(u4.is_empty());
+}
 
 #[test]
 fn test_union_gpu_basic() {
@@ -248,6 +288,58 @@ fn test_union_gpu_uses_device_row_count() {
 }
 
 // ============== Diff Tests ==============
+
+#[test]
+fn test_diff_gpu_zero_arity() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    let empty = zero_arity_buffer(&provider, 0);
+    let unit = zero_arity_buffer(&provider, 1);
+
+    // unit - empty = unit
+    let d1 = provider.diff_gpu(&unit, &empty).unwrap();
+    assert_eq!(host_row_count(&provider, &d1), 1);
+
+    // unit - unit = empty
+    let d2 = provider.diff_gpu(&unit, &unit).unwrap();
+    assert_eq!(host_row_count(&provider, &d2), 0);
+    assert!(d2.is_empty());
+
+    // empty - unit = empty
+    let d3 = provider.diff_gpu(&empty, &unit).unwrap();
+    assert_eq!(host_row_count(&provider, &d3), 0);
+    assert!(d3.is_empty());
+}
+
+#[test]
+fn test_compact_buffer_by_device_mask_counted_empty_result_has_zero_device_rows() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    let schema = Schema::new(vec![("val".to_string(), ScalarType::U32)]);
+    let input = provider
+        .create_buffer_from_u32_slice(&[1u32, 2u32, 3u32], schema.clone())
+        .unwrap();
+
+    let mut d_mask = provider.memory().alloc::<u8>(3).unwrap();
+    provider
+        .device()
+        .inner()
+        .htod_sync_copy_into(&[0u8, 0u8, 0u8], &mut d_mask)
+        .unwrap();
+
+    let out = provider
+        .compact_buffer_by_device_mask_counted(&input, &d_mask)
+        .unwrap();
+    assert_eq!(host_row_count(&provider, &out), 0);
+    assert_eq!(out.num_rows(), input.num_rows());
+    assert_eq!(out.schema().arity(), schema.arity());
+}
 
 #[test]
 fn test_diff_gpu_basic() {

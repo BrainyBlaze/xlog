@@ -1066,11 +1066,22 @@ fn build_zero_arity_buffer(
     ))
 }
 
+fn device_row_count_u32(provider: &Arc<CudaKernelProvider>, buffer: &CudaBuffer) -> Result<u32> {
+    let mut host = [0u32];
+    provider
+        .device()
+        .inner()
+        .dtoh_sync_copy_into(buffer.num_rows_device(), &mut host)
+        .map_err(|e| XlogError::Kernel(format!("Failed to read row count: {}", e)))?;
+    Ok(host[0])
+}
+
 fn dedup_relation(
     provider: &Arc<CudaKernelProvider>,
     buffer: &CudaBuffer,
 ) -> Result<CudaBuffer> {
-    if buffer.is_empty() {
+    let rows = device_row_count_u32(provider, buffer)?;
+    if rows == 0 {
         return provider.create_empty_buffer(buffer.schema().clone());
     }
     if buffer.arity() == 0 {
@@ -1259,13 +1270,12 @@ fn build_sample_buffers(
         .map_err(|e| XlogError::Kernel(format!("mc_eval_mask_var failed: {}", e)))?;
 
         let filtered = provider.compact_buffer_by_device_mask_counted(&table.buffer, &d_mask)?;
-        if filtered.is_empty() {
+        let filtered_rows = device_row_count_u32(provider, &filtered)?;
+        if filtered_rows == 0 {
             continue;
         }
         let deduped = dedup_relation(provider, &filtered)?;
-        if !deduped.is_empty() {
-            out.push((table.predicate.clone(), deduped));
-        }
+        out.push((table.predicate.clone(), deduped));
     }
 
     for table in ad_tables {
@@ -1312,13 +1322,12 @@ fn build_sample_buffers(
         .map_err(|e| XlogError::Kernel(format!("mc_eval_mask_ad_choice failed: {}", e)))?;
 
         let filtered = provider.compact_buffer_by_device_mask_counted(&table.buffer, &d_mask)?;
-        if filtered.is_empty() {
+        let filtered_rows = device_row_count_u32(provider, &filtered)?;
+        if filtered_rows == 0 {
             continue;
         }
         let deduped = dedup_relation(provider, &filtered)?;
-        if !deduped.is_empty() {
-            out.push((table.predicate.clone(), deduped));
-        }
+        out.push((table.predicate.clone(), deduped));
     }
 
     Ok(out)

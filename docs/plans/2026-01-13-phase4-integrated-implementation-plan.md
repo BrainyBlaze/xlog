@@ -4,6 +4,9 @@
 **Status:** Completed (merged into `main`)  
 **Targets:** Linux x86_64 + CUDA-only  
 
+**Update (2026-02-03):** The CPU D4/DDNNF compilation pipeline has been removed. There is no longer any dependency on an
+external `d4` binary; exact inference is GPU-native (compile + verify + WMC/gradients).
+
 This plan executes the design in `docs/plans/2026-01-13-phase4-integrated-design.md` and updates the Phase 4 roadmap items (P4.1–P4.4) as substrate, not as separate projects.
 
 ## Execution Summary (2026-01-14)
@@ -21,7 +24,8 @@ All tasks in this plan are implemented and merged into `main`, including the P3 
 ## 0) Acceptance Criteria (Phase 4 “Done”)
 
 ### 0.1 Deterministic logic (regression)
-- `cargo test --workspace --all-targets` passes in `debug` and `release`.
+- `cargo test --workspace --all-targets --exclude pyxlog` passes in `debug`.
+- `cargo test --workspace --all-targets --exclude pyxlog --release` passes in `release`.
 - CUDA certification suite remains green (no kernel regressions).
 
 ### 0.2 xlog-prob (exact)
@@ -64,16 +68,13 @@ All tasks in this plan are implemented and merged into `main`, including the P3 
 **Notes:**
 - Keep CUDA kernels for circuits in `kernels/` alongside existing modules; load via `crates/xlog-cuda/src/provider.rs`.
 
-### Task 1.2: Vendor D4 in-repo (build as part of workspace)
-**Create (example layout):**
-- `vendor/d4/` (pinned upstream snapshot)
-- `crates/xlog-prob/build.rs` to build `vendor/d4` into `target/` (or a deterministic `target/d4/` subdir)
+### Task 1.2: CPU D4/DDNNF compilation removed (GPU-native only)
+This plan originally included a CPU pipeline that vendored D4 in-repo (`vendor/d4` + `crates/xlog-prob/build.rs`).
+That entire CPU D4/DDNNF compilation path has since been removed from the repository (2026-02-03).
 
-**Deliverable:**
-- `xlog-prob` can invoke a known-path `d4` binary without requiring a system install.
-
-**Validation:**
-- `cargo build -p xlog-prob` builds D4 as needed.
+**Current behavior:**
+- Exact inference uses the GPU-native compiler (`kernels/d4.ptx`) and GPU CDCL verifier (`kernels/sat.ptx`).
+- No shell-out to D4; no vendored D4 snapshot.
 
 ---
 
@@ -153,16 +154,25 @@ All tasks in this plan are implemented and merged into `main`, including the P3 
 
 ---
 
-## 5) Knowledge Compilation (D4) → Circuit Ingestion
+## 5) Knowledge Compilation (GPU D4) → Device-Resident Circuit
 
-### Task 5.1: Run D4 and parse Decision-DNNF output
-**Create:**
-- `crates/xlog-prob/src/kc/d4.rs` (backend wrapper)
-- `crates/xlog-prob/src/kc/ddnnf.rs` (parser + in-memory circuit)
+**Update (2026-02-03):** The CPU D4 shell-out + Decision-DNNF artifact pipeline has been removed from the repository.
+Exact inference uses the GPU-native compiler (`kernels/d4.ptx` orchestrated by `crates/xlog-prob/src/compilation/gpu_d4.rs`)
+and validates equivalence via the GPU CDCL verifier (`kernels/sat.ptx`).
+
+The Decision-DNNF parser (`crates/xlog-prob/src/kc/ddnnf.rs`) remains for tests/fixtures only and is not part of the
+production exact inference path.
+
+### Task 5.1: Compile + verify on GPU (no host IO)
+**Key code:**
+- `crates/xlog-prob/src/compilation/gpu_d4.rs`
+- `crates/xlog-prob/src/compilation/validation.rs`
+- `kernels/d4.cu` / `kernels/d4.ptx`
+- `kernels/sat.cu` / `kernels/sat.ptx`
 
 **Requirements:**
-- Deterministic mapping from CNF vars → D4 vars → circuit literals.
-- Durable cache keys: content hash of (slice + cnf + settings) → compiled ddnnf artifact.
+- Deterministic mapping from CNF vars → circuit literals (device-resident).
+- Cache keys: deterministic CNF hash computed on GPU → circuit cache slot.
 
 ---
 
@@ -240,7 +250,7 @@ All tasks in this plan are implemented and merged into `main`, including the P3 
 
 ### Task 9.1: Update docs to match locked decisions
 **Modify:**
-- `docs/ROADMAP.md` (Phase 4 integrated plan pointers; `xlog-gpu`; vendored D4; P3 gating)
+- `docs/ROADMAP.md` (Phase 4 integrated plan pointers; `xlog-gpu`; GPU-native exact inference; P3 gating)
 - `docs/architecture/cudf-interop.md` (Python package name + DLPack-first guidance)
 
 ### Task 9.2: Add end-to-end examples

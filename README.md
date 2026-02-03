@@ -563,7 +563,7 @@ xlog/
 
 ```bash
 # Full test suite (release mode recommended for GPU tests)
-cargo test --workspace --all-targets --release
+cargo test --workspace --all-targets --exclude pyxlog --release
 
 # CUDA certification suite only
 cargo test -p xlog-cuda-tests --test certification_suite --release
@@ -611,4 +611,4 @@ XLOG builds on research in GPU-accelerated Datalog, probabilistic logic programm
 - [GPUlog](https://dl.acm.org/doi/10.1145/3183713.3183727) — HISA indexing, parallel fixpoint
 - [VFLog](https://dl.acm.org/doi/10.1145/3639310) — Columnar GPU Datalog
 - [ProbLog](https://dtai.cs.kuleuven.be/problog/) — Knowledge compilation for probabilistic logic
-- [D4](https://github.com/crillab/d4) — Decision-DNNF compiler (vendored)
+- [D4](https://github.com/crillab/d4) — Decision-DNNF compilation reference

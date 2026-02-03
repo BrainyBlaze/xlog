@@ -405,7 +405,15 @@ impl Lowerer {
         }
 
         // Plan positive atoms (join tree shape + leaf order).
-        let (positive_root, leaf_order) = self.plan_positive_atoms(&positive_atoms)?;
+        //
+        // Rules with no positive atoms are legal for nullary/ground heads in our
+        // probabilistic profiles (e.g. `q() :- not p().`). Lower them by seeding
+        // the body with a unit relation ({()}) and applying filters/negations.
+        let (positive_root, leaf_order) = if positive_atoms.is_empty() {
+            (RirNode::Unit, Vec::new())
+        } else {
+            self.plan_positive_atoms(&positive_atoms)?
+        };
 
         // Build variable environment from the planned leaf order (matches join output layout:
         // left subtree columns then right subtree columns).

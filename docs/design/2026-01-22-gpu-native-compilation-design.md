@@ -438,14 +438,16 @@ This makes failure modes reproducible and prevents silent correctness degradatio
 
 ### 5.1 Exact Inference Path
 
-Replace the CPU D4 call in `crates/xlog-prob/src/exact.rs:538`:
+Exact inference is GPU-native (no CPU D4/DDNNF compilation, no CNF/DDNNF file IO). At a high level:
 
 ```rust
-// OLD: CPU D4 + file IO
-// d4.compile_ddnnf(&cnf_path, &out_path)?;
-
-// NEW: GPU-native compile + verify (device-resident)
-let gpu_circuit = compile_gpu_d4_and_verify(&gpu_cnf, provider.as_ref(), &config)?;
+let encoding = encode_cnf_gpu(&gpu_pir, &gpu_roots, &provider)?;
+let gpu_circuit = compile_gpu_d4_and_verify(
+    &encoding.cnf,
+    &encoding.decision_var_limit,
+    &provider,
+    &config,
+)?;
 ```
 
 ### 5.2 GPU CNF Generation

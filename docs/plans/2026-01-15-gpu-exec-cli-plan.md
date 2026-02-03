@@ -1538,7 +1538,7 @@ git commit -m "docs: document gpu-resident execution and cli"
 Run:
 
 ```bash
-cargo test --workspace --all-targets --release
+cargo test --workspace --all-targets --exclude pyxlog --release
 cargo test -p xlog-cuda-tests --test certification_suite --release -- --nocapture
 ```
 

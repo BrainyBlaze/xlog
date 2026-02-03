@@ -229,7 +229,7 @@ PIR (Provenance IR)
      │ Optional GPU preprocessing (simplification)
      ▼
 ┌─────────┐
-│   D4    │  Decision-DNNF compiler (CPU, vendored)
+│ GPU D4  │  Decision-DNNF compiler (GPU-native)
 └────┬────┘
      │
      ▼
@@ -315,8 +315,9 @@ xlog/
 ├── kernels/             # CUDA source files (.cu) + embedded PTX (.ptx)
 ├── examples/
 │   └── neural/          # Neural-symbolic training examples
-└── vendor/              # Vendored D4 + Boost (for exact probabilistic inference)
 ```
+
+XLOG no longer vendors a CPU knowledge compiler binary (D4/Boost); the exact inference path is GPU-native.
 
 ### Dependency Graph
 
@@ -347,7 +348,7 @@ xlog-cuda-tests ─────────────────────�
 | `xlog-runtime` | `Executor`, versioned `RelationStore`, profiling, incremental maintenance, adaptive join index cache |
 | `xlog-cuda` | `CudaKernelProvider`, `GpuMemoryManager`, `CudaBuffer`/`CudaColumn`, PTX embedding, Arrow IPC/C Data + DLPack interop |
 | `xlog-stats` | `StatsManager` + `StatsSnapshot` (compiler feedback + runtime tracking) |
-| `xlog-prob` | Probabilistic tier: provenance → CNF → D4 → XGCF; exact inference + Monte Carlo sampling + circuit caching; includes GPU-native PIR→CNF encoder and GPU D4/CDCL compilation utilities |
+| `xlog-prob` | Probabilistic tier: provenance → CNF → GPU D4 → XGCF; exact inference + Monte Carlo sampling + circuit caching; includes GPU-native PIR→CNF encoder and GPU D4/CDCL compilation utilities |
 | `xlog-neural` | Neural-symbolic integration: `NetworkRegistry`, `NetworkHandle`, `TensorSourceRegistry`, `NeuralBridge` (v0.4.0) |
 | `xlog-solve` | Solver services: GPU CDCL verifier (complete SAT/UNSAT, on-GPU validation) + CLS SAT/MaxSAT (heuristic) |
 | `xlog-gpu` | High-level GPU API: deterministic execution + input/output buffers for integration layers |
@@ -1234,10 +1235,10 @@ const MAX_SCC_ITERATIONS: usize = 1000;
 
 ```bash
 # Debug mode
-cargo test --workspace --all-targets
+cargo test --workspace --all-targets --exclude pyxlog
 
 # Release mode (recommended for GPU tests)
-cargo test --workspace --all-targets --release
+cargo test --workspace --all-targets --exclude pyxlog --release
 ```
 
 ### CUDA Certification Suite

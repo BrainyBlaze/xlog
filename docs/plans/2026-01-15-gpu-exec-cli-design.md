@@ -118,7 +118,7 @@ A new crate `crates/xlog-cli` will provide the `xlog` binary with two subcommand
   - Arrow IPC input round-trip
   - `--output=pretty|csv|arrow`
   - Probabilistic exact and MC paths
-- Full suite: `cargo test --workspace --all-targets --release` and CUDA certification.
+- Full suite: `cargo test --workspace --all-targets --exclude pyxlog --release` and CUDA certification.
 
 ---
 

@@ -701,6 +701,7 @@ fn demo_graph_analytics() {
                     RirNode::Diff { left, right } => {
                         contains_fixpoint(left) || contains_fixpoint(right)
                     }
+                    RirNode::Unit => false,
                     RirNode::Scan { .. } => false,
                 }
             }
