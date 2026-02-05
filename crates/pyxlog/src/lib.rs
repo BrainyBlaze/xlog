@@ -21,6 +21,9 @@ use xlog_prob::neural_fast_path::{GpuWeightSlots, NeuralFastPathConfig};
 
 use std::collections::HashMap as StdHashMap;
 
+mod neural_registry;
+use neural_registry::NeuralPredicateRegistry;
+
 const DLPACK_CAPSULE_NAME: &[u8] = b"dltensor\0";
 const USED_DLPACK_CAPSULE_NAME: &[u8] = b"used_dltensor\0";
 
@@ -443,6 +446,7 @@ impl Program {
             .iter()
             .map(|np| np.network.clone())
             .collect();
+        let neural_registry = NeuralPredicateRegistry::from_ast(&ast);
 
         let engine = match prob_engine {
             Some(s) => parse_prob_engine_override(&s)?,
@@ -466,6 +470,7 @@ impl Program {
             program,
             output_provider: Arc::new(provider),
             network_registry: NetworkRegistry::new(),
+            neural_registry,
             declared_networks,
             tensor_sources: TensorSourceRegistry::new(),
             source: source.to_string(),
@@ -511,6 +516,8 @@ pub struct CompiledProgram {
     output_provider: Arc<CudaKernelProvider>,
     /// Registry for neural networks
     network_registry: NetworkRegistry,
+    /// Registry for neural predicate metadata (predicate -> network/labels)
+    neural_registry: NeuralPredicateRegistry,
     /// Names of neural networks declared in the program (from nn() declarations)
     declared_networks: HashSet<String>,
     /// Registry for tensor data sources (images, embeddings, etc.)
@@ -763,6 +770,18 @@ impl CompiledProgram {
     /// Get names of all declared neural networks (from nn() declarations).
     fn declared_network_names(&self) -> Vec<String> {
         self.declared_networks.iter().cloned().collect()
+    }
+
+    /// Get neural predicate metadata (network name + labels).
+    fn neural_predicate_info(&self, py: Python<'_>, predicate: &str) -> PyResult<PyObject> {
+        let info = self
+            .neural_registry
+            .get(predicate)
+            .ok_or_else(|| PyValueError::new_err("Unknown neural predicate"))?;
+        let dict = PyDict::new_bound(py);
+        dict.set_item("network", info.network.clone())?;
+        dict.set_item("labels", info.labels.clone())?;
+        Ok(dict.into())
     }
 
     /// Check if a network is declared in the program.
