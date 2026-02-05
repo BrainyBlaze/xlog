@@ -784,6 +784,11 @@ impl CompiledProgram {
         Ok(dict.into())
     }
 
+    /// Resolve a label to its index using the declared nn/4 label list.
+    fn label_to_index(&self, predicate: &str, label: &str) -> PyResult<usize> {
+        self.get_label_index(predicate, label)
+    }
+
     /// Check if a network is declared in the program.
     fn has_neural_predicate(&self, name: &str) -> bool {
         self.declared_networks.contains(name)
@@ -1099,9 +1104,14 @@ impl CompiledProgram {
     ) -> PyResult<PyObject> {
         // Try to parse as a direct neural predicate query first.
         match self.try_parse_direct_neural_query(query) {
-            Ok((network_name, input_idx, target_label)) => {
-                self.forward_backward_direct_tensor(py, &network_name, input_idx, &target_label)
-            }
+            Ok((predicate, network_name, input_idx, target_label)) => self
+                .forward_backward_direct_tensor(
+                    py,
+                    &predicate,
+                    &network_name,
+                    input_idx,
+                    &target_label,
+                ),
             Err(_) => self.forward_backward_complex_tensor(py, query),
         }
     }
@@ -1163,9 +1173,9 @@ impl CompiledProgram {
 
     /// Try to parse a query as a direct neural predicate query.
     ///
-    /// Returns Ok((network_name, input_idx, target_label)) if the query is a direct neural predicate.
+    /// Returns Ok((predicate_name, network_name, input_idx, target_label)) if the query is a direct neural predicate.
     /// Returns Err if the query is not a direct neural predicate (e.g., it's a complex query).
-    fn try_parse_direct_neural_query(&self, query: &str) -> PyResult<(String, usize, String)> {
+    fn try_parse_direct_neural_query(&self, query: &str) -> PyResult<(String, String, usize, String)> {
         let query = query.trim();
 
         // Find predicate name and arguments
@@ -1200,7 +1210,7 @@ impl CompiledProgram {
         // Find network name for this predicate
         let network_name = self.find_network_for_predicate(pred_name)?;
 
-        Ok((network_name, input_idx, target_label))
+        Ok((pred_name.to_string(), network_name, input_idx, target_label))
     }
 
     /// Forward-backward for a direct neural predicate query.
@@ -1209,6 +1219,7 @@ impl CompiledProgram {
     fn forward_backward_direct_tensor(
         &self,
         py: Python<'_>,
+        predicate: &str,
         network_name: &str,
         input_idx: usize,
         target_label: &str,
@@ -1238,7 +1249,7 @@ impl CompiledProgram {
 
         // Select the target probability tensor and compute loss on GPU:
         // loss = -log(clamp(prob, min=epsilon)).
-        let label_idx = self.get_label_index(network_name, target_label)?;
+        let label_idx = self.get_label_index(predicate, target_label)?;
         let prob_tensor = output_squeezed.get_item(label_idx)?;
 
         let clamp_kwargs = PyDict::new_bound(py);
@@ -1701,26 +1712,15 @@ impl CompiledProgram {
         }
     }
 
-    /// Get the label index for a given label string.
-    fn get_label_index(&self, _network_name: &str, label: &str) -> PyResult<usize> {
-        // Try to parse as integer first
-        if let Ok(idx) = label.parse::<usize>() {
-            return Ok(idx);
-        }
-
-        // For symbolic labels, we need to look up in the label list
-        // For v0.4.0-alpha, use simple mapping: a=0, b=1, c=2, etc.
-        if label.len() == 1 {
-            let c = label.chars().next().unwrap();
-            if c.is_ascii_lowercase() {
-                return Ok((c as usize) - ('a' as usize));
-            }
-        }
-
-        Err(PyValueError::new_err(format!(
-            "Could not resolve label '{}' to index",
-            label
-        )))
+    /// Get the label index for a given label string from declared labels.
+    fn get_label_index(&self, predicate: &str, label: &str) -> PyResult<usize> {
+        let info = self.neural_registry.get(predicate).ok_or_else(|| {
+            PyValueError::new_err(format!("Unknown neural predicate '{}'", predicate))
+        })?;
+        info.labels
+            .iter()
+            .position(|l| l == label)
+            .ok_or_else(|| PyValueError::new_err(format!("Label '{}' not in declared list", label)))
     }
 
     /// Get input tensor for a given index from the active tensor source.
