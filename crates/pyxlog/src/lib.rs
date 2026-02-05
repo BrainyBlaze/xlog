@@ -1294,87 +1294,129 @@ impl CompiledProgram {
         // Extract the target value (e.g., the sum in addition(X,Y,Z)).
         let target_val = self.extract_query_target_int(query)?;
 
-        // Get the network (v0.4.0-alpha: assume single network).
-        let network_name = self
-            .network_registry
-            .names()
-            .first()
-            .ok_or_else(|| PyValueError::new_err("No network registered"))?
-            .to_string();
-
-        let handle = self.network_registry.get(&network_name).ok_or_else(|| {
-            PyValueError::new_err(format!("Network '{}' not registered", network_name))
-        })?;
-
-        let module = handle.module().ok_or_else(|| {
-            PyValueError::new_err(format!("Network '{}' has no module", network_name))
-        })?;
-
         // Run neural networks and import the outputs as device-resident buffers via DLPack (no .tolist()).
         let torch = py.import_bound("torch")?;
         let schema_f32 = Schema::new(vec![("col0".to_string(), ScalarType::F32)]);
         let schema_f64 = Schema::new(vec![("col0".to_string(), ScalarType::F64)]);
 
-        let mut out_tensors: Vec<PyObject> = Vec::with_capacity(input_indices.len());
-        let mut grad_tensors: Vec<PyObject> = Vec::with_capacity(input_indices.len());
-        let mut prob_bufs: Vec<xlog_cuda::CudaBuffer> = Vec::with_capacity(input_indices.len());
-        let mut grad_bufs: Vec<xlog_cuda::CudaBuffer> = Vec::with_capacity(input_indices.len());
+        #[derive(Clone)]
+        struct NeuralCall {
+            input_idx: usize,
+            order_idx: usize,
+        }
+
+        let template_predicate = match pred_name.as_str() {
+            "addition" => "digit",
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "Unsupported cached predicate '{}'",
+                    other
+                )));
+            }
+        };
+
+        let mut calls_by_network: HashMap<String, Vec<NeuralCall>> = HashMap::new();
+        for (order_idx, &input_idx) in input_indices.iter().enumerate() {
+            let network_name = self.find_network_for_predicate(template_predicate)?;
+            calls_by_network
+                .entry(network_name)
+                .or_default()
+                .push(NeuralCall {
+                    input_idx,
+                    order_idx,
+                });
+        }
+
+        let mut out_tensors: Vec<Option<PyObject>> =
+            std::iter::repeat_with(|| None).take(input_indices.len()).collect();
+        let mut grad_tensors: Vec<Option<PyObject>> =
+            std::iter::repeat_with(|| None).take(input_indices.len()).collect();
+        let mut prob_bufs: Vec<Option<xlog_cuda::CudaBuffer>> =
+            std::iter::repeat_with(|| None).take(input_indices.len()).collect();
+        let mut grad_bufs: Vec<Option<xlog_cuda::CudaBuffer>> =
+            std::iter::repeat_with(|| None).take(input_indices.len()).collect();
 
         let mut num_labels: Option<usize> = None;
 
-        for &input_idx in &input_indices {
-            let input_tensor = self.get_input_tensor(py, input_idx)?;
-            let input_bound = input_tensor.bind(py);
-            let input_unsqueezed = input_bound.call_method1("unsqueeze", (0i32,))?;
+        for (network_name, calls) in calls_by_network {
+            let handle = self.network_registry.get(&network_name).ok_or_else(|| {
+                PyValueError::new_err(format!("Network '{}' not registered", network_name))
+            })?;
 
-            // Forward pass with gradient tracking.
-            let output = module.call_method1(py, "__call__", (input_unsqueezed,))?;
-            let output_bound = output.bind(py);
-            let output_squeezed = output_bound.call_method1("squeeze", (0i32,))?;
-            let output_squeezed = output_squeezed.call_method0("contiguous")?;
+            let module = handle.module().ok_or_else(|| {
+                PyValueError::new_err(format!("Network '{}' has no module", network_name))
+            })?;
 
-            // Determine label count.
-            let n: usize = output_squeezed
-                .call_method0("numel")?
-                .extract::<i64>()?
-                .try_into()
-                .map_err(|_| PyValueError::new_err("Invalid output numel"))?;
-            if let Some(prev) = num_labels {
-                if n != prev {
-                    return Err(PyValueError::new_err(format!(
-                        "Network outputs disagree on num_labels: {} vs {}",
-                        prev, n
-                    )));
-                }
-            } else {
-                num_labels = Some(n);
+            let mut inputs: Vec<PyObject> = Vec::with_capacity(calls.len());
+            for call in &calls {
+                inputs.push(self.get_input_tensor(py, call.input_idx)?);
             }
 
-            // DLPack cannot export tensors that require grad. We detach here to read probabilities as
-            // values, while keeping the original `output_squeezed` for autograd.
-            let output_detached = output_squeezed.call_method0("detach")?;
+            let input_list = pyo3::types::PyList::new_bound(py, &inputs);
+            let batch = torch.call_method1("stack", (input_list, 0i32))?;
 
-            // Import prob tensor (1D F32 CUDA) as a zero-copy CudaBuffer.
-            let managed = dlpack_from_py(&output_detached)?;
-            let prob_buf = self
-                .output_provider
-                .from_dlpack_tensors_with_schema(schema_f32.clone(), vec![managed])
-                .map_err(|e| PyRuntimeError::new_err(format!("DLPack import failed: {}", e)))?;
+            // Forward pass with gradient tracking (single batched forward).
+            let output = module.call_method1(py, "__call__", (batch,))?;
+            let output_bound = output.bind(py);
 
-            // Allocate a grad tensor on the same device and import it as a writable buffer.
-            let grad_tensor = torch.call_method1("zeros_like", (&output_squeezed,))?;
-            let grad_tensor = grad_tensor.call_method0("contiguous")?;
-            let grad_managed = dlpack_from_py(&grad_tensor)?;
-            let grad_buf = self
-                .output_provider
-                .from_dlpack_tensors_with_schema(schema_f32.clone(), vec![grad_managed])
-                .map_err(|e| PyRuntimeError::new_err(format!("DLPack import failed: {}", e)))?;
+            for (batch_idx, call) in calls.iter().enumerate() {
+                let output_row = output_bound.get_item(batch_idx)?;
+                let output_row = output_row.call_method0("contiguous")?;
 
-            out_tensors.push(output_squeezed.into());
-            grad_tensors.push(grad_tensor.into());
-            prob_bufs.push(prob_buf);
-            grad_bufs.push(grad_buf);
+                let n: usize = output_row
+                    .call_method0("numel")?
+                    .extract::<i64>()?
+                    .try_into()
+                    .map_err(|_| PyValueError::new_err("Invalid output numel"))?;
+                if let Some(prev) = num_labels {
+                    if n != prev {
+                        return Err(PyValueError::new_err(format!(
+                            "Network outputs disagree on num_labels: {} vs {}",
+                            prev, n
+                        )));
+                    }
+                } else {
+                    num_labels = Some(n);
+                }
+
+                let output_detached = output_row.call_method0("detach")?;
+                let managed = dlpack_from_py(&output_detached)?;
+                let prob_buf = self
+                    .output_provider
+                    .from_dlpack_tensors_with_schema(schema_f32.clone(), vec![managed])
+                    .map_err(|e| PyRuntimeError::new_err(format!("DLPack import failed: {}", e)))?;
+
+                let grad_tensor = torch.call_method1("zeros_like", (&output_row,))?;
+                let grad_tensor = grad_tensor.call_method0("contiguous")?;
+                let grad_managed = dlpack_from_py(&grad_tensor)?;
+                let grad_buf = self
+                    .output_provider
+                    .from_dlpack_tensors_with_schema(schema_f32.clone(), vec![grad_managed])
+                    .map_err(|e| PyRuntimeError::new_err(format!("DLPack import failed: {}", e)))?;
+
+                out_tensors[call.order_idx] = Some(output_row.into());
+                grad_tensors[call.order_idx] = Some(grad_tensor.into());
+                prob_bufs[call.order_idx] = Some(prob_buf);
+                grad_bufs[call.order_idx] = Some(grad_buf);
+            }
         }
+
+        let out_tensors: Vec<PyObject> = out_tensors
+            .into_iter()
+            .map(|v| v.ok_or_else(|| PyRuntimeError::new_err("Missing output tensor")))
+            .collect::<PyResult<_>>()?;
+        let grad_tensors: Vec<PyObject> = grad_tensors
+            .into_iter()
+            .map(|v| v.ok_or_else(|| PyRuntimeError::new_err("Missing grad tensor")))
+            .collect::<PyResult<_>>()?;
+        let prob_bufs: Vec<xlog_cuda::CudaBuffer> = prob_bufs
+            .into_iter()
+            .map(|v| v.ok_or_else(|| PyRuntimeError::new_err("Missing prob buffer")))
+            .collect::<PyResult<_>>()?;
+        let mut grad_bufs: Vec<xlog_cuda::CudaBuffer> = grad_bufs
+            .into_iter()
+            .map(|v| v.ok_or_else(|| PyRuntimeError::new_err("Missing grad buffer")))
+            .collect::<PyResult<_>>()?;
 
         let num_labels = num_labels.ok_or_else(|| PyValueError::new_err("No network outputs"))?;
 
@@ -1483,9 +1525,16 @@ impl CompiledProgram {
         }
 
         // Backward through the networks using the device-resident gradients we filled on GPU.
-        for (out, grad) in out_tensors.iter().zip(grad_tensors.iter()) {
+        let last_idx = out_tensors.len().saturating_sub(1);
+        for (idx, (out, grad)) in out_tensors.iter().zip(grad_tensors.iter()).enumerate() {
             let out_bound = out.bind(py);
-            out_bound.call_method1("backward", (grad.bind(py),))?;
+            if idx == last_idx {
+                out_bound.call_method1("backward", (grad.bind(py),))?;
+            } else {
+                let kwargs = PyDict::new_bound(py);
+                kwargs.set_item("retain_graph", true)?;
+                out_bound.call_method("backward", (grad.bind(py),), Some(&kwargs))?;
+            }
         }
 
         Ok(loss_tensor.into_py(py))
