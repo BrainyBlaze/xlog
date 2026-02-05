@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List
@@ -58,3 +60,17 @@ class DatasetManifest:
             "metrics": self.metrics,
         }
         Path(path).write_text(json.dumps(payload, indent=2) + "\n")
+
+
+def verify_sha256(path: Path, expected_hex: str) -> bool:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest() == expected_hex
+
+
+def download_file(url: str, dest: Path) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with urllib.request.urlopen(url) as r, open(dest, "wb") as f:
+        f.write(r.read())

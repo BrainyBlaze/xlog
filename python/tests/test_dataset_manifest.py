@@ -1,3 +1,4 @@
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -7,7 +8,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from scripts.neural_datasets import DatasetManifest, DatasetSplit
+from scripts.neural_datasets import DatasetManifest, DatasetSplit, download_file, verify_sha256
 
 
 def test_manifest_parse_and_roundtrip(tmp_path: Path):
@@ -42,3 +43,19 @@ def test_manifest_parse_and_roundtrip(tmp_path: Path):
     manifest.save(out)
     loaded = DatasetManifest.load(out)
     assert loaded.name == "mnist"
+
+
+def test_verify_sha256(tmp_path: Path):
+    f = tmp_path / "blob.txt"
+    f.write_bytes(b"xlog-datasets")
+    digest = hashlib.sha256(b"xlog-datasets").hexdigest()
+    assert verify_sha256(f, digest) is True
+    assert verify_sha256(f, "deadbeef") is False
+
+
+def test_download_file_local(tmp_path: Path):
+    src = tmp_path / "src.bin"
+    src.write_bytes(b"xlog-download")
+    dst = tmp_path / "dst.bin"
+    download_file(f"file://{src}", dst)
+    assert dst.read_bytes() == b"xlog-download"
