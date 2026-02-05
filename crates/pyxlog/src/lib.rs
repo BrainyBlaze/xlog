@@ -1613,32 +1613,10 @@ impl CompiledProgram {
 
     /// Find the network name associated with a predicate.
     fn find_network_for_predicate(&self, pred_name: &str) -> PyResult<String> {
-        // For v0.4.0-alpha, use simple heuristic: if only one network, use it
-        // Otherwise, look for matching predicate pattern
-        let network_names: Vec<_> = self.network_registry.names().iter().cloned().collect();
-
-        if network_names.len() == 1 {
-            return Ok(network_names[0].to_string());
-        }
-
-        // Try to find a network with matching name pattern
-        for name in &network_names {
-            if pred_name.contains(&**name) || name.contains(pred_name) {
-                return Ok(name.to_string());
-            }
-        }
-
-        // If no match, try the first declared network
-        if let Some(name) = self.declared_networks.iter().next() {
-            if self.network_registry.contains(name) {
-                return Ok(name.clone());
-            }
-        }
-
-        Err(PyValueError::new_err(format!(
-            "Could not find network for predicate '{}'. Registered networks: {:?}",
-            pred_name, network_names
-        )))
+        let info = self.neural_registry.get(pred_name).ok_or_else(|| {
+            PyValueError::new_err(format!("Unknown neural predicate '{}'", pred_name))
+        })?;
+        Ok(info.network.clone())
     }
 
     /// Generate cache key for a query template.
