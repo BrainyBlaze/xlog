@@ -1,0 +1,9 @@
+{
+  "name": "sample",
+  "provider": "manual",
+  "version": "0.1",
+  "splits": {"train": {"count": 10}},
+  "ci_subset": {"train": 2},
+  "artifacts": [],
+  "metrics": {"min_accuracy": 0.5}
+}
