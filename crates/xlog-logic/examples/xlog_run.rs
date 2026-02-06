@@ -29,6 +29,23 @@ fn usage() -> String {
     .join("\n")
 }
 
+fn module_search_paths(entry_path: &Path) -> Vec<std::path::PathBuf> {
+    let Some(base_dir) = entry_path.parent() else {
+        return vec![Path::new(".").to_path_buf()];
+    };
+
+    let mut paths = Vec::new();
+    for dir in base_dir.ancestors() {
+        if !paths.iter().any(|p| p == dir) {
+            paths.push(dir.to_path_buf());
+        }
+        if dir.join(".git").exists() {
+            break;
+        }
+    }
+    paths
+}
+
 fn parse_args() -> Result<(String, usize, usize, usize)> {
     let mut args = env::args().skip(1);
     let Some(path) = args.next() else {
@@ -273,7 +290,10 @@ fn decode_column_to_strings(
         ScalarType::Symbol => {
             for chunk in bytes.chunks_exact(4) {
                 let id = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-                out.push(symbol::resolve(id));
+                // Avoid crashing the example runner when a relation contains a non-interned symbol ID.
+                // Keep output printable while preserving the raw identifier for debugging.
+                let resolved = symbol::resolve_checked(id).unwrap_or_else(|| format!("sym#{}", id));
+                out.push(resolved);
             }
         }
         ScalarType::I32 => {
@@ -336,13 +356,12 @@ fn main() -> Result<()> {
 
     // Parse and resolve module imports
     let entry_path = Path::new(&path);
-    let base_dir = entry_path.parent().unwrap_or(Path::new("."));
 
     let mut program = parse_program(&source)?;
 
     // If the program has imports, resolve them using the module system
     if !program.imports.is_empty() {
-        let resolver = load_modules(entry_path, vec![base_dir.to_path_buf()])
+        let resolver = load_modules(entry_path, module_search_paths(entry_path))
             .map_err(|e| XlogError::Compilation(format!("Module resolution failed: {}", e)))?;
         program = resolver
             .merge_imports(program)

@@ -2,7 +2,7 @@
 
 pred txn(u32, u32).      // user_id, amount(u32)
 pred total(u32, u64).
-pred cnt(u32, u32).
+pred cnt(u32, u64).
 pred avg(u32, f64).
 
 txn(1, 10).
@@ -20,4 +20,3 @@ avg(User, A) :-
   A is cast(Total, f64) / cast(N, f64).
 
 ?- avg(User, A).
-

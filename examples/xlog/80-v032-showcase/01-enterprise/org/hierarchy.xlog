@@ -124,5 +124,5 @@ pred is_manager(symbol).
 is_manager(Emp) :- reports_to(_, Emp).
 
 // Org depth (max levels below this person)
-pred org_depth(symbol, u64).
+pred org_depth(symbol, u32).
 org_depth(Mgr, max(Level)) :- management_chain(_, Mgr, Level).

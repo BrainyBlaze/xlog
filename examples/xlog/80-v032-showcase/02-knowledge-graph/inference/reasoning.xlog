@@ -10,8 +10,9 @@
 //   - Aggregation-based statistics
 // =============================================================================
 
-// Note: ontology/schema and entities/movies are imported via main.xlog
-// Removed redundant use statements to fix predicate ordering issues
+// Import ontology + entity facts so this module can run standalone or via main.xlog.
+use ontology/schema.
+use entities/movies.
 
 // =============================================================================
 // USER-DEFINED FUNCTIONS (6 required UDFs)

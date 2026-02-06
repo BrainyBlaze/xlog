@@ -50,11 +50,13 @@ pub fn intern(s: &str) -> u32 {
 
 /// Resolve an ID to its string. Panics if ID is invalid.
 pub fn resolve(id: u32) -> String {
+    resolve_checked(id).expect("invalid symbol ID: this is a bug")
+}
+
+/// Resolve an ID to its string if present.
+pub fn resolve_checked(id: u32) -> Option<String> {
     let reg = registry().read().unwrap();
-    reg.to_string
-        .get(id as usize)
-        .cloned()
-        .expect("invalid symbol ID: this is a bug")
+    reg.to_string.get(id as usize).cloned()
 }
 
 /// Clear all symbols. For testing/REPL only.

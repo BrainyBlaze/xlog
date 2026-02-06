@@ -1,7 +1,7 @@
 // Aggregation: count edges per source node.
 
 pred edge(u32, u32).
-pred out_degree(u32, u32).
+pred out_degree(u32, u64).
 
 edge(1, 2).
 edge(1, 3).
@@ -10,4 +10,3 @@ edge(2, 4).
 out_degree(X, count(Y)) :- edge(X, Y).
 
 ?- out_degree(X, N).
-
