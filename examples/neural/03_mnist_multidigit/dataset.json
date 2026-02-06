@@ -1,0 +1,17 @@
+{
+  "name": "svhn_two_digit",
+  "provider": "manual",
+  "version": "1.0",
+  "splits": {
+    "train": {
+      "count": 0
+    }
+  },
+  "ci_subset": {
+    "train": 128
+  },
+  "artifacts": [],
+  "metrics": {
+    "min_accuracy": 0.5
+  }
+}
