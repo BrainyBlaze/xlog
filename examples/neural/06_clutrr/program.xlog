@@ -1,0 +1,2 @@
+nn(rel_net, [X], R, [parent, child, spouse, sibling]) :: rel(X, R).
+related(X, Y) :- rel(X, parent), rel(Y, child).
