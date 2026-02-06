@@ -1,0 +1,17 @@
+{
+  "name": "crohme",
+  "provider": "manual",
+  "version": "2019",
+  "splits": {
+    "train": {
+      "count": 0
+    }
+  },
+  "ci_subset": {
+    "train": 64
+  },
+  "artifacts": [],
+  "metrics": {
+    "min_accuracy": 0.5
+  }
+}

@@ -1,0 +1,2 @@
+nn(hw_net, [X], T, [add, sub, mul, eq]) :: expr_type(X, T).
+equation(X) :- expr_type(X, eq).
