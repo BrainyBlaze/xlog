@@ -1,0 +1,8 @@
+nn(rank_net, [X], R, [2,3,4,5,6,7,8,9,10,J,Q,K,A]) :: rank(X, R).
+nn(suit_net, [X], S, [C,D,H,S]) :: suit(X, S).
+
+pair(A,B,C,D,E) :- rank(A,R), rank(B,R).
+flush(A,B,C,D,E) :- suit(A,S), suit(B,S), suit(C,S), suit(D,S), suit(E,S).
+
+hand_rank(A,B,C,D,E, pair) :- pair(A,B,C,D,E).
+hand_rank(A,B,C,D,E, flush) :- flush(A,B,C,D,E).
