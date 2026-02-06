@@ -25,6 +25,7 @@ Example:
     # Training minimizes -log P(addition(i, j, correct_sum))
 """
 import argparse
+import os
 import torch
 import torch.nn as nn
 import pyxlog
@@ -147,12 +148,18 @@ def load_mnist(data_path):
         images = torch.stack([img for img, _ in train_dataset])
         labels = [label for _, label in train_dataset]
 
+        limit = os.environ.get("XLOG_PY_EXAMPLE_MNIST_LIMIT")
+        if limit:
+            n = max(1, int(limit))
+            images = images[:n]
+            labels = labels[:n]
+
         return images, labels
 
     except ImportError:
         print("Warning: torchvision not available, using random data")
         # Fallback to random data for testing
-        n_samples = 1000
+        n_samples = int(os.environ.get("XLOG_PY_EXAMPLE_MNIST_LIMIT", "1000"))
         images = torch.randn(n_samples, 1, 28, 28)
         labels = torch.randint(0, 10, (n_samples,)).tolist()
         return images, labels

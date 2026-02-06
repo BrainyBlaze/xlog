@@ -1,9 +1,13 @@
+import os
+
 import torch
 
 from pyxlog import Program
 
 
 def main() -> None:
+    samples = int(os.environ.get("XLOG_PY_EXAMPLE_MC_SAMPLES", "100000"))
+
     source = r"""
     #pragma prob_engine = mc
 
@@ -20,7 +24,7 @@ def main() -> None:
     prog = Program.compile(source, device=0, memory_mb=1024)
     result = prog.evaluate(
         return_grads=False,
-        samples=100_000,
+        samples=samples,
         seed=123,
         confidence=0.95,
         max_nonmonotone_iterations=256,
@@ -52,4 +56,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
