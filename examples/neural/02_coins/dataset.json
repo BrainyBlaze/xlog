@@ -1,0 +1,21 @@
+{
+  "name": "coins",
+  "provider": "imagefolder",
+  "version": "1.0",
+  "splits": {
+    "train": {
+      "count": 0
+    },
+    "test": {
+      "count": 0
+    }
+  },
+  "ci_subset": {
+    "train": 64,
+    "test": 32
+  },
+  "artifacts": [],
+  "metrics": {
+    "min_accuracy": 0.7
+  }
+}
