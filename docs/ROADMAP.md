@@ -332,8 +332,8 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 ### Implemented ✅ (unreleased; targeting v0.4.0-alpha)
 
 **Release gate (v0.4.0-alpha):**
-- [ ] Validate all examples in `examples/` end-to-end (CLI + Python where applicable)
-- [ ] Add additional neural examples beyond `examples/neural/01_minimal` (Coins, Poker, HWF, CLUTRR, etc.)
+- [ ] Validate all examples in `examples/` end-to-end (CLI + Python where applicable) via `scripts/validate_examples.py`
+- [x] Add additional neural examples beyond `examples/neural/01_minimal` (Coins, Poker, HWF, CLUTRR, etc.)
 
 **Neural Predicates:**
 - [x] `nn/4` syntax for neural network integration
@@ -361,6 +361,11 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 
 **Examples:**
 - [x] Minimal MNIST Addition example (`examples/neural/01_minimal/`)
+- [x] Coins example (`examples/neural/02_coins/`)
+- [x] Multi-digit SVHN example (`examples/neural/03_mnist_multidigit/`)
+- [x] Handwritten Formula example (`examples/neural/04_hwf/`)
+- [x] Poker example (`examples/neural/05_poker/`)
+- [x] CLUTRR example (`examples/neural/06_clutrr/`)
 
 ### Planned 📋 (v0.4.0-beta and beyond)
 
@@ -591,8 +596,8 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 | v0.2.0 | Released | Probabilistic reasoning (exact + MC), Python bindings, GPU-resident execution |
 | v0.3.1 | Released | Float predicates (IEEE 754 total ordering), benchmarks, `--stats` flag, fuzz testing, property-based testing |
 | v0.3.2 | Released | Module system, UDFs, reversible symbols, showcase examples, count→u64 fix |
-| v0.4.0-alpha | Planned | Neural predicates (`nn/4`) + training milestone (release-gated on full example validation + additional neural examples) |
-| v0.4.0-beta | Planned | Extended neural-symbolic examples (Coins, Poker, HWF, CLUTRR), term embeddings |
+| v0.4.0-alpha | Planned | Neural predicates (`nn/4`) + training milestone (release-gated on full example validation with real datasets) |
+| v0.4.0-beta | Planned | Term embeddings and extended neural-symbolic training controls |
 | v0.4.0-rc | Planned | Lists, meta-predicates, semantic loss functions |
 | v0.4.0 | Planned | Full neural-symbolic feature set, production-ready training |
 | v0.5.0 | Planned | GPU-native knowledge compilation (GPU D4 + GPU CDCL verifier), zero data-plane host transfers |

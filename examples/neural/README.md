@@ -47,9 +47,9 @@ queries = ["addition(0, 1, 7)", "addition(2, 3, 5)", ...]
 history = pyxlog.train_model(program, queries, epochs=50, batch_size=32)
 ```
 
-## Planned Examples (Required For `v0.4.0-alpha`)
+## Required Example Set (`v0.4.0-alpha`)
 
-The following neural-symbolic examples are required to claim `v0.4.0-alpha`:
+The required neural-symbolic example set is now present in the repository:
 
 | Example | Description |
 |---------|-------------|
@@ -58,6 +58,8 @@ The following neural-symbolic examples are required to claim `v0.4.0-alpha`:
 | **04_hwf** | Handwritten Formula recognition |
 | **05_poker** | Card rank classification |
 | **06_clutrr** | Family relationship reasoning with knowledge graphs |
+
+Release remains gated on end-to-end validation across these examples with real datasets.
 
 ## How Neural-Symbolic Training Works
 

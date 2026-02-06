@@ -1,6 +1,6 @@
 # XLOG Validation Report (Current HEAD)
 
-**Date:** February 3, 2026  
+**Date:** February 6, 2026  
 **Scope:** Repository state on `main` (unreleased; ahead of `v0.3.2`)
 
 This document is the single source of truth for what is *actually verified* in the repository at a given point in
@@ -16,8 +16,9 @@ time. It is intentionally conservative: if something is not listed here, it is n
   tagged release milestone.
 
 **v0.4.0-alpha gate (not yet achieved):**
-- End-to-end validation of *all* examples in `examples/` (CLI + Python where applicable)
-- Additional neural examples beyond `examples/neural/01_minimal`
+- End-to-end validation of *all* examples in `examples/` (CLI + Python where applicable) using `scripts/validate_examples.py`
+- Full-dataset (`--mode release`) validation for all neural examples on real data
+- Additional neural examples beyond `examples/neural/01_minimal` (**implemented**)
 
 ---
 
@@ -50,21 +51,42 @@ cargo test -p xlog-cuda-tests --test certification_suite -- --nocapture
 
 Most recent run (February 3, 2026): **206/206** passing (C01-C25 + G01-G08).
 
+### Example harness and neural example smoke checks
+
+```bash
+# Example harness (runs deterministic/prob/python + neural train.py scripts)
+python scripts/validate_examples.py --mode ci
+
+# Neural example smoke checks (fail-fast on missing real datasets)
+pytest python/tests/test_example_02_coins.py \
+       python/tests/test_example_03_mnist_multidigit.py \
+       python/tests/test_example_04_hwf.py \
+       python/tests/test_example_05_poker.py \
+       python/tests/test_example_06_clutrr.py -v
+```
+
 ---
 
 ## Example Validation Status
 
-Examples are a release gate for neural milestones, but they are **not yet** validated end-to-end as a suite.
+Examples are a release gate for neural milestones, but they are **not yet** validated end-to-end on full datasets.
 
 What *is* covered today:
 - The Rust test suite includes a basic CLI smoke test (`test_xlog_run_basic`) that exercises `xlog run` on a small
   program.
 - GPU kernels are validated via the certification suite (see above).
+- A repository-level example harness exists at `scripts/validate_examples.py` with `--mode {ci,dev,release}`.
+- Required neural examples are implemented:
+  - `examples/neural/02_coins/`
+  - `examples/neural/03_mnist_multidigit/`
+  - `examples/neural/04_hwf/`
+  - `examples/neural/05_poker/`
+  - `examples/neural/06_clutrr/`
+- Neural example smoke tests verify fail-fast behavior when required real datasets are missing.
 
 What is *not* yet covered:
-- A systematic “run all deterministic `.xlog` examples” harness.
-- End-to-end validation for `examples/python/*` (requires a Python environment with CUDA + PyTorch).
-- End-to-end validation for neural training scripts beyond the minimal example.
+- Verified `scripts/validate_examples.py --mode ci` and `--mode release` runs on a fully provisioned real-dataset machine.
+- Full-dataset metric-threshold validation reports for all neural examples.
 
 ---
 

@@ -6,8 +6,9 @@
 
 > **Release status:** Latest tagged release is `v0.3.2`. The `main` branch is ahead of `v0.3.2` and contains
 > unreleased work (GPU-native knowledge compilation, GPU CDCL verifier + cache integration, and neural-symbolic
-> training APIs). The originally planned `v0.4.0-alpha` milestone is **not yet achieved**: it remains gated on
-> end-to-end validation of *all* examples and additional neural examples beyond `examples/neural/01_minimal`.
+> training APIs). The originally planned `v0.4.0-alpha` milestone is **not yet achieved**: additional required neural
+> examples (`02_coins` through `06_clutrr`) are now implemented, but release remains gated on end-to-end harness
+> validation of *all* examples with real datasets.
 > See `docs/ROADMAP.md` and `docs/VALIDATION_REPORT.md`.
 
 **XLOG** is a GPU-accelerated Datalog query engine with neural-symbolic integration. It compiles declarative logic programs into optimized relational plans and executes them on NVIDIA GPUs, achieving high throughput for recursive queries, graph analytics, probabilistic inference, and neural-symbolic training.
@@ -223,6 +224,14 @@ Gradients flow correctly through negated literals for neural-symbolic training.
 XLOG supports neural-symbolic integration where neural network outputs become probabilistic facts in logic programs.
 This infrastructure exists in the current codebase, but the `v0.4.0-alpha` milestone is not yet release-gated (see
 the release status note at the top of this README).
+
+Current required neural example set:
+- `examples/neural/01_minimal`
+- `examples/neural/02_coins`
+- `examples/neural/03_mnist_multidigit`
+- `examples/neural/04_hwf`
+- `examples/neural/05_poker`
+- `examples/neural/06_clutrr`
 
 ### Neural Predicates
 
@@ -588,6 +597,9 @@ cargo run -p xlog-cli --release -- run examples/xlog/00-basics/01_tc_reachabilit
 cargo run -p xlog-logic --release --example xlog_run -- \
     examples/xlog/00-basics/01_tc_reachability.xlog \
     --device 0 --memory-mb 1024 --limit 100
+
+# Full example harness (ci/dev/release modes)
+python scripts/validate_examples.py --mode ci
 ```
 
 ---
