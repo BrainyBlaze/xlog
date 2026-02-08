@@ -1,3 +1,4 @@
 nn(coin_net, [X], Y, [heads, tails]) :: coin(X, Y).
 win(X, Y) :- coin(X, heads), coin(Y, heads).
-lose(X, Y) :- coin(X, tails); coin(Y, tails).
+lose(X, Y) :- coin(X, tails).
+lose(X, Y) :- coin(Y, tails).

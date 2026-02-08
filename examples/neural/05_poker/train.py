@@ -14,6 +14,22 @@ MANIFEST = ROOT / "dataset.json"
 
 RANKS = ["2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A"]
 SUITS = ["C", "D", "H", "S"]
+RANK_ATOMS = {
+    "2": "r2",
+    "3": "r3",
+    "4": "r4",
+    "5": "r5",
+    "6": "r6",
+    "7": "r7",
+    "8": "r8",
+    "9": "r9",
+    "10": "r10",
+    "J": "rj",
+    "Q": "rq",
+    "K": "rk",
+    "A": "ra",
+}
+SUIT_ATOMS = {"C": "c", "D": "d", "H": "h", "S": "s"}
 
 
 def load_cards(mode: str):
@@ -43,7 +59,7 @@ def load_cards(mode: str):
         if rank not in RANKS or suit not in SUITS:
             continue
         images.append(Image.open(img).convert("RGB"))
-        labels.append((rank, suit))
+        labels.append((RANK_ATOMS[rank], SUIT_ATOMS[suit]))
         if len(images) >= limit:
             break
 
