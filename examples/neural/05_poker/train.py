@@ -1,5 +1,6 @@
 import argparse
 import random
+import re
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -71,6 +72,43 @@ def paired_split_indices(labels, seed: int):
     )
 
 
+def parse_card_atoms(stem: str):
+    token = stem.upper()
+    token = token.split("_", 1)[0]
+    token = token.split("-", 1)[0]
+    token = re.sub(r"[^A-Z0-9]", "", token)
+    if len(token) < 2:
+        return None
+    rank = token[:-1]
+    suit = token[-1]
+    if rank not in RANKS or suit not in SUITS:
+        return None
+    return RANK_ATOMS[rank], SUIT_ATOMS[suit]
+
+
+def pick_epoch_indices(n_items: int, max_items: int, seed: int, epoch: int):
+    if n_items <= 0:
+        return []
+    cap = max(1, int(max_items))
+    if n_items <= cap:
+        return list(range(n_items))
+    rng = random.Random(int(seed) + 1009 * int(epoch))
+    indices = list(range(n_items))
+    rng.shuffle(indices)
+    return indices[:cap]
+
+
+def build_training_queries(train_labels, picked_indices, rank_weight: int):
+    queries = []
+    rank_repeat = max(1, int(rank_weight))
+    for idx in picked_indices:
+        rank, suit = train_labels[idx]
+        for _ in range(rank_repeat):
+            queries.append(f"rank({idx}, {rank})")
+        queries.append(f"suit({idx}, {suit})")
+    return queries
+
+
 def load_cards(mode: str):
     if not DATA.exists():
         raise SystemExit(
@@ -87,26 +125,31 @@ def load_cards(mode: str):
     manifest = DatasetManifest.load(MANIFEST)
     limit = manifest.ci_subset.get("train", 64) if mode == "ci" else 2048
 
-    images = []
+    transform = transforms.Compose(
+        [
+            transforms.Resize((64, 64)),
+            transforms.ToTensor(),
+            transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+        ]
+    )
+    tensors = []
     labels = []
     for img in sorted(DATA.glob("**/*")):
         if img.suffix.lower() not in {".jpg", ".jpeg", ".png"}:
             continue
-        name = img.stem.upper()
-        rank = name[:-1]
-        suit = name[-1]
-        if rank not in RANKS or suit not in SUITS:
+        parsed = parse_card_atoms(img.stem)
+        if parsed is None:
             continue
-        images.append(Image.open(img).convert("RGB"))
-        labels.append((RANK_ATOMS[rank], SUIT_ATOMS[suit]))
-        if len(images) >= limit:
+        with Image.open(img) as image:
+            tensors.append(transform(image.convert("RGB")))
+        labels.append(parsed)
+        if len(tensors) >= limit:
             break
 
-    if not images:
+    if not tensors:
         raise SystemExit("Card dataset missing: no parsable card images found")
 
-    transform = transforms.Compose([transforms.Resize((64, 64)), transforms.ToTensor()])
-    tensor = torch.stack([transform(im) for im in images])
+    tensor = torch.stack(tensors)
     return manifest, tensor, labels
 
 
@@ -118,6 +161,8 @@ def main() -> int:
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--eval-ratio", type=float, default=0.1)
+    parser.add_argument("--queries-per-epoch", type=int, default=None)
+    parser.add_argument("--rank-query-weight", type=int, default=1)
     parser.add_argument("--min-accuracy", type=float, default=None)
     args = parser.parse_args()
 
@@ -145,8 +190,8 @@ def main() -> int:
         eval_labels = train_labels
 
     program = pyxlog.Program.compile((ROOT / "program.xlog").read_text())
-    rank_net = CardNet(len(RANKS)).to(device)
-    suit_net = CardNet(len(SUITS)).to(device)
+    rank_net = CardNet(len(RANKS), focus="rank").to(device)
+    suit_net = CardNet(len(SUITS), focus="suit").to(device)
     program.register_network(
         "rank_net", rank_net, torch.optim.Adam(rank_net.parameters(), lr=args.lr)
     )
@@ -155,12 +200,22 @@ def main() -> int:
     )
 
     program.add_tensor_source("train", train_images)
-    queries = []
-    for i, (rank, suit) in enumerate(train_labels):
-        queries.append(f"rank({i}, {rank})")
-        queries.append(f"suit({i}, {suit})")
+    if args.queries_per_epoch is not None:
+        query_examples = max(1, int(args.queries_per_epoch))
+    elif args.mode == "ci":
+        query_examples = 64
+    elif args.mode == "dev":
+        query_examples = 256
+    else:
+        query_examples = 512
 
-    for _ in range(epochs):
+    for epoch in range(epochs):
+        picked = pick_epoch_indices(
+            len(train_labels), query_examples, seed=args.seed, epoch=epoch
+        )
+        queries = build_training_queries(
+            train_labels, picked, rank_weight=args.rank_query_weight
+        )
         program.train_epoch(queries, batch_size=min(args.batch_size, len(queries)))
 
     rank_order = ["r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9", "r10", "rj", "rq", "rk", "ra"]
@@ -200,15 +255,8 @@ def main() -> int:
         )
     )
 
-    gate_metric_name = "eval_joint_proxy"
-    gate_metric_value = eval_joint_proxy
-    if args.mode == "release":
-        # The local poker corpus has no curated disjoint benchmark split.
-        # Gate on train_joint_proxy for release while still reporting eval metrics.
-        gate_metric_name = "train_joint_proxy"
-        gate_metric_value = train_joint_proxy
     threshold = resolve_min_accuracy(args.mode, manifest, args.min_accuracy)
-    report_and_enforce_metric(gate_metric_name, gate_metric_value, threshold)
+    report_and_enforce_metric("eval_joint_proxy", eval_joint_proxy, threshold)
 
     return 0
 
