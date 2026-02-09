@@ -31,6 +31,17 @@ import torch.nn as nn
 import pyxlog
 
 
+def compute_improvement_percent(epoch_losses):
+    """Return percent loss improvement or None when it is not well-defined."""
+    if len(epoch_losses) < 2:
+        return None
+    initial = epoch_losses[0]
+    if initial == 0:
+        return None
+    final = epoch_losses[-1]
+    return (1 - final / initial) * 100
+
+
 class MNISTNet(nn.Module):
     """CNN for MNIST digit classification.
 
@@ -224,7 +235,11 @@ def main():
     print(f"\nTraining complete!")
     print(f"  Initial loss: {history.epoch_losses[0]:.4f}")
     print(f"  Final loss: {history.epoch_losses[-1]:.4f}")
-    print(f"  Improvement: {(1 - history.epoch_losses[-1]/history.epoch_losses[0])*100:.1f}%")
+    improvement = compute_improvement_percent(history.epoch_losses)
+    if improvement is None:
+        print("  Improvement: N/A (requires >=2 epochs and non-zero initial loss)")
+    else:
+        print(f"  Improvement: {improvement:.1f}%")
 
     # Save model
     torch.save(net.state_dict(), args.save_path)
