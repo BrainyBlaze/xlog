@@ -29,8 +29,23 @@ examples/neural/01_minimal/
 **Run:**
 ```bash
 cd examples/neural/01_minimal
-python train.py --epochs 50 --batch-size 32
+python train.py --engine torch --epochs 20 --batch-size 512 --pairs-per-epoch 65536 --train-limit 60000 --eval-limit 10000 --seed 0
 ```
+
+This run uses addition supervision only, keeps train/test disjoint, and is the recommended no-leakage benchmark path.
+
+**Observed benchmark (2026-02-09):**
+
+| Metric | Value |
+|--------|-------|
+| Command | `python train.py --engine torch --epochs 20 --batch-size 512 --pairs-per-epoch 65536 --train-limit 60000 --eval-limit 10000 --seed 0` |
+| Device | `cuda` (`NVIDIA RTX PRO 3000 Blackwell Generation Laptop GPU`) |
+| Final train accuracy | `0.9983` |
+| Final held-out eval accuracy (`MNIST test`, `n=10000`) | `0.9907` |
+| Initial loss | `1.3407` |
+| Final loss | `0.0138` |
+
+This benchmark is no-leakage: training uses only train split images with addition supervision, while evaluation uses disjoint MNIST test images.
 
 **Program:**
 ```prolog
