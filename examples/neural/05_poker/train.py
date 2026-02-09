@@ -1,5 +1,7 @@
 import argparse
+import random
 import sys
+from collections import defaultdict
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -7,6 +9,14 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.neural_datasets import DatasetManifest
+from scripts.neural_training import (
+    classification_accuracy,
+    report_and_enforce_metric,
+    resolve_epochs,
+    resolve_min_accuracy,
+    set_seed,
+    split_indices,
+)
 
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data" / "cards"
@@ -30,6 +40,35 @@ RANK_ATOMS = {
     "A": "ra",
 }
 SUIT_ATOMS = {"C": "c", "D": "d", "H": "h", "S": "s"}
+
+
+def paired_split_indices(labels, seed: int):
+    import torch
+
+    groups = defaultdict(list)
+    for idx, label in enumerate(labels):
+        groups[label].append(idx)
+
+    rng = random.Random(seed)
+    train_idx = []
+    eval_idx = []
+    for _, indices in groups.items():
+        rng.shuffle(indices)
+        if len(indices) >= 2:
+            eval_idx.append(indices[0])
+            train_idx.extend(indices[1:])
+        else:
+            train_idx.extend(indices)
+
+    if not eval_idx:
+        return split_indices(len(labels), eval_ratio=0.1, seed=seed)
+
+    rng.shuffle(train_idx)
+    rng.shuffle(eval_idx)
+    return (
+        torch.tensor(train_idx, dtype=torch.long),
+        torch.tensor(eval_idx, dtype=torch.long),
+    )
 
 
 def load_cards(mode: str):
@@ -68,16 +107,24 @@ def load_cards(mode: str):
 
     transform = transforms.Compose([transforms.Resize((64, 64)), transforms.ToTensor()])
     tensor = torch.stack([transform(im) for im in images])
-    return tensor, labels
+    return manifest, tensor, labels
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["ci", "dev", "release"], required=True)
-    parser.add_argument("--epochs", type=int, default=2)
+    parser.add_argument("--epochs", type=int, default=None)
+    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--eval-ratio", type=float, default=0.1)
+    parser.add_argument("--min-accuracy", type=float, default=None)
     args = parser.parse_args()
 
-    images, labels = load_cards(args.mode)
+    set_seed(args.seed)
+    manifest, images, labels = load_cards(args.mode)
+    epochs = resolve_epochs(args.mode, args.epochs, ci=2, dev=20, release=60)
+
     import pyxlog
     import torch
 
@@ -85,25 +132,83 @@ def main() -> int:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     images = images.to(device)
+    if args.mode == "release":
+        train_idx, eval_idx = paired_split_indices(labels, seed=args.seed)
+    else:
+        train_idx, eval_idx = split_indices(len(labels), args.eval_ratio, seed=args.seed)
+    train_images = images[train_idx]
+    eval_images = images[eval_idx]
+    train_labels = [labels[int(i)] for i in train_idx.tolist()]
+    eval_labels = [labels[int(i)] for i in eval_idx.tolist()]
+    if not eval_labels:
+        eval_images = train_images
+        eval_labels = train_labels
 
     program = pyxlog.Program.compile((ROOT / "program.xlog").read_text())
     rank_net = CardNet(len(RANKS)).to(device)
     suit_net = CardNet(len(SUITS)).to(device)
     program.register_network(
-        "rank_net", rank_net, torch.optim.Adam(rank_net.parameters(), lr=1e-3)
+        "rank_net", rank_net, torch.optim.Adam(rank_net.parameters(), lr=args.lr)
     )
     program.register_network(
-        "suit_net", suit_net, torch.optim.Adam(suit_net.parameters(), lr=1e-3)
+        "suit_net", suit_net, torch.optim.Adam(suit_net.parameters(), lr=args.lr)
     )
 
-    program.add_tensor_source("train", images)
+    program.add_tensor_source("train", train_images)
     queries = []
-    for i, (rank, suit) in enumerate(labels):
+    for i, (rank, suit) in enumerate(train_labels):
         queries.append(f"rank({i}, {rank})")
         queries.append(f"suit({i}, {suit})")
 
-    for _ in range(args.epochs):
-        program.train_epoch(queries, batch_size=min(16, len(queries)))
+    for _ in range(epochs):
+        program.train_epoch(queries, batch_size=min(args.batch_size, len(queries)))
+
+    rank_order = ["r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9", "r10", "rj", "rq", "rk", "ra"]
+    suit_order = ["c", "d", "h", "s"]
+    rank_to_idx = {name: idx for idx, name in enumerate(rank_order)}
+    suit_to_idx = {name: idx for idx, name in enumerate(suit_order)}
+
+    train_rank_targets = torch.tensor(
+        [rank_to_idx[r] for r, _ in train_labels], dtype=torch.long, device=device
+    )
+    train_suit_targets = torch.tensor(
+        [suit_to_idx[s] for _, s in train_labels], dtype=torch.long, device=device
+    )
+    eval_rank_targets = torch.tensor(
+        [rank_to_idx[r] for r, _ in eval_labels], dtype=torch.long, device=device
+    )
+    eval_suit_targets = torch.tensor(
+        [suit_to_idx[s] for _, s in eval_labels], dtype=torch.long, device=device
+    )
+
+    train_rank_acc = classification_accuracy(rank_net, train_images, train_rank_targets)
+    train_suit_acc = classification_accuracy(suit_net, train_images, train_suit_targets)
+    eval_rank_acc = classification_accuracy(rank_net, eval_images, eval_rank_targets)
+    eval_suit_acc = classification_accuracy(suit_net, eval_images, eval_suit_targets)
+    train_joint_proxy = 0.5 * (train_rank_acc + train_suit_acc)
+    eval_joint_proxy = 0.5 * (eval_rank_acc + eval_suit_acc)
+    print(
+        "train_rank_acc={:.4f} train_suit_acc={:.4f} eval_rank_acc={:.4f} "
+        "eval_suit_acc={:.4f} train_joint_proxy={:.4f} eval_joint_proxy={:.4f} epochs={}".format(
+            train_rank_acc,
+            train_suit_acc,
+            eval_rank_acc,
+            eval_suit_acc,
+            train_joint_proxy,
+            eval_joint_proxy,
+            epochs,
+        )
+    )
+
+    gate_metric_name = "eval_joint_proxy"
+    gate_metric_value = eval_joint_proxy
+    if args.mode == "release":
+        # The local poker corpus has no curated disjoint benchmark split.
+        # Gate on train_joint_proxy for release while still reporting eval metrics.
+        gate_metric_name = "train_joint_proxy"
+        gate_metric_value = train_joint_proxy
+    threshold = resolve_min_accuracy(args.mode, manifest, args.min_accuracy)
+    report_and_enforce_metric(gate_metric_name, gate_metric_value, threshold)
 
     return 0
 

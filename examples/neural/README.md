@@ -76,6 +76,10 @@ The required neural-symbolic example set is now present in the repository:
 
 Release remains gated on end-to-end validation across these examples with real datasets.
 
+Each `train.py --mode release` run now emits a `FINAL_METRIC` line and enforces
+the example-specific minimum accuracy from `examples/neural/<example>/dataset.json`
+unless overridden via `--min-accuracy`.
+
 ## How Neural-Symbolic Training Works
 
 1. **Define neural predicates** — declare that a network provides probability distributions

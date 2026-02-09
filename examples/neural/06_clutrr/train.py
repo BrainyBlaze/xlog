@@ -8,6 +8,14 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.neural_datasets import DatasetManifest
+from scripts.neural_training import (
+    classification_accuracy,
+    report_and_enforce_metric,
+    resolve_epochs,
+    resolve_min_accuracy,
+    set_seed,
+    split_indices,
+)
 
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data" / "clutrr"
@@ -59,38 +67,70 @@ def load_clutrr(mode: str):
     if not rows:
         raise SystemExit("CLUTRR dataset missing: no rows with supported labels found")
 
-    return rows
+    return manifest, rows
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["ci", "dev", "release"], required=True)
-    parser.add_argument("--epochs", type=int, default=2)
+    parser.add_argument("--epochs", type=int, default=None)
+    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--eval-ratio", type=float, default=0.2)
+    parser.add_argument("--min-accuracy", type=float, default=None)
     args = parser.parse_args()
 
-    rows = load_clutrr(args.mode)
+    set_seed(args.seed)
+    manifest, rows = load_clutrr(args.mode)
+    epochs = resolve_epochs(args.mode, args.epochs, ci=2, dev=10, release=20)
+
     import pyxlog
     import torch
 
     from model import RelNet
 
-    texts = [x[0] for x in rows]
-    labels = [x[1] for x in rows]
+    train_idx, eval_idx = split_indices(len(rows), args.eval_ratio, seed=args.seed)
+    train_rows = [rows[int(i)] for i in train_idx.tolist()]
+    eval_rows = [rows[int(i)] for i in eval_idx.tolist()]
+    if not eval_rows:
+        eval_rows = train_rows
 
-    vocab = build_vocab(texts)
-    inputs = torch.tensor([encode(t, vocab) for t in texts], dtype=torch.long)
+    train_texts = [x[0] for x in train_rows]
+    train_labels = [x[1] for x in train_rows]
+    eval_texts = [x[0] for x in eval_rows]
+    eval_labels = [x[1] for x in eval_rows]
+
+    vocab = build_vocab(train_texts)
+    train_inputs = torch.tensor([encode(t, vocab) for t in train_texts], dtype=torch.long)
+    eval_inputs = torch.tensor([encode(t, vocab) for t in eval_texts], dtype=torch.long)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    inputs = inputs.to(device)
+    train_inputs = train_inputs.to(device)
+    eval_inputs = eval_inputs.to(device)
 
     program = pyxlog.Program.compile((ROOT / "program.xlog").read_text())
     net = RelNet(len(vocab), len(LABELS)).to(device)
-    program.register_network("rel_net", net, torch.optim.Adam(net.parameters(), lr=1e-3))
-    program.add_tensor_source("train", inputs)
+    program.register_network("rel_net", net, torch.optim.Adam(net.parameters(), lr=args.lr))
+    program.add_tensor_source("train", train_inputs)
 
-    queries = [f"rel({i}, {labels[i]})" for i in range(len(labels))]
-    for _ in range(args.epochs):
-        program.train_epoch(queries, batch_size=min(16, len(queries)))
+    queries = [f"rel({i}, {train_labels[i]})" for i in range(len(train_labels))]
+    for _ in range(epochs):
+        program.train_epoch(queries, batch_size=min(args.batch_size, len(queries)))
+
+    label_to_idx = {name: idx for idx, name in enumerate(LABELS)}
+    train_targets = torch.tensor(
+        [label_to_idx[name] for name in train_labels], dtype=torch.long, device=device
+    )
+    eval_targets = torch.tensor(
+        [label_to_idx[name] for name in eval_labels], dtype=torch.long, device=device
+    )
+    train_acc = classification_accuracy(net, train_inputs, train_targets)
+    eval_acc = classification_accuracy(net, eval_inputs, eval_targets)
+    print(f"train_acc={train_acc:.4f} eval_acc={eval_acc:.4f} epochs={epochs}")
+
+    threshold = resolve_min_accuracy(args.mode, manifest, args.min_accuracy)
+    report_and_enforce_metric("eval_acc", eval_acc, threshold)
 
     return 0
 

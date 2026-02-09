@@ -7,6 +7,13 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.neural_datasets import DatasetManifest
+from scripts.neural_training import (
+    classification_accuracy,
+    report_and_enforce_metric,
+    resolve_epochs,
+    resolve_min_accuracy,
+    set_seed,
+)
 
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data"
@@ -39,17 +46,22 @@ def load_dataset(mode: str):
     if len(train_ds) == 0:
         raise SystemExit("Dataset missing: coins train split is empty")
 
-    return train_ds, test_ds
+    return manifest, train_ds, test_ds
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["ci", "dev", "release"], required=True)
-    parser.add_argument("--epochs", type=int, default=2)
+    parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--min-accuracy", type=float, default=None)
     args = parser.parse_args()
 
-    train_ds, _ = load_dataset(args.mode)
+    manifest, train_ds, test_ds = load_dataset(args.mode)
+    epochs = resolve_epochs(args.mode, args.epochs, ci=2, dev=12, release=40)
+    set_seed(args.seed)
 
     import pyxlog
     import torch
@@ -60,16 +72,28 @@ def main() -> int:
     program = pyxlog.Program.compile((ROOT / "program.xlog").read_text())
 
     net = CoinNet().to(device)
-    opt = torch.optim.Adam(net.parameters(), lr=1e-3)
+    opt = torch.optim.Adam(net.parameters(), lr=args.lr)
     program.register_network("coin_net", net, opt)
 
-    images = torch.stack([x for x, _ in train_ds]).to(device)
-    labels = [train_ds.classes[y] for _, y in train_ds.samples]
-    program.add_tensor_source("train", images)
+    train_images = torch.stack([x for x, _ in train_ds]).to(device)
+    train_idx_labels = torch.tensor(train_ds.targets, dtype=torch.long, device=device)
+    train_atom_labels = [train_ds.classes[int(y)] for y in train_ds.targets]
+    test_images = torch.stack([x for x, _ in test_ds]).to(device)
+    test_idx_labels = torch.tensor(test_ds.targets, dtype=torch.long, device=device)
+    if int(test_idx_labels.numel()) == 0:
+        raise SystemExit("Dataset missing: coins test split is empty")
+    program.add_tensor_source("train", train_images)
 
-    queries = [f"coin({i}, {labels[i]})" for i in range(len(labels))]
-    for _ in range(args.epochs):
+    queries = [f"coin({i}, {train_atom_labels[i]})" for i in range(len(train_atom_labels))]
+    for _ in range(epochs):
         program.train_epoch(queries, batch_size=min(args.batch_size, len(queries)))
+
+    train_acc = classification_accuracy(net, train_images, train_idx_labels)
+    test_acc = classification_accuracy(net, test_images, test_idx_labels)
+    print(f"train_acc={train_acc:.4f} test_acc={test_acc:.4f} epochs={epochs}")
+
+    threshold = resolve_min_accuracy(args.mode, manifest, args.min_accuracy)
+    report_and_enforce_metric("test_acc", test_acc, threshold)
 
     return 0
 

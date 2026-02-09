@@ -8,10 +8,19 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.neural_datasets import DatasetManifest
+from scripts.neural_training import (
+    classification_accuracy,
+    report_and_enforce_metric,
+    resolve_epochs,
+    resolve_min_accuracy,
+    set_seed,
+    split_indices,
+)
 
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data" / "crohme"
 MANIFEST = ROOT / "dataset.json"
+LABEL_ORDER = ["add", "sub", "mul", "eq"]
 
 
 def inkml_to_image(path: Path, size: int = 128):
@@ -86,16 +95,24 @@ def load_crohme(mode: str):
 
     transform = transforms.Compose([transforms.Resize((128, 128)), transforms.ToTensor()])
     tensor = torch.stack([transform(im) for im in images])
-    return tensor, labels
+    return manifest, tensor, labels
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["ci", "dev", "release"], required=True)
-    parser.add_argument("--epochs", type=int, default=2)
+    parser.add_argument("--epochs", type=int, default=None)
+    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--eval-ratio", type=float, default=0.2)
+    parser.add_argument("--min-accuracy", type=float, default=None)
     args = parser.parse_args()
 
-    images, labels = load_crohme(args.mode)
+    set_seed(args.seed)
+    manifest, images, labels = load_crohme(args.mode)
+    epochs = resolve_epochs(args.mode, args.epochs, ci=2, dev=12, release=30)
+
     import pyxlog
     import torch
 
@@ -103,15 +120,37 @@ def main() -> int:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     images = images.to(device)
+    train_idx, eval_idx = split_indices(len(labels), args.eval_ratio, seed=args.seed)
+    train_images = images[train_idx]
+    eval_images = images[eval_idx]
+    train_labels = [labels[int(i)] for i in train_idx.tolist()]
+    eval_labels = [labels[int(i)] for i in eval_idx.tolist()]
+    if not eval_labels:
+        eval_images = train_images
+        eval_labels = train_labels
 
     program = pyxlog.Program.compile((ROOT / "program.xlog").read_text())
     net = HWFNet().to(device)
-    program.register_network("hw_net", net, torch.optim.Adam(net.parameters(), lr=1e-3))
-    program.add_tensor_source("train", images)
+    program.register_network("hw_net", net, torch.optim.Adam(net.parameters(), lr=args.lr))
+    program.add_tensor_source("train", train_images)
 
-    queries = [f"expr_type({i}, {labels[i]})" for i in range(len(labels))]
-    for _ in range(args.epochs):
-        program.train_epoch(queries, batch_size=min(8, len(queries)))
+    queries = [f"expr_type({i}, {train_labels[i]})" for i in range(len(train_labels))]
+    for _ in range(epochs):
+        program.train_epoch(queries, batch_size=min(args.batch_size, len(queries)))
+
+    label_to_idx = {name: idx for idx, name in enumerate(LABEL_ORDER)}
+    train_targets = torch.tensor(
+        [label_to_idx[name] for name in train_labels], dtype=torch.long, device=device
+    )
+    eval_targets = torch.tensor(
+        [label_to_idx[name] for name in eval_labels], dtype=torch.long, device=device
+    )
+    train_acc = classification_accuracy(net, train_images, train_targets)
+    eval_acc = classification_accuracy(net, eval_images, eval_targets)
+    print(f"train_acc={train_acc:.4f} eval_acc={eval_acc:.4f} epochs={epochs}")
+
+    threshold = resolve_min_accuracy(args.mode, manifest, args.min_accuracy)
+    report_and_enforce_metric("eval_acc", eval_acc, threshold)
 
     return 0
 
