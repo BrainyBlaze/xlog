@@ -1,0 +1,15 @@
+Failed to retrieve file url:
+
+	Cannot retrieve the public link of the file. You may need to change
+	the permission to 'Anyone with the link', or have had many accesses.
+	Check FAQ in https://github.com/wkentaro/gdown?tab=readme-ov-file#faq.
+
+You may still be able to access the file from the browser:
+
+	https://drive.google.com/uc?id=1G07kw-wK-rqbg_85tuB7FNfA49q8lvoy
+
+but Gdown can't. Please check connections and permissions.
+unzip:  cannot find or open HWF.zip, HWF.zip.zip or HWF.zip.ZIP.
+mv: cannot stat 'data/*': No such file or directory
+rm: cannot remove 'HWF.zip': No such file or directory
+ELAPSED 0:00.51 EXIT 0 MAXRSS_KB 38712

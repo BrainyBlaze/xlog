@@ -1,0 +1,101 @@
+/home/dev/.local/lib/python3.10/site-packages/deepproblog/engines/approximate_engine.py:156: UserWarning: Converting a tensor with requires_grad=True to a scalar may lead to unexpected behavior.
+Consider using tensor.detach() first. (Triggered internally at /pytorch/torch/csrc/autograd/generated/python_variable_methods.cpp:836.)
+  output_var.unify([float(x) for x in probabilities])
+Training  until Accuracy reaches 1.0 or until plateau in Accuracy
+Epoch 1
+Iteration:  50 	s:21.1604 	Average Loss:  3.0753306886553764
+Iteration:  100 	s:14.6545 	Average Loss:  1.6064878433197736
+Iteration:  150 	s:13.5485 	Average Loss:  0.4758928081765771
+Iteration:  200 	s:13.3654 	Average Loss:  0.12681921179872005
+Iteration:  250 	s:12.7458 	Average Loss:  0.13874908571131528
+         	               	     	      	     	      	             	       	        	   	       Actual	           	    	           	      	               	      	        	             	          
+         	               	uncle	sister	niece	mother	mother_in_law	brother	daughter	son	granddaughter	grandmother	aunt	grandfather	nephew	daughter_in_law	father	grandson	father_in_law	son_in_law
+         	          uncle	    4	     0	    0	     0	            0	      0	       0	  0	            0	          0	   0	          0	     0	              0	     0	       0	            0	         0
+         	         sister	    0	     9	    0	     0	            0	      0	       0	  0	            0	          0	   0	          0	     0	              0	     0	       0	            0	         0
+         	          niece	    0	     0	    3	     0	            0	      0	       0	  0	            0	          0	   0	          0	     0	              0	     0	       0	            0	         0
+         	         mother	    0	     0	    0	     8	            0	      0	       0	  0	            0	          0	   0	          0	     0	              0	     0	       0	            0	         0
+         	  mother_in_law	    0	     0	    0	     0	            4	      0	       0	  0	            0	          0	   0	          0	     0	              0	     0	       0	            0	         0
+         	        brother	    0	     0	    0	     0	            0	      8	       0	  0	            0	          0	   0	          0	     0	              0	     0	       0	            0	         0
+         	       daughter	    0	     0	    0	     0	            0	      0	       4	  0	            0	          0	   0	          0	     0	              0	     0	       0	            0	         0
+         	            son	    0	     0	    0	     0	            0	      0	       0	  4	            0	          0	   0	          0	     0	              0	     0	       0	            0	         0
+Predicted	  granddaughter	    0	     0	    0	     0	            0	      0	       0	  0	           10	          0	   0	          0	     0	              0	     0	       0	            0	         0
+         	    grandmother	    0	     0	    0	     0	            0	      0	       0	  0	            0	          7	   0	          0	     0	              0	     0	       0	            0	         0
+         	           aunt	    0	     0	    0	     0	            0	      0	       0	  0	            0	          0	   4	          0	     0	              0	     0	       0	            0	         0
+         	    grandfather	    0	     0	    0	     0	            0	      0	       0	  0	            0	          0	   0	          6	     0	              0	     0	       0	            0	         0
+         	         nephew	    0	     0	    1	     0	            0	      0	       0	  0	            0	          0	   0	          0	     4	              0	     0	       0	            0	         0
+         	daughter_in_law	    0	     0	    0	     0	            0	      0	       0	  0	            0	          0	   0	          0	     0	              2	     0	       0	            0	         0
+         	         father	    0	     0	    0	     0	            0	      0	       0	  0	            0	          0	   0	          0	     0	              0	     8	       0	            0	         0
+         	       grandson	    0	     0	    0	     0	            0	      0	       0	  0	            0	          0	   0	          0	     0	              0	     0	       8	            0	         0
+         	  father_in_law	    0	     0	    0	     0	            0	      0	       0	  0	            0	          0	   0	          0	     0	              0	     0	       0	            4	         0
+         	     son_in_law	    0	     0	    0	     0	            0	      0	       0	  0	            0	          0	   0	          0	     0	              0	     0	       0	            0	         2
+Accuracy:  0.99
+Accuracy 0.99
+Accuracy:  0.99
+Test:  [('Accuracy', np.float64(0.99))]
+Epoch time:  91.1193437576294
+Epoch 2
+Iteration:  300 	s:25.1627 	Average Loss:  0.029695551390759647
+Iteration:  350 	s:12.7876 	Average Loss:  0.012040423038997687
+Iteration:  400 	s:13.0084 	Average Loss:  0.02064526433532592
+Iteration:  450 	s:12.4028 	Average Loss:  0.024007380313705654
+Iteration:  500 	s:12.0051 	Average Loss:  0.051511561947409065
+Exception ignored on calling ctypes callback function: <function _foreignWrapper.<locals>.wrapper at 0x767262d4edd0>
+Traceback (most recent call last):
+  File "/home/dev/.local/lib/python3.10/site-packages/pyswip/easy.py", line 523, in wrapper
+    def wrapper(*args):
+KeyboardInterrupt: 
+         	               	     	      	     	      	             	       	        	   	       Actual	           	    	           	      	               	      	        	             	          
+         	               	uncle	sister	niece	mother	mother_in_law	brother	daughter	son	granddaughter	grandmother	aunt	grandfather	nephew	daughter_in_law	father	grandson	father_in_law	son_in_law
+         	          uncle	    4	     0	    0	     0	            0	      0	       0	  0	            0	          0	   0	          0	     0	              0	     0	       0	            0	         0
+         	         sister	    0	     9	    0	     0	            0	      0	       0	  0	            0	          0	   0	          0	     0	              0	     0	       0	            0	         0
+         	          niece	    0	     0	    4	     0	            0	      0	       0	  0	            0	          0	   0	          0	     0	              0	     0	       0	            0	         0
+         	         mother	    0	     0	    0	     8	            0	      0	       0	  0	            0	          0	   0	          0	     0	              0	     0	       0	            0	         0
+         	  mother_in_law	    0	     0	    0	     0	            4	      0	       0	  0	            0	          0	   0	          0	     0	              0	     0	       0	            0	         0
+         	        brother	    0	     0	    0	     0	            0	      8	       0	  0	            0	          0	   0	          0	     0	              0	     0	       0	            0	         0
+         	       daughter	    0	     0	    0	     0	            0	      0	       4	  0	            0	          0	   0	          0	     0	              0	     0	       0	            0	         0
+         	            son	    0	     0	    0	     0	            0	      0	       0	  4	            0	          0	   0	          0	     0	              0	     0	       0	            0	         0
+Predicted	  granddaughter	    0	     0	    0	     0	            0	      0	       0	  0	           10	          0	   0	          0	     0	              0	     0	       0	            0	         0
+         	    grandmother	    0	     0	    0	     0	            0	      0	       0	  0	            0	          7	   0	          0	     0	              0	     0	       0	            0	         0
+         	           aunt	    0	     0	    0	     0	            0	      0	       0	  0	            0	          0	   4	          0	     0	              0	     0	       0	            0	         0
+         	    grandfather	    0	     0	    0	     0	            0	      0	       0	  0	            0	          0	   0	          6	     0	              0	     0	       0	            0	         0
+         	         nephew	    0	     0	    0	     0	            0	      0	       0	  0	            0	          0	   0	          0	     4	              0	     0	       0	            0	         0
+         	daughter_in_law	    0	     0	    0	     0	            0	      0	       0	  0	            0	          0	   0	          0	     0	              2	     0	       0	            0	         0
+         	         father	    0	     0	    0	     0	            0	      0	       0	  0	            0	          0	   0	          0	     0	              0	     8	       0	            0	         0
+         	       grandson	    0	     0	    0	     0	            0	      0	       0	  0	            0	          0	   0	          0	     0	              0	     0	       8	            0	         0
+         	  father_in_law	    0	     0	    0	     0	            0	      0	       0	  0	            0	          0	   0	          0	     0	              0	     0	       0	            4	         0
+         	     son_in_law	    0	     0	    0	     0	            0	      0	       0	  0	            0	          0	   0	          0	     0	              0	     0	       0	            0	         2
+Accuracy:  1.0
+Accuracy 1.0
+Accuracy:  1.0
+Test:  [('Accuracy', np.float64(1.0))]
+Epoch time:  69.44976735115051
+Accuracy:  0.9344262295081968
+Accuracy:  0.9923664122137404
+Traceback (most recent call last):
+  File "/home/dev/projects/xlog/.worktrees/v0.4.0-alpha-integrated/examples/neural/baseline/deepproblog/CLUTRR/clutrr.py", line 48, in <module>
+    final_acc = get_confusion_matrix(
+  File "/home/dev/.local/lib/python3.10/site-packages/deepproblog/evaluate.py", line 27, in get_confusion_matrix
+    answer = model.solve([test_query])[0]
+  File "/home/dev/.local/lib/python3.10/site-packages/deepproblog/model.py", line 117, in solve
+    return self.solver.solve(batch)
+  File "/home/dev/.local/lib/python3.10/site-packages/deepproblog/solver.py", line 86, in solve
+    acs: List[ArithmeticCircuit] = [self.cache.get(q) for q in batch]
+  File "/home/dev/.local/lib/python3.10/site-packages/deepproblog/solver.py", line 86, in <listcomp>
+    acs: List[ArithmeticCircuit] = [self.cache.get(q) for q in batch]
+  File "/home/dev/.local/lib/python3.10/site-packages/deepproblog/utils/cache.py", line 52, in get
+    return self.first(item)
+  File "/home/dev/.local/lib/python3.10/site-packages/deepproblog/solver.py", line 71, in build_ac
+    ground = self.engine.ground(q, label=LogicFormula.LABEL_QUERY)
+  File "/home/dev/.local/lib/python3.10/site-packages/deepproblog/engines/approximate_engine.py", line 133, in ground
+    return self.engine.ground(
+  File "/home/dev/.local/lib/python3.10/site-packages/deepproblog/engines/prolog_engine/engine.py", line 62, in ground
+    proofs = self.get_proofs(term, sp)
+  File "/home/dev/.local/lib/python3.10/site-packages/deepproblog/engines/prolog_engine/engine.py", line 99, in get_proofs
+    res = program.query(query_str, profile=profile)
+  File "/home/dev/.local/lib/python3.10/site-packages/deepproblog/engines/prolog_engine/swi_program.py", line 313, in query
+    result = list(self.prolog.query(query))
+  File "/home/dev/.local/lib/python3.10/site-packages/pyswip/prolog.py", line 133, in __call__
+    raise PrologError("".join(["Caused by: '", query, "'. ",
+pyswip.prolog.PrologError: Caused by: 'prove(clutrr_text([0, 1, 2, 3, 4, 5, 6, 7, 8],[s([1, 2],"2 is 1 ' s son"), s([4, 5],"the husband of 4 is 5"), s([2, 3],"3 is 2 ' s sister"), s([0, 1],"1 is 0 ' s husband"), s([8, 7],"7 has a brother named 8"), s([4, 6],"6 is a daughter of 4"), s([3, 4],"4 is 3 ' s aunt"), s([4, 5],"4 is the wife of 5"), s([6, 7],"6 has a sister named 7")],0,X_3,8),1,Proofs,geometric_mean,true)'. Returned: 'error(domain_error(foreign_return_value, 99955060655776), context(/(rel_extract_extern, 2), _135248608))'.
+Command exited with non-zero status 124
+ELAPSED 5:01.23 EXIT 124 MAXRSS_KB 3110600

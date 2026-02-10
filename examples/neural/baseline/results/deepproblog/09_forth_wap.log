@@ -1,0 +1,39 @@
+/home/dev/.local/lib/python3.10/site-packages/deepproblog/semiring/graph_semiring.py:77: UserWarning: Converting a tensor with requires_grad=True to a scalar may lead to unexpected behavior.
+Consider using tensor.detach() first. (Triggered internally at /pytorch/torch/csrc/autograd/generated/python_variable_methods.cpp:836.)
+  return -self.eps <= float(a) <= self.eps
+rnn params 2556416
+net1 params 24582
+Caching ACs
+Accuracy:  0.085
+Test:  [('Accuracy', np.float64(0.085))]
+Training  for 40 epoch(s)
+Epoch 1
+Iteration:  10 	s:361.2895 	Average Loss:  4.141684223758057
+Traceback (most recent call last):
+  File "/home/dev/projects/xlog/.worktrees/v0.4.0-alpha-integrated/examples/neural/baseline/deepproblog/Forth/WAP/wap.py", line 26, in <module>
+    train_obj = train_model(
+  File "/home/dev/.local/lib/python3.10/site-packages/deepproblog/train.py", line 200, in train_model
+    train_object.train(loader, stop_condition, **kwargs)
+  File "/home/dev/.local/lib/python3.10/site-packages/deepproblog/train.py", line 128, in train
+    loss = self.get_loss(batch, loss_function)
+  File "/home/dev/.local/lib/python3.10/site-packages/deepproblog/train.py", line 39, in get_loss
+    result = self.model.solve(batch)
+  File "/home/dev/.local/lib/python3.10/site-packages/deepproblog/model.py", line 117, in solve
+    return self.solver.solve(batch)
+  File "/home/dev/.local/lib/python3.10/site-packages/deepproblog/solver.py", line 88, in solve
+    result = [
+  File "/home/dev/.local/lib/python3.10/site-packages/deepproblog/solver.py", line 89, in <listcomp>
+    ac.evaluate(self.model, batch[i].substitution) for i, ac in enumerate(acs)
+  File "/home/dev/.local/lib/python3.10/site-packages/deepproblog/arithmetic_circuit.py", line 54, in evaluate
+    to_evaluate = self.extract_neural()
+  File "/home/dev/.local/lib/python3.10/site-packages/deepproblog/arithmetic_circuit.py", line 83, in extract_neural
+    self._add_ordered_evaluation(w.args[0], w.args[1], neural_eval)
+  File "/home/dev/.local/lib/python3.10/site-packages/deepproblog/arithmetic_circuit.py", line 89, in _add_ordered_evaluation
+    for argument in term2list(arguments, deep=False):
+  File "/home/dev/.local/lib/python3.10/site-packages/problog/logic.py", line 136, in term2list
+    while not is_variable(term) and term.functor == "." and term.arity == 2:
+  File "/home/dev/.local/lib/python3.10/site-packages/problog/logic.py", line 161, in is_variable
+    def is_variable(term):
+KeyboardInterrupt
+Command exited with non-zero status 124
+ELAPSED 10:01.01 EXIT 124 MAXRSS_KB 1354968

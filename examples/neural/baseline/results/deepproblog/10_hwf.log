@@ -1,0 +1,7 @@
+/home/dev/.local/lib/python3.10/site-packages/problog/parser.py:697: UserWarning: The use of '\==' might give unexpected results. Consider using '\=' instead.
+  warn("The use of '\\==' might give unexpected results. Consider using '\\=' instead.")
+Training HWF with N=1 and curriculum=False
+Caching ACs
+The HWD dataset has not been downloaded. See the README.md for info on how to download it.
+Command exited with non-zero status 1
+ELAPSED 0:03.50 EXIT 1 MAXRSS_KB 784936

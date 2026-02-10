@@ -1,0 +1,6 @@
+example	timeout_s	exit_code	status	elapsed_s	log
+01_minimal	300	124	timeout	301	/home/dev/projects/xlog/.worktrees/v0.4.0-alpha-integrated/examples/neural/baseline/results/deepproblog/01_minimal.log
+02_mnist_addition	300	124	timeout	301	/home/dev/projects/xlog/.worktrees/v0.4.0-alpha-integrated/examples/neural/baseline/results/deepproblog/02_mnist_addition.log
+03_mnist_addition_noisy	300	124	timeout	301	/home/dev/projects/xlog/.worktrees/v0.4.0-alpha-integrated/examples/neural/baseline/results/deepproblog/03_mnist_addition_noisy.log
+04_coins	600	124	timeout	601	/home/dev/projects/xlog/.worktrees/v0.4.0-alpha-integrated/examples/neural/baseline/results/deepproblog/04_coins.log
+05_poker	600	1	error	4	/home/dev/projects/xlog/.worktrees/v0.4.0-alpha-integrated/examples/neural/baseline/results/deepproblog/05_poker.log

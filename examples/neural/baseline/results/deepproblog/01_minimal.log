@@ -1,0 +1,33 @@
+/home/dev/.local/lib/python3.10/site-packages/deepproblog/semiring/graph_semiring.py:77: UserWarning: Converting a tensor with requires_grad=True to a scalar may lead to unexpected behavior.
+Consider using tensor.detach() first. (Triggered internally at /pytorch/torch/csrc/autograd/generated/python_variable_methods.cpp:836.)
+  return -self.eps <= float(a) <= self.eps
+Training  for 1 epoch(s)
+Epoch 1
+Iteration:  100 	s:37.1998 	Average Loss:  2.757524379491806
+Iteration:  200 	s:35.7090 	Average Loss:  2.5757068249583246
+Iteration:  300 	s:35.1865 	Average Loss:  2.4863351610302926
+Iteration:  400 	s:36.1142 	Average Loss:  2.085183506011963
+Iteration:  500 	s:36.2780 	Average Loss:  1.5551253885673941
+Iteration:  600 	s:37.9307 	Average Loss:  0.9920352702890523
+Iteration:  700 	s:38.0604 	Average Loss:  0.9275603790313471
+Iteration:  800 	s:35.6948 	Average Loss:  0.6655916620171047
+Traceback (most recent call last):
+  File "/home/dev/projects/xlog/.worktrees/v0.4.0-alpha-integrated/examples/neural/baseline/deepproblog/minimal/addition_minimal.py", line 24, in <module>
+    train_model(model, loader, 1, log_iter=100, profile=0)
+  File "/home/dev/.local/lib/python3.10/site-packages/deepproblog/train.py", line 200, in train_model
+    train_object.train(loader, stop_condition, **kwargs)
+  File "/home/dev/.local/lib/python3.10/site-packages/deepproblog/train.py", line 128, in train
+    loss = self.get_loss(batch, loss_function)
+  File "/home/dev/.local/lib/python3.10/site-packages/deepproblog/train.py", line 48, in get_loss
+    total_loss += backpropagate_loss(
+  File "/home/dev/.local/lib/python3.10/site-packages/deepproblog/semiring/graph_semiring.py", line 127, in cross_entropy
+    loss.backward(retain_graph=True)
+  File "/home/dev/.local/lib/python3.10/site-packages/torch/_tensor.py", line 630, in backward
+    torch.autograd.backward(
+  File "/home/dev/.local/lib/python3.10/site-packages/torch/autograd/__init__.py", line 364, in backward
+    _engine_run_backward(
+  File "/home/dev/.local/lib/python3.10/site-packages/torch/autograd/graph.py", line 865, in _engine_run_backward
+    return Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
+KeyboardInterrupt
+Command exited with non-zero status 124
+ELAPSED 5:00.81 EXIT 124 MAXRSS_KB 855268

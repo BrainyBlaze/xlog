@@ -1,0 +1,24 @@
+/home/dev/.local/lib/python3.10/site-packages/deepproblog/semiring/graph_semiring.py:77: UserWarning: Converting a tensor with requires_grad=True to a scalar may lead to unexpected behavior.
+Consider using tensor.detach() first. (Triggered internally at /pytorch/torch/csrc/autograd/generated/python_variable_methods.cpp:836.)
+  return -self.eps <= float(a) <= self.eps
+Caching ACs
+Accuracy:  0.0
+Test:  [('Accuracy', np.float64(0.0))]
+Training  for 40 epoch(s)
+Iteration:  50 	s:1.5626 	Average Loss:  2.647924076914153
+Iteration:  100 	s:0.3924 	Average Loss:  2.3618790972402883
+Iteration:  150 	s:0.3763 	Average Loss:  1.4965458459409688
+Iteration:  200 	s:0.4031 	Average Loss:  1.0970121364667975
+Iteration:  250 	s:0.4083 	Average Loss:  1.7723272716734297
+Accuracy:  0.1875
+Test:  [('Accuracy', np.float64(0.1875))]
+Iteration:  300 	s:1.5186 	Average Loss:  2.6352274383507814
+Iteration:  350 	s:0.4551 	Average Loss:  2.675730018171819
+Iteration:  400 	s:0.3951 	Average Loss:  2.7376079712248655
+Iteration:  450 	s:0.3708 	Average Loss:  2.7445116426608767
+Iteration:  500 	s:0.4301 	Average Loss:  2.664464686885404
+Accuracy:  0.0625
+Test:  [('Accuracy', np.float64(0.0625))]
+Iteration:  550 	s:1.5113 	Average Loss:  2.945308988094267
+Iteration:  600 	s:0.5127 	Average Loss:  2.5029856166429063
+ELAPSED 0:11.64 EXIT 0 MAXRSS_KB 829604

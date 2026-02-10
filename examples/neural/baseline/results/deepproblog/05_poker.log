@@ -1,0 +1,49 @@
+unfair
+	 queen 0.4
+	 ace 0.25
+	 jack 0.2
+	 king 0.15
+fair_test
+	 ace 0.25
+	 queen 0.25
+	 jack 0.25
+	 king 0.25
+Caching ACs
+Traceback (most recent call last):
+  File "/home/dev/projects/xlog/.worktrees/v0.4.0-alpha-integrated/examples/neural/baseline/deepproblog/Poker/poker.py", line 34, in <module>
+    train_obj = train_model(
+  File "/home/dev/.local/lib/python3.10/site-packages/deepproblog/train.py", line 200, in train_model
+    train_object.train(loader, stop_condition, **kwargs)
+  File "/home/dev/.local/lib/python3.10/site-packages/deepproblog/train.py", line 106, in train
+    value = kwargs["test"](self.model)
+  File "/home/dev/projects/xlog/.worktrees/v0.4.0-alpha-integrated/examples/neural/baseline/deepproblog/Poker/poker.py", line 42, in <lambda>
+    ("Accuracy", get_confusion_matrix(model, datasets["fair_test"]).accuracy())
+  File "/home/dev/.local/lib/python3.10/site-packages/deepproblog/evaluate.py", line 27, in get_confusion_matrix
+    answer = model.solve([test_query])[0]
+  File "/home/dev/.local/lib/python3.10/site-packages/deepproblog/model.py", line 117, in solve
+    return self.solver.solve(batch)
+  File "/home/dev/.local/lib/python3.10/site-packages/deepproblog/solver.py", line 88, in solve
+    result = [
+  File "/home/dev/.local/lib/python3.10/site-packages/deepproblog/solver.py", line 89, in <listcomp>
+    ac.evaluate(self.model, batch[i].substitution) for i, ac in enumerate(acs)
+  File "/home/dev/.local/lib/python3.10/site-packages/deepproblog/arithmetic_circuit.py", line 56, in evaluate
+    values = model.evaluate_nn(to_evaluate)
+  File "/home/dev/.local/lib/python3.10/site-packages/deepproblog/model.py", line 97, in evaluate_nn
+    out = network([term2list(x, False) for x in evaluations[net]])
+  File "/home/dev/.local/lib/python3.10/site-packages/deepproblog/network.py", line 126, in __call__
+    for inputs in zip(*inputs):
+  File "/home/dev/.local/lib/python3.10/site-packages/deepproblog/network.py", line 124, in <genexpr>
+    inputs = (self.function(*e) for e in to_evaluate)
+  File "/home/dev/.local/lib/python3.10/site-packages/deepproblog/network.py", line 11, in tensor_function
+    return tuple(network.model.get_tensor(arg) for arg in args)
+  File "/home/dev/.local/lib/python3.10/site-packages/deepproblog/network.py", line 11, in <genexpr>
+    return tuple(network.model.get_tensor(arg) for arg in args)
+  File "/home/dev/.local/lib/python3.10/site-packages/deepproblog/model.py", line 201, in get_tensor
+    return self.tensor_sources[term.args[0].functor][term.args[0].args]
+  File "/home/dev/.local/lib/python3.10/site-packages/deepproblog/examples/Poker/__init__.py", line 20, in __getitem__
+    return super().__getitem__("{}_{}".format(*i))
+  File "/home/dev/.local/lib/python3.10/site-packages/deepproblog/dataset.py", line 349, in __getitem__
+    with open(p, "rb") as f:
+FileNotFoundError: [Errno 2] No such file or directory: 'data/images/fair_test/0_0.png'
+Command exited with non-zero status 1
+ELAPSED 0:04.60 EXIT 1 MAXRSS_KB 911760

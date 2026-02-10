@@ -1,0 +1,38 @@
+  0%|          | 0.00/9.91M [00:00<?, ?B/s]  0%|          | 32.8k/9.91M [00:00<00:48, 203kB/s]  1%|          | 98.3k/9.91M [00:00<00:26, 370kB/s]  2%|▏         | 197k/9.91M [00:00<00:16, 581kB/s]   4%|▍         | 393k/9.91M [00:00<00:09, 995kB/s]  8%|▊         | 754k/9.91M [00:00<00:05, 1.82MB/s] 13%|█▎        | 1.25M/9.91M [00:00<00:03, 2.76MB/s] 18%|█▊        | 1.77M/9.91M [00:00<00:02, 3.51MB/s] 28%|██▊       | 2.79M/9.91M [00:00<00:01, 5.39MB/s] 40%|███▉      | 3.93M/9.91M [00:01<00:00, 7.00MB/s] 52%|█████▏    | 5.18M/9.91M [00:01<00:00, 8.53MB/s] 63%|██████▎   | 6.26M/9.91M [00:01<00:00, 9.11MB/s] 75%|███████▍  | 7.41M/9.91M [00:01<00:00, 9.78MB/s] 86%|████████▋ | 8.55M/9.91M [00:01<00:00, 10.2MB/s] 98%|█████████▊| 9.70M/9.91M [00:01<00:00, 10.5MB/s]100%|██████████| 9.91M/9.91M [00:01<00:00, 6.36MB/s]
+  0%|          | 0.00/28.9k [00:00<?, ?B/s]100%|██████████| 28.9k/28.9k [00:00<00:00, 257kB/s]100%|██████████| 28.9k/28.9k [00:00<00:00, 256kB/s]
+  0%|          | 0.00/1.65M [00:00<?, ?B/s]  2%|▏         | 32.8k/1.65M [00:00<00:05, 298kB/s]  6%|▌         | 98.3k/1.65M [00:00<00:03, 466kB/s] 12%|█▏        | 197k/1.65M [00:00<00:02, 665kB/s]  24%|██▍       | 393k/1.65M [00:00<00:01, 1.05MB/s] 48%|████▊     | 786k/1.65M [00:00<00:00, 1.84MB/s] 99%|█████████▉| 1.64M/1.65M [00:00<00:00, 3.60MB/s]100%|██████████| 1.65M/1.65M [00:00<00:00, 2.34MB/s]
+  0%|          | 0.00/4.54k [00:00<?, ?B/s]100%|██████████| 4.54k/4.54k [00:00<00:00, 26.5MB/s]
+/home/dev/.local/lib/python3.10/site-packages/deepproblog/semiring/graph_semiring.py:77: UserWarning: Converting a tensor with requires_grad=True to a scalar may lead to unexpected behavior.
+Consider using tensor.detach() first. (Triggered internally at /pytorch/torch/csrc/autograd/generated/python_variable_methods.cpp:836.)
+  return -self.eps <= float(a) <= self.eps
+Caching ACs
+Training  for 1 epoch(s)
+Epoch 1
+Iteration:  100 	s:33.5775 	Average Loss:  2.7669116079807283
+Iteration:  200 	s:33.4848 	Average Loss:  2.76780952334404
+Iteration:  300 	s:33.1831 	Average Loss:  2.5817668294906615
+Iteration:  400 	s:32.6613 	Average Loss:  2.498731023669243
+Iteration:  500 	s:33.2273 	Average Loss:  2.2724614737648516
+Iteration:  600 	s:34.5719 	Average Loss:  2.161975307315588
+Iteration:  700 	s:34.9911 	Average Loss:  1.7986852005310356
+Iteration:  800 	s:32.8779 	Average Loss:  1.438092584387632
+Traceback (most recent call last):
+  File "/home/dev/projects/xlog/.worktrees/v0.4.0-alpha-integrated/examples/neural/baseline/deepproblog/MNIST/addition.py", line 42, in <module>
+    train = train_model(model, loader, 1, log_iter=100, profile=0)
+  File "/home/dev/.local/lib/python3.10/site-packages/deepproblog/train.py", line 200, in train_model
+    train_object.train(loader, stop_condition, **kwargs)
+  File "/home/dev/.local/lib/python3.10/site-packages/deepproblog/train.py", line 128, in train
+    loss = self.get_loss(batch, loss_function)
+  File "/home/dev/.local/lib/python3.10/site-packages/deepproblog/train.py", line 48, in get_loss
+    total_loss += backpropagate_loss(
+  File "/home/dev/.local/lib/python3.10/site-packages/deepproblog/semiring/graph_semiring.py", line 127, in cross_entropy
+    loss.backward(retain_graph=True)
+  File "/home/dev/.local/lib/python3.10/site-packages/torch/_tensor.py", line 630, in backward
+    torch.autograd.backward(
+  File "/home/dev/.local/lib/python3.10/site-packages/torch/autograd/__init__.py", line 364, in backward
+    _engine_run_backward(
+  File "/home/dev/.local/lib/python3.10/site-packages/torch/autograd/graph.py", line 865, in _engine_run_backward
+    return Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
+KeyboardInterrupt
+Command exited with non-zero status 124
+ELAPSED 5:01.79 EXIT 124 MAXRSS_KB 959712

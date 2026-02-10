@@ -1,0 +1,38 @@
+/home/dev/.local/lib/python3.10/site-packages/deepproblog/semiring/graph_semiring.py:77: UserWarning: Converting a tensor with requires_grad=True to a scalar may lead to unexpected behavior.
+Consider using tensor.detach() first. (Triggered internally at /pytorch/torch/csrc/autograd/generated/python_variable_methods.cpp:836.)
+  return -self.eps <= float(a) <= self.eps
+Caching ACs
+Accuracy:  0.0
+Test:  [('Accuracy', np.float64(0.0))]
+Training  for 40 epoch(s)
+Iteration:  20 	s:4.0901 	Average Loss:  2.63152022305876
+Iteration:  40 	s:0.7475 	Average Loss:  2.3628823863342405
+Iteration:  60 	s:0.6876 	Average Loss:  2.254018650762737
+Iteration:  80 	s:0.6663 	Average Loss:  2.2607707234099506
+Iteration:  100 	s:0.6417 	Average Loss:  2.247281957603991
+Accuracy:  0.0
+Test:  [('Accuracy', np.float64(0.0))]
+Iteration:  120 	s:3.8341 	Average Loss:  2.2315896741114556
+Iteration:  140 	s:0.6746 	Average Loss:  2.1910909599624575
+Iteration:  160 	s:0.7189 	Average Loss:  2.1990820930339394
+Iteration:  180 	s:0.6481 	Average Loss:  2.1671369250863792
+Iteration:  200 	s:0.6837 	Average Loss:  2.073939216416329
+Accuracy:  0.00390625
+Test:  [('Accuracy', np.float64(0.00390625))]
+Iteration:  220 	s:3.8369 	Average Loss:  1.9419799127150328
+Iteration:  240 	s:0.6462 	Average Loss:  1.7578382227104157
+Iteration:  260 	s:0.6866 	Average Loss:  1.4467229028232396
+Iteration:  280 	s:0.6195 	Average Loss:  1.1510900413501077
+Iteration:  300 	s:0.6564 	Average Loss:  0.8319761175080203
+Accuracy:  0.46484375
+Test:  [('Accuracy', np.float64(0.46484375))]
+Iteration:  320 	s:3.9465 	Average Loss:  0.6205082810949534
+Iteration:  340 	s:0.6772 	Average Loss:  0.4028856662189355
+Iteration:  360 	s:0.6464 	Average Loss:  0.2685094751388533
+Iteration:  380 	s:0.5904 	Average Loss:  0.1689970358245773
+Iteration:  400 	s:0.5602 	Average Loss:  0.1162189477472566
+Accuracy:  0.9375
+Test:  [('Accuracy', np.float64(0.9375))]
+Iteration:  420 	s:3.1318 	Average Loss:  0.08266716550569982
+Iteration:  440 	s:0.5857 	Average Loss:  0.06385786270184327
+ELAPSED 0:34.06 EXIT 0 MAXRSS_KB 864104

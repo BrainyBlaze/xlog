@@ -1,0 +1,12 @@
+example	timeout_s	exit_code	status	elapsed_s	log
+01_minimal	300	124	timeout	301	/home/dev/projects/xlog/.worktrees/v0.4.0-alpha-integrated/examples/neural/baseline/results/deepproblog/01_minimal.log
+02_mnist_addition	300	124	timeout	301	/home/dev/projects/xlog/.worktrees/v0.4.0-alpha-integrated/examples/neural/baseline/results/deepproblog/02_mnist_addition.log
+03_mnist_addition_noisy	300	124	timeout	301	/home/dev/projects/xlog/.worktrees/v0.4.0-alpha-integrated/examples/neural/baseline/results/deepproblog/03_mnist_addition_noisy.log
+04_coins	600	124	timeout	601	/home/dev/projects/xlog/.worktrees/v0.4.0-alpha-integrated/examples/neural/baseline/results/deepproblog/04_coins.log
+05_poker	600	1	error	4	/home/dev/projects/xlog/.worktrees/v0.4.0-alpha-integrated/examples/neural/baseline/results/deepproblog/05_poker.log
+05_poker_rerun	600	124	timeout	601	/home/dev/projects/xlog/.worktrees/v0.4.0-alpha-integrated/examples/neural/baseline/results/deepproblog/05_poker_rerun.log
+06_clutrr_rerun	300	124	timeout	301	/home/dev/projects/xlog/.worktrees/v0.4.0-alpha-integrated/examples/neural/baseline/results/deepproblog/06_clutrr_rerun.log
+07_forth_add	600	0	ok	34	/home/dev/projects/xlog/.worktrees/v0.4.0-alpha-integrated/examples/neural/baseline/results/deepproblog/07_forth_add.log
+08_forth_sort	600	0	ok	12	/home/dev/projects/xlog/.worktrees/v0.4.0-alpha-integrated/examples/neural/baseline/results/deepproblog/08_forth_sort.log
+09_forth_wap	600	124	timeout	601	/home/dev/projects/xlog/.worktrees/v0.4.0-alpha-integrated/examples/neural/baseline/results/deepproblog/09_forth_wap.log
+10_hwf	300	1	error	4	/home/dev/projects/xlog/.worktrees/v0.4.0-alpha-integrated/examples/neural/baseline/results/deepproblog/10_hwf.log

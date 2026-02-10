@@ -1,0 +1,39 @@
+/home/dev/.local/lib/python3.10/site-packages/deepproblog/semiring/graph_semiring.py:77: UserWarning: Converting a tensor with requires_grad=True to a scalar may lead to unexpected behavior.
+Consider using tensor.detach() first. (Triggered internally at /pytorch/torch/csrc/autograd/generated/python_variable_methods.cpp:836.)
+  return -self.eps <= float(a) <= self.eps
+unfair
+	 queen 0.4
+	 ace 0.25
+	 jack 0.2
+	 king 0.15
+fair_test
+	 ace 0.25
+	 queen 0.25
+	 jack 0.25
+	 king 0.25
+Caching ACs
+Accuracy:  0.27
+Test:  [('Accuracy', np.float64(0.27))]
+Training  for 10 epoch(s)
+Iteration:  10 	s:444.9584 	Average Loss:  0.09800804732332566
+0.24920425226206575	0.24917770612068507	0.24889391866238847	0.25272412295486074
+Traceback (most recent call last):
+  File "/home/dev/projects/xlog/.worktrees/v0.4.0-alpha-integrated/examples/neural/baseline/deepproblog/Poker/poker.py", line 34, in <module>
+    train_obj = train_model(
+  File "/home/dev/.local/lib/python3.10/site-packages/deepproblog/train.py", line 200, in train_model
+    train_object.train(loader, stop_condition, **kwargs)
+  File "/home/dev/.local/lib/python3.10/site-packages/deepproblog/train.py", line 128, in train
+    loss = self.get_loss(batch, loss_function)
+  File "/home/dev/.local/lib/python3.10/site-packages/deepproblog/train.py", line 48, in get_loss
+    total_loss += backpropagate_loss(
+  File "/home/dev/.local/lib/python3.10/site-packages/deepproblog/semiring/graph_semiring.py", line 150, in mse
+    loss.backward(retain_graph=True)
+  File "/home/dev/.local/lib/python3.10/site-packages/torch/_tensor.py", line 630, in backward
+    torch.autograd.backward(
+  File "/home/dev/.local/lib/python3.10/site-packages/torch/autograd/__init__.py", line 364, in backward
+    _engine_run_backward(
+  File "/home/dev/.local/lib/python3.10/site-packages/torch/autograd/graph.py", line 865, in _engine_run_backward
+    return Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
+KeyboardInterrupt
+Command exited with non-zero status 124
+ELAPSED 10:00.91 EXIT 124 MAXRSS_KB 1577880
