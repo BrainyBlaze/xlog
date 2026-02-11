@@ -14,7 +14,8 @@ class EncodeModule(nn.Module):
         self.in_size = in_size
 
     def __call__(self, *x):
-        input = torch.zeros(self.in_size)
+        device = next(self.mlp.parameters()).device
+        input = torch.zeros(self.in_size, device=device)
         for j, i in enumerate(x):
             i = int(i)
             input[j * 10 + i] = 1

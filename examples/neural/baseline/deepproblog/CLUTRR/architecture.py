@@ -100,7 +100,8 @@ class Encoder(nn.Module):
         text = text.value.strip('"')
         ent1, ent2 = int(ent1), int(ent2)
         x, indices = tokenize_cloze(text, [ent1, ent2], self.vocab)
-        x = self.embedding(torch.LongTensor(x))
+        embed_device = self.embedding.weight.device
+        x = self.embedding(torch.tensor(x, dtype=torch.long, device=embed_device))
         x, _ = self.lstm(x.unsqueeze(0))
         x = x.view(-1, 2, self.hidden_size)
         forward, backward = x[:, 0, :], x[:, 1, :]
@@ -108,7 +109,7 @@ class Encoder(nn.Module):
         for j, e in enumerate([ent1, ent2]):
             i = indices[j]
             if i:
-                i = torch.LongTensor(i)
+                i = torch.tensor(i, dtype=torch.long, device=forward.device)
                 embedding = torch.cat([forward[i, :], backward[-i - 1, :]])
                 out.append(torch.mean(embedding, 0))
             else:
@@ -160,7 +161,8 @@ class GenderNet(nn.Module):
         text = " ".join(t.value.strip('"') + " ." for t in text)
         ent = int(ent)
         x, indices = tokenize_cloze(text, [ent], self.vocab)
-        x = self.embedding(torch.LongTensor(x))
+        embed_device = self.embedding.weight.device
+        x = self.embedding(torch.tensor(x, dtype=torch.long, device=embed_device))
         x, _ = self.lstm(x.unsqueeze(0))
         x = x[:, -1, :]
         x = self.classification(x)

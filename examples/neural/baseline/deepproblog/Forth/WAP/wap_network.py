@@ -51,7 +51,8 @@ class RNN(nn.Module):
         x, _, indices = tokenize(sentence)
         n1, n2, n3 = indices
         seq_len = len(x)
-        x = torch.LongTensor(x).unsqueeze(0)
+        device = self.embedding.weight.device
+        x = torch.tensor(x, dtype=torch.long, device=device).unsqueeze(0)
         x = self.embedding(x)
         x, _ = self.lstm(x)
         x = x.view(seq_len, 2, self.hidden_size)
