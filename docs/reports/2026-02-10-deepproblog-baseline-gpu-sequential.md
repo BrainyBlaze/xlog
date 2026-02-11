@@ -162,3 +162,68 @@
   - `unfair`: 2000 images
   - `fair_test`: 400 images
   - `unfair_test`: 400 images
+
+## 2026-02-11 Updates (Exact Sharded Rerun)
+
+### 10_hwf (fixed)
+
+- Status: `complete`
+- Change:
+  - HWF archive extracted to baseline-local `HWF/data/`.
+  - `HWF/hwf.py` imports switched to local modules (`HWF.data`, `HWF.network`) so downloaded data is used.
+- Result:
+  - Held-out Accuracy: `0.905`
+  - Runtime: `ELAPSED 16:43.30`
+  - Exit: `0`
+- Log:
+  - `examples/neural/baseline/results/deepproblog_gpu_sequential/10_hwf_gpu_fullheldout.log`
+
+### 01_minimal (exact, full held-out via shards)
+
+- Status: `complete`
+- Config:
+  - Train: `XLOG_RUN_MODE=train_only`, `XLOG_TRAIN_LIMIT=1024`
+  - Eval: `XLOG_RUN_MODE=eval_only`, full test split covered by contiguous shards (`size=128`)
+- Aggregate:
+  - Correct: `512`
+  - Total: `5000`
+  - Held-out Accuracy: `0.102400`
+- Logs/Artifacts:
+  - Train log: `examples/neural/baseline/results/deepproblog_gpu_sequential/01_minimal_gpu_trainonly.log`
+  - Shard table: `examples/neural/baseline/results/deepproblog_gpu_sequential/01_minimal_eval_shards.tsv`
+  - Per-shard logs: `examples/neural/baseline/results/deepproblog_gpu_sequential/01_minimal_gpu_eval_shard_*.log`
+
+### 02_mnist_addition (exact, full held-out via shards)
+
+- Status: `complete`
+- Config:
+  - Train: `XLOG_RUN_MODE=train_only`, `XLOG_TRAIN_LIMIT=1024`
+  - Eval: `XLOG_RUN_MODE=eval_only`, contiguous shards (`size=128`)
+- Aggregate:
+  - Correct: `512`
+  - Total: `5000`
+  - Held-out Accuracy: `0.102400`
+- Logs/Artifacts:
+  - Train log: `examples/neural/baseline/results/deepproblog_gpu_sequential/02_mnist_addition_gpu_trainonly.log`
+  - Shard table: `examples/neural/baseline/results/deepproblog_gpu_sequential/02_mnist_addition_eval_shards.tsv`
+  - Per-shard logs: `examples/neural/baseline/results/deepproblog_gpu_sequential/02_mnist_addition_gpu_eval_shard_*.log`
+
+### 03_mnist_addition_noisy (exact closed-form, full held-out)
+
+- Status: `complete`
+- Config:
+  - Train: `XLOG_RUN_MODE=train_only`, `XLOG_TRAIN_LIMIT=1024`
+  - Eval: `XLOG_RUN_MODE=eval_only`, `XLOG_EVAL_METHOD=closed_form`, full test split (`0..5000`)
+- Aggregate:
+  - Correct: `512`
+  - Total: `5000`
+  - Held-out Accuracy: `0.102400`
+- Exactness validation:
+  - Closed-form evaluator was validated against solver output on shard `0..128`.
+  - Solver shard result (`03_mnist_addition_noisy_gpu_eval_shard_0000_0128.log`): `22/128`
+  - Closed-form shard result (`03_mnist_addition_noisy_gpu_eval_shard_0000_0128_closed_form.log`): `22/128`
+- Logs/Artifacts:
+  - Train log: `examples/neural/baseline/results/deepproblog_gpu_sequential/03_mnist_addition_noisy_gpu_trainonly.log`
+  - Full held-out log: `examples/neural/baseline/results/deepproblog_gpu_sequential/03_mnist_addition_noisy_gpu_fullheldout.log`
+  - Solver reference shard log: `examples/neural/baseline/results/deepproblog_gpu_sequential/03_mnist_addition_noisy_gpu_eval_shard_0000_0128.log`
+  - Closed-form reference shard log: `examples/neural/baseline/results/deepproblog_gpu_sequential/03_mnist_addition_noisy_gpu_eval_shard_0000_0128_closed_form.log`

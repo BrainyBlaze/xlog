@@ -102,7 +102,8 @@ def held_out_accuracy_batched(
     for start in range(0, len(queries), batch_size):
         batch_queries = queries[start : start + batch_size]
         test_queries = [query.variable_output() for query in batch_queries]
-        answers = model.solve(test_queries)
+        with torch.no_grad():
+            answers = model.solve(test_queries)
         for gt_query, answer in zip(batch_queries, answers):
             if eps is None:
                 actual = str(gt_query.output_values()[0])

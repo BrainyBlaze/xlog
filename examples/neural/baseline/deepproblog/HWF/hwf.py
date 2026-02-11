@@ -4,8 +4,8 @@ from torch.optim import Adam
 
 from deepproblog.dataset import DataLoader
 from deepproblog.engines import ApproximateEngine, ExactEngine
-from deepproblog.examples.HWF.data import HWFDataset, hwf_images
-from deepproblog.examples.HWF.network import SymbolEncoder, SymbolClassifier
+from HWF.data import HWFDataset, hwf_images
+from HWF.network import SymbolEncoder, SymbolClassifier
 from deepproblog.model import Model
 from deepproblog.network import Network
 from deepproblog.train import train_model

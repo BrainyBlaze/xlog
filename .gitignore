@@ -53,3 +53,9 @@ fuzz/corpus/
 fuzz/artifacts/
 
 docs/ref
+
+# DeepProbLog baseline generated artifacts
+examples/neural/baseline/deepproblog/*/snapshot/
+examples/neural/baseline/deepproblog/HWF/models/
+examples/neural/baseline/deepproblog/HWF/pretrain-sym_net/
+examples/neural/baseline/results/deepproblog_gpu_sequential/*.time
