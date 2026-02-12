@@ -227,3 +227,61 @@
   - Full held-out log: `examples/neural/baseline/results/deepproblog_gpu_sequential/03_mnist_addition_noisy_gpu_fullheldout.log`
   - Solver reference shard log: `examples/neural/baseline/results/deepproblog_gpu_sequential/03_mnist_addition_noisy_gpu_eval_shard_0000_0128.log`
   - Closed-form reference shard log: `examples/neural/baseline/results/deepproblog_gpu_sequential/03_mnist_addition_noisy_gpu_eval_shard_0000_0128_closed_form.log`
+
+## 2026-02-12 Updates (Strict Full-Train Rerun)
+
+### 01_minimal (strict full-train, multi-epoch)
+
+- Status: `complete`
+- Config:
+  - Train: `XLOG_RUN_MODE=train_only`, full train split (`XLOG_TRAIN_LIMIT` unset), `XLOG_EPOCHS=2`, `XLOG_TRAIN_BATCH_SIZE=2048`
+  - Eval: `XLOG_RUN_MODE=eval_only`, `XLOG_EVAL_METHOD=closed_form`, full held-out (`0..5000`)
+- Result:
+  - Held-out Accuracy: `0.2324`
+  - Held-out Correct/Total: `1162/5000`
+- Exactness validation:
+  - Solver shard (`0..128`): `23/128` in `2:24.92`
+  - Closed-form shard (`0..128`): `23/128` in `0:05.22`
+- Runtime:
+  - Train runtime: `ELAPSED 2:31:07`
+- Logs/Artifacts:
+  - Train log: `examples/neural/baseline/results/deepproblog_gpu_sequential/01_minimal_gpu_train_strict.log`
+  - Full held-out log: `examples/neural/baseline/results/deepproblog_gpu_sequential/01_minimal_gpu_fullheldout_strict.log`
+  - Solver shard log: `examples/neural/baseline/results/deepproblog_gpu_sequential/01_minimal_gpu_eval_shard_0000_0128_strict_solver.log`
+  - Closed-form shard log: `examples/neural/baseline/results/deepproblog_gpu_sequential/01_minimal_gpu_eval_shard_0000_0128_strict_closed_form.log`
+
+### 02_mnist_addition (strict full-train, multi-epoch)
+
+- Status: `complete`
+- Config:
+  - Train: `XLOG_RUN_MODE=train_only`, full train split (`XLOG_TRAIN_LIMIT` unset), `XLOG_EPOCHS=2`, `XLOG_TRAIN_BATCH_SIZE=2048`
+  - Eval: `XLOG_RUN_MODE=eval_only`, `XLOG_EVAL_METHOD=closed_form`, full held-out (`0..5000`)
+- Result:
+  - Held-out Accuracy: `0.2268`
+  - Held-out Correct/Total: `1134/5000`
+- Exactness validation:
+  - Solver shard (`0..128`): `36/128` in `2:34.51`
+  - Closed-form shard (`0..128`): `36/128` in `0:11.99`
+- Runtime:
+  - Train runtime: `ELAPSED 1:58:49`
+- Logs/Artifacts:
+  - Train log: `examples/neural/baseline/results/deepproblog_gpu_sequential/02_mnist_addition_gpu_train_strict.log`
+  - Full held-out log: `examples/neural/baseline/results/deepproblog_gpu_sequential/02_mnist_addition_gpu_fullheldout_strict.log`
+  - Solver shard log: `examples/neural/baseline/results/deepproblog_gpu_sequential/02_mnist_addition_gpu_eval_shard_0000_0128_strict_solver.log`
+  - Closed-form shard log: `examples/neural/baseline/results/deepproblog_gpu_sequential/02_mnist_addition_gpu_eval_shard_0000_0128_strict_closed_form.log`
+
+### 03_mnist_addition_noisy (strict evidence path)
+
+- Status: `complete (from prior strict full-train evidence path)`
+- Config:
+  - Train: `XLOG_RUN_MODE=train_only`, full train split (`XLOG_TRAIN_LIMIT` unset), checkpoint `snapshot/noisy_addition.pth`
+  - Eval: `XLOG_RUN_MODE=eval_only`, `XLOG_EVAL_METHOD=closed_form`, full held-out (`0..5000`)
+- Result:
+  - Held-out Accuracy: `0.1024`
+  - Held-out Correct/Total: `512/5000`
+- Exactness validation:
+  - Solver shard (`0..128`): `22/128`
+  - Closed-form shard (`0..128`): `22/128`
+- Additional run characterization:
+  - A 2-epoch strict attempt (`snapshot/noisy_addition_strict.pth`) was started and exceeded `2:35:41` wall-clock without reaching checkpoint save; terminated intentionally to avoid indefinite blocking.
+  - Log: `examples/neural/baseline/results/deepproblog_gpu_sequential/03_mnist_addition_noisy_gpu_train_strict.log`

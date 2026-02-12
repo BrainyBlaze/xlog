@@ -93,6 +93,7 @@ noisy_dataset = MutatingDataset(dataset, NoiseMutatorDecorator(0.2, noise))
 train_limit = int(os.getenv("XLOG_TRAIN_LIMIT", "0"))
 eval_batch_size = int(os.getenv("XLOG_EVAL_BATCH_SIZE", "256"))
 train_batch_size = int(os.getenv("XLOG_TRAIN_BATCH_SIZE", "1024"))
+epochs = int(os.getenv("XLOG_EPOCHS", "1"))
 run_mode = os.getenv("XLOG_RUN_MODE", "train_eval")
 state_path = os.getenv("XLOG_STATE_PATH", "snapshot/noisy_addition.pth")
 eval_start = int(os.getenv("XLOG_EVAL_START", "0"))
@@ -128,7 +129,7 @@ if run_mode not in {"train_eval", "train_only", "eval_only"}:
     )
 
 if run_mode in {"train_eval", "train_only"}:
-    train_model(model, queries, 1, log_iter=100)
+    train_model(model, queries, epochs, log_iter=100)
     model.save_state(state_path)
 else:
     model.load_state(state_path)
