@@ -74,7 +74,12 @@ def load_crohme(mode: str):
     import torch
 
     manifest = DatasetManifest.load(MANIFEST)
-    limit = manifest.ci_subset.get("train", 64) if mode == "ci" else 1024
+    if mode == "ci":
+        limit = manifest.ci_subset.get("train", 64)
+    elif mode == "dev":
+        limit = 1024
+    else:
+        limit = None
 
     inkml_files = sorted(DATA.glob("**/*.inkml"))
     images = []
@@ -87,7 +92,7 @@ def load_crohme(mode: str):
         image = inkml_to_image(inkml_file)
         images.append(image)
         labels.append(label_from_latex(latex))
-        if len(images) >= limit:
+        if limit is not None and len(images) >= limit:
             break
 
     if not images:

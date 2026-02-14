@@ -123,7 +123,12 @@ def load_cards(mode: str):
     import torch
 
     manifest = DatasetManifest.load(MANIFEST)
-    limit = manifest.ci_subset.get("train", 64) if mode == "ci" else 2048
+    if mode == "ci":
+        limit = manifest.ci_subset.get("train", 64)
+    elif mode == "dev":
+        limit = 2048
+    else:
+        limit = None
 
     transform = transforms.Compose(
         [
@@ -143,7 +148,7 @@ def load_cards(mode: str):
         with Image.open(img) as image:
             tensors.append(transform(image.convert("RGB")))
         labels.append(parsed)
-        if len(tensors) >= limit:
+        if limit is not None and len(tensors) >= limit:
             break
 
     if not tensors:
@@ -207,7 +212,7 @@ def main() -> int:
     elif args.mode == "dev":
         query_examples = 256
     else:
-        query_examples = 512
+        query_examples = len(train_labels)
 
     for epoch in range(epochs):
         picked = pick_epoch_indices(

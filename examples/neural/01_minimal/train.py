@@ -101,6 +101,37 @@ def compute_digit_accuracy(model, images, labels, device, batch_size=256):
     return correct / total if total else 0.0
 
 
+@torch.no_grad()
+def compute_addition_accuracy(model, images, labels, device, batch_size=256):
+    """Evaluate addition held-out accuracy on adjacent image pairs."""
+    model.eval()
+    if isinstance(labels, list):
+        labels = torch.tensor(labels, dtype=torch.long)
+    labels = labels.to(device)
+
+    n_items = int(labels.numel())
+    n_pairs = n_items // 2
+    if n_pairs == 0:
+        return 0.0, 0, 0
+
+    correct = 0
+    total = 0
+    for start in range(0, n_pairs, batch_size):
+        end = min(start + batch_size, n_pairs)
+        pair_ids = torch.arange(start, end, device=device, dtype=torch.long)
+        left_idx = 2 * pair_ids
+        right_idx = left_idx + 1
+        probs_a = model(images[left_idx])
+        probs_b = model(images[right_idx])
+        sum_probs = addition_sum_distribution(probs_a, probs_b)
+        pred_sum = sum_probs.argmax(dim=1)
+        true_sum = labels[left_idx] + labels[right_idx]
+        correct += int((pred_sum == true_sum).sum().item())
+        total += int(true_sum.numel())
+
+    return correct / total, correct, total
+
+
 class MNISTNet(nn.Module):
     """CNN for MNIST digit classification.
 
@@ -409,6 +440,20 @@ def main():
         print(f"  Improvement: {improvement:.1f}%")
     final_train_acc = compute_digit_accuracy(net, train_images, train_labels, device)
     print(f"  Final train accuracy: {final_train_acc:.4f}")
+
+    test_images, test_labels = load_mnist_test(args.data_path, limit=10000)
+    if device == "cuda":
+        test_images = test_images.cuda()
+    heldout_digit_acc = compute_digit_accuracy(net, test_images, test_labels, device)
+    heldout_add_acc, heldout_add_correct, heldout_add_total = compute_addition_accuracy(
+        net, test_images, test_labels, device
+    )
+    print(f"  Held-out digit accuracy: {heldout_digit_acc:.4f}")
+    print(f"Held-out Accuracy {heldout_add_acc:.4f}")
+    print(f"Held-out Correct/Total {heldout_add_correct} {heldout_add_total}")
+    print(
+        f"FINAL_METRIC: heldout_addition_acc={heldout_add_acc:.4f}, threshold=none"
+    )
 
     # Save model
     torch.save(net.state_dict(), args.save_path)

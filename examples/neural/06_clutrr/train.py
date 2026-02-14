@@ -45,7 +45,12 @@ def load_clutrr(mode: str):
         )
 
     manifest = DatasetManifest.load(MANIFEST)
-    limit = manifest.ci_subset.get("train", 64) if mode == "ci" else 2048
+    if mode == "ci":
+        limit = manifest.ci_subset.get("train", 64)
+    elif mode == "dev":
+        limit = 2048
+    else:
+        limit = None
 
     rows = []
     with data_file.open("r", encoding="utf-8") as f:
@@ -61,7 +66,7 @@ def load_clutrr(mode: str):
             if not story:
                 continue
             rows.append((story, label))
-            if len(rows) >= limit:
+            if limit is not None and len(rows) >= limit:
                 break
 
     if not rows:

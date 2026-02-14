@@ -58,7 +58,12 @@ def load_svhn_two_digit(mode: str):
     import torch
 
     manifest = DatasetManifest.load(MANIFEST)
-    limit = manifest.ci_subset.get("train", 128) if mode == "ci" else 2048
+    if mode == "ci":
+        limit = manifest.ci_subset.get("train", 128)
+    elif mode == "dev":
+        limit = 2048
+    else:
+        limit = None
 
     with h5py.File(mat_path, "r") as f:
         names = f["digitStruct"]["name"]
@@ -126,7 +131,7 @@ def load_svhn_two_digit(mode: str):
             left_digit_crops.append(left_crop)
             right_digit_crops.append(right_crop)
             labels.append((left_label, right_label))
-            if len(labels) >= limit:
+            if limit is not None and len(labels) >= limit:
                 break
 
     if not labels:
