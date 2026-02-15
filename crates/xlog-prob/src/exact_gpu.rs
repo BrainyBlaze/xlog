@@ -176,6 +176,19 @@ pub fn compile_provenance_gpu_only(
         queries.push(atom.clone());
     }
 
+    // Ensure ALL probabilistic variable nodes (Decision, Lit, NegLit) are reachable
+    // so they get CNF variables. Required for template/neural fast-path slot mapping.
+    for (idx, node) in provenance.pir.nodes().iter().enumerate() {
+        match node {
+            crate::pir::PirNode::Decision { .. }
+            | crate::pir::PirNode::Lit { .. }
+            | crate::pir::PirNode::NegLit { .. } => {
+                roots_set.insert(crate::pir::PirNodeId::from_u32(idx as u32));
+            }
+            _ => {}
+        }
+    }
+
     let mut roots: Vec<crate::pir::PirNodeId> = roots_set.into_iter().collect();
     roots.sort();
 
@@ -248,8 +261,18 @@ pub fn compile_provenance_gpu_only(
         .ok_or_else(|| XlogError::Compilation("random var count overflow".to_string()))?;
     let random_var_count = u32::try_from(random_var_count)
         .map_err(|_| XlogError::Compilation("random var count exceeds u32".to_string()))?;
-    let random_var_list = collect_random_vars_device(&provider, &encoding.vars, random_var_count)?;
-    let random_vars = DeviceRandomVarList::from_device(random_var_list, random_var_count)?;
+    let num_leaf_probs = u32::try_from(leaf_probs_host.len())
+        .map_err(|_| XlogError::Compilation("leaf_probs count exceeds u32".to_string()))?;
+    let num_choice_probs = u32::try_from(choice_true_host.len())
+        .map_err(|_| XlogError::Compilation("choice_probs count exceeds u32".to_string()))?;
+    let (random_var_list, actual_random_var_count) = collect_random_vars_device(
+        &provider,
+        &encoding.vars,
+        num_leaf_probs,
+        num_choice_probs,
+        random_var_count,
+    )?;
+    let random_vars = DeviceRandomVarList::from_device(random_var_list, actual_random_var_count)?;
     let compile_config = default_compile_config(&encoding.cnf, config.memory_bytes)?;
     let cache_config = default_cache_config(&encoding.cnf, &compile_config)?;
 

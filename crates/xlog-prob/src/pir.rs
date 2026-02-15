@@ -6,6 +6,10 @@ use xlog_core::{Result, XlogError};
 pub struct PirNodeId(u32);
 
 impl PirNodeId {
+    pub fn from_u32(id: u32) -> Self {
+        Self(id)
+    }
+
     pub fn as_u32(self) -> u32 {
         self.0
     }
