@@ -205,3 +205,127 @@ fn matches_decl_term(decl_term: &Term, query_term: &Term) -> bool {
 
     decl_term == query_term
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xlog_logic::parser;
+
+    fn parse_neural_registry(source: &str) -> Result<NeuralPredicateRegistry, String> {
+        let ast = parser::parse_program(source).map_err(|e| format!("{e}"))?;
+        NeuralPredicateRegistry::from_ast(&ast)
+    }
+
+    #[test]
+    fn test_coins_registry_two_declarations() {
+        let registry = parse_neural_registry(
+            "nn(net1, [X], Y, [heads, tails]) :: coin(1, X, Y).\n\
+             nn(net2, [X], Y, [heads, tails]) :: coin(2, X, Y).",
+        )
+        .expect("registry should parse");
+
+        let infos = registry.get("coin").expect("coin should exist");
+        assert_eq!(infos.len(), 2);
+        assert_eq!(infos[0].network, "net1");
+        assert_eq!(infos[0].labels, Some(vec!["heads".into(), "tails".into()]));
+        assert_eq!(infos[0].predicate_arity, 3);
+        assert_eq!(infos[1].network, "net2");
+        assert_eq!(infos[1].labels, Some(vec!["heads".into(), "tails".into()]));
+        assert_eq!(infos[1].predicate_arity, 3);
+    }
+
+    #[test]
+    fn test_coins_resolve_atom_constant_1() {
+        let registry = parse_neural_registry(
+            "nn(net1, [X], Y, [heads, tails]) :: coin(1, X, Y).\n\
+             nn(net2, [X], Y, [heads, tails]) :: coin(2, X, Y).",
+        )
+        .expect("registry should parse");
+
+        let atom = Atom {
+            predicate: "coin".to_string(),
+            terms: vec![
+                Term::Integer(1),
+                Term::Variable("X".into()),
+                Term::Variable("Y".into()),
+            ],
+        };
+        let info = registry.resolve_atom(&atom).expect("atom should resolve");
+        assert_eq!(info.network, "net1");
+    }
+
+    #[test]
+    fn test_coins_resolve_atom_constant_2() {
+        let registry = parse_neural_registry(
+            "nn(net1, [X], Y, [heads, tails]) :: coin(1, X, Y).\n\
+             nn(net2, [X], Y, [heads, tails]) :: coin(2, X, Y).",
+        )
+        .expect("registry should parse");
+
+        let atom = Atom {
+            predicate: "coin".to_string(),
+            terms: vec![
+                Term::Integer(2),
+                Term::Variable("X".into()),
+                Term::Variable("Y".into()),
+            ],
+        };
+        let info = registry.resolve_atom(&atom).expect("atom should resolve");
+        assert_eq!(info.network, "net2");
+    }
+
+    #[test]
+    fn test_coins_resolve_atom_variable_is_ambiguous() {
+        let registry = parse_neural_registry(
+            "nn(net1, [X, Z], Y, [heads, tails]) :: coin(X, Z, Y).\n\
+             nn(net2, [X, Z], Y, [heads, tails]) :: coin(X, Z, Y).",
+        )
+        .expect("registry should parse");
+
+        let atom = Atom {
+            predicate: "coin".to_string(),
+            terms: vec![
+                Term::Variable("C".into()),
+                Term::Variable("X".into()),
+                Term::Variable("Y".into()),
+            ],
+        };
+        let err = registry
+            .resolve_atom(&atom)
+            .expect_err("ambiguous should error");
+        assert!(err.contains("Ambiguous"));
+    }
+
+    #[test]
+    fn test_single_declaration_no_constant() {
+        let registry = parse_neural_registry("nn(net, [X], Y, [a, b]) :: pred(X, Y).")
+            .expect("registry should parse");
+
+        let infos = registry.get("pred").expect("pred should exist");
+        assert_eq!(infos.len(), 1);
+        let atom = Atom {
+            predicate: "pred".to_string(),
+            terms: vec![Term::Variable("X".into()), Term::Variable("Y".into())],
+        };
+        let info = registry
+            .resolve_atom(&atom)
+            .expect("single declaration should resolve");
+        assert_eq!(info.network, "net");
+    }
+
+    #[test]
+    fn test_duplicate_label_rejected() {
+        let err = parse_neural_registry("nn(net, [X], Y, [a, a]) :: pred(X, Y).")
+            .expect_err("duplicate labels should be rejected");
+        assert!(err.contains("duplicate label"));
+    }
+
+    #[test]
+    fn test_output_overlaps_input_rejected() {
+        let err = parse_neural_registry("nn(net, [X, X], Y, [a]) :: pred(X, Y).")
+            .expect_err("repeated input should be rejected");
+        assert!(
+            err.contains("appears multiple times") || err.contains("overlaps an input")
+        );
+    }
+}
