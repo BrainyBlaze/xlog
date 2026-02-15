@@ -165,6 +165,29 @@ extern "C" __global__ void weights_restore_var_false(
     log_false[var] = restore[0];
 }
 
+extern "C" __global__ void weights_force_var_true(
+    uint32_t var,
+    double* __restrict__ log_true,
+    double* __restrict__ restore
+) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) {
+        return;
+    }
+    restore[0] = log_true[var];
+    log_true[var] = -INFINITY;
+}
+
+extern "C" __global__ void weights_restore_var_true(
+    uint32_t var,
+    double* __restrict__ log_true,
+    const double* __restrict__ restore
+) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) {
+        return;
+    }
+    log_true[var] = restore[0];
+}
+
 extern "C" __global__ void weights_apply_query_vars(
     const uint32_t* __restrict__ query_vars,
     uint32_t count,

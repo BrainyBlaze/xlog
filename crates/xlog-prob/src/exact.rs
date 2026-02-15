@@ -261,7 +261,7 @@ impl ExactDdnnfProgram {
         out_grads: &mut [CudaBuffer],
         cfg: NeuralFastPathConfig,
     ) -> Result<()> {
-        self.neural_backward_nll_buffers_inner(slots, query_idx, probs, out_grads, cfg, None)
+        self.neural_backward_nll_buffers_inner(slots, query_idx, probs, out_grads, cfg, None, true)
     }
 
     /// Same as [`Self::neural_backward_nll_buffers`], but also returns the device-resident scalar NLL loss:
@@ -275,6 +275,7 @@ impl ExactDdnnfProgram {
         probs: &[CudaBuffer],
         out_grads: &mut [CudaBuffer],
         cfg: NeuralFastPathConfig,
+        expected_true: bool,
     ) -> Result<TrackedCudaSlice<f64>> {
         let state = self.gpu_state()?;
         let mut loss = state.provider.memory().alloc::<f64>(1)?;
@@ -285,6 +286,7 @@ impl ExactDdnnfProgram {
             out_grads,
             cfg,
             Some(&mut loss),
+            expected_true,
         )?;
         Ok(loss)
     }
@@ -297,6 +299,7 @@ impl ExactDdnnfProgram {
         out_grads: &mut [CudaBuffer],
         cfg: NeuralFastPathConfig,
         out_loss: Option<&mut TrackedCudaSlice<f64>>,
+        expected_true: bool,
     ) -> Result<()> {
         if self.gpu.is_none() {
             return Err(XlogError::Execution(
@@ -503,9 +506,16 @@ impl ExactDdnnfProgram {
         }
 
         let mut restore = state.provider.memory().alloc::<f64>(1)?;
-        {
-            let (_, var_log_false) = cache.var_log_weights_mut();
-            force_query_var_false(state.provider(), var_log_false, query_var, &mut restore)?;
+        if expected_true {
+            {
+                let (_, var_log_false) = cache.var_log_weights_mut();
+                force_query_var_false(state.provider(), var_log_false, query_var, &mut restore)?;
+            }
+        } else {
+            {
+                let (var_log_true, _) = cache.var_log_weights_mut();
+                force_query_var_true(state.provider(), var_log_true, query_var, &mut restore)?;
+            }
         }
 
         cache.eval_grads_inplace(state.handle())?;
@@ -568,9 +578,16 @@ impl ExactDdnnfProgram {
             }
             .map_err(|e| XlogError::Kernel(format!("neural_scatter (query) failed: {}", e)))?;
         }
-        {
-            let (_, var_log_false) = cache.var_log_weights_mut();
-            restore_query_var_false(state.provider(), var_log_false, query_var, &restore)?;
+        if expected_true {
+            {
+                let (_, var_log_false) = cache.var_log_weights_mut();
+                restore_query_var_false(state.provider(), var_log_false, query_var, &restore)?;
+            }
+        } else {
+            {
+                let (var_log_true, _) = cache.var_log_weights_mut();
+                restore_query_var_true(state.provider(), var_log_true, query_var, &restore)?;
+            }
         }
 
         state.provider.device().synchronize()?;
@@ -1159,6 +1176,56 @@ fn restore_query_var_false(
         )
     }
     .map_err(|e| XlogError::Kernel(format!("weights_restore_var_false failed: {}", e)))?;
+    Ok(())
+}
+
+fn force_query_var_true(
+    provider: &Arc<CudaKernelProvider>,
+    log_true: &mut TrackedCudaSlice<f64>,
+    var: u32,
+    restore: &mut TrackedCudaSlice<f64>,
+) -> Result<()> {
+    let device = provider.device().inner();
+    let func = device
+        .get_func(WEIGHTS_MODULE, weights_kernels::WEIGHTS_FORCE_VAR_TRUE)
+        .ok_or_else(|| XlogError::Kernel("weights_force_var_true kernel not found".to_string()))?;
+    unsafe {
+        func.clone().launch(
+            LaunchConfig {
+                grid_dim: (1, 1, 1),
+                block_dim: (1, 1, 1),
+                shared_mem_bytes: 0,
+            },
+            (var, log_true, restore),
+        )
+    }
+    .map_err(|e| XlogError::Kernel(format!("weights_force_var_true failed: {}", e)))?;
+    Ok(())
+}
+
+fn restore_query_var_true(
+    provider: &Arc<CudaKernelProvider>,
+    log_true: &mut TrackedCudaSlice<f64>,
+    var: u32,
+    restore: &TrackedCudaSlice<f64>,
+) -> Result<()> {
+    let device = provider.device().inner();
+    let func = device
+        .get_func(WEIGHTS_MODULE, weights_kernels::WEIGHTS_RESTORE_VAR_TRUE)
+        .ok_or_else(|| {
+            XlogError::Kernel("weights_restore_var_true kernel not found".to_string())
+        })?;
+    unsafe {
+        func.clone().launch(
+            LaunchConfig {
+                grid_dim: (1, 1, 1),
+                block_dim: (1, 1, 1),
+                shared_mem_bytes: 0,
+            },
+            (var, log_true, restore),
+        )
+    }
+    .map_err(|e| XlogError::Kernel(format!("weights_restore_var_true failed: {}", e)))?;
     Ok(())
 }
 

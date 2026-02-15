@@ -1151,8 +1151,9 @@ impl CompiledProgram {
     ///
     /// # Note
     /// Call zero_grad() before this and optimizer_step() after.
-    fn forward_backward(&mut self, py: Python<'_>, query: &str) -> PyResult<f64> {
-        let loss = self.forward_backward_tensor_internal(py, query)?;
+    #[pyo3(signature = (query, expected=true))]
+    fn forward_backward(&mut self, py: Python<'_>, query: &str, expected: bool) -> PyResult<f64> {
+        let loss = self.forward_backward_tensor_internal(py, query, expected)?;
         let loss_bound = loss.bind(py);
         loss_bound.call_method0("item")?.extract()
     }
@@ -1161,8 +1162,14 @@ impl CompiledProgram {
     ///
     /// This is the preferred API for strict GPU-native training loops. If you need a host `f64`,
     /// call `forward_backward(...)` which will read back a single scalar.
-    fn forward_backward_tensor(&mut self, py: Python<'_>, query: &str) -> PyResult<PyObject> {
-        self.forward_backward_tensor_internal(py, query)
+    #[pyo3(signature = (query, expected=true))]
+    fn forward_backward_tensor(
+        &mut self,
+        py: Python<'_>,
+        query: &str,
+        expected: bool,
+    ) -> PyResult<PyObject> {
+        self.forward_backward_tensor_internal(py, query, expected)
     }
 }
 
@@ -1171,6 +1178,7 @@ impl CompiledProgram {
         &mut self,
         py: Python<'_>,
         query: &str,
+        expected: bool,
     ) -> PyResult<PyObject> {
         // Try to parse as a direct neural predicate query first.
         match self.try_parse_direct_neural_query(query) {
@@ -1181,10 +1189,11 @@ impl CompiledProgram {
                     &network_name,
                     input_idx,
                     &target_label,
+                    expected,
                 ),
             Err(_) => {
                 let atom = self.parse_query_atom(query)?;
-                self.forward_backward_complex_tensor(py, &atom)
+                self.forward_backward_complex_tensor(py, &atom, expected)
             }
         }
     }
@@ -1216,7 +1225,7 @@ impl CompiledProgram {
             // Forward-backward for each query in batch
             let mut batch_loss = 0.0;
             for query in batch {
-                batch_loss += self.forward_backward(py, query)?;
+                batch_loss += self.forward_backward(py, query, true)?;
             }
             batch_loss /= batch.len() as f64;
 
@@ -1328,6 +1337,7 @@ impl CompiledProgram {
         network_name: &str,
         input_idx: usize,
         target_label: &str,
+        expected: bool,
     ) -> PyResult<PyObject> {
         // Get the network handle
         let handle = self.network_registry.get(network_name).ok_or_else(|| {
@@ -1357,12 +1367,26 @@ impl CompiledProgram {
         let label_idx = self.get_label_index(predicate, target_label)?;
         let prob_tensor = output_squeezed.get_item(label_idx)?;
 
+        let torch = py.import_bound("torch")?;
         let clamp_kwargs = PyDict::new_bound(py);
         clamp_kwargs.set_item("min", NLL_EPSILON)?;
-        let prob_clamped = prob_tensor.call_method("clamp", (), Some(&clamp_kwargs))?;
-
-        let log_p = prob_clamped.call_method0("log")?;
-        let loss = log_p.call_method0("__neg__")?;
+        let loss = if expected {
+            let prob_clamped = prob_tensor.call_method("clamp", (), Some(&clamp_kwargs))?;
+            let log_p = prob_clamped.call_method0("log")?;
+            log_p.call_method0("__neg__")?
+        } else {
+            let device = prob_tensor.call_method0("device")?;
+            let dtype = prob_tensor.call_method0("dtype")?;
+            let one = torch.call_method1("tensor", (1.0f64,))?;
+            let kwargs = PyDict::new_bound(py);
+            kwargs.set_item("device", device)?;
+            kwargs.set_item("dtype", dtype)?;
+            let one_on_device = one.call_method("to", (), Some(&kwargs))?;
+            let complement = one_on_device.call_method1("__sub__", (&prob_tensor,))?;
+            let complement_clamped = complement.call_method("clamp", (), Some(&clamp_kwargs))?;
+            let log_p = complement_clamped.call_method0("log")?;
+            log_p.call_method0("__neg__")?
+        };
 
         // Backprop through the network.
         loss.call_method0("backward")?;
@@ -1386,6 +1410,7 @@ impl CompiledProgram {
         &mut self,
         py: Python<'_>,
         atom: &Atom,
+        expected: bool,
     ) -> PyResult<PyObject> {
         let signature = self
             .get_or_build_query_signature(&atom.predicate, atom.terms.len())?
@@ -1575,6 +1600,7 @@ impl CompiledProgram {
                 &prob_bufs,
                 &mut grad_bufs,
                 cfg,
+                expected,
             )
             .map_err(|e| PyRuntimeError::new_err(format!("Neural fast-path error: {}", e)))?;
 
@@ -2116,9 +2142,7 @@ impl CompiledProgram {
             let (expanded_ast, target_domain) =
                 self.generate_template_ast(signature, query_pred, query_arity)?;
             let program = ExactDdnnfProgram::compile_from_program(&expanded_ast, self._gpu_config)
-                .map_err(|e| {
-                PyRuntimeError::new_err(format!("Query compilation error: {}", e))
-            })?;
+                .map_err(|e| PyRuntimeError::new_err(format!("Query compilation error: {}", e)))?;
 
             let random_vars = program.random_var_indices();
             let group_label_counts: Vec<usize> = signature
@@ -2254,8 +2278,8 @@ impl CompiledProgram {
                     let program =
                         McProgram::compile_source_with_gpu(&source_with_queries, self._gpu_config)
                             .map_err(|e| {
-                            PyRuntimeError::new_err(format!("Query compilation error: {}", e))
-                        })?;
+                                PyRuntimeError::new_err(format!("Query compilation error: {}", e))
+                            })?;
 
                     let cfg = McEvalConfig::default();
                     program
