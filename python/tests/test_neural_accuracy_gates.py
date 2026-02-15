@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 
 import pytest
+torch = pytest.importorskip("torch")
 
 from neural_test_env import runtime_env
 
@@ -32,6 +33,9 @@ EXAMPLES = [
 
 RUNTIME_ENV = runtime_env()
 
+if not torch.cuda.is_available():
+    pytest.skip("CUDA not available", allow_module_level=True)
+
 
 def _run(script: str, threshold: float) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
@@ -54,10 +58,13 @@ def _run(script: str, threshold: float) -> subprocess.CompletedProcess[str]:
 
 @pytest.mark.parametrize("script,marker", EXAMPLES)
 def test_examples_report_final_metric(script: str, marker: Path):
+    script_path = Path(script)
+    if not script_path.exists():
+        pytest.skip(f"Missing example script: {script_path}")
     if not marker.exists():
         pytest.skip(f"dataset missing for {script}")
 
-    result = _run(script, threshold=0.0)
+    result = _run(str(script_path), threshold=0.0)
     combined = f"{result.stdout}\n{result.stderr}"
     assert result.returncode == 0, combined
     assert "FINAL_METRIC" in combined
@@ -65,10 +72,13 @@ def test_examples_report_final_metric(script: str, marker: Path):
 
 @pytest.mark.parametrize("script,marker", EXAMPLES)
 def test_examples_fail_accuracy_gate_when_threshold_too_high(script: str, marker: Path):
+    script_path = Path(script)
+    if not script_path.exists():
+        pytest.skip(f"Missing example script: {script_path}")
     if not marker.exists():
         pytest.skip(f"dataset missing for {script}")
 
-    result = _run(script, threshold=1.1)
+    result = _run(str(script_path), threshold=1.1)
     combined = f"{result.stdout}\n{result.stderr}".lower()
     assert result.returncode != 0
     assert "accuracy gate failed" in combined
