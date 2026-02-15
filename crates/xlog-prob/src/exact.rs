@@ -880,8 +880,22 @@ impl ExactDdnnfProgram {
         let provider = Arc::new(CudaKernelProvider::new(device, memory)?);
 
         let gpu_pir = GpuPirGraph::from_host(&provenance.pir, &provider)?;
+        eprintln!("[diag] PIR uploaded to GPU");
         let gpu_roots = GpuPirRoots::from_host(&roots, &provider)?;
+        eprintln!("[diag] PIR roots uploaded: {} roots", roots.len());
         let encoding = encode_cnf_gpu(&gpu_pir, &gpu_roots, &provider)?;
+        eprintln!("[diag] CNF encoded: var_cap={}, clause_cap={}", encoding.cnf.var_cap, encoding.cnf.clause_cap);
+        {
+            let mut num_vars_host = [0u32; 1];
+            let mut num_clauses_host = [0u32; 1];
+            let mut num_lits_host = [0u32; 1];
+            provider.device().inner().dtoh_sync_copy_into(&encoding.cnf.num_vars, &mut num_vars_host).ok();
+            provider.device().inner().dtoh_sync_copy_into(&encoding.cnf.num_clauses, &mut num_clauses_host).ok();
+            provider.device().inner().dtoh_sync_copy_into(&encoding.cnf.num_lits, &mut num_lits_host).ok();
+            eprintln!("[diag] CNF actual: num_vars={}, num_clauses={}, num_lits={} (caps: var={}, clause={}, lit={})",
+                num_vars_host[0], num_clauses_host[0], num_lits_host[0],
+                encoding.cnf.var_cap, encoding.cnf.clause_cap, encoding.cnf.lit_cap);
+        }
         if encoding.vars.max_var != encoding.cnf.var_cap {
             return Err(XlogError::Compilation(format!(
                 "Exact inference error: CNF var_cap {} != vars.max_var {}",
@@ -932,6 +946,7 @@ impl ExactDdnnfProgram {
             &evidence_by_var,
             &provider,
         )?;
+        eprintln!("[diag] Weights built on GPU");
 
         let random_var_count = leaf_probs_host
             .len()
@@ -939,14 +954,23 @@ impl ExactDdnnfProgram {
             .ok_or_else(|| XlogError::Compilation("random var count overflow".to_string()))?;
         let random_var_count = u32::try_from(random_var_count)
             .map_err(|_| XlogError::Compilation("random var count exceeds u32".to_string()))?;
+        eprintln!("[diag] random_var_count={}, leaf_probs_host.len()={}, choice_true_host.len()={}, max_var={}, leaf_var.len()={}, choice_var.len()={}",
+            random_var_count, leaf_probs_host.len(), choice_true_host.len(),
+            encoding.vars.max_var, encoding.vars.leaf_var.len(), encoding.vars.choice_var.len());
+        // Sync device before collect to catch any prior async kernel errors
+        provider.device().inner().synchronize()
+            .map_err(|e| XlogError::Kernel(format!("[diag] sync before collect_random_vars failed: {}", e)))?;
+        eprintln!("[diag] device synced OK before collect_random_vars");
         let random_var_list =
             collect_random_vars_device(&provider, &encoding.vars, random_var_count)?;
         let random_vars = DeviceRandomVarList::from_device(random_var_list, random_var_count)?;
 
         let compile_config = default_compile_config(&encoding.cnf, config.memory_bytes)?;
         let cache_config = default_cache_config(&encoding.cnf, &compile_config)?;
+        eprintln!("[diag] Cache config: node_cap={}, edge_cap={}, level_cap={}, var_cap={}", cache_config.node_cap, cache_config.edge_cap, cache_config.level_cap, cache_config.var_cap);
 
         let mut cache = GpuCircuitCache::new(&provider, cache_config)?;
+        eprintln!("[diag] GpuCircuitCache created");
         let handle = compile_gpu_d4_and_verify_cached(
             &encoding.cnf,
             &encoding.decision_var_limit,
@@ -955,6 +979,7 @@ impl ExactDdnnfProgram {
             &mut cache,
             &random_vars,
         )?;
+        eprintln!("[diag] D4 compiled successfully");
         cache.store_weights(&handle, &weights.log_true, &weights.log_false)?;
 
         #[cfg(feature = "host-io")]
@@ -1469,6 +1494,7 @@ pub(crate) fn collect_random_vars_device(
         )
     }
     .map_err(|e| XlogError::Kernel(format!("fill_u32_iota failed: {}", e)))?;
+    eprintln!("[diag] fill_u32_iota launched (mask_len={})", mask_len);
 
     let leaf_len = u32::try_from(vars.leaf_var.len())
         .map_err(|_| XlogError::Compilation("leaf_var len exceeds u32".to_string()))?;
@@ -1498,10 +1524,18 @@ pub(crate) fn collect_random_vars_device(
             )
         }
         .map_err(|e| XlogError::Kernel(format!("mark_random_vars failed: {}", e)))?;
+        eprintln!("[diag] mark_random_vars launched (leaf_len={}, choice_len={}, mark_n={})", leaf_len, choice_len, mark_n);
     }
 
+    // Sync to catch errors from fill_u32_iota or mark_random_vars before scan
+    device.synchronize()
+        .map_err(|e| XlogError::Kernel(format!("[diag] sync after mark_random_vars failed: {}", e)))?;
+    eprintln!("[diag] sync after mark OK");
+
     let prefix_sum = provider.scan_u8_mask_device(&mask, mask_len)?;
+    eprintln!("[diag] scan_u8_mask_device done");
     let count_device = capture_compact_count_device(provider, &prefix_sum, &mask, mask_len)?;
+    eprintln!("[diag] capture_compact_count_device done");
 
     let check_kernel = device
         .get_func(FILTER_MODULE, filter_kernels::CHECK_RANDOM_VAR_COUNT)
@@ -1517,6 +1551,7 @@ pub(crate) fn collect_random_vars_device(
         )
     }
     .map_err(|e| XlogError::Kernel(format!("check_random_var_count failed: {}", e)))?;
+    eprintln!("[diag] check_random_var_count launched (expected_count={})", expected_count);
 
     let mut out = memory.alloc::<u32>(mask_len_usize)?;
     let compact_fn = device
@@ -1533,6 +1568,12 @@ pub(crate) fn collect_random_vars_device(
         )
     }
     .map_err(|e| XlogError::Kernel(format!("compact_u32_by_mask failed: {}", e)))?;
+    eprintln!("[diag] compact_u32_by_mask launched");
+
+    // Final sync to surface any errors
+    device.synchronize()
+        .map_err(|e| XlogError::Kernel(format!("[diag] final sync in collect_random_vars failed: {}", e)))?;
+    eprintln!("[diag] collect_random_vars_device complete");
 
     Ok(out)
 }

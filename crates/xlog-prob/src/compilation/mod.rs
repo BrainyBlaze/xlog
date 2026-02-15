@@ -134,6 +134,7 @@ pub fn compile_gpu_d4_and_verify_cached(
     #[cfg(debug_assertions)]
     eprintln!("[xlog-prob] compile_gpu_d4_and_verify_cached: hash_cnf_gpu");
     let key = gpu_cache::hash_cnf_gpu(cnf, provider)?;
+    eprintln!("[diag] CNF hash computed");
     #[cfg(debug_assertions)]
     {
         provider
@@ -145,12 +146,15 @@ pub fn compile_gpu_d4_and_verify_cached(
     eprintln!("[xlog-prob] compile_gpu_d4_and_verify_cached: lookup_or_insert_device");
     let lookup = cache.lookup_or_insert_device(&key)?;
     let mut handle = lookup.into_handle();
+    eprintln!("[diag] Cache lookup complete");
 
     let d4_config = d4_config_for_smoothing(config, random_vars.count())?;
     #[cfg(debug_assertions)]
     eprintln!("[xlog-prob] compile_gpu_d4_and_verify_cached: compile_gpu_d4_gated");
+    eprintln!("[diag] Starting D4 compilation...");
     let circuit_base =
         gpu_d4::compile_gpu_d4_gated(cnf, provider, &d4_config, handle.compile_needed_device())?;
+    eprintln!("[diag] D4 compilation complete");
     #[cfg(debug_assertions)]
     {
         provider.device().synchronize().map_err(|e| {
