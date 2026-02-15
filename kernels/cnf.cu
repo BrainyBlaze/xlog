@@ -1,15 +1,18 @@
 // GPU CNF encoding kernels for PIR -> Tseitin CNF.
 // Implements reachability, variable assignment, clause counting, and clause emission.
 
-// NOTE: This file is compiled to PTX and embedded in the repo. To keep regeneration possible in
-// environments that only have NVRTC available (no host C++ standard library headers), avoid
-// libstdc++ includes and define the fixed-width integer aliases we need.
+// NOTE: This file is compiled to PTX and embedded in the repo. Under NVRTC (no host headers)
+// we define integer aliases manually; under nvcc we include <stdint.h>.
+#ifdef __CUDACC_RTC__
 typedef unsigned char uint8_t;
 typedef signed char int8_t;
 typedef unsigned int uint32_t;
 typedef int int32_t;
 typedef unsigned long long uint64_t;
 typedef long long int64_t;
+#else
+#include <stdint.h>
+#endif
 
 #define PIR_CONST    0
 #define PIR_LIT      1

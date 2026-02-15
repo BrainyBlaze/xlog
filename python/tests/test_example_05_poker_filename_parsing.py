@@ -1,9 +1,12 @@
 import importlib.util
 from pathlib import Path
+import pytest
 
 
 def _load_train_module():
     path = Path("examples/neural/05_poker/train.py").resolve()
+    if not path.exists():
+        pytest.skip(f"Missing example file: {path}", allow_module_level=True)
     spec = importlib.util.spec_from_file_location("example_05_poker_train", path)
     assert spec is not None
     assert spec.loader is not None

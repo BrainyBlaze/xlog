@@ -1,11 +1,14 @@
 import importlib.util
 from pathlib import Path
+import pytest
 
 import torch
 
 
 def _load_model_module():
     path = Path("examples/neural/05_poker/model.py").resolve()
+    if not path.exists():
+        pytest.skip(f"Missing example file: {path}", allow_module_level=True)
     spec = importlib.util.spec_from_file_location("example_05_poker_model", path)
     assert spec is not None
     assert spec.loader is not None

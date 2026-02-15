@@ -10,7 +10,7 @@ if not torch.cuda.is_available():
 COINS_PROGRAM = """
     nn(net1, [X], Y, [heads, tails]) :: coin(1, X, Y).
     nn(net2, [X], Y, [heads, tails]) :: coin(2, X, Y).
-    win :- coin(1, X, heads), coin(2, Y, heads).
+    win() :- coin(1, X, heads), coin(2, Y, heads).
 """
 
 
@@ -75,7 +75,7 @@ def test_coins_forward_backward_expected_true():
     program.add_tensor_source("data", _build_data())
 
     program.zero_grad()
-    loss = program.forward_backward("win", expected=True)
+    loss = program.forward_backward("win()", expected=True)
 
     assert isinstance(loss, float)
     assert loss >= 0
@@ -89,14 +89,14 @@ def test_coins_forward_backward_expected_false():
     program.add_tensor_source("data", _build_data())
 
     program.zero_grad()
-    loss_false = program.forward_backward("win", expected=False)
+    loss_false = program.forward_backward("win()", expected=False)
     assert isinstance(loss_false, float)
     assert loss_false >= 0
     _assert_nonzero_grad(net1)
     _assert_nonzero_grad(net2)
 
     program.zero_grad()
-    loss_true = program.forward_backward("win", expected=True)
+    loss_true = program.forward_backward("win()", expected=True)
     assert loss_true != loss_false
 
 
@@ -108,7 +108,7 @@ def test_coins_training_reduces_loss():
     losses = []
     for _ in range(20):
         program.zero_grad()
-        losses.append(program.forward_backward("win"))
+        losses.append(program.forward_backward("win()"))
         program.optimizer_step()
 
     assert losses[-1] < losses[0]
@@ -118,8 +118,8 @@ def test_coins_cache_reuse():
     program, net1, net2 = _build_program()
     program.add_tensor_source("data", _build_data())
 
-    loss1 = program.forward_backward("win")
-    loss2 = program.forward_backward("win")
+    loss1 = program.forward_backward("win()")
+    loss2 = program.forward_backward("win()")
 
     assert isinstance(loss1, float)
     assert isinstance(loss2, float)
@@ -135,7 +135,7 @@ def test_coins_batching_per_network():
     program, net1, net2 = _build_program()
     program.add_tensor_source("data", _build_data())
 
-    loss = program.forward_backward("win")
+    loss = program.forward_backward("win()")
     assert isinstance(loss, float)
 
     assert net1.call_count == 1

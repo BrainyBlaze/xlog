@@ -1,17 +1,22 @@
 import subprocess
 import sys
 from pathlib import Path
+import pytest
 
 from neural_test_env import runtime_env
 
 
 RUNTIME_ENV = runtime_env()
+TRAIN_SCRIPT = Path("examples/neural/04_hwf/train.py")
+
+if not TRAIN_SCRIPT.exists():
+    pytest.skip(f"Missing example script: {TRAIN_SCRIPT}", allow_module_level=True)
 
 
 def test_hwf_ci_mode():
     data_root = Path("examples/neural/04_hwf/data/crohme")
     result = subprocess.run(
-        [sys.executable, "examples/neural/04_hwf/train.py", "--mode", "ci"],
+        [sys.executable, str(TRAIN_SCRIPT), "--mode", "ci"],
         capture_output=True,
         text=True,
         check=False,

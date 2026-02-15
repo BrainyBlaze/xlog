@@ -13,10 +13,14 @@ use xlog_core::{symbol, MemoryBudget, ScalarType, Schema};
 #[cfg(feature = "arrow-device-import")]
 use xlog_cuda::{ArrowDeviceArray, ArrowDeviceArrayOwned};
 use xlog_cuda::{CudaDevice, CudaKernelProvider, DlpackManagedTensor, GpuMemoryManager};
-use xlog_logic::ast::{ArithExpr, Atom, BodyLiteral, ProbEngine, Rule, Term};
+#[cfg(feature = "host-io")]
+use xlog_logic::ast::ArithExpr;
+use xlog_logic::ast::{Atom, BodyLiteral, ProbEngine, Rule, Term};
 use xlog_logic::parse_program;
 use xlog_neural::{NetworkConfig, NetworkRegistry, TensorMetadata, TensorSourceRegistry};
-use xlog_prob::exact::{ExactDdnnfProgram, ExactResultWithGrads, GpuConfig, QueryProbability};
+use xlog_prob::exact::{ExactDdnnfProgram, GpuConfig};
+#[cfg(feature = "host-io")]
+use xlog_prob::exact::{ExactResultWithGrads, QueryProbability};
 use xlog_prob::mc::{McEvalConfig, McProgram};
 use xlog_prob::neural_fast_path::{GpuWeightSlots, NeuralFastPathConfig};
 
@@ -198,6 +202,7 @@ fn arrow_device_from_py(obj: &Bound<'_, PyAny>) -> PyResult<ArrowDeviceArrayOwne
     Ok(unsafe { ArrowDeviceArrayOwned::from_raw(ptr as *mut ArrowDeviceArray) })
 }
 
+#[cfg(feature = "host-io")]
 fn atom_to_string(atom: &xlog_prob::provenance::GroundAtom) -> String {
     use xlog_prob::provenance::Value;
 
@@ -490,6 +495,7 @@ impl Program {
             _prob_engine: engine,
             query_signature_cache: StdHashMap::new(),
             circuit_cache: StdHashMap::new(),
+            template_compile_count: 0,
         })
     }
 }
@@ -519,6 +525,7 @@ enum InputSource {
 struct NeuralGroup {
     info: NeuralPredicateInfo,
     input_source: InputSource,
+    #[cfg(feature = "host-io")]
     output_var: Option<String>,
 }
 
@@ -547,6 +554,7 @@ enum CompiledProbProgram {
 }
 
 impl CompiledProbProgram {
+    #[cfg(feature = "host-io")]
     fn num_vars(&self) -> usize {
         match self {
             Self::Exact(p) => p.num_vars(),
@@ -579,6 +587,8 @@ pub struct CompiledProgram {
     query_signature_cache: StdHashMap<String, QuerySignature>,
     /// Cache of compiled circuits by template signature
     circuit_cache: StdHashMap<String, CachedCircuit>,
+    /// Number of times the template compilation path executed.
+    template_compile_count: usize,
 }
 
 #[pymethods]
@@ -823,6 +833,16 @@ impl CompiledProgram {
             .collect()
     }
 
+    /// Number of cached circuit templates currently stored for this program.
+    fn template_cache_size(&self) -> usize {
+        self.circuit_cache.len()
+    }
+
+    /// Number of times template compilation has been executed.
+    fn template_compile_count(&self) -> usize {
+        self.template_compile_count
+    }
+
     /// Get names of all declared neural networks (from nn() declarations).
     fn declared_network_names(&self) -> Vec<String> {
         self.declared_networks.iter().cloned().collect()
@@ -856,7 +876,34 @@ impl CompiledProgram {
 
     /// Resolve a label to its index using the declared nn/4 label list.
     fn label_to_index(&self, predicate: &str, label: &str) -> PyResult<usize> {
-        self.get_label_index(predicate, label)
+        let infos = self.neural_registry.get(predicate).ok_or_else(|| {
+            PyValueError::new_err(format!("Unknown neural predicate '{}'", predicate))
+        })?;
+        let info = match infos.as_slice() {
+            [] => {
+                return Err(PyValueError::new_err(format!(
+                    "Unknown neural predicate '{}'",
+                    predicate
+                )))
+            }
+            [single] => single,
+            _ => {
+                return Err(PyValueError::new_err(format!(
+                    "Predicate '{}' has multiple nn/4 declarations; provide a concrete query atom",
+                    predicate
+                )))
+            }
+        };
+        let labels = info.labels.as_ref().ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "Predicate '{}' does not declare a label list in nn/4",
+                predicate
+            ))
+        })?;
+        labels
+            .iter()
+            .position(|l| l == label)
+            .ok_or_else(|| PyValueError::new_err(format!("Label '{}' not in declared list", label)))
     }
 
     /// Check if a network is declared in the program.
@@ -1364,7 +1411,7 @@ impl CompiledProgram {
 
         // Select the target probability tensor and compute loss on GPU:
         // loss = -log(clamp(prob, min=epsilon)).
-        let label_idx = self.get_label_index(predicate, target_label)?;
+        let label_idx = self.get_label_index(predicate, network_name, target_label)?;
         let prob_tensor = output_squeezed.get_item(label_idx)?;
 
         let torch = py.import_bound("torch")?;
@@ -1556,6 +1603,7 @@ impl CompiledProgram {
             let cached =
                 self.compile_circuit_for_template(&signature, &pred_name, atom.terms.len())?;
             self.circuit_cache.insert(cache_key.clone(), cached);
+            self.template_compile_count = self.template_compile_count.saturating_add(1);
         }
 
         let cached = self
@@ -1725,25 +1773,22 @@ impl CompiledProgram {
                     InputSource::ImplicitSlot(next_slot)
                 };
 
-            let output_term = body_atom.terms.get(info.output_position).ok_or_else(|| {
+            let _output_term = body_atom.terms.get(info.output_position).ok_or_else(|| {
                 PyValueError::new_err(format!(
                     "Malformed declaration for '{}': missing output variable at {}",
                     info.predicate, info.output_position
                 ))
             })?;
-            let output_var = match output_term {
+            #[cfg(feature = "host-io")]
+            let output_var = match _output_term {
                 Term::Variable(name) => Some(name.clone()),
-                _ => {
-                    return Err(PyValueError::new_err(format!(
-                        "Expected variable at output position {} of neural call '{}'",
-                        info.output_position, info.predicate
-                    )));
-                }
+                _ => None,
             };
 
             groups.push(NeuralGroup {
                 info: info.clone(),
                 input_source,
+                #[cfg(feature = "host-io")]
                 output_var,
             });
         }
@@ -1830,6 +1875,7 @@ impl CompiledProgram {
             .position(|term| matches!(term, Term::Variable(name) if name == var_name))
     }
 
+    #[cfg(feature = "host-io")]
     fn generate_template_ast(
         &self,
         signature: &QuerySignature,
@@ -1951,6 +1997,7 @@ impl CompiledProgram {
         Ok((template_program, target_domain))
     }
 
+    #[cfg(feature = "host-io")]
     fn generate_target_domain(
         &self,
         query_pred: &str,
@@ -2021,6 +2068,7 @@ impl CompiledProgram {
         }
     }
 
+    #[cfg(feature = "host-io")]
     fn extract_addition_domain_from_rule(
         &self,
         rule: &Rule,
@@ -2091,6 +2139,7 @@ impl CompiledProgram {
         Ok(None)
     }
 
+    #[cfg(feature = "host-io")]
     fn extract_arith_var(&self, expr: &ArithExpr) -> PyResult<String> {
         match expr {
             ArithExpr::Variable(name) => Ok(name.clone()),
@@ -2117,6 +2166,7 @@ impl CompiledProgram {
         key
     }
 
+    #[cfg(feature = "host-io")]
     fn label_string_to_term(&self, label: &str) -> Term {
         if let Ok(v) = label.parse::<i64>() {
             Term::Integer(v)
@@ -2186,26 +2236,16 @@ impl CompiledProgram {
         }
     }
     /// Get the label index for a given label string from declared labels.
-    fn get_label_index(&self, predicate: &str, label: &str) -> PyResult<usize> {
+    fn get_label_index(&self, predicate: &str, network: &str, label: &str) -> PyResult<usize> {
         let infos = self.neural_registry.get(predicate).ok_or_else(|| {
             PyValueError::new_err(format!("Unknown neural predicate '{}'", predicate))
         })?;
-        let info = match infos.as_slice() {
-            [] => {
-                return Err(PyValueError::new_err(format!(
-                    "Unknown neural predicate '{}'",
-                    predicate
-                )))
-            }
-            [single] => single,
-            _ => {
-                return Err(PyValueError::new_err(format!(
-                    "Predicate '{}' has {} nn/4 declarations; provide a concrete query atom",
-                    predicate,
-                    infos.len()
-                )))
-            }
-        };
+        let info = infos.iter().find(|i| i.network == network).ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "No nn/4 declaration for predicate '{}' with network '{}'",
+                predicate, network
+            ))
+        })?;
         let labels = info.labels.as_ref().ok_or_else(|| {
             PyValueError::new_err(format!(
                 "Predicate '{}' does not declare a label list in nn/4",
@@ -2314,6 +2354,7 @@ impl CompiledProgram {
         }
     }
 
+    #[cfg(feature = "host-io")]
     fn pack_result_probs(
         &self,
         py: Python<'_>,
@@ -2372,6 +2413,7 @@ impl CompiledProgram {
         })
     }
 
+    #[cfg(feature = "host-io")]
     fn pack_result_with_grads(
         &self,
         py: Python<'_>,
@@ -2458,6 +2500,7 @@ impl CompiledProgram {
         })
     }
 
+    #[cfg(feature = "host-io")]
     fn pack_result_mc(
         &self,
         py: Python<'_>,

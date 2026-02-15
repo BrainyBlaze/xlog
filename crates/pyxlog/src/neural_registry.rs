@@ -324,8 +324,6 @@ mod tests {
     fn test_output_overlaps_input_rejected() {
         let err = parse_neural_registry("nn(net, [X, X], Y, [a]) :: pred(X, Y).")
             .expect_err("repeated input should be rejected");
-        assert!(
-            err.contains("appears multiple times") || err.contains("overlaps an input")
-        );
+        assert!(err.contains("appears multiple times") || err.contains("overlaps an input"));
     }
 }

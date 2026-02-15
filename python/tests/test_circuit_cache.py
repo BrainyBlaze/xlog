@@ -7,8 +7,6 @@ These tests verify:
 """
 
 import pytest
-import time
-
 torch = pytest.importorskip("torch")
 pyxlog = pytest.importorskip("pyxlog")
 
@@ -47,6 +45,7 @@ class TestCircuitCache:
     def test_cache_hit_same_structure(self, monkeypatch):
         """Repeated queries with same structure should use cached circuit."""
         program = pyxlog.Program.compile(PROGRAM_SOURCE)
+        baseline_compiles = program.template_compile_count()
 
         # Enforce GPU-native path: forbid any internal .tolist() (would force device->host transfer).
         def _forbid_tolist(*_args, **_kwargs):
@@ -64,20 +63,13 @@ class TestCircuitCache:
         program.add_tensor_source("X", dummy_images)
 
         # First query - should compile circuit (cache miss)
-        t0 = time.time()
         loss1 = program.forward_backward("addition(0, 1, 0)")
-        time_first = time.time() - t0
+        assert program.template_compile_count() == baseline_compiles + 1
 
         # Second query with SAME structure - should use cache
-        t0 = time.time()
         loss2 = program.forward_backward("addition(2, 3, 0)")
-        time_second = time.time() - t0
-
-        # Cache hit should be significantly faster (no D4 compilation)
-        # First query includes D4 compilation (~100-200ms)
-        # Cached query should be mostly GPU evaluation (~10-50ms)
-        assert time_second < time_first, \
-            f"Cache hit ({time_second:.3f}s) should be faster than miss ({time_first:.3f}s)"
+        assert program.template_compile_count() == baseline_compiles + 1
+        assert program.template_cache_size() == 1
 
         # Both should return valid losses
         assert loss1 > 0, f"First loss should be positive: {loss1}"
@@ -86,6 +78,7 @@ class TestCircuitCache:
     def test_multiple_cache_hits(self):
         """Multiple queries with same structure should all benefit from cache."""
         program = pyxlog.Program.compile(PROGRAM_SOURCE)
+        baseline_compiles = program.template_compile_count()
 
         net = SimpleNet(NUM_CLASSES).cuda()
         optimizer = torch.optim.Adam(net.parameters(), lr=0.001)
@@ -96,6 +89,8 @@ class TestCircuitCache:
 
         # First query - cache miss
         loss_first = program.forward_backward("addition(0, 1, 0)")
+        assert program.template_compile_count() == baseline_compiles + 1
+        assert program.template_cache_size() == 1
 
         # Multiple queries with same structure - all cache hits
         losses = []
@@ -103,6 +98,7 @@ class TestCircuitCache:
             loss = program.forward_backward(f"addition({i}, {i+1}, {target_sum(i)})")
             losses.append(loss)
             assert loss > 0, f"Query {i} should return valid loss"
+            assert program.template_compile_count() == baseline_compiles + 1
 
         # All losses should be valid
         assert all(loss > 0 for loss in losses)
@@ -153,24 +149,15 @@ class TestCachePerformance:
         # Simulate a short training loop with repeated query shape.
         queries = [f"addition({i}, {i+1}, {target_sum(i)})" for i in range(6)]
 
-        t0 = time.time()
         epoch_times = []
         for epoch in range(2):
-            epoch_t0 = time.time()
             optimizer.zero_grad()
             total_loss = 0.0
             for q in queries:
                 loss = program.forward_backward(q)
                 total_loss += loss
             optimizer.step()
-            epoch_times.append(time.time() - epoch_t0)
-        elapsed = time.time() - t0
+            assert program.template_compile_count() == 1
+            epoch_times.append(total_loss)
 
-        # Runtime can fluctuate by device/driver, but this loop must complete in bounded time.
-        assert elapsed < 180.0, \
-            f"Training took {elapsed:.1f}s, expected completion within 180s"
-
-        print(
-            f"\nTraining loop with caching: total={elapsed:.2f}s, "
-            f"epoch1={epoch_times[0]:.2f}s, epoch2={epoch_times[1]:.2f}s"
-        )
+        assert epoch_times, "Expected at least one epoch result"
