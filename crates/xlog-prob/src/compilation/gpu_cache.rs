@@ -191,10 +191,7 @@ impl GpuCircuitCache {
 
     pub fn var_log_weights_mut(
         &mut self,
-    ) -> (
-        &mut TrackedCudaSlice<f64>,
-        &mut TrackedCudaSlice<f64>,
-    ) {
+    ) -> (&mut TrackedCudaSlice<f64>, &mut TrackedCudaSlice<f64>) {
         (&mut self.var_log_true, &mut self.var_log_false)
     }
 
@@ -267,34 +264,31 @@ impl GpuCircuitCache {
             XlogError::Compilation("GpuCircuitCache num_slots overflow".to_string())
         })?;
 
-        let node_cap = usize::try_from(config.node_cap).map_err(|_| {
-            XlogError::Compilation("GpuCircuitCache node_cap overflow".to_string())
-        })?;
-        let edge_cap = usize::try_from(config.edge_cap).map_err(|_| {
-            XlogError::Compilation("GpuCircuitCache edge_cap overflow".to_string())
-        })?;
+        let node_cap = usize::try_from(config.node_cap)
+            .map_err(|_| XlogError::Compilation("GpuCircuitCache node_cap overflow".to_string()))?;
+        let edge_cap = usize::try_from(config.edge_cap)
+            .map_err(|_| XlogError::Compilation("GpuCircuitCache edge_cap overflow".to_string()))?;
         let level_cap = usize::try_from(config.level_cap).map_err(|_| {
             XlogError::Compilation("GpuCircuitCache level_cap overflow".to_string())
         })?;
-        let var_cap = usize::try_from(config.var_cap).map_err(|_| {
-            XlogError::Compilation("GpuCircuitCache var_cap overflow".to_string())
-        })?;
+        let var_cap = usize::try_from(config.var_cap)
+            .map_err(|_| XlogError::Compilation("GpuCircuitCache var_cap overflow".to_string()))?;
 
-        let node_slots = slot_len
-            .checked_mul(node_cap)
-            .ok_or_else(|| XlogError::Compilation("GpuCircuitCache node slots overflow".to_string()))?;
-        let edge_slots = slot_len
-            .checked_mul(edge_cap)
-            .ok_or_else(|| XlogError::Compilation("GpuCircuitCache edge slots overflow".to_string()))?;
-        let var_slots = slot_len
-            .checked_mul(var_cap + 1)
-            .ok_or_else(|| XlogError::Compilation("GpuCircuitCache var slots overflow".to_string()))?;
-        let node_offsets = slot_len
-            .checked_mul(node_cap + 1)
-            .ok_or_else(|| XlogError::Compilation("GpuCircuitCache offset slots overflow".to_string()))?;
-        let level_offsets = slot_len
-            .checked_mul(level_cap + 1)
-            .ok_or_else(|| XlogError::Compilation("GpuCircuitCache level offsets overflow".to_string()))?;
+        let node_slots = slot_len.checked_mul(node_cap).ok_or_else(|| {
+            XlogError::Compilation("GpuCircuitCache node slots overflow".to_string())
+        })?;
+        let edge_slots = slot_len.checked_mul(edge_cap).ok_or_else(|| {
+            XlogError::Compilation("GpuCircuitCache edge slots overflow".to_string())
+        })?;
+        let var_slots = slot_len.checked_mul(var_cap + 1).ok_or_else(|| {
+            XlogError::Compilation("GpuCircuitCache var slots overflow".to_string())
+        })?;
+        let node_offsets = slot_len.checked_mul(node_cap + 1).ok_or_else(|| {
+            XlogError::Compilation("GpuCircuitCache offset slots overflow".to_string())
+        })?;
+        let level_offsets = slot_len.checked_mul(level_cap + 1).ok_or_else(|| {
+            XlogError::Compilation("GpuCircuitCache level offsets overflow".to_string())
+        })?;
 
         let mut keys = memory.alloc::<u64>(table_len)?;
         let mut slots = memory.alloc::<u32>(table_len)?;
@@ -329,24 +323,24 @@ impl GpuCircuitCache {
         let mut zero_f64 = memory.alloc::<f64>(zero_len)?;
         let mut one_f64 = memory.alloc::<f64>(1)?;
 
-        device.memset_zeros(&mut keys).map_err(|e| {
-            XlogError::Kernel(format!("GpuCircuitCache zero keys failed: {}", e))
-        })?;
-        device.memset_zeros(&mut slots).map_err(|e| {
-            XlogError::Kernel(format!("GpuCircuitCache zero slots failed: {}", e))
-        })?;
-        device.memset_zeros(&mut state).map_err(|e| {
-            XlogError::Kernel(format!("GpuCircuitCache zero state failed: {}", e))
-        })?;
+        device
+            .memset_zeros(&mut keys)
+            .map_err(|e| XlogError::Kernel(format!("GpuCircuitCache zero keys failed: {}", e)))?;
+        device
+            .memset_zeros(&mut slots)
+            .map_err(|e| XlogError::Kernel(format!("GpuCircuitCache zero slots failed: {}", e)))?;
+        device
+            .memset_zeros(&mut state)
+            .map_err(|e| XlogError::Kernel(format!("GpuCircuitCache zero state failed: {}", e)))?;
         device.memset_zeros(&mut last_used).map_err(|e| {
             XlogError::Kernel(format!("GpuCircuitCache zero last_used failed: {}", e))
         })?;
         device.memset_zeros(&mut slot_states).map_err(|e| {
             XlogError::Kernel(format!("GpuCircuitCache zero slot_states failed: {}", e))
         })?;
-        device.memset_zeros(&mut clock).map_err(|e| {
-            XlogError::Kernel(format!("GpuCircuitCache zero clock failed: {}", e))
-        })?;
+        device
+            .memset_zeros(&mut clock)
+            .map_err(|e| XlogError::Kernel(format!("GpuCircuitCache zero clock failed: {}", e)))?;
 
         device.memset_zeros(&mut node_type).map_err(|e| {
             XlogError::Kernel(format!("GpuCircuitCache zero node_type failed: {}", e))
@@ -357,18 +351,20 @@ impl GpuCircuitCache {
         device.memset_zeros(&mut child_indices).map_err(|e| {
             XlogError::Kernel(format!("GpuCircuitCache zero child_indices failed: {}", e))
         })?;
-        device.memset_zeros(&mut lit).map_err(|e| {
-            XlogError::Kernel(format!("GpuCircuitCache zero lit failed: {}", e))
-        })?;
+        device
+            .memset_zeros(&mut lit)
+            .map_err(|e| XlogError::Kernel(format!("GpuCircuitCache zero lit failed: {}", e)))?;
         device.memset_zeros(&mut decision_var).map_err(|e| {
             XlogError::Kernel(format!("GpuCircuitCache zero decision_var failed: {}", e))
         })?;
-        device.memset_zeros(&mut decision_child_false).map_err(|e| {
-            XlogError::Kernel(format!(
-                "GpuCircuitCache zero decision_child_false failed: {}",
-                e
-            ))
-        })?;
+        device
+            .memset_zeros(&mut decision_child_false)
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "GpuCircuitCache zero decision_child_false failed: {}",
+                    e
+                ))
+            })?;
         device.memset_zeros(&mut decision_child_true).map_err(|e| {
             XlogError::Kernel(format!(
                 "GpuCircuitCache zero decision_child_true failed: {}",
@@ -387,12 +383,12 @@ impl GpuCircuitCache {
         device.memset_zeros(&mut var_log_false).map_err(|e| {
             XlogError::Kernel(format!("GpuCircuitCache zero var_log_false failed: {}", e))
         })?;
-        device.memset_zeros(&mut values).map_err(|e| {
-            XlogError::Kernel(format!("GpuCircuitCache zero values failed: {}", e))
-        })?;
-        device.memset_zeros(&mut adj).map_err(|e| {
-            XlogError::Kernel(format!("GpuCircuitCache zero adj failed: {}", e))
-        })?;
+        device
+            .memset_zeros(&mut values)
+            .map_err(|e| XlogError::Kernel(format!("GpuCircuitCache zero values failed: {}", e)))?;
+        device
+            .memset_zeros(&mut adj)
+            .map_err(|e| XlogError::Kernel(format!("GpuCircuitCache zero adj failed: {}", e)))?;
         device.memset_zeros(&mut grad_true).map_err(|e| {
             XlogError::Kernel(format!("GpuCircuitCache zero grad_true failed: {}", e))
         })?;
@@ -406,7 +402,10 @@ impl GpuCircuitCache {
             XlogError::Kernel(format!("GpuCircuitCache zero meta_num_nodes failed: {}", e))
         })?;
         device.memset_zeros(&mut meta_num_levels).map_err(|e| {
-            XlogError::Kernel(format!("GpuCircuitCache zero meta_num_levels failed: {}", e))
+            XlogError::Kernel(format!(
+                "GpuCircuitCache zero meta_num_levels failed: {}",
+                e
+            ))
         })?;
         device.memset_zeros(&mut meta_root).map_err(|e| {
             XlogError::Kernel(format!("GpuCircuitCache zero meta_root failed: {}", e))
@@ -419,10 +418,14 @@ impl GpuCircuitCache {
         })?;
         device
             .htod_sync_copy_into(&[1u32], &mut always_on)
-            .map_err(|e| XlogError::Kernel(format!("GpuCircuitCache init always_on failed: {}", e)))?;
+            .map_err(|e| {
+                XlogError::Kernel(format!("GpuCircuitCache init always_on failed: {}", e))
+            })?;
         device
             .htod_sync_copy_into(&[1.0f64], &mut one_f64)
-            .map_err(|e| XlogError::Kernel(format!("GpuCircuitCache init one_f64 failed: {}", e)))?;
+            .map_err(|e| {
+                XlogError::Kernel(format!("GpuCircuitCache init one_f64 failed: {}", e))
+            })?;
 
         Ok(Self {
             provider: provider.clone(),
@@ -649,28 +652,25 @@ impl GpuCircuitCache {
         };
 
         let node_stride = self.node_cap;
-        let offset_stride = self
-            .node_cap
-            .checked_add(1)
-            .ok_or_else(|| XlogError::Compilation("GpuCircuitCache store: node_cap overflow".to_string()))?;
-        let level_offset_stride = self
-            .level_cap
-            .checked_add(1)
-            .ok_or_else(|| XlogError::Compilation("GpuCircuitCache store: level_cap overflow".to_string()))?;
-        let var_stride = self
-            .var_cap
-            .checked_add(1)
-            .ok_or_else(|| XlogError::Compilation("GpuCircuitCache store: var_cap overflow".to_string()))?;
+        let offset_stride = self.node_cap.checked_add(1).ok_or_else(|| {
+            XlogError::Compilation("GpuCircuitCache store: node_cap overflow".to_string())
+        })?;
+        let level_offset_stride = self.level_cap.checked_add(1).ok_or_else(|| {
+            XlogError::Compilation("GpuCircuitCache store: level_cap overflow".to_string())
+        })?;
+        let var_stride = self.var_cap.checked_add(1).ok_or_else(|| {
+            XlogError::Compilation("GpuCircuitCache store: var_cap overflow".to_string())
+        })?;
 
-        let num_nodes_plus1 = num_nodes
-            .checked_add(1)
-            .ok_or_else(|| XlogError::Compilation("GpuCircuitCache store: num_nodes overflow".to_string()))?;
-        let num_levels_plus1 = num_levels
-            .checked_add(1)
-            .ok_or_else(|| XlogError::Compilation("GpuCircuitCache store: num_levels overflow".to_string()))?;
-        let weights_len = max_var
-            .checked_add(1)
-            .ok_or_else(|| XlogError::Compilation("GpuCircuitCache store: max_var overflow".to_string()))?;
+        let num_nodes_plus1 = num_nodes.checked_add(1).ok_or_else(|| {
+            XlogError::Compilation("GpuCircuitCache store: num_nodes overflow".to_string())
+        })?;
+        let num_levels_plus1 = num_levels.checked_add(1).ok_or_else(|| {
+            XlogError::Compilation("GpuCircuitCache store: num_levels overflow".to_string())
+        })?;
+        let weights_len = max_var.checked_add(1).ok_or_else(|| {
+            XlogError::Compilation("GpuCircuitCache store: max_var overflow".to_string())
+        })?;
 
         let grid_nodes = grid_for(num_nodes);
         if grid_nodes != 0 {
@@ -940,10 +940,9 @@ impl GpuCircuitCache {
         weights_true: &TrackedCudaSlice<f64>,
         weights_false: &TrackedCudaSlice<f64>,
     ) -> Result<()> {
-        let weights_len = handle
-            .max_var
-            .checked_add(1)
-            .ok_or_else(|| XlogError::Compilation("GpuCircuitCache store_weights max_var overflow".to_string()))?;
+        let weights_len = handle.max_var.checked_add(1).ok_or_else(|| {
+            XlogError::Compilation("GpuCircuitCache store_weights max_var overflow".to_string())
+        })?;
         let weights_len_usize = usize::try_from(weights_len).map_err(|_| {
             XlogError::Compilation("GpuCircuitCache store_weights len overflow".to_string())
         })?;
@@ -968,10 +967,9 @@ impl GpuCircuitCache {
             (weights_len + block_dim - 1) / block_dim
         };
         if grid_dim != 0 {
-            let var_stride = self
-                .var_cap
-                .checked_add(1)
-                .ok_or_else(|| XlogError::Compilation("GpuCircuitCache store_weights var_cap overflow".to_string()))?;
+            let var_stride = self.var_cap.checked_add(1).ok_or_else(|| {
+                XlogError::Compilation("GpuCircuitCache store_weights var_cap overflow".to_string())
+            })?;
             unsafe {
                 store_f64.clone().launch(
                     LaunchConfig {
@@ -1024,12 +1022,9 @@ impl GpuCircuitCache {
         weights_true: &TrackedCudaSlice<f64>,
         weights_false: &TrackedCudaSlice<f64>,
     ) -> Result<()> {
-        let weights_len = handle
-            .max_var
-            .checked_add(1)
-            .ok_or_else(|| {
-                XlogError::Compilation("GpuCircuitCache overwrite_weights max_var overflow".to_string())
-            })?;
+        let weights_len = handle.max_var.checked_add(1).ok_or_else(|| {
+            XlogError::Compilation("GpuCircuitCache overwrite_weights max_var overflow".to_string())
+        })?;
         let weights_len_usize = usize::try_from(weights_len).map_err(|_| {
             XlogError::Compilation("GpuCircuitCache overwrite_weights len overflow".to_string())
         })?;
@@ -1054,14 +1049,11 @@ impl GpuCircuitCache {
             (weights_len + block_dim - 1) / block_dim
         };
         if grid_dim != 0 {
-            let var_stride = self
-                .var_cap
-                .checked_add(1)
-                .ok_or_else(|| {
-                    XlogError::Compilation(
-                        "GpuCircuitCache overwrite_weights var_cap overflow".to_string(),
-                    )
-                })?;
+            let var_stride = self.var_cap.checked_add(1).ok_or_else(|| {
+                XlogError::Compilation(
+                    "GpuCircuitCache overwrite_weights var_cap overflow".to_string(),
+                )
+            })?;
             unsafe {
                 store_f64.clone().launch(
                     LaunchConfig {
@@ -1079,7 +1071,9 @@ impl GpuCircuitCache {
                     ),
                 )
             }
-            .map_err(|e| XlogError::Kernel(format!("cache_overwrite_weights_true failed: {}", e)))?;
+            .map_err(|e| {
+                XlogError::Kernel(format!("cache_overwrite_weights_true failed: {}", e))
+            })?;
 
             unsafe {
                 store_f64.clone().launch(
@@ -1103,10 +1097,9 @@ impl GpuCircuitCache {
             })?;
         }
 
-        self.provider
-            .device()
-            .synchronize()
-            .map_err(|e| XlogError::Kernel(format!("cache overwrite_weights sync failed: {}", e)))?;
+        self.provider.device().synchronize().map_err(|e| {
+            XlogError::Kernel(format!("cache overwrite_weights sync failed: {}", e))
+        })?;
         Ok(())
     }
 
@@ -1118,20 +1111,18 @@ impl GpuCircuitCache {
         let mask_len = u32::try_from(mask.len()).map_err(|_| {
             XlogError::Compilation("GpuCircuitCache free_var_mask len overflow".to_string())
         })?;
-        let expected_len = handle
-            .max_var
-            .checked_add(1)
-            .ok_or_else(|| XlogError::Compilation("GpuCircuitCache free_var_mask max_var overflow".to_string()))?;
+        let expected_len = handle.max_var.checked_add(1).ok_or_else(|| {
+            XlogError::Compilation("GpuCircuitCache free_var_mask max_var overflow".to_string())
+        })?;
         if mask_len != expected_len {
             return Err(XlogError::Compilation(format!(
                 "GpuCircuitCache free_var_mask len {} != expected {}",
                 mask_len, expected_len
             )));
         }
-        let var_stride = self
-            .var_cap
-            .checked_add(1)
-            .ok_or_else(|| XlogError::Compilation("GpuCircuitCache free_var_mask var_cap overflow".to_string()))?;
+        let var_stride = self.var_cap.checked_add(1).ok_or_else(|| {
+            XlogError::Compilation("GpuCircuitCache free_var_mask var_cap overflow".to_string())
+        })?;
         if expected_len > var_stride {
             return Err(XlogError::Compilation(format!(
                 "GpuCircuitCache free_var_mask len {} exceeds var_cap+1 {}",
@@ -1169,10 +1160,9 @@ impl GpuCircuitCache {
         }
         .map_err(|e| XlogError::Kernel(format!("cache_store_free_var_mask failed: {}", e)))?;
 
-        self.provider
-            .device()
-            .synchronize()
-            .map_err(|e| XlogError::Kernel(format!("cache store free_var_mask sync failed: {}", e)))?;
+        self.provider.device().synchronize().map_err(|e| {
+            XlogError::Kernel(format!("cache store free_var_mask sync failed: {}", e))
+        })?;
 
         self.has_free_var_mask = true;
         Ok(())
@@ -1335,14 +1325,12 @@ impl GpuCircuitCache {
             }
         };
         let node_stride = self.node_cap;
-        let var_stride = self
-            .var_cap
-            .checked_add(1)
-            .ok_or_else(|| XlogError::Compilation("GPU cache eval_grads var_cap overflow".to_string()))?;
-        let weights_len = self
-            .var_cap
-            .checked_add(1)
-            .ok_or_else(|| XlogError::Compilation("GPU cache eval_grads var_cap overflow".to_string()))?;
+        let var_stride = self.var_cap.checked_add(1).ok_or_else(|| {
+            XlogError::Compilation("GPU cache eval_grads var_cap overflow".to_string())
+        })?;
+        let weights_len = self.var_cap.checked_add(1).ok_or_else(|| {
+            XlogError::Compilation("GPU cache eval_grads var_cap overflow".to_string())
+        })?;
 
         let grid_nodes = grid_for(self.node_cap);
         if grid_nodes != 0 {
@@ -1439,7 +1427,9 @@ impl GpuCircuitCache {
                 xlog_cuda::circuit_kernels::XGCF_BACKWARD_LEVEL_PROPAGATE_CACHED,
             )
             .ok_or_else(|| {
-                XlogError::Kernel("xgcf_backward_level_propagate_cached kernel not found".to_string())
+                XlogError::Kernel(
+                    "xgcf_backward_level_propagate_cached kernel not found".to_string(),
+                )
             })?;
         let decision_grad = device
             .get_func(
@@ -1457,7 +1447,9 @@ impl GpuCircuitCache {
                 xlog_cuda::circuit_kernels::XGCF_BACKWARD_LEVEL_LIT_GRAD_CACHED,
             )
             .ok_or_else(|| {
-                XlogError::Kernel("xgcf_backward_level_lit_grad_cached kernel not found".to_string())
+                XlogError::Kernel(
+                    "xgcf_backward_level_lit_grad_cached kernel not found".to_string(),
+                )
             })?;
 
         let num_blocks = (self.node_cap + block_size - 1) / block_size;
@@ -1500,7 +1492,10 @@ impl GpuCircuitCache {
                 )
             }
             .map_err(|e| {
-                XlogError::Kernel(format!("xgcf_backward_level_propagate_cached failed: {}", e))
+                XlogError::Kernel(format!(
+                    "xgcf_backward_level_propagate_cached failed: {}",
+                    e
+                ))
             })?;
 
             let mut params: Vec<*mut std::ffi::c_void> = vec![
@@ -1602,9 +1597,14 @@ impl GpuCircuitCache {
 
         if apply_grads {
             let apply_grad = device
-                .get_func(xlog_cuda::CIRCUIT_MODULE, xlog_cuda::circuit_kernels::XGCF_FREE_VAR_APPLY_GRAD_CACHED)
+                .get_func(
+                    xlog_cuda::CIRCUIT_MODULE,
+                    xlog_cuda::circuit_kernels::XGCF_FREE_VAR_APPLY_GRAD_CACHED,
+                )
                 .ok_or_else(|| {
-                    XlogError::Kernel("xgcf_free_var_apply_grad_cached kernel not found".to_string())
+                    XlogError::Kernel(
+                        "xgcf_free_var_apply_grad_cached kernel not found".to_string(),
+                    )
                 })?;
             unsafe {
                 apply_grad.clone().launch(
@@ -1632,12 +1632,20 @@ impl GpuCircuitCache {
 
         if apply_log_z {
             let reduce_stage = device
-                .get_func(xlog_cuda::CIRCUIT_MODULE, xlog_cuda::circuit_kernels::XGCF_FREE_VAR_REDUCE_STAGE_CACHED)
+                .get_func(
+                    xlog_cuda::CIRCUIT_MODULE,
+                    xlog_cuda::circuit_kernels::XGCF_FREE_VAR_REDUCE_STAGE_CACHED,
+                )
                 .ok_or_else(|| {
-                    XlogError::Kernel("xgcf_free_var_reduce_stage_cached kernel not found".to_string())
+                    XlogError::Kernel(
+                        "xgcf_free_var_reduce_stage_cached kernel not found".to_string(),
+                    )
                 })?;
             let add_scalar = device
-                .get_func(xlog_cuda::CIRCUIT_MODULE, xlog_cuda::circuit_kernels::XGCF_ADD_SCALAR_CACHED)
+                .get_func(
+                    xlog_cuda::CIRCUIT_MODULE,
+                    xlog_cuda::circuit_kernels::XGCF_ADD_SCALAR_CACHED,
+                )
                 .ok_or_else(|| {
                     XlogError::Kernel("xgcf_add_scalar_cached kernel not found".to_string())
                 })?;

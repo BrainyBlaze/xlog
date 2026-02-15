@@ -794,9 +794,16 @@ pub fn build_equivalence_queries_gpu(
         .htod_sync_copy_into(&[1u32], &mut compile_needed)
         .map_err(|e| XlogError::Kernel(format!("Failed to upload compile_needed=1: {}", e)))?;
 
-    let circuit_cnf = build_circuit_cnf(provider, circuit, &phi.num_vars, phi.var_cap, &compile_needed)?;
+    let circuit_cnf = build_circuit_cnf(
+        provider,
+        circuit,
+        &phi.num_vars,
+        phi.var_cap,
+        &compile_needed,
+    )?;
     let q1 = build_phi_and_not_c(provider, phi, circuit, &circuit_cnf, &compile_needed)?;
-    let (q2, q2_unsat_var_base) = build_c_and_not_phi(provider, phi, circuit, &circuit_cnf, &compile_needed)?;
+    let (q2, q2_unsat_var_base) =
+        build_c_and_not_phi(provider, phi, circuit, &circuit_cnf, &compile_needed)?;
     Ok(GpuEquivalenceQueries {
         q1,
         q2,
@@ -814,32 +821,36 @@ pub fn check_equivalence_gpu_gated(
 ) -> Result<()> {
     #[cfg(debug_assertions)]
     eprintln!("[xlog-prob] equivalence: build_circuit_cnf");
-    let circuit_cnf = build_circuit_cnf(provider, circuit, &phi.num_vars, phi.var_cap, compile_needed)?;
+    let circuit_cnf = build_circuit_cnf(
+        provider,
+        circuit,
+        &phi.num_vars,
+        phi.var_cap,
+        compile_needed,
+    )?;
     #[cfg(debug_assertions)]
     {
-        provider
-            .device()
-            .synchronize()
-            .map_err(|e| XlogError::Kernel(format!("sync after build_circuit_cnf failed: {}", e)))?;
+        provider.device().synchronize().map_err(|e| {
+            XlogError::Kernel(format!("sync after build_circuit_cnf failed: {}", e))
+        })?;
         eprintln!("[xlog-prob] equivalence: build_phi_and_not_c");
     }
 
     let q1 = build_phi_and_not_c(provider, phi, circuit, &circuit_cnf, compile_needed)?;
     #[cfg(debug_assertions)]
     {
-        provider
-            .device()
-            .synchronize()
-            .map_err(|e| XlogError::Kernel(format!("sync after build_phi_and_not_c failed: {}", e)))?;
+        provider.device().synchronize().map_err(|e| {
+            XlogError::Kernel(format!("sync after build_phi_and_not_c failed: {}", e))
+        })?;
         eprintln!("[xlog-prob] equivalence: build_c_and_not_phi");
     }
-    let (q2, q2_unsat_var_base) = build_c_and_not_phi(provider, phi, circuit, &circuit_cnf, compile_needed)?;
+    let (q2, q2_unsat_var_base) =
+        build_c_and_not_phi(provider, phi, circuit, &circuit_cnf, compile_needed)?;
     #[cfg(debug_assertions)]
     {
-        provider
-            .device()
-            .synchronize()
-            .map_err(|e| XlogError::Kernel(format!("sync after build_c_and_not_phi failed: {}", e)))?;
+        provider.device().synchronize().map_err(|e| {
+            XlogError::Kernel(format!("sync after build_c_and_not_phi failed: {}", e))
+        })?;
         eprintln!(
             "[xlog-prob] equivalence: caps: phi(v={} c={} l={}) circuit_cnf(v={} c={} l={}) q1(v={} c={} l={}) q2(v={} c={} l={})",
             phi.var_cap,
@@ -865,13 +876,16 @@ pub fn check_equivalence_gpu_gated(
     }
 
     let solver = GpuCdclSolver::new(provider.clone(), config.cdcl);
-    solver.solve_expect_unsat_with_branch_limit_gated(&q1, compile_needed, phi_decision_var_limit)?;
+    solver.solve_expect_unsat_with_branch_limit_gated(
+        &q1,
+        compile_needed,
+        phi_decision_var_limit,
+    )?;
     #[cfg(debug_assertions)]
     {
-        provider
-            .device()
-            .synchronize()
-            .map_err(|e| XlogError::Kernel(format!("sync after solve_expect_unsat(q1) failed: {}", e)))?;
+        provider.device().synchronize().map_err(|e| {
+            XlogError::Kernel(format!("sync after solve_expect_unsat(q1) failed: {}", e))
+        })?;
         eprintln!("[xlog-prob] equivalence: solve_expect_unsat q2");
     }
     solver.solve_expect_unsat_with_decision_ranges_gated(
@@ -883,10 +897,9 @@ pub fn check_equivalence_gpu_gated(
     )?;
     #[cfg(debug_assertions)]
     {
-        provider
-            .device()
-            .synchronize()
-            .map_err(|e| XlogError::Kernel(format!("sync after solve_expect_unsat(q2) failed: {}", e)))?;
+        provider.device().synchronize().map_err(|e| {
+            XlogError::Kernel(format!("sync after solve_expect_unsat(q2) failed: {}", e))
+        })?;
         eprintln!("[xlog-prob] equivalence: done");
     }
     Ok(())

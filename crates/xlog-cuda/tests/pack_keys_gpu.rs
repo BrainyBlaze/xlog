@@ -44,7 +44,9 @@ fn test_pack_keys_gpu_generic_no_dtoh() {
 
     provider.reset_host_transfer_stats();
 
-    let index = provider.build_join_index_v2(&buffer, &[0, 1, 2, 3, 4]).unwrap();
+    let index = provider
+        .build_join_index_v2(&buffer, &[0, 1, 2, 3, 4])
+        .unwrap();
     assert!(index.estimated_bytes() > 0);
 
     let stats = provider.host_transfer_stats();

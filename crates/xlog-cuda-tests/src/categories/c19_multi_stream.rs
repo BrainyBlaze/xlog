@@ -147,7 +147,9 @@ fn test_sequential_batch_operations(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Filter {}: expected {} rows, got {}",
-                    i, expected_count, ctx.device_row_count(&filtered)
+                    i,
+                    expected_count,
+                    ctx.device_row_count(&filtered)
                 ),
             );
         }
@@ -678,7 +680,11 @@ fn test_batch_completion(ctx: &TestContext) -> TestResult {
                 )
             }
         };
-        mixed_ops.push(("filter", ctx.device_row_count(&filtered), expected_filtered as u64));
+        mixed_ops.push((
+            "filter",
+            ctx.device_row_count(&filtered),
+            expected_filtered as u64,
+        ));
     }
 
     // Sync

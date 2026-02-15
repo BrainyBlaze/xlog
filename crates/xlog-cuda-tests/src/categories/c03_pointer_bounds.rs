@@ -87,7 +87,9 @@ fn test_edge_case_sizes(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Size {}: filter returned {} rows, expected {}",
-                    size, ctx.device_row_count(&filtered), expected_count
+                    size,
+                    ctx.device_row_count(&filtered),
+                    expected_count
                 ),
             );
         }
@@ -294,7 +296,9 @@ fn test_off_by_one_sort(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Size {}: sort returned {} rows, expected {}",
-                    size, ctx.device_row_count(&sorted), size
+                    size,
+                    ctx.device_row_count(&sorted),
+                    size
                 ),
             );
         }
@@ -431,7 +435,9 @@ fn test_grid_stride_loop(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Size {}: filter returned {} rows, expected {}",
-                    size, ctx.device_row_count(&filtered), expected_count
+                    size,
+                    ctx.device_row_count(&filtered),
+                    expected_count
                 ),
             );
         }
@@ -554,7 +560,9 @@ fn test_tail_handling_filter(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Size {}: filter returned {} rows, expected {}",
-                    size, ctx.device_row_count(&filtered), size
+                    size,
+                    ctx.device_row_count(&filtered),
+                    size
                 ),
             );
         }
@@ -641,7 +649,9 @@ fn test_tail_handling_sort(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Size {}: sort returned {} rows, expected {}",
-                    size, ctx.device_row_count(&sorted), size
+                    size,
+                    ctx.device_row_count(&sorted),
+                    size
                 ),
             );
         }
@@ -870,7 +880,10 @@ fn test_multi_column_strides(ctx: &TestContext) -> TestResult {
                     start.elapsed(),
                     format!(
                         "{} cols, size {}: filter returned {} rows, expected {}",
-                        num_cols, size, ctx.device_row_count(&filtered), expected_count
+                        num_cols,
+                        size,
+                        ctx.device_row_count(&filtered),
+                        expected_count
                     ),
                 );
             }

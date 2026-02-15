@@ -460,7 +460,12 @@ impl GpuCdclSolver {
                         block_dim: (1, 1, 1),
                         shared_mem_bytes: 0,
                     },
-                    (compile_needed, &run.out_status, &run.out_error, SAT_STATUS_SAT),
+                    (
+                        compile_needed,
+                        &run.out_status,
+                        &run.out_error,
+                        SAT_STATUS_SAT,
+                    ),
                 )
                 .map_err(|e| {
                     XlogError::Kernel(format!("Failed to launch sat_assert_status: {}", e))
@@ -519,7 +524,10 @@ impl GpuCdclSolver {
         self.provider.device().synchronize()?;
         #[cfg(debug_assertions)]
         if trace {
-            eprintln!("[xlog-solve] cdcl(sat)+model_check time: {:?}", t0.elapsed());
+            eprintln!(
+                "[xlog-solve] cdcl(sat)+model_check time: {:?}",
+                t0.elapsed()
+            );
         }
 
         Ok(run.assignment)
@@ -662,7 +670,12 @@ impl GpuCdclSolver {
                         block_dim: (1, 1, 1),
                         shared_mem_bytes: 0,
                     },
-                    (compile_needed, &run.out_status, &run.out_error, SAT_STATUS_UNSAT),
+                    (
+                        compile_needed,
+                        &run.out_status,
+                        &run.out_error,
+                        SAT_STATUS_UNSAT,
+                    ),
                 )
                 .map_err(|e| {
                     XlogError::Kernel(format!("Failed to launch sat_assert_status: {}", e))
@@ -737,14 +750,15 @@ impl GpuCdclSolver {
             scratch_map = Some(m);
             break;
         }
-        let mut scratch_a =
-            scratch_a.ok_or_else(|| last_alloc_err.unwrap_or_else(|| {
+        let mut scratch_a = scratch_a.ok_or_else(|| {
+            last_alloc_err.unwrap_or_else(|| {
                 XlogError::Kernel("Failed to allocate proof scratch buffers".to_string())
-            }))?;
-        let mut scratch_b =
-            scratch_b.ok_or_else(|| XlogError::Kernel("Missing proof scratch buffer".to_string()))?;
-        let mut scratch_map =
-            scratch_map.ok_or_else(|| XlogError::Kernel("Missing proof scratch map buffer".to_string()))?;
+            })
+        })?;
+        let mut scratch_b = scratch_b
+            .ok_or_else(|| XlogError::Kernel("Missing proof scratch buffer".to_string()))?;
+        let mut scratch_map = scratch_map
+            .ok_or_else(|| XlogError::Kernel("Missing proof scratch map buffer".to_string()))?;
         device
             .memset_zeros(&mut scratch_map)
             .map_err(|e| XlogError::Kernel(format!("Failed to zero proof scratch map: {}", e)))?;
@@ -794,7 +808,10 @@ impl GpuCdclSolver {
         self.provider.device().synchronize()?;
         #[cfg(debug_assertions)]
         if trace {
-            eprintln!("[xlog-solve] proof_mark_needed time: {:?}", t_mark.elapsed());
+            eprintln!(
+                "[xlog-solve] proof_mark_needed time: {:?}",
+                t_mark.elapsed()
+            );
         }
 
         let proof_fn = device
@@ -802,9 +819,8 @@ impl GpuCdclSolver {
             .ok_or_else(|| XlogError::Kernel("sat_proof_check kernel not found".to_string()))?;
         #[cfg(debug_assertions)]
         let t_proof = std::time::Instant::now();
-        let proof_blocks_u32 = u32::try_from(proof_blocks).map_err(|_| {
-            XlogError::Kernel("Proof check grid dim exceeds u32::MAX".to_string())
-        })?;
+        let proof_blocks_u32 = u32::try_from(proof_blocks)
+            .map_err(|_| XlogError::Kernel("Proof check grid dim exceeds u32::MAX".to_string()))?;
         let mut proof_params: Vec<*mut c_void> = vec![
             compile_needed.as_kernel_param(),
             (&cnf.clause_offsets).as_kernel_param(),
@@ -859,7 +875,10 @@ impl GpuCdclSolver {
         #[cfg(debug_assertions)]
         if trace {
             eprintln!("[xlog-solve] proof_check time: {:?}", t_proof.elapsed());
-            eprintln!("[xlog-solve] cdcl(unsat)+proof_check time: {:?}", t0.elapsed());
+            eprintln!(
+                "[xlog-solve] cdcl(unsat)+proof_check time: {:?}",
+                t0.elapsed()
+            );
         }
 
         Ok(())

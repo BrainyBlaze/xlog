@@ -135,13 +135,8 @@ impl RelationStore {
     ) -> xlog_core::Result<&CudaBuffer> {
         if !self.relations.contains_key(name) {
             let buffer = self.provider.create_empty_buffer(schema.clone())?;
-            self.relations.insert(
-                name.to_string(),
-                VersionedCudaBuffer {
-                    buffer,
-                    version: 1,
-                },
-            );
+            self.relations
+                .insert(name.to_string(), VersionedCudaBuffer { buffer, version: 1 });
         }
         Ok(&self
             .relations
@@ -169,13 +164,8 @@ impl RelationStore {
     ) -> xlog_core::Result<&mut CudaBuffer> {
         if !self.relations.contains_key(name) {
             let buffer = self.provider.create_empty_buffer(schema.clone())?;
-            self.relations.insert(
-                name.to_string(),
-                VersionedCudaBuffer {
-                    buffer,
-                    version: 1,
-                },
-            );
+            self.relations
+                .insert(name.to_string(), VersionedCudaBuffer { buffer, version: 1 });
         }
         let entry = self
             .relations
@@ -231,7 +221,6 @@ impl RelationStore {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -280,9 +269,7 @@ mod tests {
     fn make_buffer(provider: &CudaKernelProvider, schema: Schema, rows: usize) -> CudaBuffer {
         if schema.arity() == 0 {
             if rows == 0 {
-                return provider
-                    .create_empty_buffer(schema)
-                    .expect("empty buffer");
+                return provider.create_empty_buffer(schema).expect("empty buffer");
             }
             let rows_u32 = u32::try_from(rows).expect("row count fits u32");
             let mut d_num_rows = provider.memory().alloc::<u32>(1).expect("alloc");
@@ -294,9 +281,7 @@ mod tests {
             return CudaBuffer::from_columns(Vec::new(), rows as u64, d_num_rows, schema);
         }
         if rows == 0 {
-            return provider
-                .create_empty_buffer(schema)
-                .expect("empty buffer");
+            return provider.create_empty_buffer(schema).expect("empty buffer");
         }
         let mut columns: Vec<Vec<u8>> = Vec::with_capacity(schema.arity());
         for col_idx in 0..schema.arity() {
@@ -508,7 +493,10 @@ mod tests {
         }
 
         assert!(store.contains("new_rel"));
-        assert_eq!(device_row_count(&provider, store.get("new_rel").unwrap()), 42);
+        assert_eq!(
+            device_row_count(&provider, store.get("new_rel").unwrap()),
+            42
+        );
     }
 
     #[test]

@@ -37,12 +37,18 @@ fn test_groupby_agg_gpu_multi_key() {
 
     let buffer = provider
         .create_buffer_from_slices(
-            &[bytemuck::cast_slice(&k1), bytemuck::cast_slice(&k2), bytemuck::cast_slice(&v)],
+            &[
+                bytemuck::cast_slice(&k1),
+                bytemuck::cast_slice(&k2),
+                bytemuck::cast_slice(&v),
+            ],
             schema,
         )
         .unwrap();
 
-    let out = provider.groupby_agg(&buffer, &[0, 1], AggOp::Sum, 2).unwrap();
+    let out = provider
+        .groupby_agg(&buffer, &[0, 1], AggOp::Sum, 2)
+        .unwrap();
     let rb = provider.to_arrow_record_batch(&out).unwrap();
     assert_eq!(rb.num_columns(), 3);
     assert_eq!(rb.num_rows(), 3);

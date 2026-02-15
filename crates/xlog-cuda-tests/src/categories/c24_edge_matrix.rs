@@ -85,7 +85,10 @@ fn test_size_distribution_matrix_u32(ctx: &TestContext) -> TestResult {
                     start.elapsed(),
                     format!(
                         "Sort returned {} rows for size={}, dist={:?}, expected {}",
-                        ctx.device_row_count(&sorted), size, dist, size
+                        ctx.device_row_count(&sorted),
+                        size,
+                        dist,
+                        size
                     ),
                 );
             }
@@ -214,7 +217,10 @@ fn test_size_distribution_matrix_u64(ctx: &TestContext) -> TestResult {
                     start.elapsed(),
                     format!(
                         "U64 sort returned {} rows for size={}, dist={:?}, expected {}",
-                        ctx.device_row_count(&sorted), size, dist, size
+                        ctx.device_row_count(&sorted),
+                        size,
+                        dist,
+                        size
                     ),
                 );
             }
@@ -322,7 +328,10 @@ fn test_size_distribution_matrix_i64(ctx: &TestContext) -> TestResult {
                     start.elapsed(),
                     format!(
                         "I64 sort returned {} rows for size={}, dist={:?}, expected {}",
-                        ctx.device_row_count(&sorted), size, dist, size
+                        ctx.device_row_count(&sorted),
+                        size,
+                        dist,
+                        size
                     ),
                 );
             }
@@ -455,7 +464,10 @@ fn test_size_distribution_matrix_f64(ctx: &TestContext) -> TestResult {
                     start.elapsed(),
                     format!(
                         "F64 sort returned {} rows for size={}, dist={:?}, expected {}",
-                        ctx.device_row_count(&sorted), size, dist, size
+                        ctx.device_row_count(&sorted),
+                        size,
+                        dist,
+                        size
                     ),
                 );
             }
@@ -628,7 +640,9 @@ fn test_operation_matrix(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Sort returned {} rows for size {}, expected {}",
-                    ctx.device_row_count(&sorted), size, size
+                    ctx.device_row_count(&sorted),
+                    size,
+                    size
                 ),
             );
         }
@@ -690,7 +704,10 @@ fn test_operation_matrix(ctx: &TestContext) -> TestResult {
                     start.elapsed(),
                     format!(
                         "Filter {} returned {} rows for size {}, expected {}",
-                        name, ctx.device_row_count(&filtered), size, expected_count
+                        name,
+                        ctx.device_row_count(&filtered),
+                        size,
+                        expected_count
                     ),
                 );
             }
@@ -739,7 +756,9 @@ fn test_operation_matrix(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Dedup returned {} rows for size {}, expected {}",
-                    ctx.device_row_count(&deduped), size, expected_unique
+                    ctx.device_row_count(&deduped),
+                    size,
+                    expected_unique
                 ),
             );
         }
@@ -821,7 +840,9 @@ fn test_operation_matrix(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Chain filter returned {} rows for size {}, expected {}",
-                    ctx.device_row_count(&filtered), size, expected_after_filter
+                    ctx.device_row_count(&filtered),
+                    size,
+                    expected_after_filter
                 ),
             );
         }

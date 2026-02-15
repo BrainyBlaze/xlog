@@ -999,10 +999,12 @@ fn compile_gpu_d4_with_gate(
     exclusive_scan_u32_inplace(provider, &mut edge_offsets, max_items_u32)?;
     #[cfg(debug_assertions)]
     eprintln!("[xlog-prob] gpu_d4: sync after node_offsets/edge_offsets scan");
-    provider
-        .device()
-        .synchronize()
-        .map_err(|e| XlogError::Kernel(format!("sync after node_offsets/edge_offsets scan failed: {}", e)))?;
+    provider.device().synchronize().map_err(|e| {
+        XlogError::Kernel(format!(
+            "sync after node_offsets/edge_offsets scan failed: {}",
+            e
+        ))
+    })?;
 
     let node_cap_usize = usize::try_from(node_cap)
         .map_err(|_| XlogError::Compilation("smooth_node_cap exceeds usize::MAX".to_string()))?;
@@ -2568,15 +2570,15 @@ mod tests {
                         block_dim: (256, 1, 1),
                         shared_mem_bytes: 0,
                     },
-                (
-                    &compile_needed,
-                    &node_level,
-                    &num_nodes_device,
-                    num_levels,
-                    &level_offsets,
-                    &mut level_cursors,
-                    &mut level_nodes,
-                ),
+                    (
+                        &compile_needed,
+                        &node_level,
+                        &num_nodes_device,
+                        num_levels,
+                        &level_offsets,
+                        &mut level_cursors,
+                        &mut level_nodes,
+                    ),
                 )
                 .unwrap();
         }
@@ -2859,15 +2861,15 @@ mod tests {
                         block_dim: (256, 1, 1),
                         shared_mem_bytes: 0,
                     },
-                (
-                    &compile_needed,
-                    &node_level,
-                    &num_nodes_device,
-                    num_levels,
-                    &level_offsets,
-                    &mut level_cursors,
-                    &mut level_nodes,
-                ),
+                    (
+                        &compile_needed,
+                        &node_level,
+                        &num_nodes_device,
+                        num_levels,
+                        &level_offsets,
+                        &mut level_cursors,
+                        &mut level_nodes,
+                    ),
                 )
                 .unwrap();
         }
@@ -3137,15 +3139,15 @@ mod tests {
                         block_dim: (256, 1, 1),
                         shared_mem_bytes: 0,
                     },
-                (
-                    &compile_needed,
-                    &node_level,
-                    &num_nodes_device,
-                    num_levels,
-                    &level_offsets,
-                    &mut level_cursors,
-                    &mut level_nodes,
-                ),
+                    (
+                        &compile_needed,
+                        &node_level,
+                        &num_nodes_device,
+                        num_levels,
+                        &level_offsets,
+                        &mut level_cursors,
+                        &mut level_nodes,
+                    ),
                 )
                 .unwrap();
         }
@@ -3411,15 +3413,15 @@ mod tests {
                         block_dim: (256, 1, 1),
                         shared_mem_bytes: 0,
                     },
-                (
-                    &compile_needed,
-                    &node_level,
-                    &num_nodes_device,
-                    num_levels,
-                    &level_offsets,
-                    &mut level_cursors,
-                    &mut level_nodes,
-                ),
+                    (
+                        &compile_needed,
+                        &node_level,
+                        &num_nodes_device,
+                        num_levels,
+                        &level_offsets,
+                        &mut level_cursors,
+                        &mut level_nodes,
+                    ),
                 )
                 .unwrap();
         }

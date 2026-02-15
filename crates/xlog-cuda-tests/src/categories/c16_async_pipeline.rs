@@ -130,7 +130,9 @@ fn test_sequential_operations(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Filter iteration {}: expected {} rows, got {}",
-                    i, expected_count, ctx.device_row_count(&filtered)
+                    i,
+                    expected_count,
+                    ctx.device_row_count(&filtered)
                 ),
             );
         }
@@ -896,7 +898,9 @@ fn test_large_batch_operations(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Batch 2 iter {}: expected {} rows, got {}",
-                    i, expected_count, ctx.device_row_count(&filtered)
+                    i,
+                    expected_count,
+                    ctx.device_row_count(&filtered)
                 ),
             );
         }
@@ -951,7 +955,9 @@ fn test_large_batch_operations(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Batch 3 iter {}: expected {} unique, got {}",
-                    i, num_unique, ctx.device_row_count(&deduped)
+                    i,
+                    num_unique,
+                    ctx.device_row_count(&deduped)
                 ),
             );
         }
@@ -1036,7 +1042,9 @@ fn test_large_batch_operations(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Batch 4 iter {}: join returned {} rows, expected {}",
-                    i, ctx.device_row_count(&joined), expected_matches
+                    i,
+                    ctx.device_row_count(&joined),
+                    expected_matches
                 ),
             );
         }

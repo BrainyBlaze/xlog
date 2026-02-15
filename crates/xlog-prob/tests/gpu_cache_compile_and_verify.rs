@@ -2,10 +2,10 @@ use std::sync::Arc;
 
 use xlog_core::MemoryBudget;
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_prob::compilation::gpu_cache::{GpuCircuitCache, GpuCircuitCacheConfig};
 use xlog_prob::compilation::{
     compile_gpu_d4_and_verify_cached, DeviceRandomVarList, GpuCompileConfig,
 };
-use xlog_prob::compilation::gpu_cache::{GpuCircuitCache, GpuCircuitCacheConfig};
 use xlog_solve::{Clause, GpuCnf, Literal, SolveInstance};
 
 #[test]
@@ -17,7 +17,10 @@ fn gpu_cache_compile_reuses_slot() {
             return;
         }
     };
-    let memory = Arc::new(GpuMemoryManager::new(device.clone(), MemoryBudget::with_limit(1 << 30)));
+    let memory = Arc::new(GpuMemoryManager::new(
+        device.clone(),
+        MemoryBudget::with_limit(1 << 30),
+    ));
     let provider = Arc::new(CudaKernelProvider::new(device, memory).expect("provider"));
 
     let clauses = vec![Clause::new(vec![Literal::positive(0)])];

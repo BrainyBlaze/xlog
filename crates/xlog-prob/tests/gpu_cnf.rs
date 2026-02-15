@@ -45,11 +45,15 @@ fn gpu_cnf_to_host(
     let mut num_vars = [0u32; 1];
     let mut num_clauses = [0u32; 1];
     let mut num_lits = [0u32; 1];
-    device.dtoh_sync_copy_into(&cnf.num_vars, &mut num_vars).unwrap();
+    device
+        .dtoh_sync_copy_into(&cnf.num_vars, &mut num_vars)
+        .unwrap();
     device
         .dtoh_sync_copy_into(&cnf.num_clauses, &mut num_clauses)
         .unwrap();
-    device.dtoh_sync_copy_into(&cnf.num_lits, &mut num_lits).unwrap();
+    device
+        .dtoh_sync_copy_into(&cnf.num_lits, &mut num_lits)
+        .unwrap();
 
     let clauses_len = num_clauses[0] as usize;
     let lits_len = num_lits[0] as usize;
@@ -58,7 +62,9 @@ fn gpu_cnf_to_host(
 
     let offsets_view = cnf.clause_offsets.slice(0..(clauses_len + 1));
     let lits_view = cnf.literals.slice(0..lits_len);
-    device.dtoh_sync_copy_into(&offsets_view, &mut offsets).unwrap();
+    device
+        .dtoh_sync_copy_into(&offsets_view, &mut offsets)
+        .unwrap();
     device.dtoh_sync_copy_into(&lits_view, &mut lits).unwrap();
 
     let mut clauses = Vec::with_capacity(clauses_len);

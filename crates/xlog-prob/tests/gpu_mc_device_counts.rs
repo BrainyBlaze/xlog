@@ -1,7 +1,7 @@
 #![cfg(feature = "host-io")]
 
-use std::sync::Arc;
 use cudarc::driver::DeviceSlice;
+use std::sync::Arc;
 use xlog_core::{MemoryBudget, Result};
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 use xlog_prob::mc::{McEvalConfig, McProgram};

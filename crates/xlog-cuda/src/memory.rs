@@ -686,6 +686,9 @@ mod tests {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             CudaBuffer::from_columns(vec![], 100, d_num_rows, schema);
         }));
-        assert!(result.is_err(), "Expected from_columns to panic on schema mismatch");
+        assert!(
+            result.is_err(),
+            "Expected from_columns to panic on schema mismatch"
+        );
     }
 }

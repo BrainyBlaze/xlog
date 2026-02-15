@@ -1718,12 +1718,10 @@ impl CudaKernelProvider {
 
         let block_size = 256u32;
 
-        let a_rows = usize::try_from(a_rows).map_err(|_| {
-            XlogError::Kernel(format!("Concat: a has too many rows: {}", a_rows))
-        })?;
-        let b_rows = usize::try_from(b_rows).map_err(|_| {
-            XlogError::Kernel(format!("Concat: b has too many rows: {}", b_rows))
-        })?;
+        let a_rows = usize::try_from(a_rows)
+            .map_err(|_| XlogError::Kernel(format!("Concat: a has too many rows: {}", a_rows)))?;
+        let b_rows = usize::try_from(b_rows)
+            .map_err(|_| XlogError::Kernel(format!("Concat: b has too many rows: {}", b_rows)))?;
 
         let mut result_columns = Vec::with_capacity(schema.arity());
         for col_idx in 0..schema.arity() {
@@ -2163,20 +2161,18 @@ impl CudaKernelProvider {
         // SAFETY: Kernel signature matches:
         // sorted_diff_mark(a, a_len_device, a_cap, b, b_len_device, b_cap, in_diff)
         unsafe {
-            diff_mark_fn
-                .clone()
-                .launch(
-                    config,
-                    (
-                        &a_view,
-                        deduped_a.num_rows_device(),
-                        num_a,
-                        &b_view,
-                        deduped_b.num_rows_device(),
-                        num_b,
-                        &diff_mask,
-                    ),
-                )
+            diff_mark_fn.clone().launch(
+                config,
+                (
+                    &a_view,
+                    deduped_a.num_rows_device(),
+                    num_a,
+                    &b_view,
+                    deduped_b.num_rows_device(),
+                    num_b,
+                    &diff_mask,
+                ),
+            )
         }
         .map_err(|e| XlogError::Kernel(format!("sorted_diff_mark failed: {}", e)))?;
 
@@ -2549,7 +2545,9 @@ impl CudaKernelProvider {
                 AggOp::Count => {
                     let output_bytes = row_cap_usize
                         .checked_mul(std::mem::size_of::<u64>())
-                        .ok_or_else(|| XlogError::Kernel("Count output size overflow".to_string()))?;
+                        .ok_or_else(|| {
+                            XlogError::Kernel("Count output size overflow".to_string())
+                        })?;
                     let mut output = self.memory.alloc::<u8>(output_bytes)?;
                     device.memset_zeros(&mut output).map_err(|e| {
                         XlogError::Kernel(format!("Failed to zero count output: {}", e))
@@ -2685,9 +2683,9 @@ impl CudaKernelProvider {
                             .launch(fill_config, (f64::NEG_INFINITY, row_cap_u32, &mut maxs))
                     }
                     .map_err(|e| XlogError::Kernel(format!("Failed to init maxs: {}", e)))?;
-                    device.memset_zeros(&mut sumexps).map_err(|e| {
-                        XlogError::Kernel(format!("Failed to init sumexps: {}", e))
-                    })?;
+                    device
+                        .memset_zeros(&mut sumexps)
+                        .map_err(|e| XlogError::Kernel(format!("Failed to init sumexps: {}", e)))?;
 
                     let max_func = device
                         .get_func(GROUPBY_MODULE, groupby_kernels::GROUPBY_LOGSUMEXP_MAX)
@@ -2735,12 +2733,10 @@ impl CudaKernelProvider {
                         })?;
 
                     unsafe {
-                        final_func
-                            .clone()
-                            .launch(
-                                final_config,
-                                (&maxs, &sumexps, &d_num_groups, row_cap_u32, &results),
-                            )
+                        final_func.clone().launch(
+                            final_config,
+                            (&maxs, &sumexps, &d_num_groups, row_cap_u32, &results),
+                        )
                     }
                     .map_err(|e| {
                         XlogError::Kernel(format!("groupby_logsumexp_final failed: {}", e))
@@ -3305,8 +3301,12 @@ impl CudaKernelProvider {
         let mut indices_b = self.memory.alloc::<u32>(n as usize)?;
 
         // SAFETY: init_indices(indices, num_rows_device, row_cap)
-        unsafe { init_fn.clone().launch(launch_config, (&mut indices_a, d_num_rows, n)) }
-            .map_err(|e| XlogError::Kernel(format!("init_indices failed: {}", e)))?;
+        unsafe {
+            init_fn
+                .clone()
+                .launch(launch_config, (&mut indices_a, d_num_rows, n))
+        }
+        .map_err(|e| XlogError::Kernel(format!("init_indices failed: {}", e)))?;
 
         // Working key buffers (u32 words).
         let mut keys_a = self.memory.alloc::<u32>(n as usize)?;
@@ -3338,9 +3338,10 @@ impl CudaKernelProvider {
 
                     // SAFETY: apply_permutation_u32(input, output, permutation, num_rows_device, row_cap)
                     unsafe {
-                        gather_fn
-                            .clone()
-                            .launch(launch_config, (&col_view, &mut keys_a, &indices_a, d_num_rows, n))
+                        gather_fn.clone().launch(
+                            launch_config,
+                            (&col_view, &mut keys_a, &indices_a, d_num_rows, n),
+                        )
                     }
                     .map_err(|e| {
                         XlogError::Kernel(format!("apply_permutation_u32 failed: {}", e))
@@ -3370,9 +3371,10 @@ impl CudaKernelProvider {
 
                     // SAFETY: gather_keys_i32_ordered_u32(i32_bits, permutation, num_rows_device, row_cap, out_keys)
                     unsafe {
-                        gather_fn
-                            .clone()
-                            .launch(launch_config, (&col_bits, &indices_a, d_num_rows, n, &mut keys_a))
+                        gather_fn.clone().launch(
+                            launch_config,
+                            (&col_bits, &indices_a, d_num_rows, n, &mut keys_a),
+                        )
                     }
                     .map_err(|e| {
                         XlogError::Kernel(format!("gather_keys_i32_ordered_u32 failed: {}", e))
@@ -3402,9 +3404,10 @@ impl CudaKernelProvider {
 
                     // SAFETY: gather_keys_f32_ordered_u32(f32_bits, permutation, num_rows_device, row_cap, out_keys)
                     unsafe {
-                        gather_fn
-                            .clone()
-                            .launch(launch_config, (&col_bits, &indices_a, d_num_rows, n, &mut keys_a))
+                        gather_fn.clone().launch(
+                            launch_config,
+                            (&col_bits, &indices_a, d_num_rows, n, &mut keys_a),
+                        )
                     }
                     .map_err(|e| {
                         XlogError::Kernel(format!("gather_keys_f32_ordered_u32 failed: {}", e))
@@ -3474,9 +3477,10 @@ impl CudaKernelProvider {
 
                         // SAFETY: gather_keys_u64_*_u32(vals, permutation, num_rows_device, row_cap, out_keys)
                         unsafe {
-                            gather_fn
-                                .clone()
-                                .launch(launch_config, (&col_bits, &indices_a, d_num_rows, n, &mut keys_a))
+                            gather_fn.clone().launch(
+                                launch_config,
+                                (&col_bits, &indices_a, d_num_rows, n, &mut keys_a),
+                            )
                         }
                         .map_err(|e| XlogError::Kernel(format!("{} failed: {}", word, e)))?;
 
@@ -3505,9 +3509,10 @@ impl CudaKernelProvider {
 
                         // SAFETY: gather_keys_i64_*_u32(i64_bits, permutation, num_rows_device, row_cap, out_keys)
                         unsafe {
-                            gather_fn
-                                .clone()
-                                .launch(launch_config, (&col_bits, &indices_a, d_num_rows, n, &mut keys_a))
+                            gather_fn.clone().launch(
+                                launch_config,
+                                (&col_bits, &indices_a, d_num_rows, n, &mut keys_a),
+                            )
                         }
                         .map_err(|e| XlogError::Kernel(format!("{} failed: {}", word, e)))?;
 
@@ -3536,9 +3541,10 @@ impl CudaKernelProvider {
 
                         // SAFETY: gather_keys_f64_*_u32(f64_bits, permutation, num_rows_device, row_cap, out_keys)
                         unsafe {
-                            gather_fn
-                                .clone()
-                                .launch(launch_config, (&col_bits, &indices_a, d_num_rows, n, &mut keys_a))
+                            gather_fn.clone().launch(
+                                launch_config,
+                                (&col_bits, &indices_a, d_num_rows, n, &mut keys_a),
+                            )
                         }
                         .map_err(|e| XlogError::Kernel(format!("{} failed: {}", word, e)))?;
 
@@ -3623,9 +3629,10 @@ impl CudaKernelProvider {
             // Histogram (digit-major): hist[digit * grid_size + block] = count
             // SAFETY: radix_histogram(keys, num_rows_device, row_cap, histograms, shift)
             unsafe {
-                histogram_fn
-                    .clone()
-                    .launch(sort_config, (keys_in, num_rows_device, row_cap, &mut *hist, shift))
+                histogram_fn.clone().launch(
+                    sort_config,
+                    (keys_in, num_rows_device, row_cap, &mut *hist, shift),
+                )
             }
             .map_err(|e| XlogError::Kernel(format!("radix_histogram failed: {}", e)))?;
 
@@ -3649,9 +3656,10 @@ impl CudaKernelProvider {
             // Compute per-element ranks for stability.
             // SAFETY: compute_ranks(keys, num_rows_device, row_cap, ranks, shift)
             unsafe {
-                ranks_fn
-                    .clone()
-                    .launch(sort_config, (keys_in, num_rows_device, row_cap, &mut *ranks, shift))
+                ranks_fn.clone().launch(
+                    sort_config,
+                    (keys_in, num_rows_device, row_cap, &mut *ranks, shift),
+                )
             }
             .map_err(|e| XlogError::Kernel(format!("compute_ranks failed: {}", e)))?;
 
@@ -3718,8 +3726,12 @@ impl CudaKernelProvider {
             .ok_or_else(|| XlogError::Kernel("init_indices kernel not found".to_string()))?;
         let d_num_rows = self.upload_device_row_count(n)?;
         // SAFETY: init_indices(indices, num_rows_device, row_cap)
-        unsafe { init_fn.clone().launch(config, (&mut *indices, &d_num_rows, n)) }
-            .map_err(|e| XlogError::Kernel(format!("init_indices failed: {}", e)))?;
+        unsafe {
+            init_fn
+                .clone()
+                .launch(config, (&mut *indices, &d_num_rows, n))
+        }
+        .map_err(|e| XlogError::Kernel(format!("init_indices failed: {}", e)))?;
         Ok(())
     }
 
@@ -3756,8 +3768,12 @@ impl CudaKernelProvider {
             })?;
         let d_num_rows = self.upload_device_row_count(n)?;
         // SAFETY: apply_permutation_u32(input, output, permutation, num_rows_device, row_cap)
-        unsafe { gather_fn.clone().launch(config, (input, output, indices, &d_num_rows, n)) }
-            .map_err(|e| XlogError::Kernel(format!("gather_u32_by_indices failed: {}", e)))?;
+        unsafe {
+            gather_fn
+                .clone()
+                .launch(config, (input, output, indices, &d_num_rows, n))
+        }
+        .map_err(|e| XlogError::Kernel(format!("gather_u32_by_indices failed: {}", e)))?;
         Ok(())
     }
 
@@ -3827,8 +3843,12 @@ impl CudaKernelProvider {
             .ok_or_else(|| XlogError::Kernel("gather_keys_u64_lo_u32 not found".to_string()))?;
         let d_num_rows = self.upload_device_row_count(n)?;
         // SAFETY: gather_keys_u64_lo_u32(vals, permutation, num_rows_device, row_cap, out_keys)
-        unsafe { gather_fn.clone().launch(config, (input, indices, &d_num_rows, n, output)) }
-            .map_err(|e| XlogError::Kernel(format!("gather_u64_lo_by_indices failed: {}", e)))?;
+        unsafe {
+            gather_fn
+                .clone()
+                .launch(config, (input, indices, &d_num_rows, n, output))
+        }
+        .map_err(|e| XlogError::Kernel(format!("gather_u64_lo_by_indices failed: {}", e)))?;
         Ok(())
     }
 
@@ -3856,8 +3876,12 @@ impl CudaKernelProvider {
             .ok_or_else(|| XlogError::Kernel("gather_keys_u64_hi_u32 not found".to_string()))?;
         let d_num_rows = self.upload_device_row_count(n)?;
         // SAFETY: gather_keys_u64_hi_u32(vals, permutation, num_rows_device, row_cap, out_keys)
-        unsafe { gather_fn.clone().launch(config, (input, indices, &d_num_rows, n, output)) }
-            .map_err(|e| XlogError::Kernel(format!("gather_u64_hi_by_indices failed: {}", e)))?;
+        unsafe {
+            gather_fn
+                .clone()
+                .launch(config, (input, indices, &d_num_rows, n, output))
+        }
+        .map_err(|e| XlogError::Kernel(format!("gather_u64_hi_by_indices failed: {}", e)))?;
         Ok(())
     }
 
@@ -4010,7 +4034,14 @@ impl CudaKernelProvider {
             unsafe {
                 apply_perm_fn.clone().launch(
                     launch_config,
-                    (src_col, &dst_col, permutation, d_num_rows, row_cap, elem_size),
+                    (
+                        src_col,
+                        &dst_col,
+                        permutation,
+                        d_num_rows,
+                        row_cap,
+                        elem_size,
+                    ),
                 )
             }
             .map_err(|e| XlogError::Kernel(format!("apply_permutation_bytes failed: {}", e)))?;
@@ -4099,7 +4130,14 @@ impl CudaKernelProvider {
             unsafe {
                 gather_fn.clone().launch(
                     launch_config,
-                    (src_col, &dst_col, indices, &d_output_rows, output_rows, elem_size),
+                    (
+                        src_col,
+                        &dst_col,
+                        indices,
+                        &d_output_rows,
+                        output_rows,
+                        elem_size,
+                    ),
                 )
             }
             .map_err(|e| XlogError::Kernel(format!("apply_permutation_bytes failed: {}", e)))?;
@@ -5572,16 +5610,14 @@ impl CudaKernelProvider {
             .get_func(D4_MODULE, d4_kernels::D4_ASSERT_U32_EQ)
             .ok_or_else(|| XlogError::Kernel("d4_assert_u32_eq kernel not found".to_string()))?;
         unsafe {
-            assert_fn
-                .clone()
-                .launch(
-                    LaunchConfig {
-                        grid_dim: (1, 1, 1),
-                        block_dim: (1, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
-                    (buffer.num_rows_device(), num_rows_u32),
-                )
+            assert_fn.clone().launch(
+                LaunchConfig {
+                    grid_dim: (1, 1, 1),
+                    block_dim: (1, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (buffer.num_rows_device(), num_rows_u32),
+            )
         }
         .map_err(|e| XlogError::Kernel(format!("d4_assert_u32_eq failed: {}", e)))?;
         self.device.synchronize()?;
@@ -5593,13 +5629,8 @@ impl CudaKernelProvider {
         let mut children: Vec<ArrayData> = Vec::with_capacity(buffer.arity());
 
         for (col_idx, (name, scalar_type)) in buffer.schema().columns.iter().enumerate() {
-            let (field, child) = self.build_arrow_device_child(
-                &buffer,
-                col_idx,
-                name,
-                *scalar_type,
-                num_rows,
-            )?;
+            let (field, child) =
+                self.build_arrow_device_child(&buffer, col_idx, name, *scalar_type, num_rows)?;
             fields.push(field);
             children.push(child);
         }
@@ -5714,9 +5745,9 @@ impl CudaKernelProvider {
                 XlogError::Kernel("Arrow device import missing value buffer".to_string())
             })?;
             let len_bytes = buf.len();
-            let expected_bytes = num_rows
-                .checked_mul(elem_size)
-                .ok_or_else(|| XlogError::Kernel("Arrow device import size overflow".to_string()))?;
+            let expected_bytes = num_rows.checked_mul(elem_size).ok_or_else(|| {
+                XlogError::Kernel("Arrow device import size overflow".to_string())
+            })?;
             if len_bytes != expected_bytes {
                 return Err(XlogError::Kernel(format!(
                     "Arrow device import buffer size mismatch: expected {}, got {}",
@@ -5731,7 +5762,11 @@ impl CudaKernelProvider {
                 ));
             }
             let device_ptr = ptr as usize as cudarc::driver::sys::CUdeviceptr;
-            columns.push(CudaColumn::arrow_device(device_ptr, len_bytes, keepalive.clone()));
+            columns.push(CudaColumn::arrow_device(
+                device_ptr,
+                len_bytes,
+                keepalive.clone(),
+            ));
             schema_cols.push((field.name().to_string(), scalar_type));
         }
 
@@ -5929,8 +5964,7 @@ impl CudaKernelProvider {
                         XlogError::Kernel("pack_bools_to_bitmap kernel not found".to_string())
                     })?;
                 let block_size = 256u32;
-                let grid_size =
-                    (packed_len as u32 + block_size - 1) / block_size;
+                let grid_size = (packed_len as u32 + block_size - 1) / block_size;
                 unsafe {
                     pack_fn.clone().launch(
                         LaunchConfig {
@@ -5973,7 +6007,9 @@ impl CudaKernelProvider {
     }
 
     #[cfg(feature = "arrow-device-import")]
-    fn scalar_type_from_arrow_field(field: &arrow::datatypes::Field) -> Result<(ScalarType, usize)> {
+    fn scalar_type_from_arrow_field(
+        field: &arrow::datatypes::Field,
+    ) -> Result<(ScalarType, usize)> {
         use arrow::datatypes::DataType;
 
         // Arrow's Field metadata is a map (possibly empty), not an Option.
@@ -5991,10 +6027,7 @@ impl CudaKernelProvider {
             }
             DataType::UInt32 if is_symbol => ScalarType::Symbol,
             dt => ScalarType::from_arrow_type(dt).ok_or_else(|| {
-                XlogError::Kernel(format!(
-                    "Arrow device import unsupported type {:?}",
-                    dt
-                ))
+                XlogError::Kernel(format!("Arrow device import unsupported type {:?}", dt))
             })?,
         };
 
@@ -6522,7 +6555,9 @@ impl CudaKernelProvider {
         src: &CudaBuffer,
     ) -> Result<CudaBuffer> {
         let d_num_rows = self.clone_device_row_count(src)?;
-        Ok(CudaBuffer::from_columns(columns, row_cap, d_num_rows, schema))
+        Ok(CudaBuffer::from_columns(
+            columns, row_cap, d_num_rows, schema,
+        ))
     }
 
     fn column_bytes_view<'a>(
@@ -6680,12 +6715,8 @@ impl CudaKernelProvider {
         row_cap: u64,
         schema: Schema,
     ) -> Result<CudaBuffer> {
-        let row_u32 = u32::try_from(row_cap).map_err(|_| {
-            XlogError::Kernel(format!(
-                "Row capacity {} exceeds u32::MAX",
-                row_cap
-            ))
-        })?;
+        let row_u32 = u32::try_from(row_cap)
+            .map_err(|_| XlogError::Kernel(format!("Row capacity {} exceeds u32::MAX", row_cap)))?;
         let mut d_num_rows = self.memory.alloc::<u32>(1)?;
         self.device
             .inner()
@@ -7162,10 +7193,7 @@ impl CudaKernelProvider {
                     ),
                 )
                 .map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "pack_and_hash_keys_generic launch failed: {}",
-                        e
-                    ))
+                    XlogError::Kernel(format!("pack_and_hash_keys_generic launch failed: {}", e))
                 })?;
         }
 
@@ -8289,11 +8317,7 @@ impl CudaKernelProvider {
             let mut result_columns = Vec::with_capacity(combined_schema.arity());
             result_columns.extend(inner_left.columns.into_iter());
             result_columns.extend(inner_right.columns.into_iter());
-            return self.buffer_from_columns(
-                result_columns,
-                inner_count as u64,
-                combined_schema,
-            );
+            return self.buffer_from_columns(result_columns, inner_count as u64, combined_schema);
         }
 
         if inner_count == 0 {
@@ -8673,11 +8697,7 @@ impl CudaKernelProvider {
             let mut result_columns = Vec::with_capacity(combined_schema.arity());
             result_columns.extend(inner_left.columns.into_iter());
             result_columns.extend(inner_right.columns.into_iter());
-            return self.buffer_from_columns(
-                result_columns,
-                inner_count as u64,
-                combined_schema,
-            );
+            return self.buffer_from_columns(result_columns, inner_count as u64, combined_schema);
         }
 
         if inner_count == 0 {
@@ -9967,7 +9987,12 @@ impl CudaKernelProvider {
             .map_err(|e| XlogError::Kernel(format!("arith binary failed: {}", e)))?;
 
         self.device.synchronize()?;
-        self.buffer_from_columns_with_device_count(vec![out.into()], a.num_rows(), a.schema.clone(), a)
+        self.buffer_from_columns_with_device_count(
+            vec![out.into()],
+            a.num_rows(),
+            a.schema.clone(),
+            a,
+        )
     }
 
     /// Combine multiple single-column buffers into a multi-column buffer
@@ -10000,9 +10025,7 @@ impl CudaKernelProvider {
             if col.row_cap != row_cap {
                 return Err(XlogError::Kernel(format!(
                     "Column {} has row capacity {}, expected {}",
-                    i,
-                    col.row_cap,
-                    row_cap
+                    i, col.row_cap, row_cap
                 )));
             }
             if col.arity() != 1 {
@@ -10477,10 +10500,7 @@ mod tests {
         let row_cap = 16u64;
         let data: Vec<u32> = (0..row_cap as u32).collect();
         let bytes: Vec<u8> = data.iter().flat_map(|v| v.to_le_bytes()).collect();
-        let mut col = provider
-            .memory()
-            .alloc::<u8>(bytes.len())
-            .expect("alloc");
+        let mut col = provider.memory().alloc::<u8>(bytes.len()).expect("alloc");
         provider
             .device()
             .inner()
@@ -10678,11 +10698,7 @@ mod tests {
         let dedup_count = provider
             .device_row_count(&deduped)
             .expect("read dedup row count");
-        assert_eq!(
-            dedup_count,
-            750,
-            "Should have 750 unique values (0..750)"
-        );
+        assert_eq!(dedup_count, 750, "Should have 750 unique values (0..750)");
 
         // Verify output is sorted
         let result = provider.download_column_u32(&deduped, 0).unwrap();
@@ -11051,14 +11067,12 @@ mod tests {
         assert_eq!(count_schema.column_type(1), Some(ScalarType::U64));
 
         // Sum result schema
-        let sum_schema =
-            provider.groupby_multi_agg_result_schema(&input, &[0], &[(1, AggOp::Sum)]);
+        let sum_schema = provider.groupby_multi_agg_result_schema(&input, &[0], &[(1, AggOp::Sum)]);
         assert_eq!(sum_schema.arity(), 2);
         assert_eq!(sum_schema.column_type(1), Some(ScalarType::U64));
 
         // Min/Max result schema
-        let min_schema =
-            provider.groupby_multi_agg_result_schema(&input, &[0], &[(1, AggOp::Min)]);
+        let min_schema = provider.groupby_multi_agg_result_schema(&input, &[0], &[(1, AggOp::Min)]);
         assert_eq!(min_schema.arity(), 2);
         assert_eq!(min_schema.column_type(1), Some(ScalarType::U32));
     }

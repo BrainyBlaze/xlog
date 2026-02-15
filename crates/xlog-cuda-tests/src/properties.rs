@@ -423,7 +423,8 @@ pub fn prop_dedup_determinism(
     if ctx.device_row_count(&dedup1) != ctx.device_row_count(&dedup2) {
         return Err(format!(
             "Dedup row count differs: {} vs {}",
-            ctx.device_row_count(&dedup1), ctx.device_row_count(&dedup2)
+            ctx.device_row_count(&dedup1),
+            ctx.device_row_count(&dedup2)
         ));
     }
 

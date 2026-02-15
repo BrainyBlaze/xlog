@@ -15,7 +15,10 @@ fn gpu_eval_device_only_matches_cached_eval() {
             return;
         }
     };
-    let memory = Arc::new(GpuMemoryManager::new(device.clone(), MemoryBudget::with_limit(1 << 30)));
+    let memory = Arc::new(GpuMemoryManager::new(
+        device.clone(),
+        MemoryBudget::with_limit(1 << 30),
+    ));
     let provider = Arc::new(CudaKernelProvider::new(device, memory).expect("provider"));
 
     let circuit = Xgcf {
@@ -49,9 +52,7 @@ fn gpu_eval_device_only_matches_cached_eval() {
     let mut cache = GpuCircuitCache::new(&provider, config).expect("cache");
 
     let mut handle = cache.claim_slot(0xabcdefu64).expect("claim");
-    cache
-        .store_from_xgcf(&mut handle, &direct)
-        .expect("store");
+    cache.store_from_xgcf(&mut handle, &direct).expect("store");
     cache
         .store_weights(&handle, direct.var_log_true(), direct.var_log_false())
         .expect("store weights");

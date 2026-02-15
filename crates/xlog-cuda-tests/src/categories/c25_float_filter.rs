@@ -448,7 +448,10 @@ fn test_f64_total_ordering_comprehensive(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_f64_total_ordering_comprehensive",
             start.elapsed(),
-            format!("Expected 1 value > +Inf (NaN), got {}", ctx.device_row_count(&gt_inf)),
+            format!(
+                "Expected 1 value > +Inf (NaN), got {}",
+                ctx.device_row_count(&gt_inf)
+            ),
         );
     }
 
@@ -926,7 +929,10 @@ fn test_f32_total_ordering_comprehensive(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_f32_total_ordering_comprehensive",
             start.elapsed(),
-            format!("Expected 1 value > +Inf (NaN), got {}", ctx.device_row_count(&gt_inf)),
+            format!(
+                "Expected 1 value > +Inf (NaN), got {}",
+                ctx.device_row_count(&gt_inf)
+            ),
         );
     }
 

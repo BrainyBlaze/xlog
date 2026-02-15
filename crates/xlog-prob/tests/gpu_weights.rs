@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use xlog_core::MemoryBudget;
-use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 use xlog_cuda::memory::TrackedCudaSlice;
+use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 use xlog_prob::compilation::gpu_cnf::GpuCnfVarTables;
 use xlog_prob::compilation::gpu_weights::{build_evidence_by_var_gpu, build_weights_gpu};
 
@@ -14,11 +14,17 @@ fn try_provider() -> Option<Arc<CudaKernelProvider>> {
             return None;
         }
     };
-    let memory = Arc::new(GpuMemoryManager::new(device.clone(), MemoryBudget::with_limit(1 << 30)));
+    let memory = Arc::new(GpuMemoryManager::new(
+        device.clone(),
+        MemoryBudget::with_limit(1 << 30),
+    ));
     match CudaKernelProvider::new(device, memory) {
         Ok(p) => Some(Arc::new(p)),
         Err(e) => {
-            eprintln!("Skipping test: failed to create CUDA kernel provider: {}", e);
+            eprintln!(
+                "Skipping test: failed to create CUDA kernel provider: {}",
+                e
+            );
             None
         }
     }
@@ -74,7 +80,7 @@ fn gpu_weights_builds_log_tables_and_evidence() {
     // var_cap = 6 (DIMACS 1-based)
     let node_var = upload_u32(&provider, &[4, 0, 0]); // node 0 -> var 4
     let leaf_var = upload_u32(&provider, &[2, 5, 0]); // leaf 0 -> var 2, leaf 1 -> var 5
-    let choice_var = upload_u32(&provider, &[3, 6]);  // choice 0 -> var 3, choice 1 -> var 6
+    let choice_var = upload_u32(&provider, &[3, 6]); // choice 0 -> var 3, choice 1 -> var 6
 
     let vars = GpuCnfVarTables {
         node_var,

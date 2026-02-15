@@ -12,20 +12,20 @@ use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::CudaKernelProvider;
 use xlog_solve::{GpuCdclConfig, GpuCnf};
 
-use crate::gpu::GpuXgcf;
 use crate::compilation::gpu_cache::{GpuCircuitCache, GpuCircuitCacheHandle};
+use crate::gpu::GpuXgcf;
 
-pub mod gpu_d4;
 pub mod gpu_cache;
 pub mod gpu_cnf;
+pub mod gpu_d4;
 pub mod gpu_pir;
 pub mod gpu_pir_intern;
 pub mod gpu_weights;
 pub mod sparse_matrix;
 pub mod validation;
 
-pub use gpu_d4::GpuCompileConfig;
 pub use gpu_cnf::{encode_cnf_gpu, GpuCnfEncoding, GpuCnfVarTables};
+pub use gpu_d4::GpuCompileConfig;
 pub use gpu_pir::{
     GpuPirGraph, GpuPirRoots, PIR_AND, PIR_CONST, PIR_DECISION, PIR_LIT, PIR_NEG_LIT, PIR_OR,
 };
@@ -61,10 +61,7 @@ impl DeviceRandomVarList {
         Ok(Self { list, count })
     }
 
-    pub fn from_host(
-        provider: &CudaKernelProvider,
-        host: &[u32],
-    ) -> Result<Self> {
+    pub fn from_host(provider: &CudaKernelProvider, host: &[u32]) -> Result<Self> {
         let memory = provider.memory();
         let mut list = memory.alloc::<u32>(host.len())?;
         if !host.is_empty() {
@@ -152,18 +149,13 @@ pub fn compile_gpu_d4_and_verify_cached(
     let d4_config = d4_config_for_smoothing(config, random_vars.count())?;
     #[cfg(debug_assertions)]
     eprintln!("[xlog-prob] compile_gpu_d4_and_verify_cached: compile_gpu_d4_gated");
-    let circuit_base = gpu_d4::compile_gpu_d4_gated(
-        cnf,
-        provider,
-        &d4_config,
-        handle.compile_needed_device(),
-    )?;
+    let circuit_base =
+        gpu_d4::compile_gpu_d4_gated(cnf, provider, &d4_config, handle.compile_needed_device())?;
     #[cfg(debug_assertions)]
     {
-        provider
-            .device()
-            .synchronize()
-            .map_err(|e| XlogError::Kernel(format!("sync after compile_gpu_d4_gated failed: {}", e)))?;
+        provider.device().synchronize().map_err(|e| {
+            XlogError::Kernel(format!("sync after compile_gpu_d4_gated failed: {}", e))
+        })?;
     }
     if circuit_base.num_nodes() == 0 || circuit_base.num_levels() == 0 {
         return Ok(handle);
@@ -194,7 +186,10 @@ pub fn compile_gpu_d4_and_verify_cached(
     #[cfg(debug_assertions)]
     {
         provider.device().synchronize().map_err(|e| {
-            XlogError::Kernel(format!("sync after validate_equivalence_gpu_gated failed: {}", e))
+            XlogError::Kernel(format!(
+                "sync after validate_equivalence_gpu_gated failed: {}",
+                e
+            ))
         })?;
     }
 
@@ -215,7 +210,10 @@ pub fn compile_gpu_d4_and_verify_cached(
         #[cfg(debug_assertions)]
         {
             provider.device().synchronize().map_err(|e| {
-                XlogError::Kernel(format!("sync after smooth_random_vars_device failed: {}", e))
+                XlogError::Kernel(format!(
+                    "sync after smooth_random_vars_device failed: {}",
+                    e
+                ))
             })?;
         }
         smoothed
@@ -233,12 +231,19 @@ pub fn compile_gpu_d4_and_verify_cached(
 
     #[cfg(debug_assertions)]
     eprintln!("[xlog-prob] compile_gpu_d4_and_verify_cached: compute_free_var_mask_gpu_gated");
-    let free_var_mask =
-        gpu_d4::compute_free_var_mask_gpu_gated(cnf, &circuit_eval, provider, handle.compile_needed_device())?;
+    let free_var_mask = gpu_d4::compute_free_var_mask_gpu_gated(
+        cnf,
+        &circuit_eval,
+        provider,
+        handle.compile_needed_device(),
+    )?;
     #[cfg(debug_assertions)]
     {
         provider.device().synchronize().map_err(|e| {
-            XlogError::Kernel(format!("sync after compute_free_var_mask_gpu_gated failed: {}", e))
+            XlogError::Kernel(format!(
+                "sync after compute_free_var_mask_gpu_gated failed: {}",
+                e
+            ))
         })?;
     }
     #[cfg(debug_assertions)]
@@ -253,7 +258,10 @@ pub fn compile_gpu_d4_and_verify_cached(
     Ok(handle)
 }
 
-fn d4_config_for_smoothing(config: &GpuCompileConfig, random_var_count: u32) -> Result<GpuCompileConfig> {
+fn d4_config_for_smoothing(
+    config: &GpuCompileConfig,
+    random_var_count: u32,
+) -> Result<GpuCompileConfig> {
     if random_var_count == 0 {
         return Ok(*config);
     }

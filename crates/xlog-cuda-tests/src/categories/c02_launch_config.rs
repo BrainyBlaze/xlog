@@ -125,7 +125,10 @@ fn test_zero_elements_no_launch(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "zero_elements_no_launch",
             start.elapsed(),
-            format!("Empty buffer has {} rows, expected 0", ctx.device_row_count(&empty)),
+            format!(
+                "Empty buffer has {} rows, expected 0",
+                ctx.device_row_count(&empty)
+            ),
         );
     }
 
@@ -396,7 +399,9 @@ fn test_warp_boundary_sizes(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Size {}: sort returned {} rows, expected {}",
-                    size, ctx.device_row_count(&sorted), size
+                    size,
+                    ctx.device_row_count(&sorted),
+                    size
                 ),
             );
         }
@@ -486,7 +491,9 @@ fn test_block_boundary_sizes(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Size {}: sort returned {} rows, expected {}",
-                    size, ctx.device_row_count(&sorted), size
+                    size,
+                    ctx.device_row_count(&sorted),
+                    size
                 ),
             );
         }
@@ -574,7 +581,9 @@ fn test_non_power_of_two_sizes(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Size {}: sort returned {} rows, expected {}",
-                    size, ctx.device_row_count(&sorted), size
+                    size,
+                    ctx.device_row_count(&sorted),
+                    size
                 ),
             );
         }
@@ -658,7 +667,11 @@ fn test_large_grid_sizes(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "large_grid_sizes",
             start.elapsed(),
-            format!("Sort returned {} rows, expected {}", ctx.device_row_count(&sorted), size),
+            format!(
+                "Sort returned {} rows, expected {}",
+                ctx.device_row_count(&sorted),
+                size
+            ),
         );
     }
 
@@ -782,7 +795,11 @@ fn test_max_practical_size(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "max_practical_size",
             start.elapsed(),
-            format!("Sort returned {} rows, expected {}", ctx.device_row_count(&sorted), size),
+            format!(
+                "Sort returned {} rows, expected {}",
+                ctx.device_row_count(&sorted),
+                size
+            ),
         );
     }
 

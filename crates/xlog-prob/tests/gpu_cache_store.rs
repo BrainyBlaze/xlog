@@ -21,7 +21,10 @@ fn read_u32_at(
     host[0]
 }
 
-fn read_slot(provider: &Arc<CudaKernelProvider>, handle: &xlog_prob::compilation::gpu_cache::GpuCircuitCacheHandle) -> usize {
+fn read_slot(
+    provider: &Arc<CudaKernelProvider>,
+    handle: &xlog_prob::compilation::gpu_cache::GpuCircuitCacheHandle,
+) -> usize {
     let mut host = [0u32; 1];
     provider
         .device()
@@ -40,7 +43,10 @@ fn cache_store_writes_metadata() {
             return;
         }
     };
-    let memory = Arc::new(GpuMemoryManager::new(device.clone(), MemoryBudget::with_limit(1 << 30)));
+    let memory = Arc::new(GpuMemoryManager::new(
+        device.clone(),
+        MemoryBudget::with_limit(1 << 30),
+    ));
     let provider = Arc::new(CudaKernelProvider::new(device, memory).expect("provider"));
 
     let circuit = Xgcf {

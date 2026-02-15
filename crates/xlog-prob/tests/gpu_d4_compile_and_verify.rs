@@ -47,7 +47,7 @@ fn gpu_d4_compile_and_verify_unit_clause() {
         cdcl_conflict_budget: None,
     };
 
-    let circuit =
-        compile_gpu_d4_and_verify(&phi, &phi.num_vars, &provider, &config).expect("compile must succeed");
+    let circuit = compile_gpu_d4_and_verify(&phi, &phi.num_vars, &provider, &config)
+        .expect("compile must succeed");
     assert!(circuit.num_nodes() > 0);
 }

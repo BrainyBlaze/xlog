@@ -2,11 +2,12 @@ use std::sync::Arc;
 
 use xlog_core::MemoryBudget;
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
-use xlog_prob::compilation::gpu_cache::{
-    GpuCacheLookup, GpuCircuitCache, GpuCircuitCacheConfig,
-};
+use xlog_prob::compilation::gpu_cache::{GpuCacheLookup, GpuCircuitCache, GpuCircuitCacheConfig};
 
-fn read_u32(provider: &Arc<CudaKernelProvider>, slice: &xlog_cuda::memory::TrackedCudaSlice<u32>) -> u32 {
+fn read_u32(
+    provider: &Arc<CudaKernelProvider>,
+    slice: &xlog_cuda::memory::TrackedCudaSlice<u32>,
+) -> u32 {
     let mut host = vec![0u32; 1];
     provider
         .device()
@@ -30,7 +31,10 @@ fn gpu_cache_hit_miss_and_eviction() {
             return;
         }
     };
-    let memory = Arc::new(GpuMemoryManager::new(device.clone(), MemoryBudget::with_limit(1 << 30)));
+    let memory = Arc::new(GpuMemoryManager::new(
+        device.clone(),
+        MemoryBudget::with_limit(1 << 30),
+    ));
     let provider = Arc::new(CudaKernelProvider::new(device, memory).expect("provider"));
 
     let config = GpuCircuitCacheConfig {

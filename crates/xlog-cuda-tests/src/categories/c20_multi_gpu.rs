@@ -119,7 +119,8 @@ fn test_single_gpu_baseline(ctx: &TestContext) -> TestResult {
             start.elapsed(),
             format!(
                 "Filter: expected {} rows, got {}",
-                expected_count, ctx.device_row_count(&filtered)
+                expected_count,
+                ctx.device_row_count(&filtered)
             ),
         );
     }
@@ -162,7 +163,10 @@ fn test_single_gpu_baseline(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_single_gpu_baseline",
             start.elapsed(),
-            format!("Dedup: expected 1000 unique, got {}", ctx.device_row_count(&deduped)),
+            format!(
+                "Dedup: expected 1000 unique, got {}",
+                ctx.device_row_count(&deduped)
+            ),
         );
     }
 
@@ -229,7 +233,10 @@ fn test_single_gpu_baseline(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_single_gpu_baseline",
             start.elapsed(),
-            format!("Join: expected 500 rows, got {}", ctx.device_row_count(&joined)),
+            format!(
+                "Join: expected 500 rows, got {}",
+                ctx.device_row_count(&joined)
+            ),
         );
     }
 
@@ -302,7 +309,10 @@ fn test_multi_gpu_detection(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_multi_gpu_detection",
             start.elapsed(),
-            format!("Sort returned {} rows, expected 1000", ctx.device_row_count(&sorted)),
+            format!(
+                "Sort returned {} rows, expected 1000",
+                ctx.device_row_count(&sorted)
+            ),
         );
     }
 
@@ -390,7 +400,8 @@ fn test_device_enumeration(ctx: &TestContext) -> TestResult {
                     start.elapsed(),
                     format!(
                         "Device {}: sort returned {} rows",
-                        test_num, ctx.device_row_count(&sorted)
+                        test_num,
+                        ctx.device_row_count(&sorted)
                     ),
                 );
             }

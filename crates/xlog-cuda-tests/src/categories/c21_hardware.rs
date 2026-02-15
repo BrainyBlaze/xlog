@@ -639,7 +639,11 @@ fn test_stress_operations(ctx: &TestContext) -> TestResult {
             return TestResult::error(
                 "test_stress_operations",
                 start.elapsed(),
-                format!("Stress dedup {}: expected 100, got {}", i, ctx.device_row_count(&deduped)),
+                format!(
+                    "Stress dedup {}: expected 100, got {}",
+                    i,
+                    ctx.device_row_count(&deduped)
+                ),
             );
         }
 
@@ -788,7 +792,9 @@ fn test_memory_pressure(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Buffer {}: filter expected {} rows, got {}",
-                    i, expected, ctx.device_row_count(&filtered)
+                    i,
+                    expected,
+                    ctx.device_row_count(&filtered)
                 ),
             );
         }
@@ -1079,7 +1085,8 @@ fn test_sustained_operation(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Sustained join {}: expected 500 rows, got {}",
-                    join_count, ctx.device_row_count(&joined)
+                    join_count,
+                    ctx.device_row_count(&joined)
                 ),
             );
         }

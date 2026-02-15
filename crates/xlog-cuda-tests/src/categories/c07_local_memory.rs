@@ -97,7 +97,11 @@ fn test_deep_sort_keys(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_deep_sort_keys",
             start.elapsed(),
-            format!("Sort returned {} rows, expected {}", ctx.device_row_count(&sorted), SIZE),
+            format!(
+                "Sort returned {} rows, expected {}",
+                ctx.device_row_count(&sorted),
+                SIZE
+            ),
         );
     }
 
@@ -229,7 +233,9 @@ fn test_repeated_operations(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Iteration {}: sort returned {} rows, expected {}",
-                    iter, ctx.device_row_count(&sorted), SIZE
+                    iter,
+                    ctx.device_row_count(&sorted),
+                    SIZE
                 ),
             );
         }
@@ -279,7 +285,9 @@ fn test_repeated_operations(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Filter iteration {}: returned {} rows, expected {}",
-                    iter, ctx.device_row_count(&filtered), expected_count
+                    iter,
+                    ctx.device_row_count(&filtered),
+                    expected_count
                 ),
             );
         }
@@ -356,7 +364,9 @@ fn test_variable_workload(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Test {}: size {} returned {} rows",
-                    i, size, ctx.device_row_count(&sorted)
+                    i,
+                    size,
+                    ctx.device_row_count(&sorted)
                 ),
             );
         }
@@ -456,7 +466,8 @@ fn test_complex_filter_chains(ctx: &TestContext) -> TestResult {
             start.elapsed(),
             format!(
                 "Filter 1: returned {} rows, expected {}",
-                ctx.device_row_count(&filtered1), expected1
+                ctx.device_row_count(&filtered1),
+                expected1
             ),
         );
     }
@@ -483,7 +494,8 @@ fn test_complex_filter_chains(ctx: &TestContext) -> TestResult {
             start.elapsed(),
             format!(
                 "Filter 2: returned {} rows, expected {}",
-                ctx.device_row_count(&filtered2), expected2
+                ctx.device_row_count(&filtered2),
+                expected2
             ),
         );
     }
@@ -510,7 +522,8 @@ fn test_complex_filter_chains(ctx: &TestContext) -> TestResult {
             start.elapsed(),
             format!(
                 "Filter 3: returned {} rows, expected {}",
-                ctx.device_row_count(&filtered3), expected3
+                ctx.device_row_count(&filtered3),
+                expected3
             ),
         );
     }
@@ -616,7 +629,9 @@ fn test_local_memory_stress(ctx: &TestContext) -> TestResult {
                     start.elapsed(),
                     format!(
                         "Iter {}, size {}: wrong row count {}",
-                        iter, size, ctx.device_row_count(&sorted)
+                        iter,
+                        size,
+                        ctx.device_row_count(&sorted)
                     ),
                 );
             }
@@ -642,7 +657,9 @@ fn test_local_memory_stress(ctx: &TestContext) -> TestResult {
                     start.elapsed(),
                     format!(
                         "Iter {}, size {}: filter returned {} rows",
-                        iter, size, ctx.device_row_count(&filtered)
+                        iter,
+                        size,
+                        ctx.device_row_count(&filtered)
                     ),
                 );
             }

@@ -79,13 +79,7 @@ fn test_device_compact_count(ctx: &TestContext) -> TestResult {
 
     let device_count = match read_device_count(ctx, &filtered) {
         Ok(count) => count,
-        Err(e) => {
-            return TestResult::error(
-                "test_device_compact_count",
-                start.elapsed(),
-                e,
-            )
-        }
+        Err(e) => return TestResult::error("test_device_compact_count", start.elapsed(), e),
     };
 
     if device_count != expected_count {
@@ -172,20 +166,17 @@ fn test_groupby_device_count_sum(ctx: &TestContext) -> TestResult {
 
     let device_count = match read_device_count(ctx, &grouped) {
         Ok(count) => count,
-        Err(e) => {
-            return TestResult::error(
-                "test_groupby_device_count_sum",
-                start.elapsed(),
-                e,
-            )
-        }
+        Err(e) => return TestResult::error("test_groupby_device_count_sum", start.elapsed(), e),
     };
 
     if device_count != 3 {
         return TestResult::error(
             "test_groupby_device_count_sum",
             start.elapsed(),
-            format!("Device group count mismatch: got {}, expected 3", device_count),
+            format!(
+                "Device group count mismatch: got {}, expected 3",
+                device_count
+            ),
         );
     }
 
@@ -223,10 +214,7 @@ fn test_groupby_device_count_sum(ctx: &TestContext) -> TestResult {
         );
     }
 
-    let mut pairs: Vec<(u32, u64)> = out_keys
-        .into_iter()
-        .zip(out_sums.into_iter())
-        .collect();
+    let mut pairs: Vec<(u32, u64)> = out_keys.into_iter().zip(out_sums.into_iter()).collect();
     pairs.sort_by_key(|(k, _)| *k);
 
     let expected = vec![(1u32, 30u64), (2u32, 3u64), (3u32, 5u64)];
@@ -234,7 +222,10 @@ fn test_groupby_device_count_sum(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_groupby_device_count_sum",
             start.elapsed(),
-            format!("Group sums mismatch: got {:?}, expected {:?}", pairs, expected),
+            format!(
+                "Group sums mismatch: got {:?}, expected {:?}",
+                pairs, expected
+            ),
         );
     }
 

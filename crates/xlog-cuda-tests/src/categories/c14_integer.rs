@@ -791,7 +791,8 @@ fn test_integer_wraparound_keys(ctx: &TestContext) -> TestResult {
             start.elapsed(),
             format!(
                 "Join returned {} rows, expected {}",
-                ctx.device_row_count(&joined), expected_matches
+                ctx.device_row_count(&joined),
+                expected_matches
             ),
         );
     }

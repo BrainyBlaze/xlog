@@ -35,5 +35,8 @@ query(a()).
     let r2 = prog.evaluate().expect("eval 2");
 
     assert_eq!(r1.query_probs.len(), r2.query_probs.len());
-    assert_eq!(r1.query_probs[0].prob.to_bits(), r2.query_probs[0].prob.to_bits());
+    assert_eq!(
+        r1.query_probs[0].prob.to_bits(),
+        r2.query_probs[0].prob.to_bits()
+    );
 }

@@ -102,6 +102,12 @@ fn gpu_equivalence_accepts_padded_phi_caps() {
     };
     let circuit = GpuXgcf::upload(&provider, &xgcf).expect("GpuXgcf upload");
 
-    validate_equivalence_gpu(&phi, &phi.num_vars, &circuit, &provider, GpuEquivalenceConfig::default())
-        .expect("equivalence should hold even when phi capacities exceed exact sizes");
+    validate_equivalence_gpu(
+        &phi,
+        &phi.num_vars,
+        &circuit,
+        &provider,
+        GpuEquivalenceConfig::default(),
+    )
+    .expect("equivalence should hold even when phi capacities exceed exact sizes");
 }

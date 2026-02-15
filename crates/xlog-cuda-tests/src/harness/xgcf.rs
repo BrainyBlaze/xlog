@@ -553,43 +553,35 @@ fn launch_level(
 
 pub fn run_tiny_xgcf_forward(ctx: &TestContext, spec: &TinyXgcfSpec) -> Result<Vec<f64>> {
     let mut d_node_type = ctx.memory.alloc::<u8>(spec.node_type.len())?;
-    ctx
-        .htod_sync_copy_into(&spec.node_type, &mut d_node_type)
+    ctx.htod_sync_copy_into(&spec.node_type, &mut d_node_type)
         .map_err(|e| XlogError::Kernel(format!("Failed to upload node_type: {}", e)))?;
 
     let mut d_child_offsets = ctx.memory.alloc::<u32>(spec.child_offsets.len())?;
-    ctx
-        .htod_sync_copy_into(&spec.child_offsets, &mut d_child_offsets)
+    ctx.htod_sync_copy_into(&spec.child_offsets, &mut d_child_offsets)
         .map_err(|e| XlogError::Kernel(format!("Failed to upload child_offsets: {}", e)))?;
 
     let mut d_child_indices = ctx.memory.alloc::<u32>(spec.child_indices.len())?;
-    ctx
-        .htod_sync_copy_into(&spec.child_indices, &mut d_child_indices)
+    ctx.htod_sync_copy_into(&spec.child_indices, &mut d_child_indices)
         .map_err(|e| XlogError::Kernel(format!("Failed to upload child_indices: {}", e)))?;
 
     let mut d_lit = ctx.memory.alloc::<i32>(spec.lit.len())?;
-    ctx
-        .htod_sync_copy_into(&spec.lit, &mut d_lit)
+    ctx.htod_sync_copy_into(&spec.lit, &mut d_lit)
         .map_err(|e| XlogError::Kernel(format!("Failed to upload lit: {}", e)))?;
 
     let mut d_decision_var = ctx.memory.alloc::<u32>(spec.decision_var.len())?;
-    ctx
-        .htod_sync_copy_into(&spec.decision_var, &mut d_decision_var)
+    ctx.htod_sync_copy_into(&spec.decision_var, &mut d_decision_var)
         .map_err(|e| XlogError::Kernel(format!("Failed to upload decision_var: {}", e)))?;
 
     let mut d_decision_child_false = ctx.memory.alloc::<u32>(spec.decision_child_false.len())?;
-    ctx
-        .htod_sync_copy_into(&spec.decision_child_false, &mut d_decision_child_false)
+    ctx.htod_sync_copy_into(&spec.decision_child_false, &mut d_decision_child_false)
         .map_err(|e| XlogError::Kernel(format!("Failed to upload decision_child_false: {}", e)))?;
 
     let mut d_decision_child_true = ctx.memory.alloc::<u32>(spec.decision_child_true.len())?;
-    ctx
-        .htod_sync_copy_into(&spec.decision_child_true, &mut d_decision_child_true)
+    ctx.htod_sync_copy_into(&spec.decision_child_true, &mut d_decision_child_true)
         .map_err(|e| XlogError::Kernel(format!("Failed to upload decision_child_true: {}", e)))?;
 
     let mut d_level_nodes = ctx.memory.alloc::<u32>(spec.level_nodes.len())?;
-    ctx
-        .htod_sync_copy_into(&spec.level_nodes, &mut d_level_nodes)
+    ctx.htod_sync_copy_into(&spec.level_nodes, &mut d_level_nodes)
         .map_err(|e| XlogError::Kernel(format!("Failed to upload level_nodes: {}", e)))?;
 
     let mut level_offsets: Vec<u32> = Vec::with_capacity(spec.levels.len() + 1);
@@ -607,8 +599,7 @@ pub fn run_tiny_xgcf_forward(ctx: &TestContext, spec: &TinyXgcfSpec) -> Result<V
         ));
     }
     let mut d_level_offsets = ctx.memory.alloc::<u32>(level_offsets.len())?;
-    ctx
-        .htod_sync_copy_into(&level_offsets, &mut d_level_offsets)
+    ctx.htod_sync_copy_into(&level_offsets, &mut d_level_offsets)
         .map_err(|e| XlogError::Kernel(format!("Failed to upload level_offsets: {}", e)))?;
 
     let mut level_offsets: Vec<u32> = Vec::with_capacity(spec.levels.len() + 1);
@@ -626,24 +617,20 @@ pub fn run_tiny_xgcf_forward(ctx: &TestContext, spec: &TinyXgcfSpec) -> Result<V
         ));
     }
     let mut d_level_offsets = ctx.memory.alloc::<u32>(level_offsets.len())?;
-    ctx
-        .htod_sync_copy_into(&level_offsets, &mut d_level_offsets)
+    ctx.htod_sync_copy_into(&level_offsets, &mut d_level_offsets)
         .map_err(|e| XlogError::Kernel(format!("Failed to upload level_offsets: {}", e)))?;
 
     let mut d_var_log_true = ctx.memory.alloc::<f64>(spec.var_log_true.len())?;
-    ctx
-        .htod_sync_copy_into(&spec.var_log_true, &mut d_var_log_true)
+    ctx.htod_sync_copy_into(&spec.var_log_true, &mut d_var_log_true)
         .map_err(|e| XlogError::Kernel(format!("Failed to upload var_log_true: {}", e)))?;
 
     let mut d_var_log_false = ctx.memory.alloc::<f64>(spec.var_log_false.len())?;
-    ctx
-        .htod_sync_copy_into(&spec.var_log_false, &mut d_var_log_false)
+    ctx.htod_sync_copy_into(&spec.var_log_false, &mut d_var_log_false)
         .map_err(|e| XlogError::Kernel(format!("Failed to upload var_log_false: {}", e)))?;
 
     let mut d_values = ctx.memory.alloc::<f64>(spec.num_nodes)?;
     let init_values = vec![0.0f64; spec.num_nodes];
-    ctx
-        .htod_sync_copy_into(&init_values, &mut d_values)
+    ctx.htod_sync_copy_into(&init_values, &mut d_values)
         .map_err(|e| XlogError::Kernel(format!("Failed to init values: {}", e)))?;
 
     for (level, &(_offset, len)) in spec.levels.iter().enumerate() {
@@ -668,50 +655,41 @@ pub fn run_tiny_xgcf_forward(ctx: &TestContext, spec: &TinyXgcfSpec) -> Result<V
 
     ctx.sync_and_check()?;
 
-    ctx
-        .dtoh_sync_copy(&d_values)
+    ctx.dtoh_sync_copy(&d_values)
         .map_err(|e| XlogError::Kernel(format!("Failed to download values: {}", e)))
 }
 
 pub fn run_tiny_xgcf_backward(ctx: &TestContext, spec: &TinyXgcfSpec) -> Result<TinyXgcfRun> {
     let mut d_node_type = ctx.memory.alloc::<u8>(spec.node_type.len())?;
-    ctx
-        .htod_sync_copy_into(&spec.node_type, &mut d_node_type)
+    ctx.htod_sync_copy_into(&spec.node_type, &mut d_node_type)
         .map_err(|e| XlogError::Kernel(format!("Failed to upload node_type: {}", e)))?;
 
     let mut d_child_offsets = ctx.memory.alloc::<u32>(spec.child_offsets.len())?;
-    ctx
-        .htod_sync_copy_into(&spec.child_offsets, &mut d_child_offsets)
+    ctx.htod_sync_copy_into(&spec.child_offsets, &mut d_child_offsets)
         .map_err(|e| XlogError::Kernel(format!("Failed to upload child_offsets: {}", e)))?;
 
     let mut d_child_indices = ctx.memory.alloc::<u32>(spec.child_indices.len())?;
-    ctx
-        .htod_sync_copy_into(&spec.child_indices, &mut d_child_indices)
+    ctx.htod_sync_copy_into(&spec.child_indices, &mut d_child_indices)
         .map_err(|e| XlogError::Kernel(format!("Failed to upload child_indices: {}", e)))?;
 
     let mut d_lit = ctx.memory.alloc::<i32>(spec.lit.len())?;
-    ctx
-        .htod_sync_copy_into(&spec.lit, &mut d_lit)
+    ctx.htod_sync_copy_into(&spec.lit, &mut d_lit)
         .map_err(|e| XlogError::Kernel(format!("Failed to upload lit: {}", e)))?;
 
     let mut d_decision_var = ctx.memory.alloc::<u32>(spec.decision_var.len())?;
-    ctx
-        .htod_sync_copy_into(&spec.decision_var, &mut d_decision_var)
+    ctx.htod_sync_copy_into(&spec.decision_var, &mut d_decision_var)
         .map_err(|e| XlogError::Kernel(format!("Failed to upload decision_var: {}", e)))?;
 
     let mut d_decision_child_false = ctx.memory.alloc::<u32>(spec.decision_child_false.len())?;
-    ctx
-        .htod_sync_copy_into(&spec.decision_child_false, &mut d_decision_child_false)
+    ctx.htod_sync_copy_into(&spec.decision_child_false, &mut d_decision_child_false)
         .map_err(|e| XlogError::Kernel(format!("Failed to upload decision_child_false: {}", e)))?;
 
     let mut d_decision_child_true = ctx.memory.alloc::<u32>(spec.decision_child_true.len())?;
-    ctx
-        .htod_sync_copy_into(&spec.decision_child_true, &mut d_decision_child_true)
+    ctx.htod_sync_copy_into(&spec.decision_child_true, &mut d_decision_child_true)
         .map_err(|e| XlogError::Kernel(format!("Failed to upload decision_child_true: {}", e)))?;
 
     let mut d_level_nodes = ctx.memory.alloc::<u32>(spec.level_nodes.len())?;
-    ctx
-        .htod_sync_copy_into(&spec.level_nodes, &mut d_level_nodes)
+    ctx.htod_sync_copy_into(&spec.level_nodes, &mut d_level_nodes)
         .map_err(|e| XlogError::Kernel(format!("Failed to upload level_nodes: {}", e)))?;
 
     let mut level_offsets: Vec<u32> = Vec::with_capacity(spec.levels.len() + 1);
@@ -729,24 +707,20 @@ pub fn run_tiny_xgcf_backward(ctx: &TestContext, spec: &TinyXgcfSpec) -> Result<
         ));
     }
     let mut d_level_offsets = ctx.memory.alloc::<u32>(level_offsets.len())?;
-    ctx
-        .htod_sync_copy_into(&level_offsets, &mut d_level_offsets)
+    ctx.htod_sync_copy_into(&level_offsets, &mut d_level_offsets)
         .map_err(|e| XlogError::Kernel(format!("Failed to upload level_offsets: {}", e)))?;
 
     let mut d_var_log_true = ctx.memory.alloc::<f64>(spec.var_log_true.len())?;
-    ctx
-        .htod_sync_copy_into(&spec.var_log_true, &mut d_var_log_true)
+    ctx.htod_sync_copy_into(&spec.var_log_true, &mut d_var_log_true)
         .map_err(|e| XlogError::Kernel(format!("Failed to upload var_log_true: {}", e)))?;
 
     let mut d_var_log_false = ctx.memory.alloc::<f64>(spec.var_log_false.len())?;
-    ctx
-        .htod_sync_copy_into(&spec.var_log_false, &mut d_var_log_false)
+    ctx.htod_sync_copy_into(&spec.var_log_false, &mut d_var_log_false)
         .map_err(|e| XlogError::Kernel(format!("Failed to upload var_log_false: {}", e)))?;
 
     let mut d_values = ctx.memory.alloc::<f64>(spec.num_nodes)?;
     let init_values = vec![0.0f64; spec.num_nodes];
-    ctx
-        .htod_sync_copy_into(&init_values, &mut d_values)
+    ctx.htod_sync_copy_into(&init_values, &mut d_values)
         .map_err(|e| XlogError::Kernel(format!("Failed to init values: {}", e)))?;
 
     for (level, &(_offset, len)) in spec.levels.iter().enumerate() {
@@ -780,18 +754,15 @@ pub fn run_tiny_xgcf_backward(ctx: &TestContext, spec: &TinyXgcfSpec) -> Result<
     }
     adj_init[root_idx] = 1.0;
     let mut d_adj = ctx.memory.alloc::<f64>(spec.num_nodes)?;
-    ctx
-        .htod_sync_copy_into(&adj_init, &mut d_adj)
+    ctx.htod_sync_copy_into(&adj_init, &mut d_adj)
         .map_err(|e| XlogError::Kernel(format!("Failed to init adj: {}", e)))?;
 
     let mut d_grad_true = ctx.memory.alloc::<f64>(spec.num_vars + 1)?;
     let mut d_grad_false = ctx.memory.alloc::<f64>(spec.num_vars + 1)?;
     let grad_init = vec![0.0f64; spec.num_vars + 1];
-    ctx
-        .htod_sync_copy_into(&grad_init, &mut d_grad_true)
+    ctx.htod_sync_copy_into(&grad_init, &mut d_grad_true)
         .map_err(|e| XlogError::Kernel(format!("Failed to init grad_true: {}", e)))?;
-    ctx
-        .htod_sync_copy_into(&grad_init, &mut d_grad_false)
+    ctx.htod_sync_copy_into(&grad_init, &mut d_grad_false)
         .map_err(|e| XlogError::Kernel(format!("Failed to init grad_false: {}", e)))?;
 
     for (level, &(_offset, len)) in spec.levels.iter().enumerate().rev() {

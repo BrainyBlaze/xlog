@@ -337,8 +337,7 @@ fn test_gpu_xgcf_smoothing_matches_cpu_gradients() {
 
     let gpu_xgcf = GpuXgcf::upload(&provider, &xgcf).unwrap();
     let random_vars = vec![1u32, 2u32];
-    let random_vars_device =
-        DeviceRandomVarList::from_host(&provider, &random_vars).unwrap();
+    let random_vars_device = DeviceRandomVarList::from_host(&provider, &random_vars).unwrap();
     let mut gpu_smoothed = gpu_xgcf
         .smooth_random_vars_device(
             &provider,

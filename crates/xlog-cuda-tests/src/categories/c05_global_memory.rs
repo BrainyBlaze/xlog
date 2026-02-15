@@ -55,7 +55,11 @@ fn test_large_allocation(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_large_allocation",
             start.elapsed(),
-            format!("Buffer has {} rows, expected {}", ctx.device_row_count(&buffer), SIZE),
+            format!(
+                "Buffer has {} rows, expected {}",
+                ctx.device_row_count(&buffer),
+                SIZE
+            ),
         );
     }
 
@@ -82,7 +86,8 @@ fn test_large_allocation(ctx: &TestContext) -> TestResult {
             start.elapsed(),
             format!(
                 "Filter returned {} rows, expected {}",
-                ctx.device_row_count(&filtered), expected_count
+                ctx.device_row_count(&filtered),
+                expected_count
             ),
         );
     }

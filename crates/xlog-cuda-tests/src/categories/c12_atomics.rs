@@ -120,7 +120,10 @@ fn test_hash_join_atomic_correctness(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Join ({}x{}) returned {} rows, expected {}",
-                    left_size, right_size, ctx.device_row_count(&joined), matching_right
+                    left_size,
+                    right_size,
+                    ctx.device_row_count(&joined),
+                    matching_right
                 ),
             );
         }
@@ -298,7 +301,9 @@ fn test_dedup_atomic_correctness(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Pattern {}: dedup returned {} rows, expected {}",
-                    name, ctx.device_row_count(&deduped), expected_unique
+                    name,
+                    ctx.device_row_count(&deduped),
+                    expected_unique
                 ),
             );
         }
@@ -423,7 +428,8 @@ fn test_high_contention_join(ctx: &TestContext) -> TestResult {
             start.elapsed(),
             format!(
                 "Collision join returned {} rows, expected {}",
-                ctx.device_row_count(&joined), SIZE
+                ctx.device_row_count(&joined),
+                SIZE
             ),
         );
     }
@@ -563,7 +569,8 @@ fn test_high_contention_join(ctx: &TestContext) -> TestResult {
             start.elapsed(),
             format!(
                 "Same-key join returned {} rows, expected {} (Cartesian)",
-                ctx.device_row_count(&same_joined), expected_same
+                ctx.device_row_count(&same_joined),
+                expected_same
             ),
         );
     }
@@ -711,7 +718,9 @@ fn test_atomic_counting(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Size {}: filter returned {} rows, expected {}",
-                    size, ctx.device_row_count(&filtered), expected_count
+                    size,
+                    ctx.device_row_count(&filtered),
+                    expected_count
                 ),
             );
         }
@@ -821,7 +830,9 @@ fn test_concurrent_atomic_updates(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Iteration {}: dedup returned {} rows, expected {}",
-                    iteration, ctx.device_row_count(&deduped), SIZE
+                    iteration,
+                    ctx.device_row_count(&deduped),
+                    SIZE
                 ),
             );
         }
@@ -847,7 +858,9 @@ fn test_concurrent_atomic_updates(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Iteration {}: filter returned {} rows, expected {}",
-                    iteration, ctx.device_row_count(&filtered), expected_filter
+                    iteration,
+                    ctx.device_row_count(&filtered),
+                    expected_filter
                 ),
             );
         }
@@ -872,7 +885,9 @@ fn test_concurrent_atomic_updates(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Iteration {}: self-join returned {} rows, expected {}",
-                    iteration, ctx.device_row_count(&joined), SIZE
+                    iteration,
+                    ctx.device_row_count(&joined),
+                    SIZE
                 ),
             );
         }

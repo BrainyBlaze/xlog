@@ -56,6 +56,12 @@ fn gpu_equivalence_smoke_phi_is_lit() {
     };
     let circuit = GpuXgcf::upload(&provider, &xgcf).expect("GpuXgcf upload");
 
-    validate_equivalence_gpu(&phi, &phi.num_vars, &circuit, &provider, GpuEquivalenceConfig::default())
-        .expect("equivalence should hold");
+    validate_equivalence_gpu(
+        &phi,
+        &phi.num_vars,
+        &circuit,
+        &provider,
+        GpuEquivalenceConfig::default(),
+    )
+    .expect("equivalence should hold");
 }

@@ -584,10 +584,7 @@ impl Executor {
         Ok(())
     }
 
-    pub fn execute_non_recursive_scc(
-        &mut self,
-        rules: &[xlog_ir::CompiledRule],
-    ) -> Result<()> {
+    pub fn execute_non_recursive_scc(&mut self, rules: &[xlog_ir::CompiledRule]) -> Result<()> {
         for rule in rules {
             let result = self.execute_node(&rule.body)?;
 
@@ -632,7 +629,9 @@ impl Executor {
                     .device()
                     .inner()
                     .htod_sync_copy_into(&[1u32], &mut d_num_rows)
-                    .map_err(|e| XlogError::Kernel(format!("Failed to create unit row count: {}", e)))?;
+                    .map_err(|e| {
+                        XlogError::Kernel(format!("Failed to create unit row count: {}", e))
+                    })?;
                 Ok(CudaBuffer::from_columns(
                     Vec::new(),
                     1,
@@ -867,10 +866,7 @@ impl Executor {
     /// 2. Track which relations changed (delta)
     /// 3. Re-execute rules, using delta from previous iteration
     /// 4. Repeat until no changes (fixpoint reached)
-    pub fn execute_recursive_scc(
-        &mut self,
-        rules: &[xlog_ir::CompiledRule],
-    ) -> Result<()> {
+    pub fn execute_recursive_scc(&mut self, rules: &[xlog_ir::CompiledRule]) -> Result<()> {
         // Identify SCC predicates from rule heads (these are the recursive IDBs).
         let mut recursive_preds: HashSet<String> = HashSet::new();
         let mut schema_by_pred: HashMap<String, Schema> = HashMap::new();
@@ -2223,13 +2219,12 @@ impl Executor {
             Expr::Const(val) => {
                 // Create a column filled with the constant value
                 let (bytes, col_type) = self.const_to_bytes_and_type(val);
-                self.provider
-                    .create_constant_column_with_device_count(
-                        &bytes,
-                        col_type,
-                        input.num_rows(),
-                        input.num_rows_device(),
-                    )
+                self.provider.create_constant_column_with_device_count(
+                    &bytes,
+                    col_type,
+                    input.num_rows(),
+                    input.num_rows_device(),
+                )
             }
             Expr::Add(l, r) => {
                 let left = self.evaluate_arith_expr(l, input)?;
@@ -2739,10 +2734,7 @@ impl Executor {
                         .inner()
                         .dtod_copy(src_col, &mut dst_col)
                         .map_err(|e| {
-                            XlogError::Execution(format!(
-                                "Failed to clone column on device: {}",
-                                e
-                            ))
+                            XlogError::Execution(format!("Failed to clone column on device: {}", e))
                         })?;
                 }
                 result_columns.push(dst_col.into());
@@ -3232,7 +3224,8 @@ mod tests {
             .unwrap();
 
         let d_num_rows = device_row_count(&executor, 3);
-        let buffer = CudaBuffer::from_columns(vec![col_a.into(), col_b.into()], 3, d_num_rows, schema);
+        let buffer =
+            CudaBuffer::from_columns(vec![col_a.into(), col_b.into()], 3, d_num_rows, schema);
 
         // Project: [b, a] (reverse order)
         let result =
@@ -3301,7 +3294,8 @@ mod tests {
             .unwrap();
 
         let d_num_rows = device_row_count(&executor, 3);
-        let buffer = CudaBuffer::from_columns(vec![col_a.into(), col_b.into()], 3, d_num_rows, schema);
+        let buffer =
+            CudaBuffer::from_columns(vec![col_a.into(), col_b.into()], 3, d_num_rows, schema);
 
         // Project with computed expression: a + b
         let add_expr = Expr::Add(Box::new(Expr::Column(0)), Box::new(Expr::Column(1)));

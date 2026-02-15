@@ -72,7 +72,9 @@ fn test_non_power_of_two_sizes(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Sort for size {} returned {} rows, expected {}",
-                    size, ctx.device_row_count(&sorted), size
+                    size,
+                    ctx.device_row_count(&sorted),
+                    size
                 ),
             );
         }
@@ -98,7 +100,9 @@ fn test_non_power_of_two_sizes(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Filter for size {} returned {} rows, expected {}",
-                    size, ctx.device_row_count(&filtered), expected_filtered
+                    size,
+                    ctx.device_row_count(&filtered),
+                    expected_filtered
                 ),
             );
         }
@@ -191,7 +195,9 @@ fn test_non_power_of_two_sizes(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Sort for odd size {} returned {} rows, expected {}",
-                    size, ctx.device_row_count(&sorted), size
+                    size,
+                    ctx.device_row_count(&sorted),
+                    size
                 ),
             );
         }
@@ -317,7 +323,9 @@ fn test_misaligned_boundaries(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Filter for block size {} returned {} rows, expected {}",
-                    size, ctx.device_row_count(&filtered), expected_count
+                    size,
+                    ctx.device_row_count(&filtered),
+                    expected_count
                 ),
             );
         }
@@ -524,7 +532,10 @@ fn test_near_overflow_indices(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_near_overflow_indices",
             start.elapsed(),
-            format!("Filter should return 100 rows, got {}", ctx.device_row_count(&filtered)),
+            format!(
+                "Filter should return 100 rows, got {}",
+                ctx.device_row_count(&filtered)
+            ),
         );
     }
 

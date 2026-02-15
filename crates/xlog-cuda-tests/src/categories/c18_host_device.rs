@@ -241,7 +241,8 @@ fn test_large_transfer(ctx: &TestContext) -> TestResult {
             start.elapsed(),
             format!(
                 "Buffer has {} rows, expected {}",
-                ctx.device_row_count(&buffer), LARGE_SIZE
+                ctx.device_row_count(&buffer),
+                LARGE_SIZE
             ),
         );
     }
@@ -327,7 +328,8 @@ fn test_large_transfer(ctx: &TestContext) -> TestResult {
             start.elapsed(),
             format!(
                 "Filter returned {} rows, expected {}",
-                ctx.device_row_count(&filtered), expected_filtered
+                ctx.device_row_count(&filtered),
+                expected_filtered
             ),
         );
     }
@@ -707,7 +709,11 @@ fn test_memory_lifecycle(ctx: &TestContext) -> TestResult {
             return TestResult::error(
                 "test_memory_lifecycle",
                 start.elapsed(),
-                format!("Realloc {}: wrong row count: {}", i, ctx.device_row_count(&sorted)),
+                format!(
+                    "Realloc {}: wrong row count: {}",
+                    i,
+                    ctx.device_row_count(&sorted)
+                ),
             );
         }
 
@@ -751,7 +757,9 @@ fn test_memory_lifecycle(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Varying {}: expected {} rows, got {}",
-                    i, size, ctx.device_row_count(&sorted)
+                    i,
+                    size,
+                    ctx.device_row_count(&sorted)
                 ),
             );
         }
@@ -884,7 +892,9 @@ fn test_memory_budget_limits(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Buffer {}: filter expected {} rows, got {}",
-                    i, expected, ctx.device_row_count(&filtered)
+                    i,
+                    expected,
+                    ctx.device_row_count(&filtered)
                 ),
             );
         }
@@ -934,7 +944,8 @@ fn test_memory_budget_limits(ctx: &TestContext) -> TestResult {
             start.elapsed(),
             format!(
                 "Reallocated buffer: expected {} rows, got {}",
-                per_buffer_size, ctx.device_row_count(&new_sorted)
+                per_buffer_size,
+                ctx.device_row_count(&new_sorted)
             ),
         );
     }

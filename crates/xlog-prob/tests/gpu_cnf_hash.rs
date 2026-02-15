@@ -3,8 +3,8 @@ use std::sync::Arc;
 use cudarc::driver::DeviceSlice;
 use xlog_core::MemoryBudget;
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
-use xlog_solve::{Clause, GpuCnf, Literal, SolveInstance};
 use xlog_prob::compilation::gpu_cache::hash_cnf_gpu;
+use xlog_solve::{Clause, GpuCnf, Literal, SolveInstance};
 
 fn cpu_hash_u64(vals: &[u64]) -> u64 {
     const FNV_OFFSET: u64 = 0xcbf29ce484222325;

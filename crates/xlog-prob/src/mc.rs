@@ -23,12 +23,12 @@ use xlog_cuda::provider::{mc_eval_kernels, MC_EVAL_MODULE};
 use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager};
 #[cfg(feature = "host-io")]
 use xlog_logic::ast::AggExpr;
+#[cfg(feature = "host-io")]
+use xlog_logic::ast::Rule;
 use xlog_logic::ast::{
     AggOp, AnnotatedDisjunction, Atom, BodyLiteral, Evidence, PredDecl, ProbFact, ProbQuery,
     Program, Term,
 };
-#[cfg(feature = "host-io")]
-use xlog_logic::ast::Rule;
 use xlog_logic::compile::Compiler;
 use xlog_logic::stratify::analyze_stratification;
 #[cfg(feature = "host-io")]
@@ -36,9 +36,9 @@ use xlog_logic::stratify::{build_dependency_graph, find_sccs_for_lowering};
 use xlog_runtime::Executor;
 
 use crate::exact::GpuConfig;
+use crate::provenance::{atom_key_from_ground_atom, validate_prob, GroundAtom, Value};
 #[cfg(feature = "host-io")]
 use crate::provenance::{eval_arith_expr, eval_comparison, unify_atom, value_from_term};
-use crate::provenance::{atom_key_from_ground_atom, validate_prob, GroundAtom, Value};
 
 /// Phase 4 semantics for non-monotone SCC evaluation inside MC sampling.
 pub const NONMONOTONE_SEMANTICS: &str = "Synchronous iteration per SCC; if a fixpoint is reached, use it; if a cycle is detected, use the intersection of all states in the cycle (skeptical tuples only); if the iteration budget is exceeded, use the intersection across all visited states (conservative).";
@@ -463,9 +463,7 @@ impl McProgram {
                 .device()
                 .inner()
                 .memset_zeros(&mut d_query_counts)
-                .map_err(|e| {
-                    XlogError::Kernel(format!("Failed to zero MC query counts: {}", e))
-                })?;
+                .map_err(|e| XlogError::Kernel(format!("Failed to zero MC query counts: {}", e)))?;
         }
         let mut d_evidence_count = provider.memory().alloc::<u32>(1)?;
         provider
@@ -523,89 +521,87 @@ impl McProgram {
             shared_mem_bytes: 0,
         };
 
-        let stats = self.evaluate_gpu_counts_with(&cfg, provider.clone(), |executor, plan, count| {
-            let zero_ptr = *d_zero_count.device_ptr() as u64;
+        let stats =
+            self.evaluate_gpu_counts_with(&cfg, provider.clone(), |executor, plan, count| {
+                let zero_ptr = *d_zero_count.device_ptr() as u64;
 
-            let mut query_ptrs: Vec<u64> = Vec::with_capacity(count);
-            for rel_name in plan.query_rel_names.iter().take(count) {
-                let ptr = executor
-                    .store()
-                    .get(rel_name)
-                    .map(|buf| *buf.num_rows_device().device_ptr() as u64)
-                    .unwrap_or(zero_ptr);
-                query_ptrs.push(ptr);
-            }
-            upload_slice(
-                &provider,
-                &query_ptrs,
-                &mut d_query_ptrs,
-                "MC query count ptrs",
-            )?;
+                let mut query_ptrs: Vec<u64> = Vec::with_capacity(count);
+                for rel_name in plan.query_rel_names.iter().take(count) {
+                    let ptr = executor
+                        .store()
+                        .get(rel_name)
+                        .map(|buf| *buf.num_rows_device().device_ptr() as u64)
+                        .unwrap_or(zero_ptr);
+                    query_ptrs.push(ptr);
+                }
+                upload_slice(
+                    &provider,
+                    &query_ptrs,
+                    &mut d_query_ptrs,
+                    "MC query count ptrs",
+                )?;
 
-            let mut evidence_ptrs: Vec<u64> = Vec::with_capacity(evidence_count);
-            for (rel_name, _) in plan.evidence_rel_specs.iter() {
-                let ptr = executor
-                    .store()
-                    .get(rel_name)
-                    .map(|buf| *buf.num_rows_device().device_ptr() as u64)
-                    .unwrap_or(zero_ptr);
-                evidence_ptrs.push(ptr);
-            }
-            upload_slice(
-                &provider,
-                &evidence_ptrs,
-                &mut d_evidence_ptrs,
-                "MC evidence count ptrs",
-            )?;
+                let mut evidence_ptrs: Vec<u64> = Vec::with_capacity(evidence_count);
+                for (rel_name, _) in plan.evidence_rel_specs.iter() {
+                    let ptr = executor
+                        .store()
+                        .get(rel_name)
+                        .map(|buf| *buf.num_rows_device().device_ptr() as u64)
+                        .unwrap_or(zero_ptr);
+                    evidence_ptrs.push(ptr);
+                }
+                upload_slice(
+                    &provider,
+                    &evidence_ptrs,
+                    &mut d_evidence_ptrs,
+                    "MC evidence count ptrs",
+                )?;
 
-            let block_dim = 128u32;
-            let threads = if count == 0 { 1 } else { count as u32 };
-            let grid_dim = (threads + block_dim - 1) / block_dim;
-            unsafe {
-                truth_fn
-                    .clone()
-                    .launch(
-                        LaunchConfig {
-                            grid_dim: (grid_dim, 1, 1),
-                            block_dim: (block_dim, 1, 1),
-                            shared_mem_bytes: 0,
-                        },
-                        (
-                            &d_query_ptrs,
-                            prob_query_count_u32,
-                            &d_evidence_ptrs,
-                            &d_evidence_expected,
-                            evidence_count_u32,
-                            &mut d_query_flags,
-                            &mut d_evidence_ok,
-                        ),
-                    )
-                    .map_err(|e| {
-                        XlogError::Kernel(format!(
-                            "mc_eval_query_evidence_truth failed: {}",
-                            e
-                        ))
-                    })?;
-            }
-            unsafe {
-                accum_fn
-                    .clone()
-                    .launch(
-                        accum_config,
-                        (
-                            &d_query_flags,
-                            prob_query_count_u32,
-                            &d_evidence_ok,
-                            &mut d_query_counts,
-                            &mut d_evidence_count,
-                        ),
-                    )
-                    .map_err(|e| {
-                        XlogError::Kernel(format!("mc_accumulate_counts failed: {}", e))
-                    })?;
-            }
-            Ok(())
-        })?;
+                let block_dim = 128u32;
+                let threads = if count == 0 { 1 } else { count as u32 };
+                let grid_dim = (threads + block_dim - 1) / block_dim;
+                unsafe {
+                    truth_fn
+                        .clone()
+                        .launch(
+                            LaunchConfig {
+                                grid_dim: (grid_dim, 1, 1),
+                                block_dim: (block_dim, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            (
+                                &d_query_ptrs,
+                                prob_query_count_u32,
+                                &d_evidence_ptrs,
+                                &d_evidence_expected,
+                                evidence_count_u32,
+                                &mut d_query_flags,
+                                &mut d_evidence_ok,
+                            ),
+                        )
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("mc_eval_query_evidence_truth failed: {}", e))
+                        })?;
+                }
+                unsafe {
+                    accum_fn
+                        .clone()
+                        .launch(
+                            accum_config,
+                            (
+                                &d_query_flags,
+                                prob_query_count_u32,
+                                &d_evidence_ok,
+                                &mut d_query_counts,
+                                &mut d_evidence_count,
+                            ),
+                        )
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("mc_accumulate_counts failed: {}", e))
+                        })?;
+                }
+                Ok(())
+            })?;
 
         provider.device().synchronize()?;
 
@@ -721,7 +717,12 @@ impl McProgram {
             executor.put_relation(name, provider.create_empty_buffer(schema.clone())?);
         }
 
-        load_deterministic_facts(&gpu_plan.program, &gpu_plan.schemas, &provider, &mut executor)?;
+        load_deterministic_facts(
+            &gpu_plan.program,
+            &gpu_plan.schemas,
+            &provider,
+            &mut executor,
+        )?;
 
         let base_store = snapshot_store(&provider, &executor, &gpu_plan.schemas)?;
 
@@ -731,11 +732,7 @@ impl McProgram {
         let samples_device = if self.bernoulli_probs.is_empty() || cfg.samples == 0 {
             provider.memory().alloc::<u8>(0)?
         } else {
-            provider.sample_bernoulli_matrix_device(
-                &self.bernoulli_probs,
-                cfg.samples,
-                cfg.seed,
-            )?
+            provider.sample_bernoulli_matrix_device(&self.bernoulli_probs, cfg.samples, cfg.seed)?
         };
 
         let mut stats = EvalStats::default();
@@ -777,8 +774,7 @@ impl McProgram {
             )?;
             stats.nonmonotone_sccs += sample_stats.nonmonotone_sccs;
             stats.nonmonotone_cycles += sample_stats.nonmonotone_cycles;
-            stats.nonmonotone_iteration_limit_hits +=
-                sample_stats.nonmonotone_iteration_limit_hits;
+            stats.nonmonotone_iteration_limit_hits += sample_stats.nonmonotone_iteration_limit_hits;
 
             on_sample(&executor, &gpu_plan, prob_query_count)?;
         }
@@ -1076,10 +1072,7 @@ fn device_row_count_u32(provider: &Arc<CudaKernelProvider>, buffer: &CudaBuffer)
     Ok(host[0])
 }
 
-fn dedup_relation(
-    provider: &Arc<CudaKernelProvider>,
-    buffer: &CudaBuffer,
-) -> Result<CudaBuffer> {
+fn dedup_relation(provider: &Arc<CudaKernelProvider>, buffer: &CudaBuffer) -> Result<CudaBuffer> {
     let rows = device_row_count_u32(provider, buffer)?;
     if rows == 0 {
         return provider.create_empty_buffer(buffer.schema().clone());
@@ -1226,9 +1219,7 @@ fn build_sample_buffers(
     ad_tables: &[AdTableDevice],
     ad_decisions: &AdDecisionDevice,
 ) -> Result<Vec<(String, CudaBuffer)>> {
-    if sample_bits.len() == 0
-        && (!prob_tables.is_empty() || ad_decisions.decision_vars.len() > 0)
-    {
+    if sample_bits.len() == 0 && (!prob_tables.is_empty() || ad_decisions.decision_vars.len() > 0) {
         return Err(XlogError::Execution(
             "MC sample bits empty but probabilistic variables exist".to_string(),
         ));
@@ -1265,7 +1256,9 @@ fn build_sample_buffers(
 
         // SAFETY: mc_eval_mask_var(sample_bits, var_idx, n, out_mask)
         unsafe {
-            kernel.clone().launch(config, (sample_bits, &table.var_idx, n, &mut d_mask))
+            kernel
+                .clone()
+                .launch(config, (sample_bits, &table.var_idx, n, &mut d_mask))
         }
         .map_err(|e| XlogError::Kernel(format!("mc_eval_mask_var failed: {}", e)))?;
 
@@ -1344,9 +1337,10 @@ fn evaluate_program_gpu(
 
     if plan.strata.is_empty() {
         for (idx, scc) in plan.sccs.iter().enumerate() {
-            let rules = plan.rules_by_scc.get(idx).ok_or_else(|| {
-                XlogError::Execution(format!("Missing rules for SCC {}", idx))
-            })?;
+            let rules = plan
+                .rules_by_scc
+                .get(idx)
+                .ok_or_else(|| XlogError::Execution(format!("Missing rules for SCC {}", idx)))?;
             if nonmonotone_sccs.contains(&idx) {
                 stats.nonmonotone_sccs += 1;
                 let (cycle, hit_limit) = execute_nonmonotone_scc_gpu(
@@ -1377,9 +1371,10 @@ fn evaluate_program_gpu(
             let scc = plan.sccs.get(scc_idx).ok_or_else(|| {
                 XlogError::Execution(format!("Missing SCC metadata for {}", scc_id))
             })?;
-            let rules = plan.rules_by_scc.get(scc_idx).ok_or_else(|| {
-                XlogError::Execution(format!("Missing rules for SCC {}", scc_id))
-            })?;
+            let rules = plan
+                .rules_by_scc
+                .get(scc_idx)
+                .ok_or_else(|| XlogError::Execution(format!("Missing rules for SCC {}", scc_id)))?;
 
             if nonmonotone_sccs.contains(&scc_idx) {
                 stats.nonmonotone_sccs += 1;
@@ -1664,9 +1659,9 @@ fn build_buffer_from_rows(
             )));
         }
         for (idx, value) in row.iter().enumerate() {
-            let col_type = schema.column_type(idx).ok_or_else(|| {
-                XlogError::Execution(format!("Missing column type for {}", idx))
-            })?;
+            let col_type = schema
+                .column_type(idx)
+                .ok_or_else(|| XlogError::Execution(format!("Missing column type for {}", idx)))?;
             push_value_bytes(&mut columns[idx], col_type, value)?;
         }
     }
@@ -1721,12 +1716,10 @@ fn ensure_predicate_decls(program: &mut Program) -> Result<()> {
     let mut record_atom = |atom: &Atom| {
         let types: Vec<ScalarType> = atom.terms.iter().map(infer_term_scalar_type).collect();
         match inferred.get(&atom.predicate) {
-            Some(existing) if *existing != types => {
-                Err(XlogError::Compilation(format!(
-                    "Inconsistent predicate types for {}",
-                    atom.predicate
-                )))
-            }
+            Some(existing) if *existing != types => Err(XlogError::Compilation(format!(
+                "Inconsistent predicate types for {}",
+                atom.predicate
+            ))),
             Some(_) => Ok(()),
             None => {
                 inferred.insert(atom.predicate.clone(), types);

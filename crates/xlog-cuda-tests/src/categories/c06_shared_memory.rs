@@ -79,7 +79,9 @@ fn test_sort_uses_shared_memory(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Size {}: sort returned {} rows, expected {}",
-                    size, ctx.device_row_count(&sorted), size
+                    size,
+                    ctx.device_row_count(&sorted),
+                    size
                 ),
             );
         }
@@ -358,7 +360,11 @@ fn test_sort_multiple_passes(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_sort_multiple_passes",
             start.elapsed(),
-            format!("Sort returned {} rows, expected {}", ctx.device_row_count(&sorted), SIZE),
+            format!(
+                "Sort returned {} rows, expected {}",
+                ctx.device_row_count(&sorted),
+                SIZE
+            ),
         );
     }
 
@@ -467,7 +473,9 @@ fn test_block_boundary_shared_mem(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Size {}: sort returned {} rows, expected {}",
-                    size, ctx.device_row_count(&sorted), size
+                    size,
+                    ctx.device_row_count(&sorted),
+                    size
                 ),
             );
         }
@@ -568,7 +576,9 @@ fn test_shared_mem_size_limits(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Size {}: sort returned {} rows, expected {}",
-                    size, ctx.device_row_count(&sorted), size
+                    size,
+                    ctx.device_row_count(&sorted),
+                    size
                 ),
             );
         }

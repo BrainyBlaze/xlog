@@ -5,7 +5,9 @@ use std::ffi::c_void;
 use cudarc::driver::{DeviceRepr, DeviceSlice, LaunchAsync, LaunchConfig};
 use xlog_core::{Result, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
-use xlog_cuda::provider::{arith_kernels, d4_kernels, filter_kernels, ARITH_MODULE, D4_MODULE, FILTER_MODULE};
+use xlog_cuda::provider::{
+    arith_kernels, d4_kernels, filter_kernels, ARITH_MODULE, D4_MODULE, FILTER_MODULE,
+};
 use xlog_cuda::{circuit_kernels, CudaKernelProvider, CIRCUIT_MODULE};
 
 use crate::compilation::gpu_d4::exclusive_scan_u32_inplace;
@@ -292,9 +294,7 @@ impl GpuXgcf {
         if map_len > 0 {
             let fill_const = device
                 .get_func(FILTER_MODULE, filter_kernels::FILL_U32_CONST)
-                .ok_or_else(|| {
-                    XlogError::Kernel("fill_u32_const kernel not found".to_string())
-                })?;
+                .ok_or_else(|| XlogError::Kernel("fill_u32_const kernel not found".to_string()))?;
             let grid = (map_len_u32 + block_size - 1) / block_size;
             unsafe {
                 fill_const.clone().launch(
@@ -322,12 +322,15 @@ impl GpuXgcf {
                         block_dim: (block_size, 1, 1),
                         shared_mem_bytes: 0,
                     },
-                    (random_var_list, num_random_vars, map_len_u32, &mut d_random_map),
+                    (
+                        random_var_list,
+                        num_random_vars,
+                        map_len_u32,
+                        &mut d_random_map,
+                    ),
                 )
             }
-            .map_err(|e| {
-                XlogError::Kernel(format!("random_var_to_bit_from_list failed: {}", e))
-            })?;
+            .map_err(|e| XlogError::Kernel(format!("random_var_to_bit_from_list failed: {}", e)))?;
         }
 
         let mut support = memory.alloc::<u32>(support_len)?;
@@ -394,9 +397,7 @@ impl GpuXgcf {
                     (self.root, num_random_vars, words_per_support, &mut support),
                 )
             }
-            .map_err(|e| {
-                XlogError::Kernel(format!("d4_support_set_root_bits failed: {}", e))
-            })?;
+            .map_err(|e| XlogError::Kernel(format!("d4_support_set_root_bits failed: {}", e)))?;
         }
 
         let mut wrap_prefix_or = memory.alloc::<u32>(num_edges as usize)?;

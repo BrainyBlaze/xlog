@@ -74,7 +74,9 @@ fn test_single_block_operations(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Size {}: sort returned {} rows, expected {}",
-                    size, ctx.device_row_count(&sorted), size
+                    size,
+                    ctx.device_row_count(&sorted),
+                    size
                 ),
             );
         }
@@ -125,7 +127,9 @@ fn test_single_block_operations(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Size {}: filter returned {} rows, expected {}",
-                    size, ctx.device_row_count(&filtered), expected_count
+                    size,
+                    ctx.device_row_count(&filtered),
+                    expected_count
                 ),
             );
         }
@@ -149,7 +153,9 @@ fn test_single_block_operations(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Size {}: dedup returned {} rows, expected {}",
-                    size, ctx.device_row_count(&deduped), size
+                    size,
+                    ctx.device_row_count(&deduped),
+                    size
                 ),
             );
         }
@@ -213,7 +219,9 @@ fn test_multi_block_operations(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Size {}: sort returned {} rows, expected {}",
-                    size, ctx.device_row_count(&sorted), size
+                    size,
+                    ctx.device_row_count(&sorted),
+                    size
                 ),
             );
         }
@@ -313,7 +321,9 @@ fn test_multi_block_operations(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Size {}: filter returned {} rows, expected {}",
-                    size, ctx.device_row_count(&filtered), expected_count
+                    size,
+                    ctx.device_row_count(&filtered),
+                    expected_count
                 ),
             );
         }
@@ -377,7 +387,9 @@ fn test_block_boundary_correctness(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Size {}: sort returned {} rows, expected {}",
-                    size, ctx.device_row_count(&sorted), size
+                    size,
+                    ctx.device_row_count(&sorted),
+                    size
                 ),
             );
         }
@@ -435,7 +447,9 @@ fn test_block_boundary_correctness(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Size {}: filter returned {} rows, expected {}",
-                    size, ctx.device_row_count(&filtered), expected_count
+                    size,
+                    ctx.device_row_count(&filtered),
+                    expected_count
                 ),
             );
         }
@@ -524,7 +538,9 @@ fn test_grid_stride_correctness(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Size {}: sort returned {} rows, expected {}",
-                    size, ctx.device_row_count(&sorted), size
+                    size,
+                    ctx.device_row_count(&sorted),
+                    size
                 ),
             );
         }
@@ -630,7 +646,9 @@ fn test_grid_stride_correctness(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Size {}: filter returned {} rows, expected {}",
-                    size, ctx.device_row_count(&filtered), expected_count
+                    size,
+                    ctx.device_row_count(&filtered),
+                    expected_count
                 ),
             );
         }

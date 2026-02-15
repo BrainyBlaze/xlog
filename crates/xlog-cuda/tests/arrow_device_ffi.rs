@@ -138,7 +138,9 @@ fn test_arrow_device_export_bool_bitpacked() {
     let schema = Schema::new(vec![("flag".to_string(), ScalarType::Bool)]);
     let flags: Vec<u8> = vec![1, 0, 1, 1, 0, 0, 1, 0, 1];
 
-    let buffer = provider.create_buffer_from_slices(&[&flags], schema).unwrap();
+    let buffer = provider
+        .create_buffer_from_slices(&[&flags], schema)
+        .unwrap();
     let device_rb = provider.to_arrow_device_record_batch(buffer).unwrap();
 
     unsafe {
@@ -149,10 +151,7 @@ fn test_arrow_device_export_bool_bitpacked() {
         let child_arr = &*(child_ptr as *const RawArrowArray);
         assert!(child_arr.n_buffers >= 2);
 
-        let buffers = std::slice::from_raw_parts(
-            child_arr.buffers,
-            child_arr.n_buffers as usize,
-        );
+        let buffers = std::slice::from_raw_parts(child_arr.buffers, child_arr.n_buffers as usize);
         let values_ptr = buffers[1] as *const u8;
         assert!(!values_ptr.is_null());
 
@@ -163,9 +162,7 @@ fn test_arrow_device_export_bool_bitpacked() {
             ptr: values_ptr as u64,
             len: packed_len,
         };
-        device
-            .dtoh_sync_copy_into(&dev_slice, &mut host)
-            .unwrap();
+        device.dtoh_sync_copy_into(&dev_slice, &mut host).unwrap();
 
         assert_eq!(host[0], 0b0100_1101u8);
         assert_eq!(host[1], 0b0000_0001u8);

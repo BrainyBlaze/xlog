@@ -72,6 +72,5 @@ fn main() {
                 panic!("nvcc failed to compile {}.cu", kernel);
             }
         }
-
     }
 }

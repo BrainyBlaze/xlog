@@ -652,7 +652,9 @@ fn test_join_reproducibility(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Iteration {} returned {} rows, first returned {}",
-                    iteration, ctx.device_row_count(&joined), ctx.device_row_count(&first_joined)
+                    iteration,
+                    ctx.device_row_count(&joined),
+                    ctx.device_row_count(&first_joined)
                 ),
             );
         }
@@ -829,7 +831,9 @@ fn test_dedup_reproducibility(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Iteration {} returned {} rows, first returned {}",
-                    iteration, ctx.device_row_count(&deduped), ctx.device_row_count(&first_deduped)
+                    iteration,
+                    ctx.device_row_count(&deduped),
+                    ctx.device_row_count(&first_deduped)
                 ),
             );
         }

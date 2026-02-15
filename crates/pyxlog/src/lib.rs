@@ -9,11 +9,12 @@ use pyo3::types::{PyDict, PySequence};
 use pyo3::Bound;
 
 use ::xlog_gpu::logic as gpu_logic;
-use xlog_core::{MemoryBudget, ScalarType, Schema};
-use xlog_cuda::{CudaDevice, CudaKernelProvider, DlpackManagedTensor, GpuMemoryManager};
+use xlog_core::{symbol, MemoryBudget, ScalarType, Schema};
 #[cfg(feature = "arrow-device-import")]
 use xlog_cuda::{ArrowDeviceArray, ArrowDeviceArrayOwned};
-use xlog_logic::ast::ProbEngine;
+use xlog_cuda::{CudaDevice, CudaKernelProvider, DlpackManagedTensor, GpuMemoryManager};
+use xlog_logic::ast::{ArithExpr, Atom, BodyLiteral, ProbEngine, Rule, Term};
+use xlog_logic::parse_program;
 use xlog_neural::{NetworkConfig, NetworkRegistry, TensorMetadata, TensorSourceRegistry};
 use xlog_prob::exact::{ExactDdnnfProgram, ExactResultWithGrads, GpuConfig, QueryProbability};
 use xlog_prob::mc::{McEvalConfig, McProgram};
@@ -22,7 +23,7 @@ use xlog_prob::neural_fast_path::{GpuWeightSlots, NeuralFastPathConfig};
 use std::collections::HashMap as StdHashMap;
 
 mod neural_registry;
-use neural_registry::NeuralPredicateRegistry;
+use neural_registry::{NeuralPredicateInfo, NeuralPredicateRegistry};
 
 const DLPACK_CAPSULE_NAME: &[u8] = b"dltensor\0";
 const USED_DLPACK_CAPSULE_NAME: &[u8] = b"used_dltensor\0";
@@ -124,7 +125,9 @@ unsafe extern "C" fn arrow_device_array_capsule_destructor(capsule: *mut pyo3::f
         return;
     }
 
-    drop(ArrowDeviceArrayOwned::from_raw(ptr as *mut ArrowDeviceArray));
+    drop(ArrowDeviceArrayOwned::from_raw(
+        ptr as *mut ArrowDeviceArray,
+    ));
 }
 
 #[cfg(feature = "arrow-device-import")]
@@ -145,7 +148,9 @@ fn arrow_device_capsule_from_device_array(
         unsafe {
             drop(ArrowDeviceArrayOwned::from_raw(raw));
         }
-        return Err(PyRuntimeError::new_err("Failed to create Arrow device array capsule"));
+        return Err(PyRuntimeError::new_err(
+            "Failed to create Arrow device array capsule",
+        ));
     }
     let obj: Py<PyAny> = unsafe { Py::from_owned_ptr(py, capsule) };
     Ok(obj.into_py(py))
@@ -371,7 +376,12 @@ fn import_arrow_device(
         .from_arrow_device_record_batch(device_array)
         .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
-    let names: Vec<String> = buffer.schema.columns.iter().map(|(n, _)| n.clone()).collect();
+    let names: Vec<String> = buffer
+        .schema
+        .columns
+        .iter()
+        .map(|(n, _)| n.clone())
+        .collect();
     let num_rows = buffer.num_rows() as usize;
     let arity = buffer.arity();
 
@@ -446,7 +456,8 @@ impl Program {
             .iter()
             .map(|np| np.network.clone())
             .collect();
-        let neural_registry = NeuralPredicateRegistry::from_ast(&ast);
+        let neural_registry =
+            NeuralPredicateRegistry::from_ast(&ast).map_err(|e| PyValueError::new_err(e))?;
 
         let engine = match prob_engine {
             Some(s) => parse_prob_engine_override(&s)?,
@@ -473,9 +484,11 @@ impl Program {
             neural_registry,
             declared_networks,
             tensor_sources: TensorSourceRegistry::new(),
-            source: source.to_string(),
-            gpu_config: config,
-            prob_engine: engine,
+            _source: source.to_string(),
+            ast,
+            _gpu_config: config,
+            _prob_engine: engine,
+            query_signature_cache: StdHashMap::new(),
             circuit_cache: StdHashMap::new(),
         })
     }
@@ -492,8 +505,40 @@ struct CachedCircuit {
     /// Device-resident mapping from neural output slots to CNF variable ids.
     slots: GpuWeightSlots,
 
-    /// Label count for each neural predicate instance in this template.
-    num_labels: usize,
+    /// Ordered target domain for Targeted signatures. Empty for Boolean.
+    target_domain: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+enum InputSource {
+    QueryArg(usize),
+    ImplicitSlot(usize),
+}
+
+#[derive(Debug, Clone)]
+struct NeuralGroup {
+    info: NeuralPredicateInfo,
+    input_source: InputSource,
+    output_var: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+enum QuerySignature {
+    Boolean {
+        groups: Vec<NeuralGroup>,
+    },
+    Targeted {
+        target_position: usize,
+        groups: Vec<NeuralGroup>,
+    },
+}
+
+impl QuerySignature {
+    fn groups(&self) -> &[NeuralGroup] {
+        match self {
+            QuerySignature::Boolean { groups } | QuerySignature::Targeted { groups, .. } => groups,
+        }
+    }
 }
 
 enum CompiledProbProgram {
@@ -523,11 +568,15 @@ pub struct CompiledProgram {
     /// Registry for tensor data sources (images, embeddings, etc.)
     tensor_sources: TensorSourceRegistry,
     /// Original program source (for dynamic query compilation)
-    source: String,
+    _source: String,
+    /// Parsed program AST (for signature analysis)
+    ast: xlog_logic::ast::Program,
     /// GPU configuration
-    gpu_config: GpuConfig,
+    _gpu_config: GpuConfig,
     /// Probabilistic inference engine
-    prob_engine: ProbEngine,
+    _prob_engine: ProbEngine,
+    /// Cache of analyzed query signatures.
+    query_signature_cache: StdHashMap<String, QuerySignature>,
     /// Cache of compiled circuits by template signature
     circuit_cache: StdHashMap<String, CachedCircuit>,
 }
@@ -537,7 +586,7 @@ impl CompiledProgram {
     #[pyo3(signature = (return_grads=false, samples=None, seed=None, confidence=0.95, max_nonmonotone_iterations=1024))]
     pub fn evaluate(
         &self,
-        py: Python<'_>,
+        _py: Python<'_>,
         return_grads: bool,
         samples: Option<usize>,
         seed: Option<u64>,
@@ -545,7 +594,7 @@ impl CompiledProgram {
         max_nonmonotone_iterations: usize,
     ) -> PyResult<EvalResult> {
         match &self.program {
-            CompiledProbProgram::Exact(program) => {
+            CompiledProbProgram::Exact(_program) => {
                 if samples.is_some() || seed.is_some() {
                     return Err(PyValueError::new_err(
                         "samples/seed are only supported for prob_engine='mc'",
@@ -554,15 +603,15 @@ impl CompiledProgram {
                 #[cfg(feature = "host-io")]
                 {
                     if return_grads {
-                        let result = program
+                        let result = _program
                             .evaluate_gpu_with_grads()
                             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-                        self.pack_result_with_grads(py, result)
+                        self.pack_result_with_grads(_py, result)
                     } else {
-                        let result = program
+                        let result = _program
                             .evaluate()
                             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-                        self.pack_result_probs(py, result.query_probs)
+                        self.pack_result_probs(_py, result.query_probs)
                     }
                 }
                 #[cfg(not(feature = "host-io"))]
@@ -571,7 +620,7 @@ impl CompiledProgram {
                     Err(host_io_disabled_pyerr())
                 }
             }
-            CompiledProbProgram::Mc(program) => {
+            CompiledProbProgram::Mc(_program) => {
                 if return_grads {
                     return Err(PyValueError::new_err(
                         "MC inference does not support gradients (return_grads must be false)",
@@ -586,10 +635,10 @@ impl CompiledProgram {
                 };
                 #[cfg(feature = "host-io")]
                 {
-                    let result = program
+                    let result = _program
                         .evaluate(cfg)
                         .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-                    self.pack_result_mc(py, result)
+                    self.pack_result_mc(_py, result)
                 }
                 #[cfg(not(feature = "host-io"))]
                 {
@@ -613,73 +662,80 @@ impl CompiledProgram {
         confidence: f64,
         max_nonmonotone_iterations: usize,
     ) -> PyResult<McDeviceEvalResult> {
-        let (query_counts, evidence_count, total_samples, seed, confidence, nonmonotone_sccs, nonmonotone_cycles, nonmonotone_iteration_limit_hits) =
-            match &self.program {
-                CompiledProbProgram::Mc(program) => {
-                    let cfg = McEvalConfig {
-                        samples: samples.unwrap_or(10000),
-                        seed: seed.unwrap_or(0),
-                        confidence,
-                        max_nonmonotone_iterations,
-                    };
+        let (
+            query_counts,
+            evidence_count,
+            total_samples,
+            seed,
+            confidence,
+            nonmonotone_sccs,
+            nonmonotone_cycles,
+            nonmonotone_iteration_limit_hits,
+        ) = match &self.program {
+            CompiledProbProgram::Mc(program) => {
+                let cfg = McEvalConfig {
+                    samples: samples.unwrap_or(10000),
+                    seed: seed.unwrap_or(0),
+                    confidence,
+                    max_nonmonotone_iterations,
+                };
 
-                    let result = program
-                        .evaluate_gpu_device_with_provider(cfg, self.output_provider.clone())
-                        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                let result = program
+                    .evaluate_gpu_device_with_provider(cfg, self.output_provider.clone())
+                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
-                    (
-                        result.query_counts,
-                        result.evidence_count,
-                        result.total_samples,
-                        result.seed,
-                        result.confidence,
-                        result.nonmonotone_sccs,
-                        result.nonmonotone_cycles,
-                        result.nonmonotone_iteration_limit_hits,
-                    )
-                }
-                _ => {
-                    return Err(PyValueError::new_err(
-                        "evaluate_device is only supported for prob_engine='mc'",
-                    ))
-                }
-            };
+                (
+                    result.query_counts,
+                    result.evidence_count,
+                    result.total_samples,
+                    result.seed,
+                    result.confidence,
+                    result.nonmonotone_sccs,
+                    result.nonmonotone_cycles,
+                    result.nonmonotone_iteration_limit_hits,
+                )
+            }
+            _ => {
+                return Err(PyValueError::new_err(
+                    "evaluate_device is only supported for prob_engine='mc'",
+                ))
+            }
+        };
 
         // PyTorch does not support unsigned 32-bit types. Export as i32 (bitwise identical for
         // counts < 2^31) for maximum DLPack consumer compatibility.
         let schema_i32 = Schema::new(vec![("col0".to_string(), ScalarType::I32)]);
 
-        let make_count_tensor = |counts: xlog_cuda::memory::TrackedCudaSlice<u32>,
-                                 rows: u64|
-         -> PyResult<PyObject> {
-            let rows_u32 = u32::try_from(rows).map_err(|_| {
-                PyValueError::new_err(format!("Row count {} exceeds u32::MAX", rows))
-            })?;
+        let make_count_tensor =
+            |counts: xlog_cuda::memory::TrackedCudaSlice<u32>, rows: u64| -> PyResult<PyObject> {
+                let rows_u32 = u32::try_from(rows).map_err(|_| {
+                    PyValueError::new_err(format!("Row count {} exceeds u32::MAX", rows))
+                })?;
 
-            let mut d_num_rows = self
-                .output_provider
-                .memory()
-                .alloc::<u32>(1)
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-            self.output_provider
-                .device()
-                .inner()
-                .htod_sync_copy_into(&[rows_u32], &mut d_num_rows)
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                let mut d_num_rows = self
+                    .output_provider
+                    .memory()
+                    .alloc::<u32>(1)
+                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                self.output_provider
+                    .device()
+                    .inner()
+                    .htod_sync_copy_into(&[rows_u32], &mut d_num_rows)
+                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
-            let buffer = xlog_cuda::CudaBuffer::from_columns(
-                vec![counts.into_bytes().into()],
-                rows,
-                d_num_rows,
-                schema_i32.clone(),
-            );
-            let tensor = self
-                .output_provider
-                .to_dlpack_table(buffer)
-                .column(0)
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-            dlpack_capsule_from_tensor(py, tensor)
-        };
+                let buffer = xlog_cuda::CudaBuffer::from_columns(
+                    vec![counts.into_bytes().into()],
+                    rows,
+                    d_num_rows,
+                    schema_i32.clone(),
+                );
+                let tensor = self
+                    .output_provider
+                    .to_dlpack_table(buffer)
+                    .column(0)
+                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                dlpack_capsule_from_tensor(py, tensor)
+            };
 
         let query_rows = u64::try_from(query_counts.len())
             .map_err(|_| PyValueError::new_err("query_counts length overflow"))?;
@@ -774,10 +830,24 @@ impl CompiledProgram {
 
     /// Get neural predicate metadata (network name + labels).
     fn neural_predicate_info(&self, py: Python<'_>, predicate: &str) -> PyResult<PyObject> {
-        let info = self
-            .neural_registry
-            .get(predicate)
-            .ok_or_else(|| PyValueError::new_err("Unknown neural predicate"))?;
+        let infos = self.neural_registry.get(predicate).ok_or_else(|| {
+            PyValueError::new_err(format!("Unknown neural predicate '{}'", predicate))
+        })?;
+        let info = match infos.len() {
+            0 => {
+                return Err(PyValueError::new_err(format!(
+                    "Unknown neural predicate '{}'",
+                    predicate
+                )))
+            }
+            1 => &infos[0],
+            _ => {
+                return Err(PyValueError::new_err(format!(
+                    "Predicate '{}' has multiple nn/4 declarations; provide a concrete query atom",
+                    predicate
+                )))
+            }
+        };
         let dict = PyDict::new_bound(py);
         dict.set_item("network", info.network.clone())?;
         dict.set_item("labels", info.labels.clone())?;
@@ -1112,7 +1182,10 @@ impl CompiledProgram {
                     input_idx,
                     &target_label,
                 ),
-            Err(_) => self.forward_backward_complex_tensor(py, query),
+            Err(_) => {
+                let atom = self.parse_query_atom(query)?;
+                self.forward_backward_complex_tensor(py, &atom)
+            }
         }
     }
 
@@ -1175,42 +1248,74 @@ impl CompiledProgram {
     ///
     /// Returns Ok((predicate_name, network_name, input_idx, target_label)) if the query is a direct neural predicate.
     /// Returns Err if the query is not a direct neural predicate (e.g., it's a complex query).
-    fn try_parse_direct_neural_query(&self, query: &str) -> PyResult<(String, String, usize, String)> {
-        let query = query.trim();
+    fn try_parse_direct_neural_query(
+        &self,
+        query: &str,
+    ) -> PyResult<(String, String, usize, String)> {
+        let atom = self.parse_query_atom(query)?;
+        let info = self
+            .neural_registry
+            .resolve_atom(&atom)
+            .map_err(PyValueError::new_err)?;
 
-        // Find predicate name and arguments
-        let paren_start = query
-            .find('(')
-            .ok_or_else(|| PyValueError::new_err(format!("Invalid query format: {}", query)))?;
-        let paren_end = query
-            .rfind(')')
-            .ok_or_else(|| PyValueError::new_err(format!("Invalid query format: {}", query)))?;
-
-        let pred_name = &query[..paren_start];
-        let args_str = &query[paren_start + 1..paren_end];
-
-        // Split arguments
-        let args: Vec<&str> = args_str.split(',').map(|s| s.trim()).collect();
-
-        // Direct neural predicate queries have exactly 2 arguments: (input_idx, label)
-        if args.len() != 2 {
+        if info.input_arity != 1 {
             return Err(PyValueError::new_err(format!(
-                "Not a direct neural predicate query (expected 2 args, got {}): {}",
-                args.len(),
-                query
+                "Predicate '{}' is associated with a {}-argument network, not a direct-call query",
+                info.predicate, info.input_arity
             )));
         }
 
-        // Try to parse input index
-        let input_idx: usize = args[0]
-            .parse()
-            .map_err(|_| PyValueError::new_err(format!("Invalid input index: {}", args[0])))?;
-        let target_label = args[1].to_string();
+        let input_idx = self
+            .term_to_input_idx(&atom.terms[info.input_positions[0]])
+            .map_err(|_| PyValueError::new_err("Not a direct neural predicate query"))?;
 
-        // Find network name for this predicate
-        let network_name = self.find_network_for_predicate(pred_name)?;
+        let target_label = self
+            .term_to_label(&atom.terms[info.output_position])
+            .map_err(|_| PyValueError::new_err("Not a direct neural predicate query"))?;
 
-        Ok((pred_name.to_string(), network_name, input_idx, target_label))
+        Ok((
+            atom.predicate,
+            info.network.clone(),
+            input_idx,
+            target_label,
+        ))
+    }
+
+    fn parse_query_atom(&self, query: &str) -> PyResult<Atom> {
+        let source = format!("?- {}.", query.trim());
+        let program = parse_program(&source).map_err(|e| {
+            PyValueError::new_err(format!("Invalid query format '{}': {}", query, e))
+        })?;
+        if program.queries.len() != 1 {
+            return Err(PyValueError::new_err(format!(
+                "Expected exactly one query, got {}",
+                program.queries.len()
+            )));
+        }
+
+        let atom = program.queries.into_iter().next().unwrap().atom;
+        Ok(atom)
+    }
+
+    fn term_to_input_idx(&self, term: &Term) -> PyResult<usize> {
+        match term {
+            Term::Integer(idx) => usize::try_from(*idx)
+                .map_err(|_| PyValueError::new_err(format!("Invalid input index: {}", idx))),
+            _ => Err(PyValueError::new_err(format!(
+                "Expected integer input index, got term {:?}",
+                term
+            ))),
+        }
+    }
+
+    fn term_to_label(&self, term: &Term) -> PyResult<String> {
+        match term {
+            Term::Integer(v) => Ok(v.to_string()),
+            Term::String(v) => Ok(v.clone()),
+            Term::Symbol(id) => symbol::resolve_checked(*id)
+                .ok_or_else(|| PyValueError::new_err("Invalid symbol id in query")),
+            _ => Err(PyValueError::new_err("Expected constant label term")),
+        }
     }
 
     /// Forward-backward for a direct neural predicate query.
@@ -1280,19 +1385,34 @@ impl CompiledProgram {
     fn forward_backward_complex_tensor(
         &mut self,
         py: Python<'_>,
-        query: &str,
+        atom: &Atom,
     ) -> PyResult<PyObject> {
-        // Parse query to extract (1) neural input indices and (2) template predicate name.
-        let (input_indices, pred_name) = self.extract_query_input_indices(query)?;
+        let signature = self
+            .get_or_build_query_signature(&atom.predicate, atom.terms.len())?
+            .clone();
+        let pred_name = atom.predicate.clone();
+
+        let input_indices: Vec<usize> = signature
+            .groups()
+            .iter()
+            .map(|group| match &group.input_source {
+                InputSource::QueryArg(pos) => self.term_to_input_idx(&atom.terms[*pos]),
+                InputSource::ImplicitSlot(slot) => Ok(*slot),
+            })
+            .collect::<PyResult<Vec<_>>>()?;
         if input_indices.is_empty() {
             return Err(PyValueError::new_err(format!(
                 "No input indices found in query: {}. Make sure the query references neural predicate inputs.",
-                query
+                atom.predicate
             )));
         }
 
-        // Extract the target value (e.g., the sum in addition(X,Y,Z)).
-        let target_val = self.extract_query_target_int(query)?;
+        let target_label = match &signature {
+            QuerySignature::Boolean { .. } => None,
+            QuerySignature::Targeted {
+                target_position, ..
+            } => Some(self.term_to_label(&atom.terms[*target_position])?),
+        };
 
         // Run neural networks and import the outputs as device-resident buffers via DLPack (no .tolist()).
         let torch = py.import_bound("torch")?;
@@ -1305,19 +1425,19 @@ impl CompiledProgram {
             order_idx: usize,
         }
 
-        let template_predicate = match pred_name.as_str() {
-            "addition" => "digit",
-            other => {
-                return Err(PyValueError::new_err(format!(
-                    "Unsupported cached predicate '{}'",
-                    other
-                )));
-            }
-        };
-
         let mut calls_by_network: HashMap<String, Vec<NeuralCall>> = HashMap::new();
         for (order_idx, &input_idx) in input_indices.iter().enumerate() {
-            let network_name = self.find_network_for_predicate(template_predicate)?;
+            let network_name = signature
+                .groups()
+                .get(order_idx)
+                .ok_or_else(|| {
+                    PyRuntimeError::new_err(
+                        "Invalid group index while building complex query call batches",
+                    )
+                })?
+                .info
+                .network
+                .clone();
             calls_by_network
                 .entry(network_name)
                 .or_default()
@@ -1327,16 +1447,18 @@ impl CompiledProgram {
                 });
         }
 
-        let mut out_tensors: Vec<Option<PyObject>> =
-            std::iter::repeat_with(|| None).take(input_indices.len()).collect();
-        let mut grad_tensors: Vec<Option<PyObject>> =
-            std::iter::repeat_with(|| None).take(input_indices.len()).collect();
-        let mut prob_bufs: Vec<Option<xlog_cuda::CudaBuffer>> =
-            std::iter::repeat_with(|| None).take(input_indices.len()).collect();
-        let mut grad_bufs: Vec<Option<xlog_cuda::CudaBuffer>> =
-            std::iter::repeat_with(|| None).take(input_indices.len()).collect();
-
-        let mut num_labels: Option<usize> = None;
+        let mut out_tensors: Vec<Option<PyObject>> = std::iter::repeat_with(|| None)
+            .take(input_indices.len())
+            .collect();
+        let mut grad_tensors: Vec<Option<PyObject>> = std::iter::repeat_with(|| None)
+            .take(input_indices.len())
+            .collect();
+        let mut prob_bufs: Vec<Option<xlog_cuda::CudaBuffer>> = std::iter::repeat_with(|| None)
+            .take(input_indices.len())
+            .collect();
+        let mut grad_bufs: Vec<Option<xlog_cuda::CudaBuffer>> = std::iter::repeat_with(|| None)
+            .take(input_indices.len())
+            .collect();
 
         for (network_name, calls) in calls_by_network {
             let handle = self.network_registry.get(&network_name).ok_or_else(|| {
@@ -1362,22 +1484,6 @@ impl CompiledProgram {
             for (batch_idx, call) in calls.iter().enumerate() {
                 let output_row = output_bound.get_item(batch_idx)?;
                 let output_row = output_row.call_method0("contiguous")?;
-
-                let n: usize = output_row
-                    .call_method0("numel")?
-                    .extract::<i64>()?
-                    .try_into()
-                    .map_err(|_| PyValueError::new_err("Invalid output numel"))?;
-                if let Some(prev) = num_labels {
-                    if n != prev {
-                        return Err(PyValueError::new_err(format!(
-                            "Network outputs disagree on num_labels: {} vs {}",
-                            prev, n
-                        )));
-                    }
-                } else {
-                    num_labels = Some(n);
-                }
 
                 let output_detached = output_row.call_method0("detach")?;
                 let managed = dlpack_from_py(&output_detached)?;
@@ -1418,13 +1524,12 @@ impl CompiledProgram {
             .map(|v| v.ok_or_else(|| PyRuntimeError::new_err("Missing grad buffer")))
             .collect::<PyResult<_>>()?;
 
-        let num_labels = num_labels.ok_or_else(|| PyValueError::new_err("No network outputs"))?;
-
         // Ensure template circuit is available (compile-once per shape).
-        let cache_key = self.generate_cache_key(&pred_name, input_indices.len(), num_labels);
+        let cache_key =
+            self.generate_cache_key_for_signature(&signature, &pred_name, atom.terms.len());
         if !self.circuit_cache.contains_key(&cache_key) {
             let cached =
-                self.compile_circuit_for_template(&pred_name, input_indices.len(), num_labels)?;
+                self.compile_circuit_for_template(&signature, &pred_name, atom.terms.len())?;
             self.circuit_cache.insert(cache_key.clone(), cached);
         }
 
@@ -1433,31 +1538,18 @@ impl CompiledProgram {
             .get(&cache_key)
             .expect("cache populated above");
 
-        if cached.num_labels != num_labels {
-            return Err(PyRuntimeError::new_err(format!(
-                "Cached template num_labels {} != runtime num_labels {}",
-                cached.num_labels, num_labels
-            )));
-        }
-
-        let query_idx: usize = match pred_name.as_str() {
-            // Template queries are emitted in ascending sum order: query(addition(0,1,sum)).
-            "addition" => {
-                let max_sum = 2usize.saturating_mul(num_labels.saturating_sub(1));
-                if target_val > max_sum {
-                    return Err(PyValueError::new_err(format!(
-                        "Target sum {} out of range (max {})",
-                        target_val, max_sum
-                    )));
-                }
-                target_val
-            }
-            other => {
-                return Err(PyValueError::new_err(format!(
-                    "Unsupported cached predicate '{}' for neural fast-path",
-                    other
-                )));
-            }
+        let query_idx: usize = match target_label {
+            Some(label) => cached
+                .target_domain
+                .iter()
+                .position(|entry| entry == &label)
+                .ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "Target '{}' not in domain {:?} for predicate '{}'",
+                        label, cached.target_domain, pred_name
+                    ))
+                })?,
+            None => 0,
         };
 
         // Robustness: order Torch stream work vs XLOG's CUDA work-stream (legacy default stream).
@@ -1540,211 +1632,563 @@ impl CompiledProgram {
         Ok(loss_tensor.into_py(py))
     }
 
-    /// Extract input indices from a query.
-    ///
-    /// For `addition(0, 1, 7)`, returns indices [0, 1].
-    fn extract_query_input_indices(&self, query: &str) -> PyResult<(Vec<usize>, String)> {
-        let query = query.trim();
-
-        let paren_start = query
-            .find('(')
-            .ok_or_else(|| PyValueError::new_err(format!("Invalid query format: {}", query)))?;
-        let paren_end = query
-            .rfind(')')
-            .ok_or_else(|| PyValueError::new_err(format!("Invalid query format: {}", query)))?;
-
-        let pred_name = query[..paren_start].to_string();
-        let args_str = &query[paren_start + 1..paren_end];
-
-        let mut indices = Vec::new();
-        for arg in args_str.split(',').map(|s| s.trim()) {
-            // Try to parse as integer - if successful, it's a potential input index
-            if let Ok(idx) = arg.parse::<usize>() {
-                indices.push(idx);
-            }
-        }
-
-        // For addition(X, Y, Z), the first two arguments are input indices,
-        // the third is the expected sum. We want the input indices.
-        // Heuristic: all but the last index for rules like addition
-        if indices.len() > 1 {
-            indices.pop(); // Remove the last one (e.g., the sum/result)
-        }
-
-        Ok((indices, pred_name))
-    }
-
-    /// Extract the final integer argument from a query (e.g., the sum in `addition(X,Y,Z)`).
-    fn extract_query_target_int(&self, query: &str) -> PyResult<usize> {
-        let query = query.trim();
-        let paren_start = query
-            .find('(')
-            .ok_or_else(|| PyValueError::new_err(format!("Invalid query format: {}", query)))?;
-        let paren_end = query
-            .rfind(')')
-            .ok_or_else(|| PyValueError::new_err(format!("Invalid query format: {}", query)))?;
-
-        let args_str = &query[paren_start + 1..paren_end];
-        let last = args_str
-            .split(',')
-            .map(|s| s.trim())
-            .last()
-            .ok_or_else(|| PyValueError::new_err(format!("Invalid query args: {}", query)))?;
-
-        last.parse::<usize>()
-            .map_err(|_| PyValueError::new_err(format!("Invalid target value: {}", last)))
-    }
-
-    /// Generate a template-expanded source program for a cached query shape.
-    ///
-    /// The output is independent of concrete input indices and target values:
-    /// - Uses placeholder inputs `0..num_inputs-1`
-    /// - Emits uniform dummy probabilities (sum < 1.0 to force an implicit "none" branch)
-    /// - Emits a query for each possible target (so runtime can select by index)
-    fn generate_template_source(
-        &self,
+    fn get_or_build_query_signature(
+        &mut self,
         pred_name: &str,
-        num_inputs: usize,
-        num_labels: usize,
-    ) -> PyResult<String> {
-        let mut source = String::new();
-
-        if num_labels == 0 {
-            return Err(PyValueError::new_err("num_labels must be > 0"));
+        arity: usize,
+    ) -> PyResult<&QuerySignature> {
+        let key = format!("{}:{}", pred_name, arity);
+        if !self.query_signature_cache.contains_key(&key) {
+            let signature = self.build_query_signature(pred_name, arity)?;
+            self.query_signature_cache.insert(key.clone(), signature);
         }
+        self.query_signature_cache
+            .get(&key)
+            .ok_or_else(|| PyRuntimeError::new_err(format!("Failed to build signature for {key}")))
+    }
 
-        // Dummy uniform probabilities (will be scaled to sum < 1.0).
-        let p = 1.0f64 / (num_labels as f64);
-        let sum = 1.0f64;
-        let scale = 0.9999999 / sum;
-        let normalized_p = (p * scale).max(1e-10);
+    fn build_query_signature(&self, pred_name: &str, arity: usize) -> PyResult<QuerySignature> {
+        let rule = self.find_query_rule(pred_name, arity)?;
 
-        // Add annotated disjunctions for each placeholder input index.
-        for input_pos in 0..num_inputs {
-            let mut ad_parts: Vec<String> = Vec::new();
-            for label_idx in 0..num_labels {
-                ad_parts.push(format!(
-                    "{:.10}::digit({}, {})",
-                    normalized_p, input_pos, label_idx
-                ));
+        let mut groups: Vec<NeuralGroup> = Vec::with_capacity(rule.body.len());
+        for literal in &rule.body {
+            let body_atom = match literal {
+                BodyLiteral::Positive(atom) => atom,
+                _ => continue,
+            };
+
+            if self.neural_registry.get(&body_atom.predicate).is_none() {
+                continue;
             }
-            source.push_str(&ad_parts.join("; "));
-            source.push_str(".\n");
+
+            let info = self.match_neural_decl_for_atom(body_atom)?;
+
+            if info.input_positions.len() != 1 {
+                return Err(PyValueError::new_err(format!(
+                    "Query signature currently supports exactly one input position per neural declaration; '{}' has {}",
+                    info.predicate,
+                    info.input_positions.len()
+                )));
+            }
+
+            let input_position = info.input_positions[0];
+            let input_term = body_atom.terms.get(input_position).ok_or_else(|| {
+                PyValueError::new_err(format!(
+                    "Malformed declaration for '{}': missing input variable at {}",
+                    info.predicate, input_position
+                ))
+            })?;
+            let input_var = match input_term {
+                Term::Variable(name) => name.as_str(),
+                _ => {
+                    return Err(PyValueError::new_err(format!(
+                        "Expected variable at input position {} of neural call '{}'",
+                        input_position, info.predicate
+                    )))
+                }
+            };
+
+            let input_source =
+                if let Some(head_position) = Self::find_head_position(&rule.head, input_var) {
+                    InputSource::QueryArg(head_position)
+                } else {
+                    let next_slot = groups
+                        .iter()
+                        .filter(|group| matches!(group.input_source, InputSource::ImplicitSlot(_)))
+                        .count();
+                    InputSource::ImplicitSlot(next_slot)
+                };
+
+            let output_term = body_atom.terms.get(info.output_position).ok_or_else(|| {
+                PyValueError::new_err(format!(
+                    "Malformed declaration for '{}': missing output variable at {}",
+                    info.predicate, info.output_position
+                ))
+            })?;
+            let output_var = match output_term {
+                Term::Variable(name) => Some(name.clone()),
+                _ => {
+                    return Err(PyValueError::new_err(format!(
+                        "Expected variable at output position {} of neural call '{}'",
+                        info.output_position, info.predicate
+                    )));
+                }
+            };
+
+            groups.push(NeuralGroup {
+                info: info.clone(),
+                input_source,
+                output_var,
+            });
         }
 
-        match pred_name {
-            "addition" => {
-                if num_inputs != 2 {
+        if groups.is_empty() {
+            return Err(PyValueError::new_err(format!(
+                "No neural groups found for query predicate '{}'",
+                pred_name
+            )));
+        }
+
+        if arity == 0 {
+            return Ok(QuerySignature::Boolean { groups });
+        }
+
+        let mut used_head_positions: Vec<usize> = groups
+            .iter()
+            .filter_map(|group| match group.input_source {
+                InputSource::QueryArg(pos) => Some(pos),
+                InputSource::ImplicitSlot(_) => None,
+            })
+            .collect();
+        used_head_positions.sort_unstable();
+        used_head_positions.dedup();
+
+        let target_positions: Vec<usize> = (0..arity)
+            .filter(|pos| !used_head_positions.contains(pos))
+            .collect();
+        if target_positions.len() != 1 {
+            return Err(PyValueError::new_err(format!(
+                "Could not determine unique target position for '{}': target positions {:?}",
+                pred_name, target_positions
+            )));
+        }
+
+        Ok(QuerySignature::Targeted {
+            target_position: target_positions[0],
+            groups,
+        })
+    }
+
+    fn find_query_rule(&self, pred_name: &str, arity: usize) -> PyResult<&Rule> {
+        let mut matches = 0usize;
+        let mut found: Option<&Rule> = None;
+        for rule in &self.ast.rules {
+            if rule.head.predicate == pred_name && rule.head.arity() == arity {
+                matches += 1;
+                found = Some(rule);
+            }
+        }
+
+        if matches == 0 {
+            return Err(PyValueError::new_err(format!(
+                "No rule defines predicate '{}' with arity {}",
+                pred_name, arity
+            )));
+        }
+
+        if matches > 1 {
+            return Err(PyValueError::new_err(format!(
+                "Query predicate '{}' has {} defining rules; expected exactly 1 for v0.4.0-alpha",
+                pred_name, matches
+            )));
+        }
+
+        found.ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "Failed to locate defining rule for '{}' / arity {}",
+                pred_name, arity
+            ))
+        })
+    }
+
+    fn match_neural_decl_for_atom(&self, atom: &Atom) -> PyResult<&NeuralPredicateInfo> {
+        self.neural_registry
+            .resolve_atom(atom)
+            .map_err(PyValueError::new_err)
+    }
+
+    fn find_head_position(rule_head: &Atom, var_name: &str) -> Option<usize> {
+        rule_head
+            .terms
+            .iter()
+            .position(|term| matches!(term, Term::Variable(name) if name == var_name))
+    }
+
+    fn generate_template_ast(
+        &self,
+        signature: &QuerySignature,
+        query_pred: &str,
+        query_arity: usize,
+    ) -> PyResult<(xlog_logic::ast::Program, Vec<String>)> {
+        let template_rule = self.find_query_rule(query_pred, query_arity)?;
+        let mut template_program = xlog_logic::ast::Program::default();
+        let mut target_domain = self.generate_target_domain(query_pred, query_arity, signature)?;
+
+        for (group_idx, group) in signature.groups().iter().enumerate() {
+            let labels = group.info.labels.as_ref().ok_or_else(|| {
+                PyValueError::new_err(format!(
+                    "Neural predicate '{}' does not declare labels",
+                    group.info.predicate
+                ))
+            })?;
+            if labels.is_empty() {
+                return Err(PyValueError::new_err(format!(
+                    "Neural predicate '{}' must declare at least one label",
+                    group.info.predicate
+                )));
+            }
+
+            let p = 0.9999999 / (labels.len() as f64);
+            let mut choices = Vec::with_capacity(labels.len());
+            for label in labels {
+                let mut terms = Vec::with_capacity(group.info.predicate_arity);
+                for pos in 0..group.info.predicate_arity {
+                    if group.info.input_positions.contains(&pos) {
+                        terms.push(Term::Integer(group_idx as i64));
+                    } else if pos == group.info.output_position {
+                        terms.push(self.label_string_to_term(label));
+                    } else {
+                        terms.push(group.info.predicate_terms[pos].clone());
+                    }
+                }
+
+                choices.push(xlog_logic::ast::ProbFact {
+                    prob: p,
+                    atom: Atom {
+                        predicate: group.info.predicate.clone(),
+                        terms,
+                    },
+                });
+            }
+
+            template_program
+                .annotated_disjunctions
+                .push(xlog_logic::ast::AnnotatedDisjunction { choices });
+        }
+
+        template_program.rules.push(template_rule.clone());
+
+        match signature {
+            QuerySignature::Boolean { .. } => {
+                template_program
+                    .prob_queries
+                    .push(xlog_logic::ast::ProbQuery {
+                        atom: Atom {
+                            predicate: query_pred.to_string(),
+                            terms: Vec::new(),
+                        },
+                    });
+            }
+            QuerySignature::Targeted {
+                target_position, ..
+            } => {
+                if target_domain.is_empty() {
                     return Err(PyValueError::new_err(format!(
-                        "addition expects exactly 2 inputs, got {}",
-                        num_inputs
+                        "Targeted signature '{}' has empty target domain",
+                        query_pred
                     )));
                 }
 
-                source.push_str("addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.\n");
-
-                // Emit queries in ascending sum order so query_idx == sum.
-                let max_sum = 2usize.saturating_mul(num_labels.saturating_sub(1));
-                for sum in 0..=max_sum {
-                    source.push_str(&format!("query(addition(0, 1, {})).\n", sum));
+                let mut head_to_group: StdHashMap<usize, usize> = StdHashMap::new();
+                for (idx, group) in signature.groups().iter().enumerate() {
+                    if let InputSource::QueryArg(pos) = group.input_source {
+                        head_to_group.entry(pos).or_insert(idx);
+                    }
                 }
-            }
-            other => {
-                return Err(PyValueError::new_err(format!(
-                    "Unsupported template predicate '{}'",
-                    other
-                )));
+
+                for target in target_domain.iter() {
+                    let mut terms = Vec::with_capacity(query_arity);
+                    for pos in 0..query_arity {
+                        if pos == *target_position {
+                            terms.push(self.label_string_to_term(target));
+                        } else if let Some(group_idx) = head_to_group.get(&pos) {
+                            terms.push(Term::Integer(*group_idx as i64));
+                        } else {
+                            let head_term = template_rule
+                                .head
+                                .terms
+                                .get(pos)
+                                .ok_or_else(|| {
+                                    PyValueError::new_err(format!(
+                                        "Rule head position {} out of range in '{}' / arity {}",
+                                        pos, query_pred, query_arity
+                                    ))
+                                })?
+                                .clone();
+                            terms.push(head_term);
+                        }
+                    }
+
+                    template_program
+                        .prob_queries
+                        .push(xlog_logic::ast::ProbQuery {
+                            atom: Atom {
+                                predicate: query_pred.to_string(),
+                                terms,
+                            },
+                        });
+                }
             }
         }
 
-        Ok(source)
+        target_domain.sort_unstable();
+        Ok((template_program, target_domain))
     }
 
-    /// Find the network name associated with a predicate.
-    fn find_network_for_predicate(&self, pred_name: &str) -> PyResult<String> {
-        let info = self.neural_registry.get(pred_name).ok_or_else(|| {
-            PyValueError::new_err(format!("Unknown neural predicate '{}'", pred_name))
-        })?;
-        Ok(info.network.clone())
+    fn generate_target_domain(
+        &self,
+        query_pred: &str,
+        query_arity: usize,
+        signature: &QuerySignature,
+    ) -> PyResult<Vec<String>> {
+        let rule = self.find_query_rule(query_pred, query_arity)?;
+
+        match signature {
+            QuerySignature::Boolean { .. } => Ok(Vec::new()),
+            QuerySignature::Targeted {
+                target_position,
+                groups,
+                ..
+            } => {
+                let target_term = rule
+                    .head
+                    .terms
+                    .get(*target_position)
+                    .ok_or_else(|| PyValueError::new_err("Target position is out of range"))?;
+                let target_var = target_term.variable_name().ok_or_else(|| {
+                    PyValueError::new_err("Target in query rule must be a variable")
+                })?;
+
+                let output_map: StdHashMap<&str, Vec<&NeuralGroup>> = groups
+                    .iter()
+                    .filter_map(|g| g.output_var.as_deref().map(|name| (name, g)))
+                    .fold(StdHashMap::new(), |mut acc, (name, group)| {
+                        acc.entry(name).or_default().push(group);
+                        acc
+                    });
+
+                if let Some(domain) =
+                    self.extract_addition_domain_from_rule(rule, target_var, &output_map)?
+                {
+                    return Ok(domain);
+                }
+
+                if let Some(groups_for_target) = output_map.get(target_var) {
+                    let mut domain = groups_for_target
+                        .iter()
+                        .flat_map(|group| {
+                            group
+                                .info
+                                .labels
+                                .as_ref()
+                                .into_iter()
+                                .flat_map(|labels| labels.iter())
+                        })
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>();
+                    domain.sort_unstable();
+                    domain.dedup();
+                    if domain.is_empty() {
+                        return Err(PyValueError::new_err(format!(
+                            "No labels found for target variable '{}'",
+                            target_var
+                        )));
+                    }
+                    return Ok(domain);
+                }
+
+                Err(PyValueError::new_err(format!(
+                    "Could not determine target domain for '{}'",
+                    target_var
+                )))
+            }
+        }
     }
 
-    /// Generate cache key for a query template.
-    ///
-    /// Format: `{predicate}:{num_inputs}:{num_labels}`
-    /// Example: `addition:2:10` for addition(0, 1, 7) with 10-class MNIST
-    ///
-    /// Queries with identical structure (same predicate, same number of inputs,
-    /// same network label count) share the same circuit - only weights differ.
-    fn generate_cache_key(&self, pred_name: &str, num_inputs: usize, num_labels: usize) -> String {
-        format!("{}:{}:{}", pred_name, num_inputs, num_labels)
+    fn extract_addition_domain_from_rule(
+        &self,
+        rule: &Rule,
+        target_var: &str,
+        output_map: &StdHashMap<&str, Vec<&NeuralGroup>>,
+    ) -> PyResult<Option<Vec<String>>> {
+        use std::collections::BTreeSet;
+        for literal in &rule.body {
+            let is_expr = match literal {
+                BodyLiteral::IsExpr(is_expr) if is_expr.target == target_var => is_expr,
+                _ => continue,
+            };
+
+            let (left_var, right_var) = match &is_expr.expr {
+                ArithExpr::Add(lhs, rhs) => {
+                    (self.extract_arith_var(lhs)?, self.extract_arith_var(rhs)?)
+                }
+                _ => {
+                    return Ok(None);
+                }
+            };
+
+            let left_groups = output_map.get(left_var.as_str()).ok_or_else(|| {
+                PyValueError::new_err(format!("No neural group produces variable '{}'", left_var))
+            })?;
+            let right_groups = output_map.get(right_var.as_str()).ok_or_else(|| {
+                PyValueError::new_err(format!("No neural group produces variable '{}'", right_var))
+            })?;
+            if left_groups.is_empty() || right_groups.is_empty() {
+                return Err(PyValueError::new_err(
+                    "Missing neural groups for target expression",
+                ));
+            }
+
+            let left_labels = left_groups[0]
+                .info
+                .labels
+                .as_ref()
+                .ok_or_else(|| PyValueError::new_err("Missing labels for source variable"))?;
+            let right_labels = right_groups[0]
+                .info
+                .labels
+                .as_ref()
+                .ok_or_else(|| PyValueError::new_err("Missing labels for source variable"))?;
+
+            let mut values = BTreeSet::new();
+            for left_label in left_labels {
+                let left_value = left_label.parse::<i64>().map_err(|_| {
+                    PyValueError::new_err(format!(
+                        "Non-integer label '{}' in addition target domain",
+                        left_label
+                    ))
+                })?;
+                for right_label in right_labels {
+                    let right_value = right_label.parse::<i64>().map_err(|_| {
+                        PyValueError::new_err(format!(
+                            "Non-integer label '{}' in addition target domain",
+                            right_label
+                        ))
+                    })?;
+                    values.insert((left_value + right_value).to_string());
+                }
+            }
+
+            return Ok(Some(values.into_iter().collect()));
+        }
+
+        Ok(None)
     }
 
-    /// Compile and cache a template circuit (compile-once per `{predicate}:{num_inputs}:{num_labels}`).
-    ///
-    /// The compiled template is independent of concrete input indices and target values; concrete targets are
-    /// handled by selecting a query index at runtime and forcing the corresponding query var on GPU.
+    fn extract_arith_var(&self, expr: &ArithExpr) -> PyResult<String> {
+        match expr {
+            ArithExpr::Variable(name) => Ok(name.clone()),
+            _ => Err(PyValueError::new_err(
+                "Only variable terms are supported for target-domain arithmetic pattern",
+            )),
+        }
+    }
+
+    fn generate_cache_key_for_signature(
+        &self,
+        signature: &QuerySignature,
+        query_pred: &str,
+        query_arity: usize,
+    ) -> String {
+        let mut key = format!("{}:{}", query_pred, query_arity);
+        for group in signature.groups() {
+            let labels = group.info.labels.as_ref().map_or(0, |labels| labels.len());
+            key.push(':');
+            key.push_str(&group.info.network);
+            key.push(':');
+            key.push_str(&labels.to_string());
+        }
+        key
+    }
+
+    fn label_string_to_term(&self, label: &str) -> Term {
+        if let Ok(v) = label.parse::<i64>() {
+            Term::Integer(v)
+        } else {
+            Term::Symbol(xlog_core::symbol::intern(label))
+        }
+    }
+
     fn compile_circuit_for_template(
         &self,
-        pred_name: &str,
-        num_inputs: usize,
-        num_labels: usize,
+        signature: &QuerySignature,
+        query_pred: &str,
+        query_arity: usize,
     ) -> PyResult<CachedCircuit> {
         #[cfg(not(feature = "host-io"))]
         {
-            let _ = (pred_name, num_inputs, num_labels);
+            let _ = (signature, query_pred, query_arity);
             return Err(host_io_disabled_pyerr());
         }
 
         #[cfg(feature = "host-io")]
         {
-            let expanded_source =
-                self.generate_template_source(pred_name, num_inputs, num_labels)?;
-
-            let program =
-                ExactDdnnfProgram::compile_source_with_gpu(&expanded_source, self.gpu_config)
-                    .map_err(|e| {
-                        PyRuntimeError::new_err(format!("Query compilation error: {}", e))
-                    })?;
+            let (expanded_ast, target_domain) =
+                self.generate_template_ast(signature, query_pred, query_arity)?;
+            let program = ExactDdnnfProgram::compile_from_program(&expanded_ast, self._gpu_config)
+                .map_err(|e| {
+                PyRuntimeError::new_err(format!("Query compilation error: {}", e))
+            })?;
 
             let random_vars = program.random_var_indices();
-            let expected = num_inputs
-                .checked_mul(num_labels)
-                .ok_or_else(|| PyValueError::new_err("num_inputs*num_labels overflow"))?;
+            let group_label_counts: Vec<usize> = signature
+                .groups()
+                .iter()
+                .map(|g| g.info.labels.as_ref().map(|l| l.len()).unwrap_or(0))
+                .collect();
 
-            if random_vars.len() != expected {
+            let expected_total: usize = group_label_counts.iter().sum();
+            if random_vars.len() != expected_total {
                 return Err(PyRuntimeError::new_err(format!(
-                    "Template compilation produced {} random vars, expected {} (inputs={}, labels={})",
+                    "Template compilation produced {} random vars, expected {} (groups: {:?})",
                     random_vars.len(),
-                    expected,
-                    num_inputs,
-                    num_labels
+                    expected_total,
+                    group_label_counts
                 )));
             }
 
-            let mut groups: Vec<Vec<u32>> = Vec::with_capacity(num_inputs);
-            for input_pos in 0..num_inputs {
-                let start = input_pos * num_labels;
-                let end = start + num_labels;
-                groups.push(random_vars[start..end].to_vec());
+            let mut slot_groups = Vec::with_capacity(group_label_counts.len());
+            let mut offset = 0usize;
+            for count in group_label_counts.iter() {
+                let end = offset + *count;
+                if end > random_vars.len() {
+                    return Err(PyRuntimeError::new_err(format!(
+                        "Template compilation random vars exhausted at offset {} count {}",
+                        offset, count
+                    )));
+                }
+                slot_groups.push(random_vars[offset..end].to_vec());
+                offset = end;
             }
 
-            let slots = GpuWeightSlots::upload(self.output_provider.as_ref(), &groups)
+            let slots = GpuWeightSlots::upload(self.output_provider.as_ref(), &slot_groups)
                 .map_err(|e| PyRuntimeError::new_err(format!("Slot map upload error: {}", e)))?;
 
             Ok(CachedCircuit {
                 program,
                 slots,
-                num_labels,
+                target_domain,
             })
         }
     }
-
     /// Get the label index for a given label string from declared labels.
     fn get_label_index(&self, predicate: &str, label: &str) -> PyResult<usize> {
-        let info = self.neural_registry.get(predicate).ok_or_else(|| {
+        let infos = self.neural_registry.get(predicate).ok_or_else(|| {
             PyValueError::new_err(format!("Unknown neural predicate '{}'", predicate))
         })?;
-        info.labels
+        let info = match infos.as_slice() {
+            [] => {
+                return Err(PyValueError::new_err(format!(
+                    "Unknown neural predicate '{}'",
+                    predicate
+                )))
+            }
+            [single] => single,
+            _ => {
+                return Err(PyValueError::new_err(format!(
+                    "Predicate '{}' has {} nn/4 declarations; provide a concrete query atom",
+                    predicate,
+                    infos.len()
+                )))
+            }
+        };
+        let labels = info.labels.as_ref().ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "Predicate '{}' does not declare a label list in nn/4",
+                predicate
+            ))
+        })?;
+        labels
             .iter()
             .position(|l| l == label)
             .ok_or_else(|| PyValueError::new_err(format!("Label '{}' not in declared list", label)))
@@ -1783,17 +2227,17 @@ impl CompiledProgram {
         #[cfg(feature = "host-io")]
         {
             // Build source with queries appended
-            let mut source_with_queries = self.source.clone();
+            let mut source_with_queries = self._source.clone();
             for query in queries {
                 source_with_queries.push_str(&format!("\nquery({}).", query));
             }
 
             // Compile and evaluate the temporary program
-            let result: Vec<QueryProbability> = match self.prob_engine {
+            let result: Vec<QueryProbability> = match self._prob_engine {
                 ProbEngine::ExactDdnnf => {
                     let program = ExactDdnnfProgram::compile_source_with_gpu(
                         &source_with_queries,
-                        self.gpu_config,
+                        self._gpu_config,
                     )
                     .map_err(|e| {
                         PyRuntimeError::new_err(format!("Query compilation error: {}", e))
@@ -1808,10 +2252,10 @@ impl CompiledProgram {
                 }
                 ProbEngine::Mc => {
                     let program =
-                        McProgram::compile_source_with_gpu(&source_with_queries, self.gpu_config)
+                        McProgram::compile_source_with_gpu(&source_with_queries, self._gpu_config)
                             .map_err(|e| {
-                                PyRuntimeError::new_err(format!("Query compilation error: {}", e))
-                            })?;
+                            PyRuntimeError::new_err(format!("Query compilation error: {}", e))
+                        })?;
 
                     let cfg = McEvalConfig::default();
                     program
@@ -2179,7 +2623,6 @@ impl CompiledLogicProgram {
             let num_rows = q.buffer.num_rows() as usize;
             let is_true = q.columns.is_empty() && num_rows > 0;
             let arity = q.buffer.arity();
-
             let mut tensors: Vec<PyObject> = Vec::new();
             if !q.columns.is_empty() {
                 let table = self.provider.to_dlpack_table(q.buffer);
@@ -2348,7 +2791,7 @@ impl TrainingHistory {
 ///
 /// # Arguments
 /// * `program` - Compiled program with registered networks
-/// * `queries` - Training queries (e.g., ["addition(0, 1, 5)", "addition(2, 3, 7)"])
+/// * `queries` - Training queries (e.g., ["addition(0, 1, 5)", "addition(2, 3, 7)")
 /// * `epochs` - Number of training epochs (default: 10)
 /// * `batch_size` - Number of queries per batch (default: 32)
 /// * `log_iter` - Log progress every N batches (default: 100)

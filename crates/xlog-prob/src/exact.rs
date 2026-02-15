@@ -5,8 +5,11 @@ use std::sync::{Arc, Mutex};
 
 use cudarc::driver::{DeviceSlice, LaunchAsync, LaunchConfig};
 use xlog_core::{MemoryBudget, Result, ScalarType, XlogError};
+use xlog_logic::ast::Program;
 
-use crate::compilation::gpu_cache::{GpuCircuitCache, GpuCircuitCacheConfig, GpuCircuitCacheHandle};
+use crate::compilation::gpu_cache::{
+    GpuCircuitCache, GpuCircuitCacheConfig, GpuCircuitCacheHandle,
+};
 use crate::compilation::gpu_cnf::GpuCnfVarTables;
 use crate::compilation::gpu_weights::{build_evidence_by_var_gpu, build_weights_gpu};
 #[cfg(feature = "host-io")]
@@ -16,7 +19,7 @@ use crate::compilation::{
     GpuPirGraph, GpuPirRoots,
 };
 use crate::neural_fast_path::{GpuWeightSlots, NeuralFastPathConfig};
-use crate::provenance::{extract_from_source, GroundAtom, Provenance};
+use crate::provenance::{extract_from_program, extract_from_source, GroundAtom, Provenance};
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::provider::{
     arith_kernels, filter_kernels, neural_kernels, weights_kernels, ARITH_MODULE, FILTER_MODULE,
@@ -120,6 +123,11 @@ impl ExactDdnnfProgram {
 
     pub fn compile_source_with_gpu(source: &str, config: GpuConfig) -> Result<Self> {
         let provenance = extract_from_source(source)?;
+        Self::compile_provenance_with_gpu(provenance, config)
+    }
+
+    pub fn compile_from_program(program: &Program, config: GpuConfig) -> Result<Self> {
+        let provenance = extract_from_program(program)?;
         Self::compile_provenance_with_gpu(provenance, config)
     }
 
@@ -610,8 +618,7 @@ impl ExactDdnnfProgram {
             if idx >= weights_len {
                 return Err(XlogError::Compilation(format!(
                     "Exact inference error: query var {} out of bounds (len={})",
-                    var,
-                    weights_len
+                    var, weights_len
                 )));
             }
 
@@ -725,8 +732,7 @@ impl ExactDdnnfProgram {
             if idx >= weights_len {
                 return Err(XlogError::Compilation(format!(
                     "Exact inference error: query var {} out of bounds (len={})",
-                    var,
-                    weights_len
+                    var, weights_len
                 )));
             }
 
@@ -913,12 +919,9 @@ impl ExactDdnnfProgram {
         let random_var_count = leaf_probs_host
             .len()
             .checked_add(choice_true_host.len())
-            .ok_or_else(|| {
-                XlogError::Compilation("random var count overflow".to_string())
-            })?;
-        let random_var_count = u32::try_from(random_var_count).map_err(|_| {
-            XlogError::Compilation("random var count exceeds u32".to_string())
-        })?;
+            .ok_or_else(|| XlogError::Compilation("random var count overflow".to_string()))?;
+        let random_var_count = u32::try_from(random_var_count)
+            .map_err(|_| XlogError::Compilation("random var count exceeds u32".to_string()))?;
         let random_var_list =
             collect_random_vars_device(&provider, &encoding.vars, random_var_count)?;
         let random_vars = DeviceRandomVarList::from_device(random_var_list, random_var_count)?;
@@ -1030,7 +1033,9 @@ impl ExactDdnnfProgram {
 
     fn gpu_state(&self) -> Result<Arc<GpuExactState>> {
         self.gpu.clone().ok_or_else(|| {
-            XlogError::Execution("Exact inference GPU error: program has no compiled circuit".to_string())
+            XlogError::Execution(
+                "Exact inference GPU error: program has no compiled circuit".to_string(),
+            )
         })
     }
 
@@ -1172,9 +1177,7 @@ pub(crate) fn default_compile_config(
         .ok_or_else(|| XlogError::Compilation("trail size overflow".to_string()))?;
     let denom = trail_bytes_per_item.saturating_mul(8).max(1);
     let max_items_by_trail = memory_bytes / denom;
-    let max_frontier_items = max_items_by_trail
-        .clamp(8, 4096)
-        .min(u64::from(u32::MAX)) as u32;
+    let max_frontier_items = max_items_by_trail.clamp(8, 4096).min(u64::from(u32::MAX)) as u32;
 
     // The Phase 1 D4 compiler emits one leaf circuit per frontier item; caps must scale with the
     // maximum frontier size (up to 2^frontier_depth, bounded by max_frontier_items).
@@ -1244,11 +1247,7 @@ pub(crate) fn default_cache_config(
 pub(crate) fn build_weight_sources(
     provenance: &Provenance,
 ) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>)> {
-    let max_leaf = provenance
-        .leaf_probs
-        .keys()
-        .map(|leaf| leaf.as_u32())
-        .max();
+    let max_leaf = provenance.leaf_probs.keys().map(|leaf| leaf.as_u32()).max();
     let leaf_len = max_leaf.map(|v| v as usize + 1).unwrap_or(0);
     let mut leaf_probs = vec![0.0f64; leaf_len];
     let mut leaf_seen = vec![false; leaf_len];
@@ -1351,9 +1350,7 @@ fn capture_compact_count_device(
     let device = provider.device().inner();
     let capture_fn = device
         .get_func(FILTER_MODULE, filter_kernels::CAPTURE_COMPACT_COUNT)
-        .ok_or_else(|| {
-            XlogError::Kernel("capture_compact_count kernel not found".to_string())
-        })?;
+        .ok_or_else(|| XlogError::Kernel("capture_compact_count kernel not found".to_string()))?;
     unsafe {
         capture_fn.clone().launch(
             LaunchConfig {
@@ -1380,9 +1377,8 @@ pub(crate) fn collect_random_vars_device(
         .max_var
         .checked_add(1)
         .ok_or_else(|| XlogError::Compilation("random var mask_len overflow".to_string()))?;
-    let mask_len_usize = usize::try_from(mask_len).map_err(|_| {
-        XlogError::Compilation("random var mask_len exceeds usize".to_string())
-    })?;
+    let mask_len_usize = usize::try_from(mask_len)
+        .map_err(|_| XlogError::Compilation("random var mask_len exceeds usize".to_string()))?;
 
     let mut mask = memory.alloc::<u8>(mask_len_usize)?;
     device
@@ -1407,12 +1403,10 @@ pub(crate) fn collect_random_vars_device(
     }
     .map_err(|e| XlogError::Kernel(format!("fill_u32_iota failed: {}", e)))?;
 
-    let leaf_len = u32::try_from(vars.leaf_var.len()).map_err(|_| {
-        XlogError::Compilation("leaf_var len exceeds u32".to_string())
-    })?;
-    let choice_len = u32::try_from(vars.choice_var.len()).map_err(|_| {
-        XlogError::Compilation("choice_var len exceeds u32".to_string())
-    })?;
+    let leaf_len = u32::try_from(vars.leaf_var.len())
+        .map_err(|_| XlogError::Compilation("leaf_var len exceeds u32".to_string()))?;
+    let choice_len = u32::try_from(vars.choice_var.len())
+        .map_err(|_| XlogError::Compilation("choice_var len exceeds u32".to_string()))?;
     let mark_kernel = device
         .get_func(FILTER_MODULE, filter_kernels::MARK_RANDOM_VARS)
         .ok_or_else(|| XlogError::Kernel("mark_random_vars kernel not found".to_string()))?;
@@ -1444,9 +1438,7 @@ pub(crate) fn collect_random_vars_device(
 
     let check_kernel = device
         .get_func(FILTER_MODULE, filter_kernels::CHECK_RANDOM_VAR_COUNT)
-        .ok_or_else(|| {
-            XlogError::Kernel("check_random_var_count kernel not found".to_string())
-        })?;
+        .ok_or_else(|| XlogError::Kernel("check_random_var_count kernel not found".to_string()))?;
     unsafe {
         check_kernel.clone().launch(
             LaunchConfig {
@@ -1568,7 +1560,10 @@ query(sprinkler()).
         let log_z_eq = program.eval_log_z_gpu(Some(sprinkler_var)).unwrap();
 
         let state = program.gpu_state().unwrap();
-        let mut cache = state.cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut cache = state
+            .cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let (_, var_log_false) = cache.var_log_weights_mut();
 
         let mut before = [0.0f64];
@@ -1595,7 +1590,10 @@ query(sprinkler()).
 
         restore_query_var_false(state.provider(), var_log_false, sprinkler_var, &restore).unwrap();
 
-        assert!(before[0].is_finite(), "expected finite log_false before forcing");
+        assert!(
+            before[0].is_finite(),
+            "expected finite log_false before forcing"
+        );
         assert!(
             after[0].is_infinite() && after[0].is_sign_negative(),
             "expected -inf log_false after forcing, got {}",

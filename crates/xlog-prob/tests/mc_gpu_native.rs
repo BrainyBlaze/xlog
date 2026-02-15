@@ -70,7 +70,10 @@ query(coin()).
         host_evidence[0],
         host_counts.get(0).copied().unwrap_or(0)
     );
-    assert_eq!(host_counts.get(0).copied().unwrap_or(0) as usize, cfg.samples);
+    assert_eq!(
+        host_counts.get(0).copied().unwrap_or(0) as usize,
+        cfg.samples
+    );
 }
 
 #[test]
@@ -101,7 +104,10 @@ fn mc_eval_kernels_set_evidence_ok_without_evidence() {
         return;
     };
 
-    let mut d_query_count = provider.memory().alloc::<u32>(1).expect("alloc query count");
+    let mut d_query_count = provider
+        .memory()
+        .alloc::<u32>(1)
+        .expect("alloc query count");
     provider
         .device()
         .inner()
@@ -116,7 +122,10 @@ fn mc_eval_kernels_set_evidence_ok_without_evidence() {
         .htod_sync_copy_into(&[query_ptr], &mut d_query_ptrs)
         .expect("copy query ptrs");
 
-    let mut d_evidence_ptrs = provider.memory().alloc::<u64>(1).expect("alloc evidence ptrs");
+    let mut d_evidence_ptrs = provider
+        .memory()
+        .alloc::<u64>(1)
+        .expect("alloc evidence ptrs");
     provider
         .device()
         .inner()
@@ -208,13 +217,19 @@ fn mc_accumulate_counts_increments_on_ok() {
         .htod_sync_copy_into(&[1u8], &mut d_evidence_ok)
         .expect("copy evidence ok");
 
-    let mut d_query_counts = provider.memory().alloc::<u32>(1).expect("alloc query counts");
+    let mut d_query_counts = provider
+        .memory()
+        .alloc::<u32>(1)
+        .expect("alloc query counts");
     provider
         .device()
         .inner()
         .memset_zeros(&mut d_query_counts)
         .expect("zero query counts");
-    let mut d_evidence_count = provider.memory().alloc::<u32>(1).expect("alloc evidence count");
+    let mut d_evidence_count = provider
+        .memory()
+        .alloc::<u32>(1)
+        .expect("alloc evidence count");
     provider
         .device()
         .inner()

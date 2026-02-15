@@ -3,12 +3,12 @@ use std::sync::Arc;
 use cudarc::driver::DeviceSlice;
 use xlog_core::MemoryBudget;
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_prob::compilation::build_weights_gpu;
 use xlog_prob::compilation::{
     build_evidence_by_var_gpu, encode_cnf_gpu, map_nodes_to_vars_gpu, GpuPirGraph, GpuPirRoots,
 };
 use xlog_prob::pir::PirNode;
 use xlog_prob::provenance::extract_from_source;
-use xlog_prob::compilation::build_weights_gpu;
 
 fn try_provider() -> Option<Arc<CudaKernelProvider>> {
     let device = match CudaDevice::new(0) {
@@ -55,10 +55,7 @@ query(sprinkler()).
     let encoding = encode_cnf_gpu(&gpu_pir, &roots, &provider).unwrap();
 
     let host_nodes = [sprinkler.as_u32(), wet.as_u32(), rain.as_u32()];
-    let mut d_nodes = provider
-        .memory()
-        .alloc::<u32>(host_nodes.len())
-        .unwrap();
+    let mut d_nodes = provider.memory().alloc::<u32>(host_nodes.len()).unwrap();
     provider
         .device()
         .inner()
@@ -94,7 +91,8 @@ query(sprinkler()).
     };
     let PirNode::Lit {
         leaf: sprinkler_leaf,
-    } = provenance.pir.node(sprinkler).unwrap() else {
+    } = provenance.pir.node(sprinkler).unwrap()
+    else {
         panic!("sprinkler formula is not a leaf literal");
     };
 
@@ -132,10 +130,7 @@ query(sprinkler()).
     let encoding = encode_cnf_gpu(&gpu_pir, &roots, &provider).unwrap();
 
     let host_nodes = [wet.as_u32()];
-    let mut d_nodes = provider
-        .memory()
-        .alloc::<u32>(host_nodes.len())
-        .unwrap();
+    let mut d_nodes = provider.memory().alloc::<u32>(host_nodes.len()).unwrap();
     provider
         .device()
         .inner()

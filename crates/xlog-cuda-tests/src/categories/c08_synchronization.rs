@@ -99,7 +99,8 @@ fn test_hash_join_atomics(ctx: &TestContext) -> TestResult {
             start.elapsed(),
             format!(
                 "Join returned {} rows, expected {}",
-                ctx.device_row_count(&joined), expected_matches
+                ctx.device_row_count(&joined),
+                expected_matches
             ),
         );
     }
@@ -251,7 +252,9 @@ fn test_filter_scan_sync(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Size {}: filter returned {} rows, expected {}",
-                    size, ctx.device_row_count(&filtered), expected_count
+                    size,
+                    ctx.device_row_count(&filtered),
+                    expected_count
                 ),
             );
         }
@@ -385,7 +388,9 @@ fn test_sort_barrier_correctness(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Pattern {}: sort returned {} rows, expected {}",
-                    name, ctx.device_row_count(&sorted), size
+                    name,
+                    ctx.device_row_count(&sorted),
+                    size
                 ),
             );
         }
@@ -518,7 +523,9 @@ fn test_dedup_atomic_marking(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Pattern {}: dedup returned {} rows, expected {}",
-                    name, ctx.device_row_count(&deduped), expected_unique
+                    name,
+                    ctx.device_row_count(&deduped),
+                    expected_unique
                 ),
             );
         }
@@ -693,7 +700,10 @@ fn test_concurrent_operations(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Buffer {}: {} returned {} rows, expected {}",
-                    idx, op, ctx.device_row_count(&result), BUFFER_SIZE
+                    idx,
+                    op,
+                    ctx.device_row_count(&result),
+                    BUFFER_SIZE
                 ),
             );
         }

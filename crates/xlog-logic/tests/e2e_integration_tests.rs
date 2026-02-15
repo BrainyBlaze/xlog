@@ -45,7 +45,10 @@ fn create_test_executor() -> Option<(Executor, Arc<CudaKernelProvider>)> {
     Some((executor, provider))
 }
 
-fn device_row_count(provider: &CudaKernelProvider, rows: u64) -> xlog_cuda::memory::TrackedCudaSlice<u32> {
+fn device_row_count(
+    provider: &CudaKernelProvider,
+    rows: u64,
+) -> xlog_cuda::memory::TrackedCudaSlice<u32> {
     let rows_u32 = u32::try_from(rows).expect("row count fits u32");
     let mut d_num_rows = provider.memory().alloc::<u32>(1).expect("alloc");
     provider

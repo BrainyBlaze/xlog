@@ -10,9 +10,9 @@ use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 use xlog_gpu::logic::LogicProgram;
 use xlog_logic::compile::load_modules;
 #[cfg(feature = "host-io")]
-use xlog_prob::exact::GpuConfig;
-#[cfg(feature = "host-io")]
 use xlog_prob::exact::ExactDdnnfProgram;
+#[cfg(feature = "host-io")]
+use xlog_prob::exact::GpuConfig;
 #[cfg(feature = "host-io")]
 use xlog_prob::mc::{McEvalConfig, McProgram};
 

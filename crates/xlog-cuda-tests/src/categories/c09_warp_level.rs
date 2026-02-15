@@ -69,7 +69,9 @@ fn test_warp_size_operations(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Size {}: sort returned {} rows, expected {}",
-                    size, ctx.device_row_count(&sorted), size
+                    size,
+                    ctx.device_row_count(&sorted),
+                    size
                 ),
             );
         }
@@ -118,7 +120,9 @@ fn test_warp_size_operations(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Size {}: filter returned {} rows, expected {}",
-                    size, ctx.device_row_count(&filtered), expected_count
+                    size,
+                    ctx.device_row_count(&filtered),
+                    expected_count
                 ),
             );
         }
@@ -180,7 +184,9 @@ fn test_partial_warp_correctness(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Size {}: sort returned {} rows, expected {}",
-                    size, ctx.device_row_count(&sorted), size
+                    size,
+                    ctx.device_row_count(&sorted),
+                    size
                 ),
             );
         }
@@ -227,7 +233,9 @@ fn test_partial_warp_correctness(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Size {}: dedup returned {} rows, expected {}",
-                    size, ctx.device_row_count(&deduped), size
+                    size,
+                    ctx.device_row_count(&deduped),
+                    size
                 ),
             );
         }
@@ -556,7 +564,8 @@ fn test_warp_uniform_patterns(ctx: &TestContext) -> TestResult {
             start.elapsed(),
             format!(
                 "Dedup returned {} unique, expected {}",
-                ctx.device_row_count(&deduped), expected_unique
+                ctx.device_row_count(&deduped),
+                expected_unique
             ),
         );
     }
@@ -662,7 +671,9 @@ fn test_multi_warp_coordination(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Size {}: sort returned {} rows, expected {}",
-                    size, ctx.device_row_count(&sorted), size
+                    size,
+                    ctx.device_row_count(&sorted),
+                    size
                 ),
             );
         }
@@ -763,7 +774,9 @@ fn test_multi_warp_coordination(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Size {}: filter returned {} rows, expected {}",
-                    size, ctx.device_row_count(&filtered), expected_count
+                    size,
+                    ctx.device_row_count(&filtered),
+                    expected_count
                 ),
             );
         }

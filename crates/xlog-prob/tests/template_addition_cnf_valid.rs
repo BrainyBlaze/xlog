@@ -203,9 +203,7 @@ fn validate_dimacs_host(
     if offsets[nc as usize] != nl {
         return Err(format!(
             "offsets[nc] != nl (offsets[{}]={}, nl={})",
-            nc,
-            offsets[nc as usize],
-            nl
+            nc, offsets[nc as usize], nl
         ));
     }
 
@@ -333,10 +331,7 @@ fn template_addition_cnf_is_valid_dimacs() {
             continue;
         }
         if node_vars.get(i).copied().unwrap_or(0) == 0 {
-            panic!(
-                "reachable node_var is zero: node {} tag={:?}",
-                i, node
-            );
+            panic!("reachable node_var is zero: node {} tag={:?}", i, node);
         }
         match node {
             PirNode::And { children } | PirNode::Or { children } => {
@@ -393,14 +388,13 @@ fn template_addition_cnf_is_valid_dimacs() {
     let nc = num_clauses[0];
     let nl = num_lits[0];
 
-    let offsets_view = encoding
-        .cnf
-        .clause_offsets
-        .slice(0..(nc as usize + 1));
+    let offsets_view = encoding.cnf.clause_offsets.slice(0..(nc as usize + 1));
     let lits_view = encoding.cnf.literals.slice(0..(nl as usize));
     let mut offsets = vec![0u32; (nc as usize) + 1];
     let mut lits = vec![0i32; nl as usize];
-    device.dtoh_sync_copy_into(&offsets_view, &mut offsets).unwrap();
+    device
+        .dtoh_sync_copy_into(&offsets_view, &mut offsets)
+        .unwrap();
     device.dtoh_sync_copy_into(&lits_view, &mut lits).unwrap();
 
     if let Err(msg) = validate_dimacs_host(

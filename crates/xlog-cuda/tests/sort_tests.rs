@@ -134,11 +134,7 @@ fn test_sort_respects_device_row_count_after_filter() {
         .unwrap();
 
     let mask: Vec<u8> = vec![0, 1, 1];
-    let d_mask = provider
-        .device()
-        .inner()
-        .htod_sync_copy(&mask)
-        .unwrap();
+    let d_mask = provider.device().inner().htod_sync_copy(&mask).unwrap();
     let filtered = provider.filter_by_device_mask(&buffer, &d_mask).unwrap();
 
     let filtered_vals = provider.download_column_u32(&filtered, 0).unwrap();

@@ -44,9 +44,9 @@ pub fn build_evidence_by_var_gpu(
     let memory = provider.memory();
     let device = provider.device().inner();
     let mut evidence_by_var = memory.alloc::<u8>(len)?;
-    device.memset_zeros(&mut evidence_by_var).map_err(|e| {
-        XlogError::Kernel(format!("Failed to zero evidence buffer: {}", e))
-    })?;
+    device
+        .memset_zeros(&mut evidence_by_var)
+        .map_err(|e| XlogError::Kernel(format!("Failed to zero evidence buffer: {}", e)))?;
 
     let count = evidence_nodes.len();
     if count == 0 {
@@ -54,7 +54,10 @@ pub fn build_evidence_by_var_gpu(
     }
 
     let func = device
-        .get_func(WEIGHTS_MODULE, weights_kernels::WEIGHTS_SET_EVIDENCE_FROM_NODES)
+        .get_func(
+            WEIGHTS_MODULE,
+            weights_kernels::WEIGHTS_SET_EVIDENCE_FROM_NODES,
+        )
         .ok_or_else(|| {
             XlogError::Kernel("weights_set_evidence_from_nodes kernel not found".to_string())
         })?;
@@ -112,13 +115,7 @@ pub fn map_nodes_to_vars_gpu(
                 block_dim: (block, 1, 1),
                 shared_mem_bytes: 0,
             },
-            (
-                node_var,
-                node_ids,
-                count as u32,
-                var_cap,
-                &mut out,
-            ),
+            (node_var, node_ids, count as u32, var_cap, &mut out),
         )
     }
     .map_err(|e| XlogError::Kernel(format!("weights_map_nodes_to_vars failed: {}", e)))?;
@@ -280,12 +277,12 @@ pub fn build_weights_gpu(
     let mut log_false = memory.alloc::<f64>(weights_len)?;
 
     // Initialize to 0.0
-    device.memset_zeros(&mut log_true).map_err(|e| {
-        XlogError::Kernel(format!("Failed to zero log_true weights: {}", e))
-    })?;
-    device.memset_zeros(&mut log_false).map_err(|e| {
-        XlogError::Kernel(format!("Failed to zero log_false weights: {}", e))
-    })?;
+    device
+        .memset_zeros(&mut log_true)
+        .map_err(|e| XlogError::Kernel(format!("Failed to zero log_true weights: {}", e)))?;
+    device
+        .memset_zeros(&mut log_false)
+        .map_err(|e| XlogError::Kernel(format!("Failed to zero log_false weights: {}", e)))?;
 
     let block = 256u32;
 
@@ -343,7 +340,9 @@ pub fn build_weights_gpu(
     if evidence_by_var.len() > 0 {
         let func = device
             .get_func(WEIGHTS_MODULE, weights_kernels::WEIGHTS_APPLY_EVIDENCE)
-            .ok_or_else(|| XlogError::Kernel("weights_apply_evidence kernel not found".to_string()))?;
+            .ok_or_else(|| {
+                XlogError::Kernel("weights_apply_evidence kernel not found".to_string())
+            })?;
         let grid = grid_for(var_cap + 1, block);
         unsafe {
             func.clone().launch(
@@ -360,7 +359,10 @@ pub fn build_weights_gpu(
 
     provider.device().synchronize()?;
 
-    Ok(GpuWeights { log_true, log_false })
+    Ok(GpuWeights {
+        log_true,
+        log_false,
+    })
 }
 
 pub fn upload_weights_from_host(
@@ -386,5 +388,8 @@ pub fn upload_weights_from_host(
         .htod_sync_copy_into(&host_false, &mut log_false)
         .map_err(|e| XlogError::Kernel(format!("Upload log_false weights failed: {}", e)))?;
 
-    Ok(GpuWeights { log_true, log_false })
+    Ok(GpuWeights {
+        log_true,
+        log_false,
+    })
 }

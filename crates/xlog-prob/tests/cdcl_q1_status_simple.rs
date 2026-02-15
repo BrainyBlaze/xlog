@@ -3,7 +3,8 @@ use std::sync::Arc;
 use xlog_core::MemoryBudget;
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 use xlog_prob::compilation::{
-    build_equivalence_queries_gpu, encode_cnf_gpu, gpu_d4, GpuCompileConfig, GpuPirGraph, GpuPirRoots,
+    build_equivalence_queries_gpu, encode_cnf_gpu, gpu_d4, GpuCompileConfig, GpuPirGraph,
+    GpuPirRoots,
 };
 use xlog_prob::provenance::extract_from_source;
 use xlog_solve::{GpuCdclConfig, GpuCdclSolver};
@@ -27,7 +28,10 @@ fn try_provider() -> Option<Arc<CudaKernelProvider>> {
     }
 }
 
-fn default_compile_config_for_test(cnf: &xlog_solve::GpuCnf, memory_bytes: u64) -> xlog_core::Result<GpuCompileConfig> {
+fn default_compile_config_for_test(
+    cnf: &xlog_solve::GpuCnf,
+    memory_bytes: u64,
+) -> xlog_core::Result<GpuCompileConfig> {
     // Keep in sync with `ExactDdnnfProgram::default_compile_config` (private) for parity with
     // production exact inference.
     let frontier_depth: u16 = 6;
@@ -39,9 +43,7 @@ fn default_compile_config_for_test(cnf: &xlog_solve::GpuCnf, memory_bytes: u64) 
         .ok_or_else(|| xlog_core::XlogError::Compilation("trail size overflow".to_string()))?;
     let denom = trail_bytes_per_item.saturating_mul(8).max(1);
     let max_items_by_trail = memory_bytes / denom;
-    let max_frontier_items = max_items_by_trail
-        .clamp(8, 4096)
-        .min(u64::from(u32::MAX)) as u32;
+    let max_frontier_items = max_items_by_trail.clamp(8, 4096).min(u64::from(u32::MAX)) as u32;
 
     let frontier_cap_factor = (1u64
         .checked_shl(frontier_depth as u32)
@@ -118,9 +120,9 @@ fn cdcl_config_from_compile(config: &GpuCompileConfig) -> xlog_core::Result<GpuC
         ));
     }
 
-    let max_lits = max_clauses
-        .checked_mul(AVG_LEN)
-        .ok_or_else(|| xlog_core::XlogError::Compilation("max_learned_lits overflow".to_string()))?;
+    let max_lits = max_clauses.checked_mul(AVG_LEN).ok_or_else(|| {
+        xlog_core::XlogError::Compilation("max_learned_lits overflow".to_string())
+    })?;
     let max_proof_u32 = max_clauses
         .checked_mul(2 + 2 * AVG_LEN)
         .ok_or_else(|| xlog_core::XlogError::Compilation("max_proof_u32 overflow".to_string()))?;
@@ -138,7 +140,9 @@ fn cdcl_config_from_compile(config: &GpuCompileConfig) -> xlog_core::Result<GpuC
     let reduce_interval = config
         .cdcl_restart_interval
         .checked_mul(20)
-        .ok_or_else(|| xlog_core::XlogError::Compilation("cdcl reduce_interval overflow".to_string()))?;
+        .ok_or_else(|| {
+            xlog_core::XlogError::Compilation("cdcl reduce_interval overflow".to_string())
+        })?;
 
     Ok(GpuCdclConfig {
         max_learned_clauses,
@@ -164,13 +168,18 @@ query(q()).
     let provenance = extract_from_source(source).expect("extract provenance");
 
     // Mirror `ExactDdnnfProgram::compile_provenance_with_gpu`: roots are all query formulas.
-    let p = provenance.query_formula("p", &[]).expect("p() query formula");
-    let q = provenance.query_formula("q", &[]).expect("q() query formula");
+    let p = provenance
+        .query_formula("p", &[])
+        .expect("p() query formula");
+    let q = provenance
+        .query_formula("q", &[])
+        .expect("q() query formula");
     let gpu_pir = GpuPirGraph::from_host(&provenance.pir, &provider).expect("upload pir");
     let gpu_roots = GpuPirRoots::from_host(&[p, q], &provider).expect("upload roots");
     let encoding = encode_cnf_gpu(&gpu_pir, &gpu_roots, &provider).expect("encode cnf");
 
-    let compile = default_compile_config_for_test(&encoding.cnf, 1024 * 1024 * 1024).expect("compile config");
+    let compile =
+        default_compile_config_for_test(&encoding.cnf, 1024 * 1024 * 1024).expect("compile config");
     let cdcl = cdcl_config_from_compile(&compile).expect("cdcl config");
 
     let mut compile_needed = provider
@@ -246,7 +255,11 @@ query(q()).
         .dtoh_sync_copy_into(&raw.out_error, &mut error_host)
         .expect("read out_error");
 
-    assert_eq!(error_host[0], 0, "expected q1 out_error=0, got {}", error_host[0]);
+    assert_eq!(
+        error_host[0], 0,
+        "expected q1 out_error=0, got {}",
+        error_host[0]
+    );
     assert_eq!(
         status_host[0], 0,
         "expected q1 UNSAT (status=0), got status={} error={}",

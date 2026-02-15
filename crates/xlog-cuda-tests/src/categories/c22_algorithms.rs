@@ -344,7 +344,11 @@ fn test_sort_all_equal(ctx: &TestContext) -> TestResult {
         return TestResult::error(
             "test_sort_all_equal",
             start.elapsed(),
-            format!("Sort returned {} rows, expected {}", ctx.device_row_count(&sorted), SIZE),
+            format!(
+                "Sort returned {} rows, expected {}",
+                ctx.device_row_count(&sorted),
+                SIZE
+            ),
         );
     }
 
@@ -777,7 +781,10 @@ fn test_join_all_matches(ctx: &TestContext) -> TestResult {
             start.elapsed(),
             format!(
                 "Join should produce {} rows ({}x{}), got {}",
-                expected_rows, LEFT_SIZE, RIGHT_SIZE, ctx.device_row_count(&joined)
+                expected_rows,
+                LEFT_SIZE,
+                RIGHT_SIZE,
+                ctx.device_row_count(&joined)
             ),
         );
     }
@@ -938,7 +945,8 @@ fn test_join_high_cardinality(ctx: &TestContext) -> TestResult {
             start.elapsed(),
             format!(
                 "Join should produce {} rows, got {}",
-                expected_matches, ctx.device_row_count(&joined)
+                expected_matches,
+                ctx.device_row_count(&joined)
             ),
         );
     }
@@ -1091,7 +1099,8 @@ fn test_dedup_all_unique(ctx: &TestContext) -> TestResult {
             start.elapsed(),
             format!(
                 "Dedup should return all {} rows when all unique, got {}",
-                SIZE, ctx.device_row_count(&deduped)
+                SIZE,
+                ctx.device_row_count(&deduped)
             ),
         );
     }

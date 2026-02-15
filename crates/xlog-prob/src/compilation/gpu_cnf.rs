@@ -64,9 +64,8 @@ pub fn encode_cnf_gpu(
 
     let num_nodes_u32 = u32::try_from(num_nodes)
         .map_err(|_| XlogError::Compilation("PIR node count overflow".to_string()))?;
-    let num_roots_u32 = u32::try_from(roots.roots.len()).map_err(|_| {
-        XlogError::Compilation("PIR root count exceeds u32::MAX".to_string())
-    })?;
+    let num_roots_u32 = u32::try_from(roots.roots.len())
+        .map_err(|_| XlogError::Compilation("PIR root count exceeds u32::MAX".to_string()))?;
 
     let num_edges = pir.children.len();
     let n64 = num_nodes as u64;
@@ -85,16 +84,16 @@ pub fn encode_cnf_gpu(
         .ok_or_else(|| XlogError::Kernel("CNF clause capacity overflow".to_string()))?,
     )
     .map_err(|_| XlogError::Kernel("CNF clause capacity exceeds u32::MAX".to_string()))?;
-    let lit_cap = u32::try_from(
-        e64.checked_mul(3)
-            .ok_or_else(|| XlogError::Kernel("CNF literal capacity overflow".to_string()))?
-            .checked_add(
-                n64.checked_mul(12)
-                    .ok_or_else(|| XlogError::Kernel("CNF literal capacity overflow".to_string()))?,
-            )
-            .ok_or_else(|| XlogError::Kernel("CNF literal capacity overflow".to_string()))?,
-    )
-    .map_err(|_| XlogError::Kernel("CNF literal capacity exceeds u32::MAX".to_string()))?;
+    let lit_cap =
+        u32::try_from(
+            e64.checked_mul(3)
+                .ok_or_else(|| XlogError::Kernel("CNF literal capacity overflow".to_string()))?
+                .checked_add(n64.checked_mul(12).ok_or_else(|| {
+                    XlogError::Kernel("CNF literal capacity overflow".to_string())
+                })?)
+                .ok_or_else(|| XlogError::Kernel("CNF literal capacity overflow".to_string()))?,
+        )
+        .map_err(|_| XlogError::Kernel("CNF literal capacity exceeds u32::MAX".to_string()))?;
 
     let leaf_cap = num_nodes_u32;
     let choice_cap = num_nodes_u32;
@@ -333,9 +332,7 @@ pub fn encode_cnf_gpu(
             ),
         )
     }
-    .map_err(|e| {
-        XlogError::Kernel(format!("cnf_compute_leaf_choice_totals failed: {}", e))
-    })?;
+    .map_err(|e| XlogError::Kernel(format!("cnf_compute_leaf_choice_totals failed: {}", e)))?;
 
     if leaf_cap > 0 {
         let grid_leaf = grid_dim(leaf_cap, block);
@@ -379,7 +376,12 @@ pub fn encode_cnf_gpu(
                 block_dim: (block, 1, 1),
                 shared_mem_bytes: 0,
             },
-            (&pir.node_type, &reachable, num_nodes_u32, &mut node_needs_var),
+            (
+                &pir.node_type,
+                &reachable,
+                num_nodes_u32,
+                &mut node_needs_var,
+            ),
         )
     }
     .map_err(|e| XlogError::Kernel(format!("cnf_mark_node_vars failed: {}", e)))?;

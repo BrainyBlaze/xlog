@@ -136,7 +136,9 @@ fn test_cache_line_access(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Size {}: filter expected {} rows, got {}",
-                    size, expected_count, ctx.device_row_count(&filtered)
+                    size,
+                    expected_count,
+                    ctx.device_row_count(&filtered)
                 ),
             );
         }
@@ -318,7 +320,9 @@ fn test_cache_reuse(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Filter iteration {}: expected {} rows, got {}",
-                    i, expected_count, ctx.device_row_count(&filtered)
+                    i,
+                    expected_count,
+                    ctx.device_row_count(&filtered)
                 ),
             );
         }
@@ -365,7 +369,8 @@ fn test_cache_reuse(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Dedup iteration {}: expected 1000 rows, got {}",
-                    i, ctx.device_row_count(&deduped)
+                    i,
+                    ctx.device_row_count(&deduped)
                 ),
             );
         }
@@ -562,7 +567,8 @@ fn test_cache_thrashing(ctx: &TestContext) -> TestResult {
             start.elapsed(),
             format!(
                 "Large filter: expected {} rows, got {}",
-                expected_count, ctx.device_row_count(&filtered)
+                expected_count,
+                ctx.device_row_count(&filtered)
             ),
         );
     }
@@ -800,7 +806,8 @@ fn test_memory_locality(ctx: &TestContext) -> TestResult {
             start.elapsed(),
             format!(
                 "Alternating filter: expected {} rows, got {}",
-                expected_alt, ctx.device_row_count(&filtered_alt)
+                expected_alt,
+                ctx.device_row_count(&filtered_alt)
             ),
         );
     }
@@ -827,7 +834,8 @@ fn test_memory_locality(ctx: &TestContext) -> TestResult {
             start.elapsed(),
             format!(
                 "Sparse filter: expected {} rows, got {}",
-                expected_sparse, ctx.device_row_count(&filtered_sparse)
+                expected_sparse,
+                ctx.device_row_count(&filtered_sparse)
             ),
         );
     }
@@ -1067,7 +1075,9 @@ fn test_l2_cache_effects(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Interleaved {}: small has {} rows, expected {}",
-                    i, ctx.device_row_count(&small_sorted), SMALL_SIZE
+                    i,
+                    ctx.device_row_count(&small_sorted),
+                    SMALL_SIZE
                 ),
             );
         }
@@ -1078,7 +1088,9 @@ fn test_l2_cache_effects(ctx: &TestContext) -> TestResult {
                 start.elapsed(),
                 format!(
                     "Interleaved {}: medium has {} rows, expected {}",
-                    i, ctx.device_row_count(&medium_sorted), MEDIUM_SIZE
+                    i,
+                    ctx.device_row_count(&medium_sorted),
+                    MEDIUM_SIZE
                 ),
             );
         }

@@ -10,8 +10,8 @@ use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 
 use crate::compilation::gpu_cache::{GpuCircuitCache, GpuCircuitCacheHandle};
 use crate::compilation::gpu_weights::{
-    apply_query_vars_device, build_evidence_by_var_gpu, build_weights_gpu,
-    map_nodes_to_vars_gpu, restore_query_vars_device, GpuWeights,
+    apply_query_vars_device, build_evidence_by_var_gpu, build_weights_gpu, map_nodes_to_vars_gpu,
+    restore_query_vars_device, GpuWeights,
 };
 use crate::compilation::{
     compile_gpu_d4_and_verify_cached, encode_cnf_gpu, DeviceRandomVarList, GpuPirGraph, GpuPirRoots,
@@ -83,9 +83,7 @@ impl ExactGpuState {
         &self.queries
     }
 
-    pub fn allocate_query_restore(
-        &self,
-    ) -> Result<Option<TrackedCudaSlice<f64>>> {
+    pub fn allocate_query_restore(&self) -> Result<Option<TrackedCudaSlice<f64>>> {
         let Some(provider) = self.provider.as_ref() else {
             return Ok(None);
         };
@@ -202,8 +200,7 @@ pub fn compile_provenance_gpu_only(
         )));
     }
 
-    let (leaf_probs_host, choice_true_host, choice_false_host) =
-        build_weight_sources(provenance)?;
+    let (leaf_probs_host, choice_true_host, choice_false_host) = build_weight_sources(provenance)?;
     let leaf_probs = upload_f64(&provider, &leaf_probs_host)?;
     let choice_true = upload_f64(&provider, &choice_true_host)?;
     let choice_false = upload_f64(&provider, &choice_false_host)?;
@@ -251,8 +248,7 @@ pub fn compile_provenance_gpu_only(
         .ok_or_else(|| XlogError::Compilation("random var count overflow".to_string()))?;
     let random_var_count = u32::try_from(random_var_count)
         .map_err(|_| XlogError::Compilation("random var count exceeds u32".to_string()))?;
-    let random_var_list =
-        collect_random_vars_device(&provider, &encoding.vars, random_var_count)?;
+    let random_var_list = collect_random_vars_device(&provider, &encoding.vars, random_var_count)?;
     let random_vars = DeviceRandomVarList::from_device(random_var_list, random_var_count)?;
     let compile_config = default_compile_config(&encoding.cnf, config.memory_bytes)?;
     let cache_config = default_cache_config(&encoding.cnf, &compile_config)?;

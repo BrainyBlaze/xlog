@@ -3,12 +3,12 @@ use std::sync::Arc;
 use cudarc::driver::DeviceSlice;
 use xlog_core::MemoryBudget;
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
-use xlog_prob::compilation::{
-    compile_gpu_d4_and_verify, encode_cnf_gpu, DeviceRandomVarList, GpuCompileConfig,
-    GpuPirGraph, GpuPirRoots, map_nodes_to_vars_gpu,
-};
-use xlog_prob::compilation::gpu_d4::compute_free_var_mask_gpu;
 use xlog_prob::compilation::gpu_cache::{GpuCircuitCache, GpuCircuitCacheConfig};
+use xlog_prob::compilation::gpu_d4::compute_free_var_mask_gpu;
+use xlog_prob::compilation::{
+    compile_gpu_d4_and_verify, encode_cnf_gpu, map_nodes_to_vars_gpu, DeviceRandomVarList,
+    GpuCompileConfig, GpuPirGraph, GpuPirRoots,
+};
 use xlog_prob::provenance::extract_from_source;
 
 fn try_provider() -> Option<Arc<CudaKernelProvider>> {
@@ -97,9 +97,13 @@ query(sprinkler()).
         base_config.smooth_node_cap = base_config.smooth_node_cap.checked_sub(headroom).unwrap();
     }
 
-    let mut circuit =
-        compile_gpu_d4_and_verify(&encoding.cnf, &encoding.decision_var_limit, &provider, &base_config)
-            .unwrap();
+    let mut circuit = compile_gpu_d4_and_verify(
+        &encoding.cnf,
+        &encoding.decision_var_limit,
+        &provider,
+        &base_config,
+    )
+    .unwrap();
     if !random_vars_device.is_empty() {
         circuit = circuit
             .smooth_random_vars_device(
@@ -151,7 +155,10 @@ query(sprinkler()).
         .dtoh_sync_copy_into(&free_mask, &mut mask_host)
         .unwrap();
 
-    assert_eq!(mask_host[sprinkler_var as usize], 0, "sprinkler var marked free");
+    assert_eq!(
+        mask_host[sprinkler_var as usize], 0,
+        "sprinkler var marked free"
+    );
 }
 
 #[test]
@@ -190,8 +197,13 @@ query(dry()).
         .inner()
         .htod_sync_copy_into(&[dry.as_u32()], &mut node_ids_device)
         .unwrap();
-    let mapped = map_nodes_to_vars_gpu(&encoding.vars.node_var, &node_ids_device, encoding.vars.max_var, &provider)
-        .unwrap();
+    let mapped = map_nodes_to_vars_gpu(
+        &encoding.vars.node_var,
+        &node_ids_device,
+        encoding.vars.max_var,
+        &provider,
+    )
+    .unwrap();
     let mut mapped_host = [0u32];
     provider
         .device()
@@ -276,9 +288,13 @@ query(dry()).
         base_config.smooth_node_cap = base_config.smooth_node_cap.checked_sub(headroom).unwrap();
     }
 
-    let mut circuit =
-        compile_gpu_d4_and_verify(&encoding.cnf, &encoding.decision_var_limit, &provider, &base_config)
-            .unwrap();
+    let mut circuit = compile_gpu_d4_and_verify(
+        &encoding.cnf,
+        &encoding.decision_var_limit,
+        &provider,
+        &base_config,
+    )
+    .unwrap();
     if !random_vars_device.is_empty() {
         circuit = circuit
             .smooth_random_vars_device(
@@ -387,9 +403,13 @@ query(dry()).
         base_config.smooth_node_cap = base_config.smooth_node_cap.checked_sub(headroom).unwrap();
     }
 
-    let mut circuit =
-        compile_gpu_d4_and_verify(&encoding.cnf, &encoding.decision_var_limit, &provider, &base_config)
-            .unwrap();
+    let mut circuit = compile_gpu_d4_and_verify(
+        &encoding.cnf,
+        &encoding.decision_var_limit,
+        &provider,
+        &base_config,
+    )
+    .unwrap();
     if !random_vars_device.is_empty() {
         circuit = circuit
             .smooth_random_vars_device(
@@ -516,9 +536,13 @@ query(dry()).
         base_config.smooth_node_cap = base_config.smooth_node_cap.checked_sub(headroom).unwrap();
     }
 
-    let mut circuit =
-        compile_gpu_d4_and_verify(&encoding.cnf, &encoding.decision_var_limit, &provider, &base_config)
-            .unwrap();
+    let mut circuit = compile_gpu_d4_and_verify(
+        &encoding.cnf,
+        &encoding.decision_var_limit,
+        &provider,
+        &base_config,
+    )
+    .unwrap();
     if !random_vars_device.is_empty() {
         circuit = circuit
             .smooth_random_vars_device(

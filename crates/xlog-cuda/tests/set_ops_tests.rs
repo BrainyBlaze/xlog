@@ -18,7 +18,10 @@ fn setup_provider() -> Option<CudaKernelProvider> {
     Some(CudaKernelProvider::new(device, memory).unwrap())
 }
 
-fn device_row_count(provider: &CudaKernelProvider, rows: u32) -> xlog_cuda::memory::TrackedCudaSlice<u32> {
+fn device_row_count(
+    provider: &CudaKernelProvider,
+    rows: u32,
+) -> xlog_cuda::memory::TrackedCudaSlice<u32> {
     let mut d_num_rows = provider.memory().alloc::<u32>(1).expect("alloc");
     provider
         .device()
@@ -52,7 +55,10 @@ fn buffer_with_row_cap(
     schema: Schema,
 ) -> CudaBuffer {
     assert!(row_cap as usize >= data.len(), "row_cap must fit data");
-    assert!(actual_rows as u64 <= row_cap, "actual_rows must be <= row_cap");
+    assert!(
+        actual_rows as u64 <= row_cap,
+        "actual_rows must be <= row_cap"
+    );
 
     let mut bytes = Vec::with_capacity((row_cap as usize) * 4);
     for &v in data {

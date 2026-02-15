@@ -1,13 +1,13 @@
 //! Test context and provider setup for CUDA certification tests.
 
-use std::sync::{Arc, Mutex, OnceLock};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::{fs::OpenOptions, path::Path};
+use cudarc::driver::{result, sys};
+use cudarc::driver::{DevicePtr, DevicePtrMut, DeviceRepr};
 use fs2::FileExt;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::{fs::OpenOptions, path::Path};
 use xlog_core::{MemoryBudget, Result, XlogError};
 use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager};
-use cudarc::driver::{DevicePtr, DevicePtrMut, DeviceRepr};
-use cudarc::driver::{result, sys};
 
 #[derive(Default)]
 struct TransferCounters {
@@ -54,9 +54,8 @@ fn gpu_test_lock_file() -> Result<std::fs::File> {
         .write(true)
         .open(path)
         .map_err(|e| XlogError::Kernel(format!("Failed to open GPU test lock file: {}", e)))?;
-    file.lock_exclusive().map_err(|e| {
-        XlogError::Kernel(format!("Failed to acquire GPU test lock file: {}", e))
-    })?;
+    file.lock_exclusive()
+        .map_err(|e| XlogError::Kernel(format!("Failed to acquire GPU test lock file: {}", e)))?;
     Ok(file)
 }
 
@@ -216,8 +215,9 @@ impl TestContext {
                 .map_err(|e| XlogError::Kernel(format!("Failed to record end event: {}", e)))?;
         }
         self.sync_and_check()?;
-        let elapsed = unsafe { result::event::elapsed(start, end) }
-            .map_err(|e| XlogError::Kernel(format!("Failed to measure event elapsed time: {}", e)))?;
+        let elapsed = unsafe { result::event::elapsed(start, end) }.map_err(|e| {
+            XlogError::Kernel(format!("Failed to measure event elapsed time: {}", e))
+        })?;
         unsafe {
             result::event::destroy(start)
                 .map_err(|e| XlogError::Kernel(format!("Failed to destroy start event: {}", e)))?;
