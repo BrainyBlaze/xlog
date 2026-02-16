@@ -1,0 +1,75 @@
+{
+  "track": "A",
+  "run_id": "20260216T145409Z_track_a_dev",
+  "seed_policy": {
+    "01_minimal": [
+      42
+    ],
+    "default": [
+      7,
+      42,
+      123
+    ]
+  },
+  "examples": {
+    "01_minimal": {
+      "metric_name": "heldout_addition_acc",
+      "n": 0,
+      "mean": null,
+      "std": null,
+      "min": null,
+      "max": null
+    },
+    "02_coins": {
+      "metric_name": "test_acc",
+      "n": 3,
+      "mean": 0.4167,
+      "std": 0.1179,
+      "min": 0.25,
+      "max": 0.5
+    },
+    "03_mnist_multidigit": {
+      "metric_name": "eval_joint_proxy",
+      "n": 3,
+      "mean": 0.4972,
+      "std": 0.0116,
+      "min": 0.4817,
+      "max": 0.5098
+    },
+    "04_hwf": {
+      "metric_name": "eval_acc",
+      "n": 3,
+      "mean": 0.8667,
+      "std": 0.0189,
+      "min": 0.84,
+      "max": 0.88
+    },
+    "05_poker": {
+      "metric_name": "eval_joint_proxy",
+      "n": 3,
+      "mean": 0.1769,
+      "std": 0.0103,
+      "min": 0.1684,
+      "max": 0.1913
+    },
+    "06_clutrr": {
+      "metric_name": "eval_acc",
+      "n": 3,
+      "mean": 0.6908,
+      "std": 0.0071,
+      "min": 0.6821,
+      "max": 0.6994
+    }
+  },
+  "notes": [
+    "Track A hardware is not RTX 3090; timing is provisional.",
+    "Scallop comparison deferred (not installed).",
+    "Data completeness for 02/03/04 is provisional.",
+    "01_minimal runs 1 seed only (XLOG engine compile overhead)."
+  ],
+  "handoff_flags": {
+    "hardware_reference_compliant": false,
+    "scallop_comparison_complete": false,
+    "dataset_finalized": false
+  }
+}

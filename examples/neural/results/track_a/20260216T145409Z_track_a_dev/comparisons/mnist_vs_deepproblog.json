@@ -1,0 +1,14 @@
+{
+  "xlog_track_a": {
+    "metric_name": "heldout_addition_acc",
+    "mean": null,
+    "std": null,
+    "n": 0
+  },
+  "deepproblog_reference": {
+    "source": "docs/reports/2026-02-10-deepproblog-baseline-gpu-sequential.md",
+    "note": "Values to be extracted from baseline report"
+  },
+  "protocol_match": false,
+  "comparison_scope": "provisional"
+}

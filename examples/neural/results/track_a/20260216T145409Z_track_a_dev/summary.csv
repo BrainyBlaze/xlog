@@ -1,0 +1,17 @@
+run_id,example,seed,status,exit_code,duration_sec,metric_name,metric_value,metric_threshold,gate_pass
+20260216T145409Z_track_a_dev,01_minimal,42,timeout,-1,5400.23,heldout_addition_acc,,,
+20260216T145409Z_track_a_dev,02_coins,7,ok,0,5.08,test_acc,0.5,,True
+20260216T145409Z_track_a_dev,02_coins,42,ok,0,2.8,test_acc,0.5,,True
+20260216T145409Z_track_a_dev,02_coins,123,ok,0,2.89,test_acc,0.25,,True
+20260216T145409Z_track_a_dev,03_mnist_multidigit,7,ok,0,45.71,eval_joint_proxy,0.5,,True
+20260216T145409Z_track_a_dev,03_mnist_multidigit,42,ok,0,46.91,eval_joint_proxy,0.5098,,True
+20260216T145409Z_track_a_dev,03_mnist_multidigit,123,ok,0,45.6,eval_joint_proxy,0.4817,,True
+20260216T145409Z_track_a_dev,04_hwf,7,ok,0,3.83,eval_acc,0.84,,True
+20260216T145409Z_track_a_dev,04_hwf,42,ok,0,4.29,eval_acc,0.88,,True
+20260216T145409Z_track_a_dev,04_hwf,123,ok,0,3.84,eval_acc,0.88,,True
+20260216T145409Z_track_a_dev,05_poker,7,ok,0,199.6,eval_joint_proxy,0.1684,,True
+20260216T145409Z_track_a_dev,05_poker,42,ok,0,182.62,eval_joint_proxy,0.1913,,True
+20260216T145409Z_track_a_dev,05_poker,123,ok,0,187.53,eval_joint_proxy,0.1709,,True
+20260216T145409Z_track_a_dev,06_clutrr,7,ok,0,24.19,eval_acc,0.6994,,True
+20260216T145409Z_track_a_dev,06_clutrr,42,ok,0,25.18,eval_acc,0.6908,,True
+20260216T145409Z_track_a_dev,06_clutrr,123,ok,0,24.37,eval_acc,0.6821,,True

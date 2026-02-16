@@ -1,0 +1,32 @@
+{
+  "track": "A",
+  "run_id": "20260216T145409Z_track_a_dev",
+  "example": "05_poker",
+  "seed": 123,
+  "status": "ok",
+  "exit_code": 0,
+  "duration_sec": 187.53,
+  "command": "/home/dev/projects/xlog/.venv/bin/python examples/neural/05_poker/train.py --mode dev --epochs 20 --batch-size 16 --lr 1e-3 --seed 123 --eval-ratio 0.1 --rank-query-weight 1",
+  "metric": {
+    "name": "eval_joint_proxy",
+    "value": 0.1709,
+    "threshold": null
+  },
+  "dataset": {
+    "manifest_path": "examples/neural/05_poker/dataset.json",
+    "manifest_sha256": "0252fe5b437d4836a0fd37bfde64a4ed4f0cccba81e3f9f5dc1c83c62be50fe6",
+    "completeness": "provisional"
+  },
+  "environment": {
+    "python": "3.10.12",
+    "torch": "2.10.0+cu128",
+    "pyxlog": "0.4.0",
+    "gpu_name": "NVIDIA RTX PRO 3000 Blackwell Generation Laptop GPU",
+    "driver": "573.71",
+    "cuda_visible": true
+  },
+  "git": {
+    "branch": "v0.4.0-alpha-integrated",
+    "commit": "b29b8473f2032a78bb45df828f617267e21bd260"
+  }
+}
