@@ -65,7 +65,7 @@
     "Track A hardware is not RTX 3090; timing is provisional.",
     "Scallop comparison deferred (not installed).",
     "Data completeness for 02/03/04 is provisional.",
-    "01_minimal runs 1 seed only (XLOG engine compile overhead)."
+    "01_minimal runs 1 seed only (per-query host sync overhead in forward_backward)."
   ],
   "handoff_flags": {
     "hardware_reference_compliant": false,

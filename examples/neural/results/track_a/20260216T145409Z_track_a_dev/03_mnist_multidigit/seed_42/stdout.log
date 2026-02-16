@@ -1,0 +1,2 @@
+train_left_acc=0.5894 train_right_acc=0.6113 eval_left_acc=0.5012 eval_right_acc=0.5183 eval_joint_proxy=0.5098 epochs=12
+FINAL_METRIC: eval_joint_proxy=0.5098, threshold=none

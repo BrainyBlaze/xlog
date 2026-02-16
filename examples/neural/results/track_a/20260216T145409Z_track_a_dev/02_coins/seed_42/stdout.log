@@ -1,0 +1,2 @@
+train_acc=0.5833 test_acc=0.5000 epochs=12
+FINAL_METRIC: test_acc=0.5000, threshold=none

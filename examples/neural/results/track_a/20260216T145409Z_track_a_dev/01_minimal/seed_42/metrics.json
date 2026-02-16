@@ -5,8 +5,8 @@
   "seed": 42,
   "status": "timeout",
   "exit_code": -1,
-  "duration_sec": 5400.23,
-  "command": "/home/dev/projects/xlog/.venv/bin/python examples/neural/01_minimal/train.py --engine xlog --epochs 12 --batch-size 64 --seed 42 --data-path examples/neural/01_minimal/data/mnist --save-path /home/dev/projects/xlog/.worktrees/v0.4.0-alpha-integrated/examples/neural/results/track_a/20260216T145409Z_track_a_dev/01_minimal/seed_42/mnist_net.pt",
+  "duration_sec": 3600.22,
+  "command": "/home/dev/projects/xlog/.venv/bin/python examples/neural/01_minimal/train.py --engine xlog --epochs 5 --batch-size 64 --seed 42 --train-limit 512 --data-path examples/neural/01_minimal/data/mnist --save-path /home/dev/projects/xlog/.worktrees/v0.4.0-alpha-integrated/examples/neural/results/track_a/20260216T145409Z_track_a_dev/01_minimal/seed_42/mnist_net.pt",
   "metric": {
     "name": "heldout_addition_acc",
     "value": null,
@@ -14,7 +14,7 @@
   },
   "dataset": {
     "manifest_path": "examples/neural/01_minimal/dataset.json",
-    "manifest_sha256": "file_not_found",
+    "manifest_sha256": "9e1d51d43a917b395da4fd339f82582c5ac97420fe14f5113906b74910390f3e",
     "completeness": "provisional"
   },
   "environment": {

@@ -1,0 +1,2 @@
+train_rank_acc=0.1287 train_suit_acc=0.2558 eval_rank_acc=0.1378 eval_suit_acc=0.2449 train_joint_proxy=0.1923 eval_joint_proxy=0.1913 epochs=20
+FINAL_METRIC: eval_joint_proxy=0.1913, threshold=none

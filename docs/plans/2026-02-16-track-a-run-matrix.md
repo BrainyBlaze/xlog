@@ -45,14 +45,14 @@ git rev-parse HEAD
 Profile:
 
 - Mode: `dev` for `02..06` (full-data path, no release gate abort).
-- Seeds: `7`, `42`, `123`.
+- Seeds: `7`, `42`, `123` (default). 01_minimal: seed `42` only (per-query host sync overhead in forward_backward).
 - Each run writes its own logs and JSON metrics.
 
 ### Matrix
 
 | Example | Script | Command Template | Final Metric Key |
 |---|---|---|---|
-| `01_minimal` | `examples/neural/01_minimal/train.py` | `$PYTHON examples/neural/01_minimal/train.py --engine xlog --epochs 12 --batch-size 64 --seed {seed} --data-path examples/neural/01_minimal/data/mnist --save-path {run_dir}/mnist_net.pt` | `heldout_addition_acc` |
+| `01_minimal` | `examples/neural/01_minimal/train.py` | `$PYTHON examples/neural/01_minimal/train.py --engine xlog --epochs 5 --batch-size 64 --seed {seed} --train-limit 512 --data-path examples/neural/01_minimal/data/mnist --save-path {run_dir}/mnist_net.pt` | `heldout_addition_acc` |
 | `02_coins` | `examples/neural/02_coins/train.py` | `$PYTHON examples/neural/02_coins/train.py --mode dev --epochs 12 --batch-size 32 --lr 1e-3 --seed {seed}` | `test_acc` |
 | `03_mnist_multidigit` | `examples/neural/03_mnist_multidigit/train.py` | `$PYTHON examples/neural/03_mnist_multidigit/train.py --mode dev --epochs 12 --batch-size 32 --lr 1e-3 --seed {seed} --eval-ratio 0.2` | `eval_joint_proxy` |
 | `04_hwf` | `examples/neural/04_hwf/train.py` | `$PYTHON examples/neural/04_hwf/train.py --mode dev --epochs 12 --batch-size 8 --lr 1e-3 --seed {seed} --eval-ratio 0.2` | `eval_acc` |
@@ -220,12 +220,12 @@ Fields:
 
 ## Completion Criteria (Track A)
 
-- All 18 runs complete (6 examples x 3 seeds).
+- All 16 runs complete (01_minimal: 1 seed; 02-06: 3 seeds each).
 - Every run has `stdout.log`, `stderr.log`, `time.txt`, `exit_code.txt`, `metrics.json`.
 - `summary.csv` and `summary.json` generated with no missing rows.
-- Comparison stubs generated:
-  - `mnist_vs_deepproblog.json`
-  - `scallop_status.json`
+- Comparison artifacts generated (real data only, no placeholders):
+  - `mnist_vs_deepproblog.json` — blocked if 01_minimal has no metric
+  - `scallop_status.json` — blocked (not installed)
 - No claims of charter completion attached to Track A outputs.
 
 ## Track A to Track B Handoff

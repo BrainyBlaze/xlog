@@ -1,5 +1,5 @@
 run_id,example,seed,status,exit_code,duration_sec,metric_name,metric_value,metric_threshold,gate_pass
-20260216T145409Z_track_a_dev,01_minimal,42,timeout,-1,5400.23,heldout_addition_acc,,,
+20260216T145409Z_track_a_dev,01_minimal,42,timeout,-1,3600.22,heldout_addition_acc,,,
 20260216T145409Z_track_a_dev,02_coins,7,ok,0,5.08,test_acc,0.5,,True
 20260216T145409Z_track_a_dev,02_coins,42,ok,0,2.8,test_acc,0.5,,True
 20260216T145409Z_track_a_dev,02_coins,123,ok,0,2.89,test_acc,0.25,,True

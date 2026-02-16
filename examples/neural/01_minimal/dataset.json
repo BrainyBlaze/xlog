@@ -1,0 +1,26 @@
+{
+  "name": "mnist_addition",
+  "provider": "torchvision.datasets.MNIST",
+  "version": "1.0",
+  "splits": {
+    "train": {
+      "count": 60000
+    },
+    "test": {
+      "count": 10000
+    }
+  },
+  "ci_subset": {
+    "train": 512,
+    "test": 512
+  },
+  "artifacts": [
+    "data/mnist/MNIST/raw/train-images-idx3-ubyte.gz",
+    "data/mnist/MNIST/raw/train-labels-idx1-ubyte.gz",
+    "data/mnist/MNIST/raw/t10k-images-idx3-ubyte.gz",
+    "data/mnist/MNIST/raw/t10k-labels-idx1-ubyte.gz"
+  ],
+  "metrics": {
+    "min_accuracy": null
+  }
+}

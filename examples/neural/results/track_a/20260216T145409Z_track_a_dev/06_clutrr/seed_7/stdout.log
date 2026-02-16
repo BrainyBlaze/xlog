@@ -1,0 +1,2 @@
+train_acc=0.9855 eval_acc=0.6994 epochs=10
+FINAL_METRIC: eval_acc=0.6994, threshold=none
