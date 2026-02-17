@@ -1,6 +1,63 @@
 {
-  "status": "blocked",
-  "reason": "01_minimal XLOG run timed out; no XLOG metric available for comparison",
-  "deepproblog_baseline_report": "docs/reports/2026-02-10-deepproblog-baseline-gpu-sequential.md",
-  "deferred_to": "Track B"
+  "status": "partial",
+  "note": "Seeds 7,42 complete. Seed 123 was terminated (SIGTERM) and needs rerun. Will be updated to 'complete' with n=3 stats when all finish.",
+  "xlog_track_a": {
+    "metric_name": "training_loss",
+    "seeds_complete": [7, 42],
+    "seeds_pending": [123],
+    "seed_7": {
+      "final_loss": 2.569344,
+      "initial_loss": 2.779722,
+      "epoch_losses": [2.779722, 2.758047, 2.722442, 2.661981, 2.569344],
+      "training_time_sec": 21962.85
+    },
+    "seed_42": {
+      "final_loss": 2.590412,
+      "initial_loss": 2.777859,
+      "epoch_losses": [2.777859, 2.759703, 2.733906, 2.680629, 2.590412],
+      "training_time_sec": 20987.04
+    },
+    "n": 2,
+    "final_loss_mean": 2.579878,
+    "final_loss_std": 0.014897,
+    "training_time_sec_mean": 21474.9,
+    "training_time_sec_std": 690.0,
+    "params": {
+      "train_limit": 512,
+      "epochs": 5,
+      "batch_size": 64,
+      "training_function": "train_model_tensor"
+    }
+  },
+  "deepproblog_baseline": {
+    "source": "docs/reports/2026-02-10-deepproblog-baseline-gpu-sequential.md",
+    "01_minimal_strict_full_train": {
+      "config": "full train split, 2 epochs, batch_size=2048, GPU-enabled neural nets",
+      "held_out_accuracy": 0.2324,
+      "held_out_correct_total": "1162/5000",
+      "training_time": "2:31:07"
+    },
+    "01_minimal_limited_1024": {
+      "config": "train_limit=1024, batch_size=256, GPU-enabled neural nets",
+      "status": "incomplete (manual abort after 60m wall-clock)"
+    }
+  },
+  "deepproblog_published": {
+    "source": "Manhaeve et al., Neural Probabilistic Logic Programming in DeepProbLog, JAIR 2021",
+    "metric_name": "addition_accuracy",
+    "value": "~93% (single-digit addition with full MNIST, 30k pairs)",
+    "training_time_sec": "not directly comparable (CPU-only, different hardware)",
+    "notes": "Published results use full MNIST training set (30k pairs), CPU evaluation via PySDD."
+  },
+  "protocol_notes": [
+    "XLOG uses --train-limit 512 (256 pairs); DeepProbLog baseline uses full MNIST or 1024-limited.",
+    "Hardware: NVIDIA RTX PRO 3000 Blackwell Laptop GPU for both XLOG and DeepProbLog baseline.",
+    "XLOG uses train_model_tensor (GPU-native loss accumulation, CUDA d-DNNF circuits).",
+    "DeepProbLog baseline uses PySDD/ProbLog CPU inference with GPU-enabled neural networks.",
+    "Metric mismatch: XLOG reports training loss (no eval split); DeepProbLog reports held-out accuracy.",
+    "Direct accuracy comparison requires adding held-out evaluation to XLOG's 01_minimal.",
+    "Training time: XLOG mean = 5.97h (5 epochs, 256 pairs, n=2); DeepProbLog strict = 2.5h (2 epochs, full dataset).",
+    "Per-epoch time dominated by WMC circuit evaluation (~17 sec/query), not GPU tensor operations.",
+    "Seed 123 was killed by SIGTERM during D4 compilation; needs rerun when GPU is free."
+  ]
 }

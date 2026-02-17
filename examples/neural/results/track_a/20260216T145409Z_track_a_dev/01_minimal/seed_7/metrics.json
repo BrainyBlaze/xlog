@@ -1,5 +1,5 @@
 {
-  "seed": 42,
+  "seed": 7,
   "example": "01_minimal",
   "engine": "xlog",
   "training_function": "train_model_tensor",
@@ -10,10 +10,10 @@
   "learning_rate": 0.001,
   "device": "cuda",
   "exit_code": 0,
-  "elapsed_sec": 20987.04,
-  "epoch_losses": [2.777859, 2.759703, 2.733906, 2.680629, 2.590412],
-  "initial_loss": 2.777859,
-  "final_loss": 2.590412,
-  "loss_improvement_pct": 6.7,
+  "elapsed_sec": 21962.85,
+  "epoch_losses": [2.779722, 2.758047, 2.722442, 2.661981, 2.569344],
+  "initial_loss": 2.779722,
+  "final_loss": 2.569344,
+  "loss_improvement_pct": 7.6,
   "model_saved": "mnist_net.pt"
 }

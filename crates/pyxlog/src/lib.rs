@@ -1218,6 +1218,24 @@ impl CompiledProgram {
     ) -> PyResult<PyObject> {
         self.forward_backward_tensor_internal(py, query, expected)
     }
+
+    /// Train for one epoch with GPU-native loss accumulation (no per-query .item()).
+    #[pyo3(signature = (queries, batch_size=32))]
+    fn train_epoch_tensor(
+        &mut self,
+        py: Python<'_>,
+        queries: Vec<String>,
+        batch_size: usize,
+    ) -> PyResult<EpochStats> {
+        let mut history = TrainingHistory::new();
+        self.train_epoch_tensor_internal(py, &queries, batch_size, usize::MAX, &mut history)
+    }
+
+    /// Clear the circuit template cache, forcing recompilation on next query.
+    /// Used for cache ablation benchmarks.
+    fn clear_circuit_cache(&mut self) {
+        self.circuit_cache.clear();
+    }
 }
 
 impl CompiledProgram {
@@ -1289,6 +1307,78 @@ impl CompiledProgram {
                     batch_idx + 1,
                     num_batches,
                     batch_loss
+                );
+            }
+        }
+
+        Ok(EpochStats {
+            avg_loss: total_loss / num_batches as f64,
+            num_batches,
+            total_queries: queries.len(),
+        })
+    }
+
+    /// GPU-native training epoch — no per-query .item() host sync.
+    ///
+    /// Accumulates batch loss as a CUDA tensor via torch.Tensor.add().
+    /// Single .item() call per batch for logging/history only.
+    pub(crate) fn train_epoch_tensor_internal(
+        &mut self,
+        py: Python<'_>,
+        queries: &[String],
+        batch_size: usize,
+        log_iter: usize,
+        history: &mut TrainingHistory,
+    ) -> PyResult<EpochStats> {
+        if queries.is_empty() {
+            return Ok(EpochStats {
+                avg_loss: 0.0,
+                num_batches: 0,
+                total_queries: 0,
+            });
+        }
+
+        let num_batches = (queries.len() + batch_size - 1) / batch_size;
+        let mut total_loss = 0.0;
+
+        for (batch_idx, batch) in queries.chunks(batch_size).enumerate() {
+            self.zero_grad(py)?;
+
+            // Accumulate loss on device — no .item() per query
+            let mut batch_loss_tensor: Option<PyObject> = None;
+            for query in batch {
+                let loss_t = self.forward_backward_tensor_internal(py, query, true)?;
+                // Detach from computation graph (backward already called inside)
+                let loss_val = loss_t.bind(py).call_method0("detach")?.unbind();
+                batch_loss_tensor = Some(match batch_loss_tensor {
+                    None => loss_val,
+                    Some(acc) => {
+                        acc.bind(py).call_method1("add_", (loss_val.bind(py),))?;
+                        acc
+                    }
+                });
+            }
+
+            self.optimizer_step(py)?;
+
+            // Single host sync per batch for logging
+            let batch_loss_scalar: f64 = match batch_loss_tensor {
+                Some(t) => {
+                    let raw: f64 = t.bind(py).call_method0("item")?.extract()?;
+                    raw / batch.len() as f64
+                }
+                None => 0.0,
+            };
+
+            total_loss += batch_loss_scalar;
+            history.add_batch(batch_loss_scalar);
+
+            if log_iter < usize::MAX && (batch_idx + 1) % log_iter == 0 {
+                println!(
+                    "  Batch {}/{}: loss={:.6}",
+                    batch_idx + 1,
+                    num_batches,
+                    batch_loss_scalar
                 );
             }
         }
@@ -2901,6 +2991,55 @@ pub fn train_model(
             epochs,
             stats.avg_loss
         );
+        // Flush stdout so epoch progress is visible when output is redirected to a file
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+    }
+
+    Ok(history)
+}
+
+/// GPU-native training loop — no per-query host synchronization.
+///
+/// Identical to train_model but uses forward_backward_tensor internally.
+/// Loss stays on CUDA device; .item() called once per batch only.
+#[pyfunction]
+#[pyo3(signature = (program, queries, epochs=10, batch_size=32, log_iter=100, shuffle=true))]
+pub fn train_model_tensor(
+    py: Python<'_>,
+    program: &mut CompiledProgram,
+    queries: Vec<String>,
+    epochs: usize,
+    batch_size: usize,
+    log_iter: usize,
+    shuffle: bool,
+) -> PyResult<TrainingHistory> {
+    use rand::seq::SliceRandom;
+    use rand::thread_rng;
+
+    let mut history = TrainingHistory::new();
+
+    for epoch in 0..epochs {
+        let mut epoch_queries = queries.clone();
+
+        if shuffle {
+            let mut rng = thread_rng();
+            epoch_queries.shuffle(&mut rng);
+        }
+
+        let stats =
+            program.train_epoch_tensor_internal(py, &epoch_queries, batch_size, log_iter, &mut history)?;
+        history.add_epoch(stats.avg_loss);
+
+        println!(
+            "Epoch {}/{}: avg_loss={:.6}",
+            epoch + 1,
+            epochs,
+            stats.avg_loss
+        );
+        // Flush stdout so epoch progress is visible when output is redirected to a file
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
     }
 
     Ok(history)
@@ -2921,6 +3060,7 @@ fn pyxlog(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<EpochStats>()?;
     m.add_class::<TrainingHistory>()?;
     m.add_function(wrap_pyfunction!(train_model, m)?)?;
+    m.add_function(wrap_pyfunction!(train_model_tensor, m)?)?;
     m.add_function(wrap_pyfunction!(dlpack_roundtrip, m)?)?;
     #[cfg(feature = "arrow-device-import")]
     m.add_function(wrap_pyfunction!(export_arrow_device, m)?)?;

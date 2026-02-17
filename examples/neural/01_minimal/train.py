@@ -400,7 +400,7 @@ def main():
         queries = generate_queries(n_pairs, train_labels)
         print(f"Generated {len(queries)} training queries")
 
-        history = pyxlog.train_model(
+        history = pyxlog.train_model_tensor(
             program,
             queries,
             epochs=args.epochs,

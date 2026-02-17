@@ -1,0 +1,23 @@
+Compiling XLOG program...
+Initializing network...
+Loading MNIST data from examples/neural/01_minimal/data/mnist...
+  Limited to 512 images
+Generated 256 training queries
+
+Training for 5 epochs...
+  Batch size: 64
+  Learning rate: 0.001
+  Device: cuda
+
+Epoch 1/5: avg_loss=2.779722
+Epoch 2/5: avg_loss=2.758047
+Epoch 3/5: avg_loss=2.722442
+Epoch 4/5: avg_loss=2.661981
+Epoch 5/5: avg_loss=2.569344
+
+Training complete!
+  Initial loss: 2.7797
+  Final loss: 2.5693
+  Improvement: 7.6%
+
+Model saved to examples/neural/results/track_a/20260216T145409Z_track_a_dev/01_minimal/seed_7/mnist_net.pt
