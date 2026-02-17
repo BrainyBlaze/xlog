@@ -424,6 +424,7 @@ pub mod circuit_kernels {
     pub const XGCF_BACKWARD_LEVEL_DECISION_GRAD_CACHED: &str =
         "xgcf_backward_level_decision_grad_cached";
     pub const XGCF_BACKWARD_LEVEL_LIT_GRAD_CACHED: &str = "xgcf_backward_level_lit_grad_cached";
+    pub const XGCF_BACKWARD_ALL_LEVELS_CACHED: &str = "xgcf_backward_all_levels_cached";
     pub const XGCF_FREE_VAR_APPLY_GRAD_CACHED: &str = "xgcf_free_var_apply_grad_cached";
     pub const XGCF_FREE_VAR_REDUCE_STAGE_CACHED: &str = "xgcf_free_var_reduce_stage_cached";
     pub const XGCF_ADD_SCALAR_CACHED: &str = "xgcf_add_scalar_cached";
@@ -943,6 +944,7 @@ impl CudaKernelProvider {
                     circuit_kernels::XGCF_BACKWARD_LEVEL_PROPAGATE_CACHED,
                     circuit_kernels::XGCF_BACKWARD_LEVEL_DECISION_GRAD_CACHED,
                     circuit_kernels::XGCF_BACKWARD_LEVEL_LIT_GRAD_CACHED,
+                    circuit_kernels::XGCF_BACKWARD_ALL_LEVELS_CACHED,
                     circuit_kernels::XGCF_FREE_VAR_APPLY_GRAD_CACHED,
                     circuit_kernels::XGCF_FREE_VAR_REDUCE_STAGE_CACHED,
                     circuit_kernels::XGCF_ADD_SCALAR_CACHED,

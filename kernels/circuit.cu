@@ -992,6 +992,176 @@ extern "C" __global__ void xgcf_backward_level_lit_grad_cached(
     }
 }
 
+// Fused backward pass: all levels in a single kernel (cached layout).
+// Replaces the host-side per-level loop that launches three separate kernels
+// (propagate, decision_grad, lit_grad) for each level.
+extern "C" __global__ void xgcf_backward_all_levels_cached(
+    const uint32_t* __restrict__ active_slot,
+    uint32_t node_cap,
+    uint32_t edge_cap,
+    uint32_t level_cap,
+    uint32_t var_cap,
+    const uint8_t* __restrict__ node_type,
+    const uint32_t* __restrict__ child_offsets,
+    const uint32_t* __restrict__ child_indices,
+    const uint32_t* __restrict__ decision_var,
+    const uint32_t* __restrict__ decision_child_false,
+    const uint32_t* __restrict__ decision_child_true,
+    const int32_t* __restrict__ lit,
+    const uint32_t* __restrict__ level_nodes,
+    const uint32_t* __restrict__ level_offsets,
+    const double* __restrict__ var_log_true,
+    const double* __restrict__ var_log_false,
+    const double* __restrict__ values,
+    double* __restrict__ adj,
+    double* __restrict__ grad_true,
+    double* __restrict__ grad_false,
+    const uint32_t* __restrict__ meta_num_levels
+) {
+    if (blockIdx.x != 0) {
+        return;
+    }
+    uint32_t slot = active_slot[0];
+    size_t node_base = slot_offset(slot, node_cap);
+    size_t edge_base = slot_offset(slot, edge_cap);
+    size_t offset_base = slot_offset(slot, node_cap + 1u);
+    size_t level_base = slot_offset(slot, node_cap);
+    size_t level_offset_base = slot_offset(slot, level_cap + 1u);
+    size_t var_base = slot_offset(slot, var_cap + 1u);
+
+    const uint8_t* node_type_s = node_type + node_base;
+    const uint32_t* child_offsets_s = child_offsets + offset_base;
+    const uint32_t* child_indices_s = child_indices + edge_base;
+    const uint32_t* decision_var_s = decision_var + node_base;
+    const uint32_t* decision_child_false_s = decision_child_false + node_base;
+    const uint32_t* decision_child_true_s = decision_child_true + node_base;
+    const int32_t* lit_s = lit + node_base;
+    const uint32_t* level_nodes_s = level_nodes + level_base;
+    const uint32_t* level_offsets_s = level_offsets + level_offset_base;
+    const double* var_log_true_s = var_log_true + var_base;
+    const double* var_log_false_s = var_log_false + var_base;
+    const double* values_s = values + node_base;
+    double* adj_s = adj + node_base;
+    double* grad_true_s = grad_true + var_base;
+    double* grad_false_s = grad_false + var_base;
+
+    uint32_t num_levels = meta_num_levels[slot];
+    for (int32_t level = static_cast<int32_t>(num_levels) - 1; level >= 0; --level) {
+        uint32_t level_off = level_offsets_s[level];
+        uint32_t num_level_nodes = level_offsets_s[level + 1] - level_off;
+        for (uint32_t idx = threadIdx.x; idx < num_level_nodes; idx += blockDim.x) {
+            uint32_t node = level_nodes_s[level_off + idx];
+            double a = adj_s[node];
+
+            // --- propagate (from xgcf_backward_level_propagate_cached) ---
+            if (a != 0.0) {
+                uint8_t ty = node_type_s[node];
+                switch (ty) {
+                    case XGCF_AND: {
+                        uint32_t c0 = child_offsets_s[node];
+                        uint32_t c1 = child_offsets_s[node + 1];
+                        for (uint32_t i = c0; i < c1; i++) {
+                            uint32_t child = child_indices_s[i];
+                            atomicAdd(&adj_s[child], a);
+                        }
+                        break;
+                    }
+                    case XGCF_OR: {
+                        double parent_v = values_s[node];
+                        if (!(isinf(parent_v) && parent_v < 0.0)) {
+                            uint32_t c0 = child_offsets_s[node];
+                            uint32_t c1 = child_offsets_s[node + 1];
+                            for (uint32_t i = c0; i < c1; i++) {
+                                uint32_t child = child_indices_s[i];
+                                double child_v = values_s[child];
+                                if (isinf(child_v) && child_v < 0.0) {
+                                    continue;
+                                }
+                                double ratio = exp(child_v - parent_v);
+                                if (ratio != 0.0) {
+                                    atomicAdd(&adj_s[child], a * ratio);
+                                }
+                            }
+                        }
+                        break;
+                    }
+                    case XGCF_DECISION: {
+                        double parent_v = values_s[node];
+                        if (!(isinf(parent_v) && parent_v < 0.0)) {
+                            uint32_t var = decision_var_s[node];
+                            uint32_t child_f = decision_child_false_s[node];
+                            uint32_t child_t = decision_child_true_s[node];
+                            double log_t = var_log_true_s[var];
+                            double log_f = var_log_false_s[var];
+
+                            double vf = values_s[child_f];
+                            double vt = values_s[child_t];
+                            if (!(isinf(vf) && vf < 0.0)) {
+                                double ratio_f = exp((log_f + vf) - parent_v);
+                                if (ratio_f != 0.0) {
+                                    atomicAdd(&adj_s[child_f], a * ratio_f);
+                                }
+                            }
+                            if (!(isinf(vt) && vt < 0.0)) {
+                                double ratio_t = exp((log_t + vt) - parent_v);
+                                if (ratio_t != 0.0) {
+                                    atomicAdd(&adj_s[child_t], a * ratio_t);
+                                }
+                            }
+                        }
+                        break;
+                    }
+                    default:
+                        break;
+                }
+
+                // --- decision_grad (from xgcf_backward_level_decision_grad_cached) ---
+                if (ty == XGCF_DECISION) {
+                    double parent_v = values_s[node];
+                    if (!(isinf(parent_v) && parent_v < 0.0)) {
+                        uint32_t var = decision_var_s[node];
+                        uint32_t child_f = decision_child_false_s[node];
+                        uint32_t child_t = decision_child_true_s[node];
+                        double log_t = var_log_true_s[var];
+                        double log_f = var_log_false_s[var];
+
+                        double vf = values_s[child_f];
+                        double vt = values_s[child_t];
+
+                        double p_false = 0.0;
+                        double p_true = 0.0;
+                        if (!(isinf(vf) && vf < 0.0)) {
+                            p_false = exp((log_f + vf) - parent_v);
+                        }
+                        if (!(isinf(vt) && vt < 0.0)) {
+                            p_true = exp((log_t + vt) - parent_v);
+                        }
+
+                        if (p_false != 0.0) {
+                            atomicAdd(&grad_false_s[var], a * p_false);
+                        }
+                        if (p_true != 0.0) {
+                            atomicAdd(&grad_true_s[var], a * p_true);
+                        }
+                    }
+                }
+
+                // --- lit_grad (from xgcf_backward_level_lit_grad_cached) ---
+                if (ty == XGCF_LIT) {
+                    int32_t l = lit_s[node];
+                    uint32_t var = (l > 0) ? static_cast<uint32_t>(l) : static_cast<uint32_t>(-l);
+                    if (l > 0) {
+                        atomicAdd(&grad_true_s[var], a);
+                    } else if (l < 0) {
+                        atomicAdd(&grad_false_s[var], a);
+                    }
+                }
+            }
+        }
+        __syncthreads();
+    }
+}
+
 extern "C" __global__ void xgcf_free_var_apply_grad_cached(
     const uint32_t* __restrict__ active_slot,
     uint32_t var_cap,
