@@ -1574,6 +1574,210 @@ impl GpuCircuitCache {
         Ok(())
     }
 
+    /// Like [`eval_grads_inplace`] but replaces the per-level backward loop
+    /// with a single launch of `xgcf_backward_all_levels_cached`, and omits the
+    /// trailing `device().synchronize()` so that the caller can batch multiple
+    /// queries before syncing.
+    pub fn eval_grads_inplace_fused(&mut self, handle: &GpuCircuitCacheHandle) -> Result<()> {
+        let device = self.provider.device().inner();
+        let eval_all = device
+            .get_func(
+                xlog_cuda::CIRCUIT_MODULE,
+                xlog_cuda::circuit_kernels::XGCF_EVAL_ALL_LEVELS_CACHED,
+            )
+            .ok_or_else(|| {
+                XlogError::Kernel("xgcf_eval_all_levels_cached kernel not found".to_string())
+            })?;
+        let block_size: u32 = 256;
+        let mut params: Vec<*mut std::ffi::c_void> = vec![
+            handle.slot_device().as_kernel_param(),
+            self.node_cap.as_kernel_param(),
+            self.edge_cap.as_kernel_param(),
+            self.level_cap.as_kernel_param(),
+            self.var_cap.as_kernel_param(),
+            (&self.node_type).as_kernel_param(),
+            (&self.child_offsets).as_kernel_param(),
+            (&self.child_indices).as_kernel_param(),
+            (&self.lit).as_kernel_param(),
+            (&self.decision_var).as_kernel_param(),
+            (&self.decision_child_false).as_kernel_param(),
+            (&self.decision_child_true).as_kernel_param(),
+            (&self.level_nodes).as_kernel_param(),
+            (&self.level_offsets).as_kernel_param(),
+            (&self.var_log_true).as_kernel_param(),
+            (&self.var_log_false).as_kernel_param(),
+            (&mut self.values).as_kernel_param(),
+            (&self.meta_num_levels).as_kernel_param(),
+        ];
+        unsafe {
+            eval_all.clone().launch(
+                LaunchConfig {
+                    grid_dim: (1, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                &mut params,
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("xgcf_eval_all_levels_cached failed: {}", e)))?;
+
+        let device = self.provider.device().inner();
+        let store_f64 = device
+            .get_func(CACHE_MODULE, cache_kernels::CACHE_STORE_F64)
+            .ok_or_else(|| XlogError::Kernel("cache_store_f64 kernel not found".to_string()))?;
+
+        let grid_for = |count: u32| -> u32 {
+            if count == 0 {
+                0
+            } else {
+                (count + block_size - 1) / block_size
+            }
+        };
+        let node_stride = self.node_cap;
+        let var_stride = self.var_cap.checked_add(1).ok_or_else(|| {
+            XlogError::Compilation("GPU cache eval_grads var_cap overflow".to_string())
+        })?;
+        let weights_len = self.var_cap.checked_add(1).ok_or_else(|| {
+            XlogError::Compilation("GPU cache eval_grads var_cap overflow".to_string())
+        })?;
+
+        let grid_nodes = grid_for(self.node_cap);
+        if grid_nodes != 0 {
+            unsafe {
+                store_f64.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (grid_nodes, 1, 1),
+                        block_dim: (block_size, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        handle.slot_device(),
+                        &self.always_on,
+                        node_stride,
+                        &self.zero_f64,
+                        &mut self.adj,
+                        self.node_cap,
+                    ),
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("cache zero adj failed: {}", e)))?;
+        }
+
+        let grid_weights = grid_for(weights_len);
+        if grid_weights != 0 {
+            unsafe {
+                store_f64.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (grid_weights, 1, 1),
+                        block_dim: (block_size, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        handle.slot_device(),
+                        &self.always_on,
+                        var_stride,
+                        &self.zero_f64,
+                        &mut self.grad_true,
+                        weights_len,
+                    ),
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("cache zero grad_true failed: {}", e)))?;
+
+            unsafe {
+                store_f64.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (grid_weights, 1, 1),
+                        block_dim: (block_size, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        handle.slot_device(),
+                        &self.always_on,
+                        var_stride,
+                        &self.zero_f64,
+                        &mut self.grad_false,
+                        weights_len,
+                    ),
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("cache zero grad_false failed: {}", e)))?;
+        }
+
+        let add_scalar = device
+            .get_func(
+                xlog_cuda::CIRCUIT_MODULE,
+                xlog_cuda::circuit_kernels::XGCF_ADD_SCALAR_CACHED,
+            )
+            .ok_or_else(|| {
+                XlogError::Kernel("xgcf_add_scalar_cached kernel not found".to_string())
+            })?;
+        unsafe {
+            add_scalar.clone().launch(
+                LaunchConfig {
+                    grid_dim: (1, 1, 1),
+                    block_dim: (1, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (
+                    handle.slot_device(),
+                    self.node_cap,
+                    &mut self.adj,
+                    &self.meta_root,
+                    &self.one_f64,
+                ),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("xgcf_add_scalar_cached (adj) failed: {}", e)))?;
+
+        // Fused backward: single kernel replaces the per-level loop.
+        let backward_all = device
+            .get_func(
+                xlog_cuda::CIRCUIT_MODULE,
+                xlog_cuda::circuit_kernels::XGCF_BACKWARD_ALL_LEVELS_CACHED,
+            )
+            .ok_or_else(|| XlogError::Kernel("xgcf_backward_all_levels_cached not found".into()))?;
+
+        let mut params: Vec<*mut std::ffi::c_void> = vec![
+            handle.slot_device().as_kernel_param(),
+            self.node_cap.as_kernel_param(),
+            self.edge_cap.as_kernel_param(),
+            self.level_cap.as_kernel_param(),
+            self.var_cap.as_kernel_param(),
+            (&self.node_type).as_kernel_param(),
+            (&self.child_offsets).as_kernel_param(),
+            (&self.child_indices).as_kernel_param(),
+            (&self.decision_var).as_kernel_param(),
+            (&self.decision_child_false).as_kernel_param(),
+            (&self.decision_child_true).as_kernel_param(),
+            (&self.lit).as_kernel_param(),
+            (&self.level_nodes).as_kernel_param(),
+            (&self.level_offsets).as_kernel_param(),
+            (&self.var_log_true).as_kernel_param(),
+            (&self.var_log_false).as_kernel_param(),
+            (&self.values).as_kernel_param(),
+            (&mut self.adj).as_kernel_param(),
+            (&mut self.grad_true).as_kernel_param(),
+            (&mut self.grad_false).as_kernel_param(),
+            (&self.meta_num_levels).as_kernel_param(),
+        ];
+
+        unsafe {
+            backward_all.clone().launch(
+                LaunchConfig {
+                    grid_dim: (1, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                &mut params,
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("xgcf_backward_all_levels_cached failed: {}", e)))?;
+
+        self.apply_free_var_correction_cached(handle, true, true)?;
+        Ok(())
+    }
+
     fn apply_free_var_correction_cached(
         &mut self,
         handle: &GpuCircuitCacheHandle,

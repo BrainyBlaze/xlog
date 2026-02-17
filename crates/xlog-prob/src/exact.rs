@@ -421,7 +421,7 @@ impl ExactDdnnfProgram {
         }
 
         // 2) Base run: out = dlogZ_base/dp
-        cache.eval_grads_inplace(state.handle())?;
+        cache.eval_grads_inplace_fused(state.handle())?;
         if let Some(base) = base_log_z.as_mut() {
             let root_view = cache.values().slice(root_idx..(root_idx + 1));
             device.dtod_copy(&root_view, base).map_err(|e| {
@@ -518,7 +518,7 @@ impl ExactDdnnfProgram {
             }
         }
 
-        cache.eval_grads_inplace(state.handle())?;
+        cache.eval_grads_inplace_fused(state.handle())?;
         if let Some(out) = out_loss {
             let base = base_log_z
                 .as_ref()
@@ -590,7 +590,6 @@ impl ExactDdnnfProgram {
             }
         }
 
-        state.provider.device().synchronize()?;
         Ok(())
     }
 
