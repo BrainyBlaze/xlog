@@ -78,7 +78,7 @@ impl Default for GpuConfig {
     fn default() -> Self {
         Self {
             device_ordinal: 0,
-            memory_bytes: 1024 * 1024 * 1024,
+            memory_bytes: 32 * 1024 * 1024 * 1024, // 32 GB — clamped to available device memory by GpuMemoryManager at runtime.
         }
     }
 }
@@ -1323,8 +1323,8 @@ pub(crate) fn default_cache_config(
         ));
     }
     Ok(GpuCircuitCacheConfig {
-        num_slots: 1,
-        table_size: 1,
+        num_slots: 4,   // Hold 4 circuit templates; power-of-2 hash table.
+        table_size: 8,
         node_cap: compile.smooth_node_cap,
         edge_cap: compile.smooth_edge_cap,
         level_cap: compile.smooth_node_cap,

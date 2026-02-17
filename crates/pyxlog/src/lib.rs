@@ -314,7 +314,7 @@ fn dlpack_from_py(obj: &Bound<'_, PyAny>) -> PyResult<DlpackManagedTensor> {
 /// EXPERIMENTAL: Requires building `pyxlog` with `--features arrow-device-import`.
 #[cfg(feature = "arrow-device-import")]
 #[pyfunction]
-#[pyo3(signature = (dlpack_columns, device=0, memory_mb=1024))]
+#[pyo3(signature = (dlpack_columns, device=0, memory_mb=32768))]
 fn export_arrow_device(
     py: Python<'_>,
     dlpack_columns: &Bound<'_, PyAny>,
@@ -357,7 +357,7 @@ fn export_arrow_device(
 /// EXPERIMENTAL: Requires building `pyxlog` with `--features arrow-device-import`.
 #[cfg(feature = "arrow-device-import")]
 #[pyfunction]
-#[pyo3(signature = (device_array, device=0, memory_mb=1024))]
+#[pyo3(signature = (device_array, device=0, memory_mb=32768))]
 fn import_arrow_device(
     py: Python<'_>,
     device_array: &Bound<'_, PyAny>,
@@ -435,7 +435,7 @@ pub struct Program;
 #[pymethods]
 impl Program {
     #[staticmethod]
-    #[pyo3(signature = (source, device=0, memory_mb=1024, prob_engine=None))]
+    #[pyo3(signature = (source, device=0, memory_mb=32768, prob_engine=None))]
     pub fn compile(
         source: &str,
         device: usize,
@@ -2689,7 +2689,7 @@ pub struct LogicProgram;
 #[pymethods]
 impl LogicProgram {
     #[staticmethod]
-    #[pyo3(signature = (source, device=0, memory_mb=1024))]
+    #[pyo3(signature = (source, device=0, memory_mb=32768))]
     pub fn compile(source: &str, device: usize, memory_mb: u64) -> PyResult<CompiledLogicProgram> {
         if memory_mb == 0 {
             return Err(PyValueError::new_err("memory_mb must be > 0"));
