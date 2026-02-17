@@ -203,12 +203,13 @@ run_id,example,seed,status,exit_code,duration_sec,metric_name,metric_value,metri
 
 ### `comparisons/mnist_vs_deepproblog.json`
 
-Fields:
+Fields (when 01_minimal metric is available):
 
-- `xlog_track_a`: mean/std/time for `01_minimal`.
-- `deepproblog_reference`: values sourced from `docs/reports/2026-02-10-deepproblog-baseline-gpu-sequential.md`.
-- `protocol_match`: boolean.
-- `comparison_scope`: `"provisional"` for Track A.
+- `status`: `"complete"` or `"blocked"` (if 01_minimal timed out).
+- `xlog_track_a`: mean/std/n for `01_minimal` (present when `status=complete`).
+- `deepproblog_baseline_report`: path to baseline report.
+- `reason`: explanation when blocked.
+- `deferred_to`: `"Track B"` when blocked.
 
 ### `comparisons/scallop_status.json`
 
