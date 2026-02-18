@@ -188,6 +188,36 @@ extern "C" __global__ void weights_restore_var_true(
     log_true[var] = restore[0];
 }
 
+// Broadcast one cached slot's weight vectors into batch-major buffers.
+// out_{true,false}_batch layout: [batch][var_stride].
+extern "C" __global__ void weights_copy_slot_to_batch(
+    const uint32_t* __restrict__ active_slot,
+    uint32_t var_cap,
+    const double* __restrict__ log_true,
+    const double* __restrict__ log_false,
+    double* __restrict__ out_true_batch,
+    double* __restrict__ out_false_batch,
+    uint32_t var_stride,
+    uint32_t batch_size
+) {
+    uint32_t slot = active_slot[0];
+    uint32_t vars_per_query = var_cap + 1u;
+    size_t src_base = static_cast<size_t>(slot) * static_cast<size_t>(vars_per_query);
+
+    uint64_t total = static_cast<uint64_t>(vars_per_query) * static_cast<uint64_t>(batch_size);
+    uint64_t tid = static_cast<uint64_t>(blockIdx.x) * static_cast<uint64_t>(blockDim.x)
+        + static_cast<uint64_t>(threadIdx.x);
+    uint64_t step = static_cast<uint64_t>(blockDim.x) * static_cast<uint64_t>(gridDim.x);
+
+    for (uint64_t idx = tid; idx < total; idx += step) {
+        uint32_t q = static_cast<uint32_t>(idx / vars_per_query);
+        uint32_t var = static_cast<uint32_t>(idx % vars_per_query);
+        size_t dst_base = static_cast<size_t>(q) * static_cast<size_t>(var_stride);
+        out_true_batch[dst_base + var] = log_true[src_base + var];
+        out_false_batch[dst_base + var] = log_false[src_base + var];
+    }
+}
+
 extern "C" __global__ void weights_apply_query_vars(
     const uint32_t* __restrict__ query_vars,
     uint32_t count,
@@ -227,5 +257,99 @@ extern "C" __global__ void weights_restore_query_vars(
             weights_trap();
         }
         log_false[var] = saved[idx];
+    }
+}
+
+// Apply/restore one query var per batch row in strided weight tables.
+// Layout: log_{true,false}_batch[query_idx * var_stride + var].
+extern "C" __global__ void weights_apply_query_vars_false_batched(
+    const uint32_t* __restrict__ query_vars,
+    uint32_t count,
+    uint32_t var_cap,
+    uint32_t var_stride,
+    double* __restrict__ log_false_batch,
+    double* __restrict__ saved
+) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    for (uint32_t idx = tid; idx < count; idx += blockDim.x * gridDim.x) {
+        uint32_t var = query_vars[idx];
+        if (var == 0u) {
+            saved[idx] = 0.0;
+            continue;
+        }
+        if (var > var_cap) {
+            weights_trap();
+        }
+        size_t base = static_cast<size_t>(idx) * static_cast<size_t>(var_stride);
+        saved[idx] = log_false_batch[base + var];
+        log_false_batch[base + var] = -INFINITY;
+    }
+}
+
+extern "C" __global__ void weights_restore_query_vars_false_batched(
+    const uint32_t* __restrict__ query_vars,
+    uint32_t count,
+    uint32_t var_cap,
+    uint32_t var_stride,
+    double* __restrict__ log_false_batch,
+    const double* __restrict__ saved
+) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    for (uint32_t idx = tid; idx < count; idx += blockDim.x * gridDim.x) {
+        uint32_t var = query_vars[idx];
+        if (var == 0u) {
+            continue;
+        }
+        if (var > var_cap) {
+            weights_trap();
+        }
+        size_t base = static_cast<size_t>(idx) * static_cast<size_t>(var_stride);
+        log_false_batch[base + var] = saved[idx];
+    }
+}
+
+extern "C" __global__ void weights_apply_query_vars_true_batched(
+    const uint32_t* __restrict__ query_vars,
+    uint32_t count,
+    uint32_t var_cap,
+    uint32_t var_stride,
+    double* __restrict__ log_true_batch,
+    double* __restrict__ saved
+) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    for (uint32_t idx = tid; idx < count; idx += blockDim.x * gridDim.x) {
+        uint32_t var = query_vars[idx];
+        if (var == 0u) {
+            saved[idx] = 0.0;
+            continue;
+        }
+        if (var > var_cap) {
+            weights_trap();
+        }
+        size_t base = static_cast<size_t>(idx) * static_cast<size_t>(var_stride);
+        saved[idx] = log_true_batch[base + var];
+        log_true_batch[base + var] = -INFINITY;
+    }
+}
+
+extern "C" __global__ void weights_restore_query_vars_true_batched(
+    const uint32_t* __restrict__ query_vars,
+    uint32_t count,
+    uint32_t var_cap,
+    uint32_t var_stride,
+    double* __restrict__ log_true_batch,
+    const double* __restrict__ saved
+) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    for (uint32_t idx = tid; idx < count; idx += blockDim.x * gridDim.x) {
+        uint32_t var = query_vars[idx];
+        if (var == 0u) {
+            continue;
+        }
+        if (var > var_cap) {
+            weights_trap();
+        }
+        size_t base = static_cast<size_t>(idx) * static_cast<size_t>(var_stride);
+        log_true_batch[base + var] = saved[idx];
     }
 }

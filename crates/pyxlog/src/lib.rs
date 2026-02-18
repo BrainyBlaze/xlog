@@ -1383,8 +1383,7 @@ impl CompiledProgram {
                             batch_loss_tensor = Some(match batch_loss_tensor {
                                 None => loss_val,
                                 Some(acc) => {
-                                    acc.bind(py)
-                                        .call_method1("add_", (loss_val.bind(py),))?;
+                                    acc.bind(py).call_method1("add_", (loss_val.bind(py),))?;
                                     acc
                                 }
                             });
@@ -1393,10 +1392,7 @@ impl CompiledProgram {
                             // Complex query: group by template for batching.
                             let atom = self.parse_query_atom(query)?;
                             let sig = self
-                                .get_or_build_query_signature(
-                                    &atom.predicate,
-                                    atom.terms.len(),
-                                )?
+                                .get_or_build_query_signature(&atom.predicate, atom.terms.len())?
                                 .clone();
                             let key = self.generate_cache_key_for_signature(
                                 &sig,
@@ -1414,14 +1410,12 @@ impl CompiledProgram {
                 // Batch-process each complex group in insertion order.
                 for key in &complex_group_order {
                     let group = complex_groups.remove(key).unwrap();
-                    let loss = self
-                        .forward_backward_batch_complex_tensor(py, &group, true)?;
+                    let loss = self.forward_backward_batch_complex_tensor(py, &group, true)?;
                     let loss_val = loss.bind(py).call_method0("detach")?.unbind();
                     batch_loss_tensor = Some(match batch_loss_tensor {
                         None => loss_val,
                         Some(acc) => {
-                            acc.bind(py)
-                                .call_method1("add_", (loss_val.bind(py),))?;
+                            acc.bind(py).call_method1("add_", (loss_val.bind(py),))?;
                             acc
                         }
                     });
@@ -1429,14 +1423,12 @@ impl CompiledProgram {
             } else {
                 // ── Sequential path (for regression testing / fallback) ─
                 for query in batch {
-                    let loss_t =
-                        self.forward_backward_tensor_internal(py, query, true)?;
+                    let loss_t = self.forward_backward_tensor_internal(py, query, true)?;
                     let loss_val = loss_t.bind(py).call_method0("detach")?.unbind();
                     batch_loss_tensor = Some(match batch_loss_tensor {
                         None => loss_val,
                         Some(acc) => {
-                            acc.bind(py)
-                                .call_method1("add_", (loss_val.bind(py),))?;
+                            acc.bind(py).call_method1("add_", (loss_val.bind(py),))?;
                             acc
                         }
                     });
@@ -1818,16 +1810,14 @@ impl CompiledProgram {
         // This lets Python threads (e.g. data loaders) run while CUDA kernels execute.
         let loss_dev = py
             .allow_threads(|| {
-                cached
-                    .program
-                    .neural_backward_nll_buffers_with_device_loss(
-                        &cached.slots,
-                        query_idx,
-                        &prob_bufs,
-                        &mut grad_bufs,
-                        cfg,
-                        expected,
-                    )
+                cached.program.neural_backward_nll_buffers_with_device_loss(
+                    &cached.slots,
+                    query_idx,
+                    &prob_bufs,
+                    &mut grad_bufs,
+                    cfg,
+                    expected,
+                )
             })
             .map_err(|e| PyRuntimeError::new_err(format!("Neural fast-path error: {}", e)))?;
 
@@ -1905,6 +1895,8 @@ impl CompiledProgram {
                 "forward_backward_batch_complex_tensor called with empty atoms slice",
             ));
         }
+        let n_queries_u32 = u32::try_from(n_queries)
+            .map_err(|_| PyRuntimeError::new_err("Query batch size exceeds u32"))?;
 
         // ── 1. Shared setup from first atom ─────────────────────────────
         let signature = self
@@ -1914,17 +1906,11 @@ impl CompiledProgram {
         let pred_name = atoms[0].predicate.clone();
 
         // Ensure circuit is compiled/cached.
-        let cache_key = self.generate_cache_key_for_signature(
-            &signature,
-            &pred_name,
-            atoms[0].terms.len(),
-        );
+        let cache_key =
+            self.generate_cache_key_for_signature(&signature, &pred_name, atoms[0].terms.len());
         if !self.circuit_cache.contains_key(&cache_key) {
-            let cached = self.compile_circuit_for_template(
-                &signature,
-                &pred_name,
-                atoms[0].terms.len(),
-            )?;
+            let cached =
+                self.compile_circuit_for_template(&signature, &pred_name, atoms[0].terms.len())?;
             self.circuit_cache.insert(cache_key.clone(), cached);
             self.template_compile_count = self.template_compile_count.saturating_add(1);
         }
@@ -2069,9 +2055,7 @@ impl CompiledProgram {
                 let prob_buf = self
                     .output_provider
                     .from_dlpack_tensors_with_schema(schema_f32.clone(), vec![managed])
-                    .map_err(|e| {
-                        PyRuntimeError::new_err(format!("DLPack import failed: {}", e))
-                    })?;
+                    .map_err(|e| PyRuntimeError::new_err(format!("DLPack import failed: {}", e)))?;
 
                 let grad_tensor = torch.call_method1("zeros_like", (&row,))?;
                 let grad_tensor = grad_tensor.call_method0("contiguous")?;
@@ -2079,9 +2063,7 @@ impl CompiledProgram {
                 let grad_buf = self
                     .output_provider
                     .from_dlpack_tensors_with_schema(schema_f32.clone(), vec![grad_managed])
-                    .map_err(|e| {
-                        PyRuntimeError::new_err(format!("DLPack import failed: {}", e))
-                    })?;
+                    .map_err(|e| PyRuntimeError::new_err(format!("DLPack import failed: {}", e)))?;
 
                 prob_map.insert((call.query, call.group), prob_buf);
                 grad_map.insert((call.query, call.group), grad_buf);
@@ -2137,29 +2119,18 @@ impl CompiledProgram {
             .get(&cache_key)
             .expect("cache populated above");
 
-        let mut loss_devs: Vec<xlog_cuda::memory::TrackedCudaSlice<u8>> =
-            Vec::with_capacity(n_queries);
-
-        for q in 0..n_queries {
-            // Release the GIL during GPU circuit evaluation.
-            let loss_dev = py
-                .allow_threads(|| {
-                    cached
-                        .program
-                        .neural_backward_nll_buffers_with_device_loss(
-                            &cached.slots,
-                            per_query_idx[q],
-                            &per_query_probs[q],
-                            &mut per_query_grads[q],
-                            cfg,
-                            expected,
-                        )
-                })
-                .map_err(|e| {
-                    PyRuntimeError::new_err(format!("Neural fast-path error: {}", e))
-                })?;
-            loss_devs.push(loss_dev.into_bytes());
-        }
+        let batched_loss_dev = py.allow_threads(|| {
+            cached
+                .program
+                .neural_backward_nll_buffers_batch_with_device_loss(
+                    &cached.slots,
+                    &per_query_idx,
+                    &per_query_probs,
+                    &mut per_query_grads,
+                    cfg,
+                    expected,
+                )
+        });
 
         // ── 7. Stream sync: default → torch current (once) ─────────────
         // All circuit work (loss writes + grad fills) is on XLOG's default
@@ -2177,44 +2148,94 @@ impl CompiledProgram {
         }
 
         // ── 7b. Export losses via DLPack and accumulate on device ────────
-        let mut batch_loss_tensor: Option<PyObject> = None;
+        let batch_loss_tensor: PyObject = match batched_loss_dev {
+            Ok(loss_dev) => {
+                let mut d_num_rows =
+                    self.output_provider.memory().alloc::<u32>(1).map_err(|e| {
+                        PyRuntimeError::new_err(format!("GPU allocation failed: {}", e))
+                    })?;
+                self.output_provider
+                    .device()
+                    .inner()
+                    .htod_sync_copy_into(&[n_queries_u32], &mut d_num_rows)
+                    .map_err(|e| {
+                        PyRuntimeError::new_err(format!("Failed to set row count: {}", e))
+                    })?;
 
-        for loss_bytes in loss_devs {
-            let mut d_num_rows = self
-                .output_provider
-                .memory()
-                .alloc::<u32>(1)
-                .map_err(|e| PyRuntimeError::new_err(format!("GPU allocation failed: {}", e)))?;
-            self.output_provider
-                .device()
-                .inner()
-                .htod_sync_copy_into(&[1u32], &mut d_num_rows)
-                .map_err(|e| {
-                    PyRuntimeError::new_err(format!("Failed to set row count: {}", e))
-                })?;
+                let loss_buf = xlog_cuda::CudaBuffer::from_columns(
+                    vec![loss_dev.into_bytes().into()],
+                    n_queries_u32 as u64,
+                    d_num_rows,
+                    schema_f64.clone(),
+                );
+                let loss_dl = self
+                    .output_provider
+                    .to_dlpack_table(loss_buf)
+                    .column(0)
+                    .map_err(|e| PyRuntimeError::new_err(format!("DLPack export failed: {}", e)))?;
+                let loss_capsule = dlpack_capsule_from_tensor(py, loss_dl)?;
+                let loss_tensor = torch.getattr("from_dlpack")?.call1((loss_capsule,))?;
+                loss_tensor.call_method0("sum")?.into_py(py)
+            }
+            Err(_batch_err) => {
+                // Fallback path: preserve prior semantics if batched circuit path
+                // is unavailable for this circuit.
+                let mut accum: Option<PyObject> = None;
+                for q in 0..n_queries {
+                    let loss_dev = py
+                        .allow_threads(|| {
+                            cached.program.neural_backward_nll_buffers_with_device_loss(
+                                &cached.slots,
+                                per_query_idx[q],
+                                &per_query_probs[q],
+                                &mut per_query_grads[q],
+                                cfg,
+                                expected,
+                            )
+                        })
+                        .map_err(|e| {
+                            PyRuntimeError::new_err(format!("Neural fast-path error: {}", e))
+                        })?;
 
-            let loss_buf = xlog_cuda::CudaBuffer::from_columns(
-                vec![loss_bytes.into()],
-                1,
-                d_num_rows,
-                schema_f64.clone(),
-            );
-            let loss_dl = self
-                .output_provider
-                .to_dlpack_table(loss_buf)
-                .column(0)
-                .map_err(|e| PyRuntimeError::new_err(format!("DLPack export failed: {}", e)))?;
-            let loss_capsule = dlpack_capsule_from_tensor(py, loss_dl)?;
-            let loss_tensor = torch.getattr("from_dlpack")?.call1((loss_capsule,))?;
+                    let mut d_num_rows =
+                        self.output_provider.memory().alloc::<u32>(1).map_err(|e| {
+                            PyRuntimeError::new_err(format!("GPU allocation failed: {}", e))
+                        })?;
+                    self.output_provider
+                        .device()
+                        .inner()
+                        .htod_sync_copy_into(&[1u32], &mut d_num_rows)
+                        .map_err(|e| {
+                            PyRuntimeError::new_err(format!("Failed to set row count: {}", e))
+                        })?;
 
-            batch_loss_tensor = Some(match batch_loss_tensor {
-                None => loss_tensor.into_py(py),
-                Some(acc) => {
-                    acc.bind(py).call_method1("add_", (loss_tensor,))?;
-                    acc
+                    let loss_buf = xlog_cuda::CudaBuffer::from_columns(
+                        vec![loss_dev.into_bytes().into()],
+                        1,
+                        d_num_rows,
+                        schema_f64.clone(),
+                    );
+                    let loss_dl = self
+                        .output_provider
+                        .to_dlpack_table(loss_buf)
+                        .column(0)
+                        .map_err(|e| {
+                            PyRuntimeError::new_err(format!("DLPack export failed: {}", e))
+                        })?;
+                    let loss_capsule = dlpack_capsule_from_tensor(py, loss_dl)?;
+                    let loss_tensor = torch.getattr("from_dlpack")?.call1((loss_capsule,))?;
+
+                    accum = Some(match accum {
+                        None => loss_tensor.into_py(py),
+                        Some(acc) => {
+                            acc.bind(py).call_method1("add_", (loss_tensor,))?;
+                            acc
+                        }
+                    });
                 }
-            });
-        }
+                accum.ok_or_else(|| PyRuntimeError::new_err("No loss computed in batch"))?
+            }
+        };
 
         // ── 8. Batched backward through all networks ────────────────────
         // torch.autograd.backward(tensors, grad_tensors) — single backward pass
@@ -2225,8 +2246,7 @@ impl CompiledProgram {
         autograd.call_method1("backward", (out_list, grad_list))?;
 
         // ── 9. Return accumulated loss ──────────────────────────────────
-        batch_loss_tensor
-            .ok_or_else(|| PyRuntimeError::new_err("No loss computed in batch"))
+        Ok(batch_loss_tensor)
     }
 
     fn get_or_build_query_signature(
@@ -3469,8 +3489,13 @@ pub fn train_model_tensor(
         }
 
         let epoch_start = Instant::now();
-        let stats =
-            program.train_epoch_tensor_internal(py, &epoch_queries, batch_size, log_iter, &mut history)?;
+        let stats = program.train_epoch_tensor_internal(
+            py,
+            &epoch_queries,
+            batch_size,
+            log_iter,
+            &mut history,
+        )?;
         history.add_epoch(stats.avg_loss, epoch_start.elapsed().as_secs_f64());
 
         println!(

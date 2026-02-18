@@ -924,6 +924,90 @@ $L__BB8_2:
 	ret;
 
 }
+	// .globl	weights_copy_slot_to_batch
+.visible .entry weights_copy_slot_to_batch(
+	.param .u64 .ptr .align 1 weights_copy_slot_to_batch_param_0,
+	.param .u32 weights_copy_slot_to_batch_param_1,
+	.param .u64 .ptr .align 1 weights_copy_slot_to_batch_param_2,
+	.param .u64 .ptr .align 1 weights_copy_slot_to_batch_param_3,
+	.param .u64 .ptr .align 1 weights_copy_slot_to_batch_param_4,
+	.param .u64 .ptr .align 1 weights_copy_slot_to_batch_param_5,
+	.param .u32 weights_copy_slot_to_batch_param_6,
+	.param .u32 weights_copy_slot_to_batch_param_7
+)
+{
+	.reg .pred 	%p<4>;
+	.reg .b32 	%r<14>;
+	.reg .b64 	%rd<46>;
+
+	ld.param.b64 	%rd25, [weights_copy_slot_to_batch_param_0];
+	ld.param.b32 	%r2, [weights_copy_slot_to_batch_param_1];
+	ld.param.b64 	%rd21, [weights_copy_slot_to_batch_param_2];
+	ld.param.b64 	%rd22, [weights_copy_slot_to_batch_param_3];
+	ld.param.b64 	%rd23, [weights_copy_slot_to_batch_param_4];
+	ld.param.b64 	%rd24, [weights_copy_slot_to_batch_param_5];
+	ld.param.b32 	%r1, [weights_copy_slot_to_batch_param_6];
+	ld.param.b32 	%r3, [weights_copy_slot_to_batch_param_7];
+	cvta.to.global.u64 	%rd26, %rd25;
+	ld.global.nc.b32 	%rd1, [%rd26];
+	add.s32 	%r4, %r2, 1;
+	cvt.u64.u32 	%rd2, %r4;
+	mul.wide.u32 	%rd3, %r3, %r4;
+	mov.u32 	%r5, %ctaid.x;
+	mov.u32 	%r6, %ntid.x;
+	cvt.u64.u32 	%rd4, %r6;
+	mul.wide.u32 	%rd27, %r5, %r6;
+	mov.u32 	%r7, %tid.x;
+	cvt.u64.u32 	%rd28, %r7;
+	add.s64 	%rd43, %rd27, %rd28;
+	setp.ge.u64 	%p1, %rd43, %rd3;
+	@%p1 bra 	$L__BB9_6;
+	cvt.u64.u32 	%rd6, %r1;
+	mov.u32 	%r8, %nctaid.x;
+	cvt.u64.u32 	%rd29, %r8;
+	mul.lo.s64 	%rd7, %rd4, %rd29;
+	mul.lo.s64 	%rd8, %rd1, %rd2;
+	cvta.to.global.u64 	%rd9, %rd21;
+	cvta.to.global.u64 	%rd10, %rd23;
+	cvta.to.global.u64 	%rd11, %rd22;
+	cvta.to.global.u64 	%rd12, %rd24;
+	cvt.u32.u64 	%r9, %rd2;
+$L__BB9_2:
+	and.b64 	%rd30, %rd43, -4294967296;
+	setp.ne.s64 	%p2, %rd30, 0;
+	@%p2 bra 	$L__BB9_4;
+	cvt.u32.u64 	%r10, %rd43;
+	div.u32 	%r11, %r10, %r9;
+	mul.lo.s32 	%r12, %r11, %r9;
+	sub.s32 	%r13, %r10, %r12;
+	cvt.u64.u32 	%rd44, %r11;
+	cvt.u64.u32 	%rd45, %r13;
+	bra.uni 	$L__BB9_5;
+$L__BB9_4:
+	div.u64 	%rd44, %rd43, %rd2;
+	mul.lo.s64 	%rd31, %rd44, %rd2;
+	sub.s64 	%rd45, %rd43, %rd31;
+$L__BB9_5:
+	and.b64 	%rd32, %rd44, 4294967295;
+	add.s64 	%rd33, %rd45, %rd8;
+	shl.b64 	%rd34, %rd33, 3;
+	add.s64 	%rd35, %rd9, %rd34;
+	ld.global.nc.b64 	%rd36, [%rd35];
+	mad.lo.s64 	%rd37, %rd32, %rd6, %rd45;
+	shl.b64 	%rd38, %rd37, 3;
+	add.s64 	%rd39, %rd10, %rd38;
+	st.global.b64 	[%rd39], %rd36;
+	add.s64 	%rd40, %rd11, %rd34;
+	ld.global.nc.b64 	%rd41, [%rd40];
+	add.s64 	%rd42, %rd12, %rd38;
+	st.global.b64 	[%rd42], %rd41;
+	add.s64 	%rd43, %rd43, %rd7;
+	setp.lt.u64 	%p3, %rd43, %rd3;
+	@%p3 bra 	$L__BB9_2;
+$L__BB9_6:
+	ret;
+
+}
 	// .globl	weights_apply_query_vars
 .visible .entry weights_apply_query_vars(
 	.param .u64 .ptr .align 1 weights_apply_query_vars_param_0,
@@ -948,28 +1032,28 @@ $L__BB8_2:
 	mov.u32 	%r10, %tid.x;
 	mad.lo.s32 	%r12, %r9, %r1, %r10;
 	setp.ge.u32 	%p1, %r12, %r7;
-	@%p1 bra 	$L__BB9_8;
+	@%p1 bra 	$L__BB10_8;
 	mov.u32 	%r11, %nctaid.x;
 	mul.lo.s32 	%r3, %r1, %r11;
 	cvta.to.global.u64 	%rd2, %rd4;
 	cvta.to.global.u64 	%rd3, %rd5;
-$L__BB9_2:
+$L__BB10_2:
 	mul.wide.u32 	%rd7, %r12, 4;
 	add.s64 	%rd8, %rd2, %rd7;
 	ld.global.nc.b32 	%r5, [%rd8];
 	setp.ne.s32 	%p2, %r5, 0;
-	@%p2 bra 	$L__BB9_4;
+	@%p2 bra 	$L__BB10_4;
 	mul.wide.u32 	%rd14, %r12, 8;
 	add.s64 	%rd15, %rd1, %rd14;
 	st.global.b64 	[%rd15], 0;
-	bra.uni 	$L__BB9_7;
-$L__BB9_4:
+	bra.uni 	$L__BB10_7;
+$L__BB10_4:
 	setp.le.u32 	%p3, %r5, %r8;
-	@%p3 bra 	$L__BB9_6;
+	@%p3 bra 	$L__BB10_6;
 	// begin inline asm
 	trap;
 	// end inline asm
-$L__BB9_6:
+$L__BB10_6:
 	mul.wide.u32 	%rd9, %r5, 8;
 	add.s64 	%rd10, %rd3, %rd9;
 	ld.global.b64 	%rd11, [%rd10];
@@ -977,11 +1061,11 @@ $L__BB9_6:
 	add.s64 	%rd13, %rd1, %rd12;
 	st.global.b64 	[%rd13], %rd11;
 	st.global.b64 	[%rd10], -4503599627370496;
-$L__BB9_7:
+$L__BB10_7:
 	add.s32 	%r12, %r12, %r3;
 	setp.lt.u32 	%p4, %r12, %r7;
-	@%p4 bra 	$L__BB9_2;
-$L__BB9_8:
+	@%p4 bra 	$L__BB10_2;
+$L__BB10_8:
 	ret;
 
 }
@@ -1008,35 +1092,287 @@ $L__BB9_8:
 	mov.u32 	%r10, %tid.x;
 	mad.lo.s32 	%r12, %r9, %r1, %r10;
 	setp.ge.u32 	%p1, %r12, %r7;
-	@%p1 bra 	$L__BB10_7;
+	@%p1 bra 	$L__BB11_7;
 	mov.u32 	%r11, %nctaid.x;
 	mul.lo.s32 	%r3, %r1, %r11;
 	cvta.to.global.u64 	%rd1, %rd4;
 	cvta.to.global.u64 	%rd2, %rd6;
 	cvta.to.global.u64 	%rd3, %rd5;
-$L__BB10_2:
+$L__BB11_2:
 	mul.wide.u32 	%rd7, %r12, 4;
 	add.s64 	%rd8, %rd1, %rd7;
 	ld.global.nc.b32 	%r5, [%rd8];
 	setp.eq.s32 	%p2, %r5, 0;
-	@%p2 bra 	$L__BB10_6;
+	@%p2 bra 	$L__BB11_6;
 	setp.le.u32 	%p3, %r5, %r8;
-	@%p3 bra 	$L__BB10_5;
+	@%p3 bra 	$L__BB11_5;
 	// begin inline asm
 	trap;
 	// end inline asm
-$L__BB10_5:
+$L__BB11_5:
 	mul.wide.u32 	%rd9, %r12, 8;
 	add.s64 	%rd10, %rd2, %rd9;
 	ld.global.nc.b64 	%rd11, [%rd10];
 	mul.wide.u32 	%rd12, %r5, 8;
 	add.s64 	%rd13, %rd3, %rd12;
 	st.global.b64 	[%rd13], %rd11;
-$L__BB10_6:
+$L__BB11_6:
 	add.s32 	%r12, %r12, %r3;
 	setp.lt.u32 	%p4, %r12, %r7;
-	@%p4 bra 	$L__BB10_2;
-$L__BB10_7:
+	@%p4 bra 	$L__BB11_2;
+$L__BB11_7:
+	ret;
+
+}
+	// .globl	weights_apply_query_vars_false_batched
+.visible .entry weights_apply_query_vars_false_batched(
+	.param .u64 .ptr .align 1 weights_apply_query_vars_false_batched_param_0,
+	.param .u32 weights_apply_query_vars_false_batched_param_1,
+	.param .u32 weights_apply_query_vars_false_batched_param_2,
+	.param .u32 weights_apply_query_vars_false_batched_param_3,
+	.param .u64 .ptr .align 1 weights_apply_query_vars_false_batched_param_4,
+	.param .u64 .ptr .align 1 weights_apply_query_vars_false_batched_param_5
+)
+{
+	.reg .pred 	%p<5>;
+	.reg .b32 	%r<14>;
+	.reg .b64 	%rd<19>;
+
+	ld.param.b64 	%rd5, [weights_apply_query_vars_false_batched_param_0];
+	ld.param.b32 	%r6, [weights_apply_query_vars_false_batched_param_1];
+	ld.param.b32 	%r7, [weights_apply_query_vars_false_batched_param_2];
+	ld.param.b32 	%r8, [weights_apply_query_vars_false_batched_param_3];
+	ld.param.b64 	%rd6, [weights_apply_query_vars_false_batched_param_4];
+	ld.param.b64 	%rd7, [weights_apply_query_vars_false_batched_param_5];
+	cvta.to.global.u64 	%rd1, %rd7;
+	mov.u32 	%r9, %ctaid.x;
+	mov.u32 	%r1, %ntid.x;
+	mov.u32 	%r10, %tid.x;
+	mad.lo.s32 	%r13, %r9, %r1, %r10;
+	setp.ge.u32 	%p1, %r13, %r6;
+	@%p1 bra 	$L__BB12_8;
+	mov.u32 	%r11, %nctaid.x;
+	mul.lo.s32 	%r3, %r1, %r11;
+	cvta.to.global.u64 	%rd2, %rd5;
+	cvta.to.global.u64 	%rd3, %rd6;
+$L__BB12_2:
+	mul.wide.u32 	%rd8, %r13, 4;
+	add.s64 	%rd9, %rd2, %rd8;
+	ld.global.nc.b32 	%rd4, [%rd9];
+	setp.ne.s64 	%p2, %rd4, 0;
+	@%p2 bra 	$L__BB12_4;
+	mul.wide.u32 	%rd17, %r13, 8;
+	add.s64 	%rd18, %rd1, %rd17;
+	st.global.b64 	[%rd18], 0;
+	bra.uni 	$L__BB12_7;
+$L__BB12_4:
+	cvt.u32.u64 	%r12, %rd4;
+	setp.le.u32 	%p3, %r12, %r7;
+	@%p3 bra 	$L__BB12_6;
+	// begin inline asm
+	trap;
+	// end inline asm
+$L__BB12_6:
+	mul.wide.u32 	%rd10, %r13, %r8;
+	add.s64 	%rd11, %rd10, %rd4;
+	shl.b64 	%rd12, %rd11, 3;
+	add.s64 	%rd13, %rd3, %rd12;
+	ld.global.b64 	%rd14, [%rd13];
+	mul.wide.u32 	%rd15, %r13, 8;
+	add.s64 	%rd16, %rd1, %rd15;
+	st.global.b64 	[%rd16], %rd14;
+	st.global.b64 	[%rd13], -4503599627370496;
+$L__BB12_7:
+	add.s32 	%r13, %r13, %r3;
+	setp.lt.u32 	%p4, %r13, %r6;
+	@%p4 bra 	$L__BB12_2;
+$L__BB12_8:
+	ret;
+
+}
+	// .globl	weights_restore_query_vars_false_batched
+.visible .entry weights_restore_query_vars_false_batched(
+	.param .u64 .ptr .align 1 weights_restore_query_vars_false_batched_param_0,
+	.param .u32 weights_restore_query_vars_false_batched_param_1,
+	.param .u32 weights_restore_query_vars_false_batched_param_2,
+	.param .u32 weights_restore_query_vars_false_batched_param_3,
+	.param .u64 .ptr .align 1 weights_restore_query_vars_false_batched_param_4,
+	.param .u64 .ptr .align 1 weights_restore_query_vars_false_batched_param_5
+)
+{
+	.reg .pred 	%p<5>;
+	.reg .b32 	%r<14>;
+	.reg .b64 	%rd<17>;
+
+	ld.param.b64 	%rd5, [weights_restore_query_vars_false_batched_param_0];
+	ld.param.b32 	%r6, [weights_restore_query_vars_false_batched_param_1];
+	ld.param.b32 	%r7, [weights_restore_query_vars_false_batched_param_2];
+	ld.param.b32 	%r8, [weights_restore_query_vars_false_batched_param_3];
+	ld.param.b64 	%rd6, [weights_restore_query_vars_false_batched_param_4];
+	ld.param.b64 	%rd7, [weights_restore_query_vars_false_batched_param_5];
+	mov.u32 	%r9, %ctaid.x;
+	mov.u32 	%r1, %ntid.x;
+	mov.u32 	%r10, %tid.x;
+	mad.lo.s32 	%r13, %r9, %r1, %r10;
+	setp.ge.u32 	%p1, %r13, %r6;
+	@%p1 bra 	$L__BB13_7;
+	mov.u32 	%r11, %nctaid.x;
+	mul.lo.s32 	%r3, %r1, %r11;
+	cvta.to.global.u64 	%rd1, %rd5;
+	cvta.to.global.u64 	%rd2, %rd7;
+	cvta.to.global.u64 	%rd3, %rd6;
+$L__BB13_2:
+	mul.wide.u32 	%rd8, %r13, 4;
+	add.s64 	%rd9, %rd1, %rd8;
+	ld.global.nc.b32 	%rd4, [%rd9];
+	setp.eq.s64 	%p2, %rd4, 0;
+	@%p2 bra 	$L__BB13_6;
+	cvt.u32.u64 	%r12, %rd4;
+	setp.le.u32 	%p3, %r12, %r7;
+	@%p3 bra 	$L__BB13_5;
+	// begin inline asm
+	trap;
+	// end inline asm
+$L__BB13_5:
+	mul.wide.u32 	%rd10, %r13, %r8;
+	mul.wide.u32 	%rd11, %r13, 8;
+	add.s64 	%rd12, %rd2, %rd11;
+	ld.global.nc.b64 	%rd13, [%rd12];
+	add.s64 	%rd14, %rd10, %rd4;
+	shl.b64 	%rd15, %rd14, 3;
+	add.s64 	%rd16, %rd3, %rd15;
+	st.global.b64 	[%rd16], %rd13;
+$L__BB13_6:
+	add.s32 	%r13, %r13, %r3;
+	setp.lt.u32 	%p4, %r13, %r6;
+	@%p4 bra 	$L__BB13_2;
+$L__BB13_7:
+	ret;
+
+}
+	// .globl	weights_apply_query_vars_true_batched
+.visible .entry weights_apply_query_vars_true_batched(
+	.param .u64 .ptr .align 1 weights_apply_query_vars_true_batched_param_0,
+	.param .u32 weights_apply_query_vars_true_batched_param_1,
+	.param .u32 weights_apply_query_vars_true_batched_param_2,
+	.param .u32 weights_apply_query_vars_true_batched_param_3,
+	.param .u64 .ptr .align 1 weights_apply_query_vars_true_batched_param_4,
+	.param .u64 .ptr .align 1 weights_apply_query_vars_true_batched_param_5
+)
+{
+	.reg .pred 	%p<5>;
+	.reg .b32 	%r<14>;
+	.reg .b64 	%rd<19>;
+
+	ld.param.b64 	%rd5, [weights_apply_query_vars_true_batched_param_0];
+	ld.param.b32 	%r6, [weights_apply_query_vars_true_batched_param_1];
+	ld.param.b32 	%r7, [weights_apply_query_vars_true_batched_param_2];
+	ld.param.b32 	%r8, [weights_apply_query_vars_true_batched_param_3];
+	ld.param.b64 	%rd6, [weights_apply_query_vars_true_batched_param_4];
+	ld.param.b64 	%rd7, [weights_apply_query_vars_true_batched_param_5];
+	cvta.to.global.u64 	%rd1, %rd7;
+	mov.u32 	%r9, %ctaid.x;
+	mov.u32 	%r1, %ntid.x;
+	mov.u32 	%r10, %tid.x;
+	mad.lo.s32 	%r13, %r9, %r1, %r10;
+	setp.ge.u32 	%p1, %r13, %r6;
+	@%p1 bra 	$L__BB14_8;
+	mov.u32 	%r11, %nctaid.x;
+	mul.lo.s32 	%r3, %r1, %r11;
+	cvta.to.global.u64 	%rd2, %rd5;
+	cvta.to.global.u64 	%rd3, %rd6;
+$L__BB14_2:
+	mul.wide.u32 	%rd8, %r13, 4;
+	add.s64 	%rd9, %rd2, %rd8;
+	ld.global.nc.b32 	%rd4, [%rd9];
+	setp.ne.s64 	%p2, %rd4, 0;
+	@%p2 bra 	$L__BB14_4;
+	mul.wide.u32 	%rd17, %r13, 8;
+	add.s64 	%rd18, %rd1, %rd17;
+	st.global.b64 	[%rd18], 0;
+	bra.uni 	$L__BB14_7;
+$L__BB14_4:
+	cvt.u32.u64 	%r12, %rd4;
+	setp.le.u32 	%p3, %r12, %r7;
+	@%p3 bra 	$L__BB14_6;
+	// begin inline asm
+	trap;
+	// end inline asm
+$L__BB14_6:
+	mul.wide.u32 	%rd10, %r13, %r8;
+	add.s64 	%rd11, %rd10, %rd4;
+	shl.b64 	%rd12, %rd11, 3;
+	add.s64 	%rd13, %rd3, %rd12;
+	ld.global.b64 	%rd14, [%rd13];
+	mul.wide.u32 	%rd15, %r13, 8;
+	add.s64 	%rd16, %rd1, %rd15;
+	st.global.b64 	[%rd16], %rd14;
+	st.global.b64 	[%rd13], -4503599627370496;
+$L__BB14_7:
+	add.s32 	%r13, %r13, %r3;
+	setp.lt.u32 	%p4, %r13, %r6;
+	@%p4 bra 	$L__BB14_2;
+$L__BB14_8:
+	ret;
+
+}
+	// .globl	weights_restore_query_vars_true_batched
+.visible .entry weights_restore_query_vars_true_batched(
+	.param .u64 .ptr .align 1 weights_restore_query_vars_true_batched_param_0,
+	.param .u32 weights_restore_query_vars_true_batched_param_1,
+	.param .u32 weights_restore_query_vars_true_batched_param_2,
+	.param .u32 weights_restore_query_vars_true_batched_param_3,
+	.param .u64 .ptr .align 1 weights_restore_query_vars_true_batched_param_4,
+	.param .u64 .ptr .align 1 weights_restore_query_vars_true_batched_param_5
+)
+{
+	.reg .pred 	%p<5>;
+	.reg .b32 	%r<14>;
+	.reg .b64 	%rd<17>;
+
+	ld.param.b64 	%rd5, [weights_restore_query_vars_true_batched_param_0];
+	ld.param.b32 	%r6, [weights_restore_query_vars_true_batched_param_1];
+	ld.param.b32 	%r7, [weights_restore_query_vars_true_batched_param_2];
+	ld.param.b32 	%r8, [weights_restore_query_vars_true_batched_param_3];
+	ld.param.b64 	%rd6, [weights_restore_query_vars_true_batched_param_4];
+	ld.param.b64 	%rd7, [weights_restore_query_vars_true_batched_param_5];
+	mov.u32 	%r9, %ctaid.x;
+	mov.u32 	%r1, %ntid.x;
+	mov.u32 	%r10, %tid.x;
+	mad.lo.s32 	%r13, %r9, %r1, %r10;
+	setp.ge.u32 	%p1, %r13, %r6;
+	@%p1 bra 	$L__BB15_7;
+	mov.u32 	%r11, %nctaid.x;
+	mul.lo.s32 	%r3, %r1, %r11;
+	cvta.to.global.u64 	%rd1, %rd5;
+	cvta.to.global.u64 	%rd2, %rd7;
+	cvta.to.global.u64 	%rd3, %rd6;
+$L__BB15_2:
+	mul.wide.u32 	%rd8, %r13, 4;
+	add.s64 	%rd9, %rd1, %rd8;
+	ld.global.nc.b32 	%rd4, [%rd9];
+	setp.eq.s64 	%p2, %rd4, 0;
+	@%p2 bra 	$L__BB15_6;
+	cvt.u32.u64 	%r12, %rd4;
+	setp.le.u32 	%p3, %r12, %r7;
+	@%p3 bra 	$L__BB15_5;
+	// begin inline asm
+	trap;
+	// end inline asm
+$L__BB15_5:
+	mul.wide.u32 	%rd10, %r13, %r8;
+	mul.wide.u32 	%rd11, %r13, 8;
+	add.s64 	%rd12, %rd2, %rd11;
+	ld.global.nc.b64 	%rd13, [%rd12];
+	add.s64 	%rd14, %rd10, %rd4;
+	shl.b64 	%rd15, %rd14, 3;
+	add.s64 	%rd16, %rd3, %rd15;
+	st.global.b64 	[%rd16], %rd13;
+$L__BB15_6:
+	add.s32 	%r13, %r13, %r3;
+	setp.lt.u32 	%p4, %r13, %r6;
+	@%p4 bra 	$L__BB15_2;
+$L__BB15_7:
 	ret;
 
 }

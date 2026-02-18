@@ -223,8 +223,16 @@ pub mod weights_kernels {
     pub const WEIGHTS_RESTORE_VAR_FALSE: &str = "weights_restore_var_false";
     pub const WEIGHTS_FORCE_VAR_TRUE: &str = "weights_force_var_true";
     pub const WEIGHTS_RESTORE_VAR_TRUE: &str = "weights_restore_var_true";
+    pub const WEIGHTS_COPY_SLOT_TO_BATCH: &str = "weights_copy_slot_to_batch";
     pub const WEIGHTS_APPLY_QUERY_VARS: &str = "weights_apply_query_vars";
     pub const WEIGHTS_RESTORE_QUERY_VARS: &str = "weights_restore_query_vars";
+    pub const WEIGHTS_APPLY_QUERY_VARS_FALSE_BATCHED: &str =
+        "weights_apply_query_vars_false_batched";
+    pub const WEIGHTS_RESTORE_QUERY_VARS_FALSE_BATCHED: &str =
+        "weights_restore_query_vars_false_batched";
+    pub const WEIGHTS_APPLY_QUERY_VARS_TRUE_BATCHED: &str = "weights_apply_query_vars_true_batched";
+    pub const WEIGHTS_RESTORE_QUERY_VARS_TRUE_BATCHED: &str =
+        "weights_restore_query_vars_true_batched";
 }
 
 /// Kernel function names in the GPU D4 module (CNF validation + circuit levelization).
@@ -420,16 +428,21 @@ pub mod circuit_kernels {
     pub const XGCF_ADD_SCALAR: &str = "xgcf_add_scalar";
     pub const XGCF_FORWARD_LEVEL_CACHED: &str = "xgcf_forward_level_cached";
     pub const XGCF_EVAL_ALL_LEVELS_CACHED: &str = "xgcf_eval_all_levels_cached";
+    pub const XGCF_EVAL_ALL_LEVELS_CACHED_BATCHED: &str = "xgcf_eval_all_levels_cached_batched";
     pub const XGCF_BACKWARD_LEVEL_PROPAGATE_CACHED: &str = "xgcf_backward_level_propagate_cached";
     pub const XGCF_BACKWARD_LEVEL_DECISION_GRAD_CACHED: &str =
         "xgcf_backward_level_decision_grad_cached";
     pub const XGCF_BACKWARD_LEVEL_LIT_GRAD_CACHED: &str = "xgcf_backward_level_lit_grad_cached";
     pub const XGCF_BACKWARD_ALL_LEVELS_CACHED: &str = "xgcf_backward_all_levels_cached";
+    pub const XGCF_BACKWARD_ALL_LEVELS_CACHED_BATCHED: &str =
+        "xgcf_backward_all_levels_cached_batched";
     pub const XGCF_FREE_VAR_APPLY_GRAD_CACHED: &str = "xgcf_free_var_apply_grad_cached";
     pub const XGCF_FREE_VAR_REDUCE_STAGE_CACHED: &str = "xgcf_free_var_reduce_stage_cached";
     pub const XGCF_ADD_SCALAR_CACHED: &str = "xgcf_add_scalar_cached";
+    pub const XGCF_SET_ROOT_ADJ_CACHED_BATCHED: &str = "xgcf_set_root_adj_cached_batched";
     pub const XGCF_COPY_ROOT_CACHED: &str = "xgcf_copy_root_cached";
     pub const XGCF_COPY_ROOT_CACHED_META: &str = "xgcf_copy_root_cached_meta";
+    pub const XGCF_COPY_ROOT_CACHED_META_BATCHED: &str = "xgcf_copy_root_cached_meta_batched";
 }
 
 /// Kernel function names in the cache module
@@ -919,8 +932,13 @@ impl CudaKernelProvider {
                     weights_kernels::WEIGHTS_RESTORE_VAR_FALSE,
                     weights_kernels::WEIGHTS_FORCE_VAR_TRUE,
                     weights_kernels::WEIGHTS_RESTORE_VAR_TRUE,
+                    weights_kernels::WEIGHTS_COPY_SLOT_TO_BATCH,
                     weights_kernels::WEIGHTS_APPLY_QUERY_VARS,
                     weights_kernels::WEIGHTS_RESTORE_QUERY_VARS,
+                    weights_kernels::WEIGHTS_APPLY_QUERY_VARS_FALSE_BATCHED,
+                    weights_kernels::WEIGHTS_RESTORE_QUERY_VARS_FALSE_BATCHED,
+                    weights_kernels::WEIGHTS_APPLY_QUERY_VARS_TRUE_BATCHED,
+                    weights_kernels::WEIGHTS_RESTORE_QUERY_VARS_TRUE_BATCHED,
                 ],
             )
             .map_err(|e| XlogError::Kernel(format!("Failed to load weights PTX: {}", e)))?;
@@ -941,15 +959,19 @@ impl CudaKernelProvider {
                     circuit_kernels::XGCF_ADD_SCALAR,
                     circuit_kernels::XGCF_FORWARD_LEVEL_CACHED,
                     circuit_kernels::XGCF_EVAL_ALL_LEVELS_CACHED,
+                    circuit_kernels::XGCF_EVAL_ALL_LEVELS_CACHED_BATCHED,
                     circuit_kernels::XGCF_BACKWARD_LEVEL_PROPAGATE_CACHED,
                     circuit_kernels::XGCF_BACKWARD_LEVEL_DECISION_GRAD_CACHED,
                     circuit_kernels::XGCF_BACKWARD_LEVEL_LIT_GRAD_CACHED,
                     circuit_kernels::XGCF_BACKWARD_ALL_LEVELS_CACHED,
+                    circuit_kernels::XGCF_BACKWARD_ALL_LEVELS_CACHED_BATCHED,
                     circuit_kernels::XGCF_FREE_VAR_APPLY_GRAD_CACHED,
                     circuit_kernels::XGCF_FREE_VAR_REDUCE_STAGE_CACHED,
                     circuit_kernels::XGCF_ADD_SCALAR_CACHED,
+                    circuit_kernels::XGCF_SET_ROOT_ADJ_CACHED_BATCHED,
                     circuit_kernels::XGCF_COPY_ROOT_CACHED,
                     circuit_kernels::XGCF_COPY_ROOT_CACHED_META,
+                    circuit_kernels::XGCF_COPY_ROOT_CACHED_META_BATCHED,
                 ],
             )
             .map_err(|e| XlogError::Kernel(format!("Failed to load circuit PTX: {}", e)))?;

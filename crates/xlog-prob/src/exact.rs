@@ -291,6 +291,483 @@ impl ExactDdnnfProgram {
         Ok(loss)
     }
 
+    /// Batched variant of [`Self::neural_backward_nll_buffers_with_device_loss`].
+    ///
+    /// Computes NLL gradients for `batch` queries that share one compiled circuit
+    /// template and returns a device-resident vector of `batch` scalar losses.
+    ///
+    /// On circuits that require free-variable correction, this falls back to the
+    /// existing per-query path for correctness.
+    pub fn neural_backward_nll_buffers_batch_with_device_loss(
+        &self,
+        slots: &GpuWeightSlots,
+        query_indices: &[usize],
+        probs_batch: &[Vec<CudaBuffer>],
+        out_grads_batch: &mut [Vec<CudaBuffer>],
+        cfg: NeuralFastPathConfig,
+        expected_true: bool,
+    ) -> Result<TrackedCudaSlice<f64>> {
+        let batch = query_indices.len();
+        if batch == 0 {
+            return Err(XlogError::Execution(
+                "Neural fast-path batch error: empty query batch".to_string(),
+            ));
+        }
+        if probs_batch.len() != batch || out_grads_batch.len() != batch {
+            return Err(XlogError::Compilation(format!(
+                "Neural fast-path batch error: query/prob/grad batch mismatch ({}/{}/{})",
+                batch,
+                probs_batch.len(),
+                out_grads_batch.len()
+            )));
+        }
+
+        let state = self.gpu_state()?;
+        let batch_u32 = u32::try_from(batch).map_err(|_| {
+            XlogError::Compilation("Neural fast-path batch size exceeds u32".to_string())
+        })?;
+        let device = state.provider.device().inner();
+
+        // Fallback for circuits that currently require per-query free-var correction.
+        {
+            let cache = state
+                .cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if cache.has_free_var_mask() {
+                drop(cache);
+                let mut losses = state.provider.memory().alloc::<f64>(batch)?;
+                for q in 0..batch {
+                    let loss_q = self.neural_backward_nll_buffers_with_device_loss(
+                        slots,
+                        query_indices[q],
+                        &probs_batch[q],
+                        &mut out_grads_batch[q],
+                        cfg,
+                        expected_true,
+                    )?;
+                    let mut dst = losses.slice_mut(q..(q + 1));
+                    device.dtod_copy(&loss_q, &mut dst).map_err(|e| {
+                        XlogError::Kernel(format!(
+                            "Failed to copy fallback batch loss to output: {}",
+                            e
+                        ))
+                    })?;
+                }
+                return Ok(losses);
+            }
+        }
+
+        let fill = device
+            .get_func(NEURAL_MODULE, neural_kernels::NEURAL_FILL_AD_CHAIN_F32)
+            .ok_or_else(|| {
+                XlogError::Kernel("neural_fill_ad_chain_f32 kernel not found".to_string())
+            })?;
+        let scatter = device
+            .get_func(
+                NEURAL_MODULE,
+                neural_kernels::NEURAL_SCATTER_AD_CHAIN_GRADS_F32,
+            )
+            .ok_or_else(|| {
+                XlogError::Kernel("neural_scatter_ad_chain_grads_f32 kernel not found".to_string())
+            })?;
+        let binary_f64 = device
+            .get_func(ARITH_MODULE, arith_kernels::ARITH_BINARY_F64)
+            .ok_or_else(|| XlogError::Kernel("arith_binary_f64 kernel not found".to_string()))?;
+        let apply_query_false_batched = device
+            .get_func(
+                WEIGHTS_MODULE,
+                weights_kernels::WEIGHTS_APPLY_QUERY_VARS_FALSE_BATCHED,
+            )
+            .ok_or_else(|| {
+                XlogError::Kernel(
+                    "weights_apply_query_vars_false_batched kernel not found".to_string(),
+                )
+            })?;
+        let apply_query_true_batched = device
+            .get_func(
+                WEIGHTS_MODULE,
+                weights_kernels::WEIGHTS_APPLY_QUERY_VARS_TRUE_BATCHED,
+            )
+            .ok_or_else(|| {
+                XlogError::Kernel(
+                    "weights_apply_query_vars_true_batched kernel not found".to_string(),
+                )
+            })?;
+
+        let mut cache = state
+            .cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let var_stride = cache.var_stride()?;
+        let var_stride_usize = var_stride as usize;
+        let node_stride = cache.node_stride();
+        let node_stride_usize = node_stride as usize;
+
+        let mut var_log_true_batch = state
+            .provider
+            .memory()
+            .alloc::<f64>(batch * var_stride_usize)?;
+        let mut var_log_false_batch = state
+            .provider
+            .memory()
+            .alloc::<f64>(batch * var_stride_usize)?;
+        cache.copy_slot_weights_to_batch(
+            state.handle(),
+            &mut var_log_true_batch,
+            &mut var_log_false_batch,
+            batch_u32,
+        )?;
+
+        let mut values_batch = state
+            .provider
+            .memory()
+            .alloc::<f64>(batch * node_stride_usize)?;
+        let mut adj_batch = state
+            .provider
+            .memory()
+            .alloc::<f64>(batch * node_stride_usize)?;
+        let mut grad_true_batch = state
+            .provider
+            .memory()
+            .alloc::<f64>(batch * var_stride_usize)?;
+        let mut grad_false_batch = state
+            .provider
+            .memory()
+            .alloc::<f64>(batch * var_stride_usize)?;
+        let mut base_roots = state.provider.memory().alloc::<f64>(batch)?;
+        let mut query_roots = state.provider.memory().alloc::<f64>(batch)?;
+        let mut losses = state.provider.memory().alloc::<f64>(batch)?;
+        let mut query_vars = state.provider.memory().alloc::<u32>(batch)?;
+        let mut force_saved = state.provider.memory().alloc::<f64>(batch)?;
+
+        let mut query_vars_host: Vec<u32> = Vec::with_capacity(batch);
+
+        // Fill per-query var weight rows from device-resident probability tensors.
+        for q in 0..batch {
+            if probs_batch[q].len() != out_grads_batch[q].len() {
+                return Err(XlogError::Compilation(format!(
+                    "Neural fast-path batch error: probs len {} != out_grads len {} for query {}",
+                    probs_batch[q].len(),
+                    out_grads_batch[q].len(),
+                    q
+                )));
+            }
+            if probs_batch[q].len() as u32 != slots.num_groups() {
+                return Err(XlogError::Compilation(format!(
+                    "Neural fast-path batch error: expected {} groups, got {} for query {}",
+                    slots.num_groups(),
+                    probs_batch[q].len(),
+                    q
+                )));
+            }
+
+            let query_var = self.query_var(query_indices[q]).ok_or_else(|| {
+                XlogError::Execution(format!(
+                    "Neural fast-path batch error: query {} has no CNF var",
+                    query_indices[q]
+                ))
+            })?;
+            if query_var == 0 || query_var > self.max_var {
+                return Err(XlogError::Compilation(format!(
+                    "Neural fast-path batch error: query var {} out of bounds (max_var={})",
+                    query_var, self.max_var
+                )));
+            }
+            query_vars_host.push(query_var);
+
+            let row_start = q
+                .checked_mul(var_stride_usize)
+                .ok_or_else(|| XlogError::Compilation("Neural batch row overflow".to_string()))?;
+            let row_end = row_start + var_stride_usize;
+
+            for (g, prob_buf) in probs_batch[q].iter().enumerate() {
+                if prob_buf.arity() != 1 {
+                    return Err(XlogError::Compilation(
+                        "Neural fast-path expects 1-column prob buffers".to_string(),
+                    ));
+                }
+                let ty = prob_buf.schema().column_type(0).ok_or_else(|| {
+                    XlogError::Compilation("Missing prob buffer schema".to_string())
+                })?;
+                if ty != ScalarType::F32 {
+                    return Err(XlogError::Compilation(format!(
+                        "Neural fast-path expects prob dtype F32, got {:?}",
+                        ty
+                    )));
+                }
+
+                let slot_vars = slots.group_slot_cnf_var(g)?;
+                let labels = slot_vars.len() as u32;
+                if prob_buf.num_rows() != labels as u64 {
+                    return Err(XlogError::Compilation(format!(
+                        "Neural fast-path prob rows {} != labels {}",
+                        prob_buf.num_rows(),
+                        labels
+                    )));
+                }
+                if out_grads_batch[q][g].num_rows() != labels as u64 {
+                    return Err(XlogError::Compilation(format!(
+                        "Neural fast-path grad rows {} != labels {}",
+                        out_grads_batch[q][g].num_rows(),
+                        labels
+                    )));
+                }
+
+                let prob_col = prob_buf.column(0).ok_or_else(|| {
+                    XlogError::Compilation("Neural fast-path missing prob column".to_string())
+                })?;
+                let mut q_true = var_log_true_batch.slice_mut(row_start..row_end);
+                let mut q_false = var_log_false_batch.slice_mut(row_start..row_end);
+
+                unsafe {
+                    fill.clone().launch(
+                        LaunchConfig {
+                            grid_dim: (1, 1, 1),
+                            block_dim: (1, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        (
+                            prob_col,
+                            labels,
+                            &slot_vars,
+                            cfg.eps,
+                            cfg.min_p,
+                            &mut q_true,
+                            &mut q_false,
+                        ),
+                    )
+                }
+                .map_err(|e| {
+                    XlogError::Kernel(format!("neural_fill_ad_chain_f32 failed: {}", e))
+                })?;
+            }
+        }
+
+        // Base pass (all queries): grads = dlogZ_base/dp, roots = logZ_base.
+        cache.eval_grads_inplace_fused_batched(
+            state.handle(),
+            &var_log_true_batch,
+            &var_log_false_batch,
+            &mut values_batch,
+            &mut adj_batch,
+            &mut grad_true_batch,
+            &mut grad_false_batch,
+            batch_u32,
+        )?;
+        cache.copy_root_batched_from_values(
+            state.handle(),
+            &values_batch,
+            &mut base_roots,
+            batch_u32,
+        )?;
+
+        // Scatter base gradients into output buffers.
+        for q in 0..batch {
+            let row_start = q
+                .checked_mul(var_stride_usize)
+                .ok_or_else(|| XlogError::Compilation("Neural batch row overflow".to_string()))?;
+            let row_end = row_start + var_stride_usize;
+            let q_grad_true = grad_true_batch.slice(row_start..row_end);
+            let q_grad_false = grad_false_batch.slice(row_start..row_end);
+
+            for (g, prob_buf) in probs_batch[q].iter().enumerate() {
+                let slot_vars = slots.group_slot_cnf_var(g)?;
+                let labels = slot_vars.len() as u32;
+                let prob_col = prob_buf.column(0).ok_or_else(|| {
+                    XlogError::Compilation("Neural fast-path missing prob column".to_string())
+                })?;
+                let out_col = out_grads_batch[q][g]
+                    .columns
+                    .get_mut(0)
+                    .ok_or_else(|| XlogError::Compilation("Missing grad column".to_string()))?;
+
+                let shared_bytes: u32 = 3u64
+                    .checked_mul(labels as u64)
+                    .and_then(|n| n.checked_mul(std::mem::size_of::<f64>() as u64))
+                    .and_then(|n| u32::try_from(n).ok())
+                    .ok_or_else(|| {
+                        XlogError::Kernel("Neural scatter shared memory overflow".to_string())
+                    })?;
+
+                unsafe {
+                    scatter.clone().launch(
+                        LaunchConfig {
+                            grid_dim: (1, 1, 1),
+                            block_dim: (1, 1, 1),
+                            shared_mem_bytes: shared_bytes,
+                        },
+                        (
+                            prob_col,
+                            labels,
+                            &slot_vars,
+                            cfg.eps,
+                            cfg.min_p,
+                            &q_grad_true,
+                            &q_grad_false,
+                            0u8,
+                            out_col,
+                        ),
+                    )
+                }
+                .map_err(|e| XlogError::Kernel(format!("neural_scatter (base) failed: {}", e)))?;
+            }
+        }
+
+        device
+            .htod_sync_copy_into(&query_vars_host, &mut query_vars)
+            .map_err(|e| {
+                XlogError::Kernel(format!("Failed to upload batched query vars: {}", e))
+            })?;
+        let force_grid = if batch_u32 == 0 {
+            0
+        } else {
+            (batch_u32 + 255) / 256
+        };
+        if force_grid != 0 {
+            if expected_true {
+                unsafe {
+                    apply_query_false_batched.clone().launch(
+                        LaunchConfig {
+                            grid_dim: (force_grid, 1, 1),
+                            block_dim: (256, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        (
+                            &query_vars,
+                            batch_u32,
+                            self.max_var,
+                            var_stride,
+                            &mut var_log_false_batch,
+                            &mut force_saved,
+                        ),
+                    )
+                }
+                .map_err(|e| {
+                    XlogError::Kernel(format!(
+                        "weights_apply_query_vars_false_batched failed: {}",
+                        e
+                    ))
+                })?;
+            } else {
+                unsafe {
+                    apply_query_true_batched.clone().launch(
+                        LaunchConfig {
+                            grid_dim: (force_grid, 1, 1),
+                            block_dim: (256, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        (
+                            &query_vars,
+                            batch_u32,
+                            self.max_var,
+                            var_stride,
+                            &mut var_log_true_batch,
+                            &mut force_saved,
+                        ),
+                    )
+                }
+                .map_err(|e| {
+                    XlogError::Kernel(format!(
+                        "weights_apply_query_vars_true_batched failed: {}",
+                        e
+                    ))
+                })?;
+            }
+        }
+
+        // Query-forced pass (all queries): grads = dlogZ_query/dp, roots = logZ_query.
+        cache.eval_grads_inplace_fused_batched(
+            state.handle(),
+            &var_log_true_batch,
+            &var_log_false_batch,
+            &mut values_batch,
+            &mut adj_batch,
+            &mut grad_true_batch,
+            &mut grad_false_batch,
+            batch_u32,
+        )?;
+        cache.copy_root_batched_from_values(
+            state.handle(),
+            &values_batch,
+            &mut query_roots,
+            batch_u32,
+        )?;
+
+        let loss_grid = if batch_u32 == 0 {
+            0
+        } else {
+            (batch_u32 + 255) / 256
+        };
+        if loss_grid != 0 {
+            unsafe {
+                binary_f64.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (loss_grid, 1, 1),
+                        block_dim: (256, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (&base_roots, &query_roots, batch_u32, 1u8, &mut losses),
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("Failed to compute batched NLL loss: {}", e)))?;
+        }
+
+        // Scatter query gradients with subtract mode.
+        for q in 0..batch {
+            let row_start = q
+                .checked_mul(var_stride_usize)
+                .ok_or_else(|| XlogError::Compilation("Neural batch row overflow".to_string()))?;
+            let row_end = row_start + var_stride_usize;
+            let q_grad_true = grad_true_batch.slice(row_start..row_end);
+            let q_grad_false = grad_false_batch.slice(row_start..row_end);
+
+            for (g, prob_buf) in probs_batch[q].iter().enumerate() {
+                let slot_vars = slots.group_slot_cnf_var(g)?;
+                let labels = slot_vars.len() as u32;
+                let prob_col = prob_buf.column(0).ok_or_else(|| {
+                    XlogError::Compilation("Neural fast-path missing prob column".to_string())
+                })?;
+                let out_col = out_grads_batch[q][g]
+                    .columns
+                    .get_mut(0)
+                    .ok_or_else(|| XlogError::Compilation("Missing grad column".to_string()))?;
+
+                let shared_bytes: u32 = 3u64
+                    .checked_mul(labels as u64)
+                    .and_then(|n| n.checked_mul(std::mem::size_of::<f64>() as u64))
+                    .and_then(|n| u32::try_from(n).ok())
+                    .ok_or_else(|| {
+                        XlogError::Kernel("Neural scatter shared memory overflow".to_string())
+                    })?;
+
+                unsafe {
+                    scatter.clone().launch(
+                        LaunchConfig {
+                            grid_dim: (1, 1, 1),
+                            block_dim: (1, 1, 1),
+                            shared_mem_bytes: shared_bytes,
+                        },
+                        (
+                            prob_col,
+                            labels,
+                            &slot_vars,
+                            cfg.eps,
+                            cfg.min_p,
+                            &q_grad_true,
+                            &q_grad_false,
+                            1u8,
+                            out_col,
+                        ),
+                    )
+                }
+                .map_err(|e| XlogError::Kernel(format!("neural_scatter (query) failed: {}", e)))?;
+            }
+        }
+
+        Ok(losses)
+    }
+
     fn neural_backward_nll_buffers_inner(
         &self,
         slots: &GpuWeightSlots,
@@ -962,7 +1439,8 @@ impl ExactDdnnfProgram {
             num_choice_probs,
             random_var_count,
         )?;
-        let random_vars = DeviceRandomVarList::from_device(random_var_list, actual_random_var_count)?;
+        let random_vars =
+            DeviceRandomVarList::from_device(random_var_list, actual_random_var_count)?;
 
         let compile_config = default_compile_config(&encoding.cnf, config.memory_bytes)?;
         let cache_config = default_cache_config(&encoding.cnf, &compile_config)?;
@@ -1323,7 +1801,7 @@ pub(crate) fn default_cache_config(
         ));
     }
     Ok(GpuCircuitCacheConfig {
-        num_slots: 4,   // Hold 4 circuit templates; power-of-2 hash table.
+        num_slots: 4, // Hold 4 circuit templates; power-of-2 hash table.
         table_size: 8,
         node_cap: compile.smooth_node_cap,
         edge_cap: compile.smooth_edge_cap,
@@ -1534,7 +2012,8 @@ pub(crate) fn collect_random_vars_device(
     // from query/evidence roots and don't get assigned CNF variables.
     let actual_count = {
         let mut buf = vec![0u32; 1];
-        device.dtoh_sync_copy_into(&count_device, &mut buf)
+        device
+            .dtoh_sync_copy_into(&count_device, &mut buf)
             .map_err(|e| XlogError::Kernel(format!("dtoh count_device failed: {}", e)))?;
         buf[0]
     };

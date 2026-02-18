@@ -702,6 +702,354 @@ extern "C" __global__ void xgcf_eval_all_levels_cached(
     }
 }
 
+// Evaluate all levels for a batch of query-specific weight tables while reusing
+// the same cached circuit topology slot.
+// - One CUDA block handles one query (blockIdx.x = query index).
+// - Topology and level metadata come from active_slot[0].
+// - var/value buffers are laid out as [batch][stride].
+extern "C" __global__ void xgcf_eval_all_levels_cached_batched(
+    const uint32_t* __restrict__ active_slot,
+    uint32_t node_cap,
+    uint32_t edge_cap,
+    uint32_t level_cap,
+    uint32_t var_cap,
+    const uint8_t* __restrict__ node_type,
+    const uint32_t* __restrict__ child_offsets,
+    const uint32_t* __restrict__ child_indices,
+    const int32_t* __restrict__ lit,
+    const uint32_t* __restrict__ decision_var,
+    const uint32_t* __restrict__ decision_child_false,
+    const uint32_t* __restrict__ decision_child_true,
+    const uint32_t* __restrict__ level_nodes,
+    const uint32_t* __restrict__ level_offsets,
+    const uint32_t* __restrict__ meta_num_levels,
+    const double* __restrict__ var_log_true_batch,
+    const double* __restrict__ var_log_false_batch,
+    uint32_t var_stride,
+    double* __restrict__ values_batch,
+    uint32_t value_stride,
+    uint32_t batch_size
+) {
+    uint32_t q = blockIdx.x;
+    if (q >= batch_size) {
+        return;
+    }
+
+    uint32_t slot = active_slot[0];
+    size_t node_base = slot_offset(slot, node_cap);
+    size_t edge_base = slot_offset(slot, edge_cap);
+    size_t offset_base = slot_offset(slot, node_cap + 1u);
+    size_t level_base = slot_offset(slot, node_cap);
+    size_t level_offset_base = slot_offset(slot, level_cap + 1u);
+
+    const uint8_t* node_type_s = node_type + node_base;
+    const uint32_t* child_offsets_s = child_offsets + offset_base;
+    const uint32_t* child_indices_s = child_indices + edge_base;
+    const int32_t* lit_s = lit + node_base;
+    const uint32_t* decision_var_s = decision_var + node_base;
+    const uint32_t* decision_child_false_s = decision_child_false + node_base;
+    const uint32_t* decision_child_true_s = decision_child_true + node_base;
+    const uint32_t* level_nodes_s = level_nodes + level_base;
+    const uint32_t* level_offsets_s = level_offsets + level_offset_base;
+
+    size_t q_var_base = static_cast<size_t>(q) * static_cast<size_t>(var_stride);
+    size_t q_value_base = static_cast<size_t>(q) * static_cast<size_t>(value_stride);
+    const double* var_log_true_q = var_log_true_batch + q_var_base;
+    const double* var_log_false_q = var_log_false_batch + q_var_base;
+    double* values_q = values_batch + q_value_base;
+
+    uint32_t num_levels = meta_num_levels[slot];
+    for (uint32_t level = 0; level < num_levels; ++level) {
+        uint32_t level_offset = level_offsets_s[level];
+        uint32_t num_level_nodes = level_offsets_s[level + 1] - level_offset;
+        for (uint32_t idx = threadIdx.x; idx < num_level_nodes; idx += blockDim.x) {
+            uint32_t node = level_nodes_s[level_offset + idx];
+            uint8_t ty = node_type_s[node];
+
+            double v;
+            switch (ty) {
+                case XGCF_CONST0:
+                    v = -INFINITY;
+                    break;
+                case XGCF_CONST1:
+                    v = 0.0;
+                    break;
+                case XGCF_LIT: {
+                    int32_t l = lit_s[node];
+                    uint32_t var = (l > 0) ? static_cast<uint32_t>(l) : static_cast<uint32_t>(-l);
+                    v = (l > 0) ? var_log_true_q[var] : var_log_false_q[var];
+                    break;
+                }
+                case XGCF_AND: {
+                    uint32_t c0 = child_offsets_s[node];
+                    uint32_t c1 = child_offsets_s[node + 1];
+                    double acc = 0.0;
+                    for (uint32_t i = c0; i < c1; i++) {
+                        uint32_t child = child_indices_s[i];
+                        acc += values_q[child];
+                    }
+                    v = acc;
+                    break;
+                }
+                case XGCF_OR: {
+                    uint32_t c0 = child_offsets_s[node];
+                    uint32_t c1 = child_offsets_s[node + 1];
+                    double maxv = -INFINITY;
+                    for (uint32_t i = c0; i < c1; i++) {
+                        uint32_t child = child_indices_s[i];
+                        double cv = values_q[child];
+                        if (cv > maxv) {
+                            maxv = cv;
+                        }
+                    }
+                    if (isinf(maxv) && maxv < 0.0) {
+                        v = maxv;
+                    } else {
+                        double sum = 0.0;
+                        for (uint32_t i = c0; i < c1; i++) {
+                            uint32_t child = child_indices_s[i];
+                            sum += exp(values_q[child] - maxv);
+                        }
+                        v = maxv + log(sum);
+                    }
+                    break;
+                }
+                case XGCF_DECISION: {
+                    uint32_t var = decision_var_s[node];
+                    uint32_t child_f = decision_child_false_s[node];
+                    uint32_t child_t = decision_child_true_s[node];
+                    double t = var_log_true_q[var];
+                    double f = var_log_false_q[var];
+                    v = logsumexp2(f + values_q[child_f], t + values_q[child_t]);
+                    break;
+                }
+                default:
+                    v = -INFINITY;
+                    break;
+            }
+
+            values_q[node] = v;
+        }
+        __syncthreads();
+    }
+}
+
+// Set adj[root] = 1.0 for each query batch row.
+extern "C" __global__ void xgcf_set_root_adj_cached_batched(
+    const uint32_t* __restrict__ active_slot,
+    uint32_t node_cap,
+    const uint32_t* __restrict__ meta_root,
+    double* __restrict__ adj_batch,
+    uint32_t adj_stride,
+    uint32_t batch_size
+) {
+    uint32_t q = blockIdx.x;
+    if (q >= batch_size || threadIdx.x != 0) {
+        return;
+    }
+    uint32_t slot = active_slot[0];
+    uint32_t root = meta_root[slot];
+    size_t q_adj_base = static_cast<size_t>(q) * static_cast<size_t>(adj_stride);
+    (void)node_cap;
+    adj_batch[q_adj_base + root] = 1.0;
+}
+
+// Fused backward pass over all levels for batched query rows.
+extern "C" __global__ void xgcf_backward_all_levels_cached_batched(
+    const uint32_t* __restrict__ active_slot,
+    uint32_t node_cap,
+    uint32_t edge_cap,
+    uint32_t level_cap,
+    uint32_t var_cap,
+    const uint8_t* __restrict__ node_type,
+    const uint32_t* __restrict__ child_offsets,
+    const uint32_t* __restrict__ child_indices,
+    const uint32_t* __restrict__ decision_var,
+    const uint32_t* __restrict__ decision_child_false,
+    const uint32_t* __restrict__ decision_child_true,
+    const int32_t* __restrict__ lit,
+    const uint32_t* __restrict__ level_nodes,
+    const uint32_t* __restrict__ level_offsets,
+    const uint32_t* __restrict__ meta_num_levels,
+    const double* __restrict__ var_log_true_batch,
+    const double* __restrict__ var_log_false_batch,
+    uint32_t var_stride,
+    const double* __restrict__ values_batch,
+    uint32_t value_stride,
+    double* __restrict__ adj_batch,
+    uint32_t adj_stride,
+    double* __restrict__ grad_true_batch,
+    double* __restrict__ grad_false_batch,
+    uint32_t grad_stride,
+    uint32_t batch_size
+) {
+    uint32_t q = blockIdx.x;
+    if (q >= batch_size) {
+        return;
+    }
+
+    uint32_t slot = active_slot[0];
+    size_t node_base = slot_offset(slot, node_cap);
+    size_t edge_base = slot_offset(slot, edge_cap);
+    size_t offset_base = slot_offset(slot, node_cap + 1u);
+    size_t level_base = slot_offset(slot, node_cap);
+    size_t level_offset_base = slot_offset(slot, level_cap + 1u);
+
+    const uint8_t* node_type_s = node_type + node_base;
+    const uint32_t* child_offsets_s = child_offsets + offset_base;
+    const uint32_t* child_indices_s = child_indices + edge_base;
+    const uint32_t* decision_var_s = decision_var + node_base;
+    const uint32_t* decision_child_false_s = decision_child_false + node_base;
+    const uint32_t* decision_child_true_s = decision_child_true + node_base;
+    const int32_t* lit_s = lit + node_base;
+    const uint32_t* level_nodes_s = level_nodes + level_base;
+    const uint32_t* level_offsets_s = level_offsets + level_offset_base;
+
+    size_t q_var_base = static_cast<size_t>(q) * static_cast<size_t>(var_stride);
+    size_t q_value_base = static_cast<size_t>(q) * static_cast<size_t>(value_stride);
+    size_t q_adj_base = static_cast<size_t>(q) * static_cast<size_t>(adj_stride);
+    size_t q_grad_base = static_cast<size_t>(q) * static_cast<size_t>(grad_stride);
+    const double* var_log_true_q = var_log_true_batch + q_var_base;
+    const double* var_log_false_q = var_log_false_batch + q_var_base;
+    const double* values_q = values_batch + q_value_base;
+    double* adj_q = adj_batch + q_adj_base;
+    double* grad_true_q = grad_true_batch + q_grad_base;
+    double* grad_false_q = grad_false_batch + q_grad_base;
+
+    uint32_t num_levels = meta_num_levels[slot];
+    for (int32_t level = static_cast<int32_t>(num_levels) - 1; level >= 0; --level) {
+        uint32_t level_off = level_offsets_s[level];
+        uint32_t num_level_nodes = level_offsets_s[level + 1] - level_off;
+        for (uint32_t idx = threadIdx.x; idx < num_level_nodes; idx += blockDim.x) {
+            uint32_t node = level_nodes_s[level_off + idx];
+            double a = adj_q[node];
+
+            if (a != 0.0) {
+                uint8_t ty = node_type_s[node];
+                switch (ty) {
+                    case XGCF_AND: {
+                        uint32_t c0 = child_offsets_s[node];
+                        uint32_t c1 = child_offsets_s[node + 1];
+                        for (uint32_t i = c0; i < c1; i++) {
+                            uint32_t child = child_indices_s[i];
+                            atomicAdd(&adj_q[child], a);
+                        }
+                        break;
+                    }
+                    case XGCF_OR: {
+                        double parent_v = values_q[node];
+                        if (!(isinf(parent_v) && parent_v < 0.0)) {
+                            uint32_t c0 = child_offsets_s[node];
+                            uint32_t c1 = child_offsets_s[node + 1];
+                            for (uint32_t i = c0; i < c1; i++) {
+                                uint32_t child = child_indices_s[i];
+                                double child_v = values_q[child];
+                                if (isinf(child_v) && child_v < 0.0) {
+                                    continue;
+                                }
+                                double ratio = exp(child_v - parent_v);
+                                if (ratio != 0.0) {
+                                    atomicAdd(&adj_q[child], a * ratio);
+                                }
+                            }
+                        }
+                        break;
+                    }
+                    case XGCF_DECISION: {
+                        double parent_v = values_q[node];
+                        if (!(isinf(parent_v) && parent_v < 0.0)) {
+                            uint32_t var = decision_var_s[node];
+                            uint32_t child_f = decision_child_false_s[node];
+                            uint32_t child_t = decision_child_true_s[node];
+                            double log_t = var_log_true_q[var];
+                            double log_f = var_log_false_q[var];
+
+                            double vf = values_q[child_f];
+                            double vt = values_q[child_t];
+                            if (!(isinf(vf) && vf < 0.0)) {
+                                double ratio_f = exp((log_f + vf) - parent_v);
+                                if (ratio_f != 0.0) {
+                                    atomicAdd(&adj_q[child_f], a * ratio_f);
+                                }
+                            }
+                            if (!(isinf(vt) && vt < 0.0)) {
+                                double ratio_t = exp((log_t + vt) - parent_v);
+                                if (ratio_t != 0.0) {
+                                    atomicAdd(&adj_q[child_t], a * ratio_t);
+                                }
+                            }
+                        }
+                        break;
+                    }
+                    default:
+                        break;
+                }
+
+                if (ty == XGCF_DECISION) {
+                    double parent_v = values_q[node];
+                    if (!(isinf(parent_v) && parent_v < 0.0)) {
+                        uint32_t var = decision_var_s[node];
+                        uint32_t child_f = decision_child_false_s[node];
+                        uint32_t child_t = decision_child_true_s[node];
+                        double log_t = var_log_true_q[var];
+                        double log_f = var_log_false_q[var];
+
+                        double vf = values_q[child_f];
+                        double vt = values_q[child_t];
+
+                        double p_false = 0.0;
+                        double p_true = 0.0;
+                        if (!(isinf(vf) && vf < 0.0)) {
+                            p_false = exp((log_f + vf) - parent_v);
+                        }
+                        if (!(isinf(vt) && vt < 0.0)) {
+                            p_true = exp((log_t + vt) - parent_v);
+                        }
+
+                        if (p_false != 0.0) {
+                            atomicAdd(&grad_false_q[var], a * p_false);
+                        }
+                        if (p_true != 0.0) {
+                            atomicAdd(&grad_true_q[var], a * p_true);
+                        }
+                    }
+                }
+
+                if (ty == XGCF_LIT) {
+                    int32_t l = lit_s[node];
+                    uint32_t var = (l > 0) ? static_cast<uint32_t>(l) : static_cast<uint32_t>(-l);
+                    if (l > 0) {
+                        atomicAdd(&grad_true_q[var], a);
+                    } else if (l < 0) {
+                        atomicAdd(&grad_false_q[var], a);
+                    }
+                }
+            }
+        }
+        __syncthreads();
+    }
+}
+
+extern "C" __global__ void xgcf_copy_root_cached_meta_batched(
+    const uint32_t* __restrict__ active_slot,
+    uint32_t node_cap,
+    const uint32_t* __restrict__ meta_root,
+    const double* __restrict__ values_batch,
+    uint32_t value_stride,
+    double* __restrict__ out_log_z,
+    uint32_t batch_size
+) {
+    uint32_t q = blockIdx.x;
+    if (q >= batch_size || threadIdx.x != 0) {
+        return;
+    }
+    uint32_t slot = active_slot[0];
+    uint32_t root = meta_root[slot];
+    size_t q_value_base = static_cast<size_t>(q) * static_cast<size_t>(value_stride);
+    (void)node_cap;
+    out_log_z[q] = values_batch[q_value_base + root];
+}
+
 extern "C" __global__ void xgcf_copy_root_cached_meta(
     const uint32_t* __restrict__ active_slot,
     uint32_t node_cap,

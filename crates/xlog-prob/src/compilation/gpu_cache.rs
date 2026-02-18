@@ -222,6 +222,346 @@ impl GpuCircuitCache {
         self.num_slots
     }
 
+    pub fn has_free_var_mask(&self) -> bool {
+        self.has_free_var_mask
+    }
+
+    pub fn var_stride(&self) -> Result<u32> {
+        self.var_cap
+            .checked_add(1)
+            .ok_or_else(|| XlogError::Compilation("GpuCircuitCache var_cap overflow".to_string()))
+    }
+
+    pub fn node_stride(&self) -> u32 {
+        self.node_cap
+    }
+
+    pub fn copy_slot_weights_to_batch(
+        &mut self,
+        handle: &GpuCircuitCacheHandle,
+        out_true_batch: &mut TrackedCudaSlice<f64>,
+        out_false_batch: &mut TrackedCudaSlice<f64>,
+        batch_size: u32,
+    ) -> Result<()> {
+        if batch_size == 0 {
+            return Ok(());
+        }
+        let var_stride = self.var_stride()?;
+        let expected = (batch_size as usize)
+            .checked_mul(var_stride as usize)
+            .ok_or_else(|| {
+                XlogError::Compilation("GpuCircuitCache batch weight size overflow".to_string())
+            })?;
+        if out_true_batch.len() != expected || out_false_batch.len() != expected {
+            return Err(XlogError::Compilation(format!(
+                "GpuCircuitCache batched weight buffers must both have len {}, got {} and {}",
+                expected,
+                out_true_batch.len(),
+                out_false_batch.len()
+            )));
+        }
+
+        let device = self.provider.device().inner();
+        let func = device
+            .get_func(
+                xlog_cuda::provider::WEIGHTS_MODULE,
+                xlog_cuda::provider::weights_kernels::WEIGHTS_COPY_SLOT_TO_BATCH,
+            )
+            .ok_or_else(|| {
+                XlogError::Kernel("weights_copy_slot_to_batch kernel not found".to_string())
+            })?;
+
+        let block_dim = 256u32;
+        let total = (batch_size as u64)
+            .checked_mul(var_stride as u64)
+            .ok_or_else(|| {
+                XlogError::Compilation("GpuCircuitCache batch copy overflow".to_string())
+            })?;
+        let grid_dim = if total == 0 {
+            0
+        } else {
+            ((total + (block_dim as u64) - 1) / (block_dim as u64)) as u32
+        };
+        if grid_dim == 0 {
+            return Ok(());
+        }
+
+        unsafe {
+            func.clone().launch(
+                LaunchConfig {
+                    grid_dim: (grid_dim, 1, 1),
+                    block_dim: (block_dim, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (
+                    handle.slot_device(),
+                    self.var_cap,
+                    &self.var_log_true,
+                    &self.var_log_false,
+                    out_true_batch,
+                    out_false_batch,
+                    var_stride,
+                    batch_size,
+                ),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("weights_copy_slot_to_batch failed: {}", e)))?;
+
+        Ok(())
+    }
+
+    pub fn eval_grads_inplace_fused_batched(
+        &mut self,
+        handle: &GpuCircuitCacheHandle,
+        var_log_true_batch: &TrackedCudaSlice<f64>,
+        var_log_false_batch: &TrackedCudaSlice<f64>,
+        values_batch: &mut TrackedCudaSlice<f64>,
+        adj_batch: &mut TrackedCudaSlice<f64>,
+        grad_true_batch: &mut TrackedCudaSlice<f64>,
+        grad_false_batch: &mut TrackedCudaSlice<f64>,
+        batch_size: u32,
+    ) -> Result<()> {
+        if batch_size == 0 {
+            return Ok(());
+        }
+        if self.has_free_var_mask {
+            return Err(XlogError::Execution(
+                "Batched fused eval currently does not support free-var correction".to_string(),
+            ));
+        }
+
+        let var_stride = self.var_stride()?;
+        let node_stride = self.node_stride();
+        let expected_var = (batch_size as usize)
+            .checked_mul(var_stride as usize)
+            .ok_or_else(|| {
+                XlogError::Compilation("GpuCircuitCache batched var buffer overflow".to_string())
+            })?;
+        let expected_node = (batch_size as usize)
+            .checked_mul(node_stride as usize)
+            .ok_or_else(|| {
+                XlogError::Compilation("GpuCircuitCache batched node buffer overflow".to_string())
+            })?;
+
+        if var_log_true_batch.len() != expected_var
+            || var_log_false_batch.len() != expected_var
+            || grad_true_batch.len() != expected_var
+            || grad_false_batch.len() != expected_var
+        {
+            return Err(XlogError::Compilation(format!(
+                "GpuCircuitCache batched var buffers must have len {}",
+                expected_var
+            )));
+        }
+        if values_batch.len() != expected_node || adj_batch.len() != expected_node {
+            return Err(XlogError::Compilation(format!(
+                "GpuCircuitCache batched node buffers must have len {}",
+                expected_node
+            )));
+        }
+
+        let device = self.provider.device().inner();
+        device
+            .memset_zeros(adj_batch)
+            .map_err(|e| XlogError::Kernel(format!("Failed to zero batched adj: {}", e)))?;
+        device
+            .memset_zeros(grad_true_batch)
+            .map_err(|e| XlogError::Kernel(format!("Failed to zero batched grad_true: {}", e)))?;
+        device
+            .memset_zeros(grad_false_batch)
+            .map_err(|e| XlogError::Kernel(format!("Failed to zero batched grad_false: {}", e)))?;
+
+        let eval_all = device
+            .get_func(
+                xlog_cuda::CIRCUIT_MODULE,
+                xlog_cuda::circuit_kernels::XGCF_EVAL_ALL_LEVELS_CACHED_BATCHED,
+            )
+            .ok_or_else(|| {
+                XlogError::Kernel("xgcf_eval_all_levels_cached_batched not found".to_string())
+            })?;
+        let set_root_adj = device
+            .get_func(
+                xlog_cuda::CIRCUIT_MODULE,
+                xlog_cuda::circuit_kernels::XGCF_SET_ROOT_ADJ_CACHED_BATCHED,
+            )
+            .ok_or_else(|| {
+                XlogError::Kernel("xgcf_set_root_adj_cached_batched not found".to_string())
+            })?;
+        let backward_all = device
+            .get_func(
+                xlog_cuda::CIRCUIT_MODULE,
+                xlog_cuda::circuit_kernels::XGCF_BACKWARD_ALL_LEVELS_CACHED_BATCHED,
+            )
+            .ok_or_else(|| {
+                XlogError::Kernel("xgcf_backward_all_levels_cached_batched not found".to_string())
+            })?;
+
+        let block_size = 256u32;
+        let mut eval_params: Vec<*mut std::ffi::c_void> = vec![
+            handle.slot_device().as_kernel_param(),
+            self.node_cap.as_kernel_param(),
+            self.edge_cap.as_kernel_param(),
+            self.level_cap.as_kernel_param(),
+            self.var_cap.as_kernel_param(),
+            (&self.node_type).as_kernel_param(),
+            (&self.child_offsets).as_kernel_param(),
+            (&self.child_indices).as_kernel_param(),
+            (&self.lit).as_kernel_param(),
+            (&self.decision_var).as_kernel_param(),
+            (&self.decision_child_false).as_kernel_param(),
+            (&self.decision_child_true).as_kernel_param(),
+            (&self.level_nodes).as_kernel_param(),
+            (&self.level_offsets).as_kernel_param(),
+            (&self.meta_num_levels).as_kernel_param(),
+            var_log_true_batch.as_kernel_param(),
+            var_log_false_batch.as_kernel_param(),
+            var_stride.as_kernel_param(),
+            values_batch.as_kernel_param(),
+            node_stride.as_kernel_param(),
+            batch_size.as_kernel_param(),
+        ];
+        unsafe {
+            eval_all.clone().launch(
+                LaunchConfig {
+                    grid_dim: (batch_size, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                &mut eval_params,
+            )
+        }
+        .map_err(|e| {
+            XlogError::Kernel(format!("xgcf_eval_all_levels_cached_batched failed: {}", e))
+        })?;
+
+        unsafe {
+            set_root_adj.clone().launch(
+                LaunchConfig {
+                    grid_dim: (batch_size, 1, 1),
+                    block_dim: (1, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (
+                    handle.slot_device(),
+                    self.node_cap,
+                    &self.meta_root,
+                    &mut *adj_batch,
+                    node_stride,
+                    batch_size,
+                ),
+            )
+        }
+        .map_err(|e| {
+            XlogError::Kernel(format!("xgcf_set_root_adj_cached_batched failed: {}", e))
+        })?;
+
+        let mut backward_params: Vec<*mut std::ffi::c_void> = vec![
+            handle.slot_device().as_kernel_param(),
+            self.node_cap.as_kernel_param(),
+            self.edge_cap.as_kernel_param(),
+            self.level_cap.as_kernel_param(),
+            self.var_cap.as_kernel_param(),
+            (&self.node_type).as_kernel_param(),
+            (&self.child_offsets).as_kernel_param(),
+            (&self.child_indices).as_kernel_param(),
+            (&self.decision_var).as_kernel_param(),
+            (&self.decision_child_false).as_kernel_param(),
+            (&self.decision_child_true).as_kernel_param(),
+            (&self.lit).as_kernel_param(),
+            (&self.level_nodes).as_kernel_param(),
+            (&self.level_offsets).as_kernel_param(),
+            (&self.meta_num_levels).as_kernel_param(),
+            var_log_true_batch.as_kernel_param(),
+            var_log_false_batch.as_kernel_param(),
+            var_stride.as_kernel_param(),
+            values_batch.as_kernel_param(),
+            node_stride.as_kernel_param(),
+            adj_batch.as_kernel_param(),
+            node_stride.as_kernel_param(),
+            grad_true_batch.as_kernel_param(),
+            grad_false_batch.as_kernel_param(),
+            var_stride.as_kernel_param(),
+            batch_size.as_kernel_param(),
+        ];
+        unsafe {
+            backward_all.clone().launch(
+                LaunchConfig {
+                    grid_dim: (batch_size, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                &mut backward_params,
+            )
+        }
+        .map_err(|e| {
+            XlogError::Kernel(format!(
+                "xgcf_backward_all_levels_cached_batched failed: {}",
+                e
+            ))
+        })?;
+
+        Ok(())
+    }
+
+    pub fn copy_root_batched_from_values(
+        &self,
+        handle: &GpuCircuitCacheHandle,
+        values_batch: &TrackedCudaSlice<f64>,
+        out_roots: &mut TrackedCudaSlice<f64>,
+        batch_size: u32,
+    ) -> Result<()> {
+        if batch_size == 0 {
+            return Ok(());
+        }
+        let node_stride = self.node_stride();
+        let expected_values = (batch_size as usize)
+            .checked_mul(node_stride as usize)
+            .ok_or_else(|| {
+                XlogError::Compilation("GpuCircuitCache batched values overflow".to_string())
+            })?;
+        if values_batch.len() != expected_values || out_roots.len() != batch_size as usize {
+            return Err(XlogError::Compilation(format!(
+                "GpuCircuitCache root copy expects values len {} and roots len {}, got {} and {}",
+                expected_values,
+                batch_size,
+                values_batch.len(),
+                out_roots.len()
+            )));
+        }
+
+        let device = self.provider.device().inner();
+        let copy_root = device
+            .get_func(
+                xlog_cuda::CIRCUIT_MODULE,
+                xlog_cuda::circuit_kernels::XGCF_COPY_ROOT_CACHED_META_BATCHED,
+            )
+            .ok_or_else(|| {
+                XlogError::Kernel("xgcf_copy_root_cached_meta_batched not found".to_string())
+            })?;
+        unsafe {
+            copy_root.clone().launch(
+                LaunchConfig {
+                    grid_dim: (batch_size, 1, 1),
+                    block_dim: (1, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (
+                    handle.slot_device(),
+                    self.node_cap,
+                    &self.meta_root,
+                    values_batch,
+                    node_stride,
+                    out_roots,
+                    batch_size,
+                ),
+            )
+        }
+        .map_err(|e| {
+            XlogError::Kernel(format!("xgcf_copy_root_cached_meta_batched failed: {}", e))
+        })?;
+        Ok(())
+    }
+
     pub fn new(provider: &Arc<CudaKernelProvider>, config: GpuCircuitCacheConfig) -> Result<Self> {
         if config.num_slots == 0 {
             return Err(XlogError::Compilation(
