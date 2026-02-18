@@ -1,0 +1,15 @@
+{
+  "compile_api_sec": 0.01,
+  "epoch_sec": [
+    67.477,
+    2.658,
+    2.66,
+    2.659,
+    2.653
+  ],
+  "first_epoch_sec": 67.477,
+  "steady_epoch_sec_mean": 2.658,
+  "warmup_sec": 64.82,
+  "total_train_sec": 78.108,
+  "per_query_ms": 61.022
+}

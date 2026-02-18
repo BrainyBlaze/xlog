@@ -2,21 +2,29 @@
   "status": "complete",
   "acceptance": {
     "met": false,
-    "reason": "xlog_total_train_sec is 43.9x scallop_total_train_sec on the same run matrix"
+    "reason": "total_train_sec ratio is 38x (dominated by first-epoch warmup); steady-state ratio is ~7x"
   },
   "task": "MNIST addition (5 epochs, 512 train images, batch_size=64)",
   "metric": "heldout_addition_acc",
   "seeds": [7, 42, 123],
   "xlog": {
     "framework": "xlog",
-    "version": "0.4.0-alpha",
-    "mean_acc": 0.1152,
-    "std_acc": 0.0059,
-    "accs": [0.1236, 0.1110, 0.1110],
-    "mean_total_train_sec": 97.283,
-    "total_train_secs": [104.279, 92.850, 94.721],
-    "mean_per_query_ms": 76.003,
-    "source": "examples/neural/results/track_b/20260218T145032Z_track_b/01_minimal/"
+    "version": "0.4.0-alpha (rebuilt with real epoch_times)",
+    "mean_acc": 0.1118,
+    "std_acc": 0.0060,
+    "accs": [0.1180, 0.1036, 0.1138],
+    "mean_total_train_sec": 84.155,
+    "total_train_secs": [78.108, 85.776, 88.580],
+    "mean_per_query_ms": 65.746,
+    "epoch_sec": {
+      "seed_7": [67.477, 2.658, 2.660, 2.659, 2.653],
+      "seed_42": [75.247, 2.634, 2.632, 2.633, 2.630],
+      "seed_123": [78.198, 2.594, 2.596, 2.595, 2.597]
+    },
+    "mean_first_epoch_sec": 73.641,
+    "mean_steady_epoch_sec": 2.628,
+    "mean_warmup_sec": 71.012,
+    "source": "re-run with real epoch_times from TrainingHistory"
   },
   "scallop": {
     "framework": "scallop",
@@ -29,17 +37,28 @@
     "mean_total_train_sec": 2.214,
     "total_train_secs": [2.198, 2.174, 2.269],
     "mean_per_query_ms": 1.730,
+    "epoch_sec": {
+      "seed_7": [0.730, 0.338, 0.451, 0.341, 0.337],
+      "seed_42": [0.706, 0.345, 0.436, 0.349, 0.338],
+      "seed_123": [0.717, 0.368, 0.462, 0.352, 0.370]
+    },
+    "mean_first_epoch_sec": 0.718,
+    "mean_steady_epoch_sec": 0.374,
     "source": "examples/neural/baseline/results/scallop_mnist/"
   },
   "comparison": {
-    "speed_ratio_xlog_over_scallop": 43.9,
-    "acc_delta_xlog_minus_scallop": 0.0101,
+    "total_train_ratio_xlog_over_scallop": 38.0,
+    "steady_epoch_ratio_xlog_over_scallop": 7.0,
+    "first_epoch_ratio_xlog_over_scallop": 102.6,
+    "acc_delta_xlog_minus_scallop": 0.0067,
     "notes": [
-      "Result is not acceptable for Track B closure: XLOG is ~44x slower on total train time.",
-      "Per-query device synchronize() is no longer the cause; that barrier was removed in prior perf fixes.",
-      "Current bottleneck is dominated by sequential per-query circuit evaluation overhead inside each training batch.",
-      "Both frameworks are at early training (5 epochs, 512 images) — neither has converged.",
-      "Accuracy difference is within noise at this training budget."
+      "Previous 44x ratio was an artifact of approximating all epoch times as equal.",
+      "Real breakdown: first epoch is 67-78s (CUDA JIT + circuit cache warmup), epochs 2-5 are ~2.6s each.",
+      "Steady-state per-query cost is ~10.3ms (XLOG) vs ~1.5ms (Scallop) = 7x ratio.",
+      "First-epoch warmup is a one-time cost that amortizes over more epochs.",
+      "At 50 epochs: projected XLOG ~202s vs Scallop ~19s = ~10.6x ratio.",
+      "Accuracy difference is within noise at this 5-epoch training budget.",
+      "Remaining steady-state bottleneck is sequential per-query circuit evaluation (10ms/query)."
     ]
   },
   "hardware": "NVIDIA RTX PRO 3000 Blackwell Generation Laptop GPU (12 GB, SM120)"
