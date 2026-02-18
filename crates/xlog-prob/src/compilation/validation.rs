@@ -185,7 +185,7 @@ fn build_circuit_cnf(
     provider.exclusive_scan_u32_inplace(&mut internal_prefix, num_nodes_u32)?;
     provider.exclusive_scan_u32_inplace(&mut clause_base, num_nodes_u32)?;
     provider.exclusive_scan_u32_inplace(&mut lit_base, num_nodes_u32)?;
-    provider.device().synchronize()?;
+    // No device synchronize: next ops are alloc + kernel launches on same stream.
 
     // Output CNF buffers + device-resident meta.
     let mut d_num_vars = memory.alloc::<u32>(1)?;
@@ -281,7 +281,7 @@ fn build_circuit_cnf(
         )
     }
     .map_err(|e| XlogError::Kernel(format!("sat_cnf_write_terminator failed: {}", e)))?;
-    provider.device().synchronize()?;
+    // No device synchronize: returns device-resident CNF; same-stream ordering suffices.
 
     Ok(CircuitCnf {
         cnf: GpuCnf {
@@ -480,8 +480,7 @@ fn build_phi_and_not_c(
         )
     }
     .map_err(|e| XlogError::Kernel(format!("sat_xgcf_write_root_unit_clause failed: {}", e)))?;
-
-    provider.device().synchronize()?;
+    // No device synchronize: returns device-resident CNF; same-stream ordering suffices.
 
     Ok(GpuCnf {
         var_cap,
@@ -728,8 +727,7 @@ fn build_c_and_not_phi(
         )
     }
     .map_err(|e| XlogError::Kernel(format!("sat_emit_not_phi failed: {}", e)))?;
-
-    provider.device().synchronize()?;
+    // No device synchronize: returns device-resident CNF; same-stream ordering suffices.
 
     Ok((
         GpuCnf {
