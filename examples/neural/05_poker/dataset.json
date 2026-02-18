@@ -2,15 +2,21 @@
   "name": "playing_cards",
   "provider": "manual",
   "version": "1.0",
+  "description": "Playing card images (JPEG); parsed by filename to rank+suit atoms",
   "splits": {
     "train": {
-      "count": 0
+      "count": 1967,
+      "note": "all images in data/cards/; train/eval split done at runtime"
     }
   },
   "ci_subset": {
     "train": 64
   },
   "artifacts": [],
+  "local_paths": [
+    "data/cards/*.jpg",
+    "data/cards/*.jpeg"
+  ],
   "metrics": {
     "min_accuracy": 0.5
   }

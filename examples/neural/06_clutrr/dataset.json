@@ -2,15 +2,21 @@
   "name": "clutrr",
   "provider": "manual",
   "version": "1.0",
+  "description": "CLUTRR kinship reasoning; JSONL with story+target_relation fields",
   "splits": {
     "train": {
-      "count": 0
+      "count": 1730,
+      "labels": ["parent", "child", "spouse", "sibling"],
+      "note": "rows with unsupported labels are filtered at load time"
     }
   },
   "ci_subset": {
     "train": 64
   },
   "artifacts": [],
+  "local_paths": [
+    "data/clutrr/train.jsonl"
+  ],
   "metrics": {
     "min_accuracy": 0.4
   }

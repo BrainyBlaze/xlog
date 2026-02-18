@@ -2,15 +2,21 @@
   "name": "svhn_two_digit",
   "provider": "manual",
   "version": "1.0",
+  "description": "SVHN images filtered to exactly 2-digit bounding boxes; digit crops used as separate network inputs",
   "splits": {
     "train": {
-      "count": 0
+      "count": 2048,
+      "note": "raw images; effective count depends on 2-digit filter"
     }
   },
   "ci_subset": {
     "train": 128
   },
   "artifacts": [],
+  "local_paths": [
+    "data/svhn/train/digitStruct.mat",
+    "data/svhn/train/*.png"
+  ],
   "metrics": {
     "min_accuracy": 0.5
   }

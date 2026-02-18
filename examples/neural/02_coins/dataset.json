@@ -4,17 +4,25 @@
   "version": "1.0",
   "splits": {
     "train": {
-      "count": 0
+      "count": 12,
+      "classes": {"heads": 6, "tails": 6}
     },
     "test": {
-      "count": 0
+      "count": 4,
+      "classes": {"heads": 2, "tails": 2}
     }
   },
   "ci_subset": {
-    "train": 64,
-    "test": 32
+    "train": 12,
+    "test": 4
   },
   "artifacts": [],
+  "local_paths": [
+    "data/coins/train/heads/",
+    "data/coins/train/tails/",
+    "data/coins/test/heads/",
+    "data/coins/test/tails/"
+  ],
   "metrics": {
     "min_accuracy": 0.7
   }

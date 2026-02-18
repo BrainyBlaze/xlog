@@ -2,15 +2,21 @@
   "name": "crohme",
   "provider": "manual",
   "version": "2019",
+  "description": "CROHME 2019 ExpressMatch subset; InkML+label pairs for handwritten formula recognition",
   "splits": {
     "train": {
-      "count": 0
+      "count": 128,
+      "note": "128 InkML/label pairs in expressmatch/"
     }
   },
   "ci_subset": {
     "train": 64
   },
   "artifacts": [],
+  "local_paths": [
+    "data/crohme/expressmatch/*.inkml",
+    "data/crohme/expressmatch/*.txt"
+  ],
   "metrics": {
     "min_accuracy": 0.5
   }
