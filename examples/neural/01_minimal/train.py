@@ -360,6 +360,8 @@ def main():
                         help='Number of random addition pairs per epoch in torch engine')
     parser.add_argument('--target-train-acc', type=float, default=None,
                         help='Optional early-stop target for train accuracy in torch engine')
+    parser.add_argument('--metrics-path', type=str, default=None,
+                        help='Path to write frozen-schema metrics JSON')
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -390,9 +392,13 @@ def main():
 
     if args.engine == 'xlog':
         print("Compiling XLOG program...")
+        import time as _time
         import pyxlog
 
+        t0 = _time.monotonic()
         program = create_program()
+        compile_api_sec = _time.monotonic() - t0
+
         program.register_network("mnist_net", net, optimizer)
         program.add_tensor_source("train", train_images)
 
@@ -400,6 +406,7 @@ def main():
         queries = generate_queries(n_pairs, train_labels)
         print(f"Generated {len(queries)} training queries")
 
+        train_start = _time.monotonic()
         history = pyxlog.train_model_tensor(
             program,
             queries,
@@ -407,7 +414,38 @@ def main():
             batch_size=args.batch_size,
             log_iter=args.log_iter,
         )
+        total_train_sec = _time.monotonic() - train_start
         epoch_losses = history.epoch_losses
+
+        # Write frozen-schema metrics if path provided
+        if args.metrics_path is not None:
+            import json
+            from pathlib import Path
+            n_epochs = len(epoch_losses)
+            epoch_sec = []
+            if hasattr(history, 'epoch_times'):
+                epoch_sec = list(history.epoch_times)
+            else:
+                # Approximate: divide total evenly (first epoch is slower)
+                avg = total_train_sec / max(n_epochs, 1)
+                epoch_sec = [avg] * n_epochs
+            first_epoch_sec = epoch_sec[0] if epoch_sec else 0.0
+            steady = epoch_sec[1:] if len(epoch_sec) > 1 else epoch_sec
+            steady_mean = sum(steady) / len(steady) if steady else first_epoch_sec
+            warmup = max(0.0, first_epoch_sec - steady_mean)
+            per_query_ms = total_train_sec / (len(queries) * max(n_epochs, 1)) * 1000
+
+            data = {
+                "compile_api_sec": round(compile_api_sec, 3),
+                "epoch_sec": [round(t, 3) for t in epoch_sec],
+                "first_epoch_sec": round(first_epoch_sec, 3),
+                "steady_epoch_sec_mean": round(steady_mean, 3),
+                "warmup_sec": round(warmup, 3),
+                "total_train_sec": round(total_train_sec, 3),
+                "per_query_ms": round(per_query_ms, 3),
+            }
+            Path(args.metrics_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(args.metrics_path).write_text(json.dumps(data, indent=2) + "\n")
     else:
         eval_images = None
         eval_labels = None

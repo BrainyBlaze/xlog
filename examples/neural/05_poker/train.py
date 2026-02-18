@@ -17,6 +17,7 @@ from scripts.neural_training import (
     resolve_min_accuracy,
     set_seed,
     split_indices,
+    write_frozen_metrics,
 )
 
 ROOT = Path(__file__).resolve().parent
@@ -169,6 +170,7 @@ def main() -> int:
     parser.add_argument("--queries-per-epoch", type=int, default=None)
     parser.add_argument("--rank-query-weight", type=int, default=1)
     parser.add_argument("--min-accuracy", type=float, default=None)
+    parser.add_argument("--metrics-path", type=str, default=None)
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -194,7 +196,12 @@ def main() -> int:
         eval_images = train_images
         eval_labels = train_labels
 
+    import time as _time
+
+    t0 = _time.monotonic()
     program = pyxlog.Program.compile((ROOT / "program.xlog").read_text())
+    compile_api_sec = _time.monotonic() - t0
+
     rank_net = CardNet(len(RANKS), focus="rank").to(device)
     suit_net = CardNet(len(SUITS), focus="suit").to(device)
     program.register_network(
@@ -214,6 +221,9 @@ def main() -> int:
     else:
         query_examples = len(train_labels)
 
+    epoch_times = []
+    total_queries = 0
+    train_start = _time.monotonic()
     for epoch in range(epochs):
         picked = pick_epoch_indices(
             len(train_labels), query_examples, seed=args.seed, epoch=epoch
@@ -221,7 +231,14 @@ def main() -> int:
         queries = build_training_queries(
             train_labels, picked, rank_weight=args.rank_query_weight
         )
+        if epoch == 0:
+            total_queries = len(queries)
+        ep_start = _time.monotonic()
         program.train_epoch(queries, batch_size=min(args.batch_size, len(queries)))
+        epoch_times.append(_time.monotonic() - ep_start)
+    total_train_sec = _time.monotonic() - train_start
+
+    write_frozen_metrics(args.metrics_path, compile_api_sec, epoch_times, total_train_sec, total_queries)
 
     rank_order = ["r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9", "r10", "rj", "rq", "rk", "ra"]
     suit_order = ["c", "d", "h", "s"]

@@ -39,6 +39,7 @@ EXAMPLES = [
             " --train-limit 512"
             " --data-path examples/neural/01_minimal/data/mnist"
             " --save-path {run_dir}/mnist_net.pt"
+            " --metrics-path {run_dir}/metrics.json"
         ),
         "metric_key": "heldout_addition_acc",
         "manifest": "examples/neural/01_minimal/dataset.json",
@@ -50,6 +51,7 @@ EXAMPLES = [
         "command": (
             f"{PYTHON} examples/neural/02_coins/train.py"
             " --mode dev --epochs 12 --batch-size 32 --lr 1e-3 --seed {seed}"
+            " --metrics-path {run_dir}/metrics.json"
         ),
         "metric_key": "test_acc",
         "manifest": "examples/neural/02_coins/dataset.json",
@@ -60,6 +62,7 @@ EXAMPLES = [
             f"{PYTHON} examples/neural/03_mnist_multidigit/train.py"
             " --mode dev --epochs 12 --batch-size 32 --lr 1e-3 --seed {seed}"
             " --eval-ratio 0.2"
+            " --metrics-path {run_dir}/metrics.json"
         ),
         "metric_key": "eval_joint_proxy",
         "manifest": "examples/neural/03_mnist_multidigit/dataset.json",
@@ -70,6 +73,7 @@ EXAMPLES = [
             f"{PYTHON} examples/neural/04_hwf/train.py"
             " --mode dev --epochs 12 --batch-size 8 --lr 1e-3 --seed {seed}"
             " --eval-ratio 0.2"
+            " --metrics-path {run_dir}/metrics.json"
         ),
         "metric_key": "eval_acc",
         "manifest": "examples/neural/04_hwf/dataset.json",
@@ -80,6 +84,7 @@ EXAMPLES = [
             f"{PYTHON} examples/neural/05_poker/train.py"
             " --mode dev --epochs 20 --batch-size 16 --lr 1e-3 --seed {seed}"
             " --eval-ratio 0.1 --rank-query-weight 1"
+            " --metrics-path {run_dir}/metrics.json"
         ),
         "metric_key": "eval_joint_proxy",
         "manifest": "examples/neural/05_poker/dataset.json",
@@ -90,6 +95,7 @@ EXAMPLES = [
             f"{PYTHON} examples/neural/06_clutrr/train.py"
             " --mode dev --epochs 10 --batch-size 16 --lr 1e-3 --seed {seed}"
             " --eval-ratio 0.2"
+            " --metrics-path {run_dir}/metrics.json"
         ),
         "metric_key": "eval_acc",
         "manifest": "examples/neural/06_clutrr/dataset.json",
@@ -265,6 +271,18 @@ def run_single(example, seed, run_dir, env_info, git_info, run_id):
         "environment": env_info,
         "git": git_info,
     }
+
+    # Merge frozen-schema fields written by training script (if present)
+    ext_metrics_path = run_dir / "metrics.json"
+    if ext_metrics_path.exists():
+        try:
+            ext = json.loads(ext_metrics_path.read_text())
+            for key in ("compile_api_sec", "first_epoch_sec", "steady_epoch_sec_mean",
+                        "warmup_sec", "per_query_ms", "epoch_sec", "total_train_sec"):
+                if key in ext:
+                    metrics[key] = ext[key]
+        except (json.JSONDecodeError, OSError):
+            pass
 
     with open(run_dir / "metrics.json", "w") as f:
         json.dump(metrics, f, indent=2)

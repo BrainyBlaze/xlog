@@ -15,6 +15,7 @@ from scripts.neural_training import (
     resolve_min_accuracy,
     set_seed,
     split_indices,
+    write_frozen_metrics,
 )
 
 ROOT = Path(__file__).resolve().parent
@@ -112,6 +113,7 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--eval-ratio", type=float, default=0.2)
     parser.add_argument("--min-accuracy", type=float, default=None)
+    parser.add_argument("--metrics-path", type=str, default=None)
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -134,14 +136,26 @@ def main() -> int:
         eval_images = train_images
         eval_labels = train_labels
 
+    import time as _time
+
+    t0 = _time.monotonic()
     program = pyxlog.Program.compile((ROOT / "program.xlog").read_text())
+    compile_api_sec = _time.monotonic() - t0
+
     net = HWFNet().to(device)
     program.register_network("hw_net", net, torch.optim.Adam(net.parameters(), lr=args.lr))
     program.add_tensor_source("train", train_images)
 
     queries = [f"expr_type({i}, {train_labels[i]})" for i in range(len(train_labels))]
+    epoch_times = []
+    train_start = _time.monotonic()
     for _ in range(epochs):
+        ep_start = _time.monotonic()
         program.train_epoch(queries, batch_size=min(args.batch_size, len(queries)))
+        epoch_times.append(_time.monotonic() - ep_start)
+    total_train_sec = _time.monotonic() - train_start
+
+    write_frozen_metrics(args.metrics_path, compile_api_sec, epoch_times, total_train_sec, len(queries))
 
     label_to_idx = {name: idx for idx, name in enumerate(LABEL_ORDER)}
     train_targets = torch.tensor(

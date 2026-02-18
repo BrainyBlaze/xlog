@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
 import random
-from typing import Optional, Tuple
+import time
+from pathlib import Path
+from typing import List, Optional, Tuple
 
 import torch
 
@@ -101,3 +104,56 @@ def report_and_enforce_metric(
         raise SystemExit(
             f"accuracy gate failed: {metric_name}={metric_value:.4f} < threshold={threshold:.4f}"
         )
+
+
+def write_frozen_metrics(
+    metrics_path: Optional[str],
+    compile_api_sec: float,
+    epoch_sec: List[float],
+    total_train_sec: float,
+    n_queries: int,
+    extra: Optional[dict] = None,
+) -> None:
+    """Write metrics.json with the frozen schema fields.
+
+    Args:
+        metrics_path: File path to write. If None, skip.
+        compile_api_sec: Time for pyxlog.Program.compile().
+        epoch_sec: List of per-epoch wall-clock times.
+        total_train_sec: Wall-clock time for the full training loop.
+        n_queries: Total number of training queries per epoch.
+        extra: Additional key-value pairs to include.
+    """
+    if metrics_path is None:
+        return
+
+    first_epoch_sec = epoch_sec[0] if epoch_sec else 0.0
+    if len(epoch_sec) > 1:
+        steady = epoch_sec[1:]
+        steady_epoch_sec_mean = round(sum(steady) / len(steady), 3)
+    else:
+        steady_epoch_sec_mean = round(first_epoch_sec, 3)
+    warmup_sec = round(first_epoch_sec - steady_epoch_sec_mean, 3)
+    if warmup_sec < 0:
+        warmup_sec = 0.0
+
+    n_epochs = len(epoch_sec)
+    if n_queries > 0 and n_epochs > 0:
+        per_query_ms = round(total_train_sec / (n_queries * n_epochs) * 1000, 3)
+    else:
+        per_query_ms = 0.0
+
+    data = {
+        "compile_api_sec": round(compile_api_sec, 3),
+        "epoch_sec": [round(t, 3) for t in epoch_sec],
+        "first_epoch_sec": round(first_epoch_sec, 3),
+        "steady_epoch_sec_mean": steady_epoch_sec_mean,
+        "warmup_sec": warmup_sec,
+        "total_train_sec": round(total_train_sec, 3),
+        "per_query_ms": per_query_ms,
+    }
+    if extra:
+        data.update(extra)
+
+    Path(metrics_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(metrics_path).write_text(json.dumps(data, indent=2) + "\n")

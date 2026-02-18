@@ -13,6 +13,7 @@ from scripts.neural_training import (
     resolve_epochs,
     resolve_min_accuracy,
     set_seed,
+    write_frozen_metrics,
 )
 
 ROOT = Path(__file__).resolve().parent
@@ -57,6 +58,7 @@ def main() -> int:
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--min-accuracy", type=float, default=None)
+    parser.add_argument("--metrics-path", type=str, default=None)
     args = parser.parse_args()
 
     manifest, train_ds, test_ds = load_dataset(args.mode)
@@ -69,7 +71,11 @@ def main() -> int:
     from model import CoinNet
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    import time as _time
+
+    t0 = _time.monotonic()
     program = pyxlog.Program.compile((ROOT / "program.xlog").read_text())
+    compile_api_sec = _time.monotonic() - t0
 
     net = CoinNet().to(device)
     opt = torch.optim.Adam(net.parameters(), lr=args.lr)
@@ -85,8 +91,15 @@ def main() -> int:
     program.add_tensor_source("train", train_images)
 
     queries = [f"coin({i}, {train_atom_labels[i]})" for i in range(len(train_atom_labels))]
+    epoch_times = []
+    train_start = _time.monotonic()
     for _ in range(epochs):
+        ep_start = _time.monotonic()
         program.train_epoch(queries, batch_size=min(args.batch_size, len(queries)))
+        epoch_times.append(_time.monotonic() - ep_start)
+    total_train_sec = _time.monotonic() - train_start
+
+    write_frozen_metrics(args.metrics_path, compile_api_sec, epoch_times, total_train_sec, len(queries))
 
     train_acc = classification_accuracy(net, train_images, train_idx_labels)
     test_acc = classification_accuracy(net, test_images, test_idx_labels)
