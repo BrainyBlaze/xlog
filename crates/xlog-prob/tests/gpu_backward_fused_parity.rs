@@ -12,6 +12,7 @@
 
 use std::sync::Arc;
 
+use cudarc::driver::DeviceSlice;
 use xlog_core::MemoryBudget;
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 use xlog_prob::compilation::gpu_cache::{GpuCircuitCache, GpuCircuitCacheConfig};
@@ -91,13 +92,18 @@ fn build_test_circuit() -> Xgcf {
     }
 }
 
+/// Download the first `n` elements from a device slice.
+/// The device slice may be larger (e.g., multi-slot cache layout), so we download
+/// the full buffer and truncate to the requested length.
 fn download_f64(provider: &CudaKernelProvider, src: &xlog_cuda::memory::TrackedCudaSlice<f64>, n: usize) -> Vec<f64> {
-    let mut host = vec![0.0f64; n];
+    let device_len = src.len();
+    let mut host = vec![0.0f64; device_len];
     provider
         .device()
         .inner()
         .dtoh_sync_copy_into(src, &mut host)
         .expect("dtoh copy");
+    host.truncate(n);
     host
 }
 

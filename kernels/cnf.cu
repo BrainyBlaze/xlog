@@ -4,12 +4,16 @@
 // NOTE: This file is compiled to PTX and embedded in the repo. To keep regeneration possible in
 // environments that only have NVRTC available (no host C++ standard library headers), avoid
 // libstdc++ includes and define the fixed-width integer aliases we need.
+#ifndef __cplusplus
 typedef unsigned char uint8_t;
 typedef signed char int8_t;
 typedef unsigned int uint32_t;
 typedef int int32_t;
 typedef unsigned long long uint64_t;
 typedef long long int64_t;
+#else
+#include <cstdint>
+#endif
 
 #define PIR_CONST    0
 #define PIR_LIT      1
