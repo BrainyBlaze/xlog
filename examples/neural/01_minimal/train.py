@@ -425,7 +425,7 @@ def main():
             epoch_sec = []
             if hasattr(history, 'epoch_times'):
                 epoch_sec = list(history.epoch_times)
-            else:
+            if len(epoch_sec) != n_epochs:
                 # Approximate: divide total evenly (first epoch is slower)
                 avg = total_train_sec / max(n_epochs, 1)
                 epoch_sec = [avg] * n_epochs

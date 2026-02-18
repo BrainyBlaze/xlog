@@ -3351,6 +3351,9 @@ pub struct TrainingHistory {
     /// Loss at the end of each epoch
     #[pyo3(get)]
     pub epoch_losses: Vec<f64>,
+    /// Wall-clock time (seconds) for each epoch
+    #[pyo3(get)]
+    pub epoch_times: Vec<f64>,
     /// Loss for each batch across all epochs
     #[pyo3(get)]
     pub batch_losses: Vec<f64>,
@@ -3360,12 +3363,14 @@ impl TrainingHistory {
     fn new() -> Self {
         Self {
             epoch_losses: Vec::new(),
+            epoch_times: Vec::new(),
             batch_losses: Vec::new(),
         }
     }
 
-    fn add_epoch(&mut self, loss: f64) {
+    fn add_epoch(&mut self, loss: f64, epoch_time_sec: f64) {
         self.epoch_losses.push(loss);
+        self.epoch_times.push(epoch_time_sec);
     }
 
     fn add_batch(&mut self, loss: f64) {
@@ -3402,6 +3407,7 @@ pub fn train_model(
 ) -> PyResult<TrainingHistory> {
     use rand::seq::SliceRandom;
     use rand::thread_rng;
+    use std::time::Instant;
 
     let mut history = TrainingHistory::new();
 
@@ -3413,9 +3419,10 @@ pub fn train_model(
             epoch_queries.shuffle(&mut rng);
         }
 
+        let epoch_start = Instant::now();
         let stats =
             program.train_epoch_internal(py, &epoch_queries, batch_size, log_iter, &mut history)?;
-        history.add_epoch(stats.avg_loss);
+        history.add_epoch(stats.avg_loss, epoch_start.elapsed().as_secs_f64());
 
         // Print epoch progress (visible in Python output)
         println!(
@@ -3449,6 +3456,7 @@ pub fn train_model_tensor(
 ) -> PyResult<TrainingHistory> {
     use rand::seq::SliceRandom;
     use rand::thread_rng;
+    use std::time::Instant;
 
     let mut history = TrainingHistory::new();
 
@@ -3460,9 +3468,10 @@ pub fn train_model_tensor(
             epoch_queries.shuffle(&mut rng);
         }
 
+        let epoch_start = Instant::now();
         let stats =
             program.train_epoch_tensor_internal(py, &epoch_queries, batch_size, log_iter, &mut history)?;
-        history.add_epoch(stats.avg_loss);
+        history.add_epoch(stats.avg_loss, epoch_start.elapsed().as_secs_f64());
 
         println!(
             "Epoch {}/{}: avg_loss={:.6}",

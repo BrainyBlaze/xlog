@@ -1,5 +1,6 @@
 {
   "available": true,
+  "comparison_acceptable": false,
   "version": "0.2.5 (git master, built with rustc nightly 1.95.0)",
   "comparison_artifact": "mnist_xlog_vs_scallop.json",
   "baseline_script": "examples/neural/baseline/scallop/mnist_addition.py",

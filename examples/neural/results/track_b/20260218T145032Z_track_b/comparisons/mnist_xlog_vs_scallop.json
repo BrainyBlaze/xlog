@@ -1,5 +1,9 @@
 {
   "status": "complete",
+  "acceptance": {
+    "met": false,
+    "reason": "xlog_total_train_sec is 43.9x scallop_total_train_sec on the same run matrix"
+  },
   "task": "MNIST addition (5 epochs, 512 train images, batch_size=64)",
   "metric": "heldout_addition_acc",
   "seeds": [7, 42, 123],
@@ -31,10 +35,11 @@
     "speed_ratio_xlog_over_scallop": 43.9,
     "acc_delta_xlog_minus_scallop": 0.0101,
     "notes": [
-      "XLOG is ~44x slower due to per-query host synchronization in forward_backward path.",
+      "Result is not acceptable for Track B closure: XLOG is ~44x slower on total train time.",
+      "Per-query device synchronize() is no longer the cause; that barrier was removed in prior perf fixes.",
+      "Current bottleneck is dominated by sequential per-query circuit evaluation overhead inside each training batch.",
       "Both frameworks are at early training (5 epochs, 512 images) — neither has converged.",
-      "Accuracy difference is within noise at this training budget.",
-      "XLOG multi-query batching (planned) targets the per-query sync bottleneck."
+      "Accuracy difference is within noise at this training budget."
     ]
   },
   "hardware": "NVIDIA RTX PRO 3000 Blackwell Generation Laptop GPU (12 GB, SM120)"

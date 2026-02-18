@@ -64,6 +64,7 @@
   },
   "handoff_flags": {
     "scallop_comparison_complete": true,
+    "scallop_performance_acceptable": false,
     "dataset_finalized": false
   }
 }
