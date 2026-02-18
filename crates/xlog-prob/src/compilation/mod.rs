@@ -246,14 +246,30 @@ pub fn compile_gpu_d4_and_verify_cached(
             ))
         })?;
     }
+    // Only enable free-var correction if there are actual free variables.
+    // When the mask is all-zero (common for smoothed d-DNNF circuits),
+    // skipping this keeps has_free_var_mask=false, which avoids unnecessary
+    // free-var correction kernel launches on every subsequent eval.
+    let mask_host: Vec<u8> = provider
+        .device()
+        .inner()
+        .dtoh_sync_copy(&free_var_mask)
+        .map_err(|e| XlogError::Kernel(format!("Failed to read free_var_mask: {}", e)))?;
+    let has_free_vars = mask_host.iter().any(|&b| b != 0);
     #[cfg(debug_assertions)]
-    eprintln!("[xlog-prob] compile_gpu_d4_and_verify_cached: store_free_var_mask");
-    cache.store_free_var_mask(&mut handle, &free_var_mask)?;
-    #[cfg(debug_assertions)]
-    {
-        provider.device().synchronize().map_err(|e| {
-            XlogError::Kernel(format!("sync after store_free_var_mask failed: {}", e))
-        })?;
+    eprintln!(
+        "[xlog-prob] free_var_mask: {} free vars, batched eval {}",
+        if has_free_vars { "has" } else { "no" },
+        if has_free_vars { "DISABLED" } else { "ENABLED" },
+    );
+    if has_free_vars {
+        cache.store_free_var_mask(&mut handle, &free_var_mask)?;
+        #[cfg(debug_assertions)]
+        {
+            provider.device().synchronize().map_err(|e| {
+                XlogError::Kernel(format!("sync after store_free_var_mask failed: {}", e))
+            })?;
+        }
     }
     Ok(handle)
 }
