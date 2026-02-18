@@ -1,0 +1,26 @@
+	Command being timed: "bash -c 
+python examples/neural/01_minimal/train.py   --engine xlog   --epochs 5   --batch-size 64   --lr 0.001   --seed 42   --train-limit 512   --data-path examples/neural/01_minimal/data/mnist   --save-path examples/neural/results/track_a/20260218T_postfix_v040alpha/01_minimal/seed_42/mnist_net.pt   2>examples/neural/results/track_a/20260218T_postfix_v040alpha/01_minimal/seed_42/stderr.log   1>examples/neural/results/track_a/20260218T_postfix_v040alpha/01_minimal/seed_42/stdout.log
+echo $? > examples/neural/results/track_a/20260218T_postfix_v040alpha/01_minimal/seed_42/exit_code.txt
+"
+	User time (seconds): 9.64
+	System time (seconds): 0.57
+	Percent of CPU this job got: 95%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:10.74
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 1376260
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 1612
+	Minor (reclaiming a frame) page faults: 287529
+	Voluntary context switches: 2226
+	Involuntary context switches: 459
+	Swaps: 0
+	File system inputs: 339632
+	File system outputs: 56
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

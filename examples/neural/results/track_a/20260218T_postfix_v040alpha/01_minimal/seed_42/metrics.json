@@ -1,0 +1,30 @@
+{
+  "seed": 42,
+  "example": "01_minimal",
+  "engine": "xlog",
+  "training_function": "train_model_tensor",
+  "branch": "v0.4.0-alpha-integrated",
+  "postfix_label": "fused_backward+sync_removal+32GB_mem",
+  "train_limit": 512,
+  "num_pairs": 256,
+  "epochs": 5,
+  "batch_size": 64,
+  "learning_rate": 0.001,
+  "device": "cuda",
+  "gpu": "RTX_PRO_6000_Blackwell",
+  "exit_code": 0,
+  "elapsed_sec": 100.77,
+  "max_rss_kb": 1668812,
+  "epoch_losses": [
+    2.781259,
+    2.767784,
+    2.748421,
+    2.715785,
+    2.657772
+  ],
+  "initial_loss": 2.781259,
+  "final_loss": 2.657772,
+  "loss_improvement_pct": 4.4,
+  "heldout_addition_acc": 0.0984,
+  "heldout_digit_acc": 0.1108
+}

@@ -21,6 +21,6 @@ xlog-logic = { path = "../xlog-logic" }
 xlog-neural = { path = "../xlog-neural", features = ["python"] }
 
 [features]
-default = []
+default = ["host-io"]
 host-io = ["xlog-prob/host-io"]
 arrow-device-import = ["xlog-cuda/arrow-device-import"]

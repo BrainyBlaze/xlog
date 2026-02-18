@@ -15,4 +15,4 @@ classifiers = [
 
 [tool.maturin]
 module-name = "pyxlog"
-features = ["pyo3/extension-module"]
+features = ["pyo3/extension-module", "host-io"]
