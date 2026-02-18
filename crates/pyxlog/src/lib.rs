@@ -563,7 +563,7 @@ impl CompiledProbProgram {
     }
 }
 
-#[pyclass(unsendable)]
+#[pyclass]
 pub struct CompiledProgram {
     program: CompiledProbProgram,
     output_provider: Arc<CudaKernelProvider>,
@@ -1730,16 +1730,21 @@ impl CompiledProgram {
         }
 
         let cfg = NeuralFastPathConfig::default();
-        let loss_dev = cached
-            .program
-            .neural_backward_nll_buffers_with_device_loss(
-                &cached.slots,
-                query_idx,
-                &prob_bufs,
-                &mut grad_bufs,
-                cfg,
-                expected,
-            )
+        // Release the GIL during GPU circuit evaluation + backward pass.
+        // This lets Python threads (e.g. data loaders) run while CUDA kernels execute.
+        let loss_dev = py
+            .allow_threads(|| {
+                cached
+                    .program
+                    .neural_backward_nll_buffers_with_device_loss(
+                        &cached.slots,
+                        query_idx,
+                        &prob_bufs,
+                        &mut grad_bufs,
+                        cfg,
+                        expected,
+                    )
+            })
             .map_err(|e| PyRuntimeError::new_err(format!("Neural fast-path error: {}", e)))?;
 
         // `CudaBuffer` carries the row count on-device. For a single scalar loss, upload 1.
@@ -2712,7 +2717,7 @@ impl LogicProgram {
     }
 }
 
-#[pyclass(unsendable)]
+#[pyclass]
 pub struct CompiledLogicProgram {
     program: gpu_logic::LogicProgram,
     provider: Arc<CudaKernelProvider>,

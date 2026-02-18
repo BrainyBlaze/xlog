@@ -6,18 +6,18 @@
 use std::sync::Arc;
 
 use cudarc::driver::CudaDevice as CudarcDevice;
-use cudarc::driver::CudaStream;
 use xlog_core::{Result, XlogError};
 
 /// CUDA device wrapper for GPU operations
 ///
-/// Wraps a cudarc CudaDevice with an associated stream for kernel execution.
+/// Wraps a cudarc CudaDevice for kernel execution.
 /// The device is reference-counted via Arc for safe sharing.
+///
+/// This type is `Send` so it can be used with `py.allow_threads()` in PyO3.
+/// All kernel launches use the device's built-in default stream.
 pub struct CudaDevice {
     /// The underlying cudarc device (already Arc-wrapped)
     device: Arc<CudarcDevice>,
-    /// Default stream for kernel execution
-    stream: CudaStream,
 }
 
 impl CudaDevice {
@@ -46,13 +46,7 @@ impl CudaDevice {
                 XlogError::Kernel(format!("Failed to create CUDA device {}: {}", ordinal, e))
             })?;
 
-        let stream = std::panic::catch_unwind(|| device.fork_default_stream())
-            .map_err(|_| {
-                XlogError::Kernel("Failed to create CUDA stream: cudarc panicked".to_string())
-            })?
-            .map_err(|e| XlogError::Kernel(format!("Failed to create CUDA stream: {}", e)))?;
-
-        Ok(Self { device, stream })
+        Ok(Self { device })
     }
 
     /// Synchronize the device, waiting for all operations to complete
@@ -76,18 +70,19 @@ impl CudaDevice {
         &self.device
     }
 
-    /// Get a reference to the device's execution stream
-    ///
-    /// The stream is used for async kernel execution and memory transfers.
-    pub fn stream(&self) -> &CudaStream {
-        &self.stream
-    }
-
     /// Get the device ordinal (GPU index)
     pub fn ordinal(&self) -> usize {
         self.device.ordinal()
     }
 }
+
+// Compile-time assertion: CudaDevice must be Send so pyxlog can use py.allow_threads().
+const _: () = {
+    fn _assert_send<T: Send>() {}
+    fn _check() {
+        _assert_send::<CudaDevice>();
+    }
+};
 
 #[cfg(test)]
 mod tests {

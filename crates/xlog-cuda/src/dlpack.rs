@@ -151,6 +151,13 @@ pub struct DlpackManagedTensor {
     ptr: *mut DLManagedTensor,
 }
 
+// SAFETY: DLPack tensors are GPU device pointers with a deleter callback.
+// GPU memory is accessible from any CPU thread, and the deleter is a plain
+// function pointer with no thread affinity. The pointer is never dereferenced
+// concurrently — it is only read during column access and freed on drop.
+unsafe impl Send for DlpackManagedTensor {}
+unsafe impl Sync for DlpackManagedTensor {}
+
 impl DlpackManagedTensor {
     /// Construct an owned DLPack tensor from a raw pointer.
     ///
