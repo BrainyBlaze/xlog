@@ -571,11 +571,11 @@ def main():
 
     if not schema_ok:
         print(
-            "\nWARNING: Some runs failed the schema gate. Training scripts "
-            "may need to emit the frozen schema fields. See the per-run "
-            "metrics.json for details.",
+            "\nFATAL: Some runs failed the schema gate. Training scripts "
+            "must emit all frozen schema fields. See per-run metrics.json.",
             flush=True,
         )
+        sys.exit(1)
 
 
 if __name__ == "__main__":
