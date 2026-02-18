@@ -805,8 +805,7 @@ impl GpuXgcf {
         }
         .map_err(|e| XlogError::Kernel(format!("d4_levelize_emit failed: {}", e)))?;
 
-        provider.device().synchronize()?;
-
+        // No device synchronize: result is device buffers used by subsequent GPU ops.
         let builder = GpuCircuitBuilder {
             node_type: out_node_type,
             child_offsets: out_child_offsets,
@@ -1231,7 +1230,8 @@ impl GpuXgcf {
             .dtod_copy(&root_view, out_log_z)
             .map_err(|e| XlogError::Kernel(format!("Failed to copy device logZ: {}", e)))?;
 
-        provider.device().synchronize()?;
+        // No device synchronize: callers read back with a synchronous host copy
+        // or pass the result to subsequent GPU operations (same-stream ordering).
         Ok(())
     }
 
@@ -1576,7 +1576,8 @@ impl GpuXgcf {
         }
 
         self.apply_free_var_correction(provider, true, true)?;
-        provider.device().synchronize()?;
+        // No device synchronize: callers batch multiple eval/backward calls
+        // before syncing at the query boundary.
         Ok(())
     }
 

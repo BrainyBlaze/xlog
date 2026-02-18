@@ -926,11 +926,8 @@ impl GpuCircuitCache {
         }
         .map_err(|e| XlogError::Kernel(format!("cache_store_meta failed: {}", e)))?;
 
-        self.provider
-            .device()
-            .synchronize()
-            .map_err(|e| XlogError::Kernel(format!("cache store sync failed: {}", e)))?;
-
+        // No device synchronize needed: all stores are GPU-to-GPU on the same stream.
+        // Same-stream ordering guarantees subsequent kernels see the stored data.
         Ok(())
     }
 
@@ -1009,10 +1006,7 @@ impl GpuCircuitCache {
             .map_err(|e| XlogError::Kernel(format!("cache_store_weights_false failed: {}", e)))?;
         }
 
-        self.provider
-            .device()
-            .synchronize()
-            .map_err(|e| XlogError::Kernel(format!("cache store_weights sync failed: {}", e)))?;
+        // No device synchronize: same-stream ordering guarantees visibility.
         Ok(())
     }
 
@@ -1097,9 +1091,7 @@ impl GpuCircuitCache {
             })?;
         }
 
-        self.provider.device().synchronize().map_err(|e| {
-            XlogError::Kernel(format!("cache overwrite_weights sync failed: {}", e))
-        })?;
+        // No device synchronize: same-stream ordering guarantees visibility.
         Ok(())
     }
 
@@ -1160,10 +1152,7 @@ impl GpuCircuitCache {
         }
         .map_err(|e| XlogError::Kernel(format!("cache_store_free_var_mask failed: {}", e)))?;
 
-        self.provider.device().synchronize().map_err(|e| {
-            XlogError::Kernel(format!("cache store free_var_mask sync failed: {}", e))
-        })?;
-
+        // No device synchronize: same-stream ordering guarantees visibility.
         self.has_free_var_mask = true;
         Ok(())
     }
@@ -1262,10 +1251,8 @@ impl GpuCircuitCache {
         }
         .map_err(|e| XlogError::Kernel(format!("xgcf_copy_root_cached_meta failed: {}", e)))?;
 
-        self.provider
-            .device()
-            .synchronize()
-            .map_err(|e| XlogError::Kernel(format!("cache eval sync failed: {}", e)))?;
+        // No device synchronize: callers read back with a synchronous host copy
+        // or pass the result to subsequent GPU operations (same-stream ordering).
         Ok(())
     }
 
@@ -1570,7 +1557,8 @@ impl GpuCircuitCache {
         }
 
         self.apply_free_var_correction_cached(handle, true, true)?;
-        self.provider.device().synchronize()?;
+        // No device synchronize: callers batch multiple eval/backward calls
+        // before syncing at the query boundary.
         Ok(())
     }
 
