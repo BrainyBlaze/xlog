@@ -496,6 +496,7 @@ impl Program {
             query_signature_cache: StdHashMap::new(),
             circuit_cache: StdHashMap::new(),
             template_compile_count: 0,
+            batch_queries: true,
         })
     }
 }
@@ -589,6 +590,8 @@ pub struct CompiledProgram {
     circuit_cache: StdHashMap<String, CachedCircuit>,
     /// Number of times the template compilation path executed.
     template_compile_count: usize,
+    /// When true, batch queries sharing the same circuit template in training.
+    batch_queries: bool,
 }
 
 #[pymethods]
@@ -914,6 +917,16 @@ impl CompiledProgram {
     /// Set training mode for all registered networks.
     fn set_train_mode(&mut self, train: bool) {
         self.network_registry.set_train_mode(train);
+    }
+
+    /// Enable or disable multi-query batching for training.
+    ///
+    /// When enabled (default), queries sharing the same circuit template are
+    /// grouped and processed with batched network forward/backward passes,
+    /// reducing kernel launch, DLPack, and GIL transition overhead.
+    #[pyo3(signature = (enabled=true))]
+    fn set_batch_queries(&mut self, enabled: bool) {
+        self.batch_queries = enabled;
     }
 
     // =========================================================================
@@ -1346,17 +1359,88 @@ impl CompiledProgram {
 
             // Accumulate loss on device — no .item() per query
             let mut batch_loss_tensor: Option<PyObject> = None;
-            for query in batch {
-                let loss_t = self.forward_backward_tensor_internal(py, query, true)?;
-                // Detach from computation graph (backward already called inside)
-                let loss_val = loss_t.bind(py).call_method0("detach")?.unbind();
-                batch_loss_tensor = Some(match batch_loss_tensor {
-                    None => loss_val,
-                    Some(acc) => {
-                        acc.bind(py).call_method1("add_", (loss_val.bind(py),))?;
-                        acc
+
+            if self.batch_queries {
+                // ── Batched path: group queries by template ─────────────
+                // Use insertion-ordered grouping so gradient accumulation
+                // ordering is deterministic across runs.
+                let mut complex_group_order: Vec<String> = Vec::new();
+                let mut complex_groups: StdHashMap<String, Vec<Atom>> = StdHashMap::new();
+
+                for query in batch {
+                    match self.try_parse_direct_neural_query(query) {
+                        Ok((predicate, network_name, input_idx, target_label)) => {
+                            // Direct queries: process individually (pure PyTorch, no circuit)
+                            let loss = self.forward_backward_direct_tensor(
+                                py,
+                                &predicate,
+                                &network_name,
+                                input_idx,
+                                &target_label,
+                                true,
+                            )?;
+                            let loss_val = loss.bind(py).call_method0("detach")?.unbind();
+                            batch_loss_tensor = Some(match batch_loss_tensor {
+                                None => loss_val,
+                                Some(acc) => {
+                                    acc.bind(py)
+                                        .call_method1("add_", (loss_val.bind(py),))?;
+                                    acc
+                                }
+                            });
+                        }
+                        Err(_) => {
+                            // Complex query: group by template for batching.
+                            let atom = self.parse_query_atom(query)?;
+                            let sig = self
+                                .get_or_build_query_signature(
+                                    &atom.predicate,
+                                    atom.terms.len(),
+                                )?
+                                .clone();
+                            let key = self.generate_cache_key_for_signature(
+                                &sig,
+                                &atom.predicate,
+                                atom.terms.len(),
+                            );
+                            if !complex_groups.contains_key(&key) {
+                                complex_group_order.push(key.clone());
+                            }
+                            complex_groups.entry(key).or_default().push(atom);
+                        }
                     }
-                });
+                }
+
+                // Batch-process each complex group in insertion order.
+                for key in &complex_group_order {
+                    let group = complex_groups.remove(key).unwrap();
+                    let loss = self
+                        .forward_backward_batch_complex_tensor(py, &group, true)?;
+                    let loss_val = loss.bind(py).call_method0("detach")?.unbind();
+                    batch_loss_tensor = Some(match batch_loss_tensor {
+                        None => loss_val,
+                        Some(acc) => {
+                            acc.bind(py)
+                                .call_method1("add_", (loss_val.bind(py),))?;
+                            acc
+                        }
+                    });
+                }
+            } else {
+                // ── Sequential path (for regression testing / fallback) ─
+                for query in batch {
+                    let loss_t =
+                        self.forward_backward_tensor_internal(py, query, true)?;
+                    let loss_val = loss_t.bind(py).call_method0("detach")?.unbind();
+                    batch_loss_tensor = Some(match batch_loss_tensor {
+                        None => loss_val,
+                        Some(acc) => {
+                            acc.bind(py)
+                                .call_method1("add_", (loss_val.bind(py),))?;
+                            acc
+                        }
+                    });
+                }
             }
 
             self.optimizer_step(py)?;
@@ -1799,6 +1883,350 @@ impl CompiledProgram {
         }
 
         Ok(loss_tensor.into_py(py))
+    }
+
+    /// Batch-process multiple queries that share the same circuit template.
+    ///
+    /// Instead of N separate forward passes, DLPack cycles, stream syncs, and
+    /// backward passes, this method:
+    /// 1. Stacks inputs per-network → single batched forward pass
+    /// 2. Performs per-query circuit evaluation (same API, just looped)
+    /// 3. Single stream sync before/after the circuit eval batch
+    /// 4. Uses `torch.autograd.backward(outputs, grads)` for one backward pass
+    fn forward_backward_batch_complex_tensor(
+        &mut self,
+        py: Python<'_>,
+        atoms: &[Atom],
+        expected: bool,
+    ) -> PyResult<PyObject> {
+        let n_queries = atoms.len();
+        if n_queries == 0 {
+            return Err(PyRuntimeError::new_err(
+                "forward_backward_batch_complex_tensor called with empty atoms slice",
+            ));
+        }
+
+        // ── 1. Shared setup from first atom ─────────────────────────────
+        let signature = self
+            .get_or_build_query_signature(&atoms[0].predicate, atoms[0].terms.len())?
+            .clone();
+        let n_groups = signature.groups().len();
+        let pred_name = atoms[0].predicate.clone();
+
+        // Ensure circuit is compiled/cached.
+        let cache_key = self.generate_cache_key_for_signature(
+            &signature,
+            &pred_name,
+            atoms[0].terms.len(),
+        );
+        if !self.circuit_cache.contains_key(&cache_key) {
+            let cached = self.compile_circuit_for_template(
+                &signature,
+                &pred_name,
+                atoms[0].terms.len(),
+            )?;
+            self.circuit_cache.insert(cache_key.clone(), cached);
+            self.template_compile_count = self.template_compile_count.saturating_add(1);
+        }
+
+        // ── 2. Per-query data: input indices + query_idx ────────────────
+        let mut per_query_inputs: Vec<Vec<usize>> = Vec::with_capacity(n_queries);
+        let mut per_query_idx: Vec<usize> = Vec::with_capacity(n_queries);
+
+        for atom in atoms {
+            let input_indices: Vec<usize> = signature
+                .groups()
+                .iter()
+                .map(|group| match &group.input_source {
+                    InputSource::QueryArg(pos) => self.term_to_input_idx(&atom.terms[*pos]),
+                    InputSource::ImplicitSlot(slot) => Ok(*slot),
+                })
+                .collect::<PyResult<Vec<_>>>()?;
+
+            let target_label = match &signature {
+                QuerySignature::Boolean { .. } => None,
+                QuerySignature::Targeted {
+                    target_position, ..
+                } => Some(self.term_to_label(&atom.terms[*target_position])?),
+            };
+
+            let cached = self
+                .circuit_cache
+                .get(&cache_key)
+                .expect("cache populated above");
+            let query_idx: usize = match target_label {
+                Some(label) => cached
+                    .target_domain
+                    .iter()
+                    .position(|entry| entry == &label)
+                    .ok_or_else(|| {
+                        PyValueError::new_err(format!(
+                            "Target '{}' not in domain {:?} for predicate '{}'",
+                            label, cached.target_domain, pred_name
+                        ))
+                    })?,
+                None => 0,
+            };
+
+            per_query_inputs.push(input_indices);
+            per_query_idx.push(query_idx);
+        }
+
+        // ── 3. Group network calls: network → [(query, group, input_idx)] ─
+        // Insertion-ordered Vec for deterministic gradient accumulation.
+        struct NetCall {
+            query: usize,
+            group: usize,
+            input_idx: usize,
+        }
+        let mut calls_by_network: Vec<(String, Vec<NetCall>)> = Vec::new();
+        let mut net_index: StdHashMap<String, usize> = StdHashMap::new();
+
+        for (q, inputs) in per_query_inputs.iter().enumerate() {
+            for (g, group) in signature.groups().iter().enumerate() {
+                let name = &group.info.network;
+                let idx = match net_index.get(name) {
+                    Some(&i) => i,
+                    None => {
+                        let i = calls_by_network.len();
+                        net_index.insert(name.clone(), i);
+                        calls_by_network.push((name.clone(), Vec::new()));
+                        i
+                    }
+                };
+                calls_by_network[idx].1.push(NetCall {
+                    query: q,
+                    group: g,
+                    input_idx: inputs[g],
+                });
+            }
+        }
+
+        // ── 4. Batched forward per network ──────────────────────────────
+        let torch = py.import_bound("torch")?;
+        let schema_f32 = Schema::new(vec![("col0".to_string(), ScalarType::F32)]);
+        let schema_f64 = Schema::new(vec![("col0".to_string(), ScalarType::F64)]);
+
+        // Storage indexed by (query, group).
+        let mut prob_map: StdHashMap<(usize, usize), xlog_cuda::CudaBuffer> = StdHashMap::new();
+        let mut grad_map: StdHashMap<(usize, usize), xlog_cuda::CudaBuffer> = StdHashMap::new();
+        // All output rows + grad tensors for the batched backward.
+        let mut all_out_tensors: Vec<PyObject> = Vec::new();
+        let mut all_grad_tensors: Vec<PyObject> = Vec::new();
+
+        for (net_name, calls) in &calls_by_network {
+            let handle = self.network_registry.get(net_name).ok_or_else(|| {
+                PyValueError::new_err(format!("Network '{}' not registered", net_name))
+            })?;
+            let module = handle.module().ok_or_else(|| {
+                PyValueError::new_err(format!("Network '{}' has no module", net_name))
+            })?;
+
+            // Stack all inputs for this network into a single batch.
+            let mut inputs: Vec<PyObject> = Vec::with_capacity(calls.len());
+            for c in calls {
+                inputs.push(self.get_input_tensor(py, c.input_idx)?);
+            }
+            let input_list = pyo3::types::PyList::new_bound(py, &inputs);
+            let stacked = torch.call_method1("stack", (input_list, 0i32))?;
+
+            // Single batched forward: [N_total, num_classes]
+            let batch_output = module.call_method1(py, "__call__", (stacked,))?;
+            let batch_output_bound = batch_output.bind(py);
+
+            // Slice each row, validate label count, create DLPack buffers.
+            for (i, call) in calls.iter().enumerate() {
+                let row = batch_output_bound.get_item(i)?;
+                let row = row.call_method0("contiguous")?;
+
+                // Validate network output width matches declared labels.
+                let n: usize = row
+                    .call_method0("numel")?
+                    .extract::<i64>()?
+                    .try_into()
+                    .map_err(|_| PyValueError::new_err("Invalid output numel"))?;
+                let expected_labels = signature
+                    .groups()
+                    .get(call.group)
+                    .and_then(|g| g.info.labels.as_ref())
+                    .map(|l| l.len())
+                    .ok_or_else(|| {
+                        PyValueError::new_err(format!(
+                            "No declared labels for group {}",
+                            call.group
+                        ))
+                    })?;
+                if n != expected_labels {
+                    return Err(PyValueError::new_err(format!(
+                        "Network output size {} does not match declared label count {} for group {}",
+                        n, expected_labels, call.group
+                    )));
+                }
+
+                // DLPack import: detach for prob values, keep original for autograd.
+                let row_detached = row.call_method0("detach")?;
+                let managed = dlpack_from_py(&row_detached)?;
+                let prob_buf = self
+                    .output_provider
+                    .from_dlpack_tensors_with_schema(schema_f32.clone(), vec![managed])
+                    .map_err(|e| {
+                        PyRuntimeError::new_err(format!("DLPack import failed: {}", e))
+                    })?;
+
+                let grad_tensor = torch.call_method1("zeros_like", (&row,))?;
+                let grad_tensor = grad_tensor.call_method0("contiguous")?;
+                let grad_managed = dlpack_from_py(&grad_tensor)?;
+                let grad_buf = self
+                    .output_provider
+                    .from_dlpack_tensors_with_schema(schema_f32.clone(), vec![grad_managed])
+                    .map_err(|e| {
+                        PyRuntimeError::new_err(format!("DLPack import failed: {}", e))
+                    })?;
+
+                prob_map.insert((call.query, call.group), prob_buf);
+                grad_map.insert((call.query, call.group), grad_buf);
+                all_out_tensors.push(row.into());
+                all_grad_tensors.push(grad_tensor.into());
+            }
+        }
+
+        // Arrange into per-query Vec<CudaBuffer> in group order.
+        let mut per_query_probs: Vec<Vec<xlog_cuda::CudaBuffer>> = Vec::with_capacity(n_queries);
+        let mut per_query_grads: Vec<Vec<xlog_cuda::CudaBuffer>> = Vec::with_capacity(n_queries);
+        for q in 0..n_queries {
+            let mut probs = Vec::with_capacity(n_groups);
+            let mut grads = Vec::with_capacity(n_groups);
+            for g in 0..n_groups {
+                probs.push(prob_map.remove(&(q, g)).ok_or_else(|| {
+                    PyRuntimeError::new_err(format!(
+                        "Missing prob buffer for query {} group {}",
+                        q, g
+                    ))
+                })?);
+                grads.push(grad_map.remove(&(q, g)).ok_or_else(|| {
+                    PyRuntimeError::new_err(format!(
+                        "Missing grad buffer for query {} group {}",
+                        q, g
+                    ))
+                })?);
+            }
+            per_query_probs.push(probs);
+            per_query_grads.push(grads);
+        }
+
+        // ── 5. Stream sync: torch current → default (once) ─────────────
+        if torch
+            .getattr("cuda")
+            .and_then(|c| c.call_method0("is_available"))
+            .and_then(|b| b.extract::<bool>())
+            .unwrap_or(false)
+        {
+            let cuda = torch.getattr("cuda")?;
+            let current = cuda.call_method0("current_stream")?;
+            let default_stream = cuda.call_method0("default_stream")?;
+            default_stream.call_method1("wait_stream", (current,))?;
+        }
+
+        // ── 6. Per-query circuit evaluation ─────────────────────────────
+        // Collect device-resident loss scalars first; DLPack export happens
+        // AFTER the stream sync to avoid a race between XLOG's default
+        // stream writes and PyTorch's current stream reads.
+        let cfg = NeuralFastPathConfig::default();
+        let cached = self
+            .circuit_cache
+            .get(&cache_key)
+            .expect("cache populated above");
+
+        let mut loss_devs: Vec<xlog_cuda::memory::TrackedCudaSlice<u8>> =
+            Vec::with_capacity(n_queries);
+
+        for q in 0..n_queries {
+            // Release the GIL during GPU circuit evaluation.
+            let loss_dev = py
+                .allow_threads(|| {
+                    cached
+                        .program
+                        .neural_backward_nll_buffers_with_device_loss(
+                            &cached.slots,
+                            per_query_idx[q],
+                            &per_query_probs[q],
+                            &mut per_query_grads[q],
+                            cfg,
+                            expected,
+                        )
+                })
+                .map_err(|e| {
+                    PyRuntimeError::new_err(format!("Neural fast-path error: {}", e))
+                })?;
+            loss_devs.push(loss_dev.into_bytes());
+        }
+
+        // ── 7. Stream sync: default → torch current (once) ─────────────
+        // All circuit work (loss writes + grad fills) is on XLOG's default
+        // stream. Sync before handing memory to PyTorch or calling backward.
+        if torch
+            .getattr("cuda")
+            .and_then(|c| c.call_method0("is_available"))
+            .and_then(|b| b.extract::<bool>())
+            .unwrap_or(false)
+        {
+            let cuda = torch.getattr("cuda")?;
+            let current = cuda.call_method0("current_stream")?;
+            let default_stream = cuda.call_method0("default_stream")?;
+            current.call_method1("wait_stream", (default_stream,))?;
+        }
+
+        // ── 7b. Export losses via DLPack and accumulate on device ────────
+        let mut batch_loss_tensor: Option<PyObject> = None;
+
+        for loss_bytes in loss_devs {
+            let mut d_num_rows = self
+                .output_provider
+                .memory()
+                .alloc::<u32>(1)
+                .map_err(|e| PyRuntimeError::new_err(format!("GPU allocation failed: {}", e)))?;
+            self.output_provider
+                .device()
+                .inner()
+                .htod_sync_copy_into(&[1u32], &mut d_num_rows)
+                .map_err(|e| {
+                    PyRuntimeError::new_err(format!("Failed to set row count: {}", e))
+                })?;
+
+            let loss_buf = xlog_cuda::CudaBuffer::from_columns(
+                vec![loss_bytes.into()],
+                1,
+                d_num_rows,
+                schema_f64.clone(),
+            );
+            let loss_dl = self
+                .output_provider
+                .to_dlpack_table(loss_buf)
+                .column(0)
+                .map_err(|e| PyRuntimeError::new_err(format!("DLPack export failed: {}", e)))?;
+            let loss_capsule = dlpack_capsule_from_tensor(py, loss_dl)?;
+            let loss_tensor = torch.getattr("from_dlpack")?.call1((loss_capsule,))?;
+
+            batch_loss_tensor = Some(match batch_loss_tensor {
+                None => loss_tensor.into_py(py),
+                Some(acc) => {
+                    acc.bind(py).call_method1("add_", (loss_tensor,))?;
+                    acc
+                }
+            });
+        }
+
+        // ── 8. Batched backward through all networks ────────────────────
+        // torch.autograd.backward(tensors, grad_tensors) — single backward pass
+        // through the shared batched computation graph.
+        let autograd = torch.getattr("autograd")?;
+        let out_list = pyo3::types::PyList::new_bound(py, all_out_tensors.iter());
+        let grad_list = pyo3::types::PyList::new_bound(py, all_grad_tensors.iter());
+        autograd.call_method1("backward", (out_list, grad_list))?;
+
+        // ── 9. Return accumulated loss ──────────────────────────────────
+        batch_loss_tensor
+            .ok_or_else(|| PyRuntimeError::new_err("No loss computed in batch"))
     }
 
     fn get_or_build_query_signature(
