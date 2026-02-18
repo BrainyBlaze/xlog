@@ -1,0 +1,58 @@
+{
+  "track": "B",
+  "run_id": "20260218T145032Z_track_b",
+  "example": "01_minimal",
+  "seed": 42,
+  "status": "ok",
+  "exit_code": 0,
+  "duration_sec": 103.19,
+  "command": "/home/dev/projects/xlog/.venv/bin/python examples/neural/01_minimal/train.py --engine xlog --epochs 5 --batch-size 64 --seed 42 --train-limit 512 --data-path examples/neural/01_minimal/data/mnist --save-path /home/dev/projects/xlog/.worktrees/v0.4.0-alpha-integrated/examples/neural/results/track_b/20260218T145032Z_track_b/01_minimal/seed_42/mnist_net.pt --metrics-path /home/dev/projects/xlog/.worktrees/v0.4.0-alpha-integrated/examples/neural/results/track_b/20260218T145032Z_track_b/01_minimal/seed_42/metrics.json",
+  "metric": {
+    "name": "heldout_addition_acc",
+    "value": 0.111,
+    "threshold": null
+  },
+  "dataset": {
+    "manifest_path": "examples/neural/01_minimal/dataset.json",
+    "manifest_sha256": "9e1d51d43a917b395da4fd339f82582c5ac97420fe14f5113906b74910390f3e",
+    "completeness": "provisional"
+  },
+  "environment": {
+    "python": "3.10.12",
+    "torch": "2.10.0+cu128",
+    "pyxlog": "0.4.0",
+    "gpu_name": "NVIDIA RTX PRO 3000 Blackwell Generation Laptop GPU",
+    "driver": "591.59",
+    "cuda_visible": true
+  },
+  "git": {
+    "branch": "v0.4.0-alpha-integrated",
+    "commit": "80722212e15bad349be265dcdd7647174c135537"
+  },
+  "steady_epoch_sec_mean": 18.57,
+  "first_epoch_sec": 18.57,
+  "epoch_sec": [
+    18.57,
+    18.57,
+    18.57,
+    18.57,
+    18.57
+  ],
+  "total_train_sec": 92.85,
+  "warmup_sec": 0.0,
+  "per_query_ms": 72.539,
+  "compile_api_sec": 0.013,
+  "schema_gate": {
+    "passed": true,
+    "missing_keys": [],
+    "frozen_keys": [
+      "compile_api_sec",
+      "epoch_sec",
+      "first_epoch_sec",
+      "per_query_ms",
+      "steady_epoch_sec_mean",
+      "total_train_sec",
+      "warmup_sec"
+    ]
+  }
+}
