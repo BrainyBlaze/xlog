@@ -1,0 +1,41 @@
+{
+  "seed": 42,
+  "example": "01_minimal",
+  "engine": "xlog",
+  "training_function": "train_model_tensor",
+  "branch": "v0.4.0-alpha-integrated",
+  "postfix_label": "fused_backward+sync_removal+32GB_mem+multi_query_batching",
+  "batch_queries": true,
+  "train_limit": 512,
+  "num_pairs": 256,
+  "epochs": 5,
+  "batch_size": 64,
+  "learning_rate": 0.001,
+  "device": "cuda",
+  "gpu": "NVIDIA_RTX_PRO_3000_Blackwell_Generation_Laptop_GPU",
+  "compile_sec": 0.013,
+  "epoch_sec": [
+    77.658,
+    2.927,
+    2.903,
+    2.912,
+    2.925
+  ],
+  "total_train_sec": 89.325,
+  "per_query_ms": 69.785,
+  "epoch_losses": [
+    2.777128,
+    2.756491,
+    2.722354,
+    2.672042,
+    2.598223
+  ],
+  "initial_loss": 2.777128,
+  "final_loss": 2.598223,
+  "loss_improvement_pct": 6.4,
+  "final_train_acc": 0.166,
+  "heldout_digit_acc": 0.1543,
+  "heldout_addition_acc": 0.1102,
+  "heldout_add_correct": 551,
+  "heldout_add_total": 5000
+}

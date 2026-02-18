@@ -1,0 +1,16 @@
+Epoch 1/2: avg_loss=2.839778
+Epoch 2/2: avg_loss=2.747582
+Epoch 1/2: avg_loss=2.839778
+Epoch 2/2: avg_loss=2.747582
+Sequential losses: [2.8397778827835496, 2.747581804886649]
+Batched losses:    [2.8397778793920034, 2.7475815704598827]
+  Epoch 0: seq=2.839778 bat=2.839778 diff=3.39e-09 [PASS]
+  Epoch 1: seq=2.747582 bat=2.747582 diff=2.34e-07 [PASS]
+  Param conv1.weight: delta=1.05e-05 [PASS]
+  Param conv1.bias: delta=1.86e-09 [PASS]
+  Param fc1.weight: delta=5.32e-07 [PASS]
+  Param fc1.bias: delta=7.92e-09 [PASS]
+  Param fc2.weight: delta=7.97e-08 [PASS]
+  Param fc2.bias: delta=2.08e-09 [PASS]
+
+test_batch_parity: PASSED
