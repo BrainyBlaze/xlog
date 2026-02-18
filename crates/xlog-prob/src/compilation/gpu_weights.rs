@@ -81,8 +81,7 @@ pub fn build_evidence_by_var_gpu(
         )
     }
     .map_err(|e| XlogError::Kernel(format!("weights_set_evidence_from_nodes failed: {}", e)))?;
-
-    provider.device().synchronize()?;
+    // No device synchronize: returns device-resident slice; same-stream ordering suffices.
     Ok(evidence_by_var)
 }
 
@@ -119,7 +118,7 @@ pub fn map_nodes_to_vars_gpu(
         )
     }
     .map_err(|e| XlogError::Kernel(format!("weights_map_nodes_to_vars failed: {}", e)))?;
-    provider.device().synchronize()?;
+    // No device synchronize: returns device-resident slice; same-stream ordering suffices.
     Ok(out)
 }
 
@@ -172,7 +171,7 @@ pub fn apply_query_vars_device(
         )
     }
     .map_err(|e| XlogError::Kernel(format!("weights_apply_query_vars failed: {}", e)))?;
-    provider.device().synchronize()?;
+    // No device synchronize: same-stream ordering guarantees visibility to subsequent kernels.
     Ok(())
 }
 
@@ -225,7 +224,7 @@ pub fn restore_query_vars_device(
         )
     }
     .map_err(|e| XlogError::Kernel(format!("weights_restore_query_vars failed: {}", e)))?;
-    provider.device().synchronize()?;
+    // No device synchronize: same-stream ordering guarantees visibility to subsequent kernels.
     Ok(())
 }
 
@@ -356,9 +355,7 @@ pub fn build_weights_gpu(
         }
         .map_err(|e| XlogError::Kernel(format!("weights_apply_evidence failed: {}", e)))?;
     }
-
-    provider.device().synchronize()?;
-
+    // No device synchronize: returns device-resident weights; same-stream ordering suffices.
     Ok(GpuWeights {
         log_true,
         log_false,

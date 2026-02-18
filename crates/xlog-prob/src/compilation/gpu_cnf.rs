@@ -523,9 +523,7 @@ pub fn encode_cnf_gpu(
         )
     }
     .map_err(|e| XlogError::Kernel(format!("cnf_set_clause_end failed: {}", e)))?;
-
-    provider.device().synchronize()?;
-
+    // No device synchronize: returns device-resident CNF; same-stream ordering suffices.
     Ok(GpuCnfEncoding {
         cnf: GpuCnf {
             var_cap,

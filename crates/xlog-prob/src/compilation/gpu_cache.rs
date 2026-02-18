@@ -175,12 +175,7 @@ pub fn hash_cnf_gpu(
         )
     }
     .map_err(|e| XlogError::Kernel(format!("cache_cnf_hash launch failed: {}", e)))?;
-
-    provider
-        .device()
-        .synchronize()
-        .map_err(|e| XlogError::Kernel(format!("cache_cnf_hash sync failed: {}", e)))?;
-
+    // No device synchronize: hash stays device-resident for lookup kernel; same-stream ordering suffices.
     Ok(out_hash)
 }
 
@@ -519,12 +514,7 @@ impl GpuCircuitCache {
             )
         }
         .map_err(|e| XlogError::Kernel(format!("cache_lookup_or_insert failed: {}", e)))?;
-
-        self.provider
-            .device()
-            .synchronize()
-            .map_err(|e| XlogError::Kernel(format!("cache_lookup_or_insert sync failed: {}", e)))?;
-
+        // No device synchronize: slot and compile_needed stay device-resident; same-stream ordering suffices.
         Ok(GpuCacheLookup {
             provider: self.provider.clone(),
             slot: out_slot,

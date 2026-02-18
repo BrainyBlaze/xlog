@@ -884,12 +884,8 @@ fn compile_gpu_d4_with_gate(
     #[cfg(debug_assertions)]
     eprintln!("[xlog-prob] gpu_d4: build_frontier_bitset");
     let frontier = build_frontier_bitset(cnf, provider, config, compile_needed)?;
-    #[cfg(debug_assertions)]
-    eprintln!("[xlog-prob] gpu_d4: sync after build_frontier");
-    provider
-        .device()
-        .synchronize()
-        .map_err(|e| XlogError::Kernel(format!("sync after build_frontier failed: {}", e)))?;
+    // No device synchronize after build_frontier: words_per_item is a host-side
+    // struct field and all subsequent device ops use same-stream ordering.
 
     let max_items = config.max_frontier_items;
     let words_per_item = frontier.words_per_item();
@@ -978,12 +974,8 @@ fn compile_gpu_d4_with_gate(
         )
     }
     .map_err(|e| XlogError::Kernel(format!("d4_compile_count failed: {}", e)))?;
-    #[cfg(debug_assertions)]
-    eprintln!("[xlog-prob] gpu_d4: sync after d4_compile_count");
-    provider
-        .device()
-        .synchronize()
-        .map_err(|e| XlogError::Kernel(format!("sync after d4_compile_count failed: {}", e)))?;
+    // No device synchronize after d4_compile_count: next ops are alloc + dtod_copy
+    // (both device-ordered) with no host reads of device data.
 
     let mut node_offsets = memory.alloc::<u32>(max_items as usize)?;
     let mut edge_offsets = memory.alloc::<u32>(max_items as usize)?;
@@ -997,14 +989,7 @@ fn compile_gpu_d4_with_gate(
     eprintln!("[xlog-prob] gpu_d4: scan node_offsets/edge_offsets");
     exclusive_scan_u32_inplace(provider, &mut node_offsets, max_items_u32)?;
     exclusive_scan_u32_inplace(provider, &mut edge_offsets, max_items_u32)?;
-    #[cfg(debug_assertions)]
-    eprintln!("[xlog-prob] gpu_d4: sync after node_offsets/edge_offsets scan");
-    provider.device().synchronize().map_err(|e| {
-        XlogError::Kernel(format!(
-            "sync after node_offsets/edge_offsets scan failed: {}",
-            e
-        ))
-    })?;
+    // No device synchronize after scans: next ops are kernel launches on same stream.
 
     let node_cap_usize = usize::try_from(node_cap)
         .map_err(|_| XlogError::Compilation("smooth_node_cap exceeds usize::MAX".to_string()))?;
@@ -1119,12 +1104,8 @@ fn compile_gpu_d4_with_gate(
         )
     }
     .map_err(|e| XlogError::Kernel(format!("d4_compile_emit failed: {}", e)))?;
-    #[cfg(debug_assertions)]
-    eprintln!("[xlog-prob] gpu_d4: sync after d4_compile_emit");
-    provider
-        .device()
-        .synchronize()
-        .map_err(|e| XlogError::Kernel(format!("sync after d4_compile_emit failed: {}", e)))?;
+    // No device synchronize after d4_compile_emit: next op is capture_meta launch
+    // on same stream.
     #[cfg(debug_assertions)]
     eprintln!("[xlog-prob] gpu_d4: launch d4_capture_emit_meta");
     unsafe {
@@ -1151,12 +1132,8 @@ fn compile_gpu_d4_with_gate(
         )
     }
     .map_err(|e| XlogError::Kernel(format!("d4_capture_emit_meta failed: {}", e)))?;
-    #[cfg(debug_assertions)]
-    eprintln!("[xlog-prob] gpu_d4: sync after d4_capture_emit_meta");
-    provider
-        .device()
-        .synchronize()
-        .map_err(|e| XlogError::Kernel(format!("sync after d4_capture_emit_meta failed: {}", e)))?;
+    // No device synchronize after d4_capture_emit_meta: next ops are host-only
+    // arithmetic and memory allocations (no device data reads).
 
     let num_levels = (max_depth as u32)
         .checked_mul(2)
@@ -1237,10 +1214,8 @@ fn compile_gpu_d4_with_gate(
         )
     }
     .map_err(|e| XlogError::Kernel(format!("d4_levelize_emit failed: {}", e)))?;
-    provider
-        .device()
-        .synchronize()
-        .map_err(|e| XlogError::Kernel(format!("sync after d4_levelize_emit failed: {}", e)))?;
+    // No device synchronize after d4_levelize_emit: builder wraps device slices
+    // consumed by subsequent GPU ops on same stream.
 
     let builder = GpuCircuitBuilder {
         node_type,

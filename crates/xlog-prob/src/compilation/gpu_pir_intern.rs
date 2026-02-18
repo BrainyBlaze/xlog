@@ -959,9 +959,7 @@ impl GpuPirInterner {
             )
         }
         .map_err(|e| XlogError::Kernel(format!("pir_update_counts failed: {}", e)))?;
-
-        self.provider.device().synchronize()?;
-
+        // No device synchronize: returns device-resident IDs; same-stream ordering suffices.
         Ok(out_ids)
     }
 }

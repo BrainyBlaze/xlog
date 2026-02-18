@@ -1,10 +1,10 @@
 //! Guardrail: prevent regressions that re-introduce unnecessary device synchronize()
-//! calls in the GPU circuit cache. Only two sync sites are allowed:
+//! calls in the GPU circuit cache. Zero sync sites are needed:
 //!
-//!   1. `cache_cnf_hash` — host reads hash result for cache lookup
-//!   2. `lookup_or_insert` — host reads slot/compile_needed for control flow
+//!   - `cache_cnf_hash` — hash stays device-resident; same-stream ordering suffices
+//!   - `lookup_or_insert` — slot/compile_needed stay device-resident; same-stream ordering suffices
 //!
-//! All other cache operations rely on same-stream ordering. Adding a new
+//! All cache operations rely on same-stream ordering. Adding a new
 //! synchronize() here will cause this test to fail — make sure it is truly
 //! needed (host reads the result) before bumping the count.
 
@@ -36,8 +36,8 @@ fn gpu_cache_synchronize_count_is_pinned() {
     let count = count_sync_calls(&text);
 
     assert_eq!(
-        count, 2,
-        "gpu_cache.rs has {} synchronize() calls (expected 2). \
+        count, 0,
+        "gpu_cache.rs has {} synchronize() calls (expected 0). \
          If you added a new sync, verify it is truly needed (host reads \
          the result immediately after). Same-stream ordering makes most \
          syncs between GPU-to-GPU ops redundant.",
