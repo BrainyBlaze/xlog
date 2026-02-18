@@ -159,8 +159,9 @@ nvcc --cubin -arch=sm_{cc} -o $OUT_DIR/{name}.sm_{cc}.cubin kernels/{name}.cu
 nvcc --ptx -arch=sm_{cc} -o $OUT_DIR/{name}.ptx kernels/{name}.cu
 ```
 
-Additionally, generate one **portable PTX** (no device-specific SM target, or targeting
-a baseline like `sm_70`) as the fallback for unknown GPUs.
+Additionally, generate one **portable PTX per module** targeting a baseline SM (e.g.
+`sm_70`) as the fallback for unknown GPUs. This replaces the current repo-embedded PTX
+which targets `sm_120` and would fail on non-Blackwell hardware.
 
 Env vars:
 - `XLOG_NO_CUBIN=1` — skip cubin generation (dev builds without nvcc)
@@ -180,13 +181,18 @@ Rebuild triggers:
    let cc = major * 10 + minor;  // e.g. 120, 89
    ```
 
-2. Cubin resolution order per module:
+2. Module resolution order per module:
    1. `$XLOG_CUBIN_DIR/{name}.sm_{cc}.cubin` (explicit override for packaged installs)
    2. `$OUT_DIR/{name}.sm_{cc}.cubin` (build output)
-   3. Fall back to embedded PTX via `Ptx::from_src()` (portable baseline)
+   3. `$XLOG_CUBIN_DIR/{name}.portable.ptx` or `$OUT_DIR/{name}.portable.ptx`
+      (portable baseline PTX, built targeting `sm_70`)
+
+   **Note:** The current embedded PTX (`include_str!()` in provider.rs) targets
+   `sm_120` and is NOT portable. Phase 1 replaces this with file-based loading from
+   build outputs. The embedded PTX constants become dead code and should be removed.
 
 3. Load cubin via `Ptx::from_file(path)` (cudarc 0.12 supports this for module files).
-   PTX fallback uses current `Ptx::from_src()` path unchanged.
+   PTX fallback uses `Ptx::from_file()` for the portable PTX, same resolution strategy.
 
 4. When profiling flag is on, log per-module: cubin vs PTX, load time.
 
@@ -206,13 +212,34 @@ Cache compiled circuit topology on disk so d-DNNF compilation is skipped on warm
 starts. Cache topology and metadata only — query-specific weights are computed per-query
 at runtime.
 
+### Free-Var Mask Slot Reuse Safety
+
+The current `has_free_var_mask` flag is **global** on `GpuCircuitCache`
+(`gpu_cache.rs:61`), not per-slot. When a slot is reused for a circuit with no free
+vars, stale mask data from a previous circuit can remain in the slot's mask region.
+
+**Required fix (prerequisite for Phase 2, recommended in Phase 1):** On every
+compile/restore miss path, **always zero the slot's free-var mask region** before
+populating circuit data. Then conditionally store the actual mask and set the flag only
+when the mask is non-zero. This ensures no stale mask data survives slot reuse.
+
+Concretely, in `store_from_xgcf()` or the new disk-cache restore path:
+1. Zero the `free_var_mask` region for the target slot (`memset_zeros`)
+2. Store topology arrays
+3. If `has_free_var_mask`: store mask and set flag
+4. If not: flag stays false, mask region is clean zeros
+
+Long-term, `has_free_var_mask` should become per-slot metadata (stored alongside
+`meta_num_nodes`, etc.), but zeroing on reuse is sufficient and lower-risk for now.
+
 ### What Gets Cached
 
 Everything from `store_from_xgcf()` except weights:
 - `node_type`, `child_offsets`, `child_indices`, `lit`, `decision_var`,
   `decision_child_false`, `decision_child_true`, `level_nodes`, `level_offsets`
 - Metadata: `num_nodes`, `num_edges`, `num_levels`, `root`, `max_var`
-- `free_var_mask` (if non-zero)
+- `free_var_mask` — **always stored** in the cache artifact (even if all-zero), so the
+  restore path can write it to the slot and set `has_free_var_mask` correctly
 
 Weights (`var_log_true`, `var_log_false`) are NOT cached — they change per query.
 
@@ -256,7 +283,7 @@ Weights (`var_log_true`, `var_log_false`) are NOT cached — they change per que
 [decision_child_true: u32 x num_nodes]
 [level_nodes: u32 x num_nodes]
 [level_offsets: u32 x (num_levels+1)]
-[free_var_mask: u8 x (max_var+1)]  -- only if has_free_var_mask
+[free_var_mask: u8 x (max_var+1)]  -- always present (may be all-zero)
 ```
 
 ### Write Path (after successful compilation)
@@ -318,7 +345,8 @@ When `XLOG_WARMUP_PROFILE=1`:
   Per-query evaluation uses the same cached GPU circuit and batched kernels.
 - **Correctness preserved:** Disk cache stores topology computed by the same D4 +
   verification pipeline. Cache key includes all inputs that affect output. Version
-  stamp invalidates stale entries.
+  stamp invalidates stale entries. Free-var mask slot region is always zeroed before
+  populating to prevent stale data from prior slot occupants.
 - **Graceful degradation:** Cubin miss → PTX fallback. Disk cache miss → full
   recompilation. No hard failure modes.
 - **No new build dependencies for default path:** `XLOG_NO_CUBIN=1` skips nvcc
