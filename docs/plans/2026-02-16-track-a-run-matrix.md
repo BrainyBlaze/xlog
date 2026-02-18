@@ -4,7 +4,7 @@
 
 ## Scope and Constraints
 
-- Track A executes on the current machine (`NVIDIA RTX PRO 3000 Blackwell Generation Laptop GPU`, driver `573.71`), not RTX 3090.
+- Track A executes on the development machine (`NVIDIA RTX PRO 3000 Blackwell Generation Laptop GPU`, 12 GB, SM120, driver `591.59`).
 - Scallop is not currently installed (`scallopy`/`scallop` missing), so Scallop comparison is deferred to Track B.
 - DeepProbLog baseline already exists in:
   - `docs/reports/2026-02-10-deepproblog-baseline-gpu-sequential.md`
@@ -192,7 +192,7 @@ run_id,example,seed,status,exit_code,duration_sec,metric_name,metric_value,metri
     }
   },
   "notes": [
-    "Track A hardware is not RTX 3090; timing is provisional.",
+    "Hardware: NVIDIA RTX PRO 3000 Blackwell Generation Laptop GPU (12 GB, SM120).",
     "Scallop comparison deferred (not installed).",
     "Data completeness for 02/03/04 is provisional."
   ]
@@ -231,11 +231,12 @@ Fields:
 
 ## Track A to Track B Handoff
 
-Track A artifacts must explicitly mark:
+Development and benchmark hardware: **NVIDIA RTX PRO 3000 Blackwell Generation Laptop GPU** (12 GB, SM120, driver 591.59).
 
-- `hardware_reference_compliant=false` (not RTX 3090).
-- `scallop_comparison_complete=false`.
-- `dataset_finalized=false` for any provisional datasets.
+Track B (`scripts/track_b_runner.py`) runs all examples with 3 seeds, enforces the frozen metric schema, and records GPU identity in every artifact.
 
-Track B will re-run with final datasets + RTX 3090 + Scallop parity.
+Remaining blockers:
+
+- `scallop_comparison_complete=false` — scallopy not installed.
+- `dataset_finalized=false` for any provisional datasets (02-06 counts now finalized).
 

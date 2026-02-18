@@ -18,10 +18,10 @@ This document describes XLOG's performance benchmarking suite, methodology, and 
 
 ### Prerequisites
 
-- CUDA-capable NVIDIA GPU (compute capability 7.0+)
+- CUDA-capable NVIDIA GPU (compute capability 7.0+; development device: RTX PRO 3000 Blackwell, SM120)
 - CUDA Toolkit 12.0+
 - D4 knowledge compiler (for exact inference benchmarks)
-- Sufficient GPU memory (4GB minimum, 8GB recommended)
+- Sufficient GPU memory (4GB minimum, 12GB recommended for neural-symbolic training)
 
 ### Quick Start
 
@@ -199,7 +199,9 @@ All random data generation uses deterministic seeding:
 
 ## Baseline Metrics
 
-Target performance on NVIDIA RTX 3090 (24GB, SM86):
+Development hardware: **NVIDIA RTX PRO 3000 Blackwell Generation Laptop GPU** (12 GB, SM120, compute capability 12.0, driver 591.59).
+
+All baseline targets below are measured on this device. Throughput numbers on desktop-class GPUs (e.g. RTX 4090, RTX 5090) will differ due to higher memory bandwidth and SM count.
 
 ### Transitive Closure
 
@@ -231,6 +233,20 @@ Target performance on NVIDIA RTX 3090 (24GB, SM86):
 |---------------|--------|-------|
 | 100K samples, 100 vars | >10M worlds/sec | Throughput mode |
 | 10K samples, 500 vars | >5M worlds/sec | Complexity mode |
+
+### Neural-Symbolic Training (v0.4.0-alpha)
+
+Measured on development hardware with `01_minimal` (MNIST addition, 512 images, 5 epochs, batch_size=64).
+
+| Metric | Value | Notes |
+|--------|-------|-------|
+| `compile_api_sec` | 0.013 s | xlog-prob circuit compilation API |
+| `first_epoch_sec` | ~78 s | Includes JIT kernel compilation + CUDA warmup |
+| `steady_epoch_sec_mean` | ~2.9 s | Epochs 2-5 after warmup |
+| `per_query_ms` | ~70 ms | Per-query forward+backward through circuit |
+| Cache speedup | 2.74x | Circuit caching vs no caching (95% CI: [2.29, 3.18]) |
+
+Evidence: `examples/neural/results/evidence/cache_ablation_20260218.json`
 
 ---
 

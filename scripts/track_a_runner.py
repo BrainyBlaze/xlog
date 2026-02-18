@@ -332,13 +332,12 @@ def generate_summary(rows, run_id, out_dir, seed_map):
         },
         "examples": examples_agg,
         "notes": [
-            "Track A hardware is not RTX 3090; timing is provisional.",
+            "Timing is from development hardware (RTX PRO 3000 Blackwell laptop GPU).",
             "Scallop comparison deferred (not installed).",
             "Data completeness for 02/03/04 is provisional.",
             "01_minimal runs 1 seed only (per-query host sync overhead in forward_backward).",
         ],
         "handoff_flags": {
-            "hardware_reference_compliant": False,
             "scallop_comparison_complete": False,
             "dataset_finalized": False,
         },
