@@ -1,0 +1,18 @@
+{
+  "compile_api_sec": 0.007,
+  "epoch_sec": [
+    0.717,
+    0.368,
+    0.462,
+    0.352,
+    0.37
+  ],
+  "first_epoch_sec": 0.717,
+  "steady_epoch_sec_mean": 0.388,
+  "warmup_sec": 0.329,
+  "total_train_sec": 2.269,
+  "per_query_ms": 1.773,
+  "framework": "scallop",
+  "provenance": "difftopbottomkclauses",
+  "k": 3
+}

@@ -1,5 +1,7 @@
 {
-  "available": false,
-  "reason": "scallopy/scallop not installed in environment",
-  "deferred_to": "post-merge"
+  "available": true,
+  "version": "0.2.5 (git master, built with rustc nightly 1.95.0)",
+  "comparison_artifact": "mnist_xlog_vs_scallop.json",
+  "baseline_script": "examples/neural/baseline/scallop/mnist_addition.py",
+  "baseline_results": "examples/neural/baseline/results/scallop_mnist/"
 }

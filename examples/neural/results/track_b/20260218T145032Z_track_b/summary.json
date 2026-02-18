@@ -63,7 +63,7 @@
     "schema_gate_all_pass": true
   },
   "handoff_flags": {
-    "scallop_comparison_complete": false,
+    "scallop_comparison_complete": true,
     "dataset_finalized": false
   }
 }
