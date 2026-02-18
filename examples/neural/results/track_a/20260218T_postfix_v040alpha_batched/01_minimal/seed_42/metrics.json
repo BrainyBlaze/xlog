@@ -13,7 +13,7 @@
   "learning_rate": 0.001,
   "device": "cuda",
   "gpu": "NVIDIA_RTX_PRO_3000_Blackwell_Generation_Laptop_GPU",
-  "compile_sec": 0.013,
+  "compile_api_sec": 0.013,
   "epoch_sec": [
     77.658,
     2.927,
@@ -21,6 +21,9 @@
     2.912,
     2.925
   ],
+  "first_epoch_sec": 77.658,
+  "steady_epoch_sec_mean": 2.917,
+  "warmup_sec": 74.741,
   "total_train_sec": 89.325,
   "per_query_ms": 69.785,
   "epoch_losses": [
