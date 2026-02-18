@@ -24,7 +24,62 @@ restore path needs per-slot mask state) and a correctness fix for Phase 1.
 **Files:**
 - Modify: `crates/xlog-prob/src/compilation/gpu_cache.rs`
 
-### Step 1: Change `has_free_var_mask` field from `bool` to `Vec<bool>`
+### Step 1: Add host-side `slot_host` to `GpuCircuitCacheHandle`
+
+The slot index is assigned at lookup time (off the hot path) but currently only exists
+on device. Add a host-resident copy so hot-path code never needs a D→H sync.
+
+In `gpu_cache.rs:96-104`, add `slot_host: u32`:
+
+```rust
+pub struct GpuCircuitCacheHandle {
+    provider: Arc<CudaKernelProvider>,
+    slot: TrackedCudaSlice<u32>,
+    compile_needed: TrackedCudaSlice<u32>,
+    slot_host: u32,           // <-- new: host-side slot index
+    num_nodes: u32,
+    num_levels: u32,
+    root: u32,
+    max_var: u32,
+}
+```
+
+Add accessor:
+
+```rust
+    pub fn slot_index(&self) -> u32 {
+        self.slot_host
+    }
+```
+
+### Step 2: Populate `slot_host` during `into_handle()`
+
+In `GpuCacheLookup::into_handle()` (gpu_cache.rs:83-93), do one D→H copy of the slot
+index. This happens at lookup time (once per compilation, off the eval hot path):
+
+```rust
+    pub fn into_handle(self) -> Result<GpuCircuitCacheHandle> {
+        let slot_host_vec: Vec<u32> = self.provider.device().inner()
+            .dtoh_sync_copy(&self.slot)
+            .map_err(|e| XlogError::Kernel(format!("dtoh slot index: {}", e)))?;
+        Ok(GpuCircuitCacheHandle {
+            provider: self.provider,
+            slot: self.slot,
+            compile_needed: self.compile_needed,
+            slot_host: slot_host_vec[0],
+            num_nodes: 0,
+            num_levels: 0,
+            root: 0,
+            max_var: 0,
+        })
+    }
+```
+
+**Note:** `into_handle()` return type changes from `GpuCircuitCacheHandle` to
+`Result<GpuCircuitCacheHandle>`. Update all callers (`lookup.into_handle()` →
+`lookup.into_handle()?`).
+
+### Step 3: Change `has_free_var_mask` field from `bool` to `Vec<bool>`
 
 In `gpu_cache.rs:61`, change:
 
@@ -38,7 +93,7 @@ to:
 has_free_var_mask: Vec<bool>,
 ```
 
-### Step 2: Initialize per-slot in `new()` constructor
+### Step 4: Initialize per-slot in `new()` constructor
 
 In `gpu_cache.rs:802`, change:
 
@@ -52,7 +107,7 @@ to:
             has_free_var_mask: vec![false; config.num_slots as usize],
 ```
 
-### Step 3: Update `has_free_var_mask()` accessor
+### Step 5: Update `has_free_var_mask()` accessor
 
 In `gpu_cache.rs:225-227`, change:
 
@@ -77,7 +132,7 @@ to:
     }
 ```
 
-### Step 4: Update `store_free_var_mask()` to be per-slot
+### Step 6: Update `store_free_var_mask()` to be per-slot
 
 In `gpu_cache.rs:1486`, change:
 
@@ -88,17 +143,15 @@ In `gpu_cache.rs:1486`, change:
 to:
 
 ```rust
-        // Read slot index from device to set per-slot flag
-        let slot_host: Vec<u32> = self.provider.device().inner()
-            .dtoh_sync_copy(handle.slot_device())
-            .map_err(|e| XlogError::Kernel(format!("dtoh slot for mask flag failed: {}", e)))?;
-        let slot_idx = slot_host[0] as usize;
+        let slot_idx = handle.slot_index() as usize;
         if slot_idx < self.has_free_var_mask.len() {
             self.has_free_var_mask[slot_idx] = true;
         }
 ```
 
-### Step 5: Update `apply_free_var_correction_cached()` to check per-slot
+No D→H sync here — uses the host-side slot index from the handle.
+
+### Step 7: Update `apply_free_var_correction_cached()` to check per-slot
 
 In `gpu_cache.rs:2105`, change:
 
@@ -111,21 +164,14 @@ In `gpu_cache.rs:2105`, change:
 to:
 
 ```rust
-        // Read slot index to check per-slot flag
-        let slot_host: Vec<u32> = self.provider.device().inner()
-            .dtoh_sync_copy(handle.slot_device())
-            .map_err(|e| XlogError::Kernel(format!("dtoh slot for mask check failed: {}", e)))?;
-        let slot_idx = slot_host[0] as usize;
-        let has_mask = self.has_free_var_mask
-            .get(slot_idx)
-            .copied()
-            .unwrap_or(false);
-        if !has_mask {
+        if !self.has_free_var_mask_for_slot(handle.slot_index()) {
             return Ok(());
         }
 ```
 
-### Step 6: Update `eval_grads_inplace_fused_batched()` to check per-slot
+No D→H sync — uses the host-side slot index from the handle.
+
+### Step 8: Update `eval_grads_inplace_fused_batched()` to check per-slot
 
 In `gpu_cache.rs:327-331`, change:
 
@@ -140,32 +186,25 @@ In `gpu_cache.rs:327-331`, change:
 to:
 
 ```rust
-        // Read slot index to check per-slot flag
-        let slot_host: Vec<u32> = self.provider.device().inner()
-            .dtoh_sync_copy(handle.slot_device())
-            .map_err(|e| XlogError::Kernel(format!("dtoh slot for batch check failed: {}", e)))?;
-        let slot_idx = slot_host[0] as usize;
-        let has_mask = self.has_free_var_mask
-            .get(slot_idx)
-            .copied()
-            .unwrap_or(false);
-        if has_mask {
+        if self.has_free_var_mask_for_slot(handle.slot_index()) {
             return Err(XlogError::Execution(
                 "Batched fused eval currently does not support free-var correction".to_string(),
             ));
         }
 ```
 
-### Step 7: Fix any callers of the old `has_free_var_mask()` accessor
+No D→H sync — uses the host-side slot index from the handle.
 
-Search for all callers of `has_free_var_mask()` and update them. The method was renamed
-to `has_any_free_var_mask()` — callers outside gpu_cache.rs that used the global check
-should switch to `has_any_free_var_mask()` if they need any-slot semantics, or
-`has_free_var_mask_for_slot()` if they have a slot index.
+### Step 9: Fix all callers of the old `has_free_var_mask()` accessor and `into_handle()`
 
-Run: `rg 'has_free_var_mask' crates/` to find all call sites.
+Two search-and-fix passes:
 
-### Step 8: Compile and test
+1. `rg 'has_free_var_mask\(\)' crates/` — rename to `has_any_free_var_mask()` or
+   `has_free_var_mask_for_slot(slot)` depending on context.
+2. `rg 'into_handle\(\)' crates/` — add `?` after each call since it now returns
+   `Result<GpuCircuitCacheHandle>`.
+
+### Step 10: Compile and test
 
 Run: `cargo check -p xlog-prob`
 Expected: compiles clean
@@ -173,7 +212,7 @@ Expected: compiles clean
 Run: `cargo test -p xlog-prob`
 Expected: all tests pass
 
-### Step 9: Commit
+### Step 11: Commit
 
 ```bash
 git add crates/xlog-prob/src/compilation/gpu_cache.rs
@@ -181,7 +220,10 @@ git commit -m "fix(gpu-cache): make has_free_var_mask per-slot instead of global
 
 A global flag was unsafe with 4 slots: clearing it for a zero-mask
 circuit could disable free-var correction for another slot that
-genuinely needs it. Now each slot tracks its own mask state."
+genuinely needs it. Now each slot tracks its own mask state.
+
+Host-side slot index stored in GpuCircuitCacheHandle at lookup time
+to avoid D→H syncs on the per-query eval hot path."
 ```
 
 ---
@@ -394,9 +436,26 @@ Surface warmup profile data through pyxlog to the Python training scripts.
 
 ### Step 1: Expose PTX profile through pyxlog
 
-In `compile_circuit_for_template()` (line 2721), add timing around the full function
-call when `XLOG_WARMUP_PROFILE=1` is set. Store the timing in a thread-local or on
-the `XlogEngine` struct so the Python side can query it.
+**Mutability strategy:** `compile_circuit_for_template()` takes `&self` (line 2722),
+but its callers (`forward_backward_complex_tensor` at line 1767,
+`forward_backward_batch_complex_tensor` at line 1910) take `&mut self` and are
+responsible for inserting into `circuit_cache` and incrementing
+`template_compile_count`. Store the latest `CircuitCompileProfile` on
+`CompiledProgram` as a new field:
+
+```rust
+    /// Latest circuit compilation profile (populated on cache miss when profiling).
+    last_compile_profile: Option<CircuitCompileProfile>,
+```
+
+In the `&mut self` callers (lines 1767-1772 and 1910-1915), after calling
+`compile_circuit_for_template()` and receiving the profile from
+`compile_gpu_d4_and_verify_cached()`, store it in `self.last_compile_profile`.
+No interior mutability needed — the mutation happens in the `&mut self` methods.
+
+The `PtxLoadProfile` is stored on `CudaKernelProvider` (from Task 2) and accessed
+via `self.output_provider.ptx_load_profile()` — this is already `&self`-accessible
+through `Arc`.
 
 Add a Python-accessible method:
 
@@ -405,9 +464,9 @@ Add a Python-accessible method:
     fn warmup_breakdown(&self) -> PyResult<Option<PyObject>> { ... }
 ```
 
-This method reads the `PtxLoadProfile` from the kernel provider and any
-`CircuitCompileProfile` from the most recent compilation, builds a Python dict
-matching the JSON format in the design doc, and returns it.
+This method reads the `PtxLoadProfile` from the kernel provider and
+`last_compile_profile` from the struct, builds a Python dict matching the JSON
+format in the design doc, and returns it.
 
 ### Step 2: Wire into Python training scripts
 
@@ -487,40 +546,59 @@ Save both JSON files under `docs/plans/warmup-profile-results/` and commit.
 Create a shared kernel manifest consumed by both `build.rs` and `provider.rs`.
 
 **Files:**
-- Create: `crates/xlog-cuda/src/kernel_manifest.rs`
-- Modify: `crates/xlog-cuda/src/lib.rs` (add `pub mod kernel_manifest;`)
+- Create: `crates/xlog-cuda/src/kernel_manifest_data.rs`
+- Modify: `crates/xlog-cuda/src/lib.rs` (add `pub mod kernel_manifest_data;`)
+- Modify: `crates/xlog-cuda/build.rs` (add `include!()` for manifest)
 
-### Step 1: Create manifest module
+### Step 1: Create shared manifest data file
+
+Create `crates/xlog-cuda/src/kernel_manifest_data.rs` as a **plain data file** that
+can be consumed by both `build.rs` (via `include!()`) and `provider.rs` (via `mod`).
+
+The file must use only types and expressions valid in both contexts. Use simple
+`&[&str]` arrays:
 
 ```rust
 //! Single source of truth for CUDA kernel modules.
 //!
-//! Both `build.rs` and `provider.rs` consume this manifest to avoid
-//! the kernel list being duplicated in two places.
+//! This file is consumed by both `build.rs` (via include!()) and `provider.rs`
+//! (via mod) to avoid the kernel list being duplicated in two places.
 
-/// A CUDA module entry: (module_name, cu_filename, &[kernel_entry_points]).
-pub struct KernelModule {
-    pub module_name: &'static str,
-    pub cu_filename: &'static str,
-    pub entry_points: &'static [&'static str],
-}
-
-/// All 19 CUDA kernel modules.
-pub const KERNEL_MODULES: &[KernelModule] = &[
-    // Populate from the 19 load_ptx() calls in provider.rs (lines 667-1116),
-    // including the missing `cnf` module from build.rs.
-    // Each entry lists the module name constant, .cu filename, and all kernel
-    // entry point strings from the corresponding *_kernels module.
+/// Module names matching the .cu filenames (without extension).
+/// Order matches provider.rs load order. All 19 modules listed.
+pub const KERNEL_CU_NAMES: &[&str] = &[
+    "join", "dedup", "groupby", "scan", "sort", "filter", "set_ops",
+    "pack", "pir", "cnf", "cache", "weights", "circuit",
+    "mc_sample", "mc_eval", "arith", "sat", "d4", "neural",
 ];
 ```
 
-Populate from `provider.rs` lines 667-1116. The 19 modules are: join, dedup, groupby,
-scan, sort, filter, set_ops, pack, pir, cnf, cache, weights, circuit, mc_sample,
-mc_eval, arith, sat, d4, neural.
+The entry-point lists stay in `provider.rs` (they reference module-specific kernel
+name constants that are only available there). The manifest's job is only to
+enumerate modules and enforce the 19-count invariant.
 
-### Step 2: Wire into lib.rs
+### Step 2: Wire into both consumers
 
-Add `pub mod kernel_manifest;` to `crates/xlog-cuda/src/lib.rs`.
+**`crates/xlog-cuda/src/lib.rs`:** Add `pub mod kernel_manifest_data;`
+
+**`crates/xlog-cuda/build.rs`:** Replace the hardcoded 18-kernel list with:
+
+```rust
+include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/kernel_manifest_data.rs"));
+// Now KERNEL_CU_NAMES is available — use it for the module loop.
+```
+
+This ensures both `build.rs` and `provider.rs` use the same module list.
+
+### Step 3: Add compile-time count assertion in provider.rs
+
+After loading all 19 modules, add:
+
+```rust
+const _: () = assert!(kernel_manifest_data::KERNEL_CU_NAMES.len() == 19);
+```
+
+This catches any drift between the manifest and the actual load calls at compile time.
 
 ### Step 3: Compile
 
@@ -530,11 +608,12 @@ Expected: compiles clean
 ### Step 4: Commit
 
 ```bash
-git add crates/xlog-cuda/src/kernel_manifest.rs crates/xlog-cuda/src/lib.rs
-git commit -m "feat(cuda): add kernel_manifest.rs as single source of truth
+git add crates/xlog-cuda/src/kernel_manifest_data.rs crates/xlog-cuda/src/lib.rs crates/xlog-cuda/build.rs
+git commit -m "feat(cuda): add kernel_manifest_data.rs as single source of truth
 
-Lists all 19 CUDA modules with entry points. Consumed by build.rs
-and provider.rs to eliminate kernel list duplication."
+Lists all 19 CUDA module names. Consumed by build.rs (via include!())
+and provider.rs (via mod) to eliminate kernel list duplication.
+Compile-time assertion enforces 19-count invariant."
 ```
 
 ---
@@ -551,23 +630,24 @@ PTX per module.
 
 Replace the current build.rs (which compiles 18 kernels to PTX targeting sm_70) with:
 
-1. Read `XLOG_NO_CUBIN` — if `1`, skip all cubin/PTX generation
+1. Read `XLOG_NO_CUBIN` — if `1`, **skip cubin generation only** (step 3a), but
+   **still generate portable PTX** (step 3b). Portable PTX is always required as the
+   runtime fallback — without it, loading fails when `include_str!()` is removed.
 2. Read `XLOG_CUBIN_ARCHS` — default `sm_120`, comma-separated
-3. For each of the 19 modules (from kernel_manifest or hardcoded to match):
-   a. For each arch: `nvcc --cubin -arch={arch} -O3 -o $OUT_DIR/{name}.{arch}.cubin kernels/{name}.cu`
-   b. Once per module (outside arch loop): `nvcc --ptx -arch=sm_70 -O3 -o $OUT_DIR/{name}.portable.ptx kernels/{name}.cu`
+3. For each module in `KERNEL_CU_NAMES` (from the included manifest):
+   a. If `XLOG_NO_CUBIN` is not set, for each arch: `nvcc --cubin -arch={arch} -O3 -o $OUT_DIR/{name}.{arch}.cubin kernels/{name}.cu`
+   b. Always, once per module (outside arch loop): `nvcc --ptx -arch=sm_70 -O3 -o $OUT_DIR/{name}.portable.ptx kernels/{name}.cu`
 4. Write `cargo:rerun-if-env-changed` for both env vars
 5. Write `cargo:rerun-if-changed` for each `.cu` file
 
-**Note:** The manifest module can't be imported directly in `build.rs` (it's a build
-script, not part of the crate). Either duplicate the kernel list (18→19 fix) or
-`include!()` a shared file. Simplest: hardcode the corrected 19-entry list in build.rs
-and add a compile-time assertion in the manifest module that the count matches.
+**Note:** `build.rs` uses `include!()` to import `KERNEL_CU_NAMES` from the shared
+manifest (see Task 6). No duplication — the 19-module list is defined once.
 
 ### Step 2: Handle nvcc not found gracefully
 
-If `XLOG_NO_CUBIN=1` or nvcc is not found, emit a cargo warning and skip.
-Current builds won't break.
+If nvcc is not found at all, emit a cargo warning and skip everything (builds
+that can't invoke nvcc are broken anyway since portable PTX is now required).
+If `XLOG_NO_CUBIN=1`, skip only cubin generation — portable PTX is still built.
 
 ### Step 3: Test build
 
@@ -582,7 +662,7 @@ git commit -m "feat(cuda): generate cubins per SM arch + portable PTX in build.r
 
 Generates {name}.sm_{cc}.cubin for each arch in XLOG_CUBIN_ARCHS
 and {name}.portable.ptx (sm_70 baseline) for each of the 19 modules.
-XLOG_NO_CUBIN=1 skips generation for dev builds without nvcc."
+XLOG_NO_CUBIN=1 skips cubin generation but still builds portable PTX."
 ```
 
 ---
@@ -650,15 +730,18 @@ device.inner().load_ptx(Ptx::from_src(JOIN_PTX), JOIN_MODULE, &[...])
 with:
 
 ```rust
-let ptx = match resolve_module_path("join", cc) {
-    Some(path) => Ptx::from_file(path),
-    None => Ptx::from_src(JOIN_PTX),  // embedded fallback (sm_120)
-};
+let ptx = resolve_module_path("join", cc)
+    .map(Ptx::from_file)
+    .ok_or_else(|| XlogError::Kernel(
+        "join: no cubin or portable PTX found (set XLOG_CUBIN_DIR or rebuild with nvcc)".into()
+    ))?;
 device.inner().load_ptx(ptx, JOIN_MODULE, &[...])
 ```
 
-Keep `include_str!()` constants as the final fallback — they still work for the
-current sm_120 hardware. When cubins or portable PTX exist, they take priority.
+**Remove all `include_str!()` PTX constants** (`JOIN_PTX`, `DEDUP_PTX`, ... lines 21-39).
+The embedded PTX targets `sm_120` and is NOT portable — keeping it as a fallback
+silently masks the failure to build portable PTX and would break on non-Blackwell
+hardware. File-based loading from build outputs is now the only path.
 
 ### Step 4: Remove stale `sm_70` references
 
@@ -787,13 +870,13 @@ fn cache_path(key: &CircuitCacheKey) -> PathBuf {
 pub fn write_artifact(key: &CircuitCacheKey, artifact: &CircuitArtifact) -> Result<()> {
     let dir = cache_dir();
     fs::create_dir_all(&dir).map_err(|e| {
-        XlogError::Io(format!("Failed to create circuit cache dir: {}", e))
+        XlogError::Compilation(format!("Failed to create circuit cache dir: {}", e))
     })?;
 
     let path = cache_path(key);
     let tmp = path.with_extension("tmp");
     let mut f = fs::File::create(&tmp).map_err(|e| {
-        XlogError::Io(format!("Failed to create cache tmp file: {}", e))
+        XlogError::Compilation(format!("Failed to create cache tmp file: {}", e))
     })?;
 
     // Write header
@@ -825,7 +908,7 @@ pub fn write_artifact(key: &CircuitCacheKey, artifact: &CircuitArtifact) -> Resu
 
     drop(f);
     fs::rename(&tmp, &path).map_err(|e| {
-        XlogError::Io(format!("Failed to rename cache file: {}", e))
+        XlogError::Compilation(format!("Failed to rename cache file: {}", e))
     })?;
 
     evict_if_needed()?;
@@ -843,7 +926,7 @@ pub fn read_artifact(key: &CircuitCacheKey) -> Result<Option<CircuitArtifact>> {
     }
 
     let data = fs::read(&path).map_err(|e| {
-        XlogError::Io(format!("Failed to read cache file: {}", e))
+        XlogError::Compilation(format!("Failed to read cache file: {}", e))
     })?;
 
     // Validate header (magic, version, key match)
