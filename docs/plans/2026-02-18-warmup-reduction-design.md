@@ -156,12 +156,18 @@ For each of the 19 modules in the manifest, for each arch in `XLOG_CUBIN_ARCHS`
 
 ```
 nvcc --cubin -arch=sm_{cc} -o $OUT_DIR/{name}.sm_{cc}.cubin kernels/{name}.cu
-nvcc --ptx -arch=sm_{cc} -o $OUT_DIR/{name}.ptx kernels/{name}.cu
 ```
 
-Additionally, generate one **portable PTX per module** targeting a baseline SM (e.g.
-`sm_70`) as the fallback for unknown GPUs. This replaces the current repo-embedded PTX
-which targets `sm_120` and would fail on non-Blackwell hardware.
+Separately (once per module, **outside** the per-arch loop), generate one portable PTX
+targeting a baseline SM as the fallback for unknown GPUs:
+
+```
+nvcc --ptx -arch=sm_70 -o $OUT_DIR/{name}.portable.ptx kernels/{name}.cu
+```
+
+This replaces the current repo-embedded PTX which targets `sm_120` and would fail on
+non-Blackwell hardware. The portable PTX is generated only once per module regardless
+of how many architectures are listed in `XLOG_CUBIN_ARCHS`.
 
 Env vars:
 - `XLOG_NO_CUBIN=1` — skip cubin generation (dev builds without nvcc)
@@ -212,25 +218,31 @@ Cache compiled circuit topology on disk so d-DNNF compilation is skipped on warm
 starts. Cache topology and metadata only — query-specific weights are computed per-query
 at runtime.
 
-### Free-Var Mask Slot Reuse Safety
+### Free-Var Mask: Per-Slot Metadata (Prerequisite)
 
 The current `has_free_var_mask` flag is **global** on `GpuCircuitCache`
-(`gpu_cache.rs:61`), not per-slot. When a slot is reused for a circuit with no free
-vars, stale mask data from a previous circuit can remain in the slot's mask region.
+(`gpu_cache.rs:61`), not per-slot. With 4 cache slots, a global flag is unsafe:
+compiling/restoring a zero-mask circuit into one slot and clearing the flag disables
+free-var correction for another slot that genuinely needs it.
 
-**Required fix (prerequisite for Phase 2, recommended in Phase 1):** On every
-compile/restore miss path, **always zero the slot's free-var mask region** before
-populating circuit data. Then conditionally store the actual mask and set the flag only
-when the mask is non-zero. This ensures no stale mask data survives slot reuse.
+**Required fix (prerequisite for Phase 2, recommended in Phase 1):** Make
+`has_free_var_mask` **per-slot metadata**, stored alongside existing per-slot fields
+(`meta_num_nodes`, `meta_num_edges`, etc.) in `GpuCircuitCache`.
 
-Concretely, in `store_from_xgcf()` or the new disk-cache restore path:
-1. Zero the `free_var_mask` region for the target slot (`memset_zeros`)
-2. Store topology arrays
-3. If `has_free_var_mask`: store mask and set flag
-4. If not: flag stays false, mask region is clean zeros
+Concretely:
+1. Replace `has_free_var_mask: bool` (global) with `has_free_var_mask: [bool; NUM_SLOTS]`
+2. In `store_from_xgcf()` and the new disk-cache restore path:
+   a. Zero the `free_var_mask` region for the target slot (`memset_zeros`)
+   b. Store topology arrays
+   c. If mask is non-zero: H→D copy mask, set `has_free_var_mask[slot] = true`
+   d. If mask is all-zero: `has_free_var_mask[slot] = false` (region is clean zeros)
+3. In `apply_free_var_correction_cached()`: check `has_free_var_mask[slot]` instead of
+   the global flag. The slot index is already available from the LRU lookup.
+4. In `eval_grads_inplace_fused_batched()`: same per-slot check — the batch path uses
+   a single slot per batch, so the slot index is known.
 
-Long-term, `has_free_var_mask` should become per-slot metadata (stored alongside
-`meta_num_nodes`, etc.), but zeroing on reuse is sufficient and lower-risk for now.
+This is a small change (one bool → array of bools, two check-sites updated) and
+eliminates the cross-slot interference that makes the global flag unsafe.
 
 ### What Gets Cached
 
@@ -239,7 +251,7 @@ Everything from `store_from_xgcf()` except weights:
   `decision_child_false`, `decision_child_true`, `level_nodes`, `level_offsets`
 - Metadata: `num_nodes`, `num_edges`, `num_levels`, `root`, `max_var`
 - `free_var_mask` — **always stored** in the cache artifact (even if all-zero), so the
-  restore path can write it to the slot and set `has_free_var_mask` correctly
+  restore path can write it to the slot and set `has_free_var_mask[slot]` correctly
 
 Weights (`var_log_true`, `var_log_false`) are NOT cached — they change per query.
 
@@ -345,8 +357,9 @@ When `XLOG_WARMUP_PROFILE=1`:
   Per-query evaluation uses the same cached GPU circuit and batched kernels.
 - **Correctness preserved:** Disk cache stores topology computed by the same D4 +
   verification pipeline. Cache key includes all inputs that affect output. Version
-  stamp invalidates stale entries. Free-var mask slot region is always zeroed before
-  populating to prevent stale data from prior slot occupants.
+  stamp invalidates stale entries. Per-slot `has_free_var_mask` metadata ensures
+  free-var correction is applied only to slots that need it, with mask regions
+  zeroed on every compile/restore to prevent stale data from prior slot occupants.
 - **Graceful degradation:** Cubin miss → PTX fallback. Disk cache miss → full
   recompilation. No hard failure modes.
 - **No new build dependencies for default path:** `XLOG_NO_CUBIN=1` skips nvcc
