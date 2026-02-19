@@ -60,6 +60,7 @@ fn gpu_cache_compile_reuses_slot() {
         &compile_config,
         &mut cache,
         &random_vars,
+        None, // no PIR available, skip disk cache
     )
     .expect("compile 1");
     let (h2, _) = compile_gpu_d4_and_verify_cached(
@@ -69,6 +70,7 @@ fn gpu_cache_compile_reuses_slot() {
         &compile_config,
         &mut cache,
         &random_vars,
+        None,
     )
     .expect("compile 2");
 

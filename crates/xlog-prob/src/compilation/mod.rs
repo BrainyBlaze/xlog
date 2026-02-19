@@ -138,6 +138,10 @@ pub fn compile_gpu_d4_and_verify(
 }
 
 /// Compile CNF on GPU, cache the circuit, then verify equivalence with GPU CDCL.
+///
+/// `canonical_cnf_hash`: a process-independent hash of the PIR structure, used as
+/// the `cnf_hash` in the disk cache key. Computed via [`crate::cnf::canonical_pir_hash`].
+/// If `None`, disk caching is skipped.
 pub fn compile_gpu_d4_and_verify_cached(
     cnf: &GpuCnf,
     decision_var_limit: &TrackedCudaSlice<u32>,
@@ -145,6 +149,7 @@ pub fn compile_gpu_d4_and_verify_cached(
     config: &GpuCompileConfig,
     cache: &mut GpuCircuitCache,
     random_vars: &DeviceRandomVarList,
+    canonical_cnf_hash: Option<u64>,
 ) -> Result<(GpuCircuitCacheHandle, Option<CircuitCompileProfile>)> {
     if config.cdcl_conflict_budget.is_some() {
         return Err(XlogError::Compilation(
@@ -203,23 +208,22 @@ pub fn compile_gpu_d4_and_verify_cached(
     }
 
     // Build the disk cache key (we know compile_needed == 1 at this point).
+    // Uses the caller-supplied canonical PIR hash (process-independent) instead of the
+    // GPU CNF hash (which varies per process due to PirNodeId non-determinism).
     let cache_key = if compile_needed == 1 {
-        // D→H copy cnf_hash from the device-resident key
-        let cnf_hash_host: Vec<u64> = provider
-            .device()
-            .inner()
-            .dtoh_sync_copy(&key)
-            .map_err(|e| XlogError::Kernel(format!("dtoh cnf_hash for disk cache: {}", e)))?;
-        let cnf_hash = cnf_hash_host[0];
-        let config_hash = hash_compile_config(config);
-        let random_vars_hash = hash_random_vars(random_vars, provider)?;
-        let sm = detect_compute_capability(provider)?;
-        Some(disk_cache::CircuitCacheKey {
-            cnf_hash,
-            config_hash,
-            random_vars_hash,
-            sm,
-        })
+        if let Some(cnf_hash) = canonical_cnf_hash {
+            let config_hash = hash_compile_config(config);
+            let random_vars_hash = hash_random_vars(random_vars, provider)?;
+            let sm = detect_compute_capability(provider)?;
+            Some(disk_cache::CircuitCacheKey {
+                cnf_hash,
+                config_hash,
+                random_vars_hash,
+                sm,
+            })
+        } else {
+            None
+        }
     } else {
         None
     };

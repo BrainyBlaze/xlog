@@ -15,7 +15,7 @@ use crate::wfs::{evaluate_wfs_rules, WfsAtom, WfsConfig, WfsLiteral, WfsRule};
 
 use crate::pir::{ChoiceVarId, LeafId, PirGraph, PirNodeId};
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Value {
     I64(i64),
     F64(u64),
@@ -41,7 +41,7 @@ impl From<String> for Value {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct GroundAtom {
     pub predicate: String,
     pub args: Vec<Value>,
@@ -58,13 +58,13 @@ impl GroundAtom {
 
 #[derive(Debug, Clone)]
 struct Relation {
-    tuples: HashMap<Vec<Value>, PirNodeId>,
+    tuples: BTreeMap<Vec<Value>, PirNodeId>,
 }
 
 impl Relation {
     fn new() -> Self {
         Self {
-            tuples: HashMap::new(),
+            tuples: BTreeMap::new(),
         }
     }
 
@@ -281,7 +281,7 @@ pub struct Provenance {
     pub pir: PirGraph,
     pub leaf_probs: BTreeMap<LeafId, f64>,
     pub choice_probs: BTreeMap<ChoiceVarId, (f64, f64)>,
-    tuple_formulas: HashMap<GroundAtom, PirNodeId>,
+    tuple_formulas: BTreeMap<GroundAtom, PirNodeId>,
     pub queries: Vec<GroundAtom>,
     pub evidence: Vec<(GroundAtom, bool)>,
 }
@@ -308,7 +308,7 @@ pub fn extract_from_program(program: &Program) -> Result<Provenance> {
     let mut leaf_probs: BTreeMap<LeafId, f64> = BTreeMap::new();
     let mut choice_probs: BTreeMap<ChoiceVarId, (f64, f64)> = BTreeMap::new();
 
-    let mut store: HashMap<String, Relation> = HashMap::new();
+    let mut store: BTreeMap<String, Relation> = BTreeMap::new();
 
     // Deterministic facts.
     for fact in program.facts() {
@@ -376,7 +376,7 @@ pub fn extract_from_program(program: &Program) -> Result<Provenance> {
         .flat_map(|(_, scc)| scc.iter().cloned())
         .collect();
 
-    let mut rules_by_head: HashMap<String, Vec<Rule>> = HashMap::new();
+    let mut rules_by_head: BTreeMap<String, Vec<Rule>> = BTreeMap::new();
     for rule in program.proper_rules() {
         if rule.has_aggregation() {
             return Err(XlogError::Compilation(
@@ -418,7 +418,7 @@ pub fn extract_from_program(program: &Program) -> Result<Provenance> {
     }
 
     // Snapshot tuple formulas.
-    let mut tuple_formulas: HashMap<GroundAtom, PirNodeId> = HashMap::new();
+    let mut tuple_formulas: BTreeMap<GroundAtom, PirNodeId> = BTreeMap::new();
     for (pred, rel) in &store {
         for (tuple, formula) in &rel.tuples {
             tuple_formulas.insert(GroundAtom::new(pred.clone(), tuple.clone()), *formula);
@@ -575,11 +575,11 @@ fn is_recursive_scc(scc: &[String], rules: &[Rule]) -> bool {
 
 fn eval_non_recursive_scc(
     rules: &[Rule],
-    store: &mut HashMap<String, Relation>,
+    store: &mut BTreeMap<String, Relation>,
     builder: &mut PirBuilder,
 ) -> Result<()> {
     for rule in rules {
-        let derived = eval_rule(rule, store, &HashMap::new(), None, builder)?;
+        let derived = eval_rule(rule, store, &BTreeMap::new(), None, builder)?;
         let rel = store
             .entry(rule.head.predicate.clone())
             .or_insert_with(Relation::new);
@@ -595,20 +595,20 @@ const MAX_PROVENANCE_ITERATIONS: usize = 1024;
 fn eval_recursive_scc(
     scc: &[String],
     rules: &[Rule],
-    store: &mut HashMap<String, Relation>,
+    store: &mut BTreeMap<String, Relation>,
     builder: &mut PirBuilder,
 ) -> Result<()> {
     let scc_set: std::collections::HashSet<&str> = scc.iter().map(|s| s.as_str()).collect();
 
     // Snapshot full relations for the SCC.
-    let mut full: HashMap<String, Relation> = HashMap::new();
+    let mut full: BTreeMap<String, Relation> = BTreeMap::new();
     for pred in scc {
         let rel = store.get(pred).cloned().unwrap_or_else(Relation::new);
         full.insert(pred.clone(), rel);
     }
 
     // Seed: evaluate all rules once against the current full snapshot.
-    let mut delta: HashMap<String, Relation> = HashMap::new();
+    let mut delta: BTreeMap<String, Relation> = BTreeMap::new();
     for rule in rules {
         let derived = eval_rule(rule, store, &full, None, builder)?;
         if derived.is_empty() {
@@ -658,7 +658,7 @@ fn eval_recursive_scc(
                 continue;
             }
 
-            let mut derived_all: HashMap<Vec<Value>, PirNodeId> = HashMap::new();
+            let mut derived_all: BTreeMap<Vec<Value>, PirNodeId> = BTreeMap::new();
             for idx in body_indices {
                 let derived =
                     eval_rule(rule, store, &full_prev, Some((idx, &delta_prev)), builder)?;
@@ -714,7 +714,7 @@ fn eval_recursive_scc(
 fn eval_non_monotone_scc_with_wfs(
     scc: &[String],
     rules: &[Rule],
-    store: &mut HashMap<String, Relation>,
+    store: &mut BTreeMap<String, Relation>,
     builder: &mut PirBuilder,
 ) -> Result<()> {
     let scc_set: std::collections::HashSet<&str> = scc.iter().map(|s| s.as_str()).collect();
@@ -755,7 +755,7 @@ fn eval_non_monotone_scc_with_wfs(
 /// that match the body literals (excluding SCC predicates which are handled by WFS).
 fn ground_rule_for_wfs(
     rule: &Rule,
-    store: &HashMap<String, Relation>,
+    store: &BTreeMap<String, Relation>,
     scc_set: &std::collections::HashSet<&str>,
     builder: &mut PirBuilder,
 ) -> Result<Vec<WfsRule>> {
@@ -1001,11 +1001,11 @@ fn negate_provenance(prov: PirNodeId, builder: &mut PirBuilder) -> PirNodeId {
 /// provides a delta relation for a specific body literal index.
 fn eval_rule(
     rule: &Rule,
-    global: &HashMap<String, Relation>,
-    full_scc: &HashMap<String, Relation>,
-    delta_scc: Option<(usize, &HashMap<String, Relation>)>,
+    global: &BTreeMap<String, Relation>,
+    full_scc: &BTreeMap<String, Relation>,
+    delta_scc: Option<(usize, &BTreeMap<String, Relation>)>,
     builder: &mut PirBuilder,
-) -> Result<HashMap<Vec<Value>, PirNodeId>> {
+) -> Result<BTreeMap<Vec<Value>, PirNodeId>> {
     let mut states: Vec<(HashMap<String, Value>, PirNodeId)> = Vec::new();
     states.push((HashMap::new(), builder.const_true()));
 
@@ -1117,7 +1117,7 @@ fn eval_rule(
         }
     }
 
-    let mut out: HashMap<Vec<Value>, PirNodeId> = HashMap::new();
+    let mut out: BTreeMap<Vec<Value>, PirNodeId> = BTreeMap::new();
     for (binding, prov) in states {
         let head_tuple = materialize_head(&rule.head, &binding)?;
         let entry = out
@@ -1131,9 +1131,9 @@ fn eval_rule(
 fn select_relation<'a>(
     atom: &Atom,
     body_index: usize,
-    global: &'a HashMap<String, Relation>,
-    full_scc: &'a HashMap<String, Relation>,
-    delta_scc: Option<(usize, &'a HashMap<String, Relation>)>,
+    global: &'a BTreeMap<String, Relation>,
+    full_scc: &'a BTreeMap<String, Relation>,
+    delta_scc: Option<(usize, &'a BTreeMap<String, Relation>)>,
 ) -> Result<&'a Relation> {
     if let Some((delta_index, delta_map)) = delta_scc {
         if delta_index == body_index {

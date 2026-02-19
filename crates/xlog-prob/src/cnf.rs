@@ -119,6 +119,39 @@ fn canonical_hashes(
     canon
 }
 
+/// Compute a process-independent canonical hash of the PIR structure.
+///
+/// This hash depends only on the semantic structure of the PIR graph (node types,
+/// leaf/choice IDs, children's structural hashes), NOT on `PirNodeId` numeric
+/// values. Two processes that build the same XLOG program will produce the same
+/// canonical hash even if `HashMap`-based interning assigns different node IDs.
+///
+/// Used as the `cnf_hash` component of the disk cache key to enable cross-process
+/// cache hits.
+pub fn canonical_pir_hash(pir: &PirGraph, roots: &[PirNodeId]) -> Result<u64> {
+    if roots.is_empty() {
+        return Err(XlogError::Compilation(
+            "Cannot compute canonical hash for empty PIR root set".to_string(),
+        ));
+    }
+    let levels = pir.levelize(roots)?;
+    let canon = canonical_hashes(pir, &levels);
+
+    // Combine root hashes in a deterministic order (sorted by canonical hash).
+    let mut root_hashes: Vec<u64> = roots
+        .iter()
+        .map(|r| canon.get(r).copied().unwrap_or(0))
+        .collect();
+    root_hashes.sort();
+
+    let mut buf = Vec::with_capacity(1 + root_hashes.len() * 8);
+    buf.push(0xFFu8); // tag to distinguish from node hashes
+    for h in root_hashes {
+        buf.extend_from_slice(&h.to_le_bytes());
+    }
+    Ok(fnv1a(&buf))
+}
+
 pub fn encode_cnf(pir: &PirGraph, roots: &[PirNodeId]) -> Result<CnfEncoding> {
     if roots.is_empty() {
         return Err(XlogError::Compilation(

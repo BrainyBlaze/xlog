@@ -1377,6 +1377,7 @@ impl ExactDdnnfProgram {
         ));
         let provider = Arc::new(CudaKernelProvider::new(device, memory)?);
 
+        let canonical_cnf_hash = crate::cnf::canonical_pir_hash(&provenance.pir, &roots)?;
         let gpu_pir = GpuPirGraph::from_host(&provenance.pir, &provider)?;
         let gpu_roots = GpuPirRoots::from_host(&roots, &provider)?;
         let encoding = encode_cnf_gpu(&gpu_pir, &gpu_roots, &provider)?;
@@ -1461,6 +1462,7 @@ impl ExactDdnnfProgram {
             &compile_config,
             &mut cache,
             &random_vars,
+            Some(canonical_cnf_hash),
         )?;
         cache.store_weights(&handle, &weights.log_true, &weights.log_false)?;
 
