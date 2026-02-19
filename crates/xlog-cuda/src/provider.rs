@@ -10544,7 +10544,7 @@ mod tests {
     fn test_ptx_target_architecture() {
         // Verify PTX is compiled for a valid CUDA architecture (sm_70 or later)
         // Note: The actual target may vary based on the build environment
-        let valid_targets = [".target sm_70", ".target sm_80", ".target sm_90"];
+        let valid_targets = [".target sm_70", ".target sm_75", ".target sm_80", ".target sm_90", ".target sm_120"];
 
         assert!(
             valid_targets.iter().any(|t| JOIN_PTX.contains(t)),

@@ -1,10 +1,35 @@
-//! Build script for xlog-cuda: compiles CUDA kernels to PTX
+//! Build script for xlog-cuda: compiles CUDA kernels to cubin + portable PTX.
 
 use std::env;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
+// Import the canonical kernel list from the shared manifest.
+include!("src/kernel_manifest_data.rs");
+
+fn find_nvcc() -> PathBuf {
+    // Check NVCC_PATH env var first, then fall back to PATH lookup.
+    if let Ok(p) = env::var("NVCC_PATH") {
+        let path = PathBuf::from(p);
+        if path.exists() {
+            return path;
+        }
+    }
+    // Verify nvcc is on PATH.
+    match Command::new("nvcc").arg("--version").output() {
+        Ok(output) if output.status.success() => PathBuf::from("nvcc"),
+        _ => {
+            panic!(
+                "nvcc not found — required to generate portable PTX/cubin build \
+                 artifacts. Install the CUDA toolkit and ensure nvcc is on PATH."
+            );
+        }
+    }
+}
+
 fn main() {
+    let nvcc = find_nvcc();
+
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
     let kernels_dir = Path::new(&manifest_dir)
         .parent()
@@ -12,65 +37,64 @@ fn main() {
         .parent()
         .unwrap()
         .join("kernels");
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
-    // List of CUDA kernels to compile
-    let kernels = [
-        "join",
-        "dedup",
-        "groupby",
-        "scan",
-        "sort",
-        "filter",
-        "pack",
-        "set_ops",
-        "circuit",
-        "mc_sample",
-        "mc_eval",
-        "arith",
-        "sat",
-        "d4",
-        "neural",
-        "pir",
-        "cache",
-        "weights",
-    ];
+    // Environment knobs.
+    let no_cubin = env::var("XLOG_NO_CUBIN").map(|v| v == "1").unwrap_or(false);
+    let cubin_archs: Vec<String> = env::var("XLOG_CUBIN_ARCHS")
+        .unwrap_or_else(|_| "sm_120".to_string())
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
 
-    for kernel in &kernels {
-        let cu_path = kernels_dir.join(format!("{}.cu", kernel));
-        let ptx_path = kernels_dir.join(format!("{}.ptx", kernel));
+    // Rerun triggers.
+    println!("cargo:rerun-if-env-changed=XLOG_NO_CUBIN");
+    println!("cargo:rerun-if-env-changed=XLOG_CUBIN_ARCHS");
+    println!("cargo:rerun-if-env-changed=NVCC_PATH");
 
-        // Only recompile if the .cu file is newer than the .ptx file
-        let needs_compile = if ptx_path.exists() {
-            let cu_meta = std::fs::metadata(&cu_path).ok();
-            let ptx_meta = std::fs::metadata(&ptx_path).ok();
-            match (cu_meta, ptx_meta) {
-                (Some(cu), Some(ptx)) => cu.modified().ok() > ptx.modified().ok(),
-                _ => true,
-            }
-        } else {
-            true
-        };
-
-        // Tell Cargo to rerun this script if the .cu file changes
+    for name in KERNEL_CU_NAMES {
+        let cu_path = kernels_dir.join(format!("{name}.cu"));
         println!("cargo:rerun-if-changed={}", cu_path.display());
 
-        if needs_compile {
-            let status = Command::new("nvcc")
-                .args([
-                    "-ptx",
-                    "-arch=sm_70",
-                    "-Wno-deprecated-gpu-targets",
-                    "-O3",
-                    "-o",
-                    ptx_path.to_str().unwrap(),
-                    cu_path.to_str().unwrap(),
-                ])
-                .status()
-                .expect("Failed to execute nvcc. Is CUDA toolkit installed?");
+        // (a) Generate cubin per arch (unless XLOG_NO_CUBIN=1).
+        if !no_cubin {
+            for arch in &cubin_archs {
+                let cubin_path = out_dir.join(format!("{name}.{arch}.cubin"));
+                let status = Command::new(&nvcc)
+                    .args([
+                        "--cubin",
+                        &format!("-arch={arch}"),
+                        "-O3",
+                        "-o",
+                        cubin_path.to_str().unwrap(),
+                        cu_path.to_str().unwrap(),
+                    ])
+                    .status()
+                    .unwrap_or_else(|e| panic!("failed to run nvcc for {name}.{arch}.cubin: {e}"));
 
-            if !status.success() {
-                panic!("nvcc failed to compile {}.cu", kernel);
+                if !status.success() {
+                    panic!("nvcc failed to compile {name}.cu to cubin for {arch}");
+                }
             }
+        }
+
+        // (b) Always generate portable PTX (sm_75 baseline — lowest arch in CUDA 13+).
+        let ptx_path = out_dir.join(format!("{name}.portable.ptx"));
+        let status = Command::new(&nvcc)
+            .args([
+                "--ptx",
+                "-arch=sm_75",
+                "-O3",
+                "-o",
+                ptx_path.to_str().unwrap(),
+                cu_path.to_str().unwrap(),
+            ])
+            .status()
+            .unwrap_or_else(|e| panic!("failed to run nvcc for {name}.portable.ptx: {e}"));
+
+        if !status.success() {
+            panic!("nvcc failed to compile {name}.cu to portable PTX");
         }
     }
 }
