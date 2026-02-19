@@ -651,8 +651,8 @@ If nvcc is not found at all, **emit a hard build error** (`panic!` or
 `compile_error!`). Since Phase 1 removes all embedded `include_str!()` PTX
 constants, there is no fallback — a successful build without nvcc would
 produce a binary that fails at runtime on every module load. The error message
-should say: `"nvcc not found — required to generate portable PTX. Install the
-CUDA toolkit or set XLOG_NO_CUBIN=1 (still requires nvcc for portable PTX)."`.
+should say: `"nvcc not found — required to generate portable PTX/cubin build
+artifacts. Install the CUDA toolkit and ensure nvcc is on PATH."`.
 
 If `XLOG_NO_CUBIN=1`, skip only cubin generation — portable PTX is still built
 (and still requires nvcc).
@@ -979,10 +979,14 @@ fn evict_if_needed() -> Result<()> {
 }
 ```
 
-### Step 6: Add `bytemuck` dependency if not present
+### Step 6: Add dependencies for disk-cache helpers
 
-Check `crates/xlog-prob/Cargo.toml` for `bytemuck`. If not present, add it.
-Alternatively, use `unsafe { std::slice::from_raw_parts() }` for the casts.
+Check `crates/xlog-prob/Cargo.toml` for both `bytemuck` and `dirs`.
+If either is missing, add it.
+`bytemuck` is used for `cast_slice` calls and `dirs` is used by
+`dirs::cache_dir()` in `cache_dir()`.
+Alternatively, if you want to avoid adding `dirs`, rewrite `cache_dir()` using
+only `std::env` path resolution.
 
 ### Step 7: Compile and unit test
 
