@@ -334,7 +334,7 @@ impl ExactDdnnfProgram {
                 .cache
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if cache.has_free_var_mask() {
+            if cache.has_any_free_var_mask() {
                 drop(cache);
                 let mut losses = state.provider.memory().alloc::<f64>(batch)?;
                 for q in 0..batch {

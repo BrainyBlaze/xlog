@@ -58,7 +58,7 @@ pub struct GpuCircuitCache {
     zero_f64: TrackedCudaSlice<f64>,
     one_f64: TrackedCudaSlice<f64>,
     free_var_mask: TrackedCudaSlice<u8>,
-    has_free_var_mask: bool,
+    has_free_var_mask: Vec<bool>,
 }
 
 pub struct GpuCacheLookup {
@@ -80,16 +80,20 @@ impl GpuCacheLookup {
         &self.provider
     }
 
-    pub fn into_handle(self) -> GpuCircuitCacheHandle {
-        GpuCircuitCacheHandle {
+    pub fn into_handle(self) -> Result<GpuCircuitCacheHandle> {
+        let slot_host_vec: Vec<u32> = self.provider.device().inner()
+            .dtoh_sync_copy(&self.slot)
+            .map_err(|e| XlogError::Kernel(format!("dtoh slot index: {}", e)))?;
+        Ok(GpuCircuitCacheHandle {
             provider: self.provider,
             slot: self.slot,
             compile_needed: self.compile_needed,
+            slot_host: slot_host_vec[0],
             num_nodes: 0,
             num_levels: 0,
             root: 0,
             max_var: 0,
-        }
+        })
     }
 }
 
@@ -97,6 +101,7 @@ pub struct GpuCircuitCacheHandle {
     provider: Arc<CudaKernelProvider>,
     slot: TrackedCudaSlice<u32>,
     compile_needed: TrackedCudaSlice<u32>,
+    slot_host: u32,
     num_nodes: u32,
     num_levels: u32,
     root: u32,
@@ -130,6 +135,10 @@ impl GpuCircuitCacheHandle {
 
     pub fn max_var(&self) -> u32 {
         self.max_var
+    }
+
+    pub fn slot_index(&self) -> u32 {
+        self.slot_host
     }
 
     pub fn set_meta(&mut self, num_nodes: u32, num_levels: u32, root: u32, max_var: u32) {
@@ -222,8 +231,15 @@ impl GpuCircuitCache {
         self.num_slots
     }
 
-    pub fn has_free_var_mask(&self) -> bool {
+    pub fn has_any_free_var_mask(&self) -> bool {
+        self.has_free_var_mask.iter().any(|&v| v)
+    }
+
+    pub fn has_free_var_mask_for_slot(&self, slot: u32) -> bool {
         self.has_free_var_mask
+            .get(slot as usize)
+            .copied()
+            .unwrap_or(false)
     }
 
     pub fn var_stride(&self) -> Result<u32> {
@@ -324,7 +340,7 @@ impl GpuCircuitCache {
         if batch_size == 0 {
             return Ok(());
         }
-        if self.has_free_var_mask {
+        if self.has_free_var_mask_for_slot(handle.slot_index()) {
             return Err(XlogError::Execution(
                 "Batched fused eval currently does not support free-var correction".to_string(),
             ));
@@ -799,7 +815,7 @@ impl GpuCircuitCache {
             zero_f64,
             one_f64,
             free_var_mask,
-            has_free_var_mask: false,
+            has_free_var_mask: vec![false; config.num_slots as usize],
         })
     }
 
@@ -864,7 +880,7 @@ impl GpuCircuitCache {
 
     pub fn claim_slot(&mut self, key: u64) -> Result<GpuCircuitCacheHandle> {
         let lookup = self.lookup_or_insert(key)?;
-        Ok(lookup.into_handle())
+        lookup.into_handle()
     }
 
     pub fn store_from_xgcf(
@@ -1483,7 +1499,10 @@ impl GpuCircuitCache {
         .map_err(|e| XlogError::Kernel(format!("cache_store_free_var_mask failed: {}", e)))?;
 
         // No device synchronize: same-stream ordering guarantees visibility.
-        self.has_free_var_mask = true;
+        let slot_idx = handle.slot_index() as usize;
+        if slot_idx < self.has_free_var_mask.len() {
+            self.has_free_var_mask[slot_idx] = true;
+        }
         Ok(())
     }
 
@@ -2102,7 +2121,7 @@ impl GpuCircuitCache {
         apply_log_z: bool,
         apply_grads: bool,
     ) -> Result<()> {
-        if !self.has_free_var_mask {
+        if !self.has_free_var_mask_for_slot(handle.slot_index()) {
             return Ok(());
         }
         let n = self

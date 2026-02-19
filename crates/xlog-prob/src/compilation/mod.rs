@@ -144,7 +144,7 @@ pub fn compile_gpu_d4_and_verify_cached(
     #[cfg(debug_assertions)]
     eprintln!("[xlog-prob] compile_gpu_d4_and_verify_cached: lookup_or_insert_device");
     let lookup = cache.lookup_or_insert_device(&key)?;
-    let mut handle = lookup.into_handle();
+    let mut handle = lookup.into_handle()?;
 
     let d4_config = d4_config_for_smoothing(config, random_vars.count())?;
     #[cfg(debug_assertions)]
@@ -248,7 +248,7 @@ pub fn compile_gpu_d4_and_verify_cached(
     }
     // Only enable free-var correction if there are actual free variables.
     // When the mask is all-zero (common for smoothed d-DNNF circuits),
-    // skipping this keeps has_free_var_mask=false, which avoids unnecessary
+    // skipping this keeps has_free_var_mask[slot]=false, which avoids unnecessary
     // free-var correction kernel launches on every subsequent eval.
     let mask_host: Vec<u8> = provider
         .device()
