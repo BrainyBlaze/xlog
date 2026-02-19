@@ -141,6 +141,9 @@ pub const CNF_MODULE: &str = "xlog_cnf";
 pub const CACHE_MODULE: &str = "xlog_cache";
 pub const WEIGHTS_MODULE: &str = "xlog_weights";
 
+// Compile-time check: kernel manifest lists exactly 19 modules.
+const _: () = assert!(crate::kernel_manifest_data::KERNEL_CU_NAMES.len() == 19);
+
 /// Kernel function names in the Monte Carlo sampling module
 pub mod mc_sample_kernels {
     pub const MC_SAMPLE_BERNOULLI: &str = "mc_sample_bernoulli";

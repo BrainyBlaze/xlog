@@ -4,6 +4,7 @@ pub mod arrow_device;
 pub mod device;
 pub mod device_pool;
 pub mod dlpack;
+pub mod kernel_manifest_data;
 pub mod memory;
 pub mod multi_gpu_memory;
 pub mod provider;
