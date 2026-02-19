@@ -9,6 +9,7 @@ use xlog_cuda::provider::{cache_kernels, CACHE_MODULE};
 use xlog_cuda::CudaKernelProvider;
 use xlog_solve::GpuCnf;
 
+use super::disk_cache;
 use crate::gpu::GpuXgcf;
 
 #[derive(Debug, Clone, Copy)]
@@ -1507,6 +1508,563 @@ impl GpuCircuitCache {
         if slot_idx < self.has_free_var_mask.len() {
             self.has_free_var_mask[slot_idx] = true;
         }
+        Ok(())
+    }
+
+    /// Populate a cache slot from host-resident arrays loaded from the disk cache.
+    ///
+    /// This mirrors [`store_from_xgcf`] but takes a [`disk_cache::CircuitArtifact`]
+    /// (host `Vec`s) instead of a device-resident `GpuXgcf`. Each host array is
+    /// uploaded to a temporary device buffer and then stored into the slot via the
+    /// same `cache_store_*` kernels.
+    pub fn restore_from_host_arrays(
+        &mut self,
+        handle: &mut GpuCircuitCacheHandle,
+        artifact: &disk_cache::CircuitArtifact,
+    ) -> Result<()> {
+        // -- Validate sizes against cache caps --
+        let num_nodes = artifact.num_nodes;
+        if num_nodes == 0 {
+            return Err(XlogError::Compilation(
+                "GpuCircuitCache restore: num_nodes must be > 0".to_string(),
+            ));
+        }
+        if num_nodes > self.node_cap {
+            return Err(XlogError::Compilation(format!(
+                "GpuCircuitCache restore: num_nodes {} exceeds node_cap {}",
+                num_nodes, self.node_cap
+            )));
+        }
+
+        let num_edges = artifact.num_edges;
+        if num_edges > self.edge_cap {
+            return Err(XlogError::Compilation(format!(
+                "GpuCircuitCache restore: num_edges {} exceeds edge_cap {}",
+                num_edges, self.edge_cap
+            )));
+        }
+
+        let num_levels = artifact.num_levels;
+        if num_levels == 0 {
+            return Err(XlogError::Compilation(
+                "GpuCircuitCache restore: num_levels must be > 0".to_string(),
+            ));
+        }
+        if num_levels > self.level_cap {
+            return Err(XlogError::Compilation(format!(
+                "GpuCircuitCache restore: num_levels {} exceeds level_cap {}",
+                num_levels, self.level_cap
+            )));
+        }
+
+        let root = artifact.root;
+        if root >= num_nodes {
+            return Err(XlogError::Compilation(format!(
+                "GpuCircuitCache restore: root {} out of bounds (num_nodes={})",
+                root, num_nodes
+            )));
+        }
+
+        let max_var = artifact.max_var;
+        if max_var > self.var_cap {
+            return Err(XlogError::Compilation(format!(
+                "GpuCircuitCache restore: max_var {} exceeds var_cap {}",
+                max_var, self.var_cap
+            )));
+        }
+
+        let expected_child_offsets = (num_nodes as usize) + 1;
+        if artifact.child_offsets.len() < expected_child_offsets {
+            return Err(XlogError::Compilation(format!(
+                "GpuCircuitCache restore: child_offsets len {} < num_nodes+1 {}",
+                artifact.child_offsets.len(),
+                expected_child_offsets
+            )));
+        }
+        if artifact.level_nodes.len() < num_nodes as usize {
+            return Err(XlogError::Compilation(format!(
+                "GpuCircuitCache restore: level_nodes len {} < num_nodes {}",
+                artifact.level_nodes.len(),
+                num_nodes
+            )));
+        }
+        let expected_level_offsets = (num_levels as usize) + 1;
+        if artifact.level_offsets.len() != expected_level_offsets {
+            return Err(XlogError::Compilation(format!(
+                "GpuCircuitCache restore: level_offsets len {} != num_levels+1 {}",
+                artifact.level_offsets.len(),
+                expected_level_offsets
+            )));
+        }
+
+        // -- Set handle metadata --
+        handle.num_nodes = num_nodes;
+        handle.num_levels = num_levels;
+        handle.root = root;
+        handle.max_var = max_var;
+
+        // -- Load kernels --
+        let device = self.provider.device().inner();
+        let memory = self.provider.memory();
+
+        let store_u8 = device
+            .get_func(CACHE_MODULE, cache_kernels::CACHE_STORE_U8)
+            .ok_or_else(|| XlogError::Kernel("cache_store_u8 kernel not found".to_string()))?;
+        let store_u32 = device
+            .get_func(CACHE_MODULE, cache_kernels::CACHE_STORE_U32)
+            .ok_or_else(|| XlogError::Kernel("cache_store_u32 kernel not found".to_string()))?;
+        let store_i32 = device
+            .get_func(CACHE_MODULE, cache_kernels::CACHE_STORE_I32)
+            .ok_or_else(|| XlogError::Kernel("cache_store_i32 kernel not found".to_string()))?;
+        let store_meta = device
+            .get_func(CACHE_MODULE, cache_kernels::CACHE_STORE_META)
+            .ok_or_else(|| XlogError::Kernel("cache_store_meta kernel not found".to_string()))?;
+
+        let block_dim = 256u32;
+        let grid_for = |count: u32| -> u32 {
+            if count == 0 {
+                0
+            } else {
+                (count + block_dim - 1) / block_dim
+            }
+        };
+
+        let node_stride = self.node_cap;
+        let offset_stride = self.node_cap.checked_add(1).ok_or_else(|| {
+            XlogError::Compilation("GpuCircuitCache restore: node_cap overflow".to_string())
+        })?;
+        let level_offset_stride = self.level_cap.checked_add(1).ok_or_else(|| {
+            XlogError::Compilation("GpuCircuitCache restore: level_cap overflow".to_string())
+        })?;
+        let var_stride = self.var_cap.checked_add(1).ok_or_else(|| {
+            XlogError::Compilation("GpuCircuitCache restore: var_cap overflow".to_string())
+        })?;
+
+        let num_nodes_plus1 = num_nodes.checked_add(1).ok_or_else(|| {
+            XlogError::Compilation("GpuCircuitCache restore: num_nodes overflow".to_string())
+        })?;
+        let num_levels_plus1 = num_levels.checked_add(1).ok_or_else(|| {
+            XlogError::Compilation("GpuCircuitCache restore: num_levels overflow".to_string())
+        })?;
+
+        // -- Upload node_type (u8, num_nodes elements) --
+        let grid_nodes = grid_for(num_nodes);
+        if grid_nodes != 0 {
+            let mut d_node_type = memory.alloc::<u8>(num_nodes as usize)?;
+            device
+                .htod_sync_copy_into(&artifact.node_type[..num_nodes as usize], &mut d_node_type)
+                .map_err(|e| {
+                    XlogError::Kernel(format!("restore htod node_type failed: {}", e))
+                })?;
+            unsafe {
+                store_u8.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (grid_nodes, 1, 1),
+                        block_dim: (block_dim, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        handle.slot_device(),
+                        handle.compile_needed_device(),
+                        node_stride,
+                        &d_node_type,
+                        &mut self.node_type,
+                        num_nodes,
+                    ),
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("restore cache_store node_type failed: {}", e)))?;
+        }
+
+        // -- Upload child_offsets (u32, num_nodes+1 elements) --
+        let grid_offsets = grid_for(num_nodes_plus1);
+        if grid_offsets != 0 {
+            let mut d_child_offsets = memory.alloc::<u32>(num_nodes_plus1 as usize)?;
+            device
+                .htod_sync_copy_into(
+                    &artifact.child_offsets[..num_nodes_plus1 as usize],
+                    &mut d_child_offsets,
+                )
+                .map_err(|e| {
+                    XlogError::Kernel(format!("restore htod child_offsets failed: {}", e))
+                })?;
+            unsafe {
+                store_u32.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (grid_offsets, 1, 1),
+                        block_dim: (block_dim, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        handle.slot_device(),
+                        handle.compile_needed_device(),
+                        offset_stride,
+                        &d_child_offsets,
+                        &mut self.child_offsets,
+                        num_nodes_plus1,
+                    ),
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!("restore cache_store child_offsets failed: {}", e))
+            })?;
+        }
+
+        // -- Upload child_indices (u32, num_edges elements) --
+        let grid_edges = grid_for(num_edges);
+        if grid_edges != 0 {
+            let mut d_child_indices = memory.alloc::<u32>(num_edges as usize)?;
+            device
+                .htod_sync_copy_into(
+                    &artifact.child_indices[..num_edges as usize],
+                    &mut d_child_indices,
+                )
+                .map_err(|e| {
+                    XlogError::Kernel(format!("restore htod child_indices failed: {}", e))
+                })?;
+            unsafe {
+                store_u32.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (grid_edges, 1, 1),
+                        block_dim: (block_dim, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        handle.slot_device(),
+                        handle.compile_needed_device(),
+                        self.edge_cap,
+                        &d_child_indices,
+                        &mut self.child_indices,
+                        num_edges,
+                    ),
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!("restore cache_store child_indices failed: {}", e))
+            })?;
+        }
+
+        // -- Upload lit (i32, num_nodes elements) --
+        if grid_nodes != 0 {
+            let mut d_lit = memory.alloc::<i32>(num_nodes as usize)?;
+            device
+                .htod_sync_copy_into(&artifact.lit[..num_nodes as usize], &mut d_lit)
+                .map_err(|e| {
+                    XlogError::Kernel(format!("restore htod lit failed: {}", e))
+                })?;
+            unsafe {
+                store_i32.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (grid_nodes, 1, 1),
+                        block_dim: (block_dim, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        handle.slot_device(),
+                        handle.compile_needed_device(),
+                        node_stride,
+                        &d_lit,
+                        &mut self.lit,
+                        num_nodes,
+                    ),
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("restore cache_store lit failed: {}", e)))?;
+
+            // -- Upload decision_var (u32, num_nodes elements) --
+            let mut d_decision_var = memory.alloc::<u32>(num_nodes as usize)?;
+            device
+                .htod_sync_copy_into(
+                    &artifact.decision_var[..num_nodes as usize],
+                    &mut d_decision_var,
+                )
+                .map_err(|e| {
+                    XlogError::Kernel(format!("restore htod decision_var failed: {}", e))
+                })?;
+            unsafe {
+                store_u32.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (grid_nodes, 1, 1),
+                        block_dim: (block_dim, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        handle.slot_device(),
+                        handle.compile_needed_device(),
+                        node_stride,
+                        &d_decision_var,
+                        &mut self.decision_var,
+                        num_nodes,
+                    ),
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!("restore cache_store decision_var failed: {}", e))
+            })?;
+
+            // -- Upload decision_child_false (u32, num_nodes elements) --
+            let mut d_decision_child_false = memory.alloc::<u32>(num_nodes as usize)?;
+            device
+                .htod_sync_copy_into(
+                    &artifact.decision_child_false[..num_nodes as usize],
+                    &mut d_decision_child_false,
+                )
+                .map_err(|e| {
+                    XlogError::Kernel(format!(
+                        "restore htod decision_child_false failed: {}",
+                        e
+                    ))
+                })?;
+            unsafe {
+                store_u32.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (grid_nodes, 1, 1),
+                        block_dim: (block_dim, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        handle.slot_device(),
+                        handle.compile_needed_device(),
+                        node_stride,
+                        &d_decision_child_false,
+                        &mut self.decision_child_false,
+                        num_nodes,
+                    ),
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "restore cache_store decision_child_false failed: {}",
+                    e
+                ))
+            })?;
+
+            // -- Upload decision_child_true (u32, num_nodes elements) --
+            let mut d_decision_child_true = memory.alloc::<u32>(num_nodes as usize)?;
+            device
+                .htod_sync_copy_into(
+                    &artifact.decision_child_true[..num_nodes as usize],
+                    &mut d_decision_child_true,
+                )
+                .map_err(|e| {
+                    XlogError::Kernel(format!(
+                        "restore htod decision_child_true failed: {}",
+                        e
+                    ))
+                })?;
+            unsafe {
+                store_u32.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (grid_nodes, 1, 1),
+                        block_dim: (block_dim, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        handle.slot_device(),
+                        handle.compile_needed_device(),
+                        node_stride,
+                        &d_decision_child_true,
+                        &mut self.decision_child_true,
+                        num_nodes,
+                    ),
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "restore cache_store decision_child_true failed: {}",
+                    e
+                ))
+            })?;
+
+            // -- Upload level_nodes (u32, num_nodes elements) --
+            let mut d_level_nodes = memory.alloc::<u32>(num_nodes as usize)?;
+            device
+                .htod_sync_copy_into(
+                    &artifact.level_nodes[..num_nodes as usize],
+                    &mut d_level_nodes,
+                )
+                .map_err(|e| {
+                    XlogError::Kernel(format!("restore htod level_nodes failed: {}", e))
+                })?;
+            unsafe {
+                store_u32.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (grid_nodes, 1, 1),
+                        block_dim: (block_dim, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        handle.slot_device(),
+                        handle.compile_needed_device(),
+                        node_stride,
+                        &d_level_nodes,
+                        &mut self.level_nodes,
+                        num_nodes,
+                    ),
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!("restore cache_store level_nodes failed: {}", e))
+            })?;
+        }
+
+        // -- Upload level_offsets (u32, num_levels+1 elements) --
+        let grid_levels = grid_for(num_levels_plus1);
+        if grid_levels != 0 {
+            let mut d_level_offsets = memory.alloc::<u32>(num_levels_plus1 as usize)?;
+            device
+                .htod_sync_copy_into(
+                    &artifact.level_offsets[..num_levels_plus1 as usize],
+                    &mut d_level_offsets,
+                )
+                .map_err(|e| {
+                    XlogError::Kernel(format!("restore htod level_offsets failed: {}", e))
+                })?;
+            unsafe {
+                store_u32.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (grid_levels, 1, 1),
+                        block_dim: (block_dim, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        handle.slot_device(),
+                        handle.compile_needed_device(),
+                        level_offset_stride,
+                        &d_level_offsets,
+                        &mut self.level_offsets,
+                        num_levels_plus1,
+                    ),
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!("restore cache_store level_offsets failed: {}", e))
+            })?;
+        }
+
+        // -- Store metadata via cache_store_meta kernel --
+        unsafe {
+            store_meta.clone().launch(
+                LaunchConfig {
+                    grid_dim: (1, 1, 1),
+                    block_dim: (1, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (
+                    handle.slot_device(),
+                    handle.compile_needed_device(),
+                    self.num_slots,
+                    num_nodes,
+                    num_levels,
+                    root,
+                    max_var,
+                    &mut self.meta_num_nodes,
+                    &mut self.meta_num_levels,
+                    &mut self.meta_root,
+                    &mut self.meta_max_var,
+                ),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("restore cache_store_meta failed: {}", e)))?;
+
+        // -- Zero the free_var_mask region for this slot, then conditionally write --
+        let slot_idx = handle.slot_index() as usize;
+
+        // Zero the slot's mask region by uploading a zero buffer and storing it.
+        // We always zero to ensure stale mask data from a previous occupant is cleared.
+        let mask_cap = var_stride; // max_var+1 capacity per slot
+        let grid_mask_zero = grid_for(mask_cap);
+        if grid_mask_zero != 0 {
+            let mut d_zeros = memory.alloc::<u8>(mask_cap as usize)?;
+            device.memset_zeros(&mut d_zeros).map_err(|e| {
+                XlogError::Kernel(format!("restore memset_zeros free_var_mask failed: {}", e))
+            })?;
+            unsafe {
+                store_u8.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (grid_mask_zero, 1, 1),
+                        block_dim: (block_dim, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        handle.slot_device(),
+                        handle.compile_needed_device(),
+                        var_stride,
+                        &d_zeros,
+                        &mut self.free_var_mask,
+                        mask_cap,
+                    ),
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!("restore cache_store zero free_var_mask failed: {}", e))
+            })?;
+        }
+
+        // Write the actual free_var_mask if the artifact has one.
+        let has_mask = artifact.has_free_var_mask && !artifact.free_var_mask.is_empty();
+        if has_mask {
+            let mask_len = max_var.checked_add(1).ok_or_else(|| {
+                XlogError::Compilation(
+                    "GpuCircuitCache restore: free_var_mask max_var overflow".to_string(),
+                )
+            })?;
+            let actual_len = std::cmp::min(mask_len as usize, artifact.free_var_mask.len());
+            if actual_len > 0 {
+                let grid_mask = grid_for(actual_len as u32);
+                if grid_mask != 0 {
+                    let mut d_mask = memory.alloc::<u8>(actual_len)?;
+                    device
+                        .htod_sync_copy_into(
+                            &artifact.free_var_mask[..actual_len],
+                            &mut d_mask,
+                        )
+                        .map_err(|e| {
+                            XlogError::Kernel(format!(
+                                "restore htod free_var_mask failed: {}",
+                                e
+                            ))
+                        })?;
+                    unsafe {
+                        store_u8.clone().launch(
+                            LaunchConfig {
+                                grid_dim: (grid_mask, 1, 1),
+                                block_dim: (block_dim, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            (
+                                handle.slot_device(),
+                                handle.compile_needed_device(),
+                                var_stride,
+                                &d_mask,
+                                &mut self.free_var_mask,
+                                actual_len as u32,
+                            ),
+                        )
+                    }
+                    .map_err(|e| {
+                        XlogError::Kernel(format!(
+                            "restore cache_store free_var_mask failed: {}",
+                            e
+                        ))
+                    })?;
+                }
+            }
+        }
+
+        // Set per-slot has_free_var_mask flag.
+        debug_assert!(
+            slot_idx < self.has_free_var_mask.len(),
+            "slot_index {} exceeds num_slots {}",
+            slot_idx,
+            self.has_free_var_mask.len()
+        );
+        if slot_idx < self.has_free_var_mask.len() {
+            self.has_free_var_mask[slot_idx] = has_mask;
+        }
+
+        // No device synchronize needed: all stores are H→D copies followed by
+        // same-stream kernel launches, so ordering is guaranteed.
         Ok(())
     }
 
