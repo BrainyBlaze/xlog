@@ -4,6 +4,8 @@
 //!
 //! Production correctness requires the GPU CDCL equivalence verifier (see `validation`).
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -53,6 +55,7 @@ pub struct CircuitCompileProfile {
     pub cache_store_sec: f64,
     pub free_var_mask_sec: f64,
     pub gpu_cache_hit: bool,
+    pub disk_cache_hit: bool,
 }
 
 fn warmup_profiling_enabled() -> bool {
@@ -181,6 +184,63 @@ pub fn compile_gpu_d4_and_verify_cached(
     eprintln!("[xlog-prob] compile_gpu_d4_and_verify_cached: lookup_or_insert_device");
     let lookup = cache.lookup_or_insert_device(&key)?;
     let mut handle = lookup.into_handle()?;
+
+    // --- Disk cache check (only on GPU cache miss) ---
+    //
+    // D→H copy compile_needed to decide whether we need to compile at all.
+    // If compile_needed == 0, the GPU cache already has the circuit (GPU cache hit).
+    // If compile_needed == 1, we check the disk cache before falling through to D4.
+    let compile_needed_host: Vec<u32> = provider
+        .device()
+        .inner()
+        .dtoh_sync_copy(handle.compile_needed_device())
+        .map_err(|e| XlogError::Kernel(format!("dtoh compile_needed: {}", e)))?;
+    let compile_needed = compile_needed_host[0];
+
+    // Build the disk cache key early so it is available for both read and write paths.
+    // We only need the full key when there is a GPU cache miss.
+    let cache_key = if compile_needed == 1 {
+        // D→H copy cnf_hash from the device-resident key
+        let cnf_hash_host: Vec<u64> = provider
+            .device()
+            .inner()
+            .dtoh_sync_copy(&key)
+            .map_err(|e| XlogError::Kernel(format!("dtoh cnf_hash for disk cache: {}", e)))?;
+        let cnf_hash = cnf_hash_host[0];
+        let config_hash = hash_compile_config(config);
+        let random_vars_hash = hash_random_vars(random_vars, provider)?;
+        let sm = detect_compute_capability(provider)?;
+        Some(disk_cache::CircuitCacheKey {
+            cnf_hash,
+            config_hash,
+            random_vars_hash,
+            sm,
+        })
+    } else {
+        None
+    };
+
+    // Check disk cache on GPU cache miss
+    if let Some(ref disk_key) = cache_key {
+        #[cfg(debug_assertions)]
+        eprintln!("[xlog-prob] compile_gpu_d4_and_verify_cached: checking disk cache");
+        if let Ok(Some(artifact)) = disk_cache::read_artifact(disk_key) {
+            #[cfg(debug_assertions)]
+            eprintln!("[xlog-prob] compile_gpu_d4_and_verify_cached: disk cache hit");
+            cache.restore_from_host_arrays(&mut handle, &artifact)?;
+            provider
+                .device()
+                .synchronize()
+                .map_err(|e| {
+                    XlogError::Kernel(format!("sync after disk cache restore: {}", e))
+                })?;
+            profile.disk_cache_hit = true;
+            let out_profile = if profiling { Some(profile) } else { None };
+            return Ok((handle, out_profile));
+        }
+        #[cfg(debug_assertions)]
+        eprintln!("[xlog-prob] compile_gpu_d4_and_verify_cached: disk cache miss");
+    }
 
     let d4_config = d4_config_for_smoothing(config, random_vars.count())?;
 
@@ -374,6 +434,18 @@ pub fn compile_gpu_d4_and_verify_cached(
         profile.free_var_mask_sec = t0.elapsed().as_secs_f64();
     }
 
+    // --- Disk cache write (opportunistic) ---
+    //
+    // After a successful compilation, write the artifact to disk for next warm start.
+    // Errors are silently ignored — the disk cache is best-effort.
+    if let Some(ref disk_key) = cache_key {
+        if let Ok(artifact) = cache.build_artifact_from_device(&handle, provider) {
+            let _ = disk_cache::write_artifact(disk_key, &artifact);
+            #[cfg(debug_assertions)]
+            eprintln!("[xlog-prob] compile_gpu_d4_and_verify_cached: wrote disk cache artifact");
+        }
+    }
+
     let out_profile = if profiling { Some(profile) } else { None };
     Ok((handle, out_profile))
 }
@@ -467,4 +539,77 @@ fn cdcl_config_from_compile(config: &GpuCompileConfig) -> Result<GpuCdclConfig> 
         restart_base: config.cdcl_restart_interval,
         reduce_interval,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Disk cache helpers
+// ---------------------------------------------------------------------------
+
+/// Hash the compile config fields that affect circuit topology output.
+fn hash_compile_config(config: &GpuCompileConfig) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    config.frontier_depth.hash(&mut hasher);
+    config.max_frontier_items.hash(&mut hasher);
+    config.max_depth.hash(&mut hasher);
+    config.smooth_node_cap.hash(&mut hasher);
+    config.smooth_edge_cap.hash(&mut hasher);
+    // CDCL verifier params do not affect the compiled circuit topology,
+    // but we include them for safety so a verifier config change invalidates the cache.
+    config.cdcl_restart_interval.hash(&mut hasher);
+    config.cdcl_learned_bytes.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Hash the random variable list (D→H copy + hash).
+fn hash_random_vars(
+    random_vars: &DeviceRandomVarList,
+    provider: &Arc<CudaKernelProvider>,
+) -> Result<u64> {
+    let mut hasher = DefaultHasher::new();
+    random_vars.count().hash(&mut hasher);
+    if random_vars.count() > 0 {
+        let count = random_vars.count() as usize;
+        let host: Vec<u32> = provider
+            .device()
+            .inner()
+            .dtoh_sync_copy(random_vars.list())
+            .map_err(|e| {
+                XlogError::Kernel(format!("dtoh random_vars for disk cache hash: {}", e))
+            })?;
+        // Hash only the valid elements (count may be less than the allocation).
+        for &v in &host[..count] {
+            v.hash(&mut hasher);
+        }
+    }
+    Ok(hasher.finish())
+}
+
+/// Query the device compute capability and encode as `major * 10 + minor` (e.g. 89 for sm_89).
+fn detect_compute_capability(provider: &Arc<CudaKernelProvider>) -> Result<u32> {
+    use cudarc::driver::sys::CUdevice_attribute;
+
+    let device = provider.device().inner();
+    let major = device
+        .attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)
+        .map_err(|e| {
+            XlogError::Kernel(format!("Failed to query compute capability major: {}", e))
+        })?;
+    let minor = device
+        .attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR)
+        .map_err(|e| {
+            XlogError::Kernel(format!("Failed to query compute capability minor: {}", e))
+        })?;
+    let major_u32: u32 = major.try_into().map_err(|_| {
+        XlogError::Kernel(format!(
+            "compute capability major {} cannot be converted to u32",
+            major
+        ))
+    })?;
+    let minor_u32: u32 = minor.try_into().map_err(|_| {
+        XlogError::Kernel(format!(
+            "compute capability minor {} cannot be converted to u32",
+            minor
+        ))
+    })?;
+    Ok(major_u32 * 10 + minor_u32)
 }

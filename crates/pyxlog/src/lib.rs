@@ -1280,6 +1280,7 @@ impl CompiledProgram {
         if let Some(circuit) = circuit_profile {
             let circuit_dict = PyDict::new_bound(py);
             circuit_dict.set_item("gpu_cache_hit", circuit.gpu_cache_hit)?;
+            circuit_dict.set_item("disk_cache_hit", circuit.disk_cache_hit)?;
             circuit_dict.set_item("d4_compile_sec", circuit.d4_compile_sec)?;
             circuit_dict.set_item("verify_sec", circuit.verify_sec)?;
             circuit_dict.set_item("smooth_sec", circuit.smooth_sec)?;

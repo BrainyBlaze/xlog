@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 
 // Guardrail: GPU cache eval/grad hot-path code must not perform device->host reads.
-// The one allowed exception is `into_handle()`, which runs at lookup time (once per
-// compilation) to cache the slot index on the host — this avoids D→H syncs on every
-// subsequent eval call.
+// Allowed exceptions (off hot path, run at most once per compilation):
+//   - `into_handle()` — lookup-time slot index caching
+//   - `build_artifact_from_device()` — cold-path D→H copy for disk cache serialization
 #[test]
 fn no_device_to_host_reads_in_gpu_cache() {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -13,24 +13,25 @@ fn no_device_to_host_reads_in_gpu_cache() {
 
     let text = std::fs::read_to_string(&path).expect("read source");
 
-    // Strip lines inside the into_handle() method (lookup-time, off hot path).
+    // Strip lines inside allowed methods (off hot path).
+    let allowed_methods = &["fn into_handle(", "fn build_artifact_from_device("];
     let filtered: String = {
-        let mut inside_into_handle = false;
+        let mut inside_allowed = false;
         let mut brace_depth: i32 = 0;
         let mut lines = Vec::new();
         for line in text.lines() {
-            if line.contains("fn into_handle(") {
-                inside_into_handle = true;
+            if !inside_allowed && allowed_methods.iter().any(|m| line.contains(m)) {
+                inside_allowed = true;
                 brace_depth = 0;
             }
-            if inside_into_handle {
+            if inside_allowed {
                 for ch in line.chars() {
                     if ch == '{' {
                         brace_depth += 1;
                     } else if ch == '}' {
                         brace_depth -= 1;
                         if brace_depth == 0 {
-                            inside_into_handle = false;
+                            inside_allowed = false;
                         }
                     }
                 }

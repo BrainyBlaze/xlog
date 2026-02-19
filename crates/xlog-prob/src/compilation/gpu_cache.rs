@@ -2068,6 +2068,156 @@ impl GpuCircuitCache {
         Ok(())
     }
 
+    /// Extract a [`disk_cache::CircuitArtifact`] from a populated GPU cache slot.
+    ///
+    /// This is the inverse of [`restore_from_host_arrays`]: it reads device-resident
+    /// topology arrays from the cache slot and builds host vectors suitable for disk
+    /// serialization. The caller must ensure the slot has been populated (i.e. after
+    /// `store_from_xgcf` + `store_free_var_mask`).
+    pub fn build_artifact_from_device(
+        &self,
+        handle: &GpuCircuitCacheHandle,
+        provider: &Arc<CudaKernelProvider>,
+    ) -> Result<disk_cache::CircuitArtifact> {
+        let device = provider.device().inner();
+        let slot = handle.slot_index() as usize;
+        let num_nodes = handle.num_nodes();
+        let num_levels = handle.num_levels();
+        let root = handle.root();
+        let max_var = handle.max_var();
+
+        if num_nodes == 0 {
+            return Err(XlogError::Compilation(
+                "build_artifact_from_device: num_nodes is 0".to_string(),
+            ));
+        }
+
+        let node_stride = self.node_cap as usize;
+        let offset_stride = (self.node_cap as usize) + 1;
+        let edge_stride = self.edge_cap as usize;
+        let level_offset_stride = (self.level_cap as usize) + 1;
+        let var_stride = (self.var_cap as usize) + 1;
+
+        let slot_node_start = slot * node_stride;
+        let slot_offset_start = slot * offset_stride;
+        let slot_level_offset_start = slot * level_offset_stride;
+        let slot_var_start = slot * var_stride;
+
+        let nn = num_nodes as usize;
+        let nn1 = nn + 1;
+        let nl1 = (num_levels as usize) + 1;
+
+        // Determine num_edges from child_offsets[num_nodes] - child_offsets[0].
+        // We read child_offsets first, then derive num_edges from it.
+        let child_offsets_view = self.child_offsets.slice(slot_offset_start..(slot_offset_start + nn1));
+        let child_offsets: Vec<u32> = device
+            .dtoh_sync_copy(&child_offsets_view)
+            .map_err(|e| XlogError::Kernel(format!("build_artifact dtoh child_offsets: {}", e)))?;
+        let num_edges = if nn1 > 0 {
+            child_offsets[nn].checked_sub(child_offsets[0]).ok_or_else(|| {
+                XlogError::Compilation(
+                    "build_artifact_from_device: child_offsets[num_nodes] < child_offsets[0]"
+                        .to_string(),
+                )
+            })?
+        } else {
+            0
+        };
+
+        // Read child_indices from the edge region.
+        let slot_edge_start = slot * edge_stride;
+        let ne = num_edges as usize;
+        let child_indices: Vec<u32> = if ne > 0 {
+            let view = self.child_indices.slice(slot_edge_start..(slot_edge_start + ne));
+            device
+                .dtoh_sync_copy(&view)
+                .map_err(|e| XlogError::Kernel(format!("build_artifact dtoh child_indices: {}", e)))?
+        } else {
+            Vec::new()
+        };
+
+        // node_type (u8)
+        let node_type_view = self.node_type.slice(slot_node_start..(slot_node_start + nn));
+        let node_type: Vec<u8> = device
+            .dtoh_sync_copy(&node_type_view)
+            .map_err(|e| XlogError::Kernel(format!("build_artifact dtoh node_type: {}", e)))?;
+
+        // lit (i32)
+        let lit_view = self.lit.slice(slot_node_start..(slot_node_start + nn));
+        let lit: Vec<i32> = device
+            .dtoh_sync_copy(&lit_view)
+            .map_err(|e| XlogError::Kernel(format!("build_artifact dtoh lit: {}", e)))?;
+
+        // decision_var (u32)
+        let dv_view = self.decision_var.slice(slot_node_start..(slot_node_start + nn));
+        let decision_var: Vec<u32> = device
+            .dtoh_sync_copy(&dv_view)
+            .map_err(|e| XlogError::Kernel(format!("build_artifact dtoh decision_var: {}", e)))?;
+
+        // decision_child_false (u32)
+        let dcf_view = self.decision_child_false.slice(slot_node_start..(slot_node_start + nn));
+        let decision_child_false: Vec<u32> = device
+            .dtoh_sync_copy(&dcf_view)
+            .map_err(|e| {
+                XlogError::Kernel(format!("build_artifact dtoh decision_child_false: {}", e))
+            })?;
+
+        // decision_child_true (u32)
+        let dct_view = self.decision_child_true.slice(slot_node_start..(slot_node_start + nn));
+        let decision_child_true: Vec<u32> = device
+            .dtoh_sync_copy(&dct_view)
+            .map_err(|e| {
+                XlogError::Kernel(format!("build_artifact dtoh decision_child_true: {}", e))
+            })?;
+
+        // level_nodes (u32)
+        let ln_view = self.level_nodes.slice(slot_node_start..(slot_node_start + nn));
+        let level_nodes: Vec<u32> = device
+            .dtoh_sync_copy(&ln_view)
+            .map_err(|e| XlogError::Kernel(format!("build_artifact dtoh level_nodes: {}", e)))?;
+
+        // level_offsets (u32)
+        let lo_view =
+            self.level_offsets.slice(slot_level_offset_start..(slot_level_offset_start + nl1));
+        let level_offsets: Vec<u32> = device
+            .dtoh_sync_copy(&lo_view)
+            .map_err(|e| XlogError::Kernel(format!("build_artifact dtoh level_offsets: {}", e)))?;
+
+        // free_var_mask (u8)
+        let has_free_var_mask = self.has_free_var_mask_for_slot(slot as u32);
+        let mask_len = (max_var as usize) + 1;
+        let free_var_mask: Vec<u8> = if mask_len > 0 {
+            let fvm_view =
+                self.free_var_mask.slice(slot_var_start..(slot_var_start + mask_len));
+            device
+                .dtoh_sync_copy(&fvm_view)
+                .map_err(|e| {
+                    XlogError::Kernel(format!("build_artifact dtoh free_var_mask: {}", e))
+                })?
+        } else {
+            Vec::new()
+        };
+
+        Ok(disk_cache::CircuitArtifact {
+            num_nodes,
+            num_edges,
+            num_levels,
+            root,
+            max_var,
+            has_free_var_mask,
+            node_type,
+            child_offsets,
+            child_indices,
+            lit,
+            decision_var,
+            decision_child_false,
+            decision_child_true,
+            level_nodes,
+            level_offsets,
+            free_var_mask,
+        })
+    }
+
     pub fn eval_log_wmc_device_inplace(
         &mut self,
         handle: &GpuCircuitCacheHandle,
