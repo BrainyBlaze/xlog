@@ -1500,6 +1500,10 @@ impl GpuCircuitCache {
 
         // No device synchronize: same-stream ordering guarantees visibility.
         let slot_idx = handle.slot_index() as usize;
+        debug_assert!(
+            slot_idx < self.has_free_var_mask.len(),
+            "slot_index {} exceeds num_slots {}", slot_idx, self.has_free_var_mask.len()
+        );
         if slot_idx < self.has_free_var_mask.len() {
             self.has_free_var_mask[slot_idx] = true;
         }
