@@ -53,9 +53,12 @@ fn main() {
     println!("cargo:rerun-if-env-changed=XLOG_CUBIN_ARCHS");
     println!("cargo:rerun-if-env-changed=NVCC_PATH");
 
-    // Expose OUT_DIR as DEP_XLOG_CUDA_KERNEL_DIR so downstream crates /
-    // packaging scripts (maturin, pyxlog wheel) can stage artifacts into
-    // the installed layout (e.g. <exe_dir>/kernels/).
+    // Emit kernel-dir metadata for packaging scripts that parse build output
+    // (e.g. maturin, pyxlog wheel builds) to stage artifacts into the
+    // installed layout (<exe_dir>/kernels/).
+    // Note: this is NOT propagated as DEP_* to downstream crates (no `links`
+    // key in Cargo.toml). Scripts should grep `cargo:kernel-dir=` from
+    // `cargo build -vv` output or read OUT_DIR directly.
     println!("cargo:kernel-dir={}", out_dir.display());
 
     for name in KERNEL_CU_NAMES {
