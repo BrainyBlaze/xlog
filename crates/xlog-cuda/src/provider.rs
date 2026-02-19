@@ -12,10 +12,25 @@ use cudarc::nvrtc::Ptx;
 use std::ffi::c_void;
 use xlog_core::{AggOp, Result, ScalarType, Schema, XlogError};
 
+use std::time::Instant;
+
 use crate::{
     memory::{CudaColumn, TrackedCudaSlice},
     CudaBuffer, CudaDevice, GpuMemoryManager,
 };
+
+/// Per-module PTX load timing (populated only when XLOG_WARMUP_PROFILE=1).
+#[derive(Debug, Clone, Default)]
+pub struct PtxLoadProfile {
+    pub total_sec: f64,
+    pub per_module_sec: Vec<(String, f64)>,
+    pub cubin_loaded: u32,
+    pub ptx_fallback: u32,
+}
+
+fn warmup_profiling_enabled() -> bool {
+    std::env::var("XLOG_WARMUP_PROFILE").map(|v| v == "1").unwrap_or(false)
+}
 
 // Embedded PTX sources (pre-compiled from .cu files with nvcc -ptx -arch=sm_70)
 const JOIN_PTX: &str = include_str!("../../../kernels/join.ptx");
@@ -595,6 +610,8 @@ pub struct CudaKernelProvider {
     memory: Arc<GpuMemoryManager>,
     /// Tracked host transfers for diagnostics
     transfer_tracker: HostTransferTracker,
+    /// PTX load profiling data (populated only when XLOG_WARMUP_PROFILE=1)
+    ptx_load_profile: Option<PtxLoadProfile>,
 }
 
 #[derive(Default)]
@@ -661,464 +678,715 @@ impl CudaKernelProvider {
     /// let provider = CudaKernelProvider::new(device, memory)?;
     /// ```
     pub fn new(device: Arc<CudaDevice>, memory: Arc<GpuMemoryManager>) -> Result<Self> {
+        let profiling = warmup_profiling_enabled();
+        let mut profile = PtxLoadProfile::default();
+
         // Load join module
-        device
-            .inner()
-            .load_ptx(
-                Ptx::from_src(JOIN_PTX),
-                JOIN_MODULE,
-                &[
-                    join_kernels::HASH_JOIN_BUILD,
-                    join_kernels::HASH_JOIN_PROBE,
-                    join_kernels::COMPUTE_COMPOSITE_HASH,
-                    join_kernels::HASH_JOIN_BUCKET_COUNT_V2,
-                    join_kernels::HASH_JOIN_SCATTER_V2,
-                    join_kernels::HASH_JOIN_PROBE_V2,
-                    join_kernels::HASH_JOIN_SEMI,
-                    join_kernels::HASH_JOIN_ANTI,
-                    join_kernels::INIT_HASH_TABLE,
-                ],
-            )
-            .map_err(|e| XlogError::Kernel(format!("Failed to load join PTX: {}", e)))?;
+        {
+            let t0 = if profiling { Some(Instant::now()) } else { None };
+            device
+                .inner()
+                .load_ptx(
+                    Ptx::from_src(JOIN_PTX),
+                    JOIN_MODULE,
+                    &[
+                        join_kernels::HASH_JOIN_BUILD,
+                        join_kernels::HASH_JOIN_PROBE,
+                        join_kernels::COMPUTE_COMPOSITE_HASH,
+                        join_kernels::HASH_JOIN_BUCKET_COUNT_V2,
+                        join_kernels::HASH_JOIN_SCATTER_V2,
+                        join_kernels::HASH_JOIN_PROBE_V2,
+                        join_kernels::HASH_JOIN_SEMI,
+                        join_kernels::HASH_JOIN_ANTI,
+                        join_kernels::INIT_HASH_TABLE,
+                    ],
+                )
+                .map_err(|e| XlogError::Kernel(format!("Failed to load join PTX: {}", e)))?;
+            if let Some(t0) = t0 {
+                if profiling {
+                    device.inner().synchronize()
+                        .map_err(|e| XlogError::Kernel(format!("sync after join load: {}", e)))?;
+                }
+                let elapsed = t0.elapsed().as_secs_f64();
+                profile.per_module_sec.push(("join".to_string(), elapsed));
+                profile.total_sec += elapsed;
+                profile.ptx_fallback += 1;
+            }
+        }
 
         // Load dedup module
-        device
-            .inner()
-            .load_ptx(
-                Ptx::from_src(DEDUP_PTX),
-                DEDUP_MODULE,
-                &[
-                    dedup_kernels::MARK_DUPLICATES,
-                    dedup_kernels::MARK_UNIQUE_COLUMNAR,
-                    dedup_kernels::MARK_UNIQUE_AND_SCAN_COLUMNAR,
-                    dedup_kernels::COMPACT_ROWS,
-                ],
-            )
-            .map_err(|e| XlogError::Kernel(format!("Failed to load dedup PTX: {}", e)))?;
+        {
+            let t0 = if profiling { Some(Instant::now()) } else { None };
+            device
+                .inner()
+                .load_ptx(
+                    Ptx::from_src(DEDUP_PTX),
+                    DEDUP_MODULE,
+                    &[
+                        dedup_kernels::MARK_DUPLICATES,
+                        dedup_kernels::MARK_UNIQUE_COLUMNAR,
+                        dedup_kernels::MARK_UNIQUE_AND_SCAN_COLUMNAR,
+                        dedup_kernels::COMPACT_ROWS,
+                    ],
+                )
+                .map_err(|e| XlogError::Kernel(format!("Failed to load dedup PTX: {}", e)))?;
+            if let Some(t0) = t0 {
+                if profiling {
+                    device.inner().synchronize()
+                        .map_err(|e| XlogError::Kernel(format!("sync after dedup load: {}", e)))?;
+                }
+                let elapsed = t0.elapsed().as_secs_f64();
+                profile.per_module_sec.push(("dedup".to_string(), elapsed));
+                profile.total_sec += elapsed;
+                profile.ptx_fallback += 1;
+            }
+        }
 
         // Load groupby module
-        device
-            .inner()
-            .load_ptx(
-                Ptx::from_src(GROUPBY_PTX),
-                GROUPBY_MODULE,
-                &[
-                    groupby_kernels::DETECT_GROUP_BOUNDARIES,
-                    groupby_kernels::DETECT_BOUNDARIES,
-                    groupby_kernels::EXTRACT_GROUP_KEYS,
-                    groupby_kernels::GROUP_IDS_FROM_BOUNDARIES,
-                    groupby_kernels::GROUP_START_INDICES,
-                    groupby_kernels::CAPTURE_NUM_GROUPS,
-                    groupby_kernels::GROUPBY_COUNT,
-                    groupby_kernels::GROUPBY_SUM,
-                    groupby_kernels::GROUPBY_MIN,
-                    groupby_kernels::GROUPBY_MAX,
-                    groupby_kernels::GROUPBY_LOGSUMEXP_MAX,
-                    groupby_kernels::GROUPBY_LOGSUMEXP_SUMEXP,
-                    groupby_kernels::GROUPBY_LOGSUMEXP_FINAL,
-                ],
-            )
-            .map_err(|e| XlogError::Kernel(format!("Failed to load groupby PTX: {}", e)))?;
+        {
+            let t0 = if profiling { Some(Instant::now()) } else { None };
+            device
+                .inner()
+                .load_ptx(
+                    Ptx::from_src(GROUPBY_PTX),
+                    GROUPBY_MODULE,
+                    &[
+                        groupby_kernels::DETECT_GROUP_BOUNDARIES,
+                        groupby_kernels::DETECT_BOUNDARIES,
+                        groupby_kernels::EXTRACT_GROUP_KEYS,
+                        groupby_kernels::GROUP_IDS_FROM_BOUNDARIES,
+                        groupby_kernels::GROUP_START_INDICES,
+                        groupby_kernels::CAPTURE_NUM_GROUPS,
+                        groupby_kernels::GROUPBY_COUNT,
+                        groupby_kernels::GROUPBY_SUM,
+                        groupby_kernels::GROUPBY_MIN,
+                        groupby_kernels::GROUPBY_MAX,
+                        groupby_kernels::GROUPBY_LOGSUMEXP_MAX,
+                        groupby_kernels::GROUPBY_LOGSUMEXP_SUMEXP,
+                        groupby_kernels::GROUPBY_LOGSUMEXP_FINAL,
+                    ],
+                )
+                .map_err(|e| XlogError::Kernel(format!("Failed to load groupby PTX: {}", e)))?;
+            if let Some(t0) = t0 {
+                if profiling {
+                    device.inner().synchronize()
+                        .map_err(|e| XlogError::Kernel(format!("sync after groupby load: {}", e)))?;
+                }
+                let elapsed = t0.elapsed().as_secs_f64();
+                profile.per_module_sec.push(("groupby".to_string(), elapsed));
+                profile.total_sec += elapsed;
+                profile.ptx_fallback += 1;
+            }
+        }
 
         // Load scan module
-        device
-            .inner()
-            .load_ptx(
-                Ptx::from_src(SCAN_PTX),
-                SCAN_MODULE,
-                &[
-                    scan_kernels::BLOCK_INCLUSIVE_SCAN,
-                    scan_kernels::ADD_BLOCK_OFFSETS,
-                    scan_kernels::EXCLUSIVE_SCAN_MASK,
-                    scan_kernels::COUNT_MASK,
-                    scan_kernels::MULTIBLOCK_SCAN_PHASE1,
-                    scan_kernels::MULTIBLOCK_SCAN_U32_PHASE1,
-                    scan_kernels::MULTIBLOCK_SCAN_PHASE2,
-                    scan_kernels::MULTIBLOCK_SCAN_PHASE3,
-                ],
-            )
-            .map_err(|e| XlogError::Kernel(format!("Failed to load scan PTX: {}", e)))?;
+        {
+            let t0 = if profiling { Some(Instant::now()) } else { None };
+            device
+                .inner()
+                .load_ptx(
+                    Ptx::from_src(SCAN_PTX),
+                    SCAN_MODULE,
+                    &[
+                        scan_kernels::BLOCK_INCLUSIVE_SCAN,
+                        scan_kernels::ADD_BLOCK_OFFSETS,
+                        scan_kernels::EXCLUSIVE_SCAN_MASK,
+                        scan_kernels::COUNT_MASK,
+                        scan_kernels::MULTIBLOCK_SCAN_PHASE1,
+                        scan_kernels::MULTIBLOCK_SCAN_U32_PHASE1,
+                        scan_kernels::MULTIBLOCK_SCAN_PHASE2,
+                        scan_kernels::MULTIBLOCK_SCAN_PHASE3,
+                    ],
+                )
+                .map_err(|e| XlogError::Kernel(format!("Failed to load scan PTX: {}", e)))?;
+            if let Some(t0) = t0 {
+                if profiling {
+                    device.inner().synchronize()
+                        .map_err(|e| XlogError::Kernel(format!("sync after scan load: {}", e)))?;
+                }
+                let elapsed = t0.elapsed().as_secs_f64();
+                profile.per_module_sec.push(("scan".to_string(), elapsed));
+                profile.total_sec += elapsed;
+                profile.ptx_fallback += 1;
+            }
+        }
 
         // Load sort module
-        device
-            .inner()
-            .load_ptx(
-                Ptx::from_src(SORT_PTX),
-                SORT_MODULE,
-                &[
-                    sort_kernels::RADIX_HISTOGRAM,
-                    sort_kernels::RADIX_SCATTER,
-                    sort_kernels::COMPUTE_RANKS,
-                    sort_kernels::RADIX_SCATTER_STABLE,
-                    sort_kernels::COMPUTE_DIGIT_PREFIX_SUMS,
-                    sort_kernels::INIT_INDICES,
-                    sort_kernels::APPLY_PERMUTATION_U32,
-                    sort_kernels::APPLY_PERMUTATION_BYTES,
-                    sort_kernels::GATHER_KEYS_I32_ORDERED_U32,
-                    sort_kernels::GATHER_KEYS_F32_ORDERED_U32,
-                    sort_kernels::GATHER_KEYS_BOOL_ORDERED_U32,
-                    sort_kernels::GATHER_KEYS_U64_LO_U32,
-                    sort_kernels::GATHER_KEYS_U64_HI_U32,
-                    sort_kernels::GATHER_KEYS_I64_LO_U32,
-                    sort_kernels::GATHER_KEYS_I64_HI_U32,
-                    sort_kernels::GATHER_KEYS_F64_LO_U32,
-                    sort_kernels::GATHER_KEYS_F64_HI_U32,
-                ],
-            )
-            .map_err(|e| XlogError::Kernel(format!("Failed to load sort PTX: {}", e)))?;
+        {
+            let t0 = if profiling { Some(Instant::now()) } else { None };
+            device
+                .inner()
+                .load_ptx(
+                    Ptx::from_src(SORT_PTX),
+                    SORT_MODULE,
+                    &[
+                        sort_kernels::RADIX_HISTOGRAM,
+                        sort_kernels::RADIX_SCATTER,
+                        sort_kernels::COMPUTE_RANKS,
+                        sort_kernels::RADIX_SCATTER_STABLE,
+                        sort_kernels::COMPUTE_DIGIT_PREFIX_SUMS,
+                        sort_kernels::INIT_INDICES,
+                        sort_kernels::APPLY_PERMUTATION_U32,
+                        sort_kernels::APPLY_PERMUTATION_BYTES,
+                        sort_kernels::GATHER_KEYS_I32_ORDERED_U32,
+                        sort_kernels::GATHER_KEYS_F32_ORDERED_U32,
+                        sort_kernels::GATHER_KEYS_BOOL_ORDERED_U32,
+                        sort_kernels::GATHER_KEYS_U64_LO_U32,
+                        sort_kernels::GATHER_KEYS_U64_HI_U32,
+                        sort_kernels::GATHER_KEYS_I64_LO_U32,
+                        sort_kernels::GATHER_KEYS_I64_HI_U32,
+                        sort_kernels::GATHER_KEYS_F64_LO_U32,
+                        sort_kernels::GATHER_KEYS_F64_HI_U32,
+                    ],
+                )
+                .map_err(|e| XlogError::Kernel(format!("Failed to load sort PTX: {}", e)))?;
+            if let Some(t0) = t0 {
+                if profiling {
+                    device.inner().synchronize()
+                        .map_err(|e| XlogError::Kernel(format!("sync after sort load: {}", e)))?;
+                }
+                let elapsed = t0.elapsed().as_secs_f64();
+                profile.per_module_sec.push(("sort".to_string(), elapsed));
+                profile.total_sec += elapsed;
+                profile.ptx_fallback += 1;
+            }
+        }
 
         // Load filter module
-        device
-            .inner()
-            .load_ptx(
-                Ptx::from_src(FILTER_PTX),
-                FILTER_MODULE,
-                &[
-                    filter_kernels::FILTER_COMPARE_U32,
-                    filter_kernels::FILTER_COMPARE_I64,
-                    filter_kernels::FILTER_COMPARE_F64,
-                    filter_kernels::FILTER_COMPARE_I32,
-                    filter_kernels::FILTER_COMPARE_U64,
-                    filter_kernels::FILTER_COMPARE_F32,
-                    filter_kernels::FILTER_COMPARE_U8,
-                    filter_kernels::FILTER_COMPARE_U32_SCAN_PHASE1,
-                    filter_kernels::FILTER_COMPARE_F64_SCAN_PHASE1,
-                    filter_kernels::FILTER_COMPARE_F32_SCAN_PHASE1,
-                    filter_kernels::FILTER_COMPARE_U32_COL,
-                    filter_kernels::FILTER_COMPARE_I32_COL,
-                    filter_kernels::FILTER_COMPARE_I64_COL,
-                    filter_kernels::FILTER_COMPARE_U64_COL,
-                    filter_kernels::FILTER_COMPARE_F32_COL,
-                    filter_kernels::FILTER_COMPARE_F64_COL,
-                    filter_kernels::FILTER_COMPARE_U8_COL,
-                    filter_kernels::FILL_U32_IOTA,
-                    filter_kernels::FILL_U32_CONST,
-                    filter_kernels::MARK_RANDOM_VARS,
-                    filter_kernels::RANDOM_VAR_TO_BIT_FROM_LIST,
-                    filter_kernels::CHECK_RANDOM_VAR_COUNT,
-                    filter_kernels::COMPACT_U32_BY_MASK,
-                    filter_kernels::COMPACT_I64_BY_MASK,
-                    filter_kernels::COMPACT_F64_BY_MASK,
-                    filter_kernels::COMPACT_BYTES_BY_MASK,
-                    filter_kernels::CAPTURE_COMPACT_COUNT,
-                    filter_kernels::MASK_CLAMP_ROWS,
-                    filter_kernels::MASK_AND,
-                    filter_kernels::MASK_OR,
-                    filter_kernels::MASK_NOT,
-                ],
-            )
-            .map_err(|e| XlogError::Kernel(format!("Failed to load filter PTX: {}", e)))?;
+        {
+            let t0 = if profiling { Some(Instant::now()) } else { None };
+            device
+                .inner()
+                .load_ptx(
+                    Ptx::from_src(FILTER_PTX),
+                    FILTER_MODULE,
+                    &[
+                        filter_kernels::FILTER_COMPARE_U32,
+                        filter_kernels::FILTER_COMPARE_I64,
+                        filter_kernels::FILTER_COMPARE_F64,
+                        filter_kernels::FILTER_COMPARE_I32,
+                        filter_kernels::FILTER_COMPARE_U64,
+                        filter_kernels::FILTER_COMPARE_F32,
+                        filter_kernels::FILTER_COMPARE_U8,
+                        filter_kernels::FILTER_COMPARE_U32_SCAN_PHASE1,
+                        filter_kernels::FILTER_COMPARE_F64_SCAN_PHASE1,
+                        filter_kernels::FILTER_COMPARE_F32_SCAN_PHASE1,
+                        filter_kernels::FILTER_COMPARE_U32_COL,
+                        filter_kernels::FILTER_COMPARE_I32_COL,
+                        filter_kernels::FILTER_COMPARE_I64_COL,
+                        filter_kernels::FILTER_COMPARE_U64_COL,
+                        filter_kernels::FILTER_COMPARE_F32_COL,
+                        filter_kernels::FILTER_COMPARE_F64_COL,
+                        filter_kernels::FILTER_COMPARE_U8_COL,
+                        filter_kernels::FILL_U32_IOTA,
+                        filter_kernels::FILL_U32_CONST,
+                        filter_kernels::MARK_RANDOM_VARS,
+                        filter_kernels::RANDOM_VAR_TO_BIT_FROM_LIST,
+                        filter_kernels::CHECK_RANDOM_VAR_COUNT,
+                        filter_kernels::COMPACT_U32_BY_MASK,
+                        filter_kernels::COMPACT_I64_BY_MASK,
+                        filter_kernels::COMPACT_F64_BY_MASK,
+                        filter_kernels::COMPACT_BYTES_BY_MASK,
+                        filter_kernels::CAPTURE_COMPACT_COUNT,
+                        filter_kernels::MASK_CLAMP_ROWS,
+                        filter_kernels::MASK_AND,
+                        filter_kernels::MASK_OR,
+                        filter_kernels::MASK_NOT,
+                    ],
+                )
+                .map_err(|e| XlogError::Kernel(format!("Failed to load filter PTX: {}", e)))?;
+            if let Some(t0) = t0 {
+                if profiling {
+                    device.inner().synchronize()
+                        .map_err(|e| XlogError::Kernel(format!("sync after filter load: {}", e)))?;
+                }
+                let elapsed = t0.elapsed().as_secs_f64();
+                profile.per_module_sec.push(("filter".to_string(), elapsed));
+                profile.total_sec += elapsed;
+                profile.ptx_fallback += 1;
+            }
+        }
 
         // Load set_ops module
-        device
-            .inner()
-            .load_ptx(
-                Ptx::from_src(SET_OPS_PTX),
-                SET_OPS_MODULE,
-                &[
-                    set_ops_kernels::CONCAT_U32,
-                    set_ops_kernels::CONCAT_BYTES,
-                    set_ops_kernels::SORTED_DIFF_MARK,
-                ],
-            )
-            .map_err(|e| XlogError::Kernel(format!("Failed to load set_ops PTX: {}", e)))?;
+        {
+            let t0 = if profiling { Some(Instant::now()) } else { None };
+            device
+                .inner()
+                .load_ptx(
+                    Ptx::from_src(SET_OPS_PTX),
+                    SET_OPS_MODULE,
+                    &[
+                        set_ops_kernels::CONCAT_U32,
+                        set_ops_kernels::CONCAT_BYTES,
+                        set_ops_kernels::SORTED_DIFF_MARK,
+                    ],
+                )
+                .map_err(|e| XlogError::Kernel(format!("Failed to load set_ops PTX: {}", e)))?;
+            if let Some(t0) = t0 {
+                if profiling {
+                    device.inner().synchronize()
+                        .map_err(|e| XlogError::Kernel(format!("sync after set_ops load: {}", e)))?;
+                }
+                let elapsed = t0.elapsed().as_secs_f64();
+                profile.per_module_sec.push(("set_ops".to_string(), elapsed));
+                profile.total_sec += elapsed;
+                profile.ptx_fallback += 1;
+            }
+        }
 
         // Load pack module (GPU-side key packing for multi-column joins)
-        device
-            .inner()
-            .load_ptx(
-                Ptx::from_src(PACK_PTX),
-                PACK_MODULE,
-                &[
-                    pack_kernels::PACK_KEYS,
-                    pack_kernels::HASH_PACKED_KEYS,
-                    pack_kernels::PACK_AND_HASH_KEYS,
-                    pack_kernels::PACK_AND_HASH_KEYS_GENERIC,
-                    pack_kernels::PACK_KEYS_ALIGNED,
-                    pack_kernels::UNPACK_COLUMN,
-                    pack_kernels::UNPACK_COLUMN_COUNTED,
-                    pack_kernels::GATHER_PACKED_ROWS,
-                    pack_kernels::GATHER_PACKED_ROWS_COUNTED,
-                    pack_kernels::SCATTER_PACKED_ROWS,
-                    pack_kernels::COMPARE_PACKED_KEYS,
-                    pack_kernels::PACK_BOOLS_TO_BITMAP,
-                ],
-            )
-            .map_err(|e| XlogError::Kernel(format!("Failed to load pack PTX: {}", e)))?;
+        {
+            let t0 = if profiling { Some(Instant::now()) } else { None };
+            device
+                .inner()
+                .load_ptx(
+                    Ptx::from_src(PACK_PTX),
+                    PACK_MODULE,
+                    &[
+                        pack_kernels::PACK_KEYS,
+                        pack_kernels::HASH_PACKED_KEYS,
+                        pack_kernels::PACK_AND_HASH_KEYS,
+                        pack_kernels::PACK_AND_HASH_KEYS_GENERIC,
+                        pack_kernels::PACK_KEYS_ALIGNED,
+                        pack_kernels::UNPACK_COLUMN,
+                        pack_kernels::UNPACK_COLUMN_COUNTED,
+                        pack_kernels::GATHER_PACKED_ROWS,
+                        pack_kernels::GATHER_PACKED_ROWS_COUNTED,
+                        pack_kernels::SCATTER_PACKED_ROWS,
+                        pack_kernels::COMPARE_PACKED_KEYS,
+                        pack_kernels::PACK_BOOLS_TO_BITMAP,
+                    ],
+                )
+                .map_err(|e| XlogError::Kernel(format!("Failed to load pack PTX: {}", e)))?;
+            if let Some(t0) = t0 {
+                if profiling {
+                    device.inner().synchronize()
+                        .map_err(|e| XlogError::Kernel(format!("sync after pack load: {}", e)))?;
+                }
+                let elapsed = t0.elapsed().as_secs_f64();
+                profile.per_module_sec.push(("pack".to_string(), elapsed));
+                profile.total_sec += elapsed;
+                profile.ptx_fallback += 1;
+            }
+        }
 
         // Load PIR interning module (GPU PIR key packing + hashing + unique marking)
-        device
-            .inner()
-            .load_ptx(
-                Ptx::from_src(PIR_PTX),
-                PIR_MODULE,
-                &[
-                    pir_kernels::PIR_PACK_KEYS,
-                    pir_kernels::PIR_HASH_KEYS,
-                    pir_kernels::PIR_MARK_UNIQUE,
-                    pir_kernels::PIR_FIND_EXISTING,
-                    pir_kernels::PIR_MARK_NEW_GROUPS,
-                    pir_kernels::PIR_BUILD_GROUP_IDS,
-                    pir_kernels::PIR_FILL_CHILD_PARENTS,
-                    pir_kernels::PIR_MARK_UNIQUE_PAIRS,
-                    pir_kernels::PIR_COMPACT_PAIRS,
-                    pir_kernels::PIR_COUNT_CHILDREN,
-                    pir_kernels::PIR_WRITE_CHILD_OFFSETS,
-                    pir_kernels::PIR_GATHER_CHILDREN,
-                    pir_kernels::PIR_BUILD_GRAPH_CHILD_COUNTS,
-                    pir_kernels::PIR_SUM_COUNTS,
-                    pir_kernels::PIR_EMIT_NODES_AND_IDS,
-                    pir_kernels::PIR_UPDATE_COUNTS,
-                ],
-            )
-            .map_err(|e| XlogError::Kernel(format!("Failed to load PIR PTX: {}", e)))?;
+        {
+            let t0 = if profiling { Some(Instant::now()) } else { None };
+            device
+                .inner()
+                .load_ptx(
+                    Ptx::from_src(PIR_PTX),
+                    PIR_MODULE,
+                    &[
+                        pir_kernels::PIR_PACK_KEYS,
+                        pir_kernels::PIR_HASH_KEYS,
+                        pir_kernels::PIR_MARK_UNIQUE,
+                        pir_kernels::PIR_FIND_EXISTING,
+                        pir_kernels::PIR_MARK_NEW_GROUPS,
+                        pir_kernels::PIR_BUILD_GROUP_IDS,
+                        pir_kernels::PIR_FILL_CHILD_PARENTS,
+                        pir_kernels::PIR_MARK_UNIQUE_PAIRS,
+                        pir_kernels::PIR_COMPACT_PAIRS,
+                        pir_kernels::PIR_COUNT_CHILDREN,
+                        pir_kernels::PIR_WRITE_CHILD_OFFSETS,
+                        pir_kernels::PIR_GATHER_CHILDREN,
+                        pir_kernels::PIR_BUILD_GRAPH_CHILD_COUNTS,
+                        pir_kernels::PIR_SUM_COUNTS,
+                        pir_kernels::PIR_EMIT_NODES_AND_IDS,
+                        pir_kernels::PIR_UPDATE_COUNTS,
+                    ],
+                )
+                .map_err(|e| XlogError::Kernel(format!("Failed to load PIR PTX: {}", e)))?;
+            if let Some(t0) = t0 {
+                if profiling {
+                    device.inner().synchronize()
+                        .map_err(|e| XlogError::Kernel(format!("sync after PIR load: {}", e)))?;
+                }
+                let elapsed = t0.elapsed().as_secs_f64();
+                profile.per_module_sec.push(("pir".to_string(), elapsed));
+                profile.total_sec += elapsed;
+                profile.ptx_fallback += 1;
+            }
+        }
 
         // Load GPU CNF encoder module (PIR -> Tseitin CNF on device)
-        device
-            .inner()
-            .load_ptx(
-                Ptx::from_src(CNF_PTX),
-                CNF_MODULE,
-                &[
-                    cnf_kernels::CNF_REACHABILITY_INIT,
-                    cnf_kernels::CNF_REACHABILITY_BFS,
-                    cnf_kernels::CNF_MARK_LEAF_CHOICE,
-                    cnf_kernels::CNF_ASSIGN_LEAF_VAR,
-                    cnf_kernels::CNF_ASSIGN_CHOICE_VAR,
-                    cnf_kernels::CNF_MARK_NODE_VARS,
-                    cnf_kernels::CNF_COUNT_CLAUSES,
-                    cnf_kernels::CNF_CAPTURE_LAST_COUNTS,
-                    cnf_kernels::CNF_COMPUTE_LEAF_CHOICE_TOTALS,
-                    cnf_kernels::CNF_COMPUTE_TOTALS,
-                    cnf_kernels::CNF_ASSIGN_NODE_VAR,
-                    cnf_kernels::CNF_EMIT_CLAUSES,
-                    cnf_kernels::CNF_SET_CLAUSE_END,
-                ],
-            )
-            .map_err(|e| XlogError::Kernel(format!("Failed to load CNF PTX: {}", e)))?;
+        {
+            let t0 = if profiling { Some(Instant::now()) } else { None };
+            device
+                .inner()
+                .load_ptx(
+                    Ptx::from_src(CNF_PTX),
+                    CNF_MODULE,
+                    &[
+                        cnf_kernels::CNF_REACHABILITY_INIT,
+                        cnf_kernels::CNF_REACHABILITY_BFS,
+                        cnf_kernels::CNF_MARK_LEAF_CHOICE,
+                        cnf_kernels::CNF_ASSIGN_LEAF_VAR,
+                        cnf_kernels::CNF_ASSIGN_CHOICE_VAR,
+                        cnf_kernels::CNF_MARK_NODE_VARS,
+                        cnf_kernels::CNF_COUNT_CLAUSES,
+                        cnf_kernels::CNF_CAPTURE_LAST_COUNTS,
+                        cnf_kernels::CNF_COMPUTE_LEAF_CHOICE_TOTALS,
+                        cnf_kernels::CNF_COMPUTE_TOTALS,
+                        cnf_kernels::CNF_ASSIGN_NODE_VAR,
+                        cnf_kernels::CNF_EMIT_CLAUSES,
+                        cnf_kernels::CNF_SET_CLAUSE_END,
+                    ],
+                )
+                .map_err(|e| XlogError::Kernel(format!("Failed to load CNF PTX: {}", e)))?;
+            if let Some(t0) = t0 {
+                if profiling {
+                    device.inner().synchronize()
+                        .map_err(|e| XlogError::Kernel(format!("sync after CNF load: {}", e)))?;
+                }
+                let elapsed = t0.elapsed().as_secs_f64();
+                profile.per_module_sec.push(("cnf".to_string(), elapsed));
+                profile.total_sec += elapsed;
+                profile.ptx_fallback += 1;
+            }
+        }
 
         // Load cache module (CNF hash + cache helpers)
-        device
-            .inner()
-            .load_ptx(
-                Ptx::from_src(CACHE_PTX),
-                CACHE_MODULE,
-                &[
-                    cache_kernels::CACHE_CNF_HASH,
-                    cache_kernels::CACHE_LOOKUP_OR_INSERT,
-                    cache_kernels::CACHE_EVICT_LRU,
-                    cache_kernels::CACHE_STORE_U8,
-                    cache_kernels::CACHE_STORE_U32,
-                    cache_kernels::CACHE_STORE_I32,
-                    cache_kernels::CACHE_STORE_F64,
-                    cache_kernels::CACHE_STORE_META,
-                ],
-            )
-            .map_err(|e| XlogError::Kernel(format!("Failed to load cache PTX: {}", e)))?;
+        {
+            let t0 = if profiling { Some(Instant::now()) } else { None };
+            device
+                .inner()
+                .load_ptx(
+                    Ptx::from_src(CACHE_PTX),
+                    CACHE_MODULE,
+                    &[
+                        cache_kernels::CACHE_CNF_HASH,
+                        cache_kernels::CACHE_LOOKUP_OR_INSERT,
+                        cache_kernels::CACHE_EVICT_LRU,
+                        cache_kernels::CACHE_STORE_U8,
+                        cache_kernels::CACHE_STORE_U32,
+                        cache_kernels::CACHE_STORE_I32,
+                        cache_kernels::CACHE_STORE_F64,
+                        cache_kernels::CACHE_STORE_META,
+                    ],
+                )
+                .map_err(|e| XlogError::Kernel(format!("Failed to load cache PTX: {}", e)))?;
+            if let Some(t0) = t0 {
+                if profiling {
+                    device.inner().synchronize()
+                        .map_err(|e| XlogError::Kernel(format!("sync after cache load: {}", e)))?;
+                }
+                let elapsed = t0.elapsed().as_secs_f64();
+                profile.per_module_sec.push(("cache".to_string(), elapsed));
+                profile.total_sec += elapsed;
+                profile.ptx_fallback += 1;
+            }
+        }
 
         // Load weights module (GPU weight table builders)
-        device
-            .inner()
-            .load_ptx(
-                Ptx::from_src(WEIGHTS_PTX),
-                WEIGHTS_MODULE,
-                &[
-                    weights_kernels::WEIGHTS_FILL_LEAF,
-                    weights_kernels::WEIGHTS_FILL_CHOICE,
-                    weights_kernels::WEIGHTS_SET_EVIDENCE_FROM_NODES,
-                    weights_kernels::WEIGHTS_APPLY_EVIDENCE,
-                    weights_kernels::WEIGHTS_MAP_NODES_TO_VARS,
-                    weights_kernels::WEIGHTS_FORCE_VAR_FALSE,
-                    weights_kernels::WEIGHTS_RESTORE_VAR_FALSE,
-                    weights_kernels::WEIGHTS_FORCE_VAR_TRUE,
-                    weights_kernels::WEIGHTS_RESTORE_VAR_TRUE,
-                    weights_kernels::WEIGHTS_COPY_SLOT_TO_BATCH,
-                    weights_kernels::WEIGHTS_APPLY_QUERY_VARS,
-                    weights_kernels::WEIGHTS_RESTORE_QUERY_VARS,
-                    weights_kernels::WEIGHTS_APPLY_QUERY_VARS_FALSE_BATCHED,
-                    weights_kernels::WEIGHTS_RESTORE_QUERY_VARS_FALSE_BATCHED,
-                    weights_kernels::WEIGHTS_APPLY_QUERY_VARS_TRUE_BATCHED,
-                    weights_kernels::WEIGHTS_RESTORE_QUERY_VARS_TRUE_BATCHED,
-                ],
-            )
-            .map_err(|e| XlogError::Kernel(format!("Failed to load weights PTX: {}", e)))?;
+        {
+            let t0 = if profiling { Some(Instant::now()) } else { None };
+            device
+                .inner()
+                .load_ptx(
+                    Ptx::from_src(WEIGHTS_PTX),
+                    WEIGHTS_MODULE,
+                    &[
+                        weights_kernels::WEIGHTS_FILL_LEAF,
+                        weights_kernels::WEIGHTS_FILL_CHOICE,
+                        weights_kernels::WEIGHTS_SET_EVIDENCE_FROM_NODES,
+                        weights_kernels::WEIGHTS_APPLY_EVIDENCE,
+                        weights_kernels::WEIGHTS_MAP_NODES_TO_VARS,
+                        weights_kernels::WEIGHTS_FORCE_VAR_FALSE,
+                        weights_kernels::WEIGHTS_RESTORE_VAR_FALSE,
+                        weights_kernels::WEIGHTS_FORCE_VAR_TRUE,
+                        weights_kernels::WEIGHTS_RESTORE_VAR_TRUE,
+                        weights_kernels::WEIGHTS_COPY_SLOT_TO_BATCH,
+                        weights_kernels::WEIGHTS_APPLY_QUERY_VARS,
+                        weights_kernels::WEIGHTS_RESTORE_QUERY_VARS,
+                        weights_kernels::WEIGHTS_APPLY_QUERY_VARS_FALSE_BATCHED,
+                        weights_kernels::WEIGHTS_RESTORE_QUERY_VARS_FALSE_BATCHED,
+                        weights_kernels::WEIGHTS_APPLY_QUERY_VARS_TRUE_BATCHED,
+                        weights_kernels::WEIGHTS_RESTORE_QUERY_VARS_TRUE_BATCHED,
+                    ],
+                )
+                .map_err(|e| XlogError::Kernel(format!("Failed to load weights PTX: {}", e)))?;
+            if let Some(t0) = t0 {
+                if profiling {
+                    device.inner().synchronize()
+                        .map_err(|e| XlogError::Kernel(format!("sync after weights load: {}", e)))?;
+                }
+                let elapsed = t0.elapsed().as_secs_f64();
+                profile.per_module_sec.push(("weights".to_string(), elapsed));
+                profile.total_sec += elapsed;
+                profile.ptx_fallback += 1;
+            }
+        }
 
         // Load circuit module (XGCF circuit evaluation)
-        device
-            .inner()
-            .load_ptx(
-                Ptx::from_src(CIRCUIT_PTX),
-                CIRCUIT_MODULE,
-                &[
-                    circuit_kernels::XGCF_FORWARD_LEVEL,
-                    circuit_kernels::XGCF_BACKWARD_LEVEL_PROPAGATE,
-                    circuit_kernels::XGCF_BACKWARD_LEVEL_DECISION_GRAD,
-                    circuit_kernels::XGCF_BACKWARD_LEVEL_LIT_GRAD,
-                    circuit_kernels::XGCF_FREE_VAR_APPLY_GRAD,
-                    circuit_kernels::XGCF_FREE_VAR_REDUCE_STAGE,
-                    circuit_kernels::XGCF_ADD_SCALAR,
-                    circuit_kernels::XGCF_FORWARD_LEVEL_CACHED,
-                    circuit_kernels::XGCF_EVAL_ALL_LEVELS_CACHED,
-                    circuit_kernels::XGCF_EVAL_ALL_LEVELS_CACHED_BATCHED,
-                    circuit_kernels::XGCF_BACKWARD_LEVEL_PROPAGATE_CACHED,
-                    circuit_kernels::XGCF_BACKWARD_LEVEL_DECISION_GRAD_CACHED,
-                    circuit_kernels::XGCF_BACKWARD_LEVEL_LIT_GRAD_CACHED,
-                    circuit_kernels::XGCF_BACKWARD_ALL_LEVELS_CACHED,
-                    circuit_kernels::XGCF_BACKWARD_ALL_LEVELS_CACHED_BATCHED,
-                    circuit_kernels::XGCF_FREE_VAR_APPLY_GRAD_CACHED,
-                    circuit_kernels::XGCF_FREE_VAR_REDUCE_STAGE_CACHED,
-                    circuit_kernels::XGCF_ADD_SCALAR_CACHED,
-                    circuit_kernels::XGCF_SET_ROOT_ADJ_CACHED_BATCHED,
-                    circuit_kernels::XGCF_COPY_ROOT_CACHED,
-                    circuit_kernels::XGCF_COPY_ROOT_CACHED_META,
-                    circuit_kernels::XGCF_COPY_ROOT_CACHED_META_BATCHED,
-                ],
-            )
-            .map_err(|e| XlogError::Kernel(format!("Failed to load circuit PTX: {}", e)))?;
+        {
+            let t0 = if profiling { Some(Instant::now()) } else { None };
+            device
+                .inner()
+                .load_ptx(
+                    Ptx::from_src(CIRCUIT_PTX),
+                    CIRCUIT_MODULE,
+                    &[
+                        circuit_kernels::XGCF_FORWARD_LEVEL,
+                        circuit_kernels::XGCF_BACKWARD_LEVEL_PROPAGATE,
+                        circuit_kernels::XGCF_BACKWARD_LEVEL_DECISION_GRAD,
+                        circuit_kernels::XGCF_BACKWARD_LEVEL_LIT_GRAD,
+                        circuit_kernels::XGCF_FREE_VAR_APPLY_GRAD,
+                        circuit_kernels::XGCF_FREE_VAR_REDUCE_STAGE,
+                        circuit_kernels::XGCF_ADD_SCALAR,
+                        circuit_kernels::XGCF_FORWARD_LEVEL_CACHED,
+                        circuit_kernels::XGCF_EVAL_ALL_LEVELS_CACHED,
+                        circuit_kernels::XGCF_EVAL_ALL_LEVELS_CACHED_BATCHED,
+                        circuit_kernels::XGCF_BACKWARD_LEVEL_PROPAGATE_CACHED,
+                        circuit_kernels::XGCF_BACKWARD_LEVEL_DECISION_GRAD_CACHED,
+                        circuit_kernels::XGCF_BACKWARD_LEVEL_LIT_GRAD_CACHED,
+                        circuit_kernels::XGCF_BACKWARD_ALL_LEVELS_CACHED,
+                        circuit_kernels::XGCF_BACKWARD_ALL_LEVELS_CACHED_BATCHED,
+                        circuit_kernels::XGCF_FREE_VAR_APPLY_GRAD_CACHED,
+                        circuit_kernels::XGCF_FREE_VAR_REDUCE_STAGE_CACHED,
+                        circuit_kernels::XGCF_ADD_SCALAR_CACHED,
+                        circuit_kernels::XGCF_SET_ROOT_ADJ_CACHED_BATCHED,
+                        circuit_kernels::XGCF_COPY_ROOT_CACHED,
+                        circuit_kernels::XGCF_COPY_ROOT_CACHED_META,
+                        circuit_kernels::XGCF_COPY_ROOT_CACHED_META_BATCHED,
+                    ],
+                )
+                .map_err(|e| XlogError::Kernel(format!("Failed to load circuit PTX: {}", e)))?;
+            if let Some(t0) = t0 {
+                if profiling {
+                    device.inner().synchronize()
+                        .map_err(|e| XlogError::Kernel(format!("sync after circuit load: {}", e)))?;
+                }
+                let elapsed = t0.elapsed().as_secs_f64();
+                profile.per_module_sec.push(("circuit".to_string(), elapsed));
+                profile.total_sec += elapsed;
+                profile.ptx_fallback += 1;
+            }
+        }
 
         // Load Monte Carlo sampling module (Bernoulli sampler)
-        device
-            .inner()
-            .load_ptx(
-                Ptx::from_src(MC_SAMPLE_PTX),
-                MC_SAMPLE_MODULE,
-                &[mc_sample_kernels::MC_SAMPLE_BERNOULLI],
-            )
-            .map_err(|e| XlogError::Kernel(format!("Failed to load MC sample PTX: {}", e)))?;
+        {
+            let t0 = if profiling { Some(Instant::now()) } else { None };
+            device
+                .inner()
+                .load_ptx(
+                    Ptx::from_src(MC_SAMPLE_PTX),
+                    MC_SAMPLE_MODULE,
+                    &[mc_sample_kernels::MC_SAMPLE_BERNOULLI],
+                )
+                .map_err(|e| XlogError::Kernel(format!("Failed to load MC sample PTX: {}", e)))?;
+            if let Some(t0) = t0 {
+                if profiling {
+                    device.inner().synchronize()
+                        .map_err(|e| XlogError::Kernel(format!("sync after mc_sample load: {}", e)))?;
+                }
+                let elapsed = t0.elapsed().as_secs_f64();
+                profile.per_module_sec.push(("mc_sample".to_string(), elapsed));
+                profile.total_sec += elapsed;
+                profile.ptx_fallback += 1;
+            }
+        }
 
         // Load Monte Carlo evaluation module (mask construction)
-        device
-            .inner()
-            .load_ptx(
-                Ptx::from_src(MC_EVAL_PTX),
-                MC_EVAL_MODULE,
-                &[
-                    mc_eval_kernels::MC_EVAL_MASK_VAR,
-                    mc_eval_kernels::MC_EVAL_MASK_AD,
-                    mc_eval_kernels::MC_EVAL_QUERY_EVIDENCE_TRUTH,
-                    mc_eval_kernels::MC_EVAL_ACCUMULATE_COUNTS,
-                ],
-            )
-            .map_err(|e| XlogError::Kernel(format!("Failed to load MC eval PTX: {}", e)))?;
+        {
+            let t0 = if profiling { Some(Instant::now()) } else { None };
+            device
+                .inner()
+                .load_ptx(
+                    Ptx::from_src(MC_EVAL_PTX),
+                    MC_EVAL_MODULE,
+                    &[
+                        mc_eval_kernels::MC_EVAL_MASK_VAR,
+                        mc_eval_kernels::MC_EVAL_MASK_AD,
+                        mc_eval_kernels::MC_EVAL_QUERY_EVIDENCE_TRUTH,
+                        mc_eval_kernels::MC_EVAL_ACCUMULATE_COUNTS,
+                    ],
+                )
+                .map_err(|e| XlogError::Kernel(format!("Failed to load MC eval PTX: {}", e)))?;
+            if let Some(t0) = t0 {
+                if profiling {
+                    device.inner().synchronize()
+                        .map_err(|e| XlogError::Kernel(format!("sync after mc_eval load: {}", e)))?;
+                }
+                let elapsed = t0.elapsed().as_secs_f64();
+                profile.per_module_sec.push(("mc_eval".to_string(), elapsed));
+                profile.total_sec += elapsed;
+                profile.ptx_fallback += 1;
+            }
+        }
 
         // Load arithmetic module
-        let arith_module = Ptx::from_src(ARITH_PTX);
-        let _arith = device
-            .inner()
-            .load_ptx(
-                arith_module,
-                ARITH_MODULE,
-                &[
-                    arith_kernels::ARITH_BINARY_I64,
-                    arith_kernels::ARITH_BINARY_I32,
-                    arith_kernels::ARITH_BINARY_U64,
-                    arith_kernels::ARITH_BINARY_U32,
-                    arith_kernels::ARITH_BINARY_F64,
-                    arith_kernels::ARITH_BINARY_F32,
-                    arith_kernels::ARITH_ABS_I64,
-                    arith_kernels::ARITH_ABS_I32,
-                    arith_kernels::ARITH_ABS_F64,
-                    arith_kernels::ARITH_ABS_F32,
-                    arith_kernels::ARITH_POW_F64,
-                    arith_kernels::ARITH_CAST,
-                    arith_kernels::ARITH_FILL_CONST_U32,
-                    arith_kernels::ARITH_FILL_CONST_U64,
-                    arith_kernels::ARITH_FILL_CONST_I64,
-                    arith_kernels::ARITH_FILL_CONST_I32,
-                    arith_kernels::ARITH_FILL_CONST_F64,
-                    arith_kernels::ARITH_FILL_CONST_F32,
-                    arith_kernels::ARITH_FILL_CONST_U8,
-                    arith_kernels::ARITH_SELECT_I64,
-                    arith_kernels::ARITH_SELECT_I32,
-                    arith_kernels::ARITH_SELECT_U64,
-                    arith_kernels::ARITH_SELECT_U32,
-                    arith_kernels::ARITH_SELECT_F64,
-                    arith_kernels::ARITH_SELECT_F32,
-                ],
-            )
-            .map_err(|e| XlogError::Kernel(format!("Failed to load arith PTX: {}", e)))?;
+        {
+            let t0 = if profiling { Some(Instant::now()) } else { None };
+            let arith_module = Ptx::from_src(ARITH_PTX);
+            let _arith = device
+                .inner()
+                .load_ptx(
+                    arith_module,
+                    ARITH_MODULE,
+                    &[
+                        arith_kernels::ARITH_BINARY_I64,
+                        arith_kernels::ARITH_BINARY_I32,
+                        arith_kernels::ARITH_BINARY_U64,
+                        arith_kernels::ARITH_BINARY_U32,
+                        arith_kernels::ARITH_BINARY_F64,
+                        arith_kernels::ARITH_BINARY_F32,
+                        arith_kernels::ARITH_ABS_I64,
+                        arith_kernels::ARITH_ABS_I32,
+                        arith_kernels::ARITH_ABS_F64,
+                        arith_kernels::ARITH_ABS_F32,
+                        arith_kernels::ARITH_POW_F64,
+                        arith_kernels::ARITH_CAST,
+                        arith_kernels::ARITH_FILL_CONST_U32,
+                        arith_kernels::ARITH_FILL_CONST_U64,
+                        arith_kernels::ARITH_FILL_CONST_I64,
+                        arith_kernels::ARITH_FILL_CONST_I32,
+                        arith_kernels::ARITH_FILL_CONST_F64,
+                        arith_kernels::ARITH_FILL_CONST_F32,
+                        arith_kernels::ARITH_FILL_CONST_U8,
+                        arith_kernels::ARITH_SELECT_I64,
+                        arith_kernels::ARITH_SELECT_I32,
+                        arith_kernels::ARITH_SELECT_U64,
+                        arith_kernels::ARITH_SELECT_U32,
+                        arith_kernels::ARITH_SELECT_F64,
+                        arith_kernels::ARITH_SELECT_F32,
+                    ],
+                )
+                .map_err(|e| XlogError::Kernel(format!("Failed to load arith PTX: {}", e)))?;
+            if let Some(t0) = t0 {
+                if profiling {
+                    device.inner().synchronize()
+                        .map_err(|e| XlogError::Kernel(format!("sync after arith load: {}", e)))?;
+                }
+                let elapsed = t0.elapsed().as_secs_f64();
+                profile.per_module_sec.push(("arith".to_string(), elapsed));
+                profile.total_sec += elapsed;
+                profile.ptx_fallback += 1;
+            }
+        }
 
         // Load SAT module (GPU CDCL + on-GPU validation)
-        device
-            .inner()
-            .load_ptx(
-                Ptx::from_src(SAT_PTX),
-                SAT_MODULE,
-                &[
-                    sat_kernels::SAT_CDCL_SOLVE,
-                    sat_kernels::SAT_CHECK_MODEL,
-                    sat_kernels::SAT_PROOF_MARK_NEEDED,
-                    sat_kernels::SAT_PROOF_CHECK,
-                    sat_kernels::SAT_ASSERT_STATUS,
-                    sat_kernels::SAT_ASSERT_OK,
-                    sat_kernels::SAT_XGCF_CNF_COUNTS,
-                    sat_kernels::SAT_XGCF_CNF_EMIT,
-                    sat_kernels::SAT_XGCF_CNF_CAPTURE_LAST_COUNTS,
-                    sat_kernels::SAT_XGCF_CNF_COMPUTE_TOTALS,
-                    sat_kernels::SAT_CNF_WRITE_TERMINATOR,
-                    sat_kernels::SAT_CNF_COPY_INTO,
-                    sat_kernels::SAT_SHIFT_OFFSETS,
-                    sat_kernels::SAT_XGCF_WRITE_ROOT_UNIT_CLAUSE,
-                    sat_kernels::SAT_NOT_PHI_COUNTS,
-                    sat_kernels::SAT_EMIT_NOT_PHI,
-                ],
-            )
-            .map_err(|e| XlogError::Kernel(format!("Failed to load SAT PTX: {}", e)))?;
+        {
+            let t0 = if profiling { Some(Instant::now()) } else { None };
+            device
+                .inner()
+                .load_ptx(
+                    Ptx::from_src(SAT_PTX),
+                    SAT_MODULE,
+                    &[
+                        sat_kernels::SAT_CDCL_SOLVE,
+                        sat_kernels::SAT_CHECK_MODEL,
+                        sat_kernels::SAT_PROOF_MARK_NEEDED,
+                        sat_kernels::SAT_PROOF_CHECK,
+                        sat_kernels::SAT_ASSERT_STATUS,
+                        sat_kernels::SAT_ASSERT_OK,
+                        sat_kernels::SAT_XGCF_CNF_COUNTS,
+                        sat_kernels::SAT_XGCF_CNF_EMIT,
+                        sat_kernels::SAT_XGCF_CNF_CAPTURE_LAST_COUNTS,
+                        sat_kernels::SAT_XGCF_CNF_COMPUTE_TOTALS,
+                        sat_kernels::SAT_CNF_WRITE_TERMINATOR,
+                        sat_kernels::SAT_CNF_COPY_INTO,
+                        sat_kernels::SAT_SHIFT_OFFSETS,
+                        sat_kernels::SAT_XGCF_WRITE_ROOT_UNIT_CLAUSE,
+                        sat_kernels::SAT_NOT_PHI_COUNTS,
+                        sat_kernels::SAT_EMIT_NOT_PHI,
+                    ],
+                )
+                .map_err(|e| XlogError::Kernel(format!("Failed to load SAT PTX: {}", e)))?;
+            if let Some(t0) = t0 {
+                if profiling {
+                    device.inner().synchronize()
+                        .map_err(|e| XlogError::Kernel(format!("sync after SAT load: {}", e)))?;
+                }
+                let elapsed = t0.elapsed().as_secs_f64();
+                profile.per_module_sec.push(("sat".to_string(), elapsed));
+                profile.total_sec += elapsed;
+                profile.ptx_fallback += 1;
+            }
+        }
 
         // Load D4 module (GPU D4 compiler support: CNF validation + circuit levelization)
-        device
-            .inner()
-            .load_ptx(
-                Ptx::from_src(D4_PTX),
-                D4_MODULE,
-                &[
-                    d4_kernels::D4_VALIDATE_CNF,
-                    d4_kernels::D4_LEVELIZE_COUNTS,
-                    d4_kernels::D4_LEVELIZE_EMIT,
-                    d4_kernels::D4_FRONTIER_PREPARE,
-                    d4_kernels::D4_FRONTIER_EXPAND,
-                    d4_kernels::D4_FRONTIER_PREPARE_DENSE,
-                    d4_kernels::D4_FRONTIER_EXPAND_DENSE,
-                    d4_kernels::D4_COMPILE_COUNT,
-                    d4_kernels::D4_COMPILE_EMIT,
-                    d4_kernels::D4_CAPTURE_EMIT_META,
-                    d4_kernels::D4_SUPPORT_LEVEL,
-                    d4_kernels::D4_SUPPORT_SET_ROOT_BITS,
-                    d4_kernels::D4_SMOOTH_COUNT,
-                    d4_kernels::D4_SMOOTH_WRAPPER_COUNTS,
-                    d4_kernels::D4_SMOOTH_WRAPPER_EDGE_COUNTS_OR,
-                    d4_kernels::D4_SMOOTH_WRAPPER_EDGE_COUNTS_DEC,
-                    d4_kernels::D4_SMOOTH_INIT_NODES,
-                    d4_kernels::D4_SMOOTH_EMIT_LEVEL,
-                    d4_kernels::D4_SMOOTH_CHECK_EDGE_CAP,
-                    d4_kernels::D4_MARK_VARS_IN_CLAUSES,
-                    d4_kernels::D4_MARK_VARS_IN_CIRCUIT,
-                    d4_kernels::D4_BUILD_FREE_VAR_MASK,
-                    d4_kernels::D4_ASSERT_U32_EQ,
-                    d4_kernels::D4_ASSERT_BITSET_VAR,
-                    d4_kernels::D4_ASSERT_DENSE_VAR,
-                    d4_kernels::D4_ASSERT_LEAF_ROOT_AND_DEGREE,
-                ],
-            )
-            .map_err(|e| XlogError::Kernel(format!("Failed to load D4 PTX: {}", e)))?;
+        {
+            let t0 = if profiling { Some(Instant::now()) } else { None };
+            device
+                .inner()
+                .load_ptx(
+                    Ptx::from_src(D4_PTX),
+                    D4_MODULE,
+                    &[
+                        d4_kernels::D4_VALIDATE_CNF,
+                        d4_kernels::D4_LEVELIZE_COUNTS,
+                        d4_kernels::D4_LEVELIZE_EMIT,
+                        d4_kernels::D4_FRONTIER_PREPARE,
+                        d4_kernels::D4_FRONTIER_EXPAND,
+                        d4_kernels::D4_FRONTIER_PREPARE_DENSE,
+                        d4_kernels::D4_FRONTIER_EXPAND_DENSE,
+                        d4_kernels::D4_COMPILE_COUNT,
+                        d4_kernels::D4_COMPILE_EMIT,
+                        d4_kernels::D4_CAPTURE_EMIT_META,
+                        d4_kernels::D4_SUPPORT_LEVEL,
+                        d4_kernels::D4_SUPPORT_SET_ROOT_BITS,
+                        d4_kernels::D4_SMOOTH_COUNT,
+                        d4_kernels::D4_SMOOTH_WRAPPER_COUNTS,
+                        d4_kernels::D4_SMOOTH_WRAPPER_EDGE_COUNTS_OR,
+                        d4_kernels::D4_SMOOTH_WRAPPER_EDGE_COUNTS_DEC,
+                        d4_kernels::D4_SMOOTH_INIT_NODES,
+                        d4_kernels::D4_SMOOTH_EMIT_LEVEL,
+                        d4_kernels::D4_SMOOTH_CHECK_EDGE_CAP,
+                        d4_kernels::D4_MARK_VARS_IN_CLAUSES,
+                        d4_kernels::D4_MARK_VARS_IN_CIRCUIT,
+                        d4_kernels::D4_BUILD_FREE_VAR_MASK,
+                        d4_kernels::D4_ASSERT_U32_EQ,
+                        d4_kernels::D4_ASSERT_BITSET_VAR,
+                        d4_kernels::D4_ASSERT_DENSE_VAR,
+                        d4_kernels::D4_ASSERT_LEAF_ROOT_AND_DEGREE,
+                    ],
+                )
+                .map_err(|e| XlogError::Kernel(format!("Failed to load D4 PTX: {}", e)))?;
+            if let Some(t0) = t0 {
+                if profiling {
+                    device.inner().synchronize()
+                        .map_err(|e| XlogError::Kernel(format!("sync after D4 load: {}", e)))?;
+                }
+                let elapsed = t0.elapsed().as_secs_f64();
+                profile.per_module_sec.push(("d4".to_string(), elapsed));
+                profile.total_sec += elapsed;
+                profile.ptx_fallback += 1;
+            }
+        }
 
         // Load neural fast-path module (AD chain weight fill + gradient scatter)
-        device
-            .inner()
-            .load_ptx(
-                Ptx::from_src(NEURAL_PTX),
-                NEURAL_MODULE,
-                &[
-                    neural_kernels::NEURAL_FILL_AD_CHAIN_F32,
-                    neural_kernels::NEURAL_SCATTER_AD_CHAIN_GRADS_F32,
-                ],
-            )
-            .map_err(|e| XlogError::Kernel(format!("Failed to load neural PTX: {}", e)))?;
+        {
+            let t0 = if profiling { Some(Instant::now()) } else { None };
+            device
+                .inner()
+                .load_ptx(
+                    Ptx::from_src(NEURAL_PTX),
+                    NEURAL_MODULE,
+                    &[
+                        neural_kernels::NEURAL_FILL_AD_CHAIN_F32,
+                        neural_kernels::NEURAL_SCATTER_AD_CHAIN_GRADS_F32,
+                    ],
+                )
+                .map_err(|e| XlogError::Kernel(format!("Failed to load neural PTX: {}", e)))?;
+            if let Some(t0) = t0 {
+                if profiling {
+                    device.inner().synchronize()
+                        .map_err(|e| XlogError::Kernel(format!("sync after neural load: {}", e)))?;
+                }
+                let elapsed = t0.elapsed().as_secs_f64();
+                profile.per_module_sec.push(("neural".to_string(), elapsed));
+                profile.total_sec += elapsed;
+                profile.ptx_fallback += 1;
+            }
+        }
 
         Ok(Self {
             device,
             memory,
             transfer_tracker: HostTransferTracker::default(),
+            ptx_load_profile: if profiling { Some(profile) } else { None },
         })
     }
 
@@ -1130,6 +1398,11 @@ impl CudaKernelProvider {
     /// Get the GPU memory manager
     pub fn memory(&self) -> &Arc<GpuMemoryManager> {
         &self.memory
+    }
+
+    /// Get PTX load profiling data (only populated when XLOG_WARMUP_PROFILE=1).
+    pub fn ptx_load_profile(&self) -> Option<&PtxLoadProfile> {
+        self.ptx_load_profile.as_ref()
     }
 
     /// Reset tracked host transfer statistics.
