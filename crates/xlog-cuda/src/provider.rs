@@ -32,26 +32,70 @@ fn warmup_profiling_enabled() -> bool {
     std::env::var("XLOG_WARMUP_PROFILE").map(|v| v == "1").unwrap_or(false)
 }
 
-// Embedded PTX sources (pre-compiled from .cu files with nvcc -ptx -arch=sm_70)
-const JOIN_PTX: &str = include_str!("../../../kernels/join.ptx");
-const DEDUP_PTX: &str = include_str!("../../../kernels/dedup.ptx");
-const GROUPBY_PTX: &str = include_str!("../../../kernels/groupby.ptx");
-const SCAN_PTX: &str = include_str!("../../../kernels/scan.ptx");
-const SORT_PTX: &str = include_str!("../../../kernels/sort.ptx");
-const FILTER_PTX: &str = include_str!("../../../kernels/filter.ptx");
-const SET_OPS_PTX: &str = include_str!("../../../kernels/set_ops.ptx");
-const PACK_PTX: &str = include_str!("../../../kernels/pack.ptx");
-const CIRCUIT_PTX: &str = include_str!("../../../kernels/circuit.ptx");
-const MC_SAMPLE_PTX: &str = include_str!("../../../kernels/mc_sample.ptx");
-const MC_EVAL_PTX: &str = include_str!("../../../kernels/mc_eval.ptx");
-const ARITH_PTX: &str = include_str!("../../../kernels/arith.ptx");
-const SAT_PTX: &str = include_str!("../../../kernels/sat.ptx");
-const D4_PTX: &str = include_str!("../../../kernels/d4.ptx");
-const NEURAL_PTX: &str = include_str!("../../../kernels/neural.ptx");
-const PIR_PTX: &str = include_str!("../../../kernels/pir.ptx");
-const CNF_PTX: &str = include_str!("../../../kernels/cnf.ptx");
-const CACHE_PTX: &str = include_str!("../../../kernels/cache.ptx");
-const WEIGHTS_PTX: &str = include_str!("../../../kernels/weights.ptx");
+/// Detect device compute capability as a two-digit number (e.g. 75, 80, 120).
+fn detect_compute_capability(device: &Arc<CudaDevice>) -> Result<u32> {
+    let major = device
+        .inner()
+        .attribute(cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)
+        .map_err(|e| XlogError::Kernel(format!("Failed to query SM major: {}", e)))?;
+    let minor = device
+        .inner()
+        .attribute(cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR)
+        .map_err(|e| XlogError::Kernel(format!("Failed to query SM minor: {}", e)))?;
+    Ok((major as u32) * 10 + (minor as u32))
+}
+
+/// Resolve a kernel module to a file path, preferring cubin over portable PTX.
+///
+/// Search order:
+///   1. `XLOG_CUBIN_DIR/{name}.sm_{cc}.cubin`
+///   2. `OUT_DIR/{name}.sm_{cc}.cubin`
+///   3. `XLOG_CUBIN_DIR/{name}.portable.ptx`
+///   4. `OUT_DIR/{name}.portable.ptx`
+fn resolve_module_path(name: &str, cc: u32) -> Option<(std::path::PathBuf, bool)> {
+    let cubin_dir = std::env::var("XLOG_CUBIN_DIR").ok();
+    let out_dir = option_env!("OUT_DIR");
+
+    // 1. XLOG_CUBIN_DIR cubin
+    if let Some(dir) = &cubin_dir {
+        let p = std::path::PathBuf::from(dir).join(format!("{name}.sm_{cc}.cubin"));
+        if p.exists() {
+            return Some((p, true));
+        }
+    }
+    // 2. OUT_DIR cubin
+    if let Some(dir) = out_dir {
+        let p = std::path::PathBuf::from(dir).join(format!("{name}.sm_{cc}.cubin"));
+        if p.exists() {
+            return Some((p, true));
+        }
+    }
+    // 3. XLOG_CUBIN_DIR portable PTX
+    if let Some(dir) = &cubin_dir {
+        let p = std::path::PathBuf::from(dir).join(format!("{name}.portable.ptx"));
+        if p.exists() {
+            return Some((p, false));
+        }
+    }
+    // 4. OUT_DIR portable PTX
+    if let Some(dir) = out_dir {
+        let p = std::path::PathBuf::from(dir).join(format!("{name}.portable.ptx"));
+        if p.exists() {
+            return Some((p, false));
+        }
+    }
+    None
+}
+
+/// Load a kernel module from file (cubin or portable PTX).
+fn load_module_from_file(name: &str, cc: u32) -> Result<(Ptx, bool)> {
+    let (path, is_cubin) = resolve_module_path(name, cc).ok_or_else(|| {
+        XlogError::Kernel(format!(
+            "{name}: no cubin or portable PTX found (set XLOG_CUBIN_DIR or rebuild with nvcc)"
+        ))
+    })?;
+    Ok((Ptx::from_file(path), is_cubin))
+}
 
 #[derive(Clone, Copy)]
 struct RawCudaView<'a, T> {
@@ -683,14 +727,16 @@ impl CudaKernelProvider {
     pub fn new(device: Arc<CudaDevice>, memory: Arc<GpuMemoryManager>) -> Result<Self> {
         let profiling = warmup_profiling_enabled();
         let mut profile = PtxLoadProfile::default();
+        let cc = detect_compute_capability(&device)?;
 
         // Load join module
         {
             let t0 = if profiling { Some(Instant::now()) } else { None };
+            let (ptx, is_cubin) = load_module_from_file("join", cc)?;
             device
                 .inner()
                 .load_ptx(
-                    Ptx::from_src(JOIN_PTX),
+                    ptx,
                     JOIN_MODULE,
                     &[
                         join_kernels::HASH_JOIN_BUILD,
@@ -704,7 +750,7 @@ impl CudaKernelProvider {
                         join_kernels::INIT_HASH_TABLE,
                     ],
                 )
-                .map_err(|e| XlogError::Kernel(format!("Failed to load join PTX: {}", e)))?;
+                .map_err(|e| XlogError::Kernel(format!("Failed to load join module: {}", e)))?;
             if let Some(t0) = t0 {
                 if profiling {
                     device.inner().synchronize()
@@ -713,17 +759,18 @@ impl CudaKernelProvider {
                 let elapsed = t0.elapsed().as_secs_f64();
                 profile.per_module_sec.push(("join".to_string(), elapsed));
                 profile.total_sec += elapsed;
-                profile.ptx_fallback += 1;
+                if is_cubin { profile.cubin_loaded += 1; } else { profile.ptx_fallback += 1; }
             }
         }
 
         // Load dedup module
         {
             let t0 = if profiling { Some(Instant::now()) } else { None };
+            let (ptx, is_cubin) = load_module_from_file("dedup", cc)?;
             device
                 .inner()
                 .load_ptx(
-                    Ptx::from_src(DEDUP_PTX),
+                    ptx,
                     DEDUP_MODULE,
                     &[
                         dedup_kernels::MARK_DUPLICATES,
@@ -732,7 +779,7 @@ impl CudaKernelProvider {
                         dedup_kernels::COMPACT_ROWS,
                     ],
                 )
-                .map_err(|e| XlogError::Kernel(format!("Failed to load dedup PTX: {}", e)))?;
+                .map_err(|e| XlogError::Kernel(format!("Failed to load dedup module: {}", e)))?;
             if let Some(t0) = t0 {
                 if profiling {
                     device.inner().synchronize()
@@ -741,17 +788,18 @@ impl CudaKernelProvider {
                 let elapsed = t0.elapsed().as_secs_f64();
                 profile.per_module_sec.push(("dedup".to_string(), elapsed));
                 profile.total_sec += elapsed;
-                profile.ptx_fallback += 1;
+                if is_cubin { profile.cubin_loaded += 1; } else { profile.ptx_fallback += 1; }
             }
         }
 
         // Load groupby module
         {
             let t0 = if profiling { Some(Instant::now()) } else { None };
+            let (ptx, is_cubin) = load_module_from_file("groupby", cc)?;
             device
                 .inner()
                 .load_ptx(
-                    Ptx::from_src(GROUPBY_PTX),
+                    ptx,
                     GROUPBY_MODULE,
                     &[
                         groupby_kernels::DETECT_GROUP_BOUNDARIES,
@@ -769,7 +817,7 @@ impl CudaKernelProvider {
                         groupby_kernels::GROUPBY_LOGSUMEXP_FINAL,
                     ],
                 )
-                .map_err(|e| XlogError::Kernel(format!("Failed to load groupby PTX: {}", e)))?;
+                .map_err(|e| XlogError::Kernel(format!("Failed to load groupby module: {}", e)))?;
             if let Some(t0) = t0 {
                 if profiling {
                     device.inner().synchronize()
@@ -778,17 +826,18 @@ impl CudaKernelProvider {
                 let elapsed = t0.elapsed().as_secs_f64();
                 profile.per_module_sec.push(("groupby".to_string(), elapsed));
                 profile.total_sec += elapsed;
-                profile.ptx_fallback += 1;
+                if is_cubin { profile.cubin_loaded += 1; } else { profile.ptx_fallback += 1; }
             }
         }
 
         // Load scan module
         {
             let t0 = if profiling { Some(Instant::now()) } else { None };
+            let (ptx, is_cubin) = load_module_from_file("scan", cc)?;
             device
                 .inner()
                 .load_ptx(
-                    Ptx::from_src(SCAN_PTX),
+                    ptx,
                     SCAN_MODULE,
                     &[
                         scan_kernels::BLOCK_INCLUSIVE_SCAN,
@@ -801,7 +850,7 @@ impl CudaKernelProvider {
                         scan_kernels::MULTIBLOCK_SCAN_PHASE3,
                     ],
                 )
-                .map_err(|e| XlogError::Kernel(format!("Failed to load scan PTX: {}", e)))?;
+                .map_err(|e| XlogError::Kernel(format!("Failed to load scan module: {}", e)))?;
             if let Some(t0) = t0 {
                 if profiling {
                     device.inner().synchronize()
@@ -810,17 +859,18 @@ impl CudaKernelProvider {
                 let elapsed = t0.elapsed().as_secs_f64();
                 profile.per_module_sec.push(("scan".to_string(), elapsed));
                 profile.total_sec += elapsed;
-                profile.ptx_fallback += 1;
+                if is_cubin { profile.cubin_loaded += 1; } else { profile.ptx_fallback += 1; }
             }
         }
 
         // Load sort module
         {
             let t0 = if profiling { Some(Instant::now()) } else { None };
+            let (ptx, is_cubin) = load_module_from_file("sort", cc)?;
             device
                 .inner()
                 .load_ptx(
-                    Ptx::from_src(SORT_PTX),
+                    ptx,
                     SORT_MODULE,
                     &[
                         sort_kernels::RADIX_HISTOGRAM,
@@ -842,7 +892,7 @@ impl CudaKernelProvider {
                         sort_kernels::GATHER_KEYS_F64_HI_U32,
                     ],
                 )
-                .map_err(|e| XlogError::Kernel(format!("Failed to load sort PTX: {}", e)))?;
+                .map_err(|e| XlogError::Kernel(format!("Failed to load sort module: {}", e)))?;
             if let Some(t0) = t0 {
                 if profiling {
                     device.inner().synchronize()
@@ -851,17 +901,18 @@ impl CudaKernelProvider {
                 let elapsed = t0.elapsed().as_secs_f64();
                 profile.per_module_sec.push(("sort".to_string(), elapsed));
                 profile.total_sec += elapsed;
-                profile.ptx_fallback += 1;
+                if is_cubin { profile.cubin_loaded += 1; } else { profile.ptx_fallback += 1; }
             }
         }
 
         // Load filter module
         {
             let t0 = if profiling { Some(Instant::now()) } else { None };
+            let (ptx, is_cubin) = load_module_from_file("filter", cc)?;
             device
                 .inner()
                 .load_ptx(
-                    Ptx::from_src(FILTER_PTX),
+                    ptx,
                     FILTER_MODULE,
                     &[
                         filter_kernels::FILTER_COMPARE_U32,
@@ -897,7 +948,7 @@ impl CudaKernelProvider {
                         filter_kernels::MASK_NOT,
                     ],
                 )
-                .map_err(|e| XlogError::Kernel(format!("Failed to load filter PTX: {}", e)))?;
+                .map_err(|e| XlogError::Kernel(format!("Failed to load filter module: {}", e)))?;
             if let Some(t0) = t0 {
                 if profiling {
                     device.inner().synchronize()
@@ -906,17 +957,18 @@ impl CudaKernelProvider {
                 let elapsed = t0.elapsed().as_secs_f64();
                 profile.per_module_sec.push(("filter".to_string(), elapsed));
                 profile.total_sec += elapsed;
-                profile.ptx_fallback += 1;
+                if is_cubin { profile.cubin_loaded += 1; } else { profile.ptx_fallback += 1; }
             }
         }
 
         // Load set_ops module
         {
             let t0 = if profiling { Some(Instant::now()) } else { None };
+            let (ptx, is_cubin) = load_module_from_file("set_ops", cc)?;
             device
                 .inner()
                 .load_ptx(
-                    Ptx::from_src(SET_OPS_PTX),
+                    ptx,
                     SET_OPS_MODULE,
                     &[
                         set_ops_kernels::CONCAT_U32,
@@ -924,7 +976,7 @@ impl CudaKernelProvider {
                         set_ops_kernels::SORTED_DIFF_MARK,
                     ],
                 )
-                .map_err(|e| XlogError::Kernel(format!("Failed to load set_ops PTX: {}", e)))?;
+                .map_err(|e| XlogError::Kernel(format!("Failed to load set_ops module: {}", e)))?;
             if let Some(t0) = t0 {
                 if profiling {
                     device.inner().synchronize()
@@ -933,17 +985,18 @@ impl CudaKernelProvider {
                 let elapsed = t0.elapsed().as_secs_f64();
                 profile.per_module_sec.push(("set_ops".to_string(), elapsed));
                 profile.total_sec += elapsed;
-                profile.ptx_fallback += 1;
+                if is_cubin { profile.cubin_loaded += 1; } else { profile.ptx_fallback += 1; }
             }
         }
 
         // Load pack module (GPU-side key packing for multi-column joins)
         {
             let t0 = if profiling { Some(Instant::now()) } else { None };
+            let (ptx, is_cubin) = load_module_from_file("pack", cc)?;
             device
                 .inner()
                 .load_ptx(
-                    Ptx::from_src(PACK_PTX),
+                    ptx,
                     PACK_MODULE,
                     &[
                         pack_kernels::PACK_KEYS,
@@ -960,7 +1013,7 @@ impl CudaKernelProvider {
                         pack_kernels::PACK_BOOLS_TO_BITMAP,
                     ],
                 )
-                .map_err(|e| XlogError::Kernel(format!("Failed to load pack PTX: {}", e)))?;
+                .map_err(|e| XlogError::Kernel(format!("Failed to load pack module: {}", e)))?;
             if let Some(t0) = t0 {
                 if profiling {
                     device.inner().synchronize()
@@ -969,17 +1022,18 @@ impl CudaKernelProvider {
                 let elapsed = t0.elapsed().as_secs_f64();
                 profile.per_module_sec.push(("pack".to_string(), elapsed));
                 profile.total_sec += elapsed;
-                profile.ptx_fallback += 1;
+                if is_cubin { profile.cubin_loaded += 1; } else { profile.ptx_fallback += 1; }
             }
         }
 
         // Load PIR interning module (GPU PIR key packing + hashing + unique marking)
         {
             let t0 = if profiling { Some(Instant::now()) } else { None };
+            let (ptx, is_cubin) = load_module_from_file("pir", cc)?;
             device
                 .inner()
                 .load_ptx(
-                    Ptx::from_src(PIR_PTX),
+                    ptx,
                     PIR_MODULE,
                     &[
                         pir_kernels::PIR_PACK_KEYS,
@@ -1000,7 +1054,7 @@ impl CudaKernelProvider {
                         pir_kernels::PIR_UPDATE_COUNTS,
                     ],
                 )
-                .map_err(|e| XlogError::Kernel(format!("Failed to load PIR PTX: {}", e)))?;
+                .map_err(|e| XlogError::Kernel(format!("Failed to load PIR module: {}", e)))?;
             if let Some(t0) = t0 {
                 if profiling {
                     device.inner().synchronize()
@@ -1009,17 +1063,18 @@ impl CudaKernelProvider {
                 let elapsed = t0.elapsed().as_secs_f64();
                 profile.per_module_sec.push(("pir".to_string(), elapsed));
                 profile.total_sec += elapsed;
-                profile.ptx_fallback += 1;
+                if is_cubin { profile.cubin_loaded += 1; } else { profile.ptx_fallback += 1; }
             }
         }
 
         // Load GPU CNF encoder module (PIR -> Tseitin CNF on device)
         {
             let t0 = if profiling { Some(Instant::now()) } else { None };
+            let (ptx, is_cubin) = load_module_from_file("cnf", cc)?;
             device
                 .inner()
                 .load_ptx(
-                    Ptx::from_src(CNF_PTX),
+                    ptx,
                     CNF_MODULE,
                     &[
                         cnf_kernels::CNF_REACHABILITY_INIT,
@@ -1037,7 +1092,7 @@ impl CudaKernelProvider {
                         cnf_kernels::CNF_SET_CLAUSE_END,
                     ],
                 )
-                .map_err(|e| XlogError::Kernel(format!("Failed to load CNF PTX: {}", e)))?;
+                .map_err(|e| XlogError::Kernel(format!("Failed to load CNF module: {}", e)))?;
             if let Some(t0) = t0 {
                 if profiling {
                     device.inner().synchronize()
@@ -1046,17 +1101,18 @@ impl CudaKernelProvider {
                 let elapsed = t0.elapsed().as_secs_f64();
                 profile.per_module_sec.push(("cnf".to_string(), elapsed));
                 profile.total_sec += elapsed;
-                profile.ptx_fallback += 1;
+                if is_cubin { profile.cubin_loaded += 1; } else { profile.ptx_fallback += 1; }
             }
         }
 
         // Load cache module (CNF hash + cache helpers)
         {
             let t0 = if profiling { Some(Instant::now()) } else { None };
+            let (ptx, is_cubin) = load_module_from_file("cache", cc)?;
             device
                 .inner()
                 .load_ptx(
-                    Ptx::from_src(CACHE_PTX),
+                    ptx,
                     CACHE_MODULE,
                     &[
                         cache_kernels::CACHE_CNF_HASH,
@@ -1069,7 +1125,7 @@ impl CudaKernelProvider {
                         cache_kernels::CACHE_STORE_META,
                     ],
                 )
-                .map_err(|e| XlogError::Kernel(format!("Failed to load cache PTX: {}", e)))?;
+                .map_err(|e| XlogError::Kernel(format!("Failed to load cache module: {}", e)))?;
             if let Some(t0) = t0 {
                 if profiling {
                     device.inner().synchronize()
@@ -1078,17 +1134,18 @@ impl CudaKernelProvider {
                 let elapsed = t0.elapsed().as_secs_f64();
                 profile.per_module_sec.push(("cache".to_string(), elapsed));
                 profile.total_sec += elapsed;
-                profile.ptx_fallback += 1;
+                if is_cubin { profile.cubin_loaded += 1; } else { profile.ptx_fallback += 1; }
             }
         }
 
         // Load weights module (GPU weight table builders)
         {
             let t0 = if profiling { Some(Instant::now()) } else { None };
+            let (ptx, is_cubin) = load_module_from_file("weights", cc)?;
             device
                 .inner()
                 .load_ptx(
-                    Ptx::from_src(WEIGHTS_PTX),
+                    ptx,
                     WEIGHTS_MODULE,
                     &[
                         weights_kernels::WEIGHTS_FILL_LEAF,
@@ -1109,7 +1166,7 @@ impl CudaKernelProvider {
                         weights_kernels::WEIGHTS_RESTORE_QUERY_VARS_TRUE_BATCHED,
                     ],
                 )
-                .map_err(|e| XlogError::Kernel(format!("Failed to load weights PTX: {}", e)))?;
+                .map_err(|e| XlogError::Kernel(format!("Failed to load weights module: {}", e)))?;
             if let Some(t0) = t0 {
                 if profiling {
                     device.inner().synchronize()
@@ -1118,17 +1175,18 @@ impl CudaKernelProvider {
                 let elapsed = t0.elapsed().as_secs_f64();
                 profile.per_module_sec.push(("weights".to_string(), elapsed));
                 profile.total_sec += elapsed;
-                profile.ptx_fallback += 1;
+                if is_cubin { profile.cubin_loaded += 1; } else { profile.ptx_fallback += 1; }
             }
         }
 
         // Load circuit module (XGCF circuit evaluation)
         {
             let t0 = if profiling { Some(Instant::now()) } else { None };
+            let (ptx, is_cubin) = load_module_from_file("circuit", cc)?;
             device
                 .inner()
                 .load_ptx(
-                    Ptx::from_src(CIRCUIT_PTX),
+                    ptx,
                     CIRCUIT_MODULE,
                     &[
                         circuit_kernels::XGCF_FORWARD_LEVEL,
@@ -1155,7 +1213,7 @@ impl CudaKernelProvider {
                         circuit_kernels::XGCF_COPY_ROOT_CACHED_META_BATCHED,
                     ],
                 )
-                .map_err(|e| XlogError::Kernel(format!("Failed to load circuit PTX: {}", e)))?;
+                .map_err(|e| XlogError::Kernel(format!("Failed to load circuit module: {}", e)))?;
             if let Some(t0) = t0 {
                 if profiling {
                     device.inner().synchronize()
@@ -1164,21 +1222,22 @@ impl CudaKernelProvider {
                 let elapsed = t0.elapsed().as_secs_f64();
                 profile.per_module_sec.push(("circuit".to_string(), elapsed));
                 profile.total_sec += elapsed;
-                profile.ptx_fallback += 1;
+                if is_cubin { profile.cubin_loaded += 1; } else { profile.ptx_fallback += 1; }
             }
         }
 
         // Load Monte Carlo sampling module (Bernoulli sampler)
         {
             let t0 = if profiling { Some(Instant::now()) } else { None };
+            let (ptx, is_cubin) = load_module_from_file("mc_sample", cc)?;
             device
                 .inner()
                 .load_ptx(
-                    Ptx::from_src(MC_SAMPLE_PTX),
+                    ptx,
                     MC_SAMPLE_MODULE,
                     &[mc_sample_kernels::MC_SAMPLE_BERNOULLI],
                 )
-                .map_err(|e| XlogError::Kernel(format!("Failed to load MC sample PTX: {}", e)))?;
+                .map_err(|e| XlogError::Kernel(format!("Failed to load MC sample module: {}", e)))?;
             if let Some(t0) = t0 {
                 if profiling {
                     device.inner().synchronize()
@@ -1187,17 +1246,18 @@ impl CudaKernelProvider {
                 let elapsed = t0.elapsed().as_secs_f64();
                 profile.per_module_sec.push(("mc_sample".to_string(), elapsed));
                 profile.total_sec += elapsed;
-                profile.ptx_fallback += 1;
+                if is_cubin { profile.cubin_loaded += 1; } else { profile.ptx_fallback += 1; }
             }
         }
 
         // Load Monte Carlo evaluation module (mask construction)
         {
             let t0 = if profiling { Some(Instant::now()) } else { None };
+            let (ptx, is_cubin) = load_module_from_file("mc_eval", cc)?;
             device
                 .inner()
                 .load_ptx(
-                    Ptx::from_src(MC_EVAL_PTX),
+                    ptx,
                     MC_EVAL_MODULE,
                     &[
                         mc_eval_kernels::MC_EVAL_MASK_VAR,
@@ -1206,7 +1266,7 @@ impl CudaKernelProvider {
                         mc_eval_kernels::MC_EVAL_ACCUMULATE_COUNTS,
                     ],
                 )
-                .map_err(|e| XlogError::Kernel(format!("Failed to load MC eval PTX: {}", e)))?;
+                .map_err(|e| XlogError::Kernel(format!("Failed to load MC eval module: {}", e)))?;
             if let Some(t0) = t0 {
                 if profiling {
                     device.inner().synchronize()
@@ -1215,14 +1275,14 @@ impl CudaKernelProvider {
                 let elapsed = t0.elapsed().as_secs_f64();
                 profile.per_module_sec.push(("mc_eval".to_string(), elapsed));
                 profile.total_sec += elapsed;
-                profile.ptx_fallback += 1;
+                if is_cubin { profile.cubin_loaded += 1; } else { profile.ptx_fallback += 1; }
             }
         }
 
         // Load arithmetic module
         {
             let t0 = if profiling { Some(Instant::now()) } else { None };
-            let arith_module = Ptx::from_src(ARITH_PTX);
+            let (arith_module, is_cubin) = load_module_from_file("arith", cc)?;
             let _arith = device
                 .inner()
                 .load_ptx(
@@ -1256,7 +1316,7 @@ impl CudaKernelProvider {
                         arith_kernels::ARITH_SELECT_F32,
                     ],
                 )
-                .map_err(|e| XlogError::Kernel(format!("Failed to load arith PTX: {}", e)))?;
+                .map_err(|e| XlogError::Kernel(format!("Failed to load arith module: {}", e)))?;
             if let Some(t0) = t0 {
                 if profiling {
                     device.inner().synchronize()
@@ -1265,17 +1325,18 @@ impl CudaKernelProvider {
                 let elapsed = t0.elapsed().as_secs_f64();
                 profile.per_module_sec.push(("arith".to_string(), elapsed));
                 profile.total_sec += elapsed;
-                profile.ptx_fallback += 1;
+                if is_cubin { profile.cubin_loaded += 1; } else { profile.ptx_fallback += 1; }
             }
         }
 
         // Load SAT module (GPU CDCL + on-GPU validation)
         {
             let t0 = if profiling { Some(Instant::now()) } else { None };
+            let (ptx, is_cubin) = load_module_from_file("sat", cc)?;
             device
                 .inner()
                 .load_ptx(
-                    Ptx::from_src(SAT_PTX),
+                    ptx,
                     SAT_MODULE,
                     &[
                         sat_kernels::SAT_CDCL_SOLVE,
@@ -1296,7 +1357,7 @@ impl CudaKernelProvider {
                         sat_kernels::SAT_EMIT_NOT_PHI,
                     ],
                 )
-                .map_err(|e| XlogError::Kernel(format!("Failed to load SAT PTX: {}", e)))?;
+                .map_err(|e| XlogError::Kernel(format!("Failed to load SAT module: {}", e)))?;
             if let Some(t0) = t0 {
                 if profiling {
                     device.inner().synchronize()
@@ -1305,17 +1366,18 @@ impl CudaKernelProvider {
                 let elapsed = t0.elapsed().as_secs_f64();
                 profile.per_module_sec.push(("sat".to_string(), elapsed));
                 profile.total_sec += elapsed;
-                profile.ptx_fallback += 1;
+                if is_cubin { profile.cubin_loaded += 1; } else { profile.ptx_fallback += 1; }
             }
         }
 
         // Load D4 module (GPU D4 compiler support: CNF validation + circuit levelization)
         {
             let t0 = if profiling { Some(Instant::now()) } else { None };
+            let (ptx, is_cubin) = load_module_from_file("d4", cc)?;
             device
                 .inner()
                 .load_ptx(
-                    Ptx::from_src(D4_PTX),
+                    ptx,
                     D4_MODULE,
                     &[
                         d4_kernels::D4_VALIDATE_CNF,
@@ -1346,7 +1408,7 @@ impl CudaKernelProvider {
                         d4_kernels::D4_ASSERT_LEAF_ROOT_AND_DEGREE,
                     ],
                 )
-                .map_err(|e| XlogError::Kernel(format!("Failed to load D4 PTX: {}", e)))?;
+                .map_err(|e| XlogError::Kernel(format!("Failed to load D4 module: {}", e)))?;
             if let Some(t0) = t0 {
                 if profiling {
                     device.inner().synchronize()
@@ -1355,24 +1417,25 @@ impl CudaKernelProvider {
                 let elapsed = t0.elapsed().as_secs_f64();
                 profile.per_module_sec.push(("d4".to_string(), elapsed));
                 profile.total_sec += elapsed;
-                profile.ptx_fallback += 1;
+                if is_cubin { profile.cubin_loaded += 1; } else { profile.ptx_fallback += 1; }
             }
         }
 
         // Load neural fast-path module (AD chain weight fill + gradient scatter)
         {
             let t0 = if profiling { Some(Instant::now()) } else { None };
+            let (ptx, is_cubin) = load_module_from_file("neural", cc)?;
             device
                 .inner()
                 .load_ptx(
-                    Ptx::from_src(NEURAL_PTX),
+                    ptx,
                     NEURAL_MODULE,
                     &[
                         neural_kernels::NEURAL_FILL_AD_CHAIN_F32,
                         neural_kernels::NEURAL_SCATTER_AD_CHAIN_GRADS_F32,
                     ],
                 )
-                .map_err(|e| XlogError::Kernel(format!("Failed to load neural PTX: {}", e)))?;
+                .map_err(|e| XlogError::Kernel(format!("Failed to load neural module: {}", e)))?;
             if let Some(t0) = t0 {
                 if profiling {
                     device.inner().synchronize()
@@ -1381,7 +1444,7 @@ impl CudaKernelProvider {
                 let elapsed = t0.elapsed().as_secs_f64();
                 profile.per_module_sec.push(("neural".to_string(), elapsed));
                 profile.total_sec += elapsed;
-                profile.ptx_fallback += 1;
+                if is_cubin { profile.cubin_loaded += 1; } else { profile.ptx_fallback += 1; }
             }
         }
 
@@ -10383,202 +10446,23 @@ mod tests {
     }
 
     #[test]
-    fn test_ptx_embedded() {
-        // Verify PTX sources are embedded and non-empty
-        assert!(!JOIN_PTX.is_empty(), "JOIN_PTX should not be empty");
-        assert!(!DEDUP_PTX.is_empty(), "DEDUP_PTX should not be empty");
-        assert!(!GROUPBY_PTX.is_empty(), "GROUPBY_PTX should not be empty");
-        assert!(!CIRCUIT_PTX.is_empty(), "CIRCUIT_PTX should not be empty");
-        assert!(
-            !MC_SAMPLE_PTX.is_empty(),
-            "MC_SAMPLE_PTX should not be empty"
-        );
-        assert!(!SAT_PTX.is_empty(), "SAT_PTX should not be empty");
-        assert!(!NEURAL_PTX.is_empty(), "NEURAL_PTX should not be empty");
-
-        // Verify PTX contains expected kernel names
-        assert!(
-            JOIN_PTX.contains("hash_join_build"),
-            "JOIN_PTX should contain hash_join_build"
-        );
-        assert!(
-            JOIN_PTX.contains("hash_join_probe"),
-            "JOIN_PTX should contain hash_join_probe"
-        );
-        assert!(
-            DEDUP_PTX.contains("mark_duplicates"),
-            "DEDUP_PTX should contain mark_duplicates"
-        );
-        assert!(
-            DEDUP_PTX.contains("compact_rows"),
-            "DEDUP_PTX should contain compact_rows"
-        );
-        assert!(
-            GROUPBY_PTX.contains("detect_group_boundaries"),
-            "GROUPBY_PTX should contain detect_group_boundaries"
-        );
-        assert!(
-            GROUPBY_PTX.contains("groupby_count"),
-            "GROUPBY_PTX should contain groupby_count"
-        );
-        assert!(
-            GROUPBY_PTX.contains("groupby_sum"),
-            "GROUPBY_PTX should contain groupby_sum"
-        );
-        assert!(
-            GROUPBY_PTX.contains("groupby_min"),
-            "GROUPBY_PTX should contain groupby_min"
-        );
-        assert!(
-            GROUPBY_PTX.contains("groupby_max"),
-            "GROUPBY_PTX should contain groupby_max"
-        );
-        assert!(
-            CIRCUIT_PTX.contains("xgcf_forward_level"),
-            "CIRCUIT_PTX should contain xgcf_forward_level"
-        );
-        assert!(
-            CIRCUIT_PTX.contains("xgcf_backward_level_propagate"),
-            "CIRCUIT_PTX should contain xgcf_backward_level_propagate"
-        );
-        assert!(
-            CIRCUIT_PTX.contains("xgcf_backward_level_decision_grad"),
-            "CIRCUIT_PTX should contain xgcf_backward_level_decision_grad"
-        );
-        assert!(
-            CIRCUIT_PTX.contains("xgcf_backward_level_lit_grad"),
-            "CIRCUIT_PTX should contain xgcf_backward_level_lit_grad"
-        );
-        assert!(
-            MC_SAMPLE_PTX.contains("mc_sample_bernoulli"),
-            "MC_SAMPLE_PTX should contain mc_sample_bernoulli"
-        );
-        assert!(
-            MC_EVAL_PTX.contains("mc_eval_mask_var"),
-            "MC_EVAL_PTX should contain mc_eval_mask_var"
-        );
-        assert!(
-            MC_EVAL_PTX.contains("mc_eval_mask_ad_choice"),
-            "MC_EVAL_PTX should contain mc_eval_mask_ad_choice"
-        );
-        assert!(
-            MC_EVAL_PTX.contains("mc_eval_query_evidence_truth"),
-            "MC_EVAL_PTX should contain mc_eval_query_evidence_truth"
-        );
-        assert!(
-            SAT_PTX.contains("sat_cdcl_solve"),
-            "SAT_PTX should contain sat_cdcl_solve"
-        );
-        assert!(
-            SAT_PTX.contains("sat_check_model"),
-            "SAT_PTX should contain sat_check_model"
-        );
-        assert!(
-            SAT_PTX.contains("sat_proof_mark_needed"),
-            "SAT_PTX should contain sat_proof_mark_needed"
-        );
-        assert!(
-            SAT_PTX.contains("sat_proof_check"),
-            "SAT_PTX should contain sat_proof_check"
-        );
-        assert!(
-            SAT_PTX.contains("sat_assert_status"),
-            "SAT_PTX should contain sat_assert_status"
-        );
-        assert!(
-            SAT_PTX.contains("sat_assert_ok"),
-            "SAT_PTX should contain sat_assert_ok"
-        );
-        assert!(
-            SAT_PTX.contains("sat_xgcf_cnf_counts"),
-            "SAT_PTX should contain sat_xgcf_cnf_counts"
-        );
-        assert!(
-            SAT_PTX.contains("sat_xgcf_cnf_emit"),
-            "SAT_PTX should contain sat_xgcf_cnf_emit"
-        );
-        assert!(
-            SAT_PTX.contains("sat_xgcf_cnf_capture_last_counts"),
-            "SAT_PTX should contain sat_xgcf_cnf_capture_last_counts"
-        );
-        assert!(
-            SAT_PTX.contains("sat_xgcf_cnf_compute_totals"),
-            "SAT_PTX should contain sat_xgcf_cnf_compute_totals"
-        );
-        assert!(
-            SAT_PTX.contains("sat_cnf_write_terminator"),
-            "SAT_PTX should contain sat_cnf_write_terminator"
-        );
-        assert!(
-            SAT_PTX.contains("sat_cnf_copy_into"),
-            "SAT_PTX should contain sat_cnf_copy_into"
-        );
-        assert!(
-            SAT_PTX.contains("sat_shift_offsets"),
-            "SAT_PTX should contain sat_shift_offsets"
-        );
-        assert!(
-            SAT_PTX.contains("sat_xgcf_write_root_unit_clause"),
-            "SAT_PTX should contain sat_xgcf_write_root_unit_clause"
-        );
-        assert!(
-            SAT_PTX.contains("sat_not_phi_counts"),
-            "SAT_PTX should contain sat_not_phi_counts"
-        );
-        assert!(
-            SAT_PTX.contains("sat_emit_not_phi"),
-            "SAT_PTX should contain sat_emit_not_phi"
-        );
-
-        assert!(
-            NEURAL_PTX.contains("neural_fill_ad_chain_f32"),
-            "NEURAL_PTX should contain neural_fill_ad_chain_f32"
-        );
-        assert!(
-            NEURAL_PTX.contains("neural_scatter_ad_chain_grads_f32"),
-            "NEURAL_PTX should contain neural_scatter_ad_chain_grads_f32"
-        );
-    }
-
-    #[test]
-    fn test_ptx_target_architecture() {
-        // Verify PTX is compiled for a valid CUDA architecture (sm_70 or later)
-        // Note: The actual target may vary based on the build environment
-        let valid_targets = [".target sm_70", ".target sm_75", ".target sm_80", ".target sm_90", ".target sm_120"];
-
-        assert!(
-            valid_targets.iter().any(|t| JOIN_PTX.contains(t)),
-            "JOIN_PTX should target sm_70 or later, got: {:?}",
-            JOIN_PTX.lines().find(|l| l.starts_with(".target"))
-        );
-        assert!(
-            valid_targets.iter().any(|t| DEDUP_PTX.contains(t)),
-            "DEDUP_PTX should target sm_70 or later"
-        );
-        assert!(
-            valid_targets.iter().any(|t| GROUPBY_PTX.contains(t)),
-            "GROUPBY_PTX should target sm_70 or later"
-        );
-        assert!(
-            valid_targets.iter().any(|t| CIRCUIT_PTX.contains(t)),
-            "CIRCUIT_PTX should target sm_70 or later"
-        );
-        assert!(
-            valid_targets.iter().any(|t| MC_SAMPLE_PTX.contains(t)),
-            "MC_SAMPLE_PTX should target sm_70 or later"
-        );
-        assert!(
-            valid_targets.iter().any(|t| MC_EVAL_PTX.contains(t)),
-            "MC_EVAL_PTX should target sm_70 or later"
-        );
-        assert!(
-            valid_targets.iter().any(|t| SAT_PTX.contains(t)),
-            "SAT_PTX should target sm_70 or later"
-        );
-        assert!(
-            valid_targets.iter().any(|t| NEURAL_PTX.contains(t)),
-            "NEURAL_PTX should target sm_70 or later"
-        );
+    fn test_module_resolution_finds_portable_ptx() {
+        // Verify resolve_module_path finds portable PTX for all 19 modules.
+        // Uses a dummy cc (999) so cubin won't match — only portable PTX.
+        for name in crate::kernel_manifest_data::KERNEL_CU_NAMES {
+            let result = resolve_module_path(name, 999);
+            assert!(
+                result.is_some(),
+                "resolve_module_path({name}, 999) should find portable PTX"
+            );
+            let (path, is_cubin) = result.unwrap();
+            assert!(!is_cubin, "{name}: expected portable PTX fallback, got cubin");
+            assert!(
+                path.to_str().unwrap().ends_with(".portable.ptx"),
+                "{name}: path should end with .portable.ptx, got {:?}",
+                path
+            );
+        }
     }
 
     #[test]
