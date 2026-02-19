@@ -1,6 +1,6 @@
 //! CNF emission for PIR via Tseitin encoding (DIMACS).
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use xlog_core::{Result, XlogError};
 
@@ -42,6 +42,81 @@ pub struct CnfEncoding {
     pub node_var: BTreeMap<PirNodeId, u32>,
     pub leaf_var: BTreeMap<LeafId, u32>,
     pub choice_var: BTreeMap<ChoiceVarId, u32>,
+}
+
+/// FNV-1a 64-bit — deterministic, process-independent.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    const OFFSET: u64 = 0xcbf29ce484222325;
+    const PRIME: u64 = 0x100000001b3;
+    let mut h = OFFSET;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(PRIME);
+    }
+    h
+}
+
+/// Compute a canonical hash for each reachable PIR node.
+/// The hash depends only on node structure (variant + leaf/choice IDs + children's
+/// canonical hashes), not on PirNodeId numeric values.
+fn canonical_hashes(
+    pir: &PirGraph,
+    levels: &[Vec<PirNodeId>],
+) -> HashMap<PirNodeId, u64> {
+    let mut canon: HashMap<PirNodeId, u64> = HashMap::new();
+    for level in levels {
+        for &id in level {
+            let node = pir.node(id).unwrap();
+            let h = match node {
+                PirNode::Const(b) => fnv1a(&[0, *b as u8]),
+                PirNode::Lit { leaf } => {
+                    let mut buf = [0u8; 5];
+                    buf[0] = 1;
+                    buf[1..5].copy_from_slice(&leaf.as_u32().to_le_bytes());
+                    fnv1a(&buf)
+                }
+                PirNode::NegLit { leaf } => {
+                    let mut buf = [0u8; 5];
+                    buf[0] = 2;
+                    buf[1..5].copy_from_slice(&leaf.as_u32().to_le_bytes());
+                    fnv1a(&buf)
+                }
+                PirNode::And { children } => {
+                    let mut child_h: Vec<u64> =
+                        children.iter().map(|c| canon[c]).collect();
+                    child_h.sort();
+                    let mut buf = vec![3u8];
+                    for h in child_h {
+                        buf.extend_from_slice(&h.to_le_bytes());
+                    }
+                    fnv1a(&buf)
+                }
+                PirNode::Or { children } => {
+                    let mut child_h: Vec<u64> =
+                        children.iter().map(|c| canon[c]).collect();
+                    child_h.sort();
+                    let mut buf = vec![4u8];
+                    for h in child_h {
+                        buf.extend_from_slice(&h.to_le_bytes());
+                    }
+                    fnv1a(&buf)
+                }
+                PirNode::Decision {
+                    var,
+                    child_false,
+                    child_true,
+                } => {
+                    let mut buf = vec![5u8];
+                    buf.extend_from_slice(&var.as_u32().to_le_bytes());
+                    buf.extend_from_slice(&canon[child_false].to_le_bytes());
+                    buf.extend_from_slice(&canon[child_true].to_le_bytes());
+                    fnv1a(&buf)
+                }
+            };
+            canon.insert(id, h);
+        }
+    }
+    canon
 }
 
 pub fn encode_cnf(pir: &PirGraph, roots: &[PirNodeId]) -> Result<CnfEncoding> {
@@ -106,8 +181,12 @@ pub fn encode_cnf(pir: &PirGraph, roots: &[PirNodeId]) -> Result<CnfEncoding> {
         next_var += 1;
     }
 
+    // Compute canonical hashes for structural ordering independent of PirNodeId values.
+    let levels = pir.levelize(roots)?;
+    let canon = canonical_hashes(pir, &levels);
+
     let mut node_ids: Vec<PirNodeId> = visited.into_iter().collect();
-    node_ids.sort();
+    node_ids.sort_by_key(|id| canon.get(id).copied().unwrap_or(0));
 
     let mut node_var: BTreeMap<PirNodeId, u32> = BTreeMap::new();
     for node_id in node_ids {
@@ -144,9 +223,11 @@ pub fn encode_cnf(pir: &PirGraph, roots: &[PirNodeId]) -> Result<CnfEncoding> {
     let num_vars = next_var - 1;
     let mut clauses: Vec<Vec<i32>> = Vec::new();
 
-    let levels = pir.levelize(roots)?;
-    for level in levels {
-        for node_id in level {
+    // Re-sort each level by canonical hash for deterministic clause emission.
+    for level in &levels {
+        let mut sorted_level = level.clone();
+        sorted_level.sort_by_key(|id| canon.get(id).copied().unwrap_or(0));
+        for node_id in sorted_level {
             let node = pir.node(node_id).ok_or_else(|| {
                 XlogError::Compilation(format!(
                     "Invalid PIR node id while emitting CNF clauses: {:?}",
@@ -181,7 +262,11 @@ pub fn encode_cnf(pir: &PirGraph, roots: &[PirNodeId]) -> Result<CnfEncoding> {
                         clauses.push(vec![v]);
                         continue;
                     }
-                    for &child in children {
+                    // Sort children by canonical hash for deterministic clause order.
+                    let mut sorted_children = children.clone();
+                    sorted_children
+                        .sort_by_key(|id| canon.get(id).copied().unwrap_or(0));
+                    for &child in &sorted_children {
                         let c = *node_var.get(&child).ok_or_else(|| {
                             XlogError::Compilation(format!(
                                 "Missing CNF var for AND child {:?} of {:?}",
@@ -191,7 +276,7 @@ pub fn encode_cnf(pir: &PirGraph, roots: &[PirNodeId]) -> Result<CnfEncoding> {
                         clauses.push(vec![-v, c]);
                     }
                     let mut clause = Vec::with_capacity(children.len() + 1);
-                    for &child in children {
+                    for &child in &sorted_children {
                         let c = *node_var.get(&child).ok_or_else(|| {
                             XlogError::Compilation(format!(
                                 "Missing CNF var for AND child {:?} of {:?}",
@@ -208,7 +293,11 @@ pub fn encode_cnf(pir: &PirGraph, roots: &[PirNodeId]) -> Result<CnfEncoding> {
                         clauses.push(vec![-v]);
                         continue;
                     }
-                    for &child in children {
+                    // Sort children by canonical hash for deterministic clause order.
+                    let mut sorted_children = children.clone();
+                    sorted_children
+                        .sort_by_key(|id| canon.get(id).copied().unwrap_or(0));
+                    for &child in &sorted_children {
                         let c = *node_var.get(&child).ok_or_else(|| {
                             XlogError::Compilation(format!(
                                 "Missing CNF var for OR child {:?} of {:?}",
@@ -219,7 +308,7 @@ pub fn encode_cnf(pir: &PirGraph, roots: &[PirNodeId]) -> Result<CnfEncoding> {
                     }
                     let mut clause = Vec::with_capacity(children.len() + 1);
                     clause.push(-v);
-                    for &child in children {
+                    for &child in &sorted_children {
                         let c = *node_var.get(&child).ok_or_else(|| {
                             XlogError::Compilation(format!(
                                 "Missing CNF var for OR child {:?} of {:?}",
