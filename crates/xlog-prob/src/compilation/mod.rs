@@ -5,6 +5,7 @@
 //! Production correctness requires the GPU CDCL equivalence verifier (see `validation`).
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use cudarc::driver::DeviceSlice;
 use xlog_core::{Result, XlogError};
@@ -40,6 +41,24 @@ pub use validation::{
     validate_equivalence_gpu, validate_equivalence_gpu_gated, GpuEquivalenceConfig,
     GpuEquivalenceQueries,
 };
+
+/// Per-stage compilation timing (populated only when XLOG_WARMUP_PROFILE=1).
+#[derive(Debug, Clone, Default)]
+pub struct CircuitCompileProfile {
+    pub cnf_hash_sec: f64,
+    pub d4_compile_sec: f64,
+    pub verify_sec: f64,
+    pub smooth_sec: f64,
+    pub cache_store_sec: f64,
+    pub free_var_mask_sec: f64,
+    pub gpu_cache_hit: bool,
+}
+
+fn warmup_profiling_enabled() -> bool {
+    std::env::var("XLOG_WARMUP_PROFILE")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+}
 
 /// Device-resident random-variable list for GPU smoothing.
 pub struct DeviceRandomVarList {
@@ -124,22 +143,38 @@ pub fn compile_gpu_d4_and_verify_cached(
     config: &GpuCompileConfig,
     cache: &mut GpuCircuitCache,
     random_vars: &DeviceRandomVarList,
-) -> Result<GpuCircuitCacheHandle> {
+) -> Result<(GpuCircuitCacheHandle, Option<CircuitCompileProfile>)> {
     if config.cdcl_conflict_budget.is_some() {
         return Err(XlogError::Compilation(
             "cdcl_conflict_budget is not supported by the GPU CDCL verifier".to_string(),
         ));
     }
 
+    let profiling = warmup_profiling_enabled();
+    let mut profile = CircuitCompileProfile::default();
+
+    // --- CNF hash stage ---
     #[cfg(debug_assertions)]
     eprintln!("[xlog-prob] compile_gpu_d4_and_verify_cached: hash_cnf_gpu");
+    let t_hash = if profiling { Some(Instant::now()) } else { None };
     let key = gpu_cache::hash_cnf_gpu(cnf, provider)?;
-    #[cfg(debug_assertions)]
-    {
+    if let Some(t0) = t_hash {
         provider
             .device()
             .synchronize()
-            .map_err(|e| XlogError::Kernel(format!("sync after hash_cnf_gpu failed: {}", e)))?;
+            .map_err(|e| XlogError::Kernel(format!("sync after hash_cnf_gpu: {}", e)))?;
+        profile.cnf_hash_sec = t0.elapsed().as_secs_f64();
+    }
+    #[cfg(debug_assertions)]
+    {
+        if !profiling {
+            provider
+                .device()
+                .synchronize()
+                .map_err(|e| {
+                    XlogError::Kernel(format!("sync after hash_cnf_gpu failed: {}", e))
+                })?;
+        }
     }
     #[cfg(debug_assertions)]
     eprintln!("[xlog-prob] compile_gpu_d4_and_verify_cached: lookup_or_insert_device");
@@ -147,20 +182,37 @@ pub fn compile_gpu_d4_and_verify_cached(
     let mut handle = lookup.into_handle()?;
 
     let d4_config = d4_config_for_smoothing(config, random_vars.count())?;
+
+    // --- D4 compile stage ---
     #[cfg(debug_assertions)]
     eprintln!("[xlog-prob] compile_gpu_d4_and_verify_cached: compile_gpu_d4_gated");
+    let t_d4 = if profiling { Some(Instant::now()) } else { None };
     let circuit_base =
         gpu_d4::compile_gpu_d4_gated(cnf, provider, &d4_config, handle.compile_needed_device())?;
+    if let Some(t0) = t_d4 {
+        provider
+            .device()
+            .synchronize()
+            .map_err(|e| XlogError::Kernel(format!("sync after d4 compile: {}", e)))?;
+        profile.d4_compile_sec = t0.elapsed().as_secs_f64();
+    }
     #[cfg(debug_assertions)]
     {
-        provider.device().synchronize().map_err(|e| {
-            XlogError::Kernel(format!("sync after compile_gpu_d4_gated failed: {}", e))
-        })?;
+        if !profiling {
+            provider.device().synchronize().map_err(|e| {
+                XlogError::Kernel(format!("sync after compile_gpu_d4_gated failed: {}", e))
+            })?;
+        }
     }
     if circuit_base.num_nodes() == 0 || circuit_base.num_levels() == 0 {
-        return Ok(handle);
+        // Gated compile returned an empty circuit -- the slot was already populated (cache hit).
+        profile.gpu_cache_hit = true;
+        let out_profile = if profiling { Some(profile) } else { None };
+        return Ok((handle, out_profile));
     }
 
+    // --- Verify equivalence stage ---
+    //
     // Verify equivalence on the *base* circuit (pre-smoothing) to keep the verifier CNFs minimal.
     //
     // `encode_cnf_gpu` sets `decision_var_limit` to the end of the leaf+choice var range. For
@@ -175,6 +227,7 @@ pub fn compile_gpu_d4_and_verify_cached(
     let cdcl = cdcl_config_from_compile(config)?;
     #[cfg(debug_assertions)]
     eprintln!("[xlog-prob] compile_gpu_d4_and_verify_cached: validate_equivalence_gpu_gated");
+    let t_verify = if profiling { Some(Instant::now()) } else { None };
     validate_equivalence_gpu_gated(
         cnf,
         verifier_decision_var_limit,
@@ -183,18 +236,30 @@ pub fn compile_gpu_d4_and_verify_cached(
         GpuEquivalenceConfig { cdcl },
         handle.compile_needed_device(),
     )?;
+    if let Some(t0) = t_verify {
+        provider
+            .device()
+            .synchronize()
+            .map_err(|e| XlogError::Kernel(format!("sync after verify: {}", e)))?;
+        profile.verify_sec = t0.elapsed().as_secs_f64();
+    }
     #[cfg(debug_assertions)]
     {
-        provider.device().synchronize().map_err(|e| {
-            XlogError::Kernel(format!(
-                "sync after validate_equivalence_gpu_gated failed: {}",
-                e
-            ))
-        })?;
+        if !profiling {
+            provider.device().synchronize().map_err(|e| {
+                XlogError::Kernel(format!(
+                    "sync after validate_equivalence_gpu_gated failed: {}",
+                    e
+                ))
+            })?;
+        }
     }
 
+    // --- Smoothing stage ---
+    //
     // Smoothing is evaluation-only (WMC/grad correctness); it is semantics-preserving and does not
     // need to participate in the equivalence check.
+    let t_smooth = if profiling { Some(Instant::now()) } else { None };
     let circuit_eval = if random_vars.is_empty() {
         circuit_base
     } else {
@@ -209,28 +274,53 @@ pub fn compile_gpu_d4_and_verify_cached(
         )?;
         #[cfg(debug_assertions)]
         {
-            provider.device().synchronize().map_err(|e| {
-                XlogError::Kernel(format!(
-                    "sync after smooth_random_vars_device failed: {}",
-                    e
-                ))
-            })?;
+            if !profiling {
+                provider.device().synchronize().map_err(|e| {
+                    XlogError::Kernel(format!(
+                        "sync after smooth_random_vars_device failed: {}",
+                        e
+                    ))
+                })?;
+            }
         }
         smoothed
     };
-    #[cfg(debug_assertions)]
-    eprintln!("[xlog-prob] compile_gpu_d4_and_verify_cached: store_from_xgcf");
-    cache.store_from_xgcf(&mut handle, &circuit_eval)?;
-    #[cfg(debug_assertions)]
-    {
+    if let Some(t0) = t_smooth {
         provider
             .device()
             .synchronize()
-            .map_err(|e| XlogError::Kernel(format!("sync after store_from_xgcf failed: {}", e)))?;
+            .map_err(|e| XlogError::Kernel(format!("sync after smooth: {}", e)))?;
+        profile.smooth_sec = t0.elapsed().as_secs_f64();
     }
 
+    // --- Cache store stage ---
+    #[cfg(debug_assertions)]
+    eprintln!("[xlog-prob] compile_gpu_d4_and_verify_cached: store_from_xgcf");
+    let t_store = if profiling { Some(Instant::now()) } else { None };
+    cache.store_from_xgcf(&mut handle, &circuit_eval)?;
+    if let Some(t0) = t_store {
+        provider
+            .device()
+            .synchronize()
+            .map_err(|e| XlogError::Kernel(format!("sync after cache store: {}", e)))?;
+        profile.cache_store_sec = t0.elapsed().as_secs_f64();
+    }
+    #[cfg(debug_assertions)]
+    {
+        if !profiling {
+            provider
+                .device()
+                .synchronize()
+                .map_err(|e| {
+                    XlogError::Kernel(format!("sync after store_from_xgcf failed: {}", e))
+                })?;
+        }
+    }
+
+    // --- Free-var mask stage ---
     #[cfg(debug_assertions)]
     eprintln!("[xlog-prob] compile_gpu_d4_and_verify_cached: compute_free_var_mask_gpu_gated");
+    let t_fvm = if profiling { Some(Instant::now()) } else { None };
     let free_var_mask = gpu_d4::compute_free_var_mask_gpu_gated(
         cnf,
         &circuit_eval,
@@ -239,12 +329,14 @@ pub fn compile_gpu_d4_and_verify_cached(
     )?;
     #[cfg(debug_assertions)]
     {
-        provider.device().synchronize().map_err(|e| {
-            XlogError::Kernel(format!(
-                "sync after compute_free_var_mask_gpu_gated failed: {}",
-                e
-            ))
-        })?;
+        if !profiling {
+            provider.device().synchronize().map_err(|e| {
+                XlogError::Kernel(format!(
+                    "sync after compute_free_var_mask_gpu_gated failed: {}",
+                    e
+                ))
+            })?;
+        }
     }
     // Only enable free-var correction if there are actual free variables.
     // When the mask is all-zero (common for smoothed d-DNNF circuits),
@@ -266,12 +358,23 @@ pub fn compile_gpu_d4_and_verify_cached(
         cache.store_free_var_mask(&mut handle, &free_var_mask)?;
         #[cfg(debug_assertions)]
         {
-            provider.device().synchronize().map_err(|e| {
-                XlogError::Kernel(format!("sync after store_free_var_mask failed: {}", e))
-            })?;
+            if !profiling {
+                provider.device().synchronize().map_err(|e| {
+                    XlogError::Kernel(format!("sync after store_free_var_mask failed: {}", e))
+                })?;
+            }
         }
     }
-    Ok(handle)
+    if let Some(t0) = t_fvm {
+        provider
+            .device()
+            .synchronize()
+            .map_err(|e| XlogError::Kernel(format!("sync after free_var_mask: {}", e)))?;
+        profile.free_var_mask_sec = t0.elapsed().as_secs_f64();
+    }
+
+    let out_profile = if profiling { Some(profile) } else { None };
+    Ok((handle, out_profile))
 }
 
 fn d4_config_for_smoothing(

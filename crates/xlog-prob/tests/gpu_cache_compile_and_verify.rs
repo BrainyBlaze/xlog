@@ -53,7 +53,7 @@ fn gpu_cache_compile_reuses_slot() {
 
     let random_vars =
         DeviceRandomVarList::from_host(provider.as_ref(), &[]).expect("random vars upload");
-    let h1 = compile_gpu_d4_and_verify_cached(
+    let (h1, _) = compile_gpu_d4_and_verify_cached(
         &cnf,
         &cnf.num_vars,
         &provider,
@@ -62,7 +62,7 @@ fn gpu_cache_compile_reuses_slot() {
         &random_vars,
     )
     .expect("compile 1");
-    let h2 = compile_gpu_d4_and_verify_cached(
+    let (h2, _) = compile_gpu_d4_and_verify_cached(
         &cnf,
         &cnf.num_vars,
         &provider,

@@ -277,7 +277,7 @@ pub fn compile_provenance_gpu_only(
     let cache_config = default_cache_config(&encoding.cnf, &compile_config)?;
 
     let mut cache = GpuCircuitCache::new(&provider, cache_config)?;
-    let handle = compile_gpu_d4_and_verify_cached(
+    let (handle, _compile_profile) = compile_gpu_d4_and_verify_cached(
         &encoding.cnf,
         &encoding.decision_var_limit,
         &provider,
