@@ -336,6 +336,10 @@ def run_single(example, seed, run_dir, env_info, git_info, run_id):
             for key in FROZEN_SCHEMA_KEYS:
                 if key in ext:
                     metrics[key] = ext[key]
+            # Preserve optional diagnostic fields
+            for opt_key in ("warmup_breakdown",):
+                if opt_key in ext:
+                    metrics[opt_key] = ext[opt_key]
         except json.JSONDecodeError:
             schema_missing = sorted(FROZEN_SCHEMA_KEYS)
             print(

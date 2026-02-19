@@ -281,6 +281,10 @@ def run_single(example, seed, run_dir, env_info, git_info, run_id):
                         "warmup_sec", "per_query_ms", "epoch_sec", "total_train_sec"):
                 if key in ext:
                     metrics[key] = ext[key]
+            # Preserve optional diagnostic fields
+            for opt_key in ("warmup_breakdown",):
+                if opt_key in ext:
+                    metrics[opt_key] = ext[opt_key]
         except (json.JSONDecodeError, OSError):
             pass
 
