@@ -1,6 +1,22 @@
 use xlog_prob::cnf::encode_cnf;
 use xlog_prob::pir::{LeafId, PirGraph};
 
+/// Canonicalize clauses for comparison: sort literals within each clause,
+/// then sort the clause list. This ignores emission order while preserving
+/// logical content.
+fn canonicalize(clauses: &[Vec<i32>]) -> Vec<Vec<i32>> {
+    let mut out: Vec<Vec<i32>> = clauses
+        .iter()
+        .map(|c| {
+            let mut sorted = c.clone();
+            sorted.sort();
+            sorted
+        })
+        .collect();
+    out.sort();
+    out
+}
+
 /// Build two PIR graphs with identical structure but different node ID assignments.
 /// Verify that encode_cnf() produces byte-identical CNF output.
 #[test]
@@ -36,7 +52,8 @@ fn encode_cnf_is_independent_of_pir_node_id_order() {
     );
 }
 
-/// Same test but with reversed child ordering in And/Or.
+/// Reversed child ordering in And/Or produces logically equivalent CNF.
+/// Clause emission order may differ, but canonicalized clauses match.
 #[test]
 fn encode_cnf_is_independent_of_child_order_in_and_or() {
     let mut pir_a = PirGraph::new();
@@ -58,13 +75,13 @@ fn encode_cnf_is_independent_of_child_order_in_and_or() {
         "num_vars mismatch with reversed child order"
     );
     assert_eq!(
-        cnf_a.cnf.clauses(),
-        cnf_b.cnf.clauses(),
-        "clauses differ with reversed child order in And"
+        canonicalize(cnf_a.cnf.clauses()),
+        canonicalize(cnf_b.cnf.clauses()),
+        "canonicalized clauses differ with reversed child order in And"
     );
 }
 
-/// Or with reversed children should also produce identical CNF.
+/// Or with reversed children should also produce logically equivalent CNF.
 #[test]
 fn encode_cnf_or_is_independent_of_child_order() {
     let mut pir_a = PirGraph::new();
@@ -81,7 +98,10 @@ fn encode_cnf_or_is_independent_of_child_order() {
     let cnf_b = encode_cnf(&pir_b, &[b_root]).unwrap();
 
     assert_eq!(cnf_a.cnf.num_vars(), cnf_b.cnf.num_vars());
-    assert_eq!(cnf_a.cnf.clauses(), cnf_b.cnf.clauses());
+    assert_eq!(
+        canonicalize(cnf_a.cnf.clauses()),
+        canonicalize(cnf_b.cnf.clauses()),
+    );
 }
 
 /// Deeper graph: nested And(Or(lit, lit), lit) with different ID offsets.

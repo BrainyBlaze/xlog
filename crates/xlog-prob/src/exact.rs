@@ -1628,11 +1628,19 @@ impl ExactDdnnfProgram {
             .dtoh_sync_copy_into(&root_view, &mut log_z)
             .map_err(|e| XlogError::Kernel(format!("Failed to read logZ: {}", e)))?;
 
+        // Gradient buffers are multi-slot: [slot0_var0..slot0_varN, slot1_var0..].
+        // Slice into the correct slot to download only this circuit's gradients.
+        let var_stride = cache.var_stride()? as usize;
+        let slot = state.handle().slot_index() as usize;
+        let grad_start = slot * var_stride;
+        let grad_end = grad_start + weights_len;
+        let grad_true_slot = cache.grad_true().slice(grad_start..grad_end);
+        let grad_false_slot = cache.grad_false().slice(grad_start..grad_end);
         device
-            .dtoh_sync_copy_into(cache.grad_true(), &mut host_grad_true)
+            .dtoh_sync_copy_into(&grad_true_slot, &mut host_grad_true)
             .map_err(|e| XlogError::Kernel(format!("Failed to download grad_true: {}", e)))?;
         device
-            .dtoh_sync_copy_into(cache.grad_false(), &mut host_grad_false)
+            .dtoh_sync_copy_into(&grad_false_slot, &mut host_grad_false)
             .map_err(|e| XlogError::Kernel(format!("Failed to download grad_false: {}", e)))?;
 
         Ok((log_z[0], host_grad_true, host_grad_false))
