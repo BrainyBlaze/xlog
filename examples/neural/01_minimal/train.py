@@ -444,6 +444,15 @@ def main():
                 "total_train_sec": round(total_train_sec, 3),
                 "per_query_ms": round(per_query_ms, 3),
             }
+
+            # Include warmup profiling breakdown when available.
+            try:
+                breakdown = program.warmup_breakdown()
+                if breakdown is not None:
+                    data["warmup_breakdown"] = breakdown
+            except Exception:
+                pass  # profiling not available; skip silently
+
             Path(args.metrics_path).parent.mkdir(parents=True, exist_ok=True)
             Path(args.metrics_path).write_text(json.dumps(data, indent=2) + "\n")
     else:

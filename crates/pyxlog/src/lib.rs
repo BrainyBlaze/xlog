@@ -497,6 +497,7 @@ impl Program {
             circuit_cache: StdHashMap::new(),
             template_compile_count: 0,
             batch_queries: true,
+            last_compile_profile: None,
         })
     }
 }
@@ -592,6 +593,8 @@ pub struct CompiledProgram {
     template_compile_count: usize,
     /// When true, batch queries sharing the same circuit template in training.
     batch_queries: bool,
+    /// Latest circuit compilation profile (populated on cache miss when profiling).
+    last_compile_profile: Option<xlog_prob::compilation::CircuitCompileProfile>,
 }
 
 #[pymethods]
@@ -1244,6 +1247,51 @@ impl CompiledProgram {
         self.train_epoch_tensor_internal(py, &queries, batch_size, usize::MAX, &mut history)
     }
 
+    /// Return warmup profiling data as a Python dict (or None if profiling disabled).
+    ///
+    /// When XLOG_WARMUP_PROFILE=1, returns a dict with:
+    ///   - "ptx": PTX load timing breakdown
+    ///   - "circuit": circuit compilation timing breakdown
+    /// Returns None if profiling is not enabled or no data is available.
+    fn warmup_breakdown(&self, py: Python<'_>) -> PyResult<Option<PyObject>> {
+        let ptx_profile = self.output_provider.ptx_load_profile();
+        let circuit_profile = self.last_compile_profile.as_ref();
+
+        // Return None if neither profile is available.
+        if ptx_profile.is_none() && circuit_profile.is_none() {
+            return Ok(None);
+        }
+
+        let result = PyDict::new_bound(py);
+
+        if let Some(ptx) = ptx_profile {
+            let ptx_dict = PyDict::new_bound(py);
+            ptx_dict.set_item("total_sec", ptx.total_sec)?;
+            ptx_dict.set_item("cubin_loaded", ptx.cubin_loaded)?;
+            ptx_dict.set_item("ptx_fallback", ptx.ptx_fallback)?;
+            let per_module = PyDict::new_bound(py);
+            for (name, sec) in &ptx.per_module_sec {
+                per_module.set_item(name, *sec)?;
+            }
+            ptx_dict.set_item("per_module_sec", per_module)?;
+            result.set_item("ptx", ptx_dict)?;
+        }
+
+        if let Some(circuit) = circuit_profile {
+            let circuit_dict = PyDict::new_bound(py);
+            circuit_dict.set_item("gpu_cache_hit", circuit.gpu_cache_hit)?;
+            circuit_dict.set_item("d4_compile_sec", circuit.d4_compile_sec)?;
+            circuit_dict.set_item("verify_sec", circuit.verify_sec)?;
+            circuit_dict.set_item("smooth_sec", circuit.smooth_sec)?;
+            circuit_dict.set_item("cache_store_sec", circuit.cache_store_sec)?;
+            circuit_dict.set_item("free_var_mask_sec", circuit.free_var_mask_sec)?;
+            circuit_dict.set_item("cnf_hash_sec", circuit.cnf_hash_sec)?;
+            result.set_item("circuit", circuit_dict)?;
+        }
+
+        Ok(Some(result.into()))
+    }
+
     /// Clear the circuit template cache, forcing recompilation on next query.
     /// Used for cache ablation benchmarks.
     fn clear_circuit_cache(&mut self) {
@@ -1766,10 +1814,13 @@ impl CompiledProgram {
         let cache_key =
             self.generate_cache_key_for_signature(&signature, &pred_name, atom.terms.len());
         if !self.circuit_cache.contains_key(&cache_key) {
-            let cached =
+            let (cached, profile) =
                 self.compile_circuit_for_template(&signature, &pred_name, atom.terms.len())?;
             self.circuit_cache.insert(cache_key.clone(), cached);
             self.template_compile_count = self.template_compile_count.saturating_add(1);
+            if profile.is_some() {
+                self.last_compile_profile = profile;
+            }
         }
 
         let cached = self
@@ -1909,10 +1960,13 @@ impl CompiledProgram {
         let cache_key =
             self.generate_cache_key_for_signature(&signature, &pred_name, atoms[0].terms.len());
         if !self.circuit_cache.contains_key(&cache_key) {
-            let cached =
+            let (cached, profile) =
                 self.compile_circuit_for_template(&signature, &pred_name, atoms[0].terms.len())?;
             self.circuit_cache.insert(cache_key.clone(), cached);
             self.template_compile_count = self.template_compile_count.saturating_add(1);
+            if profile.is_some() {
+                self.last_compile_profile = profile;
+            }
         }
 
         // ── 2. Per-query data: input indices + query_idx ────────────────
@@ -2723,7 +2777,7 @@ impl CompiledProgram {
         signature: &QuerySignature,
         query_pred: &str,
         query_arity: usize,
-    ) -> PyResult<CachedCircuit> {
+    ) -> PyResult<(CachedCircuit, Option<xlog_prob::compilation::CircuitCompileProfile>)> {
         #[cfg(not(feature = "host-io"))]
         {
             let _ = (signature, query_pred, query_arity);
@@ -2736,6 +2790,8 @@ impl CompiledProgram {
                 self.generate_template_ast(signature, query_pred, query_arity)?;
             let program = ExactDdnnfProgram::compile_from_program(&expanded_ast, self._gpu_config)
                 .map_err(|e| PyRuntimeError::new_err(format!("Query compilation error: {}", e)))?;
+
+            let compile_profile = program.last_compile_profile().cloned();
 
             let random_vars = program.random_var_indices();
             let group_label_counts: Vec<usize> = signature
@@ -2771,11 +2827,11 @@ impl CompiledProgram {
             let slots = GpuWeightSlots::upload(self.output_provider.as_ref(), &slot_groups)
                 .map_err(|e| PyRuntimeError::new_err(format!("Slot map upload error: {}", e)))?;
 
-            Ok(CachedCircuit {
+            Ok((CachedCircuit {
                 program,
                 slots,
                 target_domain,
-            })
+            }, compile_profile))
         }
     }
     /// Get the label index for a given label string from declared labels.

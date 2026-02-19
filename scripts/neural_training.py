@@ -113,6 +113,7 @@ def write_frozen_metrics(
     total_train_sec: float,
     n_queries: int,
     extra: Optional[dict] = None,
+    engine=None,
 ) -> None:
     """Write metrics.json with the frozen schema fields.
 
@@ -123,6 +124,8 @@ def write_frozen_metrics(
         total_train_sec: Wall-clock time for the full training loop.
         n_queries: Total number of training queries per epoch.
         extra: Additional key-value pairs to include.
+        engine: Optional pyxlog CompiledProgram; if provided and
+                XLOG_WARMUP_PROFILE=1, its warmup_breakdown() is included.
     """
     if metrics_path is None:
         return
@@ -154,6 +157,15 @@ def write_frozen_metrics(
     }
     if extra:
         data.update(extra)
+
+    # Include warmup profiling breakdown when available.
+    if engine is not None:
+        try:
+            breakdown = engine.warmup_breakdown()
+            if breakdown is not None:
+                data["warmup_breakdown"] = breakdown
+        except Exception:
+            pass  # profiling not available; skip silently
 
     Path(metrics_path).parent.mkdir(parents=True, exist_ok=True)
     Path(metrics_path).write_text(json.dumps(data, indent=2) + "\n")

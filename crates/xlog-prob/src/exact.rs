@@ -15,8 +15,8 @@ use crate::compilation::gpu_weights::{build_evidence_by_var_gpu, build_weights_g
 #[cfg(feature = "host-io")]
 use crate::compilation::gpu_weights::{map_nodes_to_vars_gpu, upload_weights_from_host};
 use crate::compilation::{
-    compile_gpu_d4_and_verify_cached, encode_cnf_gpu, DeviceRandomVarList, GpuCompileConfig,
-    GpuPirGraph, GpuPirRoots,
+    compile_gpu_d4_and_verify_cached, encode_cnf_gpu, CircuitCompileProfile, DeviceRandomVarList,
+    GpuCompileConfig, GpuPirGraph, GpuPirRoots,
 };
 use crate::neural_fast_path::{GpuWeightSlots, NeuralFastPathConfig};
 use crate::provenance::{extract_from_program, extract_from_source, GroundAtom, Provenance};
@@ -113,6 +113,8 @@ pub struct ExactDdnnfProgram {
     random_vars: Option<Arc<DeviceRandomVarList>>,
     max_var: u32,
     gpu_config: GpuConfig,
+    /// Latest circuit compilation profile (populated on cache miss when profiling).
+    last_compile_profile: Option<CircuitCompileProfile>,
 }
 
 impl ExactDdnnfProgram {
@@ -133,6 +135,11 @@ impl ExactDdnnfProgram {
 
     pub fn gpu_config(&self) -> GpuConfig {
         self.gpu_config
+    }
+
+    /// Get the latest circuit compilation profile (populated when XLOG_WARMUP_PROFILE=1).
+    pub fn last_compile_profile(&self) -> Option<&CircuitCompileProfile> {
+        self.last_compile_profile.as_ref()
     }
 
     #[cfg(feature = "host-io")]
@@ -1359,6 +1366,7 @@ impl ExactDdnnfProgram {
                 random_vars: None,
                 max_var: 0,
                 gpu_config: config,
+                last_compile_profile: None,
             });
         }
 
@@ -1446,7 +1454,7 @@ impl ExactDdnnfProgram {
         let cache_config = default_cache_config(&encoding.cnf, &compile_config)?;
 
         let mut cache = GpuCircuitCache::new(&provider, cache_config)?;
-        let (handle, _compile_profile) = compile_gpu_d4_and_verify_cached(
+        let (handle, compile_profile) = compile_gpu_d4_and_verify_cached(
             &encoding.cnf,
             &encoding.decision_var_limit,
             &provider,
@@ -1491,6 +1499,7 @@ impl ExactDdnnfProgram {
             random_vars: Some(Arc::new(random_vars)),
             max_var: encoding.vars.max_var,
             gpu_config: config,
+            last_compile_profile: compile_profile,
         })
     }
 
