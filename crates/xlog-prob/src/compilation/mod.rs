@@ -4,8 +4,6 @@
 //!
 //! Production correctness requires the GPU CDCL equivalence verifier (see `validation`).
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -197,8 +195,14 @@ pub fn compile_gpu_d4_and_verify_cached(
         .map_err(|e| XlogError::Kernel(format!("dtoh compile_needed: {}", e)))?;
     let compile_needed = compile_needed_host[0];
 
-    // Build the disk cache key early so it is available for both read and write paths.
-    // We only need the full key when there is a GPU cache miss.
+    // GPU cache hit — short-circuit the entire compile pipeline.
+    if compile_needed == 0 {
+        profile.gpu_cache_hit = true;
+        let out_profile = if profiling { Some(profile) } else { None };
+        return Ok((handle, out_profile));
+    }
+
+    // Build the disk cache key (we know compile_needed == 1 at this point).
     let cache_key = if compile_needed == 1 {
         // D→H copy cnf_hash from the device-resident key
         let cnf_hash_host: Vec<u64> = provider
@@ -266,8 +270,8 @@ pub fn compile_gpu_d4_and_verify_cached(
         }
     }
     if circuit_base.num_nodes() == 0 || circuit_base.num_levels() == 0 {
-        // Gated compile returned an empty circuit -- the slot was already populated (cache hit).
-        profile.gpu_cache_hit = true;
+        // Defensive: D4 returned an empty circuit (the primary GPU cache hit is handled
+        // by the compile_needed == 0 early return above; this catches degenerate CNFs).
         let out_profile = if profiling { Some(profile) } else { None };
         return Ok((handle, out_profile));
     }
@@ -545,19 +549,32 @@ fn cdcl_config_from_compile(config: &GpuCompileConfig) -> Result<GpuCdclConfig> 
 // Disk cache helpers
 // ---------------------------------------------------------------------------
 
+/// FNV-1a 64-bit hash — deterministic across processes and Rust versions.
+/// Matches the FNV-1a algorithm used in the GPU hash kernel (kernels/cache.cu).
+fn fnv1a_u64(bytes: &[u8]) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+    let mut h = FNV_OFFSET;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(FNV_PRIME);
+    }
+    h
+}
+
 /// Hash the compile config fields that affect circuit topology output.
 fn hash_compile_config(config: &GpuCompileConfig) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    config.frontier_depth.hash(&mut hasher);
-    config.max_frontier_items.hash(&mut hasher);
-    config.max_depth.hash(&mut hasher);
-    config.smooth_node_cap.hash(&mut hasher);
-    config.smooth_edge_cap.hash(&mut hasher);
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&config.frontier_depth.to_le_bytes());
+    buf.extend_from_slice(&config.max_frontier_items.to_le_bytes());
+    buf.extend_from_slice(&config.max_depth.to_le_bytes());
+    buf.extend_from_slice(&config.smooth_node_cap.to_le_bytes());
+    buf.extend_from_slice(&config.smooth_edge_cap.to_le_bytes());
     // CDCL verifier params do not affect the compiled circuit topology,
     // but we include them for safety so a verifier config change invalidates the cache.
-    config.cdcl_restart_interval.hash(&mut hasher);
-    config.cdcl_learned_bytes.hash(&mut hasher);
-    hasher.finish()
+    buf.extend_from_slice(&config.cdcl_restart_interval.to_le_bytes());
+    buf.extend_from_slice(&config.cdcl_learned_bytes.to_le_bytes());
+    fnv1a_u64(&buf)
 }
 
 /// Hash the random variable list (D→H copy + hash).
@@ -565,10 +582,10 @@ fn hash_random_vars(
     random_vars: &DeviceRandomVarList,
     provider: &Arc<CudaKernelProvider>,
 ) -> Result<u64> {
-    let mut hasher = DefaultHasher::new();
-    random_vars.count().hash(&mut hasher);
-    if random_vars.count() > 0 {
-        let count = random_vars.count() as usize;
+    let count = random_vars.count();
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&count.to_le_bytes());
+    if count > 0 {
         let host: Vec<u32> = provider
             .device()
             .inner()
@@ -577,11 +594,11 @@ fn hash_random_vars(
                 XlogError::Kernel(format!("dtoh random_vars for disk cache hash: {}", e))
             })?;
         // Hash only the valid elements (count may be less than the allocation).
-        for &v in &host[..count] {
-            v.hash(&mut hasher);
+        for &v in &host[..count as usize] {
+            buf.extend_from_slice(&v.to_le_bytes());
         }
     }
-    Ok(hasher.finish())
+    Ok(fnv1a_u64(&buf))
 }
 
 /// Query the device compute capability and encode as `major * 10 + minor` (e.g. 89 for sm_89).
