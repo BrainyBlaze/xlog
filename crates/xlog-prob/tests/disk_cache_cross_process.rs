@@ -98,6 +98,30 @@ fn build_encode_and_hash_gpu() -> Option<u64> {
     Some(hash_host[0])
 }
 
+/// Ensure child processes can load the CUDA driver on WSL hosts.
+///
+/// Some environments expose `nvidia-smi` but omit `/usr/lib/wsl/lib` from
+/// `LD_LIBRARY_PATH`, which causes `libcuda.so` resolution to fail in children.
+fn with_child_cuda_env(cmd: &mut Command) {
+    let wsl_cuda_dir = "/usr/lib/wsl/lib";
+    if !std::path::Path::new("/usr/lib/wsl/lib/libcuda.so").exists() {
+        return;
+    }
+
+    let current = std::env::var("LD_LIBRARY_PATH").unwrap_or_default();
+    let has_wsl_dir = current.split(':').any(|p| p == wsl_cuda_dir);
+    if has_wsl_dir {
+        return;
+    }
+
+    let updated = if current.is_empty() {
+        wsl_cuda_dir.to_string()
+    } else {
+        format!("{wsl_cuda_dir}:{current}")
+    };
+    cmd.env("LD_LIBRARY_PATH", updated);
+}
+
 /// Child-mode entry point. When XLOG_GPU_HASH_OUTPUT_PATH is set,
 /// compute the GPU cache hash and write it to that file.
 #[test]
@@ -127,10 +151,12 @@ fn gpu_cnf_hash_is_identical_across_processes() {
     let _ = std::fs::remove_file(&path_b);
 
     let run = |label: &str, path: &std::path::Path| {
-        let output = Command::new(&exe)
-            .arg("--exact")
+        let mut cmd = Command::new(&exe);
+        cmd.arg("--exact")
             .arg("disk_cache_cross_process_child")
-            .env("XLOG_GPU_HASH_OUTPUT_PATH", path.to_str().unwrap())
+            .env("XLOG_GPU_HASH_OUTPUT_PATH", path.to_str().unwrap());
+        with_child_cuda_env(&mut cmd);
+        let output = cmd
             .output()
             .unwrap_or_else(|e| panic!("{label}: failed to spawn: {e}"));
         assert!(
