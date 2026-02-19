@@ -22,9 +22,15 @@ fn main() {
         .unwrap_or_else(|e| panic!("Failed to read {}: {}", cu_path.display(), e));
 
     // Keep options minimal so this works in environments that only have NVRTC available.
+    // Default sm_75 is the lowest arch supported by CUDA 13+.
+    // Leak is fine — this is a one-shot CLI tool.
+    let arch: &'static str = Box::leak(
+        std::env::var("XLOG_NVRTC_ARCH")
+            .unwrap_or_else(|_| "sm_75".to_string())
+            .into_boxed_str(),
+    );
     let opts = CompileOptions {
-        // NVRTC expects an `sm_XX` architecture string for `--gpu-architecture`.
-        arch: Some("sm_70"),
+        arch: Some(arch),
         ..Default::default()
     };
 
