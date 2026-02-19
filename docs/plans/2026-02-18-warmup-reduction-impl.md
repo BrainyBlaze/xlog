@@ -559,10 +559,12 @@ The file must use only types and expressions valid in both contexts. Use simple
 `&[&str]` arrays:
 
 ```rust
-//! Single source of truth for CUDA kernel modules.
-//!
-//! This file is consumed by both `build.rs` (via include!()) and `provider.rs`
-//! (via mod) to avoid the kernel list being duplicated in two places.
+// Single source of truth for CUDA kernel modules.
+//
+// This file is consumed by both `build.rs` (via include!()) and `provider.rs`
+// (via mod) to avoid the kernel list being duplicated in two places.
+// NOTE: Use regular comments (//), NOT inner doc comments (//!), because
+// include!() in build.rs would interpret //! as documenting the wrong item.
 
 /// Module names matching the .cu filenames (without extension).
 /// Order matches provider.rs load order. All 19 modules listed.
@@ -643,11 +645,17 @@ Replace the current build.rs (which compiles 18 kernels to PTX targeting sm_70) 
 **Note:** `build.rs` uses `include!()` to import `KERNEL_CU_NAMES` from the shared
 manifest (see Task 6). No duplication — the 19-module list is defined once.
 
-### Step 2: Handle nvcc not found gracefully
+### Step 2: Handle nvcc not found
 
-If nvcc is not found at all, emit a cargo warning and skip everything (builds
-that can't invoke nvcc are broken anyway since portable PTX is now required).
-If `XLOG_NO_CUBIN=1`, skip only cubin generation — portable PTX is still built.
+If nvcc is not found at all, **emit a hard build error** (`panic!` or
+`compile_error!`). Since Phase 1 removes all embedded `include_str!()` PTX
+constants, there is no fallback — a successful build without nvcc would
+produce a binary that fails at runtime on every module load. The error message
+should say: `"nvcc not found — required to generate portable PTX. Install the
+CUDA toolkit or set XLOG_NO_CUBIN=1 (still requires nvcc for portable PTX)."`.
+
+If `XLOG_NO_CUBIN=1`, skip only cubin generation — portable PTX is still built
+(and still requires nvcc).
 
 ### Step 3: Test build
 
@@ -747,22 +755,41 @@ hardware. File-based loading from build outputs is now the only path.
 
 Update comment at line 20 (`sm_70` → `sm_120` or remove), line 648 (same).
 
-### Step 5: Compile and test
+### Step 5: Migrate tests that depend on embedded PTX constants
+
+Tests at `provider.rs:10110-10288` reference the removed `include_str!()`
+constants (`JOIN_PTX`, `DEDUP_PTX`, `CIRCUIT_PTX`, etc.) for inline module
+loading. These will fail to compile after Step 3 removes the constants.
+
+For each affected test:
+- If it loads a module via `Ptx::from_src(JOIN_PTX)`, replace with
+  `Ptx::from_file(resolve_module_path("join", cc).expect("test requires built PTX"))`.
+- If it just checks that the PTX string is non-empty (a smoke test for the
+  `include_str!()` embedding), **delete it** — it tests the old embedding
+  mechanism which no longer exists.
+- If it tests kernel launch/correctness, keep the test but switch to
+  file-based loading. These tests already require a CUDA device, so requiring
+  build artifacts is not an additional constraint.
+
+Verify after migration: `cargo test -p xlog-cuda` passes.
+
+### Step 6: Compile and test
 
 Run: `cargo check -p xlog-cuda`
 Expected: compiles clean
 
 Run: `cargo test -p xlog-cuda`
-Expected: all tests pass
+Expected: all tests pass (including migrated tests from Step 5)
 
-### Step 6: Commit
+### Step 7: Commit
 
 ```bash
 git add crates/xlog-cuda/src/provider.rs
-git commit -m "feat(cuda): load cubin with PTX fallback in provider
+git commit -m "feat(cuda): load cubin with portable PTX fallback in provider
 
 Detects device SM, tries cubin first (from XLOG_CUBIN_DIR or
-OUT_DIR), then portable PTX, then embedded PTX as final fallback.
+OUT_DIR), then portable PTX. Removes all include_str!() embedded
+PTX constants and migrates tests to file-based loading.
 Eliminates driver JIT when cubins are available."
 ```
 
@@ -868,48 +895,48 @@ fn cache_path(key: &CircuitCacheKey) -> PathBuf {
 
 ```rust
 pub fn write_artifact(key: &CircuitCacheKey, artifact: &CircuitArtifact) -> Result<()> {
+    // Helper: XlogError has no From<std::io::Error> impl, so every IO op
+    // must be explicitly mapped.
+    fn io(e: std::io::Error) -> XlogError {
+        XlogError::Compilation(format!("circuit cache IO error: {}", e))
+    }
+
     let dir = cache_dir();
-    fs::create_dir_all(&dir).map_err(|e| {
-        XlogError::Compilation(format!("Failed to create circuit cache dir: {}", e))
-    })?;
+    fs::create_dir_all(&dir).map_err(io)?;
 
     let path = cache_path(key);
     let tmp = path.with_extension("tmp");
-    let mut f = fs::File::create(&tmp).map_err(|e| {
-        XlogError::Compilation(format!("Failed to create cache tmp file: {}", e))
-    })?;
+    let mut f = fs::File::create(&tmp).map_err(io)?;
 
     // Write header
-    f.write_all(&MAGIC.to_le_bytes())?;
-    f.write_all(&FORMAT_VERSION.to_le_bytes())?;
-    f.write_all(&key.cnf_hash.to_le_bytes())?;
-    f.write_all(&key.config_hash.to_le_bytes())?;
-    f.write_all(&key.random_vars_hash.to_le_bytes())?;
-    f.write_all(&key.sm.to_le_bytes())?;
-    f.write_all(&artifact.num_nodes.to_le_bytes())?;
-    f.write_all(&artifact.num_edges.to_le_bytes())?;
-    f.write_all(&artifact.num_levels.to_le_bytes())?;
-    f.write_all(&artifact.root.to_le_bytes())?;
-    f.write_all(&artifact.max_var.to_le_bytes())?;
-    f.write_all(&[artifact.has_free_var_mask as u8])?;
-    f.write_all(&[0u8; 3])?; // padding
+    f.write_all(&MAGIC.to_le_bytes()).map_err(io)?;
+    f.write_all(&FORMAT_VERSION.to_le_bytes()).map_err(io)?;
+    f.write_all(&key.cnf_hash.to_le_bytes()).map_err(io)?;
+    f.write_all(&key.config_hash.to_le_bytes()).map_err(io)?;
+    f.write_all(&key.random_vars_hash.to_le_bytes()).map_err(io)?;
+    f.write_all(&key.sm.to_le_bytes()).map_err(io)?;
+    f.write_all(&artifact.num_nodes.to_le_bytes()).map_err(io)?;
+    f.write_all(&artifact.num_edges.to_le_bytes()).map_err(io)?;
+    f.write_all(&artifact.num_levels.to_le_bytes()).map_err(io)?;
+    f.write_all(&artifact.root.to_le_bytes()).map_err(io)?;
+    f.write_all(&artifact.max_var.to_le_bytes()).map_err(io)?;
+    f.write_all(&[artifact.has_free_var_mask as u8]).map_err(io)?;
+    f.write_all(&[0u8; 3]).map_err(io)?; // padding
 
     // Write arrays as raw bytes
-    f.write_all(&artifact.node_type)?;
-    f.write_all(bytemuck::cast_slice(&artifact.child_offsets))?;
-    f.write_all(bytemuck::cast_slice(&artifact.child_indices))?;
-    f.write_all(bytemuck::cast_slice(&artifact.lit))?;
-    f.write_all(bytemuck::cast_slice(&artifact.decision_var))?;
-    f.write_all(bytemuck::cast_slice(&artifact.decision_child_false))?;
-    f.write_all(bytemuck::cast_slice(&artifact.decision_child_true))?;
-    f.write_all(bytemuck::cast_slice(&artifact.level_nodes))?;
-    f.write_all(bytemuck::cast_slice(&artifact.level_offsets))?;
-    f.write_all(&artifact.free_var_mask)?;
+    f.write_all(&artifact.node_type).map_err(io)?;
+    f.write_all(bytemuck::cast_slice(&artifact.child_offsets)).map_err(io)?;
+    f.write_all(bytemuck::cast_slice(&artifact.child_indices)).map_err(io)?;
+    f.write_all(bytemuck::cast_slice(&artifact.lit)).map_err(io)?;
+    f.write_all(bytemuck::cast_slice(&artifact.decision_var)).map_err(io)?;
+    f.write_all(bytemuck::cast_slice(&artifact.decision_child_false)).map_err(io)?;
+    f.write_all(bytemuck::cast_slice(&artifact.decision_child_true)).map_err(io)?;
+    f.write_all(bytemuck::cast_slice(&artifact.level_nodes)).map_err(io)?;
+    f.write_all(bytemuck::cast_slice(&artifact.level_offsets)).map_err(io)?;
+    f.write_all(&artifact.free_var_mask).map_err(io)?;
 
     drop(f);
-    fs::rename(&tmp, &path).map_err(|e| {
-        XlogError::Compilation(format!("Failed to rename cache file: {}", e))
-    })?;
+    fs::rename(&tmp, &path).map_err(io)?;
 
     evict_if_needed()?;
     Ok(())
