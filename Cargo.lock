@@ -2221,6 +2221,7 @@ dependencies = [
 name = "xlog-prob"
 version = "0.3.2"
 dependencies = [
+ "bytemuck",
  "criterion",
  "cudarc",
  "xlog-core",

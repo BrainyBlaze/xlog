@@ -16,6 +16,7 @@ use xlog_solve::{GpuCdclConfig, GpuCnf};
 use crate::compilation::gpu_cache::{GpuCircuitCache, GpuCircuitCacheHandle};
 use crate::gpu::GpuXgcf;
 
+pub mod disk_cache;
 pub mod gpu_cache;
 pub mod gpu_cnf;
 pub mod gpu_d4;

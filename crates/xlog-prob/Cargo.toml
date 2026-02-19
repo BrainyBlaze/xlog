@@ -11,6 +11,7 @@ xlog-cuda = { path = "../xlog-cuda" }
 xlog-runtime = { path = "../xlog-runtime" }
 xlog-solve = { path = "../xlog-solve" }
 cudarc = { workspace = true }
+bytemuck = "1"
 
 [dev-dependencies]
 criterion = "0.5"
