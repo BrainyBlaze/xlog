@@ -47,48 +47,62 @@ fn detect_compute_capability(device: &Arc<CudaDevice>) -> Result<u32> {
 
 /// Resolve a kernel module to a file path, preferring cubin over portable PTX.
 ///
-/// Search order:
+/// Search order (first match wins):
 ///   1. `XLOG_CUBIN_DIR/{name}.sm_{cc}.cubin`
-///   2. `OUT_DIR/{name}.sm_{cc}.cubin`
-///   3. `XLOG_CUBIN_DIR/{name}.portable.ptx`
-///   4. `OUT_DIR/{name}.portable.ptx`
+///   2. `<exe_dir>/kernels/{name}.sm_{cc}.cubin`   (packaged installs)
+///   3. `OUT_DIR/{name}.sm_{cc}.cubin`              (in-tree builds)
+///   4. `XLOG_CUBIN_DIR/{name}.portable.ptx`
+///   5. `<exe_dir>/kernels/{name}.portable.ptx`
+///   6. `OUT_DIR/{name}.portable.ptx`
 fn resolve_module_path(name: &str, cc: u32) -> Option<(std::path::PathBuf, bool)> {
     let cubin_dir = std::env::var("XLOG_CUBIN_DIR").ok();
+    let exe_kernels_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("kernels")));
     let out_dir = option_env!("OUT_DIR");
 
-    // 1. XLOG_CUBIN_DIR cubin
-    if let Some(dir) = &cubin_dir {
-        let p = std::path::PathBuf::from(dir).join(format!("{name}.sm_{cc}.cubin"));
-        if p.exists() {
-            return Some((p, true));
+    // Helper: collect candidate directories in priority order.
+    let dirs_for = |suffix: &str, is_cubin: bool| -> Option<(std::path::PathBuf, bool)> {
+        // XLOG_CUBIN_DIR
+        if let Some(dir) = &cubin_dir {
+            let p = std::path::PathBuf::from(dir).join(suffix);
+            if p.exists() {
+                return Some((p, is_cubin));
+            }
         }
-    }
-    // 2. OUT_DIR cubin
-    if let Some(dir) = out_dir {
-        let p = std::path::PathBuf::from(dir).join(format!("{name}.sm_{cc}.cubin"));
-        if p.exists() {
-            return Some((p, true));
+        // exe-relative kernels/
+        if let Some(dir) = &exe_kernels_dir {
+            let p = dir.join(suffix);
+            if p.exists() {
+                return Some((p, is_cubin));
+            }
         }
-    }
-    // 3. XLOG_CUBIN_DIR portable PTX
-    if let Some(dir) = &cubin_dir {
-        let p = std::path::PathBuf::from(dir).join(format!("{name}.portable.ptx"));
-        if p.exists() {
-            return Some((p, false));
+        // OUT_DIR (compile-time)
+        if let Some(dir) = out_dir {
+            let p = std::path::PathBuf::from(dir).join(suffix);
+            if p.exists() {
+                return Some((p, is_cubin));
+            }
         }
+        None
+    };
+
+    // Try cubin first, then portable PTX.
+    if let found @ Some(_) = dirs_for(&format!("{name}.sm_{cc}.cubin"), true) {
+        return found;
     }
-    // 4. OUT_DIR portable PTX
-    if let Some(dir) = out_dir {
-        let p = std::path::PathBuf::from(dir).join(format!("{name}.portable.ptx"));
-        if p.exists() {
-            return Some((p, false));
-        }
-    }
-    None
+    dirs_for(&format!("{name}.portable.ptx"), false)
 }
 
 /// Load a kernel module from file (cubin or portable PTX).
+///
+/// Asserts (in debug builds) that `name` is present in the kernel manifest,
+/// catching name/order drift between the manifest and provider load blocks.
 fn load_module_from_file(name: &str, cc: u32) -> Result<(Ptx, bool)> {
+    debug_assert!(
+        crate::kernel_manifest_data::KERNEL_CU_NAMES.contains(&name),
+        "kernel module '{name}' is not in KERNEL_CU_NAMES manifest — update kernel_manifest_data.rs"
+    );
     let (path, is_cubin) = resolve_module_path(name, cc).ok_or_else(|| {
         XlogError::Kernel(format!(
             "{name}: no cubin or portable PTX found (set XLOG_CUBIN_DIR or rebuild with nvcc)"
@@ -708,8 +722,8 @@ impl HostTransferTracker {
 impl CudaKernelProvider {
     /// Create a new CUDA kernel provider
     ///
-    /// Loads all PTX modules into the CUDA device.
-    /// The modules are compiled for sm_70 (Volta) and above.
+    /// Loads all kernel modules into the CUDA device.
+    /// Prefers cubin for the detected SM arch, falls back to portable PTX (sm_75+).
     ///
     /// # Arguments
     /// * `device` - The CUDA device to load modules into

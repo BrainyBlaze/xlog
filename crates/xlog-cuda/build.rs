@@ -53,6 +53,11 @@ fn main() {
     println!("cargo:rerun-if-env-changed=XLOG_CUBIN_ARCHS");
     println!("cargo:rerun-if-env-changed=NVCC_PATH");
 
+    // Expose OUT_DIR as DEP_XLOG_CUDA_KERNEL_DIR so downstream crates /
+    // packaging scripts (maturin, pyxlog wheel) can stage artifacts into
+    // the installed layout (e.g. <exe_dir>/kernels/).
+    println!("cargo:kernel-dir={}", out_dir.display());
+
     for name in KERNEL_CU_NAMES {
         let cu_path = kernels_dir.join(format!("{name}.cu"));
         println!("cargo:rerun-if-changed={}", cu_path.display());
