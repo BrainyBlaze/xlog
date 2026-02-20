@@ -889,9 +889,15 @@ impl GpuCircuitCache {
         handle: &mut GpuCircuitCacheHandle,
         xgcf: &GpuXgcf,
     ) -> Result<()> {
-        let num_nodes = u32::try_from(xgcf.num_nodes()).map_err(|_| {
-            XlogError::Compilation("GpuCircuitCache store: num_nodes overflow".to_string())
-        })?;
+        // Download the actual node/edge counts from device-resident metadata.
+        // xgcf.num_nodes() / num_edges() return the CAPACITY (node_cap / edge_cap),
+        // not the actual count produced by d4. Using the capacity would store garbage
+        // data beyond the actual circuit, corrupting disk cache artifacts.
+        let device = self.provider.device().inner();
+        let num_nodes_host: Vec<u32> = device
+            .dtoh_sync_copy(xgcf.num_nodes_device())
+            .map_err(|e| XlogError::Kernel(format!("dtoh meta_num_nodes: {}", e)))?;
+        let num_nodes = num_nodes_host[0];
         if num_nodes == 0 {
             return Err(XlogError::Compilation(
                 "GpuCircuitCache store: num_nodes must be > 0".to_string(),
@@ -904,9 +910,10 @@ impl GpuCircuitCache {
             )));
         }
 
-        let num_edges = u32::try_from(xgcf.num_edges()).map_err(|_| {
-            XlogError::Compilation("GpuCircuitCache store: num_edges overflow".to_string())
-        })?;
+        let num_edges_host: Vec<u32> = device
+            .dtoh_sync_copy(xgcf.num_edges_device())
+            .map_err(|e| XlogError::Kernel(format!("dtoh meta_num_edges: {}", e)))?;
+        let num_edges = num_edges_host[0];
         if num_edges > self.edge_cap {
             return Err(XlogError::Compilation(format!(
                 "GpuCircuitCache store: num_edges {} exceeds edge_cap {}",
@@ -972,7 +979,6 @@ impl GpuCircuitCache {
         handle.root = root;
         handle.max_var = max_var;
 
-        let device = self.provider.device().inner();
         let store_u8 = device
             .get_func(CACHE_MODULE, cache_kernels::CACHE_STORE_U8)
             .ok_or_else(|| XlogError::Kernel("cache_store_u8 kernel not found".to_string()))?;

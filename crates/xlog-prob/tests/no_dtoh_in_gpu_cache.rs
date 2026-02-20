@@ -4,6 +4,7 @@ use std::path::PathBuf;
 // Allowed exceptions (off hot path, run at most once per compilation):
 //   - `into_handle()` — lookup-time slot index caching
 //   - `build_artifact_from_device()` — cold-path D→H copy for disk cache serialization
+//   - `store_from_xgcf()` — cold-path D→H copy for actual node/edge counts
 #[test]
 fn no_device_to_host_reads_in_gpu_cache() {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -14,7 +15,7 @@ fn no_device_to_host_reads_in_gpu_cache() {
     let text = std::fs::read_to_string(&path).expect("read source");
 
     // Strip lines inside allowed methods (off hot path).
-    let allowed_methods = &["fn into_handle(", "fn build_artifact_from_device("];
+    let allowed_methods = &["fn into_handle(", "fn build_artifact_from_device(", "fn store_from_xgcf("];
     let filtered: String = {
         let mut inside_allowed = false;
         let mut brace_depth: i32 = 0;
