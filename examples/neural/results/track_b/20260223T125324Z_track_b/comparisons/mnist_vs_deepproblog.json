@@ -1,0 +1,10 @@
+{
+  "status": "complete",
+  "xlog_track_b": {
+    "metric_name": "heldout_addition_acc",
+    "mean": 0.1127,
+    "std": 0.0029,
+    "n": 3
+  },
+  "deepproblog_baseline_report": "docs/reports/2026-02-10-deepproblog-baseline-gpu-sequential.md"
+}

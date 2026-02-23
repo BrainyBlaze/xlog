@@ -1,0 +1,5 @@
+{
+  "available": false,
+  "reason": "scallopy/scallop not installed in environment",
+  "deferred_to": "post-merge"
+}

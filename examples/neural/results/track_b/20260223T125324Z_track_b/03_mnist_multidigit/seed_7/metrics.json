@@ -1,0 +1,65 @@
+{
+  "track": "B",
+  "run_id": "20260223T125324Z_track_b",
+  "example": "03_mnist_multidigit",
+  "seed": 7,
+  "status": "ok",
+  "exit_code": 0,
+  "duration_sec": 59.4,
+  "command": "/home/dev/projects/xlog/.venv/bin/python examples/neural/03_mnist_multidigit/train.py --mode dev --epochs 12 --batch-size 32 --lr 1e-3 --seed 7 --eval-ratio 0.2 --metrics-path /home/dev/projects/xlog/.worktrees/v0.4.0-alpha-integrated/examples/neural/results/track_b/20260223T125324Z_track_b/03_mnist_multidigit/seed_7/metrics.json",
+  "metric": {
+    "name": "eval_joint_proxy",
+    "value": 0.5,
+    "threshold": null
+  },
+  "dataset": {
+    "manifest_path": "examples/neural/03_mnist_multidigit/dataset.json",
+    "manifest_sha256": "e887a787f6abae140e38e508af7aefc16e60dde2a233e4225c9aa7d49b975946",
+    "completeness": "provisional"
+  },
+  "environment": {
+    "python": "3.10.12",
+    "torch": "2.10.0+cu128",
+    "pyxlog": "0.4.0",
+    "gpu_name": "NVIDIA RTX PRO 3000 Blackwell Generation Laptop GPU",
+    "driver": "591.59",
+    "cuda_visible": true
+  },
+  "git": {
+    "branch": "v0.4.0-alpha-integrated",
+    "commit": "fdfd7ca6129023d6e1ace376d604ca3477434640"
+  },
+  "warmup_sec": 0.0,
+  "total_train_sec": 53.587,
+  "steady_epoch_sec_mean": 4.477,
+  "compile_api_sec": 0.011,
+  "per_query_ms": 1.362,
+  "epoch_sec": [
+    4.337,
+    3.98,
+    3.798,
+    3.831,
+    5.017,
+    5.601,
+    4.73,
+    4.12,
+    4.357,
+    4.524,
+    4.53,
+    4.762
+  ],
+  "first_epoch_sec": 4.337,
+  "schema_gate": {
+    "passed": true,
+    "missing_keys": [],
+    "frozen_keys": [
+      "compile_api_sec",
+      "epoch_sec",
+      "first_epoch_sec",
+      "per_query_ms",
+      "steady_epoch_sec_mean",
+      "total_train_sec",
+      "warmup_sec"
+    ]
+  }
+}
