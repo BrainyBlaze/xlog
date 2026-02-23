@@ -1,0 +1,96 @@
+{
+  "track": "B",
+  "run_id": "20260223T103756Z_track_b",
+  "example": "01_minimal",
+  "seed": 123,
+  "status": "ok",
+  "exit_code": 0,
+  "duration_sec": 12.17,
+  "command": "/home/dev/projects/xlog/.venv/bin/python examples/neural/01_minimal/train.py --engine xlog --epochs 5 --batch-size 64 --seed 123 --train-limit 512 --data-path examples/neural/01_minimal/data/mnist --save-path /home/dev/projects/xlog/.worktrees/v0.4.0-alpha-integrated/examples/neural/results/track_b/20260223T103756Z_track_b/01_minimal/seed_123/mnist_net.pt --metrics-path /home/dev/projects/xlog/.worktrees/v0.4.0-alpha-integrated/examples/neural/results/track_b/20260223T103756Z_track_b/01_minimal/seed_123/metrics.json",
+  "metric": {
+    "name": "heldout_addition_acc",
+    "value": 0.1116,
+    "threshold": null
+  },
+  "dataset": {
+    "manifest_path": "examples/neural/01_minimal/dataset.json",
+    "manifest_sha256": "9e1d51d43a917b395da4fd339f82582c5ac97420fe14f5113906b74910390f3e",
+    "completeness": "provisional"
+  },
+  "environment": {
+    "python": "3.10.12",
+    "torch": "2.10.0+cu128",
+    "pyxlog": "0.4.0",
+    "gpu_name": "NVIDIA RTX PRO 3000 Blackwell Generation Laptop GPU",
+    "driver": "591.59",
+    "cuda_visible": true
+  },
+  "git": {
+    "branch": "v0.4.0-alpha-integrated",
+    "commit": "442b7f2612a95640baf37b7fccfe3324c2e48787"
+  },
+  "steady_epoch_sec_mean": 0.308,
+  "warmup_sec": 0.474,
+  "first_epoch_sec": 0.781,
+  "per_query_ms": 1.572,
+  "total_train_sec": 2.012,
+  "epoch_sec": [
+    0.781,
+    0.302,
+    0.316,
+    0.297,
+    0.315
+  ],
+  "compile_api_sec": 0.009,
+  "warmup_breakdown": {
+    "ptx": {
+      "total_sec": 0.007924471999999998,
+      "cubin_loaded": 19,
+      "ptx_fallback": 0,
+      "per_module_sec": {
+        "join": 0.000683022,
+        "dedup": 0.000219943,
+        "groupby": 0.000193513,
+        "scan": 0.000386592,
+        "sort": 0.000314678,
+        "filter": 0.000467589,
+        "set_ops": 0.000612634,
+        "pack": 0.000195296,
+        "pir": 0.000361715,
+        "cnf": 0.000479188,
+        "cache": 0.000272849,
+        "weights": 0.000475951,
+        "circuit": 0.000856386,
+        "mc_sample": 0.000480713,
+        "mc_eval": 0.00010677,
+        "arith": 0.000316065,
+        "sat": 0.000448674,
+        "d4": 0.000624957,
+        "neural": 0.000427937
+      }
+    },
+    "circuit": {
+      "gpu_cache_hit": false,
+      "disk_cache_hit": true,
+      "d4_compile_sec": 0.0,
+      "verify_sec": 0.0,
+      "smooth_sec": 0.0,
+      "cache_store_sec": 0.0,
+      "free_var_mask_sec": 0.0,
+      "cnf_hash_sec": 0.000493672
+    }
+  },
+  "schema_gate": {
+    "passed": true,
+    "missing_keys": [],
+    "frozen_keys": [
+      "compile_api_sec",
+      "epoch_sec",
+      "first_epoch_sec",
+      "per_query_ms",
+      "steady_epoch_sec_mean",
+      "total_train_sec",
+      "warmup_sec"
+    ]
+  }
+}

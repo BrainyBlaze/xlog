@@ -1,0 +1,69 @@
+{
+  "track": "B",
+  "run_id": "20260223T103756Z_track_b",
+  "hardware": "NVIDIA RTX PRO 3000 Blackwell Generation Laptop GPU",
+  "seed_policy": {
+    "default": [
+      7,
+      42,
+      123
+    ]
+  },
+  "examples": {
+    "01_minimal": {
+      "metric_name": "heldout_addition_acc",
+      "n": 3,
+      "mean": 0.1193,
+      "std": 0.0113,
+      "min": 0.111,
+      "max": 0.1352
+    },
+    "02_coins": {
+      "metric_name": "test_acc",
+      "n": 3,
+      "mean": 0.4167,
+      "std": 0.1179,
+      "min": 0.25,
+      "max": 0.5
+    },
+    "03_mnist_multidigit": {
+      "metric_name": "eval_joint_proxy",
+      "n": 3,
+      "mean": 0.4972,
+      "std": 0.0116,
+      "min": 0.4817,
+      "max": 0.5098
+    },
+    "04_hwf": {
+      "metric_name": "eval_acc",
+      "n": 3,
+      "mean": 0.8667,
+      "std": 0.0189,
+      "min": 0.84,
+      "max": 0.88
+    },
+    "05_poker": {
+      "metric_name": "eval_joint_proxy",
+      "n": 3,
+      "mean": 0.1769,
+      "std": 0.0103,
+      "min": 0.1684,
+      "max": 0.1913
+    },
+    "06_clutrr": {
+      "metric_name": "eval_acc",
+      "n": 3,
+      "mean": 0.6908,
+      "std": 0.0071,
+      "min": 0.6821,
+      "max": 0.6994
+    }
+  },
+  "gates": {
+    "schema_gate_all_pass": true
+  },
+  "handoff_flags": {
+    "scallop_comparison_complete": false,
+    "dataset_finalized": false
+  }
+}

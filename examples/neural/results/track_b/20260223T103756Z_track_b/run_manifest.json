@@ -1,0 +1,33 @@
+{
+  "track": "B",
+  "run_id": "20260223T103756Z_track_b",
+  "timestamp": "2026-02-23T10:37:59.268272+00:00",
+  "seed_policy": {
+    "default": [
+      7,
+      42,
+      123
+    ]
+  },
+  "examples": [
+    "01_minimal",
+    "02_coins",
+    "03_mnist_multidigit",
+    "04_hwf",
+    "05_poker",
+    "06_clutrr"
+  ],
+  "total_runs": 18,
+  "environment": {
+    "python": "3.10.12",
+    "torch": "2.10.0+cu128",
+    "pyxlog": "0.4.0",
+    "gpu_name": "NVIDIA RTX PRO 3000 Blackwell Generation Laptop GPU",
+    "driver": "591.59",
+    "cuda_visible": true
+  },
+  "git": {
+    "branch": "v0.4.0-alpha-integrated",
+    "commit": "442b7f2612a95640baf37b7fccfe3324c2e48787"
+  }
+}
