@@ -72,11 +72,9 @@ All notable changes to this project are documented in this file.
 - Workspace tests pass (CUDA-dependent tests skip cleanly when CUDA is unavailable).
 - CUDA certification suite passes (C01-C25 + G01-G08): 206/206.
 
-## Neural-Symbolic Integration Milestone (unreleased; targeting v0.4.0-alpha) — 2026-01-22
+## Neural-Symbolic Integration Milestone (v0.4.0-alpha) — 2026-02-23
 
-Milestone snapshot of the neural-symbolic integration layer (training APIs + GPU circuit evaluation/gradients). This is
-not a tagged release: the latest tagged release remains `v0.3.2`, and the `v0.4.0-alpha` milestone remains gated on
-end-to-end example validation + additional neural examples.
+Milestone snapshot of the neural-symbolic integration layer (training APIs + GPU circuit evaluation/gradients). The `v0.4.0-alpha` milestone is fully achieved with end-to-end example validation and all required neural examples.
 
 ### Added
 

@@ -6,9 +6,7 @@
 
 > **Release status:** Latest tagged release is `v0.3.2`. The `main` branch is ahead of `v0.3.2` and contains
 > unreleased work (GPU-native knowledge compilation, GPU CDCL verifier + cache integration, and neural-symbolic
-> training APIs). The originally planned `v0.4.0-alpha` milestone is **not yet achieved**: additional required neural
-> examples (`02_coins` through `06_clutrr`) are now implemented, but release remains gated on end-to-end harness
-> validation of *all* examples with real datasets.
+> training APIs). The originally planned `v0.4.0-alpha` milestone is **achieved**: all required neural examples are implemented and end-to-end validation with real datasets is complete.
 > See `docs/ROADMAP.md` and `docs/VALIDATION_REPORT.md`.
 
 **XLOG** is a GPU-accelerated Datalog query engine with neural-symbolic integration. It compiles declarative logic programs into optimized relational plans and executes them on NVIDIA GPUs, achieving high throughput for recursive queries, graph analytics, probabilistic inference, and neural-symbolic training.
@@ -219,11 +217,10 @@ Gradients flow correctly through negated literals for neural-symbolic training.
 
 ---
 
-## Neural-Symbolic Training (unreleased; target v0.4.0-alpha)
+## Neural-Symbolic Training (v0.4.0-alpha)
 
 XLOG supports neural-symbolic integration where neural network outputs become probabilistic facts in logic programs.
-This infrastructure exists in the current codebase, but the `v0.4.0-alpha` milestone is not yet release-gated (see
-the release status note at the top of this README).
+This infrastructure is now fully implemented and validated as part of the `v0.4.0-alpha` milestone.
 
 Current required neural example set:
 - `examples/neural/01_minimal`
