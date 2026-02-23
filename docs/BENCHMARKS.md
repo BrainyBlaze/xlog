@@ -240,10 +240,10 @@ Measured on development hardware with `01_minimal` (MNIST addition, 512 images, 
 
 | Metric | Value | Notes |
 |--------|-------|-------|
-| `compile_api_sec` | 0.013 s | xlog-prob circuit compilation API |
-| `first_epoch_sec` | ~78 s | Includes JIT kernel compilation + CUDA warmup |
-| `steady_epoch_sec_mean` | ~2.9 s | Epochs 2-5 after warmup |
-| `per_query_ms` | ~70 ms | Per-query forward+backward through circuit |
+| `PTX JIT \(cold\)` | 0.02 s | Cubin loading (1750x speedup from ~35s) |
+| `first_epoch_sec` | ~75 s | Cold-start (d4 compile + verify), warm-starts drop to 0.26s |
+| `steady_epoch_sec_mean` | ~0.25 s | Epochs 2-5 after warmup (Batched evaluation) |
+| `per_query_ms` | ~1.0 ms | Per-query forward+backward through circuit |
 | Cache speedup | 2.74x | Circuit caching vs no caching (95% CI: [2.29, 3.18]) |
 
 Evidence: `examples/neural/results/evidence/cache_ablation_20260218.json`

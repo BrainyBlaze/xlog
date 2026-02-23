@@ -1,11 +1,10 @@
 # XLOG Development Roadmap
 
-> **Last Updated:** February 3, 2026
+> **Last Updated:** February 23, 2026
 > **Current Version:** v0.3.2 (Released)
-> **Next Version:** v0.4.0-alpha (Unreleased) — Neural-symbolic milestone
-> **Status:** `main` is ahead of `v0.3.2` (unreleased): GPU-native exact path (GPU D4 + GPU CDCL verifier + cache) and
-> neural-symbolic training APIs exist in code. The `v0.4.0-alpha` milestone is **not yet achieved**: it remains gated
-> on end-to-end validation of *all* examples and additional neural examples beyond `examples/neural/01_minimal`.
+> **Current Version:** v0.4.0-alpha (Neural-symbolic milestone)
+> **Status:** `main` is ahead of `v0.3.2` (v0.4.0-alpha milestone achieved): GPU-native exact path (GPU D4 + GPU CDCL verifier + cache) and
+> neural-symbolic training APIs exist in code. The `v0.4.0-alpha` milestone is **achieved**: end-to-end validation of all examples and additional neural examples have been completed.
 
 ---
 
@@ -329,10 +328,10 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 
 ## Neural-Symbolic Integration (`xlog-neural`) — Phase 5 / v0.4.0
 
-### Implemented ✅ (unreleased; targeting v0.4.0-alpha)
+### Implemented ✅ (v0.4.0-alpha)
 
 **Release gate (v0.4.0-alpha):**
-- [ ] Validate all examples in `examples/` end-to-end (CLI + Python where applicable) via `scripts/validate_examples.py`
+- [x] Validate all examples in `examples/` end-to-end (CLI + Python where applicable) via `scripts/validate_examples.py`
 - [x] Add additional neural examples beyond `examples/neural/01_minimal` (Coins, Poker, HWF, CLUTRR, etc.)
 
 **Neural Predicates:**
@@ -473,7 +472,7 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 - [x] Uncertainty metadata for Monte Carlo results
 - [x] `dlpack_roundtrip()` helper for interop validation
 
-### Implemented ✅ (unreleased; targeting v0.4.0-alpha neural-symbolic training)
+### Implemented ✅ (v0.4.0-alpha neural-symbolic training)
 
 - [x] `register_network(name, module, optimizer, scheduler)` — PyTorch network registration
 - [x] `add_tensor_source(name, tensor)` — external data registration
@@ -591,12 +590,12 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 
 | Version | Status | Key Features |
 |---------|--------|--------------|
-| Unreleased (main) | Unreleased | GPU-native exact path (GPU D4 + GPU CDCL verifier + cache), device-only MC counts, Arrow C Device export, neural-symbolic training APIs |
+| v0.4.0-alpha (main) | Achieved | GPU-native exact path (GPU D4 + GPU CDCL verifier + cache), device-only MC counts, Arrow C Device export, neural-symbolic training APIs |
 | v0.1.0 | Released | Deterministic Datalog, GPU joins/aggregations, basic CLI |
 | v0.2.0 | Released | Probabilistic reasoning (exact + MC), Python bindings, GPU-resident execution |
 | v0.3.1 | Released | Float predicates (IEEE 754 total ordering), benchmarks, `--stats` flag, fuzz testing, property-based testing |
 | v0.3.2 | Released | Module system, UDFs, reversible symbols, showcase examples, count→u64 fix |
-| v0.4.0-alpha | Planned | Neural predicates (`nn/4`) + training milestone (release-gated on full example validation with real datasets) |
+| v0.4.0-alpha | Implemented | Neural predicates (`nn/4`) + training milestone (release-gated on full example validation with real datasets) |
 | v0.4.0-beta | Planned | Term embeddings and extended neural-symbolic training controls |
 | v0.4.0-rc | Planned | Lists, meta-predicates, semantic loss functions |
 | v0.4.0 | Planned | Full neural-symbolic feature set, production-ready training |

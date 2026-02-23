@@ -267,7 +267,7 @@ XLOG builds on established research in GPU-accelerated databases and probabilist
 | **[VFLog](https://arxiv.org/abs/2501.13051)** | Column-oriented GPU Datalog runtime. Demonstrates 200× gains over CPU column engines. |
 | **[mnmgDatalog](https://hpcrl.github.io/ICS2025-webpage/program/Proceedings_ICS25/ics25-71.pdf)** | Multi-node multi-GPU Datalog. Radix-hash partitioning, GPU-aware all-to-all. |
 | **[ProbLog](https://dtai.cs.kuleuven.be/problog/)** | Knowledge compilation approach to probabilistic logic. Compile-once evaluate-many pattern. |
-| **Neural-symbolic AI** | Neural predicates integrated with probabilistic logic. End-to-end differentiable inference. Implemented in `main` (unreleased; targeting v0.4.0-alpha). |
+| **Neural-symbolic AI** | Neural predicates integrated with probabilistic logic. End-to-end differentiable inference. Implemented in v0.4.0-alpha. |
 | **[D4](https://www.ijcai.org/proceedings/2017/0093.pdf)** | State-of-the-art Decision-DNNF compiler for weighted model counting. |
 | **[eclingo](https://arxiv.org/abs/2008.02018)** | Epistemic logic solver implementing G91 semantics via guess-and-check. |
 | **[FAEEL](https://arxiv.org/abs/1907.09247)** | Founded Autoepistemic Equilibrium Logic. Avoids self-supported world views. |
@@ -306,7 +306,7 @@ xlog/
 │   ├── xlog-cuda/       # CUDA provider, memory management, interop (Arrow IPC/C Data, DLPack)
 │   ├── xlog-stats/      # Runtime statistics (optimizer feedback + adaptive indexing)
 │   ├── xlog-prob/       # Probabilistic tier (exact inference + Monte Carlo)
-│   ├── xlog-neural/     # Neural-symbolic integration (unreleased; targeting v0.4.0-alpha)
+│   ├── xlog-neural/     # Neural-symbolic integration (v0.4.0-alpha)
 │   ├── xlog-solve/      # Solver services (SAT/MaxSAT)
 │   ├── xlog-gpu/        # High-level GPU API (Rust)
 │   ├── xlog-cli/        # CLI binary (deterministic + probabilistic execution)
@@ -349,7 +349,7 @@ xlog-cuda-tests ─────────────────────�
 | `xlog-cuda` | `CudaKernelProvider`, `GpuMemoryManager`, `CudaBuffer`/`CudaColumn`, PTX embedding, Arrow IPC/C Data + DLPack interop |
 | `xlog-stats` | `StatsManager` + `StatsSnapshot` (compiler feedback + runtime tracking) |
 | `xlog-prob` | Probabilistic tier: provenance → CNF → GPU D4 → XGCF; exact inference + Monte Carlo sampling + circuit caching; includes GPU-native PIR→CNF encoder and GPU D4/CDCL compilation utilities |
-| `xlog-neural` | Neural-symbolic integration: `NetworkRegistry`, `NetworkHandle`, `TensorSourceRegistry`, `NeuralBridge` (unreleased; targeting v0.4.0-alpha) |
+| `xlog-neural` | Neural-symbolic integration: `NetworkRegistry`, `NetworkHandle`, `TensorSourceRegistry`, `NeuralBridge` (v0.4.0-alpha) |
 | `xlog-solve` | Solver services: GPU CDCL verifier (complete SAT/UNSAT, on-GPU validation) + CLS SAT/MaxSAT (heuristic) |
 | `xlog-gpu` | High-level GPU API: deterministic execution + input/output buffers for integration layers |
 | `xlog-cli` | `xlog` CLI for deterministic and probabilistic execution with Arrow IPC I/O |
@@ -1046,7 +1046,7 @@ print(prob)
 # Optional host read for a single scalar:
 print(float(prob[0].item()))
 
-# Neural-symbolic training (unreleased; targeting v0.4.0-alpha)
+# Neural-symbolic training (v0.4.0-alpha)
 program = pyxlog.Program.compile("""
     nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
     addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
