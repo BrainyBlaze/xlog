@@ -127,3 +127,53 @@ fn test_extract_nonzero_empty_mask() {
 
     assert!(result.is_empty());
 }
+
+// T2.4: ILP module loads successfully
+#[test]
+fn test_ilp_module_loads() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+    use xlog_cuda::provider::{ILP_MODULE, ilp_kernels};
+    let func = provider.device().inner().get_func(
+        ILP_MODULE,
+        ilp_kernels::EXTRACT_NONZERO_INDICES,
+    );
+    assert!(func.is_some(), "extract_nonzero_indices kernel must be loadable");
+}
+
+// T2.2: Multi-element extraction
+#[test]
+fn test_extract_nonzero_multiple_active() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    let n = 3;
+    let total = n * n * n;
+    let mut hard = vec![0.0f32; total];
+    let mut soft = vec![0.0f32; total];
+
+    // Activate 3 entries with distinct priorities
+    // (0,1,2) at flat 5, priority 0.9
+    hard[5] = 1.0; soft[5] = 0.9;
+    // (1,0,1) at flat 10, priority 0.5
+    hard[10] = 1.0; soft[10] = 0.5;
+    // (2,2,0) at flat 24, priority 0.8
+    hard[24] = 1.0; soft[24] = 0.8;
+
+    let hard_buf = make_mask_buffer(&provider, &hard);
+    let soft_buf = make_mask_buffer(&provider, &soft);
+
+    let result = provider
+        .extract_active_rule_indices(&hard_buf, &soft_buf, n, 32)
+        .expect("kernel launch");
+
+    assert_eq!(result.len(), 3);
+    // Sorted by priority descending: (0,1,2)=0.9, (2,2,0)=0.8, (1,0,1)=0.5
+    assert_eq!(result[0], (0, 1, 2));
+    assert_eq!(result[1], (2, 2, 0));
+    assert_eq!(result[2], (1, 0, 1));
+}

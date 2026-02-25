@@ -345,3 +345,112 @@ fn test_tmj_identity_mask_correct_join() {
     // So we expect at least 1 row
     assert!(entry.num_rows >= 1, "Join should produce at least 1 row");
 }
+
+// T3.4: Tag metadata matches active rules
+#[test]
+fn test_tmj_tag_metadata_correct() {
+    let Some((provider, mut compiler)) = setup() else { return; };
+
+    let input = r#"
+        edge(1, 2).
+        edge(2, 3).
+        learnable(W) :: reach(X, Y) :- b1(X, Z), b2(Z, Y).
+    "#;
+    let ast = parse_program(input).unwrap();
+    let plan = compiler.compile_program(&ast).unwrap();
+    let mut executor = Executor::new(provider.clone());
+    setup_executor_with_facts(&provider, &compiler, &ast, &mut executor);
+
+    let mut rel_index: Vec<(RelId, String)> = compiler
+        .rel_ids().iter()
+        .map(|(name, id)| (*id, name.clone())).collect();
+    rel_index.sort_by_key(|(id, _)| id.0);
+    let n = rel_index.len();
+
+    let edge_idx = rel_index.iter().position(|(_, name)| name == "edge").unwrap();
+    let reach_idx = rel_index.iter().position(|(_, name)| name == "reach").unwrap();
+
+    let total = n * n * n;
+    let mut hard_data = vec![0.0f32; total];
+    let mut soft_data = vec![0.0f32; total];
+    let flat_idx = edge_idx * n * n + edge_idx * n + reach_idx;
+    hard_data[flat_idx] = 1.0;
+    soft_data[flat_idx] = 0.95;
+
+    let schema_1d = Schema::new(vec![("c0".to_string(), ScalarType::F32)]);
+    let hard_buf = provider.create_buffer_from_slices(
+        &[bytemuck::cast_slice(&hard_data)], schema_1d.clone()).unwrap();
+    let soft_buf = provider.create_buffer_from_slices(
+        &[bytemuck::cast_slice(&soft_data)], schema_1d).unwrap();
+    executor.ilp_registry_mut().insert_mask("W".to_string(), hard_buf, soft_buf, n);
+
+    executor.execute_plan(&plan).unwrap();
+
+    let tagged = executor.ilp_last_result().unwrap();
+    assert_eq!(tagged.entries.len(), 1);
+    let e = &tagged.entries[0];
+    assert_eq!(e.i as usize, edge_idx, "Tag i should be edge index");
+    assert_eq!(e.j as usize, edge_idx, "Tag j should be edge index");
+    assert_eq!(e.k as usize, reach_idx, "Tag k should be reach index");
+    assert!(e.num_rows > 0, "Tag num_rows should be positive");
+}
+
+// T3.7: Diff against existing facts — only new facts added
+#[test]
+fn test_tmj_diff_no_duplicate_facts() {
+    let Some((provider, mut compiler)) = setup() else { return; };
+
+    let input = r#"
+        edge(1, 2).
+        edge(2, 3).
+        learnable(W) :: reach(X, Y) :- b1(X, Z), b2(Z, Y).
+    "#;
+    let ast = parse_program(input).unwrap();
+    let plan = compiler.compile_program(&ast).unwrap();
+    let mut executor = Executor::new(provider.clone());
+    setup_executor_with_facts(&provider, &compiler, &ast, &mut executor);
+
+    let mut rel_index: Vec<(RelId, String)> = compiler
+        .rel_ids().iter()
+        .map(|(name, id)| (*id, name.clone())).collect();
+    rel_index.sort_by_key(|(id, _)| id.0);
+    let n = rel_index.len();
+
+    let edge_idx = rel_index.iter().position(|(_, name)| name == "edge").unwrap();
+    let reach_idx = rel_index.iter().position(|(_, name)| name == "reach").unwrap();
+
+    let total = n * n * n;
+    let mut hard_data = vec![0.0f32; total];
+    let mut soft_data = vec![0.0f32; total];
+    hard_data[edge_idx * n * n + edge_idx * n + reach_idx] = 1.0;
+    soft_data[edge_idx * n * n + edge_idx * n + reach_idx] = 0.95;
+
+    let schema_1d = Schema::new(vec![("c0".to_string(), ScalarType::F32)]);
+
+    // First execution
+    let h1 = provider.create_buffer_from_slices(
+        &[bytemuck::cast_slice(&hard_data)], schema_1d.clone()).unwrap();
+    let s1 = provider.create_buffer_from_slices(
+        &[bytemuck::cast_slice(&soft_data)], schema_1d.clone()).unwrap();
+    executor.ilp_registry_mut().insert_mask("W".to_string(), h1, s1, n);
+    executor.execute_plan(&plan).unwrap();
+
+    let reach_rows_1 = executor.store().get("reach")
+        .map(|b| read_device_row_count(&provider, b).unwrap())
+        .unwrap_or(0);
+
+    // Second execution with same mask
+    let h2 = provider.create_buffer_from_slices(
+        &[bytemuck::cast_slice(&hard_data)], schema_1d.clone()).unwrap();
+    let s2 = provider.create_buffer_from_slices(
+        &[bytemuck::cast_slice(&soft_data)], schema_1d).unwrap();
+    executor.ilp_registry_mut().insert_mask("W".to_string(), h2, s2, n);
+    executor.execute_plan(&plan).unwrap();
+
+    let reach_rows_2 = executor.store().get("reach")
+        .map(|b| read_device_row_count(&provider, b).unwrap())
+        .unwrap_or(0);
+
+    assert_eq!(reach_rows_1, reach_rows_2,
+        "Re-execution with same mask must not duplicate facts (diff_gpu)");
+}

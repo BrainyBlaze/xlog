@@ -8,6 +8,8 @@ pyxlog = pytest.importorskip("pyxlog")
 if not torch.cuda.is_available():
     pytest.skip("CUDA is required for ILP tests", allow_module_level=True)
 
+import torch.nn.functional as F
+
 
 def test_ilp_compile_and_schema():
     """Test basic ILP compilation returns correct schema."""
@@ -105,3 +107,103 @@ def test_ilp_gradient_flow():
     loss.backward()
     assert W.grad is not None, "Gradients must flow through ST-Gumbel-Softmax"
     assert W.grad.abs().sum().item() > 0, "Non-zero gradient expected (T4.1)"
+
+
+def test_ilp_missed_positive_penalty():
+    """T4.5: Missed-positive penalty produces non-zero gradient (RD-21)."""
+    source = """
+        edge(1, 2).
+        edge(2, 3).
+        learnable(W_mask) :: reach(X, Y) :- body1(X, Z), body2(Z, Y).
+    """
+    prog = pyxlog.IlpProgramFactory.compile(source, device=0, memory_mb=512)
+    n = prog.ilp_schema_size()
+    rel_names = prog.ilp_relation_names()
+
+    W = torch.randn((n, n, n), requires_grad=True, device='cuda')
+
+    M_soft = F.gumbel_softmax(W, tau=0.5, hard=False, dim=-1)
+    index = M_soft.max(dim=-1, keepdim=True)[1]
+    M_hard = torch.zeros_like(M_soft).scatter_(-1, index, 1.0)
+
+    prog.set_rule_mask("W_mask",
+                        M_hard.detach().contiguous().view(-1),
+                        M_soft.detach().contiguous().view(-1), n)
+    prog.evaluate()
+
+    # Ask for a fact that almost certainly won't be derived
+    contributing = prog.tagged_entries_containing_fact("reach", [99, 99])
+    assert len(contributing) == 0, "Sanity: this fact shouldn't be derived"
+
+    # RD-21: Differentiable missed-positive penalty
+    k_idx = rel_names.index("reach")
+    penalty = -M_soft[:, :, k_idx].sum() / (n * n)
+    penalty.backward()
+    assert W.grad is not None, "Missed-positive penalty must produce gradients"
+    assert W.grad.abs().sum().item() > 0, "Non-zero gradient from penalty (T4.5)"
+
+
+def test_ilp_temperature_annealing():
+    """T4.4: Temperature annealing produces increasingly discrete M."""
+    n = 4
+    W = torch.randn((n, n, n), device='cuda')
+
+    discreteness = []
+    for tau in [2.0, 1.0, 0.5, 0.1]:
+        M_soft = F.gumbel_softmax(W, tau=tau, hard=False, dim=-1)
+        max_vals = M_soft.max(dim=-1)[0]
+        discreteness.append(max_vals.mean().item())
+
+    for i in range(len(discreteness) - 1):
+        assert discreteness[i] <= discreteness[i + 1] + 0.05, \
+            f"Temperature annealing: tau decrease should increase discreteness"
+
+
+def test_ilp_predecessor_benchmark_smoke():
+    """T5.1 smoke: Predecessor benchmark setup compiles and runs 5 steps."""
+    source = """
+        zero(0). succ(0, 1). succ(1, 2). succ(2, 3). succ(3, 4).
+        learnable(W_mask) :: pred(X, Y) :- body1(X, Z), body2(Z, Y).
+    """
+    prog = pyxlog.IlpProgramFactory.compile(source, device=0, memory_mb=512)
+    n = prog.ilp_schema_size()
+
+    W = torch.randn((n, n, n), requires_grad=True, device='cuda')
+    optimizer = torch.optim.Adam([W], lr=0.1)
+
+    for step in range(5):
+        optimizer.zero_grad()
+        M_soft = F.gumbel_softmax(W, tau=0.5, hard=False, dim=-1)
+        index = M_soft.max(dim=-1, keepdim=True)[1]
+        M_hard = torch.zeros_like(M_soft).scatter_(-1, index, 1.0)
+
+        prog.set_rule_mask("W_mask",
+                            M_hard.detach().contiguous().view(-1),
+                            M_soft.detach().contiguous().view(-1), n)
+        prog.evaluate()
+
+        results = prog.get_tagged_results()
+        loss = torch.tensor(0.0, device='cuda')
+        for (i, j, k, nr) in results:
+            if nr > 0:
+                loss = loss + M_soft[i, j, k]
+        if loss.requires_grad:
+            loss.backward()
+            optimizer.step()
+
+    assert True  # Smoke: completed without crash
+
+
+def test_ilp_commit_rule():
+    """T5.5 + T5.6: Rule commit removes learnable, post-commit matches."""
+    source = """
+        edge(1, 2). edge(2, 3).
+        learnable(W_mask) :: reach(X, Y) :- body1(X, Z), body2(Z, Y).
+    """
+    prog = pyxlog.IlpProgramFactory.compile(source, device=0, memory_mb=512)
+
+    prog.commit_induced_rule("reach(X, Y) :- edge(X, Z), edge(Z, Y).")
+
+    prog.evaluate()
+
+    assert prog.fact_exists("reach", [1, 3]), "reach(1,3) should be derived post-commit"

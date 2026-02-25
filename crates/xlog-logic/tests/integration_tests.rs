@@ -328,5 +328,63 @@ fn test_learnable_rule_body_validation() {
     assert!(result.is_err(), "Should reject single-body learnable rule");
 }
 
+// =============================================================================
+// M1 Gap Tests — Syntax & IR
+// =============================================================================
+
+// T1.2: Parse failure on malformed learnable rule
+#[test]
+fn test_parse_learnable_malformed_fails() {
+    // Missing mask name
+    let input = "learnable() :: h(X) :- b1(X, Z), b2(Z, Y).";
+    assert!(parse_program(input).is_err());
+
+    // Missing :: separator
+    let input2 = "learnable(W) h(X,Y) :- b1(X,Z), b2(Z,Y).";
+    assert!(parse_program(input2).is_err());
+}
+
+// T1.4: referenced_relations() includes all rel_index entries
+#[test]
+fn test_tmj_referenced_relations_complete() {
+    let input = r#"
+        edge(1,2).
+        learnable(W) :: reach(X, Y) :- b1(X, Z), b2(Z, Y).
+    "#;
+    let mut compiler = Compiler::new();
+    let program = parse_program(input).unwrap();
+    let plan = compiler.compile_program(&program).unwrap();
+
+    for rule in plan.rules_by_scc.iter().flatten() {
+        if let xlog_ir::rir::RirNode::TensorMaskedJoin { ref rel_index, .. } = rule.body {
+            let collected = rule.body.referenced_relations();
+            for (rel_id, _) in rel_index {
+                assert!(
+                    collected.contains(rel_id),
+                    "referenced_relations missing RelId {:?}",
+                    rel_id
+                );
+            }
+            return;
+        }
+    }
+    panic!("No TensorMaskedJoin found in compiled plan");
+}
+
+// T1.8: Optimizer handles TensorMaskedJoin without panic
+#[test]
+fn test_optimizer_handles_tmj() {
+    let input = r#"
+        edge(1,2).
+        edge(2,3).
+        learnable(W) :: reach(X, Y) :- b1(X, Z), b2(Z, Y).
+        ?- reach(1, N).
+    "#;
+    let mut compiler = Compiler::new();
+    let program = parse_program(input).unwrap();
+    let result = compiler.compile_program(&program);
+    assert!(result.is_ok(), "Optimizer should handle TensorMaskedJoin: {:?}", result.err());
+}
+
 // Note: Full execution tests require xlog-cuda and xlog-runtime
 // which depend on CUDA hardware. These will be added in later tasks.
