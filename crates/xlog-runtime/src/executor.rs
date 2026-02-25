@@ -16,6 +16,7 @@ use xlog_ir::{
 };
 use xlog_stats::{StatsManager, StatsSnapshot};
 
+use crate::ilp_registry::{IlpRegistry, IlpTaggedResult};
 use crate::profiler::{ExecutionStats, Profiler};
 use crate::RelationStore;
 
@@ -176,6 +177,10 @@ pub struct Executor {
     config: RuntimeConfig,
     /// Performance profiler for --stats output
     profiler: Profiler,
+    /// ILP tensor mask registry
+    ilp_registry: IlpRegistry,
+    /// Last ILP tagged result metadata
+    ilp_last_result: Option<IlpTaggedResult>,
 }
 
 impl Executor {
@@ -201,6 +206,8 @@ impl Executor {
             join_index_cache: JoinIndexCache::new(max_index_cache_bytes),
             config,
             profiler: Profiler::default(),
+            ilp_registry: IlpRegistry::new(),
+            ilp_last_result: None,
         }
     }
 
@@ -235,6 +242,16 @@ impl Executor {
     /// Get a mutable reference to the relation store
     pub fn store_mut(&mut self) -> &mut RelationStore {
         &mut self.store
+    }
+
+    /// Get a mutable reference to the ILP registry (RD-35).
+    pub fn ilp_registry_mut(&mut self) -> &mut IlpRegistry {
+        &mut self.ilp_registry
+    }
+
+    /// Get the last ILP tagged result (RD-35).
+    pub fn ilp_last_result(&self) -> Option<&IlpTaggedResult> {
+        self.ilp_last_result.as_ref()
     }
 
     /// Store a relation buffer and invalidate join indices.
