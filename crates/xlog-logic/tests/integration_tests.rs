@@ -257,5 +257,42 @@ fn test_parse_learnable_rule_preserves_normal_rules() {
     assert_eq!(program.queries.len(), 1);
 }
 
+#[test]
+fn test_stratify_with_learnable_rule() {
+    let input = r#"
+        edge(1, 2).
+        edge(2, 3).
+        learnable(W) :: reach(X, Y) :- b1(X, Z), b2(Z, Y).
+    "#;
+    let program = parse_program(input).unwrap();
+    let result = stratify(&program);
+    assert!(
+        result.is_ok(),
+        "Stratification failed: {:?}",
+        result.err()
+    );
+    // Verify the learnable rule's head predicate appears in the strata
+    let strata = result.unwrap();
+    let all_preds: Vec<&str> = strata
+        .iter()
+        .flat_map(|s| s.predicates.iter().map(|p| p.as_str()))
+        .collect();
+    assert!(
+        all_preds.contains(&"reach"),
+        "Learnable rule head 'reach' should appear in strata, got: {:?}",
+        all_preds
+    );
+    assert!(
+        all_preds.contains(&"b1"),
+        "Learnable rule body 'b1' should appear in strata, got: {:?}",
+        all_preds
+    );
+    assert!(
+        all_preds.contains(&"b2"),
+        "Learnable rule body 'b2' should appear in strata, got: {:?}",
+        all_preds
+    );
+}
+
 // Note: Full execution tests require xlog-cuda and xlog-runtime
 // which depend on CUDA hardware. These will be added in later tasks.

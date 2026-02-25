@@ -76,6 +76,21 @@ pub fn build_dependency_graph(program: &Program) -> DependencyGraph {
         }
     }
 
+    // Learnable rules: head depends on body predicates.
+    // At runtime, TensorMaskedJoin dynamically selects which relations
+    // to join, but for stratification we conservatively register the
+    // template's body predicates as positive dependencies.
+    for lr in &program.learnable_rules {
+        let head = &lr.head.predicate;
+        graph.add_predicate(head.clone());
+        for body_lit in &lr.body {
+            if let Some(atom) = body_lit.atom() {
+                graph.add_predicate(atom.predicate.clone());
+                graph.add_edge(head.clone(), atom.predicate.clone(), DepType::Positive);
+            }
+        }
+    }
+
     graph
 }
 
