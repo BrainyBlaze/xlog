@@ -16,7 +16,7 @@ use xlog_ir::{
 };
 use xlog_stats::{StatsManager, StatsSnapshot};
 
-use crate::ilp_registry::{IlpRegistry, IlpTaggedResult};
+use crate::ilp_registry::{read_device_row_count, IlpRegistry, IlpTagEntry, IlpTaggedResult};
 use crate::profiler::{ExecutionStats, Profiler};
 use crate::RelationStore;
 
@@ -805,11 +805,24 @@ impl Executor {
                 // Semi-naive fixpoint iteration
                 self.execute_fixpoint(*scc_id, base, recursive, *delta_rel, *full_rel)
             }
-            RirNode::TensorMaskedJoin { .. } => {
-                Err(XlogError::Execution(
-                    "TensorMaskedJoin execution not yet implemented (Task 8)".into(),
-                ))
-            }
+            RirNode::TensorMaskedJoin {
+                mask_name,
+                schema_size,
+                left_keys,
+                right_keys,
+                rel_index,
+                head_rel_name,
+                max_active_rules,
+                ..
+            } => self.execute_tensor_masked_join(
+                mask_name,
+                *schema_size,
+                left_keys,
+                right_keys,
+                rel_index,
+                head_rel_name,
+                *max_active_rules,
+            ),
         }
     }
 
@@ -2723,6 +2736,124 @@ impl Executor {
             Self::MAX_FIXPOINT_ITERATIONS,
             scc_id
         )))
+    }
+
+    fn execute_tensor_masked_join(
+        &mut self,
+        mask_name: &str,
+        schema_size: usize,
+        left_keys: &[usize],
+        right_keys: &[usize],
+        rel_index: &[(RelId, String)],
+        head_rel_name: &str,
+        max_active_rules: usize,
+    ) -> Result<CudaBuffer> {
+        // RD-12: No-op when no mask registered. Return empty buffer with
+        // the head relation's schema (not Schema::new(vec![])) to prevent
+        // schema corruption when execute_non_recursive_scc stores the result.
+        let ilp_mask = match self.ilp_registry.get_mask(mask_name) {
+            Some(mask) => mask,
+            None => {
+                self.ilp_last_result = Some(IlpTaggedResult { entries: Vec::new() });
+                // RD-37: Fail hard if head relation missing from store.
+                let schema = self.store.get(head_rel_name)
+                    .map(|buf| buf.schema().clone())
+                    .ok_or_else(|| XlogError::Execution(format!(
+                        "TensorMaskedJoin: head relation '{}' not found in store \
+                         (was load_facts_into_store called?)", head_rel_name
+                    )))?;
+                return self.provider.create_empty_buffer(schema);
+            }
+        };
+
+        let start = self.profiler.start_op();
+
+        // 2. Extract active (i,j,k) indices via GPU kernel
+        let active_rules = self.provider.extract_active_rule_indices(
+            &ilp_mask.hard, &ilp_mask.soft,
+            schema_size, max_active_rules,
+        )?;
+
+        // 3. Dispatch hash joins, collect tag metadata
+        let mut tag_entries: Vec<IlpTagEntry> = Vec::new();
+        let mut results_by_k: HashMap<u32, Vec<CudaBuffer>> = HashMap::new();
+
+        for &(i, j, k) in &active_rules {
+            let (_, left_name) = &rel_index[i as usize];
+            let (_, right_name) = &rel_index[j as usize];
+
+            let left_buf = match self.store.get(left_name) {
+                Some(buf) => buf,
+                None => continue,
+            };
+            let right_buf = match self.store.get(right_name) {
+                Some(buf) => buf,
+                None => continue,
+            };
+
+            let joined = self.provider.hash_join_v2(
+                left_buf, right_buf,
+                left_keys, right_keys,
+                CudaJoinType::Inner,
+            )?;
+
+            // RD-22: Use public helper instead of private device_row_count
+            let num_rows = read_device_row_count(&self.provider, &joined)? as u32;
+
+            if num_rows > 0 {
+                // RD-17: Store only metadata, not CudaBuffer clones
+                tag_entries.push(IlpTagEntry { i, j, k, num_rows });
+                results_by_k.entry(k).or_default().push(joined);
+            }
+        }
+
+        // 4. Union results per target relation and store
+        for (k, buffers) in results_by_k {
+            let (_, target_name) = &rel_index[k as usize];
+
+            // Chain-union all buffers
+            let union_buf = if buffers.len() == 1 {
+                buffers.into_iter().next().unwrap()
+            } else {
+                let mut acc = self.provider.union_gpu(&buffers[0], &buffers[1])?;
+                for buf in &buffers[2..] {
+                    acc = self.provider.union_gpu(&acc, buf)?;
+                }
+                acc
+            };
+
+            // Diff against existing and merge
+            if let Some(existing) = self.store.get(target_name) {
+                let delta = self.provider.diff_gpu(&union_buf, existing)?;
+                if !delta.is_empty() {
+                    let merged = self.provider.union_gpu(existing, &delta)?;
+                    self.store_put(target_name, merged);
+                }
+            } else {
+                let key_cols: Vec<usize> = (0..union_buf.arity()).collect();
+                let deduped = self.provider.dedup(&union_buf, &key_cols)?;
+                self.store_put(target_name, deduped);
+            }
+        }
+
+        // 5. Store tag metadata
+        self.ilp_last_result = Some(IlpTaggedResult { entries: tag_entries });
+
+        if let Some(start) = start {
+            let mem = self.provider.memory().allocated_bytes();
+            self.profiler.record_op(
+                "TensorMaskedJoin", 0, active_rules.len() as u64, start, mem,
+            );
+        }
+
+        // Return empty with head schema (results routed via store).
+        let schema = self.store.get(head_rel_name)
+            .map(|buf| buf.schema().clone())
+            .ok_or_else(|| XlogError::Execution(format!(
+                "TensorMaskedJoin: head relation '{}' not found in store \
+                 (was load_facts_into_store called?)", head_rel_name
+            )))?;
+        self.provider.create_empty_buffer(schema)
     }
 
     /// Get the relation name for a RelId, creating a default name if not registered
