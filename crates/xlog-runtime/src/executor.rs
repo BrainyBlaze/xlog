@@ -2796,7 +2796,10 @@ impl Executor {
 
             // Skip arity-mismatched relations: the join keys are fixed by
             // the learnable rule template, so the mapped relation must have
-            // enough columns for every key index.
+            // enough columns for every key index. Relations with matching
+            // arity but different semantic column meanings will join without
+            // error; semantic correctness of the mask is the optimizer's
+            // responsibility (RD-37).
             let left_max_key = left_keys.iter().copied().max().unwrap_or(0);
             let right_max_key = right_keys.iter().copied().max().unwrap_or(0);
             if left_buf.arity() <= left_max_key || right_buf.arity() <= right_max_key {

@@ -159,7 +159,8 @@ pred_decl = { private_mod? ~ "pred" ~ ident ~ "(" ~ type_list? ~ ")" ~ "." }
 type_list = { type_spec ~ ("," ~ type_spec)* }
 
 // Learnable rule: parameterized by a named tensor mask
-// mask_name allows both lowercase and uppercase identifiers (e.g., w_mask or W_mask)
+// mask_name starts with ASCII_ALPHA (upper OR lower), unlike ident which
+// requires ASCII_ALPHA_LOWER. This allows W_mask, w_mask, W, etc.
 mask_name = @{ ASCII_ALPHA ~ (ASCII_ALPHANUMERIC | "_")* }
 learnable_rule = {
     "learnable" ~ "(" ~ mask_name ~ ")" ~ "::" ~ head ~ ":-" ~ body ~ "."

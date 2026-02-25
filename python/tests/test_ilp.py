@@ -8,7 +8,7 @@ pyxlog = pytest.importorskip("pyxlog")
 if not torch.cuda.is_available():
     pytest.skip("CUDA is required for ILP tests", allow_module_level=True)
 
-import torch.nn.functional as F
+F = pytest.importorskip("torch.nn.functional")
 
 
 def test_ilp_compile_and_schema():
@@ -203,6 +203,8 @@ def test_ilp_commit_rule():
     """
     prog = pyxlog.IlpProgramFactory.compile(source, device=0, memory_mb=512)
 
+    # commit_induced_rule recompiles with a concrete rule (using actual
+    # predicates like 'edge', not the learnable template names b1/b2).
     prog.commit_induced_rule("reach(X, Y) :- edge(X, Z), edge(Z, Y).")
 
     prog.evaluate()
