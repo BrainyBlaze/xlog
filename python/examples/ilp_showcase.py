@@ -397,11 +397,39 @@ STAGE_3 = StageConfig(
     retries=5,
 )
 
+STAGE_4 = StageConfig(
+    name="Arithmetic plus2",
+    source="""
+        succ(0, 1). succ(1, 2). succ(2, 3). succ(3, 4). succ(4, 5).
+        pred(1, 0). pred(2, 1). pred(3, 2). pred(4, 3). pred(5, 4).
+        learnable(W_p2) :: plus2(X, Y) :- bL(X, Z), bR(Z, Y).
+    """,
+    mask_name="W_p2",
+    positives=[
+        ("plus2", [0, 2]),
+        ("plus2", [1, 3]),
+        ("plus2", [2, 4]),
+        ("plus2", [3, 5]),
+    ],
+    negatives=[
+        ("plus2", [0, 1]),
+        ("plus2", [5, 0]),
+    ],
+    target_rule="plus2(X, Y) :- succ(X, Z), succ(Z, Y).",
+    rule_template="{H}(X, Y) :- {L}(X, Z), {R}(Z, Y).",
+    max_steps=150,
+    tau_start=2.5,
+    tau_end=0.05,
+    lr=0.15,
+    commit=True,  # THIS STAGE COMMITS THE DISCOVERED RULE
+    retries=5,
+)
+
 
 
 # -- Main ---------------------------------------------------------------------
 
-STAGES = [STAGE_1, STAGE_2, STAGE_3]
+STAGES = [STAGE_1, STAGE_2, STAGE_3, STAGE_4]
 
 if __name__ == "__main__":
     preflight_check()
