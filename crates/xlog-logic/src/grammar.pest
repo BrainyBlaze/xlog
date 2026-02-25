@@ -158,6 +158,11 @@ private_mod = { "private" }
 pred_decl = { private_mod? ~ "pred" ~ ident ~ "(" ~ type_list? ~ ")" ~ "." }
 type_list = { type_spec ~ ("," ~ type_spec)* }
 
+// Learnable rule: parameterized by a named tensor mask
+learnable_rule = {
+    "learnable" ~ "(" ~ ident ~ ")" ~ "::" ~ head ~ ":-" ~ body ~ "."
+}
+
 // Program structure
 statement = {
     func_def
@@ -166,6 +171,7 @@ statement = {
     | pred_decl
     | pragma
     | neural_pred_decl
+    | learnable_rule
     | rule_def
     | prob_fact
     | annotated_disjunction
