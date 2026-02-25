@@ -209,3 +209,51 @@ def test_ilp_commit_rule():
     prog.evaluate()
 
     assert prog.fact_exists("reach", [1, 3]), "reach(1,3) should be derived post-commit"
+
+
+def test_ilp_schema_size_mismatch_rejected():
+    """schema_size passed to set_rule_mask must match compiled schema_size."""
+    source = """
+        edge(1, 2). edge(2, 3).
+        learnable(W) :: reach(X, Y) :- b1(X, Z), b2(Z, Y).
+    """
+    prog = pyxlog.IlpProgramFactory.compile(source, device=0, memory_mb=512)
+    n = prog.ilp_schema_size()
+
+    W = torch.zeros((n, n, n), device='cuda')
+    flat = W.contiguous().view(-1)
+
+    # Correct size should work
+    prog.set_rule_mask("W", flat, flat, n)
+
+    # Wrong size should raise
+    with pytest.raises(ValueError, match="schema_size mismatch"):
+        prog.set_rule_mask("W", flat, flat, n + 1)
+
+
+def test_ilp_projected_credit_path():
+    """tagged_entries_containing_fact must use head_projection on join output."""
+    source = """
+        edge(1, 2). edge(2, 3). edge(3, 4).
+        learnable(W_mask) :: reach(X, Y) :- body1(X, Z), body2(Z, Y).
+    """
+    prog = pyxlog.IlpProgramFactory.compile(source, device=0, memory_mb=512)
+    n = prog.ilp_schema_size()
+    rel_names = prog.ilp_relation_names()
+
+    # Build a mask that maps body1→edge, body2→edge (should derive reach(1,3) etc.)
+    edge_idx = rel_names.index("edge")
+    M_hard = torch.zeros((n, n, n), device='cuda')
+    M_soft = torch.zeros((n, n, n), device='cuda')
+    M_hard[edge_idx, edge_idx, rel_names.index("reach")] = 1.0
+    M_soft[edge_idx, edge_idx, rel_names.index("reach")] = 1.0
+
+    prog.set_rule_mask("W_mask",
+                        M_hard.contiguous().view(-1),
+                        M_soft.contiguous().view(-1), n)
+    prog.evaluate()
+
+    # The credit path should find (1,3) via projected columns, not raw join
+    contributing = prog.tagged_entries_containing_fact("reach", [1, 3])
+    assert len(contributing) > 0, \
+        "Projected credit path should find reach(1,3) from edge⋈edge"

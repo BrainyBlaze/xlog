@@ -386,5 +386,33 @@ fn test_optimizer_handles_tmj() {
     assert!(result.is_ok(), "Optimizer should handle TensorMaskedJoin: {:?}", result.err());
 }
 
+// T2: Learnable head validation — unbound variable must fail
+#[test]
+fn test_learnable_head_unbound_variable_fails() {
+    let input = r#"
+        edge(1, 2).
+        learnable(W) :: reach(X, Q) :- b1(X, Z), b2(Z, Y).
+    "#;
+    let mut compiler = Compiler::new();
+    let result = compiler.compile(input);
+    assert!(result.is_err(), "Should reject head variable Q not in body");
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("not found in body"), "Error should mention unbound var: {}", err);
+}
+
+// T2: Learnable head validation — constant in head must fail
+#[test]
+fn test_learnable_head_constant_fails() {
+    let input = r#"
+        edge(1, 2).
+        learnable(W) :: reach(1, Y) :- b1(X, Z), b2(Z, Y).
+    "#;
+    let mut compiler = Compiler::new();
+    let result = compiler.compile(input);
+    assert!(result.is_err(), "Should reject constant in learnable head");
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("only variables"), "Error should mention variables-only: {}", err);
+}
+
 // Note: Full execution tests require xlog-cuda and xlog-runtime
 // which depend on CUDA hardware. These will be added in later tasks.
