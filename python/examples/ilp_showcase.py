@@ -364,10 +364,11 @@ STAGE_2 = StageConfig(
     ],
     target_rule="grandparent(X, Y) :- parent(X, Z), parent(Z, Y).",
     rule_template="{H}(X, Y) :- {L}(X, Z), {R}(Z, Y).",
-    max_steps=100,
+    max_steps=120,
     tau_start=2.0,
-    tau_end=0.1,
-    lr=0.1,
+    tau_end=0.05,
+    lr=0.15,
+    retries=5,
 )
 
 STAGE_3 = StageConfig(
@@ -390,11 +391,11 @@ STAGE_3 = StageConfig(
     ],
     target_rule="colleague(X, Y) :- worksAt(X, Z), worksAt(Y, Z).",
     rule_template="{H}(X, Y) :- {L}(X, Z), {R}(Y, Z).",
-    max_steps=120,
+    max_steps=150,
     tau_start=2.0,
     tau_end=0.05,
     lr=0.15,
-    retries=5,
+    retries=7,
 )
 
 STAGE_4 = StageConfig(
