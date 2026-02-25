@@ -195,9 +195,27 @@ def train_stage(config: StageConfig) -> tuple[str, bool, int]:
                     for rel, vals in config.positives
                 )
                 if all_derived:
+                    # Validate that the argmax rule ALONE derives all positives.
                     left, right, head = argmax
-                    rule_str = format_rule(left, right, head, config.rule_template)
-                    return rule_str, True, step + 1
+                    i_idx = rel_names.index(left)
+                    j_idx = rel_names.index(right)
+                    k_idx = rel_names.index(head)
+                    M_check = torch.zeros((n, n, n), device="cuda")
+                    M_check[i_idx, j_idx, k_idx] = 1.0
+                    flat_check = M_check.contiguous().view(-1)
+                    prog.set_rule_mask(
+                        config.mask_name, flat_check, flat_check, n,
+                    )
+                    prog.evaluate()
+                    argmax_ok = all(
+                        prog.fact_exists(rel, vals)
+                        for rel, vals in config.positives
+                    )
+                    if argmax_ok:
+                        rule_str = format_rule(left, right, head, config.rule_template)
+                        return rule_str, True, step + 1
+                    # Argmax alone doesn't work; keep training.
+                    stable_count = 0
 
     left, right, head = prev_argmax if prev_argmax else ("?", "?", "?")
     rule_str = format_rule(left, right, head, config.rule_template)
@@ -301,8 +319,55 @@ def preflight_check():
           f"CUDA={torch.version.cuda}, N_smoke={n}")
 
 
+# -- Stage Definitions --------------------------------------------------------
+
+STAGE_1 = StageConfig(
+    name="Graph Reachability",
+    source="""
+        edge(1, 2). edge(2, 3). edge(3, 4). edge(4, 5). edge(5, 6).
+        learnable(W_reach) :: reach(X, Y) :- bL(X, Z), bR(Z, Y).
+    """,
+    mask_name="W_reach",
+    positives=[
+        ("reach", [1, 3]),
+        ("reach", [2, 4]),
+        ("reach", [3, 5]),
+        ("reach", [4, 6]),
+    ],
+    negatives=[],
+    target_rule="reach(X, Y) :- edge(X, Z), edge(Z, Y).",
+    rule_template="{H}(X, Y) :- {L}(X, Z), {R}(Z, Y).",
+    max_steps=100,
+    tau_start=1.0,
+    tau_end=0.1,
+    lr=0.1,
+)
+
+
 # -- Main ---------------------------------------------------------------------
+
+STAGES = [STAGE_1]
 
 if __name__ == "__main__":
     preflight_check()
-    print("\n(Stages not yet implemented)")
+
+    results: list[tuple[str, str, str, bool, int, str]] = []
+
+    for i, stage in enumerate(STAGES, 1):
+        rule, ok, steps, tag = run_stage(stage)
+        results.append((f"Stage {i}", stage.name, rule, ok, steps, tag))
+
+    print(f"\n{'='*60}")
+    print("  XLOG dILP Showcase -- Summary")
+    print(f"{'='*60}")
+    for label, name, rule, ok, steps, tag in results:
+        suffix = f" ({tag})" if tag else ""
+        status = f"OK {steps} steps{suffix}" if ok else "FAILED"
+        print(f"  {label}: {rule:<50s} {status}")
+    print(f"{'='*60}")
+
+    if not all(ok for _, _, _, ok, _, _ in results):
+        print("\nSome stages did not converge. See output above.")
+        sys.exit(1)
+    else:
+        print("\nAll stages converged and validated successfully.")
