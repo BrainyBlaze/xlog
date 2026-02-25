@@ -4,11 +4,10 @@ import pytest
 
 torch = pytest.importorskip("torch")
 pyxlog = pytest.importorskip("pyxlog")
+F = pytest.importorskip("torch.nn.functional")
 
 if not torch.cuda.is_available():
     pytest.skip("CUDA is required for ILP tests", allow_module_level=True)
-
-F = pytest.importorskip("torch.nn.functional")
 
 
 def test_ilp_compile_and_schema():
