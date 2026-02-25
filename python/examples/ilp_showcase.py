@@ -343,10 +343,37 @@ STAGE_1 = StageConfig(
     lr=0.1,
 )
 
+STAGE_2 = StageConfig(
+    name="Family Grandparent",
+    source="""
+        parent(1, 2). parent(2, 3). parent(2, 4). parent(3, 5). parent(4, 6).
+        gender(1, 0). gender(2, 1). gender(3, 1). gender(4, 0).
+        sibling(2, 7). sibling(7, 2).
+        learnable(W_gp) :: grandparent(X, Y) :- bL(X, Z), bR(Z, Y).
+    """,
+    mask_name="W_gp",
+    positives=[
+        ("grandparent", [1, 3]),
+        ("grandparent", [1, 4]),
+        ("grandparent", [2, 5]),
+        ("grandparent", [2, 6]),
+    ],
+    negatives=[
+        ("grandparent", [1, 2]),
+        ("grandparent", [3, 1]),
+    ],
+    target_rule="grandparent(X, Y) :- parent(X, Z), parent(Z, Y).",
+    rule_template="{H}(X, Y) :- {L}(X, Z), {R}(Z, Y).",
+    max_steps=100,
+    tau_start=2.0,
+    tau_end=0.1,
+    lr=0.1,
+)
+
 
 # -- Main ---------------------------------------------------------------------
 
-STAGES = [STAGE_1]
+STAGES = [STAGE_1, STAGE_2]
 
 if __name__ == "__main__":
     preflight_check()
