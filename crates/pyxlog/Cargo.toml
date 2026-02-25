@@ -19,6 +19,8 @@ xlog-gpu = { path = "../xlog-gpu" }
 xlog-prob = { path = "../xlog-prob" }
 xlog-logic = { path = "../xlog-logic" }
 xlog-neural = { path = "../xlog-neural", features = ["python"] }
+xlog-runtime = { path = "../xlog-runtime" }
+xlog-ir = { path = "../xlog-ir" }
 
 [features]
 default = ["host-io"]

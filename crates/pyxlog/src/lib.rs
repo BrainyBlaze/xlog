@@ -26,6 +26,12 @@ use xlog_prob::neural_fast_path::{GpuWeightSlots, NeuralFastPathConfig};
 
 use std::collections::HashMap as StdHashMap;
 
+use xlog_core::RelId;
+use xlog_logic::ast::Program as AstProgram;
+use xlog_runtime::{Executor, read_device_row_count};
+use xlog_ir::{ExecutionPlan, RirNode};
+use xlog_cuda::JoinType;
+
 mod neural_registry;
 use neural_registry::{NeuralPredicateInfo, NeuralPredicateRegistry};
 
@@ -3569,6 +3575,462 @@ pub fn train_model_tensor(
     Ok(history)
 }
 
+// ---------------------------------------------------------------------------
+// ILP (Inductive Logic Programming) Python bindings
+// ---------------------------------------------------------------------------
+
+fn push_term_bytes(out: &mut Vec<u8>, term: &Term, typ: ScalarType) -> xlog_core::Result<()> {
+    use xlog_core::XlogError;
+    match (typ, term) {
+        (ScalarType::U32, Term::Integer(v)) => {
+            let v = u32::try_from(*v)
+                .map_err(|_| XlogError::Execution(format!("u32 out of range: {}", v)))?;
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        (ScalarType::U64, Term::Integer(v)) => {
+            let v = u64::try_from(*v)
+                .map_err(|_| XlogError::Execution(format!("u64 out of range: {}", v)))?;
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        (ScalarType::I32, Term::Integer(v)) => {
+            let v = i32::try_from(*v)
+                .map_err(|_| XlogError::Execution(format!("i32 out of range: {}", v)))?;
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        (ScalarType::I64, Term::Integer(v)) => {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        (ScalarType::F32, Term::Float(v)) => {
+            out.extend_from_slice(&(*v as f32).to_le_bytes());
+        }
+        (ScalarType::F64, Term::Float(v)) => {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        (ScalarType::F32, Term::Integer(v)) => {
+            out.extend_from_slice(&(*v as f32).to_le_bytes());
+        }
+        (ScalarType::F64, Term::Integer(v)) => {
+            out.extend_from_slice(&(*v as f64).to_le_bytes());
+        }
+        (ScalarType::Bool, Term::Integer(v)) => {
+            let b = match *v { 0 => 0u8, 1 => 1u8, other => {
+                return Err(XlogError::Execution(format!("bool expects 0/1, got {}", other)));
+            }};
+            out.push(b);
+        }
+        (ScalarType::Bool, Term::Symbol(id)) => {
+            let s = symbol::resolve(*id);
+            if s == "true" || s == "false" {
+                out.push(if s == "true" { 1u8 } else { 0u8 });
+            } else {
+                return Err(XlogError::Execution(format!("Expected boolean symbol, got '{}'", s)));
+            }
+        }
+        (ScalarType::Symbol, Term::String(s)) => {
+            out.extend_from_slice(&symbol::intern(s).to_le_bytes());
+        }
+        (ScalarType::Symbol, Term::Symbol(id)) => {
+            out.extend_from_slice(&id.to_le_bytes());
+        }
+        (_, Term::Variable(v)) => {
+            return Err(XlogError::Execution(format!("Fact cannot contain variable {}", v)));
+        }
+        (_, Term::Anonymous) => {
+            return Err(XlogError::Execution("Fact cannot contain anonymous wildcard '_'".into()));
+        }
+        (_, Term::Aggregate(_)) => {
+            return Err(XlogError::Execution("Fact cannot contain aggregate".into()));
+        }
+        (expected, got) => {
+            return Err(XlogError::Execution(format!("Type mismatch: expected {:?}, got {:?}", expected, got)));
+        }
+    }
+    Ok(())
+}
+
+fn load_facts_into_store(
+    ast: &AstProgram,
+    provider: &CudaKernelProvider,
+    executor: &mut Executor,
+    schemas: &HashMap<String, Schema>,
+) -> xlog_core::Result<()> {
+    use xlog_core::XlogError;
+    let mut rows_by_pred: HashMap<&str, Vec<&[Term]>> = HashMap::new();
+    for fact in ast.facts() {
+        rows_by_pred
+            .entry(fact.head.predicate.as_str())
+            .or_default()
+            .push(&fact.head.terms);
+    }
+
+    for (pred, rows) in rows_by_pred {
+        let schema = schemas.get(pred).ok_or_else(|| {
+            XlogError::Execution(format!("Missing schema for fact predicate {}", pred))
+        })?;
+
+        if rows.iter().any(|r| r.len() != schema.arity()) {
+            return Err(XlogError::Execution(format!(
+                "Fact arity mismatch for {} (expected {})", pred, schema.arity()
+            )));
+        }
+
+        let mut columns: Vec<Vec<u8>> = vec![Vec::new(); schema.arity()];
+        for row in &rows {
+            for (col_idx, term) in row.iter().enumerate() {
+                let typ = schema.column_type(col_idx).ok_or_else(|| {
+                    XlogError::Execution(format!("Missing type for col {}", col_idx))
+                })?;
+                push_term_bytes(&mut columns[col_idx], term, typ)?;
+            }
+        }
+
+        let slices: Vec<&[u8]> = columns.iter().map(|c| c.as_slice()).collect();
+        let fact_buf = provider.create_buffer_from_slices(&slices, schema.clone())?;
+
+        let existing = executor.store().get(pred).ok_or_else(|| {
+            XlogError::Execution(format!("Missing base relation {} while loading facts", pred))
+        })?;
+        let merged = provider.union(existing, &fact_buf)?;
+        executor.store_mut().put(pred, merged);
+    }
+    Ok(())
+}
+
+fn extract_tmj_keys(plan: &ExecutionPlan) -> (Vec<usize>, Vec<usize>) {
+    fn walk(node: &RirNode) -> Option<(Vec<usize>, Vec<usize>)> {
+        match node {
+            RirNode::TensorMaskedJoin { left_keys, right_keys, .. } => {
+                Some((left_keys.clone(), right_keys.clone()))
+            }
+            RirNode::Fixpoint { base, recursive, .. } => {
+                walk(base).or_else(|| walk(recursive))
+            }
+            RirNode::Union { inputs } => {
+                inputs.iter().find_map(walk)
+            }
+            RirNode::Filter { input, .. }
+            | RirNode::Project { input, .. }
+            | RirNode::Distinct { input, .. }
+            | RirNode::GroupBy { input, .. } => walk(input),
+            RirNode::Join { left, right, .. }
+            | RirNode::Diff { left, right } => {
+                walk(left).or_else(|| walk(right))
+            }
+            _ => None,
+        }
+    }
+    for scc_rules in &plan.rules_by_scc {
+        for rule in scc_rules {
+            if let Some(keys) = walk(&rule.body) {
+                return keys;
+            }
+        }
+    }
+    (vec![], vec![])
+}
+
+fn strip_learnable_declarations(source: &str) -> String {
+    source.lines()
+        .filter(|line| !line.trim_start().starts_with("learnable("))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn extract_learnable_declarations(source: &str) -> String {
+    source.lines()
+        .filter(|line| line.trim_start().starts_with("learnable("))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[pyclass]
+pub struct IlpProgramFactory;
+
+#[pymethods]
+impl IlpProgramFactory {
+    #[staticmethod]
+    pub fn compile(
+        source: &str,
+        device: usize,
+        memory_mb: u64,
+    ) -> PyResult<CompiledIlpProgram> {
+        let ast = xlog_logic::parse_program(source)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+        let base_source = strip_learnable_declarations(source);
+        let learnable_source = extract_learnable_declarations(source);
+
+        let mut compiler = xlog_logic::Compiler::new();
+        let plan = compiler.compile_program(&ast)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+        let mut rel_index: Vec<(RelId, String)> = compiler.rel_ids().iter()
+            .map(|(name, id)| (*id, name.clone()))
+            .collect();
+        rel_index.sort_by_key(|(id, _)| id.0);
+        let schemas = compiler.schemas().clone();
+
+        let config = GpuConfig {
+            device_ordinal: device,
+            memory_bytes: memory_mb * 1024 * 1024,
+        };
+        let provider = Arc::new(
+            provider_from_config(config)
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+        );
+
+        let mut executor = Executor::new(provider.clone());
+
+        for (name, rel_id) in compiler.rel_ids() {
+            executor.register_relation(*rel_id, name);
+        }
+
+        for (name, schema) in &schemas {
+            let empty = provider.create_empty_buffer(schema.clone())
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            executor.store_mut().put(name, empty);
+        }
+
+        load_facts_into_store(&ast, &provider, &mut executor, &schemas)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+        executor.execute_plan(&plan)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+        let (left_keys, right_keys) = extract_tmj_keys(&plan);
+
+        Ok(CompiledIlpProgram {
+            base_source, learnable_source, ast, executor, provider,
+            plan, rel_index, schemas, left_keys, right_keys,
+        })
+    }
+}
+
+#[pyclass]
+pub struct CompiledIlpProgram {
+    base_source: String,
+    learnable_source: String,
+    ast: AstProgram,
+    executor: Executor,
+    provider: Arc<CudaKernelProvider>,
+    plan: ExecutionPlan,
+    rel_index: Vec<(RelId, String)>,
+    schemas: HashMap<String, Schema>,
+    left_keys: Vec<usize>,
+    right_keys: Vec<usize>,
+}
+
+#[pymethods]
+impl CompiledIlpProgram {
+    pub fn set_rule_mask(
+        &mut self,
+        name: String,
+        mask_hard_flat: &Bound<'_, PyAny>,
+        mask_soft_flat: &Bound<'_, PyAny>,
+        schema_size: usize,
+    ) -> PyResult<()> {
+        let hard_dmt = dlpack_from_py(mask_hard_flat)?;
+        let soft_dmt = dlpack_from_py(mask_soft_flat)?;
+
+        let hard_buf = self.provider.from_dlpack_tensors(vec![hard_dmt])
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let soft_buf = self.provider.from_dlpack_tensors(vec![soft_dmt])
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+        self.executor.ilp_registry_mut().insert_mask(
+            name, hard_buf, soft_buf, schema_size,
+        );
+        Ok(())
+    }
+
+    pub fn evaluate(&mut self, py: Python<'_>) -> PyResult<()> {
+        let _result: xlog_core::Result<xlog_cuda::CudaBuffer> = py.allow_threads(|| {
+            self.executor.reset_for_mc();
+            for (name, schema) in &self.schemas {
+                let empty = self.provider.create_empty_buffer(schema.clone())?;
+                self.executor.store_mut().put(name, empty);
+            }
+            load_facts_into_store(
+                &self.ast, &self.provider, &mut self.executor, &self.schemas,
+            )?;
+            self.executor.execute_plan(&self.plan)
+        });
+        _result.map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        Ok(())
+    }
+
+    pub fn get_tagged_results(&self) -> PyResult<Vec<(u32, u32, u32, u32)>> {
+        match self.executor.ilp_last_result() {
+            Some(result) => Ok(result.entries.iter()
+                .map(|e| (e.i, e.j, e.k, e.num_rows))
+                .collect()),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    pub fn fact_exists(
+        &self,
+        relation: &str,
+        values: Vec<i64>,
+    ) -> PyResult<bool> {
+        let buf = self.executor.store().get(relation)
+            .ok_or_else(|| PyValueError::new_err(
+                format!("Relation '{}' not found", relation)
+            ))?;
+
+        Self::fact_exists_in_buffer(&self.provider, buf, &values)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }
+
+    pub fn tagged_entries_containing_fact(
+        &self,
+        relation: &str,
+        values: Vec<i64>,
+    ) -> PyResult<Vec<(u32, u32, u32)>> {
+        let k_idx = self.rel_index.iter()
+            .position(|(_, name)| name == relation)
+            .ok_or_else(|| PyValueError::new_err(
+                format!("Relation '{}' not in ILP schema", relation)
+            ))? as u32;
+
+        let tagged = match self.executor.ilp_last_result() {
+            Some(t) => t,
+            None => return Ok(Vec::new()),
+        };
+
+        let mut result = Vec::new();
+        for entry in &tagged.entries {
+            if entry.k != k_idx || entry.num_rows == 0 {
+                continue;
+            }
+
+            let (_, left_name) = &self.rel_index[entry.i as usize];
+            let (_, right_name) = &self.rel_index[entry.j as usize];
+
+            let left_buf = match self.executor.store().get(left_name) {
+                Some(buf) => buf,
+                None => continue,
+            };
+            let right_buf = match self.executor.store().get(right_name) {
+                Some(buf) => buf,
+                None => continue,
+            };
+
+            let joined = self.provider.hash_join_v2(
+                left_buf, right_buf,
+                &self.left_keys, &self.right_keys,
+                JoinType::Inner,
+            ).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+            let found = Self::fact_exists_in_buffer(
+                &self.provider, &joined, &values,
+            ).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+            if found {
+                result.push((entry.i, entry.j, entry.k));
+            }
+        }
+        Ok(result)
+    }
+
+    pub fn ilp_schema_size(&self) -> usize { self.rel_index.len() }
+
+    pub fn ilp_relation_names(&self) -> Vec<String> {
+        self.rel_index.iter().map(|(_, name)| name.clone()).collect()
+    }
+
+    pub fn commit_induced_rule(&mut self, rule_source: &str) -> PyResult<()> {
+        let new_base = format!("{}\n{}", self.base_source, rule_source);
+
+        let ast = xlog_logic::parse_program(&new_base)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let mut compiler = xlog_logic::Compiler::new();
+        let plan = compiler.compile_program(&ast)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let schemas = compiler.schemas().clone();
+
+        self.executor.reset_for_mc();
+        for (name, rel_id) in compiler.rel_ids() {
+            self.executor.register_relation(*rel_id, name);
+        }
+        for (name, schema) in &schemas {
+            let empty = self.provider.create_empty_buffer(schema.clone())
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            self.executor.store_mut().put(name, empty);
+        }
+        load_facts_into_store(&ast, &self.provider, &mut self.executor, &schemas)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        self.executor.execute_plan(&plan)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+        self.base_source = new_base;
+        self.ast = ast;
+        let (lk, rk) = extract_tmj_keys(&plan);
+        self.left_keys = lk;
+        self.right_keys = rk;
+        self.plan = plan;
+        self.schemas = schemas;
+        Ok(())
+    }
+}
+
+impl CompiledIlpProgram {
+    fn fact_exists_in_buffer(
+        provider: &CudaKernelProvider,
+        buf: &xlog_cuda::CudaBuffer,
+        values: &[i64],
+    ) -> xlog_core::Result<bool> {
+        use xlog_core::XlogError;
+        let num_rows = read_device_row_count(provider, buf)? as usize;
+        if num_rows == 0 { return Ok(false); }
+        if values.len() != buf.arity() { return Ok(false); }
+
+        let schema = buf.schema();
+        let mut columns: Vec<Vec<i64>> = Vec::new();
+        for col_idx in 0..buf.arity() {
+            let col_type = schema.column_type(col_idx)
+                .ok_or_else(|| XlogError::Kernel(
+                    format!("Column {} type not found in schema", col_idx)
+                ))?;
+            let col_i64: Vec<i64> = match col_type {
+                ScalarType::I64 => provider.download_column_i64(buf, col_idx)?,
+                ScalarType::I32 => provider.download_column_i32(buf, col_idx)?
+                    .into_iter().map(|v| v as i64).collect(),
+                ScalarType::U32 | ScalarType::Symbol => {
+                    provider.download_column_u32(buf, col_idx)?
+                        .into_iter().map(|v| v as i64).collect()
+                }
+                ScalarType::U64 => {
+                    let col_u64 = provider.download_column_u64(buf, col_idx)?;
+                    col_u64.into_iter().map(|v| v as i64).collect()
+                }
+                ScalarType::Bool => {
+                    provider.download_column_bool(buf, col_idx)?
+                        .into_iter().map(|v| if v { 1i64 } else { 0i64 }).collect()
+                }
+                ScalarType::F32 | ScalarType::F64 => {
+                    return Err(XlogError::Kernel(
+                        format!("fact_exists does not support float column type {:?}", col_type)
+                    ));
+                }
+            };
+            columns.push(col_i64);
+        }
+
+        for row in 0..num_rows {
+            let mut matches = true;
+            for (col_idx, val) in values.iter().enumerate() {
+                if columns[col_idx][row] != *val {
+                    matches = false;
+                    break;
+                }
+            }
+            if matches { return Ok(true); }
+        }
+        Ok(false)
+    }
+}
+
 #[pymodule]
 fn pyxlog(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
@@ -3583,6 +4045,9 @@ fn pyxlog(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Training infrastructure
     m.add_class::<EpochStats>()?;
     m.add_class::<TrainingHistory>()?;
+    // ILP bindings
+    m.add_class::<IlpProgramFactory>()?;
+    m.add_class::<CompiledIlpProgram>()?;
     m.add_function(wrap_pyfunction!(train_model, m)?)?;
     m.add_function(wrap_pyfunction!(train_model_tensor, m)?)?;
     m.add_function(wrap_pyfunction!(dlpack_roundtrip, m)?)?;
