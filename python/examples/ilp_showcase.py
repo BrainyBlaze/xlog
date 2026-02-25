@@ -370,10 +370,38 @@ STAGE_2 = StageConfig(
     lr=0.1,
 )
 
+STAGE_3 = StageConfig(
+    name="Workplace Colleague",
+    source="""
+        worksAt(1, 101). worksAt(7, 101). worksAt(2, 102). worksAt(4, 102).
+        livesIn(1, 201). livesIn(2, 201). livesIn(3, 202). livesIn(4, 202).
+        learnable(W_col) :: colleague(X, Y) :- bL(X, Z), bR(Y, Z).
+    """,
+    mask_name="W_col",
+    positives=[
+        ("colleague", [1, 7]),
+        ("colleague", [7, 1]),
+        ("colleague", [2, 4]),
+        ("colleague", [4, 2]),
+    ],
+    negatives=[
+        ("colleague", [1, 2]),
+        ("colleague", [3, 4]),
+    ],
+    target_rule="colleague(X, Y) :- worksAt(X, Z), worksAt(Y, Z).",
+    rule_template="{H}(X, Y) :- {L}(X, Z), {R}(Y, Z).",
+    max_steps=120,
+    tau_start=2.0,
+    tau_end=0.05,
+    lr=0.15,
+    retries=5,
+)
+
+
 
 # -- Main ---------------------------------------------------------------------
 
-STAGES = [STAGE_1, STAGE_2]
+STAGES = [STAGE_1, STAGE_2, STAGE_3]
 
 if __name__ == "__main__":
     preflight_check()
