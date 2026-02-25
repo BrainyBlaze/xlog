@@ -3696,11 +3696,26 @@ fn load_facts_into_store(
     Ok(())
 }
 
-fn extract_tmj_keys(plan: &ExecutionPlan) -> (Vec<usize>, Vec<usize>) {
-    fn walk(node: &RirNode) -> Option<(Vec<usize>, Vec<usize>)> {
+/// Extracted TensorMaskedJoin metadata from the execution plan.
+struct TmjMeta {
+    left_keys: Vec<usize>,
+    right_keys: Vec<usize>,
+    head_projection: Vec<usize>,
+    schema_size: usize,
+}
+
+fn extract_tmj_meta(plan: &ExecutionPlan) -> TmjMeta {
+    fn walk(node: &RirNode) -> Option<TmjMeta> {
         match node {
-            RirNode::TensorMaskedJoin { left_keys, right_keys, .. } => {
-                Some((left_keys.clone(), right_keys.clone()))
+            RirNode::TensorMaskedJoin {
+                left_keys, right_keys, head_projection, schema_size, ..
+            } => {
+                Some(TmjMeta {
+                    left_keys: left_keys.clone(),
+                    right_keys: right_keys.clone(),
+                    head_projection: head_projection.clone(),
+                    schema_size: *schema_size,
+                })
             }
             RirNode::Fixpoint { base, recursive, .. } => {
                 walk(base).or_else(|| walk(recursive))
@@ -3721,12 +3736,12 @@ fn extract_tmj_keys(plan: &ExecutionPlan) -> (Vec<usize>, Vec<usize>) {
     }
     for scc_rules in &plan.rules_by_scc {
         for rule in scc_rules {
-            if let Some(keys) = walk(&rule.body) {
-                return keys;
+            if let Some(meta) = walk(&rule.body) {
+                return meta;
             }
         }
     }
-    (vec![], vec![])
+    TmjMeta { left_keys: vec![], right_keys: vec![], head_projection: vec![], schema_size: 0 }
 }
 
 fn strip_learnable_declarations(source: &str) -> String {
@@ -3797,11 +3812,14 @@ impl IlpProgramFactory {
         executor.execute_plan(&plan)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
-        let (left_keys, right_keys) = extract_tmj_keys(&plan);
+        let tmj = extract_tmj_meta(&plan);
 
         Ok(CompiledIlpProgram {
             base_source, _learnable_source: learnable_source, ast, executor, provider,
-            plan, rel_index, schemas, left_keys, right_keys,
+            plan, rel_index, schemas,
+            left_keys: tmj.left_keys, right_keys: tmj.right_keys,
+            head_projection: tmj.head_projection,
+            compiled_schema_size: tmj.schema_size,
         })
     }
 }
@@ -3818,6 +3836,8 @@ pub struct CompiledIlpProgram {
     schemas: HashMap<String, Schema>,
     left_keys: Vec<usize>,
     right_keys: Vec<usize>,
+    head_projection: Vec<usize>,
+    compiled_schema_size: usize,
 }
 
 #[pymethods]
@@ -3829,6 +3849,13 @@ impl CompiledIlpProgram {
         mask_soft_flat: &Bound<'_, PyAny>,
         schema_size: usize,
     ) -> PyResult<()> {
+        if self.compiled_schema_size > 0 && schema_size != self.compiled_schema_size {
+            return Err(PyValueError::new_err(format!(
+                "schema_size mismatch: mask has N={} but compiled program expects N={}",
+                schema_size, self.compiled_schema_size,
+            )));
+        }
+
         let hard_dmt = dlpack_from_py(mask_hard_flat)?;
         let soft_dmt = dlpack_from_py(mask_soft_flat)?;
 
@@ -3908,13 +3935,20 @@ impl CompiledIlpProgram {
             let (_, right_name) = &self.rel_index[entry.j as usize];
 
             let left_buf = match self.executor.store().get(left_name) {
-                Some(buf) => buf,
-                None => continue,
+                Some(buf) if buf.arity() > 0 => buf,
+                _ => continue,
             };
             let right_buf = match self.executor.store().get(right_name) {
-                Some(buf) => buf,
-                None => continue,
+                Some(buf) if buf.arity() > 0 => buf,
+                _ => continue,
             };
+
+            // Arity guard: same as executor (skip if join keys exceed columns)
+            let left_max = self.left_keys.iter().copied().max().unwrap_or(0);
+            let right_max = self.right_keys.iter().copied().max().unwrap_or(0);
+            if left_buf.arity() <= left_max || right_buf.arity() <= right_max {
+                continue;
+            }
 
             let joined = self.provider.hash_join_v2(
                 left_buf, right_buf,
@@ -3922,9 +3956,19 @@ impl CompiledIlpProgram {
                 JoinType::Inner,
             ).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
-            let found = Self::fact_exists_in_buffer(
-                &self.provider, &joined, &values,
-            ).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            // Apply head_projection: check projected columns against values,
+            // not the raw join output (which has more columns than the head).
+            let found = if !self.head_projection.is_empty()
+                && self.head_projection.len() == values.len()
+            {
+                Self::fact_exists_projected(
+                    &self.provider, &joined, &values, &self.head_projection,
+                ).map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+            } else {
+                Self::fact_exists_in_buffer(
+                    &self.provider, &joined, &values,
+                ).map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+            };
 
             if found {
                 result.push((entry.i, entry.j, entry.k));
@@ -3965,9 +4009,11 @@ impl CompiledIlpProgram {
 
         self.base_source = new_base;
         self.ast = ast;
-        let (lk, rk) = extract_tmj_keys(&plan);
-        self.left_keys = lk;
-        self.right_keys = rk;
+        let tmj = extract_tmj_meta(&plan);
+        self.left_keys = tmj.left_keys;
+        self.right_keys = tmj.right_keys;
+        self.head_projection = tmj.head_projection;
+        self.compiled_schema_size = tmj.schema_size;
         self.plan = plan;
         self.schemas = schemas;
         Ok(())
@@ -4021,6 +4067,65 @@ impl CompiledIlpProgram {
             let mut matches = true;
             for (col_idx, val) in values.iter().enumerate() {
                 if columns[col_idx][row] != *val {
+                    matches = false;
+                    break;
+                }
+            }
+            if matches { return Ok(true); }
+        }
+        Ok(false)
+    }
+
+    /// Like fact_exists_in_buffer but checks only the projected columns.
+    /// `projection[i]` is the column index in `buf` that corresponds to
+    /// `values[i]` in the head relation.
+    fn fact_exists_projected(
+        provider: &CudaKernelProvider,
+        buf: &xlog_cuda::CudaBuffer,
+        values: &[i64],
+        projection: &[usize],
+    ) -> xlog_core::Result<bool> {
+        use xlog_core::XlogError;
+        let num_rows = read_device_row_count(provider, buf)? as usize;
+        if num_rows == 0 { return Ok(false); }
+
+        let schema = buf.schema();
+        let mut columns: Vec<Vec<i64>> = Vec::new();
+        for &col_idx in projection {
+            if col_idx >= buf.arity() { return Ok(false); }
+            let col_type = schema.column_type(col_idx)
+                .ok_or_else(|| XlogError::Kernel(
+                    format!("Column {} type not found in schema", col_idx)
+                ))?;
+            let col_i64: Vec<i64> = match col_type {
+                ScalarType::I64 => provider.download_column_i64(buf, col_idx)?,
+                ScalarType::I32 => provider.download_column_i32(buf, col_idx)?
+                    .into_iter().map(|v| v as i64).collect(),
+                ScalarType::U32 | ScalarType::Symbol => {
+                    provider.download_column_u32(buf, col_idx)?
+                        .into_iter().map(|v| v as i64).collect()
+                }
+                ScalarType::U64 => {
+                    provider.download_column_u64(buf, col_idx)?
+                        .into_iter().map(|v| v as i64).collect()
+                }
+                ScalarType::Bool => {
+                    provider.download_column_bool(buf, col_idx)?
+                        .into_iter().map(|v| if v { 1i64 } else { 0i64 }).collect()
+                }
+                ScalarType::F32 | ScalarType::F64 => {
+                    return Err(XlogError::Kernel(
+                        format!("fact_exists does not support float column type {:?}", col_type)
+                    ));
+                }
+            };
+            columns.push(col_i64);
+        }
+
+        for row in 0..num_rows {
+            let mut matches = true;
+            for (i, val) in values.iter().enumerate() {
+                if columns[i][row] != *val {
                     matches = false;
                     break;
                 }

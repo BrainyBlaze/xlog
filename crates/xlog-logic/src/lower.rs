@@ -474,13 +474,25 @@ impl Lowerer {
             }
         }
 
-        let head_projection: Vec<usize> = rule.head.terms.iter().map(|term| {
+        let mut head_projection: Vec<usize> = Vec::new();
+        for term in &rule.head.terms {
             if let Some(name) = term.variable_name() {
-                *var_to_col.get(name).unwrap_or(&0)
+                let col = var_to_col.get(name).ok_or_else(|| {
+                    XlogError::Compilation(format!(
+                        "Learnable rule head variable '{}' not found in body atoms \
+                         ({}, {}). All head variables must appear in the body.",
+                        name, left_atom.predicate, right_atom.predicate,
+                    ))
+                })?;
+                head_projection.push(*col);
             } else {
-                0 // Constants in head default to column 0 (shouldn't happen in ILP templates)
+                return Err(XlogError::Compilation(format!(
+                    "Learnable rule head must contain only variables, \
+                     found constant {:?} in head of '{}'",
+                    term, head_rel_name,
+                )));
             }
-        }).collect();
+        }
 
         // Infer schema for head predicate from the learnable rule if not already set.
         // The head's column types come from the projected join columns.
