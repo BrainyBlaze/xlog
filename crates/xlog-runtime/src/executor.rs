@@ -16,6 +16,7 @@ use xlog_ir::{
 };
 use xlog_stats::{StatsManager, StatsSnapshot};
 
+use crate::ilp_registry::{read_device_row_count, IlpRegistry, IlpTagEntry, IlpTaggedResult};
 use crate::profiler::{ExecutionStats, Profiler};
 use crate::RelationStore;
 
@@ -176,6 +177,10 @@ pub struct Executor {
     config: RuntimeConfig,
     /// Performance profiler for --stats output
     profiler: Profiler,
+    /// ILP tensor mask registry
+    ilp_registry: IlpRegistry,
+    /// Last ILP tagged result metadata
+    ilp_last_result: Option<IlpTaggedResult>,
 }
 
 impl Executor {
@@ -201,6 +206,8 @@ impl Executor {
             join_index_cache: JoinIndexCache::new(max_index_cache_bytes),
             config,
             profiler: Profiler::default(),
+            ilp_registry: IlpRegistry::new(),
+            ilp_last_result: None,
         }
     }
 
@@ -235,6 +242,16 @@ impl Executor {
     /// Get a mutable reference to the relation store
     pub fn store_mut(&mut self) -> &mut RelationStore {
         &mut self.store
+    }
+
+    /// Get a mutable reference to the ILP registry (RD-35).
+    pub fn ilp_registry_mut(&mut self) -> &mut IlpRegistry {
+        &mut self.ilp_registry
+    }
+
+    /// Get the last ILP tagged result (RD-35).
+    pub fn ilp_last_result(&self) -> Option<&IlpTaggedResult> {
+        self.ilp_last_result.as_ref()
     }
 
     /// Store a relation buffer and invalidate join indices.
@@ -481,6 +498,7 @@ impl Executor {
                 RirNode::Fixpoint {
                     base, recursive, ..
                 } => contains_non_monotonic_ops(base) || contains_non_monotonic_ops(recursive),
+                RirNode::TensorMaskedJoin { .. } => false,
             }
         }
 
@@ -787,6 +805,26 @@ impl Executor {
                 // Semi-naive fixpoint iteration
                 self.execute_fixpoint(*scc_id, base, recursive, *delta_rel, *full_rel)
             }
+            RirNode::TensorMaskedJoin {
+                mask_name,
+                schema_size,
+                left_keys,
+                right_keys,
+                rel_index,
+                head_rel_name,
+                max_active_rules,
+                head_projection,
+                ..
+            } => self.execute_tensor_masked_join(
+                mask_name,
+                *schema_size,
+                left_keys,
+                right_keys,
+                rel_index,
+                head_rel_name,
+                *max_active_rules,
+                head_projection,
+            ),
         }
     }
 
@@ -1267,6 +1305,11 @@ impl Executor {
                 Self::collect_scan_rels(base, out);
                 Self::collect_scan_rels(recursive, out);
             }
+            RirNode::TensorMaskedJoin { rel_index, .. } => {
+                for (rel_id, _) in rel_index {
+                    out.push(*rel_id);
+                }
+            }
         }
     }
 
@@ -1456,6 +1499,10 @@ impl Executor {
                     },
                     replaced_recursive,
                 )
+            }
+            RirNode::TensorMaskedJoin { .. } => {
+                // TensorMaskedJoin is a leaf node — no child scans to rewrite.
+                (node.clone(), false)
             }
         }
     }
@@ -2691,6 +2738,150 @@ impl Executor {
             Self::MAX_FIXPOINT_ITERATIONS,
             scc_id
         )))
+    }
+
+    fn execute_tensor_masked_join(
+        &mut self,
+        mask_name: &str,
+        schema_size: usize,
+        left_keys: &[usize],
+        right_keys: &[usize],
+        rel_index: &[(RelId, String)],
+        head_rel_name: &str,
+        max_active_rules: usize,
+        head_projection: &[usize],
+    ) -> Result<CudaBuffer> {
+        // RD-12: No-op when no mask registered. Return empty buffer with
+        // the head relation's schema (not Schema::new(vec![])) to prevent
+        // schema corruption when execute_non_recursive_scc stores the result.
+        let ilp_mask = match self.ilp_registry.get_mask(mask_name) {
+            Some(mask) => mask,
+            None => {
+                self.ilp_last_result = Some(IlpTaggedResult { entries: Vec::new() });
+                // RD-37: Fail hard if head relation missing from store.
+                let schema = self.store.get(head_rel_name)
+                    .map(|buf| buf.schema().clone())
+                    .ok_or_else(|| XlogError::Execution(format!(
+                        "TensorMaskedJoin: head relation '{}' not found in store \
+                         (was load_facts_into_store called?)", head_rel_name
+                    )))?;
+                return self.provider.create_empty_buffer(schema);
+            }
+        };
+
+        let start = self.profiler.start_op();
+
+        // 2. Extract active (i,j,k) indices via GPU kernel
+        let active_rules = self.provider.extract_active_rule_indices(
+            &ilp_mask.hard, &ilp_mask.soft,
+            schema_size, max_active_rules,
+        )?;
+
+        // 3. Dispatch hash joins, collect tag metadata
+        let mut tag_entries: Vec<IlpTagEntry> = Vec::new();
+        let mut results_by_k: HashMap<u32, Vec<CudaBuffer>> = HashMap::new();
+
+        for &(i, j, k) in &active_rules {
+            let (_, left_name) = &rel_index[i as usize];
+            let (_, right_name) = &rel_index[j as usize];
+
+            let left_buf = match self.store.get(left_name) {
+                Some(buf) if buf.arity() > 0 => buf,
+                _ => continue,
+            };
+            let right_buf = match self.store.get(right_name) {
+                Some(buf) if buf.arity() > 0 => buf,
+                _ => continue,
+            };
+
+            // Skip arity-mismatched relations: the join keys are fixed by
+            // the learnable rule template, so the mapped relation must have
+            // enough columns for every key index. Relations with matching
+            // arity but different semantic column meanings will join without
+            // error; semantic correctness of the mask is the optimizer's
+            // responsibility (RD-37).
+            let left_max_key = left_keys.iter().copied().max().unwrap_or(0);
+            let right_max_key = right_keys.iter().copied().max().unwrap_or(0);
+            if left_buf.arity() <= left_max_key || right_buf.arity() <= right_max_key {
+                continue;
+            }
+
+            let joined = self.provider.hash_join_v2(
+                left_buf, right_buf,
+                left_keys, right_keys,
+                CudaJoinType::Inner,
+            )?;
+
+            // Project join result to head schema columns if projection is specified.
+            // The join produces [left_cols..., right_cols...] but the head may only
+            // need a subset (e.g. reach(X,Y) from b1(X,Z) join b2(Z,Y) needs cols 0,3).
+            let projected = if !head_projection.is_empty() && head_projection.len() < joined.arity() {
+                let proj_exprs: Vec<ProjectExpr> = head_projection
+                    .iter()
+                    .map(|&col| ProjectExpr::Column(col))
+                    .collect();
+                self.execute_project(&joined, &proj_exprs)?
+            } else {
+                joined
+            };
+
+            // RD-22: Use public helper instead of private device_row_count
+            let num_rows = read_device_row_count(&self.provider, &projected)? as u32;
+
+            if num_rows > 0 {
+                // RD-17: Store only metadata, not CudaBuffer clones
+                tag_entries.push(IlpTagEntry { i, j, k, num_rows });
+                results_by_k.entry(k).or_default().push(projected);
+            }
+        }
+
+        // 4. Union results per target relation and store
+        for (k, buffers) in results_by_k {
+            let (_, target_name) = &rel_index[k as usize];
+
+            // Chain-union all buffers
+            let union_buf = if buffers.len() == 1 {
+                buffers.into_iter().next().unwrap()
+            } else {
+                let mut acc = self.provider.union_gpu(&buffers[0], &buffers[1])?;
+                for buf in &buffers[2..] {
+                    acc = self.provider.union_gpu(&acc, buf)?;
+                }
+                acc
+            };
+
+            // Diff against existing and merge
+            if let Some(existing) = self.store.get(target_name) {
+                let delta = self.provider.diff_gpu(&union_buf, existing)?;
+                if !delta.is_empty() {
+                    let merged = self.provider.union_gpu(existing, &delta)?;
+                    self.store_put(target_name, merged);
+                }
+            } else {
+                let key_cols: Vec<usize> = (0..union_buf.arity()).collect();
+                let deduped = self.provider.dedup(&union_buf, &key_cols)?;
+                self.store_put(target_name, deduped);
+            }
+        }
+
+        // 5. Store tag metadata
+        self.ilp_last_result = Some(IlpTaggedResult { entries: tag_entries });
+
+        if let Some(start) = start {
+            let mem = self.provider.memory().allocated_bytes();
+            self.profiler.record_op(
+                "TensorMaskedJoin", 0, active_rules.len() as u64, start, mem,
+            );
+        }
+
+        // Return empty with head schema (results routed via store).
+        let schema = self.store.get(head_rel_name)
+            .map(|buf| buf.schema().clone())
+            .ok_or_else(|| XlogError::Execution(format!(
+                "TensorMaskedJoin: head relation '{}' not found in store \
+                 (was load_facts_into_store called?)", head_rel_name
+            )))?;
+        self.provider.create_empty_buffer(schema)
     }
 
     /// Get the relation name for a RelId, creating a default name if not registered

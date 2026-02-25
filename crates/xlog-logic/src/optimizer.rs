@@ -432,6 +432,8 @@ impl Optimizer {
                 delta_rel,
                 full_rel,
             },
+
+            RirNode::TensorMaskedJoin { .. } => node, // Leaf-like: no pushdown
         }
     }
 
@@ -591,6 +593,13 @@ impl Optimizer {
             RirNode::Distinct { input, .. } => self.estimate_width(input),
             RirNode::Diff { left, .. } => self.estimate_width(left),
             RirNode::Fixpoint { base, .. } => self.estimate_width(base),
+            // RD-27: Optimizer schemas are HashMap<RelId, Schema>.
+            // Use head_rel_id (not head_rel_name) for lookup.
+            RirNode::TensorMaskedJoin { head_rel_id, .. } => self
+                .schemas
+                .get(head_rel_id)
+                .map(|s| s.arity())
+                .unwrap_or(2),
         }
     }
 
@@ -831,6 +840,15 @@ impl Optimizer {
                 let recursive_cost = self.estimate_cost(recursive);
                 self.estimate_fixpoint_cost(base_cost, recursive_cost)
             }
+
+            RirNode::TensorMaskedJoin {
+                max_active_rules, ..
+            } => PlanCost {
+                rows: *max_active_rules as u64,
+                cpu_cost: *max_active_rules as f64 * 100.0,
+                gpu_mem: *max_active_rules as u64 * 1024,
+                transfers: 1,
+            },
         }
     }
 

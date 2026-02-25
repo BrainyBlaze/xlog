@@ -175,6 +175,28 @@ pub enum RirNode {
         /// Relation for full result
         full_rel: RelId,
     },
+
+    /// Tensorized ILP super-graph join. A DLPack mask tensor selects which
+    /// (body_i, body_j) → head_k rule combinations are active.
+    TensorMaskedJoin {
+        mask_name: String,
+        schema_size: usize,
+        left_keys: Vec<usize>,
+        right_keys: Vec<usize>,
+        /// Mapping from tensor dimension index → (RelId, relation name).
+        /// Sorted by RelId for deterministic ordering (RD-36).
+        rel_index: Vec<(RelId, String)>,
+        /// Head relation name (for store lookup in executor, RD-12).
+        head_rel_name: String,
+        /// Head relation ID (for optimizer schema lookup, keyed by RelId, RD-27).
+        head_rel_id: RelId,
+        /// Maximum active rules to process (budget cap, RD-6).
+        max_active_rules: usize,
+        /// Column indices from the join result to project into the head schema.
+        /// Maps head column i to join result column head_projection[i].
+        /// Join result columns are: [left_col_0..left_col_n, right_col_0..right_col_m].
+        head_projection: Vec<usize>,
+    },
 }
 
 impl RirNode {
@@ -220,6 +242,11 @@ impl RirNode {
                 recursive.collect_relations(rels);
                 rels.push(*delta_rel);
                 rels.push(*full_rel);
+            }
+            RirNode::TensorMaskedJoin { rel_index, .. } => {
+                for (rel_id, _) in rel_index {
+                    rels.push(*rel_id);
+                }
             }
         }
     }

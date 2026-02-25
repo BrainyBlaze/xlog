@@ -142,7 +142,7 @@ mod tests {
 
     #[test]
     fn test_stratum_assignment() {
-        let strata = vec![
+        let strata = [
             Stratum {
                 id: 0,
                 sccs: vec![0, 1],

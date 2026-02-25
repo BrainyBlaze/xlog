@@ -10,9 +10,9 @@ use xlog_core::{symbol, Result, ScalarType, XlogError};
 
 use crate::ast::{
     AggExpr, AggOp, AnnotatedDisjunction, ArithExpr, Atom, BodyLiteral, CompOp, Comparison,
-    CondExpr, Constraint, DomainDecl, Evidence, FuncBody, FuncDef, FuncParam, IsExpr, NeuralLabel,
-    NeuralPredDecl, PredDecl, ProbCache, ProbEngine, ProbFact, ProbQuery, Program, Query,
-    Rule as AstRule, Term, UseDecl,
+    CondExpr, Constraint, DomainDecl, Evidence, FuncBody, FuncDef, FuncParam, IsExpr,
+    LearnableRule, NeuralLabel, NeuralPredDecl, PredDecl, ProbCache, ProbEngine, ProbFact,
+    ProbQuery, Program, Query, Rule as AstRule, Term, UseDecl,
 };
 
 #[derive(Parser)]
@@ -114,6 +114,9 @@ fn build_statement(pair: Pair<'_, Rule>, program: &mut Program) -> Result<()> {
                 program
                     .neural_predicates
                     .push(build_neural_pred_decl(inner)?);
+            }
+            Rule::learnable_rule => {
+                program.learnable_rules.push(build_learnable_rule(inner)?);
             }
             _ => {}
         }
@@ -645,6 +648,33 @@ fn build_neural_pred_decl(pair: Pair<'_, Rule>) -> Result<NeuralPredDecl> {
         output,
         labels,
         predicate,
+    })
+}
+
+/// Build a learnable rule from a parsed pair.
+/// Grammar: learnable_rule = { "learnable" ~ "(" ~ ident ~ ")" ~ "::" ~ head ~ ":-" ~ body ~ "." }
+/// RD-33: Uses build_head (not build_atom) because grammar produces `head` pair.
+fn build_learnable_rule(pair: Pair<'_, Rule>) -> Result<LearnableRule> {
+    let mut inner = pair.into_inner();
+    let mask_name = inner
+        .next()
+        .ok_or_else(|| XlogError::Parse("Missing learnable mask name".into()))?
+        .as_str()
+        .to_string();
+    let head = build_head(
+        inner
+            .next()
+            .ok_or_else(|| XlogError::Parse("Missing learnable head".into()))?,
+    )?;
+    let body = build_body(
+        inner
+            .next()
+            .ok_or_else(|| XlogError::Parse("Missing learnable body".into()))?,
+    )?;
+    Ok(LearnableRule {
+        mask_name,
+        head,
+        body,
     })
 }
 

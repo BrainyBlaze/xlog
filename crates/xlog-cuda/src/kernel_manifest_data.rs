@@ -6,7 +6,7 @@
 // include!() in build.rs would interpret //! as documenting the wrong item.
 
 /// Module names matching the .cu filenames (without extension).
-/// Order matches provider.rs load order. All 19 modules listed.
+/// Order matches provider.rs load order. All 20 modules listed.
 pub const KERNEL_CU_NAMES: &[&str] = &[
     "join",
     "dedup",
@@ -27,4 +27,5 @@ pub const KERNEL_CU_NAMES: &[&str] = &[
     "sat",
     "d4",
     "neural",
+    "ilp",
 ];

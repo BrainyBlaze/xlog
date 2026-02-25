@@ -198,9 +198,10 @@ pub const PIR_MODULE: &str = "xlog_pir";
 pub const CNF_MODULE: &str = "xlog_cnf";
 pub const CACHE_MODULE: &str = "xlog_cache";
 pub const WEIGHTS_MODULE: &str = "xlog_weights";
+pub const ILP_MODULE: &str = "xlog_ilp";
 
-// Compile-time check: kernel manifest lists exactly 19 modules.
-const _: () = assert!(crate::kernel_manifest_data::KERNEL_CU_NAMES.len() == 19);
+// Compile-time check: kernel manifest lists exactly 20 modules.
+const _: () = assert!(crate::kernel_manifest_data::KERNEL_CU_NAMES.len() == 20);
 
 /// Kernel function names in the Monte Carlo sampling module
 pub mod mc_sample_kernels {
@@ -249,6 +250,11 @@ pub mod arith_kernels {
 pub mod neural_kernels {
     pub const NEURAL_FILL_AD_CHAIN_F32: &str = "neural_fill_ad_chain_f32";
     pub const NEURAL_SCATTER_AD_CHAIN_GRADS_F32: &str = "neural_scatter_ad_chain_grads_f32";
+}
+
+/// Kernel function names in the ILP module.
+pub mod ilp_kernels {
+    pub const EXTRACT_NONZERO_INDICES: &str = "extract_nonzero_indices";
 }
 
 /// Kernel function names in the PIR interning module.
@@ -1459,6 +1465,40 @@ impl CudaKernelProvider {
                 profile.per_module_sec.push(("neural".to_string(), elapsed));
                 profile.total_sec += elapsed;
                 if is_cubin { profile.cubin_loaded += 1; } else { profile.ptx_fallback += 1; }
+            }
+        }
+
+        // ILP module
+        {
+            let t0 = if profiling { Some(Instant::now()) } else { None };
+            let (ptx, is_cubin) = load_module_from_file("ilp", cc)?;
+            device
+                .inner()
+                .load_ptx(
+                    ptx,
+                    ILP_MODULE,
+                    &[ilp_kernels::EXTRACT_NONZERO_INDICES],
+                )
+                .map_err(|e| {
+                    XlogError::Kernel(format!("Failed to load ILP module: {}", e))
+                })?;
+            if let Some(t0) = t0 {
+                if profiling {
+                    device
+                        .inner()
+                        .synchronize()
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("sync after ILP load: {}", e))
+                        })?;
+                }
+                let elapsed = t0.elapsed().as_secs_f64();
+                profile.per_module_sec.push(("ilp".to_string(), elapsed));
+                profile.total_sec += elapsed;
+                if is_cubin {
+                    profile.cubin_loaded += 1;
+                } else {
+                    profile.ptx_fallback += 1;
+                }
             }
         }
 
@@ -10447,6 +10487,135 @@ impl CudaKernelProvider {
             d_num_rows,
             schema,
         ))
+    }
+
+    /// Extract active (i,j,k) rule indices from a flattened N×N×N mask.
+    /// Returns up to `max_active` entries sorted by soft-mask priority.
+    pub fn extract_active_rule_indices(
+        &self,
+        mask_hard: &CudaBuffer,
+        mask_soft: &CudaBuffer,
+        n: usize,
+        max_active: usize,
+    ) -> Result<Vec<(u32, u32, u32)>> {
+        let total = n * n * n;
+        let block_size = 256usize;
+        let grid_size = (total + block_size - 1) / block_size;
+
+        let mut out_i = self.memory().alloc::<u32>(total)?;
+        let mut out_j = self.memory().alloc::<u32>(total)?;
+        let mut out_k = self.memory().alloc::<u32>(total)?;
+        let mut out_p = self.memory().alloc::<f32>(total)?;
+        let mut count = self.memory().alloc::<u32>(1)?;
+
+        self.device()
+            .inner()
+            .htod_sync_copy_into(&[0u32], &mut count)
+            .map_err(|e| XlogError::Kernel(format!("ILP htod count: {}", e)))?;
+
+        let hard_col = mask_hard
+            .column(0)
+            .ok_or_else(|| XlogError::Kernel("ILP hard mask has no column".into()))?;
+        let soft_col = mask_soft
+            .column(0)
+            .ok_or_else(|| XlogError::Kernel("ILP soft mask has no column".into()))?;
+
+        let kernel = self
+            .device()
+            .inner()
+            .get_func(ILP_MODULE, ilp_kernels::EXTRACT_NONZERO_INDICES)
+            .ok_or_else(|| {
+                XlogError::Kernel("extract_nonzero_indices kernel not found".into())
+            })?;
+
+        let hard_bytes = total * std::mem::size_of::<f32>();
+        let soft_bytes = total * std::mem::size_of::<f32>();
+        let hard_view = self.column_bytes_view(hard_col, hard_bytes)?;
+        let soft_view = self.column_bytes_view(soft_col, soft_bytes)?;
+
+        unsafe {
+            kernel
+                .clone()
+                .launch(
+                    cudarc::driver::LaunchConfig {
+                        grid_dim: (grid_size as u32, 1, 1),
+                        block_dim: (block_size as u32, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        &hard_view,
+                        &soft_view,
+                        n as u32,
+                        &mut out_i,
+                        &mut out_j,
+                        &mut out_k,
+                        &mut out_p,
+                        &mut count,
+                    ),
+                )
+                .map_err(|e| {
+                    XlogError::Kernel(format!(
+                        "Failed to launch extract_nonzero_indices: {}",
+                        e
+                    ))
+                })?;
+        }
+
+        let mut count_host = [0u32];
+        self.device()
+            .inner()
+            .dtoh_sync_copy_into(&count, &mut count_host)
+            .map_err(|e| XlogError::Kernel(format!("ILP dtoh count: {}", e)))?;
+        let active_count = count_host[0] as usize;
+
+        if active_count == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut i_host = vec![0u32; active_count];
+        let mut j_host = vec![0u32; active_count];
+        let mut k_host = vec![0u32; active_count];
+        let mut p_host = vec![0f32; active_count];
+
+        let out_i_view = out_i
+            .try_slice(0..active_count)
+            .ok_or_else(|| XlogError::Kernel("ILP slice i out of bounds".into()))?;
+        let out_j_view = out_j
+            .try_slice(0..active_count)
+            .ok_or_else(|| XlogError::Kernel("ILP slice j out of bounds".into()))?;
+        let out_k_view = out_k
+            .try_slice(0..active_count)
+            .ok_or_else(|| XlogError::Kernel("ILP slice k out of bounds".into()))?;
+        let out_p_view = out_p
+            .try_slice(0..active_count)
+            .ok_or_else(|| XlogError::Kernel("ILP slice p out of bounds".into()))?;
+
+        self.device()
+            .inner()
+            .dtoh_sync_copy_into(&out_i_view, &mut i_host)
+            .map_err(|e| XlogError::Kernel(format!("ILP dtoh i: {}", e)))?;
+        self.device()
+            .inner()
+            .dtoh_sync_copy_into(&out_j_view, &mut j_host)
+            .map_err(|e| XlogError::Kernel(format!("ILP dtoh j: {}", e)))?;
+        self.device()
+            .inner()
+            .dtoh_sync_copy_into(&out_k_view, &mut k_host)
+            .map_err(|e| XlogError::Kernel(format!("ILP dtoh k: {}", e)))?;
+        self.device()
+            .inner()
+            .dtoh_sync_copy_into(&out_p_view, &mut p_host)
+            .map_err(|e| XlogError::Kernel(format!("ILP dtoh p: {}", e)))?;
+
+        let mut indices: Vec<(f32, u32, u32, u32)> = (0..active_count)
+            .map(|idx| (p_host[idx], i_host[idx], j_host[idx], k_host[idx]))
+            .collect();
+        indices.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        indices.truncate(max_active);
+
+        Ok(indices.into_iter().map(|(_, i, j, k)| (i, j, k)).collect())
     }
 }
 

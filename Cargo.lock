@@ -1397,9 +1397,11 @@ dependencies = [
  "xlog-core",
  "xlog-cuda",
  "xlog-gpu",
+ "xlog-ir",
  "xlog-logic",
  "xlog-neural",
  "xlog-prob",
+ "xlog-runtime",
 ]
 
 [[package]]
@@ -2236,6 +2238,7 @@ dependencies = [
 name = "xlog-runtime"
 version = "0.3.2"
 dependencies = [
+ "bytemuck",
  "cudarc",
  "xlog-core",
  "xlog-cuda",
