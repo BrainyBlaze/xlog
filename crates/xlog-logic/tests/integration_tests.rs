@@ -218,5 +218,44 @@ fn test_compile_syntax_error() {
     assert!(result.is_err(), "Should fail with syntax error");
 }
 
+// =============================================================================
+// Learnable Rule Tests (ILP)
+// =============================================================================
+
+#[test]
+fn test_parse_learnable_rule() {
+    let input = include_str!("logic/learnable.xlog");
+    let result = parse_program(input);
+    assert!(
+        result.is_ok(),
+        "Failed to parse learnable program: {:?}",
+        result.err()
+    );
+
+    let program = result.unwrap();
+    assert_eq!(program.learnable_rules.len(), 1);
+
+    let lr = &program.learnable_rules[0];
+    assert_eq!(lr.mask_name, "W_mask");
+    assert_eq!(lr.head.predicate, "reach");
+    assert_eq!(lr.head.terms.len(), 2);
+    assert_eq!(lr.body.len(), 2);
+}
+
+#[test]
+fn test_parse_learnable_rule_preserves_normal_rules() {
+    let input = include_str!("logic/learnable.xlog");
+    let program = parse_program(input).unwrap();
+
+    // 3 facts (edge) are in program.rules
+    assert_eq!(program.facts().count(), 3);
+    // The learnable rule is NOT in program.rules
+    assert_eq!(program.proper_rules().count(), 0);
+    // It's in learnable_rules
+    assert_eq!(program.learnable_rules.len(), 1);
+    // Query still parsed
+    assert_eq!(program.queries.len(), 1);
+}
+
 // Note: Full execution tests require xlog-cuda and xlog-runtime
 // which depend on CUDA hardware. These will be added in later tasks.

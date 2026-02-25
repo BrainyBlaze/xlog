@@ -1,0 +1,8 @@
+// Learnable ILP test program
+edge(1, 2).
+edge(2, 3).
+edge(3, 4).
+
+learnable(W_mask) :: reach(X, Y) :- b1(X, Z), b2(Z, Y).
+
+?- reach(1, N).
