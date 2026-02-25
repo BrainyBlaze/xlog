@@ -1397,9 +1397,11 @@ dependencies = [
  "xlog-core",
  "xlog-cuda",
  "xlog-gpu",
+ "xlog-ir",
  "xlog-logic",
  "xlog-neural",
  "xlog-prob",
+ "xlog-runtime",
 ]
 
 [[package]]

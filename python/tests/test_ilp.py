@@ -162,7 +162,8 @@ def test_ilp_temperature_annealing():
 def test_ilp_predecessor_benchmark_smoke():
     """T5.1 smoke: Predecessor benchmark setup compiles and runs 5 steps."""
     source = """
-        zero(0). succ(0, 1). succ(1, 2). succ(2, 3). succ(3, 4).
+        edge(0, 1). edge(1, 2). edge(2, 3). edge(3, 4).
+        base(0, 1). base(1, 2). base(2, 3).
         learnable(W_mask) :: pred(X, Y) :- body1(X, Z), body2(Z, Y).
     """
     prog = pyxlog.IlpProgramFactory.compile(source, device=0, memory_mb=512)

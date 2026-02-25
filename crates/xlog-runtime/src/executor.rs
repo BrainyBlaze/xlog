@@ -2786,13 +2786,22 @@ impl Executor {
             let (_, right_name) = &rel_index[j as usize];
 
             let left_buf = match self.store.get(left_name) {
-                Some(buf) => buf,
-                None => continue,
+                Some(buf) if buf.arity() > 0 => buf,
+                _ => continue,
             };
             let right_buf = match self.store.get(right_name) {
-                Some(buf) => buf,
-                None => continue,
+                Some(buf) if buf.arity() > 0 => buf,
+                _ => continue,
             };
+
+            // Skip arity-mismatched relations: the join keys are fixed by
+            // the learnable rule template, so the mapped relation must have
+            // enough columns for every key index.
+            let left_max_key = left_keys.iter().copied().max().unwrap_or(0);
+            let right_max_key = right_keys.iter().copied().max().unwrap_or(0);
+            if left_buf.arity() <= left_max_key || right_buf.arity() <= right_max_key {
+                continue;
+            }
 
             let joined = self.provider.hash_join_v2(
                 left_buf, right_buf,

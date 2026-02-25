@@ -3800,7 +3800,7 @@ impl IlpProgramFactory {
         let (left_keys, right_keys) = extract_tmj_keys(&plan);
 
         Ok(CompiledIlpProgram {
-            base_source, learnable_source, ast, executor, provider,
+            base_source, _learnable_source: learnable_source, ast, executor, provider,
             plan, rel_index, schemas, left_keys, right_keys,
         })
     }
@@ -3809,7 +3809,7 @@ impl IlpProgramFactory {
 #[pyclass]
 pub struct CompiledIlpProgram {
     base_source: String,
-    learnable_source: String,
+    _learnable_source: String,
     ast: AstProgram,
     executor: Executor,
     provider: Arc<CudaKernelProvider>,
