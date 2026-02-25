@@ -19,7 +19,8 @@ use xlog_ir::{
 };
 
 use crate::ast::{
-    AggOp, ArithExpr, Atom, BodyLiteral, CompOp, Comparison, IsExpr, Program, Rule, Term,
+    AggOp, ArithExpr, Atom, BodyLiteral, CompOp, Comparison, IsExpr, LearnableRule, Program, Rule,
+    Term,
 };
 use crate::stratify::{build_dependency_graph, find_sccs_for_lowering, DepType};
 
@@ -365,6 +366,32 @@ impl Lowerer {
             }
         }
 
+        // Lower learnable rules (RD-32)
+        // Pre-allocate RelIds for ALL learnable predicates (heads + bodies)
+        // so every lower_learnable_rule snapshot is complete.
+        for learnable in &program.learnable_rules {
+            self.get_or_create_rel_id(&learnable.head.predicate);
+            for lit in &learnable.body {
+                if let BodyLiteral::Positive(atom) = lit {
+                    self.get_or_create_rel_id(&atom.predicate);
+                }
+            }
+        }
+        for learnable in &program.learnable_rules {
+            let head_pred = &learnable.head.predicate;
+            let scc_id = self.find_scc_for_predicate(head_pred);
+            let body = self.lower_learnable_rule(learnable)?;
+            let meta = self.create_meta_for_predicate(head_pred);
+            builder.add_rule(
+                scc_id,
+                CompiledRule {
+                    head: head_pred.clone(),
+                    body,
+                    meta,
+                },
+            );
+        }
+
         Ok(builder.build())
     }
 
@@ -385,6 +412,92 @@ impl Lowerer {
             .cloned()
             .unwrap_or_else(|| Schema::new(vec![]));
         RirMeta::with_schema(schema)
+    }
+
+    /// Lower a learnable rule template into a TensorMaskedJoin node.
+    /// RD-34: Validates body has exactly 2 positive atoms.
+    /// RD-36: Sorts rel_index by RelId for deterministic tensor dimension mapping.
+    /// RD-30: Uses get_or_create_rel_id for head (handles head-only predicates).
+    fn lower_learnable_rule(&mut self, rule: &LearnableRule) -> Result<RirNode> {
+        // RD-34: Validate body shape
+        if rule.body.len() != 2 {
+            return Err(XlogError::Compilation(format!(
+                "learnable rule '{}' requires exactly 2 body literals, got {}",
+                rule.mask_name,
+                rule.body.len()
+            )));
+        }
+        for (idx, lit) in rule.body.iter().enumerate() {
+            match lit {
+                BodyLiteral::Positive(_) => {}
+                _ => {
+                    return Err(XlogError::Compilation(format!(
+                        "learnable rule '{}' body[{}]: only positive atoms allowed",
+                        rule.mask_name, idx
+                    )));
+                }
+            }
+        }
+
+        // RD-36: Sort by RelId for deterministic mapping
+        let mut rel_index: Vec<(RelId, String)> = self
+            .rel_ids()
+            .iter()
+            .map(|(name, id)| (*id, name.clone()))
+            .collect();
+        rel_index.sort_by_key(|(id, _)| id.0);
+        let schema_size = rel_index.len();
+
+        let (left_keys, right_keys) =
+            self.extract_template_join_keys(&rule.body[0], &rule.body[1])?;
+
+        let head_rel_name = rule.head.predicate.clone();
+        // RD-30: Allocate lazily — head-only predicates may not have a RelId yet
+        let head_rel_id = self.get_or_create_rel_id(&head_rel_name);
+
+        Ok(RirNode::TensorMaskedJoin {
+            mask_name: rule.mask_name.clone(),
+            schema_size,
+            left_keys,
+            right_keys,
+            rel_index,
+            head_rel_name,
+            head_rel_id,
+            max_active_rules: 32,
+        })
+    }
+
+    /// Extract join keys from two body literals' shared variables.
+    /// For `b1(X, Z), b2(Z, Y)`, the shared variable Z gives left_keys=[1], right_keys=[0].
+    fn extract_template_join_keys(
+        &self,
+        left: &BodyLiteral,
+        right: &BodyLiteral,
+    ) -> Result<(Vec<usize>, Vec<usize>)> {
+        let left_atom = left.atom().ok_or_else(|| {
+            XlogError::Compilation("Learnable body[0] is not an atom".into())
+        })?;
+        let right_atom = right.atom().ok_or_else(|| {
+            XlogError::Compilation("Learnable body[1] is not an atom".into())
+        })?;
+
+        let mut left_keys = Vec::new();
+        let mut right_keys = Vec::new();
+
+        for (li, lt) in left_atom.terms.iter().enumerate() {
+            if let Some(lname) = lt.variable_name() {
+                for (ri, rt) in right_atom.terms.iter().enumerate() {
+                    if let Some(rname) = rt.variable_name() {
+                        if lname == rname {
+                            left_keys.push(li);
+                            right_keys.push(ri);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok((left_keys, right_keys))
     }
 
     /// Lower a single rule to an RIR node

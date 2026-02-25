@@ -294,5 +294,39 @@ fn test_stratify_with_learnable_rule() {
     );
 }
 
+#[test]
+fn test_compile_learnable_rule_produces_tmj() {
+    let input = r#"
+        edge(1, 2).
+        edge(2, 3).
+        learnable(W) :: reach(X, Y) :- b1(X, Z), b2(Z, Y).
+    "#;
+    let mut compiler = Compiler::new();
+    let result = compiler.compile(input);
+    assert!(
+        result.is_ok(),
+        "Compilation failed: {:?}",
+        result.err()
+    );
+
+    // Verify we can find a TensorMaskedJoin in the plan
+    let plan = result.unwrap();
+    let has_tmj = plan.rules_by_scc.iter().flatten().any(|rule| {
+        matches!(rule.body, xlog_ir::rir::RirNode::TensorMaskedJoin { .. })
+    });
+    assert!(has_tmj, "Expected TensorMaskedJoin in compiled plan");
+}
+
+#[test]
+fn test_learnable_rule_body_validation() {
+    // Body must have exactly 2 positive atoms
+    let input = r#"
+        learnable(W) :: h(X) :- b1(X, Z).
+    "#;
+    let mut compiler = Compiler::new();
+    let result = compiler.compile(input);
+    assert!(result.is_err(), "Should reject single-body learnable rule");
+}
+
 // Note: Full execution tests require xlog-cuda and xlog-runtime
 // which depend on CUDA hardware. These will be added in later tasks.

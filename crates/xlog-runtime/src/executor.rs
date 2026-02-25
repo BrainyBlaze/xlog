@@ -481,6 +481,7 @@ impl Executor {
                 RirNode::Fixpoint {
                     base, recursive, ..
                 } => contains_non_monotonic_ops(base) || contains_non_monotonic_ops(recursive),
+                RirNode::TensorMaskedJoin { .. } => false,
             }
         }
 
@@ -786,6 +787,11 @@ impl Executor {
             } => {
                 // Semi-naive fixpoint iteration
                 self.execute_fixpoint(*scc_id, base, recursive, *delta_rel, *full_rel)
+            }
+            RirNode::TensorMaskedJoin { .. } => {
+                Err(XlogError::Execution(
+                    "TensorMaskedJoin execution not yet implemented (Task 8)".into(),
+                ))
             }
         }
     }
@@ -1267,6 +1273,11 @@ impl Executor {
                 Self::collect_scan_rels(base, out);
                 Self::collect_scan_rels(recursive, out);
             }
+            RirNode::TensorMaskedJoin { rel_index, .. } => {
+                for (rel_id, _) in rel_index {
+                    out.push(*rel_id);
+                }
+            }
         }
     }
 
@@ -1456,6 +1467,10 @@ impl Executor {
                     },
                     replaced_recursive,
                 )
+            }
+            RirNode::TensorMaskedJoin { .. } => {
+                // TensorMaskedJoin is a leaf node — no child scans to rewrite.
+                (node.clone(), false)
             }
         }
     }
