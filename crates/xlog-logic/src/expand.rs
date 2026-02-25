@@ -486,6 +486,7 @@ pub fn expand_program_functions(
         evidence: program.evidence.clone(),
         prob_queries: program.prob_queries.clone(),
         neural_predicates: program.neural_predicates.clone(),
+        learnable_rules: program.learnable_rules.clone(),
     })
 }
 

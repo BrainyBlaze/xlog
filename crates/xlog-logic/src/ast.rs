@@ -357,6 +357,16 @@ pub enum NeuralLabel {
     Symbol(String),
 }
 
+/// A learnable rule template parameterized by a named tensor mask.
+/// Used for differentiable ILP — the mask selects which (body1, body2, head)
+/// combinations are active during execution.
+#[derive(Debug, Clone)]
+pub struct LearnableRule {
+    pub mask_name: String,
+    pub head: Atom,
+    pub body: Vec<BodyLiteral>,
+}
+
 /// Annotated disjunction (`p1::a1; p2::a2.`)
 #[derive(Debug, Clone, PartialEq)]
 pub struct AnnotatedDisjunction {
@@ -468,6 +478,7 @@ pub struct Program {
     pub evidence: Vec<Evidence>,
     pub prob_queries: Vec<ProbQuery>,
     pub neural_predicates: Vec<NeuralPredDecl>,
+    pub learnable_rules: Vec<LearnableRule>,
     pub directives: Directives,
 }
 
