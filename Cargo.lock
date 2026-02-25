@@ -2236,6 +2236,7 @@ dependencies = [
 name = "xlog-runtime"
 version = "0.3.2"
 dependencies = [
+ "bytemuck",
  "cudarc",
  "xlog-core",
  "xlog-cuda",

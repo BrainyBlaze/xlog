@@ -192,6 +192,10 @@ pub enum RirNode {
         head_rel_id: RelId,
         /// Maximum active rules to process (budget cap, RD-6).
         max_active_rules: usize,
+        /// Column indices from the join result to project into the head schema.
+        /// Maps head column i to join result column head_projection[i].
+        /// Join result columns are: [left_col_0..left_col_n, right_col_0..right_col_m].
+        head_projection: Vec<usize>,
     },
 }
 

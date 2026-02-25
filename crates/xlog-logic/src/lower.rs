@@ -455,6 +455,52 @@ impl Lowerer {
         // RD-30: Allocate lazily — head-only predicates may not have a RelId yet
         let head_rel_id = self.get_or_create_rel_id(&head_rel_name);
 
+        // Compute head projection: map head variables to join result columns.
+        // Join result layout: [left_col_0..left_col_n, right_col_0..right_col_m].
+        let left_atom = rule.body[0].atom().unwrap();
+        let right_atom = rule.body[1].atom().unwrap();
+        let left_arity = left_atom.terms.len();
+
+        // Build variable -> first-occurrence column mapping over joined result
+        let mut var_to_col: HashMap<String, usize> = HashMap::new();
+        for (i, term) in left_atom.terms.iter().enumerate() {
+            if let Some(name) = term.variable_name() {
+                var_to_col.entry(name.to_string()).or_insert(i);
+            }
+        }
+        for (i, term) in right_atom.terms.iter().enumerate() {
+            if let Some(name) = term.variable_name() {
+                var_to_col.entry(name.to_string()).or_insert(left_arity + i);
+            }
+        }
+
+        let head_projection: Vec<usize> = rule.head.terms.iter().map(|term| {
+            if let Some(name) = term.variable_name() {
+                *var_to_col.get(name).unwrap_or(&0)
+            } else {
+                0 // Constants in head default to column 0 (shouldn't happen in ILP templates)
+            }
+        }).collect();
+
+        // Infer schema for head predicate from the learnable rule if not already set.
+        // The head's column types come from the projected join columns.
+        if !self.schemas.contains_key(&head_rel_name) {
+            let columns: Vec<(String, ScalarType)> = head_projection.iter().enumerate().map(|(i, &col)| {
+                // Determine the type from left or right atom's schema
+                let ty = if col < left_arity {
+                    self.schemas.get(&left_atom.predicate)
+                        .and_then(|s| s.column_type(col))
+                        .unwrap_or(ScalarType::U32)
+                } else {
+                    self.schemas.get(&right_atom.predicate)
+                        .and_then(|s| s.column_type(col - left_arity))
+                        .unwrap_or(ScalarType::U32)
+                };
+                (format!("c{}", i), ty)
+            }).collect();
+            self.schemas.insert(head_rel_name.clone(), Schema::new(columns));
+        }
+
         Ok(RirNode::TensorMaskedJoin {
             mask_name: rule.mask_name.clone(),
             schema_size,
@@ -464,6 +510,7 @@ impl Lowerer {
             head_rel_name,
             head_rel_id,
             max_active_rules: 32,
+            head_projection,
         })
     }
 

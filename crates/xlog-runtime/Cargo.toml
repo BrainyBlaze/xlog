@@ -12,3 +12,4 @@ xlog-stats = { path = "../xlog-stats" }
 
 [dev-dependencies]
 xlog-logic = { path = "../xlog-logic" }
+bytemuck = "1.14"

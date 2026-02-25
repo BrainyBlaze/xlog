@@ -813,6 +813,7 @@ impl Executor {
                 rel_index,
                 head_rel_name,
                 max_active_rules,
+                head_projection,
                 ..
             } => self.execute_tensor_masked_join(
                 mask_name,
@@ -822,6 +823,7 @@ impl Executor {
                 rel_index,
                 head_rel_name,
                 *max_active_rules,
+                head_projection,
             ),
         }
     }
@@ -2747,6 +2749,7 @@ impl Executor {
         rel_index: &[(RelId, String)],
         head_rel_name: &str,
         max_active_rules: usize,
+        head_projection: &[usize],
     ) -> Result<CudaBuffer> {
         // RD-12: No-op when no mask registered. Return empty buffer with
         // the head relation's schema (not Schema::new(vec![])) to prevent
@@ -2797,13 +2800,26 @@ impl Executor {
                 CudaJoinType::Inner,
             )?;
 
+            // Project join result to head schema columns if projection is specified.
+            // The join produces [left_cols..., right_cols...] but the head may only
+            // need a subset (e.g. reach(X,Y) from b1(X,Z) join b2(Z,Y) needs cols 0,3).
+            let projected = if !head_projection.is_empty() && head_projection.len() < joined.arity() {
+                let proj_exprs: Vec<ProjectExpr> = head_projection
+                    .iter()
+                    .map(|&col| ProjectExpr::Column(col))
+                    .collect();
+                self.execute_project(&joined, &proj_exprs)?
+            } else {
+                joined
+            };
+
             // RD-22: Use public helper instead of private device_row_count
-            let num_rows = read_device_row_count(&self.provider, &joined)? as u32;
+            let num_rows = read_device_row_count(&self.provider, &projected)? as u32;
 
             if num_rows > 0 {
                 // RD-17: Store only metadata, not CudaBuffer clones
                 tag_entries.push(IlpTagEntry { i, j, k, num_rows });
-                results_by_k.entry(k).or_default().push(joined);
+                results_by_k.entry(k).or_default().push(projected);
             }
         }
 
