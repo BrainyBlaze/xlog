@@ -2,6 +2,7 @@
 from pyxlog.ilp.entropy import entropy_weight_at_step, normalized_entropy
 from pyxlog.ilp.exceptions import IlpCandidateError, IlpConfigError, IlpTrainingError
 from pyxlog.ilp.temperature import AdaptiveTempController, TempMode
+from pyxlog.ilp.trainer import train_only
 from pyxlog.ilp.types import (
     ArtifactMetadata,
     CandidateMapEntry,
@@ -33,4 +34,5 @@ __all__ = [
     "PromotionStatus",
     "PromotionResult",
     "GateResult",
+    "train_only",
 ]
