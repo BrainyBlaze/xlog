@@ -9,10 +9,13 @@
 
 ## Executive Summary
 
+> **Note:** This is a single-run analysis. Multi-run reliability (5/5 consecutive
+> passes, 100% convergence rate) was validated separately — see commit `05e91632`.
+
 All 4 stages converge to the exact target rule. Two stages required retries
 (fresh random re-initialisation of the weight tensor W), demonstrating that
-the retry mechanism is essential for robust convergence in the presence of
-distractor predicates and template-variable local minima.
+the retry mechanism is essential for convergence in the presence of distractor
+predicates and template-variable local minima.
 
 | Stage | Target Rule | Steps | Attempt | Retries Used |
 |-------|------------|-------|---------|--------------|
@@ -42,27 +45,31 @@ derives nothing), the convergence gate never opens.
 
 **Phase B — Partial discovery (steps 8–14):** The argmax shifts to `edge+bR→reach`.
 This is closer — `edge` is a real base relation and `reach` is the correct head — but
-`bR` is still a template variable. Loss drops (0.2 at step 13) as surrounding mask
-entries contribute credit, but the argmax-only validation at step 13 (stable=5)
-correctly rejects this rule: edge(X,Z)⋈bR(Z,Y) alone cannot derive reach(1,3).
+`bR` is still a template variable. Stable count reaches 5 at step 13, but since
+`all_derived` is False (edge⋈bR produces nothing), the convergence gate blocks
+before argmax-only validation is even reached.
 
 **Phase C — Convergence (steps 15–20):** The argmax shifts to `edge+edge→reach`,
-the correct rule. Loss is low and stable (~0.3). At step 20 (stable=5), the
-argmax-only validation passes — a single mask entry at (edge,edge,reach)
-derives all 4 positive examples. Converged at step 21.
+the correct rule. Loss is low and stable (~0.3). At step 20 (stable=5), `all_derived`
+is True for the first time — the budget mask derives all 4 positives. The argmax-only
+validation then confirms that a single mask entry at (edge,edge,reach) alone derives
+all positives. Converged at step 21.
 
 ### Key Observation
 
-The argmax-only validation (lines 198–218 of the showcase) is critical here. Without
-it, the optimiser could have falsely converged at step 5 or step 13, where surrounding
-mask entries were contributing derivations but the reported argmax rule was wrong.
+The two-gate convergence check provides defense in depth. The `all_derived` gate
+(line 192–196) blocks convergence when the argmax rule derives nothing — this prevented
+false convergence at steps 5 and 13, where template variables (bL, bR) cannot produce
+derivations. The argmax-only validation (lines 198–218) then guards against a subtler
+failure mode: where the budget mask derives all positives via *non-argmax* entries
+while the reported argmax rule alone cannot. Both gates are necessary.
 
 ---
 
 ## Stage 2: Family Grandparent (27 steps, 2nd attempt)
 
 **Domain:** Family tree with 6 people + distractor relations (gender, sibling).
-**Search space:** N=8 relations → 512-cell W tensor.
+**Search space:** N=6 relations → 216-cell W tensor.
 **Features exercised:** Distractor relations, negative examples, missed-positive penalty (RD-21), retry mechanism.
 
 ### Attempt 1 — Stuck on Gender (120 steps, FAILED)
@@ -119,7 +126,7 @@ The `gender` relation is a particularly effective distractor because:
 ## Stage 3: Workplace Colleague (32 steps, 1st attempt)
 
 **Domain:** 4 employees at 2 companies + distractor relation (livesIn at 2 cities).
-**Search space:** N=6 relations → 216-cell W tensor.
+**Search space:** N=5 relations → 125-cell W tensor.
 **Features exercised:** Shared-endpoint join pattern (bR(Y,Z) not bR(Z,Y)), head projection [0,2], distractor separation.
 
 ### Training Dynamics
@@ -157,7 +164,7 @@ same city (201), but worksAt correctly excludes it (different companies).
 ## Stage 4: Arithmetic plus2 (39 steps, 2nd attempt)
 
 **Domain:** Integer successor chain 0→1→2→3→4→5, with pred (inverse) as distractor.
-**Search space:** N=7 relations → 343-cell W tensor.
+**Search space:** N=5 relations → 125-cell W tensor.
 **Features exercised:** Temperature annealing (tau 2.5→0.05), rule commit, post-commit validation.
 
 ### Attempt 1 — Template Variable Trap (150 steps, FAILED)
@@ -222,7 +229,7 @@ these patterns.
 
 All four stages exhibit a similar three-phase pattern:
 1. **Random exploration** (5–30 steps): High loss, unstable argmax, low discreteness.
-2. **Local minimum** (0–120 steps): Argmax locks onto wrong rule, loss may drop
+2. **Local minimum** (0–150 steps): Argmax locks onto wrong rule, loss may drop
    misleadingly. Argmax-only validation prevents false convergence.
 3. **Phase transition**: Argmax jumps to correct rule, loss drops, convergence within 5–10 steps.
 
