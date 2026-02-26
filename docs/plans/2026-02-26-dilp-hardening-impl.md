@@ -10,20 +10,27 @@
 
 **Design doc:** `docs/plans/2026-02-26-dilp-hardening-design.md`
 
+**Key syntax references (from existing codebase):**
+- Learnable rule: `learnable(W_reach) :: reach(X, Y) :- bL(X, Z), bR(Z, Y).`
+- Compile: `pyxlog.IlpProgramFactory.compile(source, device=0, memory_mb=512)` (static method)
+- CUDA gate: `torch = pytest.importorskip("torch")` + `if not torch.cuda.is_available(): pytest.skip(...)`
+- Template names: `bL`, `bR` (or `b1`, `b2`) — identified by the compiler, not by prefix
+
 **Alpha scope (what's IN):**
 - Python types (TrainConfig, TrainResult, LearnedArtifact, exceptions)
-- Rust `valid_candidates(mask_name)` API with candidate pruning
+- Rust `valid_candidates(mask_name, allow_recursive)` API with candidate pruning
 - Configurable `max_active_rules` (no longer hardcoded 32)
 - Adaptive temperature controller (COOLING/PLATEAU/WARMUP)
 - Entropy regularization (normalized)
 - Structured multi-start (best-of-K with random reserve)
-- `train_only()` entry point with per-attempt isolation
+- `train_only()` entry point with per-attempt isolation (dense mask, Phase 1)
 - NaN/Inf detection and numeric failure policy
 - Telemetry level 0 (summary) and level 1 (per-step)
 - 5/5 reliability gate on showcase suite
 
 **Alpha scope (what's OUT — deferred):**
 - `set_rule_mask_sparse()` (beta — Phase 2 sparse API)
+- Factorized scoring over C-vector (RC — requires Phase 2 sparse mask)
 - `train_and_promote()` + promotion gates (beta)
 - Ambiguity detection (beta)
 - CUDA event profiling counters (beta)
@@ -33,6 +40,13 @@
 - Artifact save/load persistence (beta)
 - Typed schemas (GA)
 - Telemetry level 2 streaming (GA)
+
+**Alpha training loop uses dense N³ mask** (same as current showcase). The
+`valid_candidates()` API provides the candidate list for Python-side bookkeeping
+(argmax decoding, confidence metrics, rule formatting), but the actual mask
+passed to `set_rule_mask()` is still the full N³ tensor. Factorized scoring
+(operating only on C logits) is deferred to RC when `set_rule_mask_sparse()`
+is available.
 
 ---
 
@@ -49,72 +63,85 @@
 ```python
 # python/tests/test_ilp_candidates.py
 """Tests for valid_candidates() Rust API."""
-import pyxlog
+import pytest
+
+torch = pytest.importorskip("torch")
+pyxlog = pytest.importorskip("pyxlog")
+
+if not torch.cuda.is_available():
+    pytest.skip("CUDA is required for ILP tests", allow_module_level=True)
 
 SOURCE = """
     edge(1, 2).
     edge(2, 3).
     edge(3, 4).
-    learnable reach(X, Y) :- bL(X, Z), bR(Z, Y).
+    learnable(W) :: reach(X, Y) :- bL(X, Z), bR(Z, Y).
 """
 
 
 def test_valid_candidates_returns_candidates():
     """valid_candidates returns non-empty list of CandidateInfo dicts."""
-    factory = pyxlog.IlpProgramFactory()
-    prog = factory.compile(SOURCE)
+    prog = pyxlog.IlpProgramFactory.compile(SOURCE, device=0, memory_mb=512)
     candidates = prog.valid_candidates("W")
     assert isinstance(candidates, list)
     assert len(candidates) > 0
-    # Each candidate is a dict with required keys
+    # Each candidate has required keys
     c = candidates[0]
     assert set(c.keys()) == {"id", "i", "j", "k", "left_name", "right_name", "head_name"}
 
 
 def test_valid_candidates_deterministic_ids():
     """Same program produces same candidate IDs."""
-    factory = pyxlog.IlpProgramFactory()
-    prog1 = factory.compile(SOURCE)
-    prog2 = factory.compile(SOURCE)
+    prog1 = pyxlog.IlpProgramFactory.compile(SOURCE, device=0, memory_mb=512)
+    prog2 = pyxlog.IlpProgramFactory.compile(SOURCE, device=0, memory_mb=512)
     c1 = prog1.valid_candidates("W")
     c2 = prog2.valid_candidates("W")
     assert [c["id"] for c in c1] == [c["id"] for c in c2]
 
 
-def test_valid_candidates_prunes_template_template():
-    """Candidates where both body atoms are templates are pruned."""
-    factory = pyxlog.IlpProgramFactory()
-    prog = factory.compile(SOURCE)
+def test_valid_candidates_prunes_template_plus_template():
+    """Candidates where both body atoms are template variables are pruned."""
+    prog = pyxlog.IlpProgramFactory.compile(SOURCE, device=0, memory_mb=512)
     candidates = prog.valid_candidates("W")
+    # Get the actual template names from relation list
+    names = prog.ilp_relation_names()
+    templates = {n for n in names if n.startswith("bL") or n.startswith("bR")
+                 or n.startswith("b1") or n.startswith("b2")}
     for c in candidates:
-        assert not (c["left_name"].startswith("b") and c["right_name"].startswith("b")), \
+        assert not (c["left_name"] in templates and c["right_name"] in templates), \
             f"Template+template candidate not pruned: {c}"
 
 
 def test_valid_candidates_head_is_target():
     """All candidates have head_name == the learnable target relation."""
-    factory = pyxlog.IlpProgramFactory()
-    prog = factory.compile(SOURCE)
+    prog = pyxlog.IlpProgramFactory.compile(SOURCE, device=0, memory_mb=512)
     candidates = prog.valid_candidates("W")
     for c in candidates:
         assert c["head_name"] == "reach", f"Wrong head: {c}"
 
 
 def test_valid_candidates_nonrecursive_prunes_head_in_body():
-    """With allow_recursive=False (default), candidates where body==head are pruned."""
-    factory = pyxlog.IlpProgramFactory()
-    prog = factory.compile(SOURCE)
-    candidates = prog.valid_candidates("W")
+    """Default (allow_recursive=False): candidates where body==head are pruned."""
+    prog = pyxlog.IlpProgramFactory.compile(SOURCE, device=0, memory_mb=512)
+    candidates = prog.valid_candidates("W")  # default: allow_recursive=False
     for c in candidates:
-        # reach has no base facts, so i==k_idx or j==k_idx should be pruned
+        # reach has no base facts, so body referencing reach should be pruned
         assert c["left_name"] != "reach" and c["right_name"] != "reach", \
             f"Recursive candidate not pruned: {c}"
 
 
+def test_valid_candidates_recursive_allowed():
+    """With allow_recursive=True, body==head candidates are included."""
+    prog = pyxlog.IlpProgramFactory.compile(SOURCE, device=0, memory_mb=512)
+    candidates_strict = prog.valid_candidates("W", allow_recursive=False)
+    candidates_open = prog.valid_candidates("W", allow_recursive=True)
+    # Open set should be >= strict set (may have recursive candidates)
+    assert len(candidates_open) >= len(candidates_strict)
+
+
 def test_valid_candidates_ids_contiguous():
     """IDs are 0..C-1 with no gaps."""
-    factory = pyxlog.IlpProgramFactory()
-    prog = factory.compile(SOURCE)
+    prog = pyxlog.IlpProgramFactory.compile(SOURCE, device=0, memory_mb=512)
     candidates = prog.valid_candidates("W")
     ids = sorted(c["id"] for c in candidates)
     assert ids == list(range(len(candidates)))
@@ -127,38 +154,113 @@ Expected: FAIL with `AttributeError: 'CompiledIlpProgram' has no attribute 'vali
 
 **Step 3: Implement valid_candidates in Rust**
 
-In `crates/pyxlog/src/lib.rs`, add to the `#[pymethods]` impl block for `CompiledIlpProgram` (after `ilp_relation_names` around line 3984):
+In `crates/pyxlog/src/lib.rs`, add to the `#[pymethods]` impl block for
+`CompiledIlpProgram` (after `ilp_relation_names` around line 3984):
 
 ```rust
 /// Return the set of valid (i,j,k) candidates for the given learnable mask.
-/// Each candidate is a dict: {id, i, j, k, left_name, right_name, head_name}.
-/// Pruning: template+template bodies removed, recursive (body==head) removed
-/// unless head has base facts. Sorted by (k,i,j), IDs assigned 0..C-1.
-fn valid_candidates(&self, mask_name: String) -> PyResult<Vec<HashMap<String, PyObject>>> {
-    // Implementation:
-    // 1. Look up mask_name in ILP registry to get schema_size (N) and rel_index
-    // 2. Identify head relation index (k) from the learnable rule metadata
-    // 3. Enumerate all (i, j) pairs where i,j in 0..N
-    // 4. Prune: template+template, recursive (i==k_head or j==k_head unless head has base facts)
-    // 5. Sort by (k, i, j), assign IDs 0..C-1
-    // 6. Return as list of dicts
-    // ... (full implementation in Step 3)
+///
+/// Pruning rules:
+/// - k must be the head relation for this mask
+/// - At least one of (i,j) must be a base relation with nonzero tuples
+/// - Template+template body pairs are pruned
+/// - If allow_recursive is false: i==k_head or j==k_head are pruned
+///
+/// Returns list of dicts: [{id, i, j, k, left_name, right_name, head_name}]
+/// IDs assigned 0..C-1 after sorting by (k, i, j) ascending.
+#[pyo3(signature = (mask_name, allow_recursive=false))]
+fn valid_candidates(
+    &self,
+    py: Python<'_>,
+    mask_name: String,
+    allow_recursive: bool,
+) -> PyResult<Vec<HashMap<String, PyObject>>> {
+    let n = self.compiled_schema_size;
+    let head_name = &self.head_rel_name;  // need to add this field
+
+    // Find head index in rel_index
+    let k_head = self.rel_index.iter()
+        .position(|(_, name)| name == head_name)
+        .ok_or_else(|| PyValueError::new_err(
+            format!("head relation '{}' not in rel_index", head_name)
+        ))? as u32;
+
+    // Identify which relations have nonzero tuples in the store
+    let has_tuples: Vec<bool> = self.rel_index.iter()
+        .map(|(_, name)| {
+            self.executor.store.get(name)
+                .map(|buf| buf.num_rows().unwrap_or(0) > 0)
+                .unwrap_or(false)
+        })
+        .collect();
+
+    // Identify template variables (bL, bR, b1, b2 etc — no base facts)
+    // Templates are relations in rel_index that have zero tuples
+    // and are body-variable placeholders from lower_learnable_rule
+
+    let mut candidates: Vec<(u32, u32, u32)> = Vec::new();
+
+    for i in 0..n as u32 {
+        for j in 0..n as u32 {
+            let k = k_head;  // only head relation is valid target
+
+            // Prune: both body atoms must not both be template (no tuples)
+            if !has_tuples[i as usize] && !has_tuples[j as usize] {
+                continue;
+            }
+
+            // Prune: recursive (body references head) unless allowed
+            if !allow_recursive && (i == k || j == k) {
+                // Allow if head already has base facts
+                if !has_tuples[k as usize] {
+                    continue;
+                }
+            }
+
+            candidates.push((i, j, k));
+        }
+    }
+
+    // Sort by (k, i, j) and assign stable IDs
+    candidates.sort();
+
+    let result: Vec<HashMap<String, PyObject>> = candidates.iter()
+        .enumerate()
+        .map(|(id, &(i, j, k))| {
+            let mut d = HashMap::new();
+            d.insert("id".into(), id.to_object(py));
+            d.insert("i".into(), i.to_object(py));
+            d.insert("j".into(), j.to_object(py));
+            d.insert("k".into(), k.to_object(py));
+            d.insert("left_name".into(),
+                     self.rel_index[i as usize].1.to_object(py));
+            d.insert("right_name".into(),
+                     self.rel_index[j as usize].1.to_object(py));
+            d.insert("head_name".into(),
+                     self.rel_index[k as usize].1.to_object(py));
+            d
+        })
+        .collect();
+
+    Ok(result)
 }
 ```
 
-The implementation needs access to:
-- `self.rel_index` — the sorted `Vec<(RelId, String)>` mapping
-- `self.executor.store` — to check which relations have nonzero tuples
-- The learnable rule's head relation name (stored during compilation)
-
-Add a field `head_rel_name: String` to `CompiledIlpProgram` (populated in `compile()`).
+Also add `head_rel_name: String` field to `CompiledIlpProgram` struct
+(line ~3830) and populate it in the `compile()` method by extracting the
+head relation name from the learnable rule's AST.
 
 **Step 4: Rebuild and run tests**
 
 Run: `cd /home/dev/projects/xlog && .venv/bin/maturin develop --release && .venv/bin/python -m pytest python/tests/test_ilp_candidates.py -v`
-Expected: All 6 tests PASS
+Expected: All 7 tests PASS
 
-**Step 5: Commit**
+**Step 5: Run existing ILP tests for regression**
+
+Run: `.venv/bin/python -m pytest python/tests/test_ilp.py -v`
+Expected: All 9 tests PASS
+
+**Step 6: Commit**
 
 ```bash
 git add crates/pyxlog/src/lib.rs python/tests/test_ilp_candidates.py
@@ -182,10 +284,25 @@ Add to `python/tests/test_ilp_candidates.py`:
 ```python
 def test_max_active_rules_configurable():
     """Compilation accepts max_active_rules parameter."""
-    factory = pyxlog.IlpProgramFactory()
-    prog = factory.compile(SOURCE, max_active_rules=64)
-    # Verify it compiles without error; the value is used at evaluation time
+    prog = pyxlog.IlpProgramFactory.compile(
+        SOURCE, device=0, memory_mb=512, max_active_rules=64
+    )
     assert prog.ilp_schema_size() > 0
+
+
+def test_max_active_rules_default_is_32():
+    """Default max_active_rules is 32 (backward compatible)."""
+    prog = pyxlog.IlpProgramFactory.compile(SOURCE, device=0, memory_mb=512)
+    # No way to query it directly, but compilation succeeds with default
+    assert prog.ilp_schema_size() > 0
+
+
+def test_max_active_rules_rejects_out_of_range():
+    """Values outside 16-128 are rejected."""
+    with pytest.raises(ValueError):
+        pyxlog.IlpProgramFactory.compile(SOURCE, device=0, memory_mb=512, max_active_rules=5)
+    with pytest.raises(ValueError):
+        pyxlog.IlpProgramFactory.compile(SOURCE, device=0, memory_mb=512, max_active_rules=500)
 ```
 
 **Step 2: Run test to verify it fails**
@@ -195,19 +312,26 @@ Expected: FAIL with `TypeError: compile() got an unexpected keyword argument 'ma
 
 **Step 3: Implement configurable max_active_rules**
 
-1. In `crates/pyxlog/src/lib.rs` `compile()` method: add `max_active_rules: Option<usize>` param, default to 32, validate range 16-128.
-2. Pass through to `lower_learnable_rule()` in `crates/xlog-logic/src/lower.rs:524`.
-3. In `lower.rs`: replace hardcoded `32` with the parameter.
+1. In `crates/pyxlog/src/lib.rs`, `IlpProgramFactory::compile()` (~line 3767):
+   add `max_active_rules: Option<usize>` param with `#[pyo3(signature = (source, device=0, memory_mb=512, max_active_rules=None))]`.
+   Validate: if provided, must be 16..=128; if None, default to 32.
+   Pass through to the compiler/lowering phase.
+
+2. In `crates/xlog-logic/src/lower.rs:524`: accept `max_active_rules` as a
+   parameter to `lower_learnable_rule()` instead of hardcoding 32.
+
+3. Threading: `compile()` → `compiler.compile_program()` needs to carry the
+   value. Either add it to `Compiler` config or pass to `lower_learnable_rule()`.
 
 **Step 4: Rebuild and run tests**
 
 Run: `.venv/bin/maturin develop --release && .venv/bin/python -m pytest python/tests/test_ilp_candidates.py -v`
-Expected: All tests PASS (including new one)
+Expected: All tests PASS (including new ones)
 
-**Step 5: Run existing ILP tests to verify no regression**
+**Step 5: Regression check**
 
 Run: `.venv/bin/python -m pytest python/tests/test_ilp.py -v`
-Expected: All 9 tests PASS (default 32 preserves current behavior)
+Expected: All 9 tests PASS (default 32 preserves behavior)
 
 **Step 6: Commit**
 
@@ -223,38 +347,34 @@ git commit -m "feat(ilp): make max_active_rules configurable (16-128, default 32
 ### Task 3: Create pyxlog.ilp module with types and exceptions
 
 **Files:**
-- Create: `python/pyxlog/__init__.py` (if not exists, or verify it imports pyxlog native)
 - Create: `python/pyxlog/ilp/__init__.py`
 - Create: `python/pyxlog/ilp/types.py`
 - Create: `python/pyxlog/ilp/exceptions.py`
 - Test: `python/tests/test_ilp_types.py` (create)
 
-**Important:** pyxlog is a native extension (cdylib via maturin), not a pure Python package.
-The `python/pyxlog/ilp/` module is a pure Python sub-package that imports from the
-native `pyxlog` module. It lives alongside the native module in the package.
-
-Check if `python/pyxlog/__init__.py` exists first. If pyxlog is purely a cdylib with
-no Python wrapper, we need to create the package structure carefully — possibly as
-a separate `pyxlog_ilp` package or by using maturin's mixed Python/Rust layout.
+**Important:** pyxlog is a native cdylib extension (maturin). The `python/pyxlog/ilp/`
+sub-package is pure Python. Verify maturin's mixed layout support first:
+check if `python/pyxlog/__init__.py` exists. If not, the native module is
+imported directly as `pyxlog` and a separate `pyxlog.ilp` pure-Python package
+may need special setup (e.g., `python-packages` in pyproject.toml or a
+standalone `pyxlog_ilp` package). Determine the correct layout before creating files.
 
 **Step 1: Verify current package structure**
 
-Run: `ls -la python/pyxlog/ 2>/dev/null && cat crates/pyxlog/pyproject.toml`
+Run: `ls -la python/pyxlog/ 2>/dev/null; grep -A5 'python-source\|python-packages\|mixed' crates/pyxlog/pyproject.toml 2>/dev/null`
 
-If no `python/pyxlog/` exists, check maturin config for `python-source` or
-`python-packages` settings. The module name in pyproject.toml is `pyxlog`.
+Depending on result, either:
+- (a) Use maturin mixed layout: create `python/pyxlog/__init__.py` that re-exports native module, then add `ilp/` sub-package.
+- (b) Create standalone `python/pyxlog_ilp/` package if mixed layout isn't viable.
 
-For maturin mixed layout, create `python/pyxlog/ilp/` alongside the native module.
+**Step 2: Write type definitions**
 
-**Step 2: Write the type definitions**
+`python/pyxlog/ilp/types.py`:
 
 ```python
-# python/pyxlog/ilp/types.py
 """dILP trainer types — see docs/plans/2026-02-26-dilp-hardening-design.md"""
 from __future__ import annotations
 
-import hashlib
-import json
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -310,7 +430,7 @@ class TrainConfig:
 
     # Compilation
     device: int = 0
-    memory_mb: int | None = None
+    memory_mb: int = 512
 
     # Observability
     telemetry_level: int = 0
@@ -417,8 +537,9 @@ class PromotionResult:
     artifact: LearnedArtifact = field(default_factory=LearnedArtifact)
 ```
 
+`python/pyxlog/ilp/exceptions.py`:
+
 ```python
-# python/pyxlog/ilp/exceptions.py
 """dILP exception taxonomy."""
 
 
@@ -443,8 +564,9 @@ class IlpTrainingError(RuntimeError):
         self.context = context or {}
 ```
 
+`python/pyxlog/ilp/__init__.py`:
+
 ```python
-# python/pyxlog/ilp/__init__.py
 """dILP trainer module."""
 from pyxlog.ilp.exceptions import IlpCandidateError, IlpConfigError, IlpTrainingError
 from pyxlog.ilp.types import (
@@ -493,17 +615,15 @@ from pyxlog.ilp import (
 
 
 def test_train_config_frozen():
-    """TrainConfig is immutable after creation."""
     cfg = TrainConfig()
     try:
         cfg.tau_start = 99.0  # type: ignore
-        assert False, "Should have raised FrozenInstanceError"
+        assert False, "Should have raised"
     except AttributeError:
-        pass  # dataclass(frozen=True) raises AttributeError
+        pass
 
 
 def test_train_config_defaults():
-    """Default values match design doc."""
     cfg = TrainConfig()
     assert cfg.global_step_limit == 1000
     assert cfg.max_attempts == 5
@@ -511,10 +631,11 @@ def test_train_config_defaults():
     assert cfg.max_active_rules == 32
     assert cfg.allow_recursive_candidates is False
     assert cfg.max_numeric_failures == 3
+    assert cfg.device == 0
+    assert cfg.memory_mb == 512
 
 
 def test_train_config_custom():
-    """Custom values override defaults."""
     cfg = TrainConfig(tau_start=3.0, max_attempts=10, seed=42)
     assert cfg.tau_start == 3.0
     assert cfg.max_attempts == 10
@@ -522,7 +643,6 @@ def test_train_config_custom():
 
 
 def test_promotion_status_values():
-    """PromotionStatus enum has required members."""
     assert PromotionStatus.PROMOTED.value == "promoted"
     assert PromotionStatus.MANUAL_REVIEW_REQUIRED.value == "manual_review_required"
     assert PromotionStatus.COMMIT_FAILED.value == "commit_failed"
@@ -531,7 +651,6 @@ def test_promotion_status_values():
 
 
 def test_train_result_defaults():
-    """TrainResult defaults are safe."""
     result = TrainResult()
     assert result.converged is False
     assert result.discovered_rule is None
@@ -539,27 +658,29 @@ def test_train_result_defaults():
 
 
 def test_ilp_config_error_is_value_error():
-    """IlpConfigError inherits ValueError."""
     assert issubclass(IlpConfigError, ValueError)
 
 
 def test_ilp_candidate_error_is_value_error():
-    """IlpCandidateError inherits ValueError."""
     assert issubclass(IlpCandidateError, ValueError)
 
 
 def test_ilp_training_error_has_context():
-    """IlpTrainingError carries enriched context dict."""
     err = IlpTrainingError("CUDA OOM", {"attempt": 2, "step": 50, "C": 100})
     assert err.context["attempt"] == 2
     assert err.context["step"] == 50
     assert "CUDA OOM" in str(err)
+
+
+def test_ilp_training_error_default_context():
+    err = IlpTrainingError("generic failure")
+    assert err.context == {}
 ```
 
 **Step 4: Run tests**
 
 Run: `.venv/bin/python -m pytest python/tests/test_ilp_types.py -v`
-Expected: All tests PASS (pure Python, no Rust needed)
+Expected: All tests PASS (pure Python, no CUDA required)
 
 **Step 5: Commit**
 
@@ -626,7 +747,6 @@ def test_plateau_holds_tau():
         trap_disc_threshold=0.85, trap_progress_window=10,
         total_steps=100,
     )
-    # Feed identical losses to trigger plateau
     for _ in range(10):
         controller.step(loss=1.0, disc=0.5, witness_coverage=0.5)
     tau_at_plateau = controller.tau
@@ -642,121 +762,25 @@ def test_trap_warms_up_tau():
         trap_disc_threshold=0.85, trap_progress_window=3,
         total_steps=100,
     )
-    # High disc + no progress triggers trap
     for _ in range(5):
         controller.step(loss=0.5, disc=0.95, witness_coverage=0.0)
     assert controller.mode == TempMode.WARMUP
-    # tau should have increased
     assert controller.tau > 0.05
 ```
 
-**Step 2: Run tests to verify they fail**
+**Step 2: Run to verify failure**
 
 Run: `.venv/bin/python -m pytest python/tests/test_ilp_temperature.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'pyxlog.ilp.temperature'`
+Expected: FAIL with `ModuleNotFoundError`
 
 **Step 3: Implement the controller**
 
-```python
-# python/pyxlog/ilp/temperature.py
-"""Adaptive temperature controller for dILP training."""
-from __future__ import annotations
-
-from enum import Enum, auto
-
-
-class TempMode(Enum):
-    COOLING = auto()
-    PLATEAU = auto()
-    WARMUP = auto()
-
-
-class AdaptiveTempController:
-    """Three-mode temperature controller: COOLING → PLATEAU → WARMUP.
-
-    See design doc Section 2.1.
-    """
-
-    def __init__(
-        self,
-        tau_start: float,
-        tau_floor: float,
-        plateau_window: int,
-        plateau_threshold: float,
-        warmup_increment: float,
-        trap_disc_threshold: float,
-        trap_progress_window: int,
-        total_steps: int,
-    ):
-        self.tau = tau_start
-        self.tau_start = tau_start
-        self.tau_floor = tau_floor
-        self.plateau_window = plateau_window
-        self.plateau_threshold = plateau_threshold
-        self.warmup_increment = warmup_increment
-        self.trap_disc_threshold = trap_disc_threshold
-        self.trap_progress_window = trap_progress_window
-        self.total_steps = max(total_steps, 1)
-
-        self.mode = TempMode.COOLING
-        self._step_count = 0
-        self._ema_loss = None
-        self._ema_alpha = 2.0 / (plateau_window + 1)
-        self._loss_history: list[float] = []
-        self._coverage_history: list[float] = []
-
-    def step(self, loss: float, disc: float, witness_coverage: float) -> float:
-        """Update temperature based on current training state. Returns new tau."""
-        self._step_count += 1
-        self._loss_history.append(loss)
-        self._coverage_history.append(witness_coverage)
-
-        # Update EMA loss
-        if self._ema_loss is None:
-            self._ema_loss = loss
-        else:
-            self._ema_loss = self._ema_alpha * loss + (1 - self._ema_alpha) * self._ema_loss
-
-        # Check trap condition
-        if self._is_trapped(disc):
-            self.mode = TempMode.WARMUP
-            self.tau = min(self.tau + self.warmup_increment, self.tau_start)
-        elif self._is_plateau():
-            self.mode = TempMode.PLATEAU
-            # Hold tau constant
-        else:
-            self.mode = TempMode.COOLING
-            # Linear decrease
-            frac = self._step_count / self.total_steps
-            self.tau = self.tau_start + (self.tau_floor - self.tau_start) * frac
-
-        # Enforce floor
-        self.tau = max(self.tau, self.tau_floor)
-        return self.tau
-
-    def _is_trapped(self, disc: float) -> bool:
-        """Detect trap: high discreteness + no progress in witness coverage."""
-        if disc < self.trap_disc_threshold:
-            return False
-        if len(self._coverage_history) < self.trap_progress_window:
-            return False
-        recent = self._coverage_history[-self.trap_progress_window:]
-        # No progress = max coverage hasn't increased
-        return max(recent) <= min(recent)
-
-    def _is_plateau(self) -> bool:
-        """Detect plateau: EMA loss flat over window."""
-        if len(self._loss_history) < self.plateau_window:
-            return False
-        recent = self._loss_history[-self.plateau_window:]
-        ema_values = []
-        ema = recent[0]
-        for v in recent:
-            ema = self._ema_alpha * v + (1 - self._ema_alpha) * ema
-            ema_values.append(ema)
-        delta = abs(ema_values[-1] - ema_values[0])
-        return delta < self.plateau_threshold
-```
+Create `python/pyxlog/ilp/temperature.py` implementing `AdaptiveTempController`
+with three modes (COOLING, PLATEAU, WARMUP). See design Section 2.1.
+Key logic:
+- COOLING: linear decrease from tau_start toward tau_floor
+- PLATEAU: EMA loss flat over window → hold tau constant
+- WARMUP: disc > threshold AND no witness coverage progress → bump tau
 
 **Step 4: Run tests**
 
@@ -783,12 +807,13 @@ git commit -m "feat(ilp): adaptive temperature controller (COOLING/PLATEAU/WARMU
 ```python
 # python/tests/test_ilp_entropy.py
 """Tests for entropy regularization."""
-import torch
-from pyxlog.ilp.entropy import normalized_entropy, entropy_weight_at_step
+import pytest
+
+torch = pytest.importorskip("torch")
 
 
 def test_normalized_entropy_uniform():
-    """Uniform distribution has entropy 1.0 (normalized)."""
+    from pyxlog.ilp.entropy import normalized_entropy
     C = 10
     logits = torch.zeros(C)
     probs = torch.softmax(logits, dim=0)
@@ -797,7 +822,7 @@ def test_normalized_entropy_uniform():
 
 
 def test_normalized_entropy_one_hot():
-    """One-hot distribution has entropy ~0.0."""
+    from pyxlog.ilp.entropy import normalized_entropy
     C = 10
     logits = torch.full((C,), -100.0)
     logits[0] = 100.0
@@ -807,7 +832,7 @@ def test_normalized_entropy_one_hot():
 
 
 def test_normalized_entropy_gradient_flows():
-    """Entropy bonus produces non-zero gradient on logits."""
+    from pyxlog.ilp.entropy import normalized_entropy
     C = 10
     logits = torch.randn(C, requires_grad=True)
     probs = torch.softmax(logits, dim=0)
@@ -818,7 +843,7 @@ def test_normalized_entropy_gradient_flows():
 
 
 def test_entropy_weight_decay():
-    """Weight decays linearly from start to end."""
+    from pyxlog.ilp.entropy import entropy_weight_at_step
     w0 = entropy_weight_at_step(0, 100, start=0.1, end=0.0)
     w50 = entropy_weight_at_step(50, 100, start=0.1, end=0.0)
     w100 = entropy_weight_at_step(100, 100, start=0.1, end=0.0)
@@ -834,37 +859,9 @@ Expected: FAIL with `ModuleNotFoundError`
 
 **Step 3: Implement**
 
-```python
-# python/pyxlog/ilp/entropy.py
-"""Entropy regularization for dILP training. See design Section 2.2."""
-from __future__ import annotations
-
-import math
-
-import torch
-
-
-def normalized_entropy(probs: torch.Tensor, C: int) -> torch.Tensor:
-    """Normalized Shannon entropy: H / log(C). Range [0, 1].
-
-    Uses log_softmax-style computation for numerical stability.
-    """
-    log_C = math.log(C) if C > 1 else 1.0
-    # Clamp to avoid log(0)
-    log_probs = torch.log(probs.clamp(min=1e-38))
-    H = -(probs * log_probs).sum()
-    return H / log_C
-
-
-def entropy_weight_at_step(
-    step: int, total_steps: int, start: float, end: float
-) -> float:
-    """Linear decay from start to end over total_steps."""
-    if total_steps <= 0:
-        return end
-    frac = min(step / total_steps, 1.0)
-    return start + (end - start) * frac
-```
+Create `python/pyxlog/ilp/entropy.py`:
+- `normalized_entropy(probs, C)` → `H / log(C)`, numerically stable via clamped log
+- `entropy_weight_at_step(step, total, start, end)` → linear decay
 
 **Step 4: Run tests**
 
@@ -887,57 +884,49 @@ git commit -m "feat(ilp): normalized entropy regularization with linear weight d
 - Modify: `python/pyxlog/ilp/__init__.py` (export train_only)
 - Test: `python/tests/test_ilp_trainer.py` (create)
 
-This is the largest task. It integrates:
-- Adaptive temperature (Task 4)
-- Entropy regularization (Task 5)
-- Structured multi-start (best-of-K with random reserve)
-- NaN/Inf detection
-- Per-attempt isolation (fresh compile)
-- Telemetry collection (level 0 + 1)
-- Candidate-aware factorized scoring
+This is the largest task. It integrates Tasks 1-5 into a working training loop.
 
-**Step 1: Write the failing integration test**
+**Alpha training loop uses the dense N³ mask** (same path as current showcase).
+The `valid_candidates()` output is used for:
+- Determining the candidate count C for confidence/coverage metrics
+- Decoding the argmax (i,j,k) triple into a readable rule string
+- Building the candidate map for the artifact
+
+The mask itself is still built as a full N³ tensor via `build_budget_aware_mask()`
+and passed to `set_rule_mask()` via DLPack. Factorized scoring (only C logits)
+is deferred to RC when the sparse mask API is ready.
+
+**Step 1: Write the failing integration tests**
 
 ```python
 # python/tests/test_ilp_trainer.py
 """Integration tests for train_only()."""
 import pytest
+
+torch = pytest.importorskip("torch")
+pyxlog = pytest.importorskip("pyxlog")
+
+if not torch.cuda.is_available():
+    pytest.skip("CUDA is required for ILP trainer tests", allow_module_level=True)
+
 from pyxlog.ilp import train_only, TrainConfig, TrainResult, IlpConfigError
 
 REACH_SOURCE = """
-    edge(1, 2).
-    edge(2, 3).
-    edge(3, 4).
-    edge(4, 5).
-    edge(5, 6).
-    learnable reach(X, Y) :- bL(X, Z), bR(Z, Y).
+    edge(1, 2). edge(2, 3). edge(3, 4). edge(4, 5). edge(5, 6).
+    learnable(W_reach) :: reach(X, Y) :- bL(X, Z), bR(Z, Y).
 """
-
-REACH_POSITIVES = [
-    ("reach", [1, 3]),
-    ("reach", [2, 4]),
-    ("reach", [3, 5]),
-    ("reach", [4, 6]),
-]
-
-REACH_NEGATIVES = []
+REACH_POS = [("reach", [1, 3]), ("reach", [2, 4]), ("reach", [3, 5]), ("reach", [4, 6])]
+REACH_NEG = []
 
 
 def test_train_only_converges_on_reach():
-    """train_only finds reach(X,Y) :- edge(X,Z), edge(Z,Y)."""
     config = TrainConfig(
-        step_budget_per_attempt=100,
-        max_attempts=5,
-        tau_start=2.0,
-        tau_floor=0.05,
-        seed=42,
+        step_budget_per_attempt=100, max_attempts=5,
+        tau_start=2.0, tau_floor=0.05, seed=42,
     )
     result = train_only(
-        source=REACH_SOURCE,
-        mask_name="W",
-        positives=REACH_POSITIVES,
-        negatives=REACH_NEGATIVES,
-        config=config,
+        source=REACH_SOURCE, mask_name="W_reach",
+        positives=REACH_POS, negatives=REACH_NEG, config=config,
     )
     assert isinstance(result, TrainResult)
     assert result.converged
@@ -947,22 +936,15 @@ def test_train_only_converges_on_reach():
     assert result.total_steps > 0
 
 
-def test_train_only_returns_telemetry():
-    """Level-1 telemetry has per-step records."""
+def test_train_only_returns_telemetry_level_1():
     config = TrainConfig(
-        step_budget_per_attempt=50,
-        max_attempts=3,
-        tau_start=2.0,
-        tau_floor=0.05,
-        seed=42,
+        step_budget_per_attempt=50, max_attempts=3,
+        tau_start=2.0, tau_floor=0.05, seed=42,
         telemetry_level=1,
     )
     result = train_only(
-        source=REACH_SOURCE,
-        mask_name="W",
-        positives=REACH_POSITIVES,
-        negatives=REACH_NEGATIVES,
-        config=config,
+        source=REACH_SOURCE, mask_name="W_reach",
+        positives=REACH_POS, negatives=REACH_NEG, config=config,
     )
     assert len(result.artifact.telemetry.steps) > 0
     step0 = result.artifact.telemetry.steps[0]
@@ -972,383 +954,305 @@ def test_train_only_returns_telemetry():
 
 
 def test_train_only_empty_positives_raises():
-    """Empty positives raises IlpConfigError."""
     config = TrainConfig(max_attempts=1)
-    with pytest.raises(IlpConfigError):
+    with pytest.raises(IlpConfigError, match="positives"):
         train_only(
-            source=REACH_SOURCE,
-            mask_name="W",
-            positives=[],
-            negatives=[],
-            config=config,
+            source=REACH_SOURCE, mask_name="W_reach",
+            positives=[], negatives=[], config=config,
+        )
+
+
+def test_train_only_contradictory_examples_raises():
+    config = TrainConfig(max_attempts=1)
+    pos = [("reach", [1, 3])]
+    neg = [("reach", [1, 3])]
+    with pytest.raises(IlpConfigError, match="contradict"):
+        train_only(
+            source=REACH_SOURCE, mask_name="W_reach",
+            positives=pos, negatives=neg, config=config,
         )
 
 
 def test_train_only_precision_recall():
-    """Result includes precision and recall metrics."""
     config = TrainConfig(
-        step_budget_per_attempt=100,
-        max_attempts=5,
-        tau_start=2.0,
-        tau_floor=0.05,
-        seed=42,
+        step_budget_per_attempt=100, max_attempts=5,
+        tau_start=2.0, tau_floor=0.05, seed=42,
     )
     result = train_only(
-        source=REACH_SOURCE,
-        mask_name="W",
-        positives=REACH_POSITIVES,
-        negatives=REACH_NEGATIVES,
-        config=config,
+        source=REACH_SOURCE, mask_name="W_reach",
+        positives=REACH_POS, negatives=REACH_NEG, config=config,
     )
     if result.converged:
         assert result.precision > 0.0
         assert result.recall > 0.0
+
+
+def test_train_only_confidence_metrics():
+    config = TrainConfig(
+        step_budget_per_attempt=100, max_attempts=3,
+        tau_start=2.0, tau_floor=0.05, seed=42,
+    )
+    result = train_only(
+        source=REACH_SOURCE, mask_name="W_reach",
+        positives=REACH_POS, negatives=REACH_NEG, config=config,
+    )
+    if result.converged:
+        assert 0.0 <= result.confidence_margin <= 1.0
+        assert 0.0 <= result.top_k_concentration <= 1.0
+        assert 0.0 <= result.rule_frequency <= 1.0
+
+
+def test_train_only_global_step_limit():
+    config = TrainConfig(
+        global_step_limit=50, step_budget_per_attempt=30,
+        max_attempts=10, tau_start=2.0, tau_floor=0.05, seed=42,
+    )
+    result = train_only(
+        source=REACH_SOURCE, mask_name="W_reach",
+        positives=REACH_POS, negatives=REACH_NEG, config=config,
+    )
+    assert result.total_steps <= 50
 ```
 
 **Step 2: Run to verify failure**
 
 Run: `.venv/bin/python -m pytest python/tests/test_ilp_trainer.py -v`
-Expected: FAIL with `ImportError: cannot import name 'train_only' from 'pyxlog.ilp'`
+Expected: FAIL with `ImportError: cannot import name 'train_only'`
 
 **Step 3: Implement train_only**
 
-Create `python/pyxlog/ilp/trainer.py`. This is a substantial file (~300 lines).
-Key structure:
+Create `python/pyxlog/ilp/trainer.py` (~300 lines). Structure:
 
 ```python
-# python/pyxlog/ilp/trainer.py
-"""dILP trainer — train_only entry point. See design Section 5.1."""
-from __future__ import annotations
-
-import logging
-import math
-import time
-from dataclasses import replace
-
-import torch
-
-import pyxlog
-from pyxlog.ilp.exceptions import IlpCandidateError, IlpConfigError, IlpTrainingError
-from pyxlog.ilp.temperature import AdaptiveTempController
-from pyxlog.ilp.entropy import normalized_entropy, entropy_weight_at_step
-from pyxlog.ilp.types import (
-    ArtifactMetadata,
-    CandidateMapEntry,
-    LearnedArtifact,
-    StepRecord,
-    TrainConfig,
-    TrainResult,
-    TrainTelemetry,
-)
-
-log = logging.getLogger(__name__)
-
-
-def train_only(
-    source: str,
-    mask_name: str,
-    positives: list[tuple[str, list[int]]],
-    negatives: list[tuple[str, list[int]]],
-    config: TrainConfig,
-    holdout_positives: list[tuple[str, list[int]]] | None = None,
-    holdout_negatives: list[tuple[str, list[int]]] | None = None,
-) -> TrainResult:
-    """Train a single learnable rule via structured multi-start.
-
-    See design doc Section 5.1 for full contract.
-    """
-    _validate_inputs(source, mask_name, positives, config)
-
-    # Run structured multi-start
-    attempts: list[_AttemptResult] = []
-    total_steps = 0
-    numeric_failures = 0
-
+def train_only(source, mask_name, positives, negatives, config, ...) -> TrainResult:
+    _validate_inputs(...)
+    attempts = []
     for attempt_idx in range(config.max_attempts):
-        if total_steps >= config.global_step_limit:
-            break
-
-        remaining = config.global_step_limit - total_steps
-        step_budget = min(config.step_budget_per_attempt, remaining)
-        if step_budget <= 0:
-            break
-
-        seed = _attempt_seed(config.seed, attempt_idx)
-        try:
-            result = _run_single_attempt(
-                source=source,
-                mask_name=mask_name,
-                positives=positives,
-                negatives=negatives,
-                config=config,
-                step_budget=step_budget,
-                seed=seed,
-                attempt_idx=attempt_idx,
-                prior_attempts=attempts,
-            )
-            attempts.append(result)
-            total_steps += result.steps_used
-        except _NumericFailure:
-            numeric_failures += 1
-            if numeric_failures >= config.max_numeric_failures:
-                raise IlpTrainingError(
-                    f"Numeric instability: {numeric_failures} NaN/Inf attempts",
-                    {"attempt": attempt_idx, "terminal_reason": "numeric_instability"},
-                )
-            continue
-
-    return _select_winner(attempts, config, total_steps)
-
-
-# ... (internal helpers: _validate_inputs, _run_single_attempt,
-#      _build_mask, _compute_loss, _check_convergence, _select_winner,
-#      _attempt_seed, _NumericFailure)
+        # Fresh compile per attempt (isolation)
+        prog = pyxlog.IlpProgramFactory.compile(
+            source, device=config.device, memory_mb=config.memory_mb,
+            max_active_rules=config.max_active_rules,
+        )
+        # Get candidates for bookkeeping
+        candidates = prog.valid_candidates(mask_name, config.allow_recursive_candidates)
+        # Training loop with dense N³ mask
+        result = _run_single_attempt(prog, mask_name, candidates, ...)
+        attempts.append(result)
+    return _select_winner(attempts, config)
 ```
 
-The implementation follows the existing `ilp_showcase.py` patterns
-(build_budget_aware_mask, compute_loss, convergence checking) but refactored
-into the structured multi-start framework with adaptive temperature and entropy.
-
-**Key internal functions to implement:**
-
-1. `_validate_inputs()` — check non-empty positives, valid config ranges
-2. `_run_single_attempt()` — compile fresh program, training loop with
-   adaptive temp + entropy, convergence detection
-3. `_build_budget_aware_mask()` — ST-Gumbel-Softmax over C candidates (not N³)
-4. `_compute_loss()` — per-fact surrogate credit + missed-positive penalty +
-   negative penalty + entropy bonus
-5. `_check_convergence()` — stable argmax count + all_derived gate +
-   argmax-only validation
-6. `_select_winner()` — deterministic tie-break across attempts
-7. `_attempt_seed()` — derive per-attempt seed from base seed
+Key internals (adapted from `ilp_showcase.py` patterns):
+- `_run_single_attempt()`: builds N³ weight tensor, training loop with
+  `build_budget_aware_mask()` → `set_rule_mask()` → `evaluate()` →
+  `compute_loss()` → optimizer step. Uses AdaptiveTempController and entropy.
+- `_build_budget_aware_mask()`: ST-Gumbel-Softmax over N³ tensor (same as showcase)
+- `_compute_loss()`: per-fact surrogate credit + missed-positive + negative penalty + entropy
+- `_check_convergence()`: stable argmax + all_derived + argmax-only validation
+- `_select_winner()`: deterministic tie-break chain across attempts
 
 **Step 4: Run tests**
 
-Run: `.venv/bin/maturin develop --release && .venv/bin/python -m pytest python/tests/test_ilp_trainer.py -v`
-Expected: All 4 tests PASS
+Run: `.venv/bin/maturin develop --release && .venv/bin/python -m pytest python/tests/test_ilp_trainer.py -v --timeout=300`
+Expected: All 7 tests PASS
 
-**Step 5: Run full test suite regression check**
+**Step 5: Full regression**
 
-Run: `.venv/bin/python -m pytest python/tests/ -v --timeout=300`
-Expected: All existing tests still pass
+Run: `.venv/bin/python -m pytest python/tests/ -v --timeout=600`
+Expected: All existing + new tests pass
 
 **Step 6: Commit**
 
 ```bash
 git add python/pyxlog/ilp/trainer.py python/pyxlog/ilp/__init__.py python/tests/test_ilp_trainer.py
-git commit -m "feat(ilp): train_only() entry point with adaptive temp + entropy + multi-start"
+git commit -m "feat(ilp): train_only() with adaptive temp + entropy + multi-start"
 ```
 
 ---
 
-### Task 7: Structured multi-start with random reserve and narrowing
+### Task 7: Multi-start integration tests with distractors
 
 **Files:**
-- Modify: `python/pyxlog/ilp/trainer.py` (enhance _run_single_attempt)
-- Test: `python/tests/test_ilp_multistart.py` (create)
+- Create: `python/tests/test_ilp_multistart.py`
 
-This task adds the progressive narrowing behavior (design Section 2.3):
-- First `ceil(K * random_reserve_fraction)` attempts use random init
-- Remaining attempts narrow candidates based on prior attempt results
-- Winner selected by deterministic tie-break chain
-
-**Step 1: Write the failing tests**
+**Step 1: Write tests**
 
 ```python
 # python/tests/test_ilp_multistart.py
-"""Tests for structured multi-start behavior."""
+"""Integration tests for structured multi-start with distractor relations."""
+import pytest
+
+torch = pytest.importorskip("torch")
+pyxlog = pytest.importorskip("pyxlog")
+
+if not torch.cuda.is_available():
+    pytest.skip("CUDA is required for ILP tests", allow_module_level=True)
+
 from pyxlog.ilp import train_only, TrainConfig
 
 GRANDPARENT_SOURCE = """
-    parent(1, 2).
-    parent(2, 3).
-    parent(3, 4).
-    parent(4, 5).
-    gender(1, 0).
-    gender(2, 1).
-    gender(3, 0).
-    gender(4, 1).
-    sibling(1, 3).
-    sibling(3, 1).
-    learnable grandparent(X, Y) :- bL(X, Z), bR(Z, Y).
+    parent(1, 2). parent(2, 3). parent(3, 4). parent(4, 5).
+    gender(1, 0). gender(2, 1). gender(3, 0). gender(4, 1).
+    sibling(1, 3). sibling(3, 1).
+    learnable(W_gp) :: grandparent(X, Y) :- bL(X, Z), bR(Z, Y).
 """
-
 GRANDPARENT_POS = [("grandparent", [1, 3]), ("grandparent", [2, 4]), ("grandparent", [3, 5])]
 GRANDPARENT_NEG = [("grandparent", [1, 2]), ("grandparent", [3, 1])]
 
 
-def test_multistart_uses_multiple_attempts():
-    """With distractors, multiple attempts may be needed."""
+def test_multistart_converges_with_distractors():
     config = TrainConfig(
-        step_budget_per_attempt=120,
-        max_attempts=5,
-        tau_start=2.0,
-        tau_floor=0.05,
-        seed=42,
+        step_budget_per_attempt=120, max_attempts=5,
+        tau_start=2.0, tau_floor=0.05, seed=42,
     )
     result = train_only(
-        source=GRANDPARENT_SOURCE,
-        mask_name="W",
-        positives=GRANDPARENT_POS,
-        negatives=GRANDPARENT_NEG,
-        config=config,
+        source=GRANDPARENT_SOURCE, mask_name="W_gp",
+        positives=GRANDPARENT_POS, negatives=GRANDPARENT_NEG, config=config,
     )
     assert result.converged
     assert "parent" in result.discovered_rule
 
 
 def test_multistart_reports_attempt_count():
-    """Result correctly reports how many attempts were used."""
     config = TrainConfig(
-        step_budget_per_attempt=120,
-        max_attempts=7,
-        tau_start=2.0,
-        tau_floor=0.05,
-        seed=42,
+        step_budget_per_attempt=120, max_attempts=7,
+        tau_start=2.0, tau_floor=0.05, seed=42,
     )
     result = train_only(
-        source=GRANDPARENT_SOURCE,
-        mask_name="W",
-        positives=GRANDPARENT_POS,
-        negatives=GRANDPARENT_NEG,
-        config=config,
+        source=GRANDPARENT_SOURCE, mask_name="W_gp",
+        positives=GRANDPARENT_POS, negatives=GRANDPARENT_NEG, config=config,
     )
     assert 1 <= result.attempt_count <= 7
-
-
-def test_multistart_global_step_limit():
-    """Global step limit is respected across attempts."""
-    config = TrainConfig(
-        global_step_limit=50,
-        step_budget_per_attempt=30,
-        max_attempts=10,
-        tau_start=2.0,
-        tau_floor=0.05,
-        seed=42,
-    )
-    result = train_only(
-        source=GRANDPARENT_SOURCE,
-        mask_name="W",
-        positives=GRANDPARENT_POS,
-        negatives=GRANDPARENT_NEG,
-        config=config,
-    )
-    # total_steps should not exceed global_step_limit
-    assert result.total_steps <= 50
 ```
 
-**Step 2: Run to verify it exercises the code**
+**Step 2: Run tests**
 
-Run: `.venv/bin/python -m pytest python/tests/test_ilp_multistart.py -v`
-Expected: Tests should pass if Task 6 is complete (multi-start is part of train_only)
+Run: `.venv/bin/python -m pytest python/tests/test_ilp_multistart.py -v --timeout=300`
+Expected: PASS
 
 **Step 3: Commit**
 
 ```bash
 git add python/tests/test_ilp_multistart.py
-git commit -m "test(ilp): structured multi-start integration tests with distractors"
+git commit -m "test(ilp): multi-start integration tests with distractor relations"
 ```
 
 ---
 
-### Task 8: NaN/Inf detection and numeric failure policy
+### Task 8: Robustness tests including NaN/Inf behavior
 
 **Files:**
-- Modify: `python/pyxlog/ilp/trainer.py` (add NaN checks in training loop)
-- Test: `python/tests/test_ilp_robustness.py` (create)
+- Create: `python/tests/test_ilp_robustness.py`
 
-**Step 1: Write the failing tests**
+**Step 1: Write tests**
 
 ```python
 # python/tests/test_ilp_robustness.py
-"""Tests for robustness: NaN/Inf handling, empty inputs, contradictions."""
+"""Robustness tests: input validation, NaN/Inf detection, edge cases."""
 import pytest
+
+torch = pytest.importorskip("torch")
+pyxlog = pytest.importorskip("pyxlog")
+
+if not torch.cuda.is_available():
+    pytest.skip("CUDA is required for ILP tests", allow_module_level=True)
+
 from pyxlog.ilp import train_only, TrainConfig, IlpConfigError, IlpTrainingError
 
 SOURCE = """
-    edge(1, 2).
-    edge(2, 3).
-    learnable reach(X, Y) :- bL(X, Z), bR(Z, Y).
+    edge(1, 2). edge(2, 3).
+    learnable(W) :: reach(X, Y) :- bL(X, Z), bR(Z, Y).
 """
 
 
 def test_empty_positives_raises_config_error():
-    """Empty positives raises IlpConfigError before GPU work."""
     with pytest.raises(IlpConfigError, match="positives"):
         train_only(SOURCE, "W", [], [], TrainConfig(max_attempts=1))
 
 
 def test_contradictory_examples_raises_config_error():
-    """Same fact in positives and negatives raises IlpConfigError."""
     pos = [("reach", [1, 3])]
     neg = [("reach", [1, 3])]
-    with pytest.raises(IlpConfigError, match="contradictory"):
+    with pytest.raises(IlpConfigError, match="contradict"):
         train_only(SOURCE, "W", pos, neg, TrainConfig(max_attempts=1))
 
 
-def test_numeric_failure_limit():
-    """After max_numeric_failures NaN attempts, raises IlpTrainingError."""
-    # This test is hard to trigger naturally; we test the policy indirectly
-    # by checking that max_numeric_failures is respected in config
+def test_all_distractors_returns_not_converged():
+    """When no useful relations exist, training should not converge but not crash."""
+    # Only distractor relations, no useful base for reach
+    distractor_source = """
+        color(1, 0). color(2, 1).
+        learnable(W) :: reach(X, Y) :- bL(X, Z), bR(Z, Y).
+    """
+    config = TrainConfig(
+        step_budget_per_attempt=20, max_attempts=2,
+        tau_start=1.0, tau_floor=0.1, seed=0,
+    )
+    result = train_only(
+        source=distractor_source, mask_name="W",
+        positives=[("reach", [1, 3])], negatives=[], config=config,
+    )
+    # May or may not converge, but must not crash
+    assert isinstance(result.converged, bool)
+    assert result.total_steps > 0
+
+
+def test_numeric_failure_limit_in_config():
+    """max_numeric_failures is respected in config."""
     config = TrainConfig(max_numeric_failures=1)
     assert config.max_numeric_failures == 1
+    config2 = TrainConfig(max_numeric_failures=10)
+    assert config2.max_numeric_failures == 10
 ```
 
 **Step 2: Run tests**
 
-Run: `.venv/bin/python -m pytest python/tests/test_ilp_robustness.py -v`
-Expected: Tests pass (validation logic is in _validate_inputs from Task 6)
+Run: `.venv/bin/python -m pytest python/tests/test_ilp_robustness.py -v --timeout=120`
+Expected: PASS
 
 **Step 3: Commit**
 
 ```bash
 git add python/tests/test_ilp_robustness.py
-git commit -m "test(ilp): robustness tests for input validation and numeric failure policy"
+git commit -m "test(ilp): robustness tests for validation, distractors, numeric policy"
 ```
 
 ---
 
-### Task 9: Confidence metrics (margin + concentration + rule frequency)
+### Task 9: Confidence metrics tests
 
 **Files:**
-- Modify: `python/pyxlog/ilp/trainer.py` (_select_winner computes metrics)
-- Test: `python/tests/test_ilp_trainer.py` (extend)
+- Extend: `python/tests/test_ilp_trainer.py` (already has confidence test from Task 6)
 
-**Step 1: Add tests to test_ilp_trainer.py**
+This task verifies that `rule_frequency` works across multi-attempt runs.
+
+**Step 1: Add test to `test_ilp_trainer.py`**
 
 ```python
-def test_train_only_confidence_metrics():
-    """Result includes confidence margin and concentration."""
+def test_train_only_rule_frequency_multi_attempt():
+    """rule_frequency reflects how many attempts found the winning rule."""
     config = TrainConfig(
-        step_budget_per_attempt=100,
-        max_attempts=3,
-        tau_start=2.0,
-        tau_floor=0.05,
-        seed=42,
+        step_budget_per_attempt=100, max_attempts=3,
+        tau_start=2.0, tau_floor=0.05, seed=42,
     )
     result = train_only(
-        source=REACH_SOURCE,
-        mask_name="W",
-        positives=REACH_POSITIVES,
-        negatives=REACH_NEGATIVES,
-        config=config,
+        source=REACH_SOURCE, mask_name="W_reach",
+        positives=REACH_POS, negatives=REACH_NEG, config=config,
     )
     if result.converged:
-        assert 0.0 <= result.confidence_margin <= 1.0
-        assert 0.0 <= result.top_k_concentration <= 1.0
-        assert 0.0 <= result.rule_frequency <= 1.0
+        # At least the winning attempt found this rule
+        assert result.rule_frequency >= 1.0 / result.attempt_count
 ```
 
 **Step 2: Run test**
 
-Run: `.venv/bin/python -m pytest python/tests/test_ilp_trainer.py::test_train_only_confidence_metrics -v`
-Expected: PASS (metrics computed in _select_winner from Task 6)
+Run: `.venv/bin/python -m pytest python/tests/test_ilp_trainer.py::test_train_only_rule_frequency_multi_attempt -v`
+Expected: PASS
 
 **Step 3: Commit**
 
 ```bash
 git add python/tests/test_ilp_trainer.py
-git commit -m "test(ilp): confidence metric assertions (margin, concentration, frequency)"
+git commit -m "test(ilp): rule_frequency metric assertion for multi-attempt runs"
 ```
 
 ---
@@ -1358,8 +1262,7 @@ git commit -m "test(ilp): confidence metric assertions (margin, concentration, f
 **Files:**
 - Create: `python/tests/test_ilp_reliability.py`
 
-This is the alpha exit gate. Runs `train_only` on all 4 showcase stages with
-5 different seeds and verifies 100% convergence.
+This is the alpha exit gate: all 4 showcase stages converge with 5 different seeds.
 
 **Step 1: Write the reliability test**
 
@@ -1367,53 +1270,60 @@ This is the alpha exit gate. Runs `train_only` on all 4 showcase stages with
 # python/tests/test_ilp_reliability.py
 """Alpha reliability gate: 5/5 consecutive passes on showcase suite.
 
-See design doc Section 6.1. This test validates that train_only()
-converges on all 4 stages with seeds 0..4.
+See design doc Section 6.1. Validates train_only() converges on all 4 stages
+with seeds 0..4.
 """
 import pytest
+
+torch = pytest.importorskip("torch")
+pyxlog = pytest.importorskip("pyxlog")
+
+if not torch.cuda.is_available():
+    pytest.skip("CUDA is required for ILP reliability tests", allow_module_level=True)
+
 from pyxlog.ilp import train_only, TrainConfig
 
-# Stage definitions (same domains as ilp_showcase.py)
+# --- Stage definitions (matching ilp_showcase.py domains) ---
+
 STAGE_1_SOURCE = """
     edge(1, 2). edge(2, 3). edge(3, 4). edge(4, 5). edge(5, 6).
-    learnable reach(X, Y) :- bL(X, Z), bR(Z, Y).
+    learnable(W_reach) :: reach(X, Y) :- bL(X, Z), bR(Z, Y).
 """
 STAGE_1_POS = [("reach", [1, 3]), ("reach", [2, 4]), ("reach", [3, 5]), ("reach", [4, 6])]
 STAGE_1_NEG = []
 
 STAGE_2_SOURCE = """
-    parent(1, 2). parent(2, 3). parent(3, 4). parent(4, 5).
-    gender(1, 0). gender(2, 1). gender(3, 0). gender(4, 1).
-    sibling(1, 3). sibling(3, 1).
-    learnable grandparent(X, Y) :- bL(X, Z), bR(Z, Y).
+    parent(1, 2). parent(2, 3). parent(2, 4). parent(3, 5). parent(4, 6).
+    gender(1, 0). gender(2, 1). gender(3, 1). gender(4, 0).
+    sibling(2, 7). sibling(7, 2).
+    learnable(W_gp) :: grandparent(X, Y) :- bL(X, Z), bR(Z, Y).
 """
-STAGE_2_POS = [("grandparent", [1, 3]), ("grandparent", [2, 4]), ("grandparent", [3, 5])]
+STAGE_2_POS = [("grandparent", [1, 3]), ("grandparent", [1, 4]),
+               ("grandparent", [2, 5]), ("grandparent", [2, 6])]
 STAGE_2_NEG = [("grandparent", [1, 2]), ("grandparent", [3, 1])]
 
 STAGE_3_SOURCE = """
     worksAt(1, 100). worksAt(7, 100). worksAt(2, 200). worksAt(4, 200).
     livesIn(1, 201). livesIn(2, 201). livesIn(7, 202). livesIn(4, 202).
-    learnable colleague(X, Y) :- bL(X, Z), bR(Y, Z).
+    learnable(W_col) :: colleague(X, Y) :- bL(X, Z), bR(Y, Z).
 """
-STAGE_3_POS = [
-    ("colleague", [1, 7]), ("colleague", [7, 1]),
-    ("colleague", [2, 4]), ("colleague", [4, 2]),
-]
+STAGE_3_POS = [("colleague", [1, 7]), ("colleague", [7, 1]),
+               ("colleague", [2, 4]), ("colleague", [4, 2])]
 STAGE_3_NEG = [("colleague", [1, 2]), ("colleague", [3, 4])]
 
 STAGE_4_SOURCE = """
     succ(0, 1). succ(1, 2). succ(2, 3). succ(3, 4). succ(4, 5).
     pred(1, 0). pred(2, 1). pred(3, 2). pred(4, 3). pred(5, 4).
-    learnable plus2(X, Y) :- bL(X, Z), bR(Z, Y).
+    learnable(W_p2) :: plus2(X, Y) :- bL(X, Z), bR(Z, Y).
 """
 STAGE_4_POS = [("plus2", [0, 2]), ("plus2", [1, 3]), ("plus2", [2, 4]), ("plus2", [3, 5])]
 STAGE_4_NEG = [("plus2", [0, 1]), ("plus2", [5, 0])]
 
 STAGES = [
-    ("reach", STAGE_1_SOURCE, STAGE_1_POS, STAGE_1_NEG, "W"),
-    ("grandparent", STAGE_2_SOURCE, STAGE_2_POS, STAGE_2_NEG, "W"),
-    ("colleague", STAGE_3_SOURCE, STAGE_3_POS, STAGE_3_NEG, "W"),
-    ("plus2", STAGE_4_SOURCE, STAGE_4_POS, STAGE_4_NEG, "W"),
+    ("reach", STAGE_1_SOURCE, STAGE_1_POS, STAGE_1_NEG, "W_reach"),
+    ("grandparent", STAGE_2_SOURCE, STAGE_2_POS, STAGE_2_NEG, "W_gp"),
+    ("colleague", STAGE_3_SOURCE, STAGE_3_POS, STAGE_3_NEG, "W_col"),
+    ("plus2", STAGE_4_SOURCE, STAGE_4_POS, STAGE_4_NEG, "W_p2"),
 ]
 
 
@@ -1431,6 +1341,8 @@ def test_alpha_reliability(stage_name, source, positives, negatives, mask_name, 
         tau_start=2.0,
         tau_floor=0.05,
         seed=seed,
+        device=0,
+        memory_mb=512,
     )
     result = train_only(
         source=source,
@@ -1481,12 +1393,16 @@ Tasks 7-10 depend on Task 6 and can run in parallel.
 # Rebuild Rust bindings (needed after Task 1, 2)
 cd /home/dev/projects/xlog && .venv/bin/maturin develop --release
 
-# Run Python tests
-.venv/bin/python -m pytest python/tests/test_ilp_candidates.py -v
+# Run Python tests (no CUDA needed)
 .venv/bin/python -m pytest python/tests/test_ilp_types.py -v
+
+# Run Python tests (CUDA required)
+.venv/bin/python -m pytest python/tests/test_ilp_candidates.py -v
 .venv/bin/python -m pytest python/tests/test_ilp_temperature.py -v
 .venv/bin/python -m pytest python/tests/test_ilp_entropy.py -v
 .venv/bin/python -m pytest python/tests/test_ilp_trainer.py -v --timeout=300
+.venv/bin/python -m pytest python/tests/test_ilp_multistart.py -v --timeout=300
+.venv/bin/python -m pytest python/tests/test_ilp_robustness.py -v --timeout=120
 .venv/bin/python -m pytest python/tests/test_ilp_reliability.py -v --timeout=600
 
 # Run Rust tests (regression)
@@ -1498,21 +1414,19 @@ cargo test --workspace --all-targets --exclude pyxlog --release
 
 ## Beta/RC/GA Deferred Tasks (not in this plan)
 
-These are documented for future planning sessions:
-
-- **Beta Task B1:** `set_rule_mask_sparse()` Rust API (Phase 2 sparse path)
-- **Beta Task B2:** `train_and_promote()` entry point + promotion gates
-- **Beta Task B3:** `sample_false_positives()` Rust API + hard-negative mining
-- **Beta Task B4:** Holdout LOO/k-fold cross-validation
-- **Beta Task B5:** Ambiguity detection (top-256 scan)
-- **Beta Task B6:** Recursive candidate policy (`allow_recursive_candidates`)
-- **Beta Task B7:** Artifact save/load persistence (JSON)
-- **Beta Task B8:** 20/20 reliability gate
-- **RC Task R1:** CUDA event profiling counters (4 sub-timers)
-- **RC Task R2:** Factorized scoring over C-vector (replacing N³)
-- **GA Task G1:** Typed schemas + waiver policy
-- **GA Task G2:** Telemetry level 2 streaming to sink
-- **GA Task G3:** 50/50 reliability gate + statistical CI
-- **GA Task G4:** Deterministic mode + reproducibility gate
-- **GA Task G5:** Performance SLO benchmarks (N=20/50/150)
-- **GA Task G6:** Robustness scenario test suite
+- **Beta B1:** `set_rule_mask_sparse()` Rust API (Phase 2 sparse path)
+- **Beta B2:** `train_and_promote()` + promotion gates
+- **Beta B3:** `sample_false_positives()` Rust API + hard-negative mining
+- **Beta B4:** Holdout LOO/k-fold cross-validation
+- **Beta B5:** Ambiguity detection (top-256 scan)
+- **Beta B6:** Recursive candidates (`allow_recursive_candidates = True`)
+- **Beta B7:** Artifact save/load (JSON)
+- **Beta B8:** 20/20 reliability gate
+- **RC R1:** CUDA event profiling counters (4 sub-timers)
+- **RC R2:** Factorized scoring over C-vector (replacing N³ in training loop)
+- **GA G1:** Typed schemas + waiver policy
+- **GA G2:** Telemetry level 2 streaming to sink
+- **GA G3:** 50/50 reliability gate + Clopper-Pearson CI
+- **GA G4:** Deterministic mode + reproducibility gate
+- **GA G5:** Performance SLO benchmarks (N=20/50/150)
+- **GA G6:** Robustness scenario suite (all 6 adversarial inputs)

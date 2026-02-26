@@ -22,9 +22,11 @@
 
 ### Rust Additions
 
-**`valid_candidates(mask_name) → Vec<CandidateInfo>`**
+**`valid_candidates(mask_name, allow_recursive=False) → Vec<CandidateInfo>`**
 
 Returns the deterministic set of valid candidates for a given learnable mask.
+The `allow_recursive` flag controls whether body-references-head candidates
+(i==k or j==k) are included (maps to `TrainConfig.allow_recursive_candidates`).
 Each candidate has a stable integer ID within a single compilation. IDs are
 **not** guaranteed stable across recompilations (validity depends on data,
 not just schema). Artifacts must persist the full candidate map
@@ -525,7 +527,7 @@ for the caller to use if they choose. The caller applies it themselves.
 - `save(path)` / `load(path)` using JSON (alpha) or MessagePack (GA).
 - Includes `schema_version` hash for compatibility checking.
 - Includes `ArtifactMetadata` with pyxlog_version, git_sha, cuda_version,
-  device_name, candidate_set_hash, config_hash, timestamp_utc.
+  device_name, candidate_map_hash, config_hash, timestamp_utc.
 - No GPU tensors, no program objects, no CUDA state.
 
 ### 5.3 Observability
