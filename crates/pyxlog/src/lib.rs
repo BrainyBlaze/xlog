@@ -3901,6 +3901,90 @@ impl CompiledIlpProgram {
         Ok(())
     }
 
+    /// Sparse mask API: candidate IDs + soft probabilities.
+    ///
+    /// `candidate_ids` must be exactly `[0..C)` where C is the candidate count
+    /// for this mask under the provided recursion policy.
+    ///
+    /// Rust performs deterministic top-k (desc soft value, then lower id) and
+    /// materializes dense flat mask buffers for the existing executor path.
+    #[pyo3(signature = (name, candidate_ids, soft_probs, budget, allow_recursive=false))]
+    pub fn set_rule_mask_sparse(
+        &mut self,
+        name: String,
+        candidate_ids: Vec<u32>,
+        soft_probs: Vec<f64>,
+        budget: usize,
+        allow_recursive: bool,
+    ) -> PyResult<()> {
+        let tmj = extract_tmj_meta_for_mask(&self.plan, Some(&name));
+        let n = tmj.schema_size;
+        if n == 0 {
+            return Err(PyValueError::new_err(format!(
+                "no learnable mask '{}' found", name
+            )));
+        }
+        if self.compiled_schema_size > 0 && n != self.compiled_schema_size {
+            return Err(PyValueError::new_err(format!(
+                "schema_size mismatch for '{}': plan N={} compiled N={}",
+                name, n, self.compiled_schema_size
+            )));
+        }
+
+        let expected_c = self.expected_candidate_count(&name, allow_recursive)?;
+        if candidate_ids.len() != expected_c {
+            return Err(PyValueError::new_err(format!(
+                "candidate_ids length {} != expected candidate count {}",
+                candidate_ids.len(), expected_c
+            )));
+        }
+        for (idx, &cid) in candidate_ids.iter().enumerate() {
+            if cid != idx as u32 {
+                return Err(PyValueError::new_err(format!(
+                    "candidate_ids must be [0..{}), got id {} at position {}",
+                    expected_c, cid, idx
+                )));
+            }
+        }
+        if soft_probs.len() != candidate_ids.len() {
+            return Err(PyValueError::new_err(format!(
+                "soft_probs length {} != candidate_ids length {}",
+                soft_probs.len(), candidate_ids.len()
+            )));
+        }
+
+        let candidate_triples = self.candidate_triples_for_mask(&name, allow_recursive)?;
+        if candidate_triples.len() != expected_c {
+            return Err(PyRuntimeError::new_err(format!(
+                "internal candidate count mismatch: triples={} expected={}",
+                candidate_triples.len(), expected_c
+            )));
+        }
+
+        let mut ranked: Vec<(usize, f64)> =
+            soft_probs.iter().copied().enumerate().collect();
+        ranked.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.0.cmp(&b.0))
+        });
+        ranked.truncate(budget.min(ranked.len()));
+
+        let active_ijk: Vec<(u32, u32, u32)> = ranked
+            .iter()
+            .map(|&(idx, _)| candidate_triples[idx])
+            .collect();
+        let active_soft: Vec<f32> = ranked
+            .iter()
+            .map(|&(idx, _)| soft_probs[idx] as f32)
+            .collect();
+
+        self.executor
+            .ilp_registry_mut()
+            .insert_mask_from_sparse(name, n, &active_ijk, &active_soft, &self.provider)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }
+
     pub fn evaluate(&mut self, py: Python<'_>) -> PyResult<()> {
         let _result: xlog_core::Result<xlog_cuda::CudaBuffer> = py.allow_threads(|| {
             self.executor.reset_for_mc();
@@ -4032,57 +4116,7 @@ impl CompiledIlpProgram {
         mask_name: String,
         allow_recursive: bool,
     ) -> PyResult<Vec<StdHashMap<String, PyObject>>> {
-        // Look up the TMJ for this specific mask_name from the plan
-        let tmj = extract_tmj_meta_for_mask(&self.plan, Some(&mask_name));
-        let n = tmj.schema_size;
-        if n == 0 {
-            return Err(PyValueError::new_err(
-                format!("no learnable mask '{}' found in compiled program", mask_name)
-            ));
-        }
-        let head_name = &tmj.head_rel_name;
-
-        // Find head index in rel_index
-        let k_head = self.rel_index.iter()
-            .position(|(_, name)| name == head_name)
-            .ok_or_else(|| PyValueError::new_err(
-                format!("head relation '{}' not in rel_index for mask '{}'", head_name, mask_name)
-            ))? as u32;
-
-        // Identify which relations have nonzero tuples in the store
-        let has_tuples: Vec<bool> = self.rel_index.iter()
-            .map(|(_, name)| {
-                self.executor.store().get(name)
-                    .map(|buf| buf.num_rows() > 0)
-                    .unwrap_or(false)
-            })
-            .collect();
-
-        let mut candidates: Vec<(u32, u32, u32)> = Vec::new();
-
-        for i in 0..n as u32 {
-            for j in 0..n as u32 {
-                let k = k_head; // only head relation is valid target
-
-                // Prune: both body atoms must not both be template (no tuples)
-                if !has_tuples[i as usize] && !has_tuples[j as usize] {
-                    continue;
-                }
-
-                // Prune: recursive (body references head) unless allowed
-                if !allow_recursive && (i == k || j == k) {
-                    // Allow if head already has base facts
-                    if !has_tuples[k as usize] {
-                        continue;
-                    }
-                }
-
-                candidates.push((i, j, k));
-            }
-        }
-
-        // Sort by (k, i, j) and assign stable IDs
-        candidates.sort();
+        let candidates = self.candidate_triples_for_mask(&mask_name, allow_recursive)?;
 
         let result: Vec<StdHashMap<String, PyObject>> = candidates.iter()
             .enumerate()
@@ -4298,6 +4332,79 @@ impl CompiledIlpProgram {
 }
 
 impl CompiledIlpProgram {
+    /// Returns sorted (i,j,k) candidate triples for the given learnable mask.
+    /// Pruning logic must stay aligned with `valid_candidates`.
+    fn candidate_triples_for_mask(
+        &self,
+        mask_name: &str,
+        allow_recursive: bool,
+    ) -> PyResult<Vec<(u32, u32, u32)>> {
+        let tmj = extract_tmj_meta_for_mask(&self.plan, Some(mask_name));
+        let n = tmj.schema_size;
+        if n == 0 {
+            return Err(PyValueError::new_err(format!(
+                "no learnable mask '{}' found in compiled program",
+                mask_name
+            )));
+        }
+        let head_name = &tmj.head_rel_name;
+        let k_head = self
+            .rel_index
+            .iter()
+            .position(|(_, name)| name == head_name)
+            .ok_or_else(|| {
+                PyValueError::new_err(format!(
+                    "head relation '{}' not in rel_index for mask '{}'",
+                    head_name, mask_name
+                ))
+            })? as u32;
+
+        // Identify which relations currently have nonzero tuples in store.
+        let has_tuples: Vec<bool> = self
+            .rel_index
+            .iter()
+            .map(|(_, name)| {
+                self.executor
+                    .store()
+                    .get(name)
+                    .map(|buf| buf.num_rows() > 0)
+                    .unwrap_or(false)
+            })
+            .collect();
+
+        let mut triples: Vec<(u32, u32, u32)> = Vec::new();
+        for i in 0..n as u32 {
+            for j in 0..n as u32 {
+                let k = k_head;
+
+                // Prune template+template (both no tuples).
+                if !has_tuples[i as usize] && !has_tuples[j as usize] {
+                    continue;
+                }
+
+                // Keep behavior aligned with existing alpha candidate pruning:
+                // recursive body refs are allowed only if head already has tuples.
+                if !allow_recursive && (i == k || j == k) && !has_tuples[k as usize] {
+                    continue;
+                }
+
+                triples.push((i, j, k));
+            }
+        }
+        triples.sort_by_key(|&(i, j, k)| (k, i, j));
+        Ok(triples)
+    }
+
+    fn expected_candidate_count(
+        &self,
+        mask_name: &str,
+        allow_recursive: bool,
+    ) -> PyResult<usize> {
+        Ok(self
+            .candidate_triples_for_mask(mask_name, allow_recursive)?
+            .len())
+    }
+
     fn fact_exists_in_buffer(
         provider: &CudaKernelProvider,
         buf: &xlog_cuda::CudaBuffer,
