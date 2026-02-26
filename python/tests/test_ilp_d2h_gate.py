@@ -32,3 +32,40 @@ def test_d2h_counter_reset():
 
     prog.reset_d2h_transfer_count()
     assert prog.d2h_transfer_count() == 0
+
+
+def test_batch_fact_membership_basic():
+    """batch_fact_membership returns correct bool mask."""
+    prog = pyxlog.IlpProgramFactory.compile(
+        REACH_SOURCE, device=0, memory_mb=64,
+    )
+    prog.evaluate()
+
+    # edge relation has: (1,2), (2,3), (3,4)
+    facts = [[1, 2], [5, 6], [2, 3]]
+    mask = prog.batch_fact_membership("edge", facts)
+    assert mask == [True, False, True]
+
+
+def test_batch_fact_membership_empty_facts():
+    prog = pyxlog.IlpProgramFactory.compile(
+        REACH_SOURCE, device=0, memory_mb=64,
+    )
+    prog.evaluate()
+    mask = prog.batch_fact_membership("edge", [])
+    assert mask == []
+
+
+def test_batch_fact_membership_no_d2h_columns():
+    """batch_fact_membership must NOT use download_column_*."""
+    prog = pyxlog.IlpProgramFactory.compile(
+        REACH_SOURCE, device=0, memory_mb=64,
+    )
+    prog.evaluate()
+
+    prog.reset_d2h_transfer_count()
+    facts = [[1, 2], [5, 6], [2, 3]]
+    _ = prog.batch_fact_membership("edge", facts)
+    assert prog.d2h_transfer_count() == 0, (
+        f"batch_fact_membership triggered {prog.d2h_transfer_count()} column downloads"
+    )

@@ -4143,6 +4143,64 @@ impl CompiledIlpProgram {
         Ok(())
     }
 
+    /// GPU-side batch fact membership check.
+    /// Uploads `facts` (list of value-lists) to a temporary CudaBuffer,
+    /// semi-joins against the named relation, returns per-fact boolean mask.
+    /// Zero download_column_* calls — only downloads the u8 mask.
+    pub fn batch_fact_membership(
+        &self,
+        relation: &str,
+        facts: Vec<Vec<i64>>,
+    ) -> PyResult<Vec<bool>> {
+        if facts.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let buf = self.executor.store().get(relation)
+            .ok_or_else(|| PyValueError::new_err(
+                format!("Relation '{}' not found", relation)
+            ))?;
+
+        let arity = buf.arity();
+        if arity == 0 {
+            return Ok(vec![false; facts.len()]);
+        }
+
+        // Validate all facts have correct arity
+        for (idx, fact) in facts.iter().enumerate() {
+            if fact.len() != arity {
+                return Err(PyValueError::new_err(format!(
+                    "Fact {} has {} values, expected {} (arity of '{}')",
+                    idx, fact.len(), arity, relation,
+                )));
+            }
+        }
+
+        // Transpose facts into columnar layout for GPU upload
+        let mut columns: Vec<Vec<u32>> = vec![Vec::with_capacity(facts.len()); arity];
+        for fact in &facts {
+            for (col_idx, &val) in fact.iter().enumerate() {
+                columns[col_idx].push(val as u32);
+            }
+        }
+
+        // Upload to GPU using create_buffer_from_u32_columns
+        let col_slices: Vec<&[u32]> = columns.iter().map(|c| c.as_slice()).collect();
+        let query_buf = self.provider
+            .create_buffer_from_u32_columns(
+                &col_slices,
+                buf.schema().clone(),
+            )
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+        // All columns are keys (full-tuple match)
+        let keys: Vec<usize> = (0..arity).collect();
+
+        self.provider
+            .membership_mask(&query_buf, buf, &keys, &keys)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }
+
     pub fn d2h_transfer_count(&self) -> u64 {
         self.provider.d2h_transfer_count()
     }
