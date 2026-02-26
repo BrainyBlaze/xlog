@@ -3702,19 +3702,21 @@ struct TmjMeta {
     right_keys: Vec<usize>,
     head_projection: Vec<usize>,
     schema_size: usize,
+    head_rel_name: String,
 }
 
 fn extract_tmj_meta(plan: &ExecutionPlan) -> TmjMeta {
     fn walk(node: &RirNode) -> Option<TmjMeta> {
         match node {
             RirNode::TensorMaskedJoin {
-                left_keys, right_keys, head_projection, schema_size, ..
+                left_keys, right_keys, head_projection, schema_size, head_rel_name, ..
             } => {
                 Some(TmjMeta {
                     left_keys: left_keys.clone(),
                     right_keys: right_keys.clone(),
                     head_projection: head_projection.clone(),
                     schema_size: *schema_size,
+                    head_rel_name: head_rel_name.clone(),
                 })
             }
             RirNode::Fixpoint { base, recursive, .. } => {
@@ -3741,7 +3743,7 @@ fn extract_tmj_meta(plan: &ExecutionPlan) -> TmjMeta {
             }
         }
     }
-    TmjMeta { left_keys: vec![], right_keys: vec![], head_projection: vec![], schema_size: 0 }
+    TmjMeta { left_keys: vec![], right_keys: vec![], head_projection: vec![], schema_size: 0, head_rel_name: String::new() }
 }
 
 fn strip_learnable_declarations(source: &str) -> String {
@@ -3820,6 +3822,7 @@ impl IlpProgramFactory {
             left_keys: tmj.left_keys, right_keys: tmj.right_keys,
             head_projection: tmj.head_projection,
             compiled_schema_size: tmj.schema_size,
+            head_rel_name: tmj.head_rel_name,
         })
     }
 }
@@ -3838,6 +3841,7 @@ pub struct CompiledIlpProgram {
     right_keys: Vec<usize>,
     head_projection: Vec<usize>,
     compiled_schema_size: usize,
+    head_rel_name: String,
 }
 
 #[pymethods]
@@ -3983,6 +3987,93 @@ impl CompiledIlpProgram {
         self.rel_index.iter().map(|(_, name)| name.clone()).collect()
     }
 
+    /// Return the set of valid (i,j,k) candidates for the given learnable mask.
+    ///
+    /// Pruning rules:
+    /// - k must be the head relation for this mask
+    /// - At least one of (i,j) must have nonzero tuples in the store
+    /// - Template+template body pairs (both have zero tuples) are pruned
+    /// - If allow_recursive is false: i==k_head or j==k_head are pruned
+    ///   (unless head already has base facts)
+    ///
+    /// Returns list of dicts: [{id, i, j, k, left_name, right_name, head_name}]
+    /// IDs assigned 0..C-1 after sorting by (k, i, j) ascending.
+    #[pyo3(signature = (mask_name, allow_recursive=false))]
+    fn valid_candidates(
+        &self,
+        py: Python<'_>,
+        mask_name: String,
+        allow_recursive: bool,
+    ) -> PyResult<Vec<StdHashMap<String, PyObject>>> {
+        let n = self.compiled_schema_size;
+        if n == 0 {
+            return Ok(vec![]);
+        }
+        let head_name = &self.head_rel_name;
+
+        // Find head index in rel_index
+        let k_head = self.rel_index.iter()
+            .position(|(_, name)| name == head_name)
+            .ok_or_else(|| PyValueError::new_err(
+                format!("head relation '{}' not in rel_index for mask '{}'", head_name, mask_name)
+            ))? as u32;
+
+        // Identify which relations have nonzero tuples in the store
+        let has_tuples: Vec<bool> = self.rel_index.iter()
+            .map(|(_, name)| {
+                self.executor.store().get(name)
+                    .map(|buf| buf.num_rows() > 0)
+                    .unwrap_or(false)
+            })
+            .collect();
+
+        let mut candidates: Vec<(u32, u32, u32)> = Vec::new();
+
+        for i in 0..n as u32 {
+            for j in 0..n as u32 {
+                let k = k_head; // only head relation is valid target
+
+                // Prune: both body atoms must not both be template (no tuples)
+                if !has_tuples[i as usize] && !has_tuples[j as usize] {
+                    continue;
+                }
+
+                // Prune: recursive (body references head) unless allowed
+                if !allow_recursive && (i == k || j == k) {
+                    // Allow if head already has base facts
+                    if !has_tuples[k as usize] {
+                        continue;
+                    }
+                }
+
+                candidates.push((i, j, k));
+            }
+        }
+
+        // Sort by (k, i, j) and assign stable IDs
+        candidates.sort();
+
+        let result: Vec<StdHashMap<String, PyObject>> = candidates.iter()
+            .enumerate()
+            .map(|(id, &(i, j, k))| {
+                let mut d = StdHashMap::new();
+                d.insert("id".into(), id.into_py(py));
+                d.insert("i".into(), i.into_py(py));
+                d.insert("j".into(), j.into_py(py));
+                d.insert("k".into(), k.into_py(py));
+                d.insert("left_name".into(),
+                         self.rel_index[i as usize].1.clone().into_py(py));
+                d.insert("right_name".into(),
+                         self.rel_index[j as usize].1.clone().into_py(py));
+                d.insert("head_name".into(),
+                         self.rel_index[k as usize].1.clone().into_py(py));
+                d
+            })
+            .collect();
+
+        Ok(result)
+    }
+
     pub fn commit_induced_rule(&mut self, rule_source: &str) -> PyResult<()> {
         let new_base = format!("{}\n{}", self.base_source, rule_source);
 
@@ -4014,6 +4105,7 @@ impl CompiledIlpProgram {
         self.right_keys = tmj.right_keys;
         self.head_projection = tmj.head_projection;
         self.compiled_schema_size = tmj.schema_size;
+        self.head_rel_name = tmj.head_rel_name;
         self.plan = plan;
         self.schemas = schemas;
         Ok(())
