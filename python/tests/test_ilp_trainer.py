@@ -146,3 +146,18 @@ def test_train_only_telemetry_entropy_not_zero():
     # Early steps with high tau should have non-zero entropy
     assert any(s.entropy > 0.0 for s in steps), \
         "At least some telemetry steps should have non-zero entropy"
+
+
+def test_train_only_rule_frequency_multi_attempt():
+    """rule_frequency reflects how many attempts found the winning rule."""
+    config = TrainConfig(
+        step_budget_per_attempt=100, max_attempts=3,
+        tau_start=2.0, tau_floor=0.05, seed=42,
+    )
+    result = train_only(
+        source=REACH_SOURCE, mask_name="W_reach",
+        positives=REACH_POS, negatives=REACH_NEG, config=config,
+    )
+    if result.converged:
+        # At least the winning attempt found this rule
+        assert result.rule_frequency >= 1.0 / result.attempt_count
