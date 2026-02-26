@@ -19,6 +19,7 @@
 **Alpha scope (what's IN):**
 - Python types (TrainConfig, TrainResult, LearnedArtifact, exceptions)
 - Rust `valid_candidates(mask_name, allow_recursive)` API with candidate pruning
+  (alpha always passes `allow_recursive=False`; the param exists for API completeness)
 - Configurable `max_active_rules` (no longer hardcoded 32)
 - Adaptive temperature controller (COOLING/PLATEAU/WARMUP)
 - Entropy regularization (normalized)
@@ -35,7 +36,7 @@
 - Ambiguity detection (beta)
 - CUDA event profiling counters (beta)
 - `sample_false_positives()` hard-negative mining (beta)
-- Recursive candidate policy (beta)
+- Recursive candidate policy — trainer using `allow_recursive=True` (beta)
 - Holdout LOO/k-fold (beta)
 - Artifact save/load persistence (beta)
 - Typed schemas (GA)
@@ -128,15 +129,6 @@ def test_valid_candidates_nonrecursive_prunes_head_in_body():
         # reach has no base facts, so body referencing reach should be pruned
         assert c["left_name"] != "reach" and c["right_name"] != "reach", \
             f"Recursive candidate not pruned: {c}"
-
-
-def test_valid_candidates_recursive_allowed():
-    """With allow_recursive=True, body==head candidates are included."""
-    prog = pyxlog.IlpProgramFactory.compile(SOURCE, device=0, memory_mb=512)
-    candidates_strict = prog.valid_candidates("W", allow_recursive=False)
-    candidates_open = prog.valid_candidates("W", allow_recursive=True)
-    # Open set should be >= strict set (may have recursive candidates)
-    assert len(candidates_open) >= len(candidates_strict)
 
 
 def test_valid_candidates_ids_contiguous():
@@ -253,7 +245,7 @@ head relation name from the learnable rule's AST.
 **Step 4: Rebuild and run tests**
 
 Run: `cd /home/dev/projects/xlog && .venv/bin/maturin develop --release && .venv/bin/python -m pytest python/tests/test_ilp_candidates.py -v`
-Expected: All 7 tests PASS
+Expected: All 6 tests PASS
 
 **Step 5: Run existing ILP tests for regression**
 
@@ -347,25 +339,47 @@ git commit -m "feat(ilp): make max_active_rules configurable (16-128, default 32
 ### Task 3: Create pyxlog.ilp module with types and exceptions
 
 **Files:**
+- Modify: `crates/pyxlog/pyproject.toml` (add `python-source`, rename module)
+- Create: `python/pyxlog/__init__.py` (re-export native module)
 - Create: `python/pyxlog/ilp/__init__.py`
 - Create: `python/pyxlog/ilp/types.py`
 - Create: `python/pyxlog/ilp/exceptions.py`
 - Test: `python/tests/test_ilp_types.py` (create)
 
-**Important:** pyxlog is a native cdylib extension (maturin). The `python/pyxlog/ilp/`
-sub-package is pure Python. Verify maturin's mixed layout support first:
-check if `python/pyxlog/__init__.py` exists. If not, the native module is
-imported directly as `pyxlog` and a separate `pyxlog.ilp` pure-Python package
-may need special setup (e.g., `python-packages` in pyproject.toml or a
-standalone `pyxlog_ilp` package). Determine the correct layout before creating files.
+**Step 1: Set up maturin mixed Python/Rust layout**
 
-**Step 1: Verify current package structure**
+Current state: pyxlog is a pure cdylib. Maturin auto-generates `__init__.py`
+at install time. To add pure-Python sub-packages (`pyxlog.ilp`), switch to
+maturin's mixed layout:
 
-Run: `ls -la python/pyxlog/ 2>/dev/null; grep -A5 'python-source\|python-packages\|mixed' crates/pyxlog/pyproject.toml 2>/dev/null`
+1. Add `python-source` and rename native module in `crates/pyxlog/pyproject.toml`:
 
-Depending on result, either:
-- (a) Use maturin mixed layout: create `python/pyxlog/__init__.py` that re-exports native module, then add `ilp/` sub-package.
-- (b) Create standalone `python/pyxlog_ilp/` package if mixed layout isn't viable.
+```toml
+[tool.maturin]
+python-source = "python"
+module-name = "pyxlog._native"
+features = ["pyo3/extension-module", "host-io"]
+```
+
+2. Create `python/pyxlog/__init__.py` (replaces maturin's auto-generated one):
+
+```python
+# Re-export everything from the native Rust module
+from pyxlog._native import *  # noqa: F401,F403
+from pyxlog._native import __doc__
+
+if hasattr(_native, "__all__"):
+    __all__ = _native.__all__
+```
+
+Note: The `python/` directory here is relative to `crates/pyxlog/` (where
+pyproject.toml lives), so the actual path is `crates/pyxlog/python/pyxlog/`.
+Alternatively, use an absolute path. Check maturin docs — `python-source`
+can also be `../../python` to point to the repo-level python directory.
+Test with `maturin develop --release` to confirm imports work.
+
+3. Verify: `python -c "import pyxlog; print(pyxlog.IlpProgramFactory)"` must still work.
+4. Verify: `python -c "from pyxlog.ilp import TrainConfig"` must work after creating types.
 
 **Step 2: Write type definitions**
 
@@ -1196,12 +1210,39 @@ def test_all_distractors_returns_not_converged():
     assert result.total_steps > 0
 
 
-def test_numeric_failure_limit_in_config():
-    """max_numeric_failures is respected in config."""
-    config = TrainConfig(max_numeric_failures=1)
-    assert config.max_numeric_failures == 1
-    config2 = TrainConfig(max_numeric_failures=10)
-    assert config2.max_numeric_failures == 10
+def test_nan_inf_detection_raises_after_limit():
+    """NaN/Inf in logits triggers IlpTrainingError after max_numeric_failures.
+
+    Strategy: monkey-patch the trainer's internal _build_budget_aware_mask to
+    inject NaN into the weight tensor, then verify the error path fires.
+    """
+    from unittest.mock import patch
+    import pyxlog.ilp.trainer as trainer_mod
+
+    original_fn = trainer_mod._build_budget_aware_mask
+
+    call_count = [0]
+
+    def _inject_nan(*args, **kwargs):
+        call_count[0] += 1
+        result = original_fn(*args, **kwargs)
+        # Corrupt the soft mask to force NaN in loss computation
+        result[1].fill_(float("nan"))  # result is (M_hard, M_soft) or similar
+        return result
+
+    config = TrainConfig(
+        step_budget_per_attempt=10, max_attempts=5,
+        max_numeric_failures=2, seed=0,
+    )
+
+    with patch.object(trainer_mod, "_build_budget_aware_mask", _inject_nan):
+        with pytest.raises(IlpTrainingError, match="numeric_instability"):
+            train_only(
+                source=SOURCE, mask_name="W",
+                positives=[("reach", [1, 3])], negatives=[], config=config,
+            )
+    # Should have tried exactly max_numeric_failures attempts before raising
+    assert call_count[0] >= 2
 ```
 
 **Step 2: Run tests**

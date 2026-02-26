@@ -45,6 +45,10 @@ struct CandidateInfo {
 }
 ```
 
+**Python representation:** PyO3 serializes each `CandidateInfo` as a `dict`
+with string keys `{"id", "i", "j", "k", "left_name", "right_name", "head_name"}`.
+The Python return type is `list[dict[str, int | str]]`.
+
 Deterministic tie-break for ID assignment: sort by `(k, i, j)` ascending,
 assign IDs `0..C-1`. Ties on `(k, i, j)` are impossible (unique triples).
 
