@@ -679,6 +679,8 @@ pub struct CudaKernelProvider {
     transfer_tracker: HostTransferTracker,
     /// PTX load profiling data (populated only when XLOG_WARMUP_PROFILE=1)
     ptx_load_profile: Option<PtxLoadProfile>,
+    /// Column-level D2H transfer counter (incremented by each download_column_* call)
+    d2h_transfer_count: AtomicU64,
 }
 
 #[derive(Default)]
@@ -1507,6 +1509,7 @@ impl CudaKernelProvider {
             memory,
             transfer_tracker: HostTransferTracker::default(),
             ptx_load_profile: if profiling { Some(profile) } else { None },
+            d2h_transfer_count: AtomicU64::new(0),
         })
     }
 
@@ -1533,6 +1536,20 @@ impl CudaKernelProvider {
     /// Snapshot tracked host transfer statistics.
     pub fn host_transfer_stats(&self) -> HostTransferStats {
         self.transfer_tracker.snapshot()
+    }
+
+    /// Read the column-level D2H transfer counter.
+    ///
+    /// This counter increments once per `download_column_*` call, enabling
+    /// callers (e.g. the ILP trainer) to assert that no column downloads
+    /// occurred during a performance-critical section.
+    pub fn d2h_transfer_count(&self) -> u64 {
+        self.d2h_transfer_count.load(Ordering::Relaxed)
+    }
+
+    /// Reset the column-level D2H transfer counter to zero.
+    pub fn reset_d2h_transfer_count(&self) {
+        self.d2h_transfer_count.store(0, Ordering::Relaxed);
     }
 
     fn dtoh_sync_copy_into_tracked<T: DeviceRepr, Src: DevicePtr<T>>(
@@ -6651,6 +6668,7 @@ impl CudaKernelProvider {
     /// - Column index is out of bounds
     /// - Download fails
     pub fn download_column_u32(&self, buffer: &CudaBuffer, col_idx: usize) -> Result<Vec<u32>> {
+        self.d2h_transfer_count.fetch_add(1, Ordering::Relaxed);
         let col = buffer
             .column(col_idx)
             .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
@@ -6690,6 +6708,7 @@ impl CudaKernelProvider {
     /// - Column index is out of bounds
     /// - Download fails
     pub fn download_column_u8(&self, buffer: &CudaBuffer, col_idx: usize) -> Result<Vec<u8>> {
+        self.d2h_transfer_count.fetch_add(1, Ordering::Relaxed);
         let col = buffer
             .column(col_idx)
             .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
@@ -6724,6 +6743,7 @@ impl CudaKernelProvider {
     /// - Column index is out of bounds
     /// - Download fails
     pub fn download_column_u64(&self, buffer: &CudaBuffer, col_idx: usize) -> Result<Vec<u64>> {
+        self.d2h_transfer_count.fetch_add(1, Ordering::Relaxed);
         let col = buffer
             .column(col_idx)
             .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
@@ -6763,6 +6783,7 @@ impl CudaKernelProvider {
     /// - Column index is out of bounds
     /// - Download fails
     pub fn download_column_f64(&self, buffer: &CudaBuffer, col_idx: usize) -> Result<Vec<f64>> {
+        self.d2h_transfer_count.fetch_add(1, Ordering::Relaxed);
         let col = buffer
             .column(col_idx)
             .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
@@ -6802,6 +6823,7 @@ impl CudaKernelProvider {
     /// - Column index is out of bounds
     /// - Download fails
     pub fn download_column_bool(&self, buffer: &CudaBuffer, col_idx: usize) -> Result<Vec<bool>> {
+        self.d2h_transfer_count.fetch_add(1, Ordering::Relaxed);
         let col = buffer
             .column(col_idx)
             .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
@@ -6836,6 +6858,7 @@ impl CudaKernelProvider {
     /// - Column index is out of bounds
     /// - Download fails
     pub fn download_column_i32(&self, buffer: &CudaBuffer, col_idx: usize) -> Result<Vec<i32>> {
+        self.d2h_transfer_count.fetch_add(1, Ordering::Relaxed);
         let col = buffer
             .column(col_idx)
             .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
@@ -6875,6 +6898,7 @@ impl CudaKernelProvider {
     /// - Column index is out of bounds
     /// - Download fails
     pub fn download_column_i64(&self, buffer: &CudaBuffer, col_idx: usize) -> Result<Vec<i64>> {
+        self.d2h_transfer_count.fetch_add(1, Ordering::Relaxed);
         let col = buffer
             .column(col_idx)
             .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
@@ -6914,6 +6938,7 @@ impl CudaKernelProvider {
     /// - Column index is out of bounds
     /// - Download fails
     pub fn download_column_f32(&self, buffer: &CudaBuffer, col_idx: usize) -> Result<Vec<f32>> {
+        self.d2h_transfer_count.fetch_add(1, Ordering::Relaxed);
         let col = buffer
             .column(col_idx)
             .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
