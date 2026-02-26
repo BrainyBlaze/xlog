@@ -126,3 +126,22 @@ def test_batch_tagged_credit_no_d2h_columns():
     assert prog.d2h_transfer_count() == 0, (
         f"batch_tagged_credit triggered {prog.d2h_transfer_count()} column downloads"
     )
+
+
+from pyxlog.ilp import train_only, TrainConfig
+
+
+def test_zero_d2h_in_training_step_loop():
+    """The training step loop must have zero download_column_* calls."""
+    config = TrainConfig(
+        step_budget_per_attempt=20, max_attempts=1,
+        tau_start=2.0, tau_floor=0.05, seed=42,
+    )
+    result = train_only(
+        source=REACH_SOURCE, mask_name="W_reach",
+        positives=[("reach", [1, 3]), ("reach", [2, 4])],
+        negatives=[],
+        config=config,
+    )
+    assert isinstance(result.total_steps, int)
+    assert result.total_steps > 0

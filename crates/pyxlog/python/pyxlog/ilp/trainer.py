@@ -238,10 +238,21 @@ def _run_single_attempt(
             stable_count = 0
         prev_argmax = argmax_ijk
 
-        # Compute witness coverage for temperature controller
-        witness_count = sum(
-            1 for rel, vals in positives if prog.fact_exists(rel, vals)
-        )
+        # Batch witness coverage — GPU-side fact membership
+        pos_by_rel: dict[str, list[list[int]]] = {}
+        pos_indices_by_rel: dict[str, list[int]] = {}
+        for idx, (rel, vals) in enumerate(positives):
+            pos_by_rel.setdefault(rel, []).append(vals)
+            pos_indices_by_rel.setdefault(rel, []).append(idx)
+
+        witness_mask = [False] * len(positives)
+        for rel_name, facts_list in pos_by_rel.items():
+            mask = prog.batch_fact_membership(rel_name, facts_list)
+            for local_idx, found in enumerate(mask):
+                global_idx = pos_indices_by_rel[rel_name][local_idx]
+                witness_mask[global_idx] = found
+
+        witness_count = sum(witness_mask)
         witness_coverage = witness_count / len(positives)
 
         disc = M_soft.max(dim=-1)[0].mean().item()
@@ -340,23 +351,36 @@ def _compute_loss(
     rel_names: list[str],
     n: int,
 ) -> torch.Tensor:
-    """Per-fact surrogate loss with missed-positive penalty."""
+    """Per-fact surrogate loss using GPU-side batch credit assignment."""
     loss = torch.tensor(0.0, device="cuda")
 
-    for rel_name, values in positives:
-        contributing = prog.tagged_entries_containing_fact(rel_name, values)
-        if contributing:
-            credit = sum(M_soft[i, j, k] for (i, j, k) in contributing)
-            loss = loss + (-torch.log(credit.clamp(min=1e-8)))
-        else:
-            k_idx = rel_names.index(rel_name)
-            loss = loss + (-M_soft[:, :, k_idx].sum() / (n * n))
+    # Group facts by relation for batch API calls
+    if positives:
+        pos_by_rel: dict[str, list[list[int]]] = {}
+        for rel_name, values in positives:
+            pos_by_rel.setdefault(rel_name, []).append(values)
 
-    for rel_name, values in negatives:
-        contributing = prog.tagged_entries_containing_fact(rel_name, values)
-        if contributing:
-            credit = sum(M_soft[i, j, k] for (i, j, k) in contributing)
-            loss = loss + (-torch.log((1.0 - credit).clamp(min=1e-8)))
+        for rel_name, facts_list in pos_by_rel.items():
+            credits = prog.batch_tagged_credit(rel_name, facts_list)
+            for fact_idx, contributing in enumerate(credits):
+                if contributing:
+                    credit = sum(M_soft[i, j, k] for (i, j, k) in contributing)
+                    loss = loss + (-torch.log(credit.clamp(min=1e-8)))
+                else:
+                    k_idx = rel_names.index(rel_name)
+                    loss = loss + (-M_soft[:, :, k_idx].sum() / (n * n))
+
+    if negatives:
+        neg_by_rel: dict[str, list[list[int]]] = {}
+        for rel_name, values in negatives:
+            neg_by_rel.setdefault(rel_name, []).append(values)
+
+        for rel_name, facts_list in neg_by_rel.items():
+            credits = prog.batch_tagged_credit(rel_name, facts_list)
+            for fact_idx, contributing in enumerate(credits):
+                if contributing:
+                    credit = sum(M_soft[i, j, k] for (i, j, k) in contributing)
+                    loss = loss + (-torch.log((1.0 - credit).clamp(min=1e-8)))
 
     return loss
 
@@ -375,20 +399,25 @@ def _check_convergence(
     n: int,
     argmax_ijk: tuple[int, int, int],
 ) -> bool:
-    """Three-gated convergence: stable argmax + all derived + argmax-only check."""
+    """Three-gated convergence using batch GPU APIs."""
     # Gate 1: all positives derived under current mask
-    all_derived = all(
-        prog.fact_exists(rel, vals) for rel, vals in positives
-    )
-    if not all_derived:
-        return False
+    pos_by_rel: dict[str, list[list[int]]] = {}
+    for rel, vals in positives:
+        pos_by_rel.setdefault(rel, []).append(vals)
+    for rel_name, facts_list in pos_by_rel.items():
+        mask = prog.batch_fact_membership(rel_name, facts_list)
+        if not all(mask):
+            return False
 
     # Gate 2: no negatives derived
-    any_neg = any(
-        prog.fact_exists(rel, vals) for rel, vals in negatives
-    )
-    if any_neg:
-        return False
+    neg_by_rel: dict[str, list[list[int]]] = {}
+    if negatives:
+        for rel, vals in negatives:
+            neg_by_rel.setdefault(rel, []).append(vals)
+        for rel_name, facts_list in neg_by_rel.items():
+            mask = prog.batch_fact_membership(rel_name, facts_list)
+            if any(mask):
+                return False
 
     # Gate 3: argmax-only re-evaluation
     i, j, k = argmax_ijk
@@ -398,17 +427,20 @@ def _check_convergence(
     prog.set_rule_mask(mask_name, flat_check, flat_check, n)
     prog.evaluate()
 
-    argmax_pos_ok = all(
-        prog.fact_exists(rel, vals) for rel, vals in positives
-    )
-    if not argmax_pos_ok:
-        return False
+    # Gate 3a: argmax-only must derive all positives
+    for rel_name, facts_list in pos_by_rel.items():
+        mask = prog.batch_fact_membership(rel_name, facts_list)
+        if not all(mask):
+            return False
 
-    # Gate 4: argmax-only must also not derive negatives
-    argmax_neg = any(
-        prog.fact_exists(rel, vals) for rel, vals in negatives
-    )
-    return not argmax_neg
+    # Gate 4: argmax-only must not derive negatives
+    if negatives:
+        for rel_name, facts_list in neg_by_rel.items():
+            mask = prog.batch_fact_membership(rel_name, facts_list)
+            if any(mask):
+                return False
+
+    return True
 
 
 # ---------------------------------------------------------------------------
