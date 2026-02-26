@@ -25,6 +25,8 @@ def normalized_entropy(probs: torch.Tensor, C: int) -> torch.Tensor:
     torch.Tensor
         Scalar in [0, 1].
     """
+    if C <= 1:
+        return torch.tensor(0.0, device=probs.device)
     log_probs = torch.log(probs.clamp(min=1e-8))
     H = -(probs * log_probs).sum()
     return H / torch.log(torch.tensor(float(C), device=probs.device))

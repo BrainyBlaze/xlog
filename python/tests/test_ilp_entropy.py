@@ -35,6 +35,13 @@ def test_normalized_entropy_gradient_flows():
     assert logits.grad.abs().sum() > 0
 
 
+def test_normalized_entropy_singleton_returns_zero():
+    from pyxlog.ilp.entropy import normalized_entropy
+    probs = torch.tensor([1.0])
+    h = normalized_entropy(probs, C=1)
+    assert h.item() == 0.0
+
+
 def test_entropy_weight_decay():
     from pyxlog.ilp.entropy import entropy_weight_at_step
     w0 = entropy_weight_at_step(0, 100, start=0.1, end=0.0)
