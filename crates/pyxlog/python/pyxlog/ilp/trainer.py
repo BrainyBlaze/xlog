@@ -8,9 +8,6 @@ See docs/plans/2026-02-26-dilp-hardening-design.md §5.1.
 """
 from __future__ import annotations
 
-import math
-from typing import Optional
-
 import torch
 import torch.nn.functional as F
 
@@ -34,8 +31,6 @@ def train_only(
     positives: list[tuple[str, list[int]]],
     negatives: list[tuple[str, list[int]]],
     config: TrainConfig = TrainConfig(),
-    holdout_positives: Optional[list[tuple[str, list[int]]]] = None,
-    holdout_negatives: Optional[list[tuple[str, list[int]]]] = None,
 ) -> TrainResult:
     """Train a single learnable rule via differentiable ILP.
 
@@ -258,13 +253,24 @@ def _run_single_attempt(
         if config.telemetry_level >= 1:
             i, j, k = argmax_ijk
             argmax_rule = f"{rel_names[i]}+{rel_names[j]}->{rel_names[k]}"
+            # Compute entropy for telemetry
+            with torch.no_grad():
+                tel_cand_probs = torch.stack(
+                    [M_soft[c["i"], c["j"], c["k"]] for c in candidates]
+                )
+                tel_sum = tel_cand_probs.sum()
+                if tel_sum > 1e-8 and C > 1:
+                    tel_normed = tel_cand_probs / tel_sum
+                    tel_ent = normalized_entropy(tel_normed, C).item()
+                else:
+                    tel_ent = 0.0
             result.telemetry_steps.append(StepRecord(
                 step=step,
                 loss=loss.item(),
                 argmax_rule=argmax_rule,
                 discreteness=disc,
                 temperature=temp_controller.tau,
-                entropy=0.0,
+                entropy=tel_ent,
                 stable_count=stable_count,
                 active_candidates=C,
             ))
@@ -277,6 +283,8 @@ def _run_single_attempt(
             )
             if converged:
                 result.converged = True
+                result.precision = 1.0
+                result.recall = 1.0
                 i, j, k = argmax_ijk
                 result.discovered_rule = _format_rule(
                     rel_names[i], rel_names[j], rel_names[k],
@@ -286,8 +294,9 @@ def _run_single_attempt(
                 _fill_metrics(result, M_soft, candidates, W, n)
                 return result
 
-    # Did not converge
+    # Did not converge — compute partial recall from witness coverage
     result.steps_used = step_budget
+    result.recall = witness_coverage
     if prev_argmax is not None:
         i, j, k = prev_argmax
         result.discovered_rule = _format_rule(
@@ -389,10 +398,17 @@ def _check_convergence(
     prog.set_rule_mask(mask_name, flat_check, flat_check, n)
     prog.evaluate()
 
-    argmax_ok = all(
+    argmax_pos_ok = all(
         prog.fact_exists(rel, vals) for rel, vals in positives
     )
-    return argmax_ok
+    if not argmax_pos_ok:
+        return False
+
+    # Gate 4: argmax-only must also not derive negatives
+    argmax_neg = any(
+        prog.fact_exists(rel, vals) for rel, vals in negatives
+    )
+    return not argmax_neg
 
 
 # ---------------------------------------------------------------------------
