@@ -73,3 +73,26 @@ def test_valid_candidates_ids_contiguous():
     candidates = prog.valid_candidates("W")
     ids = sorted(c["id"] for c in candidates)
     assert ids == list(range(len(candidates)))
+
+
+def test_max_active_rules_configurable():
+    """Compilation accepts max_active_rules parameter."""
+    prog = pyxlog.IlpProgramFactory.compile(
+        SOURCE, device=0, memory_mb=512, max_active_rules=64
+    )
+    assert prog.ilp_schema_size() > 0
+
+
+def test_max_active_rules_default_is_32():
+    """Default max_active_rules is 32 (backward compatible)."""
+    prog = pyxlog.IlpProgramFactory.compile(SOURCE, device=0, memory_mb=512)
+    # No way to query it directly, but compilation succeeds with default
+    assert prog.ilp_schema_size() > 0
+
+
+def test_max_active_rules_rejects_out_of_range():
+    """Values outside 16-128 are rejected."""
+    with pytest.raises(ValueError):
+        pyxlog.IlpProgramFactory.compile(SOURCE, device=0, memory_mb=512, max_active_rules=5)
+    with pytest.raises(ValueError):
+        pyxlog.IlpProgramFactory.compile(SOURCE, device=0, memory_mb=512, max_active_rules=500)

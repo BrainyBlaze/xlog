@@ -3766,11 +3766,22 @@ pub struct IlpProgramFactory;
 #[pymethods]
 impl IlpProgramFactory {
     #[staticmethod]
+    #[pyo3(signature = (source, device=0, memory_mb=512, max_active_rules=None))]
     pub fn compile(
         source: &str,
         device: usize,
         memory_mb: u64,
+        max_active_rules: Option<usize>,
     ) -> PyResult<CompiledIlpProgram> {
+        // Validate max_active_rules range
+        if let Some(max) = max_active_rules {
+            if !(16..=128).contains(&max) {
+                return Err(PyValueError::new_err(format!(
+                    "max_active_rules must be between 16 and 128, got {}", max
+                )));
+            }
+        }
+
         let ast = xlog_logic::parse_program(source)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
@@ -3778,6 +3789,9 @@ impl IlpProgramFactory {
         let learnable_source = extract_learnable_declarations(source);
 
         let mut compiler = xlog_logic::Compiler::new();
+        if let Some(max) = max_active_rules {
+            compiler.set_max_active_rules(max);
+        }
         let plan = compiler.compile_program(&ast)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 

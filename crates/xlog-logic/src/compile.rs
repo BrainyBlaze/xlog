@@ -61,6 +61,11 @@ impl Compiler {
         }
     }
 
+    /// Set the maximum active rules for TensorMaskedJoin (16..=128).
+    pub fn set_max_active_rules(&mut self, max: usize) {
+        self.lowerer.set_max_active_rules(max);
+    }
+
     /// Compile XLOG source code into an execution plan.
     ///
     /// This is the main entry point for compilation. It chains together:

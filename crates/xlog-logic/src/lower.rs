@@ -50,6 +50,8 @@ pub struct Lowerer {
     rel_ids: HashMap<String, RelId>,
     /// SCCs for the program (from stratification)
     sccs: Vec<Scc>,
+    /// Maximum active rules for TensorMaskedJoin (default 32)
+    max_active_rules: usize,
 }
 
 impl Default for Lowerer {
@@ -69,7 +71,13 @@ impl Lowerer {
             next_rel_id: 0,
             rel_ids: HashMap::new(),
             sccs: Vec::new(),
+            max_active_rules: 32,
         }
+    }
+
+    /// Set the maximum active rules for TensorMaskedJoin.
+    pub fn set_max_active_rules(&mut self, max: usize) {
+        self.max_active_rules = max;
     }
 
     /// Set the stratification result for ordering
@@ -521,7 +529,7 @@ impl Lowerer {
             rel_index,
             head_rel_name,
             head_rel_id,
-            max_active_rules: 32,
+            max_active_rules: self.max_active_rules,
             head_projection,
         })
     }
