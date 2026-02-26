@@ -501,16 +501,13 @@ def _select_winner(
     )
     rule_freq = same_rule_count / len(attempts) if attempts else 0.0
 
-    # Compute precision/recall for winner
-    precision, recall = _compute_precision_recall(winner, config)
-
     return TrainResult(
         converged=winner.converged,
         discovered_rule=winner.discovered_rule,
         attempt_count=len(attempts),
         total_steps=global_steps,
-        precision=precision,
-        recall=recall,
+        precision=winner.precision,
+        recall=winner.recall,
         confidence_margin=winner.confidence_margin,
         top_k_concentration=winner.top_k_concentration,
         rule_frequency=rule_freq,
@@ -526,16 +523,3 @@ def _select_winner(
     )
 
 
-def _compute_precision_recall(
-    result: _AttemptResult,
-    config: TrainConfig,
-) -> tuple[float, float]:
-    """Compute precision and recall for the winner's discovered rule.
-
-    Since we validate convergence by checking all positives are derived
-    and no negatives are derived, a converged result has recall=1.0 and
-    precision=1.0 by construction (on the training set).
-    """
-    if result.converged:
-        return 1.0, 1.0
-    return 0.0, 0.0

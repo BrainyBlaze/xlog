@@ -111,3 +111,38 @@ def test_train_only_global_step_limit():
         positives=REACH_POS, negatives=REACH_NEG, config=config,
     )
     assert result.total_steps <= 50
+
+
+def test_train_only_nonconverged_has_partial_recall():
+    """Non-converged result should report partial recall, not 0.0."""
+    # Mix reachable + impossible positive → forces non-convergence
+    pos_mixed = [("reach", [1, 3]), ("reach", [99, 99])]
+    config = TrainConfig(
+        step_budget_per_attempt=30, max_attempts=1,
+        tau_start=2.0, tau_floor=0.05, seed=42,
+    )
+    result = train_only(
+        source=REACH_SOURCE, mask_name="W_reach",
+        positives=pos_mixed, negatives=REACH_NEG, config=config,
+    )
+    assert not result.converged
+    # reach(1,3) is derivable from edge joins, so recall should be > 0
+    assert result.recall > 0.0, "Non-converged recall should reflect partial witness coverage"
+
+
+def test_train_only_telemetry_entropy_not_zero():
+    """Telemetry entropy should reflect actual candidate distribution."""
+    config = TrainConfig(
+        step_budget_per_attempt=20, max_attempts=1,
+        tau_start=2.0, tau_floor=0.05, seed=42,
+        telemetry_level=1,
+    )
+    result = train_only(
+        source=REACH_SOURCE, mask_name="W_reach",
+        positives=REACH_POS, negatives=REACH_NEG, config=config,
+    )
+    steps = result.artifact.telemetry.steps
+    assert len(steps) > 0
+    # Early steps with high tau should have non-zero entropy
+    assert any(s.entropy > 0.0 for s in steps), \
+        "At least some telemetry steps should have non-zero entropy"
