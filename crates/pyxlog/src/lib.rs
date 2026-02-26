@@ -4201,6 +4201,93 @@ impl CompiledIlpProgram {
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))
     }
 
+    /// GPU-side batch credit assignment.
+    ///
+    /// For each fact in `facts`, returns the list of (i,j,k) entries whose
+    /// join result contains that fact. Uses membership_mask against retained
+    /// per-entry buffers — zero download_column_* calls.
+    pub fn batch_tagged_credit(
+        &self,
+        relation: &str,
+        facts: Vec<Vec<i64>>,
+    ) -> PyResult<Vec<Vec<(u32, u32, u32)>>> {
+        if facts.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Find k index for this relation
+        let k_idx = self.rel_index.iter()
+            .position(|(_, name)| name == relation)
+            .ok_or_else(|| PyValueError::new_err(
+                format!("Relation '{}' not in ILP schema", relation)
+            ))? as u32;
+
+        let tagged = match self.executor.ilp_last_result() {
+            Some(t) => t,
+            None => return Ok(vec![Vec::new(); facts.len()]),
+        };
+
+        // Filter entries to those matching target relation k, with retained buffers
+        let relevant_entries: Vec<&xlog_runtime::ilp_registry::IlpTagEntry> = tagged.entries.iter()
+            .filter(|e| e.k == k_idx && e.num_rows > 0 && e.buffer.is_some())
+            .collect();
+
+        if relevant_entries.is_empty() {
+            return Ok(vec![Vec::new(); facts.len()]);
+        }
+
+        // Determine arity from the first entry's buffer
+        let first_buf = relevant_entries[0].buffer.as_ref().unwrap();
+        let arity = first_buf.arity();
+        if arity == 0 {
+            return Ok(vec![Vec::new(); facts.len()]);
+        }
+
+        // Validate facts arity
+        for (idx, fact) in facts.iter().enumerate() {
+            if fact.len() != arity {
+                return Err(PyValueError::new_err(format!(
+                    "Fact {} has {} values, expected {} (projected arity of '{}')",
+                    idx, fact.len(), arity, relation,
+                )));
+            }
+        }
+
+        // Upload query facts to GPU once
+        let mut columns: Vec<Vec<u32>> = vec![Vec::with_capacity(facts.len()); arity];
+        for fact in &facts {
+            for (col_idx, &val) in fact.iter().enumerate() {
+                columns[col_idx].push(val as u32);
+            }
+        }
+
+        let schema = first_buf.schema().clone();
+        let col_slices: Vec<&[u32]> = columns.iter().map(|c| c.as_slice()).collect();
+        let query_buf = self.provider
+            .create_buffer_from_u32_columns(&col_slices, schema)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+        let keys: Vec<usize> = (0..arity).collect();
+
+        // For each relevant entry, compute membership mask against query facts
+        let mut per_fact_credits: Vec<Vec<(u32, u32, u32)>> = vec![Vec::new(); facts.len()];
+
+        for entry in &relevant_entries {
+            let entry_buf = entry.buffer.as_ref().unwrap();
+            let mask = self.provider
+                .membership_mask(&query_buf, entry_buf, &keys, &keys)
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+            for (fact_idx, &found) in mask.iter().enumerate() {
+                if found {
+                    per_fact_credits[fact_idx].push((entry.i, entry.j, entry.k));
+                }
+            }
+        }
+
+        Ok(per_fact_credits)
+    }
+
     pub fn d2h_transfer_count(&self) -> u64 {
         self.provider.d2h_transfer_count()
     }
