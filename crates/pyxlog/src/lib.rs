@@ -4142,6 +4142,14 @@ impl CompiledIlpProgram {
         self.schemas = schemas;
         Ok(())
     }
+
+    pub fn d2h_transfer_count(&self) -> u64 {
+        self.provider.d2h_transfer_count()
+    }
+
+    pub fn reset_d2h_transfer_count(&self) {
+        self.provider.reset_d2h_transfer_count()
+    }
 }
 
 impl CompiledIlpProgram {
