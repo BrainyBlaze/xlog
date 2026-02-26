@@ -5,8 +5,8 @@ import pytest
 torch = pytest.importorskip("torch")
 pyxlog = pytest.importorskip("pyxlog")
 
-if not torch.cuda.is_available():
-    pytest.skip("CUDA is required for ILP tests", allow_module_level=True)
+from conftest import skip_unless_pyxlog_cuda
+skip_unless_pyxlog_cuda()
 
 SOURCE = """
     edge(1, 2).

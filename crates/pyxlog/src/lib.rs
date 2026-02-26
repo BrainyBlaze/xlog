@@ -3705,12 +3705,12 @@ struct TmjMeta {
     head_rel_name: String,
 }
 
-fn extract_tmj_meta(plan: &ExecutionPlan) -> TmjMeta {
-    fn walk(node: &RirNode) -> Option<TmjMeta> {
-        match node {
-            RirNode::TensorMaskedJoin {
-                left_keys, right_keys, head_projection, schema_size, head_rel_name, ..
-            } => {
+fn walk_tmj(node: &RirNode, target_mask: Option<&str>) -> Option<TmjMeta> {
+    match node {
+        RirNode::TensorMaskedJoin {
+            mask_name, left_keys, right_keys, head_projection, schema_size, head_rel_name, ..
+        } => {
+            if target_mask.is_none() || target_mask == Some(mask_name.as_str()) {
                 Some(TmjMeta {
                     left_keys: left_keys.clone(),
                     right_keys: right_keys.clone(),
@@ -3718,27 +3718,36 @@ fn extract_tmj_meta(plan: &ExecutionPlan) -> TmjMeta {
                     schema_size: *schema_size,
                     head_rel_name: head_rel_name.clone(),
                 })
+            } else {
+                None
             }
-            RirNode::Fixpoint { base, recursive, .. } => {
-                walk(base).or_else(|| walk(recursive))
-            }
-            RirNode::Union { inputs } => {
-                inputs.iter().find_map(walk)
-            }
-            RirNode::Filter { input, .. }
-            | RirNode::Project { input, .. }
-            | RirNode::Distinct { input, .. }
-            | RirNode::GroupBy { input, .. } => walk(input),
-            RirNode::Join { left, right, .. }
-            | RirNode::Diff { left, right } => {
-                walk(left).or_else(|| walk(right))
-            }
-            _ => None,
         }
+        RirNode::Fixpoint { base, recursive, .. } => {
+            walk_tmj(base, target_mask).or_else(|| walk_tmj(recursive, target_mask))
+        }
+        RirNode::Union { inputs } => {
+            inputs.iter().find_map(|n| walk_tmj(n, target_mask))
+        }
+        RirNode::Filter { input, .. }
+        | RirNode::Project { input, .. }
+        | RirNode::Distinct { input, .. }
+        | RirNode::GroupBy { input, .. } => walk_tmj(input, target_mask),
+        RirNode::Join { left, right, .. }
+        | RirNode::Diff { left, right } => {
+            walk_tmj(left, target_mask).or_else(|| walk_tmj(right, target_mask))
+        }
+        _ => None,
     }
+}
+
+fn extract_tmj_meta(plan: &ExecutionPlan) -> TmjMeta {
+    extract_tmj_meta_for_mask(plan, None)
+}
+
+fn extract_tmj_meta_for_mask(plan: &ExecutionPlan, mask_name: Option<&str>) -> TmjMeta {
     for scc_rules in &plan.rules_by_scc {
         for rule in scc_rules {
-            if let Some(meta) = walk(&rule.body) {
+            if let Some(meta) = walk_tmj(&rule.body, mask_name) {
                 return meta;
             }
         }
@@ -3830,6 +3839,8 @@ impl IlpProgramFactory {
 
         let tmj = extract_tmj_meta(&plan);
 
+        let active_rules = max_active_rules.unwrap_or(32);
+
         Ok(CompiledIlpProgram {
             base_source, _learnable_source: learnable_source, ast, executor, provider,
             plan, rel_index, schemas,
@@ -3837,6 +3848,7 @@ impl IlpProgramFactory {
             head_projection: tmj.head_projection,
             compiled_schema_size: tmj.schema_size,
             head_rel_name: tmj.head_rel_name,
+            max_active_rules: active_rules,
         })
     }
 }
@@ -3856,6 +3868,7 @@ pub struct CompiledIlpProgram {
     head_projection: Vec<usize>,
     compiled_schema_size: usize,
     head_rel_name: String,
+    max_active_rules: usize,
 }
 
 #[pymethods]
@@ -4019,11 +4032,15 @@ impl CompiledIlpProgram {
         mask_name: String,
         allow_recursive: bool,
     ) -> PyResult<Vec<StdHashMap<String, PyObject>>> {
-        let n = self.compiled_schema_size;
+        // Look up the TMJ for this specific mask_name from the plan
+        let tmj = extract_tmj_meta_for_mask(&self.plan, Some(&mask_name));
+        let n = tmj.schema_size;
         if n == 0 {
-            return Ok(vec![]);
+            return Err(PyValueError::new_err(
+                format!("no learnable mask '{}' found in compiled program", mask_name)
+            ));
         }
-        let head_name = &self.head_rel_name;
+        let head_name = &tmj.head_rel_name;
 
         // Find head index in rel_index
         let k_head = self.rel_index.iter()
@@ -4094,6 +4111,7 @@ impl CompiledIlpProgram {
         let ast = xlog_logic::parse_program(&new_base)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let mut compiler = xlog_logic::Compiler::new();
+        compiler.set_max_active_rules(self.max_active_rules);
         let plan = compiler.compile_program(&ast)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         let schemas = compiler.schemas().clone();
