@@ -25,8 +25,11 @@
 **`valid_candidates(mask_name) → Vec<CandidateInfo>`**
 
 Returns the deterministic set of valid candidates for a given learnable mask.
-Each candidate has a stable integer ID that persists across recompilations
-(as long as the relation set is unchanged).
+Each candidate has a stable integer ID within a single compilation. IDs are
+**not** guaranteed stable across recompilations (validity depends on data,
+not just schema). Artifacts must persist the full candidate map
+`(id → (i, j, k, left_name, right_name, head_name))` for cross-run comparison.
+Cross-compilation comparison uses triple/name mapping, not raw IDs.
 
 ```rust
 struct CandidateInfo {
@@ -52,8 +55,12 @@ deterministic top-k hardening:
 3. Take top `min(budget, len(candidates))`.
 4. Build sparse hard mask for executor.
 
-Strict input validation: candidate_ids must be a subset of valid_candidates().
-Unknown IDs raise ValueError. Duplicate IDs raise ValueError.
+Strict input validation:
+- `candidate_ids` must be exactly the full valid set, length C, in order `[0..C)`.
+- `soft_probs` must be length C, one-to-one with candidate_ids.
+- Rust validates `len(candidate_ids) == C`. Partial/subset inputs raise ValueError.
+- This ensures metrics, coverage, and determinism are always computed over
+  the complete candidate distribution.
 
 **Profiling counters** (4 sub-counters, exposed via Python bindings):
 - `ilp.extract_us` — GPU kernel time (CUDA events)
@@ -95,6 +102,9 @@ class TrainConfig:
     max_active_rules: int           # default: min(C, 32), range 16-128
     debug_dense_mask: bool          # False = sparse API, True = dense fallback
 
+    # Recursion policy (Section 3.1)
+    allow_recursive_candidates: bool  # default False (alpha); True enables i==k/j==k
+
     # Guarantees (Section 4)
     check_ambiguity: bool           # default False, recommended True for promotion
     exhaustive_ambiguity: bool      # default False, full C scan vs top-256
@@ -106,6 +116,10 @@ class TrainConfig:
     # Reproducibility
     seed: int | None                # None = random per attempt
     deterministic: bool             # enables torch deterministic algorithms
+
+    # Compilation (Section 5.1)
+    device: int                     # CUDA device ordinal (default 0)
+    memory_mb: int | None           # GPU memory budget in MB (None = no limit)
 
     # Observability (Section 5)
     telemetry_level: int            # 0=summary, 1=per-step, 2=debug trace
@@ -133,14 +147,25 @@ class ArtifactMetadata:
     git_sha: str | None
     cuda_version: str
     device_name: str
-    candidate_set_hash: str     # SHA-256 of sorted candidate_ids
+    candidate_map_hash: str     # SHA-256 of full candidate map (id→triple)
     config_hash: str            # SHA-256 of TrainConfig JSON
     timestamp_utc: str          # ISO 8601
 
 
 @dataclass
+class CandidateMapEntry:
+    id: int
+    i: int
+    j: int
+    k: int
+    left_name: str
+    right_name: str
+    head_name: str
+
+
+@dataclass
 class LearnedArtifact:
-    candidate_ids: list[int]
+    candidate_map: list[CandidateMapEntry]  # full id→triple mapping
     logits: list[float]
     soft_probs: list[float]
     selected_hard: list[int]
@@ -217,8 +242,11 @@ class PromotionResult:
 
 ### Schema Version
 
-`schema_version` is a SHA-256 hash of the sorted relation names + arities.
-Used to reject incompatible artifacts at load time.
+`schema_version` is a SHA-256 hash of: sorted relation names + arities +
+type annotations (if present) + candidate pruning rule version tag (a constant
+string that bumps when pruning logic changes, e.g., `"prune-v1-nonrecursive"`).
+Used to reject incompatible artifacts at load time. Any semantically relevant
+change to the candidate generation logic invalidates old artifacts.
 
 ---
 
@@ -314,8 +342,15 @@ A candidate `(i, j, k)` is valid iff:
 - At least one of `(i, j)` is a base relation with nonzero tuples at compile time.
 - Template placeholders (bL/bR) are allowed only if the other body atom is a
   base relation that can populate the join. Template+template is always pruned.
-- Recursive candidates where `i == k` or `j == k` are pruned unless the head
-  already has base facts.
+
+**Recursive candidate policy** (`TrainConfig.allow_recursive_candidates`):
+- `False` (default, alpha): candidates where `i == k` or `j == k` are pruned.
+  This is a known expressivity limitation documented in TrainResult.
+- `True` (beta+): recursive candidates allowed unconditionally. Safety relies
+  on step budgets, ambiguity audit, and holdout gates.
+- **GA requirement:** recursive discovery mandatory in gate suite; pruning rule
+  must no longer block `i==k`/`j==k` by default. Recursive benchmark stage(s)
+  added to the showcase suite.
 
 ### 3.2 Factorized Scoring
 
@@ -443,25 +478,46 @@ Informational — not gating.
 
 ### 5.1 Trainer Entry Points
 
-**`train_only(program, config) → TrainResult`**
-- Runs structured multi-start. Returns best learned rule + telemetry.
-- Does NOT mutate the caller's program. Each attempt compiles a fresh
-  `CompiledIlpProgram` internally (clean store + ILP registry per attempt).
-- Pure function over program state — safe to call repeatedly.
+```python
+def train_only(
+    source: str,                                        # Datalog program text
+    mask_name: str,                                     # which learnable rule to train
+    positives: list[tuple[str, list[int]]],             # [(rel, [v1, v2]), ...]
+    negatives: list[tuple[str, list[int]]],
+    config: TrainConfig,
+    holdout_positives: list[tuple[str, list[int]]] | None = None,
+    holdout_negatives: list[tuple[str, list[int]]] | None = None,
+) -> TrainResult
 
-**`train_and_promote(program, config) → PromotionResult`**
+def train_and_promote(
+    source: str,
+    mask_name: str,
+    positives: list[tuple[str, list[int]]],
+    negatives: list[tuple[str, list[int]]],
+    config: TrainConfig,
+    holdout_positives: list[tuple[str, list[int]]] | None = None,
+    holdout_negatives: list[tuple[str, list[int]]] | None = None,
+) -> PromotionResult
+```
+
+**`train_only`:**
+- Trainer owns compilation: calls `IlpProgramFactory.compile(source)` internally.
+- Each attempt compiles a fresh `CompiledIlpProgram` (clean store + ILP registry).
+- Returns best learned rule + telemetry. Never mutates any external state.
+- Pure function — safe to call repeatedly with different configs.
+
+**`train_and_promote`:**
 - Calls `train_only` internally.
 - Compiles a *trial* program with the discovered rule committed.
 - Runs all promotion gates against the trial.
-- If all gates pass: recompiles the caller's program with the committed rule
-  (atomic compile+swap). Returns `PROMOTED`.
-- If any gate fails or holdout empty: caller's program unchanged. Returns
-  `MANUAL_REVIEW_REQUIRED` with per-gate detail + artifact.
-- If commit fails recompilation: returns `COMMIT_FAILED`.
+- If all gates pass: returns `PROMOTED` with the committed source text in the artifact.
+- If any gate fails or holdout empty: returns `MANUAL_REVIEW_REQUIRED` with
+  per-gate detail + artifact.
+- If commit fails recompilation: returns `COMMIT_FAILED` with error detail.
 
-**Transactional guarantee:** The caller's program is never modified until all
-gates pass on the trial compilation. Failed commits leave the program
-byte-for-byte unchanged.
+**No external mutation:** Neither entry point modifies any object passed by the
+caller. The committed program source is returned inside `PromotionResult.artifact`
+for the caller to use if they choose. The caller applies it themselves.
 
 ### 5.2 Artifact Persistence
 
@@ -499,10 +555,12 @@ class IlpCandidateError(ValueError):
 class IlpTrainingError(RuntimeError):
     """CUDA or numerical failure during training."""
     context: dict  # attempt, step, C, k, device_name, allocated_bytes, terminal_reason
-
-class IlpCommitError(RuntimeError):
-    """Rule commit / recompilation failed."""
 ```
+
+**No IlpCommitError.** Commit failures are expected outcomes, not exceptions.
+`train_and_promote` returns `PromotionStatus.COMMIT_FAILED` with error detail
+in `GateResult`. Exceptions are reserved for caller errors (bad config) and
+infrastructure failures (CUDA).
 
 CUDA errors are caught, enriched with training context (attempt index, step,
 C, k, device name, allocated bytes), wrapped in `IlpTrainingError`, re-raised.
@@ -538,7 +596,7 @@ Tested on the showcase suite (4 stages) with seeds `0..N-1`.
 |-------|-----------|
 | Training positives | 100% derived |
 | Training negatives | 0% derived |
-| Holdout (LOO/k-fold) | ≥95% accuracy |
+| Holdout (LOO/k-fold) | F1 ≥ 0.95 |
 | Novel-fact audit | novel_rate ≤ max_novel_rate |
 | Regression check | Protected-relation facts preserved |
 | Ambiguity scan | Top-256 default; exhaustive for GA release |
