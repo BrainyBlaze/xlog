@@ -4243,6 +4243,7 @@ impl CompiledIlpProgram {
 }
 
 #[pymodule]
+#[pyo3(name = "_native")]
 fn pyxlog(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_class::<Program>()?;

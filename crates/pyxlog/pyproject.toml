@@ -14,5 +14,6 @@ classifiers = [
 ]
 
 [tool.maturin]
-module-name = "pyxlog"
+python-source = "python"
+module-name = "pyxlog._native"
 features = ["pyo3/extension-module", "host-io"]
