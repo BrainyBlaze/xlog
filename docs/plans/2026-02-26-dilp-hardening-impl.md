@@ -1047,7 +1047,7 @@ Create `crates/pyxlog/python/pyxlog/ilp/trainer.py` (~300 lines). Structure:
 
 ```python
 def train_only(source, mask_name, positives, negatives, config, ...) -> TrainResult:
-    _validate_inputs(...)
+    _validate_inputs(...)  # raises IlpConfigError on bad inputs
     attempts = []
     for attempt_idx in range(config.max_attempts):
         # Fresh compile per attempt (isolation)
@@ -1055,8 +1055,8 @@ def train_only(source, mask_name, positives, negatives, config, ...) -> TrainRes
             source, device=config.device, memory_mb=config.memory_mb,
             max_active_rules=config.max_active_rules,
         )
-        # Get candidates for bookkeeping
-        candidates = prog.valid_candidates(mask_name, config.allow_recursive_candidates)
+        # Alpha always passes False; recursive candidates are beta-only
+        candidates = prog.valid_candidates(mask_name, False)
         # Training loop with dense N³ mask
         result = _run_single_attempt(prog, mask_name, candidates, ...)
         attempts.append(result)
@@ -1064,6 +1064,8 @@ def train_only(source, mask_name, positives, negatives, config, ...) -> TrainRes
 ```
 
 Key internals (adapted from `ilp_showcase.py` patterns):
+- `_validate_inputs()`: raises `IlpConfigError` for empty positives, contradictory
+  pos/neg overlap, and `allow_recursive_candidates=True` (beta-only feature)
 - `_run_single_attempt()`: builds N³ weight tensor, training loop with
   `build_budget_aware_mask()` → `set_rule_mask()` → `evaluate()` →
   `compute_loss()` → optimizer step. Uses AdaptiveTempController and entropy.
@@ -1196,6 +1198,13 @@ def test_contradictory_examples_raises_config_error():
     neg = [("reach", [1, 3])]
     with pytest.raises(IlpConfigError, match="contradict"):
         train_only(SOURCE, "W", pos, neg, TrainConfig(max_attempts=1))
+
+
+def test_recursive_candidates_rejected_in_alpha():
+    """allow_recursive_candidates=True is a beta-only feature."""
+    config = TrainConfig(max_attempts=1, allow_recursive_candidates=True)
+    with pytest.raises(IlpConfigError, match="beta"):
+        train_only(SOURCE, "W", [("reach", [1, 3])], [], config)
 
 
 def test_all_distractors_returns_not_converged():
