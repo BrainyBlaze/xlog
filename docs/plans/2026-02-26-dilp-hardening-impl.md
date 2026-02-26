@@ -180,8 +180,8 @@ fn valid_candidates(
     // Identify which relations have nonzero tuples in the store
     let has_tuples: Vec<bool> = self.rel_index.iter()
         .map(|(_, name)| {
-            self.executor.store.get(name)
-                .map(|buf| buf.num_rows().unwrap_or(0) > 0)
+            self.executor.store().get(name)
+                .map(|buf| buf.num_rows() > 0)
                 .unwrap_or(false)
         })
         .collect();
@@ -339,12 +339,15 @@ git commit -m "feat(ilp): make max_active_rules configurable (16-128, default 32
 ### Task 3: Create pyxlog.ilp module with types and exceptions
 
 **Files:**
+All Python files live under `crates/pyxlog/python/pyxlog/` (maturin's mixed layout,
+relative to `crates/pyxlog/pyproject.toml`).
+
 - Modify: `crates/pyxlog/pyproject.toml` (add `python-source`, rename module)
-- Create: `python/pyxlog/__init__.py` (re-export native module)
-- Create: `python/pyxlog/ilp/__init__.py`
-- Create: `python/pyxlog/ilp/types.py`
-- Create: `python/pyxlog/ilp/exceptions.py`
-- Test: `python/tests/test_ilp_types.py` (create)
+- Create: `crates/pyxlog/python/pyxlog/__init__.py` (re-export native module)
+- Create: `crates/pyxlog/python/pyxlog/ilp/__init__.py`
+- Create: `crates/pyxlog/python/pyxlog/ilp/types.py`
+- Create: `crates/pyxlog/python/pyxlog/ilp/exceptions.py`
+- Test: `python/tests/test_ilp_types.py` (create, in repo-level test dir)
 
 **Step 1: Set up maturin mixed Python/Rust layout**
 
@@ -361,29 +364,34 @@ module-name = "pyxlog._native"
 features = ["pyo3/extension-module", "host-io"]
 ```
 
-2. Create `python/pyxlog/__init__.py` (replaces maturin's auto-generated one):
+`python-source = "python"` is relative to pyproject.toml, so maturin looks
+for `crates/pyxlog/python/pyxlog/` as the package root.
+
+2. Create `crates/pyxlog/python/pyxlog/__init__.py`:
 
 ```python
 # Re-export everything from the native Rust module
+import pyxlog._native as _native
 from pyxlog._native import *  # noqa: F401,F403
-from pyxlog._native import __doc__
 
+__doc__ = _native.__doc__
 if hasattr(_native, "__all__"):
     __all__ = _native.__all__
 ```
 
-Note: The `python/` directory here is relative to `crates/pyxlog/` (where
-pyproject.toml lives), so the actual path is `crates/pyxlog/python/pyxlog/`.
-Alternatively, use an absolute path. Check maturin docs — `python-source`
-can also be `../../python` to point to the repo-level python directory.
-Test with `maturin develop --release` to confirm imports work.
+3. Verify native re-export:
 
-3. Verify: `python -c "import pyxlog; print(pyxlog.IlpProgramFactory)"` must still work.
-4. Verify: `python -c "from pyxlog.ilp import TrainConfig"` must work after creating types.
+Run: `.venv/bin/maturin develop --release && .venv/bin/python -c "import pyxlog; print(pyxlog.IlpProgramFactory)"`
+Expected: prints the class without error.
+
+4. Verify sub-package import (after creating types in later steps):
+
+Run: `.venv/bin/python -c "from pyxlog.ilp import TrainConfig; print(TrainConfig)"`
+Expected: prints the dataclass without error.
 
 **Step 2: Write type definitions**
 
-`python/pyxlog/ilp/types.py`:
+`crates/pyxlog/python/pyxlog/ilp/types.py`:
 
 ```python
 """dILP trainer types — see docs/plans/2026-02-26-dilp-hardening-design.md"""
@@ -551,7 +559,7 @@ class PromotionResult:
     artifact: LearnedArtifact = field(default_factory=LearnedArtifact)
 ```
 
-`python/pyxlog/ilp/exceptions.py`:
+`crates/pyxlog/python/pyxlog/ilp/exceptions.py`:
 
 ```python
 """dILP exception taxonomy."""
@@ -578,7 +586,7 @@ class IlpTrainingError(RuntimeError):
         self.context = context or {}
 ```
 
-`python/pyxlog/ilp/__init__.py`:
+`crates/pyxlog/python/pyxlog/ilp/__init__.py`:
 
 ```python
 """dILP trainer module."""
@@ -699,7 +707,7 @@ Expected: All tests PASS (pure Python, no CUDA required)
 **Step 5: Commit**
 
 ```bash
-git add python/pyxlog/ilp/ python/tests/test_ilp_types.py
+git add crates/pyxlog/python/pyxlog/ilp/ python/tests/test_ilp_types.py
 git commit -m "feat(ilp): add pyxlog.ilp types and exception taxonomy"
 ```
 
@@ -708,7 +716,7 @@ git commit -m "feat(ilp): add pyxlog.ilp types and exception taxonomy"
 ### Task 4: Implement adaptive temperature controller
 
 **Files:**
-- Create: `python/pyxlog/ilp/temperature.py`
+- Create: `crates/pyxlog/python/pyxlog/ilp/temperature.py`
 - Test: `python/tests/test_ilp_temperature.py` (create)
 
 **Step 1: Write the failing tests**
@@ -789,7 +797,7 @@ Expected: FAIL with `ModuleNotFoundError`
 
 **Step 3: Implement the controller**
 
-Create `python/pyxlog/ilp/temperature.py` implementing `AdaptiveTempController`
+Create `crates/pyxlog/python/pyxlog/ilp/temperature.py` implementing `AdaptiveTempController`
 with three modes (COOLING, PLATEAU, WARMUP). See design Section 2.1.
 Key logic:
 - COOLING: linear decrease from tau_start toward tau_floor
@@ -804,7 +812,7 @@ Expected: All 5 tests PASS
 **Step 5: Commit**
 
 ```bash
-git add python/pyxlog/ilp/temperature.py python/tests/test_ilp_temperature.py
+git add crates/pyxlog/python/pyxlog/ilp/temperature.py python/tests/test_ilp_temperature.py
 git commit -m "feat(ilp): adaptive temperature controller (COOLING/PLATEAU/WARMUP)"
 ```
 
@@ -813,7 +821,7 @@ git commit -m "feat(ilp): adaptive temperature controller (COOLING/PLATEAU/WARMU
 ### Task 5: Implement entropy regularization
 
 **Files:**
-- Create: `python/pyxlog/ilp/entropy.py`
+- Create: `crates/pyxlog/python/pyxlog/ilp/entropy.py`
 - Test: `python/tests/test_ilp_entropy.py` (create)
 
 **Step 1: Write the failing tests**
@@ -873,7 +881,7 @@ Expected: FAIL with `ModuleNotFoundError`
 
 **Step 3: Implement**
 
-Create `python/pyxlog/ilp/entropy.py`:
+Create `crates/pyxlog/python/pyxlog/ilp/entropy.py`:
 - `normalized_entropy(probs, C)` → `H / log(C)`, numerically stable via clamped log
 - `entropy_weight_at_step(step, total, start, end)` → linear decay
 
@@ -885,7 +893,7 @@ Expected: All 4 tests PASS
 **Step 5: Commit**
 
 ```bash
-git add python/pyxlog/ilp/entropy.py python/tests/test_ilp_entropy.py
+git add crates/pyxlog/python/pyxlog/ilp/entropy.py python/tests/test_ilp_entropy.py
 git commit -m "feat(ilp): normalized entropy regularization with linear weight decay"
 ```
 
@@ -894,8 +902,8 @@ git commit -m "feat(ilp): normalized entropy regularization with linear weight d
 ### Task 6: Implement train_only() core training loop
 
 **Files:**
-- Create: `python/pyxlog/ilp/trainer.py`
-- Modify: `python/pyxlog/ilp/__init__.py` (export train_only)
+- Create: `crates/pyxlog/python/pyxlog/ilp/trainer.py`
+- Modify: `crates/pyxlog/python/pyxlog/ilp/__init__.py` (export train_only)
 - Test: `python/tests/test_ilp_trainer.py` (create)
 
 This is the largest task. It integrates Tasks 1-5 into a working training loop.
@@ -1035,7 +1043,7 @@ Expected: FAIL with `ImportError: cannot import name 'train_only'`
 
 **Step 3: Implement train_only**
 
-Create `python/pyxlog/ilp/trainer.py` (~300 lines). Structure:
+Create `crates/pyxlog/python/pyxlog/ilp/trainer.py` (~300 lines). Structure:
 
 ```python
 def train_only(source, mask_name, positives, negatives, config, ...) -> TrainResult:
@@ -1077,7 +1085,7 @@ Expected: All existing + new tests pass
 **Step 6: Commit**
 
 ```bash
-git add python/pyxlog/ilp/trainer.py python/pyxlog/ilp/__init__.py python/tests/test_ilp_trainer.py
+git add crates/pyxlog/python/pyxlog/ilp/trainer.py crates/pyxlog/python/pyxlog/ilp/__init__.py python/tests/test_ilp_trainer.py
 git commit -m "feat(ilp): train_only() with adaptive temp + entropy + multi-start"
 ```
 
@@ -1205,8 +1213,8 @@ def test_all_distractors_returns_not_converged():
         source=distractor_source, mask_name="W",
         positives=[("reach", [1, 3])], negatives=[], config=config,
     )
-    # May or may not converge, but must not crash
-    assert isinstance(result.converged, bool)
+    # No useful base relations exist, so training must not converge
+    assert result.converged is False, "expected non-convergence with all-distractor relations"
     assert result.total_steps > 0
 
 
