@@ -8292,6 +8292,130 @@ impl CudaKernelProvider {
         self.filter_by_device_mask(left, &d_has_match)
     }
 
+    /// Compute a per-row membership mask: for each row in `probe`, check whether
+    /// a matching row exists in `build` (by the specified key columns).
+    /// Returns a `Vec<bool>` of length = probe row count.
+    /// This downloads only num_probe bytes (the mask), NOT column data.
+    pub fn membership_mask(
+        &self,
+        probe: &CudaBuffer,
+        build: &CudaBuffer,
+        probe_keys: &[usize],
+        build_keys: &[usize],
+    ) -> Result<Vec<bool>> {
+        let num_probe = self.device_row_count(probe)?;
+        let num_build = self.device_row_count(build)?;
+
+        // Edge case: empty probe → empty mask
+        if num_probe == 0 {
+            return Ok(Vec::new());
+        }
+
+        // Edge case: empty build → no matches possible
+        if num_build == 0 {
+            return Ok(vec![false; num_probe]);
+        }
+
+        if num_probe > u32::MAX as usize || num_build > u32::MAX as usize {
+            return Err(XlogError::Kernel(format!(
+                "membership_mask supports at most {} rows per side (probe={}, build={})",
+                u32::MAX,
+                num_probe,
+                num_build
+            )));
+        }
+
+        // Validate key columns
+        if probe_keys.is_empty() || build_keys.is_empty() {
+            return Err(XlogError::Kernel(
+                "membership_mask requires at least one key column".to_string(),
+            ));
+        }
+        if probe_keys.len() != build_keys.len() {
+            return Err(XlogError::Kernel(
+                "Probe and build key columns must have same length".to_string(),
+            ));
+        }
+
+        // Validate key column types match
+        for (&p_idx, &b_idx) in probe_keys.iter().zip(build_keys.iter()) {
+            let p_type = probe.schema().column_type(p_idx);
+            let b_type = build.schema().column_type(b_idx);
+            if p_type != b_type {
+                return Err(XlogError::Kernel(format!(
+                    "Key column type mismatch: probe[{}]={:?}, build[{}]={:?}",
+                    p_idx, p_type, b_idx, b_type
+                )));
+            }
+        }
+
+        let num_probe_u32 = num_probe as u32;
+        let num_build_u32 = num_build as u32;
+
+        // Compute composite hashes and pack keys for both sides
+        let probe_packed = self.compute_hashes_and_pack_keys(probe, probe_keys)?;
+        let build_packed = self.compute_hashes_and_pack_keys(build, build_keys)?;
+
+        // Build hash table from build side
+        let table = self.build_hash_table_v2(&build_packed.hashes, num_build_u32)?;
+
+        // Allocate output mask on device
+        let d_has_match = self.memory.alloc::<u8>(num_probe)?;
+
+        // Launch semi-join kernel to populate the mask
+        let semi_func = self
+            .device
+            .inner()
+            .get_func(JOIN_MODULE, join_kernels::HASH_JOIN_SEMI)
+            .ok_or_else(|| XlogError::Kernel("hash_join_semi kernel not found".to_string()))?;
+
+        let block_size = 256u32;
+        let grid_size = (num_probe_u32 + block_size - 1) / block_size;
+        let config = LaunchConfig {
+            grid_dim: (grid_size, 1, 1),
+            block_dim: (block_size, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        // SAFETY: hash_join_semi(probe_hashes, num_probe,
+        //                        bucket_offsets, bucket_counts, bucket_entries,
+        //                        bucket_entry_hashes, bucket_mask,
+        //                        probe_keys, build_keys, key_bytes, has_match)
+        unsafe {
+            semi_func
+                .clone()
+                .launch(
+                    config,
+                    (
+                        &probe_packed.hashes,
+                        num_probe_u32,
+                        &table.bucket_offsets,
+                        &table.bucket_counts,
+                        &table.bucket_entries,
+                        &table.bucket_entry_hashes,
+                        table.bucket_mask,
+                        &probe_packed.packed_keys,
+                        &build_packed.packed_keys,
+                        probe_packed.key_bytes,
+                        &d_has_match,
+                    ),
+                )
+                .map_err(|e| XlogError::Kernel(format!("hash_join_semi failed: {}", e)))?;
+        }
+
+        // Download the mask to host (N bytes only — NOT counted as a column D2H transfer)
+        let mut host_mask = vec![0u8; num_probe];
+        self.device
+            .inner()
+            .dtoh_sync_copy_into(&d_has_match, &mut host_mask)
+            .map_err(|e| {
+                XlogError::Kernel(format!("Failed to download membership mask: {}", e))
+            })?;
+
+        // Convert u8 mask to Vec<bool>
+        Ok(host_mask.into_iter().map(|b| b != 0).collect())
+    }
+
     fn hash_join_semi_indexed(
         &self,
         left: &CudaBuffer,
