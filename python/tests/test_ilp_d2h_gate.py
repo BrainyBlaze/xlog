@@ -145,3 +145,49 @@ def test_zero_d2h_in_training_step_loop():
     )
     assert isinstance(result.total_steps, int)
     assert result.total_steps > 0
+
+
+def test_full_training_zero_d2h_gate():
+    """Full training run must complete without D2H gate violation."""
+    source = """
+        edge(1, 2). edge(2, 3). edge(3, 4). edge(4, 5). edge(5, 6).
+        learnable(W_reach) :: reach(X, Y) :- b1(X, Z), b2(Z, Y).
+    """
+    config = TrainConfig(
+        step_budget_per_attempt=50, max_attempts=3,
+        tau_start=2.0, tau_floor=0.05, seed=42,
+    )
+    result = train_only(
+        source=source, mask_name="W_reach",
+        positives=[("reach", [1, 3]), ("reach", [2, 4]),
+                   ("reach", [3, 5]), ("reach", [4, 6])],
+        negatives=[],
+        config=config,
+    )
+    # If we got here without IlpTrainingError("d2h_gate_violation"),
+    # the hard gate passed.
+    assert result.converged
+    assert "edge" in result.discovered_rule
+
+
+def test_d2h_gate_with_negatives():
+    """D2H gate holds even with negative examples."""
+    source = """
+        parent(1, 2). parent(2, 3). parent(3, 4). parent(4, 5).
+        gender(1, 0). gender(2, 1). gender(3, 0). gender(4, 1).
+        sibling(1, 3). sibling(3, 1).
+        learnable(W_gp) :: grandparent(X, Y) :- bL(X, Z), bR(Z, Y).
+    """
+    config = TrainConfig(
+        step_budget_per_attempt=60, max_attempts=3,
+        tau_start=2.0, tau_floor=0.05, seed=42,
+    )
+    result = train_only(
+        source=source, mask_name="W_gp",
+        positives=[("grandparent", [1, 3]), ("grandparent", [2, 4])],
+        negatives=[("grandparent", [1, 2]), ("grandparent", [3, 1])],
+        config=config,
+    )
+    # No d2h_gate_violation raised
+    assert result.converged
+    assert "parent" in result.discovered_rule

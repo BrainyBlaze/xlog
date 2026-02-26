@@ -203,6 +203,7 @@ def _run_single_attempt(
             n,
         )
         prog.evaluate()
+        prog.reset_d2h_transfer_count()
 
         # Compute task loss
         loss = _compute_loss(prog, M_soft, positives, negatives, rel_names, n)
@@ -304,6 +305,14 @@ def _run_single_attempt(
                 result.argmax_ijk = argmax_ijk
                 _fill_metrics(result, M_soft, candidates, W, n)
                 return result
+
+        # --- D2H hard gate: assert zero column downloads in step body ---
+        d2h_count = prog.d2h_transfer_count()
+        if d2h_count > 0:
+            raise IlpTrainingError(
+                "d2h_gate_violation: download_column_* called in step loop",
+                {"step": step, "d2h_count": d2h_count},
+            )
 
     # Did not converge — compute partial recall from witness coverage
     result.steps_used = step_budget
@@ -426,6 +435,7 @@ def _check_convergence(
     flat_check = M_check.contiguous().view(-1)
     prog.set_rule_mask(mask_name, flat_check, flat_check, n)
     prog.evaluate()
+    prog.reset_d2h_transfer_count()
 
     # Gate 3a: argmax-only must derive all positives
     for rel_name, facts_list in pos_by_rel.items():
