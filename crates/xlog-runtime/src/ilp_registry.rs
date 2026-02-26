@@ -34,17 +34,20 @@ pub struct IlpMask {
 }
 
 /// Tag metadata from TensorMaskedJoin execution.
-/// Does NOT store CudaBuffer clones (RD-17: CudaBuffer is not Clone).
+/// Retains per-entry projected join buffers for batch credit queries.
 pub struct IlpTaggedResult {
     pub entries: Vec<IlpTagEntry>,
 }
 
-/// Metadata for a single active rule (i,j,k) and its result cardinality.
+/// Metadata for a single active rule (i,j,k), its result cardinality,
+/// and the projected join result buffer (retained for batch credit queries).
 pub struct IlpTagEntry {
     pub i: u32,
     pub j: u32,
     pub k: u32,
     pub num_rows: u32,
+    /// The projected join result buffer, retained for batch credit queries.
+    pub buffer: Option<CudaBuffer>,
 }
 
 impl IlpRegistry {

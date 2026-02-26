@@ -2777,9 +2777,9 @@ impl Executor {
             schema_size, max_active_rules,
         )?;
 
-        // 3. Dispatch hash joins, collect tag metadata
+        // 3. Phase 1: Dispatch hash joins, collect results into tag_entries
+        //    (retaining per-entry buffers for batch credit queries)
         let mut tag_entries: Vec<IlpTagEntry> = Vec::new();
-        let mut results_by_k: HashMap<u32, Vec<CudaBuffer>> = HashMap::new();
 
         for &(i, j, k) in &active_rules {
             let (_, left_name) = &rel_index[i as usize];
@@ -2829,21 +2829,28 @@ impl Executor {
             let num_rows = read_device_row_count(&self.provider, &projected)? as u32;
 
             if num_rows > 0 {
-                // RD-17: Store only metadata, not CudaBuffer clones
-                tag_entries.push(IlpTagEntry { i, j, k, num_rows });
-                results_by_k.entry(k).or_default().push(projected);
+                tag_entries.push(IlpTagEntry { i, j, k, num_rows, buffer: Some(projected) });
             }
         }
 
-        // 4. Union results per target relation and store
-        for (k, buffers) in results_by_k {
+        // 4. Phase 2: Union results by k, borrowing buffers from tag_entries
+        let mut bufs_by_k: HashMap<u32, Vec<&CudaBuffer>> = HashMap::new();
+        for entry in &tag_entries {
+            if let Some(ref buf) = entry.buffer {
+                bufs_by_k.entry(entry.k).or_default().push(buf);
+            }
+        }
+
+        for (k, buffers) in bufs_by_k {
             let (_, target_name) = &rel_index[k as usize];
 
-            // Chain-union all buffers
+            // Chain-union all buffers (union_gpu takes &CudaBuffer refs)
             let union_buf = if buffers.len() == 1 {
-                buffers.into_iter().next().unwrap()
+                // Single buffer: union with an empty buffer to produce a copy
+                let empty = self.provider.create_empty_buffer(buffers[0].schema().clone())?;
+                self.provider.union_gpu(buffers[0], &empty)?
             } else {
-                let mut acc = self.provider.union_gpu(&buffers[0], &buffers[1])?;
+                let mut acc = self.provider.union_gpu(buffers[0], buffers[1])?;
                 for buf in &buffers[2..] {
                     acc = self.provider.union_gpu(&acc, buf)?;
                 }
@@ -2864,7 +2871,7 @@ impl Executor {
             }
         }
 
-        // 5. Store tag metadata
+        // 5. Phase 3: Store tag entries (with retained buffers)
         self.ilp_last_result = Some(IlpTaggedResult { entries: tag_entries });
 
         if let Some(start) = start {
