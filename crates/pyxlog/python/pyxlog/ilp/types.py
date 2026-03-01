@@ -127,6 +127,100 @@ class LearnedArtifact:
     telemetry: TrainTelemetry = field(default_factory=TrainTelemetry)
     metadata: ArtifactMetadata = field(default_factory=ArtifactMetadata)
 
+    def save(self, path: Path) -> None:
+        """Save artifact to JSON file."""
+        import json
+        import hashlib
+        import dataclasses
+
+        map_data = [
+            {"id": c.id, "i": c.i, "j": c.j, "k": c.k,
+             "left_name": c.left_name, "right_name": c.right_name,
+             "head_name": c.head_name}
+            for c in self.candidate_map
+        ]
+        map_str = json.dumps(map_data, sort_keys=True)
+        self.metadata.candidate_map_hash = hashlib.sha256(map_str.encode()).hexdigest()
+
+        # Compute config_hash from config_snapshot if present
+        config_hash = ""
+        if self.config_snapshot:
+            config_dict = dataclasses.asdict(self.config_snapshot)
+            config_str = json.dumps(config_dict, sort_keys=True, default=str)
+            config_hash = hashlib.sha256(config_str.encode()).hexdigest()
+        self.metadata.config_hash = config_hash
+
+        data = {
+            "schema_version": getattr(self, "schema_version", "beta-v1"),
+            "discovered_rule": self.discovered_rule,
+            "candidate_map": map_data,
+            "logits": self.logits,
+            "soft_probs": self.soft_probs,
+            "selected_hard": self.selected_hard,
+            "metadata": {
+                "pyxlog_version": self.metadata.pyxlog_version,
+                "git_sha": self.metadata.git_sha,
+                "cuda_version": self.metadata.cuda_version,
+                "device_name": self.metadata.device_name,
+                "candidate_map_hash": self.metadata.candidate_map_hash,
+                "config_hash": self.metadata.config_hash,
+                "timestamp_utc": self.metadata.timestamp_utc,
+            },
+            "config_snapshot": dataclasses.asdict(self.config_snapshot) if self.config_snapshot else None,
+        }
+        with open(path, "w") as f:
+            json.dump(data, f, indent=2, default=str)
+
+    @classmethod
+    def load(cls, path: Path, verify_hash: bool = False) -> "LearnedArtifact":
+        """Load artifact from JSON file."""
+        import json
+        import hashlib
+
+        with open(path) as f:
+            data = json.load(f)
+
+        candidate_map = [
+            CandidateMapEntry(**c) for c in data["candidate_map"]
+        ]
+
+        if verify_hash:
+            map_str = json.dumps(data["candidate_map"], sort_keys=True)
+            computed = hashlib.sha256(map_str.encode()).hexdigest()
+            stored = data.get("metadata", {}).get("candidate_map_hash", "")
+            if computed != stored:
+                raise ValueError(
+                    f"Candidate map hash mismatch: computed {computed}, stored {stored}"
+                )
+
+        # Schema version compatibility check
+        stored_version = data.get("schema_version", "")
+        if verify_hash and stored_version and stored_version != "beta-v1":
+            raise ValueError(
+                f"Incompatible schema version: {stored_version} (expected beta-v1)"
+            )
+
+        meta_data = data.get("metadata", {})
+        metadata = ArtifactMetadata(
+            pyxlog_version=meta_data.get("pyxlog_version", ""),
+            git_sha=meta_data.get("git_sha"),
+            cuda_version=meta_data.get("cuda_version", ""),
+            device_name=meta_data.get("device_name", ""),
+            candidate_map_hash=meta_data.get("candidate_map_hash", ""),
+            config_hash=meta_data.get("config_hash", ""),
+            timestamp_utc=meta_data.get("timestamp_utc", ""),
+        )
+
+        return cls(
+            candidate_map=candidate_map,
+            logits=data.get("logits", []),
+            soft_probs=data.get("soft_probs", []),
+            selected_hard=data.get("selected_hard", []),
+            discovered_rule=data.get("discovered_rule", ""),
+            config_snapshot=None,  # Config not restored from JSON in beta (deferred)
+            metadata=metadata,
+        )
+
 
 @dataclass
 class TrainResult:
