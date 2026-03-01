@@ -161,4 +161,5 @@ class PromotionResult:
     novel_rate: float | None = None
     novel_examples: list[str] | None = None
     committed_source: str | None = None
+    ambiguous_alternatives: list[str] | None = None
     artifact: LearnedArtifact = field(default_factory=LearnedArtifact)

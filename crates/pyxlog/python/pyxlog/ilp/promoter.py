@@ -9,6 +9,7 @@ import pyxlog
 from pyxlog.ilp.trainer import train_only
 from pyxlog.ilp.types import (
     GateResult,
+    LearnedArtifact,
     PromotionResult,
     PromotionStatus,
     TrainConfig,
@@ -150,6 +151,16 @@ def train_and_promote(
             detail=f"{hn_derived}/{len(hn)} derived (want 0)",
         ))
 
+    # Ambiguity scan (informational, not gating)
+    ambiguous_alts: list[str] | None = None
+    if config.check_ambiguity:
+        top_m = 256 if not config.exhaustive_ambiguity else 10_000
+        ambiguous_alts = _scan_ambiguity(
+            source, mask_name, positives, negatives,
+            discovered, train_result.artifact, config,
+            top_m=top_m,
+        )
+
     all_pass = all(g.passed for g in gates)
     status = PromotionStatus.PROMOTED if all_pass else PromotionStatus.MANUAL_REVIEW_REQUIRED
 
@@ -160,8 +171,62 @@ def train_and_promote(
         novel_rate=novel_rate,
         novel_examples=[str(f) for f in novel[:10]],
         committed_source=trial_source if all_pass else None,
+        ambiguous_alternatives=ambiguous_alts,
         artifact=train_result.artifact,
     )
+
+
+def _scan_ambiguity(
+    source: str,
+    mask_name: str,
+    positives: list[tuple[str, list[int]]],
+    negatives: list[tuple[str, list[int]]],
+    winning_rule: str,
+    artifact: LearnedArtifact,
+    config: TrainConfig,
+    top_m: int = 256,
+) -> list[str]:
+    """Check top-M candidates by final soft probability for alternative rules.
+
+    Per design doc Section 4.2: scan top-M by final soft probability, not
+    by candidate position. M = min(top_m, C).
+    """
+    prog = pyxlog.IlpProgramFactory.compile(
+        source, device=config.device, memory_mb=config.memory_mb,
+    )
+    candidates = prog.valid_candidates(mask_name, config.allow_recursive_candidates)
+
+    # Sort candidates by final soft probability (descending) from artifact
+    soft_probs = artifact.soft_probs if artifact.soft_probs else []
+    if soft_probs and len(soft_probs) == len(candidates):
+        indexed = sorted(enumerate(candidates), key=lambda x: -soft_probs[x[0]])
+        sorted_candidates = [c for _, c in indexed]
+    else:
+        sorted_candidates = candidates
+
+    alternatives: list[str] = []
+    scan_count = min(top_m, len(sorted_candidates))
+    for c in sorted_candidates[:scan_count]:
+        rule_str = f"{c['head_name']}(X, Y) :- {c['left_name']}(X, Z), {c['right_name']}(Z, Y)."
+        if rule_str == winning_rule:
+            continue
+
+        trial_source = _commit_rule(source, mask_name, rule_str)
+        try:
+            trial = pyxlog.IlpProgramFactory.compile(
+                trial_source, device=config.device, memory_mb=config.memory_mb,
+            )
+            trial.evaluate()
+
+            all_pos = all(trial.fact_exists(r, v) for r, v in positives)
+            no_neg = not any(trial.fact_exists(r, v) for r, v in negatives)
+
+            if all_pos and no_neg:
+                alternatives.append(rule_str)
+        except Exception:
+            continue
+
+    return alternatives
 
 
 def _commit_rule(source: str, mask_name: str, rule: str) -> str:
