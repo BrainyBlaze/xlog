@@ -73,6 +73,8 @@ def test_promote_gates_are_populated():
         holdout_positives=[("reach", [1, 3])],
         holdout_negatives=[],
     )
+    assert result.status != PromotionStatus.NOT_CONVERGED, \
+        "Cannot test gates without convergence"
     gate_names = [g.name for g in result.gates]
     assert "training_positive" in gate_names
     assert "training_negative" in gate_names

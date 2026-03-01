@@ -120,7 +120,7 @@ def train_and_promote(
     ))
 
     # Holdout gates
-    if holdout_positives is None and holdout_negatives is None:
+    if not holdout_positives and not holdout_negatives:
         return PromotionResult(
             status=PromotionStatus.MANUAL_REVIEW_REQUIRED,
             gates=gates,
