@@ -1,0 +1,224 @@
+# Differentiable ILP (dILP) Training Architecture
+
+This document describes the dILP training subsystem: a GPU-accelerated differentiable Inductive Logic
+Programming engine that learns Datalog rules from positive/negative examples via gradient descent.
+
+## Design Goals
+
+1. **Learn rules, not weights** — discover symbolic Datalog clauses (e.g., `reach(X,Y) :- edge(X,Z), edge(Z,Y).`) from data
+2. **GPU-resident hot loop** — no device-to-host transfers in the training step loop (P0 contract)
+3. **Sparse by default** — candidate-indexed soft-probs instead of materializing N³ tensors
+4. **Transactional promotion** — learned rules pass gate checks before entering the knowledge base
+
+## Core Idea: Tensorized Super-Graph Masking
+
+Traditional ILP systems compile candidate rules into executable programs — impossible at millisecond
+timescales. XLOG's approach pre-compiles a "super-graph" of all candidate rules and activates them
+via continuous mask tensors optimized with Gumbel-Softmax:
+
+```
+Candidate rules          Logit tensor W (C floats)
+  ┌──────────┐              ┌───────────┐
+  │ r1: A←B,C│              │ w1  w2 .. │ ─── Gumbel-Softmax(τ) ──►  soft mask
+  │ r2: A←B,D│              │           │                               │
+  │ ...       │              └───────────┘                               ▼
+  └──────────┘                                              set_rule_mask_sparse()
+                                                                        │
+                                                                        ▼
+                                                            xlog evaluate (GPU)
+                                                                        │
+                                                                        ▼
+                                                              BCE loss + ∇W
+```
+
+At convergence, `argmax(W)` picks the winning rule. Temperature annealing (τ → τ_floor) drives the
+soft mask toward a one-hot selection.
+
+For the full mathematical treatment, see [`docs/ilp/rfc-tensorized-ilp.md`](../ilp/rfc-tensorized-ilp.md).
+
+## Architecture Overview
+
+```
+                           Python (pyxlog.ilp)
+     ┌─────────────────────────────────────────────────────┐
+     │  train_only()                                       │
+     │    ├─ valid_candidates()  → candidate map           │
+     │    ├─ MaskBackend.init_weights()                    │
+     │    ├─ AdaptiveTempController                        │
+     │    └─ step loop ──────────────────────────┐         │
+     │         ├─ MaskBackend.apply_mask()       │         │
+     │         ├─ program.evaluate_device()      │ GPU     │
+     │         ├─ BCE loss (torch)               │ only    │
+     │         ├─ loss.backward()                │         │
+     │         └─ optimizer.step()               │         │
+     │                                           │         │
+     │  train_and_promote()                      │         │
+     │    ├─ train_only()                        │         │
+     │    ├─ trial compile (Rust)                │         │
+     │    └─ promotion gates                     │         │
+     └───────────────────────────────────────────┘         │
+                        │                                   │
+                        ▼                                   │
+     ┌────────────────────────────────────┐                │
+     │  Rust (xlog-runtime, xlog-cuda)   │                │
+     │    ├─ set_rule_mask_sparse()       │◄───────────────┘
+     │    ├─ IlpRegistry (mask storage)  │
+     │    ├─ TensorMaskedJoin (executor) │
+     │    ├─ batch_fact_membership()     │
+     │    └─ batch_tagged_credit()       │
+     └────────────────────────────────────┘
+                        │
+                        ▼
+     ┌────────────────────────────────────┐
+     │  CUDA (kernels/ilp.cu)            │
+     │    └─ extract_nonzero_indices()   │
+     └────────────────────────────────────┘
+```
+
+## Key Entry Points
+
+### Python (pyxlog.ilp)
+
+| File | Purpose |
+|------|---------|
+| `pyxlog/ilp/trainer.py` | `train_only()` — multi-start training loop |
+| `pyxlog/ilp/promoter.py` | `train_and_promote()` — training + gate pipeline |
+| `pyxlog/ilp/backend.py` | `MaskBackend` protocol, `SparseMaskBackend`, `DenseMaskBackend` |
+| `pyxlog/ilp/temperature.py` | `AdaptiveTempController` — cosine-annealed τ schedule |
+| `pyxlog/ilp/entropy.py` | Entropy regularization helpers |
+| `pyxlog/ilp/holdout.py` | `loo_holdout_f1()` — leave-one-out F1 scoring |
+| `pyxlog/ilp/types.py` | `TrainConfig`, `TrainResult`, `PromotionResult`, `LearnedArtifact`, etc. |
+| `pyxlog/ilp/exceptions.py` | `IlpConfigError`, `IlpCandidateError`, `IlpTrainingError` |
+
+### Rust (xlog-runtime, xlog-cuda)
+
+| File | Purpose |
+|------|---------|
+| `crates/xlog-runtime/src/ilp_registry.rs` | `IlpRegistry` — mask storage, `IlpTaggedResult` metadata |
+| `crates/xlog-runtime/tests/ilp_integration_tests.rs` | Rust-side integration tests for mask round-trips |
+| `crates/xlog-cuda/tests/ilp_kernel_tests.rs` | CUDA kernel unit tests (extract_nonzero_indices) |
+
+### CUDA Kernels
+
+| File | Purpose |
+|------|---------|
+| `kernels/ilp.cu` | `extract_nonzero_indices()` — N³ mask → sparse index extraction |
+
+## Mask Backends
+
+The `MaskBackend` protocol abstracts how the learnable tensor W is applied to the XLOG executor:
+
+### SparseMaskBackend (default)
+
+```
+W (C logits) → Gumbel-Softmax(τ) → candidate_soft_probs (C,)
+                                          │
+                        set_rule_mask_sparse(candidate_ids, soft_probs, budget)
+                                          │
+                                          ▼
+                              Rust builds executor mask internally
+                              (no N³ tensor materialized)
+```
+
+- Learnable params: `C` floats (one per candidate rule)
+- Memory: O(C) — typically C < 100
+- Calls `set_rule_mask_sparse()` on the compiled program
+
+### DenseMaskBackend (alpha-compatible, debug)
+
+```
+W (N×N×N logits) → Gumbel-Softmax(τ) → 3D soft mask
+                                              │
+                           flatten → DLPack → set_rule_mask()
+                                              │
+                                              ▼
+                                    Rust imports N³ tensor
+```
+
+- Learnable params: N³ floats (N = schema size)
+- Memory: O(N³) — expensive for large schemas
+- Enabled via `TrainConfig(debug_dense_mask=True)` for parity testing
+
+## Training Pipeline
+
+### train_only()
+
+1. **Candidate enumeration** — `valid_candidates(source, mask_name)` returns all syntactically legal body-pair assignments
+2. **Multi-start** — up to `max_attempts` independent restarts with fresh logits
+3. **Step loop** (per attempt, up to `step_budget_per_attempt`):
+   - Apply mask via backend
+   - Forward pass: `program.evaluate_device()` (GPU-only, no host reads)
+   - BCE loss between predicted and target fact membership
+   - Backward pass: `loss.backward()` through PyTorch autograd
+   - Optimizer step on W
+   - Temperature anneal: τ_start → τ_floor (cosine schedule)
+   - Early stopping: when argmax is stable and loss < threshold
+4. **Decode** — `argmax(W)` maps to winning candidate → discovered rule string
+
+### train_and_promote()
+
+1. Call `train_only()` — get `TrainResult`
+2. If not converged → `PromotionStatus.NOT_CONVERGED`
+3. **Trial compile** — substitute discovered rule into source, compile via Rust
+4. **Promotion gates** (all must pass for `PROMOTED`):
+   - **Convergence gate** — training converged (already checked)
+   - **Novel-rate gate** — fraction of non-example derivations ≤ `max_novel_rate`
+   - **Protected-relation gate** — no unwanted relation side-effects
+   - **Holdout F1 gate** — F1 on held-out examples ≥ threshold
+   - **Ambiguity gate** — leave-one-out scan detects no alternative winning candidates
+5. All pass → `PromotionStatus.PROMOTED` with `committed_source`
+
+## Artifact Persistence
+
+`LearnedArtifact` captures the full training result for reproducibility:
+
+```python
+artifact.save("artifact.json")   # JSON with SHA-256 candidate-map hash
+loaded = LearnedArtifact.load("artifact.json", verify_hash=True)
+```
+
+Schema version: `beta-v1`. Fields: discovered rule, logits, candidate map, config, telemetry,
+precision/recall, metadata (timestamp, schema version, candidate map hash).
+
+## GPU Contract
+
+The training step loop obeys XLOG's P0 GPU-resident contract:
+
+- `evaluate_device()` — no host reads for semantic results
+- `batch_fact_membership()` / `batch_tagged_credit()` — GPU-side fact queries
+- `AtomicU64` D2H counter on `CudaKernelProvider` — hard gate raises if counter > 0 during step loop
+- Mask byte D2H (O(20 bytes) for sparse paths) is accepted as control-plane overhead
+
+## Testing
+
+- **86 static test functions** across 18 Python test files → **124 parametrized** by pytest
+- **Reliability gate**: 20 consecutive `train_only()` runs must all converge (20/20 pass)
+- **Dense/sparse parity**: every sparse-path test has a `debug_dense_mask=True` variant
+- Rust-side: `ilp_integration_tests.rs`, `ilp_kernel_tests.rs`
+- CUDA certification: `extract_nonzero_indices` covered by kernel test suite
+
+## Design Documents
+
+The dILP design evolved through 10 iterations plus an RFC:
+
+| Document | Content |
+|----------|---------|
+| [`docs/ilp/1.md`](../ilp/1.md) | Motivation: continuous compilation via tensor masking |
+| [`docs/ilp/2.md`](../ilp/2.md) | Mathematical foundation: Gumbel-Softmax, tensorized semi-naive |
+| [`docs/ilp/3.md`](../ilp/3.md) | Hardware justification: why NVIDIA Tensor Cores |
+| [`docs/ilp/4.md`](../ilp/4.md) | Implementation map across XLOG crate stack |
+| [`docs/ilp/5.md`](../ilp/5.md) | End-to-end math + implementation details |
+| [`docs/ilp/6.md`](../ilp/6.md) | Operational workflow: trigger → search → commit |
+| [`docs/ilp/7.md`](../ilp/7.md) | Design Doc v1.0: Phases 1–4 |
+| [`docs/ilp/8.md`](../ilp/8.md) | Design Doc v2.0: transductive guidance extension |
+| [`docs/ilp/9.md`](../ilp/9.md) | Exhaustive engineering spec (file-by-file) |
+| [`docs/ilp/10.md`](../ilp/10.md) | RFC draft v4.4: resolved design decisions |
+| [`docs/ilp/rfc-tensorized-ilp.md`](../ilp/rfc-tensorized-ilp.md) | Full RFC (supersedes numbered docs) |
+| [`docs/ilp/dilp-showcase-report.md`](../ilp/dilp-showcase-report.md) | Validation: 4-stage showcase run analysis |
+
+## See Also
+
+- [Python Bindings — ILP Training API](python-bindings.md#ilp-training-dilp-beta) — user-facing API reference
+- [GPU Execution](gpu-execution.md) — mask DAG evaluation, stream compaction
+- [Probabilistic Tier](xlog-prob.md) — XGCF circuits, provenance (shared infrastructure)
+- [Data Interoperability](cudf-interop.md) — DLPack details

@@ -5,8 +5,9 @@
 [![Version](https://img.shields.io/badge/version-v0.3.2-blue.svg)](CHANGELOG.md)
 
 > **Release status:** Latest tagged release is `v0.3.2`. The `main` branch is ahead of `v0.3.2` and contains
-> unreleased work (GPU-native knowledge compilation, GPU CDCL verifier + cache integration, and neural-symbolic
-> training APIs). The originally planned `v0.4.0-alpha` milestone is **achieved**: all required neural examples are implemented and end-to-end validation with real datasets is complete.
+> unreleased work: GPU-native knowledge compilation, GPU CDCL verifier + cache, neural-symbolic training APIs,
+> and a **dILP beta trainer** (sparse mask API, promotion pipeline, artifact persistence, 20/20 reliability gate).
+> The `v0.4.0-alpha` milestone is **achieved**; dILP beta is **achieved**.
 > See `docs/ROADMAP.md` and `docs/VALIDATION_REPORT.md`.
 
 **XLOG** is a GPU-accelerated Datalog query engine with neural-symbolic integration. It compiles declarative logic programs into optimized relational plans and executes them on NVIDIA GPUs, achieving high throughput for recursive queries, graph analytics, probabilistic inference, and neural-symbolic training.
@@ -26,6 +27,7 @@
 | **Float Predicates** | IEEE 754 total ordering for `f32`/`f64` (`NaN > Inf > nums > +0 > -0 > -Inf`) |
 | **Probabilistic** | Exact inference (knowledge compilation), Monte Carlo sampling, negation (stratified + WFS) |
 | **Neural-Symbolic** | Neural predicates (`nn/4`), PyTorch integration, differentiable training, circuit caching |
+| **dILP Training** | Differentiable ILP: sparse GPU mask, multi-start optimizer, promotion gates, artifact save/load |
 | **Interop** | Arrow IPC, DLPack (zero-copy), Python bindings, PyTorch autograd |
 | **Profiling** | `--stats` flag for per-stratum/per-operation timing, memory tracking |
 
@@ -338,6 +340,59 @@ history = pyxlog.train_model(
 
 ---
 
+## Differentiable ILP (dILP) Training (Beta)
+
+XLOG includes a differentiable Inductive Logic Programming trainer that learns Datalog rules from positive/negative examples using gradient descent on a GPU.
+
+### Training a Rule
+
+```python
+from pyxlog.ilp import train_only, TrainConfig
+
+source = """
+    edge(1, 2). edge(2, 3). edge(3, 4). edge(4, 5).
+    learnable(W) :: reach(X, Y) :- bL(X, Z), bR(Z, Y).
+"""
+pos = [("reach", [1, 3]), ("reach", [2, 4]), ("reach", [1, 4])]
+neg = [("reach", [1, 1]), ("reach", [3, 2])]
+
+config = TrainConfig(
+    step_budget_per_attempt=150,
+    max_attempts=5,
+    tau_start=2.0,
+    tau_floor=0.05,
+    seed=42,
+)
+
+result = train_only(source, "W", pos, neg, config)
+if result.converged:
+    print(f"Discovered: {result.discovered_rule}")
+    result.artifact.save("learned.json")
+```
+
+### Promotion Pipeline
+
+```python
+from pyxlog.ilp import train_and_promote, TrainConfig
+
+config = TrainConfig(check_ambiguity=True, max_novel_rate=0.05)
+promotion = train_and_promote(source, "W", pos, neg, config)
+
+print(f"Status: {promotion.status}")
+for gate in promotion.gates:
+    print(f"  {gate.name}: {'PASS' if gate.passed else 'FAIL'} — {gate.detail}")
+```
+
+### Key Features
+
+- **Sparse GPU mask**: Candidate soft-probs sent to Rust; executor mask built on device with zero host transfers
+- **Multi-start optimizer**: Adaptive temperature, entropy regularization, plateau detection
+- **Promotion gates**: Convergence, novel rate, protected relations, holdout F1, ambiguity scan
+- **Artifact persistence**: JSON save/load with SHA-256 hash verification
+- **Recursive candidates**: Optional body-references-head rules via `allow_recursive_candidates=True`
+
+---
+
 ## Language Overview
 
 ### Facts and Rules
@@ -538,6 +593,8 @@ The legacy CPU D4 vendor pipeline is removed.
 | [Data Interop](docs/architecture/cudf-interop.md) | Arrow and DLPack integration |
 | [Examples](examples/) | Annotated example programs |
 | [Neural Examples](examples/neural/) | Neural-symbolic training examples |
+| [dILP Beta Design](docs/plans/2026-02-26-dilp-hardening-design.md) | dILP trainer hardening design |
+| [dILP Beta Plan](docs/plans/2026-02-26-dilp-beta-impl.md) | dILP beta implementation plan (9 tasks) |
 | [v0.3.2 Showcase](examples/xlog/80-v032-showcase/) | Production-grade multi-module examples |
 | [CUDA Certification](docs/architecture/cuda-certification.md) | Certification suite coverage (current HEAD) |
 

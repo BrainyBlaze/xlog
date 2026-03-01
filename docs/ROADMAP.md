@@ -1,10 +1,11 @@
 # XLOG Development Roadmap
 
-> **Last Updated:** February 23, 2026
+> **Last Updated:** March 1, 2026
 > **Current Version:** v0.3.2 (Released)
-> **Current Version:** v0.4.0-alpha (Neural-symbolic milestone)
-> **Status:** `main` is ahead of `v0.3.2` (v0.4.0-alpha milestone achieved): GPU-native exact path (GPU D4 + GPU CDCL verifier + cache) and
-> neural-symbolic training APIs exist in code. The `v0.4.0-alpha` milestone is **achieved**: end-to-end validation of all examples and additional neural examples have been completed.
+> **Current Milestone:** v0.4.0-alpha (Neural-symbolic achieved), dILP beta (ILP trainer achieved)
+> **Status:** `main` is ahead of `v0.3.2`: GPU-native exact path (GPU D4 + GPU CDCL verifier + cache),
+> neural-symbolic training APIs, and dILP beta trainer (sparse mask, promotion pipeline, artifact persistence,
+> 20/20 reliability gate) all exist in code.
 
 ---
 
@@ -403,6 +404,60 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 
 ---
 
+## Differentiable ILP (dILP) Trainer (`pyxlog.ilp`) — v0.4.0-beta
+
+### Implemented ✅ (dILP Beta)
+
+**Sparse Mask API (Rust + PyO3):**
+- [x] `set_rule_mask_sparse(candidate_ids, soft_probs, budget)` — Rust builds executor mask internally
+- [x] No N3 tensor materialization; zero host→device mask transfer
+- [x] AtomicU32 row-count cache on `CudaBuffer` for GPU-resident row counts
+
+**Trainer Backend Abstraction:**
+- [x] `MaskBackend` protocol with `SparseMaskBackend` (default) and `DenseMaskBackend` (fallback)
+- [x] `debug_dense_mask=True` config option for dense parity testing
+- [x] Dense-parity verified: sparse and dense backends produce the same discovered rules
+
+**Training Pipeline:**
+- [x] `train_only()` — multi-start training with adaptive temperature, entropy regularization, plateau detection
+- [x] `train_and_promote()` — wraps `train_only()` + trial compilation + promotion gates → `PromotionResult`
+- [x] 5 promotion gates: convergence, novel rate, protected relations, holdout F1, ambiguity scan
+- [x] Transactional commit: trial program compiled with discovered rule before promotion
+
+**Holdout Scoring + Ambiguity:**
+- [x] LOO (leave-one-out) holdout F1 for ≤20 examples
+- [x] Per-fold precision/recall with configurable `holdout_strategy`
+- [x] Top-M ambiguity scan for alternative rules (`check_ambiguity`, `exhaustive_ambiguity`)
+
+**Hard-Negative Mining:**
+- [x] `sample_false_positives()` Rust API for GPU-side false positive sampling
+- [x] Wired into trainer every 20 steps; D2H counter reset preserves zero-transfer contract
+
+**Artifact Persistence:**
+- [x] `LearnedArtifact.save(path)` / `.load(path)` with JSON serialization
+- [x] SHA-256 candidate map hash verification (`verify_hash=True`)
+- [x] Schema version `beta-v1` with forward-compatibility check
+
+**Recursive Candidates:**
+- [x] `allow_recursive_candidates=True` enables body-references-head candidates (i==k, j==k)
+- [x] Default off; behind config flag
+
+**Reliability:**
+- [x] Beta gate: 4 stages (reach, grandparent, colleague, plus2) x 5 seeds = 20/20
+- [x] Zero D2H column transfers in training step loop (hard gate verified)
+
+**Design document:** `docs/plans/2026-02-26-dilp-hardening-design.md`
+**Implementation plan:** `docs/plans/2026-02-26-dilp-beta-impl.md`
+
+### Planned 📋 (dILP beyond beta)
+
+- [ ] Typed query-buffer builder (non-u32 schemas)
+- [ ] Full GPU-resident loss computation (v0.5.0)
+- [ ] Config restoration from saved artifact JSON
+- [ ] Telemetry persistence in artifact (optional, size-bounded)
+
+---
+
 ## GPU-Native Knowledge Compilation (`xlog-prob` + `xlog-solve`) — Phase 6 / v0.5.0
 
 ### Implemented ✅ (Foundations)
@@ -484,6 +539,17 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 - [x] `zero_grad()`, `optimizer_step()`, `scheduler_step()` — training utilities
 - [x] `TrainingHistory` — epoch losses and batch metrics
 
+### Implemented ✅ (dILP beta — ILP training)
+
+- [x] `pyxlog.ilp.train_only()` — multi-start dILP training with sparse GPU mask
+- [x] `pyxlog.ilp.train_and_promote()` — training + trial compilation + promotion gates
+- [x] `TrainConfig` — 31-field frozen config (temperature, budget, holdout, recursion, etc.)
+- [x] `TrainResult` — convergence, metrics, discovered rule, artifact
+- [x] `PromotionResult` — gate results, novel count/rate, committed source
+- [x] `LearnedArtifact` — save/load with JSON + SHA-256 hash verification
+- [x] `IlpProgramFactory.compile()` — compile learnable programs for ILP
+- [x] `valid_candidates()` — enumerate candidate rules (recursive/non-recursive)
+
 ### Planned 📋
 
 - [ ] PyPI package distribution
@@ -556,6 +622,7 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 - [x] Fuzz testing for parser, compiler, and type inference (cargo-fuzz, ASAN, `.github/workflows/fuzz.yml`)
 - [x] Property-based testing for kernel correctness (proptest: sort stability, join correctness, filter idempotence, dedup determinism)
 - [x] Float predicate edge case tests (NaN, Infinity, subnormals, signed zeros)
+- [x] dILP beta test suite: 86 static test functions (124 parametrized), 20/20 reliability gate
 
 ### Planned 📋
 
@@ -591,12 +658,13 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 | Version | Status | Key Features |
 |---------|--------|--------------|
 | v0.4.0-alpha (main) | Achieved | GPU-native exact path (GPU D4 + GPU CDCL verifier + cache), device-only MC counts, Arrow C Device export, neural-symbolic training APIs |
+| dILP beta (main) | Achieved | Sparse mask API, trainer backend abstraction, promotion pipeline, holdout F1, hard-negative mining, artifact persistence, recursive candidates, 20/20 reliability |
 | v0.1.0 | Released | Deterministic Datalog, GPU joins/aggregations, basic CLI |
 | v0.2.0 | Released | Probabilistic reasoning (exact + MC), Python bindings, GPU-resident execution |
 | v0.3.1 | Released | Float predicates (IEEE 754 total ordering), benchmarks, `--stats` flag, fuzz testing, property-based testing |
 | v0.3.2 | Released | Module system, UDFs, reversible symbols, showcase examples, count→u64 fix |
 | v0.4.0-alpha | Implemented | Neural predicates (`nn/4`) + training milestone (release-gated on full example validation with real datasets) |
-| v0.4.0-beta | Planned | Term embeddings and extended neural-symbolic training controls |
+| v0.4.0-beta | In progress | dILP beta trainer (achieved); term embeddings, extended neural-symbolic training controls (planned) |
 | v0.4.0-rc | Planned | Lists, meta-predicates, semantic loss functions |
 | v0.4.0 | Planned | Full neural-symbolic feature set, production-ready training |
 | v0.5.0 | Planned | GPU-native knowledge compilation (GPU D4 + GPU CDCL verifier), zero data-plane host transfers |

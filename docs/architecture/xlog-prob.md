@@ -272,3 +272,9 @@ python -m pip install --upgrade pip maturin
 maturin develop --release
 python ../../examples/python/03_prob_mc_nonmonotone_torch.py
 ```
+
+## See Also
+
+- [dILP Training Architecture](dilp-training.md) — Differentiable ILP (shares XGCF/provenance infrastructure)
+- [GPU Execution](gpu-execution.md) — Mask DAG evaluation, stream compaction
+- [Python Bindings](python-bindings.md) — User-facing API reference

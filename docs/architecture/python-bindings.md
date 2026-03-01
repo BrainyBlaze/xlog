@@ -8,6 +8,7 @@ The `pyxlog` Python module provides:
 
 - Deterministic Datalog execution via `LogicProgram`
 - Probabilistic inference via `Program`
+- Differentiable ILP training via `pyxlog.ilp` (rule learning from examples)
 - Zero-copy GPU tensor exchange via DLPack (primary interop boundary)
 - Optional experimental Arrow C Device interop (feature-gated)
 
@@ -190,6 +191,95 @@ When built with `--features arrow-device-import`, `pyxlog` exposes:
 These helpers exist to bridge between DLPack columns and Arrow's C Device interface without host
 copies. This is experimental and currently rejects nulls; import does not yet support bit-packed
 `Bool`.
+
+## ILP Training (dILP Beta)
+
+The `pyxlog.ilp` subpackage provides differentiable ILP (Inductive Logic Programming) for learning
+Datalog rules from examples via gradient descent.
+
+### Training API
+
+```python
+from pyxlog.ilp import train_only, train_and_promote, TrainConfig, LearnedArtifact
+
+# Define a learnable program
+source = """
+    edge(1, 2). edge(2, 3). edge(3, 4). edge(4, 5).
+    learnable(W) :: reach(X, Y) :- bL(X, Z), bR(Z, Y).
+"""
+pos = [("reach", [1, 3]), ("reach", [2, 4])]
+neg = [("reach", [1, 1])]
+
+# Configure training
+config = TrainConfig(
+    step_budget_per_attempt=150,   # steps per attempt
+    max_attempts=5,                # multi-start attempts
+    tau_start=2.0,                 # initial temperature
+    tau_floor=0.05,                # minimum temperature
+    seed=42,                       # reproducibility
+)
+
+# Train only (no promotion gates)
+result = train_only(source, "W", pos, neg, config)
+assert result.converged
+print(result.discovered_rule)      # e.g., "reach(X,Y) :- edge(X,Z), edge(Z,Y)."
+
+# Train and promote (with gates)
+config = TrainConfig(check_ambiguity=True, max_novel_rate=0.05)
+promotion = train_and_promote(source, "W", pos, neg, config)
+print(promotion.status)            # PromotionStatus.PROMOTED
+```
+
+### Artifact Persistence
+
+```python
+# Save learned artifact
+result.artifact.save("artifact.json")
+
+# Load with hash verification
+loaded = LearnedArtifact.load("artifact.json", verify_hash=True)
+print(loaded.discovered_rule)
+print(loaded.logits)
+```
+
+### TrainConfig Fields
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `step_budget_per_attempt` | 150 | Max gradient steps per attempt |
+| `max_attempts` | 5 | Multi-start attempts |
+| `tau_start` | 2.0 | Initial Gumbel-softmax temperature |
+| `tau_floor` | 0.05 | Minimum temperature |
+| `allow_recursive_candidates` | False | Enable body-references-head candidates |
+| `check_ambiguity` | False | Run ambiguity scan on convergence |
+| `max_novel_rate` | 0.0 | Max fraction of novel (non-example) derivations |
+| `debug_dense_mask` | False | Force dense mask backend (for parity testing) |
+| `seed` | None | Random seed for reproducibility |
+| `device` | 0 | CUDA device index |
+| `memory_mb` | 512 | GPU memory limit |
+
+### Result Types
+
+```python
+# TrainResult
+result.converged          # bool
+result.discovered_rule    # str | None
+result.attempt_count      # int
+result.total_steps        # int
+result.precision          # float
+result.recall             # float
+result.holdout_f1         # float | None
+result.artifact           # LearnedArtifact
+
+# PromotionResult
+promotion.status          # PromotionStatus (PROMOTED, GATE_FAILED, etc.)
+promotion.gates           # list[GateResult]
+promotion.novel_count     # int | None
+promotion.novel_rate      # float | None
+promotion.committed_source # str | None
+```
+
+---
 
 ## DLPack Integration
 
@@ -400,6 +490,7 @@ Current limitations:
 
 ## See Also
 
+- [dILP Training Architecture](dilp-training.md) — System design, mask backends, promotion pipeline
 - [Data Interoperability](cudf-interop.md) — DLPack and Arrow details
 - [Probabilistic Tier](xlog-prob.md) — Inference engine details
 - [CLI Reference](cli-reference.md) — Command-line alternative
