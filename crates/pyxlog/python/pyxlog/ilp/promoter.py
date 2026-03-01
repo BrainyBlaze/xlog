@@ -120,6 +120,16 @@ def train_and_promote(
         detail="; ".join(regression_detail_parts),
     ))
 
+    # Ambiguity scan (informational, not gating) — runs before holdout check
+    ambiguous_alts: list[str] | None = None
+    if config.check_ambiguity:
+        top_m: int | None = 256 if not config.exhaustive_ambiguity else None
+        ambiguous_alts = _scan_ambiguity(
+            source, mask_name, positives, negatives,
+            discovered, train_result.artifact, config,
+            top_m=top_m,
+        )
+
     # Holdout gates
     if not holdout_positives and not holdout_negatives:
         return PromotionResult(
@@ -128,6 +138,7 @@ def train_and_promote(
             novel_count=novel_count,
             novel_rate=novel_rate,
             novel_examples=[str(f) for f in novel[:10]],
+            ambiguous_alternatives=ambiguous_alts,
             artifact=train_result.artifact,
         )
 
@@ -150,16 +161,6 @@ def train_and_promote(
             passed=hn_ok,
             detail=f"{hn_derived}/{len(hn)} derived (want 0)",
         ))
-
-    # Ambiguity scan (informational, not gating)
-    ambiguous_alts: list[str] | None = None
-    if config.check_ambiguity:
-        top_m = 256 if not config.exhaustive_ambiguity else 10_000
-        ambiguous_alts = _scan_ambiguity(
-            source, mask_name, positives, negatives,
-            discovered, train_result.artifact, config,
-            top_m=top_m,
-        )
 
     all_pass = all(g.passed for g in gates)
     status = PromotionStatus.PROMOTED if all_pass else PromotionStatus.MANUAL_REVIEW_REQUIRED
@@ -184,12 +185,12 @@ def _scan_ambiguity(
     winning_rule: str,
     artifact: LearnedArtifact,
     config: TrainConfig,
-    top_m: int = 256,
+    top_m: int | None = 256,
 ) -> list[str]:
     """Check top-M candidates by final soft probability for alternative rules.
 
     Per design doc Section 4.2: scan top-M by final soft probability, not
-    by candidate position. M = min(top_m, C).
+    by candidate position. M = min(top_m, C). Pass None for exhaustive scan.
     """
     prog = pyxlog.IlpProgramFactory.compile(
         source, device=config.device, memory_mb=config.memory_mb,
@@ -205,7 +206,7 @@ def _scan_ambiguity(
         sorted_candidates = candidates
 
     alternatives: list[str] = []
-    scan_count = min(top_m, len(sorted_candidates))
+    scan_count = len(sorted_candidates) if top_m is None else min(top_m, len(sorted_candidates))
     for c in sorted_candidates[:scan_count]:
         rule_str = f"{c['head_name']}(X, Y) :- {c['left_name']}(X, Z), {c['right_name']}(Z, Y)."
         if rule_str == winning_rule:

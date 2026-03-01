@@ -8,7 +8,7 @@ pyxlog = pytest.importorskip("pyxlog")
 from conftest import skip_unless_pyxlog_cuda
 skip_unless_pyxlog_cuda()
 
-from pyxlog.ilp import train_and_promote, TrainConfig, PromotionStatus
+from pyxlog.ilp import train_and_promote, TrainConfig, PromotionResult, PromotionStatus
 from pyxlog.ilp.holdout import loo_holdout_f1
 
 SOURCE = """
@@ -67,4 +67,5 @@ def test_ambiguity_scan_smoke():
         holdout_positives=POS[:2],
         holdout_negatives=[],
     )
-    assert isinstance(result, type(result))
+    assert isinstance(result, PromotionResult)
+    assert result.ambiguous_alternatives is None or isinstance(result.ambiguous_alternatives, list)
