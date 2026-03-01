@@ -28,11 +28,12 @@ def test_contradictory_examples_raises_config_error():
         train_only(SOURCE, "W", pos, neg, TrainConfig(max_attempts=1))
 
 
-def test_recursive_candidates_rejected_in_alpha():
-    """allow_recursive_candidates=True is a beta-only feature."""
+def test_recursive_candidates_accepted_in_beta():
+    """allow_recursive_candidates=True is now a supported beta feature."""
     config = TrainConfig(max_attempts=1, allow_recursive_candidates=True)
-    with pytest.raises(IlpConfigError, match="beta"):
-        train_only(SOURCE, "W", [("reach", [1, 3])], [], config)
+    # Should not raise — just run with limited budget
+    result = train_only(SOURCE, "W", [("reach", [1, 3])], [], config)
+    assert result.total_steps > 0
 
 
 def test_all_distractors_returns_not_converged():

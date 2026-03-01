@@ -98,12 +98,6 @@ def _validate_inputs(
             f"positives and negatives contradict: {overlap}"
         )
 
-    # Alpha scope: recursive candidates are beta-only
-    if config.allow_recursive_candidates:
-        raise IlpConfigError(
-            "allow_recursive_candidates=True is a beta-only feature"
-        )
-
 
 # ---------------------------------------------------------------------------
 # Single attempt
