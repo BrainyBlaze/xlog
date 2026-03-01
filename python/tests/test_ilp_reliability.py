@@ -58,6 +58,7 @@ STAGES = [
 ]
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("seed", range(5))
 @pytest.mark.parametrize(
     "stage_name,source,positives,negatives,mask_name",

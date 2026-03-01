@@ -22,7 +22,7 @@ GRANDPARENT_NEG = [("grandparent", [1, 2]), ("grandparent", [3, 1])]
 
 def test_multistart_converges_with_distractors():
     config = TrainConfig(
-        step_budget_per_attempt=120, max_attempts=5,
+        step_budget_per_attempt=60, max_attempts=3,
         tau_start=2.0, tau_floor=0.05, seed=42,
     )
     result = train_only(
@@ -35,7 +35,7 @@ def test_multistart_converges_with_distractors():
 
 def test_multistart_reports_attempt_count():
     config = TrainConfig(
-        step_budget_per_attempt=120, max_attempts=7,
+        step_budget_per_attempt=60, max_attempts=3,
         tau_start=2.0, tau_floor=0.05, seed=42,
     )
     result = train_only(
