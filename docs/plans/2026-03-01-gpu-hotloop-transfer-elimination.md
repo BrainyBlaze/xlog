@@ -54,7 +54,15 @@ fn device_row_count(&self, buffer: &CudaBuffer) -> Result<usize> {
 }
 ```
 
-**Blocker fix**: `read_device_row_count` in `crates/xlog-runtime/src/ilp_registry.rs` bypasses provider and reads `dtoh_sync_copy_into` directly. Must be changed to call `provider.device_row_count()` (make it `pub`) or use `buffer.cached_row_count()` directly. This is the only external row-count reader.
+**Bypass fixes** (all external row-count readers that bypass provider):
+- `read_device_row_count` in `crates/xlog-runtime/src/ilp_registry.rs:9-20` — calls `provider.device().inner().dtoh_sync_copy_into()` directly. Must route through `buffer.cached_row_count()` with lazy fallback via public `provider.device_row_count()`.
+- `buffer_row_count` in `crates/xlog-runtime/src/executor.rs:2961-2968` — same pattern, calls `provider.device().inner().dtoh_sync_copy_into()` directly. Must route through `buffer.cached_row_count()` with lazy fallback.
+
+**Struct-literal and destructuring sites** that must be updated when adding the new field:
+- `crates/xlog-cuda/src/memory.rs:499` — direct struct literal construction in tests (`CudaBuffer { columns, row_cap, d_num_rows, schema }`)
+- `crates/xlog-cuda/src/provider.rs:1843` — destructuring pattern (`let CudaBuffer { columns, row_cap, d_num_rows, schema: _ } = combined`)
+- All test files using struct literal syntax (search for `CudaBuffer {`)
+- Strategy: add `cached_row_count: AtomicU32::new(u32::MAX)` in `from_columns`, then convert struct-literal sites to use `from_columns` or add `..` rest pattern for destructuring.
 
 ### Impact
 - Eliminates ~130 of ~170 per-step D2H transfers
@@ -98,9 +106,9 @@ struct FactBufferEntry {
 
 **Handle validity**: Monotonic `next_handle: u64` counter. Handles are opaque u64 IDs.
 
-**Epoch guard**: `compile_epoch: u64` on CompiledIlpProgram, incremented on recompile/schema-change/commit (NOT on `evaluate()` — fact buffers are valid across steps within the same attempt). `_preloaded` variants reject handles where `entry.creation_epoch != self.compile_epoch`.
+**Epoch guard**: `compile_epoch: u64` on CompiledIlpProgram, incremented on recompile/schema-change/commit (NOT on `evaluate()` — fact buffers are valid across steps within the same attempt). `_preloaded` variants reject handles where `entry.creation_epoch != self.compile_epoch`. **On epoch bump, all existing handles are dropped** to prevent GPU memory leaks from accumulated stale buffers across repeated recompile cycles.
 
-**Schema-aware upload**: Route through the relation's schema from `self.executor.store()`, not hardcoded u32. Use the same encoding logic as `push_term_bytes` to handle future non-U32 column types.
+**Schema-aware upload**: Route through the relation's schema from `self.executor.store()`, not hardcoded u32. For alpha scope, the API accepts `Vec<Vec<i64>>` and encodes as integer-like columns only (U32, I32, I64) based on the relation schema. True symbol/term/float handling is deferred to beta when richer schemas are introduced — at that point the API type may need to change to support heterogeneous column types.
 
 **RAII cleanup in Python** (`trainer.py`):
 ```python
@@ -130,7 +138,7 @@ def _run_single_attempt(...):
 ## 3. Complete D2H Transfer Tracking
 
 ### Problem
-`HostTransferTracker` exists on CudaKernelProvider with `dtoh_calls`, `dtoh_bytes`, `htod_calls`, `htod_bytes` and reset/snapshot methods. But only 2 call sites use `dtoh_sync_copy_into_tracked`; all others call `device.inner().dtoh_sync_copy_into()` directly, bypassing tracking.
+`HostTransferTracker` exists on CudaKernelProvider with `dtoh_calls`, `dtoh_bytes`, `htod_calls`, `htod_bytes` and reset/snapshot methods. Several call sites already use `dtoh_sync_copy_into_tracked` (join paths at lines 2344, 7931, 8107, 8802, 9171, etc.), but many hot-path sites still call `device.inner().dtoh_sync_copy_into()` directly, bypassing tracking — notably `device_row_count`, `membership_mask` mask download, `extract_active_rule_indices`, and the external `read_device_row_count` / `buffer_row_count` in xlog-runtime.
 
 ### Design
 
@@ -144,7 +152,9 @@ def _run_single_attempt(...):
 | `hash_join_inner_v2` probe count (line 7930) | `device.inner().dtoh_sync_copy_into` | `self.dtoh_sync_copy_into_tracked` |
 | All other `device.inner().dtoh_sync_copy_into` sites | direct | tracked wrapper |
 
-**External bypass**: `read_device_row_count` in `ilp_registry.rs` also calls `provider.device().inner().dtoh_sync_copy_into()` directly. After making `device_row_count` public, this function becomes a thin wrapper or is eliminated entirely.
+**External bypasses** (must also be routed through cache or tracked wrapper):
+- `read_device_row_count` in `ilp_registry.rs:9-20` — after making `device_row_count` public (or using buffer cache), this becomes a thin wrapper or is eliminated.
+- `buffer_row_count` in `executor.rs:2961-2968` — same pattern. Must route through `buffer.cached_row_count()` with lazy fallback.
 
 **PyO3 exposure**:
 ```python
@@ -156,6 +166,8 @@ prog.reset_host_transfer_stats()
 - Existing `d2h_transfer_count` gate (column-only) stays for strict gating
 - New `host_transfer_stats()` provides comprehensive profiling
 - Log total D2H bytes in telemetry when `telemetry_level >= 2`
+
+**Metric window definition**: The trainer currently resets `d2h_transfer_count` at line 206 (after `evaluate()`), so the column-download gate measures only the "post-evaluate hot loop" (loss + witness + convergence), not the evaluate phase itself. The `host_transfer_stats` profiling counter uses a different window: reset at the START of each step (before `set_rule_mask` + `evaluate`), snapshot at the END. This gives a "full step" view including evaluate-phase transfers. The expected-results table below uses the "full step" window for total D2H counts.
 
 ### Impact
 - No new counters needed — reuse existing HostTransferTracker
@@ -173,7 +185,7 @@ prog.reset_host_transfer_stats()
 | H2D uploads/step | ~15-25 | ~3 | 0 (pre-uploaded) |
 | download_column_*/step | 15-25 | 0 (gated) | 0 (gated) |
 
-Remaining ~40 D2H transfers are inherent to the host-dispatched join loop (`extract_active_rule_indices` + per-rule probe counts) and PyTorch scalar `.item()` calls. Eliminating these requires a fully GPU-resident join dispatcher (v0.5.0).
+Remaining ~40 D2H transfers in the "full step" window are from the evaluate phase (`extract_active_rule_indices` + per-rule probe counts + join output counts) and PyTorch scalar `.item()` calls. In the "post-evaluate" window (what the column-download gate measures), the remaining D2H is ~13 calls from `membership_mask` mask downloads only. Eliminating the evaluate-phase transfers requires a fully GPU-resident join dispatcher (v0.5.0).
 
 ---
 
