@@ -2959,12 +2959,16 @@ impl Executor {
     }
 
     fn buffer_row_count(&self, buffer: &CudaBuffer) -> Result<u32> {
+        if let Some(n) = buffer.cached_row_count() {
+            return Ok(n);
+        }
         let mut host_rows = [0u32];
         self.provider
             .device()
             .inner()
             .dtoh_sync_copy_into(buffer.num_rows_device(), &mut host_rows)
             .map_err(|e| XlogError::Execution(format!("Failed to read row count: {}", e)))?;
+        buffer.set_cached_row_count_if_unset(host_rows[0]);
         Ok(host_rows[0])
     }
 }
@@ -3033,6 +3037,9 @@ mod tests {
     }
 
     fn buffer_row_count(executor: &Executor, buffer: &CudaBuffer) -> u32 {
+        if let Some(n) = buffer.cached_row_count() {
+            return n;
+        }
         let mut host_rows = [0u32];
         executor
             .provider
@@ -3040,6 +3047,7 @@ mod tests {
             .inner()
             .dtoh_sync_copy_into(buffer.num_rows_device(), &mut host_rows)
             .expect("dtoh row count");
+        buffer.set_cached_row_count_if_unset(host_rows[0]);
         host_rows[0]
     }
 

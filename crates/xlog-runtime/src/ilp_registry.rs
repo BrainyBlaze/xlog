@@ -10,12 +10,16 @@ pub fn read_device_row_count(
     provider: &CudaKernelProvider,
     buffer: &CudaBuffer,
 ) -> Result<usize, XlogError> {
+    if let Some(n) = buffer.cached_row_count() {
+        return Ok(n as usize);
+    }
     let mut host_rows = [0u32];
     provider
         .device()
         .inner()
         .dtoh_sync_copy_into(buffer.num_rows_device(), &mut host_rows)
         .map_err(|e| XlogError::Kernel(format!("Failed to read row count: {}", e)))?;
+    buffer.set_cached_row_count_if_unset(host_rows[0]);
     Ok(host_rows[0] as usize)
 }
 
