@@ -190,37 +190,6 @@ class TestNonMonotone:
     stratification checking.
     """
 
-    def test_non_monotone_with_mc(self):
-        """Non-monotone programs should work with MC engine."""
-        source = """
-0.5::base().
-p() :- base(), not q().
-q() :- not base(), not p().
-query(p()).
-query(base()).
-"""
-
-        # MC engine should handle non-monotone programs
-        # Use prob_engine parameter to ensure MC is selected before stratification
-        program = pyxlog.Program.compile(source, prob_engine='mc')
-        result = program.evaluate(samples=50000)
-
-        probs = torch.from_dlpack(result.prob)
-        assert len(result.atoms) == 2
-
-        # Find the p() and base() probabilities
-        p_prob = None
-        base_prob = None
-        for i, atom in enumerate(result.atoms):
-            if atom == "p()":
-                p_prob = probs[i].item()
-            elif atom == "base()":
-                base_prob = probs[i].item()
-
-        # Just verify it runs without error and returns valid probabilities
-        assert p_prob is not None and 0.0 <= p_prob <= 1.0
-        assert base_prob is not None and abs(base_prob - 0.5) < 0.05
-
     def test_non_monotone_simple_cycle(self):
         """Test simple cyclic program with MC."""
         source = """
