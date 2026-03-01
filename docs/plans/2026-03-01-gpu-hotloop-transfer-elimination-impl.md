@@ -219,47 +219,40 @@ git commit -m "feat(cuda): wire row-count cache into device_row_count + buffer_f
 
 Replace the function (lines 9-20) to use the buffer cache:
 
+First, make `device_row_count` public on `CudaKernelProvider` so external crates can route through it (it already has cache + tracked D2H from Task 2):
+
+In `crates/xlog-cuda/src/provider.rs`, change the method visibility (around line 6969):
+```rust
+// Before:
+fn device_row_count(&self, buffer: &CudaBuffer) -> Result<usize> {
+// After:
+pub fn device_row_count(&self, buffer: &CudaBuffer) -> Result<usize> {
+```
+
+Now rewrite `read_device_row_count` to delegate to the provider's tracked+cached method:
+
 ```rust
 pub fn read_device_row_count(
-    _provider: &CudaKernelProvider,
+    provider: &CudaKernelProvider,
     buffer: &CudaBuffer,
 ) -> Result<usize, XlogError> {
-    // Use cached row count if available (populated eagerly by buffer_from_columns
-    // or lazily by device_row_count on first access).
-    if let Some(cached) = buffer.cached_row_count() {
-        return Ok(cached as usize);
-    }
-    // Lazy fallback: read from device and cache
-    let mut host_rows = [0u32];
-    _provider
-        .device()
-        .inner()
-        .dtoh_sync_copy_into(buffer.num_rows_device(), &mut host_rows)
-        .map_err(|e| XlogError::Kernel(format!("Failed to read row count: {}", e)))?;
-    buffer.set_cached_row_count_if_unset(host_rows[0]);
-    Ok(host_rows[0] as usize)
+    // Route through provider.device_row_count which uses
+    // the cache (Task 1) and tracked D2H wrapper (Task 2).
+    provider.device_row_count(buffer)
 }
 ```
 
 **Step 2: Rewrite `buffer_row_count` in executor.rs**
 
-Replace the method (lines 2961-2969) to use the buffer cache:
+Replace the method (lines 2961-2969) to delegate to the provider:
 
 ```rust
 fn buffer_row_count(&self, buffer: &CudaBuffer) -> Result<u32> {
-    // Use cached row count if available
-    if let Some(cached) = buffer.cached_row_count() {
-        return Ok(cached);
-    }
-    // Lazy fallback: read from device and cache
-    let mut host_rows = [0u32];
+    // Route through provider.device_row_count which uses
+    // the cache (Task 1) and tracked D2H wrapper (Task 2).
     self.provider
-        .device()
-        .inner()
-        .dtoh_sync_copy_into(buffer.num_rows_device(), &mut host_rows)
-        .map_err(|e| XlogError::Execution(format!("Failed to read row count: {}", e)))?;
-    buffer.set_cached_row_count_if_unset(host_rows[0]);
-    Ok(host_rows[0])
+        .device_row_count(buffer)
+        .map(|n| n as u32)
 }
 ```
 
@@ -277,11 +270,13 @@ git commit -m "fix(runtime): route row-count bypasses through CudaBuffer cache"
 
 ---
 
-### Task 4: Route Untracked D2H Through Tracked Wrapper
+### Task 4: Route Untracked D2H and H2D Through Tracked Wrappers
 
 **Files:**
-- Modify: `crates/xlog-cuda/src/provider.rs:8410` (membership_mask mask download)
-- Modify: `crates/xlog-cuda/src/provider.rs:10716,10744-10756` (extract_active_rule_indices)
+- Modify: `crates/xlog-cuda/src/provider.rs:8410` (membership_mask mask download — D2H)
+- Modify: `crates/xlog-cuda/src/provider.rs:10716,10744-10756` (extract_active_rule_indices — D2H)
+- Modify: `crates/xlog-cuda/src/provider.rs:10662` (extract_active_rule_indices — H2D)
+- Modify: `crates/xlog-cuda/src/provider.rs:5806` (create_buffer_from_u32_columns — H2D)
 
 **Step 1: Convert `membership_mask` mask download to tracked**
 
@@ -329,7 +324,35 @@ self.dtoh_sync_copy_into_tracked(&out_i_view, &mut i_host)?;
 
 Note: `dtoh_sync_copy_into_tracked` uses `&self` (not `&self.device()`) and returns `Result<()>` with XlogError, so the call site simplifies. Check the existing tracked wrapper signature at line 1555 — it takes `&self` on `CudaKernelProvider`. But `extract_active_rule_indices` uses `self.device()` which returns the `CudaDevice`. The tracked wrapper is `self.dtoh_sync_copy_into_tracked()` on CudaKernelProvider. Verify the method receiver — if `extract_active_rule_indices` is on `CudaKernelProvider`, use `self.dtoh_sync_copy_into_tracked(...)`. If it's on a sub-struct, you may need to pass the tracker through.
 
-**Step 3: Verify no remaining untracked D2H in provider.rs**
+**Step 3: Convert step-loop H2D calls to tracked**
+
+`htod_sync_copy_into_tracked` already exists on `CudaKernelProvider` (provider.rs:1581). Route step-loop H2D paths through it:
+
+In `extract_active_rule_indices` (line ~10662), convert the count-register initialization:
+```rust
+// Before:
+self.device()
+    .inner()
+    .htod_sync_copy_into(&[0u32], &mut count)
+    .map_err(|e| XlogError::Kernel(format!("ILP htod count: {}", e)))?;
+// After:
+self.htod_sync_copy_into_tracked(&[0u32], &mut count)?;
+```
+
+In `create_buffer_from_u32_columns` (line ~5806), convert the column upload:
+```rust
+// Before:
+self.device
+    .inner()
+    .htod_sync_copy_into(&bytes, &mut col)
+    .map_err(|e| XlogError::Kernel(format!("Failed to upload column: {}", e)))?;
+// After:
+self.htod_sync_copy_into_tracked(&bytes, &mut col)?;
+```
+
+Note: construction-time H2D (e.g., `buffer_from_columns` at line 7169 uploading row counts) does NOT need conversion — it runs during compile/init, not during the step loop. The H2D assertion is scoped to the post-evaluate window where these paths don't execute.
+
+**Step 4: Verify no remaining untracked D2H in provider.rs**
 
 Run: `rg 'device.*\.inner\(\).*\.dtoh_sync_copy_into' crates/xlog-cuda/src/provider.rs`
 Expected: Zero matches (all converted to tracked wrapper). If any remain, convert them too.
@@ -337,7 +360,7 @@ Expected: Zero matches (all converted to tracked wrapper). If any remain, conver
 Also check: `rg 'device\(\).*\.inner\(\).*\.dtoh_sync_copy_into' crates/xlog-cuda/src/provider.rs`
 Expected: Zero matches.
 
-**Step 4: Build and run tests**
+**Step 5: Build and run tests**
 
 Run: `cargo test --workspace --all-targets --exclude pyxlog --release 2>&1 | tail -30`
 Expected: All tests pass.
@@ -345,11 +368,11 @@ Expected: All tests pass.
 Run: `cd /home/dev/projects/xlog && .venv/bin/python -m pytest python/tests/test_ilp_d2h_gate.py -v --timeout=120 2>&1 | tail -20`
 Expected: All 10 tests pass.
 
-**Step 5: Commit**
+**Step 6: Commit**
 
 ```bash
 git add crates/xlog-cuda/src/provider.rs
-git commit -m "feat(cuda): route all provider D2H through tracked wrapper"
+git commit -m "feat(cuda): route all provider D2H + step-loop H2D through tracked wrappers"
 ```
 
 ---
