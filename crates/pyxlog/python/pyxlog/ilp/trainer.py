@@ -10,7 +10,6 @@ See docs/plans/2026-02-26-dilp-hardening-design.md S5.1.
 from __future__ import annotations
 
 import torch
-import torch.nn.functional as F
 
 import pyxlog
 from pyxlog.ilp.backend import DenseMaskBackend, SparseMaskBackend

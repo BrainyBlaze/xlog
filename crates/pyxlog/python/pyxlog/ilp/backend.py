@@ -33,7 +33,7 @@ class MaskBackend(Protocol):
         budget: int,
         candidates: list[dict],
         n: int,
-        allow_recursive: bool = False,
+        allow_recursive: bool = False,  # TODO(task-8): forward to set_rule_mask_sparse
     ) -> torch.Tensor:
         """Apply mask to program. Returns candidate_soft_probs shape (C,)."""
         ...
@@ -108,8 +108,9 @@ class SparseMaskBackend:
         # Gumbel-softmax over C-dimensional logits
         cand_probs = F.gumbel_softmax(W, tau=tau, hard=False, dim=0)
 
-        # Materialize into dense N^3 format for set_rule_mask
-        # (avoids store-state-dependent validation in set_rule_mask_sparse)
+        # Materialize into dense N^3 format for set_rule_mask.
+        # TODO(RC): switch to prog.set_rule_mask_sparse() once store-state
+        # validation issue is resolved — eliminates Python-side N^3 tensor.
         M_soft = torch.zeros((n, n, n), device=W.device)
         for ci, c in enumerate(candidates):
             M_soft[c["i"], c["j"], c["k"]] = cand_probs[ci]
