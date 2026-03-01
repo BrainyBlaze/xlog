@@ -6810,6 +6810,34 @@ impl CudaKernelProvider {
             .collect())
     }
 
+    /// Download f64 values without incrementing the D2H transfer counter.
+    /// For control-plane reads (mask setup), not data-plane.
+    pub fn download_f64_untracked(&self, buffer: &CudaBuffer, col_idx: usize) -> Result<Vec<f64>> {
+        let col = buffer
+            .column(col_idx)
+            .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
+
+        let num_rows = self.device_row_count(buffer)?;
+        if num_rows == 0 {
+            return Ok(vec![]);
+        }
+
+        let num_bytes = num_rows
+            .checked_mul(std::mem::size_of::<f64>())
+            .ok_or_else(|| XlogError::Kernel("Row byte size overflow".to_string()))?;
+        let col_view = self.column_bytes_view(col, num_bytes)?;
+        let mut bytes = vec![0u8; num_bytes];
+        self.device
+            .inner()
+            .dtoh_sync_copy_into(&col_view, &mut bytes)
+            .map_err(|e| XlogError::Kernel(format!("Failed to download f64: {}", e)))?;
+
+        Ok(bytes
+            .chunks_exact(8)
+            .map(|c| f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
+            .collect())
+    }
+
     /// Download a Bool column from GPU to host memory
     ///
     /// # Arguments

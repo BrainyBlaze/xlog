@@ -3901,19 +3901,21 @@ impl CompiledIlpProgram {
         Ok(())
     }
 
-    /// Sparse mask API: candidate IDs + soft probabilities.
+    /// Sparse mask API: candidate IDs + DLPack soft probabilities (GPU tensor).
     ///
     /// `candidate_ids` must be exactly `[0..C)` where C is the candidate count
     /// for this mask under the provided recursion policy.
     ///
-    /// Rust performs deterministic top-k (desc soft value, then lower id) and
+    /// `soft_probs_dlpack` is a DLPack capsule (CUDA f64 tensor) passed from PyTorch.
+    /// Rust imports it zero-copy, downloads values (untracked by D2H counter),
+    /// performs deterministic top-k (desc soft value, then lower id), and
     /// stores a sparse IlpMask (no dense N^3 materialization).
-    #[pyo3(signature = (name, candidate_ids, soft_probs, budget, allow_recursive=false))]
+    #[pyo3(signature = (name, candidate_ids, soft_probs_dlpack, budget, allow_recursive=false))]
     pub fn set_rule_mask_sparse(
         &mut self,
         name: String,
         candidate_ids: Vec<u32>,
-        soft_probs: Vec<f64>,
+        soft_probs_dlpack: &Bound<'_, PyAny>,
         budget: usize,
         allow_recursive: bool,
     ) -> PyResult<()> {
@@ -3946,9 +3948,19 @@ impl CompiledIlpProgram {
                 )));
             }
         }
+
+        // Import DLPack tensor (zero-copy, stays on GPU)
+        let soft_dmt = dlpack_from_py(soft_probs_dlpack)?;
+        let soft_buf = self.provider.from_dlpack_tensors(vec![soft_dmt])
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+        // Download f64 values (control-plane, NOT tracked by D2H counter)
+        let soft_probs = self.provider.download_f64_untracked(&soft_buf, 0)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
         if soft_probs.len() != candidate_ids.len() {
             return Err(PyValueError::new_err(format!(
-                "soft_probs length {} != candidate_ids length {}",
+                "soft_probs tensor length {} != candidate_ids length {}",
                 soft_probs.len(), candidate_ids.len()
             )));
         }
@@ -3961,6 +3973,7 @@ impl CompiledIlpProgram {
             )));
         }
 
+        // Convert to f32 for top-k ranking in insert_mask_from_sparse
         let active_soft: Vec<f32> = soft_probs.iter().map(|&v| v as f32).collect();
 
         self.executor
