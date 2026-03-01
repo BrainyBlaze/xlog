@@ -16,7 +16,7 @@ use xlog_ir::{
 };
 use xlog_stats::{StatsManager, StatsSnapshot};
 
-use crate::ilp_registry::{read_device_row_count, IlpRegistry, IlpTagEntry, IlpTaggedResult};
+use crate::ilp_registry::{read_device_row_count, IlpMask, IlpRegistry, IlpTagEntry, IlpTaggedResult};
 use crate::profiler::{ExecutionStats, Profiler};
 use crate::RelationStore;
 
@@ -2771,11 +2771,18 @@ impl Executor {
 
         let start = self.profiler.start_op();
 
-        // 2. Extract active (i,j,k) indices via GPU kernel
-        let active_rules = self.provider.extract_active_rule_indices(
-            &ilp_mask.hard, &ilp_mask.soft,
-            schema_size, max_active_rules,
-        )?;
+        // 2. Extract active (i,j,k) indices: sparse path skips GPU kernel entirely
+        let active_rules: Vec<(u32, u32, u32)> = match ilp_mask {
+            IlpMask::Dense { hard, soft, .. } => {
+                self.provider.extract_active_rule_indices(
+                    hard, soft, schema_size, max_active_rules,
+                )?
+            }
+            IlpMask::Sparse { active_entries, .. } => {
+                let limit = max_active_rules.min(active_entries.len());
+                active_entries[..limit].to_vec()
+            }
+        };
 
         // 3. Phase 1: Dispatch hash joins, collect results into tag_entries
         //    (retaining per-entry buffers for batch credit queries)
