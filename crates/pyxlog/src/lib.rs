@@ -4024,6 +4024,69 @@ impl CompiledIlpProgram {
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))
     }
 
+    /// Return all facts in the named relation as a list of int lists.
+    #[pyo3(signature = (rel_name))]
+    pub fn relation_facts(&self, rel_name: String) -> PyResult<Vec<Vec<i64>>> {
+        let buf = self.executor.store().get(&rel_name)
+            .ok_or_else(|| PyValueError::new_err(
+                format!("Relation '{}' not found", rel_name)
+            ))?;
+
+        let num_rows = read_device_row_count(&self.provider, buf)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))? as usize;
+        if num_rows == 0 {
+            return Ok(Vec::new());
+        }
+
+        // Download all columns (reuse fact_exists_in_buffer pattern)
+        let schema = buf.schema();
+        let mut columns: Vec<Vec<i64>> = Vec::new();
+        for col_idx in 0..buf.arity() {
+            let col_type = schema.column_type(col_idx)
+                .ok_or_else(|| PyRuntimeError::new_err(
+                    format!("Column {} type not found in schema", col_idx)
+                ))?;
+            let col_i64: Vec<i64> = match col_type {
+                ScalarType::I64 => self.provider.download_column_i64(buf, col_idx)
+                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?,
+                ScalarType::I32 => self.provider.download_column_i32(buf, col_idx)
+                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+                    .into_iter().map(|v| v as i64).collect(),
+                ScalarType::U32 | ScalarType::Symbol => {
+                    self.provider.download_column_u32(buf, col_idx)
+                        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+                        .into_iter().map(|v| v as i64).collect()
+                }
+                ScalarType::U64 => {
+                    self.provider.download_column_u64(buf, col_idx)
+                        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+                        .into_iter().map(|v| v as i64).collect()
+                }
+                ScalarType::Bool => {
+                    self.provider.download_column_bool(buf, col_idx)
+                        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+                        .into_iter().map(|v| if v { 1i64 } else { 0i64 }).collect()
+                }
+                ScalarType::F32 | ScalarType::F64 => {
+                    return Err(PyRuntimeError::new_err(
+                        format!("relation_facts does not support float column type {:?}", col_type)
+                    ));
+                }
+            };
+            columns.push(col_i64);
+        }
+
+        let mut result = Vec::with_capacity(num_rows);
+        for r in 0..num_rows {
+            let mut row = Vec::with_capacity(buf.arity());
+            for c in 0..buf.arity() {
+                row.push(columns[c][r]);
+            }
+            result.push(row);
+        }
+        Ok(result)
+    }
+
     pub fn tagged_entries_containing_fact(
         &self,
         relation: &str,

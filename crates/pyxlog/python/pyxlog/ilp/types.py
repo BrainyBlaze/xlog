@@ -160,4 +160,5 @@ class PromotionResult:
     novel_count: int | None = None
     novel_rate: float | None = None
     novel_examples: list[str] | None = None
+    committed_source: str | None = None
     artifact: LearnedArtifact = field(default_factory=LearnedArtifact)

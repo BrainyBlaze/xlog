@@ -3,6 +3,7 @@ from pyxlog.ilp.backend import DenseMaskBackend, SparseMaskBackend
 from pyxlog.ilp.entropy import entropy_weight_at_step, normalized_entropy
 from pyxlog.ilp.exceptions import IlpCandidateError, IlpConfigError, IlpTrainingError
 from pyxlog.ilp.temperature import AdaptiveTempController, TempMode
+from pyxlog.ilp.promoter import train_and_promote
 from pyxlog.ilp.trainer import train_only
 from pyxlog.ilp.types import (
     ArtifactMetadata,
@@ -38,4 +39,5 @@ __all__ = [
     "PromotionResult",
     "GateResult",
     "train_only",
+    "train_and_promote",
 ]
