@@ -1845,6 +1845,7 @@ impl CudaKernelProvider {
             row_cap,
             d_num_rows,
             schema: _,
+            ..
         } = combined;
 
         if combined_columns.len() != left_arity + right_arity {

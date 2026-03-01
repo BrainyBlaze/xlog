@@ -5,7 +5,7 @@
 
 use std::mem::ManuallyDrop;
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use cudarc::driver::CudaSlice;
@@ -371,6 +371,9 @@ pub struct CudaBuffer {
     pub d_num_rows: TrackedCudaSlice<u32>,
     /// Schema describing the column types
     pub schema: Schema,
+    /// Cached host-side row count (u32::MAX = not yet cached).
+    /// Avoids repeated synchronous D2H transfers for the immutable row count.
+    cached_row_count: AtomicU32,
 }
 
 impl CudaBuffer {
@@ -402,7 +405,54 @@ impl CudaBuffer {
             row_cap,
             d_num_rows,
             schema,
+            cached_row_count: AtomicU32::new(u32::MAX),
         }
+    }
+
+    /// Like `from_columns`, but eagerly populates the row-count cache.
+    /// Use when the host already knows the exact row count (e.g., `buffer_from_columns`).
+    pub fn from_columns_with_host_count(
+        columns: Vec<CudaColumn>,
+        row_cap: u64,
+        d_num_rows: TrackedCudaSlice<u32>,
+        schema: Schema,
+        host_row_count: u32,
+    ) -> Self {
+        assert_eq!(
+            columns.len(),
+            schema.arity(),
+            "Number of columns ({}) must match schema arity ({})",
+            columns.len(),
+            schema.arity()
+        );
+        Self {
+            columns,
+            row_cap,
+            d_num_rows,
+            schema,
+            cached_row_count: AtomicU32::new(host_row_count),
+        }
+    }
+
+    /// Returns the cached row count if available (not sentinel `u32::MAX`).
+    pub fn cached_row_count(&self) -> Option<u32> {
+        let v = self.cached_row_count.load(Ordering::Relaxed);
+        if v == u32::MAX {
+            None
+        } else {
+            Some(v)
+        }
+    }
+
+    /// Sets the cached row count if not already set (CAS from sentinel).
+    /// No-op if already cached.
+    pub fn set_cached_row_count_if_unset(&self, count: u32) {
+        let _ = self.cached_row_count.compare_exchange(
+            u32::MAX,
+            count,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        );
     }
 
     /// Get the row capacity
@@ -496,12 +546,11 @@ mod tests {
             .htod_sync_copy_into(&[100u32], &mut d_num_rows)
             .unwrap();
 
-        let buffer = CudaBuffer {
-            columns: Vec::new(),
-            row_cap: 100,
-            d_num_rows,
-            schema: schema.clone(),
-        };
+        // Allocate dummy columns matching the schema arity (100 rows each)
+        let col_a = CudaColumn::owned(manager.alloc::<u8>(100 * 4).unwrap()); // U32: 4 bytes
+        let col_b = CudaColumn::owned(manager.alloc::<u8>(100 * 8).unwrap()); // U64: 8 bytes
+        let buffer =
+            CudaBuffer::from_columns(vec![col_a, col_b], 100, d_num_rows, schema.clone());
 
         assert_eq!(buffer.num_rows(), 100);
         assert_eq!(buffer.arity(), 2);
