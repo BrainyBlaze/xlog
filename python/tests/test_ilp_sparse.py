@@ -36,7 +36,7 @@ def test_sparse_mask_exists():
     cands = prog.valid_candidates("W", False)
     c = len(cands)
     ids = list(range(c))
-    soft = [1.0 / c] * c
+    soft = torch.tensor([1.0 / c] * c, device="cuda", dtype=torch.float64)
     prog.set_rule_mask_sparse("W", ids, soft, 32)
 
 
@@ -46,8 +46,9 @@ def test_sparse_derives_same_as_dense():
     cands = prog_dense.valid_candidates("W", False)
     n = prog_dense.ilp_schema_size()
 
-    soft = [0.0] * len(cands)
-    soft[0] = 1.0
+    soft_list = [0.0] * len(cands)
+    soft_list[0] = 1.0
+    soft = torch.tensor(soft_list, device="cuda", dtype=torch.float64)
 
     _dense_set_single(prog_dense, n, cands[0])
     prog_dense.evaluate()
@@ -66,8 +67,9 @@ def test_sparse_tagged_entries_match_dense():
     cands = prog_dense.valid_candidates("W", False)
     n = prog_dense.ilp_schema_size()
 
-    soft = [0.0] * len(cands)
-    soft[0] = 1.0
+    soft_list = [0.0] * len(cands)
+    soft_list[0] = 1.0
+    soft = torch.tensor(soft_list, device="cuda", dtype=torch.float64)
 
     _dense_set_single(prog_dense, n, cands[0])
     prog_dense.evaluate()
@@ -83,22 +85,24 @@ def test_sparse_tagged_entries_match_dense():
 def test_sparse_validates_candidate_count():
     prog = _compile()
     c = len(prog.valid_candidates("W", False))
+    soft = torch.tensor([1.0] * (c - 1), device="cuda", dtype=torch.float64)
     with pytest.raises(ValueError, match="candidate"):
-        prog.set_rule_mask_sparse("W", list(range(c - 1)), [1.0] * (c - 1), 32)
+        prog.set_rule_mask_sparse("W", list(range(c - 1)), soft, 32)
 
 
 def test_sparse_validates_soft_length():
     prog = _compile()
     c = len(prog.valid_candidates("W", False))
+    soft = torch.tensor([1.0] * (c + 1), device="cuda", dtype=torch.float64)
     with pytest.raises(ValueError, match="length"):
-        prog.set_rule_mask_sparse("W", list(range(c)), [1.0] * (c + 1), 32)
+        prog.set_rule_mask_sparse("W", list(range(c)), soft, 32)
 
 
 def test_sparse_top_k_deterministic_tiebreak():
     prog = _compile()
     cands = prog.valid_candidates("W", False)
     c = len(cands)
-    soft = [1.0 / c] * c
+    soft = torch.tensor([1.0 / c] * c, device="cuda", dtype=torch.float64)
     prog.set_rule_mask_sparse("W", list(range(c)), soft, 1)
     prog.evaluate()
     tags = prog.get_tagged_results()

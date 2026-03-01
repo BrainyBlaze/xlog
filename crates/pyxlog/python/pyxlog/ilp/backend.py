@@ -94,8 +94,9 @@ class SparseMaskBackend:
     This gives a smaller, more focused parameter space that converges
     faster on the correct candidate.
 
-    Internally materializes the candidate probs into the dense N^3 mask
-    format via set_rule_mask for store-state-independent evaluation.
+    Passes DLPack-wrapped soft-probs directly to Rust via
+    set_rule_mask_sparse — no Python-side N^3 materialization.
+    Rust owns top-k ranking and sparse mask construction.
     """
 
     def init_weights(self, C: int, n: int, device: str) -> torch.Tensor:
@@ -105,41 +106,42 @@ class SparseMaskBackend:
         self, prog, mask_name, W, tau, budget, candidates, n,
         allow_recursive=False,
     ):
+        C = len(candidates)
+
         # Gumbel-softmax over C-dimensional logits
         cand_probs = F.gumbel_softmax(W, tau=tau, hard=False, dim=0)
 
-        # Materialize into dense N^3 format for set_rule_mask.
-        # TODO(RC): switch to prog.set_rule_mask_sparse() once store-state
-        # validation issue is resolved — eliminates Python-side N^3 tensor.
-        M_soft = torch.zeros((n, n, n), device=W.device)
-        for ci, c in enumerate(candidates):
-            M_soft[c["i"], c["j"], c["k"]] = cand_probs[ci]
+        # Rust validates candidate count against current store state.
+        # After evaluate(), derived relations may gain tuples, changing
+        # the expected count.  Re-query the live set and pad with zeros
+        # for any new candidates that appeared since compile time.
+        live_cands = prog.valid_candidates(mask_name, allow_recursive)
+        C_live = len(live_cands)
 
-        # Top-k hard mask over C candidates (not N^3 cells).
-        #
-        # Key insight: in the dense backend, topk(budget) selects budget cells
-        # out of N^3 total, so only a fraction of the C valid candidate positions
-        # end up active (typically 2-5 for budget=32, N=6). In the sparse backend,
-        # ALL C cells are non-zero after materialization, so topk(budget) with
-        # budget >= C would activate ALL candidates -- leaking distractor rules
-        # into the hard mask and causing Gate 2 to fail.
-        #
-        # Fix: cap the hard mask at half of C (matching the ~15% activation
-        # ratio of the dense backend) while ensuring at least 1 candidate.
-        C = len(candidates)
-        k = max(1, min(budget, C) // 2)
-        _, topk_idx = cand_probs.topk(k)
-        # Build hard mask: only activate top-k candidates in the N^3 tensor
-        M_hard = torch.zeros((n, n, n), device=W.device)
-        for idx in topk_idx:
-            c = candidates[idx]
-            M_hard[c["i"], c["j"], c["k"]] = 1.0
+        if C_live == C:
+            soft = cand_probs.detach().contiguous().double()
+        else:
+            # Build (i,j,k) -> original index lookup
+            orig_ijk = {
+                (c["i"], c["j"], c["k"]): idx for idx, c in enumerate(candidates)
+            }
+            soft = torch.zeros(C_live, device=W.device, dtype=torch.float64)
+            for li, lc in enumerate(live_cands):
+                key = (lc["i"], lc["j"], lc["k"])
+                if key in orig_ijk:
+                    soft[li] = cand_probs[orig_ijk[key]].detach().double()
 
-        prog.set_rule_mask(
-            mask_name,
-            M_hard.detach().contiguous().view(-1),
-            M_soft.detach().contiguous().view(-1),
-            n,
+        # Cap the budget so padded zero-prob candidates don't leak into the
+        # hard mask.  Mirrors the old dense-materialization cap:
+        #   max(1, min(budget, C) // 2)
+        # This keeps activation ratio ~50% of original C (matching the
+        # dense backend's selectivity over N^3).
+        effective_budget = max(1, min(budget, C) // 2)
+
+        candidate_ids = list(range(C_live))
+        prog.set_rule_mask_sparse(
+            mask_name, candidate_ids, soft.contiguous(), effective_budget,
+            allow_recursive,
         )
 
         return cand_probs
