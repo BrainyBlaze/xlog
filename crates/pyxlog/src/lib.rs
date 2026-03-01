@@ -3907,7 +3907,7 @@ impl CompiledIlpProgram {
     /// for this mask under the provided recursion policy.
     ///
     /// Rust performs deterministic top-k (desc soft value, then lower id) and
-    /// materializes dense flat mask buffers for the existing executor path.
+    /// stores a sparse IlpMask (no dense N^3 materialization).
     #[pyo3(signature = (name, candidate_ids, soft_probs, budget, allow_recursive=false))]
     pub fn set_rule_mask_sparse(
         &mut self,
@@ -3961,27 +3961,11 @@ impl CompiledIlpProgram {
             )));
         }
 
-        let mut ranked: Vec<(usize, f64)> =
-            soft_probs.iter().copied().enumerate().collect();
-        ranked.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then(a.0.cmp(&b.0))
-        });
-        ranked.truncate(budget.min(ranked.len()));
-
-        let active_ijk: Vec<(u32, u32, u32)> = ranked
-            .iter()
-            .map(|&(idx, _)| candidate_triples[idx])
-            .collect();
-        let active_soft: Vec<f32> = ranked
-            .iter()
-            .map(|&(idx, _)| soft_probs[idx] as f32)
-            .collect();
+        let active_soft: Vec<f32> = soft_probs.iter().map(|&v| v as f32).collect();
 
         self.executor
             .ilp_registry_mut()
-            .insert_mask_from_sparse(name, n, &active_ijk, &active_soft, &self.provider)
+            .insert_mask_from_sparse(name, n, &candidate_triples, &active_soft, budget)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))
     }
 
