@@ -6968,11 +6968,15 @@ impl CudaKernelProvider {
     // ============== Internal Helper Methods ==============
 
     fn device_row_count(&self, buffer: &CudaBuffer) -> Result<usize> {
+        if let Some(n) = buffer.cached_row_count() {
+            return Ok(n as usize);
+        }
         let mut host_rows = [0u32];
         self.device
             .inner()
             .dtoh_sync_copy_into(buffer.num_rows_device(), &mut host_rows)
             .map_err(|e| XlogError::Kernel(format!("Failed to read row count: {}", e)))?;
+        buffer.set_cached_row_count_if_unset(host_rows[0]);
         Ok(host_rows[0] as usize)
     }
 
@@ -7169,8 +7173,8 @@ impl CudaKernelProvider {
             .inner()
             .htod_sync_copy_into(&[row_u32], &mut d_num_rows)
             .map_err(|e| XlogError::Kernel(format!("Failed to set row count: {}", e)))?;
-        Ok(CudaBuffer::from_columns(
-            columns, row_cap, d_num_rows, schema,
+        Ok(CudaBuffer::from_columns_with_host_count(
+            columns, row_cap, d_num_rows, schema, row_u32,
         ))
     }
 
