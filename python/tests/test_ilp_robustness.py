@@ -56,16 +56,18 @@ def test_all_distractors_returns_not_converged():
 def test_nan_inf_detection_raises_after_limit():
     """NaN/Inf in logits triggers IlpTrainingError after max_numeric_failures."""
     from unittest.mock import patch
-    import pyxlog.ilp.trainer as trainer_mod
+    from pyxlog.ilp.backend import SparseMaskBackend
 
-    original_fn = trainer_mod._build_budget_aware_mask
-
+    original_apply = SparseMaskBackend.apply_mask
     call_count = [0]
 
-    def _inject_nan(*args, **kwargs):
+    def _inject_nan(self, prog, mask_name, W, tau, budget, candidates, n,
+                    allow_recursive=False):
         call_count[0] += 1
-        result = original_fn(*args, **kwargs)
-        result[1].fill_(float("nan"))
+        result = original_apply(self, prog, mask_name, W, tau, budget,
+                                candidates, n, allow_recursive=allow_recursive)
+        # Replace cand_probs with NaN to trigger numeric failure detection
+        result.fill_(float("nan"))
         return result
 
     config = TrainConfig(
@@ -73,7 +75,7 @@ def test_nan_inf_detection_raises_after_limit():
         max_numeric_failures=2, seed=0,
     )
 
-    with patch.object(trainer_mod, "_build_budget_aware_mask", _inject_nan):
+    with patch.object(SparseMaskBackend, "apply_mask", _inject_nan):
         with pytest.raises(IlpTrainingError, match="numeric_instability"):
             train_only(
                 source=SOURCE, mask_name="W",

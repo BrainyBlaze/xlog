@@ -37,7 +37,7 @@ class TrainConfig:
 
     # Scaling
     max_active_rules: int = 32
-    debug_dense_mask: bool = True   # alpha: dense; beta: sparse default
+    debug_dense_mask: bool = False  # beta: sparse default; True = dense fallback
 
     # Recursion
     allow_recursive_candidates: bool = False

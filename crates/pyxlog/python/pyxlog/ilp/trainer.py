@@ -1,10 +1,11 @@
-"""dILP trainer — train_only() entry point.
+"""dILP trainer -- train_only() entry point.
 
 Integrates valid_candidates, adaptive temperature, entropy regularization,
-and multi-start into a single training API. Uses the dense N³ mask path
-(alpha); factorized scoring deferred to RC.
+and multi-start into a single training API. Supports dense N^3 mask path
+(alpha) and sparse candidate-indexed path (beta default) via MaskBackend
+abstraction.
 
-See docs/plans/2026-02-26-dilp-hardening-design.md §5.1.
+See docs/plans/2026-02-26-dilp-hardening-design.md S5.1.
 """
 from __future__ import annotations
 
@@ -12,6 +13,7 @@ import torch
 import torch.nn.functional as F
 
 import pyxlog
+from pyxlog.ilp.backend import DenseMaskBackend, SparseMaskBackend
 from pyxlog.ilp.entropy import entropy_weight_at_step, normalized_entropy
 from pyxlog.ilp.exceptions import IlpCandidateError, IlpConfigError, IlpTrainingError
 from pyxlog.ilp.temperature import AdaptiveTempController
@@ -151,8 +153,8 @@ def _run_single_attempt(
     n = prog.ilp_schema_size()
     rel_names = prog.ilp_relation_names()
 
-    # Alpha always passes False for recursive candidates
-    candidates = prog.valid_candidates(mask_name, False)
+    allow_recursive = config.allow_recursive_candidates
+    candidates = prog.valid_candidates(mask_name, allow_recursive)
     if not candidates:
         raise IlpCandidateError("No valid candidates for mask")
 
@@ -166,7 +168,14 @@ def _run_single_attempt(
         for c in candidates
     ]
 
-    W = torch.randn((n, n, n), requires_grad=True, device="cuda")
+    # Build (i,j,k) -> candidate index lookup for loss computation
+    ijk_to_cidx: dict[tuple[int, int, int], int] = {}
+    for ci, c in enumerate(candidates):
+        ijk_to_cidx[(c["i"], c["j"], c["k"])] = ci
+
+    # Select backend based on config
+    backend = SparseMaskBackend() if not config.debug_dense_mask else DenseMaskBackend()
+    W = backend.init_weights(C, n, "cuda")
     optimizer = torch.optim.Adam([W], lr=0.1)
 
     temp_controller = AdaptiveTempController(
@@ -188,25 +197,23 @@ def _run_single_attempt(
     for step in range(step_budget):
         optimizer.zero_grad()
 
-        M_hard, M_soft = _build_budget_aware_mask(
-            W, temp_controller.tau, config.max_active_rules,
+        cand_probs = backend.apply_mask(
+            prog, mask_name, W, temp_controller.tau,
+            config.max_active_rules, candidates, n,
+            allow_recursive=allow_recursive,
         )
 
         # Check for NaN/Inf
-        if torch.isnan(M_soft).any() or torch.isinf(M_soft).any():
+        if torch.isnan(cand_probs).any() or torch.isinf(cand_probs).any():
             raise _NumericFailure()
 
-        prog.set_rule_mask(
-            mask_name,
-            M_hard.detach().contiguous().view(-1),
-            M_soft.detach().contiguous().view(-1),
-            n,
-        )
         prog.evaluate()
         prog.reset_d2h_transfer_count()
 
-        # Compute task loss
-        loss = _compute_loss(prog, M_soft, positives, negatives, rel_names, n)
+        # Compute task loss using candidate probs
+        loss = _compute_loss_from_candidates(
+            prog, cand_probs, positives, negatives, candidates, ijk_to_cidx,
+        )
 
         # Entropy regularization
         ent_weight = entropy_weight_at_step(
@@ -215,8 +222,6 @@ def _run_single_attempt(
             end=config.entropy_weight_end,
         )
         if ent_weight > 0 and C > 1:
-            # Extract soft probs for valid candidates
-            cand_probs = torch.stack([M_soft[c["i"], c["j"], c["k"]] for c in candidates])
             cand_sum = cand_probs.sum()
             if cand_sum > 1e-8:
                 cand_probs_norm = cand_probs / cand_sum
@@ -231,15 +236,20 @@ def _run_single_attempt(
             loss.backward()
             optimizer.step()
 
-        # Decode argmax
-        argmax_ijk = _decode_argmax_ijk(W, n)
+        # Decode argmax via backend
+        argmax_idx = backend.decode_argmax(W, candidates, n)
+        argmax_ijk = (
+            candidates[argmax_idx]["i"],
+            candidates[argmax_idx]["j"],
+            candidates[argmax_idx]["k"],
+        )
         if argmax_ijk == prev_argmax:
             stable_count += 1
         else:
             stable_count = 0
         prev_argmax = argmax_ijk
 
-        # Batch witness coverage — GPU-side fact membership
+        # Batch witness coverage -- GPU-side fact membership
         pos_by_rel: dict[str, list[list[int]]] = {}
         pos_indices_by_rel: dict[str, list[int]] = {}
         for idx, (rel, vals) in enumerate(positives):
@@ -256,7 +266,9 @@ def _run_single_attempt(
         witness_count = sum(witness_mask)
         witness_coverage = witness_count / len(positives)
 
-        disc = M_soft.max(dim=-1)[0].mean().item()
+        # Discreteness metric -- max candidate prob
+        with torch.no_grad():
+            disc = cand_probs.max().item()
         temp_controller.step(
             loss=loss.item(), disc=disc, witness_coverage=witness_coverage,
         )
@@ -267,12 +279,9 @@ def _run_single_attempt(
             argmax_rule = f"{rel_names[i]}+{rel_names[j]}->{rel_names[k]}"
             # Compute entropy for telemetry
             with torch.no_grad():
-                tel_cand_probs = torch.stack(
-                    [M_soft[c["i"], c["j"], c["k"]] for c in candidates]
-                )
-                tel_sum = tel_cand_probs.sum()
+                tel_sum = cand_probs.sum()
                 if tel_sum > 1e-8 and C > 1:
-                    tel_normed = tel_cand_probs / tel_sum
+                    tel_normed = cand_probs / tel_sum
                     tel_ent = normalized_entropy(tel_normed, C).item()
                 else:
                     tel_ent = 0.0
@@ -303,7 +312,7 @@ def _run_single_attempt(
                 )
                 result.steps_used = step + 1
                 result.argmax_ijk = argmax_ijk
-                _fill_metrics(result, M_soft, candidates, W, n)
+                _fill_metrics(result, cand_probs, candidates, W, backend)
                 return result
 
         # --- D2H hard gate: assert zero column downloads in step body ---
@@ -314,7 +323,7 @@ def _run_single_attempt(
                 {"step": step, "d2h_count": d2h_count},
             )
 
-    # Did not converge — compute partial recall from witness coverage
+    # Did not converge -- compute partial recall from witness coverage
     result.steps_used = step_budget
     result.recall = witness_coverage
     if prev_argmax is not None:
@@ -323,45 +332,29 @@ def _run_single_attempt(
             rel_names[i], rel_names[j], rel_names[k],
         )
         result.argmax_ijk = prev_argmax
-    _fill_metrics(result, M_soft, candidates, W, n)
+    _fill_metrics(result, cand_probs, candidates, W, backend)
     return result
 
 
 # ---------------------------------------------------------------------------
-# Mask building (dense N³, same as showcase)
+# Loss computation (per-fact surrogate credit via candidate probs)
 # ---------------------------------------------------------------------------
 
-def _build_budget_aware_mask(
-    W: torch.Tensor, tau: float, budget: int = 32,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """ST-Gumbel-Softmax with global top-k hard selection."""
-    M_soft = F.gumbel_softmax(W, tau=tau, hard=False, dim=-1)
-
-    flat = M_soft.view(-1)
-    k = min(budget, flat.numel())
-    _, topk_idx = flat.topk(k)
-
-    M_hard_flat = torch.zeros_like(flat)
-    M_hard_flat[topk_idx] = 1.0
-    M_hard = M_hard_flat.view_as(M_soft)
-
-    return M_hard, M_soft
-
-
-# ---------------------------------------------------------------------------
-# Loss computation (per-fact surrogate credit)
-# ---------------------------------------------------------------------------
-
-def _compute_loss(
+def _compute_loss_from_candidates(
     prog,
-    M_soft: torch.Tensor,
+    cand_probs: torch.Tensor,
     positives: list[tuple[str, list[int]]],
     negatives: list[tuple[str, list[int]]],
-    rel_names: list[str],
-    n: int,
+    candidates: list[dict],
+    ijk_to_cidx: dict[tuple[int, int, int], int],
 ) -> torch.Tensor:
-    """Per-fact surrogate loss using GPU-side batch credit assignment."""
+    """Per-fact surrogate loss using GPU-side batch credit assignment.
+
+    Works with both dense and sparse backends by using candidate-level
+    soft probs and a (i,j,k)->candidate_index mapping.
+    """
     loss = torch.tensor(0.0, device="cuda")
+    C = len(candidates)
 
     # Group facts by relation for batch API calls
     if positives:
@@ -373,11 +366,16 @@ def _compute_loss(
             credits = prog.batch_tagged_credit(rel_name, facts_list)
             for fact_idx, contributing in enumerate(credits):
                 if contributing:
-                    credit = sum(M_soft[i, j, k] for (i, j, k) in contributing)
+                    credit = torch.tensor(0.0, device="cuda")
+                    for (i, j, k) in contributing:
+                        ci = ijk_to_cidx.get((i, j, k))
+                        if ci is not None:
+                            credit = credit + cand_probs[ci]
                     loss = loss + (-torch.log(credit.clamp(min=1e-8)))
                 else:
-                    k_idx = rel_names.index(rel_name)
-                    loss = loss + (-M_soft[:, :, k_idx].sum() / (n * n))
+                    # No contributing rules -- push all candidates toward
+                    # the head relation as a gradient signal
+                    loss = loss + (-cand_probs.sum() / C)
 
     if negatives:
         neg_by_rel: dict[str, list[list[int]]] = {}
@@ -388,7 +386,11 @@ def _compute_loss(
             credits = prog.batch_tagged_credit(rel_name, facts_list)
             for fact_idx, contributing in enumerate(credits):
                 if contributing:
-                    credit = sum(M_soft[i, j, k] for (i, j, k) in contributing)
+                    credit = torch.tensor(0.0, device="cuda")
+                    for (i, j, k) in contributing:
+                        ci = ijk_to_cidx.get((i, j, k))
+                        if ci is not None:
+                            credit = credit + cand_probs[ci]
                     loss = loss + (-torch.log((1.0 - credit).clamp(min=1e-8)))
 
     return loss
@@ -428,7 +430,7 @@ def _check_convergence(
             if any(mask):
                 return False
 
-    # Gate 3: argmax-only re-evaluation
+    # Gate 3: argmax-only re-evaluation (always uses dense mask for verification)
     i, j, k = argmax_ijk
     M_check = torch.zeros((n, n, n), device="cuda")
     M_check[i, j, k] = 1.0
@@ -457,17 +459,6 @@ def _check_convergence(
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _decode_argmax_ijk(W: torch.Tensor, n: int) -> tuple[int, int, int]:
-    """Decode the argmax of W into (i, j, k) triple."""
-    with torch.no_grad():
-        flat = W.view(-1)
-        idx = flat.argmax().item()
-        i = idx // (n * n)
-        j = (idx % (n * n)) // n
-        k = idx % n
-    return (i, j, k)
-
-
 def _format_rule(left: str, right: str, head: str) -> str:
     """Format a discovered (left, right, head) triple as a Datalog rule string."""
     return f"{head}(X, Y) :- {left}(X, Z), {right}(Z, Y)."
@@ -475,17 +466,13 @@ def _format_rule(left: str, right: str, head: str) -> str:
 
 def _fill_metrics(
     result: _AttemptResult,
-    M_soft: torch.Tensor,
+    cand_probs: torch.Tensor,
     candidates: list[dict],
     W: torch.Tensor,
-    n: int,
+    backend,
 ) -> None:
     """Fill confidence metrics on an attempt result."""
     with torch.no_grad():
-        # Extract candidate soft probs
-        cand_probs = torch.stack(
-            [M_soft[c["i"], c["j"], c["k"]] for c in candidates]
-        )
         total = cand_probs.sum()
         if total > 1e-8:
             normed = cand_probs / total
@@ -507,9 +494,13 @@ def _fill_metrics(
 
         # Store raw values for artifact
         result.soft_probs = cand_probs.cpu().tolist()
-        result.logits = [
-            W[c["i"], c["j"], c["k"]].item() for c in candidates
-        ]
+        # Logits: for sparse backend W is C-shaped, for dense it's N^3
+        if isinstance(backend, SparseMaskBackend):
+            result.logits = W.detach().cpu().tolist()
+        else:
+            result.logits = [
+                W[c["i"], c["j"], c["k"]].item() for c in candidates
+            ]
 
 
 # ---------------------------------------------------------------------------
@@ -528,12 +519,12 @@ def _select_winner(
     converged = [a for a in attempts if a.converged]
 
     if converged:
-        # Tie-break: recall → precision → fewer steps → lower candidate id
+        # Tie-break: recall -> precision -> fewer steps -> lower candidate id
         winner = max(converged, key=lambda a: (
             a.recall, a.precision, -a.steps_used,
         ))
     else:
-        # No convergence — pick attempt with most witness coverage (best recall proxy)
+        # No convergence -- pick attempt with most witness coverage (best recall proxy)
         winner = max(attempts, key=lambda a: (a.recall, -a.steps_used))
 
     # Compute rule_frequency: fraction of converged attempts finding same rule
@@ -563,5 +554,3 @@ def _select_winner(
             telemetry=TrainTelemetry(steps=winner.telemetry_steps),
         ),
     )
-
-

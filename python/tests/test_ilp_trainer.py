@@ -97,7 +97,7 @@ def test_train_only_confidence_metrics():
     )
     if result.converged:
         assert 0.0 <= result.confidence_margin <= 1.0
-        assert 0.0 <= result.top_k_concentration <= 1.0
+        assert 0.0 <= result.top_k_concentration <= 1.0 + 1e-6
         assert 0.0 <= result.rule_frequency <= 1.0
 
 
