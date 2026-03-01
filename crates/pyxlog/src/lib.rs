@@ -4087,6 +4087,90 @@ impl CompiledIlpProgram {
         Ok(result)
     }
 
+    /// Sample up to `max_n` derived facts for `head_rel` that are NOT in `exclude`.
+    ///
+    /// Returns `list[list[int]]` — each inner list is a tuple of column values.
+    /// Uses the same column-download pattern as `relation_facts`.
+    #[pyo3(signature = (head_rel, exclude, max_n))]
+    pub fn sample_false_positives(
+        &self,
+        head_rel: String,
+        exclude: Vec<(String, Vec<i64>)>,
+        max_n: usize,
+    ) -> PyResult<Vec<Vec<i64>>> {
+        // Build exclude set: only consider tuples for the requested relation
+        let exclude_set: HashSet<Vec<i64>> = exclude
+            .into_iter()
+            .filter(|(rel, _)| rel == &head_rel)
+            .map(|(_, vals)| vals)
+            .collect();
+
+        // Download all facts using the same pattern as relation_facts
+        let buf = self.executor.store().get(&head_rel)
+            .ok_or_else(|| PyValueError::new_err(
+                format!("Relation '{}' not found", head_rel)
+            ))?;
+
+        let num_rows = read_device_row_count(&self.provider, buf)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))? as usize;
+        if num_rows == 0 {
+            return Ok(Vec::new());
+        }
+
+        let schema = buf.schema();
+        let mut columns: Vec<Vec<i64>> = Vec::new();
+        for col_idx in 0..buf.arity() {
+            let col_type = schema.column_type(col_idx)
+                .ok_or_else(|| PyRuntimeError::new_err(
+                    format!("Column {} type not found in schema", col_idx)
+                ))?;
+            let col_i64: Vec<i64> = match col_type {
+                ScalarType::I64 => self.provider.download_column_i64(buf, col_idx)
+                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?,
+                ScalarType::I32 => self.provider.download_column_i32(buf, col_idx)
+                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+                    .into_iter().map(|v| v as i64).collect(),
+                ScalarType::U32 | ScalarType::Symbol => {
+                    self.provider.download_column_u32(buf, col_idx)
+                        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+                        .into_iter().map(|v| v as i64).collect()
+                }
+                ScalarType::U64 => {
+                    self.provider.download_column_u64(buf, col_idx)
+                        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+                        .into_iter().map(|v| v as i64).collect()
+                }
+                ScalarType::Bool => {
+                    self.provider.download_column_bool(buf, col_idx)
+                        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+                        .into_iter().map(|v| if v { 1i64 } else { 0i64 }).collect()
+                }
+                ScalarType::F32 | ScalarType::F64 => {
+                    return Err(PyRuntimeError::new_err(
+                        format!("sample_false_positives does not support float column type {:?}", col_type)
+                    ));
+                }
+            };
+            columns.push(col_i64);
+        }
+
+        // Filter out excluded tuples and cap at max_n
+        let mut result = Vec::with_capacity(max_n.min(num_rows));
+        for r in 0..num_rows {
+            if result.len() >= max_n {
+                break;
+            }
+            let mut row = Vec::with_capacity(buf.arity());
+            for c in 0..buf.arity() {
+                row.push(columns[c][r]);
+            }
+            if !exclude_set.contains(&row) {
+                result.push(row);
+            }
+        }
+        Ok(result)
+    }
+
     pub fn tagged_entries_containing_fact(
         &self,
         relation: &str,

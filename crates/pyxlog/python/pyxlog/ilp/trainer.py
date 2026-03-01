@@ -209,9 +209,22 @@ def _run_single_attempt(
         prog.evaluate()
         prog.reset_d2h_transfer_count()
 
+        # Hard-negative mining: sample false positives every 20 steps
+        if config.max_mined_negatives > 0 and step > 0 and step % 20 == 0:
+            head_name = candidates[0]["head_name"]
+            fps = prog.sample_false_positives(
+                head_name, positives, config.max_mined_negatives,
+            )
+            mined_negs = [(head_name, fp) for fp in fps]
+            all_negatives = list(negatives) + mined_negs
+            # Reset D2H counter after mining (download_column_* was called)
+            prog.reset_d2h_transfer_count()
+        else:
+            all_negatives = negatives
+
         # Compute task loss using candidate probs
         loss = _compute_loss_from_candidates(
-            prog, cand_probs, positives, negatives, candidates, ijk_to_cidx,
+            prog, cand_probs, positives, all_negatives, candidates, ijk_to_cidx,
         )
 
         # Entropy regularization
