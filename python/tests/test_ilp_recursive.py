@@ -8,7 +8,7 @@ pyxlog = pytest.importorskip("pyxlog")
 from conftest import skip_unless_pyxlog_cuda
 skip_unless_pyxlog_cuda()
 
-from pyxlog.ilp import train_only, TrainConfig, IlpConfigError
+from pyxlog.ilp import train_only, TrainConfig
 
 SOURCE = """
     edge(1, 2). edge(2, 3). edge(3, 4). edge(4, 5).
