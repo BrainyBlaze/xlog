@@ -140,7 +140,7 @@ class LearnedArtifact:
             for c in self.candidate_map
         ]
         map_str = json.dumps(map_data, sort_keys=True)
-        self.metadata.candidate_map_hash = hashlib.sha256(map_str.encode()).hexdigest()
+        candidate_map_hash = hashlib.sha256(map_str.encode()).hexdigest()
 
         # Compute config_hash from config_snapshot if present
         config_hash = ""
@@ -148,12 +148,12 @@ class LearnedArtifact:
             config_dict = dataclasses.asdict(self.config_snapshot)
             config_str = json.dumps(config_dict, sort_keys=True, default=str)
             config_hash = hashlib.sha256(config_str.encode()).hexdigest()
-        self.metadata.config_hash = config_hash
 
         data = {
-            "schema_version": getattr(self, "schema_version", "beta-v1"),
+            "schema_version": "beta-v1",
             "discovered_rule": self.discovered_rule,
             "candidate_map": map_data,
+            # Telemetry intentionally excluded (can be large)
             "logits": self.logits,
             "soft_probs": self.soft_probs,
             "selected_hard": self.selected_hard,
@@ -162,8 +162,8 @@ class LearnedArtifact:
                 "git_sha": self.metadata.git_sha,
                 "cuda_version": self.metadata.cuda_version,
                 "device_name": self.metadata.device_name,
-                "candidate_map_hash": self.metadata.candidate_map_hash,
-                "config_hash": self.metadata.config_hash,
+                "candidate_map_hash": candidate_map_hash,
+                "config_hash": config_hash,
                 "timestamp_utc": self.metadata.timestamp_utc,
             },
             "config_snapshot": dataclasses.asdict(self.config_snapshot) if self.config_snapshot else None,
@@ -193,9 +193,9 @@ class LearnedArtifact:
                     f"Candidate map hash mismatch: computed {computed}, stored {stored}"
                 )
 
-        # Schema version compatibility check
+        # Schema version compatibility check (always validated)
         stored_version = data.get("schema_version", "")
-        if verify_hash and stored_version and stored_version != "beta-v1":
+        if stored_version and stored_version != "beta-v1":
             raise ValueError(
                 f"Incompatible schema version: {stored_version} (expected beta-v1)"
             )

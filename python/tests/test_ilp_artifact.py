@@ -36,6 +36,7 @@ def test_save_load_roundtrip(tmp_path):
     assert loaded.discovered_rule == result.artifact.discovered_rule
     assert len(loaded.candidate_map) == len(result.artifact.candidate_map)
     assert loaded.logits == pytest.approx(result.artifact.logits, abs=1e-6)
+    assert loaded.telemetry.steps == []  # telemetry not persisted
 
 
 def test_save_produces_valid_json(tmp_path):
