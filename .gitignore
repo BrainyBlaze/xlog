@@ -59,3 +59,6 @@ examples/neural/baseline/deepproblog/*/snapshot/
 examples/neural/baseline/deepproblog/HWF/models/
 examples/neural/baseline/deepproblog/HWF/pretrain-sym_net/
 examples/neural/baseline/results/deepproblog_gpu_sequential/*.time
+
+# PyO3 build artifacts
+crates/pyxlog/python/pyxlog/*.so
