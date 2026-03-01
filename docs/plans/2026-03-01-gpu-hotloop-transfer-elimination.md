@@ -2,9 +2,15 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Eliminate remaining redundant D2H/H2D transfers in the ILP trainer step loop, reducing per-step transfers from ~170 to ~40 and bytes from ~1,300 to ~600.
+**Goal:** Reduce redundant D2H/H2D transfers in the ILP trainer step loop. This is an incremental transfer-reduction milestone, NOT a full GPU-resident step loop — the step loop still returns host data (`Vec<bool>`, `Vec<Vec<(i,j,k)>>`) and Python-side loss/convergence logic remains CPU-side. A fully GPU-resident step loop (zero host returns, GPU-side loss computation) is a v0.5.0 objective.
 
-**Architecture:** Three optimizations: (1) lazy row-count cache on CudaBuffer eliminates ~130 redundant 4-byte D2H reads, (2) pre-uploaded fact buffers eliminate ~3 per-step H2D uploads, (3) route all D2H through tracked wrappers so existing HostTransferTracker provides complete profiling signal.
+**Architecture:** Three optimizations: (1) lazy row-count cache on CudaBuffer eliminates ~130 redundant 4-byte D2H reads, (2) pre-uploaded fact buffers eliminate per-step H2D re-uploads, (3) route all host transfers (D2H and H2D) through tracked wrappers so existing HostTransferTracker provides complete profiling signal.
+
+**Explicit non-goals for this milestone:**
+- GPU-side loss computation (Python still loops over returned credit vectors)
+- GPU-side convergence checking (Python still loops over returned membership masks)
+- Eliminating evaluate-phase transfers (host-dispatched join loop stays)
+- Eliminating PyTorch `.item()` scalar transfers (control-flow scalars stay)
 
 **Tech Stack:** Rust (xlog-cuda, xlog-runtime, pyxlog), Python (trainer.py), CUDA (no kernel changes)
 
@@ -142,7 +148,7 @@ def _run_single_attempt(...):
 
 ### Design
 
-**Route all D2H through tracked wrapper**: Convert every `self.device.inner().dtoh_sync_copy_into()` call site in provider.rs to use `self.dtoh_sync_copy_into_tracked()` instead. Key sites:
+**Route all transfers through tracked wrappers**: Convert every `self.device.inner().dtoh_sync_copy_into()` call site in provider.rs to use `self.dtoh_sync_copy_into_tracked()`. Similarly, add an `htod_sync_copy_into_tracked` wrapper (same pattern: increment `htod_calls`/`htod_bytes` on `HostTransferTracker`, then delegate) and route step-loop H2D paths through it. Key D2H sites:
 
 | Path | Current | Change to |
 |------|---------|-----------|
@@ -152,9 +158,9 @@ def _run_single_attempt(...):
 | `hash_join_inner_v2` probe count (line 7930) | `device.inner().dtoh_sync_copy_into` | `self.dtoh_sync_copy_into_tracked` |
 | All other `device.inner().dtoh_sync_copy_into` sites | direct | tracked wrapper |
 
-**External bypasses** (must also be routed through cache or tracked wrapper):
-- `read_device_row_count` in `ilp_registry.rs:9-20` — after making `device_row_count` public (or using buffer cache), this becomes a thin wrapper or is eliminated.
-- `buffer_row_count` in `executor.rs:2961-2968` — same pattern. Must route through `buffer.cached_row_count()` with lazy fallback.
+**REQUIRED: External bypass fixes** (these are blocking implementation work, not optional):
+- `read_device_row_count` in `ilp_registry.rs:9-20` — calls `provider.device().inner().dtoh_sync_copy_into()` directly, bypassing both cache and tracking. MUST be rewritten to route through `buffer.cached_row_count()` with lazy fallback via provider. Without this fix, the row-count cache provides incomplete coverage and the "complete profiling signal" claim is invalid.
+- `buffer_row_count` in `executor.rs:2961-2968` — same pattern, same requirement. MUST route through `buffer.cached_row_count()` with lazy fallback. Both bypasses must be fixed in the same task as the row-count cache and tracked-wrapper work.
 
 **PyO3 exposure**:
 ```python
@@ -178,14 +184,33 @@ prog.reset_host_transfer_stats()
 
 ## Expected Results
 
+**Full-step window** (reset before `set_rule_mask`, snapshot after convergence check):
+
 | Metric | Before P0 | After P0 | After This |
 |--------|-----------|----------|------------|
-| D2H transfers/step | ~500+ | ~170 | ~40 |
-| D2H bytes/step | ~10,000+ | ~1,300 | ~600 |
+| D2H transfers/step | ~500+ | ~170 | E_eval + E_post + S |
+| D2H bytes/step | ~10,000+ | ~1,300 | workload-dependent |
 | H2D uploads/step | ~15-25 | ~3 | 0 (pre-uploaded) |
 | download_column_*/step | 15-25 | 0 (gated) | 0 (gated) |
 
-Remaining ~40 D2H transfers in the "full step" window are from the evaluate phase (`extract_active_rule_indices` + per-rule probe counts + join output counts) and PyTorch scalar `.item()` calls. In the "post-evaluate" window (what the column-download gate measures), the remaining D2H is ~13 calls from `membership_mask` mask downloads only. Eliminating the evaluate-phase transfers requires a fully GPU-resident join dispatcher (v0.5.0).
+Where:
+- **E_eval** = evaluate-phase D2H (fixed per step): `extract_active_rule_indices` (5 calls) + per-active-rule probe counts + join output counts. For K=32 active rules, E_eval ≈ 25.
+- **E_post** = post-evaluate D2H (workload-dependent): `batch_tagged_credit` calls `membership_mask` once per contributing tagged entry. Each `membership_mask` call does 2× `device_row_count` (cached → 0 D2H) + 1× mask download. So E_post = number of contributing (i,j,k) entries across all positive facts. For the reach benchmark with 2 positives and 1 contributing rule: E_post ≈ 2. For the grandparent benchmark with 2 positives: E_post ≈ 2-4.
+- **S** = PyTorch scalar `.item()` calls (fixed per step): ~10 calls for loss/entropy/temperature. **Note:** These are CUDA runtime transfers outside xlog's provider, so they are NOT counted by `host_transfer_stats()`. The S term appears in the "total transfers" model but must be excluded from `host_transfer_stats`-based test thresholds.
+
+**Post-evaluate window** (what the column-download gate measures): E_post + witness `batch_fact_membership` mask downloads. The `batch_fact_membership` calls do 1× `membership_mask` per relation, so post-evaluate D2H ≈ E_post + R_pos + R_neg (where R_pos/R_neg = number of distinct relations with positives/negatives).
+
+**Concrete benchmarks** (K=32 active rules):
+
+| Workload | E_eval | E_post | Tracked D2H/step | S (untracked) |
+|----------|--------|--------|-------------------|----------------|
+| reach (2 pos, 0 neg) | ~25 | ~2 | ~27 | ~10 |
+| grandparent (2 pos, 2 neg) | ~25 | ~4 | ~29 | ~10 |
+| colleague (4 pos, 0 neg) | ~25 | ~4 | ~29 | ~10 |
+
+"Tracked D2H/step" = E_eval + E_post (what `host_transfer_stats().dtoh_calls` reports). S is outside provider tracking.
+
+Remaining D2H in the full-step window is dominated by the evaluate phase (~25 calls from `extract_active_rule_indices` + probe/output counts). Eliminating these requires a fully GPU-resident join dispatcher (v0.5.0). In the post-evaluate window, remaining D2H is E_post + R mask downloads only.
 
 ---
 
@@ -194,6 +219,10 @@ Remaining ~40 D2H transfers in the "full step" window are from the evaluate phas
 1. **Unit tests**: Row-count cache correctness (eager, lazy, device-computed paths)
 2. **Integration tests**: Pre-uploaded buffer lifecycle (create, use, stale-handle rejection, cleanup)
 3. **D2H gate**: Existing `d2h_transfer_count` gate unchanged (zero column downloads)
-4. **Transfer profiling test**: Assert `host_transfer_stats().dtoh_calls` per step is ≤ expected threshold
+4. **Transfer profiling test** (concrete thresholds — all thresholds use `host_transfer_stats()` which only counts provider-tracked transfers, NOT PyTorch `.item()` or other CUDA runtime transfers):
+   - **Post-evaluate window**: Assert `host_transfer_stats().dtoh_calls` ≤ `E_post + R_pos + R_neg + 2` per step, where E_post = number of contributing tagged entries, R_pos/R_neg = distinct relations with positives/negatives. For the reach benchmark (2 pos, 0 neg, 1 relation): threshold = 2 + 1 + 0 + 2 = **5**.
+   - **Full-step window**: Assert `host_transfer_stats().dtoh_calls` ≤ `E_eval + E_post + 5` (5 = margin for device-computed buffers' first-read lazy cache misses). S is excluded because PyTorch `.item()` calls are outside provider tracking. For reach: threshold = 25 + 2 + 5 = **32**.
+   - **Tracked H2D uploads**: Assert `host_transfer_stats().htod_calls` == **0** in the step loop body (all facts pre-uploaded before the loop). This assertion covers only provider-tracked H2D paths. Direct `htod_sync_copy_into` calls that bypass the tracked wrapper (e.g., `buffer_from_columns` at provider.rs:7169) are outside tracking scope. To make this assertion sound, the H2D tracking wrapper (`htod_sync_copy_into_tracked`) must also be added as part of Section 3's "route all transfers through tracked wrappers" work — same pattern as the D2H wrapper conversion. Untracked H2D paths that are NOT called during the step loop (only during construction/compilation) do not affect the assertion.
+   - Test uses the reach benchmark with known positive counts so thresholds are deterministic. If actual counts exceed thresholds, the test fails with a diagnostic message showing the breakdown.
 5. **Reliability gate**: 20/20 alpha reliability suite passes unchanged
 6. **Semantic parity**: Loss and convergence behavior identical (same test assertions)
