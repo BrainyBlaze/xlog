@@ -3688,31 +3688,31 @@ fn pack_i64_columns_typed(
             let col_type = schema.column_type(col_idx);
             let col = &mut columns[col_idx];
             match col_type {
-                ScalarType::U32 => {
+                Some(ScalarType::U32) => {
                     let v = u32::try_from(val).map_err(|_| PyValueError::new_err(format!(
                         "Relation '{}' column {} (U32): value {} out of range [0, {}]",
                         relation, col_idx, val, u32::MAX,
                     )))?;
                     col.extend_from_slice(&v.to_le_bytes());
                 }
-                ScalarType::I32 => {
+                Some(ScalarType::I32) => {
                     let v = i32::try_from(val).map_err(|_| PyValueError::new_err(format!(
                         "Relation '{}' column {} (I32): value {} out of range [{}, {}]",
                         relation, col_idx, val, i32::MIN, i32::MAX,
                     )))?;
                     col.extend_from_slice(&v.to_le_bytes());
                 }
-                ScalarType::U64 => {
+                Some(ScalarType::U64) => {
                     let v = u64::try_from(val).map_err(|_| PyValueError::new_err(format!(
                         "Relation '{}' column {} (U64): value {} out of range [0, {}]",
                         relation, col_idx, val, i64::MAX,
                     )))?;
                     col.extend_from_slice(&v.to_le_bytes());
                 }
-                ScalarType::I64 => {
+                Some(ScalarType::I64) => {
                     col.extend_from_slice(&val.to_le_bytes());
                 }
-                ScalarType::Bool => {
+                Some(ScalarType::Bool) => {
                     match val {
                         0 => col.push(0u8),
                         1 => col.push(1u8),
@@ -3722,22 +3722,28 @@ fn pack_i64_columns_typed(
                         ))),
                     }
                 }
-                ScalarType::Symbol => {
+                Some(ScalarType::Symbol) => {
                     let v = u32::try_from(val).map_err(|_| PyValueError::new_err(format!(
                         "Relation '{}' column {} (Symbol): value {} out of range [0, {}]",
                         relation, col_idx, val, u32::MAX,
                     )))?;
                     col.extend_from_slice(&v.to_le_bytes());
                 }
-                ScalarType::F32 => {
+                Some(ScalarType::F32) => {
                     return Err(PyValueError::new_err(format!(
                         "Relation '{}' column {} (F32): float columns not supported in batch APIs",
                         relation, col_idx,
                     )));
                 }
-                ScalarType::F64 => {
+                Some(ScalarType::F64) => {
                     return Err(PyValueError::new_err(format!(
                         "Relation '{}' column {} (F64): float columns not supported in batch APIs",
+                        relation, col_idx,
+                    )));
+                }
+                None => {
+                    return Err(PyValueError::new_err(format!(
+                        "Relation '{}' column {}: no type in schema",
                         relation, col_idx,
                     )));
                 }
@@ -4499,28 +4505,11 @@ impl CompiledIlpProgram {
             return Ok(vec![false; facts.len()]);
         }
 
-        // Validate all facts have correct arity
-        for (idx, fact) in facts.iter().enumerate() {
-            if fact.len() != arity {
-                return Err(PyValueError::new_err(format!(
-                    "Fact {} has {} values, expected {} (arity of '{}')",
-                    idx, fact.len(), arity, relation,
-                )));
-            }
-        }
-
-        // Transpose facts into columnar layout for GPU upload
-        let mut columns: Vec<Vec<u32>> = vec![Vec::with_capacity(facts.len()); arity];
-        for fact in &facts {
-            for (col_idx, &val) in fact.iter().enumerate() {
-                columns[col_idx].push(val as u32);
-            }
-        }
-
-        // Upload to GPU using create_buffer_from_u32_columns
-        let col_slices: Vec<&[u32]> = columns.iter().map(|c| c.as_slice()).collect();
+        // Schema-aware typed upload
+        let col_bytes = pack_i64_columns_typed(relation, &facts, buf.schema())?;
+        let col_slices: Vec<&[u8]> = col_bytes.iter().map(|c| c.as_slice()).collect();
         let query_buf = self.provider
-            .create_buffer_from_u32_columns(
+            .create_buffer_from_slices(
                 &col_slices,
                 buf.schema().clone(),
             )
@@ -4576,28 +4565,12 @@ impl CompiledIlpProgram {
             return Ok(vec![Vec::new(); facts.len()]);
         }
 
-        // Validate facts arity
-        for (idx, fact) in facts.iter().enumerate() {
-            if fact.len() != arity {
-                return Err(PyValueError::new_err(format!(
-                    "Fact {} has {} values, expected {} (projected arity of '{}')",
-                    idx, fact.len(), arity, relation,
-                )));
-            }
-        }
-
-        // Upload query facts to GPU once
-        let mut columns: Vec<Vec<u32>> = vec![Vec::with_capacity(facts.len()); arity];
-        for fact in &facts {
-            for (col_idx, &val) in fact.iter().enumerate() {
-                columns[col_idx].push(val as u32);
-            }
-        }
-
+        // Schema-aware typed upload
         let schema = first_buf.schema().clone();
-        let col_slices: Vec<&[u32]> = columns.iter().map(|c| c.as_slice()).collect();
+        let col_bytes = pack_i64_columns_typed(relation, &facts, &schema)?;
+        let col_slices: Vec<&[u8]> = col_bytes.iter().map(|c| c.as_slice()).collect();
         let query_buf = self.provider
-            .create_buffer_from_u32_columns(&col_slices, schema)
+            .create_buffer_from_slices(&col_slices, schema)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
         let keys: Vec<usize> = (0..arity).collect();
