@@ -1,6 +1,6 @@
 # Sparse Executor + Transfer Elimination Implementation Plan
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+> **Execution note:** Implement this plan task-by-task and verify tests after each major change.
 
 **Goal:** Eliminate dense N^3 materialization from the sparse trainer path and wire the row-count cache end-to-end.
 

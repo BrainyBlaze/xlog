@@ -790,19 +790,15 @@ def _select_winner(
     holdout_f1 = None
     holdout_variance = 0.0
     if _compute_holdout and winner.converged:
-        try:
-            from pyxlog.ilp.holdout import holdout_f1_and_variance
+        from pyxlog.ilp.holdout import holdout_f1_and_variance
 
-            holdout_f1, holdout_variance = holdout_f1_and_variance(
-                source,
-                mask_name,
-                positives,
-                negatives,
-                config,
-            )
-        except Exception:
-            holdout_f1 = None
-            holdout_variance = 0.0
+        holdout_f1, holdout_variance = holdout_f1_and_variance(
+            source,
+            mask_name,
+            positives,
+            negatives,
+            config,
+        )
 
     # Compute rule_frequency: fraction of converged attempts finding same rule
     same_rule_count = sum(

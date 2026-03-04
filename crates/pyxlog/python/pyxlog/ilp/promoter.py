@@ -122,6 +122,7 @@ def train_and_promote(
     ))
 
     # Gate: holdout F1 (LOO/k-fold on training positives only).
+    holdout_threshold = config.holdout_threshold
     holdout_f1 = train_result.holdout_f1
     if holdout_f1 is None:
         gates.append(GateResult(
@@ -130,7 +131,6 @@ def train_and_promote(
             detail="holdout_f1 unavailable (insufficient positives for validation)",
         ))
     else:
-        holdout_threshold = config.holdout_threshold
         gates.append(GateResult(
             name="holdout_f1",
             passed=holdout_f1 >= holdout_threshold,
@@ -175,11 +175,11 @@ def train_and_promote(
 
     if hp:
         hp_derived = sum(1 for r, v in hp if trial.fact_exists(r, v))
-        hp_ok = hp_derived >= len(hp) * 0.95
+        hp_ok = hp_derived >= len(hp) * holdout_threshold
         gates.append(GateResult(
             name="holdout_positive",
             passed=hp_ok,
-            detail=f"{hp_derived}/{len(hp)} derived (threshold 95%)",
+            detail=f"{hp_derived}/{len(hp)} derived (threshold {holdout_threshold:.2f})",
         ))
     if hn:
         hn_derived = sum(1 for r, v in hn if trial.fact_exists(r, v))

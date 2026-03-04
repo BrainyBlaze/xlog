@@ -133,7 +133,8 @@ def k_fold_holdout_f1_and_variance(
         if not fold:
             continue
 
-        train_pos = [p for idx, p in enumerate(positives) if idx not in set(fold)]
+        fold_set = set(fold)
+        train_pos = [p for idx, p in enumerate(positives) if idx not in fold_set]
         held_out = [positives[idx] for idx in fold]
         if not train_pos or not held_out:
             continue

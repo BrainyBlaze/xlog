@@ -59,28 +59,33 @@ class DenseMaskBackend:
     ):
         M_soft = F.gumbel_softmax(W, tau=tau, hard=False, dim=-1)
         flat = M_soft.view(-1)
-        # Decode hard candidates at the candidate level for telemetry and
-        # gate bookkeeping, but keep dense-mask materialization behavior for
-        # execution by applying hard updates on the flattened tensor.
-        k = min(budget, flat.numel())
-        _, topk_idx = flat.topk(k)
+        # Restrict hard-mask activation to valid candidate cells only.
+        # This keeps dense fallback semantically aligned with valid_candidates().
+        candidate_flat_indices = [
+            int(c["i"]) * n * n + int(c["j"]) * n + int(c["k"])
+            for c in candidates
+        ]
 
-        # Map dense flatten indices back to candidate indices for selected_hard.
-        # Candidates are defined in the same sorted order as valid_candidates(), so
-        # this remains deterministic across implementations.
-        flat_to_candidate: dict[int, int] = {}
-        for ci, c in enumerate(candidates):
-            flat_idx = int(c["i"]) * n * n + int(c["j"]) * n + int(c["k"])
-            flat_to_candidate[flat_idx] = ci
-
-        selected_hard = []
-        for idx in topk_idx.detach().cpu().tolist():
-            ci = flat_to_candidate.get(int(idx))
-            if ci is not None:
-                selected_hard.append(ci)
+        if candidate_flat_indices:
+            candidate_flat_indices_tensor = torch.tensor(
+                candidate_flat_indices, device=flat.device, dtype=torch.long,
+            )
+            candidate_scores = flat[candidate_flat_indices_tensor]
+            k = min(budget, candidate_scores.numel())
+            if k > 0:
+                _, topk_rel_idx = candidate_scores.topk(k)
+                topk_idx = candidate_flat_indices_tensor[topk_rel_idx]
+                selected_hard = topk_rel_idx.detach().cpu().tolist()
+            else:
+                topk_idx = torch.empty(0, dtype=torch.long, device=flat.device)
+                selected_hard = []
+        else:
+            topk_idx = torch.empty(0, dtype=torch.long, device=flat.device)
+            selected_hard = []
 
         M_hard_flat = torch.zeros_like(flat)
-        M_hard_flat[topk_idx] = 1.0
+        if topk_idx.numel() > 0:
+            M_hard_flat[topk_idx] = 1.0
         M_hard = M_hard_flat.view_as(M_soft)
 
         prog.set_rule_mask(
@@ -98,16 +103,13 @@ class DenseMaskBackend:
         return cand_probs, selected_hard
 
     def decode_argmax(self, W, candidates, n):
+        if not candidates:
+            return 0
         with torch.no_grad():
-            flat = W.view(-1)
-            idx = flat.argmax().item()
-            i = idx // (n * n)
-            j = (idx % (n * n)) // n
-            k = idx % n
-        for ci, c in enumerate(candidates):
-            if c["i"] == i and c["j"] == j and c["k"] == k:
-                return ci
-        return 0
+            candidate_vals = torch.stack(
+                [W[c["i"], c["j"], c["k"]] for c in candidates]
+            )
+            return int(candidate_vals.argmax().item())
 
 
 class SparseMaskBackend:
