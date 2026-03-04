@@ -75,3 +75,23 @@ def test_load_rejects_incompatible_hash(tmp_path):
 
     with pytest.raises(ValueError, match="hash"):
         LearnedArtifact.load(path, verify_hash=True)
+
+
+def test_config_snapshot_roundtrip(tmp_path):
+    """Config snapshot survives save/load roundtrip."""
+    config = TrainConfig(
+        step_budget_per_attempt=100, max_attempts=5,
+        tau_start=2.0, tau_floor=0.05, seed=42,
+        holdout_threshold=0.9, typed_schema_required=True,
+        protected_relations=("edge",),
+        deterministic=True,
+    )
+    result = train_only(SOURCE, "W_reach", POS, [], config)
+    assert result.converged
+
+    path = tmp_path / "artifact.json"
+    result.artifact.save(path)
+
+    loaded = LearnedArtifact.load(path)
+    assert loaded.config_snapshot is not None, "config_snapshot should be restored"
+    assert loaded.config_snapshot == config

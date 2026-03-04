@@ -214,13 +214,28 @@ class LearnedArtifact:
             timestamp_utc=meta_data.get("timestamp_utc", ""),
         )
 
+        # Restore config_snapshot if present
+        config_snapshot = None
+        raw_config = data.get("config_snapshot")
+        if raw_config is not None:
+            # Fix types that dataclasses.asdict + json.dump changed:
+            # - Path fields serialized as strings
+            # - tuple fields serialized as lists
+            if raw_config.get("telemetry_sink") is not None:
+                raw_config["telemetry_sink"] = Path(raw_config["telemetry_sink"])
+            if "protected_relations" in raw_config:
+                raw_config["protected_relations"] = tuple(
+                    raw_config["protected_relations"]
+                )
+            config_snapshot = TrainConfig(**raw_config)
+
         return cls(
             candidate_map=candidate_map,
             logits=data.get("logits", []),
             soft_probs=data.get("soft_probs", []),
             selected_hard=data.get("selected_hard", []),
             discovered_rule=data.get("discovered_rule", ""),
-            config_snapshot=None,  # Config not restored from JSON in beta (deferred)
+            config_snapshot=config_snapshot,
             metadata=metadata,
         )
 

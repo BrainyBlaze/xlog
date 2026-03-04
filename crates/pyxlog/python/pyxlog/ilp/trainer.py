@@ -826,6 +826,7 @@ def _select_winner(
             soft_probs=winner.soft_probs,
             selected_hard=winner.selected_hard,
             discovered_rule=winner.discovered_rule or "",
+            config_snapshot=config,
             telemetry=TrainTelemetry(
                 steps=winner.telemetry_steps,
                 step_timings=winner.telemetry_timings,
