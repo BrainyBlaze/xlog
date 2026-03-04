@@ -14,6 +14,8 @@ All notable changes to this project are documented in this file.
 
 - **Per-step phase timing** in dILP trainer: 6 timed phases (apply_mask, loss_credit, loss_reduce,
   backward_step, membership, convergence) with p95 and total_ms telemetry in `result.telemetry_timings`.
+- **SLO scaling harness**: Parametrized `test_slo_scaling[N]` for N=20/50/100/150 chain lengths
+  with wall-clock and forward_p95_us targets. Advisory by default; enforce with `ILP_PERF_ENFORCE_SLO=1`.
 
 ## [0.4.0-beta] — 2026-03-04
 

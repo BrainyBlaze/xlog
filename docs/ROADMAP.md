@@ -469,7 +469,7 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 - [ ] Config restoration from saved artifact JSON
 - [ ] Telemetry persistence in artifact (optional, size-bounded)
 - [x] ~~Full CI-grade 50-seed GA reliability runtime budget optimization~~ (done: 1447s → 436s, `max_attempts=2`)
-- [ ] Full SLO benchmark harness for N=20/50/100/150 (beyond smoke tests)
+- [x] ~~Full SLO benchmark harness for N=20/50/100/150~~ (done: parametrized `test_slo_scaling[N]` with wall-clock and forward_p95_us targets)
 
 ---
 
