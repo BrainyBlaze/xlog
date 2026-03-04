@@ -3661,6 +3661,93 @@ fn push_term_bytes(out: &mut Vec<u8>, term: &Term, typ: ScalarType) -> xlog_core
     Ok(())
 }
 
+/// Pack `i64` fact values into typed byte columns according to schema.
+/// Returns one `Vec<u8>` per column with correctly-encoded LE bytes.
+/// Rejects F32/F64 columns (not supported in batch APIs).
+fn pack_i64_columns_typed(
+    relation: &str,
+    facts: &[Vec<i64>],
+    schema: &Schema,
+) -> PyResult<Vec<Vec<u8>>> {
+    let arity = schema.arity();
+    for (idx, fact) in facts.iter().enumerate() {
+        if fact.len() != arity {
+            return Err(PyValueError::new_err(format!(
+                "Relation '{}': fact {} has {} values, expected {}",
+                relation, idx, fact.len(), arity,
+            )));
+        }
+    }
+
+    let mut columns: Vec<Vec<u8>> = (0..arity)
+        .map(|_| Vec::with_capacity(facts.len() * 8))
+        .collect();
+
+    for fact in facts {
+        for (col_idx, &val) in fact.iter().enumerate() {
+            let col_type = schema.column_type(col_idx);
+            let col = &mut columns[col_idx];
+            match col_type {
+                ScalarType::U32 => {
+                    let v = u32::try_from(val).map_err(|_| PyValueError::new_err(format!(
+                        "Relation '{}' column {} (U32): value {} out of range [0, {}]",
+                        relation, col_idx, val, u32::MAX,
+                    )))?;
+                    col.extend_from_slice(&v.to_le_bytes());
+                }
+                ScalarType::I32 => {
+                    let v = i32::try_from(val).map_err(|_| PyValueError::new_err(format!(
+                        "Relation '{}' column {} (I32): value {} out of range [{}, {}]",
+                        relation, col_idx, val, i32::MIN, i32::MAX,
+                    )))?;
+                    col.extend_from_slice(&v.to_le_bytes());
+                }
+                ScalarType::U64 => {
+                    let v = u64::try_from(val).map_err(|_| PyValueError::new_err(format!(
+                        "Relation '{}' column {} (U64): value {} out of range [0, {}]",
+                        relation, col_idx, val, i64::MAX,
+                    )))?;
+                    col.extend_from_slice(&v.to_le_bytes());
+                }
+                ScalarType::I64 => {
+                    col.extend_from_slice(&val.to_le_bytes());
+                }
+                ScalarType::Bool => {
+                    match val {
+                        0 => col.push(0u8),
+                        1 => col.push(1u8),
+                        _ => return Err(PyValueError::new_err(format!(
+                            "Relation '{}' column {} (Bool): value {} not in {{0, 1}}",
+                            relation, col_idx, val,
+                        ))),
+                    }
+                }
+                ScalarType::Symbol => {
+                    let v = u32::try_from(val).map_err(|_| PyValueError::new_err(format!(
+                        "Relation '{}' column {} (Symbol): value {} out of range [0, {}]",
+                        relation, col_idx, val, u32::MAX,
+                    )))?;
+                    col.extend_from_slice(&v.to_le_bytes());
+                }
+                ScalarType::F32 => {
+                    return Err(PyValueError::new_err(format!(
+                        "Relation '{}' column {} (F32): float columns not supported in batch APIs",
+                        relation, col_idx,
+                    )));
+                }
+                ScalarType::F64 => {
+                    return Err(PyValueError::new_err(format!(
+                        "Relation '{}' column {} (F64): float columns not supported in batch APIs",
+                        relation, col_idx,
+                    )));
+                }
+            }
+        }
+    }
+
+    Ok(columns)
+}
+
 fn load_facts_into_store(
     ast: &AstProgram,
     provider: &CudaKernelProvider,
