@@ -1,9 +1,7 @@
 name: cuda-ci
 
 on:
-  push:
-    branches: ["**"]
-  pull_request:
+  workflow_dispatch:
 
 jobs:
   rust-tests:

@@ -1,7 +1,7 @@
 //! ILP (Inductive Logic Programming) registry for tensor mask management.
 
 use std::collections::HashMap;
-use xlog_core::{ScalarType, Schema, XlogError};
+use xlog_core::XlogError;
 use xlog_cuda::{CudaBuffer, CudaKernelProvider};
 
 /// Reads the device-side row count using only public APIs (RD-22).
@@ -10,12 +10,16 @@ pub fn read_device_row_count(
     provider: &CudaKernelProvider,
     buffer: &CudaBuffer,
 ) -> Result<usize, XlogError> {
+    if let Some(n) = buffer.cached_row_count() {
+        return Ok(n as usize);
+    }
     let mut host_rows = [0u32];
     provider
         .device()
         .inner()
         .dtoh_sync_copy_into(buffer.num_rows_device(), &mut host_rows)
         .map_err(|e| XlogError::Kernel(format!("Failed to read row count: {}", e)))?;
+    buffer.set_cached_row_count_if_unset(host_rows[0]);
     Ok(host_rows[0] as usize)
 }
 
@@ -24,13 +28,26 @@ pub struct IlpRegistry {
     masks: HashMap<String, IlpMask>,
 }
 
-/// A registered ILP mask pair (hard + soft) with schema size.
-pub struct IlpMask {
-    /// Flat 1D CudaBuffer (N*N*N f32 elements), imported via DLPack.
-    /// Python flattens 3D tensor to 1D before export (RD-16).
-    pub hard: CudaBuffer,
-    pub soft: CudaBuffer,
-    pub schema_size: usize,
+/// A registered ILP mask — Dense (imported via DLPack) or Sparse (candidate entries only).
+pub enum IlpMask {
+    Dense {
+        hard: CudaBuffer,
+        soft: CudaBuffer,
+        schema_size: usize,
+    },
+    Sparse {
+        active_entries: Vec<(u32, u32, u32)>,
+        schema_size: usize,
+    },
+}
+
+impl IlpMask {
+    pub fn schema_size(&self) -> usize {
+        match self {
+            IlpMask::Dense { schema_size, .. } => *schema_size,
+            IlpMask::Sparse { schema_size, .. } => *schema_size,
+        }
+    }
 }
 
 /// Tag metadata from TensorMaskedJoin execution.
@@ -65,20 +82,20 @@ impl IlpRegistry {
         schema_size: usize,
     ) {
         self.masks
-            .insert(name, IlpMask { hard, soft, schema_size });
+            .insert(name, IlpMask::Dense { hard, soft, schema_size });
     }
 
     /// Insert a mask built from sparse candidate data.
     ///
-    /// Builds dense flat N*N*N hard/soft arrays on host and uploads them as
-    /// single-column f32 buffers for executor consumption.
+    /// Performs deterministic top-k ranking (desc soft value, then lower index)
+    /// and stores the selected (i,j,k) entries directly — no dense buffer.
     pub fn insert_mask_from_sparse(
         &mut self,
         name: String,
         schema_size: usize,
         active_ijk: &[(u32, u32, u32)],
         active_soft: &[f32],
-        provider: &CudaKernelProvider,
+        budget: usize,
     ) -> Result<(), XlogError> {
         if active_ijk.len() != active_soft.len() {
             return Err(XlogError::Execution(format!(
@@ -88,41 +105,25 @@ impl IlpRegistry {
             )));
         }
 
-        let total = schema_size
-            .checked_mul(schema_size)
-            .and_then(|v| v.checked_mul(schema_size))
-            .ok_or_else(|| XlogError::Execution(
-                format!("schema_size overflow for N={}", schema_size)
-            ))?;
+        // Deterministic top-k: descending soft value, then ascending index for ties
+        let mut ranked: Vec<(usize, f32)> =
+            active_soft.iter().copied().enumerate().collect();
+        ranked.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.0.cmp(&b.0))
+        });
+        ranked.truncate(budget.min(ranked.len()));
 
-        let mut hard_host = vec![0f32; total];
-        let mut soft_host = vec![0f32; total];
+        let entries: Vec<(u32, u32, u32)> = ranked
+            .iter()
+            .map(|&(idx, _)| active_ijk[idx])
+            .collect();
 
-        for (idx, &(i, j, k)) in active_ijk.iter().enumerate() {
-            let flat = (i as usize)
-                .checked_mul(schema_size)
-                .and_then(|v| v.checked_mul(schema_size))
-                .and_then(|v| v.checked_add((j as usize) * schema_size))
-                .and_then(|v| v.checked_add(k as usize))
-                .ok_or_else(|| XlogError::Execution(format!(
-                    "flat index overflow for ({},{},{}) with N={}",
-                    i, j, k, schema_size
-                )))?;
-            if flat >= total {
-                return Err(XlogError::Execution(format!(
-                    "candidate ({},{},{}) out of bounds for N={}",
-                    i, j, k, schema_size
-                )));
-            }
-            hard_host[flat] = 1.0;
-            soft_host[flat] = active_soft[idx];
-        }
-
-        let mask_schema = Schema::new(vec![("mask".to_string(), ScalarType::F32)]);
-        let hard = provider.create_buffer_from_f32_slice(&hard_host, mask_schema.clone())?;
-        let soft = provider.create_buffer_from_f32_slice(&soft_host, mask_schema)?;
-
-        self.masks.insert(name, IlpMask { hard, soft, schema_size });
+        self.masks.insert(name, IlpMask::Sparse {
+            active_entries: entries,
+            schema_size,
+        });
         Ok(())
     }
 

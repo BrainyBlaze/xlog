@@ -6810,6 +6810,33 @@ impl CudaKernelProvider {
             .collect())
     }
 
+    /// Download f64 values without incrementing the D2H transfer counter.
+    /// This remains D2H-count-transparent for the ILP D2H hot-path gate, but
+    /// still recorded in host transfer stats (`dtoh_bytes`/`dtoh_calls`) for
+    /// accounting and profiling.
+    pub fn download_f64_untracked(&self, buffer: &CudaBuffer, col_idx: usize) -> Result<Vec<f64>> {
+        let col = buffer
+            .column(col_idx)
+            .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
+
+        let num_rows = self.device_row_count(buffer)?;
+        if num_rows == 0 {
+            return Ok(vec![]);
+        }
+
+        let num_bytes = num_rows
+            .checked_mul(std::mem::size_of::<f64>())
+            .ok_or_else(|| XlogError::Kernel("Row byte size overflow".to_string()))?;
+        let col_view = self.column_bytes_view(col, num_bytes)?;
+        let mut bytes = vec![0u8; num_bytes];
+        self.dtoh_sync_copy_into_tracked(&col_view, &mut bytes)?;
+
+        Ok(bytes
+            .chunks_exact(8)
+            .map(|c| f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
+            .collect())
+    }
+
     /// Download a Bool column from GPU to host memory
     ///
     /// # Arguments
@@ -6968,11 +6995,15 @@ impl CudaKernelProvider {
     // ============== Internal Helper Methods ==============
 
     fn device_row_count(&self, buffer: &CudaBuffer) -> Result<usize> {
+        if let Some(n) = buffer.cached_row_count() {
+            return Ok(n as usize);
+        }
         let mut host_rows = [0u32];
         self.device
             .inner()
             .dtoh_sync_copy_into(buffer.num_rows_device(), &mut host_rows)
             .map_err(|e| XlogError::Kernel(format!("Failed to read row count: {}", e)))?;
+        buffer.set_cached_row_count_if_unset(host_rows[0]);
         Ok(host_rows[0] as usize)
     }
 
@@ -7169,8 +7200,8 @@ impl CudaKernelProvider {
             .inner()
             .htod_sync_copy_into(&[row_u32], &mut d_num_rows)
             .map_err(|e| XlogError::Kernel(format!("Failed to set row count: {}", e)))?;
-        Ok(CudaBuffer::from_columns(
-            columns, row_cap, d_num_rows, schema,
+        Ok(CudaBuffer::from_columns_with_host_count(
+            columns, row_cap, d_num_rows, schema, row_u32,
         ))
     }
 

@@ -1,5 +1,7 @@
 # python/tests/test_ilp_trainer.py
 """Integration tests for train_only()."""
+import math
+
 import pytest
 
 torch = pytest.importorskip("torch")
@@ -50,6 +52,50 @@ def test_train_only_returns_telemetry_level_1():
     assert step0.step == 0
     assert isinstance(step0.loss, float)
     assert isinstance(step0.temperature, float)
+
+
+def test_train_only_forward_p95_telemetry_populated():
+    """Telemetry must include forward-pass timing in microseconds."""
+    config = TrainConfig(
+        step_budget_per_attempt=20, max_attempts=2,
+        tau_start=2.0, tau_floor=0.05, seed=13,
+        telemetry_level=1,
+    )
+    result = train_only(
+        source=REACH_SOURCE, mask_name="W_reach",
+        positives=REACH_POS, negatives=REACH_NEG, config=config,
+    )
+    steps = result.artifact.telemetry.steps
+    assert len(steps) > 0
+    step_forward = [s.forward_p95_us for s in steps]
+    assert all(v >= 0.0 for v in step_forward)
+    assert max(step_forward) >= 0.0
+
+    timing = result.artifact.telemetry.step_timings
+    assert isinstance(timing, dict)
+    assert "forward_p95_us" in timing
+    sorted_forward = sorted(step_forward)
+    p95_idx = min(len(sorted_forward) - 1, max(0, math.ceil(0.95 * len(sorted_forward)) - 1))
+    assert timing["forward_p95_us"] >= sorted_forward[p95_idx] - 1e-6
+
+
+def test_train_only_telemetry_step_timings_population():
+    """Telemetry step summary should include forward and memory stats."""
+    config = TrainConfig(
+        step_budget_per_attempt=40, max_attempts=2,
+        tau_start=2.0, tau_floor=0.05, seed=13,
+        telemetry_level=1,
+    )
+    result = train_only(
+        source=REACH_SOURCE, mask_name="W_reach",
+        positives=REACH_POS, negatives=REACH_NEG, config=config,
+    )
+    timing = result.artifact.telemetry.step_timings
+    assert isinstance(timing, dict)
+    assert "forward_p95_us" in timing
+    assert timing["forward_p95_us"] >= 0.0
+    assert "allocated_bytes_p95" in timing
+    assert "allocated_bytes_max" in timing
 
 
 def test_train_only_empty_positives_raises():
@@ -128,6 +174,41 @@ def test_train_only_nonconverged_has_partial_recall():
     assert not result.converged
     # reach(1,3) is derivable from edge joins, so recall should be > 0
     assert result.recall > 0.0, "Non-converged recall should reflect partial witness coverage"
+
+
+def test_train_only_reproducibility_selected_hard_and_probs():
+    """Deterministic mode stabilizes learned artifacts across runs."""
+    config = TrainConfig(
+        step_budget_per_attempt=120,
+        max_attempts=4,
+        tau_start=2.0,
+        tau_floor=0.05,
+        seed=123,
+        deterministic=True,
+        debug_dense_mask=False,
+    )
+    a = train_only(
+        source=REACH_SOURCE,
+        mask_name="W_reach",
+        positives=REACH_POS,
+        negatives=REACH_NEG,
+        config=config,
+    )
+    b = train_only(
+        source=REACH_SOURCE,
+        mask_name="W_reach",
+        positives=REACH_POS,
+        negatives=REACH_NEG,
+        config=config,
+    )
+
+    assert a.discovered_rule == b.discovered_rule
+    assert a.artifact.selected_hard == b.artifact.selected_hard
+    assert len(a.artifact.soft_probs) == len(b.artifact.soft_probs)
+    assert a.converged is True
+    assert b.converged is True
+    for p, q in zip(a.artifact.soft_probs, b.artifact.soft_probs):
+        assert abs(p - q) <= max(1e-6, abs(q) * 1e-5 + 1e-6)
 
 
 def test_train_only_telemetry_entropy_not_zero():

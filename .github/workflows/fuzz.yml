@@ -1,9 +1,6 @@
 name: Fuzz Testing
 
 on:
-  schedule:
-    # Run daily at 3 AM UTC
-    - cron: '0 3 * * *'
   workflow_dispatch:
     inputs:
       target:

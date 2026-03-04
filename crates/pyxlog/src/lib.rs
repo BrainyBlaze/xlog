@@ -46,6 +46,19 @@ const USED_ARROW_DEVICE_ARRAY_CAPSULE_NAME: &[u8] = b"used_arrow_device_array\0"
 /// Epsilon value for numerical stability in log computations
 const NLL_EPSILON: f64 = 1e-38;
 
+fn scalar_type_name(typ: &ScalarType) -> String {
+    match *typ {
+        ScalarType::U32 => "u32".to_string(),
+        ScalarType::U64 => "u64".to_string(),
+        ScalarType::I32 => "i32".to_string(),
+        ScalarType::I64 => "i64".to_string(),
+        ScalarType::F32 => "f32".to_string(),
+        ScalarType::F64 => "f64".to_string(),
+        ScalarType::Bool => "bool".to_string(),
+        ScalarType::Symbol => "symbol".to_string(),
+    }
+}
+
 #[cfg(not(feature = "host-io"))]
 fn host_io_disabled_pyerr() -> PyErr {
     PyRuntimeError::new_err(
@@ -3901,19 +3914,21 @@ impl CompiledIlpProgram {
         Ok(())
     }
 
-    /// Sparse mask API: candidate IDs + soft probabilities.
+    /// Sparse mask API: candidate IDs + DLPack soft probabilities (GPU tensor).
     ///
     /// `candidate_ids` must be exactly `[0..C)` where C is the candidate count
     /// for this mask under the provided recursion policy.
     ///
-    /// Rust performs deterministic top-k (desc soft value, then lower id) and
-    /// materializes dense flat mask buffers for the existing executor path.
-    #[pyo3(signature = (name, candidate_ids, soft_probs, budget, allow_recursive=false))]
+    /// `soft_probs_dlpack` is a DLPack capsule (CUDA f64 tensor) passed from PyTorch.
+    /// Rust imports it zero-copy, downloads values (not counted by the D2H counter),
+    /// performs deterministic top-k (desc soft value, then lower id), and
+    /// stores a sparse IlpMask (no dense N^3 materialization).
+    #[pyo3(signature = (name, candidate_ids, soft_probs_dlpack, budget, allow_recursive=false))]
     pub fn set_rule_mask_sparse(
         &mut self,
         name: String,
         candidate_ids: Vec<u32>,
-        soft_probs: Vec<f64>,
+        soft_probs_dlpack: &Bound<'_, PyAny>,
         budget: usize,
         allow_recursive: bool,
     ) -> PyResult<()> {
@@ -3946,9 +3961,19 @@ impl CompiledIlpProgram {
                 )));
             }
         }
+
+        // Import DLPack tensor (zero-copy, stays on GPU)
+        let soft_dmt = dlpack_from_py(soft_probs_dlpack)?;
+        let soft_buf = self.provider.from_dlpack_tensors(vec![soft_dmt])
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+        // Download f64 values (control-plane, NOT tracked by D2H counter)
+        let soft_probs = self.provider.download_f64_untracked(&soft_buf, 0)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
         if soft_probs.len() != candidate_ids.len() {
             return Err(PyValueError::new_err(format!(
-                "soft_probs length {} != candidate_ids length {}",
+                "soft_probs tensor length {} != candidate_ids length {}",
                 soft_probs.len(), candidate_ids.len()
             )));
         }
@@ -3961,27 +3986,12 @@ impl CompiledIlpProgram {
             )));
         }
 
-        let mut ranked: Vec<(usize, f64)> =
-            soft_probs.iter().copied().enumerate().collect();
-        ranked.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then(a.0.cmp(&b.0))
-        });
-        ranked.truncate(budget.min(ranked.len()));
-
-        let active_ijk: Vec<(u32, u32, u32)> = ranked
-            .iter()
-            .map(|&(idx, _)| candidate_triples[idx])
-            .collect();
-        let active_soft: Vec<f32> = ranked
-            .iter()
-            .map(|&(idx, _)| soft_probs[idx] as f32)
-            .collect();
+        // Convert to f32 for top-k ranking in insert_mask_from_sparse
+        let active_soft: Vec<f32> = soft_probs.iter().map(|&v| v as f32).collect();
 
         self.executor
             .ilp_registry_mut()
-            .insert_mask_from_sparse(name, n, &active_ijk, &active_soft, &self.provider)
+            .insert_mask_from_sparse(name, n, &candidate_triples, &active_soft, budget)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))
     }
 
@@ -4245,6 +4255,22 @@ impl CompiledIlpProgram {
         self.rel_index.iter().map(|(_, name)| name.clone()).collect()
     }
 
+    /// Return declared predicate types from source `pred` declarations.
+    ///
+    /// Output is a list of `(name, types)` tuples so callers can
+    /// deterministically inspect whether metadata is available for
+    /// relations used during promotion.
+    pub fn relation_type_annotations(&self) -> Vec<(String, Vec<String>)> {
+        self.ast
+            .predicates
+            .iter()
+            .map(|pred| {
+                let types = pred.types.iter().map(scalar_type_name).collect();
+                (pred.name.clone(), types)
+            })
+            .collect()
+    }
+
     /// Return the set of valid (i,j,k) candidates for the given learnable mask.
     ///
     /// Pruning rules:
@@ -4475,6 +4501,20 @@ impl CompiledIlpProgram {
 
     pub fn reset_d2h_transfer_count(&self) {
         self.provider.reset_d2h_transfer_count()
+    }
+
+    pub fn host_transfer_stats(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let stats = self.provider.host_transfer_stats();
+        let dict = PyDict::new_bound(py);
+        dict.set_item("dtoh_bytes", stats.dtoh_bytes)?;
+        dict.set_item("htod_bytes", stats.htod_bytes)?;
+        dict.set_item("dtoh_calls", stats.dtoh_calls)?;
+        dict.set_item("htod_calls", stats.htod_calls)?;
+        Ok(dict.into())
+    }
+
+    pub fn reset_host_transfer_stats(&self) {
+        self.provider.reset_host_transfer_stats()
     }
 }
 

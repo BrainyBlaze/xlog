@@ -8,7 +8,15 @@ pyxlog = pytest.importorskip("pyxlog")
 from conftest import skip_unless_pyxlog_cuda
 skip_unless_pyxlog_cuda()
 
-from pyxlog.ilp import train_only, TrainConfig, IlpConfigError, IlpTrainingError
+from pyxlog.ilp import (
+    DenseMaskBackend,
+    SparseMaskBackend,
+    TrainConfig,
+    IlpCandidateError,
+    IlpConfigError,
+    IlpTrainingError,
+    train_only,
+)
 
 SOURCE = """
     edge(1, 2). edge(2, 3).
@@ -68,7 +76,7 @@ def test_nan_inf_detection_raises_after_limit():
         result = original_apply(self, prog, mask_name, W, tau, budget,
                                 candidates, n, allow_recursive=allow_recursive)
         # Replace cand_probs with NaN to trigger numeric failure detection
-        result.fill_(float("nan"))
+        result[0].fill_(float("nan"))
         return result
 
     config = TrainConfig(
@@ -83,3 +91,49 @@ def test_nan_inf_detection_raises_after_limit():
                 positives=[("reach", [1, 3])], negatives=[], config=config,
             )
     assert call_count[0] >= 2
+
+
+def test_degenerate_candidate_raises_candidate_error():
+    """N=1 (degenerate) candidate space should fail fast with IlpCandidateError."""
+    source = """
+        learnable(W) :: reach(X, Y) :- reach(X, Z), reach(Z, Y).
+    """
+    config = TrainConfig(max_attempts=1, step_budget_per_attempt=5)
+
+    with pytest.raises(IlpCandidateError, match="No valid candidates"):
+        train_only(
+            source=source,
+            mask_name="W",
+            positives=[("reach", [1, 2])],
+            negatives=[],
+            config=config,
+        )
+
+
+def test_cuda_oom_error_shape_and_context():
+    """CUDA OOM errors should be wrapped as IlpTrainingError with terminal_reason."""
+    from unittest.mock import patch
+
+    config = TrainConfig(
+        step_budget_per_attempt=8,
+        max_attempts=1,
+        seed=0,
+    )
+
+    original_apply = SparseMaskBackend.apply_mask
+
+    def _raise_oom(*_args, **_kwargs):
+        raise RuntimeError("CUDA out of memory while allocating temporary buffer")
+
+    with patch.object(DenseMaskBackend, "apply_mask", _raise_oom), \
+         patch.object(SparseMaskBackend, "apply_mask", _raise_oom):
+        with pytest.raises(IlpTrainingError) as exc:
+            train_only(
+                source=SOURCE,
+                mask_name="W",
+                positives=[("reach", [1, 3])],
+                negatives=[],
+                config=config,
+            )
+
+    assert exc.value.context["terminal_reason"] == "cuda_oom"

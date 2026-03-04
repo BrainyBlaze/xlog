@@ -191,3 +191,24 @@ def test_d2h_gate_with_negatives():
     # No d2h_gate_violation raised
     assert result.converged
     assert "parent" in result.discovered_rule
+
+
+def test_host_transfer_stats_methods_accessible():
+    """host_transfer_stats and reset_host_transfer_stats should be available and reset correctly."""
+    prog = pyxlog.IlpProgramFactory.compile(
+        REACH_SOURCE, device=0, memory_mb=64,
+    )
+    keys = prog.host_transfer_stats().keys()
+    assert set(keys) >= {"dtoh_bytes", "htod_bytes", "dtoh_calls", "htod_calls"}
+
+    prog.evaluate()
+    prog.reset_host_transfer_stats()
+    post_reset = prog.host_transfer_stats()
+    assert post_reset["dtoh_bytes"] == 0
+    assert post_reset["htod_bytes"] == 0
+    assert post_reset["dtoh_calls"] == 0
+    assert post_reset["htod_calls"] == 0
+
+    _ = prog.batch_fact_membership("edge", [[1, 2], [99, 99]])
+    after = prog.host_transfer_stats()
+    assert after["htod_calls"] > 0, "batch_fact_membership should track host transfers"

@@ -6,7 +6,7 @@ Programming engine that learns Datalog rules from positive/negative examples via
 ## Design Goals
 
 1. **Learn rules, not weights** — discover symbolic Datalog clauses (e.g., `reach(X,Y) :- edge(X,Z), edge(Z,Y).`) from data
-2. **GPU-resident hot loop** — no device-to-host transfers in the training step loop (P0 contract)
+2. **GPU-resident hot loop** — no semantic column downloads in the training step loop (P0 contract)
 3. **Sparse by default** — candidate-indexed soft-probs instead of materializing N³ tensors
 4. **Transactional promotion** — learned rules pass gate checks before entering the knowledge base
 
@@ -86,7 +86,7 @@ For the full mathematical treatment, see [`docs/ilp/rfc-tensorized-ilp.md`](../i
 | `pyxlog/ilp/backend.py` | `MaskBackend` protocol, `SparseMaskBackend`, `DenseMaskBackend` |
 | `pyxlog/ilp/temperature.py` | `AdaptiveTempController` — cosine-annealed τ schedule |
 | `pyxlog/ilp/entropy.py` | Entropy regularization helpers |
-| `pyxlog/ilp/holdout.py` | `loo_holdout_f1()` — leave-one-out F1 scoring |
+| `pyxlog/ilp/holdout.py` | `holdout_f1_and_variance()` — LOO (`<=20`) and k-fold (`>20`) F1 scoring |
 | `pyxlog/ilp/types.py` | `TrainConfig`, `TrainResult`, `PromotionResult`, `LearnedArtifact`, etc. |
 | `pyxlog/ilp/exceptions.py` | `IlpConfigError`, `IlpCandidateError`, `IlpTrainingError` |
 
@@ -152,6 +152,7 @@ W (N×N×N logits) → Gumbel-Softmax(τ) → 3D soft mask
    - Backward pass: `loss.backward()` through PyTorch autograd
    - Optimizer step on W
    - Temperature anneal: τ_start → τ_floor (cosine schedule)
+   - Optional deterministic controls (`deterministic=True`) for reproducible attempt seeding
    - Early stopping: when argmax is stable and loss < threshold
 4. **Decode** — `argmax(W)` maps to winning candidate → discovered rule string
 
@@ -165,7 +166,8 @@ W (N×N×N logits) → Gumbel-Softmax(τ) → 3D soft mask
    - **Novel-rate gate** — fraction of non-example derivations ≤ `max_novel_rate`
    - **Protected-relation gate** — no unwanted relation side-effects
    - **Holdout F1 gate** — F1 on held-out examples ≥ threshold
-   - **Ambiguity gate** — leave-one-out scan detects no alternative winning candidates
+   - **Ambiguity gate** — top-M scan (or exhaustive mode) detects no alternative winning candidates
+   - **Typed-schema gate** — optional hard gate requiring relation type metadata (or waiver-driven manual review)
 5. All pass → `PromotionStatus.PROMOTED` with `committed_source`
 
 ## Artifact Persistence
@@ -186,13 +188,16 @@ The training step loop obeys XLOG's P0 GPU-resident contract:
 
 - `evaluate_device()` — no host reads for semantic results
 - `batch_fact_membership()` / `batch_tagged_credit()` — GPU-side fact queries
-- `AtomicU64` D2H counter on `CudaKernelProvider` — hard gate raises if counter > 0 during step loop
-- Mask byte D2H (O(20 bytes) for sparse paths) is accepted as control-plane overhead
+- `AtomicU64` D2H counter on `CudaKernelProvider` — hard gate raises if `download_column_*` is observed during step loop
+- `host_transfer_stats()` / `reset_host_transfer_stats()` expose broader host transfer accounting for profiling
+- Mask/control-plane D2H (small, e.g. sparse soft-prob imports) is accepted outside the semantic data plane
 
 ## Testing
 
-- **86 static test functions** across 18 Python test files → **124 parametrized** by pytest
+- **86+ static test functions** across ILP Python test files (expanded by parametrized GA/beta gates)
 - **Reliability gate**: 20 consecutive `train_only()` runs must all converge (20/20 pass)
+- **GA reliability gate**: default 50-seed statistical run (`test_ilp_ga_reliability.py`)
+- **GA performance/transfer tests**: `forward_p95_us` + host transfer accounting (`test_ilp_performance.py`)
 - **Dense/sparse parity**: every sparse-path test has a `debug_dense_mask=True` variant
 - Rust-side: `ilp_integration_tests.rs`, `ilp_kernel_tests.rs`
 - CUDA certification: `extract_nonzero_indices` covered by kernel test suite

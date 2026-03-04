@@ -33,9 +33,13 @@ class MaskBackend(Protocol):
         budget: int,
         candidates: list[dict],
         n: int,
-        allow_recursive: bool = False,  # TODO(task-8): forward to set_rule_mask_sparse
-    ) -> torch.Tensor:
-        """Apply mask to program. Returns candidate_soft_probs shape (C,)."""
+        allow_recursive: bool = False,
+    ) -> tuple[torch.Tensor, list[int]]:
+        """Apply mask to program.
+
+        Returns:
+            candidate_soft_probs: Tensor of shape (C,) and selected hard candidate IDs.
+        """
         ...
 
     def decode_argmax(self, W: torch.Tensor, candidates: list[dict], n: int) -> int:
@@ -55,10 +59,33 @@ class DenseMaskBackend:
     ):
         M_soft = F.gumbel_softmax(W, tau=tau, hard=False, dim=-1)
         flat = M_soft.view(-1)
-        k = min(budget, flat.numel())
-        _, topk_idx = flat.topk(k)
+        # Restrict hard-mask activation to valid candidate cells only.
+        # This keeps dense fallback semantically aligned with valid_candidates().
+        candidate_flat_indices = [
+            int(c["i"]) * n * n + int(c["j"]) * n + int(c["k"])
+            for c in candidates
+        ]
+
+        if candidate_flat_indices:
+            candidate_flat_indices_tensor = torch.tensor(
+                candidate_flat_indices, device=flat.device, dtype=torch.long,
+            )
+            candidate_scores = flat[candidate_flat_indices_tensor]
+            k = min(budget, candidate_scores.numel())
+            if k > 0:
+                _, topk_rel_idx = candidate_scores.topk(k)
+                topk_idx = candidate_flat_indices_tensor[topk_rel_idx]
+                selected_hard = topk_rel_idx.detach().cpu().tolist()
+            else:
+                topk_idx = torch.empty(0, dtype=torch.long, device=flat.device)
+                selected_hard = []
+        else:
+            topk_idx = torch.empty(0, dtype=torch.long, device=flat.device)
+            selected_hard = []
+
         M_hard_flat = torch.zeros_like(flat)
-        M_hard_flat[topk_idx] = 1.0
+        if topk_idx.numel() > 0:
+            M_hard_flat[topk_idx] = 1.0
         M_hard = M_hard_flat.view_as(M_soft)
 
         prog.set_rule_mask(
@@ -72,19 +99,17 @@ class DenseMaskBackend:
         cand_probs = torch.stack(
             [M_soft[c["i"], c["j"], c["k"]] for c in candidates]
         )
-        return cand_probs
+        selected_hard.sort()
+        return cand_probs, selected_hard
 
     def decode_argmax(self, W, candidates, n):
+        if not candidates:
+            return 0
         with torch.no_grad():
-            flat = W.view(-1)
-            idx = flat.argmax().item()
-            i = idx // (n * n)
-            j = (idx % (n * n)) // n
-            k = idx % n
-        for ci, c in enumerate(candidates):
-            if c["i"] == i and c["j"] == j and c["k"] == k:
-                return ci
-        return 0
+            candidate_vals = torch.stack(
+                [W[c["i"], c["j"], c["k"]] for c in candidates]
+            )
+            return int(candidate_vals.argmax().item())
 
 
 class SparseMaskBackend:
@@ -94,8 +119,9 @@ class SparseMaskBackend:
     This gives a smaller, more focused parameter space that converges
     faster on the correct candidate.
 
-    Internally materializes the candidate probs into the dense N^3 mask
-    format via set_rule_mask for store-state-independent evaluation.
+    Passes DLPack-wrapped soft-probs directly to Rust via
+    set_rule_mask_sparse — no Python-side N^3 materialization.
+    Rust owns top-k ranking and sparse mask construction.
     """
 
     def init_weights(self, C: int, n: int, device: str) -> torch.Tensor:
@@ -105,44 +131,58 @@ class SparseMaskBackend:
         self, prog, mask_name, W, tau, budget, candidates, n,
         allow_recursive=False,
     ):
+        C = len(candidates)
+
         # Gumbel-softmax over C-dimensional logits
         cand_probs = F.gumbel_softmax(W, tau=tau, hard=False, dim=0)
 
-        # Materialize into dense N^3 format for set_rule_mask.
-        # TODO(RC): switch to prog.set_rule_mask_sparse() once store-state
-        # validation issue is resolved — eliminates Python-side N^3 tensor.
-        M_soft = torch.zeros((n, n, n), device=W.device)
-        for ci, c in enumerate(candidates):
-            M_soft[c["i"], c["j"], c["k"]] = cand_probs[ci]
+        # Rust validates candidate count against current store state.
+        # After evaluate(), derived relations may gain tuples, changing
+        # the expected count.  Re-query the live set and pad with zeros
+        # for any new candidates that appeared since compile time.
+        live_cands = prog.valid_candidates(mask_name, allow_recursive)
+        C_live = len(live_cands)
 
-        # Top-k hard mask over C candidates (not N^3 cells).
-        #
-        # Key insight: in the dense backend, topk(budget) selects budget cells
-        # out of N^3 total, so only a fraction of the C valid candidate positions
-        # end up active (typically 2-5 for budget=32, N=6). In the sparse backend,
-        # ALL C cells are non-zero after materialization, so topk(budget) with
-        # budget >= C would activate ALL candidates -- leaking distractor rules
-        # into the hard mask and causing Gate 2 to fail.
-        #
-        # Fix: cap the hard mask at half of C (matching the ~15% activation
-        # ratio of the dense backend) while ensuring at least 1 candidate.
-        C = len(candidates)
-        k = max(1, min(budget, C) // 2)
-        _, topk_idx = cand_probs.topk(k)
-        # Build hard mask: only activate top-k candidates in the N^3 tensor
-        M_hard = torch.zeros((n, n, n), device=W.device)
-        for idx in topk_idx:
-            c = candidates[idx]
-            M_hard[c["i"], c["j"], c["k"]] = 1.0
+        # Build (i,j,k) -> original index lookup
+        orig_ijk = {
+            (c["i"], c["j"], c["k"]): idx for idx, c in enumerate(candidates)
+        }
+        live_to_orig: list[int | None] = []
+        for lc in live_cands:
+            key = (lc["i"], lc["j"], lc["k"])
+            live_to_orig.append(orig_ijk.get(key))
 
-        prog.set_rule_mask(
-            mask_name,
-            M_hard.detach().contiguous().view(-1),
-            M_soft.detach().contiguous().view(-1),
-            n,
+        if C_live == C:
+            soft = cand_probs.detach().contiguous().double()
+        else:
+            soft = torch.zeros(C_live, device=W.device, dtype=torch.float64)
+            for li, lc in enumerate(live_cands):
+                key = (lc["i"], lc["j"], lc["k"])
+                if key in orig_ijk:
+                    soft[li] = cand_probs[orig_ijk[key]].detach().double()
+
+        effective_budget = min(budget, soft.numel())
+
+        candidate_ids = list(range(C_live))
+        prog.set_rule_mask_sparse(
+            mask_name, candidate_ids, soft.contiguous(), effective_budget,
+            allow_recursive,
         )
+        selected = torch.topk(
+            soft,
+            k=min(effective_budget, soft.numel()),
+            largest=True,
+            sorted=True,
+        ).indices
+        selected_hard = []
+        for i in selected.detach().cpu().tolist():
+            idx = int(i)
+            orig_idx = live_to_orig[idx] if 0 <= idx < len(live_to_orig) else None
+            if orig_idx is not None:
+                selected_hard.append(orig_idx)
 
-        return cand_probs
+        selected_hard.sort()
+        return cand_probs, selected_hard
 
     def decode_argmax(self, W, candidates, n):
         with torch.no_grad():

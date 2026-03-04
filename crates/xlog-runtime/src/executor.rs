@@ -3,6 +3,7 @@
 //! The executor interprets RIR (Relational IR) nodes using the CUDA kernel provider
 //! to execute GPU-accelerated relational operations.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -16,7 +17,9 @@ use xlog_ir::{
 };
 use xlog_stats::{StatsManager, StatsSnapshot};
 
-use crate::ilp_registry::{read_device_row_count, IlpRegistry, IlpTagEntry, IlpTaggedResult};
+use crate::ilp_registry::{
+    read_device_row_count, IlpMask, IlpRegistry, IlpTagEntry, IlpTaggedResult,
+};
 use crate::profiler::{ExecutionStats, Profiler};
 use crate::RelationStore;
 
@@ -2757,31 +2760,49 @@ impl Executor {
         let ilp_mask = match self.ilp_registry.get_mask(mask_name) {
             Some(mask) => mask,
             None => {
-                self.ilp_last_result = Some(IlpTaggedResult { entries: Vec::new() });
+                self.ilp_last_result = Some(IlpTaggedResult {
+                    entries: Vec::new(),
+                });
                 // RD-37: Fail hard if head relation missing from store.
-                let schema = self.store.get(head_rel_name)
+                let schema = self
+                    .store
+                    .get(head_rel_name)
                     .map(|buf| buf.schema().clone())
-                    .ok_or_else(|| XlogError::Execution(format!(
-                        "TensorMaskedJoin: head relation '{}' not found in store \
-                         (was load_facts_into_store called?)", head_rel_name
-                    )))?;
+                    .ok_or_else(|| {
+                        XlogError::Execution(format!(
+                            "TensorMaskedJoin: head relation '{}' not found in store \
+                         (was load_facts_into_store called?)",
+                            head_rel_name
+                        ))
+                    })?;
                 return self.provider.create_empty_buffer(schema);
             }
         };
 
         let start = self.profiler.start_op();
 
-        // 2. Extract active (i,j,k) indices via GPU kernel
-        let active_rules = self.provider.extract_active_rule_indices(
-            &ilp_mask.hard, &ilp_mask.soft,
-            schema_size, max_active_rules,
-        )?;
+        // 2. Extract active (i,j,k) indices: sparse path skips GPU kernel entirely
+        let active_rules: Cow<'_, [(u32, u32, u32)]> = match ilp_mask {
+            IlpMask::Dense { hard, soft, .. } => {
+                Cow::Owned(self.provider.extract_active_rule_indices(
+                    hard,
+                    soft,
+                    schema_size,
+                    max_active_rules,
+                )?)
+            }
+            IlpMask::Sparse { active_entries, .. } => {
+                let limit = max_active_rules.min(active_entries.len());
+                Cow::Borrowed(&active_entries[..limit])
+            }
+        };
+        let active_rule_count = active_rules.len() as u64;
 
         // 3. Phase 1: Dispatch hash joins, collect results into tag_entries
         //    (retaining per-entry buffers for batch credit queries)
         let mut tag_entries: Vec<IlpTagEntry> = Vec::new();
 
-        for &(i, j, k) in &active_rules {
+        for &(i, j, k) in active_rules.iter() {
             let (_, left_name) = &rel_index[i as usize];
             let (_, right_name) = &rel_index[j as usize];
 
@@ -2807,15 +2828,18 @@ impl Executor {
             }
 
             let joined = self.provider.hash_join_v2(
-                left_buf, right_buf,
-                left_keys, right_keys,
+                left_buf,
+                right_buf,
+                left_keys,
+                right_keys,
                 CudaJoinType::Inner,
             )?;
 
             // Project join result to head schema columns if projection is specified.
             // The join produces [left_cols..., right_cols...] but the head may only
             // need a subset (e.g. reach(X,Y) from b1(X,Z) join b2(Z,Y) needs cols 0,3).
-            let projected = if !head_projection.is_empty() && head_projection.len() < joined.arity() {
+            let projected = if !head_projection.is_empty() && head_projection.len() < joined.arity()
+            {
                 let proj_exprs: Vec<ProjectExpr> = head_projection
                     .iter()
                     .map(|&col| ProjectExpr::Column(col))
@@ -2829,9 +2853,16 @@ impl Executor {
             let num_rows = read_device_row_count(&self.provider, &projected)? as u32;
 
             if num_rows > 0 {
-                tag_entries.push(IlpTagEntry { i, j, k, num_rows, buffer: Some(projected) });
+                tag_entries.push(IlpTagEntry {
+                    i,
+                    j,
+                    k,
+                    num_rows,
+                    buffer: Some(projected),
+                });
             }
         }
+        drop(active_rules);
 
         // 4. Phase 2: Union results by k, borrowing buffers from tag_entries
         let mut bufs_by_k: HashMap<u32, Vec<&CudaBuffer>> = HashMap::new();
@@ -2847,7 +2878,9 @@ impl Executor {
             // Chain-union all buffers (union_gpu takes &CudaBuffer refs)
             let union_buf = if buffers.len() == 1 {
                 // Single buffer: union with an empty buffer to produce a copy
-                let empty = self.provider.create_empty_buffer(buffers[0].schema().clone())?;
+                let empty = self
+                    .provider
+                    .create_empty_buffer(buffers[0].schema().clone())?;
                 self.provider.union_gpu(buffers[0], &empty)?
             } else {
                 let mut acc = self.provider.union_gpu(buffers[0], buffers[1])?;
@@ -2872,22 +2905,28 @@ impl Executor {
         }
 
         // 5. Phase 3: Store tag entries (with retained buffers)
-        self.ilp_last_result = Some(IlpTaggedResult { entries: tag_entries });
+        self.ilp_last_result = Some(IlpTaggedResult {
+            entries: tag_entries,
+        });
 
         if let Some(start) = start {
             let mem = self.provider.memory().allocated_bytes();
-            self.profiler.record_op(
-                "TensorMaskedJoin", 0, active_rules.len() as u64, start, mem,
-            );
+            self.profiler
+                .record_op("TensorMaskedJoin", 0, active_rule_count, start, mem);
         }
 
         // Return empty with head schema (results routed via store).
-        let schema = self.store.get(head_rel_name)
+        let schema = self
+            .store
+            .get(head_rel_name)
             .map(|buf| buf.schema().clone())
-            .ok_or_else(|| XlogError::Execution(format!(
-                "TensorMaskedJoin: head relation '{}' not found in store \
-                 (was load_facts_into_store called?)", head_rel_name
-            )))?;
+            .ok_or_else(|| {
+                XlogError::Execution(format!(
+                    "TensorMaskedJoin: head relation '{}' not found in store \
+                 (was load_facts_into_store called?)",
+                    head_rel_name
+                ))
+            })?;
         self.provider.create_empty_buffer(schema)
     }
 
@@ -2959,12 +2998,16 @@ impl Executor {
     }
 
     fn buffer_row_count(&self, buffer: &CudaBuffer) -> Result<u32> {
+        if let Some(n) = buffer.cached_row_count() {
+            return Ok(n);
+        }
         let mut host_rows = [0u32];
         self.provider
             .device()
             .inner()
             .dtoh_sync_copy_into(buffer.num_rows_device(), &mut host_rows)
             .map_err(|e| XlogError::Execution(format!("Failed to read row count: {}", e)))?;
+        buffer.set_cached_row_count_if_unset(host_rows[0]);
         Ok(host_rows[0])
     }
 }
@@ -3033,6 +3076,9 @@ mod tests {
     }
 
     fn buffer_row_count(executor: &Executor, buffer: &CudaBuffer) -> u32 {
+        if let Some(n) = buffer.cached_row_count() {
+            return n;
+        }
         let mut host_rows = [0u32];
         executor
             .provider
@@ -3040,6 +3086,7 @@ mod tests {
             .inner()
             .dtoh_sync_copy_into(buffer.num_rows_device(), &mut host_rows)
             .expect("dtoh row count");
+        buffer.set_cached_row_count_if_unset(host_rows[0]);
         host_rows[0]
     }
 

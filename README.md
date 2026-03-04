@@ -6,8 +6,8 @@
 
 > **Release status:** Latest tagged release is `v0.3.2`. The `main` branch is ahead of `v0.3.2` and contains
 > unreleased work: GPU-native knowledge compilation, GPU CDCL verifier + cache, neural-symbolic training APIs,
-> and a **dILP beta trainer** (sparse mask API, promotion pipeline, artifact persistence, 20/20 reliability gate).
-> The `v0.4.0-alpha` milestone is **achieved**; dILP beta is **achieved**.
+> and a **dILP beta trainer** (sparse mask API, promotion pipeline, artifact persistence, reliability gates).
+> The `v0.4.0-alpha` milestone is **achieved**; dILP beta is **achieved**; GA hardening is in progress.
 > See `docs/ROADMAP.md` and `docs/VALIDATION_REPORT.md`.
 
 **XLOG** is a GPU-accelerated Datalog query engine with neural-symbolic integration. It compiles declarative logic programs into optimized relational plans and executes them on NVIDIA GPUs, achieving high throughput for recursive queries, graph analytics, probabilistic inference, and neural-symbolic training.
@@ -27,7 +27,7 @@
 | **Float Predicates** | IEEE 754 total ordering for `f32`/`f64` (`NaN > Inf > nums > +0 > -0 > -Inf`) |
 | **Probabilistic** | Exact inference (knowledge compilation), Monte Carlo sampling, negation (stratified + WFS) |
 | **Neural-Symbolic** | Neural predicates (`nn/4`), PyTorch integration, differentiable training, circuit caching |
-| **dILP Training** | Differentiable ILP: sparse GPU mask, multi-start optimizer, promotion gates, artifact save/load |
+| **dILP Training** | Differentiable ILP: sparse GPU mask, deterministic mode, promotion gates, holdout validation, artifact save/load |
 | **Interop** | Arrow IPC, DLPack (zero-copy), Python bindings, PyTorch autograd |
 | **Profiling** | `--stats` flag for per-stratum/per-operation timing, memory tracking |
 
@@ -375,7 +375,11 @@ if result.converged:
 ```python
 from pyxlog.ilp import train_and_promote, TrainConfig
 
-config = TrainConfig(check_ambiguity=True, max_novel_rate=0.05)
+config = TrainConfig(
+    check_ambiguity=True,
+    holdout_threshold=0.95,
+    typed_schema_required=True,
+)
 promotion = train_and_promote(source, "W", pos, neg, config)
 
 print(f"Status: {promotion.status}")
@@ -385,9 +389,12 @@ for gate in promotion.gates:
 
 ### Key Features
 
-- **Sparse GPU mask**: Candidate soft-probs sent to Rust; executor mask built on device with zero host transfers
+- **Sparse GPU mask**: Candidate soft-probs sent via `set_rule_mask_sparse`; no Python-side N³ mask materialization
+- **Deterministic mode**: Seeded training path with reproducible candidate ranking and persisted `selected_hard`
 - **Multi-start optimizer**: Adaptive temperature, entropy regularization, plateau detection
-- **Promotion gates**: Convergence, novel rate, protected relations, holdout F1, ambiguity scan
+- **Promotion gates**: Convergence, novel rate audit, regression check, holdout F1 threshold, ambiguity scan, typed schema gate
+- **Holdout strategies**: LOO for small sets (`<=20` positives), k-fold for larger sets
+- **Telemetry**: `forward_p95_us`, allocation summaries, and host-transfer accounting (`host_transfer_stats`)
 - **Artifact persistence**: JSON save/load with SHA-256 hash verification
 - **Recursive candidates**: Optional body-references-head rules via `allow_recursive_candidates=True`
 
@@ -595,6 +602,9 @@ The legacy CPU D4 vendor pipeline is removed.
 | [Neural Examples](examples/neural/) | Neural-symbolic training examples |
 | [dILP Beta Design](docs/plans/2026-02-26-dilp-hardening-design.md) | dILP trainer hardening design |
 | [dILP Beta Plan](docs/plans/2026-02-26-dilp-beta-impl.md) | dILP beta implementation plan (9 tasks) |
+| [dILP Architecture](docs/architecture/dilp-training.md) | Runtime/trainer architecture and GPU hot-loop contract |
+| [GPU Hot-loop Transfer Elimination](docs/plans/2026-03-01-gpu-hotloop-transfer-elimination.md) | Transfer-reduction design |
+| [Sparse Executor Transfer Fix](docs/plans/2026-03-01-sparse-executor-transfer-fix.md) | Sparse-mask executor alignment and implementation |
 | [v0.3.2 Showcase](examples/xlog/80-v032-showcase/) | Production-grade multi-module examples |
 | [CUDA Certification](docs/architecture/cuda-certification.md) | Certification suite coverage (current HEAD) |
 

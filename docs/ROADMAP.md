@@ -1,11 +1,11 @@
 # XLOG Development Roadmap
 
-> **Last Updated:** March 1, 2026
+> **Last Updated:** March 4, 2026
 > **Current Version:** v0.3.2 (Released)
-> **Current Milestone:** v0.4.0-alpha (Neural-symbolic achieved), dILP beta (ILP trainer achieved)
+> **Current Milestone:** v0.4.0-alpha (Neural-symbolic achieved), dILP beta (ILP trainer achieved), dILP GA hardening (in progress)
 > **Status:** `main` is ahead of `v0.3.2`: GPU-native exact path (GPU D4 + GPU CDCL verifier + cache),
 > neural-symbolic training APIs, and dILP beta trainer (sparse mask, promotion pipeline, artifact persistence,
-> 20/20 reliability gate) all exist in code.
+> reliability gates) all exist in code.
 
 ---
 
@@ -421,12 +421,13 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 **Training Pipeline:**
 - [x] `train_only()` — multi-start training with adaptive temperature, entropy regularization, plateau detection
 - [x] `train_and_promote()` — wraps `train_only()` + trial compilation + promotion gates → `PromotionResult`
-- [x] 5 promotion gates: convergence, novel rate, protected relations, holdout F1, ambiguity scan
+- [x] Promotion gates: convergence, novel rate audit, regression check, holdout F1, ambiguity scan, typed schema
 - [x] Transactional commit: trial program compiled with discovered rule before promotion
 
 **Holdout Scoring + Ambiguity:**
 - [x] LOO (leave-one-out) holdout F1 for ≤20 examples
-- [x] Per-fold precision/recall with configurable `holdout_strategy`
+- [x] k-fold holdout scoring for larger example sets (`holdout_strategy`, `holdout_folds`)
+- [x] Per-fold precision/recall with deterministic fold assignment (`seed`)
 - [x] Top-M ambiguity scan for alternative rules (`check_ambiguity`, `exhaustive_ambiguity`)
 
 **Hard-Negative Mining:**
@@ -446,6 +447,16 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 - [x] Beta gate: 4 stages (reach, grandparent, colleague, plus2) x 5 seeds = 20/20
 - [x] Zero D2H column transfers in training step loop (hard gate verified)
 
+**GA Hardening (current on `main`):**
+- [x] Deterministic mode in trainer (`TrainConfig.deterministic`) with reproducible per-attempt seeding
+- [x] `selected_hard` persisted in `LearnedArtifact` for deterministic auditability
+- [x] Promotion holdout threshold gate (`holdout_threshold`, default 0.95)
+- [x] Typed-schema gate with waiver-based manual-review fallback (`typed_schema_required`, `waiver_untyped`)
+- [x] Host transfer telemetry via `host_transfer_stats()` / `reset_host_transfer_stats()`
+- [x] `forward_p95_us` telemetry in `TrainResult.artifact.telemetry.step_timings`
+- [x] GA reliability statistical gate test (`test_ilp_ga_reliability.py`, default 50 seeds)
+- [x] GA performance/transfer accounting test (`test_ilp_performance.py`)
+
 **Design document:** `docs/plans/2026-02-26-dilp-hardening-design.md`
 **Implementation plan:** `docs/plans/2026-02-26-dilp-beta-impl.md`
 
@@ -455,6 +466,8 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 - [ ] Full GPU-resident loss computation (v0.5.0)
 - [ ] Config restoration from saved artifact JSON
 - [ ] Telemetry persistence in artifact (optional, size-bounded)
+- [ ] Full CI-grade 50-seed GA reliability runtime budget optimization
+- [ ] Full SLO benchmark harness for N=20/50/100/150 (beyond smoke tests)
 
 ---
 
@@ -543,7 +556,7 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 
 - [x] `pyxlog.ilp.train_only()` — multi-start dILP training with sparse GPU mask
 - [x] `pyxlog.ilp.train_and_promote()` — training + trial compilation + promotion gates
-- [x] `TrainConfig` — 31-field frozen config (temperature, budget, holdout, recursion, etc.)
+- [x] `TrainConfig` — expanded frozen config (temperature, budget, holdout, recursion, determinism, typed-schema gates)
 - [x] `TrainResult` — convergence, metrics, discovered rule, artifact
 - [x] `PromotionResult` — gate results, novel count/rate, committed source
 - [x] `LearnedArtifact` — save/load with JSON + SHA-256 hash verification
@@ -623,6 +636,8 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 - [x] Property-based testing for kernel correctness (proptest: sort stability, join correctness, filter idempotence, dedup determinism)
 - [x] Float predicate edge case tests (NaN, Infinity, subnormals, signed zeros)
 - [x] dILP beta test suite: 86 static test functions (124 parametrized), 20/20 reliability gate
+- [x] dILP GA reliability gate test (`test_ilp_ga_reliability.py`, 50-seed statistical check)
+- [x] dILP performance/transfer telemetry smoke tests (`test_ilp_performance.py`)
 
 ### Planned 📋
 
@@ -659,12 +674,13 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 |---------|--------|--------------|
 | v0.4.0-alpha (main) | Achieved | GPU-native exact path (GPU D4 + GPU CDCL verifier + cache), device-only MC counts, Arrow C Device export, neural-symbolic training APIs |
 | dILP beta (main) | Achieved | Sparse mask API, trainer backend abstraction, promotion pipeline, holdout F1, hard-negative mining, artifact persistence, recursive candidates, 20/20 reliability |
+| dILP GA hardening (main) | In progress | Deterministic mode, holdout threshold gate, typed-schema gate, host transfer telemetry, GA reliability/performance suites |
 | v0.1.0 | Released | Deterministic Datalog, GPU joins/aggregations, basic CLI |
 | v0.2.0 | Released | Probabilistic reasoning (exact + MC), Python bindings, GPU-resident execution |
 | v0.3.1 | Released | Float predicates (IEEE 754 total ordering), benchmarks, `--stats` flag, fuzz testing, property-based testing |
 | v0.3.2 | Released | Module system, UDFs, reversible symbols, showcase examples, count→u64 fix |
 | v0.4.0-alpha | Implemented | Neural predicates (`nn/4`) + training milestone (release-gated on full example validation with real datasets) |
-| v0.4.0-beta | In progress | dILP beta trainer (achieved); term embeddings, extended neural-symbolic training controls (planned) |
+| v0.4.0-beta | In progress | dILP beta trainer (achieved) + GA hardening workstream in progress; term embeddings and extended neural-symbolic controls planned |
 | v0.4.0-rc | Planned | Lists, meta-predicates, semantic loss functions |
 | v0.4.0 | Planned | Full neural-symbolic feature set, production-ready training |
 | v0.5.0 | Planned | GPU-native knowledge compilation (GPU D4 + GPU CDCL verifier), zero data-plane host transfers |
