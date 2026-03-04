@@ -1,9 +1,11 @@
 """Tests for set_rule_mask_sparse() dense-parity behavior."""
 
 import pytest
+import unittest.mock as mock
 
 torch = pytest.importorskip("torch")
 pyxlog = pytest.importorskip("pyxlog")
+import pyxlog.ilp.backend as backend_mod
 
 from conftest import skip_unless_pyxlog_cuda
 
@@ -109,3 +111,94 @@ def test_sparse_top_k_deterministic_tiebreak():
     if tags:
         i, j, k, _ = tags[0]
         assert (i, j, k) == (cands[0]["i"], cands[0]["j"], cands[0]["k"])
+
+
+def test_sparse_backend_respects_max_active_rules_budget():
+    """Sparse backend should pass budget unchanged to set_rule_mask_sparse."""
+    class _ProgCapture:
+        def __init__(self, candidates):
+            self.candidates = candidates
+            self.captured_budget = None
+
+        def valid_candidates(self, _mask_name, _allow_recursive):
+            return self.candidates
+
+        def set_rule_mask_sparse(self, _mask_name, candidate_ids, soft_probs, budget, _allow_recursive):
+            self.captured_budget = budget
+            # Keep Python-side behavior deterministic for apply_mask return path.
+            return None
+
+        def reset_d2h_transfer_count(self):
+            return None
+
+    candidates = [
+        {"id": 0, "i": 0, "j": 1, "k": 1, "left_name": "edge", "right_name": "edge", "head_name": "reach"},
+        {"id": 1, "i": 1, "j": 2, "k": 1, "left_name": "edge", "right_name": "edge", "head_name": "reach"},
+        {"id": 2, "i": 2, "j": 3, "k": 1, "left_name": "edge", "right_name": "edge", "head_name": "reach"},
+    ]
+    prog = _ProgCapture(candidates)
+    backend = backend_mod.SparseMaskBackend()
+    W = torch.randn(len(candidates), device="cpu")
+
+    backend.apply_mask(
+        prog=prog,
+        mask_name="W",
+        W=W,
+        tau=1.0,
+        budget=2,
+        candidates=candidates,
+        n=4,
+        allow_recursive=False,
+    )
+
+    assert prog.captured_budget == 2
+
+
+def test_sparse_selected_hard_maps_live_indices_back_to_original():
+    """selected_hard should use artifact candidate indices, not live candidate indices."""
+    class _ProgCapture:
+        def __init__(self, candidates):
+            self.candidates = candidates
+
+        def valid_candidates(self, _mask_name, _allow_recursive):
+            return self.candidates
+
+        def set_rule_mask_sparse(self, mask_name, candidate_ids, soft_probs, budget, allow_recursive):
+            assert mask_name == "W"
+            assert candidate_ids == list(range(len(self.candidates)))
+            assert budget == 2
+            return None
+
+        def reset_d2h_transfer_count(self):
+            return None
+
+    original = [
+        {"id": 0, "i": 0, "j": 1, "k": 1, "left_name": "edge", "right_name": "edge", "head_name": "reach"},
+        {"id": 1, "i": 1, "j": 2, "k": 1, "left_name": "edge", "right_name": "edge", "head_name": "reach"},
+    ]
+    # Simulate live candidates growing with one extra candidate that has no match.
+    live = [
+        {"id": 0, "i": 9, "j": 9, "k": 1, "left_name": "edge", "right_name": "edge", "head_name": "reach"},
+        original[0],
+        original[1],
+    ]
+
+    prog = _ProgCapture(live)
+    backend = backend_mod.SparseMaskBackend()
+
+    def _det_softmax(logits, tau, hard=False, dim=-1):
+        return torch.tensor([0.1, 0.8, 0.2], device=logits.device, dtype=logits.dtype, requires_grad=True)
+
+    with mock.patch("pyxlog.ilp.backend.F.gumbel_softmax", _det_softmax):
+        _, selected = backend.apply_mask(
+            prog=prog,
+            mask_name="W",
+            W=torch.tensor([1.0, 2.0], device="cpu", requires_grad=True),
+            tau=1.0,
+            budget=2,
+            candidates=original,
+            n=4,
+            allow_recursive=False,
+        )
+
+    assert selected == [0, 1], f"selected_hard was not mapped to original indices: {selected}"

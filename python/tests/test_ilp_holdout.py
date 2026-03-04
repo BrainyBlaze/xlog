@@ -8,8 +8,26 @@ pyxlog = pytest.importorskip("pyxlog")
 from conftest import skip_unless_pyxlog_cuda
 skip_unless_pyxlog_cuda()
 
-from pyxlog.ilp import train_and_promote, TrainConfig, PromotionResult, PromotionStatus
-from pyxlog.ilp.holdout import loo_holdout_f1
+from pyxlog.ilp import (
+    PromotionResult,
+    PromotionStatus,
+    TrainConfig,
+    train_and_promote,
+    train_only,
+)
+from pyxlog.ilp.holdout import holdout_f1_and_variance, loo_holdout_f1
+
+
+LARGE_SOURCE = """
+    edge(1, 2). edge(2, 3). edge(3, 4). edge(4, 5). edge(5, 6).
+    edge(6, 7). edge(7, 8). edge(8, 9). edge(9, 10). edge(10, 11).
+    edge(11, 12). edge(12, 13). edge(13, 14). edge(14, 15). edge(15, 16).
+    edge(16, 17). edge(17, 18). edge(18, 19). edge(19, 20). edge(20, 21).
+    edge(21, 22). edge(22, 23). edge(23, 24). edge(24, 25). edge(25, 26).
+    learnable(W_reach_large) :: reach(X, Y) :- bL(X, Z), bR(Z, Y).
+"""
+LARGE_POS = [("reach", [i, i + 2]) for i in range(1, 25)]
+LARGE_NEG = []
 
 SOURCE = """
     edge(1, 2). edge(2, 3). edge(3, 4). edge(4, 5). edge(5, 6).
@@ -69,3 +87,48 @@ def test_ambiguity_scan_smoke():
     )
     assert isinstance(result, PromotionResult)
     assert result.ambiguous_alternatives is None or isinstance(result.ambiguous_alternatives, list)
+
+
+def test_kfold_holdout_and_variance():
+    """Large-positive datasets should run k-fold holdout validation."""
+    config = TrainConfig(
+        step_budget_per_attempt=120,
+        max_attempts=4,
+        tau_start=2.0,
+        tau_floor=0.05,
+        deterministic=True,
+        seed=1,
+        holdout_strategy="kfold",
+        holdout_folds=4,
+    )
+    f1, variance = holdout_f1_and_variance(
+        LARGE_SOURCE,
+        "W_reach_large",
+        LARGE_POS,
+        LARGE_NEG,
+        config,
+    )
+    assert f1 is not None
+    assert 0.0 <= f1 <= 1.0
+    assert variance >= 0.0
+
+
+def test_train_only_holdout_variance_in_result():
+    config = TrainConfig(
+        step_budget_per_attempt=120,
+        max_attempts=4,
+        tau_start=2.0,
+        tau_floor=0.05,
+        deterministic=True,
+        seed=1,
+        holdout_strategy="kfold",
+    )
+    result = train_only(
+        LARGE_SOURCE,
+        "W_reach_large",
+        LARGE_POS,
+        LARGE_NEG,
+        config=config,
+    )
+    assert result.holdout_f1 is None or 0.0 <= result.holdout_f1 <= 1.0
+    assert result.holdout_variance >= 0.0

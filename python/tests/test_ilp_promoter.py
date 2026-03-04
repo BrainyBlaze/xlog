@@ -9,8 +9,24 @@ from conftest import skip_unless_pyxlog_cuda
 skip_unless_pyxlog_cuda()
 
 from pyxlog.ilp import (
-    train_and_promote, TrainConfig, PromotionResult, PromotionStatus,
+    CandidateMapEntry,
+    LearnedArtifact,
+    TrainConfig,
+    TrainResult,
+    train_and_promote,
+    PromotionResult,
+    PromotionStatus,
 )
+
+
+class _TrialProgramStub:
+    """Small protocol stub for _typed_schema_gate tests."""
+
+    def __init__(self, annotations):
+        self._annotations = annotations
+
+    def relation_type_annotations(self):
+        return self._annotations
 
 SOURCE = """
     edge(1, 2). edge(2, 3). edge(3, 4). edge(4, 5). edge(5, 6).
@@ -97,3 +113,140 @@ def test_promote_not_converged():
         [("reach", [1, 3])], [], config,
     )
     assert result.status == PromotionStatus.NOT_CONVERGED
+
+
+def test_typed_schema_gate_passes_with_annotations():
+    """typed_schema gate passes when all rule relations expose metadata."""
+    from pyxlog.ilp.promoter import _typed_schema_gate
+
+    artifact = LearnedArtifact(
+        candidate_map=[
+            CandidateMapEntry(
+                id=0,
+                i=0,
+                j=1,
+                k=2,
+                left_name="edge",
+                right_name="edge",
+                head_name="reach",
+            ),
+        ],
+    )
+
+    gate = _typed_schema_gate(
+        trial=_TrialProgramStub([
+            ("edge", ["u32", "u32"]),
+            ("reach", ["u32", "u32"]),
+        ]),
+        discovered_rule="reach(X, Y) :- edge(X, Z), edge(Z, Y).",
+        artifact=artifact,
+        config=TrainConfig(typed_schema_required=True),
+    )
+
+    assert gate.name == "typed_schema"
+    assert gate.passed is True
+
+
+def test_typed_schema_gate_blocks_without_metadata():
+    """typed_schema_required blocks promotion when metadata is unavailable."""
+    from pyxlog.ilp.promoter import _typed_schema_gate
+
+    artifact = LearnedArtifact(
+        candidate_map=[
+            CandidateMapEntry(
+                id=0,
+                i=0,
+                j=1,
+                k=2,
+                left_name="edge",
+                right_name="edge",
+                head_name="reach",
+            ),
+        ],
+    )
+
+    gate = _typed_schema_gate(
+        trial=_TrialProgramStub([]),
+        discovered_rule="reach(X, Y) :- edge(X, Z), edge(Z, Y).",
+        artifact=artifact,
+        config=TrainConfig(typed_schema_required=True),
+    )
+
+    assert gate.name == "typed_schema"
+    assert gate.passed is False
+
+
+def test_typed_schema_gate_allows_manual_review_with_waiver():
+    """waiver_untyped keeps typed gate on manual-review path instead of hard-fail."""
+    from pyxlog.ilp.promoter import _typed_schema_gate
+
+    artifact = LearnedArtifact(
+        candidate_map=[
+            CandidateMapEntry(
+                id=0,
+                i=0,
+                j=1,
+                k=2,
+                left_name="edge",
+                right_name="edge",
+                head_name="reach",
+            ),
+        ],
+    )
+
+    gate = _typed_schema_gate(
+        trial=_TrialProgramStub([]),
+        discovered_rule="reach(X, Y) :- edge(X, Z), edge(Z, Y).",
+        artifact=artifact,
+        config=TrainConfig(waiver_untyped=True),
+    )
+
+    assert gate.name == "typed_schema"
+    assert gate.passed is False
+
+
+def test_holdout_f1_gate_fails_when_unavailable(monkeypatch):
+    """Holdout gate must fail explicitly when holdout_f1 is unavailable."""
+    import pyxlog.ilp.promoter as promoter
+
+    fake_train_result = TrainResult(
+        converged=True,
+        discovered_rule="reach(X, Y) :- edge(X, Z), edge(Z, Y).",
+        attempt_count=1,
+        total_steps=10,
+        precision=1.0,
+        recall=1.0,
+        holdout_f1=None,
+        artifact=LearnedArtifact(
+            candidate_map=[
+                CandidateMapEntry(
+                    id=0,
+                    i=0,
+                    j=0,
+                    k=1,
+                    left_name="edge",
+                    right_name="edge",
+                    head_name="reach",
+                ),
+            ],
+        ),
+    )
+    monkeypatch.setattr(promoter, "train_only", lambda *args, **kwargs: fake_train_result)
+    result = promoter.train_and_promote(
+        source=SOURCE,
+        mask_name="W_reach",
+        positives=POS,
+        negatives=[],
+        config=TrainConfig(
+            step_budget_per_attempt=20,
+            max_attempts=1,
+            seed=7,
+            typed_schema_required=False,
+        ),
+        holdout_positives=[("reach", [1, 3])],
+        holdout_negatives=[],
+    )
+    holdout_gates = [g for g in result.gates if g.name == "holdout_f1"]
+    assert holdout_gates, "holdout_f1 gate not reported"
+    assert holdout_gates[0].passed is False
+    assert result.status == PromotionStatus.MANUAL_REVIEW_REQUIRED
