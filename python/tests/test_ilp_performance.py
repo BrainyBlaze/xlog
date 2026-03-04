@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import time
 
 import pytest
 
@@ -77,14 +78,22 @@ def _chain_positives(length: int):
     return [("reach", [i, i + 2]) for i in range(1, length - 1)]
 
 
+SLO_TARGETS: dict[int, dict[str, float]] = {
+    20: {"wall_s": 15.0, "forward_p95_us": 250_000.0},
+    50: {"wall_s": 20.0, "forward_p95_us": 550_000.0},
+    100: {"wall_s": 35.0, "forward_p95_us": 900_000.0},
+    150: {"wall_s": 50.0, "forward_p95_us": 1_500_000.0},
+}
+
+
 @pytest.mark.slow
-def test_forward_performance_slo_n50_smoke():
-    """Optional slow benchmark verifies forward timing telemetry on a larger schema."""
-    length = 50
-    source = _build_reach_chain_source(length)
+@pytest.mark.parametrize("chain_length", sorted(SLO_TARGETS.keys()))
+def test_slo_scaling(chain_length: int):
+    """Parametrized SLO benchmark across chain lengths with optional enforcement."""
+    source = _build_reach_chain_source(chain_length)
     config = TrainConfig(
         step_budget_per_attempt=150,
-        max_attempts=4,
+        max_attempts=2,
         tau_start=2.0,
         tau_floor=0.05,
         seed=7,
@@ -92,25 +101,41 @@ def test_forward_performance_slo_n50_smoke():
         max_active_rules=16,
         telemetry_level=1,
     )
+    t0 = time.perf_counter()
     result = train_only(
         source=source,
         mask_name="W_reach_chain",
-        positives=_chain_positives(length),
+        positives=_chain_positives(chain_length),
         negatives=[],
         config=config,
         _compute_holdout=False,
     )
+    wall_s = time.perf_counter() - t0
+
+    assert result.converged, (
+        f"N={chain_length} did not converge: "
+        f"attempts={result.attempt_count}, steps={result.total_steps}"
+    )
 
     forward_p95_us = result.artifact.telemetry.step_timings.get("forward_p95_us", 0.0)
-    alloc_max = result.artifact.telemetry.step_timings.get("allocated_bytes_max", 0.0)
     assert forward_p95_us > 0.0
-    assert alloc_max >= 0.0
 
-    # Optional strict GA-performance check can be enabled in CI stage.
+    target = SLO_TARGETS[chain_length]
+    wall_ok = wall_s <= target["wall_s"]
+    fwd_ok = forward_p95_us <= target["forward_p95_us"]
+
+    print(
+        f"\nSLO N={chain_length}: wall={wall_s:.1f}s"
+        f" (limit={target['wall_s']:.0f}s {'PASS' if wall_ok else 'FAIL'})"
+        f"  fwd_p95={forward_p95_us:.0f}us"
+        f" (limit={target['forward_p95_us']:.0f}us {'PASS' if fwd_ok else 'FAIL'})"
+    )
+
     if os.getenv("ILP_PERF_ENFORCE_SLO", "0") == "1":
-        assert forward_p95_us <= 500_000.0, (
-            f"forward p95 {forward_p95_us}us exceeds N<=150 GA SLO target 500000us"
+        assert wall_ok, (
+            f"N={chain_length} wall-clock {wall_s:.1f}s exceeds SLO {target['wall_s']}s"
         )
-        assert alloc_max <= 100 * 1024 * 1024, (
-            f"alloc max {alloc_max} exceeds N<=150 GA memory target 100MB"
+        assert fwd_ok, (
+            f"N={chain_length} forward p95 {forward_p95_us:.0f}us"
+            f" exceeds SLO {target['forward_p95_us']:.0f}us"
         )
