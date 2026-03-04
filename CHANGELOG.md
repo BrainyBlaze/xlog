@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## Unreleased — 2026-03-01
+## Unreleased — 2026-03-04
 
 ### Added
 
@@ -11,8 +11,8 @@ All notable changes to this project are documented in this file.
     the executor mask internally — no N3 tensor materialized, zero host→device transfer for the mask.
   - **Trainer backend abstraction** (`MaskBackend` protocol): `SparseMaskBackend` (default) and `DenseMaskBackend`
     (fallback via `debug_dense_mask=True`). Dense parity verified in tests.
-  - **`train_and_promote()`**: Wraps `train_only()` + trial compilation + 5 promotion gates (convergence, novel rate,
-    protected relations, holdout F1, ambiguity scan) → returns `PromotionResult` with transactional commit.
+  - **`train_and_promote()`**: Wraps `train_only()` + trial compilation + promotion gates (convergence, novel rate,
+    regression check, holdout F1, ambiguity scan, typed schema) → returns `PromotionResult` with transactional commit.
   - **LOO holdout F1 scoring**: Leave-one-out cross-validation for ≤20 examples with per-fold precision/recall.
   - **Ambiguity scan**: Top-M alternative rule detection with configurable `check_ambiguity` / `exhaustive_ambiguity`.
   - **Hard-negative mining** (`sample_false_positives`): Rust-side false positive sampling, wired into trainer every
@@ -23,6 +23,11 @@ All notable changes to this project are documented in this file.
     (behind config flag, default off).
   - **Beta reliability gate**: 4 stages (reach, grandparent, colleague, plus2) x 5 seeds = 20/20 with sparse backend.
   - **AtomicU32 row-count cache** on `CudaBuffer` for GPU-resident row counts without host reads.
+  - **Deterministic training path**: `TrainConfig(deterministic=True)` enables deterministic CUDA/Torch settings and
+    per-attempt seed derivation for reproducible runs.
+  - **`selected_hard` artifact field**: persisted selected candidate IDs with deterministic ordering for sparse/dense parity.
+  - **GA reliability gate test**: `test_ilp_ga_reliability.py` runs 50 seeds x 4 stages with Clopper-Pearson lower-bound check.
+  - **GA performance/transfer test**: `test_ilp_performance.py` validates `forward_p95_us` telemetry and host-transfer accounting.
 
 - **Arrow C Data Interface device export** for `CudaBuffer` record batches (`to_arrow_device_record_batch`) returning
   `ArrowDeviceArrayOwned` handles with CUDA device descriptors and zero host transfers (import exists but is
@@ -61,6 +66,12 @@ All notable changes to this project are documented in this file.
 ### Changed
 
 - dILP trainer defaults to sparse mask backend (`SparseMaskBackend`); dense fallback via `TrainConfig(debug_dense_mask=True)`.
+- dILP holdout strategy now defaults to:
+  - LOO for `<=20` positives
+  - k-fold for `>20` positives (`holdout_strategy`, `holdout_folds` configurable)
+- dILP promotion now enforces configurable holdout threshold (`holdout_threshold`, default `0.95`) and supports
+  typed-schema gate controls (`typed_schema_required`, `waiver_untyped`).
+- PyO3 exposes host transfer counters via `host_transfer_stats()` / `reset_host_transfer_stats()`.
 - `GpuCnf` literal storage field renamed to `literals` (DIMACS `i32`) to match the solver/kernel interface.
 - CUDA-dependent tests now skip cleanly when the CUDA runtime is unavailable (developer ergonomics).
 - Workspace testing avoids building the PyO3 `extension-module` target when running `cargo test --workspace`.
@@ -95,6 +106,13 @@ All notable changes to this project are documented in this file.
 - Workspace tests pass (CUDA-dependent tests skip cleanly when CUDA is unavailable).
 - CUDA certification suite passes (C01-C25 + G01-G08): 206/206.
 - dILP beta reliability gate: 20/20 (4 stages x 5 seeds, sparse backend).
+- Consolidated CUDA Python ILP gate batch (fresh):
+  - `44 passed` (`test_ilp_types`, `test_ilp_trainer`, `test_ilp_promoter`, `test_ilp_holdout`, `test_ilp_robustness`)
+  - `19 passed` (`test_ilp_d2h_gate`, `test_ilp_sparse`)
+  - `20 passed` (`test_ilp_beta_gate`)
+  - `20 passed` (`test_ilp_reliability`)
+  - `3 passed` (`test_ilp_performance`)
+  - `1 passed` (`test_ilp_ga_reliability`, default `GA_RELIABILITY_SEEDS=50`)
 
 ## Neural-Symbolic Integration Milestone (v0.4.0-alpha) — 2026-02-23
 
