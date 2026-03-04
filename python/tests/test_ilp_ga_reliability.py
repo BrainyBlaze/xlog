@@ -30,6 +30,8 @@ def test_ga_reliability_50():
     """Run 50 seeds across the 4-stage showcase and enforce CI lower bound."""
     seed_count = int(os.getenv("GA_RELIABILITY_SEEDS", "50"))
     seed_count = max(1, seed_count)
+    step_budget = int(os.getenv("GA_RELIABILITY_STEP_BUDGET", "150"))
+    max_attempts = int(os.getenv("GA_RELIABILITY_MAX_ATTEMPTS", "7"))
     runs = 0
     success = 0
     failures = []
@@ -43,8 +45,8 @@ def test_ga_reliability_50():
     for seed in range(seed_count):
         for stage_name, source, positives, negatives, mask_name in STAGES:
             config = TrainConfig(
-                step_budget_per_attempt=150,
-                max_attempts=7,
+                step_budget_per_attempt=step_budget,
+                max_attempts=max_attempts,
                 tau_start=2.0,
                 tau_floor=0.05,
                 device=0,
