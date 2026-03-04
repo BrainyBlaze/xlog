@@ -1,0 +1,12 @@
+    Blocking waiting for file lock on artifact directory
+   Compiling xlog-cuda v0.3.2 (/home/dev/projects/xlog/crates/xlog-cuda)
+   Compiling xlog-solve v0.3.2 (/home/dev/projects/xlog/crates/xlog-solve)
+   Compiling xlog-cuda-tests v0.2.0 (/home/dev/projects/xlog/crates/xlog-cuda-tests)
+    Finished `release` profile [optimized] target(s) in 28.19s
+     Running tests/certification_suite.rs (target/release/deps/certification_suite-7ca1800c210b340a)
+
+running 1 test
+test run_full_certification ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

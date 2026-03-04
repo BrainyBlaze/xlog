@@ -1,0 +1,7 @@
+=== Environment ===
+Date: Wed Mar  4 13:51:25 UTC 2026
+Commit: c0de8ffe055038706fc4ec237cbde0a44e3d5900
+Rust: rustc 1.93.0 (254b59607 2026-01-19)
+Python: Python 3.10.12
+CUDA: Build cuda_13.1.r13.1/compiler.37061995_0
+NVIDIA RTX PRO 3000 Blackwell Generation Laptop GPU, 591.59

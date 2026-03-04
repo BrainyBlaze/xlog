@@ -21,7 +21,7 @@ All notable changes to this project are documented in this file.
     SHA-256 candidate map hash verification, schema version `beta-v1`.
   - **Recursive candidates**: `allow_recursive_candidates=True` enables i==k and j==k body-references-head candidates
     (behind config flag, default off).
-  - **Beta reliability gate**: 4 stages (reach, grandparent, colleague, plus2) x 5 seeds = 20/20 with sparse backend.
+  - **Beta reliability gate**: 4 stages (reach, grandparent, colleague, plus2) x 5 seeds = 20/20 with sparse backend. This is the primary beta release gate.
   - **AtomicU32 row-count cache** on `CudaBuffer` for GPU-resident row counts without host reads.
   - **Deterministic training path**: `TrainConfig(deterministic=True)` enables deterministic CUDA/Torch settings and
     per-attempt seed derivation for reproducible runs.
@@ -105,6 +105,7 @@ All notable changes to this project are documented in this file.
 
 - Python batch query path (`batch_fact_membership`, `batch_tagged_credit`) coerces all facts via `as u32`. Typed relation schemas work in core execution but the Python query interface is U32-entity-ID-only for now.
 - `bench.yml` PR-comparison dispatch path is non-operational under manual-only CI (event-gated for `push`/`pull_request`).
+- GA 50-seed statistical reliability gate (`test_ilp_ga_reliability.py`) exceeds 600s timeout; deferred to post-beta runtime budget optimization. Beta gate = 20/20 reliability (Suite 4).
 
 ### Deferred to v0.4.0-rc
 

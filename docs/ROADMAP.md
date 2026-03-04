@@ -681,7 +681,7 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 | v0.3.1 | Released | Float predicates (IEEE 754 total ordering), benchmarks, `--stats` flag, fuzz testing, property-based testing |
 | v0.3.2 | Released | Module system, UDFs, reversible symbols, showcase examples, count→u64 fix |
 | v0.4.0-alpha | Implemented | Neural predicates (`nn/4`) + training milestone (release-gated on full example validation with real datasets) |
-| v0.4.0-beta | Achieved | dILP beta trainer, GA-hardened promotion, sparse executor (DLPack-native, no N^3 materialization), deterministic training, artifact persistence. U32 Python batch query path. |
+| v0.4.0-beta | Achieved | dILP beta trainer, GA-hardened promotion, sparse executor (DLPack-native, no N^3 materialization), deterministic training, artifact persistence. Beta gate = 20/20 reliability. U32 Python batch query path. 50-seed GA gate deferred (runtime budget). |
 | v0.4.0-rc | Planned | Term embeddings, extended training controls, negation removal, aggregate lifting, alternative KC, importance sampling |
 | v0.4.0 | Planned | Full neural-symbolic feature set, production-ready training |
 | v0.5.0 | Planned | GPU-native knowledge compilation, typed query-buffer builder (non-u32), full GPU-resident loss path, zero data-plane host transfers |
