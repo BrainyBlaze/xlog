@@ -3680,7 +3680,12 @@ fn pack_i64_columns_typed(
     }
 
     let mut columns: Vec<Vec<u8>> = (0..arity)
-        .map(|_| Vec::with_capacity(facts.len() * 8))
+        .map(|col_idx| {
+            let elem_size = schema.column_type(col_idx)
+                .map(|t| t.size_bytes())
+                .unwrap_or(4);
+            Vec::with_capacity(facts.len() * elem_size)
+        })
         .collect();
 
     for fact in facts {
@@ -3704,8 +3709,8 @@ fn pack_i64_columns_typed(
                 }
                 Some(ScalarType::U64) => {
                     let v = u64::try_from(val).map_err(|_| PyValueError::new_err(format!(
-                        "Relation '{}' column {} (U64): value {} out of range [0, {}]",
-                        relation, col_idx, val, i64::MAX,
+                        "Relation '{}' column {} (U64): value {} is negative; U64 requires non-negative values",
+                        relation, col_idx, val,
                     )))?;
                     col.extend_from_slice(&v.to_le_bytes());
                 }

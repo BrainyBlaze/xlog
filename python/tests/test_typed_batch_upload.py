@@ -108,7 +108,7 @@ def test_membership_u64_negative_error():
         data(1, 2).
         learnable(W) :: reach(X, Y) :- bL(X, Z), bR(Z, Y).
     """)
-    with pytest.raises(ValueError, match=r"column 0 \(U64\).*out of range"):
+    with pytest.raises(ValueError, match=r"column 0 \(U64\).*negative"):
         prog.batch_fact_membership("data", [[-5, 1]])
 
 
