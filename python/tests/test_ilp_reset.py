@@ -122,3 +122,44 @@ def test_reset_d2h_counter_cleared():
     prog.reset_d2h_transfer_count()
     prog.reset_runtime()
     assert prog.d2h_transfer_count() == 0, "D2H counter should be 0 after reset"
+
+
+from pyxlog.ilp import TrainConfig, train_only
+
+
+def test_train_deterministic_reproducibility():
+    """Two train_only() calls with same seed must produce identical results."""
+    config = TrainConfig(
+        step_budget_per_attempt=150,
+        max_attempts=3,
+        tau_start=2.0,
+        tau_floor=0.05,
+        seed=42,
+        deterministic=True,
+        debug_dense_mask=False,
+    )
+
+    result_1 = train_only(
+        source=SOURCE,
+        mask_name="W",
+        positives=POS,
+        negatives=[],
+        config=config,
+        _compute_holdout=False,
+    )
+
+    result_2 = train_only(
+        source=SOURCE,
+        mask_name="W",
+        positives=POS,
+        negatives=[],
+        config=config,
+        _compute_holdout=False,
+    )
+
+    assert result_1.converged == result_2.converged, (
+        f"Determinism: converged mismatch {result_1.converged} vs {result_2.converged}"
+    )
+    assert result_1.discovered_rule == result_2.discovered_rule, (
+        f"Determinism: rule mismatch {result_1.discovered_rule!r} vs {result_2.discovered_rule!r}"
+    )
