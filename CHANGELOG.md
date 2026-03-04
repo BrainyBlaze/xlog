@@ -10,6 +10,13 @@ All notable changes to this project are documented in this file.
   50-seed gate runtime reduced from ~1447s to ~436s (3.3x speedup) with identical statistical quality
   (200/200, Clopper-Pearson lower95 = 0.982). Override via `GA_RELIABILITY_MAX_ATTEMPTS` env var.
 
+### Fixed
+
+- **Typed batch upload**: `batch_fact_membership` and `batch_tagged_credit` now use
+  schema-aware typed packing for all column types (I32, I64, U64, Bool, Symbol).
+  Previously, all values were blindly cast to `u32`, corrupting non-U32 columns.
+  F32/F64 columns are explicitly rejected with a clear error message.
+
 ### Added
 
 - **Per-step phase timing** in dILP trainer: 6 timed phases (apply_mask, loss_credit, loss_reduce,
