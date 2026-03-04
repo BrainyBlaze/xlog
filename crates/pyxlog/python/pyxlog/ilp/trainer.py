@@ -47,9 +47,18 @@ def train_only(
     if config.deterministic:
         _set_deterministic_cuda(config.seed)
 
+    # Compile once for all attempts
+    _compile_t0 = time.perf_counter()
+    prog = pyxlog.IlpProgramFactory.compile(
+        source, device=config.device, memory_mb=config.memory_mb,
+        max_active_rules=config.max_active_rules,
+    )
+    compile_ms = (time.perf_counter() - _compile_t0) * 1000.0
+
     attempts: list[_AttemptResult] = []
     global_steps = 0
     numeric_failures = 0
+    reset_ms_list: list[float] = []
 
     for attempt_idx in range(config.max_attempts):
         if global_steps >= config.global_step_limit:
@@ -63,9 +72,15 @@ def train_only(
         if step_budget <= 0:
             break
 
+        # Reset runtime state for attempts after the first
+        if attempt_idx > 0:
+            _reset_t0 = time.perf_counter()
+            prog.reset_runtime()
+            reset_ms_list.append((time.perf_counter() - _reset_t0) * 1000.0)
+
         try:
             result = _run_single_attempt(
-                source,
+                prog,
                 mask_name,
                 positives,
                 negatives,
@@ -73,6 +88,11 @@ def train_only(
                 attempt_idx,
                 step_budget,
             )
+            # Attach compile/reset instrumentation
+            result.telemetry_timings["compile_ms_once"] = compile_ms
+            if reset_ms_list:
+                result.telemetry_timings["reset_ms_total"] = sum(reset_ms_list)
+                result.telemetry_timings["reset_ms_p95"] = _percentile_95(reset_ms_list)
             attempts.append(result)
             global_steps += result.steps_used
         except _NumericFailure:
@@ -225,7 +245,7 @@ class _AttemptResult:
 
 
 def _run_single_attempt(
-    source: str,
+    prog: object,
     mask_name: str,
     positives: list[tuple[str, list[int]]],
     negatives: list[tuple[str, list[int]]],
@@ -241,10 +261,6 @@ def _run_single_attempt(
         "allocated_bytes": _allocated_bytes(config.device),
     }
     try:
-        prog = pyxlog.IlpProgramFactory.compile(
-            source, device=config.device, memory_mb=config.memory_mb,
-            max_active_rules=config.max_active_rules,
-        )
         n = prog.ilp_schema_size()
         rel_names = prog.ilp_relation_names()
 
