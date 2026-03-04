@@ -74,6 +74,11 @@ impl IlpRegistry {
         }
     }
 
+    /// Clear all registered masks, releasing GPU buffers.
+    pub fn clear(&mut self) {
+        self.masks.clear();
+    }
+
     pub fn insert_mask(
         &mut self,
         name: String,
