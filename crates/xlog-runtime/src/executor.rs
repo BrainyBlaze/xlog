@@ -275,6 +275,21 @@ impl Executor {
         self.join_index_cache.clear();
     }
 
+    /// Reset executor state for ILP attempt reuse.
+    ///
+    /// Clears ILP registry (masks + tagged results), relation storage,
+    /// join index cache, stats, and profiler. Preserves relation name
+    /// registrations (rel_names, name_to_rel) since those are immutable
+    /// compile artifacts.
+    pub fn reset_for_ilp(&mut self) {
+        self.ilp_registry.clear();
+        self.ilp_last_result = None;
+        self.store.clear();
+        self.join_index_cache.clear();
+        self.stats = StatsManager::new();
+        self.profiler = Profiler::default();
+    }
+
     /// Get a mutable reference to the runtime statistics manager
     pub fn stats_mut(&mut self) -> &mut StatsManager {
         &mut self.stats
