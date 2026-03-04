@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Changed
+
+- **GA reliability runtime profile**: Default `max_attempts` reduced from 7 to 2 in `test_ilp_ga_reliability.py`.
+  50-seed gate runtime reduced from ~1447s to ~436s (3.3x speedup) with identical statistical quality
+  (200/200, Clopper-Pearson lower95 = 0.982). Override via `GA_RELIABILITY_MAX_ATTEMPTS` env var.
+
+### Added
+
+- **Per-step phase timing** in dILP trainer: 6 timed phases (apply_mask, loss_credit, loss_reduce,
+  backward_step, membership, convergence) with p95 and total_ms telemetry in `result.telemetry_timings`.
+
 ## [0.4.0-beta] — 2026-03-04
 
 ### Added
