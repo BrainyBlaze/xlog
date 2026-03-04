@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## Unreleased — 2026-03-04
+## [0.4.0-beta] — 2026-03-04
 
 ### Added
 
@@ -101,18 +101,26 @@ All notable changes to this project are documented in this file.
 
 - `test_non_monotone_with_mc` — pre-existing 50K MC sample negation test that consistently timed out (unrelated to dILP).
 
+### Known Limitations
+
+- Python batch query path (`batch_fact_membership`, `batch_tagged_credit`) coerces all facts via `as u32`. Typed relation schemas work in core execution but the Python query interface is U32-entity-ID-only for now.
+- `bench.yml` PR-comparison dispatch path is non-operational under manual-only CI (event-gated for `push`/`pull_request`).
+
+### Deferred to v0.4.0-rc
+
+- Term embeddings for neural-symbolic integration
+- Extended neural-symbolic training controls
+
+### Deferred to v0.5.0
+
+- Typed query-buffer builder (non-u32 Python batch queries)
+- Full GPU-resident loss computation path
+- 50-seed runtime budget optimization
+- SLO harness for N=20/50/100/150
+
 ### Validation
 
-- Workspace tests pass (CUDA-dependent tests skip cleanly when CUDA is unavailable).
-- CUDA certification suite passes (C01-C25 + G01-G08): 206/206.
-- dILP beta reliability gate: 20/20 (4 stages x 5 seeds, sparse backend).
-- Consolidated CUDA Python ILP gate batch (fresh):
-  - `44 passed` (`test_ilp_types`, `test_ilp_trainer`, `test_ilp_promoter`, `test_ilp_holdout`, `test_ilp_robustness`)
-  - `19 passed` (`test_ilp_d2h_gate`, `test_ilp_sparse`)
-  - `20 passed` (`test_ilp_beta_gate`)
-  - `20 passed` (`test_ilp_reliability`)
-  - `3 passed` (`test_ilp_performance`)
-  - `1 passed` (`test_ilp_ga_reliability`, default `GA_RELIABILITY_SEEDS=50`)
+All tests pass on v0.4.0-beta validation matrix (7 suites). See `docs/reports/2026-03-04-v0.4.0-beta-validation.md`.
 
 ## Neural-Symbolic Integration Milestone (v0.4.0-alpha) — 2026-02-23
 
