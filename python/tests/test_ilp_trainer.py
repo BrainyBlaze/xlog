@@ -229,6 +229,30 @@ def test_train_only_telemetry_entropy_not_zero():
         "At least some telemetry steps should have non-zero entropy"
 
 
+def test_train_only_phase_timing_keys():
+    """Phase timing breakdown must include all expected keys."""
+    config = TrainConfig(
+        step_budget_per_attempt=20, max_attempts=2,
+        tau_start=2.0, tau_floor=0.05, seed=42,
+    )
+    result = train_only(
+        source=REACH_SOURCE, mask_name="W_reach",
+        positives=REACH_POS, negatives=REACH_NEG, config=config,
+    )
+    timing = result.artifact.telemetry.step_timings
+    expected_p95 = [
+        "apply_mask_p95_us", "loss_credit_p95_us", "loss_reduce_p95_us",
+        "backward_step_p95_us", "membership_p95_us", "convergence_p95_us",
+    ]
+    expected_total = [
+        "apply_mask_total_ms", "loss_credit_total_ms", "loss_reduce_total_ms",
+        "backward_step_total_ms", "membership_total_ms", "convergence_total_ms",
+    ]
+    for key in expected_p95 + expected_total:
+        assert key in timing, f"Missing timing key: {key}"
+        assert timing[key] >= 0.0, f"Negative timing: {key}={timing[key]}"
+
+
 def test_train_only_rule_frequency_multi_attempt():
     """rule_frequency reflects how many attempts found the winning rule."""
     config = TrainConfig(

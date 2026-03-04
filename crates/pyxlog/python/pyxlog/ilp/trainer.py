@@ -311,17 +311,27 @@ def _run_single_attempt(
         witness_coverage = 0.0
         best_witness_coverage = 0.0
 
+        # Phase timing accumulators (microseconds per step)
+        phase_apply_mask_us: list[float] = []
+        phase_loss_credit_us: list[float] = []
+        phase_loss_reduce_us: list[float] = []
+        phase_backward_step_us: list[float] = []
+        phase_membership_us: list[float] = []
+        phase_convergence_us: list[float] = []
+
         for step in range(step_budget):
             try:
                 optimizer.zero_grad()
                 prog.reset_d2h_transfer_count()
 
+                _t0 = time.perf_counter()
                 cand_probs, selected_hard = backend.apply_mask(
                     prog, mask_name, W, temp_controller.tau,
                     config.max_active_rules, candidates, n,
                     allow_recursive=allow_recursive,
                 )
                 result.selected_hard = [int(i) for i in selected_hard if int(i) >= 0]
+                phase_apply_mask_us.append((time.perf_counter() - _t0) * 1_000_000)
 
                 # Check for NaN/Inf
                 if torch.isnan(cand_probs).any() or torch.isinf(cand_probs).any():
@@ -346,11 +356,14 @@ def _run_single_attempt(
                     all_negatives = negatives
 
                 # Compute task loss using candidate probs
+                _t0 = time.perf_counter()
                 loss = _compute_loss_from_candidates(
                     prog, cand_probs, positives, all_negatives, candidates, ijk_to_cidx,
                 )
+                phase_loss_credit_us.append((time.perf_counter() - _t0) * 1_000_000)
 
                 # Entropy regularization
+                _t0 = time.perf_counter()
                 ent_weight = entropy_weight_at_step(
                     step, step_budget,
                     start=config.entropy_weight_start,
@@ -366,10 +379,13 @@ def _run_single_attempt(
                 # Check for NaN/Inf in loss
                 if torch.isnan(loss) or torch.isinf(loss):
                     raise _NumericFailure()
+                phase_loss_reduce_us.append((time.perf_counter() - _t0) * 1_000_000)
 
+                _t0 = time.perf_counter()
                 if loss.requires_grad:
                     loss.backward()
                     optimizer.step()
+                phase_backward_step_us.append((time.perf_counter() - _t0) * 1_000_000)
 
                 # Decode argmax via backend
                 argmax_idx = backend.decode_argmax(W, candidates, n)
@@ -385,6 +401,7 @@ def _run_single_attempt(
                 prev_argmax = argmax_ijk
 
                 # Batch witness coverage -- GPU-side fact membership
+                _t0 = time.perf_counter()
                 pos_by_rel: dict[str, list[list[int]]] = {}
                 pos_indices_by_rel: dict[str, list[int]] = {}
                 for idx, (rel, vals) in enumerate(positives):
@@ -401,6 +418,7 @@ def _run_single_attempt(
                 witness_count = sum(witness_mask)
                 witness_coverage = witness_count / len(positives)
                 best_witness_coverage = max(best_witness_coverage, witness_coverage)
+                phase_membership_us.append((time.perf_counter() - _t0) * 1_000_000)
 
                 # Discreteness metric -- max candidate prob
                 with torch.no_grad():
@@ -432,6 +450,7 @@ def _run_single_attempt(
                     ))
 
                 # Convergence check
+                _t0 = time.perf_counter()
                 if stable_count >= 5:
                     converged = _check_convergence(
                         prog, W, mask_name, positives, negatives,
@@ -450,11 +469,24 @@ def _run_single_attempt(
                             "forward_p95_us": forward_p95_us,
                             "allocated_bytes_p95": _percentile_95(allocated_hist_bytes),
                             "allocated_bytes_max": max(allocated_hist_bytes),
+                            "apply_mask_p95_us": _percentile_95(phase_apply_mask_us),
+                            "loss_credit_p95_us": _percentile_95(phase_loss_credit_us),
+                            "loss_reduce_p95_us": _percentile_95(phase_loss_reduce_us),
+                            "backward_step_p95_us": _percentile_95(phase_backward_step_us),
+                            "membership_p95_us": _percentile_95(phase_membership_us),
+                            "convergence_p95_us": _percentile_95(phase_convergence_us),
+                            "apply_mask_total_ms": sum(phase_apply_mask_us) / 1000,
+                            "loss_credit_total_ms": sum(phase_loss_credit_us) / 1000,
+                            "loss_reduce_total_ms": sum(phase_loss_reduce_us) / 1000,
+                            "backward_step_total_ms": sum(phase_backward_step_us) / 1000,
+                            "membership_total_ms": sum(phase_membership_us) / 1000,
+                            "convergence_total_ms": sum(phase_convergence_us) / 1000,
                         }
                         result.steps_used = step + 1
                         result.argmax_ijk = argmax_ijk
                         _fill_metrics(result, cand_probs, candidates, W, backend)
                         return result
+                phase_convergence_us.append((time.perf_counter() - _t0) * 1_000_000)
 
                 # --- D2H hard gate: assert zero column downloads in step body ---
                 d2h_count = prog.d2h_transfer_count()
@@ -507,6 +539,18 @@ def _run_single_attempt(
                 "forward_p95_us": _percentile_95(forward_hist_us),
                 "allocated_bytes_p95": _percentile_95(allocated_hist_bytes),
                 "allocated_bytes_max": max(allocated_hist_bytes),
+                "apply_mask_p95_us": _percentile_95(phase_apply_mask_us),
+                "loss_credit_p95_us": _percentile_95(phase_loss_credit_us),
+                "loss_reduce_p95_us": _percentile_95(phase_loss_reduce_us),
+                "backward_step_p95_us": _percentile_95(phase_backward_step_us),
+                "membership_p95_us": _percentile_95(phase_membership_us),
+                "convergence_p95_us": _percentile_95(phase_convergence_us),
+                "apply_mask_total_ms": sum(phase_apply_mask_us) / 1000,
+                "loss_credit_total_ms": sum(phase_loss_credit_us) / 1000,
+                "loss_reduce_total_ms": sum(phase_loss_reduce_us) / 1000,
+                "backward_step_total_ms": sum(phase_backward_step_us) / 1000,
+                "membership_total_ms": sum(phase_membership_us) / 1000,
+                "convergence_total_ms": sum(phase_convergence_us) / 1000,
             }
         return result
     except _NumericFailure:
