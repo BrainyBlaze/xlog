@@ -1,12 +1,11 @@
 # XLOG Development Roadmap
 
 > **Last Updated:** March 5, 2026
-> **Current Version:** v0.4.0-beta (Tagged)
-> **Current Milestone:** v0.4.0-beta (dILP beta achieved, GA hardening complete, sparse executor shipped)
-> **Status:** `main` is at `v0.4.0-beta`: GPU-native exact path (GPU D4 + GPU CDCL verifier + cache),
-> neural-symbolic training APIs, dILP beta trainer (sparse mask, promotion pipeline, artifact persistence,
-> reliability gates), GA-hardened promotion, and sparse executor with DLPack-native mask path.
-> **Beta scope:** Typed relation schemas in core execution; Python batch query path is U32-only for now.
+> **Current Version:** v0.4.0-ga (Tagged)
+> **Current Milestone:** v0.4.0-ga (GA release — typed batch upload fix, SLO harness, 50-seed reliability gate)
+> **Status:** `main` is at `v0.4.0-ga`: GPU-native exact path (GPU D4 + GPU CDCL verifier + cache),
+> neural-symbolic training APIs, dILP GA trainer (sparse mask, promotion pipeline, artifact persistence,
+> reliability gates, typed batch upload), GA-hardened promotion, and sparse executor with DLPack-native mask path.
 
 ---
 
@@ -462,12 +461,12 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 **Design document:** `docs/plans/2026-02-26-dilp-hardening-design.md`
 **Implementation plan:** `docs/plans/2026-02-26-dilp-beta-impl.md`
 
-### Planned 📋 (dILP beyond beta)
+### Planned 📋 (dILP beyond GA)
 
-- [ ] Typed query-buffer builder (non-u32 schemas)
 - [ ] Full GPU-resident loss computation (v0.5.0)
 - [ ] Config restoration from saved artifact JSON
 - [ ] Telemetry persistence in artifact (optional, size-bounded)
+- [x] ~~Typed query-buffer builder (non-u32 schemas)~~ (done: schema-aware typed packing for I32/I64/U64/Bool/Symbol, F32/F64 rejected)
 - [x] ~~Full CI-grade 50-seed GA reliability runtime budget optimization~~ (done: 1447s → 436s, `max_attempts=2`)
 - [x] ~~Full SLO benchmark harness for N=20/50/100/150~~ (done: parametrized `test_slo_scaling[N]` with wall-clock and forward_p95_us targets)
 
@@ -682,10 +681,9 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 | v0.3.1 | Released | Float predicates (IEEE 754 total ordering), benchmarks, `--stats` flag, fuzz testing, property-based testing |
 | v0.3.2 | Released | Module system, UDFs, reversible symbols, showcase examples, count→u64 fix |
 | v0.4.0-alpha | Implemented | Neural predicates (`nn/4`) + training milestone (release-gated on full example validation with real datasets) |
-| v0.4.0-beta | Achieved | dILP beta trainer, GA-hardened promotion, sparse executor (DLPack-native, no N^3 materialization), deterministic training, artifact persistence. Beta gate = 20/20 reliability. U32 Python batch query path. 50-seed GA gate = 200/200 (436s, `max_attempts=2`). |
-| v0.4.0-rc | Planned | Term embeddings, extended training controls, negation removal, aggregate lifting, alternative KC, importance sampling |
-| v0.4.0 | Planned | Full neural-symbolic feature set, production-ready training |
-| v0.5.0 | Planned | GPU-native knowledge compilation, typed query-buffer builder (non-u32), full GPU-resident loss path, zero data-plane host transfers |
+| v0.4.0-beta | Achieved | dILP beta trainer, GA-hardened promotion, sparse executor (DLPack-native, no N^3 materialization), deterministic training, artifact persistence. Beta gate = 20/20 reliability. 50-seed GA gate = 200/200 (436s, `max_attempts=2`). |
+| v0.4.0-ga | **Achieved** | Typed batch upload fix (schema-aware I32/I64/U64/Bool/Symbol packing), SLO scaling harness, per-step phase timing, GA preflight all-pass. |
+| v0.5.0 | Planned | Full GPU-resident loss/credit path, zero data-plane host transfers, term embeddings, extended training controls |
 | v0.6.0 | Planned | Epistemic logic tier (Phase 7) |
 | v0.7+ | Planned | Multi-GPU support, distributed execution (Phase 8) |
 

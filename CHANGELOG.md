@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.4.0-ga] — 2026-03-05
+
 ### Changed
 
 - **GA reliability runtime profile**: Default `max_attempts` reduced from 7 to 2 in `test_ilp_ga_reliability.py`.
