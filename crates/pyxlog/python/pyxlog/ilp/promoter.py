@@ -6,6 +6,7 @@ runs promotion gates, returns PromotionResult.
 from __future__ import annotations
 
 import pyxlog
+import re
 from pyxlog.ilp.trainer import train_only
 from pyxlog.ilp.types import (
     GateResult,
@@ -120,6 +121,33 @@ def train_and_promote(
         detail="; ".join(regression_detail_parts),
     ))
 
+    # Gate: holdout F1 (LOO/k-fold on training positives only).
+    holdout_f1 = train_result.holdout_f1
+    if holdout_f1 is None:
+        gates.append(GateResult(
+            name="holdout_f1",
+            passed=False,
+            detail="holdout_f1 unavailable (insufficient positives for validation)",
+        ))
+    else:
+        holdout_threshold = config.holdout_threshold
+        gates.append(GateResult(
+            name="holdout_f1",
+            passed=holdout_f1 >= holdout_threshold,
+            detail=(
+                f"holdout_f1={holdout_f1:.3f}, threshold={holdout_threshold}, "
+                f"variance={train_result.holdout_variance:.6f}"
+            ),
+        ))
+
+    # Gate: typed schema availability (GA blocker).
+    gates.append(_typed_schema_gate(
+        trial=trial,
+        discovered_rule=discovered or "",
+        artifact=train_result.artifact,
+        config=config,
+    ))
+
     # Ambiguity scan (informational, not gating) — runs before holdout check
     ambiguous_alts: list[str] | None = None
     if config.check_ambiguity:
@@ -175,6 +203,121 @@ def train_and_promote(
         ambiguous_alternatives=ambiguous_alts,
         artifact=train_result.artifact,
     )
+
+
+def _typed_schema_gate(
+    *,
+    trial,
+    discovered_rule: str,
+    artifact: LearnedArtifact,
+    config: TrainConfig,
+) -> GateResult:
+    if not (config.typed_schema_required or config.waiver_untyped):
+        return GateResult(
+            name="typed_schema",
+            passed=True,
+            detail="typed schema enforcement disabled",
+        )
+
+    if not discovered_rule:
+        return GateResult(
+            name="typed_schema",
+            passed=False,
+            detail="typed schema check skipped: discovered_rule missing",
+        )
+
+    rel_names = _extract_rule_relations(artifact, discovered_rule)
+    if not rel_names:
+        if config.waiver_untyped:
+            return GateResult(
+                name="typed_schema",
+                passed=False,
+                detail=(
+                    "typed schema check unavailable: unable to map discovered rule to candidate metadata; "
+                    "manual_review_required"
+                ),
+            )
+        return GateResult(
+            name="typed_schema",
+            passed=False,
+            detail="typed schema check unavailable for discovered rule",
+        )
+
+    head_name, left_name, right_name = rel_names
+
+    try:
+        annotations = trial.relation_type_annotations()
+    except Exception as exc:
+        if config.waiver_untyped:
+            return GateResult(
+                name="typed_schema",
+                passed=False,
+                detail=(
+                    f"typed schema metadata unavailable at runtime ({exc}); manual review required"
+                ),
+            )
+        return GateResult(
+            name="typed_schema",
+            passed=False,
+            detail=f"typed schema metadata unavailable at runtime: {exc}",
+        )
+
+    annotations_by_name = {name: tuple(types) for name, types in annotations}
+    missing: list[str] = []
+    for rel in (head_name, left_name, right_name):
+        rel_types = annotations_by_name.get(rel)
+        if not rel_types or len(rel_types) < 2:
+            missing.append(rel)
+
+    if missing:
+        unique = ", ".join(sorted(set(missing)))
+        if config.waiver_untyped:
+            return GateResult(
+                name="typed_schema",
+                passed=False,
+                detail=(
+                    f"typed schema missing for: {unique}; "
+                    "waiver_untyped=True -> manual_review_required"
+                ),
+            )
+        return GateResult(
+            name="typed_schema",
+            passed=False,
+            detail=(
+                f"typed schema missing for: {unique}; "
+                "set waiver_untyped=True for manual_review fallback"
+            ),
+        )
+
+    return GateResult(
+        name="typed_schema",
+        passed=True,
+        detail=(
+            "typed schema available for head/left/right relations: "
+            f"{head_name}/{left_name}/{right_name}"
+        ),
+    )
+
+
+def _extract_rule_relations(
+    artifact: LearnedArtifact,
+    discovered_rule: str,
+) -> tuple[str, str, str] | None:
+    for entry in artifact.candidate_map:
+        candidate_rule = (
+            f"{entry.head_name}(X, Y) :- {entry.left_name}(X, Z), {entry.right_name}(Z, Y)."
+        )
+        if discovered_rule == candidate_rule:
+            return entry.head_name, entry.left_name, entry.right_name
+
+    # Fallback to parsing only for defense in case formats drift.
+    match = re.match(
+        r"^\s*([^(\s]+)\s*\([^)]*\)\s*:-\s*([^,(\s]+)\([^)]*\)\s*,\s*([^,(\s]+)\([^)]*\)\s*\.\s*$",
+        discovered_rule,
+    )
+    if match:
+        return match.group(1), match.group(2), match.group(3)
+    return None
 
 
 def _scan_ambiguity(

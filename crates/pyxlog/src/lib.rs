@@ -46,6 +46,19 @@ const USED_ARROW_DEVICE_ARRAY_CAPSULE_NAME: &[u8] = b"used_arrow_device_array\0"
 /// Epsilon value for numerical stability in log computations
 const NLL_EPSILON: f64 = 1e-38;
 
+fn scalar_type_name(typ: &ScalarType) -> String {
+    match *typ {
+        ScalarType::U32 => "u32".to_string(),
+        ScalarType::U64 => "u64".to_string(),
+        ScalarType::I32 => "i32".to_string(),
+        ScalarType::I64 => "i64".to_string(),
+        ScalarType::F32 => "f32".to_string(),
+        ScalarType::F64 => "f64".to_string(),
+        ScalarType::Bool => "bool".to_string(),
+        ScalarType::Symbol => "symbol".to_string(),
+    }
+}
+
 #[cfg(not(feature = "host-io"))]
 fn host_io_disabled_pyerr() -> PyErr {
     PyRuntimeError::new_err(
@@ -3907,7 +3920,7 @@ impl CompiledIlpProgram {
     /// for this mask under the provided recursion policy.
     ///
     /// `soft_probs_dlpack` is a DLPack capsule (CUDA f64 tensor) passed from PyTorch.
-    /// Rust imports it zero-copy, downloads values (untracked by D2H counter),
+    /// Rust imports it zero-copy, downloads values (not counted by the D2H counter),
     /// performs deterministic top-k (desc soft value, then lower id), and
     /// stores a sparse IlpMask (no dense N^3 materialization).
     #[pyo3(signature = (name, candidate_ids, soft_probs_dlpack, budget, allow_recursive=false))]
@@ -4242,6 +4255,22 @@ impl CompiledIlpProgram {
         self.rel_index.iter().map(|(_, name)| name.clone()).collect()
     }
 
+    /// Return declared predicate types from source `pred` declarations.
+    ///
+    /// Output is a list of `(name, types)` tuples so callers can
+    /// deterministically inspect whether metadata is available for
+    /// relations used during promotion.
+    pub fn relation_type_annotations(&self) -> Vec<(String, Vec<String>)> {
+        self.ast
+            .predicates
+            .iter()
+            .map(|pred| {
+                let types = pred.types.iter().map(scalar_type_name).collect();
+                (pred.name.clone(), types)
+            })
+            .collect()
+    }
+
     /// Return the set of valid (i,j,k) candidates for the given learnable mask.
     ///
     /// Pruning rules:
@@ -4472,6 +4501,20 @@ impl CompiledIlpProgram {
 
     pub fn reset_d2h_transfer_count(&self) {
         self.provider.reset_d2h_transfer_count()
+    }
+
+    pub fn host_transfer_stats(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let stats = self.provider.host_transfer_stats();
+        let dict = PyDict::new_bound(py);
+        dict.set_item("dtoh_bytes", stats.dtoh_bytes)?;
+        dict.set_item("htod_bytes", stats.htod_bytes)?;
+        dict.set_item("dtoh_calls", stats.dtoh_calls)?;
+        dict.set_item("htod_calls", stats.htod_calls)?;
+        Ok(dict.into())
+    }
+
+    pub fn reset_host_transfer_stats(&self) {
+        self.provider.reset_host_transfer_stats()
     }
 }
 

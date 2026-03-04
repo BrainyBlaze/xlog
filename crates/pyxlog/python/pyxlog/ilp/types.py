@@ -48,6 +48,9 @@ class TrainConfig:
     max_novel_rate: float = 0.0
     protected_relations: tuple[str, ...] = ()
     holdout_strategy: str = "loo"
+    holdout_threshold: float = 0.95
+    holdout_folds: int = 5
+    typed_schema_required: bool = False
     waiver_untyped: bool = False
 
     # Reproducibility

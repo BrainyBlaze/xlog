@@ -33,9 +33,13 @@ class MaskBackend(Protocol):
         budget: int,
         candidates: list[dict],
         n: int,
-        allow_recursive: bool = False,  # TODO(task-8): forward to set_rule_mask_sparse
-    ) -> torch.Tensor:
-        """Apply mask to program. Returns candidate_soft_probs shape (C,)."""
+        allow_recursive: bool = False,
+    ) -> tuple[torch.Tensor, list[int]]:
+        """Apply mask to program.
+
+        Returns:
+            candidate_soft_probs: Tensor of shape (C,) and selected hard candidate IDs.
+        """
         ...
 
     def decode_argmax(self, W: torch.Tensor, candidates: list[dict], n: int) -> int:
@@ -55,8 +59,26 @@ class DenseMaskBackend:
     ):
         M_soft = F.gumbel_softmax(W, tau=tau, hard=False, dim=-1)
         flat = M_soft.view(-1)
+        # Decode hard candidates at the candidate level for telemetry and
+        # gate bookkeeping, but keep dense-mask materialization behavior for
+        # execution by applying hard updates on the flattened tensor.
         k = min(budget, flat.numel())
         _, topk_idx = flat.topk(k)
+
+        # Map dense flatten indices back to candidate indices for selected_hard.
+        # Candidates are defined in the same sorted order as valid_candidates(), so
+        # this remains deterministic across implementations.
+        flat_to_candidate: dict[int, int] = {}
+        for ci, c in enumerate(candidates):
+            flat_idx = int(c["i"]) * n * n + int(c["j"]) * n + int(c["k"])
+            flat_to_candidate[flat_idx] = ci
+
+        selected_hard = []
+        for idx in topk_idx.detach().cpu().tolist():
+            ci = flat_to_candidate.get(int(idx))
+            if ci is not None:
+                selected_hard.append(ci)
+
         M_hard_flat = torch.zeros_like(flat)
         M_hard_flat[topk_idx] = 1.0
         M_hard = M_hard_flat.view_as(M_soft)
@@ -72,7 +94,8 @@ class DenseMaskBackend:
         cand_probs = torch.stack(
             [M_soft[c["i"], c["j"], c["k"]] for c in candidates]
         )
-        return cand_probs
+        selected_hard.sort()
+        return cand_probs, selected_hard
 
     def decode_argmax(self, W, candidates, n):
         with torch.no_grad():
@@ -118,33 +141,46 @@ class SparseMaskBackend:
         live_cands = prog.valid_candidates(mask_name, allow_recursive)
         C_live = len(live_cands)
 
+        # Build (i,j,k) -> original index lookup
+        orig_ijk = {
+            (c["i"], c["j"], c["k"]): idx for idx, c in enumerate(candidates)
+        }
+        live_to_orig: list[int | None] = []
+        for lc in live_cands:
+            key = (lc["i"], lc["j"], lc["k"])
+            live_to_orig.append(orig_ijk.get(key))
+
         if C_live == C:
             soft = cand_probs.detach().contiguous().double()
         else:
-            # Build (i,j,k) -> original index lookup
-            orig_ijk = {
-                (c["i"], c["j"], c["k"]): idx for idx, c in enumerate(candidates)
-            }
             soft = torch.zeros(C_live, device=W.device, dtype=torch.float64)
             for li, lc in enumerate(live_cands):
                 key = (lc["i"], lc["j"], lc["k"])
                 if key in orig_ijk:
                     soft[li] = cand_probs[orig_ijk[key]].detach().double()
 
-        # Cap the budget so padded zero-prob candidates don't leak into the
-        # hard mask.  Mirrors the old dense-materialization cap:
-        #   max(1, min(budget, C) // 2)
-        # This keeps activation ratio ~50% of original C (matching the
-        # dense backend's selectivity over N^3).
-        effective_budget = max(1, min(budget, C) // 2)
+        effective_budget = min(budget, soft.numel())
 
         candidate_ids = list(range(C_live))
         prog.set_rule_mask_sparse(
             mask_name, candidate_ids, soft.contiguous(), effective_budget,
             allow_recursive,
         )
+        selected = torch.topk(
+            soft,
+            k=min(effective_budget, soft.numel()),
+            largest=True,
+            sorted=True,
+        ).indices
+        selected_hard = []
+        for i in selected.detach().cpu().tolist():
+            idx = int(i)
+            orig_idx = live_to_orig[idx] if 0 <= idx < len(live_to_orig) else None
+            if orig_idx is not None:
+                selected_hard.append(orig_idx)
 
-        return cand_probs
+        selected_hard.sort()
+        return cand_probs, selected_hard
 
     def decode_argmax(self, W, candidates, n):
         with torch.no_grad():

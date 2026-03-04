@@ -6811,7 +6811,9 @@ impl CudaKernelProvider {
     }
 
     /// Download f64 values without incrementing the D2H transfer counter.
-    /// For control-plane reads (mask setup), not data-plane.
+    /// This remains D2H-count-transparent for the ILP D2H hot-path gate, but
+    /// still recorded in host transfer stats (`dtoh_bytes`/`dtoh_calls`) for
+    /// accounting and profiling.
     pub fn download_f64_untracked(&self, buffer: &CudaBuffer, col_idx: usize) -> Result<Vec<f64>> {
         let col = buffer
             .column(col_idx)
@@ -6827,10 +6829,7 @@ impl CudaKernelProvider {
             .ok_or_else(|| XlogError::Kernel("Row byte size overflow".to_string()))?;
         let col_view = self.column_bytes_view(col, num_bytes)?;
         let mut bytes = vec![0u8; num_bytes];
-        self.device
-            .inner()
-            .dtoh_sync_copy_into(&col_view, &mut bytes)
-            .map_err(|e| XlogError::Kernel(format!("Failed to download f64: {}", e)))?;
+        self.dtoh_sync_copy_into_tracked(&col_view, &mut bytes)?;
 
         Ok(bytes
             .chunks_exact(8)
