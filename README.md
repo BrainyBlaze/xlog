@@ -2,13 +2,12 @@
 
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
 [![CUDA Tests](https://img.shields.io/badge/CUDA%20tests-206%2F206-brightgreen.svg)](docs/architecture/cuda-certification.md)
-[![Version](https://img.shields.io/badge/version-v0.3.2-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.4.0--beta-blue.svg)](CHANGELOG.md)
 
-> **Release status:** Latest tagged release is `v0.3.2`. The `main` branch is ahead of `v0.3.2` and contains
-> unreleased work: GPU-native knowledge compilation, GPU CDCL verifier + cache, neural-symbolic training APIs,
-> and a **dILP beta trainer** (sparse mask API, promotion pipeline, artifact persistence, reliability gates).
-> The `v0.4.0-alpha` milestone is **achieved**; dILP beta is **achieved**; GA hardening is in progress.
-> See `docs/ROADMAP.md` and `docs/VALIDATION_REPORT.md`.
+> **Release status:** Latest tagged release is `v0.4.0-beta`. The dILP differentiable ILP engine includes
+> sparse GPU executor (DLPack-native, no N^3 materialization), GA-hardened promotion pipeline, deterministic
+> training mode, and artifact persistence with config snapshot restoration. Python batch query path is U32-only.
+> See `docs/ROADMAP.md` and `CHANGELOG.md`.
 
 **XLOG** is a GPU-accelerated Datalog query engine with neural-symbolic integration. It compiles declarative logic programs into optimized relational plans and executes them on NVIDIA GPUs, achieving high throughput for recursive queries, graph analytics, probabilistic inference, and neural-symbolic training.
 
