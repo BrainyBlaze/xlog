@@ -1,5 +1,6 @@
 """GA reliability gate: 50/50 with Clopper-Pearson lower-bound check."""
 import os
+import time
 
 import pytest
 
@@ -31,7 +32,7 @@ def test_ga_reliability_50():
     seed_count = int(os.getenv("GA_RELIABILITY_SEEDS", "50"))
     seed_count = max(1, seed_count)
     step_budget = int(os.getenv("GA_RELIABILITY_STEP_BUDGET", "150"))
-    max_attempts = int(os.getenv("GA_RELIABILITY_MAX_ATTEMPTS", "7"))
+    max_attempts = int(os.getenv("GA_RELIABILITY_MAX_ATTEMPTS", "2"))
     runs = 0
     success = 0
     failures = []
@@ -42,6 +43,7 @@ def test_ga_reliability_50():
         "plus2": {"success": 0, "total": 0},
     }
 
+    wall_t0 = time.perf_counter()
     for seed in range(seed_count):
         for stage_name, source, positives, negatives, mask_name in STAGES:
             config = TrainConfig(
@@ -75,10 +77,13 @@ def test_ga_reliability_50():
                     f" attempts={result.attempt_count}, steps={result.total_steps}"
                 )
 
+    total_wall_s = time.perf_counter() - wall_t0
     ci_low = _clopper_p_lower(success, runs)
     rate = success / runs if runs else 0.0
 
     print("GA reliability summary:")
+    print(f"  config: step_budget={step_budget}, max_attempts={max_attempts}")
+    print(f"  total_wall_s: {total_wall_s:.1f}")
     print(f"  runs: {runs}")
     print(f"  success: {success}/{runs} ({rate:.4f})")
     print(f"  clopper_pearson_95_lower: {ci_low:.6f}")
