@@ -4011,6 +4011,45 @@ impl CompiledIlpProgram {
         Ok(())
     }
 
+    /// Reset mutable runtime state for ILP attempt reuse.
+    ///
+    /// Clears ILP registry (masks/tagged results), executor store,
+    /// join index cache, stats, and profiler. Then re-registers schemas
+    /// with empty buffers, reloads base facts from AST, and re-executes
+    /// the plan. Preserves all immutable compile artifacts (AST, plan,
+    /// schemas, rel_index, provider, TMJ metadata, max_active_rules).
+    ///
+    /// After reset, the program is in the same state as a fresh compile()
+    /// with the same source — ready for set_rule_mask / evaluate cycles.
+    pub fn reset_runtime(&mut self, py: Python<'_>) -> PyResult<()> {
+        let _result: xlog_core::Result<()> = py.allow_threads(|| {
+            // 1. Clear all mutable state (ILP registry, store, caches, stats)
+            self.executor.reset_for_ilp();
+
+            // 2. Re-register schemas with empty buffers
+            for (name, schema) in &self.schemas {
+                let empty = self.provider.create_empty_buffer(schema.clone())?;
+                self.executor.store_mut().put(name, empty);
+            }
+
+            // 3. Reload base facts from preserved AST
+            load_facts_into_store(
+                &self.ast, &self.provider, &mut self.executor, &self.schemas,
+            )?;
+
+            // 4. Re-execute plan (populates derived relations)
+            self.executor.execute_plan(&self.plan)?;
+
+            Ok(())
+        });
+        _result.map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+        // 5. Reset D2H transfer counter
+        self.provider.reset_d2h_transfer_count();
+
+        Ok(())
+    }
+
     pub fn get_tagged_results(&self) -> PyResult<Vec<(u32, u32, u32, u32)>> {
         match self.executor.ilp_last_result() {
             Some(result) => Ok(result.entries.iter()
