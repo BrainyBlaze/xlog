@@ -4524,6 +4524,63 @@ impl CudaKernelProvider {
         Ok(d_count)
     }
 
+    /// Count 1-bits in `mask[0..n]` and write the result into
+    /// `task_counts[slot_idx]` via the existing `count_mask` kernel.
+    ///
+    /// The caller MUST ensure `task_counts[slot_idx]` is zero before
+    /// calling (e.g. by zeroing the whole array once).
+    ///
+    /// This avoids allocating a fresh 1-element device buffer per call,
+    /// which matters when iterating over hundreds of tasks.
+    pub fn count_mask_into_slot(
+        &self,
+        mask: &crate::memory::TrackedCudaSlice<u8>,
+        n: u32,
+        task_counts: &mut crate::memory::TrackedCudaSlice<u32>,
+        slot_idx: usize,
+    ) -> Result<()> {
+        if n == 0 {
+            // Slot is already zero (caller pre-zeroed); nothing to do.
+            return Ok(());
+        }
+        if slot_idx >= task_counts.len() {
+            return Err(XlogError::Kernel(format!(
+                "count_mask_into_slot: slot_idx={} >= len={}",
+                slot_idx,
+                task_counts.len()
+            )));
+        }
+
+        let device = self.device.inner();
+        let block_size = 256u32;
+        let grid_size = (n + block_size - 1) / block_size;
+
+        let count_fn = device
+            .get_func(SCAN_MODULE, scan_kernels::COUNT_MASK)
+            .ok_or_else(|| {
+                XlogError::Kernel("count_mask kernel not found".to_string())
+            })?;
+
+        // Get a mutable sub-slice pointing at task_counts[slot_idx..slot_idx+1].
+        let mut slot = task_counts.slice_mut(slot_idx..slot_idx + 1);
+
+        // SAFETY: count_mask(mask, n, count) — writes atomicAdd into count ptr.
+        // The slot was pre-zeroed by the caller.
+        unsafe {
+            count_fn.clone().launch(
+                LaunchConfig {
+                    grid_dim: (grid_size, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (mask, n, &mut slot),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("count_mask_into_slot kernel failed: {}", e)))?;
+
+        Ok(())
+    }
+
     /// Apply permutation to reorder all columns in buffer using GPU
     fn apply_permutation_gpu(
         &self,
