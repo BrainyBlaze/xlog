@@ -1,54 +1,54 @@
 # GPU-Resident ILP Credit/Loss — Performance Report
 
 **Date:** 2026-03-05
-**Commit:** `8d821b66` (fix(ilp): correct GPU credit tests + trainer detach)
-**Plan:** `docs/plans/2026-03-05-gpu-resident-loss-credit-impl.md`
+**Commit:** `d268f0de` (test(ilp): strict D2H acceptance gate via host\_transfer\_stats)
+**Plan:** `docs/plans/2026-03-05-sparse-executor-transfer-elimination-impl.md`
 
 ---
 
 ## Summary
 
-Implemented `compute_ilp_loss_grad_gpu` — a single Rust/CUDA call that replaces the Python-side `_compute_loss_from_candidates()` loop. The GPU path builds a COO→CSR sparse matrix mapping facts to covering candidates, runs forward (credit gather + NLL loss) and backward (gradient scatter via atomicAdd) CUDA kernels, and returns loss + grad as DLPack tensors. No D2H *column* transfers occur, but two host-staging transfers remain for COO/CSR construction (see D2H Transfer Accounting).
+`compute_ilp_loss_grad_gpu` is a single Rust/CUDA call that replaces the Python-side `_compute_loss_from_candidates()` loop. The GPU path builds a COO→CSR sparse matrix on-device, runs forward (credit gather + NLL loss) and backward (gradient scatter via atomicAdd) CUDA kernels, reduces loss on-device, and returns loss + grad as DLPack tensors. **Zero D2H transfers** occur in the non-chunked path, confirmed by strict byte-level accounting (`host_transfer_stats(): dtoh_calls=0, dtoh_bytes=0`).
 
 ## Test Results
 
 | Suite | Result | Time |
 |-------|--------|------|
-| GPU credit tests (`test_ilp_credit_gpu.py`) | **13/13 PASS** | 1.00s |
+| GPU credit tests (`test_ilp_credit_gpu.py`) | **15/15 PASS** | 1.2s |
 | Gradient parity (GPU vs Python reference) | **3/3 PASS** (f32, f64, multi-candidate) | included above |
-| D2H transfer accounting | **1/1 PASS** (0 transfers) | included above |
+| D2H transfer accounting (coarse + strict) | **2/2 PASS** (0 transfers, 0 bytes) | included above |
+| Memory cap / chunked fallback | **1/1 PASS** | included above |
 | Rust workspace (`cargo test --workspace`) | **PASS** | — |
-| CUDA certification suite (206 tests) | **PASS** | 26.20s |
-| ILP 20/20 reliability | **20/20 PASS** | 883s |
-
-## Microbenchmark: GPU vs Python Reference
-
-### Small scale (1 candidate, 2 facts — reach program)
-
-| Metric | GPU path | Python reference | Speedup |
-|--------|----------|-----------------|---------|
-| p50 | 6,309 µs | 10,144 µs | **1.6x** |
-| p95 | 10,432 µs | 15,895 µs | **1.5x** |
-
-### Larger scale (9 candidates, 10 facts — multi-relation reach)
-
-| Metric | GPU path |
-|--------|----------|
-| p50 | 24,577 µs |
-| p95 | 32,314 µs |
-
-**Note:** At this toy scale, kernel launch overhead dominates. The GPU path's advantage grows with candidate count and fact count because the CSR scatter-gather parallelizes over facts while the Python reference does sequential `tagged_entries_containing_fact` calls per fact. Real ILP training with hundreds of candidates and thousands of facts will show larger speedups.
+| CUDA certification suite | **PASS** | — |
+| ILP 20/20 reliability | **20/20 PASS** | — |
 
 ## D2H Transfer Accounting
 
-`test_zero_dtoh_transfers` confirms **zero** D2H *column* transfers during `compute_ilp_loss_grad_gpu` (the gate tracked by `d2h_transfer_count()`).
+**Phase 2 complete: zero D2H transfers.**
 
-**Caveat:** The current implementation still performs two host-staging D2H transfers that bypass the column-download gate:
+Two independent gates confirm zero host transfers during `compute_ilp_loss_grad_gpu`:
 
-1. **Membership mask download** (`lib.rs:4173`): Per-candidate `dtoh_sync_copy_into` of `u8` mask to identify which facts each candidate covers. Size: O(num_facts) bytes per candidate.
-2. **Sorted COO fact indices** (`lib.rs:4234`): `dtoh_sync_copy_into` of sorted fact indices to build CSR `row_offsets` on host. Size: O(nnz * 4) bytes.
+1. **Coarse gate** (`d2h_transfer_count()`): 0 column-level D2H transfers.
+2. **Strict gate** (`host_transfer_stats()`): `dtoh_calls=0`, `dtoh_bytes=0`.
 
-These are control-plane staging transfers (small, not bulk column data), but they are not yet zero. The accurate characterization is **"GPU-accelerated loss path with host CSR staging"**, not "fully GPU-resident."
+All three original D2H transfers have been eliminated:
+
+| Transfer | Old path | New path |
+|----------|----------|----------|
+| Membership mask download | `dtoh_sync_copy` per candidate | `scan_u8_mask_device` + `ilp_coo_fill_from_mask` kernel on-device |
+| COO facts D2H for CSR build | `dtoh_sync_copy` of sorted facts | `ilp_csr_histogram` kernel + GPU prefix-sum |
+| Loss reduction D2H | `dtoh_sync_copy` of loss array | `ilp_reduce_sum_{f32,f64}` kernel → device-resident scalar |
+
+**Chunked fallback path** (activated when COO allocation exceeds `coo_memory_cap`, default 16 MB): Uses bounded D2H transfers per chunk, merges on host, then H2D uploads merged COO. This is a correctness fallback for large candidate sets; the default path is fully zero-D2H.
+
+## New CUDA Kernels
+
+| Kernel | File | Purpose |
+|--------|------|---------|
+| `ilp_coo_fill_from_mask` | `kernels/ilp.cu` | Fill COO arrays from device-side mask + prefix-sum |
+| `ilp_csr_histogram` | `kernels/ilp.cu` | Histogram of fact indices for CSR row_offsets |
+| `ilp_reduce_sum_f32` | `kernels/ilp.cu` | Block-level f32 sum reduction |
+| `ilp_reduce_sum_f64` | `kernels/ilp.cu` | Block-level f64 sum reduction |
 
 ## Gradient Parity
 
@@ -66,32 +66,30 @@ All pass, confirming the CSR forward/backward kernels compute the correct surrog
 Python trainer
   └─ prog.compute_ilp_loss_grad_gpu(pos, neg, cand_probs)
        └─ Rust (lib.rs)
-            ├─ Parse pos/neg facts, resolve to compacted fact indices
-            ├─ For each candidate: query membership mask → COO pairs
-            ├─ Sort COO → CSR (row_offsets, col_indices)
-            ├─ Launch ilp_credit_forward_{f32,f64}  → credit_out, loss_contrib
-            ├─ Launch ilp_credit_backward_{f32,f64} → d_cand_probs
-            └─ Return (loss, grad) as DLPack capsules
+            ├─ Phase A: Parse pos/neg facts, resolve to compacted fact indices
+            ├─ Phase B: For each candidate: build task (d_mask, fact_indices, cidx)
+            ├─ Phase C: COO fill — scan + fill kernel per task (fully on-device)
+            ├─ Phase D: Sort COO → CSR via radix sort + histogram kernel + prefix-sum
+            ├─ Phase E: Forward kernel → credit + loss_contrib
+            │           Reduce kernel → device-resident total loss
+            │           Backward kernel → device-resident grad
+            └─ Return (loss, grad) as DLPack capsules (zero-copy GPU→PyTorch)
 ```
 
-CUDA kernels: `kernels/ilp_credit.cu` (4 kernels: `ilp_coo_fill`, forward f32/f64, backward f32/f64).
+CUDA kernels: `kernels/ilp_credit.cu` (forward/backward f32/f64), `kernels/ilp.cu` (COO fill, CSR histogram, reduce sum).
 
 ## Go/No-Go
 
-**GO for Phase 1** (correctness + performance parity). All correctness gates pass (13/13 tests, 3/3 parity, 0 column transfers, 20/20 reliability). The GPU path is functional and correct. Performance gains at toy scale are modest (1.5x) due to kernel launch overhead; real workloads will show larger speedups.
-
-**Not yet GO for "full zero-D2H loss path."** Two host-staging transfers remain (membership mask download, CSR row_offsets construction). See follow-up tasks below.
+**GO for Phase 2 (true zero-D2H).** All correctness gates pass: 15/15 tests, 3/3 gradient parity, strict byte-level D2H accounting (0 calls, 0 bytes), 20/20 reliability. The GPU path is functionally complete with zero host transfers in the default (non-chunked) path.
 
 ## Known Limitations
 
-- COO→CSR construction happens on CPU in Rust before upload — could be moved to GPU for large candidate sets
-- Membership mask downloaded per-candidate to host for COO assembly — could use `ilp_coo_fill` kernel directly from device mask
-- D2H gate (`d2h_transfer_count`) only covers `download_column_*`; `dtoh_sync_copy_into` calls bypass it
 - Benchmark at toy scale only; real-world ILP training benchmarks deferred to v0.5.0 GA
-- `test_ga_reliability_50` times out under default pytest timeout (pre-existing, unrelated)
+- Chunked fallback path uses bounded D2H transfers (correctness-safe but not zero-D2H)
+- `ilp_reduce_sum` uses `atomicAdd` to global memory — sufficient for current block counts but could use hierarchical reduction for very large arrays
 
-## Follow-Up Tasks (v0.5.0)
+## Completed Follow-Up Tasks
 
-1. **Move COO/CSR construction fully to GPU.** Use `ilp_coo_fill` kernel with device-side membership masks; build `row_offsets` via GPU prefix-sum instead of host download + scan.
-2. **Route all D2H/H2D in this path through tracked wrappers** so `d2h_transfer_count` assertions cover the full loss path, not just column downloads.
-3. **Update roadmap/issue tracking** to reflect "GPU-accelerated loss path with host CSR staging" (Phase 1), with full zero-D2H as a separate Phase 2 milestone.
+1. ~~Move COO/CSR construction fully to GPU~~ — Done: `ilp_coo_fill_from_mask` kernel + `ilp_csr_histogram` kernel
+2. ~~Route all D2H/H2D through tracked wrappers~~ — Done: `host_transfer_stats()` strict accounting
+3. ~~Memory cap + chunked fallback~~ — Done: `coo_memory_cap` field with bounded-memory chunked COO assembly
