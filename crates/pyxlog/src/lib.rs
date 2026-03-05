@@ -5274,7 +5274,17 @@ impl CompiledIlpProgram {
                     .memset_zeros(&mut d_grad)
                     .map_err(|e| PyRuntimeError::new_err(format!("zero grad: {}", e)))?;
             }
-            self.export_loss_grad_f64(py, 0.0f64, d_grad, num_cands)
+            let mut d_loss = self
+                .provider
+                .memory()
+                .alloc::<f64>(1)
+                .map_err(|e| PyRuntimeError::new_err(format!("alloc loss: {}", e)))?;
+            self.provider
+                .device()
+                .inner()
+                .memset_zeros(&mut d_loss)
+                .map_err(|e| PyRuntimeError::new_err(format!("zero loss: {}", e)))?;
+            self.export_loss_grad_device_f64(py, d_loss, d_grad, num_cands)
         } else {
             let mut d_grad = self
                 .provider
@@ -5288,7 +5298,17 @@ impl CompiledIlpProgram {
                     .memset_zeros(&mut d_grad)
                     .map_err(|e| PyRuntimeError::new_err(format!("zero grad: {}", e)))?;
             }
-            self.export_loss_grad_f32(py, 0.0f32, d_grad, num_cands)
+            let mut d_loss = self
+                .provider
+                .memory()
+                .alloc::<f32>(1)
+                .map_err(|e| PyRuntimeError::new_err(format!("alloc loss: {}", e)))?;
+            self.provider
+                .device()
+                .inner()
+                .memset_zeros(&mut d_loss)
+                .map_err(|e| PyRuntimeError::new_err(format!("zero loss: {}", e)))?;
+            self.export_loss_grad_device_f32(py, d_loss, d_grad, num_cands)
         }
     }
 
@@ -5367,13 +5387,10 @@ impl CompiledIlpProgram {
                 )
                 .map_err(|e| PyRuntimeError::new_err(format!("forward: {}", e)))?;
 
-            let mut loss_host = vec![0.0f64; num_facts as usize];
-            self.provider
-                .device()
-                .inner()
-                .dtoh_sync_copy_into(&loss_contrib, &mut loss_host)
-                .map_err(|e| PyRuntimeError::new_err(format!("dtoh: {}", e)))?;
-            let total_loss: f64 = loss_host.iter().sum();
+            let d_total_loss = self
+                .provider
+                .ilp_reduce_sum_f64_launch(&loss_contrib, num_facts)
+                .map_err(|e| PyRuntimeError::new_err(format!("reduce: {}", e)))?;
 
             let d_grad = self
                 .provider
@@ -5387,7 +5404,7 @@ impl CompiledIlpProgram {
                 )
                 .map_err(|e| PyRuntimeError::new_err(format!("backward: {}", e)))?;
 
-            self.export_loss_grad_f64(py, total_loss, d_grad, num_cands)
+            self.export_loss_grad_device_f64(py, d_total_loss, d_grad, num_cands)
         } else {
             let (credit_out, loss_contrib) = self
                 .provider
@@ -5401,13 +5418,10 @@ impl CompiledIlpProgram {
                 )
                 .map_err(|e| PyRuntimeError::new_err(format!("forward: {}", e)))?;
 
-            let mut loss_host = vec![0.0f32; num_facts as usize];
-            self.provider
-                .device()
-                .inner()
-                .dtoh_sync_copy_into(&loss_contrib, &mut loss_host)
-                .map_err(|e| PyRuntimeError::new_err(format!("dtoh: {}", e)))?;
-            let total_loss: f32 = loss_host.iter().sum();
+            let d_total_loss = self
+                .provider
+                .ilp_reduce_sum_f32_launch(&loss_contrib, num_facts)
+                .map_err(|e| PyRuntimeError::new_err(format!("reduce: {}", e)))?;
 
             let d_grad = self
                 .provider
@@ -5421,159 +5435,12 @@ impl CompiledIlpProgram {
                 )
                 .map_err(|e| PyRuntimeError::new_err(format!("backward: {}", e)))?;
 
-            self.export_loss_grad_f32(py, total_loss, d_grad, num_cands)
+            self.export_loss_grad_device_f32(py, d_total_loss, d_grad, num_cands)
         }
     }
 
     /// Export a scalar f32 loss and f32 grad vector as DLPack capsules.
-    fn export_loss_grad_f32(
-        &self,
-        py: Python<'_>,
-        total_loss: f32,
-        d_grad: xlog_cuda::memory::TrackedCudaSlice<f32>,
-        num_cands: u32,
-    ) -> PyResult<(PyObject, PyObject)> {
-        let schema_f32 = Schema::new(vec![("col_0".to_string(), ScalarType::F32)]);
-
-        // Loss scalar: upload to GPU as single-element buffer
-        let mut d_loss_val = self
-            .provider
-            .memory()
-            .alloc::<f32>(1)
-            .map_err(|e| PyRuntimeError::new_err(format!("alloc loss: {}", e)))?;
-        self.provider
-            .device()
-            .inner()
-            .htod_sync_copy_into(&[total_loss], &mut d_loss_val)
-            .map_err(|e| PyRuntimeError::new_err(format!("htod loss: {}", e)))?;
-
-        let mut d_loss_nrows = self
-            .provider
-            .memory()
-            .alloc::<u32>(1)
-            .map_err(|e| PyRuntimeError::new_err(format!("alloc: {}", e)))?;
-        self.provider
-            .device()
-            .inner()
-            .htod_sync_copy_into(&[1u32], &mut d_loss_nrows)
-            .map_err(|e| PyRuntimeError::new_err(format!("htod: {}", e)))?;
-
-        let loss_buf = xlog_cuda::CudaBuffer::from_columns(
-            vec![d_loss_val.into_bytes().into()],
-            1,
-            d_loss_nrows,
-            schema_f32.clone(),
-        );
-        let loss_dl = self
-            .provider
-            .to_dlpack_table(loss_buf)
-            .column(0)
-            .map_err(|e| PyRuntimeError::new_err(format!("DLPack loss: {}", e)))?;
-        let loss_capsule = dlpack_capsule_from_tensor(py, loss_dl)?;
-
-        // Grad vector
-        let mut d_grad_nrows = self
-            .provider
-            .memory()
-            .alloc::<u32>(1)
-            .map_err(|e| PyRuntimeError::new_err(format!("alloc: {}", e)))?;
-        self.provider
-            .device()
-            .inner()
-            .htod_sync_copy_into(&[num_cands], &mut d_grad_nrows)
-            .map_err(|e| PyRuntimeError::new_err(format!("htod: {}", e)))?;
-
-        let grad_buf = xlog_cuda::CudaBuffer::from_columns(
-            vec![d_grad.into_bytes().into()],
-            num_cands as u64,
-            d_grad_nrows,
-            schema_f32,
-        );
-        let grad_dl = self
-            .provider
-            .to_dlpack_table(grad_buf)
-            .column(0)
-            .map_err(|e| PyRuntimeError::new_err(format!("DLPack grad: {}", e)))?;
-        let grad_capsule = dlpack_capsule_from_tensor(py, grad_dl)?;
-
-        Ok((loss_capsule, grad_capsule))
-    }
-
-    /// Export a scalar f64 loss and f64 grad vector as DLPack capsules.
-    fn export_loss_grad_f64(
-        &self,
-        py: Python<'_>,
-        total_loss: f64,
-        d_grad: xlog_cuda::memory::TrackedCudaSlice<f64>,
-        num_cands: u32,
-    ) -> PyResult<(PyObject, PyObject)> {
-        let schema_f64 = Schema::new(vec![("col_0".to_string(), ScalarType::F64)]);
-
-        let mut d_loss_val = self
-            .provider
-            .memory()
-            .alloc::<f64>(1)
-            .map_err(|e| PyRuntimeError::new_err(format!("alloc loss: {}", e)))?;
-        self.provider
-            .device()
-            .inner()
-            .htod_sync_copy_into(&[total_loss], &mut d_loss_val)
-            .map_err(|e| PyRuntimeError::new_err(format!("htod loss: {}", e)))?;
-
-        let mut d_loss_nrows = self
-            .provider
-            .memory()
-            .alloc::<u32>(1)
-            .map_err(|e| PyRuntimeError::new_err(format!("alloc: {}", e)))?;
-        self.provider
-            .device()
-            .inner()
-            .htod_sync_copy_into(&[1u32], &mut d_loss_nrows)
-            .map_err(|e| PyRuntimeError::new_err(format!("htod: {}", e)))?;
-
-        let loss_buf = xlog_cuda::CudaBuffer::from_columns(
-            vec![d_loss_val.into_bytes().into()],
-            1,
-            d_loss_nrows,
-            schema_f64.clone(),
-        );
-        let loss_dl = self
-            .provider
-            .to_dlpack_table(loss_buf)
-            .column(0)
-            .map_err(|e| PyRuntimeError::new_err(format!("DLPack loss: {}", e)))?;
-        let loss_capsule = dlpack_capsule_from_tensor(py, loss_dl)?;
-
-        let mut d_grad_nrows = self
-            .provider
-            .memory()
-            .alloc::<u32>(1)
-            .map_err(|e| PyRuntimeError::new_err(format!("alloc: {}", e)))?;
-        self.provider
-            .device()
-            .inner()
-            .htod_sync_copy_into(&[num_cands], &mut d_grad_nrows)
-            .map_err(|e| PyRuntimeError::new_err(format!("htod: {}", e)))?;
-
-        let grad_buf = xlog_cuda::CudaBuffer::from_columns(
-            vec![d_grad.into_bytes().into()],
-            num_cands as u64,
-            d_grad_nrows,
-            schema_f64,
-        );
-        let grad_dl = self
-            .provider
-            .to_dlpack_table(grad_buf)
-            .column(0)
-            .map_err(|e| PyRuntimeError::new_err(format!("DLPack grad: {}", e)))?;
-        let grad_capsule = dlpack_capsule_from_tensor(py, grad_dl)?;
-
-        Ok((loss_capsule, grad_capsule))
-    }
-
     /// Export a device-resident f32 loss scalar and f32 grad vector as DLPack capsules.
-    /// Unlike `export_loss_grad_f32`, this takes a `TrackedCudaSlice<f32>` that is already
-    /// on device, avoiding the host→device upload of the loss value.
     fn export_loss_grad_device_f32(
         &self,
         py: Python<'_>,
