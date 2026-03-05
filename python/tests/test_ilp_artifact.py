@@ -159,3 +159,99 @@ def test_schema_v2_roundtrip(tmp_path):
     art2 = LearnedArtifact.load(path)
     assert art2.discovered_rule == "test rule"
     assert art2.logits == [2.0]
+
+
+def test_telemetry_persistence_roundtrip(tmp_path):
+    """Telemetry snapshot persists and restores when enabled."""
+    from pyxlog.ilp.types import (
+        LearnedArtifact, CandidateMapEntry, ArtifactMetadata,
+        TrainConfig, TrainTelemetry, StepRecord,
+    )
+    config = TrainConfig(persist_telemetry=True, telemetry_persist_limit=5)
+    steps = [
+        StepRecord(step=i, loss=1.0 / (i + 1), argmax_rule="r",
+                   discreteness=0.9, temperature=1.0, entropy=0.5,
+                   stable_count=i)
+        for i in range(10)
+    ]
+    art = LearnedArtifact(
+        candidate_map=[CandidateMapEntry(
+            id=0, i=0, j=0, k=1,
+            left_name="e", right_name="e", head_name="r"
+        )],
+        discovered_rule="test",
+        config_snapshot=config,
+        telemetry=TrainTelemetry(steps=steps, step_timings={"total": 1.5}),
+        metadata=ArtifactMetadata(pyxlog_version="0.5.0"),
+    )
+    path = tmp_path / "telem_artifact.json"
+    art.save(path)
+
+    art2 = LearnedArtifact.load(path)
+    # Should have last 5 steps only (truncated by persist_limit)
+    assert len(art2.telemetry.steps) == 5
+    assert art2.telemetry.steps[0].step == 5  # last 5 of 0..9
+    assert art2.telemetry.step_timings == {"total": 1.5}
+
+
+def test_telemetry_not_persisted_by_default(tmp_path):
+    """Telemetry is NOT saved when persist_telemetry=False (default)."""
+    from pyxlog.ilp.types import (
+        LearnedArtifact, CandidateMapEntry, ArtifactMetadata,
+        TrainConfig, TrainTelemetry, StepRecord,
+    )
+    config = TrainConfig()  # persist_telemetry defaults to False
+    steps = [StepRecord(step=0, loss=1.0, argmax_rule="r",
+                        discreteness=0.9, temperature=1.0, entropy=0.5,
+                        stable_count=0)]
+    art = LearnedArtifact(
+        candidate_map=[CandidateMapEntry(
+            id=0, i=0, j=0, k=1,
+            left_name="e", right_name="e", head_name="r"
+        )],
+        discovered_rule="test",
+        config_snapshot=config,
+        telemetry=TrainTelemetry(steps=steps),
+        metadata=ArtifactMetadata(pyxlog_version="0.5.0"),
+    )
+    path = tmp_path / "no_telem.json"
+    art.save(path)
+
+    import json
+    with open(path) as f:
+        data = json.load(f)
+    assert data.get("telemetry_snapshot") is None
+
+    art2 = LearnedArtifact.load(path)
+    assert len(art2.telemetry.steps) == 0
+
+
+def test_telemetry_persist_limit_truncation(tmp_path):
+    """persist_limit truncates to last N steps."""
+    from pyxlog.ilp.types import (
+        LearnedArtifact, CandidateMapEntry, ArtifactMetadata,
+        TrainConfig, TrainTelemetry, StepRecord,
+    )
+    config = TrainConfig(persist_telemetry=True, telemetry_persist_limit=3)
+    steps = [
+        StepRecord(step=i, loss=float(i), argmax_rule="r",
+                   discreteness=0.9, temperature=1.0, entropy=0.5,
+                   stable_count=0)
+        for i in range(100)
+    ]
+    art = LearnedArtifact(
+        candidate_map=[CandidateMapEntry(
+            id=0, i=0, j=0, k=1,
+            left_name="e", right_name="e", head_name="r"
+        )],
+        discovered_rule="test",
+        config_snapshot=config,
+        telemetry=TrainTelemetry(steps=steps),
+        metadata=ArtifactMetadata(pyxlog_version="0.5.0"),
+    )
+    path = tmp_path / "truncated.json"
+    art.save(path)
+
+    art2 = LearnedArtifact.load(path)
+    assert len(art2.telemetry.steps) == 3
+    assert art2.telemetry.steps[0].step == 97  # last 3 of 0..99

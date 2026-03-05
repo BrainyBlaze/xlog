@@ -66,6 +66,10 @@ class TrainConfig:
     max_telemetry_steps: int = 1000
     telemetry_sink: Path | None = None
 
+    # Artifact telemetry persistence
+    persist_telemetry: bool = False
+    telemetry_persist_limit: int = 100
+
     # Numeric stability
     max_numeric_failures: int = 3
 
@@ -152,11 +156,23 @@ class LearnedArtifact:
             config_str = json.dumps(config_dict, sort_keys=True, default=str)
             config_hash = hashlib.sha256(config_str.encode()).hexdigest()
 
+        # Bounded telemetry snapshot (only when config says persist)
+        telemetry_snapshot = None
+        if (self.config_snapshot
+                and self.config_snapshot.persist_telemetry
+                and self.telemetry.steps):
+            limit = self.config_snapshot.telemetry_persist_limit
+            truncated_steps = self.telemetry.steps[-limit:]
+            telemetry_snapshot = {
+                "steps": [dataclasses.asdict(s) for s in truncated_steps],
+                "step_timings": self.telemetry.step_timings,
+            }
+
         data = {
             "schema_version": "beta-v2",
             "discovered_rule": self.discovered_rule,
             "candidate_map": map_data,
-            # Telemetry intentionally excluded (can be large)
+            "telemetry_snapshot": telemetry_snapshot,
             "logits": self.logits,
             "soft_probs": self.soft_probs,
             "selected_hard": self.selected_hard,
@@ -231,6 +247,18 @@ class LearnedArtifact:
                 )
             config_snapshot = TrainConfig(**raw_config)
 
+        # Restore telemetry from snapshot if present (v2+)
+        telemetry = TrainTelemetry()
+        raw_telemetry = data.get("telemetry_snapshot")
+        if raw_telemetry is not None:
+            restored_steps = [
+                StepRecord(**s) for s in raw_telemetry.get("steps", [])
+            ]
+            telemetry = TrainTelemetry(
+                steps=restored_steps,
+                step_timings=raw_telemetry.get("step_timings"),
+            )
+
         return cls(
             candidate_map=candidate_map,
             logits=data.get("logits", []),
@@ -238,6 +266,7 @@ class LearnedArtifact:
             selected_hard=data.get("selected_hard", []),
             discovered_rule=data.get("discovered_rule", ""),
             config_snapshot=config_snapshot,
+            telemetry=telemetry,
             metadata=metadata,
         )
 
