@@ -1,10 +1,12 @@
-# v0.5.0 Implementation Plan — Sparse Executor + Transfer Elimination
+# v0.5.0 Phase 1 Implementation Plan — Zero Data-Plane D2H + Artifact Schema
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Eliminate the last D2H transfer from `compute_ilp_loss_grad_gpu` via a two-pass bounded-memory GPU-only chunk merge, add artifact schema migration with telemetry persistence, and update release gates.
+**Goal:** Eliminate the last data-plane D2H transfer from `compute_ilp_loss_grad_gpu` (P0), add artifact schema migration with telemetry persistence (P1), and validate release gates (P4).
 
-**Architecture:** Replace the host-side sentinel-filter merge (D2H + H2D round-trip) with a two-pass GPU-only algorithm: pass 1 counts NNZ per task into a device array, pass 2 fills COO at pre-computed offsets. A new `coo_chunk_budget` parameter controls per-chunk temp allocation while allowing the final exact-NNZ output buffer to exceed it. A `dtoh_scalar_untracked` helper reads the 8-byte total_nnz metadata without touching D2H accounting.
+**Scope:** This plan covers P0, P1, and P4 of the v0.5.0 design. P2a (term embeddings), P2b (extended training controls), and P3 (incremental verifier) are separate follow-up plans — they depend on P0 completing first (see design doc sequencing).
+
+**Architecture:** Replace the host-side sentinel-filter merge (D2H + H2D round-trip) with a two-pass GPU-only COO merge algorithm: pass 1 counts NNZ per task into a device array, pass 2 fills COO at pre-computed offsets. A new `coo_chunk_budget` parameter bounds per-chunk temp allocations (masks, prefix sums, scratch) while allowing the final exact-NNZ output buffer to exceed it. Note: per-task `d_mask` buffers are still fully retained before the chunking branch (`lib.rs:4218`); "bounded-memory" refers to the COO merge scratch only, not the total compute-path footprint. A `dtoh_scalar_untracked` helper reads the 4-byte total_nnz metadata without touching D2H accounting.
 
 **Tech Stack:** Rust (PyO3), CUDA C, Python (pytest)
 
@@ -494,16 +496,15 @@ Expected: All tests pass except the strict rejection test (which we'll update in
 
 ```bash
 git add crates/pyxlog/src/lib.rs
-git commit -m "feat(ilp): two-pass GPU-only chunk merge (zero D2H)
+git commit -m "feat(ilp): two-pass GPU-only chunk merge (zero data-plane D2H)
 
-Replace host-side sentinel-filter merge with bounded-memory two-pass
-streaming:
+Replace host-side sentinel-filter merge with two-pass streaming:
 - Pass 1: count_mask_into_slot per task → exclusive scan → total_nnz
 - Pass 2: fill COO at pre-computed per-task offsets
-- Metadata read (4 bytes total_nnz) via dtoh_scalar_untracked
+- 4-byte metadata read (total_nnz) via dtoh_scalar_untracked (untracked)
 
-Chunked path now fully GPU-resident. strict_zero_dtoh no longer needs
-to reject chunking."
+Chunked COO merge now has zero data-plane D2H transfers.
+strict_zero_dtoh no longer needs to reject chunking."
 ```
 
 ---
@@ -962,33 +963,82 @@ restores telemetry from snapshot if present, else empty."
 
 **Files:** None modified (validation only)
 
-**Context:** P4 release gates from the design doc. These are verification-only steps.
+**Context:** P4 release gates from the approved design doc (design.md:285-299). The D2H gate applies to `compute_ilp_loss_grad_gpu` only, not the full training step. Three mandatory gates plus one Rust workspace check.
 
-**Step 1: Zero compute-path D2H gate**
+**Step 1: Gate 1 — Zero data-plane D2H on all 4 ILP stages**
 
-Run: `.venv/bin/python -m pytest python/tests/test_ilp_credit_gpu.py -v 2>&1 | tail -20`
-Expected: All pass, including `test_strict_zero_dtoh_chunked_passes`
+This gate requires `strict_zero_dtoh=True` to pass on all 4 stages (reach, grandparent, colleague, plus2) with both default and tiny `coo_chunk_budget`. The strict D2H tests in `test_ilp_credit_gpu.py` cover reach. We also need the 4-stage coverage from `test_ilp_reliability.py`.
 
-**Step 2: Full Python regression suite**
+Run: `.venv/bin/python -m pytest python/tests/test_ilp_credit_gpu.py -v -k "dtoh" 2>&1 | tail -20`
+Expected: All D2H tests pass, including `test_strict_zero_dtoh_chunked_passes`
 
-Run: `.venv/bin/python -m pytest python/tests/ -v --ignore=python/tests/test_ilp_ga_reliability.py 2>&1 | tail -30`
+Run: `.venv/bin/python -m pytest python/tests/test_ilp_reliability.py -v -k "not slow" 2>&1 | tail -20`
+Expected: All non-slow reliability tests pass (4 stages)
+
+If no non-slow 4-stage strict D2H test exists yet, verify manually:
+```bash
+.venv/bin/python -c "
+from test_ilp_reliability import STAGES
+from pyxlog.ilp import TrainConfig, train_only
+for name, source, pos, neg, mask in STAGES:
+    print(f'Testing {name}...')
+    result = train_only(source, mask, pos, neg, TrainConfig(
+        step_budget_per_attempt=80, max_attempts=3, seed=42, deterministic=True))
+    print(f'  {name}: converged={result.converged}')
+print('All 4 stages complete.')
+"
+```
+Expected: All 4 stages converge.
+
+**Step 2: Gate 2 — SLO harness**
+
+Run: `.venv/bin/python -m pytest python/tests/test_ilp_performance.py -v 2>&1 | tail -15`
+Expected: All SLO tests pass (this file exists and contains `test_forward_and_memory_telemetry_smoke` plus transfer accounting checks)
+
+**Step 3: Gate 3 — 50-seed GA reliability**
+
+Run: `.venv/bin/python -m pytest python/tests/test_ilp_ga_reliability.py -v 2>&1 | tail -15`
+Expected: 200/200 pass (≤600s). This is the full GA gate from design.md:293.
+
+Note: This test is slow (~400-600s). If running in CI, ensure adequate timeout.
+
+**Step 4: ILP regression suite (curated)**
+
+Run the ILP-specific test files that are on the P0/P1 critical path:
+```bash
+.venv/bin/python -m pytest \
+    python/tests/test_ilp_credit_gpu.py \
+    python/tests/test_ilp_artifact.py \
+    python/tests/test_ilp_d2h_gate.py \
+    python/tests/test_ilp_backend.py \
+    python/tests/test_ilp_sparse.py \
+    python/tests/test_ilp_sparse_guard.py \
+    python/tests/test_ilp_beta_gate.py \
+    python/tests/test_ilp_performance.py \
+    python/tests/test_ilp_reliability.py \
+    python/tests/test_ilp_reset.py \
+    -v 2>&1 | tail -30
+```
 Expected: All pass
 
-**Step 3: Rust workspace tests**
+**Step 5: Rust workspace tests**
 
 Run: `cargo test --workspace --all-targets --exclude pyxlog --release 2>&1 | tail -10`
 Expected: All pass
 
-**Step 4: SLO harness (if present)**
+**Step 6: Verify no regressions in remaining Python tests**
 
-Run: `.venv/bin/python -m pytest python/tests/test_ilp_performance.py -v 2>&1 | tail -10`
-Expected: Pass
+Run: `.venv/bin/python -m pytest python/tests/ -v --ignore=python/tests/test_ilp_ga_reliability.py -x 2>&1 | tail -30`
+Expected: All pass (this catches any non-ILP regressions, `-x` stops on first failure for faster feedback)
 
-**Step 5: Commit docs update**
+**Step 7: Commit**
 
 ```bash
-git add -A
-git commit -m "docs: v0.5.0 P0+P1 implementation complete — release gate pass"
+git add docs/plans/2026-03-05-v050-implementation.md docs/plans/2026-03-05-v050-execution-design.md
+git commit -m "docs: v0.5.0 phase 1 (P0+P1) implementation complete — all P4 gates pass
+
+Verified: 4-stage strict zero data-plane D2H, SLO harness, 50-seed GA
+reliability (200/200), ILP regression suite, Rust workspace tests."
 ```
 
 ---
@@ -1006,3 +1056,11 @@ Task 8 (release gates) — after all above
 ```
 
 Tasks 1-5 are sequential (each builds on the previous). Tasks 6-7 are independent of 1-5 but must be sequential with each other. Task 8 is the final validation gate.
+
+## Out of Scope (follow-up plans)
+
+The following tiers from the v0.5.0 design are **not** covered by this plan:
+
+- **P2a: Term embeddings** — depends on P0 completing (touches `lib.rs`). Separate plan.
+- **P2b: Extended training controls** — depends on P0 completing (touches `lib.rs`). Separate plan.
+- **P3: Incremental verifier interface** — file-independent but architecturally complex. Separate plan.
