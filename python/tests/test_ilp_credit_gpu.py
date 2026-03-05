@@ -481,3 +481,45 @@ def test_compute_ilp_loss_grad_gpu_memory_cap():
     assert torch.allclose(grad, grad_ref, atol=1e-5), (
         f"chunked grad={grad} != ref={grad_ref}"
     )
+
+
+def test_strict_zero_dtoh_rejects_chunking():
+    """strict_zero_dtoh mode raises when chunking would be needed."""
+    prog = pyxlog.IlpProgramFactory.compile("""
+        pred edge(u32, u32). pred reach(u32, u32).
+        edge(1, 2). edge(2, 3).
+        learnable(W) :: reach(X, Y) :- bL(X, Z), bR(Z, Y).
+    """, device=0, memory_mb=64)
+    prog.evaluate()
+
+    N = prog.ilp_schema_size()
+    names = prog.ilp_relation_names()
+    edge_idx = names.index("edge")
+    reach_idx = names.index("reach")
+
+    cand = (edge_idx, edge_idx, reach_idx)
+    device = torch.device("cuda:0")
+    mask = torch.zeros(N ** 3, device=device, dtype=torch.float32)
+    mask[edge_idx * N * N + edge_idx * N + reach_idx] = 1.0
+    prog.set_rule_mask("W", mask, mask, N)
+    prog.evaluate()
+
+    prog.set_candidate_map([cand])
+    cand_probs = torch.tensor([0.5], device=device, dtype=torch.float32)
+
+    # Enable strict mode + tiny cap to force chunking
+    prog.set_strict_zero_dtoh(True)
+    prog.set_coo_memory_cap(1)
+
+    with pytest.raises(RuntimeError, match="strict_zero_dtoh"):
+        prog.compute_ilp_loss_grad_gpu(
+            [("reach", [1, 3])], [("reach", [1, 2])], cand_probs
+        )
+
+    # With default cap (plenty of room), strict mode should succeed
+    prog.set_coo_memory_cap(16 * 1024 * 1024)
+    loss_dl, grad_dl = prog.compute_ilp_loss_grad_gpu(
+        [("reach", [1, 3])], [("reach", [1, 2])], cand_probs
+    )
+    loss = torch.from_dlpack(loss_dl)
+    assert torch.isfinite(loss).item()

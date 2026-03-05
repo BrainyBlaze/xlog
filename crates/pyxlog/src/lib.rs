@@ -3962,6 +3962,7 @@ impl IlpProgramFactory {
             max_active_rules: active_rules,
             candidate_map: None,
             coo_memory_cap: 16 * 1024 * 1024,
+            strict_zero_dtoh: false,
         })
     }
 }
@@ -3987,6 +3988,9 @@ pub struct CompiledIlpProgram {
     /// computation would exceed this cap, candidates are processed in chunks.
     /// Default: 16 MB.
     coo_memory_cap: u64,
+    /// When true, raise instead of falling back to chunked COO path.
+    /// Use in zero-D2H benchmarks and CI gates. Default: false.
+    strict_zero_dtoh: bool,
 }
 
 #[pymethods]
@@ -4011,6 +4015,13 @@ impl CompiledIlpProgram {
     /// in chunks. Default: 16 MB.
     pub fn set_coo_memory_cap(&mut self, bytes: u64) {
         self.coo_memory_cap = bytes;
+    }
+
+    /// Enable strict zero-D2H mode. When true, raises RuntimeError instead
+    /// of falling back to the chunked COO path (which uses D2H transfers).
+    /// Use for zero-D2H benchmarks and CI gates.
+    pub fn set_strict_zero_dtoh(&mut self, strict: bool) {
+        self.strict_zero_dtoh = strict;
     }
 
     /// GPU-resident ILP loss + gradient computation.
@@ -4234,6 +4245,14 @@ impl CompiledIlpProgram {
         // Each COO entry uses 8 bytes (4 for fact_idx + 4 for cand_idx).
         let coo_bytes = (upper_bound as u64) * 8;
         let needs_chunking = coo_bytes > self.coo_memory_cap;
+
+        if needs_chunking && self.strict_zero_dtoh {
+            return Err(PyRuntimeError::new_err(format!(
+                "strict_zero_dtoh: COO allocation {} bytes exceeds cap {} bytes; \
+                 chunked fallback would require D2H transfers",
+                coo_bytes, self.coo_memory_cap
+            )));
+        }
 
         // Upload is_positive once (shared across all paths, H2D allowed)
         let mut d_is_positive = self
