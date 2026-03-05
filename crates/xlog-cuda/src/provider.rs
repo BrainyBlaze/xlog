@@ -8324,28 +8324,38 @@ impl CudaKernelProvider {
         self.filter_by_device_mask(left, &d_has_match)
     }
 
-    /// Compute a per-row membership mask: for each row in `probe`, check whether
-    /// a matching row exists in `build` (by the specified key columns).
-    /// Returns a `Vec<bool>` of length = probe row count.
-    /// This downloads only num_probe bytes (the mask), NOT column data.
-    pub fn membership_mask(
+    /// Compute a per-row membership mask on device: for each row in `probe`,
+    /// check whether a matching row exists in `build` (by the specified key
+    /// columns).  Returns a `TrackedCudaSlice<u8>` of length = probe row count
+    /// that stays GPU-resident (no D2H transfer).
+    pub fn membership_mask_device(
         &self,
         probe: &CudaBuffer,
         build: &CudaBuffer,
         probe_keys: &[usize],
         build_keys: &[usize],
-    ) -> Result<Vec<bool>> {
+    ) -> Result<TrackedCudaSlice<u8>> {
         let num_probe = self.device_row_count(probe)?;
         let num_build = self.device_row_count(build)?;
 
-        // Edge case: empty probe → empty mask
+        // Edge case: empty probe → empty device allocation
         if num_probe == 0 {
-            return Ok(Vec::new());
+            return self.memory.alloc::<u8>(0);
         }
 
-        // Edge case: empty build → no matches possible
+        // Edge case: empty build → no matches possible, return zeroed mask
         if num_build == 0 {
-            return Ok(vec![false; num_probe]);
+            let mut d_mask = self.memory.alloc::<u8>(num_probe)?;
+            self.device
+                .inner()
+                .memset_zeros(&mut d_mask)
+                .map_err(|e| {
+                    XlogError::Kernel(format!(
+                        "Failed to zero membership mask for empty build: {}",
+                        e
+                    ))
+                })?;
+            return Ok(d_mask);
         }
 
         if num_probe > u32::MAX as usize || num_build > u32::MAX as usize {
@@ -8435,7 +8445,25 @@ impl CudaKernelProvider {
                 .map_err(|e| XlogError::Kernel(format!("hash_join_semi failed: {}", e)))?;
         }
 
-        // Download the mask to host (N bytes only — NOT counted as a column D2H transfer)
+        Ok(d_has_match)
+    }
+
+    /// Compute a per-row membership mask: for each row in `probe`, check whether
+    /// a matching row exists in `build` (by the specified key columns).
+    /// Returns a `Vec<bool>` of length = probe row count.
+    /// This downloads only num_probe bytes (the mask), NOT column data.
+    pub fn membership_mask(
+        &self,
+        probe: &CudaBuffer,
+        build: &CudaBuffer,
+        probe_keys: &[usize],
+        build_keys: &[usize],
+    ) -> Result<Vec<bool>> {
+        let d_has_match = self.membership_mask_device(probe, build, probe_keys, build_keys)?;
+        let num_probe = d_has_match.len();
+        if num_probe == 0 {
+            return Ok(Vec::new());
+        }
         let mut host_mask = vec![0u8; num_probe];
         self.device
             .inner()
@@ -8443,8 +8471,6 @@ impl CudaKernelProvider {
             .map_err(|e| {
                 XlogError::Kernel(format!("Failed to download membership mask: {}", e))
             })?;
-
-        // Convert u8 mask to Vec<bool>
         Ok(host_mask.into_iter().map(|b| b != 0).collect())
     }
 
