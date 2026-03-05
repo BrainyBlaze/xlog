@@ -37,3 +37,8 @@ harness = true
 name = "properties"
 path = "tests/properties.rs"
 harness = true
+
+[[test]]
+name = "count_mask_device"
+path = "tests/count_mask_device.rs"
+harness = true

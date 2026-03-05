@@ -4468,6 +4468,52 @@ impl CudaKernelProvider {
         Ok(prefix_sum)
     }
 
+    /// Count non-zero entries in a u8 mask on device (no host reads).
+    ///
+    /// Returns a 1-element device buffer containing the count.
+    pub fn count_mask_device(
+        &self,
+        mask: &crate::memory::TrackedCudaSlice<u8>,
+        n: u32,
+    ) -> Result<crate::memory::TrackedCudaSlice<u32>> {
+        let mut d_count = self.memory.alloc::<u32>(1)?;
+        self.device
+            .inner()
+            .htod_sync_copy_into(&[0u32], &mut d_count)
+            .map_err(|e| XlogError::Kernel(format!("count_mask_device: zero init failed: {}", e)))?;
+
+        if n == 0 {
+            return Ok(d_count);
+        }
+
+        let device = self.device.inner();
+        let block_size = 256u32;
+        let grid_size = (n + block_size - 1) / block_size;
+
+        let count_fn = device
+            .get_func(SCAN_MODULE, scan_kernels::COUNT_MASK)
+            .ok_or_else(|| {
+                XlogError::Kernel("count_mask kernel not found".to_string())
+            })?;
+
+        // SAFETY: count_mask(mask, n, count)
+        unsafe {
+            count_fn.clone().launch(
+                LaunchConfig {
+                    grid_dim: (grid_size, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (mask, n, &mut d_count),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("count_mask kernel failed: {}", e)))?;
+
+        self.device.synchronize()?;
+
+        Ok(d_count)
+    }
+
     /// Apply permutation to reorder all columns in buffer using GPU
     fn apply_permutation_gpu(
         &self,
