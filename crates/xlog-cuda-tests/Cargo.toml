@@ -42,3 +42,8 @@ harness = true
 name = "count_mask_device"
 path = "tests/count_mask_device.rs"
 harness = true
+
+[[test]]
+name = "ilp_coo_fill_from_mask"
+path = "tests/ilp_coo_fill_from_mask.rs"
+harness = true

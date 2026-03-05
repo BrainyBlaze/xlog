@@ -256,6 +256,7 @@ pub mod neural_kernels {
 /// Kernel function names in the ILP module.
 pub mod ilp_kernels {
     pub const EXTRACT_NONZERO_INDICES: &str = "extract_nonzero_indices";
+    pub const ILP_COO_FILL_FROM_MASK: &str = "ilp_coo_fill_from_mask";
 }
 
 /// Kernel function names in the ILP credit module.
@@ -1489,7 +1490,10 @@ impl CudaKernelProvider {
                 .load_ptx(
                     ptx,
                     ILP_MODULE,
-                    &[ilp_kernels::EXTRACT_NONZERO_INDICES],
+                    &[
+                        ilp_kernels::EXTRACT_NONZERO_INDICES,
+                        ilp_kernels::ILP_COO_FILL_FROM_MASK,
+                    ],
                 )
                 .map_err(|e| {
                     XlogError::Kernel(format!("Failed to load ILP module: {}", e))
@@ -11178,6 +11182,67 @@ impl CudaKernelProvider {
         indices.truncate(max_active);
 
         Ok(indices.into_iter().map(|(_, i, j, k)| (i, j, k)).collect())
+    }
+
+    /// Fill COO arrays from a device-side mask and prefix-sum.
+    ///
+    /// For each set bit in `mask`, writes the corresponding `fact_indices` entry
+    /// into `coo_fact` and the candidate index `cidx` into `coo_cand` at the
+    /// position determined by `d_offsets[cidx] + prefix_sum[tid]`.
+    ///
+    /// This keeps COO assembly fully on device, eliminating the mask D2H transfer.
+    pub fn ilp_coo_fill_from_mask_launch(
+        &self,
+        mask: &TrackedCudaSlice<u8>,
+        prefix_sum: &TrackedCudaSlice<u32>,
+        fact_indices: &TrackedCudaSlice<u32>,
+        cidx: u32,
+        num_query: u32,
+        d_offsets: &TrackedCudaSlice<u32>,
+        coo_fact: &mut TrackedCudaSlice<u32>,
+        coo_cand: &mut TrackedCudaSlice<u32>,
+    ) -> Result<()> {
+        if num_query == 0 {
+            return Ok(());
+        }
+        let func = self
+            .device()
+            .inner()
+            .get_func(ILP_MODULE, ilp_kernels::ILP_COO_FILL_FROM_MASK)
+            .ok_or_else(|| {
+                XlogError::Kernel("ilp_coo_fill_from_mask not found".to_string())
+            })?;
+        let block_size = 256u32;
+        let grid_size = (num_query + block_size - 1) / block_size;
+        unsafe {
+            func.clone().launch(
+                LaunchConfig {
+                    grid_dim: (grid_size, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (
+                    mask,
+                    prefix_sum,
+                    fact_indices,
+                    cidx,
+                    num_query,
+                    d_offsets,
+                    coo_fact,
+                    coo_cand,
+                ),
+            )
+        }
+        .map_err(|e| {
+            XlogError::Kernel(format!("ilp_coo_fill_from_mask: {}", e))
+        })?;
+        self.device()
+            .inner()
+            .synchronize()
+            .map_err(|e| {
+                XlogError::Kernel(format!("ilp_coo_fill_from_mask sync: {}", e))
+            })?;
+        Ok(())
     }
 }
 

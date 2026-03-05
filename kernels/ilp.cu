@@ -24,3 +24,27 @@ extern "C" __global__ void extract_nonzero_indices(
         out_priority[pos] = mask_soft[idx];
     }
 }
+
+/// Fill COO arrays from device-side mask + prefix-sum.
+/// Reads write offset from d_offsets[cidx] on device, avoiding mask D2H.
+/// For each set bit in mask, writes the corresponding fact_index and cidx
+/// into the COO arrays at the position determined by (offset + prefix_sum[tid]).
+extern "C" __global__ void ilp_coo_fill_from_mask(
+    const uint8_t* mask,
+    const uint32_t* prefix_sum,
+    const uint32_t* fact_indices,
+    uint32_t cidx,
+    uint32_t num_query,
+    const uint32_t* d_offsets,
+    uint32_t* coo_fact,
+    uint32_t* coo_cand
+) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= num_query) return;
+    if (mask[tid]) {
+        uint32_t offset = d_offsets[cidx];
+        uint32_t write_idx = offset + prefix_sum[tid];
+        coo_fact[write_idx] = fact_indices[tid];
+        coo_cand[write_idx] = cidx;
+    }
+}
