@@ -3961,7 +3961,7 @@ impl IlpProgramFactory {
             head_rel_name: tmj.head_rel_name,
             max_active_rules: active_rules,
             candidate_map: None,
-            coo_memory_cap: 16 * 1024 * 1024,
+            coo_chunk_budget: 16 * 1024 * 1024,
             strict_zero_dtoh: false,
         })
     }
@@ -3984,10 +3984,10 @@ pub struct CompiledIlpProgram {
     head_rel_name: String,
     max_active_rules: usize,
     candidate_map: Option<HashMap<(u32, u32, u32), u32>>,
-    /// Maximum COO buffer size in bytes. If the COO allocation for a loss
-    /// computation would exceed this cap, candidates are processed in chunks.
-    /// Default: 16 MB.
-    coo_memory_cap: u64,
+    /// Maximum bytes for per-chunk temp allocations (masks, prefix sums,
+    /// chunk-local COO scratch). The final merged COO buffer is exact-NNZ
+    /// sized and may exceed this budget. Default: 16 MB.
+    coo_chunk_budget: u64,
     /// When true, raise instead of falling back to chunked COO path.
     /// Use in zero-D2H benchmarks and CI gates. Default: false.
     strict_zero_dtoh: bool,
@@ -4010,11 +4010,16 @@ impl CompiledIlpProgram {
         self.candidate_map.as_ref().map_or(0, |m| m.len())
     }
 
-    /// Set the maximum COO buffer size in bytes. If the COO allocation
-    /// for a loss computation would exceed this cap, candidates are processed
-    /// in chunks. Default: 16 MB.
+    /// Set the per-chunk temp allocation budget in bytes. The final merged
+    /// COO buffer is exact-NNZ sized and may exceed this budget. Default: 16 MB.
+    pub fn set_coo_chunk_budget(&mut self, bytes: u64) {
+        self.coo_chunk_budget = bytes;
+    }
+
+    /// Deprecated: use `set_coo_chunk_budget`. Kept for one release cycle.
+    #[allow(deprecated)]
     pub fn set_coo_memory_cap(&mut self, bytes: u64) {
-        self.coo_memory_cap = bytes;
+        self.coo_chunk_budget = bytes;
     }
 
     /// Enable strict zero-D2H mode. When true, raises RuntimeError instead
@@ -4244,13 +4249,13 @@ impl CompiledIlpProgram {
         // Check if COO allocation would exceed memory cap.
         // Each COO entry uses 8 bytes (4 for fact_idx + 4 for cand_idx).
         let coo_bytes = (upper_bound as u64) * 8;
-        let needs_chunking = coo_bytes > self.coo_memory_cap;
+        let needs_chunking = coo_bytes > self.coo_chunk_budget;
 
         if needs_chunking && self.strict_zero_dtoh {
             return Err(PyRuntimeError::new_err(format!(
                 "strict_zero_dtoh: COO allocation {} bytes exceeds cap {} bytes; \
                  chunked fallback would require D2H transfers",
-                coo_bytes, self.coo_memory_cap
+                coo_bytes, self.coo_chunk_budget
             )));
         }
 
@@ -4358,7 +4363,7 @@ impl CompiledIlpProgram {
             // per-chunk: NLL loss is -log(sum), which is nonlinear.
             // We must build ONE complete CSR and run forward/backward ONCE.
 
-            let max_queries_per_chunk = (self.coo_memory_cap / 8).max(1) as u32;
+            let max_queries_per_chunk = (self.coo_chunk_budget / 8).max(1) as u32;
             let sentinel_fact = num_facts;
 
             // Host accumulators for merged COO entries (sentinel-free).
