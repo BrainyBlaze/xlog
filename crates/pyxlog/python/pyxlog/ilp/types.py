@@ -153,7 +153,7 @@ class LearnedArtifact:
             config_hash = hashlib.sha256(config_str.encode()).hexdigest()
 
         data = {
-            "schema_version": "beta-v1",
+            "schema_version": "beta-v2",
             "discovered_rule": self.discovered_rule,
             "candidate_map": map_data,
             # Telemetry intentionally excluded (can be large)
@@ -198,9 +198,11 @@ class LearnedArtifact:
 
         # Schema version compatibility check (always validated)
         stored_version = data.get("schema_version", "")
-        if stored_version and stored_version != "beta-v1":
+        _SUPPORTED_VERSIONS = {"beta-v1", "beta-v2"}
+        if stored_version and stored_version not in _SUPPORTED_VERSIONS:
             raise ValueError(
-                f"Incompatible schema version: {stored_version} (expected beta-v1)"
+                f"Incompatible schema version: {stored_version} "
+                f"(supported: {sorted(_SUPPORTED_VERSIONS)})"
             )
 
         meta_data = data.get("metadata", {})

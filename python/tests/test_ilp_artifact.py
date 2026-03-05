@@ -95,3 +95,67 @@ def test_config_snapshot_roundtrip(tmp_path):
     loaded = LearnedArtifact.load(path)
     assert loaded.config_snapshot is not None, "config_snapshot should be restored"
     assert loaded.config_snapshot == config
+
+
+def test_schema_v1_loads_in_v2_code(tmp_path):
+    """A beta-v1 artifact must load cleanly in v2 code."""
+    import json
+    v1_data = {
+        "schema_version": "beta-v1",
+        "discovered_rule": "reach(X,Y) :- edge(X,Z), edge(Z,Y).",
+        "candidate_map": [
+            {"id": 0, "i": 0, "j": 0, "k": 1,
+             "left_name": "edge", "right_name": "edge", "head_name": "reach"}
+        ],
+        "logits": [1.5],
+        "soft_probs": [0.82],
+        "selected_hard": [0],
+        "metadata": {
+            "pyxlog_version": "0.4.0",
+            "cuda_version": "12.6",
+            "device_name": "test",
+            "candidate_map_hash": "",
+            "config_hash": "",
+            "timestamp_utc": "2026-01-01T00:00:00Z",
+        },
+        "config_snapshot": None,
+    }
+    path = tmp_path / "v1_artifact.json"
+    with open(path, "w") as f:
+        json.dump(v1_data, f)
+
+    from pyxlog.ilp.types import LearnedArtifact
+    art = LearnedArtifact.load(path)
+    assert art.discovered_rule == "reach(X,Y) :- edge(X,Z), edge(Z,Y)."
+    assert len(art.candidate_map) == 1
+    # Telemetry should be empty (v1 has no telemetry_snapshot)
+    assert len(art.telemetry.steps) == 0
+
+
+def test_schema_v2_roundtrip(tmp_path):
+    """Save as v2, load back, verify fields."""
+    from pyxlog.ilp.types import (
+        LearnedArtifact, CandidateMapEntry, ArtifactMetadata
+    )
+    art = LearnedArtifact(
+        candidate_map=[CandidateMapEntry(
+            id=0, i=0, j=0, k=1,
+            left_name="edge", right_name="edge", head_name="reach"
+        )],
+        logits=[2.0],
+        soft_probs=[0.88],
+        selected_hard=[0],
+        discovered_rule="test rule",
+        metadata=ArtifactMetadata(pyxlog_version="0.5.0"),
+    )
+    path = tmp_path / "v2_artifact.json"
+    art.save(path)
+
+    import json
+    with open(path) as f:
+        data = json.load(f)
+    assert data["schema_version"] == "beta-v2"
+
+    art2 = LearnedArtifact.load(path)
+    assert art2.discovered_rule == "test rule"
+    assert art2.logits == [2.0]
