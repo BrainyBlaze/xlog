@@ -1627,6 +1627,42 @@ impl CudaKernelProvider {
             .map_err(|e| XlogError::Kernel(format!("Failed to copy from device: {}", e)))
     }
 
+    /// Read a single scalar from device to host WITHOUT updating the
+    /// D2H transfer tracker. Use ONLY for metadata reads (e.g. total_nnz
+    /// after an exclusive scan), never for data-plane transfers.
+    ///
+    /// This makes the "metadata != data-plane" contract explicit and
+    /// auditable: callers that bypass tracking must call this method
+    /// (which is grep-able) rather than reaching for device().inner().
+    pub fn dtoh_scalar_untracked<T: DeviceRepr + Default + Copy>(
+        &self,
+        src: &crate::memory::TrackedCudaSlice<T>,
+        index: usize,
+    ) -> Result<T> {
+        if index >= src.len() {
+            return Err(XlogError::Kernel(format!(
+                "dtoh_scalar_untracked: index={} >= len={}",
+                index,
+                src.len()
+            )));
+        }
+        let slice = src.try_slice(index..index + 1)
+            .ok_or_else(|| {
+                XlogError::Kernel(format!(
+                    "dtoh_scalar_untracked: slice failed at index={}",
+                    index
+                ))
+            })?;
+        let mut buf = [T::default()];
+        self.device
+            .inner()
+            .dtoh_sync_copy_into(&slice, &mut buf)
+            .map_err(|e| XlogError::Kernel(format!(
+                "dtoh_scalar_untracked: copy failed: {}", e
+            )))?;
+        Ok(buf[0])
+    }
+
     fn htod_sync_copy_into_tracked<T: DeviceRepr, Dst: cudarc::driver::DevicePtrMut<T>>(
         &self,
         src: &[T],
