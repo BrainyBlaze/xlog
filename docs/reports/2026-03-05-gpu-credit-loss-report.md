@@ -1,7 +1,7 @@
 # GPU-Resident ILP Credit/Loss — Performance Report
 
 **Date:** 2026-03-05
-**Commit:** `d268f0de` (test(ilp): strict D2H acceptance gate via host\_transfer\_stats)
+**Commit:** `87f689cb` (fix(ilp): eliminate D2H from empty-COO and zero-loss paths)
 **Plan:** `docs/plans/2026-03-05-sparse-executor-transfer-elimination-impl.md`
 
 ---
@@ -31,13 +31,15 @@ Two independent gates confirm zero host transfers during `compute_ilp_loss_grad_
 1. **Coarse gate** (`d2h_transfer_count()`): 0 column-level D2H transfers.
 2. **Strict gate** (`host_transfer_stats()`): `dtoh_calls=0`, `dtoh_bytes=0`.
 
-All three original D2H transfers have been eliminated:
+All five D2H transfer sites have been eliminated from non-chunked paths:
 
 | Transfer | Old path | New path |
 |----------|----------|----------|
 | Membership mask download | `dtoh_sync_copy` per candidate | `scan_u8_mask_device` + `ilp_coo_fill_from_mask` kernel on-device |
 | COO facts D2H for CSR build | `dtoh_sync_copy` of sorted facts | `ilp_csr_histogram` kernel + GPU prefix-sum |
-| Loss reduction D2H | `dtoh_sync_copy` of loss array | `ilp_reduce_sum_{f32,f64}` kernel → device-resident scalar |
+| Loss reduction D2H (main path) | `dtoh_sync_copy` of loss array | `ilp_reduce_sum_{f32,f64}` kernel → device-resident scalar |
+| Loss reduction D2H (empty-COO) | `dtoh_sync_copy_into` + host sum | `ilp_reduce_sum_{f32,f64}_launch` on device |
+| Zero-loss scalar upload | host `0.0` → `htod_sync_copy` | `alloc` + `memset_zeros` (device-only) |
 
 **Chunked fallback path** (activated when COO allocation exceeds `coo_memory_cap`, default 16 MB): Uses bounded D2H transfers per chunk, merges on host, then H2D uploads merged COO. This is a correctness fallback for large candidate sets; the default path is fully zero-D2H.
 
@@ -93,3 +95,4 @@ CUDA kernels: `kernels/ilp_credit.cu` (forward/backward f32/f64), `kernels/ilp.c
 1. ~~Move COO/CSR construction fully to GPU~~ — Done: `ilp_coo_fill_from_mask` kernel + `ilp_csr_histogram` kernel
 2. ~~Route all D2H/H2D through tracked wrappers~~ — Done: `host_transfer_stats()` strict accounting
 3. ~~Memory cap + chunked fallback~~ — Done: `coo_memory_cap` field with bounded-memory chunked COO assembly
+4. ~~Eliminate D2H from empty-COO and zero-loss paths~~ — Done: device-side reduce + `memset_zeros`; legacy `export_loss_grad_f32/f64` helpers removed
