@@ -464,7 +464,7 @@ def test_compute_ilp_loss_grad_gpu_memory_cap():
     grad_ref = torch.from_dlpack(grad_ref_dl).clone()
 
     # Force chunking: 1-byte cap means each task is its own chunk
-    prog.set_coo_memory_cap(1)
+    prog.set_coo_chunk_budget(1)
 
     loss_dl, grad_dl = prog.compute_ilp_loss_grad_gpu(
         positives, negatives, cand_probs
@@ -483,8 +483,8 @@ def test_compute_ilp_loss_grad_gpu_memory_cap():
     )
 
 
-def test_strict_zero_dtoh_rejects_chunking():
-    """strict_zero_dtoh mode raises when chunking would be needed."""
+def test_strict_zero_dtoh_chunked_passes():
+    """Chunked path now GPU-only — must pass under strict_zero_dtoh."""
     prog = pyxlog.IlpProgramFactory.compile("""
         pred edge(u32, u32). pred reach(u32, u32).
         edge(1, 2). edge(2, 3).
@@ -507,19 +507,33 @@ def test_strict_zero_dtoh_rejects_chunking():
     prog.set_candidate_map([cand])
     cand_probs = torch.tensor([0.5], device=device, dtype=torch.float32)
 
-    # Enable strict mode + tiny cap to force chunking
+    # Enable strict mode + tiny budget to force chunking
     prog.set_strict_zero_dtoh(True)
-    prog.set_coo_memory_cap(1)
+    prog.set_coo_chunk_budget(1)  # Force chunking
 
-    with pytest.raises(RuntimeError, match="strict_zero_dtoh"):
-        prog.compute_ilp_loss_grad_gpu(
-            [("reach", [1, 3])], [("reach", [1, 2])], cand_probs
-        )
-
-    # With default cap (plenty of room), strict mode should succeed
-    prog.set_coo_memory_cap(16 * 1024 * 1024)
+    # Reset stats, run loss/grad, verify zero tracked D2H
+    prog.reset_host_transfer_stats()
     loss_dl, grad_dl = prog.compute_ilp_loss_grad_gpu(
         [("reach", [1, 3])], [("reach", [1, 2])], cand_probs
     )
     loss = torch.from_dlpack(loss_dl)
-    assert torch.isfinite(loss).item()
+    assert torch.isfinite(loss).item(), f"Loss not finite: {loss.item()}"
+
+    stats = prog.host_transfer_stats()
+    assert stats['dtoh_calls'] == 0, (
+        f"Chunked path caused {stats['dtoh_calls']} tracked D2H calls; expected 0"
+    )
+    assert stats['dtoh_bytes'] == 0, (
+        f"Chunked path transferred {stats['dtoh_bytes']} tracked D2H bytes; expected 0"
+    )
+
+
+def test_deprecated_set_coo_memory_cap():
+    """Deprecated alias still works."""
+    prog = pyxlog.IlpProgramFactory.compile("""
+        pred edge(u32, u32). pred reach(u32, u32).
+        edge(1, 2). edge(2, 3).
+        learnable(W) :: reach(X, Y) :- bL(X, Z), bR(Z, Y).
+    """, device=0, memory_mb=64)
+    # Should not raise — alias forwards to set_coo_chunk_budget
+    prog.set_coo_memory_cap(1024)
