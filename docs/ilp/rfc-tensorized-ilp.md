@@ -1,9 +1,20 @@
 # RFC: Tensorized Differentiable ILP in XLOG
 
-**Status:** Draft v4.4
-**Date:** 2026-02-23
-**Supersedes:** docs/ilp/1.md through docs/ilp/10.md, RFC v1–v4.2
+**Status:** Draft v5
+**Date:** 2026-03-05
+**Supersedes:** docs/ilp/1.md through docs/ilp/10.md, RFC v1–v4.4
 **References:** docs/ilp/live-5714-10391-jair.pdf (DeepMind ILP/JAIR), docs/ilp/2505.14744v1.pdf (TIIPS)
+
+### v5 Changes (2026-03-05)
+
+This revision reconciles RFC text with implemented behavior post-v0.4.0-GA:
+
+- **RD-6 updated**: Per-(i,j) argmax replaced by global 1D Gumbel-softmax/top-k over sparse candidate list. Reflects actual `SparseMaskBackend` semantics.
+- **Performance target scoped**: Zero host round-trip target now applies to the loss/grad compute path (`compute_ilp_loss_grad_gpu`). Witness/convergence checks (`batch_fact_membership`) still perform bounded D2H reads; these are outside the inner gradient step.
+- **RD-17 updated**: `IlpTagEntry` retains `buffer: Option<CudaBuffer>` for batch credit queries. The no-buffer constraint is removed.
+- **Benchmark gates updated**: Phase 5 acceptance tests now use reach/grandparent/colleague/plus2 (4 stages x 5 seeds = 20/20 reliability gate), replacing the original Predecessor/Even-Odd/Ancestor set.
+- **TIIPS phase**: Remains optional and unimplemented. No change in status.
+- **GPU-resident loss path**: New §4.8 documents `compute_ilp_loss_grad_gpu` with zero-D2H guarantee (non-chunked), strict mode gate, and COO memory cap.
 
 ---
 
@@ -21,9 +32,13 @@ inductive gradient descent plateaus.
 
 ### Performance Target
 
-Rule induction and mask "compilation" must complete within the GPU hot loop
-without host round-trips, targeting sub-millisecond overhead per step on top
-of standard XLOG evaluation.
+The GPU loss/gradient compute path (`compute_ilp_loss_grad_gpu`) must
+complete without host round-trips (zero D2H) in the non-chunked path.
+Mask application and evaluation run on-device. Witness/convergence checks
+(`batch_fact_membership`) perform bounded D2H reads (bool mask bytes) and
+are outside the inner gradient step. The chunked COO fallback (activated
+when COO allocation exceeds `coo_memory_cap`) uses bounded D2H by design;
+`set_strict_zero_dtoh(True)` rejects this fallback for CI gates.
 
 ---
 
@@ -54,8 +69,12 @@ is not involved. See §3.
 
 ### RD-6: Cardinality of Active Rules
 
-Per-(i,j) argmax selects one k, producing at most N^2 active rules.
-Truncated to `max_active_rules` (default 32) by soft-mask priority.
+~~Per-(i,j) argmax selects one k, producing at most N^2 active rules.~~
+**(v5):** `SparseMaskBackend` uses 1D candidate logits with global
+Gumbel-softmax and top-k selection over a flat candidate list, producing
+at most `budget` active rules (default: `max_active_rules`). The per-(i,j)
+argmax semantics from v4 are superseded. `DenseMaskBackend` (debug fallback)
+retains the N^3 dense path for parity testing.
 
 ### RD-7–RD-11: (Unchanged from v3)
 
@@ -677,7 +696,7 @@ pub struct IlpMask {
 }
 
 /// Tag metadata from TensorMaskedJoin execution.
-/// Does NOT store CudaBuffer clones (RD-17: CudaBuffer is not Clone).
+/// (v5) IlpTagEntry retains buffer for batch credit queries (RD-17 relaxed).
 pub struct IlpTaggedResult {
     pub entries: Vec<IlpTagEntry>,
 }
@@ -687,6 +706,8 @@ pub struct IlpTagEntry {
     pub j: u32,
     pub k: u32,
     pub num_rows: u32,
+    /// The projected join result buffer, retained for batch credit queries.
+    pub buffer: Option<CudaBuffer>,
 }
 
 impl IlpRegistry {
@@ -1696,6 +1717,49 @@ pub fn extract_relation_state(
 
 ---
 
+#### 4.11 GPU-Resident Loss/Gradient Path (v5)
+
+**(Added v5.)** `compute_ilp_loss_grad_gpu` is a single Rust/CUDA call that
+replaces the Python-side `_compute_loss_from_candidates()` loop.
+
+**Pipeline:**
+```
+Python trainer
+  └─ prog.compute_ilp_loss_grad_gpu(pos, neg, cand_probs)
+       └─ Rust (lib.rs)
+            ├─ Phase A: Parse pos/neg facts, resolve to compacted fact indices
+            ├─ Phase B: For each candidate: build task (d_mask, fact_indices, cidx)
+            ├─ Phase C: COO fill — scan + fill kernel per task (fully on-device)
+            ├─ Phase D: Sort COO → CSR via radix sort + histogram kernel + prefix-sum
+            ├─ Phase E: Forward kernel → credit + loss_contrib
+            │           Reduce kernel → device-resident total loss
+            │           Backward kernel → device-resident grad
+            └─ Return (loss, grad) as DLPack capsules (zero-copy GPU→PyTorch)
+```
+
+**CUDA kernels:**
+- `ilp_coo_fill_from_mask` (`kernels/ilp.cu`): Fill COO arrays from device-side mask + prefix-sum
+- `ilp_csr_histogram` (`kernels/ilp.cu`): Histogram of fact indices for CSR row_offsets
+- `ilp_reduce_sum_f32` / `ilp_reduce_sum_f64` (`kernels/ilp.cu`): Block-level sum reduction
+- Forward/backward credit kernels (`kernels/ilp_credit.cu`): f32/f64 variants
+
+**D2H transfer guarantee:**
+- Non-chunked path: zero D2H transfers (strict byte-level accounting via `host_transfer_stats()`)
+- Chunked fallback (COO exceeds `coo_memory_cap`): bounded D2H per chunk, merge on host
+- `set_strict_zero_dtoh(True)`: raises instead of falling back to chunked path
+
+**Python API:**
+```python
+prog.set_candidate_map([(i, j, k), ...])       # Upload candidate → index mapping
+prog.set_coo_memory_cap(bytes)                  # Default 16 MB
+prog.set_strict_zero_dtoh(True)                 # Reject chunked fallback
+loss_dl, grad_dl = prog.compute_ilp_loss_grad_gpu(positives, negatives, cand_probs)
+loss = torch.from_dlpack(loss_dl)               # Zero-copy device tensor
+grad = torch.from_dlpack(grad_dl)               # Zero-copy device tensor
+```
+
+---
+
 ## 5. Test Plan with Paper-Derived Benchmarks
 
 ### 5.1 Phase 1 Tests: Syntax & IR (No GPU Required)
@@ -1749,14 +1813,19 @@ pub fn extract_relation_state(
 
 ### 5.5 Phase 5 Tests: End-to-End ILP Benchmarks
 
+**(v5):** Benchmark gate set updated to match implemented reliability suite.
+
 | Test | Benchmark | Source | Pass Criterion |
 |------|-----------|--------|----------------|
-| T5.1 | Predecessor | DeepMind S5.2 | Correct rule within 50 steps |
-| T5.2 | Graph Reachability | Custom | Induces recursive reach rule |
-| T5.3 | Even/Odd | DeepMind S5.1 | Mutual recursion within 200 steps |
-| T5.4 | Ancestor | DeepMind S5.3 | Transitive closure within 200 steps |
+| T5.1 | Reach (transitive closure) | Custom | Correct rule within default step budget |
+| T5.2 | Grandparent | Custom | Two-hop derivation rule |
+| T5.3 | Colleague | Custom | Multi-predicate join rule |
+| T5.4 | Plus2 | Custom | Arithmetic successor chain |
 | T5.5 | Rule Commit | Custom | Post-commit evaluation matches |
 | T5.6 | Commit removes learnable | Custom | No TensorMaskedJoin in recompiled plan |
+
+**Reliability gate:** 4 stages (T5.1–T5.4) x 5 seeds = 20/20 with sparse backend.
+**GA gate:** 4 stages x 50 seeds = 200/200 (Clopper-Pearson lower95 >= 0.98).
 
 ### 5.6 Validation Milestones
 
@@ -1768,6 +1837,8 @@ pub fn extract_relation_state(
 | **M4: Gradients** | T4.1-T4.5 | All pass |
 | **M5: ILP Basic** | T5.1-T5.2 | Converge |
 | **M6: ILP Complete** | T5.1-T5.6 | All pass |
+| **M7: GPU Loss** | 16/16 credit tests + strict D2H gate | All pass |
+| **M8: Reliability** | 4 stages x 5 seeds (beta) / 50 seeds (GA) | 20/20 / 200/200 |
 
 ---
 
