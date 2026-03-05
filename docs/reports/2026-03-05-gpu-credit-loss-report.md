@@ -8,7 +8,7 @@
 
 ## Summary
 
-Implemented `compute_ilp_loss_grad_gpu` — a single Rust/CUDA call that replaces the Python-side `_compute_loss_from_candidates()` loop. The GPU path builds a COO→CSR sparse matrix mapping facts to covering candidates, runs forward (credit gather + NLL loss) and backward (gradient scatter via atomicAdd) CUDA kernels, and returns loss + grad as DLPack tensors. No D2H column transfers occur.
+Implemented `compute_ilp_loss_grad_gpu` — a single Rust/CUDA call that replaces the Python-side `_compute_loss_from_candidates()` loop. The GPU path builds a COO→CSR sparse matrix mapping facts to covering candidates, runs forward (credit gather + NLL loss) and backward (gradient scatter via atomicAdd) CUDA kernels, and returns loss + grad as DLPack tensors. No D2H *column* transfers occur, but two host-staging transfers remain for COO/CSR construction (see D2H Transfer Accounting).
 
 ## Test Results
 
@@ -41,7 +41,14 @@ Implemented `compute_ilp_loss_grad_gpu` — a single Rust/CUDA call that replace
 
 ## D2H Transfer Accounting
 
-`test_zero_dtoh_transfers` confirms **zero** D2H column transfers during `compute_ilp_loss_grad_gpu`. The entire credit/loss/gradient computation stays GPU-resident, consistent with the v0.5.0 zero-data-plane-host-transfer contract.
+`test_zero_dtoh_transfers` confirms **zero** D2H *column* transfers during `compute_ilp_loss_grad_gpu` (the gate tracked by `d2h_transfer_count()`).
+
+**Caveat:** The current implementation still performs two host-staging D2H transfers that bypass the column-download gate:
+
+1. **Membership mask download** (`lib.rs:4173`): Per-candidate `dtoh_sync_copy_into` of `u8` mask to identify which facts each candidate covers. Size: O(num_facts) bytes per candidate.
+2. **Sorted COO fact indices** (`lib.rs:4234`): `dtoh_sync_copy_into` of sorted fact indices to build CSR `row_offsets` on host. Size: O(nnz * 4) bytes.
+
+These are control-plane staging transfers (small, not bulk column data), but they are not yet zero. The accurate characterization is **"GPU-accelerated loss path with host CSR staging"**, not "fully GPU-resident."
 
 ## Gradient Parity
 
@@ -71,10 +78,20 @@ CUDA kernels: `kernels/ilp_credit.cu` (4 kernels: `ilp_coo_fill`, forward f32/f6
 
 ## Go/No-Go
 
-**GO.** All correctness gates pass (13/13 tests, 3/3 parity, 0 D2H transfers, 20/20 reliability). The GPU path is functional and correct. Performance gains at toy scale are modest (1.5x) due to kernel launch overhead, but the path eliminates D2H transfers and will scale with real workloads.
+**GO for Phase 1** (correctness + performance parity). All correctness gates pass (13/13 tests, 3/3 parity, 0 column transfers, 20/20 reliability). The GPU path is functional and correct. Performance gains at toy scale are modest (1.5x) due to kernel launch overhead; real workloads will show larger speedups.
+
+**Not yet GO for "full zero-D2H loss path."** Two host-staging transfers remain (membership mask download, CSR row_offsets construction). See follow-up tasks below.
 
 ## Known Limitations
 
 - COO→CSR construction happens on CPU in Rust before upload — could be moved to GPU for large candidate sets
+- Membership mask downloaded per-candidate to host for COO assembly — could use `ilp_coo_fill` kernel directly from device mask
+- D2H gate (`d2h_transfer_count`) only covers `download_column_*`; `dtoh_sync_copy_into` calls bypass it
 - Benchmark at toy scale only; real-world ILP training benchmarks deferred to v0.5.0 GA
 - `test_ga_reliability_50` times out under default pytest timeout (pre-existing, unrelated)
+
+## Follow-Up Tasks (v0.5.0)
+
+1. **Move COO/CSR construction fully to GPU.** Use `ilp_coo_fill` kernel with device-side membership masks; build `row_offsets` via GPU prefix-sum instead of host download + scan.
+2. **Route all D2H/H2D in this path through tracked wrappers** so `d2h_transfer_count` assertions cover the full loss path, not just column downloads.
+3. **Update roadmap/issue tracking** to reflect "GPU-accelerated loss path with host CSR staging" (Phase 1), with full zero-D2H as a separate Phase 2 milestone.
