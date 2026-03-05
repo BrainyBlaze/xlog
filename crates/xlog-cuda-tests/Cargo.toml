@@ -47,3 +47,8 @@ harness = true
 name = "ilp_coo_fill_from_mask"
 path = "tests/ilp_coo_fill_from_mask.rs"
 harness = true
+
+[[test]]
+name = "ilp_csr_histogram"
+path = "tests/ilp_csr_histogram.rs"
+harness = true

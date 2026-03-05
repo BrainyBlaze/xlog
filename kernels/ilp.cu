@@ -48,3 +48,20 @@ extern "C" __global__ void ilp_coo_fill_from_mask(
         coo_cand[write_idx] = cidx;
     }
 }
+
+/// Histogram of fact indices for CSR row_offsets construction.
+/// Each thread atomically increments hist[sorted_facts[tid]].
+/// Caller must zero hist before launch.
+extern "C" __global__ void ilp_csr_histogram(
+    const uint32_t* sorted_facts,
+    uint32_t nnz,
+    uint32_t num_facts,
+    uint32_t* hist
+) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= nnz) return;
+    uint32_t f = sorted_facts[tid];
+    if (f < num_facts) {
+        atomicAdd(&hist[f], 1);
+    }
+}

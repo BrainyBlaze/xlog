@@ -257,6 +257,7 @@ pub mod neural_kernels {
 pub mod ilp_kernels {
     pub const EXTRACT_NONZERO_INDICES: &str = "extract_nonzero_indices";
     pub const ILP_COO_FILL_FROM_MASK: &str = "ilp_coo_fill_from_mask";
+    pub const ILP_CSR_HISTOGRAM: &str = "ilp_csr_histogram";
 }
 
 /// Kernel function names in the ILP credit module.
@@ -1493,6 +1494,7 @@ impl CudaKernelProvider {
                     &[
                         ilp_kernels::EXTRACT_NONZERO_INDICES,
                         ilp_kernels::ILP_COO_FILL_FROM_MASK,
+                        ilp_kernels::ILP_CSR_HISTOGRAM,
                     ],
                 )
                 .map_err(|e| {
@@ -11243,6 +11245,67 @@ impl CudaKernelProvider {
                 XlogError::Kernel(format!("ilp_coo_fill_from_mask sync: {}", e))
             })?;
         Ok(())
+    }
+
+    /// Build a histogram of fact indices from sorted COO data.
+    ///
+    /// For each entry in `sorted_facts[0..nnz]`, atomically increments
+    /// the corresponding bin in the output histogram. The result is a
+    /// device-side count array of length `num_facts`, suitable for
+    /// prefix-sum to produce CSR `row_offsets`.
+    ///
+    /// The caller provides sorted fact indices; the histogram is
+    /// zero-initialized internally.
+    pub fn ilp_csr_histogram_launch(
+        &self,
+        sorted_facts: &TrackedCudaSlice<u32>,
+        nnz: u32,
+        num_facts: u32,
+    ) -> Result<TrackedCudaSlice<u32>> {
+        let mut d_hist = self.memory().alloc::<u32>(num_facts as usize)?;
+        // Zero the histogram
+        let zeros = vec![0u32; num_facts as usize];
+        self.device()
+            .inner()
+            .htod_sync_copy_into(&zeros, &mut d_hist)
+            .map_err(|e| XlogError::Kernel(format!("ilp_csr_histogram zero hist: {}", e)))?;
+
+        if nnz == 0 {
+            return Ok(d_hist);
+        }
+
+        let func = self
+            .device()
+            .inner()
+            .get_func(ILP_MODULE, ilp_kernels::ILP_CSR_HISTOGRAM)
+            .ok_or_else(|| {
+                XlogError::Kernel("ilp_csr_histogram kernel not found".to_string())
+            })?;
+
+        let block_size = 256u32;
+        let grid_size = (nnz + block_size - 1) / block_size;
+
+        unsafe {
+            func.clone()
+                .launch(
+                    cudarc::driver::LaunchConfig {
+                        grid_dim: (grid_size, 1, 1),
+                        block_dim: (block_size, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (sorted_facts, nnz, num_facts, &mut d_hist),
+                )
+                .map_err(|e| {
+                    XlogError::Kernel(format!("ilp_csr_histogram launch: {}", e))
+                })?;
+        }
+
+        self.device()
+            .inner()
+            .synchronize()
+            .map_err(|e| XlogError::Kernel(format!("ilp_csr_histogram sync: {}", e)))?;
+
+        Ok(d_hist)
     }
 }
 
