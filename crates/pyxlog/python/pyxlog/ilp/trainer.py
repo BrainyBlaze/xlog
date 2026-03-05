@@ -361,7 +361,7 @@ def _run_single_attempt(
                 # Compute task loss using GPU-resident credit path
                 _t0 = time.perf_counter()
                 loss_dl, grad_dl = prog.compute_ilp_loss_grad_gpu(
-                    positives, all_negatives, cand_probs,
+                    positives, all_negatives, cand_probs.detach(),
                 )
                 credit_loss = torch.from_dlpack(loss_dl).item()
                 credit_grad = torch.from_dlpack(grad_dl)
