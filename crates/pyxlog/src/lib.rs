@@ -4235,33 +4235,7 @@ impl CompiledIlpProgram {
         let coo_bytes = (upper_bound as u64) * 8;
         let needs_chunking = coo_bytes > self.coo_memory_cap;
 
-        // Determine chunk boundaries. In the non-chunked case we have a single
-        // chunk spanning all tasks; this avoids code duplication.
-        let max_queries_per_chunk = if needs_chunking {
-            // At least 1 to guarantee progress even if a single task exceeds the cap
-            (self.coo_memory_cap / 8).max(1) as u32
-        } else {
-            upper_bound // one chunk = all tasks
-        };
-
-        let mut chunks: Vec<std::ops::Range<usize>> = Vec::new();
-        {
-            let mut chunk_start = 0usize;
-            let mut chunk_sum = 0u32;
-            for (i, task) in tasks.iter().enumerate() {
-                if chunk_sum + task.num_query > max_queries_per_chunk && chunk_sum > 0 {
-                    chunks.push(chunk_start..i);
-                    chunk_start = i;
-                    chunk_sum = 0;
-                }
-                chunk_sum += task.num_query;
-            }
-            if chunk_start < tasks.len() {
-                chunks.push(chunk_start..tasks.len());
-            }
-        }
-
-        // Upload is_positive once (shared across chunks, H2D allowed)
+        // Upload is_positive once (shared across all paths, H2D allowed)
         let mut d_is_positive = self
             .provider
             .memory()
@@ -4280,44 +4254,27 @@ impl CompiledIlpProgram {
         let eps_f32 = 1e-8f32;
         let eps_f64 = 1e-8f64;
 
-        // Accumulators for chunked path. For the common single-chunk case
-        // these are unused because we return directly from Phase E.
-        let mut acc_loss_f32: f32 = 0.0;
-        let mut acc_loss_f64: f64 = 0.0;
-        let mut acc_grad_f32: Vec<f32> = if needs_chunking && !is_f64 {
-            vec![0.0f32; num_cands as usize]
-        } else {
-            Vec::new()
-        };
-        let mut acc_grad_f64: Vec<f64> = if needs_chunking && is_f64 {
-            vec![0.0f64; num_cands as usize]
-        } else {
-            Vec::new()
-        };
-
-        for chunk in &chunks {
-            let chunk_tasks = &tasks[chunk.clone()];
-            let chunk_len = chunk_tasks.len();
-            let chunk_upper_bound: u32 = chunk_tasks.iter().map(|t| t.num_query).sum();
-            if chunk_upper_bound == 0 || chunk_len == 0 {
-                continue;
-            }
-
-            // ── Phase C2 (per-chunk): COO write offsets + alloc + fill ──
-            let mut offsets_host = vec![0u32; chunk_len];
+        // Build COO arrays. If chunking is needed, we fill in chunks on device,
+        // D2H each chunk, merge on host, then H2D the merged result.
+        // This ensures a single CSR + forward/backward pass over the complete
+        // COO, which is mathematically correct (NLL loss is nonlinear, so we
+        // cannot sum per-chunk losses independently).
+        let (mut d_coo_facts, mut d_coo_cands, actual_nnz) = if !needs_chunking {
+            // ── Phase C (non-chunked): single-pass COO fill on device ──
+            let mut offsets_host = vec![0u32; num_tasks];
             {
                 let mut running = 0u32;
-                for i in 0..chunk_len {
+                for i in 0..num_tasks {
                     offsets_host[i] = running;
-                    running += chunk_tasks[i].num_query;
+                    running += tasks[i].num_query;
                 }
-                debug_assert_eq!(running, chunk_upper_bound);
+                debug_assert_eq!(running, upper_bound);
             }
 
             let mut d_offsets = self
                 .provider
                 .memory()
-                .alloc::<u32>(chunk_len)
+                .alloc::<u32>(num_tasks)
                 .map_err(|e| PyRuntimeError::new_err(format!("alloc d_offsets: {}", e)))?;
             self.provider
                 .device()
@@ -4325,22 +4282,21 @@ impl CompiledIlpProgram {
                 .htod_sync_copy_into(&offsets_host, &mut d_offsets)
                 .map_err(|e| PyRuntimeError::new_err(format!("htod d_offsets: {}", e)))?;
 
-            // Allocate COO arrays at chunk_upper_bound, filled with sentinel values.
             let sentinel_fact = num_facts;
             let sentinel_cand = num_cands;
             let mut d_coo_facts = self
                 .provider
                 .memory()
-                .alloc::<u32>(chunk_upper_bound as usize)
+                .alloc::<u32>(upper_bound as usize)
                 .map_err(|e| PyRuntimeError::new_err(format!("alloc coo_facts: {}", e)))?;
             let mut d_coo_cands = self
                 .provider
                 .memory()
-                .alloc::<u32>(chunk_upper_bound as usize)
+                .alloc::<u32>(upper_bound as usize)
                 .map_err(|e| PyRuntimeError::new_err(format!("alloc coo_cands: {}", e)))?;
             {
-                let sentinel_facts_vec = vec![sentinel_fact; chunk_upper_bound as usize];
-                let sentinel_cands_vec = vec![sentinel_cand; chunk_upper_bound as usize];
+                let sentinel_facts_vec = vec![sentinel_fact; upper_bound as usize];
+                let sentinel_cands_vec = vec![sentinel_cand; upper_bound as usize];
                 self.provider
                     .device()
                     .inner()
@@ -4353,8 +4309,7 @@ impl CompiledIlpProgram {
                     .map_err(|e| PyRuntimeError::new_err(format!("sentinel cands: {}", e)))?;
             }
 
-            // Fill COO entries from device masks using the fill kernel.
-            for (local_idx, task) in chunk_tasks.iter().enumerate() {
+            for (task_idx, task) in tasks.iter().enumerate() {
                 let d_prefix = self
                     .provider
                     .scan_u8_mask_device(&task.d_mask, task.num_query)
@@ -4365,8 +4320,8 @@ impl CompiledIlpProgram {
                         &task.d_mask,
                         &d_prefix,
                         &fact_indices_buffers[task.fact_indices_idx],
-                        local_idx as u32,  // offset_idx into chunk-local d_offsets
-                        task.cidx,         // cand_value: actual candidate index
+                        task_idx as u32,
+                        task.cidx,
                         task.num_query,
                         &d_offsets,
                         &mut d_coo_facts,
@@ -4375,231 +4330,286 @@ impl CompiledIlpProgram {
                     .map_err(|e| PyRuntimeError::new_err(format!("coo fill: {}", e)))?;
             }
 
-            // ── Phase D (per-chunk): Sort COO + device-side CSR build ──
-            let mut scratch =
-                xlog_cuda::provider::RadixSortScratch::new(&self.provider, chunk_upper_bound)
-                    .map_err(|e| PyRuntimeError::new_err(format!("sort scratch: {}", e)))?;
-            self.provider
-                .radix_sort_u32_pairs(
-                    &mut d_coo_facts,
-                    &mut d_coo_cands,
-                    chunk_upper_bound,
-                    &mut scratch,
-                )
-                .map_err(|e| PyRuntimeError::new_err(format!("radix sort: {}", e)))?;
+            (d_coo_facts, d_coo_cands, upper_bound)
+        } else {
+            // ── Phase C (chunked): fill COO in bounded-memory chunks,
+            //    D2H each chunk, merge on host, H2D merged result ──
+            //
+            // This avoids the mathematical bug of running forward/backward
+            // per-chunk: NLL loss is -log(sum), which is nonlinear.
+            // We must build ONE complete CSR and run forward/backward ONCE.
 
-            let d_hist = self
-                .provider
-                .ilp_csr_histogram_launch(&d_coo_facts, chunk_upper_bound, num_facts)
-                .map_err(|e| PyRuntimeError::new_err(format!("csr histogram: {}", e)))?;
+            let max_queries_per_chunk = (self.coo_memory_cap / 8).max(1) as u32;
+            let sentinel_fact = num_facts;
 
-            let mut d_row_offsets = self
+            // Host accumulators for merged COO entries (sentinel-free).
+            let mut merged_facts: Vec<u32> = Vec::new();
+            let mut merged_cands: Vec<u32> = Vec::new();
+
+            let mut chunk_start = 0usize;
+            while chunk_start < tasks.len() {
+                // Determine chunk end: pack tasks until cap exceeded.
+                let mut chunk_end = chunk_start;
+                let mut chunk_sum = 0u32;
+                while chunk_end < tasks.len() {
+                    let nq = tasks[chunk_end].num_query;
+                    if chunk_sum + nq > max_queries_per_chunk && chunk_sum > 0 {
+                        break;
+                    }
+                    chunk_sum += nq;
+                    chunk_end += 1;
+                }
+                // Safety: at least one task per chunk.
+                if chunk_end == chunk_start {
+                    chunk_sum = tasks[chunk_start].num_query;
+                    chunk_end = chunk_start + 1;
+                }
+
+                let chunk_tasks = &tasks[chunk_start..chunk_end];
+                let chunk_len = chunk_tasks.len();
+                let chunk_upper_bound = chunk_sum;
+
+                if chunk_upper_bound > 0 && chunk_len > 0 {
+                    // Compute chunk-local offsets.
+                    let mut offsets_host = vec![0u32; chunk_len];
+                    {
+                        let mut running = 0u32;
+                        for i in 0..chunk_len {
+                            offsets_host[i] = running;
+                            running += chunk_tasks[i].num_query;
+                        }
+                    }
+
+                    let mut d_offsets = self
+                        .provider
+                        .memory()
+                        .alloc::<u32>(chunk_len)
+                        .map_err(|e| PyRuntimeError::new_err(format!("alloc d_offsets: {}", e)))?;
+                    self.provider
+                        .device()
+                        .inner()
+                        .htod_sync_copy_into(&offsets_host, &mut d_offsets)
+                        .map_err(|e| PyRuntimeError::new_err(format!("htod d_offsets: {}", e)))?;
+
+                    let mut d_coo_facts = self
+                        .provider
+                        .memory()
+                        .alloc::<u32>(chunk_upper_bound as usize)
+                        .map_err(|e| PyRuntimeError::new_err(format!("alloc coo_facts: {}", e)))?;
+                    let mut d_coo_cands = self
+                        .provider
+                        .memory()
+                        .alloc::<u32>(chunk_upper_bound as usize)
+                        .map_err(|e| PyRuntimeError::new_err(format!("alloc coo_cands: {}", e)))?;
+                    {
+                        let sentinel_facts_vec = vec![sentinel_fact; chunk_upper_bound as usize];
+                        let sentinel_cands_vec = vec![num_cands; chunk_upper_bound as usize];
+                        self.provider
+                            .device()
+                            .inner()
+                            .htod_sync_copy_into(&sentinel_facts_vec, &mut d_coo_facts)
+                            .map_err(|e| PyRuntimeError::new_err(format!("sentinel facts: {}", e)))?;
+                        self.provider
+                            .device()
+                            .inner()
+                            .htod_sync_copy_into(&sentinel_cands_vec, &mut d_coo_cands)
+                            .map_err(|e| PyRuntimeError::new_err(format!("sentinel cands: {}", e)))?;
+                    }
+
+                    for (local_idx, task) in chunk_tasks.iter().enumerate() {
+                        let d_prefix = self
+                            .provider
+                            .scan_u8_mask_device(&task.d_mask, task.num_query)
+                            .map_err(|e| PyRuntimeError::new_err(format!("scan mask: {}", e)))?;
+
+                        self.provider
+                            .ilp_coo_fill_from_mask_launch(
+                                &task.d_mask,
+                                &d_prefix,
+                                &fact_indices_buffers[task.fact_indices_idx],
+                                local_idx as u32,
+                                task.cidx,
+                                task.num_query,
+                                &d_offsets,
+                                &mut d_coo_facts,
+                                &mut d_coo_cands,
+                            )
+                            .map_err(|e| PyRuntimeError::new_err(format!("coo fill: {}", e)))?;
+                    }
+
+                    // Synchronize before D2H to ensure fill kernels have completed.
+                    self.provider.device().synchronize()
+                        .map_err(|e| PyRuntimeError::new_err(format!("sync: {}", e)))?;
+
+                    // D2H: download chunk COO arrays and filter out sentinels.
+                    // This is bounded by chunk size and allowed in the chunked path.
+                    let h_facts: Vec<u32> = self.provider.device().inner().dtoh_sync_copy(&d_coo_facts)
+                        .map_err(|e| PyRuntimeError::new_err(format!("dtoh coo_facts: {}", e)))?;
+                    let h_cands: Vec<u32> = self.provider.device().inner().dtoh_sync_copy(&d_coo_cands)
+                        .map_err(|e| PyRuntimeError::new_err(format!("dtoh coo_cands: {}", e)))?;
+
+                    for (f, c) in h_facts.into_iter().zip(h_cands.into_iter()) {
+                        if f < sentinel_fact {
+                            merged_facts.push(f);
+                            merged_cands.push(c);
+                        }
+                    }
+                    // Device chunk buffers freed here (drop).
+                }
+
+                chunk_start = chunk_end;
+            }
+            let actual_nnz = merged_facts.len() as u32;
+            if actual_nnz == 0 {
+                return self.build_loss_grad_empty_coo(
+                    py,
+                    &is_positive_host,
+                    num_facts,
+                    num_cands,
+                    is_f64,
+                );
+            }
+
+            // H2D: upload merged COO (actual NNZ, no sentinels).
+            let mut d_coo_facts = self
                 .provider
                 .memory()
-                .alloc::<u32>((num_facts + 1) as usize)
-                .map_err(|e| PyRuntimeError::new_err(format!("alloc row_offsets: {}", e)))?;
-            {
-                let zeros = vec![0u32; (num_facts + 1) as usize];
-                self.provider
-                    .device()
-                    .inner()
-                    .htod_sync_copy_into(&zeros, &mut d_row_offsets)
-                    .map_err(|e| PyRuntimeError::new_err(format!("zero row_offsets: {}", e)))?;
-            }
-            {
-                let mut dst_view = d_row_offsets
-                    .try_slice_mut(0..num_facts as usize)
-                    .ok_or_else(|| {
-                        PyRuntimeError::new_err("row_offsets slice failed")
-                    })?;
-                self.provider
-                    .device()
-                    .inner()
-                    .dtod_copy(&d_hist, &mut dst_view)
-                    .map_err(|e| PyRuntimeError::new_err(format!("dtod hist->row_offsets: {}", e)))?;
-            }
+                .alloc::<u32>(actual_nnz as usize)
+                .map_err(|e| PyRuntimeError::new_err(format!("alloc merged coo_facts: {}", e)))?;
+            let mut d_coo_cands = self
+                .provider
+                .memory()
+                .alloc::<u32>(actual_nnz as usize)
+                .map_err(|e| PyRuntimeError::new_err(format!("alloc merged coo_cands: {}", e)))?;
             self.provider
-                .exclusive_scan_u32_inplace(&mut d_row_offsets, num_facts + 1)
-                .map_err(|e| PyRuntimeError::new_err(format!("scan row_offsets: {}", e)))?;
+                .device()
+                .inner()
+                .htod_sync_copy_into(&merged_facts, &mut d_coo_facts)
+                .map_err(|e| PyRuntimeError::new_err(format!("htod merged facts: {}", e)))?;
+            self.provider
+                .device()
+                .inner()
+                .htod_sync_copy_into(&merged_cands, &mut d_coo_cands)
+                .map_err(|e| PyRuntimeError::new_err(format!("htod merged cands: {}", e)))?;
 
-            // ── Phase E (per-chunk): Forward + backward ──
-            if !needs_chunking {
-                // Single chunk: return directly from device (zero D2H fast path)
-                if is_f64 {
-                    let (credit_out, loss_contrib) = self
-                        .provider
-                        .ilp_credit_forward_f64_launch(
-                            &d_row_offsets,
-                            &d_coo_cands,
-                            cand_col,
-                            &d_is_positive,
-                            num_facts,
-                            eps_f64,
-                        )
-                        .map_err(|e| PyRuntimeError::new_err(format!("forward f64: {}", e)))?;
+            (d_coo_facts, d_coo_cands, actual_nnz)
+        };
 
-                    let d_total_loss = self
-                        .provider
-                        .ilp_reduce_sum_f64_launch(&loss_contrib, num_facts)
-                        .map_err(|e| PyRuntimeError::new_err(format!("reduce f64: {}", e)))?;
+        // ── Phase D: Sort COO + device-side CSR build ──
+        //
+        // Sort all entries by fact index. In the non-chunked path, sentinels
+        // (fact = num_facts) sort to the end and are ignored by the histogram
+        // kernel's f < num_facts guard. In the chunked path, sentinels were
+        // already filtered out on the host.
+        let mut scratch =
+            xlog_cuda::provider::RadixSortScratch::new(&self.provider, actual_nnz)
+                .map_err(|e| PyRuntimeError::new_err(format!("sort scratch: {}", e)))?;
+        self.provider
+            .radix_sort_u32_pairs(
+                &mut d_coo_facts,
+                &mut d_coo_cands,
+                actual_nnz,
+                &mut scratch,
+            )
+            .map_err(|e| PyRuntimeError::new_err(format!("radix sort: {}", e)))?;
 
-                    let d_grad = self
-                        .provider
-                        .ilp_credit_backward_f64_launch(
-                            &d_row_offsets,
-                            &d_coo_cands,
-                            &credit_out,
-                            &d_is_positive,
-                            num_facts,
-                            num_cands,
-                        )
-                        .map_err(|e| PyRuntimeError::new_err(format!("backward f64: {}", e)))?;
+        let d_hist = self
+            .provider
+            .ilp_csr_histogram_launch(&d_coo_facts, actual_nnz, num_facts)
+            .map_err(|e| PyRuntimeError::new_err(format!("csr histogram: {}", e)))?;
 
-                    return self.export_loss_grad_device_f64(py, d_total_loss, d_grad, num_cands);
-                } else {
-                    let (credit_out, loss_contrib) = self
-                        .provider
-                        .ilp_credit_forward_f32_launch(
-                            &d_row_offsets,
-                            &d_coo_cands,
-                            cand_col,
-                            &d_is_positive,
-                            num_facts,
-                            eps_f32,
-                        )
-                        .map_err(|e| PyRuntimeError::new_err(format!("forward f32: {}", e)))?;
+        let mut d_row_offsets = self
+            .provider
+            .memory()
+            .alloc::<u32>((num_facts + 1) as usize)
+            .map_err(|e| PyRuntimeError::new_err(format!("alloc row_offsets: {}", e)))?;
+        {
+            let zeros = vec![0u32; (num_facts + 1) as usize];
+            self.provider
+                .device()
+                .inner()
+                .htod_sync_copy_into(&zeros, &mut d_row_offsets)
+                .map_err(|e| PyRuntimeError::new_err(format!("zero row_offsets: {}", e)))?;
+        }
+        {
+            let mut dst_view = d_row_offsets
+                .try_slice_mut(0..num_facts as usize)
+                .ok_or_else(|| {
+                    PyRuntimeError::new_err("row_offsets slice failed")
+                })?;
+            self.provider
+                .device()
+                .inner()
+                .dtod_copy(&d_hist, &mut dst_view)
+                .map_err(|e| PyRuntimeError::new_err(format!("dtod hist->row_offsets: {}", e)))?;
+        }
+        self.provider
+            .exclusive_scan_u32_inplace(&mut d_row_offsets, num_facts + 1)
+            .map_err(|e| PyRuntimeError::new_err(format!("scan row_offsets: {}", e)))?;
 
-                    let d_total_loss = self
-                        .provider
-                        .ilp_reduce_sum_f32_launch(&loss_contrib, num_facts)
-                        .map_err(|e| PyRuntimeError::new_err(format!("reduce f32: {}", e)))?;
-
-                    let d_grad = self
-                        .provider
-                        .ilp_credit_backward_f32_launch(
-                            &d_row_offsets,
-                            &d_coo_cands,
-                            &credit_out,
-                            &d_is_positive,
-                            num_facts,
-                            num_cands,
-                        )
-                        .map_err(|e| PyRuntimeError::new_err(format!("backward f32: {}", e)))?;
-
-                    return self.export_loss_grad_device_f32(py, d_total_loss, d_grad, num_cands);
-                }
-            }
-
-            // Chunked path: run forward/backward, D2H chunk results, accumulate on host.
-            // Small D2H transfers are allowed in the chunked path by design.
-            if is_f64 {
-                let (credit_out, loss_contrib) = self
-                    .provider
-                    .ilp_credit_forward_f64_launch(
-                        &d_row_offsets,
-                        &d_coo_cands,
-                        cand_col,
-                        &d_is_positive,
-                        num_facts,
-                        eps_f64,
-                    )
-                    .map_err(|e| PyRuntimeError::new_err(format!("forward f64 chunk: {}", e)))?;
-
-                let d_total_loss = self
-                    .provider
-                    .ilp_reduce_sum_f64_launch(&loss_contrib, num_facts)
-                    .map_err(|e| PyRuntimeError::new_err(format!("reduce f64 chunk: {}", e)))?;
-
-                let d_grad = self
-                    .provider
-                    .ilp_credit_backward_f64_launch(
-                        &d_row_offsets,
-                        &d_coo_cands,
-                        &credit_out,
-                        &d_is_positive,
-                        num_facts,
-                        num_cands,
-                    )
-                    .map_err(|e| PyRuntimeError::new_err(format!("backward f64 chunk: {}", e)))?;
-
-                // D2H: read chunk loss scalar and grad vector (allowed in chunked path)
-                let chunk_loss = self.provider.device().inner().dtoh_sync_copy(&d_total_loss)
-                    .map_err(|e| PyRuntimeError::new_err(format!("dtoh loss f64: {}", e)))?;
-                acc_loss_f64 += chunk_loss[0];
-
-                let chunk_grad = self.provider.device().inner().dtoh_sync_copy(&d_grad)
-                    .map_err(|e| PyRuntimeError::new_err(format!("dtoh grad f64: {}", e)))?;
-                for (acc, val) in acc_grad_f64.iter_mut().zip(chunk_grad.iter()) {
-                    *acc += val;
-                }
-            } else {
-                let (credit_out, loss_contrib) = self
-                    .provider
-                    .ilp_credit_forward_f32_launch(
-                        &d_row_offsets,
-                        &d_coo_cands,
-                        cand_col,
-                        &d_is_positive,
-                        num_facts,
-                        eps_f32,
-                    )
-                    .map_err(|e| PyRuntimeError::new_err(format!("forward f32 chunk: {}", e)))?;
-
-                let d_total_loss = self
-                    .provider
-                    .ilp_reduce_sum_f32_launch(&loss_contrib, num_facts)
-                    .map_err(|e| PyRuntimeError::new_err(format!("reduce f32 chunk: {}", e)))?;
-
-                let d_grad = self
-                    .provider
-                    .ilp_credit_backward_f32_launch(
-                        &d_row_offsets,
-                        &d_coo_cands,
-                        &credit_out,
-                        &d_is_positive,
-                        num_facts,
-                        num_cands,
-                    )
-                    .map_err(|e| PyRuntimeError::new_err(format!("backward f32 chunk: {}", e)))?;
-
-                // D2H: read chunk loss scalar and grad vector (allowed in chunked path)
-                let chunk_loss = self.provider.device().inner().dtoh_sync_copy(&d_total_loss)
-                    .map_err(|e| PyRuntimeError::new_err(format!("dtoh loss f32: {}", e)))?;
-                acc_loss_f32 += chunk_loss[0];
-
-                let chunk_grad = self.provider.device().inner().dtoh_sync_copy(&d_grad)
-                    .map_err(|e| PyRuntimeError::new_err(format!("dtoh grad f32: {}", e)))?;
-                for (acc, val) in acc_grad_f32.iter_mut().zip(chunk_grad.iter()) {
-                    *acc += val;
-                }
-            }
-        } // end chunk loop
-
-        // Chunked path: upload accumulated loss + grad to device and export.
+        // ── Phase E: Forward + backward + device-side reduction ──
         if is_f64 {
-            let mut d_loss = self.provider.memory().alloc::<f64>(1)
-                .map_err(|e| PyRuntimeError::new_err(format!("alloc loss f64: {}", e)))?;
-            self.provider.device().inner()
-                .htod_sync_copy_into(&[acc_loss_f64], &mut d_loss)
-                .map_err(|e| PyRuntimeError::new_err(format!("htod loss f64: {}", e)))?;
-            let mut d_grad = self.provider.memory().alloc::<f64>(num_cands as usize)
-                .map_err(|e| PyRuntimeError::new_err(format!("alloc grad f64: {}", e)))?;
-            self.provider.device().inner()
-                .htod_sync_copy_into(&acc_grad_f64, &mut d_grad)
-                .map_err(|e| PyRuntimeError::new_err(format!("htod grad f64: {}", e)))?;
-            self.export_loss_grad_device_f64(py, d_loss, d_grad, num_cands)
+            let (credit_out, loss_contrib) = self
+                .provider
+                .ilp_credit_forward_f64_launch(
+                    &d_row_offsets,
+                    &d_coo_cands,
+                    cand_col,
+                    &d_is_positive,
+                    num_facts,
+                    eps_f64,
+                )
+                .map_err(|e| PyRuntimeError::new_err(format!("forward f64: {}", e)))?;
+
+            let d_total_loss = self
+                .provider
+                .ilp_reduce_sum_f64_launch(&loss_contrib, num_facts)
+                .map_err(|e| PyRuntimeError::new_err(format!("reduce f64: {}", e)))?;
+
+            let d_grad = self
+                .provider
+                .ilp_credit_backward_f64_launch(
+                    &d_row_offsets,
+                    &d_coo_cands,
+                    &credit_out,
+                    &d_is_positive,
+                    num_facts,
+                    num_cands,
+                )
+                .map_err(|e| PyRuntimeError::new_err(format!("backward f64: {}", e)))?;
+
+            self.export_loss_grad_device_f64(py, d_total_loss, d_grad, num_cands)
         } else {
-            let mut d_loss = self.provider.memory().alloc::<f32>(1)
-                .map_err(|e| PyRuntimeError::new_err(format!("alloc loss f32: {}", e)))?;
-            self.provider.device().inner()
-                .htod_sync_copy_into(&[acc_loss_f32], &mut d_loss)
-                .map_err(|e| PyRuntimeError::new_err(format!("htod loss f32: {}", e)))?;
-            let mut d_grad = self.provider.memory().alloc::<f32>(num_cands as usize)
-                .map_err(|e| PyRuntimeError::new_err(format!("alloc grad f32: {}", e)))?;
-            self.provider.device().inner()
-                .htod_sync_copy_into(&acc_grad_f32, &mut d_grad)
-                .map_err(|e| PyRuntimeError::new_err(format!("htod grad f32: {}", e)))?;
-            self.export_loss_grad_device_f32(py, d_loss, d_grad, num_cands)
+            let (credit_out, loss_contrib) = self
+                .provider
+                .ilp_credit_forward_f32_launch(
+                    &d_row_offsets,
+                    &d_coo_cands,
+                    cand_col,
+                    &d_is_positive,
+                    num_facts,
+                    eps_f32,
+                )
+                .map_err(|e| PyRuntimeError::new_err(format!("forward f32: {}", e)))?;
+
+            let d_total_loss = self
+                .provider
+                .ilp_reduce_sum_f32_launch(&loss_contrib, num_facts)
+                .map_err(|e| PyRuntimeError::new_err(format!("reduce f32: {}", e)))?;
+
+            let d_grad = self
+                .provider
+                .ilp_credit_backward_f32_launch(
+                    &d_row_offsets,
+                    &d_coo_cands,
+                    &credit_out,
+                    &d_is_positive,
+                    num_facts,
+                    num_cands,
+                )
+                .map_err(|e| PyRuntimeError::new_err(format!("backward f32: {}", e)))?;
+
+            self.export_loss_grad_device_f32(py, d_total_loss, d_grad, num_cands)
         }
     }
 

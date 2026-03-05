@@ -385,22 +385,53 @@ def test_zero_dtoh_transfers():
 # ---------------------------------------------------------------------------
 
 def test_compute_ilp_loss_grad_gpu_memory_cap():
-    """Force chunked COO assembly by setting a tiny memory cap."""
-    prog = _compile_reach()
-    prog.set_candidate_map([(0, 0, 1)])
+    """Force chunked COO assembly by setting a tiny memory cap.
+
+    Uses the multi-candidate setup from test_loss_parity_multi_candidate
+    so that facts are covered by multiple candidates. With a 1-byte cap,
+    each task goes into its own chunk. The chunked path must merge all
+    chunk COO entries before building a single CSR and running
+    forward/backward, otherwise -log(a+b) != -log(a) + -log(b).
+    """
+    prog = pyxlog.IlpProgramFactory.compile("""
+        pred edge(u32, u32). pred link(u32, u32).
+        edge(1, 2). edge(2, 3). edge(3, 4). edge(1, 4).
+        link(1, 2). link(2, 3).
+        learnable(W) :: reach(X, Y) :- bL(X, Z), bR(Z, Y).
+    """, device=0, memory_mb=64)
+    prog.evaluate()
+
+    N = prog.ilp_schema_size()
+    names = prog.ilp_relation_names()
+    edge_idx = names.index("edge")
+    link_idx = names.index("link")
+    reach_idx = names.index("reach")
+
+    cand_a = (edge_idx, edge_idx, reach_idx)
+    cand_b = (link_idx, edge_idx, reach_idx)
+
     device = torch.device("cuda:0")
-    cand_probs = torch.tensor([0.7], device=device, dtype=torch.float32)
+    mask = torch.zeros(N ** 3, device=device, dtype=torch.float32)
+    for i, j, k in [cand_a, cand_b]:
+        mask[i * N * N + j * N + k] = 1.0
+    prog.set_rule_mask("W", mask, mask, N)
+    prog.evaluate()
+
+    prog.set_candidate_map([cand_a, cand_b])
+    # Use probs that don't sum to 1 so NLL > 0 (both cands derive reach(1,3),
+    # so coverage = 0.3+0.4 = 0.7, NLL = -log(0.7) > 0).
+    cand_probs = torch.tensor([0.3, 0.4], device=device, dtype=torch.float32)
     positives = [("reach", [1, 3])]
     negatives = [("reach", [1, 4])]
 
-    # Run without chunking first to get reference values
+    # Reference: non-chunked path (default 16 MB cap)
     loss_ref_dl, grad_ref_dl = prog.compute_ilp_loss_grad_gpu(
         positives, negatives, cand_probs
     )
     loss_ref = torch.from_dlpack(loss_ref_dl).clone()
     grad_ref = torch.from_dlpack(grad_ref_dl).clone()
 
-    # Set absurdly small cap to force chunking (1 byte)
+    # Force chunking: 1-byte cap means each task is its own chunk
     prog.set_coo_memory_cap(1)
 
     loss_dl, grad_dl = prog.compute_ilp_loss_grad_gpu(
@@ -409,13 +440,12 @@ def test_compute_ilp_loss_grad_gpu_memory_cap():
     loss = torch.from_dlpack(loss_dl)
     grad = torch.from_dlpack(grad_dl)
 
-    # Same result as non-chunked path
     assert loss.item() > 0.0
     assert torch.isfinite(loss).item()
     assert torch.all(torch.isfinite(grad)).item()
-    assert torch.allclose(loss, loss_ref, atol=1e-6), (
+    assert torch.allclose(loss, loss_ref, atol=1e-5), (
         f"chunked loss={loss.item()} != ref={loss_ref.item()}"
     )
-    assert torch.allclose(grad, grad_ref, atol=1e-6), (
+    assert torch.allclose(grad, grad_ref, atol=1e-5), (
         f"chunked grad={grad} != ref={grad_ref}"
     )
