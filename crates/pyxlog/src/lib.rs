@@ -4280,8 +4280,8 @@ impl CompiledIlpProgram {
             .column(0)
             .ok_or_else(|| PyRuntimeError::new_err("cand_probs has no column"))?;
 
-        let eps_f32 = 1e-38f32;
-        let eps_f64 = 1e-38f64;
+        let eps_f32 = 1e-8f32;
+        let eps_f64 = 1e-8f64;
 
         if is_f64 {
             let (credit_out, loss_contrib) = self
@@ -5106,7 +5106,7 @@ impl CompiledIlpProgram {
                     &dummy_col,
                     &d_is_positive,
                     num_facts,
-                    1e-38f64,
+                    1e-8f64,
                 )
                 .map_err(|e| PyRuntimeError::new_err(format!("forward: {}", e)))?;
 
@@ -5140,7 +5140,7 @@ impl CompiledIlpProgram {
                     &dummy_col,
                     &d_is_positive,
                     num_facts,
-                    1e-38f32,
+                    1e-8f32,
                 )
                 .map_err(|e| PyRuntimeError::new_err(format!("forward: {}", e)))?;
 

@@ -36,13 +36,15 @@ def test_set_candidate_map_length():
 def test_compute_ilp_loss_grad_gpu_basic():
     """GPU loss/grad returns correct shapes, dtypes, and device."""
     prog = _compile_reach()
+    # (0,0,0) = rule 0 with bL=edge, bR=edge for head reach
     candidates = [(0, 0, 0)]
     prog.set_candidate_map(candidates)
 
     device = torch.device("cuda:0")
     cand_probs = torch.tensor([0.8], device=device, dtype=torch.float32)
 
-    positives = [("edge", [1, 2])]
+    # reach(1,3) is derivable via edge(1,2)+edge(2,3)
+    positives = [("reach", [1, 3])]
     negatives = []
 
     loss_dl, grad_dl = prog.compute_ilp_loss_grad_gpu(
@@ -82,19 +84,19 @@ def test_compute_ilp_loss_grad_gpu_no_candidate_map_error():
     cand_probs = torch.tensor([0.5], device=device, dtype=torch.float32)
 
     with pytest.raises(Exception, match="candidate_map"):
-        prog.compute_ilp_loss_grad_gpu([("edge", [1, 2])], [], cand_probs)
+        prog.compute_ilp_loss_grad_gpu([("reach", [1, 3])], [], cand_probs)
 
 
 def test_compute_ilp_loss_grad_gpu_loss_positive():
-    """Positive loss should be > 0 when credit < 1."""
+    """Positive loss should be > 0 and grad should be non-zero for derivable facts."""
     prog = _compile_reach()
     prog.set_candidate_map([(0, 0, 0)])
 
     device = torch.device("cuda:0")
     cand_probs = torch.tensor([0.3], device=device, dtype=torch.float32)
 
-    # edge(1,2) is a base fact that may or may not be in the tagged entries
-    positives = [("edge", [1, 2])]
+    # reach(1,3) is derivable: loss = -log(0.3) > 0
+    positives = [("reach", [1, 3])]
     negatives = []
 
     loss_dl, grad_dl = prog.compute_ilp_loss_grad_gpu(
@@ -103,11 +105,12 @@ def test_compute_ilp_loss_grad_gpu_loss_positive():
     loss = torch.from_dlpack(loss_dl)
     grad = torch.from_dlpack(grad_dl)
 
-    # Loss should be finite and non-negative
-    assert loss.item() >= 0.0
+    # Loss should be positive (since -log(0.3) > 0) and finite
+    assert loss.item() > 0.0
     assert torch.isfinite(loss).item()
-    # Grad should be finite
+    # Grad should be non-zero and finite
     assert torch.all(torch.isfinite(grad)).item()
+    assert not torch.all(grad == 0.0).item()
 
 
 def test_compute_ilp_loss_grad_gpu_f64():
@@ -118,7 +121,7 @@ def test_compute_ilp_loss_grad_gpu_f64():
     device = torch.device("cuda:0")
     cand_probs = torch.tensor([0.5], device=device, dtype=torch.float64)
 
-    positives = [("edge", [1, 2])]
+    positives = [("reach", [1, 3])]
     negatives = []
 
     loss_dl, grad_dl = prog.compute_ilp_loss_grad_gpu(
@@ -142,4 +145,30 @@ def test_compute_ilp_loss_grad_gpu_cand_size_mismatch_error():
     cand_probs = torch.tensor([0.5], device=device, dtype=torch.float32)  # 1 element
 
     with pytest.raises(Exception, match="length"):
-        prog.compute_ilp_loss_grad_gpu([("edge", [1, 2])], [], cand_probs)
+        prog.compute_ilp_loss_grad_gpu([("reach", [1, 3])], [], cand_probs)
+
+
+def test_compute_ilp_loss_grad_gpu_negative_facts():
+    """Negative facts should contribute loss = -log(1 - credit)."""
+    prog = _compile_reach()
+    prog.set_candidate_map([(0, 0, 0)])
+
+    device = torch.device("cuda:0")
+    cand_probs = torch.tensor([0.8], device=device, dtype=torch.float32)
+
+    # reach(1,4) — not derivable in one hop, so credit = 0 → loss = -log(1-0) = 0
+    # reach(1,3) — derivable, credit = 0.8 as negative → loss = -log(1-0.8) = -log(0.2)
+    positives = []
+    negatives = [("reach", [1, 3])]
+
+    loss_dl, grad_dl = prog.compute_ilp_loss_grad_gpu(
+        positives, negatives, cand_probs
+    )
+    loss = torch.from_dlpack(loss_dl)
+    grad = torch.from_dlpack(grad_dl)
+
+    # loss = -log(1 - 0.8) = -log(0.2) ≈ 1.609
+    assert loss.item() > 1.0
+    assert torch.isfinite(loss).item()
+    # Grad for negative: +1/(1-sum) = 1/0.2 = 5.0
+    assert grad[0].item() > 0.0
