@@ -52,3 +52,8 @@ harness = true
 name = "ilp_csr_histogram"
 path = "tests/ilp_csr_histogram.rs"
 harness = true
+
+[[test]]
+name = "ilp_reduce_sum"
+path = "tests/ilp_reduce_sum.rs"
+harness = true

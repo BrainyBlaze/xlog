@@ -65,3 +65,60 @@ extern "C" __global__ void ilp_csr_histogram(
         atomicAdd(&hist[f], 1);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Reduction kernels for device-side loss summation
+// ---------------------------------------------------------------------------
+
+#define REDUCE_BLOCK_SIZE 256
+
+/// Block-level sum reduction (f32). Each block reduces its stripe via shared
+/// memory, then atomicAdds the partial sum to block_sums[0].
+extern "C" __global__ void ilp_reduce_sum_f32(
+    const float* input,
+    uint32_t n,
+    float* block_sums
+) {
+    __shared__ float sdata[REDUCE_BLOCK_SIZE];
+    uint32_t tid = threadIdx.x;
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+
+    sdata[tid] = (gid < n) ? input[gid] : 0.0f;
+    __syncthreads();
+
+    for (uint32_t s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            sdata[tid] += sdata[tid + s];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        atomicAdd(&block_sums[0], sdata[0]);
+    }
+}
+
+/// Block-level sum reduction (f64). Requires sm_60+ for double atomicAdd.
+extern "C" __global__ void ilp_reduce_sum_f64(
+    const double* input,
+    uint32_t n,
+    double* block_sums
+) {
+    __shared__ double sdata[REDUCE_BLOCK_SIZE];
+    uint32_t tid = threadIdx.x;
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+
+    sdata[tid] = (gid < n) ? input[gid] : 0.0;
+    __syncthreads();
+
+    for (uint32_t s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            sdata[tid] += sdata[tid + s];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        atomicAdd(&block_sums[0], sdata[0]);
+    }
+}

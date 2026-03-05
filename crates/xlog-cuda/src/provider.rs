@@ -258,6 +258,8 @@ pub mod ilp_kernels {
     pub const EXTRACT_NONZERO_INDICES: &str = "extract_nonzero_indices";
     pub const ILP_COO_FILL_FROM_MASK: &str = "ilp_coo_fill_from_mask";
     pub const ILP_CSR_HISTOGRAM: &str = "ilp_csr_histogram";
+    pub const ILP_REDUCE_SUM_F32: &str = "ilp_reduce_sum_f32";
+    pub const ILP_REDUCE_SUM_F64: &str = "ilp_reduce_sum_f64";
 }
 
 /// Kernel function names in the ILP credit module.
@@ -1495,6 +1497,8 @@ impl CudaKernelProvider {
                         ilp_kernels::EXTRACT_NONZERO_INDICES,
                         ilp_kernels::ILP_COO_FILL_FROM_MASK,
                         ilp_kernels::ILP_CSR_HISTOGRAM,
+                        ilp_kernels::ILP_REDUCE_SUM_F32,
+                        ilp_kernels::ILP_REDUCE_SUM_F64,
                     ],
                 )
                 .map_err(|e| {
@@ -11055,6 +11059,90 @@ impl CudaKernelProvider {
             d_num_rows,
             schema,
         ))
+    }
+
+    /// GPU-side sum reduction (f32).
+    ///
+    /// Sums `n` elements of `input` on device and returns a single-element
+    /// device buffer containing the result.  The caller must zero the output
+    /// buffer *before* launching the kernel — this function handles that.
+    pub fn ilp_reduce_sum_f32_launch(
+        &self,
+        input: &TrackedCudaSlice<f32>,
+        n: u32,
+    ) -> Result<TrackedCudaSlice<f32>> {
+        let mut d_result = self.memory.alloc::<f32>(1)?;
+        self.device
+            .inner()
+            .htod_sync_copy_into(&[0.0f32], &mut d_result)
+            .map_err(|e| XlogError::Kernel(format!("ilp_reduce_sum_f32 zero result: {}", e)))?;
+
+        if n == 0 {
+            return Ok(d_result);
+        }
+
+        let func = self
+            .device
+            .inner()
+            .get_func(ILP_MODULE, ilp_kernels::ILP_REDUCE_SUM_F32)
+            .ok_or_else(|| XlogError::Kernel("ilp_reduce_sum_f32 not found".to_string()))?;
+        let block_size = 256u32;
+        let grid_size = (n + block_size - 1) / block_size;
+        unsafe {
+            func.clone().launch(
+                LaunchConfig {
+                    grid_dim: (grid_size, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (input, n, &mut d_result),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("ilp_reduce_sum_f32: {}", e)))?;
+        self.device.synchronize()?;
+        Ok(d_result)
+    }
+
+    /// GPU-side sum reduction (f64).
+    ///
+    /// Sums `n` elements of `input` on device and returns a single-element
+    /// device buffer containing the result.  Requires sm_60+ for double
+    /// atomicAdd (this project targets sm_75 baseline).
+    pub fn ilp_reduce_sum_f64_launch(
+        &self,
+        input: &TrackedCudaSlice<f64>,
+        n: u32,
+    ) -> Result<TrackedCudaSlice<f64>> {
+        let mut d_result = self.memory.alloc::<f64>(1)?;
+        self.device
+            .inner()
+            .htod_sync_copy_into(&[0.0f64], &mut d_result)
+            .map_err(|e| XlogError::Kernel(format!("ilp_reduce_sum_f64 zero result: {}", e)))?;
+
+        if n == 0 {
+            return Ok(d_result);
+        }
+
+        let func = self
+            .device
+            .inner()
+            .get_func(ILP_MODULE, ilp_kernels::ILP_REDUCE_SUM_F64)
+            .ok_or_else(|| XlogError::Kernel("ilp_reduce_sum_f64 not found".to_string()))?;
+        let block_size = 256u32;
+        let grid_size = (n + block_size - 1) / block_size;
+        unsafe {
+            func.clone().launch(
+                LaunchConfig {
+                    grid_dim: (grid_size, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (input, n, &mut d_result),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("ilp_reduce_sum_f64: {}", e)))?;
+        self.device.synchronize()?;
+        Ok(d_result)
     }
 
     /// Extract active (i,j,k) rule indices from a flattened N×N×N mask.
