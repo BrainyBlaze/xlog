@@ -1,11 +1,11 @@
 # XLOG Development Roadmap
 
 > **Last Updated:** March 5, 2026
-> **Current Version:** v0.4.0-ga (Tagged)
-> **Current Milestone:** v0.4.0-ga (GA release — typed batch upload fix, SLO harness, 50-seed reliability gate)
-> **Status:** `main` is at `v0.4.0-ga`: GPU-native exact path (GPU D4 + GPU CDCL verifier + cache),
-> neural-symbolic training APIs, dILP GA trainer (sparse mask, promotion pipeline, artifact persistence,
-> reliability gates, typed batch upload), GA-hardened promotion, and sparse executor with DLPack-native mask path.
+> **Current Version:** v0.4.0-ga (Tagged) + post-GA hardening
+> **Current Milestone:** v0.5.0 (in progress)
+> **Status:** `main` is post-GA: GPU-resident ILP credit/loss (zero D2H, non-chunked), strict zero-D2H
+> CI gate, COO memory cap with chunked fallback, 4 new CUDA kernels. Prior: GPU-native exact path,
+> neural-symbolic training, dILP GA trainer, sparse executor.
 
 ---
 
@@ -463,7 +463,7 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 
 ### Planned 📋 (dILP beyond GA)
 
-- [ ] Full GPU-resident loss computation (v0.5.0)
+- [x] ~~Full GPU-resident loss computation (v0.5.0)~~ (done: `compute_ilp_loss_grad_gpu` with zero D2H in non-chunked paths, strict gate via `set_strict_zero_dtoh`, 4 new CUDA kernels)
 - [ ] Config restoration from saved artifact JSON
 - [ ] Telemetry persistence in artifact (optional, size-bounded)
 - [x] ~~Typed query-buffer builder (non-u32 schemas)~~ (done: schema-aware typed packing for I32/I64/U64/Bool/Symbol, F32/F64 rejected)
@@ -683,7 +683,7 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 | v0.4.0-alpha | Implemented | Neural predicates (`nn/4`) + training milestone (release-gated on full example validation with real datasets) |
 | v0.4.0-beta | Achieved | dILP beta trainer, GA-hardened promotion, sparse executor (DLPack-native, no N^3 materialization), deterministic training, artifact persistence. Beta gate = 20/20 reliability. 50-seed GA gate = 200/200 (436s, `max_attempts=2`). |
 | v0.4.0-ga | **Achieved** | Typed batch upload fix (schema-aware I32/I64/U64/Bool/Symbol packing), SLO scaling harness, per-step phase timing, GA preflight all-pass. |
-| v0.5.0 | Planned | Full GPU-resident loss/credit path, zero data-plane host transfers, term embeddings, extended training controls |
+| v0.5.0 | In Progress | GPU-resident loss/credit path (done: zero D2H non-chunked, strict gate, 4 CUDA kernels), GPU-only chunk merge (planned), term embeddings, extended training controls |
 | v0.6.0 | Planned | Epistemic logic tier (Phase 7) |
 | v0.7+ | Planned | Multi-GPU support, distributed execution (Phase 8) |
 

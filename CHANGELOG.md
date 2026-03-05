@@ -4,6 +4,29 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **GPU-resident ILP credit/loss path** (`compute_ilp_loss_grad_gpu`): Single Rust/CUDA call replaces
+  Python-side `_compute_loss_from_candidates()` loop. Builds COO→CSR on-device, runs forward/backward
+  CUDA kernels, reduces loss on-device, returns `(loss, grad)` as DLPack tensors. Zero D2H transfers
+  in all non-chunked paths, confirmed by strict byte-level accounting (`host_transfer_stats()`).
+- **4 new CUDA kernels**: `ilp_coo_fill_from_mask` (COO fill from device mask + prefix-sum),
+  `ilp_csr_histogram` (CSR row_offsets via atomicAdd histogram), `ilp_reduce_sum_f32`/`ilp_reduce_sum_f64`
+  (block-level sum reduction).
+- **COO memory cap + chunked fallback**: `set_coo_memory_cap(bytes)` controls maximum COO buffer size.
+  When exceeded, candidates are processed in bounded-memory chunks (D2H merge by design).
+- **Strict zero-D2H mode**: `set_strict_zero_dtoh(True)` raises `RuntimeError` instead of falling back
+  to chunked path. Use in zero-D2H benchmarks and CI gates.
+- **D2H transfer accounting**: Strict byte-level gate via `host_transfer_stats()` returning
+  `dtoh_calls` and `dtoh_bytes` counters, plus coarse column-level `d2h_transfer_count()`.
+- **3 gradient parity tests**: GPU kernel output vs pure-PyTorch reference (f32, f64, multi-candidate).
+
+### Removed
+
+- **Legacy host-sum export helpers** (`export_loss_grad_f32`, `export_loss_grad_f64`): Replaced by
+  device-only `export_loss_grad_device_f32`/`export_loss_grad_device_f64`. All loss/grad export now
+  stays on device.
+
 ## [0.4.0-ga] — 2026-03-05
 
 ### Changed
