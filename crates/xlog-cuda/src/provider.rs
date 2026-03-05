@@ -11277,8 +11277,12 @@ impl CudaKernelProvider {
     /// Fill COO arrays from a device-side mask and prefix-sum.
     ///
     /// For each set bit in `mask`, writes the corresponding `fact_indices` entry
-    /// into `coo_fact` and the candidate index `cidx` into `coo_cand` at the
-    /// position determined by `d_offsets[cidx] + prefix_sum[tid]`.
+    /// into `coo_fact` and `cand_value` into `coo_cand` at the position
+    /// determined by `d_offsets[offset_idx] + prefix_sum[tid]`.
+    ///
+    /// Parameters:
+    /// - `offset_idx`: index into `d_offsets` for the write base position
+    /// - `cand_value`: actual candidate index to write into `coo_cand`
     ///
     /// This keeps COO assembly fully on device, eliminating the mask D2H transfer.
     pub fn ilp_coo_fill_from_mask_launch(
@@ -11286,7 +11290,8 @@ impl CudaKernelProvider {
         mask: &TrackedCudaSlice<u8>,
         prefix_sum: &TrackedCudaSlice<u32>,
         fact_indices: &TrackedCudaSlice<u32>,
-        cidx: u32,
+        offset_idx: u32,
+        cand_value: u32,
         num_query: u32,
         d_offsets: &TrackedCudaSlice<u32>,
         coo_fact: &mut TrackedCudaSlice<u32>,
@@ -11315,7 +11320,8 @@ impl CudaKernelProvider {
                     mask,
                     prefix_sum,
                     fact_indices,
-                    cidx,
+                    offset_idx,
+                    cand_value,
                     num_query,
                     d_offsets,
                     coo_fact,

@@ -4108,12 +4108,28 @@ impl CompiledIlpProgram {
             .ilp_last_result()
             .ok_or_else(|| PyRuntimeError::new_err("No ILP result — call evaluate() first"))?;
 
-        // ── Phase C: COO build ──
-        let mut coo_facts: Vec<u32> = Vec::new();
-        let mut coo_cands: Vec<u32> = Vec::new();
+        // ── Phase C: Device-side COO build (zero D2H) ──
+        //
+        // Two-pass approach over (relation, candidate) tasks:
+        //   Pass 1: compute GPU membership masks
+        //   Pass 2: scatter COO entries at host-computed offsets via device kernel
+        //
+        // The key insight is that each task's num_query is known on the host
+        // (it equals the number of facts in that relation group), so we can
+        // compute COO write offsets entirely on the host without any D2H reads.
+        // We over-allocate COO arrays at upper_bound (sum of all num_query)
+        // and fill sentinel values for unused slots.
+
+        struct CooTask {
+            cidx: u32,
+            num_query: u32,
+            d_mask: xlog_cuda::memory::TrackedCudaSlice<u8>,
+            fact_indices_idx: usize, // index into fact_indices_buffers
+        }
+        let mut tasks: Vec<CooTask> = Vec::new();
+        let mut fact_indices_buffers: Vec<xlog_cuda::memory::TrackedCudaSlice<u32>> = Vec::new();
 
         for (relation, facts_with_idx) in &groups {
-            // Find k_idx for this relation
             let k_idx = self
                 .rel_index
                 .iter()
@@ -4122,7 +4138,6 @@ impl CompiledIlpProgram {
                     PyValueError::new_err(format!("Relation '{}' not in ILP schema", relation))
                 })? as u32;
 
-            // Filter relevant entries
             let relevant_entries: Vec<&xlog_runtime::ilp_registry::IlpTagEntry> = tagged
                 .entries
                 .iter()
@@ -4133,7 +4148,6 @@ impl CompiledIlpProgram {
                 continue;
             }
 
-            // Get schema and build query buffer
             let first_buf = relevant_entries[0].buffer.as_ref().unwrap();
             let arity = first_buf.arity();
             if arity == 0 {
@@ -4141,10 +4155,8 @@ impl CompiledIlpProgram {
             }
             let schema = first_buf.schema().clone();
 
-            // Extract just the fact values (without global indices) for typed upload
             let fact_values: Vec<Vec<i64>> =
                 facts_with_idx.iter().map(|(_, v)| v.clone()).collect();
-
             let col_bytes = pack_i64_columns_typed(relation, &fact_values, &schema)?;
             let col_slices: Vec<&[u8]> = col_bytes.iter().map(|c| c.as_slice()).collect();
             let query_buf = self
@@ -4153,117 +4165,200 @@ impl CompiledIlpProgram {
                 .map_err(|e| PyRuntimeError::new_err(format!("create_buffer: {}", e)))?;
 
             let keys: Vec<usize> = (0..arity).collect();
-            let num_query = fact_values.len();
+            let num_query = fact_values.len() as u32;
+
+            // Upload global fact indices for this relation group (H2D, allowed).
+            // Shared across all entries in this relation group via index.
+            let global_indices: Vec<u32> =
+                facts_with_idx.iter().map(|(idx, _)| *idx).collect();
+            let mut d_fact_indices = self
+                .provider
+                .memory()
+                .alloc::<u32>(num_query as usize)
+                .map_err(|e| PyRuntimeError::new_err(format!("alloc fact_indices: {}", e)))?;
+            self.provider
+                .device()
+                .inner()
+                .htod_sync_copy_into(&global_indices, &mut d_fact_indices)
+                .map_err(|e| PyRuntimeError::new_err(format!("htod fact_indices: {}", e)))?;
+            let fi_idx = fact_indices_buffers.len();
+            fact_indices_buffers.push(d_fact_indices);
 
             for entry in &relevant_entries {
-                // Look up candidate index for this entry
                 let cidx = match candidate_map.get(&(entry.i, entry.j, entry.k)) {
                     Some(c) => *c,
-                    None => continue, // entry's rule not in current candidate set
+                    None => continue,
                 };
 
                 let entry_buf = entry.buffer.as_ref().unwrap();
-
-                // GPU-resident membership mask
                 let d_mask = self
                     .provider
                     .membership_mask_device(&query_buf, entry_buf, &keys, &keys)
                     .map_err(|e| PyRuntimeError::new_err(format!("membership_mask: {}", e)))?;
 
-                // Download small mask (control-plane metadata, ~10 bytes)
-                let mut host_mask = vec![0u8; num_query];
-                self.provider
-                    .device()
-                    .inner()
-                    .dtoh_sync_copy_into(&d_mask, &mut host_mask)
-                    .map_err(|e| {
-                        PyRuntimeError::new_err(format!("mask download: {}", e))
-                    })?;
-
-                for (local_idx, &m) in host_mask.iter().enumerate() {
-                    if m != 0 {
-                        let global_fact_idx = facts_with_idx[local_idx].0;
-                        coo_facts.push(global_fact_idx);
-                        coo_cands.push(cidx);
-                    }
-                }
+                tasks.push(CooTask {
+                    cidx,
+                    num_query,
+                    d_mask,
+                    fact_indices_idx: fi_idx,
+                });
             }
         }
 
-        let nnz = coo_facts.len() as u32;
+        let num_tasks = tasks.len();
+        let upper_bound: u32 = tasks.iter().map(|t| t.num_query).sum();
 
-        // Handle case where no facts matched any entries
-        if nnz == 0 {
-            // No matching entries: loss = sum of NLL for all facts with credit=0
-            // For positives: -log(eps), for negatives: -log(1-0) = 0
-            // Use the kernel path with empty CSR for correctness
-            return self.build_loss_grad_empty_coo(py, &is_positive_host, num_facts, num_cands, is_f64);
+        if upper_bound == 0 || num_tasks == 0 {
+            return self.build_loss_grad_empty_coo(
+                py,
+                &is_positive_host,
+                num_facts,
+                num_cands,
+                is_f64,
+            );
         }
 
-        // ── Phase D: Upload COO, sort, build CSR ──
+        // Compute COO write offsets from host-known num_query values.
+        // offset[i] = sum of num_query for tasks 0..i, so each task writes
+        // its entries starting at offset[i] in the COO arrays.
+        let mut offsets_host = vec![0u32; num_tasks];
+        {
+            let mut running = 0u32;
+            for i in 0..num_tasks {
+                offsets_host[i] = running;
+                running += tasks[i].num_query;
+            }
+            debug_assert_eq!(running, upper_bound);
+        }
+
+        let mut d_offsets = self
+            .provider
+            .memory()
+            .alloc::<u32>(num_tasks)
+            .map_err(|e| PyRuntimeError::new_err(format!("alloc d_offsets: {}", e)))?;
+        self.provider
+            .device()
+            .inner()
+            .htod_sync_copy_into(&offsets_host, &mut d_offsets)
+            .map_err(|e| PyRuntimeError::new_err(format!("htod d_offsets: {}", e)))?;
+
+        // Allocate COO arrays at upper_bound, filled with sentinel values.
+        // Sentinel fact = num_facts (out-of-bounds for histogram, which checks f < num_facts).
+        // Sentinel cand = num_cands (out-of-bounds, never accessed by forward kernel
+        // because row_offsets won't reference sentinel positions).
+        let sentinel_fact = num_facts;
+        let sentinel_cand = num_cands;
         let mut d_coo_facts = self
             .provider
             .memory()
-            .alloc::<u32>(nnz as usize)
+            .alloc::<u32>(upper_bound as usize)
             .map_err(|e| PyRuntimeError::new_err(format!("alloc coo_facts: {}", e)))?;
         let mut d_coo_cands = self
             .provider
             .memory()
-            .alloc::<u32>(nnz as usize)
+            .alloc::<u32>(upper_bound as usize)
             .map_err(|e| PyRuntimeError::new_err(format!("alloc coo_cands: {}", e)))?;
+        {
+            let sentinel_facts_vec = vec![sentinel_fact; upper_bound as usize];
+            let sentinel_cands_vec = vec![sentinel_cand; upper_bound as usize];
+            self.provider
+                .device()
+                .inner()
+                .htod_sync_copy_into(&sentinel_facts_vec, &mut d_coo_facts)
+                .map_err(|e| PyRuntimeError::new_err(format!("sentinel facts: {}", e)))?;
+            self.provider
+                .device()
+                .inner()
+                .htod_sync_copy_into(&sentinel_cands_vec, &mut d_coo_cands)
+                .map_err(|e| PyRuntimeError::new_err(format!("sentinel cands: {}", e)))?;
+        }
 
-        self.provider
-            .device()
-            .inner()
-            .htod_sync_copy_into(&coo_facts, &mut d_coo_facts)
-            .map_err(|e| PyRuntimeError::new_err(format!("htod coo_facts: {}", e)))?;
-        self.provider
-            .device()
-            .inner()
-            .htod_sync_copy_into(&coo_cands, &mut d_coo_cands)
-            .map_err(|e| PyRuntimeError::new_err(format!("htod coo_cands: {}", e)))?;
+        // Pass 2: Fill COO entries from device masks using the fill kernel.
+        // Each task scatters its matching entries at d_offsets[task_idx] + prefix_sum[tid].
+        for (task_idx, task) in tasks.iter().enumerate() {
+            let d_prefix = self
+                .provider
+                .scan_u8_mask_device(&task.d_mask, task.num_query)
+                .map_err(|e| PyRuntimeError::new_err(format!("scan mask: {}", e)))?;
 
-        // Sort COO by fact_idx (keys), carrying cand_idx (values)
+            self.provider
+                .ilp_coo_fill_from_mask_launch(
+                    &task.d_mask,
+                    &d_prefix,
+                    &fact_indices_buffers[task.fact_indices_idx],
+                    task_idx as u32, // offset_idx: index into d_offsets
+                    task.cidx,       // cand_value: actual candidate index
+                    task.num_query,
+                    &d_offsets,
+                    &mut d_coo_facts,
+                    &mut d_coo_cands,
+                )
+                .map_err(|e| PyRuntimeError::new_err(format!("coo fill: {}", e)))?;
+        }
+
+        // ── Phase D: Sort COO + device-side CSR build (zero D2H) ──
+        //
+        // Sort all upper_bound entries (including sentinels). After sorting,
+        // valid entries (fact < num_facts) come first in order, followed by
+        // sentinels (fact = num_facts). The histogram kernel ignores sentinels
+        // via its f < num_facts bounds check.
         let mut scratch =
-            xlog_cuda::provider::RadixSortScratch::new(&self.provider, nnz)
+            xlog_cuda::provider::RadixSortScratch::new(&self.provider, upper_bound)
                 .map_err(|e| PyRuntimeError::new_err(format!("sort scratch: {}", e)))?;
         self.provider
-            .radix_sort_u32_pairs(&mut d_coo_facts, &mut d_coo_cands, nnz, &mut scratch)
+            .radix_sort_u32_pairs(
+                &mut d_coo_facts,
+                &mut d_coo_cands,
+                upper_bound,
+                &mut scratch,
+            )
             .map_err(|e| PyRuntimeError::new_err(format!("radix sort: {}", e)))?;
 
-        // Download sorted fact indices to build CSR row_offsets on host
-        // (O(nnz * 4) bytes of control metadata)
-        let mut sorted_facts = vec![0u32; nnz as usize];
-        self.provider
-            .device()
-            .inner()
-            .dtoh_sync_copy_into(&d_coo_facts, &mut sorted_facts)
-            .map_err(|e| PyRuntimeError::new_err(format!("dtoh sorted: {}", e)))?;
+        // Build CSR row_offsets via device histogram + exclusive prefix-sum.
+        // histogram[i] = count of COO entries with fact index i (sentinels excluded).
+        let d_hist = self
+            .provider
+            .ilp_csr_histogram_launch(&d_coo_facts, upper_bound, num_facts)
+            .map_err(|e| PyRuntimeError::new_err(format!("csr histogram: {}", e)))?;
 
-        // Build CSR row_offsets: row_offsets[i] = first index in sorted COO where fact_idx == i
-        let mut row_offsets = vec![0u32; (num_facts + 1) as usize];
-        for &f in &sorted_facts {
-            if (f as usize) < num_facts as usize {
-                row_offsets[(f + 1) as usize] += 1;
-            }
-        }
-        // Prefix sum
-        for i in 1..=num_facts as usize {
-            row_offsets[i] += row_offsets[i - 1];
-        }
-
-        // Upload row_offsets and is_positive to GPU
+        // Build row_offsets[num_facts+1] from histogram:
+        //   row_offsets = [h0, h1, ..., h_{n-1}, 0]
+        // after exclusive scan:
+        //   row_offsets = [0, h0, h0+h1, ..., total_nnz]
         let mut d_row_offsets = self
             .provider
             .memory()
             .alloc::<u32>((num_facts + 1) as usize)
             .map_err(|e| PyRuntimeError::new_err(format!("alloc row_offsets: {}", e)))?;
+        {
+            // Zero-initialize row_offsets (H2D, allowed)
+            let zeros = vec![0u32; (num_facts + 1) as usize];
+            self.provider
+                .device()
+                .inner()
+                .htod_sync_copy_into(&zeros, &mut d_row_offsets)
+                .map_err(|e| PyRuntimeError::new_err(format!("zero row_offsets: {}", e)))?;
+        }
+        // Device-to-device copy: histogram[0..num_facts] -> row_offsets[0..num_facts]
+        // (leaving row_offsets[num_facts] = 0 for the exclusive scan tail)
+        {
+            let mut dst_view = d_row_offsets
+                .try_slice_mut(0..num_facts as usize)
+                .ok_or_else(|| {
+                    PyRuntimeError::new_err("row_offsets slice failed")
+                })?;
+            self.provider
+                .device()
+                .inner()
+                .dtod_copy(&d_hist, &mut dst_view)
+                .map_err(|e| PyRuntimeError::new_err(format!("dtod hist->row_offsets: {}", e)))?;
+        }
+        // Exclusive scan converts [h0, h1, ..., h_{n-1}, 0] -> [0, h0, h0+h1, ..., total_nnz]
         self.provider
-            .device()
-            .inner()
-            .htod_sync_copy_into(&row_offsets, &mut d_row_offsets)
-            .map_err(|e| PyRuntimeError::new_err(format!("htod row_offsets: {}", e)))?;
+            .exclusive_scan_u32_inplace(&mut d_row_offsets, num_facts + 1)
+            .map_err(|e| PyRuntimeError::new_err(format!("scan row_offsets: {}", e)))?;
 
+        // Upload is_positive (H2D, allowed)
         let mut d_is_positive = self
             .provider
             .memory()
@@ -4275,7 +4370,7 @@ impl CompiledIlpProgram {
             .htod_sync_copy_into(&is_positive_host, &mut d_is_positive)
             .map_err(|e| PyRuntimeError::new_err(format!("htod is_positive: {}", e)))?;
 
-        // ── Phase E: Forward + backward kernel launches ──
+        // ── Phase E: Forward + backward + device-side reduction (zero D2H) ──
         let cand_col = cand_buf
             .column(0)
             .ok_or_else(|| PyRuntimeError::new_err("cand_probs has no column"))?;
@@ -4296,14 +4391,11 @@ impl CompiledIlpProgram {
                 )
                 .map_err(|e| PyRuntimeError::new_err(format!("forward f64: {}", e)))?;
 
-            // Download loss_contrib to sum on host (O(num_facts * 8) bytes, control metadata)
-            let mut loss_host = vec![0.0f64; num_facts as usize];
-            self.provider
-                .device()
-                .inner()
-                .dtoh_sync_copy_into(&loss_contrib, &mut loss_host)
-                .map_err(|e| PyRuntimeError::new_err(format!("dtoh loss: {}", e)))?;
-            let total_loss: f64 = loss_host.iter().sum();
+            // Device-side reduction: sum loss_contrib on GPU (zero D2H)
+            let d_total_loss = self
+                .provider
+                .ilp_reduce_sum_f64_launch(&loss_contrib, num_facts)
+                .map_err(|e| PyRuntimeError::new_err(format!("reduce f64: {}", e)))?;
 
             let d_grad = self
                 .provider
@@ -4317,7 +4409,7 @@ impl CompiledIlpProgram {
                 )
                 .map_err(|e| PyRuntimeError::new_err(format!("backward f64: {}", e)))?;
 
-            self.export_loss_grad_f64(py, total_loss, d_grad, num_cands)
+            self.export_loss_grad_device_f64(py, d_total_loss, d_grad, num_cands)
         } else {
             let (credit_out, loss_contrib) = self
                 .provider
@@ -4331,14 +4423,11 @@ impl CompiledIlpProgram {
                 )
                 .map_err(|e| PyRuntimeError::new_err(format!("forward f32: {}", e)))?;
 
-            // Download loss_contrib to sum on host (O(num_facts * 4) bytes, control metadata)
-            let mut loss_host = vec![0.0f32; num_facts as usize];
-            self.provider
-                .device()
-                .inner()
-                .dtoh_sync_copy_into(&loss_contrib, &mut loss_host)
-                .map_err(|e| PyRuntimeError::new_err(format!("dtoh loss: {}", e)))?;
-            let total_loss: f32 = loss_host.iter().sum();
+            // Device-side reduction: sum loss_contrib on GPU (zero D2H)
+            let d_total_loss = self
+                .provider
+                .ilp_reduce_sum_f32_launch(&loss_contrib, num_facts)
+                .map_err(|e| PyRuntimeError::new_err(format!("reduce f32: {}", e)))?;
 
             let d_grad = self
                 .provider
@@ -4352,7 +4441,7 @@ impl CompiledIlpProgram {
                 )
                 .map_err(|e| PyRuntimeError::new_err(format!("backward f32: {}", e)))?;
 
-            self.export_loss_grad_f32(py, total_loss, d_grad, num_cands)
+            self.export_loss_grad_device_f32(py, d_total_loss, d_grad, num_cands)
         }
     }
 

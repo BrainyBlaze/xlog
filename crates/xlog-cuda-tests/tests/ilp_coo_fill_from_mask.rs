@@ -20,8 +20,10 @@ fn test_ilp_coo_fill_from_mask_basic() {
     let prefix_sum_data: Vec<u32> = vec![0, 1, 1, 2];
     // fact_indices: [10, 20, 30, 40]
     let fact_indices_data: Vec<u32> = vec![10, 20, 30, 40];
-    // cidx = 2, d_offsets = [0, 0, 7, 0, 0, 0] (offset at index 2 = 7)
-    let cidx: u32 = 2;
+    // offset_idx = 2, cand_value = 5
+    // d_offsets = [0, 0, 7, 0, 0, 0] (offset at index 2 = 7)
+    let offset_idx: u32 = 2;
+    let cand_value: u32 = 5;
     let d_offsets_data: Vec<u32> = vec![0, 0, 7, 0, 0, 0];
     let num_query: u32 = 4;
 
@@ -46,13 +48,14 @@ fn test_ilp_coo_fill_from_mask_basic() {
     ctx.htod_sync_copy_into(&zeros, &mut coo_fact).expect("zero coo_fact");
     ctx.htod_sync_copy_into(&zeros, &mut coo_cand).expect("zero coo_cand");
 
-    // Launch kernel
+    // Launch kernel with split offset_idx / cand_value
     ctx.provider
         .ilp_coo_fill_from_mask_launch(
             &mask,
             &prefix_sum,
             &fact_indices,
-            cidx,
+            offset_idx,
+            cand_value,
             num_query,
             &d_offsets,
             &mut coo_fact,
@@ -64,18 +67,18 @@ fn test_ilp_coo_fill_from_mask_basic() {
     let coo_fact_host: Vec<u32> = ctx.dtoh_sync_copy(&coo_fact).expect("download coo_fact");
     let coo_cand_host: Vec<u32> = ctx.dtoh_sync_copy(&coo_cand).expect("download coo_cand");
 
-    // Expected writes at indices 7, 8, 9:
-    // mask[0]=1: write_idx = 7 + 0 = 7 -> coo_fact[7]=10, coo_cand[7]=2
+    // Expected writes at indices 7, 8, 9 (offset = d_offsets[offset_idx=2] = 7):
+    // mask[0]=1: write_idx = 7 + 0 = 7 -> coo_fact[7]=10, coo_cand[7]=5 (cand_value)
     // mask[1]=0: skip
-    // mask[2]=1: write_idx = 7 + 1 = 8 -> coo_fact[8]=30, coo_cand[8]=2
-    // mask[3]=1: write_idx = 7 + 2 = 9 -> coo_fact[9]=40, coo_cand[9]=2
+    // mask[2]=1: write_idx = 7 + 1 = 8 -> coo_fact[8]=30, coo_cand[8]=5
+    // mask[3]=1: write_idx = 7 + 2 = 9 -> coo_fact[9]=40, coo_cand[9]=5
     assert_eq!(coo_fact_host[7], 10, "coo_fact[7] should be 10");
     assert_eq!(coo_fact_host[8], 30, "coo_fact[8] should be 30");
     assert_eq!(coo_fact_host[9], 40, "coo_fact[9] should be 40");
 
-    assert_eq!(coo_cand_host[7], 2, "coo_cand[7] should be 2");
-    assert_eq!(coo_cand_host[8], 2, "coo_cand[8] should be 2");
-    assert_eq!(coo_cand_host[9], 2, "coo_cand[9] should be 2");
+    assert_eq!(coo_cand_host[7], 5, "coo_cand[7] should be cand_value=5");
+    assert_eq!(coo_cand_host[8], 5, "coo_cand[8] should be cand_value=5");
+    assert_eq!(coo_cand_host[9], 5, "coo_cand[9] should be cand_value=5");
 
     // Verify untouched positions remain zero
     for i in 0..7 {
@@ -113,7 +116,8 @@ fn test_ilp_coo_fill_from_mask_empty() {
             &mask,
             &prefix_sum,
             &fact_indices,
-            0,
+            0, // offset_idx
+            0, // cand_value
             0, // num_query = 0
             &d_offsets,
             &mut coo_fact,
@@ -164,7 +168,8 @@ fn test_ilp_coo_fill_from_mask_all_zeros() {
             &mask,
             &prefix_sum,
             &fact_indices,
-            1,
+            1,  // offset_idx
+            99, // cand_value
             num_query,
             &d_offsets,
             &mut coo_fact,
