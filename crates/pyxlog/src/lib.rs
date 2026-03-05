@@ -3960,6 +3960,7 @@ impl IlpProgramFactory {
             compiled_schema_size: tmj.schema_size,
             head_rel_name: tmj.head_rel_name,
             max_active_rules: active_rules,
+            candidate_map: None,
         })
     }
 }
@@ -3980,10 +3981,26 @@ pub struct CompiledIlpProgram {
     compiled_schema_size: usize,
     head_rel_name: String,
     max_active_rules: usize,
+    candidate_map: Option<HashMap<(u32, u32, u32), u32>>,
 }
 
 #[pymethods]
 impl CompiledIlpProgram {
+    /// Upload candidate (i,j,k) -> index mapping. Called once per attempt.
+    pub fn set_candidate_map(&mut self, candidates: Vec<(u32, u32, u32)>) -> PyResult<()> {
+        let mut map = HashMap::with_capacity(candidates.len());
+        for (cidx, &(i, j, k)) in candidates.iter().enumerate() {
+            map.insert((i, j, k), cidx as u32);
+        }
+        self.candidate_map = Some(map);
+        Ok(())
+    }
+
+    /// Length of current candidate map (0 if not set).
+    pub fn candidate_map_len(&self) -> usize {
+        self.candidate_map.as_ref().map_or(0, |m| m.len())
+    }
+
     pub fn set_rule_mask(
         &mut self,
         name: String,
