@@ -199,9 +199,10 @@ pub const CNF_MODULE: &str = "xlog_cnf";
 pub const CACHE_MODULE: &str = "xlog_cache";
 pub const WEIGHTS_MODULE: &str = "xlog_weights";
 pub const ILP_MODULE: &str = "xlog_ilp";
+pub const ILP_CREDIT_MODULE: &str = "xlog_ilp_credit";
 
-// Compile-time check: kernel manifest lists exactly 20 modules.
-const _: () = assert!(crate::kernel_manifest_data::KERNEL_CU_NAMES.len() == 20);
+// Compile-time check: kernel manifest lists exactly 21 modules.
+const _: () = assert!(crate::kernel_manifest_data::KERNEL_CU_NAMES.len() == 21);
 
 /// Kernel function names in the Monte Carlo sampling module
 pub mod mc_sample_kernels {
@@ -255,6 +256,15 @@ pub mod neural_kernels {
 /// Kernel function names in the ILP module.
 pub mod ilp_kernels {
     pub const EXTRACT_NONZERO_INDICES: &str = "extract_nonzero_indices";
+}
+
+/// Kernel function names in the ILP credit module.
+pub mod ilp_credit_kernels {
+    pub const ILP_COO_FILL: &str = "ilp_coo_fill";
+    pub const ILP_CREDIT_FORWARD_F32: &str = "ilp_credit_forward_f32";
+    pub const ILP_CREDIT_FORWARD_F64: &str = "ilp_credit_forward_f64";
+    pub const ILP_CREDIT_BACKWARD_F32: &str = "ilp_credit_backward_f32";
+    pub const ILP_CREDIT_BACKWARD_F64: &str = "ilp_credit_backward_f64";
 }
 
 /// Kernel function names in the PIR interning module.
@@ -1495,6 +1505,46 @@ impl CudaKernelProvider {
                 }
                 let elapsed = t0.elapsed().as_secs_f64();
                 profile.per_module_sec.push(("ilp".to_string(), elapsed));
+                profile.total_sec += elapsed;
+                if is_cubin {
+                    profile.cubin_loaded += 1;
+                } else {
+                    profile.ptx_fallback += 1;
+                }
+            }
+        }
+
+        // ILP credit module
+        {
+            let t0 = if profiling { Some(Instant::now()) } else { None };
+            let (ptx, is_cubin) = load_module_from_file("ilp_credit", cc)?;
+            device
+                .inner()
+                .load_ptx(
+                    ptx,
+                    ILP_CREDIT_MODULE,
+                    &[
+                        ilp_credit_kernels::ILP_COO_FILL,
+                        ilp_credit_kernels::ILP_CREDIT_FORWARD_F32,
+                        ilp_credit_kernels::ILP_CREDIT_FORWARD_F64,
+                        ilp_credit_kernels::ILP_CREDIT_BACKWARD_F32,
+                        ilp_credit_kernels::ILP_CREDIT_BACKWARD_F64,
+                    ],
+                )
+                .map_err(|e| {
+                    XlogError::Kernel(format!("Failed to load ILP credit module: {}", e))
+                })?;
+            if let Some(t0) = t0 {
+                if profiling {
+                    device
+                        .inner()
+                        .synchronize()
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("sync after ILP credit load: {}", e))
+                        })?;
+                }
+                let elapsed = t0.elapsed().as_secs_f64();
+                profile.per_module_sec.push(("ilp_credit".to_string(), elapsed));
                 profile.total_sec += elapsed;
                 if is_cubin {
                     profile.cubin_loaded += 1;
