@@ -8524,6 +8524,265 @@ impl CudaKernelProvider {
         Ok(host_mask.into_iter().map(|b| b != 0).collect())
     }
 
+    // ─── ILP credit kernel launchers ───────────────────────────────────
+
+    /// Launch `ilp_coo_fill` kernel: writes `(compacted_fact_indices[i], cidx)`
+    /// pairs at `coo_fact[offset..]` and `coo_cand[offset..]`.
+    pub fn ilp_coo_fill_launch(
+        &self,
+        compacted_fact_indices: &TrackedCudaSlice<u32>,
+        cidx: u32,
+        count: u32,
+        offset: u32,
+        coo_fact: &mut TrackedCudaSlice<u32>,
+        coo_cand: &mut TrackedCudaSlice<u32>,
+    ) -> Result<()> {
+        if count == 0 {
+            return Ok(());
+        }
+        let func = self
+            .device
+            .inner()
+            .get_func(ILP_CREDIT_MODULE, ilp_credit_kernels::ILP_COO_FILL)
+            .ok_or_else(|| XlogError::Kernel("ilp_coo_fill kernel not found".to_string()))?;
+        let block_size = 256u32;
+        let grid_size = (count + block_size - 1) / block_size;
+        unsafe {
+            func.clone().launch(
+                LaunchConfig {
+                    grid_dim: (grid_size, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (compacted_fact_indices, cidx, count, offset, coo_fact, coo_cand),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("ilp_coo_fill failed: {}", e)))?;
+        self.device.synchronize()?;
+        Ok(())
+    }
+
+    /// Launch `ilp_credit_forward_f32`: CSR credit gather + clamp + NLL loss.
+    /// Returns `(credit_out, loss_contrib)` device slices of length `num_facts`.
+    pub fn ilp_credit_forward_f32_launch(
+        &self,
+        row_offsets: &TrackedCudaSlice<u32>,
+        col_indices: &TrackedCudaSlice<u32>,
+        cand_probs: &CudaColumn, // raw byte column from CudaBuffer
+        is_positive: &TrackedCudaSlice<u8>,
+        num_facts: u32,
+        eps: f32,
+    ) -> Result<(TrackedCudaSlice<f32>, TrackedCudaSlice<f32>)> {
+        let mut credit_out = self.memory.alloc::<f32>(num_facts as usize)?;
+        let mut loss_contrib = self.memory.alloc::<f32>(num_facts as usize)?;
+        if num_facts == 0 {
+            return Ok((credit_out, loss_contrib));
+        }
+        let func = self
+            .device
+            .inner()
+            .get_func(
+                ILP_CREDIT_MODULE,
+                ilp_credit_kernels::ILP_CREDIT_FORWARD_F32,
+            )
+            .ok_or_else(|| {
+                XlogError::Kernel("ilp_credit_forward_f32 kernel not found".to_string())
+            })?;
+        let block_size = 256u32;
+        let grid_size = (num_facts + block_size - 1) / block_size;
+        // reinterpret the u8 byte column as f32 for the kernel
+        let cand_view = RawCudaView::<f32> {
+            ptr: *cudarc::driver::DevicePtr::device_ptr(cand_probs),
+            len: cudarc::driver::DeviceSlice::len(cand_probs) / 4,
+            _marker: PhantomData,
+        };
+        unsafe {
+            func.clone().launch(
+                LaunchConfig {
+                    grid_dim: (grid_size, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (
+                    row_offsets,
+                    col_indices,
+                    &cand_view,
+                    is_positive,
+                    num_facts,
+                    eps,
+                    &mut credit_out,
+                    &mut loss_contrib,
+                ),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("ilp_credit_forward_f32 failed: {}", e)))?;
+        self.device.synchronize()?;
+        Ok((credit_out, loss_contrib))
+    }
+
+    /// Launch `ilp_credit_forward_f64`: CSR credit gather + clamp + NLL loss.
+    /// Returns `(credit_out, loss_contrib)` device slices of length `num_facts`.
+    pub fn ilp_credit_forward_f64_launch(
+        &self,
+        row_offsets: &TrackedCudaSlice<u32>,
+        col_indices: &TrackedCudaSlice<u32>,
+        cand_probs: &CudaColumn, // raw byte column from CudaBuffer
+        is_positive: &TrackedCudaSlice<u8>,
+        num_facts: u32,
+        eps: f64,
+    ) -> Result<(TrackedCudaSlice<f64>, TrackedCudaSlice<f64>)> {
+        let mut credit_out = self.memory.alloc::<f64>(num_facts as usize)?;
+        let mut loss_contrib = self.memory.alloc::<f64>(num_facts as usize)?;
+        if num_facts == 0 {
+            return Ok((credit_out, loss_contrib));
+        }
+        let func = self
+            .device
+            .inner()
+            .get_func(
+                ILP_CREDIT_MODULE,
+                ilp_credit_kernels::ILP_CREDIT_FORWARD_F64,
+            )
+            .ok_or_else(|| {
+                XlogError::Kernel("ilp_credit_forward_f64 kernel not found".to_string())
+            })?;
+        let block_size = 256u32;
+        let grid_size = (num_facts + block_size - 1) / block_size;
+        let cand_view = RawCudaView::<f64> {
+            ptr: *cudarc::driver::DevicePtr::device_ptr(cand_probs),
+            len: cudarc::driver::DeviceSlice::len(cand_probs) / 8,
+            _marker: PhantomData,
+        };
+        unsafe {
+            func.clone().launch(
+                LaunchConfig {
+                    grid_dim: (grid_size, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (
+                    row_offsets,
+                    col_indices,
+                    &cand_view,
+                    is_positive,
+                    num_facts,
+                    eps,
+                    &mut credit_out,
+                    &mut loss_contrib,
+                ),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("ilp_credit_forward_f64 failed: {}", e)))?;
+        self.device.synchronize()?;
+        Ok((credit_out, loss_contrib))
+    }
+
+    /// Launch `ilp_credit_backward_f32`: gradient scatter via CSR + atomicAdd.
+    /// Returns `d_cand_probs` gradient of length `num_cands` (zeroed, then accumulated).
+    pub fn ilp_credit_backward_f32_launch(
+        &self,
+        row_offsets: &TrackedCudaSlice<u32>,
+        col_indices: &TrackedCudaSlice<u32>,
+        credit_out: &TrackedCudaSlice<f32>,
+        is_positive: &TrackedCudaSlice<u8>,
+        num_facts: u32,
+        num_cands: u32,
+    ) -> Result<TrackedCudaSlice<f32>> {
+        let mut d_grad = self.memory.alloc::<f32>(num_cands as usize)?;
+        self.device
+            .inner()
+            .memset_zeros(&mut d_grad)
+            .map_err(|e| XlogError::Kernel(format!("Failed to zero grad: {}", e)))?;
+        if num_facts == 0 {
+            return Ok(d_grad);
+        }
+        let func = self
+            .device
+            .inner()
+            .get_func(
+                ILP_CREDIT_MODULE,
+                ilp_credit_kernels::ILP_CREDIT_BACKWARD_F32,
+            )
+            .ok_or_else(|| {
+                XlogError::Kernel("ilp_credit_backward_f32 kernel not found".to_string())
+            })?;
+        let block_size = 256u32;
+        let grid_size = (num_facts + block_size - 1) / block_size;
+        unsafe {
+            func.clone().launch(
+                LaunchConfig {
+                    grid_dim: (grid_size, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (
+                    row_offsets,
+                    col_indices,
+                    credit_out,
+                    is_positive,
+                    num_facts,
+                    &mut d_grad,
+                ),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("ilp_credit_backward_f32 failed: {}", e)))?;
+        self.device.synchronize()?;
+        Ok(d_grad)
+    }
+
+    /// Launch `ilp_credit_backward_f64`: gradient scatter via CSR + atomicAdd.
+    /// Returns `d_cand_probs` gradient of length `num_cands` (zeroed, then accumulated).
+    pub fn ilp_credit_backward_f64_launch(
+        &self,
+        row_offsets: &TrackedCudaSlice<u32>,
+        col_indices: &TrackedCudaSlice<u32>,
+        credit_out: &TrackedCudaSlice<f64>,
+        is_positive: &TrackedCudaSlice<u8>,
+        num_facts: u32,
+        num_cands: u32,
+    ) -> Result<TrackedCudaSlice<f64>> {
+        let mut d_grad = self.memory.alloc::<f64>(num_cands as usize)?;
+        self.device
+            .inner()
+            .memset_zeros(&mut d_grad)
+            .map_err(|e| XlogError::Kernel(format!("Failed to zero grad: {}", e)))?;
+        if num_facts == 0 {
+            return Ok(d_grad);
+        }
+        let func = self
+            .device
+            .inner()
+            .get_func(
+                ILP_CREDIT_MODULE,
+                ilp_credit_kernels::ILP_CREDIT_BACKWARD_F64,
+            )
+            .ok_or_else(|| {
+                XlogError::Kernel("ilp_credit_backward_f64 kernel not found".to_string())
+            })?;
+        let block_size = 256u32;
+        let grid_size = (num_facts + block_size - 1) / block_size;
+        unsafe {
+            func.clone().launch(
+                LaunchConfig {
+                    grid_dim: (grid_size, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (
+                    row_offsets,
+                    col_indices,
+                    credit_out,
+                    is_positive,
+                    num_facts,
+                    &mut d_grad,
+                ),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("ilp_credit_backward_f64 failed: {}", e)))?;
+        self.device.synchronize()?;
+        Ok(d_grad)
+    }
+
     fn hash_join_semi_indexed(
         &self,
         left: &CudaBuffer,

@@ -4001,6 +4001,361 @@ impl CompiledIlpProgram {
         self.candidate_map.as_ref().map_or(0, |m| m.len())
     }
 
+    /// GPU-resident ILP loss + gradient computation.
+    ///
+    /// Builds a sparse CSR structure from retained per-entry membership masks
+    /// and launches forward (credit gather + NLL loss) and backward (gradient
+    /// scatter) CUDA kernels.  Returns `(loss_dlpack, grad_dlpack)` where both
+    /// are GPU-resident tensors exported via DLPack.
+    ///
+    /// # Arguments
+    /// * `positives` — list of `(relation, [col_values])` positive examples
+    /// * `negatives` — list of `(relation, [col_values])` negative examples
+    /// * `cand_probs_obj` — DLPack/PyTorch tensor of candidate probabilities on GPU
+    pub fn compute_ilp_loss_grad_gpu<'py>(
+        &self,
+        py: Python<'py>,
+        positives: Vec<(String, Vec<i64>)>,
+        negatives: Vec<(String, Vec<i64>)>,
+        cand_probs_obj: &Bound<'py, PyAny>,
+    ) -> PyResult<(PyObject, PyObject)> {
+        // ── Phase A: Validation + DLPack import ──
+        let candidate_map = self.candidate_map.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err(
+                "candidate_map not set — call set_candidate_map() before compute_ilp_loss_grad_gpu()",
+            )
+        })?;
+        let num_cands = candidate_map.len() as u32;
+
+        let managed = dlpack_from_py(cand_probs_obj)?;
+        let cand_buf = self
+            .provider
+            .from_dlpack_tensors(vec![managed])
+            .map_err(|e| PyRuntimeError::new_err(format!("DLPack import: {}", e)))?;
+
+        // Determine dtype from imported buffer
+        let cand_schema = cand_buf.schema().clone();
+        let cand_dtype = cand_schema
+            .column_type(0)
+            .ok_or_else(|| PyRuntimeError::new_err("cand_probs has no column type"))?;
+        let is_f64 = match cand_dtype {
+            ScalarType::F32 => false,
+            ScalarType::F64 => true,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "cand_probs must be F32 or F64, got {:?}",
+                    other
+                )));
+            }
+        };
+
+        let cand_rows = read_device_row_count(&self.provider, &cand_buf)
+            .map_err(|e| PyRuntimeError::new_err(format!("row count: {}", e)))?;
+        if cand_rows != num_cands as usize {
+            return Err(PyValueError::new_err(format!(
+                "cand_probs length ({}) != candidate_map length ({})",
+                cand_rows, num_cands
+            )));
+        }
+
+        // ── Phase B: Build fact list, group by relation ──
+        let num_pos = positives.len();
+        let num_neg = negatives.len();
+        let num_facts = (num_pos + num_neg) as u32;
+
+        // Build all_facts: (relation, values, is_positive, global_fact_idx)
+        struct FactInfo {
+            relation: String,
+            values: Vec<i64>,
+            is_positive: bool,
+        }
+        let mut all_facts: Vec<FactInfo> = Vec::with_capacity(num_pos + num_neg);
+        for (rel, vals) in positives {
+            all_facts.push(FactInfo {
+                relation: rel,
+                values: vals,
+                is_positive: true,
+            });
+        }
+        for (rel, vals) in negatives {
+            all_facts.push(FactInfo {
+                relation: rel,
+                values: vals,
+                is_positive: false,
+            });
+        }
+
+        // Handle empty facts edge case: return zero loss + zero grad
+        if num_facts == 0 {
+            return self.build_zero_loss_grad(py, num_cands, is_f64);
+        }
+
+        // Build is_positive array for upload
+        let is_positive_host: Vec<u8> = all_facts.iter().map(|f| if f.is_positive { 1u8 } else { 0u8 }).collect();
+
+        // Group facts by relation, preserving global fact_idx
+        let mut groups: HashMap<String, Vec<(u32, Vec<i64>)>> = HashMap::new();
+        for (global_idx, fact) in all_facts.iter().enumerate() {
+            groups
+                .entry(fact.relation.clone())
+                .or_default()
+                .push((global_idx as u32, fact.values.clone()));
+        }
+
+        // Get ILP tagged result
+        let tagged = self
+            .executor
+            .ilp_last_result()
+            .ok_or_else(|| PyRuntimeError::new_err("No ILP result — call evaluate() first"))?;
+
+        // ── Phase C: COO build ──
+        let mut coo_facts: Vec<u32> = Vec::new();
+        let mut coo_cands: Vec<u32> = Vec::new();
+
+        for (relation, facts_with_idx) in &groups {
+            // Find k_idx for this relation
+            let k_idx = self
+                .rel_index
+                .iter()
+                .position(|(_, name)| name == relation)
+                .ok_or_else(|| {
+                    PyValueError::new_err(format!("Relation '{}' not in ILP schema", relation))
+                })? as u32;
+
+            // Filter relevant entries
+            let relevant_entries: Vec<&xlog_runtime::ilp_registry::IlpTagEntry> = tagged
+                .entries
+                .iter()
+                .filter(|e| e.k == k_idx && e.num_rows > 0 && e.buffer.is_some())
+                .collect();
+
+            if relevant_entries.is_empty() {
+                continue;
+            }
+
+            // Get schema and build query buffer
+            let first_buf = relevant_entries[0].buffer.as_ref().unwrap();
+            let arity = first_buf.arity();
+            if arity == 0 {
+                continue;
+            }
+            let schema = first_buf.schema().clone();
+
+            // Extract just the fact values (without global indices) for typed upload
+            let fact_values: Vec<Vec<i64>> =
+                facts_with_idx.iter().map(|(_, v)| v.clone()).collect();
+
+            let col_bytes = pack_i64_columns_typed(relation, &fact_values, &schema)?;
+            let col_slices: Vec<&[u8]> = col_bytes.iter().map(|c| c.as_slice()).collect();
+            let query_buf = self
+                .provider
+                .create_buffer_from_slices(&col_slices, schema)
+                .map_err(|e| PyRuntimeError::new_err(format!("create_buffer: {}", e)))?;
+
+            let keys: Vec<usize> = (0..arity).collect();
+            let num_query = fact_values.len();
+
+            for entry in &relevant_entries {
+                // Look up candidate index for this entry
+                let cidx = match candidate_map.get(&(entry.i, entry.j, entry.k)) {
+                    Some(c) => *c,
+                    None => continue, // entry's rule not in current candidate set
+                };
+
+                let entry_buf = entry.buffer.as_ref().unwrap();
+
+                // GPU-resident membership mask
+                let d_mask = self
+                    .provider
+                    .membership_mask_device(&query_buf, entry_buf, &keys, &keys)
+                    .map_err(|e| PyRuntimeError::new_err(format!("membership_mask: {}", e)))?;
+
+                // Download small mask (control-plane metadata, ~10 bytes)
+                let mut host_mask = vec![0u8; num_query];
+                self.provider
+                    .device()
+                    .inner()
+                    .dtoh_sync_copy_into(&d_mask, &mut host_mask)
+                    .map_err(|e| {
+                        PyRuntimeError::new_err(format!("mask download: {}", e))
+                    })?;
+
+                for (local_idx, &m) in host_mask.iter().enumerate() {
+                    if m != 0 {
+                        let global_fact_idx = facts_with_idx[local_idx].0;
+                        coo_facts.push(global_fact_idx);
+                        coo_cands.push(cidx);
+                    }
+                }
+            }
+        }
+
+        let nnz = coo_facts.len() as u32;
+
+        // Handle case where no facts matched any entries
+        if nnz == 0 {
+            // No matching entries: loss = sum of NLL for all facts with credit=0
+            // For positives: -log(eps), for negatives: -log(1-0) = 0
+            // Use the kernel path with empty CSR for correctness
+            return self.build_loss_grad_empty_coo(py, &is_positive_host, num_facts, num_cands, is_f64);
+        }
+
+        // ── Phase D: Upload COO, sort, build CSR ──
+        let mut d_coo_facts = self
+            .provider
+            .memory()
+            .alloc::<u32>(nnz as usize)
+            .map_err(|e| PyRuntimeError::new_err(format!("alloc coo_facts: {}", e)))?;
+        let mut d_coo_cands = self
+            .provider
+            .memory()
+            .alloc::<u32>(nnz as usize)
+            .map_err(|e| PyRuntimeError::new_err(format!("alloc coo_cands: {}", e)))?;
+
+        self.provider
+            .device()
+            .inner()
+            .htod_sync_copy_into(&coo_facts, &mut d_coo_facts)
+            .map_err(|e| PyRuntimeError::new_err(format!("htod coo_facts: {}", e)))?;
+        self.provider
+            .device()
+            .inner()
+            .htod_sync_copy_into(&coo_cands, &mut d_coo_cands)
+            .map_err(|e| PyRuntimeError::new_err(format!("htod coo_cands: {}", e)))?;
+
+        // Sort COO by fact_idx (keys), carrying cand_idx (values)
+        let mut scratch =
+            xlog_cuda::provider::RadixSortScratch::new(&self.provider, nnz)
+                .map_err(|e| PyRuntimeError::new_err(format!("sort scratch: {}", e)))?;
+        self.provider
+            .radix_sort_u32_pairs(&mut d_coo_facts, &mut d_coo_cands, nnz, &mut scratch)
+            .map_err(|e| PyRuntimeError::new_err(format!("radix sort: {}", e)))?;
+
+        // Download sorted fact indices to build CSR row_offsets on host
+        // (O(nnz * 4) bytes of control metadata)
+        let mut sorted_facts = vec![0u32; nnz as usize];
+        self.provider
+            .device()
+            .inner()
+            .dtoh_sync_copy_into(&d_coo_facts, &mut sorted_facts)
+            .map_err(|e| PyRuntimeError::new_err(format!("dtoh sorted: {}", e)))?;
+
+        // Build CSR row_offsets: row_offsets[i] = first index in sorted COO where fact_idx == i
+        let mut row_offsets = vec![0u32; (num_facts + 1) as usize];
+        for &f in &sorted_facts {
+            if (f as usize) < num_facts as usize {
+                row_offsets[(f + 1) as usize] += 1;
+            }
+        }
+        // Prefix sum
+        for i in 1..=num_facts as usize {
+            row_offsets[i] += row_offsets[i - 1];
+        }
+
+        // Upload row_offsets and is_positive to GPU
+        let mut d_row_offsets = self
+            .provider
+            .memory()
+            .alloc::<u32>((num_facts + 1) as usize)
+            .map_err(|e| PyRuntimeError::new_err(format!("alloc row_offsets: {}", e)))?;
+        self.provider
+            .device()
+            .inner()
+            .htod_sync_copy_into(&row_offsets, &mut d_row_offsets)
+            .map_err(|e| PyRuntimeError::new_err(format!("htod row_offsets: {}", e)))?;
+
+        let mut d_is_positive = self
+            .provider
+            .memory()
+            .alloc::<u8>(num_facts as usize)
+            .map_err(|e| PyRuntimeError::new_err(format!("alloc is_positive: {}", e)))?;
+        self.provider
+            .device()
+            .inner()
+            .htod_sync_copy_into(&is_positive_host, &mut d_is_positive)
+            .map_err(|e| PyRuntimeError::new_err(format!("htod is_positive: {}", e)))?;
+
+        // ── Phase E: Forward + backward kernel launches ──
+        let cand_col = cand_buf
+            .column(0)
+            .ok_or_else(|| PyRuntimeError::new_err("cand_probs has no column"))?;
+
+        let eps_f32 = 1e-38f32;
+        let eps_f64 = 1e-38f64;
+
+        if is_f64 {
+            let (credit_out, loss_contrib) = self
+                .provider
+                .ilp_credit_forward_f64_launch(
+                    &d_row_offsets,
+                    &d_coo_cands,
+                    cand_col,
+                    &d_is_positive,
+                    num_facts,
+                    eps_f64,
+                )
+                .map_err(|e| PyRuntimeError::new_err(format!("forward f64: {}", e)))?;
+
+            // Download loss_contrib to sum on host (O(num_facts * 8) bytes, control metadata)
+            let mut loss_host = vec![0.0f64; num_facts as usize];
+            self.provider
+                .device()
+                .inner()
+                .dtoh_sync_copy_into(&loss_contrib, &mut loss_host)
+                .map_err(|e| PyRuntimeError::new_err(format!("dtoh loss: {}", e)))?;
+            let total_loss: f64 = loss_host.iter().sum();
+
+            let d_grad = self
+                .provider
+                .ilp_credit_backward_f64_launch(
+                    &d_row_offsets,
+                    &d_coo_cands,
+                    &credit_out,
+                    &d_is_positive,
+                    num_facts,
+                    num_cands,
+                )
+                .map_err(|e| PyRuntimeError::new_err(format!("backward f64: {}", e)))?;
+
+            self.export_loss_grad_f64(py, total_loss, d_grad, num_cands)
+        } else {
+            let (credit_out, loss_contrib) = self
+                .provider
+                .ilp_credit_forward_f32_launch(
+                    &d_row_offsets,
+                    &d_coo_cands,
+                    cand_col,
+                    &d_is_positive,
+                    num_facts,
+                    eps_f32,
+                )
+                .map_err(|e| PyRuntimeError::new_err(format!("forward f32: {}", e)))?;
+
+            // Download loss_contrib to sum on host (O(num_facts * 4) bytes, control metadata)
+            let mut loss_host = vec![0.0f32; num_facts as usize];
+            self.provider
+                .device()
+                .inner()
+                .dtoh_sync_copy_into(&loss_contrib, &mut loss_host)
+                .map_err(|e| PyRuntimeError::new_err(format!("dtoh loss: {}", e)))?;
+            let total_loss: f32 = loss_host.iter().sum();
+
+            let d_grad = self
+                .provider
+                .ilp_credit_backward_f32_launch(
+                    &d_row_offsets,
+                    &d_coo_cands,
+                    &credit_out,
+                    &d_is_positive,
+                    num_facts,
+                    num_cands,
+                )
+                .map_err(|e| PyRuntimeError::new_err(format!("backward f32: {}", e)))?;
+
+            self.export_loss_grad_f32(py, total_loss, d_grad, num_cands)
+        }
+    }
+
     pub fn set_rule_mask(
         &mut self,
         name: String,
@@ -4640,6 +4995,325 @@ impl CompiledIlpProgram {
 }
 
 impl CompiledIlpProgram {
+    // ─── GPU loss/grad export helpers ──────────────────────────────────
+
+    /// Build zero loss (scalar) + zero grad (num_cands) on GPU, export via DLPack.
+    fn build_zero_loss_grad(
+        &self,
+        py: Python<'_>,
+        num_cands: u32,
+        is_f64: bool,
+    ) -> PyResult<(PyObject, PyObject)> {
+        if is_f64 {
+            let mut d_grad = self
+                .provider
+                .memory()
+                .alloc::<f64>(num_cands as usize)
+                .map_err(|e| PyRuntimeError::new_err(format!("alloc grad: {}", e)))?;
+            if num_cands > 0 {
+                self.provider
+                    .device()
+                    .inner()
+                    .memset_zeros(&mut d_grad)
+                    .map_err(|e| PyRuntimeError::new_err(format!("zero grad: {}", e)))?;
+            }
+            self.export_loss_grad_f64(py, 0.0f64, d_grad, num_cands)
+        } else {
+            let mut d_grad = self
+                .provider
+                .memory()
+                .alloc::<f32>(num_cands as usize)
+                .map_err(|e| PyRuntimeError::new_err(format!("alloc grad: {}", e)))?;
+            if num_cands > 0 {
+                self.provider
+                    .device()
+                    .inner()
+                    .memset_zeros(&mut d_grad)
+                    .map_err(|e| PyRuntimeError::new_err(format!("zero grad: {}", e)))?;
+            }
+            self.export_loss_grad_f32(py, 0.0f32, d_grad, num_cands)
+        }
+    }
+
+    /// Handle the case where COO is empty but we have facts.
+    /// Facts with no covering entries get: positive → -log(eps), negative → -log(1.0) = 0.
+    /// We still run the kernels with an empty CSR for correctness.
+    fn build_loss_grad_empty_coo(
+        &self,
+        py: Python<'_>,
+        is_positive_host: &[u8],
+        num_facts: u32,
+        num_cands: u32,
+        is_f64: bool,
+    ) -> PyResult<(PyObject, PyObject)> {
+        // Build CSR with all-zero row_offsets (every row has 0 non-zeros)
+        let row_offsets = vec![0u32; (num_facts + 1) as usize];
+        let mut d_row_offsets = self
+            .provider
+            .memory()
+            .alloc::<u32>((num_facts + 1) as usize)
+            .map_err(|e| PyRuntimeError::new_err(format!("alloc: {}", e)))?;
+        self.provider
+            .device()
+            .inner()
+            .htod_sync_copy_into(&row_offsets, &mut d_row_offsets)
+            .map_err(|e| PyRuntimeError::new_err(format!("htod: {}", e)))?;
+
+        // Empty col_indices
+        let d_col_indices = self
+            .provider
+            .memory()
+            .alloc::<u32>(0)
+            .map_err(|e| PyRuntimeError::new_err(format!("alloc: {}", e)))?;
+
+        let mut d_is_positive = self
+            .provider
+            .memory()
+            .alloc::<u8>(num_facts as usize)
+            .map_err(|e| PyRuntimeError::new_err(format!("alloc: {}", e)))?;
+        self.provider
+            .device()
+            .inner()
+            .htod_sync_copy_into(is_positive_host, &mut d_is_positive)
+            .map_err(|e| PyRuntimeError::new_err(format!("htod: {}", e)))?;
+
+        // Build a single-column CudaBuffer with 0 elements to represent an empty cand_probs
+        // for the kernel launch (won't be read since row ranges are all empty).
+        // We need a dummy CudaColumn. Use the actual cand count = num_cands.
+        // Since COO is empty the kernel won't access cand_probs, but we need to pass something.
+        let dummy_col: xlog_cuda::CudaColumn = if is_f64 {
+            self.provider
+                .memory()
+                .alloc::<f64>(num_cands.max(1) as usize)
+                .map_err(|e| PyRuntimeError::new_err(format!("alloc dummy: {}", e)))?
+                .into_bytes()
+                .into()
+        } else {
+            self.provider
+                .memory()
+                .alloc::<f32>(num_cands.max(1) as usize)
+                .map_err(|e| PyRuntimeError::new_err(format!("alloc dummy: {}", e)))?
+                .into_bytes()
+                .into()
+        };
+
+        if is_f64 {
+            let (credit_out, loss_contrib) = self
+                .provider
+                .ilp_credit_forward_f64_launch(
+                    &d_row_offsets,
+                    &d_col_indices,
+                    &dummy_col,
+                    &d_is_positive,
+                    num_facts,
+                    1e-38f64,
+                )
+                .map_err(|e| PyRuntimeError::new_err(format!("forward: {}", e)))?;
+
+            let mut loss_host = vec![0.0f64; num_facts as usize];
+            self.provider
+                .device()
+                .inner()
+                .dtoh_sync_copy_into(&loss_contrib, &mut loss_host)
+                .map_err(|e| PyRuntimeError::new_err(format!("dtoh: {}", e)))?;
+            let total_loss: f64 = loss_host.iter().sum();
+
+            let d_grad = self
+                .provider
+                .ilp_credit_backward_f64_launch(
+                    &d_row_offsets,
+                    &d_col_indices,
+                    &credit_out,
+                    &d_is_positive,
+                    num_facts,
+                    num_cands,
+                )
+                .map_err(|e| PyRuntimeError::new_err(format!("backward: {}", e)))?;
+
+            self.export_loss_grad_f64(py, total_loss, d_grad, num_cands)
+        } else {
+            let (credit_out, loss_contrib) = self
+                .provider
+                .ilp_credit_forward_f32_launch(
+                    &d_row_offsets,
+                    &d_col_indices,
+                    &dummy_col,
+                    &d_is_positive,
+                    num_facts,
+                    1e-38f32,
+                )
+                .map_err(|e| PyRuntimeError::new_err(format!("forward: {}", e)))?;
+
+            let mut loss_host = vec![0.0f32; num_facts as usize];
+            self.provider
+                .device()
+                .inner()
+                .dtoh_sync_copy_into(&loss_contrib, &mut loss_host)
+                .map_err(|e| PyRuntimeError::new_err(format!("dtoh: {}", e)))?;
+            let total_loss: f32 = loss_host.iter().sum();
+
+            let d_grad = self
+                .provider
+                .ilp_credit_backward_f32_launch(
+                    &d_row_offsets,
+                    &d_col_indices,
+                    &credit_out,
+                    &d_is_positive,
+                    num_facts,
+                    num_cands,
+                )
+                .map_err(|e| PyRuntimeError::new_err(format!("backward: {}", e)))?;
+
+            self.export_loss_grad_f32(py, total_loss, d_grad, num_cands)
+        }
+    }
+
+    /// Export a scalar f32 loss and f32 grad vector as DLPack capsules.
+    fn export_loss_grad_f32(
+        &self,
+        py: Python<'_>,
+        total_loss: f32,
+        d_grad: xlog_cuda::memory::TrackedCudaSlice<f32>,
+        num_cands: u32,
+    ) -> PyResult<(PyObject, PyObject)> {
+        let schema_f32 = Schema::new(vec![("col_0".to_string(), ScalarType::F32)]);
+
+        // Loss scalar: upload to GPU as single-element buffer
+        let mut d_loss_val = self
+            .provider
+            .memory()
+            .alloc::<f32>(1)
+            .map_err(|e| PyRuntimeError::new_err(format!("alloc loss: {}", e)))?;
+        self.provider
+            .device()
+            .inner()
+            .htod_sync_copy_into(&[total_loss], &mut d_loss_val)
+            .map_err(|e| PyRuntimeError::new_err(format!("htod loss: {}", e)))?;
+
+        let mut d_loss_nrows = self
+            .provider
+            .memory()
+            .alloc::<u32>(1)
+            .map_err(|e| PyRuntimeError::new_err(format!("alloc: {}", e)))?;
+        self.provider
+            .device()
+            .inner()
+            .htod_sync_copy_into(&[1u32], &mut d_loss_nrows)
+            .map_err(|e| PyRuntimeError::new_err(format!("htod: {}", e)))?;
+
+        let loss_buf = xlog_cuda::CudaBuffer::from_columns(
+            vec![d_loss_val.into_bytes().into()],
+            1,
+            d_loss_nrows,
+            schema_f32.clone(),
+        );
+        let loss_dl = self
+            .provider
+            .to_dlpack_table(loss_buf)
+            .column(0)
+            .map_err(|e| PyRuntimeError::new_err(format!("DLPack loss: {}", e)))?;
+        let loss_capsule = dlpack_capsule_from_tensor(py, loss_dl)?;
+
+        // Grad vector
+        let mut d_grad_nrows = self
+            .provider
+            .memory()
+            .alloc::<u32>(1)
+            .map_err(|e| PyRuntimeError::new_err(format!("alloc: {}", e)))?;
+        self.provider
+            .device()
+            .inner()
+            .htod_sync_copy_into(&[num_cands], &mut d_grad_nrows)
+            .map_err(|e| PyRuntimeError::new_err(format!("htod: {}", e)))?;
+
+        let grad_buf = xlog_cuda::CudaBuffer::from_columns(
+            vec![d_grad.into_bytes().into()],
+            num_cands as u64,
+            d_grad_nrows,
+            schema_f32,
+        );
+        let grad_dl = self
+            .provider
+            .to_dlpack_table(grad_buf)
+            .column(0)
+            .map_err(|e| PyRuntimeError::new_err(format!("DLPack grad: {}", e)))?;
+        let grad_capsule = dlpack_capsule_from_tensor(py, grad_dl)?;
+
+        Ok((loss_capsule, grad_capsule))
+    }
+
+    /// Export a scalar f64 loss and f64 grad vector as DLPack capsules.
+    fn export_loss_grad_f64(
+        &self,
+        py: Python<'_>,
+        total_loss: f64,
+        d_grad: xlog_cuda::memory::TrackedCudaSlice<f64>,
+        num_cands: u32,
+    ) -> PyResult<(PyObject, PyObject)> {
+        let schema_f64 = Schema::new(vec![("col_0".to_string(), ScalarType::F64)]);
+
+        let mut d_loss_val = self
+            .provider
+            .memory()
+            .alloc::<f64>(1)
+            .map_err(|e| PyRuntimeError::new_err(format!("alloc loss: {}", e)))?;
+        self.provider
+            .device()
+            .inner()
+            .htod_sync_copy_into(&[total_loss], &mut d_loss_val)
+            .map_err(|e| PyRuntimeError::new_err(format!("htod loss: {}", e)))?;
+
+        let mut d_loss_nrows = self
+            .provider
+            .memory()
+            .alloc::<u32>(1)
+            .map_err(|e| PyRuntimeError::new_err(format!("alloc: {}", e)))?;
+        self.provider
+            .device()
+            .inner()
+            .htod_sync_copy_into(&[1u32], &mut d_loss_nrows)
+            .map_err(|e| PyRuntimeError::new_err(format!("htod: {}", e)))?;
+
+        let loss_buf = xlog_cuda::CudaBuffer::from_columns(
+            vec![d_loss_val.into_bytes().into()],
+            1,
+            d_loss_nrows,
+            schema_f64.clone(),
+        );
+        let loss_dl = self
+            .provider
+            .to_dlpack_table(loss_buf)
+            .column(0)
+            .map_err(|e| PyRuntimeError::new_err(format!("DLPack loss: {}", e)))?;
+        let loss_capsule = dlpack_capsule_from_tensor(py, loss_dl)?;
+
+        let mut d_grad_nrows = self
+            .provider
+            .memory()
+            .alloc::<u32>(1)
+            .map_err(|e| PyRuntimeError::new_err(format!("alloc: {}", e)))?;
+        self.provider
+            .device()
+            .inner()
+            .htod_sync_copy_into(&[num_cands], &mut d_grad_nrows)
+            .map_err(|e| PyRuntimeError::new_err(format!("htod: {}", e)))?;
+
+        let grad_buf = xlog_cuda::CudaBuffer::from_columns(
+            vec![d_grad.into_bytes().into()],
+            num_cands as u64,
+            d_grad_nrows,
+            schema_f64,
+        );
+        let grad_dl = self
+            .provider
+            .to_dlpack_table(grad_buf)
+            .column(0)
+            .map_err(|e| PyRuntimeError::new_err(format!("DLPack grad: {}", e)))?;
+        let grad_capsule = dlpack_capsule_from_tensor(py, grad_dl)?;
+
+        Ok((loss_capsule, grad_capsule))
+    }
+
     /// Returns sorted (i,j,k) candidate triples for the given learnable mask.
     /// Pruning logic must stay aligned with `valid_candidates`.
     fn candidate_triples_for_mask(
