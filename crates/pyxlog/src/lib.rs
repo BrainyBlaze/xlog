@@ -4251,14 +4251,6 @@ impl CompiledIlpProgram {
         let coo_bytes = (upper_bound as u64) * 8;
         let needs_chunking = coo_bytes > self.coo_chunk_budget;
 
-        if needs_chunking && self.strict_zero_dtoh {
-            return Err(PyRuntimeError::new_err(format!(
-                "strict_zero_dtoh: COO allocation {} bytes exceeds cap {} bytes; \
-                 chunked fallback would require D2H transfers",
-                coo_bytes, self.coo_chunk_budget
-            )));
-        }
-
         // Upload is_positive once (shared across all paths, H2D allowed)
         let mut d_is_positive = self
             .provider
@@ -4356,91 +4348,132 @@ impl CompiledIlpProgram {
 
             (d_coo_facts, d_coo_cands, upper_bound)
         } else {
-            // ── Phase C (chunked): fill COO in bounded-memory chunks,
-            //    D2H each chunk, merge on host, H2D merged result ──
+            // ── Phase C (chunked): Two-pass GPU-only bounded-memory merge ──
             //
-            // This avoids the mathematical bug of running forward/backward
-            // per-chunk: NLL loss is -log(sum), which is nonlinear.
-            // We must build ONE complete CSR and run forward/backward ONCE.
+            // Pass 1: Count NNZ per task on device (bounded temp per chunk).
+            // Pass 2: Fill COO at pre-computed offsets (bounded temp per chunk).
+            // The final COO buffer is exact-NNZ sized and may exceed
+            // coo_chunk_budget — this is safe because actual NNZ << upper_bound.
 
             let max_queries_per_chunk = (self.coo_chunk_budget / 8).max(1) as u32;
-            let sentinel_fact = num_facts;
 
-            // Host accumulators for merged COO entries (sentinel-free).
-            let mut merged_facts: Vec<u32> = Vec::new();
-            let mut merged_cands: Vec<u32> = Vec::new();
+            // Allocate task_counts array (num_tasks + 1 for exclusive scan).
+            let tc_len = num_tasks + 1;
+            let mut d_task_counts = self
+                .provider
+                .memory()
+                .alloc::<u32>(tc_len)
+                .map_err(|e| PyRuntimeError::new_err(format!("alloc task_counts: {}", e)))?;
+            // Zero-init the entire array (counts default to 0, last slot = 0 for scan).
+            {
+                let zeros = vec![0u32; tc_len];
+                self.provider
+                    .device()
+                    .inner()
+                    .htod_sync_copy_into(&zeros, &mut d_task_counts)
+                    .map_err(|e| PyRuntimeError::new_err(format!("zero task_counts: {}", e)))?;
+            }
 
-            let mut chunk_start = 0usize;
-            while chunk_start < tasks.len() {
-                // Determine chunk end: pack tasks until cap exceeded.
-                let mut chunk_end = chunk_start;
-                let mut chunk_sum = 0u32;
-                while chunk_end < tasks.len() {
-                    let nq = tasks[chunk_end].num_query;
-                    if chunk_sum + nq > max_queries_per_chunk && chunk_sum > 0 {
-                        break;
-                    }
-                    chunk_sum += nq;
-                    chunk_end += 1;
-                }
-                // Safety: at least one task per chunk.
-                if chunk_end == chunk_start {
-                    chunk_sum = tasks[chunk_start].num_query;
-                    chunk_end = chunk_start + 1;
-                }
-
-                let chunk_tasks = &tasks[chunk_start..chunk_end];
-                let chunk_len = chunk_tasks.len();
-                let chunk_upper_bound = chunk_sum;
-
-                if chunk_upper_bound > 0 && chunk_len > 0 {
-                    // Compute chunk-local offsets.
-                    let mut offsets_host = vec![0u32; chunk_len];
-                    {
-                        let mut running = 0u32;
-                        for i in 0..chunk_len {
-                            offsets_host[i] = running;
-                            running += chunk_tasks[i].num_query;
+            // ── Pass 1: Count NNZ per task ──
+            {
+                let mut chunk_start = 0usize;
+                while chunk_start < tasks.len() {
+                    let mut chunk_end = chunk_start;
+                    let mut chunk_sum = 0u32;
+                    while chunk_end < tasks.len() {
+                        let nq = tasks[chunk_end].num_query;
+                        if chunk_sum + nq > max_queries_per_chunk && chunk_sum > 0 {
+                            break;
                         }
+                        chunk_sum += nq;
+                        chunk_end += 1;
+                    }
+                    if chunk_end == chunk_start {
+                        chunk_end = chunk_start + 1;
                     }
 
-                    let mut d_offsets = self
-                        .provider
-                        .memory()
-                        .alloc::<u32>(chunk_len)
-                        .map_err(|e| PyRuntimeError::new_err(format!("alloc d_offsets: {}", e)))?;
-                    self.provider
-                        .device()
-                        .inner()
-                        .htod_sync_copy_into(&offsets_host, &mut d_offsets)
-                        .map_err(|e| PyRuntimeError::new_err(format!("htod d_offsets: {}", e)))?;
-
-                    let mut d_coo_facts = self
-                        .provider
-                        .memory()
-                        .alloc::<u32>(chunk_upper_bound as usize)
-                        .map_err(|e| PyRuntimeError::new_err(format!("alloc coo_facts: {}", e)))?;
-                    let mut d_coo_cands = self
-                        .provider
-                        .memory()
-                        .alloc::<u32>(chunk_upper_bound as usize)
-                        .map_err(|e| PyRuntimeError::new_err(format!("alloc coo_cands: {}", e)))?;
-                    {
-                        let sentinel_facts_vec = vec![sentinel_fact; chunk_upper_bound as usize];
-                        let sentinel_cands_vec = vec![num_cands; chunk_upper_bound as usize];
+                    for task_idx in chunk_start..chunk_end {
+                        let task = &tasks[task_idx];
                         self.provider
-                            .device()
-                            .inner()
-                            .htod_sync_copy_into(&sentinel_facts_vec, &mut d_coo_facts)
-                            .map_err(|e| PyRuntimeError::new_err(format!("sentinel facts: {}", e)))?;
-                        self.provider
-                            .device()
-                            .inner()
-                            .htod_sync_copy_into(&sentinel_cands_vec, &mut d_coo_cands)
-                            .map_err(|e| PyRuntimeError::new_err(format!("sentinel cands: {}", e)))?;
+                            .count_mask_into_slot(
+                                &task.d_mask,
+                                task.num_query,
+                                &mut d_task_counts,
+                                task_idx,
+                            )
+                            .map_err(|e| PyRuntimeError::new_err(format!(
+                                "count_mask_into_slot: {}", e
+                            )))?;
                     }
 
-                    for (local_idx, task) in chunk_tasks.iter().enumerate() {
+                    chunk_start = chunk_end;
+                }
+            }
+
+            // Synchronize to ensure all count kernels have completed.
+            self.provider.device().synchronize()
+                .map_err(|e| PyRuntimeError::new_err(format!("sync pass1: {}", e)))?;
+
+            // Compute per-task write offsets via exclusive scan.
+            // d_task_counts[0..num_tasks] has counts; after scan,
+            // d_task_counts[i] = sum of counts[0..i] = write offset for task i.
+            // d_task_counts[num_tasks] = total_nnz.
+            self.provider
+                .exclusive_scan_u32_inplace(&mut d_task_counts, tc_len as u32)
+                .map_err(|e| PyRuntimeError::new_err(format!("scan task_counts: {}", e)))?;
+
+            // Read total_nnz from the last element (metadata-only, untracked).
+            let total_nnz: u32 = self.provider
+                .dtoh_scalar_untracked(&d_task_counts, num_tasks)
+                .map_err(|e| PyRuntimeError::new_err(format!("read total_nnz: {}", e)))?;
+
+            if total_nnz == 0 {
+                return self.build_loss_grad_empty_coo(
+                    py,
+                    &is_positive_host,
+                    num_facts,
+                    num_cands,
+                    is_f64,
+                );
+            }
+
+            // Allocate exact-NNZ global COO buffers (may exceed coo_chunk_budget).
+            let mut d_coo_facts = self
+                .provider
+                .memory()
+                .alloc::<u32>(total_nnz as usize)
+                .map_err(|e| PyRuntimeError::new_err(format!("alloc global coo_facts: {}", e)))?;
+            let mut d_coo_cands = self
+                .provider
+                .memory()
+                .alloc::<u32>(total_nnz as usize)
+                .map_err(|e| PyRuntimeError::new_err(format!("alloc global coo_cands: {}", e)))?;
+
+            // ── Pass 2: Fill COO at pre-computed offsets ──
+            // d_task_counts now contains offsets (after exclusive scan).
+            // ilp_coo_fill_from_mask_launch reads d_offsets[offset_idx] for the
+            // write base position. We pass d_task_counts as d_offsets with
+            // offset_idx = task_idx.
+            {
+                let mut chunk_start = 0usize;
+                while chunk_start < tasks.len() {
+                    let mut chunk_end = chunk_start;
+                    let mut chunk_sum = 0u32;
+                    while chunk_end < tasks.len() {
+                        let nq = tasks[chunk_end].num_query;
+                        if chunk_sum + nq > max_queries_per_chunk && chunk_sum > 0 {
+                            break;
+                        }
+                        chunk_sum += nq;
+                        chunk_end += 1;
+                    }
+                    if chunk_end == chunk_start {
+                        chunk_end = chunk_start + 1;
+                    }
+
+                    for task_idx in chunk_start..chunk_end {
+                        let task = &tasks[task_idx];
+
                         let d_prefix = self
                             .provider
                             .scan_u8_mask_device(&task.d_mask, task.num_query)
@@ -4451,80 +4484,30 @@ impl CompiledIlpProgram {
                                 &task.d_mask,
                                 &d_prefix,
                                 &fact_indices_buffers[task.fact_indices_idx],
-                                local_idx as u32,
+                                task_idx as u32,
                                 task.cidx,
                                 task.num_query,
-                                &d_offsets,
+                                &d_task_counts,  // offsets after scan
                                 &mut d_coo_facts,
                                 &mut d_coo_cands,
                             )
                             .map_err(|e| PyRuntimeError::new_err(format!("coo fill: {}", e)))?;
+                        // d_prefix dropped here (bounded temp).
                     }
 
-                    // Synchronize before D2H to ensure fill kernels have completed.
-                    self.provider.device().synchronize()
-                        .map_err(|e| PyRuntimeError::new_err(format!("sync: {}", e)))?;
-
-                    // D2H: download chunk COO arrays and filter out sentinels.
-                    // This is bounded by chunk size and allowed in the chunked path.
-                    let h_facts: Vec<u32> = self.provider.device().inner().dtoh_sync_copy(&d_coo_facts)
-                        .map_err(|e| PyRuntimeError::new_err(format!("dtoh coo_facts: {}", e)))?;
-                    let h_cands: Vec<u32> = self.provider.device().inner().dtoh_sync_copy(&d_coo_cands)
-                        .map_err(|e| PyRuntimeError::new_err(format!("dtoh coo_cands: {}", e)))?;
-
-                    for (f, c) in h_facts.into_iter().zip(h_cands.into_iter()) {
-                        if f < sentinel_fact {
-                            merged_facts.push(f);
-                            merged_cands.push(c);
-                        }
-                    }
-                    // Device chunk buffers freed here (drop).
+                    chunk_start = chunk_end;
                 }
-
-                chunk_start = chunk_end;
-            }
-            let actual_nnz = merged_facts.len() as u32;
-            if actual_nnz == 0 {
-                return self.build_loss_grad_empty_coo(
-                    py,
-                    &is_positive_host,
-                    num_facts,
-                    num_cands,
-                    is_f64,
-                );
             }
 
-            // H2D: upload merged COO (actual NNZ, no sentinels).
-            let mut d_coo_facts = self
-                .provider
-                .memory()
-                .alloc::<u32>(actual_nnz as usize)
-                .map_err(|e| PyRuntimeError::new_err(format!("alloc merged coo_facts: {}", e)))?;
-            let mut d_coo_cands = self
-                .provider
-                .memory()
-                .alloc::<u32>(actual_nnz as usize)
-                .map_err(|e| PyRuntimeError::new_err(format!("alloc merged coo_cands: {}", e)))?;
-            self.provider
-                .device()
-                .inner()
-                .htod_sync_copy_into(&merged_facts, &mut d_coo_facts)
-                .map_err(|e| PyRuntimeError::new_err(format!("htod merged facts: {}", e)))?;
-            self.provider
-                .device()
-                .inner()
-                .htod_sync_copy_into(&merged_cands, &mut d_coo_cands)
-                .map_err(|e| PyRuntimeError::new_err(format!("htod merged cands: {}", e)))?;
-
-            (d_coo_facts, d_coo_cands, actual_nnz)
+            (d_coo_facts, d_coo_cands, total_nnz)
         };
 
         // ── Phase D: Sort COO + device-side CSR build ──
         //
         // Sort all entries by fact index. In the non-chunked path, sentinels
         // (fact = num_facts) sort to the end and are ignored by the histogram
-        // kernel's f < num_facts guard. In the chunked path, sentinels were
-        // already filtered out on the host.
+        // kernel's f < num_facts guard. In the chunked path, the COO is
+        // exact-NNZ (no sentinels) from the two-pass GPU-only merge.
         let mut scratch =
             xlog_cuda::provider::RadixSortScratch::new(&self.provider, actual_nnz)
                 .map_err(|e| PyRuntimeError::new_err(format!("sort scratch: {}", e)))?;
