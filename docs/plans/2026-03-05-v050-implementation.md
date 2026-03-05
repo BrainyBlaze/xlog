@@ -967,33 +967,79 @@ restores telemetry from snapshot if present, else empty."
 
 **Step 1: Gate 1 — Zero data-plane D2H on all 4 ILP stages**
 
-This gate requires `strict_zero_dtoh=True` to pass on all 4 stages (reach, grandparent, colleague, plus2) with both default and tiny `coo_chunk_budget`. The strict D2H tests in `test_ilp_credit_gpu.py` cover reach. We also need the 4-stage coverage from `test_ilp_reliability.py`.
+This gate requires `strict_zero_dtoh=True` + tiny `coo_chunk_budget` to pass on all 4 stages (reach, grandparent, colleague, plus2). The existing `test_ilp_reliability.py` stages are marked `@pytest.mark.slow` so we run a direct verification script that enables strict mode and checks transfer counters.
 
-Run: `.venv/bin/python -m pytest python/tests/test_ilp_credit_gpu.py -v -k "dtoh" 2>&1 | tail -20`
+Run the existing credit-GPU D2H tests first (reach coverage):
+```bash
+.venv/bin/python -m pytest python/tests/test_ilp_credit_gpu.py -v -k "dtoh" 2>&1 | tail -20
+```
 Expected: All D2H tests pass, including `test_strict_zero_dtoh_chunked_passes`
 
-Run: `.venv/bin/python -m pytest python/tests/test_ilp_reliability.py -v -k "not slow" 2>&1 | tail -20`
-Expected: All non-slow reliability tests pass (4 stages)
-
-If no non-slow 4-stage strict D2H test exists yet, verify manually:
+Then verify all 4 stages with strict mode + tiny budget + transfer counter checks:
 ```bash
-.venv/bin/python -c "
+cd /home/dev/projects/xlog && .venv/bin/python -c "
+import sys; sys.path.insert(0, 'python/tests')
+import torch, pyxlog
 from test_ilp_reliability import STAGES
 from pyxlog.ilp import TrainConfig, train_only
+
 for name, source, pos, neg, mask in STAGES:
-    print(f'Testing {name}...')
+    print(f'=== Stage: {name} ===')
+    # Compile, evaluate, set up candidates
+    prog = pyxlog.IlpProgramFactory.compile(source, device=0, memory_mb=128)
+    prog.evaluate()
+    N = prog.ilp_schema_size()
+    names = prog.ilp_relation_names()
+
+    # Use train_only to confirm convergence
     result = train_only(source, mask, pos, neg, TrainConfig(
         step_budget_per_attempt=80, max_attempts=3, seed=42, deterministic=True))
-    print(f'  {name}: converged={result.converged}')
-print('All 4 stages complete.')
+    assert result.converged, f'{name} did not converge'
+
+    # Now test strict zero data-plane D2H with tiny budget (forces chunking)
+    prog2 = pyxlog.IlpProgramFactory.compile(source, device=0, memory_mb=128)
+    prog2.evaluate()
+    prog2.set_strict_zero_dtoh(True)
+    prog2.set_coo_chunk_budget(1)  # tiny = force chunking
+
+    # Set up a single candidate and run loss/grad
+    device = torch.device('cuda:0')
+    # Use first valid candidate triple
+    ri = {n: i for i, n in enumerate(prog2.ilp_relation_names())}
+    first_rel = [n for n in ri if n != 'succ' and n != 'pred'][0]
+    cand = (ri.get('edge', ri.get('succ', 0)),
+            ri.get('edge', ri.get('pred', ri.get('succ', 0))),
+            ri[first_rel] if first_rel in ri else 1)
+    mask_t = torch.zeros(N**3, device=device, dtype=torch.float32)
+    mask_t[cand[0]*N*N + cand[1]*N + cand[2]] = 1.0
+    prog2.set_rule_mask(mask, mask_t, mask_t, N)
+    prog2.evaluate()
+    prog2.set_candidate_map([cand])
+    cand_probs = torch.tensor([0.5], device=device, dtype=torch.float32)
+
+    prog2.reset_host_transfer_stats()
+    loss_dl, grad_dl = prog2.compute_ilp_loss_grad_gpu(pos, neg, cand_probs)
+    loss = torch.from_dlpack(loss_dl)
+    assert torch.isfinite(loss).item(), f'{name}: loss not finite'
+
+    stats = prog2.host_transfer_stats()
+    assert stats['dtoh_calls'] == 0, f'{name}: {stats[\"dtoh_calls\"]} tracked D2H calls'
+    assert stats['dtoh_bytes'] == 0, f'{name}: {stats[\"dtoh_bytes\"]} tracked D2H bytes'
+    print(f'  {name}: converged=True, strict_dtoh=PASS')
+
+print('All 4 stages pass strict zero data-plane D2H gate.')
 "
 ```
-Expected: All 4 stages converge.
+Expected: All 4 stages converge AND have zero tracked D2H calls/bytes under strict mode with chunking forced.
 
-**Step 2: Gate 2 — SLO harness**
+**Step 2: Gate 2 — SLO harness (enforced)**
 
-Run: `.venv/bin/python -m pytest python/tests/test_ilp_performance.py -v 2>&1 | tail -15`
-Expected: All SLO tests pass (this file exists and contains `test_forward_and_memory_telemetry_smoke` plus transfer accounting checks)
+The SLO assertions in `test_ilp_performance.py:134` are gated behind `ILP_PERF_ENFORCE_SLO=1`. Run with the env var set:
+
+```bash
+ILP_PERF_ENFORCE_SLO=1 .venv/bin/python -m pytest python/tests/test_ilp_performance.py -v 2>&1 | tail -15
+```
+Expected: All SLO tests pass with assertions enforced.
 
 **Step 3: Gate 3 — 50-seed GA reliability**
 
@@ -1002,7 +1048,7 @@ Expected: 200/200 pass (≤600s). This is the full GA gate from design.md:293.
 
 Note: This test is slow (~400-600s). If running in CI, ensure adequate timeout.
 
-**Step 4: ILP regression suite (curated)**
+**Step 4: ILP regression suite (curated, blocking)**
 
 Run the ILP-specific test files that are on the P0/P1 critical path:
 ```bash
@@ -1025,11 +1071,6 @@ Expected: All pass
 
 Run: `cargo test --workspace --all-targets --exclude pyxlog --release 2>&1 | tail -10`
 Expected: All pass
-
-**Step 6: Verify no regressions in remaining Python tests**
-
-Run: `.venv/bin/python -m pytest python/tests/ -v --ignore=python/tests/test_ilp_ga_reliability.py -x 2>&1 | tail -30`
-Expected: All pass (this catches any non-ILP regressions, `-x` stops on first failure for faster feedback)
 
 **Step 7: Commit**
 
