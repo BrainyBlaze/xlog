@@ -367,16 +367,48 @@ def test_zero_dtoh_transfers():
     positives = [("reach", [1, 3])]
     negatives = [("reach", [1, 4])]
 
-    # Zero the counter, then call the GPU loss/grad path
+    # Column-level gate (coarse)
     prog.reset_d2h_transfer_count()
-    before = prog.d2h_transfer_count()
-    assert before == 0, f"reset_d2h_transfer_count did not zero: {before}"
+    # Byte-level gate (strict)
+    prog.reset_host_transfer_stats()
 
     prog.compute_ilp_loss_grad_gpu(positives, negatives, cand_probs)
 
-    after = prog.d2h_transfer_count()
-    assert after == 0, (
-        f"compute_ilp_loss_grad_gpu caused {after} D2H column transfers; expected 0"
+    # Coarse gate
+    assert prog.d2h_transfer_count() == 0, (
+        f"compute_ilp_loss_grad_gpu caused {prog.d2h_transfer_count()} D2H column transfers; expected 0"
+    )
+    # Strict gate
+    stats = prog.host_transfer_stats()
+    assert stats['dtoh_calls'] == 0, (
+        f"compute_ilp_loss_grad_gpu caused {stats['dtoh_calls']} D2H calls; expected 0"
+    )
+    assert stats['dtoh_bytes'] == 0, (
+        f"compute_ilp_loss_grad_gpu transferred {stats['dtoh_bytes']} D2H bytes; expected 0"
+    )
+
+
+def test_zero_dtoh_strict():
+    """compute_ilp_loss_grad_gpu must cause zero D2H transfers (strict accounting)."""
+    prog = _compile_reach()
+    prog.set_candidate_map([(0, 0, 1)])
+
+    device = torch.device("cuda:0")
+    cand_probs = torch.tensor([0.7], device=device, dtype=torch.float32)
+
+    positives = [("reach", [1, 3])]
+    negatives = [("reach", [1, 4])]
+
+    # Reset byte-level transfer stats, then call GPU loss/grad path
+    prog.reset_host_transfer_stats()
+    prog.compute_ilp_loss_grad_gpu(positives, negatives, cand_probs)
+    stats = prog.host_transfer_stats()
+
+    assert stats['dtoh_calls'] == 0, (
+        f"compute_ilp_loss_grad_gpu caused {stats['dtoh_calls']} D2H calls; expected 0"
+    )
+    assert stats['dtoh_bytes'] == 0, (
+        f"compute_ilp_loss_grad_gpu transferred {stats['dtoh_bytes']} D2H bytes; expected 0"
     )
 
 
