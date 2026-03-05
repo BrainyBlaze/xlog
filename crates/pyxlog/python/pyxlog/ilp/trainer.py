@@ -285,6 +285,9 @@ def _run_single_attempt(
         for ci, c in enumerate(candidates):
             ijk_to_cidx[(c["i"], c["j"], c["k"])] = ci
 
+        # Upload candidate map to Rust for GPU-resident loss computation
+        prog.set_candidate_map([(c["i"], c["j"], c["k"]) for c in candidates])
+
         # Select backend based on config
         backend = SparseMaskBackend() if not config.debug_dense_mask else DenseMaskBackend()
         device = f"cuda:{config.device}" if torch.cuda.is_available() else "cpu"
@@ -355,11 +358,13 @@ def _run_single_attempt(
                 else:
                     all_negatives = negatives
 
-                # Compute task loss using candidate probs
+                # Compute task loss using GPU-resident credit path
                 _t0 = time.perf_counter()
-                loss = _compute_loss_from_candidates(
-                    prog, cand_probs, positives, all_negatives, candidates, ijk_to_cidx,
+                loss_dl, grad_dl = prog.compute_ilp_loss_grad_gpu(
+                    positives, all_negatives, cand_probs,
                 )
+                credit_loss = torch.from_dlpack(loss_dl).item()
+                credit_grad = torch.from_dlpack(grad_dl)
                 phase_loss_credit_us.append((time.perf_counter() - _t0) * 1_000_000)
 
                 # Entropy regularization
@@ -369,22 +374,26 @@ def _run_single_attempt(
                     start=config.entropy_weight_start,
                     end=config.entropy_weight_end,
                 )
+                loss_value = credit_loss
                 if ent_weight > 0 and C > 1:
                     cand_sum = cand_probs.sum()
                     if cand_sum > 1e-8:
                         cand_probs_norm = cand_probs / cand_sum
                         ent = normalized_entropy(cand_probs_norm, C)
-                        loss = loss - ent_weight * ent
+                        loss_value = loss_value - ent_weight * ent.item()
+                        ent_grads = torch.autograd.grad(
+                            -ent_weight * ent, cand_probs, retain_graph=True,
+                        )[0]
+                        credit_grad = credit_grad + ent_grads
 
-                # Check for NaN/Inf in loss
-                if torch.isnan(loss) or torch.isinf(loss):
+                # Check for NaN/Inf
+                if math.isnan(loss_value) or math.isinf(loss_value):
                     raise _NumericFailure()
                 phase_loss_reduce_us.append((time.perf_counter() - _t0) * 1_000_000)
 
                 _t0 = time.perf_counter()
-                if loss.requires_grad:
-                    loss.backward()
-                    optimizer.step()
+                cand_probs.backward(credit_grad)
+                optimizer.step()
                 phase_backward_step_us.append((time.perf_counter() - _t0) * 1_000_000)
 
                 # Decode argmax via backend
@@ -424,7 +433,7 @@ def _run_single_attempt(
                 with torch.no_grad():
                     disc = cand_probs.max().item() if cand_probs.numel() > 0 else 0.0
                 temp_controller.step(
-                    loss=float(loss.item()), disc=disc, witness_coverage=witness_coverage,
+                    loss=loss_value, disc=disc, witness_coverage=witness_coverage,
                 )
 
                 # Telemetry
@@ -439,7 +448,7 @@ def _run_single_attempt(
                         tel_ent = 0.0
                     result.telemetry_steps.append(StepRecord(
                         step=step,
-                        loss=float(loss.item()),
+                        loss=loss_value,
                         argmax_rule=argmax_rule,
                         discreteness=disc,
                         temperature=temp_controller.tau,
