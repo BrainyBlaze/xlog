@@ -1002,14 +1002,12 @@ for name, source, pos, neg, mask in STAGES:
     prog2.set_strict_zero_dtoh(True)
     prog2.set_coo_chunk_budget(1)  # tiny = force chunking
 
-    # Set up a single candidate and run loss/grad
+    # Set up a single candidate from valid_candidates (stage-aware)
     device = torch.device('cuda:0')
-    # Use first valid candidate triple
-    ri = {n: i for i, n in enumerate(prog2.ilp_relation_names())}
-    first_rel = [n for n in ri if n != 'succ' and n != 'pred'][0]
-    cand = (ri.get('edge', ri.get('succ', 0)),
-            ri.get('edge', ri.get('pred', ri.get('succ', 0))),
-            ri[first_rel] if first_rel in ri else 1)
+    cands = prog2.valid_candidates(mask, False)
+    assert len(cands) > 0, f'{name}: no valid candidates for mask {mask}'
+    c = cands[0]  # dict with keys: id, i, j, k, left_name, right_name, head_name
+    cand = (c['i'], c['j'], c['k'])
     mask_t = torch.zeros(N**3, device=device, dtype=torch.float32)
     mask_t[cand[0]*N*N + cand[1]*N + cand[2]] = 1.0
     prog2.set_rule_mask(mask, mask_t, mask_t, N)
