@@ -378,3 +378,44 @@ def test_zero_dtoh_transfers():
     assert after == 0, (
         f"compute_ilp_loss_grad_gpu caused {after} D2H column transfers; expected 0"
     )
+
+
+# ---------------------------------------------------------------------------
+# Task 7: COO memory cap + chunked fallback
+# ---------------------------------------------------------------------------
+
+def test_compute_ilp_loss_grad_gpu_memory_cap():
+    """Force chunked COO assembly by setting a tiny memory cap."""
+    prog = _compile_reach()
+    prog.set_candidate_map([(0, 0, 1)])
+    device = torch.device("cuda:0")
+    cand_probs = torch.tensor([0.7], device=device, dtype=torch.float32)
+    positives = [("reach", [1, 3])]
+    negatives = [("reach", [1, 4])]
+
+    # Run without chunking first to get reference values
+    loss_ref_dl, grad_ref_dl = prog.compute_ilp_loss_grad_gpu(
+        positives, negatives, cand_probs
+    )
+    loss_ref = torch.from_dlpack(loss_ref_dl).clone()
+    grad_ref = torch.from_dlpack(grad_ref_dl).clone()
+
+    # Set absurdly small cap to force chunking (1 byte)
+    prog.set_coo_memory_cap(1)
+
+    loss_dl, grad_dl = prog.compute_ilp_loss_grad_gpu(
+        positives, negatives, cand_probs
+    )
+    loss = torch.from_dlpack(loss_dl)
+    grad = torch.from_dlpack(grad_dl)
+
+    # Same result as non-chunked path
+    assert loss.item() > 0.0
+    assert torch.isfinite(loss).item()
+    assert torch.all(torch.isfinite(grad)).item()
+    assert torch.allclose(loss, loss_ref, atol=1e-6), (
+        f"chunked loss={loss.item()} != ref={loss_ref.item()}"
+    )
+    assert torch.allclose(grad, grad_ref, atol=1e-6), (
+        f"chunked grad={grad} != ref={grad_ref}"
+    )
