@@ -172,3 +172,176 @@ def test_compute_ilp_loss_grad_gpu_negative_facts():
     assert torch.isfinite(loss).item()
     # Grad for negative: +1/(1-sum) = 1/0.2 = 5.0
     assert grad[0].item() > 0.0
+
+
+# ---------------------------------------------------------------------------
+# Task 5: Gradient parity tests — GPU vs Python reference
+# ---------------------------------------------------------------------------
+
+def _reference_loss_grad(prog, cand_probs, ijk_to_cidx, positives, negatives):
+    """Pure-PyTorch reference for ILP loss + gradient.
+
+    Uses ``tagged_entries_containing_fact`` to discover which (i,j,k) triples
+    contribute to each fact, then accumulates the standard surrogate loss:
+
+        positive: -log(clamp(credit, 1e-8))
+        negative: -log(clamp(1 - credit, 1e-8))
+
+    Returns (loss_scalar, grad_tensor) both on CPU as plain floats/tensors
+    so comparisons are easy.
+    """
+    # Clone with grad so we can .backward()
+    p = cand_probs.detach().clone().requires_grad_(True)
+    loss = torch.tensor(0.0, device=p.device, dtype=p.dtype)
+
+    for rel_name, values in positives:
+        contributing = prog.tagged_entries_containing_fact(rel_name, values)
+        credit = sum(
+            (p[ijk_to_cidx[tuple(ijk)]] for ijk in contributing if tuple(ijk) in ijk_to_cidx),
+            torch.tensor(0.0, device=p.device, dtype=p.dtype),
+        )
+        loss = loss + (-torch.log(credit.clamp(min=1e-8)))
+
+    for rel_name, values in negatives:
+        contributing = prog.tagged_entries_containing_fact(rel_name, values)
+        credit = sum(
+            (p[ijk_to_cidx[tuple(ijk)]] for ijk in contributing if tuple(ijk) in ijk_to_cidx),
+            torch.tensor(0.0, device=p.device, dtype=p.dtype),
+        )
+        loss = loss + (-torch.log((1.0 - credit).clamp(min=1e-8)))
+
+    loss.backward()
+    return loss.detach(), p.grad.detach()
+
+
+def test_loss_parity_f32_reach():
+    """GPU loss/grad matches Python reference (f32, single candidate, pos+neg)."""
+    prog = _compile_reach()
+    candidates = [(0, 0, 0)]
+    ijk_to_cidx = {(0, 0, 0): 0}
+    prog.set_candidate_map(candidates)
+
+    device = torch.device("cuda:0")
+    cand_probs = torch.tensor([0.7], device=device, dtype=torch.float32)
+
+    positives = [("reach", [1, 3])]
+    negatives = [("reach", [1, 4])]
+
+    # --- reference ---
+    ref_loss, ref_grad = _reference_loss_grad(
+        prog, cand_probs, ijk_to_cidx, positives, negatives,
+    )
+
+    # --- GPU kernel ---
+    loss_dl, grad_dl = prog.compute_ilp_loss_grad_gpu(
+        positives, negatives, cand_probs,
+    )
+    gpu_loss = torch.from_dlpack(loss_dl)
+    gpu_grad = torch.from_dlpack(grad_dl)
+
+    assert torch.allclose(gpu_loss, ref_loss, atol=1e-6), (
+        f"loss mismatch: gpu={gpu_loss.item()}, ref={ref_loss.item()}"
+    )
+    assert torch.allclose(gpu_grad, ref_grad, atol=1e-5), (
+        f"grad mismatch: gpu={gpu_grad}, ref={ref_grad}"
+    )
+
+
+def test_loss_parity_f64_reach():
+    """GPU loss/grad matches Python reference (f64, tighter tolerance)."""
+    prog = _compile_reach()
+    candidates = [(0, 0, 0)]
+    ijk_to_cidx = {(0, 0, 0): 0}
+    prog.set_candidate_map(candidates)
+
+    device = torch.device("cuda:0")
+    cand_probs = torch.tensor([0.7], device=device, dtype=torch.float64)
+
+    positives = [("reach", [1, 3])]
+    negatives = [("reach", [1, 4])]
+
+    # --- reference ---
+    ref_loss, ref_grad = _reference_loss_grad(
+        prog, cand_probs, ijk_to_cidx, positives, negatives,
+    )
+
+    # --- GPU kernel ---
+    loss_dl, grad_dl = prog.compute_ilp_loss_grad_gpu(
+        positives, negatives, cand_probs,
+    )
+    gpu_loss = torch.from_dlpack(loss_dl)
+    gpu_grad = torch.from_dlpack(grad_dl)
+
+    assert torch.allclose(gpu_loss, ref_loss, atol=1e-12), (
+        f"loss mismatch: gpu={gpu_loss.item()}, ref={ref_loss.item()}"
+    )
+    assert torch.allclose(gpu_grad, ref_grad, atol=1e-10), (
+        f"grad mismatch: gpu={gpu_grad}, ref={ref_grad}"
+    )
+
+
+def test_loss_parity_multi_candidate():
+    """GPU loss/grad matches Python reference with multiple candidates."""
+    prog = pyxlog.IlpProgramFactory.compile("""
+        pred edge(u32, u32).
+        edge(1, 2). edge(2, 3). edge(3, 4). edge(1, 4).
+        learnable(W) :: reach(X, Y) :- bL(X, Z), bR(Z, Y).
+    """, device=0, memory_mb=64)
+    prog.evaluate()
+
+    candidates = [(0, 0, 0), (0, 1, 0)]
+    ijk_to_cidx = {(0, 0, 0): 0, (0, 1, 0): 1}
+    prog.set_candidate_map(candidates)
+
+    device = torch.device("cuda:0")
+    cand_probs = torch.tensor([0.5, 0.3], device=device, dtype=torch.float32)
+
+    positives = [("reach", [1, 3])]
+    negatives = []
+
+    # --- reference ---
+    ref_loss, ref_grad = _reference_loss_grad(
+        prog, cand_probs, ijk_to_cidx, positives, negatives,
+    )
+
+    # --- GPU kernel ---
+    loss_dl, grad_dl = prog.compute_ilp_loss_grad_gpu(
+        positives, negatives, cand_probs,
+    )
+    gpu_loss = torch.from_dlpack(loss_dl)
+    gpu_grad = torch.from_dlpack(grad_dl)
+
+    assert torch.allclose(gpu_loss, ref_loss, atol=1e-6), (
+        f"loss mismatch: gpu={gpu_loss.item()}, ref={ref_loss.item()}"
+    )
+    assert torch.allclose(gpu_grad, ref_grad, atol=1e-5), (
+        f"grad mismatch: gpu={gpu_grad}, ref={ref_grad}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Task 6: D2H accounting test
+# ---------------------------------------------------------------------------
+
+def test_zero_dtoh_transfers():
+    """compute_ilp_loss_grad_gpu must not cause additional D2H column transfers."""
+    prog = _compile_reach()
+    prog.set_candidate_map([(0, 0, 0)])
+
+    device = torch.device("cuda:0")
+    cand_probs = torch.tensor([0.7], device=device, dtype=torch.float32)
+
+    positives = [("reach", [1, 3])]
+    negatives = [("reach", [1, 4])]
+
+    # Zero the counter, then call the GPU loss/grad path
+    prog.reset_d2h_transfer_count()
+    before = prog.d2h_transfer_count()
+    assert before == 0, f"reset_d2h_transfer_count did not zero: {before}"
+
+    prog.compute_ilp_loss_grad_gpu(positives, negatives, cand_probs)
+
+    after = prog.d2h_transfer_count()
+    assert after == 0, (
+        f"compute_ilp_loss_grad_gpu caused {after} D2H column transfers; expected 0"
+    )
