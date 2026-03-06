@@ -1,11 +1,11 @@
 # XLOG Development Roadmap
 
-> **Last Updated:** March 5, 2026
-> **Current Version:** v0.4.0-ga (Tagged) + post-GA hardening
-> **Current Milestone:** v0.5.0 (in progress)
-> **Status:** `main` is post-GA: GPU-resident ILP credit/loss (zero D2H, non-chunked), strict zero-D2H
-> CI gate, COO memory cap with chunked fallback, 4 new CUDA kernels. Prior: GPU-native exact path,
-> neural-symbolic training, dILP GA trainer, sparse executor.
+> **Last Updated:** March 6, 2026
+> **Current Version:** v0.5.0-phase1 (Tagged) + P0/P1 complete
+> **Current Milestone:** v0.5.0 Phase 2 (P2a/P2b/P3)
+> **Status:** `main` has P0 zero-D2H chunk merge (two-pass GPU-only), P1 artifact schema migration
+> (beta-v2) + telemetry persistence. All 5 release gates pass. Prior: GPU-resident ILP credit/loss,
+> strict zero-D2H CI gate, 4 CUDA kernels, neural-symbolic training, dILP GA trainer, sparse executor.
 
 ---
 
@@ -458,14 +458,25 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 - [x] GA performance/transfer accounting test (`test_ilp_performance.py`)
 - [x] GA runtime optimization: 1447s → 436s via budget sweep (compile-once + `max_attempts` 7→2)
 
+**v0.5.0 Phase 1 (P0 + P1):**
+- [x] Two-pass bounded-memory GPU-only chunk merge (zero data-plane D2H in all paths)
+- [x] `coo_chunk_budget` (renamed from `coo_memory_cap`; deprecated alias retained)
+- [x] `count_mask_into_slot` provider method (avoids per-task allocation churn)
+- [x] `dtoh_scalar_untracked` provider helper (metadata-only reads, not tracked)
+- [x] Strict zero-D2H now passes with forced chunking (tiny `coo_chunk_budget`)
+- [x] Artifact schema migration beta-v1 → beta-v2 (backward-compatible load)
+- [x] Bounded telemetry persistence (`persist_telemetry`, `telemetry_persist_limit`)
+
 **Design document:** `docs/plans/2026-02-26-dilp-hardening-design.md`
 **Implementation plan:** `docs/plans/2026-02-26-dilp-beta-impl.md`
+**v0.5.0 design:** `docs/plans/2026-03-05-v050-execution-design.md`
+**v0.5.0 Phase 1 plan:** `docs/plans/2026-03-05-v050-implementation.md`
 
 ### Planned 📋 (dILP beyond GA)
 
 - [x] ~~Full GPU-resident loss computation (v0.5.0)~~ (done: `compute_ilp_loss_grad_gpu` with zero D2H in non-chunked paths, strict gate via `set_strict_zero_dtoh`, 4 new CUDA kernels)
-- [ ] Config restoration from saved artifact JSON
-- [ ] Telemetry persistence in artifact (optional, size-bounded)
+- [x] ~~Config restoration from saved artifact JSON~~ (done: `load()` restores config from beta-v1 and beta-v2 artifacts)
+- [x] ~~Telemetry persistence in artifact (optional, size-bounded)~~ (done: `persist_telemetry=True`, `telemetry_persist_limit=100`, bounded `StepRecord` snapshot in beta-v2)
 - [x] ~~Typed query-buffer builder (non-u32 schemas)~~ (done: schema-aware typed packing for I32/I64/U64/Bool/Symbol, F32/F64 rejected)
 - [x] ~~Full CI-grade 50-seed GA reliability runtime budget optimization~~ (done: 1447s → 436s, `max_attempts=2`)
 - [x] ~~Full SLO benchmark harness for N=20/50/100/150~~ (done: parametrized `test_slo_scaling[N]` with wall-clock and forward_p95_us targets)

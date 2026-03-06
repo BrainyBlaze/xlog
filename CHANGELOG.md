@@ -9,17 +9,36 @@ All notable changes to this project are documented in this file.
 - **GPU-resident ILP credit/loss path** (`compute_ilp_loss_grad_gpu`): Single Rust/CUDA call replaces
   Python-side `_compute_loss_from_candidates()` loop. Builds COO→CSR on-device, runs forward/backward
   CUDA kernels, reduces loss on-device, returns `(loss, grad)` as DLPack tensors. Zero D2H transfers
-  in all non-chunked paths, confirmed by strict byte-level accounting (`host_transfer_stats()`).
+  in all paths (including chunked), confirmed by strict byte-level accounting (`host_transfer_stats()`).
 - **4 new CUDA kernels**: `ilp_coo_fill_from_mask` (COO fill from device mask + prefix-sum),
   `ilp_csr_histogram` (CSR row_offsets via atomicAdd histogram), `ilp_reduce_sum_f32`/`ilp_reduce_sum_f64`
   (block-level sum reduction).
-- **COO memory cap + chunked fallback**: `set_coo_memory_cap(bytes)` controls maximum COO buffer size.
-  When exceeded, candidates are processed in bounded-memory chunks (D2H merge by design).
-- **Strict zero-D2H mode**: `set_strict_zero_dtoh(True)` raises `RuntimeError` instead of falling back
-  to chunked path. Use in zero-D2H benchmarks and CI gates.
+- **Two-pass GPU-only chunk merge**: Bounded-memory streaming replaces D2H-based chunked fallback.
+  Pass 1 counts NNZ per task via `count_mask_into_slot`, pass 2 fills COO at pre-computed offsets.
+  Zero data-plane D2H in all code paths, verified on all 4 ILP stages with forced chunking.
+- **`coo_chunk_budget`** (renamed from `coo_memory_cap`): Controls per-chunk temp allocation ceiling.
+  Final exact-NNZ COO buffer may exceed the chunk budget. Deprecated `set_coo_memory_cap()` alias
+  retained for one release cycle.
+- **`count_mask_into_slot`**: Provider method writing mask count directly into pre-allocated device
+  array slot, avoiding per-task allocation churn in pass 1.
+- **`dtoh_scalar_untracked`**: Provider helper for metadata-only D2H reads (e.g., total_nnz scalar)
+  without incrementing transfer counters. Makes the metadata-vs-data-plane contract explicit.
+- **Strict zero-D2H mode**: `set_strict_zero_dtoh(True)` now passes in all paths including chunked.
+  Use in zero-D2H benchmarks and CI gates.
 - **D2H transfer accounting**: Strict byte-level gate via `host_transfer_stats()` returning
   `dtoh_calls` and `dtoh_bytes` counters, plus coarse column-level `d2h_transfer_count()`.
 - **3 gradient parity tests**: GPU kernel output vs pure-PyTorch reference (f32, f64, multi-candidate).
+- **Artifact schema migration**: `save()` writes `beta-v2`, `load()` accepts both `beta-v1` and
+  `beta-v2`. Forward-compatible schema evolution.
+- **Bounded telemetry persistence**: `TrainConfig.persist_telemetry` (default False) and
+  `telemetry_persist_limit` (default 100). When enabled, `save()` includes a `telemetry_snapshot`
+  with the last N `StepRecord`s and `step_timings`. `load()` restores telemetry from snapshot.
+
+### Changed
+
+- **`coo_memory_cap` renamed to `coo_chunk_budget`**: Old name implied a hard ceiling on all COO
+  allocations; new semantics allow the exact-NNZ output buffer to exceed the chunk budget.
+  `set_coo_memory_cap()` remains as a deprecated alias.
 
 ### Removed
 
