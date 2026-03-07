@@ -504,3 +504,82 @@ class TestGradientClipping:
         # No max_grad_norm — backward compatible
         history = pyxlog.train_model(program, queries, epochs=2, batch_size=5)
         assert len(history.epoch_losses) == 2
+
+
+class TestEarlyStopping:
+    """Tests for early stopping in train_model."""
+
+    def test_early_stopping_triggers(self):
+        """train_model stops early when val loss stops improving.
+
+        Uses lr=0.0 so the network never updates — val loss is flat from
+        epoch 1, guaranteeing early stop after exactly `patience` epochs
+        of no improvement (plus the initial improving epoch = patience+1
+        total, though epoch 0 sets best_val_loss, so we get patience+1
+        epochs if first epoch sets baseline then patience epochs with no
+        improvement).
+        """
+        program = pyxlog.Program.compile("""
+            nn(test_net, [X], Y, [a, b, c]) :: pred(X, Y).
+        """)
+
+        net = SimpleNet()
+        # lr=0: optimizer.step() is a no-op → val loss never improves
+        optimizer = torch.optim.SGD(net.parameters(), lr=0.0)
+        program.register_network("test_net", net, optimizer)
+
+        inputs = torch.randn(20, 10)
+        program.add_tensor_source("data", inputs)
+
+        train_queries = [f"pred({i}, a)" for i in range(10)]
+        val_queries = [f"pred({i}, b)" for i in range(10, 15)]
+
+        patience = 3
+        history = pyxlog.train_model(
+            program, train_queries, epochs=100,
+            batch_size=5, val_queries=val_queries, patience=patience
+        )
+
+        # Epoch 0 sets baseline (improvement), epochs 1..patience have no
+        # improvement → stop after patience+1 total epochs.
+        assert len(history.epoch_losses) == patience + 1
+        assert history.stopped_early is True
+
+    def test_early_stopping_disabled_by_default(self):
+        """Without val_queries/patience, all epochs run (backward compat)."""
+        program = pyxlog.Program.compile("""
+            nn(test_net, [X], Y, [a, b, c]) :: pred(X, Y).
+        """)
+
+        net = SimpleNet()
+        optimizer = torch.optim.SGD(net.parameters(), lr=0.01)
+        program.register_network("test_net", net, optimizer)
+
+        inputs = torch.randn(20, 10)
+        program.add_tensor_source("data", inputs)
+        queries = [f"pred({i}, a)" for i in range(10)]
+
+        history = pyxlog.train_model(program, queries, epochs=3, batch_size=5)
+
+        assert len(history.epoch_losses) == 3
+        assert history.stopped_early is False
+
+    def test_early_stopping_requires_both_params(self):
+        """val_queries without patience (or vice versa) raises ValueError."""
+        program = pyxlog.Program.compile("""
+            nn(test_net, [X], Y, [a, b, c]) :: pred(X, Y).
+        """)
+
+        net = SimpleNet()
+        optimizer = torch.optim.SGD(net.parameters(), lr=0.01)
+        program.register_network("test_net", net, optimizer)
+
+        inputs = torch.randn(20, 10)
+        program.add_tensor_source("data", inputs)
+        queries = [f"pred({i}, a)" for i in range(10)]
+
+        with pytest.raises(ValueError):
+            pyxlog.train_model(
+                program, queries, epochs=5, batch_size=5,
+                val_queries=queries  # patience not provided
+            )

@@ -3567,6 +3567,9 @@ pub struct TrainingHistory {
     /// Loss for each batch across all epochs
     #[pyo3(get)]
     pub batch_losses: Vec<f64>,
+    /// True if training was stopped early due to validation loss plateau.
+    #[pyo3(get)]
+    pub stopped_early: bool,
 }
 
 impl TrainingHistory {
@@ -3575,6 +3578,7 @@ impl TrainingHistory {
             epoch_losses: Vec::new(),
             epoch_times: Vec::new(),
             batch_losses: Vec::new(),
+            stopped_early: false,
         }
     }
 
@@ -3605,7 +3609,7 @@ impl TrainingHistory {
 /// # Returns
 /// TrainingHistory with epoch and batch losses
 #[pyfunction]
-#[pyo3(signature = (program, queries, epochs=10, batch_size=32, log_iter=100, shuffle=true, max_grad_norm=None))]
+#[pyo3(signature = (program, queries, epochs=10, batch_size=32, log_iter=100, shuffle=true, max_grad_norm=None, val_queries=None, patience=None))]
 pub fn train_model(
     py: Python<'_>,
     program: &mut CompiledProgram,
@@ -3615,12 +3619,26 @@ pub fn train_model(
     log_iter: usize,
     shuffle: bool,
     max_grad_norm: Option<f64>,
+    val_queries: Option<Vec<String>>,
+    patience: Option<usize>,
 ) -> PyResult<TrainingHistory> {
     use rand::seq::SliceRandom;
     use rand::thread_rng;
     use std::time::Instant;
 
+    // Validate: val_queries and patience must both be present or both absent
+    match (&val_queries, &patience) {
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "val_queries and patience must both be provided for early stopping"
+            ));
+        }
+        _ => {}
+    }
+
     let mut history = TrainingHistory::new();
+    let mut best_val_loss = f64::INFINITY;
+    let mut epochs_without_improvement = 0usize;
 
     for epoch in 0..epochs {
         let mut epoch_queries = queries.clone();
@@ -3635,16 +3653,27 @@ pub fn train_model(
             program.train_epoch_internal(py, &epoch_queries, batch_size, log_iter, max_grad_norm, &mut history)?;
         history.add_epoch(stats.avg_loss, epoch_start.elapsed().as_secs_f64());
 
-        // Print epoch progress (visible in Python output)
         println!(
             "Epoch {}/{}: avg_loss={:.6}",
-            epoch + 1,
-            epochs,
-            stats.avg_loss
+            epoch + 1, epochs, stats.avg_loss
         );
-        // Flush stdout so epoch progress is visible when output is redirected to a file
         use std::io::Write;
         let _ = std::io::stdout().flush();
+
+        // Early stopping check
+        if let (Some(ref val_q), Some(pat)) = (&val_queries, patience) {
+            let val_loss = program.evaluate_loss(val_q.clone())?;
+            if val_loss < best_val_loss {
+                best_val_loss = val_loss;
+                epochs_without_improvement = 0;
+            } else {
+                epochs_without_improvement += 1;
+            }
+            if epochs_without_improvement >= pat {
+                history.stopped_early = true;
+                break;
+            }
+        }
     }
 
     Ok(history)
@@ -3655,7 +3684,7 @@ pub fn train_model(
 /// Identical to train_model but uses forward_backward_tensor internally.
 /// Loss stays on CUDA device; .item() called once per batch only.
 #[pyfunction]
-#[pyo3(signature = (program, queries, epochs=10, batch_size=32, log_iter=100, shuffle=true, max_grad_norm=None))]
+#[pyo3(signature = (program, queries, epochs=10, batch_size=32, log_iter=100, shuffle=true, max_grad_norm=None, val_queries=None, patience=None))]
 pub fn train_model_tensor(
     py: Python<'_>,
     program: &mut CompiledProgram,
@@ -3665,12 +3694,25 @@ pub fn train_model_tensor(
     log_iter: usize,
     shuffle: bool,
     max_grad_norm: Option<f64>,
+    val_queries: Option<Vec<String>>,
+    patience: Option<usize>,
 ) -> PyResult<TrainingHistory> {
     use rand::seq::SliceRandom;
     use rand::thread_rng;
     use std::time::Instant;
 
+    match (&val_queries, &patience) {
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "val_queries and patience must both be provided for early stopping"
+            ));
+        }
+        _ => {}
+    }
+
     let mut history = TrainingHistory::new();
+    let mut best_val_loss = f64::INFINITY;
+    let mut epochs_without_improvement = 0usize;
 
     for epoch in 0..epochs {
         let mut epoch_queries = queries.clone();
@@ -3697,9 +3739,22 @@ pub fn train_model_tensor(
             epochs,
             stats.avg_loss
         );
-        // Flush stdout so epoch progress is visible when output is redirected to a file
         use std::io::Write;
         let _ = std::io::stdout().flush();
+
+        if let (Some(ref val_q), Some(pat)) = (&val_queries, patience) {
+            let val_loss = program.evaluate_loss(val_q.clone())?;
+            if val_loss < best_val_loss {
+                best_val_loss = val_loss;
+                epochs_without_improvement = 0;
+            } else {
+                epochs_without_improvement += 1;
+            }
+            if epochs_without_improvement >= pat {
+                history.stopped_early = true;
+                break;
+            }
+        }
     }
 
     Ok(history)

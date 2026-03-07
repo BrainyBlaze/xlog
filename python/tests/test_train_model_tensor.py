@@ -435,3 +435,89 @@ class TestTensorTrainingGradClipping:
 
         assert delta_clip < delta_no_clip, \
             f"Clipped delta {delta_clip:.6f} not smaller than unclipped {delta_no_clip:.6f}"
+
+
+class TestTensorTrainingEarlyStopping:
+    """Test early stopping works through train_model_tensor entrypoint."""
+
+    def test_tensor_early_stopping_triggers(self):
+        """train_model_tensor stops early when val loss plateaus.
+
+        Uses lr=0.0 so optimizer is a no-op — val loss never improves,
+        triggering early stop after patience+1 total epochs.
+        """
+        source = """
+            nn(test_net, [X], Y, [a, b, c]) :: pred(X, Y).
+        """
+
+        torch.manual_seed(42)
+        net = SimpleNet()
+        prog = pyxlog.Program.compile(source)
+        opt = torch.optim.SGD(net.parameters(), lr=0.0)
+        prog.register_network("test_net", net, opt)
+
+        torch.manual_seed(99)
+        inputs = torch.randn(20, 10)
+        prog.add_tensor_source("data", inputs)
+
+        train_queries = [f"pred({i}, a)" for i in range(10)]
+        val_queries = [f"pred({i}, b)" for i in range(10, 15)]
+
+        patience = 3
+        history = pyxlog.train_model_tensor(
+            prog, train_queries, epochs=100,
+            batch_size=5, shuffle=False,
+            val_queries=val_queries, patience=patience,
+        )
+
+        assert len(history.epoch_losses) == patience + 1
+        assert history.stopped_early is True
+
+    def test_tensor_early_stopping_requires_both_params(self):
+        """val_queries without patience (or vice versa) raises ValueError via tensor path."""
+        source = """
+            nn(test_net, [X], Y, [a, b, c]) :: pred(X, Y).
+        """
+
+        torch.manual_seed(42)
+        net = SimpleNet()
+        prog = pyxlog.Program.compile(source)
+        opt = torch.optim.SGD(net.parameters(), lr=0.01)
+        prog.register_network("test_net", net, opt)
+
+        torch.manual_seed(99)
+        inputs = torch.randn(20, 10)
+        prog.add_tensor_source("data", inputs)
+
+        queries = [f"pred({i}, a)" for i in range(8)]
+
+        with pytest.raises(ValueError):
+            pyxlog.train_model_tensor(
+                prog, queries, epochs=5, batch_size=4, shuffle=False,
+                val_queries=queries,  # patience not provided
+            )
+
+    def test_tensor_early_stopping_stopped_early_false(self):
+        """Without val_queries, all epochs run and stopped_early is False."""
+        source = """
+            nn(test_net, [X], Y, [a, b, c]) :: pred(X, Y).
+        """
+
+        torch.manual_seed(42)
+        net = SimpleNet()
+        prog = pyxlog.Program.compile(source)
+        opt = torch.optim.SGD(net.parameters(), lr=0.01)
+        prog.register_network("test_net", net, opt)
+
+        torch.manual_seed(99)
+        inputs = torch.randn(20, 10)
+        prog.add_tensor_source("data", inputs)
+
+        queries = [f"pred({i}, a)" for i in range(8)]
+
+        history = pyxlog.train_model_tensor(
+            prog, queries, epochs=3, batch_size=4, shuffle=False,
+        )
+
+        assert len(history.epoch_losses) == 3
+        assert history.stopped_early is False
