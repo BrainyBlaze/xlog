@@ -394,3 +394,44 @@ addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
 
         # Training should still produce valid results
         assert stats.avg_loss > 0
+
+
+class TestTensorTrainingGradClipping:
+    """Test gradient clipping works through train_model_tensor entrypoint."""
+
+    def test_tensor_grad_clipping_limits_param_delta(self):
+        """Tight max_grad_norm via tensor path produces smaller weight changes."""
+        source = """
+            nn(test_net, [X], Y, [a, b, c]) :: pred(X, Y).
+        """
+
+        def make_program_and_net():
+            torch.manual_seed(42)
+            n = SimpleNet()
+            prog = pyxlog.Program.compile(source)
+            opt = torch.optim.SGD(n.parameters(), lr=1.0)
+            prog.register_network("test_net", n, opt)
+            torch.manual_seed(99)
+            inputs = torch.randn(20, 10)
+            prog.add_tensor_source("data", inputs)
+            return prog, n
+
+        queries = [f"pred({i}, a)" for i in range(10)]
+
+        # Run WITHOUT clipping
+        prog_no_clip, net_no_clip = make_program_and_net()
+        w_before = net_no_clip.fc.weight.clone()
+        pyxlog.train_model_tensor(prog_no_clip, queries, epochs=1,
+                                  batch_size=10, shuffle=False)
+        delta_no_clip = (net_no_clip.fc.weight - w_before).norm().item()
+
+        # Run WITH tight clipping
+        prog_clip, net_clip = make_program_and_net()
+        w_before = net_clip.fc.weight.clone()
+        pyxlog.train_model_tensor(prog_clip, queries, epochs=1,
+                                  batch_size=10, shuffle=False,
+                                  max_grad_norm=0.001)
+        delta_clip = (net_clip.fc.weight - w_before).norm().item()
+
+        assert delta_clip < delta_no_clip, \
+            f"Clipped delta {delta_clip:.6f} not smaller than unclipped {delta_no_clip:.6f}"

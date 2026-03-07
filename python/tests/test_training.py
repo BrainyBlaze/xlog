@@ -448,3 +448,59 @@ class TestPerNetworkScheduler:
 
         assert opt_a.param_groups[0]['lr'] == pytest.approx(0.5)
         assert opt_b.param_groups[0]['lr'] == pytest.approx(0.5)
+
+
+class TestGradientClipping:
+    """Tests for gradient clipping in train_model."""
+
+    def test_grad_clipping_limits_param_delta(self):
+        """Tight max_grad_norm produces smaller parameter changes than no clipping."""
+        torch.manual_seed(42)
+
+        def make_program_and_net():
+            prog = pyxlog.Program.compile("""
+                nn(test_net, [X], Y, [a, b, c]) :: pred(X, Y).
+            """)
+            n = SimpleNet()
+            opt = torch.optim.SGD(n.parameters(), lr=1.0)
+            prog.register_network("test_net", n, opt)
+            inputs = torch.randn(20, 10)
+            prog.add_tensor_source("data", inputs)
+            return prog, n
+
+        queries = [f"pred({i}, a)" for i in range(10)]
+
+        # Run WITHOUT clipping
+        prog_no_clip, net_no_clip = make_program_and_net()
+        w_before_no_clip = net_no_clip.fc.weight.clone()
+        pyxlog.train_model(prog_no_clip, queries, epochs=1, batch_size=10, shuffle=False)
+        delta_no_clip = (net_no_clip.fc.weight - w_before_no_clip).norm().item()
+
+        # Run WITH tight clipping
+        prog_clip, net_clip = make_program_and_net()
+        w_before_clip = net_clip.fc.weight.clone()
+        pyxlog.train_model(prog_clip, queries, epochs=1, batch_size=10,
+                           shuffle=False, max_grad_norm=0.001)
+        delta_clip = (net_clip.fc.weight - w_before_clip).norm().item()
+
+        # Clipped update must be strictly smaller
+        assert delta_clip < delta_no_clip, \
+            f"Clipped delta {delta_clip:.6f} not smaller than unclipped {delta_no_clip:.6f}"
+
+    def test_grad_clipping_none_is_default(self):
+        """train_model without max_grad_norm works as before (no clipping)."""
+        program = pyxlog.Program.compile("""
+            nn(test_net, [X], Y, [a, b, c]) :: pred(X, Y).
+        """)
+
+        net = SimpleNet()
+        optimizer = torch.optim.SGD(net.parameters(), lr=0.01)
+        program.register_network("test_net", net, optimizer)
+
+        inputs = torch.randn(20, 10)
+        program.add_tensor_source("data", inputs)
+        queries = [f"pred({i}, a)" for i in range(10)]
+
+        # No max_grad_norm — backward compatible
+        history = pyxlog.train_model(program, queries, epochs=2, batch_size=5)
+        assert len(history.epoch_losses) == 2

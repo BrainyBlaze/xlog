@@ -1156,6 +1156,24 @@ impl CompiledProgram {
         Ok(())
     }
 
+    /// Clip gradient norms for all registered networks.
+    ///
+    /// Uses `torch.nn.utils.clip_grad_norm_`.
+    fn clip_grad_norms(&self, py: Python<'_>, max_norm: f64) -> PyResult<()> {
+        let clip_fn = py
+            .import("torch.nn.utils")?
+            .getattr("clip_grad_norm_")?;
+        for name in self.network_registry.names() {
+            if let Some(handle) = self.network_registry.get(name) {
+                if let Some(ref module) = handle.module() {
+                    let params = module.call_method0(py, "parameters")?;
+                    clip_fn.call1((params, max_norm))?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Step the learning rate scheduler.
     ///
     /// If `network_name` is provided, steps only that network's scheduler.
@@ -1270,15 +1288,16 @@ impl CompiledProgram {
     ///
     /// # Returns
     /// EpochStats with avg_loss, num_batches, total_queries
-    #[pyo3(signature = (queries, batch_size=32))]
+    #[pyo3(signature = (queries, batch_size=32, max_grad_norm=None))]
     fn train_epoch(
         &mut self,
         py: Python<'_>,
         queries: Vec<String>,
         batch_size: usize,
+        max_grad_norm: Option<f64>,
     ) -> PyResult<EpochStats> {
         let mut history = TrainingHistory::new();
-        self.train_epoch_internal(py, &queries, batch_size, usize::MAX, &mut history)
+        self.train_epoch_internal(py, &queries, batch_size, usize::MAX, max_grad_norm, &mut history)
     }
 
     /// Evaluate mean NLL loss over queries without updating parameters.
@@ -1337,15 +1356,16 @@ impl CompiledProgram {
     }
 
     /// Train for one epoch with GPU-native loss accumulation (no per-query .item()).
-    #[pyo3(signature = (queries, batch_size=32))]
+    #[pyo3(signature = (queries, batch_size=32, max_grad_norm=None))]
     fn train_epoch_tensor(
         &mut self,
         py: Python<'_>,
         queries: Vec<String>,
         batch_size: usize,
+        max_grad_norm: Option<f64>,
     ) -> PyResult<EpochStats> {
         let mut history = TrainingHistory::new();
-        self.train_epoch_tensor_internal(py, &queries, batch_size, usize::MAX, &mut history)
+        self.train_epoch_tensor_internal(py, &queries, batch_size, usize::MAX, max_grad_norm, &mut history)
     }
 
     /// Return warmup profiling data as a Python dict (or None if profiling disabled).
@@ -1433,6 +1453,7 @@ impl CompiledProgram {
         queries: &[String],
         batch_size: usize,
         log_iter: usize,
+        max_grad_norm: Option<f64>,
         history: &mut TrainingHistory,
     ) -> PyResult<EpochStats> {
         if queries.is_empty() {
@@ -1456,6 +1477,11 @@ impl CompiledProgram {
                 batch_loss += self.forward_backward(py, query, true)?;
             }
             batch_loss /= batch.len() as f64;
+
+            // Clip gradients if requested
+            if let Some(max_norm) = max_grad_norm {
+                self.clip_grad_norms(py, max_norm)?;
+            }
 
             // Update parameters
             self.optimizer_step(py)?;
@@ -1491,6 +1517,7 @@ impl CompiledProgram {
         queries: &[String],
         batch_size: usize,
         log_iter: usize,
+        max_grad_norm: Option<f64>,
         history: &mut TrainingHistory,
     ) -> PyResult<EpochStats> {
         if queries.is_empty() {
@@ -1583,6 +1610,11 @@ impl CompiledProgram {
                         }
                     });
                 }
+            }
+
+            // Clip gradients if requested
+            if let Some(max_norm) = max_grad_norm {
+                self.clip_grad_norms(py, max_norm)?;
             }
 
             self.optimizer_step(py)?;
@@ -3573,7 +3605,7 @@ impl TrainingHistory {
 /// # Returns
 /// TrainingHistory with epoch and batch losses
 #[pyfunction]
-#[pyo3(signature = (program, queries, epochs=10, batch_size=32, log_iter=100, shuffle=true))]
+#[pyo3(signature = (program, queries, epochs=10, batch_size=32, log_iter=100, shuffle=true, max_grad_norm=None))]
 pub fn train_model(
     py: Python<'_>,
     program: &mut CompiledProgram,
@@ -3582,6 +3614,7 @@ pub fn train_model(
     batch_size: usize,
     log_iter: usize,
     shuffle: bool,
+    max_grad_norm: Option<f64>,
 ) -> PyResult<TrainingHistory> {
     use rand::seq::SliceRandom;
     use rand::thread_rng;
@@ -3599,7 +3632,7 @@ pub fn train_model(
 
         let epoch_start = Instant::now();
         let stats =
-            program.train_epoch_internal(py, &epoch_queries, batch_size, log_iter, &mut history)?;
+            program.train_epoch_internal(py, &epoch_queries, batch_size, log_iter, max_grad_norm, &mut history)?;
         history.add_epoch(stats.avg_loss, epoch_start.elapsed().as_secs_f64());
 
         // Print epoch progress (visible in Python output)
@@ -3622,7 +3655,7 @@ pub fn train_model(
 /// Identical to train_model but uses forward_backward_tensor internally.
 /// Loss stays on CUDA device; .item() called once per batch only.
 #[pyfunction]
-#[pyo3(signature = (program, queries, epochs=10, batch_size=32, log_iter=100, shuffle=true))]
+#[pyo3(signature = (program, queries, epochs=10, batch_size=32, log_iter=100, shuffle=true, max_grad_norm=None))]
 pub fn train_model_tensor(
     py: Python<'_>,
     program: &mut CompiledProgram,
@@ -3631,6 +3664,7 @@ pub fn train_model_tensor(
     batch_size: usize,
     log_iter: usize,
     shuffle: bool,
+    max_grad_norm: Option<f64>,
 ) -> PyResult<TrainingHistory> {
     use rand::seq::SliceRandom;
     use rand::thread_rng;
@@ -3652,6 +3686,7 @@ pub fn train_model_tensor(
             &epoch_queries,
             batch_size,
             log_iter,
+            max_grad_norm,
             &mut history,
         )?;
         history.add_epoch(stats.avg_loss, epoch_start.elapsed().as_secs_f64());
