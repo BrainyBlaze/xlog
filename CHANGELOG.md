@@ -33,6 +33,18 @@ All notable changes to this project are documented in this file.
 - **Bounded telemetry persistence**: `TrainConfig.persist_telemetry` (default False) and
   `telemetry_persist_limit` (default 100). When enabled, `save()` includes a `telemetry_snapshot`
   with the last N `StepRecord`s and `step_timings`. `load()` restores telemetry from snapshot.
+- **`program.get_lr(network_name)`**: Read current learning rate from a registered network's optimizer.
+- **`program.set_lr(network_name, lr)`**: Set learning rate across all param groups of a registered
+  network's optimizer.
+- **Per-network `scheduler_step`**: `program.scheduler_step(network_name)` steps a single network's
+  scheduler. `scheduler_step(None)` (default) steps all schedulers, preserving backward compatibility.
+- **Gradient clipping**: `train_model(..., max_grad_norm=N)` and `train_model_tensor(..., max_grad_norm=N)`
+  clip gradients via `torch.nn.utils.clip_grad_norm_` before each optimizer step. `None` (default)
+  disables clipping.
+- **Early stopping**: `train_model(..., val_queries=[...], patience=N)` and
+  `train_model_tensor(..., val_queries=[...], patience=N)` evaluate validation loss each epoch and
+  stop training after `patience` consecutive epochs without improvement.
+- **`TrainingHistory.stopped_early`**: Boolean flag indicating whether early stopping was triggered.
 
 ### Changed
 
