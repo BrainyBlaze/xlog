@@ -1171,6 +1171,34 @@ impl CompiledProgram {
         Ok(())
     }
 
+    /// Get the current learning rate for a registered network.
+    ///
+    /// Reads `optimizer.param_groups[0]['lr']`.
+    ///
+    /// # Arguments
+    /// * `network_name` - Name used in register_network()
+    fn get_lr(&self, py: Python<'_>, network_name: &str) -> PyResult<f64> {
+        let handle = self
+            .network_registry
+            .get(network_name)
+            .ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "No network registered with name '{network_name}'"
+                ))
+            })?;
+        let optimizer = handle
+            .optimizer()
+            .ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "Network '{network_name}' has no optimizer"
+                ))
+            })?;
+        let param_groups = optimizer.getattr(py, "param_groups")?;
+        let group0 = param_groups.call_method1(py, "__getitem__", (0i32,))?;
+        let lr = group0.call_method1(py, "__getitem__", ("lr",))?;
+        lr.extract(py)
+    }
+
     // =========================================================================
     // Training Methods
     // =========================================================================

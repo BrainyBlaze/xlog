@@ -338,3 +338,33 @@ class TestTrainingEdgeCases:
 
         stats = program.train_epoch(queries, batch_size=5)
         assert stats.avg_loss > 0
+
+
+class TestGetSetLr:
+    """Tests for get_lr() and set_lr() methods."""
+
+    def test_get_lr(self):
+        """get_lr returns the optimizer's current learning rate."""
+        program = pyxlog.Program.compile("""
+            nn(test_net, [X], Y, [a, b, c]) :: pred(X, Y).
+        """)
+
+        net = SimpleNet()
+        optimizer = torch.optim.SGD(net.parameters(), lr=0.042)
+        program.register_network("test_net", net, optimizer)
+
+        lr = program.get_lr("test_net")
+        assert lr == pytest.approx(0.042)
+
+    def test_get_lr_unknown_network_raises(self):
+        """get_lr raises ValueError for an unregistered network name."""
+        program = pyxlog.Program.compile("""
+            nn(test_net, [X], Y, [a, b, c]) :: pred(X, Y).
+        """)
+
+        net = SimpleNet()
+        optimizer = torch.optim.SGD(net.parameters(), lr=0.01)
+        program.register_network("test_net", net, optimizer)
+
+        with pytest.raises(ValueError):
+            program.get_lr("nonexistent")
