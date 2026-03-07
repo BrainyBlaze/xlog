@@ -368,3 +368,33 @@ class TestGetSetLr:
 
         with pytest.raises(ValueError):
             program.get_lr("nonexistent")
+
+    def test_set_lr(self):
+        """set_lr updates the optimizer's learning rate for all param groups."""
+        program = pyxlog.Program.compile("""
+            nn(test_net, [X], Y, [a, b, c]) :: pred(X, Y).
+        """)
+
+        net = SimpleNet()
+        optimizer = torch.optim.SGD(net.parameters(), lr=0.01)
+        program.register_network("test_net", net, optimizer)
+
+        program.set_lr("test_net", 0.123)
+
+        # Verify via get_lr
+        assert program.get_lr("test_net") == pytest.approx(0.123)
+        # Verify the Python optimizer object is updated too
+        assert optimizer.param_groups[0]['lr'] == pytest.approx(0.123)
+
+    def test_set_lr_unknown_network_raises(self):
+        """set_lr raises ValueError for an unregistered network name."""
+        program = pyxlog.Program.compile("""
+            nn(test_net, [X], Y, [a, b, c]) :: pred(X, Y).
+        """)
+
+        net = SimpleNet()
+        optimizer = torch.optim.SGD(net.parameters(), lr=0.01)
+        program.register_network("test_net", net, optimizer)
+
+        with pytest.raises(ValueError):
+            program.set_lr("nonexistent", 0.1)
