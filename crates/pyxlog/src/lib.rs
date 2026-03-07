@@ -1156,15 +1156,37 @@ impl CompiledProgram {
         Ok(())
     }
 
-    /// Step the learning rate scheduler for all registered networks.
+    /// Step the learning rate scheduler.
     ///
-    /// This updates learning rates according to the scheduler policy.
-    /// Should be called once per epoch or as specified by the scheduler.
-    fn scheduler_step(&self, py: Python<'_>) -> PyResult<()> {
-        for name in self.network_registry.names() {
-            if let Some(handle) = self.network_registry.get(name) {
+    /// If `network_name` is provided, steps only that network's scheduler.
+    /// If `None` (default), steps all registered schedulers.
+    #[pyo3(signature = (network_name=None))]
+    fn scheduler_step(
+        &self,
+        py: Python<'_>,
+        network_name: Option<&str>,
+    ) -> PyResult<()> {
+        match network_name {
+            Some(name) => {
+                let handle = self
+                    .network_registry
+                    .get(name)
+                    .ok_or_else(|| {
+                        pyo3::exceptions::PyValueError::new_err(format!(
+                            "No network registered with name '{name}'"
+                        ))
+                    })?;
                 if let Some(ref scheduler) = handle.scheduler() {
                     scheduler.call_method0(py, "step")?;
+                }
+            }
+            None => {
+                for name in self.network_registry.names() {
+                    if let Some(handle) = self.network_registry.get(name) {
+                        if let Some(ref scheduler) = handle.scheduler() {
+                            scheduler.call_method0(py, "step")?;
+                        }
+                    }
                 }
             }
         }

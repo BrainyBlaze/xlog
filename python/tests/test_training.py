@@ -398,3 +398,53 @@ class TestGetSetLr:
 
         with pytest.raises(ValueError):
             program.set_lr("nonexistent", 0.1)
+
+
+class TestPerNetworkScheduler:
+    """Tests for per-network scheduler_step()."""
+
+    def test_scheduler_step_single_network(self):
+        """scheduler_step(name) steps only that network's scheduler."""
+        program = pyxlog.Program.compile("""
+            nn(net_a, [X], Y, [a, b, c]) :: pred_a(X, Y).
+            nn(net_b, [X], Y, [0, 1]) :: pred_b(X, Y).
+        """)
+
+        net_a = SimpleNet(input_dim=10, output_dim=3)
+        opt_a = torch.optim.SGD(net_a.parameters(), lr=1.0)
+        sched_a = torch.optim.lr_scheduler.StepLR(opt_a, step_size=1, gamma=0.5)
+        program.register_network("net_a", net_a, opt_a, sched_a)
+
+        net_b = SimpleNet(input_dim=10, output_dim=2)
+        opt_b = torch.optim.SGD(net_b.parameters(), lr=1.0)
+        sched_b = torch.optim.lr_scheduler.StepLR(opt_b, step_size=1, gamma=0.5)
+        program.register_network("net_b", net_b, opt_b, sched_b)
+
+        # Step only net_a's scheduler
+        program.scheduler_step("net_a")
+
+        assert opt_a.param_groups[0]['lr'] == pytest.approx(0.5)
+        assert opt_b.param_groups[0]['lr'] == pytest.approx(1.0)  # Unchanged
+
+    def test_scheduler_step_none_steps_all(self):
+        """scheduler_step(None) or scheduler_step() steps all schedulers (backward compat)."""
+        program = pyxlog.Program.compile("""
+            nn(net_a, [X], Y, [a, b, c]) :: pred_a(X, Y).
+            nn(net_b, [X], Y, [0, 1]) :: pred_b(X, Y).
+        """)
+
+        net_a = SimpleNet(input_dim=10, output_dim=3)
+        opt_a = torch.optim.SGD(net_a.parameters(), lr=1.0)
+        sched_a = torch.optim.lr_scheduler.StepLR(opt_a, step_size=1, gamma=0.5)
+        program.register_network("net_a", net_a, opt_a, sched_a)
+
+        net_b = SimpleNet(input_dim=10, output_dim=2)
+        opt_b = torch.optim.SGD(net_b.parameters(), lr=1.0)
+        sched_b = torch.optim.lr_scheduler.StepLR(opt_b, step_size=1, gamma=0.5)
+        program.register_network("net_b", net_b, opt_b, sched_b)
+
+        # Step all (backward-compatible call)
+        program.scheduler_step()
+
+        assert opt_a.param_groups[0]['lr'] == pytest.approx(0.5)
+        assert opt_b.param_groups[0]['lr'] == pytest.approx(0.5)
