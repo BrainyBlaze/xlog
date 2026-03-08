@@ -1,25 +1,52 @@
 # P2a: Term Embeddings — Design
 
 **Date:** 2026-03-08
-**Status:** Approved
+**Status:** Approved (revised)
 **Depends on:** v0.5.0-phase1 (tagged 2026-03-06, commit 407d8bab)
 
 ## Goal
 
-Enable embedding predicates (`labels.is_none()`) to execute. The AST already
-parses `nn(encoder, [X], Embedding) :: embed(X, Embedding).` but the
-forward/backward path only handles classification (softmax over a label list).
-P2a adds the execution path for embeddings: registration, forward dispatch,
-inference through rules, and explicit training via Python.
+Enable embedding predicates (`labels.is_none()`) to execute for training.
+The AST already parses `nn(encoder, [X], Embedding) :: embed(X, Embedding).`
+but the forward/backward path only handles classification (softmax over a
+label list). P2a adds the training execution path: registration,
+cross-registration validation, and `forward_embedding()` for batched tensor
+lookup with autograd support.
 
 ## Non-goals
 
 - GPU-native embedding weights or CUDA lookup kernels (v0.6.0+)
 - Implicit loss from rule success/failure (requires tensor-aware rule engine)
-- Full foreign tensor predicate set (only `dot`/`cosine` in v0.5)
+- Foreign tensor predicates (`dot`, `cosine`, etc.) in rule evaluation
+  (requires arithmetic function lowering in lower.rs + executor.rs; v0.5.1+)
+- Grounded-facts `query()` API for embedding inference (no such API exists
+  today; v0.5.1+)
 - Integration with P2b optimizer/scheduler APIs
 - Artifact persistence for embedding modules
 - Symbol/string lookup keys (integer IDs only)
+- Train/eval mode switching for embeddings (user-managed in v0.5)
+
+## Deferred: Embedding Inference (v0.5.1+)
+
+The inference path — rules like `similar(X, Y) :- embed(X, EX), embed(Y, EY),
+Score is dot(EX, EY), Score > 0.8` evaluated through `query()` — is deferred.
+It requires three features that do not exist today:
+
+1. **Arithmetic function lowering:** `dot(EX, EY)` parses as
+   `ArithExpr::FuncCall` (parser.rs:1074) but lowering rejects all function
+   calls (lower.rs:1868) and the executor handles only lowered `Expr::*`
+   (executor.rs:2048). Making `dot`/`cosine` work in `is` expressions
+   requires special-casing these as built-in arithmetic functions across
+   the lowerer and executor.
+2. **Grounded-facts query API:** Current `CompiledProgram` exposes
+   `evaluate_query_probabilities()` (pyxlog/src/lib.rs:3017) which returns
+   probabilities, not variable bindings. A `query()` method returning
+   grounded bindings is a new API surface.
+3. **Embedding cache in rule evaluation:** The rule engine must resolve
+   `embed(X, EX)` by calling the embedding module and caching results
+   per-query, keyed on `(decl_name, entity_id)`.
+
+These are bounded but separate from P2a's training scope.
 
 ---
 
@@ -48,17 +75,27 @@ If `trainable=True` is passed with a raw `torch.Tensor`, raise a hard error.
 
 ### Cross-registration validation
 
-- If the declaration has labels (`labels.is_some()`), reject
-  `register_embedding`. Error: "declaration '{name}' is a classification
-  network; use register_network()".
-- If the declaration lacks labels (`labels.is_none()`), reject
-  `register_network`. Error: "declaration '{name}' is an embedding; use
-  register_embedding()".
+Cross-registration requires a by-network index. Today,
+`NeuralPredicateRegistry` (neural_registry.rs:18) is indexed by predicate
+name, and `CompiledProgram` stores only a `HashSet<String>` of declared
+network names (lib.rs:596). Neither provides a network-name-to-form lookup.
+
+**Resolution:** At compile time, build a `HashMap<String, bool>` mapping each
+declared network name to whether it is an embedding (`labels.is_none()`).
+Store this alongside `declared_networks` in `CompiledProgram`. If the same
+network name appears in multiple declarations with mixed forms (some with
+labels, some without), reject at compile time with a hard error.
+
+Validation at registration:
+- If the declaration has labels, reject `register_embedding`. Error:
+  "declaration '{name}' is a classification network; use register_network()".
+- If the declaration lacks labels, reject `register_network`. Error:
+  "declaration '{name}' is an embedding; use register_embedding()".
 
 ### Registration-time checks
 
 1. Declared name exists in program's neural predicate declarations.
-2. Declaration form matches (embedding vs classification).
+2. Declaration form matches (embedding vs classification) via by-network index.
 3. Payload shape: `nn.Embedding` — `.weight` is 2D `[vocab_size, dim]`, float
    dtype. `torch.Tensor` — rank 2, float dtype.
 
@@ -92,146 +129,89 @@ pub struct EmbeddingHandle {
 
 `NetworkRegistry` gains a parallel `HashMap<String, EmbeddingHandle>` for
 embeddings. Methods: `register_embedding`, `get_embedding`,
-`get_embedding_mut`, `contains_embedding`. Train/inference mode switching
-applies to trainable embeddings (calls `module.train()` / `module.eval()`
-on the PyTorch side).
+`get_embedding_mut`, `contains_embedding`.
+
+Train/eval mode switching for embeddings is **not part of v0.5**. The user
+manages module state directly. Future versions may integrate embeddings into
+the registry's `set_train_mode()` if needed.
 
 ---
 
-## Section 3: Forward Dispatch
+## Section 3: Forward Embedding API
 
-### Per-query embedding cache
+### `forward_embedding()`
 
-When the rule engine resolves `embed(X, EX)`, the embedding module produces
-a tensor. A per-query cache stores these tensors to avoid redundant lookups:
-
-- **Key:** `(embedding_decl_name: &str, entity_id: u32)`
-- **Value:** `torch.Tensor` of shape `[dim]`
-- **Lifetime:** one query (forward or forward/backward)
-- **Behavior:** memoized. Repeated `embed(X, EX)` for the same entity reuses
-  the same tensor node in the autograd graph.
-
-Variable names are not used as keys — they are rule-local and unstable across
-joins. Predicate name + entity ID is the stable identity.
-
-### Dispatch branch
-
-In `forward_backward_*` (pyxlog/src/lib.rs), when encountering a neural
-predicate with `labels.is_none()`:
-
-1. Look up `EmbeddingHandle` by name (not `NetworkHandle`).
-2. Call `module(torch.tensor([entity_id]))` for `nn.Embedding`, or
-   `tensor[entity_id]` for raw `torch.Tensor`.
-3. Store result in the embedding cache.
-4. Return the cached tensor for downstream consumption.
-
-### Score semantics
-
-`dot(EX, EY, Score)` and `cosine(EX, EY, Score)` produce normal f64 scalar
-terms bound into the relation. The value enters the arithmetic/comparison
-pipeline like any other f64.
-
-The scalar is extracted via `.item()` (detached from autograd graph) for logic
-evaluation. The underlying tensor computation is retained in the graph for the
-training path.
-
----
-
-## Section 4: Two Execution Modes
-
-### Inference: `query()`
-
-Embedding predicates work inside rules:
-
-```prolog
-similar(X, Y) :-
-    embed(X, EX),
-    embed(Y, EY),
-    Score is dot(EX, EY),
-    Score > 0.8.
-```
-
-```python
-results = program.query("similar(X, Y)")
-# Returns grounded facts only. No tensor exposure.
-```
-
-The rule engine resolves embeddings internally: cache lookup, tensor op,
-`.item()`, scalar binding, comparison. Tensors never appear in query results.
-
-### Training: `forward_embedding()`
-
-New method on `CompiledProgram`:
+New method on `CompiledProgram`. This is a standalone API, separate from
+the existing `forward_backward_*` classification path. It does not hook
+into the circuit-backed forward/backward pipeline.
 
 ```python
 results = program.forward_embedding("entity_embed", [0, 5, 42])
-# results -> torch.Tensor [3, dim], grad-enabled for nn.Embedding
+# results -> torch.Tensor [3, dim]
+# grad-enabled if nn.Embedding; no grad if frozen torch.Tensor
 ```
 
 - Accepts: embedding declaration name + list of integer IDs.
-- Returns: batched `torch.Tensor` with autograd graph intact.
-- The user computes loss in Python and calls `loss.backward()`.
+- Returns: batched `torch.Tensor`.
+- For `nn.Embedding`: calls `module(torch.tensor(ids))`. Autograd graph
+  intact. User computes loss and calls `loss.backward()`.
+- For `torch.Tensor`: indexes `tensor[ids]`. No gradient flow.
 
-This is the only gradient-carrying embedding API in v0.5.
+### Lookup semantics
 
-### Boundary rule
+The method calls the embedding module directly — no embedding cache, no
+rule evaluation, no interaction with the logic engine. The cache design
+(keyed on `(decl_name, entity_id)`) is deferred to the inference path.
 
-If a query path uses embedding-derived values only inside logic comparisons
-and never exposes tensor outputs to Python, it is inference-only. No gradient
-semantics. Normal query results never expose tensor-valued variables.
+### Training workflow
 
----
+```python
+embedding = torch.nn.Embedding(100, 64)
+optimizer = torch.optim.Adam(embedding.parameters())
 
-## Section 5: Tensor Predicates (Inference Path)
+program.register_embedding("entity_embed", embedding, trainable=True)
 
-### `dot(EX, EY, Score)`
-
-Computes `torch.dot(EX, EY).item()` -> f64. Both EX and EY must be in the
-embedding cache. If either is missing, the predicate fails (no derivation).
-
-### `cosine(EX, EY, Score)`
-
-Computes `torch.cosine_similarity(EX, EY, dim=0).item()` -> f64. Same cache
-contract as `dot`.
-
-### Implementation
-
-These predicates dispatch as foreign predicates in the rule engine. They pull
-tensors from the embedding cache by variable binding, compute, and return a
-scalar. They do not appear in the AST as neural predicates — they are built-in
-arithmetic operators over cached embedding values.
+# Training loop (user-managed)
+for batch_ids, targets in dataloader:
+    optimizer.zero_grad()
+    vectors = program.forward_embedding("entity_embed", batch_ids.tolist())
+    loss = my_loss_fn(vectors, targets)
+    loss.backward()
+    optimizer.step()
+```
 
 ---
 
-## Section 6: Testing
+## Section 4: Testing
 
-Six tests cover the contract surface:
+Five tests cover the contract surface:
 
 | # | Test | Verifies |
 |---|------|----------|
-| 1 | `register_embedding` with `nn.Embedding` | Forward produces correct dim vector via `forward_embedding` |
-| 2 | `register_embedding` with frozen `torch.Tensor` | Forward produces correct values; `trainable=True` with tensor is rejected |
-| 3 | `dot` / `cosine` produce correct scalars | Two embeddings produce correct dot product and cosine similarity |
-| 4 | Cross-registration errors (both directions) | Embedding decl + `register_network` raises error; labeled decl + `register_embedding` raises error |
-| 5 | Gradient flow | `forward_embedding` then external loss then `.backward()` updates `nn.Embedding` weights |
-| 6 | Inference integration via `query()` | Rule with `embed` + `dot` + threshold derives correct grounded facts through normal query path |
+| 1 | `register_embedding` with `nn.Embedding` | `forward_embedding` returns correct shape `[n, dim]` and expected values |
+| 2 | `register_embedding` with frozen `torch.Tensor` | Returns correct values; `trainable=True` with raw tensor is rejected |
+| 3 | Cross-registration errors (both directions) | Embedding decl + `register_network` raises error; labeled decl + `register_embedding` raises error |
+| 4 | Gradient flow | `forward_embedding` then external loss then `.backward()` then `optimizer.step()` changes `nn.Embedding` weights |
+| 5 | Frozen output is non-trainable | `forward_embedding` on frozen tensor returns tensor with `requires_grad=False` |
 
 All tests in `python/tests/test_embeddings.py`.
 
 ---
 
-## Section 7: Files
+## Section 5: Files
 
 ### New
 
-- `python/tests/test_embeddings.py` — 6 tests
+- `python/tests/test_embeddings.py` — 5 tests
 
 ### Modified
 
 - `crates/xlog-neural/src/handle.rs` — add `EmbeddingHandle` struct
+- `crates/xlog-neural/src/lib.rs` — re-export `EmbeddingHandle`
 - `crates/xlog-neural/src/registry.rs` — add embedding storage and methods
-- `crates/pyxlog/src/lib.rs` — `register_embedding`, `forward_embedding`,
-  embedding dispatch in forward/backward, `dot`/`cosine` foreign predicates
+- `crates/pyxlog/src/lib.rs` — by-network form index at compile time,
+  `register_embedding`, `forward_embedding`, cross-registration validation
+  in `register_network`
 
 ---
 
@@ -239,14 +219,12 @@ All tests in `python/tests/test_embeddings.py`.
 
 | # | Decision | Rationale |
 |---|----------|-----------|
-| D1 | Scope A: PyTorch-side execution, no CUDA kernels | Smallest change that enables embeddings; defers GPU-native to v0.6.0+ |
+| D1 | Scope: training-only in v0.5, no inference | dot/cosine require lowerer+executor changes; grounded query API does not exist; both deferred to v0.5.1+ |
 | D2 | Separate `register_embedding`, not unified with `register_network` | Different parameters; cross-registration validation catches real mistakes |
 | D3 | `nn.Embedding` + `torch.Tensor` payloads; raw tensors always frozen | `nn.Embedding` owns autograd; raw tensors have no optimizer owner |
-| D4 | Per-query embedding cache keyed on `(decl_name, entity_id)` | Preserves scalar unification model; memoizes lookups; stable identity |
-| D5 | Score is normal f64 scalar, not soft confidence | `dot` returns a value, not a probability; arithmetic needs a real binding |
-| D6 | External loss only; no implicit loss from rule success | `.item()` detaches from autograd; implicit loss requires tensor-aware rule engine |
-| D7 | Separate `forward_embedding` training API | Keeps `query()` results scalar-only; training API returns live tensors |
-| D8 | Integer IDs only for lookup keys | `nn.Embedding` takes integers natively; symbol interning is a runtime internal |
-| D9 | User-managed optimizer | Keeps P2a scoped to execution, not optimizer orchestration; P2b APIs do not cover embeddings |
-| D10 | Inference path in v0.5 (query with embedding rules) | Core value proposition: similar(X, Y) rules in the logic language |
-| D11 | `dot` and `cosine` only; other tensor ops deferred | Covers similarity and KG embedding use cases; minimal dispatch surface |
+| D4 | By-network form index for cross-registration | `NeuralPredicateRegistry` is by-predicate; need network-name-to-form lookup; mixed-form same-name rejected at compile time |
+| D5 | External loss only; no implicit loss from rule success | `.item()` detaches from autograd; implicit loss requires tensor-aware rule engine |
+| D6 | `forward_embedding` is standalone, not in forward_backward_* | forward_backward_* is circuit-backed classification; embeddings have no circuit path in v0.5 |
+| D7 | Integer IDs only for lookup keys | `nn.Embedding` takes integers natively; symbol interning is a runtime internal |
+| D8 | User-managed optimizer | Keeps P2a scoped to execution, not optimizer orchestration; P2b APIs do not cover embeddings |
+| D9 | No train/eval mode switching in v0.5 | User manages module state directly; registry integration deferred |
