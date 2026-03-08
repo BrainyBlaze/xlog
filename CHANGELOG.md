@@ -45,6 +45,14 @@ All notable changes to this project are documented in this file.
   `train_model_tensor(..., val_queries=[...], patience=N)` evaluate validation loss each epoch and
   stop training after `patience` consecutive epochs without improvement.
 - **`TrainingHistory.stopped_early`**: Boolean flag indicating whether early stopping was triggered.
+- **`GpuCdclWorkspace`**: Pre-allocated solver arena for reusing GPU buffers across multiple CDCL
+  solves (P3 incremental verifier). Created via `GpuCdclSolver::new_workspace()`.
+- **`solve_expect_unsat_*_ws` method variants**: Workspace-backed CDCL solving that reuses
+  pre-allocated device buffers instead of per-call allocation.
+- **`GpuCompileConfig.incremental_verify`**: Opt-in for workspace reuse in the equivalence
+  verifier (amortizes arena allocation across q1/q2 solve pair).
+- **`GpuEquivalenceConfig.reuse_workspace`**: Internal config field propagated from
+  `incremental_verify`.
 
 ### Changed
 
