@@ -480,6 +480,24 @@ impl Program {
             .iter()
             .map(|np| np.network.clone())
             .collect();
+        // Build by-network form index: network name -> is_embedding
+        let mut declared_network_forms: HashMap<String, bool> = HashMap::new();
+        for np in &ast.neural_predicates {
+            let is_embedding = np.labels.is_none();
+            match declared_network_forms.get(&np.network) {
+                Some(&existing_form) if existing_form != is_embedding => {
+                    return Err(PyValueError::new_err(format!(
+                        "network '{}' is declared as both classification and embedding; \
+                         each network name must have a single form",
+                        np.network
+                    )));
+                }
+                _ => {
+                    declared_network_forms.insert(np.network.clone(), is_embedding);
+                }
+            }
+        }
+
         let neural_registry =
             NeuralPredicateRegistry::from_ast(&ast).map_err(|e| PyValueError::new_err(e))?;
 
@@ -507,6 +525,7 @@ impl Program {
             network_registry: NetworkRegistry::new(),
             neural_registry,
             declared_networks,
+            declared_network_forms,
             tensor_sources: TensorSourceRegistry::new(),
             _source: source.to_string(),
             ast,
@@ -594,6 +613,8 @@ pub struct CompiledProgram {
     neural_registry: NeuralPredicateRegistry,
     /// Names of neural networks declared in the program (from nn() declarations)
     declared_networks: HashSet<String>,
+    /// Map from network name to form: true = embedding, false = classification
+    declared_network_forms: HashMap<String, bool>,
     /// Registry for tensor data sources (images, embeddings, etc.)
     tensor_sources: TensorSourceRegistry,
     /// Original program source (for dynamic query compilation)
