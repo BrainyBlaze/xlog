@@ -103,3 +103,10 @@ fn atoms_with_formulas_returns_all_formula_atoms() {
         assert_eq!(looked_up, *node_id);
     }
 }
+
+#[test]
+fn ground_atom_new_public() {
+    let atom = GroundAtom::new("reach", vec![Value::I64(1), Value::I64(3)]);
+    assert_eq!(atom.predicate, "reach");
+    assert_eq!(atom.args, vec![Value::I64(1), Value::I64(3)]);
+}
