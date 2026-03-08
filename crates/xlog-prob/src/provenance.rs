@@ -296,6 +296,8 @@ pub struct Provenance {
     tuple_formulas: BTreeMap<GroundAtom, PirNodeId>,
     pub queries: Vec<GroundAtom>,
     pub evidence: Vec<(GroundAtom, bool)>,
+    pub leaf_atoms: BTreeMap<LeafId, GroundAtom>,
+    pub choice_sources: BTreeMap<ChoiceVarId, ChoiceSource>,
 }
 
 impl Provenance {
@@ -319,6 +321,8 @@ pub fn extract_from_program(program: &Program) -> Result<Provenance> {
 
     let mut leaf_probs: BTreeMap<LeafId, f64> = BTreeMap::new();
     let mut choice_probs: BTreeMap<ChoiceVarId, (f64, f64)> = BTreeMap::new();
+    let mut leaf_atoms: BTreeMap<LeafId, GroundAtom> = BTreeMap::new();
+    let mut choice_sources: BTreeMap<ChoiceVarId, ChoiceSource> = BTreeMap::new();
 
     let mut store: BTreeMap<String, Relation> = BTreeMap::new();
 
@@ -454,6 +458,8 @@ pub fn extract_from_program(program: &Program) -> Result<Provenance> {
         tuple_formulas,
         queries,
         evidence,
+        leaf_atoms,
+        choice_sources,
     })
 }
 
