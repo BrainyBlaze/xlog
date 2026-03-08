@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- **Provenance primitives** (`xlog-prob`): Retained provenance metadata for external Rust consumers.
+  New `ChoiceSource` type captures annotated-disjunction metadata (explicit heads, choice index,
+  optional source ID). Two new fields on `Provenance`: `leaf_atoms` (`BTreeMap<LeafId, GroundAtom>`)
+  and `choice_sources` (`BTreeMap<ChoiceVarId, ChoiceSource>`). Three new accessors:
+  `leaf_atom(LeafId)`, `choice_source(ChoiceVarId)`, `atoms_with_formulas()` iterator.
+  `GroundAtom::new()` made public. Top-level re-exports added to `xlog-prob` lib.rs for
+  `ChoiceSource`, `GroundAtom`, `Provenance`, `Value`, `ChoiceVarId`, `LeafId`, `PirGraph`,
+  `PirNode`, `PirNodeId`. Inline retention at existing extraction allocation sites — no new
+  passes or post-hoc reconstruction.
+
 ## [0.5.0] — 2026-03-08
 
 ### Added

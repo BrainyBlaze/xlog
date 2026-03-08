@@ -637,6 +637,7 @@ The legacy CPU D4 vendor pipeline is removed.
 | [dILP Beta Plan](docs/plans/2026-02-26-dilp-beta-impl.md) | dILP beta implementation plan (9 tasks) |
 | [dILP Architecture](docs/architecture/dilp-training.md) | Runtime/trainer architecture and GPU hot-loop contract |
 | [Term Embeddings Design](docs/plans/2026-03-08-p2a-term-embeddings-design.md) | P2a embedding registration, forward API, cross-registration validation |
+| [Provenance Primitives Design](docs/plans/2026-03-08-provenance-primitives-design.md) | Retained provenance metadata for external Rust consumers (leaf atoms, choice sources, formula iterator) |
 | [GPU Hot-loop Transfer Elimination](docs/plans/2026-03-01-gpu-hotloop-transfer-elimination.md) | Transfer-reduction design |
 | [Sparse Executor Transfer Fix](docs/plans/2026-03-01-sparse-executor-transfer-fix.md) | Sparse-mask executor alignment and implementation |
 | [v0.3.2 Showcase](examples/xlog/80-v032-showcase/) | Production-grade multi-module examples |

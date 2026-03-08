@@ -273,6 +273,47 @@ maturin develop --release
 python ../../examples/python/03_prob_mc_nonmonotone_torch.py
 ```
 
+## Provenance Primitives (Rust-only)
+
+`xlog-prob` exposes retained provenance metadata so external Rust consumers can resolve PIR nodes
+back to their source atoms and annotated-disjunction metadata. All data is retained inline during
+extraction — no new passes or post-hoc reconstruction.
+
+### New type
+
+- `ChoiceSource` — captures explicit annotated-disjunction heads (with probabilities), the
+  Bernoulli decision stage index (`choice_index`), and an optional AD identity (`source_id`,
+  `None` in v1).
+
+### New fields on `Provenance`
+
+- `leaf_atoms: BTreeMap<LeafId, GroundAtom>` — one entry per probabilistic fact leaf
+- `choice_sources: BTreeMap<ChoiceVarId, ChoiceSource>` — one entry per Bernoulli decision variable
+
+### Accessors
+
+- `leaf_atom(LeafId) -> Option<&GroundAtom>` — resolve a PIR leaf to its source atom
+- `choice_source(ChoiceVarId) -> Option<&ChoiceSource>` — resolve a decision node to AD metadata
+- `atoms_with_formulas() -> impl Iterator<Item = (&GroundAtom, PirNodeId)>` — iterate all atoms
+  with provenance formulas (exposes `tuple_formulas` read-only)
+
+### Re-exports
+
+`xlog-prob` lib.rs re-exports key types at crate root:
+
+```rust
+pub use pir::{ChoiceVarId, LeafId, PirGraph, PirNode, PirNodeId};
+pub use provenance::{ChoiceSource, GroundAtom, Provenance, Value};
+```
+
+### Design documents
+
+- `docs/plans/2026-03-08-provenance-primitives-design.md`
+- `docs/plans/2026-03-08-provenance-primitives-plan.md`
+- `docs/xlog-change-request-provenance.md` (original change request)
+
+---
+
 ## See Also
 
 - [dILP Training Architecture](dilp-training.md) — Differentiable ILP (shares XGCF/provenance infrastructure)
