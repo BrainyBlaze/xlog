@@ -1,4 +1,4 @@
-use xlog_prob::{ChoiceSource, ChoiceVarId, GroundAtom, LeafId, Provenance, Value};
+use xlog_prob::{ChoiceVarId, GroundAtom, LeafId, Provenance, Value};
 
 #[test]
 fn leaf_atom_resolves_prob_facts() {
