@@ -205,7 +205,7 @@ arithmetic operators over cached embedding values.
 
 ## Section 6: Testing
 
-Five tests cover the contract surface:
+Six tests cover the contract surface:
 
 | # | Test | Verifies |
 |---|------|----------|
@@ -214,6 +214,7 @@ Five tests cover the contract surface:
 | 3 | `dot` / `cosine` produce correct scalars | Two embeddings produce correct dot product and cosine similarity |
 | 4 | Cross-registration errors (both directions) | Embedding decl + `register_network` raises error; labeled decl + `register_embedding` raises error |
 | 5 | Gradient flow | `forward_embedding` then external loss then `.backward()` updates `nn.Embedding` weights |
+| 6 | Inference integration via `query()` | Rule with `embed` + `dot` + threshold derives correct grounded facts through normal query path |
 
 All tests in `python/tests/test_embeddings.py`.
 
@@ -223,7 +224,7 @@ All tests in `python/tests/test_embeddings.py`.
 
 ### New
 
-- `python/tests/test_embeddings.py` — 5 tests
+- `python/tests/test_embeddings.py` — 6 tests
 
 ### Modified
 
