@@ -999,6 +999,51 @@ impl CompiledProgram {
         Ok(())
     }
 
+    /// Look up embedding vectors by integer IDs.
+    ///
+    /// Returns a batched torch.Tensor with shape [len(ids), dim].
+    /// For nn.Embedding: tensor has autograd graph (grad-enabled).
+    /// For frozen torch.Tensor: tensor has requires_grad=False.
+    ///
+    /// This is the only gradient-carrying embedding API in v0.5.
+    fn forward_embedding(
+        &self,
+        py: Python<'_>,
+        name: String,
+        ids: Vec<i64>,
+    ) -> PyResult<PyObject> {
+        let handle = self.network_registry.get_embedding(&name).ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "Embedding '{}' not registered. Did you call register_embedding()?",
+                name
+            ))
+        })?;
+
+        let module = handle.module().ok_or_else(|| {
+            PyValueError::new_err(format!("Embedding '{}' has no module", name))
+        })?;
+
+        let torch = py.import_bound("torch")?;
+
+        if handle.trainable {
+            // nn.Embedding: call module(ids_tensor)
+            let ids_tensor = torch.call_method1(
+                "tensor",
+                (ids, torch.getattr("long")?),
+            )?;
+            let result = module.call_method1(py, "__call__", (ids_tensor,))?;
+            Ok(result)
+        } else {
+            // Frozen tensor: index directly
+            let ids_tensor = torch.call_method1(
+                "tensor",
+                (ids, torch.getattr("long")?),
+            )?;
+            let result = module.call_method1(py, "__getitem__", (ids_tensor,))?;
+            Ok(result)
+        }
+    }
+
     /// Get names of all registered neural networks.
     fn network_names(&self) -> Vec<String> {
         self.network_registry
