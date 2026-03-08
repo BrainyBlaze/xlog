@@ -123,3 +123,15 @@ class TestFrozenOutputNonTrainable:
 
         result = program.forward_embedding("entity_embed", [0, 1])
         assert not result.requires_grad
+
+
+class TestMixedFormRejection:
+    """Test compile-time rejection of mixed-form network names."""
+
+    def test_same_name_both_forms_rejected(self):
+        """Same network name as both embedding and classification -> compile error."""
+        with pytest.raises(ValueError, match="declared as both classification and embedding"):
+            pyxlog.Program.compile("""
+                nn(shared, [X], E) :: embed(X, E).
+                nn(shared, [X], Y, [0, 1]) :: classify(X, Y).
+            """)
