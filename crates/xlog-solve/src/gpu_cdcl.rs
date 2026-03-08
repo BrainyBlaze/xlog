@@ -1179,4 +1179,325 @@ impl GpuCdclSolver {
 
         Ok(())
     }
+
+    // ── Workspace-reuse variants ──────────────────────────────────────────
+
+    /// Solve and enforce UNSAT entirely on GPU using a pre-allocated workspace,
+    /// restricting branching to variables in `1..=branch_var_limit[0]`.
+    pub fn solve_expect_unsat_with_branch_limit_ws(
+        &self,
+        ws: &mut GpuCdclWorkspace,
+        cnf: &GpuCnf,
+        branch_var_limit: &TrackedCudaSlice<u32>,
+    ) -> Result<()> {
+        let compile_needed = self.alloc_u32_scalar(1)?;
+        self.solve_expect_unsat_with_branch_limit_gated_ws(
+            ws,
+            cnf,
+            &compile_needed,
+            branch_var_limit,
+        )
+    }
+
+    /// Gated workspace variant: solve and enforce UNSAT entirely on GPU,
+    /// restricting branching to variables in `1..=branch_var_limit[0]`.
+    /// Skips all GPU work if `compile_needed` is 0.
+    pub fn solve_expect_unsat_with_branch_limit_gated_ws(
+        &self,
+        ws: &mut GpuCdclWorkspace,
+        cnf: &GpuCnf,
+        compile_needed: &TrackedCudaSlice<u32>,
+        branch_var_limit: &TrackedCudaSlice<u32>,
+    ) -> Result<()> {
+        let zero = self.alloc_u32_scalar(0)?;
+        self.solve_expect_unsat_with_decision_ranges_gated_ws(
+            ws,
+            cnf,
+            compile_needed,
+            branch_var_limit,
+            &zero,
+            &zero,
+        )
+    }
+
+    /// Solve and enforce UNSAT entirely on GPU using a pre-allocated workspace,
+    /// with explicit decision variable ranges.
+    pub fn solve_expect_unsat_with_decision_ranges_ws(
+        &self,
+        ws: &mut GpuCdclWorkspace,
+        cnf: &GpuCnf,
+        decision_base_limit: &TrackedCudaSlice<u32>,
+        decision_extra_base: &TrackedCudaSlice<u32>,
+        decision_extra_count: &TrackedCudaSlice<u32>,
+    ) -> Result<()> {
+        let compile_needed = self.alloc_u32_scalar(1)?;
+        self.solve_expect_unsat_with_decision_ranges_gated_ws(
+            ws,
+            cnf,
+            &compile_needed,
+            decision_base_limit,
+            decision_extra_base,
+            decision_extra_count,
+        )
+    }
+
+    /// Gated workspace variant (LEAF): solve and enforce UNSAT entirely on GPU
+    /// using a pre-allocated workspace, with explicit decision variable ranges.
+    /// Skips all GPU work if `compile_needed` is 0.
+    ///
+    /// This is the leaf implementation for all `_ws` UNSAT methods. It:
+    /// 1. Launches CDCL via `launch_cdcl_with_workspace_gated`
+    /// 2. Asserts UNSAT status on GPU
+    /// 3. Verifies the UNSAT proof on GPU (sat_proof_mark_needed + sat_proof_check + sat_assert_ok)
+    pub fn solve_expect_unsat_with_decision_ranges_gated_ws(
+        &self,
+        ws: &mut GpuCdclWorkspace,
+        cnf: &GpuCnf,
+        compile_needed: &TrackedCudaSlice<u32>,
+        decision_base_limit: &TrackedCudaSlice<u32>,
+        decision_extra_base: &TrackedCudaSlice<u32>,
+        decision_extra_count: &TrackedCudaSlice<u32>,
+    ) -> Result<()> {
+        #[cfg(debug_assertions)]
+        let trace = std::env::var_os("XLOG_CDCL_TRACE").is_some();
+        #[cfg(debug_assertions)]
+        let t0 = std::time::Instant::now();
+
+        self.launch_cdcl_with_workspace_gated(
+            ws,
+            cnf,
+            compile_needed,
+            decision_base_limit,
+            decision_extra_base,
+            decision_extra_count,
+        )?;
+
+        let device = self.provider.device().inner();
+        let memory = self.provider.memory();
+
+        let assert_status_fn = device
+            .get_func(SAT_MODULE, sat_kernels::SAT_ASSERT_STATUS)
+            .ok_or_else(|| XlogError::Kernel("sat_assert_status kernel not found".to_string()))?;
+        unsafe {
+            assert_status_fn
+                .clone()
+                .launch(
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (1, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        compile_needed,
+                        &ws.out_status,
+                        &ws.out_error,
+                        SAT_STATUS_UNSAT,
+                    ),
+                )
+                .map_err(|e| {
+                    XlogError::Kernel(format!("Failed to launch sat_assert_status: {}", e))
+                })?;
+        }
+        // Fail-fast if the solver did not produce UNSAT.
+        self.provider.device().synchronize()?;
+        #[cfg(debug_assertions)]
+        if trace {
+            eprintln!("[xlog-solve] cdcl_ws(unsat) time: {:?}", t0.elapsed());
+        }
+
+        let mut out_ok = memory.alloc::<i32>(1)?;
+        device
+            .htod_sync_copy_into(&[1i32], &mut out_ok)
+            .map_err(|e| XlogError::Kernel(format!("Failed to init proof out_ok: {}", e)))?;
+
+        // sat_proof_check uses scratch buffers sized to `scratch_cap` per verifier block. To keep
+        // proof checking fast on large instances, allocate multiple scratch regions and verify
+        // learned clauses in parallel across blocks.
+        let scratch_cap_u32 = cnf
+            .var_cap
+            .checked_add(1)
+            .ok_or_else(|| XlogError::Kernel("Proof scratch capacity overflow".to_string()))?;
+        let scratch_cap = scratch_cap_u32 as usize;
+
+        let mut proof_blocks: usize = 1;
+        let mut scratch_a = None;
+        let mut scratch_b = None;
+        let mut scratch_map = None;
+        let mut last_alloc_err: Option<XlogError> = None;
+        for blocks in [512usize, 256, 128, 64, 32, 16, 8, 4, 2, 1] {
+            let len = match scratch_cap.checked_mul(blocks) {
+                Some(v) => v,
+                None => {
+                    last_alloc_err = Some(XlogError::Kernel(
+                        "Proof scratch allocation length overflow".to_string(),
+                    ));
+                    continue;
+                }
+            };
+
+            let a = match memory.alloc::<i32>(len) {
+                Ok(buf) => buf,
+                Err(e) => {
+                    last_alloc_err = Some(e);
+                    continue;
+                }
+            };
+            let b = match memory.alloc::<i32>(len) {
+                Ok(buf) => buf,
+                Err(e) => {
+                    last_alloc_err = Some(e);
+                    // Drop `a` before retrying with a smaller configuration.
+                    drop(a);
+                    continue;
+                }
+            };
+            let m = match memory.alloc::<u32>(len) {
+                Ok(buf) => buf,
+                Err(e) => {
+                    last_alloc_err = Some(e);
+                    drop(a);
+                    drop(b);
+                    continue;
+                }
+            };
+
+            proof_blocks = blocks;
+            scratch_a = Some(a);
+            scratch_b = Some(b);
+            scratch_map = Some(m);
+            break;
+        }
+        let mut scratch_a = scratch_a.ok_or_else(|| {
+            last_alloc_err.unwrap_or_else(|| {
+                XlogError::Kernel("Failed to allocate proof scratch buffers".to_string())
+            })
+        })?;
+        let mut scratch_b = scratch_b
+            .ok_or_else(|| XlogError::Kernel("Missing proof scratch buffer".to_string()))?;
+        let mut scratch_map = scratch_map
+            .ok_or_else(|| XlogError::Kernel("Missing proof scratch map buffer".to_string()))?;
+        device
+            .memset_zeros(&mut scratch_map)
+            .map_err(|e| XlogError::Kernel(format!("Failed to zero proof scratch map: {}", e)))?;
+        #[cfg(debug_assertions)]
+        if trace {
+            eprintln!("[xlog-solve] proof_check_ws blocks: {}", proof_blocks);
+        }
+        #[cfg(debug_assertions)]
+        let t_mark = std::time::Instant::now();
+
+        let needed_cap_u32 = self.config.max_learned_clauses;
+        let needed_cap = needed_cap_u32 as usize;
+        let mut needed = memory.alloc::<u8>(needed_cap)?;
+        device
+            .memset_zeros(&mut needed)
+            .map_err(|e| XlogError::Kernel(format!("Failed to zero proof needed mask: {}", e)))?;
+
+        let mark_needed_fn = device
+            .get_func(SAT_MODULE, sat_kernels::SAT_PROOF_MARK_NEEDED)
+            .ok_or_else(|| {
+                XlogError::Kernel("sat_proof_mark_needed kernel not found".to_string())
+            })?;
+        let mut mark_params: Vec<*mut c_void> = vec![
+            compile_needed.as_kernel_param(),
+            (&cnf.num_clauses).as_kernel_param(),
+            (&ws.out_learned_count).as_kernel_param(),
+            (&ws.proof_offsets).as_kernel_param(),
+            (&ws.proof_data).as_kernel_param(),
+            needed_cap_u32.as_kernel_param(),
+            (&mut needed).as_kernel_param(),
+        ];
+        unsafe {
+            mark_needed_fn
+                .clone()
+                .launch(
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (1, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    &mut mark_params,
+                )
+                .map_err(|e| {
+                    XlogError::Kernel(format!("Failed to launch sat_proof_mark_needed: {}", e))
+                })?;
+        }
+        self.provider.device().synchronize()?;
+        #[cfg(debug_assertions)]
+        if trace {
+            eprintln!(
+                "[xlog-solve] proof_mark_needed_ws time: {:?}",
+                t_mark.elapsed()
+            );
+        }
+
+        let proof_fn = device
+            .get_func(SAT_MODULE, sat_kernels::SAT_PROOF_CHECK)
+            .ok_or_else(|| XlogError::Kernel("sat_proof_check kernel not found".to_string()))?;
+        #[cfg(debug_assertions)]
+        let t_proof = std::time::Instant::now();
+        let proof_blocks_u32 = u32::try_from(proof_blocks)
+            .map_err(|_| XlogError::Kernel("Proof check grid dim exceeds u32::MAX".to_string()))?;
+        let mut proof_params: Vec<*mut c_void> = vec![
+            compile_needed.as_kernel_param(),
+            (&cnf.clause_offsets).as_kernel_param(),
+            (&cnf.literals).as_kernel_param(),
+            (&cnf.num_clauses).as_kernel_param(),
+            (&ws.learned_offsets).as_kernel_param(),
+            (&ws.learned_lits).as_kernel_param(),
+            (&ws.out_learned_count).as_kernel_param(),
+            (&ws.proof_offsets).as_kernel_param(),
+            (&ws.proof_data).as_kernel_param(),
+            (&needed).as_kernel_param(),
+            needed_cap_u32.as_kernel_param(),
+            (&mut scratch_a).as_kernel_param(),
+            (&mut scratch_b).as_kernel_param(),
+            (&mut scratch_map).as_kernel_param(),
+            scratch_cap_u32.as_kernel_param(),
+            (&mut out_ok).as_kernel_param(),
+        ];
+        unsafe {
+            proof_fn
+                .clone()
+                .launch(
+                    LaunchConfig {
+                        grid_dim: (proof_blocks_u32, 1, 1),
+                        block_dim: (128, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    &mut proof_params,
+                )
+                .map_err(|e| {
+                    XlogError::Kernel(format!("Failed to launch SAT proof check: {}", e))
+                })?;
+        }
+
+        let assert_ok_fn = device
+            .get_func(SAT_MODULE, sat_kernels::SAT_ASSERT_OK)
+            .ok_or_else(|| XlogError::Kernel("sat_assert_ok kernel not found".to_string()))?;
+        unsafe {
+            assert_ok_fn
+                .clone()
+                .launch(
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (1, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (compile_needed, &out_ok),
+                )
+                .map_err(|e| XlogError::Kernel(format!("Failed to launch sat_assert_ok: {}", e)))?;
+        }
+        self.provider.device().synchronize()?;
+        #[cfg(debug_assertions)]
+        if trace {
+            eprintln!("[xlog-solve] proof_check_ws time: {:?}", t_proof.elapsed());
+            eprintln!(
+                "[xlog-solve] cdcl_ws(unsat)+proof_check time: {:?}",
+                t0.elapsed()
+            );
+        }
+
+        Ok(())
+    }
 }
