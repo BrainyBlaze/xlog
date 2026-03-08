@@ -70,3 +70,37 @@ fn choice_source_returns_none_for_invalid() {
     let prov: Provenance = xlog_prob::provenance::extract_from_source(src).unwrap();
     assert!(prov.choice_source(ChoiceVarId::new(9999)).is_none());
 }
+
+#[test]
+fn atoms_with_formulas_returns_all_formula_atoms() {
+    let src = r#"
+        wet() :- rain().
+        wet() :- sprinkler().
+        0.3::rain().
+        0.7::sprinkler().
+        query(wet()).
+    "#;
+    let prov: Provenance = xlog_prob::provenance::extract_from_source(src).unwrap();
+
+    let formula_atoms: Vec<_> = prov.atoms_with_formulas().collect();
+
+    // Should contain: rain, sprinkler (prob facts) + wet (derived).
+    assert_eq!(formula_atoms.len(), 3);
+
+    // Every atom returned should have a valid PirNodeId.
+    for (_atom, node_id) in &formula_atoms {
+        assert!(prov.pir.node(*node_id).is_some());
+    }
+
+    // Check that specific atoms are present.
+    let predicates: Vec<&str> = formula_atoms.iter().map(|(a, _)| a.predicate.as_str()).collect();
+    assert!(predicates.contains(&"rain"));
+    assert!(predicates.contains(&"sprinkler"));
+    assert!(predicates.contains(&"wet"));
+
+    // Verify consistency with query_formula.
+    for (atom, node_id) in &formula_atoms {
+        let looked_up = prov.query_formula(&atom.predicate, &atom.args).unwrap();
+        assert_eq!(looked_up, *node_id);
+    }
+}

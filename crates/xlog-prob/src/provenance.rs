@@ -314,6 +314,10 @@ impl Provenance {
     pub fn choice_source(&self, var: ChoiceVarId) -> Option<&ChoiceSource> {
         self.choice_sources.get(&var)
     }
+
+    pub fn atoms_with_formulas(&self) -> impl Iterator<Item = (&GroundAtom, PirNodeId)> + '_ {
+        self.tuple_formulas.iter().map(|(atom, &id)| (atom, id))
+    }
 }
 
 pub fn extract_from_source(source: &str) -> Result<Provenance> {
