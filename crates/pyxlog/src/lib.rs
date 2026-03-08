@@ -927,7 +927,7 @@ impl CompiledProgram {
         let embedding_cls = nn.getattr("Embedding")?;
         let is_nn_embedding = obj.is_instance(&embedding_cls)?;
 
-        let (vocab_size, dim) = if is_nn_embedding {
+        let (vocab_size, dim, stored_obj) = if is_nn_embedding {
             // nn.Embedding: read .weight shape
             let weight = obj.getattr("weight")?;
             let shape = weight.getattr("shape")?;
@@ -947,7 +947,7 @@ impl CompiledProgram {
                 ));
             }
 
-            (vs, d)
+            (vs, d, module_or_tensor.clone_ref(py))
         } else {
             // Raw torch.Tensor: must be frozen
             let tensor_cls = torch.getattr("Tensor")?;
@@ -989,11 +989,13 @@ impl CompiledProgram {
                 ));
             }
 
-            (vs, d)
+            // Detach raw tensor to enforce frozen contract
+            let detached = obj.call_method0("detach")?;
+            (vs, d, detached.into_py(py))
         };
 
         let mut handle = EmbeddingHandle::new(name.clone(), trainable, dim, vocab_size);
-        handle.set_module(module_or_tensor);
+        handle.set_module(stored_obj);
         self.network_registry.register_embedding(handle);
 
         Ok(())
@@ -1026,6 +1028,15 @@ impl CompiledProgram {
         let torch = py.import_bound("torch")?;
         let kwargs = PyDict::new_bound(py);
         kwargs.set_item("dtype", torch.getattr("long")?)?;
+
+        // Determine device from the embedding weight/tensor so ids_tensor
+        // is created on the same device (prevents CPU/CUDA mismatch).
+        let device = if handle.trainable {
+            module.getattr(py, "weight")?.getattr(py, "device")?
+        } else {
+            module.getattr(py, "device")?
+        };
+        kwargs.set_item("device", device)?;
 
         if handle.trainable {
             // nn.Embedding: call module(ids_tensor)

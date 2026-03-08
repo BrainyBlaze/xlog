@@ -124,6 +124,16 @@ class TestFrozenOutputNonTrainable:
         result = program.forward_embedding("entity_embed", [0, 1])
         assert not result.requires_grad
 
+    def test_requires_grad_tensor_detached_on_register(self):
+        """Raw tensor with requires_grad=True is detached — output has no grad."""
+        program = pyxlog.Program.compile(EMBEDDING_SOURCE)
+
+        weights = torch.randn(10, 8, requires_grad=True)
+        program.register_embedding("entity_embed", weights, trainable=False)
+
+        result = program.forward_embedding("entity_embed", [0, 1])
+        assert not result.requires_grad
+
 
 class TestMixedFormRejection:
     """Test compile-time rejection of mixed-form network names."""
