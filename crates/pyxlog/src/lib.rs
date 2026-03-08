@@ -17,7 +17,7 @@ use xlog_cuda::{CudaDevice, CudaKernelProvider, DlpackManagedTensor, GpuMemoryMa
 use xlog_logic::ast::ArithExpr;
 use xlog_logic::ast::{Atom, BodyLiteral, ProbEngine, Rule, Term};
 use xlog_logic::parse_program;
-use xlog_neural::{NetworkConfig, NetworkRegistry, TensorMetadata, TensorSourceRegistry};
+use xlog_neural::{EmbeddingHandle, NetworkConfig, NetworkRegistry, TensorMetadata, TensorSourceRegistry};
 use xlog_prob::exact::{ExactDdnnfProgram, GpuConfig};
 #[cfg(feature = "host-io")]
 use xlog_prob::exact::{ExactResultWithGrads, QueryProbability};
@@ -847,6 +847,14 @@ impl CompiledProgram {
             )));
         }
 
+        // Cross-registration: reject if this network is declared as an embedding
+        if let Some(&true) = self.declared_network_forms.get(&name) {
+            return Err(PyValueError::new_err(format!(
+                "declaration '{}' is an embedding; use register_embedding()",
+                name
+            )));
+        }
+
         let config = NetworkConfig {
             name: name.clone(),
             batching,
@@ -866,6 +874,127 @@ impl CompiledProgram {
                 handle.set_scheduler(sched);
             }
         }
+
+        Ok(())
+    }
+
+    /// Register an embedding module for a declared embedding predicate.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Must match an nn() declaration with no label list
+    /// * `module_or_tensor` - PyTorch nn.Embedding or 2D torch.Tensor
+    /// * `trainable` - Whether gradients flow; must be false for raw tensors
+    #[pyo3(signature = (name, module_or_tensor, trainable=true))]
+    fn register_embedding(
+        &mut self,
+        py: Python<'_>,
+        name: String,
+        module_or_tensor: PyObject,
+        trainable: bool,
+    ) -> PyResult<()> {
+        // Validate network name exists
+        if !self.declared_networks.contains(&name) {
+            return Err(PyValueError::new_err(format!(
+                "Network '{}' not declared in program. Declared networks: {:?}",
+                name,
+                self.declared_networks.iter().collect::<Vec<_>>()
+            )));
+        }
+
+        // Cross-registration: reject if declared as classification
+        match self.declared_network_forms.get(&name) {
+            Some(&false) => {
+                return Err(PyValueError::new_err(format!(
+                    "declaration '{}' is a classification network; use register_network()",
+                    name
+                )));
+            }
+            None => {
+                return Err(PyValueError::new_err(format!(
+                    "Network '{}' not found in form index",
+                    name
+                )));
+            }
+            _ => {} // is_embedding = true, correct
+        }
+
+        let torch = py.import_bound("torch")?;
+        let nn = py.import_bound("torch.nn")?;
+        let obj = module_or_tensor.bind(py);
+
+        // Detect payload type and extract shape
+        let embedding_cls = nn.getattr("Embedding")?;
+        let is_nn_embedding = obj.is_instance(&embedding_cls)?;
+
+        let (vocab_size, dim) = if is_nn_embedding {
+            // nn.Embedding: read .weight shape
+            let weight = obj.getattr("weight")?;
+            let shape = weight.getattr("shape")?;
+            let vs: usize = shape.get_item(0)?.extract()?;
+            let d: usize = shape.get_item(1)?.extract()?;
+
+            // Validate dtype is float
+            let dtype = weight.getattr("dtype")?;
+            let float32 = torch.getattr("float32")?;
+            let float64 = torch.getattr("float64")?;
+            let float16 = torch.getattr("float16")?;
+            let bfloat16 = torch.getattr("bfloat16")?;
+            if !dtype.eq(&float32)? && !dtype.eq(&float64)?
+                && !dtype.eq(&float16)? && !dtype.eq(&bfloat16)? {
+                return Err(PyValueError::new_err(
+                    "nn.Embedding weight must have float dtype"
+                ));
+            }
+
+            (vs, d)
+        } else {
+            // Raw torch.Tensor: must be frozen
+            let tensor_cls = torch.getattr("Tensor")?;
+            if !obj.is_instance(&tensor_cls)? {
+                return Err(PyValueError::new_err(
+                    "module_or_tensor must be nn.Embedding or torch.Tensor"
+                ));
+            }
+
+            if trainable {
+                return Err(PyValueError::new_err(
+                    "trainable=True requires nn.Embedding; raw torch.Tensor is always frozen"
+                ));
+            }
+
+            // Validate rank == 2
+            let ndim: usize = obj.getattr("ndim")?.extract()?;
+            if ndim != 2 {
+                return Err(PyValueError::new_err(format!(
+                    "embedding tensor must be 2D [vocab_size, dim], got {}D",
+                    ndim
+                )));
+            }
+
+            let shape = obj.getattr("shape")?;
+            let vs: usize = shape.get_item(0)?.extract()?;
+            let d: usize = shape.get_item(1)?.extract()?;
+
+            // Validate dtype is float
+            let dtype = obj.getattr("dtype")?;
+            let float32 = torch.getattr("float32")?;
+            let float64 = torch.getattr("float64")?;
+            let float16 = torch.getattr("float16")?;
+            let bfloat16 = torch.getattr("bfloat16")?;
+            if !dtype.eq(&float32)? && !dtype.eq(&float64)?
+                && !dtype.eq(&float16)? && !dtype.eq(&bfloat16)? {
+                return Err(PyValueError::new_err(
+                    "embedding tensor must have float dtype"
+                ));
+            }
+
+            (vs, d)
+        };
+
+        let mut handle = EmbeddingHandle::new(name.clone(), trainable, dim, vocab_size);
+        handle.set_module(module_or_tensor);
+        self.network_registry.register_embedding(handle);
 
         Ok(())
     }
