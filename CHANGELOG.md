@@ -9,9 +9,12 @@ All notable changes to this project are documented in this file.
 - **P2a: Term Embeddings (training-only)** — `register_embedding()` for
   `nn.Embedding` (trainable) and `torch.Tensor` (frozen) payloads.
   `forward_embedding(name, ids)` returns batched tensors with autograd
-  support. Cross-registration validation: embedding declarations reject
-  `register_network()` and vice versa. Compile-time mixed-form rejection
-  for network names.
+  support on the same device as the embedding (CUDA-safe). Cross-registration
+  validation: embedding declarations reject `register_network()` and vice
+  versa. Compile-time mixed-form rejection for network names. Raw tensors
+  are detached at registration to enforce frozen contract even when input
+  has `requires_grad=True`. User-managed optimizer (P2b APIs do not cover
+  embeddings). Inference path deferred to v0.5.1+.
 - **GPU-resident ILP credit/loss path** (`compute_ilp_loss_grad_gpu`): Single Rust/CUDA call replaces
   Python-side `_compute_loss_from_candidates()` loop. Builds COO→CSR on-device, runs forward/backward
   CUDA kernels, reduces loss on-device, returns `(loss, grad)` as DLPack tensors. Zero D2H transfers
@@ -201,8 +204,8 @@ All notable changes to this project are documented in this file.
 
 ### Deferred to v0.4.0-rc
 
-- Term embeddings for neural-symbolic integration
-- Extended neural-symbolic training controls
+- ~~Term embeddings for neural-symbolic integration~~ (done in v0.5.0: P2a)
+- ~~Extended neural-symbolic training controls~~ (done in v0.5.0: P2b)
 
 ### Deferred to v0.5.0
 

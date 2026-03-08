@@ -8,6 +8,7 @@ The `pyxlog` Python module provides:
 
 - Deterministic Datalog execution via `LogicProgram`
 - Probabilistic inference via `Program`
+- Term embedding registration and lookup via `register_embedding` / `forward_embedding`
 - Differentiable ILP training via `pyxlog.ilp` (rule learning from examples)
 - Zero-copy GPU tensor exchange via DLPack (primary interop boundary)
 - Optional experimental Arrow C Device interop (feature-gated)
@@ -191,6 +192,53 @@ When built with `--features arrow-device-import`, `pyxlog` exposes:
 These helpers exist to bridge between DLPack columns and Arrow's C Device interface without host
 copies. This is experimental and currently rejects nulls; import does not yet support bit-packed
 `Bool`.
+
+## Term Embeddings (v0.5.0)
+
+The `register_embedding` / `forward_embedding` API enables explicit PyTorch-side embedding training
+through the logic program. Embedding predicates use the label-free `nn/3` declaration form.
+
+### Embedding Registration
+
+```python
+program = pyxlog.Program.compile("""
+    nn(entity_embed, [X], E) :: embed(X, E).
+""")
+
+# Trainable nn.Embedding — autograd graph preserved
+embedding = torch.nn.Embedding(100, 64).cuda()
+program.register_embedding("entity_embed", embedding, trainable=True)
+
+# Frozen torch.Tensor — detached at registration, no gradient flow
+weights = torch.randn(100, 64).cuda()
+program.register_embedding("entity_embed", weights, trainable=False)
+```
+
+### Forward Lookup
+
+```python
+# Returns [n, dim] tensor on same device as embedding
+vectors = program.forward_embedding("entity_embed", [0, 5, 42])
+
+# For trainable nn.Embedding: vectors.requires_grad == True
+# For frozen torch.Tensor: vectors.requires_grad == False
+```
+
+### Cross-Registration Validation
+
+- Embedding declarations (`nn/3`, no labels) reject `register_network()` — error directs to `register_embedding()`
+- Classification declarations (`nn/4`, with labels) reject `register_embedding()` — error directs to `register_network()`
+- Same network name as both embedding and classification → compile-time error
+
+### Constraints
+
+- `trainable=True` requires `nn.Embedding`; raw `torch.Tensor` with `trainable=True` raises `ValueError`
+- Raw tensors with `requires_grad=True` are detached at registration (frozen contract enforced)
+- Integer IDs only (symbol/string lookup keys deferred)
+- Optimizer ownership is user-managed (P2b APIs do not cover embeddings)
+- Inference through rules (dot/cosine evaluation, grounded query API) deferred to v0.5.1+
+
+---
 
 ## ILP Training (dILP Beta)
 

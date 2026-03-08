@@ -1,7 +1,7 @@
 # P2a: Term Embeddings — Design
 
 **Date:** 2026-03-08
-**Status:** Implemented (2026-03-08, branch feat/p2a-term-embeddings)
+**Status:** Implemented (2026-03-08, merged to main)
 **Depends on:** v0.5.0-phase1 (tagged 2026-03-06, commit 407d8bab)
 
 ## Goal

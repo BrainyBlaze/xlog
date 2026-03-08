@@ -4,10 +4,11 @@
 > **Current Version:** v0.5.0-phase1 (Tagged) + P0/P1/P2b/P3 complete
 > **Current Milestone:** v0.5.0 Phase 2 complete (P2a term embeddings, P2b training controls, P3 incremental verifier)
 > **Status:** `main` has P0 zero-D2H chunk merge (two-pass GPU-only), P1 artifact schema migration
-> (beta-v2) + telemetry persistence, P2b extended training controls (gradient clipping, early stopping,
-> per-network scheduler_step, get/set_lr), P3 incremental verifier (`GpuCdclWorkspace` arena reuse).
-> All 5 release gates pass. Prior: GPU-resident ILP credit/loss, strict zero-D2H CI gate, 4 CUDA
-> kernels, neural-symbolic training, dILP GA trainer, sparse executor.
+> (beta-v2) + telemetry persistence, P2a term embeddings (`register_embedding`, `forward_embedding`,
+> cross-registration validation, CUDA device-aware lookup), P2b extended training controls (gradient
+> clipping, early stopping, per-network scheduler_step, get/set_lr), P3 incremental verifier
+> (`GpuCdclWorkspace` arena reuse). All 5 release gates pass. Prior: GPU-resident ILP credit/loss,
+> strict zero-D2H CI gate, 4 CUDA kernels, neural-symbolic training, dILP GA trainer, sparse executor.
 
 ---
 
@@ -372,16 +373,17 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 ### Planned 📋 (v0.4.0-beta and beyond)
 
 **Neural Predicates (Extended):**
-- [ ] Term embeddings (learnable + pretrained)
+- [x] ~~Term embeddings (learnable + pretrained)~~ (done: P2a `register_embedding` + `forward_embedding`, nn.Embedding trainable + torch.Tensor frozen, CUDA device-aware, cross-registration validation)
+- [ ] Term embedding inference path (dot/cosine in rules, grounded query API, embedding cache — v0.5.1+)
 - [ ] Foreign tensor predicates (dot, cosine, rbf, sigmoid, softmax, etc.)
 - [ ] Neural output caching with configurable size
 - [ ] Top-k deterministic mode
 
 **Training Infrastructure (Extended):**
+- [x] ~~Stop conditions (threshold, plateau detection)~~ (done: P2b early stopping via val_queries + patience)
+- [x] ~~Learning rate schedulers~~ (done: P2b get_lr/set_lr/scheduler_step)
 - [ ] Semantic loss functions (logic-based supervision)
 - [ ] Loss functions (MSE, semantic, infoloss)
-- [ ] Stop conditions (threshold, plateau detection)
-- [ ] Learning rate schedulers
 
 **Language Extensions:**
 - [ ] List syntax (`[H|T]`, `[a,b,c]`) and built-ins (member, select, append)
@@ -395,11 +397,11 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 - [ ] Approximate inference engine (geometric_mean, beam search)
 
 **Neural-Symbolic Examples:**
-- [ ] Coins example (two coin classifiers)
-- [ ] MNIST multi-digit addition
-- [ ] HWF (Handwritten Formula recognition)
-- [ ] Poker (card rank classification)
-- [ ] CLUTRR (family relationship reasoning)
+- [x] ~~Coins example (two coin classifiers)~~ (done: `examples/neural/02_coins/`)
+- [x] ~~MNIST multi-digit addition~~ (done: `examples/neural/03_mnist_multidigit/`)
+- [x] ~~HWF (Handwritten Formula recognition)~~ (done: `examples/neural/04_hwf/`)
+- [x] ~~Poker (card rank classification)~~ (done: `examples/neural/05_poker/`)
+- [x] ~~CLUTRR (family relationship reasoning)~~ (done: `examples/neural/06_clutrr/`)
 
 **Design document:** `docs/plans/2026-01-20-v0.4.0-neural-symbolic-design.md`
 **Implementation plan:** `docs/plans/v0.4.0-alpha-implementation.md`
@@ -476,6 +478,17 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 - [x] `program.get_lr(network_name)` / `program.set_lr(network_name, lr)`
 - [x] `TrainingHistory.stopped_early` boolean flag
 
+**v0.5.0 Phase 2 (P2a — Term Embeddings):**
+- [x] `EmbeddingHandle` struct in `xlog-neural` (parallel to `NetworkHandle`)
+- [x] `NetworkRegistry` embedding storage (`register_embedding`, `get_embedding`, `get_embedding_mut`)
+- [x] By-network form index (`HashMap<String, bool>`) built at compile time
+- [x] Compile-time mixed-form rejection (same name as both classification and embedding → error)
+- [x] `register_embedding(name, module_or_tensor, trainable)` with cross-registration validation
+- [x] `forward_embedding(name, ids)` with CUDA device-aware `ids_tensor` creation
+- [x] Raw tensor detach at registration (frozen contract enforced even with `requires_grad=True`)
+- [x] Cross-registration guard on `register_network` (rejects embedding declarations)
+- [x] 9 Python tests covering shape/values, frozen tensor, cross-registration, gradient flow, detach, mixed-form
+
 **v0.5.0 Phase 2 (P3 — Incremental Verifier):**
 - [x] `GpuCdclWorkspace` pre-allocated solver arena (29 device buffers)
 - [x] `GpuCdclSolver::new_workspace()` constructor with capacity overflow checking
@@ -487,6 +500,8 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 **Implementation plan:** `docs/plans/2026-02-26-dilp-beta-impl.md`
 **v0.5.0 design:** `docs/plans/2026-03-05-v050-execution-design.md`
 **v0.5.0 Phase 1 plan:** `docs/plans/2026-03-05-v050-implementation.md`
+**P2a design:** `docs/plans/2026-03-08-p2a-term-embeddings-design.md`
+**P2a plan:** `docs/plans/2026-03-08-p2a-term-embeddings.md`
 **P3 design:** `docs/plans/2026-03-08-p3-incremental-verifier-design.md`
 **P3 plan:** `docs/plans/2026-03-08-p3-incremental-verifier.md`
 
@@ -592,6 +607,13 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 - [x] `nll_loss(prob)`, `nll_loss_batch(probs)`, `nll_loss_tensor(prob)` — loss functions
 - [x] `zero_grad()`, `optimizer_step()`, `scheduler_step()` — training utilities
 - [x] `TrainingHistory` — epoch losses and batch metrics
+
+### Implemented ✅ (v0.5.0 — term embeddings)
+
+- [x] `register_embedding(name, module_or_tensor, trainable)` — embedding registration with cross-registration validation
+- [x] `forward_embedding(name, ids)` — batched tensor lookup with CUDA device-aware autograd
+- [x] By-network form index with compile-time mixed-form rejection
+- [x] Raw tensor detach at registration (frozen contract enforcement)
 
 ### Implemented ✅ (dILP beta — ILP training)
 
@@ -725,7 +747,7 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 | v0.4.0-alpha | Implemented | Neural predicates (`nn/4`) + training milestone (release-gated on full example validation with real datasets) |
 | v0.4.0-beta | Achieved | dILP beta trainer, GA-hardened promotion, sparse executor (DLPack-native, no N^3 materialization), deterministic training, artifact persistence. Beta gate = 20/20 reliability. 50-seed GA gate = 200/200 (436s, `max_attempts=2`). |
 | v0.4.0-ga | **Achieved** | Typed batch upload fix (schema-aware I32/I64/U64/Bool/Symbol packing), SLO scaling harness, per-step phase timing, GA preflight all-pass. |
-| v0.5.0 | In Progress | GPU-resident loss/credit path (zero D2H, 4 CUDA kernels), two-pass GPU-only chunk merge, extended training controls (gradient clipping, early stopping, lr management), incremental verifier (`GpuCdclWorkspace` arena reuse), P2a term embeddings (`register_embedding`, `forward_embedding`, cross-registration validation). |
+| v0.5.0 | In Progress (Phase 2 complete) | GPU-resident loss/credit path (zero D2H, 4 CUDA kernels), two-pass GPU-only chunk merge, P2a term embeddings (`register_embedding`, `forward_embedding`, CUDA device-aware autograd, cross-registration validation, frozen tensor detach), P2b extended training controls (gradient clipping, early stopping, lr management), P3 incremental verifier (`GpuCdclWorkspace` arena reuse). |
 | v0.6.0 | Planned | Epistemic logic tier (Phase 7) |
 | v0.7+ | Planned | Multi-GPU support, distributed execution (Phase 8) |
 

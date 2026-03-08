@@ -4,10 +4,11 @@
 [![CUDA Tests](https://img.shields.io/badge/CUDA%20tests-206%2F206-brightgreen.svg)](docs/architecture/cuda-certification.md)
 [![Version](https://img.shields.io/badge/version-v0.5.0--phase1-blue.svg)](CHANGELOG.md)
 
-> **Release status:** Latest tagged release is `v0.5.0-phase1`. Post-phase1 development adds extended
-> training controls (gradient clipping, early stopping, lr management), and the P3 incremental verifier
+> **Release status:** Latest tagged release is `v0.5.0-phase1`. Post-phase1 development adds P2a term
+> embeddings (`register_embedding` / `forward_embedding` with device-aware autograd), P2b extended
+> training controls (gradient clipping, early stopping, lr management), and P3 incremental verifier
 > (`GpuCdclWorkspace` pre-allocated solver arena for amortizing GPU allocation across equivalence checks).
-> See `docs/ROADMAP.md` and `CHANGELOG.md`.
+> v0.5.0 Phase 2 is complete. See `docs/ROADMAP.md` and `CHANGELOG.md`.
 
 **XLOG** is a GPU-accelerated Datalog query engine with neural-symbolic integration. It compiles declarative logic programs into optimized relational plans and executes them on NVIDIA GPUs, achieving high throughput for recursive queries, graph analytics, probabilistic inference, and neural-symbolic training.
 
@@ -25,7 +26,7 @@
 | **GPU Operators** | Hash joins, radix sort, filter, dedup, union, difference, groupby |
 | **Float Predicates** | IEEE 754 total ordering for `f32`/`f64` (`NaN > Inf > nums > +0 > -0 > -Inf`) |
 | **Probabilistic** | Exact inference (knowledge compilation), Monte Carlo sampling, negation (stratified + WFS) |
-| **Neural-Symbolic** | Neural predicates (`nn/4`), PyTorch integration, differentiable training, circuit caching |
+| **Neural-Symbolic** | Neural predicates (`nn/4`), PyTorch integration, differentiable training, circuit caching, term embeddings |
 | **dILP Training** | Differentiable ILP: sparse GPU mask, deterministic mode, promotion gates, holdout validation, artifact save/load |
 | **Interop** | Arrow IPC, DLPack (zero-copy), Python bindings, PyTorch autograd |
 | **Profiling** | `--stats` flag for per-stratum/per-operation timing, memory tracking |
@@ -313,6 +314,40 @@ print(f"Final loss: {history.epoch_losses[-1]:.4f}")
 4. **Weighted model counting**: Circuit evaluated for query probability
 5. **Backward pass**: Gradients flow from loss through circuit back to network
 6. **Circuit caching**: Compiled circuits reused across training iterations (100x+ speedup)
+
+### Term Embeddings (v0.5.0)
+
+Register embedding modules for explicit PyTorch-side training. Embedding predicates use the
+label-free `nn/3` form:
+
+```python
+program = pyxlog.Program.compile("""
+    nn(entity_embed, [X], E) :: embed(X, E).
+""")
+
+# Trainable nn.Embedding — autograd intact, user-managed optimizer
+embedding = torch.nn.Embedding(100, 64).cuda()
+optimizer = torch.optim.Adam(embedding.parameters())
+program.register_embedding("entity_embed", embedding, trainable=True)
+
+# Batched lookup — returns [n, dim] tensor on same device as embedding
+vectors = program.forward_embedding("entity_embed", [0, 5, 42])
+loss = my_loss_fn(vectors, targets)
+loss.backward()
+optimizer.step()
+```
+
+Frozen lookup with raw tensors (no gradient flow):
+
+```python
+weights = torch.randn(100, 64).cuda()
+program.register_embedding("entity_embed", weights, trainable=False)
+vectors = program.forward_embedding("entity_embed", [0, 5, 42])
+assert not vectors.requires_grad
+```
+
+Cross-registration validation prevents mixing embedding and classification declarations.
+Compile-time rejection catches same network name used as both forms.
 
 ### Training API
 
@@ -602,6 +637,7 @@ The legacy CPU D4 vendor pipeline is removed.
 | [dILP Beta Design](docs/plans/2026-02-26-dilp-hardening-design.md) | dILP trainer hardening design |
 | [dILP Beta Plan](docs/plans/2026-02-26-dilp-beta-impl.md) | dILP beta implementation plan (9 tasks) |
 | [dILP Architecture](docs/architecture/dilp-training.md) | Runtime/trainer architecture and GPU hot-loop contract |
+| [Term Embeddings Design](docs/plans/2026-03-08-p2a-term-embeddings-design.md) | P2a embedding registration, forward API, cross-registration validation |
 | [GPU Hot-loop Transfer Elimination](docs/plans/2026-03-01-gpu-hotloop-transfer-elimination.md) | Transfer-reduction design |
 | [Sparse Executor Transfer Fix](docs/plans/2026-03-01-sparse-executor-transfer-fix.md) | Sparse-mask executor alignment and implementation |
 | [v0.3.2 Showcase](examples/xlog/80-v032-showcase/) | Production-grade multi-module examples |
