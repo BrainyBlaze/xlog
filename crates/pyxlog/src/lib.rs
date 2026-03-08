@@ -1024,20 +1024,24 @@ impl CompiledProgram {
         })?;
 
         let torch = py.import_bound("torch")?;
+        let kwargs = PyDict::new_bound(py);
+        kwargs.set_item("dtype", torch.getattr("long")?)?;
 
         if handle.trainable {
             // nn.Embedding: call module(ids_tensor)
-            let ids_tensor = torch.call_method1(
+            let ids_tensor = torch.call_method(
                 "tensor",
-                (ids, torch.getattr("long")?),
+                (ids,),
+                Some(&kwargs),
             )?;
             let result = module.call_method1(py, "__call__", (ids_tensor,))?;
             Ok(result)
         } else {
             // Frozen tensor: index directly
-            let ids_tensor = torch.call_method1(
+            let ids_tensor = torch.call_method(
                 "tensor",
-                (ids, torch.getattr("long")?),
+                (ids,),
+                Some(&kwargs),
             )?;
             let result = module.call_method1(py, "__getitem__", (ids_tensor,))?;
             Ok(result)
