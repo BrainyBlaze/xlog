@@ -121,6 +121,24 @@ impl GpuCdclWorkspace {
     pub fn reset_for_solve(&mut self) {
         // Intentionally empty. See sat.cu:1220, 1293, 1329, 1341.
     }
+
+    /// Variable capacity this workspace was allocated for.
+    #[inline]
+    pub fn var_cap(&self) -> usize {
+        self.var_cap
+    }
+
+    /// Total clause capacity (input + learned) this workspace was allocated for.
+    #[inline]
+    pub fn clause_total_cap(&self) -> usize {
+        self.clause_total_cap
+    }
+
+    /// Device pointer of the assignment buffer (for diagnostics / reuse verification).
+    #[inline]
+    pub fn assign_device_ptr(&self) -> cudarc::driver::sys::CUdeviceptr {
+        *cudarc::driver::DevicePtr::device_ptr(&self.assign)
+    }
 }
 
 /// Raw CDCL outputs (device-resident) for debugging and research.
