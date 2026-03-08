@@ -167,12 +167,12 @@ class TestNetworkRegistration:
             nn(encoder, [X], Embedding) :: encode(X, Embedding).
         """)
 
-        net = EmbeddingNet()
-        optimizer = torch.optim.Adam(net.parameters())
+        embedding = torch.nn.Embedding(100, 128)
+        program.register_embedding("encoder", embedding, trainable=True)
 
-        program.register_network("encoder", net, optimizer)
-
-        assert "encoder" in program.network_names()
+        # Verify it is registered (not in network_names, which is classification only)
+        result = program.forward_embedding("encoder", [0])
+        assert result.shape == (1, 128)
 
 
 class TestNetworkRegistrationEdgeCases:
