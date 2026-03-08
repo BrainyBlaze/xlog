@@ -2,11 +2,11 @@
 
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
 [![CUDA Tests](https://img.shields.io/badge/CUDA%20tests-206%2F206-brightgreen.svg)](docs/architecture/cuda-certification.md)
-[![Version](https://img.shields.io/badge/version-v0.4.0--ga-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.5.0--phase1-blue.svg)](CHANGELOG.md)
 
-> **Release status:** Latest tagged release is `v0.4.0-ga`. Post-GA development adds GPU-resident ILP
-> credit/loss with zero D2H transfers (non-chunked paths), 4 new CUDA kernels (COO fill, CSR histogram,
-> reduce sum f32/f64), strict zero-D2H CI gate, and COO memory cap with chunked fallback.
+> **Release status:** Latest tagged release is `v0.5.0-phase1`. Post-phase1 development adds extended
+> training controls (gradient clipping, early stopping, lr management), and the P3 incremental verifier
+> (`GpuCdclWorkspace` pre-allocated solver arena for amortizing GPU allocation across equivalence checks).
 > See `docs/ROADMAP.md` and `CHANGELOG.md`.
 
 **XLOG** is a GPU-accelerated Datalog query engine with neural-symbolic integration. It compiles declarative logic programs into optimized relational plans and executes them on NVIDIA GPUs, achieving high throughput for recursive queries, graph analytics, probabilistic inference, and neural-symbolic training.
@@ -593,7 +593,7 @@ The legacy CPU D4 vendor pipeline is removed.
 | [Roadmap](docs/ROADMAP.md) | Feature status and development plans |
 | [Benchmarks](docs/BENCHMARKS.md) | Performance methodology and baseline metrics |
 | [Probabilistic Tier](docs/architecture/xlog-prob.md) | Exact and Monte Carlo inference |
-| [Solver Services](docs/architecture/solver-services.md) | GPU CDCL verifier (zero host reads) + SAT/MaxSAT services |
+| [Solver Services](docs/architecture/solver-services.md) | GPU CDCL verifier (zero host reads) + workspace arena reuse + SAT/MaxSAT services |
 | [Neural-Symbolic Design](docs/plans/2026-01-20-v0.4.0-neural-symbolic-design.md) | v0.4.0 neural-symbolic integration design |
 | [GPU-Native Compilation Design](docs/design/2026-01-22-gpu-native-compilation-design.md) | v0.5.0 design for GPU D4 + GPU CDCL verifier |
 | [Data Interop](docs/architecture/cudf-interop.md) | Arrow and DLPack integration |

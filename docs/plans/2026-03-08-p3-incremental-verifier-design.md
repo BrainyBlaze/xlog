@@ -1,7 +1,7 @@
 # P3: Incremental Verifier Interface — Design
 
 **Date:** 2026-03-08
-**Status:** Approved
+**Status:** Implemented (2026-03-08, branch feat/p3-incremental-verifier)
 **Depends on:** v0.5.0-phase1 (tagged 2026-03-06, commit 407d8bab)
 
 ## Goal

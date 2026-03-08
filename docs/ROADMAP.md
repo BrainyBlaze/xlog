@@ -1,11 +1,13 @@
 # XLOG Development Roadmap
 
-> **Last Updated:** March 6, 2026
-> **Current Version:** v0.5.0-phase1 (Tagged) + P0/P1 complete
-> **Current Milestone:** v0.5.0 Phase 2 (P2a/P2b/P3)
+> **Last Updated:** March 8, 2026
+> **Current Version:** v0.5.0-phase1 (Tagged) + P0/P1/P2b/P3 complete
+> **Current Milestone:** v0.5.0 Phase 2 (P2a remaining)
 > **Status:** `main` has P0 zero-D2H chunk merge (two-pass GPU-only), P1 artifact schema migration
-> (beta-v2) + telemetry persistence. All 5 release gates pass. Prior: GPU-resident ILP credit/loss,
-> strict zero-D2H CI gate, 4 CUDA kernels, neural-symbolic training, dILP GA trainer, sparse executor.
+> (beta-v2) + telemetry persistence, P2b extended training controls (gradient clipping, early stopping,
+> per-network scheduler_step, get/set_lr), P3 incremental verifier (`GpuCdclWorkspace` arena reuse).
+> All 5 release gates pass. Prior: GPU-resident ILP credit/loss, strict zero-D2H CI gate, 4 CUDA
+> kernels, neural-symbolic training, dILP GA trainer, sparse executor.
 
 ---
 
@@ -467,10 +469,26 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 - [x] Artifact schema migration beta-v1 → beta-v2 (backward-compatible load)
 - [x] Bounded telemetry persistence (`persist_telemetry`, `telemetry_persist_limit`)
 
+**v0.5.0 Phase 2 (P2b — Extended Training Controls):**
+- [x] Gradient clipping (`train_model(..., max_grad_norm=N)`)
+- [x] Early stopping (`train_model(..., val_queries=[...], patience=N)`)
+- [x] Per-network `scheduler_step(network_name)` / `scheduler_step(None)`
+- [x] `program.get_lr(network_name)` / `program.set_lr(network_name, lr)`
+- [x] `TrainingHistory.stopped_early` boolean flag
+
+**v0.5.0 Phase 2 (P3 — Incremental Verifier):**
+- [x] `GpuCdclWorkspace` pre-allocated solver arena (29 device buffers)
+- [x] `GpuCdclSolver::new_workspace()` constructor with capacity overflow checking
+- [x] 4 workspace-backed `solve_expect_unsat_*_ws` public methods
+- [x] `GpuCompileConfig.incremental_verify` opt-in → `GpuEquivalenceConfig.reuse_workspace`
+- [x] Integration in `check_equivalence_gpu` / `check_equivalence_gpu_gated`
+
 **Design document:** `docs/plans/2026-02-26-dilp-hardening-design.md`
 **Implementation plan:** `docs/plans/2026-02-26-dilp-beta-impl.md`
 **v0.5.0 design:** `docs/plans/2026-03-05-v050-execution-design.md`
 **v0.5.0 Phase 1 plan:** `docs/plans/2026-03-05-v050-implementation.md`
+**P3 design:** `docs/plans/2026-03-08-p3-incremental-verifier-design.md`
+**P3 plan:** `docs/plans/2026-03-08-p3-incremental-verifier.md`
 
 ### Planned 📋 (dILP beyond GA)
 
@@ -498,9 +516,18 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 - [x] GPU smoothing seeds root support with all random vars (unconditional facts/evidence remain correct)
 - [x] CUDA certification: SAT/CDCL category (G07) + device-count/row-count category (G08)
 
+### Implemented ✅ (v0.5.0 Phase 2 — P3)
+
+- [x] `GpuCdclWorkspace` pre-allocated solver arena for reusing device buffers across multiple CDCL solves
+- [x] `GpuCdclSolver::new_workspace(max_var_cap, max_clause_cap)` constructor
+- [x] `solve_expect_unsat_*_ws` method variants for workspace-backed solving
+- [x] Opt-in via `GpuCompileConfig.incremental_verify` → `GpuEquivalenceConfig.reuse_workspace`
+- [x] Integration in `check_equivalence_gpu` / `check_equivalence_gpu_gated` with q1/q2 workspace reuse
+
 ### Planned 📋
 
-- [ ] Incremental/assumption interface for verifier reuse (share solver state across related queries)
+- [ ] Incremental SAT semantics (learned clause transfer between solves)
+- [ ] Assumption-based solving for related queries with shared variable spaces
 
 ---
 
@@ -529,11 +556,13 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 - [x] Expectation-based verifier API with zero device→host reads (`solve_expect_sat`, `solve_expect_unsat`)
 - [x] GPU-native equivalence-query construction helpers (`φ ∧ ¬C`, `C ∧ ¬φ`) used by `xlog-prob::compilation`
 - [x] CLS (Continuous Local Search) algorithm for SAT/MaxSAT (heuristic; non-verifying)
+- [x] `GpuCdclWorkspace` pre-allocated solver arena for buffer reuse across multiple CDCL solves (P3)
+- [x] Workspace-backed `solve_expect_unsat_*_ws` method variants (branch_limit, decision_ranges, gated)
 
 ### Planned 📋
 
 - [ ] Integration with `xlog-logic` for constraint solving
-- [ ] Incremental/assumption interface for verifier reuse (single solver state across multiple related queries)
+- [ ] Incremental SAT semantics (learned clause transfer between solves)
 - [ ] MaxSAT optimization with soft constraints
 - [ ] GPU-accelerated parallel portfolio solving
 
@@ -643,6 +672,8 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 - [x] End-to-end Datalog query tests
 - [x] Probabilistic inference correctness tests
 - [x] GPU CDCL verifier tests (SAT/UNSAT) + zero-host-read guardrails for verifier integrations
+- [x] GPU CDCL workspace tests (buffer reuse, capacity overflow, decision ranges, gated early-return)
+- [x] Workspace-enabled equivalence verification parity tests (incremental_verify true vs false)
 - [x] Performance regression benchmarks with CI tracking (Criterion.rs, `.github/workflows/bench.yml`)
 - [x] Fuzz testing for parser, compiler, and type inference (cargo-fuzz, ASAN, `.github/workflows/fuzz.yml`)
 - [x] Property-based testing for kernel correctness (proptest: sort stability, join correctness, filter idempotence, dedup determinism)
@@ -694,7 +725,7 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 | v0.4.0-alpha | Implemented | Neural predicates (`nn/4`) + training milestone (release-gated on full example validation with real datasets) |
 | v0.4.0-beta | Achieved | dILP beta trainer, GA-hardened promotion, sparse executor (DLPack-native, no N^3 materialization), deterministic training, artifact persistence. Beta gate = 20/20 reliability. 50-seed GA gate = 200/200 (436s, `max_attempts=2`). |
 | v0.4.0-ga | **Achieved** | Typed batch upload fix (schema-aware I32/I64/U64/Bool/Symbol packing), SLO scaling harness, per-step phase timing, GA preflight all-pass. |
-| v0.5.0 | In Progress | GPU-resident loss/credit path (done: zero D2H non-chunked, strict gate, 4 CUDA kernels), GPU-only chunk merge (planned), term embeddings, extended training controls |
+| v0.5.0 | In Progress | GPU-resident loss/credit path (zero D2H, 4 CUDA kernels), two-pass GPU-only chunk merge, extended training controls (gradient clipping, early stopping, lr management), incremental verifier (`GpuCdclWorkspace` arena reuse). Remaining: P2a term embeddings. |
 | v0.6.0 | Planned | Epistemic logic tier (Phase 7) |
 | v0.7+ | Planned | Multi-GPU support, distributed execution (Phase 8) |
 
