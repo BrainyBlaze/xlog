@@ -763,15 +763,31 @@ pub fn check_equivalence_gpu(
     }
 
     let solver = GpuCdclSolver::new(provider.clone(), config.cdcl);
-    // q1: decisions only on semantically meaningful phi vars (exclude internal/Tseitin vars).
-    solver.solve_expect_unsat_with_branch_limit(&queries.q1, phi_decision_var_limit)?;
-    // q2: decisions on semantically meaningful phi vars + ¬phi selector vars.
-    solver.solve_expect_unsat_with_decision_ranges(
-        &queries.q2,
-        phi_decision_var_limit,
-        &queries.q2_unsat_var_base,
-        &phi.num_clauses,
-    )?;
+    if config.reuse_workspace {
+        let max_var_cap = std::cmp::max(queries.q1.var_cap, queries.q2.var_cap);
+        let max_clause_cap = std::cmp::max(queries.q1.clause_cap, queries.q2.clause_cap);
+        let mut ws = solver.new_workspace(max_var_cap, max_clause_cap)?;
+        // q1: decisions only on semantically meaningful phi vars (exclude internal/Tseitin vars).
+        solver.solve_expect_unsat_with_branch_limit_ws(&mut ws, &queries.q1, phi_decision_var_limit)?;
+        // q2: decisions on semantically meaningful phi vars + ¬phi selector vars.
+        solver.solve_expect_unsat_with_decision_ranges_ws(
+            &mut ws,
+            &queries.q2,
+            phi_decision_var_limit,
+            &queries.q2_unsat_var_base,
+            &phi.num_clauses,
+        )?;
+    } else {
+        // q1: decisions only on semantically meaningful phi vars (exclude internal/Tseitin vars).
+        solver.solve_expect_unsat_with_branch_limit(&queries.q1, phi_decision_var_limit)?;
+        // q2: decisions on semantically meaningful phi vars + ¬phi selector vars.
+        solver.solve_expect_unsat_with_decision_ranges(
+            &queries.q2,
+            phi_decision_var_limit,
+            &queries.q2_unsat_var_base,
+            &phi.num_clauses,
+        )?;
+    }
     Ok(())
 }
 
@@ -876,25 +892,52 @@ pub fn check_equivalence_gpu_gated(
     }
 
     let solver = GpuCdclSolver::new(provider.clone(), config.cdcl);
-    solver.solve_expect_unsat_with_branch_limit_gated(
-        &q1,
-        compile_needed,
-        phi_decision_var_limit,
-    )?;
-    #[cfg(debug_assertions)]
-    {
-        provider.device().synchronize().map_err(|e| {
-            XlogError::Kernel(format!("sync after solve_expect_unsat(q1) failed: {}", e))
-        })?;
-        eprintln!("[xlog-prob] equivalence: solve_expect_unsat q2");
+    if config.reuse_workspace {
+        let max_var_cap = std::cmp::max(q1.var_cap, q2.var_cap);
+        let max_clause_cap = std::cmp::max(q1.clause_cap, q2.clause_cap);
+        let mut ws = solver.new_workspace(max_var_cap, max_clause_cap)?;
+        solver.solve_expect_unsat_with_branch_limit_gated_ws(
+            &mut ws,
+            &q1,
+            compile_needed,
+            phi_decision_var_limit,
+        )?;
+        #[cfg(debug_assertions)]
+        {
+            provider.device().synchronize().map_err(|e| {
+                XlogError::Kernel(format!("sync after solve_expect_unsat(q1) failed: {}", e))
+            })?;
+            eprintln!("[xlog-prob] equivalence: solve_expect_unsat q2");
+        }
+        solver.solve_expect_unsat_with_decision_ranges_gated_ws(
+            &mut ws,
+            &q2,
+            compile_needed,
+            phi_decision_var_limit,
+            &q2_unsat_var_base,
+            &phi.num_clauses,
+        )?;
+    } else {
+        solver.solve_expect_unsat_with_branch_limit_gated(
+            &q1,
+            compile_needed,
+            phi_decision_var_limit,
+        )?;
+        #[cfg(debug_assertions)]
+        {
+            provider.device().synchronize().map_err(|e| {
+                XlogError::Kernel(format!("sync after solve_expect_unsat(q1) failed: {}", e))
+            })?;
+            eprintln!("[xlog-prob] equivalence: solve_expect_unsat q2");
+        }
+        solver.solve_expect_unsat_with_decision_ranges_gated(
+            &q2,
+            compile_needed,
+            phi_decision_var_limit,
+            &q2_unsat_var_base,
+            &phi.num_clauses,
+        )?;
     }
-    solver.solve_expect_unsat_with_decision_ranges_gated(
-        &q2,
-        compile_needed,
-        phi_decision_var_limit,
-        &q2_unsat_var_base,
-        &phi.num_clauses,
-    )?;
     #[cfg(debug_assertions)]
     {
         provider.device().synchronize().map_err(|e| {
