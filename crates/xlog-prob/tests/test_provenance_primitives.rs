@@ -1,4 +1,4 @@
-use xlog_prob::pir::LeafId;
+use xlog_prob::pir::{ChoiceVarId, LeafId};
 use xlog_prob::provenance::Provenance;
 
 #[test]
@@ -32,4 +32,41 @@ fn leaf_atom_returns_none_for_invalid() {
     "#;
     let prov: Provenance = xlog_prob::provenance::extract_from_source(src).unwrap();
     assert!(prov.leaf_atom(LeafId::new(9999)).is_none());
+}
+
+#[test]
+fn choice_source_resolves_ad_metadata() {
+    // 2 explicit heads → 1 choice variable (m-1 = 1).
+    let src = r#"
+        0.3::color(red) ; 0.7::color(blue).
+        query(color(red)).
+    "#;
+    let prov: Provenance = xlog_prob::provenance::extract_from_source(src).unwrap();
+
+    assert_eq!(prov.choice_sources.len(), prov.choice_probs.len());
+
+    let cs = prov.choice_source(ChoiceVarId::new(0)).unwrap();
+
+    // choices: explicit heads only (no implicit none branch).
+    assert_eq!(cs.choices.len(), 2);
+    assert_eq!(cs.choices[0].0.predicate, "color");
+    assert_eq!(cs.choices[0].1, 0.3);
+    assert_eq!(cs.choices[1].0.predicate, "color");
+    assert_eq!(cs.choices[1].1, 0.7);
+
+    // choice_index = 0 (first and only decision stage).
+    assert_eq!(cs.choice_index, 0);
+
+    // source_id = None in v1.
+    assert!(cs.source_id.is_none());
+}
+
+#[test]
+fn choice_source_returns_none_for_invalid() {
+    let src = r#"
+        0.3::color(red) ; 0.7::color(blue).
+        query(color(red)).
+    "#;
+    let prov: Provenance = xlog_prob::provenance::extract_from_source(src).unwrap();
+    assert!(prov.choice_source(ChoiceVarId::new(9999)).is_none());
 }

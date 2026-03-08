@@ -310,6 +310,10 @@ impl Provenance {
     pub fn leaf_atom(&self, leaf: LeafId) -> Option<&GroundAtom> {
         self.leaf_atoms.get(&leaf)
     }
+
+    pub fn choice_source(&self, var: ChoiceVarId) -> Option<&ChoiceSource> {
+        self.choice_sources.get(&var)
+    }
 }
 
 pub fn extract_from_source(source: &str) -> Result<Provenance> {
@@ -364,7 +368,7 @@ pub fn extract_from_program(program: &Program) -> Result<Provenance> {
             ));
         }
         let (vars, outcome_formulas) =
-            compile_annotated_disjunction(ad, &mut next_choice, &mut choice_probs, &mut builder)?;
+            compile_annotated_disjunction(ad, &mut next_choice, &mut choice_probs, &mut choice_sources, &mut builder)?;
         let _ = vars;
 
         for (pf, formula) in ad.choices.iter().zip(outcome_formulas.into_iter()) {
@@ -508,12 +512,22 @@ fn compile_annotated_disjunction(
     ad: &xlog_logic::ast::AnnotatedDisjunction,
     next_choice: &mut u32,
     choice_probs: &mut BTreeMap<ChoiceVarId, (f64, f64)>,
+    choice_sources: &mut BTreeMap<ChoiceVarId, ChoiceSource>,
     builder: &mut PirBuilder,
 ) -> Result<(Vec<ChoiceVarId>, Vec<PirNodeId>)> {
     for pf in &ad.choices {
         validate_prob(pf.prob, "annotated disjunction choice")?;
         let _ = atom_key_from_ground_atom(&pf.atom)?;
     }
+
+    let explicit_choices: Vec<(GroundAtom, f64)> = ad
+        .choices
+        .iter()
+        .map(|pf| {
+            let atom = atom_key_from_ground_atom(&pf.atom).unwrap();
+            (atom, pf.prob)
+        })
+        .collect();
 
     let mut probs: Vec<f64> = ad.choices.iter().map(|pf| pf.prob).collect();
     let sum: f64 = probs.iter().copied().sum();
@@ -552,6 +566,11 @@ fn compile_annotated_disjunction(
         *next_choice = next_choice.saturating_add(1);
         vars.push(var);
         choice_probs.insert(var, (cond_true, cond_false));
+        choice_sources.insert(var, ChoiceSource {
+            choices: explicit_choices.clone(),
+            choice_index: i,
+            source_id: None,
+        });
         remaining -= p_i;
     }
 
