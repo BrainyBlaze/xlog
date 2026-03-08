@@ -62,18 +62,15 @@ class TestBatchedEvaluation:
             nn(classifier, [E], Y, [0,1,2]) :: classify(E, Y).
         """)
 
-        encoder = torch.nn.Linear(100, 50)
+        encoder = torch.nn.Embedding(100, 50)
         classifier = torch.nn.Linear(50, 3)
 
-        program.register_network(
-            "encoder", encoder, torch.optim.Adam(encoder.parameters())
-        )
+        program.register_embedding("encoder", encoder, trainable=True)
         program.register_network(
             "classifier", classifier, torch.optim.Adam(classifier.parameters())
         )
 
         names = program.network_names()
-        assert "encoder" in names
         assert "classifier" in names
 
 

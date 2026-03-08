@@ -2,13 +2,12 @@
 
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
 [![CUDA Tests](https://img.shields.io/badge/CUDA%20tests-206%2F206-brightgreen.svg)](docs/architecture/cuda-certification.md)
-[![Version](https://img.shields.io/badge/version-v0.5.0--phase1-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.5.0-blue.svg)](CHANGELOG.md)
 
-> **Release status:** Latest tagged release is `v0.5.0-phase1`. Post-phase1 development adds P2a term
-> embeddings (`register_embedding` / `forward_embedding` with device-aware autograd), P2b extended
-> training controls (gradient clipping, early stopping, lr management), and P3 incremental verifier
-> (`GpuCdclWorkspace` pre-allocated solver arena for amortizing GPU allocation across equivalence checks).
-> v0.5.0 Phase 2 is complete. See `docs/ROADMAP.md` and `CHANGELOG.md`.
+> **Release status:** `v0.5.0` — GPU-resident ILP credit/loss path (zero D2H), P2a term embeddings
+> (`register_embedding` / `forward_embedding` with device-aware autograd), P2b extended training
+> controls (gradient clipping, early stopping, lr management), P3 incremental verifier
+> (`GpuCdclWorkspace` arena reuse). See `docs/ROADMAP.md` and `CHANGELOG.md`.
 
 **XLOG** is a GPU-accelerated Datalog query engine with neural-symbolic integration. It compiles declarative logic programs into optimized relational plans and executes them on NVIDIA GPUs, achieving high throughput for recursive queries, graph analytics, probabilistic inference, and neural-symbolic training.
 
