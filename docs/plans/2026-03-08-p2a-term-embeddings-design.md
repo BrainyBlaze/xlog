@@ -6,12 +6,15 @@
 
 ## Goal
 
-Enable embedding predicates (`labels.is_none()`) to execute for training.
-The AST already parses `nn(encoder, [X], Embedding) :: embed(X, Embedding).`
-but the forward/backward path only handles classification (softmax over a
-label list). P2a adds the training execution path: registration,
-cross-registration validation, and `forward_embedding()` for batched tensor
-lookup with autograd support.
+Enable embedding predicates (`labels.is_none()`) to produce tensors for
+explicit PyTorch-side training. The AST already parses
+`nn(encoder, [X], Embedding) :: embed(X, Embedding).` but no execution path
+handles the `labels.is_none()` case. P2a adds three capabilities:
+`register_embedding()` for payload registration with cross-registration
+validation, `forward_embedding()` for batched tensor lookup with autograd
+support, and compile-time form validation for network names. Inference
+through rules (dot/cosine evaluation, grounded query API) is deferred to
+v0.5.1+.
 
 ## Non-goals
 
@@ -80,11 +83,17 @@ Cross-registration requires a by-network index. Today,
 name, and `CompiledProgram` stores only a `HashSet<String>` of declared
 network names (lib.rs:596). Neither provides a network-name-to-form lookup.
 
-**Resolution:** At compile time, build a `HashMap<String, bool>` mapping each
-declared network name to whether it is an embedding (`labels.is_none()`).
-Store this alongside `declared_networks` in `CompiledProgram`. If the same
-network name appears in multiple declarations with mixed forms (some with
-labels, some without), reject at compile time with a hard error.
+**Compile-time rule:** Every network name must map to exactly one form
+(classification or embedding) across all `nn()` declarations. Mixed use of
+the same network name — some declarations with labels, some without — is a
+compile error. Error: "network '{name}' is declared as both classification
+and embedding; each network name must have a single form."
+
+**Implementation:** At compile time, build a `HashMap<String, bool>` mapping
+each declared network name to whether it is an embedding
+(`labels.is_none()`). Store this alongside `declared_networks` in
+`CompiledProgram`. Iterate all `nn()` declarations; if a name appears with
+conflicting forms, reject before compilation proceeds.
 
 Validation at registration:
 - If the declaration has labels, reject `register_embedding`. Error:
