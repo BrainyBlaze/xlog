@@ -57,6 +57,72 @@ pub struct GpuCdclSolver {
     config: GpuCdclConfig,
 }
 
+/// Pre-allocated solver arena for reuse across multiple CDCL solves.
+///
+/// Owns the 30 device buffers that `launch_cdcl_with_decision_ranges_gated` normally
+/// allocates per call. Does NOT own CNF storage (clause_offsets/literals stay on GpuCnf).
+///
+/// Created via [`GpuCdclSolver::new_workspace`]. Passed as `&mut` to `_ws` solver methods.
+///
+/// `reset_for_solve()` is intentionally a no-op: the `sat_cdcl_solve` kernel initializes
+/// all mutable state at launch (sat.cu:1220, 1293, 1329, 1341).
+pub struct GpuCdclWorkspace {
+    // Capacity limits (used for overflow checks)
+    pub(crate) var_cap: usize,
+    pub(crate) clause_total_cap: usize,
+
+    // Variable state (var_cap + 1 each)
+    pub(crate) assign: TrackedCudaSlice<i8>,
+    pub(crate) level: TrackedCudaSlice<u32>,
+    pub(crate) reason: TrackedCudaSlice<i32>,
+    pub(crate) var_activity: TrackedCudaSlice<u32>,
+    pub(crate) var_phase: TrackedCudaSlice<i8>,
+    pub(crate) decision_heap: TrackedCudaSlice<u32>,
+    pub(crate) decision_heap_pos: TrackedCudaSlice<u32>,
+
+    // Trail (var_cap + 1 each)
+    pub(crate) trail: TrackedCudaSlice<i32>,
+    pub(crate) trail_lim: TrackedCudaSlice<u32>,
+
+    // Analysis scratch (var_cap + 1 each)
+    pub(crate) seen: TrackedCudaSlice<u8>,
+    pub(crate) learnt_tmp: TrackedCudaSlice<i32>,
+    pub(crate) proof_vars_tmp: TrackedCudaSlice<u32>,
+    pub(crate) proof_reason_tmp: TrackedCudaSlice<u32>,
+
+    // Watch lists
+    pub(crate) watch0_pos: TrackedCudaSlice<u32>,     // clause_total_cap
+    pub(crate) watch1_pos: TrackedCudaSlice<u32>,     // clause_total_cap
+    pub(crate) watch_head: TrackedCudaSlice<i32>,     // 2 * var_cap
+    pub(crate) watch_next: TrackedCudaSlice<i32>,     // 2 * clause_total_cap
+    pub(crate) watch_prev: TrackedCudaSlice<i32>,     // 2 * clause_total_cap
+
+    // Learned clause arena
+    pub(crate) learned_offsets: TrackedCudaSlice<u32>,  // max_learned_clauses + 1
+    pub(crate) learned_lits: TrackedCudaSlice<i32>,     // max_learned_lits
+    pub(crate) learned_deleted: TrackedCudaSlice<u8>,   // max_learned_clauses
+    pub(crate) learned_lbd: TrackedCudaSlice<u32>,      // max_learned_clauses
+    pub(crate) learned_activity: TrackedCudaSlice<u32>, // max_learned_clauses
+    pub(crate) learned_locked: TrackedCudaSlice<u8>,    // max_learned_clauses
+
+    // Proof trace
+    pub(crate) proof_offsets: TrackedCudaSlice<u32>,  // max_learned_clauses + 1
+    pub(crate) proof_data: TrackedCudaSlice<u32>,     // max_proof_u32
+
+    // Scalar outputs
+    pub(crate) out_status: TrackedCudaSlice<i32>,       // 1
+    pub(crate) out_error: TrackedCudaSlice<i32>,        // 1
+    pub(crate) out_learned_count: TrackedCudaSlice<u32>, // 1
+}
+
+impl GpuCdclWorkspace {
+    /// No-op: the sat_cdcl_solve kernel initializes all mutable state at launch.
+    #[inline]
+    pub fn reset_for_solve(&mut self) {
+        // Intentionally empty. See sat.cu:1220, 1293, 1329, 1341.
+    }
+}
+
 /// Raw CDCL outputs (device-resident) for debugging and research.
 ///
 /// Production verifier paths should prefer `solve_expect_sat*` / `solve_expect_unsat*`,
@@ -71,6 +137,77 @@ pub struct GpuCdclRawOutput {
 impl GpuCdclSolver {
     pub fn new(provider: Arc<CudaKernelProvider>, config: GpuCdclConfig) -> Self {
         Self { provider, config }
+    }
+
+    /// Pre-allocate a reusable solver arena.
+    ///
+    /// `max_var_cap` and `max_clause_cap` must be >= the `var_cap` / `clause_cap` of any
+    /// `GpuCnf` that will be solved with this workspace. If a solve call exceeds these
+    /// capacities, it returns `XlogError::Kernel`.
+    pub fn new_workspace(
+        &self,
+        max_var_cap: u32,
+        max_clause_cap: u32,
+    ) -> Result<GpuCdclWorkspace> {
+        let num_vars_cap = max_var_cap as usize;
+        let num_clauses_cap = max_clause_cap as usize;
+        let max_learned_clauses = self.config.max_learned_clauses as usize;
+        let max_learned_lits = self.config.max_learned_lits as usize;
+        let max_proof_u32 = self.config.max_proof_u32 as usize;
+
+        let max_total_clauses = num_clauses_cap
+            .checked_add(max_learned_clauses)
+            .ok_or_else(|| XlogError::Kernel("SAT clause capacity overflow".to_string()))?;
+
+        let memory = self.provider.memory();
+
+        Ok(GpuCdclWorkspace {
+            var_cap: num_vars_cap,
+            clause_total_cap: max_total_clauses,
+
+            // Variable state
+            assign: memory.alloc::<i8>(num_vars_cap + 1)?,
+            level: memory.alloc::<u32>(num_vars_cap + 1)?,
+            reason: memory.alloc::<i32>(num_vars_cap + 1)?,
+            var_activity: memory.alloc::<u32>(num_vars_cap + 1)?,
+            var_phase: memory.alloc::<i8>(num_vars_cap + 1)?,
+            decision_heap: memory.alloc::<u32>(num_vars_cap + 1)?,
+            decision_heap_pos: memory.alloc::<u32>(num_vars_cap + 1)?,
+
+            // Trail
+            trail: memory.alloc::<i32>(num_vars_cap + 1)?,
+            trail_lim: memory.alloc::<u32>(num_vars_cap + 1)?,
+
+            // Analysis scratch
+            seen: memory.alloc::<u8>(num_vars_cap + 1)?,
+            learnt_tmp: memory.alloc::<i32>(num_vars_cap + 1)?,
+            proof_vars_tmp: memory.alloc::<u32>(num_vars_cap + 1)?,
+            proof_reason_tmp: memory.alloc::<u32>(num_vars_cap + 1)?,
+
+            // Watch lists
+            watch0_pos: memory.alloc::<u32>(max_total_clauses)?,
+            watch1_pos: memory.alloc::<u32>(max_total_clauses)?,
+            watch_head: memory.alloc::<i32>(2 * num_vars_cap)?,
+            watch_next: memory.alloc::<i32>(2 * max_total_clauses)?,
+            watch_prev: memory.alloc::<i32>(2 * max_total_clauses)?,
+
+            // Learned
+            learned_offsets: memory.alloc::<u32>(max_learned_clauses + 1)?,
+            learned_lits: memory.alloc::<i32>(max_learned_lits)?,
+            learned_deleted: memory.alloc::<u8>(max_learned_clauses)?,
+            learned_lbd: memory.alloc::<u32>(max_learned_clauses)?,
+            learned_activity: memory.alloc::<u32>(max_learned_clauses)?,
+            learned_locked: memory.alloc::<u8>(max_learned_clauses)?,
+
+            // Proof
+            proof_offsets: memory.alloc::<u32>(max_learned_clauses + 1)?,
+            proof_data: memory.alloc::<u32>(max_proof_u32)?,
+
+            // Outputs
+            out_status: memory.alloc::<i32>(1)?,
+            out_error: memory.alloc::<i32>(1)?,
+            out_learned_count: memory.alloc::<u32>(1)?,
+        })
     }
 
     fn alloc_u32_scalar(&self, value: u32) -> Result<TrackedCudaSlice<u32>> {
