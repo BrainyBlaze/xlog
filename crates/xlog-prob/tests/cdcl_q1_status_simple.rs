@@ -80,6 +80,7 @@ fn default_compile_config_for_test(
         cdcl_restart_interval: 64,
         cdcl_learned_bytes,
         cdcl_conflict_budget: None,
+        incremental_verify: false,
     })
 }
 

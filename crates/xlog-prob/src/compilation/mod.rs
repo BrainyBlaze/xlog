@@ -132,7 +132,7 @@ pub fn compile_gpu_d4_and_verify(
         decision_var_limit,
         &circuit,
         provider,
-        GpuEquivalenceConfig { cdcl },
+        GpuEquivalenceConfig { cdcl, reuse_workspace: config.incremental_verify },
     )?;
     Ok(circuit)
 }
@@ -302,7 +302,7 @@ pub fn compile_gpu_d4_and_verify_cached(
         verifier_decision_var_limit,
         &circuit_base,
         provider,
-        GpuEquivalenceConfig { cdcl },
+        GpuEquivalenceConfig { cdcl, reuse_workspace: config.incremental_verify },
         handle.compile_needed_device(),
     )?;
     if let Some(t0) = t_verify {

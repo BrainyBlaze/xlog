@@ -20,12 +20,14 @@ use crate::gpu::GpuXgcf;
 #[derive(Debug, Clone, Copy)]
 pub struct GpuEquivalenceConfig {
     pub cdcl: GpuCdclConfig,
+    pub reuse_workspace: bool,
 }
 
 impl Default for GpuEquivalenceConfig {
     fn default() -> Self {
         Self {
             cdcl: GpuCdclConfig::default(),
+            reuse_workspace: false,
         }
     }
 }

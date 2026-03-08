@@ -64,6 +64,7 @@ query(sprinkler()).
         cdcl_restart_interval: 64,
         cdcl_learned_bytes: 4 * 1024 * 1024,
         cdcl_conflict_budget: None,
+        incremental_verify: false,
     };
 
     // Collect the random-var list for smoothing (device-side compaction is tested elsewhere).
@@ -257,6 +258,7 @@ query(dry()).
         cdcl_restart_interval: 64,
         cdcl_learned_bytes: 4 * 1024 * 1024,
         cdcl_conflict_budget: None,
+        incremental_verify: false,
     };
 
     // Smoothing list: probabilistic vars only (same as production).
@@ -376,6 +378,7 @@ query(dry()).
         cdcl_restart_interval: 64,
         cdcl_learned_bytes: 4 * 1024 * 1024,
         cdcl_conflict_budget: None,
+        incremental_verify: false,
     };
 
     // Smoothing list: probabilistic vars only (same as production).
@@ -509,6 +512,7 @@ query(dry()).
         cdcl_restart_interval: 64,
         cdcl_learned_bytes: 4 * 1024 * 1024,
         cdcl_conflict_budget: None,
+        incremental_verify: false,
     };
 
     // Smoothing list: probabilistic vars only (same as production).

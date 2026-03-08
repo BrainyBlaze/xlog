@@ -64,6 +64,9 @@ pub struct GpuCompileConfig {
     pub cdcl_learned_bytes: u64,
     /// Optional conflict budget for debug/profiling only; production must be unbounded.
     pub cdcl_conflict_budget: Option<u64>,
+
+    /// Enable workspace reuse in the equivalence verifier (amortizes arena allocation).
+    pub incremental_verify: bool,
 }
 
 /// Validate `GpuCnf` CSR invariants on the GPU (fail-fast trap on invalid input).
@@ -1316,6 +1319,7 @@ mod tests {
             cdcl_conflict_budget: None,
             smooth_node_cap: 256,
             smooth_edge_cap: 512,
+            incremental_verify: false,
         };
         assert!(config.smooth_node_cap > 0);
         assert!(config.smooth_edge_cap > 0);
@@ -1741,6 +1745,7 @@ mod tests {
             cdcl_restart_interval: 64,
             cdcl_learned_bytes: 1 << 20,
             cdcl_conflict_budget: None,
+            incremental_verify: false,
         };
 
         let compile_needed = super::alloc_compile_gate(&provider, 1).expect("compile gate");
@@ -2034,6 +2039,7 @@ mod tests {
             cdcl_restart_interval: 64,
             cdcl_learned_bytes: 1 << 20,
             cdcl_conflict_budget: None,
+            incremental_verify: false,
         };
 
         let compile_needed = super::alloc_compile_gate(&provider, 1).expect("compile gate");
@@ -2334,6 +2340,7 @@ mod tests {
             cdcl_restart_interval: 32,
             cdcl_learned_bytes: 4 * 1024 * 1024,
             cdcl_conflict_budget: None,
+            incremental_verify: false,
         };
 
         super::validate_cnf_gpu(&phi, &provider).expect("CNF validation must succeed");
@@ -2623,6 +2630,7 @@ mod tests {
             cdcl_restart_interval: 32,
             cdcl_learned_bytes: 4 * 1024 * 1024,
             cdcl_conflict_budget: None,
+            incremental_verify: false,
         };
 
         super::validate_cnf_gpu(&phi, &provider).expect("CNF validation must succeed");
@@ -2909,6 +2917,7 @@ mod tests {
             cdcl_restart_interval: 32,
             cdcl_learned_bytes: 4 * 1024 * 1024,
             cdcl_conflict_budget: None,
+            incremental_verify: false,
         };
 
         super::validate_cnf_gpu(&phi, &provider).expect("CNF validation must succeed");
@@ -3190,6 +3199,7 @@ mod tests {
             cdcl_restart_interval: 32,
             cdcl_learned_bytes: 4 * 1024 * 1024,
             cdcl_conflict_budget: None,
+            incremental_verify: false,
         };
 
         super::validate_cnf_gpu(&phi, &provider).expect("CNF validation must succeed");
@@ -3468,6 +3478,7 @@ mod tests {
             cdcl_restart_interval: 32,
             cdcl_learned_bytes: 4 * 1024 * 1024,
             cdcl_conflict_budget: None,
+            incremental_verify: false,
         };
 
         super::validate_cnf_gpu(&phi, &provider).expect("CNF validation must succeed");
