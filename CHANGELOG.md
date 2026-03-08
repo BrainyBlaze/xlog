@@ -6,6 +6,12 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- **P2a: Term Embeddings (training-only)** — `register_embedding()` for
+  `nn.Embedding` (trainable) and `torch.Tensor` (frozen) payloads.
+  `forward_embedding(name, ids)` returns batched tensors with autograd
+  support. Cross-registration validation: embedding declarations reject
+  `register_network()` and vice versa. Compile-time mixed-form rejection
+  for network names.
 - **GPU-resident ILP credit/loss path** (`compute_ilp_loss_grad_gpu`): Single Rust/CUDA call replaces
   Python-side `_compute_loss_from_candidates()` loop. Builds COO→CSR on-device, runs forward/backward
   CUDA kernels, reduces loss on-device, returns `(loss, grad)` as DLPack tensors. Zero D2H transfers

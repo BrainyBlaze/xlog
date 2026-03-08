@@ -17,7 +17,7 @@ use xlog_cuda::{CudaDevice, CudaKernelProvider, DlpackManagedTensor, GpuMemoryMa
 use xlog_logic::ast::ArithExpr;
 use xlog_logic::ast::{Atom, BodyLiteral, ProbEngine, Rule, Term};
 use xlog_logic::parse_program;
-use xlog_neural::{NetworkConfig, NetworkRegistry, TensorMetadata, TensorSourceRegistry};
+use xlog_neural::{EmbeddingHandle, NetworkConfig, NetworkRegistry, TensorMetadata, TensorSourceRegistry};
 use xlog_prob::exact::{ExactDdnnfProgram, GpuConfig};
 #[cfg(feature = "host-io")]
 use xlog_prob::exact::{ExactResultWithGrads, QueryProbability};
@@ -480,6 +480,24 @@ impl Program {
             .iter()
             .map(|np| np.network.clone())
             .collect();
+        // Build by-network form index: network name -> is_embedding
+        let mut declared_network_forms: HashMap<String, bool> = HashMap::new();
+        for np in &ast.neural_predicates {
+            let is_embedding = np.labels.is_none();
+            match declared_network_forms.get(&np.network) {
+                Some(&existing_form) if existing_form != is_embedding => {
+                    return Err(PyValueError::new_err(format!(
+                        "network '{}' is declared as both classification and embedding; \
+                         each network name must have a single form",
+                        np.network
+                    )));
+                }
+                _ => {
+                    declared_network_forms.insert(np.network.clone(), is_embedding);
+                }
+            }
+        }
+
         let neural_registry =
             NeuralPredicateRegistry::from_ast(&ast).map_err(|e| PyValueError::new_err(e))?;
 
@@ -507,6 +525,7 @@ impl Program {
             network_registry: NetworkRegistry::new(),
             neural_registry,
             declared_networks,
+            declared_network_forms,
             tensor_sources: TensorSourceRegistry::new(),
             _source: source.to_string(),
             ast,
@@ -594,6 +613,8 @@ pub struct CompiledProgram {
     neural_registry: NeuralPredicateRegistry,
     /// Names of neural networks declared in the program (from nn() declarations)
     declared_networks: HashSet<String>,
+    /// Map from network name to form: true = embedding, false = classification
+    declared_network_forms: HashMap<String, bool>,
     /// Registry for tensor data sources (images, embeddings, etc.)
     tensor_sources: TensorSourceRegistry,
     /// Original program source (for dynamic query compilation)
@@ -826,6 +847,14 @@ impl CompiledProgram {
             )));
         }
 
+        // Cross-registration: reject if this network is declared as an embedding
+        if let Some(&true) = self.declared_network_forms.get(&name) {
+            return Err(PyValueError::new_err(format!(
+                "declaration '{}' is an embedding; use register_embedding()",
+                name
+            )));
+        }
+
         let config = NetworkConfig {
             name: name.clone(),
             batching,
@@ -847,6 +876,187 @@ impl CompiledProgram {
         }
 
         Ok(())
+    }
+
+    /// Register an embedding module for a declared embedding predicate.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Must match an nn() declaration with no label list
+    /// * `module_or_tensor` - PyTorch nn.Embedding or 2D torch.Tensor
+    /// * `trainable` - Whether gradients flow; must be false for raw tensors
+    #[pyo3(signature = (name, module_or_tensor, trainable=true))]
+    fn register_embedding(
+        &mut self,
+        py: Python<'_>,
+        name: String,
+        module_or_tensor: PyObject,
+        trainable: bool,
+    ) -> PyResult<()> {
+        // Validate network name exists
+        if !self.declared_networks.contains(&name) {
+            return Err(PyValueError::new_err(format!(
+                "Network '{}' not declared in program. Declared networks: {:?}",
+                name,
+                self.declared_networks.iter().collect::<Vec<_>>()
+            )));
+        }
+
+        // Cross-registration: reject if declared as classification
+        match self.declared_network_forms.get(&name) {
+            Some(&false) => {
+                return Err(PyValueError::new_err(format!(
+                    "declaration '{}' is a classification network; use register_network()",
+                    name
+                )));
+            }
+            None => {
+                return Err(PyValueError::new_err(format!(
+                    "Network '{}' not found in form index",
+                    name
+                )));
+            }
+            _ => {} // is_embedding = true, correct
+        }
+
+        let torch = py.import_bound("torch")?;
+        let nn = py.import_bound("torch.nn")?;
+        let obj = module_or_tensor.bind(py);
+
+        // Detect payload type and extract shape
+        let embedding_cls = nn.getattr("Embedding")?;
+        let is_nn_embedding = obj.is_instance(&embedding_cls)?;
+
+        let (vocab_size, dim, stored_obj) = if is_nn_embedding {
+            // nn.Embedding: read .weight shape
+            let weight = obj.getattr("weight")?;
+            let shape = weight.getattr("shape")?;
+            let vs: usize = shape.get_item(0)?.extract()?;
+            let d: usize = shape.get_item(1)?.extract()?;
+
+            // Validate dtype is float
+            let dtype = weight.getattr("dtype")?;
+            let float32 = torch.getattr("float32")?;
+            let float64 = torch.getattr("float64")?;
+            let float16 = torch.getattr("float16")?;
+            let bfloat16 = torch.getattr("bfloat16")?;
+            if !dtype.eq(&float32)? && !dtype.eq(&float64)?
+                && !dtype.eq(&float16)? && !dtype.eq(&bfloat16)? {
+                return Err(PyValueError::new_err(
+                    "nn.Embedding weight must have float dtype"
+                ));
+            }
+
+            (vs, d, module_or_tensor.clone_ref(py))
+        } else {
+            // Raw torch.Tensor: must be frozen
+            let tensor_cls = torch.getattr("Tensor")?;
+            if !obj.is_instance(&tensor_cls)? {
+                return Err(PyValueError::new_err(
+                    "module_or_tensor must be nn.Embedding or torch.Tensor"
+                ));
+            }
+
+            if trainable {
+                return Err(PyValueError::new_err(
+                    "trainable=True requires nn.Embedding; raw torch.Tensor is always frozen"
+                ));
+            }
+
+            // Validate rank == 2
+            let ndim: usize = obj.getattr("ndim")?.extract()?;
+            if ndim != 2 {
+                return Err(PyValueError::new_err(format!(
+                    "embedding tensor must be 2D [vocab_size, dim], got {}D",
+                    ndim
+                )));
+            }
+
+            let shape = obj.getattr("shape")?;
+            let vs: usize = shape.get_item(0)?.extract()?;
+            let d: usize = shape.get_item(1)?.extract()?;
+
+            // Validate dtype is float
+            let dtype = obj.getattr("dtype")?;
+            let float32 = torch.getattr("float32")?;
+            let float64 = torch.getattr("float64")?;
+            let float16 = torch.getattr("float16")?;
+            let bfloat16 = torch.getattr("bfloat16")?;
+            if !dtype.eq(&float32)? && !dtype.eq(&float64)?
+                && !dtype.eq(&float16)? && !dtype.eq(&bfloat16)? {
+                return Err(PyValueError::new_err(
+                    "embedding tensor must have float dtype"
+                ));
+            }
+
+            // Detach raw tensor to enforce frozen contract
+            let detached = obj.call_method0("detach")?;
+            (vs, d, detached.into_py(py))
+        };
+
+        let mut handle = EmbeddingHandle::new(name.clone(), trainable, dim, vocab_size);
+        handle.set_module(stored_obj);
+        self.network_registry.register_embedding(handle);
+
+        Ok(())
+    }
+
+    /// Look up embedding vectors by integer IDs.
+    ///
+    /// Returns a batched torch.Tensor with shape [len(ids), dim].
+    /// For nn.Embedding: tensor has autograd graph (grad-enabled).
+    /// For frozen torch.Tensor: tensor has requires_grad=False.
+    ///
+    /// This is the only gradient-carrying embedding API in v0.5.
+    fn forward_embedding(
+        &self,
+        py: Python<'_>,
+        name: String,
+        ids: Vec<i64>,
+    ) -> PyResult<PyObject> {
+        let handle = self.network_registry.get_embedding(&name).ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "Embedding '{}' not registered. Did you call register_embedding()?",
+                name
+            ))
+        })?;
+
+        let module = handle.module().ok_or_else(|| {
+            PyValueError::new_err(format!("Embedding '{}' has no module", name))
+        })?;
+
+        let torch = py.import_bound("torch")?;
+        let kwargs = PyDict::new_bound(py);
+        kwargs.set_item("dtype", torch.getattr("long")?)?;
+
+        // Determine device from the embedding weight/tensor so ids_tensor
+        // is created on the same device (prevents CPU/CUDA mismatch).
+        let device = if handle.trainable {
+            module.getattr(py, "weight")?.getattr(py, "device")?
+        } else {
+            module.getattr(py, "device")?
+        };
+        kwargs.set_item("device", device)?;
+
+        if handle.trainable {
+            // nn.Embedding: call module(ids_tensor)
+            let ids_tensor = torch.call_method(
+                "tensor",
+                (ids,),
+                Some(&kwargs),
+            )?;
+            let result = module.call_method1(py, "__call__", (ids_tensor,))?;
+            Ok(result)
+        } else {
+            // Frozen tensor: index directly
+            let ids_tensor = torch.call_method(
+                "tensor",
+                (ids,),
+                Some(&kwargs),
+            )?;
+            let result = module.call_method1(py, "__getitem__", (ids_tensor,))?;
+            Ok(result)
+        }
     }
 
     /// Get names of all registered neural networks.

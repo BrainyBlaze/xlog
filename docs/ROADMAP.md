@@ -2,7 +2,7 @@
 
 > **Last Updated:** March 8, 2026
 > **Current Version:** v0.5.0-phase1 (Tagged) + P0/P1/P2b/P3 complete
-> **Current Milestone:** v0.5.0 Phase 2 (P2a remaining)
+> **Current Milestone:** v0.5.0 Phase 2 complete (P2a term embeddings, P2b training controls, P3 incremental verifier)
 > **Status:** `main` has P0 zero-D2H chunk merge (two-pass GPU-only), P1 artifact schema migration
 > (beta-v2) + telemetry persistence, P2b extended training controls (gradient clipping, early stopping,
 > per-network scheduler_step, get/set_lr), P3 incremental verifier (`GpuCdclWorkspace` arena reuse).
@@ -725,7 +725,7 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 | v0.4.0-alpha | Implemented | Neural predicates (`nn/4`) + training milestone (release-gated on full example validation with real datasets) |
 | v0.4.0-beta | Achieved | dILP beta trainer, GA-hardened promotion, sparse executor (DLPack-native, no N^3 materialization), deterministic training, artifact persistence. Beta gate = 20/20 reliability. 50-seed GA gate = 200/200 (436s, `max_attempts=2`). |
 | v0.4.0-ga | **Achieved** | Typed batch upload fix (schema-aware I32/I64/U64/Bool/Symbol packing), SLO scaling harness, per-step phase timing, GA preflight all-pass. |
-| v0.5.0 | In Progress | GPU-resident loss/credit path (zero D2H, 4 CUDA kernels), two-pass GPU-only chunk merge, extended training controls (gradient clipping, early stopping, lr management), incremental verifier (`GpuCdclWorkspace` arena reuse). Remaining: P2a term embeddings. |
+| v0.5.0 | In Progress | GPU-resident loss/credit path (zero D2H, 4 CUDA kernels), two-pass GPU-only chunk merge, extended training controls (gradient clipping, early stopping, lr management), incremental verifier (`GpuCdclWorkspace` arena reuse), P2a term embeddings (`register_embedding`, `forward_embedding`, cross-registration validation). |
 | v0.6.0 | Planned | Epistemic logic tier (Phase 7) |
 | v0.7+ | Planned | Multi-GPU support, distributed execution (Phase 8) |
 
