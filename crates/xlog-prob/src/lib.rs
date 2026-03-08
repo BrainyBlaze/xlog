@@ -12,3 +12,6 @@ pub mod pir;
 pub mod provenance;
 pub mod wfs;
 pub mod xgcf;
+
+pub use pir::{ChoiceVarId, LeafId, PirGraph, PirNode, PirNodeId};
+pub use provenance::{ChoiceSource, GroundAtom, Provenance, Value};
