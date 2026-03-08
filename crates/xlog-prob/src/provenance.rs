@@ -48,12 +48,24 @@ pub struct GroundAtom {
 }
 
 impl GroundAtom {
-    fn new(predicate: impl Into<String>, args: Vec<Value>) -> Self {
+    pub fn new(predicate: impl Into<String>, args: Vec<Value>) -> Self {
         Self {
             predicate: predicate.into(),
             args,
         }
     }
+}
+
+/// Metadata for a single Bernoulli decision stage in an annotated disjunction.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChoiceSource {
+    /// Explicit heads of the annotated disjunction, paired with probabilities.
+    /// Does not include the synthetic implicit "none" branch.
+    pub choices: Vec<(GroundAtom, f64)>,
+    /// Position of this ChoiceVarId in the m-1 Bernoulli decision chain.
+    pub choice_index: usize,
+    /// Enclosing annotated-disjunction identity. `None` in v1.
+    pub source_id: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
