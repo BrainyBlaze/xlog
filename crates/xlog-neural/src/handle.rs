@@ -182,6 +182,66 @@ impl NetworkHandle {
     }
 }
 
+/// Handle to a registered embedding module.
+///
+/// Wraps either a trainable `nn.Embedding` or a frozen `torch.Tensor`.
+/// Created via `CompiledProgram.register_embedding()` in Python.
+#[derive(Debug)]
+pub struct EmbeddingHandle {
+    /// Unique name matching the nn() declaration
+    pub name: String,
+
+    /// The PyTorch nn.Embedding or tensor
+    #[cfg(feature = "python")]
+    pub module: Option<PyObject>,
+
+    /// Whether gradients flow through this embedding
+    pub trainable: bool,
+
+    /// Embedding vector dimension (second axis of weight matrix)
+    pub dim: usize,
+
+    /// Number of embedding entries (first axis of weight matrix)
+    pub vocab_size: usize,
+}
+
+impl EmbeddingHandle {
+    /// Create a new embedding handle.
+    pub fn new(name: String, trainable: bool, dim: usize, vocab_size: usize) -> Self {
+        Self {
+            name,
+            #[cfg(feature = "python")]
+            module: None,
+            trainable,
+            dim,
+            vocab_size,
+        }
+    }
+
+    /// Check if the PyTorch module/tensor has been set.
+    #[cfg(feature = "python")]
+    pub fn has_module(&self) -> bool {
+        self.module.is_some()
+    }
+
+    #[cfg(not(feature = "python"))]
+    pub fn has_module(&self) -> bool {
+        false
+    }
+
+    /// Set the PyTorch module/tensor.
+    #[cfg(feature = "python")]
+    pub fn set_module(&mut self, module: PyObject) {
+        self.module = Some(module);
+    }
+
+    /// Get a reference to the PyTorch module/tensor.
+    #[cfg(feature = "python")]
+    pub fn module(&self) -> Option<&PyObject> {
+        self.module.as_ref()
+    }
+}
+
 impl Default for NetworkHandle {
     fn default() -> Self {
         Self::new(String::new())
@@ -220,5 +280,23 @@ mod tests {
         assert!(handle.det);
         assert!(!handle.cache_enabled);
         assert_eq!(handle.cache_size, 500);
+    }
+
+    #[test]
+    fn test_embedding_handle_new() {
+        let handle = EmbeddingHandle::new("test_embed".to_string(), true, 64, 1000);
+        assert_eq!(handle.name, "test_embed");
+        assert!(handle.trainable);
+        assert_eq!(handle.dim, 64);
+        assert_eq!(handle.vocab_size, 1000);
+        assert!(!handle.has_module());
+    }
+
+    #[test]
+    fn test_embedding_handle_frozen() {
+        let handle = EmbeddingHandle::new("frozen".to_string(), false, 128, 500);
+        assert!(!handle.trainable);
+        assert_eq!(handle.dim, 128);
+        assert_eq!(handle.vocab_size, 500);
     }
 }

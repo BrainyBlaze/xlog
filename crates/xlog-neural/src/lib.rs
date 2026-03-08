@@ -35,7 +35,7 @@ pub mod tensor_source;
 
 pub use batch::{BatchCollector, BatchMapping, BatchResult, NeuralCall};
 pub use bridge::{ADProbability, CircuitLeaf, NeuralBridge, NeuralOutput};
-pub use handle::NetworkHandle;
+pub use handle::{EmbeddingHandle, NetworkHandle};
 pub use registry::{NetworkConfig, NetworkRegistry};
 pub use tensor_source::{TensorMetadata, TensorSourceError, TensorSourceRegistry};
 
