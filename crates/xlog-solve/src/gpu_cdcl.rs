@@ -417,6 +417,165 @@ impl GpuCdclSolver {
         })
     }
 
+    /// Launch CDCL using pre-allocated workspace buffers.
+    ///
+    /// Like `launch_cdcl_with_decision_ranges_gated` but uses `ws` buffers instead of
+    /// allocating per call. Returns `Result<()>` — the caller reads `ws.out_*` directly.
+    fn launch_cdcl_with_workspace_gated(
+        &self,
+        ws: &mut GpuCdclWorkspace,
+        cnf: &GpuCnf,
+        compile_needed: &TrackedCudaSlice<u32>,
+        decision_base_limit: &TrackedCudaSlice<u32>,
+        decision_extra_base: &TrackedCudaSlice<u32>,
+        decision_extra_count: &TrackedCudaSlice<u32>,
+    ) -> Result<()> {
+        let num_vars_cap = cnf.var_cap as usize;
+        let num_clauses_cap = cnf.clause_cap as usize;
+
+        // Capacity checks: workspace must be large enough for this CNF.
+        if num_vars_cap > ws.var_cap {
+            return Err(XlogError::Kernel(format!(
+                "CNF var_cap {} exceeds workspace var_cap {}",
+                num_vars_cap, ws.var_cap
+            )));
+        }
+
+        let max_learned_clauses = self.config.max_learned_clauses as usize;
+        let max_total_clauses = num_clauses_cap
+            .checked_add(max_learned_clauses)
+            .ok_or_else(|| XlogError::Kernel("SAT clause capacity overflow".to_string()))?;
+
+        if max_total_clauses > ws.clause_total_cap {
+            return Err(XlogError::Kernel(format!(
+                "CNF clause_total {} exceeds workspace clause_total_cap {}",
+                max_total_clauses, ws.clause_total_cap
+            )));
+        }
+
+        // Replicate all validation checks from the existing launch method.
+        if cnf.var_cap == 0 {
+            return Err(XlogError::Compilation(
+                "GpuCdclSolver requires num_vars > 0".to_string(),
+            ));
+        }
+        if decision_base_limit.len() != 1 {
+            return Err(XlogError::Compilation(format!(
+                "GpuCdclSolver requires decision_base_limit len=1, got {}",
+                decision_base_limit.len()
+            )));
+        }
+        if decision_extra_base.len() != 1 {
+            return Err(XlogError::Compilation(format!(
+                "GpuCdclSolver requires decision_extra_base len=1, got {}",
+                decision_extra_base.len()
+            )));
+        }
+        if decision_extra_count.len() != 1 {
+            return Err(XlogError::Compilation(format!(
+                "GpuCdclSolver requires decision_extra_count len=1, got {}",
+                decision_extra_count.len()
+            )));
+        }
+        if self.config.max_learned_clauses == 0 {
+            return Err(XlogError::Compilation(
+                "GpuCdclSolver requires max_learned_clauses > 0".to_string(),
+            ));
+        }
+        if self.config.max_learned_lits == 0 {
+            return Err(XlogError::Compilation(
+                "GpuCdclSolver requires max_learned_lits > 0".to_string(),
+            ));
+        }
+        if self.config.max_proof_u32 < 2 {
+            return Err(XlogError::Compilation(
+                "GpuCdclSolver requires max_proof_u32 >= 2".to_string(),
+            ));
+        }
+
+        // No-op: the sat_cdcl_solve kernel initializes all mutable state at launch.
+        ws.reset_for_solve();
+
+        let sat_fn = self
+            .provider
+            .device()
+            .inner()
+            .get_func(SAT_MODULE, sat_kernels::SAT_CDCL_SOLVE)
+            .ok_or_else(|| XlogError::Kernel("sat_cdcl_solve kernel not found".to_string()))?;
+
+        // Scalar kernel arguments must be backed by stable host storage until cuLaunchKernel
+        // copies them.
+        let cnf_var_cap = cnf.var_cap;
+        let cnf_clause_cap = cnf.clause_cap;
+        let cfg_max_learned_clauses = self.config.max_learned_clauses;
+        let cfg_max_learned_lits = self.config.max_learned_lits;
+        let cfg_max_proof_u32 = self.config.max_proof_u32;
+        let cfg_restart_base = self.config.restart_base;
+        let cfg_reduce_interval = self.config.reduce_interval;
+
+        // Parameter order MUST match launch_cdcl_with_decision_ranges_gated exactly.
+        let mut params: Vec<*mut c_void> = vec![
+            compile_needed.as_kernel_param(),
+            (&cnf.clause_offsets).as_kernel_param(),
+            (&cnf.literals).as_kernel_param(),
+            (&cnf.num_vars).as_kernel_param(),
+            (&cnf.num_clauses).as_kernel_param(),
+            decision_base_limit.as_kernel_param(),
+            decision_extra_base.as_kernel_param(),
+            decision_extra_count.as_kernel_param(),
+            cnf_var_cap.as_kernel_param(),
+            cnf_clause_cap.as_kernel_param(),
+            cfg_max_learned_clauses.as_kernel_param(),
+            cfg_max_learned_lits.as_kernel_param(),
+            cfg_max_proof_u32.as_kernel_param(),
+            cfg_restart_base.as_kernel_param(),
+            cfg_reduce_interval.as_kernel_param(),
+            (&mut ws.assign).as_kernel_param(),
+            (&mut ws.level).as_kernel_param(),
+            (&mut ws.reason).as_kernel_param(),
+            (&mut ws.var_activity).as_kernel_param(),
+            (&mut ws.var_phase).as_kernel_param(),
+            (&mut ws.decision_heap).as_kernel_param(),
+            (&mut ws.decision_heap_pos).as_kernel_param(),
+            (&mut ws.trail).as_kernel_param(),
+            (&mut ws.trail_lim).as_kernel_param(),
+            (&mut ws.seen).as_kernel_param(),
+            (&mut ws.learnt_tmp).as_kernel_param(),
+            (&mut ws.proof_vars_tmp).as_kernel_param(),
+            (&mut ws.proof_reason_tmp).as_kernel_param(),
+            (&mut ws.watch0_pos).as_kernel_param(),
+            (&mut ws.watch1_pos).as_kernel_param(),
+            (&mut ws.watch_head).as_kernel_param(),
+            (&mut ws.watch_next).as_kernel_param(),
+            (&mut ws.watch_prev).as_kernel_param(),
+            (&mut ws.learned_offsets).as_kernel_param(),
+            (&mut ws.learned_lits).as_kernel_param(),
+            (&mut ws.learned_deleted).as_kernel_param(),
+            (&mut ws.learned_lbd).as_kernel_param(),
+            (&mut ws.learned_activity).as_kernel_param(),
+            (&mut ws.learned_locked).as_kernel_param(),
+            (&mut ws.proof_offsets).as_kernel_param(),
+            (&mut ws.proof_data).as_kernel_param(),
+            (&mut ws.out_status).as_kernel_param(),
+            (&mut ws.out_error).as_kernel_param(),
+            (&mut ws.out_learned_count).as_kernel_param(),
+        ];
+
+        unsafe {
+            sat_fn.clone().launch(
+                LaunchConfig {
+                    grid_dim: (1, 1, 1),
+                    block_dim: (256, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                &mut params,
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("Failed to launch SAT solver kernel: {}", e)))?;
+
+        Ok(())
+    }
+
     /// Launch CDCL and return raw device outputs without enforcing SAT/UNSAT on device.
     ///
     /// This is intentionally **not** used in production verifier paths. It exists so tests and
