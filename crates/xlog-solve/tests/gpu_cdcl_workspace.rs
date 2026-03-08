@@ -117,6 +117,87 @@ fn test_workspace_capacity_overflow() {
     );
 }
 
+/// Solve with explicit decision ranges (base limit only, no extra range)
+/// returns UNSAT on a trivially unsatisfiable CNF.
+#[test]
+fn test_workspace_decision_ranges_ws() {
+    let Some(provider) = try_provider() else {
+        return;
+    };
+
+    // Trivially UNSAT: (x0) AND (NOT x0)
+    let instance = SolveInstance::new(
+        1,
+        vec![
+            Clause::new(vec![Literal::positive(0)]),
+            Clause::new(vec![Literal::negative(0)]),
+        ],
+    );
+    let cnf = GpuCnf::from_host(&instance, &provider).expect("GpuCnf upload");
+
+    let config = GpuCdclConfig::default();
+    let solver = GpuCdclSolver::new(provider.clone(), config);
+
+    let mut ws = solver
+        .new_workspace(cnf.var_cap, cnf.clause_cap)
+        .expect("new_workspace");
+
+    // decision_base_limit = var_cap (all vars allowed as decisions)
+    let decision_base_limit = solver_alloc_u32(&provider, cnf.var_cap as u32);
+    // No extra decision range.
+    let decision_extra_base = solver_alloc_u32(&provider, 0);
+    let decision_extra_count = solver_alloc_u32(&provider, 0);
+
+    solver
+        .solve_expect_unsat_with_decision_ranges_ws(
+            &mut ws,
+            &cnf,
+            &decision_base_limit,
+            &decision_extra_base,
+            &decision_extra_count,
+        )
+        .expect("decision_ranges_ws should return UNSAT");
+}
+
+/// When `compile_needed == 0`, the gated workspace variant early-returns
+/// without performing any CDCL work. The workspace buffers remain untouched.
+#[test]
+fn test_workspace_gated_ws_compile_not_needed() {
+    let Some(provider) = try_provider() else {
+        return;
+    };
+
+    // Trivially UNSAT: (x0) AND (NOT x0)
+    let instance = SolveInstance::new(
+        1,
+        vec![
+            Clause::new(vec![Literal::positive(0)]),
+            Clause::new(vec![Literal::negative(0)]),
+        ],
+    );
+    let cnf = GpuCnf::from_host(&instance, &provider).expect("GpuCnf upload");
+
+    let config = GpuCdclConfig::default();
+    let solver = GpuCdclSolver::new(provider.clone(), config);
+
+    let mut ws = solver
+        .new_workspace(cnf.var_cap, cnf.clause_cap)
+        .expect("new_workspace");
+
+    // compile_needed = 0 → kernel early-returns at sat.cu:1137
+    let compile_needed = solver_alloc_u32(&provider, 0);
+    let branch_limit = solver_alloc_u32(&provider, 1);
+
+    solver
+        .solve_expect_unsat_with_branch_limit_gated_ws(
+            &mut ws,
+            &cnf,
+            &compile_needed,
+            &branch_limit,
+        )
+        .expect("gated_ws with compile_needed=0 should succeed (early-return)");
+}
+
 /// Helper: upload a u32 scalar to the GPU.
 fn solver_alloc_u32(provider: &Arc<CudaKernelProvider>, value: u32) -> xlog_cuda::memory::TrackedCudaSlice<u32> {
     let memory = provider.memory();
