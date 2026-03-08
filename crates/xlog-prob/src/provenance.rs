@@ -306,6 +306,10 @@ impl Provenance {
             .get(&GroundAtom::new(predicate, args.to_vec()))
             .copied()
     }
+
+    pub fn leaf_atom(&self, leaf: LeafId) -> Option<&GroundAtom> {
+        self.leaf_atoms.get(&leaf)
+    }
 }
 
 pub fn extract_from_source(source: &str) -> Result<Provenance> {
@@ -343,6 +347,7 @@ pub fn extract_from_program(program: &Program) -> Result<Provenance> {
         let leaf = LeafId::new(next_leaf);
         next_leaf = next_leaf.saturating_add(1);
         leaf_probs.insert(leaf, pf.prob);
+        leaf_atoms.insert(leaf, key.clone());
 
         let rel = store
             .entry(key.predicate.clone())
