@@ -7,7 +7,7 @@
 //! - Train/eval mode switching for all networks
 //! - Network lookup by name
 
-use crate::handle::NetworkHandle;
+use crate::handle::{EmbeddingHandle, NetworkHandle};
 use std::collections::HashMap;
 
 /// Configuration for registering a neural network.
@@ -117,6 +117,8 @@ impl NetworkConfig {
 pub struct NetworkRegistry {
     /// Map from network name to handle
     networks: HashMap<String, NetworkHandle>,
+    /// Map from embedding name to handle
+    embeddings: HashMap<String, EmbeddingHandle>,
 }
 
 impl NetworkRegistry {
@@ -124,6 +126,7 @@ impl NetworkRegistry {
     pub fn new() -> Self {
         Self {
             networks: HashMap::new(),
+            embeddings: HashMap::new(),
         }
     }
 
@@ -193,6 +196,26 @@ impl NetworkRegistry {
     /// Iterate mutably over all network handles.
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (&str, &mut NetworkHandle)> {
         self.networks.iter_mut().map(|(k, v)| (k.as_str(), v))
+    }
+
+    /// Register an embedding with the given handle.
+    pub fn register_embedding(&mut self, handle: EmbeddingHandle) {
+        self.embeddings.insert(handle.name.clone(), handle);
+    }
+
+    /// Get a reference to an embedding handle by name.
+    pub fn get_embedding(&self, name: &str) -> Option<&EmbeddingHandle> {
+        self.embeddings.get(name)
+    }
+
+    /// Get a mutable reference to an embedding handle by name.
+    pub fn get_embedding_mut(&mut self, name: &str) -> Option<&mut EmbeddingHandle> {
+        self.embeddings.get_mut(name)
+    }
+
+    /// Check if an embedding is registered.
+    pub fn contains_embedding(&self, name: &str) -> bool {
+        self.embeddings.contains_key(name)
     }
 }
 
@@ -269,5 +292,32 @@ mod tests {
 
         let names: Vec<&str> = registry.iter().map(|(name, _)| name).collect();
         assert_eq!(names.len(), 2);
+    }
+
+    use crate::handle::EmbeddingHandle;
+
+    #[test]
+    fn test_registry_embedding_register_get() {
+        let mut registry = NetworkRegistry::new();
+        let handle = EmbeddingHandle::new("embed1".to_string(), true, 64, 100);
+        registry.register_embedding(handle);
+
+        assert!(registry.contains_embedding("embed1"));
+        assert!(!registry.contains_embedding("nonexistent"));
+
+        let h = registry.get_embedding("embed1").unwrap();
+        assert_eq!(h.dim, 64);
+        assert_eq!(h.vocab_size, 100);
+    }
+
+    #[test]
+    fn test_registry_embedding_get_mut() {
+        let mut registry = NetworkRegistry::new();
+        let handle = EmbeddingHandle::new("embed1".to_string(), true, 64, 100);
+        registry.register_embedding(handle);
+
+        let h = registry.get_embedding_mut("embed1").unwrap();
+        h.trainable = false;
+        assert!(!registry.get_embedding("embed1").unwrap().trainable);
     }
 }
