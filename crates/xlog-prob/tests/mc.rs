@@ -1,7 +1,7 @@
 #![cfg(feature = "host-io")]
 
 use xlog_cuda::CudaDevice;
-use xlog_prob::mc::{McEvalConfig, McProgram};
+use xlog_prob::mc::{ForceabilityReason, McEvalConfig, McProgram};
 
 fn has_cuda_device() -> bool {
     // cudarc::driver::CudaDevice::count() may panic in restricted containers. Attempt real init instead.
@@ -165,4 +165,51 @@ query(coin(2)).
 
     assert_eq!(p_coin2, 0.0);
     assert!(result.evidence_samples > 0);
+}
+
+#[test]
+fn test_evidence_forcing_prob_fact_true() {
+    let src = r#"
+0.3::rain().
+0.7::sprinkler().
+evidence(rain(), true).
+query(sprinkler()).
+"#;
+    let program = McProgram::compile_source(src).unwrap();
+    let forcing = program.compile_evidence_forcing().unwrap();
+    assert!(forcing.forceable);
+    assert_eq!(forcing.reason, ForceabilityReason::AllForceable);
+    // rain is var 0, sprinkler is var 1
+    assert_eq!(forcing.force_mask[0], 1);
+    assert_eq!(forcing.forced_value[0], 1);
+    assert_eq!(forcing.force_mask[1], 0);
+}
+
+#[test]
+fn test_evidence_forcing_prob_fact_false() {
+    let src = r#"
+0.3::rain().
+evidence(rain(), false).
+query(rain()).
+"#;
+    let program = McProgram::compile_source(src).unwrap();
+    let forcing = program.compile_evidence_forcing().unwrap();
+    assert!(forcing.forceable);
+    assert_eq!(forcing.reason, ForceabilityReason::AllForceable);
+    assert_eq!(forcing.force_mask[0], 1);
+    assert_eq!(forcing.forced_value[0], 0);
+}
+
+#[test]
+fn test_evidence_forcing_derived_atom_not_forceable() {
+    let src = r#"
+0.3::rain().
+wet() :- rain().
+evidence(wet(), true).
+query(rain()).
+"#;
+    let program = McProgram::compile_source(src).unwrap();
+    let forcing = program.compile_evidence_forcing().unwrap();
+    assert!(!forcing.forceable);
+    assert_eq!(forcing.reason, ForceabilityReason::ContainsDerivedEvidence);
 }
