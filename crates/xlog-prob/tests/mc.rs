@@ -2,10 +2,19 @@
 
 use xlog_cuda::CudaDevice;
 use xlog_prob::mc::{ForceabilityReason, McEvalConfig, McProgram, McSamplingMethod};
+use xlog_prob::provenance::Value;
 
 fn has_cuda_device() -> bool {
     // cudarc::driver::CudaDevice::count() may panic in restricted containers. Attempt real init instead.
     CudaDevice::new(0).is_ok()
+}
+
+fn value_as_symbol_name(v: &Value) -> Option<String> {
+    match v {
+        Value::Symbol(id) => Some(xlog_core::symbol::resolve(*id)),
+        Value::String(s) => Some(s.clone()),
+        _ => None,
+    }
 }
 
 fn prob_of_atom(result: &xlog_prob::mc::McResult, predicate: &str) -> f64 {
@@ -486,4 +495,50 @@ query(rain()).
     assert!((p - 0.7).abs() < 0.02, "p={}", p);
     // Under rejection, evidence_samples < total_samples (sprinkler satisfied in ~20% of worlds)
     assert!(result.evidence_samples < result.total_samples);
+}
+
+#[test]
+fn test_evidence_clamping_ad_head_3way() {
+    if !has_cuda_device() {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    }
+
+    // 3-head AD + none: 0.2::color(red); 0.3::color(blue); 0.4::color(green).
+    // evidence(color(blue), true) -> clamp, every sample has color(blue)=true
+    // P(color(red) | color(blue)) = 0  (AD is exclusive)
+    // P(color(green) | color(blue)) = 0
+    let src = r#"
+0.2::color(red); 0.3::color(blue); 0.4::color(green).
+evidence(color(blue), true).
+query(color(red)).
+query(color(green)).
+"#;
+    let program = McProgram::compile_source(src).unwrap();
+    let cfg = McEvalConfig {
+        samples: 10_000,
+        seed: 42,
+        confidence: 0.95,
+        max_nonmonotone_iterations: 128,
+        sampling_method: None,
+    };
+    let result = program.evaluate(cfg).unwrap();
+
+    assert_eq!(result.sampling_method, McSamplingMethod::EvidenceClamping);
+    assert_eq!(result.evidence_samples, result.total_samples);
+
+    // Under clamped evidence, color(blue) is always true, others always false
+    let p_red = result.query_estimates.iter()
+        .find(|q| q.atom.predicate == "color" && !q.atom.args.is_empty()
+            && value_as_symbol_name(&q.atom.args[0]).as_deref() == Some("red"))
+        .expect("missing query for color(red)")
+        .prob;
+    let p_green = result.query_estimates.iter()
+        .find(|q| q.atom.predicate == "color" && !q.atom.args.is_empty()
+            && value_as_symbol_name(&q.atom.args[0]).as_deref() == Some("green"))
+        .expect("missing query for color(green)")
+        .prob;
+
+    assert_eq!(p_red, 0.0, "P(color(red) | color(blue)) should be 0.0");
+    assert_eq!(p_green, 0.0, "P(color(green) | color(blue)) should be 0.0");
 }
