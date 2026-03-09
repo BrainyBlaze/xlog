@@ -40,6 +40,7 @@ fn test_mc_device_counts_match_cpu() -> Result<()> {
         seed: 123,
         confidence: 0.95,
         max_nonmonotone_iterations: 10,
+        sampling_method: None,
     };
 
     let gpu_host = program.evaluate_gpu(cfg.clone())?;

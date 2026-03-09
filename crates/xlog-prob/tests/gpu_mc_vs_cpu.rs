@@ -20,6 +20,7 @@ fn gpu_mc_matches_cpu_on_small_program() {
         seed: 42,
         confidence: 0.95,
         max_nonmonotone_iterations: 128,
+        sampling_method: None,
     };
 
     let cpu = prog.evaluate_cpu(cfg.clone()).unwrap();

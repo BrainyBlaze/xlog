@@ -35,6 +35,7 @@ query(rain()).
         seed: 123,
         confidence: 0.95,
         max_nonmonotone_iterations: 128,
+        sampling_method: None,
     };
     let result = program.evaluate(cfg).unwrap();
 
@@ -66,6 +67,7 @@ query(sprinkler()).
         seed: 7,
         confidence: 0.95,
         max_nonmonotone_iterations: 128,
+        sampling_method: None,
     };
     let result = program.evaluate(cfg).unwrap();
 
@@ -114,6 +116,7 @@ query(flip()).
         seed: 999,
         confidence: 0.95,
         max_nonmonotone_iterations: 256,
+        sampling_method: None,
     };
     let result = program.evaluate(cfg).unwrap();
 
@@ -145,6 +148,7 @@ query(coin(2)).
         seed: 2026,
         confidence: 0.95,
         max_nonmonotone_iterations: 128,
+        sampling_method: None,
     };
     let result = program.evaluate(cfg).unwrap();
 

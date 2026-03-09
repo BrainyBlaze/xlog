@@ -40,6 +40,15 @@ use crate::provenance::{atom_key_from_ground_atom, validate_prob, GroundAtom, Va
 #[cfg(feature = "host-io")]
 use crate::provenance::{eval_arith_expr, eval_comparison, unify_atom, value_from_term};
 
+/// Sampling method for Monte Carlo inference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McSamplingMethod {
+    /// Sample from prior, discard worlds where evidence is not satisfied.
+    Rejection,
+    /// Force evidence variables in the sampler; every sample counts.
+    EvidenceClamping,
+}
+
 /// Phase 4 semantics for non-monotone SCC evaluation inside MC sampling.
 pub const NONMONOTONE_SEMANTICS: &str = "Synchronous iteration per SCC; if a fixpoint is reached, use it; if a cycle is detected, use the intersection of all states in the cycle (skeptical tuples only); if the iteration budget is exceeded, use the intersection across all visited states (conservative).";
 
@@ -69,6 +78,8 @@ pub struct McEvalConfig {
     pub confidence: f64,
     /// Maximum SCC iteration steps for non-monotone cycle detection.
     pub max_nonmonotone_iterations: usize,
+    /// Sampling method override.  `None` = auto-select (rejection for now).
+    pub sampling_method: Option<McSamplingMethod>,
 }
 
 impl Default for McEvalConfig {
@@ -78,6 +89,7 @@ impl Default for McEvalConfig {
             seed: 0,
             confidence: 0.95,
             max_nonmonotone_iterations: 1024,
+            sampling_method: None,
         }
     }
 }
@@ -102,6 +114,7 @@ pub struct McResult {
     pub nonmonotone_sccs: usize,
     pub nonmonotone_cycles: usize,
     pub nonmonotone_iteration_limit_hits: usize,
+    pub sampling_method: McSamplingMethod,
 }
 
 /// Device-resident Monte Carlo result counts.
@@ -114,6 +127,7 @@ pub struct McDeviceResult {
     pub nonmonotone_sccs: usize,
     pub nonmonotone_cycles: usize,
     pub nonmonotone_iteration_limit_hits: usize,
+    pub sampling_method: McSamplingMethod,
 }
 
 #[derive(Debug, Clone)]
@@ -298,6 +312,7 @@ impl McProgram {
             nonmonotone_sccs: device_result.nonmonotone_sccs,
             nonmonotone_cycles: device_result.nonmonotone_cycles,
             nonmonotone_iteration_limit_hits: device_result.nonmonotone_iteration_limit_hits,
+            sampling_method: McSamplingMethod::Rejection,
         })
     }
 
@@ -424,6 +439,7 @@ impl McProgram {
             nonmonotone_sccs: stats.nonmonotone_sccs,
             nonmonotone_cycles: stats.nonmonotone_cycles,
             nonmonotone_iteration_limit_hits: stats.nonmonotone_iteration_limit_hits,
+            sampling_method: McSamplingMethod::Rejection,
         })
     }
 
@@ -614,6 +630,7 @@ impl McProgram {
             nonmonotone_sccs: stats.nonmonotone_sccs,
             nonmonotone_cycles: stats.nonmonotone_cycles,
             nonmonotone_iteration_limit_hits: stats.nonmonotone_iteration_limit_hits,
+            sampling_method: McSamplingMethod::Rejection,
         })
     }
 

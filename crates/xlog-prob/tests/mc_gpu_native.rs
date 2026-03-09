@@ -40,6 +40,7 @@ query(coin()).
         seed: 7,
         confidence: 0.95,
         max_nonmonotone_iterations: 16,
+        sampling_method: None,
     };
 
     let device_result = program

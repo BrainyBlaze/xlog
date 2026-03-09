@@ -688,6 +688,7 @@ impl CompiledProgram {
                     seed: seed.unwrap_or(0),
                     confidence,
                     max_nonmonotone_iterations,
+                    sampling_method: None,
                 };
                 #[cfg(feature = "host-io")]
                 {
@@ -734,6 +735,7 @@ impl CompiledProgram {
                     seed: seed.unwrap_or(0),
                     confidence,
                     max_nonmonotone_iterations,
+                    sampling_method: None,
                 };
 
                 let result = program
