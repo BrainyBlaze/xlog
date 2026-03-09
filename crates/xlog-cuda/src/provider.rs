@@ -7,7 +7,7 @@ use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use cudarc::driver::{CudaViewMut, DevicePtr, DeviceRepr, DeviceSlice, LaunchAsync, LaunchConfig};
+use cudarc::driver::{CudaView, CudaViewMut, DevicePtr, DeviceRepr, DeviceSlice, LaunchAsync, LaunchConfig};
 use cudarc::nvrtc::Ptx;
 use std::ffi::c_void;
 use xlog_core::{AggOp, Result, ScalarType, Schema, XlogError};
@@ -1687,6 +1687,8 @@ impl CudaKernelProvider {
         probs: &[f32],
         num_samples: usize,
         seed: u64,
+        force_mask: &CudaView<u8>,
+        forced_value: &CudaView<u8>,
     ) -> Result<Vec<u8>> {
         if probs.is_empty() || num_samples == 0 {
             return Ok(Vec::new());
@@ -1736,11 +1738,11 @@ impl CudaKernelProvider {
             .get_func(MC_SAMPLE_MODULE, mc_sample_kernels::MC_SAMPLE_BERNOULLI)
             .ok_or_else(|| XlogError::Kernel("mc_sample_bernoulli kernel not found".to_string()))?;
 
-        // SAFETY: mc_sample_bernoulli(out, probs, num_vars, num_samples, seed)
+        // SAFETY: mc_sample_bernoulli(out, probs, force_mask, forced_value, num_vars, num_samples, seed)
         unsafe {
             kernel.clone().launch(
                 config,
-                (&mut d_out, &d_probs, num_vars_u32, num_samples_u32, seed),
+                (&mut d_out, &d_probs, force_mask, forced_value, num_vars_u32, num_samples_u32, seed),
             )
         }
         .map_err(|e| XlogError::Kernel(format!("Failed to launch mc_sample_bernoulli: {}", e)))?;
@@ -1761,6 +1763,8 @@ impl CudaKernelProvider {
         probs: &[f32],
         num_samples: usize,
         seed: u64,
+        force_mask: &CudaView<u8>,
+        forced_value: &CudaView<u8>,
     ) -> Result<TrackedCudaSlice<u8>> {
         if probs.is_empty() || num_samples == 0 {
             return self.memory.alloc::<u8>(0).map_err(|e| {
@@ -1809,11 +1813,11 @@ impl CudaKernelProvider {
             .get_func(MC_SAMPLE_MODULE, mc_sample_kernels::MC_SAMPLE_BERNOULLI)
             .ok_or_else(|| XlogError::Kernel("mc_sample_bernoulli kernel not found".to_string()))?;
 
-        // SAFETY: mc_sample_bernoulli(out, probs, num_vars, num_samples, seed)
+        // SAFETY: mc_sample_bernoulli(out, probs, force_mask, forced_value, num_vars, num_samples, seed)
         unsafe {
             kernel.clone().launch(
                 config,
-                (&mut d_out, &d_probs, num_vars_u32, num_samples_u32, seed),
+                (&mut d_out, &d_probs, force_mask, forced_value, num_vars_u32, num_samples_u32, seed),
             )
         }
         .map_err(|e| XlogError::Kernel(format!("Failed to launch mc_sample_bernoulli: {}", e)))?;

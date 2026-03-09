@@ -41,10 +41,17 @@ fn test_mc_sample_edge_sizes(ctx: &TestContext) -> TestResult {
 
     for &num_vars in &var_counts {
         let probs: Vec<f32> = vec![0.5f32; num_vars];
+
+        // Allocate zero-filled force arrays (no clamping)
+        let mut d_force_mask = ctx.memory.alloc::<u8>(num_vars.max(1)).unwrap();
+        ctx.device.inner().memset_zeros(&mut d_force_mask).unwrap();
+        let mut d_forced_value = ctx.memory.alloc::<u8>(num_vars.max(1)).unwrap();
+        ctx.device.inner().memset_zeros(&mut d_forced_value).unwrap();
+
         for &num_samples in &sample_counts {
             let got = match ctx
                 .provider
-                .sample_bernoulli_matrix(&probs, num_samples, 123)
+                .sample_bernoulli_matrix(&probs, num_samples, 123, &d_force_mask.slice(..), &d_forced_value.slice(..))
             {
                 Ok(v) => v,
                 Err(e) => {

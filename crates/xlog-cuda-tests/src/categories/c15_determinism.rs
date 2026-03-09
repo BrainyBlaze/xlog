@@ -36,9 +36,16 @@ fn test_mc_sample_reproducibility(ctx: &TestContext) -> TestResult {
     let num_samples = 4096usize;
     let seed = 424242u64;
 
+    // Allocate zero-filled force arrays (no clamping)
+    let num_vars = probs.len();
+    let mut d_force_mask = ctx.memory.alloc::<u8>(num_vars.max(1)).unwrap();
+    ctx.device.inner().memset_zeros(&mut d_force_mask).unwrap();
+    let mut d_forced_value = ctx.memory.alloc::<u8>(num_vars.max(1)).unwrap();
+    ctx.device.inner().memset_zeros(&mut d_forced_value).unwrap();
+
     let a = match ctx
         .provider
-        .sample_bernoulli_matrix(&probs, num_samples, seed)
+        .sample_bernoulli_matrix(&probs, num_samples, seed, &d_force_mask.slice(..), &d_forced_value.slice(..))
     {
         Ok(v) => v,
         Err(e) => {
@@ -51,7 +58,7 @@ fn test_mc_sample_reproducibility(ctx: &TestContext) -> TestResult {
     };
     let b = match ctx
         .provider
-        .sample_bernoulli_matrix(&probs, num_samples, seed)
+        .sample_bernoulli_matrix(&probs, num_samples, seed, &d_force_mask.slice(..), &d_forced_value.slice(..))
     {
         Ok(v) => v,
         Err(e) => {

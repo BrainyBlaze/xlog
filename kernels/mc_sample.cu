@@ -19,6 +19,8 @@ static __device__ __forceinline__ uint64_t splitmix64(uint64_t x) {
 extern "C" __global__ void mc_sample_bernoulli(
     uint8_t* __restrict__ out,
     const float* __restrict__ probs,
+    const uint8_t* __restrict__ force_mask,
+    const uint8_t* __restrict__ forced_value,
     uint32_t num_vars,
     uint32_t num_samples,
     uint64_t seed
@@ -30,6 +32,12 @@ extern "C" __global__ void mc_sample_bernoulli(
     }
 
     const uint32_t var_idx = (uint32_t)(tid % (uint64_t)num_vars);
+
+    if (force_mask[var_idx]) {
+        out[tid] = forced_value[var_idx];
+        return;
+    }
+
     const float p = probs[var_idx];
 
     // Clamp p defensively; callers validate probabilities but this avoids NaNs

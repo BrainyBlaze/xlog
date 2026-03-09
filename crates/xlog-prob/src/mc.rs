@@ -347,10 +347,21 @@ impl McProgram {
                 .checked_mul(cfg.samples)
                 .ok_or_else(|| XlogError::Execution("MC sample matrix overflow".to_string()))?;
             let provider = Arc::new(self.provider()?);
+
+            // Allocate zero-filled force arrays (no clamping in evaluate_cpu path)
+            let mut d_force_mask = provider.memory().alloc::<u8>(num_vars.max(1))?;
+            provider.device().inner().memset_zeros(&mut d_force_mask)
+                .map_err(|e| XlogError::Kernel(format!("Failed to zero force_mask: {}", e)))?;
+            let mut d_forced_value = provider.memory().alloc::<u8>(num_vars.max(1))?;
+            provider.device().inner().memset_zeros(&mut d_forced_value)
+                .map_err(|e| XlogError::Kernel(format!("Failed to zero forced_value: {}", e)))?;
+
             let samples_device = provider.sample_bernoulli_matrix_device(
                 &self.bernoulli_probs,
                 cfg.samples,
                 cfg.seed,
+                &d_force_mask.slice(..),
+                &d_forced_value.slice(..),
             )?;
             let mut host = vec![0u8; total];
             if !host.is_empty() {
@@ -746,14 +757,29 @@ impl McProgram {
         let (prob_tables, ad_tables, ad_decisions) =
             build_prob_tables_device(self, &provider, &gpu_plan.schemas)?;
 
+        let num_vars = self.bernoulli_probs.len();
+
+        // Allocate zero-filled force arrays (no clamping by default)
+        let mut d_force_mask = provider.memory().alloc::<u8>(num_vars.max(1))?;
+        provider.device().inner().memset_zeros(&mut d_force_mask)
+            .map_err(|e| XlogError::Kernel(format!("Failed to zero force_mask: {}", e)))?;
+        let mut d_forced_value = provider.memory().alloc::<u8>(num_vars.max(1))?;
+        provider.device().inner().memset_zeros(&mut d_forced_value)
+            .map_err(|e| XlogError::Kernel(format!("Failed to zero forced_value: {}", e)))?;
+
         let samples_device = if self.bernoulli_probs.is_empty() || cfg.samples == 0 {
             provider.memory().alloc::<u8>(0)?
         } else {
-            provider.sample_bernoulli_matrix_device(&self.bernoulli_probs, cfg.samples, cfg.seed)?
+            provider.sample_bernoulli_matrix_device(
+                &self.bernoulli_probs,
+                cfg.samples,
+                cfg.seed,
+                &d_force_mask.slice(..),
+                &d_forced_value.slice(..),
+            )?
         };
 
         let mut stats = EvalStats::default();
-        let num_vars = self.bernoulli_probs.len();
 
         for sample_idx in 0..cfg.samples {
             executor.reset_for_mc();
