@@ -337,3 +337,153 @@ query(other()).
     let p = prob_of_atom(&result, "other");
     assert!((p - 0.5).abs() < 0.05, "p={}", p);
 }
+
+#[test]
+fn test_evidence_clamping_derived_evidence_falls_back() {
+    if !has_cuda_device() {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    }
+
+    let src = r#"
+0.3::rain().
+wet() :- rain().
+evidence(wet(), true).
+query(rain()).
+"#;
+    let program = McProgram::compile_source(src).unwrap();
+    let cfg = McEvalConfig {
+        samples: 50_000,
+        seed: 7,
+        confidence: 0.95,
+        max_nonmonotone_iterations: 128,
+        sampling_method: None, // auto-select → should fall back to Rejection
+    };
+    let result = program.evaluate(cfg).unwrap();
+    assert_eq!(result.sampling_method, McSamplingMethod::Rejection);
+    // P(rain | wet) = P(rain) / P(wet) = 0.3 / 0.3 = 1.0
+    let p = prob_of_atom(&result, "rain");
+    assert!((p - 1.0).abs() < 0.01, "p={}", p);
+}
+
+#[test]
+fn test_evidence_clamping_negative_ad_falls_back() {
+    if !has_cuda_device() {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    }
+
+    let src = r#"
+0.3::coin(1); 0.3::coin(2).
+evidence(coin(1), false).
+query(coin(2)).
+"#;
+    let program = McProgram::compile_source(src).unwrap();
+    let cfg = McEvalConfig {
+        samples: 50_000,
+        seed: 2026,
+        confidence: 0.95,
+        max_nonmonotone_iterations: 128,
+        sampling_method: None,
+    };
+    let result = program.evaluate(cfg).unwrap();
+    assert_eq!(result.sampling_method, McSamplingMethod::Rejection);
+}
+
+#[test]
+fn test_explicit_clamping_unforceable_evidence_errors() {
+    let src = r#"
+0.3::rain().
+wet() :- rain().
+evidence(wet(), true).
+query(rain()).
+"#;
+    let program = McProgram::compile_source(src).unwrap();
+    let cfg = McEvalConfig {
+        samples: 1000,
+        seed: 7,
+        confidence: 0.95,
+        max_nonmonotone_iterations: 128,
+        sampling_method: Some(McSamplingMethod::EvidenceClamping),
+    };
+    let result = program.evaluate(cfg);
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("EvidenceClamping") || err.contains("forceable"),
+        "Error should mention clamping: {}",
+        err
+    );
+}
+
+#[test]
+fn test_sampling_method_in_result_metadata() {
+    if !has_cuda_device() {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    }
+
+    // No evidence → Rejection
+    let src_no_ev = r#"
+0.5::a().
+query(a()).
+"#;
+    let prog = McProgram::compile_source(src_no_ev).unwrap();
+    let cfg = McEvalConfig {
+        samples: 100,
+        seed: 0,
+        confidence: 0.95,
+        max_nonmonotone_iterations: 128,
+        sampling_method: None,
+    };
+    let result = prog.evaluate(cfg).unwrap();
+    assert_eq!(result.sampling_method, McSamplingMethod::Rejection);
+
+    // Root evidence → EvidenceClamping
+    let src_ev = r#"
+0.5::a().
+0.3::b().
+evidence(a(), true).
+query(b()).
+"#;
+    let prog2 = McProgram::compile_source(src_ev).unwrap();
+    let cfg2 = McEvalConfig {
+        samples: 100,
+        seed: 0,
+        confidence: 0.95,
+        max_nonmonotone_iterations: 128,
+        sampling_method: None,
+    };
+    let result2 = prog2.evaluate(cfg2).unwrap();
+    assert_eq!(result2.sampling_method, McSamplingMethod::EvidenceClamping);
+}
+
+#[test]
+fn test_rejection_unchanged() {
+    if !has_cuda_device() {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    }
+
+    // Explicit Rejection with root evidence — should still work (old behavior)
+    let src = r#"
+0.7::rain().
+0.2::sprinkler().
+evidence(sprinkler(), true).
+query(rain()).
+"#;
+    let program = McProgram::compile_source(src).unwrap();
+    let cfg = McEvalConfig {
+        samples: 50_000,
+        seed: 7,
+        confidence: 0.95,
+        max_nonmonotone_iterations: 128,
+        sampling_method: Some(McSamplingMethod::Rejection),
+    };
+    let result = program.evaluate(cfg).unwrap();
+    assert_eq!(result.sampling_method, McSamplingMethod::Rejection);
+    let p = prob_of_atom(&result, "rain");
+    assert!((p - 0.7).abs() < 0.02, "p={}", p);
+    // Under rejection, evidence_samples < total_samples (sprinkler satisfied in ~20% of worlds)
+    assert!(result.evidence_samples < result.total_samples);
+}
