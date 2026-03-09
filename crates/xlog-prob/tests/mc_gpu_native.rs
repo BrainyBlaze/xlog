@@ -287,3 +287,12 @@ fn mc_accumulate_counts_increments_on_ok() {
     assert_eq!(host_query_counts[0], 1u32);
     assert_eq!(host_evidence_count[0], 1u32);
 }
+
+#[test]
+fn mc_hot_path_no_device_row_count_helper() {
+    let mut path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    path.push("src");
+    path.push("mc.rs");
+    let text = std::fs::read_to_string(&path).expect("read mc.rs");
+    assert!(!text.contains("device_row_count_u32(provider, &filtered)"));
+}

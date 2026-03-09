@@ -1303,23 +1303,10 @@ fn build_zero_arity_buffer(
     ))
 }
 
-fn device_row_count_u32(provider: &Arc<CudaKernelProvider>, buffer: &CudaBuffer) -> Result<u32> {
-    let mut host = [0u32];
-    provider
-        .device()
-        .inner()
-        .dtoh_sync_copy_into(buffer.num_rows_device(), &mut host)
-        .map_err(|e| XlogError::Kernel(format!("Failed to read row count: {}", e)))?;
-    Ok(host[0])
-}
-
 fn dedup_relation(provider: &Arc<CudaKernelProvider>, buffer: &CudaBuffer) -> Result<CudaBuffer> {
-    let rows = device_row_count_u32(provider, buffer)?;
+    let rows = buffer.num_rows();
     if rows == 0 {
         return provider.create_empty_buffer(buffer.schema().clone());
-    }
-    if buffer.arity() == 0 {
-        return build_zero_arity_buffer(provider, 1u32, buffer.schema());
     }
     let key_cols: Vec<usize> = (0..buffer.arity()).collect();
     provider.dedup(buffer, &key_cols)
@@ -1504,10 +1491,6 @@ fn build_sample_buffers(
         .map_err(|e| XlogError::Kernel(format!("mc_eval_mask_var failed: {}", e)))?;
 
         let filtered = provider.compact_buffer_by_device_mask_counted(&table.buffer, &d_mask)?;
-        let filtered_rows = device_row_count_u32(provider, &filtered)?;
-        if filtered_rows == 0 {
-            continue;
-        }
         let deduped = dedup_relation(provider, &filtered)?;
         out.push((table.predicate.clone(), deduped));
     }
@@ -1556,10 +1539,6 @@ fn build_sample_buffers(
         .map_err(|e| XlogError::Kernel(format!("mc_eval_mask_ad_choice failed: {}", e)))?;
 
         let filtered = provider.compact_buffer_by_device_mask_counted(&table.buffer, &d_mask)?;
-        let filtered_rows = device_row_count_u32(provider, &filtered)?;
-        if filtered_rows == 0 {
-            continue;
-        }
         let deduped = dedup_relation(provider, &filtered)?;
         out.push((table.predicate.clone(), deduped));
     }
