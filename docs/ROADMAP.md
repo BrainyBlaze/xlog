@@ -338,7 +338,7 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 
 - [ ] Aggregate support in probabilistic programs
 - [ ] Alternative knowledge compilers (c2d, miniC2D)
-- [ ] Importance sampling for rare-event queries
+- [x] ~~Importance sampling for rare-event queries~~ (done: evidence clamping for forceable root evidence, `McSamplingMethod::EvidenceClamping`)
 - [ ] Incremental circuit updates for dynamic programs
 
 ---
@@ -406,7 +406,7 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 **Inference Enhancements:**
 - [ ] Aggregate lifting for small domains
 - [ ] Alternative knowledge compilers (c2d, miniC2D)
-- [ ] Importance sampling for Monte Carlo
+- [x] ~~Importance sampling for Monte Carlo~~ (done: evidence clamping, v0.5.1)
 - [ ] Approximate inference engine (geometric_mean, beam search)
 
 **Neural-Symbolic Examples:**

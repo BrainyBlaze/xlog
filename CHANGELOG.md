@@ -6,6 +6,13 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- **Evidence clamping for MC inference** (`xlog-prob`): Monte Carlo evidence conditioning
+  via `McSamplingMethod::EvidenceClamping`. Forces root Bernoulli evidence variables in the
+  sampling kernel so every sample counts (`evidence_samples == total_samples`). Auto-selected
+  when all evidence maps to probabilistic facts or positive AD heads; falls back to rejection
+  for derived/deterministic/negative-AD evidence. New `sampling_method` field on `McEvalConfig`,
+  `McResult`, `McDeviceResult`, and Python API. CUDA kernel updated with `force_mask`/`forced_value`
+  inputs.
 - **Provenance primitives** (`xlog-prob`): Retained provenance metadata for external Rust consumers.
   New `ChoiceSource` type captures annotated-disjunction metadata (explicit heads, choice index,
   optional source ID). Two new fields on `Provenance`: `leaf_atoms` (`BTreeMap<LeafId, GroundAtom>`)
