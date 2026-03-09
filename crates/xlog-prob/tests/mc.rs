@@ -553,3 +553,16 @@ fn test_mc_timing_breakdown_totals_sum() {
     t.count_us = 50;
     assert_eq!(t.total_us(), 150);
 }
+
+#[test]
+fn test_count_strategy_clamped_skips_evidence_side() {
+    use xlog_prob::mc::{McCountStrategy, McSamplingMethod};
+    assert_eq!(
+        McCountStrategy::from_method(McSamplingMethod::EvidenceClamping),
+        McCountStrategy::QueriesOnly,
+    );
+    assert_eq!(
+        McCountStrategy::from_method(McSamplingMethod::Rejection),
+        McCountStrategy::QueriesAndEvidence,
+    );
+}

@@ -49,6 +49,29 @@ pub enum McSamplingMethod {
     EvidenceClamping,
 }
 
+/// Strategy for counting evidence-satisfied samples in the MC loop.
+///
+/// In `QueriesOnly` mode (used with evidence clamping), evidence is
+/// guaranteed to hold in every sample, so we skip the truth-kernel's
+/// evidence check and evidence-side buffer allocations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McCountStrategy {
+    /// Full path: check both queries and evidence each sample.
+    QueriesAndEvidence,
+    /// Clamped path: evidence is always satisfied; only accumulate query flags.
+    QueriesOnly,
+}
+
+impl McCountStrategy {
+    /// Derive the count strategy from the chosen sampling method.
+    pub fn from_method(method: McSamplingMethod) -> Self {
+        match method {
+            McSamplingMethod::Rejection => Self::QueriesAndEvidence,
+            McSamplingMethod::EvidenceClamping => Self::QueriesOnly,
+        }
+    }
+}
+
 /// Breakdown of time spent in each phase of MC evaluation.
 /// Gate with `XLOG_MC_PROFILE=1` to print at the end of evaluation.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -538,7 +561,7 @@ impl McProgram {
         provider: Arc<CudaKernelProvider>,
     ) -> Result<McDeviceResult> {
         let (method, forcing) = self.resolve_sampling_method(cfg.sampling_method)?;
-        let is_clamped = method == McSamplingMethod::EvidenceClamping;
+        let strategy = McCountStrategy::from_method(method);
 
         let prob_query_count = self.queries.len();
         let evidence_count = self.evidence.len();
@@ -554,8 +577,11 @@ impl McProgram {
                 evidence_count
             ))
         })?;
-        // In clamped mode, pass 0 evidence to the truth kernel so it sets evidence_ok = 1
-        let effective_evidence_count_u32 = if is_clamped { 0u32 } else { evidence_count_u32 };
+        // In QueriesOnly mode, pass 0 evidence to the truth kernel so it sets evidence_ok = 1
+        let effective_evidence_count_u32 = match strategy {
+            McCountStrategy::QueriesOnly => 0u32,
+            McCountStrategy::QueriesAndEvidence => evidence_count_u32,
+        };
 
         let mut d_query_counts = provider.memory().alloc::<u32>(prob_query_count)?;
         if prob_query_count > 0 {
@@ -566,6 +592,12 @@ impl McProgram {
                 .map_err(|e| XlogError::Kernel(format!("Failed to zero MC query counts: {}", e)))?;
         }
         let mut d_evidence_count = provider.memory().alloc::<u32>(1)?;
+        // Design note (QueriesOnly mode): The spec requires evidence_count ==
+        // cfg.samples at the end of inference.  We achieve this without a
+        // separate HtoD upload: the truth kernel always sets evidence_ok = 1
+        // (because effective_evidence_count = 0 ⇒ all evidence trivially
+        // satisfied), so the accumulate kernel atomicAdd's evidence_count once
+        // per sample, arriving at exactly cfg.samples after the loop.
         provider
             .device()
             .inner()
@@ -575,8 +607,6 @@ impl McProgram {
         let mut d_query_flags = provider.memory().alloc::<u8>(prob_query_count)?;
         let mut d_evidence_ok = provider.memory().alloc::<u8>(1)?;
         let mut d_query_ptrs = provider.memory().alloc::<u64>(prob_query_count)?;
-        let mut d_evidence_ptrs = provider.memory().alloc::<u64>(evidence_count)?;
-        let mut d_evidence_expected = provider.memory().alloc::<u8>(evidence_count)?;
         let mut d_zero_count = provider.memory().alloc::<u32>(1)?;
         provider
             .device()
@@ -584,7 +614,16 @@ impl McProgram {
             .memset_zeros(&mut d_zero_count)
             .map_err(|e| XlogError::Kernel(format!("Failed to zero MC zero-count: {}", e)))?;
 
-        if evidence_count > 0 && !is_clamped {
+        // In QueriesOnly mode, skip evidence-side buffer allocations.
+        // We still need 1-element sentinel slices for the truth kernel args.
+        let evidence_alloc_count = match strategy {
+            McCountStrategy::QueriesOnly => 1,
+            McCountStrategy::QueriesAndEvidence => evidence_count.max(1),
+        };
+        let mut d_evidence_ptrs = provider.memory().alloc::<u64>(evidence_alloc_count)?;
+        let mut d_evidence_expected = provider.memory().alloc::<u8>(evidence_alloc_count)?;
+
+        if evidence_count > 0 && strategy == McCountStrategy::QueriesAndEvidence {
             let expected: Vec<u8> = self
                 .evidence
                 .iter()
@@ -641,7 +680,7 @@ impl McProgram {
                     "MC query count ptrs",
                 )?;
 
-                if !is_clamped {
+                if strategy == McCountStrategy::QueriesAndEvidence {
                     let mut evidence_ptrs: Vec<u64> = Vec::with_capacity(evidence_count);
                     for (rel_name, _) in plan.evidence_rel_specs.iter() {
                         let ptr = executor
