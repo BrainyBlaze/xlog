@@ -1,7 +1,7 @@
 #![cfg(feature = "host-io")]
 
 use xlog_cuda::CudaDevice;
-use xlog_prob::mc::{ForceabilityReason, McEvalConfig, McProgram};
+use xlog_prob::mc::{ForceabilityReason, McEvalConfig, McProgram, McSamplingMethod};
 
 fn has_cuda_device() -> bool {
     // cudarc::driver::CudaDevice::count() may panic in restricted containers. Attempt real init instead.
@@ -255,4 +255,85 @@ query(coin(heads)).
     assert!(forcing.forceable);
     assert_eq!(forcing.force_mask[0], 1);
     assert_eq!(forcing.forced_value[0], 0); // last head → all decision vars = 0
+}
+
+#[test]
+fn test_evidence_clamping_prob_fact_true_matches_exact() {
+    if !has_cuda_device() {
+        eprintln!("Skipping test: no CUDA device available");
+        return;
+    }
+    let src = r#"
+0.7::rain().
+0.2::sprinkler().
+evidence(sprinkler(), true).
+query(rain()).
+"#;
+    let program = McProgram::compile_source(src).unwrap();
+    let cfg = McEvalConfig {
+        samples: 50_000,
+        seed: 42,
+        confidence: 0.95,
+        max_nonmonotone_iterations: 128,
+        sampling_method: None,
+    };
+    let result = program.evaluate(cfg).unwrap();
+    assert_eq!(result.sampling_method, McSamplingMethod::EvidenceClamping);
+    assert_eq!(result.evidence_samples, result.total_samples);
+    let p = prob_of_atom(&result, "rain");
+    assert!((p - 0.7).abs() < 0.02, "p={}", p);
+}
+
+#[test]
+fn test_evidence_clamping_prob_fact_false_matches_exact() {
+    if !has_cuda_device() {
+        eprintln!("Skipping test: no CUDA device available");
+        return;
+    }
+    let src = r#"
+0.7::rain().
+0.2::sprinkler().
+evidence(sprinkler(), false).
+query(rain()).
+"#;
+    let program = McProgram::compile_source(src).unwrap();
+    let cfg = McEvalConfig {
+        samples: 50_000,
+        seed: 42,
+        confidence: 0.95,
+        max_nonmonotone_iterations: 128,
+        sampling_method: None,
+    };
+    let result = program.evaluate(cfg).unwrap();
+    assert_eq!(result.sampling_method, McSamplingMethod::EvidenceClamping);
+    assert_eq!(result.evidence_samples, result.total_samples);
+    let p = prob_of_atom(&result, "rain");
+    assert!((p - 0.7).abs() < 0.02, "p={}", p);
+}
+
+#[test]
+fn test_evidence_clamping_all_samples_count() {
+    if !has_cuda_device() {
+        eprintln!("Skipping test: no CUDA device available");
+        return;
+    }
+    let src = r#"
+0.01::rare().
+0.5::other().
+evidence(rare(), true).
+query(other()).
+"#;
+    let program = McProgram::compile_source(src).unwrap();
+    let cfg = McEvalConfig {
+        samples: 1000,
+        seed: 7,
+        confidence: 0.95,
+        max_nonmonotone_iterations: 128,
+        sampling_method: None,
+    };
+    let result = program.evaluate(cfg).unwrap();
+    assert_eq!(result.sampling_method, McSamplingMethod::EvidenceClamping);
+    assert_eq!(result.evidence_samples, 1000);
+    let p = prob_of_atom(&result, "other");
+    assert!((p - 0.5).abs() < 0.05, "p={}", p);
 }

@@ -78,7 +78,7 @@ pub struct McEvalConfig {
     pub confidence: f64,
     /// Maximum SCC iteration steps for non-monotone cycle detection.
     pub max_nonmonotone_iterations: usize,
-    /// Sampling method override.  `None` = auto-select (rejection for now).
+    /// Sampling method override. `None` = auto-select (EvidenceClamping when forceable, Rejection otherwise).
     pub sampling_method: Option<McSamplingMethod>,
 }
 
@@ -246,7 +246,34 @@ impl McProgram {
         self.bernoulli_probs.len()
     }
 
-    #[cfg(feature = "host-io")]
+    /// Resolve the sampling method from config + evidence forceability.
+    fn resolve_sampling_method(
+        &self,
+        requested: Option<McSamplingMethod>,
+    ) -> Result<(McSamplingMethod, EvidenceForcing)> {
+        let forcing = self.compile_evidence_forcing()?;
+        let method = match requested {
+            Some(McSamplingMethod::EvidenceClamping) => {
+                if !forcing.forceable {
+                    return Err(XlogError::Execution(format!(
+                        "Cannot use EvidenceClamping: {:?}",
+                        forcing.reason
+                    )));
+                }
+                McSamplingMethod::EvidenceClamping
+            }
+            Some(McSamplingMethod::Rejection) => McSamplingMethod::Rejection,
+            None => {
+                if forcing.forceable {
+                    McSamplingMethod::EvidenceClamping
+                } else {
+                    McSamplingMethod::Rejection
+                }
+            }
+        };
+        Ok((method, forcing))
+    }
+
     #[cfg(feature = "host-io")]
     pub fn evaluate(&self, cfg: McEvalConfig) -> Result<McResult> {
         let provider = Arc::new(self.provider()?);
@@ -279,7 +306,10 @@ impl McProgram {
             host_evidence[0] as usize
         };
 
-        if !self.evidence.is_empty() && evidence_samples == 0 {
+        if device_result.sampling_method != McSamplingMethod::EvidenceClamping
+            && !self.evidence.is_empty()
+            && evidence_samples == 0
+        {
             return Err(XlogError::Execution(format!(
                 "MC inference error: evidence was never satisfied across {} samples (seed={})",
                 cfg.samples, cfg.seed
@@ -312,7 +342,7 @@ impl McProgram {
             nonmonotone_sccs: device_result.nonmonotone_sccs,
             nonmonotone_cycles: device_result.nonmonotone_cycles,
             nonmonotone_iteration_limit_hits: device_result.nonmonotone_iteration_limit_hits,
-            sampling_method: McSamplingMethod::Rejection,
+            sampling_method: device_result.sampling_method,
         })
     }
 
@@ -335,6 +365,9 @@ impl McProgram {
             ));
         }
 
+        let (method, forcing) = self.resolve_sampling_method(cfg.sampling_method)?;
+        let is_clamped = method == McSamplingMethod::EvidenceClamping;
+
         let mut n_evidence: usize = 0;
         let mut n_query_true: Vec<usize> = vec![0; self.queries.len()];
         let mut stats = EvalStats::default();
@@ -348,13 +381,26 @@ impl McProgram {
                 .ok_or_else(|| XlogError::Execution("MC sample matrix overflow".to_string()))?;
             let provider = Arc::new(self.provider()?);
 
-            // Allocate zero-filled force arrays (no clamping in evaluate_cpu path)
+            // Allocate force arrays: upload actual forcing data in clamped mode, zero-fill otherwise
             let mut d_force_mask = provider.memory().alloc::<u8>(num_vars.max(1))?;
-            provider.device().inner().memset_zeros(&mut d_force_mask)
-                .map_err(|e| XlogError::Kernel(format!("Failed to zero force_mask: {}", e)))?;
             let mut d_forced_value = provider.memory().alloc::<u8>(num_vars.max(1))?;
-            provider.device().inner().memset_zeros(&mut d_forced_value)
-                .map_err(|e| XlogError::Kernel(format!("Failed to zero forced_value: {}", e)))?;
+            if is_clamped {
+                provider
+                    .device()
+                    .inner()
+                    .htod_sync_copy_into(&forcing.force_mask, &mut d_force_mask)
+                    .map_err(|e| XlogError::Kernel(format!("Failed to upload force_mask: {}", e)))?;
+                provider
+                    .device()
+                    .inner()
+                    .htod_sync_copy_into(&forcing.forced_value, &mut d_forced_value)
+                    .map_err(|e| XlogError::Kernel(format!("Failed to upload forced_value: {}", e)))?;
+            } else {
+                provider.device().inner().memset_zeros(&mut d_force_mask)
+                    .map_err(|e| XlogError::Kernel(format!("Failed to zero force_mask: {}", e)))?;
+                provider.device().inner().memset_zeros(&mut d_forced_value)
+                    .map_err(|e| XlogError::Kernel(format!("Failed to zero forced_value: {}", e)))?;
+            }
 
             let samples_device = provider.sample_bernoulli_matrix_device(
                 &self.bernoulli_probs,
@@ -397,7 +443,8 @@ impl McProgram {
             stats.nonmonotone_cycles += sample_stats.nonmonotone_cycles;
             stats.nonmonotone_iteration_limit_hits += sample_stats.nonmonotone_iteration_limit_hits;
 
-            if !evidence_satisfied(&store, &self.evidence) {
+            // In clamped mode, skip evidence check — all samples count
+            if !is_clamped && !evidence_satisfied(&store, &self.evidence) {
                 continue;
             }
 
@@ -409,15 +456,15 @@ impl McProgram {
             }
         }
 
-        if !self.evidence.is_empty() && n_evidence == 0 {
+        if !is_clamped && !self.evidence.is_empty() && n_evidence == 0 {
             return Err(XlogError::Execution(format!(
                 "MC inference error: evidence was never satisfied across {} samples (seed={})",
                 cfg.samples, cfg.seed
             )));
         }
 
-        // If there is no evidence, treat all samples as evidence-satisfying.
-        let denom = if self.evidence.is_empty() {
+        // If there is no evidence (or clamped mode), treat all samples as evidence-satisfying.
+        let denom = if self.evidence.is_empty() || is_clamped {
             cfg.samples
         } else {
             n_evidence
@@ -450,7 +497,7 @@ impl McProgram {
             nonmonotone_sccs: stats.nonmonotone_sccs,
             nonmonotone_cycles: stats.nonmonotone_cycles,
             nonmonotone_iteration_limit_hits: stats.nonmonotone_iteration_limit_hits,
-            sampling_method: McSamplingMethod::Rejection,
+            sampling_method: method,
         })
     }
 
@@ -469,6 +516,9 @@ impl McProgram {
         cfg: McEvalConfig,
         provider: Arc<CudaKernelProvider>,
     ) -> Result<McDeviceResult> {
+        let (method, forcing) = self.resolve_sampling_method(cfg.sampling_method)?;
+        let is_clamped = method == McSamplingMethod::EvidenceClamping;
+
         let prob_query_count = self.queries.len();
         let evidence_count = self.evidence.len();
         let prob_query_count_u32 = u32::try_from(prob_query_count).map_err(|_| {
@@ -483,6 +533,8 @@ impl McProgram {
                 evidence_count
             ))
         })?;
+        // In clamped mode, pass 0 evidence to the truth kernel so it sets evidence_ok = 1
+        let effective_evidence_count_u32 = if is_clamped { 0u32 } else { evidence_count_u32 };
 
         let mut d_query_counts = provider.memory().alloc::<u32>(prob_query_count)?;
         if prob_query_count > 0 {
@@ -511,7 +563,7 @@ impl McProgram {
             .memset_zeros(&mut d_zero_count)
             .map_err(|e| XlogError::Kernel(format!("Failed to zero MC zero-count: {}", e)))?;
 
-        if evidence_count > 0 {
+        if evidence_count > 0 && !is_clamped {
             let expected: Vec<u8> = self
                 .evidence
                 .iter()
@@ -549,7 +601,7 @@ impl McProgram {
         };
 
         let stats =
-            self.evaluate_gpu_counts_with(&cfg, provider.clone(), |executor, plan, count| {
+            self.evaluate_gpu_counts_with(&cfg, &forcing, method, provider.clone(), |executor, plan, count| {
                 let zero_ptr = *d_zero_count.device_ptr() as u64;
 
                 let mut query_ptrs: Vec<u64> = Vec::with_capacity(count);
@@ -568,21 +620,23 @@ impl McProgram {
                     "MC query count ptrs",
                 )?;
 
-                let mut evidence_ptrs: Vec<u64> = Vec::with_capacity(evidence_count);
-                for (rel_name, _) in plan.evidence_rel_specs.iter() {
-                    let ptr = executor
-                        .store()
-                        .get(rel_name)
-                        .map(|buf| *buf.num_rows_device().device_ptr() as u64)
-                        .unwrap_or(zero_ptr);
-                    evidence_ptrs.push(ptr);
+                if !is_clamped {
+                    let mut evidence_ptrs: Vec<u64> = Vec::with_capacity(evidence_count);
+                    for (rel_name, _) in plan.evidence_rel_specs.iter() {
+                        let ptr = executor
+                            .store()
+                            .get(rel_name)
+                            .map(|buf| *buf.num_rows_device().device_ptr() as u64)
+                            .unwrap_or(zero_ptr);
+                        evidence_ptrs.push(ptr);
+                    }
+                    upload_slice(
+                        &provider,
+                        &evidence_ptrs,
+                        &mut d_evidence_ptrs,
+                        "MC evidence count ptrs",
+                    )?;
                 }
-                upload_slice(
-                    &provider,
-                    &evidence_ptrs,
-                    &mut d_evidence_ptrs,
-                    "MC evidence count ptrs",
-                )?;
 
                 let block_dim = 128u32;
                 let threads = if count == 0 { 1 } else { count as u32 };
@@ -601,7 +655,7 @@ impl McProgram {
                                 prob_query_count_u32,
                                 &d_evidence_ptrs,
                                 &d_evidence_expected,
-                                evidence_count_u32,
+                                effective_evidence_count_u32,
                                 &mut d_query_flags,
                                 &mut d_evidence_ok,
                             ),
@@ -641,7 +695,7 @@ impl McProgram {
             nonmonotone_sccs: stats.nonmonotone_sccs,
             nonmonotone_cycles: stats.nonmonotone_cycles,
             nonmonotone_iteration_limit_hits: stats.nonmonotone_iteration_limit_hits,
-            sampling_method: McSamplingMethod::Rejection,
+            sampling_method: method,
         })
     }
 
@@ -702,6 +756,8 @@ impl McProgram {
     fn evaluate_gpu_counts_with<F>(
         &self,
         cfg: &McEvalConfig,
+        forcing: &EvidenceForcing,
+        method: McSamplingMethod,
         provider: Arc<CudaKernelProvider>,
         mut on_sample: F,
     ) -> Result<EvalStats>
@@ -759,13 +815,26 @@ impl McProgram {
 
         let num_vars = self.bernoulli_probs.len();
 
-        // Allocate zero-filled force arrays (no clamping by default)
+        // Allocate force arrays: upload actual forcing data in clamped mode, zero-fill otherwise
         let mut d_force_mask = provider.memory().alloc::<u8>(num_vars.max(1))?;
-        provider.device().inner().memset_zeros(&mut d_force_mask)
-            .map_err(|e| XlogError::Kernel(format!("Failed to zero force_mask: {}", e)))?;
         let mut d_forced_value = provider.memory().alloc::<u8>(num_vars.max(1))?;
-        provider.device().inner().memset_zeros(&mut d_forced_value)
-            .map_err(|e| XlogError::Kernel(format!("Failed to zero forced_value: {}", e)))?;
+        if method == McSamplingMethod::EvidenceClamping && num_vars > 0 {
+            provider
+                .device()
+                .inner()
+                .htod_sync_copy_into(&forcing.force_mask, &mut d_force_mask)
+                .map_err(|e| XlogError::Kernel(format!("Failed to upload force_mask: {}", e)))?;
+            provider
+                .device()
+                .inner()
+                .htod_sync_copy_into(&forcing.forced_value, &mut d_forced_value)
+                .map_err(|e| XlogError::Kernel(format!("Failed to upload forced_value: {}", e)))?;
+        } else {
+            provider.device().inner().memset_zeros(&mut d_force_mask)
+                .map_err(|e| XlogError::Kernel(format!("Failed to zero force_mask: {}", e)))?;
+            provider.device().inner().memset_zeros(&mut d_forced_value)
+                .map_err(|e| XlogError::Kernel(format!("Failed to zero forced_value: {}", e)))?;
+        }
 
         let samples_device = if self.bernoulli_probs.is_empty() || cfg.samples == 0 {
             provider.memory().alloc::<u8>(0)?
