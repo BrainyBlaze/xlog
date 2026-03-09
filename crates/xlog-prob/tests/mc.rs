@@ -542,3 +542,14 @@ query(color(green)).
     assert_eq!(p_red, 0.0, "P(color(red) | color(blue)) should be 0.0");
     assert_eq!(p_green, 0.0, "P(color(green) | color(blue)) should be 0.0");
 }
+
+#[test]
+fn test_mc_timing_breakdown_totals_sum() {
+    let mut t = xlog_prob::mc::McTimingBreakdown::default();
+    t.sampler_us = 10;
+    t.sample_reset_us = 20;
+    t.sample_build_us = 30;
+    t.eval_us = 40;
+    t.count_us = 50;
+    assert_eq!(t.total_us(), 150);
+}

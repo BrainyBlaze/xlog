@@ -49,6 +49,27 @@ pub enum McSamplingMethod {
     EvidenceClamping,
 }
 
+/// Breakdown of time spent in each phase of MC evaluation.
+/// Gate with `XLOG_MC_PROFILE=1` to print at the end of evaluation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct McTimingBreakdown {
+    pub sampler_us: u64,
+    pub sample_reset_us: u64,
+    pub sample_build_us: u64,
+    pub eval_us: u64,
+    pub count_us: u64,
+}
+
+impl McTimingBreakdown {
+    pub fn total_us(&self) -> u64 {
+        self.sampler_us
+            .saturating_add(self.sample_reset_us)
+            .saturating_add(self.sample_build_us)
+            .saturating_add(self.eval_us)
+            .saturating_add(self.count_us)
+    }
+}
+
 /// Phase 4 semantics for non-monotone SCC evaluation inside MC sampling.
 pub const NONMONOTONE_SEMANTICS: &str = "Synchronous iteration per SCC; if a fixpoint is reached, use it; if a cycle is detected, use the intersection of all states in the cycle (skeptical tuples only); if the iteration budget is exceeded, use the intersection across all visited states (conservative).";
 
@@ -836,6 +857,10 @@ impl McProgram {
                 .map_err(|e| XlogError::Kernel(format!("Failed to zero forced_value: {}", e)))?;
         }
 
+        let mc_profile = std::env::var("XLOG_MC_PROFILE").ok().map(|v| v == "1").unwrap_or(false);
+        let mut timing = McTimingBreakdown::default();
+
+        let t0 = std::time::Instant::now();
         let samples_device = if self.bernoulli_probs.is_empty() || cfg.samples == 0 {
             provider.memory().alloc::<u8>(0)?
         } else {
@@ -847,17 +872,25 @@ impl McProgram {
                 &d_forced_value.slice(..),
             )?
         };
+        if mc_profile {
+            timing.sampler_us = t0.elapsed().as_micros() as u64;
+        }
 
         let mut stats = EvalStats::default();
 
         for sample_idx in 0..cfg.samples {
+            let t_reset = std::time::Instant::now();
             executor.reset_for_mc();
             restore_store(&provider, &base_store, &mut executor)?;
+            if mc_profile {
+                timing.sample_reset_us += t_reset.elapsed().as_micros() as u64;
+            }
 
             let start = sample_idx * num_vars;
             let end = start + num_vars;
             let sample_bits = samples_device.slice(start..end);
 
+            let t_build = std::time::Instant::now();
             let sample_buffers = build_sample_buffers(
                 &provider,
                 &sample_bits,
@@ -876,7 +909,11 @@ impl McProgram {
                 };
                 executor.put_relation(&pred, merged);
             }
+            if mc_profile {
+                timing.sample_build_us += t_build.elapsed().as_micros() as u64;
+            }
 
+            let t_eval = std::time::Instant::now();
             let sample_stats = evaluate_program_gpu(
                 &provider,
                 &mut executor,
@@ -884,11 +921,26 @@ impl McProgram {
                 &gpu_plan.nonmonotone_sccs,
                 cfg.max_nonmonotone_iterations,
             )?;
+            if mc_profile {
+                timing.eval_us += t_eval.elapsed().as_micros() as u64;
+            }
             stats.nonmonotone_sccs += sample_stats.nonmonotone_sccs;
             stats.nonmonotone_cycles += sample_stats.nonmonotone_cycles;
             stats.nonmonotone_iteration_limit_hits += sample_stats.nonmonotone_iteration_limit_hits;
 
+            let t_count = std::time::Instant::now();
             on_sample(&executor, &gpu_plan, prob_query_count)?;
+            if mc_profile {
+                timing.count_us += t_count.elapsed().as_micros() as u64;
+            }
+        }
+
+        if mc_profile {
+            eprintln!(
+                "[MC Profile] samples={} sampler={}us reset={}us build={}us eval={}us count={}us total={}us",
+                cfg.samples, timing.sampler_us, timing.sample_reset_us, timing.sample_build_us,
+                timing.eval_us, timing.count_us, timing.total_us()
+            );
         }
 
         Ok(stats)
