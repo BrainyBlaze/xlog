@@ -213,3 +213,46 @@ query(rain()).
     assert!(!forcing.forceable);
     assert_eq!(forcing.reason, ForceabilityReason::ContainsDerivedEvidence);
 }
+
+#[test]
+fn test_evidence_forcing_ad_3way_middle_head() {
+    // 3 explicit heads with sum < 1.0, so there is an implicit none branch.
+    // AD: 0.2::color(red); 0.3::color(blue); 0.4::color(green).
+    // has_none = true (sum = 0.9 < 1.0), so 4-way including none
+    // decision_vars: [v0, v1, v2] (3 Bernoulli vars for 4-way including none)
+    // evidence(color(blue), true) => choice_idx=1 => force v0=0, v1=1
+    let src = r#"
+0.2::color(red); 0.3::color(blue); 0.4::color(green).
+evidence(color(blue), true).
+query(color(red)).
+query(color(green)).
+"#;
+    let program = McProgram::compile_source(src).unwrap();
+    let forcing = program.compile_evidence_forcing().unwrap();
+    assert!(forcing.forceable, "3-way AD positive evidence should be forceable");
+
+    // v0 forced to 0 (not red), v1 forced to 1 (blue selected), v2 not forced
+    assert_eq!(forcing.force_mask[0], 1);
+    assert_eq!(forcing.forced_value[0], 0);
+    assert_eq!(forcing.force_mask[1], 1);
+    assert_eq!(forcing.forced_value[1], 1);
+    assert_eq!(forcing.force_mask[2], 0); // irrelevant after v1=1
+}
+
+#[test]
+fn test_evidence_forcing_ad_last_head_no_none() {
+    // 2 heads summing to 1.0 → no none branch
+    // AD: 0.4::coin(heads); 0.6::coin(tails).
+    // decision_vars: [v0] (1 Bernoulli var for 2-way, no none)
+    // evidence(coin(tails), true) => last head, no none → force v0=0
+    let src = r#"
+0.4::coin(heads); 0.6::coin(tails).
+evidence(coin(tails), true).
+query(coin(heads)).
+"#;
+    let program = McProgram::compile_source(src).unwrap();
+    let forcing = program.compile_evidence_forcing().unwrap();
+    assert!(forcing.forceable);
+    assert_eq!(forcing.force_mask[0], 1);
+    assert_eq!(forcing.forced_value[0], 0); // last head → all decision vars = 0
+}
