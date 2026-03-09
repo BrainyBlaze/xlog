@@ -21,7 +21,7 @@ use xlog_neural::{EmbeddingHandle, NetworkConfig, NetworkRegistry, TensorMetadat
 use xlog_prob::exact::{ExactDdnnfProgram, GpuConfig};
 #[cfg(feature = "host-io")]
 use xlog_prob::exact::{ExactResultWithGrads, QueryProbability};
-use xlog_prob::mc::{McEvalConfig, McProgram};
+use xlog_prob::mc::{McEvalConfig, McProgram, McSamplingMethod};
 use xlog_prob::neural_fast_path::{GpuWeightSlots, NeuralFastPathConfig};
 
 use std::collections::HashMap as StdHashMap;
@@ -637,9 +637,23 @@ pub struct CompiledProgram {
     last_compile_profile: Option<xlog_prob::compilation::CircuitCompileProfile>,
 }
 
+impl CompiledProgram {
+    fn parse_sampling_method(s: Option<String>) -> PyResult<Option<McSamplingMethod>> {
+        match s.as_deref() {
+            None => Ok(None),
+            Some("rejection") => Ok(Some(McSamplingMethod::Rejection)),
+            Some("evidence_clamping") => Ok(Some(McSamplingMethod::EvidenceClamping)),
+            Some(other) => Err(PyValueError::new_err(format!(
+                "Unknown sampling_method '{}'. Use 'rejection' or 'evidence_clamping'.",
+                other
+            ))),
+        }
+    }
+}
+
 #[pymethods]
 impl CompiledProgram {
-    #[pyo3(signature = (return_grads=false, samples=None, seed=None, confidence=0.95, max_nonmonotone_iterations=1024))]
+    #[pyo3(signature = (return_grads=false, samples=None, seed=None, confidence=0.95, max_nonmonotone_iterations=1024, sampling_method=None))]
     pub fn evaluate(
         &self,
         _py: Python<'_>,
@@ -648,6 +662,7 @@ impl CompiledProgram {
         seed: Option<u64>,
         confidence: f64,
         max_nonmonotone_iterations: usize,
+        sampling_method: Option<String>,
     ) -> PyResult<EvalResult> {
         match &self.program {
             CompiledProbProgram::Exact(_program) => {
@@ -688,7 +703,7 @@ impl CompiledProgram {
                     seed: seed.unwrap_or(0),
                     confidence,
                     max_nonmonotone_iterations,
-                    sampling_method: None,
+                    sampling_method: Self::parse_sampling_method(sampling_method)?,
                 };
                 #[cfg(feature = "host-io")]
                 {
@@ -710,7 +725,7 @@ impl CompiledProgram {
     ///
     /// This is the primary GPU-native API surface for MC inference. It never performs
     /// device->host reads for result data (only returns device buffers).
-    #[pyo3(signature = (samples=None, seed=None, confidence=0.95, max_nonmonotone_iterations=1024))]
+    #[pyo3(signature = (samples=None, seed=None, confidence=0.95, max_nonmonotone_iterations=1024, sampling_method=None))]
     pub fn evaluate_device(
         &self,
         py: Python<'_>,
@@ -718,6 +733,7 @@ impl CompiledProgram {
         seed: Option<u64>,
         confidence: f64,
         max_nonmonotone_iterations: usize,
+        sampling_method: Option<String>,
     ) -> PyResult<McDeviceEvalResult> {
         let (
             query_counts,
@@ -728,6 +744,7 @@ impl CompiledProgram {
             nonmonotone_sccs,
             nonmonotone_cycles,
             nonmonotone_iteration_limit_hits,
+            sampling_method_val,
         ) = match &self.program {
             CompiledProbProgram::Mc(program) => {
                 let cfg = McEvalConfig {
@@ -735,7 +752,7 @@ impl CompiledProgram {
                     seed: seed.unwrap_or(0),
                     confidence,
                     max_nonmonotone_iterations,
-                    sampling_method: None,
+                    sampling_method: Self::parse_sampling_method(sampling_method)?,
                 };
 
                 let result = program
@@ -751,6 +768,7 @@ impl CompiledProgram {
                     result.nonmonotone_sccs,
                     result.nonmonotone_cycles,
                     result.nonmonotone_iteration_limit_hits,
+                    result.sampling_method,
                 )
             }
             _ => {
@@ -810,6 +828,10 @@ impl CompiledProgram {
             nonmonotone_sccs,
             nonmonotone_cycles,
             nonmonotone_iteration_limit_hits,
+            sampling_method: match sampling_method_val {
+                McSamplingMethod::Rejection => "rejection".to_string(),
+                McSamplingMethod::EvidenceClamping => "evidence_clamping".to_string(),
+            },
         })
     }
 
@@ -3355,6 +3377,7 @@ impl CompiledProgram {
             nonmonotone_sccs: None,
             nonmonotone_cycles: None,
             nonmonotone_iteration_limit_hits: None,
+            sampling_method: None,
         })
     }
 
@@ -3442,6 +3465,7 @@ impl CompiledProgram {
             nonmonotone_sccs: None,
             nonmonotone_cycles: None,
             nonmonotone_iteration_limit_hits: None,
+            sampling_method: None,
         })
     }
 
@@ -3534,6 +3558,10 @@ impl CompiledProgram {
             nonmonotone_sccs: Some(result.nonmonotone_sccs),
             nonmonotone_cycles: Some(result.nonmonotone_cycles),
             nonmonotone_iteration_limit_hits: Some(result.nonmonotone_iteration_limit_hits),
+            sampling_method: Some(match result.sampling_method {
+                McSamplingMethod::Rejection => "rejection".to_string(),
+                McSamplingMethod::EvidenceClamping => "evidence_clamping".to_string(),
+            }),
         })
     }
 }
@@ -3705,6 +3733,8 @@ pub struct McDeviceEvalResult {
     pub nonmonotone_cycles: usize,
     #[pyo3(get)]
     pub nonmonotone_iteration_limit_hits: usize,
+    #[pyo3(get)]
+    pub sampling_method: String,
 }
 
 #[pyclass]
@@ -3745,6 +3775,8 @@ pub struct EvalResult {
     pub nonmonotone_cycles: Option<usize>,
     #[pyo3(get)]
     pub nonmonotone_iteration_limit_hits: Option<usize>,
+    #[pyo3(get)]
+    pub sampling_method: Option<String>,
 }
 
 // =========================================================================
