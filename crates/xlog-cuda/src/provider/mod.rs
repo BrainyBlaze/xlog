@@ -18,6 +18,7 @@ use crate::{
 };
 
 mod kernel_loading;
+mod transfer;
 
 /// Per-module PTX load timing (populated only when XLOG_WARMUP_PROFILE=1).
 #[derive(Debug, Clone, Default)]

@@ -9,7 +9,7 @@ pub mod memory;
 pub mod multi_gpu_memory;
 pub mod provider;
 pub(crate) mod error_helpers;
-pub(crate) mod type_seam;
+pub mod type_seam;
 
 pub use arrow_device::{ArrowDeviceArray, ArrowDeviceArrayOwned, ARROW_DEVICE_CUDA};
 pub use device::CudaDevice;

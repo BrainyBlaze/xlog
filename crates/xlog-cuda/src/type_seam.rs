@@ -18,7 +18,7 @@
 ///
 /// Wave 2 will add `download_column::<T>()` and `create_buffer_from_slice::<T>()`
 /// that replace the current type-specialized function families.
-pub(crate) trait GpuScalar: cudarc::driver::DeviceRepr + Copy + Send + 'static {
+pub trait GpuScalar: cudarc::driver::DeviceRepr + Copy + Send + 'static {
     /// Size in bytes of this scalar type.
     const BYTE_WIDTH: usize;
 
