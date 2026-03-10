@@ -317,13 +317,13 @@ pub fn prop_filter_idempotence(
     // First filter: val < threshold
     let filtered_once = ctx
         .provider
-        .filter_u32(&buffer, 0, threshold, CompareOp::Lt)
+        .filter::<u32>(&buffer, 0, threshold, CompareOp::Lt)
         .map_err(|e| format!("First filter failed: {}", e))?;
 
     // Second filter with same condition
     let filtered_twice = ctx
         .provider
-        .filter_u32(&filtered_once, 0, threshold, CompareOp::Lt)
+        .filter::<u32>(&filtered_once, 0, threshold, CompareOp::Lt)
         .map_err(|e| format!("Second filter failed: {}", e))?;
 
     // Download both results
