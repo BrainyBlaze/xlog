@@ -8,6 +8,7 @@ pub mod kernel_manifest_data;
 pub mod memory;
 pub mod multi_gpu_memory;
 pub mod provider;
+pub(crate) mod error_helpers;
 
 pub use arrow_device::{ArrowDeviceArray, ArrowDeviceArrayOwned, ARROW_DEVICE_CUDA};
 pub use device::CudaDevice;
