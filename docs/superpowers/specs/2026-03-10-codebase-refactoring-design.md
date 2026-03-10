@@ -23,9 +23,9 @@ Two changes that must land before any structural work.
 The workspace has 6 error types across 3 crates (`XlogError`, `NeuralError`, `TensorSourceError`, `ModuleError`, `FunctionError`, `TypeError`) with zero `From` implementations. Every cross-crate call requires manual `.map_err()`.
 
 **Changes:**
-- Add ~15 `From<CrateError> for XlogError` implementations in `xlog-core`
+- Add 5 `From<CrateError> for XlogError` implementations: 2 typed (`#[from]`) for neural errors in `xlog-core`, 3 string-wrapping in `xlog-logic` (to avoid circular dependency)
 - Remove the `Result<T>` type alias from `xlog-neural` (collides with `xlog-core::Result<T>`)
-- Convert ~50 `.map_err()` call sites to use `?` directly
+- Convert 5–15 `.map_err()` call sites to use `?` directly (most of the 1,094 `.map_err()` calls convert cudarc errors and are unaffected)
 
 ### C2 — Lock down visibility
 
