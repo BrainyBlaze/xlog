@@ -192,7 +192,7 @@ pattern.
 | Change type | Files | Lines |
 |-------------|-------|-------|
 | Cargo.toml edits (remove deps + add xlog-core to xlog-neural) | 3 | ~6 |
-| New `From` impls | 3 (neural, logic, cuda) | ~60 |
+| New `From` impls + CUDA helper | 2 `From` impls (neural, logic) + 1 helper fn (cuda) | ~60 |
 | Error context helpers | 1 (xlog-core/error.rs) | ~25 |
 | GpuScalar trait + impls | 1 (new: xlog-cuda/type_seam.rs) | ~80 |
 | Unit tests | 5 files | ~120 |

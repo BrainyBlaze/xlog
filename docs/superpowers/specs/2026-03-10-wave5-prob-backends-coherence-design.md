@@ -29,14 +29,27 @@ the existing shape: external entry points in `compilation/mod.rs`, lower-level f
 distributed across gpu_d4 submodules.
 
 Current public surface (function-based, not object model):
-- `compile_gpu_d4_and_verify` (compilation/mod.rs:117 — entry point that orchestrates D4)
+
+Entry points in compilation/mod.rs (orchestrate the full pipeline):
+- `compile_gpu_d4_and_verify` (mod.rs:117 — compile + verify, no caching)
+- `compile_gpu_d4_and_verify_cached` (mod.rs:145 — compile + cache + verify + smooth; used by exact.rs, exact_gpu.rs)
+
+Public functions in gpu_d4.rs:
 - `validate_cnf_gpu` (gpu_d4.rs:76)
-- `compile_gpu_d4` (gpu_d4.rs:836)
-- `compile_gpu_d4_gated` (gpu_d4.rs:847)
+- `compute_free_var_mask_gpu` (gpu_d4.rs:123)
+- `compute_free_var_mask_gpu_gated` (gpu_d4.rs:132)
 - `build_frontier_bitset` (gpu_d4.rs:464)
 - `build_frontier_dense` (gpu_d4.rs:639)
-- `compute_free_var_mask_gpu*` (gpu_d4.rs)
-- Internal helpers exposed from gpu_d4.rs (audit during split for pub(crate) candidates)
+- `compile_gpu_d4` (gpu_d4.rs:836)
+- `compile_gpu_d4_gated` (gpu_d4.rs:847)
+
+Public structs in gpu_d4.rs:
+- `GpuCompileConfig` (gpu_d4.rs:49 — re-exported via compilation/mod.rs:30)
+- `GpuFrontierBitset` (gpu_d4.rs:395)
+- `GpuFrontierDense` (gpu_d4.rs:431)
+
+Internal helpers:
+- `exclusive_scan_u32_inplace` (gpu_d4.rs:319, pub(crate) — used by xlog-prob/gpu.rs)
 
 ```
 crates/xlog-prob/src/compilation/
@@ -179,15 +192,17 @@ dependency edges between crates. Comment points to pattern origin. Saves ~250 li
 Add top-level re-exports to `xlog-prob/src/lib.rs`:
 
 ```rust
-// gpu_d4 is function-based — re-export the actual entry point functions
-pub use compilation::gpu_d4::{compile_gpu_d4, compile_gpu_d4_gated};
+// Primary entry points — these are what external callers actually use
+pub use compilation::{compile_gpu_d4_and_verify, compile_gpu_d4_and_verify_cached};
+pub use compilation::gpu_d4::GpuCompileConfig;
 pub use exact::{ExactDdnnfProgram, ExactResult};
 pub use mc::{McProgram, McEvalConfig, McResult};
 // WFS: see 5c.5 for consolidation — re-export the primary free functions
 ```
 
-Existing deep imports continue to work. These add convenience paths. The exact function
-names to re-export should be verified against the post-5a split surface.
+Existing deep imports continue to work. These add convenience paths. The lower-level
+`compile_gpu_d4` and `compile_gpu_d4_gated` are NOT re-exported — they are internal to
+the compilation module, called only by the `_and_verify*` orchestrators.
 
 ### 5c.5 WFS Entry Point Consolidation (N5)
 

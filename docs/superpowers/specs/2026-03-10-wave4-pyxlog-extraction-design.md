@@ -42,10 +42,10 @@ crates/pyxlog/src/
 |--------|---------|----------|
 | `lib.rs` | `#[pymodule]` function (lib.rs:6176), `#[pyclass]` struct definitions with fields, module registration, submodule imports | ~400 |
 | `program.rs` | `CompiledProgram` `#[pymethods]`: all method blocks currently starting at lib.rs:654 — evaluate, evaluate_device, tensor-source management, training helpers, forward/backward paths, cache controls, query-probability helpers | ~1,200 |
-| `logic.rs` | `LogicProgram` (lib.rs:3570), `Program` (lib.rs:451), `CompiledLogicProgram` (lib.rs:3599), `LogicQueryResult` (lib.rs:3694), `LogicEvalResult` (lib.rs:3709), `McDeviceEvalResult` (lib.rs:3714), `EvalResult` (lib.rs:3740) — all #[pymethods] for these types | ~600 |
-| `ilp.rs` | `CompiledIlpProgram` `#[pymethods]`: consolidated from 2 non-contiguous impl blocks (lib.rs:4412 and lib.rs:5677). `IlpProgramFactory` (lib.rs:4299) with `compile`. Runtime/control surface, training loop orchestration. Delegates GPU compute to `ilp_gpu.rs`. | ~1,000 |
+| `logic.rs` | `Program` #[pymethods] (lib.rs:454), `LogicProgram` #[pymethods] (lib.rs:3572), `CompiledLogicProgram` #[pymethods] (lib.rs:3604). Getter-only #[pyclass] data types (no #[pymethods]): `LogicQueryResult` (lib.rs:3694), `LogicEvalResult` (lib.rs:3709), `McDeviceEvalResult` (lib.rs:3714), `EvalResult` (lib.rs:3740). | ~600 |
+| `ilp.rs` | `CompiledIlpProgram` `#[pymethods]` (lib.rs:4412–5675, single block). `IlpProgramFactory` #[pymethods] (lib.rs:4302) with `compile`. The second impl block at lib.rs:5677 is a **plain Rust impl** (NOT #[pymethods]) containing private GPU export helpers (`build_zero_loss_grad`, `export_loss_grad_device_f32/f64`). Both blocks consolidate into `ilp.rs`. Delegates GPU compute to `ilp_gpu.rs`. | ~1,000 |
 | `ilp_gpu.rs` | GPU loss/gradient computation extracted from ILP: chunked/non-chunked paths, COO merge, sparse reduction, evidence clamping setup | ~700 |
-| `training.rs` | `TrainingHistory` (lib.rs:3802), `EpochStats` (lib.rs:3787) — recording, metrics access | ~400 |
+| `training.rs` | Getter-only #[pyclass] data types: `EpochStats` (lib.rs:3789), `TrainingHistory` (lib.rs:3804). TrainingHistory has a plain `impl` (lib.rs:3819, NOT #[pymethods]) with private helpers `new()`, `add_epoch()`, `add_batch()`. | ~400 |
 | `neural.rs` | Network registration, embedding registration/forward, tensor source management, generic f32/f64 forward-backward helper | ~500 |
 | `types.rs` | `scalar_type_name()`, error mapping helpers, value conversion utilities | ~250 |
 

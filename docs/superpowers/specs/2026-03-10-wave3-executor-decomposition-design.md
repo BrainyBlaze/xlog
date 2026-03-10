@@ -38,7 +38,7 @@ crates/xlog-runtime/src/
 
 | Module | Content | LOC est. |
 |--------|---------|----------|
-| `mod.rs` | Executor struct, fields, `execute_plan()` entry point, relation store access, profiler integration, public accessors (set_profiling, execution_stats, store, store_mut, put_relation, register_relation, reset_for_mc, reset_for_mc_relations, reset_for_ilp, ilp_registry_mut, ilp_last_result) | ~500 |
+| `mod.rs` | Executor struct, fields, `new()`/`new_with_config()`, `execute_plan()` entry point, relation store access (`store`/`store_mut`), `put_relation`, `register_relation`, profiler integration (`set_profiling`/`is_profiling`/`execution_stats`), stats access (`stats`/`stats_mut`/`stats_snapshot`), MC/ILP reset methods (`reset_for_mc`/`reset_for_mc_relations`/`reset_for_ilp`), ILP accessors (`ilp_registry_mut`/`ilp_last_result`) | ~500 |
 | `node_dispatch.rs` | `execute_node()` match dispatch, per-node handlers (scan, project, filter, distinct, limit), `execute_tensor_masked_join()` (moved as-is, 178 lines) | ~800 |
 | `recursive.rs` | `execute_recursive_scc()`, `execute_non_recursive_scc()`, `execute_fixpoint()`, fixpoint iteration using DeltaRelationTracker | ~500 |
 | `expression.rs` | Production expression evaluation: `execute_filter`, `eval_predicate_mask_gpu`, `compare_buffers_mask`, `evaluate_arith_expr`, `const_to_bytes_and_type`, mask operations | ~400 |
@@ -53,45 +53,55 @@ crates/xlog-runtime/src/
 The public API is wider than `execute_plan()`. Cross-crate callers depend on a significant
 surface. All methods listed below must remain `pub` after the split.
 
-### Orchestration & state management
+### Complete public method inventory
 
-| Method | Location | Called by |
-|--------|----------|----------|
-| `new()` / `new_with_config()` | executor.rs:189, executor.rs:199 | logic.rs:139 (xlog-gpu), pyxlog lib.rs:4364 |
-| `execute_plan()` | executor.rs (main entry) | logic.rs:139 (xlog-gpu) |
-| `set_profiling()` / `execution_stats()` | executor.rs | xlog-gpu/logic.rs |
-| `store()` / `store_mut()` | executor.rs | mc.rs:978, pyxlog lib.rs:5515 |
-| `store_relation_name()` | executor.rs:229 | xlog-prob, pyxlog |
-| `put_relation()` / `put_relation_data()` | executor.rs, executor.rs:266 | mc.rs:869, pyxlog lib.rs:5150 |
-| `register_relation()` | executor.rs | mc.rs:865, pyxlog |
-| `provider()` / `provider_arc()` | executor.rs:329, executor.rs:336 | xlog-prob, pyxlog |
-| `reset_for_mc()` / `reset_for_mc_relations()` | executor.rs | mc.rs:942, mc.rs:974 |
-| `reset_for_ilp()` | executor.rs | pyxlog ILP path |
-| `ilp_registry_mut()` / `ilp_last_result()` | executor.rs | pyxlog ILP path |
+All Executor methods are `pub fn` (no `pub(crate)` on Executor). Verified line numbers
+from current executor.rs:
 
-### Execution methods called directly by xlog-prob::mc (NOT purely internal)
+| Method | Line | Target module | Cross-crate callers |
+|--------|------|---------------|---------------------|
+| `new()` | 194 | mod.rs | xlog-gpu/logic.rs, pyxlog |
+| `new_with_config()` | 199 | mod.rs | pyxlog lib.rs:4364 |
+| `set_profiling()` | 220 | mod.rs | mc.rs:861 (via xlog-prob) |
+| `is_profiling()` | 229 | mod.rs | — (internal only currently) |
+| `execution_stats()` | 236 | mod.rs | xlog-gpu/logic.rs:163 |
+| `store()` | 241 | mod.rs | mc.rs:974, mc.rs:1360, pyxlog lib.rs:4217/5217/5229/5308/5398/5402/5555 |
+| `store_mut()` | 246 | mod.rs | xlog-gpu/logic.rs:120/134/146, pyxlog lib.rs:4221/4358/5153/5182/5522 |
+| `ilp_registry_mut()` | 251 | mod.rs | pyxlog ILP path |
+| `ilp_last_result()` | 256 | mod.rs | pyxlog ILP path |
+| `put_relation()` | 261 | mod.rs | mc.rs:869/951/978/1266/1875, pyxlog |
+| `stats()` | 266 | mod.rs | — (internal only currently) |
+| `reset_for_mc()` | 273 | mod.rs | pyxlog lib.rs:5150/5515 |
+| `reset_for_mc_relations()` | 290 | mod.rs | mc.rs:942 |
+| `reset_for_ilp()` | 319 | mod.rs | pyxlog lib.rs:5177 |
+| `stats_mut()` | 329 | mod.rs | — (internal only currently) |
+| `stats_snapshot()` | 336 | mod.rs | — (internal only currently) |
+| `register_relation()` | 368 | mod.rs | mc.rs:865, xlog-gpu/logic.rs:115, pyxlog lib.rs:4352/5517 |
+| `execute_plan()` | 392 | mod.rs | xlog-gpu/logic.rs:139, pyxlog lib.rs:4364/5158/5191/5526 |
+| `apply_deltas_and_recompute()` | 435 | rewrite.rs | — (no current cross-crate callers found) |
+| `execute_non_recursive_scc()` | 658 | recursive.rs | mc.rs:1724/1759 |
+| `execute_node()` | 694 | node_dispatch.rs | mc.rs:1783 |
+| `execute_recursive_scc()` | 960 | recursive.rs | mc.rs:1722/1757 |
+| `execute_stratum()` | 1577 | recursive.rs | — (stub: returns error directing to execute_plan) |
+| `execute_filter()` | 1609 | expression.rs | — (internal + test-only callers) |
 
-| Method | Location | Called by | Target module |
-|--------|----------|----------|---------------|
-| `execute_recursive_scc()` | executor.rs | mc.rs:1722 | → recursive.rs |
-| `execute_non_recursive_scc()` | executor.rs | mc.rs (nearby) | → recursive.rs |
-| `execute_node()` | executor.rs | mc.rs:1783 | → node_dispatch.rs |
-| `set_profiling()` | executor.rs | mc.rs:861 | → mod.rs |
-| `register_relation()` | executor.rs | mc.rs:865 | → mod.rs |
-| `put_relation()` | executor.rs | mc.rs:869 | → mod.rs |
-| `reset_for_mc_relations()` | executor.rs | mc.rs:942 | → mod.rs |
-| `store()` | executor.rs | mc.rs:978 | → mod.rs |
+### Cross-crate caller summary
 
-### Additional public methods used cross-crate
+| Consumer | Call sites | Unique methods used |
+|----------|-----------|---------------------|
+| xlog-gpu/logic.rs | 9 | register_relation, store_mut, execute_plan, execution_stats, store |
+| pyxlog/lib.rs | 21 | new_with_config, register_relation, store, store_mut, execute_plan, reset_for_mc, reset_for_ilp |
+| xlog-prob/mc.rs | 14 | set_profiling, register_relation, put_relation, reset_for_mc_relations, store, execute_recursive_scc, execute_non_recursive_scc, execute_node |
 
-| Method | Location | Called by | Target module |
-|--------|----------|----------|---------------|
-| `apply_deltas_and_recompute()` | executor.rs:435 | xlog-prob | → rewrite.rs |
-| `execute_stratum()` | executor.rs:1577 | xlog-prob | → recursive.rs |
-| `execute_filter()` | executor.rs:1609 | xlog-prob, internal | → expression.rs |
+**Note**: `apply_deltas_and_recompute()`, `execute_stratum()`, and `execute_filter()` have no
+verified cross-crate production callers. They remain `pub` for now but are candidates for
+`pub(crate)` tightening during the Wave 5 visibility audit. `execute_stratum()` is a stub
+that returns an error directing callers to use `execute_plan()` instead.
 
-All of these must remain `pub` (not `pub(crate)`) since xlog-prob and pyxlog are separate
-crates. The file split changes where the source lives, not the API surface.
+**Methods that do NOT exist on Executor** (corrected from earlier drafts): `provider()`,
+`provider_arc()`, `store_relation_name()`, `put_relation_data()`. The provider is accessed
+via the Executor's internal field, not a public accessor. Callers that need the provider
+obtain it before constructing the Executor.
 
 ## 3. Expression Evaluation Dedup
 
