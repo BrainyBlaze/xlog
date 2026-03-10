@@ -544,6 +544,38 @@ query(color(green)).
 }
 
 #[test]
+fn test_mc_sample_reset_plan_preserves_base_and_clears_sampled_relations() {
+    if !has_cuda_device() {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    }
+
+    let src = r#"
+    base().
+    0.5::flip().
+    seen_base() :- base().
+    seen_flip() :- flip().
+    query(seen_base()).
+    query(seen_flip()).
+    "#;
+
+    let program = McProgram::compile_source(src).unwrap();
+    let cfg = McEvalConfig {
+        samples: 2000,
+        seed: 9,
+        confidence: 0.95,
+        max_nonmonotone_iterations: 64,
+        sampling_method: Some(McSamplingMethod::Rejection),
+    };
+
+    let result = program.evaluate_gpu(cfg).unwrap();
+    let p_base = prob_of_atom(&result, "seen_base");
+    let p_flip = prob_of_atom(&result, "seen_flip");
+    assert!((p_base - 1.0).abs() < 1e-9, "p_base={}", p_base);
+    assert!((p_flip - 0.5).abs() < 0.08, "p_flip={}", p_flip);
+}
+
+#[test]
 fn test_mc_timing_breakdown_totals_sum() {
     let mut t = xlog_prob::mc::McTimingBreakdown::default();
     t.sampler_us = 10;

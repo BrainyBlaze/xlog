@@ -868,10 +868,14 @@ impl McProgram {
             &mut executor,
         )?;
 
-        let base_store = snapshot_store(&provider, &executor, &gpu_plan.schemas)?;
-
         let (prob_tables, ad_tables, ad_decisions) =
             build_prob_tables_device(self, &provider, &gpu_plan.schemas)?;
+
+        // Build the targeted reset plan: preserve pure deterministic base
+        // relations, clear everything else, and snapshot base facts for
+        // predicates that are both deterministic and dynamic.
+        let reset_plan =
+            build_sample_reset_plan(&gpu_plan, self, &provider, &executor)?;
 
         let num_vars = self.bernoulli_probs.len();
 
@@ -917,10 +921,27 @@ impl McProgram {
 
         let mut stats = EvalStats::default();
 
+        // Pre-compute reference slices for the reset plan (avoids per-sample allocation).
+        let preserve_refs: Vec<&str> = reset_plan.preserve.iter().map(|s| s.as_str()).collect();
+        let clear_refs: Vec<(&str, Schema)> = reset_plan
+            .clear
+            .iter()
+            .map(|(s, sc)| (s.as_str(), sc.clone()))
+            .collect();
+
         for sample_idx in 0..cfg.samples {
             let t_reset = std::time::Instant::now();
-            executor.reset_for_mc();
-            restore_store(&provider, &base_store, &mut executor)?;
+            executor.reset_for_mc_relations(&preserve_refs, &clear_refs)?;
+            // Re-load deterministic base facts for predicates that are both
+            // deterministic and dynamic (e.g., `a(1). 0.5::a(2).`).
+            for (pred, base_buf) in &reset_plan.reload_base {
+                let cloned = if base_buf.is_empty() {
+                    provider.create_empty_buffer(base_buf.schema().clone())?
+                } else {
+                    clone_buffer_device(&provider, base_buf)?
+                };
+                executor.put_relation(pred, cloned);
+            }
             if mc_profile {
                 timing.sample_reset_us += t_reset.elapsed().as_micros() as u64;
             }
@@ -1240,41 +1261,115 @@ fn load_deterministic_facts(
     Ok(())
 }
 
-fn snapshot_store(
-    provider: &Arc<CudaKernelProvider>,
-    executor: &Executor,
-    schemas: &HashMap<String, Schema>,
-) -> Result<HashMap<String, CudaBuffer>> {
-    let mut snapshot: HashMap<String, CudaBuffer> = HashMap::new();
-    for (pred, schema) in schemas {
-        let buffer = executor
-            .store()
-            .get(pred)
-            .ok_or_else(|| XlogError::Execution(format!("Missing relation {}", pred)))?;
-        let cloned = if buffer.is_empty() {
-            provider.create_empty_buffer(schema.clone())?
-        } else {
-            clone_buffer_device(provider, buffer)?
-        };
-        snapshot.insert(pred.clone(), cloned);
-    }
-    Ok(snapshot)
+/// Plan for per-sample executor reset.
+///
+/// Instead of cloning/restoring the entire store each sample, we classify
+/// relations as either *preserve* (deterministic base facts that are never
+/// overwritten) or *clear* (everything else).  Preserved relations stay
+/// in-place across samples; cleared relations are re-created as empty
+/// buffers.
+///
+/// A predicate that has **both** deterministic facts and dynamic writes
+/// (probabilistic / AD / rule-head) is placed in `clear`, and its
+/// deterministic base facts are re-loaded each sample from `reload_base`.
+struct McSampleResetPlan {
+    /// Relations to keep untouched (pure deterministic base facts).
+    preserve: Vec<String>,
+    /// Relations to clear to empty buffers each sample (dynamic/sampled/rule-derived).
+    clear: Vec<(String, Schema)>,
+    /// Deterministic base-fact buffers for predicates that are both
+    /// deterministic AND dynamic.  These are cloned into the store each
+    /// sample after clearing, before `build_sample_buffers` merges sampled
+    /// rows on top.
+    reload_base: Vec<(String, CudaBuffer)>,
 }
 
-fn restore_store(
+/// Build a reset plan from the compiled MC program and the GPU execution plan.
+///
+/// A predicate is "preserve-safe" iff it:
+/// - has at least one deterministic fact (from `program.facts()`)
+/// - is NOT a probabilistic fact predicate (`self.prob_facts`)
+/// - is NOT an annotated disjunction choice predicate (`self.annotated_disjunctions`)
+/// - is NOT a rule head predicate (`program.rules`, excluding facts)
+/// - is NOT a query temp relation (`__xlog_query_*`)
+fn build_sample_reset_plan(
+    gpu_plan: &GpuMcPlan,
+    mc_program: &McProgram,
     provider: &Arc<CudaKernelProvider>,
-    base_store: &HashMap<String, CudaBuffer>,
-    executor: &mut Executor,
-) -> Result<()> {
-    for (pred, buffer) in base_store {
-        let cloned = if buffer.is_empty() {
-            provider.create_empty_buffer(buffer.schema().clone())?
-        } else {
-            clone_buffer_device(provider, buffer)?
-        };
-        executor.put_relation(pred, cloned);
+    executor: &Executor,
+) -> Result<McSampleResetPlan> {
+    // Collect the set of predicates that have deterministic facts.
+    let mut det_preds: HashSet<String> = HashSet::new();
+    for fact in gpu_plan.program.facts() {
+        det_preds.insert(fact.head.predicate.clone());
     }
-    Ok(())
+
+    // Collect predicates that are "dynamic" — written by sampling or rules.
+    let mut dynamic_preds: HashSet<String> = HashSet::new();
+
+    // Probabilistic fact predicates.
+    for pf in &mc_program.prob_facts {
+        dynamic_preds.insert(pf.atom.predicate.clone());
+    }
+
+    // Annotated disjunction choice predicates.
+    for ad in &mc_program.annotated_disjunctions {
+        for choice in &ad.choices {
+            dynamic_preds.insert(choice.predicate.clone());
+        }
+    }
+
+    // Rule head predicates (proper rules only, not facts).
+    for rule in gpu_plan.program.proper_rules() {
+        dynamic_preds.insert(rule.head.predicate.clone());
+    }
+
+    // Query temp relations.
+    for (name, _) in &gpu_plan.schemas {
+        if name.starts_with("__xlog_query_") {
+            dynamic_preds.insert(name.clone());
+        }
+    }
+
+    let mut preserve: Vec<String> = Vec::new();
+    let mut clear: Vec<(String, Schema)> = Vec::new();
+    let mut reload_base: Vec<(String, CudaBuffer)> = Vec::new();
+
+    for (name, schema) in &gpu_plan.schemas {
+        let is_det = det_preds.contains(name);
+        let is_dyn = dynamic_preds.contains(name);
+
+        if is_det && !is_dyn {
+            // Pure deterministic — preserve in-place.
+            preserve.push(name.clone());
+        } else {
+            // Dynamic (possibly also deterministic) — clear each sample.
+            clear.push((name.clone(), schema.clone()));
+
+            if is_det && is_dyn {
+                // Has both deterministic and dynamic facts: snapshot the
+                // deterministic base buffer so we can re-load it each sample.
+                let buf = executor.store().get(name).ok_or_else(|| {
+                    XlogError::Execution(format!(
+                        "Missing relation {} for reload snapshot",
+                        name
+                    ))
+                })?;
+                let cloned = if buf.is_empty() {
+                    provider.create_empty_buffer(schema.clone())?
+                } else {
+                    clone_buffer_device(provider, buf)?
+                };
+                reload_base.push((name.clone(), cloned));
+            }
+        }
+    }
+
+    Ok(McSampleResetPlan {
+        preserve,
+        clear,
+        reload_base,
+    })
 }
 
 fn clone_buffer_device(
