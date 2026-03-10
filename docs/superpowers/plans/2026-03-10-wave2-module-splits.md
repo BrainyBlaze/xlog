@@ -4,7 +4,7 @@
 
 **Goal:** Split three god modules (provider.rs 12,809 LOC, pyxlog/lib.rs 6,202 LOC) into focused submodules, genericize type-specialized functions, extract profiling boilerplate, and consolidate the test harness.
 
-**Architecture:** Move functions into submodules by category while keeping the public API stable via re-exports from the parent module. Use Rust generics with a `DeviceRepr` trait to replace type-specialized download/upload functions. Create a shared test helper module for CUDA tests.
+**Architecture:** Move functions into submodules by category while keeping the public API stable via re-exports from the parent module. Use Rust generics with a `ColumnRepr` trait (supertrait of `cudarc::driver::ColumnRepr`) to replace type-specialized download/upload functions. Create a shared test helper module for CUDA tests.
 
 **Tech Stack:** Rust (generics, module system), PyO3 (Python bindings). No new dependencies.
 
@@ -35,7 +35,7 @@
 
 ### Task 1: Convert provider.rs to a directory module
 
-**Important context:** The `CudaKernelProvider` struct (defined at ~line 744) has 5 fields that all submodules need access to:
+**Important context:** The `CudaKernelProvider` struct (defined at line 687, first `impl` block starts at line 744) has 5 fields that all submodules need access to:
 ```rust
 pub struct CudaKernelProvider {
     device: Arc<CudaDevice>,
@@ -47,6 +47,10 @@ pub struct CudaKernelProvider {
 ```
 
 **Strategy:** Keep the struct definition and shared helpers in `mod.rs`. Each submodule file contains `impl CudaKernelProvider` blocks with the category-specific methods. Rust allows multiple `impl` blocks for the same type across modules within the same crate.
+
+**Note on visibility:** Private struct fields (like `device`, `memory`, `transfer_tracker`) are accessible from `impl` blocks in any module within the same crate. No visibility changes are needed — `use super::*;` imports types, and `self.field` access works across module boundaries within a crate.
+
+**Important:** When moving a public function, also move all private helper functions it calls (unless they're shared by multiple submodules, in which case they stay in `mod.rs`). The function lists below include both public API and their private helpers.
 
 - [ ] **Step 1: Create the provider directory**
 
@@ -86,11 +90,22 @@ Public API:
 - `hash_join_v2_with_index` (line 7544)
 - `build_hash_table_u64` (line 8025)
 
-Internal helpers (move as `pub(crate)` or keep accessible):
+Internal helpers (move with their callers):
 - `pack_keys_gpu` (line 7666)
+- `pack_keys_gpu_generic` (line 7783)
+- `compute_hashes_and_pack_keys` (line 7897)
 - `build_hash_table_v2` (line 7919)
 - `hash_join_inner_v2` (line 8047)
 - `hash_join_inner_v2_indexed` (line 8253)
+- `hash_join_semi_impl` (line 8423)
+- `membership_mask_device` (line 8534)
+- `membership_mask` (line 8658)
+- `hash_join_semi_indexed` (line 8939)
+- `hash_join_anti_impl` (line 9016)
+- `hash_join_anti_indexed` (line 9123)
+- `hash_join_left_outer_indexed` (line 9199)
+- `hash_join_left_outer_impl` (line 9540)
+- `left_outer_with_nulls` (line 9923)
 
 - [ ] **Step 1: Create joins.rs with the impl block**
 
@@ -136,13 +151,17 @@ git commit -m "refactor(cuda): extract join operations to provider/joins.rs"
 
 ### Task 3: Extract set_ops.rs
 
-**Functions to move:**
+**Functions to move (public + private helpers):**
+- `dedup` (line 1998)
+- `dedup_sorted` (line 2033)
+- `scalar_type_code` (line 2063, helper for dedup)
 - `union` (line 2217)
+- `concat_buffers_gpu` (line 2221, helper for union)
 - `diff` (line 2341)
 - `union_gpu` (line 2536)
 - `diff_gpu` (line 2592)
-- `dedup` (line 1998)
-- `dedup_sorted` (line 2033)
+- `diff_gpu_u32` (line 2639, helper for diff_gpu)
+- `diff_via_anti_join` (line 2781, helper for diff)
 
 - [ ] **Step 1–5:** Same pattern as Task 2. Create `provider/set_ops.rs`, move functions, add `mod set_ops;`, verify, commit.
 
@@ -153,12 +172,17 @@ git commit -m "refactor(cuda): extract set operations to provider/set_ops.rs"
 ### Task 4: Extract filters.rs
 
 **Functions to move:**
-- All `filter_*` functions (lines 4814–5585)
+- All `filter_*` functions (lines 4814–5413)
 - All `compare_columns_*` functions (lines 5054–5162)
+- `compare_const_mask` (line 5179, helper)
+- `compare_columns_mask` (line 5259, helper)
 - `filter_by_mask` (line 5536)
+- `compact_buffer_by_mask` (line 5562, helper)
 - `compact_buffer_by_device_mask_counted` (line 5585)
+- `capture_compact_count` (line 5674, helper)
+- `compact_buffer_by_device_mask_device_count` (line 5701, helper)
+- `compact_buffer_by_device_mask` (line 5792, helper)
 - `filter_by_device_mask` (line 5851)
-- `filter_f64_*` functions (lines 5367–5413)
 
 - [ ] **Step 1–5:** Same pattern. Create `provider/filters.rs`, move, verify, commit.
 
@@ -171,6 +195,8 @@ git commit -m "refactor(cuda): extract filter operations to provider/filters.rs"
 **Functions to move:**
 - `groupby_agg` (line 2819)
 - `groupby_multi_agg` (line 2856)
+- `capture_num_groups` (line 3384, helper)
+- `groupby_multi_agg_result_schema` (line 3411, helper)
 
 - [ ] **Step 1–5:** Same pattern. Create `provider/groupby.rs`, move, verify, commit.
 
@@ -194,6 +220,7 @@ git commit -m "refactor(cuda): extract groupby operations to provider/groupby.rs
 - `gather_u64_lo_by_indices` (line 4362)
 - `gather_u64_hi_by_indices` (line 4395)
 - `radix_sort_u32_pairs` (line 4428)
+- `radix_sort_u32_pairs_with_scratch` (line 4109)
 - `scan_u8_mask_device` (line 4454)
 - `count_mask_device` (line 4524)
 - `count_mask_into_slot` (line 4575)
@@ -207,13 +234,17 @@ git commit -m "refactor(cuda): extract scan/sort operations to provider/scan.rs"
 ### Task 7: Extract memory.rs
 
 **Functions to move:**
-- All `create_buffer_from_*_slice` functions (lines 5961–6166)
+- All `create_buffer_from_*_slice` functions (lines 5961–6139)
+- `create_buffer_from_u32_columns` (line 5983)
+- `create_buffer_from_slices` (line 6166)
 - `create_empty_buffer` (line 7384)
+- `clone_buffer` (line 9982)
 - `extract_column` (line 10022)
 - `create_constant_column` (line 10070)
 - `create_constant_column_with_device_count` (line 10156)
 - `combine_columns` (line 11096)
 - All `download_column_*` functions (lines 6874–7171)
+- `download_f64_untracked` (line 7020, unique semantics — keep separate from generic)
 
 Shared helpers to keep in mod.rs (used by multiple submodules):
 - `device_row_count` (line 7200)
@@ -248,6 +279,8 @@ git commit -m "refactor(cuda): extract buffer/memory operations to provider/memo
 - `from_arrow_ipc_stream` (line 6803)
 - `write_arrow_ipc_stream_file` (line 6830)
 - `read_arrow_ipc_stream_file` (line 6847)
+- `build_arrow_device_child` (line 6553, helper)
+- `scalar_type_from_arrow_field` (line 6652, helper)
 
 - [ ] **Step 1–5:** Same pattern. Create `provider/arrow.rs`, move, verify, commit.
 
@@ -268,6 +301,7 @@ git commit -m "refactor(cuda): extract Arrow conversion to provider/arrow.rs"
 - `max_columns` (line 10694)
 - `pow_columns` (line 10738)
 - `cast_column` (line 10946)
+- `select_columns` (line 10829)
 - `select_columns_bool` (line 10918)
 - `binary_arith_op_device` (line 11018)
 
@@ -301,6 +335,7 @@ git commit -m "refactor(cuda): extract sampling operations to provider/sampling.
 - `ilp_reduce_sum_f64_launch` (line 11208)
 - `ilp_coo_fill_from_mask_launch` (line 11385)
 - `ilp_csr_histogram_launch` (line 11450)
+- `extract_active_rule_indices` (line 11247, helper)
 
 - [ ] **Step 1–5:** Same pattern. Create `provider/ilp.rs`, move, verify, commit.
 
@@ -336,7 +371,7 @@ If any tests failed, fix and commit.
 
 ## Chunk 2: Genericize Type-Specialized Functions (H2)
 
-### Task 13: Create DeviceRepr trait and generic download_column
+### Task 13: Create ColumnRepr trait and generic download_column
 
 **Files:**
 - Create: `crates/xlog-cuda/src/provider/device_repr.rs`
@@ -396,14 +431,22 @@ Run: `cargo test -p xlog-cuda --test test_generic_download --release 2>&1 | head
 
 Expected: Compilation failure — `download_column` method doesn't exist.
 
-- [ ] **Step 3: Define the DeviceRepr trait**
+- [ ] **Step 3: Define the ColumnRepr trait**
 
-Create `crates/xlog-cuda/src/provider/device_repr.rs`:
+Create `crates/xlog-cuda/src/provider/column_repr.rs`:
+
+**IMPORTANT:** `cudarc::driver::DeviceRepr` already exists and is used by 6+ functions in provider.rs. Our trait MUST NOT collide with that name. We use `ColumnRepr` as a supertrait:
 
 ```rust
-/// Trait for types that can be transferred between host and GPU device memory.
+/// Trait for types that can be downloaded from GPU columns as typed vectors.
+/// Supertrait of `cudarc::driver::DeviceRepr` — any `ColumnRepr` type is also `DeviceRepr`.
 /// Enables generic `download_column<T>` and `create_buffer_from_slice<T>`.
-pub trait DeviceRepr: Copy + Sized + 'static {
+///
+/// # Safety
+/// This trait is safe because it only adds byte-level serialization on top of
+/// the already-unsafe `DeviceRepr`. The `DeviceRepr` safety contract is maintained
+/// by cudarc's implementations.
+pub trait ColumnRepr: cudarc::driver::DeviceRepr + Copy + Sized + 'static {
     /// Number of bytes per element.
     const BYTE_SIZE: usize = std::mem::size_of::<Self>();
 
@@ -414,54 +457,54 @@ pub trait DeviceRepr: Copy + Sized + 'static {
     fn to_le_bytes_vec(&self) -> Vec<u8>;
 }
 
-impl DeviceRepr for u32 {
+impl ColumnRepr for u32 {
     fn from_le_bytes(bytes: &[u8]) -> Self {
         u32::from_le_bytes(bytes.try_into().unwrap())
     }
     fn to_le_bytes_vec(&self) -> Vec<u8> { self.to_le_bytes().to_vec() }
 }
 
-impl DeviceRepr for u64 {
+impl ColumnRepr for u64 {
     fn from_le_bytes(bytes: &[u8]) -> Self {
         u64::from_le_bytes(bytes.try_into().unwrap())
     }
     fn to_le_bytes_vec(&self) -> Vec<u8> { self.to_le_bytes().to_vec() }
 }
 
-impl DeviceRepr for i32 {
+impl ColumnRepr for i32 {
     fn from_le_bytes(bytes: &[u8]) -> Self {
         i32::from_le_bytes(bytes.try_into().unwrap())
     }
     fn to_le_bytes_vec(&self) -> Vec<u8> { self.to_le_bytes().to_vec() }
 }
 
-impl DeviceRepr for i64 {
+impl ColumnRepr for i64 {
     fn from_le_bytes(bytes: &[u8]) -> Self {
         i64::from_le_bytes(bytes.try_into().unwrap())
     }
     fn to_le_bytes_vec(&self) -> Vec<u8> { self.to_le_bytes().to_vec() }
 }
 
-impl DeviceRepr for f32 {
+impl ColumnRepr for f32 {
     fn from_le_bytes(bytes: &[u8]) -> Self {
         f32::from_le_bytes(bytes.try_into().unwrap())
     }
     fn to_le_bytes_vec(&self) -> Vec<u8> { self.to_le_bytes().to_vec() }
 }
 
-impl DeviceRepr for f64 {
+impl ColumnRepr for f64 {
     fn from_le_bytes(bytes: &[u8]) -> Self {
         f64::from_le_bytes(bytes.try_into().unwrap())
     }
     fn to_le_bytes_vec(&self) -> Vec<u8> { self.to_le_bytes().to_vec() }
 }
 
-impl DeviceRepr for u8 {
+impl ColumnRepr for u8 {
     fn from_le_bytes(bytes: &[u8]) -> Self { bytes[0] }
     fn to_le_bytes_vec(&self) -> Vec<u8> { vec![*self] }
 }
 
-impl DeviceRepr for bool {
+impl ColumnRepr for bool {
     const BYTE_SIZE: usize = 1;
     fn from_le_bytes(bytes: &[u8]) -> Self { bytes[0] != 0 }
     fn to_le_bytes_vec(&self) -> Vec<u8> { vec![if *self { 1 } else { 0 }] }
@@ -473,11 +516,13 @@ impl DeviceRepr for bool {
 In `crates/xlog-cuda/src/provider/memory.rs`, add:
 
 ```rust
-use super::device_repr::DeviceRepr;
+use super::column_repr::ColumnRepr;
 
 impl CudaKernelProvider {
     /// Generic column download — replaces all type-specialized download_column_* functions.
-    pub fn download_column<T: DeviceRepr>(&self, buffer: &CudaBuffer, col_idx: usize) -> Result<Vec<T>> {
+    /// Matches existing behavior: increments d2h_transfer_count, uses raw dtoh_sync_copy_into
+    /// (NOT the tracked variant — matching the current typed functions exactly).
+    pub fn download_column<T: ColumnRepr>(&self, buffer: &CudaBuffer, col_idx: usize) -> Result<Vec<T>> {
         self.d2h_transfer_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let col = buffer.column(col_idx)?;
         let num_rows = self.device_row_count(buffer)?;
@@ -491,13 +536,14 @@ impl CudaKernelProvider {
             .inner()
             .dtoh_sync_copy_into(&col_view, &mut bytes)
             .map_err(|e| XlogError::Execution(format!("D2H copy failed: {}", e)))?;
-        self.transfer_tracker.record_d2h(num_bytes);
         Ok(bytes.chunks_exact(T::BYTE_SIZE).map(|c| T::from_le_bytes(c)).collect())
     }
 }
 ```
 
-Add `mod device_repr;` and `pub use device_repr::DeviceRepr;` to `provider/mod.rs`.
+**NOTE:** `download_f64_untracked` (line 7020) has unique semantics — it does NOT increment `d2h_transfer_count` but DOES use `dtoh_sync_copy_into_tracked`. This function is NOT replaced by the generic version and should remain as-is in `memory.rs`.
+
+Add `mod column_repr;` and `pub use column_repr::ColumnRepr;` to `provider/mod.rs`.
 
 - [ ] **Step 5: Run test to verify it passes**
 
@@ -520,7 +566,7 @@ Expected: All pass (deprecated functions still compile).
 ```bash
 git add crates/xlog-cuda/src/provider/
 git add crates/xlog-cuda/tests/test_generic_download.rs
-git commit -m "feat(cuda): add generic download_column<T> via DeviceRepr trait, deprecate typed variants"
+git commit -m "feat(cuda): add generic download_column<T> via ColumnRepr trait, deprecate typed variants"
 ```
 
 ### Task 14: Add generic create_buffer_from_slice
@@ -534,7 +580,7 @@ Test that `provider.create_buffer_from_slice::<u32>(&data, schema)` produces the
 - [ ] **Step 2: Implement generic version**
 
 ```rust
-pub fn create_buffer_from_slice<T: DeviceRepr>(&self, data: &[T], schema: Schema) -> Result<CudaBuffer> {
+pub fn create_buffer_from_slice<T: ColumnRepr>(&self, data: &[T], schema: Schema) -> Result<CudaBuffer> {
     let bytes: Vec<u8> = data.iter().flat_map(|v| v.to_le_bytes_vec()).collect();
     // ... same logic as typed version using bytes
 }
@@ -630,7 +676,7 @@ git commit -m "refactor(pyxlog): extract utility types and helpers to types.rs"
 - `EpochStats` struct (line 3789)
 - `TrainingHistory` struct (line 3804)
 
-All are `#[pyclass]` types — they need `#[pyclass]` annotations preserved and must be registered in the module init function.
+All are `#[pyclass]` types — they need `#[pyclass]` annotations preserved and must be registered in the module init function. **IMPORTANT:** Any `#[pymethods]` impl blocks must move with their `#[pyclass]` structs. The module registration in `lib.rs` (`m.add_class::<Type>()`) must import the types from their new locations via `use`.
 
 - [ ] **Step 1–4:** Same pattern. Create `results.rs`, move, update imports, verify, commit.
 
@@ -718,14 +764,14 @@ Ok(result)
 
 - [ ] **Step 1: Write the profiled_execute helper**
 
-Add to `executor.rs`:
+Add to `executor.rs`. **IMPORTANT:** Use `result.num_rows()` (cheap host-side field, returns `u64`) for row counts, NOT `self.buffer_row_count()` (which does a D2H transfer). The existing profiling code uses `num_rows()`.
 
 ```rust
 /// Execute an operation with profiling instrumentation.
 fn profiled_execute<F>(
     &mut self,
     op_name: &str,
-    input_rows: usize,
+    input_rows: u64,
     f: F,
 ) -> Result<CudaBuffer>
 where
@@ -735,8 +781,7 @@ where
     let result = f(self)?;
     if let Some(start) = start {
         let mem = self.provider.memory().allocated_bytes();
-        let out_rows = self.buffer_row_count(&result)? as usize;
-        self.profiler.record_op(op_name, input_rows, out_rows, start, mem);
+        self.profiler.record_op(op_name, input_rows as usize, result.num_rows() as usize, start, mem);
         self.profiler.record_peak_memory(mem);
     }
     Ok(result)
@@ -747,31 +792,17 @@ where
 
 Example transformation for the Filter arm:
 ```rust
-// Before
-RirNode::Filter { input, predicate } => {
-    let start = self.profiler.start_op();
-    let input_buf = self.execute_node(input)?;
-    let input_rows = self.buffer_row_count(&input_buf)? as usize;
-    let result = self.execute_filter(&input_buf, predicate)?;
-    if let Some(start) = start {
-        let mem = self.provider.memory().allocated_bytes();
-        self.profiler.record_op("filter", input_rows, self.buffer_row_count(&result)? as usize, start, mem);
-        self.profiler.record_peak_memory(mem);
-    }
-    Ok(result)
-}
-
 // After
 RirNode::Filter { input, predicate } => {
     let input_buf = self.execute_node(input)?;
-    let input_rows = self.buffer_row_count(&input_buf)? as usize;
+    let input_rows = input_buf.num_rows();
     self.profiled_execute("filter", input_rows, |this| {
         this.execute_filter(&input_buf, predicate)
     })
 }
 ```
 
-**CAUTION:** The closure borrows `self` mutably. You may need to adjust the signature to take `&Self` if the inner operation only needs shared access, or use a different pattern if borrow checker complains. Test each arm individually.
+**Borrow checker note:** The closure captures `&input_buf` and `predicate` — both are local variables or references into the `node` parameter, NOT fields of `self`. So the mutable borrow of `self` by `profiled_execute` does not conflict. Test each arm to confirm.
 
 - [ ] **Step 3: Run executor tests**
 
