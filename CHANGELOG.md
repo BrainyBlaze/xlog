@@ -6,6 +6,19 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- **MC runtime optimization** (`xlog-prob`, `xlog-runtime`): 8.6% wall-clock improvement on
+  the MC evaluation hot loop (14.11s → 12.90s on 1000-sample clamped benchmark). No API changes.
+  - `McTimingBreakdown` struct with env-gated profiling (`XLOG_MC_PROFILE=1`) for per-phase
+    timing (sampler, reset, build, eval, count).
+  - `McCountStrategy` enum: maps sampling method to count strategy (`QueriesAndEvidence` for
+    rejection, `QueriesOnly` for clamped). Skips evidence-side allocations/uploads in clamped mode.
+  - `McSampleResetPlan` struct + `build_sample_reset_plan()`: classifies relations as preserve
+    (deterministic-only), clear (dynamic), or reload_base. Replaces full store clone/restore
+    with targeted per-relation reset.
+  - `Executor::reset_for_mc_relations()`: new method for targeted preserve/clear reset of
+    relations between MC samples.
+  - Pre-allocated pointer buffers (`query_ptrs_buf`, `evidence_ptrs_buf`) outside the sample
+    closure, avoiding per-sample Vec heap allocation.
 - **Evidence clamping for MC inference** (`xlog-prob`): Monte Carlo evidence conditioning
   via `McSamplingMethod::EvidenceClamping`. Forces root Bernoulli evidence variables in the
   sampling kernel so every sample counts (`evidence_samples == total_samples`). Auto-selected
@@ -22,6 +35,23 @@ All notable changes to this project are documented in this file.
   `ChoiceSource`, `GroundAtom`, `Provenance`, `Value`, `ChoiceVarId`, `LeafId`, `PirGraph`,
   `PirNode`, `PirNodeId`. Inline retention at existing extraction allocation sites — no new
   passes or post-hoc reconstruction.
+
+### Changed
+
+- **MC behavior test budgets reduced** (`xlog-prob`): 10 MC tests trimmed from 50K–80K samples
+  to 2K–5K (one 20K accuracy guard retained). Reduces test-suite turnaround without changing
+  runtime engine behavior.
+- **`build_sample_buffers()` no longer performs per-sample D2H row-count reads**: Uses host-side
+  `num_rows()` (capacity) instead of synchronous `device_row_count_u32()` GPU→CPU transfers.
+- **MC per-sample store management replaced**: Full `snapshot_store()`/`restore_store()` cycle
+  replaced by `McSampleResetPlan` with targeted relation-level reset.
+
+### Removed
+
+- **`device_row_count_u32()`** helper in MC hot loop — synchronous D2H scalar read, replaced
+  by host-side capacity checks.
+- **`snapshot_store()` / `restore_store()`** in MC evaluator — replaced by `McSampleResetPlan`
+  with `reset_for_mc_relations()`.
 
 ## [0.5.0] — 2026-03-08
 
