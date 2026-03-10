@@ -275,6 +275,41 @@ impl Executor {
         self.join_index_cache.clear();
     }
 
+    /// Targeted MC reset: preserve base/static relations and clear dynamic ones.
+    ///
+    /// Unlike [`reset_for_mc`] which drops all relations, this method keeps the
+    /// relations listed in `preserve` untouched, removes every other relation,
+    /// then re-creates the relations specified in `clear_to_empty` as empty
+    /// GPU buffers with the given schemas.  The join-index cache is fully
+    /// invalidated because dynamic relations have changed.
+    ///
+    /// # Arguments
+    /// * `preserve` - Relation names to keep as-is (base/static facts).
+    /// * `clear_to_empty` - `(name, schema)` pairs for dynamic relations that
+    ///   should be present but empty after the reset.
+    pub fn reset_for_mc_relations(
+        &mut self,
+        preserve: &[&str],
+        clear_to_empty: &[(&str, Schema)],
+    ) -> Result<()> {
+        let preserve_set: HashSet<&str> = preserve.iter().copied().collect();
+        let existing_names: Vec<String> = self.store.names().map(|s| s.to_string()).collect();
+
+        for name in &existing_names {
+            if !preserve_set.contains(name.as_str()) {
+                self.store.remove(name);
+            }
+        }
+
+        for (name, schema) in clear_to_empty {
+            let empty = self.provider.create_empty_buffer(schema.clone())?;
+            self.store.put(name, empty);
+        }
+
+        self.join_index_cache.clear();
+        Ok(())
+    }
+
     /// Reset executor state for ILP attempt reuse.
     ///
     /// Clears ILP registry (masks + tagged results), relation storage,
@@ -4263,5 +4298,40 @@ mod tests {
 
         let values = read_buffer_u32(&executor, &result, 0);
         assert_eq!(values, vec![3, 4, 5]);
+    }
+
+    // ============== MC Relation Reset Tests ==============
+
+    #[test]
+    fn test_reset_for_mc_relations_preserves_static_and_clears_dynamic() {
+        let mut executor = match create_test_executor() {
+            Some(e) => e,
+            None => {
+                eprintln!("Skipping: no CUDA device");
+                return;
+            }
+        };
+
+        executor.register_relation(RelId(1), "base_rel");
+        executor.register_relation(RelId(2), "dyn_rel");
+
+        let schema = Schema::new(vec![("x".to_string(), ScalarType::U32)]);
+        let base = create_test_buffer(&executor, &[1u32], "x");
+        let dyn_buf = create_test_buffer(&executor, &[9u32], "x");
+        executor.put_relation("base_rel", base);
+        executor.put_relation("dyn_rel", dyn_buf);
+
+        executor
+            .reset_for_mc_relations(&["base_rel"], &[("dyn_rel", schema.clone())])
+            .unwrap();
+
+        assert_eq!(
+            buffer_row_count(&executor, executor.store().get("base_rel").unwrap()),
+            1
+        );
+        assert_eq!(
+            buffer_row_count(&executor, executor.store().get("dyn_rel").unwrap()),
+            0
+        );
     }
 }
