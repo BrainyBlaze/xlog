@@ -145,6 +145,12 @@ impl std::fmt::Display for ModuleError {
 
 impl std::error::Error for ModuleError {}
 
+impl From<ModuleError> for xlog_core::XlogError {
+    fn from(e: ModuleError) -> Self {
+        xlog_core::XlogError::Compilation(e.to_string())
+    }
+}
+
 /// Generate internal qualified name for a predicate
 /// E.g., (["utils", "math"], "abs") -> "__utils_math__abs"
 pub fn internal_name(module_path: &[String], predicate: &str) -> String {
@@ -229,6 +235,20 @@ mod tests {
         assert_eq!(
             parse_internal_name("__single__pred"),
             (vec!["single".to_string()], "pred".to_string())
+        );
+    }
+
+    #[test]
+    fn test_module_error_into_xlog() {
+        let err = ModuleError::ParseError {
+            path: std::path::PathBuf::from("/test.xlog"),
+            message: "unexpected EOF".to_string(),
+        };
+        let xlog_err: xlog_core::XlogError = err.into();
+        let msg = xlog_err.to_string();
+        assert!(
+            msg.contains("unexpected EOF"),
+            "Expected 'unexpected EOF' in: {msg}"
         );
     }
 }

@@ -92,6 +92,18 @@ impl std::fmt::Display for TypeError {
 
 impl std::error::Error for TypeError {}
 
+impl From<FunctionError> for xlog_core::XlogError {
+    fn from(e: FunctionError) -> Self {
+        xlog_core::XlogError::Compilation(e.to_string())
+    }
+}
+
+impl From<TypeError> for xlog_core::XlogError {
+    fn from(e: TypeError) -> Self {
+        xlog_core::XlogError::Type(e.to_string())
+    }
+}
+
 /// Warning for potentially infinite recursion
 #[derive(Debug, Clone)]
 pub struct RecursionWarning {
@@ -415,6 +427,27 @@ fn is_builtin(name: &str) -> bool {
 mod tests {
     use super::*;
     use crate::ast::FuncParam;
+    use xlog_core::XlogError;
+
+    #[test]
+    fn test_function_error_into_xlog() {
+        let err = FunctionError::UndefinedFunction {
+            name: "foo".to_string(),
+        };
+        let xlog_err: XlogError = err.into();
+        let msg = xlog_err.to_string();
+        assert!(msg.contains("foo"), "Expected 'foo' in: {msg}");
+    }
+
+    #[test]
+    fn test_type_error_into_xlog() {
+        let err = TypeError::CannotInfer {
+            name: "X".to_string(),
+        };
+        let xlog_err: XlogError = err.into();
+        let msg = xlog_err.to_string();
+        assert!(msg.contains("X"), "Expected 'X' in: {msg}");
+    }
 
     fn make_arith_func(name: &str, body: ArithExpr) -> FuncDef {
         FuncDef {
