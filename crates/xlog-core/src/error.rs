@@ -34,6 +34,23 @@ pub enum XlogError {
     Execution(String),
 }
 
+impl XlogError {
+    /// Create a Kernel error with structured context: "op: detail: source".
+    pub fn kernel_ctx(op: &str, detail: &str, source: &impl std::fmt::Display) -> Self {
+        XlogError::Kernel(format!("{op}: {detail}: {source}"))
+    }
+
+    /// Create an Execution error with structured context.
+    pub fn execution_ctx(op: &str, detail: &str, source: &impl std::fmt::Display) -> Self {
+        XlogError::Execution(format!("{op}: {detail}: {source}"))
+    }
+
+    /// Create a Compilation error with structured context.
+    pub fn compilation_ctx(op: &str, detail: &str, source: &impl std::fmt::Display) -> Self {
+        XlogError::Compilation(format!("{op}: {detail}: {source}"))
+    }
+}
+
 /// Result alias using XlogError
 pub type Result<T> = std::result::Result<T, XlogError>;
 
@@ -63,5 +80,32 @@ mod tests {
         };
         assert!(err.to_string().contains("1024"));
         assert!(err.to_string().contains("512"));
+    }
+
+    #[test]
+    fn test_kernel_ctx() {
+        let err = XlogError::kernel_ctx("download_column", "dtoh copy failed", &"device error 42");
+        assert_eq!(
+            err.to_string(),
+            "Kernel error: download_column: dtoh copy failed: device error 42"
+        );
+    }
+
+    #[test]
+    fn test_execution_ctx() {
+        let err = XlogError::execution_ctx("execute_node", "filter failed", &"type mismatch");
+        assert_eq!(
+            err.to_string(),
+            "Execution error: execute_node: filter failed: type mismatch"
+        );
+    }
+
+    #[test]
+    fn test_compilation_ctx() {
+        let err = XlogError::compilation_ctx("compile_d4", "frontier overflow", &"limit 1024");
+        assert_eq!(
+            err.to_string(),
+            "Compilation error: compile_d4: frontier overflow: limit 1024"
+        );
     }
 }
