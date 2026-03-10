@@ -2217,6 +2217,7 @@ dependencies = [
  "lru",
  "pyo3",
  "thiserror",
+ "xlog-core",
 ]
 
 [[package]]
@@ -2263,7 +2264,6 @@ version = "0.3.2"
 dependencies = [
  "criterion",
  "xlog-core",
- "xlog-cuda",
 ]
 
 [[package]]
