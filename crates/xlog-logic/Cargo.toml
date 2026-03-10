@@ -6,7 +6,6 @@ edition.workspace = true
 [dependencies]
 xlog-core = { path = "../xlog-core" }
 xlog-ir = { path = "../xlog-ir" }
-xlog-runtime = { path = "../xlog-runtime" }
 xlog-stats = { path = "../xlog-stats" }
 pest.workspace = true
 pest_derive.workspace = true
@@ -14,5 +13,6 @@ pest_derive.workspace = true
 [dev-dependencies]
 xlog-cuda = { path = "../xlog-cuda" }
 xlog-gpu = { path = "../xlog-gpu" }
+xlog-runtime = { path = "../xlog-runtime" }
 tempfile = "3"
 serial_test = "3"
