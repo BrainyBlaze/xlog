@@ -185,7 +185,6 @@ must re-export the same namespace so all existing `use` paths continue to resolv
 | Consumer | Import location | What they import from `provider::` |
 |----------|----------------|-----------------------------------|
 | xlog-runtime/executor.rs | executor.rs:13 | `arith_kernels`, `filter_kernels`, `ARITH_MODULE`, `FILTER_MODULE` |
-| xlog-gpu/gpu.rs | gpu.rs:8–10 | `arith_kernels`, `d4_kernels`, `filter_kernels`, `ARITH_MODULE`, `D4_MODULE`, `FILTER_MODULE` |
 | xlog-solve/gpu_cdcl.rs | gpu_cdcl.rs:7 | `sat_kernels`, `SAT_MODULE` |
 | xlog-prob/compilation/gpu_d4.rs | gpu_d4.rs:14 | `d4_kernels`, `scan_kernels`, `D4_MODULE`, `SCAN_MODULE` |
 | xlog-prob/compilation/gpu_cnf.rs | gpu_cnf.rs:9 | `cnf_kernels`, `CNF_MODULE` |

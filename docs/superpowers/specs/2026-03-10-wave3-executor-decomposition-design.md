@@ -60,16 +60,16 @@ from current executor.rs:
 
 | Method | Line | Target module | Cross-crate callers |
 |--------|------|---------------|---------------------|
-| `new()` | 194 | mod.rs | xlog-gpu/logic.rs, pyxlog |
-| `new_with_config()` | 199 | mod.rs | pyxlog lib.rs:4364 |
+| `new()` | 194 | mod.rs | xlog-gpu/logic.rs:112, pyxlog lib.rs:4349, mc.rs:861 |
+| `new_with_config()` | 199 | mod.rs | — (runtime tests only: executor_config_tests.rs:25) |
 | `set_profiling()` | 220 | mod.rs | mc.rs:861 (via xlog-prob) |
 | `is_profiling()` | 229 | mod.rs | — (internal only currently) |
 | `execution_stats()` | 236 | mod.rs | xlog-gpu/logic.rs:163 |
-| `store()` | 241 | mod.rs | mc.rs:974, mc.rs:1360, pyxlog lib.rs:4217/5217/5229/5308/5398/5402/5555 |
+| `store()` | 241 | mod.rs | xlog-gpu/logic.rs:209/230, mc.rs:974/1360, pyxlog lib.rs:4217/5217/5229/5308/5398/5402/5555 |
 | `store_mut()` | 246 | mod.rs | xlog-gpu/logic.rs:120/134/146, pyxlog lib.rs:4221/4358/5153/5182/5522 |
 | `ilp_registry_mut()` | 251 | mod.rs | pyxlog ILP path |
 | `ilp_last_result()` | 256 | mod.rs | pyxlog ILP path |
-| `put_relation()` | 261 | mod.rs | mc.rs:869/951/978/1266/1875, pyxlog |
+| `put_relation()` | 261 | mod.rs | mc.rs:869/951/978/1266/1875 |
 | `stats()` | 266 | mod.rs | — (internal only currently) |
 | `reset_for_mc()` | 273 | mod.rs | pyxlog lib.rs:5150/5515 |
 | `reset_for_mc_relations()` | 290 | mod.rs | mc.rs:942 |
@@ -89,8 +89,8 @@ from current executor.rs:
 
 | Consumer | Call sites | Unique methods used |
 |----------|-----------|---------------------|
-| xlog-gpu/logic.rs | 9 | register_relation, store_mut, execute_plan, execution_stats, store |
-| pyxlog/lib.rs | 21 | new_with_config, register_relation, store, store_mut, execute_plan, reset_for_mc, reset_for_ilp |
+| xlog-gpu/logic.rs | 9 | new, register_relation, store, store_mut, execute_plan, execution_stats |
+| pyxlog/lib.rs | 21 | new, register_relation, store, store_mut, execute_plan, reset_for_mc, reset_for_ilp |
 | xlog-prob/mc.rs | 14 | set_profiling, register_relation, put_relation, reset_for_mc_relations, store, execute_recursive_scc, execute_non_recursive_scc, execute_node |
 
 **Note**: `apply_deltas_and_recompute()`, `execute_stratum()`, and `execute_filter()` have no

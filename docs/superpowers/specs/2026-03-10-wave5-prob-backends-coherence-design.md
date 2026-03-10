@@ -182,10 +182,11 @@ xlog-solve: 2, xlog-prob: 7). Full unification is over-engineering. Realistic im
 
 ### 5c.3 Test Harness Consolidation (A5)
 
-21 copies of `setup_provider()` across test files. Each crate keeps one canonical copy in a
-`tests/common/mod.rs` or `src/test_support.rs` — less DRY but avoids new test-utility
-dependency edges between crates. Comment points to pattern origin. Saves ~250 lines
-(21 copies → ~5 copies).
+24 copies of `setup_provider()` across test files (22 in xlog-cuda/tests/, 1 in
+xlog-prob/tests/, 1 in xlog-runtime/src/relation.rs). Each crate keeps one canonical copy
+in a `tests/common/mod.rs` or `src/test_support.rs` — less DRY but avoids new test-utility
+dependency edges between crates. Comment points to pattern origin. Saves ~300 lines
+(24 copies → ~5 copies).
 
 ### 5c.4 xlog-prob Export Cleanup (ST3)
 
