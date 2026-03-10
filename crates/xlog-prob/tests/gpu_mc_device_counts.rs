@@ -116,6 +116,35 @@ fn test_device_counts_clamped_correct() -> Result<()> {
 }
 
 #[test]
+fn test_device_counts_reuse_pointer_tables_without_semantic_change() -> Result<()> {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return Ok(());
+    };
+
+    let program = McProgram::compile_source(
+        r#"
+        0.5::a().
+        evidence(a(), true).
+        query(a()).
+        "#,
+    )?;
+
+    let cfg = McEvalConfig {
+        samples: 64,
+        seed: 7,
+        confidence: 0.95,
+        max_nonmonotone_iterations: 8,
+        sampling_method: None,
+    };
+
+    let result = program.evaluate_gpu_device_with_provider(cfg, provider)?;
+    assert_eq!(result.total_samples, 64);
+    assert_eq!(result.sampling_method, McSamplingMethod::EvidenceClamping);
+    Ok(())
+}
+
+#[test]
 fn test_compact_and_dedup_preserve_host_row_count() -> Result<()> {
     let Some(provider) = setup_provider() else {
         eprintln!("Skipping: no CUDA device");

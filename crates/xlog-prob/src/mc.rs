@@ -660,39 +660,47 @@ impl McProgram {
             shared_mem_bytes: 0,
         };
 
+        // Pre-allocate host-side pointer vectors outside the per-sample closure
+        // to avoid repeated heap allocation.  Query/evidence relations are dynamic
+        // (re-created each sample), so the device pointers themselves are NOT
+        // stable -- we still upload every sample -- but the host Vec storage is
+        // reused across iterations.
+        let mut query_ptrs_buf: Vec<u64> = vec![0u64; prob_query_count];
+        let mut evidence_ptrs_buf: Vec<u64> = vec![0u64; evidence_count];
+
         let stats =
             self.evaluate_gpu_counts_with(&cfg, &forcing, method, provider.clone(), |executor, plan, count| {
                 let zero_ptr = *d_zero_count.device_ptr() as u64;
 
-                let mut query_ptrs: Vec<u64> = Vec::with_capacity(count);
+                query_ptrs_buf.clear();
                 for rel_name in plan.query_rel_names.iter().take(count) {
                     let ptr = executor
                         .store()
                         .get(rel_name)
                         .map(|buf| *buf.num_rows_device().device_ptr() as u64)
                         .unwrap_or(zero_ptr);
-                    query_ptrs.push(ptr);
+                    query_ptrs_buf.push(ptr);
                 }
                 upload_slice(
                     &provider,
-                    &query_ptrs,
+                    &query_ptrs_buf,
                     &mut d_query_ptrs,
                     "MC query count ptrs",
                 )?;
 
                 if strategy == McCountStrategy::QueriesAndEvidence {
-                    let mut evidence_ptrs: Vec<u64> = Vec::with_capacity(evidence_count);
+                    evidence_ptrs_buf.clear();
                     for (rel_name, _) in plan.evidence_rel_specs.iter() {
                         let ptr = executor
                             .store()
                             .get(rel_name)
                             .map(|buf| *buf.num_rows_device().device_ptr() as u64)
                             .unwrap_or(zero_ptr);
-                        evidence_ptrs.push(ptr);
+                        evidence_ptrs_buf.push(ptr);
                     }
                     upload_slice(
                         &provider,
-                        &evidence_ptrs,
+                        &evidence_ptrs_buf,
                         &mut d_evidence_ptrs,
                         "MC evidence count ptrs",
                     )?;
