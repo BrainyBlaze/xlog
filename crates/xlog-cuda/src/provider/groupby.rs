@@ -618,7 +618,7 @@ impl super::CudaKernelProvider {
     }
 
     /// Create result schema for multi-aggregation groupby
-    fn groupby_multi_agg_result_schema(
+    pub(crate) fn groupby_multi_agg_result_schema(
         &self,
         input: &Schema,
         key_cols: &[usize],

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use cudarc::driver::{CudaViewMut, DevicePtr, DeviceRepr, DeviceSlice, LaunchAsync, LaunchConfig};
 use cudarc::nvrtc::Ptx;
 use std::ffi::c_void;
-use xlog_core::{Result, ScalarType, Schema, XlogError};
+use xlog_core::{Result, Schema, XlogError};
 
 use crate::{
     memory::{CudaColumn, TrackedCudaSlice},
@@ -1222,563 +1222,6 @@ impl CudaKernelProvider {
     }
 
 
-
-
-
-    // ============== Filter Methods ==============
-
-    /// Filter buffer where u32 column equals constant
-    ///
-    /// # Arguments
-    /// * `input` - The input buffer to filter
-    /// * `col` - Column index to filter on
-    /// * `value` - Value to compare against
-    ///
-    /// # Returns
-    /// A new buffer containing only rows where `input[col] == value`
-    ///
-    /// # Errors
-    /// Returns `XlogError::Kernel` if kernel execution fails
-    pub fn filter_u32_eq(&self, input: &CudaBuffer, col: usize, value: u32) -> Result<CudaBuffer> {
-        self.filter_u32(input, col, value, CompareOp::Eq)
-    }
-
-    /// Filter buffer where u32 column is greater than constant
-    ///
-    /// # Arguments
-    /// * `input` - The input buffer to filter
-    /// * `col` - Column index to filter on
-    /// * `value` - Value to compare against
-    ///
-    /// # Returns
-    /// A new buffer containing only rows where `input[col] > value`
-    ///
-    /// # Errors
-    /// Returns `XlogError::Kernel` if kernel execution fails
-    pub fn filter_u32_gt(&self, input: &CudaBuffer, col: usize, value: u32) -> Result<CudaBuffer> {
-        self.filter_u32(input, col, value, CompareOp::Gt)
-    }
-
-    /// Filter u32 column with comparison operator.
-    ///
-    /// # Arguments
-    /// * `input` - Buffer to filter
-    /// * `col` - Column index to compare
-    /// * `value` - Constant to compare against
-    /// * `op` - Comparison operator
-    ///
-    /// # Errors
-    /// Returns error if column index is out of bounds or the input exceeds the u32 row limit.
-    pub fn filter_u32(
-        &self,
-        input: &CudaBuffer,
-        col: usize,
-        value: u32,
-        op: CompareOp,
-    ) -> Result<CudaBuffer> {
-        if input.num_rows() == 0 {
-            return self.create_empty_buffer(input.schema.clone());
-        }
-
-        if input.num_rows() > u32::MAX as u64 {
-            return Err(XlogError::Kernel(format!(
-                "filter_u32 supports at most {} rows, got {}",
-                u32::MAX,
-                input.num_rows()
-            )));
-        }
-
-        let n = input.num_rows() as usize;
-        let num_rows = input.num_rows() as u32;
-        let device = self.device.inner();
-
-        // Validate column index
-        if col >= input.arity() {
-            return Err(XlogError::Kernel(format!(
-                "Column index {} out of bounds (arity {})",
-                col,
-                input.arity()
-            )));
-        }
-
-        // Validate column type is U32 (or Symbol which is u32-backed)
-        let col_type = input.schema().column_type(col);
-        if col_type != Some(ScalarType::U32) && col_type != Some(ScalarType::Symbol) {
-            return Err(XlogError::Kernel(format!(
-                "Column {} is {:?} (expected U32/Symbol for filter_u32)",
-                col, col_type
-            )));
-        }
-
-        // Get the filter column as u32 view
-        let col_data = input
-            .column(col)
-            .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col)))?;
-        let col_view = self.column_as_u32_view(col_data, n)?;
-
-        let block_size = 256u32;
-        let num_blocks = (num_rows + block_size - 1) / block_size;
-        let config = LaunchConfig {
-            grid_dim: (num_blocks, 1, 1),
-            block_dim: (block_size, 1, 1),
-            shared_mem_bytes: 0,
-        };
-
-        // Fused compare + scan phase1.
-        let d_mask = self.memory.alloc::<u8>(n)?;
-        let d_prefix_sum = self.memory.alloc::<u32>(n)?;
-        let mut d_block_sums = self.memory.alloc::<u32>(num_blocks as usize)?;
-
-        let filter_scan_fn = device
-            .get_func(
-                FILTER_MODULE,
-                filter_kernels::FILTER_COMPARE_U32_SCAN_PHASE1,
-            )
-            .ok_or_else(|| {
-                XlogError::Kernel("filter_compare_u32_scan_phase1 kernel not found".to_string())
-            })?;
-
-        // SAFETY: filter_compare_u32_scan_phase1(column, constant, num_rows, num_rows_device, op, mask, prefix_sum, block_sums)
-        unsafe {
-            filter_scan_fn.clone().launch(
-                config,
-                (
-                    &col_view,
-                    value,
-                    num_rows,
-                    input.num_rows_device(),
-                    op as u8,
-                    &d_mask,
-                    &d_prefix_sum,
-                    &d_block_sums,
-                ),
-            )
-        }
-        .map_err(|e| XlogError::Kernel(format!("filter_compare_u32_scan_phase1 failed: {}", e)))?;
-
-        if num_blocks > 1 {
-            self.multiblock_scan_u32_inplace(&mut d_block_sums, num_blocks)?;
-
-            let phase3_fn = device
-                .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE3)
-                .ok_or_else(|| {
-                    XlogError::Kernel("Failed to get multiblock_scan_phase3 kernel".to_string())
-                })?;
-
-            // SAFETY: multiblock_scan_phase3(uint32_t* prefix_sum, const uint32_t* block_offsets, uint32_t n)
-            unsafe {
-                phase3_fn.clone().launch(
-                    LaunchConfig {
-                        grid_dim: (num_blocks, 1, 1),
-                        block_dim: (block_size, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
-                    (&d_prefix_sum, &d_block_sums, num_rows),
-                )
-            }
-            .map_err(|e| XlogError::Kernel(format!("multiblock_scan_phase3 failed: {}", e)))?;
-        }
-
-        self.device.synchronize()?;
-
-        let d_out_count = self.capture_compact_count(&d_prefix_sum, &d_mask, num_rows)?;
-        self.compact_buffer_by_device_mask_device_count(input, &d_mask, &d_prefix_sum, d_out_count)
-    }
-
-    /// Filter i32 column with comparison operator.
-    pub fn filter_i32(
-        &self,
-        input: &CudaBuffer,
-        col: usize,
-        value: i32,
-        op: CompareOp,
-    ) -> Result<CudaBuffer> {
-        if input.is_empty() {
-            return self.create_empty_buffer(input.schema.clone());
-        }
-
-        let mask = self.compare_const_mask::<i32>(
-            input,
-            col,
-            value,
-            op,
-            &[ScalarType::I32],
-            filter_kernels::FILTER_COMPARE_I32,
-        )?;
-        self.filter_by_device_mask(input, &mask)
-    }
-
-    /// Filter u64 column with comparison operator.
-    pub fn filter_u64(
-        &self,
-        input: &CudaBuffer,
-        col: usize,
-        value: u64,
-        op: CompareOp,
-    ) -> Result<CudaBuffer> {
-        if input.is_empty() {
-            return self.create_empty_buffer(input.schema.clone());
-        }
-
-        let mask = self.compare_const_mask::<u64>(
-            input,
-            col,
-            value,
-            op,
-            &[ScalarType::U64],
-            filter_kernels::FILTER_COMPARE_U64,
-        )?;
-        self.filter_by_device_mask(input, &mask)
-    }
-
-    /// Filter f32 column with comparison operator.
-    pub fn filter_f32(
-        &self,
-        input: &CudaBuffer,
-        col: usize,
-        value: f32,
-        op: CompareOp,
-    ) -> Result<CudaBuffer> {
-        if input.is_empty() {
-            return self.create_empty_buffer(input.schema.clone());
-        }
-
-        let mask = self.compare_const_mask::<f32>(
-            input,
-            col,
-            value,
-            op,
-            &[ScalarType::F32],
-            filter_kernels::FILTER_COMPARE_F32,
-        )?;
-        self.filter_by_device_mask(input, &mask)
-    }
-
-    /// Filter bool column with comparison operator.
-    pub fn filter_bool(
-        &self,
-        input: &CudaBuffer,
-        col: usize,
-        value: bool,
-        op: CompareOp,
-    ) -> Result<CudaBuffer> {
-        if input.is_empty() {
-            return self.create_empty_buffer(input.schema.clone());
-        }
-
-        let value_u8 = if value { 1u8 } else { 0u8 };
-        let mask = self.compare_const_mask::<u8>(
-            input,
-            col,
-            value_u8,
-            op,
-            &[ScalarType::Bool],
-            filter_kernels::FILTER_COMPARE_U8,
-        )?;
-        self.filter_by_device_mask(input, &mask)
-    }
-
-    /// Compare two u32 columns and return a device mask.
-    pub fn compare_columns_u32(
-        &self,
-        input: &CudaBuffer,
-        left: usize,
-        right: usize,
-        op: CompareOp,
-    ) -> Result<TrackedCudaSlice<u8>> {
-        self.compare_columns_mask::<u32>(
-            input,
-            left,
-            right,
-            op,
-            &[ScalarType::U32, ScalarType::Symbol],
-            filter_kernels::FILTER_COMPARE_U32_COL,
-        )
-    }
-
-    /// Compare two i32 columns and return a device mask.
-    pub fn compare_columns_i32(
-        &self,
-        input: &CudaBuffer,
-        left: usize,
-        right: usize,
-        op: CompareOp,
-    ) -> Result<TrackedCudaSlice<u8>> {
-        self.compare_columns_mask::<i32>(
-            input,
-            left,
-            right,
-            op,
-            &[ScalarType::I32],
-            filter_kernels::FILTER_COMPARE_I32_COL,
-        )
-    }
-
-    /// Compare two i64 columns and return a device mask.
-    pub fn compare_columns_i64(
-        &self,
-        input: &CudaBuffer,
-        left: usize,
-        right: usize,
-        op: CompareOp,
-    ) -> Result<TrackedCudaSlice<u8>> {
-        self.compare_columns_mask::<i64>(
-            input,
-            left,
-            right,
-            op,
-            &[ScalarType::I64],
-            filter_kernels::FILTER_COMPARE_I64_COL,
-        )
-    }
-
-    /// Compare two u64 columns and return a device mask.
-    pub fn compare_columns_u64(
-        &self,
-        input: &CudaBuffer,
-        left: usize,
-        right: usize,
-        op: CompareOp,
-    ) -> Result<TrackedCudaSlice<u8>> {
-        self.compare_columns_mask::<u64>(
-            input,
-            left,
-            right,
-            op,
-            &[ScalarType::U64],
-            filter_kernels::FILTER_COMPARE_U64_COL,
-        )
-    }
-
-    /// Compare two f32 columns and return a device mask.
-    pub fn compare_columns_f32(
-        &self,
-        input: &CudaBuffer,
-        left: usize,
-        right: usize,
-        op: CompareOp,
-    ) -> Result<TrackedCudaSlice<u8>> {
-        self.compare_columns_mask::<f32>(
-            input,
-            left,
-            right,
-            op,
-            &[ScalarType::F32],
-            filter_kernels::FILTER_COMPARE_F32_COL,
-        )
-    }
-
-    /// Compare two f64 columns and return a device mask.
-    pub fn compare_columns_f64(
-        &self,
-        input: &CudaBuffer,
-        left: usize,
-        right: usize,
-        op: CompareOp,
-    ) -> Result<TrackedCudaSlice<u8>> {
-        self.compare_columns_mask::<f64>(
-            input,
-            left,
-            right,
-            op,
-            &[ScalarType::F64],
-            filter_kernels::FILTER_COMPARE_F64_COL,
-        )
-    }
-
-    /// Compare two u8 columns and return a device mask.
-    pub fn compare_columns_u8(
-        &self,
-        input: &CudaBuffer,
-        left: usize,
-        right: usize,
-        op: CompareOp,
-    ) -> Result<TrackedCudaSlice<u8>> {
-        self.compare_columns_mask::<u8>(
-            input,
-            left,
-            right,
-            op,
-            &[ScalarType::Bool],
-            filter_kernels::FILTER_COMPARE_U8_COL,
-        )
-    }
-
-    // compare_const_mask and compare_columns_mask have been moved to filter.rs
-
-    /// Filter buffer where f64 column equals constant
-    ///
-    /// # Arguments
-    /// * `input` - The input buffer to filter
-    /// * `col` - Column index to filter on
-    /// * `value` - Value to compare against
-    ///
-    /// # Returns
-    /// A new buffer containing only rows where `input[col] == value`
-    ///
-    /// # Errors
-    /// Returns `XlogError::Kernel` if kernel execution fails or column type is not F64
-    pub fn filter_f64_eq(&self, input: &CudaBuffer, col: usize, value: f64) -> Result<CudaBuffer> {
-        self.filter_f64(input, col, value, CompareOp::Eq)
-    }
-
-    /// Filter buffer where f64 column is greater than constant
-    ///
-    /// # Arguments
-    /// * `input` - The input buffer to filter
-    /// * `col` - Column index to filter on
-    /// * `value` - Value to compare against
-    ///
-    /// # Returns
-    /// A new buffer containing only rows where `input[col] > value`
-    ///
-    /// # Errors
-    /// Returns `XlogError::Kernel` if kernel execution fails or column type is not F64
-    pub fn filter_f64_gt(&self, input: &CudaBuffer, col: usize, value: f64) -> Result<CudaBuffer> {
-        self.filter_f64(input, col, value, CompareOp::Gt)
-    }
-
-    /// Filter buffer where f64 column is less than constant
-    ///
-    /// # Arguments
-    /// * `input` - The input buffer to filter
-    /// * `col` - Column index to filter on
-    /// * `value` - Value to compare against
-    ///
-    /// # Returns
-    /// A new buffer containing only rows where `input[col] < value`
-    ///
-    /// # Errors
-    /// Returns `XlogError::Kernel` if kernel execution fails or column type is not F64
-    pub fn filter_f64_lt(&self, input: &CudaBuffer, col: usize, value: f64) -> Result<CudaBuffer> {
-        self.filter_f64(input, col, value, CompareOp::Lt)
-    }
-
-    /// Filter f64 column with comparison operator.
-    ///
-    /// # Arguments
-    /// * `input` - Buffer to filter
-    /// * `col` - Column index to compare
-    /// * `value` - Constant to compare against
-    /// * `op` - Comparison operator
-    ///
-    /// # Errors
-    /// Returns error if column index is out of bounds or column type is not F64.
-    pub fn filter_f64(
-        &self,
-        input: &CudaBuffer,
-        col: usize,
-        value: f64,
-        op: CompareOp,
-    ) -> Result<CudaBuffer> {
-        if input.num_rows() == 0 {
-            return self.create_empty_buffer(input.schema.clone());
-        }
-
-        if input.num_rows() > u32::MAX as u64 {
-            return Err(XlogError::Kernel(format!(
-                "filter_f64 supports at most {} rows, got {}",
-                u32::MAX,
-                input.num_rows()
-            )));
-        }
-
-        let n = input.num_rows() as usize;
-        let num_rows = input.num_rows() as u32;
-        let device = self.device.inner();
-
-        // Validate column index
-        if col >= input.arity() {
-            return Err(XlogError::Kernel(format!(
-                "Column index {} out of bounds (arity {})",
-                col,
-                input.arity()
-            )));
-        }
-
-        // Validate column type is F64
-        if input.schema().column_type(col) != Some(ScalarType::F64) {
-            return Err(XlogError::Kernel(format!(
-                "Column {} is not F64 (expected F64 for filter_f64)",
-                col
-            )));
-        }
-
-        // Get the filter column as f64 view
-        let col_data = input
-            .column(col)
-            .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col)))?;
-        let col_view = self.column_as_f64_view(col_data, n)?;
-
-        let block_size = 256u32;
-        let num_blocks = (num_rows + block_size - 1) / block_size;
-        let config = LaunchConfig {
-            grid_dim: (num_blocks, 1, 1),
-            block_dim: (block_size, 1, 1),
-            shared_mem_bytes: 0,
-        };
-
-        // Fused compare + scan phase1.
-        let d_mask = self.memory.alloc::<u8>(n)?;
-        let d_prefix_sum = self.memory.alloc::<u32>(n)?;
-        let mut d_block_sums = self.memory.alloc::<u32>(num_blocks as usize)?;
-
-        let filter_scan_fn = device
-            .get_func(
-                FILTER_MODULE,
-                filter_kernels::FILTER_COMPARE_F64_SCAN_PHASE1,
-            )
-            .ok_or_else(|| {
-                XlogError::Kernel("filter_compare_f64_scan_phase1 kernel not found".to_string())
-            })?;
-
-        // SAFETY: filter_compare_f64_scan_phase1(column, constant, num_rows, num_rows_device, op, mask, prefix_sum, block_sums)
-        unsafe {
-            filter_scan_fn.clone().launch(
-                config,
-                (
-                    &col_view,
-                    value,
-                    num_rows,
-                    input.num_rows_device(),
-                    op as u8,
-                    &d_mask,
-                    &d_prefix_sum,
-                    &d_block_sums,
-                ),
-            )
-        }
-        .map_err(|e| XlogError::Kernel(format!("filter_compare_f64_scan_phase1 failed: {}", e)))?;
-
-        if num_blocks > 1 {
-            self.multiblock_scan_u32_inplace(&mut d_block_sums, num_blocks)?;
-
-            let phase3_fn = device
-                .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE3)
-                .ok_or_else(|| {
-                    XlogError::Kernel("Failed to get multiblock_scan_phase3 kernel".to_string())
-                })?;
-
-            // SAFETY: multiblock_scan_phase3(uint32_t* prefix_sum, const uint32_t* block_offsets, uint32_t n)
-            unsafe {
-                phase3_fn.clone().launch(
-                    LaunchConfig {
-                        grid_dim: (num_blocks, 1, 1),
-                        block_dim: (block_size, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
-                    (&d_prefix_sum, &d_block_sums, num_rows),
-                )
-            }
-            .map_err(|e| XlogError::Kernel(format!("multiblock_scan_phase3 failed: {}", e)))?;
-        }
-
-        self.device.synchronize()?;
-
-        let d_out_count = self.capture_compact_count(&d_prefix_sum, &d_mask, num_rows)?;
-        self.compact_buffer_by_device_mask_device_count(input, &d_mask, &d_prefix_sum, d_out_count)
-    }
-
     /// Filter buffer by pre-computed mask.
     ///
     /// # Arguments
@@ -2442,7 +1885,7 @@ impl CudaKernelProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xlog_core::MemoryBudget;
+    use xlog_core::{AggOp, MemoryBudget, ScalarType};
 
     fn has_cuda_device() -> bool {
         CudaDevice::new(0).is_ok()
@@ -2863,7 +2306,7 @@ mod tests {
             .expect("read dedup row count");
         assert_eq!(dedup_count, 3, "Should have 3 unique values");
 
-        let result = provider.download_column_u32(&deduped, 0).unwrap();
+        let result = provider.download_column::<u32>(&deduped, 0).unwrap();
         // Result should be sorted and deduped
         assert_eq!(result, vec![1, 2, 3]);
     }
@@ -2892,7 +2335,7 @@ mod tests {
         assert_eq!(dedup_count, 750, "Should have 750 unique values (0..750)");
 
         // Verify output is sorted
-        let result = provider.download_column_u32(&deduped, 0).unwrap();
+        let result = provider.download_column::<u32>(&deduped, 0).unwrap();
         let is_sorted = result.windows(2).all(|w| w[0] <= w[1]);
         assert!(is_sorted, "Output should be sorted");
 
@@ -3191,7 +2634,7 @@ mod tests {
 
         // Download results
         let result_values = provider
-            .download_column_f64(&result, 1)
+            .download_column::<f64>(&result, 1)
             .expect("download result");
 
         // Expected values:
@@ -3360,13 +2803,13 @@ mod tests {
     /// Helper to create an i64 buffer for arithmetic tests
     fn create_i64_buffer(provider: &CudaKernelProvider, data: &[i64]) -> CudaBuffer {
         let schema = Schema::new(vec![("col".to_string(), ScalarType::I64)]);
-        provider.create_buffer_from_i64_slice(data, schema).unwrap()
+        provider.create_buffer_from_slice::<i64>(data, schema).unwrap()
     }
 
     /// Helper to create an f64 buffer for arithmetic tests
     fn create_f64_buffer(provider: &CudaKernelProvider, data: &[f64]) -> CudaBuffer {
         let schema = Schema::new(vec![("col".to_string(), ScalarType::F64)]);
-        provider.create_buffer_from_f64_slice(data, schema).unwrap()
+        provider.create_buffer_from_slice::<f64>(data, schema).unwrap()
     }
 
     #[test]
@@ -3380,7 +2823,7 @@ mod tests {
         let b = create_i64_buffer(&provider, &[10, 20, 30, 40, 50]);
 
         let result = provider.add_columns(&a, &b).unwrap();
-        let values = provider.download_column_i64(&result, 0).unwrap();
+        let values = provider.download_column::<i64>(&result, 0).unwrap();
 
         assert_eq!(values, vec![11, 22, 33, 44, 55]);
     }
@@ -3396,7 +2839,7 @@ mod tests {
         let b = create_i64_buffer(&provider, &[1, 2, 3, 4, 5]);
 
         let result = provider.sub_columns(&a, &b).unwrap();
-        let values = provider.download_column_i64(&result, 0).unwrap();
+        let values = provider.download_column::<i64>(&result, 0).unwrap();
 
         assert_eq!(values, vec![9, 18, 27, 36, 45]);
     }
@@ -3412,7 +2855,7 @@ mod tests {
         let b = create_i64_buffer(&provider, &[3, 4, 5, 6, 7]);
 
         let result = provider.mul_columns(&a, &b).unwrap();
-        let values = provider.download_column_i64(&result, 0).unwrap();
+        let values = provider.download_column::<i64>(&result, 0).unwrap();
 
         assert_eq!(values, vec![6, 12, 20, 30, 42]);
     }
@@ -3428,7 +2871,7 @@ mod tests {
         let b = create_i64_buffer(&provider, &[10, 20, 30, 40]);
 
         let result = provider.div_columns(&a, &b).unwrap();
-        let values = provider.download_column_i64(&result, 0).unwrap();
+        let values = provider.download_column::<i64>(&result, 0).unwrap();
 
         assert_eq!(values, vec![10, 10, 10, 10]);
     }
@@ -3444,7 +2887,7 @@ mod tests {
         let b = create_i64_buffer(&provider, &[2, 0, 3]); // Note: division by zero
 
         let result = provider.div_columns(&a, &b).unwrap();
-        let values = provider.download_column_i64(&result, 0).unwrap();
+        let values = provider.download_column::<i64>(&result, 0).unwrap();
 
         // Division by zero returns i64::MAX
         assert_eq!(values, vec![5, i64::MAX, 10]);
@@ -3461,7 +2904,7 @@ mod tests {
         let b = create_i64_buffer(&provider, &[5, 7, 30, 3]);
 
         let result = provider.mod_columns(&a, &b).unwrap();
-        let values = provider.download_column_i64(&result, 0).unwrap();
+        let values = provider.download_column::<i64>(&result, 0).unwrap();
 
         assert_eq!(values, vec![2, 2, 10, 1]);
     }
@@ -3477,7 +2920,7 @@ mod tests {
         let b = create_i64_buffer(&provider, &[3, 0]); // Note: mod by zero
 
         let result = provider.mod_columns(&a, &b).unwrap();
-        let values = provider.download_column_i64(&result, 0).unwrap();
+        let values = provider.download_column::<i64>(&result, 0).unwrap();
 
         // Mod by zero returns 0
         assert_eq!(values, vec![1, 0]);
@@ -3493,7 +2936,7 @@ mod tests {
         let a = create_i64_buffer(&provider, &[-5, 10, -15, 20, 0]);
 
         let result = provider.abs_column(&a).unwrap();
-        let values = provider.download_column_i64(&result, 0).unwrap();
+        let values = provider.download_column::<i64>(&result, 0).unwrap();
 
         assert_eq!(values, vec![5, 10, 15, 20, 0]);
     }
@@ -3509,7 +2952,7 @@ mod tests {
         let b = create_i64_buffer(&provider, &[3, 12, 10, 25]);
 
         let result = provider.min_columns(&a, &b).unwrap();
-        let values = provider.download_column_i64(&result, 0).unwrap();
+        let values = provider.download_column::<i64>(&result, 0).unwrap();
 
         assert_eq!(values, vec![3, 10, 10, 20]);
     }
@@ -3525,7 +2968,7 @@ mod tests {
         let b = create_i64_buffer(&provider, &[3, 12, 10, 25]);
 
         let result = provider.max_columns(&a, &b).unwrap();
-        let values = provider.download_column_i64(&result, 0).unwrap();
+        let values = provider.download_column::<i64>(&result, 0).unwrap();
 
         assert_eq!(values, vec![5, 12, 15, 25]);
     }
@@ -3541,7 +2984,7 @@ mod tests {
         let b = create_f64_buffer(&provider, &[0.5, 1.5, 2.5]);
 
         let result = provider.add_columns(&a, &b).unwrap();
-        let values = provider.download_column_f64(&result, 0).unwrap();
+        let values = provider.download_column::<f64>(&result, 0).unwrap();
 
         assert_eq!(values, vec![2.0, 4.0, 6.0]);
     }
@@ -3557,7 +3000,7 @@ mod tests {
         let b = create_f64_buffer(&provider, &[1.5, 2.0, 2.5]);
 
         let result = provider.mul_columns(&a, &b).unwrap();
-        let values = provider.download_column_f64(&result, 0).unwrap();
+        let values = provider.download_column::<f64>(&result, 0).unwrap();
 
         assert_eq!(values, vec![3.0, 6.0, 10.0]);
     }
@@ -3573,7 +3016,7 @@ mod tests {
         let b = create_f64_buffer(&provider, &[0.0, 0.0, 0.0]);
 
         let result = provider.div_columns(&a, &b).unwrap();
-        let values = provider.download_column_f64(&result, 0).unwrap();
+        let values = provider.download_column::<f64>(&result, 0).unwrap();
 
         // IEEE 754: 1.0/0.0 = Inf, -1.0/0.0 = -Inf, 0.0/0.0 = NaN
         assert!(values[0].is_infinite() && values[0].is_sign_positive());
@@ -3592,7 +3035,7 @@ mod tests {
         let exp = create_i64_buffer(&provider, &[3, 2, 2, 1]);
 
         let result = provider.pow_columns(&base, &exp).unwrap();
-        let values = provider.download_column_f64(&result, 0).unwrap();
+        let values = provider.download_column::<f64>(&result, 0).unwrap();
 
         // pow always returns f64
         assert_eq!(values, vec![8.0, 9.0, 16.0, 5.0]);
@@ -3609,7 +3052,7 @@ mod tests {
         let exp = create_f64_buffer(&provider, &[0.5, 0.5, 1.0 / 3.0]);
 
         let result = provider.pow_columns(&base, &exp).unwrap();
-        let values = provider.download_column_f64(&result, 0).unwrap();
+        let values = provider.download_column::<f64>(&result, 0).unwrap();
 
         // sqrt(4) = 2, sqrt(9) = 3, cbrt(27) = 3
         assert!((values[0] - 2.0).abs() < 1e-10);
@@ -3627,7 +3070,7 @@ mod tests {
         let a = create_i64_buffer(&provider, &[1, 2, 3, 4, 5]);
 
         let result = provider.cast_column(&a, ScalarType::F64).unwrap();
-        let values = provider.download_column_f64(&result, 0).unwrap();
+        let values = provider.download_column::<f64>(&result, 0).unwrap();
 
         assert_eq!(values, vec![1.0, 2.0, 3.0, 4.0, 5.0]);
     }
@@ -3642,7 +3085,7 @@ mod tests {
         let a = create_f64_buffer(&provider, &[1.9, 2.1, 3.5, 4.0, 5.7]);
 
         let result = provider.cast_column(&a, ScalarType::I64).unwrap();
-        let values = provider.download_column_i64(&result, 0).unwrap();
+        let values = provider.download_column::<i64>(&result, 0).unwrap();
 
         // Truncation towards zero
         assert_eq!(values, vec![1, 2, 3, 4, 5]);
@@ -3658,7 +3101,7 @@ mod tests {
         let a = create_i64_buffer(&provider, &[1, 2, 3, 100, 200]);
 
         let result = provider.cast_column(&a, ScalarType::I32).unwrap();
-        let values = provider.download_column_i32(&result, 0).unwrap();
+        let values = provider.download_column::<i32>(&result, 0).unwrap();
 
         assert_eq!(values, vec![1, 2, 3, 100, 200]);
     }
@@ -3690,7 +3133,7 @@ mod tests {
         let b = create_i64_buffer(&provider, &[]);
 
         let result = provider.add_columns(&a, &b).unwrap();
-        let values = provider.download_column_i64(&result, 0).unwrap();
+        let values = provider.download_column::<i64>(&result, 0).unwrap();
 
         assert_eq!(values, Vec::<i64>::new());
     }
@@ -3707,7 +3150,7 @@ mod tests {
 
         // Addition should wrap
         let add_result = provider.add_columns(&a, &b).unwrap();
-        let add_values = provider.download_column_i64(&add_result, 0).unwrap();
+        let add_values = provider.download_column::<i64>(&add_result, 0).unwrap();
         assert_eq!(add_values[0], i64::MIN); // MAX + 1 wraps to MIN
         assert_eq!(add_values[1], i64::MAX); // MIN - 1 wraps to MAX
     }
@@ -3722,7 +3165,7 @@ mod tests {
         let a = create_f64_buffer(&provider, &[-1.5, 2.5, -3.5, 0.0]);
 
         let result = provider.abs_column(&a).unwrap();
-        let values = provider.download_column_f64(&result, 0).unwrap();
+        let values = provider.download_column::<f64>(&result, 0).unwrap();
 
         assert_eq!(values, vec![1.5, 2.5, 3.5, 0.0]);
     }
@@ -3738,11 +3181,11 @@ mod tests {
         let b = create_f64_buffer(&provider, &[2.0, 3.0, 4.0]);
 
         let min_result = provider.min_columns(&a, &b).unwrap();
-        let min_values = provider.download_column_f64(&min_result, 0).unwrap();
+        let min_values = provider.download_column::<f64>(&min_result, 0).unwrap();
         assert_eq!(min_values, vec![1.5, 3.0, 3.0]);
 
         let max_result = provider.max_columns(&a, &b).unwrap();
-        let max_values = provider.download_column_f64(&max_result, 0).unwrap();
+        let max_values = provider.download_column::<f64>(&max_result, 0).unwrap();
         assert_eq!(max_values, vec![2.0, 5.0, 4.0]);
     }
 }
