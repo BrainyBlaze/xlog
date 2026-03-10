@@ -29,48 +29,102 @@ pub trait GpuScalar: cudarc::driver::DeviceRepr + Copy + Send + 'static {
     /// Serialize into a little-endian byte buffer.
     /// The buffer length must equal `BYTE_WIDTH`.
     fn to_le_bytes_into(self, buf: &mut [u8]);
+
+    /// Kernel function name for const-compare mask generation.
+    fn filter_compare_kernel() -> &'static str;
+
+    /// Kernel function name for column-column comparison mask.
+    fn compare_col_kernel() -> &'static str;
+
+    /// ScalarType variants accepted for this type in filter/compare operations.
+    fn allowed_scalar_types() -> &'static [xlog_core::ScalarType];
+
+    /// Optional fused compare+scan kernel (phase 1). Only u32 and f64 have optimized
+    /// fused-scan paths. Returns None for types using the mask+compact path.
+    fn filter_scan_phase1_kernel() -> Option<&'static str> { None }
 }
 
 impl GpuScalar for u8 {
     const BYTE_WIDTH: usize = 1;
     fn from_le_bytes(bytes: &[u8]) -> Self { bytes[0] }
     fn to_le_bytes_into(self, buf: &mut [u8]) { buf[0] = self; }
+    fn filter_compare_kernel() -> &'static str { "filter_compare_u8" }
+    fn compare_col_kernel() -> &'static str { "filter_compare_u8_col" }
+    fn allowed_scalar_types() -> &'static [xlog_core::ScalarType] {
+        &[xlog_core::ScalarType::Bool]
+    }
 }
 
 impl GpuScalar for u32 {
     const BYTE_WIDTH: usize = 4;
     fn from_le_bytes(bytes: &[u8]) -> Self { u32::from_le_bytes(bytes.try_into().unwrap()) }
     fn to_le_bytes_into(self, buf: &mut [u8]) { buf.copy_from_slice(&self.to_le_bytes()); }
+    fn filter_compare_kernel() -> &'static str { "filter_compare_u32" }
+    fn compare_col_kernel() -> &'static str { "filter_compare_u32_col" }
+    fn allowed_scalar_types() -> &'static [xlog_core::ScalarType] {
+        &[xlog_core::ScalarType::U32, xlog_core::ScalarType::Symbol]
+    }
+    fn filter_scan_phase1_kernel() -> Option<&'static str> {
+        Some("filter_compare_u32_scan_phase1")
+    }
 }
 
 impl GpuScalar for u64 {
     const BYTE_WIDTH: usize = 8;
     fn from_le_bytes(bytes: &[u8]) -> Self { u64::from_le_bytes(bytes.try_into().unwrap()) }
     fn to_le_bytes_into(self, buf: &mut [u8]) { buf.copy_from_slice(&self.to_le_bytes()); }
+    fn filter_compare_kernel() -> &'static str { "filter_compare_u64" }
+    fn compare_col_kernel() -> &'static str { "filter_compare_u64_col" }
+    fn allowed_scalar_types() -> &'static [xlog_core::ScalarType] {
+        &[xlog_core::ScalarType::U64]
+    }
 }
 
 impl GpuScalar for i32 {
     const BYTE_WIDTH: usize = 4;
     fn from_le_bytes(bytes: &[u8]) -> Self { i32::from_le_bytes(bytes.try_into().unwrap()) }
     fn to_le_bytes_into(self, buf: &mut [u8]) { buf.copy_from_slice(&self.to_le_bytes()); }
+    fn filter_compare_kernel() -> &'static str { "filter_compare_i32" }
+    fn compare_col_kernel() -> &'static str { "filter_compare_i32_col" }
+    fn allowed_scalar_types() -> &'static [xlog_core::ScalarType] {
+        &[xlog_core::ScalarType::I32]
+    }
 }
 
 impl GpuScalar for i64 {
     const BYTE_WIDTH: usize = 8;
     fn from_le_bytes(bytes: &[u8]) -> Self { i64::from_le_bytes(bytes.try_into().unwrap()) }
     fn to_le_bytes_into(self, buf: &mut [u8]) { buf.copy_from_slice(&self.to_le_bytes()); }
+    fn filter_compare_kernel() -> &'static str { "filter_compare_i64" }
+    fn compare_col_kernel() -> &'static str { "filter_compare_i64_col" }
+    fn allowed_scalar_types() -> &'static [xlog_core::ScalarType] {
+        &[xlog_core::ScalarType::I64]
+    }
 }
 
 impl GpuScalar for f32 {
     const BYTE_WIDTH: usize = 4;
     fn from_le_bytes(bytes: &[u8]) -> Self { f32::from_le_bytes(bytes.try_into().unwrap()) }
     fn to_le_bytes_into(self, buf: &mut [u8]) { buf.copy_from_slice(&self.to_le_bytes()); }
+    fn filter_compare_kernel() -> &'static str { "filter_compare_f32" }
+    fn compare_col_kernel() -> &'static str { "filter_compare_f32_col" }
+    fn allowed_scalar_types() -> &'static [xlog_core::ScalarType] {
+        &[xlog_core::ScalarType::F32]
+    }
 }
 
 impl GpuScalar for f64 {
     const BYTE_WIDTH: usize = 8;
     fn from_le_bytes(bytes: &[u8]) -> Self { f64::from_le_bytes(bytes.try_into().unwrap()) }
     fn to_le_bytes_into(self, buf: &mut [u8]) { buf.copy_from_slice(&self.to_le_bytes()); }
+    fn filter_compare_kernel() -> &'static str { "filter_compare_f64" }
+    fn compare_col_kernel() -> &'static str { "filter_compare_f64_col" }
+    fn allowed_scalar_types() -> &'static [xlog_core::ScalarType] {
+        &[xlog_core::ScalarType::F64]
+    }
+    fn filter_scan_phase1_kernel() -> Option<&'static str> {
+        Some("filter_compare_f64_scan_phase1")
+    }
 }
 
 /// Bool encoding:
@@ -87,6 +141,13 @@ impl GpuScalar for bool {
     fn to_le_bytes_into(self, buf: &mut [u8]) {
         // Canonical write: 0x00 or 0x01.
         buf[0] = if self { 1 } else { 0 };
+    }
+
+    // Bool uses the u8 kernel on the GPU side.
+    fn filter_compare_kernel() -> &'static str { "filter_compare_u8" }
+    fn compare_col_kernel() -> &'static str { "filter_compare_u8_col" }
+    fn allowed_scalar_types() -> &'static [xlog_core::ScalarType] {
+        &[xlog_core::ScalarType::Bool]
     }
 }
 
@@ -158,5 +219,67 @@ mod tests {
         assert_eq!(f32::BYTE_WIDTH, std::mem::size_of::<f32>());
         assert_eq!(f64::BYTE_WIDTH, std::mem::size_of::<f64>());
         assert_eq!(bool::BYTE_WIDTH, std::mem::size_of::<bool>());
+    }
+
+    #[test]
+    fn test_filter_kernel_names_non_empty() {
+        // Every GpuScalar impl must return non-empty kernel names.
+        assert!(!u8::filter_compare_kernel().is_empty());
+        assert!(!u8::compare_col_kernel().is_empty());
+        assert!(!u32::filter_compare_kernel().is_empty());
+        assert!(!u32::compare_col_kernel().is_empty());
+        assert!(!u64::filter_compare_kernel().is_empty());
+        assert!(!u64::compare_col_kernel().is_empty());
+        assert!(!i32::filter_compare_kernel().is_empty());
+        assert!(!i32::compare_col_kernel().is_empty());
+        assert!(!i64::filter_compare_kernel().is_empty());
+        assert!(!i64::compare_col_kernel().is_empty());
+        assert!(!f32::filter_compare_kernel().is_empty());
+        assert!(!f32::compare_col_kernel().is_empty());
+        assert!(!f64::filter_compare_kernel().is_empty());
+        assert!(!f64::compare_col_kernel().is_empty());
+        assert!(!bool::filter_compare_kernel().is_empty());
+        assert!(!bool::compare_col_kernel().is_empty());
+    }
+
+    #[test]
+    fn test_allowed_scalar_types_non_empty() {
+        assert!(!u8::allowed_scalar_types().is_empty());
+        assert!(!u32::allowed_scalar_types().is_empty());
+        assert!(!u64::allowed_scalar_types().is_empty());
+        assert!(!i32::allowed_scalar_types().is_empty());
+        assert!(!i64::allowed_scalar_types().is_empty());
+        assert!(!f32::allowed_scalar_types().is_empty());
+        assert!(!f64::allowed_scalar_types().is_empty());
+        assert!(!bool::allowed_scalar_types().is_empty());
+    }
+
+    #[test]
+    fn test_fused_scan_kernel_only_u32_and_f64() {
+        // Only u32 and f64 have fused-scan phase1 kernels.
+        assert!(u32::filter_scan_phase1_kernel().is_some());
+        assert!(f64::filter_scan_phase1_kernel().is_some());
+        // All others return None.
+        assert!(u8::filter_scan_phase1_kernel().is_none());
+        assert!(u64::filter_scan_phase1_kernel().is_none());
+        assert!(i32::filter_scan_phase1_kernel().is_none());
+        assert!(i64::filter_scan_phase1_kernel().is_none());
+        assert!(f32::filter_scan_phase1_kernel().is_none());
+        assert!(bool::filter_scan_phase1_kernel().is_none());
+    }
+
+    #[test]
+    fn test_bool_and_u8_share_gpu_kernels() {
+        // Bool is stored as u8 on the GPU, so both types share the same kernels.
+        assert_eq!(u8::filter_compare_kernel(), bool::filter_compare_kernel());
+        assert_eq!(u8::compare_col_kernel(), bool::compare_col_kernel());
+    }
+
+    #[test]
+    fn test_u32_allowed_includes_symbol() {
+        // u32 filter must accept both U32 and Symbol columns.
+        let allowed = u32::allowed_scalar_types();
+        assert!(allowed.contains(&xlog_core::ScalarType::U32));
+        assert!(allowed.contains(&xlog_core::ScalarType::Symbol));
     }
 }
