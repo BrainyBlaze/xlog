@@ -49,6 +49,50 @@ pub enum McSamplingMethod {
     EvidenceClamping,
 }
 
+/// Strategy for counting evidence-satisfied samples in the MC loop.
+///
+/// In `QueriesOnly` mode (used with evidence clamping), evidence is
+/// guaranteed to hold in every sample, so we skip the truth-kernel's
+/// evidence check and evidence-side buffer allocations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McCountStrategy {
+    /// Full path: check both queries and evidence each sample.
+    QueriesAndEvidence,
+    /// Clamped path: evidence is always satisfied; only accumulate query flags.
+    QueriesOnly,
+}
+
+impl McCountStrategy {
+    /// Derive the count strategy from the chosen sampling method.
+    pub fn from_method(method: McSamplingMethod) -> Self {
+        match method {
+            McSamplingMethod::Rejection => Self::QueriesAndEvidence,
+            McSamplingMethod::EvidenceClamping => Self::QueriesOnly,
+        }
+    }
+}
+
+/// Breakdown of time spent in each phase of MC evaluation.
+/// Gate with `XLOG_MC_PROFILE=1` to print at the end of evaluation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct McTimingBreakdown {
+    pub sampler_us: u64,
+    pub sample_reset_us: u64,
+    pub sample_build_us: u64,
+    pub eval_us: u64,
+    pub count_us: u64,
+}
+
+impl McTimingBreakdown {
+    pub fn total_us(&self) -> u64 {
+        self.sampler_us
+            .saturating_add(self.sample_reset_us)
+            .saturating_add(self.sample_build_us)
+            .saturating_add(self.eval_us)
+            .saturating_add(self.count_us)
+    }
+}
+
 /// Phase 4 semantics for non-monotone SCC evaluation inside MC sampling.
 pub const NONMONOTONE_SEMANTICS: &str = "Synchronous iteration per SCC; if a fixpoint is reached, use it; if a cycle is detected, use the intersection of all states in the cycle (skeptical tuples only); if the iteration budget is exceeded, use the intersection across all visited states (conservative).";
 
@@ -517,7 +561,7 @@ impl McProgram {
         provider: Arc<CudaKernelProvider>,
     ) -> Result<McDeviceResult> {
         let (method, forcing) = self.resolve_sampling_method(cfg.sampling_method)?;
-        let is_clamped = method == McSamplingMethod::EvidenceClamping;
+        let strategy = McCountStrategy::from_method(method);
 
         let prob_query_count = self.queries.len();
         let evidence_count = self.evidence.len();
@@ -533,8 +577,11 @@ impl McProgram {
                 evidence_count
             ))
         })?;
-        // In clamped mode, pass 0 evidence to the truth kernel so it sets evidence_ok = 1
-        let effective_evidence_count_u32 = if is_clamped { 0u32 } else { evidence_count_u32 };
+        // In QueriesOnly mode, pass 0 evidence to the truth kernel so it sets evidence_ok = 1
+        let effective_evidence_count_u32 = match strategy {
+            McCountStrategy::QueriesOnly => 0u32,
+            McCountStrategy::QueriesAndEvidence => evidence_count_u32,
+        };
 
         let mut d_query_counts = provider.memory().alloc::<u32>(prob_query_count)?;
         if prob_query_count > 0 {
@@ -545,6 +592,12 @@ impl McProgram {
                 .map_err(|e| XlogError::Kernel(format!("Failed to zero MC query counts: {}", e)))?;
         }
         let mut d_evidence_count = provider.memory().alloc::<u32>(1)?;
+        // Design note (QueriesOnly mode): The spec requires evidence_count ==
+        // cfg.samples at the end of inference.  We achieve this without a
+        // separate HtoD upload: the truth kernel always sets evidence_ok = 1
+        // (because effective_evidence_count = 0 ⇒ all evidence trivially
+        // satisfied), so the accumulate kernel atomicAdd's evidence_count once
+        // per sample, arriving at exactly cfg.samples after the loop.
         provider
             .device()
             .inner()
@@ -554,8 +607,6 @@ impl McProgram {
         let mut d_query_flags = provider.memory().alloc::<u8>(prob_query_count)?;
         let mut d_evidence_ok = provider.memory().alloc::<u8>(1)?;
         let mut d_query_ptrs = provider.memory().alloc::<u64>(prob_query_count)?;
-        let mut d_evidence_ptrs = provider.memory().alloc::<u64>(evidence_count)?;
-        let mut d_evidence_expected = provider.memory().alloc::<u8>(evidence_count)?;
         let mut d_zero_count = provider.memory().alloc::<u32>(1)?;
         provider
             .device()
@@ -563,7 +614,16 @@ impl McProgram {
             .memset_zeros(&mut d_zero_count)
             .map_err(|e| XlogError::Kernel(format!("Failed to zero MC zero-count: {}", e)))?;
 
-        if evidence_count > 0 && !is_clamped {
+        // In QueriesOnly mode, skip evidence-side buffer allocations.
+        // We still need 1-element sentinel slices for the truth kernel args.
+        let evidence_alloc_count = match strategy {
+            McCountStrategy::QueriesOnly => 1,
+            McCountStrategy::QueriesAndEvidence => evidence_count.max(1),
+        };
+        let mut d_evidence_ptrs = provider.memory().alloc::<u64>(evidence_alloc_count)?;
+        let mut d_evidence_expected = provider.memory().alloc::<u8>(evidence_alloc_count)?;
+
+        if evidence_count > 0 && strategy == McCountStrategy::QueriesAndEvidence {
             let expected: Vec<u8> = self
                 .evidence
                 .iter()
@@ -600,39 +660,47 @@ impl McProgram {
             shared_mem_bytes: 0,
         };
 
+        // Pre-allocate host-side pointer vectors outside the per-sample closure
+        // to avoid repeated heap allocation.  Query/evidence relations are dynamic
+        // (re-created each sample), so the device pointers themselves are NOT
+        // stable -- we still upload every sample -- but the host Vec storage is
+        // reused across iterations.
+        let mut query_ptrs_buf: Vec<u64> = vec![0u64; prob_query_count];
+        let mut evidence_ptrs_buf: Vec<u64> = vec![0u64; evidence_count];
+
         let stats =
             self.evaluate_gpu_counts_with(&cfg, &forcing, method, provider.clone(), |executor, plan, count| {
                 let zero_ptr = *d_zero_count.device_ptr() as u64;
 
-                let mut query_ptrs: Vec<u64> = Vec::with_capacity(count);
+                query_ptrs_buf.clear();
                 for rel_name in plan.query_rel_names.iter().take(count) {
                     let ptr = executor
                         .store()
                         .get(rel_name)
                         .map(|buf| *buf.num_rows_device().device_ptr() as u64)
                         .unwrap_or(zero_ptr);
-                    query_ptrs.push(ptr);
+                    query_ptrs_buf.push(ptr);
                 }
                 upload_slice(
                     &provider,
-                    &query_ptrs,
+                    &query_ptrs_buf,
                     &mut d_query_ptrs,
                     "MC query count ptrs",
                 )?;
 
-                if !is_clamped {
-                    let mut evidence_ptrs: Vec<u64> = Vec::with_capacity(evidence_count);
+                if strategy == McCountStrategy::QueriesAndEvidence {
+                    evidence_ptrs_buf.clear();
                     for (rel_name, _) in plan.evidence_rel_specs.iter() {
                         let ptr = executor
                             .store()
                             .get(rel_name)
                             .map(|buf| *buf.num_rows_device().device_ptr() as u64)
                             .unwrap_or(zero_ptr);
-                        evidence_ptrs.push(ptr);
+                        evidence_ptrs_buf.push(ptr);
                     }
                     upload_slice(
                         &provider,
-                        &evidence_ptrs,
+                        &evidence_ptrs_buf,
                         &mut d_evidence_ptrs,
                         "MC evidence count ptrs",
                     )?;
@@ -808,10 +876,14 @@ impl McProgram {
             &mut executor,
         )?;
 
-        let base_store = snapshot_store(&provider, &executor, &gpu_plan.schemas)?;
-
         let (prob_tables, ad_tables, ad_decisions) =
             build_prob_tables_device(self, &provider, &gpu_plan.schemas)?;
+
+        // Build the targeted reset plan: preserve pure deterministic base
+        // relations, clear everything else, and snapshot base facts for
+        // predicates that are both deterministic and dynamic.
+        let reset_plan =
+            build_sample_reset_plan(&gpu_plan, self, &provider, &executor)?;
 
         let num_vars = self.bernoulli_probs.len();
 
@@ -836,6 +908,10 @@ impl McProgram {
                 .map_err(|e| XlogError::Kernel(format!("Failed to zero forced_value: {}", e)))?;
         }
 
+        let mc_profile = std::env::var("XLOG_MC_PROFILE").ok().map(|v| v == "1").unwrap_or(false);
+        let mut timing = McTimingBreakdown::default();
+
+        let t0 = std::time::Instant::now();
         let samples_device = if self.bernoulli_probs.is_empty() || cfg.samples == 0 {
             provider.memory().alloc::<u8>(0)?
         } else {
@@ -847,17 +923,42 @@ impl McProgram {
                 &d_forced_value.slice(..),
             )?
         };
+        if mc_profile {
+            timing.sampler_us = t0.elapsed().as_micros() as u64;
+        }
 
         let mut stats = EvalStats::default();
 
+        // Pre-compute reference slices for the reset plan (avoids per-sample allocation).
+        let preserve_refs: Vec<&str> = reset_plan.preserve.iter().map(|s| s.as_str()).collect();
+        let clear_refs: Vec<(&str, Schema)> = reset_plan
+            .clear
+            .iter()
+            .map(|(s, sc)| (s.as_str(), sc.clone()))
+            .collect();
+
         for sample_idx in 0..cfg.samples {
-            executor.reset_for_mc();
-            restore_store(&provider, &base_store, &mut executor)?;
+            let t_reset = std::time::Instant::now();
+            executor.reset_for_mc_relations(&preserve_refs, &clear_refs)?;
+            // Re-load deterministic base facts for predicates that are both
+            // deterministic and dynamic (e.g., `a(1). 0.5::a(2).`).
+            for (pred, base_buf) in &reset_plan.reload_base {
+                let cloned = if base_buf.is_empty() {
+                    provider.create_empty_buffer(base_buf.schema().clone())?
+                } else {
+                    clone_buffer_device(&provider, base_buf)?
+                };
+                executor.put_relation(pred, cloned);
+            }
+            if mc_profile {
+                timing.sample_reset_us += t_reset.elapsed().as_micros() as u64;
+            }
 
             let start = sample_idx * num_vars;
             let end = start + num_vars;
             let sample_bits = samples_device.slice(start..end);
 
+            let t_build = std::time::Instant::now();
             let sample_buffers = build_sample_buffers(
                 &provider,
                 &sample_bits,
@@ -876,7 +977,11 @@ impl McProgram {
                 };
                 executor.put_relation(&pred, merged);
             }
+            if mc_profile {
+                timing.sample_build_us += t_build.elapsed().as_micros() as u64;
+            }
 
+            let t_eval = std::time::Instant::now();
             let sample_stats = evaluate_program_gpu(
                 &provider,
                 &mut executor,
@@ -884,11 +989,26 @@ impl McProgram {
                 &gpu_plan.nonmonotone_sccs,
                 cfg.max_nonmonotone_iterations,
             )?;
+            if mc_profile {
+                timing.eval_us += t_eval.elapsed().as_micros() as u64;
+            }
             stats.nonmonotone_sccs += sample_stats.nonmonotone_sccs;
             stats.nonmonotone_cycles += sample_stats.nonmonotone_cycles;
             stats.nonmonotone_iteration_limit_hits += sample_stats.nonmonotone_iteration_limit_hits;
 
+            let t_count = std::time::Instant::now();
             on_sample(&executor, &gpu_plan, prob_query_count)?;
+            if mc_profile {
+                timing.count_us += t_count.elapsed().as_micros() as u64;
+            }
+        }
+
+        if mc_profile {
+            eprintln!(
+                "[MC Profile] samples={} sampler={}us reset={}us build={}us eval={}us count={}us total={}us",
+                cfg.samples, timing.sampler_us, timing.sample_reset_us, timing.sample_build_us,
+                timing.eval_us, timing.count_us, timing.total_us()
+            );
         }
 
         Ok(stats)
@@ -1149,41 +1269,115 @@ fn load_deterministic_facts(
     Ok(())
 }
 
-fn snapshot_store(
-    provider: &Arc<CudaKernelProvider>,
-    executor: &Executor,
-    schemas: &HashMap<String, Schema>,
-) -> Result<HashMap<String, CudaBuffer>> {
-    let mut snapshot: HashMap<String, CudaBuffer> = HashMap::new();
-    for (pred, schema) in schemas {
-        let buffer = executor
-            .store()
-            .get(pred)
-            .ok_or_else(|| XlogError::Execution(format!("Missing relation {}", pred)))?;
-        let cloned = if buffer.is_empty() {
-            provider.create_empty_buffer(schema.clone())?
-        } else {
-            clone_buffer_device(provider, buffer)?
-        };
-        snapshot.insert(pred.clone(), cloned);
-    }
-    Ok(snapshot)
+/// Plan for per-sample executor reset.
+///
+/// Instead of cloning/restoring the entire store each sample, we classify
+/// relations as either *preserve* (deterministic base facts that are never
+/// overwritten) or *clear* (everything else).  Preserved relations stay
+/// in-place across samples; cleared relations are re-created as empty
+/// buffers.
+///
+/// A predicate that has **both** deterministic facts and dynamic writes
+/// (probabilistic / AD / rule-head) is placed in `clear`, and its
+/// deterministic base facts are re-loaded each sample from `reload_base`.
+struct McSampleResetPlan {
+    /// Relations to keep untouched (pure deterministic base facts).
+    preserve: Vec<String>,
+    /// Relations to clear to empty buffers each sample (dynamic/sampled/rule-derived).
+    clear: Vec<(String, Schema)>,
+    /// Deterministic base-fact buffers for predicates that are both
+    /// deterministic AND dynamic.  These are cloned into the store each
+    /// sample after clearing, before `build_sample_buffers` merges sampled
+    /// rows on top.
+    reload_base: Vec<(String, CudaBuffer)>,
 }
 
-fn restore_store(
+/// Build a reset plan from the compiled MC program and the GPU execution plan.
+///
+/// A predicate is "preserve-safe" iff it:
+/// - has at least one deterministic fact (from `program.facts()`)
+/// - is NOT a probabilistic fact predicate (`self.prob_facts`)
+/// - is NOT an annotated disjunction choice predicate (`self.annotated_disjunctions`)
+/// - is NOT a rule head predicate (`program.rules`, excluding facts)
+/// - is NOT a query temp relation (`__xlog_query_*`)
+fn build_sample_reset_plan(
+    gpu_plan: &GpuMcPlan,
+    mc_program: &McProgram,
     provider: &Arc<CudaKernelProvider>,
-    base_store: &HashMap<String, CudaBuffer>,
-    executor: &mut Executor,
-) -> Result<()> {
-    for (pred, buffer) in base_store {
-        let cloned = if buffer.is_empty() {
-            provider.create_empty_buffer(buffer.schema().clone())?
-        } else {
-            clone_buffer_device(provider, buffer)?
-        };
-        executor.put_relation(pred, cloned);
+    executor: &Executor,
+) -> Result<McSampleResetPlan> {
+    // Collect the set of predicates that have deterministic facts.
+    let mut det_preds: HashSet<String> = HashSet::new();
+    for fact in gpu_plan.program.facts() {
+        det_preds.insert(fact.head.predicate.clone());
     }
-    Ok(())
+
+    // Collect predicates that are "dynamic" — written by sampling or rules.
+    let mut dynamic_preds: HashSet<String> = HashSet::new();
+
+    // Probabilistic fact predicates.
+    for pf in &mc_program.prob_facts {
+        dynamic_preds.insert(pf.atom.predicate.clone());
+    }
+
+    // Annotated disjunction choice predicates.
+    for ad in &mc_program.annotated_disjunctions {
+        for choice in &ad.choices {
+            dynamic_preds.insert(choice.predicate.clone());
+        }
+    }
+
+    // Rule head predicates (proper rules only, not facts).
+    for rule in gpu_plan.program.proper_rules() {
+        dynamic_preds.insert(rule.head.predicate.clone());
+    }
+
+    // Query temp relations.
+    for (name, _) in &gpu_plan.schemas {
+        if name.starts_with("__xlog_query_") {
+            dynamic_preds.insert(name.clone());
+        }
+    }
+
+    let mut preserve: Vec<String> = Vec::new();
+    let mut clear: Vec<(String, Schema)> = Vec::new();
+    let mut reload_base: Vec<(String, CudaBuffer)> = Vec::new();
+
+    for (name, schema) in &gpu_plan.schemas {
+        let is_det = det_preds.contains(name);
+        let is_dyn = dynamic_preds.contains(name);
+
+        if is_det && !is_dyn {
+            // Pure deterministic — preserve in-place.
+            preserve.push(name.clone());
+        } else {
+            // Dynamic (possibly also deterministic) — clear each sample.
+            clear.push((name.clone(), schema.clone()));
+
+            if is_det && is_dyn {
+                // Has both deterministic and dynamic facts: snapshot the
+                // deterministic base buffer so we can re-load it each sample.
+                let buf = executor.store().get(name).ok_or_else(|| {
+                    XlogError::Execution(format!(
+                        "Missing relation {} for reload snapshot",
+                        name
+                    ))
+                })?;
+                let cloned = if buf.is_empty() {
+                    provider.create_empty_buffer(schema.clone())?
+                } else {
+                    clone_buffer_device(provider, buf)?
+                };
+                reload_base.push((name.clone(), cloned));
+            }
+        }
+    }
+
+    Ok(McSampleResetPlan {
+        preserve,
+        clear,
+        reload_base,
+    })
 }
 
 fn clone_buffer_device(
@@ -1251,23 +1445,10 @@ fn build_zero_arity_buffer(
     ))
 }
 
-fn device_row_count_u32(provider: &Arc<CudaKernelProvider>, buffer: &CudaBuffer) -> Result<u32> {
-    let mut host = [0u32];
-    provider
-        .device()
-        .inner()
-        .dtoh_sync_copy_into(buffer.num_rows_device(), &mut host)
-        .map_err(|e| XlogError::Kernel(format!("Failed to read row count: {}", e)))?;
-    Ok(host[0])
-}
-
 fn dedup_relation(provider: &Arc<CudaKernelProvider>, buffer: &CudaBuffer) -> Result<CudaBuffer> {
-    let rows = device_row_count_u32(provider, buffer)?;
+    let rows = buffer.num_rows();
     if rows == 0 {
         return provider.create_empty_buffer(buffer.schema().clone());
-    }
-    if buffer.arity() == 0 {
-        return build_zero_arity_buffer(provider, 1u32, buffer.schema());
     }
     let key_cols: Vec<usize> = (0..buffer.arity()).collect();
     provider.dedup(buffer, &key_cols)
@@ -1452,10 +1633,6 @@ fn build_sample_buffers(
         .map_err(|e| XlogError::Kernel(format!("mc_eval_mask_var failed: {}", e)))?;
 
         let filtered = provider.compact_buffer_by_device_mask_counted(&table.buffer, &d_mask)?;
-        let filtered_rows = device_row_count_u32(provider, &filtered)?;
-        if filtered_rows == 0 {
-            continue;
-        }
         let deduped = dedup_relation(provider, &filtered)?;
         out.push((table.predicate.clone(), deduped));
     }
@@ -1504,10 +1681,6 @@ fn build_sample_buffers(
         .map_err(|e| XlogError::Kernel(format!("mc_eval_mask_ad_choice failed: {}", e)))?;
 
         let filtered = provider.compact_buffer_by_device_mask_counted(&table.buffer, &d_mask)?;
-        let filtered_rows = device_row_count_u32(provider, &filtered)?;
-        if filtered_rows == 0 {
-            continue;
-        }
         let deduped = dedup_relation(provider, &filtered)?;
         out.push((table.predicate.clone(), deduped));
     }
