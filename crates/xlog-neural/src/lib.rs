@@ -72,4 +72,17 @@ pub enum NeuralError {
 }
 
 /// Result type for neural operations
-pub type Result<T> = std::result::Result<T, NeuralError>;
+pub type NeuralResult<T> = std::result::Result<T, NeuralError>;
+
+// Error conversion seams — orphan rule: NeuralError is defined here.
+impl From<NeuralError> for xlog_core::XlogError {
+    fn from(e: NeuralError) -> Self {
+        xlog_core::XlogError::Execution(e.to_string())
+    }
+}
+
+impl From<tensor_source::TensorSourceError> for xlog_core::XlogError {
+    fn from(e: tensor_source::TensorSourceError) -> Self {
+        xlog_core::XlogError::Execution(e.to_string())
+    }
+}
