@@ -15,9 +15,9 @@ fn main() {
         let input: Vec<u32> = (0..size).rev().collect();
         let schema = Schema::new(vec![("val".to_string(), ScalarType::U32)]);
         
-        let buffer = provider.create_buffer_from_u32_slice(&input, schema).unwrap();
+        let buffer = provider.create_buffer_from_slice::<u32>(&input, schema).unwrap();
         let sorted = provider.sort(&buffer, &[0]).unwrap();
-        let result = provider.download_column_u32(&sorted, 0).unwrap();
+        let result = provider.download_column::<u32>(&sorted, 0).unwrap();
         
         // Check if sorted correctly
         let expected: Vec<u32> = (0..size).collect();

@@ -29,7 +29,7 @@ mod tests {
 
         let schema = Schema::new(vec![("x".to_string(), ScalarType::U32)]);
         let buffer = provider
-            .create_buffer_from_u32_slice(&[1, 2, 3], schema.clone())
+            .create_buffer_from_slice::<u32>(&[1, 2, 3], schema.clone())
             .expect("create buffer");
 
         let arrow_dev = provider

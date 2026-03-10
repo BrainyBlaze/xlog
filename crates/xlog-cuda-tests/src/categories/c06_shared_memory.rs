@@ -48,7 +48,7 @@ fn test_sort_uses_shared_memory(ctx: &TestContext) -> TestResult {
 
         let buffer = match ctx
             .provider
-            .create_buffer_from_u32_slice(&data, schema.clone())
+            .create_buffer_from_slice::<u32>(&data, schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -87,7 +87,7 @@ fn test_sort_uses_shared_memory(ctx: &TestContext) -> TestResult {
         }
 
         // Download and verify sorted order
-        let sorted_data = match ctx.provider.download_column_u32(&sorted, 0) {
+        let sorted_data = match ctx.provider.download_column::<u32>(&sorted, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -137,7 +137,7 @@ fn test_sort_bank_conflicts(ctx: &TestContext) -> TestResult {
 
     let buffer_same = match ctx
         .provider
-        .create_buffer_from_u32_slice(&data_same, schema.clone())
+        .create_buffer_from_slice::<u32>(&data_same, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -160,7 +160,7 @@ fn test_sort_bank_conflicts(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let downloaded_same = match ctx.provider.download_column_u32(&sorted_same, 0) {
+    let downloaded_same = match ctx.provider.download_column::<u32>(&sorted_same, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -187,7 +187,7 @@ fn test_sort_bank_conflicts(ctx: &TestContext) -> TestResult {
 
     let buffer_stride = match ctx
         .provider
-        .create_buffer_from_u32_slice(&data_stride, schema.clone())
+        .create_buffer_from_slice::<u32>(&data_stride, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -210,7 +210,7 @@ fn test_sort_bank_conflicts(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let downloaded_stride = match ctx.provider.download_column_u32(&sorted_stride, 0) {
+    let downloaded_stride = match ctx.provider.download_column::<u32>(&sorted_stride, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -242,7 +242,7 @@ fn test_sort_bank_conflicts(ctx: &TestContext) -> TestResult {
 
     let buffer_pow2 = match ctx
         .provider
-        .create_buffer_from_u32_slice(&data_pow2, schema.clone())
+        .create_buffer_from_slice::<u32>(&data_pow2, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -265,7 +265,7 @@ fn test_sort_bank_conflicts(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let downloaded_pow2 = match ctx.provider.download_column_u32(&sorted_pow2, 0) {
+    let downloaded_pow2 = match ctx.provider.download_column::<u32>(&sorted_pow2, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -369,7 +369,7 @@ fn test_sort_multiple_passes(ctx: &TestContext) -> TestResult {
     }
 
     // Download and verify
-    let sorted_keys = match ctx.provider.download_column_u32(&sorted, 0) {
+    let sorted_keys = match ctx.provider.download_column::<u32>(&sorted, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -442,7 +442,7 @@ fn test_block_boundary_shared_mem(ctx: &TestContext) -> TestResult {
 
         let buffer = match ctx
             .provider
-            .create_buffer_from_u32_slice(&data, schema.clone())
+            .create_buffer_from_slice::<u32>(&data, schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -481,7 +481,7 @@ fn test_block_boundary_shared_mem(ctx: &TestContext) -> TestResult {
         }
 
         // Download and verify
-        let sorted_data = match ctx.provider.download_column_u32(&sorted, 0) {
+        let sorted_data = match ctx.provider.download_column::<u32>(&sorted, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -584,7 +584,7 @@ fn test_shared_mem_size_limits(ctx: &TestContext) -> TestResult {
         }
 
         // Download and verify keys
-        let sorted_keys = match ctx.provider.download_column_u32(&sorted, 0) {
+        let sorted_keys = match ctx.provider.download_column::<u32>(&sorted, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -595,7 +595,7 @@ fn test_shared_mem_size_limits(ctx: &TestContext) -> TestResult {
             }
         };
 
-        let sorted_vals = match ctx.provider.download_column_u32(&sorted, 1) {
+        let sorted_vals = match ctx.provider.download_column::<u32>(&sorted, 1) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(

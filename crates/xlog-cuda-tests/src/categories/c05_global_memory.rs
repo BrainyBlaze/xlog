@@ -38,7 +38,7 @@ fn test_large_allocation(ctx: &TestContext) -> TestResult {
 
     let buffer = match ctx
         .provider
-        .create_buffer_from_u32_slice(&data, schema.clone())
+        .create_buffer_from_slice::<u32>(&data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -93,7 +93,7 @@ fn test_large_allocation(ctx: &TestContext) -> TestResult {
     }
 
     // Verify some filtered values
-    let filtered_data = match ctx.provider.download_column_u32(&filtered, 0) {
+    let filtered_data = match ctx.provider.download_column::<u32>(&filtered, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -153,7 +153,7 @@ fn test_aligned_access_patterns(ctx: &TestContext) -> TestResult {
 
         let buffer = match ctx
             .provider
-            .create_buffer_from_u32_slice(&data, schema.clone())
+            .create_buffer_from_slice::<u32>(&data, schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -178,7 +178,7 @@ fn test_aligned_access_patterns(ctx: &TestContext) -> TestResult {
         };
 
         // Download and verify
-        let sorted_data = match ctx.provider.download_column_u32(&sorted, 0) {
+        let sorted_data = match ctx.provider.download_column::<u32>(&sorted, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -257,7 +257,7 @@ fn test_coalesced_access(ctx: &TestContext) -> TestResult {
     };
 
     // Download and verify
-    let sorted_keys = match ctx.provider.download_column_u32(&sorted, 0) {
+    let sorted_keys = match ctx.provider.download_column::<u32>(&sorted, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -268,7 +268,7 @@ fn test_coalesced_access(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let sorted_vals = match ctx.provider.download_column_u32(&sorted, 1) {
+    let sorted_vals = match ctx.provider.download_column::<u32>(&sorted, 1) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -334,7 +334,7 @@ fn test_repeated_access(ctx: &TestContext) -> TestResult {
 
     let buffer = match ctx
         .provider
-        .create_buffer_from_u32_slice(&data, schema.clone())
+        .create_buffer_from_slice::<u32>(&data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -384,7 +384,7 @@ fn test_repeated_access(ctx: &TestContext) -> TestResult {
     };
 
     // Verify sorted1 and sorted2 are identical
-    let sorted_data1 = match ctx.provider.download_column_u32(&sorted1, 0) {
+    let sorted_data1 = match ctx.provider.download_column::<u32>(&sorted1, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -395,7 +395,7 @@ fn test_repeated_access(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let sorted_data2 = match ctx.provider.download_column_u32(&sorted2, 0) {
+    let sorted_data2 = match ctx.provider.download_column::<u32>(&sorted2, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -426,7 +426,7 @@ fn test_repeated_access(ctx: &TestContext) -> TestResult {
     }
 
     // Verify filtered data
-    let filtered_data = match ctx.provider.download_column_u32(&filtered, 0) {
+    let filtered_data = match ctx.provider.download_column::<u32>(&filtered, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -462,7 +462,7 @@ fn test_repeated_access(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let sorted_data3 = match ctx.provider.download_column_u32(&sorted3, 0) {
+    let sorted_data3 = match ctx.provider.download_column::<u32>(&sorted3, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -507,7 +507,7 @@ fn test_buffer_reuse(ctx: &TestContext) -> TestResult {
 
     let buffer = match ctx
         .provider
-        .create_buffer_from_u32_slice(&data, schema.clone())
+        .create_buffer_from_slice::<u32>(&data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -520,7 +520,7 @@ fn test_buffer_reuse(ctx: &TestContext) -> TestResult {
     };
 
     // Read 1: Download and verify
-    let read1 = match ctx.provider.download_column_u32(&buffer, 0) {
+    let read1 = match ctx.provider.download_column::<u32>(&buffer, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -552,7 +552,7 @@ fn test_buffer_reuse(ctx: &TestContext) -> TestResult {
     };
 
     // Read 2: Verify original buffer unchanged after sort
-    let read2 = match ctx.provider.download_column_u32(&buffer, 0) {
+    let read2 = match ctx.provider.download_column::<u32>(&buffer, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -585,7 +585,7 @@ fn test_buffer_reuse(ctx: &TestContext) -> TestResult {
     };
 
     // Read 3: Verify original buffer still unchanged
-    let read3 = match ctx.provider.download_column_u32(&buffer, 0) {
+    let read3 = match ctx.provider.download_column::<u32>(&buffer, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -605,7 +605,7 @@ fn test_buffer_reuse(ctx: &TestContext) -> TestResult {
     }
 
     // Verify sorted result is correct
-    let sorted_data = match ctx.provider.download_column_u32(&sorted, 0) {
+    let sorted_data = match ctx.provider.download_column::<u32>(&sorted, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -626,7 +626,7 @@ fn test_buffer_reuse(ctx: &TestContext) -> TestResult {
     }
 
     // Verify filtered result is correct
-    let filtered_data = match ctx.provider.download_column_u32(&filtered, 0) {
+    let filtered_data = match ctx.provider.download_column::<u32>(&filtered, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(

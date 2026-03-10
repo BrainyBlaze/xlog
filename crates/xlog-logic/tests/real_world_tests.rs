@@ -108,7 +108,7 @@ fn read_column_u32(provider: &CudaKernelProvider, buffer: &CudaBuffer, col: usiz
         return vec![];
     }
     provider
-        .download_column_u32(buffer, col)
+        .download_column::<u32>(buffer, col)
         .unwrap_or_default()
 }
 

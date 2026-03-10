@@ -106,7 +106,7 @@ fn test_hash_join_atomics(ctx: &TestContext) -> TestResult {
     }
 
     // Download and verify join results
-    let joined_keys = match ctx.provider.download_column_u32(&joined, 0) {
+    let joined_keys = match ctx.provider.download_column::<u32>(&joined, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -117,7 +117,7 @@ fn test_hash_join_atomics(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let joined_lvals = match ctx.provider.download_column_u32(&joined, 1) {
+    let joined_lvals = match ctx.provider.download_column::<u32>(&joined, 1) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -128,7 +128,7 @@ fn test_hash_join_atomics(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let joined_rvals = match ctx.provider.download_column_u32(&joined, 2) {
+    let joined_rvals = match ctx.provider.download_column::<u32>(&joined, 2) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -216,7 +216,7 @@ fn test_filter_scan_sync(ctx: &TestContext) -> TestResult {
 
         let buffer = match ctx
             .provider
-            .create_buffer_from_u32_slice(&data, schema.clone())
+            .create_buffer_from_slice::<u32>(&data, schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -260,7 +260,7 @@ fn test_filter_scan_sync(ctx: &TestContext) -> TestResult {
         }
 
         // Download and verify values
-        let filtered_data = match ctx.provider.download_column_u32(&filtered, 0) {
+        let filtered_data = match ctx.provider.download_column::<u32>(&filtered, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -396,7 +396,7 @@ fn test_sort_barrier_correctness(ctx: &TestContext) -> TestResult {
         }
 
         // Download sorted keys
-        let sorted_keys = match ctx.provider.download_column_u32(&sorted, 0) {
+        let sorted_keys = match ctx.provider.download_column::<u32>(&sorted, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -531,7 +531,7 @@ fn test_dedup_atomic_marking(ctx: &TestContext) -> TestResult {
         }
 
         // Download and verify uniqueness
-        let deduped_keys = match ctx.provider.download_column_u32(&deduped, 0) {
+        let deduped_keys = match ctx.provider.download_column::<u32>(&deduped, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -598,7 +598,7 @@ fn test_concurrent_operations(ctx: &TestContext) -> TestResult {
 
         let buffer = match ctx
             .provider
-            .create_buffer_from_u32_slice(&data, schema.clone())
+            .create_buffer_from_slice::<u32>(&data, schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -708,7 +708,7 @@ fn test_concurrent_operations(ctx: &TestContext) -> TestResult {
             );
         }
 
-        let sorted_data = match ctx.provider.download_column_u32(result, 0) {
+        let sorted_data = match ctx.provider.download_column::<u32>(result, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -781,7 +781,7 @@ fn test_concurrent_operations(ctx: &TestContext) -> TestResult {
 
     // Verify original buffers are unchanged
     for i in 0..NUM_BUFFERS {
-        let current_data = match ctx.provider.download_column_u32(&buffers[i], 0) {
+        let current_data = match ctx.provider.download_column::<u32>(&buffers[i], 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(

@@ -53,7 +53,7 @@ fn test_hash_join_v2_single_key() {
 
     // Expected: rows with matching keys 2 and 3
     // Result should have 4 columns: left.key, left.payload, right.key, right.value
-    let rows = provider.download_column_u32(&result, 0).unwrap();
+    let rows = provider.download_column::<u32>(&result, 0).unwrap();
     assert_eq!(rows.len(), 2);
     assert_eq!(result.arity(), 4);
 }
@@ -74,17 +74,17 @@ fn test_semi_join() {
     let right_schema = make_schema(&[("val", ScalarType::U32)]);
 
     let left_buf = provider
-        .create_buffer_from_u32_slice(&left, left_schema)
+        .create_buffer_from_slice::<u32>(&left, left_schema)
         .unwrap();
     let right_buf = provider
-        .create_buffer_from_u32_slice(&right, right_schema)
+        .create_buffer_from_slice::<u32>(&right, right_schema)
         .unwrap();
 
     let result = provider
         .hash_join_v2(&left_buf, &right_buf, &[0], &[0], JoinType::Semi)
         .unwrap();
 
-    let vals = provider.download_column_u32(&result, 0).unwrap();
+    let vals = provider.download_column::<u32>(&result, 0).unwrap();
     // Order may vary, just check count and values
     assert_eq!(vals.len(), 2);
     assert!(vals.contains(&2));
@@ -107,17 +107,17 @@ fn test_anti_join() {
     let right_schema = make_schema(&[("val", ScalarType::U32)]);
 
     let left_buf = provider
-        .create_buffer_from_u32_slice(&left, left_schema)
+        .create_buffer_from_slice::<u32>(&left, left_schema)
         .unwrap();
     let right_buf = provider
-        .create_buffer_from_u32_slice(&right, right_schema)
+        .create_buffer_from_slice::<u32>(&right, right_schema)
         .unwrap();
 
     let result = provider
         .hash_join_v2(&left_buf, &right_buf, &[0], &[0], JoinType::Anti)
         .unwrap();
 
-    let vals = provider.download_column_u32(&result, 0).unwrap();
+    let vals = provider.download_column::<u32>(&result, 0).unwrap();
     assert_eq!(vals.len(), 2);
     assert!(vals.contains(&1));
     assert!(vals.contains(&3));
@@ -137,17 +137,17 @@ fn test_join_no_matches() {
     let right_schema = make_schema(&[("val", ScalarType::U32)]);
 
     let left_buf = provider
-        .create_buffer_from_u32_slice(&left, left_schema)
+        .create_buffer_from_slice::<u32>(&left, left_schema)
         .unwrap();
     let right_buf = provider
-        .create_buffer_from_u32_slice(&right, right_schema)
+        .create_buffer_from_slice::<u32>(&right, right_schema)
         .unwrap();
 
     let result = provider
         .hash_join_v2(&left_buf, &right_buf, &[0], &[0], JoinType::Inner)
         .unwrap();
 
-    let vals = provider.download_column_u32(&result, 0).unwrap();
+    let vals = provider.download_column::<u32>(&result, 0).unwrap();
     assert!(vals.is_empty());
 }
 
@@ -167,10 +167,10 @@ fn test_inner_join_with_duplicates() {
     let right_schema = make_schema(&[("key", ScalarType::U32)]);
 
     let left_buf = provider
-        .create_buffer_from_u32_slice(&left, left_schema)
+        .create_buffer_from_slice::<u32>(&left, left_schema)
         .unwrap();
     let right_buf = provider
-        .create_buffer_from_u32_slice(&right, right_schema)
+        .create_buffer_from_slice::<u32>(&right, right_schema)
         .unwrap();
 
     let result = provider
@@ -178,7 +178,7 @@ fn test_inner_join_with_duplicates() {
         .unwrap();
 
     // 2 matching left rows x 2 matching right rows = 4
-    let vals = provider.download_column_u32(&result, 0).unwrap();
+    let vals = provider.download_column::<u32>(&result, 0).unwrap();
     assert_eq!(vals.len(), 4);
 }
 
@@ -202,7 +202,7 @@ fn test_semi_join_preserves_left_columns() {
         .create_buffer_from_u32_columns(&[&left_key, &left_payload], left_schema)
         .unwrap();
     let right = provider
-        .create_buffer_from_u32_slice(&right_key, right_schema)
+        .create_buffer_from_slice::<u32>(&right_key, right_schema)
         .unwrap();
 
     let result = provider
@@ -211,8 +211,8 @@ fn test_semi_join_preserves_left_columns() {
 
     // Semi-join keeps left schema
     assert_eq!(result.arity(), 2);
-    let keys = provider.download_column_u32(&result, 0).unwrap();
-    let payloads = provider.download_column_u32(&result, 1).unwrap();
+    let keys = provider.download_column::<u32>(&result, 0).unwrap();
+    let payloads = provider.download_column::<u32>(&result, 1).unwrap();
     assert_eq!(keys.len(), 2);
 
     // Should have rows for keys 2 and 3
@@ -247,10 +247,10 @@ fn test_left_outer_join() {
     let right_schema = make_schema(&[("rval", ScalarType::U32)]);
 
     let left_buf = provider
-        .create_buffer_from_u32_slice(&left, left_schema)
+        .create_buffer_from_slice::<u32>(&left, left_schema)
         .unwrap();
     let right_buf = provider
-        .create_buffer_from_u32_slice(&right, right_schema)
+        .create_buffer_from_slice::<u32>(&right, right_schema)
         .unwrap();
 
     let result = provider
@@ -260,8 +260,8 @@ fn test_left_outer_join() {
     // Should have 3 rows (all left rows preserved)
     assert_eq!(result.arity(), 2);
 
-    let left_vals = provider.download_column_u32(&result, 0).unwrap();
-    let right_vals = provider.download_column_u32(&result, 1).unwrap();
+    let left_vals = provider.download_column::<u32>(&result, 0).unwrap();
+    let right_vals = provider.download_column::<u32>(&result, 1).unwrap();
     assert_eq!(left_vals.len(), 3);
 
     // All left values should be present
@@ -296,17 +296,17 @@ fn test_left_outer_all_unmatched() {
     let right_schema = make_schema(&[("rval", ScalarType::U32)]);
 
     let left_buf = provider
-        .create_buffer_from_u32_slice(&left, left_schema)
+        .create_buffer_from_slice::<u32>(&left, left_schema)
         .unwrap();
     let right_buf = provider
-        .create_buffer_from_u32_slice(&right, right_schema)
+        .create_buffer_from_slice::<u32>(&right, right_schema)
         .unwrap();
 
     let result = provider
         .hash_join_v2(&left_buf, &right_buf, &[0], &[0], JoinType::LeftOuter)
         .unwrap();
 
-    let right_vals = provider.download_column_u32(&result, 1).unwrap();
+    let right_vals = provider.download_column::<u32>(&result, 1).unwrap();
     assert_eq!(right_vals.len(), 3);
     // All right values should be 0 (null)
     assert!(right_vals.iter().all(|&v| v == 0));
@@ -360,7 +360,7 @@ fn test_multi_column_join() {
     // (1, 10, 100) joins (1, 10, 1000) -> result row
     // (1, 20, 200) joins (1, 20, 3000) -> result row
     // (2, 10, 300) joins (2, 10, 2000) -> result row
-    let rows = provider.download_column_u32(&result, 0).unwrap();
+    let rows = provider.download_column::<u32>(&result, 0).unwrap();
     assert_eq!(rows.len(), 3, "Should have 3 matches for multi-column join");
 }
 
@@ -379,10 +379,10 @@ fn test_left_outer_empty_right() {
     let right_schema = make_schema(&[("rval", ScalarType::U32)]);
 
     let left_buf = provider
-        .create_buffer_from_u32_slice(&left, left_schema)
+        .create_buffer_from_slice::<u32>(&left, left_schema)
         .unwrap();
     let right_buf = provider
-        .create_buffer_from_u32_slice(&right, right_schema)
+        .create_buffer_from_slice::<u32>(&right, right_schema)
         .unwrap();
 
     let result = provider
@@ -392,7 +392,7 @@ fn test_left_outer_empty_right() {
     // All left rows should be returned with null right columns
     assert_eq!(result.arity(), 2);
 
-    let right_vals = provider.download_column_u32(&result, 1).unwrap();
+    let right_vals = provider.download_column::<u32>(&result, 1).unwrap();
     assert_eq!(right_vals.len(), 3);
     assert!(right_vals.iter().all(|&v| v == 0));
 }

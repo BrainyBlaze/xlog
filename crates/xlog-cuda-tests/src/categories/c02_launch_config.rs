@@ -208,7 +208,7 @@ fn test_single_element(ctx: &TestContext) -> TestResult {
     let data: Vec<u32> = vec![42];
     let buffer = match ctx
         .provider
-        .create_buffer_from_u32_slice(&data, schema.clone())
+        .create_buffer_from_slice::<u32>(&data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -256,7 +256,7 @@ fn test_single_element(ctx: &TestContext) -> TestResult {
     }
 
     // Verify the sorted value
-    let sorted_data = match ctx.provider.download_column_u32(&sorted, 0) {
+    let sorted_data = match ctx.provider.download_column::<u32>(&sorted, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -302,7 +302,7 @@ fn test_single_element(ctx: &TestContext) -> TestResult {
     }
 
     // Verify filtered value
-    let filtered_data = match ctx.provider.download_column_u32(&filtered_keep, 0) {
+    let filtered_data = match ctx.provider.download_column::<u32>(&filtered_keep, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -375,7 +375,7 @@ fn test_warp_boundary_sizes(ctx: &TestContext) -> TestResult {
 
         let buffer = match ctx
             .provider
-            .create_buffer_from_u32_slice(&data, schema.clone())
+            .create_buffer_from_slice::<u32>(&data, schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -414,7 +414,7 @@ fn test_warp_boundary_sizes(ctx: &TestContext) -> TestResult {
         }
 
         // Download and verify sorted order
-        let sorted_data = match ctx.provider.download_column_u32(&sorted, 0) {
+        let sorted_data = match ctx.provider.download_column::<u32>(&sorted, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -467,7 +467,7 @@ fn test_block_boundary_sizes(ctx: &TestContext) -> TestResult {
 
         let buffer = match ctx
             .provider
-            .create_buffer_from_u32_slice(&data, schema.clone())
+            .create_buffer_from_slice::<u32>(&data, schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -506,7 +506,7 @@ fn test_block_boundary_sizes(ctx: &TestContext) -> TestResult {
         }
 
         // Download and verify sorted order
-        let sorted_data = match ctx.provider.download_column_u32(&sorted, 0) {
+        let sorted_data = match ctx.provider.download_column::<u32>(&sorted, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -557,7 +557,7 @@ fn test_non_power_of_two_sizes(ctx: &TestContext) -> TestResult {
 
         let buffer = match ctx
             .provider
-            .create_buffer_from_u32_slice(&data, schema.clone())
+            .create_buffer_from_slice::<u32>(&data, schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -596,7 +596,7 @@ fn test_non_power_of_two_sizes(ctx: &TestContext) -> TestResult {
         }
 
         // Download and verify sorted order
-        let sorted_data = match ctx.provider.download_column_u32(&sorted, 0) {
+        let sorted_data = match ctx.provider.download_column::<u32>(&sorted, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -645,7 +645,7 @@ fn test_large_grid_sizes(ctx: &TestContext) -> TestResult {
 
     let buffer = match ctx
         .provider
-        .create_buffer_from_u32_slice(&data, schema.clone())
+        .create_buffer_from_slice::<u32>(&data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -683,7 +683,7 @@ fn test_large_grid_sizes(ctx: &TestContext) -> TestResult {
     }
 
     // Download sorted data
-    let sorted_data = match ctx.provider.download_column_u32(&sorted, 0) {
+    let sorted_data = match ctx.provider.download_column::<u32>(&sorted, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -773,7 +773,7 @@ fn test_max_practical_size(ctx: &TestContext) -> TestResult {
 
     let buffer = match ctx
         .provider
-        .create_buffer_from_u32_slice(&data, schema.clone())
+        .create_buffer_from_slice::<u32>(&data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -811,7 +811,7 @@ fn test_max_practical_size(ctx: &TestContext) -> TestResult {
     }
 
     // Download sorted data
-    let sorted_data = match ctx.provider.download_column_u32(&sorted, 0) {
+    let sorted_data = match ctx.provider.download_column::<u32>(&sorted, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(

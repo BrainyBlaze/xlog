@@ -51,7 +51,7 @@ fn test_cache_line_access(ctx: &TestContext) -> TestResult {
 
         let buffer = match ctx
             .provider
-            .create_buffer_from_u32_slice(&data, schema.clone())
+            .create_buffer_from_slice::<u32>(&data, schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -76,7 +76,7 @@ fn test_cache_line_access(ctx: &TestContext) -> TestResult {
         };
 
         // Verify sort correctness
-        let sorted_data = match ctx.provider.download_column_u32(&sorted, 0) {
+        let sorted_data = match ctx.provider.download_column::<u32>(&sorted, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -157,7 +157,7 @@ fn test_cache_line_access(ctx: &TestContext) -> TestResult {
 
         let buffer = match ctx
             .provider
-            .create_buffer_from_u32_slice(&data, schema.clone())
+            .create_buffer_from_slice::<u32>(&data, schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -183,7 +183,7 @@ fn test_cache_line_access(ctx: &TestContext) -> TestResult {
             }
         };
 
-        let sorted_data = match ctx.provider.download_column_u32(&sorted, 0) {
+        let sorted_data = match ctx.provider.download_column::<u32>(&sorted, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -232,7 +232,7 @@ fn test_cache_reuse(ctx: &TestContext) -> TestResult {
 
     let buffer = match ctx
         .provider
-        .create_buffer_from_u32_slice(&data, schema.clone())
+        .create_buffer_from_slice::<u32>(&data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -259,7 +259,7 @@ fn test_cache_reuse(ctx: &TestContext) -> TestResult {
             }
         };
 
-        let result = match ctx.provider.download_column_u32(&sorted, 0) {
+        let result = match ctx.provider.download_column::<u32>(&sorted, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -407,7 +407,7 @@ fn test_cache_thrashing(ctx: &TestContext) -> TestResult {
 
     let large_buffer = match ctx
         .provider
-        .create_buffer_from_u32_slice(&large_data, schema.clone())
+        .create_buffer_from_slice::<u32>(&large_data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -432,7 +432,7 @@ fn test_cache_thrashing(ctx: &TestContext) -> TestResult {
     };
 
     // Verify correctness even with cache thrashing
-    let sorted_data = match ctx.provider.download_column_u32(&sorted, 0) {
+    let sorted_data = match ctx.provider.download_column::<u32>(&sorted, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -501,7 +501,7 @@ fn test_cache_thrashing(ctx: &TestContext) -> TestResult {
 
     let medium_buffer = match ctx
         .provider
-        .create_buffer_from_u32_slice(&medium_data, schema.clone())
+        .create_buffer_from_slice::<u32>(&medium_data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -524,7 +524,7 @@ fn test_cache_thrashing(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let medium_result = match ctx.provider.download_column_u32(&sorted_medium, 0) {
+    let medium_result = match ctx.provider.download_column::<u32>(&sorted_medium, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -599,7 +599,7 @@ fn test_memory_locality(ctx: &TestContext) -> TestResult {
 
     let seq_buffer = match ctx
         .provider
-        .create_buffer_from_u32_slice(&sequential_data, schema.clone())
+        .create_buffer_from_slice::<u32>(&sequential_data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -623,7 +623,7 @@ fn test_memory_locality(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let seq_result = match ctx.provider.download_column_u32(&sorted_seq, 0) {
+    let seq_result = match ctx.provider.download_column::<u32>(&sorted_seq, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -653,7 +653,7 @@ fn test_memory_locality(ctx: &TestContext) -> TestResult {
 
     let rev_buffer = match ctx
         .provider
-        .create_buffer_from_u32_slice(&reverse_data, schema.clone())
+        .create_buffer_from_slice::<u32>(&reverse_data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -676,7 +676,7 @@ fn test_memory_locality(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let rev_result = match ctx.provider.download_column_u32(&sorted_rev, 0) {
+    let rev_result = match ctx.provider.download_column::<u32>(&sorted_rev, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -708,7 +708,7 @@ fn test_memory_locality(ctx: &TestContext) -> TestResult {
 
     let rand_buffer = match ctx
         .provider
-        .create_buffer_from_u32_slice(&random_data, schema.clone())
+        .create_buffer_from_slice::<u32>(&random_data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -731,7 +731,7 @@ fn test_memory_locality(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let rand_result = match ctx.provider.download_column_u32(&sorted_rand, 0) {
+    let rand_result = match ctx.provider.download_column::<u32>(&sorted_rand, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -875,7 +875,7 @@ fn test_l2_cache_effects(ctx: &TestContext) -> TestResult {
 
     let small_buffer = match ctx
         .provider
-        .create_buffer_from_u32_slice(&small_data, schema.clone())
+        .create_buffer_from_slice::<u32>(&small_data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -900,7 +900,7 @@ fn test_l2_cache_effects(ctx: &TestContext) -> TestResult {
             }
         };
 
-        let result = match ctx.provider.download_column_u32(&sorted, 0) {
+        let result = match ctx.provider.download_column::<u32>(&sorted, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -929,7 +929,7 @@ fn test_l2_cache_effects(ctx: &TestContext) -> TestResult {
 
     let medium_buffer = match ctx
         .provider
-        .create_buffer_from_u32_slice(&medium_data, schema.clone())
+        .create_buffer_from_slice::<u32>(&medium_data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -952,7 +952,7 @@ fn test_l2_cache_effects(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let medium_result = match ctx.provider.download_column_u32(&sorted_medium, 0) {
+    let medium_result = match ctx.provider.download_column::<u32>(&sorted_medium, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -980,7 +980,7 @@ fn test_l2_cache_effects(ctx: &TestContext) -> TestResult {
 
     let large_buffer = match ctx
         .provider
-        .create_buffer_from_u32_slice(&large_data, schema.clone())
+        .create_buffer_from_slice::<u32>(&large_data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -1003,7 +1003,7 @@ fn test_l2_cache_effects(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let large_result = match ctx.provider.download_column_u32(&sorted_large, 0) {
+    let large_result = match ctx.provider.download_column::<u32>(&sorted_large, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -1030,7 +1030,7 @@ fn test_l2_cache_effects(ctx: &TestContext) -> TestResult {
     let small2_data: Vec<u32> = (0..SMALL_SIZE).map(|i| (i * 3) as u32).collect();
     let small2_buffer = match ctx
         .provider
-        .create_buffer_from_u32_slice(&small2_data, schema.clone())
+        .create_buffer_from_slice::<u32>(&small2_data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {

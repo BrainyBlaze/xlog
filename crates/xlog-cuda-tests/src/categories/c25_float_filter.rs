@@ -53,7 +53,7 @@ fn test_f64_nan_greater_than_inf(ctx: &TestContext) -> TestResult {
 
     let buffer = match ctx
         .provider
-        .create_buffer_from_f64_slice(&data, schema.clone())
+        .create_buffer_from_slice::<f64>(&data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -124,7 +124,7 @@ fn test_f64_negative_zero_less_than_positive_zero(ctx: &TestContext) -> TestResu
 
     let buffer = match ctx
         .provider
-        .create_buffer_from_f64_slice(&data, schema.clone())
+        .create_buffer_from_slice::<f64>(&data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -190,7 +190,7 @@ fn test_f64_nan_equality_ieee(ctx: &TestContext) -> TestResult {
 
     let buffer = match ctx
         .provider
-        .create_buffer_from_f64_slice(&data, schema.clone())
+        .create_buffer_from_slice::<f64>(&data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -271,7 +271,7 @@ fn test_f64_nan_ordering_total(ctx: &TestContext) -> TestResult {
 
     let buffer = match ctx
         .provider
-        .create_buffer_from_f64_slice(&data, schema.clone())
+        .create_buffer_from_slice::<f64>(&data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -394,7 +394,7 @@ fn test_f64_total_ordering_comprehensive(ctx: &TestContext) -> TestResult {
 
     let buffer = match ctx
         .provider
-        .create_buffer_from_f64_slice(&data, schema.clone())
+        .create_buffer_from_slice::<f64>(&data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -534,7 +534,7 @@ fn test_f32_nan_greater_than_inf(ctx: &TestContext) -> TestResult {
 
     let buffer = match ctx
         .provider
-        .create_buffer_from_f32_slice(&data, schema.clone())
+        .create_buffer_from_slice::<f32>(&data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -605,7 +605,7 @@ fn test_f32_negative_zero_less_than_positive_zero(ctx: &TestContext) -> TestResu
 
     let buffer = match ctx
         .provider
-        .create_buffer_from_f32_slice(&data, schema.clone())
+        .create_buffer_from_slice::<f32>(&data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -671,7 +671,7 @@ fn test_f32_nan_equality_ieee(ctx: &TestContext) -> TestResult {
 
     let buffer = match ctx
         .provider
-        .create_buffer_from_f32_slice(&data, schema.clone())
+        .create_buffer_from_slice::<f32>(&data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -752,7 +752,7 @@ fn test_f32_nan_ordering_total(ctx: &TestContext) -> TestResult {
 
     let buffer = match ctx
         .provider
-        .create_buffer_from_f32_slice(&data, schema.clone())
+        .create_buffer_from_slice::<f32>(&data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -875,7 +875,7 @@ fn test_f32_total_ordering_comprehensive(ctx: &TestContext) -> TestResult {
 
     let buffer = match ctx
         .provider
-        .create_buffer_from_f32_slice(&data, schema.clone())
+        .create_buffer_from_slice::<f32>(&data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {

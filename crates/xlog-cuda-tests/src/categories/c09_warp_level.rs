@@ -39,7 +39,7 @@ fn test_warp_size_operations(ctx: &TestContext) -> TestResult {
 
         let buffer = match ctx
             .provider
-            .create_buffer_from_u32_slice(&data, schema.clone())
+            .create_buffer_from_slice::<u32>(&data, schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -77,7 +77,7 @@ fn test_warp_size_operations(ctx: &TestContext) -> TestResult {
         }
 
         // Download and verify
-        let sorted_data = match ctx.provider.download_column_u32(&sorted, 0) {
+        let sorted_data = match ctx.provider.download_column::<u32>(&sorted, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -154,7 +154,7 @@ fn test_partial_warp_correctness(ctx: &TestContext) -> TestResult {
 
         let buffer = match ctx
             .provider
-            .create_buffer_from_u32_slice(&data, schema.clone())
+            .create_buffer_from_slice::<u32>(&data, schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -192,7 +192,7 @@ fn test_partial_warp_correctness(ctx: &TestContext) -> TestResult {
         }
 
         // Download and verify
-        let sorted_data = match ctx.provider.download_column_u32(&sorted, 0) {
+        let sorted_data = match ctx.provider.download_column::<u32>(&sorted, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -274,7 +274,7 @@ fn test_warp_divergence_patterns(ctx: &TestContext) -> TestResult {
 
     let buffer1 = match ctx
         .provider
-        .create_buffer_from_u32_slice(&alternating, schema.clone())
+        .create_buffer_from_slice::<u32>(&alternating, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -298,7 +298,7 @@ fn test_warp_divergence_patterns(ctx: &TestContext) -> TestResult {
     };
 
     // Verify sorted
-    let sorted_data1 = match ctx.provider.download_column_u32(&sorted1, 0) {
+    let sorted_data1 = match ctx.provider.download_column::<u32>(&sorted1, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -336,7 +336,7 @@ fn test_warp_divergence_patterns(ctx: &TestContext) -> TestResult {
 
     let buffer2 = match ctx
         .provider
-        .create_buffer_from_u32_slice(&warp_chaos, schema.clone())
+        .create_buffer_from_slice::<u32>(&warp_chaos, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -359,7 +359,7 @@ fn test_warp_divergence_patterns(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let sorted_data2 = match ctx.provider.download_column_u32(&sorted2, 0) {
+    let sorted_data2 = match ctx.provider.download_column::<u32>(&sorted2, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -400,7 +400,7 @@ fn test_warp_divergence_patterns(ctx: &TestContext) -> TestResult {
 
     let buffer3 = match ctx
         .provider
-        .create_buffer_from_u32_slice(&sawtooth, schema.clone())
+        .create_buffer_from_slice::<u32>(&sawtooth, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -423,7 +423,7 @@ fn test_warp_divergence_patterns(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let sorted_data3 = match ctx.provider.download_column_u32(&sorted3, 0) {
+    let sorted_data3 = match ctx.provider.download_column::<u32>(&sorted3, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -475,7 +475,7 @@ fn test_warp_uniform_patterns(ctx: &TestContext) -> TestResult {
 
     let buffer1 = match ctx
         .provider
-        .create_buffer_from_u32_slice(&warp_uniform, schema.clone())
+        .create_buffer_from_slice::<u32>(&warp_uniform, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -499,7 +499,7 @@ fn test_warp_uniform_patterns(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let sorted_data1 = match ctx.provider.download_column_u32(&sorted1, 0) {
+    let sorted_data1 = match ctx.provider.download_column::<u32>(&sorted1, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -575,7 +575,7 @@ fn test_warp_uniform_patterns(ctx: &TestContext) -> TestResult {
 
     let buffer2 = match ctx
         .provider
-        .create_buffer_from_u32_slice(&all_same, schema.clone())
+        .create_buffer_from_slice::<u32>(&all_same, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -678,7 +678,7 @@ fn test_multi_warp_coordination(ctx: &TestContext) -> TestResult {
             );
         }
 
-        let sorted_keys = match ctx.provider.download_column_u32(&sorted, 0) {
+        let sorted_keys = match ctx.provider.download_column::<u32>(&sorted, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -689,7 +689,7 @@ fn test_multi_warp_coordination(ctx: &TestContext) -> TestResult {
             }
         };
 
-        let sorted_vals = match ctx.provider.download_column_u32(&sorted, 1) {
+        let sorted_vals = match ctx.provider.download_column::<u32>(&sorted, 1) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(

@@ -190,7 +190,7 @@ fn main() {
         .unwrap();
 
     let sorted = provider.sort(&unsorted, &[0]).expect("Sort failed");
-    let sorted_keys = provider.download_column_u32(&sorted, 0).unwrap();
+    let sorted_keys = provider.download_column::<u32>(&sorted, 0).unwrap();
     assert_eq!(
         sorted_keys,
         vec![1, 2, 3, 4, 5],

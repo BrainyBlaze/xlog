@@ -179,6 +179,6 @@ fn test_executor_filter_with_column_column_compare_and_symbol() {
     ]);
 
     let filtered = executor.execute_filter(&buf, &predicate).unwrap();
-    let vals = provider.download_column_u32(&filtered, 0).unwrap();
+    let vals = provider.download_column::<u32>(&filtered, 0).unwrap();
     assert_eq!(vals, vec![1, 3]);
 }

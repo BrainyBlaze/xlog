@@ -180,7 +180,7 @@ fn test_sort_reproducibility(ctx: &TestContext) -> TestResult {
 
     let buffer = match ctx
         .provider
-        .create_buffer_from_u32_slice(&data, schema.clone())
+        .create_buffer_from_slice::<u32>(&data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -204,7 +204,7 @@ fn test_sort_reproducibility(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let first_result = match ctx.provider.download_column_u32(&first_sorted, 0) {
+    let first_result = match ctx.provider.download_column::<u32>(&first_sorted, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -244,7 +244,7 @@ fn test_sort_reproducibility(ctx: &TestContext) -> TestResult {
             }
         };
 
-        let result = match ctx.provider.download_column_u32(&sorted, 0) {
+        let result = match ctx.provider.download_column::<u32>(&sorted, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -286,7 +286,7 @@ fn test_sort_reproducibility(ctx: &TestContext) -> TestResult {
     // Also test with a fresh buffer to ensure no caching effects
     let buffer2 = match ctx
         .provider
-        .create_buffer_from_u32_slice(&data, schema.clone())
+        .create_buffer_from_slice::<u32>(&data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -309,7 +309,7 @@ fn test_sort_reproducibility(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let result2 = match ctx.provider.download_column_u32(&sorted2, 0) {
+    let result2 = match ctx.provider.download_column::<u32>(&sorted2, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -360,7 +360,7 @@ fn test_filter_reproducibility(ctx: &TestContext) -> TestResult {
 
     let buffer = match ctx
         .provider
-        .create_buffer_from_u32_slice(&data, schema.clone())
+        .create_buffer_from_slice::<u32>(&data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -384,7 +384,7 @@ fn test_filter_reproducibility(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let first_result = match ctx.provider.download_column_u32(&first_filtered, 0) {
+    let first_result = match ctx.provider.download_column::<u32>(&first_filtered, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -422,7 +422,7 @@ fn test_filter_reproducibility(ctx: &TestContext) -> TestResult {
             }
         };
 
-        let result = match ctx.provider.download_column_u32(&filtered, 0) {
+        let result = match ctx.provider.download_column::<u32>(&filtered, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -478,7 +478,7 @@ fn test_filter_reproducibility(ctx: &TestContext) -> TestResult {
             }
         };
 
-        let baseline_data = match ctx.provider.download_column_u32(&baseline, 0) {
+        let baseline_data = match ctx.provider.download_column::<u32>(&baseline, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -501,7 +501,7 @@ fn test_filter_reproducibility(ctx: &TestContext) -> TestResult {
             }
         };
 
-        let repeat_data = match ctx.provider.download_column_u32(&repeat, 0) {
+        let repeat_data = match ctx.provider.download_column::<u32>(&repeat, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -603,7 +603,7 @@ fn test_join_reproducibility(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let first_keys = match ctx.provider.download_column_u32(&first_joined, 0) {
+    let first_keys = match ctx.provider.download_column::<u32>(&first_joined, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -614,7 +614,7 @@ fn test_join_reproducibility(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let first_lvals = match ctx.provider.download_column_u32(&first_joined, 1) {
+    let first_lvals = match ctx.provider.download_column::<u32>(&first_joined, 1) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -625,7 +625,7 @@ fn test_join_reproducibility(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let first_rvals = match ctx.provider.download_column_u32(&first_joined, 2) {
+    let first_rvals = match ctx.provider.download_column::<u32>(&first_joined, 2) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -666,7 +666,7 @@ fn test_join_reproducibility(ctx: &TestContext) -> TestResult {
             );
         }
 
-        let keys = match ctx.provider.download_column_u32(&joined, 0) {
+        let keys = match ctx.provider.download_column::<u32>(&joined, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -677,7 +677,7 @@ fn test_join_reproducibility(ctx: &TestContext) -> TestResult {
             }
         };
 
-        let lvals = match ctx.provider.download_column_u32(&joined, 1) {
+        let lvals = match ctx.provider.download_column::<u32>(&joined, 1) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -688,7 +688,7 @@ fn test_join_reproducibility(ctx: &TestContext) -> TestResult {
             }
         };
 
-        let rvals = match ctx.provider.download_column_u32(&joined, 2) {
+        let rvals = match ctx.provider.download_column::<u32>(&joined, 2) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -783,7 +783,7 @@ fn test_dedup_reproducibility(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let first_keys = match ctx.provider.download_column_u32(&first_deduped, 0) {
+    let first_keys = match ctx.provider.download_column::<u32>(&first_deduped, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -845,7 +845,7 @@ fn test_dedup_reproducibility(ctx: &TestContext) -> TestResult {
             );
         }
 
-        let iter_keys = match ctx.provider.download_column_u32(&deduped, 0) {
+        let iter_keys = match ctx.provider.download_column::<u32>(&deduped, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -911,7 +911,7 @@ fn test_dedup_reproducibility(ctx: &TestContext) -> TestResult {
             }
         };
 
-        let baseline_keys = match ctx.provider.download_column_u32(&baseline, 0) {
+        let baseline_keys = match ctx.provider.download_column::<u32>(&baseline, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -933,7 +933,7 @@ fn test_dedup_reproducibility(ctx: &TestContext) -> TestResult {
             }
         };
 
-        let repeat_keys = match ctx.provider.download_column_u32(&repeat, 0) {
+        let repeat_keys = match ctx.provider.download_column::<u32>(&repeat, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -1017,7 +1017,7 @@ fn test_stable_sort_order(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let sorted_keys = match ctx.provider.download_column_u32(&sorted, 0) {
+    let sorted_keys = match ctx.provider.download_column::<u32>(&sorted, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -1028,7 +1028,7 @@ fn test_stable_sort_order(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let sorted_vals = match ctx.provider.download_column_u32(&sorted, 1) {
+    let sorted_vals = match ctx.provider.download_column::<u32>(&sorted, 1) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -1114,7 +1114,7 @@ fn test_stable_sort_order(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let sorted_keys2 = match ctx.provider.download_column_u32(&sorted2, 0) {
+    let sorted_keys2 = match ctx.provider.download_column::<u32>(&sorted2, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -1125,7 +1125,7 @@ fn test_stable_sort_order(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let sorted_vals2 = match ctx.provider.download_column_u32(&sorted2, 1) {
+    let sorted_vals2 = match ctx.provider.download_column::<u32>(&sorted2, 1) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(

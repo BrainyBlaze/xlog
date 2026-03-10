@@ -106,7 +106,7 @@ fn test_deep_sort_keys(ctx: &TestContext) -> TestResult {
     }
 
     // Download and verify sorted order
-    let sorted_k1 = match ctx.provider.download_column_u32(&sorted, 0) {
+    let sorted_k1 = match ctx.provider.download_column::<u32>(&sorted, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -117,7 +117,7 @@ fn test_deep_sort_keys(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let sorted_k2 = match ctx.provider.download_column_u32(&sorted, 1) {
+    let sorted_k2 = match ctx.provider.download_column::<u32>(&sorted, 1) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -128,7 +128,7 @@ fn test_deep_sort_keys(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let sorted_val = match ctx.provider.download_column_u32(&sorted, 4) {
+    let sorted_val = match ctx.provider.download_column::<u32>(&sorted, 4) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -201,7 +201,7 @@ fn test_repeated_operations(ctx: &TestContext) -> TestResult {
 
     let buffer = match ctx
         .provider
-        .create_buffer_from_u32_slice(&data, schema.clone())
+        .create_buffer_from_slice::<u32>(&data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -242,7 +242,7 @@ fn test_repeated_operations(ctx: &TestContext) -> TestResult {
 
         // Every 5th iteration, verify data correctness
         if iter % 5 == 0 {
-            let sorted_data = match ctx.provider.download_column_u32(&sorted, 0) {
+            let sorted_data = match ctx.provider.download_column::<u32>(&sorted, 0) {
                 Ok(d) => d,
                 Err(e) => {
                     return TestResult::error(
@@ -330,7 +330,7 @@ fn test_variable_workload(ctx: &TestContext) -> TestResult {
 
         let buffer = match ctx
             .provider
-            .create_buffer_from_u32_slice(&data, schema.clone())
+            .create_buffer_from_slice::<u32>(&data, schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -372,7 +372,7 @@ fn test_variable_workload(ctx: &TestContext) -> TestResult {
         }
 
         // Verify first and last elements
-        let sorted_data = match ctx.provider.download_column_u32(&sorted, 0) {
+        let sorted_data = match ctx.provider.download_column::<u32>(&sorted, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -434,7 +434,7 @@ fn test_complex_filter_chains(ctx: &TestContext) -> TestResult {
 
     let buffer = match ctx
         .provider
-        .create_buffer_from_u32_slice(&data, schema.clone())
+        .create_buffer_from_slice::<u32>(&data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -533,7 +533,7 @@ fn test_complex_filter_chains(ctx: &TestContext) -> TestResult {
     // After filter1: 0, 2, 4, 6, 8, ... (even indices)
     // After filter2 (every 4th): 0, 8, 16, 24, ... (indices 0, 4, 8, 12 from even = 0, 8, 16, 24)
     // After filter3 (every 5th): 0, 40, 80, 120, ... (indices 0, 5, 10, 15 from above = 0, 40, 80, 120)
-    let final_data = match ctx.provider.download_column_u32(&filtered3, 0) {
+    let final_data = match ctx.provider.download_column::<u32>(&filtered3, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -595,7 +595,7 @@ fn test_local_memory_stress(ctx: &TestContext) -> TestResult {
 
             let buffer = match ctx
                 .provider
-                .create_buffer_from_u32_slice(&data, schema.clone())
+                .create_buffer_from_slice::<u32>(&data, schema.clone())
             {
                 Ok(buf) => buf,
                 Err(e) => {

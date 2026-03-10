@@ -33,7 +33,7 @@ fn test_device_compact_count(ctx: &TestContext) -> TestResult {
 
     let schema = Schema::new(vec![("id".to_string(), ScalarType::U32)]);
     let data: Vec<u32> = (0..32u32).collect();
-    let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema) {
+    let buffer = match ctx.provider.create_buffer_from_slice::<u32>(&data, schema) {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -93,7 +93,7 @@ fn test_device_compact_count(ctx: &TestContext) -> TestResult {
         );
     }
 
-    let filtered_values = match ctx.provider.download_column_u32(&filtered, 0) {
+    let filtered_values = match ctx.provider.download_column::<u32>(&filtered, 0) {
         Ok(values) => values,
         Err(e) => {
             return TestResult::error(
@@ -180,7 +180,7 @@ fn test_groupby_device_count_sum(ctx: &TestContext) -> TestResult {
         );
     }
 
-    let out_keys = match ctx.provider.download_column_u32(&grouped, 0) {
+    let out_keys = match ctx.provider.download_column::<u32>(&grouped, 0) {
         Ok(values) => values,
         Err(e) => {
             return TestResult::error(
@@ -191,7 +191,7 @@ fn test_groupby_device_count_sum(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let out_sums = match ctx.provider.download_column_u64(&grouped, 1) {
+    let out_sums = match ctx.provider.download_column::<u64>(&grouped, 1) {
         Ok(values) => values,
         Err(e) => {
             return TestResult::error(

@@ -51,7 +51,7 @@ fn test_size_distribution_matrix_u32(ctx: &TestContext) -> TestResult {
 
             let buffer = match ctx
                 .provider
-                .create_buffer_from_u32_slice(&data, schema.clone())
+                .create_buffer_from_slice::<u32>(&data, schema.clone())
             {
                 Ok(buf) => buf,
                 Err(e) => {
@@ -95,7 +95,7 @@ fn test_size_distribution_matrix_u32(ctx: &TestContext) -> TestResult {
 
             // For non-empty buffers, verify sorted order
             if size > 0 {
-                let sorted_data = match ctx.provider.download_column_u32(&sorted, 0) {
+                let sorted_data = match ctx.provider.download_column::<u32>(&sorted, 0) {
                     Ok(d) => d,
                     Err(e) => {
                         return TestResult::error(
@@ -183,7 +183,7 @@ fn test_size_distribution_matrix_u64(ctx: &TestContext) -> TestResult {
 
             let buffer = match ctx
                 .provider
-                .create_buffer_from_u64_slice(&data, schema.clone())
+                .create_buffer_from_slice::<u64>(&data, schema.clone())
             {
                 Ok(buf) => buf,
                 Err(e) => {
@@ -227,7 +227,7 @@ fn test_size_distribution_matrix_u64(ctx: &TestContext) -> TestResult {
 
             // For non-empty buffers, verify sorted order
             if size > 0 {
-                let sorted_data = match ctx.provider.download_column_u64(&sorted, 0) {
+                let sorted_data = match ctx.provider.download_column::<u64>(&sorted, 0) {
                     Ok(d) => d,
                     Err(e) => {
                         return TestResult::error(
@@ -294,7 +294,7 @@ fn test_size_distribution_matrix_i64(ctx: &TestContext) -> TestResult {
 
             let buffer = match ctx
                 .provider
-                .create_buffer_from_i64_slice(&data, schema.clone())
+                .create_buffer_from_slice::<i64>(&data, schema.clone())
             {
                 Ok(buf) => buf,
                 Err(e) => {
@@ -338,7 +338,7 @@ fn test_size_distribution_matrix_i64(ctx: &TestContext) -> TestResult {
 
             // For non-empty buffers, verify sorted order (signed comparison)
             if size > 0 {
-                let sorted_data = match ctx.provider.download_column_i64(&sorted, 0) {
+                let sorted_data = match ctx.provider.download_column::<i64>(&sorted, 0) {
                     Ok(d) => d,
                     Err(e) => {
                         return TestResult::error(
@@ -430,7 +430,7 @@ fn test_size_distribution_matrix_f64(ctx: &TestContext) -> TestResult {
 
             let buffer = match ctx
                 .provider
-                .create_buffer_from_f64_slice(&data, schema.clone())
+                .create_buffer_from_slice::<f64>(&data, schema.clone())
             {
                 Ok(buf) => buf,
                 Err(e) => {
@@ -474,7 +474,7 @@ fn test_size_distribution_matrix_f64(ctx: &TestContext) -> TestResult {
 
             // For non-empty buffers, verify sorted order
             if size > 0 {
-                let sorted_data = match ctx.provider.download_column_f64(&sorted, 0) {
+                let sorted_data = match ctx.provider.download_column::<f64>(&sorted, 0) {
                     Ok(d) => d,
                     Err(e) => {
                         return TestResult::error(
@@ -521,7 +521,7 @@ fn test_size_distribution_matrix_f64(ctx: &TestContext) -> TestResult {
 
     let edge_buffer = match ctx
         .provider
-        .create_buffer_from_f64_slice(&edge_values, schema.clone())
+        .create_buffer_from_slice::<f64>(&edge_values, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -544,7 +544,7 @@ fn test_size_distribution_matrix_f64(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let edge_sorted_data = match ctx.provider.download_column_f64(&edge_sorted, 0) {
+    let edge_sorted_data = match ctx.provider.download_column::<f64>(&edge_sorted, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -610,7 +610,7 @@ fn test_operation_matrix(ctx: &TestContext) -> TestResult {
 
         let buffer = match ctx
             .provider
-            .create_buffer_from_u32_slice(&data, schema.clone())
+            .create_buffer_from_slice::<u32>(&data, schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -647,7 +647,7 @@ fn test_operation_matrix(ctx: &TestContext) -> TestResult {
             );
         }
 
-        let sorted_data = match ctx.provider.download_column_u32(&sorted, 0) {
+        let sorted_data = match ctx.provider.download_column::<u32>(&sorted, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -763,7 +763,7 @@ fn test_operation_matrix(ctx: &TestContext) -> TestResult {
             );
         }
 
-        let deduped_keys = match ctx.provider.download_column_u32(&deduped, 0) {
+        let deduped_keys = match ctx.provider.download_column::<u32>(&deduped, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -796,7 +796,7 @@ fn test_operation_matrix(ctx: &TestContext) -> TestResult {
 
         let buffer = match ctx
             .provider
-            .create_buffer_from_u32_slice(&data, schema.clone())
+            .create_buffer_from_slice::<u32>(&data, schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -849,7 +849,7 @@ fn test_operation_matrix(ctx: &TestContext) -> TestResult {
 
         // Dedup on the filtered (which is still single column, need to add val column)
         // Actually, for dedup we need two columns, so let's just verify the filter worked
-        let filtered_data = match ctx.provider.download_column_u32(&filtered, 0) {
+        let filtered_data = match ctx.provider.download_column::<u32>(&filtered, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(

@@ -54,7 +54,7 @@ fn test_edge_case_sizes(ctx: &TestContext) -> TestResult {
 
         let buffer = match ctx
             .provider
-            .create_buffer_from_u32_slice(&data, schema.clone())
+            .create_buffer_from_slice::<u32>(&data, schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -95,7 +95,7 @@ fn test_edge_case_sizes(ctx: &TestContext) -> TestResult {
         }
 
         // Verify filtered values are the even indices (0, 2, 4, ...)
-        let filtered_data = match ctx.provider.download_column_u32(&filtered, 0) {
+        let filtered_data = match ctx.provider.download_column::<u32>(&filtered, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -150,7 +150,7 @@ fn test_off_by_one_filter(ctx: &TestContext) -> TestResult {
 
         let buffer = match ctx
             .provider
-            .create_buffer_from_u32_slice(&data, schema.clone())
+            .create_buffer_from_slice::<u32>(&data, schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -192,7 +192,7 @@ fn test_off_by_one_filter(ctx: &TestContext) -> TestResult {
         }
 
         // Download and verify the excluded element is NOT in the result
-        let filtered_data = match ctx.provider.download_column_u32(&filtered, 0) {
+        let filtered_data = match ctx.provider.download_column::<u32>(&filtered, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -304,7 +304,7 @@ fn test_off_by_one_sort(ctx: &TestContext) -> TestResult {
         }
 
         // Download sorted columns
-        let sorted_keys = match ctx.provider.download_column_u32(&sorted, 0) {
+        let sorted_keys = match ctx.provider.download_column::<u32>(&sorted, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -315,7 +315,7 @@ fn test_off_by_one_sort(ctx: &TestContext) -> TestResult {
             }
         };
 
-        let sorted_vals = match ctx.provider.download_column_u32(&sorted, 1) {
+        let sorted_vals = match ctx.provider.download_column::<u32>(&sorted, 1) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -401,7 +401,7 @@ fn test_grid_stride_loop(ctx: &TestContext) -> TestResult {
 
         let buffer = match ctx
             .provider
-            .create_buffer_from_u32_slice(&data, schema.clone())
+            .create_buffer_from_slice::<u32>(&data, schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -443,7 +443,7 @@ fn test_grid_stride_loop(ctx: &TestContext) -> TestResult {
         }
 
         // Sample check: verify some values
-        let filtered_data = match ctx.provider.download_column_u32(&filtered, 0) {
+        let filtered_data = match ctx.provider.download_column::<u32>(&filtered, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -527,7 +527,7 @@ fn test_tail_handling_filter(ctx: &TestContext) -> TestResult {
 
         let buffer = match ctx
             .provider
-            .create_buffer_from_u32_slice(&data, schema.clone())
+            .create_buffer_from_slice::<u32>(&data, schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -568,7 +568,7 @@ fn test_tail_handling_filter(ctx: &TestContext) -> TestResult {
         }
 
         // Download and verify all elements
-        let filtered_data = match ctx.provider.download_column_u32(&filtered, 0) {
+        let filtered_data = match ctx.provider.download_column::<u32>(&filtered, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -618,7 +618,7 @@ fn test_tail_handling_sort(ctx: &TestContext) -> TestResult {
 
         let buffer = match ctx
             .provider
-            .create_buffer_from_u32_slice(&data, schema.clone())
+            .create_buffer_from_slice::<u32>(&data, schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -657,7 +657,7 @@ fn test_tail_handling_sort(ctx: &TestContext) -> TestResult {
         }
 
         // Download and verify sorted order: 0, 1, 2, ..., size-1
-        let sorted_data = match ctx.provider.download_column_u32(&sorted, 0) {
+        let sorted_data = match ctx.provider.download_column::<u32>(&sorted, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -705,7 +705,7 @@ fn test_boundary_indices(ctx: &TestContext) -> TestResult {
 
     let buffer = match ctx
         .provider
-        .create_buffer_from_u32_slice(&data, schema.clone())
+        .create_buffer_from_slice::<u32>(&data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -743,7 +743,7 @@ fn test_boundary_indices(ctx: &TestContext) -> TestResult {
         );
     }
 
-    let first_data = match ctx.provider.download_column_u32(&filtered_first, 0) {
+    let first_data = match ctx.provider.download_column::<u32>(&filtered_first, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -788,7 +788,7 @@ fn test_boundary_indices(ctx: &TestContext) -> TestResult {
         );
     }
 
-    let last_data = match ctx.provider.download_column_u32(&filtered_last, 0) {
+    let last_data = match ctx.provider.download_column::<u32>(&filtered_last, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -890,7 +890,7 @@ fn test_multi_column_strides(ctx: &TestContext) -> TestResult {
 
             // Verify each column in output has correct values
             for col_idx in 0..num_cols {
-                let col_data = match ctx.provider.download_column_u32(&filtered, col_idx) {
+                let col_data = match ctx.provider.download_column::<u32>(&filtered, col_idx) {
                     Ok(d) => d,
                     Err(e) => {
                         return TestResult::error(

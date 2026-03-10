@@ -53,7 +53,7 @@ fn test_i64_overflow_boundaries(ctx: &TestContext) -> TestResult {
 
     let buffer = match ctx
         .provider
-        .create_buffer_from_i64_slice(&data, schema.clone())
+        .create_buffer_from_slice::<i64>(&data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -78,7 +78,7 @@ fn test_i64_overflow_boundaries(ctx: &TestContext) -> TestResult {
     };
 
     // Download sorted data
-    let sorted_data = match ctx.provider.download_column_i64(&sorted, 0) {
+    let sorted_data = match ctx.provider.download_column::<i64>(&sorted, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -168,7 +168,7 @@ fn test_i64_overflow_boundaries(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let filtered_data = match ctx.provider.download_column_i64(&filtered, 0) {
+    let filtered_data = match ctx.provider.download_column::<i64>(&filtered, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -243,7 +243,7 @@ fn test_u64_overflow_boundaries(ctx: &TestContext) -> TestResult {
 
     let buffer = match ctx
         .provider
-        .create_buffer_from_u64_slice(&data, schema.clone())
+        .create_buffer_from_slice::<u64>(&data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -268,7 +268,7 @@ fn test_u64_overflow_boundaries(ctx: &TestContext) -> TestResult {
     };
 
     // Download sorted data
-    let sorted_data = match ctx.provider.download_column_u64(&sorted, 0) {
+    let sorted_data = match ctx.provider.download_column::<u64>(&sorted, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -408,7 +408,7 @@ fn test_u32_full_range(ctx: &TestContext) -> TestResult {
 
     let buffer = match ctx
         .provider
-        .create_buffer_from_u32_slice(&data, schema.clone())
+        .create_buffer_from_slice::<u32>(&data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -433,7 +433,7 @@ fn test_u32_full_range(ctx: &TestContext) -> TestResult {
     };
 
     // Download sorted data
-    let sorted_data = match ctx.provider.download_column_u32(&sorted, 0) {
+    let sorted_data = match ctx.provider.download_column::<u32>(&sorted, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -512,7 +512,7 @@ fn test_u32_full_range(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let filtered_data = match ctx.provider.download_column_u32(&filtered, 0) {
+    let filtered_data = match ctx.provider.download_column::<u32>(&filtered, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -574,7 +574,7 @@ fn test_i64_signed_comparison(ctx: &TestContext) -> TestResult {
 
     let buffer = match ctx
         .provider
-        .create_buffer_from_i64_slice(&data, schema.clone())
+        .create_buffer_from_slice::<i64>(&data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -599,7 +599,7 @@ fn test_i64_signed_comparison(ctx: &TestContext) -> TestResult {
     };
 
     // Download sorted data
-    let sorted_data = match ctx.provider.download_column_i64(&sorted, 0) {
+    let sorted_data = match ctx.provider.download_column::<i64>(&sorted, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -798,7 +798,7 @@ fn test_integer_wraparound_keys(ctx: &TestContext) -> TestResult {
     }
 
     // Download and verify join results
-    let joined_keys = match ctx.provider.download_column_u32(&joined, 0) {
+    let joined_keys = match ctx.provider.download_column::<u32>(&joined, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -809,7 +809,7 @@ fn test_integer_wraparound_keys(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let joined_lvals = match ctx.provider.download_column_u32(&joined, 1) {
+    let joined_lvals = match ctx.provider.download_column::<u32>(&joined, 1) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -820,7 +820,7 @@ fn test_integer_wraparound_keys(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let joined_rvals = match ctx.provider.download_column_u32(&joined, 2) {
+    let joined_rvals = match ctx.provider.download_column::<u32>(&joined, 2) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(

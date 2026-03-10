@@ -3340,11 +3340,11 @@ impl CompiledProgram {
         let schema = Schema::new(vec![("col0".to_string(), ScalarType::F64)]);
         let prob_buf = self
             .output_provider
-            .create_buffer_from_f64_slice(&probs, schema.clone())
+            .create_buffer_from_slice::<f64>(&probs, schema.clone())
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         let log_prob_buf = self
             .output_provider
-            .create_buffer_from_f64_slice(&log_probs, schema)
+            .create_buffer_from_slice::<f64>(&log_probs, schema)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
         let prob_tensor = self
@@ -3404,11 +3404,11 @@ impl CompiledProgram {
 
             let grad_true_buf = self
                 .output_provider
-                .create_buffer_from_f64_slice(&q.grad_true, schema.clone())
+                .create_buffer_from_slice::<f64>(&q.grad_true, schema.clone())
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
             let grad_false_buf = self
                 .output_provider
-                .create_buffer_from_f64_slice(&q.grad_false, schema.clone())
+                .create_buffer_from_slice::<f64>(&q.grad_false, schema.clone())
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
             let grad_true_tensor = self
@@ -3428,11 +3428,11 @@ impl CompiledProgram {
 
         let prob_buf = self
             .output_provider
-            .create_buffer_from_f64_slice(&probs, schema.clone())
+            .create_buffer_from_slice::<f64>(&probs, schema.clone())
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         let log_prob_buf = self
             .output_provider
-            .create_buffer_from_f64_slice(&log_probs, schema)
+            .create_buffer_from_slice::<f64>(&log_probs, schema)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
         let prob_tensor = self
@@ -3494,23 +3494,23 @@ impl CompiledProgram {
         let schema = Schema::new(vec![("col0".to_string(), ScalarType::F64)]);
         let prob_buf = self
             .output_provider
-            .create_buffer_from_f64_slice(&probs, schema.clone())
+            .create_buffer_from_slice::<f64>(&probs, schema.clone())
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         let log_prob_buf = self
             .output_provider
-            .create_buffer_from_f64_slice(&log_probs, schema.clone())
+            .create_buffer_from_slice::<f64>(&log_probs, schema.clone())
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         let stderr_buf = self
             .output_provider
-            .create_buffer_from_f64_slice(&stderrs, schema.clone())
+            .create_buffer_from_slice::<f64>(&stderrs, schema.clone())
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         let ci_low_buf = self
             .output_provider
-            .create_buffer_from_f64_slice(&ci_lows, schema.clone())
+            .create_buffer_from_slice::<f64>(&ci_lows, schema.clone())
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         let ci_high_buf = self
             .output_provider
-            .create_buffer_from_f64_slice(&ci_highs, schema)
+            .create_buffer_from_slice::<f64>(&ci_highs, schema)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
         let prob_tensor = self
@@ -5118,7 +5118,7 @@ impl CompiledIlpProgram {
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
         // Download f64 values (control-plane, NOT tracked by D2H counter)
-        let soft_probs = self.provider.download_f64_untracked(&soft_buf, 0)
+        let soft_probs = self.provider.download_column_untracked::<f64>(&soft_buf, 0)
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
         if soft_probs.len() != candidate_ids.len() {
@@ -5246,23 +5246,23 @@ impl CompiledIlpProgram {
                     format!("Column {} type not found in schema", col_idx)
                 ))?;
             let col_i64: Vec<i64> = match col_type {
-                ScalarType::I64 => self.provider.download_column_i64(buf, col_idx)
+                ScalarType::I64 => self.provider.download_column::<i64>(buf, col_idx)
                     .map_err(|e| PyRuntimeError::new_err(e.to_string()))?,
-                ScalarType::I32 => self.provider.download_column_i32(buf, col_idx)
+                ScalarType::I32 => self.provider.download_column::<i32>(buf, col_idx)
                     .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
                     .into_iter().map(|v| v as i64).collect(),
                 ScalarType::U32 | ScalarType::Symbol => {
-                    self.provider.download_column_u32(buf, col_idx)
+                    self.provider.download_column::<u32>(buf, col_idx)
                         .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
                         .into_iter().map(|v| v as i64).collect()
                 }
                 ScalarType::U64 => {
-                    self.provider.download_column_u64(buf, col_idx)
+                    self.provider.download_column::<u64>(buf, col_idx)
                         .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
                         .into_iter().map(|v| v as i64).collect()
                 }
                 ScalarType::Bool => {
-                    self.provider.download_column_bool(buf, col_idx)
+                    self.provider.download_column::<bool>(buf, col_idx)
                         .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
                         .into_iter().map(|v| if v { 1i64 } else { 0i64 }).collect()
                 }
@@ -5324,23 +5324,23 @@ impl CompiledIlpProgram {
                     format!("Column {} type not found in schema", col_idx)
                 ))?;
             let col_i64: Vec<i64> = match col_type {
-                ScalarType::I64 => self.provider.download_column_i64(buf, col_idx)
+                ScalarType::I64 => self.provider.download_column::<i64>(buf, col_idx)
                     .map_err(|e| PyRuntimeError::new_err(e.to_string()))?,
-                ScalarType::I32 => self.provider.download_column_i32(buf, col_idx)
+                ScalarType::I32 => self.provider.download_column::<i32>(buf, col_idx)
                     .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
                     .into_iter().map(|v| v as i64).collect(),
                 ScalarType::U32 | ScalarType::Symbol => {
-                    self.provider.download_column_u32(buf, col_idx)
+                    self.provider.download_column::<u32>(buf, col_idx)
                         .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
                         .into_iter().map(|v| v as i64).collect()
                 }
                 ScalarType::U64 => {
-                    self.provider.download_column_u64(buf, col_idx)
+                    self.provider.download_column::<u64>(buf, col_idx)
                         .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
                         .into_iter().map(|v| v as i64).collect()
                 }
                 ScalarType::Bool => {
-                    self.provider.download_column_bool(buf, col_idx)
+                    self.provider.download_column::<bool>(buf, col_idx)
                         .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
                         .into_iter().map(|v| if v { 1i64 } else { 0i64 }).collect()
                 }
@@ -6076,19 +6076,19 @@ impl CompiledIlpProgram {
                     format!("Column {} type not found in schema", col_idx)
                 ))?;
             let col_i64: Vec<i64> = match col_type {
-                ScalarType::I64 => provider.download_column_i64(buf, col_idx)?,
-                ScalarType::I32 => provider.download_column_i32(buf, col_idx)?
+                ScalarType::I64 => provider.download_column::<i64>(buf, col_idx)?,
+                ScalarType::I32 => provider.download_column::<i32>(buf, col_idx)?
                     .into_iter().map(|v| v as i64).collect(),
                 ScalarType::U32 | ScalarType::Symbol => {
-                    provider.download_column_u32(buf, col_idx)?
+                    provider.download_column::<u32>(buf, col_idx)?
                         .into_iter().map(|v| v as i64).collect()
                 }
                 ScalarType::U64 => {
-                    let col_u64 = provider.download_column_u64(buf, col_idx)?;
+                    let col_u64 = provider.download_column::<u64>(buf, col_idx)?;
                     col_u64.into_iter().map(|v| v as i64).collect()
                 }
                 ScalarType::Bool => {
-                    provider.download_column_bool(buf, col_idx)?
+                    provider.download_column::<bool>(buf, col_idx)?
                         .into_iter().map(|v| if v { 1i64 } else { 0i64 }).collect()
                 }
                 ScalarType::F32 | ScalarType::F64 => {
@@ -6135,19 +6135,19 @@ impl CompiledIlpProgram {
                     format!("Column {} type not found in schema", col_idx)
                 ))?;
             let col_i64: Vec<i64> = match col_type {
-                ScalarType::I64 => provider.download_column_i64(buf, col_idx)?,
-                ScalarType::I32 => provider.download_column_i32(buf, col_idx)?
+                ScalarType::I64 => provider.download_column::<i64>(buf, col_idx)?,
+                ScalarType::I32 => provider.download_column::<i32>(buf, col_idx)?
                     .into_iter().map(|v| v as i64).collect(),
                 ScalarType::U32 | ScalarType::Symbol => {
-                    provider.download_column_u32(buf, col_idx)?
+                    provider.download_column::<u32>(buf, col_idx)?
                         .into_iter().map(|v| v as i64).collect()
                 }
                 ScalarType::U64 => {
-                    provider.download_column_u64(buf, col_idx)?
+                    provider.download_column::<u64>(buf, col_idx)?
                         .into_iter().map(|v| v as i64).collect()
                 }
                 ScalarType::Bool => {
-                    provider.download_column_bool(buf, col_idx)?
+                    provider.download_column::<bool>(buf, col_idx)?
                         .into_iter().map(|v| if v { 1i64 } else { 0i64 }).collect()
                 }
                 ScalarType::F32 | ScalarType::F64 => {

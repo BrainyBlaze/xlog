@@ -119,14 +119,14 @@ fn test_union_gpu_basic() {
     let schema = Schema::new(vec![("val".to_string(), ScalarType::U32)]);
 
     let buf_a = provider
-        .create_buffer_from_u32_slice(&a, schema.clone())
+        .create_buffer_from_slice::<u32>(&a, schema.clone())
         .unwrap();
     let buf_b = provider
-        .create_buffer_from_u32_slice(&b, schema.clone())
+        .create_buffer_from_slice::<u32>(&b, schema.clone())
         .unwrap();
 
     let result = provider.union_gpu(&buf_a, &buf_b).unwrap();
-    let result_data = provider.download_column_u32(&result, 0).unwrap();
+    let result_data = provider.download_column::<u32>(&result, 0).unwrap();
 
     assert_eq!(result_data, vec![1, 2, 3, 4, 5]);
 }
@@ -145,14 +145,14 @@ fn test_union_gpu_no_overlap() {
     let schema = Schema::new(vec![("val".to_string(), ScalarType::U32)]);
 
     let buf_a = provider
-        .create_buffer_from_u32_slice(&a, schema.clone())
+        .create_buffer_from_slice::<u32>(&a, schema.clone())
         .unwrap();
     let buf_b = provider
-        .create_buffer_from_u32_slice(&b, schema.clone())
+        .create_buffer_from_slice::<u32>(&b, schema.clone())
         .unwrap();
 
     let result = provider.union_gpu(&buf_a, &buf_b).unwrap();
-    let result_data = provider.download_column_u32(&result, 0).unwrap();
+    let result_data = provider.download_column::<u32>(&result, 0).unwrap();
 
     assert_eq!(result_data, vec![1, 2, 3, 4]);
 }
@@ -171,14 +171,14 @@ fn test_union_gpu_complete_overlap() {
     let schema = Schema::new(vec![("val".to_string(), ScalarType::U32)]);
 
     let buf_a = provider
-        .create_buffer_from_u32_slice(&a, schema.clone())
+        .create_buffer_from_slice::<u32>(&a, schema.clone())
         .unwrap();
     let buf_b = provider
-        .create_buffer_from_u32_slice(&b, schema.clone())
+        .create_buffer_from_slice::<u32>(&b, schema.clone())
         .unwrap();
 
     let result = provider.union_gpu(&buf_a, &buf_b).unwrap();
-    let result_data = provider.download_column_u32(&result, 0).unwrap();
+    let result_data = provider.download_column::<u32>(&result, 0).unwrap();
 
     assert_eq!(result_data, vec![1, 2, 3]);
 }
@@ -197,11 +197,11 @@ fn test_union_gpu_empty_a() {
 
     let buf_a = provider.create_empty_buffer(schema.clone()).unwrap();
     let buf_b = provider
-        .create_buffer_from_u32_slice(&b, schema.clone())
+        .create_buffer_from_slice::<u32>(&b, schema.clone())
         .unwrap();
 
     let result = provider.union_gpu(&buf_a, &buf_b).unwrap();
-    let result_data = provider.download_column_u32(&result, 0).unwrap();
+    let result_data = provider.download_column::<u32>(&result, 0).unwrap();
 
     assert_eq!(result_data, vec![1, 2]);
 }
@@ -219,12 +219,12 @@ fn test_union_gpu_empty_b() {
     let schema = Schema::new(vec![("val".to_string(), ScalarType::U32)]);
 
     let buf_a = provider
-        .create_buffer_from_u32_slice(&a, schema.clone())
+        .create_buffer_from_slice::<u32>(&a, schema.clone())
         .unwrap();
     let buf_b = provider.create_empty_buffer(schema.clone()).unwrap();
 
     let result = provider.union_gpu(&buf_a, &buf_b).unwrap();
-    let result_data = provider.download_column_u32(&result, 0).unwrap();
+    let result_data = provider.download_column::<u32>(&result, 0).unwrap();
 
     assert_eq!(result_data, vec![1, 2]);
 }
@@ -244,7 +244,7 @@ fn test_union_gpu_both_empty() {
     let buf_b = provider.create_empty_buffer(schema.clone()).unwrap();
 
     let result = provider.union_gpu(&buf_a, &buf_b).unwrap();
-    let result_data = provider.download_column_u32(&result, 0).unwrap();
+    let result_data = provider.download_column::<u32>(&result, 0).unwrap();
     assert!(result_data.is_empty());
 }
 
@@ -262,14 +262,14 @@ fn test_union_gpu_with_duplicates_in_input() {
     let schema = Schema::new(vec![("val".to_string(), ScalarType::U32)]);
 
     let buf_a = provider
-        .create_buffer_from_u32_slice(&a, schema.clone())
+        .create_buffer_from_slice::<u32>(&a, schema.clone())
         .unwrap();
     let buf_b = provider
-        .create_buffer_from_u32_slice(&b, schema.clone())
+        .create_buffer_from_slice::<u32>(&b, schema.clone())
         .unwrap();
 
     let result = provider.union_gpu(&buf_a, &buf_b).unwrap();
-    let result_data = provider.download_column_u32(&result, 0).unwrap();
+    let result_data = provider.download_column::<u32>(&result, 0).unwrap();
 
     assert_eq!(result_data, vec![1, 2, 3]);
 }
@@ -288,7 +288,7 @@ fn test_union_gpu_uses_device_row_count() {
     let buf_b = buffer_with_row_cap(&provider, &data, 4, 2, schema.clone());
 
     let result = provider.union_gpu(&buf_a, &buf_b).unwrap();
-    let result_data = provider.download_column_u32(&result, 0).unwrap();
+    let result_data = provider.download_column::<u32>(&result, 0).unwrap();
 
     assert_eq!(result_data, vec![1, 2]);
 }
@@ -329,7 +329,7 @@ fn test_compact_buffer_by_device_mask_counted_empty_result_has_zero_device_rows(
 
     let schema = Schema::new(vec![("val".to_string(), ScalarType::U32)]);
     let input = provider
-        .create_buffer_from_u32_slice(&[1u32, 2u32, 3u32], schema.clone())
+        .create_buffer_from_slice::<u32>(&[1u32, 2u32, 3u32], schema.clone())
         .unwrap();
 
     let mut d_mask = provider.memory().alloc::<u8>(3).unwrap();
@@ -361,14 +361,14 @@ fn test_diff_gpu_basic() {
     let schema = Schema::new(vec![("val".to_string(), ScalarType::U32)]);
 
     let buf_a = provider
-        .create_buffer_from_u32_slice(&a, schema.clone())
+        .create_buffer_from_slice::<u32>(&a, schema.clone())
         .unwrap();
     let buf_b = provider
-        .create_buffer_from_u32_slice(&b, schema.clone())
+        .create_buffer_from_slice::<u32>(&b, schema.clone())
         .unwrap();
 
     let result = provider.diff_gpu(&buf_a, &buf_b).unwrap();
-    let result_data = provider.download_column_u32(&result, 0).unwrap();
+    let result_data = provider.download_column::<u32>(&result, 0).unwrap();
 
     assert_eq!(result_data, vec![1, 3]);
 }
@@ -387,14 +387,14 @@ fn test_diff_gpu_no_overlap() {
     let schema = Schema::new(vec![("val".to_string(), ScalarType::U32)]);
 
     let buf_a = provider
-        .create_buffer_from_u32_slice(&a, schema.clone())
+        .create_buffer_from_slice::<u32>(&a, schema.clone())
         .unwrap();
     let buf_b = provider
-        .create_buffer_from_u32_slice(&b, schema.clone())
+        .create_buffer_from_slice::<u32>(&b, schema.clone())
         .unwrap();
 
     let result = provider.diff_gpu(&buf_a, &buf_b).unwrap();
-    let result_data = provider.download_column_u32(&result, 0).unwrap();
+    let result_data = provider.download_column::<u32>(&result, 0).unwrap();
 
     assert_eq!(result_data, vec![1, 2, 3]);
 }
@@ -413,14 +413,14 @@ fn test_diff_gpu_complete_overlap() {
     let schema = Schema::new(vec![("val".to_string(), ScalarType::U32)]);
 
     let buf_a = provider
-        .create_buffer_from_u32_slice(&a, schema.clone())
+        .create_buffer_from_slice::<u32>(&a, schema.clone())
         .unwrap();
     let buf_b = provider
-        .create_buffer_from_u32_slice(&b, schema.clone())
+        .create_buffer_from_slice::<u32>(&b, schema.clone())
         .unwrap();
 
     let result = provider.diff_gpu(&buf_a, &buf_b).unwrap();
-    let result_data = provider.download_column_u32(&result, 0).unwrap();
+    let result_data = provider.download_column::<u32>(&result, 0).unwrap();
     assert!(result_data.is_empty());
 }
 
@@ -438,11 +438,11 @@ fn test_diff_gpu_empty_a() {
 
     let buf_a = provider.create_empty_buffer(schema.clone()).unwrap();
     let buf_b = provider
-        .create_buffer_from_u32_slice(&b, schema.clone())
+        .create_buffer_from_slice::<u32>(&b, schema.clone())
         .unwrap();
 
     let result = provider.diff_gpu(&buf_a, &buf_b).unwrap();
-    let result_data = provider.download_column_u32(&result, 0).unwrap();
+    let result_data = provider.download_column::<u32>(&result, 0).unwrap();
     assert!(result_data.is_empty());
 }
 
@@ -459,12 +459,12 @@ fn test_diff_gpu_empty_b() {
     let schema = Schema::new(vec![("val".to_string(), ScalarType::U32)]);
 
     let buf_a = provider
-        .create_buffer_from_u32_slice(&a, schema.clone())
+        .create_buffer_from_slice::<u32>(&a, schema.clone())
         .unwrap();
     let buf_b = provider.create_empty_buffer(schema.clone()).unwrap();
 
     let result = provider.diff_gpu(&buf_a, &buf_b).unwrap();
-    let result_data = provider.download_column_u32(&result, 0).unwrap();
+    let result_data = provider.download_column::<u32>(&result, 0).unwrap();
 
     assert_eq!(result_data, vec![1, 2, 3]);
 }
@@ -483,14 +483,14 @@ fn test_diff_gpu_b_superset() {
     let schema = Schema::new(vec![("val".to_string(), ScalarType::U32)]);
 
     let buf_a = provider
-        .create_buffer_from_u32_slice(&a, schema.clone())
+        .create_buffer_from_slice::<u32>(&a, schema.clone())
         .unwrap();
     let buf_b = provider
-        .create_buffer_from_u32_slice(&b, schema.clone())
+        .create_buffer_from_slice::<u32>(&b, schema.clone())
         .unwrap();
 
     let result = provider.diff_gpu(&buf_a, &buf_b).unwrap();
-    let result_data = provider.download_column_u32(&result, 0).unwrap();
+    let result_data = provider.download_column::<u32>(&result, 0).unwrap();
     assert!(result_data.is_empty());
 }
 
@@ -509,14 +509,14 @@ fn test_diff_gpu_unsorted_inputs() {
     let schema = Schema::new(vec![("val".to_string(), ScalarType::U32)]);
 
     let buf_a = provider
-        .create_buffer_from_u32_slice(&a, schema.clone())
+        .create_buffer_from_slice::<u32>(&a, schema.clone())
         .unwrap();
     let buf_b = provider
-        .create_buffer_from_u32_slice(&b, schema.clone())
+        .create_buffer_from_slice::<u32>(&b, schema.clone())
         .unwrap();
 
     let result = provider.diff_gpu(&buf_a, &buf_b).unwrap();
-    let result_data = provider.download_column_u32(&result, 0).unwrap();
+    let result_data = provider.download_column::<u32>(&result, 0).unwrap();
 
     // Result should be sorted: [1, 3]
     assert_eq!(result_data, vec![1, 3]);
@@ -536,14 +536,14 @@ fn test_diff_gpu_with_duplicates() {
     let schema = Schema::new(vec![("val".to_string(), ScalarType::U32)]);
 
     let buf_a = provider
-        .create_buffer_from_u32_slice(&a, schema.clone())
+        .create_buffer_from_slice::<u32>(&a, schema.clone())
         .unwrap();
     let buf_b = provider
-        .create_buffer_from_u32_slice(&b, schema.clone())
+        .create_buffer_from_slice::<u32>(&b, schema.clone())
         .unwrap();
 
     let result = provider.diff_gpu(&buf_a, &buf_b).unwrap();
-    let result_data = provider.download_column_u32(&result, 0).unwrap();
+    let result_data = provider.download_column::<u32>(&result, 0).unwrap();
 
     assert_eq!(result_data, vec![1, 3]);
 }
@@ -563,14 +563,14 @@ fn test_union_u64() {
     let b_vals: Vec<u64> = vec![2, 3, 4];
 
     let a_buf = provider
-        .create_buffer_from_u64_slice(&a_vals, schema.clone())
+        .create_buffer_from_slice::<u64>(&a_vals, schema.clone())
         .unwrap();
     let b_buf = provider
-        .create_buffer_from_u64_slice(&b_vals, schema)
+        .create_buffer_from_slice::<u64>(&b_vals, schema)
         .unwrap();
 
     let result = provider.union_gpu(&a_buf, &b_buf).unwrap();
-    let result_data = provider.download_column_u64(&result, 0).unwrap();
+    let result_data = provider.download_column::<u64>(&result, 0).unwrap();
     assert_eq!(result_data.len(), 4); // 1, 2, 3, 4
     assert_eq!(result_data, vec![1, 2, 3, 4]);
 }
@@ -589,14 +589,14 @@ fn test_union_u64_with_duplicates() {
     let b_vals: Vec<u64> = vec![2, 3, 3];
 
     let a_buf = provider
-        .create_buffer_from_u64_slice(&a_vals, schema.clone())
+        .create_buffer_from_slice::<u64>(&a_vals, schema.clone())
         .unwrap();
     let b_buf = provider
-        .create_buffer_from_u64_slice(&b_vals, schema)
+        .create_buffer_from_slice::<u64>(&b_vals, schema)
         .unwrap();
 
     let result = provider.union_gpu(&a_buf, &b_buf).unwrap();
-    let result_data = provider.download_column_u64(&result, 0).unwrap();
+    let result_data = provider.download_column::<u64>(&result, 0).unwrap();
     assert_eq!(result_data.len(), 3); // 1, 2, 3
     assert_eq!(result_data, vec![1, 2, 3]);
 }
@@ -614,11 +614,11 @@ fn test_union_u64_empty_a() {
 
     let a_buf = provider.create_empty_buffer(schema.clone()).unwrap();
     let b_buf = provider
-        .create_buffer_from_u64_slice(&b_vals, schema)
+        .create_buffer_from_slice::<u64>(&b_vals, schema)
         .unwrap();
 
     let result = provider.union_gpu(&a_buf, &b_buf).unwrap();
-    let result_data = provider.download_column_u64(&result, 0).unwrap();
+    let result_data = provider.download_column::<u64>(&result, 0).unwrap();
     assert_eq!(result_data.len(), 3);
     assert_eq!(result_data, vec![1, 2, 3]);
 }
@@ -638,14 +638,14 @@ fn test_diff_u64() {
     let b_vals: Vec<u64> = vec![2, 4];
 
     let a_buf = provider
-        .create_buffer_from_u64_slice(&a_vals, schema.clone())
+        .create_buffer_from_slice::<u64>(&a_vals, schema.clone())
         .unwrap();
     let b_buf = provider
-        .create_buffer_from_u64_slice(&b_vals, schema)
+        .create_buffer_from_slice::<u64>(&b_vals, schema)
         .unwrap();
 
     let result = provider.diff_gpu(&a_buf, &b_buf).unwrap();
-    let result_data = provider.download_column_u64(&result, 0).unwrap();
+    let result_data = provider.download_column::<u64>(&result, 0).unwrap();
     assert_eq!(result_data.len(), 2); // 1, 3
     assert_eq!(result_data, vec![1, 3]);
 }
@@ -663,14 +663,14 @@ fn test_diff_u64_no_overlap() {
     let b_vals: Vec<u64> = vec![4, 5, 6];
 
     let a_buf = provider
-        .create_buffer_from_u64_slice(&a_vals, schema.clone())
+        .create_buffer_from_slice::<u64>(&a_vals, schema.clone())
         .unwrap();
     let b_buf = provider
-        .create_buffer_from_u64_slice(&b_vals, schema)
+        .create_buffer_from_slice::<u64>(&b_vals, schema)
         .unwrap();
 
     let result = provider.diff_gpu(&a_buf, &b_buf).unwrap();
-    let result_data = provider.download_column_u64(&result, 0).unwrap();
+    let result_data = provider.download_column::<u64>(&result, 0).unwrap();
     assert_eq!(result_data.len(), 3); // All remain
     assert_eq!(result_data, vec![1, 2, 3]);
 }
@@ -688,14 +688,14 @@ fn test_diff_u64_complete_overlap() {
     let b_vals: Vec<u64> = vec![1, 2, 3];
 
     let a_buf = provider
-        .create_buffer_from_u64_slice(&a_vals, schema.clone())
+        .create_buffer_from_slice::<u64>(&a_vals, schema.clone())
         .unwrap();
     let b_buf = provider
-        .create_buffer_from_u64_slice(&b_vals, schema)
+        .create_buffer_from_slice::<u64>(&b_vals, schema)
         .unwrap();
 
     let result = provider.diff_gpu(&a_buf, &b_buf).unwrap();
-    let result_data = provider.download_column_u64(&result, 0).unwrap();
+    let result_data = provider.download_column::<u64>(&result, 0).unwrap();
     assert!(result_data.is_empty()); // All removed
 }
 
@@ -711,12 +711,12 @@ fn test_diff_u64_empty_b() {
     let a_vals: Vec<u64> = vec![1, 2, 3];
 
     let a_buf = provider
-        .create_buffer_from_u64_slice(&a_vals, schema.clone())
+        .create_buffer_from_slice::<u64>(&a_vals, schema.clone())
         .unwrap();
     let b_buf = provider.create_empty_buffer(schema).unwrap();
 
     let result = provider.diff_gpu(&a_buf, &b_buf).unwrap();
-    let result_data = provider.download_column_u64(&result, 0).unwrap();
+    let result_data = provider.download_column::<u64>(&result, 0).unwrap();
     assert_eq!(result_data.len(), 3); // All remain
     assert_eq!(result_data, vec![1, 2, 3]);
 }
@@ -737,14 +737,14 @@ fn test_union_i64() {
     let b_vals: Vec<i64> = vec![-5, 0, 10, 20];
 
     let a = provider
-        .create_buffer_from_i64_slice(&a_vals, schema.clone())
+        .create_buffer_from_slice::<i64>(&a_vals, schema.clone())
         .unwrap();
     let b = provider
-        .create_buffer_from_i64_slice(&b_vals, schema)
+        .create_buffer_from_slice::<i64>(&b_vals, schema)
         .unwrap();
 
     let result = provider.union_gpu(&a, &b).unwrap();
-    let result_data = provider.download_column_i64(&result, 0).unwrap();
+    let result_data = provider.download_column::<i64>(&result, 0).unwrap();
     assert_eq!(result_data.len(), 6); // -10, -5, 0, 5, 10, 20
     assert_eq!(result_data, vec![-10, -5, 0, 5, 10, 20]);
 }
@@ -762,14 +762,14 @@ fn test_union_i64_with_duplicates() {
     let b_vals: Vec<i64> = vec![0, 5, 5];
 
     let a = provider
-        .create_buffer_from_i64_slice(&a_vals, schema.clone())
+        .create_buffer_from_slice::<i64>(&a_vals, schema.clone())
         .unwrap();
     let b = provider
-        .create_buffer_from_i64_slice(&b_vals, schema)
+        .create_buffer_from_slice::<i64>(&b_vals, schema)
         .unwrap();
 
     let result = provider.union_gpu(&a, &b).unwrap();
-    let result_data = provider.download_column_i64(&result, 0).unwrap();
+    let result_data = provider.download_column::<i64>(&result, 0).unwrap();
     assert_eq!(result_data.len(), 3); // -5, 0, 5
     assert_eq!(result_data, vec![-5, 0, 5]);
 }
@@ -789,14 +789,14 @@ fn test_union_f64() {
     let b_vals: Vec<f64> = vec![2.5, 3.5, 4.5];
 
     let a = provider
-        .create_buffer_from_f64_slice(&a_vals, schema.clone())
+        .create_buffer_from_slice::<f64>(&a_vals, schema.clone())
         .unwrap();
     let b = provider
-        .create_buffer_from_f64_slice(&b_vals, schema)
+        .create_buffer_from_slice::<f64>(&b_vals, schema)
         .unwrap();
 
     let result = provider.union_gpu(&a, &b).unwrap();
-    let result_data = provider.download_column_f64(&result, 0).unwrap();
+    let result_data = provider.download_column::<f64>(&result, 0).unwrap();
     assert_eq!(result_data.len(), 4); // 1.5, 2.5, 3.5, 4.5
     assert_eq!(result_data, vec![1.5, 2.5, 3.5, 4.5]);
 }
@@ -814,14 +814,14 @@ fn test_union_f64_with_duplicates() {
     let b_vals: Vec<f64> = vec![2.5, 3.5, 3.5];
 
     let a = provider
-        .create_buffer_from_f64_slice(&a_vals, schema.clone())
+        .create_buffer_from_slice::<f64>(&a_vals, schema.clone())
         .unwrap();
     let b = provider
-        .create_buffer_from_f64_slice(&b_vals, schema)
+        .create_buffer_from_slice::<f64>(&b_vals, schema)
         .unwrap();
 
     let result = provider.union_gpu(&a, &b).unwrap();
-    let result_data = provider.download_column_f64(&result, 0).unwrap();
+    let result_data = provider.download_column::<f64>(&result, 0).unwrap();
     assert_eq!(result_data.len(), 3); // 1.5, 2.5, 3.5
     assert_eq!(result_data, vec![1.5, 2.5, 3.5]);
 }
@@ -841,14 +841,14 @@ fn test_diff_i64() {
     let b_vals: Vec<i64> = vec![-5, 5];
 
     let a = provider
-        .create_buffer_from_i64_slice(&a_vals, schema.clone())
+        .create_buffer_from_slice::<i64>(&a_vals, schema.clone())
         .unwrap();
     let b = provider
-        .create_buffer_from_i64_slice(&b_vals, schema)
+        .create_buffer_from_slice::<i64>(&b_vals, schema)
         .unwrap();
 
     let result = provider.diff_gpu(&a, &b).unwrap();
-    let result_data = provider.download_column_i64(&result, 0).unwrap();
+    let result_data = provider.download_column::<i64>(&result, 0).unwrap();
     assert_eq!(result_data.len(), 3); // -10, 0, 10
     assert_eq!(result_data, vec![-10, 0, 10]);
 }
@@ -866,14 +866,14 @@ fn test_diff_i64_no_overlap() {
     let b_vals: Vec<i64> = vec![5, 10, 15];
 
     let a = provider
-        .create_buffer_from_i64_slice(&a_vals, schema.clone())
+        .create_buffer_from_slice::<i64>(&a_vals, schema.clone())
         .unwrap();
     let b = provider
-        .create_buffer_from_i64_slice(&b_vals, schema)
+        .create_buffer_from_slice::<i64>(&b_vals, schema)
         .unwrap();
 
     let result = provider.diff_gpu(&a, &b).unwrap();
-    let result_data = provider.download_column_i64(&result, 0).unwrap();
+    let result_data = provider.download_column::<i64>(&result, 0).unwrap();
     assert_eq!(result_data.len(), 3); // All remain: -10, -5, 0
     assert_eq!(result_data, vec![-10, -5, 0]);
 }
@@ -893,14 +893,14 @@ fn test_diff_f64() {
     let b_vals: Vec<f64> = vec![2.5, 4.5];
 
     let a = provider
-        .create_buffer_from_f64_slice(&a_vals, schema.clone())
+        .create_buffer_from_slice::<f64>(&a_vals, schema.clone())
         .unwrap();
     let b = provider
-        .create_buffer_from_f64_slice(&b_vals, schema)
+        .create_buffer_from_slice::<f64>(&b_vals, schema)
         .unwrap();
 
     let result = provider.diff_gpu(&a, &b).unwrap();
-    let result_data = provider.download_column_f64(&result, 0).unwrap();
+    let result_data = provider.download_column::<f64>(&result, 0).unwrap();
     assert_eq!(result_data.len(), 2); // 1.5, 3.5
     assert_eq!(result_data, vec![1.5, 3.5]);
 }
@@ -918,14 +918,14 @@ fn test_diff_f64_no_overlap() {
     let b_vals: Vec<f64> = vec![4.5, 5.5, 6.5];
 
     let a = provider
-        .create_buffer_from_f64_slice(&a_vals, schema.clone())
+        .create_buffer_from_slice::<f64>(&a_vals, schema.clone())
         .unwrap();
     let b = provider
-        .create_buffer_from_f64_slice(&b_vals, schema)
+        .create_buffer_from_slice::<f64>(&b_vals, schema)
         .unwrap();
 
     let result = provider.diff_gpu(&a, &b).unwrap();
-    let result_data = provider.download_column_f64(&result, 0).unwrap();
+    let result_data = provider.download_column::<f64>(&result, 0).unwrap();
     assert_eq!(result_data.len(), 3); // All remain: 1.5, 2.5, 3.5
     assert_eq!(result_data, vec![1.5, 2.5, 3.5]);
 }

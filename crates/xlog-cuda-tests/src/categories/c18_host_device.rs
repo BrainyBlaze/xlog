@@ -56,7 +56,7 @@ fn test_upload_download_integrity(ctx: &TestContext) -> TestResult {
         // Upload
         let buffer = match ctx
             .provider
-            .create_buffer_from_u32_slice(&data, schema.clone())
+            .create_buffer_from_slice::<u32>(&data, schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -69,7 +69,7 @@ fn test_upload_download_integrity(ctx: &TestContext) -> TestResult {
         };
 
         // Download immediately (no operation)
-        let downloaded = match ctx.provider.download_column_u32(&buffer, 0) {
+        let downloaded = match ctx.provider.download_column::<u32>(&buffer, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -119,7 +119,7 @@ fn test_upload_download_integrity(ctx: &TestContext) -> TestResult {
             }
         };
 
-        let sorted_data = match ctx.provider.download_column_u32(&sorted, 0) {
+        let sorted_data = match ctx.provider.download_column::<u32>(&sorted, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -157,7 +157,7 @@ fn test_upload_download_integrity(ctx: &TestContext) -> TestResult {
     let schema64 = Schema::new(vec![("val".to_string(), ScalarType::U64)]);
     let data64: Vec<u64> = (0..5000).map(|i| i as u64 * 1_000_000_000).collect();
 
-    let buffer64 = match ctx.provider.create_buffer_from_u64_slice(&data64, schema64) {
+    let buffer64 = match ctx.provider.create_buffer_from_slice::<u64>(&data64, schema64) {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -168,7 +168,7 @@ fn test_upload_download_integrity(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let downloaded64 = match ctx.provider.download_column_u64(&buffer64, 0) {
+    let downloaded64 = match ctx.provider.download_column::<u64>(&buffer64, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -222,7 +222,7 @@ fn test_large_transfer(ctx: &TestContext) -> TestResult {
     // Upload
     let buffer = match ctx
         .provider
-        .create_buffer_from_u32_slice(&large_data, schema.clone())
+        .create_buffer_from_slice::<u32>(&large_data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -248,7 +248,7 @@ fn test_large_transfer(ctx: &TestContext) -> TestResult {
     }
 
     // Download
-    let downloaded = match ctx.provider.download_column_u32(&buffer, 0) {
+    let downloaded = match ctx.provider.download_column::<u32>(&buffer, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -335,7 +335,7 @@ fn test_large_transfer(ctx: &TestContext) -> TestResult {
     }
 
     // Download filtered and verify
-    let filtered_data = match ctx.provider.download_column_u32(&filtered, 0) {
+    let filtered_data = match ctx.provider.download_column::<u32>(&filtered, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -392,7 +392,7 @@ fn test_repeated_transfer(ctx: &TestContext) -> TestResult {
 
         let buffer = match ctx
             .provider
-            .create_buffer_from_u32_slice(&data, schema.clone())
+            .create_buffer_from_slice::<u32>(&data, schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -404,7 +404,7 @@ fn test_repeated_transfer(ctx: &TestContext) -> TestResult {
             }
         };
 
-        let downloaded = match ctx.provider.download_column_u32(&buffer, 0) {
+        let downloaded = match ctx.provider.download_column::<u32>(&buffer, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -444,7 +444,7 @@ fn test_repeated_transfer(ctx: &TestContext) -> TestResult {
 
         let buffer = match ctx
             .provider
-            .create_buffer_from_u32_slice(&data, schema.clone())
+            .create_buffer_from_slice::<u32>(&data, schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -469,7 +469,7 @@ fn test_repeated_transfer(ctx: &TestContext) -> TestResult {
 
         // Periodic verification
         if i % 50 == 0 {
-            let result = match ctx.provider.download_column_u32(&sorted, 0) {
+            let result = match ctx.provider.download_column::<u32>(&sorted, 0) {
                 Ok(d) => d,
                 Err(e) => {
                     return TestResult::error(
@@ -503,7 +503,7 @@ fn test_repeated_transfer(ctx: &TestContext) -> TestResult {
             .collect();
         let buffer = match ctx
             .provider
-            .create_buffer_from_u32_slice(&data, schema.clone())
+            .create_buffer_from_slice::<u32>(&data, schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -531,7 +531,7 @@ fn test_repeated_transfer(ctx: &TestContext) -> TestResult {
         };
 
         // Download
-        let result = match ctx.provider.download_column_u32(&filtered, 0) {
+        let result = match ctx.provider.download_column::<u32>(&filtered, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -594,7 +594,7 @@ fn test_memory_lifecycle(ctx: &TestContext) -> TestResult {
 
             let buffer = match ctx
                 .provider
-                .create_buffer_from_u32_slice(&data, schema.clone())
+                .create_buffer_from_slice::<u32>(&data, schema.clone())
             {
                 Ok(buf) => buf,
                 Err(e) => {
@@ -623,7 +623,7 @@ fn test_memory_lifecycle(ctx: &TestContext) -> TestResult {
             };
 
             // Verify correctness
-            let result = match ctx.provider.download_column_u32(&sorted, 0) {
+            let result = match ctx.provider.download_column::<u32>(&sorted, 0) {
                 Ok(d) => d,
                 Err(e) => {
                     return TestResult::error(
@@ -682,7 +682,7 @@ fn test_memory_lifecycle(ctx: &TestContext) -> TestResult {
 
         let buffer = match ctx
             .provider
-            .create_buffer_from_u32_slice(&data, schema.clone())
+            .create_buffer_from_slice::<u32>(&data, schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -728,7 +728,7 @@ fn test_memory_lifecycle(ctx: &TestContext) -> TestResult {
 
         let buffer = match ctx
             .provider
-            .create_buffer_from_u32_slice(&data, schema.clone())
+            .create_buffer_from_slice::<u32>(&data, schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -800,7 +800,7 @@ fn test_memory_budget_limits(ctx: &TestContext) -> TestResult {
 
     let buffer = match ctx
         .provider
-        .create_buffer_from_u32_slice(&data, schema.clone())
+        .create_buffer_from_slice::<u32>(&data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -825,7 +825,7 @@ fn test_memory_budget_limits(ctx: &TestContext) -> TestResult {
     };
 
     // Verify
-    let result = match ctx.provider.download_column_u32(&sorted, 0) {
+    let result = match ctx.provider.download_column::<u32>(&sorted, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -858,7 +858,7 @@ fn test_memory_budget_limits(ctx: &TestContext) -> TestResult {
 
         match ctx
             .provider
-            .create_buffer_from_u32_slice(&buf_data, schema.clone())
+            .create_buffer_from_slice::<u32>(&buf_data, schema.clone())
         {
             Ok(buf) => buffers.push(buf),
             Err(_) => {
@@ -915,7 +915,7 @@ fn test_memory_budget_limits(ctx: &TestContext) -> TestResult {
     let new_data: Vec<u32> = (0..per_buffer_size as u32).collect();
     let new_buffer = match ctx
         .provider
-        .create_buffer_from_u32_slice(&new_data, schema.clone())
+        .create_buffer_from_slice::<u32>(&new_data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {

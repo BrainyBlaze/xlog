@@ -41,7 +41,7 @@ fn test_single_gpu_baseline(ctx: &TestContext) -> TestResult {
     // Upload
     let buffer = match ctx
         .provider
-        .create_buffer_from_u32_slice(&data, schema.clone())
+        .create_buffer_from_slice::<u32>(&data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -66,7 +66,7 @@ fn test_single_gpu_baseline(ctx: &TestContext) -> TestResult {
     };
 
     // Download and verify
-    let result = match ctx.provider.download_column_u32(&sorted, 0) {
+    let result = match ctx.provider.download_column::<u32>(&sorted, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -283,7 +283,7 @@ fn test_multi_gpu_detection(ctx: &TestContext) -> TestResult {
     let schema = Schema::new(vec![("val".to_string(), ScalarType::U32)]);
     let data: Vec<u32> = (0..1000u32).collect();
 
-    let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema) {
+    let buffer = match ctx.provider.create_buffer_from_slice::<u32>(&data, schema) {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -371,7 +371,7 @@ fn test_device_enumeration(ctx: &TestContext) -> TestResult {
 
             let buffer = match ctx
                 .provider
-                .create_buffer_from_u32_slice(&data, schema.clone())
+                .create_buffer_from_slice::<u32>(&data, schema.clone())
             {
                 Ok(buf) => buf,
                 Err(e) => {
@@ -459,7 +459,7 @@ fn test_primary_device_operations(ctx: &TestContext) -> TestResult {
 
     let large_buffer = match ctx
         .provider
-        .create_buffer_from_u32_slice(&large_data, schema.clone())
+        .create_buffer_from_slice::<u32>(&large_data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -482,7 +482,7 @@ fn test_primary_device_operations(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let large_result = match ctx.provider.download_column_u32(&large_sorted, 0) {
+    let large_result = match ctx.provider.download_column::<u32>(&large_sorted, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -509,7 +509,7 @@ fn test_primary_device_operations(ctx: &TestContext) -> TestResult {
 
     let chain_buffer = match ctx
         .provider
-        .create_buffer_from_u32_slice(&chain_data, schema.clone())
+        .create_buffer_from_slice::<u32>(&chain_data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -533,7 +533,7 @@ fn test_primary_device_operations(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let step1_data = match ctx.provider.download_column_u32(&step1, 0) {
+    let step1_data = match ctx.provider.download_column::<u32>(&step1, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -571,7 +571,7 @@ fn test_primary_device_operations(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let chain_result = match ctx.provider.download_column_u32(&step3, 0) {
+    let chain_result = match ctx.provider.download_column::<u32>(&step3, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -611,7 +611,7 @@ fn test_primary_device_operations(ctx: &TestContext) -> TestResult {
 
         let buffer = match ctx
             .provider
-            .create_buffer_from_u32_slice(&data, schema.clone())
+            .create_buffer_from_slice::<u32>(&data, schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -639,7 +639,7 @@ fn test_primary_device_operations(ctx: &TestContext) -> TestResult {
 
     // Verify all
     for (i, sorted) in buffers.iter().enumerate() {
-        let result = match ctx.provider.download_column_u32(sorted, 0) {
+        let result = match ctx.provider.download_column::<u32>(sorted, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -750,7 +750,7 @@ fn test_device_capability_query(ctx: &TestContext) -> TestResult {
         })
         .collect();
 
-    let buffer = match ctx.provider.create_buffer_from_u32_slice(&data, schema) {
+    let buffer = match ctx.provider.create_buffer_from_slice::<u32>(&data, schema) {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(
@@ -775,7 +775,7 @@ fn test_device_capability_query(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let result = match ctx.provider.download_column_u32(&sorted, 0) {
+    let result = match ctx.provider.download_column::<u32>(&sorted, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(

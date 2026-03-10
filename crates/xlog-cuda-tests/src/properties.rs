@@ -57,11 +57,11 @@ pub fn prop_sort_stability(
     // Download results
     let sorted_keys = ctx
         .provider
-        .download_column_u32(&sorted, 0)
+        .download_column::<u32>(&sorted, 0)
         .map_err(|e| format!("Download keys failed: {}", e))?;
     let sorted_vals = ctx
         .provider
-        .download_column_u32(&sorted, 1)
+        .download_column::<u32>(&sorted, 1)
         .map_err(|e| format!("Download vals failed: {}", e))?;
 
     // Verify keys are sorted (ascending)
@@ -211,15 +211,15 @@ pub fn prop_join_correctness(
     // Download results
     let result_keys = ctx
         .provider
-        .download_column_u32(&joined, 0)
+        .download_column::<u32>(&joined, 0)
         .map_err(|e| format!("Download result keys failed: {}", e))?;
     let result_lvals = ctx
         .provider
-        .download_column_u32(&joined, 1)
+        .download_column::<u32>(&joined, 1)
         .map_err(|e| format!("Download result lvals failed: {}", e))?;
     let result_rvals = ctx
         .provider
-        .download_column_u32(&joined, 2)
+        .download_column::<u32>(&joined, 2)
         .map_err(|e| format!("Download result rvals failed: {}", e))?;
 
     // Compute expected result using CPU reference implementation
@@ -311,7 +311,7 @@ pub fn prop_filter_idempotence(
 
     let buffer = ctx
         .provider
-        .create_buffer_from_u32_slice(&data, schema)
+        .create_buffer_from_slice::<u32>(&data, schema)
         .map_err(|e| format!("Buffer creation failed: {}", e))?;
 
     // First filter: val < threshold
@@ -329,12 +329,12 @@ pub fn prop_filter_idempotence(
     // Download both results
     let once_data = ctx
         .provider
-        .download_column_u32(&filtered_once, 0)
+        .download_column::<u32>(&filtered_once, 0)
         .map_err(|e| format!("Download first filter failed: {}", e))?;
 
     let twice_data = ctx
         .provider
-        .download_column_u32(&filtered_twice, 0)
+        .download_column::<u32>(&filtered_twice, 0)
         .map_err(|e| format!("Download second filter failed: {}", e))?;
 
     // Results should be identical
@@ -411,12 +411,12 @@ pub fn prop_dedup_determinism(
     // Download results
     let keys1 = ctx
         .provider
-        .download_column_u32(&dedup1, 0)
+        .download_column::<u32>(&dedup1, 0)
         .map_err(|e| format!("Download dedup1 keys failed: {}", e))?;
 
     let keys2 = ctx
         .provider
-        .download_column_u32(&dedup2, 0)
+        .download_column::<u32>(&dedup2, 0)
         .map_err(|e| format!("Download dedup2 keys failed: {}", e))?;
 
     // Row counts should match

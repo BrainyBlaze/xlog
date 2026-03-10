@@ -56,9 +56,9 @@ fn test_groupby_count() {
     assert_eq!(device_row_count(&provider, &result), 2);
 
     // Download and verify results
-    let result_keys = provider.download_column_u32(&result, 0).unwrap();
+    let result_keys = provider.download_column::<u32>(&result, 0).unwrap();
     // Count results are u64 to match predicate declarations
-    let result_counts = provider.download_column_u64(&result, 1).unwrap();
+    let result_counts = provider.download_column::<u64>(&result, 1).unwrap();
 
     assert_eq!(result_keys, vec![1, 2]);
     assert_eq!(result_counts, vec![2u64, 3u64]);
@@ -92,9 +92,9 @@ fn test_groupby_sum() {
 
     assert_eq!(device_row_count(&provider, &result), 2);
 
-    let result_keys = provider.download_column_u32(&result, 0).unwrap();
+    let result_keys = provider.download_column::<u32>(&result, 0).unwrap();
     // Sum results are u64 (to prevent overflow)
-    let result_sums = provider.download_column_u64(&result, 1).unwrap();
+    let result_sums = provider.download_column::<u64>(&result, 1).unwrap();
 
     assert_eq!(result_keys, vec![1, 2]);
     assert_eq!(result_sums, vec![30u64, 45u64]);
@@ -127,8 +127,8 @@ fn test_groupby_min_max() {
         .unwrap();
 
     assert_eq!(device_row_count(&provider, &result_min), 2);
-    let result_keys = provider.download_column_u32(&result_min, 0).unwrap();
-    let result_mins = provider.download_column_u32(&result_min, 1).unwrap();
+    let result_keys = provider.download_column::<u32>(&result_min, 0).unwrap();
+    let result_mins = provider.download_column::<u32>(&result_min, 1).unwrap();
 
     assert_eq!(result_keys, vec![1, 2]);
     assert_eq!(result_mins, vec![10, 5]);
@@ -139,8 +139,8 @@ fn test_groupby_min_max() {
         .unwrap();
 
     assert_eq!(device_row_count(&provider, &result_max), 2);
-    let result_keys = provider.download_column_u32(&result_max, 0).unwrap();
-    let result_maxs = provider.download_column_u32(&result_max, 1).unwrap();
+    let result_keys = provider.download_column::<u32>(&result_max, 0).unwrap();
+    let result_maxs = provider.download_column::<u32>(&result_max, 1).unwrap();
 
     assert_eq!(result_keys, vec![1, 2]);
     assert_eq!(result_maxs, vec![20, 25]);
@@ -185,12 +185,12 @@ fn test_groupby_multi_agg() {
     assert_eq!(device_row_count(&provider, &result), 2);
     assert_eq!(result.arity(), 5);
 
-    let result_keys = provider.download_column_u32(&result, 0).unwrap();
+    let result_keys = provider.download_column::<u32>(&result, 0).unwrap();
     // Sum and Count results are u64
-    let result_sums = provider.download_column_u64(&result, 1).unwrap();
-    let result_counts = provider.download_column_u64(&result, 2).unwrap();
-    let result_mins = provider.download_column_u32(&result, 3).unwrap();
-    let result_maxs = provider.download_column_u32(&result, 4).unwrap();
+    let result_sums = provider.download_column::<u64>(&result, 1).unwrap();
+    let result_counts = provider.download_column::<u64>(&result, 2).unwrap();
+    let result_mins = provider.download_column::<u32>(&result, 3).unwrap();
+    let result_maxs = provider.download_column::<u32>(&result, 4).unwrap();
 
     assert_eq!(result_keys, vec![1, 2]);
     assert_eq!(result_sums, vec![30u64, 45u64]);
@@ -245,10 +245,10 @@ fn test_groupby_single_group() {
 
     assert_eq!(device_row_count(&provider, &result), 1);
 
-    let result_keys = provider.download_column_u32(&result, 0).unwrap();
+    let result_keys = provider.download_column::<u32>(&result, 0).unwrap();
     // Sum and Count results are u64
-    let result_sums = provider.download_column_u64(&result, 1).unwrap();
-    let result_counts = provider.download_column_u64(&result, 2).unwrap();
+    let result_sums = provider.download_column::<u64>(&result, 1).unwrap();
+    let result_counts = provider.download_column::<u64>(&result, 2).unwrap();
 
     assert_eq!(result_keys, vec![5]);
     assert_eq!(result_sums, vec![100u64]); // 10+20+30+40
@@ -284,9 +284,9 @@ fn test_groupby_unsorted_input() {
 
     assert_eq!(device_row_count(&provider, &result), 2);
 
-    let result_keys = provider.download_column_u32(&result, 0).unwrap();
+    let result_keys = provider.download_column::<u32>(&result, 0).unwrap();
     // Sum results are u64 (to prevent overflow)
-    let result_sums = provider.download_column_u64(&result, 1).unwrap();
+    let result_sums = provider.download_column::<u64>(&result, 1).unwrap();
 
     assert_eq!(result_keys, vec![1, 2]);
     assert_eq!(result_sums, vec![30u64, 45u64]);
@@ -318,9 +318,9 @@ fn test_groupby_multi_key_device_keys() {
         .groupby_multi_agg(&buffer, &[0, 1], &[(2, AggOp::Sum)])
         .unwrap();
 
-    let k1 = provider.download_column_u32(&result, 0).unwrap();
-    let k2 = provider.download_column_u32(&result, 1).unwrap();
-    let sums = provider.download_column_u64(&result, 2).unwrap();
+    let k1 = provider.download_column::<u32>(&result, 0).unwrap();
+    let k2 = provider.download_column::<u32>(&result, 1).unwrap();
+    let sums = provider.download_column::<u64>(&result, 2).unwrap();
 
     assert_eq!(k1, vec![1, 2]);
     assert_eq!(k2, vec![10, 20]);
@@ -364,11 +364,11 @@ fn test_groupby_many_groups() {
 
     assert_eq!(device_row_count(&provider, &result), 5);
 
-    let result_keys = provider.download_column_u32(&result, 0).unwrap();
+    let result_keys = provider.download_column::<u32>(&result, 0).unwrap();
     // Sum results are u64 (to prevent overflow)
-    let result_sums = provider.download_column_u64(&result, 1).unwrap();
+    let result_sums = provider.download_column::<u64>(&result, 1).unwrap();
     // Count results are u64 (to match predicate declaration types)
-    let result_counts = provider.download_column_u64(&result, 2).unwrap();
+    let result_counts = provider.download_column::<u64>(&result, 2).unwrap();
 
     // Keys should be sorted: 1, 2, 3, 4, 5
     assert_eq!(result_keys, vec![1, 2, 3, 4, 5]);
@@ -430,7 +430,7 @@ fn test_groupby_logsumexp_single_element_groups() {
     );
 
     let result_values = provider
-        .download_column_f64(&result, 1)
+        .download_column::<f64>(&result, 1)
         .expect("download result");
 
     // For single element groups, logsumexp(x) = x
@@ -485,7 +485,7 @@ fn test_groupby_logsumexp_mixed_positive_negative() {
     assert_eq!(device_row_count(&provider, &result), 3);
 
     let result_values = provider
-        .download_column_f64(&result, 1)
+        .download_column::<f64>(&result, 1)
         .expect("download result");
 
     let tolerance = 1e-5;
@@ -546,7 +546,7 @@ fn test_groupby_logsumexp_infinity() {
     assert_eq!(device_row_count(&provider, &result), 2);
 
     let result_values = provider
-        .download_column_f64(&result, 1)
+        .download_column::<f64>(&result, 1)
         .expect("download result");
 
     // Group 1 should be +INFINITY

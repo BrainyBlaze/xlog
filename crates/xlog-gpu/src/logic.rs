@@ -238,7 +238,7 @@ impl LogicProgram {
                 continue;
             }
 
-            let rows = provider.download_column_u32(buf, 0).unwrap_or_default();
+            let rows = provider.download_column::<u32>(buf, 0).unwrap_or_default();
             if rows.is_empty() {
                 continue;
             }

@@ -96,10 +96,10 @@ query(pred(0, 2)).
 
     let schema = xlog_core::Schema::new(vec![("col0".to_string(), xlog_core::ScalarType::F32)]);
     let prob_buf = provider
-        .create_buffer_from_f32_slice(&p, schema.clone())
+        .create_buffer_from_slice::<f32>(&p, schema.clone())
         .unwrap();
     let grad_buf = provider
-        .create_buffer_from_f32_slice(&[0.0f32; 3], schema)
+        .create_buffer_from_slice::<f32>(&[0.0f32; 3], schema)
         .unwrap();
 
     let cfg = NeuralFastPathConfig {
@@ -171,10 +171,10 @@ query(pred(0, 2)).
 
     let schema = xlog_core::Schema::new(vec![("col0".to_string(), xlog_core::ScalarType::F32)]);
     let prob_buf = provider
-        .create_buffer_from_f32_slice(&p, schema.clone())
+        .create_buffer_from_slice::<f32>(&p, schema.clone())
         .unwrap();
     let grad_buf = provider
-        .create_buffer_from_f32_slice(&[0.0f32; 3], schema)
+        .create_buffer_from_slice::<f32>(&[0.0f32; 3], schema)
         .unwrap();
 
     let cfg = NeuralFastPathConfig {
@@ -239,10 +239,10 @@ query(pred(0, 2)).
 
     let schema = xlog_core::Schema::new(vec![("col0".to_string(), xlog_core::ScalarType::F32)]);
     let prob_buf = provider
-        .create_buffer_from_f32_slice(&p, schema.clone())
+        .create_buffer_from_slice::<f32>(&p, schema.clone())
         .unwrap();
     let grad_buf = provider
-        .create_buffer_from_f32_slice(&[0.0f32; 3], schema)
+        .create_buffer_from_slice::<f32>(&[0.0f32; 3], schema)
         .unwrap();
 
     let cfg = NeuralFastPathConfig {

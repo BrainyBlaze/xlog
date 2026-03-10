@@ -96,6 +96,6 @@ fn test_roundtrip_import_u32_column_from_dlpack_zero_copy() {
     assert_eq!(imported_ptr as u64, dl_data_ptr);
 
     // Verify contents.
-    let got = provider.download_column_u32(&imported, 0).unwrap();
+    let got = provider.download_column::<u32>(&imported, 0).unwrap();
     assert_eq!(got, ids);
 }

@@ -42,7 +42,7 @@ fn test_filter_all_pass(ctx: &TestContext) -> TestResult {
 
         let buffer = match ctx
             .provider
-            .create_buffer_from_u32_slice(&data, schema.clone())
+            .create_buffer_from_slice::<u32>(&data, schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -83,7 +83,7 @@ fn test_filter_all_pass(ctx: &TestContext) -> TestResult {
         }
 
         // Download and verify data is identical
-        let filtered_data = match ctx.provider.download_column_u32(&filtered, 0) {
+        let filtered_data = match ctx.provider.download_column::<u32>(&filtered, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -131,7 +131,7 @@ fn test_filter_none_pass(ctx: &TestContext) -> TestResult {
 
         let buffer = match ctx
             .provider
-            .create_buffer_from_u32_slice(&data, schema.clone())
+            .create_buffer_from_slice::<u32>(&data, schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -199,7 +199,7 @@ fn test_filter_half_pass(ctx: &TestContext) -> TestResult {
 
         let buffer = match ctx
             .provider
-            .create_buffer_from_u32_slice(&data, schema.clone())
+            .create_buffer_from_slice::<u32>(&data, schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -242,7 +242,7 @@ fn test_filter_half_pass(ctx: &TestContext) -> TestResult {
         }
 
         // Download and verify
-        let filtered_data = match ctx.provider.download_column_u32(&filtered, 0) {
+        let filtered_data = match ctx.provider.download_column::<u32>(&filtered, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -293,7 +293,7 @@ fn test_sparse_predicate(ctx: &TestContext) -> TestResult {
 
         let buffer = match ctx
             .provider
-            .create_buffer_from_u32_slice(&data, schema.clone())
+            .create_buffer_from_slice::<u32>(&data, schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -336,7 +336,7 @@ fn test_sparse_predicate(ctx: &TestContext) -> TestResult {
         }
 
         // Download and verify
-        let filtered_data = match ctx.provider.download_column_u32(&filtered, 0) {
+        let filtered_data = match ctx.provider.download_column::<u32>(&filtered, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -391,7 +391,7 @@ fn test_dense_predicate(ctx: &TestContext) -> TestResult {
 
         let buffer = match ctx
             .provider
-            .create_buffer_from_u32_slice(&data, schema.clone())
+            .create_buffer_from_slice::<u32>(&data, schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -434,7 +434,7 @@ fn test_dense_predicate(ctx: &TestContext) -> TestResult {
         }
 
         // Download and verify
-        let filtered_data = match ctx.provider.download_column_u32(&filtered, 0) {
+        let filtered_data = match ctx.provider.download_column::<u32>(&filtered, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -498,7 +498,7 @@ fn test_alternating_predicate(ctx: &TestContext) -> TestResult {
 
         let buffer = match ctx
             .provider
-            .create_buffer_from_u32_slice(&data, schema.clone())
+            .create_buffer_from_slice::<u32>(&data, schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -539,7 +539,7 @@ fn test_alternating_predicate(ctx: &TestContext) -> TestResult {
         }
 
         // Download and verify
-        let filtered_data = match ctx.provider.download_column_u32(&filtered, 0) {
+        let filtered_data = match ctx.provider.download_column::<u32>(&filtered, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -593,7 +593,7 @@ fn test_alternating_predicate(ctx: &TestContext) -> TestResult {
             );
         }
 
-        let filtered_data2 = match ctx.provider.download_column_u32(&filtered2, 0) {
+        let filtered_data2 = match ctx.provider.download_column::<u32>(&filtered2, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -648,7 +648,7 @@ fn test_random_predicate_distribution(ctx: &TestContext) -> TestResult {
 
         let buffer = match ctx
             .provider
-            .create_buffer_from_u32_slice(&data, schema.clone())
+            .create_buffer_from_slice::<u32>(&data, schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -699,7 +699,7 @@ fn test_random_predicate_distribution(ctx: &TestContext) -> TestResult {
         }
 
         // Verify filtered values match expected
-        let filtered_data1 = match ctx.provider.download_column_u32(&filtered1, 0) {
+        let filtered_data1 = match ctx.provider.download_column::<u32>(&filtered1, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -801,7 +801,7 @@ fn test_random_predicate_distribution(ctx: &TestContext) -> TestResult {
             );
         }
 
-        let filtered_data3 = match ctx.provider.download_column_u32(&filtered3, 0) {
+        let filtered_data3 = match ctx.provider.download_column::<u32>(&filtered3, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(

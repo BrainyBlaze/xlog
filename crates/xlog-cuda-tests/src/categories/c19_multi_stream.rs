@@ -45,7 +45,7 @@ fn test_sequential_batch_operations(ctx: &TestContext) -> TestResult {
 
         let buffer = match ctx
             .provider
-            .create_buffer_from_u32_slice(&data, schema.clone())
+            .create_buffer_from_slice::<u32>(&data, schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -80,7 +80,7 @@ fn test_sequential_batch_operations(ctx: &TestContext) -> TestResult {
 
     // Verify all results after batch completes
     for (i, (sorted, original)) in sorted_buffers.iter().zip(original_data.iter()).enumerate() {
-        let result = match ctx.provider.download_column_u32(sorted, 0) {
+        let result = match ctx.provider.download_column::<u32>(sorted, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -185,7 +185,7 @@ fn test_interleaved_operations(ctx: &TestContext) -> TestResult {
 
     let sort_buffer = match ctx
         .provider
-        .create_buffer_from_u32_slice(&sort_data, schema.clone())
+        .create_buffer_from_slice::<u32>(&sort_data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -199,7 +199,7 @@ fn test_interleaved_operations(ctx: &TestContext) -> TestResult {
 
     let filter_buffer = match ctx
         .provider
-        .create_buffer_from_u32_slice(&filter_data, schema.clone())
+        .create_buffer_from_slice::<u32>(&filter_data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -252,7 +252,7 @@ fn test_interleaved_operations(ctx: &TestContext) -> TestResult {
     let mut first_sort_result: Option<Vec<u32>> = None;
 
     for (i, sorted) in sort_results.iter().enumerate() {
-        let result = match ctx.provider.download_column_u32(sorted, 0) {
+        let result = match ctx.provider.download_column::<u32>(sorted, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -348,7 +348,7 @@ fn test_operation_isolation(ctx: &TestContext) -> TestResult {
 
         let buffer = match ctx
             .provider
-            .create_buffer_from_u32_slice(&data, schema.clone())
+            .create_buffer_from_slice::<u32>(&data, schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -382,7 +382,7 @@ fn test_operation_isolation(ctx: &TestContext) -> TestResult {
 
     // Verify each buffer maintains its unique identity (no cross-contamination)
     for (i, sorted) in sorted_buffers.iter().enumerate() {
-        let result = match ctx.provider.download_column_u32(sorted, 0) {
+        let result = match ctx.provider.download_column::<u32>(sorted, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -473,7 +473,7 @@ fn test_operation_isolation(ctx: &TestContext) -> TestResult {
 
     // Verify filtered results maintain isolation
     for (i, filtered) in filtered_buffers.iter().enumerate() {
-        let result = match ctx.provider.download_column_u32(filtered, 0) {
+        let result = match ctx.provider.download_column::<u32>(filtered, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -547,7 +547,7 @@ fn test_batch_completion(ctx: &TestContext) -> TestResult {
 
         let buffer = match ctx
             .provider
-            .create_buffer_from_u32_slice(&data, schema.clone())
+            .create_buffer_from_slice::<u32>(&data, schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -584,7 +584,7 @@ fn test_batch_completion(ctx: &TestContext) -> TestResult {
 
     // Verify all operations completed correctly
     for (i, (sorted, original)) in all_operations.iter().enumerate() {
-        let result = match ctx.provider.download_column_u32(sorted, 0) {
+        let result = match ctx.provider.download_column::<u32>(sorted, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -624,7 +624,7 @@ fn test_batch_completion(ctx: &TestContext) -> TestResult {
     let base_data: Vec<u32> = (0..SIZE as u32).collect();
     let base_buffer = match ctx
         .provider
-        .create_buffer_from_u32_slice(&base_data, schema.clone())
+        .create_buffer_from_slice::<u32>(&base_data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -641,7 +641,7 @@ fn test_batch_completion(ctx: &TestContext) -> TestResult {
         let sort_data: Vec<u32> = (0..SIZE).map(|j| ((j * i) % SIZE) as u32).collect();
         let sort_buffer = match ctx
             .provider
-            .create_buffer_from_u32_slice(&sort_data, schema.clone())
+            .create_buffer_from_slice::<u32>(&sort_data, schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -738,7 +738,7 @@ fn test_dependency_chain(ctx: &TestContext) -> TestResult {
 
     let buffer = match ctx
         .provider
-        .create_buffer_from_u32_slice(&data, schema.clone())
+        .create_buffer_from_slice::<u32>(&data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -764,7 +764,7 @@ fn test_dependency_chain(ctx: &TestContext) -> TestResult {
     };
 
     // Get intermediate result for filter condition
-    let step1_data = match ctx.provider.download_column_u32(&step1, 0) {
+    let step1_data = match ctx.provider.download_column::<u32>(&step1, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -807,7 +807,7 @@ fn test_dependency_chain(ctx: &TestContext) -> TestResult {
     };
 
     // Verify chain 1 result
-    let chain1_result = match ctx.provider.download_column_u32(&step3, 0) {
+    let chain1_result = match ctx.provider.download_column::<u32>(&step3, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -945,7 +945,7 @@ fn test_dependency_chain(ctx: &TestContext) -> TestResult {
     }
 
     // Download and verify join result
-    let join_keys = match ctx.provider.download_column_u32(&joined, 0) {
+    let join_keys = match ctx.provider.download_column::<u32>(&joined, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -956,7 +956,7 @@ fn test_dependency_chain(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let join_lvals = match ctx.provider.download_column_u32(&joined, 1) {
+    let join_lvals = match ctx.provider.download_column::<u32>(&joined, 1) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -988,7 +988,7 @@ fn test_dependency_chain(ctx: &TestContext) -> TestResult {
     let deep_data: Vec<u32> = (0..10000).map(|i| (i % 1000) as u32).collect();
     let mut current = match ctx
         .provider
-        .create_buffer_from_u32_slice(&deep_data, schema.clone())
+        .create_buffer_from_slice::<u32>(&deep_data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -1014,7 +1014,7 @@ fn test_dependency_chain(ctx: &TestContext) -> TestResult {
         };
 
         // Filter to keep ~80%
-        let current_data = match ctx.provider.download_column_u32(&sorted, 0) {
+        let current_data = match ctx.provider.download_column::<u32>(&sorted, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -1042,7 +1042,7 @@ fn test_dependency_chain(ctx: &TestContext) -> TestResult {
     }
 
     // Verify deep chain result
-    let deep_result = match ctx.provider.download_column_u32(&current, 0) {
+    let deep_result = match ctx.provider.download_column::<u32>(&current, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(

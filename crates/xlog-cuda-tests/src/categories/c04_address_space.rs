@@ -52,7 +52,7 @@ fn test_global_u32_correctness(ctx: &TestContext) -> TestResult {
 
     let buffer = match ctx
         .provider
-        .create_buffer_from_u32_slice(&data, schema.clone())
+        .create_buffer_from_slice::<u32>(&data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -90,7 +90,7 @@ fn test_global_u32_correctness(ctx: &TestContext) -> TestResult {
     }
 
     // Download and verify all original values are present (sorted)
-    let sorted_data = match ctx.provider.download_column_u32(&sorted, 0) {
+    let sorted_data = match ctx.provider.download_column::<u32>(&sorted, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -169,7 +169,7 @@ fn test_global_u64_correctness(ctx: &TestContext) -> TestResult {
 
     let buffer = match ctx
         .provider
-        .create_buffer_from_u64_slice(&data, schema.clone())
+        .create_buffer_from_slice::<u64>(&data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -207,7 +207,7 @@ fn test_global_u64_correctness(ctx: &TestContext) -> TestResult {
     }
 
     // Download and verify
-    let sorted_data = match ctx.provider.download_column_u64(&sorted, 0) {
+    let sorted_data = match ctx.provider.download_column::<u64>(&sorted, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -297,7 +297,7 @@ fn test_global_i64_correctness(ctx: &TestContext) -> TestResult {
 
     let buffer = match ctx
         .provider
-        .create_buffer_from_i64_slice(&data, schema.clone())
+        .create_buffer_from_slice::<i64>(&data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -335,7 +335,7 @@ fn test_global_i64_correctness(ctx: &TestContext) -> TestResult {
     }
 
     // Download and verify
-    let sorted_data = match ctx.provider.download_column_i64(&sorted, 0) {
+    let sorted_data = match ctx.provider.download_column::<i64>(&sorted, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -451,7 +451,7 @@ fn test_global_f64_correctness(ctx: &TestContext) -> TestResult {
 
     let buffer = match ctx
         .provider
-        .create_buffer_from_f64_slice(&data, schema.clone())
+        .create_buffer_from_slice::<f64>(&data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -489,7 +489,7 @@ fn test_global_f64_correctness(ctx: &TestContext) -> TestResult {
     }
 
     // Download and verify
-    let sorted_data = match ctx.provider.download_column_f64(&sorted, 0) {
+    let sorted_data = match ctx.provider.download_column::<f64>(&sorted, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -567,7 +567,7 @@ fn test_multi_buffer_isolation(ctx: &TestContext) -> TestResult {
 
     let buffer_a = match ctx
         .provider
-        .create_buffer_from_u32_slice(&data_a, schema.clone())
+        .create_buffer_from_slice::<u32>(&data_a, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -581,7 +581,7 @@ fn test_multi_buffer_isolation(ctx: &TestContext) -> TestResult {
 
     let buffer_b = match ctx
         .provider
-        .create_buffer_from_u32_slice(&data_b, schema.clone())
+        .create_buffer_from_slice::<u32>(&data_b, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -595,7 +595,7 @@ fn test_multi_buffer_isolation(ctx: &TestContext) -> TestResult {
 
     let buffer_c = match ctx
         .provider
-        .create_buffer_from_u32_slice(&data_c, schema.clone())
+        .create_buffer_from_slice::<u32>(&data_c, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -620,7 +620,7 @@ fn test_multi_buffer_isolation(ctx: &TestContext) -> TestResult {
     };
 
     // Verify buffer A is unchanged by downloading and checking
-    let downloaded_a = match ctx.provider.download_column_u32(&buffer_a, 0) {
+    let downloaded_a = match ctx.provider.download_column::<u32>(&buffer_a, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -640,7 +640,7 @@ fn test_multi_buffer_isolation(ctx: &TestContext) -> TestResult {
     }
 
     // Verify buffer C is unchanged
-    let downloaded_c = match ctx.provider.download_column_u32(&buffer_c, 0) {
+    let downloaded_c = match ctx.provider.download_column::<u32>(&buffer_c, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -660,7 +660,7 @@ fn test_multi_buffer_isolation(ctx: &TestContext) -> TestResult {
     }
 
     // Verify sorted_b has correct sorted values
-    let downloaded_sorted_b = match ctx.provider.download_column_u32(&sorted_b, 0) {
+    let downloaded_sorted_b = match ctx.provider.download_column::<u32>(&sorted_b, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -697,7 +697,7 @@ fn test_multi_buffer_isolation(ctx: &TestContext) -> TestResult {
     };
 
     // Re-verify buffer C is still unchanged
-    let downloaded_c_again = match ctx.provider.download_column_u32(&buffer_c, 0) {
+    let downloaded_c_again = match ctx.provider.download_column::<u32>(&buffer_c, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -717,7 +717,7 @@ fn test_multi_buffer_isolation(ctx: &TestContext) -> TestResult {
     }
 
     // Verify filtered_a has correct values (every other element from original)
-    let downloaded_filtered_a = match ctx.provider.download_column_u32(&filtered_a, 0) {
+    let downloaded_filtered_a = match ctx.provider.download_column::<u32>(&filtered_a, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(

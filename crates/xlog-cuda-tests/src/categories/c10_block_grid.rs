@@ -82,7 +82,7 @@ fn test_single_block_operations(ctx: &TestContext) -> TestResult {
         }
 
         // Download and verify
-        let sorted_keys = match ctx.provider.download_column_u32(&sorted, 0) {
+        let sorted_keys = match ctx.provider.download_column::<u32>(&sorted, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -189,7 +189,7 @@ fn test_multi_block_operations(ctx: &TestContext) -> TestResult {
 
         let buffer = match ctx
             .provider
-            .create_buffer_from_u32_slice(&data, schema.clone())
+            .create_buffer_from_slice::<u32>(&data, schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -227,7 +227,7 @@ fn test_multi_block_operations(ctx: &TestContext) -> TestResult {
         }
 
         // Download and verify key positions
-        let sorted_data = match ctx.provider.download_column_u32(&sorted, 0) {
+        let sorted_data = match ctx.provider.download_column::<u32>(&sorted, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -357,7 +357,7 @@ fn test_block_boundary_correctness(ctx: &TestContext) -> TestResult {
 
         let buffer = match ctx
             .provider
-            .create_buffer_from_u32_slice(&data, schema.clone())
+            .create_buffer_from_slice::<u32>(&data, schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -395,7 +395,7 @@ fn test_block_boundary_correctness(ctx: &TestContext) -> TestResult {
         }
 
         // Download and verify every element
-        let sorted_data = match ctx.provider.download_column_u32(&sorted, 0) {
+        let sorted_data = match ctx.provider.download_column::<u32>(&sorted, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -455,7 +455,7 @@ fn test_block_boundary_correctness(ctx: &TestContext) -> TestResult {
         }
 
         // Verify filtered values
-        let filtered_data = match ctx.provider.download_column_u32(&filtered, 0) {
+        let filtered_data = match ctx.provider.download_column::<u32>(&filtered, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -508,7 +508,7 @@ fn test_grid_stride_correctness(ctx: &TestContext) -> TestResult {
 
         let buffer = match ctx
             .provider
-            .create_buffer_from_u32_slice(&data, schema.clone())
+            .create_buffer_from_slice::<u32>(&data, schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -546,7 +546,7 @@ fn test_grid_stride_correctness(ctx: &TestContext) -> TestResult {
         }
 
         // Download and verify
-        let sorted_data = match ctx.provider.download_column_u32(&sorted, 0) {
+        let sorted_data = match ctx.provider.download_column::<u32>(&sorted, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -762,7 +762,7 @@ fn test_cross_block_data_patterns(ctx: &TestContext) -> TestResult {
     }
 
     // Download and verify join results
-    let joined_keys = match ctx.provider.download_column_u32(&joined, 0) {
+    let joined_keys = match ctx.provider.download_column::<u32>(&joined, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -773,7 +773,7 @@ fn test_cross_block_data_patterns(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let joined_lvals = match ctx.provider.download_column_u32(&joined, 1) {
+    let joined_lvals = match ctx.provider.download_column::<u32>(&joined, 1) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -784,7 +784,7 @@ fn test_cross_block_data_patterns(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let joined_rvals = match ctx.provider.download_column_u32(&joined, 2) {
+    let joined_rvals = match ctx.provider.download_column::<u32>(&joined, 2) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -847,7 +847,7 @@ fn test_cross_block_data_patterns(ctx: &TestContext) -> TestResult {
 
     let sort_buffer = match ctx
         .provider
-        .create_buffer_from_u32_slice(&cross_block_data, sort_schema.clone())
+        .create_buffer_from_slice::<u32>(&cross_block_data, sort_schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -870,7 +870,7 @@ fn test_cross_block_data_patterns(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let sorted_data = match ctx.provider.download_column_u32(&sorted, 0) {
+    let sorted_data = match ctx.provider.download_column::<u32>(&sorted, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(

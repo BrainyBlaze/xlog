@@ -131,7 +131,7 @@ fn test_join_verifies_multi_column_keys() {
         .hash_join_v2(&left, &right, &[0, 1], &[0, 1], JoinType::Inner)
         .unwrap();
 
-    let rows = provider.download_column_u32(&result, 0).unwrap();
+    let rows = provider.download_column::<u32>(&result, 0).unwrap();
     assert_eq!(
         rows.len() as u64,
         0,
@@ -150,13 +150,13 @@ fn test_semi_join_verifies_keys() {
     let left_key: Vec<u32> = vec![100, 200];
     let left_schema = make_schema(&[("key", ScalarType::U32)]);
     let left = provider
-        .create_buffer_from_u32_slice(&left_key, left_schema)
+        .create_buffer_from_slice::<u32>(&left_key, left_schema)
         .unwrap();
 
     let right_key: Vec<u32> = vec![300, 400]; // No matching keys
     let right_schema = make_schema(&[("key", ScalarType::U32)]);
     let right = provider
-        .create_buffer_from_u32_slice(&right_key, right_schema)
+        .create_buffer_from_slice::<u32>(&right_key, right_schema)
         .unwrap();
 
     // Semi-join should return no rows since no keys match
@@ -164,7 +164,7 @@ fn test_semi_join_verifies_keys() {
         .hash_join_v2(&left, &right, &[0], &[0], JoinType::Semi)
         .unwrap();
 
-    let rows = provider.download_column_u32(&result, 0).unwrap();
+    let rows = provider.download_column::<u32>(&result, 0).unwrap();
     assert_eq!(
         rows.len() as u64,
         0,
@@ -183,13 +183,13 @@ fn test_anti_join_verifies_keys() {
     let left_key: Vec<u32> = vec![100, 200];
     let left_schema = make_schema(&[("key", ScalarType::U32)]);
     let left = provider
-        .create_buffer_from_u32_slice(&left_key, left_schema)
+        .create_buffer_from_slice::<u32>(&left_key, left_schema)
         .unwrap();
 
     let right_key: Vec<u32> = vec![300, 400]; // No matching keys
     let right_schema = make_schema(&[("key", ScalarType::U32)]);
     let right = provider
-        .create_buffer_from_u32_slice(&right_key, right_schema)
+        .create_buffer_from_slice::<u32>(&right_key, right_schema)
         .unwrap();
 
     // Anti-join should return ALL left rows since no keys match
@@ -197,7 +197,7 @@ fn test_anti_join_verifies_keys() {
         .hash_join_v2(&left, &right, &[0], &[0], JoinType::Anti)
         .unwrap();
 
-    let rows = provider.download_column_u32(&result, 0).unwrap();
+    let rows = provider.download_column::<u32>(&result, 0).unwrap();
     assert_eq!(
         rows.len() as u64,
         2,

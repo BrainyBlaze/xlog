@@ -54,7 +54,7 @@ fn test_filter_i64_by_mask() {
     let filtered = provider.filter_by_mask(&buffer, &mask).unwrap();
 
     // Verify result
-    let result = provider.download_column_i64(&filtered, 0).unwrap();
+    let result = provider.download_column::<i64>(&filtered, 0).unwrap();
     assert_eq!(result.len(), 3);
     assert_eq!(result, vec![100, 300, 500]);
 }
@@ -79,7 +79,7 @@ fn test_filter_f64_by_mask() {
         .expect("buffer");
     let filtered = provider.filter_by_mask(&buffer, &mask).unwrap();
 
-    let result = provider.download_column_f64(&filtered, 0).unwrap();
+    let result = provider.download_column::<f64>(&filtered, 0).unwrap();
     assert_eq!(result.len(), 3);
     assert_eq!(result, vec![2.5, 3.5, 5.5]);
 }
@@ -103,7 +103,7 @@ fn test_filter_i32_by_mask() {
         .expect("buffer");
     let filtered = provider.filter_by_mask(&buffer, &mask).unwrap();
 
-    let result = provider.download_column_i32(&filtered, 0).unwrap();
+    let result = provider.download_column::<i32>(&filtered, 0).unwrap();
     assert_eq!(result.len(), 3);
     assert_eq!(result, vec![-10, 20, -50]);
 }
@@ -127,7 +127,7 @@ fn test_filter_f32_by_mask() {
         .expect("buffer");
     let filtered = provider.filter_by_mask(&buffer, &mask).unwrap();
 
-    let result = provider.download_column_f32(&filtered, 0).unwrap();
+    let result = provider.download_column::<f32>(&filtered, 0).unwrap();
     assert_eq!(result.len(), 2);
     assert!((result[0] - 1.1).abs() < 0.001);
     assert!((result[1] - 3.3).abs() < 0.001);
@@ -153,8 +153,8 @@ fn test_sort_u32_keys() {
 
     let sorted = provider.sort(&buffer, &[0]).unwrap();
 
-    let result_keys = provider.download_column_u32(&sorted, 0).unwrap();
-    let result_values = provider.download_column_u32(&sorted, 1).unwrap();
+    let result_keys = provider.download_column::<u32>(&sorted, 0).unwrap();
+    let result_values = provider.download_column::<u32>(&sorted, 1).unwrap();
 
     assert_eq!(result_keys, vec![1, 2, 3, 5, 8, 9]);
     assert_eq!(result_values, vec![10, 20, 30, 50, 80, 90]);
@@ -172,11 +172,11 @@ fn test_sort_u32_with_duplicates() {
     let schema = make_schema(&[("key", ScalarType::U32)]);
 
     let buffer = provider
-        .create_buffer_from_u32_slice(&keys, schema)
+        .create_buffer_from_slice::<u32>(&keys, schema)
         .unwrap();
 
     let sorted = provider.sort(&buffer, &[0]).unwrap();
-    let result = provider.download_column_u32(&sorted, 0).unwrap();
+    let result = provider.download_column::<u32>(&sorted, 0).unwrap();
 
     assert_eq!(result, vec![1, 1, 2, 2, 3, 3]);
 }
@@ -211,7 +211,7 @@ fn test_join_u32_keys_inner() {
         .unwrap();
 
     // Should have 2 matches: key 2 and key 3
-    let result_keys = provider.download_column_u32(&result, 0).unwrap();
+    let result_keys = provider.download_column::<u32>(&result, 0).unwrap();
     assert_eq!(result_keys.len(), 2);
     assert_eq!(result.arity(), 4);
 }
@@ -231,17 +231,17 @@ fn test_join_u32_keys_semi() {
     let right_schema = make_schema(&[("val", ScalarType::U32)]);
 
     let left_buf = provider
-        .create_buffer_from_u32_slice(&left, left_schema)
+        .create_buffer_from_slice::<u32>(&left, left_schema)
         .unwrap();
     let right_buf = provider
-        .create_buffer_from_u32_slice(&right, right_schema)
+        .create_buffer_from_slice::<u32>(&right, right_schema)
         .unwrap();
 
     let result = provider
         .hash_join_v2(&left_buf, &right_buf, &[0], &[0], JoinType::Semi)
         .unwrap();
 
-    let vals = provider.download_column_u32(&result, 0).unwrap();
+    let vals = provider.download_column::<u32>(&result, 0).unwrap();
     assert_eq!(vals.len(), 2);
     assert!(vals.contains(&2));
     assert!(vals.contains(&4));
@@ -262,17 +262,17 @@ fn test_join_u32_keys_anti() {
     let right_schema = make_schema(&[("val", ScalarType::U32)]);
 
     let left_buf = provider
-        .create_buffer_from_u32_slice(&left, left_schema)
+        .create_buffer_from_slice::<u32>(&left, left_schema)
         .unwrap();
     let right_buf = provider
-        .create_buffer_from_u32_slice(&right, right_schema)
+        .create_buffer_from_slice::<u32>(&right, right_schema)
         .unwrap();
 
     let result = provider
         .hash_join_v2(&left_buf, &right_buf, &[0], &[0], JoinType::Anti)
         .unwrap();
 
-    let vals = provider.download_column_u32(&result, 0).unwrap();
+    let vals = provider.download_column::<u32>(&result, 0).unwrap();
     assert_eq!(vals.len(), 2);
     assert!(vals.contains(&1));
     assert!(vals.contains(&3));
@@ -300,8 +300,8 @@ fn test_groupby_sum_u32() {
         .groupby_multi_agg(&buffer, &[0], &[(1, AggOp::Sum)])
         .unwrap();
 
-    let result_keys = provider.download_column_u32(&result, 0).unwrap();
-    let result_sums = provider.download_column_u64(&result, 1).unwrap();
+    let result_keys = provider.download_column::<u32>(&result, 0).unwrap();
+    let result_sums = provider.download_column::<u64>(&result, 1).unwrap();
     assert_eq!(result_keys.len(), 2);
 
     assert_eq!(result_keys, vec![1, 2]);
@@ -328,9 +328,9 @@ fn test_groupby_count_u32() {
         .groupby_multi_agg(&buffer, &[0], &[(1, AggOp::Count)])
         .unwrap();
 
-    let result_keys = provider.download_column_u32(&result, 0).unwrap();
+    let result_keys = provider.download_column::<u32>(&result, 0).unwrap();
     // Count results are u64 (to match predicate declaration types)
-    let result_counts = provider.download_column_u64(&result, 1).unwrap();
+    let result_counts = provider.download_column::<u64>(&result, 1).unwrap();
     assert_eq!(result_keys.len(), 3);
 
     assert_eq!(result_keys, vec![1, 2, 3]);
@@ -358,8 +358,8 @@ fn test_groupby_min_max_u32() {
         .groupby_multi_agg(&buffer, &[0], &[(1, AggOp::Min)])
         .unwrap();
 
-    let result_keys = provider.download_column_u32(&result_min, 0).unwrap();
-    let result_mins = provider.download_column_u32(&result_min, 1).unwrap();
+    let result_keys = provider.download_column::<u32>(&result_min, 0).unwrap();
+    let result_mins = provider.download_column::<u32>(&result_min, 1).unwrap();
 
     assert_eq!(result_keys, vec![1, 2]);
     assert_eq!(result_mins, vec![10, 5]);
@@ -369,7 +369,7 @@ fn test_groupby_min_max_u32() {
         .groupby_multi_agg(&buffer, &[0], &[(1, AggOp::Max)])
         .unwrap();
 
-    let result_maxs = provider.download_column_u32(&result_max, 1).unwrap();
+    let result_maxs = provider.download_column::<u32>(&result_max, 1).unwrap();
     assert_eq!(result_maxs, vec![20, 25]);
 }
 
@@ -388,14 +388,14 @@ fn test_union_u32() {
     let schema = make_schema(&[("val", ScalarType::U32)]);
 
     let buf_a = provider
-        .create_buffer_from_u32_slice(&a, schema.clone())
+        .create_buffer_from_slice::<u32>(&a, schema.clone())
         .unwrap();
     let buf_b = provider
-        .create_buffer_from_u32_slice(&b, schema.clone())
+        .create_buffer_from_slice::<u32>(&b, schema.clone())
         .unwrap();
 
     let result = provider.union_gpu(&buf_a, &buf_b).unwrap();
-    let result_data = provider.download_column_u32(&result, 0).unwrap();
+    let result_data = provider.download_column::<u32>(&result, 0).unwrap();
 
     // Union should deduplicate: [1, 2, 3, 4, 5]
     assert_eq!(result_data, vec![1, 2, 3, 4, 5]);
@@ -414,14 +414,14 @@ fn test_union_u32_no_overlap() {
     let schema = make_schema(&[("val", ScalarType::U32)]);
 
     let buf_a = provider
-        .create_buffer_from_u32_slice(&a, schema.clone())
+        .create_buffer_from_slice::<u32>(&a, schema.clone())
         .unwrap();
     let buf_b = provider
-        .create_buffer_from_u32_slice(&b, schema.clone())
+        .create_buffer_from_slice::<u32>(&b, schema.clone())
         .unwrap();
 
     let result = provider.union_gpu(&buf_a, &buf_b).unwrap();
-    let result_data = provider.download_column_u32(&result, 0).unwrap();
+    let result_data = provider.download_column::<u32>(&result, 0).unwrap();
 
     assert_eq!(result_data, vec![1, 2, 3, 4]);
 }
@@ -441,14 +441,14 @@ fn test_diff_u32() {
     let schema = make_schema(&[("val", ScalarType::U32)]);
 
     let buf_a = provider
-        .create_buffer_from_u32_slice(&a, schema.clone())
+        .create_buffer_from_slice::<u32>(&a, schema.clone())
         .unwrap();
     let buf_b = provider
-        .create_buffer_from_u32_slice(&b, schema.clone())
+        .create_buffer_from_slice::<u32>(&b, schema.clone())
         .unwrap();
 
     let result = provider.diff_gpu(&buf_a, &buf_b).unwrap();
-    let result_data = provider.download_column_u32(&result, 0).unwrap();
+    let result_data = provider.download_column::<u32>(&result, 0).unwrap();
 
     // Diff: a - b = [1, 3]
     assert_eq!(result_data, vec![1, 3]);
@@ -467,14 +467,14 @@ fn test_diff_u32_no_overlap() {
     let schema = make_schema(&[("val", ScalarType::U32)]);
 
     let buf_a = provider
-        .create_buffer_from_u32_slice(&a, schema.clone())
+        .create_buffer_from_slice::<u32>(&a, schema.clone())
         .unwrap();
     let buf_b = provider
-        .create_buffer_from_u32_slice(&b, schema.clone())
+        .create_buffer_from_slice::<u32>(&b, schema.clone())
         .unwrap();
 
     let result = provider.diff_gpu(&buf_a, &buf_b).unwrap();
-    let result_data = provider.download_column_u32(&result, 0).unwrap();
+    let result_data = provider.download_column::<u32>(&result, 0).unwrap();
 
     assert_eq!(result_data, vec![1, 2, 3]);
 }
@@ -493,40 +493,40 @@ fn test_operations_empty_buffer() {
     let empty = provider.create_empty_buffer(schema.clone()).unwrap();
     let non_empty: Vec<u32> = vec![1, 2, 3];
     let non_empty_buf = provider
-        .create_buffer_from_u32_slice(&non_empty, schema.clone())
+        .create_buffer_from_slice::<u32>(&non_empty, schema.clone())
         .unwrap();
 
     // Filter empty buffer with mask
     let mask: Vec<u8> = vec![];
     let filtered = provider.filter_by_mask(&empty, &mask).unwrap();
-    let filtered_vals = provider.download_column_u32(&filtered, 0).unwrap();
+    let filtered_vals = provider.download_column::<u32>(&filtered, 0).unwrap();
     assert!(filtered_vals.is_empty());
 
     // Sort empty buffer
     let sorted = provider.sort(&empty, &[0]).unwrap();
-    let sorted_vals = provider.download_column_u32(&sorted, 0).unwrap();
+    let sorted_vals = provider.download_column::<u32>(&sorted, 0).unwrap();
     assert!(sorted_vals.is_empty());
 
     // Join with empty buffer
     let join_result = provider
         .hash_join_v2(&empty, &non_empty_buf, &[0], &[0], JoinType::Inner)
         .unwrap();
-    let join_vals = provider.download_column_u32(&join_result, 0).unwrap();
+    let join_vals = provider.download_column::<u32>(&join_result, 0).unwrap();
     assert!(join_vals.is_empty());
 
     // Union with empty buffer
     let union_result = provider.union_gpu(&empty, &non_empty_buf).unwrap();
-    let union_data = provider.download_column_u32(&union_result, 0).unwrap();
+    let union_data = provider.download_column::<u32>(&union_result, 0).unwrap();
     assert_eq!(union_data, vec![1, 2, 3]);
 
     // Diff with empty buffer
     let diff_result = provider.diff_gpu(&non_empty_buf, &empty).unwrap();
-    let diff_data = provider.download_column_u32(&diff_result, 0).unwrap();
+    let diff_data = provider.download_column::<u32>(&diff_result, 0).unwrap();
     assert_eq!(diff_data, vec![1, 2, 3]);
 
     // Diff from empty buffer
     let diff_result2 = provider.diff_gpu(&empty, &non_empty_buf).unwrap();
-    let diff_data2 = provider.download_column_u32(&diff_result2, 0).unwrap();
+    let diff_data2 = provider.download_column::<u32>(&diff_result2, 0).unwrap();
     assert!(diff_data2.is_empty());
 }
 
@@ -545,7 +545,7 @@ fn test_groupby_empty_input() {
         .groupby_multi_agg(&empty, &[0], &[(1, AggOp::Sum)])
         .unwrap();
 
-    let result_keys = provider.download_column_u32(&result, 0).unwrap();
+    let result_keys = provider.download_column::<u32>(&result, 0).unwrap();
     assert!(result_keys.is_empty());
 }
 
@@ -579,15 +579,15 @@ fn test_buffer_operations_with_groupby() {
             ],
         )
         .unwrap();
-    let result_keys = provider.download_column_u32(&grouped, 0).unwrap();
+    let result_keys = provider.download_column::<u32>(&grouped, 0).unwrap();
     assert_eq!(result_keys.len(), 3); // 3 unique keys
 
     // Verify results
     // Count results are u64 (to match predicate declaration types)
-    let result_counts = provider.download_column_u64(&grouped, 1).unwrap();
-    let result_sums = provider.download_column_u64(&grouped, 2).unwrap();
-    let result_mins = provider.download_column_u32(&grouped, 3).unwrap();
-    let result_maxs = provider.download_column_u32(&grouped, 4).unwrap();
+    let result_counts = provider.download_column::<u64>(&grouped, 1).unwrap();
+    let result_sums = provider.download_column::<u64>(&grouped, 2).unwrap();
+    let result_mins = provider.download_column::<u32>(&grouped, 3).unwrap();
+    let result_maxs = provider.download_column::<u32>(&grouped, 4).unwrap();
 
     assert_eq!(result_keys, vec![1, 2, 3]);
     assert_eq!(result_counts, vec![2u64, 3u64, 1u64]);
@@ -614,7 +614,7 @@ fn test_sort_operation() {
         .unwrap();
 
     let sorted = provider.sort(&buffer, &[0]).unwrap();
-    let sorted_keys = provider.download_column_u32(&sorted, 0).unwrap();
+    let sorted_keys = provider.download_column::<u32>(&sorted, 0).unwrap();
     assert_eq!(sorted_keys.len(), 10);
 
     // Verify sorted order
@@ -643,16 +643,16 @@ fn test_large_union() {
     let schema = make_schema(&[("val", ScalarType::U32)]);
 
     let buf_a = provider
-        .create_buffer_from_u32_slice(&a, schema.clone())
+        .create_buffer_from_slice::<u32>(&a, schema.clone())
         .unwrap();
     let buf_b = provider
-        .create_buffer_from_u32_slice(&b, schema.clone())
+        .create_buffer_from_slice::<u32>(&b, schema.clone())
         .unwrap();
 
     let result = provider.union_gpu(&buf_a, &buf_b).unwrap();
 
     // Union should have 7500 unique values (0..7500)
-    let result_data = provider.download_column_u32(&result, 0).unwrap();
+    let result_data = provider.download_column::<u32>(&result, 0).unwrap();
     assert_eq!(result_data.len(), 7500);
 }
 
@@ -671,16 +671,16 @@ fn test_moderate_diff() {
     let schema = make_schema(&[("val", ScalarType::U32)]);
 
     let buf_a = provider
-        .create_buffer_from_u32_slice(&a, schema.clone())
+        .create_buffer_from_slice::<u32>(&a, schema.clone())
         .unwrap();
     let buf_b = provider
-        .create_buffer_from_u32_slice(&b, schema.clone())
+        .create_buffer_from_slice::<u32>(&b, schema.clone())
         .unwrap();
 
     let result = provider.diff_gpu(&buf_a, &buf_b).unwrap();
 
     // Diff should have 50 values (0..50)
-    let result_data = provider.download_column_u32(&result, 0).unwrap();
+    let result_data = provider.download_column::<u32>(&result, 0).unwrap();
     assert_eq!(result_data.len(), 50);
 }
 
@@ -707,8 +707,8 @@ fn test_filter_multi_column_mixed_types() {
         .expect("buffer");
 
     let filtered = provider.filter_by_mask(&buffer, &mask).unwrap();
-    let result0 = provider.download_column_u32(&filtered, 0).unwrap();
-    let result1 = provider.download_column_u64(&filtered, 1).unwrap();
+    let result0 = provider.download_column::<u32>(&filtered, 0).unwrap();
+    let result1 = provider.download_column::<u64>(&filtered, 1).unwrap();
     assert_eq!(result0.len(), 3);
     assert_eq!(result0, vec![1, 3, 5]);
     assert_eq!(result1, vec![100, 300, 500]);
@@ -726,22 +726,22 @@ fn test_single_element_buffer() {
     let schema = make_schema(&[("val", ScalarType::U32)]);
 
     let buffer = provider
-        .create_buffer_from_u32_slice(&data, schema.clone())
+        .create_buffer_from_slice::<u32>(&data, schema.clone())
         .unwrap();
 
     // Sort single element
     let sorted = provider.sort(&buffer, &[0]).unwrap();
-    let sorted_data = provider.download_column_u32(&sorted, 0).unwrap();
+    let sorted_data = provider.download_column::<u32>(&sorted, 0).unwrap();
     assert_eq!(sorted_data, vec![42]);
 
     // Filter with mask=1
     let filtered = provider.filter_by_mask(&buffer, &[1]).unwrap();
-    let filtered_vals = provider.download_column_u32(&filtered, 0).unwrap();
+    let filtered_vals = provider.download_column::<u32>(&filtered, 0).unwrap();
     assert_eq!(filtered_vals, vec![42]);
 
     // Filter with mask=0
     let filtered0 = provider.filter_by_mask(&buffer, &[0]).unwrap();
-    let filtered0_vals = provider.download_column_u32(&filtered0, 0).unwrap();
+    let filtered0_vals = provider.download_column::<u32>(&filtered0, 0).unwrap();
     assert!(filtered0_vals.is_empty());
 }
 
@@ -758,11 +758,11 @@ fn test_filter_select_all() {
     let schema = make_schema(&[("val", ScalarType::U32)]);
 
     let buffer = provider
-        .create_buffer_from_u32_slice(&data, schema)
+        .create_buffer_from_slice::<u32>(&data, schema)
         .unwrap();
 
     let filtered = provider.filter_by_mask(&buffer, &mask).unwrap();
-    let result = provider.download_column_u32(&filtered, 0).unwrap();
+    let result = provider.download_column::<u32>(&filtered, 0).unwrap();
 
     assert_eq!(result, vec![1, 2, 3, 4, 5]);
 }
@@ -780,11 +780,11 @@ fn test_filter_select_none() {
     let schema = make_schema(&[("val", ScalarType::U32)]);
 
     let buffer = provider
-        .create_buffer_from_u32_slice(&data, schema)
+        .create_buffer_from_slice::<u32>(&data, schema)
         .unwrap();
 
     let filtered = provider.filter_by_mask(&buffer, &mask).unwrap();
-    let filtered_vals = provider.download_column_u32(&filtered, 0).unwrap();
+    let filtered_vals = provider.download_column::<u32>(&filtered, 0).unwrap();
     assert!(filtered_vals.is_empty());
 }
 
@@ -797,57 +797,57 @@ fn test_arith_u32_i32_u64_f32() {
 
     let schema_u32 = Schema::new(vec![("v".to_string(), ScalarType::U32)]);
     let a_u32 = provider
-        .create_buffer_from_u32_slice(&[1, 2, 3], schema_u32.clone())
+        .create_buffer_from_slice::<u32>(&[1, 2, 3], schema_u32.clone())
         .unwrap();
     let b_u32 = provider
-        .create_buffer_from_u32_slice(&[4, 5, 6], schema_u32.clone())
+        .create_buffer_from_slice::<u32>(&[4, 5, 6], schema_u32.clone())
         .unwrap();
     let sum_u32 = provider.add_columns(&a_u32, &b_u32).unwrap();
-    let vals_u32 = provider.download_column_u32(&sum_u32, 0).unwrap();
+    let vals_u32 = provider.download_column::<u32>(&sum_u32, 0).unwrap();
     assert_eq!(vals_u32, vec![5, 7, 9]);
 
     let b_u32_div = provider
-        .create_buffer_from_u32_slice(&[1, 0, 2], schema_u32.clone())
+        .create_buffer_from_slice::<u32>(&[1, 0, 2], schema_u32.clone())
         .unwrap();
     let div_u32 = provider.div_columns(&a_u32, &b_u32_div).unwrap();
-    let vals_u32_div = provider.download_column_u32(&div_u32, 0).unwrap();
+    let vals_u32_div = provider.download_column::<u32>(&div_u32, 0).unwrap();
     assert_eq!(vals_u32_div, vec![1, u32::MAX, 1]);
 
     let schema_i32 = Schema::new(vec![("v".to_string(), ScalarType::I32)]);
     let a_i32 = provider
-        .create_buffer_from_i32_slice(&[-3, 4, -5], schema_i32.clone())
+        .create_buffer_from_slice::<i32>(&[-3, 4, -5], schema_i32.clone())
         .unwrap();
     let abs_i32 = provider.abs_column(&a_i32).unwrap();
-    let vals_i32 = provider.download_column_i32(&abs_i32, 0).unwrap();
+    let vals_i32 = provider.download_column::<i32>(&abs_i32, 0).unwrap();
     assert_eq!(vals_i32, vec![3, 4, 5]);
 
     let schema_u64 = Schema::new(vec![("v".to_string(), ScalarType::U64)]);
     let a_u64 = provider
-        .create_buffer_from_u64_slice(&[10, 20, 30], schema_u64.clone())
+        .create_buffer_from_slice::<u64>(&[10, 20, 30], schema_u64.clone())
         .unwrap();
     let b_u64 = provider
-        .create_buffer_from_u64_slice(&[1, 2, 3], schema_u64.clone())
+        .create_buffer_from_slice::<u64>(&[1, 2, 3], schema_u64.clone())
         .unwrap();
     let diff_u64 = provider.sub_columns(&a_u64, &b_u64).unwrap();
-    let vals_u64 = provider.download_column_u64(&diff_u64, 0).unwrap();
+    let vals_u64 = provider.download_column::<u64>(&diff_u64, 0).unwrap();
     assert_eq!(vals_u64, vec![9, 18, 27]);
 
     let b_u64_div = provider
-        .create_buffer_from_u64_slice(&[2, 0, 3], schema_u64.clone())
+        .create_buffer_from_slice::<u64>(&[2, 0, 3], schema_u64.clone())
         .unwrap();
     let div_u64 = provider.div_columns(&a_u64, &b_u64_div).unwrap();
-    let vals_u64_div = provider.download_column_u64(&div_u64, 0).unwrap();
+    let vals_u64_div = provider.download_column::<u64>(&div_u64, 0).unwrap();
     assert_eq!(vals_u64_div, vec![5, u64::MAX, 10]);
 
     let schema_f32 = Schema::new(vec![("v".to_string(), ScalarType::F32)]);
     let a_f32 = provider
-        .create_buffer_from_f32_slice(&[1.5, -2.0, 3.0], schema_f32.clone())
+        .create_buffer_from_slice::<f32>(&[1.5, -2.0, 3.0], schema_f32.clone())
         .unwrap();
     let b_f32 = provider
-        .create_buffer_from_f32_slice(&[2.0, 2.0, 0.5], schema_f32.clone())
+        .create_buffer_from_slice::<f32>(&[2.0, 2.0, 0.5], schema_f32.clone())
         .unwrap();
     let prod_f32 = provider.mul_columns(&a_f32, &b_f32).unwrap();
-    let vals_f32 = provider.download_column_f32(&prod_f32, 0).unwrap();
+    let vals_f32 = provider.download_column::<f32>(&prod_f32, 0).unwrap();
     assert!((vals_f32[0] - 3.0).abs() < 1e-6);
     assert!((vals_f32[1] + 4.0).abs() < 1e-6);
     assert!((vals_f32[2] - 1.5).abs() < 1e-6);

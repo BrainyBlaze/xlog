@@ -3121,7 +3121,7 @@ mod tests {
     fn read_buffer_u32(executor: &Executor, buffer: &CudaBuffer, col: usize) -> Vec<u32> {
         executor
             .provider
-            .download_column_u32(buffer, col)
+            .download_column::<u32>(buffer, col)
             .unwrap_or_default()
     }
 

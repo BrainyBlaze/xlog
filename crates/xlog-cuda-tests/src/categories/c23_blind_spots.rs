@@ -42,7 +42,7 @@ fn test_non_power_of_two_sizes(ctx: &TestContext) -> TestResult {
 
         let buffer = match ctx
             .provider
-            .create_buffer_from_u32_slice(&data, schema.clone())
+            .create_buffer_from_slice::<u32>(&data, schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -166,7 +166,7 @@ fn test_non_power_of_two_sizes(ctx: &TestContext) -> TestResult {
 
         let buffer = match ctx
             .provider
-            .create_buffer_from_u32_slice(&data, schema.clone())
+            .create_buffer_from_slice::<u32>(&data, schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -230,7 +230,7 @@ fn test_misaligned_boundaries(ctx: &TestContext) -> TestResult {
 
         let buffer = match ctx
             .provider
-            .create_buffer_from_u32_slice(&data, schema.clone())
+            .create_buffer_from_slice::<u32>(&data, schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -253,7 +253,7 @@ fn test_misaligned_boundaries(ctx: &TestContext) -> TestResult {
             }
         };
 
-        let sorted_data = match ctx.provider.download_column_u32(&sorted, 0) {
+        let sorted_data = match ctx.provider.download_column::<u32>(&sorted, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -294,7 +294,7 @@ fn test_misaligned_boundaries(ctx: &TestContext) -> TestResult {
 
         let buffer = match ctx
             .provider
-            .create_buffer_from_u32_slice(&data, schema.clone())
+            .create_buffer_from_slice::<u32>(&data, schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -365,7 +365,7 @@ fn test_near_overflow_indices(ctx: &TestContext) -> TestResult {
 
     let buffer = match ctx
         .provider
-        .create_buffer_from_u32_slice(&edge_values, schema.clone())
+        .create_buffer_from_slice::<u32>(&edge_values, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -388,7 +388,7 @@ fn test_near_overflow_indices(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let sorted_data = match ctx.provider.download_column_u32(&sorted, 0) {
+    let sorted_data = match ctx.provider.download_column::<u32>(&sorted, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -434,7 +434,7 @@ fn test_near_overflow_indices(ctx: &TestContext) -> TestResult {
 
     let i64_buffer = match ctx
         .provider
-        .create_buffer_from_i64_slice(&i64_edge_values, i64_schema.clone())
+        .create_buffer_from_slice::<i64>(&i64_edge_values, i64_schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -457,7 +457,7 @@ fn test_near_overflow_indices(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let i64_sorted_data = match ctx.provider.download_column_i64(&i64_sorted, 0) {
+    let i64_sorted_data = match ctx.provider.download_column::<i64>(&i64_sorted, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -500,7 +500,7 @@ fn test_near_overflow_indices(ctx: &TestContext) -> TestResult {
 
     let large_buffer = match ctx
         .provider
-        .create_buffer_from_u32_slice(&large_data, schema.clone())
+        .create_buffer_from_slice::<u32>(&large_data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -539,7 +539,7 @@ fn test_near_overflow_indices(ctx: &TestContext) -> TestResult {
         );
     }
 
-    let filtered_data = match ctx.provider.download_column_u32(&filtered, 0) {
+    let filtered_data = match ctx.provider.download_column::<u32>(&filtered, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -593,7 +593,7 @@ fn test_alternating_patterns(ctx: &TestContext) -> TestResult {
 
     let buffer1 = match ctx
         .provider
-        .create_buffer_from_u32_slice(&alternating_extreme, schema.clone())
+        .create_buffer_from_slice::<u32>(&alternating_extreme, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -616,7 +616,7 @@ fn test_alternating_patterns(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let sorted_data1 = match ctx.provider.download_column_u32(&sorted1, 0) {
+    let sorted_data1 = match ctx.provider.download_column::<u32>(&sorted1, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -652,7 +652,7 @@ fn test_alternating_patterns(ctx: &TestContext) -> TestResult {
 
     let buffer2 = match ctx
         .provider
-        .create_buffer_from_u32_slice(&checkerboard, schema.clone())
+        .create_buffer_from_slice::<u32>(&checkerboard, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -701,7 +701,7 @@ fn test_alternating_patterns(ctx: &TestContext) -> TestResult {
 
     let _buffer3 = match ctx
         .provider
-        .create_buffer_from_u32_slice(&stride3, schema.clone())
+        .create_buffer_from_slice::<u32>(&stride3, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -769,7 +769,7 @@ fn test_alternating_patterns(ctx: &TestContext) -> TestResult {
 
     let buffer4 = match ctx
         .provider
-        .create_buffer_from_u32_slice(&lcg_pattern, schema.clone())
+        .create_buffer_from_slice::<u32>(&lcg_pattern, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -792,7 +792,7 @@ fn test_alternating_patterns(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let sorted_data4 = match ctx.provider.download_column_u32(&sorted4, 0) {
+    let sorted_data4 = match ctx.provider.download_column::<u32>(&sorted4, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -843,7 +843,7 @@ fn test_empty_and_single(ctx: &TestContext) -> TestResult {
 
     let empty_buffer = match ctx
         .provider
-        .create_buffer_from_u32_slice(&empty_data, schema.clone())
+        .create_buffer_from_slice::<u32>(&empty_data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -907,7 +907,7 @@ fn test_empty_and_single(ctx: &TestContext) -> TestResult {
 
     let single_buffer = match ctx
         .provider
-        .create_buffer_from_u32_slice(&single_data, schema.clone())
+        .create_buffer_from_slice::<u32>(&single_data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -942,7 +942,7 @@ fn test_empty_and_single(ctx: &TestContext) -> TestResult {
         );
     }
 
-    let sorted_single_data = match ctx.provider.download_column_u32(&sorted_single, 0) {
+    let sorted_single_data = match ctx.provider.download_column::<u32>(&sorted_single, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(

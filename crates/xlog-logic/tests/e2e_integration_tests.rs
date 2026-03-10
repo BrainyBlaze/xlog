@@ -197,7 +197,7 @@ fn create_triple_buffer(provider: &CudaKernelProvider, rows: &[(u32, u32, u32)])
 /// Read a single column of U32 values from a CudaBuffer
 fn read_buffer_u32(provider: &CudaKernelProvider, buffer: &CudaBuffer, col: usize) -> Vec<u32> {
     provider
-        .download_column_u32(buffer, col)
+        .download_column::<u32>(buffer, col)
         .unwrap_or_default()
 }
 
@@ -447,7 +447,7 @@ fn test_aggregates() {
     // Read columns with correct types (count is now u64)
     let nodes = read_buffer_u32(&provider, out_degree, 0);
     let counts = provider
-        .download_column_u64(out_degree, 1)
+        .download_column::<u64>(out_degree, 1)
         .expect("download counts");
 
     // Build pairs from columns
@@ -504,11 +504,11 @@ fn test_aggregates_multi_key_sum() {
         .get("sales_by_cat_region")
         .expect("sales_by_cat_region not found");
 
-    let cats = provider.download_column_u32(out, 0).expect("download cat");
+    let cats = provider.download_column::<u32>(out, 0).expect("download cat");
     let regions = provider
-        .download_column_u32(out, 1)
+        .download_column::<u32>(out, 1)
         .expect("download region");
-    let sums = provider.download_column_u64(out, 2).expect("download sum");
+    let sums = provider.download_column::<u64>(out, 2).expect("download sum");
 
     let mut rows: Vec<(u32, u32, u64)> = cats
         .into_iter()
@@ -916,7 +916,7 @@ fn create_sensor_buffer_f32(provider: &CudaKernelProvider, data: &[(u32, f32)]) 
 /// Read f64 values from a buffer column
 fn read_buffer_f64(provider: &CudaKernelProvider, buffer: &CudaBuffer, col: usize) -> Vec<f64> {
     provider
-        .download_column_f64(buffer, col)
+        .download_column::<f64>(buffer, col)
         .unwrap_or_default()
 }
 

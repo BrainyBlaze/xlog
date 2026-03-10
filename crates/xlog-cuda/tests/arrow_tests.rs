@@ -248,8 +248,8 @@ fn test_import_from_arrow_record_batch() {
     assert_eq!(buffer.arity(), 2);
 
     // Verify data roundtrips correctly
-    let x_values = provider.download_column_u32(&buffer, 0).unwrap();
-    let y_values = provider.download_column_f64(&buffer, 1).unwrap();
+    let x_values = provider.download_column::<u32>(&buffer, 0).unwrap();
+    let y_values = provider.download_column::<f64>(&buffer, 1).unwrap();
 
     assert_eq!(x_values, vec![10, 20, 30]);
     assert!((y_values[0] - 1.5).abs() < 0.001);
@@ -321,37 +321,37 @@ fn test_arrow_roundtrip_all_types() {
     assert_eq!(buffer.arity(), buffer2.arity());
 
     // Check bool column (index 0)
-    let bool_orig = provider.download_column_bool(&buffer, 0).unwrap();
-    let bool_round = provider.download_column_bool(&buffer2, 0).unwrap();
+    let bool_orig = provider.download_column::<bool>(&buffer, 0).unwrap();
+    let bool_round = provider.download_column::<bool>(&buffer2, 0).unwrap();
     assert_eq!(bool_orig, bool_round, "Bool column mismatch");
 
     // Check u32 column (index 1)
-    let u32_orig = provider.download_column_u32(&buffer, 1).unwrap();
-    let u32_round = provider.download_column_u32(&buffer2, 1).unwrap();
+    let u32_orig = provider.download_column::<u32>(&buffer, 1).unwrap();
+    let u32_round = provider.download_column::<u32>(&buffer2, 1).unwrap();
     assert_eq!(u32_orig, u32_round, "U32 column mismatch");
 
     // Check i32 column (index 2)
-    let i32_orig = provider.download_column_i32(&buffer, 2).unwrap();
-    let i32_round = provider.download_column_i32(&buffer2, 2).unwrap();
+    let i32_orig = provider.download_column::<i32>(&buffer, 2).unwrap();
+    let i32_round = provider.download_column::<i32>(&buffer2, 2).unwrap();
     assert_eq!(i32_orig, i32_round, "I32 column mismatch");
 
     // Check u64 column (index 3)
-    let u64_orig = provider.download_column_u64(&buffer, 3).unwrap();
-    let u64_round = provider.download_column_u64(&buffer2, 3).unwrap();
+    let u64_orig = provider.download_column::<u64>(&buffer, 3).unwrap();
+    let u64_round = provider.download_column::<u64>(&buffer2, 3).unwrap();
     assert_eq!(u64_orig, u64_round, "U64 column mismatch");
 
     // Check i64 column (index 4)
-    let i64_orig = provider.download_column_i64(&buffer, 4).unwrap();
-    let i64_round = provider.download_column_i64(&buffer2, 4).unwrap();
+    let i64_orig = provider.download_column::<i64>(&buffer, 4).unwrap();
+    let i64_round = provider.download_column::<i64>(&buffer2, 4).unwrap();
     assert_eq!(i64_orig, i64_round, "I64 column mismatch");
 
     // Check f32 column (index 5)
-    let f32_orig = provider.download_column_f32(&buffer, 5).unwrap();
-    let f32_round = provider.download_column_f32(&buffer2, 5).unwrap();
+    let f32_orig = provider.download_column::<f32>(&buffer, 5).unwrap();
+    let f32_round = provider.download_column::<f32>(&buffer2, 5).unwrap();
     assert_eq!(f32_orig, f32_round, "F32 column mismatch");
 
     // Check f64 column (index 6)
-    let f64_orig = provider.download_column_f64(&buffer, 6).unwrap();
-    let f64_round = provider.download_column_f64(&buffer2, 6).unwrap();
+    let f64_orig = provider.download_column::<f64>(&buffer, 6).unwrap();
+    let f64_round = provider.download_column::<f64>(&buffer2, 6).unwrap();
     assert_eq!(f64_orig, f64_round, "F64 column mismatch");
 }

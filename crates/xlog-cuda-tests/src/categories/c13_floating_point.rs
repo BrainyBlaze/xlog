@@ -48,7 +48,7 @@ fn test_f64_infinity(ctx: &TestContext) -> TestResult {
 
     let buffer = match ctx
         .provider
-        .create_buffer_from_f64_slice(&data, schema.clone())
+        .create_buffer_from_slice::<f64>(&data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -73,7 +73,7 @@ fn test_f64_infinity(ctx: &TestContext) -> TestResult {
     };
 
     // Download sorted data
-    let sorted_data = match ctx.provider.download_column_f64(&sorted, 0) {
+    let sorted_data = match ctx.provider.download_column::<f64>(&sorted, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -148,7 +148,7 @@ fn test_f64_infinity(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let filtered_data = match ctx.provider.download_column_f64(&filtered, 0) {
+    let filtered_data = match ctx.provider.download_column::<f64>(&filtered, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -218,7 +218,7 @@ fn test_f64_nan_handling(ctx: &TestContext) -> TestResult {
 
     let buffer = match ctx
         .provider
-        .create_buffer_from_f64_slice(&data, schema.clone())
+        .create_buffer_from_slice::<f64>(&data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -243,7 +243,7 @@ fn test_f64_nan_handling(ctx: &TestContext) -> TestResult {
     };
 
     // Download sorted data
-    let sorted_data = match ctx.provider.download_column_f64(&sorted, 0) {
+    let sorted_data = match ctx.provider.download_column::<f64>(&sorted, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -345,7 +345,7 @@ fn test_f64_zero_signs(ctx: &TestContext) -> TestResult {
 
     let buffer = match ctx
         .provider
-        .create_buffer_from_f64_slice(&data, schema.clone())
+        .create_buffer_from_slice::<f64>(&data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -370,7 +370,7 @@ fn test_f64_zero_signs(ctx: &TestContext) -> TestResult {
     };
 
     // Download sorted data
-    let sorted_data = match ctx.provider.download_column_f64(&sorted, 0) {
+    let sorted_data = match ctx.provider.download_column::<f64>(&sorted, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -502,7 +502,7 @@ fn test_f64_subnormal(ctx: &TestContext) -> TestResult {
 
     let buffer = match ctx
         .provider
-        .create_buffer_from_f64_slice(&data, schema.clone())
+        .create_buffer_from_slice::<f64>(&data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -527,7 +527,7 @@ fn test_f64_subnormal(ctx: &TestContext) -> TestResult {
     };
 
     // Download sorted data
-    let sorted_data = match ctx.provider.download_column_f64(&sorted, 0) {
+    let sorted_data = match ctx.provider.download_column::<f64>(&sorted, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -644,7 +644,7 @@ fn test_f64_precision_extremes(ctx: &TestContext) -> TestResult {
 
     let buffer = match ctx
         .provider
-        .create_buffer_from_f64_slice(&data, schema.clone())
+        .create_buffer_from_slice::<f64>(&data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -669,7 +669,7 @@ fn test_f64_precision_extremes(ctx: &TestContext) -> TestResult {
     };
 
     // Download sorted data
-    let sorted_data = match ctx.provider.download_column_f64(&sorted, 0) {
+    let sorted_data = match ctx.provider.download_column::<f64>(&sorted, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -813,7 +813,7 @@ fn test_f64_sort_ordering(ctx: &TestContext) -> TestResult {
 
     let buffer = match ctx
         .provider
-        .create_buffer_from_f64_slice(&shuffled, schema.clone())
+        .create_buffer_from_slice::<f64>(&shuffled, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -838,7 +838,7 @@ fn test_f64_sort_ordering(ctx: &TestContext) -> TestResult {
     };
 
     // Download sorted data
-    let sorted_data = match ctx.provider.download_column_f64(&sorted, 0) {
+    let sorted_data = match ctx.provider.download_column::<f64>(&sorted, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(

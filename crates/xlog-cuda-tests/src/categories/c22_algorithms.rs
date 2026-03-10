@@ -323,7 +323,7 @@ fn test_sort_all_equal(ctx: &TestContext) -> TestResult {
 
     let buffer = match ctx
         .provider
-        .create_buffer_from_u32_slice(&data, schema.clone())
+        .create_buffer_from_slice::<u32>(&data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -361,7 +361,7 @@ fn test_sort_all_equal(ctx: &TestContext) -> TestResult {
     }
 
     // Download sorted data
-    let sorted_data = match ctx.provider.download_column_u32(&sorted, 0) {
+    let sorted_data = match ctx.provider.download_column::<u32>(&sorted, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -409,7 +409,7 @@ fn test_sort_already_sorted(ctx: &TestContext) -> TestResult {
 
     let buffer = match ctx
         .provider
-        .create_buffer_from_u32_slice(&data, schema.clone())
+        .create_buffer_from_slice::<u32>(&data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -434,7 +434,7 @@ fn test_sort_already_sorted(ctx: &TestContext) -> TestResult {
     };
 
     // Download sorted data
-    let sorted_data = match ctx.provider.download_column_u32(&sorted, 0) {
+    let sorted_data = match ctx.provider.download_column::<u32>(&sorted, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -510,7 +510,7 @@ fn test_sort_reverse_sorted(ctx: &TestContext) -> TestResult {
 
     let buffer = match ctx
         .provider
-        .create_buffer_from_u32_slice(&data, schema.clone())
+        .create_buffer_from_slice::<u32>(&data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -535,7 +535,7 @@ fn test_sort_reverse_sorted(ctx: &TestContext) -> TestResult {
     };
 
     // Download sorted data
-    let sorted_data = match ctx.provider.download_column_u32(&sorted, 0) {
+    let sorted_data = match ctx.provider.download_column::<u32>(&sorted, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -798,7 +798,7 @@ fn test_join_all_matches(ctx: &TestContext) -> TestResult {
     }
 
     // Download and verify all keys are COMMON_KEY
-    let joined_keys = match ctx.provider.download_column_u32(&joined, 0) {
+    let joined_keys = match ctx.provider.download_column::<u32>(&joined, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -820,7 +820,7 @@ fn test_join_all_matches(ctx: &TestContext) -> TestResult {
     }
 
     // Verify we have all combinations of lval and rval
-    let joined_lvals = match ctx.provider.download_column_u32(&joined, 1) {
+    let joined_lvals = match ctx.provider.download_column::<u32>(&joined, 1) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -831,7 +831,7 @@ fn test_join_all_matches(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let joined_rvals = match ctx.provider.download_column_u32(&joined, 2) {
+    let joined_rvals = match ctx.provider.download_column::<u32>(&joined, 2) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -960,7 +960,7 @@ fn test_join_high_cardinality(ctx: &TestContext) -> TestResult {
     }
 
     // Download and verify results
-    let joined_keys = match ctx.provider.download_column_u32(&joined, 0) {
+    let joined_keys = match ctx.provider.download_column::<u32>(&joined, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -971,7 +971,7 @@ fn test_join_high_cardinality(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let joined_lvals = match ctx.provider.download_column_u32(&joined, 1) {
+    let joined_lvals = match ctx.provider.download_column::<u32>(&joined, 1) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -982,7 +982,7 @@ fn test_join_high_cardinality(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let joined_rvals = match ctx.provider.download_column_u32(&joined, 2) {
+    let joined_rvals = match ctx.provider.download_column::<u32>(&joined, 2) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -1114,7 +1114,7 @@ fn test_dedup_all_unique(ctx: &TestContext) -> TestResult {
     }
 
     // Download and verify keys
-    let deduped_keys = match ctx.provider.download_column_u32(&deduped, 0) {
+    let deduped_keys = match ctx.provider.download_column::<u32>(&deduped, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -1204,7 +1204,7 @@ fn test_dedup_all_same(ctx: &TestContext) -> TestResult {
     }
 
     // Download and verify the single key
-    let deduped_keys = match ctx.provider.download_column_u32(&deduped, 0) {
+    let deduped_keys = match ctx.provider.download_column::<u32>(&deduped, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -1292,7 +1292,7 @@ fn test_groupby_single_group(ctx: &TestContext) -> TestResult {
         );
     }
 
-    let count_keys = match ctx.provider.download_column_u32(&count_result, 0) {
+    let count_keys = match ctx.provider.download_column::<u32>(&count_result, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -1304,7 +1304,7 @@ fn test_groupby_single_group(ctx: &TestContext) -> TestResult {
     };
 
     // Count results are u64 (to match predicate declaration types)
-    let counts = match ctx.provider.download_column_u64(&count_result, 1) {
+    let counts = match ctx.provider.download_column::<u64>(&count_result, 1) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -1346,7 +1346,7 @@ fn test_groupby_single_group(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let sums = match ctx.provider.download_column_u64(&sum_result, 1) {
+    let sums = match ctx.provider.download_column::<u64>(&sum_result, 1) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -1382,7 +1382,7 @@ fn test_groupby_single_group(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let mins = match ctx.provider.download_column_u32(&min_result, 1) {
+    let mins = match ctx.provider.download_column::<u32>(&min_result, 1) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -1416,7 +1416,7 @@ fn test_groupby_single_group(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let maxs = match ctx.provider.download_column_u32(&max_result, 1) {
+    let maxs = match ctx.provider.download_column::<u32>(&max_result, 1) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -1503,7 +1503,7 @@ fn test_groupby_all_unique_keys(ctx: &TestContext) -> TestResult {
         );
     }
 
-    let count_keys = match ctx.provider.download_column_u32(&count_result, 0) {
+    let count_keys = match ctx.provider.download_column::<u32>(&count_result, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -1515,7 +1515,7 @@ fn test_groupby_all_unique_keys(ctx: &TestContext) -> TestResult {
     };
 
     // Count results are u64 (to match predicate declaration types)
-    let counts = match ctx.provider.download_column_u64(&count_result, 1) {
+    let counts = match ctx.provider.download_column::<u64>(&count_result, 1) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -1563,7 +1563,7 @@ fn test_groupby_all_unique_keys(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let sum_keys = match ctx.provider.download_column_u32(&sum_result, 0) {
+    let sum_keys = match ctx.provider.download_column::<u32>(&sum_result, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -1574,7 +1574,7 @@ fn test_groupby_all_unique_keys(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let sums = match ctx.provider.download_column_u64(&sum_result, 1) {
+    let sums = match ctx.provider.download_column::<u64>(&sum_result, 1) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(

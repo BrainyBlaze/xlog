@@ -41,7 +41,7 @@ fn test_sequential_operations(ctx: &TestContext) -> TestResult {
 
         let buffer = match ctx
             .provider
-            .create_buffer_from_u32_slice(&data, schema.clone())
+            .create_buffer_from_slice::<u32>(&data, schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -66,7 +66,7 @@ fn test_sequential_operations(ctx: &TestContext) -> TestResult {
         };
 
         // Verify result
-        let sorted_data = match ctx.provider.download_column_u32(&sorted, 0) {
+        let sorted_data = match ctx.provider.download_column::<u32>(&sorted, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -93,7 +93,7 @@ fn test_sequential_operations(ctx: &TestContext) -> TestResult {
     let filter_data: Vec<u32> = (0..SIZE as u32).collect();
     let filter_buffer = match ctx
         .provider
-        .create_buffer_from_u32_slice(&filter_data, schema.clone())
+        .create_buffer_from_slice::<u32>(&filter_data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -164,7 +164,7 @@ fn test_operation_dependencies(ctx: &TestContext) -> TestResult {
 
     let buffer = match ctx
         .provider
-        .create_buffer_from_u32_slice(&data, schema.clone())
+        .create_buffer_from_slice::<u32>(&data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -190,7 +190,7 @@ fn test_operation_dependencies(ctx: &TestContext) -> TestResult {
     };
 
     // Verify step 1
-    let step1_data = match ctx.provider.download_column_u32(&step1, 0) {
+    let step1_data = match ctx.provider.download_column::<u32>(&step1, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -227,7 +227,7 @@ fn test_operation_dependencies(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let step2_data = match ctx.provider.download_column_u32(&step2, 0) {
+    let step2_data = match ctx.provider.download_column::<u32>(&step2, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -262,7 +262,7 @@ fn test_operation_dependencies(ctx: &TestContext) -> TestResult {
     };
 
     // Step 4: Filter (keep values < 800)
-    let step3_data = match ctx.provider.download_column_u32(&step3, 0) {
+    let step3_data = match ctx.provider.download_column::<u32>(&step3, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -288,7 +288,7 @@ fn test_operation_dependencies(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let step4_data = match ctx.provider.download_column_u32(&step4, 0) {
+    let step4_data = match ctx.provider.download_column::<u32>(&step4, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -322,7 +322,7 @@ fn test_operation_dependencies(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let final_data = match ctx.provider.download_column_u32(&step5, 0) {
+    let final_data = match ctx.provider.download_column::<u32>(&step5, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -390,7 +390,7 @@ fn test_sync_between_operations(ctx: &TestContext) -> TestResult {
 
     let buffer = match ctx
         .provider
-        .create_buffer_from_u32_slice(&data, schema.clone())
+        .create_buffer_from_slice::<u32>(&data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -424,7 +424,7 @@ fn test_sync_between_operations(ctx: &TestContext) -> TestResult {
     }
 
     // Verify data is available after sync
-    let sorted_data = match ctx.provider.download_column_u32(&sorted, 0) {
+    let sorted_data = match ctx.provider.download_column::<u32>(&sorted, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -472,7 +472,7 @@ fn test_sync_between_operations(ctx: &TestContext) -> TestResult {
     }
 
     // Verify filter result
-    let filtered_data = match ctx.provider.download_column_u32(&filtered, 0) {
+    let filtered_data = match ctx.provider.download_column::<u32>(&filtered, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -550,7 +550,7 @@ fn test_sync_between_operations(ctx: &TestContext) -> TestResult {
     }
 
     // Verify both operations completed
-    let sorted2_data = match ctx.provider.download_column_u32(&sorted2, 0) {
+    let sorted2_data = match ctx.provider.download_column::<u32>(&sorted2, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -561,7 +561,7 @@ fn test_sync_between_operations(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let deduped_data = match ctx.provider.download_column_u32(&deduped, 0) {
+    let deduped_data = match ctx.provider.download_column::<u32>(&deduped, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -611,7 +611,7 @@ fn test_error_propagation(ctx: &TestContext) -> TestResult {
     let empty_data: Vec<u32> = vec![];
     let empty_buffer = match ctx
         .provider
-        .create_buffer_from_u32_slice(&empty_data, schema.clone())
+        .create_buffer_from_slice::<u32>(&empty_data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -650,7 +650,7 @@ fn test_error_propagation(ctx: &TestContext) -> TestResult {
     let data: Vec<u32> = vec![1, 2, 3, 4, 5];
     let buffer = match ctx
         .provider
-        .create_buffer_from_u32_slice(&data, schema.clone())
+        .create_buffer_from_slice::<u32>(&data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {
@@ -742,7 +742,7 @@ fn test_error_propagation(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let sorted_keys = match ctx.provider.download_column_u32(&sorted, 0) {
+    let sorted_keys = match ctx.provider.download_column::<u32>(&sorted, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -799,7 +799,7 @@ fn test_large_batch_operations(ctx: &TestContext) -> TestResult {
 
         let buffer = match ctx
             .provider
-            .create_buffer_from_u32_slice(&data, schema.clone())
+            .create_buffer_from_slice::<u32>(&data, schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -824,7 +824,7 @@ fn test_large_batch_operations(ctx: &TestContext) -> TestResult {
 
         // Periodic verification (every 10th)
         if i % 10 == 0 {
-            let sorted_data = match ctx.provider.download_column_u32(&sorted, 0) {
+            let sorted_data = match ctx.provider.download_column::<u32>(&sorted, 0) {
                 Ok(d) => d,
                 Err(e) => {
                     return TestResult::error(
@@ -860,7 +860,7 @@ fn test_large_batch_operations(ctx: &TestContext) -> TestResult {
     let filter_data: Vec<u32> = (0..OPERATION_SIZE as u32).collect();
     let filter_buffer = match ctx
         .provider
-        .create_buffer_from_u32_slice(&filter_data, schema.clone())
+        .create_buffer_from_slice::<u32>(&filter_data, schema.clone())
     {
         Ok(buf) => buf,
         Err(e) => {

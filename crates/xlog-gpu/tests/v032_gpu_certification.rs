@@ -65,13 +65,13 @@ fn create_symbol_buffer(
 
 fn read_column_u32(provider: &CudaKernelProvider, buffer: &CudaBuffer, col: usize) -> Vec<u32> {
     provider
-        .download_column_u32(buffer, col)
+        .download_column::<u32>(buffer, col)
         .unwrap_or_default()
 }
 
 fn read_column_i64(provider: &CudaKernelProvider, buffer: &CudaBuffer, col: usize) -> Vec<i64> {
     provider
-        .download_column_i64(buffer, col)
+        .download_column::<i64>(buffer, col)
         .unwrap_or_default()
 }
 

@@ -129,7 +129,7 @@ fn test_hash_join_atomic_correctness(ctx: &TestContext) -> TestResult {
         }
 
         // Download and verify join results
-        let joined_keys = match ctx.provider.download_column_u32(&joined, 0) {
+        let joined_keys = match ctx.provider.download_column::<u32>(&joined, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -140,7 +140,7 @@ fn test_hash_join_atomic_correctness(ctx: &TestContext) -> TestResult {
             }
         };
 
-        let joined_lvals = match ctx.provider.download_column_u32(&joined, 1) {
+        let joined_lvals = match ctx.provider.download_column::<u32>(&joined, 1) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -151,7 +151,7 @@ fn test_hash_join_atomic_correctness(ctx: &TestContext) -> TestResult {
             }
         };
 
-        let joined_rvals = match ctx.provider.download_column_u32(&joined, 2) {
+        let joined_rvals = match ctx.provider.download_column::<u32>(&joined, 2) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -309,7 +309,7 @@ fn test_dedup_atomic_correctness(ctx: &TestContext) -> TestResult {
         }
 
         // Download and verify uniqueness
-        let deduped_keys = match ctx.provider.download_column_u32(&deduped, 0) {
+        let deduped_keys = match ctx.provider.download_column::<u32>(&deduped, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -435,7 +435,7 @@ fn test_high_contention_join(ctx: &TestContext) -> TestResult {
     }
 
     // Download and verify
-    let joined_keys = match ctx.provider.download_column_u32(&joined, 0) {
+    let joined_keys = match ctx.provider.download_column::<u32>(&joined, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -446,7 +446,7 @@ fn test_high_contention_join(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let joined_lvals = match ctx.provider.download_column_u32(&joined, 1) {
+    let joined_lvals = match ctx.provider.download_column::<u32>(&joined, 1) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -457,7 +457,7 @@ fn test_high_contention_join(ctx: &TestContext) -> TestResult {
         }
     };
 
-    let joined_rvals = match ctx.provider.download_column_u32(&joined, 2) {
+    let joined_rvals = match ctx.provider.download_column::<u32>(&joined, 2) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -576,7 +576,7 @@ fn test_high_contention_join(ctx: &TestContext) -> TestResult {
     }
 
     // Verify all joined keys are the same key
-    let same_joined_keys = match ctx.provider.download_column_u32(&same_joined, 0) {
+    let same_joined_keys = match ctx.provider.download_column::<u32>(&same_joined, 0) {
         Ok(d) => d,
         Err(e) => {
             return TestResult::error(
@@ -689,7 +689,7 @@ fn test_atomic_counting(ctx: &TestContext) -> TestResult {
 
         let buffer = match ctx
             .provider
-            .create_buffer_from_u32_slice(&data, schema.clone())
+            .create_buffer_from_slice::<u32>(&data, schema.clone())
         {
             Ok(buf) => buf,
             Err(e) => {
@@ -726,7 +726,7 @@ fn test_atomic_counting(ctx: &TestContext) -> TestResult {
         }
 
         // Verify filtered positions match prefix sums
-        let filtered_data = match ctx.provider.download_column_u32(&filtered, 0) {
+        let filtered_data = match ctx.provider.download_column::<u32>(&filtered, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
@@ -893,7 +893,7 @@ fn test_concurrent_atomic_updates(ctx: &TestContext) -> TestResult {
         }
 
         // Verify joined results
-        let joined_keys = match ctx.provider.download_column_u32(&joined, 0) {
+        let joined_keys = match ctx.provider.download_column::<u32>(&joined, 0) {
             Ok(d) => d,
             Err(e) => {
                 return TestResult::error(
