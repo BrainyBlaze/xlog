@@ -43,7 +43,7 @@ crates/xlog-cuda/src/
 |--------|-------------------|----------|---------|
 | `mod.rs` | 8–10 | ~800 | Struct definition, field accessors, `new()` (refactored), memory budget, d2h counter, device_row_count |
 | `kernel_loading.rs` | 2–3 | ~200 | Consumes/extends `kernel_manifest_data.rs`, `load_all_kernel_modules()` helper, warmup profiling |
-| `relational.rs` | ~15 | ~1,800 | hash_join, anti_join, dedup, dedup_sorted, union, diff, sort (only methods that exist as current public provider methods) |
+| `relational.rs` | ~15 | ~1,800 | hash_join, hash_join_with_limit (provider.rs:1873), hash_join_v2 (provider.rs:7447), hash_join_v2_with_index (provider.rs:7544), dedup, dedup_sorted, union_gpu (provider.rs:2536), diff_gpu (provider.rs:2592), sort. Verify full inventory against current provider.rs during implementation. |
 | `filter.rs` | ~4 | ~400 | Generic `filter<T: GpuScalar>()`, `compare_columns<T: GpuScalar>()`, mask composition (collapsed from 18 type-specialized fns) |
 | `groupby.rs` | ~5 | ~700 | groupby_agg, groupby_multi_agg, count_distinct |
 | `arithmetic.rs` | ~12 | ~600 | add/sub/mul/div/mod/abs/negate/pow/cast columns, binary/unary dispatch |
@@ -178,11 +178,23 @@ Applied as methods are relocated to submodules (zero marginal cost):
 path changes from `provider.rs` to `provider/mod.rs` — Rust treats these identically for
 `use` statements. No downstream `use` path changes.
 
-**Provider kernel namespace exports**: External crates import provider kernel namespaces
-directly through the public module at `lib.rs:10`. Current consumers include
-`executor.rs:13` (xlog-runtime) and `gpu.rs:8` (xlog-gpu). These `pub use provider::{...}`
-paths must be explicitly preserved in `lib.rs` after the split, or migrated with coordinated
-consumer updates. The provider/mod.rs must re-export the same namespace hierarchy.
+**Provider module direct imports**: External crates import provider-module items directly
+from the public `provider` module (not just via crate-root re-exports). Known consumers:
+
+| Consumer | Import location | What they import |
+|----------|----------------|-----------------|
+| xlog-runtime/executor.rs | executor.rs:13 | Provider methods + kernel constants |
+| xlog-gpu/gpu.rs | gpu.rs:8 | Provider methods |
+| xlog-solve/gpu_cdcl.rs | gpu_cdcl.rs:7 | Provider methods + kernel constants |
+| xlog-prob/compilation/gpu_cache.rs | gpu_cache.rs:8 | Provider methods |
+| xlog-prob/compilation/gpu_pir_intern.rs | gpu_pir_intern.rs:11 | Provider methods |
+| xlog-prob/exact.rs | exact.rs:24 | Provider methods |
+| xlog-prob/mc.rs | mc.rs:22 | Provider methods |
+| pyxlog/lib.rs | lib.rs:4928 | Provider methods |
+
+This surface is broader than just the crate-root re-exports. The `provider/mod.rs` must
+re-export the same namespace hierarchy so all existing `use xlog_cuda::provider::{...}`
+paths continue to resolve. Verify the complete import set during implementation.
 
 ## 6. Call-Site Update Scope
 

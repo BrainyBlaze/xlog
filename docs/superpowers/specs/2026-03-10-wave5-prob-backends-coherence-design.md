@@ -29,8 +29,12 @@ the existing shape: external entry points in `compilation/mod.rs`, lower-level f
 distributed across gpu_d4 submodules.
 
 Current public surface (function-based, not object model):
-- `validate_cnf_gpu` (compilation/mod.rs:117)
-- `compile_gpu_d4*` entry points (gpu_d4.rs:76, gpu_d4.rs:464, gpu_d4.rs:639)
+- `compile_gpu_d4_and_verify` (compilation/mod.rs:117 — entry point that orchestrates D4)
+- `validate_cnf_gpu` (gpu_d4.rs:76)
+- `compile_gpu_d4` (gpu_d4.rs:836)
+- `compile_gpu_d4_gated` (gpu_d4.rs:847)
+- `build_frontier_bitset` (gpu_d4.rs:464)
+- `build_frontier_dense` (gpu_d4.rs:639)
 - `compute_free_var_mask_gpu*` (gpu_d4.rs)
 - Internal helpers exposed from gpu_d4.rs (audit during split for pub(crate) candidates)
 
@@ -111,11 +115,22 @@ crates/xlog-prob/src/
 
 ### Key Coupling
 
-xlog-prob::mc directly calls `Executor::execute_node`, `execute_recursive_scc`, and
-`execute_non_recursive_scc` (mc.rs:1722, mc.rs:1783). By Wave 5, these live in
-`executor/node_dispatch.rs` and `executor/recursive.rs` with stable signatures. The mc.rs
-decomposition doesn't change which executor methods are called — only where within mc/ the
-calls live.
+xlog-prob::mc depends on a broad Executor surface:
+
+| Executor method | mc.rs call site |
+|----------------|----------------|
+| `set_profiling()` | mc.rs:861 |
+| `register_relation()` | mc.rs:865 |
+| `put_relation()` | mc.rs:869 |
+| `reset_for_mc_relations()` | mc.rs:942 |
+| `store()` | mc.rs:974, mc.rs:978 |
+| `execute_recursive_scc()` | mc.rs:1722 |
+| `execute_non_recursive_scc()` | mc.rs (nearby) |
+| `execute_node()` | mc.rs:1783 |
+
+By Wave 5, these live across `executor/mod.rs`, `executor/recursive.rs`, and
+`executor/node_dispatch.rs` with stable signatures from Wave 3. The mc.rs decomposition
+doesn't change which executor methods are called — only where within mc/ the calls live.
 
 ### Unwrap/Expect in mc.rs
 
@@ -165,7 +180,7 @@ Add top-level re-exports to `xlog-prob/src/lib.rs`:
 
 ```rust
 // gpu_d4 is function-based — re-export the actual entry point functions
-pub use compilation::gpu_d4::{compile_gpu_d4, compile_gpu_d4_with_config};
+pub use compilation::gpu_d4::{compile_gpu_d4, compile_gpu_d4_gated};
 pub use exact::{ExactDdnnfProgram, ExactResult};
 pub use mc::{McProgram, McEvalConfig, McResult};
 // WFS: see 5c.5 for consolidation — re-export the primary free functions
@@ -236,24 +251,24 @@ Deferred from Wave 3. After the executor split, assess:
 
 ### Documented release matrix (from v0.4.0-beta-release-design.md)
 
-| Gate | Required |
-|------|----------|
-| Non-slow batch (v0.4.0-beta-release-design.md:52) | Yes |
-| ILP reliability (v0.4.0-beta-release-design.md:53) | Yes |
-| ILP sparse (v0.4.0-beta-release-design.md:54) | Yes |
-| GA reliability (v0.4.0-beta-release-design.md:55) | Yes |
-| ILP performance (v0.4.0-beta-release-design.md:56) | Yes |
+| # | Gate | Command | Required |
+|---|------|---------|----------|
+| 1 | Rust workspace (v0.4.0-beta-release-design.md:50) | `cargo test --workspace --all-targets --exclude pyxlog --release` | Yes |
+| 2 | CUDA certification (v0.4.0-beta-release-design.md:51) | `cargo test -p xlog-cuda-tests --test certification_suite --release` | Yes (206/206) |
+| 3 | Non-slow batch (v0.4.0-beta-release-design.md:52) | | Yes |
+| 4 | ILP reliability (v0.4.0-beta-release-design.md:53) | | Yes |
+| 5 | ILP sparse (v0.4.0-beta-release-design.md:54) | | Yes |
+| 6 | GA reliability (v0.4.0-beta-release-design.md:55) | | Yes |
+| 7 | ILP performance (v0.4.0-beta-release-design.md:56) | | Yes |
 
-### Supplemental build gates (not part of documented matrix, but required)
+### Additional build gates (not in documented matrix, required for Wave 5)
 
 | Gate | Command | Required |
 |------|---------|----------|
-| Rust workspace | `cargo test --workspace --all-targets --exclude pyxlog --release` | Yes |
-| CUDA certification | `cargo test -p xlog-cuda-tests --test certification_suite --release` | Yes (206/206) |
 | pyxlog compile | `cargo check -p pyxlog` | Yes |
 | Python wheel build | `maturin develop --release -m crates/pyxlog/Cargo.toml` | Yes |
 
-Wave 5 is the final wave — it must pass the full documented matrix plus supplemental build
+Wave 5 is the final wave — it must pass the full documented matrix plus additional build
 gates before the refactoring is considered complete.
 
 ## Diff Profile (estimated)

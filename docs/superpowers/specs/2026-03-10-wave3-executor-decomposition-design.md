@@ -57,12 +57,15 @@ surface. All methods listed below must remain `pub` after the split.
 
 | Method | Location | Called by |
 |--------|----------|----------|
-| `new()` / `new_with_config()` | executor.rs:189, executor.rs:199 | xlog-gpu/logic.rs, xlog-prob, pyxlog |
-| `execute_plan()` | executor.rs (main entry) | xlog-gpu/logic.rs, xlog-prob (exact, wfs) |
+| `new()` / `new_with_config()` | executor.rs:189, executor.rs:199 | logic.rs:139 (xlog-gpu), pyxlog lib.rs:4364 |
+| `execute_plan()` | executor.rs (main entry) | logic.rs:139 (xlog-gpu) |
 | `set_profiling()` / `execution_stats()` | executor.rs | xlog-gpu/logic.rs |
-| `store()` / `store_mut()` | executor.rs | xlog-prob (mc, exact, wfs) |
-| `put_relation()` / `register_relation()` | executor.rs | xlog-prob, pyxlog |
-| `reset_for_mc()` / `reset_for_mc_relations()` | executor.rs | xlog-prob/mc |
+| `store()` / `store_mut()` | executor.rs | mc.rs:978, pyxlog lib.rs:5515 |
+| `store_relation_name()` | executor.rs:229 | xlog-prob, pyxlog |
+| `put_relation()` / `put_relation_data()` | executor.rs, executor.rs:266 | mc.rs:869, pyxlog lib.rs:5150 |
+| `register_relation()` | executor.rs | mc.rs:865, pyxlog |
+| `provider()` / `provider_arc()` | executor.rs:329, executor.rs:336 | xlog-prob, pyxlog |
+| `reset_for_mc()` / `reset_for_mc_relations()` | executor.rs | mc.rs:942, mc.rs:974 |
 | `reset_for_ilp()` | executor.rs | pyxlog ILP path |
 | `ilp_registry_mut()` / `ilp_last_result()` | executor.rs | pyxlog ILP path |
 
@@ -73,6 +76,11 @@ surface. All methods listed below must remain `pub` after the split.
 | `execute_recursive_scc()` | executor.rs | mc.rs:1722 | → recursive.rs |
 | `execute_non_recursive_scc()` | executor.rs | mc.rs (nearby) | → recursive.rs |
 | `execute_node()` | executor.rs | mc.rs:1783 | → node_dispatch.rs |
+| `set_profiling()` | executor.rs | mc.rs:861 | → mod.rs |
+| `register_relation()` | executor.rs | mc.rs:865 | → mod.rs |
+| `put_relation()` | executor.rs | mc.rs:869 | → mod.rs |
+| `reset_for_mc_relations()` | executor.rs | mc.rs:942 | → mod.rs |
+| `store()` | executor.rs | mc.rs:978 | → mod.rs |
 
 ### Additional public methods used cross-crate
 

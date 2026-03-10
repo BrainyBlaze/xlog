@@ -53,23 +53,37 @@ crates/pyxlog/src/
 
 ## 2. Frozen Python API Surface (Accurate Inventory)
 
-The following `#[pyclass]` and `#[pyfunction]` exports must remain identical from Python:
+The frozen surface includes both native `#[pyclass]`/`#[pyfunction]` exports AND the
+pure-Python package surface.
 
-| PyClass / Export | Defined at | Target module | Key methods |
-|-----------------|------------|---------------|-------------|
+### Native Rust exports (#[pyclass] / #[pyfunction])
+
+| PyClass / Export | Defined at | Target module | Notes |
+|-----------------|------------|---------------|-------|
 | `Program` | lib.rs:451 | logic.rs | Constructor, compile |
 | `CompiledProgram` | lib.rs:654+ | program.rs | Full method surface (evaluate, evaluate_device, tensor-source, training, forward/backward, cache, query-probability) |
 | `LogicProgram` | lib.rs:3570 | logic.rs | Constructor, compile |
 | `CompiledLogicProgram` | lib.rs:3599 | logic.rs | Evaluation methods |
-| `LogicQueryResult` | lib.rs:3694 | logic.rs | Result access |
-| `LogicEvalResult` | lib.rs:3709 | logic.rs | Result access |
-| `McDeviceEvalResult` | lib.rs:3714 | logic.rs | Device result access |
-| `EvalResult` | lib.rs:3740 | logic.rs | Result access |
-| `EpochStats` | lib.rs:3787 | training.rs | Training metrics |
-| `TrainingHistory` | lib.rs:3802 | training.rs | Training recording, `add_batch` (lib.rs:3834) |
+| `LogicQueryResult` | lib.rs:3694 | logic.rs | Getter-only data class |
+| `LogicEvalResult` | lib.rs:3709 | logic.rs | Getter-only data class |
+| `McDeviceEvalResult` | lib.rs:3714 | logic.rs | Getter-only data class |
+| `EvalResult` | lib.rs:3740 | logic.rs | Getter-only data class |
+| `EpochStats` | lib.rs:3787 | training.rs | Getter-only data class |
+| `TrainingHistory` | lib.rs:3802 | training.rs | Training recording. Note: `add_batch` (lib.rs:3819) is a private Rust helper, NOT part of the Python surface. |
 | `IlpProgramFactory` | lib.rs:4299 | ilp.rs | `compile` (lib.rs:4299) |
 | `CompiledIlpProgram` | lib.rs:4412+ | ilp.rs | Full runtime/control surface across both impl blocks |
 | Module functions | lib.rs:6176 | lib.rs | All `#[pyfunction]` exports in `#[pymodule]` (stays in lib.rs for registration) |
+
+### Pure-Python package surface
+
+| File | Content | Constraint |
+|------|---------|-----------|
+| `python/pyxlog/__init__.py` | Package imports, public API re-exports | Frozen — user-facing import paths |
+| `python/pyxlog/ilp/__init__.py` | ILP subpackage imports | Frozen — user-facing import paths |
+
+Changes to these files require the same care as changes to `#[pymethods]` — they define
+what Python users can `import`. Verify after refactoring that all existing `from pyxlog import X`
+and `from pyxlog.ilp import Y` paths still resolve.
 
 Experimental feature-gated surfaces (e.g., Arrow device import/export) can move faster.
 
@@ -172,25 +186,24 @@ into a single `impl` block in `ilp.rs`. The split was an artifact of incremental
 
 ### Documented release matrix (from v0.4.0-beta-release-design.md)
 
-| Gate | Required |
-|------|----------|
-| Non-slow batch | Per v0.4.0-beta-release-design.md:52 | Yes |
-| ILP reliability | Per v0.4.0-beta-release-design.md:53 | Yes |
-| ILP sparse | Per v0.4.0-beta-release-design.md:54 | Yes |
-| GA reliability | Per v0.4.0-beta-release-design.md:55 | Yes |
-| ILP performance | Per v0.4.0-beta-release-design.md:56 | Yes |
+| # | Gate | Ref |
+|---|------|-----|
+| 1 | Rust workspace (`cargo test --workspace --all-targets --exclude pyxlog --release`) | v0.4.0-beta-release-design.md:50 |
+| 2 | CUDA certification 206/206 (`cargo test -p xlog-cuda-tests --test certification_suite --release`) | v0.4.0-beta-release-design.md:51 |
+| 3 | Non-slow batch | v0.4.0-beta-release-design.md:52 |
+| 4 | ILP reliability | v0.4.0-beta-release-design.md:53 |
+| 5 | ILP sparse | v0.4.0-beta-release-design.md:54 |
+| 6 | GA reliability | v0.4.0-beta-release-design.md:55 |
+| 7 | ILP performance | v0.4.0-beta-release-design.md:56 |
 
-### Supplemental build gates (not part of documented matrix, but required for Wave 4)
+### Additional build gates (not in documented matrix, required for Wave 4)
 
-| Gate | Command | Required |
-|------|---------|----------|
-| Rust workspace | `cargo test --workspace --all-targets --exclude pyxlog --release` | Yes |
-| CUDA certification | `cargo test -p xlog-cuda-tests --test certification_suite --release` | Yes (206/206) |
-| pyxlog compile | `cargo check -p pyxlog` | Yes |
-| Python wheel build | `maturin develop --release -m crates/pyxlog/Cargo.toml` | Yes |
+| Gate | Command | Rationale |
+|------|---------|-----------|
+| pyxlog compile | `cargo check -p pyxlog` | Catch Rust compilation errors before building wheel |
+| Python wheel build | `maturin develop --release -m crates/pyxlog/Cargo.toml` | Wave 4 restructures FFI boundary; wheel must build |
 
-This is the first wave with the full documented release matrix. Wave 4 restructures the FFI
-boundary, so the wheel build gate is essential even though it's not part of the formal matrix.
+This is the first wave with the full documented release matrix (all 7 suites).
 
 ## 9. Call-Site Impact
 

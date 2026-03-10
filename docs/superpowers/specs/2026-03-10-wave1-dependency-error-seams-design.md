@@ -150,9 +150,11 @@ Normal trait, normal impls (not `unsafe` — the unsafe contract is already carr
 `cudarc::driver::DeviceRepr`). Implementations for 8 types: u8, u32, u64, i32, i64, f32,
 f64, bool.
 
-**Bool encoding**: The bool impl must pin its encoding to match the current D2H behavior in
-`provider.rs:7056` — single-byte `0x00`/`0x01` representation. Document this explicitly in
-the trait impl to prevent future encoding drift.
+**Bool encoding**: The bool impl must pin its encoding to match current behavior. Note that
+D2H decoding (provider.rs:7075) treats any nonzero byte as `true` (not just `0x01`), while
+H2D encoding should canonicalize to `0x00`/`0x01`. Document both the canonical write
+encoding (`0x00`=false, `0x01`=true) and the lenient read semantics (`0x00`=false,
+nonzero=true) in the trait impl to prevent future encoding drift.
 
 **Visibility**: `pub(crate)` — internal seam for Wave 2, not a public API.
 
@@ -172,7 +174,12 @@ the trait impl to prevent future encoding drift.
 **Note on xlog-neural test location**: xlog-neural disables library tests in Cargo.toml
 (`test = false, doctest = false` for PyO3 compatibility). The error conversion tests must
 live in a separate integration test file (`tests/test_error_conversion.rs`) which is not
-affected by the `test = false` setting. This ensures they run under the workspace gate.
+affected by the `test = false` setting. This test file must NOT have `required-features`
+that would exclude it from the default workspace test run — it must remain auto-discovered
+by `cargo test --workspace`. Verify by checking that the existing xlog-neural Cargo.toml
+`[[test]]` entries (e.g., Cargo.toml:33) use `required-features = ["python-tests"]` only
+for PyO3-dependent tests, and ensure the new error conversion test does NOT follow that
+pattern.
 
 ## 5. Gate
 
