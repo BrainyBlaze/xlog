@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::Bound;
 
 use ::xlog_gpu::logic as gpu_logic;
 use xlog_core::{MemoryBudget, Schema};
@@ -14,8 +13,6 @@ use xlog_cuda::{CudaDevice, CudaKernelProvider, DlpackManagedTensor, GpuMemoryMa
 use xlog_logic::ast::ProbEngine;
 use xlog_neural::{NetworkRegistry, TensorSourceRegistry};
 use xlog_prob::exact::GpuConfig;
-
-use std::collections::HashMap as StdHashMap;
 
 use xlog_core::RelId;
 use xlog_logic::ast::Program as AstProgram;
@@ -31,6 +28,7 @@ mod ilp;
 mod ilp_gpu;
 mod neural;
 mod program;
+mod dlpack;
 pub(crate) use program::{CachedCircuit, CompiledProbProgram, InputSource, NeuralGroup, QuerySignature};
 
 const DLPACK_CAPSULE_NAME: &[u8] = b"dltensor\0";
@@ -112,7 +110,7 @@ unsafe extern "C" fn arrow_device_array_capsule_destructor(capsule: *mut pyo3::f
 }
 
 #[cfg(feature = "arrow-device-import")]
-fn arrow_device_capsule_from_device_array(
+pub(crate) fn arrow_device_capsule_from_device_array(
     py: Python<'_>,
     device_array: ArrowDeviceArrayOwned,
 ) -> PyResult<PyObject> {
@@ -138,7 +136,7 @@ fn arrow_device_capsule_from_device_array(
 }
 
 #[cfg(feature = "arrow-device-import")]
-fn arrow_device_from_py(obj: &Bound<'_, PyAny>) -> PyResult<ArrowDeviceArrayOwned> {
+pub(crate) fn arrow_device_from_py(obj: &Bound<'_, PyAny>) -> PyResult<ArrowDeviceArrayOwned> {
     if unsafe {
         pyo3::ffi::PyCapsule_IsValid(
             obj.as_ptr(),
@@ -260,129 +258,8 @@ pub(crate) fn dlpack_from_py(obj: &Bound<'_, PyAny>) -> PyResult<DlpackManagedTe
     Ok(unsafe { DlpackManagedTensor::from_raw(ptr as *mut xlog_cuda::DLManagedTensor) })
 }
 
-/// Export one (struct) Arrow C Device array from one or more DLPack columns (zero-copy).
-///
-/// EXPERIMENTAL: Requires building `pyxlog` with `--features arrow-device-import`.
-#[cfg(feature = "arrow-device-import")]
-#[pyfunction]
-#[pyo3(signature = (dlpack_columns, device=0, memory_mb=32768))]
-fn export_arrow_device(
-    py: Python<'_>,
-    dlpack_columns: &Bound<'_, PyAny>,
-    device: usize,
-    memory_mb: u64,
-) -> PyResult<PyObject> {
-    if memory_mb == 0 {
-        return Err(PyValueError::new_err("memory_mb must be > 0"));
-    }
-
-    let config = GpuConfig {
-        device_ordinal: device,
-        memory_bytes: memory_mb * 1024 * 1024,
-    };
-    let provider =
-        provider_from_config(config).map_err(types::xlog_err)?;
-
-    let tensors: Vec<DlpackManagedTensor> = match dlpack_columns.downcast::<PySequence>() {
-        Ok(seq) => {
-            let mut out = Vec::with_capacity(seq.len()? as usize);
-            for item in seq.iter()? {
-                out.push(dlpack_from_py(&item?)?);
-            }
-            out
-        }
-        Err(_) => vec![dlpack_from_py(dlpack_columns)?],
-    };
-
-    let buffer = provider
-        .from_dlpack_tensors(tensors)
-        .map_err(types::xlog_err)?;
-    let device_array = provider
-        .to_arrow_device_record_batch(buffer)
-        .map_err(types::xlog_err)?;
-    arrow_device_capsule_from_device_array(py, device_array)
-}
-
-/// Import an Arrow C Device array (device-resident) into DLPack columns (zero-copy).
-///
-/// EXPERIMENTAL: Requires building `pyxlog` with `--features arrow-device-import`.
-#[cfg(feature = "arrow-device-import")]
-#[pyfunction]
-#[pyo3(signature = (device_array, device=0, memory_mb=32768))]
-fn import_arrow_device(
-    py: Python<'_>,
-    device_array: &Bound<'_, PyAny>,
-    device: usize,
-    memory_mb: u64,
-) -> PyResult<(Vec<PyObject>, Vec<String>, usize)> {
-    if memory_mb == 0 {
-        return Err(PyValueError::new_err("memory_mb must be > 0"));
-    }
-
-    let config = GpuConfig {
-        device_ordinal: device,
-        memory_bytes: memory_mb * 1024 * 1024,
-    };
-    let provider =
-        provider_from_config(config).map_err(types::xlog_err)?;
-
-    let device_array = arrow_device_from_py(device_array)?;
-
-    let buffer = provider
-        .from_arrow_device_record_batch(device_array)
-        .map_err(types::xlog_err)?;
-
-    let names: Vec<String> = buffer
-        .schema
-        .columns
-        .iter()
-        .map(|(n, _)| n.clone())
-        .collect();
-    let num_rows = buffer.num_rows() as usize;
-    let arity = buffer.arity();
-
-    let table = provider.to_dlpack_table(buffer);
-    let mut tensors: Vec<PyObject> = Vec::with_capacity(arity);
-    for col_idx in 0..arity {
-        let tensor = table
-            .column(col_idx)
-            .map_err(types::xlog_err)?;
-        tensors.push(dlpack_capsule_from_tensor(py, tensor)?);
-    }
-
-    Ok((tensors, names, num_rows))
-}
-
-#[pyfunction]
-fn dlpack_roundtrip(
-    py: Python<'_>,
-    tensor: &Bound<'_, PyAny>,
-    device: usize,
-    memory_mb: u64,
-) -> PyResult<PyObject> {
-    if memory_mb == 0 {
-        return Err(PyValueError::new_err("memory_mb must be > 0"));
-    }
-    let config = GpuConfig {
-        device_ordinal: device,
-        memory_bytes: memory_mb * 1024 * 1024,
-    };
-    let provider =
-        provider_from_config(config).map_err(types::xlog_err)?;
-    let managed = dlpack_from_py(tensor)?;
-    let buffer = provider
-        .from_dlpack_tensors(vec![managed])
-        .map_err(types::xlog_err)?;
-    let out = provider
-        .to_dlpack_table(buffer)
-        .column(0)
-        .map_err(types::xlog_err)?;
-    dlpack_capsule_from_tensor(py, out)
-}
-
 #[pyclass]
 pub struct Program;
-
 
 #[pyclass]
 pub struct CompiledProgram {
@@ -407,9 +284,9 @@ pub struct CompiledProgram {
     /// Probabilistic inference engine
     pub(crate) _prob_engine: ProbEngine,
     /// Cache of analyzed query signatures.
-    pub(crate) query_signature_cache: StdHashMap<String, QuerySignature>,
+    pub(crate) query_signature_cache: HashMap<String, QuerySignature>,
     /// Cache of compiled circuits by template signature
-    pub(crate) circuit_cache: StdHashMap<String, CachedCircuit>,
+    pub(crate) circuit_cache: HashMap<String, CachedCircuit>,
     /// Number of times the template compilation path executed.
     pub(crate) template_compile_count: usize,
     /// When true, batch queries sharing the same circuit template in training.
@@ -581,7 +458,6 @@ pub struct CompiledIlpProgram {
     pub(crate) strict_zero_dtoh: bool,
 }
 
-
 #[pymodule]
 #[pyo3(name = "_native")]
 fn pyxlog(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -602,10 +478,10 @@ fn pyxlog(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<CompiledIlpProgram>()?;
     m.add_function(wrap_pyfunction!(training::train_model, m)?)?;
     m.add_function(wrap_pyfunction!(training::train_model_tensor, m)?)?;
-    m.add_function(wrap_pyfunction!(dlpack_roundtrip, m)?)?;
+    m.add_function(wrap_pyfunction!(dlpack::dlpack_roundtrip, m)?)?;
     #[cfg(feature = "arrow-device-import")]
-    m.add_function(wrap_pyfunction!(export_arrow_device, m)?)?;
+    m.add_function(wrap_pyfunction!(dlpack::export_arrow_device, m)?)?;
     #[cfg(feature = "arrow-device-import")]
-    m.add_function(wrap_pyfunction!(import_arrow_device, m)?)?;
+    m.add_function(wrap_pyfunction!(dlpack::import_arrow_device, m)?)?;
     Ok(())
 }
