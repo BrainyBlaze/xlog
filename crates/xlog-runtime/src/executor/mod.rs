@@ -11,7 +11,7 @@ use cudarc::driver::{LaunchAsync, LaunchConfig};
 use xlog_core::{AggOp, RelId, Result, RuntimeConfig, ScalarType, Schema, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::provider::{arith_kernels, filter_kernels, ARITH_MODULE, FILTER_MODULE};
-use xlog_cuda::{CudaBuffer, CudaKernelProvider, JoinIndexV2, JoinType as CudaJoinType};
+use xlog_cuda::{CudaBuffer, CudaKernelProvider, JoinType as CudaJoinType};
 use xlog_ir::{
     CompareOp, ConstValue, ExecutionPlan, Expr, JoinType, ProjectExpr, RirNode, Stratum,
 };
@@ -23,114 +23,8 @@ use crate::ilp_registry::{
 use crate::profiler::{ExecutionStats, Profiler};
 use crate::RelationStore;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct JoinIndexKey {
-    rel: RelId,
-    version: u64,
-    key_cols: Vec<usize>,
-}
-
-struct CachedJoinIndex {
-    index: JoinIndexV2,
-    bytes: u64,
-    last_used: u64,
-}
-
-struct JoinIndexCache {
-    entries: HashMap<JoinIndexKey, CachedJoinIndex>,
-    clock: u64,
-    total_bytes: u64,
-    max_bytes: u64,
-}
-
-impl JoinIndexCache {
-    fn new(max_bytes: u64) -> Self {
-        Self {
-            entries: HashMap::new(),
-            clock: 0,
-            total_bytes: 0,
-            max_bytes,
-        }
-    }
-
-    fn clear(&mut self) {
-        self.entries.clear();
-        self.clock = 0;
-        self.total_bytes = 0;
-    }
-
-    fn get(&mut self, key: &JoinIndexKey) -> Option<&JoinIndexV2> {
-        let entry = self.entries.get_mut(key)?;
-        self.clock = self.clock.saturating_add(1);
-        entry.last_used = self.clock;
-        Some(&entry.index)
-    }
-
-    fn insert(&mut self, key: JoinIndexKey, index: JoinIndexV2) {
-        let bytes = index.estimated_bytes();
-        if bytes > self.max_bytes {
-            return;
-        }
-
-        self.evict_until_fits(bytes);
-
-        self.clock = self.clock.saturating_add(1);
-        let last_used = self.clock;
-
-        if let Some(prev) = self.entries.remove(&key) {
-            self.total_bytes = self.total_bytes.saturating_sub(prev.bytes);
-        }
-
-        self.total_bytes = self.total_bytes.saturating_add(bytes);
-        self.entries.insert(
-            key,
-            CachedJoinIndex {
-                index,
-                bytes,
-                last_used,
-            },
-        );
-    }
-
-    fn invalidate_rel(&mut self, rel: RelId) {
-        let keys: Vec<JoinIndexKey> = self
-            .entries
-            .keys()
-            .filter(|k| k.rel == rel)
-            .cloned()
-            .collect();
-        for key in keys {
-            if let Some(entry) = self.entries.remove(&key) {
-                self.total_bytes = self.total_bytes.saturating_sub(entry.bytes);
-            }
-        }
-    }
-
-    fn evict_until_fits(&mut self, additional_bytes: u64) {
-        while !self.entries.is_empty()
-            && self.total_bytes.saturating_add(additional_bytes) > self.max_bytes
-        {
-            let mut oldest_key: Option<JoinIndexKey> = None;
-            let mut oldest_clock = u64::MAX;
-
-            for (k, v) in &self.entries {
-                if v.last_used < oldest_clock {
-                    oldest_clock = v.last_used;
-                    oldest_key = Some(k.clone());
-                }
-            }
-
-            let Some(key) = oldest_key else {
-                break;
-            };
-            if let Some(entry) = self.entries.remove(&key) {
-                self.total_bytes = self.total_bytes.saturating_sub(entry.bytes);
-            } else {
-                break;
-            }
-        }
-    }
-}
+mod join_cache;
+use join_cache::{JoinIndexCache, JoinIndexKey};
 
 /// Incremental update for a base relation.
 pub struct RelationDelta {
