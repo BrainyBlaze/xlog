@@ -125,6 +125,7 @@ def test_reset_d2h_counter_cleared():
 
 
 from pyxlog.ilp import TrainConfig, train_only
+from pyxlog.ilp.trainer import _train_on_compiled
 
 
 def test_train_deterministic_reproducibility():
@@ -162,4 +163,102 @@ def test_train_deterministic_reproducibility():
     )
     assert result_1.discovered_rule == result_2.discovered_rule, (
         f"Determinism: rule mismatch {result_1.discovered_rule!r} vs {result_2.discovered_rule!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Compile-once + reset_runtime reuse parity tests
+# ---------------------------------------------------------------------------
+
+# Use the reliability gate's stage 1 (reach) for parity -- representative and fast.
+PARITY_SOURCE = """
+    edge(1, 2). edge(2, 3). edge(3, 4). edge(4, 5). edge(5, 6).
+    learnable(W_reach) :: reach(X, Y) :- bL(X, Z), bR(Z, Y).
+"""
+PARITY_POS = [("reach", [1, 3]), ("reach", [2, 4]), ("reach", [3, 5]), ("reach", [4, 6])]
+PARITY_NEG = []
+PARITY_MASK = "W_reach"
+
+
+def _parity_config(seed: int) -> TrainConfig:
+    return TrainConfig(
+        step_budget_per_attempt=150,
+        max_attempts=7,
+        tau_start=2.0,
+        tau_floor=0.05,
+        seed=seed,
+        device=0,
+        memory_mb=512,
+    )
+
+
+@pytest.mark.parametrize("seed", [0, 2])
+def test_compile_once_reuse_parity(seed):
+    """_train_on_compiled with reset matches fresh train_only on convergence,
+    attempt_count, and discovered_rule."""
+    config = _parity_config(seed)
+
+    # Baseline: fresh compile via train_only
+    fresh = train_only(
+        source=PARITY_SOURCE,
+        mask_name=PARITY_MASK,
+        positives=PARITY_POS,
+        negatives=PARITY_NEG,
+        config=config,
+        _compute_holdout=False,
+    )
+
+    # Reuse: compile once, then train_on_compiled with reset
+    prog = pyxlog.IlpProgramFactory.compile(
+        PARITY_SOURCE, device=config.device, memory_mb=config.memory_mb,
+    )
+    reused = _train_on_compiled(
+        prog, PARITY_SOURCE, PARITY_MASK, PARITY_POS, PARITY_NEG, config,
+        _compute_holdout=False,
+        _reset_before_first_attempt=True,
+    )
+
+    assert fresh.converged == reused.converged, (
+        f"seed={seed}: converged mismatch fresh={fresh.converged} vs reused={reused.converged}"
+    )
+    assert fresh.attempt_count == reused.attempt_count, (
+        f"seed={seed}: attempt_count mismatch {fresh.attempt_count} vs {reused.attempt_count}"
+    )
+    assert fresh.discovered_rule == reused.discovered_rule, (
+        f"seed={seed}: rule mismatch {fresh.discovered_rule!r} vs {reused.discovered_rule!r}"
+    )
+
+
+def test_compile_once_multi_seed_isolation():
+    """Running two seeds on the same compiled program must not leak state."""
+    prog = pyxlog.IlpProgramFactory.compile(
+        PARITY_SOURCE, device=0, memory_mb=512,
+    )
+
+    results = []
+    for seed in [0, 1]:
+        config = _parity_config(seed)
+        r = _train_on_compiled(
+            prog, PARITY_SOURCE, PARITY_MASK, PARITY_POS, PARITY_NEG, config,
+            _compute_holdout=False,
+            _reset_before_first_attempt=True,
+        )
+        results.append(r)
+
+    # Both must converge (this stage always converges)
+    for i, r in enumerate(results):
+        assert r.converged, f"seed={i} did not converge: {r.discovered_rule}"
+
+    # Verify seed 0 result matches a fresh train_only with seed 0
+    fresh_0 = train_only(
+        source=PARITY_SOURCE,
+        mask_name=PARITY_MASK,
+        positives=PARITY_POS,
+        negatives=PARITY_NEG,
+        config=_parity_config(0),
+        _compute_holdout=False,
+    )
+    assert results[0].discovered_rule == fresh_0.discovered_rule, (
+        f"State leak: reused seed=0 rule={results[0].discovered_rule!r} "
+        f"vs fresh={fresh_0.discovered_rule!r}"
     )
