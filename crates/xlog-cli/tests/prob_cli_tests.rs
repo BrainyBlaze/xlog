@@ -1,6 +1,6 @@
 #![cfg(feature = "host-io")]
 
-use assert_cmd::cargo::cargo_bin_cmd;
+use assert_cmd::Command;
 use std::path::Path;
 use xlog_cuda::CudaDevice;
 
@@ -19,7 +19,9 @@ fn test_xlog_prob_exact_and_mc() {
     let exact_program = repo_root.join("examples/prob/01-wet-conditioning.xlog");
     let mc_program = repo_root.join("examples/prob/04-nonmonotone-mc.xlog");
 
-    let mut cmd = cargo_bin_cmd!("xlog");
+    // Use Command::cargo_bin which resolves via CARGO_BIN_EXE_xlog,
+    // inheriting the same feature flags (including host-io) from the test build.
+    let mut cmd = Command::cargo_bin("xlog").expect("xlog binary");
     cmd.args([
         "prob",
         exact_program.to_str().expect("valid path"),
@@ -28,7 +30,7 @@ fn test_xlog_prob_exact_and_mc() {
     ]);
     cmd.assert().success();
 
-    let mut cmd = cargo_bin_cmd!("xlog");
+    let mut cmd = Command::cargo_bin("xlog").expect("xlog binary");
     cmd.args([
         "prob",
         mc_program.to_str().expect("valid path"),

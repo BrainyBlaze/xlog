@@ -1,24 +1,38 @@
 //! GpuScalar — marker trait for Rust scalar types that round-trip through GPU column storage.
 //!
-//! This is an internal seam for Wave 2's generic `download_column<T>()` and
-//! `create_buffer_from_slice<T>()`. It is NOT a public API.
+//! The trait is `pub` because external crates call turbofish generics bounded by it
+//! (e.g. `provider.download_column::<u32>()`), and Rust's `private_bounds` lint
+//! requires trait bounds on pub functions to be pub. However, the trait is **sealed**:
+//! external crates cannot add new implementations.
 //!
 //! # Bool encoding
 //!
 //! Write encoding (H2D): canonical `0x00` = false, `0x01` = true.
 //! Read decoding (D2H): `0x00` = false, any nonzero byte = true.
-//! (See provider.rs:7075 for current D2H bool decoding.)
 //!
 //! The asymmetry is intentional: we always write canonical values, but tolerate
 //! non-canonical GPU output during reads to match existing provider behavior.
+
+/// Private module prevents external crates from implementing `GpuScalar`.
+mod sealed {
+    pub trait Sealed {}
+    impl Sealed for u8 {}
+    impl Sealed for u32 {}
+    impl Sealed for u64 {}
+    impl Sealed for i32 {}
+    impl Sealed for i64 {}
+    impl Sealed for f32 {}
+    impl Sealed for f64 {}
+    impl Sealed for bool {}
+}
 
 /// Marker trait: a Rust scalar type that can round-trip through GPU column storage.
 ///
 /// Requires `cudarc::driver::DeviceRepr` + known byte width + little-endian serialization.
 ///
-/// Wave 2 will add `download_column::<T>()` and `create_buffer_from_slice::<T>()`
-/// that replace the current type-specialized function families.
-pub trait GpuScalar: cudarc::driver::DeviceRepr + Copy + Send + 'static {
+/// This trait is **sealed** — it cannot be implemented outside `xlog-cuda`.
+/// The fixed set of implementations covers all GPU-compatible scalar types.
+pub trait GpuScalar: sealed::Sealed + cudarc::driver::DeviceRepr + Copy + Send + 'static {
     /// Size in bytes of this scalar type.
     const BYTE_WIDTH: usize;
 
