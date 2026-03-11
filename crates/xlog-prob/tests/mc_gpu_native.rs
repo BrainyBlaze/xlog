@@ -81,9 +81,10 @@ query(coin()).
 fn mc_host_read_apis_gated() {
     let mut path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     path.push("src");
-    path.push("mc.rs");
+    path.push("mc");
+    path.push("mod.rs");
 
-    let text = std::fs::read_to_string(&path).expect("read mc.rs");
+    let text = std::fs::read_to_string(&path).expect("read mc/mod.rs");
     assert!(
         text.contains("#[cfg(feature = \"host-io\")]\n    pub fn evaluate"),
         "evaluate() must be gated behind host-io"
@@ -290,10 +291,16 @@ fn mc_accumulate_counts_increments_on_ok() {
 
 #[test]
 fn mc_hot_path_no_device_row_count_helper() {
-    let mut path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path.push("src");
-    path.push("mc.rs");
-    let text = std::fs::read_to_string(&path).expect("read mc.rs");
+    let mut mc_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    mc_dir.push("src");
+    mc_dir.push("mc");
+    let mut text = String::new();
+    for entry in std::fs::read_dir(&mc_dir).expect("read mc/ dir") {
+        let entry = entry.expect("dir entry");
+        if entry.path().extension().map_or(false, |e| e == "rs") {
+            text.push_str(&std::fs::read_to_string(entry.path()).expect("read mc/*.rs"));
+        }
+    }
     assert!(!text.contains("device_row_count_u32(provider, &filtered)"));
 }
 

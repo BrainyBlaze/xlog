@@ -26,9 +26,10 @@ fn gpu_d4_compile_path_has_no_dtoh_calls() {
 fn mc_gpu_device_eval_avoids_host_query_truth() {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     path.push("src");
-    path.push("mc.rs");
+    path.push("mc");
+    path.push("mod.rs");
 
-    let text = std::fs::read_to_string(&path).expect("read mc.rs");
+    let text = std::fs::read_to_string(&path).expect("read mc/mod.rs");
     let body = text
         .split("fn evaluate_gpu_device")
         .nth(1)
@@ -47,14 +48,20 @@ fn mc_gpu_device_eval_avoids_host_query_truth() {
 
 #[test]
 fn mc_gpu_path_avoids_host_sampling() {
-    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path.push("src");
-    path.push("mc.rs");
+    let mut mc_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    mc_dir.push("src");
+    mc_dir.push("mc");
 
-    let text = std::fs::read_to_string(&path).expect("read mc.rs");
+    let mut text = String::new();
+    for entry in std::fs::read_dir(&mc_dir).expect("read mc/ dir") {
+        let entry = entry.expect("dir entry");
+        if entry.path().extension().map_or(false, |e| e == "rs") {
+            text.push_str(&std::fs::read_to_string(entry.path()).expect("read mc/*.rs"));
+        }
+    }
     assert!(
         !text.contains("sample_bernoulli_matrix("),
-        "mc.rs still calls host sample_bernoulli_matrix (GPU path must avoid host sampling)"
+        "mc/ still calls host sample_bernoulli_matrix (GPU path must avoid host sampling)"
     );
 }
 
