@@ -34,6 +34,7 @@ use xlog_cuda::JoinType;
 
 mod neural_registry;
 use neural_registry::{NeuralPredicateInfo, NeuralPredicateRegistry};
+mod types;
 
 const DLPACK_CAPSULE_NAME: &[u8] = b"dltensor\0";
 const USED_DLPACK_CAPSULE_NAME: &[u8] = b"used_dltensor\0";
