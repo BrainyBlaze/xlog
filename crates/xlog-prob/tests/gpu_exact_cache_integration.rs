@@ -28,6 +28,7 @@ query(a()).
     let config = GpuConfig {
         device_ordinal: 0,
         memory_bytes: 1 << 30,
+        ..Default::default()
     };
 
     let prog = ExactDdnnfProgram::compile_source_with_gpu(source, config).expect("compile");

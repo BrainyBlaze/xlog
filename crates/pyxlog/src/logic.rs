@@ -40,6 +40,7 @@ impl Program {
         let config = GpuConfig {
             device_ordinal: device,
             memory_bytes: memory_mb * 1024 * 1024,
+            ..Default::default()
         };
 
         // Parse the AST to get prob_engine and neural predicates
@@ -124,6 +125,7 @@ impl LogicProgram {
         let config = GpuConfig {
             device_ordinal: device,
             memory_bytes: memory_mb * 1024 * 1024,
+            ..Default::default()
         };
 
         let program = gpu_logic::LogicProgram::compile(source)

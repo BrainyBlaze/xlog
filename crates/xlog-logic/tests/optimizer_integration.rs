@@ -185,6 +185,7 @@ fn test_optimizer_config_integration() {
         default_filter_selectivity: 0.2,
         transfer_cost_multiplier: 50.0,
         default_bytes_per_row: 64,
+        ..Default::default()
     };
 
     let stats = Arc::new(StatsManager::new());

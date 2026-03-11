@@ -52,6 +52,8 @@ pub(super) fn memset_u8_sync(
 /// Configuration for GPU D4 + GPU CDCL.
 ///
 /// This is the public control-plane contract for the GPU-native compilation pipeline.
+/// Use [`GpuCompileConfig::default()`] for conservative static defaults, or
+/// [`crate::exact::default_compile_config`] for dynamic sizing from a CNF.
 #[derive(Debug, Clone, Copy)]
 pub struct GpuCompileConfig {
     /// BFS expansion depth before handing each frontier item to a per-block DFS worker.
@@ -74,6 +76,26 @@ pub struct GpuCompileConfig {
 
     /// Enable workspace reuse in the equivalence verifier (amortizes arena allocation).
     pub incremental_verify: bool,
+}
+
+impl Default for GpuCompileConfig {
+    /// Conservative defaults suitable for small-to-medium CNFs.
+    ///
+    /// Production callers should use [`crate::exact::default_compile_config`] which
+    /// sizes arenas dynamically from the CNF and memory budget.
+    fn default() -> Self {
+        Self {
+            frontier_depth: 6,
+            max_frontier_items: 64,
+            max_depth: 128,
+            smooth_node_cap: 65_536,
+            smooth_edge_cap: 131_072,
+            cdcl_restart_interval: 64,
+            cdcl_learned_bytes: 4 * 1024 * 1024,
+            cdcl_conflict_budget: None,
+            incremental_verify: false,
+        }
+    }
 }
 
 /// Validate `GpuCnf` CSR invariants on the GPU (fail-fast trap on invalid input).

@@ -396,6 +396,7 @@ impl IlpProgramFactory {
         let config = GpuConfig {
             device_ordinal: device,
             memory_bytes: memory_mb * 1024 * 1024,
+            ..Default::default()
         };
         let provider = Arc::new(
             provider_from_config(config)

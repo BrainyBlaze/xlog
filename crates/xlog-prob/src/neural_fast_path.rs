@@ -8,6 +8,10 @@ use xlog_core::{Result, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::CudaKernelProvider;
 
+/// Configuration for GPU neural fast-path weight injection.
+///
+/// Controls numerical stability parameters for mapping neural-network
+/// output probabilities to CNF variable log-weights.
 #[derive(Debug, Clone, Copy)]
 pub struct NeuralFastPathConfig {
     /// Probability mass reserved for the implicit "none" outcome.

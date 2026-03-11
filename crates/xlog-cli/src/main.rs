@@ -203,6 +203,7 @@ fn run_probabilistic(args: ProbArgs) -> Result<()> {
         let config = GpuConfig {
             device_ordinal: args.device,
             memory_bytes: args.memory_mb * 1024 * 1024,
+            ..Default::default()
         };
 
         match args.prob_engine {

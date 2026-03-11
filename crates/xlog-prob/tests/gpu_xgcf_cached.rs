@@ -48,6 +48,7 @@ fn cached_eval_matches_direct_eval() {
         edge_cap: 32,
         level_cap: 16,
         var_cap: 16,
+        ..Default::default()
     };
     let mut cache = GpuCircuitCache::new(&provider, config).expect("cache");
 

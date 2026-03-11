@@ -41,6 +41,7 @@ fn test_mc_device_counts_match_cpu() -> Result<()> {
         confidence: 0.95,
         max_nonmonotone_iterations: 10,
         sampling_method: None,
+        ..Default::default()
     };
 
     let gpu_host = program.evaluate_gpu(cfg.clone())?;
@@ -88,6 +89,7 @@ fn test_device_counts_clamped_correct() -> Result<()> {
         confidence: 0.95,
         max_nonmonotone_iterations: 10,
         sampling_method: None,
+        ..Default::default()
     };
 
     let gpu = program.evaluate_gpu_device(cfg.clone())?;
@@ -136,6 +138,7 @@ fn test_device_counts_reuse_pointer_tables_without_semantic_change() -> Result<(
         confidence: 0.95,
         max_nonmonotone_iterations: 8,
         sampling_method: None,
+        ..Default::default()
     };
 
     let result = program.evaluate_gpu_device_with_provider(cfg, provider)?;
@@ -164,6 +167,7 @@ fn test_compact_and_dedup_preserve_host_row_count() -> Result<()> {
         confidence: 0.95,
         max_nonmonotone_iterations: 8,
         sampling_method: None,
+        ..Default::default()
     };
 
     let device = program.evaluate_gpu_device(cfg)?;

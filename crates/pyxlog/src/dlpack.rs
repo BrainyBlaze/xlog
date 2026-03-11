@@ -33,6 +33,7 @@ pub(crate) fn export_arrow_device(
     let config = GpuConfig {
         device_ordinal: device,
         memory_bytes: memory_mb * 1024 * 1024,
+        ..Default::default()
     };
     let provider = provider_from_config(config).map_err(types::xlog_err)?;
 
@@ -75,6 +76,7 @@ pub(crate) fn import_arrow_device(
     let config = GpuConfig {
         device_ordinal: device,
         memory_bytes: memory_mb * 1024 * 1024,
+        ..Default::default()
     };
     let provider = provider_from_config(config).map_err(types::xlog_err)?;
 
@@ -116,6 +118,7 @@ pub(crate) fn dlpack_roundtrip(
     let config = GpuConfig {
         device_ordinal: device,
         memory_bytes: memory_mb * 1024 * 1024,
+        ..Default::default()
     };
     let provider = provider_from_config(config).map_err(types::xlog_err)?;
     let managed = dlpack_from_py(tensor)?;

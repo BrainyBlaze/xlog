@@ -82,6 +82,7 @@ query(pred(0, 2)).
     let cfg = GpuConfig {
         device_ordinal: 0,
         memory_bytes: 1024 * 1024 * 1024,
+        ..Default::default()
     };
     let program = ExactDdnnfProgram::compile_source_with_gpu(source, cfg).unwrap();
 
@@ -105,6 +106,7 @@ query(pred(0, 2)).
     let cfg = NeuralFastPathConfig {
         eps: 1e-7,
         min_p: 1e-12,
+        ..Default::default()
     };
 
     let probs = vec![prob_buf];
@@ -158,6 +160,7 @@ query(pred(0, 2)).
     let cfg = GpuConfig {
         device_ordinal: 0,
         memory_bytes: 1024 * 1024 * 1024,
+        ..Default::default()
     };
     let program = ExactDdnnfProgram::compile_source_with_gpu(source, cfg).unwrap();
 
@@ -180,6 +183,7 @@ query(pred(0, 2)).
     let cfg = NeuralFastPathConfig {
         eps: 1e-7,
         min_p: 1e-12,
+        ..Default::default()
     };
 
     let probs = vec![prob_buf];
@@ -226,6 +230,7 @@ query(pred(0, 2)).
     let cfg = GpuConfig {
         device_ordinal: 0,
         memory_bytes: 1024 * 1024 * 1024,
+        ..Default::default()
     };
     let program = ExactDdnnfProgram::compile_source_with_gpu(source, cfg).unwrap();
 
@@ -248,6 +253,7 @@ query(pred(0, 2)).
     let cfg = NeuralFastPathConfig {
         eps: 1e-7,
         min_p: 1e-12,
+        ..Default::default()
     };
 
     let probs = vec![prob_buf];

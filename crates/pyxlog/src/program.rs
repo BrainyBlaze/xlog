@@ -516,6 +516,7 @@ impl CompiledProgram {
                     confidence,
                     max_nonmonotone_iterations,
                     sampling_method: Self::parse_sampling_method(sampling_method)?,
+                    ..Default::default()
                 };
                 #[cfg(feature = "host-io")]
                 {
@@ -565,6 +566,7 @@ impl CompiledProgram {
                     confidence,
                     max_nonmonotone_iterations,
                     sampling_method: Self::parse_sampling_method(sampling_method)?,
+                    ..Default::default()
                 };
 
                 let result = program

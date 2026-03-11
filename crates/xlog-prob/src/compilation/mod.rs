@@ -546,6 +546,7 @@ fn cdcl_config_from_compile(config: &GpuCompileConfig) -> Result<GpuCdclConfig> 
         max_proof_u32,
         restart_base: config.cdcl_restart_interval,
         reduce_interval,
+        ..Default::default()
     })
 }
 

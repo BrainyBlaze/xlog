@@ -65,6 +65,7 @@ query(sprinkler()).
         cdcl_learned_bytes: 4 * 1024 * 1024,
         cdcl_conflict_budget: None,
         incremental_verify: false,
+        ..Default::default()
     };
 
     // Collect the random-var list for smoothing (device-side compaction is tested elsewhere).
@@ -259,6 +260,7 @@ query(dry()).
         cdcl_learned_bytes: 4 * 1024 * 1024,
         cdcl_conflict_budget: None,
         incremental_verify: false,
+        ..Default::default()
     };
 
     // Smoothing list: probabilistic vars only (same as production).
@@ -379,6 +381,7 @@ query(dry()).
         cdcl_learned_bytes: 4 * 1024 * 1024,
         cdcl_conflict_budget: None,
         incremental_verify: false,
+        ..Default::default()
     };
 
     // Smoothing list: probabilistic vars only (same as production).
@@ -513,6 +516,7 @@ query(dry()).
         cdcl_learned_bytes: 4 * 1024 * 1024,
         cdcl_conflict_budget: None,
         incremental_verify: false,
+        ..Default::default()
     };
 
     // Smoothing list: probabilistic vars only (same as production).
@@ -569,6 +573,7 @@ query(dry()).
             edge_cap: compile.smooth_edge_cap,
             level_cap: compile.smooth_node_cap,
             var_cap: encoding.cnf.var_cap,
+            ..Default::default()
         },
     )
     .unwrap();

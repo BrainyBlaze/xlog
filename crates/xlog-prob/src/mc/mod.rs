@@ -99,6 +99,10 @@ impl McTimingBreakdown {
 pub const NONMONOTONE_SEMANTICS: &str = "Synchronous iteration per SCC; if a fixpoint is reached, use it; if a cycle is detected, use the intersection of all states in the cycle (skeptical tuples only); if the iteration budget is exceeded, use the intersection across all visited states (conservative).";
 
 #[derive(Debug, Clone)]
+/// Configuration for Monte Carlo probabilistic inference.
+///
+/// Use [`McEvalConfig::default()`] as a starting point and override individual
+/// fields with the functional-update syntax (`McEvalConfig { samples: 50_000, ..Default::default() }`).
 pub struct McEvalConfig {
     /// Number of Monte Carlo samples.
     pub samples: usize,

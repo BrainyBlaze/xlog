@@ -41,6 +41,7 @@ query(coin()).
         confidence: 0.95,
         max_nonmonotone_iterations: 16,
         sampling_method: None,
+        ..Default::default()
     };
 
     let device_result = program

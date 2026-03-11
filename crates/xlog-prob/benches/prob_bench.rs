@@ -23,6 +23,7 @@ fn make_gpu_config(memory_mb: u64) -> GpuConfig {
     GpuConfig {
         device_ordinal: 0,
         memory_bytes: memory_mb * 1024 * 1024,
+        ..Default::default()
     }
 }
 

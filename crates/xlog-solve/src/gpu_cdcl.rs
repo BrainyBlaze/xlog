@@ -31,12 +31,23 @@ struct GpuCdclRun {
     out_learned_count: TrackedCudaSlice<u32>,
 }
 
+/// Configuration for the GPU CDCL (Conflict-Driven Clause Learning) solver.
+///
+/// Controls arena sizes for learned clauses, proof traces, and the
+/// deterministic restart/reduce schedule. The defaults are tuned for
+/// equivalence verification of circuits with up to ~10 000 variables;
+/// larger problems may need proportionally larger arenas.
 #[derive(Debug, Clone, Copy)]
 pub struct GpuCdclConfig {
+    /// Maximum number of learned clauses retained in the arena.
     pub max_learned_clauses: u32,
+    /// Maximum total literals across all learned clauses.
     pub max_learned_lits: u32,
+    /// Maximum size (in u32 words) of the resolution proof trace.
     pub max_proof_u32: u32,
+    /// Base conflict count between deterministic restarts.
     pub restart_base: u32,
+    /// Conflict count between clause-database reductions.
     pub reduce_interval: u32,
 }
 

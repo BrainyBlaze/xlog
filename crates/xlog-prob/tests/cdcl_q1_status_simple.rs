@@ -81,6 +81,7 @@ fn default_compile_config_for_test(
         cdcl_learned_bytes,
         cdcl_conflict_budget: None,
         incremental_verify: false,
+        ..Default::default()
     })
 }
 
@@ -151,6 +152,7 @@ fn cdcl_config_from_compile(config: &GpuCompileConfig) -> xlog_core::Result<GpuC
         max_proof_u32,
         restart_base: config.cdcl_restart_interval,
         reduce_interval,
+        ..Default::default()
     })
 }
 

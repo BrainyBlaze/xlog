@@ -17,9 +17,18 @@ use crate::compilation::gpu_d4::validate_cnf_gpu;
 
 use crate::gpu::GpuXgcf;
 
+/// Configuration for GPU-native equivalence verification (phi equiv C).
+///
+/// Controls the CDCL solver parameters and whether to reuse the solver
+/// workspace across multiple equivalence checks. Workspace reuse amortizes
+/// device-memory allocation when verifying many circuits in sequence (e.g.,
+/// during incremental compilation).
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct GpuEquivalenceConfig {
+    /// CDCL solver configuration for the equivalence verifier.
     pub cdcl: GpuCdclConfig,
+    /// Reuse the CDCL workspace across successive verifier invocations.
     pub reuse_workspace: bool,
 }
 

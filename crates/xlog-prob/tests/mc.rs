@@ -45,6 +45,7 @@ query(rain()).
         confidence: 0.95,
         max_nonmonotone_iterations: 128,
         sampling_method: None,
+        ..Default::default()
     };
     let result = program.evaluate(cfg).unwrap();
 
@@ -77,6 +78,7 @@ query(sprinkler()).
         confidence: 0.95,
         max_nonmonotone_iterations: 128,
         sampling_method: None,
+        ..Default::default()
     };
     let result = program.evaluate(cfg).unwrap();
 
@@ -126,6 +128,7 @@ query(flip()).
         confidence: 0.95,
         max_nonmonotone_iterations: 128,
         sampling_method: None,
+        ..Default::default()
     };
     let result = program.evaluate(cfg).unwrap();
 
@@ -158,6 +161,7 @@ query(coin(2)).
         confidence: 0.95,
         max_nonmonotone_iterations: 128,
         sampling_method: None,
+        ..Default::default()
     };
     let result = program.evaluate(cfg).unwrap();
 
@@ -285,6 +289,7 @@ query(rain()).
         confidence: 0.95,
         max_nonmonotone_iterations: 128,
         sampling_method: None,
+        ..Default::default()
     };
     let result = program.evaluate(cfg).unwrap();
     assert_eq!(result.sampling_method, McSamplingMethod::EvidenceClamping);
@@ -312,6 +317,7 @@ query(rain()).
         confidence: 0.95,
         max_nonmonotone_iterations: 128,
         sampling_method: None,
+        ..Default::default()
     };
     let result = program.evaluate(cfg).unwrap();
     assert_eq!(result.sampling_method, McSamplingMethod::EvidenceClamping);
@@ -339,6 +345,7 @@ query(other()).
         confidence: 0.95,
         max_nonmonotone_iterations: 128,
         sampling_method: None,
+        ..Default::default()
     };
     let result = program.evaluate(cfg).unwrap();
     assert_eq!(result.sampling_method, McSamplingMethod::EvidenceClamping);
@@ -394,6 +401,7 @@ query(coin(2)).
         confidence: 0.95,
         max_nonmonotone_iterations: 128,
         sampling_method: None,
+        ..Default::default()
     };
     let result = program.evaluate(cfg).unwrap();
     assert_eq!(result.sampling_method, McSamplingMethod::Rejection);
@@ -414,6 +422,7 @@ query(rain()).
         confidence: 0.95,
         max_nonmonotone_iterations: 128,
         sampling_method: Some(McSamplingMethod::EvidenceClamping),
+        ..Default::default()
     };
     let result = program.evaluate(cfg);
     assert!(result.is_err());
@@ -444,6 +453,7 @@ query(a()).
         confidence: 0.95,
         max_nonmonotone_iterations: 128,
         sampling_method: None,
+        ..Default::default()
     };
     let result = prog.evaluate(cfg).unwrap();
     assert_eq!(result.sampling_method, McSamplingMethod::Rejection);
@@ -462,6 +472,7 @@ query(b()).
         confidence: 0.95,
         max_nonmonotone_iterations: 128,
         sampling_method: None,
+        ..Default::default()
     };
     let result2 = prog2.evaluate(cfg2).unwrap();
     assert_eq!(result2.sampling_method, McSamplingMethod::EvidenceClamping);
@@ -488,6 +499,7 @@ query(rain()).
         confidence: 0.95,
         max_nonmonotone_iterations: 128,
         sampling_method: Some(McSamplingMethod::Rejection),
+        ..Default::default()
     };
     let result = program.evaluate(cfg).unwrap();
     assert_eq!(result.sampling_method, McSamplingMethod::Rejection);
@@ -521,6 +533,7 @@ query(color(green)).
         confidence: 0.95,
         max_nonmonotone_iterations: 128,
         sampling_method: None,
+        ..Default::default()
     };
     let result = program.evaluate(cfg).unwrap();
 
@@ -566,6 +579,7 @@ fn test_mc_sample_reset_plan_preserves_base_and_clears_sampled_relations() {
         confidence: 0.95,
         max_nonmonotone_iterations: 64,
         sampling_method: Some(McSamplingMethod::Rejection),
+        ..Default::default()
     };
 
     let result = program.evaluate_gpu(cfg).unwrap();

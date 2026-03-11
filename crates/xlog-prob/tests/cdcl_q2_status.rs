@@ -87,6 +87,7 @@ fn cdcl_config_from_learned_bytes(
         max_proof_u32,
         restart_base,
         reduce_interval,
+        ..Default::default()
     }
 }
 
@@ -141,6 +142,7 @@ fn cdcl_q2_reports_status_and_error_without_trap() {
         cdcl_learned_bytes: memory_bytes / 8,
         cdcl_conflict_budget: None,
         incremental_verify: false,
+        ..Default::default()
     };
 
     let mut compile_needed = provider

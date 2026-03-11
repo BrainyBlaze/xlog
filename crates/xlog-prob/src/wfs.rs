@@ -276,10 +276,13 @@ impl Default for WfsResult {
     }
 }
 
-/// Configuration for WFS evaluation
+/// Configuration for Well-Founded Semantics evaluation.
+///
+/// Controls the convergence budget for the alternating fixed-point loop.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct WfsConfig {
-    /// Maximum iterations before giving up
+    /// Maximum iterations before giving up.
     pub max_iterations: usize,
 }
 

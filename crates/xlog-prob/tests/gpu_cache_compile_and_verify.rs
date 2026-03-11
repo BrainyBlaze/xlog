@@ -37,6 +37,7 @@ fn gpu_cache_compile_reuses_slot() {
         cdcl_learned_bytes: 4 * 1024 * 1024,
         cdcl_conflict_budget: None,
         incremental_verify: false,
+        ..Default::default()
     };
     let level_cap = u32::from(compile_config.max_depth)
         .checked_mul(2)
@@ -49,6 +50,7 @@ fn gpu_cache_compile_reuses_slot() {
         edge_cap: compile_config.smooth_edge_cap,
         level_cap,
         var_cap: cnf.var_cap,
+        ..Default::default()
     };
     let mut cache = GpuCircuitCache::new(&provider, config).unwrap();
 

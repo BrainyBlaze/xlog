@@ -135,6 +135,7 @@ fn fused_backward_matches_per_level() {
         edge_cap: 16,
         level_cap: 16,
         var_cap,
+        ..Default::default()
     };
 
     let mut cache = GpuCircuitCache::new(&provider, config).expect("cache");

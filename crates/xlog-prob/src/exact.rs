@@ -68,9 +68,14 @@ struct GpuExactState {
     handle: GpuCircuitCacheHandle,
 }
 
+/// GPU device selection and memory budget for probabilistic inference.
+///
+/// Use [`GpuConfig::default()`] and override individual fields as needed.
 #[derive(Debug, Clone, Copy)]
 pub struct GpuConfig {
+    /// CUDA device ordinal (0-based).
     pub device_ordinal: usize,
+    /// Device memory budget in bytes (clamped to available memory at runtime).
     pub memory_bytes: u64,
 }
 

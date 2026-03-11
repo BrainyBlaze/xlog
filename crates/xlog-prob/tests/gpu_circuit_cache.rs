@@ -44,6 +44,7 @@ fn gpu_cache_hit_miss_and_eviction() {
         edge_cap: 16,
         level_cap: 8,
         var_cap: 8,
+        ..Default::default()
     };
     let mut cache = GpuCircuitCache::new(&provider, config).expect("cache");
 

@@ -12,14 +12,42 @@ use xlog_solve::GpuCnf;
 use super::disk_cache;
 use crate::gpu::GpuXgcf;
 
+/// Configuration for the GPU-resident circuit cache.
+///
+/// Controls the number of cached XGCF circuit slots and the per-slot capacity
+/// limits for nodes, edges, levels, and variables. Production callers should
+/// use [`crate::exact::default_cache_config`] which sizes caps from the CNF
+/// and compile config.
 #[derive(Debug, Clone, Copy)]
 pub struct GpuCircuitCacheConfig {
+    /// Number of circuit slots kept resident on the GPU.
     pub num_slots: u32,
+    /// Hash table size for the circuit lookup (should be >= 2 * num_slots).
     pub table_size: u32,
+    /// Maximum nodes per cached circuit.
     pub node_cap: u32,
+    /// Maximum edges per cached circuit.
     pub edge_cap: u32,
+    /// Maximum levels (BFS depth) per cached circuit.
     pub level_cap: u32,
+    /// Maximum CNF variable id (1-based, DIMACS) across all cached circuits.
     pub var_cap: u32,
+}
+
+impl Default for GpuCircuitCacheConfig {
+    /// Conservative defaults for small CNFs (< 64 variables).
+    ///
+    /// Production callers should derive caps from the actual CNF dimensions.
+    fn default() -> Self {
+        Self {
+            num_slots: 4,
+            table_size: 8,
+            node_cap: 65_536,
+            edge_cap: 131_072,
+            level_cap: 65_536,
+            var_cap: 128,
+        }
+    }
 }
 
 pub struct GpuCircuitCache {

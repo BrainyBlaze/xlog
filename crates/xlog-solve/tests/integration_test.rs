@@ -85,6 +85,7 @@ fn test_3sat_satisfiable() {
         learning_rate: 0.15,
         momentum: 0.9,
         discretize_threshold: 0.5,
+        ..Default::default()
     });
 
     let result = solver.solve(instance.clone());
@@ -537,6 +538,7 @@ fn test_solver_determinism() {
         learning_rate: 0.1,
         momentum: 0.9,
         discretize_threshold: 0.5,
+        ..Default::default()
     });
 
     // Run solver multiple times
@@ -610,6 +612,7 @@ fn test_solver_config_effects() {
         learning_rate: 0.3,
         momentum: 0.8,
         discretize_threshold: 0.5,
+        ..Default::default()
     };
     let fast_solver = Solver::with_config_cpu(fast_config);
     let fast_result = fast_solver.solve(instance.clone());

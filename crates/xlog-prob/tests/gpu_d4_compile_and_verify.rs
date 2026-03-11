@@ -46,6 +46,7 @@ fn gpu_d4_compile_and_verify_unit_clause() {
         cdcl_learned_bytes: 4 * 1024 * 1024,
         cdcl_conflict_budget: None,
         incremental_verify: false,
+        ..Default::default()
     };
 
     let circuit = compile_gpu_d4_and_verify(&phi, &phi.num_vars, &provider, &config)
