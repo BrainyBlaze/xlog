@@ -1,7 +1,7 @@
 # Wave 2: Provider Decomposition + GpuScalar Migration
 
 **Date**: 2026-03-10
-**Status**: Approved
+**Status**: Implemented (spec updated 2026-03-11 to match final contract)
 **Depends on**: Wave 1 (error seams + GpuScalar trait)
 
 ## Overview
@@ -17,7 +17,10 @@ type-specialized function families via the `GpuScalar` trait introduced in Wave 
 - Preserve zero data-plane D2H / GPU-residency contracts
 - Preserve determinism/reproducibility
 - Reuse existing `kernel_manifest_data.rs` — do not invent a second manifest
-- Bool is a special case in H2D transfer (no `create_buffer_from_bool_slice` exists today)
+- Bool H2D: no `create_buffer_from_bool_slice` existed pre-Wave-2; the generic
+  `create_buffer_from_slice::<bool>` is now technically callable (canonical 0x00/0x01
+  encoding) but has no production callers. The trait is sealed so only crate-internal
+  types can round-trip.
 - DLPack already has its own module (`dlpack.rs`) — io.rs covers Arrow/IPC only
 - Kernel const exports are used outside xlog-cuda (xlog-runtime, xlog-prob, xlog-cuda-tests) — coordinate visibility changes with consumer updates
 
@@ -86,9 +89,10 @@ Before: 7 functions (~220 LOC). After: 1 function (~30 LOC).
 
 Same pattern: serialize via `GpuScalar::to_le_bytes_into()`, alloc, htod_sync_copy, buffer_from_columns.
 
-**Bool special case**: No `create_buffer_from_bool_slice` exists today. The generic H2D
-collapse excludes bool initially. If bool H2D is needed later, define explicit 0/1 encoding
-semantics in a follow-up.
+**Bool H2D** (updated post-implementation): `create_buffer_from_slice::<bool>` is now
+callable through the generic — it uses canonical 0x00/0x01 encoding via
+`GpuScalar::to_le_bytes_into`. No production callers exist. The trait is sealed, so
+this does not widen the external API surface.
 
 ### D3: filter_<T> + filter_<T>_eq/gt/lt → generic + enum dispatch (in filter.rs)
 
@@ -97,9 +101,14 @@ names.
 
 After: Generic with kernel-name lookup added to `GpuScalar`:
 ```rust
-pub(crate) trait GpuScalar: ... {
+// pub + sealed: external crates can name the bound (required by private_bounds
+// for turbofish calls like download_column::<u32>()) but cannot implement it.
+pub trait GpuScalar: sealed::Sealed + DeviceRepr + Copy + Send + 'static {
     // ... existing methods from Wave 1 ...
-    fn filter_kernel_name() -> &'static str;  // added in Wave 2
+    fn filter_compare_kernel() -> &'static str;  // added in Wave 2
+    fn compare_col_kernel() -> &'static str;
+    fn allowed_scalar_types() -> &'static [ScalarType];
+    fn filter_scan_phase1_kernel() -> Option<&'static str> { None }
 }
 ```
 
