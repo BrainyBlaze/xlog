@@ -19,7 +19,8 @@ use xlog_prob::exact::GpuConfig;
 
 use super::{
     types, CompiledIlpProgram, IlpProgramFactory,
-    dlpack_capsule_from_tensor, dlpack_from_py, provider_from_config,
+    dlpack_from_py, provider_from_config,
+    ilp_gpu,
 };
 
 // ---------------------------------------------------------------------------
@@ -561,13 +562,7 @@ impl CompiledIlpProgram {
         // We over-allocate COO arrays at upper_bound (sum of all num_query)
         // and fill sentinel values for unused slots.
 
-        struct CooTask {
-            cidx: u32,
-            num_query: u32,
-            d_mask: xlog_cuda::memory::TrackedCudaSlice<u8>,
-            fact_indices_idx: usize, // index into fact_indices_buffers
-        }
-        let mut tasks: Vec<CooTask> = Vec::new();
+        let mut tasks: Vec<ilp_gpu::CooTask> = Vec::new();
         let mut fact_indices_buffers: Vec<xlog_cuda::memory::TrackedCudaSlice<u32>> = Vec::new();
 
         for (relation, facts_with_idx) in &groups {
@@ -643,7 +638,7 @@ impl CompiledIlpProgram {
                     .membership_mask_device(&query_buf, entry_buf, &keys, &keys)
                     .map_err(|e| types::gpu_err("membership_mask", e))?;
 
-                tasks.push(CooTask {
+                tasks.push(ilp_gpu::CooTask {
                     cidx,
                     num_query,
                     d_mask,
@@ -686,350 +681,37 @@ impl CompiledIlpProgram {
             .column(0)
             .ok_or_else(|| PyRuntimeError::new_err("cand_probs has no column"))?;
 
-        let eps_f32 = 1e-8f32;
-        let eps_f64 = 1e-8f64;
-
+        // ── Phase C: COO construction ──
         let (mut d_coo_facts, mut d_coo_cands, actual_nnz) = if !needs_chunking {
-            // ── Phase C (non-chunked): single-pass COO fill on device ──
-            let mut offsets_host = vec![0u32; num_tasks];
-            {
-                let mut running = 0u32;
-                for i in 0..num_tasks {
-                    offsets_host[i] = running;
-                    running += tasks[i].num_query;
-                }
-                debug_assert_eq!(running, upper_bound);
-            }
-
-            let mut d_offsets = self
-                .provider
-                .memory()
-                .alloc::<u32>(num_tasks)
-                .map_err(|e| types::gpu_err("alloc d_offsets", e))?;
-            self.provider
-                .device()
-                .inner()
-                .htod_sync_copy_into(&offsets_host, &mut d_offsets)
-                .map_err(|e| types::gpu_err("htod d_offsets", e))?;
-
-            let sentinel_fact = num_facts;
-            let sentinel_cand = num_cands;
-            let mut d_coo_facts = self
-                .provider
-                .memory()
-                .alloc::<u32>(upper_bound as usize)
-                .map_err(|e| types::gpu_err("alloc coo_facts", e))?;
-            let mut d_coo_cands = self
-                .provider
-                .memory()
-                .alloc::<u32>(upper_bound as usize)
-                .map_err(|e| types::gpu_err("alloc coo_cands", e))?;
-            {
-                let sentinel_facts_vec = vec![sentinel_fact; upper_bound as usize];
-                let sentinel_cands_vec = vec![sentinel_cand; upper_bound as usize];
-                self.provider
-                    .device()
-                    .inner()
-                    .htod_sync_copy_into(&sentinel_facts_vec, &mut d_coo_facts)
-                    .map_err(|e| types::gpu_err("sentinel facts", e))?;
-                self.provider
-                    .device()
-                    .inner()
-                    .htod_sync_copy_into(&sentinel_cands_vec, &mut d_coo_cands)
-                    .map_err(|e| types::gpu_err("sentinel cands", e))?;
-            }
-
-            for (task_idx, task) in tasks.iter().enumerate() {
-                let d_prefix = self
-                    .provider
-                    .scan_u8_mask_device(&task.d_mask, task.num_query)
-                    .map_err(|e| types::gpu_err("scan mask", e))?;
-
-                self.provider
-                    .ilp_coo_fill_from_mask_launch(
-                        &task.d_mask,
-                        &d_prefix,
-                        &fact_indices_buffers[task.fact_indices_idx],
-                        task_idx as u32,
-                        task.cidx,
-                        task.num_query,
-                        &d_offsets,
-                        &mut d_coo_facts,
-                        &mut d_coo_cands,
-                    )
-                    .map_err(|e| types::gpu_err("coo fill", e))?;
-            }
-
-            (d_coo_facts, d_coo_cands, upper_bound)
+            ilp_gpu::build_coo_single(
+                &self.provider, &tasks, &fact_indices_buffers,
+                num_facts, num_cands, upper_bound,
+            )?
         } else {
-            // ── Phase C (chunked): Two-pass GPU-only bounded-memory merge ──
-            //
-            // Pass 1: Count NNZ per task on device (bounded temp per chunk).
-            // Pass 2: Fill COO at pre-computed offsets (bounded temp per chunk).
-            // The final COO buffer is exact-NNZ sized and may exceed
-            // coo_chunk_budget — this is safe because actual NNZ << upper_bound.
-
-            let max_queries_per_chunk = (self.coo_chunk_budget / 8).max(1) as u32;
-
-            // Allocate task_counts array (num_tasks + 1 for exclusive scan).
-            let tc_len = num_tasks + 1;
-            let mut d_task_counts = self
-                .provider
-                .memory()
-                .alloc::<u32>(tc_len)
-                .map_err(|e| types::gpu_err("alloc task_counts", e))?;
-            // Zero-init the entire array (counts default to 0, last slot = 0 for scan).
-            {
-                let zeros = vec![0u32; tc_len];
-                self.provider
-                    .device()
-                    .inner()
-                    .htod_sync_copy_into(&zeros, &mut d_task_counts)
-                    .map_err(|e| types::gpu_err("zero task_counts", e))?;
-            }
-
-            // ── Pass 1: Count NNZ per task ──
-            {
-                let mut chunk_start = 0usize;
-                while chunk_start < tasks.len() {
-                    let mut chunk_end = chunk_start;
-                    let mut chunk_sum = 0u32;
-                    while chunk_end < tasks.len() {
-                        let nq = tasks[chunk_end].num_query;
-                        if chunk_sum + nq > max_queries_per_chunk && chunk_sum > 0 {
-                            break;
-                        }
-                        chunk_sum += nq;
-                        chunk_end += 1;
-                    }
-                    if chunk_end == chunk_start {
-                        chunk_end = chunk_start + 1;
-                    }
-
-                    for task_idx in chunk_start..chunk_end {
-                        let task = &tasks[task_idx];
-                        self.provider
-                            .count_mask_into_slot(
-                                &task.d_mask,
-                                task.num_query,
-                                &mut d_task_counts,
-                                task_idx,
-                            )
-                            .map_err(|e| types::gpu_err("count_mask_into_slot", e))?;
-                    }
-
-                    chunk_start = chunk_end;
+            match ilp_gpu::build_coo_chunked(
+                &self.provider, &tasks, &fact_indices_buffers,
+                num_facts, self.coo_chunk_budget,
+            )? {
+                Some(result) => result,
+                None => {
+                    return self.build_loss_grad_empty_coo(
+                        py, &is_positive_host, num_facts, num_cands, is_f64,
+                    );
                 }
             }
-
-            // Synchronize to ensure all count kernels have completed.
-            self.provider.device().synchronize()
-                .map_err(|e| types::gpu_err("sync pass1", e))?;
-
-            // Compute per-task write offsets via exclusive scan.
-            // d_task_counts[0..num_tasks] has counts; after scan,
-            // d_task_counts[i] = sum of counts[0..i] = write offset for task i.
-            // d_task_counts[num_tasks] = total_nnz.
-            self.provider
-                .exclusive_scan_u32_inplace(&mut d_task_counts, tc_len as u32)
-                .map_err(|e| types::gpu_err("scan task_counts", e))?;
-
-            // Read total_nnz from the last element (metadata-only, untracked).
-            let total_nnz: u32 = self.provider
-                .dtoh_scalar_untracked(&d_task_counts, num_tasks)
-                .map_err(|e| types::gpu_err("read total_nnz", e))?;
-
-            if total_nnz == 0 {
-                return self.build_loss_grad_empty_coo(
-                    py,
-                    &is_positive_host,
-                    num_facts,
-                    num_cands,
-                    is_f64,
-                );
-            }
-
-            // Allocate exact-NNZ global COO buffers (may exceed coo_chunk_budget).
-            let mut d_coo_facts = self
-                .provider
-                .memory()
-                .alloc::<u32>(total_nnz as usize)
-                .map_err(|e| types::gpu_err("alloc global coo_facts", e))?;
-            let mut d_coo_cands = self
-                .provider
-                .memory()
-                .alloc::<u32>(total_nnz as usize)
-                .map_err(|e| types::gpu_err("alloc global coo_cands", e))?;
-
-            // ── Pass 2: Fill COO at pre-computed offsets ──
-            // d_task_counts now contains offsets (after exclusive scan).
-            // ilp_coo_fill_from_mask_launch reads d_offsets[offset_idx] for the
-            // write base position. We pass d_task_counts as d_offsets with
-            // offset_idx = task_idx.
-            {
-                let mut chunk_start = 0usize;
-                while chunk_start < tasks.len() {
-                    let mut chunk_end = chunk_start;
-                    let mut chunk_sum = 0u32;
-                    while chunk_end < tasks.len() {
-                        let nq = tasks[chunk_end].num_query;
-                        if chunk_sum + nq > max_queries_per_chunk && chunk_sum > 0 {
-                            break;
-                        }
-                        chunk_sum += nq;
-                        chunk_end += 1;
-                    }
-                    if chunk_end == chunk_start {
-                        chunk_end = chunk_start + 1;
-                    }
-
-                    for task_idx in chunk_start..chunk_end {
-                        let task = &tasks[task_idx];
-
-                        let d_prefix = self
-                            .provider
-                            .scan_u8_mask_device(&task.d_mask, task.num_query)
-                            .map_err(|e| types::gpu_err("scan mask", e))?;
-
-                        self.provider
-                            .ilp_coo_fill_from_mask_launch(
-                                &task.d_mask,
-                                &d_prefix,
-                                &fact_indices_buffers[task.fact_indices_idx],
-                                task_idx as u32,
-                                task.cidx,
-                                task.num_query,
-                                &d_task_counts,  // offsets after scan
-                                &mut d_coo_facts,
-                                &mut d_coo_cands,
-                            )
-                            .map_err(|e| types::gpu_err("coo fill", e))?;
-                        // d_prefix dropped here (bounded temp).
-                    }
-
-                    chunk_start = chunk_end;
-                }
-            }
-
-            (d_coo_facts, d_coo_cands, total_nnz)
         };
 
         // ── Phase D: Sort COO + device-side CSR build ──
-        //
-        // Sort all entries by fact index. In the non-chunked path, sentinels
-        // (fact = num_facts) sort to the end and are ignored by the histogram
-        // kernel's f < num_facts guard. In the chunked path, the COO is
-        // exact-NNZ (no sentinels) from the two-pass GPU-only merge.
-        let mut scratch =
-            xlog_cuda::provider::RadixSortScratch::new(&self.provider, actual_nnz)
-                .map_err(|e| types::gpu_err("sort scratch", e))?;
-        self.provider
-            .radix_sort_u32_pairs(
-                &mut d_coo_facts,
-                &mut d_coo_cands,
-                actual_nnz,
-                &mut scratch,
-            )
-            .map_err(|e| types::gpu_err("radix sort", e))?;
-
-        let d_hist = self
-            .provider
-            .ilp_csr_histogram_launch(&d_coo_facts, actual_nnz, num_facts)
-            .map_err(|e| types::gpu_err("csr histogram", e))?;
-
-        let mut d_row_offsets = self
-            .provider
-            .memory()
-            .alloc::<u32>((num_facts + 1) as usize)
-            .map_err(|e| types::gpu_err("alloc row_offsets", e))?;
-        {
-            let zeros = vec![0u32; (num_facts + 1) as usize];
-            self.provider
-                .device()
-                .inner()
-                .htod_sync_copy_into(&zeros, &mut d_row_offsets)
-                .map_err(|e| types::gpu_err("zero row_offsets", e))?;
-        }
-        {
-            let mut dst_view = d_row_offsets
-                .try_slice_mut(0..num_facts as usize)
-                .ok_or_else(|| {
-                    PyRuntimeError::new_err("row_offsets slice failed")
-                })?;
-            self.provider
-                .device()
-                .inner()
-                .dtod_copy(&d_hist, &mut dst_view)
-                .map_err(|e| types::gpu_err("dtod hist->row_offsets", e))?;
-        }
-        self.provider
-            .exclusive_scan_u32_inplace(&mut d_row_offsets, num_facts + 1)
-            .map_err(|e| types::gpu_err("scan row_offsets", e))?;
+        let d_row_offsets = ilp_gpu::sort_and_build_csr(
+            &self.provider, &mut d_coo_facts, &mut d_coo_cands,
+            actual_nnz, num_facts,
+        )?;
 
         // ── Phase E: Forward + backward + device-side reduction ──
-        if is_f64 {
-            let (credit_out, loss_contrib) = self
-                .provider
-                .ilp_credit_forward_f64_launch(
-                    &d_row_offsets,
-                    &d_coo_cands,
-                    cand_col,
-                    &d_is_positive,
-                    num_facts,
-                    eps_f64,
-                )
-                .map_err(|e| types::gpu_err("forward f64", e))?;
-
-            let d_total_loss = self
-                .provider
-                .ilp_reduce_sum_f64_launch(&loss_contrib, num_facts)
-                .map_err(|e| types::gpu_err("reduce f64", e))?;
-
-            let d_grad = self
-                .provider
-                .ilp_credit_backward_f64_launch(
-                    &d_row_offsets,
-                    &d_coo_cands,
-                    &credit_out,
-                    &d_is_positive,
-                    num_facts,
-                    num_cands,
-                )
-                .map_err(|e| types::gpu_err("backward f64", e))?;
-
-            self.export_loss_grad_device_f64(py, d_total_loss, d_grad, num_cands)
-        } else {
-            let (credit_out, loss_contrib) = self
-                .provider
-                .ilp_credit_forward_f32_launch(
-                    &d_row_offsets,
-                    &d_coo_cands,
-                    cand_col,
-                    &d_is_positive,
-                    num_facts,
-                    eps_f32,
-                )
-                .map_err(|e| types::gpu_err("forward f32", e))?;
-
-            let d_total_loss = self
-                .provider
-                .ilp_reduce_sum_f32_launch(&loss_contrib, num_facts)
-                .map_err(|e| types::gpu_err("reduce f32", e))?;
-
-            let d_grad = self
-                .provider
-                .ilp_credit_backward_f32_launch(
-                    &d_row_offsets,
-                    &d_coo_cands,
-                    &credit_out,
-                    &d_is_positive,
-                    num_facts,
-                    num_cands,
-                )
-                .map_err(|e| types::gpu_err("backward f32", e))?;
-
-            self.export_loss_grad_device_f32(py, d_total_loss, d_grad, num_cands)
-        }
+        ilp_gpu::forward_backward_reduce(
+            &self.provider, py, &d_row_offsets, &d_coo_cands,
+            cand_col, &d_is_positive, num_facts, num_cands, is_f64,
+        )
     }
 
     pub fn set_rule_mask(
@@ -1677,7 +1359,7 @@ impl CompiledIlpProgram {
 }
 
 // ---------------------------------------------------------------------------
-// CompiledIlpProgram — plain impl block (GPU export helpers)
+// CompiledIlpProgram — plain impl block (GPU export helpers + internal)
 // ---------------------------------------------------------------------------
 
 impl CompiledIlpProgram {
@@ -1713,7 +1395,7 @@ impl CompiledIlpProgram {
                 .inner()
                 .memset_zeros(&mut d_loss)
                 .map_err(|e| types::gpu_err("zero loss", e))?;
-            self.export_loss_grad_device_f64(py, d_loss, d_grad, num_cands)
+            ilp_gpu::export_loss_grad_device_f64(&self.provider, py, d_loss, d_grad, num_cands)
         } else {
             let mut d_grad = self
                 .provider
@@ -1737,12 +1419,12 @@ impl CompiledIlpProgram {
                 .inner()
                 .memset_zeros(&mut d_loss)
                 .map_err(|e| types::gpu_err("zero loss", e))?;
-            self.export_loss_grad_device_f32(py, d_loss, d_grad, num_cands)
+            ilp_gpu::export_loss_grad_device_f32(&self.provider, py, d_loss, d_grad, num_cands)
         }
     }
 
     /// Handle the case where COO is empty but we have facts.
-    /// Facts with no covering entries get: positive → -log(eps), negative → -log(1.0) = 0.
+    /// Facts with no covering entries get: positive -> -log(eps), negative -> -log(1.0) = 0.
     /// We still run the kernels with an empty CSR for correctness.
     fn build_loss_grad_empty_coo(
         &self,
@@ -1803,191 +1485,10 @@ impl CompiledIlpProgram {
                 .into()
         };
 
-        if is_f64 {
-            let (credit_out, loss_contrib) = self
-                .provider
-                .ilp_credit_forward_f64_launch(
-                    &d_row_offsets,
-                    &d_col_indices,
-                    &dummy_col,
-                    &d_is_positive,
-                    num_facts,
-                    1e-8f64,
-                )
-                .map_err(|e| types::gpu_err("forward", e))?;
-
-            let d_total_loss = self
-                .provider
-                .ilp_reduce_sum_f64_launch(&loss_contrib, num_facts)
-                .map_err(|e| types::gpu_err("reduce", e))?;
-
-            let d_grad = self
-                .provider
-                .ilp_credit_backward_f64_launch(
-                    &d_row_offsets,
-                    &d_col_indices,
-                    &credit_out,
-                    &d_is_positive,
-                    num_facts,
-                    num_cands,
-                )
-                .map_err(|e| types::gpu_err("backward", e))?;
-
-            self.export_loss_grad_device_f64(py, d_total_loss, d_grad, num_cands)
-        } else {
-            let (credit_out, loss_contrib) = self
-                .provider
-                .ilp_credit_forward_f32_launch(
-                    &d_row_offsets,
-                    &d_col_indices,
-                    &dummy_col,
-                    &d_is_positive,
-                    num_facts,
-                    1e-8f32,
-                )
-                .map_err(|e| types::gpu_err("forward", e))?;
-
-            let d_total_loss = self
-                .provider
-                .ilp_reduce_sum_f32_launch(&loss_contrib, num_facts)
-                .map_err(|e| types::gpu_err("reduce", e))?;
-
-            let d_grad = self
-                .provider
-                .ilp_credit_backward_f32_launch(
-                    &d_row_offsets,
-                    &d_col_indices,
-                    &credit_out,
-                    &d_is_positive,
-                    num_facts,
-                    num_cands,
-                )
-                .map_err(|e| types::gpu_err("backward", e))?;
-
-            self.export_loss_grad_device_f32(py, d_total_loss, d_grad, num_cands)
-        }
-    }
-
-    /// Export a device-resident f32 loss scalar and f32 grad vector as DLPack capsules.
-    fn export_loss_grad_device_f32(
-        &self,
-        py: Python<'_>,
-        d_loss_val: xlog_cuda::memory::TrackedCudaSlice<f32>,
-        d_grad: xlog_cuda::memory::TrackedCudaSlice<f32>,
-        num_cands: u32,
-    ) -> PyResult<(PyObject, PyObject)> {
-        let schema_f32 = Schema::new(vec![("col_0".to_string(), ScalarType::F32)]);
-
-        let mut d_loss_nrows = self
-            .provider
-            .memory()
-            .alloc::<u32>(1)
-            .map_err(|e| types::gpu_err("alloc", e))?;
-        self.provider
-            .device()
-            .inner()
-            .htod_sync_copy_into(&[1u32], &mut d_loss_nrows)
-            .map_err(|e| types::gpu_err("htod", e))?;
-
-        let loss_buf = xlog_cuda::CudaBuffer::from_columns(
-            vec![d_loss_val.into_bytes().into()],
-            1,
-            d_loss_nrows,
-            schema_f32.clone(),
-        );
-        let loss_dl = self
-            .provider
-            .to_dlpack_table(loss_buf)
-            .column(0)
-            .map_err(|e| types::gpu_err("DLPack loss", e))?;
-        let loss_capsule = dlpack_capsule_from_tensor(py, loss_dl)?;
-
-        let mut d_grad_nrows = self
-            .provider
-            .memory()
-            .alloc::<u32>(1)
-            .map_err(|e| types::gpu_err("alloc", e))?;
-        self.provider
-            .device()
-            .inner()
-            .htod_sync_copy_into(&[num_cands], &mut d_grad_nrows)
-            .map_err(|e| types::gpu_err("htod", e))?;
-
-        let grad_buf = xlog_cuda::CudaBuffer::from_columns(
-            vec![d_grad.into_bytes().into()],
-            num_cands as u64,
-            d_grad_nrows,
-            schema_f32,
-        );
-        let grad_dl = self
-            .provider
-            .to_dlpack_table(grad_buf)
-            .column(0)
-            .map_err(|e| types::gpu_err("DLPack grad", e))?;
-        let grad_capsule = dlpack_capsule_from_tensor(py, grad_dl)?;
-
-        Ok((loss_capsule, grad_capsule))
-    }
-
-    /// Export a device-resident f64 loss scalar and f64 grad vector as DLPack capsules.
-    fn export_loss_grad_device_f64(
-        &self,
-        py: Python<'_>,
-        d_loss_val: xlog_cuda::memory::TrackedCudaSlice<f64>,
-        d_grad: xlog_cuda::memory::TrackedCudaSlice<f64>,
-        num_cands: u32,
-    ) -> PyResult<(PyObject, PyObject)> {
-        let schema_f64 = Schema::new(vec![("col_0".to_string(), ScalarType::F64)]);
-
-        let mut d_loss_nrows = self
-            .provider
-            .memory()
-            .alloc::<u32>(1)
-            .map_err(|e| types::gpu_err("alloc", e))?;
-        self.provider
-            .device()
-            .inner()
-            .htod_sync_copy_into(&[1u32], &mut d_loss_nrows)
-            .map_err(|e| types::gpu_err("htod", e))?;
-
-        let loss_buf = xlog_cuda::CudaBuffer::from_columns(
-            vec![d_loss_val.into_bytes().into()],
-            1,
-            d_loss_nrows,
-            schema_f64.clone(),
-        );
-        let loss_dl = self
-            .provider
-            .to_dlpack_table(loss_buf)
-            .column(0)
-            .map_err(|e| types::gpu_err("DLPack loss", e))?;
-        let loss_capsule = dlpack_capsule_from_tensor(py, loss_dl)?;
-
-        let mut d_grad_nrows = self
-            .provider
-            .memory()
-            .alloc::<u32>(1)
-            .map_err(|e| types::gpu_err("alloc", e))?;
-        self.provider
-            .device()
-            .inner()
-            .htod_sync_copy_into(&[num_cands], &mut d_grad_nrows)
-            .map_err(|e| types::gpu_err("htod", e))?;
-
-        let grad_buf = xlog_cuda::CudaBuffer::from_columns(
-            vec![d_grad.into_bytes().into()],
-            num_cands as u64,
-            d_grad_nrows,
-            schema_f64,
-        );
-        let grad_dl = self
-            .provider
-            .to_dlpack_table(grad_buf)
-            .column(0)
-            .map_err(|e| types::gpu_err("DLPack grad", e))?;
-        let grad_capsule = dlpack_capsule_from_tensor(py, grad_dl)?;
-
-        Ok((loss_capsule, grad_capsule))
+        ilp_gpu::forward_backward_reduce(
+            &self.provider, py, &d_row_offsets, &d_col_indices,
+            &dummy_col, &d_is_positive, num_facts, num_cands, is_f64,
+        )
     }
 
     /// Returns sorted (i,j,k) candidate triples for the given learnable mask.

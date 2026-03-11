@@ -37,6 +37,7 @@ mod types;
 mod training;
 mod logic;
 mod ilp;
+mod ilp_gpu;
 
 const DLPACK_CAPSULE_NAME: &[u8] = b"dltensor\0";
 const USED_DLPACK_CAPSULE_NAME: &[u8] = b"used_dltensor\0";
