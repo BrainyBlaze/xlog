@@ -38,6 +38,12 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- **ILP reliability gate 4.6x faster** (`pyxlog`): Compile once per stage and reuse across
+  all 5 seeds via `reset_runtime()`, eliminating 16 redundant compilations and 20 holdout
+  evaluations (1647s → 359s). Gate still runs 4 stages × 5 seeds = 20 independent training
+  runs with identical budgets (150 steps, 7 max attempts). Parity with fresh-compile behavior
+  verified by new `test_compile_once_reuse_parity` and `test_compile_once_multi_seed_isolation`
+  tests.
 - **MC behavior test budgets reduced** (`xlog-prob`): 10 MC tests trimmed from 50K–80K samples
   to 2K–5K (one 20K accuracy guard retained). Reduces test-suite turnaround without changing
   runtime engine behavior.
