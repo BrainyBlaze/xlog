@@ -5,7 +5,7 @@ use std::sync::Arc;
 use cudarc::driver::DeviceSlice;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PySequence};
+use pyo3::types::PyDict;
 use pyo3::Bound;
 
 use ::xlog_gpu::logic as gpu_logic;
@@ -36,6 +36,7 @@ mod neural_registry;
 use neural_registry::{NeuralPredicateInfo, NeuralPredicateRegistry};
 mod types;
 mod training;
+mod logic;
 
 const DLPACK_CAPSULE_NAME: &[u8] = b"dltensor\0";
 const USED_DLPACK_CAPSULE_NAME: &[u8] = b"used_dltensor\0";
@@ -67,7 +68,7 @@ unsafe extern "C" fn dlpack_capsule_destructor(capsule: *mut pyo3::ffi::PyObject
     drop(DlpackManagedTensor::from_raw(managed));
 }
 
-fn dlpack_capsule_from_tensor(py: Python<'_>, tensor: DlpackManagedTensor) -> PyResult<PyObject> {
+pub(crate) fn dlpack_capsule_from_tensor(py: Python<'_>, tensor: DlpackManagedTensor) -> PyResult<PyObject> {
     let raw = tensor.into_raw();
     let ptr = raw as *mut c_void;
     let capsule = unsafe {
@@ -209,7 +210,7 @@ fn atom_to_string(atom: &xlog_prob::provenance::GroundAtom) -> String {
     s
 }
 
-fn provider_from_config(config: GpuConfig) -> xlog_core::Result<CudaKernelProvider> {
+pub(crate) fn provider_from_config(config: GpuConfig) -> xlog_core::Result<CudaKernelProvider> {
     let device = Arc::new(CudaDevice::new(config.device_ordinal)?);
     let memory = Arc::new(GpuMemoryManager::new(
         device.clone(),
@@ -218,7 +219,7 @@ fn provider_from_config(config: GpuConfig) -> xlog_core::Result<CudaKernelProvid
     CudaKernelProvider::new(device, memory)
 }
 
-fn parse_prob_engine_override(s: &str) -> PyResult<ProbEngine> {
+pub(crate) fn parse_prob_engine_override(s: &str) -> PyResult<ProbEngine> {
     let v = s.trim().to_ascii_lowercase();
     match v.as_str() {
         "exact_ddnnf" | "exact" | "ddnnf" => Ok(ProbEngine::ExactDdnnf),
@@ -230,7 +231,7 @@ fn parse_prob_engine_override(s: &str) -> PyResult<ProbEngine> {
     }
 }
 
-fn dlpack_from_py(obj: &Bound<'_, PyAny>) -> PyResult<DlpackManagedTensor> {
+pub(crate) fn dlpack_from_py(obj: &Bound<'_, PyAny>) -> PyResult<DlpackManagedTensor> {
     let py = obj.py();
 
     let capsule_obj: Bound<'_, PyAny> = if unsafe {
@@ -413,100 +414,12 @@ fn dlpack_roundtrip(
 #[pyclass]
 pub struct Program;
 
-#[pymethods]
-impl Program {
-    #[staticmethod]
-    #[pyo3(signature = (source, device=0, memory_mb=32768, prob_engine=None))]
-    pub fn compile(
-        source: &str,
-        device: usize,
-        memory_mb: u64,
-        prob_engine: Option<String>,
-    ) -> PyResult<CompiledProgram> {
-        if memory_mb == 0 {
-            return Err(PyValueError::new_err("memory_mb must be > 0"));
-        }
-
-        let config = GpuConfig {
-            device_ordinal: device,
-            memory_bytes: memory_mb * 1024 * 1024,
-        };
-
-        // Parse the AST to get prob_engine and neural predicates
-        let ast = xlog_logic::parse_program(source)
-            .map_err(types::xlog_err)?;
-
-        // Extract declared neural network names
-        let declared_networks: HashSet<String> = ast
-            .neural_predicates
-            .iter()
-            .map(|np| np.network.clone())
-            .collect();
-        // Build by-network form index: network name -> is_embedding
-        let mut declared_network_forms: HashMap<String, bool> = HashMap::new();
-        for np in &ast.neural_predicates {
-            let is_embedding = np.labels.is_none();
-            match declared_network_forms.get(&np.network) {
-                Some(&existing_form) if existing_form != is_embedding => {
-                    return Err(PyValueError::new_err(format!(
-                        "network '{}' is declared as both classification and embedding; \
-                         each network name must have a single form",
-                        np.network
-                    )));
-                }
-                _ => {
-                    declared_network_forms.insert(np.network.clone(), is_embedding);
-                }
-            }
-        }
-
-        let neural_registry =
-            NeuralPredicateRegistry::from_ast(&ast).map_err(types::val_err)?;
-
-        let engine = match prob_engine {
-            Some(s) => parse_prob_engine_override(&s)?,
-            None => ast.prob_engine(),
-        };
-
-        let program = match engine {
-            ProbEngine::ExactDdnnf => CompiledProbProgram::Exact(
-                ExactDdnnfProgram::compile_source_with_gpu(source, config)
-                    .map_err(types::xlog_err)?,
-            ),
-            ProbEngine::Mc => CompiledProbProgram::Mc(
-                McProgram::compile_source_with_gpu(source, config)
-                    .map_err(types::xlog_err)?,
-            ),
-        };
-        let provider =
-            provider_from_config(config).map_err(types::xlog_err)?;
-
-        Ok(CompiledProgram {
-            program,
-            output_provider: Arc::new(provider),
-            network_registry: NetworkRegistry::new(),
-            neural_registry,
-            declared_networks,
-            declared_network_forms,
-            tensor_sources: TensorSourceRegistry::new(),
-            _source: source.to_string(),
-            ast,
-            _gpu_config: config,
-            _prob_engine: engine,
-            query_signature_cache: StdHashMap::new(),
-            circuit_cache: StdHashMap::new(),
-            template_compile_count: 0,
-            batch_queries: true,
-            last_compile_profile: None,
-        })
-    }
-}
 
 /// A cached circuit for a specific query template.
 ///
 /// The circuit structure is immutable - only weights change between queries.
 /// Weight slots map network outputs to circuit variables.
-struct CachedCircuit {
+pub(crate) struct CachedCircuit {
     /// The compiled program containing the GPU circuit
     program: ExactDdnnfProgram,
 
@@ -518,13 +431,13 @@ struct CachedCircuit {
 }
 
 #[derive(Debug, Clone)]
-enum InputSource {
+pub(crate) enum InputSource {
     QueryArg(usize),
     ImplicitSlot(usize),
 }
 
 #[derive(Debug, Clone)]
-struct NeuralGroup {
+pub(crate) struct NeuralGroup {
     info: NeuralPredicateInfo,
     input_source: InputSource,
     #[cfg(feature = "host-io")]
@@ -532,7 +445,7 @@ struct NeuralGroup {
 }
 
 #[derive(Debug, Clone)]
-enum QuerySignature {
+pub(crate) enum QuerySignature {
     Boolean {
         groups: Vec<NeuralGroup>,
     },
@@ -550,7 +463,7 @@ impl QuerySignature {
     }
 }
 
-enum CompiledProbProgram {
+pub(crate) enum CompiledProbProgram {
     Exact(ExactDdnnfProgram),
     Mc(McProgram),
 }
@@ -567,36 +480,36 @@ impl CompiledProbProgram {
 
 #[pyclass]
 pub struct CompiledProgram {
-    program: CompiledProbProgram,
-    output_provider: Arc<CudaKernelProvider>,
+    pub(crate) program: CompiledProbProgram,
+    pub(crate) output_provider: Arc<CudaKernelProvider>,
     /// Registry for neural networks
-    network_registry: NetworkRegistry,
+    pub(crate) network_registry: NetworkRegistry,
     /// Registry for neural predicate metadata (predicate -> network/labels)
-    neural_registry: NeuralPredicateRegistry,
+    pub(crate) neural_registry: NeuralPredicateRegistry,
     /// Names of neural networks declared in the program (from nn() declarations)
-    declared_networks: HashSet<String>,
+    pub(crate) declared_networks: HashSet<String>,
     /// Map from network name to form: true = embedding, false = classification
-    declared_network_forms: HashMap<String, bool>,
+    pub(crate) declared_network_forms: HashMap<String, bool>,
     /// Registry for tensor data sources (images, embeddings, etc.)
-    tensor_sources: TensorSourceRegistry,
+    pub(crate) tensor_sources: TensorSourceRegistry,
     /// Original program source (for dynamic query compilation)
-    _source: String,
+    pub(crate) _source: String,
     /// Parsed program AST (for signature analysis)
-    ast: xlog_logic::ast::Program,
+    pub(crate) ast: xlog_logic::ast::Program,
     /// GPU configuration
-    _gpu_config: GpuConfig,
+    pub(crate) _gpu_config: GpuConfig,
     /// Probabilistic inference engine
-    _prob_engine: ProbEngine,
+    pub(crate) _prob_engine: ProbEngine,
     /// Cache of analyzed query signatures.
-    query_signature_cache: StdHashMap<String, QuerySignature>,
+    pub(crate) query_signature_cache: StdHashMap<String, QuerySignature>,
     /// Cache of compiled circuits by template signature
-    circuit_cache: StdHashMap<String, CachedCircuit>,
+    pub(crate) circuit_cache: StdHashMap<String, CachedCircuit>,
     /// Number of times the template compilation path executed.
-    template_compile_count: usize,
+    pub(crate) template_compile_count: usize,
     /// When true, batch queries sharing the same circuit template in training.
-    batch_queries: bool,
+    pub(crate) batch_queries: bool,
     /// Latest circuit compilation profile (populated on cache miss when profiling).
-    last_compile_profile: Option<xlog_prob::compilation::CircuitCompileProfile>,
+    pub(crate) last_compile_profile: Option<xlog_prob::compilation::CircuitCompileProfile>,
 }
 
 impl CompiledProgram {
@@ -3511,126 +3424,10 @@ impl CompiledProgram {
 #[pyclass]
 pub struct LogicProgram;
 
-#[pymethods]
-impl LogicProgram {
-    #[staticmethod]
-    #[pyo3(signature = (source, device=0, memory_mb=32768))]
-    pub fn compile(source: &str, device: usize, memory_mb: u64) -> PyResult<CompiledLogicProgram> {
-        if memory_mb == 0 {
-            return Err(PyValueError::new_err("memory_mb must be > 0"));
-        }
-
-        let config = GpuConfig {
-            device_ordinal: device,
-            memory_bytes: memory_mb * 1024 * 1024,
-        };
-
-        let program = gpu_logic::LogicProgram::compile(source)
-            .map_err(types::xlog_err)?;
-        let provider =
-            provider_from_config(config).map_err(types::xlog_err)?;
-
-        Ok(CompiledLogicProgram {
-            program,
-            provider: Arc::new(provider),
-        })
-    }
-}
-
 #[pyclass]
 pub struct CompiledLogicProgram {
-    program: gpu_logic::LogicProgram,
-    provider: Arc<CudaKernelProvider>,
-}
-
-#[pymethods]
-impl CompiledLogicProgram {
-    #[pyo3(signature = (dlpack_inputs=None))]
-    pub fn evaluate(
-        &self,
-        py: Python<'_>,
-        dlpack_inputs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<LogicEvalResult> {
-        let mut inputs: HashMap<String, xlog_cuda::CudaBuffer> = HashMap::new();
-
-        if let Some(dict) = dlpack_inputs {
-            for (k, v) in dict.iter() {
-                let name: String = k.extract()?;
-                let schema = self.program.schema(&name).ok_or_else(|| {
-                    PyValueError::new_err(format!(
-                        "Unknown input relation {} (not present in compiled schemas)",
-                        name
-                    ))
-                })?;
-
-                let seq = v.downcast::<PySequence>().map_err(|_| {
-                    PyValueError::new_err(format!(
-                        "Input relation {} must be a sequence of DLPack columns",
-                        name
-                    ))
-                })?;
-
-                let mut tensors: Vec<DlpackManagedTensor> = Vec::with_capacity(seq.len()? as usize);
-                for item in seq.iter()? {
-                    let item = item?;
-                    tensors.push(dlpack_from_py(&item)?);
-                }
-
-                let buffer = self
-                    .provider
-                    .from_dlpack_tensors_with_schema(schema.clone(), tensors)
-                    .map_err(types::xlog_err)?;
-
-                inputs.insert(name, buffer);
-            }
-        }
-
-        let result = self
-            .program
-            .evaluate(self.provider.clone(), inputs)
-            .map_err(types::xlog_err)?;
-        self.pack_logic_result(py, result)
-    }
-}
-
-impl CompiledLogicProgram {
-    fn pack_logic_result(
-        &self,
-        py: Python<'_>,
-        result: gpu_logic::LogicEvalResult,
-    ) -> PyResult<LogicEvalResult> {
-        let mut queries: Vec<Py<LogicQueryResult>> = Vec::with_capacity(result.queries.len());
-
-        for q in result.queries {
-            let num_rows = q.buffer.num_rows() as usize;
-            let is_true = q.columns.is_empty() && num_rows > 0;
-            let arity = q.buffer.arity();
-            let mut tensors: Vec<PyObject> = Vec::new();
-            if !q.columns.is_empty() {
-                let table = self.provider.to_dlpack_table(q.buffer);
-                tensors.reserve(arity);
-                for col_idx in 0..arity {
-                    let tensor = table
-                        .column(col_idx)
-                        .map_err(types::xlog_err)?;
-                    tensors.push(dlpack_capsule_from_tensor(py, tensor)?);
-                }
-            }
-
-            queries.push(Py::new(
-                py,
-                LogicQueryResult {
-                    relation_name: q.relation_name,
-                    columns: q.columns,
-                    tensors,
-                    num_rows,
-                    is_true,
-                },
-            )?);
-        }
-
-        Ok(LogicEvalResult { queries })
-    }
+    pub(crate) program: gpu_logic::LogicProgram,
+    pub(crate) provider: Arc<CudaKernelProvider>,
 }
 
 #[pyclass]
