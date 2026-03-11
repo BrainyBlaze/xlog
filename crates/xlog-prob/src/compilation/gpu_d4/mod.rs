@@ -17,6 +17,9 @@ use xlog_solve::GpuCnf;
 
 use crate::gpu::{GpuCircuitBuilder, GpuCircuitLayout, GpuXgcf};
 
+pub(crate) mod build;
+pub(crate) mod frontier;
+
 fn alloc_compile_gate(provider: &CudaKernelProvider, value: u32) -> Result<TrackedCudaSlice<u32>> {
     let memory = provider.memory();
     let mut gate = memory.alloc::<u32>(1)?;
