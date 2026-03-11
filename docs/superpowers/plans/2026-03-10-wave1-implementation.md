@@ -553,10 +553,11 @@ defined in xlog-logic."
 Create `crates/xlog-cuda/src/type_seam.rs`:
 
 ```rust
-//! GpuScalar — marker trait for Rust scalar types that round-trip through GPU column storage.
+//! GpuScalar — pub sealed trait for Rust scalar types that round-trip through GPU column storage.
 //!
-//! This is an internal seam for Wave 2's generic `download_column<T>()` and
-//! `create_buffer_from_slice<T>()`. It is NOT a public API.
+//! Used by generic `download_column<T>()` and `create_buffer_from_slice<T>()` (Wave 2).
+//! The trait is public + sealed: external crates can name the bound (required for turbofish
+//! calls like `download_column::<u32>()`) but cannot implement it.
 //!
 //! # Bool encoding
 //!
@@ -570,10 +571,11 @@ Create `crates/xlog-cuda/src/type_seam.rs`:
 /// Marker trait: a Rust scalar type that can round-trip through GPU column storage.
 ///
 /// Requires `cudarc::driver::DeviceRepr` + known byte width + little-endian serialization.
+/// Public + sealed: external crates can name the bound (for turbofish) but cannot implement it.
 ///
-/// Wave 2 will add `download_column::<T>()` and `create_buffer_from_slice::<T>()`
+/// Wave 2 adds `download_column::<T>()` and `create_buffer_from_slice::<T>()`
 /// that replace the current type-specialized function families.
-pub(crate) trait GpuScalar: cudarc::driver::DeviceRepr + Copy + Send + 'static {
+pub trait GpuScalar: sealed::Sealed + cudarc::driver::DeviceRepr + Copy + Send + 'static {
     /// Size in bytes of this scalar type.
     const BYTE_WIDTH: usize;
 
@@ -722,7 +724,7 @@ mod tests {
 In `crates/xlog-cuda/src/lib.rs`, add after the `error_helpers` module declaration:
 
 ```rust
-pub(crate) mod type_seam;
+pub mod type_seam;
 ```
 
 - [ ] **Step 3: Run tests to verify they pass**
@@ -736,7 +738,7 @@ Expected: PASS (all type_seam tests + error_helpers tests)
 git add crates/xlog-cuda/src/type_seam.rs crates/xlog-cuda/src/lib.rs
 git commit -m "feat(xlog-cuda): add GpuScalar trait for type-safe GPU column round-trip
 
-Internal pub(crate) marker trait that Wave 2 will use to collapse
+Public sealed marker trait that Wave 2 will use to collapse
 8 download_column_<T> and 7 create_buffer_from_<T>_slice functions
 into single generic functions. Implementations for u8, u32, u64,
 i32, i64, f32, f64, bool. Bool encoding documents the asymmetry:

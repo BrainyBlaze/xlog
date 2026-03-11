@@ -42,11 +42,8 @@ no production entry exists there to remove.
 |----------|--------------|
 | `xlog-neural → xlog-core` | Enables `From<NeuralError> for XlogError` impl. xlog-core is a leaf crate. No cycle risk. |
 
-**Result<T> alias collision**: xlog-neural defines `pub type Result<T> = std::result::Result<T, NeuralError>`
-in `src/lib.rs`. Once xlog-core becomes a dependency, code in xlog-neural that uses `xlog_core::Result<T>`
-will collide with this alias. Wave 1 must either rename xlog-neural's alias (e.g., `NeuralResult<T>`)
-or use fully-qualified paths in the `From` impl file. Recommendation: rename to `NeuralResult<T>` since
-the collision will compound in downstream crates.
+**Result<T> alias collision (resolved)**: xlog-neural previously defined `pub type Result<T> = ...`
+which collided with `xlog_core::Result<T>`. Wave 1 renamed it to `NeuralResult<T>` (src/lib.rs:75).
 
 ### Post-Cleanup Tier Map
 
@@ -156,7 +153,8 @@ H2D encoding should canonicalize to `0x00`/`0x01`. Document both the canonical w
 encoding (`0x00`=false, `0x01`=true) and the lenient read semantics (`0x00`=false,
 nonzero=true) in the trait impl to prevent future encoding drift.
 
-**Visibility**: `pub(crate)` — internal seam for Wave 2, not a public API.
+**Visibility**: `pub` + sealed — external crates can name the bound (required by
+`private_bounds` for turbofish calls like `download_column::<u32>()`) but cannot implement it.
 
 ## 4. Unit Tests
 

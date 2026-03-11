@@ -489,7 +489,7 @@ Replace 7 `compare_columns_*` wrapper functions and 11 `filter_*` functions with
 Extend `crates/xlog-cuda/src/type_seam.rs`. Add these methods to the trait:
 
 ```rust
-pub(crate) trait GpuScalar: cudarc::driver::DeviceRepr + Copy + Send + 'static {
+pub trait GpuScalar: sealed::Sealed + cudarc::driver::DeviceRepr + Copy + Send + 'static {
     // ... existing methods ...
 
     /// Kernel function name for const-compare mask generation.
