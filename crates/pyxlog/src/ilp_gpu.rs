@@ -12,6 +12,7 @@ use pyo3::prelude::*;
 use xlog_core::{ScalarType, Schema};
 use xlog_cuda::CudaKernelProvider;
 use xlog_cuda::memory::TrackedCudaSlice;
+use xlog_cuda::type_seam::GpuScalar;
 
 use super::{dlpack_capsule_from_tensor, types};
 
@@ -374,7 +375,7 @@ pub(crate) fn forward_backward_reduce(
             )
             .map_err(|e| types::gpu_err("backward f64", e))?;
 
-        export_loss_grad_device_f64(provider, py, d_total_loss, d_grad, num_cands)
+        export_loss_grad_device(provider, py, d_total_loss, d_grad, num_cands, ScalarType::F64)
     } else {
         let eps_f32 = 1e-8f32;
 
@@ -404,7 +405,7 @@ pub(crate) fn forward_backward_reduce(
             )
             .map_err(|e| types::gpu_err("backward f32", e))?;
 
-        export_loss_grad_device_f32(provider, py, d_total_loss, d_grad, num_cands)
+        export_loss_grad_device(provider, py, d_total_loss, d_grad, num_cands, ScalarType::F32)
     }
 }
 
@@ -412,15 +413,19 @@ pub(crate) fn forward_backward_reduce(
 // DLPack export helpers (moved from plain impl CompiledIlpProgram)
 // ---------------------------------------------------------------------------
 
-/// Export a device-resident f32 loss scalar and f32 grad vector as DLPack capsules.
-pub(crate) fn export_loss_grad_device_f32(
+/// Export device-resident loss scalar and grad vector as DLPack capsules.
+///
+/// Handles both f32 and f64 scalar types. Pass `scalar_type` matching the
+/// element type `T` of the incoming slices.
+pub(crate) fn export_loss_grad_device<T: GpuScalar>(
     provider: &CudaKernelProvider,
     py: Python<'_>,
-    d_loss_val: TrackedCudaSlice<f32>,
-    d_grad: TrackedCudaSlice<f32>,
+    d_loss_val: TrackedCudaSlice<T>,
+    d_grad: TrackedCudaSlice<T>,
     num_cands: u32,
+    scalar_type: ScalarType,
 ) -> PyResult<(PyObject, PyObject)> {
-    let schema_f32 = Schema::new(vec![("col_0".to_string(), ScalarType::F32)]);
+    let schema = Schema::new(vec![("col_0".to_string(), scalar_type)]);
 
     let mut d_loss_nrows = provider
         .memory()
@@ -436,7 +441,7 @@ pub(crate) fn export_loss_grad_device_f32(
         vec![d_loss_val.into_bytes().into()],
         1,
         d_loss_nrows,
-        schema_f32.clone(),
+        schema.clone(),
     );
     let loss_dl = provider
         .to_dlpack_table(loss_buf)
@@ -458,64 +463,7 @@ pub(crate) fn export_loss_grad_device_f32(
         vec![d_grad.into_bytes().into()],
         num_cands as u64,
         d_grad_nrows,
-        schema_f32,
-    );
-    let grad_dl = provider
-        .to_dlpack_table(grad_buf)
-        .column(0)
-        .map_err(|e| types::gpu_err("DLPack grad", e))?;
-    let grad_capsule = dlpack_capsule_from_tensor(py, grad_dl)?;
-
-    Ok((loss_capsule, grad_capsule))
-}
-
-/// Export a device-resident f64 loss scalar and f64 grad vector as DLPack capsules.
-pub(crate) fn export_loss_grad_device_f64(
-    provider: &CudaKernelProvider,
-    py: Python<'_>,
-    d_loss_val: TrackedCudaSlice<f64>,
-    d_grad: TrackedCudaSlice<f64>,
-    num_cands: u32,
-) -> PyResult<(PyObject, PyObject)> {
-    let schema_f64 = Schema::new(vec![("col_0".to_string(), ScalarType::F64)]);
-
-    let mut d_loss_nrows = provider
-        .memory()
-        .alloc::<u32>(1)
-        .map_err(|e| types::gpu_err("alloc", e))?;
-    provider
-        .device()
-        .inner()
-        .htod_sync_copy_into(&[1u32], &mut d_loss_nrows)
-        .map_err(|e| types::gpu_err("htod", e))?;
-
-    let loss_buf = xlog_cuda::CudaBuffer::from_columns(
-        vec![d_loss_val.into_bytes().into()],
-        1,
-        d_loss_nrows,
-        schema_f64.clone(),
-    );
-    let loss_dl = provider
-        .to_dlpack_table(loss_buf)
-        .column(0)
-        .map_err(|e| types::gpu_err("DLPack loss", e))?;
-    let loss_capsule = dlpack_capsule_from_tensor(py, loss_dl)?;
-
-    let mut d_grad_nrows = provider
-        .memory()
-        .alloc::<u32>(1)
-        .map_err(|e| types::gpu_err("alloc", e))?;
-    provider
-        .device()
-        .inner()
-        .htod_sync_copy_into(&[num_cands], &mut d_grad_nrows)
-        .map_err(|e| types::gpu_err("htod", e))?;
-
-    let grad_buf = xlog_cuda::CudaBuffer::from_columns(
-        vec![d_grad.into_bytes().into()],
-        num_cands as u64,
-        d_grad_nrows,
-        schema_f64,
+        schema,
     );
     let grad_dl = provider
         .to_dlpack_table(grad_buf)

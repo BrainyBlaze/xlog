@@ -17,6 +17,8 @@ use xlog_logic::ast::{Program as AstProgram, Term};
 use xlog_runtime::{read_device_row_count, Executor};
 use xlog_prob::exact::GpuConfig;
 
+use xlog_cuda::type_seam::GpuScalar;
+
 use super::{
     types, CompiledIlpProgram, IlpProgramFactory,
     dlpack_from_py, provider_from_config,
@@ -26,6 +28,40 @@ use super::{
 // ---------------------------------------------------------------------------
 // Helper functions
 // ---------------------------------------------------------------------------
+
+/// Allocate zero-initialized loss (scalar) and grad (num_cands) on GPU and
+/// export both as DLPack capsules. Shared by both f32 and f64 paths.
+fn build_zero_typed<T>(
+    provider: &CudaKernelProvider,
+    py: Python<'_>,
+    num_cands: u32,
+    scalar_type: ScalarType,
+) -> PyResult<(PyObject, PyObject)>
+where
+    T: GpuScalar + cudarc::driver::ValidAsZeroBits,
+{
+    let mut d_grad = provider
+        .memory()
+        .alloc::<T>(num_cands as usize)
+        .map_err(|e| types::gpu_err("alloc grad", e))?;
+    if num_cands > 0 {
+        provider
+            .device()
+            .inner()
+            .memset_zeros(&mut d_grad)
+            .map_err(|e| types::gpu_err("zero grad", e))?;
+    }
+    let mut d_loss = provider
+        .memory()
+        .alloc::<T>(1)
+        .map_err(|e| types::gpu_err("alloc loss", e))?;
+    provider
+        .device()
+        .inner()
+        .memset_zeros(&mut d_loss)
+        .map_err(|e| types::gpu_err("zero loss", e))?;
+    ilp_gpu::export_loss_grad_device(provider, py, d_loss, d_grad, num_cands, scalar_type)
+}
 
 fn push_term_bytes(out: &mut Vec<u8>, term: &Term, typ: ScalarType) -> xlog_core::Result<()> {
     use xlog_core::XlogError;
@@ -1373,53 +1409,9 @@ impl CompiledIlpProgram {
         is_f64: bool,
     ) -> PyResult<(PyObject, PyObject)> {
         if is_f64 {
-            let mut d_grad = self
-                .provider
-                .memory()
-                .alloc::<f64>(num_cands as usize)
-                .map_err(|e| types::gpu_err("alloc grad", e))?;
-            if num_cands > 0 {
-                self.provider
-                    .device()
-                    .inner()
-                    .memset_zeros(&mut d_grad)
-                    .map_err(|e| types::gpu_err("zero grad", e))?;
-            }
-            let mut d_loss = self
-                .provider
-                .memory()
-                .alloc::<f64>(1)
-                .map_err(|e| types::gpu_err("alloc loss", e))?;
-            self.provider
-                .device()
-                .inner()
-                .memset_zeros(&mut d_loss)
-                .map_err(|e| types::gpu_err("zero loss", e))?;
-            ilp_gpu::export_loss_grad_device_f64(&self.provider, py, d_loss, d_grad, num_cands)
+            build_zero_typed::<f64>(&self.provider, py, num_cands, ScalarType::F64)
         } else {
-            let mut d_grad = self
-                .provider
-                .memory()
-                .alloc::<f32>(num_cands as usize)
-                .map_err(|e| types::gpu_err("alloc grad", e))?;
-            if num_cands > 0 {
-                self.provider
-                    .device()
-                    .inner()
-                    .memset_zeros(&mut d_grad)
-                    .map_err(|e| types::gpu_err("zero grad", e))?;
-            }
-            let mut d_loss = self
-                .provider
-                .memory()
-                .alloc::<f32>(1)
-                .map_err(|e| types::gpu_err("alloc loss", e))?;
-            self.provider
-                .device()
-                .inner()
-                .memset_zeros(&mut d_loss)
-                .map_err(|e| types::gpu_err("zero loss", e))?;
-            ilp_gpu::export_loss_grad_device_f32(&self.provider, py, d_loss, d_grad, num_cands)
+            build_zero_typed::<f32>(&self.provider, py, num_cands, ScalarType::F32)
         }
     }
 
