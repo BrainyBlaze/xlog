@@ -11,6 +11,11 @@
 //!   (skeptical, invariant tuples only). This avoids parity/oscillation dependence on iteration
 //!   count while remaining fully deterministic and explicit.
 
+mod buffers;
+mod evidence;
+mod results;
+mod sampling;
+
 use std::collections::{HashMap, HashSet};
 #[cfg(feature = "host-io")]
 use std::hash::{Hash, Hasher};
