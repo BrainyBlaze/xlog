@@ -23,6 +23,7 @@ use crate::ilp_registry::{
 use crate::profiler::{ExecutionStats, Profiler};
 use crate::RelationStore;
 
+mod delta;
 mod join_cache;
 use join_cache::{JoinIndexCache, JoinIndexKey};
 
