@@ -1,21 +1,7 @@
-use std::sync::Arc;
+mod common;
+use common::setup_provider;
 
-use xlog_core::MemoryBudget;
 use xlog_cuda::provider::{pir_kernels, PIR_MODULE};
-use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
-
-fn setup_provider() -> Option<CudaKernelProvider> {
-    let device = match CudaDevice::new(0) {
-        Ok(d) => Arc::new(d),
-        Err(e) => {
-            eprintln!("Skipping: CUDA runtime unavailable: {}", e);
-            return None;
-        }
-    };
-    let budget = MemoryBudget::with_limit(1024 * 1024 * 1024);
-    let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
-    Some(CudaKernelProvider::new(device, memory).unwrap())
-}
 
 #[test]
 fn test_provider_loads_pir_module_entrypoints() {

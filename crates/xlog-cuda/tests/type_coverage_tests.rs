@@ -4,24 +4,12 @@
 //! This module tests that GPU operations work correctly with different scalar types,
 //! focusing on what's actually supported: filter, join, sort, groupby, union, and diff.
 
-use std::sync::Arc;
-use xlog_core::{AggOp, MemoryBudget, ScalarType, Schema};
-use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager, JoinType};
+mod common;
+use common::setup_provider;
+use xlog_core::{AggOp, ScalarType, Schema};
+use xlog_cuda::JoinType;
 
 // ============== Test Setup ==============
-
-fn setup_provider() -> Option<CudaKernelProvider> {
-    let device = match CudaDevice::new(0) {
-        Ok(d) => Arc::new(d),
-        Err(e) => {
-            eprintln!("Skipping: CUDA runtime unavailable: {}", e);
-            return None;
-        }
-    };
-    let budget = MemoryBudget::with_limit(1024 * 1024 * 1024); // 1 GB
-    let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
-    Some(CudaKernelProvider::new(device, memory).unwrap())
-}
 
 fn make_schema(cols: &[(&str, ScalarType)]) -> Schema {
     Schema::new(cols.iter().map(|(n, t)| (n.to_string(), *t)).collect())

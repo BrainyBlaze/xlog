@@ -4,22 +4,10 @@
 //! not just hash values. While FNV-1a 64-bit hash has very low collision
 //! probability (~2^-64), joins must be mathematically correct.
 
-use std::sync::Arc;
-use xlog_core::{MemoryBudget, ScalarType, Schema};
-use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager, JoinType};
-
-fn setup_provider() -> Option<CudaKernelProvider> {
-    let device = match CudaDevice::new(0) {
-        Ok(d) => Arc::new(d),
-        Err(e) => {
-            eprintln!("Skipping: CUDA runtime unavailable: {}", e);
-            return None;
-        }
-    };
-    let budget = MemoryBudget::with_limit(1024 * 1024 * 256); // 256 MB
-    let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
-    CudaKernelProvider::new(device, memory).ok()
-}
+mod common;
+use common::setup_provider;
+use xlog_core::{ScalarType, Schema};
+use xlog_cuda::JoinType;
 
 fn make_schema(cols: &[(&str, ScalarType)]) -> Schema {
     Schema::new(cols.iter().map(|(n, t)| (n.to_string(), *t)).collect())

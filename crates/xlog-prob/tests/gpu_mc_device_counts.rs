@@ -1,25 +1,11 @@
 #![cfg(feature = "host-io")]
 
-use cudarc::driver::DeviceSlice;
-use std::sync::Arc;
-use xlog_core::{MemoryBudget, Result};
-use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
-use xlog_prob::mc::{McEvalConfig, McProgram, McSamplingMethod};
+mod common;
+use common::setup_provider;
 
-fn setup_provider() -> Option<Arc<CudaKernelProvider>> {
-    let device = match CudaDevice::new(0) {
-        Ok(d) => Arc::new(d),
-        Err(e) => {
-            eprintln!("Skipping: CUDA runtime unavailable: {}", e);
-            return None;
-        }
-    };
-    let memory = Arc::new(GpuMemoryManager::new(
-        device.clone(),
-        MemoryBudget::with_limit(1024 * 1024 * 1024),
-    ));
-    CudaKernelProvider::new(device, memory).ok().map(Arc::new)
-}
+use cudarc::driver::DeviceSlice;
+use xlog_core::Result;
+use xlog_prob::mc::{McEvalConfig, McProgram, McSamplingMethod};
 
 #[test]
 fn test_mc_device_counts_match_cpu() -> Result<()> {

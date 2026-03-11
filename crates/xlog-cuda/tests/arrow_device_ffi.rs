@@ -1,10 +1,10 @@
-use std::sync::Arc;
+mod common;
+use common::setup_provider;
 
 use arrow::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
 use cudarc::driver::safe::{DevicePtr, DeviceSlice};
 use cudarc::driver::sys;
-use xlog_core::{MemoryBudget, ScalarType, Schema};
-use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_core::{ScalarType, Schema};
 
 #[repr(C)]
 struct RawArrowArray {
@@ -35,21 +35,6 @@ impl DevicePtr<u8> for RawDeviceSlice {
     fn device_ptr(&self) -> &sys::CUdeviceptr {
         &self.ptr
     }
-}
-
-fn setup_provider() -> Option<CudaKernelProvider> {
-    let device = match CudaDevice::new(0) {
-        Ok(d) => Arc::new(d),
-        Err(e) => {
-            eprintln!("Skipping: CUDA runtime unavailable: {}", e);
-            return None;
-        }
-    };
-    let memory = Arc::new(GpuMemoryManager::new(
-        device.clone(),
-        MemoryBudget::with_limit(1024 * 1024 * 1024),
-    ));
-    CudaKernelProvider::new(device, memory).ok()
 }
 
 #[test]

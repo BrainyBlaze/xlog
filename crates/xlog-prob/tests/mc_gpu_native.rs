@@ -1,24 +1,8 @@
-use std::sync::Arc;
+mod common;
+use common::setup_provider;
 
 use cudarc::driver::{DevicePtr, DeviceSlice, LaunchAsync};
-use xlog_core::MemoryBudget;
-use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 use xlog_prob::mc::{McEvalConfig, McProgram};
-
-fn setup_provider() -> Option<Arc<CudaKernelProvider>> {
-    let device = match CudaDevice::new(0) {
-        Ok(d) => Arc::new(d),
-        Err(e) => {
-            eprintln!("Skipping: CUDA runtime unavailable: {}", e);
-            return None;
-        }
-    };
-    let memory = Arc::new(GpuMemoryManager::new(
-        device.clone(),
-        MemoryBudget::with_limit(1024 * 1024 * 1024),
-    ));
-    CudaKernelProvider::new(device, memory).ok().map(Arc::new)
-}
 
 #[test]
 fn mc_gpu_device_counts_match_expected_small() {
