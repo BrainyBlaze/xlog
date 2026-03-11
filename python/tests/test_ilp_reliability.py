@@ -3,6 +3,10 @@
 
 See design doc Section 6.1. Validates train_only() converges on all 4 stages
 with seeds 0..4.
+
+Compile-once optimization: each stage is compiled once and reused across all 5
+seeds via reset_runtime(). Parity with fresh-compile behavior is verified in
+test_ilp_reset.py::test_compile_once_reuse_parity.
 """
 import pytest
 
@@ -12,7 +16,8 @@ pyxlog = pytest.importorskip("pyxlog")
 from conftest import skip_unless_pyxlog_cuda
 skip_unless_pyxlog_cuda()
 
-from pyxlog.ilp import train_only, TrainConfig
+from pyxlog.ilp import TrainConfig
+from pyxlog.ilp.trainer import _train_on_compiled
 
 # --- Stage definitions (matching ilp_showcase.py domains) ---
 
@@ -57,6 +62,19 @@ STAGES = [
     ("plus2", STAGE_4_SOURCE, STAGE_4_POS, STAGE_4_NEG, "W_p2"),
 ]
 
+# --- Compile-once fixtures (one per stage, shared across seeds) ---
+
+_compiled_cache: dict[str, object] = {}
+
+
+def _get_compiled(stage_name: str, source: str, config: TrainConfig) -> object:
+    """Return a compiled program for the stage, compiling only on first call."""
+    if stage_name not in _compiled_cache:
+        _compiled_cache[stage_name] = pyxlog.IlpProgramFactory.compile(
+            source, device=config.device, memory_mb=config.memory_mb,
+        )
+    return _compiled_cache[stage_name]
+
 
 @pytest.mark.slow
 @pytest.mark.parametrize("seed", range(5))
@@ -76,12 +94,11 @@ def test_alpha_reliability(stage_name, source, positives, negatives, mask_name, 
         device=0,
         memory_mb=512,
     )
-    result = train_only(
-        source=source,
-        mask_name=mask_name,
-        positives=positives,
-        negatives=negatives,
-        config=config,
+    prog = _get_compiled(stage_name, source, config)
+    result = _train_on_compiled(
+        prog, source, mask_name, positives, negatives, config,
+        _compute_holdout=False,
+        _reset_before_first_attempt=True,
     )
     assert result.converged, (
         f"Stage {stage_name} failed with seed={seed}: "
