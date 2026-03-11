@@ -23,21 +23,14 @@ time. It is intentionally conservative: if something is not listed here, it is n
 
 ## Verified Commands (Most Recent Run)
 
+All gates run in `--release` mode (matches CI and production validation).
+
 ### Rust workspace (excluding PyO3 extension crate)
 
 ```bash
-# On WSL, the CUDA driver libraries are typically under /usr/lib/wsl/lib
 export LD_LIBRARY_PATH=/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}
 
-cargo test --workspace --all-targets --exclude pyxlog -- --nocapture
-```
-
-### Probabilistic tier (host-io feature enabled)
-
-```bash
-export LD_LIBRARY_PATH=/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}
-
-cargo test -p xlog-prob --features host-io --all-targets -- --nocapture
+cargo test --workspace --all-targets --exclude pyxlog --release
 ```
 
 ### CUDA/PTX certification suite (full)
@@ -45,10 +38,16 @@ cargo test -p xlog-prob --features host-io --all-targets -- --nocapture
 ```bash
 export LD_LIBRARY_PATH=/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}
 
-cargo test -p xlog-cuda-tests --test certification_suite -- --nocapture
+cargo test -p xlog-cuda-tests --test certification_suite --release
 ```
 
-Most recent run (February 3, 2026): **206/206** passing (C01-C25 + G01-G08).
+Most recent run: **206/206** passing (C01-C25 + G01-G08).
+
+### PyO3 compile gate
+
+```bash
+cargo check -p pyxlog
+```
 
 ### Example harness and neural example smoke checks
 

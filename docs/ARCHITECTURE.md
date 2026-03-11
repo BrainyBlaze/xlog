@@ -321,22 +321,30 @@ XLOG no longer vendors a CPU knowledge compiler binary (D4/Boost); the exact inf
 
 ### Dependency Graph
 
+Production `[dependencies]` only (dev-dependencies omitted):
+
 ```
-xlog-logic ───────┐
-xlog-ir ──────────┼──> xlog-runtime ──┐
-xlog-stats ───────┘                   ├──> xlog-cuda
-xlog-core  <──────────────────────────┘
+Tier 0 (leaf):  xlog-core
 
-xlog-prob ────────────────> xlog-logic + xlog-cuda (+ xlog-core)
-xlog-gpu  ────────────────> xlog-logic + xlog-runtime + xlog-cuda
-pyxlog ──────────────> xlog-gpu + xlog-prob (+ xlog-cuda)
-xlog-cli  ────────────────> xlog-gpu + xlog-prob (+ xlog-cuda)
+Tier 1:         xlog-ir ──────────> xlog-core
+                xlog-cuda ─────────> xlog-core
+                xlog-stats ────────> xlog-core
+                xlog-neural ───────> xlog-core          (Wave 1: new edge)
 
-xlog-solve ───────────────┬──────────────> xlog-cuda
-                          └──────────────> xlog-core
+Tier 2:         xlog-logic ────────> xlog-core + xlog-ir + xlog-stats
+                xlog-runtime ──────> xlog-core + xlog-ir + xlog-cuda + xlog-stats
+                xlog-solve ────────> xlog-core + xlog-cuda
 
-xlog-cuda-tests ──────────────────────────> xlog-cuda (+ xlog-core)
+Tier 3:         xlog-gpu ─────────> xlog-core + xlog-cuda + xlog-ir + xlog-logic + xlog-runtime
+                xlog-prob ─────────> xlog-core + xlog-cuda + xlog-logic + xlog-runtime + xlog-solve + xlog-ir
+
+Tier 4:         pyxlog ────────────> 8 crates (integration hub)
+                xlog-cli ──────────> xlog-core + xlog-cuda + xlog-logic + xlog-gpu + xlog-prob
+                xlog-cuda-tests ───> xlog-cuda + xlog-core + xlog-solve
 ```
+
+**Wave 1 changes** (2026-03-10): removed `xlog-logic → xlog-runtime` (moved to dev-deps),
+removed `xlog-stats → xlog-cuda` (was unused), added `xlog-neural → xlog-core`.
 
 ### Crate Responsibilities
 
