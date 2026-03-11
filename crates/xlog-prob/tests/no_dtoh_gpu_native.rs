@@ -1,16 +1,25 @@
 use std::path::PathBuf;
 #[test]
 fn gpu_d4_compile_path_has_no_dtoh_calls() {
-    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path.push("src");
-    path.push("compilation");
-    path.push("gpu_d4.rs");
+    let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    dir.push("src");
+    dir.push("compilation");
+    dir.push("gpu_d4");
 
-    let text = std::fs::read_to_string(&path).expect("read gpu_d4.rs");
-    assert!(
-        !text.contains("dtoh_sync_copy_into"),
-        "gpu_d4.rs must not perform device->host reads"
-    );
+    // Read all .rs files in the gpu_d4 directory module.
+    for entry in std::fs::read_dir(&dir).expect("read gpu_d4 dir") {
+        let entry = entry.expect("dir entry");
+        let path = entry.path();
+        if path.extension().map_or(false, |e| e == "rs") {
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
+            assert!(
+                !text.contains("dtoh_sync_copy_into"),
+                "{} must not perform device->host reads",
+                path.display()
+            );
+        }
+    }
 }
 
 #[test]
