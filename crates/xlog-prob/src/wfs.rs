@@ -586,7 +586,7 @@ pub fn evaluate_wfs_rules(
 /// This is the original interface that takes predicate names. It creates
 /// propositional atoms (no arguments) for simple testing. For full integration
 /// with the provenance extractor, use `evaluate_wfs_rules` with proper grounding.
-pub fn evaluate_wfs_scc(scc_predicates: &[String], pir: &mut PirGraph) -> Result<WfsResult> {
+pub(crate) fn evaluate_wfs_scc(scc_predicates: &[String], pir: &mut PirGraph) -> Result<WfsResult> {
     evaluate_wfs_scc_with_config(scc_predicates, pir, &WfsConfig::default())
 }
 
@@ -595,7 +595,7 @@ pub fn evaluate_wfs_scc(scc_predicates: &[String], pir: &mut PirGraph) -> Result
 /// Creates propositional atoms (no arguments) from predicate names.
 /// This is suitable for testing but real programs should use `evaluate_wfs_rules`
 /// with properly grounded rules from the provenance extractor.
-pub fn evaluate_wfs_scc_with_config(
+pub(crate) fn evaluate_wfs_scc_with_config(
     scc_predicates: &[String],
     pir: &mut PirGraph,
     config: &WfsConfig,
