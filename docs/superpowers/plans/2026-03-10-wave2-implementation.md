@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Split `crates/xlog-cuda/src/provider.rs` (12,809 lines, 163 methods) into focused submodules and collapse type-specialized function families into generics using the `GpuScalar` trait from Wave 1.
+**Goal:** Split `crates/xlog-cuda/src/provider/mod.rs` (12,809 lines, 163 methods) into focused submodules and collapse type-specialized function families into generics using the `GpuScalar` trait from Wave 1.
 
 **Architecture:** Distributed `impl CudaKernelProvider` blocks across 10 submodules. Kernel loading consolidated via extended `kernel_manifest_data.rs`. Four type-specialized families (download_column, create_buffer_from_slice, filter, compare_columns) replaced with generic functions using turbofish syntax at call sites. Old functions coexist during migration, then are removed.
 
@@ -46,7 +46,7 @@ All paths relative to `crates/xlog-cuda/src/` unless otherwise noted.
 Pure structural change. Convert the single file into a module directory. No code changes.
 
 **Files:**
-- Rename: `crates/xlog-cuda/src/provider.rs` → `crates/xlog-cuda/src/provider/mod.rs`
+- Rename: `crates/xlog-cuda/src/provider/mod.rs` → `crates/xlog-cuda/src/provider/mod.rs`
 
 - [ ] **Step 1: Create provider directory and move file**
 
@@ -523,7 +523,7 @@ Then implement for each type. Cross-reference the kernel name constants from the
 
 **Important:** Read the `filter_kernels` module (mod.rs:447–480) to get the exact constant names and verify which types have fused-scan kernels. The table above is derived from the existing filter function implementations. u32 uses `FILTER_COMPARE_U32_SCAN_PHASE1`; verify f64 has an analogous `FILTER_COMPARE_F64_SCAN_PHASE1` by reading the filter_kernels module.
 
-**Note on f32:** A `FILTER_COMPARE_F32_SCAN_PHASE1` kernel constant exists in `filter_kernels` (mod.rs:457) and is loaded at provider.rs:963, but the current `filter_f32` function (mod.rs:5007) does NOT use the fused-scan path — it uses the mask+compact path via `compare_const_mask`. The plan maps f32 to `None` for `filter_scan_phase1_kernel()` to match the current runtime behavior. If a future optimization wants to wire up the fused-scan path for f32, that can be done by changing the trait impl.
+**Note on f32:** A `FILTER_COMPARE_F32_SCAN_PHASE1` kernel constant exists in `filter_kernels` (mod.rs:457) and is loaded at provider/mod.rs (pre-Wave-2 line 963), but the current `filter_f32` function (mod.rs:5007) does NOT use the fused-scan path — it uses the mask+compact path via `compare_const_mask`. The plan maps f32 to `None` for `filter_scan_phase1_kernel()` to match the current runtime behavior. If a future optimization wants to wire up the fused-scan path for f32, that can be done by changing the trait impl.
 
 **Note on i64:** No `filter_i64` function exists in the current codebase, but `FILTER_COMPARE_I64` and `FILTER_COMPARE_I64_COL` kernel constants exist. The generic `filter::<i64>()` will work via the mask+compact path, providing new functionality that wasn't previously exposed.
 

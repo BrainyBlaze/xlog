@@ -32,7 +32,7 @@
 
 **Files:**
 - Modify: `kernels/sat.cu`
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 - Modify: `crates/xlog-cuda/build.rs` (only if needed)
 
 **Step 1: Add GPU trap helper + assertion kernels**
@@ -48,7 +48,7 @@ Pass `const uint32_t* learned_count` (len=1) and read it on device.
 
 **Step 3: Update provider kernel name constants**
 
-In `crates/xlog-cuda/src/provider.rs`:
+In `crates/xlog-cuda/src/provider/mod.rs`:
 - Add `sat_kernels::SAT_ASSERT_STATUS`
 - Add `sat_kernels::SAT_ASSERT_OK`
 - Ensure PTX presence tests assert these symbols exist in `SAT_PTX`.
@@ -63,7 +63,7 @@ Expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add kernels/sat.cu crates/xlog-cuda/src/provider.rs
+git add kernels/sat.cu crates/xlog-cuda/src/provider/mod.rs
 git commit -m "cuda: add SAT verifier assertion kernels (zero host reads)"
 ```
 
@@ -73,7 +73,7 @@ git commit -m "cuda: add SAT verifier assertion kernels (zero host reads)"
 
 **Files:**
 - Modify: `kernels/sat.cu`
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 
 **Step 1: Add XGCF CNF totals kernel**
 
@@ -100,7 +100,7 @@ Expected: PASS.
 **Step 4: Commit**
 
 ```bash
-git add kernels/sat.cu crates/xlog-cuda/src/provider.rs
+git add kernels/sat.cu crates/xlog-cuda/src/provider/mod.rs
 git commit -m "cuda: compute XGCF->CNF totals on GPU (no host sizing reads)"
 ```
 

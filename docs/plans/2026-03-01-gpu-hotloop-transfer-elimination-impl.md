@@ -15,7 +15,7 @@
 **Files:**
 - Modify: `crates/xlog-cuda/src/memory.rs:365-406` (struct + constructor)
 - Modify: `crates/xlog-cuda/src/memory.rs:499-504` (test struct literal)
-- Modify: `crates/xlog-cuda/src/provider.rs:1843-1848` (destructuring site)
+- Modify: `crates/xlog-cuda/src/provider/mod.rs:1843-1848` (destructuring site)
 
 **Step 1: Add the `cached_row_count` field and accessors to CudaBuffer**
 
@@ -106,7 +106,7 @@ let buffer = CudaBuffer {
 let buffer = CudaBuffer::from_columns(Vec::new(), 100, d_num_rows, schema.clone());
 ```
 
-In `crates/xlog-cuda/src/provider.rs` around line 1843, add `..` rest pattern to the destructuring:
+In `crates/xlog-cuda/src/provider/mod.rs` around line 1843, add `..` rest pattern to the destructuring:
 ```rust
 // Before:
 let CudaBuffer {
@@ -135,7 +135,7 @@ Expected: All tests pass (the new field has a default via `from_columns`, so exi
 **Step 4: Commit**
 
 ```bash
-git add crates/xlog-cuda/src/memory.rs crates/xlog-cuda/src/provider.rs
+git add crates/xlog-cuda/src/memory.rs crates/xlog-cuda/src/provider/mod.rs
 git commit -m "feat(cuda): add AtomicU32 row-count cache to CudaBuffer"
 ```
 
@@ -144,13 +144,13 @@ git commit -m "feat(cuda): add AtomicU32 row-count cache to CudaBuffer"
 ### Task 2: Wire Row-Count Cache into Provider
 
 **Files:**
-- Modify: `crates/xlog-cuda/src/provider.rs:6969-6976` (device_row_count)
-- Modify: `crates/xlog-cuda/src/provider.rs:7158-7174` (buffer_from_columns)
-- Modify: `crates/xlog-cuda/src/provider.rs:6996-7007` (buffer_from_columns_with_device_count)
+- Modify: `crates/xlog-cuda/src/provider/mod.rs:6969-6976` (device_row_count)
+- Modify: `crates/xlog-cuda/src/provider/mod.rs:7158-7174` (buffer_from_columns)
+- Modify: `crates/xlog-cuda/src/provider/mod.rs:6996-7007` (buffer_from_columns_with_device_count)
 
 **Step 1: Modify `device_row_count` to check cache first**
 
-In `crates/xlog-cuda/src/provider.rs`, replace the `device_row_count` method (lines 6969-6976):
+In `crates/xlog-cuda/src/provider/mod.rs`, replace the `device_row_count` method (lines 6969-6976):
 
 ```rust
 fn device_row_count(&self, buffer: &CudaBuffer) -> Result<usize> {
@@ -168,7 +168,7 @@ Note: this also converts the D2H fallback from direct `device.inner().dtoh_sync_
 
 **Step 2: Modify `buffer_from_columns` to eagerly populate cache**
 
-In `crates/xlog-cuda/src/provider.rs`, replace the `buffer_from_columns` method (lines 7158-7174):
+In `crates/xlog-cuda/src/provider/mod.rs`, replace the `buffer_from_columns` method (lines 7158-7174):
 
 ```rust
 pub(crate) fn buffer_from_columns(
@@ -203,7 +203,7 @@ Expected: All 10 tests pass.
 **Step 5: Commit**
 
 ```bash
-git add crates/xlog-cuda/src/provider.rs
+git add crates/xlog-cuda/src/provider/mod.rs
 git commit -m "feat(cuda): wire row-count cache into device_row_count + buffer_from_columns"
 ```
 
@@ -221,7 +221,7 @@ Replace the function (lines 9-20) to use the buffer cache:
 
 First, make `device_row_count` public on `CudaKernelProvider` so external crates can route through it (it already has cache + tracked D2H from Task 2):
 
-In `crates/xlog-cuda/src/provider.rs`, change the method visibility (around line 6969):
+In `crates/xlog-cuda/src/provider/mod.rs`, change the method visibility (around line 6969):
 ```rust
 // Before:
 fn device_row_count(&self, buffer: &CudaBuffer) -> Result<usize> {
@@ -273,14 +273,14 @@ git commit -m "fix(runtime): route row-count bypasses through CudaBuffer cache"
 ### Task 4: Route Untracked D2H and H2D Through Tracked Wrappers
 
 **Files:**
-- Modify: `crates/xlog-cuda/src/provider.rs:8410` (membership_mask mask download — D2H)
-- Modify: `crates/xlog-cuda/src/provider.rs:10716,10744-10756` (extract_active_rule_indices — D2H)
-- Modify: `crates/xlog-cuda/src/provider.rs:10662` (extract_active_rule_indices — H2D)
-- Modify: `crates/xlog-cuda/src/provider.rs:5806` (create_buffer_from_u32_columns — H2D)
+- Modify: `crates/xlog-cuda/src/provider/mod.rs:8410` (membership_mask mask download — D2H)
+- Modify: `crates/xlog-cuda/src/provider/mod.rs:10716,10744-10756` (extract_active_rule_indices — D2H)
+- Modify: `crates/xlog-cuda/src/provider/mod.rs:10662` (extract_active_rule_indices — H2D)
+- Modify: `crates/xlog-cuda/src/provider/mod.rs:5806` (create_buffer_from_u32_columns — H2D)
 
 **Step 1: Convert `membership_mask` mask download to tracked**
 
-In `crates/xlog-cuda/src/provider.rs`, find the mask download in `membership_mask` (around line 8410):
+In `crates/xlog-cuda/src/provider/mod.rs`, find the mask download in `membership_mask` (around line 8410):
 
 ```rust
 // Before (around line 8406-8412):
@@ -299,7 +299,7 @@ self.dtoh_sync_copy_into_tracked(&d_has_match, &mut host_mask)?;
 
 **Step 2: Convert `extract_active_rule_indices` D2H calls to tracked**
 
-In `crates/xlog-cuda/src/provider.rs`, find `extract_active_rule_indices` and convert all 5 D2H calls:
+In `crates/xlog-cuda/src/provider/mod.rs`, find `extract_active_rule_indices` and convert all 5 D2H calls:
 
 ```rust
 // Line ~10716: count download
@@ -326,7 +326,7 @@ Note: `dtoh_sync_copy_into_tracked` uses `&self` (not `&self.device()`) and retu
 
 **Step 3: Convert step-loop H2D calls to tracked**
 
-`htod_sync_copy_into_tracked` already exists on `CudaKernelProvider` (provider.rs:1581). Route step-loop H2D paths through it:
+`htod_sync_copy_into_tracked` already exists on `CudaKernelProvider` (provider/mod.rs (pre-Wave-2 line 1581)). Route step-loop H2D paths through it:
 
 In `extract_active_rule_indices` (line ~10662), convert the count-register initialization:
 ```rust
@@ -354,10 +354,10 @@ Note: construction-time H2D (e.g., `buffer_from_columns` at line 7169 uploading 
 
 **Step 4: Verify no remaining untracked D2H in provider.rs**
 
-Run: `rg 'device.*\.inner\(\).*\.dtoh_sync_copy_into' crates/xlog-cuda/src/provider.rs`
+Run: `rg 'device.*\.inner\(\).*\.dtoh_sync_copy_into' crates/xlog-cuda/src/provider/mod.rs`
 Expected: Zero matches (all converted to tracked wrapper). If any remain, convert them too.
 
-Also check: `rg 'device\(\).*\.inner\(\).*\.dtoh_sync_copy_into' crates/xlog-cuda/src/provider.rs`
+Also check: `rg 'device\(\).*\.inner\(\).*\.dtoh_sync_copy_into' crates/xlog-cuda/src/provider/mod.rs`
 Expected: Zero matches.
 
 **Step 5: Build and run tests**
@@ -371,7 +371,7 @@ Expected: All 10 tests pass.
 **Step 6: Commit**
 
 ```bash
-git add crates/xlog-cuda/src/provider.rs
+git add crates/xlog-cuda/src/provider/mod.rs
 git commit -m "feat(cuda): route all provider D2H + step-loop H2D through tracked wrappers"
 ```
 
@@ -448,7 +448,7 @@ pub fn reset_host_transfer_stats(&self) {
 
 Ensure `use std::collections::HashMap;` is imported (may already be present).
 
-Verify that `CudaKernelProvider` has public methods `host_transfer_stats()` and `reset_host_transfer_stats()`. The explore found references at provider.rs:1532-1538. If these methods exist but return `HostTransferStats` struct, check if `HostTransferStats` has `dtoh_calls`, `dtoh_bytes`, `htod_calls`, `htod_bytes` fields (it does, based on the `snapshot()` method at line 707).
+Verify that `CudaKernelProvider` has public methods `host_transfer_stats()` and `reset_host_transfer_stats()`. The explore found references at provider/mod.rs (pre-Wave-2 line 1532)-1538. If these methods exist but return `HostTransferStats` struct, check if `HostTransferStats` has `dtoh_calls`, `dtoh_bytes`, `htod_calls`, `htod_bytes` fields (it does, based on the `snapshot()` method at line 707).
 
 **Step 4: Build and run test**
 

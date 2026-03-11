@@ -27,7 +27,7 @@
 Replace the three `\+` negation occurrences in the validation report plan with `not` to match the current grammar and examples elsewhere in the spec.
 
 ### CUDA Packaging
-Extend the `build.rs` kernel list to include `circuit` and `mc_sample`. This ensures `nvcc` builds `circuit.ptx` and `mc_sample.ptx` during Cargo builds, which are then embedded by `include_str!` in `crates/xlog-cuda/src/provider.rs`. The runtime continues to load these modules and resolve entry points as before.
+Extend the `build.rs` kernel list to include `circuit` and `mc_sample`. This ensures `nvcc` builds `circuit.ptx` and `mc_sample.ptx` during Cargo builds, which are then embedded by `include_str!` in `crates/xlog-cuda/src/provider/mod.rs`. The runtime continues to load these modules and resolve entry points as before.
 
 ### Runtime Configuration
 Introduce `Executor::new_with_config(provider, config)` storing the config in the executor. `Executor::new(provider)` delegates to `RuntimeConfig::default()` to preserve existing behavior. The recursive SCC loop uses `self.config.max_iterations` (cast to `usize`) and reports the configured limit in errors.

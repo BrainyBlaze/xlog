@@ -685,7 +685,7 @@ feature/arithmetic-expressions (12 commits)
 ├── crates/xlog-logic/src/lower.rs        (arithmetic lowering)
 ├── crates/xlog-ir/src/rir.rs             (Expr variants)
 ├── crates/xlog-runtime/src/executor.rs   (computed projections)
-├── crates/xlog-cuda/src/provider.rs      (arithmetic operations)
+├── crates/xlog-cuda/src/provider/mod.rs      (arithmetic operations)
 ├── crates/xlog-logic/tests/              (integration tests)
 └── docs/plans/                           (design + validation docs)
 ```

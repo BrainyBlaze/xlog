@@ -46,7 +46,7 @@ crates/xlog-cuda/src/
 |--------|-------------------|----------|---------|
 | `mod.rs` | 8–10 | ~800 | Struct definition, field accessors, `new()` (refactored), memory budget, d2h counter, device_row_count |
 | `kernel_loading.rs` | 2–3 | ~200 | Consumes/extends `kernel_manifest_data.rs`, `load_all_kernel_modules()` helper, warmup profiling |
-| `relational.rs` | ~20 | ~2,200 | hash_join (provider.rs:1845), hash_join_with_limit (provider.rs:1873), hash_join_v2 (provider.rs:7447), hash_join_v2_with_limit (provider.rs:7473), build_join_index_v2 (provider.rs:7495), hash_join_v2_with_index (provider.rs:7544), dedup (provider.rs:1998), dedup_sorted (provider.rs:2033), union (provider.rs:2217), diff (provider.rs:2341), union_gpu (provider.rs:2536), diff_gpu (provider.rs:2592), sort (provider.rs:3793), build_hash_table_u64 (provider.rs:8025), membership_mask (provider.rs:8658), membership_mask_device (provider.rs:8534). Also includes extract_column (provider.rs:10022), extract_active_rule_indices (provider.rs:11247). |
+| `relational.rs` | ~20 | ~2,200 | hash_join, hash_join_with_limit, hash_join_v2, hash_join_v2_with_limit, build_join_index_v2, hash_join_v2_with_index, dedup, dedup_sorted, union, diff, union_gpu, diff_gpu, sort, build_hash_table_u64, membership_mask, membership_mask_device, extract_column, extract_active_rule_indices |
 | `filter.rs` | ~4 | ~400 | Generic `filter<T: GpuScalar>()`, `compare_columns<T: GpuScalar>()`, mask composition (collapsed from 18 type-specialized fns) |
 | `groupby.rs` | ~5 | ~700 | groupby_agg, groupby_multi_agg, count_distinct |
 | `arithmetic.rs` | ~12 | ~600 | add/sub/mul/div/mod/abs/negate/pow/cast columns, binary/unary dispatch |

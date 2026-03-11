@@ -59,7 +59,7 @@ cargo test -p xlog-prob
 
 **Files:**
 - Modify: `kernels/circuit.cu` (append new kernel)
-- Modify: `crates/xlog-cuda/src/provider.rs:421-427` (register new kernel name)
+- Modify: `crates/xlog-cuda/src/provider/mod.rs:421-427` (register new kernel name)
 
 **Context:** The forward path already has `xgcf_eval_all_levels_cached` (circuit.cu:585-703) which runs all levels in a single kernel using `meta_num_levels[slot]`. The backward path has NO equivalent — it launches 3 separate kernels per level from the CPU. We need `xgcf_backward_all_levels_cached` that does the same level loop internally.
 
@@ -260,7 +260,7 @@ nvcc -ptx -arch=sm_80 kernels/circuit.cu -o kernels/circuit.ptx
 
 **Step 5: Register kernel name**
 
-In `crates/xlog-cuda/src/provider.rs`, add after line 427:
+In `crates/xlog-cuda/src/provider/mod.rs`, add after line 427:
 
 ```rust
 pub const XGCF_BACKWARD_ALL_LEVELS_CACHED: &str = "xgcf_backward_all_levels_cached";
@@ -271,7 +271,7 @@ And register it in the PTX loading section (~line 938) alongside the other circu
 **Step 6: Commit**
 
 ```bash
-git add kernels/circuit.cu kernels/circuit.ptx crates/xlog-cuda/src/provider.rs
+git add kernels/circuit.cu kernels/circuit.ptx crates/xlog-cuda/src/provider/mod.rs
 git commit -m "feat(gpu): add fused backward XGCF kernel (xgcf_backward_all_levels_cached)"
 ```
 

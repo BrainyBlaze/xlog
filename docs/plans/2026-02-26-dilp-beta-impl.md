@@ -32,7 +32,7 @@ cargo test --workspace --all-targets --exclude pyxlog --release
 - Rust PyO3 bindings: `crates/pyxlog/src/lib.rs` (CompiledIlpProgram struct at line ~3857)
 - ILP registry: `crates/xlog-runtime/src/ilp_registry.rs`
 - Executor TMJ dispatch: `crates/xlog-runtime/src/executor.rs` (line ~2743: `execute_tensor_masked_join`)
-- GPU extraction kernel: `crates/xlog-cuda/src/provider.rs` (line ~10494: `extract_active_rule_indices`)
+- GPU extraction kernel: `crates/xlog-cuda/src/provider/mod.rs` (line ~10494: `extract_active_rule_indices`)
 - Python trainer: `crates/pyxlog/python/pyxlog/ilp/trainer.py`
 - Python types: `crates/pyxlog/python/pyxlog/ilp/types.py`
 - Python exceptions: `crates/pyxlog/python/pyxlog/ilp/exceptions.py`

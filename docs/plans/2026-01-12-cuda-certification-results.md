@@ -361,7 +361,7 @@ Cross-product testing of Size × Distribution × Type.
 
 ### BUG #1: Sort Only Supported u32 Keys (CRITICAL) - FIXED
 
-**Fix Location:** `provider.rs:2582`
+**Fix Location:** `provider/mod.rs (pre-Wave-2 line 2582)`
 
 **Solution:** Rewrote `sort()` to support multi-column sorting and all scalar key types by:
 - CPU-generating a permutation array
@@ -369,7 +369,7 @@ Cross-product testing of Size × Distribution × Type.
 
 ### BUG #2: Large-Mask Prefix Sum Overflow (HIGH) - FIXED
 
-**Fix Location:** `provider.rs:2461`
+**Fix Location:** `provider/mod.rs (pre-Wave-2 line 2461)`
 
 **Solution:** Fixed `filter_by_mask` for >65k elements and very large masks by:
 - CPU-scanning block_sums offsets
@@ -377,7 +377,7 @@ Cross-product testing of Size × Distribution × Type.
 
 ### BUG #3: Legacy Hash Join Schema Mismatch (MEDIUM) - FIXED
 
-**Fix Location:** `provider.rs:410`
+**Fix Location:** `provider/mod.rs (pre-Wave-2 line 410)`
 
 **Solution:** Fixed by delegating to v2 inner join implementation with natural-join column layout (eliminates schema/arity panic).
 

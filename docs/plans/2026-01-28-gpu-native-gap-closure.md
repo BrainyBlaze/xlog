@@ -547,7 +547,7 @@ git commit -m "feat: add SAT/CDCL certification category"
 - Modify: `crates/xlog-prob/src/mc.rs`
 - Modify: `crates/xlog-prob/src/lib.rs`
 - Modify: `crates/xlog-runtime/src/executor.rs`
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 - Create: `kernels/mc_eval.cu`
 - Test: `crates/xlog-prob/tests/gpu_mc_vs_cpu.rs`
 
@@ -596,7 +596,7 @@ Expected: PASS
 **Step 5: Commit**
 
 ```bash
-git add crates/xlog-prob/src/mc.rs crates/xlog-runtime/src/executor.rs crates/xlog-cuda/src/provider.rs kernels/mc_eval.cu crates/xlog-prob/tests/gpu_mc_vs_cpu.rs
+git add crates/xlog-prob/src/mc.rs crates/xlog-runtime/src/executor.rs crates/xlog-cuda/src/provider/mod.rs kernels/mc_eval.cu crates/xlog-prob/tests/gpu_mc_vs_cpu.rs
 git commit -m "feat: add GPU-native Monte Carlo evaluation"
 ```
 

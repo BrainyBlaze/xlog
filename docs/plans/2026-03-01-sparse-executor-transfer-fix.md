@@ -15,11 +15,11 @@
 ### Task 1: Wire row-count cache into provider.device_row_count
 
 **Files:**
-- Modify: `crates/xlog-cuda/src/provider.rs:6970-6977`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs:6970-6977`
 
 **Step 1: Modify device_row_count to check cache first**
 
-In `crates/xlog-cuda/src/provider.rs`, replace the `device_row_count` method (lines 6970-6977):
+In `crates/xlog-cuda/src/provider/mod.rs`, replace the `device_row_count` method (lines 6970-6977):
 
 ```rust
 fn device_row_count(&self, buffer: &CudaBuffer) -> Result<usize> {
@@ -38,7 +38,7 @@ fn device_row_count(&self, buffer: &CudaBuffer) -> Result<usize> {
 
 **Step 2: Wire cache into buffer_from_columns**
 
-In `crates/xlog-cuda/src/provider.rs`, replace `buffer_from_columns` (lines 7159-7175). It already knows the row count (`row_cap`) and uploads it — use `from_columns_with_host_count` to populate the cache at construction:
+In `crates/xlog-cuda/src/provider/mod.rs`, replace `buffer_from_columns` (lines 7159-7175). It already knows the row count (`row_cap`) and uploads it — use `from_columns_with_host_count` to populate the cache at construction:
 
 ```rust
 pub(crate) fn buffer_from_columns(
@@ -68,7 +68,7 @@ Expected: All existing tests pass (cache is transparent).
 **Step 4: Commit**
 
 ```bash
-git add crates/xlog-cuda/src/provider.rs
+git add crates/xlog-cuda/src/provider/mod.rs
 git commit -m "perf(cuda): wire row-count cache into provider.device_row_count + buffer_from_columns"
 ```
 
@@ -537,7 +537,7 @@ Expected: All Rust tests pass.
 **Step 4: Commit**
 
 ```bash
-git add crates/pyxlog/src/lib.rs crates/xlog-cuda/src/provider.rs
+git add crates/pyxlog/src/lib.rs crates/xlog-cuda/src/provider/mod.rs
 git commit -m "feat(pyxlog): DLPack-native set_rule_mask_sparse — Rust owns top-k, no Python N^3"
 ```
 

@@ -383,7 +383,7 @@ extern "C" __global__ void filter_compare_f32_scan_phase1(
 
 **Step 2: Add kernel constant to provider.rs**
 
-In `crates/xlog-cuda/src/provider.rs`, find the kernel constants section (around line 186) and add:
+In `crates/xlog-cuda/src/provider/mod.rs`, find the kernel constants section (around line 186) and add:
 
 ```rust
     pub const FILTER_COMPARE_F32_SCAN_PHASE1: &str = "filter_compare_f32_scan_phase1";
@@ -396,7 +396,7 @@ Run: `cargo build -p xlog-cuda --release 2>&1 | tail -3`
 **Step 4: Commit**
 
 ```bash
-git add kernels/filter.cu crates/xlog-cuda/src/provider.rs
+git add kernels/filter.cu crates/xlog-cuda/src/provider/mod.rs
 git commit -m "feat(cuda): add filter_compare_f32_scan_phase1 with total ordering"
 ```
 
@@ -1069,7 +1069,7 @@ git commit -m "test(cuda): register c25_float_filter in certification suite"
 ## Task 10: Add Missing Provider Methods
 
 **Files:**
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 - Modify: `crates/xlog-cuda-tests/src/harness/provider.rs`
 
 **Step 1: Check what methods are missing and add them**
@@ -1097,7 +1097,7 @@ Fix any missing method errors by adding stubs or implementations.
 **Step 3: Commit**
 
 ```bash
-git add crates/xlog-cuda/src/provider.rs crates/xlog-cuda-tests/src/harness/provider.rs
+git add crates/xlog-cuda/src/provider/mod.rs crates/xlog-cuda-tests/src/harness/provider.rs
 git commit -m "feat(cuda): add provider methods for f32/f64 filter tests"
 ```
 

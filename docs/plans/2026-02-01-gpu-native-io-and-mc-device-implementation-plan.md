@@ -14,7 +14,7 @@
 
 **Files:**
 - Modify: `crates/xlog-cuda/Cargo.toml`
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 - Modify: `crates/xlog-cuda/src/arrow_device.rs`
 - Test: `crates/xlog-cuda/tests/arrow_device_import.rs`
 
@@ -48,7 +48,7 @@ Expected: PASS (or skipped if CUDA unavailable).
 **Step 5: Commit**
 
 ```bash
-git add crates/xlog-cuda/Cargo.toml crates/xlog-cuda/src/provider.rs crates/xlog-cuda/src/arrow_device.rs crates/xlog-cuda/tests/arrow_device_import.rs
+git add crates/xlog-cuda/Cargo.toml crates/xlog-cuda/src/provider/mod.rs crates/xlog-cuda/src/arrow_device.rs crates/xlog-cuda/tests/arrow_device_import.rs
 git commit -m "cuda: add experimental Arrow device import"
 ```
 

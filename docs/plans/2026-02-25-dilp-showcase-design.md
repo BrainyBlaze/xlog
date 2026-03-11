@@ -25,7 +25,7 @@ converge to the correct target rule.
 
 2. **Budget-aware hard mask (k ≤ 32).** `max_active_rules` is fixed at 32 in
    lowering (`lower.rs:524`), and the GPU kernel truncates by M_soft priority
-   (`provider.rs:10616`). Per-(i,j) argmax produces up to N² entries
+   (`provider/mod.rs (pre-Wave-2 line 10616)`). Per-(i,j) argmax produces up to N² entries
    (N=7 → 49 > 32). Python must pre-select global top-k in the hard mask to
    stay in sync with what the executor actually processes.
 

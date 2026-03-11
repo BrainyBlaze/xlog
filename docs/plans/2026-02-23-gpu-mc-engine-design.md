@@ -42,7 +42,7 @@ computation per sample is fast; the overhead is host orchestration and
 device memory management churn.
 
 Additional hot-path issues:
-- `compact_buffer_by_device_mask_device_count` at `provider.rs:5142` has a
+- `compact_buffer_by_device_mask_device_count` at `provider/mod.rs (pre-Wave-2 line 5142)` has a
   `device.synchronize()` that blocks the host on every compaction call
 - `device_row_count_u32` at `mc.rs:1065` does a DTOH copy per call site
 - `CudaBuffer::is_empty()` checks `row_cap` (capacity), not the device-resident
@@ -73,7 +73,7 @@ Target: each test completes in <2s.
 
 ### 0.3 Remove hot-path synchronize in compaction
 
-Remove `self.device.synchronize()?` at `provider.rs:5142` in
+Remove `self.device.synchronize()?` at `provider/mod.rs (pre-Wave-2 line 5142)` in
 `compact_buffer_by_device_mask_device_count`. Same-stream kernel ordering
 guarantees correctness without an explicit sync.
 
@@ -113,7 +113,7 @@ extern "C" __global__ void mc_sample_bernoulli(
 }
 ```
 
-And update `sample_bernoulli_matrix_device` in `provider.rs:1227` to accept
+And update `sample_bernoulli_matrix_device` in `provider/mod.rs (pre-Wave-2 line 1227)` to accept
 and pass through the offset. This enables per-batch sampling with
 deterministic global indexing.
 
@@ -346,7 +346,7 @@ This is deferred to a follow-up design.
 |------|--------|
 | `crates/xlog-prob/src/mc.rs` | Replace per-sample loop with batched world-tagged execution |
 | `crates/xlog-runtime/src/executor.rs` | Add `ExecutionContext`, world-aware operator dispatch |
-| `crates/xlog-cuda/src/provider.rs` | Remove hot-path sync; add `sample_offset` to sampler; batch materialization |
+| `crates/xlog-cuda/src/provider/mod.rs` | Remove hot-path sync; add `sample_offset` to sampler; batch materialization |
 | `kernels/mc_sample.cu` | Add `sample_offset` parameter |
 | `kernels/mc_eval.cu` | New kernels: `mc_materialize_batch`, `mc_count_query_worlds` |
 | `crates/xlog-prob/tests/mc.rs` | Mark heavy tests `#[ignore]`, add fast smoke tests |

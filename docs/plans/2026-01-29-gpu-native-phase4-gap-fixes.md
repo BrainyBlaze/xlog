@@ -14,7 +14,7 @@
 
 **Files:**
 - Modify: `crates/xlog-cuda/src/memory.rs`
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 - Test: `crates/xlog-cuda/tests/device_row_counts.rs`
 
 **Step 1: Write the failing test**
@@ -96,7 +96,7 @@ impl CudaBuffer {
 ```
 
 ```rust
-// crates/xlog-cuda/src/provider.rs (helpers)
+// crates/xlog-cuda/src/provider/mod.rs (helpers)
 pub fn create_empty_buffer(&self, schema: Schema) -> Result<CudaBuffer> {
     let mut d_num_rows = self.memory.alloc::<u32>(1)?;
     self.device.inner().htod_sync_copy_into(&[0u32], &mut d_num_rows)
@@ -122,7 +122,7 @@ Expected: PASS
 **Step 5: Commit**
 
 ```bash
-git add crates/xlog-cuda/src/memory.rs crates/xlog-cuda/src/provider.rs crates/xlog-cuda/tests/device_row_counts.rs
+git add crates/xlog-cuda/src/memory.rs crates/xlog-cuda/src/provider/mod.rs crates/xlog-cuda/tests/device_row_counts.rs
 
 git commit -m "feat(cuda): add device-resident row counts to CudaBuffer"
 ```
@@ -132,7 +132,7 @@ git commit -m "feat(cuda): add device-resident row counts to CudaBuffer"
 ### Task 2: GPU-only clone/union paths (remove MVP/host clone)
 
 **Files:**
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 - Test: `crates/xlog-cuda/tests/device_row_counts.rs`
 
 **Step 1: Write the failing test**
@@ -198,7 +198,7 @@ Expected: FAIL (clone uses host path, union uses concat and keeps duplicates)
 **Step 3: Write minimal implementation**
 
 ```rust
-// crates/xlog-cuda/src/provider.rs
+// crates/xlog-cuda/src/provider/mod.rs
 pub fn union(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
     self.union_gpu(a, b)
 }
@@ -226,7 +226,7 @@ Expected: PASS
 **Step 5: Commit**
 
 ```bash
-git add crates/xlog-cuda/src/provider.rs crates/xlog-cuda/tests/device_row_counts.rs
+git add crates/xlog-cuda/src/provider/mod.rs crates/xlog-cuda/tests/device_row_counts.rs
 
 git commit -m "feat(cuda): remove host clone and dedup union via union_gpu"
 ```
@@ -237,7 +237,7 @@ git commit -m "feat(cuda): remove host clone and dedup union via union_gpu"
 
 **Files:**
 - Modify: `kernels/filter.cu`
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 - Test: `crates/xlog-cuda/tests/compact_device_count.rs`
 
 **Step 1: Write the failing test**
@@ -318,7 +318,7 @@ extern "C" __global__ void capture_compact_count(
 ```
 
 ```rust
-// crates/xlog-cuda/src/provider.rs
+// crates/xlog-cuda/src/provider/mod.rs
 pub fn compact_buffer_by_device_mask_counted(
     &self,
     input: &CudaBuffer,
@@ -380,7 +380,7 @@ Expected: PASS
 **Step 5: Commit**
 
 ```bash
-git add kernels/filter.cu crates/xlog-cuda/src/provider.rs crates/xlog-cuda/tests/compact_device_count.rs
+git add kernels/filter.cu crates/xlog-cuda/src/provider/mod.rs crates/xlog-cuda/tests/compact_device_count.rs
 
 git commit -m "feat(cuda): compute compaction counts on device"
 ```
@@ -390,7 +390,7 @@ git commit -m "feat(cuda): compute compaction counts on device"
 ### Task 4: GPU groupby path (remove CPU boundary/group-id fallback)
 
 **Files:**
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 - Modify: `kernels/groupby.cu`
 - Test: `crates/xlog-cuda/tests/groupby_gpu.rs`
 
@@ -455,7 +455,7 @@ Expected: FAIL (groupby_agg uses CPU boundary/group-id fallback and single-key)
 **Step 3: Write minimal implementation**
 
 ```rust
-// crates/xlog-cuda/src/provider.rs
+// crates/xlog-cuda/src/provider/mod.rs
 pub fn groupby_agg(
     &self,
     input: &CudaBuffer,
@@ -486,7 +486,7 @@ extern "C" __global__ void capture_num_groups(
 ```
 
 ```rust
-// crates/xlog-cuda/src/provider.rs (groupby_multi_agg)
+// crates/xlog-cuda/src/provider/mod.rs (groupby_multi_agg)
 let mut d_num_groups = self.memory.alloc::<u32>(1)?;
 let capture_groups = device
     .get_func(GROUPBY_MODULE, groupby_kernels::CAPTURE_NUM_GROUPS)
@@ -512,7 +512,7 @@ Expected: PASS
 **Step 5: Commit**
 
 ```bash
-git add kernels/groupby.cu crates/xlog-cuda/src/provider.rs crates/xlog-cuda/tests/groupby_gpu.rs
+git add kernels/groupby.cu crates/xlog-cuda/src/provider/mod.rs crates/xlog-cuda/tests/groupby_gpu.rs
 
 git commit -m "feat(cuda): move groupby to GPU-only boundaries and counts"
 ```
@@ -523,7 +523,7 @@ git commit -m "feat(cuda): move groupby to GPU-only boundaries and counts"
 
 **Files:**
 - Modify: `kernels/join.cu`
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 - Test: `crates/xlog-cuda/tests/pack_keys_gpu.rs`
 
 **Step 1: Write the failing test**
@@ -627,7 +627,7 @@ extern "C" __global__ void pack_and_hash_keys_generic(
 ```
 
 ```rust
-// crates/xlog-cuda/src/provider.rs (compute_hashes_and_pack_keys)
+// crates/xlog-cuda/src/provider/mod.rs (compute_hashes_and_pack_keys)
 fn compute_hashes_and_pack_keys(&self, buffer: &CudaBuffer, key_cols: &[usize]) -> Result<PackedKeyData> {
     if key_cols.is_empty() {
         return Ok(PackedKeyData { hashes: self.memory.alloc::<u64>(0)?, packed_keys: self.memory.alloc::<u8>(0)?, key_bytes: 0 });
@@ -644,7 +644,7 @@ Expected: PASS
 **Step 5: Commit**
 
 ```bash
-git add kernels/join.cu crates/xlog-cuda/src/provider.rs crates/xlog-cuda/tests/pack_keys_gpu.rs
+git add kernels/join.cu crates/xlog-cuda/src/provider/mod.rs crates/xlog-cuda/tests/pack_keys_gpu.rs
 
 git commit -m "feat(cuda): add generic GPU key packing (no CPU fallback)"
 ```

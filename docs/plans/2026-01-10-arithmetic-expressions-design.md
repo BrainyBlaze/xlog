@@ -286,7 +286,7 @@ fib(N, F) :-
 | `crates/xlog-logic/src/lower.rs` | `arith_to_expr`, `infer_arith_type`, `lower_is_expr` |
 | `crates/xlog-ir/src/rir.rs` | Add arithmetic to `Expr`, add `ProjectExpr` |
 | `crates/xlog-runtime/src/executor.rs` | Execute `ProjectExpr::Computed` |
-| `crates/xlog-cuda/src/provider.rs` | Compile expressions to bytecode |
+| `crates/xlog-cuda/src/provider/mod.rs` | Compile expressions to bytecode |
 | `crates/xlog-cuda/kernels/project.cu` | NEW: Projection with expression evaluation |
 
 ## Testing Strategy

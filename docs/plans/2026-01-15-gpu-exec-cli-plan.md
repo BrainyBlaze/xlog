@@ -97,7 +97,7 @@ git commit -m "feat(core): add scalar type codes for kernels"
 **Files:**
 - Create: `kernels/arith.cu`
 - Modify: `crates/xlog-cuda/build.rs`
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 - Test: `crates/xlog-cuda/tests/ptx_validation.rs`
 
 **Step 1: Write failing test for ARITH PTX presence**
@@ -504,7 +504,7 @@ let kernels = [
 
 **Step 5: Load ARITH module in provider**
 
-Add to `crates/xlog-cuda/src/provider.rs`:
+Add to `crates/xlog-cuda/src/provider/mod.rs`:
 
 ```rust
 const ARITH_PTX: &str = include_str!("../../../kernels/arith.ptx");
@@ -571,7 +571,7 @@ Expected: PASS.
 **Step 7: Commit**
 
 ```bash
-git add kernels/arith.cu crates/xlog-cuda/build.rs crates/xlog-cuda/src/provider.rs crates/xlog-cuda-tests/tests/ptx_validation.rs
+git add kernels/arith.cu crates/xlog-cuda/build.rs crates/xlog-cuda/src/provider/mod.rs crates/xlog-cuda-tests/tests/ptx_validation.rs
 git commit -m "feat(cuda): add arithmetic PTX module"
 ```
 
@@ -580,7 +580,7 @@ git commit -m "feat(cuda): add arithmetic PTX module"
 ### Task 3: Wire GPU arithmetic ops in provider
 
 **Files:**
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 - Test: `crates/xlog-cuda/tests/type_coverage_tests.rs`
 
 **Step 1: Write failing tests for numeric types**
@@ -632,7 +632,7 @@ Expected: FAIL (new kernels not wired, or missing download helpers for i32/f32 i
 
 **Step 3: Implement GPU arithmetic dispatch**
 
-In `crates/xlog-cuda/src/provider.rs`, replace `binary_arith_op`, `abs_column`, `pow_columns`, and `cast_column` to use ARITH kernels. Use op codes matching `arith.cu`.
+In `crates/xlog-cuda/src/provider/mod.rs`, replace `binary_arith_op`, `abs_column`, `pow_columns`, and `cast_column` to use ARITH kernels. Use op codes matching `arith.cu`.
 
 Add helper to launch binary ops:
 
@@ -752,7 +752,7 @@ Expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add crates/xlog-cuda/src/provider.rs crates/xlog-cuda/tests/type_coverage_tests.rs
+git add crates/xlog-cuda/src/provider/mod.rs crates/xlog-cuda/tests/type_coverage_tests.rs
  git commit -m "feat(cuda): run arithmetic ops on GPU"
 ```
 
@@ -762,7 +762,7 @@ git add crates/xlog-cuda/src/provider.rs crates/xlog-cuda/tests/type_coverage_te
 
 **Files:**
 - Modify: `kernels/filter.cu`
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 - Test: `crates/xlog-cuda/tests/filter_tests.rs`
 
 **Step 1: Add failing tests for new types and column-column compare**
@@ -870,7 +870,7 @@ extern "C" __global__ void filter_compare_u32_col(
 
 **Step 4: Wire provider methods**
 
-In `crates/xlog-cuda/src/provider.rs`:
+In `crates/xlog-cuda/src/provider/mod.rs`:
 - Add new kernel names in `filter_kernels` for the added kernels.
 - Load them in module init.
 - Add methods:
@@ -895,7 +895,7 @@ Expected: PASS.
 **Step 6: Commit**
 
 ```bash
-git add kernels/filter.cu crates/xlog-cuda/src/provider.rs crates/xlog-cuda/tests/filter_tests.rs
+git add kernels/filter.cu crates/xlog-cuda/src/provider/mod.rs crates/xlog-cuda/tests/filter_tests.rs
 git commit -m "feat(cuda): add typed filter compares and column-column masks"
 ```
 
@@ -1000,7 +1000,7 @@ git commit -m "feat(runtime): execute filters on GPU via mask DAG"
 ### Task 6: GPU groupby IDs and key extraction
 
 **Files:**
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 - Modify: `kernels/groupby.cu`
 - Modify: `kernels/pack.cu` (if needed)
 - Test: `crates/xlog-cuda/tests/groupby_tests.rs`
@@ -1044,7 +1044,7 @@ Expected: FAIL (device key extraction not implemented).
 
 **Step 3: Implement GPU group IDs and key extraction**
 
-In `crates/xlog-cuda/src/provider.rs`:
+In `crates/xlog-cuda/src/provider/mod.rs`:
 - Replace CPU boundary downloads with device scans using `multiblock_scan_phase1` + `multiblock_scan_phase3`.
 - Use `detect_group_boundaries` to produce device boundary mask.
 - Compute group IDs on device using prefix sum of boundaries.
@@ -1079,7 +1079,7 @@ Expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add crates/xlog-cuda/src/provider.rs kernels/groupby.cu kernels/pack.cu crates/xlog-cuda/tests/groupby_tests.rs
+git add crates/xlog-cuda/src/provider/mod.rs kernels/groupby.cu kernels/pack.cu crates/xlog-cuda/tests/groupby_tests.rs
 git commit -m "feat(cuda): compute groupby ids and keys on device"
 ```
 

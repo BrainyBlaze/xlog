@@ -66,7 +66,7 @@ fn device_row_count(&self, buffer: &CudaBuffer) -> Result<usize> {
 
 **Struct-literal and destructuring sites** that must be updated when adding the new field:
 - `crates/xlog-cuda/src/memory.rs:499` — direct struct literal construction in tests (`CudaBuffer { columns, row_cap, d_num_rows, schema }`)
-- `crates/xlog-cuda/src/provider.rs:1843` — destructuring pattern (`let CudaBuffer { columns, row_cap, d_num_rows, schema: _ } = combined`)
+- `crates/xlog-cuda/src/provider/mod.rs:1843` — destructuring pattern (`let CudaBuffer { columns, row_cap, d_num_rows, schema: _ } = combined`)
 - All test files using struct literal syntax (search for `CudaBuffer {`)
 - Strategy: add `cached_row_count: AtomicU32::new(u32::MAX)` in `from_columns`, then convert struct-literal sites to use `from_columns` or add `..` rest pattern for destructuring.
 
@@ -222,7 +222,7 @@ Remaining D2H in the full-step window is dominated by the evaluate phase (~25 ca
 4. **Transfer profiling test** (concrete thresholds — all thresholds use `host_transfer_stats()` which only counts provider-tracked transfers, NOT PyTorch `.item()` or other CUDA runtime transfers):
    - **Post-evaluate window**: Assert `host_transfer_stats().dtoh_calls` ≤ `E_post + R_pos + R_neg + 2` per step, where E_post = number of contributing tagged entries, R_pos/R_neg = distinct relations with positives/negatives. For the reach benchmark (2 pos, 0 neg, 1 relation): threshold = 2 + 1 + 0 + 2 = **5**.
    - **Full-step window**: Assert `host_transfer_stats().dtoh_calls` ≤ `E_eval + E_post + 5` (5 = margin for device-computed buffers' first-read lazy cache misses). S is excluded because PyTorch `.item()` calls are outside provider tracking. For reach: threshold = 25 + 2 + 5 = **32**.
-   - **Tracked H2D uploads**: Assert `host_transfer_stats().htod_calls` == **0** in the step loop body (all facts pre-uploaded before the loop). This assertion covers only provider-tracked H2D paths. Direct `htod_sync_copy_into` calls that bypass the tracked wrapper (e.g., `buffer_from_columns` at provider.rs:7169) are outside tracking scope. To make this assertion sound, the H2D tracking wrapper (`htod_sync_copy_into_tracked`) must also be added as part of Section 3's "route all transfers through tracked wrappers" work — same pattern as the D2H wrapper conversion. Untracked H2D paths that are NOT called during the step loop (only during construction/compilation) do not affect the assertion.
+   - **Tracked H2D uploads**: Assert `host_transfer_stats().htod_calls` == **0** in the step loop body (all facts pre-uploaded before the loop). This assertion covers only provider-tracked H2D paths. Direct `htod_sync_copy_into` calls that bypass the tracked wrapper (e.g., `buffer_from_columns` at provider/mod.rs (pre-Wave-2 line 7169)) are outside tracking scope. To make this assertion sound, the H2D tracking wrapper (`htod_sync_copy_into_tracked`) must also be added as part of Section 3's "route all transfers through tracked wrappers" work — same pattern as the D2H wrapper conversion. Untracked H2D paths that are NOT called during the step loop (only during construction/compilation) do not affect the assertion.
    - Test uses the reach benchmark with known positive counts so thresholds are deterministic. If actual counts exceed thresholds, the test fails with a diagnostic message showing the breakdown.
 5. **Reliability gate**: 20/20 alpha reliability suite passes unchanged
 6. **Semantic parity**: Loss and convergence behavior identical (same test assertions)

@@ -66,7 +66,7 @@ All tasks in this plan are implemented and merged into `main`, including the P3 
 - `Cargo.toml` (workspace members, workspace deps)
 
 **Notes:**
-- Keep CUDA kernels for circuits in `kernels/` alongside existing modules; load via `crates/xlog-cuda/src/provider.rs`.
+- Keep CUDA kernels for circuits in `kernels/` alongside existing modules; load via `crates/xlog-cuda/src/provider/mod.rs`.
 
 ### Task 1.2: CPU D4/DDNNF compilation removed (GPU-native only)
 This plan originally included a CPU pipeline that vendored D4 in-repo (`vendor/d4` + `crates/xlog-prob/build.rs`).
@@ -190,7 +190,7 @@ production exact inference path.
 ### Task 6.2: Add CUDA kernels for circuit forward/backward
 **Create/Modify:**
 - `kernels/circuit.cu` (new PTX module)
-- `crates/xlog-cuda/src/provider.rs` (load module, expose entrypoints)
+- `crates/xlog-cuda/src/provider/mod.rs` (load module, expose entrypoints)
 - `crates/xlog-prob/src/gpu.rs` (safe wrappers around provider calls)
 
 **Kernels:**

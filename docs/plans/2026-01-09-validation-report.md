@@ -137,7 +137,7 @@ Union (concat + sort + dedup) and difference (sorted diff mark) are correct.
 **Problem:** Single-block implementation limits to 256 elements.
 
 ```rust
-// provider.rs:1789
+// provider/mod.rs (pre-Wave-2 line 1789)
 if mask.len() > 256 {
     return Err(XlogError::Kernel("prefix_sum_mask limited to 256 elements"));
 }
@@ -179,7 +179,7 @@ if mask.len() > 256 {
 **Problem:** Sum computed as u64 but truncated to u32.
 
 ```rust
-// provider.rs:1592
+// provider/mod.rs (pre-Wave-2 line 1592)
 host_output.iter().flat_map(|v| (*v as u32).to_le_bytes()).collect()
 ```
 
@@ -402,7 +402,7 @@ cargo test --workspace -- --nocapture
 | Component | File |
 |-----------|------|
 | Executor | `crates/xlog-runtime/src/executor.rs` |
-| Kernel Provider | `crates/xlog-cuda/src/provider.rs` |
+| Kernel Provider | `crates/xlog-cuda/src/provider/mod.rs` |
 | Memory Manager | `crates/xlog-cuda/src/memory.rs` |
 | Join Kernels | `kernels/join.cu` |
 | Sort Kernels | `kernels/sort.cu` |

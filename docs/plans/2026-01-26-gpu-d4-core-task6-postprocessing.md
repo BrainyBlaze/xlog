@@ -50,7 +50,7 @@ git commit -m "feat(d4): add smoothing caps to compile config"
 
 **Files:**
 - Modify: `kernels/d4.cu`
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 
 **Step 1: Write failing tests**
 
@@ -74,7 +74,7 @@ Add smoothing kernels to `kernels/d4.cu`:
 - `d4_smooth_emit` (emit smoothed circuit, tautology table, wrappers, updated child indices, node levels).
 - `d4_smooth_finalize` (fill unused nodes and set child_offsets sentinel deterministically).
 
-Update `crates/xlog-cuda/src/provider.rs` with new kernel symbols in `d4_kernels` and module load list.
+Update `crates/xlog-cuda/src/provider/mod.rs` with new kernel symbols in `d4_kernels` and module load list.
 
 **Step 4: Run test to verify it passes**
 
@@ -84,7 +84,7 @@ Expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add kernels/d4.cu crates/xlog-cuda/src/provider.rs
+git add kernels/d4.cu crates/xlog-cuda/src/provider/mod.rs
 git commit -m "feat(d4): add gpu smoothing count+emit kernels"
 ```
 
@@ -94,7 +94,7 @@ git commit -m "feat(d4): add gpu smoothing count+emit kernels"
 
 **Files:**
 - Modify: `kernels/d4.cu`
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 - Modify: `crates/xlog-prob/src/compilation/gpu_d4.rs` (wrapper API)
 
 **Step 1: Write failing tests**
@@ -130,7 +130,7 @@ Expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add kernels/d4.cu crates/xlog-cuda/src/provider.rs crates/xlog-prob/src/compilation/gpu_d4.rs crates/xlog-prob/tests/gpu_xgcf.rs
+git add kernels/d4.cu crates/xlog-cuda/src/provider/mod.rs crates/xlog-prob/src/compilation/gpu_d4.rs crates/xlog-prob/tests/gpu_xgcf.rs
 git commit -m "feat(d4): add gpu free-var mask computation"
 ```
 
@@ -140,7 +140,7 @@ git commit -m "feat(d4): add gpu free-var mask computation"
 
 **Files:**
 - Modify: `kernels/circuit.cu`
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 - Modify: `crates/xlog-prob/src/gpu.rs`
 
 **Step 1: Write failing test**
@@ -181,7 +181,7 @@ Expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add kernels/circuit.cu crates/xlog-cuda/src/provider.rs crates/xlog-prob/src/gpu.rs
+git add kernels/circuit.cu crates/xlog-cuda/src/provider/mod.rs crates/xlog-prob/src/gpu.rs
 git commit -m "feat(gpu): apply free-var correction on device"
 ```
 

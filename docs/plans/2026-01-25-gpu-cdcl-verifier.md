@@ -94,7 +94,7 @@ git commit -m "docs: update solver services to GPU CDCL verifier + optional CLS"
 
 **Files:**
 - Modify: `crates/xlog-cuda/build.rs`
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 - Create: `kernels/sat.cu`
 
 **Step 1: Add production SAT kernels (no stubs / no placeholders)**
@@ -111,7 +111,7 @@ Add `"sat"` to the `kernels` list in `crates/xlog-cuda/build.rs`.
 
 **Step 3: Load SAT module in provider**
 
-In `crates/xlog-cuda/src/provider.rs`:
+In `crates/xlog-cuda/src/provider/mod.rs`:
 - Add `SAT_PTX` include_str.
 - Add `SAT_MODULE` const and kernel name constants:
   - `sat_kernels::SAT_CDCL_SOLVE`
@@ -121,7 +121,7 @@ In `crates/xlog-cuda/src/provider.rs`:
 
 **Step 4: Add PTX presence test (no CUDA required)**
 
-Add a small `#[test]` in `crates/xlog-cuda/src/provider.rs` (or a new test file) that:
+Add a small `#[test]` in `crates/xlog-cuda/src/provider/mod.rs` (or a new test file) that:
 - Asserts `SAT_PTX.contains("sat_cdcl_solve")`
 - Asserts `SAT_PTX.contains("sat_check_model")`
 - Asserts `SAT_PTX.contains("sat_proof_check")`
@@ -136,7 +136,7 @@ Expected: pass (skips if no CUDA device, if needed).
 **Step 6: Commit**
 
 ```bash
-git add crates/xlog-cuda/build.rs crates/xlog-cuda/src/provider.rs kernels/sat.cu
+git add crates/xlog-cuda/build.rs crates/xlog-cuda/src/provider/mod.rs kernels/sat.cu
 git commit -m "cuda: add GPU CDCL SAT solver + on-GPU proof checking"
 ```
 
@@ -189,7 +189,7 @@ git commit -m "solve: add GPU CNF CSR representation"
 
 **Files:**
 - Modify: `kernels/sat.cu`
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 - Create: `crates/xlog-solve/src/gpu_cdcl.rs`
 - Modify: `crates/xlog-solve/src/lib.rs`
 
@@ -241,7 +241,7 @@ Expected: PASS (or skip if no CUDA device).
 **Step 7: Commit**
 
 ```bash
-git add kernels/sat.cu crates/xlog-cuda/src/provider.rs crates/xlog-solve/src/gpu_cdcl.rs crates/xlog-solve/src/lib.rs crates/xlog-solve/tests/gpu_cdcl_tests.rs
+git add kernels/sat.cu crates/xlog-cuda/src/provider/mod.rs crates/xlog-solve/src/gpu_cdcl.rs crates/xlog-solve/src/lib.rs crates/xlog-solve/tests/gpu_cdcl_tests.rs
 git commit -m "solve: add GPU CDCL SAT solver kernel + Rust API"
 ```
 

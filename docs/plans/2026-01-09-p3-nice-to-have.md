@@ -112,7 +112,7 @@ git commit -m "feat(xlog-core): add Arrow type mapping for CuDF integration"
 ### Task 1.2: Create Arrow Export Functions
 
 **Files:**
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 - Create: `crates/xlog-cuda/tests/arrow_tests.rs`
 
 **Step 1: Write the failing test**
@@ -343,7 +343,7 @@ Expected: PASS
 **Step 7: Commit**
 
 ```bash
-git add crates/xlog-cuda/src/provider.rs crates/xlog-cuda/tests/arrow_tests.rs
+git add crates/xlog-cuda/src/provider/mod.rs crates/xlog-cuda/tests/arrow_tests.rs
 git commit -m "feat(xlog-cuda): add Arrow RecordBatch export for CuDF interop"
 ```
 
@@ -352,7 +352,7 @@ git commit -m "feat(xlog-cuda): add Arrow RecordBatch export for CuDF interop"
 ### Task 1.3: Create Arrow Import Functions
 
 **Files:**
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 - Modify: `crates/xlog-cuda/tests/arrow_tests.rs`
 
 **Step 1: Write the failing test**
@@ -513,7 +513,7 @@ Expected: PASS
 **Step 5: Commit**
 
 ```bash
-git add crates/xlog-cuda/src/provider.rs crates/xlog-cuda/tests/arrow_tests.rs
+git add crates/xlog-cuda/src/provider/mod.rs crates/xlog-cuda/tests/arrow_tests.rs
 git commit -m "feat(xlog-cuda): add Arrow RecordBatch import for CuDF interop"
 ```
 

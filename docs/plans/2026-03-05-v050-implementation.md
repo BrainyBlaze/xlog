@@ -115,9 +115,9 @@ alias for one release cycle."
 ### Task 2: Add `count_mask_into_slot` provider method
 
 **Files:**
-- Modify: `crates/xlog-cuda/src/provider.rs:4484-4525` (add method near `count_mask_device`)
+- Modify: `crates/xlog-cuda/src/provider/mod.rs:4484-4525` (add method near `count_mask_device`)
 
-**Context:** The existing `count_mask_device` (provider.rs:4484) allocates a fresh 1-element `TrackedCudaSlice<u32>` per call, zero-inits it, launches the `count_mask` kernel, syncs, and returns the slice. For pass 1 of the two-pass merge, we need to call this N times (once per task) but write results into a single pre-allocated `task_counts` array. The new method avoids N allocations.
+**Context:** The existing `count_mask_device` (provider/mod.rs (pre-Wave-2 line 4484)) allocates a fresh 1-element `TrackedCudaSlice<u32>` per call, zero-inits it, launches the `count_mask` kernel, syncs, and returns the slice. For pass 1 of the two-pass merge, we need to call this N times (once per task) but write results into a single pre-allocated `task_counts` array. The new method avoids N allocations.
 
 The `count_mask` kernel (scan.cu:105) writes via `atomicAdd(count, block_count)` — the `count` pointer is just a `uint32_t*`. We can point it at `task_counts[idx]` by offsetting the pointer. The slot must be pre-zeroed by the caller.
 
@@ -127,7 +127,7 @@ We test via Rust unit tests. However, this is a provider method that requires GP
 
 **Step 2: Add `count_mask_into_slot` method**
 
-In `crates/xlog-cuda/src/provider.rs`, immediately after `count_mask_device` (after line 4525), add:
+In `crates/xlog-cuda/src/provider/mod.rs`, immediately after `count_mask_device` (after line 4525), add:
 
 ```rust
     /// Count 1-bits in `mask[0..n]` and write the result into
@@ -202,7 +202,7 @@ Expected: Compiles successfully
 **Step 4: Commit**
 
 ```bash
-git add crates/xlog-cuda/src/provider.rs
+git add crates/xlog-cuda/src/provider/mod.rs
 git commit -m "feat(cuda): add count_mask_into_slot provider method
 
 Writes count_mask result directly into a pre-allocated task_counts
@@ -215,13 +215,13 @@ Reuses existing count_mask kernel (atomicAdd to output pointer)."
 ### Task 3: Add `dtoh_scalar_untracked` provider helper
 
 **Files:**
-- Modify: `crates/xlog-cuda/src/provider.rs` (add method near transfer tracker section, ~line 1615)
+- Modify: `crates/xlog-cuda/src/provider/mod.rs` (add method near transfer tracker section, ~line 1615)
 
 **Context:** The two-pass merge needs to read one `u32` (total_nnz) from device to host after pass 1's exclusive scan. This is 4 bytes of metadata, not data-plane. The helper reads via `device().inner()` without touching `record_dtoh`, making the "metadata ≠ data-plane" contract explicit. Existing strict D2H tests (`dtoh_calls == 0`, `dtoh_bytes == 0`) continue to pass.
 
 **Step 1: Add `dtoh_scalar_untracked` method**
 
-In `crates/xlog-cuda/src/provider.rs`, after `dtoh_sync_copy_into_tracked` (after line ~1628), add:
+In `crates/xlog-cuda/src/provider/mod.rs`, after `dtoh_sync_copy_into_tracked` (after line ~1628), add:
 
 ```rust
     /// Read a single scalar from device to host WITHOUT updating the
@@ -269,7 +269,7 @@ Expected: Compiles successfully
 **Step 3: Commit**
 
 ```bash
-git add crates/xlog-cuda/src/provider.rs
+git add crates/xlog-cuda/src/provider/mod.rs
 git commit -m "feat(cuda): add dtoh_scalar_untracked for metadata-only reads
 
 Explicit helper for reading single scalars from device without

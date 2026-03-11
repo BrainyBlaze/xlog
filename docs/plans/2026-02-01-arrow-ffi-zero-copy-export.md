@@ -15,7 +15,7 @@
 **Files:**
 - Create: `crates/xlog-cuda/src/arrow_device.rs`
 - Modify: `crates/xlog-cuda/src/lib.rs`
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 - Test: `crates/xlog-cuda/tests/arrow_device_ffi.rs`
 
 **Step 1: Write the failing test**
@@ -143,7 +143,7 @@ pub use arrow_device::{ArrowDeviceArray, ArrowDeviceArrayOwned};
 ```
 
 ```rust
-// crates/xlog-cuda/src/provider.rs
+// crates/xlog-cuda/src/provider/mod.rs
 pub fn to_arrow_device_record_batch(
     &self,
     _buffer: &CudaBuffer,
@@ -161,7 +161,7 @@ Expected: FAIL (still not implemented) — this is only the API stub; real behav
 
 ```bash
 git add crates/xlog-cuda/src/arrow_device.rs crates/xlog-cuda/src/lib.rs \
-  crates/xlog-cuda/src/provider.rs crates/xlog-cuda/tests/arrow_device_ffi.rs
+  crates/xlog-cuda/src/provider/mod.rs crates/xlog-cuda/tests/arrow_device_ffi.rs
 
 git commit -m "feat(cuda): add Arrow device FFI types and export API"
 ```
@@ -171,7 +171,7 @@ git commit -m "feat(cuda): add Arrow device FFI types and export API"
 ### Task 2: Device-backed Arrow buffer allocation (numeric types)
 
 **Files:**
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 - Modify: `crates/xlog-cuda/src/arrow_device.rs`
 - Test: `crates/xlog-cuda/tests/arrow_device_ffi.rs`
 
@@ -237,7 +237,7 @@ impl Allocation for ArrowCudaAllocation {}
 ```
 
 ```rust
-// crates/xlog-cuda/src/provider.rs (inside to_arrow_device_record_batch)
+// crates/xlog-cuda/src/provider/mod.rs (inside to_arrow_device_record_batch)
 // Build arrow::array::ArrayData per column using Buffer::from_custom_allocation
 // Use arrow::ffi::to_ffi to get FFI_ArrowArray + FFI_ArrowSchema
 ```
@@ -250,7 +250,7 @@ Expected: PASS
 **Step 5: Commit**
 
 ```bash
-git add crates/xlog-cuda/src/arrow_device.rs crates/xlog-cuda/src/provider.rs \
+git add crates/xlog-cuda/src/arrow_device.rs crates/xlog-cuda/src/provider/mod.rs \
   crates/xlog-cuda/tests/arrow_device_ffi.rs
 
 git commit -m "feat(cuda): export numeric columns via Arrow C Data Interface"
@@ -262,9 +262,9 @@ git commit -m "feat(cuda): export numeric columns via Arrow C Data Interface"
 
 **Files:**
 - Modify: `kernels/pack.cu`
-- Modify: `crates/xlog-cuda/src/provider.rs`
-- Modify: `crates/xlog-cuda/src/provider.rs` (kernel list)
-- Modify: `crates/xlog-cuda/src/provider.rs` (load function)
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs` (kernel list)
+- Modify: `crates/xlog-cuda/src/provider/mod.rs` (load function)
 - Test: `crates/xlog-cuda/tests/arrow_device_ffi.rs`
 
 **Step 1: Write the failing test**
@@ -324,24 +324,24 @@ extern "C" __global__ void pack_bools_to_bitmap(
 ```
 
 ```rust
-// crates/xlog-cuda/src/provider.rs
+// crates/xlog-cuda/src/provider/mod.rs
 pub mod pack_kernels {
     pub const PACK_BOOLS_TO_BITMAP: &str = "pack_bools_to_bitmap";
 }
 ```
 
 ```rust
-// crates/xlog-cuda/src/provider.rs (load_ptx list)
+// crates/xlog-cuda/src/provider/mod.rs (load_ptx list)
 pack_kernels::PACK_BOOLS_TO_BITMAP,
 ```
 
 ```rust
-// crates/xlog-cuda/src/provider.rs (to_arrow_device_record_batch)
+// crates/xlog-cuda/src/provider/mod.rs (to_arrow_device_record_batch)
 // For Bool: allocate device bitmap buffer and launch pack_bools_to_bitmap
 ```
 
 ```rust
-// crates/xlog-cuda/src/provider.rs (test helper)
+// crates/xlog-cuda/src/provider/mod.rs (test helper)
 #[cfg(test)]
 fn read_arrow_device_bool_packed(&self, rb: &ArrowDeviceArrayOwned) -> Result<Vec<u8>> { /* dtoh in tests only */ }
 ```
@@ -354,7 +354,7 @@ Expected: PASS
 **Step 5: Commit**
 
 ```bash
-git add kernels/pack.cu crates/xlog-cuda/src/provider.rs crates/xlog-cuda/tests/arrow_device_ffi.rs
+git add kernels/pack.cu crates/xlog-cuda/src/provider/mod.rs crates/xlog-cuda/tests/arrow_device_ffi.rs
 
 git commit -m "feat(cuda): bit-pack bool columns for Arrow device export"
 ```
@@ -364,7 +364,7 @@ git commit -m "feat(cuda): bit-pack bool columns for Arrow device export"
 ### Task 4: Symbol export metadata + safety checks
 
 **Files:**
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 - Test: `crates/xlog-cuda/tests/arrow_device_ffi.rs`
 
 **Step 1: Write the failing test**
@@ -397,7 +397,7 @@ Expected: FAIL (missing metadata export)
 **Step 3: Write minimal implementation**
 
 ```rust
-// crates/xlog-cuda/src/provider.rs
+// crates/xlog-cuda/src/provider/mod.rs
 // When building Arrow schema, set metadata on symbol fields:
 //   xlog.symbol=true
 //   xlog.symbol_encoding=u32
@@ -415,7 +415,7 @@ Expected: PASS
 **Step 5: Commit**
 
 ```bash
-git add crates/xlog-cuda/src/provider.rs crates/xlog-cuda/tests/arrow_device_ffi.rs
+git add crates/xlog-cuda/src/provider/mod.rs crates/xlog-cuda/tests/arrow_device_ffi.rs
 
 git commit -m "feat(cuda): export symbol metadata in Arrow device schema"
 ```

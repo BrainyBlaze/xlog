@@ -15,9 +15,9 @@
 | # | Issue | Files | Status |
 |---|-------|-------|--------|
 | 1 | Hash-only join comparison | `kernels/join.cu`, `provider.rs` | TODO |
-| 2 | Sum truncation (schema mismatch) | `provider.rs:1747-1748` | TODO |
+| 2 | Sum truncation (schema mismatch) | `provider/mod.rs (pre-Wave-2 line 1747)-1748` | TODO |
 | 3 | 256-element prefix sum limit | `kernels/scan.cu`, `provider.rs` | TODO |
-| 4 | CPU sort in dedup | `provider.rs:507-590` | TODO |
+| 4 | CPU sort in dedup | `provider/mod.rs (pre-Wave-2 line 507)-590` | TODO |
 | 5 | Memory budget not enforced | `memory.rs` | ALREADY FIXED |
 
 Note: Issue 5 (memory budget) was already fixed in `memory.rs:60-77` with proper atomic enforcement.
@@ -28,7 +28,7 @@ Note: Issue 5 (memory budget) was already fixed in `memory.rs:60-77` with proper
 
 **Files:**
 - Modify: `kernels/join.cu:167-196` (hash_join_probe_v2)
-- Modify: `crates/xlog-cuda/src/provider.rs` (pass key data to probe)
+- Modify: `crates/xlog-cuda/src/provider/mod.rs` (pass key data to probe)
 - Test: `crates/xlog-cuda/tests/join_tests.rs` (new collision test)
 
 **Problem:** The `hash_join_probe_v2` kernel only compares 64-bit hashes, not actual key bytes. While collision probability is extremely low (~2^-64), this is not mathematically correct.
@@ -197,7 +197,7 @@ Run: `nvcc -ptx --gpu-architecture=sm_90 kernels/join.cu -o kernels/join.ptx`
 
 **Step 5: Update provider to pass key data**
 
-Modify `crates/xlog-cuda/src/provider.rs` in `hash_join_v2` method to pass the additional key verification parameters to the kernel.
+Modify `crates/xlog-cuda/src/provider/mod.rs` in `hash_join_v2` method to pass the additional key verification parameters to the kernel.
 
 **Step 6: Run tests to verify fix**
 
@@ -208,7 +208,7 @@ Expected: PASS
 **Step 7: Commit**
 
 ```bash
-git add kernels/join.cu kernels/join.ptx crates/xlog-cuda/src/provider.rs crates/xlog-cuda/tests/join_collision_test.rs
+git add kernels/join.cu kernels/join.ptx crates/xlog-cuda/src/provider/mod.rs crates/xlog-cuda/tests/join_collision_test.rs
 git commit -m "fix(xlog-cuda): add key verification to hash join probe
 
 Joins now compare actual key bytes after hash match, ensuring
@@ -221,7 +221,7 @@ probability."
 ## Task 2: Fix Sum Truncation (Schema Mismatch)
 
 **Files:**
-- Modify: `crates/xlog-cuda/src/provider.rs:1747-1748`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs:1747-1748`
 - Test: existing tests should pass
 
 **Problem:** `groupby_multi_agg_result_schema` returns `ScalarType::U32` for Sum, but the actual implementation computes and returns u64 bytes. This schema/data mismatch causes incorrect interpretation of results.
@@ -266,7 +266,7 @@ Expected: FAIL - schema returns U32 but should return U64
 
 **Step 3: Fix the schema function**
 
-Modify `crates/xlog-cuda/src/provider.rs:1739-1749`:
+Modify `crates/xlog-cuda/src/provider/mod.rs:1739-1749`:
 
 ```rust
 for (i, &(_value_col, agg_op)) in aggs.iter().enumerate() {
@@ -303,7 +303,7 @@ Expected: All tests pass
 **Step 6: Commit**
 
 ```bash
-git add crates/xlog-cuda/src/provider.rs
+git add crates/xlog-cuda/src/provider/mod.rs
 git commit -m "fix(xlog-cuda): return U64 type for Sum aggregation schema
 
 The groupby_multi_agg_result_schema now returns U64 for Sum operations,
@@ -317,7 +317,7 @@ data corruption from schema/data type mismatch."
 
 **Files:**
 - Modify: `kernels/scan.cu` (add multi-block scan)
-- Modify: `crates/xlog-cuda/src/provider.rs:1783-1867` (use multi-block scan)
+- Modify: `crates/xlog-cuda/src/provider/mod.rs:1783-1867` (use multi-block scan)
 - Test: `crates/xlog-cuda/tests/prefix_sum_tests.rs`
 
 **Problem:** Current `prefix_sum_mask` is limited to 256 elements due to single-block scan. This breaks all filter operations on realistic data.
@@ -506,7 +506,7 @@ Run: `nvcc -ptx --gpu-architecture=sm_90 kernels/scan.cu -o kernels/scan.ptx`
 
 **Step 5: Update provider to use multi-block scan**
 
-Modify `crates/xlog-cuda/src/provider.rs` - replace `prefix_sum_mask` implementation:
+Modify `crates/xlog-cuda/src/provider/mod.rs` - replace `prefix_sum_mask` implementation:
 
 ```rust
 /// Compute exclusive prefix sum of u8 mask using multi-block scan
@@ -630,7 +630,7 @@ Expected: All tests pass
 **Step 9: Commit**
 
 ```bash
-git add kernels/scan.cu kernels/scan.ptx crates/xlog-cuda/src/provider.rs crates/xlog-cuda/tests/large_prefix_sum_test.rs
+git add kernels/scan.cu kernels/scan.ptx crates/xlog-cuda/src/provider/mod.rs crates/xlog-cuda/tests/large_prefix_sum_test.rs
 git commit -m "feat(xlog-cuda): implement multi-block prefix sum
 
 Removes the 256-element limitation on prefix_sum_mask by implementing
@@ -643,7 +643,7 @@ on datasets of any practical size."
 ## Task 4: Replace CPU Sort in Dedup with GPU Sort
 
 **Files:**
-- Modify: `crates/xlog-cuda/src/provider.rs:507-590` (dedup function)
+- Modify: `crates/xlog-cuda/src/provider/mod.rs:507-590` (dedup function)
 - Test: existing dedup tests should pass
 
 **Problem:** The `dedup` function downloads data to CPU, sorts using Rust, and re-uploads. This is a performance bottleneck and unnecessary since GPU sort exists.
@@ -662,7 +662,7 @@ The fix is to use existing `sort()` + GPU-based dedup marking.
 
 **Step 3: Refactor dedup to use GPU sort**
 
-Replace `crates/xlog-cuda/src/provider.rs:507-590`:
+Replace `crates/xlog-cuda/src/provider/mod.rs:507-590`:
 
 ```rust
 /// Remove duplicate rows from buffer based on key columns
@@ -800,7 +800,7 @@ Expected: All tests pass
 **Step 6: Commit**
 
 ```bash
-git add crates/xlog-cuda/src/provider.rs
+git add crates/xlog-cuda/src/provider/mod.rs
 git commit -m "perf(xlog-cuda): use GPU sort in dedup instead of CPU sort
 
 Dedup now uses the existing GPU radix sort followed by GPU-based

@@ -170,7 +170,7 @@ git commit -m "test(gpu-cnf): add GPU vs CPU CNF equivalence tests"
 - Create: `kernels/cnf.cu`
 - Modify: `kernels/CMakeLists.txt`
 - Generate: `kernels/cnf.ptx`
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 
 **Step 1: Write minimal public API in `gpu_cnf.rs`**
 
@@ -260,7 +260,7 @@ Expected: PASS.
 **Step 6: Commit**
 
 ```bash
-git add crates/xlog-prob/src/compilation/gpu_cnf.rs crates/xlog-prob/src/compilation/mod.rs kernels/cnf.cu kernels/cnf.ptx kernels/CMakeLists.txt crates/xlog-cuda/src/provider.rs
+git add crates/xlog-prob/src/compilation/gpu_cnf.rs crates/xlog-prob/src/compilation/mod.rs kernels/cnf.cu kernels/cnf.ptx kernels/CMakeLists.txt crates/xlog-cuda/src/provider/mod.rs
 git commit -m "feat(gpu-cnf): add device-side Tseitin encoder"
 ```
 

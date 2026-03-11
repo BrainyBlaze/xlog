@@ -78,7 +78,7 @@ git commit -m "feat(prob): add gpu pir graph layout"
 - Create: `kernels/pir.cu`
 - Create: `kernels/pir.ptx`
 - Modify: `crates/xlog-cuda/build.rs`
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 - Test: `crates/xlog-cuda/tests/pir_provider_tests.rs`
 
 **Step 1: Write failing provider test**
@@ -110,7 +110,7 @@ Load PTX and expose kernel names in `xlog-cuda` provider. Add test module.
 
 **Step 5: Commit**
 ```
-git add kernels/pir.cu kernels/pir.ptx crates/xlog-cuda/build.rs crates/xlog-cuda/src/provider.rs crates/xlog-cuda/tests/pir_provider_tests.rs
+git add kernels/pir.cu kernels/pir.ptx crates/xlog-cuda/build.rs crates/xlog-cuda/src/provider/mod.rs crates/xlog-cuda/tests/pir_provider_tests.rs
 git commit -m "feat(cuda): add pir kernel module plumbing"
 ```
 
@@ -121,7 +121,7 @@ git commit -m "feat(cuda): add pir kernel module plumbing"
 **Files:**
 - Create: `crates/xlog-prob/src/compilation/gpu_pir_intern.rs`
 - Modify: `crates/xlog-prob/src/compilation/mod.rs`
-- Modify: `crates/xlog-cuda/src/provider.rs` (helpers for stable sort + dedup on packed keys)
+- Modify: `crates/xlog-cuda/src/provider/mod.rs` (helpers for stable sort + dedup on packed keys)
 - Test: `crates/xlog-prob/tests/gpu_pir_intern.rs`
 
 **Step 1: Write failing test**
@@ -164,7 +164,7 @@ No atomics for ID assignment; overflow => device trap.
 
 **Step 5: Commit**
 ```
-git add crates/xlog-prob/src/compilation/gpu_pir_intern.rs crates/xlog-prob/src/compilation/mod.rs crates/xlog-prob/tests/gpu_pir_intern.rs crates/xlog-cuda/src/provider.rs
+git add crates/xlog-prob/src/compilation/gpu_pir_intern.rs crates/xlog-prob/src/compilation/mod.rs crates/xlog-prob/tests/gpu_pir_intern.rs crates/xlog-cuda/src/provider/mod.rs
 git commit -m "feat(prob): add gpu pir interner"
 ```
 
@@ -175,7 +175,7 @@ git commit -m "feat(prob): add gpu pir interner"
 **Files:**
 - Modify: `crates/xlog-runtime/src/executor.rs`
 - Modify: `crates/xlog-runtime/src/lib.rs`
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 - Modify: `kernels/dedup.cu` (dedup with OR-reduce)
 - Test: `crates/xlog-runtime/tests/provenance_runtime_tests.rs`
 
@@ -217,7 +217,7 @@ Expected: FAIL (missing provenance mode).
 
 **Step 5: Commit**
 ```
-git add crates/xlog-runtime/src/executor.rs crates/xlog-runtime/src/lib.rs crates/xlog-cuda/src/provider.rs kernels/dedup.cu crates/xlog-runtime/tests/provenance_runtime_tests.rs
+git add crates/xlog-runtime/src/executor.rs crates/xlog-runtime/src/lib.rs crates/xlog-cuda/src/provider/mod.rs kernels/dedup.cu crates/xlog-runtime/tests/provenance_runtime_tests.rs
 git commit -m "feat(runtime): add gpu provenance execution mode"
 ```
 
@@ -269,7 +269,7 @@ git commit -m "feat(prob): add gpu wfs provenance"
 - Create: `kernels/cnf.cu`
 - Create: `kernels/cnf.ptx`
 - Modify: `crates/xlog-cuda/build.rs`
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 - Create: `crates/xlog-prob/src/compilation/gpu_cnf.rs`
 - Modify: `crates/xlog-prob/src/compilation/mod.rs`
 - Test: `crates/xlog-prob/tests/gpu_cnf_encode.rs`
@@ -301,7 +301,7 @@ fn gpu_cnf_matches_cpu_encode() {
 
 **Step 5: Commit**
 ```
-git add kernels/cnf.cu kernels/cnf.ptx crates/xlog-cuda/build.rs crates/xlog-cuda/src/provider.rs crates/xlog-prob/src/compilation/gpu_cnf.rs crates/xlog-prob/src/compilation/mod.rs crates/xlog-prob/tests/gpu_cnf_encode.rs
+git add kernels/cnf.cu kernels/cnf.ptx crates/xlog-cuda/build.rs crates/xlog-cuda/src/provider/mod.rs crates/xlog-prob/src/compilation/gpu_cnf.rs crates/xlog-prob/src/compilation/mod.rs crates/xlog-prob/tests/gpu_cnf_encode.rs
 git commit -m "feat(prob): add gpu cnf encoder"
 ```
 

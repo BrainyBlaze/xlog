@@ -234,7 +234,7 @@ Instrument the 19 `load_ptx()` calls with `Instant`-based timing, gated by
 `XLOG_WARMUP_PROFILE=1` env var at runtime.
 
 **Files:**
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 
 ### Step 1: Add profiling data structure and env check
 
@@ -328,7 +328,7 @@ Expected: compiles clean
 ### Step 7: Commit
 
 ```bash
-git add crates/xlog-cuda/src/provider.rs
+git add crates/xlog-cuda/src/provider/mod.rs
 git commit -m "feat(warmup): instrument PTX load timing in CudaKernelProvider
 
 Gated by XLOG_WARMUP_PROFILE=1. Records per-module load time with
@@ -681,7 +681,7 @@ Replace `include_str!()` + `Ptx::from_src()` with file-based loading that tries 
 first, falls back to portable PTX.
 
 **Files:**
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 
 ### Step 1: Add SM detection helper
 
@@ -757,7 +757,7 @@ Update comment at line 20 (`sm_70` → `sm_120` or remove), line 648 (same).
 
 ### Step 5: Migrate tests that depend on embedded PTX constants
 
-Tests at `provider.rs:10110-10288` reference the removed `include_str!()`
+Tests at `provider/mod.rs (pre-Wave-2 line 10110)-10288` reference the removed `include_str!()`
 constants (`JOIN_PTX`, `DEDUP_PTX`, `CIRCUIT_PTX`, etc.) for inline module
 loading. These will fail to compile after Step 3 removes the constants.
 
@@ -784,7 +784,7 @@ Expected: all tests pass (including migrated tests from Step 5)
 ### Step 7: Commit
 
 ```bash
-git add crates/xlog-cuda/src/provider.rs
+git add crates/xlog-cuda/src/provider/mod.rs
 git commit -m "feat(cuda): load cubin with portable PTX fallback in provider
 
 Detects device SM, tries cubin first (from XLOG_CUBIN_DIR or

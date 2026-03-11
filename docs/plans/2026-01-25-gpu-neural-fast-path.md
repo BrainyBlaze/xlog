@@ -25,7 +25,7 @@ PyO3 (`crates/pyxlog`), Torch (Python side).
 **Files:**
 - Create: `kernels/neural.cu`
 - Modify: `crates/xlog-cuda/build.rs`
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 - Test: `crates/xlog-cuda/tests/ptx_validation.rs` (or add a new focused test)
 
 **Step 1: Write failing provider test (RED)**
@@ -67,7 +67,7 @@ Implement production-grade CUDA kernels:
 **Step 3: Wire kernel compilation + provider module (GREEN)**
 
 - Add `"neural"` to `crates/xlog-cuda/build.rs` kernel list so PTX is generated.
-- In `crates/xlog-cuda/src/provider.rs`:
+- In `crates/xlog-cuda/src/provider/mod.rs`:
   - `const NEURAL_PTX: &str = include_str!(\"../../../kernels/neural.ptx\");`
   - `pub const NEURAL_MODULE: &str = \"xlog_neural\";`
   - `pub mod neural_kernels { ... }` with the function names
@@ -81,7 +81,7 @@ Expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add kernels/neural.cu crates/xlog-cuda/build.rs crates/xlog-cuda/src/provider.rs crates/xlog-cuda/tests/ptx_validation.rs
+git add kernels/neural.cu crates/xlog-cuda/build.rs crates/xlog-cuda/src/provider/mod.rs crates/xlog-cuda/tests/ptx_validation.rs
 git commit -m "cuda(neural): add PTX module for AD weight fill and gradient scatter"
 ```
 

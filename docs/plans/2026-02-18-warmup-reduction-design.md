@@ -47,7 +47,7 @@ to isolate driver JIT cost.
 
 ### Instrumentation Sites
 
-**1. PTX/kernel load timing — `crates/xlog-cuda/src/provider.rs`**
+**1. PTX/kernel load timing — `crates/xlog-cuda/src/provider/mod.rs`**
 
 Wrap the 19 `load_ptx()` calls in `CudaKernelProvider::new()` (lines 667-1116) with
 `Instant`-based timing. Record total `ptx.total_sec` and per-module breakdown.
@@ -142,7 +142,7 @@ Currently the kernel list is duplicated:
 SM arch is inconsistent:
 - `build.rs:61`: hardcoded `sm_70`
 - `bin/nvrtc_ptx.rs:27`: hardcoded `sm_70`
-- `provider.rs:20,648,10268`: comments/references to `sm_70`
+- `provider/mod.rs (pre-Wave-2 line 20),648,10268`: comments/references to `sm_70`
 - Checked-in PTX files: actually target `sm_120`
 
 **Fix:** Create `src/kernel_manifest.rs` with a single const array of
@@ -368,14 +368,14 @@ When `XLOG_WARMUP_PROFILE=1`:
 ## Files to Modify
 
 ### Phase 0
-- `crates/xlog-cuda/src/provider.rs` — PTX load timing
+- `crates/xlog-cuda/src/provider/mod.rs` — PTX load timing
 - `crates/xlog-prob/src/compilation/mod.rs` — per-stage compile timing
 - `crates/pyxlog/src/lib.rs` — template-level timing, profiling flag plumbing
 
 ### Phase 1
 - `crates/xlog-cuda/src/kernel_manifest.rs` — new, single source of truth
 - `crates/xlog-cuda/build.rs` — cubin generation, all 19 modules, env var wiring
-- `crates/xlog-cuda/src/provider.rs` — SM detection, cubin/PTX loader
+- `crates/xlog-cuda/src/provider/mod.rs` — SM detection, cubin/PTX loader
 - `crates/xlog-cuda/src/bin/nvrtc_ptx.rs` — clean stale sm_70
 
 ### Phase 2

@@ -14,7 +14,7 @@ hot loop, but the code has two structural gaps:
    Even the Rust sparse path (`insert_mask_from_sparse`) builds dense N^3 host arrays internally.
 
 2. **Row-count cache unwired** — `CudaBuffer.cached_row_count` field exists with getter/setter
-   but all 4 call sites (`provider.rs:6970`, `ilp_registry.rs:17`, `executor.rs:2961`,
+   but all 4 call sites (`provider/mod.rs (pre-Wave-2 line 6970)`, `ilp_registry.rs:17`, `executor.rs:2961`,
    `executor.rs:3036`) do synchronous D2H transfers. `buffer_from_columns` does not populate
    the cache at construction time.
 
@@ -42,12 +42,12 @@ fn device_row_count(&self, buffer: &CudaBuffer) -> Result<usize> {
 ```
 
 Apply to all 4 call sites:
-- `CudaKernelProvider::device_row_count()` (provider.rs:6970)
+- `CudaKernelProvider::device_row_count()` (provider/mod.rs (pre-Wave-2 line 6970))
 - `ilp_registry::read_device_row_count()` (ilp_registry.rs:9-20)
 - `Executor::buffer_row_count()` (executor.rs:2961)
 - Standalone `ilp_row_count()` (executor.rs:3036)
 
-Additionally, `buffer_from_columns()` (provider.rs:7159) already knows the row count — switch to
+Additionally, `buffer_from_columns()` (provider/mod.rs (pre-Wave-2 line 7159)) already knows the row count — switch to
 `CudaBuffer::from_columns_with_host_count()` to pre-populate the cache at construction.
 
 **Safety:** Cache is write-once (CAS from u32::MAX sentinel). Mutable buffers rebuilt each

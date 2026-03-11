@@ -147,7 +147,7 @@ non-monotone paths."
 ### Task 2: Remove hot-path synchronize in compaction
 
 **Files:**
-- Modify: `crates/xlog-cuda/src/provider.rs:5142`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs:5142`
 
 **Context:** `compact_buffer_by_device_mask_device_count` at line 5142 calls `self.device.synchronize()?` after launching the compaction kernel. This is unnecessary because all operations are on the same CUDA stream — kernel ordering guarantees the compaction completes before any subsequent kernel reads the output. The sync blocks the host for no reason and is called in the MC hot path (once per prob table per sample).
 
@@ -161,7 +161,7 @@ Create `crates/xlog-prob/tests/no_sync_in_compaction.rs`:
 
 #[test]
 fn compact_buffer_by_device_mask_device_count_has_no_synchronize() {
-    let src = std::fs::read_to_string("crates/xlog-cuda/src/provider.rs").unwrap();
+    let src = std::fs::read_to_string("crates/xlog-cuda/src/provider/mod.rs").unwrap();
 
     // Find the function body
     let fn_start = src.find("fn compact_buffer_by_device_mask_device_count(")
@@ -187,7 +187,7 @@ Expected: FAIL (the synchronize is still there).
 
 **Step 3: Remove the synchronize call**
 
-In `crates/xlog-cuda/src/provider.rs`, find line 5142 (inside `compact_buffer_by_device_mask_device_count`) and remove:
+In `crates/xlog-cuda/src/provider/mod.rs`, find line 5142 (inside `compact_buffer_by_device_mask_device_count`) and remove:
 
 ```rust
 // REMOVE this line:
@@ -207,7 +207,7 @@ Expected: All 4 smoke tests still pass (correctness preserved).
 **Step 5: Commit**
 
 ```bash
-git add crates/xlog-cuda/src/provider.rs crates/xlog-prob/tests/no_sync_in_compaction.rs
+git add crates/xlog-cuda/src/provider/mod.rs crates/xlog-prob/tests/no_sync_in_compaction.rs
 git commit -m "perf(cuda): remove redundant synchronize in counted compaction
 
 Same-stream kernel ordering guarantees correctness. The sync was
@@ -221,8 +221,8 @@ Adds policy test to prevent regression."
 
 **Files:**
 - Modify: `kernels/mc_sample.cu`
-- Modify: `crates/xlog-cuda/src/provider.rs:1227-1295` (`sample_bernoulli_matrix_device`)
-- Modify: `crates/xlog-cuda/src/provider.rs:130-131` (`mc_sample_kernels` constants — no change needed since kernel name stays the same)
+- Modify: `crates/xlog-cuda/src/provider/mod.rs:1227-1295` (`sample_bernoulli_matrix_device`)
+- Modify: `crates/xlog-cuda/src/provider/mod.rs:130-131` (`mc_sample_kernels` constants — no change needed since kernel name stays the same)
 
 **Context:** The sampler kernel uses `tid` as the RNG counter: `splitmix64(seed ^ (tid * constant))`. When called per-batch with the same `seed` and `num_samples=batch_size`, batches would repeat the same random worlds. Adding a `sample_offset` parameter makes `global_idx = sample_offset * num_vars + tid`, producing unique worlds across batches while maintaining determinism.
 
@@ -345,7 +345,7 @@ extern "C" __global__ void mc_sample_bernoulli(
 
 **Step 4: Update the Rust wrapper**
 
-In `crates/xlog-cuda/src/provider.rs`, modify `sample_bernoulli_matrix_device` (starting at line 1227):
+In `crates/xlog-cuda/src/provider/mod.rs`, modify `sample_bernoulli_matrix_device` (starting at line 1227):
 
 Change the signature from:
 ```rust
@@ -418,7 +418,7 @@ Expected: All 4 smoke tests pass (offset=0 preserves behavior).
 **Step 8: Commit**
 
 ```bash
-git add kernels/mc_sample.cu crates/xlog-cuda/src/provider.rs crates/xlog-prob/src/mc.rs crates/xlog-prob/tests/mc_rng_offset.rs
+git add kernels/mc_sample.cu crates/xlog-cuda/src/provider/mod.rs crates/xlog-prob/src/mc.rs crates/xlog-prob/tests/mc_rng_offset.rs
 git commit -m "feat(mc): add sample_offset to Bernoulli sampler for batched MC
 
 The RNG counter now uses global_idx = sample_offset * num_vars + tid,
@@ -1005,7 +1005,7 @@ behavior. Used by the batched MC engine (Task 10+)."
 
 **Files:**
 - Modify: `kernels/mc_eval.cu` (add `mc_materialize_batch` kernel)
-- Modify: `crates/xlog-cuda/src/provider.rs:135-139` (register new kernel name)
+- Modify: `crates/xlog-cuda/src/provider/mod.rs:135-139` (register new kernel name)
 
 **Step 1: Add the kernel**
 
@@ -1042,7 +1042,7 @@ extern "C" __global__ void mc_materialize_batch(
 
 **Step 2: Register kernel name**
 
-In `crates/xlog-cuda/src/provider.rs`, add to `mc_eval_kernels` module:
+In `crates/xlog-cuda/src/provider/mod.rs`, add to `mc_eval_kernels` module:
 
 ```rust
 pub mod mc_eval_kernels {
@@ -1079,7 +1079,7 @@ Expected: All pass (new kernel registered but not called yet).
 **Step 4: Commit**
 
 ```bash
-git add kernels/mc_eval.cu crates/xlog-cuda/src/provider.rs
+git add kernels/mc_eval.cu crates/xlog-cuda/src/provider/mod.rs
 git commit -m "feat(cuda): add mc_materialize_batch kernel for batched MC
 
 For each (row, world) pair, checks if the row's probabilistic
@@ -1093,7 +1093,7 @@ for subsequent compaction into world-tagged buffers."
 
 **Files:**
 - Modify: `kernels/mc_eval.cu` (add `mc_count_query_worlds` and `mc_accumulate_batch` kernels)
-- Modify: `crates/xlog-cuda/src/provider.rs` (register new kernel names)
+- Modify: `crates/xlog-cuda/src/provider/mod.rs` (register new kernel names)
 
 **Step 1: Add kernels**
 
@@ -1159,7 +1159,7 @@ Expected: Compiles.
 **Step 4: Commit**
 
 ```bash
-git add kernels/mc_eval.cu crates/xlog-cuda/src/provider.rs
+git add kernels/mc_eval.cu crates/xlog-cuda/src/provider/mod.rs
 git commit -m "feat(cuda): add mc_count_query_worlds and mc_accumulate_batch kernels
 
 mc_count_query_worlds: marks which worlds have ≥1 row for a query.

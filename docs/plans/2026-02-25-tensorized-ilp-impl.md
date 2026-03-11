@@ -662,7 +662,7 @@ use xlog_core::XlogError;
 use xlog_cuda::{CudaBuffer, CudaKernelProvider};
 
 /// Reads the device-side row count using only public APIs (RD-22).
-/// `CudaKernelProvider::device_row_count` is private (provider.rs:6904).
+/// `CudaKernelProvider::device_row_count` is private (provider/mod.rs (pre-Wave-2 line 6904)).
 pub fn read_device_row_count(
     provider: &CudaKernelProvider,
     buffer: &CudaBuffer,
@@ -877,7 +877,7 @@ git commit -m "feat(ilp): add IlpRegistry, executor fields, and match arms for T
 **Files:**
 - Create: `kernels/ilp.cu`
 - Modify: `crates/xlog-cuda/src/kernel_manifest_data.rs`
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 
 **Step 1: Create the CUDA kernel**
 
@@ -934,7 +934,7 @@ Add `"ilp",` after `"neural",` (at the end of the array).
 
 **Step 3: Update the assertion in provider.rs**
 
-Find the assertion that checks `KERNEL_CU_NAMES.len() == 19` in `crates/xlog-cuda/src/provider.rs` and change it to `== 20`.
+Find the assertion that checks `KERNEL_CU_NAMES.len() == 19` in `crates/xlog-cuda/src/provider/mod.rs` and change it to `== 20`.
 
 Search for: `assert!(` or `debug_assert!` or `const _: () = assert!` near the kernel manifest usage.
 
@@ -1149,7 +1149,7 @@ Expected: Compile succeeds. The build.rs will compile `ilp.cu` to PTX and option
 **Step 8: Commit**
 
 ```bash
-git add kernels/ilp.cu crates/xlog-cuda/src/kernel_manifest_data.rs crates/xlog-cuda/src/provider.rs
+git add kernels/ilp.cu crates/xlog-cuda/src/kernel_manifest_data.rs crates/xlog-cuda/src/provider/mod.rs
 git commit -m "feat(ilp): add extract_nonzero_indices CUDA kernel and provider wrapper"
 ```
 

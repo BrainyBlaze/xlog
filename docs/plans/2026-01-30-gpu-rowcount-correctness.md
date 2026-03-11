@@ -70,7 +70,7 @@ Expected: FAIL, result contains `[1, 2, 99, 100]`.
 ### Task 2: Fix concat/union to respect device row counts
 
 **Files:**
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 
 **Step 1: Write minimal implementation**
 
@@ -105,7 +105,7 @@ Expected: PASS.
 ### Task 3: Fix join/groupby/pack to use device row counts
 
 **Files:**
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 
 **Step 1: Join path uses device counts**
 
@@ -157,7 +157,7 @@ Expected: PASS.
 **Step 1: Commit changes**
 
 ```
-git add crates/xlog-cuda/src/provider.rs crates/xlog-cuda/tests/set_ops_tests.rs kernels/set_ops.cu kernels/set_ops.ptx
+git add crates/xlog-cuda/src/provider/mod.rs crates/xlog-cuda/tests/set_ops_tests.rs kernels/set_ops.cu kernels/set_ops.ptx
 # plus any other touched files
 
 git commit -m "fix: respect device row counts in set/join/groupby"

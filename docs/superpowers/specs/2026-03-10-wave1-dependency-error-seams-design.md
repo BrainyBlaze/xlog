@@ -131,15 +131,15 @@ New file: `crates/xlog-cuda/src/type_seam.rs` (~80 lines)
 
 Defines an XLOG-internal marker trait for Rust scalar types that round-trip through GPU
 column storage. Builds on `cudarc::driver::DeviceRepr` (already in broad use across
-provider.rs, gpu_d4.rs, gpu_cdcl.rs) without replacing it.
+provider/, gpu_d4.rs, gpu_cdcl.rs) without replacing it.
 
 ```rust
 /// Marker: a Rust scalar type that can round-trip through GPU column storage.
 /// Requires cudarc::DeviceRepr + known byte width + little-endian serialization.
 ///
-/// Wave 2 will add generic download_column<T: GpuScalar>() and
-/// create_buffer_from_slice<T: GpuScalar>() that replace the type-specialized families.
-pub(crate) trait GpuScalar: cudarc::driver::DeviceRepr + Copy + Send + 'static {
+/// Post-Wave-2: generic download_column::<T>() and create_buffer_from_slice::<T>()
+/// now replace the old type-specialized families. Trait is pub + sealed.
+pub trait GpuScalar: sealed::Sealed + cudarc::driver::DeviceRepr + Copy + Send + 'static {
     const BYTE_WIDTH: usize;
     fn from_le_bytes(bytes: &[u8]) -> Self;
     fn to_le_bytes_into(self, buf: &mut [u8]);  // fixed-width, zero-allocation
@@ -151,7 +151,7 @@ Normal trait, normal impls (not `unsafe` — the unsafe contract is already carr
 f64, bool.
 
 **Bool encoding**: The bool impl must pin its encoding to match current behavior. Note that
-D2H decoding (provider.rs:7075) treats any nonzero byte as `true` (not just `0x01`), while
+D2H decoding (in `provider/transfer.rs`) treats any nonzero byte as `true` (not just `0x01`), while
 H2D encoding should canonicalize to `0x00`/`0x01`. Document both the canonical write
 encoding (`0x00`=false, `0x01`=true) and the lenient read semantics (`0x00`=false,
 nonzero=true) in the trait impl to prevent future encoding drift.

@@ -166,7 +166,7 @@ git commit -m "feat(xlog-cuda): add GPU prefix sum kernel"
 ## Task 2: Prefix Sum Rust Wrapper
 
 **Files:**
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 - Create: `crates/xlog-cuda/tests/scan_tests.rs`
 
 **Step 1: Write failing test for prefix_sum_mask**
@@ -238,7 +238,7 @@ Expected: FAIL with "method `prefix_sum_mask` not found"
 
 **Step 3: Add scan module loading to CudaKernelProvider**
 
-In `crates/xlog-cuda/src/provider.rs`, add:
+In `crates/xlog-cuda/src/provider/mod.rs`, add:
 - Field: `scan_module: CudaModule`
 - Load PTX in `new()`: `include_str!("../../../kernels/scan.ptx")`
 
@@ -324,7 +324,7 @@ Expected: 3 tests PASS
 **Step 6: Commit**
 
 ```bash
-git add crates/xlog-cuda/src/provider.rs crates/xlog-cuda/tests/scan_tests.rs
+git add crates/xlog-cuda/src/provider/mod.rs crates/xlog-cuda/tests/scan_tests.rs
 git commit -m "feat(xlog-cuda): add prefix_sum_mask kernel wrapper"
 ```
 
@@ -470,7 +470,7 @@ git commit -m "feat(xlog-cuda): add GPU radix sort kernel"
 ## Task 4: Radix Sort Rust Wrapper
 
 **Files:**
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 - Create: `crates/xlog-cuda/tests/sort_tests.rs`
 
 **Step 1: Write failing test**
@@ -555,7 +555,7 @@ Expected: FAIL with "method `sort` not found"
 
 **Step 3: Add sort module to provider and implement sort()**
 
-In `crates/xlog-cuda/src/provider.rs`:
+In `crates/xlog-cuda/src/provider/mod.rs`:
 - Add field: `sort_module: CudaModule`
 - Load PTX in `new()`
 - Implement `sort()` method using radix sort passes
@@ -737,7 +737,7 @@ Expected: 3 tests PASS
 **Step 5: Commit**
 
 ```bash
-git add crates/xlog-cuda/src/provider.rs crates/xlog-cuda/tests/sort_tests.rs
+git add crates/xlog-cuda/src/provider/mod.rs crates/xlog-cuda/tests/sort_tests.rs
 git commit -m "feat(xlog-cuda): add GPU radix sort wrapper"
 ```
 
@@ -935,7 +935,7 @@ git commit -m "feat(xlog-cuda): add GPU filter and compaction kernels"
 ## Task 6: GPU Filter Rust Wrapper
 
 **Files:**
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 - Create: `crates/xlog-cuda/tests/filter_tests.rs`
 
 **Step 1: Write failing test**
@@ -1052,7 +1052,7 @@ Expected: 4 tests PASS
 **Step 5: Commit**
 
 ```bash
-git add crates/xlog-cuda/src/provider.rs crates/xlog-cuda/tests/filter_tests.rs
+git add crates/xlog-cuda/src/provider/mod.rs crates/xlog-cuda/tests/filter_tests.rs
 git commit -m "feat(xlog-cuda): add GPU filter wrapper with stream compaction"
 ```
 
@@ -1220,7 +1220,7 @@ git commit -m "feat(xlog-cuda): add multi-column join and semi/anti join kernels
 ## Task 8: Multi-Column Join Rust Wrapper
 
 **Files:**
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 - Create: `crates/xlog-cuda/tests/join_v2_tests.rs`
 
 **Step 1: Write failing tests**
@@ -1392,7 +1392,7 @@ Expected: PASS
 **Step 5: Commit**
 
 ```bash
-git add crates/xlog-cuda/src/provider.rs crates/xlog-cuda/tests/join_v2_tests.rs
+git add crates/xlog-cuda/src/provider/mod.rs crates/xlog-cuda/tests/join_v2_tests.rs
 git commit -m "feat(xlog-cuda): add multi-column and typed hash join wrappers"
 ```
 
@@ -1403,7 +1403,7 @@ git commit -m "feat(xlog-cuda): add multi-column and typed hash join wrappers"
 **Files:**
 - Create: `kernels/set_ops.cu`
 - Modify: `crates/xlog-cuda/build.rs`
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 
 **Step 1: Write set_ops.cu**
 
@@ -1527,7 +1527,7 @@ impl CudaKernelProvider {
 **Step 5: Run tests and commit**
 
 ```bash
-git add kernels/set_ops.cu crates/xlog-cuda/build.rs crates/xlog-cuda/src/provider.rs
+git add kernels/set_ops.cu crates/xlog-cuda/build.rs crates/xlog-cuda/src/provider/mod.rs
 git commit -m "feat(xlog-cuda): add GPU-native union and diff operations"
 ```
 
@@ -1537,7 +1537,7 @@ git commit -m "feat(xlog-cuda): add GPU-native union and diff operations"
 
 **Files:**
 - Modify: `kernels/groupby.cu`
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 
 **Step 1: Enhance groupby.cu with multi-agg support**
 
@@ -1712,7 +1712,7 @@ fn test_groupby_multi_agg() {
 **Step 5: Commit**
 
 ```bash
-git add kernels/groupby.cu crates/xlog-cuda/src/provider.rs
+git add kernels/groupby.cu crates/xlog-cuda/src/provider/mod.rs
 git commit -m "feat(xlog-cuda): add multi-aggregation groupby with LogSumExp"
 ```
 

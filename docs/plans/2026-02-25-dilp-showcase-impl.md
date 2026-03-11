@@ -140,7 +140,7 @@ def build_budget_aware_mask(
     """ST-Gumbel-Softmax with global top-k hard selection.
 
     Per-(i,j) argmax produces up to N^2 entries, which can exceed the
-    executor's max_active_rules=32 (lower.rs:524, provider.rs:10616).
+    executor's max_active_rules=32 (lower.rs:524, provider/mod.rs (pre-Wave-2 line 10616)).
     Global top-k keeps the Python hard mask in sync with what the GPU
     executor actually processes — no silent truncation mismatch.
 

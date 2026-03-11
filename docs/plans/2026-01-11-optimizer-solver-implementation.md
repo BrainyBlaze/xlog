@@ -650,7 +650,7 @@ git commit -m "feat(cuda): add GPU key packing kernels"
 ### Task 5: Integrate GPU Packing into Provider
 
 **Files:**
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 
 **Step 1: Write test for GPU packing**
 
@@ -745,7 +745,7 @@ Expected: FAIL - pack_keys_gpu method not found
 
 **Step 3: Implement pack_keys_gpu in provider**
 
-Add to `crates/xlog-cuda/src/provider.rs` (in the impl block):
+Add to `crates/xlog-cuda/src/provider/mod.rs` (in the impl block):
 
 ```rust
 /// Pack key columns on GPU and compute hashes (no host roundtrip)
@@ -884,7 +884,7 @@ Expected: PASS (2 tests)
 **Step 6: Commit**
 
 ```bash
-git add crates/xlog-cuda/src/provider.rs crates/xlog-cuda/tests/pack_tests.rs
+git add crates/xlog-cuda/src/provider/mod.rs crates/xlog-cuda/tests/pack_tests.rs
 git commit -m "feat(cuda): integrate GPU key packing into provider"
 ```
 

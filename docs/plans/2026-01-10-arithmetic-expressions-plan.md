@@ -952,7 +952,7 @@ git commit -m "feat(executor): implement computed projection evaluation"
 ## Task 8: Add Provider Methods for Arithmetic
 
 **Files:**
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 
 **Step 1: Write failing test**
 
@@ -1091,7 +1091,7 @@ Expected: PASS
 **Step 6: Commit**
 
 ```bash
-git add crates/xlog-cuda/src/provider.rs
+git add crates/xlog-cuda/src/provider/mod.rs
 git commit -m "feat(provider): implement arithmetic column operations"
 ```
 

@@ -15,7 +15,7 @@
 **Files:**
 - Create: `kernels/cache.cu`
 - Modify: `crates/xlog-cuda/build.rs`
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 - Create: `crates/xlog-prob/src/compilation/gpu_cache.rs`
 - Create: `crates/xlog-prob/tests/gpu_cnf_hash.rs`
 
@@ -101,7 +101,7 @@ Expected: FAIL (missing `hash_cnf_gpu` and kernel).
 
 - Add a sequential GPU hash kernel in `kernels/cache.cu` (single block/thread) computing FNV-1a over the CNF metadata, offsets, and literals.
 - Export as `cache_cnf_hash`.
-- Add module and kernel names in `crates/xlog-cuda/src/provider.rs`.
+- Add module and kernel names in `crates/xlog-cuda/src/provider/mod.rs`.
 - Add kernel to build list in `crates/xlog-cuda/build.rs`.
 - Implement `hash_cnf_gpu` in `crates/xlog-prob/src/compilation/gpu_cache.rs`.
 
@@ -114,7 +114,7 @@ Expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add kernels/cache.cu kernels/cache.ptx crates/xlog-cuda/build.rs crates/xlog-cuda/src/provider.rs \
+git add kernels/cache.cu kernels/cache.ptx crates/xlog-cuda/build.rs crates/xlog-cuda/src/provider/mod.rs \
   crates/xlog-prob/src/compilation/gpu_cache.rs crates/xlog-prob/tests/gpu_cnf_hash.rs
 
 git commit -m "feat(gpu-cache): add CNF hash kernel and wrapper"
@@ -126,7 +126,7 @@ git commit -m "feat(gpu-cache): add CNF hash kernel and wrapper"
 
 **Files:**
 - Modify: `kernels/cache.cu`
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 - Modify: `crates/xlog-prob/src/compilation/gpu_cache.rs`
 - Create: `crates/xlog-prob/tests/gpu_circuit_cache.rs`
 
@@ -205,7 +205,7 @@ Expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add kernels/cache.cu kernels/cache.ptx crates/xlog-cuda/src/provider.rs \
+git add kernels/cache.cu kernels/cache.ptx crates/xlog-cuda/src/provider/mod.rs \
   crates/xlog-prob/src/compilation/gpu_cache.rs crates/xlog-prob/tests/gpu_circuit_cache.rs
 
 git commit -m "feat(gpu-cache): add device-resident cache table + LRU"
@@ -217,7 +217,7 @@ git commit -m "feat(gpu-cache): add device-resident cache table + LRU"
 
 **Files:**
 - Modify: `kernels/circuit.cu`
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 - Modify: `crates/xlog-prob/src/gpu.rs`
 - Create: `crates/xlog-prob/tests/gpu_xgcf_cached.rs`
 
@@ -296,7 +296,7 @@ Expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add kernels/circuit.cu kernels/circuit.ptx crates/xlog-cuda/src/provider.rs \
+git add kernels/circuit.cu kernels/circuit.ptx crates/xlog-cuda/src/provider/mod.rs \
   crates/xlog-prob/src/gpu.rs crates/xlog-prob/src/compilation/gpu_cache.rs \
   crates/xlog-prob/tests/gpu_xgcf_cached.rs
 
@@ -388,7 +388,7 @@ git commit -m "feat(gpu-cache): add cache store + metadata"
 - Modify: `crates/xlog-solve/src/gpu_cdcl.rs`
 - Modify: `kernels/d4.cu`
 - Modify: `kernels/sat.cu`
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 - Create: `crates/xlog-prob/tests/gpu_cache_compile_and_verify.rs`
 
 **Step 1: Write failing compile+cache test**

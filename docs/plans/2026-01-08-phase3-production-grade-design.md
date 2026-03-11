@@ -586,7 +586,7 @@ Phase 3 is complete when:
 - `kernels/groupby.cu` - v2 with multi-agg and LogSumExp
 
 ### Rust Modifications
-- `crates/xlog-cuda/src/provider.rs` - New kernel wrappers
+- `crates/xlog-cuda/src/provider/mod.rs` - New kernel wrappers
 - `crates/xlog-runtime/src/executor.rs` - Updated to use new APIs
 
 ### New Tests

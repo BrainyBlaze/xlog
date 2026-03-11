@@ -17,7 +17,7 @@
 Add a GPU-resident variant of `membership_mask` that returns `TrackedCudaSlice<u8>` instead of downloading to `Vec<bool>`. Then refactor existing `membership_mask` to call it internally.
 
 **Files:**
-- Modify: `crates/xlog-cuda/src/provider.rs:8327-8449`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs:8327-8449`
 - Test: `crates/xlog-cuda/tests/certification_suite/mod.rs` (or a new test in the CUDA cert suite)
 
 **Step 1: Write the failing test**
@@ -60,7 +60,7 @@ Expected: FAIL — `membership_mask_device` method does not exist.
 
 **Step 3: Implement `membership_mask_device`**
 
-In `crates/xlog-cuda/src/provider.rs`, add a new public method immediately before the existing `membership_mask` (around line 8327):
+In `crates/xlog-cuda/src/provider/mod.rs`, add a new public method immediately before the existing `membership_mask` (around line 8327):
 
 ```rust
 /// GPU-resident membership mask: returns TrackedCudaSlice<u8> on device.
@@ -184,7 +184,7 @@ Expected: All PASS.
 **Step 5: Commit**
 
 ```bash
-git add crates/xlog-cuda/src/provider.rs crates/xlog-cuda/tests/
+git add crates/xlog-cuda/src/provider/mod.rs crates/xlog-cuda/tests/
 git commit -m "feat(cuda): add membership_mask_device() — GPU-resident mask variant"
 ```
 
@@ -197,8 +197,8 @@ Write three new CUDA kernels for the ILP credit/loss pipeline: COO fill, forward
 **Files:**
 - Create: `kernels/ilp_credit.cu`
 - Modify: `crates/xlog-cuda/src/kernel_manifest_data.rs:10-31` (add `"ilp_credit"` to KERNEL_CU_NAMES)
-- Modify: `crates/xlog-cuda/src/provider.rs:201-204` (add module constant, update assertion)
-- Modify: `crates/xlog-cuda/src/provider.rs:256-258` (add kernel name constants)
+- Modify: `crates/xlog-cuda/src/provider/mod.rs:201-204` (add module constant, update assertion)
+- Modify: `crates/xlog-cuda/src/provider/mod.rs:256-258` (add kernel name constants)
 - Test: Build succeeds and CUDA cert suite loads the new module
 
 **Step 1: Create `kernels/ilp_credit.cu`**
@@ -401,7 +401,7 @@ pub const KERNEL_CU_NAMES: &[&str] = &[
 ];
 ```
 
-Update the compile-time assertion in `provider.rs:204`:
+Update the compile-time assertion in `provider/mod.rs (pre-Wave-2 line 204)`:
 
 ```rust
 const _: () = assert!(crate::kernel_manifest_data::KERNEL_CU_NAMES.len() == 21);
@@ -463,7 +463,7 @@ Expected: All tests PASS, now with 21 modules loaded.
 **Step 4: Commit**
 
 ```bash
-git add kernels/ilp_credit.cu crates/xlog-cuda/src/kernel_manifest_data.rs crates/xlog-cuda/src/provider.rs
+git add kernels/ilp_credit.cu crates/xlog-cuda/src/kernel_manifest_data.rs crates/xlog-cuda/src/provider/mod.rs
 git commit -m "feat(cuda): add ilp_credit.cu kernels — COO fill, forward, backward"
 ```
 
@@ -571,7 +571,7 @@ Implement the core Rust method that builds the sparse CSR structure on GPU from 
 
 **Files:**
 - Modify: `crates/pyxlog/src/lib.rs` (add `compute_ilp_loss_grad_gpu` method)
-- Modify: `crates/xlog-cuda/src/provider.rs` (add helper methods for COO concat, CSR build, forward/backward kernel launch)
+- Modify: `crates/xlog-cuda/src/provider/mod.rs` (add helper methods for COO concat, CSR build, forward/backward kernel launch)
 - Test: `python/tests/test_ilp_credit_gpu.py` (extend)
 
 **Step 1: Write the failing test**
@@ -693,7 +693,7 @@ Expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add crates/pyxlog/src/lib.rs crates/xlog-cuda/src/provider.rs python/tests/test_ilp_credit_gpu.py
+git add crates/pyxlog/src/lib.rs crates/xlog-cuda/src/provider/mod.rs python/tests/test_ilp_credit_gpu.py
 git commit -m "feat(pyxlog): compute_ilp_loss_grad_gpu — GPU-resident ILP loss pipeline"
 ```
 

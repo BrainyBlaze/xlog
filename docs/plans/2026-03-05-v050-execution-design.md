@@ -117,7 +117,7 @@ CSR build + credit forward/backward (all GPU-only, unchanged).
 
 - Modify: `kernels/ilp.cu` + `.ptx` (add `ilp_count_mask_into_slot` or
   use existing `count_mask` with a device-pointer write target)
-- Modify: `crates/xlog-cuda/src/provider.rs` (add `count_mask_into_slot`,
+- Modify: `crates/xlog-cuda/src/provider/mod.rs` (add `count_mask_into_slot`,
   `dtoh_scalar_untracked`)
 - Modify: `crates/pyxlog/src/lib.rs:3987–3994` (rename field to
   `coo_chunk_budget`, add deprecated `set_coo_memory_cap` alias)
@@ -276,7 +276,7 @@ clauses.
 The D2H gate applies to `compute_ilp_loss_grad_gpu` only, not the full
 training step. `batch_fact_membership` (witness coverage check) performs
 `dtoh_sync_copy_into` of mask bytes via `membership_mask`
-(`provider.rs:8576`). This is a correctness-critical control-plane
+(`provider/mod.rs (pre-Wave-2 line 8576)`). This is a correctness-critical control-plane
 transfer that requires a GPU-resident witness coverage protocol to
 eliminate (v0.6.0 scope).
 

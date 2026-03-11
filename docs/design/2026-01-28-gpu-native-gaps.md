@@ -42,7 +42,7 @@ behind `host-io`.
 
 ### 5) Arrow interop still requires host copies
 **Status:** Partially resolved.  
-**Evidence:** `crates/xlog-cuda/src/provider.rs` supports zero-copy Arrow C Device export
+**Evidence:** `crates/xlog-cuda/src/provider/io.rs` supports zero-copy Arrow C Device export
 (`to_arrow_device_record_batch`) and experimental zero-copy import behind `--features arrow-device-import`
 (`from_arrow_device_record_batch`). Arrow IPC remains host-copy.  
 **Impact:** GPU-native Arrow interop is available for supported types, but the production-recommended

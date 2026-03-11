@@ -91,6 +91,6 @@ Evidence:
 
 - Arrow C Data Interface device export (zero-copy, export-only):
   - `crates/xlog-cuda/src/arrow_device.rs`
-  - `crates/xlog-cuda/src/provider.rs` (`to_arrow_device_record_batch`)
+  - `crates/xlog-cuda/src/provider/io.rs` (`to_arrow_device_record_batch`)
   - `crates/xlog-cuda/tests/arrow_device_ffi.rs`
   - `docs/architecture/cudf-interop.md`

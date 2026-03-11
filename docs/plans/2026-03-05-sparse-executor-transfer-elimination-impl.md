@@ -17,7 +17,7 @@
 Add a Rust wrapper on `CudaKernelProvider` for the existing `count_mask` CUDA kernel. This kernel counts nonzero entries in a `u8` mask, writing the result to a device `u32`. The wrapper allocates a 1-element device buffer, zeros it, launches the kernel, and returns the device buffer (no host download).
 
 **Files:**
-- Modify: `crates/xlog-cuda/src/provider.rs` (near line 4404, after `scan_u8_mask_device`)
+- Modify: `crates/xlog-cuda/src/provider/mod.rs` (near line 4404, after `scan_u8_mask_device`)
 - Test: `crates/xlog-cuda-tests/src/harness/provider.rs` or a new test in the CUDA cert suite
 
 **Step 1: Write the failing test**
@@ -70,7 +70,7 @@ Expected: FAIL — `count_mask_device` method does not exist
 
 **Step 3: Implement `count_mask_device`**
 
-In `crates/xlog-cuda/src/provider.rs`, add after `scan_u8_mask_device`:
+In `crates/xlog-cuda/src/provider/mod.rs`, add after `scan_u8_mask_device`:
 
 ```rust
 /// Count nonzero entries in a device u8 mask.
@@ -123,7 +123,7 @@ Expected: PASS
 **Step 5: Commit**
 
 ```bash
-git add crates/xlog-cuda/src/provider.rs crates/xlog-cuda-tests/
+git add crates/xlog-cuda/src/provider/mod.rs crates/xlog-cuda-tests/
 git commit -m "feat(cuda): count_mask_device Rust wrapper for device-side mask count"
 ```
 
@@ -152,7 +152,7 @@ Thread `tid` checks `mask[tid]`; if set, writes `coo_fact[d_offsets[cidx] + pref
 
 **Files:**
 - Modify: `kernels/ilp_credit.cu` (add kernel after `ilp_coo_fill`)
-- Modify: `crates/xlog-cuda/src/provider.rs` (add Rust launcher)
+- Modify: `crates/xlog-cuda/src/provider/mod.rs` (add Rust launcher)
 - Test: New test in CUDA cert suite or `crates/xlog-cuda-tests/`
 
 **Step 1: Write the failing test**
@@ -289,7 +289,7 @@ Expected: PASS
 **Step 5: Commit**
 
 ```bash
-git add kernels/ilp_credit.cu kernels/ilp_credit.ptx crates/xlog-cuda/src/provider.rs crates/xlog-cuda-tests/
+git add kernels/ilp_credit.cu kernels/ilp_credit.ptx crates/xlog-cuda/src/provider/mod.rs crates/xlog-cuda-tests/
 git commit -m "feat(cuda): ilp_coo_fill_from_mask kernel for device-side COO assembly"
 ```
 
@@ -301,7 +301,7 @@ Write a CUDA kernel that builds a histogram of fact indices from sorted COO, pro
 
 **Files:**
 - Modify: `kernels/ilp_credit.cu`
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 - Test: CUDA cert suite
 
 **Step 1: Write the failing test**
@@ -406,7 +406,7 @@ Expected: PASS
 **Step 5: Commit**
 
 ```bash
-git add kernels/ilp_credit.cu kernels/ilp_credit.ptx crates/xlog-cuda/src/provider.rs crates/xlog-cuda-tests/
+git add kernels/ilp_credit.cu kernels/ilp_credit.ptx crates/xlog-cuda/src/provider/mod.rs crates/xlog-cuda-tests/
 git commit -m "feat(cuda): ilp_csr_histogram kernel for device-side CSR construction"
 ```
 
@@ -418,7 +418,7 @@ Write GPU reduction kernels that sum a float array to a single scalar on device.
 
 **Files:**
 - Modify: `kernels/ilp_credit.cu`
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 - Test: CUDA cert suite
 
 **Step 1: Write the failing test**
@@ -561,7 +561,7 @@ Expected: PASS
 **Step 5: Commit**
 
 ```bash
-git add kernels/ilp_credit.cu kernels/ilp_credit.ptx crates/xlog-cuda/src/provider.rs crates/xlog-cuda-tests/
+git add kernels/ilp_credit.cu kernels/ilp_credit.ptx crates/xlog-cuda/src/provider/mod.rs crates/xlog-cuda-tests/
 git commit -m "feat(cuda): ilp_reduce_sum_f32/f64 kernels for device-side loss reduction"
 ```
 

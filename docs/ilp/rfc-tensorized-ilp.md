@@ -245,11 +245,11 @@ pair towards the correct head relation.
 ### RD-22: Device Row Count Is Private (v4.1 — v4 finding #1)
 
 `CudaKernelProvider::device_row_count()` is `fn` (not `pub fn`) at
-provider.rs:6904. New ILP code cannot call it directly. The fix is a
+provider/mod.rs (private method). New ILP code cannot call it directly. The fix is a
 standalone helper that inlines the same pattern using only public APIs:
-`provider.device()` (pub, line 1474), `buffer.num_rows_device()` (pub,
-line 414), and cudarc's `dtoh_sync_copy_into`. All existing public methods
-like `download_column_*` call `device_row_count` internally, so they still
+`provider.device()`, `buffer.num_rows_device()`, and cudarc's
+`dtoh_sync_copy_into`. All existing public methods
+like `download_column::<T>()` call `device_row_count` internally, so they still
 work; this helper is only needed where we need the count without downloading
 column data.
 
@@ -670,7 +670,7 @@ use xlog_cuda::{CudaBuffer, CudaKernelProvider};
 use std::collections::HashMap;
 
 /// Helper: read device-side row count using only public APIs (RD-22).
-/// `device_row_count` is private on CudaKernelProvider (provider.rs:6904).
+/// `device_row_count` is private on CudaKernelProvider (provider/mod.rs).
 /// This inlines the same pattern: dtoh_sync_copy_into from num_rows_device().
 pub fn read_device_row_count(
     provider: &CudaKernelProvider,
@@ -819,7 +819,7 @@ pub const KERNEL_CU_NAMES: &[&str] = &[
 ];
 ```
 
-**File: `crates/xlog-cuda/src/provider.rs`**
+**File: `crates/xlog-cuda/src/provider/mod.rs`** (post-Wave-2: kernel constants remain in mod.rs)
 
 ```rust
 // Update assertion
@@ -863,7 +863,7 @@ Add load_ptx block (follows exact pattern of all other module blocks):
 
 #### 4.7 Provider Wrapper
 
-**File: `crates/xlog-cuda/src/provider.rs`**
+**File: `crates/xlog-cuda/src/provider/ilp.rs`** (post-Wave-2: ILP methods in ilp.rs submodule)
 
 Uses actual APIs only (RD-19): `memory.alloc()`, `htod_sync_copy_into`,
 `dtoh_sync_copy_into`, `device.inner().get_func()`.
@@ -982,7 +982,7 @@ impl CudaKernelProvider {
 `cudarc::driver::CudaSlice<T>` which provides `.try_slice()` returning
 `Option<CudaView<T>>` (cudarc 0.19, core.rs:1456). The
 `device.inner().dtoh_sync_copy_into()` method is the standard download
-path used throughout the codebase (e.g., provider.rs:1596, provider.rs:6630).
+path used throughout the codebase (e.g., `provider/transfer.rs`, `provider/io.rs`).
 
 ---
 
@@ -1379,7 +1379,7 @@ impl CompiledIlpProgram {
     /// RD-24: Re-executes each candidate join (rel_i ⋈ rel_j) and checks
     /// per-fact membership in the individual join result. This provides
     /// true per-join granularity, not just per-relation credit.
-    /// hash_join_v2 takes &self (provider.rs:7147), safe to call here.
+    /// hash_join_v2 takes &self (provider/relational.rs), safe to call here.
     pub fn tagged_entries_containing_fact(
         &self,
         relation: &str,
@@ -1873,7 +1873,7 @@ grad = torch.from_dlpack(grad_dl)               # Zero-copy device tensor
 | `crates/xlog-runtime/src/lib.rs` | Modify | Export `ilp_registry` |
 | `kernels/ilp.cu` | **New** | `extract_nonzero_indices` kernel |
 | `crates/xlog-cuda/src/kernel_manifest_data.rs` | Modify | Add `"ilp"` |
-| `crates/xlog-cuda/src/provider.rs` | Modify | Assertion, `ILP_MODULE`, `load_ptx`, `extract_active_rule_indices()` |
+| `crates/xlog-cuda/src/provider/mod.rs` + `provider/ilp.rs` | Modify | Assertion, `ILP_MODULE`, `load_ptx`, `extract_active_rule_indices()` |
 | `crates/pyxlog/src/lib.rs` | Modify | `IlpProgramFactory`, `CompiledIlpProgram`, helpers |
 
 **Not modified:** `crates/xlog-prob/`.
@@ -1945,11 +1945,11 @@ path shared by neural predicates. Flattening in Python is trivial
 
 | # | v4 Finding | Fix |
 |---|-----------|-----|
-| 1 | `device_row_count` is private (`fn` not `pub fn`) at provider.rs:6904 (Blocker) | RD-22: `read_device_row_count` helper inlines same pattern using public APIs (`provider.device()`, `buffer.num_rows_device()`, `dtoh_sync_copy_into`) |
+| 1 | `device_row_count` is private (`fn` not `pub fn`) in `provider/mod.rs` (Blocker) | RD-22: `read_device_row_count` helper inlines same pattern using public APIs (`provider.device()`, `buffer.num_rows_device()`, `dtoh_sync_copy_into`) |
 | 2 | `try_slice` returns `Option`, not `Result` — `.map_err()` won't compile (Blocker) | RD-23: All `.try_slice()` calls changed from `.map_err()` to `.ok_or_else()` |
 | 3 | RD-12 schema fallback uses `rel_index.first()` which may not match head (High) | Added `head_rel_name: String` field to `TensorMaskedJoin`; all schema lookups (no-mask path, return path, `estimate_width`) now use `head_rel_name` instead of `rel_index.first()` |
 | 4 | Per-fact credit regressed to relation-level — credits ALL entries targeting k (High) | RD-24: `tagged_entries_containing_fact` re-executes `hash_join_v2` per candidate entry and checks per-fact membership individually |
-| 5 | `fact_exists` hardcodes `download_column_i64` — non-i64 relations fail (Medium) | RD-25: Schema-aware dispatch via `buf.schema().column_type()` → `download_column_{u32,i32,i64,u64,bool}` with i64 widening |
+| 5 | `fact_exists` hardcodes `download_column_i64` — non-i64 relations fail (Medium) | RD-25: Schema-aware dispatch via `buf.schema().column_type()` → `download_column::<T>()` (turbofish generics post-Wave-2) with i64 widening |
 
 ### v3 → v4
 

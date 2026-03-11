@@ -159,7 +159,7 @@ For an annotated disjunction with m heads lowered to m-1 decision vars `d_0..d_{
 
 ### Provider change
 
-`sample_bernoulli_matrix_device()` in `crates/xlog-cuda/src/provider.rs` accepts
+`sample_bernoulli_matrix_device()` in `crates/xlog-cuda/src/provider/mod.rs` accepts
 device-side force arrays (pointers/slices). `mc.rs` owns allocation and H2D upload
 of the arrays.
 
@@ -191,7 +191,7 @@ Result metadata:
 |------|--------|
 | `crates/xlog-prob/src/mc.rs` | `McSamplingMethod` enum, `EvidenceForcing` struct, `compile_evidence_forcing()`, `sampling_method` on `McEvalConfig`/`McResult`/`McDeviceResult`, auto-selection logic, clamped evaluation branch (skip evidence-count path) |
 | `kernels/mc_sample.cu` | `force_mask` + `forced_value` parameters, clamping branch |
-| `crates/xlog-cuda/src/provider.rs` | Launch API accepts device-side force arrays |
+| `crates/xlog-cuda/src/provider/mod.rs` | Launch API accepts device-side force arrays |
 | `crates/pyxlog/src/lib.rs` | `sampling_method` parameter on `evaluate()`/`evaluate_device()`, result metadata packing, `evidence_count = total_samples` in clamped mode |
 | `crates/xlog-prob/tests/mc.rs` | Core evidence clamping tests |
 | `crates/xlog-prob/tests/gpu_mc_device_counts.rs` | Device-count semantics under clamped mode |

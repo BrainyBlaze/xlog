@@ -143,7 +143,7 @@ impl GpuScalar for f64 {
 
 /// Bool encoding:
 /// - Write (H2D): `0x00` = false, `0x01` = true (canonical).
-/// - Read (D2H): `0x00` = false, nonzero = true (lenient, matches provider.rs:7075).
+/// - Read (D2H): `0x00` = false, nonzero = true (lenient, matches the D2H bool decoding path in provider/transfer.rs).
 impl GpuScalar for bool {
     const BYTE_WIDTH: usize = 1;
 
@@ -216,7 +216,7 @@ mod tests {
 
     #[test]
     fn test_bool_lenient_read() {
-        // Any nonzero byte reads as true (matches provider.rs:7075 behavior).
+        // Any nonzero byte reads as true (matches the D2H bool decoding path in provider/transfer.rs behavior).
         assert!(!bool::from_le_bytes(&[0x00]));
         assert!(bool::from_le_bytes(&[0x01]));
         assert!(bool::from_le_bytes(&[0x02]));

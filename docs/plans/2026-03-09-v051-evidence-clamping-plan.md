@@ -359,7 +359,7 @@ git commit -m "test(mc): verify AD chain forcing for 3-way and last-head-no-none
 
 **Files:**
 - Modify: `kernels/mc_sample.cu`
-- Modify: `crates/xlog-cuda/src/provider.rs:1759-1821` (sample_bernoulli_matrix_device)
+- Modify: `crates/xlog-cuda/src/provider/mod.rs:1759-1821` (sample_bernoulli_matrix_device)
 
 **Step 1: Update the CUDA kernel**
 
@@ -415,7 +415,7 @@ Expected: PTX builds successfully.
 
 **Step 3: Update provider launch**
 
-In `crates/xlog-cuda/src/provider.rs`, update `sample_bernoulli_matrix_device` to accept device-side force arrays:
+In `crates/xlog-cuda/src/provider/mod.rs`, update `sample_bernoulli_matrix_device` to accept device-side force arrays:
 
 Change the method signature from:
 
@@ -492,7 +492,7 @@ Expected: All tests pass (zero-filled force arrays = identical behavior to old k
 **Step 6: Commit**
 
 ```bash
-git add kernels/mc_sample.cu kernels/build/ crates/xlog-cuda/src/provider.rs crates/xlog-prob/src/mc.rs
+git add kernels/mc_sample.cu kernels/build/ crates/xlog-cuda/src/provider/mod.rs crates/xlog-prob/src/mc.rs
 git commit -m "feat(mc): add force_mask/forced_value to mc_sample_bernoulli kernel"
 ```
 

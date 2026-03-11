@@ -70,7 +70,7 @@ The arithmetic expressions feature has been fully implemented and validated. All
 | Lowerer | `lower.rs:663-871` | infer_arith_type, arith_to_expr, lower_is_expr | ✅ |
 | IR | `rir.rs:18-114` | Expr variants, ProjectExpr::Computed | ✅ |
 | Executor | `executor.rs:517-803` | evaluate_arith_expr, execute_project | ✅ |
-| CUDA Provider | `provider.rs:5393-5632` | All arithmetic column operations | ✅ |
+| CUDA Provider | `provider/mod.rs (pre-Wave-2 line 5393)-5632` | All arithmetic column operations | ✅ |
 
 ### Design Document Compliance
 

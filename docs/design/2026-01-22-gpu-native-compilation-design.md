@@ -992,7 +992,7 @@ This appendix lists the concrete source files that must change to support the GP
    - Add GPU-resident PIR graph (`GpuPirGraph`) and GPU extraction path.
    - Ensure provenance extraction can emit GPU PIR directly or via GPU executor.
 
-6. `crates/xlog-cuda/src/provider.rs` and `kernels/`  
+6. `crates/xlog-cuda/src/provider/` and `kernels/`
    - Add new PTX modules for GPU D4 kernels and GPU CDCL verifier.
    - Wire kernel entry points into the provider (similar to existing circuit kernels).
 

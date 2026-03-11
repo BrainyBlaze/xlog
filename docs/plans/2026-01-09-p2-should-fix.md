@@ -24,7 +24,7 @@
 ## Task 1: Make Join Output Limit Configurable
 
 **Files:**
-- Modify: `crates/xlog-cuda/src/provider.rs` (lines 428, 3070, 3572)
+- Modify: `crates/xlog-cuda/src/provider/mod.rs` (lines 428, 3070, 3572)
 - Test: Add test for custom limit
 
 **Problem:** Join output is hardcoded to `min(1_000_000)`. Large joins silently truncate results.
@@ -119,7 +119,7 @@ cargo test -p xlog-cuda join -- --nocapture
 **Step 7: Commit**
 
 ```bash
-git add crates/xlog-cuda/src/provider.rs
+git add crates/xlog-cuda/src/provider/mod.rs
 git commit -m "feat(xlog-cuda): make join output limit configurable
 
 Adds max_output parameter to hash_join and hash_join_v2. Defaults to
@@ -132,7 +132,7 @@ environments."
 ## Task 2: Add Float (F64) Filter Support
 
 **Files:**
-- Modify: `crates/xlog-cuda/src/provider.rs` (add filter_f64 method)
+- Modify: `crates/xlog-cuda/src/provider/mod.rs` (add filter_f64 method)
 - Test: `crates/xlog-cuda/tests/filter_tests.rs`
 
 **Problem:** The `filter_compare_f64` CUDA kernel exists but has no Rust wrapper.
@@ -312,7 +312,7 @@ cargo test -p xlog-cuda --test filter_tests -- --nocapture
 **Step 5: Commit**
 
 ```bash
-git add crates/xlog-cuda/src/provider.rs crates/xlog-cuda/tests/filter_tests.rs
+git add crates/xlog-cuda/src/provider/mod.rs crates/xlog-cuda/tests/filter_tests.rs
 git commit -m "feat(xlog-cuda): add F64 filter support
 
 Wires up existing filter_compare_f64 CUDA kernel with Rust wrapper.
@@ -325,7 +325,7 @@ Adds filter_f64, filter_f64_eq, filter_f64_gt, filter_f64_lt methods."
 
 **Files:**
 - Modify: `kernels/groupby.cu` (add logsumexp kernels)
-- Modify: `crates/xlog-cuda/src/provider.rs` (implement LogSumExp case)
+- Modify: `crates/xlog-cuda/src/provider/mod.rs` (implement LogSumExp case)
 - Test: Add LogSumExp tests
 
 **Problem:** LogSumExp aggregation returns "not implemented" error. Needed for probabilistic reasoning.
@@ -589,7 +589,7 @@ cargo test -p xlog-cuda test_groupby_logsumexp -- --nocapture
 **Step 9: Commit**
 
 ```bash
-git add kernels/groupby.cu kernels/groupby.ptx crates/xlog-cuda/src/provider.rs
+git add kernels/groupby.cu kernels/groupby.ptx crates/xlog-cuda/src/provider/mod.rs
 git commit -m "feat(xlog-cuda): implement LogSumExp aggregation
 
 Adds numerically stable LogSumExp using 3-pass algorithm:
@@ -605,7 +605,7 @@ Required for probabilistic reasoning in xlog-prob tier."
 ## Task 4: Extend Set Operations to Multiple Types
 
 **Files:**
-- Modify: `crates/xlog-cuda/src/provider.rs` (union_gpu, diff_gpu)
+- Modify: `crates/xlog-cuda/src/provider/mod.rs` (union_gpu, diff_gpu)
 - Test: Add multi-type set op tests
 
 **Problem:** `union_gpu` and `diff_gpu` only work with single U32 columns. Should support U64, I64.
@@ -785,7 +785,7 @@ cargo test -p xlog-cuda set_ops -- --nocapture
 **Step 6: Commit**
 
 ```bash
-git add crates/xlog-cuda/src/provider.rs
+git add crates/xlog-cuda/src/provider/mod.rs
 git commit -m "feat(xlog-cuda): extend set operations to U64/I64/F64 types
 
 Union and diff now support multiple scalar types using CPU sort

@@ -30,10 +30,10 @@ LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/cuda/lib64 .venv/bin/python -m pytes
 
 ### Task 1: Add D2H instrumentation counter to CudaKernelProvider
 
-**Context:** Before fixing the hot path, we need a way to _count_ D2H transfers so we can assert they're zero during training steps. `CudaKernelProvider` (in `crates/xlog-cuda/src/provider.rs`) is the single point through which all GPU↔CPU data moves. We add an atomic counter that increments on every `download_column_*` call, plus methods to read/reset it.
+**Context:** Before fixing the hot path, we need a way to _count_ D2H transfers so we can assert they're zero during training steps. `CudaKernelProvider` (in `crates/xlog-cuda/src/provider/mod.rs`) is the single point through which all GPU↔CPU data moves. We add an atomic counter that increments on every `download_column_*` call, plus methods to read/reset it.
 
 **Files:**
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 - Test: `crates/xlog-cuda/tests/test_d2h_counter.rs` (create)
 
 **Step 1: Write the failing test**
@@ -87,7 +87,7 @@ Expected: FAIL — `d2h_transfer_count` and `reset_d2h_transfer_count` methods d
 
 **Step 3: Implement the counter**
 
-In `crates/xlog-cuda/src/provider.rs`, add to `CudaKernelProvider` struct:
+In `crates/xlog-cuda/src/provider/mod.rs`, add to `CudaKernelProvider` struct:
 
 ```rust
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -129,7 +129,7 @@ Expected: 3 tests PASS.
 **Step 5: Commit**
 
 ```bash
-git add crates/xlog-cuda/src/provider.rs crates/xlog-cuda/tests/test_d2h_counter.rs
+git add crates/xlog-cuda/src/provider/mod.rs crates/xlog-cuda/tests/test_d2h_counter.rs
 git commit -m "feat(xlog-cuda): add D2H transfer counter to CudaKernelProvider"
 ```
 
@@ -219,12 +219,12 @@ git commit -m "feat(pyxlog): expose D2H transfer counter to Python"
 
 ### Task 3: Add `membership_mask` to CudaKernelProvider
 
-**Context:** `hash_join_semi_impl` (provider.rs:8163-8268) already computes a `d_has_match: CudaSlice<u8>` mask (line 8225) with one byte per left row indicating whether that row has a match in the right side. But it immediately calls `filter_by_device_mask` (line 8267) and discards the mask. We extract a new public method `membership_mask` that returns just the raw mask, plus a `download_mask` helper that copies it to host.
+**Context:** `hash_join_semi_impl` (provider/mod.rs (pre-Wave-2 line 8163)-8268) already computes a `d_has_match: CudaSlice<u8>` mask (line 8225) with one byte per left row indicating whether that row has a match in the right side. But it immediately calls `filter_by_device_mask` (line 8267) and discards the mask. We extract a new public method `membership_mask` that returns just the raw mask, plus a `download_mask` helper that copies it to host.
 
 This is the foundational GPU primitive for batch fact-membership.
 
 **Files:**
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 - Test: `crates/xlog-cuda/tests/test_membership_mask.rs` (create)
 
 **Step 1: Write the failing test**
@@ -359,7 +359,7 @@ Expected: FAIL — `membership_mask` method doesn't exist on `CudaKernelProvider
 
 **Step 3: Implement `membership_mask`**
 
-In `crates/xlog-cuda/src/provider.rs`, add a new public method. The implementation reuses the internal hash_join_semi logic but returns the mask bytes instead of filtering:
+In `crates/xlog-cuda/src/provider/mod.rs`, add a new public method. The implementation reuses the internal hash_join_semi logic but returns the mask bytes instead of filtering:
 
 ```rust
 /// Compute a per-row membership mask: for each row in `probe`, check whether
@@ -465,7 +465,7 @@ Expected: 5 tests PASS.
 **Step 5: Commit**
 
 ```bash
-git add crates/xlog-cuda/src/provider.rs crates/xlog-cuda/tests/test_membership_mask.rs
+git add crates/xlog-cuda/src/provider/mod.rs crates/xlog-cuda/tests/test_membership_mask.rs
 git commit -m "feat(xlog-cuda): add GPU-side membership_mask primitive"
 ```
 
@@ -592,7 +592,7 @@ pub fn batch_fact_membership(
 }
 ```
 
-**Note on `create_buffer_from_u32_columns` signature:** Check the actual signature in provider.rs:5762. It takes `&[Vec<u32>]` and a `Schema`. If it takes `&[&[u32]]` instead, adjust the column construction accordingly. The key point: one H2D upload for all facts, then GPU-side matching.
+**Note on `create_buffer_from_u32_columns` signature:** Check the actual signature in provider/mod.rs (pre-Wave-2 line 5762). It takes `&[Vec<u32>]` and a `Schema`. If it takes `&[&[u32]]` instead, adjust the column construction accordingly. The key point: one H2D upload for all facts, then GPU-side matching.
 
 **Step 4: Build and run tests**
 
@@ -1289,7 +1289,7 @@ git commit -m "docs: record P0 performance results"
 
 | File | Change |
 |------|--------|
-| `crates/xlog-cuda/src/provider.rs` | Add `d2h_transfer_count` field + counter methods, add `membership_mask` method |
+| `crates/xlog-cuda/src/provider/mod.rs` | Add `d2h_transfer_count` field + counter methods, add `membership_mask` method |
 | `crates/xlog-cuda/tests/test_d2h_counter.rs` | New: D2H counter unit tests |
 | `crates/xlog-cuda/tests/test_membership_mask.rs` | New: membership_mask GPU primitive tests |
 | `crates/xlog-runtime/src/ilp_registry.rs` | Add `buffer: Option<CudaBuffer>` to `IlpTagEntry` |

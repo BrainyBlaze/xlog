@@ -111,7 +111,7 @@ git commit -m "test(gpu): add no-dtoh guardrails for native compile and mc eval"
 **Files:**
 - Modify: `kernels/d4.cu`
 - Modify: `kernels/d4.ptx` (regenerate)
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 - Modify: `crates/xlog-prob/src/compilation/gpu_d4.rs`
 - Modify: `crates/xlog-prob/src/gpu.rs` (GpuCircuitLayout / meta usage)
 
@@ -157,7 +157,7 @@ extern "C" __global__ void d4_capture_emit_meta(
 
 **Step 3: Wire kernel in provider**
 
-In `crates/xlog-cuda/src/provider.rs`:
+In `crates/xlog-cuda/src/provider/mod.rs`:
 - Add a `d4_kernels::D4_CAPTURE_EMIT_META` constant.
 - Include it in the kernel resolution list for the D4 module.
 
@@ -180,7 +180,7 @@ Expected: still FAIL (smoothing + random-var list still DTOH; will be fixed late
 **Step 6: Commit**
 
 ```bash
-git add kernels/d4.cu kernels/d4.ptx crates/xlog-cuda/src/provider.rs crates/xlog-prob/src/compilation/gpu_d4.rs
+git add kernels/d4.cu kernels/d4.ptx crates/xlog-cuda/src/provider/mod.rs crates/xlog-prob/src/compilation/gpu_d4.rs
 git commit -m "feat(d4): capture compile metadata on device and remove dtoh reads"
 ```
 
@@ -244,7 +244,7 @@ git commit -m "feat(d4): make GPU smoothing cap checks device-only"
 **Files:**
 - Modify: `kernels/filter.cu` (or new CUDA util file)
 - Modify: `kernels/filter.ptx` (regenerate)
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 - Modify: `crates/xlog-prob/src/exact.rs`
 - Modify: `crates/xlog-prob/src/gpu.rs`
 - Modify: `crates/xlog-prob/src/compilation/gpu_cache.rs`
@@ -274,7 +274,7 @@ Use existing scan + `compact_u32_by_mask` to emit the device `random_var_list`.
 
 **Step 3: Wire kernel names in provider**
 
-Add new kernel name constants and module resolution in `crates/xlog-cuda/src/provider.rs`.
+Add new kernel name constants and module resolution in `crates/xlog-cuda/src/provider/mod.rs`.
 
 **Step 4: Replace `collect_random_vars_host`**
 
@@ -303,7 +303,7 @@ Expected: PASS.
 **Step 8: Commit**
 
 ```bash
-git add kernels/filter.cu kernels/filter.ptx crates/xlog-cuda/src/provider.rs \
+git add kernels/filter.cu kernels/filter.ptx crates/xlog-cuda/src/provider/mod.rs \
   crates/xlog-prob/src/exact.rs crates/xlog-prob/src/gpu.rs crates/xlog-prob/src/compilation/gpu_cache.rs
 git commit -m "feat(gpu): device-only random-var list and cache meta evaluation"
 ```
@@ -315,7 +315,7 @@ git commit -m "feat(gpu): device-only random-var list and cache meta evaluation"
 **Files:**
 - Modify: `kernels/mc_eval.cu`
 - Modify: `kernels/mc_eval.ptx` (regenerate)
-- Modify: `crates/xlog-cuda/src/provider.rs`
+- Modify: `crates/xlog-cuda/src/provider/mod.rs`
 - Modify: `crates/xlog-prob/src/mc.rs`
 
 **Step 1: Write a failing test**
@@ -375,7 +375,7 @@ Expected: PASS.
 **Step 6: Commit**
 
 ```bash
-git add kernels/mc_eval.cu kernels/mc_eval.ptx crates/xlog-cuda/src/provider.rs crates/xlog-prob/src/mc.rs
+git add kernels/mc_eval.cu kernels/mc_eval.ptx crates/xlog-cuda/src/provider/mod.rs crates/xlog-prob/src/mc.rs
 git commit -m "feat(mc): device-only query/evidence evaluation for gpu-native MC"
 ```
 

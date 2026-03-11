@@ -529,7 +529,7 @@ impl QueryOptimizer {
 
 ### Modified Files
 - `crates/xlog-logic/src/optimizer.rs` - Query optimizer (new)
-- `crates/xlog-cuda/src/provider.rs` - GPU packing integration
+- `crates/xlog-cuda/src/provider/mod.rs` - GPU packing integration
 - `crates/xlog-runtime/src/executor.rs` - Stats collection
 - `Cargo.toml` - Workspace members
 

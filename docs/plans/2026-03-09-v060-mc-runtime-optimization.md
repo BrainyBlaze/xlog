@@ -115,7 +115,7 @@ git commit -m "feat(mc): add hot-path timing breakdown for MC evaluation"
 **Files:**
 - Modify: `crates/xlog-prob/src/mc.rs`
 - Test: `crates/xlog-prob/tests/gpu_mc_device_counts.rs`
-- Reference: `crates/xlog-cuda/src/provider.rs:5585-5784`, `crates/xlog-cuda/src/provider.rs:1998-2055`
+- Reference: `crates/xlog-cuda/src/provider/mod.rs:5585-5784`, `crates/xlog-cuda/src/provider/mod.rs:1998-2055`
 
 **Step 1: Write the failing tests**
 
