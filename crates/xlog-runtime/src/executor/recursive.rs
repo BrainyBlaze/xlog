@@ -240,9 +240,7 @@ impl Executor {
                 deduped
             };
 
-            let (_delta_rel_id, delta_name) = delta_tracker.get(pred).ok_or_else(|| {
-                XlogError::Execution(format!("Missing delta relation for {}", pred))
-            })?;
+            let delta_name = delta_tracker.delta_name(pred)?;
 
             let delta_initial = if full_old.is_empty() || full_new.is_empty() {
                 self.clone_buffer(&full_new)?
@@ -289,8 +287,8 @@ impl Executor {
                     }
 
                     // Skip variants where the delta for this predicate is empty.
-                    let (_delta_rel_id, delta_name) = match delta_tracker.get(&pred_name) {
-                        Some(v) => v,
+                    let delta_name = match delta_tracker.get(&pred_name) {
+                        Some((_rel_id, name)) => name.as_str(),
                         None => continue,
                     };
                     if self
@@ -314,16 +312,10 @@ impl Executor {
 
                 let mut rule_delta_raw: Option<CudaBuffer> = None;
                 for (rel_id, occ, pred_name) in variants {
-                    let (delta_rel_id, _delta_name) =
-                        delta_tracker.get(&pred_name).ok_or_else(|| {
-                            XlogError::Execution(format!(
-                                "Missing delta relation for predicate {}",
-                                pred_name
-                            ))
-                        })?;
+                    let delta_rel_id = delta_tracker.delta_rel_id(&pred_name)?;
 
                     let variant_node =
-                        Self::rewrite_scan_nth(&rule.body, rel_id, occ, *delta_rel_id).ok_or_else(
+                        Self::rewrite_scan_nth(&rule.body, rel_id, occ, delta_rel_id).ok_or_else(
                             || {
                                 XlogError::Execution(format!(
                                     "Failed to rewrite rule body for predicate {}",
@@ -378,7 +370,7 @@ impl Executor {
             }
 
             // Finalize delta_new per head: delta_new = dedup(delta_raw - full).
-            let mut any_changed = false;
+            delta_tracker.begin_iteration();
 
             for pred in &recursive_preds {
                 let full = self
@@ -411,17 +403,15 @@ impl Executor {
                     self.create_empty_buffer(full.schema().clone())?
                 };
 
-                let (_delta_rel_id, delta_name) = delta_tracker.get(pred).ok_or_else(|| {
-                    XlogError::Execution(format!("Missing delta relation for {}", pred))
-                })?;
+                let delta_name = delta_tracker.delta_name(pred)?.to_string();
                 if !delta_new.is_empty() {
-                    any_changed = true;
+                    delta_tracker.mark_changed();
                 }
-                self.store_put(delta_name, delta_new);
+                self.store_put(&delta_name, delta_new);
             }
 
             // Fixpoint reached if no deltas produced.
-            if !any_changed {
+            if delta_tracker.is_converged() {
                 reached_fixpoint = true;
                 self.profiler.record_iterations(iteration_count);
                 break;
@@ -433,16 +423,14 @@ impl Executor {
                     .store
                     .remove(pred)
                     .ok_or_else(|| XlogError::Execution(format!("Missing relation: {}", pred)))?;
-                let (_delta_rel_id, delta_name) = delta_tracker.get(pred).ok_or_else(|| {
-                    XlogError::Execution(format!("Missing delta relation for {}", pred))
-                })?;
-                let delta = self.store_remove(delta_name).ok_or_else(|| {
-                    XlogError::Execution(format!("Missing relation: {}", delta_name))
+                let dn = delta_tracker.delta_name(pred)?;
+                let delta = self.store_remove(dn).ok_or_else(|| {
+                    XlogError::Execution(format!("Missing relation: {}", dn))
                 })?;
 
                 if delta.is_empty() {
                     self.store_put(pred, full_old);
-                    self.store_put(delta_name, delta);
+                    self.store_put(dn, delta);
                     continue;
                 }
 
@@ -477,7 +465,7 @@ impl Executor {
                     deduped
                 };
                 self.store_put(pred, full_new);
-                self.store_put(delta_name, delta);
+                self.store_put(dn, delta);
             }
         }
 
