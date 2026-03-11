@@ -44,46 +44,6 @@ const ARROW_DEVICE_ARRAY_CAPSULE_NAME: &[u8] = b"arrow_device_array\0";
 #[cfg(feature = "arrow-device-import")]
 const USED_ARROW_DEVICE_ARRAY_CAPSULE_NAME: &[u8] = b"used_arrow_device_array\0";
 
-/// Epsilon value for numerical stability in log computations
-const NLL_EPSILON: f64 = 1e-38;
-
-fn scalar_type_name(typ: &ScalarType) -> String {
-    match *typ {
-        ScalarType::U32 => "u32".to_string(),
-        ScalarType::U64 => "u64".to_string(),
-        ScalarType::I32 => "i32".to_string(),
-        ScalarType::I64 => "i64".to_string(),
-        ScalarType::F32 => "f32".to_string(),
-        ScalarType::F64 => "f64".to_string(),
-        ScalarType::Bool => "bool".to_string(),
-        ScalarType::Symbol => "symbol".to_string(),
-    }
-}
-
-#[cfg(not(feature = "host-io"))]
-fn host_io_disabled_pyerr() -> PyErr {
-    PyRuntimeError::new_err(
-        "Host output is disabled (feature \"host-io\" is OFF). Use device-resident APIs (DLPack) or rebuild with --features host-io.",
-    )
-}
-
-/// Compute negative log-likelihood loss from probability.
-///
-/// NLL loss = -log(max(p, epsilon))
-///
-/// The epsilon prevents -log(0) = infinity.
-#[inline]
-fn nll_loss_value(probability: f64) -> f64 {
-    -(probability.max(NLL_EPSILON)).ln()
-}
-
-/// Create a PyTorch tensor from a scalar f64 value.
-fn create_torch_tensor(py: Python<'_>, value: f64) -> PyResult<PyObject> {
-    let torch = py.import_bound("torch")?;
-    let tensor = torch.call_method1("tensor", (value,))?;
-    Ok(tensor.into())
-}
-
 unsafe extern "C" fn dlpack_capsule_destructor(capsule: *mut pyo3::ffi::PyObject) {
     if capsule.is_null() {
         return;
@@ -350,7 +310,7 @@ fn export_arrow_device(
         memory_bytes: memory_mb * 1024 * 1024,
     };
     let provider =
-        provider_from_config(config).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        provider_from_config(config).map_err(types::xlog_err)?;
 
     let tensors: Vec<DlpackManagedTensor> = match dlpack_columns.downcast::<PySequence>() {
         Ok(seq) => {
@@ -365,10 +325,10 @@ fn export_arrow_device(
 
     let buffer = provider
         .from_dlpack_tensors(tensors)
-        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        .map_err(types::xlog_err)?;
     let device_array = provider
         .to_arrow_device_record_batch(buffer)
-        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        .map_err(types::xlog_err)?;
     arrow_device_capsule_from_device_array(py, device_array)
 }
 
@@ -393,13 +353,13 @@ fn import_arrow_device(
         memory_bytes: memory_mb * 1024 * 1024,
     };
     let provider =
-        provider_from_config(config).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        provider_from_config(config).map_err(types::xlog_err)?;
 
     let device_array = arrow_device_from_py(device_array)?;
 
     let buffer = provider
         .from_arrow_device_record_batch(device_array)
-        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        .map_err(types::xlog_err)?;
 
     let names: Vec<String> = buffer
         .schema
@@ -415,7 +375,7 @@ fn import_arrow_device(
     for col_idx in 0..arity {
         let tensor = table
             .column(col_idx)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(types::xlog_err)?;
         tensors.push(dlpack_capsule_from_tensor(py, tensor)?);
     }
 
@@ -437,15 +397,15 @@ fn dlpack_roundtrip(
         memory_bytes: memory_mb * 1024 * 1024,
     };
     let provider =
-        provider_from_config(config).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        provider_from_config(config).map_err(types::xlog_err)?;
     let managed = dlpack_from_py(tensor)?;
     let buffer = provider
         .from_dlpack_tensors(vec![managed])
-        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        .map_err(types::xlog_err)?;
     let out = provider
         .to_dlpack_table(buffer)
         .column(0)
-        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        .map_err(types::xlog_err)?;
     dlpack_capsule_from_tensor(py, out)
 }
 
@@ -473,7 +433,7 @@ impl Program {
 
         // Parse the AST to get prob_engine and neural predicates
         let ast = xlog_logic::parse_program(source)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(types::xlog_err)?;
 
         // Extract declared neural network names
         let declared_networks: HashSet<String> = ast
@@ -500,7 +460,7 @@ impl Program {
         }
 
         let neural_registry =
-            NeuralPredicateRegistry::from_ast(&ast).map_err(|e| PyValueError::new_err(e))?;
+            NeuralPredicateRegistry::from_ast(&ast).map_err(types::val_err)?;
 
         let engine = match prob_engine {
             Some(s) => parse_prob_engine_override(&s)?,
@@ -510,15 +470,15 @@ impl Program {
         let program = match engine {
             ProbEngine::ExactDdnnf => CompiledProbProgram::Exact(
                 ExactDdnnfProgram::compile_source_with_gpu(source, config)
-                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?,
+                    .map_err(types::xlog_err)?,
             ),
             ProbEngine::Mc => CompiledProbProgram::Mc(
                 McProgram::compile_source_with_gpu(source, config)
-                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?,
+                    .map_err(types::xlog_err)?,
             ),
         };
         let provider =
-            provider_from_config(config).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            provider_from_config(config).map_err(types::xlog_err)?;
 
         Ok(CompiledProgram {
             program,
@@ -677,19 +637,19 @@ impl CompiledProgram {
                     if return_grads {
                         let result = _program
                             .evaluate_gpu_with_grads()
-                            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                            .map_err(types::xlog_err)?;
                         self.pack_result_with_grads(_py, result)
                     } else {
                         let result = _program
                             .evaluate()
-                            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                            .map_err(types::xlog_err)?;
                         self.pack_result_probs(_py, result.query_probs)
                     }
                 }
                 #[cfg(not(feature = "host-io"))]
                 {
                     let _ = return_grads;
-                    Err(host_io_disabled_pyerr())
+                    Err(types::host_io_disabled_pyerr())
                 }
             }
             CompiledProbProgram::Mc(_program) => {
@@ -710,13 +670,13 @@ impl CompiledProgram {
                 {
                     let result = _program
                         .evaluate(cfg)
-                        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                        .map_err(types::xlog_err)?;
                     self.pack_result_mc(_py, result)
                 }
                 #[cfg(not(feature = "host-io"))]
                 {
                     let _ = cfg;
-                    Err(host_io_disabled_pyerr())
+                    Err(types::host_io_disabled_pyerr())
                 }
             }
         }
@@ -758,7 +718,7 @@ impl CompiledProgram {
 
                 let result = program
                     .evaluate_gpu_device_with_provider(cfg, self.output_provider.clone())
-                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                    .map_err(types::xlog_err)?;
 
                 (
                     result.query_counts,
@@ -793,12 +753,12 @@ impl CompiledProgram {
                     .output_provider
                     .memory()
                     .alloc::<u32>(1)
-                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                    .map_err(types::xlog_err)?;
                 self.output_provider
                     .device()
                     .inner()
                     .htod_sync_copy_into(&[rows_u32], &mut d_num_rows)
-                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                    .map_err(types::xlog_err)?;
 
                 let buffer = xlog_cuda::CudaBuffer::from_columns(
                     vec![counts.into_bytes().into()],
@@ -810,7 +770,7 @@ impl CompiledProgram {
                     .output_provider
                     .to_dlpack_table(buffer)
                     .column(0)
-                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                    .map_err(types::xlog_err)?;
                 dlpack_capsule_from_tensor(py, tensor)
             };
 
@@ -1237,7 +1197,7 @@ impl CompiledProgram {
     fn set_active_tensor_source(&mut self, name: String) -> PyResult<()> {
         self.tensor_sources
             .set_active(&name)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+            .map_err(types::val_err)
     }
 
     /// Get the name of the currently active tensor source.
@@ -1249,7 +1209,7 @@ impl CompiledProgram {
     fn active_tensor_source_size(&self) -> PyResult<usize> {
         self.tensor_sources
             .active_size()
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+            .map_err(types::val_err)
     }
 
     /// Get names of all tensor sources.
@@ -1280,7 +1240,7 @@ impl CompiledProgram {
     /// The NLL loss value (always non-negative, 0 for certain facts)
     fn nll_loss(&self, query: &str) -> PyResult<f64> {
         let prob = self.evaluate_query_probability(query)?;
-        Ok(nll_loss_value(prob))
+        Ok(types::nll_loss_value(prob))
     }
 
     /// Compute sum of NLL losses for a batch of queries.
@@ -1301,7 +1261,7 @@ impl CompiledProgram {
         }
 
         let probs = self.evaluate_query_probabilities(&queries)?;
-        Ok(probs.iter().map(|&p| nll_loss_value(p)).sum())
+        Ok(probs.iter().map(|&p| types::nll_loss_value(p)).sum())
     }
 
     /// Compute mean NLL loss for a batch of queries.
@@ -1326,7 +1286,7 @@ impl CompiledProgram {
         }
 
         let probs = self.evaluate_query_probabilities(&queries)?;
-        let sum: f64 = probs.iter().map(|&p| nll_loss_value(p)).sum();
+        let sum: f64 = probs.iter().map(|&p| types::nll_loss_value(p)).sum();
         Ok(sum / probs.len() as f64)
     }
 
@@ -1342,7 +1302,7 @@ impl CompiledProgram {
     /// PyTorch scalar tensor containing the loss value
     fn nll_loss_tensor(&self, py: Python<'_>, query: &str) -> PyResult<PyObject> {
         let loss = self.nll_loss(query)?;
-        create_torch_tensor(py, loss)
+        types::create_torch_tensor(py, loss)
     }
 
     /// Compute batch NLL loss and return as PyTorch tensor.
@@ -1354,7 +1314,7 @@ impl CompiledProgram {
     /// PyTorch scalar tensor containing the sum of losses
     fn nll_loss_batch_tensor(&self, py: Python<'_>, queries: Vec<String>) -> PyResult<PyObject> {
         let loss = self.nll_loss_batch(queries)?;
-        create_torch_tensor(py, loss)
+        types::create_torch_tensor(py, loss)
     }
 
     // =========================================================================
@@ -1550,7 +1510,7 @@ impl CompiledProgram {
         }
 
         let probs = self.evaluate_query_probabilities(&queries)?;
-        let total_loss: f64 = probs.iter().map(|&p| nll_loss_value(p)).sum();
+        let total_loss: f64 = probs.iter().map(|&p| types::nll_loss_value(p)).sum();
         Ok(total_loss / queries.len() as f64)
     }
 
@@ -1895,7 +1855,7 @@ impl CompiledProgram {
         let info = self
             .neural_registry
             .resolve_atom(&atom)
-            .map_err(PyValueError::new_err)?;
+            .map_err(types::val_err)?;
 
         if info.input_arity != 1 {
             return Err(PyValueError::new_err(format!(
@@ -1999,7 +1959,7 @@ impl CompiledProgram {
 
         let torch = py.import_bound("torch")?;
         let clamp_kwargs = PyDict::new_bound(py);
-        clamp_kwargs.set_item("min", NLL_EPSILON)?;
+        clamp_kwargs.set_item("min", types::NLL_EPSILON)?;
         let loss = if expected {
             let prob_clamped = prob_tensor.call_method("clamp", (), Some(&clamp_kwargs))?;
             let log_p = prob_clamped.call_method0("log")?;
@@ -2145,7 +2105,7 @@ impl CompiledProgram {
                 let prob_buf = self
                     .output_provider
                     .from_dlpack_tensors_with_schema(schema_f32.clone(), vec![managed])
-                    .map_err(|e| PyRuntimeError::new_err(format!("DLPack import failed: {}", e)))?;
+                    .map_err(|e| types::gpu_err("DLPack import failed", e))?;
 
                 let grad_tensor = torch.call_method1("zeros_like", (&output_row,))?;
                 let grad_tensor = grad_tensor.call_method0("contiguous")?;
@@ -2153,7 +2113,7 @@ impl CompiledProgram {
                 let grad_buf = self
                     .output_provider
                     .from_dlpack_tensors_with_schema(schema_f32.clone(), vec![grad_managed])
-                    .map_err(|e| PyRuntimeError::new_err(format!("DLPack import failed: {}", e)))?;
+                    .map_err(|e| types::gpu_err("DLPack import failed", e))?;
 
                 out_tensors[call.order_idx] = Some(output_row.into());
                 grad_tensors[call.order_idx] = Some(grad_tensor.into());
@@ -2239,19 +2199,19 @@ impl CompiledProgram {
                     expected,
                 )
             })
-            .map_err(|e| PyRuntimeError::new_err(format!("Neural fast-path error: {}", e)))?;
+            .map_err(|e| types::gpu_err("Neural fast-path error", e))?;
 
         // `CudaBuffer` carries the row count on-device. For a single scalar loss, upload 1.
         let mut d_num_rows = self
             .output_provider
             .memory()
             .alloc::<u32>(1)
-            .map_err(|e| PyRuntimeError::new_err(format!("GPU allocation failed: {}", e)))?;
+            .map_err(|e| types::gpu_err("GPU allocation failed", e))?;
         self.output_provider
             .device()
             .inner()
             .htod_sync_copy_into(&[1u32], &mut d_num_rows)
-            .map_err(|e| PyRuntimeError::new_err(format!("Failed to set row count: {}", e)))?;
+            .map_err(|e| types::gpu_err("Failed to set row count", e))?;
 
         let loss_buf = xlog_cuda::CudaBuffer::from_columns(
             vec![loss_dev.into_bytes().into()],
@@ -2263,7 +2223,7 @@ impl CompiledProgram {
             .output_provider
             .to_dlpack_table(loss_buf)
             .column(0)
-            .map_err(|e| PyRuntimeError::new_err(format!("DLPack export failed: {}", e)))?;
+            .map_err(|e| types::gpu_err("DLPack export failed", e))?;
         let loss_capsule = dlpack_capsule_from_tensor(py, loss_dl)?;
         let loss_tensor = torch.getattr("from_dlpack")?.call1((loss_capsule,))?;
 
@@ -2478,7 +2438,7 @@ impl CompiledProgram {
                 let prob_buf = self
                     .output_provider
                     .from_dlpack_tensors_with_schema(schema_f32.clone(), vec![managed])
-                    .map_err(|e| PyRuntimeError::new_err(format!("DLPack import failed: {}", e)))?;
+                    .map_err(|e| types::gpu_err("DLPack import failed", e))?;
 
                 let grad_tensor = torch.call_method1("zeros_like", (&row,))?;
                 let grad_tensor = grad_tensor.call_method0("contiguous")?;
@@ -2486,7 +2446,7 @@ impl CompiledProgram {
                 let grad_buf = self
                     .output_provider
                     .from_dlpack_tensors_with_schema(schema_f32.clone(), vec![grad_managed])
-                    .map_err(|e| PyRuntimeError::new_err(format!("DLPack import failed: {}", e)))?;
+                    .map_err(|e| types::gpu_err("DLPack import failed", e))?;
 
                 prob_map.insert((call.query, call.group), prob_buf);
                 grad_map.insert((call.query, call.group), grad_buf);
@@ -2574,16 +2534,12 @@ impl CompiledProgram {
         let batch_loss_tensor: PyObject = match batched_loss_dev {
             Ok(loss_dev) => {
                 let mut d_num_rows =
-                    self.output_provider.memory().alloc::<u32>(1).map_err(|e| {
-                        PyRuntimeError::new_err(format!("GPU allocation failed: {}", e))
-                    })?;
+                    self.output_provider.memory().alloc::<u32>(1).map_err(|e| types::gpu_err("GPU allocation failed", e))?;
                 self.output_provider
                     .device()
                     .inner()
                     .htod_sync_copy_into(&[n_queries_u32], &mut d_num_rows)
-                    .map_err(|e| {
-                        PyRuntimeError::new_err(format!("Failed to set row count: {}", e))
-                    })?;
+                    .map_err(|e| types::gpu_err("Failed to set row count", e))?;
 
                 let loss_buf = xlog_cuda::CudaBuffer::from_columns(
                     vec![loss_dev.into_bytes().into()],
@@ -2595,7 +2551,7 @@ impl CompiledProgram {
                     .output_provider
                     .to_dlpack_table(loss_buf)
                     .column(0)
-                    .map_err(|e| PyRuntimeError::new_err(format!("DLPack export failed: {}", e)))?;
+                    .map_err(|e| types::gpu_err("DLPack export failed", e))?;
                 let loss_capsule = dlpack_capsule_from_tensor(py, loss_dl)?;
                 let loss_tensor = torch.getattr("from_dlpack")?.call1((loss_capsule,))?;
                 loss_tensor.call_method0("sum")?.into_py(py)
@@ -2616,21 +2572,15 @@ impl CompiledProgram {
                                 expected,
                             )
                         })
-                        .map_err(|e| {
-                            PyRuntimeError::new_err(format!("Neural fast-path error: {}", e))
-                        })?;
+                        .map_err(|e| types::gpu_err("Neural fast-path error", e))?;
 
                     let mut d_num_rows =
-                        self.output_provider.memory().alloc::<u32>(1).map_err(|e| {
-                            PyRuntimeError::new_err(format!("GPU allocation failed: {}", e))
-                        })?;
+                        self.output_provider.memory().alloc::<u32>(1).map_err(|e| types::gpu_err("GPU allocation failed", e))?;
                     self.output_provider
                         .device()
                         .inner()
                         .htod_sync_copy_into(&[1u32], &mut d_num_rows)
-                        .map_err(|e| {
-                            PyRuntimeError::new_err(format!("Failed to set row count: {}", e))
-                        })?;
+                        .map_err(|e| types::gpu_err("Failed to set row count", e))?;
 
                     let loss_buf = xlog_cuda::CudaBuffer::from_columns(
                         vec![loss_dev.into_bytes().into()],
@@ -2642,9 +2592,7 @@ impl CompiledProgram {
                         .output_provider
                         .to_dlpack_table(loss_buf)
                         .column(0)
-                        .map_err(|e| {
-                            PyRuntimeError::new_err(format!("DLPack export failed: {}", e))
-                        })?;
+                        .map_err(|e| types::gpu_err("DLPack export failed", e))?;
                     let loss_capsule = dlpack_capsule_from_tensor(py, loss_dl)?;
                     let loss_tensor = torch.getattr("from_dlpack")?.call1((loss_capsule,))?;
 
@@ -2831,7 +2779,7 @@ impl CompiledProgram {
     fn match_neural_decl_for_atom(&self, atom: &Atom) -> PyResult<&NeuralPredicateInfo> {
         self.neural_registry
             .resolve_atom(atom)
-            .map_err(PyValueError::new_err)
+            .map_err(types::val_err)
     }
 
     fn find_head_position(rule_head: &Atom, var_name: &str) -> Option<usize> {
@@ -3150,7 +3098,7 @@ impl CompiledProgram {
         #[cfg(not(feature = "host-io"))]
         {
             let _ = (signature, query_pred, query_arity);
-            return Err(host_io_disabled_pyerr());
+            return Err(types::host_io_disabled_pyerr());
         }
 
         #[cfg(feature = "host-io")]
@@ -3158,7 +3106,7 @@ impl CompiledProgram {
             let (expanded_ast, target_domain) =
                 self.generate_template_ast(signature, query_pred, query_arity)?;
             let program = ExactDdnnfProgram::compile_from_program(&expanded_ast, self._gpu_config)
-                .map_err(|e| PyRuntimeError::new_err(format!("Query compilation error: {}", e)))?;
+                .map_err(|e| types::gpu_err("Query compilation error", e))?;
 
             let compile_profile = program.last_compile_profile().cloned();
 
@@ -3194,7 +3142,7 @@ impl CompiledProgram {
             }
 
             let slots = GpuWeightSlots::upload(self.output_provider.as_ref(), &slot_groups)
-                .map_err(|e| PyRuntimeError::new_err(format!("Slot map upload error: {}", e)))?;
+                .map_err(|e| types::gpu_err("Slot map upload error", e))?;
 
             Ok((CachedCircuit {
                 program,
@@ -3253,7 +3201,7 @@ impl CompiledProgram {
         #[cfg(not(feature = "host-io"))]
         {
             let _ = queries;
-            return Err(host_io_disabled_pyerr());
+            return Err(types::host_io_disabled_pyerr());
         }
 
         #[cfg(feature = "host-io")]
@@ -3271,30 +3219,22 @@ impl CompiledProgram {
                         &source_with_queries,
                         self._gpu_config,
                     )
-                    .map_err(|e| {
-                        PyRuntimeError::new_err(format!("Query compilation error: {}", e))
-                    })?;
+                    .map_err(|e| types::gpu_err("Query compilation error", e))?;
 
                     program
                         .evaluate()
-                        .map_err(|e| {
-                            PyRuntimeError::new_err(format!("Query evaluation error: {}", e))
-                        })?
+                        .map_err(|e| types::gpu_err("Query evaluation error", e))?
                         .query_probs
                 }
                 ProbEngine::Mc => {
                     let program =
                         McProgram::compile_source_with_gpu(&source_with_queries, self._gpu_config)
-                            .map_err(|e| {
-                                PyRuntimeError::new_err(format!("Query compilation error: {}", e))
-                            })?;
+                            .map_err(|e| types::gpu_err("Query compilation error", e))?;
 
                     let cfg = McEvalConfig::default();
                     program
                         .evaluate(cfg)
-                        .map_err(|e| {
-                            PyRuntimeError::new_err(format!("Query evaluation error: {}", e))
-                        })?
+                        .map_err(|e| types::gpu_err("Query evaluation error", e))?
                         .query_estimates
                         .into_iter()
                         .map(|e| QueryProbability {
@@ -3342,22 +3282,22 @@ impl CompiledProgram {
         let prob_buf = self
             .output_provider
             .create_buffer_from_slice::<f64>(&probs, schema.clone())
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(types::xlog_err)?;
         let log_prob_buf = self
             .output_provider
             .create_buffer_from_slice::<f64>(&log_probs, schema)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(types::xlog_err)?;
 
         let prob_tensor = self
             .output_provider
             .to_dlpack_table(prob_buf)
             .column(0)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(types::xlog_err)?;
         let log_prob_tensor = self
             .output_provider
             .to_dlpack_table(log_prob_buf)
             .column(0)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(types::xlog_err)?;
 
         Ok(EvalResult {
             atoms,
@@ -3406,22 +3346,22 @@ impl CompiledProgram {
             let grad_true_buf = self
                 .output_provider
                 .create_buffer_from_slice::<f64>(&q.grad_true, schema.clone())
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                .map_err(types::xlog_err)?;
             let grad_false_buf = self
                 .output_provider
                 .create_buffer_from_slice::<f64>(&q.grad_false, schema.clone())
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                .map_err(types::xlog_err)?;
 
             let grad_true_tensor = self
                 .output_provider
                 .to_dlpack_table(grad_true_buf)
                 .column(0)
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                .map_err(types::xlog_err)?;
             let grad_false_tensor = self
                 .output_provider
                 .to_dlpack_table(grad_false_buf)
                 .column(0)
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                .map_err(types::xlog_err)?;
 
             grad_true_caps.push(dlpack_capsule_from_tensor(py, grad_true_tensor)?);
             grad_false_caps.push(dlpack_capsule_from_tensor(py, grad_false_tensor)?);
@@ -3430,22 +3370,22 @@ impl CompiledProgram {
         let prob_buf = self
             .output_provider
             .create_buffer_from_slice::<f64>(&probs, schema.clone())
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(types::xlog_err)?;
         let log_prob_buf = self
             .output_provider
             .create_buffer_from_slice::<f64>(&log_probs, schema)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(types::xlog_err)?;
 
         let prob_tensor = self
             .output_provider
             .to_dlpack_table(prob_buf)
             .column(0)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(types::xlog_err)?;
         let log_prob_tensor = self
             .output_provider
             .to_dlpack_table(log_prob_buf)
             .column(0)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(types::xlog_err)?;
 
         Ok(EvalResult {
             atoms,
@@ -3496,49 +3436,49 @@ impl CompiledProgram {
         let prob_buf = self
             .output_provider
             .create_buffer_from_slice::<f64>(&probs, schema.clone())
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(types::xlog_err)?;
         let log_prob_buf = self
             .output_provider
             .create_buffer_from_slice::<f64>(&log_probs, schema.clone())
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(types::xlog_err)?;
         let stderr_buf = self
             .output_provider
             .create_buffer_from_slice::<f64>(&stderrs, schema.clone())
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(types::xlog_err)?;
         let ci_low_buf = self
             .output_provider
             .create_buffer_from_slice::<f64>(&ci_lows, schema.clone())
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(types::xlog_err)?;
         let ci_high_buf = self
             .output_provider
             .create_buffer_from_slice::<f64>(&ci_highs, schema)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(types::xlog_err)?;
 
         let prob_tensor = self
             .output_provider
             .to_dlpack_table(prob_buf)
             .column(0)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(types::xlog_err)?;
         let log_prob_tensor = self
             .output_provider
             .to_dlpack_table(log_prob_buf)
             .column(0)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(types::xlog_err)?;
         let stderr_tensor = self
             .output_provider
             .to_dlpack_table(stderr_buf)
             .column(0)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(types::xlog_err)?;
         let ci_low_tensor = self
             .output_provider
             .to_dlpack_table(ci_low_buf)
             .column(0)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(types::xlog_err)?;
         let ci_high_tensor = self
             .output_provider
             .to_dlpack_table(ci_high_buf)
             .column(0)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(types::xlog_err)?;
 
         Ok(EvalResult {
             atoms,
@@ -3585,9 +3525,9 @@ impl LogicProgram {
         };
 
         let program = gpu_logic::LogicProgram::compile(source)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(types::xlog_err)?;
         let provider =
-            provider_from_config(config).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            provider_from_config(config).map_err(types::xlog_err)?;
 
         Ok(CompiledLogicProgram {
             program,
@@ -3638,7 +3578,7 @@ impl CompiledLogicProgram {
                 let buffer = self
                     .provider
                     .from_dlpack_tensors_with_schema(schema.clone(), tensors)
-                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                    .map_err(types::xlog_err)?;
 
                 inputs.insert(name, buffer);
             }
@@ -3647,7 +3587,7 @@ impl CompiledLogicProgram {
         let result = self
             .program
             .evaluate(self.provider.clone(), inputs)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(types::xlog_err)?;
         self.pack_logic_result(py, result)
     }
 }
@@ -3671,7 +3611,7 @@ impl CompiledLogicProgram {
                 for col_idx in 0..arity {
                     let tensor = table
                         .column(col_idx)
-                        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                        .map_err(types::xlog_err)?;
                     tensors.push(dlpack_capsule_from_tensor(py, tensor)?);
                 }
             }
@@ -4320,7 +4260,7 @@ impl IlpProgramFactory {
         }
 
         let ast = xlog_logic::parse_program(source)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            .map_err(types::val_err)?;
 
         let base_source = strip_learnable_declarations(source);
         let learnable_source = extract_learnable_declarations(source);
@@ -4330,7 +4270,7 @@ impl IlpProgramFactory {
             compiler.set_max_active_rules(max);
         }
         let plan = compiler.compile_program(&ast)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(types::xlog_err)?;
 
         let mut rel_index: Vec<(RelId, String)> = compiler.rel_ids().iter()
             .map(|(name, id)| (*id, name.clone()))
@@ -4344,7 +4284,7 @@ impl IlpProgramFactory {
         };
         let provider = Arc::new(
             provider_from_config(config)
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+                .map_err(types::xlog_err)?
         );
 
         let mut executor = Executor::new(provider.clone());
@@ -4355,15 +4295,15 @@ impl IlpProgramFactory {
 
         for (name, schema) in &schemas {
             let empty = provider.create_empty_buffer(schema.clone())
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                .map_err(types::xlog_err)?;
             executor.store_mut().put(name, empty);
         }
 
         load_facts_into_store(&ast, &provider, &mut executor, &schemas)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(types::xlog_err)?;
 
         executor.execute_plan(&plan)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(types::xlog_err)?;
 
         let tmj = extract_tmj_meta(&plan);
 
@@ -4476,7 +4416,7 @@ impl CompiledIlpProgram {
         let cand_buf = self
             .provider
             .from_dlpack_tensors(vec![managed])
-            .map_err(|e| PyRuntimeError::new_err(format!("DLPack import: {}", e)))?;
+            .map_err(|e| types::gpu_err("DLPack import", e))?;
 
         // Determine dtype from imported buffer
         let cand_schema = cand_buf.schema().clone();
@@ -4495,7 +4435,7 @@ impl CompiledIlpProgram {
         };
 
         let cand_rows = read_device_row_count(&self.provider, &cand_buf)
-            .map_err(|e| PyRuntimeError::new_err(format!("row count: {}", e)))?;
+            .map_err(|e| types::gpu_err("row count", e))?;
         if cand_rows != num_cands as usize {
             return Err(PyValueError::new_err(format!(
                 "cand_probs length ({}) != candidate_map length ({})",
@@ -4607,7 +4547,7 @@ impl CompiledIlpProgram {
             let query_buf = self
                 .provider
                 .create_buffer_from_slices(&col_slices, schema)
-                .map_err(|e| PyRuntimeError::new_err(format!("create_buffer: {}", e)))?;
+                .map_err(|e| types::gpu_err("create_buffer", e))?;
 
             let keys: Vec<usize> = (0..arity).collect();
             let num_query = fact_values.len() as u32;
@@ -4620,12 +4560,12 @@ impl CompiledIlpProgram {
                 .provider
                 .memory()
                 .alloc::<u32>(num_query as usize)
-                .map_err(|e| PyRuntimeError::new_err(format!("alloc fact_indices: {}", e)))?;
+                .map_err(|e| types::gpu_err("alloc fact_indices", e))?;
             self.provider
                 .device()
                 .inner()
                 .htod_sync_copy_into(&global_indices, &mut d_fact_indices)
-                .map_err(|e| PyRuntimeError::new_err(format!("htod fact_indices: {}", e)))?;
+                .map_err(|e| types::gpu_err("htod fact_indices", e))?;
             let fi_idx = fact_indices_buffers.len();
             fact_indices_buffers.push(d_fact_indices);
 
@@ -4639,7 +4579,7 @@ impl CompiledIlpProgram {
                 let d_mask = self
                     .provider
                     .membership_mask_device(&query_buf, entry_buf, &keys, &keys)
-                    .map_err(|e| PyRuntimeError::new_err(format!("membership_mask: {}", e)))?;
+                    .map_err(|e| types::gpu_err("membership_mask", e))?;
 
                 tasks.push(CooTask {
                     cidx,
@@ -4673,12 +4613,12 @@ impl CompiledIlpProgram {
             .provider
             .memory()
             .alloc::<u8>(num_facts as usize)
-            .map_err(|e| PyRuntimeError::new_err(format!("alloc is_positive: {}", e)))?;
+            .map_err(|e| types::gpu_err("alloc is_positive", e))?;
         self.provider
             .device()
             .inner()
             .htod_sync_copy_into(&is_positive_host, &mut d_is_positive)
-            .map_err(|e| PyRuntimeError::new_err(format!("htod is_positive: {}", e)))?;
+            .map_err(|e| types::gpu_err("htod is_positive", e))?;
 
         let cand_col = cand_buf
             .column(0)
@@ -4708,12 +4648,12 @@ impl CompiledIlpProgram {
                 .provider
                 .memory()
                 .alloc::<u32>(num_tasks)
-                .map_err(|e| PyRuntimeError::new_err(format!("alloc d_offsets: {}", e)))?;
+                .map_err(|e| types::gpu_err("alloc d_offsets", e))?;
             self.provider
                 .device()
                 .inner()
                 .htod_sync_copy_into(&offsets_host, &mut d_offsets)
-                .map_err(|e| PyRuntimeError::new_err(format!("htod d_offsets: {}", e)))?;
+                .map_err(|e| types::gpu_err("htod d_offsets", e))?;
 
             let sentinel_fact = num_facts;
             let sentinel_cand = num_cands;
@@ -4721,12 +4661,12 @@ impl CompiledIlpProgram {
                 .provider
                 .memory()
                 .alloc::<u32>(upper_bound as usize)
-                .map_err(|e| PyRuntimeError::new_err(format!("alloc coo_facts: {}", e)))?;
+                .map_err(|e| types::gpu_err("alloc coo_facts", e))?;
             let mut d_coo_cands = self
                 .provider
                 .memory()
                 .alloc::<u32>(upper_bound as usize)
-                .map_err(|e| PyRuntimeError::new_err(format!("alloc coo_cands: {}", e)))?;
+                .map_err(|e| types::gpu_err("alloc coo_cands", e))?;
             {
                 let sentinel_facts_vec = vec![sentinel_fact; upper_bound as usize];
                 let sentinel_cands_vec = vec![sentinel_cand; upper_bound as usize];
@@ -4734,19 +4674,19 @@ impl CompiledIlpProgram {
                     .device()
                     .inner()
                     .htod_sync_copy_into(&sentinel_facts_vec, &mut d_coo_facts)
-                    .map_err(|e| PyRuntimeError::new_err(format!("sentinel facts: {}", e)))?;
+                    .map_err(|e| types::gpu_err("sentinel facts", e))?;
                 self.provider
                     .device()
                     .inner()
                     .htod_sync_copy_into(&sentinel_cands_vec, &mut d_coo_cands)
-                    .map_err(|e| PyRuntimeError::new_err(format!("sentinel cands: {}", e)))?;
+                    .map_err(|e| types::gpu_err("sentinel cands", e))?;
             }
 
             for (task_idx, task) in tasks.iter().enumerate() {
                 let d_prefix = self
                     .provider
                     .scan_u8_mask_device(&task.d_mask, task.num_query)
-                    .map_err(|e| PyRuntimeError::new_err(format!("scan mask: {}", e)))?;
+                    .map_err(|e| types::gpu_err("scan mask", e))?;
 
                 self.provider
                     .ilp_coo_fill_from_mask_launch(
@@ -4760,7 +4700,7 @@ impl CompiledIlpProgram {
                         &mut d_coo_facts,
                         &mut d_coo_cands,
                     )
-                    .map_err(|e| PyRuntimeError::new_err(format!("coo fill: {}", e)))?;
+                    .map_err(|e| types::gpu_err("coo fill", e))?;
             }
 
             (d_coo_facts, d_coo_cands, upper_bound)
@@ -4780,7 +4720,7 @@ impl CompiledIlpProgram {
                 .provider
                 .memory()
                 .alloc::<u32>(tc_len)
-                .map_err(|e| PyRuntimeError::new_err(format!("alloc task_counts: {}", e)))?;
+                .map_err(|e| types::gpu_err("alloc task_counts", e))?;
             // Zero-init the entire array (counts default to 0, last slot = 0 for scan).
             {
                 let zeros = vec![0u32; tc_len];
@@ -4788,7 +4728,7 @@ impl CompiledIlpProgram {
                     .device()
                     .inner()
                     .htod_sync_copy_into(&zeros, &mut d_task_counts)
-                    .map_err(|e| PyRuntimeError::new_err(format!("zero task_counts: {}", e)))?;
+                    .map_err(|e| types::gpu_err("zero task_counts", e))?;
             }
 
             // ── Pass 1: Count NNZ per task ──
@@ -4818,9 +4758,7 @@ impl CompiledIlpProgram {
                                 &mut d_task_counts,
                                 task_idx,
                             )
-                            .map_err(|e| PyRuntimeError::new_err(format!(
-                                "count_mask_into_slot: {}", e
-                            )))?;
+                            .map_err(|e| types::gpu_err("count_mask_into_slot", e))?;
                     }
 
                     chunk_start = chunk_end;
@@ -4829,7 +4767,7 @@ impl CompiledIlpProgram {
 
             // Synchronize to ensure all count kernels have completed.
             self.provider.device().synchronize()
-                .map_err(|e| PyRuntimeError::new_err(format!("sync pass1: {}", e)))?;
+                .map_err(|e| types::gpu_err("sync pass1", e))?;
 
             // Compute per-task write offsets via exclusive scan.
             // d_task_counts[0..num_tasks] has counts; after scan,
@@ -4837,12 +4775,12 @@ impl CompiledIlpProgram {
             // d_task_counts[num_tasks] = total_nnz.
             self.provider
                 .exclusive_scan_u32_inplace(&mut d_task_counts, tc_len as u32)
-                .map_err(|e| PyRuntimeError::new_err(format!("scan task_counts: {}", e)))?;
+                .map_err(|e| types::gpu_err("scan task_counts", e))?;
 
             // Read total_nnz from the last element (metadata-only, untracked).
             let total_nnz: u32 = self.provider
                 .dtoh_scalar_untracked(&d_task_counts, num_tasks)
-                .map_err(|e| PyRuntimeError::new_err(format!("read total_nnz: {}", e)))?;
+                .map_err(|e| types::gpu_err("read total_nnz", e))?;
 
             if total_nnz == 0 {
                 return self.build_loss_grad_empty_coo(
@@ -4859,12 +4797,12 @@ impl CompiledIlpProgram {
                 .provider
                 .memory()
                 .alloc::<u32>(total_nnz as usize)
-                .map_err(|e| PyRuntimeError::new_err(format!("alloc global coo_facts: {}", e)))?;
+                .map_err(|e| types::gpu_err("alloc global coo_facts", e))?;
             let mut d_coo_cands = self
                 .provider
                 .memory()
                 .alloc::<u32>(total_nnz as usize)
-                .map_err(|e| PyRuntimeError::new_err(format!("alloc global coo_cands: {}", e)))?;
+                .map_err(|e| types::gpu_err("alloc global coo_cands", e))?;
 
             // ── Pass 2: Fill COO at pre-computed offsets ──
             // d_task_counts now contains offsets (after exclusive scan).
@@ -4894,7 +4832,7 @@ impl CompiledIlpProgram {
                         let d_prefix = self
                             .provider
                             .scan_u8_mask_device(&task.d_mask, task.num_query)
-                            .map_err(|e| PyRuntimeError::new_err(format!("scan mask: {}", e)))?;
+                            .map_err(|e| types::gpu_err("scan mask", e))?;
 
                         self.provider
                             .ilp_coo_fill_from_mask_launch(
@@ -4908,7 +4846,7 @@ impl CompiledIlpProgram {
                                 &mut d_coo_facts,
                                 &mut d_coo_cands,
                             )
-                            .map_err(|e| PyRuntimeError::new_err(format!("coo fill: {}", e)))?;
+                            .map_err(|e| types::gpu_err("coo fill", e))?;
                         // d_prefix dropped here (bounded temp).
                     }
 
@@ -4927,7 +4865,7 @@ impl CompiledIlpProgram {
         // exact-NNZ (no sentinels) from the two-pass GPU-only merge.
         let mut scratch =
             xlog_cuda::provider::RadixSortScratch::new(&self.provider, actual_nnz)
-                .map_err(|e| PyRuntimeError::new_err(format!("sort scratch: {}", e)))?;
+                .map_err(|e| types::gpu_err("sort scratch", e))?;
         self.provider
             .radix_sort_u32_pairs(
                 &mut d_coo_facts,
@@ -4935,25 +4873,25 @@ impl CompiledIlpProgram {
                 actual_nnz,
                 &mut scratch,
             )
-            .map_err(|e| PyRuntimeError::new_err(format!("radix sort: {}", e)))?;
+            .map_err(|e| types::gpu_err("radix sort", e))?;
 
         let d_hist = self
             .provider
             .ilp_csr_histogram_launch(&d_coo_facts, actual_nnz, num_facts)
-            .map_err(|e| PyRuntimeError::new_err(format!("csr histogram: {}", e)))?;
+            .map_err(|e| types::gpu_err("csr histogram", e))?;
 
         let mut d_row_offsets = self
             .provider
             .memory()
             .alloc::<u32>((num_facts + 1) as usize)
-            .map_err(|e| PyRuntimeError::new_err(format!("alloc row_offsets: {}", e)))?;
+            .map_err(|e| types::gpu_err("alloc row_offsets", e))?;
         {
             let zeros = vec![0u32; (num_facts + 1) as usize];
             self.provider
                 .device()
                 .inner()
                 .htod_sync_copy_into(&zeros, &mut d_row_offsets)
-                .map_err(|e| PyRuntimeError::new_err(format!("zero row_offsets: {}", e)))?;
+                .map_err(|e| types::gpu_err("zero row_offsets", e))?;
         }
         {
             let mut dst_view = d_row_offsets
@@ -4965,11 +4903,11 @@ impl CompiledIlpProgram {
                 .device()
                 .inner()
                 .dtod_copy(&d_hist, &mut dst_view)
-                .map_err(|e| PyRuntimeError::new_err(format!("dtod hist->row_offsets: {}", e)))?;
+                .map_err(|e| types::gpu_err("dtod hist->row_offsets", e))?;
         }
         self.provider
             .exclusive_scan_u32_inplace(&mut d_row_offsets, num_facts + 1)
-            .map_err(|e| PyRuntimeError::new_err(format!("scan row_offsets: {}", e)))?;
+            .map_err(|e| types::gpu_err("scan row_offsets", e))?;
 
         // ── Phase E: Forward + backward + device-side reduction ──
         if is_f64 {
@@ -4983,12 +4921,12 @@ impl CompiledIlpProgram {
                     num_facts,
                     eps_f64,
                 )
-                .map_err(|e| PyRuntimeError::new_err(format!("forward f64: {}", e)))?;
+                .map_err(|e| types::gpu_err("forward f64", e))?;
 
             let d_total_loss = self
                 .provider
                 .ilp_reduce_sum_f64_launch(&loss_contrib, num_facts)
-                .map_err(|e| PyRuntimeError::new_err(format!("reduce f64: {}", e)))?;
+                .map_err(|e| types::gpu_err("reduce f64", e))?;
 
             let d_grad = self
                 .provider
@@ -5000,7 +4938,7 @@ impl CompiledIlpProgram {
                     num_facts,
                     num_cands,
                 )
-                .map_err(|e| PyRuntimeError::new_err(format!("backward f64: {}", e)))?;
+                .map_err(|e| types::gpu_err("backward f64", e))?;
 
             self.export_loss_grad_device_f64(py, d_total_loss, d_grad, num_cands)
         } else {
@@ -5014,12 +4952,12 @@ impl CompiledIlpProgram {
                     num_facts,
                     eps_f32,
                 )
-                .map_err(|e| PyRuntimeError::new_err(format!("forward f32: {}", e)))?;
+                .map_err(|e| types::gpu_err("forward f32", e))?;
 
             let d_total_loss = self
                 .provider
                 .ilp_reduce_sum_f32_launch(&loss_contrib, num_facts)
-                .map_err(|e| PyRuntimeError::new_err(format!("reduce f32: {}", e)))?;
+                .map_err(|e| types::gpu_err("reduce f32", e))?;
 
             let d_grad = self
                 .provider
@@ -5031,7 +4969,7 @@ impl CompiledIlpProgram {
                     num_facts,
                     num_cands,
                 )
-                .map_err(|e| PyRuntimeError::new_err(format!("backward f32: {}", e)))?;
+                .map_err(|e| types::gpu_err("backward f32", e))?;
 
             self.export_loss_grad_device_f32(py, d_total_loss, d_grad, num_cands)
         }
@@ -5055,9 +4993,9 @@ impl CompiledIlpProgram {
         let soft_dmt = dlpack_from_py(mask_soft_flat)?;
 
         let hard_buf = self.provider.from_dlpack_tensors(vec![hard_dmt])
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(types::xlog_err)?;
         let soft_buf = self.provider.from_dlpack_tensors(vec![soft_dmt])
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(types::xlog_err)?;
 
         self.executor.ilp_registry_mut().insert_mask(
             name, hard_buf, soft_buf, schema_size,
@@ -5116,11 +5054,11 @@ impl CompiledIlpProgram {
         // Import DLPack tensor (zero-copy, stays on GPU)
         let soft_dmt = dlpack_from_py(soft_probs_dlpack)?;
         let soft_buf = self.provider.from_dlpack_tensors(vec![soft_dmt])
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(types::xlog_err)?;
 
         // Download f64 values (control-plane, NOT tracked by D2H counter)
         let soft_probs = self.provider.download_column_untracked::<f64>(&soft_buf, 0)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(types::xlog_err)?;
 
         if soft_probs.len() != candidate_ids.len() {
             return Err(PyValueError::new_err(format!(
@@ -5143,7 +5081,7 @@ impl CompiledIlpProgram {
         self.executor
             .ilp_registry_mut()
             .insert_mask_from_sparse(name, n, &candidate_triples, &active_soft, budget)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+            .map_err(types::xlog_err)
     }
 
     pub fn evaluate(&mut self, py: Python<'_>) -> PyResult<()> {
@@ -5158,7 +5096,7 @@ impl CompiledIlpProgram {
             )?;
             self.executor.execute_plan(&self.plan)
         });
-        _result.map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        _result.map_err(types::xlog_err)?;
         Ok(())
     }
 
@@ -5193,7 +5131,7 @@ impl CompiledIlpProgram {
 
             Ok(())
         });
-        _result.map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        _result.map_err(types::xlog_err)?;
 
         // 5. Reset D2H transfer counter
         self.provider.reset_d2h_transfer_count();
@@ -5221,7 +5159,7 @@ impl CompiledIlpProgram {
             ))?;
 
         Self::fact_exists_in_buffer(&self.provider, buf, &values)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+            .map_err(types::xlog_err)
     }
 
     /// Return all facts in the named relation as a list of int lists.
@@ -5233,7 +5171,7 @@ impl CompiledIlpProgram {
             ))?;
 
         let num_rows = read_device_row_count(&self.provider, buf)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))? as usize;
+            .map_err(types::xlog_err)? as usize;
         if num_rows == 0 {
             return Ok(Vec::new());
         }
@@ -5248,23 +5186,23 @@ impl CompiledIlpProgram {
                 ))?;
             let col_i64: Vec<i64> = match col_type {
                 ScalarType::I64 => self.provider.download_column::<i64>(buf, col_idx)
-                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?,
+                    .map_err(types::xlog_err)?,
                 ScalarType::I32 => self.provider.download_column::<i32>(buf, col_idx)
-                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+                    .map_err(types::xlog_err)?
                     .into_iter().map(|v| v as i64).collect(),
                 ScalarType::U32 | ScalarType::Symbol => {
                     self.provider.download_column::<u32>(buf, col_idx)
-                        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+                        .map_err(types::xlog_err)?
                         .into_iter().map(|v| v as i64).collect()
                 }
                 ScalarType::U64 => {
                     self.provider.download_column::<u64>(buf, col_idx)
-                        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+                        .map_err(types::xlog_err)?
                         .into_iter().map(|v| v as i64).collect()
                 }
                 ScalarType::Bool => {
                     self.provider.download_column::<bool>(buf, col_idx)
-                        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+                        .map_err(types::xlog_err)?
                         .into_iter().map(|v| if v { 1i64 } else { 0i64 }).collect()
                 }
                 ScalarType::F32 | ScalarType::F64 => {
@@ -5312,7 +5250,7 @@ impl CompiledIlpProgram {
             ))?;
 
         let num_rows = read_device_row_count(&self.provider, buf)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))? as usize;
+            .map_err(types::xlog_err)? as usize;
         if num_rows == 0 {
             return Ok(Vec::new());
         }
@@ -5326,23 +5264,23 @@ impl CompiledIlpProgram {
                 ))?;
             let col_i64: Vec<i64> = match col_type {
                 ScalarType::I64 => self.provider.download_column::<i64>(buf, col_idx)
-                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?,
+                    .map_err(types::xlog_err)?,
                 ScalarType::I32 => self.provider.download_column::<i32>(buf, col_idx)
-                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+                    .map_err(types::xlog_err)?
                     .into_iter().map(|v| v as i64).collect(),
                 ScalarType::U32 | ScalarType::Symbol => {
                     self.provider.download_column::<u32>(buf, col_idx)
-                        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+                        .map_err(types::xlog_err)?
                         .into_iter().map(|v| v as i64).collect()
                 }
                 ScalarType::U64 => {
                     self.provider.download_column::<u64>(buf, col_idx)
-                        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+                        .map_err(types::xlog_err)?
                         .into_iter().map(|v| v as i64).collect()
                 }
                 ScalarType::Bool => {
                     self.provider.download_column::<bool>(buf, col_idx)
-                        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+                        .map_err(types::xlog_err)?
                         .into_iter().map(|v| if v { 1i64 } else { 0i64 }).collect()
                 }
                 ScalarType::F32 | ScalarType::F64 => {
@@ -5416,7 +5354,7 @@ impl CompiledIlpProgram {
                 left_buf, right_buf,
                 &self.left_keys, &self.right_keys,
                 JoinType::Inner,
-            ).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            ).map_err(types::xlog_err)?;
 
             // Apply head_projection: check projected columns against values,
             // not the raw join output (which has more columns than the head).
@@ -5425,11 +5363,11 @@ impl CompiledIlpProgram {
             {
                 Self::fact_exists_projected(
                     &self.provider, &joined, &values, &self.head_projection,
-                ).map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+                ).map_err(types::xlog_err)?
             } else {
                 Self::fact_exists_in_buffer(
                     &self.provider, &joined, &values,
-                ).map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+                ).map_err(types::xlog_err)?
             };
 
             if found {
@@ -5455,7 +5393,7 @@ impl CompiledIlpProgram {
             .predicates
             .iter()
             .map(|pred| {
-                let types = pred.types.iter().map(scalar_type_name).collect();
+                let types = pred.types.iter().map(types::scalar_type_name).collect();
                 (pred.name.clone(), types)
             })
             .collect()
@@ -5506,11 +5444,11 @@ impl CompiledIlpProgram {
         let new_base = format!("{}\n{}", self.base_source, rule_source);
 
         let ast = xlog_logic::parse_program(&new_base)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            .map_err(types::val_err)?;
         let mut compiler = xlog_logic::Compiler::new();
         compiler.set_max_active_rules(self.max_active_rules);
         let plan = compiler.compile_program(&ast)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(types::xlog_err)?;
         let schemas = compiler.schemas().clone();
 
         self.executor.reset_for_mc();
@@ -5519,13 +5457,13 @@ impl CompiledIlpProgram {
         }
         for (name, schema) in &schemas {
             let empty = self.provider.create_empty_buffer(schema.clone())
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                .map_err(types::xlog_err)?;
             self.executor.store_mut().put(name, empty);
         }
         load_facts_into_store(&ast, &self.provider, &mut self.executor, &schemas)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(types::xlog_err)?;
         self.executor.execute_plan(&plan)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(types::xlog_err)?;
 
         self.base_source = new_base;
         self.ast = ast;
@@ -5571,14 +5509,14 @@ impl CompiledIlpProgram {
                 &col_slices,
                 buf.schema().clone(),
             )
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(types::xlog_err)?;
 
         // All columns are keys (full-tuple match)
         let keys: Vec<usize> = (0..arity).collect();
 
         self.provider
             .membership_mask(&query_buf, buf, &keys, &keys)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+            .map_err(types::xlog_err)
     }
 
     /// GPU-side batch credit assignment.
@@ -5629,7 +5567,7 @@ impl CompiledIlpProgram {
         let col_slices: Vec<&[u8]> = col_bytes.iter().map(|c| c.as_slice()).collect();
         let query_buf = self.provider
             .create_buffer_from_slices(&col_slices, schema)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(types::xlog_err)?;
 
         let keys: Vec<usize> = (0..arity).collect();
 
@@ -5640,7 +5578,7 @@ impl CompiledIlpProgram {
             let entry_buf = entry.buffer.as_ref().unwrap();
             let mask = self.provider
                 .membership_mask(&query_buf, entry_buf, &keys, &keys)
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                .map_err(types::xlog_err)?;
 
             for (fact_idx, &found) in mask.iter().enumerate() {
                 if found {
@@ -5690,48 +5628,48 @@ impl CompiledIlpProgram {
                 .provider
                 .memory()
                 .alloc::<f64>(num_cands as usize)
-                .map_err(|e| PyRuntimeError::new_err(format!("alloc grad: {}", e)))?;
+                .map_err(|e| types::gpu_err("alloc grad", e))?;
             if num_cands > 0 {
                 self.provider
                     .device()
                     .inner()
                     .memset_zeros(&mut d_grad)
-                    .map_err(|e| PyRuntimeError::new_err(format!("zero grad: {}", e)))?;
+                    .map_err(|e| types::gpu_err("zero grad", e))?;
             }
             let mut d_loss = self
                 .provider
                 .memory()
                 .alloc::<f64>(1)
-                .map_err(|e| PyRuntimeError::new_err(format!("alloc loss: {}", e)))?;
+                .map_err(|e| types::gpu_err("alloc loss", e))?;
             self.provider
                 .device()
                 .inner()
                 .memset_zeros(&mut d_loss)
-                .map_err(|e| PyRuntimeError::new_err(format!("zero loss: {}", e)))?;
+                .map_err(|e| types::gpu_err("zero loss", e))?;
             self.export_loss_grad_device_f64(py, d_loss, d_grad, num_cands)
         } else {
             let mut d_grad = self
                 .provider
                 .memory()
                 .alloc::<f32>(num_cands as usize)
-                .map_err(|e| PyRuntimeError::new_err(format!("alloc grad: {}", e)))?;
+                .map_err(|e| types::gpu_err("alloc grad", e))?;
             if num_cands > 0 {
                 self.provider
                     .device()
                     .inner()
                     .memset_zeros(&mut d_grad)
-                    .map_err(|e| PyRuntimeError::new_err(format!("zero grad: {}", e)))?;
+                    .map_err(|e| types::gpu_err("zero grad", e))?;
             }
             let mut d_loss = self
                 .provider
                 .memory()
                 .alloc::<f32>(1)
-                .map_err(|e| PyRuntimeError::new_err(format!("alloc loss: {}", e)))?;
+                .map_err(|e| types::gpu_err("alloc loss", e))?;
             self.provider
                 .device()
                 .inner()
                 .memset_zeros(&mut d_loss)
-                .map_err(|e| PyRuntimeError::new_err(format!("zero loss: {}", e)))?;
+                .map_err(|e| types::gpu_err("zero loss", e))?;
             self.export_loss_grad_device_f32(py, d_loss, d_grad, num_cands)
         }
     }
@@ -5753,30 +5691,30 @@ impl CompiledIlpProgram {
             .provider
             .memory()
             .alloc::<u32>((num_facts + 1) as usize)
-            .map_err(|e| PyRuntimeError::new_err(format!("alloc: {}", e)))?;
+            .map_err(|e| types::gpu_err("alloc", e))?;
         self.provider
             .device()
             .inner()
             .htod_sync_copy_into(&row_offsets, &mut d_row_offsets)
-            .map_err(|e| PyRuntimeError::new_err(format!("htod: {}", e)))?;
+            .map_err(|e| types::gpu_err("htod", e))?;
 
         // Empty col_indices
         let d_col_indices = self
             .provider
             .memory()
             .alloc::<u32>(0)
-            .map_err(|e| PyRuntimeError::new_err(format!("alloc: {}", e)))?;
+            .map_err(|e| types::gpu_err("alloc", e))?;
 
         let mut d_is_positive = self
             .provider
             .memory()
             .alloc::<u8>(num_facts as usize)
-            .map_err(|e| PyRuntimeError::new_err(format!("alloc: {}", e)))?;
+            .map_err(|e| types::gpu_err("alloc", e))?;
         self.provider
             .device()
             .inner()
             .htod_sync_copy_into(is_positive_host, &mut d_is_positive)
-            .map_err(|e| PyRuntimeError::new_err(format!("htod: {}", e)))?;
+            .map_err(|e| types::gpu_err("htod", e))?;
 
         // Build a single-column CudaBuffer with 0 elements to represent an empty cand_probs
         // for the kernel launch (won't be read since row ranges are all empty).
@@ -5786,14 +5724,14 @@ impl CompiledIlpProgram {
             self.provider
                 .memory()
                 .alloc::<f64>(num_cands.max(1) as usize)
-                .map_err(|e| PyRuntimeError::new_err(format!("alloc dummy: {}", e)))?
+                .map_err(|e| types::gpu_err("alloc dummy", e))?
                 .into_bytes()
                 .into()
         } else {
             self.provider
                 .memory()
                 .alloc::<f32>(num_cands.max(1) as usize)
-                .map_err(|e| PyRuntimeError::new_err(format!("alloc dummy: {}", e)))?
+                .map_err(|e| types::gpu_err("alloc dummy", e))?
                 .into_bytes()
                 .into()
         };
@@ -5809,12 +5747,12 @@ impl CompiledIlpProgram {
                     num_facts,
                     1e-8f64,
                 )
-                .map_err(|e| PyRuntimeError::new_err(format!("forward: {}", e)))?;
+                .map_err(|e| types::gpu_err("forward", e))?;
 
             let d_total_loss = self
                 .provider
                 .ilp_reduce_sum_f64_launch(&loss_contrib, num_facts)
-                .map_err(|e| PyRuntimeError::new_err(format!("reduce: {}", e)))?;
+                .map_err(|e| types::gpu_err("reduce", e))?;
 
             let d_grad = self
                 .provider
@@ -5826,7 +5764,7 @@ impl CompiledIlpProgram {
                     num_facts,
                     num_cands,
                 )
-                .map_err(|e| PyRuntimeError::new_err(format!("backward: {}", e)))?;
+                .map_err(|e| types::gpu_err("backward", e))?;
 
             self.export_loss_grad_device_f64(py, d_total_loss, d_grad, num_cands)
         } else {
@@ -5840,12 +5778,12 @@ impl CompiledIlpProgram {
                     num_facts,
                     1e-8f32,
                 )
-                .map_err(|e| PyRuntimeError::new_err(format!("forward: {}", e)))?;
+                .map_err(|e| types::gpu_err("forward", e))?;
 
             let d_total_loss = self
                 .provider
                 .ilp_reduce_sum_f32_launch(&loss_contrib, num_facts)
-                .map_err(|e| PyRuntimeError::new_err(format!("reduce: {}", e)))?;
+                .map_err(|e| types::gpu_err("reduce", e))?;
 
             let d_grad = self
                 .provider
@@ -5857,7 +5795,7 @@ impl CompiledIlpProgram {
                     num_facts,
                     num_cands,
                 )
-                .map_err(|e| PyRuntimeError::new_err(format!("backward: {}", e)))?;
+                .map_err(|e| types::gpu_err("backward", e))?;
 
             self.export_loss_grad_device_f32(py, d_total_loss, d_grad, num_cands)
         }
@@ -5878,12 +5816,12 @@ impl CompiledIlpProgram {
             .provider
             .memory()
             .alloc::<u32>(1)
-            .map_err(|e| PyRuntimeError::new_err(format!("alloc: {}", e)))?;
+            .map_err(|e| types::gpu_err("alloc", e))?;
         self.provider
             .device()
             .inner()
             .htod_sync_copy_into(&[1u32], &mut d_loss_nrows)
-            .map_err(|e| PyRuntimeError::new_err(format!("htod: {}", e)))?;
+            .map_err(|e| types::gpu_err("htod", e))?;
 
         let loss_buf = xlog_cuda::CudaBuffer::from_columns(
             vec![d_loss_val.into_bytes().into()],
@@ -5895,19 +5833,19 @@ impl CompiledIlpProgram {
             .provider
             .to_dlpack_table(loss_buf)
             .column(0)
-            .map_err(|e| PyRuntimeError::new_err(format!("DLPack loss: {}", e)))?;
+            .map_err(|e| types::gpu_err("DLPack loss", e))?;
         let loss_capsule = dlpack_capsule_from_tensor(py, loss_dl)?;
 
         let mut d_grad_nrows = self
             .provider
             .memory()
             .alloc::<u32>(1)
-            .map_err(|e| PyRuntimeError::new_err(format!("alloc: {}", e)))?;
+            .map_err(|e| types::gpu_err("alloc", e))?;
         self.provider
             .device()
             .inner()
             .htod_sync_copy_into(&[num_cands], &mut d_grad_nrows)
-            .map_err(|e| PyRuntimeError::new_err(format!("htod: {}", e)))?;
+            .map_err(|e| types::gpu_err("htod", e))?;
 
         let grad_buf = xlog_cuda::CudaBuffer::from_columns(
             vec![d_grad.into_bytes().into()],
@@ -5919,7 +5857,7 @@ impl CompiledIlpProgram {
             .provider
             .to_dlpack_table(grad_buf)
             .column(0)
-            .map_err(|e| PyRuntimeError::new_err(format!("DLPack grad: {}", e)))?;
+            .map_err(|e| types::gpu_err("DLPack grad", e))?;
         let grad_capsule = dlpack_capsule_from_tensor(py, grad_dl)?;
 
         Ok((loss_capsule, grad_capsule))
@@ -5939,12 +5877,12 @@ impl CompiledIlpProgram {
             .provider
             .memory()
             .alloc::<u32>(1)
-            .map_err(|e| PyRuntimeError::new_err(format!("alloc: {}", e)))?;
+            .map_err(|e| types::gpu_err("alloc", e))?;
         self.provider
             .device()
             .inner()
             .htod_sync_copy_into(&[1u32], &mut d_loss_nrows)
-            .map_err(|e| PyRuntimeError::new_err(format!("htod: {}", e)))?;
+            .map_err(|e| types::gpu_err("htod", e))?;
 
         let loss_buf = xlog_cuda::CudaBuffer::from_columns(
             vec![d_loss_val.into_bytes().into()],
@@ -5956,19 +5894,19 @@ impl CompiledIlpProgram {
             .provider
             .to_dlpack_table(loss_buf)
             .column(0)
-            .map_err(|e| PyRuntimeError::new_err(format!("DLPack loss: {}", e)))?;
+            .map_err(|e| types::gpu_err("DLPack loss", e))?;
         let loss_capsule = dlpack_capsule_from_tensor(py, loss_dl)?;
 
         let mut d_grad_nrows = self
             .provider
             .memory()
             .alloc::<u32>(1)
-            .map_err(|e| PyRuntimeError::new_err(format!("alloc: {}", e)))?;
+            .map_err(|e| types::gpu_err("alloc", e))?;
         self.provider
             .device()
             .inner()
             .htod_sync_copy_into(&[num_cands], &mut d_grad_nrows)
-            .map_err(|e| PyRuntimeError::new_err(format!("htod: {}", e)))?;
+            .map_err(|e| types::gpu_err("htod", e))?;
 
         let grad_buf = xlog_cuda::CudaBuffer::from_columns(
             vec![d_grad.into_bytes().into()],
@@ -5980,7 +5918,7 @@ impl CompiledIlpProgram {
             .provider
             .to_dlpack_table(grad_buf)
             .column(0)
-            .map_err(|e| PyRuntimeError::new_err(format!("DLPack grad: {}", e)))?;
+            .map_err(|e| types::gpu_err("DLPack grad", e))?;
         let grad_capsule = dlpack_capsule_from_tensor(py, grad_dl)?;
 
         Ok((loss_capsule, grad_capsule))
