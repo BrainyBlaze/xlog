@@ -27,11 +27,6 @@ impl DeltaRelationTracker {
         self.entries.get(pred)
     }
 
-    /// Iterate over all (pred_name, (rel_id, store_name)) entries.
-    pub(crate) fn iter(&self) -> impl Iterator<Item = (&String, &(RelId, String))> {
-        self.entries.iter()
-    }
-
     /// Consume the tracker, yielding owned entries for cleanup.
     pub(crate) fn into_inner(self) -> HashMap<String, (RelId, String)> {
         self.entries
