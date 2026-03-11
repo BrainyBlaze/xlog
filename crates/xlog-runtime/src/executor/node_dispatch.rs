@@ -13,6 +13,24 @@ use super::join_cache::JoinIndexKey;
 use super::Executor;
 
 impl Executor {
+    /// Execute a Scan node — looks up the relation by RelId and returns a clone.
+    pub(super) fn execute_scan(&mut self, rel: RelId) -> Result<CudaBuffer> {
+        let name = self
+            .get_rel_name(rel)
+            .ok_or_else(|| XlogError::Execution(format!("Unknown relation: RelId({})", rel.0)))?;
+
+        let buffer = self
+            .store
+            .get(name)
+            .ok_or_else(|| XlogError::Execution(format!("Relation not found: {}", name)))?;
+
+        self.stats.record_access(rel);
+        self.stats.update_cardinality(rel, buffer.num_rows());
+        self.stats.update_byte_size(rel, buffer.estimated_bytes());
+
+        self.clone_buffer(buffer)
+    }
+
     /// Execute a single RIR node tree
     ///
     /// Recursively evaluates the node and its children, returning

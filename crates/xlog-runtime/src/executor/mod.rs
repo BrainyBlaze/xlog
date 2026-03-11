@@ -6,12 +6,14 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use xlog_core::{RelId, Result, RuntimeConfig, ScalarType, Schema, XlogError};
+use xlog_core::{RelId, Result, RuntimeConfig, Schema, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::{CudaBuffer, CudaKernelProvider};
-use xlog_ir::{ConstValue, ExecutionPlan, Expr, Stratum};
+use xlog_ir::ExecutionPlan;
 #[cfg(test)]
-use xlog_ir::{CompareOp, JoinType, ProjectExpr, RirNode};
+use xlog_core::ScalarType;
+#[cfg(test)]
+use xlog_ir::{CompareOp, ConstValue, Expr, JoinType, ProjectExpr, RirNode, Stratum};
 use xlog_stats::{StatsManager, StatsSnapshot};
 
 use crate::ilp_registry::{IlpRegistry, IlpTaggedResult};
@@ -332,41 +334,6 @@ impl Executor {
     /// * `_stratum` - The stratum (unused - see error)
     ///
     /// # Returns
-    /// Always returns an error indicating this method should not be called directly
-    ///
-    /// # Errors
-    /// Always returns an error. Use `execute_plan` instead.
-    pub fn execute_stratum(&mut self, _stratum: &Stratum) -> Result<()> {
-        Err(XlogError::Execution(
-            "execute_stratum cannot be called directly; use execute_plan instead which provides \
-             the required rules_by_scc context"
-                .to_string(),
-        ))
-    }
-
-    // ============== Node execution implementations ==============
-
-    /// Execute a Scan node — stays in mod.rs (simple store lookup).
-    ///
-    /// Looks up the relation by RelId and returns a clone of its buffer.
-    fn execute_scan(&mut self, rel: RelId) -> Result<CudaBuffer> {
-        let name = self
-            .get_rel_name(rel)
-            .ok_or_else(|| XlogError::Execution(format!("Unknown relation: RelId({})", rel.0)))?;
-
-        let buffer = self
-            .store
-            .get(name)
-            .ok_or_else(|| XlogError::Execution(format!("Relation not found: {}", name)))?;
-
-        self.stats.record_access(rel);
-        self.stats.update_cardinality(rel, buffer.num_rows());
-        self.stats.update_byte_size(rel, buffer.estimated_bytes());
-
-        // Clone the buffer
-        self.clone_buffer(buffer)
-    }
-
     /// Evaluate a predicate expression for a single row
     #[cfg(test)]
     fn evaluate_predicate(
@@ -458,29 +425,6 @@ impl Executor {
             | Expr::Conditional { .. } => Err(XlogError::Execution(
                 "Arithmetic expression cannot be evaluated as boolean predicate".into(),
             )),
-        }
-    }
-
-    pub(crate) fn expr_may_be_float(expr: &Expr, schema: &Schema) -> bool {
-        match expr {
-            Expr::Column(col_idx) => matches!(
-                schema.column_type(*col_idx),
-                Some(ScalarType::F32 | ScalarType::F64)
-            ),
-            Expr::Const(ConstValue::F32(_) | ConstValue::F64(_)) => true,
-            Expr::Cast(_, ScalarType::F32 | ScalarType::F64) => true,
-            Expr::Add(l, r)
-            | Expr::Sub(l, r)
-            | Expr::Mul(l, r)
-            | Expr::Div(l, r)
-            | Expr::Mod(l, r)
-            | Expr::Min(l, r)
-            | Expr::Max(l, r)
-            | Expr::Pow(l, r) => {
-                Self::expr_may_be_float(l, schema) || Self::expr_may_be_float(r, schema)
-            }
-            Expr::Abs(inner) | Expr::Cast(inner, _) => Self::expr_may_be_float(inner, schema),
-            _ => false,
         }
     }
 

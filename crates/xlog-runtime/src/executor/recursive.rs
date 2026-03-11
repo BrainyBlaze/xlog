@@ -13,6 +13,15 @@ impl Executor {
     /// Maximum iterations for fixpoint computation to prevent infinite loops
     const MAX_FIXPOINT_ITERATIONS: usize = 1000;
 
+    /// Stub: always returns an error directing callers to use `execute_plan` instead.
+    pub fn execute_stratum(&mut self, _stratum: &Stratum) -> Result<()> {
+        Err(XlogError::Execution(
+            "execute_stratum cannot be called directly; use execute_plan instead which provides \
+             the required rules_by_scc context"
+                .to_string(),
+        ))
+    }
+
     pub fn execute_non_recursive_scc(&mut self, rules: &[xlog_ir::CompiledRule]) -> Result<()> {
         for rule in rules {
             let result = self.execute_node(&rule.body)?;

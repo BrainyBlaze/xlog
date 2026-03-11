@@ -13,6 +13,30 @@ use xlog_ir::{CompareOp, ConstValue, Expr, ProjectExpr};
 use super::Executor;
 
 impl Executor {
+    /// Check if an expression may produce a floating-point result.
+    pub(crate) fn expr_may_be_float(expr: &Expr, schema: &Schema) -> bool {
+        match expr {
+            Expr::Column(col_idx) => matches!(
+                schema.column_type(*col_idx),
+                Some(ScalarType::F32 | ScalarType::F64)
+            ),
+            Expr::Const(ConstValue::F32(_) | ConstValue::F64(_)) => true,
+            Expr::Cast(_, ScalarType::F32 | ScalarType::F64) => true,
+            Expr::Add(l, r)
+            | Expr::Sub(l, r)
+            | Expr::Mul(l, r)
+            | Expr::Div(l, r)
+            | Expr::Mod(l, r)
+            | Expr::Min(l, r)
+            | Expr::Max(l, r)
+            | Expr::Pow(l, r) => {
+                Self::expr_may_be_float(l, schema) || Self::expr_may_be_float(r, schema)
+            }
+            Expr::Abs(inner) | Expr::Cast(inner, _) => Self::expr_may_be_float(inner, schema),
+            _ => false,
+        }
+    }
+
     /// Execute a Filter node using GPU predicate evaluation.
     pub fn execute_filter(&self, input: &CudaBuffer, predicate: &Expr) -> Result<CudaBuffer> {
         if input.is_empty() {
