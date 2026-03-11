@@ -55,6 +55,32 @@ def train_only(
     )
     compile_ms = (time.perf_counter() - _compile_t0) * 1000.0
 
+    return _train_on_compiled(
+        prog, source, mask_name, positives, negatives, config,
+        compile_ms=compile_ms,
+        _compute_holdout=_compute_holdout,
+    )
+
+
+def _train_on_compiled(
+    prog: object,
+    source: str,
+    mask_name: str,
+    positives: list[tuple[str, list[int]]],
+    negatives: list[tuple[str, list[int]]],
+    config: TrainConfig,
+    *,
+    compile_ms: float = 0.0,
+    _compute_holdout: bool = True,
+    _reset_before_first_attempt: bool = False,
+) -> TrainResult:
+    """Run training on an already-compiled CompiledIlpProgram.
+
+    This is the inner training loop extracted from train_only() to support
+    compile-once-per-stage reuse in test harnesses. When
+    _reset_before_first_attempt is True, reset_runtime() is called before
+    the first attempt (needed when reusing a program across seeds).
+    """
     attempts: list[_AttemptResult] = []
     global_steps = 0
     numeric_failures = 0
@@ -73,7 +99,8 @@ def train_only(
             break
 
         # Reset runtime state for attempts after the first
-        if attempt_idx > 0:
+        # (or before the first when reusing a compiled program across seeds)
+        if attempt_idx > 0 or _reset_before_first_attempt:
             _reset_t0 = time.perf_counter()
             prog.reset_runtime()
             reset_ms_list.append((time.perf_counter() - _reset_t0) * 1000.0)
