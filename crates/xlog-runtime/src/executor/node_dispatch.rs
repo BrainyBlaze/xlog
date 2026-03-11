@@ -9,7 +9,7 @@ use xlog_ir::{JoinType, ProjectExpr, RirNode};
 
 use crate::ilp_registry::{read_device_row_count, IlpMask, IlpTagEntry, IlpTaggedResult};
 
-use super::join_cache::JoinIndexKey;
+use super::join_cache::{estimate_join_index_bytes, JoinIndexKey};
 use super::Executor;
 
 impl Executor {
@@ -247,32 +247,6 @@ impl Executor {
         left_rel: Option<RelId>,
         right_rel: Option<RelId>,
     ) -> Result<CudaBuffer> {
-        fn estimate_join_index_bytes(right: &CudaBuffer, right_keys: &[usize]) -> u64 {
-            if right_keys.is_empty() {
-                return u64::MAX;
-            }
-
-            let mut key_bytes_per_row: u64 = 0;
-            for &k in right_keys {
-                let Some(ty) = right.schema().column_type(k) else {
-                    return u64::MAX;
-                };
-                let sz = ty.size_bytes();
-                key_bytes_per_row = key_bytes_per_row.saturating_add(sz as u64);
-            }
-
-            let num_rows = right.num_rows();
-            let packed_bytes = num_rows.saturating_mul(key_bytes_per_row);
-
-            let target = num_rows.saturating_mul(2).max(1024);
-            let num_buckets = target.next_power_of_two();
-
-            // Stored index bytes: packed keys + (counts+offsets) + (entry row ids + entry hashes)
-            packed_bytes
-                .saturating_add(num_buckets.saturating_mul(8))
-                .saturating_add(num_rows.saturating_mul(12))
-        }
-
         // Convert IR JoinType to CUDA JoinType
         let cuda_join_type = match join_type {
             JoinType::Inner => CudaJoinType::Inner,
@@ -291,22 +265,15 @@ impl Executor {
                 .map(|s| s.heat)
                 .unwrap_or(0.0);
             let est_index_bytes = estimate_join_index_bytes(right, right_keys);
-
-            let cache_budget = self.join_index_cache.max_bytes;
             let budget_bytes = self.provider.memory().budget().device_bytes;
             let remaining_bytes = self.provider.memory().remaining_bytes();
 
-            // Heuristic: require higher "heat" for larger indexes, and avoid building under
-            // memory pressure. Always skip if the estimated index cannot fit in the cache budget.
-            let heat_threshold = if cache_budget > 0 && est_index_bytes > cache_budget / 2 {
-                0.6
-            } else {
-                0.3
-            };
-            let has_room = remaining_bytes >= est_index_bytes.saturating_add(budget_bytes / 10);
-
-            let should_index =
-                build_heat >= heat_threshold && est_index_bytes <= cache_budget && has_room;
+            let should_index = self.join_index_cache.should_build(
+                est_index_bytes,
+                build_heat,
+                remaining_bytes,
+                budget_bytes,
+            );
 
             if let Some(build_name) = self.get_rel_name(build_rel).map(|s| s.to_string()) {
                 if let Some(version) = self.store.version(&build_name) {

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use xlog_core::RelId;
-use xlog_cuda::JoinIndexV2;
+use xlog_cuda::{CudaBuffer, JoinIndexV2};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct JoinIndexKey {
@@ -22,6 +22,33 @@ pub(crate) struct JoinIndexCache {
     pub(crate) max_bytes: u64,
 }
 
+/// Estimate the GPU memory footprint of a join index built on `right` with `right_keys`.
+///
+/// Returns u64::MAX if keys are empty or column types are missing (signals "don't build").
+pub(crate) fn estimate_join_index_bytes(right: &CudaBuffer, right_keys: &[usize]) -> u64 {
+    if right_keys.is_empty() {
+        return u64::MAX;
+    }
+
+    let mut key_bytes_per_row: u64 = 0;
+    for &k in right_keys {
+        let Some(ty) = right.schema().column_type(k) else {
+            return u64::MAX;
+        };
+        key_bytes_per_row = key_bytes_per_row.saturating_add(ty.size_bytes() as u64);
+    }
+
+    let num_rows = right.num_rows();
+    let packed_bytes = num_rows.saturating_mul(key_bytes_per_row);
+    let target = num_rows.saturating_mul(2).max(1024);
+    let num_buckets = target.next_power_of_two();
+
+    // Stored index bytes: packed keys + (counts+offsets) + (entry row ids + entry hashes)
+    packed_bytes
+        .saturating_add(num_buckets.saturating_mul(8))
+        .saturating_add(num_rows.saturating_mul(12))
+}
+
 impl JoinIndexCache {
     pub(crate) fn new(max_bytes: u64) -> Self {
         Self {
@@ -30,6 +57,28 @@ impl JoinIndexCache {
             total_bytes: 0,
             max_bytes,
         }
+    }
+
+    /// Decide whether to build a new join index for a relation.
+    ///
+    /// Heuristic: require higher "heat" for larger indexes, and avoid building under
+    /// memory pressure. Always skip if the estimated index cannot fit in the cache budget.
+    pub(crate) fn should_build(
+        &self,
+        est_index_bytes: u64,
+        build_heat: f32,
+        remaining_device_bytes: u64,
+        device_budget_bytes: u64,
+    ) -> bool {
+        let heat_threshold = if self.max_bytes > 0 && est_index_bytes > self.max_bytes / 2 {
+            0.6
+        } else {
+            0.3
+        };
+        let has_room =
+            remaining_device_bytes >= est_index_bytes.saturating_add(device_budget_bytes / 10);
+
+        build_heat >= heat_threshold && est_index_bytes <= self.max_bytes && has_room
     }
 
     pub(crate) fn clear(&mut self) {
