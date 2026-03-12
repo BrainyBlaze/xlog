@@ -194,7 +194,7 @@ xlog-solve: 2, xlog-prob: 7). Full unification is over-engineering. Realistic im
 **Implementation note (`#[non_exhaustive]` constraint):** Rust's `#[non_exhaustive]` blocks ALL
 struct literal construction from outside the defining crate, even with `..Default::default()`.
 Only 3 of 13 config structs could receive it (those never constructed via struct literals from
-external crates): `GpuCompileConfig`, `McEvalConfig`, `WfsConfig`. The remaining 10 use struct
+external crates): `MemoryBudget`, `GpuEquivalenceConfig`, `WfsConfig`. The remaining 10 use struct
 literal construction in pyxlog or test code across crate boundaries, making `#[non_exhaustive]`
 a breaking change. This is a Rust language constraint, not an implementation shortfall.
 
