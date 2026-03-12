@@ -197,6 +197,7 @@ impl<'a> ExpansionContext<'a> {
     /// expand to body literals that get added to the calling rule.
     ///
     /// Returns the expanded body literals and the result variable name.
+    #[allow(dead_code)] // reserved API: predicate-func expansion not yet wired
     pub(crate) fn expand_predicate_func(
         &self,
         func: &FuncDef,
@@ -362,6 +363,7 @@ impl<'a> ExpansionContext<'a> {
     }
 
     /// Check if a function has a predicate body.
+    #[allow(dead_code)] // reserved API: predicate-func expansion not yet wired
     pub(crate) fn is_predicate_func(&self, name: &str) -> bool {
         self.registry
             .get(name)

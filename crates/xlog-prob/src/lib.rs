@@ -3,6 +3,7 @@
 pub mod cnf;
 pub mod compilation;
 pub mod exact;
+#[allow(dead_code)] // reserved: GPU-only exact compilation path (not yet wired to main pipeline)
 pub mod exact_gpu;
 pub mod gpu;
 pub mod kc;

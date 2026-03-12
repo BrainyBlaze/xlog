@@ -31,22 +31,22 @@ pub use gpu_d4::GpuCompileConfig;
 pub use gpu_pir::{
     GpuPirGraph, GpuPirRoots, PIR_AND, PIR_LIT, PIR_NEG_LIT, PIR_OR,
 };
-pub(crate) use gpu_pir::{PIR_CONST, PIR_DECISION};
+// PIR_CONST and PIR_DECISION are used within gpu_pir.rs and gpu_pir_intern.rs
+// via direct module paths; no crate-level re-export needed.
 pub use gpu_pir_intern::{GpuPirInterner, PirBatch};
 pub use gpu_weights::{
     apply_query_vars_device, build_evidence_by_var_gpu, build_weights_gpu, map_nodes_to_vars_gpu,
     restore_query_vars_device,
 };
 pub use gpu_weights::GpuWeights;
-pub(crate) use sparse_matrix::GpuCsrCnf;
+// GpuCsrCnf is currently unused (dead code); remove re-export.
 pub use validation::{
     build_equivalence_queries_gpu,
     validate_equivalence_gpu, validate_equivalence_gpu_gated, GpuEquivalenceConfig,
     GpuEquivalenceQueries,
 };
-pub(crate) use validation::{
-    check_equivalence_gpu, check_equivalence_gpu_gated,
-};
+// check_equivalence_gpu and check_equivalence_gpu_gated are called only
+// within validation.rs itself; no crate-level re-export needed.
 
 /// Per-stage compilation timing (populated only when XLOG_WARMUP_PROFILE=1).
 #[derive(Debug, Clone, Default)]

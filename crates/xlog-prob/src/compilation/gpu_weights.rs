@@ -362,6 +362,7 @@ pub fn build_weights_gpu(
     })
 }
 
+#[allow(dead_code)] // reserved: host-side weight upload path for testing/diagnostics
 pub(crate) fn upload_weights_from_host(
     provider: &Arc<CudaKernelProvider>,
     weights: &[(f64, f64)],

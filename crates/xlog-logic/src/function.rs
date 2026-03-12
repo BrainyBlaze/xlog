@@ -61,6 +61,7 @@ impl std::error::Error for FunctionError {}
 
 /// Type errors
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // reserved API: type inference not yet wired to main pipeline
 pub(crate) enum TypeError {
     /// Type mismatch
     Mismatch {

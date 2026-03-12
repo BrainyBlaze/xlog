@@ -153,6 +153,7 @@ impl From<ModuleError> for xlog_core::XlogError {
 
 /// Generate internal qualified name for a predicate
 /// E.g., (["utils", "math"], "abs") -> "__utils_math__abs"
+#[allow(dead_code)] // reserved API: module system not yet wired
 pub(crate) fn internal_name(module_path: &[String], predicate: &str) -> String {
     if module_path.is_empty() {
         predicate.to_string()
@@ -163,6 +164,7 @@ pub(crate) fn internal_name(module_path: &[String], predicate: &str) -> String {
 
 /// Extract module and predicate from internal name
 /// E.g., "__utils_math__abs" -> (["utils", "math"], "abs")
+#[allow(dead_code)] // reserved API: module system not yet wired
 pub(crate) fn parse_internal_name(internal: &str) -> (Vec<String>, String) {
     if internal.starts_with("__") {
         if let Some(pos) = internal.rfind("__") {

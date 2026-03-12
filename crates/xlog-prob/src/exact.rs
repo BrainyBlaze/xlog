@@ -117,6 +117,7 @@ pub struct ExactDdnnfProgram {
     #[cfg_attr(not(feature = "host-io"), allow(dead_code))]
     random_vars: Option<Arc<DeviceRandomVarList>>,
     max_var: u32,
+    #[allow(dead_code)] // retained: config is stored for future re-compilation paths
     gpu_config: GpuConfig,
     /// Latest circuit compilation profile (populated on cache miss when profiling).
     last_compile_profile: Option<CircuitCompileProfile>,
@@ -138,6 +139,7 @@ impl ExactDdnnfProgram {
         Self::compile_provenance_with_gpu(provenance, config)
     }
 
+    #[allow(dead_code)] // retained: accessor for future re-compilation paths
     pub(crate) fn gpu_config(&self) -> GpuConfig {
         self.gpu_config
     }

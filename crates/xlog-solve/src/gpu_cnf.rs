@@ -31,6 +31,7 @@ pub struct GpuCnf {
 
 impl GpuCnf {
     #[inline]
+    #[allow(dead_code)] // diagnostic accessor, retained for debugging
     pub(crate) fn offsets_len(&self) -> usize {
         self.clause_offsets.len()
     }

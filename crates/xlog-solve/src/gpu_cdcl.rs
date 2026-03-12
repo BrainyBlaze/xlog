@@ -135,12 +135,14 @@ impl GpuCdclWorkspace {
 
     /// Variable capacity this workspace was allocated for.
     #[inline]
+    #[allow(dead_code)] // diagnostic accessor, retained for debugging
     pub(crate) fn var_cap(&self) -> usize {
         self.var_cap
     }
 
     /// Total clause capacity (input + learned) this workspace was allocated for.
     #[inline]
+    #[allow(dead_code)] // diagnostic accessor, retained for debugging
     pub(crate) fn clause_total_cap(&self) -> usize {
         self.clause_total_cap
     }

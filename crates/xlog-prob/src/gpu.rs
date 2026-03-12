@@ -1069,11 +1069,13 @@ impl GpuXgcf {
     }
 
     /// Mutable access to device-resident log(true-weight) table.
+    #[allow(dead_code)] // reserved: individual mutable weight access for exact_gpu path
     pub(crate) fn var_log_true_mut(&mut self) -> &mut TrackedCudaSlice<f64> {
         &mut self.var_log_true
     }
 
     /// Mutable access to device-resident log(false-weight) table.
+    #[allow(dead_code)] // reserved: individual mutable weight access for exact_gpu path
     pub(crate) fn var_log_false_mut(&mut self) -> &mut TrackedCudaSlice<f64> {
         &mut self.var_log_false
     }
@@ -1102,6 +1104,7 @@ impl GpuXgcf {
     }
 
     /// Upload a host free-variable mask (length = max_var + 1).
+    #[allow(dead_code)] // reserved: host-side mask upload for testing/diagnostics
     pub(crate) fn set_free_var_mask_from_host(
         &mut self,
         provider: &CudaKernelProvider,

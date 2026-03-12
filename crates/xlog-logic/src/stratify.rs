@@ -24,7 +24,7 @@ pub(crate) struct DepEdge {
 #[derive(Debug, Default)]
 pub struct DependencyGraph {
     pub predicates: HashSet<String>,
-    pub edges: Vec<DepEdge>,
+    pub(crate) edges: Vec<DepEdge>,
 }
 
 impl DependencyGraph {
@@ -36,13 +36,13 @@ impl DependencyGraph {
         self.predicates.insert(name);
     }
 
-    pub fn add_edge(&mut self, from: String, to: String, dep_type: DepType) {
+    pub(crate) fn add_edge(&mut self, from: String, to: String, dep_type: DepType) {
         self.predicates.insert(from.clone());
         self.predicates.insert(to.clone());
         self.edges.push(DepEdge { from, to, dep_type });
     }
 
-    pub fn outgoing(&self, pred: &str) -> Vec<&DepEdge> {
+    pub(crate) fn outgoing(&self, pred: &str) -> Vec<&DepEdge> {
         self.edges.iter().filter(|e| e.from == pred).collect()
     }
 }

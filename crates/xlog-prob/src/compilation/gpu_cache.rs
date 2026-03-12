@@ -170,6 +170,7 @@ impl GpuCircuitCacheHandle {
         self.slot_host
     }
 
+    #[allow(dead_code)] // reserved API: used by future cache-warming path
     pub(crate) fn set_meta(&mut self, num_nodes: u32, num_levels: u32, root: u32, max_var: u32) {
         self.num_nodes = num_nodes;
         self.num_levels = num_levels;
@@ -2108,7 +2109,7 @@ impl GpuCircuitCache {
     /// topology arrays from the cache slot and builds host vectors suitable for disk
     /// serialization. The caller must ensure the slot has been populated (i.e. after
     /// `store_from_xgcf` + `store_free_var_mask`).
-    pub fn build_artifact_from_device(
+    pub(crate) fn build_artifact_from_device(
         &self,
         handle: &GpuCircuitCacheHandle,
         provider: &Arc<CudaKernelProvider>,

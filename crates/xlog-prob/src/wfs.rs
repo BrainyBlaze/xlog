@@ -581,50 +581,6 @@ pub fn evaluate_wfs_rules(
     })
 }
 
-/// Legacy interface: Evaluate WFS given SCC predicates.
-///
-/// This is the original interface that takes predicate names. It creates
-/// propositional atoms (no arguments) for simple testing. For full integration
-/// with the provenance extractor, use `evaluate_wfs_rules` with proper grounding.
-pub(crate) fn evaluate_wfs_scc(scc_predicates: &[String], pir: &mut PirGraph) -> Result<WfsResult> {
-    evaluate_wfs_scc_with_config(scc_predicates, pir, &WfsConfig::default())
-}
-
-/// Evaluate WFS with custom configuration using predicate names.
-///
-/// Creates propositional atoms (no arguments) from predicate names.
-/// This is suitable for testing but real programs should use `evaluate_wfs_rules`
-/// with properly grounded rules from the provenance extractor.
-pub(crate) fn evaluate_wfs_scc_with_config(
-    scc_predicates: &[String],
-    pir: &mut PirGraph,
-    config: &WfsConfig,
-) -> Result<WfsResult> {
-    // For the predicate-name interface, we cannot compute WFS without rules.
-    // If someone calls this without rules, we treat each predicate as a
-    // propositional atom with no rules - making them all unfounded (false).
-
-    if scc_predicates.is_empty() {
-        return Ok(WfsResult::new());
-    }
-
-    // With no rules, all atoms are unfounded and thus false
-    let false_set: HashSet<WfsAtom> = scc_predicates
-        .iter()
-        .map(|p| WfsAtom::new(p.clone(), vec![]))
-        .collect();
-
-    // Verify convergence by simulating one iteration
-    // (Since we have no rules, this is trivially stable)
-    let _ = config; // config would be used if we had rules
-    let _ = pir; // pir would be used for provenance if we had rules
-
-    Ok(WfsResult {
-        true_set: HashMap::new(),
-        false_set,
-    })
-}
-
 /// Evaluate WFS with provided ground rules.
 ///
 /// This is the main entry point for WFS evaluation during provenance extraction.
@@ -636,13 +592,33 @@ pub fn evaluate_wfs_with_rules(rules: Vec<WfsRule>, pir: &mut PirGraph) -> Resul
     evaluate_wfs_rules(&rules, pir, &WfsConfig::default())
 }
 
-/// Evaluate WFS with rules and custom configuration.
-pub(crate) fn evaluate_wfs_with_rules_config(
-    rules: Vec<WfsRule>,
+// --- Test-only helpers below ---
+// These legacy interfaces use predicate names (not ground rules) and are only
+// exercised by the unit tests in this module. Gating behind #[cfg(test)] to
+// avoid dead_code warnings in library builds.
+
+#[cfg(test)]
+fn evaluate_wfs_scc_with_config(
+    scc_predicates: &[String],
     pir: &mut PirGraph,
     config: &WfsConfig,
 ) -> Result<WfsResult> {
-    evaluate_wfs_rules(&rules, pir, config)
+    if scc_predicates.is_empty() {
+        return Ok(WfsResult::new());
+    }
+
+    let false_set: HashSet<WfsAtom> = scc_predicates
+        .iter()
+        .map(|p| WfsAtom::new(p.clone(), vec![]))
+        .collect();
+
+    let _ = config;
+    let _ = pir;
+
+    Ok(WfsResult {
+        true_set: HashMap::new(),
+        false_set,
+    })
 }
 
 #[cfg(test)]

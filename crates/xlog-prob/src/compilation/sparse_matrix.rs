@@ -3,6 +3,7 @@
 use xlog_cuda::memory::TrackedCudaSlice;
 
 /// GPU-resident CNF in CSR (Compressed Sparse Row) format.
+#[allow(dead_code)] // reserved: CSR CNF representation for future GPU CDCL paths
 pub(crate) struct GpuCsrCnf {
     /// Number of variables
     pub num_vars: u32,

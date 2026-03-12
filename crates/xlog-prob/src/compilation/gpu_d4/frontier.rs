@@ -37,6 +37,7 @@ pub(crate) struct GpuFrontierBitset {
     true_bits: TrackedCudaSlice<u32>,
     false_bits: TrackedCudaSlice<u32>,
     pub(super) words_per_item: u32,
+    #[allow(dead_code)] // retained for diagnostics / future sizing checks
     max_frontier_items: u32,
 }
 
@@ -57,16 +58,19 @@ impl GpuFrontierBitset {
         self.words_per_item
     }
 
+    #[allow(dead_code)] // diagnostic accessor
     pub fn max_frontier_items(&self) -> u32 {
         self.max_frontier_items
     }
 
+    #[allow(dead_code)] // diagnostic accessor
     pub fn items_len(&self) -> usize {
         self.items.len()
     }
 }
 
 /// Device-resident frontier state using dense tri-state assignments.
+#[allow(dead_code)] // reserved: dense frontier is an alternative to bitset (not yet wired)
 pub(crate) struct GpuFrontierDense {
     pub(super) items: TrackedCudaSlice<D4WorkItem>,
     size: TrackedCudaSlice<u32>,
@@ -75,6 +79,7 @@ pub(crate) struct GpuFrontierDense {
     max_frontier_items: u32,
 }
 
+#[allow(dead_code)] // reserved: dense frontier is an alternative to bitset (not yet wired)
 impl GpuFrontierDense {
     pub fn size_device(&self) -> &TrackedCudaSlice<u32> {
         &self.size
@@ -275,6 +280,7 @@ pub(crate) fn build_frontier_bitset(
 }
 
 /// Build a BFS frontier using dense tri-state assignments.
+#[allow(dead_code)] // reserved: dense frontier is an alternative to bitset (not yet wired)
 pub(crate) fn build_frontier_dense(
     cnf: &GpuCnf,
     provider: &CudaKernelProvider,

@@ -1,4 +1,6 @@
 //! Type inference for user-defined functions.
+//!
+//! Reserved API: type inference is not yet wired into the main compilation pipeline.
 
 use crate::ast::{ArithExpr, FuncDef};
 use std::collections::HashMap;

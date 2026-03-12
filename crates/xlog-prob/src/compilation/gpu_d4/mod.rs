@@ -20,9 +20,9 @@ pub(crate) mod build;
 pub(crate) mod frontier;
 
 
-pub(crate) use frontier::{
-    build_frontier_bitset, build_frontier_dense, GpuFrontierBitset, GpuFrontierDense,
-};
+// Re-export used by test code in build.rs (via super::super::).
+#[cfg(test)]
+pub(crate) use frontier::build_frontier_bitset;
 
 pub(super) fn alloc_compile_gate(provider: &CudaKernelProvider, value: u32) -> Result<TrackedCudaSlice<u32>> {
     let memory = provider.memory();
