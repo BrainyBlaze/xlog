@@ -6,21 +6,23 @@ use xlog_cuda::CudaDevice;
 #[test]
 fn test_xlog_run_basic() {
     // cudarc panics on init when CUDA driver/runtime is unavailable; use xlog-cuda's safe wrapper.
-    if CudaDevice::new(0).is_err() {
-        eprintln!("Skipping test: CUDA runtime unavailable");
-        return;
-    }
-    let (_free, total) = match mem_get_info() {
-        Ok(info) => info,
-        Err(e) => {
-            eprintln!("Skipping test: failed to query GPU memory: {}", e);
+    // Keep _device alive so the CUDA context survives through mem_get_info().
+    let _device = match CudaDevice::new(0) {
+        Ok(d) => d,
+        Err(_) => {
+            println!("SKIPPED: CUDA runtime unavailable (no GPU or driver not loaded)");
             return;
         }
     };
+
+    // CUDA context is alive via _device — memory query failure is now unexpected.
+    let (_free, total) = mem_get_info()
+        .expect("mem_get_info should succeed while CudaDevice is alive");
+
     let total_mb = total / (1024 * 1024);
     if total_mb < 16_384 {
-        eprintln!(
-            "Skipping test: GPU memory {} MB < required 16384 MB",
+        println!(
+            "SKIPPED: GPU memory {} MB < required 16384 MB",
             total_mb
         );
         return;

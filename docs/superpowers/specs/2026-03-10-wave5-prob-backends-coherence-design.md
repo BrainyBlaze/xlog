@@ -28,28 +28,34 @@ Structural split only. The public surface is function-based (not an object model
 the existing shape: external entry points in `compilation/mod.rs`, lower-level functions
 distributed across gpu_d4 submodules.
 
-Current public surface (function-based, not object model):
+Post-split public surface (function-based, not object model):
 
 Entry points in compilation/mod.rs (orchestrate the full pipeline):
-- `compile_gpu_d4_and_verify` (mod.rs:117 — compile + verify, no caching)
-- `compile_gpu_d4_and_verify_cached` (mod.rs:145 — compile + cache + verify + smooth; used by exact.rs, exact_gpu.rs)
+- `compile_gpu_d4_and_verify` (mod.rs — compile + verify, no caching)
+- `compile_gpu_d4_and_verify_cached` (mod.rs — compile + cache + verify + smooth; used by exact.rs, exact_gpu.rs)
 
-Public functions in gpu_d4.rs:
-- `validate_cnf_gpu` (gpu_d4.rs:76)
-- `compute_free_var_mask_gpu` (gpu_d4.rs:123)
-- `compute_free_var_mask_gpu_gated` (gpu_d4.rs:132)
-- `build_frontier_bitset` (gpu_d4.rs:464)
-- `build_frontier_dense` (gpu_d4.rs:639)
-- `compile_gpu_d4` (gpu_d4.rs:836)
-- `compile_gpu_d4_gated` (gpu_d4.rs:847)
+Public functions in gpu_d4/mod.rs:
+- `validate_cnf_gpu` (mod.rs:105)
+- `compute_free_var_mask_gpu` (mod.rs:152)
+- `compile_gpu_d4_gated` (mod.rs:420)
 
-Public structs in gpu_d4.rs:
-- `GpuCompileConfig` (gpu_d4.rs:49 — re-exported via compilation/mod.rs:30)
-- `GpuFrontierBitset` (gpu_d4.rs:395)
-- `GpuFrontierDense` (gpu_d4.rs:431)
+Public structs in gpu_d4/mod.rs:
+- `GpuCompileConfig` (mod.rs:58 — re-exported via compilation/mod.rs and lib.rs)
 
-Internal helpers:
-- `exclusive_scan_u32_inplace` (gpu_d4.rs:319, pub(crate) — used by xlog-prob/gpu.rs)
+Internal (pub(crate)) functions in gpu_d4/mod.rs:
+- `compute_free_var_mask_gpu_gated` (mod.rs:161)
+- `compile_gpu_d4` (mod.rs:409)
+- `exclusive_scan_u32_inplace` (mod.rs:332 — used by xlog-prob/gpu.rs)
+
+Internal (pub(crate)) in gpu_d4/frontier.rs:
+- `D4WorkItem` struct (frontier.rs:23)
+- `GpuFrontierBitset` struct (frontier.rs:34)
+- `GpuFrontierDense` struct (frontier.rs:74)
+- `build_frontier_bitset` (frontier.rs:108)
+- `build_frontier_dense` (frontier.rs:284)
+
+Internal (pub(super)) in gpu_d4/build.rs:
+- `compile_gpu_d4_with_gate` (build.rs:52)
 
 ```
 crates/xlog-prob/src/compilation/
@@ -187,16 +193,16 @@ Remaining naming inconsistencies:
 xlog-solve: 2, xlog-prob: 7). Full unification is over-engineering. Realistic improvements:
 
 - Add `Default` impls to all Config structs that lack them
-- Add `#[non_exhaustive]` to public Config structs **where Rust allows it**
+- Add `#[non_exhaustive]` to the 3 public Config structs that are never constructed via
+  struct literals from external crates: `MemoryBudget`, `GpuEquivalenceConfig`, `WfsConfig`.
+  The remaining 10 (`NetworkConfig`, `GpuCompileConfig`, `GpuCircuitCacheConfig`, `GpuConfig`,
+  `McEvalConfig`, `TrainConfig`, `SolverConfig`, `SolverBudget`, `SolverSettings`,
+  `CircuitCompileProfile`) use struct literal construction in pyxlog or cross-crate test code,
+  making `#[non_exhaustive]` a breaking change. This is a Rust language constraint:
+  `#[non_exhaustive]` blocks ALL struct literal construction from outside the defining crate,
+  even with `..Default::default()`.
 - Add `///` doc comments explaining when/why to customize
 - Do NOT create a hierarchical config tree or builder pattern
-
-**Implementation note (`#[non_exhaustive]` constraint):** Rust's `#[non_exhaustive]` blocks ALL
-struct literal construction from outside the defining crate, even with `..Default::default()`.
-Only 3 of 13 config structs could receive it (those never constructed via struct literals from
-external crates): `MemoryBudget`, `GpuEquivalenceConfig`, `WfsConfig`. The remaining 10 use struct
-literal construction in pyxlog or test code across crate boundaries, making `#[non_exhaustive]`
-a breaking change. This is a Rust language constraint, not an implementation shortfall.
 
 ### 5c.3 Test Harness Consolidation (A5)
 
@@ -316,10 +322,12 @@ gates before the refactoring is considered complete.
 
 **Rust early-return skips** (e.g., `run_cli_tests.rs`): Rust's built-in test framework has no
 `skip`/`skip_unless` mechanism like pytest. Hardware-dependent tests use early `return` with
-`eprintln!` skip messages. This is the standard Rust pattern and is not a Wave 5 regression.
-The test's skip conditions (CUDA unavailable, insufficient GPU memory) are hardware-dependent
-and cannot be "gamed" in code. Python tests use `pytest.skip()` and `@pytest.mark.slow` which
-provide proper deselection semantics.
+`println!` skip messages. Only the "CUDA completely unavailable" condition triggers a skip.
+If CUDA initializes but subsequent operations fail, the test now panics (expect) rather than
+silently skipping — this closes the anti-gaming gap where a broken CUDA context would
+report success. The CudaDevice is kept alive through the test to prevent use-after-drop of
+the CUDA context. Python tests use `pytest.skip()` and `@pytest.mark.slow` which provide
+proper deselection semantics.
 
 **Pre-existing slow tests**: `test_non_monotone_simple_cycle` (50K MC samples),
 `test_ilp_showcase_all_stages_converge` (subprocess, up to 600s), and
