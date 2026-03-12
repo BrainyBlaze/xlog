@@ -362,7 +362,7 @@ pub fn build_weights_gpu(
     })
 }
 
-pub fn upload_weights_from_host(
+pub(crate) fn upload_weights_from_host(
     provider: &Arc<CudaKernelProvider>,
     weights: &[(f64, f64)],
 ) -> Result<GpuWeights> {

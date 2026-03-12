@@ -12,12 +12,12 @@ use xlog_cuda::CudaKernelProvider;
 use crate::pir::{PirGraph, PirNode, PirNodeId};
 
 /// Node type tags matching `PirNode` variants.
-pub const PIR_CONST: u8 = 0;
+pub(crate) const PIR_CONST: u8 = 0;
 pub const PIR_LIT: u8 = 1;
 pub const PIR_NEG_LIT: u8 = 2;
 pub const PIR_AND: u8 = 3;
 pub const PIR_OR: u8 = 4;
-pub const PIR_DECISION: u8 = 5;
+pub(crate) const PIR_DECISION: u8 = 5;
 
 /// GPU-resident PIR graph (device-side mirror of `pir::PirGraph`).
 pub struct GpuPirGraph {

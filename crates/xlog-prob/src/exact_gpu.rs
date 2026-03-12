@@ -22,7 +22,7 @@ use crate::exact::{
 };
 use crate::provenance::{GroundAtom, Provenance};
 
-pub struct ExactGpuState {
+pub(crate) struct ExactGpuState {
     provider: Option<Arc<CudaKernelProvider>>,
     cache: Option<Mutex<GpuCircuitCache>>,
     handle: Option<GpuCircuitCacheHandle>,
@@ -47,11 +47,11 @@ impl ExactGpuState {
         }
     }
 
-    pub fn provider(&self) -> Option<&Arc<CudaKernelProvider>> {
+    pub(crate) fn provider(&self) -> Option<&Arc<CudaKernelProvider>> {
         self.provider.as_ref()
     }
 
-    pub fn lock_cache(&self) -> Option<std::sync::MutexGuard<'_, GpuCircuitCache>> {
+    pub(crate) fn lock_cache(&self) -> Option<std::sync::MutexGuard<'_, GpuCircuitCache>> {
         self.cache.as_ref().map(|cache| {
             cache
                 .lock()
@@ -59,23 +59,23 @@ impl ExactGpuState {
         })
     }
 
-    pub fn handle(&self) -> Option<&GpuCircuitCacheHandle> {
+    pub(crate) fn handle(&self) -> Option<&GpuCircuitCacheHandle> {
         self.handle.as_ref()
     }
 
-    pub fn weights(&self) -> Option<&GpuWeights> {
+    pub(crate) fn weights(&self) -> Option<&GpuWeights> {
         self.weights.as_ref()
     }
 
-    pub fn max_var(&self) -> u32 {
+    pub(crate) fn max_var(&self) -> u32 {
         self.max_var
     }
 
-    pub fn query_vars_device(&self) -> Option<&TrackedCudaSlice<u32>> {
+    pub(crate) fn query_vars_device(&self) -> Option<&TrackedCudaSlice<u32>> {
         self.query_vars_device.as_ref()
     }
 
-    pub fn query_indices(&self) -> &[usize] {
+    pub(crate) fn query_indices(&self) -> &[usize] {
         &self.query_indices
     }
 
@@ -83,7 +83,7 @@ impl ExactGpuState {
         &self.queries
     }
 
-    pub fn allocate_query_restore(&self) -> Result<Option<TrackedCudaSlice<f64>>> {
+    pub(crate) fn allocate_query_restore(&self) -> Result<Option<TrackedCudaSlice<f64>>> {
         let Some(provider) = self.provider.as_ref() else {
             return Ok(None);
         };
@@ -94,7 +94,7 @@ impl ExactGpuState {
         Ok(Some(buf))
     }
 
-    pub fn apply_query_vars(
+    pub(crate) fn apply_query_vars(
         &self,
         cache: &mut GpuCircuitCache,
         saved: &mut TrackedCudaSlice<f64>,
@@ -109,7 +109,7 @@ impl ExactGpuState {
         apply_query_vars_device(provider, query_vars, self.max_var, log_false, saved)
     }
 
-    pub fn restore_query_vars(
+    pub(crate) fn restore_query_vars(
         &self,
         cache: &mut GpuCircuitCache,
         saved: &TrackedCudaSlice<f64>,
@@ -125,7 +125,7 @@ impl ExactGpuState {
     }
 }
 
-pub fn compile_provenance_gpu_only(
+pub(crate) fn compile_provenance_gpu_only(
     provenance: &Provenance,
     config: GpuConfig,
 ) -> Result<ExactGpuState> {

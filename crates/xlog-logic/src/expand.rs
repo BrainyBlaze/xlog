@@ -197,7 +197,7 @@ impl<'a> ExpansionContext<'a> {
     /// expand to body literals that get added to the calling rule.
     ///
     /// Returns the expanded body literals and the result variable name.
-    pub fn expand_predicate_func(
+    pub(crate) fn expand_predicate_func(
         &self,
         func: &FuncDef,
         args: &[ArithExpr],
@@ -362,7 +362,7 @@ impl<'a> ExpansionContext<'a> {
     }
 
     /// Check if a function has a predicate body.
-    pub fn is_predicate_func(&self, name: &str) -> bool {
+    pub(crate) fn is_predicate_func(&self, name: &str) -> bool {
         self.registry
             .get(name)
             .map(|f| matches!(f.body, FuncBody::Predicate { .. }))
@@ -371,7 +371,7 @@ impl<'a> ExpansionContext<'a> {
 
     /// Expand all function calls in an arithmetic expression.
     /// Returns the expanded expression with all UDF calls inlined.
-    pub fn expand_expr_fully(&mut self, expr: &ArithExpr) -> Result<ArithExpr, FunctionError> {
+    pub(crate) fn expand_expr_fully(&mut self, expr: &ArithExpr) -> Result<ArithExpr, FunctionError> {
         match expr {
             ArithExpr::Variable(_) | ArithExpr::Integer(_) | ArithExpr::Float(_) => {
                 Ok(expr.clone())

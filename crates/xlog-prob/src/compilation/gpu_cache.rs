@@ -166,11 +166,11 @@ impl GpuCircuitCacheHandle {
         self.max_var
     }
 
-    pub fn slot_index(&self) -> u32 {
+    pub(crate) fn slot_index(&self) -> u32 {
         self.slot_host
     }
 
-    pub fn set_meta(&mut self, num_nodes: u32, num_levels: u32, root: u32, max_var: u32) {
+    pub(crate) fn set_meta(&mut self, num_nodes: u32, num_levels: u32, root: u32, max_var: u32) {
         self.num_nodes = num_nodes;
         self.num_levels = num_levels;
         self.root = root;
@@ -260,28 +260,28 @@ impl GpuCircuitCache {
         self.num_slots
     }
 
-    pub fn has_any_free_var_mask(&self) -> bool {
+    pub(crate) fn has_any_free_var_mask(&self) -> bool {
         self.has_free_var_mask.iter().any(|&v| v)
     }
 
-    pub fn has_free_var_mask_for_slot(&self, slot: u32) -> bool {
+    pub(crate) fn has_free_var_mask_for_slot(&self, slot: u32) -> bool {
         self.has_free_var_mask
             .get(slot as usize)
             .copied()
             .unwrap_or(false)
     }
 
-    pub fn var_stride(&self) -> Result<u32> {
+    pub(crate) fn var_stride(&self) -> Result<u32> {
         self.var_cap
             .checked_add(1)
             .ok_or_else(|| XlogError::Compilation("GpuCircuitCache var_cap overflow".to_string()))
     }
 
-    pub fn node_stride(&self) -> u32 {
+    pub(crate) fn node_stride(&self) -> u32 {
         self.node_cap
     }
 
-    pub fn copy_slot_weights_to_batch(
+    pub(crate) fn copy_slot_weights_to_batch(
         &mut self,
         handle: &GpuCircuitCacheHandle,
         out_true_batch: &mut TrackedCudaSlice<f64>,
@@ -355,7 +355,7 @@ impl GpuCircuitCache {
         Ok(())
     }
 
-    pub fn eval_grads_inplace_fused_batched(
+    pub(crate) fn eval_grads_inplace_fused_batched(
         &mut self,
         handle: &GpuCircuitCacheHandle,
         var_log_true_batch: &TrackedCudaSlice<f64>,
@@ -548,7 +548,7 @@ impl GpuCircuitCache {
         Ok(())
     }
 
-    pub fn copy_root_batched_from_values(
+    pub(crate) fn copy_root_batched_from_values(
         &self,
         handle: &GpuCircuitCacheHandle,
         values_batch: &TrackedCudaSlice<f64>,
@@ -859,7 +859,7 @@ impl GpuCircuitCache {
         self.lookup_or_insert_device(&key_device)
     }
 
-    pub fn lookup_or_insert_device(
+    pub(crate) fn lookup_or_insert_device(
         &mut self,
         key_device: &TrackedCudaSlice<u64>,
     ) -> Result<GpuCacheLookup> {
@@ -1551,7 +1551,7 @@ impl GpuCircuitCache {
     /// (host `Vec`s) instead of a device-resident `GpuXgcf`. Each host array is
     /// uploaded to a temporary device buffer and then stored into the slot via the
     /// same `cache_store_*` kernels.
-    pub fn restore_from_host_arrays(
+    pub(crate) fn restore_from_host_arrays(
         &mut self,
         handle: &mut GpuCircuitCacheHandle,
         artifact: &disk_cache::CircuitArtifact,

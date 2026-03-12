@@ -3,7 +3,7 @@
 use xlog_cuda::memory::TrackedCudaSlice;
 
 /// GPU-resident CNF in CSR (Compressed Sparse Row) format.
-pub struct GpuCsrCnf {
+pub(crate) struct GpuCsrCnf {
     /// Number of variables
     pub num_vars: u32,
     /// Number of clauses (rows)

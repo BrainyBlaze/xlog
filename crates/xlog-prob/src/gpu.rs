@@ -1069,12 +1069,12 @@ impl GpuXgcf {
     }
 
     /// Mutable access to device-resident log(true-weight) table.
-    pub fn var_log_true_mut(&mut self) -> &mut TrackedCudaSlice<f64> {
+    pub(crate) fn var_log_true_mut(&mut self) -> &mut TrackedCudaSlice<f64> {
         &mut self.var_log_true
     }
 
     /// Mutable access to device-resident log(false-weight) table.
-    pub fn var_log_false_mut(&mut self) -> &mut TrackedCudaSlice<f64> {
+    pub(crate) fn var_log_false_mut(&mut self) -> &mut TrackedCudaSlice<f64> {
         &mut self.var_log_false
     }
 
@@ -1102,7 +1102,7 @@ impl GpuXgcf {
     }
 
     /// Upload a host free-variable mask (length = max_var + 1).
-    pub fn set_free_var_mask_from_host(
+    pub(crate) fn set_free_var_mask_from_host(
         &mut self,
         provider: &CudaKernelProvider,
         mask: &[u8],

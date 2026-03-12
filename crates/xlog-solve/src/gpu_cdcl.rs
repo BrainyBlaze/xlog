@@ -129,19 +129,19 @@ pub struct GpuCdclWorkspace {
 impl GpuCdclWorkspace {
     /// No-op: the sat_cdcl_solve kernel initializes all mutable state at launch.
     #[inline]
-    pub fn reset_for_solve(&mut self) {
+    pub(crate) fn reset_for_solve(&mut self) {
         // Intentionally empty. See sat.cu:1220, 1293, 1329, 1341.
     }
 
     /// Variable capacity this workspace was allocated for.
     #[inline]
-    pub fn var_cap(&self) -> usize {
+    pub(crate) fn var_cap(&self) -> usize {
         self.var_cap
     }
 
     /// Total clause capacity (input + learned) this workspace was allocated for.
     #[inline]
-    pub fn clause_total_cap(&self) -> usize {
+    pub(crate) fn clause_total_cap(&self) -> usize {
         self.clause_total_cap
     }
 

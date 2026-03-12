@@ -81,14 +81,14 @@ impl Lowerer {
     }
 
     /// Set the stratification result for ordering
-    pub fn set_strata(&mut self, strata: Vec<Vec<String>>) {
+    pub(crate) fn set_strata(&mut self, strata: Vec<Vec<String>>) {
         self.strata = strata;
     }
 
     /// Set cardinality hints (typically sourced from runtime statistics snapshots).
     ///
     /// These hints are used by lowering-time join ordering when available.
-    pub fn set_cardinality_hints(&mut self, hints: HashMap<String, u64>) {
+    pub(crate) fn set_cardinality_hints(&mut self, hints: HashMap<String, u64>) {
         self.cardinality_hints = hints;
     }
 
@@ -1677,7 +1677,7 @@ impl Lowerer {
     }
 
     /// Infer the result type of an arithmetic expression (strict same-type)
-    pub fn infer_arith_type(&self, expr: &ArithExpr, var_env: &VariableEnv) -> Result<ScalarType> {
+    pub(crate) fn infer_arith_type(&self, expr: &ArithExpr, var_env: &VariableEnv) -> Result<ScalarType> {
         match expr {
             ArithExpr::Variable(name) => var_env.get_type(name).ok_or_else(|| {
                 XlogError::Compilation(format!("Unknown variable {} in arithmetic", name))
@@ -1954,7 +1954,7 @@ impl Lowerer {
 }
 
 /// Track variable occurrences and column positions
-pub struct VariableEnv {
+pub(crate) struct VariableEnv {
     /// Maps variable name to list of (predicate, position in atom, global column)
     occurrences: HashMap<String, Vec<(String, usize, usize)>>,
     /// Total columns in current result

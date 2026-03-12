@@ -6,7 +6,7 @@ use xlog_core::{Result, XlogError};
 
 /// Dependency edge type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DepType {
+pub(crate) enum DepType {
     Positive,
     Negative,
     Aggregate,
@@ -14,7 +14,7 @@ pub enum DepType {
 
 /// Dependency graph edge
 #[derive(Debug, Clone)]
-pub struct DepEdge {
+pub(crate) struct DepEdge {
     pub from: String,
     pub to: String,
     pub dep_type: DepType,

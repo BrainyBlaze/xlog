@@ -637,7 +637,7 @@ pub fn evaluate_wfs_with_rules(rules: Vec<WfsRule>, pir: &mut PirGraph) -> Resul
 }
 
 /// Evaluate WFS with rules and custom configuration.
-pub fn evaluate_wfs_with_rules_config(
+pub(crate) fn evaluate_wfs_with_rules_config(
     rules: Vec<WfsRule>,
     pir: &mut PirGraph,
     config: &WfsConfig,

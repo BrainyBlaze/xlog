@@ -20,7 +20,7 @@ pub(crate) mod build;
 pub(crate) mod frontier;
 
 
-pub use frontier::{
+pub(crate) use frontier::{
     build_frontier_bitset, build_frontier_dense, GpuFrontierBitset, GpuFrontierDense,
 };
 
@@ -158,7 +158,7 @@ pub fn compute_free_var_mask_gpu(
     compute_free_var_mask_gpu_gated(cnf, circuit, provider, &compile_needed)
 }
 
-pub fn compute_free_var_mask_gpu_gated(
+pub(crate) fn compute_free_var_mask_gpu_gated(
     cnf: &GpuCnf,
     circuit: &GpuXgcf,
     provider: &CudaKernelProvider,
@@ -406,7 +406,7 @@ pub(crate) fn exclusive_scan_u32_inplace(
 
 
 /// Compile a device-resident CNF into a device-resident XGCF circuit (Phase 1).
-pub fn compile_gpu_d4(
+pub(crate) fn compile_gpu_d4(
     cnf: &GpuCnf,
     provider: &Arc<CudaKernelProvider>,
     config: &GpuCompileConfig,

@@ -29,18 +29,23 @@ pub mod validation;
 pub use gpu_cnf::{encode_cnf_gpu, GpuCnfEncoding, GpuCnfVarTables};
 pub use gpu_d4::GpuCompileConfig;
 pub use gpu_pir::{
-    GpuPirGraph, GpuPirRoots, PIR_AND, PIR_CONST, PIR_DECISION, PIR_LIT, PIR_NEG_LIT, PIR_OR,
+    GpuPirGraph, GpuPirRoots, PIR_AND, PIR_LIT, PIR_NEG_LIT, PIR_OR,
 };
+pub(crate) use gpu_pir::{PIR_CONST, PIR_DECISION};
 pub use gpu_pir_intern::{GpuPirInterner, PirBatch};
 pub use gpu_weights::{
     apply_query_vars_device, build_evidence_by_var_gpu, build_weights_gpu, map_nodes_to_vars_gpu,
-    restore_query_vars_device, GpuWeights,
+    restore_query_vars_device,
 };
-pub use sparse_matrix::GpuCsrCnf;
+pub use gpu_weights::GpuWeights;
+pub(crate) use sparse_matrix::GpuCsrCnf;
 pub use validation::{
-    build_equivalence_queries_gpu, check_equivalence_gpu, check_equivalence_gpu_gated,
+    build_equivalence_queries_gpu,
     validate_equivalence_gpu, validate_equivalence_gpu_gated, GpuEquivalenceConfig,
     GpuEquivalenceQueries,
+};
+pub(crate) use validation::{
+    check_equivalence_gpu, check_equivalence_gpu_gated,
 };
 
 /// Per-stage compilation timing (populated only when XLOG_WARMUP_PROFILE=1).

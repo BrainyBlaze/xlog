@@ -755,7 +755,7 @@ fn build_c_and_not_phi(
     ))
 }
 
-pub fn check_equivalence_gpu(
+pub(crate) fn check_equivalence_gpu(
     phi: &GpuCnf,
     phi_decision_var_limit: &TrackedCudaSlice<u32>,
     circuit: &GpuXgcf,
@@ -836,7 +836,7 @@ pub fn build_equivalence_queries_gpu(
     })
 }
 
-pub fn check_equivalence_gpu_gated(
+pub(crate) fn check_equivalence_gpu_gated(
     phi: &GpuCnf,
     phi_decision_var_limit: &TrackedCudaSlice<u32>,
     circuit: &GpuXgcf,

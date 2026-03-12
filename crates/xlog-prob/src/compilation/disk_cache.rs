@@ -19,7 +19,7 @@ const FORMAT_VERSION: u32 = 1;
 const HEADER_SIZE: usize = 60;
 
 #[derive(Debug, Clone)]
-pub struct CircuitCacheKey {
+pub(crate) struct CircuitCacheKey {
     pub cnf_hash: u64,
     pub config_hash: u64,
     pub random_vars_hash: u64,
@@ -27,7 +27,7 @@ pub struct CircuitCacheKey {
 }
 
 #[derive(Debug)]
-pub struct CircuitArtifact {
+pub(crate) struct CircuitArtifact {
     pub num_nodes: u32,
     pub num_edges: u32,
     pub num_levels: u32,
@@ -50,7 +50,7 @@ pub struct CircuitArtifact {
 ///
 /// Priority: `XLOG_CIRCUIT_CACHE_DIR` env var > `XDG_CACHE_HOME`/xlog/circuits >
 /// `HOME`/.cache/xlog/circuits.
-pub fn cache_dir() -> PathBuf {
+pub(crate) fn cache_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("XLOG_CIRCUIT_CACHE_DIR") {
         PathBuf::from(dir)
     } else if let Ok(xdg) = std::env::var("XDG_CACHE_HOME") {
@@ -73,7 +73,7 @@ fn artifact_filename(key: &CircuitCacheKey) -> String {
 /// Write a circuit artifact to the on-disk cache.
 ///
 /// Uses atomic rename (write to `.tmp`, then rename) so readers never see a partial file.
-pub fn write_artifact(key: &CircuitCacheKey, artifact: &CircuitArtifact) -> Result<()> {
+pub(crate) fn write_artifact(key: &CircuitCacheKey, artifact: &CircuitArtifact) -> Result<()> {
     write_artifact_to(&cache_dir(), key, artifact)
 }
 
@@ -81,7 +81,7 @@ pub fn write_artifact(key: &CircuitCacheKey, artifact: &CircuitArtifact) -> Resu
 ///
 /// Returns `Ok(None)` if the cache file does not exist or fails validation (stale entry).
 /// Returns `Err` only on genuine IO errors after the file has been opened.
-pub fn read_artifact(key: &CircuitCacheKey) -> Result<Option<CircuitArtifact>> {
+pub(crate) fn read_artifact(key: &CircuitCacheKey) -> Result<Option<CircuitArtifact>> {
     read_artifact_from(&cache_dir(), key)
 }
 

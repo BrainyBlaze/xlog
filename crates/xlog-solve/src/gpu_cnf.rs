@@ -31,7 +31,7 @@ pub struct GpuCnf {
 
 impl GpuCnf {
     #[inline]
-    pub fn offsets_len(&self) -> usize {
+    pub(crate) fn offsets_len(&self) -> usize {
         self.clause_offsets.len()
     }
 

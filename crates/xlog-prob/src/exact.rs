@@ -138,7 +138,7 @@ impl ExactDdnnfProgram {
         Self::compile_provenance_with_gpu(provenance, config)
     }
 
-    pub fn gpu_config(&self) -> GpuConfig {
+    pub(crate) fn gpu_config(&self) -> GpuConfig {
         self.gpu_config
     }
 
@@ -250,7 +250,7 @@ impl ExactDdnnfProgram {
     }
 
     /// CNF variable id for the `idx`-th query formula (DIMACS, 1-based), if present.
-    pub fn query_var(&self, idx: usize) -> Option<u32> {
+    pub(crate) fn query_var(&self, idx: usize) -> Option<u32> {
         self.queries.get(idx).and_then(|q| q.var)
     }
 
@@ -1182,7 +1182,7 @@ impl ExactDdnnfProgram {
     /// with different weights (from updated neural network outputs) without
     /// recompiling the circuit.
     #[cfg(feature = "host-io")]
-    pub fn evaluate_gpu_with_grads_weights(
+    pub(crate) fn evaluate_gpu_with_grads_weights(
         &self,
         external_weights: &[(f64, f64)],
     ) -> Result<ExactResultWithGrads> {

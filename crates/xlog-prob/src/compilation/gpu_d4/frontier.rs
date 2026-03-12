@@ -31,7 +31,7 @@ pub(crate) struct D4WorkItem {
 unsafe impl DeviceRepr for D4WorkItem {}
 
 /// Device-resident frontier state using compressed bitset assignments.
-pub struct GpuFrontierBitset {
+pub(crate) struct GpuFrontierBitset {
     pub(super) items: TrackedCudaSlice<D4WorkItem>,
     size: TrackedCudaSlice<u32>,
     true_bits: TrackedCudaSlice<u32>,
@@ -67,7 +67,7 @@ impl GpuFrontierBitset {
 }
 
 /// Device-resident frontier state using dense tri-state assignments.
-pub struct GpuFrontierDense {
+pub(crate) struct GpuFrontierDense {
     pub(super) items: TrackedCudaSlice<D4WorkItem>,
     size: TrackedCudaSlice<u32>,
     assignments: TrackedCudaSlice<u8>,
@@ -100,7 +100,7 @@ impl GpuFrontierDense {
 /// Build a BFS frontier using compressed bitsets (default).
 ///
 /// This is an internal building block for Phase 1 GPU D4 compilation.
-pub fn build_frontier_bitset(
+pub(crate) fn build_frontier_bitset(
     cnf: &GpuCnf,
     provider: &CudaKernelProvider,
     config: &GpuCompileConfig,
@@ -275,7 +275,7 @@ pub fn build_frontier_bitset(
 }
 
 /// Build a BFS frontier using dense tri-state assignments.
-pub fn build_frontier_dense(
+pub(crate) fn build_frontier_dense(
     cnf: &GpuCnf,
     provider: &CudaKernelProvider,
     config: &GpuCompileConfig,

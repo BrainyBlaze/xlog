@@ -6,7 +6,7 @@ use xlog_core::ScalarType;
 
 /// Type inference context
 #[derive(Debug, Default)]
-pub struct TypeContext {
+pub(crate) struct TypeContext {
     /// Known variable types
     bindings: HashMap<String, ScalarType>,
 }
@@ -79,7 +79,7 @@ impl TypeContext {
 }
 
 /// Infer parameter types from function definition
-pub fn infer_param_types(func: &FuncDef) -> Vec<Option<ScalarType>> {
+pub(crate) fn infer_param_types(func: &FuncDef) -> Vec<Option<ScalarType>> {
     func.params.iter().map(|p| p.typ).collect()
 }
 

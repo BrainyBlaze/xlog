@@ -61,7 +61,7 @@ impl std::error::Error for FunctionError {}
 
 /// Type errors
 #[derive(Debug, Clone)]
-pub enum TypeError {
+pub(crate) enum TypeError {
     /// Type mismatch
     Mismatch {
         expected: ScalarType,
