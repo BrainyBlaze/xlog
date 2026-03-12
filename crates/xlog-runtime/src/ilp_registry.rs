@@ -5,7 +5,7 @@ use xlog_core::XlogError;
 use xlog_cuda::{CudaBuffer, CudaKernelProvider};
 
 /// Reads the device-side row count using only public APIs (RD-22).
-/// `CudaKernelProvider::device_row_count` is private (provider.rs:6904).
+/// `CudaKernelProvider::device_row_count` is private (provider/transfer.rs).
 pub fn read_device_row_count(
     provider: &CudaKernelProvider,
     buffer: &CudaBuffer,

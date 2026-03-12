@@ -30,14 +30,16 @@ fn find_nvcc() -> PathBuf {
 fn main() {
     let nvcc = find_nvcc();
 
-    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
+    let manifest_dir =
+        env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR must be set by cargo");
     let kernels_dir = Path::new(&manifest_dir)
         .parent()
-        .unwrap()
+        .expect("crate directory must have a parent (workspace root)")
         .parent()
-        .unwrap()
+        .expect("workspace root must have a parent")
         .join("kernels");
-    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let out_dir =
+        PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR must be set by cargo"));
 
     // Environment knobs.
     let no_cubin = env::var("XLOG_NO_CUBIN").map(|v| v == "1").unwrap_or(false);
@@ -75,8 +77,8 @@ fn main() {
                         &format!("-arch={arch}"),
                         "-O3",
                         "-o",
-                        cubin_path.to_str().unwrap(),
-                        cu_path.to_str().unwrap(),
+                        cubin_path.to_str().expect("cubin output path must be valid UTF-8"),
+                        cu_path.to_str().expect("kernel source path must be valid UTF-8"),
                     ])
                     .status()
                     .unwrap_or_else(|e| panic!("failed to run nvcc for {name}.{arch}.cubin: {e}"));
@@ -95,8 +97,8 @@ fn main() {
                 "-arch=sm_75",
                 "-O3",
                 "-o",
-                ptx_path.to_str().unwrap(),
-                cu_path.to_str().unwrap(),
+                ptx_path.to_str().expect("ptx output path must be valid UTF-8"),
+                cu_path.to_str().expect("kernel source path must be valid UTF-8"),
             ])
             .status()
             .unwrap_or_else(|e| panic!("failed to run nvcc for {name}.portable.ptx: {e}"));
