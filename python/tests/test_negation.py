@@ -190,8 +190,9 @@ class TestNonMonotone:
     stratification checking.
     """
 
+    @pytest.mark.slow
     def test_non_monotone_simple_cycle(self):
-        """Test simple cyclic program with MC."""
+        """Test simple cyclic program with MC (50K samples, ~150s on WSL2)."""
         source = """
 0.5::flip().
 p() :- flip().

@@ -31,8 +31,12 @@ def _run_showcase() -> subprocess.CompletedProcess:
     )
 
 
+@pytest.mark.slow
 def test_ilp_showcase_all_stages_converge():
-    """Run the showcase script and verify exit code 0 (all stages converged)."""
+    """Run the showcase script and verify exit code 0 (all stages converged).
+
+    Slow: up to 2 attempts × 300s subprocess timeout = 600s worst case.
+    """
     last_result = None
     for attempt in range(1, MAX_ATTEMPTS + 1):
         result = _run_showcase()
