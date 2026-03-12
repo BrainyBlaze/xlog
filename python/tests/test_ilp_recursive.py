@@ -43,8 +43,12 @@ def test_non_recursive_still_default():
     assert config.allow_recursive_candidates is False
 
 
+@pytest.mark.slow
 def test_recursive_reach_runs_without_crash():
-    """With recursive candidates enabled, training runs without errors."""
+    """With recursive candidates enabled, training runs without errors.
+
+    Slow: up to 7 attempts × 150 steps with recursive candidates (GPU-intensive).
+    """
     config = TrainConfig(
         step_budget_per_attempt=150, max_attempts=7,
         tau_start=2.0, tau_floor=0.05, seed=42,

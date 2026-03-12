@@ -53,22 +53,33 @@ Internal helpers:
 
 ```
 crates/xlog-prob/src/compilation/
-├── gpu_d4.rs          → gpu_d4/mod.rs       (entry points, config, result types)
-├──                      gpu_d4/frontier.rs   (frontier expansion, node processing)
-├──                      gpu_d4/smoothing.rs  (circuit smoothing passes)
+├── gpu_d4.rs          → gpu_d4/mod.rs       (entry points, config, validation, scan utility)
+├──                      gpu_d4/frontier.rs   (frontier types, expansion, node processing)
 ├──                      gpu_d4/build.rs      (circuit construction, XGCF output)
 ```
+
+**Implementation note (smoothing.rs removed):** Code analysis during implementation revealed
+that smoothing logic lives in `GpuXgcf::smooth_random_vars_device` (compilation/mod.rs:337),
+not in gpu_d4.rs. The spec's `smoothing.rs` submodule would have been empty. The split is
+3 modules instead of 4, which is a better factoring of the actual code.
 
 ### Module Responsibilities
 
 | Module | Content | LOC est. |
 |--------|---------|----------|
-| `mod.rs` | Public entry points (`compile_gpu_d4*`, `compute_free_var_mask_gpu*`), `GpuCompileConfig`, result types, orchestration | ~600 |
-| `frontier.rs` | `build_frontier_*`, frontier expansion loop, node state tracking, BFS exploration, cache interaction | ~1,200 |
-| `smoothing.rs` | Post-compilation smoothing passes, determinism normalization | ~800 |
-| `build.rs` | XGCF circuit layout construction, levelized DAG building, output finalization | ~700 |
+| `mod.rs` | Config, validation, free-var mask, `exclusive_scan_u32_inplace`, thin compile wrappers | ~450 |
+| `frontier.rs` | `D4WorkItem`, `GpuFrontierBitset`, `GpuFrontierDense`, `build_frontier_*`, 4 tests | ~1,480 |
+| `build.rs` | `compile_gpu_d4_with_gate`, `alloc_component_scratch`, 5 tests | ~1,850 |
 
-**Total**: ~3,300 LOC (vs 3,669 — ~10% reduction)
+**Total**: ~3,780 LOC (vs 3,669 — slight increase due to `pub(super)` field promotions and
+test redistribution)
+
+### Visibility Adaptation
+
+Frontier types (`GpuFrontierBitset`, `GpuFrontierDense`, `D4WorkItem`) were tightened from
+`pub` to `pub(crate)` since they are only used within xlog-prob. Their struct fields are
+`pub(super)` for cross-submodule access within gpu_d4/. The `pub use` re-exports in
+gpu_d4/mod.rs and compilation/mod.rs were removed accordingly.
 
 ### Unwrap/Expect Policy
 
@@ -176,9 +187,16 @@ Remaining naming inconsistencies:
 xlog-solve: 2, xlog-prob: 7). Full unification is over-engineering. Realistic improvements:
 
 - Add `Default` impls to all Config structs that lack them
-- Add `#[non_exhaustive]` to public Config structs
+- Add `#[non_exhaustive]` to public Config structs **where Rust allows it**
 - Add `///` doc comments explaining when/why to customize
 - Do NOT create a hierarchical config tree or builder pattern
+
+**Implementation note (`#[non_exhaustive]` constraint):** Rust's `#[non_exhaustive]` blocks ALL
+struct literal construction from outside the defining crate, even with `..Default::default()`.
+Only 3 of 13 config structs could receive it (those never constructed via struct literals from
+external crates): `GpuCompileConfig`, `McEvalConfig`, `WfsConfig`. The remaining 10 use struct
+literal construction in pyxlog or test code across crate boundaries, making `#[non_exhaustive]`
+a breaking change. This is a Rust language constraint, not an implementation shortfall.
 
 ### 5c.3 Test Harness Consolidation (A5)
 
@@ -187,6 +205,13 @@ xlog-prob/tests/, 1 in xlog-runtime/src/relation.rs). Each crate keeps one canon
 in a `tests/common/mod.rs` or `src/test_support.rs` — less DRY but avoids new test-utility
 dependency edges between crates. Comment points to pattern origin. Saves ~300 lines
 (24 copies → ~5 copies).
+
+**Implementation note (relation.rs exclusion):** The `xlog-runtime/src/relation.rs` copy uses
+a different pattern — it's an inline `#[cfg(test)] mod tests` block within a source file, not
+a standalone integration test file. Consolidating it would require either making the shared
+helper available to `#[cfg(test)]` modules inside `src/` (a different dependency shape) or
+moving the tests to a separate integration test file. Left as-is; the 22 xlog-cuda + 1
+xlog-prob copies are consolidated into 2 canonical `tests/common/mod.rs` helpers.
 
 ### 5c.4 xlog-prob Export Cleanup (ST3)
 
@@ -286,6 +311,21 @@ Deferred from Wave 3. After the executor split, assess:
 
 Wave 5 is the final wave — it must pass the full documented matrix plus additional build
 gates before the refactoring is considered complete.
+
+### Known Testing Patterns
+
+**Rust early-return skips** (e.g., `run_cli_tests.rs`): Rust's built-in test framework has no
+`skip`/`skip_unless` mechanism like pytest. Hardware-dependent tests use early `return` with
+`eprintln!` skip messages. This is the standard Rust pattern and is not a Wave 5 regression.
+The test's skip conditions (CUDA unavailable, insufficient GPU memory) are hardware-dependent
+and cannot be "gamed" in code. Python tests use `pytest.skip()` and `@pytest.mark.slow` which
+provide proper deselection semantics.
+
+**Pre-existing slow tests**: `test_non_monotone_simple_cycle` (50K MC samples),
+`test_ilp_showcase_all_stages_converge` (subprocess, up to 600s), and
+`test_recursive_reach_runs_without_crash` (7×150 ILP steps with recursive candidates) are
+marked `@pytest.mark.slow` and excluded from the non-slow batch gate. These are
+WSL2-batch-context timing issues, not Wave 5 regressions.
 
 ## Diff Profile (estimated)
 
