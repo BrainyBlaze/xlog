@@ -52,12 +52,112 @@ All notable changes to this project are documented in this file.
 - **MC per-sample store management replaced**: Full `snapshot_store()`/`restore_store()` cycle
   replaced by `McSampleResetPlan` with targeted relation-level reset.
 
+### Refactored
+
+- **5-wave codebase refactoring** (2026-03-10 → 2026-03-13, 57 commits across all waves):
+  Structural decomposition of the 5 largest modules in the workspace. No external API changes.
+  No behavioral changes. All existing tests, gates, and contracts preserved.
+
+  **Wave 1 — Dependency cleanup + error/type seams** (`xlog-core`, `xlog-cuda`, `xlog-logic`,
+  `xlog-neural`; 8 commits):
+  - Removed false dependency cycle: `xlog-logic` no longer depends on `xlog-runtime` in
+    production, `xlog-stats` no longer depends on `xlog-cuda`.
+  - Added `xlog-neural → xlog-core` edge for error conversion impls.
+  - New `From` impls: `NeuralError`, `TensorSourceError`, `FunctionError`, `TypeError`,
+    `ModuleError` → `XlogError`. New `driver_err()` helper for cudarc `DriverError` (orphan
+    rule prevents `From` impl).
+  - New `XlogError::{kernel_ctx, execution_ctx, compilation_ctx}` structured error context
+    helpers.
+  - New `GpuScalar` trait (`xlog-cuda/src/type_seam.rs`): pub + sealed marker for Rust scalar
+    types that round-trip through GPU column storage. 8 impls (u8, u32, u64, i32, i64, f32,
+    f64, bool). Enables generic `download_column::<T>()` and `create_buffer_from_slice::<T>()`
+    in Wave 2.
+
+  **Wave 2 — Provider decomposition + GpuScalar migration** (`xlog-cuda`, all consumer crates;
+  9 commits):
+  - `provider.rs` (12,809 LOC) → `provider/mod.rs` + 8 submodules: `kernel_loading.rs`,
+    `relational.rs`, `filter.rs`, `groupby.rs`, `arithmetic.rs`, `transfer.rs`,
+    `probabilistic.rs`, `ilp.rs`, `io.rs`.
+  - Collapsed type-specialized function families via `GpuScalar` trait:
+    - 8 `download_column_<T>()` functions (~280 LOC) → 1 generic `download_column::<T>()` (~35 LOC)
+    - 7 `create_buffer_from_<T>_slice()` functions (~220 LOC) → 1 generic `create_buffer_from_slice::<T>()` (~30 LOC)
+    - 11 `filter_<T>()` functions (~1,200 LOC) → 1 generic `filter::<T>()` with enum dispatch
+  - ~140 mechanical turbofish call-site updates across 8 consumer crates.
+  - `new()` constructor refactored from ~814 lines of boilerplate to ~120 lines via
+    `KernelModuleSpec` manifest + `load_all_kernel_modules()`.
+  - Net reduction: ~5,990 lines.
+
+  **Wave 3 — Executor decomposition** (`xlog-runtime`; 11 commits):
+  - `executor.rs` (4,337 LOC) → `executor/mod.rs` + 6 submodules: `node_dispatch.rs`,
+    `recursive.rs`, `expression.rs`, `rewrite.rs`, `join_cache.rs`, `delta.rs`.
+  - Extracted `DeltaRelationTracker` as standalone `pub(crate)` type for delta relation
+    lifecycle during recursive evaluation.
+  - Extracted `JoinIndexCache` as standalone `pub(crate)` LRU struct.
+  - Net reduction: ~1,040 lines.
+
+  **Wave 4 — Pyxlog FFI extraction** (`pyxlog`; 10 commits):
+  - `lib.rs` (6,202 LOC) → slimmed `lib.rs` (~487 LOC) + 7 submodules: `program.rs`,
+    `logic.rs`, `ilp.rs`, `ilp_gpu.rs`, `training.rs`, `neural.rs`, `types.rs`.
+  - Consolidated 2 non-contiguous `CompiledIlpProgram` impl blocks into single block.
+  - Extracted `compute_ilp_loss_grad_gpu()` (574 LOC) into focused helpers in `ilp_gpu.rs`.
+  - Collapsed f32/f64 forward-backward duplication into generic `forward_backward_typed()`.
+  - Added `xlog_err_to_py()` / `neural_err_to_py()` local error-mapping helpers (orphan rule
+    prevents `From` impls for `PyErr`).
+  - Net reduction: ~1,320 lines.
+
+  **Wave 5 — Probabilistic backend decomposition + coherence** (`xlog-prob`, workspace-wide;
+  19 commits):
+  - `gpu_d4.rs` (3,669 LOC) → `gpu_d4/mod.rs` (~450 LOC) + `frontier.rs` (~1,480 LOC) +
+    `build.rs` (~1,850 LOC).
+  - `mc.rs` (3,399 LOC) → `mc/mod.rs` (~1,079 LOC) + `evidence.rs` (~130 LOC) +
+    `buffers.rs` (~973 LOC) + `sampling.rs` (~297 LOC) + `results.rs` (~993 LOC).
+  - Config coherence: `Default` impls on all config structs, `#[non_exhaustive]` on 3 structs
+    (`MemoryBudget`, `GpuEquivalenceConfig`, `WfsConfig`), `///` doc comments on all configs.
+  - Test harness consolidation: 22 duplicate `setup_provider()` copies → 2 canonical
+    `tests/common/mod.rs` helpers (xlog-cuda, xlog-prob).
+  - `xlog-prob` top-level re-exports: `GpuCompileConfig`, `CircuitCompileProfile`,
+    `ExactDdnnfProgram`, `ExactResult`, `GpuConfig`, `McEvalConfig`, `McProgram`,
+    `McSamplingMethod`, `McCountStrategy`, `McResult`, `McDeviceResult`, `EvidenceForcing`,
+    `ForceabilityReason`, `WfsConfig`, `WfsResult`, `TruthValue`, plus WFS free functions.
+  - WFS entry points consolidated: 2 zero-caller functions removed, 1 gated behind
+    `#[cfg(test)]`.
+  - 71 visibility tightens (`pub` → `pub(crate)`) across `xlog-prob`, `xlog-solve`,
+    `xlog-logic`.
+  - Clone audit documented (deliberate clones annotated, no actionable reductions found).
+  - RIR visitor trait decision: 7 dispatch patterns warrant a trait, deferred to v0.7+.
+  - 35 compiler warnings fixed (private_interfaces, unused imports, dead code).
+
+  **Post-refactoring module sizes** (god modules → focused submodules):
+
+  | Module | Before | After (mod.rs) | Submodules |
+  |--------|--------|----------------|------------|
+  | `provider.rs` | 12,809 | 2,651 | 8 |
+  | `pyxlog/lib.rs` | 6,202 | 487 | 7 |
+  | `executor.rs` | 4,337 | 2,050 | 6 |
+  | `gpu_d4.rs` | 3,669 | 450 | 2 |
+  | `mc.rs` | 3,399 | 1,079 | 4 |
+  | **Total** | **30,416** | **6,717** | **27** |
+
+  Design docs: `docs/superpowers/specs/2026-03-10-wave{1-5}-*.md`.
+  Implementation plans: `docs/superpowers/plans/2026-03-10-wave{1-2}-*.md`,
+  `docs/superpowers/plans/2026-03-11-wave{3-5}-*.md`.
+
 ### Removed
 
 - **`device_row_count_u32()`** helper in MC hot loop — synchronous D2H scalar read, replaced
   by host-side capacity checks.
 - **`snapshot_store()` / `restore_store()`** in MC evaluator — replaced by `McSampleResetPlan`
   with `reset_for_mc_relations()`.
+- **Type-specialized provider functions** (`xlog-cuda`): `download_column_u32`,
+  `download_column_i32`, `download_column_i64`, `download_column_u64`, `download_column_f32`,
+  `download_column_f64`, `download_column_bool`, `download_column_u8`,
+  `create_buffer_from_u32_slice`, `create_buffer_from_i32_slice`,
+  `create_buffer_from_i64_slice`, `create_buffer_from_u64_slice`,
+  `create_buffer_from_f32_slice`, `create_buffer_from_f64_slice`,
+  `create_buffer_from_u8_slice`, and 11 type-specialized `filter_*` functions — all replaced
+  by `GpuScalar`-generic equivalents.
+- **2 WFS entry points** (`xlog-prob`): `evaluate_wfs_scc` and `evaluate_wfs_with_rules_config`
+  removed (zero callers). `evaluate_wfs_scc_with_config` gated behind `#[cfg(test)]`.
 
 ## [0.5.0] — 2026-03-08
 
