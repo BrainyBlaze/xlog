@@ -51,7 +51,10 @@ pub(crate) fn nll_loss_value(probability: f64) -> f64 {
 }
 
 /// Create a PyTorch tensor from a scalar f64 value.
-pub(crate) fn create_torch_tensor(py: pyo3::Python<'_>, value: f64) -> pyo3::PyResult<pyo3::PyObject> {
+pub(crate) fn create_torch_tensor(
+    py: pyo3::Python<'_>,
+    value: f64,
+) -> pyo3::PyResult<pyo3::PyObject> {
     let torch = py.import_bound("torch")?;
     let tensor = torch.call_method1("tensor", (value,))?;
     Ok(tensor.into())

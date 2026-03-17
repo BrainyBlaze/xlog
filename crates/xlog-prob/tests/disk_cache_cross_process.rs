@@ -26,10 +26,7 @@ use xlog_solve::{Clause, GpuCnf, Literal, SolveInstance};
 
 /// Convert a CnfEncoding (DIMACS-style 1-indexed signed literals) to a
 /// SolveInstance (0-indexed Literal structs) suitable for GpuCnf::from_host.
-fn cnf_to_solve_instance(
-    num_vars: u32,
-    clauses: &[Vec<i32>],
-) -> SolveInstance {
+fn cnf_to_solve_instance(num_vars: u32, clauses: &[Vec<i32>]) -> SolveInstance {
     let solve_clauses: Vec<Clause> = clauses
         .iter()
         .map(|clause| {

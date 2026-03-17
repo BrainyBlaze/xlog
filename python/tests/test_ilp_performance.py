@@ -46,8 +46,8 @@ def test_forward_and_memory_telemetry_smoke():
     assert timings["allocated_bytes_max"] >= timings["allocated_bytes_p95"]
 
 
-def test_host_transfer_stats_tracks_sparse_mask_download():
-    """Sparse mask setup should record dtoh bytes/calls for transfer accounting."""
+def test_host_transfer_stats_tracks_legacy_sparse_mask_download():
+    """Legacy sparse mask setup should record dtoh bytes/calls for transfer accounting."""
     prog = pyxlog.IlpProgramFactory.compile(
         """
         edge(1,2). edge(2,3). edge(3,4).

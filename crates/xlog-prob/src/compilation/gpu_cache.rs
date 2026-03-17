@@ -110,7 +110,10 @@ impl GpuCacheLookup {
     }
 
     pub fn into_handle(self) -> Result<GpuCircuitCacheHandle> {
-        let slot_host_vec: Vec<u32> = self.provider.device().inner()
+        let slot_host_vec: Vec<u32> = self
+            .provider
+            .device()
+            .inner()
             .dtoh_sync_copy(&self.slot)
             .map_err(|e| XlogError::Kernel(format!("dtoh slot index: {}", e)))?;
         Ok(GpuCircuitCacheHandle {
@@ -1538,7 +1541,9 @@ impl GpuCircuitCache {
         let slot_idx = handle.slot_index() as usize;
         debug_assert!(
             slot_idx < self.has_free_var_mask.len(),
-            "slot_index {} exceeds num_slots {}", slot_idx, self.has_free_var_mask.len()
+            "slot_index {} exceeds num_slots {}",
+            slot_idx,
+            self.has_free_var_mask.len()
         );
         if slot_idx < self.has_free_var_mask.len() {
             self.has_free_var_mask[slot_idx] = true;
@@ -1688,9 +1693,7 @@ impl GpuCircuitCache {
             let mut d_node_type = memory.alloc::<u8>(num_nodes as usize)?;
             device
                 .htod_sync_copy_into(&artifact.node_type[..num_nodes as usize], &mut d_node_type)
-                .map_err(|e| {
-                    XlogError::Kernel(format!("restore htod node_type failed: {}", e))
-                })?;
+                .map_err(|e| XlogError::Kernel(format!("restore htod node_type failed: {}", e)))?;
             unsafe {
                 store_u8.clone().launch(
                     LaunchConfig {
@@ -1708,7 +1711,9 @@ impl GpuCircuitCache {
                     ),
                 )
             }
-            .map_err(|e| XlogError::Kernel(format!("restore cache_store node_type failed: {}", e)))?;
+            .map_err(|e| {
+                XlogError::Kernel(format!("restore cache_store node_type failed: {}", e))
+            })?;
         }
 
         // -- Upload child_offsets (u32, num_nodes+1 elements) --
@@ -1784,9 +1789,7 @@ impl GpuCircuitCache {
             let mut d_lit = memory.alloc::<i32>(num_nodes as usize)?;
             device
                 .htod_sync_copy_into(&artifact.lit[..num_nodes as usize], &mut d_lit)
-                .map_err(|e| {
-                    XlogError::Kernel(format!("restore htod lit failed: {}", e))
-                })?;
+                .map_err(|e| XlogError::Kernel(format!("restore htod lit failed: {}", e)))?;
             unsafe {
                 store_i32.clone().launch(
                     LaunchConfig {
@@ -1845,10 +1848,7 @@ impl GpuCircuitCache {
                     &mut d_decision_child_false,
                 )
                 .map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "restore htod decision_child_false failed: {}",
-                        e
-                    ))
+                    XlogError::Kernel(format!("restore htod decision_child_false failed: {}", e))
                 })?;
             unsafe {
                 store_u32.clone().launch(
@@ -1882,10 +1882,7 @@ impl GpuCircuitCache {
                     &mut d_decision_child_true,
                 )
                 .map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "restore htod decision_child_true failed: {}",
-                        e
-                    ))
+                    XlogError::Kernel(format!("restore htod decision_child_true failed: {}", e))
                 })?;
             unsafe {
                 store_u32.clone().launch(
@@ -2032,7 +2029,10 @@ impl GpuCircuitCache {
                 )
             }
             .map_err(|e| {
-                XlogError::Kernel(format!("restore cache_store zero free_var_mask failed: {}", e))
+                XlogError::Kernel(format!(
+                    "restore cache_store zero free_var_mask failed: {}",
+                    e
+                ))
             })?;
         }
 
@@ -2050,15 +2050,9 @@ impl GpuCircuitCache {
                 if grid_mask != 0 {
                     let mut d_mask = memory.alloc::<u8>(actual_len)?;
                     device
-                        .htod_sync_copy_into(
-                            &artifact.free_var_mask[..actual_len],
-                            &mut d_mask,
-                        )
+                        .htod_sync_copy_into(&artifact.free_var_mask[..actual_len], &mut d_mask)
                         .map_err(|e| {
-                            XlogError::Kernel(format!(
-                                "restore htod free_var_mask failed: {}",
-                                e
-                            ))
+                            XlogError::Kernel(format!("restore htod free_var_mask failed: {}", e))
                         })?;
                     unsafe {
                         store_u8.clone().launch(
@@ -2144,17 +2138,21 @@ impl GpuCircuitCache {
 
         // Determine num_edges from child_offsets[num_nodes] - child_offsets[0].
         // We read child_offsets first, then derive num_edges from it.
-        let child_offsets_view = self.child_offsets.slice(slot_offset_start..(slot_offset_start + nn1));
+        let child_offsets_view = self
+            .child_offsets
+            .slice(slot_offset_start..(slot_offset_start + nn1));
         let child_offsets: Vec<u32> = device
             .dtoh_sync_copy(&child_offsets_view)
             .map_err(|e| XlogError::Kernel(format!("build_artifact dtoh child_offsets: {}", e)))?;
         let num_edges = if nn1 > 0 {
-            child_offsets[nn].checked_sub(child_offsets[0]).ok_or_else(|| {
-                XlogError::Compilation(
-                    "build_artifact_from_device: child_offsets[num_nodes] < child_offsets[0]"
-                        .to_string(),
-                )
-            })?
+            child_offsets[nn]
+                .checked_sub(child_offsets[0])
+                .ok_or_else(|| {
+                    XlogError::Compilation(
+                        "build_artifact_from_device: child_offsets[num_nodes] < child_offsets[0]"
+                            .to_string(),
+                    )
+                })?
         } else {
             0
         };
@@ -2163,16 +2161,20 @@ impl GpuCircuitCache {
         let slot_edge_start = slot * edge_stride;
         let ne = num_edges as usize;
         let child_indices: Vec<u32> = if ne > 0 {
-            let view = self.child_indices.slice(slot_edge_start..(slot_edge_start + ne));
-            device
-                .dtoh_sync_copy(&view)
-                .map_err(|e| XlogError::Kernel(format!("build_artifact dtoh child_indices: {}", e)))?
+            let view = self
+                .child_indices
+                .slice(slot_edge_start..(slot_edge_start + ne));
+            device.dtoh_sync_copy(&view).map_err(|e| {
+                XlogError::Kernel(format!("build_artifact dtoh child_indices: {}", e))
+            })?
         } else {
             Vec::new()
         };
 
         // node_type (u8)
-        let node_type_view = self.node_type.slice(slot_node_start..(slot_node_start + nn));
+        let node_type_view = self
+            .node_type
+            .slice(slot_node_start..(slot_node_start + nn));
         let node_type: Vec<u8> = device
             .dtoh_sync_copy(&node_type_view)
             .map_err(|e| XlogError::Kernel(format!("build_artifact dtoh node_type: {}", e)))?;
@@ -2184,36 +2186,41 @@ impl GpuCircuitCache {
             .map_err(|e| XlogError::Kernel(format!("build_artifact dtoh lit: {}", e)))?;
 
         // decision_var (u32)
-        let dv_view = self.decision_var.slice(slot_node_start..(slot_node_start + nn));
+        let dv_view = self
+            .decision_var
+            .slice(slot_node_start..(slot_node_start + nn));
         let decision_var: Vec<u32> = device
             .dtoh_sync_copy(&dv_view)
             .map_err(|e| XlogError::Kernel(format!("build_artifact dtoh decision_var: {}", e)))?;
 
         // decision_child_false (u32)
-        let dcf_view = self.decision_child_false.slice(slot_node_start..(slot_node_start + nn));
-        let decision_child_false: Vec<u32> = device
-            .dtoh_sync_copy(&dcf_view)
-            .map_err(|e| {
-                XlogError::Kernel(format!("build_artifact dtoh decision_child_false: {}", e))
-            })?;
+        let dcf_view = self
+            .decision_child_false
+            .slice(slot_node_start..(slot_node_start + nn));
+        let decision_child_false: Vec<u32> = device.dtoh_sync_copy(&dcf_view).map_err(|e| {
+            XlogError::Kernel(format!("build_artifact dtoh decision_child_false: {}", e))
+        })?;
 
         // decision_child_true (u32)
-        let dct_view = self.decision_child_true.slice(slot_node_start..(slot_node_start + nn));
-        let decision_child_true: Vec<u32> = device
-            .dtoh_sync_copy(&dct_view)
-            .map_err(|e| {
-                XlogError::Kernel(format!("build_artifact dtoh decision_child_true: {}", e))
-            })?;
+        let dct_view = self
+            .decision_child_true
+            .slice(slot_node_start..(slot_node_start + nn));
+        let decision_child_true: Vec<u32> = device.dtoh_sync_copy(&dct_view).map_err(|e| {
+            XlogError::Kernel(format!("build_artifact dtoh decision_child_true: {}", e))
+        })?;
 
         // level_nodes (u32)
-        let ln_view = self.level_nodes.slice(slot_node_start..(slot_node_start + nn));
+        let ln_view = self
+            .level_nodes
+            .slice(slot_node_start..(slot_node_start + nn));
         let level_nodes: Vec<u32> = device
             .dtoh_sync_copy(&ln_view)
             .map_err(|e| XlogError::Kernel(format!("build_artifact dtoh level_nodes: {}", e)))?;
 
         // level_offsets (u32)
-        let lo_view =
-            self.level_offsets.slice(slot_level_offset_start..(slot_level_offset_start + nl1));
+        let lo_view = self
+            .level_offsets
+            .slice(slot_level_offset_start..(slot_level_offset_start + nl1));
         let level_offsets: Vec<u32> = device
             .dtoh_sync_copy(&lo_view)
             .map_err(|e| XlogError::Kernel(format!("build_artifact dtoh level_offsets: {}", e)))?;
@@ -2222,13 +2229,12 @@ impl GpuCircuitCache {
         let has_free_var_mask = self.has_free_var_mask_for_slot(slot as u32);
         let mask_len = (max_var as usize) + 1;
         let free_var_mask: Vec<u8> = if mask_len > 0 {
-            let fvm_view =
-                self.free_var_mask.slice(slot_var_start..(slot_var_start + mask_len));
-            device
-                .dtoh_sync_copy(&fvm_view)
-                .map_err(|e| {
-                    XlogError::Kernel(format!("build_artifact dtoh free_var_mask: {}", e))
-                })?
+            let fvm_view = self
+                .free_var_mask
+                .slice(slot_var_start..(slot_var_start + mask_len));
+            device.dtoh_sync_copy(&fvm_view).map_err(|e| {
+                XlogError::Kernel(format!("build_artifact dtoh free_var_mask: {}", e))
+            })?
         } else {
             Vec::new()
         };

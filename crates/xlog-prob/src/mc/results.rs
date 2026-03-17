@@ -13,7 +13,9 @@ use xlog_logic::ast::{AggExpr, AggOp, Atom, BodyLiteral, Rule, Term};
 use xlog_logic::stratify::{build_dependency_graph, find_sccs_for_lowering};
 
 #[cfg(feature = "host-io")]
-use crate::provenance::{eval_arith_expr, eval_comparison, unify_atom, value_from_term, GroundAtom, Value};
+use crate::provenance::{
+    eval_arith_expr, eval_comparison, unify_atom, value_from_term, GroundAtom, Value,
+};
 
 #[cfg(feature = "host-io")]
 use super::{EvalStats, McProgram, Relation, SccKind, SccPlan};
@@ -22,7 +24,11 @@ use xlog_logic::ast::Program;
 
 #[cfg(feature = "host-io")]
 impl McProgram {
-    pub(super) fn apply_sample_facts(&self, store: &mut HashMap<String, Relation>, bits: &[u8]) -> Result<()> {
+    pub(super) fn apply_sample_facts(
+        &self,
+        store: &mut HashMap<String, Relation>,
+        bits: &[u8],
+    ) -> Result<()> {
         for pf in &self.prob_facts {
             if bits.get(pf.var_idx).copied().unwrap_or(0) == 0 {
                 continue;
@@ -900,7 +906,10 @@ pub(super) fn atom_holds(store: &HashMap<String, Relation>, atom: &GroundAtom) -
 }
 
 #[cfg(feature = "host-io")]
-pub(super) fn evidence_satisfied(store: &HashMap<String, Relation>, evidence: &[(GroundAtom, bool)]) -> bool {
+pub(super) fn evidence_satisfied(
+    store: &HashMap<String, Relation>,
+    evidence: &[(GroundAtom, bool)],
+) -> bool {
     for (atom, value) in evidence {
         let holds = atom_holds(store, atom);
         if holds != *value {

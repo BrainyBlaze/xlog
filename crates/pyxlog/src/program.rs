@@ -21,8 +21,8 @@ use xlog_prob::neural_fast_path::GpuWeightSlots;
 
 use super::neural_registry::NeuralPredicateInfo;
 use super::{
-    dlpack_capsule_from_tensor, types, CompiledProgram, EpochStats, EvalResult,
-    McDeviceEvalResult, TrainingHistory,
+    dlpack_capsule_from_tensor, types, CompiledProgram, EpochStats, EvalResult, McDeviceEvalResult,
+    TrainingHistory,
 };
 
 // =========================================================================
@@ -491,9 +491,7 @@ impl CompiledProgram {
                             .map_err(types::xlog_err)?;
                         self.pack_result_with_grads(_py, result)
                     } else {
-                        let result = _program
-                            .evaluate()
-                            .map_err(types::xlog_err)?;
+                        let result = _program.evaluate().map_err(types::xlog_err)?;
                         self.pack_result_probs(_py, result.query_probs)
                     }
                 }
@@ -520,9 +518,7 @@ impl CompiledProgram {
                 };
                 #[cfg(feature = "host-io")]
                 {
-                    let result = _program
-                        .evaluate(cfg)
-                        .map_err(types::xlog_err)?;
+                    let result = _program.evaluate(cfg).map_err(types::xlog_err)?;
                     self.pack_result_mc(_py, result)
                 }
                 #[cfg(not(feature = "host-io"))]
@@ -782,9 +778,7 @@ impl CompiledProgram {
     ///
     /// Uses `torch.nn.utils.clip_grad_norm_`.
     pub fn clip_grad_norms(&self, py: Python<'_>, max_norm: f64) -> PyResult<()> {
-        let clip_fn = py
-            .import("torch.nn.utils")?
-            .getattr("clip_grad_norm_")?;
+        let clip_fn = py.import("torch.nn.utils")?.getattr("clip_grad_norm_")?;
         for name in self.network_registry.names() {
             if let Some(handle) = self.network_registry.get(name) {
                 if let Some(ref module) = handle.module() {
@@ -801,21 +795,14 @@ impl CompiledProgram {
     /// If `network_name` is provided, steps only that network's scheduler.
     /// If `None` (default), steps all registered schedulers.
     #[pyo3(signature = (network_name=None))]
-    fn scheduler_step(
-        &self,
-        py: Python<'_>,
-        network_name: Option<&str>,
-    ) -> PyResult<()> {
+    fn scheduler_step(&self, py: Python<'_>, network_name: Option<&str>) -> PyResult<()> {
         match network_name {
             Some(name) => {
-                let handle = self
-                    .network_registry
-                    .get(name)
-                    .ok_or_else(|| {
-                        pyo3::exceptions::PyValueError::new_err(format!(
-                            "No network registered with name '{name}'"
-                        ))
-                    })?;
+                let handle = self.network_registry.get(name).ok_or_else(|| {
+                    pyo3::exceptions::PyValueError::new_err(format!(
+                        "No network registered with name '{name}'"
+                    ))
+                })?;
                 if let Some(ref scheduler) = handle.scheduler() {
                     scheduler.call_method0(py, "step")?;
                 }
@@ -840,21 +827,16 @@ impl CompiledProgram {
     /// # Arguments
     /// * `network_name` - Name used in register_network()
     fn get_lr(&self, py: Python<'_>, network_name: &str) -> PyResult<f64> {
-        let handle = self
-            .network_registry
-            .get(network_name)
-            .ok_or_else(|| {
-                pyo3::exceptions::PyValueError::new_err(format!(
-                    "No network registered with name '{network_name}'"
-                ))
-            })?;
-        let optimizer = handle
-            .optimizer()
-            .ok_or_else(|| {
-                pyo3::exceptions::PyValueError::new_err(format!(
-                    "Network '{network_name}' has no optimizer"
-                ))
-            })?;
+        let handle = self.network_registry.get(network_name).ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "No network registered with name '{network_name}'"
+            ))
+        })?;
+        let optimizer = handle.optimizer().ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "Network '{network_name}' has no optimizer"
+            ))
+        })?;
         let param_groups = optimizer.getattr(py, "param_groups")?;
         let group0 = param_groups.call_method1(py, "__getitem__", (0i32,))?;
         let lr = group0.call_method1(py, "__getitem__", ("lr",))?;
@@ -869,21 +851,16 @@ impl CompiledProgram {
     /// * `network_name` - Name used in register_network()
     /// * `lr` - New learning rate value
     fn set_lr(&self, py: Python<'_>, network_name: &str, lr: f64) -> PyResult<()> {
-        let handle = self
-            .network_registry
-            .get(network_name)
-            .ok_or_else(|| {
-                pyo3::exceptions::PyValueError::new_err(format!(
-                    "No network registered with name '{network_name}'"
-                ))
-            })?;
-        let optimizer = handle
-            .optimizer()
-            .ok_or_else(|| {
-                pyo3::exceptions::PyValueError::new_err(format!(
-                    "Network '{network_name}' has no optimizer"
-                ))
-            })?;
+        let handle = self.network_registry.get(network_name).ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "No network registered with name '{network_name}'"
+            ))
+        })?;
+        let optimizer = handle.optimizer().ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "Network '{network_name}' has no optimizer"
+            ))
+        })?;
         let param_groups = optimizer.getattr(py, "param_groups")?;
         let num_groups: usize = param_groups.call_method0(py, "__len__")?.extract(py)?;
         for i in 0..num_groups {
@@ -919,7 +896,14 @@ impl CompiledProgram {
         max_grad_norm: Option<f64>,
     ) -> PyResult<EpochStats> {
         let mut history = TrainingHistory::new();
-        self.train_epoch_internal(py, &queries, batch_size, usize::MAX, max_grad_norm, &mut history)
+        self.train_epoch_internal(
+            py,
+            &queries,
+            batch_size,
+            usize::MAX,
+            max_grad_norm,
+            &mut history,
+        )
     }
 
     /// Evaluate mean NLL loss over queries without updating parameters.
@@ -951,7 +935,14 @@ impl CompiledProgram {
         max_grad_norm: Option<f64>,
     ) -> PyResult<EpochStats> {
         let mut history = TrainingHistory::new();
-        self.train_epoch_tensor_internal(py, &queries, batch_size, usize::MAX, max_grad_norm, &mut history)
+        self.train_epoch_tensor_internal(
+            py,
+            &queries,
+            batch_size,
+            usize::MAX,
+            max_grad_norm,
+            &mut history,
+        )
     }
 
     /// Return warmup profiling data as a Python dict (or None if profiling disabled).

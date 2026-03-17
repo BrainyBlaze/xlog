@@ -266,11 +266,7 @@ fn test_stratify_with_learnable_rule() {
     "#;
     let program = parse_program(input).unwrap();
     let result = stratify(&program);
-    assert!(
-        result.is_ok(),
-        "Stratification failed: {:?}",
-        result.err()
-    );
+    assert!(result.is_ok(), "Stratification failed: {:?}", result.err());
     // Verify the learnable rule's head predicate appears in the strata
     let strata = result.unwrap();
     let all_preds: Vec<&str> = strata
@@ -303,17 +299,15 @@ fn test_compile_learnable_rule_produces_tmj() {
     "#;
     let mut compiler = Compiler::new();
     let result = compiler.compile(input);
-    assert!(
-        result.is_ok(),
-        "Compilation failed: {:?}",
-        result.err()
-    );
+    assert!(result.is_ok(), "Compilation failed: {:?}", result.err());
 
     // Verify we can find a TensorMaskedJoin in the plan
     let plan = result.unwrap();
-    let has_tmj = plan.rules_by_scc.iter().flatten().any(|rule| {
-        matches!(rule.body, xlog_ir::rir::RirNode::TensorMaskedJoin { .. })
-    });
+    let has_tmj = plan
+        .rules_by_scc
+        .iter()
+        .flatten()
+        .any(|rule| matches!(rule.body, xlog_ir::rir::RirNode::TensorMaskedJoin { .. }));
     assert!(has_tmj, "Expected TensorMaskedJoin in compiled plan");
 }
 
@@ -383,7 +377,11 @@ fn test_optimizer_handles_tmj() {
     let mut compiler = Compiler::new();
     let program = parse_program(input).unwrap();
     let result = compiler.compile_program(&program);
-    assert!(result.is_ok(), "Optimizer should handle TensorMaskedJoin: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Optimizer should handle TensorMaskedJoin: {:?}",
+        result.err()
+    );
 }
 
 // T2: Learnable head validation — unbound variable must fail
@@ -397,7 +395,11 @@ fn test_learnable_head_unbound_variable_fails() {
     let result = compiler.compile(input);
     assert!(result.is_err(), "Should reject head variable Q not in body");
     let err = result.unwrap_err().to_string();
-    assert!(err.contains("not found in body"), "Error should mention unbound var: {}", err);
+    assert!(
+        err.contains("not found in body"),
+        "Error should mention unbound var: {}",
+        err
+    );
 }
 
 // T2: Learnable head validation — constant in head must fail
@@ -411,7 +413,11 @@ fn test_learnable_head_constant_fails() {
     let result = compiler.compile(input);
     assert!(result.is_err(), "Should reject constant in learnable head");
     let err = result.unwrap_err().to_string();
-    assert!(err.contains("only variables"), "Error should mention variables-only: {}", err);
+    assert!(
+        err.contains("only variables"),
+        "Error should mention variables-only: {}",
+        err
+    );
 }
 
 // Note: Full execution tests require xlog-cuda and xlog-runtime

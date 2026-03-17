@@ -389,7 +389,11 @@ impl Executor {
     /// Execute a Distinct node
     ///
     /// Removes duplicate rows based on key columns.
-    pub(super) fn execute_distinct(&self, input: &CudaBuffer, key_cols: &[usize]) -> Result<CudaBuffer> {
+    pub(super) fn execute_distinct(
+        &self,
+        input: &CudaBuffer,
+        key_cols: &[usize],
+    ) -> Result<CudaBuffer> {
         self.provider.dedup(input, key_cols)
     }
 

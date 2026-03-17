@@ -95,7 +95,11 @@ fn build_test_circuit() -> Xgcf {
 /// Download the first `n` elements from a device slice.
 /// The device slice may be larger (e.g., multi-slot cache layout), so we download
 /// the full buffer and truncate to the requested length.
-fn download_f64(provider: &CudaKernelProvider, src: &xlog_cuda::memory::TrackedCudaSlice<f64>, n: usize) -> Vec<f64> {
+fn download_f64(
+    provider: &CudaKernelProvider,
+    src: &xlog_cuda::memory::TrackedCudaSlice<f64>,
+    n: usize,
+) -> Vec<f64> {
     let device_len = src.len();
     let mut host = vec![0.0f64; device_len];
     provider
@@ -147,7 +151,9 @@ fn fused_backward_matches_per_level() {
         .expect("store slot 0");
 
     // Run per-level backward
-    cache.eval_grads_inplace(&handle0).expect("per-level backward");
+    cache
+        .eval_grads_inplace(&handle0)
+        .expect("per-level backward");
     provider.device().inner().synchronize().unwrap();
 
     // Download per-level results
@@ -196,5 +202,8 @@ fn fused_backward_matches_per_level() {
 
     // Sanity: at least some gradients should be non-zero
     let any_nonzero = gt_fused.iter().chain(gf_fused.iter()).any(|&v| v != 0.0);
-    assert!(any_nonzero, "All gradients are zero — circuit evaluation likely failed");
+    assert!(
+        any_nonzero,
+        "All gradients are zero — circuit evaluation likely failed"
+    );
 }

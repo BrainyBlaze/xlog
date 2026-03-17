@@ -21,26 +21,24 @@ pub use evidence::{EvidenceForcing, ForceabilityReason};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use cudarc::driver::{DevicePtr, LaunchAsync, LaunchConfig};
 #[cfg(feature = "host-io")]
 use cudarc::driver::DeviceSlice;
+use cudarc::driver::{DevicePtr, LaunchAsync, LaunchConfig};
 use xlog_core::{MemoryBudget, RelId, Result, Schema, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::provider::{mc_eval_kernels, MC_EVAL_MODULE};
 use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager};
 #[cfg(feature = "host-io")]
 use xlog_logic::ast::{BodyLiteral, Rule};
-use xlog_logic::ast::{
-    Evidence, ProbQuery, Program,
-};
+use xlog_logic::ast::{Evidence, ProbQuery, Program};
 use xlog_logic::compile::Compiler;
 use xlog_logic::stratify::analyze_stratification;
 use xlog_runtime::Executor;
 
 use crate::exact::GpuConfig;
-use crate::provenance::{atom_key_from_ground_atom, GroundAtom};
 #[cfg(feature = "host-io")]
 use crate::provenance::Value;
+use crate::provenance::{atom_key_from_ground_atom, GroundAtom};
 
 /// Sampling method for Monte Carlo inference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -395,17 +393,29 @@ impl McProgram {
                     .device()
                     .inner()
                     .htod_sync_copy_into(&forcing.force_mask, &mut d_force_mask)
-                    .map_err(|e| XlogError::Kernel(format!("Failed to upload force_mask: {}", e)))?;
+                    .map_err(|e| {
+                        XlogError::Kernel(format!("Failed to upload force_mask: {}", e))
+                    })?;
                 provider
                     .device()
                     .inner()
                     .htod_sync_copy_into(&forcing.forced_value, &mut d_forced_value)
-                    .map_err(|e| XlogError::Kernel(format!("Failed to upload forced_value: {}", e)))?;
+                    .map_err(|e| {
+                        XlogError::Kernel(format!("Failed to upload forced_value: {}", e))
+                    })?;
             } else {
-                provider.device().inner().memset_zeros(&mut d_force_mask)
+                provider
+                    .device()
+                    .inner()
+                    .memset_zeros(&mut d_force_mask)
                     .map_err(|e| XlogError::Kernel(format!("Failed to zero force_mask: {}", e)))?;
-                provider.device().inner().memset_zeros(&mut d_forced_value)
-                    .map_err(|e| XlogError::Kernel(format!("Failed to zero forced_value: {}", e)))?;
+                provider
+                    .device()
+                    .inner()
+                    .memset_zeros(&mut d_forced_value)
+                    .map_err(|e| {
+                        XlogError::Kernel(format!("Failed to zero forced_value: {}", e))
+                    })?;
             }
 
             let samples_device = provider.sample_bernoulli_matrix_device(
@@ -630,8 +640,12 @@ impl McProgram {
         let mut query_ptrs_buf: Vec<u64> = vec![0u64; prob_query_count];
         let mut evidence_ptrs_buf: Vec<u64> = vec![0u64; evidence_count];
 
-        let stats =
-            self.evaluate_gpu_counts_with(&cfg, &forcing, method, provider.clone(), |executor, plan, count| {
+        let stats = self.evaluate_gpu_counts_with(
+            &cfg,
+            &forcing,
+            method,
+            provider.clone(),
+            |executor, plan, count| {
                 let zero_ptr = *d_zero_count.device_ptr() as u64;
 
                 query_ptrs_buf.clear();
@@ -712,7 +726,8 @@ impl McProgram {
                         })?;
                 }
                 Ok(())
-            })?;
+            },
+        )?;
 
         provider.device().synchronize()?;
 
@@ -844,8 +859,7 @@ impl McProgram {
         // Build the targeted reset plan: preserve pure deterministic base
         // relations, clear everything else, and snapshot base facts for
         // predicates that are both deterministic and dynamic.
-        let reset_plan =
-            buffers::build_sample_reset_plan(&gpu_plan, self, &provider, &executor)?;
+        let reset_plan = buffers::build_sample_reset_plan(&gpu_plan, self, &provider, &executor)?;
 
         let num_vars = self.bernoulli_probs.len();
 
@@ -864,13 +878,22 @@ impl McProgram {
                 .htod_sync_copy_into(&forcing.forced_value, &mut d_forced_value)
                 .map_err(|e| XlogError::Kernel(format!("Failed to upload forced_value: {}", e)))?;
         } else {
-            provider.device().inner().memset_zeros(&mut d_force_mask)
+            provider
+                .device()
+                .inner()
+                .memset_zeros(&mut d_force_mask)
                 .map_err(|e| XlogError::Kernel(format!("Failed to zero force_mask: {}", e)))?;
-            provider.device().inner().memset_zeros(&mut d_forced_value)
+            provider
+                .device()
+                .inner()
+                .memset_zeros(&mut d_forced_value)
                 .map_err(|e| XlogError::Kernel(format!("Failed to zero forced_value: {}", e)))?;
         }
 
-        let mc_profile = std::env::var("XLOG_MC_PROFILE").ok().map(|v| v == "1").unwrap_or(false);
+        let mc_profile = std::env::var("XLOG_MC_PROFILE")
+            .ok()
+            .map(|v| v == "1")
+            .unwrap_or(false);
         let mut timing = McTimingBreakdown::default();
 
         let t0 = std::time::Instant::now();
@@ -1074,6 +1097,4 @@ impl McProgram {
         ));
         CudaKernelProvider::new(device, memory)
     }
-
 }
-

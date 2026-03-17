@@ -157,7 +157,10 @@ fn test_upload_download_integrity(ctx: &TestContext) -> TestResult {
     let schema64 = Schema::new(vec![("val".to_string(), ScalarType::U64)]);
     let data64: Vec<u64> = (0..5000).map(|i| i as u64 * 1_000_000_000).collect();
 
-    let buffer64 = match ctx.provider.create_buffer_from_slice::<u64>(&data64, schema64) {
+    let buffer64 = match ctx
+        .provider
+        .create_buffer_from_slice::<u64>(&data64, schema64)
+    {
         Ok(buf) => buf,
         Err(e) => {
             return TestResult::error(

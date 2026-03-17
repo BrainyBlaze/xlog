@@ -99,6 +99,40 @@ edge_b = torch.tensor([2, 3, 4], device="cuda", dtype=torch.int32)
 result = program.evaluate(dlpack_inputs={"edge": [edge_a, edge_b]})
 ```
 
+#### Persistent Named Relations (DLPack)
+
+For repeated evaluation with long-lived GPU relations, create a persistent session instead of
+re-supplying `dlpack_inputs` on every call.
+
+```python
+import pyxlog
+import torch
+
+program = pyxlog.LogicProgram.compile("""
+    pred edge(i32, i32).
+    pred reach(i32, i32).
+    reach(X, Y) :- edge(X, Y).
+    ?- reach(X, Y).
+""")
+
+session = program.session()
+
+edge_a = torch.tensor([1, 2, 3], device="cuda", dtype=torch.int32)
+edge_b = torch.tensor([2, 3, 4], device="cuda", dtype=torch.int32)
+
+session.put_relation("edge", [edge_a, edge_b])   # register or replace
+result = session.evaluate()                      # reuse stored relations
+exported = session.export_relation("edge")       # DLPack columns
+
+session.remove_relation("edge")
+session.clear_relations()
+```
+
+The persistent session path is additive:
+
+- `evaluate(dlpack_inputs=...)` remains the stateless one-shot API
+- `session()` exposes a mutable named relation store with schema-checked DLPack import/export
+
 ### Program (Probabilistic)
 
 ```python
@@ -326,6 +360,75 @@ promotion.novel_count     # int | None
 promotion.novel_rate      # float | None
 promotion.committed_source # str | None
 ```
+
+### Device Query APIs
+
+For GPU-native ILP workflows, `CompiledIlpProgram` now exposes device-resident query helpers in
+addition to the existing host-returning helpers:
+
+```python
+import torch
+
+prog = pyxlog.IlpProgramFactory.compile(source, device=0, memory_mb=512)
+
+# Device membership: bool CUDA tensor, one row per queried fact.
+mask = torch.from_dlpack(
+    prog.batch_fact_membership_device("edge", [[1, 2], [9, 9], [2, 3]])
+)
+assert mask.device.type == "cuda"
+assert mask.dtype == torch.bool
+
+# Device tagged credit: CSR-style CUDA outputs.
+credit = prog.batch_tagged_credit_device("reach", [[1, 3], [2, 4]])
+row_offsets = torch.from_dlpack(credit.fact_row_offsets)   # int32 CUDA tensor
+entry_indices = torch.from_dlpack(credit.entry_indices)    # int32 CUDA tensor
+entry_i = torch.from_dlpack(credit.entry_i)                # int32 CUDA tensor
+entry_j = torch.from_dlpack(credit.entry_j)                # int32 CUDA tensor
+entry_k = torch.from_dlpack(credit.entry_k)                # int32 CUDA tensor
+```
+
+Contract notes:
+
+- `batch_fact_membership()` and `batch_tagged_credit()` remain available for host-materialized Python outputs
+- `batch_fact_membership_device()` returns a DLPack bool tensor on CUDA
+- `batch_tagged_credit_device()` returns CSR-style device outputs:
+  `fact_row_offsets`, `entry_indices`, `entry_i`, `entry_j`, `entry_k`
+- The device query path avoids semantic-loop DTOH transfers; inspect
+  `host_transfer_stats()` / `reset_host_transfer_stats()` when enforcing that contract in tests
+- Unsigned metadata/count tensors are exported as DLPack `int32` for broad framework compatibility
+
+### Sparse Mask APIs
+
+`CompiledIlpProgram` exposes two sparse mask setters:
+
+- `set_rule_mask_sparse(name, candidate_ids, soft_probs, budget, allow_recursive=False)`
+  is the legacy compatibility path. Rust receives the full candidate soft-probability vector and
+  ranks it internally.
+- `set_rule_mask_sparse_selected(name, selected_candidate_ids, selected_soft_probs, allow_recursive=False)`
+  is the preferred hot-loop path. Python/Torch performs ranking on CUDA, then Rust consumes only
+  the selected subset and preserves that order as the sparse active-rule list.
+
+The selected-candidate path is the one to prefer when enforcing zero provider-side DTOH during
+mask setup.
+
+### GPU-Native Contract
+
+For Python consumers that need an auditable GPU-native ILP hot loop, the intended contract is:
+
+- Zero provider-tracked semantic-loop DTOH:
+  `set_rule_mask_sparse_selected(...)`,
+  `batch_fact_membership_device(...)`,
+  `batch_tagged_credit_device(...)`,
+  and `compute_ilp_loss_grad_gpu(...)`
+- Metadata/control-plane reads may still occur behind public runtime/provider helpers such as
+  cached row-count access; these are not relation-column materializations
+- Compatibility paths that are not suitable for a strict GPU-native hot loop:
+  `set_rule_mask_sparse(...)`,
+  `batch_fact_membership(...)`,
+  `batch_tagged_credit(...)`,
+  and any host-output API gated behind `host-io`
+- Use `host_transfer_stats()` / `reset_host_transfer_stats()` to audit the provider-tracked
+  transfer behavior of the chosen path
 
 ---
 

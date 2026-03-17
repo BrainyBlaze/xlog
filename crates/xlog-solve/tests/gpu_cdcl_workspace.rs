@@ -105,10 +105,12 @@ fn test_workspace_capacity_overflow() {
 
     let branch_limit = solver_alloc_u32(&provider, 1);
 
-    let result =
-        solver.solve_expect_unsat_with_branch_limit_ws(&mut ws, &cnf, &branch_limit);
+    let result = solver.solve_expect_unsat_with_branch_limit_ws(&mut ws, &cnf, &branch_limit);
 
-    assert!(result.is_err(), "should fail when CNF exceeds workspace capacity");
+    assert!(
+        result.is_err(),
+        "should fail when CNF exceeds workspace capacity"
+    );
     let err_msg = format!("{}", result.unwrap_err());
     assert!(
         err_msg.contains("exceeds workspace"),
@@ -199,7 +201,10 @@ fn test_workspace_gated_ws_compile_not_needed() {
 }
 
 /// Helper: upload a u32 scalar to the GPU.
-fn solver_alloc_u32(provider: &Arc<CudaKernelProvider>, value: u32) -> xlog_cuda::memory::TrackedCudaSlice<u32> {
+fn solver_alloc_u32(
+    provider: &Arc<CudaKernelProvider>,
+    value: u32,
+) -> xlog_cuda::memory::TrackedCudaSlice<u32> {
     let memory = provider.memory();
     let mut slot = memory.alloc::<u32>(1).expect("alloc u32 scalar");
     provider

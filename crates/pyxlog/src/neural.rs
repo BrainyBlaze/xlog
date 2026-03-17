@@ -17,8 +17,8 @@ use std::collections::HashMap as StdHashMap;
 
 use super::neural_registry::NeuralPredicateInfo;
 use super::{
-    dlpack_capsule_from_tensor, dlpack_from_py, types, CachedCircuit, CompiledProgram,
-    EpochStats, InputSource, NeuralGroup, QuerySignature, TrainingHistory,
+    dlpack_capsule_from_tensor, dlpack_from_py, types, CachedCircuit, CompiledProgram, EpochStats,
+    InputSource, NeuralGroup, QuerySignature, TrainingHistory,
 };
 
 /// Build the standard 1-column schema for probability values.
@@ -161,10 +161,13 @@ impl CompiledProgram {
             let float64 = torch.getattr("float64")?;
             let float16 = torch.getattr("float16")?;
             let bfloat16 = torch.getattr("bfloat16")?;
-            if !dtype.eq(&float32)? && !dtype.eq(&float64)?
-                && !dtype.eq(&float16)? && !dtype.eq(&bfloat16)? {
+            if !dtype.eq(&float32)?
+                && !dtype.eq(&float64)?
+                && !dtype.eq(&float16)?
+                && !dtype.eq(&bfloat16)?
+            {
                 return Err(PyValueError::new_err(
-                    "nn.Embedding weight must have float dtype"
+                    "nn.Embedding weight must have float dtype",
                 ));
             }
 
@@ -174,13 +177,13 @@ impl CompiledProgram {
             let tensor_cls = torch.getattr("Tensor")?;
             if !obj.is_instance(&tensor_cls)? {
                 return Err(PyValueError::new_err(
-                    "module_or_tensor must be nn.Embedding or torch.Tensor"
+                    "module_or_tensor must be nn.Embedding or torch.Tensor",
                 ));
             }
 
             if trainable {
                 return Err(PyValueError::new_err(
-                    "trainable=True requires nn.Embedding; raw torch.Tensor is always frozen"
+                    "trainable=True requires nn.Embedding; raw torch.Tensor is always frozen",
                 ));
             }
 
@@ -203,10 +206,13 @@ impl CompiledProgram {
             let float64 = torch.getattr("float64")?;
             let float16 = torch.getattr("float16")?;
             let bfloat16 = torch.getattr("bfloat16")?;
-            if !dtype.eq(&float32)? && !dtype.eq(&float64)?
-                && !dtype.eq(&float16)? && !dtype.eq(&bfloat16)? {
+            if !dtype.eq(&float32)?
+                && !dtype.eq(&float64)?
+                && !dtype.eq(&float16)?
+                && !dtype.eq(&bfloat16)?
+            {
                 return Err(PyValueError::new_err(
-                    "embedding tensor must have float dtype"
+                    "embedding tensor must have float dtype",
                 ));
             }
 
@@ -229,12 +235,7 @@ impl CompiledProgram {
     /// For frozen torch.Tensor: tensor has requires_grad=False.
     ///
     /// This is the only gradient-carrying embedding API in v0.5.
-    fn forward_embedding(
-        &self,
-        py: Python<'_>,
-        name: String,
-        ids: Vec<i64>,
-    ) -> PyResult<PyObject> {
+    fn forward_embedding(&self, py: Python<'_>, name: String, ids: Vec<i64>) -> PyResult<PyObject> {
         let handle = self.network_registry.get_embedding(&name).ok_or_else(|| {
             PyValueError::new_err(format!(
                 "Embedding '{}' not registered. Did you call register_embedding()?",
@@ -242,9 +243,9 @@ impl CompiledProgram {
             ))
         })?;
 
-        let module = handle.module().ok_or_else(|| {
-            PyValueError::new_err(format!("Embedding '{}' has no module", name))
-        })?;
+        let module = handle
+            .module()
+            .ok_or_else(|| PyValueError::new_err(format!("Embedding '{}' has no module", name)))?;
 
         let torch = py.import_bound("torch")?;
         let kwargs = PyDict::new_bound(py);
@@ -261,20 +262,12 @@ impl CompiledProgram {
 
         if handle.trainable {
             // nn.Embedding: call module(ids_tensor)
-            let ids_tensor = torch.call_method(
-                "tensor",
-                (ids,),
-                Some(&kwargs),
-            )?;
+            let ids_tensor = torch.call_method("tensor", (ids,), Some(&kwargs))?;
             let result = module.call_method1(py, "__call__", (ids_tensor,))?;
             Ok(result)
         } else {
             // Frozen tensor: index directly
-            let ids_tensor = torch.call_method(
-                "tensor",
-                (ids,),
-                Some(&kwargs),
-            )?;
+            let ids_tensor = torch.call_method("tensor", (ids,), Some(&kwargs))?;
             let result = module.call_method1(py, "__getitem__", (ids_tensor,))?;
             Ok(result)
         }
@@ -443,9 +436,7 @@ impl CompiledProgram {
 
     /// Get the size (number of samples) of the active tensor source.
     fn active_tensor_source_size(&self) -> PyResult<usize> {
-        self.tensor_sources
-            .active_size()
-            .map_err(types::val_err)
+        self.tensor_sources.active_size().map_err(types::val_err)
     }
 
     /// Get names of all tensor sources.
@@ -1420,8 +1411,11 @@ impl CompiledProgram {
         let schema_f64 = prob_schema(ScalarType::F64);
         let batch_loss_tensor: PyObject = match batched_loss_dev {
             Ok(loss_dev) => {
-                let mut d_num_rows =
-                    self.output_provider.memory().alloc::<u32>(1).map_err(|e| types::gpu_err("GPU allocation failed", e))?;
+                let mut d_num_rows = self
+                    .output_provider
+                    .memory()
+                    .alloc::<u32>(1)
+                    .map_err(|e| types::gpu_err("GPU allocation failed", e))?;
                 self.output_provider
                     .device()
                     .inner()
@@ -1461,8 +1455,11 @@ impl CompiledProgram {
                         })
                         .map_err(|e| types::gpu_err("Neural fast-path error", e))?;
 
-                    let mut d_num_rows =
-                        self.output_provider.memory().alloc::<u32>(1).map_err(|e| types::gpu_err("GPU allocation failed", e))?;
+                    let mut d_num_rows = self
+                        .output_provider
+                        .memory()
+                        .alloc::<u32>(1)
+                        .map_err(|e| types::gpu_err("GPU allocation failed", e))?;
                     self.output_provider
                         .device()
                         .inner()
@@ -1981,7 +1978,10 @@ impl CompiledProgram {
         signature: &QuerySignature,
         query_pred: &str,
         query_arity: usize,
-    ) -> PyResult<(CachedCircuit, Option<xlog_prob::compilation::CircuitCompileProfile>)> {
+    ) -> PyResult<(
+        CachedCircuit,
+        Option<xlog_prob::compilation::CircuitCompileProfile>,
+    )> {
         #[cfg(not(feature = "host-io"))]
         {
             let _ = (signature, query_pred, query_arity);
@@ -2031,11 +2031,14 @@ impl CompiledProgram {
             let slots = GpuWeightSlots::upload(self.output_provider.as_ref(), &slot_groups)
                 .map_err(|e| types::gpu_err("Slot map upload error", e))?;
 
-            Ok((CachedCircuit {
-                program,
-                slots,
-                target_domain,
-            }, compile_profile))
+            Ok((
+                CachedCircuit {
+                    program,
+                    slots,
+                    target_domain,
+                },
+                compile_profile,
+            ))
         }
     }
     /// Get the label index for a given label string from declared labels.

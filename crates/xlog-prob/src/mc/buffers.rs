@@ -16,8 +16,7 @@ use xlog_runtime::Executor;
 use crate::provenance::{atom_key_from_ground_atom, validate_prob, GroundAtom, Value};
 
 use super::{
-    AdDecisionDevice, AdSpec, AdTableDevice, GpuMcPlan, McProgram,
-    ProbFactSpec, ProbTableDevice,
+    AdDecisionDevice, AdSpec, AdTableDevice, GpuMcPlan, McProgram, ProbFactSpec, ProbTableDevice,
 };
 
 /// Plan for per-sample executor reset.
@@ -155,10 +154,7 @@ pub(super) fn build_sample_reset_plan(
                 // Has both deterministic and dynamic facts: snapshot the
                 // deterministic base buffer so we can re-load it each sample.
                 let buf = executor.store().get(name).ok_or_else(|| {
-                    XlogError::Execution(format!(
-                        "Missing relation {} for reload snapshot",
-                        name
-                    ))
+                    XlogError::Execution(format!("Missing relation {} for reload snapshot", name))
                 })?;
                 let cloned = if buf.is_empty() {
                     provider.create_empty_buffer(schema.clone())?
@@ -546,7 +542,10 @@ pub(super) fn build_buffer_from_rows(
     provider.create_buffer_from_slices(&slices, schema.clone())
 }
 
-pub(super) fn augment_schemas_for_program(program: &Program, schemas: &mut HashMap<String, Schema>) {
+pub(super) fn augment_schemas_for_program(
+    program: &Program,
+    schemas: &mut HashMap<String, Schema>,
+) {
     for fact in program.facts() {
         ensure_schema_for_atom(&fact.head, schemas);
     }
@@ -746,7 +745,10 @@ fn scalar_type_from_value(value: &Value) -> ScalarType {
     }
 }
 
-pub(super) fn extend_prob_facts_with_coin(program: &Program, prob_facts: &mut Vec<ProbFact>) -> Result<()> {
+pub(super) fn extend_prob_facts_with_coin(
+    program: &Program,
+    prob_facts: &mut Vec<ProbFact>,
+) -> Result<()> {
     let mut seen: HashSet<GroundAtom> = HashSet::new();
     for pf in prob_facts.iter() {
         seen.insert(atom_key_from_ground_atom(&pf.atom)?);

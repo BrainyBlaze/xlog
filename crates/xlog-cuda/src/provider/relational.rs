@@ -6,13 +6,10 @@ use cudarc::driver::{DevicePtr, DeviceRepr, DeviceSlice, LaunchAsync, LaunchConf
 use xlog_core::{Result, ScalarType, Schema, XlogError};
 
 use super::{
-    dedup_kernels, filter_kernels, ilp_kernels, join_kernels,
-    pack_kernels, scan_kernels, set_ops_kernels, sort_kernels,
-    HashTableU64, JoinHashTableV2, JoinIndexV2, JoinType, PackedKeyData,
-    RadixSortScratch,
-    DEFAULT_JOIN_MAX_OUTPUT,
-    DEDUP_MODULE, FILTER_MODULE, ILP_MODULE, JOIN_MODULE,
-    PACK_MODULE, SCAN_MODULE, SET_OPS_MODULE, SORT_MODULE,
+    dedup_kernels, filter_kernels, ilp_kernels, join_kernels, pack_kernels, scan_kernels,
+    set_ops_kernels, sort_kernels, HashTableU64, JoinHashTableV2, JoinIndexV2, JoinType,
+    PackedKeyData, RadixSortScratch, DEDUP_MODULE, DEFAULT_JOIN_MAX_OUTPUT, FILTER_MODULE,
+    ILP_MODULE, JOIN_MODULE, PACK_MODULE, SCAN_MODULE, SET_OPS_MODULE, SORT_MODULE,
 };
 use crate::memory::TrackedCudaSlice;
 use crate::CudaBuffer;
@@ -1748,7 +1745,9 @@ impl super::CudaKernelProvider {
         self.device
             .inner()
             .htod_sync_copy_into(&[0u32], &mut d_count)
-            .map_err(|e| XlogError::Kernel(format!("count_mask_device: zero init failed: {}", e)))?;
+            .map_err(|e| {
+                XlogError::Kernel(format!("count_mask_device: zero init failed: {}", e))
+            })?;
 
         if n == 0 {
             return Ok(d_count);
@@ -1760,9 +1759,7 @@ impl super::CudaKernelProvider {
 
         let count_fn = device
             .get_func(SCAN_MODULE, scan_kernels::COUNT_MASK)
-            .ok_or_else(|| {
-                XlogError::Kernel("count_mask kernel not found".to_string())
-            })?;
+            .ok_or_else(|| XlogError::Kernel("count_mask kernel not found".to_string()))?;
 
         // SAFETY: count_mask(mask, n, count)
         unsafe {
@@ -1815,9 +1812,7 @@ impl super::CudaKernelProvider {
 
         let count_fn = device
             .get_func(SCAN_MODULE, scan_kernels::COUNT_MASK)
-            .ok_or_else(|| {
-                XlogError::Kernel("count_mask kernel not found".to_string())
-            })?;
+            .ok_or_else(|| XlogError::Kernel("count_mask kernel not found".to_string()))?;
 
         // Get a mutable sub-slice pointing at task_counts[slot_idx..slot_idx+1].
         let mut slot = task_counts.slice_mut(slot_idx..slot_idx + 1);
@@ -3131,15 +3126,12 @@ impl super::CudaKernelProvider {
         // Edge case: empty build → no matches possible, return zeroed mask
         if num_build == 0 {
             let mut d_mask = self.memory.alloc::<u8>(num_probe)?;
-            self.device
-                .inner()
-                .memset_zeros(&mut d_mask)
-                .map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "Failed to zero membership mask for empty build: {}",
-                        e
-                    ))
-                })?;
+            self.device.inner().memset_zeros(&mut d_mask).map_err(|e| {
+                XlogError::Kernel(format!(
+                    "Failed to zero membership mask for empty build: {}",
+                    e
+                ))
+            })?;
             return Ok(d_mask);
         }
 
@@ -3253,12 +3245,9 @@ impl super::CudaKernelProvider {
         self.device
             .inner()
             .dtoh_sync_copy_into(&d_has_match, &mut host_mask)
-            .map_err(|e| {
-                XlogError::Kernel(format!("Failed to download membership mask: {}", e))
-            })?;
+            .map_err(|e| XlogError::Kernel(format!("Failed to download membership mask: {}", e)))?;
         Ok(host_mask.into_iter().map(|b| b != 0).collect())
     }
-
 
     fn hash_join_semi_indexed(
         &self,
@@ -4302,8 +4291,11 @@ impl super::CudaKernelProvider {
         self.buffer_from_columns(result_columns, num_rows, combined_schema)
     }
 
-    /// Clone a buffer (deep copy) on-device
-    pub(super) fn clone_buffer(&self, buffer: &CudaBuffer) -> Result<CudaBuffer> {
+    /// Clone a buffer (deep copy) on-device.
+    ///
+    /// This is primarily used when a caller needs owned buffer state for a
+    /// separate runtime object while preserving the original relation store.
+    pub fn clone_buffer(&self, buffer: &CudaBuffer) -> Result<CudaBuffer> {
         let mut result_columns = Vec::with_capacity(buffer.arity());
         let device = self.device.inner();
 
@@ -4416,9 +4408,7 @@ impl super::CudaKernelProvider {
             .device()
             .inner()
             .get_func(ILP_MODULE, ilp_kernels::EXTRACT_NONZERO_INDICES)
-            .ok_or_else(|| {
-                XlogError::Kernel("extract_nonzero_indices kernel not found".into())
-            })?;
+            .ok_or_else(|| XlogError::Kernel("extract_nonzero_indices kernel not found".into()))?;
 
         let hard_bytes = total * std::mem::size_of::<f32>();
         let soft_bytes = total * std::mem::size_of::<f32>();
@@ -4435,21 +4425,12 @@ impl super::CudaKernelProvider {
                         shared_mem_bytes: 0,
                     },
                     (
-                        &hard_view,
-                        &soft_view,
-                        n as u32,
-                        &mut out_i,
-                        &mut out_j,
-                        &mut out_k,
-                        &mut out_p,
-                        &mut count,
+                        &hard_view, &soft_view, n as u32, &mut out_i, &mut out_j, &mut out_k,
+                        &mut out_p, &mut count,
                     ),
                 )
                 .map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "Failed to launch extract_nonzero_indices: {}",
-                        e
-                    ))
+                    XlogError::Kernel(format!("Failed to launch extract_nonzero_indices: {}", e))
                 })?;
         }
 
@@ -4502,9 +4483,7 @@ impl super::CudaKernelProvider {
         let mut indices: Vec<(f32, u32, u32, u32)> = (0..active_count)
             .map(|idx| (p_host[idx], i_host[idx], j_host[idx], k_host[idx]))
             .collect();
-        indices.sort_by(|a, b| {
-            b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
-        });
+        indices.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         indices.truncate(max_active);
 
         Ok(indices.into_iter().map(|(_, i, j, k)| (i, j, k)).collect())

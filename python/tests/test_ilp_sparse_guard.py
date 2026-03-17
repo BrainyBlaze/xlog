@@ -24,12 +24,12 @@ POS = [("reach", [1, 3]), ("reach", [2, 4])]
 NEG = [("reach", [1, 1])]
 
 
-def test_sparse_backend_does_not_call_set_rule_mask():
-    """Sparse backend apply_mask must use set_rule_mask_sparse, never set_rule_mask.
+def test_sparse_backend_prefers_selected_sparse_api():
+    """Sparse backend apply_mask must use the selected sparse API, never dense.
 
     Two-pronged verification:
     1. Static: inspect SparseMaskBackend.apply_mask source for bare
-       set_rule_mask( calls (i.e. not set_rule_mask_sparse).
+       set_rule_mask( calls.
     2. Runtime: run a short sparse training to confirm the code path
        executes without error.
     """
@@ -41,13 +41,17 @@ def test_sparse_backend_does_not_call_set_rule_mask():
     bare_calls = re.findall(r'\.set_rule_mask\b(?!_sparse)', src)
     assert len(bare_calls) == 0, (
         f"SparseMaskBackend.apply_mask contains {len(bare_calls)} call(s) "
-        f"to set_rule_mask (dense API); expected only set_rule_mask_sparse"
+        f"to set_rule_mask (dense API); expected only sparse APIs"
     )
 
-    # Verify set_rule_mask_sparse IS present
-    sparse_calls = re.findall(r'\.set_rule_mask_sparse\b', src)
-    assert len(sparse_calls) > 0, (
-        "SparseMaskBackend.apply_mask does not call set_rule_mask_sparse"
+    legacy_sparse_calls = re.findall(r'\.set_rule_mask_sparse\b(?!_selected)', src)
+    assert len(legacy_sparse_calls) == 0, (
+        "SparseMaskBackend.apply_mask still calls legacy set_rule_mask_sparse"
+    )
+
+    selected_sparse_calls = re.findall(r'\.set_rule_mask_sparse_selected\b', src)
+    assert len(selected_sparse_calls) > 0, (
+        "SparseMaskBackend.apply_mask does not call set_rule_mask_sparse_selected"
     )
 
     # --- Prong 2: runtime smoke test ---
@@ -59,6 +63,29 @@ def test_sparse_backend_does_not_call_set_rule_mask():
     )
     result = train_only(SOURCE, "W", POS, NEG, config)
     assert result.attempt_count >= 1
+
+
+def test_sparse_backend_apply_mask_selected_path_is_zero_dtoh():
+    prog = pyxlog.IlpProgramFactory.compile(SOURCE, device=0, memory_mb=512)
+    backend = backend_mod.SparseMaskBackend()
+    candidates = prog.valid_candidates("W", False)
+    W = torch.zeros(len(candidates), device="cuda", requires_grad=True)
+
+    prog.reset_host_transfer_stats()
+    backend.apply_mask(
+        prog=prog,
+        mask_name="W",
+        W=W,
+        tau=1.0,
+        budget=2,
+        candidates=candidates,
+        n=prog.ilp_schema_size(),
+        allow_recursive=False,
+    )
+    after = prog.host_transfer_stats()
+
+    assert after["dtoh_calls"] == 0
+    assert after["dtoh_bytes"] == 0
 
 
 def test_sparse_d2h_counter_clean_after_mask_setup():

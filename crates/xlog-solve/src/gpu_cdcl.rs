@@ -102,27 +102,27 @@ pub struct GpuCdclWorkspace {
     pub(crate) proof_reason_tmp: TrackedCudaSlice<u32>,
 
     // Watch lists
-    pub(crate) watch0_pos: TrackedCudaSlice<u32>,     // clause_total_cap
-    pub(crate) watch1_pos: TrackedCudaSlice<u32>,     // clause_total_cap
-    pub(crate) watch_head: TrackedCudaSlice<i32>,     // 2 * var_cap
-    pub(crate) watch_next: TrackedCudaSlice<i32>,     // 2 * clause_total_cap
-    pub(crate) watch_prev: TrackedCudaSlice<i32>,     // 2 * clause_total_cap
+    pub(crate) watch0_pos: TrackedCudaSlice<u32>, // clause_total_cap
+    pub(crate) watch1_pos: TrackedCudaSlice<u32>, // clause_total_cap
+    pub(crate) watch_head: TrackedCudaSlice<i32>, // 2 * var_cap
+    pub(crate) watch_next: TrackedCudaSlice<i32>, // 2 * clause_total_cap
+    pub(crate) watch_prev: TrackedCudaSlice<i32>, // 2 * clause_total_cap
 
     // Learned clause arena
-    pub(crate) learned_offsets: TrackedCudaSlice<u32>,  // max_learned_clauses + 1
-    pub(crate) learned_lits: TrackedCudaSlice<i32>,     // max_learned_lits
-    pub(crate) learned_deleted: TrackedCudaSlice<u8>,   // max_learned_clauses
-    pub(crate) learned_lbd: TrackedCudaSlice<u32>,      // max_learned_clauses
+    pub(crate) learned_offsets: TrackedCudaSlice<u32>, // max_learned_clauses + 1
+    pub(crate) learned_lits: TrackedCudaSlice<i32>,    // max_learned_lits
+    pub(crate) learned_deleted: TrackedCudaSlice<u8>,  // max_learned_clauses
+    pub(crate) learned_lbd: TrackedCudaSlice<u32>,     // max_learned_clauses
     pub(crate) learned_activity: TrackedCudaSlice<u32>, // max_learned_clauses
-    pub(crate) learned_locked: TrackedCudaSlice<u8>,    // max_learned_clauses
+    pub(crate) learned_locked: TrackedCudaSlice<u8>,   // max_learned_clauses
 
     // Proof trace
-    pub(crate) proof_offsets: TrackedCudaSlice<u32>,  // max_learned_clauses + 1
-    pub(crate) proof_data: TrackedCudaSlice<u32>,     // max_proof_u32
+    pub(crate) proof_offsets: TrackedCudaSlice<u32>, // max_learned_clauses + 1
+    pub(crate) proof_data: TrackedCudaSlice<u32>,    // max_proof_u32
 
     // Scalar outputs
-    pub(crate) out_status: TrackedCudaSlice<i32>,       // 1
-    pub(crate) out_error: TrackedCudaSlice<i32>,        // 1
+    pub(crate) out_status: TrackedCudaSlice<i32>, // 1
+    pub(crate) out_error: TrackedCudaSlice<i32>,  // 1
     pub(crate) out_learned_count: TrackedCudaSlice<u32>, // 1
 }
 
@@ -175,11 +175,7 @@ impl GpuCdclSolver {
     /// `max_var_cap` and `max_clause_cap` must be >= the `var_cap` / `clause_cap` of any
     /// `GpuCnf` that will be solved with this workspace. If a solve call exceeds these
     /// capacities, it returns `XlogError::Kernel`.
-    pub fn new_workspace(
-        &self,
-        max_var_cap: u32,
-        max_clause_cap: u32,
-    ) -> Result<GpuCdclWorkspace> {
+    pub fn new_workspace(&self, max_var_cap: u32, max_clause_cap: u32) -> Result<GpuCdclWorkspace> {
         let num_vars_cap = max_var_cap as usize;
         let num_clauses_cap = max_clause_cap as usize;
         let max_learned_clauses = self.config.max_learned_clauses as usize;

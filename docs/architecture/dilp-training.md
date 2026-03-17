@@ -65,7 +65,9 @@ For the full mathematical treatment, see [`docs/ilp/rfc-tensorized-ilp.md`](../i
      │    ├─ IlpRegistry (mask storage)  │
      │    ├─ TensorMaskedJoin (executor) │
      │    ├─ batch_fact_membership()     │
-     │    └─ batch_tagged_credit()       │
+     │    ├─ batch_fact_membership_device() │
+     │    ├─ batch_tagged_credit()       │
+     │    └─ batch_tagged_credit_device()│
      └────────────────────────────────────┘
                         │
                         ▼
@@ -113,16 +115,19 @@ The `MaskBackend` protocol abstracts how the learnable tensor W is applied to th
 ```
 W (C logits) → Gumbel-Softmax(τ) → candidate_soft_probs (C,)
                                           │
-                        set_rule_mask_sparse(candidate_ids, soft_probs, budget)
+                    argsort/top-k on CUDA in Python/Torch
+                                          │
+                    set_rule_mask_sparse_selected(selected_ids, selected_soft_probs)
                                           │
                                           ▼
                               Rust builds executor mask internally
-                              (no N³ tensor materialized)
+                              (no N³ tensor materialized, no full soft-vector DTOH)
 ```
 
 - Learnable params: `C` floats (one per candidate rule)
 - Memory: O(C) — typically C < 100
-- Calls `set_rule_mask_sparse()` on the compiled program
+- Preferred hot-loop path calls `set_rule_mask_sparse_selected()` on the compiled program
+- Legacy compatibility path `set_rule_mask_sparse()` remains available when Rust-side ranking is desired
 
 ### DenseMaskBackend (alpha-compatible, debug)
 
@@ -187,10 +192,12 @@ precision/recall, metadata (timestamp, schema version, candidate map hash).
 The training step loop obeys XLOG's P0 GPU-resident contract:
 
 - `evaluate_device()` — no host reads for semantic results
-- `batch_fact_membership()` / `batch_tagged_credit()` — GPU-side fact queries
+- `batch_fact_membership_device()` — returns a CUDA bool mask via DLPack with zero semantic-loop DTOH
+- `batch_tagged_credit_device()` — returns CSR-style CUDA credit data via DLPack with zero semantic-loop DTOH
+- `batch_fact_membership()` / `batch_tagged_credit()` remain available when host materialization is desired
 - `AtomicU64` D2H counter on `CudaKernelProvider` — hard gate raises if `download_column_*` is observed during step loop
 - `host_transfer_stats()` / `reset_host_transfer_stats()` expose broader host transfer accounting for profiling
-- Mask/control-plane D2H (small, e.g. sparse soft-prob imports) is accepted outside the semantic data plane
+- Legacy `set_rule_mask_sparse()` still performs a control-plane soft-probability download; the selected-candidate sparse path avoids it
 
 ## Testing
 

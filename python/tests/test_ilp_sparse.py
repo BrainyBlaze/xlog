@@ -84,6 +84,30 @@ def test_sparse_tagged_entries_match_dense():
     assert set(dense_tags) == set(sparse_tags)
 
 
+def test_sparse_selected_mask_is_zero_dtoh_and_matches_dense():
+    prog_dense = _compile()
+    prog_sparse = _compile()
+    cands = prog_dense.valid_candidates("W", False)
+    n = prog_dense.ilp_schema_size()
+
+    selected_ids = [0]
+    selected_soft = torch.tensor([1.0], device="cuda", dtype=torch.float64)
+
+    _dense_set_single(prog_dense, n, cands[0])
+    prog_dense.evaluate()
+    dense_tags = prog_dense.get_tagged_results()
+
+    prog_sparse.reset_host_transfer_stats()
+    prog_sparse.set_rule_mask_sparse_selected("W", selected_ids, selected_soft)
+    after = prog_sparse.host_transfer_stats()
+    prog_sparse.evaluate()
+    sparse_tags = prog_sparse.get_tagged_results()
+
+    assert after["dtoh_calls"] == 0
+    assert after["dtoh_bytes"] == 0
+    assert set(dense_tags) == set(sparse_tags)
+
+
 def test_sparse_validates_candidate_count():
     prog = _compile()
     c = len(prog.valid_candidates("W", False))
@@ -113,19 +137,62 @@ def test_sparse_top_k_deterministic_tiebreak():
         assert (i, j, k) == (cands[0]["i"], cands[0]["j"], cands[0]["k"])
 
 
-def test_sparse_backend_respects_max_active_rules_budget():
-    """Sparse backend should pass budget unchanged to set_rule_mask_sparse."""
+def test_sparse_backend_selected_path_tiebreaks_lower_live_id_first():
     class _ProgCapture:
         def __init__(self, candidates):
             self.candidates = candidates
-            self.captured_budget = None
+            self.selected_candidate_ids = None
 
         def valid_candidates(self, _mask_name, _allow_recursive):
             return self.candidates
 
-        def set_rule_mask_sparse(self, _mask_name, candidate_ids, soft_probs, budget, _allow_recursive):
-            self.captured_budget = budget
-            # Keep Python-side behavior deterministic for apply_mask return path.
+        def set_rule_mask_sparse_selected(self, _mask_name, selected_candidate_ids, selected_soft_probs, _allow_recursive):
+            self.selected_candidate_ids = list(selected_candidate_ids)
+            assert len(selected_soft_probs) == len(selected_candidate_ids)
+            return None
+
+        def reset_d2h_transfer_count(self):
+            return None
+
+    candidates = [
+        {"id": 0, "i": 0, "j": 1, "k": 1, "left_name": "edge", "right_name": "edge", "head_name": "reach"},
+        {"id": 1, "i": 1, "j": 2, "k": 1, "left_name": "edge", "right_name": "edge", "head_name": "reach"},
+        {"id": 2, "i": 2, "j": 3, "k": 1, "left_name": "edge", "right_name": "edge", "head_name": "reach"},
+    ]
+    prog = _ProgCapture(candidates)
+    backend = backend_mod.SparseMaskBackend()
+
+    def _equal_softmax(logits, tau, hard=False, dim=-1):
+        return torch.tensor([0.5, 0.5, 0.5], device=logits.device, dtype=logits.dtype, requires_grad=True)
+
+    with mock.patch("pyxlog.ilp.backend.F.gumbel_softmax", _equal_softmax):
+        backend.apply_mask(
+            prog=prog,
+            mask_name="W",
+            W=torch.tensor([1.0, 2.0, 3.0], device="cpu", requires_grad=True),
+            tau=1.0,
+            budget=2,
+            candidates=candidates,
+            n=4,
+            allow_recursive=False,
+        )
+
+    assert prog.selected_candidate_ids == [0, 1]
+
+
+def test_sparse_backend_respects_max_active_rules_budget():
+    """Sparse backend should limit the selected candidate set to the budget."""
+    class _ProgCapture:
+        def __init__(self, candidates):
+            self.candidates = candidates
+            self.selected_candidate_ids = None
+
+        def valid_candidates(self, _mask_name, _allow_recursive):
+            return self.candidates
+
+        def set_rule_mask_sparse_selected(self, _mask_name, selected_candidate_ids, selected_soft_probs, _allow_recursive):
+            self.selected_candidate_ids = list(selected_candidate_ids)
+            assert len(selected_soft_probs) == len(selected_candidate_ids)
             return None
 
         def reset_d2h_transfer_count(self):
@@ -151,7 +218,8 @@ def test_sparse_backend_respects_max_active_rules_budget():
         allow_recursive=False,
     )
 
-    assert prog.captured_budget == 2
+    assert prog.selected_candidate_ids is not None
+    assert len(prog.selected_candidate_ids) == 2
 
 
 def test_sparse_selected_hard_maps_live_indices_back_to_original():
@@ -163,10 +231,11 @@ def test_sparse_selected_hard_maps_live_indices_back_to_original():
         def valid_candidates(self, _mask_name, _allow_recursive):
             return self.candidates
 
-        def set_rule_mask_sparse(self, mask_name, candidate_ids, soft_probs, budget, allow_recursive):
+        def set_rule_mask_sparse_selected(self, mask_name, selected_candidate_ids, selected_soft_probs, allow_recursive):
             assert mask_name == "W"
-            assert candidate_ids == list(range(len(self.candidates)))
-            assert budget == 2
+            assert selected_candidate_ids == [2, 1]
+            assert len(selected_soft_probs) == 2
+            assert allow_recursive is False
             return None
 
         def reset_d2h_transfer_count(self):

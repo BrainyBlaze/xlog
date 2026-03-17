@@ -19,15 +19,15 @@ pub use provenance::{ChoiceSource, GroundAtom, Provenance, Value};
 
 // Primary entry points (convenience re-exports)
 pub use compilation::{
-    compile_gpu_d4_and_verify, compile_gpu_d4_and_verify_cached,
-    GpuCompileConfig, CircuitCompileProfile,
+    compile_gpu_d4_and_verify, compile_gpu_d4_and_verify_cached, CircuitCompileProfile,
+    GpuCompileConfig,
 };
 pub use exact::{ExactDdnnfProgram, ExactResult, GpuConfig};
 pub use mc::{
-    McEvalConfig, McProgram, McSamplingMethod, McCountStrategy,
-    McResult, McDeviceResult, EvidenceForcing, ForceabilityReason,
+    EvidenceForcing, ForceabilityReason, McCountStrategy, McDeviceResult, McEvalConfig, McProgram,
+    McResult, McSamplingMethod,
 };
 pub use wfs::{
-    WfsConfig, WfsResult, TruthValue, WfsAtom, WfsRule, WfsLiteral,
-    evaluate_wfs_rules, evaluate_wfs_with_rules,
+    evaluate_wfs_rules, evaluate_wfs_with_rules, TruthValue, WfsAtom, WfsConfig, WfsLiteral,
+    WfsResult, WfsRule,
 };

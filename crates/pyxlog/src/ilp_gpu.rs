@@ -10,9 +10,9 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
 use xlog_core::{ScalarType, Schema};
-use xlog_cuda::CudaKernelProvider;
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::type_seam::GpuScalar;
+use xlog_cuda::CudaKernelProvider;
 
 use super::{dlpack_capsule_from_tensor, types};
 
@@ -284,16 +284,10 @@ pub(crate) fn sort_and_build_csr(
     actual_nnz: u32,
     num_facts: u32,
 ) -> PyResult<TrackedCudaSlice<u32>> {
-    let mut scratch =
-        xlog_cuda::provider::RadixSortScratch::new(provider, actual_nnz)
-            .map_err(|e| types::gpu_err("sort scratch", e))?;
+    let mut scratch = xlog_cuda::provider::RadixSortScratch::new(provider, actual_nnz)
+        .map_err(|e| types::gpu_err("sort scratch", e))?;
     provider
-        .radix_sort_u32_pairs(
-            d_coo_facts,
-            d_coo_cands,
-            actual_nnz,
-            &mut scratch,
-        )
+        .radix_sort_u32_pairs(d_coo_facts, d_coo_cands, actual_nnz, &mut scratch)
         .map_err(|e| types::gpu_err("radix sort", e))?;
 
     let d_hist = provider
@@ -375,7 +369,14 @@ pub(crate) fn forward_backward_reduce(
             )
             .map_err(|e| types::gpu_err("backward f64", e))?;
 
-        export_loss_grad_device(provider, py, d_total_loss, d_grad, num_cands, ScalarType::F64)
+        export_loss_grad_device(
+            provider,
+            py,
+            d_total_loss,
+            d_grad,
+            num_cands,
+            ScalarType::F64,
+        )
     } else {
         let eps_f32 = 1e-8f32;
 
@@ -405,7 +406,14 @@ pub(crate) fn forward_backward_reduce(
             )
             .map_err(|e| types::gpu_err("backward f32", e))?;
 
-        export_loss_grad_device(provider, py, d_total_loss, d_grad, num_cands, ScalarType::F32)
+        export_loss_grad_device(
+            provider,
+            py,
+            d_total_loss,
+            d_grad,
+            num_cands,
+            ScalarType::F32,
+        )
     }
 }
 

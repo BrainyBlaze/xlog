@@ -35,15 +35,9 @@ impl super::CudaKernelProvider {
         buffer: &CudaBuffer,
         col_idx: usize,
     ) -> Result<Vec<T>> {
-        let col = buffer
-            .column(col_idx)
-            .ok_or_else(|| {
-                XlogError::kernel_ctx(
-                    "download_column_untracked",
-                    "column not found",
-                    &col_idx,
-                )
-            })?;
+        let col = buffer.column(col_idx).ok_or_else(|| {
+            XlogError::kernel_ctx("download_column_untracked", "column not found", &col_idx)
+        })?;
 
         let num_rows = self.device_row_count(buffer)?;
         if num_rows == 0 {
@@ -51,11 +45,7 @@ impl super::CudaKernelProvider {
         }
 
         let num_bytes = num_rows.checked_mul(T::BYTE_WIDTH).ok_or_else(|| {
-            XlogError::kernel_ctx(
-                "download_column_untracked",
-                "byte size overflow",
-                &num_rows,
-            )
+            XlogError::kernel_ctx("download_column_untracked", "byte size overflow", &num_rows)
         })?;
         let col_view = self.column_bytes_view(col, num_bytes)?;
         let mut bytes = vec![0u8; num_bytes];
@@ -77,11 +67,9 @@ impl super::CudaKernelProvider {
         buffer: &CudaBuffer,
         col_idx: usize,
     ) -> Result<Vec<T>> {
-        let col = buffer
-            .column(col_idx)
-            .ok_or_else(|| {
-                XlogError::kernel_ctx("download_column", "column not found", &col_idx)
-            })?;
+        let col = buffer.column(col_idx).ok_or_else(|| {
+            XlogError::kernel_ctx("download_column", "column not found", &col_idx)
+        })?;
 
         let num_rows = self.device_row_count(buffer)?;
         if num_rows == 0 {
@@ -96,9 +84,7 @@ impl super::CudaKernelProvider {
         self.device
             .inner()
             .dtoh_sync_copy_into(&col_view, &mut bytes)
-            .map_err(|e| {
-                XlogError::kernel_ctx("download_column", "dtoh copy failed", &e)
-            })?;
+            .map_err(|e| XlogError::kernel_ctx("download_column", "dtoh copy failed", &e))?;
 
         Ok(bytes
             .chunks_exact(T::BYTE_WIDTH)

@@ -6,12 +6,12 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+#[cfg(test)]
+use xlog_core::ScalarType;
 use xlog_core::{RelId, Result, RuntimeConfig, Schema, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::{CudaBuffer, CudaKernelProvider};
 use xlog_ir::ExecutionPlan;
-#[cfg(test)]
-use xlog_core::ScalarType;
 #[cfg(test)]
 use xlog_ir::{CompareOp, ConstValue, Expr, JoinType, ProjectExpr, RirNode, Stratum};
 use xlog_stats::{StatsManager, StatsSnapshot};

@@ -242,7 +242,10 @@ query(color(green)).
 "#;
     let program = McProgram::compile_source(src).unwrap();
     let forcing = program.compile_evidence_forcing().unwrap();
-    assert!(forcing.forceable, "3-way AD positive evidence should be forceable");
+    assert!(
+        forcing.forceable,
+        "3-way AD positive evidence should be forceable"
+    );
 
     // v0 forced to 0 (not red), v1 forced to 1 (blue selected), v2 not forced
     assert_eq!(forcing.force_mask[0], 1);
@@ -541,14 +544,24 @@ query(color(green)).
     assert_eq!(result.evidence_samples, result.total_samples);
 
     // Under clamped evidence, color(blue) is always true, others always false
-    let p_red = result.query_estimates.iter()
-        .find(|q| q.atom.predicate == "color" && !q.atom.args.is_empty()
-            && value_as_symbol_name(&q.atom.args[0]).as_deref() == Some("red"))
+    let p_red = result
+        .query_estimates
+        .iter()
+        .find(|q| {
+            q.atom.predicate == "color"
+                && !q.atom.args.is_empty()
+                && value_as_symbol_name(&q.atom.args[0]).as_deref() == Some("red")
+        })
         .expect("missing query for color(red)")
         .prob;
-    let p_green = result.query_estimates.iter()
-        .find(|q| q.atom.predicate == "color" && !q.atom.args.is_empty()
-            && value_as_symbol_name(&q.atom.args[0]).as_deref() == Some("green"))
+    let p_green = result
+        .query_estimates
+        .iter()
+        .find(|q| {
+            q.atom.predicate == "color"
+                && !q.atom.args.is_empty()
+                && value_as_symbol_name(&q.atom.args[0]).as_deref() == Some("green")
+        })
         .expect("missing query for color(green)")
         .prob;
 

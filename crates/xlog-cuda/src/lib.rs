@@ -4,11 +4,11 @@ pub mod arrow_device;
 pub mod device;
 pub mod device_pool;
 pub mod dlpack;
+pub(crate) mod error_helpers;
 pub mod kernel_manifest_data;
 pub mod memory;
 pub mod multi_gpu_memory;
 pub mod provider;
-pub(crate) mod error_helpers;
 pub mod type_seam;
 
 pub use arrow_device::{ArrowDeviceArray, ArrowDeviceArrayOwned, ARROW_DEVICE_CUDA};

@@ -113,26 +113,20 @@ fn load_test_facts(
         let mut columns: Vec<Vec<u8>> = vec![Vec::new(); arity];
         for row in rows {
             for (col_idx, val) in row.iter().enumerate() {
-                let col_type = schema
-                    .column_type(col_idx)
-                    .unwrap_or(ScalarType::U32);
+                let col_type = schema.column_type(col_idx).unwrap_or(ScalarType::U32);
                 match col_type {
                     ScalarType::U32 => {
-                        columns[col_idx]
-                            .extend_from_slice(&(*val as u32).to_ne_bytes());
+                        columns[col_idx].extend_from_slice(&(*val as u32).to_ne_bytes());
                     }
                     ScalarType::I64 => {
-                        columns[col_idx]
-                            .extend_from_slice(&(*val).to_ne_bytes());
+                        columns[col_idx].extend_from_slice(&(*val).to_ne_bytes());
                     }
                     ScalarType::U64 => {
-                        columns[col_idx]
-                            .extend_from_slice(&(*val as u64).to_ne_bytes());
+                        columns[col_idx].extend_from_slice(&(*val as u64).to_ne_bytes());
                     }
                     _ => {
                         // Default to u32 for other types
-                        columns[col_idx]
-                            .extend_from_slice(&(*val as u32).to_ne_bytes());
+                        columns[col_idx].extend_from_slice(&(*val as u32).to_ne_bytes());
                     }
                 }
             }
@@ -225,10 +219,7 @@ fn test_tmj_empty_mask_no_derivations() {
     let soft_data = vec![0.0f32; total];
     let schema_1d = Schema::new(vec![("c0".to_string(), ScalarType::F32)]);
     let hard_buf = provider
-        .create_buffer_from_slices(
-            &[bytemuck::cast_slice(&hard_data)],
-            schema_1d.clone(),
-        )
+        .create_buffer_from_slices(&[bytemuck::cast_slice(&hard_data)], schema_1d.clone())
         .unwrap();
     let soft_buf = provider
         .create_buffer_from_slices(&[bytemuck::cast_slice(&soft_data)], schema_1d)
@@ -283,14 +274,8 @@ fn test_tmj_identity_mask_correct_join() {
     rel_index.sort_by_key(|(id, _)| id.0);
     let n = rel_index.len();
 
-    let b1_idx = rel_index
-        .iter()
-        .position(|(_, name)| name == "b1")
-        .unwrap();
-    let b2_idx = rel_index
-        .iter()
-        .position(|(_, name)| name == "b2")
-        .unwrap();
+    let b1_idx = rel_index.iter().position(|(_, name)| name == "b1").unwrap();
+    let b2_idx = rel_index.iter().position(|(_, name)| name == "b2").unwrap();
     let reach_idx = rel_index
         .iter()
         .position(|(_, name)| name == "reach")
@@ -307,10 +292,7 @@ fn test_tmj_identity_mask_correct_join() {
 
     let schema_1d = Schema::new(vec![("c0".to_string(), ScalarType::F32)]);
     let hard_buf = provider
-        .create_buffer_from_slices(
-            &[bytemuck::cast_slice(&hard_data)],
-            schema_1d.clone(),
-        )
+        .create_buffer_from_slices(&[bytemuck::cast_slice(&hard_data)], schema_1d.clone())
         .unwrap();
     let soft_buf = provider
         .create_buffer_from_slices(&[bytemuck::cast_slice(&soft_data)], schema_1d)
@@ -321,11 +303,7 @@ fn test_tmj_identity_mask_correct_join() {
         .insert_mask("W".to_string(), hard_buf, soft_buf, n);
 
     let result = executor.execute_plan(&plan);
-    assert!(
-        result.is_ok(),
-        "Mask execution failed: {:?}",
-        result.err()
-    );
+    assert!(result.is_ok(), "Mask execution failed: {:?}", result.err());
 
     // Tag metadata should have one entry: (b1, b2) -> reach
     let tagged = executor.ilp_last_result().unwrap();
@@ -349,7 +327,9 @@ fn test_tmj_identity_mask_correct_join() {
 // T3.4: Tag metadata matches active rules
 #[test]
 fn test_tmj_tag_metadata_correct() {
-    let Some((provider, mut compiler)) = setup() else { return; };
+    let Some((provider, mut compiler)) = setup() else {
+        return;
+    };
 
     let input = r#"
         edge(1, 2).
@@ -362,13 +342,21 @@ fn test_tmj_tag_metadata_correct() {
     setup_executor_with_facts(&provider, &compiler, &ast, &mut executor);
 
     let mut rel_index: Vec<(RelId, String)> = compiler
-        .rel_ids().iter()
-        .map(|(name, id)| (*id, name.clone())).collect();
+        .rel_ids()
+        .iter()
+        .map(|(name, id)| (*id, name.clone()))
+        .collect();
     rel_index.sort_by_key(|(id, _)| id.0);
     let n = rel_index.len();
 
-    let edge_idx = rel_index.iter().position(|(_, name)| name == "edge").unwrap();
-    let reach_idx = rel_index.iter().position(|(_, name)| name == "reach").unwrap();
+    let edge_idx = rel_index
+        .iter()
+        .position(|(_, name)| name == "edge")
+        .unwrap();
+    let reach_idx = rel_index
+        .iter()
+        .position(|(_, name)| name == "reach")
+        .unwrap();
 
     let total = n * n * n;
     let mut hard_data = vec![0.0f32; total];
@@ -378,11 +366,15 @@ fn test_tmj_tag_metadata_correct() {
     soft_data[flat_idx] = 0.95;
 
     let schema_1d = Schema::new(vec![("c0".to_string(), ScalarType::F32)]);
-    let hard_buf = provider.create_buffer_from_slices(
-        &[bytemuck::cast_slice(&hard_data)], schema_1d.clone()).unwrap();
-    let soft_buf = provider.create_buffer_from_slices(
-        &[bytemuck::cast_slice(&soft_data)], schema_1d).unwrap();
-    executor.ilp_registry_mut().insert_mask("W".to_string(), hard_buf, soft_buf, n);
+    let hard_buf = provider
+        .create_buffer_from_slices(&[bytemuck::cast_slice(&hard_data)], schema_1d.clone())
+        .unwrap();
+    let soft_buf = provider
+        .create_buffer_from_slices(&[bytemuck::cast_slice(&soft_data)], schema_1d)
+        .unwrap();
+    executor
+        .ilp_registry_mut()
+        .insert_mask("W".to_string(), hard_buf, soft_buf, n);
 
     executor.execute_plan(&plan).unwrap();
 
@@ -398,7 +390,9 @@ fn test_tmj_tag_metadata_correct() {
 // T3.7: Diff against existing facts — only new facts added
 #[test]
 fn test_tmj_diff_no_duplicate_facts() {
-    let Some((provider, mut compiler)) = setup() else { return; };
+    let Some((provider, mut compiler)) = setup() else {
+        return;
+    };
 
     let input = r#"
         edge(1, 2).
@@ -411,13 +405,21 @@ fn test_tmj_diff_no_duplicate_facts() {
     setup_executor_with_facts(&provider, &compiler, &ast, &mut executor);
 
     let mut rel_index: Vec<(RelId, String)> = compiler
-        .rel_ids().iter()
-        .map(|(name, id)| (*id, name.clone())).collect();
+        .rel_ids()
+        .iter()
+        .map(|(name, id)| (*id, name.clone()))
+        .collect();
     rel_index.sort_by_key(|(id, _)| id.0);
     let n = rel_index.len();
 
-    let edge_idx = rel_index.iter().position(|(_, name)| name == "edge").unwrap();
-    let reach_idx = rel_index.iter().position(|(_, name)| name == "reach").unwrap();
+    let edge_idx = rel_index
+        .iter()
+        .position(|(_, name)| name == "edge")
+        .unwrap();
+    let reach_idx = rel_index
+        .iter()
+        .position(|(_, name)| name == "reach")
+        .unwrap();
 
     let total = n * n * n;
     let mut hard_data = vec![0.0f32; total];
@@ -428,29 +430,43 @@ fn test_tmj_diff_no_duplicate_facts() {
     let schema_1d = Schema::new(vec![("c0".to_string(), ScalarType::F32)]);
 
     // First execution
-    let h1 = provider.create_buffer_from_slices(
-        &[bytemuck::cast_slice(&hard_data)], schema_1d.clone()).unwrap();
-    let s1 = provider.create_buffer_from_slices(
-        &[bytemuck::cast_slice(&soft_data)], schema_1d.clone()).unwrap();
-    executor.ilp_registry_mut().insert_mask("W".to_string(), h1, s1, n);
+    let h1 = provider
+        .create_buffer_from_slices(&[bytemuck::cast_slice(&hard_data)], schema_1d.clone())
+        .unwrap();
+    let s1 = provider
+        .create_buffer_from_slices(&[bytemuck::cast_slice(&soft_data)], schema_1d.clone())
+        .unwrap();
+    executor
+        .ilp_registry_mut()
+        .insert_mask("W".to_string(), h1, s1, n);
     executor.execute_plan(&plan).unwrap();
 
-    let reach_rows_1 = executor.store().get("reach")
+    let reach_rows_1 = executor
+        .store()
+        .get("reach")
         .map(|b| read_device_row_count(&provider, b).unwrap())
         .unwrap_or(0);
 
     // Second execution with same mask
-    let h2 = provider.create_buffer_from_slices(
-        &[bytemuck::cast_slice(&hard_data)], schema_1d.clone()).unwrap();
-    let s2 = provider.create_buffer_from_slices(
-        &[bytemuck::cast_slice(&soft_data)], schema_1d).unwrap();
-    executor.ilp_registry_mut().insert_mask("W".to_string(), h2, s2, n);
+    let h2 = provider
+        .create_buffer_from_slices(&[bytemuck::cast_slice(&hard_data)], schema_1d.clone())
+        .unwrap();
+    let s2 = provider
+        .create_buffer_from_slices(&[bytemuck::cast_slice(&soft_data)], schema_1d)
+        .unwrap();
+    executor
+        .ilp_registry_mut()
+        .insert_mask("W".to_string(), h2, s2, n);
     executor.execute_plan(&plan).unwrap();
 
-    let reach_rows_2 = executor.store().get("reach")
+    let reach_rows_2 = executor
+        .store()
+        .get("reach")
         .map(|b| read_device_row_count(&provider, b).unwrap())
         .unwrap_or(0);
 
-    assert_eq!(reach_rows_1, reach_rows_2,
-        "Re-execution with same mask must not duplicate facts (diff_gpu)");
+    assert_eq!(
+        reach_rows_1, reach_rows_2,
+        "Re-execution with same mask must not duplicate facts (diff_gpu)"
+    );
 }

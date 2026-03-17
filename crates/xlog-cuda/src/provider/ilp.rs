@@ -39,7 +39,14 @@ impl super::CudaKernelProvider {
                     block_dim: (block_size, 1, 1),
                     shared_mem_bytes: 0,
                 },
-                (compacted_fact_indices, cidx, count, offset, coo_fact, coo_cand),
+                (
+                    compacted_fact_indices,
+                    cidx,
+                    count,
+                    offset,
+                    coo_fact,
+                    coo_cand,
+                ),
             )
         }
         .map_err(|e| XlogError::Kernel(format!("ilp_coo_fill failed: {}", e)))?;
@@ -382,9 +389,7 @@ impl super::CudaKernelProvider {
             .device()
             .inner()
             .get_func(ILP_MODULE, ilp_kernels::ILP_COO_FILL_FROM_MASK)
-            .ok_or_else(|| {
-                XlogError::Kernel("ilp_coo_fill_from_mask not found".to_string())
-            })?;
+            .ok_or_else(|| XlogError::Kernel("ilp_coo_fill_from_mask not found".to_string()))?;
         let block_size = 256u32;
         let grid_size = (num_query + block_size - 1) / block_size;
         unsafe {
@@ -407,15 +412,11 @@ impl super::CudaKernelProvider {
                 ),
             )
         }
-        .map_err(|e| {
-            XlogError::Kernel(format!("ilp_coo_fill_from_mask: {}", e))
-        })?;
+        .map_err(|e| XlogError::Kernel(format!("ilp_coo_fill_from_mask: {}", e)))?;
         self.device()
             .inner()
             .synchronize()
-            .map_err(|e| {
-                XlogError::Kernel(format!("ilp_coo_fill_from_mask sync: {}", e))
-            })?;
+            .map_err(|e| XlogError::Kernel(format!("ilp_coo_fill_from_mask sync: {}", e)))?;
         Ok(())
     }
 
@@ -450,9 +451,7 @@ impl super::CudaKernelProvider {
             .device()
             .inner()
             .get_func(ILP_MODULE, ilp_kernels::ILP_CSR_HISTOGRAM)
-            .ok_or_else(|| {
-                XlogError::Kernel("ilp_csr_histogram kernel not found".to_string())
-            })?;
+            .ok_or_else(|| XlogError::Kernel("ilp_csr_histogram kernel not found".to_string()))?;
 
         let block_size = 256u32;
         let grid_size = (nnz + block_size - 1) / block_size;
@@ -467,9 +466,7 @@ impl super::CudaKernelProvider {
                     },
                     (sorted_facts, nnz, num_facts, &mut d_hist),
                 )
-                .map_err(|e| {
-                    XlogError::Kernel(format!("ilp_csr_histogram launch: {}", e))
-                })?;
+                .map_err(|e| XlogError::Kernel(format!("ilp_csr_histogram launch: {}", e)))?;
         }
 
         self.device()

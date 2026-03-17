@@ -27,8 +27,12 @@ fn create_edge_buffer(provider: &CudaKernelProvider, edges: &[(u32, u32)]) -> Re
 }
 
 fn read_pairs(provider: &CudaKernelProvider, buffer: &CudaBuffer) -> Vec<(u32, u32)> {
-    let c0 = provider.download_column::<u32>(buffer, 0).unwrap_or_default();
-    let c1 = provider.download_column::<u32>(buffer, 1).unwrap_or_default();
+    let c0 = provider
+        .download_column::<u32>(buffer, 0)
+        .unwrap_or_default();
+    let c1 = provider
+        .download_column::<u32>(buffer, 1)
+        .unwrap_or_default();
     c0.into_iter().zip(c1).collect()
 }
 

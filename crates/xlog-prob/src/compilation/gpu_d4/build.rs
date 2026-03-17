@@ -10,12 +10,12 @@ use xlog_cuda::provider::{d4_kernels, D4_MODULE};
 use xlog_cuda::CudaKernelProvider;
 use xlog_solve::GpuCnf;
 
-use crate::gpu::{GpuCircuitBuilder, GpuCircuitLayout, GpuXgcf};
-use super::{
-    checked_pool_len_usize, exclusive_scan_u32_inplace, memset_u8_sync,
-    validate_cnf_gpu, GpuCompileConfig,
-};
 use super::frontier::build_frontier_bitset;
+use super::{
+    checked_pool_len_usize, exclusive_scan_u32_inplace, memset_u8_sync, validate_cnf_gpu,
+    GpuCompileConfig,
+};
+use crate::gpu::{GpuCircuitBuilder, GpuCircuitLayout, GpuXgcf};
 
 fn alloc_component_scratch(
     provider: &CudaKernelProvider,
@@ -1008,7 +1008,8 @@ mod tests {
                 &mut level_offsets.slice_mut(0..num_levels as usize),
             )
             .unwrap();
-        super::super::exclusive_scan_u32_inplace(&provider, &mut level_offsets, num_levels + 1).unwrap();
+        super::super::exclusive_scan_u32_inplace(&provider, &mut level_offsets, num_levels + 1)
+            .unwrap();
 
         let lvl_emit = device
             .get_func(D4_MODULE, d4_kernels::D4_LEVELIZE_EMIT)
@@ -1283,7 +1284,8 @@ mod tests {
                 &mut level_offsets.slice_mut(0..num_levels as usize),
             )
             .unwrap();
-        super::super::exclusive_scan_u32_inplace(&provider, &mut level_offsets, num_levels + 1).unwrap();
+        super::super::exclusive_scan_u32_inplace(&provider, &mut level_offsets, num_levels + 1)
+            .unwrap();
         provider
             .device()
             .synchronize()
@@ -1562,7 +1564,8 @@ mod tests {
                 &mut level_offsets.slice_mut(0..num_levels as usize),
             )
             .unwrap();
-        super::super::exclusive_scan_u32_inplace(&provider, &mut level_offsets, num_levels + 1).unwrap();
+        super::super::exclusive_scan_u32_inplace(&provider, &mut level_offsets, num_levels + 1)
+            .unwrap();
 
         let lvl_emit = device
             .get_func(D4_MODULE, d4_kernels::D4_LEVELIZE_EMIT)

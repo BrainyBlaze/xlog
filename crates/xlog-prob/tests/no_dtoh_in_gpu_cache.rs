@@ -15,7 +15,11 @@ fn no_device_to_host_reads_in_gpu_cache() {
     let text = std::fs::read_to_string(&path).expect("read source");
 
     // Strip lines inside allowed methods (off hot path).
-    let allowed_methods = &["fn into_handle(", "fn build_artifact_from_device(", "fn store_from_xgcf("];
+    let allowed_methods = &[
+        "fn into_handle(",
+        "fn build_artifact_from_device(",
+        "fn store_from_xgcf(",
+    ];
     let filtered: String = {
         let mut inside_allowed = false;
         let mut brace_depth: i32 = 0;

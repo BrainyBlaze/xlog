@@ -371,8 +371,13 @@ pub fn extract_from_program(program: &Program) -> Result<Provenance> {
                 "Annotated disjunction must contain at least one choice".to_string(),
             ));
         }
-        let (vars, outcome_formulas) =
-            compile_annotated_disjunction(ad, &mut next_choice, &mut choice_probs, &mut choice_sources, &mut builder)?;
+        let (vars, outcome_formulas) = compile_annotated_disjunction(
+            ad,
+            &mut next_choice,
+            &mut choice_probs,
+            &mut choice_sources,
+            &mut builder,
+        )?;
         let _ = vars;
 
         for (pf, formula) in ad.choices.iter().zip(outcome_formulas.into_iter()) {
@@ -570,11 +575,14 @@ fn compile_annotated_disjunction(
         *next_choice = next_choice.saturating_add(1);
         vars.push(var);
         choice_probs.insert(var, (cond_true, cond_false));
-        choice_sources.insert(var, ChoiceSource {
-            choices: explicit_choices.clone(),
-            choice_index: i,
-            source_id: None,
-        });
+        choice_sources.insert(
+            var,
+            ChoiceSource {
+                choices: explicit_choices.clone(),
+                choice_index: i,
+                source_id: None,
+            },
+        );
         remaining -= p_i;
     }
 

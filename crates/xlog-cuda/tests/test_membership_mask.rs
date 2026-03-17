@@ -105,10 +105,7 @@ fn membership_mask_projected_keys() {
         ("dst".to_string(), ScalarType::U32),
     ]);
     let relation = provider
-        .create_buffer_from_u32_columns(
-            &[&[1u32, 2], &[10u32, 20], &[3u32, 4]],
-            rel_schema,
-        )
+        .create_buffer_from_u32_columns(&[&[1u32, 2], &[10u32, 20], &[3u32, 4]], rel_schema)
         .unwrap();
 
     // Query: check if (src=1, dst=3) exists (columns 0 and 2 only)

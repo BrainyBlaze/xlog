@@ -15,7 +15,5 @@ pub fn setup_provider() -> Option<Arc<CudaKernelProvider>> {
         device.clone(),
         MemoryBudget::with_limit(1024 * 1024 * 1024),
     ));
-    CudaKernelProvider::new(device, memory)
-        .ok()
-        .map(Arc::new)
+    CudaKernelProvider::new(device, memory).ok().map(Arc::new)
 }

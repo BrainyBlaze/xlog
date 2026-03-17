@@ -549,8 +549,7 @@ mod tests {
         // Allocate dummy columns matching the schema arity (100 rows each)
         let col_a = CudaColumn::owned(manager.alloc::<u8>(100 * 4).unwrap()); // U32: 4 bytes
         let col_b = CudaColumn::owned(manager.alloc::<u8>(100 * 8).unwrap()); // U64: 8 bytes
-        let buffer =
-            CudaBuffer::from_columns(vec![col_a, col_b], 100, d_num_rows, schema.clone());
+        let buffer = CudaBuffer::from_columns(vec![col_a, col_b], 100, d_num_rows, schema.clone());
 
         assert_eq!(buffer.num_rows(), 100);
         assert_eq!(buffer.arity(), 2);

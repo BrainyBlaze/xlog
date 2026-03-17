@@ -9,8 +9,8 @@ use std::time::Instant;
 use xlog_core::{Result, XlogError};
 
 use super::{CudaKernelProvider, PtxLoadProfile};
-use crate::CudaDevice;
 use crate::kernel_manifest_data::KERNEL_MODULES;
+use crate::CudaDevice;
 
 impl CudaKernelProvider {
     /// Load every kernel module listed in `KERNEL_MODULES` into `device`.
@@ -24,7 +24,11 @@ impl CudaKernelProvider {
         let mut profile = PtxLoadProfile::default();
 
         for spec in KERNEL_MODULES {
-            let t0 = if profiling { Some(Instant::now()) } else { None };
+            let t0 = if profiling {
+                Some(Instant::now())
+            } else {
+                None
+            };
 
             let (ptx, is_cubin) = super::load_module_from_file(spec.cu_name, cc)?;
 
@@ -32,23 +36,19 @@ impl CudaKernelProvider {
                 .inner()
                 .load_ptx(ptx, spec.module_name, spec.kernels)
                 .map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "Failed to load {} module: {}",
-                        spec.cu_name, e
-                    ))
+                    XlogError::Kernel(format!("Failed to load {} module: {}", spec.cu_name, e))
                 })?;
 
             if let Some(t0) = t0 {
                 if profiling {
                     device.inner().synchronize().map_err(|e| {
-                        XlogError::Kernel(format!(
-                            "sync after {} load: {}",
-                            spec.cu_name, e
-                        ))
+                        XlogError::Kernel(format!("sync after {} load: {}", spec.cu_name, e))
                     })?;
                 }
                 let elapsed = t0.elapsed().as_secs_f64();
-                profile.per_module_sec.push((spec.cu_name.to_string(), elapsed));
+                profile
+                    .per_module_sec
+                    .push((spec.cu_name.to_string(), elapsed));
                 profile.total_sec += elapsed;
                 if is_cubin {
                     profile.cubin_loaded += 1;

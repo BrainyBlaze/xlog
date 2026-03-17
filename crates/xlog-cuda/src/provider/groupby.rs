@@ -4,8 +4,8 @@ use cudarc::driver::{LaunchAsync, LaunchConfig};
 use xlog_core::{AggOp, Result, ScalarType, Schema, XlogError};
 
 use super::{
-    arith_kernels, groupby_kernels, pack_kernels, scan_kernels,
-    ARITH_MODULE, GROUPBY_MODULE, PACK_MODULE, SCAN_MODULE,
+    arith_kernels, groupby_kernels, pack_kernels, scan_kernels, ARITH_MODULE, GROUPBY_MODULE,
+    PACK_MODULE, SCAN_MODULE,
 };
 use crate::memory::{CudaColumn, TrackedCudaSlice};
 use crate::CudaBuffer;

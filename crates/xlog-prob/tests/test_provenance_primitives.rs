@@ -92,7 +92,10 @@ fn atoms_with_formulas_returns_all_formula_atoms() {
     }
 
     // Check that specific atoms are present.
-    let predicates: Vec<&str> = formula_atoms.iter().map(|(a, _)| a.predicate.as_str()).collect();
+    let predicates: Vec<&str> = formula_atoms
+        .iter()
+        .map(|(a, _)| a.predicate.as_str())
+        .collect();
     assert!(predicates.contains(&"rain"));
     assert!(predicates.contains(&"sprinkler"));
     assert!(predicates.contains(&"wet"));

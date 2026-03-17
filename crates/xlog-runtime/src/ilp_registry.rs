@@ -4,23 +4,12 @@ use std::collections::HashMap;
 use xlog_core::XlogError;
 use xlog_cuda::{CudaBuffer, CudaKernelProvider};
 
-/// Reads the device-side row count using only public APIs (RD-22).
-/// `CudaKernelProvider::device_row_count` is private (provider/transfer.rs).
+/// Reads the device-side row count through the provider's public metadata API.
 pub fn read_device_row_count(
     provider: &CudaKernelProvider,
     buffer: &CudaBuffer,
 ) -> Result<usize, XlogError> {
-    if let Some(n) = buffer.cached_row_count() {
-        return Ok(n as usize);
-    }
-    let mut host_rows = [0u32];
-    provider
-        .device()
-        .inner()
-        .dtoh_sync_copy_into(buffer.num_rows_device(), &mut host_rows)
-        .map_err(|e| XlogError::Kernel(format!("Failed to read row count: {}", e)))?;
-    buffer.set_cached_row_count_if_unset(host_rows[0]);
-    Ok(host_rows[0] as usize)
+    provider.device_row_count(buffer)
 }
 
 /// Registry for ILP tensor masks.
@@ -86,8 +75,14 @@ impl IlpRegistry {
         soft: CudaBuffer,
         schema_size: usize,
     ) {
-        self.masks
-            .insert(name, IlpMask::Dense { hard, soft, schema_size });
+        self.masks.insert(
+            name,
+            IlpMask::Dense {
+                hard,
+                soft,
+                schema_size,
+            },
+        );
     }
 
     /// Insert a mask built from sparse candidate data.
@@ -111,8 +106,7 @@ impl IlpRegistry {
         }
 
         // Deterministic top-k: descending soft value, then ascending index for ties
-        let mut ranked: Vec<(usize, f32)> =
-            active_soft.iter().copied().enumerate().collect();
+        let mut ranked: Vec<(usize, f32)> = active_soft.iter().copied().enumerate().collect();
         ranked.sort_by(|a, b| {
             b.1.partial_cmp(&a.1)
                 .unwrap_or(std::cmp::Ordering::Equal)
@@ -120,16 +114,33 @@ impl IlpRegistry {
         });
         ranked.truncate(budget.min(ranked.len()));
 
-        let entries: Vec<(u32, u32, u32)> = ranked
-            .iter()
-            .map(|&(idx, _)| active_ijk[idx])
-            .collect();
+        let entries: Vec<(u32, u32, u32)> =
+            ranked.iter().map(|&(idx, _)| active_ijk[idx]).collect();
 
-        self.masks.insert(name, IlpMask::Sparse {
-            active_entries: entries,
-            schema_size,
-        });
+        self.masks.insert(
+            name,
+            IlpMask::Sparse {
+                active_entries: entries,
+                schema_size,
+            },
+        );
         Ok(())
+    }
+
+    /// Insert an already-selected sparse mask, preserving caller order exactly.
+    pub fn insert_selected_mask(
+        &mut self,
+        name: String,
+        schema_size: usize,
+        active_entries: &[(u32, u32, u32)],
+    ) {
+        self.masks.insert(
+            name,
+            IlpMask::Sparse {
+                active_entries: active_entries.to_vec(),
+                schema_size,
+            },
+        );
     }
 
     pub fn get_mask(&self, name: &str) -> Option<&IlpMask> {

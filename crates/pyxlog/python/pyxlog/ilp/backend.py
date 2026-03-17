@@ -119,9 +119,9 @@ class SparseMaskBackend:
     This gives a smaller, more focused parameter space that converges
     faster on the correct candidate.
 
-    Passes DLPack-wrapped soft-probs directly to Rust via
-    set_rule_mask_sparse — no Python-side N^3 materialization.
-    Rust owns top-k ranking and sparse mask construction.
+    Passes only the selected candidate subset to Rust via
+    set_rule_mask_sparse_selected — no Python-side N^3 materialization
+    and no Rust-side download of the full soft-probability vector.
     """
 
     def init_weights(self, C: int, n: int, device: str) -> torch.Tensor:
@@ -162,21 +162,22 @@ class SparseMaskBackend:
                     soft[li] = cand_probs[orig_ijk[key]].detach().double()
 
         effective_budget = min(budget, soft.numel())
+        selected = torch.argsort(
+            soft,
+            descending=True,
+            stable=True,
+        )[:effective_budget]
+        selected_soft = soft.index_select(0, selected).contiguous()
+        selected_ids = [int(i) for i in selected.detach().cpu().tolist()]
 
-        candidate_ids = list(range(C_live))
-        prog.set_rule_mask_sparse(
-            mask_name, candidate_ids, soft.contiguous(), effective_budget,
+        prog.set_rule_mask_sparse_selected(
+            mask_name,
+            selected_ids,
+            selected_soft,
             allow_recursive,
         )
-        selected = torch.topk(
-            soft,
-            k=min(effective_budget, soft.numel()),
-            largest=True,
-            sorted=True,
-        ).indices
         selected_hard = []
-        for i in selected.detach().cpu().tolist():
-            idx = int(i)
+        for idx in selected_ids:
             orig_idx = live_to_orig[idx] if 0 <= idx < len(live_to_orig) else None
             if orig_idx is not None:
                 selected_hard.append(orig_idx)

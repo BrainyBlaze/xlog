@@ -5,16 +5,10 @@ use common::setup_provider;
 use xlog_core::{ScalarType, Schema};
 use xlog_cuda::CudaKernelProvider;
 
-fn make_mask_buffer(
-    provider: &CudaKernelProvider,
-    data: &[f32],
-) -> xlog_cuda::CudaBuffer {
+fn make_mask_buffer(provider: &CudaKernelProvider, data: &[f32]) -> xlog_cuda::CudaBuffer {
     let schema = Schema::new(vec![("c0".to_string(), ScalarType::F32)]);
     provider
-        .create_buffer_from_slices(
-            &[bytemuck::cast_slice(data)],
-            schema,
-        )
+        .create_buffer_from_slices(&[bytemuck::cast_slice(data)], schema)
         .expect("create mask buffer")
 }
 
@@ -121,12 +115,15 @@ fn test_ilp_module_loads() {
         eprintln!("Skipping: no CUDA device");
         return;
     };
-    use xlog_cuda::provider::{ILP_MODULE, ilp_kernels};
-    let func = provider.device().inner().get_func(
-        ILP_MODULE,
-        ilp_kernels::EXTRACT_NONZERO_INDICES,
+    use xlog_cuda::provider::{ilp_kernels, ILP_MODULE};
+    let func = provider
+        .device()
+        .inner()
+        .get_func(ILP_MODULE, ilp_kernels::EXTRACT_NONZERO_INDICES);
+    assert!(
+        func.is_some(),
+        "extract_nonzero_indices kernel must be loadable"
     );
-    assert!(func.is_some(), "extract_nonzero_indices kernel must be loadable");
 }
 
 // T2.2: Multi-element extraction
@@ -144,11 +141,14 @@ fn test_extract_nonzero_multiple_active() {
 
     // Activate 3 entries with distinct priorities
     // (0,1,2) at flat 5, priority 0.9
-    hard[5] = 1.0; soft[5] = 0.9;
+    hard[5] = 1.0;
+    soft[5] = 0.9;
     // (1,0,1) at flat 10, priority 0.5
-    hard[10] = 1.0; soft[10] = 0.5;
+    hard[10] = 1.0;
+    soft[10] = 0.5;
     // (2,2,0) at flat 24, priority 0.8
-    hard[24] = 1.0; soft[24] = 0.8;
+    hard[24] = 1.0;
+    soft[24] = 0.8;
 
     let hard_buf = make_mask_buffer(&provider, &hard);
     let soft_buf = make_mask_buffer(&provider, &soft);

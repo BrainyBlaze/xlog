@@ -161,11 +161,9 @@ impl Executor {
             )));
         }
         if left.is_empty() {
-            return self
-                .provider
-                .memory()
-                .alloc::<u8>(0)
-                .map_err(|e| XlogError::execution_ctx("compare_buffers_mask", "allocate empty mask", &e));
+            return self.provider.memory().alloc::<u8>(0).map_err(|e| {
+                XlogError::execution_ctx("compare_buffers_mask", "allocate empty mask", &e)
+            });
         }
 
         let left_type = left
@@ -528,11 +526,7 @@ impl Executor {
     }
 
     /// Build a projected schema from ProjectExpr list
-    pub(crate) fn project_schema(
-        &self,
-        input: &Schema,
-        columns: &[ProjectExpr],
-    ) -> Result<Schema> {
+    pub(crate) fn project_schema(&self, input: &Schema, columns: &[ProjectExpr]) -> Result<Schema> {
         let mut projected_columns: Vec<(String, ScalarType)> = Vec::with_capacity(columns.len());
         for proj_expr in columns {
             match proj_expr {

@@ -55,15 +55,25 @@ pub trait GpuScalar: sealed::Sealed + cudarc::driver::DeviceRepr + Copy + Send +
 
     /// Optional fused compare+scan kernel (phase 1). Only u32 and f64 have optimized
     /// fused-scan paths. Returns None for types using the mask+compact path.
-    fn filter_scan_phase1_kernel() -> Option<&'static str> { None }
+    fn filter_scan_phase1_kernel() -> Option<&'static str> {
+        None
+    }
 }
 
 impl GpuScalar for u8 {
     const BYTE_WIDTH: usize = 1;
-    fn from_le_bytes(bytes: &[u8]) -> Self { bytes[0] }
-    fn to_le_bytes_into(self, buf: &mut [u8]) { buf[0] = self; }
-    fn filter_compare_kernel() -> &'static str { "filter_compare_u8" }
-    fn compare_col_kernel() -> &'static str { "filter_compare_u8_col" }
+    fn from_le_bytes(bytes: &[u8]) -> Self {
+        bytes[0]
+    }
+    fn to_le_bytes_into(self, buf: &mut [u8]) {
+        buf[0] = self;
+    }
+    fn filter_compare_kernel() -> &'static str {
+        "filter_compare_u8"
+    }
+    fn compare_col_kernel() -> &'static str {
+        "filter_compare_u8_col"
+    }
     fn allowed_scalar_types() -> &'static [xlog_core::ScalarType] {
         &[xlog_core::ScalarType::Bool]
     }
@@ -71,10 +81,18 @@ impl GpuScalar for u8 {
 
 impl GpuScalar for u32 {
     const BYTE_WIDTH: usize = 4;
-    fn from_le_bytes(bytes: &[u8]) -> Self { u32::from_le_bytes(bytes.try_into().unwrap()) }
-    fn to_le_bytes_into(self, buf: &mut [u8]) { buf.copy_from_slice(&self.to_le_bytes()); }
-    fn filter_compare_kernel() -> &'static str { "filter_compare_u32" }
-    fn compare_col_kernel() -> &'static str { "filter_compare_u32_col" }
+    fn from_le_bytes(bytes: &[u8]) -> Self {
+        u32::from_le_bytes(bytes.try_into().unwrap())
+    }
+    fn to_le_bytes_into(self, buf: &mut [u8]) {
+        buf.copy_from_slice(&self.to_le_bytes());
+    }
+    fn filter_compare_kernel() -> &'static str {
+        "filter_compare_u32"
+    }
+    fn compare_col_kernel() -> &'static str {
+        "filter_compare_u32_col"
+    }
     fn allowed_scalar_types() -> &'static [xlog_core::ScalarType] {
         &[xlog_core::ScalarType::U32, xlog_core::ScalarType::Symbol]
     }
@@ -85,10 +103,18 @@ impl GpuScalar for u32 {
 
 impl GpuScalar for u64 {
     const BYTE_WIDTH: usize = 8;
-    fn from_le_bytes(bytes: &[u8]) -> Self { u64::from_le_bytes(bytes.try_into().unwrap()) }
-    fn to_le_bytes_into(self, buf: &mut [u8]) { buf.copy_from_slice(&self.to_le_bytes()); }
-    fn filter_compare_kernel() -> &'static str { "filter_compare_u64" }
-    fn compare_col_kernel() -> &'static str { "filter_compare_u64_col" }
+    fn from_le_bytes(bytes: &[u8]) -> Self {
+        u64::from_le_bytes(bytes.try_into().unwrap())
+    }
+    fn to_le_bytes_into(self, buf: &mut [u8]) {
+        buf.copy_from_slice(&self.to_le_bytes());
+    }
+    fn filter_compare_kernel() -> &'static str {
+        "filter_compare_u64"
+    }
+    fn compare_col_kernel() -> &'static str {
+        "filter_compare_u64_col"
+    }
     fn allowed_scalar_types() -> &'static [xlog_core::ScalarType] {
         &[xlog_core::ScalarType::U64]
     }
@@ -96,10 +122,18 @@ impl GpuScalar for u64 {
 
 impl GpuScalar for i32 {
     const BYTE_WIDTH: usize = 4;
-    fn from_le_bytes(bytes: &[u8]) -> Self { i32::from_le_bytes(bytes.try_into().unwrap()) }
-    fn to_le_bytes_into(self, buf: &mut [u8]) { buf.copy_from_slice(&self.to_le_bytes()); }
-    fn filter_compare_kernel() -> &'static str { "filter_compare_i32" }
-    fn compare_col_kernel() -> &'static str { "filter_compare_i32_col" }
+    fn from_le_bytes(bytes: &[u8]) -> Self {
+        i32::from_le_bytes(bytes.try_into().unwrap())
+    }
+    fn to_le_bytes_into(self, buf: &mut [u8]) {
+        buf.copy_from_slice(&self.to_le_bytes());
+    }
+    fn filter_compare_kernel() -> &'static str {
+        "filter_compare_i32"
+    }
+    fn compare_col_kernel() -> &'static str {
+        "filter_compare_i32_col"
+    }
     fn allowed_scalar_types() -> &'static [xlog_core::ScalarType] {
         &[xlog_core::ScalarType::I32]
     }
@@ -107,10 +141,18 @@ impl GpuScalar for i32 {
 
 impl GpuScalar for i64 {
     const BYTE_WIDTH: usize = 8;
-    fn from_le_bytes(bytes: &[u8]) -> Self { i64::from_le_bytes(bytes.try_into().unwrap()) }
-    fn to_le_bytes_into(self, buf: &mut [u8]) { buf.copy_from_slice(&self.to_le_bytes()); }
-    fn filter_compare_kernel() -> &'static str { "filter_compare_i64" }
-    fn compare_col_kernel() -> &'static str { "filter_compare_i64_col" }
+    fn from_le_bytes(bytes: &[u8]) -> Self {
+        i64::from_le_bytes(bytes.try_into().unwrap())
+    }
+    fn to_le_bytes_into(self, buf: &mut [u8]) {
+        buf.copy_from_slice(&self.to_le_bytes());
+    }
+    fn filter_compare_kernel() -> &'static str {
+        "filter_compare_i64"
+    }
+    fn compare_col_kernel() -> &'static str {
+        "filter_compare_i64_col"
+    }
     fn allowed_scalar_types() -> &'static [xlog_core::ScalarType] {
         &[xlog_core::ScalarType::I64]
     }
@@ -118,10 +160,18 @@ impl GpuScalar for i64 {
 
 impl GpuScalar for f32 {
     const BYTE_WIDTH: usize = 4;
-    fn from_le_bytes(bytes: &[u8]) -> Self { f32::from_le_bytes(bytes.try_into().unwrap()) }
-    fn to_le_bytes_into(self, buf: &mut [u8]) { buf.copy_from_slice(&self.to_le_bytes()); }
-    fn filter_compare_kernel() -> &'static str { "filter_compare_f32" }
-    fn compare_col_kernel() -> &'static str { "filter_compare_f32_col" }
+    fn from_le_bytes(bytes: &[u8]) -> Self {
+        f32::from_le_bytes(bytes.try_into().unwrap())
+    }
+    fn to_le_bytes_into(self, buf: &mut [u8]) {
+        buf.copy_from_slice(&self.to_le_bytes());
+    }
+    fn filter_compare_kernel() -> &'static str {
+        "filter_compare_f32"
+    }
+    fn compare_col_kernel() -> &'static str {
+        "filter_compare_f32_col"
+    }
     fn allowed_scalar_types() -> &'static [xlog_core::ScalarType] {
         &[xlog_core::ScalarType::F32]
     }
@@ -129,10 +179,18 @@ impl GpuScalar for f32 {
 
 impl GpuScalar for f64 {
     const BYTE_WIDTH: usize = 8;
-    fn from_le_bytes(bytes: &[u8]) -> Self { f64::from_le_bytes(bytes.try_into().unwrap()) }
-    fn to_le_bytes_into(self, buf: &mut [u8]) { buf.copy_from_slice(&self.to_le_bytes()); }
-    fn filter_compare_kernel() -> &'static str { "filter_compare_f64" }
-    fn compare_col_kernel() -> &'static str { "filter_compare_f64_col" }
+    fn from_le_bytes(bytes: &[u8]) -> Self {
+        f64::from_le_bytes(bytes.try_into().unwrap())
+    }
+    fn to_le_bytes_into(self, buf: &mut [u8]) {
+        buf.copy_from_slice(&self.to_le_bytes());
+    }
+    fn filter_compare_kernel() -> &'static str {
+        "filter_compare_f64"
+    }
+    fn compare_col_kernel() -> &'static str {
+        "filter_compare_f64_col"
+    }
     fn allowed_scalar_types() -> &'static [xlog_core::ScalarType] {
         &[xlog_core::ScalarType::F64]
     }
@@ -158,8 +216,12 @@ impl GpuScalar for bool {
     }
 
     // Bool uses the u8 kernel on the GPU side.
-    fn filter_compare_kernel() -> &'static str { "filter_compare_u8" }
-    fn compare_col_kernel() -> &'static str { "filter_compare_u8_col" }
+    fn filter_compare_kernel() -> &'static str {
+        "filter_compare_u8"
+    }
+    fn compare_col_kernel() -> &'static str {
+        "filter_compare_u8_col"
+    }
     fn allowed_scalar_types() -> &'static [xlog_core::ScalarType] {
         &[xlog_core::ScalarType::Bool]
     }
@@ -178,25 +240,53 @@ mod tests {
     }
 
     #[test]
-    fn test_gpu_scalar_roundtrip_u8() { roundtrip(42u8); roundtrip(0u8); roundtrip(255u8); }
+    fn test_gpu_scalar_roundtrip_u8() {
+        roundtrip(42u8);
+        roundtrip(0u8);
+        roundtrip(255u8);
+    }
 
     #[test]
-    fn test_gpu_scalar_roundtrip_u32() { roundtrip(0u32); roundtrip(42u32); roundtrip(u32::MAX); }
+    fn test_gpu_scalar_roundtrip_u32() {
+        roundtrip(0u32);
+        roundtrip(42u32);
+        roundtrip(u32::MAX);
+    }
 
     #[test]
-    fn test_gpu_scalar_roundtrip_u64() { roundtrip(0u64); roundtrip(42u64); roundtrip(u64::MAX); }
+    fn test_gpu_scalar_roundtrip_u64() {
+        roundtrip(0u64);
+        roundtrip(42u64);
+        roundtrip(u64::MAX);
+    }
 
     #[test]
-    fn test_gpu_scalar_roundtrip_i32() { roundtrip(0i32); roundtrip(-1i32); roundtrip(i32::MAX); }
+    fn test_gpu_scalar_roundtrip_i32() {
+        roundtrip(0i32);
+        roundtrip(-1i32);
+        roundtrip(i32::MAX);
+    }
 
     #[test]
-    fn test_gpu_scalar_roundtrip_i64() { roundtrip(0i64); roundtrip(-1i64); roundtrip(i64::MAX); }
+    fn test_gpu_scalar_roundtrip_i64() {
+        roundtrip(0i64);
+        roundtrip(-1i64);
+        roundtrip(i64::MAX);
+    }
 
     #[test]
-    fn test_gpu_scalar_roundtrip_f32() { roundtrip(0.0f32); roundtrip(-1.5f32); roundtrip(f32::INFINITY); }
+    fn test_gpu_scalar_roundtrip_f32() {
+        roundtrip(0.0f32);
+        roundtrip(-1.5f32);
+        roundtrip(f32::INFINITY);
+    }
 
     #[test]
-    fn test_gpu_scalar_roundtrip_f64() { roundtrip(0.0f64); roundtrip(-1.5f64); roundtrip(f64::INFINITY); }
+    fn test_gpu_scalar_roundtrip_f64() {
+        roundtrip(0.0f64);
+        roundtrip(-1.5f64);
+        roundtrip(f64::INFINITY);
+    }
 
     #[test]
     fn test_gpu_scalar_roundtrip_bool() {

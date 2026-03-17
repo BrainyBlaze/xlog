@@ -117,11 +117,7 @@ fn read_i32_vec(data: &[u8], offset: usize, count: usize) -> Vec<i32> {
         .collect()
 }
 
-fn write_artifact_to(
-    dir: &Path,
-    key: &CircuitCacheKey,
-    artifact: &CircuitArtifact,
-) -> Result<()> {
+fn write_artifact_to(dir: &Path, key: &CircuitCacheKey, artifact: &CircuitArtifact) -> Result<()> {
     fs::create_dir_all(dir).map_err(io_err)?;
 
     let path = dir.join(artifact_filename(key));
@@ -132,15 +128,22 @@ fn write_artifact_to(
     f.write_all(&MAGIC.to_le_bytes()).map_err(io_err)?;
     f.write_all(&FORMAT_VERSION.to_le_bytes()).map_err(io_err)?;
     f.write_all(&key.cnf_hash.to_le_bytes()).map_err(io_err)?;
-    f.write_all(&key.config_hash.to_le_bytes()).map_err(io_err)?;
-    f.write_all(&key.random_vars_hash.to_le_bytes()).map_err(io_err)?;
+    f.write_all(&key.config_hash.to_le_bytes())
+        .map_err(io_err)?;
+    f.write_all(&key.random_vars_hash.to_le_bytes())
+        .map_err(io_err)?;
     f.write_all(&key.sm.to_le_bytes()).map_err(io_err)?;
-    f.write_all(&artifact.num_nodes.to_le_bytes()).map_err(io_err)?;
-    f.write_all(&artifact.num_edges.to_le_bytes()).map_err(io_err)?;
-    f.write_all(&artifact.num_levels.to_le_bytes()).map_err(io_err)?;
+    f.write_all(&artifact.num_nodes.to_le_bytes())
+        .map_err(io_err)?;
+    f.write_all(&artifact.num_edges.to_le_bytes())
+        .map_err(io_err)?;
+    f.write_all(&artifact.num_levels.to_le_bytes())
+        .map_err(io_err)?;
     f.write_all(&artifact.root.to_le_bytes()).map_err(io_err)?;
-    f.write_all(&artifact.max_var.to_le_bytes()).map_err(io_err)?;
-    f.write_all(&[artifact.has_free_var_mask as u8]).map_err(io_err)?;
+    f.write_all(&artifact.max_var.to_le_bytes())
+        .map_err(io_err)?;
+    f.write_all(&[artifact.has_free_var_mask as u8])
+        .map_err(io_err)?;
     f.write_all(&[0u8; 3]).map_err(io_err)?; // padding
 
     // Write arrays as raw bytes
@@ -170,10 +173,7 @@ fn write_artifact_to(
     Ok(())
 }
 
-fn read_artifact_from(
-    dir: &Path,
-    key: &CircuitCacheKey,
-) -> Result<Option<CircuitArtifact>> {
+fn read_artifact_from(dir: &Path, key: &CircuitCacheKey) -> Result<Option<CircuitArtifact>> {
     let path = dir.join(artifact_filename(key));
 
     let data = match fs::read(&path) {
@@ -455,14 +455,14 @@ mod tests {
             has_free_var_mask: true,
             node_type: vec![1, 2, 3, 4],
             child_offsets: vec![0, 1, 2, 3, 3], // num_nodes + 1 = 5
-            child_indices: vec![1, 2, 3],        // num_edges = 3
-            lit: vec![0, 1, -1, 2],              // num_nodes = 4
+            child_indices: vec![1, 2, 3],       // num_edges = 3
+            lit: vec![0, 1, -1, 2],             // num_nodes = 4
             decision_var: vec![0, 1, 2, 0],
             decision_child_false: vec![0, 2, 3, 0],
             decision_child_true: vec![0, 1, 3, 0],
-            level_nodes: vec![0, 1, 2, 3],       // num_nodes = 4
-            level_offsets: vec![0, 1, 4],         // num_levels + 1 = 3
-            free_var_mask: vec![0, 1, 0],         // max_var + 1 = 3
+            level_nodes: vec![0, 1, 2, 3], // num_nodes = 4
+            level_offsets: vec![0, 1, 4],  // num_levels + 1 = 3
+            free_var_mask: vec![0, 1, 0],  // max_var + 1 = 3
         }
     }
 
@@ -516,15 +516,15 @@ mod tests {
             max_var: 3,
             has_free_var_mask: false,
             node_type: vec![1, 2, 3, 4, 5],
-            child_offsets: vec![0, 1, 2, 3, 4, 4],   // num_nodes + 1 = 6
-            child_indices: vec![1, 2, 3, 4],           // num_edges = 4
-            lit: vec![0, 1, -1, 2, -2],                // num_nodes = 5
+            child_offsets: vec![0, 1, 2, 3, 4, 4], // num_nodes + 1 = 6
+            child_indices: vec![1, 2, 3, 4],       // num_edges = 4
+            lit: vec![0, 1, -1, 2, -2],            // num_nodes = 5
             decision_var: vec![0, 1, 2, 3, 0],
             decision_child_false: vec![0, 2, 3, 4, 0],
             decision_child_true: vec![0, 1, 3, 4, 0],
-            level_nodes: vec![0, 1, 2, 3, 4],          // num_nodes = 5
-            level_offsets: vec![0, 1, 3, 5],            // num_levels + 1 = 4
-            free_var_mask: vec![0, 1, 0, 1],            // max_var + 1 = 4
+            level_nodes: vec![0, 1, 2, 3, 4], // num_nodes = 5
+            level_offsets: vec![0, 1, 3, 5],  // num_levels + 1 = 4
+            free_var_mask: vec![0, 1, 0, 1],  // max_var + 1 = 4
         };
 
         write_artifact_to(&dir, &key, &artifact).expect("write should succeed");
@@ -564,8 +564,7 @@ mod tests {
 
         // Different cnf_hash => different file path, so returns None (file not found)
         let different_key = make_key(0xBBBB);
-        let result =
-            read_artifact_from(&dir, &different_key).expect("read should not error");
+        let result = read_artifact_from(&dir, &different_key).expect("read should not error");
         assert!(result.is_none(), "mismatched key should return None");
 
         let _ = fs::remove_dir_all(&dir);

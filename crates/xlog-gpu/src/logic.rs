@@ -4,7 +4,7 @@ use std::sync::Arc;
 use xlog_core::{symbol, Result, Schema, XlogError};
 use xlog_cuda::{CudaBuffer, CudaKernelProvider};
 use xlog_logic::{BodyLiteral, Compiler, Program, Query, Term};
-use xlog_runtime::{ExecutionStats, Executor};
+use xlog_runtime::{ExecutionStats, Executor, RelationStore};
 
 pub struct LogicQueryResult {
     pub relation_name: String,
@@ -18,6 +18,7 @@ pub struct LogicEvalResult {
     pub stats: Option<ExecutionStats>,
 }
 
+#[derive(Clone)]
 pub struct LogicProgram {
     program: Program,
     plan: xlog_ir::ExecutionPlan,
@@ -87,6 +88,98 @@ impl LogicProgram {
 
     pub fn schemas(&self) -> &HashMap<String, Schema> {
         &self.schemas
+    }
+
+    /// Create a persistent user-visible relation store initialized with inline facts.
+    pub fn create_relation_store(
+        &self,
+        provider: Arc<CudaKernelProvider>,
+    ) -> Result<RelationStore> {
+        let mut store = RelationStore::new(provider.clone());
+        for (name, schema) in &self.schemas {
+            if is_user_visible_relation(name) {
+                store.put(name, provider.create_empty_buffer(schema.clone())?);
+            }
+        }
+        self.load_facts_into_store(provider.as_ref(), &mut store)?;
+        Ok(store)
+    }
+
+    /// Evaluate using a persistent base relation store.
+    ///
+    /// The provided store is treated as immutable seed state. Buffers are cloned
+    /// into a fresh executor for each evaluation so repeated evaluations reuse
+    /// stored relations without mutating the persistent store itself.
+    pub fn evaluate_with_relation_store(
+        &self,
+        provider: Arc<CudaKernelProvider>,
+        relation_store: &RelationStore,
+        profiling: bool,
+    ) -> Result<LogicEvalResult> {
+        let mut executor = Executor::new(provider.clone());
+        executor.set_profiling(profiling);
+        for (name, rel_id) in &self.rel_ids {
+            executor.register_relation(*rel_id, name);
+        }
+
+        for (name, schema) in &self.schemas {
+            executor
+                .store_mut()
+                .put(name, provider.create_empty_buffer(schema.clone())?);
+        }
+
+        for name in relation_store.names() {
+            let buffer = relation_store.get(name).ok_or_else(|| {
+                XlogError::Execution(format!(
+                    "Persistent relation {} disappeared during evaluation",
+                    name
+                ))
+            })?;
+            let schema = self.schemas.get(name).ok_or_else(|| {
+                XlogError::Execution(format!(
+                    "Persistent relation {} not declared in program schemas",
+                    name
+                ))
+            })?;
+            ensure_schema_type_compatible(schema, buffer.schema()).map_err(|e| {
+                XlogError::Execution(format!(
+                    "Persistent relation {} schema mismatch: {}",
+                    name, e
+                ))
+            })?;
+            executor
+                .store_mut()
+                .put(name, provider.clone_buffer(buffer)?);
+        }
+
+        executor.execute_plan(&self.plan)?;
+        self.enforce_constraints(&provider, &executor)?;
+
+        let mut queries: Vec<LogicQueryResult> = Vec::with_capacity(self.program.queries.len());
+        for (i, query) in self.program.queries.iter().enumerate() {
+            let relation_name = format!("__xlog_query_{}", i);
+            let buffer = executor.store_mut().remove(&relation_name).ok_or_else(|| {
+                XlogError::Execution(format!(
+                    "Missing query result relation {} (compiler bug?)",
+                    relation_name
+                ))
+            })?;
+
+            queries.push(LogicQueryResult {
+                relation_name,
+                columns: query_output_vars(query),
+                buffer,
+            });
+        }
+
+        let total_output_rows: u64 = queries.iter().map(|q| q.buffer.num_rows()).sum();
+        let stats = if profiling {
+            Some(executor.execution_stats(total_output_rows))
+        } else {
+            None
+        };
+
+        Ok(LogicEvalResult { queries, stats })
     }
 
     pub fn evaluate(
@@ -169,6 +262,14 @@ impl LogicProgram {
     }
 
     fn load_facts(&self, provider: &CudaKernelProvider, executor: &mut Executor) -> Result<()> {
+        self.load_facts_into_store(provider, executor.store_mut())
+    }
+
+    fn load_facts_into_store(
+        &self,
+        provider: &CudaKernelProvider,
+        store: &mut RelationStore,
+    ) -> Result<()> {
         let mut rows_by_pred: HashMap<&str, Vec<&[Term]>> = HashMap::new();
         for fact in self.program.facts() {
             rows_by_pred
@@ -206,7 +307,7 @@ impl LogicProgram {
             let slices: Vec<&[u8]> = columns.iter().map(|c| c.as_slice()).collect();
             let fact_buf = provider.create_buffer_from_slices(&slices, schema.clone())?;
 
-            let existing = executor.store().get(pred).ok_or_else(|| {
+            let existing = store.get(pred).ok_or_else(|| {
                 XlogError::Execution(format!(
                     "Missing base relation {} while loading facts",
                     pred
@@ -214,7 +315,7 @@ impl LogicProgram {
             })?;
 
             let merged = provider.union(existing, &fact_buf)?;
-            executor.store_mut().put(pred, merged);
+            store.put(pred, merged);
         }
 
         Ok(())
@@ -252,6 +353,10 @@ impl LogicProgram {
 
         Ok(())
     }
+}
+
+fn is_user_visible_relation(name: &str) -> bool {
+    !name.starts_with("__")
 }
 
 fn ensure_schema_type_compatible(expected: &Schema, actual: &Schema) -> Result<()> {

@@ -28,22 +28,19 @@ pub mod validation;
 
 pub use gpu_cnf::{encode_cnf_gpu, GpuCnfEncoding, GpuCnfVarTables};
 pub use gpu_d4::GpuCompileConfig;
-pub use gpu_pir::{
-    GpuPirGraph, GpuPirRoots, PIR_AND, PIR_LIT, PIR_NEG_LIT, PIR_OR,
-};
+pub use gpu_pir::{GpuPirGraph, GpuPirRoots, PIR_AND, PIR_LIT, PIR_NEG_LIT, PIR_OR};
 // PIR_CONST and PIR_DECISION are used within gpu_pir.rs and gpu_pir_intern.rs
 // via direct module paths; no crate-level re-export needed.
 pub use gpu_pir_intern::{GpuPirInterner, PirBatch};
+pub use gpu_weights::GpuWeights;
 pub use gpu_weights::{
     apply_query_vars_device, build_evidence_by_var_gpu, build_weights_gpu, map_nodes_to_vars_gpu,
     restore_query_vars_device,
 };
-pub use gpu_weights::GpuWeights;
 // GpuCsrCnf is currently unused (dead code); remove re-export.
 pub use validation::{
-    build_equivalence_queries_gpu,
-    validate_equivalence_gpu, validate_equivalence_gpu_gated, GpuEquivalenceConfig,
-    GpuEquivalenceQueries,
+    build_equivalence_queries_gpu, validate_equivalence_gpu, validate_equivalence_gpu_gated,
+    GpuEquivalenceConfig, GpuEquivalenceQueries,
 };
 // check_equivalence_gpu and check_equivalence_gpu_gated are called only
 // within validation.rs itself; no crate-level re-export needed.
@@ -137,7 +134,10 @@ pub fn compile_gpu_d4_and_verify(
         decision_var_limit,
         &circuit,
         provider,
-        GpuEquivalenceConfig { cdcl, reuse_workspace: config.incremental_verify },
+        GpuEquivalenceConfig {
+            cdcl,
+            reuse_workspace: config.incremental_verify,
+        },
     )?;
     Ok(circuit)
 }
@@ -168,7 +168,11 @@ pub fn compile_gpu_d4_and_verify_cached(
     // --- CNF hash stage ---
     #[cfg(debug_assertions)]
     eprintln!("[xlog-prob] compile_gpu_d4_and_verify_cached: hash_cnf_gpu");
-    let t_hash = if profiling { Some(Instant::now()) } else { None };
+    let t_hash = if profiling {
+        Some(Instant::now())
+    } else {
+        None
+    };
     let key = gpu_cache::hash_cnf_gpu(cnf, provider)?;
     if let Some(t0) = t_hash {
         provider
@@ -183,9 +187,7 @@ pub fn compile_gpu_d4_and_verify_cached(
             provider
                 .device()
                 .synchronize()
-                .map_err(|e| {
-                    XlogError::Kernel(format!("sync after hash_cnf_gpu failed: {}", e))
-                })?;
+                .map_err(|e| XlogError::Kernel(format!("sync after hash_cnf_gpu failed: {}", e)))?;
         }
     }
     #[cfg(debug_assertions)]
@@ -244,9 +246,7 @@ pub fn compile_gpu_d4_and_verify_cached(
             provider
                 .device()
                 .synchronize()
-                .map_err(|e| {
-                    XlogError::Kernel(format!("sync after disk cache restore: {}", e))
-                })?;
+                .map_err(|e| XlogError::Kernel(format!("sync after disk cache restore: {}", e)))?;
             profile.disk_cache_hit = true;
             let out_profile = if profiling { Some(profile) } else { None };
             return Ok((handle, out_profile));
@@ -260,7 +260,11 @@ pub fn compile_gpu_d4_and_verify_cached(
     // --- D4 compile stage ---
     #[cfg(debug_assertions)]
     eprintln!("[xlog-prob] compile_gpu_d4_and_verify_cached: compile_gpu_d4_gated");
-    let t_d4 = if profiling { Some(Instant::now()) } else { None };
+    let t_d4 = if profiling {
+        Some(Instant::now())
+    } else {
+        None
+    };
     let circuit_base =
         gpu_d4::compile_gpu_d4_gated(cnf, provider, &d4_config, handle.compile_needed_device())?;
     if let Some(t0) = t_d4 {
@@ -301,13 +305,20 @@ pub fn compile_gpu_d4_and_verify_cached(
     let cdcl = cdcl_config_from_compile(config)?;
     #[cfg(debug_assertions)]
     eprintln!("[xlog-prob] compile_gpu_d4_and_verify_cached: validate_equivalence_gpu_gated");
-    let t_verify = if profiling { Some(Instant::now()) } else { None };
+    let t_verify = if profiling {
+        Some(Instant::now())
+    } else {
+        None
+    };
     validate_equivalence_gpu_gated(
         cnf,
         verifier_decision_var_limit,
         &circuit_base,
         provider,
-        GpuEquivalenceConfig { cdcl, reuse_workspace: config.incremental_verify },
+        GpuEquivalenceConfig {
+            cdcl,
+            reuse_workspace: config.incremental_verify,
+        },
         handle.compile_needed_device(),
     )?;
     if let Some(t0) = t_verify {
@@ -333,7 +344,11 @@ pub fn compile_gpu_d4_and_verify_cached(
     //
     // Smoothing is evaluation-only (WMC/grad correctness); it is semantics-preserving and does not
     // need to participate in the equivalence check.
-    let t_smooth = if profiling { Some(Instant::now()) } else { None };
+    let t_smooth = if profiling {
+        Some(Instant::now())
+    } else {
+        None
+    };
     let circuit_eval = if random_vars.is_empty() {
         circuit_base
     } else {
@@ -370,7 +385,11 @@ pub fn compile_gpu_d4_and_verify_cached(
     // --- Cache store stage ---
     #[cfg(debug_assertions)]
     eprintln!("[xlog-prob] compile_gpu_d4_and_verify_cached: store_from_xgcf");
-    let t_store = if profiling { Some(Instant::now()) } else { None };
+    let t_store = if profiling {
+        Some(Instant::now())
+    } else {
+        None
+    };
     cache.store_from_xgcf(&mut handle, &circuit_eval)?;
     if let Some(t0) = t_store {
         provider
@@ -382,19 +401,20 @@ pub fn compile_gpu_d4_and_verify_cached(
     #[cfg(debug_assertions)]
     {
         if !profiling {
-            provider
-                .device()
-                .synchronize()
-                .map_err(|e| {
-                    XlogError::Kernel(format!("sync after store_from_xgcf failed: {}", e))
-                })?;
+            provider.device().synchronize().map_err(|e| {
+                XlogError::Kernel(format!("sync after store_from_xgcf failed: {}", e))
+            })?;
         }
     }
 
     // --- Free-var mask stage ---
     #[cfg(debug_assertions)]
     eprintln!("[xlog-prob] compile_gpu_d4_and_verify_cached: compute_free_var_mask_gpu_gated");
-    let t_fvm = if profiling { Some(Instant::now()) } else { None };
+    let t_fvm = if profiling {
+        Some(Instant::now())
+    } else {
+        None
+    };
     let free_var_mask = gpu_d4::compute_free_var_mask_gpu_gated(
         cnf,
         &circuit_eval,

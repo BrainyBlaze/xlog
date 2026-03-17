@@ -373,7 +373,10 @@ impl<'a> ExpansionContext<'a> {
 
     /// Expand all function calls in an arithmetic expression.
     /// Returns the expanded expression with all UDF calls inlined.
-    pub(crate) fn expand_expr_fully(&mut self, expr: &ArithExpr) -> Result<ArithExpr, FunctionError> {
+    pub(crate) fn expand_expr_fully(
+        &mut self,
+        expr: &ArithExpr,
+    ) -> Result<ArithExpr, FunctionError> {
         match expr {
             ArithExpr::Variable(_) | ArithExpr::Integer(_) | ArithExpr::Float(_) => {
                 Ok(expr.clone())

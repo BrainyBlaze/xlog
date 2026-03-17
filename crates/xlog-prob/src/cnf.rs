@@ -59,10 +59,7 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 /// Compute a canonical hash for each reachable PIR node.
 /// The hash depends only on node structure (variant + leaf/choice IDs + children's
 /// canonical hashes), not on PirNodeId numeric values.
-fn canonical_hashes(
-    pir: &PirGraph,
-    levels: &[Vec<PirNodeId>],
-) -> HashMap<PirNodeId, u64> {
+fn canonical_hashes(pir: &PirGraph, levels: &[Vec<PirNodeId>]) -> HashMap<PirNodeId, u64> {
     let mut canon: HashMap<PirNodeId, u64> = HashMap::new();
     for level in levels {
         for &id in level {
@@ -82,8 +79,7 @@ fn canonical_hashes(
                     fnv1a(&buf)
                 }
                 PirNode::And { children } => {
-                    let mut child_h: Vec<u64> =
-                        children.iter().map(|c| canon[c]).collect();
+                    let mut child_h: Vec<u64> = children.iter().map(|c| canon[c]).collect();
                     child_h.sort();
                     let mut buf = vec![3u8];
                     for h in child_h {
@@ -92,8 +88,7 @@ fn canonical_hashes(
                     fnv1a(&buf)
                 }
                 PirNode::Or { children } => {
-                    let mut child_h: Vec<u64> =
-                        children.iter().map(|c| canon[c]).collect();
+                    let mut child_h: Vec<u64> = children.iter().map(|c| canon[c]).collect();
                     child_h.sort();
                     let mut buf = vec![4u8];
                     for h in child_h {

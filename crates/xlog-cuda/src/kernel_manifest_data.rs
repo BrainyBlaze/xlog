@@ -164,11 +164,7 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
     KernelModuleSpec {
         cu_name: "set_ops",
         module_name: "xlog_set_ops",
-        kernels: &[
-            "concat_u32",
-            "concat_bytes",
-            "sorted_diff_mark",
-        ],
+        kernels: &["concat_u32", "concat_bytes", "sorted_diff_mark"],
     },
     KernelModuleSpec {
         cu_name: "pack",
@@ -296,9 +292,7 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
     KernelModuleSpec {
         cu_name: "mc_sample",
         module_name: "xlog_mc_sample",
-        kernels: &[
-            "mc_sample_bernoulli",
-        ],
+        kernels: &["mc_sample_bernoulli"],
     },
     KernelModuleSpec {
         cu_name: "mc_eval",

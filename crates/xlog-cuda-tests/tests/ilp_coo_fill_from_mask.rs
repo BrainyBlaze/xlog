@@ -30,23 +30,41 @@ fn test_ilp_coo_fill_from_mask_basic() {
     // Allocate output arrays large enough (offset 7 + 3 writes = need at least 10 elements)
     let coo_size = 16usize;
 
-    let mut mask = ctx.memory.alloc::<u8>(num_query as usize).expect("alloc mask");
-    let mut prefix_sum = ctx.memory.alloc::<u32>(num_query as usize).expect("alloc prefix_sum");
-    let mut fact_indices = ctx.memory.alloc::<u32>(num_query as usize).expect("alloc fact_indices");
-    let mut d_offsets = ctx.memory.alloc::<u32>(d_offsets_data.len()).expect("alloc d_offsets");
+    let mut mask = ctx
+        .memory
+        .alloc::<u8>(num_query as usize)
+        .expect("alloc mask");
+    let mut prefix_sum = ctx
+        .memory
+        .alloc::<u32>(num_query as usize)
+        .expect("alloc prefix_sum");
+    let mut fact_indices = ctx
+        .memory
+        .alloc::<u32>(num_query as usize)
+        .expect("alloc fact_indices");
+    let mut d_offsets = ctx
+        .memory
+        .alloc::<u32>(d_offsets_data.len())
+        .expect("alloc d_offsets");
     let mut coo_fact = ctx.memory.alloc::<u32>(coo_size).expect("alloc coo_fact");
     let mut coo_cand = ctx.memory.alloc::<u32>(coo_size).expect("alloc coo_cand");
 
     // Upload input data
-    ctx.htod_sync_copy_into(&mask_data, &mut mask).expect("upload mask");
-    ctx.htod_sync_copy_into(&prefix_sum_data, &mut prefix_sum).expect("upload prefix_sum");
-    ctx.htod_sync_copy_into(&fact_indices_data, &mut fact_indices).expect("upload fact_indices");
-    ctx.htod_sync_copy_into(&d_offsets_data, &mut d_offsets).expect("upload d_offsets");
+    ctx.htod_sync_copy_into(&mask_data, &mut mask)
+        .expect("upload mask");
+    ctx.htod_sync_copy_into(&prefix_sum_data, &mut prefix_sum)
+        .expect("upload prefix_sum");
+    ctx.htod_sync_copy_into(&fact_indices_data, &mut fact_indices)
+        .expect("upload fact_indices");
+    ctx.htod_sync_copy_into(&d_offsets_data, &mut d_offsets)
+        .expect("upload d_offsets");
 
     // Initialize output to zeros
     let zeros = vec![0u32; coo_size];
-    ctx.htod_sync_copy_into(&zeros, &mut coo_fact).expect("zero coo_fact");
-    ctx.htod_sync_copy_into(&zeros, &mut coo_cand).expect("zero coo_cand");
+    ctx.htod_sync_copy_into(&zeros, &mut coo_fact)
+        .expect("zero coo_fact");
+    ctx.htod_sync_copy_into(&zeros, &mut coo_cand)
+        .expect("zero coo_cand");
 
     // Launch kernel with split offset_idx / cand_value
     ctx.provider
@@ -82,12 +100,28 @@ fn test_ilp_coo_fill_from_mask_basic() {
 
     // Verify untouched positions remain zero
     for i in 0..7 {
-        assert_eq!(coo_fact_host[i], 0, "coo_fact[{}] should be untouched (0)", i);
-        assert_eq!(coo_cand_host[i], 0, "coo_cand[{}] should be untouched (0)", i);
+        assert_eq!(
+            coo_fact_host[i], 0,
+            "coo_fact[{}] should be untouched (0)",
+            i
+        );
+        assert_eq!(
+            coo_cand_host[i], 0,
+            "coo_cand[{}] should be untouched (0)",
+            i
+        );
     }
     for i in 10..coo_size {
-        assert_eq!(coo_fact_host[i], 0, "coo_fact[{}] should be untouched (0)", i);
-        assert_eq!(coo_cand_host[i], 0, "coo_cand[{}] should be untouched (0)", i);
+        assert_eq!(
+            coo_fact_host[i], 0,
+            "coo_fact[{}] should be untouched (0)",
+            i
+        );
+        assert_eq!(
+            coo_cand_host[i], 0,
+            "coo_cand[{}] should be untouched (0)",
+            i
+        );
     }
 
     println!("ilp_coo_fill_from_mask basic test PASSED");
@@ -146,22 +180,40 @@ fn test_ilp_coo_fill_from_mask_all_zeros() {
     let num_query: u32 = 4;
     let coo_size = 16usize;
 
-    let mut mask = ctx.memory.alloc::<u8>(num_query as usize).expect("alloc mask");
-    let mut prefix_sum = ctx.memory.alloc::<u32>(num_query as usize).expect("alloc prefix_sum");
-    let mut fact_indices = ctx.memory.alloc::<u32>(num_query as usize).expect("alloc fact_indices");
-    let mut d_offsets = ctx.memory.alloc::<u32>(d_offsets_data.len()).expect("alloc d_offsets");
+    let mut mask = ctx
+        .memory
+        .alloc::<u8>(num_query as usize)
+        .expect("alloc mask");
+    let mut prefix_sum = ctx
+        .memory
+        .alloc::<u32>(num_query as usize)
+        .expect("alloc prefix_sum");
+    let mut fact_indices = ctx
+        .memory
+        .alloc::<u32>(num_query as usize)
+        .expect("alloc fact_indices");
+    let mut d_offsets = ctx
+        .memory
+        .alloc::<u32>(d_offsets_data.len())
+        .expect("alloc d_offsets");
     let mut coo_fact = ctx.memory.alloc::<u32>(coo_size).expect("alloc coo_fact");
     let mut coo_cand = ctx.memory.alloc::<u32>(coo_size).expect("alloc coo_cand");
 
-    ctx.htod_sync_copy_into(&mask_data, &mut mask).expect("upload mask");
-    ctx.htod_sync_copy_into(&prefix_sum_data, &mut prefix_sum).expect("upload prefix_sum");
-    ctx.htod_sync_copy_into(&fact_indices_data, &mut fact_indices).expect("upload fact_indices");
-    ctx.htod_sync_copy_into(&d_offsets_data, &mut d_offsets).expect("upload d_offsets");
+    ctx.htod_sync_copy_into(&mask_data, &mut mask)
+        .expect("upload mask");
+    ctx.htod_sync_copy_into(&prefix_sum_data, &mut prefix_sum)
+        .expect("upload prefix_sum");
+    ctx.htod_sync_copy_into(&fact_indices_data, &mut fact_indices)
+        .expect("upload fact_indices");
+    ctx.htod_sync_copy_into(&d_offsets_data, &mut d_offsets)
+        .expect("upload d_offsets");
 
     // Initialize output to sentinel value 0xDEAD
     let sentinel = vec![0xDEADu32; coo_size];
-    ctx.htod_sync_copy_into(&sentinel, &mut coo_fact).expect("init coo_fact");
-    ctx.htod_sync_copy_into(&sentinel, &mut coo_cand).expect("init coo_cand");
+    ctx.htod_sync_copy_into(&sentinel, &mut coo_fact)
+        .expect("init coo_fact");
+    ctx.htod_sync_copy_into(&sentinel, &mut coo_cand)
+        .expect("init coo_cand");
 
     ctx.provider
         .ilp_coo_fill_from_mask_launch(

@@ -6,8 +6,8 @@
 // The EpochStats and TrainingHistory #[pyclass] struct definitions live in
 // lib.rs because pyclass registration order matters for the pymodule macro.
 
-use pyo3::prelude::*;
 use super::{CompiledProgram, TrainingHistory};
+use pyo3::prelude::*;
 
 /// Train a program for multiple epochs.
 ///
@@ -47,7 +47,7 @@ pub fn train_model(
     match (&val_queries, &patience) {
         (Some(_), None) | (None, Some(_)) => {
             return Err(pyo3::exceptions::PyValueError::new_err(
-                "val_queries and patience must both be provided for early stopping"
+                "val_queries and patience must both be provided for early stopping",
             ));
         }
         _ => {}
@@ -66,13 +66,21 @@ pub fn train_model(
         }
 
         let epoch_start = Instant::now();
-        let stats =
-            program.train_epoch_internal(py, &epoch_queries, batch_size, log_iter, max_grad_norm, &mut history)?;
+        let stats = program.train_epoch_internal(
+            py,
+            &epoch_queries,
+            batch_size,
+            log_iter,
+            max_grad_norm,
+            &mut history,
+        )?;
         history.add_epoch(stats.avg_loss, epoch_start.elapsed().as_secs_f64());
 
         println!(
             "Epoch {}/{}: avg_loss={:.6}",
-            epoch + 1, epochs, stats.avg_loss
+            epoch + 1,
+            epochs,
+            stats.avg_loss
         );
         use std::io::Write;
         let _ = std::io::stdout().flush();
@@ -121,7 +129,7 @@ pub fn train_model_tensor(
     match (&val_queries, &patience) {
         (Some(_), None) | (None, Some(_)) => {
             return Err(pyo3::exceptions::PyValueError::new_err(
-                "val_queries and patience must both be provided for early stopping"
+                "val_queries and patience must both be provided for early stopping",
             ));
         }
         _ => {}

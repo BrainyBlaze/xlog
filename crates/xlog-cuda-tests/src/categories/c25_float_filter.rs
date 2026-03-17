@@ -203,7 +203,10 @@ fn test_f64_nan_equality_ieee(ctx: &TestContext) -> TestResult {
     };
 
     // Test NaN == NaN (should be FALSE per IEEE 754)
-    let eq_result = match ctx.provider.filter::<f64>(&buffer, 0, f64::NAN, CompareOp::Eq) {
+    let eq_result = match ctx
+        .provider
+        .filter::<f64>(&buffer, 0, f64::NAN, CompareOp::Eq)
+    {
         Ok(f) => f,
         Err(e) => {
             return TestResult::error(
@@ -226,7 +229,10 @@ fn test_f64_nan_equality_ieee(ctx: &TestContext) -> TestResult {
     }
 
     // Test NaN != NaN (should be TRUE per IEEE 754) - all 6 values should pass
-    let ne_result = match ctx.provider.filter::<f64>(&buffer, 0, f64::NAN, CompareOp::Ne) {
+    let ne_result = match ctx
+        .provider
+        .filter::<f64>(&buffer, 0, f64::NAN, CompareOp::Ne)
+    {
         Ok(f) => f,
         Err(e) => {
             return TestResult::error(
@@ -456,7 +462,10 @@ fn test_f64_total_ordering_comprehensive(ctx: &TestContext) -> TestResult {
     }
 
     // Test: values >= NaN should include only NaN = 1 value
-    let ge_nan = match ctx.provider.filter::<f64>(&buffer, 0, f64::NAN, CompareOp::Ge) {
+    let ge_nan = match ctx
+        .provider
+        .filter::<f64>(&buffer, 0, f64::NAN, CompareOp::Ge)
+    {
         Ok(f) => f,
         Err(e) => {
             return TestResult::error(
@@ -620,7 +629,10 @@ fn test_f32_negative_zero_less_than_positive_zero(ctx: &TestContext) -> TestResu
     // Filter for values < 0.0 (which is +0.0)
     // Under total ordering, -0.0 < +0.0 is TRUE
     // So -0.0 (x2) and -1.0 should pass = 3 values
-    let filtered = match ctx.provider.filter::<f32>(&buffer, 0, 0.0f32, CompareOp::Lt) {
+    let filtered = match ctx
+        .provider
+        .filter::<f32>(&buffer, 0, 0.0f32, CompareOp::Lt)
+    {
         Ok(f) => f,
         Err(e) => {
             return TestResult::error(
@@ -684,7 +696,10 @@ fn test_f32_nan_equality_ieee(ctx: &TestContext) -> TestResult {
     };
 
     // Test NaN == NaN (should be FALSE per IEEE 754)
-    let eq_result = match ctx.provider.filter::<f32>(&buffer, 0, f32::NAN, CompareOp::Eq) {
+    let eq_result = match ctx
+        .provider
+        .filter::<f32>(&buffer, 0, f32::NAN, CompareOp::Eq)
+    {
         Ok(f) => f,
         Err(e) => {
             return TestResult::error(
@@ -707,7 +722,10 @@ fn test_f32_nan_equality_ieee(ctx: &TestContext) -> TestResult {
     }
 
     // Test NaN != NaN (should be TRUE per IEEE 754) - all 6 values should pass
-    let ne_result = match ctx.provider.filter::<f32>(&buffer, 0, f32::NAN, CompareOp::Ne) {
+    let ne_result = match ctx
+        .provider
+        .filter::<f32>(&buffer, 0, f32::NAN, CompareOp::Ne)
+    {
         Ok(f) => f,
         Err(e) => {
             return TestResult::error(
@@ -765,7 +783,10 @@ fn test_f32_nan_ordering_total(ctx: &TestContext) -> TestResult {
     };
 
     // Test NaN < 0.0 (should be FALSE - NaN is greater than 0.0 in total ordering)
-    let lt_result = match ctx.provider.filter::<f32>(&buffer, 0, 0.0f32, CompareOp::Lt) {
+    let lt_result = match ctx
+        .provider
+        .filter::<f32>(&buffer, 0, 0.0f32, CompareOp::Lt)
+    {
         Ok(f) => f,
         Err(e) => {
             return TestResult::error(
@@ -785,7 +806,10 @@ fn test_f32_nan_ordering_total(ctx: &TestContext) -> TestResult {
     }
 
     // Test NaN > 0.0 (should be TRUE - NaN is greater than 0.0 in total ordering)
-    let gt_result = match ctx.provider.filter::<f32>(&buffer, 0, 0.0f32, CompareOp::Gt) {
+    let gt_result = match ctx
+        .provider
+        .filter::<f32>(&buffer, 0, 0.0f32, CompareOp::Gt)
+    {
         Ok(f) => f,
         Err(e) => {
             return TestResult::error(
@@ -805,7 +829,10 @@ fn test_f32_nan_ordering_total(ctx: &TestContext) -> TestResult {
     }
 
     // Test NaN <= 0.0 (should be FALSE - NaN is greater than 0.0 in total ordering)
-    let le_result = match ctx.provider.filter::<f32>(&buffer, 0, 0.0f32, CompareOp::Le) {
+    let le_result = match ctx
+        .provider
+        .filter::<f32>(&buffer, 0, 0.0f32, CompareOp::Le)
+    {
         Ok(f) => f,
         Err(e) => {
             return TestResult::error(
@@ -825,7 +852,10 @@ fn test_f32_nan_ordering_total(ctx: &TestContext) -> TestResult {
     }
 
     // Test NaN >= 0.0 (should be TRUE - NaN is greater than 0.0 in total ordering)
-    let ge_result = match ctx.provider.filter::<f32>(&buffer, 0, 0.0f32, CompareOp::Ge) {
+    let ge_result = match ctx
+        .provider
+        .filter::<f32>(&buffer, 0, 0.0f32, CompareOp::Ge)
+    {
         Ok(f) => f,
         Err(e) => {
             return TestResult::error(
@@ -888,7 +918,10 @@ fn test_f32_total_ordering_comprehensive(ctx: &TestContext) -> TestResult {
     };
 
     // Test: values < +0.0 should include -Inf, -1.0, -0.0 = 3 values
-    let lt_zero = match ctx.provider.filter::<f32>(&buffer, 0, 0.0f32, CompareOp::Lt) {
+    let lt_zero = match ctx
+        .provider
+        .filter::<f32>(&buffer, 0, 0.0f32, CompareOp::Lt)
+    {
         Ok(f) => f,
         Err(e) => {
             return TestResult::error(
@@ -937,7 +970,10 @@ fn test_f32_total_ordering_comprehensive(ctx: &TestContext) -> TestResult {
     }
 
     // Test: values >= NaN should include only NaN = 1 value
-    let ge_nan = match ctx.provider.filter::<f32>(&buffer, 0, f32::NAN, CompareOp::Ge) {
+    let ge_nan = match ctx
+        .provider
+        .filter::<f32>(&buffer, 0, f32::NAN, CompareOp::Ge)
+    {
         Ok(f) => f,
         Err(e) => {
             return TestResult::error(

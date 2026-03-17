@@ -24,7 +24,9 @@ fn test_filter_u32_eq() {
     let buffer = provider
         .create_buffer_from_u32_columns(&[&col0, &col1], schema)
         .unwrap();
-    let filtered = provider.filter::<u32>(&buffer, 0, 2, CompareOp::Eq).unwrap();
+    let filtered = provider
+        .filter::<u32>(&buffer, 0, 2, CompareOp::Eq)
+        .unwrap();
 
     let result0 = provider.download_column::<u32>(&filtered, 0).unwrap();
     let result1 = provider.download_column::<u32>(&filtered, 1).unwrap();
@@ -47,7 +49,9 @@ fn test_filter_u32_gt() {
     let buffer = provider
         .create_buffer_from_slice::<u32>(&col0, schema)
         .unwrap();
-    let filtered = provider.filter::<u32>(&buffer, 0, 2, CompareOp::Gt).unwrap();
+    let filtered = provider
+        .filter::<u32>(&buffer, 0, 2, CompareOp::Gt)
+        .unwrap();
 
     let result = provider.download_column::<u32>(&filtered, 0).unwrap();
     assert_eq!(result, vec![3, 4, 5]);
@@ -66,7 +70,9 @@ fn test_filter_no_matches() {
     let buffer = provider
         .create_buffer_from_slice::<u32>(&col0, schema)
         .unwrap();
-    let filtered = provider.filter::<u32>(&buffer, 0, 99, CompareOp::Eq).unwrap();
+    let filtered = provider
+        .filter::<u32>(&buffer, 0, 99, CompareOp::Eq)
+        .unwrap();
 
     let result = provider.download_column::<u32>(&filtered, 0).unwrap();
     assert!(result.is_empty());
@@ -128,22 +134,30 @@ fn test_filter_u32_all_ops() {
         .unwrap();
 
     // Test Lt (less than 3): [1, 2]
-    let filtered = provider.filter::<u32>(&buffer, 0, 3, CompareOp::Lt).unwrap();
+    let filtered = provider
+        .filter::<u32>(&buffer, 0, 3, CompareOp::Lt)
+        .unwrap();
     let result = provider.download_column::<u32>(&filtered, 0).unwrap();
     assert_eq!(result, vec![1, 2]);
 
     // Test Le (less than or equal 3): [1, 2, 3]
-    let filtered = provider.filter::<u32>(&buffer, 0, 3, CompareOp::Le).unwrap();
+    let filtered = provider
+        .filter::<u32>(&buffer, 0, 3, CompareOp::Le)
+        .unwrap();
     let result = provider.download_column::<u32>(&filtered, 0).unwrap();
     assert_eq!(result, vec![1, 2, 3]);
 
     // Test Ge (greater than or equal 3): [3, 4, 5]
-    let filtered = provider.filter::<u32>(&buffer, 0, 3, CompareOp::Ge).unwrap();
+    let filtered = provider
+        .filter::<u32>(&buffer, 0, 3, CompareOp::Ge)
+        .unwrap();
     let result = provider.download_column::<u32>(&filtered, 0).unwrap();
     assert_eq!(result, vec![3, 4, 5]);
 
     // Test Ne (not equal 3): [1, 2, 4, 5]
-    let filtered = provider.filter::<u32>(&buffer, 0, 3, CompareOp::Ne).unwrap();
+    let filtered = provider
+        .filter::<u32>(&buffer, 0, 3, CompareOp::Ne)
+        .unwrap();
     let result = provider.download_column::<u32>(&filtered, 0).unwrap();
     assert_eq!(result, vec![1, 2, 4, 5]);
 }
@@ -183,7 +197,9 @@ fn test_filter_f64_eq() {
     let values: Vec<f64> = vec![1.0, 2.5, 3.0, 2.5, 4.0];
     let buffer = create_f64_buffer(&provider, &values, "col0");
 
-    let filtered = provider.filter::<f64>(&buffer, 0, 2.5, CompareOp::Eq).unwrap();
+    let filtered = provider
+        .filter::<f64>(&buffer, 0, 2.5, CompareOp::Eq)
+        .unwrap();
     let result = download_f64_column(&provider, &filtered, 0);
 
     assert_eq!(result, vec![2.5, 2.5]);
@@ -200,7 +216,9 @@ fn test_filter_f64_gt() {
     let values: Vec<f64> = vec![1.0, 2.0, 3.0, 4.0, 5.0];
     let buffer = create_f64_buffer(&provider, &values, "col0");
 
-    let filtered = provider.filter::<f64>(&buffer, 0, 2.0, CompareOp::Gt).unwrap();
+    let filtered = provider
+        .filter::<f64>(&buffer, 0, 2.0, CompareOp::Gt)
+        .unwrap();
     let result = download_f64_column(&provider, &filtered, 0);
 
     assert_eq!(result, vec![3.0, 4.0, 5.0]);
@@ -217,7 +235,9 @@ fn test_filter_i32_u64_f32_bool_and_column_column_compare() {
     let buf_i32 = provider
         .create_buffer_from_slice::<i32>(&[-2, 0, 3], schema_i32)
         .unwrap();
-    let filtered_i32 = provider.filter::<i32>(&buf_i32, 0, -1, CompareOp::Gt).unwrap();
+    let filtered_i32 = provider
+        .filter::<i32>(&buf_i32, 0, -1, CompareOp::Gt)
+        .unwrap();
     let vals_i32 = provider.download_column::<i32>(&filtered_i32, 0).unwrap();
     assert_eq!(vals_i32, vec![0, 3]);
 
@@ -225,7 +245,9 @@ fn test_filter_i32_u64_f32_bool_and_column_column_compare() {
     let buf_u64 = provider
         .create_buffer_from_slice::<u64>(&[1, 5, 9], schema_u64)
         .unwrap();
-    let filtered_u64 = provider.filter::<u64>(&buf_u64, 0, 5, CompareOp::Ge).unwrap();
+    let filtered_u64 = provider
+        .filter::<u64>(&buf_u64, 0, 5, CompareOp::Ge)
+        .unwrap();
     let vals_u64 = provider.download_column::<u64>(&filtered_u64, 0).unwrap();
     assert_eq!(vals_u64, vec![5, 9]);
 
@@ -275,7 +297,9 @@ fn test_filter_f64_lt() {
     let values: Vec<f64> = vec![1.0, 2.0, 3.0, 4.0, 5.0];
     let buffer = create_f64_buffer(&provider, &values, "col0");
 
-    let filtered = provider.filter::<f64>(&buffer, 0, 3.0, CompareOp::Lt).unwrap();
+    let filtered = provider
+        .filter::<f64>(&buffer, 0, 3.0, CompareOp::Lt)
+        .unwrap();
     let result = download_f64_column(&provider, &filtered, 0);
 
     assert_eq!(result, vec![1.0, 2.0]);
@@ -292,22 +316,30 @@ fn test_filter_f64_all_ops() {
     let buffer = create_f64_buffer(&provider, &values, "col0");
 
     // Test Lt (less than 3.0): [1.0, 2.0]
-    let filtered = provider.filter::<f64>(&buffer, 0, 3.0, CompareOp::Lt).unwrap();
+    let filtered = provider
+        .filter::<f64>(&buffer, 0, 3.0, CompareOp::Lt)
+        .unwrap();
     let result = download_f64_column(&provider, &filtered, 0);
     assert_eq!(result, vec![1.0, 2.0]);
 
     // Test Le (less than or equal 3.0): [1.0, 2.0, 3.0]
-    let filtered = provider.filter::<f64>(&buffer, 0, 3.0, CompareOp::Le).unwrap();
+    let filtered = provider
+        .filter::<f64>(&buffer, 0, 3.0, CompareOp::Le)
+        .unwrap();
     let result = download_f64_column(&provider, &filtered, 0);
     assert_eq!(result, vec![1.0, 2.0, 3.0]);
 
     // Test Ge (greater than or equal 3.0): [3.0, 4.0, 5.0]
-    let filtered = provider.filter::<f64>(&buffer, 0, 3.0, CompareOp::Ge).unwrap();
+    let filtered = provider
+        .filter::<f64>(&buffer, 0, 3.0, CompareOp::Ge)
+        .unwrap();
     let result = download_f64_column(&provider, &filtered, 0);
     assert_eq!(result, vec![3.0, 4.0, 5.0]);
 
     // Test Ne (not equal 3.0): [1.0, 2.0, 4.0, 5.0]
-    let filtered = provider.filter::<f64>(&buffer, 0, 3.0, CompareOp::Ne).unwrap();
+    let filtered = provider
+        .filter::<f64>(&buffer, 0, 3.0, CompareOp::Ne)
+        .unwrap();
     let result = download_f64_column(&provider, &filtered, 0);
     assert_eq!(result, vec![1.0, 2.0, 4.0, 5.0]);
 }
@@ -322,7 +354,9 @@ fn test_filter_f64_no_matches() {
     let values: Vec<f64> = vec![1.0, 2.0, 3.0];
     let buffer = create_f64_buffer(&provider, &values, "col0");
 
-    let filtered = provider.filter::<f64>(&buffer, 0, 99.0, CompareOp::Eq).unwrap();
+    let filtered = provider
+        .filter::<f64>(&buffer, 0, 99.0, CompareOp::Eq)
+        .unwrap();
     let result = provider.download_column::<f64>(&filtered, 0).unwrap();
     assert!(result.is_empty());
 }

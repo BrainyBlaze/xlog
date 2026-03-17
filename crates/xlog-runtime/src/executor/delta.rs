@@ -42,11 +42,7 @@ impl DeltaRelationTracker {
             .get(pred)
             .map(|(_rel_id, name)| name.as_str())
             .ok_or_else(|| {
-                xlog_core::XlogError::execution_ctx(
-                    "delta_name",
-                    "missing delta relation",
-                    &pred,
-                )
+                xlog_core::XlogError::execution_ctx("delta_name", "missing delta relation", &pred)
             })
     }
 
@@ -56,11 +52,7 @@ impl DeltaRelationTracker {
             .get(pred)
             .map(|(rel_id, _name)| *rel_id)
             .ok_or_else(|| {
-                xlog_core::XlogError::execution_ctx(
-                    "delta_rel_id",
-                    "missing delta relation",
-                    &pred,
-                )
+                xlog_core::XlogError::execution_ctx("delta_rel_id", "missing delta relation", &pred)
             })
     }
 

@@ -505,20 +505,27 @@ impl Lowerer {
         // Infer schema for head predicate from the learnable rule if not already set.
         // The head's column types come from the projected join columns.
         if !self.schemas.contains_key(&head_rel_name) {
-            let columns: Vec<(String, ScalarType)> = head_projection.iter().enumerate().map(|(i, &col)| {
-                // Determine the type from left or right atom's schema
-                let ty = if col < left_arity {
-                    self.schemas.get(&left_atom.predicate)
-                        .and_then(|s| s.column_type(col))
-                        .unwrap_or(ScalarType::U32)
-                } else {
-                    self.schemas.get(&right_atom.predicate)
-                        .and_then(|s| s.column_type(col - left_arity))
-                        .unwrap_or(ScalarType::U32)
-                };
-                (format!("c{}", i), ty)
-            }).collect();
-            self.schemas.insert(head_rel_name.clone(), Schema::new(columns));
+            let columns: Vec<(String, ScalarType)> = head_projection
+                .iter()
+                .enumerate()
+                .map(|(i, &col)| {
+                    // Determine the type from left or right atom's schema
+                    let ty = if col < left_arity {
+                        self.schemas
+                            .get(&left_atom.predicate)
+                            .and_then(|s| s.column_type(col))
+                            .unwrap_or(ScalarType::U32)
+                    } else {
+                        self.schemas
+                            .get(&right_atom.predicate)
+                            .and_then(|s| s.column_type(col - left_arity))
+                            .unwrap_or(ScalarType::U32)
+                    };
+                    (format!("c{}", i), ty)
+                })
+                .collect();
+            self.schemas
+                .insert(head_rel_name.clone(), Schema::new(columns));
         }
 
         Ok(RirNode::TensorMaskedJoin {
@@ -541,12 +548,12 @@ impl Lowerer {
         left: &BodyLiteral,
         right: &BodyLiteral,
     ) -> Result<(Vec<usize>, Vec<usize>)> {
-        let left_atom = left.atom().ok_or_else(|| {
-            XlogError::Compilation("Learnable body[0] is not an atom".into())
-        })?;
-        let right_atom = right.atom().ok_or_else(|| {
-            XlogError::Compilation("Learnable body[1] is not an atom".into())
-        })?;
+        let left_atom = left
+            .atom()
+            .ok_or_else(|| XlogError::Compilation("Learnable body[0] is not an atom".into()))?;
+        let right_atom = right
+            .atom()
+            .ok_or_else(|| XlogError::Compilation("Learnable body[1] is not an atom".into()))?;
 
         let mut left_keys = Vec::new();
         let mut right_keys = Vec::new();
@@ -1677,7 +1684,11 @@ impl Lowerer {
     }
 
     /// Infer the result type of an arithmetic expression (strict same-type)
-    pub(crate) fn infer_arith_type(&self, expr: &ArithExpr, var_env: &VariableEnv) -> Result<ScalarType> {
+    pub(crate) fn infer_arith_type(
+        &self,
+        expr: &ArithExpr,
+        var_env: &VariableEnv,
+    ) -> Result<ScalarType> {
         match expr {
             ArithExpr::Variable(name) => var_env.get_type(name).ok_or_else(|| {
                 XlogError::Compilation(format!("Unknown variable {} in arithmetic", name))

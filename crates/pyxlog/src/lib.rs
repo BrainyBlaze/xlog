@@ -5,31 +5,33 @@ use std::sync::Arc;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
-use ::xlog_gpu::logic as gpu_logic;
 use xlog_core::{MemoryBudget, Schema};
 #[cfg(feature = "arrow-device-import")]
 use xlog_cuda::{ArrowDeviceArray, ArrowDeviceArrayOwned};
 use xlog_cuda::{CudaDevice, CudaKernelProvider, DlpackManagedTensor, GpuMemoryManager};
+use xlog_gpu::logic as gpu_logic;
 use xlog_logic::ast::ProbEngine;
 use xlog_neural::{NetworkRegistry, TensorSourceRegistry};
 use xlog_prob::exact::GpuConfig;
 
 use xlog_core::RelId;
-use xlog_logic::ast::Program as AstProgram;
-use xlog_runtime::Executor;
 use xlog_ir::ExecutionPlan;
+use xlog_logic::ast::Program as AstProgram;
+use xlog_runtime::{Executor, RelationStore};
 
 mod neural_registry;
 use neural_registry::NeuralPredicateRegistry;
-mod types;
-mod training;
-mod logic;
+mod dlpack;
 mod ilp;
 mod ilp_gpu;
+mod logic;
 mod neural;
 mod program;
-mod dlpack;
-pub(crate) use program::{CachedCircuit, CompiledProbProgram, InputSource, NeuralGroup, QuerySignature};
+mod training;
+mod types;
+pub(crate) use program::{
+    CachedCircuit, CompiledProbProgram, InputSource, NeuralGroup, QuerySignature,
+};
 
 const DLPACK_CAPSULE_NAME: &[u8] = b"dltensor\0";
 const USED_DLPACK_CAPSULE_NAME: &[u8] = b"used_dltensor\0";
@@ -61,7 +63,10 @@ unsafe extern "C" fn dlpack_capsule_destructor(capsule: *mut pyo3::ffi::PyObject
     drop(DlpackManagedTensor::from_raw(managed));
 }
 
-pub(crate) fn dlpack_capsule_from_tensor(py: Python<'_>, tensor: DlpackManagedTensor) -> PyResult<PyObject> {
+pub(crate) fn dlpack_capsule_from_tensor(
+    py: Python<'_>,
+    tensor: DlpackManagedTensor,
+) -> PyResult<PyObject> {
     let raw = tensor.into_raw();
     let ptr = raw as *mut c_void;
     let capsule = unsafe {
@@ -305,6 +310,13 @@ pub struct CompiledLogicProgram {
 }
 
 #[pyclass]
+pub struct LogicRelationSession {
+    pub(crate) program: gpu_logic::LogicProgram,
+    pub(crate) provider: Arc<CudaKernelProvider>,
+    pub(crate) relation_store: RelationStore,
+}
+
+#[pyclass]
 pub struct LogicQueryResult {
     #[pyo3(get)]
     pub relation_name: String,
@@ -322,6 +334,20 @@ pub struct LogicQueryResult {
 pub struct LogicEvalResult {
     #[pyo3(get)]
     pub queries: Vec<Py<LogicQueryResult>>,
+}
+
+#[pyclass]
+pub struct IlpTaggedCreditDeviceResult {
+    #[pyo3(get)]
+    pub fact_row_offsets: PyObject,
+    #[pyo3(get)]
+    pub entry_indices: PyObject,
+    #[pyo3(get)]
+    pub entry_i: PyObject,
+    #[pyo3(get)]
+    pub entry_j: PyObject,
+    #[pyo3(get)]
+    pub entry_k: PyObject,
 }
 
 #[pyclass]
@@ -466,6 +492,7 @@ fn pyxlog(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<CompiledProgram>()?;
     m.add_class::<LogicProgram>()?;
     m.add_class::<CompiledLogicProgram>()?;
+    m.add_class::<LogicRelationSession>()?;
     m.add_class::<LogicQueryResult>()?;
     m.add_class::<LogicEvalResult>()?;
     m.add_class::<McDeviceEvalResult>()?;
@@ -476,6 +503,7 @@ fn pyxlog(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // ILP bindings
     m.add_class::<IlpProgramFactory>()?;
     m.add_class::<CompiledIlpProgram>()?;
+    m.add_class::<IlpTaggedCreditDeviceResult>()?;
     m.add_function(wrap_pyfunction!(training::train_model, m)?)?;
     m.add_function(wrap_pyfunction!(training::train_model_tensor, m)?)?;
     m.add_function(wrap_pyfunction!(dlpack::dlpack_roundtrip, m)?)?;

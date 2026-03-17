@@ -19,12 +19,14 @@ use crate::gpu::GpuXgcf;
 pub(crate) mod build;
 pub(crate) mod frontier;
 
-
 // Re-export used by test code in build.rs (via super::super::).
 #[cfg(test)]
 pub(crate) use frontier::build_frontier_bitset;
 
-pub(super) fn alloc_compile_gate(provider: &CudaKernelProvider, value: u32) -> Result<TrackedCudaSlice<u32>> {
+pub(super) fn alloc_compile_gate(
+    provider: &CudaKernelProvider,
+    value: u32,
+) -> Result<TrackedCudaSlice<u32>> {
     let memory = provider.memory();
     let mut gate = memory.alloc::<u32>(1)?;
     provider
@@ -302,7 +304,6 @@ pub(crate) fn compute_free_var_mask_gpu_gated(
     Ok(free_var_mask)
 }
 
-
 pub(super) fn bitset_words_per_item(var_cap: u32) -> Result<u32> {
     // Bit 0 is unused (DIMACS vars are 1-based), so we allocate var_cap+1 bits.
     let bits = var_cap
@@ -404,7 +405,6 @@ pub(crate) fn exclusive_scan_u32_inplace(
     Ok(())
 }
 
-
 /// Compile a device-resident CNF into a device-resident XGCF circuit (Phase 1).
 pub(crate) fn compile_gpu_d4(
     cnf: &GpuCnf,
@@ -444,7 +444,4 @@ mod tests {
         assert!(config.smooth_node_cap > 0);
         assert!(config.smooth_edge_cap > 0);
     }
-
-
-
 }

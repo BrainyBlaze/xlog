@@ -424,9 +424,9 @@ impl Executor {
                     .remove(pred)
                     .ok_or_else(|| XlogError::Execution(format!("Missing relation: {}", pred)))?;
                 let dn = delta_tracker.delta_name(pred)?;
-                let delta = self.store_remove(dn).ok_or_else(|| {
-                    XlogError::Execution(format!("Missing relation: {}", dn))
-                })?;
+                let delta = self
+                    .store_remove(dn)
+                    .ok_or_else(|| XlogError::Execution(format!("Missing relation: {}", dn)))?;
 
                 if delta.is_empty() {
                     self.store_put(pred, full_old);

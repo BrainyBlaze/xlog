@@ -11,7 +11,7 @@ use xlog_core::{Result, ScalarType, XlogError};
 use super::{filter_kernels, scan_kernels, RawCudaView, FILTER_MODULE, SCAN_MODULE};
 use crate::memory::{CudaColumn, TrackedCudaSlice};
 use crate::type_seam::GpuScalar;
-use crate::{CudaBuffer, CompareOp};
+use crate::{CompareOp, CudaBuffer};
 
 impl super::CudaKernelProvider {
     // ------------------------------------------------------------------
@@ -301,7 +301,9 @@ impl super::CudaKernelProvider {
         if !T::allowed_scalar_types().contains(&col_type) {
             return Err(XlogError::Kernel(format!(
                 "Column {} is {:?} (expected one of {:?})",
-                col, col_type, T::allowed_scalar_types()
+                col,
+                col_type,
+                T::allowed_scalar_types()
             )));
         }
 
@@ -328,9 +330,7 @@ impl super::CudaKernelProvider {
             .expect("filter_fused_scan called without scan phase1 kernel");
         let filter_scan_fn = device
             .get_func(FILTER_MODULE, scan_kernel_name)
-            .ok_or_else(|| {
-                XlogError::Kernel(format!("{} kernel not found", scan_kernel_name))
-            })?;
+            .ok_or_else(|| XlogError::Kernel(format!("{} kernel not found", scan_kernel_name)))?;
 
         // SAFETY: filter_compare_*_scan_phase1(column, constant, num_rows, num_rows_device, op, mask, prefix_sum, block_sums)
         unsafe {

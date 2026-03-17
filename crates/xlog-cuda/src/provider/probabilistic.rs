@@ -71,7 +71,15 @@ impl super::CudaKernelProvider {
         unsafe {
             kernel.clone().launch(
                 config,
-                (&mut d_out, &d_probs, force_mask, forced_value, num_vars_u32, num_samples_u32, seed),
+                (
+                    &mut d_out,
+                    &d_probs,
+                    force_mask,
+                    forced_value,
+                    num_vars_u32,
+                    num_samples_u32,
+                    seed,
+                ),
             )
         }
         .map_err(|e| XlogError::Kernel(format!("Failed to launch mc_sample_bernoulli: {}", e)))?;
@@ -146,7 +154,15 @@ impl super::CudaKernelProvider {
         unsafe {
             kernel.clone().launch(
                 config,
-                (&mut d_out, &d_probs, force_mask, forced_value, num_vars_u32, num_samples_u32, seed),
+                (
+                    &mut d_out,
+                    &d_probs,
+                    force_mask,
+                    forced_value,
+                    num_vars_u32,
+                    num_samples_u32,
+                    seed,
+                ),
             )
         }
         .map_err(|e| XlogError::Kernel(format!("Failed to launch mc_sample_bernoulli: {}", e)))?;

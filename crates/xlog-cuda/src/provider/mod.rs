@@ -37,18 +37,24 @@ pub struct PtxLoadProfile {
 }
 
 fn warmup_profiling_enabled() -> bool {
-    std::env::var("XLOG_WARMUP_PROFILE").map(|v| v == "1").unwrap_or(false)
+    std::env::var("XLOG_WARMUP_PROFILE")
+        .map(|v| v == "1")
+        .unwrap_or(false)
 }
 
 /// Detect device compute capability as a two-digit number (e.g. 75, 80, 120).
 fn detect_compute_capability(device: &Arc<CudaDevice>) -> Result<u32> {
     let major = device
         .inner()
-        .attribute(cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)
+        .attribute(
+            cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR,
+        )
         .map_err(|e| XlogError::Kernel(format!("Failed to query SM major: {}", e)))?;
     let minor = device
         .inner()
-        .attribute(cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR)
+        .attribute(
+            cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR,
+        )
         .map_err(|e| XlogError::Kernel(format!("Failed to query SM minor: {}", e)))?;
     Ok((major as u32) * 10 + (minor as u32))
 }
@@ -854,20 +860,17 @@ impl CudaKernelProvider {
                 src.len()
             )));
         }
-        let slice = src.try_slice(index..index + 1)
-            .ok_or_else(|| {
-                XlogError::Kernel(format!(
-                    "dtoh_scalar_untracked: slice failed at index={}",
-                    index
-                ))
-            })?;
+        let slice = src.try_slice(index..index + 1).ok_or_else(|| {
+            XlogError::Kernel(format!(
+                "dtoh_scalar_untracked: slice failed at index={}",
+                index
+            ))
+        })?;
         let mut buf = [T::default()];
         self.device
             .inner()
             .dtoh_sync_copy_into(&slice, &mut buf)
-            .map_err(|e| XlogError::Kernel(format!(
-                "dtoh_scalar_untracked: copy failed: {}", e
-            )))?;
+            .map_err(|e| XlogError::Kernel(format!("dtoh_scalar_untracked: copy failed: {}", e)))?;
         Ok(buf[0])
     }
 
@@ -885,13 +888,6 @@ impl CudaKernelProvider {
             .htod_sync_copy_into(src, dst)
             .map_err(|e| XlogError::Kernel(format!("Failed to copy to device: {}", e)))
     }
-
-
-
-
-
-
-
 
     /// Compute exclusive prefix sum of u8 mask, returns (prefix_sum_vec, total_count)
     ///
@@ -1107,7 +1103,9 @@ impl CudaKernelProvider {
 
     // ============== Internal Helper Methods ==============
 
-    fn device_row_count(&self, buffer: &CudaBuffer) -> Result<usize> {
+    /// Read a buffer's logical row count, using the host cache when available
+    /// and falling back to a metadata-only device-to-host read when needed.
+    pub fn device_row_count(&self, buffer: &CudaBuffer) -> Result<usize> {
         if let Some(n) = buffer.cached_row_count() {
             return Ok(n as usize);
         }
@@ -1362,7 +1360,10 @@ mod tests {
                 "resolve_module_path({name}, 999) should find portable PTX"
             );
             let (path, is_cubin) = result.unwrap();
-            assert!(!is_cubin, "{name}: expected portable PTX fallback, got cubin");
+            assert!(
+                !is_cubin,
+                "{name}: expected portable PTX fallback, got cubin"
+            );
             assert!(
                 path.to_str().unwrap().ends_with(".portable.ptx"),
                 "{name}: path should end with .portable.ptx, got {:?}",
@@ -2263,13 +2264,17 @@ mod tests {
     /// Helper to create an i64 buffer for arithmetic tests
     fn create_i64_buffer(provider: &CudaKernelProvider, data: &[i64]) -> CudaBuffer {
         let schema = Schema::new(vec![("col".to_string(), ScalarType::I64)]);
-        provider.create_buffer_from_slice::<i64>(data, schema).unwrap()
+        provider
+            .create_buffer_from_slice::<i64>(data, schema)
+            .unwrap()
     }
 
     /// Helper to create an f64 buffer for arithmetic tests
     fn create_f64_buffer(provider: &CudaKernelProvider, data: &[f64]) -> CudaBuffer {
         let schema = Schema::new(vec![("col".to_string(), ScalarType::F64)]);
-        provider.create_buffer_from_slice::<f64>(data, schema).unwrap()
+        provider
+            .create_buffer_from_slice::<f64>(data, schema)
+            .unwrap()
     }
 
     #[test]

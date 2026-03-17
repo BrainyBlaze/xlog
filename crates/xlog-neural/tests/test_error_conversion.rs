@@ -42,8 +42,5 @@ fn test_tensor_source_no_active_into_xlog() {
     let err = TensorSourceError::NoActive;
     let xlog_err: XlogError = err.into();
     let msg = xlog_err.to_string();
-    assert!(
-        msg.contains("No active"),
-        "Expected 'No active' in: {msg}"
-    );
+    assert!(msg.contains("No active"), "Expected 'No active' in: {msg}");
 }

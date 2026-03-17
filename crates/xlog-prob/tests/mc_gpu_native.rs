@@ -300,5 +300,8 @@ fn mc_behavior_tests_do_not_use_large_sample_budgets() {
             std::fs::read_to_string(p)
         })
         .unwrap();
-    assert!(!text.contains("samples: 80_000"), "mc.rs should not contain samples: 80_000");
+    assert!(
+        !text.contains("samples: 80_000"),
+        "mc.rs should not contain samples: 80_000"
+    );
 }

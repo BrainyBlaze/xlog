@@ -10,7 +10,7 @@ pub mod relation;
 mod statistics;
 
 pub use executor::Executor;
-pub use ilp_registry::{IlpRegistry, IlpTagEntry, IlpTaggedResult, read_device_row_count};
+pub use ilp_registry::{read_device_row_count, IlpRegistry, IlpTagEntry, IlpTaggedResult};
 pub use profiler::{ExecutionStats, MeasureGuard, OpStats, Profiler, StratumStats};
 pub use relation::RelationStore;
 pub use statistics::{JoinStats, JoinStrategy, QueryStatistics};

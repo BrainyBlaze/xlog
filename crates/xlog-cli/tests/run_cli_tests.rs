@@ -16,15 +16,12 @@ fn test_xlog_run_basic() {
     };
 
     // CUDA context is alive via _device — memory query failure is now unexpected.
-    let (_free, total) = mem_get_info()
-        .expect("mem_get_info should succeed while CudaDevice is alive");
+    let (_free, total) =
+        mem_get_info().expect("mem_get_info should succeed while CudaDevice is alive");
 
     let total_mb = total / (1024 * 1024);
     if total_mb < 16_384 {
-        println!(
-            "SKIPPED: GPU memory {} MB < required 16384 MB",
-            total_mb
-        );
+        println!("SKIPPED: GPU memory {} MB < required 16384 MB", total_mb);
         return;
     }
 

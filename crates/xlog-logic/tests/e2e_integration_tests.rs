@@ -504,11 +504,15 @@ fn test_aggregates_multi_key_sum() {
         .get("sales_by_cat_region")
         .expect("sales_by_cat_region not found");
 
-    let cats = provider.download_column::<u32>(out, 0).expect("download cat");
+    let cats = provider
+        .download_column::<u32>(out, 0)
+        .expect("download cat");
     let regions = provider
         .download_column::<u32>(out, 1)
         .expect("download region");
-    let sums = provider.download_column::<u64>(out, 2).expect("download sum");
+    let sums = provider
+        .download_column::<u64>(out, 2)
+        .expect("download sum");
 
     let mut rows: Vec<(u32, u32, u64)> = cats
         .into_iter()
