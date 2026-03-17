@@ -403,7 +403,7 @@ impl CudaKernelProvider {
             let expected = schema.column_type(i).ok_or_else(|| {
                 XlogError::Kernel(format!("Missing schema type for column {}", i))
             })?;
-            if ty != expected {
+            if !expected.dlpack_compatible(ty) {
                 return Err(XlogError::Kernel(format!(
                     "DLPack column {} dtype {:?} does not match schema {:?}",
                     i, ty, expected

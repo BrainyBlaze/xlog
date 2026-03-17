@@ -58,6 +58,28 @@ impl ScalarType {
         !matches!(self, ScalarType::Bool | ScalarType::Symbol)
     }
 
+    /// Returns true if `other` is DLPack-compatible with `self`.
+    ///
+    /// Two scalar types are DLPack-compatible when they have the same byte width
+    /// and differ only in signedness. This allows importing PyTorch signed integer
+    /// tensors (int32/int64) into unsigned schema columns (u32/u64) and vice versa,
+    /// since the bit patterns are identical on GPU and xlog kernels operate on raw
+    /// column buffers without signedness-dependent semantics.
+    ///
+    /// Float and bool types require exact match.
+    pub fn dlpack_compatible(&self, other: ScalarType) -> bool {
+        if *self == other {
+            return true;
+        }
+        matches!(
+            (*self, other),
+            (ScalarType::U32, ScalarType::I32)
+                | (ScalarType::I32, ScalarType::U32)
+                | (ScalarType::U64, ScalarType::I64)
+                | (ScalarType::I64, ScalarType::U64)
+        )
+    }
+
     /// Convert to Arrow DataType
     pub fn to_arrow_type(&self) -> arrow::datatypes::DataType {
         use arrow::datatypes::DataType;
@@ -259,5 +281,31 @@ mod tests {
         // Test unsupported Arrow types return None
         assert_eq!(ScalarType::from_arrow_type(&DataType::Utf8), None);
         assert_eq!(ScalarType::from_arrow_type(&DataType::Date32), None);
+    }
+
+    #[test]
+    fn test_dlpack_compatible() {
+        // Same type is always compatible
+        assert!(ScalarType::U32.dlpack_compatible(ScalarType::U32));
+        assert!(ScalarType::I64.dlpack_compatible(ScalarType::I64));
+        assert!(ScalarType::F32.dlpack_compatible(ScalarType::F32));
+
+        // Signed ↔ unsigned at same width is compatible
+        assert!(ScalarType::U32.dlpack_compatible(ScalarType::I32));
+        assert!(ScalarType::I32.dlpack_compatible(ScalarType::U32));
+        assert!(ScalarType::U64.dlpack_compatible(ScalarType::I64));
+        assert!(ScalarType::I64.dlpack_compatible(ScalarType::U64));
+
+        // Different widths are NOT compatible
+        assert!(!ScalarType::U32.dlpack_compatible(ScalarType::U64));
+        assert!(!ScalarType::I32.dlpack_compatible(ScalarType::I64));
+
+        // Float ↔ int is NOT compatible
+        assert!(!ScalarType::F32.dlpack_compatible(ScalarType::I32));
+        assert!(!ScalarType::F64.dlpack_compatible(ScalarType::I64));
+
+        // Bool/Symbol require exact match
+        assert!(!ScalarType::Bool.dlpack_compatible(ScalarType::U32));
+        assert!(!ScalarType::Symbol.dlpack_compatible(ScalarType::U32));
     }
 }
