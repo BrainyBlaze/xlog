@@ -583,6 +583,7 @@ impl IlpProgramFactory {
             head_rel_name: tmj.head_rel_name,
             max_active_rules: active_rules,
             candidate_map: None,
+            candidate_order: None,
             coo_chunk_budget: 16 * 1024 * 1024,
             strict_zero_dtoh: false,
         })
@@ -602,6 +603,7 @@ impl CompiledIlpProgram {
             map.insert((i, j, k), cidx as u32);
         }
         self.candidate_map = Some(map);
+        self.candidate_order = Some(candidates);
         Ok(())
     }
 
@@ -972,6 +974,12 @@ impl CompiledIlpProgram {
         budget: usize,
         allow_recursive: bool,
     ) -> PyResult<()> {
+        if self.strict_zero_dtoh {
+            return Err(PyRuntimeError::new_err(
+                "strict_zero_dtoh forbids legacy set_rule_mask_sparse; use set_rule_mask_sparse_selected instead",
+            ));
+        }
+
         let tmj = extract_tmj_meta_for_mask(&self.plan, Some(&name));
         let n = tmj.schema_size;
         if n == 0 {
@@ -1118,6 +1126,148 @@ impl CompiledIlpProgram {
         Ok(())
     }
 
+    /// Strict sparse mask API: selected candidate IDs stay as a device tensor on
+    /// the Python side. Rust resolves them against the fixed candidate order
+    /// uploaded via `set_candidate_map(...)`.
+    #[pyo3(signature = (name, selected_candidate_ids_dlpack, selected_soft_probs_dlpack, allow_recursive=false))]
+    pub fn set_rule_mask_sparse_selected_device(
+        &mut self,
+        name: String,
+        selected_candidate_ids_dlpack: &Bound<'_, PyAny>,
+        selected_soft_probs_dlpack: &Bound<'_, PyAny>,
+        allow_recursive: bool,
+    ) -> PyResult<()> {
+        let tmj = extract_tmj_meta_for_mask(&self.plan, Some(&name));
+        let n = tmj.schema_size;
+        if n == 0 {
+            return Err(PyValueError::new_err(format!(
+                "no learnable mask '{}' found",
+                name
+            )));
+        }
+        if self.compiled_schema_size > 0 && n != self.compiled_schema_size {
+            return Err(PyValueError::new_err(format!(
+                "schema_size mismatch for '{}': plan N={} compiled N={}",
+                name, n, self.compiled_schema_size
+            )));
+        }
+
+        let _ = allow_recursive;
+        let candidate_order = self.candidate_order.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err(
+                "candidate order not set — call set_candidate_map() before strict sparse mask updates",
+            )
+        })?;
+        let expected_c = candidate_order.len();
+
+        let ids_dmt = dlpack_from_py(selected_candidate_ids_dlpack)?;
+        let ids_buf = self
+            .provider
+            .from_dlpack_tensors(vec![ids_dmt])
+            .map_err(types::xlog_err)?;
+        let soft_dmt = dlpack_from_py(selected_soft_probs_dlpack)?;
+        let soft_buf = self
+            .provider
+            .from_dlpack_tensors(vec![soft_dmt])
+            .map_err(types::xlog_err)?;
+
+        let selected_len = usize::try_from(ids_buf.num_rows())
+            .map_err(|_| PyValueError::new_err("selected candidate ids length overflow"))?;
+        let soft_len = usize::try_from(soft_buf.num_rows())
+            .map_err(|_| PyValueError::new_err("selected soft_probs length overflow"))?;
+        if soft_len != selected_len {
+            return Err(PyValueError::new_err(format!(
+                "selected soft_probs length {} != selected candidate ids length {}",
+                soft_len, selected_len
+            )));
+        }
+
+        let ids_type = ids_buf
+            .schema()
+            .column_type(0)
+            .ok_or_else(|| PyRuntimeError::new_err("selected candidate ids tensor has no column"))?;
+        let selected_candidate_ids: Vec<u32> = match ids_type {
+            ScalarType::U32 | ScalarType::Symbol => self
+                .provider
+                .download_column_untracked::<u32>(&ids_buf, 0)
+                .map_err(types::xlog_err)?,
+            ScalarType::I32 => self
+                .provider
+                .download_column_untracked::<i32>(&ids_buf, 0)
+                .map_err(types::xlog_err)?
+                .into_iter()
+                .map(|cid| {
+                    u32::try_from(cid).map_err(|_| {
+                        PyValueError::new_err(format!(
+                            "selected candidate id {} out of range for u32",
+                            cid
+                        ))
+                    })
+                })
+                .collect::<PyResult<Vec<u32>>>()?,
+            ScalarType::I64 => self
+                .provider
+                .download_column_untracked::<i64>(&ids_buf, 0)
+                .map_err(types::xlog_err)?
+                .into_iter()
+                .map(|cid| {
+                    u32::try_from(cid).map_err(|_| {
+                        PyValueError::new_err(format!(
+                            "selected candidate id {} out of range for u32",
+                            cid
+                        ))
+                    })
+                })
+                .collect::<PyResult<Vec<u32>>>()?,
+            ScalarType::U64 => self
+                .provider
+                .download_column_untracked::<u64>(&ids_buf, 0)
+                .map_err(types::xlog_err)?
+                .into_iter()
+                .map(|cid| {
+                    u32::try_from(cid).map_err(|_| {
+                        PyValueError::new_err(format!(
+                            "selected candidate id {} out of range for u32",
+                            cid
+                        ))
+                    })
+                })
+                .collect::<PyResult<Vec<u32>>>()?,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "selected candidate ids must be I32/I64/U32/U64, got {:?}",
+                    other
+                )));
+            }
+        };
+
+        let mut seen = HashSet::with_capacity(selected_candidate_ids.len());
+        let mut selected_entries = Vec::with_capacity(selected_candidate_ids.len());
+        for (pos, &cid) in selected_candidate_ids.iter().enumerate() {
+            let idx = usize::try_from(cid).map_err(|_| {
+                PyValueError::new_err(format!("candidate id {} overflows usize", cid))
+            })?;
+            if idx >= expected_c {
+                return Err(PyValueError::new_err(format!(
+                    "selected candidate id {} out of range [0, {}) at position {}",
+                    cid, expected_c, pos
+                )));
+            }
+            if !seen.insert(cid) {
+                return Err(PyValueError::new_err(format!(
+                    "duplicate selected candidate id {} at position {}",
+                    cid, pos
+                )));
+            }
+            selected_entries.push(candidate_order[idx]);
+        }
+
+        self.executor
+            .ilp_registry_mut()
+            .insert_selected_mask(name, n, &selected_entries);
+        Ok(())
+    }
+
     pub fn evaluate(&mut self, py: Python<'_>) -> PyResult<()> {
         let _result: xlog_core::Result<xlog_cuda::CudaBuffer> = py.allow_threads(|| {
             self.executor.reset_for_mc();
@@ -1170,6 +1320,10 @@ impl CompiledIlpProgram {
     }
 
     pub fn get_tagged_results(&self) -> PyResult<Vec<(u32, u32, u32, u32)>> {
+        self.ensure_host_semantic_compat(
+            "get_tagged_results()",
+            "disable strict_zero_dtoh for host materialization",
+        )?;
         match self.executor.ilp_last_result() {
             Some(result) => Ok(result
                 .entries
@@ -1181,6 +1335,10 @@ impl CompiledIlpProgram {
     }
 
     pub fn fact_exists(&self, relation: &str, values: Vec<i64>) -> PyResult<bool> {
+        self.ensure_host_semantic_compat(
+            "fact_exists()",
+            "batch_fact_membership_device(...)",
+        )?;
         let buf =
             self.executor.store().get(relation).ok_or_else(|| {
                 PyValueError::new_err(format!("Relation '{}' not found", relation))
@@ -1192,6 +1350,10 @@ impl CompiledIlpProgram {
     /// Return all facts in the named relation as a list of int lists.
     #[pyo3(signature = (rel_name))]
     pub fn relation_facts(&self, rel_name: String) -> PyResult<Vec<Vec<i64>>> {
+        self.ensure_host_semantic_compat(
+            "relation_facts()",
+            "disable strict_zero_dtoh for host materialization",
+        )?;
         let buf =
             self.executor.store().get(&rel_name).ok_or_else(|| {
                 PyValueError::new_err(format!("Relation '{}' not found", rel_name))
@@ -1275,6 +1437,10 @@ impl CompiledIlpProgram {
         exclude: Vec<(String, Vec<i64>)>,
         max_n: usize,
     ) -> PyResult<Vec<Vec<i64>>> {
+        self.ensure_host_semantic_compat(
+            "sample_false_positives()",
+            "disable strict_zero_dtoh for host materialization",
+        )?;
         // Build exclude set: only consider tuples for the requested relation
         let exclude_set: HashSet<Vec<i64>> = exclude
             .into_iter()
@@ -1365,6 +1531,10 @@ impl CompiledIlpProgram {
         relation: &str,
         values: Vec<i64>,
     ) -> PyResult<Vec<(u32, u32, u32)>> {
+        self.ensure_host_semantic_compat(
+            "tagged_entries_containing_fact()",
+            "batch_tagged_credit_device(...)",
+        )?;
         let k_idx = self
             .rel_index
             .iter()
@@ -1602,6 +1772,10 @@ impl CompiledIlpProgram {
         relation: &str,
         facts: Vec<Vec<i64>>,
     ) -> PyResult<Vec<bool>> {
+        self.ensure_host_semantic_compat(
+            "batch_fact_membership()",
+            "batch_fact_membership_device(...)",
+        )?;
         if facts.is_empty() {
             return Ok(Vec::new());
         }
@@ -1642,6 +1816,10 @@ impl CompiledIlpProgram {
         relation: &str,
         facts: Vec<Vec<i64>>,
     ) -> PyResult<Vec<Vec<(u32, u32, u32)>>> {
+        self.ensure_host_semantic_compat(
+            "batch_tagged_credit()",
+            "batch_tagged_credit_device(...)",
+        )?;
         if facts.is_empty() {
             return Ok(Vec::new());
         }
@@ -1929,6 +2107,16 @@ impl CompiledIlpProgram {
 // ---------------------------------------------------------------------------
 
 impl CompiledIlpProgram {
+    fn ensure_host_semantic_compat(&self, api: &str, device_hint: &str) -> PyResult<()> {
+        if self.strict_zero_dtoh {
+            return Err(PyRuntimeError::new_err(format!(
+                "strict_zero_dtoh forbids {}; use {} instead",
+                api, device_hint
+            )));
+        }
+        Ok(())
+    }
+
     // ─── GPU loss/grad export helpers ──────────────────────────────────
 
     /// Build zero loss (scalar) + zero grad (num_cands) on GPU, export via DLPack.

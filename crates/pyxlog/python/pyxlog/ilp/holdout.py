@@ -9,6 +9,7 @@ from __future__ import annotations
 import random
 
 import pyxlog
+from pyxlog.ilp.exceptions import IlpConfigError
 from pyxlog.ilp.trainer import train_only
 from pyxlog.ilp.types import TrainConfig
 
@@ -25,6 +26,12 @@ def holdout_f1_and_variance(
     Returns (mean_f1, variance). Both are deterministic when `config.seed`
     is fixed because fold assignment is seed-driven.
     """
+    if config.strict_gpu_native:
+        raise IlpConfigError(
+            "strict_gpu_native is incompatible with holdout scoring; "
+            "disable strict_gpu_native for compatibility validation"
+        )
+
     if not positives:
         return None, 0.0
 

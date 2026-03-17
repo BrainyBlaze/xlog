@@ -9,6 +9,7 @@ from conftest import skip_unless_pyxlog_cuda
 skip_unless_pyxlog_cuda()
 
 from pyxlog.ilp import (
+    IlpConfigError,
     PromotionResult,
     PromotionStatus,
     TrainConfig,
@@ -42,6 +43,7 @@ def test_loo_holdout_f1_perfect():
     config = TrainConfig(
         step_budget_per_attempt=100, max_attempts=5,
         tau_start=2.0, tau_floor=0.05, seed=42,
+        strict_gpu_native=False,
     )
     f1 = loo_holdout_f1(SOURCE, "W_reach", POS, NEG, config)
     assert f1 >= 0.9, f"LOO F1 should be >= 0.9 for reach, got {f1}"
@@ -52,6 +54,7 @@ def test_loo_singleton_skipped():
     config = TrainConfig(
         step_budget_per_attempt=50, max_attempts=2,
         tau_start=2.0, tau_floor=0.05, seed=42,
+        strict_gpu_native=False,
     )
     f1 = loo_holdout_f1(SOURCE, "W_reach", [("reach", [1, 3])], NEG, config)
     assert f1 is None
@@ -63,6 +66,7 @@ def test_promote_with_loo():
         step_budget_per_attempt=100, max_attempts=5,
         tau_start=2.0, tau_floor=0.05, seed=42,
         holdout_strategy="loo",
+        strict_gpu_native=False,
     )
     result = train_and_promote(
         SOURCE, "W_reach", POS, NEG, config,
@@ -79,6 +83,7 @@ def test_ambiguity_scan_smoke():
         step_budget_per_attempt=100, max_attempts=5,
         tau_start=2.0, tau_floor=0.05, seed=42,
         check_ambiguity=True,
+        strict_gpu_native=False,
     )
     result = train_and_promote(
         SOURCE, "W_reach", POS, NEG, config,
@@ -100,6 +105,7 @@ def test_kfold_holdout_and_variance():
         seed=1,
         holdout_strategy="kfold",
         holdout_folds=4,
+        strict_gpu_native=False,
     )
     f1, variance = holdout_f1_and_variance(
         LARGE_SOURCE,
@@ -122,6 +128,7 @@ def test_train_only_holdout_variance_in_result():
         deterministic=True,
         seed=1,
         holdout_strategy="kfold",
+        strict_gpu_native=False,
     )
     result = train_only(
         LARGE_SOURCE,
@@ -132,3 +139,42 @@ def test_train_only_holdout_variance_in_result():
     )
     assert result.holdout_f1 is None or 0.0 <= result.holdout_f1 <= 1.0
     assert result.holdout_variance >= 0.0
+
+
+def test_holdout_rejects_strict_gpu_native():
+    config = TrainConfig(
+        step_budget_per_attempt=40,
+        max_attempts=2,
+        tau_start=2.0,
+        tau_floor=0.05,
+        seed=42,
+        strict_gpu_native=True,
+    )
+    with pytest.raises(IlpConfigError, match="strict_gpu_native"):
+        holdout_f1_and_variance(
+            SOURCE,
+            "W_reach",
+            POS,
+            NEG,
+            config,
+        )
+
+
+def test_train_only_strict_gpu_native_disables_holdout_scoring():
+    config = TrainConfig(
+        step_budget_per_attempt=80,
+        max_attempts=3,
+        tau_start=2.0,
+        tau_floor=0.05,
+        seed=42,
+        strict_gpu_native=True,
+    )
+    result = train_only(
+        SOURCE,
+        "W_reach",
+        POS,
+        NEG,
+        config=config,
+    )
+    assert result.holdout_f1 is None
+    assert result.holdout_variance == 0.0

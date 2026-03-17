@@ -23,9 +23,11 @@ def test_train_config_defaults():
     cfg = TrainConfig()
     assert cfg.global_step_limit == 1000
     assert cfg.max_attempts == 5
+    assert cfg.max_mined_negatives == 0
     assert cfg.tau_floor == 0.05
     assert cfg.max_active_rules == 32
     assert cfg.allow_recursive_candidates is False
+    assert cfg.strict_gpu_native is True
     assert cfg.max_numeric_failures == 3
     assert cfg.device == 0
     assert cfg.memory_mb == 512

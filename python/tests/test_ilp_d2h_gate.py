@@ -16,6 +16,24 @@ REACH_SOURCE = """
 """
 
 
+def _compile_reach_prog_with_active_mask():
+    prog = pyxlog.IlpProgramFactory.compile(
+        REACH_SOURCE, device=0, memory_mb=64,
+    )
+    n = prog.ilp_schema_size()
+    rel_names = prog.ilp_relation_names()
+    k_reach = rel_names.index("reach")
+    i_edge = rel_names.index("edge")
+
+    mask_hard = torch.zeros(n, n, n, device="cuda")
+    mask_soft = torch.zeros(n, n, n, device="cuda")
+    mask_hard[i_edge, i_edge, k_reach] = 1.0
+    mask_soft[i_edge, i_edge, k_reach] = 1.0
+    prog.set_rule_mask("W_reach", mask_hard.view(-1), mask_soft.view(-1), n)
+    prog.evaluate()
+    return prog
+
+
 def test_d2h_counter_accessible():
     prog = pyxlog.IlpProgramFactory.compile(
         REACH_SOURCE, device=0, memory_mb=64,
@@ -222,3 +240,24 @@ def test_ilp_registry_routes_row_count_reads_through_provider_api():
 
     assert "provider.device_row_count(buffer)" in src
     assert ".dtoh_sync_copy_into(buffer.num_rows_device()" not in src
+
+
+@pytest.mark.parametrize(
+    ("label", "invoker"),
+    [
+        ("fact_exists", lambda prog: prog.fact_exists("edge", [1, 2])),
+        ("relation_facts", lambda prog: prog.relation_facts("edge")),
+        ("batch_fact_membership", lambda prog: prog.batch_fact_membership("edge", [[1, 2], [9, 9]])),
+        ("batch_tagged_credit", lambda prog: prog.batch_tagged_credit("reach", [[1, 3], [9, 9]])),
+        (
+            "sample_false_positives",
+            lambda prog: prog.sample_false_positives("reach", [("reach", [1, 3])], 1),
+        ),
+    ],
+)
+def test_strict_zero_dtoh_rejects_host_semantic_runtime_apis(label, invoker):
+    prog = _compile_reach_prog_with_active_mask()
+    prog.set_strict_zero_dtoh(True)
+
+    with pytest.raises(RuntimeError, match="strict_zero_dtoh"):
+        invoker(prog)

@@ -1,5 +1,6 @@
 # python/tests/test_ilp_trainer.py
 """Integration tests for train_only()."""
+import inspect
 import math
 
 import pytest
@@ -11,6 +12,7 @@ from conftest import skip_unless_pyxlog_cuda
 skip_unless_pyxlog_cuda()
 
 from pyxlog.ilp import train_only, TrainConfig, TrainResult, IlpConfigError
+from pyxlog.ilp import trainer as trainer_mod
 
 REACH_SOURCE = """
     edge(1, 2). edge(2, 3). edge(3, 4). edge(4, 5). edge(5, 6).
@@ -18,6 +20,107 @@ REACH_SOURCE = """
 """
 REACH_POS = [("reach", [1, 3]), ("reach", [2, 4]), ("reach", [3, 5]), ("reach", [4, 6])]
 REACH_NEG = []
+
+
+def test_grouped_membership_mask_device_stays_on_cuda():
+    class _FakeProg:
+        def __init__(self):
+            self.calls = []
+
+        def batch_fact_membership_device(self, relation, facts):
+            self.calls.append((relation, facts))
+            if relation == "reach":
+                return torch.tensor([True, False], device="cuda", dtype=torch.bool)
+            if relation == "edge":
+                return torch.tensor([False], device="cuda", dtype=torch.bool)
+            raise AssertionError(f"unexpected relation {relation}")
+
+    positives = [
+        ("reach", [1, 3]),
+        ("edge", [1, 2]),
+        ("reach", [2, 4]),
+    ]
+    device = torch.device("cuda")
+    facts_by_rel, indices_by_rel = trainer_mod._prepare_relation_groups(positives, device)
+    prog = _FakeProg()
+
+    mask = trainer_mod._compute_grouped_membership_mask_device(
+        prog, facts_by_rel, indices_by_rel, len(positives), device,
+    )
+
+    assert prog.calls == [
+        ("reach", [[1, 3], [2, 4]]),
+        ("edge", [[1, 2]]),
+    ]
+    assert mask.device.type == "cuda"
+    assert mask.dtype == torch.bool
+    assert mask.cpu().tolist() == [True, False, False]
+
+
+def test_check_convergence_uses_device_membership_api_only():
+    class _FakeProg:
+        def batch_fact_membership(self, relation, facts):
+            raise AssertionError("legacy host membership API must not be used")
+
+        def batch_fact_membership_device(self, relation, facts):
+            if relation == "reach" and facts == [[1, 3], [2, 4]]:
+                return torch.tensor([True, True], device="cuda", dtype=torch.bool)
+            if relation == "reach" and facts == [[9, 9]]:
+                return torch.tensor([False], device="cuda", dtype=torch.bool)
+            raise AssertionError(f"unexpected relation/facts: {relation} {facts}")
+
+        def set_rule_mask(self, *_args, **_kwargs):
+            return None
+
+        def evaluate(self):
+            return None
+
+        def reset_d2h_transfer_count(self):
+            return None
+
+    prog = _FakeProg()
+    W = torch.zeros((4, 4, 4), device="cuda")
+    converged = trainer_mod._check_convergence(
+        prog=prog,
+        W=W,
+        mask_name="W_reach",
+        positives=[("reach", [1, 3]), ("reach", [2, 4])],
+        negatives=[("reach", [9, 9])],
+        rel_names=["edge", "reach", "foo", "bar"],
+        n=4,
+        argmax_ijk=(0, 0, 1),
+        perform_mask_checks=True,
+    )
+    assert converged is True
+
+
+def test_trainer_uses_device_membership_helper_in_hot_loop():
+    src = inspect.getsource(trainer_mod._compute_grouped_membership_mask_device)
+    assert ".batch_fact_membership_device(" in src
+    assert ".batch_fact_membership(" not in src
+
+
+def test_run_single_attempt_avoids_item_scalar_syncs_in_hot_loop():
+    src = inspect.getsource(trainer_mod._run_single_attempt)
+    assert ".item()" not in src
+
+
+def test_train_only_strict_gpu_native_rejects_host_negative_mining():
+    config = TrainConfig(
+        step_budget_per_attempt=10,
+        max_attempts=1,
+        max_mined_negatives=1,
+        strict_gpu_native=True,
+        seed=42,
+    )
+    with pytest.raises(IlpConfigError, match="host negative mining"):
+        train_only(
+            source=REACH_SOURCE,
+            mask_name="W_reach",
+            positives=REACH_POS,
+            negatives=REACH_NEG,
+            config=config,
+        )
 
 
 def test_train_only_converges_on_reach():
@@ -42,6 +145,7 @@ def test_train_only_returns_telemetry_level_1():
         step_budget_per_attempt=50, max_attempts=3,
         tau_start=2.0, tau_floor=0.05, seed=42,
         telemetry_level=1,
+        strict_gpu_native=False,
     )
     result = train_only(
         source=REACH_SOURCE, mask_name="W_reach",
@@ -60,6 +164,7 @@ def test_train_only_forward_p95_telemetry_populated():
         step_budget_per_attempt=20, max_attempts=2,
         tau_start=2.0, tau_floor=0.05, seed=13,
         telemetry_level=1,
+        strict_gpu_native=False,
     )
     result = train_only(
         source=REACH_SOURCE, mask_name="W_reach",
@@ -85,6 +190,7 @@ def test_train_only_telemetry_step_timings_population():
         step_budget_per_attempt=40, max_attempts=2,
         tau_start=2.0, tau_floor=0.05, seed=13,
         telemetry_level=1,
+        strict_gpu_native=False,
     )
     result = train_only(
         source=REACH_SOURCE, mask_name="W_reach",
@@ -217,6 +323,7 @@ def test_train_only_telemetry_entropy_not_zero():
         step_budget_per_attempt=20, max_attempts=1,
         tau_start=2.0, tau_floor=0.05, seed=42,
         telemetry_level=1,
+        strict_gpu_native=False,
     )
     result = train_only(
         source=REACH_SOURCE, mask_name="W_reach",
@@ -234,6 +341,7 @@ def test_train_only_phase_timing_keys():
     config = TrainConfig(
         step_budget_per_attempt=20, max_attempts=2,
         tau_start=2.0, tau_floor=0.05, seed=42,
+        strict_gpu_native=False,
     )
     result = train_only(
         source=REACH_SOURCE, mask_name="W_reach",
@@ -266,3 +374,46 @@ def test_train_only_rule_frequency_multi_attempt():
     if result.converged:
         # At least the winning attempt found this rule
         assert result.rule_frequency >= 1.0 / result.attempt_count
+
+
+def test_train_only_strict_gpu_native_rejects_telemetry_collection():
+    config = TrainConfig(
+        step_budget_per_attempt=20,
+        max_attempts=1,
+        telemetry_level=1,
+        strict_gpu_native=True,
+        seed=42,
+    )
+    with pytest.raises(IlpConfigError, match="telemetry"):
+        train_only(
+            source=REACH_SOURCE,
+            mask_name="W_reach",
+            positives=REACH_POS,
+            negatives=REACH_NEG,
+            config=config,
+        )
+
+
+def test_train_only_strict_gpu_native_rejects_dense_mask_backend():
+    config = TrainConfig(
+        step_budget_per_attempt=20,
+        max_attempts=1,
+        debug_dense_mask=True,
+        strict_gpu_native=True,
+        seed=42,
+    )
+    with pytest.raises(IlpConfigError, match="dense"):
+        train_only(
+            source=REACH_SOURCE,
+            mask_name="W_reach",
+            positives=REACH_POS,
+            negatives=REACH_NEG,
+            config=config,
+        )
+
+
+def test_strict_single_attempt_helper_avoids_host_sync_primitives():
+    src = inspect.getsource(trainer_mod._run_single_attempt_strict)
+    assert ".cpu(" not in src
+    assert ".item()" not in src
+    assert "torch.cuda.synchronize()" not in src

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import pyxlog
 import re
+from pyxlog.ilp.exceptions import IlpConfigError
 from pyxlog.ilp.trainer import train_only
 from pyxlog.ilp.types import (
     GateResult,
@@ -36,6 +37,12 @@ def train_and_promote(
     5. Run promotion gates against trial.
     6. All pass: PROMOTED. Any fail: MANUAL_REVIEW_REQUIRED.
     """
+    if config.strict_gpu_native:
+        raise IlpConfigError(
+            "strict_gpu_native is incompatible with train_and_promote; "
+            "disable strict_gpu_native for compatibility promotion gates"
+        )
+
     train_result = train_only(source, mask_name, positives, negatives, config)
 
     if not train_result.converged:

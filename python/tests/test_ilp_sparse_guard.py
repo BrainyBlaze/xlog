@@ -34,7 +34,9 @@ def test_sparse_backend_prefers_selected_sparse_api():
        executes without error.
     """
     # --- Prong 1: static source inspection ---
-    src = inspect.getsource(backend_mod.SparseMaskBackend.apply_mask)
+    compat_src = inspect.getsource(backend_mod.SparseMaskBackend._apply_mask_compat)
+    strict_src = inspect.getsource(backend_mod.SparseMaskBackend._apply_mask_strict)
+    src = compat_src + "\n" + strict_src
 
     # Find all set_rule_mask calls; filter out set_rule_mask_sparse.
     # Pattern: .set_rule_mask( NOT followed by _sparse
@@ -52,6 +54,10 @@ def test_sparse_backend_prefers_selected_sparse_api():
     selected_sparse_calls = re.findall(r'\.set_rule_mask_sparse_selected\b', src)
     assert len(selected_sparse_calls) > 0, (
         "SparseMaskBackend.apply_mask does not call set_rule_mask_sparse_selected"
+    )
+    selected_device_calls = re.findall(r'\.set_rule_mask_sparse_selected_device\b', src)
+    assert len(selected_device_calls) > 0, (
+        "SparseMaskBackend strict path does not call set_rule_mask_sparse_selected_device"
     )
 
     # --- Prong 2: runtime smoke test ---
@@ -105,3 +111,22 @@ def test_sparse_d2h_counter_clean_after_mask_setup():
     assert prog.d2h_transfer_count() == 0, (
         f"set_rule_mask_sparse incremented D2H counter to {prog.d2h_transfer_count()}"
     )
+
+
+def test_legacy_sparse_api_rejected_in_strict_zero_dtoh_mode():
+    prog = pyxlog.IlpProgramFactory.compile(SOURCE, device=0, memory_mb=512)
+    cands = prog.valid_candidates("W", False)
+    c = len(cands)
+
+    soft = torch.tensor([1.0 / c] * c, device="cuda", dtype=torch.float64)
+    prog.set_strict_zero_dtoh(True)
+
+    with pytest.raises(RuntimeError, match="strict_zero_dtoh"):
+        prog.set_rule_mask_sparse("W", list(range(c)), soft, 32)
+
+
+def test_sparse_backend_strict_helper_uses_device_selected_ids():
+    src = inspect.getsource(backend_mod.SparseMaskBackend._apply_mask_strict)
+    assert ".set_rule_mask_sparse_selected_device(" in src
+    assert ".cpu().tolist()" not in src
+    assert ".valid_candidates(" not in src

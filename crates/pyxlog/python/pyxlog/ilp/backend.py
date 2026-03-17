@@ -34,6 +34,7 @@ class MaskBackend(Protocol):
         candidates: list[dict],
         n: int,
         allow_recursive: bool = False,
+        strict_gpu_native: bool = False,
     ) -> tuple[torch.Tensor, list[int]]:
         """Apply mask to program.
 
@@ -56,7 +57,10 @@ class DenseMaskBackend:
     def apply_mask(
         self, prog, mask_name, W, tau, budget, candidates, n,
         allow_recursive=False,
+        strict_gpu_native=False,
     ):
+        if strict_gpu_native:
+            raise RuntimeError("DenseMaskBackend is incompatible with strict_gpu_native")
         M_soft = F.gumbel_softmax(W, tau=tau, hard=False, dim=-1)
         flat = M_soft.view(-1)
         # Restrict hard-mask activation to valid candidate cells only.
@@ -128,6 +132,54 @@ class SparseMaskBackend:
         return torch.randn(C, requires_grad=True, device=device)
 
     def apply_mask(
+        self, prog, mask_name, W, tau, budget, candidates, n,
+        allow_recursive=False,
+        strict_gpu_native=False,
+    ):
+        if strict_gpu_native:
+            return self._apply_mask_strict(
+                prog,
+                mask_name,
+                W,
+                tau,
+                budget,
+                candidates,
+                n,
+                allow_recursive=allow_recursive,
+            )
+
+        return self._apply_mask_compat(
+            prog,
+            mask_name,
+            W,
+            tau,
+            budget,
+            candidates,
+            n,
+            allow_recursive=allow_recursive,
+        )
+
+    def _apply_mask_strict(
+        self, prog, mask_name, W, tau, budget, candidates, n,
+        allow_recursive=False,
+    ):
+        cand_probs = F.gumbel_softmax(W, tau=tau, hard=False, dim=0)
+        effective_budget = min(budget, cand_probs.numel())
+        selected = torch.argsort(
+            cand_probs.detach(),
+            descending=True,
+            stable=True,
+        )[:effective_budget]
+        selected_soft = cand_probs.detach().index_select(0, selected).contiguous()
+        prog.set_rule_mask_sparse_selected_device(
+            mask_name,
+            selected.to(dtype=torch.int64).contiguous(),
+            selected_soft,
+            allow_recursive,
+        )
+        return cand_probs, []
+
+    def _apply_mask_compat(
         self, prog, mask_name, W, tau, budget, candidates, n,
         allow_recursive=False,
     ):

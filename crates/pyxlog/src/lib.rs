@@ -475,6 +475,7 @@ pub struct CompiledIlpProgram {
     pub(crate) head_rel_name: String,
     pub(crate) max_active_rules: usize,
     pub(crate) candidate_map: Option<HashMap<(u32, u32, u32), u32>>,
+    pub(crate) candidate_order: Option<Vec<(u32, u32, u32)>>,
     /// Maximum bytes for per-chunk temp allocations (masks, prefix sums,
     /// chunk-local COO scratch). The final merged COO buffer is exact-NNZ
     /// sized and may exceed this budget. Default: 16 MB.

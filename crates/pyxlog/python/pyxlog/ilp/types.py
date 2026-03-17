@@ -33,7 +33,7 @@ class TrainConfig:
     narrowing_top_fraction: float = 0.5
 
     # Hard-negative mining
-    max_mined_negatives: int = 10
+    max_mined_negatives: int = 0
 
     # Scaling
     max_active_rules: int = 32
@@ -56,6 +56,7 @@ class TrainConfig:
     # Reproducibility
     seed: int | None = None
     deterministic: bool = False
+    strict_gpu_native: bool = True
 
     # Compilation
     device: int = 0

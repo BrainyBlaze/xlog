@@ -10,6 +10,7 @@ skip_unless_pyxlog_cuda()
 
 from pyxlog.ilp import (
     CandidateMapEntry,
+    IlpConfigError,
     LearnedArtifact,
     TrainConfig,
     TrainResult,
@@ -41,6 +42,7 @@ def test_promote_returns_promotion_result():
     config = TrainConfig(
         step_budget_per_attempt=100, max_attempts=5,
         tau_start=2.0, tau_floor=0.05, seed=42,
+        strict_gpu_native=False,
     )
     result = train_and_promote(
         SOURCE, "W_reach", POS, NEG, config,
@@ -55,6 +57,7 @@ def test_promote_with_holdout_can_promote():
     config = TrainConfig(
         step_budget_per_attempt=100, max_attempts=5,
         tau_start=2.0, tau_floor=0.05, seed=42,
+        strict_gpu_native=False,
     )
     result = train_and_promote(
         SOURCE, "W_reach", POS, NEG, config,
@@ -70,6 +73,7 @@ def test_promote_without_holdout_requires_review():
     config = TrainConfig(
         step_budget_per_attempt=100, max_attempts=5,
         tau_start=2.0, tau_floor=0.05, seed=42,
+        strict_gpu_native=False,
     )
     result = train_and_promote(SOURCE, "W_reach", POS, NEG, config)
     assert result.status in (
@@ -83,6 +87,7 @@ def test_promote_gates_are_populated():
     config = TrainConfig(
         step_budget_per_attempt=100, max_attempts=5,
         tau_start=2.0, tau_floor=0.05, seed=42,
+        strict_gpu_native=False,
     )
     result = train_and_promote(
         SOURCE, "W_reach", POS, NEG, config,
@@ -107,6 +112,7 @@ def test_promote_not_converged():
     config = TrainConfig(
         step_budget_per_attempt=10, max_attempts=1,
         tau_start=1.0, tau_floor=0.1, seed=0,
+        strict_gpu_native=False,
     )
     result = train_and_promote(
         distractor_source, "W",
@@ -242,6 +248,7 @@ def test_holdout_f1_gate_fails_when_unavailable(monkeypatch):
             max_attempts=1,
             seed=7,
             typed_schema_required=False,
+            strict_gpu_native=False,
         ),
         holdout_positives=[("reach", [1, 3])],
         holdout_negatives=[],
@@ -250,3 +257,24 @@ def test_holdout_f1_gate_fails_when_unavailable(monkeypatch):
     assert holdout_gates, "holdout_f1 gate not reported"
     assert holdout_gates[0].passed is False
     assert result.status == PromotionStatus.MANUAL_REVIEW_REQUIRED
+
+
+def test_train_and_promote_rejects_strict_gpu_native():
+    config = TrainConfig(
+        step_budget_per_attempt=40,
+        max_attempts=2,
+        tau_start=2.0,
+        tau_floor=0.05,
+        seed=42,
+        strict_gpu_native=True,
+    )
+    with pytest.raises(IlpConfigError, match="strict_gpu_native"):
+        train_and_promote(
+            SOURCE,
+            "W_reach",
+            POS,
+            NEG,
+            config,
+            holdout_positives=[("reach", [1, 3])],
+            holdout_negatives=[],
+        )

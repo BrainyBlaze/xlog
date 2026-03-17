@@ -53,6 +53,7 @@ def train_only(
         source, device=config.device, memory_mb=config.memory_mb,
         max_active_rules=config.max_active_rules,
     )
+    prog.set_strict_zero_dtoh(config.strict_gpu_native)
     compile_ms = (time.perf_counter() - _compile_t0) * 1000.0
 
     return _train_on_compiled(
@@ -81,6 +82,7 @@ def _train_on_compiled(
     _reset_before_first_attempt is True, reset_runtime() is called before
     the first attempt (needed when reusing a program across seeds).
     """
+    prog.set_strict_zero_dtoh(config.strict_gpu_native)
     attempts: list[_AttemptResult] = []
     global_steps = 0
     numeric_failures = 0
@@ -176,6 +178,22 @@ def _validate_inputs(
     if overlap:
         raise IlpConfigError(
             f"positives and negatives contradict: {overlap}"
+        )
+
+    if config.strict_gpu_native and config.max_mined_negatives > 0:
+        raise IlpConfigError(
+            "host negative mining is incompatible with strict_gpu_native; "
+            "set max_mined_negatives=0 or disable strict_gpu_native"
+        )
+    if config.strict_gpu_native and config.telemetry_level > 0:
+        raise IlpConfigError(
+            "telemetry collection is incompatible with strict_gpu_native; "
+            "set telemetry_level=0 or disable strict_gpu_native"
+        )
+    if config.strict_gpu_native and config.debug_dense_mask:
+        raise IlpConfigError(
+            "dense mask backend is incompatible with strict_gpu_native; "
+            "set debug_dense_mask=False or disable strict_gpu_native"
         )
 
 
@@ -280,6 +298,36 @@ def _run_single_attempt(
     attempt_idx: int,
     step_budget: int,
 ) -> _AttemptResult:
+    if config.strict_gpu_native:
+        return _run_single_attempt_strict(
+            prog,
+            mask_name,
+            positives,
+            negatives,
+            config,
+            attempt_idx,
+            step_budget,
+        )
+    return _run_single_attempt_compat(
+        prog,
+        mask_name,
+        positives,
+        negatives,
+        config,
+        attempt_idx,
+        step_budget,
+    )
+
+
+def _run_single_attempt_compat(
+    prog: object,
+    mask_name: str,
+    positives: list[tuple[str, list[int]]],
+    negatives: list[tuple[str, list[int]]],
+    config: TrainConfig,
+    attempt_idx: int,
+    step_budget: int,
+) -> _AttemptResult:
     context_base = {
         "attempt": attempt_idx,
         "C": 0,
@@ -339,7 +387,7 @@ def _run_single_attempt(
         result = _AttemptResult()
         result.candidate_map = candidate_map
         witness_coverage = 0.0
-        best_witness_coverage = 0.0
+        best_witness_coverage = torch.tensor(0.0, device=W.device)
 
         # Phase timing accumulators (microseconds per step)
         phase_apply_mask_us: list[float] = []
@@ -348,6 +396,7 @@ def _run_single_attempt(
         phase_backward_step_us: list[float] = []
         phase_membership_us: list[float] = []
         phase_convergence_us: list[float] = []
+        pos_by_rel, pos_indices_by_rel = _prepare_relation_groups(positives, W.device)
 
         for step in range(step_budget):
             try:
@@ -390,7 +439,7 @@ def _run_single_attempt(
                 loss_dl, grad_dl = prog.compute_ilp_loss_grad_gpu(
                     positives, all_negatives, cand_probs.detach(),
                 )
-                credit_loss = torch.from_dlpack(loss_dl).item()
+                credit_loss = torch.from_dlpack(loss_dl).reshape(())
                 credit_grad = torch.from_dlpack(grad_dl)
                 phase_loss_credit_us.append((time.perf_counter() - _t0) * 1_000_000)
 
@@ -407,14 +456,15 @@ def _run_single_attempt(
                     if cand_sum > 1e-8:
                         cand_probs_norm = cand_probs / cand_sum
                         ent = normalized_entropy(cand_probs_norm, C)
-                        loss_value = loss_value - ent_weight * ent.item()
+                        loss_value = loss_value - ent_weight * ent
                         ent_grads = torch.autograd.grad(
                             -ent_weight * ent, cand_probs, retain_graph=True,
                         )[0]
                         credit_grad = credit_grad + ent_grads
 
                 # Check for NaN/Inf
-                if math.isnan(loss_value) or math.isinf(loss_value):
+                loss_value_scalar = float(loss_value.detach().cpu())
+                if math.isnan(loss_value_scalar) or math.isinf(loss_value_scalar):
                     raise _NumericFailure()
                 phase_loss_reduce_us.append((time.perf_counter() - _t0) * 1_000_000)
 
@@ -438,29 +488,30 @@ def _run_single_attempt(
 
                 # Batch witness coverage -- GPU-side fact membership
                 _t0 = time.perf_counter()
-                pos_by_rel: dict[str, list[list[int]]] = {}
-                pos_indices_by_rel: dict[str, list[int]] = {}
-                for idx, (rel, vals) in enumerate(positives):
-                    pos_by_rel.setdefault(rel, []).append(vals)
-                    pos_indices_by_rel.setdefault(rel, []).append(idx)
-
-                witness_mask = [False] * len(positives)
-                for rel_name, facts_list in pos_by_rel.items():
-                    mask = prog.batch_fact_membership(rel_name, facts_list)
-                    for local_idx, found in enumerate(mask):
-                        global_idx = pos_indices_by_rel[rel_name][local_idx]
-                        witness_mask[global_idx] = found
-
-                witness_count = sum(witness_mask)
+                witness_mask = _compute_grouped_membership_mask_device(
+                    prog,
+                    pos_by_rel,
+                    pos_indices_by_rel,
+                    len(positives),
+                    W.device,
+                )
+                witness_count = int(torch.count_nonzero(witness_mask).detach().cpu())
                 witness_coverage = witness_count / len(positives)
-                best_witness_coverage = max(best_witness_coverage, witness_coverage)
+                best_witness_coverage = torch.maximum(
+                    best_witness_coverage,
+                    torch.tensor(witness_coverage, device=W.device),
+                )
                 phase_membership_us.append((time.perf_counter() - _t0) * 1_000_000)
 
                 # Discreteness metric -- max candidate prob
                 with torch.no_grad():
-                    disc = cand_probs.max().item() if cand_probs.numel() > 0 else 0.0
+                    disc = (
+                        float(cand_probs.max().detach().cpu())
+                        if cand_probs.numel() > 0
+                        else 0.0
+                    )
                 temp_controller.step(
-                    loss=loss_value, disc=disc, witness_coverage=witness_coverage,
+                    loss=loss_value_scalar, disc=disc, witness_coverage=witness_coverage,
                 )
 
                 # Telemetry
@@ -470,12 +521,12 @@ def _run_single_attempt(
                     tel_sum = cand_probs.sum()
                     if tel_sum > 1e-8 and C > 1:
                         tel_normed = cand_probs / tel_sum
-                        tel_ent = normalized_entropy(tel_normed, C).item()
+                        tel_ent = float(normalized_entropy(tel_normed, C).detach().cpu())
                     else:
                         tel_ent = 0.0
                     result.telemetry_steps.append(StepRecord(
                         step=step,
-                        loss=loss_value,
+                        loss=loss_value_scalar,
                         argmax_rule=argmax_rule,
                         discreteness=disc,
                         temperature=temp_controller.tau,
@@ -562,7 +613,7 @@ def _run_single_attempt(
 
         # Did not converge -- compute partial recall from best witness coverage
         result.steps_used = step_budget
-        result.recall = best_witness_coverage
+        result.recall = float(best_witness_coverage.detach().cpu())
         if prev_argmax is not None:
             i, j, k = prev_argmax
             result.discovered_rule = _format_rule(
@@ -611,6 +662,248 @@ def _run_single_attempt(
             context=context,
             cause=e,
         )
+
+
+def _run_single_attempt_strict(
+    prog: object,
+    mask_name: str,
+    positives: list[tuple[str, list[int]]],
+    negatives: list[tuple[str, list[int]]],
+    config: TrainConfig,
+    attempt_idx: int,
+    step_budget: int,
+) -> _AttemptResult:
+    try:
+        n = prog.ilp_schema_size()
+        rel_names = prog.ilp_relation_names()
+        allow_recursive = config.allow_recursive_candidates
+        candidates = prog.valid_candidates(mask_name, allow_recursive)
+        if not candidates:
+            raise IlpCandidateError("No valid candidates for mask")
+
+        candidate_map = [
+            CandidateMapEntry(
+                id=c["id"], i=c["i"], j=c["j"], k=c["k"],
+                left_name=c["left_name"], right_name=c["right_name"],
+                head_name=c["head_name"],
+            )
+            for c in candidates
+        ]
+
+        prog.set_candidate_map([(c["i"], c["j"], c["k"]) for c in candidates])
+
+        backend = SparseMaskBackend()
+        device = f"cuda:{config.device}" if torch.cuda.is_available() else "cpu"
+        W = backend.init_weights(len(candidates), n, device)
+        optimizer = torch.optim.Adam([W], lr=0.1)
+        result = _AttemptResult()
+        result.candidate_map = candidate_map
+        last_cand_probs: torch.Tensor | None = None
+
+        for step in range(step_budget):
+            try:
+                optimizer.zero_grad()
+                prog.reset_d2h_transfer_count()
+
+                tau = _strict_tau_for_step(step, step_budget, config)
+                cand_probs, _ = backend.apply_mask(
+                    prog,
+                    mask_name,
+                    W,
+                    tau,
+                    config.max_active_rules,
+                    candidates,
+                    n,
+                    allow_recursive=allow_recursive,
+                    strict_gpu_native=True,
+                )
+                last_cand_probs = cand_probs
+
+                prog.evaluate()
+
+                loss_dl, grad_dl = prog.compute_ilp_loss_grad_gpu(
+                    positives,
+                    negatives,
+                    cand_probs.detach(),
+                )
+                credit_loss = torch.from_dlpack(loss_dl).reshape(())
+                credit_grad = torch.from_dlpack(grad_dl)
+
+                ent_weight = entropy_weight_at_step(
+                    step,
+                    step_budget,
+                    start=config.entropy_weight_start,
+                    end=config.entropy_weight_end,
+                )
+                if ent_weight > 0 and len(candidates) > 1:
+                    cand_probs_norm = cand_probs / cand_probs.sum().clamp_min(1e-8)
+                    ent = normalized_entropy(cand_probs_norm, len(candidates))
+                    ent_grads = torch.autograd.grad(
+                        -ent_weight * ent,
+                        cand_probs,
+                        retain_graph=True,
+                    )[0]
+                    credit_grad = credit_grad + ent_grads
+
+                cand_probs.backward(credit_grad)
+                optimizer.step()
+
+                d2h_count = prog.d2h_transfer_count()
+                if d2h_count > 0:
+                    context = _attempt_context(
+                        attempt=attempt_idx,
+                        step=step,
+                        C=len(candidates),
+                        config=config,
+                        terminal_reason="d2h_gate_violation",
+                    )
+                    context["d2h_count"] = d2h_count
+                    raise _AttemptRuntimeFailure(
+                        terminal_reason="d2h_gate_violation",
+                        context=context,
+                        cause=RuntimeError("d2h transfer observed in strict hot step loop"),
+                    )
+            except _AttemptRuntimeFailure:
+                raise
+            except Exception as e:
+                context = _attempt_context(
+                    attempt=attempt_idx,
+                    step=step,
+                    C=len(candidates),
+                    config=config,
+                    terminal_reason=_classify_failure_reason(e),
+                )
+                context["error"] = str(e)
+                raise _AttemptRuntimeFailure(
+                    terminal_reason=_classify_failure_reason(e),
+                    context=context,
+                    cause=e,
+                )
+
+        if last_cand_probs is None:
+            raise IlpTrainingError("strict_hot_loop executed zero steps", {"attempt": attempt_idx})
+
+        return _finalize_strict_attempt(
+            prog,
+            mask_name,
+            positives,
+            negatives,
+            config,
+            step_budget,
+            rel_names,
+            candidates,
+            n,
+            W,
+            last_cand_probs,
+            backend,
+            result,
+        )
+    except IlpCandidateError:
+        raise
+    except _AttemptRuntimeFailure:
+        raise
+    except Exception as e:
+        context = {
+            "attempt": attempt_idx,
+            "C": len(candidates) if "candidates" in locals() else 0,
+            "k": config.max_active_rules,
+            "device_name": _device_name(config),
+            "allocated_bytes": _allocated_bytes(config.device),
+            "step": None,
+            "terminal_reason": _classify_failure_reason(e),
+        }
+        raise _AttemptRuntimeFailure(
+            terminal_reason=_classify_failure_reason(e),
+            context=context,
+            cause=e,
+        )
+
+
+def _strict_tau_for_step(step: int, step_budget: int, config: TrainConfig) -> float:
+    if step_budget <= 1:
+        return config.tau_floor
+    frac = step / max(1, step_budget - 1)
+    tau = config.tau_start + (config.tau_floor - config.tau_start) * frac
+    return max(config.tau_floor, min(config.tau_start, tau))
+
+
+def _strict_selected_hard(cand_probs: torch.Tensor, budget: int) -> list[int]:
+    effective_budget = min(budget, cand_probs.numel())
+    selected = torch.argsort(
+        cand_probs.detach(),
+        descending=True,
+        stable=True,
+    )[:effective_budget]
+    return [int(idx) for idx in selected.cpu().tolist()]
+
+
+def _strict_witness_coverage(
+    prog,
+    positives: list[tuple[str, list[int]]],
+    device: torch.device,
+) -> float:
+    if not positives:
+        return 0.0
+    pos_by_rel, pos_indices_by_rel = _prepare_relation_groups(positives, device)
+    witness_mask = _compute_grouped_membership_mask_device(
+        prog,
+        pos_by_rel,
+        pos_indices_by_rel,
+        len(positives),
+        device,
+    )
+    witness_count = int(torch.count_nonzero(witness_mask).detach().cpu())
+    return witness_count / len(positives)
+
+
+def _finalize_strict_attempt(
+    prog,
+    mask_name: str,
+    positives: list[tuple[str, list[int]]],
+    negatives: list[tuple[str, list[int]]],
+    config: TrainConfig,
+    step_budget: int,
+    rel_names: list[str],
+    candidates: list[dict],
+    n: int,
+    W: torch.Tensor,
+    cand_probs: torch.Tensor,
+    backend,
+    result: _AttemptResult,
+) -> _AttemptResult:
+    argmax_idx = backend.decode_argmax(W, candidates, n)
+    argmax_ijk = (
+        candidates[argmax_idx]["i"],
+        candidates[argmax_idx]["j"],
+        candidates[argmax_idx]["k"],
+    )
+    result.steps_used = step_budget
+    result.argmax_ijk = argmax_ijk
+    result.selected_hard = _strict_selected_hard(cand_probs, config.max_active_rules)
+
+    witness_coverage = _strict_witness_coverage(prog, positives, cand_probs.device)
+    converged = _check_convergence(
+        prog,
+        W,
+        mask_name,
+        positives,
+        negatives,
+        rel_names,
+        n,
+        argmax_ijk,
+        perform_mask_checks=False,
+    )
+    if converged:
+        result.converged = True
+        result.precision = 1.0
+        result.recall = 1.0
+    else:
+        result.recall = witness_coverage
+
+    i, j, k = argmax_ijk
+    result.discovered_rule = _format_rule(rel_names[i], rel_names[j], rel_names[k])
+    _fill_metrics(result, cand_probs, candidates, W, backend)
+    return result
 
 
 def _classify_failure_reason(exc: Exception) -> str:
@@ -751,29 +1044,35 @@ def _check_convergence(
     perform_mask_checks: bool = True,
 ) -> bool:
     """Convergence check using training-mask checks plus argmax-only verification."""
-    pos_by_rel: dict[str, list[list[int]]] = {}
-    for rel, vals in positives:
-        pos_by_rel.setdefault(rel, []).append(vals)
+    pos_by_rel, pos_indices_by_rel = _prepare_relation_groups(positives, W.device)
 
     if perform_mask_checks:
         # Gate 1: all positives derived under current mask
-        for rel_name, facts_list in pos_by_rel.items():
-            mask = prog.batch_fact_membership(rel_name, facts_list)
-            if not all(mask):
-                return False
+        pos_mask = _compute_grouped_membership_mask_device(
+            prog,
+            pos_by_rel,
+            pos_indices_by_rel,
+            len(positives),
+            W.device,
+        )
+        if not bool(pos_mask.all().item()):
+            return False
 
         # Gate 2: no negatives derived under current mask
         # Some sparse candidate sets are intentionally smaller than
         # max_active_rules and can remain overactive; argmax-only
         # verification is still sufficient for promotion semantics.
-        neg_by_rel: dict[str, list[list[int]]] = {}
         if negatives:
-            for rel, vals in negatives:
-                neg_by_rel.setdefault(rel, []).append(vals)
-            for rel_name, facts_list in neg_by_rel.items():
-                mask = prog.batch_fact_membership(rel_name, facts_list)
-                if any(mask):
-                    return False
+            neg_by_rel, neg_indices_by_rel = _prepare_relation_groups(negatives, W.device)
+            neg_mask = _compute_grouped_membership_mask_device(
+                prog,
+                neg_by_rel,
+                neg_indices_by_rel,
+                len(negatives),
+                W.device,
+            )
+            if bool(neg_mask.any().item()):
+                return False
 
     # Gate 3: argmax-only re-evaluation (always uses dense mask for verification)
     i, j, k = argmax_ijk
@@ -785,24 +1084,30 @@ def _check_convergence(
     prog.reset_d2h_transfer_count()
 
     # Gate 3a: argmax-only must derive all positives
-    for rel_name, facts_list in pos_by_rel.items():
-        mask = prog.batch_fact_membership(rel_name, facts_list)
-        if not all(mask):
-            return False
+    pos_mask = _compute_grouped_membership_mask_device(
+        prog,
+        pos_by_rel,
+        pos_indices_by_rel,
+        len(positives),
+        W.device,
+    )
+    if not bool(pos_mask.all().item()):
+        return False
 
     # Gate 4: argmax-only must not derive negatives
     if not negatives:
         return True
 
-    neg_by_rel = {}
-    for rel, vals in negatives:
-        neg_by_rel.setdefault(rel, []).append(vals)
-
-    if negatives:
-        for rel_name, facts_list in neg_by_rel.items():
-            mask = prog.batch_fact_membership(rel_name, facts_list)
-            if any(mask):
-                return False
+    neg_by_rel, neg_indices_by_rel = _prepare_relation_groups(negatives, W.device)
+    neg_mask = _compute_grouped_membership_mask_device(
+        prog,
+        neg_by_rel,
+        neg_indices_by_rel,
+        len(negatives),
+        W.device,
+    )
+    if bool(neg_mask.any().item()):
+        return False
 
     return True
 
@@ -810,6 +1115,38 @@ def _check_convergence(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _prepare_relation_groups(
+    facts: list[tuple[str, list[int]]],
+    device: torch.device,
+) -> tuple[dict[str, list[list[int]]], dict[str, torch.Tensor]]:
+    """Group example tuples by relation and prebuild CUDA index tensors."""
+    facts_by_rel: dict[str, list[list[int]]] = {}
+    indices_by_rel_host: dict[str, list[int]] = {}
+    for idx, (rel_name, values) in enumerate(facts):
+        facts_by_rel.setdefault(rel_name, []).append(values)
+        indices_by_rel_host.setdefault(rel_name, []).append(idx)
+    indices_by_rel = {
+        rel_name: torch.tensor(indices, device=device, dtype=torch.long)
+        for rel_name, indices in indices_by_rel_host.items()
+    }
+    return facts_by_rel, indices_by_rel
+
+
+def _compute_grouped_membership_mask_device(
+    prog,
+    facts_by_rel: dict[str, list[list[int]]],
+    indices_by_rel: dict[str, torch.Tensor],
+    total_facts: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Compute a per-fact CUDA membership mask via device-native pyxlog APIs."""
+    witness_mask = torch.zeros(total_facts, dtype=torch.bool, device=device)
+    for rel_name, facts_list in facts_by_rel.items():
+        mask = torch.from_dlpack(prog.batch_fact_membership_device(rel_name, facts_list))
+        witness_mask.index_copy_(0, indices_by_rel[rel_name], mask.to(torch.bool))
+    return witness_mask
 
 
 def _format_rule(left: str, right: str, head: str) -> str:
@@ -885,7 +1222,7 @@ def _select_winner(
 
     holdout_f1 = None
     holdout_variance = 0.0
-    if _compute_holdout and winner.converged:
+    if _compute_holdout and winner.converged and not config.strict_gpu_native:
         from pyxlog.ilp.holdout import holdout_f1_and_variance
 
         holdout_f1, holdout_variance = holdout_f1_and_variance(
