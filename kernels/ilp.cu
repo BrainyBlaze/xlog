@@ -72,6 +72,172 @@ extern "C" __global__ void ilp_csr_histogram(
 }
 
 // ---------------------------------------------------------------------------
+// Strict sparse mask helpers
+// ---------------------------------------------------------------------------
+
+extern "C" __global__ void ilp_mark_selected_ids_u32(
+    const uint32_t* selected_ids,
+    uint32_t selected_len,
+    uint32_t candidate_count,
+    uint32_t* active_flags
+) {
+    uint32_t pos = blockIdx.x * blockDim.x + threadIdx.x;
+    if (pos >= selected_len) return;
+    uint32_t cid = selected_ids[pos];
+    if (cid >= candidate_count) {
+        return;
+    }
+    atomicExch(&active_flags[cid], 1u);
+}
+
+__device__ inline void ilp_record_selected_id_error(
+    uint32_t code,
+    uint32_t pos,
+    uint32_t* error_code,
+    uint32_t* error_pos
+) {
+    if (atomicCAS(error_code, 0u, code) == 0u) {
+        *error_pos = pos;
+    }
+}
+
+extern "C" __global__ void ilp_validate_selected_ids_u32(
+    const uint32_t* selected_ids,
+    uint32_t selected_len,
+    uint32_t candidate_count,
+    uint32_t* seen_flags,
+    uint32_t* error_code,
+    uint32_t* error_pos
+) {
+    uint32_t pos = blockIdx.x * blockDim.x + threadIdx.x;
+    if (pos >= selected_len) return;
+    uint32_t cid = selected_ids[pos];
+    if (cid >= candidate_count) {
+        ilp_record_selected_id_error(1u, pos, error_code, error_pos);
+        return;
+    }
+    if (atomicExch(&seen_flags[cid], 1u) != 0u) {
+        ilp_record_selected_id_error(2u, pos, error_code, error_pos);
+    }
+}
+
+extern "C" __global__ void ilp_mark_selected_ids_i32(
+    const int32_t* selected_ids,
+    uint32_t selected_len,
+    uint32_t candidate_count,
+    uint32_t* active_flags
+) {
+    uint32_t pos = blockIdx.x * blockDim.x + threadIdx.x;
+    if (pos >= selected_len) return;
+    int32_t cid = selected_ids[pos];
+    if (cid < 0 || static_cast<uint32_t>(cid) >= candidate_count) {
+        return;
+    }
+    atomicExch(&active_flags[static_cast<uint32_t>(cid)], 1u);
+}
+
+extern "C" __global__ void ilp_validate_selected_ids_i32(
+    const int32_t* selected_ids,
+    uint32_t selected_len,
+    uint32_t candidate_count,
+    uint32_t* seen_flags,
+    uint32_t* error_code,
+    uint32_t* error_pos
+) {
+    uint32_t pos = blockIdx.x * blockDim.x + threadIdx.x;
+    if (pos >= selected_len) return;
+    int32_t cid = selected_ids[pos];
+    if (cid < 0 || static_cast<uint32_t>(cid) >= candidate_count) {
+        ilp_record_selected_id_error(1u, pos, error_code, error_pos);
+        return;
+    }
+    if (atomicExch(&seen_flags[static_cast<uint32_t>(cid)], 1u) != 0u) {
+        ilp_record_selected_id_error(2u, pos, error_code, error_pos);
+    }
+}
+
+extern "C" __global__ void ilp_mark_selected_ids_i64(
+    const int64_t* selected_ids,
+    uint32_t selected_len,
+    uint32_t candidate_count,
+    uint32_t* active_flags
+) {
+    uint32_t pos = blockIdx.x * blockDim.x + threadIdx.x;
+    if (pos >= selected_len) return;
+    int64_t cid = selected_ids[pos];
+    if (cid < 0 || static_cast<uint64_t>(cid) >= static_cast<uint64_t>(candidate_count)) {
+        return;
+    }
+    atomicExch(&active_flags[static_cast<uint32_t>(cid)], 1u);
+}
+
+extern "C" __global__ void ilp_validate_selected_ids_i64(
+    const int64_t* selected_ids,
+    uint32_t selected_len,
+    uint32_t candidate_count,
+    uint32_t* seen_flags,
+    uint32_t* error_code,
+    uint32_t* error_pos
+) {
+    uint32_t pos = blockIdx.x * blockDim.x + threadIdx.x;
+    if (pos >= selected_len) return;
+    int64_t cid = selected_ids[pos];
+    if (cid < 0 || static_cast<uint64_t>(cid) >= static_cast<uint64_t>(candidate_count)) {
+        ilp_record_selected_id_error(1u, pos, error_code, error_pos);
+        return;
+    }
+    if (atomicExch(&seen_flags[static_cast<uint32_t>(cid)], 1u) != 0u) {
+        ilp_record_selected_id_error(2u, pos, error_code, error_pos);
+    }
+}
+
+extern "C" __global__ void ilp_mark_selected_ids_u64(
+    const uint64_t* selected_ids,
+    uint32_t selected_len,
+    uint32_t candidate_count,
+    uint32_t* active_flags
+) {
+    uint32_t pos = blockIdx.x * blockDim.x + threadIdx.x;
+    if (pos >= selected_len) return;
+    uint64_t cid = selected_ids[pos];
+    if (cid >= static_cast<uint64_t>(candidate_count)) {
+        return;
+    }
+    atomicExch(&active_flags[static_cast<uint32_t>(cid)], 1u);
+}
+
+extern "C" __global__ void ilp_validate_selected_ids_u64(
+    const uint64_t* selected_ids,
+    uint32_t selected_len,
+    uint32_t candidate_count,
+    uint32_t* seen_flags,
+    uint32_t* error_code,
+    uint32_t* error_pos
+) {
+    uint32_t pos = blockIdx.x * blockDim.x + threadIdx.x;
+    if (pos >= selected_len) return;
+    uint64_t cid = selected_ids[pos];
+    if (cid >= static_cast<uint64_t>(candidate_count)) {
+        ilp_record_selected_id_error(1u, pos, error_code, error_pos);
+        return;
+    }
+    if (atomicExch(&seen_flags[static_cast<uint32_t>(cid)], 1u) != 0u) {
+        ilp_record_selected_id_error(2u, pos, error_code, error_pos);
+    }
+}
+
+extern "C" __global__ void ilp_broadcast_candidate_flag(
+    const uint32_t* active_flags,
+    uint32_t candidate_idx,
+    uint32_t num_rows,
+    uint8_t* row_mask
+) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= num_rows) return;
+    row_mask[tid] = active_flags[candidate_idx] == 0u ? 0u : 1u;
+}
+
+// ---------------------------------------------------------------------------
 // Reduction kernels for device-side loss summation
 // ---------------------------------------------------------------------------
 

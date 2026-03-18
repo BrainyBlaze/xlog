@@ -270,6 +270,15 @@ pub mod neural_kernels {
 /// Kernel function names in the ILP module.
 pub mod ilp_kernels {
     pub const EXTRACT_NONZERO_INDICES: &str = "extract_nonzero_indices";
+    pub const ILP_MARK_SELECTED_IDS_U32: &str = "ilp_mark_selected_ids_u32";
+    pub const ILP_MARK_SELECTED_IDS_I32: &str = "ilp_mark_selected_ids_i32";
+    pub const ILP_MARK_SELECTED_IDS_I64: &str = "ilp_mark_selected_ids_i64";
+    pub const ILP_MARK_SELECTED_IDS_U64: &str = "ilp_mark_selected_ids_u64";
+    pub const ILP_VALIDATE_SELECTED_IDS_U32: &str = "ilp_validate_selected_ids_u32";
+    pub const ILP_VALIDATE_SELECTED_IDS_I32: &str = "ilp_validate_selected_ids_i32";
+    pub const ILP_VALIDATE_SELECTED_IDS_I64: &str = "ilp_validate_selected_ids_i64";
+    pub const ILP_VALIDATE_SELECTED_IDS_U64: &str = "ilp_validate_selected_ids_u64";
+    pub const ILP_BROADCAST_CANDIDATE_FLAG: &str = "ilp_broadcast_candidate_flag";
     pub const ILP_COO_FILL_FROM_MASK: &str = "ilp_coo_fill_from_mask";
     pub const ILP_CSR_HISTOGRAM: &str = "ilp_csr_histogram";
     pub const ILP_REDUCE_SUM_F32: &str = "ilp_reduce_sum_f32";

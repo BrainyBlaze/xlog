@@ -93,6 +93,7 @@ def test_alpha_reliability(stage_name, source, positives, negatives, mask_name, 
         seed=seed,
         device=0,
         memory_mb=512,
+        strict_gpu_native=False,
     )
     prog = _get_compiled(stage_name, source, config)
     result = _train_on_compiled(

@@ -38,7 +38,11 @@ def test_contradictory_examples_raises_config_error():
 
 def test_recursive_candidates_accepted_in_beta():
     """allow_recursive_candidates=True is now a supported beta feature."""
-    config = TrainConfig(max_attempts=1, allow_recursive_candidates=True)
+    config = TrainConfig(
+        max_attempts=1,
+        allow_recursive_candidates=True,
+        strict_gpu_native=False,
+    )
     # Should not raise — just run with limited budget
     result = train_only(SOURCE, "W", [("reach", [1, 3])], [], config)
     assert result.total_steps > 0
@@ -53,6 +57,7 @@ def test_all_distractors_returns_not_converged():
     config = TrainConfig(
         step_budget_per_attempt=20, max_attempts=2,
         tau_start=1.0, tau_floor=0.1, seed=0,
+        strict_gpu_native=False,
     )
     result = train_only(
         source=distractor_source, mask_name="W",
@@ -82,6 +87,7 @@ def test_nan_inf_detection_raises_after_limit():
     config = TrainConfig(
         step_budget_per_attempt=10, max_attempts=5,
         max_numeric_failures=2, seed=0,
+        strict_gpu_native=False,
     )
 
     with patch.object(SparseMaskBackend, "apply_mask", _inject_nan):
@@ -118,6 +124,7 @@ def test_cuda_oom_error_shape_and_context():
         step_budget_per_attempt=8,
         max_attempts=1,
         seed=0,
+        strict_gpu_native=False,
     )
 
     original_apply = SparseMaskBackend.apply_mask

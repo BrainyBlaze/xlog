@@ -19,15 +19,16 @@ NEG = []
 
 
 def test_sparse_backend_converges():
-    """train_only with debug_dense_mask=False (sparse) converges on reach."""
+    """Strict sparse backend converges; rule text is compat-export only."""
     config = TrainConfig(
         step_budget_per_attempt=100, max_attempts=5,
         tau_start=2.0, tau_floor=0.05, seed=42,
         debug_dense_mask=False,
     )
     result = train_only(SOURCE, "W_reach", POS, NEG, config)
-    assert result.converged
-    assert "edge" in result.discovered_rule
+    compat = result.export_compat_result()
+    assert compat.converged
+    assert "edge" in compat.discovered_rule
 
 
 def test_dense_backend_still_works():
@@ -36,6 +37,7 @@ def test_dense_backend_still_works():
         step_budget_per_attempt=100, max_attempts=5,
         tau_start=2.0, tau_floor=0.05, seed=42,
         debug_dense_mask=True,
+        strict_gpu_native=False,
     )
     result = train_only(SOURCE, "W_reach", POS, NEG, config)
     assert result.converged
@@ -51,6 +53,7 @@ def test_sparse_and_dense_find_same_rule():
     r_sparse = train_only(SOURCE, "W_reach", POS, NEG,
                           TrainConfig(**base, debug_dense_mask=False))
     r_dense = train_only(SOURCE, "W_reach", POS, NEG,
-                         TrainConfig(**base, debug_dense_mask=True))
-    if r_sparse.converged and r_dense.converged:
-        assert r_sparse.discovered_rule == r_dense.discovered_rule
+                         TrainConfig(**base, debug_dense_mask=True, strict_gpu_native=False))
+    r_sparse_compat = r_sparse.export_compat_result()
+    if r_sparse_compat.converged and r_dense.converged:
+        assert r_sparse_compat.discovered_rule == r_dense.discovered_rule

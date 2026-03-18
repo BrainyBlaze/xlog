@@ -6,6 +6,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 pyxlog = pytest.importorskip("pyxlog")
+import pyxlog.ilp as ilp
 
 from conftest import skip_unless_pyxlog_cuda
 skip_unless_pyxlog_cuda()
@@ -41,6 +42,16 @@ def test_d2h_counter_accessible():
     assert prog.d2h_transfer_count() == 0
 
 
+def test_compiled_ilp_program_does_not_expose_public_read_device_helpers():
+    prog = pyxlog.IlpProgramFactory.compile(
+        REACH_SOURCE, device=0, memory_mb=64,
+    )
+    assert not hasattr(prog, "read_device_i64_scalar")
+    assert not hasattr(prog, "read_device_bool_scalar")
+    assert not hasattr(prog, "read_device_i64_list")
+    assert not hasattr(prog, "set_rule_mask_sparse_selected_device_trusted")
+
+
 def test_d2h_counter_reset():
     prog = pyxlog.IlpProgramFactory.compile(
         REACH_SOURCE, device=0, memory_mb=64,
@@ -52,6 +63,17 @@ def test_d2h_counter_reset():
 
     prog.reset_d2h_transfer_count()
     assert prog.d2h_transfer_count() == 0
+
+
+def test_strict_zero_dtoh_rejects_host_sparse_selected_api():
+    prog = pyxlog.IlpProgramFactory.compile(
+        REACH_SOURCE, device=0, memory_mb=64,
+    )
+    prog.set_strict_zero_dtoh(True)
+    soft = torch.tensor([1.0], device="cuda", dtype=torch.float64)
+
+    with pytest.raises(RuntimeError, match="strict_zero_dtoh"):
+        prog.set_rule_mask_sparse_selected("W_reach", [0], soft, False)
 
 
 def test_batch_fact_membership_basic():
@@ -176,6 +198,7 @@ def test_full_training_zero_d2h_gate():
     config = TrainConfig(
         step_budget_per_attempt=50, max_attempts=3,
         tau_start=2.0, tau_floor=0.05, seed=42,
+        strict_gpu_native=True,
     )
     result = train_only(
         source=source, mask_name="W_reach",
@@ -186,8 +209,26 @@ def test_full_training_zero_d2h_gate():
     )
     # If we got here without IlpTrainingError("d2h_gate_violation"),
     # the hard gate passed.
-    assert result.converged
-    assert "edge" in result.discovered_rule
+    strict_result_type = getattr(ilp, "StrictTrainResult", None)
+    strict_artifact_type = getattr(ilp, "StrictLearnedArtifact", None)
+    assert strict_result_type is not None
+    assert strict_artifact_type is not None
+    assert isinstance(result, strict_result_type)
+    assert isinstance(result.artifact, strict_artifact_type)
+    assert result.strict_gpu_native is True
+    assert result.compat_materialized is False
+    assert not hasattr(result, "converged")
+    assert not hasattr(result, "precision")
+    assert not hasattr(result, "recall")
+    assert not hasattr(result, "rule_frequency")
+    assert not hasattr(result, "discovered_rule")
+    compat_artifact = result.artifact.export_compat_artifact()
+    compat = result.export_compat_result()
+    assert compat.converged
+    assert compat.discovered_rule is not None
+    assert "edge" in compat.discovered_rule
+    assert compat_artifact.discovered_rule is not None
+    assert "edge" in compat_artifact.discovered_rule
 
 
 def test_d2h_gate_with_negatives():
@@ -201,6 +242,7 @@ def test_d2h_gate_with_negatives():
     config = TrainConfig(
         step_budget_per_attempt=60, max_attempts=3,
         tau_start=2.0, tau_floor=0.05, seed=42,
+        strict_gpu_native=True,
     )
     result = train_only(
         source=source, mask_name="W_gp",
@@ -209,8 +251,25 @@ def test_d2h_gate_with_negatives():
         config=config,
     )
     # No d2h_gate_violation raised
-    assert result.converged
-    assert "parent" in result.discovered_rule
+    strict_result_type = getattr(ilp, "StrictTrainResult", None)
+    strict_artifact_type = getattr(ilp, "StrictLearnedArtifact", None)
+    assert strict_result_type is not None
+    assert strict_artifact_type is not None
+    assert isinstance(result, strict_result_type)
+    assert isinstance(result.artifact, strict_artifact_type)
+    assert result.strict_gpu_native is True
+    assert result.compat_materialized is False
+    assert not hasattr(result, "converged")
+    assert not hasattr(result, "precision")
+    assert not hasattr(result, "recall")
+    assert not hasattr(result, "discovered_rule")
+    compat_artifact = result.artifact.export_compat_artifact()
+    compat = result.export_compat_result()
+    assert compat.converged
+    assert compat.discovered_rule is not None
+    assert "parent" in compat.discovered_rule
+    assert compat_artifact.discovered_rule is not None
+    assert "parent" in compat_artifact.discovered_rule
 
 
 def test_host_transfer_stats_methods_accessible():

@@ -1,5 +1,9 @@
 # python/tests/test_ilp_types.py
 """Tests for dILP type definitions and exceptions."""
+import pytest
+
+import pyxlog.ilp as ilp
+
 from pyxlog.ilp import (
     TrainConfig,
     TrainResult,
@@ -53,6 +57,11 @@ def test_train_result_defaults():
     assert result.converged is False
     assert result.discovered_rule is None
     assert result.attempt_count == 0
+
+
+def test_strict_result_and_artifact_types_are_exported():
+    assert getattr(ilp, "StrictTrainResult", None) is not None
+    assert getattr(ilp, "StrictLearnedArtifact", None) is not None
 
 
 def test_ilp_config_error_is_value_error():

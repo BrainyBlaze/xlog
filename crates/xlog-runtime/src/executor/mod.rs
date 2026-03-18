@@ -148,6 +148,11 @@ impl Executor {
         &mut self.ilp_registry
     }
 
+    /// Get a shared reference to the ILP registry.
+    pub fn ilp_registry(&self) -> &IlpRegistry {
+        &self.ilp_registry
+    }
+
     /// Get the last ILP tagged result (RD-35).
     pub fn ilp_last_result(&self) -> Option<&IlpTaggedResult> {
         self.ilp_last_result.as_ref()

@@ -176,5 +176,9 @@ def test_train_only_strict_gpu_native_disables_holdout_scoring():
         NEG,
         config=config,
     )
-    assert result.holdout_f1 is None
-    assert result.holdout_variance == 0.0
+    assert result.strict_gpu_native is True
+    assert not hasattr(result, "holdout_f1")
+    assert not hasattr(result, "holdout_variance")
+    compat = result.export_compat_result()
+    assert compat.holdout_f1 is None
+    assert compat.holdout_variance == 0.0

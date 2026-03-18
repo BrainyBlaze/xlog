@@ -11,7 +11,14 @@ pyxlog = pytest.importorskip("pyxlog")
 from conftest import skip_unless_pyxlog_cuda
 skip_unless_pyxlog_cuda()
 
-from pyxlog.ilp import train_only, TrainConfig, TrainResult, IlpConfigError
+import pyxlog.ilp as ilp
+from pyxlog.ilp import (
+    train_only,
+    TrainConfig,
+    TrainResult,
+    LearnedArtifact,
+    IlpConfigError,
+)
 from pyxlog.ilp import trainer as trainer_mod
 
 REACH_SOURCE = """
@@ -127,6 +134,7 @@ def test_train_only_converges_on_reach():
     config = TrainConfig(
         step_budget_per_attempt=100, max_attempts=5,
         tau_start=2.0, tau_floor=0.05, seed=42,
+        strict_gpu_native=False,
     )
     result = train_only(
         source=REACH_SOURCE, mask_name="W_reach",
@@ -228,6 +236,7 @@ def test_train_only_precision_recall():
     config = TrainConfig(
         step_budget_per_attempt=100, max_attempts=5,
         tau_start=2.0, tau_floor=0.05, seed=42,
+        strict_gpu_native=False,
     )
     result = train_only(
         source=REACH_SOURCE, mask_name="W_reach",
@@ -242,6 +251,7 @@ def test_train_only_confidence_metrics():
     config = TrainConfig(
         step_budget_per_attempt=100, max_attempts=3,
         tau_start=2.0, tau_floor=0.05, seed=42,
+        strict_gpu_native=False,
     )
     result = train_only(
         source=REACH_SOURCE, mask_name="W_reach",
@@ -272,6 +282,7 @@ def test_train_only_nonconverged_has_partial_recall():
     config = TrainConfig(
         step_budget_per_attempt=30, max_attempts=1,
         tau_start=2.0, tau_floor=0.05, seed=42,
+        strict_gpu_native=False,
     )
     result = train_only(
         source=REACH_SOURCE, mask_name="W_reach",
@@ -292,6 +303,7 @@ def test_train_only_reproducibility_selected_hard_and_probs():
         seed=123,
         deterministic=True,
         debug_dense_mask=False,
+        strict_gpu_native=False,
     )
     a = train_only(
         source=REACH_SOURCE,
@@ -366,6 +378,7 @@ def test_train_only_rule_frequency_multi_attempt():
     config = TrainConfig(
         step_budget_per_attempt=100, max_attempts=3,
         tau_start=2.0, tau_floor=0.05, seed=42,
+        strict_gpu_native=False,
     )
     result = train_only(
         source=REACH_SOURCE, mask_name="W_reach",
@@ -417,3 +430,268 @@ def test_strict_single_attempt_helper_avoids_host_sync_primitives():
     assert ".cpu(" not in src
     assert ".item()" not in src
     assert "torch.cuda.synchronize()" not in src
+
+
+def test_strict_finalization_helpers_avoid_python_host_sync_primitives():
+    helper_sources = [
+        inspect.getsource(trainer_mod._finalize_strict_attempt),
+        inspect.getsource(trainer_mod._build_strict_train_result),
+    ]
+    strict_src = "\n".join(helper_sources)
+    assert ".cpu(" not in strict_src
+    assert ".item()" not in strict_src
+    assert ".tolist()" not in strict_src
+    assert ".numpy()" not in strict_src
+
+
+def test_select_better_strict_attempt_updates_argmax_device_selection():
+    entry = trainer_mod.CandidateMapEntry(
+        id=0, i=0, j=0, k=0,
+        left_name="edge", right_name="edge", head_name="reach",
+    )
+    best = trainer_mod._StrictAttemptState(
+        candidate_map=[entry],
+        telemetry_steps=[],
+        telemetry_timings={"winner": "best"},
+        steps_used=1,
+        W_device=torch.tensor([9.0, 1.0]),
+        cand_probs_device=torch.tensor([0.9, 0.1]),
+        score_loss_device=torch.tensor(2.0),
+        score_top1_device=torch.tensor(0.9),
+        selected_candidate_ids_device=torch.tensor([0], dtype=torch.int64),
+        argmax_candidate_id_device=torch.tensor([0], dtype=torch.int64),
+        attempt_id_device=torch.tensor([0], dtype=torch.int64),
+        rel_names=["edge", "reach"],
+        candidates=[{"i": 0, "j": 0, "k": 0}, {"i": 1, "j": 1, "k": 1}],
+        n=2,
+        allow_recursive=False,
+    )
+    candidate = trainer_mod._StrictAttemptState(
+        candidate_map=[entry],
+        telemetry_steps=[
+            trainer_mod.StepRecord(
+                step=4,
+                loss=1.0,
+                argmax_rule="edge+edge->reach",
+                discreteness=0.9,
+                temperature=0.5,
+                entropy=0.1,
+                stable_count=2,
+            )
+        ],
+        telemetry_timings={"winner": "candidate"},
+        steps_used=5,
+        W_device=torch.tensor([1.0, 10.0]),
+        cand_probs_device=torch.tensor([0.1, 0.9]),
+        score_loss_device=torch.tensor(1.0),
+        score_top1_device=torch.tensor(0.9),
+        selected_candidate_ids_device=torch.tensor([1], dtype=torch.int64),
+        argmax_candidate_id_device=torch.tensor([1], dtype=torch.int64),
+        attempt_id_device=torch.tensor([1], dtype=torch.int64),
+        rel_names=["edge", "reach"],
+        candidates=[{"i": 0, "j": 0, "k": 0}, {"i": 1, "j": 1, "k": 1}],
+        n=2,
+        allow_recursive=False,
+    )
+
+    merged = trainer_mod._select_better_strict_attempt(best, candidate)
+
+    assert merged.selected_candidate_ids_device.tolist() == [1]
+    assert merged.argmax_candidate_id_device.tolist() == [1]
+    assert merged.attempt_id_device.tolist() == [1]
+
+
+def test_export_compat_attempt_from_strict_state_uses_explicit_winner_metadata(monkeypatch):
+    class _FakeProg:
+        def reset_runtime(self):
+            return None
+
+        def set_rule_mask_sparse_selected(self, *_args, **_kwargs):
+            return None
+
+        def evaluate(self):
+            return None
+
+    def _noop_metrics(result, *_args, **_kwargs):
+        result.confidence_margin = None
+        result.top_k_concentration = None
+        result.soft_probs = []
+        result.logits = []
+
+    monkeypatch.setattr(trainer_mod, "_materialize_compat_witness_coverage", lambda *_args, **_kwargs: 0.5)
+    monkeypatch.setattr(trainer_mod, "_check_convergence", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(trainer_mod, "_materialize_compat_metrics", _noop_metrics)
+
+    state = trainer_mod._StrictAttemptState(
+        candidate_map=[],
+        telemetry_steps=[],
+        telemetry_timings={"winner": "stale"},
+        steps_used=1,
+        W_device=torch.tensor([0.1, 0.9]),
+        cand_probs_device=torch.tensor([0.1, 0.9]),
+        score_loss_device=torch.tensor(1.0),
+        score_top1_device=torch.tensor(0.9),
+        selected_candidate_ids_device=torch.tensor([1], dtype=torch.int64),
+        argmax_candidate_id_device=torch.tensor([1], dtype=torch.int64),
+        attempt_id_device=torch.tensor([7], dtype=torch.int64),
+        rel_names=["edge", "reach"],
+        candidates=[{"i": 0, "j": 0, "k": 0}, {"i": 1, "j": 1, "k": 1}],
+        n=2,
+        allow_recursive=False,
+    )
+    winner_metadata = {
+        "steps_used": 5,
+        "telemetry_steps": [
+            trainer_mod.StepRecord(
+                step=4,
+                loss=1.0,
+                argmax_rule="edge+edge->reach",
+                discreteness=0.9,
+                temperature=0.5,
+                entropy=0.1,
+                stable_count=2,
+            )
+        ],
+        "telemetry_timings": {"winner": "candidate"},
+    }
+
+    compat_attempt = trainer_mod._export_compat_attempt_from_strict_state(
+        _FakeProg(),
+        state,
+        winner_metadata,
+        "W_reach",
+        REACH_POS,
+        REACH_NEG,
+        trainer_mod.TrainConfig(strict_gpu_native=True),
+    )
+
+    assert compat_attempt.steps_used == 5
+    assert compat_attempt.telemetry_timings == {"winner": "candidate"}
+    assert len(compat_attempt.telemetry_steps) == 1
+    assert compat_attempt.telemetry_steps[0].step == 4
+
+
+def _assert_strict_result_shape(result) -> None:
+    strict_result_type = getattr(ilp, "StrictTrainResult", None)
+    strict_artifact_type = getattr(ilp, "StrictLearnedArtifact", None)
+    assert strict_result_type is not None, "StrictTrainResult must be exported"
+    assert strict_artifact_type is not None, "StrictLearnedArtifact must be exported"
+    assert isinstance(result, strict_result_type)
+    assert isinstance(result.artifact, strict_artifact_type)
+    assert result.strict_gpu_native is True
+    assert result.compat_materialized is False
+    assert not hasattr(result, "converged")
+    assert not hasattr(result, "precision")
+    assert not hasattr(result, "recall")
+    assert not hasattr(result, "holdout_f1")
+    assert not hasattr(result, "holdout_variance")
+    assert not hasattr(result, "confidence_margin")
+    assert not hasattr(result, "top_k_concentration")
+    assert not hasattr(result, "rule_frequency")
+    assert not hasattr(result, "discovered_rule")
+    assert not hasattr(result, "ambiguous_alternatives")
+
+
+def _assert_strict_artifact_shape(artifact) -> None:
+    strict_artifact_type = getattr(ilp, "StrictLearnedArtifact", None)
+    assert strict_artifact_type is not None, "StrictLearnedArtifact must be exported"
+    assert isinstance(artifact, strict_artifact_type)
+    assert artifact.strict_gpu_native is True
+    assert artifact.compat_materialized is False
+    assert not hasattr(artifact, "logits")
+    assert not hasattr(artifact, "soft_probs")
+    assert not hasattr(artifact, "selected_hard")
+    assert not hasattr(artifact, "discovered_rule")
+
+
+def test_train_only_strict_gpu_native_passes_with_host_sync_traps(monkeypatch):
+    def _forbid(name):
+        def _raise(*_args, **_kwargs):
+            raise AssertionError(f"host materialization called via torch.Tensor.{name}")
+        return _raise
+
+    monkeypatch.setattr(torch.Tensor, "cpu", _forbid("cpu"))
+    monkeypatch.setattr(torch.Tensor, "item", _forbid("item"))
+    monkeypatch.setattr(torch.Tensor, "tolist", _forbid("tolist"))
+    monkeypatch.setattr(torch.Tensor, "numpy", _forbid("numpy"))
+
+    result = train_only(
+        source=REACH_SOURCE,
+        mask_name="W_reach",
+        positives=REACH_POS,
+        negatives=REACH_NEG,
+        config=TrainConfig(
+            step_budget_per_attempt=40,
+            max_attempts=1,
+            seed=42,
+            strict_gpu_native=True,
+        ),
+    )
+
+    _assert_strict_result_shape(result)
+    _assert_strict_artifact_shape(result.artifact)
+
+
+def test_train_only_strict_gpu_native_compat_export_materializes_host_shapes():
+    result = train_only(
+        source=REACH_SOURCE,
+        mask_name="W_reach",
+        positives=REACH_POS,
+        negatives=REACH_NEG,
+        config=TrainConfig(
+            step_budget_per_attempt=60,
+            max_attempts=2,
+            seed=42,
+            strict_gpu_native=True,
+        ),
+    )
+
+    compat_artifact = result.artifact.export_compat_artifact()
+    compat_result = result.export_compat_result()
+
+    _assert_strict_result_shape(result)
+    _assert_strict_artifact_shape(result.artifact)
+    assert isinstance(compat_result, TrainResult)
+    assert isinstance(compat_artifact, LearnedArtifact)
+    assert compat_result.compat_materialized is True
+    assert compat_result.converged is True
+    assert compat_result.precision == pytest.approx(1.0)
+    assert compat_result.recall == pytest.approx(1.0)
+    assert compat_result.rule_frequency >= 0.5
+    assert compat_result.discovered_rule is not None
+    assert "edge" in compat_result.discovered_rule
+    assert compat_artifact.compat_materialized is True
+    assert compat_artifact.discovered_rule is not None
+    assert "edge" in compat_artifact.discovered_rule
+    assert len(compat_artifact.logits) > 0
+    assert len(compat_artifact.soft_probs) > 0
+    assert len(compat_artifact.selected_hard) > 0
+
+
+def test_train_only_strict_gpu_native_nonconverged_reports_partial_recall():
+    pos_mixed = [("reach", [1, 3]), ("reach", [99, 99])]
+    result = train_only(
+        source=REACH_SOURCE,
+        mask_name="W_reach",
+        positives=pos_mixed,
+        negatives=REACH_NEG,
+        config=TrainConfig(
+            step_budget_per_attempt=30,
+            max_attempts=1,
+            seed=42,
+            strict_gpu_native=True,
+        ),
+    )
+
+    compat_result = result.export_compat_result()
+    compat_artifact = result.artifact.export_compat_artifact()
+
+    _assert_strict_result_shape(result)
+    _assert_strict_artifact_shape(result.artifact)
+    assert isinstance(compat_result, TrainResult)
+    assert compat_result.converged is False
+    assert compat_result.precision == pytest.approx(0.0)
+    assert compat_result.recall > 0.0
+    assert compat_result.discovered_rule is not None
+    assert isinstance(compat_artifact, LearnedArtifact)
+    assert compat_artifact.discovered_rule == compat_result.discovered_rule

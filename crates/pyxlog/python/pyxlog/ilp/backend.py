@@ -7,7 +7,7 @@ Two backends:
 Both provide the same interface:
 - init_weights(C, n, device) -> learnable parameters
 - apply_mask(prog, mask_name, W, tau, budget, candidates, n) -> candidate_soft_probs
-- decode_argmax(W, candidates, n) -> candidate_index
+- decode_argmax_compat(W, candidates, n) -> candidate_index
 """
 from __future__ import annotations
 
@@ -43,9 +43,12 @@ class MaskBackend(Protocol):
         """
         ...
 
-    def decode_argmax(self, W: torch.Tensor, candidates: list[dict], n: int) -> int:
-        """Return the candidate index of the argmax."""
+    def decode_argmax_compat(self, W: torch.Tensor, candidates: list[dict], n: int) -> int:
+        """Return the candidate index of the argmax for explicit compatibility export."""
         ...
+
+    def decode_argmax(self, W: torch.Tensor, candidates: list[dict], n: int) -> int:
+        return self.decode_argmax_compat(W, candidates, n)
 
 
 class DenseMaskBackend:
@@ -106,7 +109,7 @@ class DenseMaskBackend:
         selected_hard.sort()
         return cand_probs, selected_hard
 
-    def decode_argmax(self, W, candidates, n):
+    def decode_argmax_compat(self, W, candidates, n):
         if not candidates:
             return 0
         with torch.no_grad():
@@ -114,6 +117,9 @@ class DenseMaskBackend:
                 [W[c["i"], c["j"], c["k"]] for c in candidates]
             )
             return int(candidate_vals.argmax().item())
+
+    def decode_argmax(self, W, candidates, n):
+        return self.decode_argmax_compat(W, candidates, n)
 
 
 class SparseMaskBackend:
@@ -163,21 +169,10 @@ class SparseMaskBackend:
         self, prog, mask_name, W, tau, budget, candidates, n,
         allow_recursive=False,
     ):
-        cand_probs = F.gumbel_softmax(W, tau=tau, hard=False, dim=0)
-        effective_budget = min(budget, cand_probs.numel())
-        selected = torch.argsort(
-            cand_probs.detach(),
-            descending=True,
-            stable=True,
-        )[:effective_budget]
-        selected_soft = cand_probs.detach().index_select(0, selected).contiguous()
-        prog.set_rule_mask_sparse_selected_device(
-            mask_name,
-            selected.to(dtype=torch.int64).contiguous(),
-            selected_soft,
-            allow_recursive,
+        raise RuntimeError(
+            "SparseMaskBackend.apply_mask(..., strict_gpu_native=True) is not a supported "
+            "public entry point; use train_only(..., strict_gpu_native=True)"
         )
-        return cand_probs, []
 
     def _apply_mask_compat(
         self, prog, mask_name, W, tau, budget, candidates, n,
@@ -237,6 +232,9 @@ class SparseMaskBackend:
         selected_hard.sort()
         return cand_probs, selected_hard
 
-    def decode_argmax(self, W, candidates, n):
+    def decode_argmax_compat(self, W, candidates, n):
         with torch.no_grad():
             return W.argmax().item()
+
+    def decode_argmax(self, W, candidates, n):
+        return self.decode_argmax_compat(W, candidates, n)

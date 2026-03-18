@@ -1,6 +1,7 @@
 """Guard tests: sparse trainer path must not fall back to dense APIs."""
 
 import inspect
+from pathlib import Path
 import re
 
 import pytest
@@ -55,10 +56,6 @@ def test_sparse_backend_prefers_selected_sparse_api():
     assert len(selected_sparse_calls) > 0, (
         "SparseMaskBackend.apply_mask does not call set_rule_mask_sparse_selected"
     )
-    selected_device_calls = re.findall(r'\.set_rule_mask_sparse_selected_device\b', src)
-    assert len(selected_device_calls) > 0, (
-        "SparseMaskBackend strict path does not call set_rule_mask_sparse_selected_device"
-    )
 
     # --- Prong 2: runtime smoke test ---
     config = TrainConfig(
@@ -69,6 +66,26 @@ def test_sparse_backend_prefers_selected_sparse_api():
     )
     result = train_only(SOURCE, "W", POS, NEG, config)
     assert result.attempt_count >= 1
+
+
+def test_sparse_backend_internal_strict_apply_mask_is_hard_gated():
+    prog = pyxlog.IlpProgramFactory.compile(SOURCE, device=0, memory_mb=512)
+    backend = backend_mod.SparseMaskBackend()
+    candidates = prog.valid_candidates("W", False)
+    W = torch.zeros(len(candidates), device="cuda", requires_grad=True)
+
+    with pytest.raises(RuntimeError, match="train_only"):
+        backend.apply_mask(
+            prog=prog,
+            mask_name="W",
+            W=W,
+            tau=1.0,
+            budget=2,
+            candidates=candidates,
+            n=prog.ilp_schema_size(),
+            allow_recursive=False,
+            strict_gpu_native=True,
+        )
 
 
 def test_sparse_backend_apply_mask_selected_path_is_zero_dtoh():
@@ -125,8 +142,103 @@ def test_legacy_sparse_api_rejected_in_strict_zero_dtoh_mode():
         prog.set_rule_mask_sparse("W", list(range(c)), soft, 32)
 
 
-def test_sparse_backend_strict_helper_uses_device_selected_ids():
+def test_sparse_backend_strict_helper_is_hard_gated():
     src = inspect.getsource(backend_mod.SparseMaskBackend._apply_mask_strict)
-    assert ".set_rule_mask_sparse_selected_device(" in src
-    assert ".cpu().tolist()" not in src
-    assert ".valid_candidates(" not in src
+    assert "raise RuntimeError" in src
+    assert "train_only(..., strict_gpu_native=True)" in src
+    assert "set_rule_mask_sparse_selected" not in src
+    assert "set_rule_mask_sparse_selected_device" not in src
+
+
+def test_strict_selected_device_mask_is_stored_as_runtime_sparse_device_variant():
+    prog = pyxlog.IlpProgramFactory.compile(SOURCE, device=0, memory_mb=512)
+    rel_names = prog.ilp_relation_names()
+    k_reach = rel_names.index("reach")
+    i_edge = rel_names.index("edge")
+
+    prog.set_candidate_map([(i_edge, i_edge, k_reach)])
+    prog.set_strict_zero_dtoh(True)
+    prog.set_rule_mask_sparse_selected_device(
+        "W",
+        torch.tensor([0], device="cuda", dtype=torch.int32),
+        torch.tensor([1.0], device="cuda", dtype=torch.float64),
+    )
+
+    assert prog.debug_ilp_mask_kind("W") == "sparse_device"
+
+
+def test_strict_selected_device_public_api_rejects_out_of_range_ids():
+    prog = pyxlog.IlpProgramFactory.compile(SOURCE, device=0, memory_mb=512)
+    rel_names = prog.ilp_relation_names()
+    k_reach = rel_names.index("reach")
+    i_edge = rel_names.index("edge")
+
+    prog.set_candidate_map([(i_edge, i_edge, k_reach)])
+    prog.set_strict_zero_dtoh(True)
+
+    with pytest.raises(ValueError, match="out of range"):
+        prog.set_rule_mask_sparse_selected_device(
+            "W",
+            torch.tensor([7], device="cuda", dtype=torch.int64),
+            torch.tensor([1.0], device="cuda", dtype=torch.float64),
+        )
+
+
+def test_strict_selected_device_public_api_rejects_duplicate_ids():
+    prog = pyxlog.IlpProgramFactory.compile(SOURCE, device=0, memory_mb=512)
+    rel_names = prog.ilp_relation_names()
+    k_reach = rel_names.index("reach")
+    i_edge = rel_names.index("edge")
+
+    prog.set_candidate_map([(i_edge, i_edge, k_reach)])
+    prog.set_strict_zero_dtoh(True)
+
+    with pytest.raises(ValueError, match="duplicate"):
+        prog.set_rule_mask_sparse_selected_device(
+            "W",
+            torch.tensor([0, 0], device="cuda", dtype=torch.int64),
+            torch.tensor([1.0, 1.0], device="cuda", dtype=torch.float64),
+        )
+
+
+def test_strict_selected_device_evaluate_is_hard_gated_in_strict_mode():
+    prog = pyxlog.IlpProgramFactory.compile(SOURCE, device=0, memory_mb=512)
+    rel_names = prog.ilp_relation_names()
+    k_reach = rel_names.index("reach")
+    i_edge = rel_names.index("edge")
+
+    prog.set_candidate_map([(i_edge, i_edge, k_reach)])
+    prog.set_strict_zero_dtoh(True)
+    prog.set_rule_mask_sparse_selected_device(
+        "W",
+        torch.tensor([0], device="cuda", dtype=torch.int64),
+        torch.tensor([1.0], device="cuda", dtype=torch.float64),
+    )
+
+    with pytest.raises(RuntimeError, match="SparseDevice.*strict_zero_dtoh"):
+        prog.evaluate()
+
+
+def test_strict_selected_device_setter_contains_no_download_helpers():
+    repo_root = Path(__file__).resolve().parents[2]
+    src = (repo_root / "crates/pyxlog/src/ilp.rs").read_text()
+    match = re.search(
+        r"pub fn set_rule_mask_sparse_selected_device\([\s\S]*?\n    }\n\n    pub fn evaluate",
+        src,
+    )
+    assert match is not None, "could not isolate set_rule_mask_sparse_selected_device body"
+    setter_src = match.group(0)
+    assert "download_" not in setter_src
+
+
+def test_strict_selected_device_provider_helper_contains_no_raw_dtoh():
+    repo_root = Path(__file__).resolve().parents[2]
+    src = (repo_root / "crates/xlog-cuda/src/provider/ilp.rs").read_text()
+    match = re.search(
+        r"pub fn build_selected_id_mask\([\s\S]*?\n    }\n\n    pub fn filter_buffer_by_candidate_flag",
+        src,
+    )
+    assert match is not None, "could not isolate build_selected_id_mask body"
+    helper_src = match.group(0)
+    assert "download_" not in helper_src
+    assert "dtoh_sync_copy_into" not in helper_src

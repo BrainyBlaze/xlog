@@ -28,6 +28,12 @@ pub enum IlpMask {
         active_entries: Vec<(u32, u32, u32)>,
         schema_size: usize,
     },
+    SparseDevice {
+        candidate_order: Vec<(u32, u32, u32)>,
+        active_flags: CudaBuffer,
+        selected_count: usize,
+        schema_size: usize,
+    },
 }
 
 impl IlpMask {
@@ -35,6 +41,7 @@ impl IlpMask {
         match self {
             IlpMask::Dense { schema_size, .. } => *schema_size,
             IlpMask::Sparse { schema_size, .. } => *schema_size,
+            IlpMask::SparseDevice { schema_size, .. } => *schema_size,
         }
     }
 }
@@ -143,7 +150,32 @@ impl IlpRegistry {
         );
     }
 
+    pub fn insert_selected_mask_device(
+        &mut self,
+        name: String,
+        schema_size: usize,
+        candidate_order: Vec<(u32, u32, u32)>,
+        active_flags: CudaBuffer,
+        selected_count: usize,
+    ) {
+        self.masks.insert(
+            name,
+            IlpMask::SparseDevice {
+                candidate_order,
+                active_flags,
+                selected_count,
+                schema_size,
+            },
+        );
+    }
+
     pub fn get_mask(&self, name: &str) -> Option<&IlpMask> {
         self.masks.get(name)
+    }
+
+    pub fn has_sparse_device_mask(&self) -> bool {
+        self.masks
+            .values()
+            .any(|mask| matches!(mask, IlpMask::SparseDevice { .. }))
     }
 }

@@ -24,6 +24,7 @@ def test_forward_and_memory_telemetry_smoke():
         tau_floor=0.05,
         seed=13,
         deterministic=True,
+        strict_gpu_native=False,
     )
     result = train_only(
         source="""
@@ -100,6 +101,7 @@ def test_slo_scaling(chain_length: int):
         deterministic=True,
         max_active_rules=16,
         telemetry_level=1,
+        strict_gpu_native=False,
     )
     t0 = time.perf_counter()
     result = train_only(

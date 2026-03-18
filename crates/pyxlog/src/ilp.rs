@@ -15,6 +15,7 @@ use xlog_cuda::{CudaKernelProvider, JoinType};
 use xlog_ir::{ExecutionPlan, RirNode};
 use xlog_logic::ast::{Program as AstProgram, Term};
 use xlog_prob::exact::GpuConfig;
+use xlog_runtime::ilp_registry::IlpMask;
 use xlog_runtime::{read_device_row_count, Executor};
 
 use xlog_cuda::type_seam::GpuScalar;
@@ -612,6 +613,17 @@ impl CompiledIlpProgram {
         self.candidate_map.as_ref().map_or(0, |m| m.len())
     }
 
+    pub fn debug_ilp_mask_kind(&self, name: String) -> Option<String> {
+        self.executor.ilp_registry().get_mask(&name).map(|mask| {
+            match mask {
+                IlpMask::Dense { .. } => "dense",
+                IlpMask::Sparse { .. } => "sparse_host",
+                IlpMask::SparseDevice { .. } => "sparse_device",
+            }
+            .to_string()
+        })
+    }
+
     /// Set the per-chunk temp allocation budget in bytes. The final merged
     /// COO buffer is exact-NNZ sized and may exceed this budget. Default: 16 MB.
     pub fn set_coo_chunk_budget(&mut self, bytes: u64) {
@@ -643,14 +655,14 @@ impl CompiledIlpProgram {
     /// * `negatives` — list of `(relation, [col_values])` negative examples
     /// * `cand_probs_obj` — DLPack/PyTorch tensor of candidate probabilities on GPU
     pub fn compute_ilp_loss_grad_gpu<'py>(
-        &self,
+        &mut self,
         py: Python<'py>,
         positives: Vec<(String, Vec<i64>)>,
         negatives: Vec<(String, Vec<i64>)>,
         cand_probs_obj: &Bound<'py, PyAny>,
     ) -> PyResult<(PyObject, PyObject)> {
         // ── Phase A: Validation + DLPack import ──
-        let candidate_map = self.candidate_map.as_ref().ok_or_else(|| {
+        let candidate_map = self.candidate_map.clone().ok_or_else(|| {
             PyRuntimeError::new_err(
                 "candidate_map not set — call set_candidate_map() before compute_ilp_loss_grad_gpu()",
             )
@@ -733,6 +745,10 @@ impl CompiledIlpProgram {
                 .entry(fact.relation.clone())
                 .or_default()
                 .push((global_idx as u32, fact.values.clone()));
+        }
+
+        if self.strict_zero_dtoh && self.executor.ilp_registry().has_sparse_device_mask() {
+            self.evaluate_ilp_plan(py)?;
         }
 
         // Get ILP tagged result
@@ -1065,6 +1081,11 @@ impl CompiledIlpProgram {
         selected_soft_probs_dlpack: &Bound<'_, PyAny>,
         allow_recursive: bool,
     ) -> PyResult<()> {
+        if self.strict_zero_dtoh {
+            return Err(PyRuntimeError::new_err(
+                "strict_zero_dtoh forbids set_rule_mask_sparse_selected; use explicit compatibility export instead",
+            ));
+        }
         let tmj = extract_tmj_meta_for_mask(&self.plan, Some(&name));
         let n = tmj.schema_size;
         if n == 0 {
@@ -1137,149 +1158,23 @@ impl CompiledIlpProgram {
         selected_soft_probs_dlpack: &Bound<'_, PyAny>,
         allow_recursive: bool,
     ) -> PyResult<()> {
-        let tmj = extract_tmj_meta_for_mask(&self.plan, Some(&name));
-        let n = tmj.schema_size;
-        if n == 0 {
-            return Err(PyValueError::new_err(format!(
-                "no learnable mask '{}' found",
-                name
-            )));
-        }
-        if self.compiled_schema_size > 0 && n != self.compiled_schema_size {
-            return Err(PyValueError::new_err(format!(
-                "schema_size mismatch for '{}': plan N={} compiled N={}",
-                name, n, self.compiled_schema_size
-            )));
-        }
-
-        let _ = allow_recursive;
-        let candidate_order = self.candidate_order.as_ref().ok_or_else(|| {
-            PyRuntimeError::new_err(
-                "candidate order not set — call set_candidate_map() before strict sparse mask updates",
-            )
-        })?;
-        let expected_c = candidate_order.len();
-
-        let ids_dmt = dlpack_from_py(selected_candidate_ids_dlpack)?;
-        let ids_buf = self
-            .provider
-            .from_dlpack_tensors(vec![ids_dmt])
-            .map_err(types::xlog_err)?;
-        let soft_dmt = dlpack_from_py(selected_soft_probs_dlpack)?;
-        let soft_buf = self
-            .provider
-            .from_dlpack_tensors(vec![soft_dmt])
-            .map_err(types::xlog_err)?;
-
-        let selected_len = usize::try_from(ids_buf.num_rows())
-            .map_err(|_| PyValueError::new_err("selected candidate ids length overflow"))?;
-        let soft_len = usize::try_from(soft_buf.num_rows())
-            .map_err(|_| PyValueError::new_err("selected soft_probs length overflow"))?;
-        if soft_len != selected_len {
-            return Err(PyValueError::new_err(format!(
-                "selected soft_probs length {} != selected candidate ids length {}",
-                soft_len, selected_len
-            )));
-        }
-
-        let ids_type = ids_buf
-            .schema()
-            .column_type(0)
-            .ok_or_else(|| PyRuntimeError::new_err("selected candidate ids tensor has no column"))?;
-        let selected_candidate_ids: Vec<u32> = match ids_type {
-            ScalarType::U32 | ScalarType::Symbol => self
-                .provider
-                .download_column_untracked::<u32>(&ids_buf, 0)
-                .map_err(types::xlog_err)?,
-            ScalarType::I32 => self
-                .provider
-                .download_column_untracked::<i32>(&ids_buf, 0)
-                .map_err(types::xlog_err)?
-                .into_iter()
-                .map(|cid| {
-                    u32::try_from(cid).map_err(|_| {
-                        PyValueError::new_err(format!(
-                            "selected candidate id {} out of range for u32",
-                            cid
-                        ))
-                    })
-                })
-                .collect::<PyResult<Vec<u32>>>()?,
-            ScalarType::I64 => self
-                .provider
-                .download_column_untracked::<i64>(&ids_buf, 0)
-                .map_err(types::xlog_err)?
-                .into_iter()
-                .map(|cid| {
-                    u32::try_from(cid).map_err(|_| {
-                        PyValueError::new_err(format!(
-                            "selected candidate id {} out of range for u32",
-                            cid
-                        ))
-                    })
-                })
-                .collect::<PyResult<Vec<u32>>>()?,
-            ScalarType::U64 => self
-                .provider
-                .download_column_untracked::<u64>(&ids_buf, 0)
-                .map_err(types::xlog_err)?
-                .into_iter()
-                .map(|cid| {
-                    u32::try_from(cid).map_err(|_| {
-                        PyValueError::new_err(format!(
-                            "selected candidate id {} out of range for u32",
-                            cid
-                        ))
-                    })
-                })
-                .collect::<PyResult<Vec<u32>>>()?,
-            other => {
-                return Err(PyValueError::new_err(format!(
-                    "selected candidate ids must be I32/I64/U32/U64, got {:?}",
-                    other
-                )));
-            }
-        };
-
-        let mut seen = HashSet::with_capacity(selected_candidate_ids.len());
-        let mut selected_entries = Vec::with_capacity(selected_candidate_ids.len());
-        for (pos, &cid) in selected_candidate_ids.iter().enumerate() {
-            let idx = usize::try_from(cid).map_err(|_| {
-                PyValueError::new_err(format!("candidate id {} overflows usize", cid))
-            })?;
-            if idx >= expected_c {
-                return Err(PyValueError::new_err(format!(
-                    "selected candidate id {} out of range [0, {}) at position {}",
-                    cid, expected_c, pos
-                )));
-            }
-            if !seen.insert(cid) {
-                return Err(PyValueError::new_err(format!(
-                    "duplicate selected candidate id {} at position {}",
-                    cid, pos
-                )));
-            }
-            selected_entries.push(candidate_order[idx]);
-        }
-
-        self.executor
-            .ilp_registry_mut()
-            .insert_selected_mask(name, n, &selected_entries);
-        Ok(())
+        self.set_rule_mask_sparse_selected_device_impl(
+            name,
+            selected_candidate_ids_dlpack,
+            selected_soft_probs_dlpack,
+            allow_recursive,
+            true,
+        )
     }
 
     pub fn evaluate(&mut self, py: Python<'_>) -> PyResult<()> {
-        let _result: xlog_core::Result<xlog_cuda::CudaBuffer> = py.allow_threads(|| {
-            self.executor.reset_for_mc();
-            for (name, schema) in &self.schemas {
-                let empty = self.provider.create_empty_buffer(schema.clone())?;
-                self.executor.store_mut().put(name, empty);
-            }
-            load_facts_into_store(&self.ast, &self.provider, &mut self.executor, &self.schemas)?;
-            self.executor.execute_plan(&self.plan)
-        });
-        _result.map_err(types::xlog_err)?;
-        Ok(())
+        if self.strict_zero_dtoh && self.executor.ilp_registry().has_sparse_device_mask() {
+            return Err(PyRuntimeError::new_err(
+                "SparseDevice evaluate() is incompatible with strict_zero_dtoh; \
+use train_only(..., strict_gpu_native=True) or export an explicit compatibility mask first",
+            ));
+        }
+        self.evaluate_ilp_plan(py)
     }
 
     /// Reset mutable runtime state for ILP attempt reuse.
@@ -1335,10 +1230,7 @@ impl CompiledIlpProgram {
     }
 
     pub fn fact_exists(&self, relation: &str, values: Vec<i64>) -> PyResult<bool> {
-        self.ensure_host_semantic_compat(
-            "fact_exists()",
-            "batch_fact_membership_device(...)",
-        )?;
+        self.ensure_host_semantic_compat("fact_exists()", "batch_fact_membership_device(...)")?;
         let buf =
             self.executor.store().get(relation).ok_or_else(|| {
                 PyValueError::new_err(format!("Relation '{}' not found", relation))
@@ -2107,6 +1999,96 @@ impl CompiledIlpProgram {
 // ---------------------------------------------------------------------------
 
 impl CompiledIlpProgram {
+    fn evaluate_ilp_plan(&mut self, py: Python<'_>) -> PyResult<()> {
+        let result: xlog_core::Result<xlog_cuda::CudaBuffer> = py.allow_threads(|| {
+            self.executor.reset_for_mc();
+            for (name, schema) in &self.schemas {
+                let empty = self.provider.create_empty_buffer(schema.clone())?;
+                self.executor.store_mut().put(name, empty);
+            }
+            load_facts_into_store(&self.ast, &self.provider, &mut self.executor, &self.schemas)?;
+            self.executor.execute_plan(&self.plan)
+        });
+        result.map_err(types::xlog_err)?;
+        Ok(())
+    }
+
+    fn set_rule_mask_sparse_selected_device_impl(
+        &mut self,
+        name: String,
+        selected_candidate_ids_dlpack: &Bound<'_, PyAny>,
+        selected_soft_probs_dlpack: &Bound<'_, PyAny>,
+        allow_recursive: bool,
+        validate_ids: bool,
+    ) -> PyResult<()> {
+        let tmj = extract_tmj_meta_for_mask(&self.plan, Some(&name));
+        let n = tmj.schema_size;
+        if n == 0 {
+            return Err(PyValueError::new_err(format!(
+                "no learnable mask '{}' found",
+                name
+            )));
+        }
+        if self.compiled_schema_size > 0 && n != self.compiled_schema_size {
+            return Err(PyValueError::new_err(format!(
+                "schema_size mismatch for '{}': plan N={} compiled N={}",
+                name, n, self.compiled_schema_size
+            )));
+        }
+
+        let _ = allow_recursive;
+        let candidate_order = self.candidate_order.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err(
+                "candidate order not set — call set_candidate_map() before strict sparse mask updates",
+            )
+        })?;
+        let expected_c = candidate_order.len();
+
+        let ids_dmt = dlpack_from_py(selected_candidate_ids_dlpack)?;
+        let ids_buf = self
+            .provider
+            .from_dlpack_tensors(vec![ids_dmt])
+            .map_err(types::xlog_err)?;
+        let soft_dmt = dlpack_from_py(selected_soft_probs_dlpack)?;
+        let soft_buf = self
+            .provider
+            .from_dlpack_tensors(vec![soft_dmt])
+            .map_err(types::xlog_err)?;
+
+        let selected_len = usize::try_from(ids_buf.num_rows())
+            .map_err(|_| PyValueError::new_err("selected candidate ids length overflow"))?;
+        let soft_len = usize::try_from(soft_buf.num_rows())
+            .map_err(|_| PyValueError::new_err("selected soft_probs length overflow"))?;
+        if soft_len != selected_len {
+            return Err(PyValueError::new_err(format!(
+                "selected soft_probs length {} != selected candidate ids length {}",
+                soft_len, selected_len
+            )));
+        }
+
+        if validate_ids {
+            self.provider
+                .validate_selected_ids(&ids_buf, expected_c)
+                .map_err(types::val_err)?;
+        }
+
+        let active_flags = self
+            .provider
+            .build_selected_id_mask(&ids_buf, expected_c)
+            .map_err(types::xlog_err)?;
+
+        self.executor
+            .ilp_registry_mut()
+            .insert_selected_mask_device(
+                name,
+                n,
+                candidate_order.clone(),
+                active_flags,
+                selected_len,
+            );
+        Ok(())
+    }
+
     fn ensure_host_semantic_compat(&self, api: &str, device_hint: &str) -> PyResult<()> {
         if self.strict_zero_dtoh {
             return Err(PyRuntimeError::new_err(format!(

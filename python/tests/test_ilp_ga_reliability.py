@@ -55,6 +55,7 @@ def test_ga_reliability_50():
                 memory_mb=512,
                 debug_dense_mask=False,
                 seed=seed,
+                strict_gpu_native=False,
             )
             runs += 1
             stage_stats[stage_name]["total"] += 1

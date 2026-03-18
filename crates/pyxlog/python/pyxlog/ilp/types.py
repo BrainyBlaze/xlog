@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from typing import Callable
 
 
 @dataclass(frozen=True)
@@ -134,9 +135,35 @@ class LearnedArtifact:
     config_snapshot: TrainConfig | None = None
     telemetry: TrainTelemetry = field(default_factory=TrainTelemetry)
     metadata: ArtifactMetadata = field(default_factory=ArtifactMetadata)
+    strict_gpu_native: bool = False
+    compat_materialized: bool = True
+    _compat_exporter: Callable[[], "LearnedArtifact"] | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+
+    def export_compat_artifact(self) -> "LearnedArtifact":
+        """Materialize a host-shaped compatibility artifact explicitly."""
+        if self.compat_materialized:
+            return self
+        if self._compat_exporter is None:
+            raise RuntimeError(
+                "strict artifact has no compatibility exporter; "
+                "call export_compat_artifact() on the originating TrainResult"
+            )
+        exported = self._compat_exporter()
+        if not exported.compat_materialized:
+            raise RuntimeError("export_compat_artifact() returned a non-materialized artifact")
+        return exported
 
     def save(self, path: Path) -> None:
         """Save artifact to JSON file."""
+        if not self.compat_materialized:
+            raise RuntimeError(
+                "strict GPU-native artifacts cannot be saved directly; "
+                "call export_compat_artifact() first"
+            )
         import json
         import hashlib
         import dataclasses
@@ -269,6 +296,40 @@ class LearnedArtifact:
             config_snapshot=config_snapshot,
             telemetry=telemetry,
             metadata=metadata,
+            strict_gpu_native=False,
+            compat_materialized=True,
+        )
+
+
+@dataclass
+class StrictLearnedArtifact:
+    candidate_map: list[CandidateMapEntry] = field(default_factory=list)
+    config_snapshot: TrainConfig | None = None
+    telemetry: TrainTelemetry = field(default_factory=TrainTelemetry)
+    strict_gpu_native: bool = True
+    compat_materialized: bool = False
+    _compat_exporter: Callable[[], LearnedArtifact] | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+
+    def export_compat_artifact(self) -> LearnedArtifact:
+        """Materialize a host-shaped compatibility artifact explicitly."""
+        if self._compat_exporter is None:
+            raise RuntimeError(
+                "strict artifact has no compatibility exporter; "
+                "call export_compat_artifact() only on strict GPU-native artifacts"
+            )
+        exported = self._compat_exporter()
+        if not exported.compat_materialized:
+            raise RuntimeError("export_compat_artifact() returned a non-materialized artifact")
+        return exported
+
+    def save(self, path: str) -> None:
+        raise RuntimeError(
+            "strict GPU-native artifacts cannot be saved directly; "
+            "call export_compat_artifact() first"
         )
 
 
@@ -281,13 +342,61 @@ class TrainResult:
     precision: float = 0.0
     recall: float = 0.0
     holdout_f1: float | None = None
-    confidence_margin: float = 0.0
-    top_k_concentration: float = 0.0
+    confidence_margin: float | None = None
+    top_k_concentration: float | None = None
     rule_frequency: float = 0.0
     holdout_variance: float = 0.0
     single_attempt: bool = True
     ambiguous_alternatives: list[str] | None = None
     artifact: LearnedArtifact = field(default_factory=LearnedArtifact)
+    strict_gpu_native: bool = False
+    compat_materialized: bool = True
+    _compat_exporter: Callable[[], "TrainResult"] | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+
+    def export_compat_result(self) -> "TrainResult":
+        """Materialize compatibility-only host summaries explicitly."""
+        if self.compat_materialized:
+            return self
+        if self._compat_exporter is None:
+            raise RuntimeError(
+                "strict GPU-native result has no compatibility exporter; "
+                "call train_only(...).export_compat_result() only on strict results"
+            )
+        exported = self._compat_exporter()
+        if not exported.compat_materialized:
+            raise RuntimeError("export_compat_result() returned a non-materialized result")
+        return exported
+
+
+@dataclass
+class StrictTrainResult:
+    attempt_count: int = 0
+    total_steps: int = 0
+    single_attempt: bool = True
+    artifact: StrictLearnedArtifact = field(default_factory=StrictLearnedArtifact)
+    strict_gpu_native: bool = True
+    compat_materialized: bool = False
+    _compat_exporter: Callable[[], TrainResult] | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+
+    def export_compat_result(self) -> TrainResult:
+        """Materialize compatibility-only host summaries explicitly."""
+        if self._compat_exporter is None:
+            raise RuntimeError(
+                "strict GPU-native result has no compatibility exporter; "
+                "call export_compat_result() only on strict results"
+            )
+        exported = self._compat_exporter()
+        if not exported.compat_materialized:
+            raise RuntimeError("export_compat_result() returned a non-materialized result")
+        return exported
 
 
 @dataclass

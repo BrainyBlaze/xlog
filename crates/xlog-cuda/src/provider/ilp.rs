@@ -2,13 +2,533 @@
 
 use std::marker::PhantomData;
 
-use cudarc::driver::{LaunchAsync, LaunchConfig};
-use xlog_core::{Result, XlogError};
+use cudarc::driver::{DevicePtr, DeviceSlice, LaunchAsync, LaunchConfig};
+use xlog_core::{Result, ScalarType, Schema, XlogError};
 
 use super::{ilp_credit_kernels, ilp_kernels, RawCudaView, ILP_CREDIT_MODULE, ILP_MODULE};
-use crate::memory::{CudaColumn, TrackedCudaSlice};
+use crate::memory::{CudaBuffer, CudaColumn, TrackedCudaSlice};
 
 impl super::CudaKernelProvider {
+    fn ilp_i32_view<'a>(
+        &self,
+        col: &'a CudaColumn,
+        num_elements: usize,
+    ) -> Result<RawCudaView<'a, i32>> {
+        let required_bytes = num_elements * std::mem::size_of::<i32>();
+        if col.num_bytes() < required_bytes {
+            return Err(XlogError::Kernel(format!(
+                "Column has {} bytes but {} required for {} i32 elements",
+                col.num_bytes(),
+                required_bytes,
+                num_elements
+            )));
+        }
+        let ptr = *col.device_ptr();
+        if (ptr as usize) % std::mem::align_of::<i32>() != 0 {
+            return Err(XlogError::Kernel(
+                "Column device pointer is not i32-aligned".to_string(),
+            ));
+        }
+        Ok(RawCudaView {
+            ptr,
+            len: num_elements,
+            _marker: PhantomData,
+        })
+    }
+
+    fn ilp_i64_view<'a>(
+        &self,
+        col: &'a CudaColumn,
+        num_elements: usize,
+    ) -> Result<RawCudaView<'a, i64>> {
+        let required_bytes = num_elements * std::mem::size_of::<i64>();
+        if col.num_bytes() < required_bytes {
+            return Err(XlogError::Kernel(format!(
+                "Column has {} bytes but {} required for {} i64 elements",
+                col.num_bytes(),
+                required_bytes,
+                num_elements
+            )));
+        }
+        let ptr = *col.device_ptr();
+        if (ptr as usize) % std::mem::align_of::<i64>() != 0 {
+            return Err(XlogError::Kernel(
+                "Column device pointer is not i64-aligned".to_string(),
+            ));
+        }
+        Ok(RawCudaView {
+            ptr,
+            len: num_elements,
+            _marker: PhantomData,
+        })
+    }
+
+    pub fn build_selected_id_mask(
+        &self,
+        ids_buf: &CudaBuffer,
+        candidate_count: usize,
+    ) -> Result<CudaBuffer> {
+        let selected_len = usize::try_from(ids_buf.num_rows())
+            .map_err(|_| XlogError::Kernel("selected id row count overflow".to_string()))?;
+        let candidate_count_u32 = u32::try_from(candidate_count).map_err(|_| {
+            XlogError::Kernel(format!(
+                "candidate count {} exceeds u32::MAX for strict sparse mask",
+                candidate_count
+            ))
+        })?;
+
+        let mut active_flags = self.memory.alloc::<u32>(candidate_count)?;
+        if candidate_count > 0 {
+            self.device
+                .inner()
+                .memset_zeros(&mut active_flags)
+                .map_err(|e| XlogError::Kernel(format!("zero strict sparse mask: {}", e)))?;
+        }
+
+        if selected_len > 0 {
+            let selected_len_u32 = u32::try_from(selected_len).map_err(|_| {
+                XlogError::Kernel(format!(
+                    "selected id count {} exceeds u32::MAX for strict sparse mask",
+                    selected_len
+                ))
+            })?;
+            let block_size = 256u32;
+            let grid_size = (selected_len_u32 + block_size - 1) / block_size;
+            let ids_col = ids_buf
+                .column(0)
+                .ok_or_else(|| XlogError::Kernel("selected id buffer has no column".to_string()))?;
+            match ids_buf.schema().column_type(0).ok_or_else(|| {
+                XlogError::Kernel("selected id buffer has no schema type".to_string())
+            })? {
+                ScalarType::U32 | ScalarType::Symbol => {
+                    let ids_view = self.column_as_u32_view(ids_col, selected_len)?;
+                    let func = self
+                        .device
+                        .inner()
+                        .get_func(ILP_MODULE, ilp_kernels::ILP_MARK_SELECTED_IDS_U32)
+                        .ok_or_else(|| {
+                            XlogError::Kernel(
+                                "ilp_mark_selected_ids_u32 kernel not found".to_string(),
+                            )
+                        })?;
+                    unsafe {
+                        func.clone().launch(
+                            LaunchConfig {
+                                grid_dim: (grid_size, 1, 1),
+                                block_dim: (block_size, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            (
+                                &ids_view,
+                                selected_len_u32,
+                                candidate_count_u32,
+                                &mut active_flags,
+                            ),
+                        )
+                    }
+                    .map_err(|e| {
+                        XlogError::Kernel(format!(
+                            "strict sparse selected-id scatter failed: {}",
+                            e
+                        ))
+                    })?;
+                }
+                ScalarType::I32 => {
+                    let ids_view = self.ilp_i32_view(ids_col, selected_len)?;
+                    let func = self
+                        .device
+                        .inner()
+                        .get_func(ILP_MODULE, ilp_kernels::ILP_MARK_SELECTED_IDS_I32)
+                        .ok_or_else(|| {
+                            XlogError::Kernel(
+                                "ilp_mark_selected_ids_i32 kernel not found".to_string(),
+                            )
+                        })?;
+                    unsafe {
+                        func.clone().launch(
+                            LaunchConfig {
+                                grid_dim: (grid_size, 1, 1),
+                                block_dim: (block_size, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            (
+                                &ids_view,
+                                selected_len_u32,
+                                candidate_count_u32,
+                                &mut active_flags,
+                            ),
+                        )
+                    }
+                    .map_err(|e| {
+                        XlogError::Kernel(format!(
+                            "strict sparse selected-id scatter failed: {}",
+                            e
+                        ))
+                    })?;
+                }
+                ScalarType::I64 => {
+                    let ids_view = self.ilp_i64_view(ids_col, selected_len)?;
+                    let func = self
+                        .device
+                        .inner()
+                        .get_func(ILP_MODULE, ilp_kernels::ILP_MARK_SELECTED_IDS_I64)
+                        .ok_or_else(|| {
+                            XlogError::Kernel(
+                                "ilp_mark_selected_ids_i64 kernel not found".to_string(),
+                            )
+                        })?;
+                    unsafe {
+                        func.clone().launch(
+                            LaunchConfig {
+                                grid_dim: (grid_size, 1, 1),
+                                block_dim: (block_size, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            (
+                                &ids_view,
+                                selected_len_u32,
+                                candidate_count_u32,
+                                &mut active_flags,
+                            ),
+                        )
+                    }
+                    .map_err(|e| {
+                        XlogError::Kernel(format!(
+                            "strict sparse selected-id scatter failed: {}",
+                            e
+                        ))
+                    })?;
+                }
+                ScalarType::U64 => {
+                    let ids_view = self.column_as_u64_view(ids_col, selected_len)?;
+                    let func = self
+                        .device
+                        .inner()
+                        .get_func(ILP_MODULE, ilp_kernels::ILP_MARK_SELECTED_IDS_U64)
+                        .ok_or_else(|| {
+                            XlogError::Kernel(
+                                "ilp_mark_selected_ids_u64 kernel not found".to_string(),
+                            )
+                        })?;
+                    unsafe {
+                        func.clone().launch(
+                            LaunchConfig {
+                                grid_dim: (grid_size, 1, 1),
+                                block_dim: (block_size, 1, 1),
+                                shared_mem_bytes: 0,
+                            },
+                            (
+                                &ids_view,
+                                selected_len_u32,
+                                candidate_count_u32,
+                                &mut active_flags,
+                            ),
+                        )
+                    }
+                    .map_err(|e| {
+                        XlogError::Kernel(format!(
+                            "strict sparse selected-id scatter failed: {}",
+                            e
+                        ))
+                    })?;
+                }
+                other => {
+                    return Err(XlogError::Kernel(format!(
+                        "selected candidate ids must be I32/I64/U32/U64, got {:?}",
+                        other
+                    )));
+                }
+            }
+
+            self.device
+                .synchronize()
+                .map_err(|e| XlogError::Kernel(format!("strict sparse scatter sync: {}", e)))?;
+        }
+
+        let d_num_rows = self.upload_device_row_count(candidate_count_u32)?;
+        Ok(CudaBuffer::from_columns_with_host_count(
+            vec![active_flags.into_bytes().into()],
+            candidate_count as u64,
+            d_num_rows,
+            Schema::new(vec![("active".to_string(), ScalarType::U32)]),
+            candidate_count_u32,
+        ))
+    }
+
+    pub fn validate_selected_ids(
+        &self,
+        ids_buf: &CudaBuffer,
+        candidate_count: usize,
+    ) -> Result<()> {
+        let selected_len = usize::try_from(ids_buf.num_rows())
+            .map_err(|_| XlogError::Kernel("selected id row count overflow".to_string()))?;
+        let candidate_count_u32 = u32::try_from(candidate_count).map_err(|_| {
+            XlogError::Kernel(format!(
+                "candidate count {} exceeds u32::MAX for strict sparse mask",
+                candidate_count
+            ))
+        })?;
+
+        if selected_len == 0 {
+            return Ok(());
+        }
+
+        let selected_len_u32 = u32::try_from(selected_len).map_err(|_| {
+            XlogError::Kernel(format!(
+                "selected id count {} exceeds u32::MAX for strict sparse mask",
+                selected_len
+            ))
+        })?;
+        let block_size = 256u32;
+        let grid_size = (selected_len_u32 + block_size - 1) / block_size;
+        let ids_col = ids_buf
+            .column(0)
+            .ok_or_else(|| XlogError::Kernel("selected id buffer has no column".to_string()))?;
+
+        let mut seen_flags = self.memory.alloc::<u32>(candidate_count)?;
+        if candidate_count > 0 {
+            self.device
+                .inner()
+                .memset_zeros(&mut seen_flags)
+                .map_err(|e| {
+                    XlogError::Kernel(format!("zero strict sparse validation flags: {}", e))
+                })?;
+        }
+
+        let mut error_code = self.memory.alloc::<u32>(1)?;
+        let mut error_pos = self.memory.alloc::<u32>(1)?;
+        self.device
+            .inner()
+            .memset_zeros(&mut error_code)
+            .map_err(|e| XlogError::Kernel(format!("zero strict sparse error code: {}", e)))?;
+        self.device
+            .inner()
+            .memset_zeros(&mut error_pos)
+            .map_err(|e| XlogError::Kernel(format!("zero strict sparse error pos: {}", e)))?;
+
+        match ids_buf.schema().column_type(0).ok_or_else(|| {
+            XlogError::Kernel("selected id buffer has no schema type".to_string())
+        })? {
+            ScalarType::U32 | ScalarType::Symbol => {
+                let ids_view = self.column_as_u32_view(ids_col, selected_len)?;
+                let func = self
+                    .device
+                    .inner()
+                    .get_func(ILP_MODULE, ilp_kernels::ILP_VALIDATE_SELECTED_IDS_U32)
+                    .ok_or_else(|| {
+                        XlogError::Kernel(
+                            "ilp_validate_selected_ids_u32 kernel not found".to_string(),
+                        )
+                    })?;
+                unsafe {
+                    func.clone().launch(
+                        LaunchConfig {
+                            grid_dim: (grid_size, 1, 1),
+                            block_dim: (block_size, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        (
+                            &ids_view,
+                            selected_len_u32,
+                            candidate_count_u32,
+                            &mut seen_flags,
+                            &mut error_code,
+                            &mut error_pos,
+                        ),
+                    )
+                }
+                .map_err(|e| {
+                    XlogError::Kernel(format!("strict sparse selected-id validation failed: {}", e))
+                })?;
+            }
+            ScalarType::I32 => {
+                let ids_view = self.ilp_i32_view(ids_col, selected_len)?;
+                let func = self
+                    .device
+                    .inner()
+                    .get_func(ILP_MODULE, ilp_kernels::ILP_VALIDATE_SELECTED_IDS_I32)
+                    .ok_or_else(|| {
+                        XlogError::Kernel(
+                            "ilp_validate_selected_ids_i32 kernel not found".to_string(),
+                        )
+                    })?;
+                unsafe {
+                    func.clone().launch(
+                        LaunchConfig {
+                            grid_dim: (grid_size, 1, 1),
+                            block_dim: (block_size, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        (
+                            &ids_view,
+                            selected_len_u32,
+                            candidate_count_u32,
+                            &mut seen_flags,
+                            &mut error_code,
+                            &mut error_pos,
+                        ),
+                    )
+                }
+                .map_err(|e| {
+                    XlogError::Kernel(format!("strict sparse selected-id validation failed: {}", e))
+                })?;
+            }
+            ScalarType::I64 => {
+                let ids_view = self.ilp_i64_view(ids_col, selected_len)?;
+                let func = self
+                    .device
+                    .inner()
+                    .get_func(ILP_MODULE, ilp_kernels::ILP_VALIDATE_SELECTED_IDS_I64)
+                    .ok_or_else(|| {
+                        XlogError::Kernel(
+                            "ilp_validate_selected_ids_i64 kernel not found".to_string(),
+                        )
+                    })?;
+                unsafe {
+                    func.clone().launch(
+                        LaunchConfig {
+                            grid_dim: (grid_size, 1, 1),
+                            block_dim: (block_size, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        (
+                            &ids_view,
+                            selected_len_u32,
+                            candidate_count_u32,
+                            &mut seen_flags,
+                            &mut error_code,
+                            &mut error_pos,
+                        ),
+                    )
+                }
+                .map_err(|e| {
+                    XlogError::Kernel(format!("strict sparse selected-id validation failed: {}", e))
+                })?;
+            }
+            ScalarType::U64 => {
+                let ids_view = self.column_as_u64_view(ids_col, selected_len)?;
+                let func = self
+                    .device
+                    .inner()
+                    .get_func(ILP_MODULE, ilp_kernels::ILP_VALIDATE_SELECTED_IDS_U64)
+                    .ok_or_else(|| {
+                        XlogError::Kernel(
+                            "ilp_validate_selected_ids_u64 kernel not found".to_string(),
+                        )
+                    })?;
+                unsafe {
+                    func.clone().launch(
+                        LaunchConfig {
+                            grid_dim: (grid_size, 1, 1),
+                            block_dim: (block_size, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        (
+                            &ids_view,
+                            selected_len_u32,
+                            candidate_count_u32,
+                            &mut seen_flags,
+                            &mut error_code,
+                            &mut error_pos,
+                        ),
+                    )
+                }
+                .map_err(|e| {
+                    XlogError::Kernel(format!("strict sparse selected-id validation failed: {}", e))
+                })?;
+            }
+            other => {
+                return Err(XlogError::Kernel(format!(
+                    "selected candidate ids must be I32/I64/U32/U64, got {:?}",
+                    other
+                )));
+            }
+        }
+
+        self.device
+            .synchronize()
+            .map_err(|e| XlogError::Kernel(format!("strict sparse validation sync: {}", e)))?;
+
+        let error_code_host = self.dtoh_scalar_untracked(&error_code, 0)?;
+        if error_code_host == 0 {
+            return Ok(());
+        }
+        let error_pos_host = self.dtoh_scalar_untracked(&error_pos, 0)?;
+        match error_code_host {
+            1 => Err(XlogError::Kernel(format!(
+                "selected candidate id out of range at position {}",
+                error_pos_host
+            ))),
+            2 => Err(XlogError::Kernel(format!(
+                "duplicate selected candidate id at position {}",
+                error_pos_host
+            ))),
+            code => Err(XlogError::Kernel(format!(
+                "strict sparse selected-id validation failed with error code {}",
+                code
+            ))),
+        }
+    }
+
+    pub fn filter_buffer_by_candidate_flag(
+        &self,
+        input: &CudaBuffer,
+        candidate_flags: &CudaBuffer,
+        candidate_idx: usize,
+    ) -> Result<CudaBuffer> {
+        if input.is_empty() {
+            return self.create_empty_buffer(input.schema().clone());
+        }
+        if candidate_idx >= candidate_flags.num_rows() as usize {
+            return Err(XlogError::Kernel(format!(
+                "candidate flag index {} out of range [0, {})",
+                candidate_idx,
+                candidate_flags.num_rows()
+            )));
+        }
+
+        let flag_col = candidate_flags
+            .column(0)
+            .ok_or_else(|| XlogError::Kernel("candidate flag buffer has no column".to_string()))?;
+        let flag_view = self.column_as_u32_view(flag_col, candidate_flags.num_rows() as usize)?;
+        let row_count = u32::try_from(input.num_rows()).map_err(|_| {
+            XlogError::Kernel(format!(
+                "strict sparse row count {} exceeds u32::MAX",
+                input.num_rows()
+            ))
+        })?;
+        let candidate_idx_u32 = u32::try_from(candidate_idx).map_err(|_| {
+            XlogError::Kernel(format!(
+                "candidate flag index {} exceeds u32::MAX",
+                candidate_idx
+            ))
+        })?;
+
+        let mut row_mask = self.memory.alloc::<u8>(row_count as usize)?;
+        let func = self
+            .device
+            .inner()
+            .get_func(ILP_MODULE, ilp_kernels::ILP_BROADCAST_CANDIDATE_FLAG)
+            .ok_or_else(|| {
+                XlogError::Kernel("ilp_broadcast_candidate_flag kernel not found".to_string())
+            })?;
+        let block_size = 256u32;
+        let grid_size = (row_count + block_size - 1) / block_size;
+        unsafe {
+            func.clone().launch(
+                LaunchConfig {
+                    grid_dim: (grid_size, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (&flag_view, candidate_idx_u32, row_count, &mut row_mask),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("strict sparse flag broadcast failed: {}", e)))?;
+
+        self.filter_by_device_mask(input, &row_mask)
+    }
+
     // ─── ILP credit kernel launchers ───────────────────────────────────
 
     /// Launch `ilp_coo_fill` kernel: writes `(compacted_fact_indices[i], cidx)`

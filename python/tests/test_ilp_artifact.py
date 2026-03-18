@@ -20,34 +20,38 @@ POS = [("reach", [1, 3]), ("reach", [2, 4]), ("reach", [3, 5]), ("reach", [4, 6]
 
 
 def test_save_load_roundtrip(tmp_path):
-    """Artifact survives save/load roundtrip."""
+    """Strict artifacts require explicit export before save/load roundtrip."""
     config = TrainConfig(
         step_budget_per_attempt=100, max_attempts=5,
         tau_start=2.0, tau_floor=0.05, seed=42,
     )
     result = train_only(SOURCE, "W_reach", POS, [], config)
-    assert result.converged
 
     path = tmp_path / "artifact.json"
-    result.artifact.save(path)
+    with pytest.raises(RuntimeError, match="export_compat_artifact"):
+        result.artifact.save(path)
+
+    compat = result.export_compat_result()
+    assert compat.converged
+    compat.artifact.save(path)
     assert path.exists()
 
     loaded = LearnedArtifact.load(path)
-    assert loaded.discovered_rule == result.artifact.discovered_rule
-    assert len(loaded.candidate_map) == len(result.artifact.candidate_map)
-    assert loaded.logits == pytest.approx(result.artifact.logits, abs=1e-6)
+    assert loaded.discovered_rule == compat.artifact.discovered_rule
+    assert len(loaded.candidate_map) == len(compat.artifact.candidate_map)
+    assert loaded.logits == pytest.approx(compat.artifact.logits, abs=1e-6)
     assert loaded.telemetry.steps == []  # telemetry not persisted
 
 
 def test_save_produces_valid_json(tmp_path):
-    """Saved artifact is valid JSON."""
+    """Explicitly exported compat artifact is valid JSON."""
     config = TrainConfig(
         step_budget_per_attempt=100, max_attempts=3,
         tau_start=2.0, tau_floor=0.05, seed=42,
     )
     result = train_only(SOURCE, "W_reach", POS, [], config)
     path = tmp_path / "artifact.json"
-    result.artifact.save(path)
+    result.export_compat_result().artifact.save(path)
 
     with open(path) as f:
         data = json.load(f)
@@ -57,14 +61,14 @@ def test_save_produces_valid_json(tmp_path):
 
 
 def test_load_rejects_incompatible_hash(tmp_path):
-    """Loading artifact with wrong hash raises when verify_hash=True."""
+    """Loading exported compat artifact with wrong hash raises when verify_hash=True."""
     config = TrainConfig(
         step_budget_per_attempt=100, max_attempts=3,
         tau_start=2.0, tau_floor=0.05, seed=42,
     )
     result = train_only(SOURCE, "W_reach", POS, [], config)
     path = tmp_path / "artifact.json"
-    result.artifact.save(path)
+    result.export_compat_result().artifact.save(path)
 
     # Corrupt the hash
     with open(path) as f:
@@ -78,7 +82,7 @@ def test_load_rejects_incompatible_hash(tmp_path):
 
 
 def test_config_snapshot_roundtrip(tmp_path):
-    """Config snapshot survives save/load roundtrip."""
+    """Config snapshot survives explicit compat save/load roundtrip."""
     config = TrainConfig(
         step_budget_per_attempt=100, max_attempts=5,
         tau_start=2.0, tau_floor=0.05, seed=42,
@@ -87,10 +91,11 @@ def test_config_snapshot_roundtrip(tmp_path):
         deterministic=True,
     )
     result = train_only(SOURCE, "W_reach", POS, [], config)
-    assert result.converged
 
     path = tmp_path / "artifact.json"
-    result.artifact.save(path)
+    compat = result.export_compat_result()
+    assert compat.converged
+    compat.artifact.save(path)
 
     loaded = LearnedArtifact.load(path)
     assert loaded.config_snapshot is not None, "config_snapshot should be restored"

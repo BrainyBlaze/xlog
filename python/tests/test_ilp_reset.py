@@ -138,6 +138,7 @@ def test_train_deterministic_reproducibility():
         seed=42,
         deterministic=True,
         debug_dense_mask=False,
+        strict_gpu_native=False,
     )
 
     result_1 = train_only(
@@ -189,6 +190,7 @@ def _parity_config(seed: int) -> TrainConfig:
         seed=seed,
         device=0,
         memory_mb=512,
+        strict_gpu_native=False,
     )
 
 

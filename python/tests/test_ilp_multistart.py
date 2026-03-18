@@ -24,6 +24,7 @@ def test_multistart_converges_with_distractors():
     config = TrainConfig(
         step_budget_per_attempt=60, max_attempts=3,
         tau_start=2.0, tau_floor=0.05, seed=42,
+        strict_gpu_native=False,
     )
     result = train_only(
         source=GRANDPARENT_SOURCE, mask_name="W_gp",
@@ -37,6 +38,7 @@ def test_multistart_reports_attempt_count():
     config = TrainConfig(
         step_budget_per_attempt=60, max_attempts=3,
         tau_start=2.0, tau_floor=0.05, seed=42,
+        strict_gpu_native=False,
     )
     result = train_only(
         source=GRANDPARENT_SOURCE, mask_name="W_gp",

@@ -1,6 +1,5 @@
 //! RIR node dispatch and per-node execution handlers.
 
-use std::borrow::Cow;
 use std::collections::HashMap;
 
 use xlog_core::{AggOp, RelId, Result, Schema, XlogError};
@@ -442,38 +441,23 @@ impl Executor {
 
         let start = self.profiler.start_op();
 
-        // 2. Extract active (i,j,k) indices: sparse path skips GPU kernel entirely
-        let active_rules: Cow<'_, [(u32, u32, u32)]> = match ilp_mask {
-            IlpMask::Dense { hard, soft, .. } => {
-                Cow::Owned(self.provider.extract_active_rule_indices(
-                    hard,
-                    soft,
-                    schema_size,
-                    max_active_rules,
-                )?)
-            }
-            IlpMask::Sparse { active_entries, .. } => {
-                let limit = max_active_rules.min(active_entries.len());
-                Cow::Borrowed(&active_entries[..limit])
-            }
-        };
-        let active_rule_count = active_rules.len() as u64;
-
-        // 3. Phase 1: Dispatch hash joins, collect results into tag_entries
-        //    (retaining per-entry buffers for batch credit queries)
         let mut tag_entries: Vec<IlpTagEntry> = Vec::new();
-
-        for &(i, j, k) in active_rules.iter() {
+        let mut process_rule = |i: u32,
+                                j: u32,
+                                k: u32,
+                                strict_candidate_idx: Option<usize>,
+                                strict_flags: Option<&CudaBuffer>|
+         -> Result<()> {
             let (_, left_name) = &rel_index[i as usize];
             let (_, right_name) = &rel_index[j as usize];
 
             let left_buf = match self.store.get(left_name) {
                 Some(buf) if buf.arity() > 0 => buf,
-                _ => continue,
+                _ => return Ok(()),
             };
             let right_buf = match self.store.get(right_name) {
                 Some(buf) if buf.arity() > 0 => buf,
-                _ => continue,
+                _ => return Ok(()),
             };
 
             // Skip arity-mismatched relations: the join keys are fixed by
@@ -485,7 +469,7 @@ impl Executor {
             let left_max_key = left_keys.iter().copied().max().unwrap_or(0);
             let right_max_key = right_keys.iter().copied().max().unwrap_or(0);
             if left_buf.arity() <= left_max_key || right_buf.arity() <= right_max_key {
-                continue;
+                return Ok(());
             }
 
             let joined = self.provider.hash_join_v2(
@@ -510,6 +494,18 @@ impl Executor {
                 joined
             };
 
+            let projected = if let (Some(candidate_idx), Some(active_flags)) =
+                (strict_candidate_idx, strict_flags)
+            {
+                self.provider.filter_buffer_by_candidate_flag(
+                    &projected,
+                    active_flags,
+                    candidate_idx,
+                )?
+            } else {
+                projected
+            };
+
             // RD-22: Use public helper instead of private device_row_count
             let num_rows = read_device_row_count(&self.provider, &projected)? as u32;
 
@@ -522,8 +518,44 @@ impl Executor {
                     buffer: Some(projected),
                 });
             }
-        }
-        drop(active_rules);
+            Ok(())
+        };
+
+        let active_rule_count = match ilp_mask {
+            IlpMask::Dense { hard, soft, .. } => {
+                let active_rules = self.provider.extract_active_rule_indices(
+                    hard,
+                    soft,
+                    schema_size,
+                    max_active_rules,
+                )?;
+                let count = active_rules.len() as u64;
+                for &(i, j, k) in &active_rules {
+                    process_rule(i, j, k, None, None)?;
+                }
+                count
+            }
+            IlpMask::Sparse { active_entries, .. } => {
+                let limit = max_active_rules.min(active_entries.len());
+                for &(i, j, k) in &active_entries[..limit] {
+                    process_rule(i, j, k, None, None)?;
+                }
+                limit as u64
+            }
+            IlpMask::SparseDevice {
+                candidate_order,
+                active_flags,
+                selected_count,
+                ..
+            } => {
+                if *selected_count > 0 {
+                    for (candidate_idx, &(i, j, k)) in candidate_order.iter().enumerate() {
+                        process_rule(i, j, k, Some(candidate_idx), Some(active_flags))?;
+                    }
+                }
+                (*selected_count).min(max_active_rules) as u64
+            }
+        };
 
         // 4. Phase 2: Union results by k, borrowing buffers from tag_entries
         let mut bufs_by_k: HashMap<u32, Vec<&CudaBuffer>> = HashMap::new();

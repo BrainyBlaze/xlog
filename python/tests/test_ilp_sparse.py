@@ -273,32 +273,13 @@ def test_sparse_selected_hard_maps_live_indices_back_to_original():
     assert selected == [0, 1], f"selected_hard was not mapped to original indices: {selected}"
 
 
-def test_sparse_backend_strict_path_uses_device_selected_api():
-    class _ProgCapture:
-        def __init__(self):
-            self.selected_candidate_ids = None
-            self.selected_soft_probs = None
-
-        def set_rule_mask_sparse_selected(self, *_args, **_kwargs):
-            raise AssertionError("host selected-ID API must not be used in strict mode")
-
-        def set_rule_mask_sparse_selected_device(
-            self,
-            _mask_name,
-            selected_candidate_ids,
-            selected_soft_probs,
-            _allow_recursive,
-        ):
-            self.selected_candidate_ids = selected_candidate_ids
-            self.selected_soft_probs = selected_soft_probs
-            return None
-
+def test_sparse_backend_strict_path_is_not_a_public_entry_point():
     candidates = [
         {"id": 0, "i": 0, "j": 1, "k": 1, "left_name": "edge", "right_name": "edge", "head_name": "reach"},
         {"id": 1, "i": 1, "j": 2, "k": 1, "left_name": "edge", "right_name": "edge", "head_name": "reach"},
         {"id": 2, "i": 2, "j": 3, "k": 1, "left_name": "edge", "right_name": "edge", "head_name": "reach"},
     ]
-    prog = _ProgCapture()
+    prog = mock.Mock()
     backend = backend_mod.SparseMaskBackend()
 
     def _det_softmax(logits, tau, hard=False, dim=-1):
@@ -310,20 +291,15 @@ def test_sparse_backend_strict_path_uses_device_selected_api():
         )
 
     with mock.patch("pyxlog.ilp.backend.F.gumbel_softmax", _det_softmax):
-        _, selected = backend.apply_mask(
-            prog=prog,
-            mask_name="W",
-            W=torch.tensor([1.0, 2.0, 3.0], device="cuda", requires_grad=True),
-            tau=1.0,
-            budget=2,
-            candidates=candidates,
-            n=4,
-            allow_recursive=False,
-            strict_gpu_native=True,
-        )
-
-    assert selected == []
-    assert prog.selected_candidate_ids is not None
-    assert prog.selected_candidate_ids.device.type == "cuda"
-    assert prog.selected_soft_probs is not None
-    assert prog.selected_soft_probs.device.type == "cuda"
+        with pytest.raises(RuntimeError, match="train_only"):
+            backend.apply_mask(
+                prog=prog,
+                mask_name="W",
+                W=torch.tensor([1.0, 2.0, 3.0], device="cuda", requires_grad=True),
+                tau=1.0,
+                budget=2,
+                candidates=candidates,
+                n=4,
+                allow_recursive=False,
+                strict_gpu_native=True,
+            )

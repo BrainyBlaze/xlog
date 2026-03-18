@@ -37,6 +37,7 @@ def test_beta_reliability_sparse(
         device=0,
         memory_mb=512,
         debug_dense_mask=False,  # sparse backend
+        strict_gpu_native=False,
     )
     result = train_only(
         source=source,
