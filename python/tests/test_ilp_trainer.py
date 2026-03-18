@@ -27,6 +27,28 @@ REACH_SOURCE = """
 """
 REACH_POS = [("reach", [1, 3]), ("reach", [2, 4]), ("reach", [3, 5]), ("reach", [4, 6])]
 REACH_NEG = []
+REACH_SESSION_SOURCE = """
+    pred edge(u32, u32).
+    pred reach(u32, u32).
+    learnable(W_reach) :: reach(X, Y) :- bL(X, Z), bR(Z, Y).
+"""
+
+
+def _u32_columns(left: list[int], right: list[int]) -> list[torch.Tensor]:
+    return [
+        torch.tensor(left, device="cuda", dtype=torch.int32),
+        torch.tensor(right, device="cuda", dtype=torch.int32),
+    ]
+
+
+def _reach_relation_batches() -> tuple[dict[str, list[torch.Tensor]], dict[str, list[torch.Tensor]]]:
+    positives = {
+        "reach": _u32_columns([1, 2, 3, 4], [3, 4, 5, 6]),
+    }
+    negatives = {
+        "reach": _u32_columns([1, 1], [4, 5]),
+    }
+    return positives, negatives
 
 
 def test_grouped_membership_mask_device_stays_on_cuda():
@@ -128,6 +150,101 @@ def test_train_only_strict_gpu_native_rejects_host_negative_mining():
             negatives=REACH_NEG,
             config=config,
         )
+
+
+def test_train_on_compiled_relations_strict_gpu_native_accepts_uploaded_relations_without_host_sync_traps(monkeypatch):
+    train_on_compiled_relations = getattr(ilp, "train_on_compiled_relations", None)
+    assert train_on_compiled_relations is not None, (
+        "pyxlog.ilp.train_on_compiled_relations must be exported for strict relation-native training"
+    )
+
+    prog = pyxlog.IlpProgramFactory.compile(REACH_SESSION_SOURCE, device=0, memory_mb=256)
+    assert hasattr(prog, "put_relation"), (
+        "CompiledIlpProgram.put_relation must exist for strict relation-native training"
+    )
+    prog.put_relation("edge", _u32_columns([1, 2, 3, 4, 5], [2, 3, 4, 5, 6]))
+
+    positives, negatives = _reach_relation_batches()
+    config = TrainConfig(
+        step_budget_per_attempt=20,
+        max_attempts=1,
+        tau_start=2.0,
+        tau_floor=0.05,
+        strict_gpu_native=True,
+        seed=42,
+    )
+
+    def _trap(name: str):
+        def _raise(*_args, **_kwargs):
+            raise AssertionError(f"unexpected host sync via Tensor.{name}")
+        return _raise
+
+    monkeypatch.setattr(torch.Tensor, "cpu", _trap("cpu"), raising=False)
+    monkeypatch.setattr(torch.Tensor, "tolist", _trap("tolist"), raising=False)
+    monkeypatch.setattr(torch.Tensor, "item", _trap("item"), raising=False)
+
+    result = train_on_compiled_relations(
+        prog,
+        "W_reach",
+        positives,
+        negatives,
+        config,
+    )
+
+    strict_result_type = getattr(ilp, "StrictTrainResult", None)
+    assert strict_result_type is not None
+    assert isinstance(result, strict_result_type)
+    assert result.strict_gpu_native is True
+    assert result.compat_materialized is False
+    assert result.total_steps > 0
+    assert len(result.artifact.candidate_map) > 0
+
+
+def test_train_on_compiled_relations_matches_inline_fact_candidate_surface():
+    train_on_compiled_relations = getattr(ilp, "train_on_compiled_relations", None)
+    assert train_on_compiled_relations is not None, (
+        "pyxlog.ilp.train_on_compiled_relations must be exported for strict relation-native training"
+    )
+
+    config = TrainConfig(
+        step_budget_per_attempt=20,
+        max_attempts=1,
+        tau_start=2.0,
+        tau_floor=0.05,
+        strict_gpu_native=True,
+        seed=42,
+    )
+
+    prog = pyxlog.IlpProgramFactory.compile(REACH_SESSION_SOURCE, device=0, memory_mb=256)
+    prog.put_relation("edge", _u32_columns([1, 2, 3, 4, 5], [2, 3, 4, 5, 6]))
+    positives, negatives = _reach_relation_batches()
+    relation_result = train_on_compiled_relations(
+        prog,
+        "W_reach",
+        positives,
+        negatives,
+        config,
+    )
+
+    inline_source = """
+        pred edge(u32, u32).
+        pred reach(u32, u32).
+        edge(1, 2). edge(2, 3). edge(3, 4). edge(4, 5). edge(5, 6).
+        learnable(W_reach) :: reach(X, Y) :- bL(X, Z), bR(Z, Y).
+    """
+    inline_result = train_only(
+        inline_source,
+        "W_reach",
+        REACH_POS,
+        [("reach", [1, 4]), ("reach", [1, 5])],
+        config,
+    )
+
+    assert relation_result.strict_gpu_native is True
+    assert inline_result.strict_gpu_native is True
+    assert len(relation_result.artifact.candidate_map) == len(inline_result.artifact.candidate_map)
+    assert relation_result.attempt_count == inline_result.attempt_count
+    assert relation_result.total_steps == inline_result.total_steps
 
 
 def test_train_only_converges_on_reach():

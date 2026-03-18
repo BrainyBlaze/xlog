@@ -231,6 +231,59 @@ def test_full_training_zero_d2h_gate():
     assert "edge" in compat_artifact.discovered_rule
 
 
+def test_compiled_relation_training_zero_d2h_gate():
+    train_on_compiled_relations = getattr(ilp, "train_on_compiled_relations", None)
+    assert train_on_compiled_relations is not None, (
+        "pyxlog.ilp.train_on_compiled_relations must be exported for strict relation-native training"
+    )
+
+    source = """
+        pred edge(u32, u32).
+        pred reach(u32, u32).
+        learnable(W_reach) :: reach(X, Y) :- b1(X, Z), b2(Z, Y).
+    """
+    prog = pyxlog.IlpProgramFactory.compile(source, device=0, memory_mb=64)
+    prog.put_relation(
+        "edge",
+        [
+            torch.tensor([1, 2, 3, 4, 5], device="cuda", dtype=torch.int32),
+            torch.tensor([2, 3, 4, 5, 6], device="cuda", dtype=torch.int32),
+        ],
+    )
+
+    config = TrainConfig(
+        step_budget_per_attempt=20,
+        max_attempts=1,
+        tau_start=2.0,
+        tau_floor=0.05,
+        seed=42,
+        strict_gpu_native=True,
+    )
+    result = train_on_compiled_relations(
+        prog,
+        "W_reach",
+        {
+            "reach": [
+                torch.tensor([1, 2, 3, 4], device="cuda", dtype=torch.int32),
+                torch.tensor([3, 4, 5, 6], device="cuda", dtype=torch.int32),
+            ],
+        },
+        {},
+        config,
+    )
+
+    strict_result_type = getattr(ilp, "StrictTrainResult", None)
+    strict_artifact_type = getattr(ilp, "StrictLearnedArtifact", None)
+    assert strict_result_type is not None
+    assert strict_artifact_type is not None
+    assert isinstance(result, strict_result_type)
+    assert isinstance(result.artifact, strict_artifact_type)
+    assert result.strict_gpu_native is True
+    assert result.compat_materialized is False
+    with pytest.raises(RuntimeError, match="no compatibility exporter"):
+        result.export_compat_result()
+
+
 def test_d2h_gate_with_negatives():
     """D2H gate holds even with negative examples."""
     source = """

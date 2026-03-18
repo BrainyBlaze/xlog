@@ -32,6 +32,36 @@ def _compile_reach():
     return prog
 
 
+def _compile_reach_with_uploaded_relation():
+    prog = pyxlog.IlpProgramFactory.compile("""
+        pred edge(u32, u32).
+        pred reach(u32, u32).
+        learnable(W) :: reach(X, Y) :- bL(X, Z), bR(Z, Y).
+    """, device=0, memory_mb=64)
+    assert hasattr(prog, "put_relation"), (
+        "CompiledIlpProgram.put_relation must exist for relation-native strict training"
+    )
+    prog.put_relation(
+        "edge",
+        [
+            torch.tensor([1, 2, 3], device="cuda", dtype=torch.int32),
+            torch.tensor([2, 3, 4], device="cuda", dtype=torch.int32),
+        ],
+    )
+    prog.evaluate()
+
+    n = prog.ilp_schema_size()
+    device = torch.device("cuda:0")
+    mask = torch.zeros(n ** 3, device=device, dtype=torch.float32)
+    names = prog.ilp_relation_names()
+    edge_idx = names.index("edge")
+    reach_idx = names.index("reach")
+    mask[edge_idx * n * n + edge_idx * n + reach_idx] = 1.0
+    prog.set_rule_mask("W", mask, mask, n)
+    prog.evaluate()
+    return prog
+
+
 def test_set_candidate_map_basic():
     """set_candidate_map succeeds with valid triples."""
     prog = _compile_reach()
@@ -72,6 +102,55 @@ def test_compute_ilp_loss_grad_gpu_basic():
     assert grad.shape == cand_probs.shape
     assert grad.dtype == torch.float32
     assert grad.device.type == "cuda"
+
+
+def test_compute_ilp_loss_grad_gpu_relations_matches_host_fact_path():
+    prog = _compile_reach_with_uploaded_relation()
+    compute_rel = getattr(prog, "compute_ilp_loss_grad_gpu_relations", None)
+    assert compute_rel is not None, (
+        "CompiledIlpProgram.compute_ilp_loss_grad_gpu_relations must exist for relation-native training"
+    )
+    names = prog.ilp_relation_names()
+    edge_idx = names.index("edge")
+    reach_idx = names.index("reach")
+    prog.set_candidate_map([(edge_idx, edge_idx, reach_idx)])
+
+    device = torch.device("cuda:0")
+    cand_probs = torch.tensor([0.8], device=device, dtype=torch.float32)
+
+    positives = [("reach", [1, 3])]
+    negatives = [("reach", [1, 4])]
+    positive_relations = {
+        "reach": [
+            torch.tensor([1], device="cuda", dtype=torch.int32),
+            torch.tensor([3], device="cuda", dtype=torch.int32),
+        ],
+    }
+    negative_relations = {
+        "reach": [
+            torch.tensor([1], device="cuda", dtype=torch.int32),
+            torch.tensor([4], device="cuda", dtype=torch.int32),
+        ],
+    }
+
+    host_loss_dl, host_grad_dl = prog.compute_ilp_loss_grad_gpu(
+        positives,
+        negatives,
+        cand_probs,
+    )
+    relation_loss_dl, relation_grad_dl = compute_rel(
+        positive_relations,
+        negative_relations,
+        cand_probs,
+    )
+
+    host_loss = torch.from_dlpack(host_loss_dl)
+    host_grad = torch.from_dlpack(host_grad_dl)
+    relation_loss = torch.from_dlpack(relation_loss_dl)
+    relation_grad = torch.from_dlpack(relation_grad_dl)
+
+    assert torch.allclose(relation_loss, host_loss, atol=1e-6)
+    assert torch.allclose(relation_grad, host_grad, atol=1e-5)
 
 
 def test_compute_ilp_loss_grad_gpu_empty_facts():

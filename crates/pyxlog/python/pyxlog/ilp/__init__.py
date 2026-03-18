@@ -5,7 +5,7 @@ from pyxlog.ilp.exceptions import IlpCandidateError, IlpConfigError, IlpTraining
 from pyxlog.ilp.holdout import loo_holdout_f1
 from pyxlog.ilp.temperature import AdaptiveTempController, TempMode
 from pyxlog.ilp.promoter import train_and_promote
-from pyxlog.ilp.trainer import train_only
+from pyxlog.ilp.trainer import train_on_compiled_relations, train_only
 from pyxlog.ilp.types import (
     ArtifactMetadata,
     CandidateMapEntry,
@@ -44,6 +44,7 @@ __all__ = [
     "PromotionResult",
     "GateResult",
     "train_only",
+    "train_on_compiled_relations",
     "train_and_promote",
     "loo_holdout_f1",
 ]

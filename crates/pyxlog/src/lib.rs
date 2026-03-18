@@ -8,7 +8,7 @@ use pyo3::prelude::*;
 use xlog_core::{MemoryBudget, Schema};
 #[cfg(feature = "arrow-device-import")]
 use xlog_cuda::{ArrowDeviceArray, ArrowDeviceArrayOwned};
-use xlog_cuda::{CudaDevice, CudaKernelProvider, DlpackManagedTensor, GpuMemoryManager};
+use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, DlpackManagedTensor, GpuMemoryManager};
 use xlog_gpu::logic as gpu_logic;
 use xlog_logic::ast::ProbEngine;
 use xlog_neural::{NetworkRegistry, TensorSourceRegistry};
@@ -476,6 +476,7 @@ pub struct CompiledIlpProgram {
     pub(crate) max_active_rules: usize,
     pub(crate) candidate_map: Option<HashMap<(u32, u32, u32), u32>>,
     pub(crate) candidate_order: Option<Vec<(u32, u32, u32)>>,
+    pub(crate) relation_overrides: HashMap<String, CudaBuffer>,
     /// Maximum bytes for per-chunk temp allocations (masks, prefix sums,
     /// chunk-local COO scratch). The final merged COO buffer is exact-NNZ
     /// sized and may exceed this budget. Default: 16 MB.

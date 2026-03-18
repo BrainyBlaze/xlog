@@ -31,6 +31,7 @@ from pyxlog.ilp.types import (
 
 
 _TrainOnlyResult = TrainResult | StrictTrainResult
+_RelationBatch = dict[str, list[object]]
 
 
 def train_only(
@@ -66,6 +67,34 @@ def train_only(
         prog, source, mask_name, positives, negatives, config,
         compile_ms=compile_ms,
         _compute_holdout=_compute_holdout,
+    )
+
+
+def train_on_compiled_relations(
+    prog: object,
+    mask_name: str,
+    positives: _RelationBatch,
+    negatives: _RelationBatch,
+    config: TrainConfig = TrainConfig(),
+) -> StrictTrainResult:
+    """Train on a pre-compiled ILP program using relation-native example batches.
+
+    `positives` and `negatives` must be dicts mapping relation name to a
+    sequence of DLPack-compatible columns already resident on device.
+    This API is strict-only and does not fall back to host-shaped training.
+    """
+    _validate_relation_inputs(mask_name, positives, negatives, config)
+
+    if config.deterministic:
+        _set_deterministic_cuda(config.seed)
+
+    prog.set_strict_zero_dtoh(True)
+    return _train_on_compiled_relations_strict(
+        prog,
+        mask_name,
+        positives,
+        negatives,
+        config,
     )
 
 
@@ -199,6 +228,31 @@ def _validate_inputs(
             f"positives and negatives contradict: {overlap}"
         )
 
+    _validate_strict_config(config)
+
+
+def _validate_relation_inputs(
+    mask_name: str,
+    positives: _RelationBatch,
+    negatives: _RelationBatch,
+    config: TrainConfig,
+) -> None:
+    if not mask_name:
+        raise IlpConfigError("mask_name must be non-empty")
+    if not isinstance(positives, dict):
+        raise IlpConfigError("positives must be a dict[str, sequence[dlpack]]")
+    if not isinstance(negatives, dict):
+        raise IlpConfigError("negatives must be a dict[str, sequence[dlpack]]")
+    if not positives:
+        raise IlpConfigError("positives must be non-empty")
+    if not config.strict_gpu_native:
+        raise IlpConfigError(
+            "train_on_compiled_relations requires strict_gpu_native=True"
+        )
+    _validate_strict_config(config)
+
+
+def _validate_strict_config(config: TrainConfig) -> None:
     if config.strict_gpu_native and config.max_mined_negatives > 0:
         raise IlpConfigError(
             "host negative mining is incompatible with strict_gpu_native; "
@@ -491,6 +545,239 @@ def _train_on_compiled_strict(
         attempt_argmax_candidate_ids=attempt_argmax_candidate_ids,
         attempt_host_metadata=attempt_host_metadata,
     )
+
+
+def _train_on_compiled_relations_strict(
+    prog: object,
+    mask_name: str,
+    positives: _RelationBatch,
+    negatives: _RelationBatch,
+    config: TrainConfig,
+    *,
+    compile_ms: float = 0.0,
+    _reset_before_first_attempt: bool = False,
+) -> StrictTrainResult:
+    best_state: _StrictAttemptState | None = None
+    global_steps = 0
+    numeric_failures = 0
+    attempt_count = 0
+
+    for attempt_idx in range(config.max_attempts):
+        if global_steps >= config.global_step_limit:
+            break
+
+        if config.deterministic:
+            _seed_for_attempt(config.seed, attempt_idx)
+
+        remaining = config.global_step_limit - global_steps
+        step_budget = min(config.step_budget_per_attempt, remaining)
+        if step_budget <= 0:
+            break
+
+        if attempt_idx > 0 or _reset_before_first_attempt:
+            prog.reset_runtime()
+
+        try:
+            state = _run_single_attempt_strict_relations(
+                prog,
+                mask_name,
+                positives,
+                negatives,
+                config,
+                attempt_idx,
+                step_budget,
+            )
+            attempt_count += 1
+            if compile_ms:
+                state.telemetry_timings["compile_ms_once"] = compile_ms
+            best_state = state if best_state is None else _select_better_strict_attempt(best_state, state)
+            global_steps += state.steps_used
+        except _NumericFailure:
+            numeric_failures += 1
+            global_steps += 1
+            if numeric_failures >= config.max_numeric_failures:
+                raise IlpTrainingError(
+                    "numeric_instability: too many NaN/Inf failures",
+                    {
+                        "attempt": attempt_idx,
+                        "step": None,
+                        "C": 0,
+                        "k": config.max_active_rules,
+                        "device_name": _device_name(config),
+                        "allocated_bytes": _allocated_bytes(config.device),
+                        "terminal_reason": "numeric_instability",
+                    },
+                )
+        except _AttemptRuntimeFailure as e:
+            raise IlpTrainingError(f"{e.terminal_reason}: {e.cause}", e.context)
+
+    return _build_relation_native_strict_train_result(
+        best_state=best_state,
+        config=config,
+        global_steps=global_steps,
+        attempt_count=attempt_count,
+    )
+
+
+def _run_single_attempt_strict_relations(
+    prog: object,
+    mask_name: str,
+    positives: _RelationBatch,
+    negatives: _RelationBatch,
+    config: TrainConfig,
+    attempt_idx: int,
+    step_budget: int,
+) -> _StrictAttemptState:
+    try:
+        n = prog.ilp_schema_size()
+        rel_names = prog.ilp_relation_names()
+        allow_recursive = config.allow_recursive_candidates
+        candidates = prog.valid_candidates(mask_name, allow_recursive)
+        if not candidates:
+            raise IlpCandidateError("No valid candidates for mask")
+
+        candidate_map = [
+            CandidateMapEntry(
+                id=c["id"], i=c["i"], j=c["j"], k=c["k"],
+                left_name=c["left_name"], right_name=c["right_name"],
+                head_name=c["head_name"],
+            )
+            for c in candidates
+        ]
+
+        prog.set_candidate_map([(c["i"], c["j"], c["k"]) for c in candidates])
+
+        device = f"cuda:{config.device}" if torch.cuda.is_available() else "cpu"
+        W = SparseMaskBackend().init_weights(len(candidates), n, device)
+        optimizer = torch.optim.Adam([W], lr=0.1, capturable=True)
+        result = _AttemptResult()
+        result.candidate_map = candidate_map
+        last_cand_probs: torch.Tensor | None = None
+        last_logits: torch.Tensor | None = None
+        last_loss: torch.Tensor | None = None
+
+        for step in range(step_budget):
+            try:
+                optimizer.zero_grad()
+                prog.reset_d2h_transfer_count()
+
+                tau = _strict_tau_for_step(step, step_budget, config)
+                cand_probs = torch.nn.functional.gumbel_softmax(W, tau=tau, hard=False, dim=0)
+                effective_budget = min(config.max_active_rules, cand_probs.numel())
+                selected = torch.argsort(
+                    cand_probs.detach(),
+                    descending=True,
+                    stable=True,
+                )[:effective_budget]
+                selected_soft = cand_probs.detach().index_select(0, selected).contiguous()
+                prog.set_rule_mask_sparse_selected_device(
+                    mask_name,
+                    selected.to(dtype=torch.int64).contiguous(),
+                    selected_soft,
+                    allow_recursive,
+                )
+                loss_dl, grad_dl = prog.compute_ilp_loss_grad_gpu_relations(
+                    positives,
+                    negatives,
+                    cand_probs.detach(),
+                )
+                credit_loss = torch.from_dlpack(loss_dl).reshape(())
+                credit_grad = torch.from_dlpack(grad_dl)
+                last_loss = credit_loss.detach().clone()
+                last_cand_probs = cand_probs.detach().clone()
+                if step == step_budget - 1:
+                    last_logits = W.detach().clone()
+
+                ent_weight = entropy_weight_at_step(
+                    step,
+                    step_budget,
+                    start=config.entropy_weight_start,
+                    end=config.entropy_weight_end,
+                )
+                if ent_weight > 0 and len(candidates) > 1:
+                    cand_probs_norm = cand_probs / cand_probs.sum().clamp_min(1e-8)
+                    ent = normalized_entropy(cand_probs_norm, len(candidates))
+                    ent_grads = torch.autograd.grad(
+                        -ent_weight * ent,
+                        cand_probs,
+                        retain_graph=True,
+                    )[0]
+                    credit_grad = credit_grad + ent_grads
+
+                cand_probs.backward(credit_grad)
+                optimizer.step()
+
+                d2h_count = prog.d2h_transfer_count()
+                if d2h_count > 0:
+                    context = _attempt_context(
+                        attempt=attempt_idx,
+                        step=step,
+                        C=len(candidates),
+                        config=config,
+                        terminal_reason="d2h_gate_violation",
+                    )
+                    context["d2h_count"] = d2h_count
+                    raise _AttemptRuntimeFailure(
+                        terminal_reason="d2h_gate_violation",
+                        context=context,
+                        cause=RuntimeError(
+                            "d2h transfer observed in strict relation-native hot step loop"
+                        ),
+                    )
+            except _AttemptRuntimeFailure:
+                raise
+            except Exception as e:
+                context = _attempt_context(
+                    attempt=attempt_idx,
+                    step=step,
+                    C=len(candidates),
+                    config=config,
+                    terminal_reason=_classify_failure_reason(e),
+                )
+                context["error"] = str(e)
+                raise _AttemptRuntimeFailure(
+                    terminal_reason=_classify_failure_reason(e),
+                    context=context,
+                    cause=e,
+                )
+
+        if last_cand_probs is None or last_logits is None or last_loss is None:
+            raise IlpTrainingError(
+                "strict_relation_native_hot_loop executed zero steps",
+                {"attempt": attempt_idx},
+            )
+
+        return _finalize_strict_attempt(
+            config,
+            attempt_idx,
+            step_budget,
+            rel_names,
+            candidates,
+            n,
+            last_logits,
+            last_cand_probs,
+            last_loss,
+            result,
+        )
+    except IlpCandidateError:
+        raise
+    except _AttemptRuntimeFailure:
+        raise
+    except Exception as e:
+        context = {
+            "attempt": attempt_idx,
+            "C": len(candidates) if "candidates" in locals() else 0,
+            "k": config.max_active_rules,
+            "device_name": _device_name(config),
+            "allocated_bytes": _allocated_bytes(config.device),
+            "step": None,
+            "terminal_reason": _classify_failure_reason(e),
+        }
+        raise _AttemptRuntimeFailure(
+            terminal_reason=_classify_failure_reason(e),
+            context=context,
+            cause=e,
+        )
 
 
 def _select_better_strict_attempt(
@@ -1854,6 +2141,42 @@ def _build_strict_train_result(
         strict_gpu_native=True,
         compat_materialized=False,
         _compat_exporter=_export_compat_result,
+    )
+
+
+def _build_relation_native_strict_train_result(
+    *,
+    best_state: _StrictAttemptState | None,
+    config: TrainConfig,
+    global_steps: int,
+    attempt_count: int,
+) -> StrictTrainResult:
+    if best_state is None:
+        return StrictTrainResult(
+            attempt_count=attempt_count,
+            total_steps=global_steps,
+            single_attempt=attempt_count == 1,
+        )
+
+    strict_artifact = StrictLearnedArtifact(
+        candidate_map=best_state.candidate_map,
+        config_snapshot=config,
+        telemetry=TrainTelemetry(
+            steps=list(best_state.telemetry_steps),
+            step_timings=dict(best_state.telemetry_timings),
+        ),
+        strict_gpu_native=True,
+        compat_materialized=False,
+        _compat_exporter=None,
+    )
+    return StrictTrainResult(
+        attempt_count=attempt_count,
+        total_steps=global_steps,
+        single_attempt=attempt_count == 1,
+        artifact=strict_artifact,
+        strict_gpu_native=True,
+        compat_materialized=False,
+        _compat_exporter=None,
     )
 
 

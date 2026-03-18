@@ -298,6 +298,14 @@ impl Lowerer {
         self.infer_schemas(program);
         self.infer_cardinalities(program);
 
+        // Pre-allocate RelIds for declared predicates so schema-only programs
+        // can populate relation stores before any facts or executable rules
+        // mention those relations. This keeps ILP candidate generation and
+        // runtime relation upload aligned with declared schemas.
+        for pred_decl in &program.predicates {
+            self.get_or_create_rel_id(&pred_decl.name);
+        }
+
         // Build SCCs
         self.build_sccs(program);
 

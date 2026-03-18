@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PySequence};
 
 use xlog_core::{symbol, RelId, ScalarType, Schema};
 use xlog_cuda::{CudaKernelProvider, JoinType};
@@ -28,6 +28,26 @@ use super::{
 // ---------------------------------------------------------------------------
 // Helper functions
 // ---------------------------------------------------------------------------
+
+struct RelationExampleGroup {
+    relation: String,
+    query_buf: xlog_cuda::CudaBuffer,
+    num_rows: u32,
+}
+
+fn collect_dlpack_columns(
+    dlpack_columns: &Bound<'_, PyAny>,
+    err_msg: &str,
+) -> PyResult<Vec<xlog_cuda::DlpackManagedTensor>> {
+    let seq = dlpack_columns
+        .downcast::<PySequence>()
+        .map_err(|_| PyValueError::new_err(err_msg.to_string()))?;
+    let mut tensors = Vec::with_capacity(seq.len()? as usize);
+    for item in seq.iter()? {
+        tensors.push(dlpack_from_py(&item?)?);
+    }
+    Ok(tensors)
+}
 
 /// Allocate zero-initialized loss (scalar) and grad (num_cands) on GPU and
 /// export both as DLPack capsules. Shared by both f32 and f64 paths.
@@ -585,6 +605,7 @@ impl IlpProgramFactory {
             max_active_rules: active_rules,
             candidate_map: None,
             candidate_order: None,
+            relation_overrides: HashMap::new(),
             coo_chunk_budget: 16 * 1024 * 1024,
             strict_zero_dtoh: false,
         })
@@ -641,6 +662,42 @@ impl CompiledIlpProgram {
     /// Use for zero-D2H benchmarks and CI gates.
     pub fn set_strict_zero_dtoh(&mut self, strict: bool) {
         self.strict_zero_dtoh = strict;
+    }
+
+    /// Upload a named relation as DLPack tensor columns into the ILP program store.
+    ///
+    /// This enables tensor-native ILP data upload: compile a schema-only source
+    /// (predicate declarations only, no facts), then upload GPU tensor data via
+    /// DLPack without host materialization.
+    pub fn put_relation(
+        &mut self,
+        name: String,
+        dlpack_columns: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        if name.starts_with("__") {
+            return Err(PyValueError::new_err(format!(
+                "Relation {} is internal and cannot be stored in a compiled ILP program",
+                name
+            )));
+        }
+        let schema = self.schemas.get(&name).ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "Unknown relation {} (not present in compiled schemas)",
+                name
+            ))
+        })?;
+        let tensors = collect_dlpack_columns(
+            dlpack_columns,
+            &format!("Relation {} must be a sequence of DLPack columns", name),
+        )?;
+        let buffer = self
+            .provider
+            .from_dlpack_tensors_with_schema(schema.clone(), tensors)
+            .map_err(types::xlog_err)?;
+        let live_buffer = self.provider.clone_buffer(&buffer).map_err(types::xlog_err)?;
+        self.relation_overrides.insert(name.clone(), buffer);
+        self.executor.put_relation(&name, live_buffer);
+        Ok(())
     }
 
     /// GPU-resident ILP loss + gradient computation.
@@ -940,6 +997,240 @@ impl CompiledIlpProgram {
         )
     }
 
+    /// GPU-resident ILP loss + gradient computation from relation-native
+    /// positive/negative examples stored as DLPack column groups.
+    ///
+    /// `positives_by_relation` and `negatives_by_relation` must be Python dicts
+    /// mapping relation name -> sequence of DLPack columns with schema-matching
+    /// dtypes. No host fact tuple materialization occurs on this path.
+    pub fn compute_ilp_loss_grad_gpu_relations<'py>(
+        &mut self,
+        py: Python<'py>,
+        positives_by_relation: &Bound<'py, PyAny>,
+        negatives_by_relation: &Bound<'py, PyAny>,
+        cand_probs_obj: &Bound<'py, PyAny>,
+    ) -> PyResult<(PyObject, PyObject)> {
+        let candidate_map = self.candidate_map.clone().ok_or_else(|| {
+            PyRuntimeError::new_err(
+                "candidate_map not set — call set_candidate_map() before compute_ilp_loss_grad_gpu_relations()",
+            )
+        })?;
+        let num_cands = candidate_map.len() as u32;
+
+        let managed = dlpack_from_py(cand_probs_obj)?;
+        let cand_buf = self
+            .provider
+            .from_dlpack_tensors(vec![managed])
+            .map_err(|e| types::gpu_err("DLPack import", e))?;
+
+        let cand_schema = cand_buf.schema().clone();
+        let cand_dtype = cand_schema
+            .column_type(0)
+            .ok_or_else(|| PyRuntimeError::new_err("cand_probs has no column type"))?;
+        let is_f64 = match cand_dtype {
+            ScalarType::F32 => false,
+            ScalarType::F64 => true,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "cand_probs must be F32 or F64, got {:?}",
+                    other
+                )));
+            }
+        };
+
+        let cand_rows = read_device_row_count(&self.provider, &cand_buf)
+            .map_err(|e| types::gpu_err("row count", e))?;
+        if cand_rows != num_cands as usize {
+            return Err(PyValueError::new_err(format!(
+                "cand_probs length ({}) != candidate_map length ({})",
+                cand_rows, num_cands
+            )));
+        }
+
+        let positive_groups = self.collect_relation_example_groups(
+            positives_by_relation,
+            "positives_by_relation must be a dict[str, sequence[dlpack]]",
+        )?;
+        let negative_groups = self.collect_relation_example_groups(
+            negatives_by_relation,
+            "negatives_by_relation must be a dict[str, sequence[dlpack]]",
+        )?;
+
+        let num_pos: u32 = positive_groups.iter().map(|g| g.num_rows).sum();
+        let num_neg: u32 = negative_groups.iter().map(|g| g.num_rows).sum();
+        let num_facts = num_pos + num_neg;
+
+        if num_facts == 0 {
+            return self.build_zero_loss_grad(py, num_cands, is_f64);
+        }
+
+        let mut is_positive_host = Vec::with_capacity(num_facts as usize);
+        is_positive_host.extend(std::iter::repeat_n(1u8, num_pos as usize));
+        is_positive_host.extend(std::iter::repeat_n(0u8, num_neg as usize));
+
+        if self.strict_zero_dtoh && self.executor.ilp_registry().has_sparse_device_mask() {
+            self.evaluate_ilp_plan(py)?;
+        }
+
+        let tagged = self
+            .executor
+            .ilp_last_result()
+            .ok_or_else(|| PyRuntimeError::new_err("No ILP result — call evaluate() first"))?;
+
+        let mut tasks: Vec<ilp_gpu::CooTask> = Vec::new();
+        let mut fact_indices_buffers: Vec<xlog_cuda::memory::TrackedCudaSlice<u32>> = Vec::new();
+        let mut next_global_idx: u32 = 0;
+
+        for group in positive_groups.iter().chain(negative_groups.iter()) {
+            if group.num_rows == 0 {
+                continue;
+            }
+            let k_idx = self
+                .rel_index
+                .iter()
+                .position(|(_, name)| name == &group.relation)
+                .ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "Relation '{}' not in ILP schema",
+                        group.relation
+                    ))
+                })? as u32;
+
+            let relevant_entries: Vec<&xlog_runtime::ilp_registry::IlpTagEntry> = tagged
+                .entries
+                .iter()
+                .filter(|e| e.k == k_idx && e.num_rows > 0 && e.buffer.is_some())
+                .collect();
+            if relevant_entries.is_empty() {
+                next_global_idx = next_global_idx.saturating_add(group.num_rows);
+                continue;
+            }
+
+            let arity = group.query_buf.arity();
+            if arity == 0 {
+                next_global_idx = next_global_idx.saturating_add(group.num_rows);
+                continue;
+            }
+            let keys: Vec<usize> = (0..arity).collect();
+
+            let global_indices: Vec<u32> = (next_global_idx..next_global_idx + group.num_rows).collect();
+            let mut d_fact_indices = self
+                .provider
+                .memory()
+                .alloc::<u32>(group.num_rows as usize)
+                .map_err(|e| types::gpu_err("alloc fact_indices", e))?;
+            self.provider
+                .device()
+                .inner()
+                .htod_sync_copy_into(&global_indices, &mut d_fact_indices)
+                .map_err(|e| types::gpu_err("htod fact_indices", e))?;
+            let fi_idx = fact_indices_buffers.len();
+            fact_indices_buffers.push(d_fact_indices);
+
+            for entry in &relevant_entries {
+                let cidx = match candidate_map.get(&(entry.i, entry.j, entry.k)) {
+                    Some(c) => *c,
+                    None => continue,
+                };
+                let entry_buf = entry.buffer.as_ref().ok_or_else(|| {
+                    PyRuntimeError::new_err("internal: filtered entry has no buffer")
+                })?;
+                let d_mask = self
+                    .provider
+                    .membership_mask_device(&group.query_buf, entry_buf, &keys, &keys)
+                    .map_err(|e| types::gpu_err("membership_mask", e))?;
+                tasks.push(ilp_gpu::CooTask {
+                    cidx,
+                    num_query: group.num_rows,
+                    d_mask,
+                    fact_indices_idx: fi_idx,
+                });
+            }
+
+            next_global_idx = next_global_idx.saturating_add(group.num_rows);
+        }
+
+        let num_tasks = tasks.len();
+        let upper_bound: u32 = tasks.iter().map(|t| t.num_query).sum();
+        if upper_bound == 0 || num_tasks == 0 {
+            return self.build_loss_grad_empty_coo(
+                py,
+                &is_positive_host,
+                num_facts,
+                num_cands,
+                is_f64,
+            );
+        }
+
+        let coo_bytes = (upper_bound as u64) * 8;
+        let needs_chunking = coo_bytes > self.coo_chunk_budget;
+
+        let mut d_is_positive = self
+            .provider
+            .memory()
+            .alloc::<u8>(num_facts as usize)
+            .map_err(|e| types::gpu_err("alloc is_positive", e))?;
+        self.provider
+            .device()
+            .inner()
+            .htod_sync_copy_into(&is_positive_host, &mut d_is_positive)
+            .map_err(|e| types::gpu_err("htod is_positive", e))?;
+
+        let cand_col = cand_buf
+            .column(0)
+            .ok_or_else(|| PyRuntimeError::new_err("cand_probs has no column"))?;
+
+        let (mut d_coo_facts, mut d_coo_cands, actual_nnz) = if !needs_chunking {
+            ilp_gpu::build_coo_single(
+                &self.provider,
+                &tasks,
+                &fact_indices_buffers,
+                num_facts,
+                num_cands,
+                upper_bound,
+            )?
+        } else {
+            match ilp_gpu::build_coo_chunked(
+                &self.provider,
+                &tasks,
+                &fact_indices_buffers,
+                num_facts,
+                self.coo_chunk_budget,
+            )? {
+                Some(result) => result,
+                None => {
+                    return self.build_loss_grad_empty_coo(
+                        py,
+                        &is_positive_host,
+                        num_facts,
+                        num_cands,
+                        is_f64,
+                    );
+                }
+            }
+        };
+
+        let d_row_offsets = ilp_gpu::sort_and_build_csr(
+            &self.provider,
+            &mut d_coo_facts,
+            &mut d_coo_cands,
+            actual_nnz,
+            num_facts,
+        )?;
+
+        ilp_gpu::forward_backward_reduce(
+            &self.provider,
+            py,
+            &d_row_offsets,
+            &d_coo_cands,
+            cand_col,
+            &d_is_positive,
+            num_facts,
+            num_cands,
+            is_f64,
+        )
+    }
+
     pub fn set_rule_mask(
         &mut self,
         name: String,
@@ -1200,6 +1491,9 @@ use train_only(..., strict_gpu_native=True) or export an explicit compatibility 
 
             // 3. Reload base facts from preserved AST
             load_facts_into_store(&self.ast, &self.provider, &mut self.executor, &self.schemas)?;
+
+            // 3b. Reapply persistent relation uploads on top of AST/base facts.
+            self.apply_relation_overrides()?;
 
             // 4. Re-execute plan (populates derived relations)
             self.executor.execute_plan(&self.plan)?;
@@ -1592,6 +1886,7 @@ use train_only(..., strict_gpu_native=True) or export an explicit compatibility 
         }
         load_facts_into_store(&ast, &self.provider, &mut self.executor, &schemas)
             .map_err(types::xlog_err)?;
+        self.apply_relation_overrides().map_err(types::xlog_err)?;
         self.executor.execute_plan(&plan).map_err(types::xlog_err)?;
 
         self.base_source = new_base;
@@ -1999,6 +2294,55 @@ use train_only(..., strict_gpu_native=True) or export an explicit compatibility 
 // ---------------------------------------------------------------------------
 
 impl CompiledIlpProgram {
+    fn collect_relation_example_groups(
+        &self,
+        relations_obj: &Bound<'_, PyAny>,
+        err_msg: &str,
+    ) -> PyResult<Vec<RelationExampleGroup>> {
+        let dict = relations_obj
+            .downcast::<PyDict>()
+            .map_err(|_| PyValueError::new_err(err_msg.to_string()))?;
+        let mut groups = Vec::with_capacity(dict.len());
+        for (name_obj, columns_obj) in dict.iter() {
+            let relation: String = name_obj.extract()?;
+            let schema = self.schemas.get(&relation).ok_or_else(|| {
+                PyValueError::new_err(format!(
+                    "Unknown relation {} (not present in compiled schemas)",
+                    relation
+                ))
+            })?;
+            let tensors = collect_dlpack_columns(
+                &columns_obj,
+                &format!("Relation {} must be a sequence of DLPack columns", relation),
+            )?;
+            let query_buf = self
+                .provider
+                .from_dlpack_tensors_with_schema(schema.clone(), tensors)
+                .map_err(types::xlog_err)?;
+            let num_rows = u32::try_from(query_buf.num_rows())
+                .map_err(|_| PyValueError::new_err("relation row count exceeds u32::MAX"))?;
+            groups.push(RelationExampleGroup {
+                relation,
+                query_buf,
+                num_rows,
+            });
+        }
+        Ok(groups)
+    }
+
+    fn apply_relation_overrides(&mut self) -> xlog_core::Result<()> {
+        let relation_names: Vec<String> = self.relation_overrides.keys().cloned().collect();
+        for name in relation_names {
+            let stored = self
+                .relation_overrides
+                .get(&name)
+                .expect("relation override disappeared during runtime reset");
+            let live = self.provider.clone_buffer(stored)?;
+            self.executor.put_relation(&name, live);
+        }
+        Ok(())
+    }
+
     fn evaluate_ilp_plan(&mut self, py: Python<'_>) -> PyResult<()> {
         let result: xlog_core::Result<xlog_cuda::CudaBuffer> = py.allow_threads(|| {
             self.executor.reset_for_mc();
@@ -2007,6 +2351,7 @@ impl CompiledIlpProgram {
                 self.executor.store_mut().put(name, empty);
             }
             load_facts_into_store(&self.ast, &self.provider, &mut self.executor, &self.schemas)?;
+            self.apply_relation_overrides()?;
             self.executor.execute_plan(&self.plan)
         });
         result.map_err(types::xlog_err)?;

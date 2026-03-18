@@ -1,10 +1,10 @@
 # Strict ILP GPU-Native Audit Evidence
 
-Updated: 2026-03-18T01:51:12Z
+Updated: 2026-03-18T13:32:00Z
 
 ## Scope
 
-This update closes the two remaining strict-path gaps called out in `docs/plans/2026-03-17-strict-gpu-native-substrate-closure.md`:
+This update originally closed the two remaining strict-path gaps called out in `docs/plans/2026-03-17-strict-gpu-native-substrate-closure.md`:
 
 1. strict sparse selected-device mask updates
 2. strict trainer/result finalization and artifact export
@@ -14,6 +14,11 @@ The final shape is:
 - strict mode returns `StrictTrainResult` / `StrictLearnedArtifact`
 - compatibility mode returns `TrainResult` / `LearnedArtifact`
 - compatibility export is one-way and explicit only
+
+This 2026-03-18 follow-up closes the remaining DTS-owned induction substrate gap too:
+
+- strict ILP no longer requires host reconstruction of committed relations or host example tuples
+- pyxlog now exposes a compiled-program strict API that trains from pre-uploaded tensor-backed relations
 
 ## Review-driven fix rounds
 
@@ -93,6 +98,58 @@ The final shape is:
 - **Fix:** compatibility-style suites now opt into `strict_gpu_native=False` when they assert host-shaped fields directly, while strict suites assert `StrictTrainResult` / `StrictLearnedArtifact` and call explicit export only when they intentionally need compatibility artifacts.
 - **Classification:** compatibility-suite migration only; no strict-path fallback or silent routing was added.
 
+## Issue 5: strict ILP still required host-shaped source/example reconstruction for induction
+
+- **Issue:** the shipped public ILP entry point still required `train_only(source: str, mask_name: str, positives, negatives, config, ...)`, so DTS had to reconstruct committed facts as host source strings and host example tuples before induction. That violated the zero-host-transfer bar for the caller path even though the strict runtime hot loop was already GPU-native.
+- **Root cause:** pyxlog had no ILP-side public substrate that could both:
+  - hold pre-uploaded tensor-backed relations across strict attempt resets
+  - consume positive/negative supervision as relation-native DLPack columns instead of host `list[tuple[str, list[int]]]`
+  In addition, schema-only ILP compiles did not allocate relation IDs for declared-but-empty predicates, so uploaded relations could not participate in candidate generation until inline facts existed.
+- **Fix:**
+  - `crates/xlog-logic/src/lower.rs:301` pre-allocates relation IDs for declared predicates during lowering, so schema-only ILP compiles keep declared relations in `ilp_relation_names()`, candidate generation, and TMJ schema size.
+  - `crates/pyxlog/src/lib.rs:477` adds persistent `relation_overrides` state to `CompiledIlpProgram`.
+  - `crates/pyxlog/src/ilp.rs:672` adds `CompiledIlpProgram.put_relation(name, dlpack_columns)` for strict-compatible, zero-host relation upload into the ILP program itself.
+  - `crates/pyxlog/src/ilp.rs:1006` adds `compute_ilp_loss_grad_gpu_relations(...)`, which consumes relation-native positive/negative example batches directly from DLPack columns and never packs host example tuples.
+  - `crates/pyxlog/src/ilp.rs:2333` reapplies uploaded relation overrides during `reset_runtime()`, strict reevaluation, and recompiled rule-commit flows, so strict multi-attempt training never loses the uploaded relation store.
+  - `crates/pyxlog/python/pyxlog/ilp/trainer.py:73` adds public `train_on_compiled_relations(...)`.
+  - `crates/pyxlog/python/pyxlog/ilp/trainer.py:550` adds the strict-only compiled-program training loop that uses `compute_ilp_loss_grad_gpu_relations(...)` instead of host example tuples.
+  - `crates/pyxlog/python/pyxlog/ilp/__init__.py:8` exports the new public API.
+- **Strict vs compatibility classification:**
+  - `train_on_compiled_relations(...)`: strict-only, relation-native public API; no compatibility fallback and no implicit compatibility export
+  - `CompiledIlpProgram.put_relation(...)`: strict-compatible public API for persistent device-backed relation upload
+  - `compute_ilp_loss_grad_gpu_relations(...)`: strict-compatible native substrate
+  - `train_only(source, positives, negatives, ...)`: existing host-shaped caller contract; still available, but not the zero-host-transfer induction API DTS should use
+
+## DTS API
+
+Strict DTS callers should use this shape:
+
+1. Compile a schema-only ILP source that declares the relations needed for candidate generation and the learnable mask.
+2. Upload committed relations directly into the compiled ILP program with `CompiledIlpProgram.put_relation(...)`.
+3. Pass positive/negative supervision as relation-native DLPack column groups to `pyxlog.ilp.train_on_compiled_relations(...)`.
+
+Example:
+
+```python
+prog = pyxlog.IlpProgramFactory.compile(schema_only_source, device=0, memory_mb=512)
+prog.put_relation("edge", [edge_left_tensor, edge_right_tensor])
+result = pyxlog.ilp.train_on_compiled_relations(
+    prog,
+    "W_reach",
+    {"reach": [pos_left_tensor, pos_right_tensor]},
+    {"reach": [neg_left_tensor, neg_right_tensor]},
+    TrainConfig(strict_gpu_native=True, ...),
+)
+```
+
+If DTS starts from a `LogicRelationSession`, the zero-host bridge is:
+
+```python
+prog.put_relation("edge", session.export_relation("edge"))
+```
+
+`LogicRelationSession.export_relation(...)` already exports DLPack device columns, so no relation contents need to cross through host lists or source reconstruction.
+
 ## Behavioral DoD status
 
 - **strict sparse selected-device mask updates perform zero host materialization**
@@ -109,36 +166,43 @@ The final shape is:
   - satisfied via `export_compat_result()` / `export_compat_artifact()`
 - **strict mode does not silently route through compatibility code**
   - satisfied for the strict result/export boundary and strict Python API surface; compatibility-only host-shaped sparse setters remain hard-gated
+- **strict ILP induction can train from pre-uploaded tensor-backed relations without source reconstruction or host example tuple materialization**
+  - satisfied via `CompiledIlpProgram.put_relation(...)` + `train_on_compiled_relations(...)`
+- **strict relation-native public API does not silently fall back to host-shaped training**
+  - satisfied; `train_on_compiled_relations(...)` is strict-only and raises if `strict_gpu_native=False`
 
 ## Verification
 
 - `maturin develop --release -m crates/pyxlog/Cargo.toml`
   - Result: succeeded, editable `pyxlog-0.4.0` installed
-- `python -m pytest python/tests/test_ilp_sparse.py python/tests/test_ilp_sparse_guard.py python/tests/test_ilp_types.py -q`
-  - Result: `33 passed in 1.83s`
-- `python -m pytest python/tests/test_ilp_d2h_gate.py -q`
-  - Result: `19 passed in 23.27s`
-- `python -m pytest python/tests/test_ilp_device_queries.py -q -x`
-  - Result: `2 passed in 0.22s`
-- `python -m pytest python/tests/test_ilp_credit_gpu.py -q -x`
-  - Result: `17 passed in 1.43s`
-- `python -m pytest python/tests/test_ilp_holdout.py -q -x`
-  - Result: `8 passed in 133.71s (0:02:13)`
-- `python -m pytest python/tests/test_ilp_promoter.py -q -x`
-  - Result: `10 passed in 54.28s`
-- `python -m pytest python/tests/test_ilp_trainer.py -q`
-  - Result: `28 passed in 97.42s (0:01:37)`
-- `python -m pytest python/tests/test_ilp_backend.py python/tests/test_ilp_artifact.py python/tests/test_ilp_reset.py python/tests/test_ilp_multistart.py python/tests/test_ilp_robustness.py -q`
-  - Result: `29 passed in 211.11s (0:03:31)`
+- `.venv/bin/python -m pytest python/tests/test_ilp_sparse.py python/tests/test_ilp_sparse_guard.py python/tests/test_ilp_types.py -q`
+  - Result: `37 passed in 1.86s`
+- `.venv/bin/python -m pytest python/tests/test_ilp_d2h_gate.py -q`
+  - Result: `20 passed in 23.74s`
+- `.venv/bin/python -m pytest python/tests/test_ilp_device_queries.py -q -x`
+  - Result: `2 passed in 0.23s`
+- `.venv/bin/python -m pytest python/tests/test_ilp_credit_gpu.py -q -x`
+  - Result: `18 passed in 1.37s`
+- `.venv/bin/python -m pytest python/tests/test_ilp_holdout.py -q -x`
+  - Result: `8 passed in 133.43s (0:02:13)`
+- `.venv/bin/python -m pytest python/tests/test_ilp_promoter.py -q -x`
+  - Result: `10 passed in 57.50s`
+- `.venv/bin/python -m pytest python/tests/test_ilp_trainer.py -q`
+  - Result: `30 passed in 94.42s (0:01:34)`
+- `.venv/bin/python -m pytest python/tests/test_ilp_backend.py python/tests/test_ilp_artifact.py python/tests/test_ilp_reset.py python/tests/test_ilp_multistart.py python/tests/test_ilp_robustness.py -q`
+  - Result: `29 passed in 208.50s (0:03:28)`
+- `.venv/bin/python -m pytest python/tests/test_logic_relation_store.py -q`
+  - Result: `4 passed in 0.18s`
+- `cargo check -p pyxlog --quiet`
+  - Result: passed
 - Rust runtime tests
   - Result: not applicable for this change set; no new Rust runtime unit tests were added
 
 ## Residual risks
 
 - No remaining hidden host-materialization escape was identified in the audited strict Python ILP training/finalization/export path.
-- Generic `SparseDevice` runtime execution is still not a genuinely sparse executor. The underlying sparsity/performance limitation remains in:
-  - `crates/xlog-runtime/src/executor/node_dispatch.rs:545`
-  - `crates/xlog-runtime/src/ilp_registry.rs:31`
-  - public generic `evaluate()` remains hard-gated at `crates/pyxlog/src/ilp.rs:1170`
-  - strict loss/grad reevaluation currently drives that executor internally from `crates/pyxlog/src/ilp.rs:750`
-- This is no longer a host-materialization blocker, but it remains the exact residual non-DTOH limitation in the current strict trainer runtime substrate.
+- No remaining DTS-owned zero-host-transfer induction blocker was identified in pyxlog after adding the compiled-program strict API.
+- The compatibility-only host-shaped APIs still exist by design:
+  - `train_only(source, positives, negatives, ...)`
+  - explicit `export_compat_result()` / `export_compat_artifact()` on strict results that were built with compatibility exporters
+  These remain non-zero-host caller contracts and are not the DTS strict path.

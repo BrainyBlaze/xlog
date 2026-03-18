@@ -15,6 +15,7 @@ skip_unless_pyxlog_cuda()
 
 from pyxlog.ilp import train_only, TrainConfig
 import pyxlog.ilp.backend as backend_mod
+from pyxlog.ilp import trainer as trainer_mod
 
 
 SOURCE = """
@@ -23,6 +24,18 @@ learnable(W) :: reach(X, Y) :- bL(X, Z), bR(Z, Y).
 """
 POS = [("reach", [1, 3]), ("reach", [2, 4])]
 NEG = [("reach", [1, 1])]
+SESSION_SOURCE = """
+pred edge(u32, u32).
+pred reach(u32, u32).
+learnable(W) :: reach(X, Y) :- bL(X, Z), bR(Z, Y).
+"""
+
+
+def _u32_columns(left: list[int], right: list[int]) -> list[torch.Tensor]:
+    return [
+        torch.tensor(left, device="cuda", dtype=torch.int32),
+        torch.tensor(right, device="cuda", dtype=torch.int32),
+    ]
 
 
 def test_sparse_backend_prefers_selected_sparse_api():
@@ -66,6 +79,57 @@ def test_sparse_backend_prefers_selected_sparse_api():
     )
     result = train_only(SOURCE, "W", POS, NEG, config)
     assert result.attempt_count >= 1
+
+
+def test_train_on_compiled_relations_wrapper_does_not_recompile_or_fallback_to_train_only():
+    train_from_compiled = getattr(trainer_mod, "train_on_compiled_relations", None)
+    assert train_from_compiled is not None, (
+        "trainer.train_on_compiled_relations must exist for relation-native strict training"
+    )
+    src = inspect.getsource(train_from_compiled)
+    assert "train_only(" not in src
+    assert "IlpProgramFactory.compile(" not in src
+
+
+def test_train_on_compiled_relations_strict_loop_applies_selected_device_mask_before_loss_grad():
+    src = inspect.getsource(trainer_mod._run_single_attempt_strict_relations)
+    assert "set_rule_mask_sparse_selected_device(" in src
+    assert "compute_ilp_loss_grad_gpu_relations(" in src
+
+
+def test_compiled_ilp_program_put_relation_persists_across_reset_runtime():
+    prog = pyxlog.IlpProgramFactory.compile(SESSION_SOURCE, device=0, memory_mb=512)
+    assert hasattr(prog, "put_relation"), (
+        "CompiledIlpProgram.put_relation must exist for relation-native strict training"
+    )
+    prog.put_relation("edge", _u32_columns([1, 2, 3], [2, 3, 4]))
+    prog.reset_runtime()
+
+    mask_dl = prog.batch_fact_membership_device("edge", [[1, 2], [2, 3], [9, 9]])
+    mask = torch.from_dlpack(mask_dl)
+    assert mask.device.type == "cuda"
+    assert mask.cpu().tolist() == [True, True, False]
+
+
+def test_train_on_compiled_relations_is_strict_only():
+    train_from_compiled = getattr(trainer_mod, "train_on_compiled_relations", None)
+    assert train_from_compiled is not None, (
+        "trainer.train_on_compiled_relations must exist for relation-native strict training"
+    )
+
+    prog = pyxlog.IlpProgramFactory.compile(SESSION_SOURCE, device=0, memory_mb=512)
+    prog.put_relation("edge", _u32_columns([1, 2, 3], [2, 3, 4]))
+    positives = {"reach": _u32_columns([1], [3])}
+    negatives = {}
+
+    with pytest.raises(Exception, match="strict_gpu_native"):
+        train_from_compiled(
+            prog,
+            "W",
+            positives,
+            negatives,
+            TrainConfig(strict_gpu_native=False),
+        )
 
 
 def test_sparse_backend_internal_strict_apply_mask_is_hard_gated():
