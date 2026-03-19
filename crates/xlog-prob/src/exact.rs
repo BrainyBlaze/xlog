@@ -11,9 +11,9 @@ use crate::compilation::gpu_cache::{
     GpuCircuitCache, GpuCircuitCacheConfig, GpuCircuitCacheHandle,
 };
 use crate::compilation::gpu_cnf::GpuCnfVarTables;
-use crate::compilation::gpu_weights::{build_evidence_by_var_gpu, build_weights_gpu};
 #[cfg(feature = "host-io")]
-use crate::compilation::gpu_weights::{map_nodes_to_vars_gpu, upload_weights_from_host};
+use crate::compilation::gpu_weights::map_nodes_to_vars_gpu;
+use crate::compilation::gpu_weights::{build_evidence_by_var_gpu, build_weights_gpu};
 use crate::compilation::{
     compile_gpu_d4_and_verify_cached, encode_cnf_gpu, CircuitCompileProfile, DeviceRandomVarList,
     GpuCompileConfig, GpuPirGraph, GpuPirRoots,
@@ -1098,120 +1098,6 @@ impl ExactDdnnfProgram {
         } else {
             (self.max_var as usize) + 1
         };
-
-        let (log_z_e, grad_true_e, grad_false_e) = self.eval_log_z_and_grads_gpu_cached(None)?;
-
-        if log_z_e.is_infinite() && log_z_e.is_sign_negative() {
-            return Err(XlogError::Execution(
-                "Exact inference error: evidence is inconsistent (P(E)=0)".to_string(),
-            ));
-        }
-
-        let mut query_grads: Vec<QueryGradients> = Vec::with_capacity(self.queries.len());
-
-        for query in &self.queries {
-            let Some(var) = query.var else {
-                query_grads.push(QueryGradients {
-                    atom: query.atom.clone(),
-                    log_prob: f64::NEG_INFINITY,
-                    prob: 0.0,
-                    grad_true: vec![0.0; weights_len],
-                    grad_false: vec![0.0; weights_len],
-                });
-                continue;
-            };
-
-            let idx = var as usize;
-            if idx >= weights_len {
-                return Err(XlogError::Compilation(format!(
-                    "Exact inference error: query var {} out of bounds (len={})",
-                    var, weights_len
-                )));
-            }
-
-            let (log_z_eq, grad_true_eq, grad_false_eq) =
-                self.eval_log_z_and_grads_gpu_cached(Some(var))?;
-
-            let log_prob = log_z_eq - log_z_e;
-            let mut prob = if log_prob.is_infinite() && log_prob.is_sign_negative() {
-                0.0
-            } else {
-                log_prob.exp()
-            };
-            if prob.is_nan() {
-                return Err(XlogError::Execution(
-                    "Exact inference error: NaN probability encountered".to_string(),
-                ));
-            }
-            if prob < 0.0 {
-                prob = 0.0;
-            } else if prob > 1.0 {
-                prob = 1.0;
-            }
-
-            if grad_true_eq.len() != grad_true_e.len() || grad_false_eq.len() != grad_false_e.len()
-            {
-                return Err(XlogError::Execution(
-                    "Exact inference error: gradient length mismatch".to_string(),
-                ));
-            }
-
-            let mut grad_true: Vec<f64> = grad_true_eq;
-            let mut grad_false: Vec<f64> = grad_false_eq;
-            for i in 0..grad_true.len() {
-                grad_true[i] -= grad_true_e[i];
-                grad_false[i] -= grad_false_e[i];
-            }
-
-            query_grads.push(QueryGradients {
-                atom: query.atom.clone(),
-                log_prob,
-                prob,
-                grad_true,
-                grad_false,
-            });
-        }
-
-        Ok(ExactResultWithGrads {
-            log_z_e,
-            query_grads,
-        })
-    }
-
-    /// Evaluate on GPU with gradients using externally provided weights.
-    ///
-    /// This enables circuit reuse: the same compiled circuit can be evaluated
-    /// with different weights (from updated neural network outputs) without
-    /// recompiling the circuit.
-    #[cfg(feature = "host-io")]
-    pub(crate) fn evaluate_gpu_with_grads_weights(
-        &self,
-        external_weights: &[(f64, f64)],
-    ) -> Result<ExactResultWithGrads> {
-        if self.gpu.is_none() {
-            return Ok(ExactResultWithGrads {
-                log_z_e: 0.0,
-                query_grads: Vec::new(),
-            });
-        }
-
-        let weights_len = external_weights.len();
-        if self.max_var != 0 && weights_len <= self.max_var as usize {
-            return Err(XlogError::Compilation(format!(
-                "Exact inference error: external weights len {} <= max_var {}",
-                weights_len, self.max_var
-            )));
-        }
-
-        let state = self.gpu_state()?;
-        let weights = upload_weights_from_host(state.provider(), external_weights)?;
-        {
-            let mut cache = state
-                .cache
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            cache.overwrite_weights(state.handle(), &weights.log_true, &weights.log_false)?;
-        }
 
         let (log_z_e, grad_true_e, grad_false_e) = self.eval_log_z_and_grads_gpu_cached(None)?;
 

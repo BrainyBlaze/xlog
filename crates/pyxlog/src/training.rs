@@ -14,6 +14,7 @@ use pyo3::prelude::*;
 /// This is the main training entry point that runs the full training loop:
 /// - For each epoch: shuffle queries (optional), process batches, record stats
 /// - Supports learning rate scheduling via scheduler_step() after each epoch
+///   once at least one optimizer step has been performed
 ///
 /// # Arguments
 /// * `program` - Compiled program with registered networks
