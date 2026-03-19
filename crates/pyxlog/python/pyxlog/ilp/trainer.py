@@ -1882,6 +1882,20 @@ def _materialize_strict_attempt_index(attempt_id_device: torch.Tensor) -> int:
     return int(attempt_values[0])
 
 
+def _strict_winner_metadata(state: _StrictAttemptState) -> tuple[int, str]:
+    winner_candidate_id = _materialize_argmax_candidate_id(state.argmax_candidate_id_device)
+    for entry in state.candidate_map:
+        if entry.id == winner_candidate_id:
+            return winner_candidate_id, _format_rule(
+                entry.left_name,
+                entry.right_name,
+                entry.head_name,
+            )
+    raise RuntimeError(
+        f"strict winner candidate id {winner_candidate_id} was not present in candidate_map"
+    )
+
+
 def _export_compat_attempt_from_strict_state(
     prog,
     state: _StrictAttemptState,
@@ -2074,6 +2088,8 @@ def _build_strict_train_result(
             single_attempt=attempt_count == 1,
         )
 
+    winner_candidate_id, discovered_rule = _strict_winner_metadata(best_state)
+
     compat_cache: dict[str, TrainResult] = {}
 
     def _export_compat_result() -> TrainResult:
@@ -2137,6 +2153,8 @@ def _build_strict_train_result(
         attempt_count=attempt_count,
         total_steps=global_steps,
         single_attempt=attempt_count == 1,
+        winner_candidate_id=winner_candidate_id,
+        discovered_rule=discovered_rule,
         artifact=strict_artifact,
         strict_gpu_native=True,
         compat_materialized=False,
@@ -2158,6 +2176,8 @@ def _build_relation_native_strict_train_result(
             single_attempt=attempt_count == 1,
         )
 
+    winner_candidate_id, discovered_rule = _strict_winner_metadata(best_state)
+
     strict_artifact = StrictLearnedArtifact(
         candidate_map=best_state.candidate_map,
         config_snapshot=config,
@@ -2173,6 +2193,8 @@ def _build_relation_native_strict_train_result(
         attempt_count=attempt_count,
         total_steps=global_steps,
         single_attempt=attempt_count == 1,
+        winner_candidate_id=winner_candidate_id,
+        discovered_rule=discovered_rule,
         artifact=strict_artifact,
         strict_gpu_native=True,
         compat_materialized=False,

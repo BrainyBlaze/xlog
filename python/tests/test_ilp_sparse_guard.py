@@ -97,6 +97,12 @@ def test_train_on_compiled_relations_strict_loop_applies_selected_device_mask_be
     assert "compute_ilp_loss_grad_gpu_relations(" in src
 
 
+def test_relation_native_strict_result_builder_has_no_compat_exporter():
+    src = inspect.getsource(trainer_mod._build_relation_native_strict_train_result)
+    assert "_compat_exporter=None" in src
+    assert "_export_compat_result" not in src
+
+
 def test_compiled_ilp_program_put_relation_persists_across_reset_runtime():
     prog = pyxlog.IlpProgramFactory.compile(SESSION_SOURCE, device=0, memory_mb=512)
     assert hasattr(prog, "put_relation"), (
