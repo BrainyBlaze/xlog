@@ -15,6 +15,12 @@ torch = pytest.importorskip("torch")
 pyxlog = pytest.importorskip("pyxlog")
 
 
+def _prime_scheduler(optimizer):
+    """Perform a real optimizer step before the first scheduler step."""
+    optimizer.zero_grad()
+    optimizer.step()
+
+
 class SimpleNet(torch.nn.Module):
     """Simple neural network for testing training loop."""
 
@@ -420,6 +426,9 @@ class TestPerNetworkScheduler:
         sched_b = torch.optim.lr_scheduler.StepLR(opt_b, step_size=1, gamma=0.5)
         program.register_network("net_b", net_b, opt_b, sched_b)
 
+        _prime_scheduler(opt_a)
+        _prime_scheduler(opt_b)
+
         # Step only net_a's scheduler
         program.scheduler_step("net_a")
 
@@ -442,6 +451,9 @@ class TestPerNetworkScheduler:
         opt_b = torch.optim.SGD(net_b.parameters(), lr=1.0)
         sched_b = torch.optim.lr_scheduler.StepLR(opt_b, step_size=1, gamma=0.5)
         program.register_network("net_b", net_b, opt_b, sched_b)
+
+        _prime_scheduler(opt_a)
+        _prime_scheduler(opt_b)
 
         # Step all (backward-compatible call)
         program.scheduler_step()

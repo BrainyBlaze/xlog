@@ -13,6 +13,12 @@ torch = pytest.importorskip("torch")
 pyxlog = pytest.importorskip("pyxlog")
 
 
+def _prime_scheduler(optimizer):
+    """Perform a real optimizer step before the first scheduler step."""
+    optimizer.zero_grad()
+    optimizer.step()
+
+
 class SimpleNet(torch.nn.Module):
     """Simple neural network for testing gradient flow."""
 
@@ -272,6 +278,8 @@ class TestSchedulerStep:
 
         # Initial LR
         assert optimizer.param_groups[0]['lr'] == 1.0
+
+        _prime_scheduler(optimizer)
 
         # Step scheduler
         program.scheduler_step()

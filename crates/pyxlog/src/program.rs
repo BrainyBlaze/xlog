@@ -778,7 +778,9 @@ impl CompiledProgram {
     ///
     /// Uses `torch.nn.utils.clip_grad_norm_`.
     pub fn clip_grad_norms(&self, py: Python<'_>, max_norm: f64) -> PyResult<()> {
-        let clip_fn = py.import("torch.nn.utils")?.getattr("clip_grad_norm_")?;
+        let clip_fn = py
+            .import_bound("torch.nn.utils")?
+            .getattr("clip_grad_norm_")?;
         for name in self.network_registry.names() {
             if let Some(handle) = self.network_registry.get(name) {
                 if let Some(ref module) = handle.module() {
@@ -791,6 +793,10 @@ impl CompiledProgram {
     }
 
     /// Step the learning rate scheduler.
+    ///
+    /// PyTorch schedulers expect at least one optimizer step before the first
+    /// scheduler step. Call this after `optimizer_step()` (or after a training
+    /// path that performs an optimizer step internally).
     ///
     /// If `network_name` is provided, steps only that network's scheduler.
     /// If `None` (default), steps all registered schedulers.
@@ -865,7 +871,7 @@ impl CompiledProgram {
         let num_groups: usize = param_groups.call_method0(py, "__len__")?.extract(py)?;
         for i in 0..num_groups {
             let group = param_groups.call_method1(py, "__getitem__", (i as i32,))?;
-            group.call_method(py, "__setitem__", ("lr", lr), None)?;
+            group.call_method_bound(py, "__setitem__", ("lr", lr), None)?;
         }
         Ok(())
     }
