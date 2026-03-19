@@ -377,6 +377,8 @@ class StrictTrainResult:
     attempt_count: int = 0
     total_steps: int = 0
     single_attempt: bool = True
+    winner_candidate_id: int | None = None
+    discovered_rule: str | None = None
     artifact: StrictLearnedArtifact = field(default_factory=StrictLearnedArtifact)
     strict_gpu_native: bool = True
     compat_materialized: bool = False

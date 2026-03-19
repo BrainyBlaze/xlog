@@ -221,7 +221,8 @@ def test_full_training_zero_d2h_gate():
     assert not hasattr(result, "precision")
     assert not hasattr(result, "recall")
     assert not hasattr(result, "rule_frequency")
-    assert not hasattr(result, "discovered_rule")
+    assert isinstance(result.winner_candidate_id, int)
+    assert isinstance(result.discovered_rule, str)
     compat_artifact = result.artifact.export_compat_artifact()
     compat = result.export_compat_result()
     assert compat.converged
@@ -280,6 +281,8 @@ def test_compiled_relation_training_zero_d2h_gate():
     assert isinstance(result.artifact, strict_artifact_type)
     assert result.strict_gpu_native is True
     assert result.compat_materialized is False
+    assert isinstance(result.winner_candidate_id, int)
+    assert isinstance(result.discovered_rule, str)
     with pytest.raises(RuntimeError, match="no compatibility exporter"):
         result.export_compat_result()
 
@@ -315,7 +318,8 @@ def test_d2h_gate_with_negatives():
     assert not hasattr(result, "converged")
     assert not hasattr(result, "precision")
     assert not hasattr(result, "recall")
-    assert not hasattr(result, "discovered_rule")
+    assert isinstance(result.winner_candidate_id, int)
+    assert isinstance(result.discovered_rule, str)
     compat_artifact = result.artifact.export_compat_artifact()
     compat = result.export_compat_result()
     assert compat.converged

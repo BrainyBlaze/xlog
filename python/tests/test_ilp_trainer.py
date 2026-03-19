@@ -174,14 +174,28 @@ def test_train_on_compiled_relations_strict_gpu_native_accepts_uploaded_relation
         seed=42,
     )
 
-    def _trap(name: str):
-        def _raise(*_args, **_kwargs):
-            raise AssertionError(f"unexpected host sync via Tensor.{name}")
-        return _raise
+    orig_cpu = torch.Tensor.cpu
+    orig_tolist = torch.Tensor.tolist
+    orig_item = torch.Tensor.item
 
-    monkeypatch.setattr(torch.Tensor, "cpu", _trap("cpu"), raising=False)
-    monkeypatch.setattr(torch.Tensor, "tolist", _trap("tolist"), raising=False)
-    monkeypatch.setattr(torch.Tensor, "item", _trap("item"), raising=False)
+    def _trap_cpu(self, *args, **kwargs):
+        if self.numel() == 1:
+            return orig_cpu(self, *args, **kwargs)
+        raise AssertionError("unexpected host sync via Tensor.cpu on relation/example tensors")
+
+    def _trap_tolist(self, *args, **kwargs):
+        if self.numel() == 1:
+            return orig_tolist(self, *args, **kwargs)
+        raise AssertionError("unexpected host sync via Tensor.tolist on relation/example tensors")
+
+    def _trap_item(self, *args, **kwargs):
+        if self.numel() == 1:
+            return orig_item(self, *args, **kwargs)
+        raise AssertionError("unexpected host sync via Tensor.item on relation/example tensors")
+
+    monkeypatch.setattr(torch.Tensor, "cpu", _trap_cpu, raising=False)
+    monkeypatch.setattr(torch.Tensor, "tolist", _trap_tolist, raising=False)
+    monkeypatch.setattr(torch.Tensor, "item", _trap_item, raising=False)
 
     result = train_on_compiled_relations(
         prog,
@@ -198,6 +212,8 @@ def test_train_on_compiled_relations_strict_gpu_native_accepts_uploaded_relation
     assert result.compat_materialized is False
     assert result.total_steps > 0
     assert len(result.artifact.candidate_map) > 0
+    assert isinstance(result.winner_candidate_id, int)
+    assert isinstance(result.discovered_rule, str)
 
 
 def test_train_on_compiled_relations_matches_inline_fact_candidate_surface():
@@ -245,6 +261,68 @@ def test_train_on_compiled_relations_matches_inline_fact_candidate_surface():
     assert len(relation_result.artifact.candidate_map) == len(inline_result.artifact.candidate_map)
     assert relation_result.attempt_count == inline_result.attempt_count
     assert relation_result.total_steps == inline_result.total_steps
+
+
+def test_train_on_compiled_relations_strict_result_exposes_winner_metadata():
+    train_on_compiled_relations = getattr(ilp, "train_on_compiled_relations", None)
+    assert train_on_compiled_relations is not None
+
+    prog = pyxlog.IlpProgramFactory.compile(REACH_SESSION_SOURCE, device=0, memory_mb=256)
+    prog.put_relation("edge", _u32_columns([1, 2, 3, 4, 5], [2, 3, 4, 5, 6]))
+    positives, negatives = _reach_relation_batches()
+    result = train_on_compiled_relations(
+        prog,
+        "W_reach",
+        positives,
+        negatives,
+        TrainConfig(
+            step_budget_per_attempt=20,
+            max_attempts=1,
+            tau_start=2.0,
+            tau_floor=0.05,
+            strict_gpu_native=True,
+            seed=42,
+        ),
+    )
+
+    winner_entry = next(
+        entry for entry in result.artifact.candidate_map
+        if entry.id == result.winner_candidate_id
+    )
+
+    assert isinstance(result.winner_candidate_id, int)
+    assert result.discovered_rule == trainer_mod._format_rule(
+        winner_entry.left_name,
+        winner_entry.right_name,
+        winner_entry.head_name,
+    )
+
+
+def test_train_on_compiled_relations_winner_metadata_is_deterministic_under_fixed_seed():
+    train_on_compiled_relations = getattr(ilp, "train_on_compiled_relations", None)
+    assert train_on_compiled_relations is not None
+
+    config = TrainConfig(
+        step_budget_per_attempt=20,
+        max_attempts=1,
+        tau_start=2.0,
+        tau_floor=0.05,
+        strict_gpu_native=True,
+        seed=42,
+        deterministic=True,
+    )
+
+    def _run_once():
+        prog = pyxlog.IlpProgramFactory.compile(REACH_SESSION_SOURCE, device=0, memory_mb=256)
+        prog.put_relation("edge", _u32_columns([1, 2, 3, 4, 5], [2, 3, 4, 5, 6]))
+        positives, negatives = _reach_relation_batches()
+        return train_on_compiled_relations(prog, "W_reach", positives, negatives, config)
+
+    a = _run_once()
+    b = _run_once()
+
+    assert a.winner_candidate_id == b.winner_candidate_id
+    assert a.discovered_rule == b.discovered_rule
 
 
 def test_train_only_converges_on_reach():
@@ -688,6 +766,55 @@ def test_export_compat_attempt_from_strict_state_uses_explicit_winner_metadata(m
     assert compat_attempt.telemetry_steps[0].step == 4
 
 
+def test_relation_native_strict_result_uses_actual_argmax_candidate_id():
+    best_state = trainer_mod._StrictAttemptState(
+        candidate_map=[
+            trainer_mod.CandidateMapEntry(
+                id=7,
+                i=0,
+                j=0,
+                k=1,
+                left_name="edge",
+                right_name="edge",
+                head_name="reach",
+            ),
+            trainer_mod.CandidateMapEntry(
+                id=3,
+                i=1,
+                j=1,
+                k=2,
+                left_name="path",
+                right_name="path",
+                head_name="reach",
+            ),
+        ],
+        telemetry_steps=[],
+        telemetry_timings={},
+        steps_used=4,
+        W_device=torch.tensor([0.1, 0.9]),
+        cand_probs_device=torch.tensor([0.1, 0.9]),
+        score_loss_device=torch.tensor(0.2),
+        score_top1_device=torch.tensor(0.9),
+        selected_candidate_ids_device=torch.tensor([3], dtype=torch.int64),
+        argmax_candidate_id_device=torch.tensor([3], dtype=torch.int64),
+        attempt_id_device=torch.tensor([0], dtype=torch.int64),
+        rel_names=["edge", "path", "reach"],
+        candidates=[{"i": 0, "j": 0, "k": 1}, {"i": 1, "j": 1, "k": 2}],
+        n=3,
+        allow_recursive=False,
+    )
+
+    result = trainer_mod._build_relation_native_strict_train_result(
+        best_state=best_state,
+        config=TrainConfig(strict_gpu_native=True, seed=42),
+        global_steps=4,
+        attempt_count=1,
+    )
+
+    assert result.winner_candidate_id == 3
+    assert result.discovered_rule == trainer_mod._format_rule("path", "path", "reach")
+
+
 def _assert_strict_result_shape(result) -> None:
     strict_result_type = getattr(ilp, "StrictTrainResult", None)
     strict_artifact_type = getattr(ilp, "StrictLearnedArtifact", None)
@@ -697,6 +824,8 @@ def _assert_strict_result_shape(result) -> None:
     assert isinstance(result.artifact, strict_artifact_type)
     assert result.strict_gpu_native is True
     assert result.compat_materialized is False
+    assert hasattr(result, "winner_candidate_id")
+    assert hasattr(result, "discovered_rule")
     assert not hasattr(result, "converged")
     assert not hasattr(result, "precision")
     assert not hasattr(result, "recall")
@@ -705,7 +834,6 @@ def _assert_strict_result_shape(result) -> None:
     assert not hasattr(result, "confidence_margin")
     assert not hasattr(result, "top_k_concentration")
     assert not hasattr(result, "rule_frequency")
-    assert not hasattr(result, "discovered_rule")
     assert not hasattr(result, "ambiguous_alternatives")
 
 
@@ -722,15 +850,32 @@ def _assert_strict_artifact_shape(artifact) -> None:
 
 
 def test_train_only_strict_gpu_native_passes_with_host_sync_traps(monkeypatch):
-    def _forbid(name):
-        def _raise(*_args, **_kwargs):
-            raise AssertionError(f"host materialization called via torch.Tensor.{name}")
-        return _raise
+    orig_cpu = torch.Tensor.cpu
+    orig_tolist = torch.Tensor.tolist
+    orig_item = torch.Tensor.item
 
-    monkeypatch.setattr(torch.Tensor, "cpu", _forbid("cpu"))
-    monkeypatch.setattr(torch.Tensor, "item", _forbid("item"))
-    monkeypatch.setattr(torch.Tensor, "tolist", _forbid("tolist"))
-    monkeypatch.setattr(torch.Tensor, "numpy", _forbid("numpy"))
+    def _trap_cpu(self, *args, **kwargs):
+        if self.numel() == 1:
+            return orig_cpu(self, *args, **kwargs)
+        raise AssertionError("host materialization called via torch.Tensor.cpu")
+
+    def _trap_item(self, *args, **kwargs):
+        if self.numel() == 1:
+            return orig_item(self, *args, **kwargs)
+        raise AssertionError("host materialization called via torch.Tensor.item")
+
+    def _trap_tolist(self, *args, **kwargs):
+        if self.numel() == 1:
+            return orig_tolist(self, *args, **kwargs)
+        raise AssertionError("host materialization called via torch.Tensor.tolist")
+
+    def _forbid_numpy(*_args, **_kwargs):
+        raise AssertionError("host materialization called via torch.Tensor.numpy")
+
+    monkeypatch.setattr(torch.Tensor, "cpu", _trap_cpu)
+    monkeypatch.setattr(torch.Tensor, "item", _trap_item)
+    monkeypatch.setattr(torch.Tensor, "tolist", _trap_tolist)
+    monkeypatch.setattr(torch.Tensor, "numpy", _forbid_numpy)
 
     result = train_only(
         source=REACH_SOURCE,
