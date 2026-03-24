@@ -763,7 +763,11 @@ impl super::CudaKernelProvider {
             shared_mem_bytes: 0,
         };
 
-        let row_cap = n as u64;
+        let output_rows = self.dtoh_scalar_untracked(&d_out_count, 0)? as u64;
+        if output_rows == 0 {
+            return self.create_empty_buffer(input.schema.clone());
+        }
+
         let mut new_columns = Vec::with_capacity(input.columns.len());
         for col_idx in 0..input.columns.len() {
             let src_col = input
@@ -776,7 +780,7 @@ impl super::CudaKernelProvider {
                 .map(|t| t.size_bytes())
                 .unwrap_or(4) as u32;
 
-            let output_bytes = (row_cap as usize) * (elem_size as usize);
+            let output_bytes = (output_rows as usize) * (elem_size as usize);
             let dst_col = self.memory.alloc::<u8>(output_bytes)?;
 
             // SAFETY: Kernel signature matches:
@@ -796,7 +800,7 @@ impl super::CudaKernelProvider {
 
         Ok(CudaBuffer::from_columns(
             new_columns,
-            row_cap,
+            output_rows,
             d_out_count,
             input.schema.clone(),
         ))

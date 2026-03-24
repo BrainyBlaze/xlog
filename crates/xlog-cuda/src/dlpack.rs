@@ -9,8 +9,9 @@ use std::sync::Arc;
 use cudarc::driver::DevicePtr;
 use xlog_core::{Result, ScalarType, Schema, XlogError};
 
-use crate::memory::{CudaBuffer, CudaColumn};
+use crate::memory::{validate_logical_row_count, CudaBuffer, CudaColumn};
 use crate::provider::CudaKernelProvider;
+use crate::CudaDevice;
 
 pub type DLDeviceType = i32;
 
@@ -280,16 +281,32 @@ unsafe fn dlpack_tensor_info(
     Ok((num_rows, scalar, ptr_with_offset as u64, len_bytes))
 }
 
+fn dlpack_logical_row_count(device: &Arc<CudaDevice>, buffer: &CudaBuffer) -> Result<usize> {
+    if let Some(cached_rows) = buffer.cached_row_count() {
+        return validate_logical_row_count(buffer.num_rows(), cached_rows as usize);
+    }
+
+    let mut host_rows = [0u32];
+    device
+        .inner()
+        .dtoh_sync_copy_into(buffer.num_rows_device(), &mut host_rows)
+        .map_err(|e| XlogError::Kernel(format!("Failed to read row count: {}", e)))?;
+    buffer.set_cached_row_count_if_unset(host_rows[0]);
+    validate_logical_row_count(buffer.num_rows(), host_rows[0] as usize)
+}
+
 /// A table-like wrapper that can export individual columns as DLPack tensors without copies.
 ///
 /// The underlying `CudaBuffer` is reference-counted so multiple DLPack exports can share it.
 pub struct DlpackTable {
     buffer: Arc<CudaBuffer>,
+    cuda_device: Arc<CudaDevice>,
     device: DLDevice,
 }
 
 impl DlpackTable {
     pub fn column(&self, col_idx: usize) -> Result<DlpackManagedTensor> {
+        let logical_rows = dlpack_logical_row_count(&self.cuda_device, &self.buffer)?;
         let dtype =
             self.buffer.schema().column_type(col_idx).ok_or_else(|| {
                 XlogError::Kernel(format!("Column index {} out of bounds", col_idx))
@@ -305,7 +322,7 @@ impl DlpackTable {
 
         let mut ctx = Box::new(DlpackCtx {
             buffer: self.buffer.clone(),
-            shape: vec![self.buffer.num_rows() as i64].into_boxed_slice(),
+            shape: vec![logical_rows as i64].into_boxed_slice(),
         });
         let shape_ptr = ctx.shape.as_mut_ptr();
 
@@ -338,6 +355,7 @@ impl CudaKernelProvider {
     pub fn to_dlpack_table(&self, buffer: CudaBuffer) -> DlpackTable {
         DlpackTable {
             buffer: Arc::new(buffer),
+            cuda_device: Arc::clone(self.device()),
             device: DLDevice {
                 device_type: K_DLCUDA,
                 device_id: self.device().ordinal() as i32,

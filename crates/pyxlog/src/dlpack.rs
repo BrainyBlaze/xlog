@@ -92,7 +92,9 @@ pub(crate) fn import_arrow_device(
         .iter()
         .map(|(n, _)| n.clone())
         .collect();
-    let num_rows = buffer.num_rows() as usize;
+    let num_rows = provider
+        .validated_logical_row_count(&buffer)
+        .map_err(types::xlog_err)?;
     let arity = buffer.arity();
 
     let table = provider.to_dlpack_table(buffer);

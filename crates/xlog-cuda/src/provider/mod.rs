@@ -13,7 +13,7 @@ use std::ffi::c_void;
 use xlog_core::{Result, Schema, XlogError};
 
 use crate::{
-    memory::{CudaColumn, TrackedCudaSlice},
+    memory::{validate_logical_row_count, CudaColumn, TrackedCudaSlice},
     CudaBuffer, CudaDevice, GpuMemoryManager,
 };
 
@@ -1125,6 +1125,15 @@ impl CudaKernelProvider {
             .map_err(|e| XlogError::Kernel(format!("Failed to read row count: {}", e)))?;
         buffer.set_cached_row_count_if_unset(host_rows[0]);
         Ok(host_rows[0] as usize)
+    }
+
+    /// Read and validate a buffer's logical row count for outward-facing APIs.
+    ///
+    /// This keeps exported/query-visible lengths tied to the device logical row
+    /// count while still rejecting impossible metadata (`logical_rows > row_cap`).
+    pub fn validated_logical_row_count(&self, buffer: &CudaBuffer) -> Result<usize> {
+        let logical_rows = self.device_row_count(buffer)?;
+        validate_logical_row_count(buffer.num_rows(), logical_rows)
     }
 
     fn clone_device_row_count(&self, buffer: &CudaBuffer) -> Result<TrackedCudaSlice<u32>> {

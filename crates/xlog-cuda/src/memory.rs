@@ -491,6 +491,20 @@ impl CudaBuffer {
     }
 }
 
+pub fn validate_logical_row_count(row_cap: u64, logical_rows: usize) -> Result<usize> {
+    let row_cap_usize = usize::try_from(row_cap).map_err(|_| {
+        XlogError::Kernel(format!("Row capacity {} exceeds usize::MAX", row_cap))
+    })?;
+    if logical_rows > row_cap_usize {
+        return Err(XlogError::Kernel(format!(
+            "Logical row count {} exceeds row capacity {}",
+            logical_rows, row_cap
+        )));
+    }
+    debug_assert!(logical_rows <= row_cap_usize);
+    Ok(logical_rows)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

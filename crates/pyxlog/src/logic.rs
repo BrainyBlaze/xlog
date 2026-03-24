@@ -296,7 +296,9 @@ fn pack_logic_result_with_provider(
     let mut queries: Vec<Py<LogicQueryResult>> = Vec::with_capacity(result.queries.len());
 
     for q in result.queries {
-        let num_rows = q.buffer.num_rows() as usize;
+        let num_rows = provider
+            .validated_logical_row_count(&q.buffer)
+            .map_err(types::xlog_err)?;
         let is_true = q.columns.is_empty() && num_rows > 0;
         let tensors = if q.columns.is_empty() {
             Vec::new()
