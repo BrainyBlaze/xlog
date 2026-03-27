@@ -23,9 +23,9 @@
 //!
 //! - [`parser`] - Pest-based parser for XLOG syntax
 //! - [`ast`] - Abstract Syntax Tree types
-//! - [`stratify`] - Stratification analysis for negation/aggregation
+//! - [`mod@stratify`] - Stratification analysis for negation/aggregation
 //! - [`lower`] - Lowering from AST to Relational IR
-//! - [`compile`] - Full compilation pipeline
+//! - [`mod@compile`] - Full compilation pipeline
 
 pub mod ast;
 pub mod compile;
