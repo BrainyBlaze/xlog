@@ -306,7 +306,7 @@ xlog/
 │   ├── xlog-cuda/       # CUDA provider, memory management, interop (Arrow IPC/C Data, DLPack)
 │   ├── xlog-stats/      # Runtime statistics (optimizer feedback + adaptive indexing)
 │   ├── xlog-prob/       # Probabilistic tier (exact inference + Monte Carlo)
-│   ├── xlog-neural/     # Neural-symbolic integration (v0.4.0-alpha)
+│   ├── xlog-neural/     # Neural-symbolic integration
 │   ├── xlog-solve/      # Solver services (SAT/MaxSAT)
 │   ├── xlog-gpu/        # High-level GPU API (Rust)
 │   ├── xlog-cli/        # CLI binary (deterministic + probabilistic execution)
@@ -314,7 +314,10 @@ xlog/
 │   └── xlog-cuda-tests/ # CUDA/PTX certification suite (not published)
 ├── kernels/             # CUDA source files (.cu) + embedded PTX (.ptx)
 ├── examples/
+│   ├── xlog/            # Deterministic Datalog examples (basics, graphs, aggregates, etc.)
+│   ├── prob/            # Probabilistic inference examples
 │   └── neural/          # Neural-symbolic training examples
+├── fuzz/                # Fuzz testing harness (cargo-fuzz)
 ```
 
 XLOG no longer vendors a CPU knowledge compiler binary (D4/Boost); the exact inference path is GPU-native.
@@ -350,18 +353,18 @@ removed `xlog-stats → xlog-cuda` (was unused), added `xlog-neural → xlog-cor
 
 | Crate | Purpose |
 |-------|---------|
-| `xlog-core` | Shared types (`ScalarType`, `Schema`, `AggOp`), traits (`KernelProvider`), errors |
-| `xlog-ir` | Relational IR nodes (`RirNode`), expressions (`Expr`), execution plans |
-| `xlog-logic` | Parser, stratification, lowering (AST → RIR), optimizer (predicate pushdown + join planning), neural predicate syntax (`nn/4`) |
-| `xlog-runtime` | `Executor`, versioned `RelationStore`, profiling, incremental maintenance, adaptive join index cache |
-| `xlog-cuda` | `CudaKernelProvider`, `GpuMemoryManager`, `CudaBuffer`/`CudaColumn`, PTX embedding, Arrow IPC/C Data + DLPack interop |
+| `xlog-core` | Shared types (`ScalarType`, `Schema`, `AggOp`), traits (`KernelProvider`), errors, `MemoryBudget`/`RuntimeConfig`, `SymbolTable` |
+| `xlog-ir` | Relational IR nodes (`RirNode`), expressions (`Expr`), execution plans (`ExecutionPlan`), IR metadata (`RirMeta`, cardinality/skew hints) |
+| `xlog-logic` | Parser, stratification, lowering (AST → RIR), optimizer (predicate pushdown + join planning), neural predicate syntax (`nn/4`), macro expansion, module system, type inference, name resolution, user-defined functions |
+| `xlog-runtime` | `Executor` (modular: `executor/{mod, delta, expression, join_cache, node_dispatch, recursive, rewrite}.rs`), versioned `RelationStore`, profiling, ILP registry, query statistics, adaptive join index cache |
+| `xlog-cuda` | `CudaKernelProvider` (modular: `provider/{relational, filter, groupby, arithmetic, io, ilp, probabilistic, transfer, kernel_loading}`), `GpuMemoryManager`, `CudaBuffer`/`CudaColumn`, device pool, multi-GPU memory, PTX embedding, Arrow IPC/C Data + DLPack interop |
 | `xlog-stats` | `StatsManager` + `StatsSnapshot` (compiler feedback + runtime tracking) |
-| `xlog-prob` | Probabilistic tier: provenance → CNF → GPU D4 → XGCF; exact inference + Monte Carlo sampling + circuit caching; includes GPU-native PIR→CNF encoder and GPU D4/CDCL compilation utilities |
-| `xlog-neural` | Neural-symbolic integration: `NetworkRegistry`, `NetworkHandle`, `TensorSourceRegistry`, `NeuralBridge` (v0.4.0-alpha) |
+| `xlog-prob` | Probabilistic tier: provenance → CNF → GPU D4 → XGCF; exact inference + Monte Carlo sampling + circuit caching; includes GPU-native PIR→CNF encoder (`compilation/{gpu_pir, gpu_cnf, gpu_d4, gpu_weights, gpu_cache, disk_cache}`), knowledge compilation (`kc/ddnnf`), Monte Carlo (`mc/{sampling, buffers, evidence, results}`), neural fast path, and WFS support |
+| `xlog-neural` | Neural-symbolic integration: `NetworkRegistry`, `NetworkHandle`, `TensorSourceRegistry`, `NeuralBridge`, `BatchCollector` |
 | `xlog-solve` | Solver services: GPU CDCL verifier (complete SAT/UNSAT, on-GPU validation) + CLS SAT/MaxSAT (heuristic) |
 | `xlog-gpu` | High-level GPU API: deterministic execution + input/output buffers for integration layers |
 | `xlog-cli` | `xlog` CLI for deterministic and probabilistic execution with Arrow IPC I/O |
-| `pyxlog` | PyO3 extension (`pyxlog` Python module) exposing DLPack-first deterministic + probabilistic evaluation + neural-symbolic training API |
+| `pyxlog` | PyO3 extension (`pyxlog` Python module) exposing DLPack-first deterministic + probabilistic evaluation, neural-symbolic training API, and ILP/dILP training API |
 | `xlog-cuda-tests` | CUDA/PTX certification suite (release gating; `publish = false`) |
 
 ---
@@ -578,7 +581,7 @@ impl Compiler {
 
 ### Executor
 
-**File**: `crates/xlog-runtime/src/executor.rs`
+**File**: `crates/xlog-runtime/src/executor/mod.rs`
 
 ```rust
 pub struct Executor {
@@ -588,6 +591,8 @@ pub struct Executor {
     name_to_rel: HashMap<String, RelId>,  // name → RelId mapping
     stats: StatsManager,                  // Runtime statistics (optimizer feedback)
     join_index_cache: JoinIndexCache,     // Cached build-side indexes (adaptive indexing)
+    config: RuntimeConfig,                // Runtime configuration (iteration limits, etc.)
+    profiler: Profiler,                   // Performance profiler for --stats output
 }
 ```
 
@@ -689,6 +694,15 @@ Note: `RirNode::Fixpoint` exists and is interpreted by `Executor::execute_fixpoi
 | `circuit.cu` | `xgcf_forward_level`, `xgcf_backward_level_*` | XGCF circuit eval + reverse-mode gradients (probabilistic) |
 | `sat.cu` | `sat_cdcl_solve`, `sat_check_model`, `sat_proof_check`, `sat_assert_*`, `sat_xgcf_cnf_*`, `sat_emit_not_phi` | GPU CDCL verifier + equivalence query construction helpers |
 | `mc_sample.cu` | `mc_sample_bernoulli` | Bernoulli sampling (Monte Carlo inference) |
+| `mc_eval.cu` | Monte Carlo evaluation kernels | MC circuit evaluation helpers |
+| `cache.cu` | Circuit cache kernels | XGCF caching support |
+| `cnf.cu` | CNF construction kernels | GPU-native CNF builder |
+| `d4.cu` | D4 compilation kernels | GPU-native Decision-DNNF compiler |
+| `pir.cu` | PIR layout kernels | Provenance IR to GPU encoding |
+| `weights.cu` | Weight injection kernels | Circuit weight management |
+| `neural.cu` | Neural predicate kernels | Leaf-weight gather for neural-symbolic training |
+| `ilp.cu` | ILP kernels | Inductive Logic Programming GPU operations |
+| `ilp_credit.cu` | ILP credit assignment kernels | Credit assignment for differentiable ILP |
 
 ### Hash Join Implementation (v2)
 
@@ -1000,7 +1014,7 @@ println!("Reachable pairs: {} rows", reach.num_rows());
 ### High-Level API (xlog-gpu)
 
 ```rust
-use pyxlog::LogicProgram;
+use xlog_gpu::logic::LogicProgram;
 
 let program = LogicProgram::compile(source)?;
 let results = program.run()?;
