@@ -64,6 +64,7 @@ impl Default for GpuCdclConfig {
     }
 }
 
+/// GPU-native CDCL SAT solver backed by CUDA kernels.
 pub struct GpuCdclSolver {
     provider: Arc<CudaKernelProvider>,
     config: GpuCdclConfig,

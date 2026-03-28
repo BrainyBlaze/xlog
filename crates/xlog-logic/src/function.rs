@@ -109,7 +109,9 @@ impl From<TypeError> for xlog_core::XlogError {
 /// Warning for potentially infinite recursion
 #[derive(Debug, Clone)]
 pub struct RecursionWarning {
+    /// Name of the function with potential infinite recursion.
     pub func_name: String,
+    /// Descriptive warning message.
     pub message: String,
 }
 
@@ -136,6 +138,7 @@ pub struct FunctionRegistry {
 }
 
 impl FunctionRegistry {
+    /// Create an empty function registry.
     pub fn new() -> Self {
         Self::default()
     }

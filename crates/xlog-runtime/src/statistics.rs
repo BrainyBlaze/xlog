@@ -46,8 +46,11 @@ impl JoinStrategy {
 /// Statistics for a specific join pair
 #[derive(Debug, Clone, Default)]
 pub struct JoinStats {
+    /// Number of times this join pair was executed.
     pub count: u64,
+    /// Cumulative selectivity across all executions.
     pub total_selectivity: f64,
+    /// Average selectivity (total_selectivity / count).
     pub avg_selectivity: f64,
 }
 
@@ -60,15 +63,18 @@ pub struct QueryStatistics {
 }
 
 impl QueryStatistics {
+    /// Create an empty statistics tracker.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Record a scan access to a relation.
     pub fn record_scan(&mut self, relation: &str) {
         *self.scan_counts.entry(relation.to_string()).or_insert(0) += 1;
         self.total_ops += 1;
     }
 
+    /// Record a join execution and its observed selectivity.
     pub fn record_join(&mut self, left: &str, right: &str, selectivity: f64) {
         let key = (left.to_string(), right.to_string());
         let stats = self.join_stats.entry(key).or_default();
@@ -78,14 +84,17 @@ impl QueryStatistics {
         self.total_ops += 1;
     }
 
+    /// Return the number of scan accesses for a relation.
     pub fn scan_count(&self, relation: &str) -> u64 {
         self.scan_counts.get(relation).copied().unwrap_or(0)
     }
 
+    /// Look up join statistics for a specific pair of relations.
     pub fn join_stats(&self, left: &str, right: &str) -> Option<&JoinStats> {
         self.join_stats.get(&(left.to_string(), right.to_string()))
     }
 
+    /// Compute the access heat for a relation (scans + 2*join accesses).
     pub fn heat(&self, relation: &str) -> u64 {
         let scan_heat = self.scan_count(relation);
         let join_heat: u64 = self
@@ -97,6 +106,7 @@ impl QueryStatistics {
         scan_heat + join_heat
     }
 
+    /// Return all relations sorted by descending heat.
     pub fn relations_by_heat(&self) -> Vec<(String, u64)> {
         let mut relations: Vec<_> = self
             .scan_counts
@@ -118,12 +128,14 @@ impl QueryStatistics {
         relations
     }
 
+    /// Clear all tracked statistics.
     pub fn clear(&mut self) {
         self.scan_counts.clear();
         self.join_stats.clear();
         self.total_ops = 0;
     }
 
+    /// Total number of recorded operations.
     pub fn total_ops(&self) -> u64 {
         self.total_ops
     }

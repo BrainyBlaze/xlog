@@ -1,4 +1,5 @@
 //! Intermediate representations for XLOG
+#![warn(missing_docs)]
 
 pub mod metadata;
 pub mod plan;

@@ -15,6 +15,7 @@ use crate::ast::{
     ProbQuery, Program, Query, Rule as AstRule, Term, UseDecl,
 };
 
+/// Pest-based parser for XLOG Datalog syntax.
 #[derive(Parser)]
 #[grammar = "grammar.pest"]
 pub struct XlogParser;

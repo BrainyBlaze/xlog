@@ -1,3 +1,6 @@
+//! Python bindings for XLOG via PyO3.
+#![allow(missing_docs)] // PyO3 #[pyclass] / #[pymethods] generate pub items without docs
+
 use std::collections::{HashMap, HashSet};
 use std::os::raw::{c_char, c_void};
 use std::sync::Arc;

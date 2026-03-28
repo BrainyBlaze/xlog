@@ -1,4 +1,5 @@
 //! Execution engine for XLOG
+#![warn(missing_docs)]
 //!
 //! This crate provides the runtime execution engine for XLOG queries,
 //! managing GPU relation storage and query execution.

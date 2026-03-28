@@ -1,4 +1,5 @@
 //! Neural network integration for XLOG probabilistic logic programs.
+#![warn(missing_docs)]
 //!
 //! This crate provides the infrastructure for integrating PyTorch neural networks
 //! with XLOG's probabilistic inference engine, following the DeepProbLog paradigm.

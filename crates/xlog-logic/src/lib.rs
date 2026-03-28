@@ -1,4 +1,5 @@
 //! Datalog frontend for XLOG
+#![warn(missing_docs)]
 //!
 //! This crate provides the parsing, analysis, and compilation pipeline
 //! for XLOG Datalog programs.

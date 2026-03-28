@@ -1,3 +1,5 @@
+//! GPU-accelerated evaluation of compiled Datalog programs.
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -6,18 +8,25 @@ use xlog_cuda::{CudaBuffer, CudaKernelProvider};
 use xlog_logic::{BodyLiteral, Compiler, Program, Query, Term};
 use xlog_runtime::{ExecutionStats, Executor, RelationStore};
 
+/// Result of evaluating a single query in a Datalog program.
 pub struct LogicQueryResult {
+    /// Internal relation name (e.g. `__xlog_query_0`).
     pub relation_name: String,
+    /// Output variable names in column order.
     pub columns: Vec<String>,
+    /// GPU-resident column buffer with the result tuples.
     pub buffer: CudaBuffer,
 }
 
+/// Result of evaluating an entire Datalog program.
 pub struct LogicEvalResult {
+    /// One result per `?-` query in the source program.
     pub queries: Vec<LogicQueryResult>,
-    /// Execution statistics (populated when profiling is enabled)
+    /// Execution statistics (populated when profiling is enabled).
     pub stats: Option<ExecutionStats>,
 }
 
+/// A compiled Datalog program ready for GPU evaluation.
 #[derive(Clone)]
 pub struct LogicProgram {
     program: Program,
@@ -27,6 +36,7 @@ pub struct LogicProgram {
 }
 
 impl LogicProgram {
+    /// Compile a Datalog source string into a GPU-executable program.
     pub fn compile(source: &str) -> Result<Self> {
         let program = xlog_logic::parse_program(source)?;
 
@@ -82,10 +92,12 @@ impl LogicProgram {
         })
     }
 
+    /// Look up the schema for a named relation.
     pub fn schema(&self, relation: &str) -> Option<&Schema> {
         self.schemas.get(relation)
     }
 
+    /// Return the full schema map (relation name to schema).
     pub fn schemas(&self) -> &HashMap<String, Schema> {
         &self.schemas
     }
@@ -182,6 +194,7 @@ impl LogicProgram {
         Ok(LogicEvalResult { queries, stats })
     }
 
+    /// Evaluate the program with the given input relations (no profiling).
     pub fn evaluate(
         &self,
         provider: Arc<CudaKernelProvider>,

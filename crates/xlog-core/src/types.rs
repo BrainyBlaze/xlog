@@ -3,14 +3,21 @@
 /// Supported scalar types in XLOG relations
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ScalarType {
+    /// Unsigned 32-bit integer.
     U32,
+    /// Unsigned 64-bit integer.
     U64,
+    /// Signed 32-bit integer.
     I32,
+    /// Signed 64-bit integer.
     I64,
+    /// 32-bit IEEE 754 floating point.
     F32,
+    /// 64-bit IEEE 754 floating point.
     F64,
+    /// Boolean (1 byte on GPU).
     Bool,
-    /// Dictionary-encoded string
+    /// Dictionary-encoded string (stored as interned `u32` ID).
     Symbol,
 }
 
@@ -159,17 +166,25 @@ impl Schema {
     }
 }
 
-/// Unique identifier for a relation
+/// Unique identifier for a relation (assigned during compilation).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct RelId(pub u32);
+pub struct RelId(
+    /// Numeric relation ID.
+    pub u32,
+);
 
 /// Aggregation operations supported
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AggOp {
+    /// Count the number of rows in each group.
     Count,
+    /// Sum of values in the aggregation column.
     Sum,
+    /// Minimum value in the aggregation column.
     Min,
+    /// Maximum value in the aggregation column.
     Max,
+    /// Log-sum-exp aggregation (numerically stable log of summed exponentials).
     LogSumExp,
 }
 

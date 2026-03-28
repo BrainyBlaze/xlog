@@ -19,24 +19,37 @@ pub struct IlpRegistry {
 
 /// A registered ILP mask — Dense (imported via DLPack) or Sparse (candidate entries only).
 pub enum IlpMask {
+    /// Dense mask with hard and soft weight buffers.
     Dense {
+        /// Hard mask (binary on/off).
         hard: CudaBuffer,
+        /// Soft mask (continuous weights).
         soft: CudaBuffer,
+        /// Number of body relations in the schema.
         schema_size: usize,
     },
+    /// Sparse mask listing active (i,j,k) entries on host.
     Sparse {
+        /// Active rule entries.
         active_entries: Vec<(u32, u32, u32)>,
+        /// Number of body relations in the schema.
         schema_size: usize,
     },
+    /// Sparse mask with device-resident active flags.
     SparseDevice {
+        /// Candidate (i,j,k) entries in evaluation order.
         candidate_order: Vec<(u32, u32, u32)>,
+        /// Device-resident boolean flags per candidate.
         active_flags: CudaBuffer,
+        /// Number of currently selected candidates.
         selected_count: usize,
+        /// Number of body relations in the schema.
         schema_size: usize,
     },
 }
 
 impl IlpMask {
+    /// Return the schema size (number of body relations).
     pub fn schema_size(&self) -> usize {
         match self {
             IlpMask::Dense { schema_size, .. } => *schema_size,
@@ -49,21 +62,27 @@ impl IlpMask {
 /// Tag metadata from TensorMaskedJoin execution.
 /// Retains per-entry projected join buffers for batch credit queries.
 pub struct IlpTaggedResult {
+    /// Per-entry metadata and result buffers.
     pub entries: Vec<IlpTagEntry>,
 }
 
 /// Metadata for a single active rule (i,j,k), its result cardinality,
 /// and the projected join result buffer (retained for batch credit queries).
 pub struct IlpTagEntry {
+    /// First body relation index.
     pub i: u32,
+    /// Second body relation index.
     pub j: u32,
+    /// Head relation index.
     pub k: u32,
+    /// Number of result rows for this entry.
     pub num_rows: u32,
     /// The projected join result buffer, retained for batch credit queries.
     pub buffer: Option<CudaBuffer>,
 }
 
 impl IlpRegistry {
+    /// Create an empty ILP registry.
     pub fn new() -> Self {
         Self {
             masks: HashMap::new(),
@@ -75,6 +94,7 @@ impl IlpRegistry {
         self.masks.clear();
     }
 
+    /// Register a dense ILP mask (hard + soft weight buffers).
     pub fn insert_mask(
         &mut self,
         name: String,
@@ -150,6 +170,7 @@ impl IlpRegistry {
         );
     }
 
+    /// Insert a device-resident sparse mask with active flags on GPU.
     pub fn insert_selected_mask_device(
         &mut self,
         name: String,
@@ -169,10 +190,12 @@ impl IlpRegistry {
         );
     }
 
+    /// Look up a registered mask by name.
     pub fn get_mask(&self, name: &str) -> Option<&IlpMask> {
         self.masks.get(name)
     }
 
+    /// Returns true if any registered mask uses the sparse-device representation.
     pub fn has_sparse_device_mask(&self) -> bool {
         self.masks
             .values()

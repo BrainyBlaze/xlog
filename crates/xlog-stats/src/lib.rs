@@ -1,4 +1,5 @@
 //! GPU-resident statistics for query optimization and solver heuristics.
+#![warn(missing_docs)]
 //!
 //! This crate provides statistics tracking for GPU-resident relations and columns
 //! that are used by the query optimizer and solver heuristics to make informed

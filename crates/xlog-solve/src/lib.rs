@@ -1,4 +1,5 @@
 //! SAT solver services for XLOG.
+#![warn(missing_docs)]
 //!
 //! This crate contains:
 //! - a CPU Continuous Local Search (CLS) solver (heuristic, not complete), and
@@ -33,7 +34,9 @@
 //! }
 //! ```
 
+#[allow(missing_docs)] // TODO(v0.6): document GPU CDCL solver methods
 mod gpu_cdcl;
+#[allow(missing_docs)] // TODO(v0.6): document or make pub(crate)
 mod gpu_cnf;
 mod instance;
 mod proof;

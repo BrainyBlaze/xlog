@@ -29,6 +29,7 @@ pub struct LoadedModule {
 }
 
 impl LoadedModule {
+    /// Create a new loaded module (exports initially empty).
     pub fn new(path: ModulePath, source_file: PathBuf, program: Program) -> Self {
         Self {
             path,
