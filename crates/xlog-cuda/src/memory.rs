@@ -83,6 +83,7 @@ impl<T: cudarc::driver::DeviceRepr> TrackedCudaSlice<T> {
             .expect("TrackedCudaSlice byte size must fit into usize");
 
         let device = manager.device.inner().clone();
+        // SAFETY: ptr was allocated by the GpuMemoryManager with len_bytes capacity; cudarc takes ownership via DeviceSlice
         let inner = unsafe { device.upgrade_device_ptr::<u8>(ptr, len_bytes) };
 
         TrackedCudaSlice {
@@ -171,8 +172,7 @@ impl GpuMemoryManager {
         }
 
         // Perform allocation
-        // SAFETY: We have reserved budget atomically and the device is valid.
-        // cudarc's alloc returns properly aligned memory for type T.
+        // SAFETY: budget reserved atomically above; cudarc's alloc returns properly aligned device memory for type T.
         let slice = unsafe {
             self.device.inner().alloc::<T>(len).map_err(|e| {
                 // Rollback the allocation tracking if CUDA allocation fails

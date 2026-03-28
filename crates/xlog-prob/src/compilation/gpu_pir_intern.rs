@@ -230,6 +230,7 @@ impl GpuPirInterner {
         let num_const = 2u32;
         let block_size = 256u32;
         let grid_const = (num_const + block_size - 1) / block_size;
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             hash_fn.clone().launch(
                 LaunchConfig {
@@ -328,6 +329,7 @@ impl GpuPirInterner {
                 .get_func(PIR_MODULE, pir_kernels::PIR_FILL_CHILD_PARENTS)
                 .ok_or_else(|| XlogError::Kernel("pir_fill_child_parents not found".to_string()))?;
             let grid_nodes = (num_nodes_u32 + block_size - 1) / block_size;
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 fill_fn.clone().launch(
                     LaunchConfig {
@@ -359,6 +361,7 @@ impl GpuPirInterner {
                 .get_func(PIR_MODULE, pir_kernels::PIR_MARK_UNIQUE_PAIRS)
                 .ok_or_else(|| XlogError::Kernel("pir_mark_unique_pairs not found".to_string()))?;
             let grid_pairs = (num_children_u32 + block_size - 1) / block_size;
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 mark_pairs.clone().launch(
                     LaunchConfig {
@@ -387,6 +390,7 @@ impl GpuPirInterner {
             let count_mask = device
                 .get_func(SCAN_MODULE, scan_kernels::COUNT_MASK)
                 .ok_or_else(|| XlogError::Kernel("count_mask not found".to_string()))?;
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 count_mask.clone().launch(
                     LaunchConfig {
@@ -403,6 +407,7 @@ impl GpuPirInterner {
             let compact_pairs = device
                 .get_func(PIR_MODULE, pir_kernels::PIR_COMPACT_PAIRS)
                 .ok_or_else(|| XlogError::Kernel("pir_compact_pairs not found".to_string()))?;
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 compact_pairs.clone().launch(
                     LaunchConfig {
@@ -430,6 +435,7 @@ impl GpuPirInterner {
             let count_children = device
                 .get_func(PIR_MODULE, pir_kernels::PIR_COUNT_CHILDREN)
                 .ok_or_else(|| XlogError::Kernel("pir_count_children not found".to_string()))?;
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 count_children.clone().launch(
                     LaunchConfig {
@@ -456,6 +462,7 @@ impl GpuPirInterner {
                     XlogError::Kernel("pir_write_child_offsets not found".to_string())
                 })?;
             let grid_nodes = (num_nodes_u32 + block_size - 1) / block_size;
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 write_offsets.clone().launch(
                     LaunchConfig {
@@ -480,6 +487,7 @@ impl GpuPirInterner {
             .get_func(PIR_MODULE, pir_kernels::PIR_HASH_KEYS)
             .ok_or_else(|| XlogError::Kernel("pir_hash_keys not found".to_string()))?;
         let grid_nodes = (num_nodes_u32 + block_size - 1) / block_size;
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             hash_fn.clone().launch(
                 LaunchConfig {
@@ -508,6 +516,7 @@ impl GpuPirInterner {
         let pack_fn = device
             .get_func(PIR_MODULE, pir_kernels::PIR_PACK_KEYS)
             .ok_or_else(|| XlogError::Kernel("pir_pack_keys not found".to_string()))?;
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             pack_fn.clone().launch(
                 LaunchConfig {
@@ -636,6 +645,7 @@ impl GpuPirInterner {
             .get_func(PIR_MODULE, pir_kernels::PIR_WRITE_CHILD_OFFSETS)
             .ok_or_else(|| XlogError::Kernel("pir_write_child_offsets not found".to_string()))?;
         let total_children_view = canon_child_offsets.slice(num_nodes..(num_nodes + 1));
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             write_offsets.clone().launch(
                 LaunchConfig {
@@ -657,6 +667,7 @@ impl GpuPirInterner {
         let gather_children = device
             .get_func(PIR_MODULE, pir_kernels::PIR_GATHER_CHILDREN)
             .ok_or_else(|| XlogError::Kernel("pir_gather_children not found".to_string()))?;
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             gather_children.clone().launch(
                 LaunchConfig {
@@ -681,6 +692,7 @@ impl GpuPirInterner {
         let hash_fn = device
             .get_func(PIR_MODULE, pir_kernels::PIR_HASH_KEYS)
             .ok_or_else(|| XlogError::Kernel("pir_hash_keys not found".to_string()))?;
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             hash_fn.clone().launch(
                 LaunchConfig {
@@ -735,6 +747,7 @@ impl GpuPirInterner {
             hash_table.bucket_mask.as_kernel_param(),
             (&mut existing_id).as_kernel_param(),
         ];
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             find_existing.clone().launch(
                 LaunchConfig {
@@ -752,6 +765,7 @@ impl GpuPirInterner {
         let mark_unique = device
             .get_func(PIR_MODULE, pir_kernels::PIR_MARK_UNIQUE)
             .ok_or_else(|| XlogError::Kernel("pir_mark_unique not found".to_string()))?;
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             mark_unique.clone().launch(
                 LaunchConfig {
@@ -779,6 +793,7 @@ impl GpuPirInterner {
         let mark_new = device
             .get_func(PIR_MODULE, pir_kernels::PIR_MARK_NEW_GROUPS)
             .ok_or_else(|| XlogError::Kernel("pir_mark_new_groups not found".to_string()))?;
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             mark_new.clone().launch(
                 LaunchConfig {
@@ -806,6 +821,7 @@ impl GpuPirInterner {
         let count_mask = device
             .get_func(SCAN_MODULE, scan_kernels::COUNT_MASK)
             .ok_or_else(|| XlogError::Kernel("count_mask not found".to_string()))?;
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             count_mask.clone().launch(
                 LaunchConfig {
@@ -822,6 +838,7 @@ impl GpuPirInterner {
         let build_group = device
             .get_func(PIR_MODULE, pir_kernels::PIR_BUILD_GROUP_IDS)
             .ok_or_else(|| XlogError::Kernel("pir_build_group_ids not found".to_string()))?;
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             build_group.clone().launch(
                 LaunchConfig {
@@ -848,6 +865,7 @@ impl GpuPirInterner {
             .ok_or_else(|| {
                 XlogError::Kernel("pir_build_graph_child_counts not found".to_string())
             })?;
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             build_counts.clone().launch(
                 LaunchConfig {
@@ -873,6 +891,7 @@ impl GpuPirInterner {
         let sum_counts = device
             .get_func(PIR_MODULE, pir_kernels::PIR_SUM_COUNTS)
             .ok_or_else(|| XlogError::Kernel("pir_sum_counts not found".to_string()))?;
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             sum_counts.clone().launch(
                 LaunchConfig {
@@ -926,6 +945,7 @@ impl GpuPirInterner {
             (&mut self.graph_hashes).as_kernel_param(),
             (&mut out_ids).as_kernel_param(),
         ];
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             emit.clone().launch(
                 LaunchConfig {
@@ -941,6 +961,7 @@ impl GpuPirInterner {
         let update_counts = device
             .get_func(PIR_MODULE, pir_kernels::PIR_UPDATE_COUNTS)
             .ok_or_else(|| XlogError::Kernel("pir_update_counts not found".to_string()))?;
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             update_counts.clone().launch(
                 LaunchConfig {

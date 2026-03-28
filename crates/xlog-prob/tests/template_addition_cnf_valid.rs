@@ -107,6 +107,7 @@ fn compute_reachable_device(
 
     let block = 256u32;
     let grid_roots = grid_dim(num_roots_u32, block);
+    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         reach_init_fn
             .clone()
@@ -132,6 +133,7 @@ fn compute_reachable_device(
     }
 
     let grid_nodes = grid_dim(num_nodes_u32, block);
+    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         reach_bfs_fn
             .clone()

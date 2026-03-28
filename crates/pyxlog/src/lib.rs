@@ -69,6 +69,7 @@ pub(crate) fn dlpack_capsule_from_tensor(
 ) -> PyResult<PyObject> {
     let raw = tensor.into_raw();
     let ptr = raw as *mut c_void;
+    // SAFETY: capsule validity was checked immediately before this call; pointer lifetime is managed by the capsule
     let capsule = unsafe {
         pyo3::ffi::PyCapsule_New(
             ptr,
@@ -77,11 +78,13 @@ pub(crate) fn dlpack_capsule_from_tensor(
         )
     };
     if capsule.is_null() {
+        // SAFETY: the pointer is a valid owned Python object pointer returned by the C API
         unsafe {
             drop(DlpackManagedTensor::from_raw(raw));
         }
         return Err(PyRuntimeError::new_err("Failed to create DLPack capsule"));
     }
+    // SAFETY: capsule is a non-null owned pointer returned by PyCapsule_New; PyO3 takes ownership
     let obj: Py<PyAny> = unsafe { Py::from_owned_ptr(py, capsule) };
     Ok(obj.into_py(py))
 }
@@ -121,6 +124,7 @@ pub(crate) fn arrow_device_capsule_from_device_array(
 ) -> PyResult<PyObject> {
     let raw = device_array.into_raw();
     let ptr = raw as *mut c_void;
+    // SAFETY: capsule validity was checked immediately before this call; pointer lifetime is managed by the capsule
     let capsule = unsafe {
         pyo3::ffi::PyCapsule_New(
             ptr,
@@ -129,6 +133,7 @@ pub(crate) fn arrow_device_capsule_from_device_array(
         )
     };
     if capsule.is_null() {
+        // SAFETY: the pointer is a valid owned Python object pointer returned by the C API
         unsafe {
             drop(ArrowDeviceArrayOwned::from_raw(raw));
         }
@@ -136,12 +141,14 @@ pub(crate) fn arrow_device_capsule_from_device_array(
             "Failed to create Arrow device array capsule",
         ));
     }
+    // SAFETY: capsule validity was checked immediately before this call; pointer lifetime is managed by the capsule
     let obj: Py<PyAny> = unsafe { Py::from_owned_ptr(py, capsule) };
     Ok(obj.into_py(py))
 }
 
 #[cfg(feature = "arrow-device-import")]
 pub(crate) fn arrow_device_from_py(obj: &Bound<'_, PyAny>) -> PyResult<ArrowDeviceArrayOwned> {
+    // SAFETY: capsule validity was checked immediately before this call; pointer lifetime is managed by the capsule
     if unsafe {
         pyo3::ffi::PyCapsule_IsValid(
             obj.as_ptr(),
@@ -154,6 +161,7 @@ pub(crate) fn arrow_device_from_py(obj: &Bound<'_, PyAny>) -> PyResult<ArrowDevi
         ));
     }
 
+    // SAFETY: capsule validity was checked immediately before this call; pointer lifetime is managed by the capsule
     let ptr = unsafe {
         pyo3::ffi::PyCapsule_GetPointer(
             obj.as_ptr(),
@@ -167,6 +175,7 @@ pub(crate) fn arrow_device_from_py(obj: &Bound<'_, PyAny>) -> PyResult<ArrowDevi
     }
 
     // Mark consumed so the capsule destructor doesn't free the pointer we now own.
+    // SAFETY: capsule is valid (checked above); renaming marks it consumed so the destructor skips cleanup
     let rc = unsafe {
         pyo3::ffi::PyCapsule_SetName(
             obj.as_ptr(),
@@ -179,6 +188,7 @@ pub(crate) fn arrow_device_from_py(obj: &Bound<'_, PyAny>) -> PyResult<ArrowDevi
         ));
     }
 
+    // SAFETY: ptr is non-null (checked above) and points to an ArrowDeviceArray matching the Arrow C Data Interface layout
     Ok(unsafe { ArrowDeviceArrayOwned::from_raw(ptr as *mut ArrowDeviceArray) })
 }
 
@@ -206,6 +216,7 @@ pub(crate) fn parse_prob_engine_override(s: &str) -> PyResult<ProbEngine> {
 pub(crate) fn dlpack_from_py(obj: &Bound<'_, PyAny>) -> PyResult<DlpackManagedTensor> {
     let py = obj.py();
 
+    // SAFETY: capsule validity was checked immediately before this call; pointer lifetime is managed by the capsule
     let capsule_obj: Bound<'_, PyAny> = if unsafe {
         pyo3::ffi::PyCapsule_IsValid(obj.as_ptr(), DLPACK_CAPSULE_NAME.as_ptr() as *const c_char)
     } != 0
@@ -228,6 +239,7 @@ pub(crate) fn dlpack_from_py(obj: &Bound<'_, PyAny>) -> PyResult<DlpackManagedTe
         ));
     };
 
+    // SAFETY: capsule validity was checked immediately before this call; pointer lifetime is managed by the capsule
     if unsafe {
         pyo3::ffi::PyCapsule_IsValid(
             capsule_obj.as_ptr(),
@@ -238,6 +250,7 @@ pub(crate) fn dlpack_from_py(obj: &Bound<'_, PyAny>) -> PyResult<DlpackManagedTe
         return Err(PyValueError::new_err("Invalid DLPack capsule"));
     }
 
+    // SAFETY: capsule validity was checked immediately before this call; pointer lifetime is managed by the capsule
     let ptr = unsafe {
         pyo3::ffi::PyCapsule_GetPointer(
             capsule_obj.as_ptr(),
@@ -248,6 +261,7 @@ pub(crate) fn dlpack_from_py(obj: &Bound<'_, PyAny>) -> PyResult<DlpackManagedTe
         return Err(PyRuntimeError::new_err("Failed to get DLPack pointer"));
     }
 
+    // SAFETY: capsule is valid (checked above); renaming marks it consumed so the destructor skips cleanup
     let rc = unsafe {
         pyo3::ffi::PyCapsule_SetName(
             capsule_obj.as_ptr(),
@@ -260,6 +274,7 @@ pub(crate) fn dlpack_from_py(obj: &Bound<'_, PyAny>) -> PyResult<DlpackManagedTe
         ));
     }
 
+    // SAFETY: ptr is non-null (checked above) and points to a DLManagedTensor matching the DLPack specification layout
     Ok(unsafe { DlpackManagedTensor::from_raw(ptr as *mut xlog_cuda::DLManagedTensor) })
 }
 

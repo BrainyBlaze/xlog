@@ -113,6 +113,7 @@ fn test_roundtrip_import_u32_column_from_dlpack_zero_copy() {
     assert_eq!(imported.num_rows(), ids.len() as u64);
 
     // The imported column should point to the same device pointer as the DLPack tensor.
+    // SAFETY: memory layout is guaranteed by the DLPack specification; pointer is valid for the tensor lifetime
     let dl_data_ptr = unsafe {
         let managed = &*raw_ptr;
         let base = managed.dl_tensor.data as usize;
@@ -139,6 +140,7 @@ fn test_export_dlpack_shape_uses_logical_device_row_count() {
     let table = provider.to_dlpack_table(buffer);
     let tensor = table.column(0).unwrap();
 
+    // SAFETY: tensor.as_ptr() is non-null; dl_tensor.shape points to valid C array per DLPack specification
     let shape0 = unsafe { *(*tensor.as_ptr()).dl_tensor.shape };
     assert_eq!(shape0, 2);
 }

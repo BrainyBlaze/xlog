@@ -296,6 +296,7 @@ impl GpuXgcf {
                 .get_func(FILTER_MODULE, filter_kernels::FILL_U32_CONST)
                 .ok_or_else(|| XlogError::Kernel("fill_u32_const kernel not found".to_string()))?;
             let grid = (map_len_u32 + block_size - 1) / block_size;
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 fill_const.clone().launch(
                     LaunchConfig {
@@ -315,6 +316,7 @@ impl GpuXgcf {
                     XlogError::Kernel("random_var_to_bit_from_list kernel not found".to_string())
                 })?;
             let grid = (num_random_vars + block_size - 1) / block_size;
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 map_kernel.clone().launch(
                     LaunchConfig {
@@ -375,6 +377,7 @@ impl GpuXgcf {
                 words_per_support.as_kernel_param(),
                 (&mut support).as_kernel_param(),
             ];
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe { support_kernel.clone().launch(config, &mut params) }
                 .map_err(|e| XlogError::Kernel(format!("d4_support_level failed: {}", e)))?;
         }
@@ -387,6 +390,7 @@ impl GpuXgcf {
                 })?;
             let num_words = (num_random_vars + 31) / 32;
             let grid = (num_words + block_size - 1) / block_size;
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 root_kernel.clone().launch(
                     LaunchConfig {
@@ -447,6 +451,7 @@ impl GpuXgcf {
             base_node.as_kernel_param(),
             smooth_node_cap.as_kernel_param(),
         ];
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             count_kernel.clone().launch(
                 LaunchConfig {
@@ -472,6 +477,7 @@ impl GpuXgcf {
             .ok_or_else(|| {
                 XlogError::Kernel("d4_smooth_wrapper_counts kernel not found".to_string())
             })?;
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             counts_kernel.clone().launch(
                 LaunchConfig {
@@ -502,6 +508,7 @@ impl GpuXgcf {
             })?;
         if num_edges > 0 {
             let num_blocks = (num_edges + block_size - 1) / block_size;
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 wrap_or_kernel.clone().launch(
                     LaunchConfig {
@@ -532,6 +539,7 @@ impl GpuXgcf {
             })?;
         if dec_entries > 0 {
             let num_blocks = (dec_entries_u32 + block_size - 1) / block_size;
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 wrap_dec_kernel.clone().launch(
                     LaunchConfig {
@@ -586,6 +594,7 @@ impl GpuXgcf {
         device
             .memset_zeros(&mut meta_num_edges)
             .map_err(|e| XlogError::Kernel(format!("Failed to zero smooth num_edges: {}", e)))?;
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             edge_cap_check.clone().launch(
                 LaunchConfig {
@@ -643,6 +652,7 @@ impl GpuXgcf {
                 XlogError::Kernel("d4_smooth_init_nodes kernel not found".to_string())
             })?;
         let init_blocks = ((num_random_vars.max(1)) + block_size - 1) / block_size;
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             init_kernel.clone().launch(
                 LaunchConfig {
@@ -713,6 +723,7 @@ impl GpuXgcf {
                 (&mut out_decision_child_true).as_kernel_param(),
                 (&mut out_node_level).as_kernel_param(),
             ];
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 emit_kernel.clone().launch(
                     LaunchConfig {
@@ -753,6 +764,7 @@ impl GpuXgcf {
             .get_func(D4_MODULE, d4_kernels::D4_LEVELIZE_COUNTS)
             .ok_or_else(|| XlogError::Kernel("d4_levelize_counts kernel not found".to_string()))?;
         let num_blocks = (smooth_node_cap + block_size - 1) / block_size;
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             levelize_counts.clone().launch(
                 LaunchConfig {
@@ -785,6 +797,7 @@ impl GpuXgcf {
         let levelize_emit = device
             .get_func(D4_MODULE, d4_kernels::D4_LEVELIZE_EMIT)
             .ok_or_else(|| XlogError::Kernel("d4_levelize_emit kernel not found".to_string()))?;
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             levelize_emit.clone().launch(
                 LaunchConfig {
@@ -1295,6 +1308,7 @@ impl GpuXgcf {
                 .ok_or_else(|| {
                     XlogError::Kernel("xgcf_free_var_apply_grad kernel not found".to_string())
                 })?;
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 apply_grad.clone().launch(
                     LaunchConfig {
@@ -1344,6 +1358,7 @@ impl GpuXgcf {
                     };
                 let mode = if stage0 { 0u32 } else { 1u32 };
 
+                // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
                 unsafe {
                     reduce_stage.clone().launch(
                         LaunchConfig {
@@ -1368,6 +1383,7 @@ impl GpuXgcf {
 
                 if out_len == 1 {
                     let result_buf = if output_is_a { &buf_a } else { &buf_b };
+                    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
                     unsafe {
                         add_scalar.clone().launch(
                             LaunchConfig {
@@ -1463,6 +1479,7 @@ impl GpuXgcf {
             .ok_or_else(|| {
                 XlogError::Kernel("arith_fill_const_f64 kernel not found".to_string())
             })?;
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             fill_const.clone().launch(
                 LaunchConfig {
@@ -1534,6 +1551,7 @@ impl GpuXgcf {
                 (&mut self.adj).as_kernel_param(),
             ];
 
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe { propagate.clone().launch(config, &mut params) }.map_err(|e| {
                 XlogError::Kernel(format!("xgcf_backward_level_propagate failed: {}", e))
             })?;
@@ -1554,10 +1572,12 @@ impl GpuXgcf {
                 (&mut self.grad_false).as_kernel_param(),
             ];
 
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe { decision_grad.clone().launch(config, &mut params) }.map_err(|e| {
                 XlogError::Kernel(format!("xgcf_backward_level_decision_grad failed: {}", e))
             })?;
 
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 lit_grad.clone().launch(
                     config,

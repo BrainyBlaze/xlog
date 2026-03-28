@@ -209,6 +209,7 @@ impl Executor {
             .ok_or_else(|| XlogError::Execution("filter compare kernel not found".into()))?;
         let config = LaunchConfig::for_num_elems(num_rows);
 
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             func.clone().launch(
                 config,
@@ -239,6 +240,7 @@ impl Executor {
             .ok_or_else(|| XlogError::Execution("mask_and kernel not found".into()))?;
         let config = LaunchConfig::for_num_elems(n);
 
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe { func.clone().launch(config, (left, right, &mut out, n)) }
             .map_err(|e| XlogError::execution_ctx("mask_and", "launch kernel", &e))?;
 
@@ -264,6 +266,7 @@ impl Executor {
             .ok_or_else(|| XlogError::Execution("mask_or kernel not found".into()))?;
         let config = LaunchConfig::for_num_elems(n);
 
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe { func.clone().launch(config, (left, right, &mut out, n)) }
             .map_err(|e| XlogError::execution_ctx("mask_or", "launch kernel", &e))?;
 
@@ -284,6 +287,7 @@ impl Executor {
             .ok_or_else(|| XlogError::Execution("mask_not kernel not found".into()))?;
         let config = LaunchConfig::for_num_elems(n);
 
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe { func.clone().launch(config, (input, &mut out, n)) }
             .map_err(|e| XlogError::execution_ctx("mask_not", "launch kernel", &e))?;
 
@@ -313,6 +317,7 @@ impl Executor {
             .ok_or_else(|| XlogError::Execution("arith fill kernel not found".into()))?;
         let config = LaunchConfig::for_num_elems(n);
 
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe { func.clone().launch(config, (value, n, &mut out)) }
             .map_err(|e| XlogError::execution_ctx("mask_filled", "mask fill", &e))?;
 

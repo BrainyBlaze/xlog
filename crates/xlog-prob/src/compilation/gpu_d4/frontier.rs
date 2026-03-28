@@ -217,6 +217,7 @@ pub(crate) fn build_frontier_bitset(
             (&mut counts).as_kernel_param(),
             (&mut pick_var).as_kernel_param(),
         ];
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             prep.clone().launch(
                 LaunchConfig {
@@ -251,6 +252,7 @@ pub(crate) fn build_frontier_bitset(
             (&mut next_false).as_kernel_param(),
             max_frontier_items_u32.as_kernel_param(),
         ];
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             expand.clone().launch(
                 LaunchConfig {
@@ -388,6 +390,7 @@ pub(crate) fn build_frontier_dense(
             (&mut counts).as_kernel_param(),
             (&mut pick_var).as_kernel_param(),
         ];
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             prep.clone().launch(
                 LaunchConfig {
@@ -419,6 +422,7 @@ pub(crate) fn build_frontier_dense(
             (&mut next_assign).as_kernel_param(),
             max_frontier_items_u32.as_kernel_param(),
         ];
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             expand.clone().launch(
                 LaunchConfig {
@@ -566,6 +570,7 @@ mod tests {
             (&mut counts).as_kernel_param(),
             (&mut pick_var).as_kernel_param(),
         ];
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             prep.clone()
                 .launch(
@@ -587,6 +592,7 @@ mod tests {
         let scan = device
             .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE2)
             .expect("multiblock_scan_phase2 must exist");
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             scan.clone()
                 .launch(
@@ -620,6 +626,7 @@ mod tests {
             (&mut next_false).as_kernel_param(),
             max_frontier_items_u32.as_kernel_param(),
         ];
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             expand
                 .clone()
@@ -638,6 +645,7 @@ mod tests {
         let assert_u32 = device
             .get_func(D4_MODULE, "d4_assert_u32_eq")
             .expect("d4_assert_u32_eq must exist");
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             assert_u32
                 .clone()
@@ -655,6 +663,7 @@ mod tests {
         let assert_var = device
             .get_func(D4_MODULE, "d4_assert_bitset_var")
             .expect("d4_assert_bitset_var must exist");
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             assert_var
                 .clone()
@@ -762,6 +771,7 @@ mod tests {
             (&mut counts).as_kernel_param(),
             (&mut pick_var).as_kernel_param(),
         ];
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             prep.clone()
                 .launch(
@@ -782,6 +792,7 @@ mod tests {
         let scan = device
             .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE2)
             .expect("multiblock_scan_phase2 must exist");
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             scan.clone()
                 .launch(
@@ -815,6 +826,7 @@ mod tests {
             (&mut next_false).as_kernel_param(),
             max_frontier_items_u32.as_kernel_param(),
         ];
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             expand
                 .clone()
@@ -832,6 +844,7 @@ mod tests {
         let assert_u32 = device
             .get_func(D4_MODULE, "d4_assert_u32_eq")
             .expect("d4_assert_u32_eq must exist");
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             assert_u32
                 .clone()
@@ -850,6 +863,7 @@ mod tests {
         let assert_var = device
             .get_func(D4_MODULE, "d4_assert_bitset_var")
             .expect("d4_assert_bitset_var must exist");
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             assert_var
                 .clone()
@@ -863,6 +877,7 @@ mod tests {
                 )
                 .unwrap();
         }
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             assert_var
                 .clone()
@@ -915,6 +930,7 @@ mod tests {
         let assert_u32 = device
             .get_func(D4_MODULE, "d4_assert_u32_eq")
             .expect("d4_assert_u32_eq must exist");
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             assert_u32
                 .clone()
@@ -935,6 +951,7 @@ mod tests {
 
         // Work item ordering is deterministic: children emitted in parent order, false then true.
         // Work 0: x1=false, x2=true (unit), x3=false.
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             assert_dense
                 .clone()
@@ -954,6 +971,7 @@ mod tests {
                 )
                 .unwrap();
         }
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             assert_dense
                 .clone()
@@ -973,6 +991,7 @@ mod tests {
                 )
                 .unwrap();
         }
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             assert_dense
                 .clone()
@@ -994,6 +1013,7 @@ mod tests {
         }
 
         // Work 1: x1=false, x2=true, x3=true.
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             assert_dense
                 .clone()
@@ -1013,6 +1033,7 @@ mod tests {
                 )
                 .unwrap();
         }
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             assert_dense
                 .clone()
@@ -1032,6 +1053,7 @@ mod tests {
                 )
                 .unwrap();
         }
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             assert_dense
                 .clone()
@@ -1053,6 +1075,7 @@ mod tests {
         }
 
         // Work 2: x1=true, x2=unassigned, x3=false.
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             assert_dense
                 .clone()
@@ -1072,6 +1095,7 @@ mod tests {
                 )
                 .unwrap();
         }
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             assert_dense
                 .clone()
@@ -1091,6 +1115,7 @@ mod tests {
                 )
                 .unwrap();
         }
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             assert_dense
                 .clone()
@@ -1112,6 +1137,7 @@ mod tests {
         }
 
         // Work 3: x1=true, x2=unassigned, x3=true.
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             assert_dense
                 .clone()
@@ -1131,6 +1157,7 @@ mod tests {
                 )
                 .unwrap();
         }
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             assert_dense
                 .clone()
@@ -1150,6 +1177,7 @@ mod tests {
                 )
                 .unwrap();
         }
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             assert_dense
                 .clone()
@@ -1209,6 +1237,7 @@ mod tests {
         let assert_u32 = device
             .get_func(D4_MODULE, "d4_assert_u32_eq")
             .expect("d4_assert_u32_eq must exist");
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             assert_u32
                 .clone()
@@ -1229,6 +1258,7 @@ mod tests {
             .expect("d4_assert_bitset_var must exist");
 
         // Work 0: x1=false, x2=true (unit), x3=false.
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             assert_var
                 .clone()
@@ -1249,6 +1279,7 @@ mod tests {
                 )
                 .unwrap();
         }
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             assert_var
                 .clone()
@@ -1269,6 +1300,7 @@ mod tests {
                 )
                 .unwrap();
         }
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             assert_var
                 .clone()
@@ -1291,6 +1323,7 @@ mod tests {
         }
 
         // Work 1: x1=false, x2=true, x3=true.
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             assert_var
                 .clone()
@@ -1311,6 +1344,7 @@ mod tests {
                 )
                 .unwrap();
         }
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             assert_var
                 .clone()
@@ -1331,6 +1365,7 @@ mod tests {
                 )
                 .unwrap();
         }
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             assert_var
                 .clone()
@@ -1353,6 +1388,7 @@ mod tests {
         }
 
         // Work 2: x1=true, x2=unassigned, x3=false.
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             assert_var
                 .clone()
@@ -1373,6 +1409,7 @@ mod tests {
                 )
                 .unwrap();
         }
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             assert_var
                 .clone()
@@ -1393,6 +1430,7 @@ mod tests {
                 )
                 .unwrap();
         }
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             assert_var
                 .clone()
@@ -1415,6 +1453,7 @@ mod tests {
         }
 
         // Work 3: x1=true, x2=unassigned, x3=true.
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             assert_var
                 .clone()
@@ -1435,6 +1474,7 @@ mod tests {
                 )
                 .unwrap();
         }
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             assert_var
                 .clone()
@@ -1455,6 +1495,7 @@ mod tests {
                 )
                 .unwrap();
         }
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             assert_var
                 .clone()

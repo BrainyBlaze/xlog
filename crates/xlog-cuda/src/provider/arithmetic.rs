@@ -60,6 +60,7 @@ impl super::CudaKernelProvider {
                     .get_func(ARITH_MODULE, $kernel)
                     .ok_or_else(|| XlogError::Kernel("arith fill kernel not found".to_string()))?;
                 let config = LaunchConfig::for_num_elems(n);
+                // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
                 unsafe { func.clone().launch(config, ($value, n, &mut dst_col)) }
                     .map_err(|e| XlogError::Kernel(format!("fill const failed: {}", e)))?;
             }};
@@ -147,6 +148,7 @@ impl super::CudaKernelProvider {
                     .get_func(ARITH_MODULE, $kernel)
                     .ok_or_else(|| XlogError::Kernel("arith fill kernel not found".to_string()))?;
                 let config = LaunchConfig::for_num_elems(n);
+                // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
                 unsafe { func.clone().launch(config, ($value, n, &mut dst_col)) }
                     .map_err(|e| XlogError::Kernel(format!("fill const failed: {}", e)))?;
             }};
@@ -478,6 +480,7 @@ impl super::CudaKernelProvider {
                     .inner()
                     .get_func(ARITH_MODULE, arith_kernels::ARITH_ABS_I64)
                     .ok_or_else(|| XlogError::Kernel("arith_abs_i64 not found".into()))?;
+                // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
                 unsafe { func.clone().launch(config, (col, n, &mut out)) }
                     .map_err(|e| XlogError::Kernel(format!("abs_i64 failed: {}", e)))?;
                 self.device.synchronize()?;
@@ -506,6 +509,7 @@ impl super::CudaKernelProvider {
                     .inner()
                     .get_func(ARITH_MODULE, arith_kernels::ARITH_ABS_I32)
                     .ok_or_else(|| XlogError::Kernel("arith_abs_i32 not found".into()))?;
+                // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
                 unsafe { func.clone().launch(config, (col, n, &mut out)) }
                     .map_err(|e| XlogError::Kernel(format!("abs_i32 failed: {}", e)))?;
                 self.device.synchronize()?;
@@ -534,6 +538,7 @@ impl super::CudaKernelProvider {
                     .inner()
                     .get_func(ARITH_MODULE, arith_kernels::ARITH_ABS_F64)
                     .ok_or_else(|| XlogError::Kernel("arith_abs_f64 not found".into()))?;
+                // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
                 unsafe { func.clone().launch(config, (col, n, &mut out)) }
                     .map_err(|e| XlogError::Kernel(format!("abs_f64 failed: {}", e)))?;
                 self.device.synchronize()?;
@@ -562,6 +567,7 @@ impl super::CudaKernelProvider {
                     .inner()
                     .get_func(ARITH_MODULE, arith_kernels::ARITH_ABS_F32)
                     .ok_or_else(|| XlogError::Kernel("arith_abs_f32 not found".into()))?;
+                // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
                 unsafe { func.clone().launch(config, (col, n, &mut out)) }
                     .map_err(|e| XlogError::Kernel(format!("abs_f32 failed: {}", e)))?;
                 self.device.synchronize()?;
@@ -747,6 +753,7 @@ impl super::CudaKernelProvider {
             .ok_or_else(|| XlogError::Kernel("arith_pow_f64 not found".into()))?;
         let config = LaunchConfig::for_num_elems(n);
 
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             func.clone()
                 .launch(config, (base_col, exp_col, n, &mut out))
@@ -852,6 +859,7 @@ impl super::CudaKernelProvider {
             .ok_or_else(|| XlogError::Kernel(format!("{} not found", kernel_name)))?;
         let config = LaunchConfig::for_num_elems(n);
 
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             func.clone()
                 .launch(config, (mask_col, then_col, else_col, n, &mut out))
@@ -945,6 +953,7 @@ impl super::CudaKernelProvider {
             .ok_or_else(|| XlogError::Kernel("arith_cast not found".into()))?;
         let config = LaunchConfig::for_num_elems(n);
 
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             func.clone().launch(
                 config,
@@ -1023,6 +1032,7 @@ impl super::CudaKernelProvider {
             .ok_or_else(|| XlogError::Kernel("arith kernel not found".into()))?;
         let config = LaunchConfig::for_num_elems(n);
 
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe { func.clone().launch(config, (col_a, col_b, n, op, &mut out)) }
             .map_err(|e| XlogError::Kernel(format!("arith binary failed: {}", e)))?;
 

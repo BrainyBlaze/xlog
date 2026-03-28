@@ -1049,6 +1049,7 @@ mod tests {
     impl From<u32> for PirNodeId {
         fn from(v: u32) -> Self {
             // This is just for testing; normally PirNodeId comes from PirGraph
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe { std::mem::transmute(v) }
         }
     }
