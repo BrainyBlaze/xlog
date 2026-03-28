@@ -24,7 +24,6 @@ python-tests = ["python"]
 [dependencies]
 xlog-core = { path = "../xlog-core" }
 thiserror = { workspace = true }
-lru = "0.16"
 # PyO3 is optional - only needed when integrating with Python
 pyo3 = { workspace = true, optional = true }
 

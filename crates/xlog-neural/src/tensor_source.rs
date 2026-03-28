@@ -104,13 +104,12 @@ impl TensorMetadata {
     }
 }
 
-/// Internal storage for a tensor source.
-#[allow(dead_code)] // metadata field used only with python feature
+/// Internal storage for a tensor source (used only with python feature).
+#[cfg(feature = "python")]
 struct TensorSource {
     /// Metadata about the tensor
     metadata: TensorMetadata,
-    /// The actual PyTorch tensor (when python feature enabled)
-    #[cfg(feature = "python")]
+    /// The actual PyTorch tensor
     tensor: PyObject,
 }
 

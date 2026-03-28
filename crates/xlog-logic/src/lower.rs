@@ -2212,7 +2212,6 @@ fn term_to_project_const_expr(term: &Term) -> Result<(Expr, ScalarType)> {
 }
 
 /// Convert AST AggOp to core AggOp
-#[allow(dead_code)]
 fn convert_agg_op(op: &AggOp) -> CoreAggOp {
     match op {
         AggOp::Count => CoreAggOp::Count,

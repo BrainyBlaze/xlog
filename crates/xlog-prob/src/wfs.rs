@@ -196,8 +196,8 @@ impl WfsRule {
 
     /// Check if rule body is definitely unsatisfiable.
     ///
-    /// This can be used for early pruning in more advanced WFS implementations.
-    #[allow(dead_code)]
+    /// Reserved API: used for early pruning in more advanced WFS implementations.
+    #[allow(dead_code)] // reserved public API for future WFS optimization
     pub fn is_definitely_unsatisfiable(
         &self,
         true_set: &HashSet<WfsAtom>,
