@@ -1,14 +1,12 @@
 # XLOG Development Roadmap
 
-> **Last Updated:** March 8, 2026
+> **Last Updated:** March 28, 2026
 > **Current Version:** v0.5.0
-> **Current Milestone:** v0.5.0 Phase 2 complete (P2a term embeddings, P2b training controls, P3 incremental verifier)
-> **Status:** `main` has P0 zero-D2H chunk merge (two-pass GPU-only), P1 artifact schema migration
-> (beta-v2) + telemetry persistence, P2a term embeddings (`register_embedding`, `forward_embedding`,
-> cross-registration validation, CUDA device-aware lookup), P2b extended training controls (gradient
-> clipping, early stopping, per-network scheduler_step, get/set_lr), P3 incremental verifier
-> (`GpuCdclWorkspace` arena reuse). All 5 release gates pass. Prior: GPU-resident ILP credit/loss,
-> strict zero-D2H CI gate, 4 CUDA kernels, neural-symbolic training, dILP GA trainer, sparse executor.
+> **Current Milestone:** v0.5.0 released; post-release audit and hardening
+> **Status:** v0.5.0 shipped with P0 zero-D2H chunk merge, P1 artifact schema migration (beta-v2)
+> + telemetry persistence, P2a term embeddings, P2b extended training controls, P3 incremental
+> verifier. Post-release: provenance primitives, MC runtime optimization, evidence clamping,
+> 5-wave codebase refactoring, Python type stubs, SAFETY audit, API visibility tightening.
 
 ---
 
@@ -639,10 +637,13 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 - [x] `IlpProgramFactory.compile()` — compile learnable programs for ILP
 - [x] `valid_candidates()` — enumerate candidate rules (recursive/non-recursive)
 
+### Implemented ✅ (v0.5.0 — pre-release audit)
+
+- [x] Python type stubs (`.pyi`) and `py.typed` marker for IDE support
+
 ### Planned 📋
 
 - [ ] PyPI package distribution
-- [ ] Type stubs for IDE support
 - [ ] Async evaluation API
 - [ ] Memory limit configuration per-call
 - [ ] Streaming results for large outputs
@@ -760,7 +761,7 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 | v0.4.0-alpha | Implemented | Neural predicates (`nn/4`) + training milestone (release-gated on full example validation with real datasets) |
 | v0.4.0-beta | Achieved | dILP beta trainer, GA-hardened promotion, sparse executor (DLPack-native, no N^3 materialization), deterministic training, artifact persistence. Beta gate = 20/20 reliability. 50-seed GA gate = 200/200 (436s, `max_attempts=2`). |
 | v0.4.0-ga | **Achieved** | Typed batch upload fix (schema-aware I32/I64/U64/Bool/Symbol packing), SLO scaling harness, per-step phase timing, GA preflight all-pass. |
-| v0.5.0 | **Released** | GPU-resident loss/credit path (zero D2H, 4 CUDA kernels), two-pass GPU-only chunk merge, P2a term embeddings (`register_embedding`, `forward_embedding`, CUDA device-aware autograd, cross-registration validation, frozen tensor detach), P2b extended training controls (gradient clipping, early stopping, lr management), P3 incremental verifier (`GpuCdclWorkspace` arena reuse). Post-release: provenance primitives (`ChoiceSource`, `leaf_atom`, `choice_source`, `atoms_with_formulas`, re-exports). |
+| v0.5.0 | **Released** | GPU-resident loss/credit path (zero D2H, 4 CUDA kernels), two-pass GPU-only chunk merge, P2a term embeddings (`register_embedding`, `forward_embedding`, CUDA device-aware autograd, cross-registration validation, frozen tensor detach), P2b extended training controls (gradient clipping, early stopping, lr management), P3 incremental verifier (`GpuCdclWorkspace` arena reuse). Post-release: provenance primitives, Python type stubs, SAFETY audit, API visibility tightening. |
 | v0.6.0 | Planned | Epistemic logic tier (Phase 7) |
 | v0.7+ | Planned | Multi-GPU support, distributed execution (Phase 8) |
 
