@@ -1,7 +1,7 @@
 # XLOG Language Reference
 
-> **Version:** v0.3.2
-> **Last Updated:** January 2026
+> **Version:** v0.5.0
+> **Last Updated:** March 2026
 
 This document provides a comprehensive reference for the XLOG language, covering all syntax, semantics, and features of the GPU-accelerated Datalog query engine.
 
@@ -26,10 +26,12 @@ This document provides a comprehensive reference for the XLOG language, covering
 15. [Modules](#modules)
 16. [Symbols](#symbols)
 17. [Probabilistic Logic](#probabilistic-logic)
-18. [Pragmas and Directives](#pragmas-and-directives)
-19. [Float Predicates and IEEE 754 Semantics](#float-predicates-and-ieee-754-semantics)
-20. [Comments](#comments)
-21. [Complete Grammar Reference](#complete-grammar-reference)
+18. [Term Embeddings](#term-embeddings)
+19. [GPU ILP Configuration](#gpu-ilp-configuration)
+20. [Pragmas and Directives](#pragmas-and-directives)
+21. [Float Predicates and IEEE 754 Semantics](#float-predicates-and-ieee-754-semantics)
+22. [Comments](#comments)
+23. [Complete Grammar Reference](#complete-grammar-reference)
 
 ---
 
@@ -898,9 +900,9 @@ Symbols can be compared for equality:
 same_status(X, Y) :- item(X, S), item(Y, S), X != Y.
 ```
 
-### Reversible Symbols (v0.3.2)
+### Reversible Symbols
 
-As of v0.3.2, symbols are **reversible**: the original string value is preserved and displayed in query output. Symbols are stored internally as `u32` IDs with a bidirectional mapping to strings.
+Since v0.3.2, symbols are **reversible**: the original string value is preserved and displayed in query output. Symbols are stored internally as `u32` IDs with a bidirectional mapping to strings.
 
 ```xlog
 pred task(symbol, symbol).
@@ -1034,6 +1036,17 @@ XLOG supports two inference engines:
 xlog prob program.xlog --prob-engine mc --samples 10000 --seed 42
 ```
 
+### Monte Carlo Sampling Methods (v0.5.0)
+
+The MC engine supports two sampling methods, controlled by the `sampling_method` field on `McEvalConfig`:
+
+| Method | Description |
+|--------|-------------|
+| `Rejection` | Sample from the prior, discard worlds where evidence is not satisfied. Default when evidence involves derived or deterministic atoms. |
+| `EvidenceClamping` | Force evidence variables directly in the CUDA sampler so every sample satisfies evidence (`evidence_samples == total_samples`). Auto-selected when all evidence maps to probabilistic facts or positive annotated-disjunction heads; falls back to `Rejection` for derived, deterministic, or negative-AD evidence. |
+
+Evidence clamping avoids wasted samples and is especially effective when evidence acceptance rates under rejection sampling are low. The chosen method is reported in `McResult.sampling_method` and `McDeviceResult.sampling_method`.
+
 ### Negation in Probabilistic Programs
 
 Exact inference supports both stratified and non-monotone negation:
@@ -1096,6 +1109,82 @@ q :- not p.
 
 query(p).  // P(p) ≈ 0.5 ± CI
 ```
+
+---
+
+## Term Embeddings
+
+*Added in v0.5.0.*
+
+Term embeddings allow associating dense vector representations with discrete terms in XLOG programs. This is used in neural-symbolic training pipelines where learned embeddings feed into differentiable logic.
+
+### `register_embedding()`
+
+Register an embedding table with a compiled program via the Python API:
+
+```python
+import torch
+import pyxlog
+
+program = pyxlog.compile("program.xlog")
+
+# Trainable embedding (nn.Embedding) — included in optimizer
+emb = torch.nn.Embedding(num_embeddings=100, embedding_dim=64).cuda()
+program.register_embedding("entity_emb", emb)
+
+# Frozen embedding (raw Tensor) — detached at registration, never trained
+frozen = torch.randn(100, 64).cuda()
+program.register_embedding("pretrained_emb", frozen)
+```
+
+Cross-registration validation prevents mixing embedding and network names: a name registered with `register_embedding()` cannot be used with `register_network()`, and vice versa.
+
+### `forward_embedding()`
+
+Retrieve batched embedding tensors with autograd support:
+
+```python
+ids = torch.tensor([0, 5, 12], device="cuda")
+vectors = program.forward_embedding("entity_emb", ids)
+# vectors.shape == (3, 64), requires_grad=True for nn.Embedding
+```
+
+The returned tensor lives on the same device as the registered embedding (CUDA-safe). For frozen (raw tensor) embeddings, `requires_grad` is always `False`.
+
+**Note:** The inference path for term embeddings is deferred to v0.5.1+. Currently only the training path is supported.
+
+---
+
+## GPU ILP Configuration
+
+*Added in v0.5.0.*
+
+The GPU-resident ILP (Inductive Logic Programming) credit/loss pipeline introduced in v0.5.0 includes configuration parameters and diagnostic APIs accessible from Python.
+
+### `coo_chunk_budget`
+
+Controls the per-chunk temporary allocation ceiling (in bytes) for the COO sparse matrix construction on GPU. The final exact-NNZ COO buffer may exceed this budget.
+
+```python
+program = pyxlog.compile("program.xlog")
+
+# Set chunk budget to 256 MB
+program.set_coo_chunk_budget(256 * 1024 * 1024)
+```
+
+The previous name `coo_memory_cap` (and `set_coo_memory_cap()`) is deprecated but retained for one release cycle.
+
+### `host_transfer_stats()`
+
+Returns D2H (device-to-host) transfer accounting counters, useful for verifying zero-copy GPU execution:
+
+```python
+stats = program.host_transfer_stats()
+print(stats["dtoh_calls"])   # Number of D2H transfer calls
+print(stats["dtoh_bytes"])   # Total bytes transferred D2H
+```
+
+Use with `set_strict_zero_dtoh(True)` to enforce that no data-plane D2H transfers occur during ILP computation, which is critical for performance benchmarking and CI gates.
 
 ---
 
