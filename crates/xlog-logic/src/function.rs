@@ -6,6 +6,7 @@ use xlog_core::ScalarType;
 
 /// Errors related to functions
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum FunctionError {
     /// Duplicate function definition
     DuplicateDefinition { name: String },

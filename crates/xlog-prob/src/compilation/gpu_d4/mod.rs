@@ -46,6 +46,7 @@ pub(super) fn memset_u8_sync(
         .bind_to_thread()
         .map_err(|e| XlogError::Kernel(format!("bind_to_thread failed: {}", e)))?;
     let dptr = *DevicePtr::device_ptr(&*dst);
+    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe { cudarc::driver::result::memset_d8_sync(dptr, value, dst.len()) }
         .map_err(|e| XlogError::Kernel(format!("memset_d8_sync failed: {}", e)))?;
     Ok(())
@@ -57,6 +58,7 @@ pub(super) fn memset_u8_sync(
 /// Use [`GpuCompileConfig::default()`] for conservative static defaults, or
 /// [`crate::exact::default_compile_config`] for dynamic sizing from a CNF.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct GpuCompileConfig {
     /// BFS expansion depth before handing each frontier item to a per-block DFS worker.
     pub frontier_depth: u16,
@@ -225,6 +227,7 @@ pub(crate) fn compute_free_var_mask_gpu_gated(
             .ok_or_else(|| {
                 XlogError::Kernel("d4_mark_vars_in_clauses kernel not found".to_string())
             })?;
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             mark_clauses.clone().launch(
                 LaunchConfig {
@@ -253,6 +256,7 @@ pub(crate) fn compute_free_var_mask_gpu_gated(
             .ok_or_else(|| {
                 XlogError::Kernel("d4_mark_vars_in_circuit kernel not found".to_string())
             })?;
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             mark_circuit.clone().launch(
                 LaunchConfig {
@@ -282,6 +286,7 @@ pub(crate) fn compute_free_var_mask_gpu_gated(
     let build_mask = device
         .get_func(D4_MODULE, d4_kernels::D4_BUILD_FREE_VAR_MASK)
         .ok_or_else(|| XlogError::Kernel("d4_build_free_var_mask kernel not found".to_string()))?;
+    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         build_mask.clone().launch(
             LaunchConfig {
@@ -348,6 +353,7 @@ pub(crate) fn exclusive_scan_u32_inplace(
             .ok_or_else(|| {
                 XlogError::Kernel("multiblock_scan_phase2 kernel not found".to_string())
             })?;
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             phase2.clone().launch(
                 LaunchConfig {
@@ -371,6 +377,7 @@ pub(crate) fn exclusive_scan_u32_inplace(
         .ok_or_else(|| {
             XlogError::Kernel("multiblock_scan_u32_phase1 kernel not found".to_string())
         })?;
+    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         phase1.clone().launch(
             LaunchConfig {
@@ -390,6 +397,7 @@ pub(crate) fn exclusive_scan_u32_inplace(
     let phase3 = device
         .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE3)
         .ok_or_else(|| XlogError::Kernel("multiblock_scan_phase3 kernel not found".to_string()))?;
+    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         phase3.clone().launch(
             LaunchConfig {

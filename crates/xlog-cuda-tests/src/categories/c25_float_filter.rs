@@ -12,7 +12,7 @@ use xlog_core::{ScalarType, Schema};
 use xlog_cuda::CompareOp;
 
 /// Run all tests in this category.
-pub fn run_all(ctx: &TestContext) -> CategoryResult {
+pub(crate) fn run_all(ctx: &TestContext) -> CategoryResult {
     let mut results = CategoryResult::new("c25_float_filter");
     let start = Instant::now();
 

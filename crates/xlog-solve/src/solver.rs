@@ -71,6 +71,7 @@ use crate::proof::{SolveProof, SolveResult, SolveStats, SolveStatus};
 /// };
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct SolverConfig {
     /// Maximum number of iterations before giving up.
     ///

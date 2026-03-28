@@ -55,6 +55,7 @@ impl MemoryBudget {
 ///
 /// Use [`RuntimeConfig::default()`] and the builder methods to construct.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct RuntimeConfig {
     /// Memory budget settings
     pub memory: MemoryBudget,

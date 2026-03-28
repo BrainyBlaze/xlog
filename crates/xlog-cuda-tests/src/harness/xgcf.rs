@@ -10,42 +10,42 @@ use xlog_cuda::{circuit_kernels, CIRCUIT_MODULE};
 use super::TestContext;
 
 #[derive(Debug, Clone)]
-pub struct TinyXgcfSpec {
-    pub num_nodes: usize,
-    pub num_vars: usize,
-    pub root: u32,
-    pub node_type: Vec<u8>,
-    pub child_offsets: Vec<u32>,
-    pub child_indices: Vec<u32>,
-    pub lit: Vec<i32>,
-    pub decision_var: Vec<u32>,
-    pub decision_child_false: Vec<u32>,
-    pub decision_child_true: Vec<u32>,
-    pub level_nodes: Vec<u32>,
-    pub levels: Vec<(u32, u32)>,
-    pub var_log_true: Vec<f64>,
-    pub var_log_false: Vec<f64>,
-    pub expected_values: Vec<f64>,
-    pub expected_grad_true: Vec<f64>,
-    pub expected_grad_false: Vec<f64>,
+pub(crate) struct TinyXgcfSpec {
+    pub(crate) num_nodes: usize,
+    pub(crate) num_vars: usize,
+    pub(crate) root: u32,
+    pub(crate) node_type: Vec<u8>,
+    pub(crate) child_offsets: Vec<u32>,
+    pub(crate) child_indices: Vec<u32>,
+    pub(crate) lit: Vec<i32>,
+    pub(crate) decision_var: Vec<u32>,
+    pub(crate) decision_child_false: Vec<u32>,
+    pub(crate) decision_child_true: Vec<u32>,
+    pub(crate) level_nodes: Vec<u32>,
+    pub(crate) levels: Vec<(u32, u32)>,
+    pub(crate) var_log_true: Vec<f64>,
+    pub(crate) var_log_false: Vec<f64>,
+    pub(crate) expected_values: Vec<f64>,
+    pub(crate) expected_grad_true: Vec<f64>,
+    pub(crate) expected_grad_false: Vec<f64>,
 }
 
 #[derive(Debug, Clone)]
-pub struct TinyXgcfRun {
-    pub values: Vec<f64>,
-    pub adj: Vec<f64>,
-    pub grad_true: Vec<f64>,
-    pub grad_false: Vec<f64>,
+pub(crate) struct TinyXgcfRun {
+    pub(crate) values: Vec<f64>,
+    pub(crate) adj: Vec<f64>,
+    pub(crate) grad_true: Vec<f64>,
+    pub(crate) grad_false: Vec<f64>,
 }
 
 /// Device-resident XGCF circuit + reusable buffers.
 ///
 /// This is used by certification categories that validate *transfer efficiency* and *circuit reuse*.
 /// The key property: circuit structure is uploaded once; repeated evaluations reuse device buffers.
-pub struct TinyXgcfDevice {
-    pub num_nodes: usize,
-    pub num_vars: usize,
-    pub root: u32,
+pub(crate) struct TinyXgcfDevice {
+    pub(crate) num_nodes: usize,
+    pub(crate) num_vars: usize,
+    pub(crate) root: u32,
     levels: Vec<(u32, u32)>,
 
     // Cached kernel handles for performance-sensitive certification categories.
@@ -77,7 +77,7 @@ pub struct TinyXgcfDevice {
 }
 
 impl TinyXgcfDevice {
-    pub fn upload(ctx: &TestContext, spec: &TinyXgcfSpec) -> Result<Self> {
+    pub(crate) fn upload(ctx: &TestContext, spec: &TinyXgcfSpec) -> Result<Self> {
         let device = ctx.device.inner();
 
         let forward_fn = device
@@ -257,12 +257,13 @@ impl TinyXgcfDevice {
             block_dim: (block_size, 1, 1),
             shared_mem_bytes: 0,
         };
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe { kernel.clone().launch(config, params) }
             .map_err(|e| XlogError::Kernel(format!("Failed to launch level kernel: {}", e)))?;
         Ok(())
     }
 
-    pub fn set_weights(
+    pub(crate) fn set_weights(
         &mut self,
         ctx: &TestContext,
         log_true: &[f64],
@@ -287,7 +288,7 @@ impl TinyXgcfDevice {
     }
 
     /// Launch forward kernels (no sync, no host transfers).
-    pub fn forward_launch(&mut self, _ctx: &TestContext) -> Result<()> {
+    pub(crate) fn forward_launch(&mut self, _ctx: &TestContext) -> Result<()> {
         for (level, &(_offset, len)) in self.levels.iter().enumerate() {
             let level_u32 = level as u32;
             let mut params: Vec<*mut c_void> = vec![
@@ -310,14 +311,14 @@ impl TinyXgcfDevice {
         Ok(())
     }
 
-    pub fn forward_download_values(&mut self, ctx: &TestContext) -> Result<Vec<f64>> {
+    pub(crate) fn forward_download_values(&mut self, ctx: &TestContext) -> Result<Vec<f64>> {
         self.forward_launch(ctx)?;
         ctx.sync_and_check()?;
         ctx.dtoh_sync_copy(&self.d_values)
             .map_err(|e| XlogError::Kernel(format!("Failed to download values: {}", e)))
     }
 
-    pub fn forward_download_root(&mut self, ctx: &TestContext) -> Result<f64> {
+    pub(crate) fn forward_download_root(&mut self, ctx: &TestContext) -> Result<f64> {
         self.forward_launch(ctx)?;
         ctx.sync_and_check()?;
         let root_idx: usize = self.root as usize;
@@ -335,7 +336,7 @@ impl TinyXgcfDevice {
     }
 
     /// Launch backward kernels using existing `d_values` (no sync, no host transfers).
-    pub fn backward_only_launch(&mut self, ctx: &TestContext) -> Result<()> {
+    pub(crate) fn backward_only_launch(&mut self, ctx: &TestContext) -> Result<()> {
         let device = ctx.device.inner();
         device
             .memset_zeros(&mut self.d_adj)
@@ -417,7 +418,7 @@ impl TinyXgcfDevice {
     }
 
     /// Convenience helper: forward + backward in one launch sequence (no sync, no host transfers).
-    pub fn forward_then_backward_launch(&mut self, ctx: &TestContext) -> Result<()> {
+    pub(crate) fn forward_then_backward_launch(&mut self, ctx: &TestContext) -> Result<()> {
         self.forward_launch(ctx)?;
         self.backward_only_launch(ctx)
     }
@@ -432,7 +433,7 @@ fn logsumexp2(a: f64, b: f64) -> f64 {
 }
 
 /// Tiny Decision-DNNF-shaped XGCF circuit that exercises CONST/LIT/AND/OR/DECISION nodes.
-pub fn tiny_xgcf_spec() -> TinyXgcfSpec {
+pub(crate) fn tiny_xgcf_spec() -> TinyXgcfSpec {
     const CONST0: u8 = 0;
     const CONST1: u8 = 1;
     const LIT: u8 = 2;
@@ -546,12 +547,13 @@ fn launch_level(
         shared_mem_bytes: 0,
     };
 
+    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe { kernel.clone().launch(config, params) }
         .map_err(|e| XlogError::Kernel(format!("Failed to launch {}: {}", kernel_name, e)))?;
     Ok(())
 }
 
-pub fn run_tiny_xgcf_forward(ctx: &TestContext, spec: &TinyXgcfSpec) -> Result<Vec<f64>> {
+pub(crate) fn run_tiny_xgcf_forward(ctx: &TestContext, spec: &TinyXgcfSpec) -> Result<Vec<f64>> {
     let mut d_node_type = ctx.memory.alloc::<u8>(spec.node_type.len())?;
     ctx.htod_sync_copy_into(&spec.node_type, &mut d_node_type)
         .map_err(|e| XlogError::Kernel(format!("Failed to upload node_type: {}", e)))?;
@@ -659,7 +661,7 @@ pub fn run_tiny_xgcf_forward(ctx: &TestContext, spec: &TinyXgcfSpec) -> Result<V
         .map_err(|e| XlogError::Kernel(format!("Failed to download values: {}", e)))
 }
 
-pub fn run_tiny_xgcf_backward(ctx: &TestContext, spec: &TinyXgcfSpec) -> Result<TinyXgcfRun> {
+pub(crate) fn run_tiny_xgcf_backward(ctx: &TestContext, spec: &TinyXgcfSpec) -> Result<TinyXgcfRun> {
     let mut d_node_type = ctx.memory.alloc::<u8>(spec.node_type.len())?;
     ctx.htod_sync_copy_into(&spec.node_type, &mut d_node_type)
         .map_err(|e| XlogError::Kernel(format!("Failed to upload node_type: {}", e)))?;
@@ -859,7 +861,7 @@ pub fn run_tiny_xgcf_backward(ctx: &TestContext, spec: &TinyXgcfSpec) -> Result<
 }
 
 /// Generate a single-literal circuit: root = Lit(+var)
-pub fn gen_single_lit_circuit(var: u32) -> TinyXgcfSpec {
+pub(crate) fn gen_single_lit_circuit(var: u32) -> TinyXgcfSpec {
     const LIT: u8 = 2;
 
     let num_nodes = 1;
@@ -908,7 +910,7 @@ pub fn gen_single_lit_circuit(var: u32) -> TinyXgcfSpec {
 }
 
 /// Generate an AND circuit: root = AND(Lit(+1), Lit(+2))
-pub fn gen_and_circuit() -> TinyXgcfSpec {
+pub(crate) fn gen_and_circuit() -> TinyXgcfSpec {
     const LIT: u8 = 2;
     const AND: u8 = 3;
 
@@ -960,7 +962,7 @@ pub fn gen_and_circuit() -> TinyXgcfSpec {
 }
 
 /// Generate an OR circuit: root = OR(Lit(+1), Lit(+2))
-pub fn gen_or_circuit() -> TinyXgcfSpec {
+pub(crate) fn gen_or_circuit() -> TinyXgcfSpec {
     const LIT: u8 = 2;
     const OR: u8 = 4;
 
@@ -1015,7 +1017,7 @@ pub fn gen_or_circuit() -> TinyXgcfSpec {
 }
 
 /// Generate a Decision circuit: root = Decision(var, false_child=Const1, true_child=Lit(+1))
-pub fn gen_decision_circuit() -> TinyXgcfSpec {
+pub(crate) fn gen_decision_circuit() -> TinyXgcfSpec {
     const CONST1: u8 = 1;
     const LIT: u8 = 2;
     const DECISION: u8 = 5;
@@ -1072,7 +1074,7 @@ pub fn gen_decision_circuit() -> TinyXgcfSpec {
 }
 
 /// Generate a large circuit with N parallel literals under an OR node
-pub fn gen_large_or_circuit(num_vars: usize) -> TinyXgcfSpec {
+pub(crate) fn gen_large_or_circuit(num_vars: usize) -> TinyXgcfSpec {
     const LIT: u8 = 2;
     const OR: u8 = 4;
 
@@ -1140,7 +1142,7 @@ pub fn gen_large_or_circuit(num_vars: usize) -> TinyXgcfSpec {
 }
 
 /// Generate a deep chain circuit: AND(AND(AND(...Lit(1)...)))
-pub fn gen_deep_chain_circuit(depth: usize) -> TinyXgcfSpec {
+pub(crate) fn gen_deep_chain_circuit(depth: usize) -> TinyXgcfSpec {
     const LIT: u8 = 2;
     const AND: u8 = 3;
 
@@ -1203,7 +1205,7 @@ pub fn gen_deep_chain_circuit(depth: usize) -> TinyXgcfSpec {
 }
 
 /// Compute numerical gradient for verification
-pub fn numerical_gradient(
+pub(crate) fn numerical_gradient(
     ctx: &TestContext,
     spec: &TinyXgcfSpec,
     var: usize,

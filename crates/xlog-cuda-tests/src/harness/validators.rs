@@ -1,11 +1,11 @@
 //! CPU reference implementations for validating GPU results.
 
 /// CPU reference implementations for all kernel operations.
-pub mod reference {
+pub(crate) mod reference {
     use std::collections::HashMap;
 
     /// Hash join returning (left_idx, right_idx) pairs.
-    pub fn hash_join_u32(left: &[u32], right: &[u32]) -> Vec<(usize, usize)> {
+    pub(crate) fn hash_join_u32(left: &[u32], right: &[u32]) -> Vec<(usize, usize)> {
         let mut result = Vec::new();
         let right_map: HashMap<u32, Vec<usize>> =
             right
@@ -27,7 +27,7 @@ pub mod reference {
     }
 
     /// Multi-column hash join.
-    pub fn hash_join_multi(left_cols: &[&[u32]], right_cols: &[&[u32]]) -> Vec<(usize, usize)> {
+    pub(crate) fn hash_join_multi(left_cols: &[&[u32]], right_cols: &[&[u32]]) -> Vec<(usize, usize)> {
         if left_cols.is_empty() || right_cols.is_empty() {
             return Vec::new();
         }
@@ -56,7 +56,7 @@ pub mod reference {
     }
 
     /// Semi join - returns left indices that have a match in right.
-    pub fn semi_join_u32(left: &[u32], right: &[u32]) -> Vec<usize> {
+    pub(crate) fn semi_join_u32(left: &[u32], right: &[u32]) -> Vec<usize> {
         let right_set: std::collections::HashSet<u32> = right.iter().copied().collect();
         left.iter()
             .enumerate()
@@ -66,7 +66,7 @@ pub mod reference {
     }
 
     /// Anti join - returns left indices that have NO match in right.
-    pub fn anti_join_u32(left: &[u32], right: &[u32]) -> Vec<usize> {
+    pub(crate) fn anti_join_u32(left: &[u32], right: &[u32]) -> Vec<usize> {
         let right_set: std::collections::HashSet<u32> = right.iter().copied().collect();
         left.iter()
             .enumerate()
@@ -76,7 +76,7 @@ pub mod reference {
     }
 
     /// Filter by comparison operation.
-    pub fn filter_compare_u32(data: &[u32], op: CompareOp, val: u32) -> Vec<usize> {
+    pub(crate) fn filter_compare_u32(data: &[u32], op: CompareOp, val: u32) -> Vec<usize> {
         data.iter()
             .enumerate()
             .filter(|(_, d)| op.apply(**d, val))
@@ -85,7 +85,7 @@ pub mod reference {
     }
 
     /// Filter by comparison operation for i64.
-    pub fn filter_compare_i64(data: &[i64], op: CompareOp, val: i64) -> Vec<usize> {
+    pub(crate) fn filter_compare_i64(data: &[i64], op: CompareOp, val: i64) -> Vec<usize> {
         data.iter()
             .enumerate()
             .filter(|(_, d)| op.apply(**d, val))
@@ -94,7 +94,7 @@ pub mod reference {
     }
 
     /// Filter by comparison operation for f64.
-    pub fn filter_compare_f64(data: &[f64], op: CompareOp, val: f64) -> Vec<f64> {
+    pub(crate) fn filter_compare_f64(data: &[f64], op: CompareOp, val: f64) -> Vec<f64> {
         data.iter()
             .filter(|d| op.apply_f64(**d, val))
             .copied()
@@ -102,7 +102,7 @@ pub mod reference {
     }
 
     /// Compact by mask.
-    pub fn compact_by_mask<T: Copy>(data: &[T], mask: &[u8]) -> Vec<T> {
+    pub(crate) fn compact_by_mask<T: Copy>(data: &[T], mask: &[u8]) -> Vec<T> {
         data.iter()
             .zip(mask.iter())
             .filter(|(_, m)| **m != 0)
@@ -111,7 +111,7 @@ pub mod reference {
     }
 
     /// Stable radix sort returning (sorted_data, permutation).
-    pub fn radix_sort_u32(keys: &[u32]) -> (Vec<u32>, Vec<u32>) {
+    pub(crate) fn radix_sort_u32(keys: &[u32]) -> (Vec<u32>, Vec<u32>) {
         let mut indexed: Vec<(u32, u32)> = keys
             .iter()
             .enumerate()
@@ -128,12 +128,12 @@ pub mod reference {
     }
 
     /// Apply permutation to data.
-    pub fn apply_permutation<T: Copy>(data: &[T], perm: &[u32]) -> Vec<T> {
+    pub(crate) fn apply_permutation<T: Copy>(data: &[T], perm: &[u32]) -> Vec<T> {
         perm.iter().map(|&i| data[i as usize]).collect()
     }
 
     /// Inclusive prefix sum.
-    pub fn inclusive_scan(data: &[u32]) -> Vec<u32> {
+    pub(crate) fn inclusive_scan(data: &[u32]) -> Vec<u32> {
         let mut result = Vec::with_capacity(data.len());
         let mut sum = 0u32;
         for &val in data {
@@ -144,7 +144,7 @@ pub mod reference {
     }
 
     /// Exclusive prefix sum.
-    pub fn exclusive_scan(data: &[u32]) -> Vec<u32> {
+    pub(crate) fn exclusive_scan(data: &[u32]) -> Vec<u32> {
         let mut result = Vec::with_capacity(data.len());
         let mut sum = 0u32;
         for &val in data {
@@ -155,7 +155,7 @@ pub mod reference {
     }
 
     /// Group by count (assumes sorted input).
-    pub fn groupby_count_sorted(keys: &[u32]) -> Vec<(u32, u64)> {
+    pub(crate) fn groupby_count_sorted(keys: &[u32]) -> Vec<(u32, u64)> {
         if keys.is_empty() {
             return Vec::new();
         }
@@ -178,7 +178,7 @@ pub mod reference {
     }
 
     /// Group by sum (assumes sorted input).
-    pub fn groupby_sum_sorted(keys: &[u32], vals: &[u32]) -> Vec<(u32, u64)> {
+    pub(crate) fn groupby_sum_sorted(keys: &[u32], vals: &[u32]) -> Vec<(u32, u64)> {
         if keys.is_empty() {
             return Vec::new();
         }
@@ -201,7 +201,7 @@ pub mod reference {
     }
 
     /// Group by min (assumes sorted input).
-    pub fn groupby_min_sorted(keys: &[u32], vals: &[u32]) -> Vec<(u32, u32)> {
+    pub(crate) fn groupby_min_sorted(keys: &[u32], vals: &[u32]) -> Vec<(u32, u32)> {
         if keys.is_empty() {
             return Vec::new();
         }
@@ -224,7 +224,7 @@ pub mod reference {
     }
 
     /// Group by max (assumes sorted input).
-    pub fn groupby_max_sorted(keys: &[u32], vals: &[u32]) -> Vec<(u32, u32)> {
+    pub(crate) fn groupby_max_sorted(keys: &[u32], vals: &[u32]) -> Vec<(u32, u32)> {
         if keys.is_empty() {
             return Vec::new();
         }
@@ -247,7 +247,7 @@ pub mod reference {
     }
 
     /// Dedup sorted data.
-    pub fn dedup_sorted<T: Eq + Copy>(data: &[T]) -> Vec<T> {
+    pub(crate) fn dedup_sorted<T: Eq + Copy>(data: &[T]) -> Vec<T> {
         if data.is_empty() {
             return Vec::new();
         }
@@ -262,7 +262,7 @@ pub mod reference {
     }
 
     /// Mark duplicates in sorted data (true = unique, false = duplicate).
-    pub fn mark_duplicates<T: Eq>(sorted: &[T]) -> Vec<bool> {
+    pub(crate) fn mark_duplicates<T: Eq>(sorted: &[T]) -> Vec<bool> {
         if sorted.is_empty() {
             return Vec::new();
         }
@@ -275,7 +275,7 @@ pub mod reference {
     }
 
     /// Sorted set union.
-    pub fn sorted_union<T: Ord + Copy>(a: &[T], b: &[T]) -> Vec<T> {
+    pub(crate) fn sorted_union<T: Ord + Copy>(a: &[T], b: &[T]) -> Vec<T> {
         let mut result = Vec::new();
         let mut i = 0;
         let mut j = 0;
@@ -318,7 +318,7 @@ pub mod reference {
     }
 
     /// Sorted set difference (a - b).
-    pub fn sorted_diff<T: Ord + Copy>(a: &[T], b: &[T]) -> Vec<T> {
+    pub(crate) fn sorted_diff<T: Ord + Copy>(a: &[T], b: &[T]) -> Vec<T> {
         let mut result = Vec::new();
         let mut i = 0;
         let mut j = 0;
@@ -344,7 +344,7 @@ pub mod reference {
     }
 
     /// Pack columns into row-major byte array.
-    pub fn pack_keys(cols: &[&[u8]], col_sizes: &[usize], num_rows: usize) -> Vec<u8> {
+    pub(crate) fn pack_keys(cols: &[&[u8]], col_sizes: &[usize], num_rows: usize) -> Vec<u8> {
         let row_size: usize = col_sizes.iter().sum();
         let mut result = vec![0u8; row_size * num_rows];
 
@@ -363,7 +363,7 @@ pub mod reference {
     }
 
     /// FNV-1a hash.
-    pub fn hash_fnv1a(data: &[u8]) -> u32 {
+    pub(crate) fn hash_fnv1a(data: &[u8]) -> u32 {
         const FNV_PRIME: u32 = 16777619;
         const FNV_OFFSET: u32 = 2166136261;
 
@@ -376,7 +376,7 @@ pub mod reference {
     }
 
     /// Unpack a column from packed rows.
-    pub fn unpack_column(
+    pub(crate) fn unpack_column(
         packed: &[u8],
         row_size: usize,
         col_offset: usize,
@@ -397,7 +397,7 @@ pub mod reference {
 
     /// Comparison operation enum.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub enum CompareOp {
+    pub(crate) enum CompareOp {
         Eq,
         Ne,
         Lt,
@@ -407,7 +407,7 @@ pub mod reference {
     }
 
     impl CompareOp {
-        pub fn apply<T: PartialOrd>(&self, a: T, b: T) -> bool {
+        pub(crate) fn apply<T: PartialOrd>(&self, a: T, b: T) -> bool {
             match self {
                 CompareOp::Eq => a == b,
                 CompareOp::Ne => a != b,
@@ -418,7 +418,7 @@ pub mod reference {
             }
         }
 
-        pub fn apply_f64(&self, a: f64, b: f64) -> bool {
+        pub(crate) fn apply_f64(&self, a: f64, b: f64) -> bool {
             match self {
                 CompareOp::Eq => a == b,
                 CompareOp::Ne => a != b,
@@ -432,9 +432,9 @@ pub mod reference {
 }
 
 /// Comparison utilities for GPU vs CPU result validation.
-pub mod compare {
+pub(crate) mod compare {
     /// Assert u32 slices are equal with detailed diff on failure.
-    pub fn assert_eq_u32(gpu: &[u32], cpu: &[u32], context: &str) {
+    pub(crate) fn assert_eq_u32(gpu: &[u32], cpu: &[u32], context: &str) {
         if gpu.len() != cpu.len() {
             panic!(
                 "{}: length mismatch: GPU={}, CPU={}",
@@ -465,7 +465,7 @@ pub mod compare {
     }
 
     /// Assert i64 slices are equal with detailed diff on failure.
-    pub fn assert_eq_i64(gpu: &[i64], cpu: &[i64], context: &str) {
+    pub(crate) fn assert_eq_i64(gpu: &[i64], cpu: &[i64], context: &str) {
         if gpu.len() != cpu.len() {
             panic!(
                 "{}: length mismatch: GPU={}, CPU={}",
@@ -496,7 +496,7 @@ pub mod compare {
     }
 
     /// Assert u64 slices are equal with detailed diff on failure.
-    pub fn assert_eq_u64(gpu: &[u64], cpu: &[u64], context: &str) {
+    pub(crate) fn assert_eq_u64(gpu: &[u64], cpu: &[u64], context: &str) {
         if gpu.len() != cpu.len() {
             panic!(
                 "{}: length mismatch: GPU={}, CPU={}",
@@ -527,7 +527,7 @@ pub mod compare {
     }
 
     /// Assert f64 slices are equal within ULP tolerance.
-    pub fn assert_eq_f64_ulp(gpu: &[f64], cpu: &[f64], max_ulp: u64, context: &str) {
+    pub(crate) fn assert_eq_f64_ulp(gpu: &[f64], cpu: &[f64], max_ulp: u64, context: &str) {
         if gpu.len() != cpu.len() {
             panic!(
                 "{}: length mismatch: GPU={}, CPU={}",
@@ -559,7 +559,7 @@ pub mod compare {
     }
 
     /// Assert f64 slices are equal within relative tolerance.
-    pub fn assert_eq_f64_rel(gpu: &[f64], cpu: &[f64], rel_tol: f64, context: &str) {
+    pub(crate) fn assert_eq_f64_rel(gpu: &[f64], cpu: &[f64], rel_tol: f64, context: &str) {
         if gpu.len() != cpu.len() {
             panic!(
                 "{}: length mismatch: GPU={}, CPU={}",
@@ -614,7 +614,7 @@ pub mod compare {
     }
 
     /// Assert sets are equal (order-independent).
-    pub fn assert_set_eq_u32(gpu: &[u32], cpu: &[u32], context: &str) {
+    pub(crate) fn assert_set_eq_u32(gpu: &[u32], cpu: &[u32], context: &str) {
         let mut gpu_sorted = gpu.to_vec();
         let mut cpu_sorted = cpu.to_vec();
         gpu_sorted.sort();
@@ -631,7 +631,7 @@ pub mod compare {
     }
 
     /// Assert permutation is valid.
-    pub fn assert_valid_permutation(perm: &[u32], len: usize, context: &str) {
+    pub(crate) fn assert_valid_permutation(perm: &[u32], len: usize, context: &str) {
         if perm.len() != len {
             panic!(
                 "{}: permutation length {} != expected {}",
@@ -660,7 +660,7 @@ pub mod compare {
     }
 
     /// Assert sort is stable (equal keys maintain relative order).
-    pub fn assert_stable_sort(
+    pub(crate) fn assert_stable_sort(
         original_keys: &[u32],
         original_vals: &[u32],
         sorted_keys: &[u32],
@@ -694,12 +694,12 @@ pub mod compare {
     }
 
     /// Check if result is sorted.
-    pub fn is_sorted_u32(data: &[u32]) -> bool {
+    pub(crate) fn is_sorted_u32(data: &[u32]) -> bool {
         data.windows(2).all(|w| w[0] <= w[1])
     }
 
     /// Check if result is sorted descending.
-    pub fn is_sorted_desc_u32(data: &[u32]) -> bool {
+    pub(crate) fn is_sorted_desc_u32(data: &[u32]) -> bool {
         data.windows(2).all(|w| w[0] >= w[1])
     }
 }

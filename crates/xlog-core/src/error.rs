@@ -4,6 +4,7 @@ use thiserror::Error;
 
 /// Primary error type for XLOG operations
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum XlogError {
     #[error("Parse error: {0}")]
     Parse(String),

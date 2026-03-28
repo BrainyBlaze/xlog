@@ -10,7 +10,7 @@ use std::time::Instant;
 use xlog_core::{AggOp, ScalarType, Schema};
 
 /// Run all tests in this category.
-pub fn run_all(ctx: &TestContext) -> CategoryResult {
+pub(crate) fn run_all(ctx: &TestContext) -> CategoryResult {
     let mut results = CategoryResult::new("c22_algorithms");
     let start = Instant::now();
 

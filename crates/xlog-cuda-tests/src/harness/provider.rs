@@ -60,21 +60,21 @@ fn gpu_test_lock_file() -> Result<std::fs::File> {
 }
 
 /// Test context providing CUDA resources for certification tests.
-pub struct TestContext {
+pub(crate) struct TestContext {
     // Hold a process-wide mutex for the lifetime of the context so GPU tests run serially.
     // This prevents timing-based certification tests from producing false positives under
     // parallel `cargo test` execution.
     _lock: std::sync::MutexGuard<'static, ()>,
     _file_lock: std::fs::File,
-    pub provider: CudaKernelProvider,
-    pub device: Arc<CudaDevice>,
-    pub memory: Arc<GpuMemoryManager>,
+    pub(crate) provider: CudaKernelProvider,
+    pub(crate) device: Arc<CudaDevice>,
+    pub(crate) memory: Arc<GpuMemoryManager>,
     transfer: Arc<TransferCounters>,
 }
 
 impl TestContext {
     /// Create test context with specific memory budget in bytes.
-    pub fn with_budget(budget_bytes: usize) -> Result<Self> {
+    pub(crate) fn with_budget(budget_bytes: usize) -> Result<Self> {
         let lock = gpu_test_lock();
         let file_lock = gpu_test_lock_file()?;
 
@@ -109,17 +109,17 @@ impl TestContext {
     }
 
     /// Create test context with default 1GB memory budget.
-    pub fn new() -> Result<Self> {
+    pub(crate) fn new() -> Result<Self> {
         Self::with_budget(1024 * 1024 * 1024)
     }
 
     /// Create test context with large 4GB memory budget for stress tests.
-    pub fn large() -> Result<Self> {
+    pub(crate) fn large() -> Result<Self> {
         Self::with_budget(4 * 1024 * 1024 * 1024)
     }
 
     /// Force device synchronization and check for async errors.
-    pub fn sync_and_check(&self) -> Result<()> {
+    pub(crate) fn sync_and_check(&self) -> Result<()> {
         self.device
             .inner()
             .synchronize()
@@ -128,27 +128,27 @@ impl TestContext {
     }
 
     /// Get current memory usage in bytes.
-    pub fn memory_used(&self) -> usize {
+    pub(crate) fn memory_used(&self) -> usize {
         self.memory.allocated_bytes() as usize
     }
 
     /// Get memory budget in bytes.
-    pub fn memory_budget(&self) -> usize {
+    pub(crate) fn memory_budget(&self) -> usize {
         self.memory.budget().device_bytes as usize
     }
 
     /// Reset host/device transfer counters (in bytes).
-    pub fn reset_transfer_counters(&self) {
+    pub(crate) fn reset_transfer_counters(&self) {
         self.transfer.reset();
     }
 
     /// Snapshot transfer counters (htod_bytes, dtoh_bytes).
-    pub fn transfer_counters(&self) -> (u64, u64) {
+    pub(crate) fn transfer_counters(&self) -> (u64, u64) {
         self.transfer.snapshot()
     }
 
     /// Track a synchronous host-to-device copy.
-    pub fn htod_sync_copy_into<T: DeviceRepr, Dst: DevicePtrMut<T>>(
+    pub(crate) fn htod_sync_copy_into<T: DeviceRepr, Dst: DevicePtrMut<T>>(
         &self,
         src: &[T],
         dst: &mut Dst,
@@ -165,7 +165,7 @@ impl TestContext {
     }
 
     /// Track a synchronous device-to-host copy returning a Vec.
-    pub fn dtoh_sync_copy<T: DeviceRepr, Src: DevicePtr<T>>(&self, src: &Src) -> Result<Vec<T>> {
+    pub(crate) fn dtoh_sync_copy<T: DeviceRepr, Src: DevicePtr<T>>(&self, src: &Src) -> Result<Vec<T>> {
         let bytes = std::mem::size_of::<T>()
             .checked_mul(src.len())
             .ok_or_else(|| XlogError::Kernel("dtoh byte count overflow".to_string()))?;
@@ -177,7 +177,7 @@ impl TestContext {
     }
 
     /// Track a synchronous device-to-host copy into a slice.
-    pub fn dtoh_sync_copy_into<T: DeviceRepr, Src: DevicePtr<T>>(
+    pub(crate) fn dtoh_sync_copy_into<T: DeviceRepr, Src: DevicePtr<T>>(
         &self,
         src: &Src,
         dst: &mut [T],
@@ -194,7 +194,7 @@ impl TestContext {
     }
 
     /// Measure GPU time (in milliseconds) for work enqueued on the device stream.
-    pub fn measure_gpu_ms<F>(&self, f: F) -> Result<f32>
+    pub(crate) fn measure_gpu_ms<F>(&self, f: F) -> Result<f32>
     where
         F: FnOnce() -> Result<()>,
     {
@@ -205,19 +205,23 @@ impl TestContext {
         let end = result::event::create(sys::CUevent_flags::CU_EVENT_DEFAULT)
             .map_err(|e| XlogError::Kernel(format!("Failed to create end event: {}", e)))?;
 
+        // SAFETY: CUDA events are valid and have been recorded; cudarc manages the event lifetime
         unsafe {
             result::event::record(start, stream)
                 .map_err(|e| XlogError::Kernel(format!("Failed to record start event: {}", e)))?;
         }
         f()?;
+        // SAFETY: CUDA events are valid and have been recorded; cudarc manages the event lifetime
         unsafe {
             result::event::record(end, stream)
                 .map_err(|e| XlogError::Kernel(format!("Failed to record end event: {}", e)))?;
         }
         self.sync_and_check()?;
+        // SAFETY: CUDA events are valid and have been recorded; cudarc manages the event lifetime
         let elapsed = unsafe { result::event::elapsed(start, end) }.map_err(|e| {
             XlogError::Kernel(format!("Failed to measure event elapsed time: {}", e))
         })?;
+        // SAFETY: CUDA events are valid and have been recorded; cudarc manages the event lifetime
         unsafe {
             result::event::destroy(start)
                 .map_err(|e| XlogError::Kernel(format!("Failed to destroy start event: {}", e)))?;
@@ -228,7 +232,7 @@ impl TestContext {
     }
 
     /// Check if multi-GPU is available.
-    pub fn multi_gpu_available(&self) -> bool {
+    pub(crate) fn multi_gpu_available(&self) -> bool {
         match std::panic::catch_unwind(|| cudarc::driver::CudaDevice::count()) {
             Ok(Ok(n)) => n > 1,
             _ => false,
@@ -236,7 +240,7 @@ impl TestContext {
     }
 
     /// Get compute capability of current device.
-    pub fn compute_capability(&self) -> Result<(u32, u32)> {
+    pub(crate) fn compute_capability(&self) -> Result<(u32, u32)> {
         use cudarc::driver::sys::CUdevice_attribute;
 
         let major = self
@@ -273,7 +277,7 @@ impl TestContext {
     /// Read device-resident row count for a buffer.
     ///
     /// Panics if the count cannot be read; certification tests treat this as fatal.
-    pub fn device_row_count(&self, buffer: &CudaBuffer) -> u64 {
+    pub(crate) fn device_row_count(&self, buffer: &CudaBuffer) -> u64 {
         let mut host_rows = [0u32];
         self.dtoh_sync_copy_into(buffer.num_rows_device(), &mut host_rows)
             .unwrap_or_else(|e| panic!("Failed to read device row count: {}", e));

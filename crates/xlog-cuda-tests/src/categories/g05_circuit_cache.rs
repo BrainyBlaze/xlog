@@ -12,7 +12,7 @@ use crate::harness::{CategoryResult, TestContext, TestResult};
 use std::time::{Duration, Instant};
 
 /// Run all tests in this category.
-pub fn run_all(ctx: &TestContext) -> CategoryResult {
+pub(crate) fn run_all(ctx: &TestContext) -> CategoryResult {
     let mut results = CategoryResult::new("g05_circuit_cache");
     let start = Instant::now();
 

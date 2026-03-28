@@ -42,6 +42,7 @@ impl LoadedModule {
 
 /// Errors that can occur during module resolution
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum ModuleError {
     /// Module file not found
     NotFound {

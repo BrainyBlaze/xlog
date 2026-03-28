@@ -44,6 +44,7 @@ use pyo3::PyObject;
 
 /// Errors from tensor source operations.
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum TensorSourceError {
     /// Tensor source not found in registry
     #[error("Tensor source '{0}' not found")]

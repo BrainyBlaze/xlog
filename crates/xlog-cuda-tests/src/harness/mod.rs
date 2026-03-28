@@ -1,12 +1,12 @@
 //! Test harness infrastructure for CUDA certification tests.
 
-pub mod diagnostics;
-pub mod generators;
-pub mod provider;
-pub mod validators;
-pub mod xgcf;
+pub(crate) mod diagnostics;
+pub(crate) mod generators;
+pub(crate) mod provider;
+pub(crate) mod validators;
+pub(crate) mod xgcf;
 
-pub use diagnostics::{
+pub(crate) use diagnostics::{
     CategoryResult, CertificationResults, FailureDiagnostic, TestResult, TestStatus,
 };
-pub use provider::TestContext;
+pub(crate) use provider::TestContext;

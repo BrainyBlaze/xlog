@@ -45,6 +45,7 @@ pub use pyo3;
 
 /// Error types for neural network operations
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum NeuralError {
     /// Network not found in registry
     #[error("Network not found: {0}")]
