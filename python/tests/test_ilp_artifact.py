@@ -2,7 +2,6 @@
 """Tests for artifact save/load."""
 import json
 import pytest
-from pathlib import Path
 
 torch = pytest.importorskip("torch")
 pyxlog = pytest.importorskip("pyxlog")

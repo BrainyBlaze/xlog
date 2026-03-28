@@ -74,7 +74,7 @@ def test_ilp_gradient_flow():
     M_soft = F.gumbel_softmax(W, tau=0.5, hard=False, dim=-1)
     index = M_soft.max(dim=-1, keepdim=True)[1]
     M_hard = torch.zeros_like(M_soft).scatter_(-1, index, 1.0)
-    M = (M_hard - M_soft).detach() + M_soft  # Straight-through
+    # Straight-through estimator: (M_hard - M_soft).detach() + M_soft
 
     # RD-16: Flatten to 1D for DLPack ndim==1 compliance
     # DLPack requires .detach() since it cannot export grad-tracking tensors.
@@ -155,7 +155,7 @@ def test_ilp_temperature_annealing():
 
     for i in range(len(discreteness) - 1):
         assert discreteness[i] <= discreteness[i + 1] + 0.05, \
-            f"Temperature annealing: tau decrease should increase discreteness"
+            "Temperature annealing: tau decrease should increase discreteness"
 
 
 def test_ilp_predecessor_benchmark_smoke():

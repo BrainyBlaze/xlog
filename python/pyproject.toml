@@ -1,0 +1,17 @@
+[tool.ruff]
+# Python/tests use pytest.importorskip() as a runtime skip guard, which means
+# subsequent imports must appear after module-level code. Suppress E402 for the
+# entire tests/ tree where this pattern is intentional.
+
+[tool.ruff.lint]
+extend-ignore = []
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["E402"]
+"examples/**" = ["E402"]
+
+[tool.mypy]
+# Test files use pytest.importorskip() which returns ModuleType at runtime,
+# so mypy cannot resolve attributes like torch.nn.Module as actual types.
+# Exclude tests from strict checking — they are validated at runtime via pytest.
+exclude = ["tests/", "examples/"]

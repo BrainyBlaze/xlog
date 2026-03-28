@@ -1,6 +1,5 @@
 # python/tests/test_ilp_types.py
 """Tests for dILP type definitions and exceptions."""
-import pytest
 
 import pyxlog.ilp as ilp
 

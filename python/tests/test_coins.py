@@ -14,7 +14,7 @@ COINS_PROGRAM = """
 """
 
 
-class CoinNet(torch.nn.Module):
+class CoinNet(torch.nn.Module):  # type: ignore[name-defined]
     """2-class network (heads/tails) with call tracking."""
 
     def __init__(self):
@@ -27,7 +27,7 @@ class CoinNet(torch.nn.Module):
         return torch.softmax(self.fc(x), dim=-1)
 
 
-def _build_program() -> tuple[pyxlog.Program, CoinNet, CoinNet]:
+def _build_program() -> "tuple[pyxlog.Program, CoinNet, CoinNet]":  # type: ignore[name-defined]
     program = pyxlog.Program.compile(COINS_PROGRAM)
     net1 = CoinNet().cuda()
     net2 = CoinNet().cuda()
@@ -36,17 +36,17 @@ def _build_program() -> tuple[pyxlog.Program, CoinNet, CoinNet]:
     return program, net1, net2
 
 
-def _build_data() -> torch.Tensor:
+def _build_data() -> "torch.Tensor":  # type: ignore[name-defined]
     return torch.randn(4, 1, device="cuda")
 
 
-def _assert_nonzero_grad(net: torch.nn.Module) -> None:
+def _assert_nonzero_grad(net: "torch.nn.Module") -> None:  # type: ignore[name-defined]
     for param in net.parameters():
         assert param.grad is not None, f"Missing grad for {param.shape}"
         assert not torch.all(param.grad == 0), "Gradient is all zeros"
 
 
-def _assert_no_grad(net: torch.nn.Module) -> None:
+def _assert_no_grad(net: "torch.nn.Module") -> None:  # type: ignore[name-defined]
     for param in net.parameters():
         if param.grad is not None:
             assert torch.all(param.grad == 0)

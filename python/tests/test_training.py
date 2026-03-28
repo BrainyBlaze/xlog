@@ -21,7 +21,7 @@ def _prime_scheduler(optimizer):
     optimizer.step()
 
 
-class SimpleNet(torch.nn.Module):
+class SimpleNet(torch.nn.Module):  # type: ignore[name-defined]
     """Simple neural network for testing training loop."""
 
     def __init__(self, input_dim=10, output_dim=3):

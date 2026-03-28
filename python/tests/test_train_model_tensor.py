@@ -15,7 +15,7 @@ torch = pytest.importorskip("torch")
 pyxlog = pytest.importorskip("pyxlog")
 
 
-class SimpleNet(torch.nn.Module):
+class SimpleNet(torch.nn.Module):  # type: ignore[name-defined]
     """Simple neural network for testing training loop."""
 
     def __init__(self, input_dim=10, output_dim=3):
@@ -26,7 +26,7 @@ class SimpleNet(torch.nn.Module):
         return torch.softmax(self.fc(x), dim=-1)
 
 
-class MNISTSimpleNet(torch.nn.Module):
+class MNISTSimpleNet(torch.nn.Module):  # type: ignore[name-defined]
     """Simple network that outputs softmax probabilities over 10 digits."""
 
     def __init__(self, num_classes=10):

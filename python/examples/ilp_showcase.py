@@ -71,7 +71,10 @@ def compute_loss(
     for rel_name, values in positives:
         contributing = prog.tagged_entries_containing_fact(rel_name, values)
         if contributing:
-            credit = sum(M_soft[i, j, k] for (i, j, k) in contributing)
+            credit: torch.Tensor = sum(
+                (M_soft[i, j, k] for (i, j, k) in contributing),
+                torch.tensor(0.0, device=M_soft.device),
+            )
             loss = loss + (-torch.log(credit.clamp(min=1e-8)))
         else:
             k_idx = rel_names.index(rel_name)
@@ -80,7 +83,10 @@ def compute_loss(
     for rel_name, values in negatives:
         contributing = prog.tagged_entries_containing_fact(rel_name, values)
         if contributing:
-            credit = sum(M_soft[i, j, k] for (i, j, k) in contributing)
+            credit = sum(
+                (M_soft[i, j, k] for (i, j, k) in contributing),
+                torch.tensor(0.0, device=M_soft.device),
+            )
             loss = loss + (-torch.log((1.0 - credit).clamp(min=1e-8)))
 
     return loss
@@ -90,7 +96,7 @@ def decode_argmax(W: torch.Tensor, rel_names: list[str]) -> tuple[str, str, str]
     """Decode the argmax (i,j,k) of W into relation name triple."""
     with torch.no_grad():
         flat = W.view(-1)
-        idx = flat.argmax().item()
+        idx = int(flat.argmax().item())
         n = W.shape[0]
         i = idx // (n * n)
         j = (idx % (n * n)) // n
@@ -264,13 +270,13 @@ def run_stage(config: StageConfig) -> tuple[str, bool, int, str]:
     if converged:
         print(f"  >>> Converged in {steps} steps: {rule_str}")
         if config.commit:
-            print(f"\n  --- Post-Convergence: Rule Commit ---")
+            print("\n  --- Post-Convergence: Rule Commit ---")
             commit_ok = commit_and_validate(config, rule_str)
             if commit_ok:
-                print(f"  >>> Commit validated: all facts correct")
+                print("  >>> Commit validated: all facts correct")
                 tag = "committed"
             else:
-                print(f"  >>> Commit validation FAILED")
+                print("  >>> Commit validation FAILED")
                 converged = False
     else:
         print(f"  >>> DID NOT CONVERGE after {config.max_steps} steps.")

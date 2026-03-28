@@ -3,12 +3,11 @@ import json
 import sys
 from pathlib import Path
 
-import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from scripts.neural_datasets import DatasetManifest, DatasetSplit, download_file, verify_sha256
+from scripts.neural_datasets import DatasetManifest, download_file, verify_sha256
 
 
 def test_manifest_parse_and_roundtrip(tmp_path: Path):

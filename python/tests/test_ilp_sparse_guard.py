@@ -31,7 +31,7 @@ learnable(W) :: reach(X, Y) :- bL(X, Z), bR(Z, Y).
 """
 
 
-def _u32_columns(left: list[int], right: list[int]) -> list[torch.Tensor]:
+def _u32_columns(left: list[int], right: list[int]) -> "list[torch.Tensor]":  # type: ignore[name-defined]
     return [
         torch.tensor(left, device="cuda", dtype=torch.int32),
         torch.tensor(right, device="cuda", dtype=torch.int32),

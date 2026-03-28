@@ -26,7 +26,7 @@ REACH_SOURCE = """
     learnable(W_reach) :: reach(X, Y) :- bL(X, Z), bR(Z, Y).
 """
 REACH_POS = [("reach", [1, 3]), ("reach", [2, 4]), ("reach", [3, 5]), ("reach", [4, 6])]
-REACH_NEG = []
+REACH_NEG: list[tuple[str, list[int]]] = []
 REACH_SESSION_SOURCE = """
     pred edge(u32, u32).
     pred reach(u32, u32).
@@ -34,14 +34,14 @@ REACH_SESSION_SOURCE = """
 """
 
 
-def _u32_columns(left: list[int], right: list[int]) -> list[torch.Tensor]:
+def _u32_columns(left: list[int], right: list[int]) -> "list[torch.Tensor]":  # type: ignore[name-defined]
     return [
         torch.tensor(left, device="cuda", dtype=torch.int32),
         torch.tensor(right, device="cuda", dtype=torch.int32),
     ]
 
 
-def _reach_relation_batches() -> tuple[dict[str, list[torch.Tensor]], dict[str, list[torch.Tensor]]]:
+def _reach_relation_batches() -> "tuple[dict[str, list[torch.Tensor]], dict[str, list[torch.Tensor]]]":  # type: ignore[name-defined]
     positives = {
         "reach": _u32_columns([1, 2, 3, 4], [3, 4, 5, 6]),
     }
