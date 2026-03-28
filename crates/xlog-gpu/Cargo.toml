@@ -2,6 +2,12 @@
 name = "xlog-gpu"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "GPU kernel orchestration for XLOG logic evaluation"
+readme = "../../README.md"
+keywords = ["logic", "probabilistic", "gpu", "cuda", "datalog"]
+categories = ["science", "mathematics"]
 
 [dependencies]
 xlog-core = { path = "../xlog-core" }

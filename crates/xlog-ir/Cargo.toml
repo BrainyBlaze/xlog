@@ -2,6 +2,12 @@
 name = "xlog-ir"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Intermediate representation for XLOG logic programs"
+readme = "../../README.md"
+keywords = ["logic", "probabilistic", "datalog", "compiler", "ir"]
+categories = ["science", "compilers"]
 
 [dependencies]
 xlog-core = { path = "../xlog-core" }

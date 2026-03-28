@@ -2,6 +2,12 @@
 name = "xlog-stats"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Statistical operations and aggregation for XLOG"
+readme = "../../README.md"
+keywords = ["logic", "probabilistic", "statistics", "aggregation", "gpu"]
+categories = ["science", "mathematics"]
 
 [dependencies]
 xlog-core = { path = "../xlog-core" }

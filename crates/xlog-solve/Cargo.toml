@@ -2,6 +2,12 @@
 name = "xlog-solve"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "GPU-accelerated solver for XLOG Datalog evaluation"
+readme = "../../README.md"
+keywords = ["logic", "probabilistic", "solver", "datalog", "gpu"]
+categories = ["science", "mathematics"]
 
 [dependencies]
 xlog-core = { path = "../xlog-core" }

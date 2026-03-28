@@ -2,6 +2,12 @@
 name = "xlog-logic"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Parser and logic layer for the XLOG language"
+readme = "../../README.md"
+keywords = ["logic", "probabilistic", "datalog", "parser", "inference"]
+categories = ["science", "compilers"]
 
 [dependencies]
 xlog-core = { path = "../xlog-core" }

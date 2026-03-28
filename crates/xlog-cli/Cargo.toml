@@ -2,6 +2,12 @@
 name = "xlog-cli"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Command-line interface for the XLOG probabilistic logic engine"
+readme = "../../README.md"
+keywords = ["logic", "probabilistic", "cli", "datalog", "gpu"]
+categories = ["command-line-utilities", "science"]
 
 [[bin]]
 name = "xlog"

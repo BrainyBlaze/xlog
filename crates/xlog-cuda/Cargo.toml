@@ -2,6 +2,12 @@
 name = "xlog-cuda"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CUDA kernel bindings and PTX management for XLOG"
+readme = "../../README.md"
+keywords = ["logic", "probabilistic", "cuda", "gpu", "datalog"]
+categories = ["science", "mathematics"]
 
 [dependencies]
 xlog-core = { path = "../xlog-core" }

@@ -2,6 +2,12 @@
 name = "pyxlog"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Python bindings for the XLOG probabilistic logic engine"
+readme = "../../README.md"
+keywords = ["logic", "probabilistic", "python", "pyo3", "gpu"]
+categories = ["science", "api-bindings"]
 
 [lib]
 name = "pyxlog"

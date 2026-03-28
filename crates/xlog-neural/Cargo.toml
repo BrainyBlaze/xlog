@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Neural network integration for XLOG probabilistic logic"
+readme = "../../README.md"
+keywords = ["logic", "probabilistic", "neural", "deep-learning", "gpu"]
+categories = ["science", "mathematics"]
 
 [lib]
 # `pyxlog` enables `pyo3/extension-module`, which makes Rust test binaries that link `pyo3` fail to
