@@ -44,7 +44,7 @@
 ### Build from Source
 
 ```bash
-git clone https://github.com/anthropics/xlog.git
+git clone https://github.com/xlog-project/xlog.git
 cd xlog
 cargo build --release
 ```
@@ -218,10 +218,10 @@ Gradients flow correctly through negated literals for neural-symbolic training.
 
 ---
 
-## Neural-Symbolic Training (v0.4.0-alpha)
+## Neural-Symbolic Training
 
 XLOG supports neural-symbolic integration where neural network outputs become probabilistic facts in logic programs.
-This infrastructure is now fully implemented and validated as part of the `v0.4.0-alpha` milestone.
+This infrastructure was introduced in `v0.4.0-alpha` and is fully validated as of `v0.5.0`.
 
 Current required neural example set:
 - `examples/neural/01_minimal`
