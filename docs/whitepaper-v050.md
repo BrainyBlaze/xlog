@@ -245,3 +245,180 @@ Standard stratified negation requires that no recursive cycle passes through a n
 WFS assigns three-valued truth to atoms: true, false, or undefined. The algorithm computes an alternating fixed point: (1) find the greatest unfounded set (atoms that cannot be supported by any rule), mark them false; (2) derive all consequences of the current knowledge, mark them true; (3) repeat until stable. Atoms that remain neither true nor false are classified as undefined. For probabilistic programs, true atoms receive normal probability and gradient computation, while false and undefined atoms are assigned probability zero with zero gradients -- matching ProbLog's conservative treatment of non-stratified programs.
 
 WFS is invoked automatically during provenance extraction when a non-monotone SCC is detected. The Monte Carlo engine also handles non-monotone programs: when cycles are detected during per-sample fixpoint evaluation, the MC engine uses the intersection of all states in the cycle (skeptical, invariant tuples only) as the interpretation, providing a deterministic semantics that avoids parity dependence on iteration count. An example program exercising this path is `examples/prob/04-nonmonotone-mc.xlog`, which defines the mutual-negation cycle `p :- flip. q :- not p. p :- not q.` and queries both `p` and `flip` under Monte Carlo inference.
+
+## 5 Neural-Symbolic Bridge
+
+The previous sections describe xlog as a purely symbolic system: Datalog evaluation on the GPU (Section 3), probabilistic inference through knowledge compilation (Section 4). This section introduces the neural-symbolic bridge -- the machinery that connects PyTorch neural networks to the probabilistic logic engine, enabling end-to-end differentiable learning where neural perception and logical reasoning are jointly trained.
+
+### 5.1 Neural Predicates
+
+In xlog, a neural network *is* a predicate. The `nn/4` declaration embeds a network directly into the Datalog program:
+
+```
+nn(network_name, [input_vars], output_var, [output_labels]) :: predicate(args).
+```
+
+This is not a foreign-function call or an escape hatch. The declaration states that evaluating predicate `predicate(args)` requires a forward pass through the named network. The network's softmax output over the label set becomes a distribution over probabilistic facts, which then participates in the standard knowledge compilation pipeline described in Section 4.
+
+On the Python side, networks are registered via the `pyxlog` API. The `CompiledProgram.register_network()` method accepts a PyTorch `nn.Module`, an optimizer, and optional configuration parameters:
+
+```python
+program.register_network("mnist_net", net, optimizer)
+```
+
+Under the hood, the Rust-side `NetworkRegistry` (in `crates/xlog-neural/src/registry.rs`) manages a collection of `NetworkHandle` instances, each holding a reference to the PyTorch module, optimizer, and optional learning rate scheduler. The `NetworkConfig` struct exposes builder-pattern configuration for batching (grouping multiple queries into a single forward pass), top-k sampling (restricting the output space when most classes have near-zero probability), deterministic mode (argmax instead of probabilistic sampling), and output caching (avoiding redundant forward passes for repeated inputs, up to a configurable cache size of 10,000 entries by default).
+
+The data flow through a neural predicate proceeds in two directions. **Forward:** when the logic engine encounters an `nn/4`-backed predicate during evaluation, it invokes the registered PyTorch module. The network's softmax output vector is decomposed into weighted probabilistic facts -- one per output label -- which are fed into the PIR/CNF/D4/XGCF compilation pipeline. Because the circuit structure depends on the logic program and not on the weight values, the compiled XGCF template is cached (Section 4.3) and only the leaf weights are updated on subsequent iterations. **Backward:** after the XGCF circuit computes the forward log-probability and backward gradients via level-parallel CUDA kernels, the per-leaf gradient buffers are exported as DLPack tensors and injected into PyTorch's autograd graph. The optimizer then updates the network parameters as usual. The Python GIL is released during GPU-resident work using `py.allow_threads()`, ensuring that CUDA kernel execution and GPU memory operations do not block the Python interpreter.
+
+### 5.2 End-to-End Training Loop
+
+To make the integration concrete, we walk through the MNIST addition example -- the canonical DeepProbLog benchmark. The task: given two MNIST digit images, predict their sum. The network never sees individual digit labels; it learns to classify digits purely from supervision on sums.
+
+**The logic program.** The complete xlog source (`examples/neural/01_minimal/minimal.xlog`) is:
+
+```
+// Neural predicate declaration
+// nn(network_name, [input_vars], output_var, [output_labels]) :: predicate(args).
+//
+// This declares that:
+// - 'mnist_net' is the name of the neural network
+// - [X] means the network takes one input (image at index X)
+// - Y is the output variable (the classified digit)
+// - [0,1,2,3,4,5,6,7,8,9] are the possible output labels (digit classes)
+// - digit(X, Y) is the resulting predicate
+//
+// The network's softmax output becomes probabilistic facts:
+//   P(digit(0, 0)) = network_output[0]
+//   P(digit(0, 1)) = network_output[1]
+//   ...
+//   P(digit(0, 9)) = network_output[9]
+nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
+
+// Addition rule
+// The sum of two digits at indices X and Y is Z.
+//
+// This uses probabilistic inference:
+// P(addition(0, 1, 7)) = sum over all (d1, d2) where d1 + d2 = 7 of:
+//                        P(digit(0, d1)) * P(digit(1, d2))
+//
+// For example, with d1=3, d2=4:
+// P(addition(0, 1, 7)) includes P(digit(0, 3)) * P(digit(1, 4))
+addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
+```
+
+Two lines of logic define the entire reasoning structure. The `nn/4` declaration connects the `mnist_net` CNN to a `digit/2` predicate. The addition rule computes all consistent decompositions of a sum through probabilistic marginalization.
+
+**The training script.** The Python driver (`examples/neural/01_minimal/train.py`) compiles the program, registers the network, and runs training through the `pyxlog.train_model_tensor` API:
+
+```python
+program = pyxlog.Program.compile("""
+    nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
+    addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
+""")
+
+program.register_network("mnist_net", net, optimizer)
+program.add_tensor_source("train", train_images)
+
+queries = generate_queries(n_pairs, train_labels)
+
+history = pyxlog.train_model_tensor(
+    program,
+    queries,
+    epochs=args.epochs,
+    batch_size=args.batch_size,
+    log_iter=args.log_iter,
+)
+```
+
+Each query has the form `addition(i, j, expected_sum)`. The training objective minimizes the negative log-probability of the query under the compiled circuit: `-log P(addition(i, j, s))`. The `train_model_tensor` function orchestrates the full loop: batching queries that share the same circuit template, running forward and backward passes over the cached XGCF circuit, and propagating gradients back to the PyTorch optimizer.
+
+**Training loop architecture.** The following diagram shows one training iteration:
+
+```
+  PyTorch Forward Pass
+  (CNN processes digit images)
+          |
+          v
+  Softmax outputs become leaf weights
+  in the probabilistic circuit
+          |
+          v
+  ┌─────────────────────────────────┐
+  │  XGCF Circuit (cached on GPU)  │
+  │  - Compiled once from D4       │
+  │  - Reused across all epochs    │
+  │  - Only leaf weights updated   │
+  └─────────────────────────────────┘
+          |
+    Forward pass: level-parallel CUDA kernels
+    compute log P(query)
+          |
+          v
+  NLL Loss = -log P(addition(i, j, s))
+          |
+    Backward pass: level-parallel CUDA kernels
+    compute d(loss)/d(leaf_weight)
+          |
+          v
+  Gradients exported via DLPack
+  (zero-copy GPU tensor sharing)
+          |
+          v
+  PyTorch Backward + Optimizer Step
+  (Adam updates CNN parameters)
+          |
+          v
+  Next iteration (circuit reused, new weights)
+```
+
+The critical performance property is that the circuit compilation (D4) happens once, during the first forward pass. All subsequent iterations reuse the cached XGCF structure, executing only the weight update and the level-parallel forward/backward kernels. This is the mechanism behind the 2.74x training speedup reported in Section 4.3.
+
+**Results.** On the MNIST addition benchmark (512 training images, 256 addition pairs, batch size 64, learning rate 1e-3, CUDA device), the xlog engine was evaluated over 5 training epochs with two random seeds:
+
+| Seed | Initial Loss | Final Loss | Improvement | Elapsed (s) |
+|------|-------------|------------|-------------|-------------|
+| 42   | 2.7779      | 2.5904     | 6.7%        | 20,987      |
+| 7    | 2.7797      | 2.5693     | 7.6%        | 21,963      |
+
+These runs use the full xlog pipeline -- compilation, circuit caching, GPU-resident forward/backward -- exercised through `pyxlog.train_model_tensor`. The loss reduction across 5 epochs confirms that gradients flow correctly from the circuit evaluation through the logic program back to the CNN parameters. The relatively long wall-clock times reflect the cold-start compilation cost (which is amortized across subsequent epochs) and the small-scale nature of these development-track validation runs.
+
+### 5.3 Term Embeddings (v0.5.0)
+
+Version 0.5.0 introduces a term embedding API that attaches dense vector representations to Datalog symbols. Where `nn/4` neural predicates map perception (images, text) to discrete logical facts, term embeddings go in the opposite direction: they give logical entities a continuous representation that can participate in neural computation.
+
+The Python API provides two methods on `CompiledProgram`:
+
+- **`register_embedding(name, module_or_tensor, trainable=True)`** accepts either a PyTorch `nn.Embedding` module or a raw 2D `torch.Tensor`. For `nn.Embedding`, the weight matrix shape `[vocab_size, dim]` is read from the module. For raw tensors, `trainable` must be `False` (frozen embeddings). The Rust-side `EmbeddingHandle` (in `crates/xlog-neural/src/handle.rs`) stores the module reference, dimensionality, vocabulary size, and trainability flag. Embeddings are registered in the same `NetworkRegistry` as neural predicates, keyed by name.
+
+- **`forward_embedding(name, ids)`** looks up embedding vectors by integer IDs, returning a batched `torch.Tensor` with shape `[len(ids), dim]`. For trainable `nn.Embedding` modules, the returned tensor carries autograd history, so gradients flow through the embedding lookup. For frozen tensors, the result has `requires_grad=False`. Internally, the method determines the device from the embedding weight tensor and creates the ID tensor on the same device to avoid CPU/CUDA mismatches.
+
+This API enables entity representation learning within the logic framework. For example, a knowledge graph completion task can attach learned embeddings to entity symbols, combine them with relational predicates in xlog rules, and jointly train the embeddings alongside neural perception networks. The embeddings are the only gradient-carrying embedding API in v0.5.0; future releases may integrate embedding lookups directly into the circuit evaluation path.
+
+### 5.4 Differentiable ILP (Beta)
+
+> **Note:** The differentiable ILP subsystem is in **beta** as of v0.5.0. The API surface, promotion pipeline, and artifact format may change in future releases. The schema version is `beta-v2`.
+
+xlog includes a differentiable inductive logic programming (dILP) trainer that learns first-order rules from examples. Unlike the neural predicate path (which trains network parameters given fixed rules), dILP searches the space of candidate rules, using gradient-based optimization to assign soft probabilities to candidates and hard selection to commit the best rule.
+
+**Sparse GPU mask API.** A key scalability challenge in dILP is the candidate mask computation. For a program with `R` relations of arity `A`, the naive candidate space is `O(R^A)`, which can easily reach millions of candidates. Materializing a dense `N x N x N` mask on the Python side is prohibitive. The `CompiledIlpProgram` class (in `crates/pyxlog/src/ilp.rs`) provides three sparse mask methods of increasing strictness:
+
+- `set_rule_mask_sparse(name, candidate_ids, soft_probs_dlpack, budget)` -- accepts a DLPack GPU tensor of soft probabilities, performs deterministic top-k selection on the Rust side, and stores a sparse `IlpMask` without dense materialization.
+- `set_rule_mask_sparse_selected(name, selected_candidate_ids, selected_soft_probs_dlpack)` -- the caller preselects candidate IDs, avoiding the full-vector probability download entirely.
+- `set_rule_mask_sparse_device(name, ...)` -- the strictest path where selected candidate IDs remain as a device tensor, with Rust resolving them against a fixed candidate order uploaded via `set_candidate_map()`.
+
+The GPU loss/gradient computation (`compute_ilp_loss_grad_gpu`) builds a sparse COO structure from the per-entry membership masks, converts it to CSR via device-side sort, and launches forward (credit gather + NLL loss) and backward (gradient scatter) CUDA kernels. The entire credit/loss path is GPU-resident with zero host transfers when using the strict sparse device mask.
+
+**Six-gate promotion pipeline.** When training converges and a candidate rule is selected, xlog does not blindly commit it to the program. Instead, the rule passes through a six-gate promotion pipeline:
+
+1. **Convergence gate** -- verifies that training actually converged (loss plateau, discreteness threshold).
+2. **Novel-rate audit** -- checks the fraction of new derivations the rule produces; a configurable `max_novel_rate` threshold catches rules that overgenerate.
+3. **Regression check** -- ensures the new rule does not invalidate existing derivations for protected relations.
+4. **Holdout F1 gate** -- evaluates the candidate on held-out examples using k-fold cross-validation (default 5 folds, threshold 0.95 F1).
+5. **Ambiguity scan** -- detects when multiple candidates have similar soft probabilities, optionally reporting `ambiguous_alternatives` for manual review.
+6. **Typed schema validation** -- when `typed_schema_required=True`, verifies that the candidate rule's variable bindings respect declared type annotations on relations.
+
+A rule that fails any gate receives a `PromotionStatus` of `GATE_FAILED` or `MANUAL_REVIEW_REQUIRED`, with per-gate `GateResult` details. Only rules that pass all six gates are committed.
+
+**Hard-negative mining.** The `TrainConfig.max_mined_negatives` parameter enables hard-negative mining: the trainer identifies examples that the current candidate rule incorrectly covers and adds them as negative examples for subsequent training rounds. This improves precision for rules operating in domains with many near-miss patterns.
+
+**Artifact persistence.** Learned rules are serialized as `LearnedArtifact` objects containing the candidate map, final logits, soft probabilities, hard selection, discovered rule text, full `TrainConfig` snapshot, and training telemetry. The `save()` method writes JSON with SHA-256 hashes computed over both the candidate map and the configuration snapshot, enabling integrity verification on `load(path, verify_hash=True)`. The schema version (`beta-v2`) is validated on load to prevent silent format incompatibilities. For strict GPU-native training paths where logits and probabilities remain device-resident, a `StrictLearnedArtifact` variant defers host materialization until `export_compat_artifact()` is explicitly called, avoiding unnecessary device-to-host transfers during automated pipeline runs.
