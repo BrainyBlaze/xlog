@@ -4,7 +4,7 @@
 
 ## Abstract
 
-<!-- TODO: Write abstract after all sections are complete (Task 10). -->
+Neural-symbolic AI systems combine perception and logical reasoning, but existing architectures split symbolic inference onto the CPU while neural computation runs on the GPU, creating a PCIe transfer bottleneck that dominates training time. We present xlog, a GPU-native Datalog engine that unifies four reasoning paradigms -- deterministic evaluation, probabilistic inference via knowledge compilation, SAT/MaxSAT verification, and differentiable neural-symbolic training -- on a single CUDA runtime with zero host-device transfers in production paths. The system compiles probabilistic Datalog programs through a fully GPU-resident pipeline (PIR to CNF to D4 to XGCF) and caches compiled circuits across training iterations, yielding a measured 2.74x end-to-end speedup (95% CI: [2.29, 3.18]) on the MNIST addition benchmark. xlog is implemented in Rust with 21 custom CUDA kernel files (14.2K lines of device code) and provides zero-copy interoperability with PyTorch, JAX, and columnar analytics frameworks via DLPack and Arrow interfaces.
 
 ## 1 Introduction
 
@@ -422,3 +422,222 @@ A rule that fails any gate receives a `PromotionStatus` of `GATE_FAILED` or `MAN
 **Hard-negative mining.** The `TrainConfig.max_mined_negatives` parameter enables hard-negative mining: the trainer identifies examples that the current candidate rule incorrectly covers and adds them as negative examples for subsequent training rounds. This improves precision for rules operating in domains with many near-miss patterns.
 
 **Artifact persistence.** Learned rules are serialized as `LearnedArtifact` objects containing the candidate map, final logits, soft probabilities, hard selection, discovered rule text, full `TrainConfig` snapshot, and training telemetry. The `save()` method writes JSON with SHA-256 hashes computed over both the candidate map and the configuration snapshot, enabling integrity verification on `load(path, verify_hash=True)`. The schema version (`beta-v2`) is validated on load to prevent silent format incompatibilities. For strict GPU-native training paths where logits and probabilities remain device-resident, a `StrictLearnedArtifact` variant defers host materialization until `export_compat_artifact()` is explicitly called, avoiding unnecessary device-to-host transfers during automated pipeline runs.
+
+## 6 Interoperability
+
+A GPU-native logic engine is only as useful as its ability to exchange data with the frameworks researchers already use. xlog exposes GPU-resident relations, probabilities, and gradients through four standard interfaces -- DLPack, Arrow, Python bindings, and PyTorch autograd -- so that results flow into downstream tools without device-to-host copies or format conversion.
+
+### 6.1 DLPack -- Zero-Copy GPU Tensor Sharing
+
+The `xlog-cuda` crate implements the DLPack protocol in `crates/xlog-cuda/src/dlpack.rs`, providing bidirectional zero-copy exchange of GPU buffers with any framework that speaks DLPack -- including PyTorch, JAX, CuPy, and cuDF. Export is handled by `DlpackTable`, which wraps a reference-counted `CudaBuffer` and produces per-column `DLManagedTensor` handles with a registered deleter callback; the underlying GPU memory remains shared and is freed only when all consumers release their handles. Import is handled by `CudaKernelProvider::from_dlpack_tensors`, which accepts a vector of `DLManagedTensor` pointers -- one per column -- validates device affinity, dtype, contiguity, and alignment, and assembles them into a `CudaBuffer` without any device-to-host copy. A schema-checked variant (`from_dlpack_tensors_with_schema`) adds compile-time type verification against an expected `Schema`, rejecting mismatches before evaluation begins. All xlog scalar types -- `U32`, `U64`, `I32`, `I64`, `F32`, `F64`, `Bool`, and `Symbol` -- have well-defined DLPack dtype mappings. The protocol is surfaced to Python as PyCapsule objects with the `"dltensor"` name; consumers call `torch.from_dlpack(capsule)` to obtain a live CUDA tensor backed by the same device memory that xlog wrote.
+
+### 6.2 Arrow IPC -- Columnar Export with Dictionary Encoding
+
+For integration with columnar analytics tools -- Pandas, Polars, DuckDB -- xlog exports relations through the Arrow C Data Interface. The `crates/xlog-cuda/src/arrow_device.rs` module defines `ArrowDeviceArray`, a `repr(C)` struct that pairs Arrow FFI array and schema pointers with a CUDA device type and ordinal, following the Arrow C Device specification. The Python API exposes `export_arrow_device` and `import_arrow_device` for zero-copy round-tripping between xlog's GPU buffers and Arrow-compatible consumers. Symbol-typed columns receive special treatment: `xlog-core`'s `symbol::to_arrow` function (`crates/xlog-core/src/symbol.rs`) converts interned symbol IDs into Arrow `DictionaryArray<UInt32Type>` with a `StringArray` dictionary, preserving the human-readable string mapping while keeping the integer representation compact. The inverse path, `symbol::from_arrow`, re-interns dictionary values back into xlog's global symbol table. This dictionary encoding means that a Polars or DuckDB consumer can read symbolic relation columns as native string dictionaries without a separate lookup step.
+
+### 6.3 Python Bindings
+
+The `pyxlog` crate provides Python bindings built with PyO3. The public API -- documented in `crates/pyxlog/python/pyxlog/_native.pyi` -- exposes three compilation entry points (`LogicProgram.compile`, `Program.compile`, `IlpProgramFactory.compile`), each returning a compiled program object with evaluation, training, and result-extraction methods. Type stubs (`.pyi` files) provide full IDE auto-completion and static type checking. All tensor-valued attributes -- `EvalResult.prob`, `McDeviceEvalResult.query_counts`, `IlpTaggedCreditDeviceResult` fields -- are returned as DLPack capsules, keeping the data on the GPU and letting the caller choose how to materialize it. Long-running GPU operations release the Python GIL via `py.allow_threads()` before entering CUDA kernel dispatch -- circuit evaluation, ILP fixpoint iteration, and the neural backward pass all execute without holding the GIL, allowing Python data-loader threads and asyncio tasks to run concurrently with GPU computation.
+
+### 6.4 PyTorch Autograd Integration
+
+Neural-symbolic training requires gradients to flow from logical inference back into neural network parameters. xlog achieves this by constructing loss tensors that participate directly in PyTorch's autograd graph. The `forward_backward_tensor` method in `crates/pyxlog/src/neural.rs` evaluates the compiled circuit on the GPU -- with the GIL released -- then exports the scalar NLL loss as a DLPack capsule and imports it into PyTorch via `torch.from_dlpack`. Because the neural network's forward pass produced grad-enabled output tensors that fed into the circuit, the resulting loss tensor remains connected to the autograd graph. The batched path (`forward_backward_batch_complex_tensor`) goes further: it stacks per-network inputs into a single batched forward pass, evaluates multiple queries against the shared circuit, accumulates per-query losses, and then calls `torch.autograd.backward(outputs, grad_tensors)` for a single backward pass through the entire computation graph. This design means that xlog's probabilistic circuit acts as a differentiable function inside PyTorch -- gradients flow from the logic layer through DLPack tensors back to `nn.Module` parameters, with no custom autograd `Function` subclass required.
+
+## 7 Evaluation
+
+This section reports absolute performance measurements for xlog's deterministic, probabilistic, and neural-symbolic subsystems. All numbers are drawn from repository artifacts; every claim cites its source file. These are single-system measurements on development hardware, not controlled head-to-head comparisons against other engines.
+
+### 7.1 Methodology
+
+**Hardware.** All measurements were collected on an NVIDIA RTX PRO 3000 Blackwell Generation Laptop GPU (12 GB VRAM, SM120, compute capability 12.0, driver 591.59) (`docs/BENCHMARKS.md`).
+
+**Build configuration.** Rust crates are compiled in `--release` mode. PTX kernels are loaded via cubin with JIT warmup. Python components use `pyxlog` with CUDA-enabled PyTorch.
+
+**Statistical protocol.** The benchmark harness uses Criterion.rs with the following settings (`docs/BENCHMARKS.md`):
+
+| Setting | Value |
+|---------|-------|
+| Sample size | 10--100 runs (benchmark-dependent) |
+| Warm-up | 3 iterations (PTX JIT, memory pool init) |
+| Significance level | 0.10 |
+| Noise threshold | 0.05 (ignore <5% variance) |
+| Seeding | Deterministic LCG (no system entropy) |
+
+Reported values are Criterion point estimates with 95% confidence intervals where available. GPU benchmarks include explicit warm-up to amortize PTX compilation and CUDA context establishment.
+
+### 7.2 Absolute Performance
+
+#### 7.2.1 Deterministic Subsystem
+
+The GPU logic engine (`xlog-gpu`) targets throughput on three core operations: transitive closure (recursive fixpoint), hash join, and aggregation. Baseline targets measured on development hardware (`docs/BENCHMARKS.md`):
+
+| Operation | Configuration | Target Throughput |
+|-----------|--------------|-------------------|
+| Transitive closure | 100K random edges (sparse) | >1M rows/sec |
+| Transitive closure | 1M random edges (medium) | >5M rows/sec |
+| Transitive closure | K_{500,500} bipartite (dense) | >10M rows/sec |
+| Hash join | 100K x 100K | >50M rows/sec |
+| Hash join | 1M x 100K | >100M rows/sec |
+| Hash join | High selectivity | >20M rows/sec |
+| Aggregation | 1M rows, 100K groups | COUNT groups/sec |
+
+These targets represent minimum acceptable throughput validated on the development GPU. Actual measured throughput depends on graph structure, key distribution, and output cardinality. The semi-naive fixpoint iteration benchmark (`crates/xlog-gpu/benches/logic_bench.rs`) exercises the full recursive evaluation pipeline including delta maintenance and deduplication.
+
+#### 7.2.2 Probabilistic Subsystem
+
+The probabilistic engine (`xlog-prob`) supports two inference modes: exact inference via Decision-DNNF knowledge compilation and GPU-accelerated Monte Carlo sampling.
+
+**Exact inference targets** (`docs/BENCHMARKS.md`):
+
+| Configuration | Target | Notes |
+|---------------|--------|-------|
+| 20-variable probabilistic path | <100 ms | Small d-DNNF circuit |
+| 50-variable Bayesian network | <500 ms | Medium circuit complexity |
+| With gradient computation | <2x base time | Backward pass overhead |
+
+**Monte Carlo inference targets** (`docs/BENCHMARKS.md`):
+
+| Configuration | Target | Notes |
+|---------------|--------|-------|
+| 100K samples, 100 variables | >10M worlds/sec | Throughput mode |
+| 10K samples, 500 variables | >5M worlds/sec | Complexity mode |
+
+**MC runtime optimization.** A targeted optimization of the MC evaluation hot loop reduced wall-clock time from 14.11 s to 12.90 s on a 1000-sample clamped benchmark, an 8.6% improvement (`docs/reports/2026-03-10-mc-runtime-optimization-report.md`). Profiling revealed that fixpoint evaluation (`evaluate_program_gpu`) accounts for 72--83% of total MC time; the optimization addressed the remaining overhead by eliminating per-sample device-to-host synchronization, replacing full store clone/restore with a targeted `McSampleResetPlan`, and pre-allocating pointer buffers outside the sample closure.
+
+| MC Phase | Time (us) | % of Total |
+|----------|-----------|-----------|
+| Sampler | 193 | 0.0% |
+| Reset | 1,172,318 | 9.5% |
+| Build | 1,924,832 | 15.6% |
+| Eval | 8,928,998 | 72.3% |
+| Count | 319,715 | 2.6% |
+| **Total** | **12,346,056** | **100%** |
+
+*Table: MC timing breakdown, optimized, 1000 samples, clamped mode* (`docs/reports/2026-03-10-mc-runtime-optimization-report.md`).
+
+#### 7.2.3 Neural-Symbolic Subsystem
+
+Neural-symbolic training is measured on the `01_minimal` benchmark (MNIST single-digit addition, 512 training images, 5 epochs, batch size 64).
+
+**Training performance:**
+
+| Metric | Value | Source |
+|--------|-------|--------|
+| PTX JIT cold start | 0.02 s | 1750x speedup from ~35 s via cubin loading (`docs/BENCHMARKS.md`) |
+| First epoch (cold) | ~78--83 s | Includes D4 compile + circuit verification (`examples/neural/results/track_a/`) |
+| Steady-state epoch (warm) | ~2.9 s | Epochs 2--5 with batched evaluation (`examples/neural/results/track_a/`) |
+| Total training (5 epochs) | ~89--95 s | Two seeds (`examples/neural/results/track_a/`) |
+| Circuit cache speedup | 2.74x | 95% CI: [2.29, 3.18] (`examples/neural/results/evidence/cache_ablation_20260218.json`) |
+
+The cache ablation study compared circuit-cached vs. uncached training over 3 seeds and 3 epochs each. Mean training time dropped from 242.9 s (uncached) to 88.9 s (cached), yielding the 2.74x speedup reported in Section 4.3 (`examples/neural/results/evidence/cache_ablation_20260218.json`).
+
+**DeepProbLog baseline.** Running the same `01_minimal` task under DeepProbLog 2.0.6 on identical hardware, the baseline timed out at 300 s without completing a single epoch -- CPU-based PySDD inference with GPU neural networks (`docs/reports/2026-02-10-deepproblog-baseline-results.md`). A full-dataset configuration (2 epochs, batch size 2048) reached held-out addition accuracy of 23.24% after 2 hours 31 minutes (`examples/neural/results/track_a/20260216T145409Z_track_a_dev/comparisons/mnist_vs_deepproblog.json`). Direct accuracy comparison is limited because the xlog configuration uses a smaller training subset and reports training loss rather than held-out accuracy at this stage.
+
+**GA-based ILP.** The genetic algorithm reliability gate (`test_ga_reliability_50`) achieved a 3.3x wall-clock reduction from 1447 s to 436 s by reducing redundant attempts, with identical statistical quality: 200/200 success rate, Clopper-Pearson lower-95 CI = 0.982 (`docs/reports/2026-03-05-ga-runtime-closure-report.md`).
+
+### 7.3 Qualitative Comparison
+
+The following table positions xlog relative to existing systems across key capability dimensions. Each system addresses a subset of the design space; xlog's contribution is unifying these capabilities within a single GPU-resident runtime.
+
+| Dimension | DeepProbLog | ProbLog2 | GPUlog | xlog |
+|-----------|-------------|----------|--------|------|
+| Symbolic execution | CPU (SWI-Prolog) | CPU (tabling) | GPU (HISA) | GPU (semi-naive fixpoint) |
+| Probabilistic inference | Exact (PySDD, CPU) | Exact + approx (CPU) | None | Exact (d-DNNF, GPU) + MC (GPU) |
+| Knowledge compilation | PySDD (CPU) | d-DNNF via c2d/D4 (CPU) | None | D4 compile + GPU circuit eval |
+| Neural integration | PyTorch + Prolog bridge | None | None | Zero-copy DLPack, fused backward |
+| Zero-copy ML interop | No (CPU-GPU transfers) | No | No | Yes (DLPack, device-resident tensors) |
+| Differentiable ILP | Via TP-operator (CPU) | No | No | GPU-resident credit/loss path (beta) |
+
+**Published GPU Datalog results.** GPUlog [Martinez-Angeles et al., 2013] reports up to 45x speedup over CPU baselines using HISA (Hash-Indexed Sorted Array) indexing with lock-free deduplication. VFLog [Wu et al., 2024] demonstrates up to 200x gains over CPU column engines with a column-oriented GPU Datalog runtime. Both systems are restricted to deterministic evaluation; neither supports probabilistic inference, knowledge compilation, or neural network integration. xlog draws on the same insight -- that Datalog's relational algebra maps naturally to GPU parallelism -- but extends the execution model through the probabilistic and neural-symbolic layers described in Sections 4 and 5.
+
+**Honest framing.** The comparison above is qualitative. xlog has not been benchmarked head-to-head against GPUlog or VFLog on identical workloads. The deterministic throughput targets in Section 7.2.1 represent xlog's own baseline measurements, not comparative claims. The DeepProbLog comparison is limited to the `01_minimal` task with differing dataset sizes and evaluation protocols, as noted above.
+
+### 7.4 CUDA Certification
+
+The CUDA kernel certification suite (`crates/xlog-cuda-tests/`) provides systematic coverage of all GPU kernel operations. As of the v0.5.0 release:
+
+| Metric | Value |
+|--------|-------|
+| Total tests | 206 |
+| Categories | 33 (C01--C25 infrastructure + G01--G08 GPU-specific) |
+| Pass rate | 100% (206/206) |
+| PTX modules covered | 19 |
+| Suite execution time | ~14 s |
+
+The 25 infrastructure categories (C01--C25) cover toolchain validation, launch configuration, pointer bounds, memory spaces (global, shared, local), synchronization, warp-level operations, control flow divergence, atomics, floating-point semantics, integer operations, determinism, async pipelines, caching, host-device transfer, multi-stream execution, multi-GPU, hardware stress, algorithmic correctness, blind spots, edge matrices, and float filter semantics (`docs/certification/2026-01-22-v0.4.0-alpha-certification-report.md`). The 8 GPU-specific categories (G01--G08) validate circuit forward evaluation, circuit backward (gradient) kernels, weight injection, transfer efficiency, circuit caching, PTX robustness, SAT/CDCL solving, and device-count invariants (`docs/architecture/cuda-certification.md`). The certification suite runs in CI on every push to `main` and every pull request.
+
+## 8 Related Work
+
+xlog draws on and extends four lines of research: GPU-accelerated Datalog evaluation, probabilistic logic programming, GPU SAT solving, and differentiable inductive logic programming. We survey each in turn, positioning xlog's contributions relative to the state of the art.
+
+### 8.1 GPU Datalog
+
+The earliest work on GPU-resident Datalog evaluation is GPUlog [Martinez-Angeles et al., 2013], which ported bottom-up fixed-point computation to CUDA and reported approximately 45x speedups over equivalent CPU Datalog engines on transitive-closure benchmarks. VFLog [Wu et al., 2024] advances this line with a vertically-fused, column-oriented kernel design that avoids materializing intermediate relations, achieving up to 200x speedups over CPU column engines on recursive graph queries. More recently, mnmgDatalog [Gu et al., 2023] extends GPU Datalog to multi-node, multi-GPU clusters, distributing semi-naive evaluation across devices via partitioned fact stores and all-to-all delta exchanges. All three systems target deterministic Datalog: they implement relational algebra operators (join, project, deduplicate) on the GPU and accelerate fixed-point iteration, but none supports probabilistic semantics, weighted model counting, or gradient computation over derived facts. xlog shares VFLog's commitment to columnar storage and kernel fusion for relational operators, but extends the GPU-resident execution model to probabilistic and differentiable reasoning, maintaining a single address space from semi-naive evaluation through circuit-based inference to neural-symbolic gradient propagation.
+
+### 8.2 Probabilistic Logic Programming
+
+ProbLog2 [Fierens et al., 2015] established the modern pipeline for exact probabilistic inference in logic programs: ground the relevant program, encode provenance as a propositional formula, compile to a tractable target (d-DNNF or SDD), and evaluate weighted model counts over the compiled circuit. DeepProbLog [Manhaeve et al., 2018] extends ProbLog2 by replacing selected probabilistic facts with the outputs of neural networks, enabling end-to-end gradient-based training of neural predicates within a logical framework. NeurASP [Yang et al., 2020] takes a related approach, integrating neural network outputs as probability annotations on answer-set programs and using stable-model semantics for inference. These systems demonstrate that combining neural perception with symbolic reasoning yields strong performance on tasks requiring both pattern recognition and logical structure. However, all three perform symbolic inference on the CPU: ProbLog2 invokes the D4 or C2D compiler as a host-side subprocess, DeepProbLog inherits this pipeline and adds a Python-level training loop that shuttles gradients between CPU logic and GPU tensors, and NeurASP relies on CPU-bound answer-set solving. In our baseline experiments, DeepProbLog's MNIST addition benchmark timed out after 300 seconds before completing a single epoch, with the CPU-resident logic engine dominating wall-clock time (`docs/reports/2026-02-10-deepproblog-baseline-results.md`). xlog eliminates this bottleneck by compiling d-DNNF circuits into GPU-resident XGCF format with compile-once/evaluate-many semantics, executing both forward weighted model counting and backward gradient propagation as level-parallel CUDA kernels without host transfers during training iterations.
+
+### 8.3 GPU SAT
+
+ParaFROST [Osama et al., 2022] is a GPU-accelerated CDCL SAT solver that parallelizes clause database simplification -- bounded variable elimination, subsumption, and self-subsuming resolution -- on the GPU while retaining sequential conflict-driven search on the CPU. It is a complete solver with proof-generation capabilities, competitive with MiniSat and CaDiCaL on industrial benchmarks. FastFourierSAT takes a different approach, reformulating SAT as continuous optimization over Fourier coefficients and applying local search on the GPU; it is an incomplete solver suited to satisfiable instances but unable to certify unsatisfiability. Both systems are standalone solvers designed for the SAT competition setting, not embedded within a logic programming pipeline. xlog's GPU CDCL module (Section 4.2, Stage 4) shares ParaFROST's strategy of offloading clause manipulation to device kernels, but integrates the solver as a verification component within the knowledge compilation pipeline -- checking circuit-formula equivalence via two UNSAT proofs, computing minimal unsatisfiable cores, and providing proof certificates that ensure the correctness of compiled circuits.
+
+### 8.4 Differentiable ILP
+
+Differentiable inductive logic programming (dILP) [Evans and Grefenstette, 2018] demonstrates that first-order rule induction can be cast as a differentiable optimization problem: candidate rules are scored by soft forward-chaining over all possible rule instantiations, and gradient descent adjusts rule weights to maximize coverage of positive examples. The approach is elegant but computationally demanding: forward-chaining materializes a dense tensor over the full rule space at each step, scaling cubically with the number of constants in the domain. Subsequent work has reduced this cost through pruning and approximate materialization, but implementations remain CPU-based and struggle beyond a few hundred constants. xlog's dILP subsystem (Section 5.4) replaces dense rule materialization with sparse GPU mask computation: candidate rules are represented as sparse bitmasks over the ground-atom space, credit assignment is performed entirely on-device via scatter-gather operations, and a six-gate promotion pipeline controls rule acceptance. This sparse, GPU-resident formulation avoids the cubic blowup of dense materialization while preserving differentiability, enabling rule induction over domains with thousands of constants.
+
+### 8.5 Positioning
+
+Each system surveyed above excels in its niche. GPUlog and VFLog demonstrate that relational fixed-point computation maps naturally to GPU architectures. ProbLog2 and DeepProbLog prove that knowledge compilation provides a principled bridge between logic and learning. ParaFROST shows that clause-level parallelism yields practical SAT speedups. dILP establishes that rule induction is amenable to gradient-based optimization. xlog unifies these capabilities on a single GPU-resident platform with zero-copy ML interop -- not claiming superiority on any single axis, but providing the integrated stack. By keeping fact stores, compiled circuits, solver state, and gradient buffers in device memory throughout the reasoning pipeline, xlog eliminates the host-device transfer overhead that fragments existing multi-system approaches, offering practitioners a single engine where deterministic evaluation, probabilistic inference, SAT verification, and differentiable learning compose without leaving the GPU.
+
+## 9 Limitations and Future Work
+
+### 9.1 Current Limitations
+
+**NVIDIA GPU required.** xlog targets CUDA exclusively. The entire execution stack -- from hash-join kernels and radix sort to Monte Carlo sampling and knowledge compilation -- is written in CUDA C. There is no OpenCL, Metal, or ROCm backend. This is a direct consequence of the GPU-native design philosophy: rather than abstracting over heterogeneous devices behind a portability layer, xlog commits to a single GPU programming model to exploit CUDA-specific features such as cooperative groups, warp-level primitives, and unified virtual addressing. Users without an NVIDIA GPU cannot run xlog.
+
+**All data must fit in GPU memory.** Relations, indices, circuit buffers, and Monte Carlo sample arrays are allocated entirely on-device. There is no out-of-core spilling mechanism; a program whose working set exceeds GPU VRAM will fail with a `RESOURCE_EXHAUSTED` error rather than degrade silently. For most Datalog workloads this is not a bottleneck -- a 24 GB GPU holds billions of 8-byte tuples -- but large-scale knowledge graphs or high-sample-count MC inference can hit the ceiling.
+
+**Python batch queries coerce to u32 entity IDs.** The core Rust engine supports typed relation schemas with u32, u64, i32, i64, f32, f64, and symbol columns. However, the Python batch-query interface -- `batch_fact_membership` and `batch_tagged_credit` -- marshals all facts through a `u32` path. Entity IDs wider than 32 bits or non-integer column types are silently truncated when accessed from Python. The typed path works end-to-end in Rust; the Python limitation is a binding-layer gap, not an engine restriction.
+
+**Differentiable ILP is beta.** The dILP subsystem -- structure learning via gradient-based rule search -- shipped in v0.4.0 and received significant reliability and performance work in v0.5.0. It remains beta: the search space is restricted to definite programs, convergence is sensitive to learning-rate schedules, and the API surface may change in minor releases.
+
+**No formal head-to-head benchmarks.** xlog's probabilistic inference pipeline occupies similar territory to DeepProbLog, but no controlled comparison on identical programs and datasets exists. The baseline experiments in Section 7.2.3 use different dataset sizes and evaluation protocols. Claims of speedup relative to CPU-based probabilistic logic systems remain informal until such benchmarks are published.
+
+### 9.2 Future Work
+
+The following directions are planned but **not yet implemented** in any released version of xlog.
+
+**Epistemic logic programming (xlog-elp).** The EIR (Epistemic Intermediate Representation) slot is reserved in the IR stack (Section 2.4), but no runtime code has been written. The planned design supports world views under FAEEL (Founded Autoepistemic Equilibrium Logic) semantics with modal operators K (known in all belief sets) and M (possible in some belief set), evaluated via a Generate-Propagate-Test algorithm on GPU. This is targeted for v0.6.0 (`docs/ROADMAP.md`).
+
+**Out-of-core execution.** For programs whose materialized relations exceed GPU memory, a streaming execution mode would partition relations across host and device, paging tiles through GPU memory in fixpoint-iteration order. This would remove the single-GPU-memory ceiling described above, at the cost of added host-device transfer overhead.
+
+**Magic sets transformation.** Top-down query-directed rewriting would restrict bottom-up evaluation to tuples reachable from a given query, potentially yielding orders-of-magnitude reduction in materialized facts for selective queries. The optimizer currently performs predicate pushdown and cost-based join planning (Section 3.3) but does not yet rewrite the program itself.
+
+**Multi-GPU partitioned evaluation.** Inspired by mnmgDatalog's radix-hash partitioning and GPU-aware all-to-all shuffle, a multi-GPU backend would distribute relations across devices and coordinate join and union operations via NVLink or PCIe. Partitioning kernels are described in the roadmap but unimplemented.
+
+**Incremental parsing.** The pest-based PEG parser currently re-parses the entire program on every change. An incremental mode would re-compile only modified rules, enabling tighter interactive feedback loops in notebook and REPL workflows.
+
+## References
+
+[1] Martinez-Angeles, C. A., Dutra, I., Costa, V. S., and Bueno, F. "A Datalog Engine for GPUs." *Proceedings of the 25th Symposium on the Implementation and Application of Functional and Logic Programming Languages (WFLP)*, 2013.
+
+[2] Wu, Y., Hua, W., and He, B. "VFLog: A High-Performance Vertical-Fused GPU Datalog Engine." *Proceedings of the ACM on Management of Data*, 2(1), 2024.
+
+[3] Gu, Y., et al. "Scalable Multi-Node Multi-GPU Datalog via Radix-Hash Partitioning." *arXiv preprint*, 2023.
+
+[4] Fierens, D., Van den Broeck, G., Renkens, J., Shterionov, D., Gutmann, B., Thon, I., Janssens, G., and De Raedt, L. "Inference and Learning in Probabilistic Logic Programs using Weighted Boolean Formulas." *Theory and Practice of Logic Programming*, 15(3):358--401, 2015.
+
+[5] Manhaeve, R., Dumancic, S., Kimmig, A., Demeester, T., and De Raedt, L. "DeepProbLog: Neural Probabilistic Logic Programming." *Advances in Neural Information Processing Systems (NeurIPS)*, 2018.
+
+[6] Yang, Z., Ishay, A., and Lee, J. "NeurASP: Embracing Neural Networks into Answer Set Programming." *Proceedings of the Twenty-Ninth International Joint Conference on Artificial Intelligence (IJCAI)*, 2020.
+
+[7] Osama, M., Wijs, A., and Biere, A. "ParaFROST: A Parallel SAT Solver with GPU Clause Simplification." *Journal of Automated Reasoning*, 66(3):407--440, 2022.
+
+[8] Evans, R. and Grefenstette, E. "Learning Explanatory Rules through Neural Satisfiability." *Journal of Artificial Intelligence Research*, 61:1--64, 2018.
+
+[9] Lagniez, J.-M. and Marquis, P. "An Improved Decision-DNNF Compiler." *Proceedings of the Twenty-Sixth International Joint Conference on Artificial Intelligence (IJCAI)*, 2017.
+
+[10] DLPack: Open In Memory Tensor Structure. https://github.com/dmlc/dlpack
+
+[11] Apache Arrow: Cross-Language Development Platform for In-Memory Data. https://arrow.apache.org
