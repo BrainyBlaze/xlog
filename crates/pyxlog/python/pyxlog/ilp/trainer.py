@@ -655,6 +655,10 @@ def _run_single_attempt_strict_relations(
         last_cand_probs: torch.Tensor | None = None
         last_logits: torch.Tensor | None = None
         last_loss: torch.Tensor | None = None
+        _prev_argmax_id: int = -1
+        _stable_count: int = 0
+        _steps_used: int = step_budget
+        _EARLY_STOP_STABLE: int = 5
 
         for step in range(step_budget):
             try:
@@ -707,6 +711,20 @@ def _run_single_attempt_strict_relations(
                 cand_probs.backward(credit_grad)
                 optimizer.step()
 
+                # Early stopping: if argmax candidate is stable for N steps
+                # in the second half of training, stop. The first half is
+                # warmup for Gumbel-softmax exploration.
+                _cur_argmax = int(W.argmax())
+                if _cur_argmax == _prev_argmax_id:
+                    _stable_count += 1
+                else:
+                    _stable_count = 0
+                    _prev_argmax_id = _cur_argmax
+                if _stable_count >= _EARLY_STOP_STABLE and step >= step_budget // 2:
+                    _steps_used = step + 1
+                    last_logits = W.detach().clone()
+                    break
+
                 d2h_count = prog.d2h_transfer_count()
                 if d2h_count > 0:
                     context = _attempt_context(
@@ -750,7 +768,7 @@ def _run_single_attempt_strict_relations(
         return _finalize_strict_attempt(
             config,
             attempt_idx,
-            step_budget,
+            _steps_used,
             rel_names,
             candidates,
             n,

@@ -260,7 +260,11 @@ def test_train_on_compiled_relations_matches_inline_fact_candidate_surface():
     assert inline_result.strict_gpu_native is True
     assert len(relation_result.artifact.candidate_map) == len(inline_result.artifact.candidate_map)
     assert relation_result.attempt_count == inline_result.attempt_count
-    assert relation_result.total_steps == inline_result.total_steps
+    # With early stopping in the strict relations path, total_steps may differ
+    # (relation path stops early when argmax stabilizes). Both should still
+    # discover the same rule and converge.
+    assert relation_result.total_steps <= inline_result.total_steps
+    assert relation_result.discovered_rule == inline_result.discovered_rule
 
 
 def test_train_on_compiled_relations_strict_result_exposes_winner_metadata():
