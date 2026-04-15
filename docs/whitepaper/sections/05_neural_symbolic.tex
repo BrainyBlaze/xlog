@@ -1,2 +1,163 @@
 \section{Neural-Symbolic Bridge}\label{sec:nesy}
-% TODO(Task 7): port Section 5 from docs/whitepaper-v050.md lines 249-425.
+
+The previous sections describe xlog as a purely symbolic system: Datalog evaluation on the GPU (\Cref{sec:datalog}), probabilistic inference through knowledge compilation (\Cref{sec:prob}). This section introduces the neural-symbolic bridge---the machinery that connects PyTorch neural networks to the probabilistic logic engine, enabling end-to-end differentiable learning where neural perception and logical reasoning are jointly trained.
+
+\subsection{Neural Predicates}
+
+In xlog, a neural network \emph{is} a predicate. The \texttt{nn/4} declaration embeds a network directly into the Datalog program:
+
+\begin{lstlisting}[style=xlogstyle]
+nn(network_name, [input_vars], output_var, [output_labels]) :: predicate(args).
+\end{lstlisting}
+
+This is not a foreign-function call or an escape hatch. The declaration states that evaluating predicate \texttt{predicate(args)} requires a forward pass through the named network. The network's softmax output over the label set becomes a distribution over probabilistic facts, which then participates in the standard knowledge compilation pipeline described in \Cref{sec:prob}.
+
+On the Python side, networks are registered via the \texttt{pyxlog} API. The \texttt{CompiledProgram.register\_network()} method accepts a PyTorch \texttt{nn.Module}, an optimizer, and optional configuration parameters:
+
+\begin{lstlisting}[style=pythonstyle]
+program.register_network("mnist_net", net, optimizer)
+\end{lstlisting}
+
+Under the hood, the Rust-side \texttt{NetworkRegistry} (in \texttt{crates/xlog-neural/src/registry.rs}) manages a collection of \texttt{NetworkHandle} instances, each holding a reference to the PyTorch module, optimizer, and optional learning rate scheduler. The \texttt{NetworkConfig} struct exposes builder-pattern configuration for batching (grouping multiple queries into a single forward pass), top-k sampling (restricting the output space when most classes have near-zero probability), deterministic mode (argmax instead of probabilistic sampling), and output caching (avoiding redundant forward passes for repeated inputs, up to a configurable cache size of 10{,}000 entries by default).
+
+The data flow through a neural predicate proceeds in two directions. \textbf{Forward:} when the logic engine encounters an \texttt{nn/4}-backed predicate during evaluation, it invokes the registered PyTorch module. The network's softmax output vector is decomposed into weighted probabilistic facts---one per output label---which are fed into the PIR/CNF/D4/XGCF compilation pipeline. Because the circuit structure depends on the logic program and not on the weight values, the compiled XGCF template is cached (\Cref{sec:prob}) and only the leaf weights are updated on subsequent iterations. \textbf{Backward:} after the XGCF circuit computes the forward log-probability and backward gradients via level-parallel CUDA kernels, the per-leaf gradient buffers are exported as DLPack tensors and injected into PyTorch's autograd graph. The optimizer then updates the network parameters as usual. The Python GIL is released during GPU-resident work using \texttt{py.allow\_threads()}, ensuring that CUDA kernel execution and GPU memory operations do not block the Python interpreter.
+
+\subsection{End-to-End Training Loop}
+
+To make the integration concrete, we walk through the MNIST addition example---the canonical DeepProbLog benchmark. The task: given two MNIST digit images, predict their sum. The network never sees individual digit labels; it learns to classify digits purely from supervision on sums.
+
+\textbf{The logic program.} The complete xlog source (\texttt{examples/neural/01\_minimal/minimal.xlog}) is:
+
+\begin{lstlisting}[style=xlogstyle]
+// Neural predicate declaration
+// nn(network_name, [input_vars], output_var, [output_labels]) :: predicate(args).
+//
+// This declares that:
+// - 'mnist_net' is the name of the neural network
+// - [X] means the network takes one input (image at index X)
+// - Y is the output variable (the classified digit)
+// - [0,1,2,3,4,5,6,7,8,9] are the possible output labels (digit classes)
+// - digit(X, Y) is the resulting predicate
+//
+// The network's softmax output becomes probabilistic facts:
+//   P(digit(0, 0)) = network_output[0]
+//   P(digit(0, 1)) = network_output[1]
+//   ...
+//   P(digit(0, 9)) = network_output[9]
+nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
+
+// Addition rule
+// The sum of two digits at indices X and Y is Z.
+//
+// This uses probabilistic inference:
+// P(addition(0, 1, 7)) = sum over all (d1, d2) where d1 + d2 = 7 of:
+//                        P(digit(0, d1)) * P(digit(1, d2))
+//
+// For example, with d1=3, d2=4:
+// P(addition(0, 1, 7)) includes P(digit(0, 3)) * P(digit(1, 4))
+addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
+\end{lstlisting}
+
+Two lines of logic define the entire reasoning structure. The \texttt{nn/4} declaration connects the \texttt{mnist\_net} CNN to a \texttt{digit/2} predicate. The addition rule computes all consistent decompositions of a sum through probabilistic marginalization.
+
+\textbf{The training script.} The Python driver (\texttt{examples/neural/01\_minimal/train.py}) compiles the program, registers the network, and runs training through the \texttt{pyxlog.train\_model\_tensor} API:
+
+\begin{lstlisting}[style=pythonstyle]
+program = pyxlog.Program.compile("""
+    nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
+    addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
+""")
+
+program.register_network("mnist_net", net, optimizer)
+program.add_tensor_source("train", train_images)
+
+queries = generate_queries(n_pairs, train_labels)
+
+history = pyxlog.train_model_tensor(
+    program,
+    queries,
+    epochs=args.epochs,
+    batch_size=args.batch_size,
+    log_iter=args.log_iter,
+)
+\end{lstlisting}
+
+Each query has the form \texttt{addition(i, j, expected\_sum)}. The training objective minimizes the negative log-probability of the query under the compiled circuit: $-\log P(\texttt{addition}(i, j, s))$. The \texttt{train\_model\_tensor} function orchestrates the full loop: batching queries that share the same circuit template, running forward and backward passes over the cached XGCF circuit, and propagating gradients back to the PyTorch optimizer.
+
+\textbf{Training loop architecture.} \Cref{fig:training} shows one training iteration.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.75\linewidth]{training_loop.pdf}
+  \caption{One iteration of neural-symbolic training on MNIST addition. The XGCF circuit is compiled once (first iteration) and reused thereafter; only the leaf weights change across iterations. Gradients flow back through DLPack capsules into PyTorch's autograd graph.}
+  \label{fig:training}
+\end{figure}
+
+The critical performance property is that the circuit compilation (D4) happens once, during the first forward pass. All subsequent iterations reuse the cached XGCF structure, executing only the weight update and the level-parallel forward/backward kernels. This is the mechanism behind the $2.74\times$ training speedup reported in \Cref{sec:prob}.
+
+\textbf{Results.} On the MNIST addition benchmark (512 training images, 256 addition pairs, batch size 64, learning rate $10^{-3}$, CUDA device), the xlog engine was evaluated over 5 training epochs with two random seeds:
+
+\begin{table}[htbp]
+  \centering
+  \caption{MNIST addition training results (\texttt{01\_minimal}, 5 epochs, two seeds).}
+  \label{tab:training-seeds}
+  \small
+  \begin{tabular}{@{}rllll@{}}
+    \toprule
+    \textbf{Seed} & \textbf{Initial Loss} & \textbf{Final Loss} & \textbf{Improvement} & \textbf{Elapsed (s)} \\
+    \midrule
+    42 & 2.7779 & 2.5904 & 6.7\% & 20{,}987 \\
+    7  & 2.7797 & 2.5693 & 7.6\% & 21{,}963 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+These runs use the full xlog pipeline---compilation, circuit caching, GPU-resident forward/backward---exercised through \texttt{pyxlog.train\_model\_tensor}. The loss reduction across 5 epochs confirms that gradients flow correctly from the circuit evaluation through the logic program back to the CNN parameters. The relatively long wall-clock times reflect the cold-start compilation cost (which is amortized across subsequent epochs) and the small-scale nature of these development-track validation runs.
+
+\subsection{Term Embeddings (v0.5.0)}
+
+Version 0.5.0 introduces a term embedding API that attaches dense vector representations to Datalog symbols. Where \texttt{nn/4} neural predicates map perception (images, text) to discrete logical facts, term embeddings go in the opposite direction: they give logical entities a continuous representation that can participate in neural computation.
+
+The Python API provides two methods on \texttt{CompiledProgram}:
+
+\begin{itemize}
+  \item \textbf{\texttt{register\_embedding(name, module\_or\_tensor, trainable=True)}} accepts either a PyTorch \texttt{nn.Embedding} module or a raw 2D \texttt{torch.Tensor}. For \texttt{nn.Embedding}, the weight matrix shape $[\text{vocab\_size}, \text{dim}]$ is read from the module. For raw tensors, \texttt{trainable} must be \texttt{False} (frozen embeddings). The Rust-side \texttt{EmbeddingHandle} (in \texttt{crates/xlog-neural/src/handle.rs}) stores the module reference, dimensionality, vocabulary size, and trainability flag. Embeddings are registered in the same \texttt{NetworkRegistry} as neural predicates, keyed by name.
+  \item \textbf{\texttt{forward\_embedding(name, ids)}} looks up embedding vectors by integer IDs, returning a batched \texttt{torch.Tensor} with shape $[\text{len(ids)}, \text{dim}]$. For trainable \texttt{nn.Embedding} modules, the returned tensor carries autograd history, so gradients flow through the embedding lookup. For frozen tensors, the result has \texttt{requires\_grad=False}. Internally, the method determines the device from the embedding weight tensor and creates the ID tensor on the same device to avoid CPU/CUDA mismatches.
+\end{itemize}
+
+This API enables entity representation learning within the logic framework. For example, a knowledge graph completion task can attach learned embeddings to entity symbols, combine them with relational predicates in xlog rules, and jointly train the embeddings alongside neural perception networks. The embeddings are the only gradient-carrying embedding API in v0.5.0; future releases may integrate embedding lookups directly into the circuit evaluation path.
+
+\subsection{Differentiable ILP (Beta)}
+
+\begin{quote}\small
+\textbf{Note:} The differentiable ILP subsystem is in \textbf{beta} as of v0.5.0. The API surface, promotion pipeline, and artifact format may change in future releases. The schema version is \texttt{beta-v2}.
+\end{quote}
+
+xlog includes a differentiable inductive logic programming (dILP) trainer~\cite{dilp} that learns first-order rules from examples. Unlike the neural predicate path (which trains network parameters given fixed rules), dILP searches the space of candidate rules, using gradient-based optimization to assign soft probabilities to candidates and hard selection to commit the best rule.
+
+\textbf{Sparse GPU mask API.} A key scalability challenge in dILP is the candidate mask computation. For a program with $R$ relations of arity $A$, the naive candidate space is $O(R^A)$, which can easily reach millions of candidates. Materializing a dense $N \times N \times N$ mask on the Python side is prohibitive. The \texttt{CompiledIlpProgram} class (in \texttt{crates/pyxlog/src/ilp.rs}) provides three sparse mask methods of increasing strictness:
+
+\begin{itemize}
+  \item \texttt{set\_rule\_mask\_sparse(name, candidate\_ids, soft\_probs\_dlpack, budget)}---accepts a DLPack GPU tensor of soft probabilities, performs deterministic top-k selection on the Rust side, and stores a sparse \texttt{IlpMask} without dense materialization.
+  \item \texttt{set\_rule\_mask\_sparse\_selected(name, selected\_candidate\_ids, selected\_soft\_probs\_dlpack)}---the caller preselects candidate IDs, avoiding the full-vector probability download entirely.
+  \item \texttt{set\_rule\_mask\_sparse\_device(name, \ldots)}---the strictest path where selected candidate IDs remain as a device tensor, with Rust resolving them against a fixed candidate order uploaded via \texttt{set\_candidate\_map()}.
+\end{itemize}
+
+The GPU loss/gradient computation (\texttt{compute\_ilp\_loss\_grad\_gpu}) builds a sparse COO structure from the per-entry membership masks, converts it to CSR via device-side sort, and launches forward (credit gather + NLL loss) and backward (gradient scatter) CUDA kernels. The entire credit/loss path is GPU-resident with zero host transfers when using the strict sparse device mask.
+
+\textbf{Six-gate promotion pipeline.} When training converges and a candidate rule is selected, xlog does not blindly commit it to the program. Instead, the rule passes through a six-gate promotion pipeline:
+
+\begin{enumerate}
+  \item \textbf{Convergence gate}---verifies that training actually converged (loss plateau, discreteness threshold).
+  \item \textbf{Novel-rate audit}---checks the fraction of new derivations the rule produces; a configurable \texttt{max\_novel\_rate} threshold catches rules that overgenerate.
+  \item \textbf{Regression check}---ensures the new rule does not invalidate existing derivations for protected relations.
+  \item \textbf{Holdout F1 gate}---evaluates the candidate on held-out examples using k-fold cross-validation (default 5 folds, threshold 0.95 F1).
+  \item \textbf{Ambiguity scan}---detects when multiple candidates have similar soft probabilities, optionally reporting \texttt{ambiguous\_alternatives} for manual review.
+  \item \textbf{Typed schema validation}---when \texttt{typed\_schema\_required=True}, verifies that the candidate rule's variable bindings respect declared type annotations on relations.
+\end{enumerate}
+
+A rule that fails any gate receives a \texttt{PromotionStatus} of \texttt{GATE\_FAILED} or \texttt{MANUAL\_REVIEW\_REQUIRED}, with per-gate \texttt{GateResult} details. Only rules that pass all six gates are committed.
+
+\textbf{Hard-negative mining.} The \texttt{TrainConfig.max\_mined\_negatives} parameter enables hard-negative mining: the trainer identifies examples that the current candidate rule incorrectly covers and adds them as negative examples for subsequent training rounds. This improves precision for rules operating in domains with many near-miss patterns.
+
+\textbf{Artifact persistence.} Learned rules are serialized as \texttt{LearnedArtifact} objects containing the candidate map, final logits, soft probabilities, hard selection, discovered rule text, full \texttt{TrainConfig} snapshot, and training telemetry. The \texttt{save()} method writes JSON with SHA-256 hashes computed over both the candidate map and the configuration snapshot, enabling integrity verification on \texttt{load(path, verify\_hash=True)}. The schema version (\texttt{beta-v2}) is validated on load to prevent silent format incompatibilities. For strict GPU-native training paths where logits and probabilities remain device-resident, a \texttt{StrictLearnedArtifact} variant defers host materialization until \texttt{export\_compat\_artifact()} is explicitly called, avoiding unnecessary device-to-host transfers during automated pipeline runs.
