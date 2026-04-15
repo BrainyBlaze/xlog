@@ -1,2 +1,195 @@
 \section{Evaluation}\label{sec:eval}
-% TODO(Task 9): port Section 7 from docs/whitepaper-v050.md lines 446-568.
+
+This section reports absolute performance measurements for xlog's deterministic, probabilistic, and neural-symbolic subsystems. All numbers are drawn from repository artifacts; every claim cites its source file. These are single-system measurements on development hardware, not controlled head-to-head comparisons against other engines.
+
+\subsection{Methodology}
+
+\textbf{Hardware.} All measurements were collected on an NVIDIA RTX PRO 3000 Blackwell Generation Laptop GPU (12\,GB VRAM, SM120, compute capability 12.0, driver 591.59) (\texttt{docs/BENCHMARKS.md}).
+
+\textbf{Build configuration.} Rust crates are compiled in \texttt{--release} mode. PTX kernels are loaded via cubin with JIT warmup. Python components use \texttt{pyxlog} with CUDA-enabled PyTorch.
+
+\textbf{Statistical protocol.} The benchmark harness uses Criterion.rs with the settings in \Cref{tab:stat-protocol} (\texttt{docs/BENCHMARKS.md}).
+
+\begin{table}[htbp]
+  \centering
+  \caption{Criterion.rs benchmark settings.}
+  \label{tab:stat-protocol}
+  \small
+  \begin{tabular}{@{}ll@{}}
+    \toprule
+    \textbf{Setting} & \textbf{Value} \\
+    \midrule
+    Sample size & 10--100 runs (benchmark-dependent) \\
+    Warm-up & 3 iterations (PTX JIT, memory pool init) \\
+    Significance level & 0.10 \\
+    Noise threshold & 0.05 (ignore ${<}5\%$ variance) \\
+    Seeding & Deterministic LCG (no system entropy) \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Reported values are Criterion point estimates with 95\% confidence intervals where available. GPU benchmarks include explicit warm-up to amortize PTX compilation and CUDA context establishment.
+
+\subsection{Absolute Performance}
+
+\subsubsection{Deterministic Subsystem}
+
+The GPU logic engine (\texttt{xlog-gpu}) targets throughput on three core operations: transitive closure (recursive fixpoint), hash join, and aggregation. Baseline targets measured on development hardware appear in \Cref{tab:throughput} (\texttt{docs/BENCHMARKS.md}).
+
+\begin{table}[htbp]
+  \centering
+  \caption{Deterministic throughput targets.}
+  \label{tab:throughput}
+  \small
+  \begin{tabular}{@{}lll@{}}
+    \toprule
+    \textbf{Operation} & \textbf{Configuration} & \textbf{Target Throughput} \\
+    \midrule
+    Transitive closure & 100K random edges (sparse)       & ${>}1$M rows/sec \\
+    Transitive closure & 1M random edges (medium)         & ${>}5$M rows/sec \\
+    Transitive closure & $K_{500,500}$ bipartite (dense)  & ${>}10$M rows/sec \\
+    Hash join          & 100K $\times$ 100K               & ${>}50$M rows/sec \\
+    Hash join          & 1M $\times$ 100K                 & ${>}100$M rows/sec \\
+    Hash join          & High selectivity                 & ${>}20$M rows/sec \\
+    Aggregation        & 1M rows, 100K groups             & COUNT groups/sec \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+These targets represent minimum acceptable throughput validated on the development GPU. Actual measured throughput depends on graph structure, key distribution, and output cardinality. The semi-naive fixpoint iteration benchmark (\texttt{crates/xlog-gpu/benches/logic\_bench.rs}) exercises the full recursive evaluation pipeline including delta maintenance and deduplication.
+
+\subsubsection{Probabilistic Subsystem}
+
+The probabilistic engine (\texttt{xlog-prob}) supports two inference modes: exact inference via Decision-DNNF knowledge compilation and GPU-accelerated Monte Carlo sampling.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Exact inference targets (\texttt{docs/BENCHMARKS.md}).}
+  \label{tab:exact-targets}
+  \small
+  \begin{tabular}{@{}lll@{}}
+    \toprule
+    \textbf{Configuration} & \textbf{Target} & \textbf{Notes} \\
+    \midrule
+    20-variable probabilistic path & ${<}100$\,ms & Small d-DNNF circuit \\
+    50-variable Bayesian network   & ${<}500$\,ms & Medium circuit complexity \\
+    With gradient computation      & ${<}2\times$ base time & Backward pass overhead \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{table}[htbp]
+  \centering
+  \caption{Monte Carlo inference targets (\texttt{docs/BENCHMARKS.md}).}
+  \label{tab:mc-targets}
+  \small
+  \begin{tabular}{@{}lll@{}}
+    \toprule
+    \textbf{Configuration} & \textbf{Target} & \textbf{Notes} \\
+    \midrule
+    100K samples, 100 variables & ${>}10$M worlds/sec & Throughput mode \\
+    10K samples, 500 variables  & ${>}5$M worlds/sec  & Complexity mode \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\textbf{MC runtime optimization.} A targeted optimization of the MC evaluation hot loop reduced wall-clock time from $14.11$\,s to $12.90$\,s on a 1000-sample clamped benchmark, an 8.6\% improvement (\texttt{docs/reports/2026-03-10-mc-runtime-optimization-report.md}). Profiling revealed that fixpoint evaluation (\texttt{evaluate\_program\_gpu}) accounts for 72--83\% of total MC time; the optimization addressed the remaining overhead by eliminating per-sample device-to-host synchronization, replacing full store clone/restore with a targeted \texttt{McSampleResetPlan}, and pre-allocating pointer buffers outside the sample closure.
+
+\begin{table}[htbp]
+  \centering
+  \caption{MC timing breakdown, optimized, 1000 samples, clamped mode (\texttt{docs/reports/2026-03-10-mc-runtime-optimization-report.md}).}
+  \label{tab:mc-breakdown}
+  \small
+  \begin{tabular}{@{}lrr@{}}
+    \toprule
+    \textbf{MC Phase} & \textbf{Time (\textmu s)} & \textbf{\% of Total} \\
+    \midrule
+    Sampler & 193         & 0.0\% \\
+    Reset   & 1{,}172{,}318 & 9.5\% \\
+    Build   & 1{,}924{,}832 & 15.6\% \\
+    Eval    & 8{,}928{,}998 & 72.3\% \\
+    Count   & 319{,}715     & 2.6\% \\
+    \midrule
+    \textbf{Total} & \textbf{12{,}346{,}056} & \textbf{100\%} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsubsection{Neural-Symbolic Subsystem}
+
+Neural-symbolic training is measured on the \texttt{01\_minimal} benchmark (MNIST single-digit addition, 512 training images, 5 epochs, batch size 64).
+
+\begin{table}[htbp]
+  \centering
+  \caption{Training performance summary.}
+  \label{tab:training-summary}
+  \small
+  \begin{tabularx}{\linewidth}{@{}l l X@{}}
+    \toprule
+    \textbf{Metric} & \textbf{Value} & \textbf{Source} \\
+    \midrule
+    PTX JIT cold start & $0.02$\,s & $1750\times$ speedup from $\sim$35\,s via cubin loading (\texttt{docs/BENCHMARKS.md}) \\
+    First epoch (cold) & $\sim$78--83\,s & Includes D4 compile + circuit verification (\texttt{examples/neural/results/track\_a/}) \\
+    Steady-state epoch (warm) & $\sim$2.9\,s & Epochs 2--5 with batched evaluation (\texttt{examples/neural/results/track\_a/}) \\
+    Total training (5 epochs) & $\sim$89--95\,s & Two seeds (\texttt{examples/neural/results/track\_a/}) \\
+    Circuit cache speedup & $2.74\times$ & 95\% CI: $[2.29, 3.18]$ (\texttt{examples/neural/results/evidence/cache\_ablation\_20260218.json}) \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+The cache ablation study compared circuit-cached vs.\ uncached training over 3 seeds and 3 epochs each. Mean training time dropped from $242.9$\,s (uncached) to $88.9$\,s (cached), yielding the $2.74\times$ speedup reported in \Cref{sec:prob} (\texttt{examples/neural/results/evidence/cache\_ablation\_20260218.json}).
+
+\textbf{DeepProbLog baseline.} Running the same \texttt{01\_minimal} task under DeepProbLog 2.0.6 on identical hardware, the baseline timed out at 300\,s without completing a single epoch---CPU-based PySDD~\cite{pysdd} inference with GPU neural networks (\texttt{docs/reports/2026-02-10-deepproblog-baseline-results.md}). A full-dataset configuration (2 epochs, batch size 2048) reached held-out addition accuracy of 23.24\% after 2 hours 31 minutes (\texttt{examples/neural/results/track\_a/20260216T145409Z\_track\_a\_dev/comparisons/mnist\_vs\_deepproblog.json}). Direct accuracy comparison is limited because the xlog configuration uses a smaller training subset and reports training loss rather than held-out accuracy at this stage.
+
+\textbf{GA-based ILP.} The genetic algorithm reliability gate (\texttt{test\_ga\_reliability\_50}) achieved a $3.3\times$ wall-clock reduction from 1447\,s to 436\,s by reducing redundant attempts, with identical statistical quality: 200/200 success rate, Clopper--Pearson lower-95 CI $= 0.982$ (\texttt{docs/reports/2026-03-05-ga-runtime-closure-report.md}).
+
+\subsection{Qualitative Comparison}
+
+\Cref{tab:comparison} positions xlog relative to existing systems across key capability dimensions. Each system addresses a subset of the design space; xlog's contribution is unifying these capabilities within a single GPU-resident runtime.
+
+\begin{table*}[htbp]
+  \centering
+  \caption{Capability comparison across probabilistic and GPU logic systems.}
+  \label{tab:comparison}
+  \small
+  \begin{tabularx}{\linewidth}{@{}l X X X X@{}}
+    \toprule
+    \textbf{Dimension} & \textbf{DeepProbLog} & \textbf{ProbLog2} & \textbf{GPUlog} & \textbf{xlog} \\
+    \midrule
+    Symbolic execution & CPU (SWI-Prolog) & CPU (tabling) & GPU (HISA) & GPU (semi-naive fixpoint) \\
+    Probabilistic inference & Exact (PySDD, CPU) & Exact + approx (CPU) & None & Exact (d-DNNF, GPU) + MC (GPU) \\
+    Knowledge compilation & PySDD (CPU) & d-DNNF via c2d/D4 (CPU) & None & D4 compile + GPU circuit eval \\
+    Neural integration & PyTorch + Prolog bridge & None & None & Zero-copy DLPack, fused backward \\
+    Zero-copy ML interop & No (CPU--GPU transfers) & No & No & Yes (DLPack, device-resident tensors) \\
+    Differentiable ILP & Via TP-operator (CPU) & No & No & GPU-resident credit/loss path (beta) \\
+    \bottomrule
+  \end{tabularx}
+\end{table*}
+
+\textbf{Published GPU Datalog results.} GPUlog~\cite{gpulog} reports up to $45\times$ speedup over CPU baselines using HISA (Hash-Indexed Sorted Array) indexing~\cite{hisa} with lock-free deduplication. VFLog~\cite{vflog} demonstrates up to $200\times$ gains over CPU column engines with a column-oriented GPU Datalog runtime. Both systems are restricted to deterministic evaluation; neither supports probabilistic inference, knowledge compilation, or neural network integration. xlog draws on the same insight---that Datalog's relational algebra maps naturally to GPU parallelism---but extends the execution model through the probabilistic and neural-symbolic layers described in \Cref{sec:prob,sec:nesy}.
+
+\textbf{Honest framing.} The comparison above is qualitative. xlog has not been benchmarked head-to-head against GPUlog or VFLog on identical workloads. The deterministic throughput targets in \Cref{tab:throughput} represent xlog's own baseline measurements, not comparative claims. The DeepProbLog comparison is limited to the \texttt{01\_minimal} task with differing dataset sizes and evaluation protocols, as noted above.
+
+\subsection{CUDA Certification}
+
+The CUDA kernel certification suite (\texttt{crates/xlog-cuda-tests/}) provides systematic coverage of all GPU kernel operations. As of the v0.5.0 release the statistics in \Cref{tab:cuda-cert} hold.
+
+\begin{table}[htbp]
+  \centering
+  \caption{CUDA certification suite statistics (v0.5.0).}
+  \label{tab:cuda-cert}
+  \small
+  \begin{tabular}{@{}ll@{}}
+    \toprule
+    \textbf{Metric} & \textbf{Value} \\
+    \midrule
+    Total tests        & 206 \\
+    Categories         & 33 (C01--C25 infrastructure + G01--G08 GPU-specific) \\
+    Pass rate          & 100\% (206/206) \\
+    PTX modules covered & 19 \\
+    Suite execution time & $\sim$14\,s \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The 25 infrastructure categories (C01--C25) cover toolchain validation, launch configuration, pointer bounds, memory spaces (global, shared, local), synchronization, warp-level operations, control flow divergence, atomics, floating-point semantics, integer operations, determinism, async pipelines, caching, host-device transfer, multi-stream execution, multi-GPU, hardware stress, algorithmic correctness, blind spots, edge matrices, and float filter semantics (\texttt{docs/certification/2026-01-22-v0.4.0-alpha-certification-report.md}). The 8 GPU-specific categories (G01--G08) validate circuit forward evaluation, circuit backward (gradient) kernels, weight injection, transfer efficiency, circuit caching, PTX robustness, SAT/CDCL solving, and device-count invariants (\texttt{docs/architecture/cuda-certification.md}). The certification suite runs in CI on every push to \texttt{main} and every pull request.
