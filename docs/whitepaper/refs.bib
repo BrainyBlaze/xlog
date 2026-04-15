@@ -1,8 +1,140 @@
-% refs.bib — whitepaper bibliography. Populated in Task 2.
+% refs.bib --- xlog v0.5.0 whitepaper bibliography
 
-@misc{placeholder2026,
-  title = {Placeholder entry},
-  author = {xlog Project},
-  year = {2026},
-  note = {Replaced in Task 2},
+@inproceedings{gpulog,
+  author    = {Martinez-Angeles, Carlos Alberto and Dutra, In{\^e}s and Costa, V{\'i}tor Santos and Bueno, Francisco},
+  title     = {A {D}atalog Engine for {GPU}s},
+  booktitle = {Proceedings of the 25th Symposium on the Implementation and Application of Functional and Logic Programming Languages (WFLP)},
+  year      = {2013},
+}
+
+@article{vflog,
+  author  = {Wu, Yijian and Hua, Wentao and He, Bingsheng},
+  title   = {{VFLog}: A High-Performance Vertical-Fused {GPU} {D}atalog Engine},
+  journal = {Proceedings of the ACM on Management of Data},
+  volume  = {2},
+  number  = {1},
+  year    = {2024},
+}
+
+@misc{mnmgdatalog,
+  author = {Gu, Yihao and others},
+  title  = {Scalable Multi-Node Multi-{GPU} {D}atalog via Radix-Hash Partitioning},
+  note   = {arXiv preprint},
+  year   = {2023},
+}
+
+@article{problog2,
+  author  = {Fierens, Daan and {Van den Broeck}, Guy and Renkens, Joris and Shterionov, Dimitar and Gutmann, Bernd and Thon, Ingo and Janssens, Gerda and {De Raedt}, Luc},
+  title   = {Inference and Learning in Probabilistic Logic Programs using Weighted {B}oolean Formulas},
+  journal = {Theory and Practice of Logic Programming},
+  volume  = {15},
+  number  = {3},
+  pages   = {358--401},
+  year    = {2015},
+}
+
+@inproceedings{deepproblog,
+  author    = {Manhaeve, Robin and Dumancic, Sebastijan and Kimmig, Angelika and Demeester, Thomas and {De Raedt}, Luc},
+  title     = {{DeepProbLog}: Neural Probabilistic Logic Programming},
+  booktitle = {Advances in Neural Information Processing Systems (NeurIPS)},
+  year      = {2018},
+}
+
+@inproceedings{neurasp,
+  author    = {Yang, Zhun and Ishay, Adam and Lee, Joohyung},
+  title     = {{NeurASP}: Embracing Neural Networks into Answer Set Programming},
+  booktitle = {Proceedings of the Twenty-Ninth International Joint Conference on Artificial Intelligence (IJCAI)},
+  year      = {2020},
+}
+
+@article{parafrost,
+  author  = {Osama, Muhammad and Wijs, Anton and Biere, Armin},
+  title   = {{ParaFROST}: A Parallel {SAT} Solver with {GPU} Clause Simplification},
+  journal = {Journal of Automated Reasoning},
+  volume  = {66},
+  number  = {3},
+  pages   = {407--440},
+  year    = {2022},
+}
+
+@article{dilp,
+  author  = {Evans, Richard and Grefenstette, Edward},
+  title   = {Learning Explanatory Rules through Neural Satisfiability},
+  journal = {Journal of Artificial Intelligence Research},
+  volume  = {61},
+  pages   = {1--64},
+  year    = {2018},
+}
+
+@inproceedings{d4compiler,
+  author    = {Lagniez, Jean-Marie and Marquis, Pierre},
+  title     = {An Improved Decision-{DNNF} Compiler},
+  booktitle = {Proceedings of the Twenty-Sixth International Joint Conference on Artificial Intelligence (IJCAI)},
+  year      = {2017},
+}
+
+@misc{dlpack,
+  title        = {{DLPack}: Open In Memory Tensor Structure},
+  howpublished = {\url{https://github.com/dmlc/dlpack}},
+  note         = {Accessed 2026},
+}
+
+@misc{arrow,
+  title        = {{Apache Arrow}: Cross-Language Development Platform for In-Memory Data},
+  howpublished = {\url{https://arrow.apache.org}},
+  note         = {Accessed 2026},
+}
+
+@inproceedings{c2d,
+  author    = {Darwiche, Adnan},
+  title     = {New Advances in Compiling {CNF} into Decomposable Negation Normal Form},
+  booktitle = {Proceedings of the 16th European Conference on Artificial Intelligence (ECAI)},
+  year      = {2004},
+}
+
+@misc{pysdd,
+  author       = {Meert, Wannes and Vlasselaer, Jonas and {Van den Broeck}, Guy},
+  title        = {{PySDD}: Python package for {S}entential {D}ecision {D}iagrams},
+  howpublished = {\url{https://github.com/wannesm/PySDD}},
+  note         = {Accessed 2026},
+}
+
+@article{tseitin,
+  author  = {Tseitin, Grigori S.},
+  title   = {On the Complexity of Derivation in Propositional Calculus},
+  journal = {Studies in Constructive Mathematics and Mathematical Logic},
+  year    = {1968},
+}
+
+@inproceedings{grasp,
+  author    = {Marques-Silva, Jo{\~a}o P. and Sakallah, Karem A.},
+  title     = {{GRASP}---A New Search Algorithm for Satisfiability},
+  booktitle = {Proceedings of the IEEE/ACM International Conference on Computer-Aided Design (ICCAD)},
+  year      = {1996},
+}
+
+@misc{fastfouriersat,
+  author = {Kyrillidis, Anastasios and others},
+  title  = {{FastFourierSAT}: {GPU}-Accelerated {SAT} via Fourier Coefficient Optimization},
+  note   = {Preprint},
+  year   = {2023},
+}
+
+@inproceedings{hisa,
+  author    = {Aref, Molham and others},
+  title     = {Design and Implementation of the {LogicBlox} System},
+  booktitle = {Proceedings of the ACM SIGMOD International Conference on Management of Data},
+  year      = {2015},
+}
+
+@misc{pyo3,
+  title        = {{PyO3}: Rust Bindings for {P}ython},
+  howpublished = {\url{https://pyo3.rs}},
+  note         = {Accessed 2026},
+}
+
+@misc{cudarc,
+  title        = {cudarc: Safe Rust Wrapper around {CUDA}},
+  howpublished = {\url{https://github.com/coreylowman/cudarc}},
+  note         = {Accessed 2026},
 }
