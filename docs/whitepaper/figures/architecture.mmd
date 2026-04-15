@@ -1,0 +1,56 @@
+flowchart TB
+  classDef tier fill:#fafafa,stroke:#888,stroke-width:1px,color:#222
+  classDef crate fill:#eef5ff,stroke:#3366aa,stroke-width:1px,color:#113
+
+  subgraph T4["Tier 4 — User Interfaces"]
+    pyxlog["pyxlog"]
+    cli["xlog-cli"]
+    tests["xlog-cuda-tests"]
+  end
+  subgraph T3["Tier 3 — Integrated Reasoning"]
+    gpu["xlog-gpu"]
+    prob["xlog-prob"]
+  end
+  subgraph T2["Tier 2 — Subsystems"]
+    logic["xlog-logic"]
+    runtime["xlog-runtime"]
+    solve["xlog-solve"]
+  end
+  subgraph T1["Tier 1 — Domain IRs + Providers"]
+    ir["xlog-ir"]
+    cuda["xlog-cuda"]
+    stats["xlog-stats"]
+    neural["xlog-neural"]
+  end
+  subgraph T0["Tier 0 — Foundation"]
+    core["xlog-core"]
+  end
+
+  pyxlog --> gpu
+  pyxlog --> prob
+  pyxlog --> neural
+  cli --> gpu
+  cli --> prob
+  tests --> cuda
+  tests --> solve
+
+  gpu --> logic
+  gpu --> runtime
+  prob --> logic
+  prob --> runtime
+  prob --> solve
+
+  logic --> ir
+  logic --> stats
+  runtime --> ir
+  runtime --> cuda
+  runtime --> stats
+  solve --> cuda
+
+  ir --> core
+  cuda --> core
+  stats --> core
+  neural --> core
+
+  class T0,T1,T2,T3,T4 tier
+  class pyxlog,cli,tests,gpu,prob,logic,runtime,solve,ir,cuda,stats,neural,core crate
