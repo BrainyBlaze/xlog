@@ -1,0 +1,26 @@
+# latexmkrc — builds main.pdf with pdflatex + biber.
+# Additionally: auto-rebuild mermaid (.mmd) sources to .pdf via mmdc if present.
+
+$pdf_mode = 1;           # pdflatex
+$bibtex_use = 2;         # always run biber if needed
+$biber = 'biber %O %B';
+$pdflatex = 'pdflatex -interaction=nonstopmode -halt-on-error -file-line-error %O %S';
+
+# Watch .bib, .tex in sections/
+@default_files = ('main.tex');
+
+# Custom dependency: .mmd -> .pdf via mmdc (Mermaid CLI).
+# Skipped silently if mmdc is not installed (committed PDFs are used instead).
+add_cus_dep('mmd', 'pdf', 0, 'mmd_to_pdf');
+sub mmd_to_pdf {
+    my $src = "$_[0].mmd";
+    my $out = "$_[0].pdf";
+    my $mmdc = `which mmdc 2>/dev/null` || `where mmdc 2>nul`;
+    chomp $mmdc;
+    if ($mmdc eq '') {
+        warn "mmdc not found; using committed $out if present\n";
+        return 0;
+    }
+    return system("mmdc -i \"$src\" -o \"$out\" -b transparent --pdfFit");
+}
+push @generated_exts, 'mmd';

@@ -1,0 +1,91 @@
+\documentclass[11pt]{article}
+
+\usepackage{arxiv}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{graphicx}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{caption}
+\usepackage[hidelinks,colorlinks=true,
+            linkcolor=black!70!blue,
+            citecolor=black!70!blue,
+            urlcolor=black!70!blue]{hyperref}
+\usepackage[noabbrev,capitalise]{cleveref}
+\usepackage[backend=biber,style=numeric-comp,sorting=none]{biblatex}
+\addbibresource{refs.bib}
+
+\graphicspath{{figures/}}
+
+% --- Listings: xlog + Python styles ---
+\definecolor{codebg}{RGB}{248,248,248}
+\definecolor{codekey}{RGB}{0,90,156}
+\definecolor{codecomment}{RGB}{106,115,125}
+\definecolor{codestring}{RGB}{163,21,21}
+
+\lstdefinelanguage{xlog}{
+  morekeywords={nn,true,false,not,and,or,if,then,else,query,fact,rule},
+  sensitive=true,
+  morecomment=[l]{\%},
+  morestring=[b]",
+  literate={:-}{{{\color{codekey}:-}}}2
+           {::}{{{\color{codekey}::}}}2
+}
+\lstdefinestyle{xlogstyle}{
+  language=xlog,
+  backgroundcolor=\color{codebg},
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{codekey}\bfseries,
+  commentstyle=\color{codecomment}\itshape,
+  stringstyle=\color{codestring},
+  frame=single,
+  framerule=0.3pt,
+  breaklines=true,
+  columns=fullflexible,
+  showstringspaces=false,
+  numbers=none,
+}
+\lstdefinestyle{pythonstyle}{
+  language=Python,
+  backgroundcolor=\color{codebg},
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{codekey}\bfseries,
+  commentstyle=\color{codecomment}\itshape,
+  stringstyle=\color{codestring},
+  frame=single,
+  framerule=0.3pt,
+  breaklines=true,
+  columns=fullflexible,
+  showstringspaces=false,
+  numbers=none,
+}
+\lstset{style=xlogstyle}
+
+% --- Title block ---
+\title{xlog: A GPU-Native Datalog Engine for Unified Symbolic Reasoning}
+\author{The xlog Project\\\small v0.5.0 Technical Whitepaper}
+\date{March 2026}
+
+\begin{document}
+\maketitle
+
+\input{sections/00_abstract.tex}
+
+\tableofcontents
+\vspace{1em}
+
+\input{sections/01_introduction.tex}
+\input{sections/02_architecture.tex}
+\input{sections/03_gpu_datalog.tex}
+\input{sections/04_probabilistic.tex}
+\input{sections/05_neural_symbolic.tex}
+\input{sections/06_interop.tex}
+\input{sections/07_evaluation.tex}
+\input{sections/08_related_work.tex}
+\input{sections/09_limitations.tex}
+
+\printbibliography
+
+\end{document}
