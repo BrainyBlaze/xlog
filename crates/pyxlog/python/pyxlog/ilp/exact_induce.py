@@ -78,6 +78,7 @@ def induce_exact(
     k_per_topology: int = 2,
     deterministic: bool = True,
     backend: str = "python",
+    strict_per_topology: bool = False,
 ) -> ExactInductionResult:
     """Exhaustively score all (left, right) pairs across 4 topologies.
 
@@ -100,6 +101,21 @@ def induce_exact(
             host-orchestrated ``set_rule_mask``/``evaluate``/``batch_fact_membership_device``
             loop). ``"native"`` dispatches to the Phase 1 ``xlog-induce`` engine
             when available; raises ``NotImplementedError`` until that engine lands.
+        strict_per_topology: (``backend="python"`` only.) When ``True``, zero
+            out the other topology masks before scoring each topology, so each
+            ``(topology, L, R)`` pair's coverage is computed in isolation —
+            semantically correct. When ``False`` (default), preserves the
+            original prototype behavior in which stale masks from prior
+            outer-loop iterations contaminate later topologies' coverage
+            numbers. Kept default-False for backward compatibility with
+            historical DTS Phase 0 measurements (e.g. Phase 0d's 449/449
+            liveness baseline was measured against this behavior).
+
+            The ``"native"`` backend implements the strict-per-topology
+            semantics by construction — each ``(topology, L, R)`` triple is
+            scored in isolation in a single batched kernel launch. Use
+            ``strict_per_topology=True`` here to get a semantically matching
+            Python reference for parity testing.
 
     Returns:
         ExactInductionResult with up to k_per_topology × 4 candidates.
@@ -156,10 +172,34 @@ def induce_exact(
     device = positive_arg0.device
     mask_names = [f"W_{topo}_{head_relation}" for topo in TOPOLOGIES]
 
+    # Pre-allocate a zero mask. Reused to clear "other" topology masks
+    # between outer-loop iterations so each topology's inner-loop scoring is
+    # isolated. Without this, a topology's final one-hot mask bleeds into
+    # the next topology's coverage counts via stale state inside evaluate(),
+    # which was a real bug caught by Phase 1 parity testing against the
+    # native backend.
+    flat_zero = torch.zeros(N * N * N, dtype=torch.float32, device=device)
+
     all_candidates: list[ScoredCandidate] = []
     total_scored = 0
 
     for topo, mask_name in zip(TOPOLOGIES, mask_names):
+        # Opt-in: zero out all other topology masks so only this topology's
+        # rule can contribute to p_A derivations during evaluate(). See
+        # comment on `flat_zero` above. Default-off to preserve historical
+        # DTS Phase 0 measurements that were calibrated against the original
+        # prototype's cross-topology contamination behavior.
+        if strict_per_topology:
+            for other_topo, other_mask in zip(TOPOLOGIES, mask_names):
+                if other_topo != topo:
+                    try:
+                        prog.set_rule_mask(other_mask, flat_zero, flat_zero, N)
+                    except Exception:
+                        # Best-effort: if the program doesn't declare one of
+                        # the other-topology masks (e.g. a head with only a
+                        # subset of the four topology rules), just skip.
+                        continue
+
         # Collect all (bL, bR) scores for this topology
         topo_scores: list[tuple[int, int, int, int]] = []  # (pos_cov, neg_cov, bL_idx, bR_idx)
 
@@ -258,14 +298,13 @@ def _induce_exact_native(
     k_per_topology: int,
     deterministic: bool,
 ) -> ExactInductionResult:
-    """Dispatch to the Rust `induce_exact_native` method on CompiledIlpProgram.
+    """Dispatch to the Rust ``induce_exact_native`` on CompiledIlpProgram.
 
-    Until M8 Phase 1 Task 3 lands, the Rust method raises
-    ``PyNotImplementedError``; this function surfaces that unchanged so the
-    parity tests fail at the native seam (Rust) rather than the Python
-    dispatcher.
+    The Rust method returns a plain ``dict`` keyed by the ``ScoredCandidate`` /
+    ``ExactInductionResult`` field names. Repackaging into the dataclass shapes
+    lives here so the Rust side doesn't have to import the Python module.
     """
-    return prog.induce_exact_native(
+    raw = prog.induce_exact_native(
         head_relation=head_relation,
         candidate_relations=candidate_relations,
         positive_arg0=positive_arg0,
@@ -274,4 +313,12 @@ def _induce_exact_native(
         negative_arg1=negative_arg1,
         k_per_topology=k_per_topology,
         deterministic=deterministic,
+    )
+    candidates = [ScoredCandidate(**c) for c in raw["candidates"]]
+    return ExactInductionResult(
+        candidates=candidates,
+        total_scored=raw["total_scored"],
+        candidate_count=raw["candidate_count"],
+        positive_count=raw["positive_count"],
+        negative_count=raw["negative_count"],
     )

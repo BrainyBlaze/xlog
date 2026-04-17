@@ -309,6 +309,7 @@ xlog/
 │   ├── xlog-neural/     # Neural-symbolic integration (v0.4.0-alpha)
 │   ├── xlog-solve/      # Solver services (SAT/MaxSAT)
 │   ├── xlog-gpu/        # High-level GPU API (Rust)
+│   ├── xlog-induce/     # Bounded exact-induction engine (DTS M8 Phase 1)
 │   ├── xlog-cli/        # CLI binary (deterministic + probabilistic execution)
 │   ├── pyxlog/     # Python module (PyO3 + DLPack + training API)
 │   └── xlog-cuda-tests/ # CUDA/PTX certification suite (not published)
@@ -337,8 +338,9 @@ Tier 2:         xlog-logic ────────> xlog-core + xlog-ir + xlog-
 
 Tier 3:         xlog-gpu ─────────> xlog-core + xlog-cuda + xlog-ir + xlog-logic + xlog-runtime
                 xlog-prob ─────────> xlog-core + xlog-cuda + xlog-logic + xlog-runtime + xlog-solve + xlog-ir
+                xlog-induce ──────> xlog-core + xlog-cuda + xlog-runtime
 
-Tier 4:         pyxlog ────────────> 8 crates (integration hub)
+Tier 4:         pyxlog ────────────> 9 crates (integration hub; includes xlog-induce)
                 xlog-cli ──────────> xlog-core + xlog-cuda + xlog-logic + xlog-gpu + xlog-prob
                 xlog-cuda-tests ───> xlog-cuda + xlog-core + xlog-solve
 ```
@@ -360,6 +362,7 @@ removed `xlog-stats → xlog-cuda` (was unused), added `xlog-neural → xlog-cor
 | `xlog-neural` | Neural-symbolic integration: `NetworkRegistry`, `NetworkHandle`, `TensorSourceRegistry`, `NeuralBridge` (v0.4.0-alpha) |
 | `xlog-solve` | Solver services: GPU CDCL verifier (complete SAT/UNSAT, on-GPU validation) + CLS SAT/MaxSAT (heuristic) |
 | `xlog-gpu` | High-level GPU API: deterministic execution + input/output buffers for integration layers |
+| `xlog-induce` | Bounded exact-induction engine — scores all `(left, right)` candidate pairs across four fixed 2-body topologies (chain/star/fanout/fanin) in one batched GPU pass via `ilp_exact` kernel; top-K per topology with structured candidate metadata. See [architecture/bounded-exact-induction.md](architecture/bounded-exact-induction.md) |
 | `xlog-cli` | `xlog` CLI for deterministic and probabilistic execution with Arrow IPC I/O |
 | `pyxlog` | PyO3 extension (`pyxlog` Python module) exposing DLPack-first deterministic + probabilistic evaluation + neural-symbolic training API |
 | `xlog-cuda-tests` | CUDA/PTX certification suite (release gating; `publish = false`) |

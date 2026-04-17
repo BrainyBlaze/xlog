@@ -21,6 +21,7 @@ mod arithmetic;
 mod filter;
 mod groupby;
 mod ilp;
+mod ilp_exact;
 mod io;
 mod kernel_loading;
 mod probabilistic;
@@ -214,9 +215,10 @@ pub const CACHE_MODULE: &str = "xlog_cache";
 pub const WEIGHTS_MODULE: &str = "xlog_weights";
 pub const ILP_MODULE: &str = "xlog_ilp";
 pub const ILP_CREDIT_MODULE: &str = "xlog_ilp_credit";
+pub const ILP_EXACT_MODULE: &str = "xlog_ilp_exact";
 
-// Compile-time check: kernel manifest lists exactly 21 modules.
-const _: () = assert!(crate::kernel_manifest_data::KERNEL_CU_NAMES.len() == 21);
+// Compile-time check: kernel manifest lists exactly 22 modules.
+const _: () = assert!(crate::kernel_manifest_data::KERNEL_CU_NAMES.len() == 22);
 
 /// Kernel function names in the Monte Carlo sampling module
 pub mod mc_sample_kernels {
@@ -292,6 +294,11 @@ pub mod ilp_credit_kernels {
     pub const ILP_CREDIT_FORWARD_F64: &str = "ilp_credit_forward_f64";
     pub const ILP_CREDIT_BACKWARD_F32: &str = "ilp_credit_backward_f32";
     pub const ILP_CREDIT_BACKWARD_F64: &str = "ilp_credit_backward_f64";
+}
+
+/// Kernel function names in the ILP exact-induction module (M8 Phase 1).
+pub mod ilp_exact_kernels {
+    pub const ILP_EXACT_SCORE: &str = "ilp_exact_score";
 }
 
 /// Kernel function names in the PIR interning module.

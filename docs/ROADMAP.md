@@ -529,6 +529,63 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 
 ---
 
+## Bounded Exact Induction (`xlog-induce`) — DTS M8 Phase 1
+
+Complement to the differentiable (dILP) path above: a **non-gradient**, bounded exact
+search engine that enumerates every `(left, right)` candidate pair across four
+fixed DTS topologies (`chain`, `star`, `fanout`, `fanin`) and returns top-K per
+topology with full structured metadata. Designed as the GPU-native replacement for
+the `pyxlog.ilp.induce_exact(backend="python")` prototype, with semantically-correct
+per-topology scoring and a single batched kernel launch per request.
+
+Architecture doc: [bounded-exact-induction.md](architecture/bounded-exact-induction.md).
+Kernel design note: `docs/plans/2026-04-17-m8-ilp-exact-kernel-design.md`.
+
+### Implemented ✅ (M8 Phase 1 Stage B — 2026-04-17)
+
+**Engine (`crates/xlog-induce/`)**
+- [x] `InduceExactRequest` / `ExactInductionResult` / `ScoredCandidate` types
+- [x] `induce_exact(provider, request)` — pure-compute entrypoint over `RelId`s + `CudaBuffer` handles
+- [x] Pre-kernel classification (`validate::classify_request`): empty-candidates and zero-positives trivial dead-ends as pure host-side functions — unit-testable without CUDA
+- [x] Buffer-level validation: arity 2, column type `U64`, cached-row-count guard
+- [x] Deterministic `reduce_per_topology` — lex sort `(-pos, neg, left.0, right.0)` + positive-coverage filter + `next_*_covered` diagnostics + `tie_class_size`
+
+**CUDA kernel (`kernels/ilp_exact.cu`, `xlog_ilp_exact` module)**
+- [x] Single `ilp_exact_score` entry (launch geometry: `grid = (C, C, 4)`, block = 256 threads); `slot = topology * C² + L * C + R`, one unique output slot per block, zero cross-block atomics
+- [x] Deterministic block-level pair-halving reduction over integer counts
+- [x] Direct implementation of the four topology templates (no `set_rule_mask` / `evaluate` round-trip per pair)
+
+**Provider launcher (`crates/xlog-cuda/src/provider/ilp_exact.rs`)**
+- [x] `CudaKernelProvider::ilp_exact_score(...)` — D2D-concats candidate columns, uploads `cand_offsets`, launches the scoring kernel, downloads two count arrays
+- [x] D2H budget: **2 tracked transfers per call**, flat in candidate count (scoring loop has zero H/D transfers)
+- [x] 3 CUDA-gated launcher tests: hand-computed coverage fixture, determinism across runs, empty-negatives handling
+
+**pyxlog bridge (`crates/pyxlog/src/ilp_exact.rs`)**
+- [x] `CompiledIlpProgram::induce_exact_native(...)` pyo3 method
+- [x] Name → `RelId` resolution against `rel_index`; dict-shaped return for Python-side dataclass repackaging
+- [x] Opt-in `strict_per_topology` flag on the Python reference backend (`backend="python"`) preserves historical numbers by default while enabling per-topology-isolated scoring for parity testing
+
+**Kernel manifest (`crates/xlog-cuda/src/kernel_manifest_data.rs`)**
+- [x] `KERNEL_MODULES` count bumped 21 → 22 (compile-time assert + runtime test both updated)
+- [x] `ILP_EXACT_MODULE` + `ilp_exact_kernels::ILP_EXACT_SCORE` constants exposed from `provider/mod.rs`
+
+**Parity contract (`python/tests/test_ilp_exact_induce.py`)**
+- [x] `test_induce_exact_native_matches_python_reference` (ordered equality of summary fields + every candidate field) — PASS against RTX PRO 3000 / CUDA 13.1
+- [x] `test_induce_exact_native_does_not_scale_d2h_with_candidate_pairs` (gate: `large.d2h_transfer_count ≤ small.d2h_transfer_count + 2`) — PASS
+
+### Planned 📋 (M8 Phase 1 remaining)
+
+- [ ] DTS integration: wire `exact_backend="native"` into DTS's `tensorized_ilp.py` (Phase 1 Task 5)
+- [ ] Reproduce Phase 0d 449/449 liveness on the engine-backed path (Phase 1 Task 6)
+
+### Deferred / Non-Blocking
+
+- [ ] Column-type dispatch beyond `U64` (would follow the `ilp_mark_selected_ids_{u32,i32,i64,u64}` precedent if a caller needs `U32`/`Symbol` relations)
+- [ ] Chain-topology shared-memory caching of L rows (profile first; at current DTS data sizes, ~2.5·10³ integer compares per query is microseconds-scale and isn't a hot spot)
+- [ ] Committed `kernels/ilp_exact.ptx` artifact (consistent with `ilp.cu` / `ilp_credit.cu`, which also are compiled at build time without a checked-in PTX; C01 certification's `test_kernel_function_resolution` only scans checked-in `.ptx` files, matching the existing convention for ILP-family kernels)
+
+---
+
 ## GPU-Native Knowledge Compilation (`xlog-prob` + `xlog-solve`) — Phase 6 / v0.5.0
 
 ### Implemented ✅ (Foundations)

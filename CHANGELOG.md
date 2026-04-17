@@ -6,6 +6,52 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- **Bounded exact-induction engine** (`xlog-induce` + `ilp_exact` CUDA kernel + `pyxlog`
+  bridge): New `xlog-induce` crate scores all `(left, right)` candidate pairs across the
+  four canonical DTS topologies (`chain`, `star`, `fanout`, `fanin`) in a single batched
+  GPU pass and returns top-K per topology with full candidate metadata
+  (`positives_covered`, `negatives_covered`, `next_*_covered`, `tie_class_size`).
+  Designed for DTS's M8 Phase 1 integration; behaviorally equivalent on bounded
+  requests to `pyxlog.ilp.induce_exact(backend="python", strict_per_topology=True)`.
+  - **Engine** (`crates/xlog-induce/`): `InduceExactRequest` (indices + buffer handles),
+    `ExactInductionResult` / `ScoredCandidate`, pre-kernel classification
+    (`validate::classify_request` — 5 pure unit tests), buffer-level validation
+    (arity=2, column type `U64`, cached-row-count guard).
+  - **Deterministic reducer** (`xlog-induce::reduce`): lexicographic `(-positives,
+    negatives, left_idx, right_idx)` sort + positive-coverage filter + `next_*` and
+    `tie_class_size` diagnostics. 16 host-side unit tests lock the comparator and
+    diagnostic semantics bit-for-bit.
+  - **CUDA kernel** (`kernels/ilp_exact.cu`, new `xlog_ilp_exact` module): single
+    `ilp_exact_score` entry. Launch geometry: `grid = (C, C, 4)` blocks of 256
+    threads; each block owns one `(topology, L, R)` output slot, so there are no
+    cross-block atomics on the scoring path. Deterministic pair-halving block
+    reduction (integer counts only).
+  - **Provider launcher** (`crates/xlog-cuda/src/provider/ilp_exact.rs`):
+    `CudaKernelProvider::ilp_exact_score(candidates, positives, negatives) ->
+    (Vec<u32>, Vec<u32>)`. D2D-concatenates candidate columns in setup, uploads
+    `cand_offsets`, launches the scoring kernel, and downloads two count arrays.
+    D2H budget is a constant **2 per call** regardless of candidate count. Three
+    CUDA-gated launcher tests (hand-computed coverage fixture, determinism across
+    runs, empty-negatives path).
+  - **Kernel manifest**: bumped `KERNEL_MODULES` count 21 → 22 (plus the
+    compile-time `assert!(KERNEL_CU_NAMES.len() == 22)` at `provider/mod.rs:221`).
+    `ILP_EXACT_MODULE` + `ilp_exact_kernels::ILP_EXACT_SCORE` constants added.
+  - **pyxlog bridge** (`crates/pyxlog/src/ilp_exact.rs`): new
+    `CompiledIlpProgram::induce_exact_native(...)` pyo3 method — resolves relation
+    names against `rel_index`, unwraps positive/negative DLPack tensors against
+    the head relation's declared schema, dispatches to the engine, and returns a
+    `dict` the Python wrapper repackages into `ExactInductionResult` /
+    `ScoredCandidate` dataclasses.
+  - **Python wrapper** (`crates/pyxlog/python/pyxlog/ilp/exact_induce.py`): new
+    `backend="native"` dispatch path on `induce_exact(...)` plus the dict → dataclass
+    repackaging helper. Wrapper default backend is still `"python"` for backward
+    compatibility with existing callers.
+  - **Parity contract** (`python/tests/test_ilp_exact_induce.py`):
+    `test_induce_exact_native_matches_python_reference` (ordered equality of
+    summary and per-candidate fields) and
+    `test_induce_exact_native_does_not_scale_d2h_with_candidate_pairs` (gate:
+    `large.d2h_transfer_count ≤ small.d2h_transfer_count + 2`).
+  - **Kernel design note**: `docs/plans/2026-04-17-m8-ilp-exact-kernel-design.md`.
 - **MC runtime optimization** (`xlog-prob`, `xlog-runtime`): 8.6% wall-clock improvement on
   the MC evaluation hot loop (14.11s → 12.90s on 1000-sample clamped benchmark). No API changes.
   - `McTimingBreakdown` struct with env-gated profiling (`XLOG_MC_PROFILE=1`) for per-phase
@@ -49,6 +95,16 @@ All notable changes to this project are documented in this file.
   across clones. Pinned by the new `test_clone_buffer_preserves_cached_row_count`
   test, and a load-bearing precondition for the M8 exact-induction engine's
   hot-loop D2H budget.
+- **`pyxlog.ilp.induce_exact()` gains `strict_per_topology` opt-in flag**
+  (`pyxlog`, Python): The `backend="python"` prototype has a latent cross-topology
+  contamination behavior — stale `W_<topo>_<head>` masks from earlier outer-loop
+  iterations bleed into later topologies' coverage numbers via `evaluate()`.
+  Setting `strict_per_topology=True` zeroes out "other" topology masks before
+  each topology's inner loop, yielding per-topology-isolated scoring that matches
+  the `backend="native"` kernel's by-construction semantics. Default remains
+  `False` for full backward compatibility with callers that are calibrated
+  against the prototype's historical numbers (notably DTS Phase 0 liveness
+  baselines). The `"native"` backend is unaffected — it is strict by design.
 - **ILP reliability gate 4.6x faster** (`pyxlog`): Compile once per stage and reuse across
   all 5 seeds via `reset_runtime()`, eliminating 16 redundant compilations and 20 holdout
   evaluations (1647s → 359s). Gate still runs 4 stages × 5 seeds = 20 independent training

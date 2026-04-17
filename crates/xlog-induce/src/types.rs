@@ -69,7 +69,7 @@ pub struct ScoredCandidate {
 }
 
 /// Combined result from one `induce_exact()` call.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ExactInductionResult {
     /// Up to `k_per_topology × 4` candidates, grouped by topology then rank.
     pub candidates: Vec<ScoredCandidate>,

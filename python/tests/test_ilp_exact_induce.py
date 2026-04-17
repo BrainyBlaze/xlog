@@ -105,10 +105,19 @@ def _run_and_collect_transfer_stats(prog, kwargs):
 # ── Parity contract (red until native lands) ───────────────────────────
 
 def test_induce_exact_native_matches_python_reference():
-    """Native backend returns the same ordered ExactInductionResult as python reference."""
+    """Native backend returns the same ordered ExactInductionResult as python reference.
+
+    Python reference uses ``strict_per_topology=True`` so each topology's
+    scoring is isolated — matching the native backend's by-construction
+    strict semantics. Without this, the Python prototype's stale-mask
+    contamination inflates fanout/fanin coverage relative to the native
+    kernel (see exact_induce.py:strict_per_topology for details).
+    """
     prog, kwargs = _build_bounded_request(n_candidates=3)
 
-    py_result = induce_exact(prog, backend="python", **kwargs)
+    py_result = induce_exact(
+        prog, backend="python", strict_per_topology=True, **kwargs
+    )
     native_result = induce_exact(prog, backend="native", **kwargs)
 
     # Summary equality

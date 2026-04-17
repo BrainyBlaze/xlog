@@ -27,6 +27,7 @@
 | **Probabilistic** | Exact inference (knowledge compilation), Monte Carlo sampling, negation (stratified + WFS) |
 | **Neural-Symbolic** | Neural predicates (`nn/4`), PyTorch integration, differentiable training, circuit caching, term embeddings |
 | **dILP Training** | Differentiable ILP: sparse GPU mask, deterministic mode, promotion gates, holdout validation, artifact save/load |
+| **Bounded Exact Induction** | `xlog-induce` + `ilp_exact` CUDA kernel: score all `(L, R)` pairs across four topologies (chain / star / fanout / fanin) in one batched pass, top-K per topology, constant-size D2H budget — see [docs/architecture/bounded-exact-induction.md](docs/architecture/bounded-exact-induction.md) |
 | **Interop** | Arrow IPC, DLPack (zero-copy), Python bindings, PyTorch autograd |
 | **Profiling** | `--stats` flag for per-stratum/per-operation timing, memory tracking |
 

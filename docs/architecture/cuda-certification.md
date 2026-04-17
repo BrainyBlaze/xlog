@@ -129,6 +129,27 @@ Category C01 enumerates every `.entry` in each PTX module and verifies resolutio
 | `sat.ptx` | `sat_*`, `cdcl_*` |
 | `weights.ptx` | `weights_fill_*`, `weights_apply_evidence`, `weights_map_nodes_to_vars` |
 
+### Build-time compiled ILP-family modules
+
+Three kernel modules are compiled from `.cu` at build time by
+`crates/xlog-cuda/build.rs` and do **not** have checked-in `.ptx`
+artifacts. They are loaded at runtime via the `KERNEL_MODULES` manifest
+(currently 22 entries) but are *not* auto-discovered by
+`c01_toolchain::test_kernel_function_resolution`, which enumerates
+committed `.ptx` files only.
+
+| Module | `.cu` source | Purpose |
+|--------|--------------|---------|
+| `xlog_ilp` | `kernels/ilp.cu` | Selected-ID mask helpers, sparse mask COO fill, CSR histogram, f32/f64 block reductions |
+| `xlog_ilp_credit` | `kernels/ilp_credit.cu` | Credit forward/backward for dILP loss gradient |
+| `xlog_ilp_exact` | `kernels/ilp_exact.cu` | M8 Phase 1 bounded exact-induction scorer (`ilp_exact_score`). See [bounded-exact-induction.md](bounded-exact-induction.md). |
+
+Each module is covered by crate-local CUDA-gated tests instead of the
+central C01 enumeration (see each crate's `provider/ilp*.rs` test
+submodules). If a future need arises for central C01-style coverage of
+these modules, committing their `.portable.ptx` build output into
+`kernels/` is the minimal incremental change.
+
 ## Test Harness
 
 ### TestContext
