@@ -16,6 +16,7 @@ pub mod reduce;
 pub mod score;
 pub mod types;
 
+pub use reduce::{reduce_per_topology, ScoredPair};
 pub use types::{
     ExactInductionConfig, ExactInductionResult, ScoredCandidate, Topology,
 };
