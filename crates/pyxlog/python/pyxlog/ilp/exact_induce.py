@@ -107,9 +107,16 @@ def induce_exact(
     if backend == "python":
         pass  # fall through to the reference implementation below
     elif backend == "native":
-        raise NotImplementedError(
-            "induce_exact(backend='native') requires the xlog-induce engine, "
-            "which is not built in this release. See M8 Phase 1.",
+        return _induce_exact_native(
+            prog,
+            head_relation=head_relation,
+            candidate_relations=candidate_relations,
+            positive_arg0=positive_arg0,
+            positive_arg1=positive_arg1,
+            negative_arg0=negative_arg0,
+            negative_arg1=negative_arg1,
+            k_per_topology=k_per_topology,
+            deterministic=deterministic,
         )
     else:
         raise ValueError(
@@ -234,4 +241,37 @@ def induce_exact(
         candidate_count=len(body_indices),
         positive_count=pos_count,
         negative_count=neg_count,
+    )
+
+
+# ── Native backend delegation ────────────────────────────────────────────
+
+def _induce_exact_native(
+    prog,
+    *,
+    head_relation: str,
+    candidate_relations: list[str],
+    positive_arg0: torch.Tensor,
+    positive_arg1: torch.Tensor,
+    negative_arg0: torch.Tensor | None,
+    negative_arg1: torch.Tensor | None,
+    k_per_topology: int,
+    deterministic: bool,
+) -> ExactInductionResult:
+    """Dispatch to the Rust `induce_exact_native` method on CompiledIlpProgram.
+
+    Until M8 Phase 1 Task 3 lands, the Rust method raises
+    ``PyNotImplementedError``; this function surfaces that unchanged so the
+    parity tests fail at the native seam (Rust) rather than the Python
+    dispatcher.
+    """
+    return prog.induce_exact_native(
+        head_relation=head_relation,
+        candidate_relations=candidate_relations,
+        positive_arg0=positive_arg0,
+        positive_arg1=positive_arg1,
+        negative_arg0=negative_arg0,
+        negative_arg1=negative_arg1,
+        k_per_topology=k_per_topology,
+        deterministic=deterministic,
     )

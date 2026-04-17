@@ -23,6 +23,7 @@ mod neural_registry;
 use neural_registry::NeuralPredicateRegistry;
 mod dlpack;
 mod ilp;
+mod ilp_exact;
 mod ilp_gpu;
 mod logic;
 mod neural;

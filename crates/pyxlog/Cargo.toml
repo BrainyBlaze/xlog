@@ -21,6 +21,7 @@ xlog-logic = { path = "../xlog-logic" }
 xlog-neural = { path = "../xlog-neural", features = ["python"] }
 xlog-runtime = { path = "../xlog-runtime" }
 xlog-ir = { path = "../xlog-ir" }
+xlog-induce = { path = "../xlog-induce" }
 
 [features]
 default = ["host-io"]

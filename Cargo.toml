@@ -14,6 +14,7 @@ members = [
     "crates/xlog-cuda-tests",
     "crates/xlog-cli",
     "crates/xlog-neural",
+    "crates/xlog-induce",
 ]
 
 [workspace.package]

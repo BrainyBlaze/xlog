@@ -1407,6 +1407,7 @@ dependencies = [
  "xlog-core",
  "xlog-cuda",
  "xlog-gpu",
+ "xlog-induce",
  "xlog-ir",
  "xlog-logic",
  "xlog-neural",
@@ -2194,6 +2195,15 @@ dependencies = [
  "xlog-cuda",
  "xlog-ir",
  "xlog-logic",
+ "xlog-runtime",
+]
+
+[[package]]
+name = "xlog-induce"
+version = "0.3.2"
+dependencies = [
+ "xlog-core",
+ "xlog-cuda",
  "xlog-runtime",
 ]
 
