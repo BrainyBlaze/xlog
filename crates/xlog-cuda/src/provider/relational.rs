@@ -4317,12 +4317,18 @@ impl super::CudaKernelProvider {
             .dtod_copy(buffer.num_rows_device(), &mut d_num_rows)
             .map_err(|e| XlogError::Kernel(format!("Failed to clone row count: {}", e)))?;
 
-        Ok(CudaBuffer::from_columns(
+        let cloned = CudaBuffer::from_columns(
             result_columns,
             buffer.row_cap,
             d_num_rows,
             buffer.schema().clone(),
-        ))
+        );
+        // Preserve the host-side row-count cache so downstream code can avoid
+        // a D2H read of num_rows_device() just to learn the row count.
+        if let Some(cached) = buffer.cached_row_count() {
+            cloned.set_cached_row_count_if_unset(cached);
+        }
+        Ok(cloned)
     }
     // ============== Arithmetic Operations (GPU) ==============
 

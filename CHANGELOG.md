@@ -38,6 +38,17 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- **`CudaKernelProvider::clone_buffer` now propagates `cached_row_count`** (`xlog-cuda`):
+  Previously the deep-cloned buffer used `CudaBuffer::from_columns` (no host-side count
+  cache), forcing any consumer of a cloned buffer to perform a D2H read on
+  `num_rows_device()` just to learn the row count. All call sites that go through
+  `CompiledIlpProgram::put_relation` clone on insertion into the executor's relation
+  store, so every relation buffer fetched from the store was losing its cache. The
+  new code calls `set_cached_row_count_if_unset(source.cached_row_count())` on the
+  clone when the source has a populated cache, preserving the host-visible count
+  across clones. Pinned by the new `test_clone_buffer_preserves_cached_row_count`
+  test, and a load-bearing precondition for the M8 exact-induction engine's
+  hot-loop D2H budget.
 - **ILP reliability gate 4.6x faster** (`pyxlog`): Compile once per stage and reuse across
   all 5 seeds via `reset_runtime()`, eliminating 16 redundant compilations and 20 holdout
   evaluations (1647s → 359s). Gate still runs 4 stages × 5 seeds = 20 independent training

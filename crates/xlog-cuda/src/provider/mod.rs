@@ -1686,6 +1686,48 @@ mod tests {
         assert_eq!(host_count[0], 3);
     }
 
+    /// `clone_buffer` must propagate the host-side `cached_row_count` so
+    /// downstream code can read the row count without a D2H round-trip.
+    /// Without this propagation, buffers flowed through the relation store
+    /// (`CompiledIlpProgram::put_relation` calls `clone_buffer` before
+    /// storing) lose their host-visible count, forcing consumers to choose
+    /// between an extra D2H (blowing the D2H-budget gates used by M8/Phase 1
+    /// and beyond) and a hard error. This test pins the cache-propagation
+    /// contract directly.
+    #[test]
+    fn test_clone_buffer_preserves_cached_row_count() {
+        let provider = match create_test_provider() {
+            Some(p) => p,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+
+        let schema = Schema::new(vec![("id".to_string(), ScalarType::U32)]);
+        let ids: Vec<u32> = vec![7, 11, 13, 17];
+        let source = provider
+            .create_buffer_from_slices(&[bytemuck::cast_slice(&ids)], schema)
+            .unwrap();
+        // Source's cache is populated by the `create_buffer_from_*` path;
+        // verify the precondition so a regression in that path shows up here
+        // rather than silently passing the real assertion below.
+        assert_eq!(
+            source.cached_row_count(),
+            Some(4),
+            "source buffer should have its cached row count populated by \
+             create_buffer_from_slices"
+        );
+
+        let cloned = provider.clone_buffer(&source).unwrap();
+
+        assert_eq!(
+            cloned.cached_row_count(),
+            Some(4),
+            "clone_buffer must propagate cached_row_count from source to clone",
+        );
+    }
+
     // ============== Hash Join Tests ==============
 
     #[test]
