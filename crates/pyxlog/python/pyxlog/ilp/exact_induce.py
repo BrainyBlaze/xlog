@@ -77,6 +77,7 @@ def induce_exact(
     negative_arg1: torch.Tensor | None = None,
     k_per_topology: int = 2,
     deterministic: bool = True,
+    backend: str = "python",
 ) -> ExactInductionResult:
     """Exhaustively score all (left, right) pairs across 4 topologies.
 
@@ -95,10 +96,26 @@ def induce_exact(
         negative_arg0, negative_arg1: Optional 1-D device tensors of negative pairs.
         k_per_topology: How many top candidates to keep per topology.
         deterministic: Unused in Python prototype (determinism is inherent).
+        backend: ``"python"`` uses the reference prototype implementation (the
+            host-orchestrated ``set_rule_mask``/``evaluate``/``batch_fact_membership_device``
+            loop). ``"native"`` dispatches to the Phase 1 ``xlog-induce`` engine
+            when available; raises ``NotImplementedError`` until that engine lands.
 
     Returns:
         ExactInductionResult with up to k_per_topology × 4 candidates.
     """
+    if backend == "python":
+        pass  # fall through to the reference implementation below
+    elif backend == "native":
+        raise NotImplementedError(
+            "induce_exact(backend='native') requires the xlog-induce engine, "
+            "which is not built in this release. See M8 Phase 1.",
+        )
+    else:
+        raise ValueError(
+            f"induce_exact: unknown backend {backend!r}; expected 'python' or 'native'",
+        )
+
     N = prog.ilp_schema_size()
     rel_names = prog.ilp_relation_names()
     name_to_idx = {n: i for i, n in enumerate(rel_names)}
