@@ -12,6 +12,7 @@ members = [
     "crates/xlog-stats",
     "crates/xlog-solve",
     "crates/xlog-cuda-tests",
+    "crates/xlog-integration",
     "crates/xlog-cli",
     "crates/xlog-neural",
     "crates/xlog-induce",

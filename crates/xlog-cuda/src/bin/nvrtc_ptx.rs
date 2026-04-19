@@ -4,7 +4,13 @@ use std::path::PathBuf;
 use cudarc::nvrtc::{compile_ptx_with_opts, CompileOptions};
 
 fn kernels_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let packaged_dir = manifest_dir.join("kernels");
+    if packaged_dir.is_dir() {
+        return packaged_dir;
+    }
+
+    manifest_dir
         .parent()
         .expect("crates/")
         .parent()

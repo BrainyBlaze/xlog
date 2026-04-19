@@ -1,0 +1,39 @@
+[package]
+name = "xlog-integration"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Workspace-only integration targets for XLOG cross-crate GPU/runtime coverage"
+
+[dependencies]
+xlog-core.workspace = true
+xlog-cuda.workspace = true
+xlog-gpu.workspace = true
+xlog-ir.workspace = true
+xlog-logic.workspace = true
+xlog-runtime.workspace = true
+bytemuck = "1.14"
+
+[[bin]]
+name = "xlog_run"
+path = "src/bin/xlog_run.rs"
+
+[[test]]
+name = "executor_config_tests"
+path = "tests/executor_config_tests.rs"
+harness = true
+
+[[test]]
+name = "ilp_integration_tests"
+path = "tests/ilp_integration_tests.rs"
+harness = true
+
+[[test]]
+name = "e2e_integration_tests"
+path = "tests/e2e_integration_tests.rs"
+harness = true
+
+[[test]]
+name = "real_world_tests"
+path = "tests/real_world_tests.rs"
+harness = true

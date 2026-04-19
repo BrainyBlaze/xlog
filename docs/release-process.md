@@ -96,6 +96,9 @@ gh secret set RELEASE_PLZ_GITHUB_TOKEN -R BrainyBlaze/xlog
 - on pushes to `main`, runs `release-plz` in `release-pr` mode to open or update the release PR
 - on manual `workflow_dispatch`, runs `release-plz` in `release` mode after the maintainer confirms
   that real-GPU validation has already passed
+- before the manual publish step, runs `scripts/preflight_release_publish.sh`; in CI this uses
+  `release-plz release --dry-run` so package verification follows the same publish order as the
+  real release wave
 
 `.github/workflows/python-publish.yml`:
 
@@ -159,6 +162,7 @@ Non-GPU release sanity:
 ```bash
 make lint-workflows
 make lint-shell
+bash scripts/preflight_release_publish.sh
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --locked --no-deps -- \
   -A clippy::approx_constant \
