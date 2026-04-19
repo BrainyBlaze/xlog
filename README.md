@@ -68,21 +68,24 @@ cargo build --release -p xlog-cli --features host-io
 
 The release binary is `./target/release/xlog`.
 
-### GitHub release binary install
+### Planned GitHub release binary install
 
-Download the Linux x86_64 release archive from GitHub Releases, unpack it, and run the `xlog`
-binary from the extracted directory. Use the source build above if you need to rebuild with
-`host-io` for host-readable probabilistic output.
+GitHub release archives are not published yet. When they are available, download the Linux x86_64
+archive, unpack it, and run the `xlog` binary from the extracted directory. Use the source build
+above if you need to rebuild with `host-io` for host-readable probabilistic output.
 
-### PyPI install
+### Planned PyPI install
+
+The `pyxlog` PyPI package is not published yet. For now, use the local development install below.
+When it is published, the install flow will be:
 
 ```bash
 pip install pyxlog
 ```
 
-### crates.io install
+### Planned crates.io install
 
-If you want the CLI crate from crates.io, install it once it is published:
+The CLI crate is not published on crates.io yet. When it is, the install flow will be:
 
 ```bash
 cargo install xlog-cli
@@ -224,7 +227,7 @@ query(wet).
 
 ```bash
 # Requires xlog-cli built with `--features host-io`
-xlog prob weather.xlog --prob-engine exact_ddnnf
+./target/release/xlog prob weather.xlog --prob-engine exact_ddnnf
 # P(wet | not sprinkler) = 0.3
 ```
 
@@ -232,7 +235,7 @@ xlog prob weather.xlog --prob-engine exact_ddnnf
 
 ```bash
 # Requires xlog-cli built with `--features host-io`
-xlog prob weather.xlog --prob-engine mc --samples 10000
+./target/release/xlog prob weather.xlog --prob-engine mc --samples 10000
 # P(wet) ≈ 0.301 ± 0.009 (95% CI)
 ```
 
@@ -638,25 +641,28 @@ cargo run -p xlog-logic --release --example xlog_run -- \
 
 ```bash
 # Deterministic execution
-xlog run program.xlog
-xlog run program.xlog --output csv
-xlog run program.xlog --output arrow --output-dir ./results
+./target/release/xlog run program.xlog
+./target/release/xlog run program.xlog --output csv
+./target/release/xlog run program.xlog --output arrow --output-dir ./results
 
 # With external data (Arrow IPC files)
-xlog run program.xlog --input edge=graph.arrow
+./target/release/xlog run program.xlog --input edge=graph.arrow
 
 # Probabilistic execution
 # Requires `xlog-cli` built with `--features host-io`
-xlog prob program.xlog --prob-engine exact_ddnnf
-xlog prob program.xlog --prob-engine mc --samples 10000 --seed 42
+./target/release/xlog prob program.xlog --prob-engine exact_ddnnf
+./target/release/xlog prob program.xlog --prob-engine mc --samples 10000 --seed 42
 
 # Performance profiling
-xlog run program.xlog --stats          # Human-readable timing
-xlog run program.xlog --stats --json   # JSON format
+./target/release/xlog run program.xlog --stats          # Human-readable timing
+./target/release/xlog run program.xlog --stats --json   # JSON format
 
 # Options
-xlog run --help
+./target/release/xlog run --help
 ```
+
+If `xlog` is installed on your `PATH` in a later packaging workflow, you can drop the
+`./target/release/` prefix.
 
 ---
 

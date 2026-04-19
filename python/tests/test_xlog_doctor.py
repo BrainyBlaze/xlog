@@ -1,3 +1,5 @@
+import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -103,3 +105,18 @@ def test_prob_cli_mentions_host_io_requirement(monkeypatch, capsys):
     assert exit_code == 0
     assert "prob-cli" in out
     assert "host-io" in out
+
+
+def test_json_cli_invocation_round_trip():
+    result = subprocess.run(
+        [sys.executable, "scripts/xlog_doctor.py", "--workflow", "prob-cli", "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    assert payload["overall_status"] == "SUPPORTED"
+    assert payload["workflow"] == "prob-cli"
+    assert any(check["slug"] == "workflow" for check in payload["checks"])
