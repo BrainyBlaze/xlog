@@ -198,6 +198,10 @@ def _check_python() -> CheckResult:
     return _ok("python", f"Python {current.major}.{current.minor}.{current.micro}")
 
 
+def _check_maturin() -> CheckResult:
+    return _run_version_command(["maturin", "--version"], "maturin", "maturin")
+
+
 def _check_cuda_loader() -> CheckResult:
     try:
         ctypes.CDLL("libcuda.so")
@@ -241,6 +245,17 @@ def evaluate(workflow: str) -> list[CheckResult]:
     platform_result = _check_platform()
     results.append(platform_result)
     if platform_result.status == "UNSUPPORTED":
+        return results
+
+    if workflow == "release":
+        results.extend(
+            [
+                _check_rust(),
+                _check_python(),
+                _check_maturin(),
+                _workflow_note(workflow),
+            ]
+        )
         return results
 
     results.extend(

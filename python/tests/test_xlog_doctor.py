@@ -24,6 +24,7 @@ def _patch_supported_env(monkeypatch):
     monkeypatch.setattr(doctor, "_check_nvcc", lambda: _ok_check("nvcc visible"))
     monkeypatch.setattr(doctor, "_check_rust", lambda: _ok_check("rustc/cargo visible"))
     monkeypatch.setattr(doctor, "_check_python", lambda: _ok_check("Python supported"))
+    monkeypatch.setattr(doctor, "_check_maturin", lambda: _ok_check("maturin visible"))
     monkeypatch.setattr(doctor, "_check_cuda_loader", lambda: _ok_check("CUDA loader ready"))
 
 
@@ -121,6 +122,48 @@ def test_release_workflow_mentions_packaging_requirements(monkeypatch, capsys):
     assert "release" in out
     assert "host-io" in out
     assert "maturin" in out
+
+
+def test_release_workflow_requires_maturin_not_gpu(monkeypatch, capsys):
+    _patch_supported_env(monkeypatch)
+    monkeypatch.setattr(
+        doctor,
+        "_check_nvidia_smi",
+        lambda: doctor.CheckResult(
+            "nvidia-smi",
+            "FAIL",
+            "Missing nvidia-smi",
+            "Install the NVIDIA driver.",
+        ),
+    )
+    monkeypatch.setattr(
+        doctor,
+        "_check_nvcc",
+        lambda: doctor.CheckResult(
+            "nvcc",
+            "FAIL",
+            "Missing nvcc",
+            "Install CUDA Toolkit.",
+        ),
+    )
+    monkeypatch.setattr(
+        doctor,
+        "_check_cuda_loader",
+        lambda: doctor.CheckResult(
+            "cuda-loader",
+            "FAIL",
+            "Missing libcuda.so",
+            "Install the NVIDIA driver.",
+        ),
+    )
+
+    exit_code = doctor.main(["--workflow", "release"])
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert "maturin" in out
+    assert "nvidia-smi" not in out
+    assert "nvcc" not in out
 
 
 def test_json_cli_invocation_round_trip():
