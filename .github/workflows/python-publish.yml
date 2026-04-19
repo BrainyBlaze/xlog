@@ -36,7 +36,7 @@ jobs:
             pkg-config
 
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install Python
         uses: actions/setup-python@v5
@@ -82,7 +82,7 @@ jobs:
             python3-pip
 
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
