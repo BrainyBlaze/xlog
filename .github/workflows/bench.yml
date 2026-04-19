@@ -97,28 +97,30 @@ jobs:
 
       - name: Generate benchmark report
         run: |
-          echo "## Benchmark Results" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Commit: \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "## Benchmark Results"
+            echo
+            echo "Commit: \`${{ github.sha }}\`"
+            echo
 
-          # List benchmark groups
-          echo "### Benchmark Groups" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- **xlog-gpu**: Transitive closure, hash joins, aggregation" >> $GITHUB_STEP_SUMMARY
-          echo "- **xlog-prob**: Exact inference (DDNNF), Monte Carlo" >> $GITHUB_STEP_SUMMARY
-          echo "- **xlog-stats**: Statistics manager" >> $GITHUB_STEP_SUMMARY
-          echo "- **xlog-solve**: SAT solver" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
+            # List benchmark groups
+            echo "### Benchmark Groups"
+            echo
+            echo "- **xlog-gpu**: Transitive closure, hash joins, aggregation"
+            echo "- **xlog-prob**: Exact inference (DDNNF), Monte Carlo"
+            echo "- **xlog-stats**: Statistics manager"
+            echo "- **xlog-solve**: SAT solver"
+            echo
 
-          # Add comparison summary if available
-          if [ -f benchmark_comparison.txt ]; then
-            echo "### Comparison with main" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-            head -100 benchmark_comparison.txt >> $GITHUB_STEP_SUMMARY
-            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          fi
+            # Add comparison summary if available
+            if [ -f benchmark_comparison.txt ]; then
+              echo "### Comparison with main"
+              echo
+              echo "\`\`\`"
+              head -100 benchmark_comparison.txt
+              echo "\`\`\`"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload benchmark results
         uses: actions/upload-artifact@v4

@@ -27,9 +27,7 @@ pub mod types;
 mod validate;
 
 pub use reduce::{reduce_per_topology, ScoredPair};
-pub use types::{
-    ExactInductionConfig, ExactInductionResult, ScoredCandidate, Topology,
-};
+pub use types::{ExactInductionConfig, ExactInductionResult, ScoredCandidate, Topology};
 
 use xlog_core::{RelId, Result, ScalarType, XlogError};
 use xlog_cuda::{CudaBuffer, CudaKernelProvider};
@@ -115,10 +113,7 @@ fn score_and_reduce(
     //    buffer (zero rows) using the positives' schema. This keeps the
     //    launcher signature and kernel signature uniform.
     let empty_neg_holder: Option<CudaBuffer> = if request.negatives.is_none() {
-        Some(
-            provider
-                .create_empty_buffer(request.positives.schema().clone())?,
-        )
+        Some(provider.create_empty_buffer(request.positives.schema().clone())?)
     } else {
         None
     };
@@ -130,8 +125,7 @@ fn score_and_reduce(
     };
 
     // ── Drive the batched scoring kernel.
-    let candidate_buffers: Vec<&CudaBuffer> =
-        request.candidates.iter().map(|(_, b)| *b).collect();
+    let candidate_buffers: Vec<&CudaBuffer> = request.candidates.iter().map(|(_, b)| *b).collect();
     let (pos_covered, neg_covered) =
         provider.ilp_exact_score(&candidate_buffers, request.positives, negatives)?;
 
@@ -230,7 +224,12 @@ mod tests {
     fn topology_all_is_engine_order() {
         assert_eq!(
             Topology::ALL,
-            [Topology::Chain, Topology::Star, Topology::Fanout, Topology::Fanin],
+            [
+                Topology::Chain,
+                Topology::Star,
+                Topology::Fanout,
+                Topology::Fanin
+            ],
         );
     }
 }

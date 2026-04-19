@@ -149,29 +149,31 @@ jobs:
 
       - name: Generate report
         run: |
-          echo "## Fuzz Testing Report" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Run completed at: $(date -u)" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "## Fuzz Testing Report"
+            echo
+            echo "Run completed at: $(date -u)"
+            echo
 
-          echo "### Targets" >> $GITHUB_STEP_SUMMARY
-          echo "| Target | Status |" >> $GITHUB_STEP_SUMMARY
-          echo "|--------|--------|" >> $GITHUB_STEP_SUMMARY
+            echo "### Targets"
+            echo "| Target | Status |"
+            echo "|--------|--------|"
 
-          for target in fuzz_parser fuzz_compiler fuzz_type_inference; do
-            if [ -d "artifacts/fuzz-crashes-$target" ]; then
-              echo "| $target | :x: Crashes found |" >> $GITHUB_STEP_SUMMARY
-            else
-              echo "| $target | :white_check_mark: No crashes |" >> $GITHUB_STEP_SUMMARY
-            fi
-          done
+            for target in fuzz_parser fuzz_compiler fuzz_type_inference; do
+              if [ -d "artifacts/fuzz-crashes-$target" ]; then
+                echo "| $target | :x: Crashes found |"
+              else
+                echo "| $target | :white_check_mark: No crashes |"
+              fi
+            done
 
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Corpus Statistics" >> $GITHUB_STEP_SUMMARY
+            echo
+            echo "### Corpus Statistics"
 
-          for target in fuzz_parser fuzz_compiler fuzz_type_inference; do
-            if [ -d "artifacts/fuzz-corpus-$target" ]; then
-              COUNT=$(find "artifacts/fuzz-corpus-$target" -type f | wc -l)
-              echo "- **$target**: $COUNT inputs" >> $GITHUB_STEP_SUMMARY
-            fi
-          done
+            for target in fuzz_parser fuzz_compiler fuzz_type_inference; do
+              if [ -d "artifacts/fuzz-corpus-$target" ]; then
+                count=$(find "artifacts/fuzz-corpus-$target" -type f | wc -l)
+                echo "- **$target**: $count inputs"
+              fi
+            done
+          } >> "$GITHUB_STEP_SUMMARY"

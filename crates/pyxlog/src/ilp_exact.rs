@@ -156,8 +156,7 @@ impl CompiledIlpProgram {
                 deterministic,
             },
         };
-        let result =
-            induce_exact_engine(&self.provider, &request).map_err(types::xlog_err)?;
+        let result = induce_exact_engine(&self.provider, &request).map_err(types::xlog_err)?;
 
         // ── 6. Marshal the result into a dict — RelId → relation name uses
         //       the same `rel_index` we resolved names against. ─────────────

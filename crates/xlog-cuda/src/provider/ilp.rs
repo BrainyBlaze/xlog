@@ -306,9 +306,11 @@ impl super::CudaKernelProvider {
             .memset_zeros(&mut error_pos)
             .map_err(|e| XlogError::Kernel(format!("zero strict sparse error pos: {}", e)))?;
 
-        match ids_buf.schema().column_type(0).ok_or_else(|| {
-            XlogError::Kernel("selected id buffer has no schema type".to_string())
-        })? {
+        match ids_buf
+            .schema()
+            .column_type(0)
+            .ok_or_else(|| XlogError::Kernel("selected id buffer has no schema type".to_string()))?
+        {
             ScalarType::U32 | ScalarType::Symbol => {
                 let ids_view = self.column_as_u32_view(ids_col, selected_len)?;
                 let func = self
@@ -338,7 +340,10 @@ impl super::CudaKernelProvider {
                     )
                 }
                 .map_err(|e| {
-                    XlogError::Kernel(format!("strict sparse selected-id validation failed: {}", e))
+                    XlogError::Kernel(format!(
+                        "strict sparse selected-id validation failed: {}",
+                        e
+                    ))
                 })?;
             }
             ScalarType::I32 => {
@@ -370,7 +375,10 @@ impl super::CudaKernelProvider {
                     )
                 }
                 .map_err(|e| {
-                    XlogError::Kernel(format!("strict sparse selected-id validation failed: {}", e))
+                    XlogError::Kernel(format!(
+                        "strict sparse selected-id validation failed: {}",
+                        e
+                    ))
                 })?;
             }
             ScalarType::I64 => {
@@ -402,7 +410,10 @@ impl super::CudaKernelProvider {
                     )
                 }
                 .map_err(|e| {
-                    XlogError::Kernel(format!("strict sparse selected-id validation failed: {}", e))
+                    XlogError::Kernel(format!(
+                        "strict sparse selected-id validation failed: {}",
+                        e
+                    ))
                 })?;
             }
             ScalarType::U64 => {
@@ -434,7 +445,10 @@ impl super::CudaKernelProvider {
                     )
                 }
                 .map_err(|e| {
-                    XlogError::Kernel(format!("strict sparse selected-id validation failed: {}", e))
+                    XlogError::Kernel(format!(
+                        "strict sparse selected-id validation failed: {}",
+                        e
+                    ))
                 })?;
             }
             other => {

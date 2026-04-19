@@ -70,9 +70,7 @@ impl super::CudaKernelProvider {
         cand_offsets_host.push(0);
         for &r in &cand_rows {
             running = running.checked_add(r).ok_or_else(|| {
-                XlogError::Kernel(
-                    "ilp_exact_score: candidate row count overflow u32".to_string(),
-                )
+                XlogError::Kernel("ilp_exact_score: candidate row count overflow u32".to_string())
             })?;
             cand_offsets_host.push(running);
         }
@@ -125,9 +123,7 @@ impl super::CudaKernelProvider {
         let mut cand_offsets_buf = self.memory.alloc::<u32>(c + 1)?;
         device
             .htod_sync_copy_into(&cand_offsets_host, &mut cand_offsets_buf)
-            .map_err(|e| {
-                XlogError::Kernel(format!("ilp_exact_score: h2d cand_offsets: {}", e))
-            })?;
+            .map_err(|e| XlogError::Kernel(format!("ilp_exact_score: h2d cand_offsets: {}", e)))?;
 
         // ── Alloc output count arrays ─────────────────────────────────────
         let n_slots = 4usize
@@ -179,9 +175,7 @@ impl super::CudaKernelProvider {
         // ── Launch ────────────────────────────────────────────────────────
         let func = device
             .get_func(ILP_EXACT_MODULE, ilp_exact_kernels::ILP_EXACT_SCORE)
-            .ok_or_else(|| {
-                XlogError::Kernel("ilp_exact_score kernel not loaded".to_string())
-            })?;
+            .ok_or_else(|| XlogError::Kernel("ilp_exact_score kernel not loaded".to_string()))?;
         unsafe {
             func.clone().launch(
                 LaunchConfig {
@@ -217,17 +211,13 @@ impl super::CudaKernelProvider {
         self.d2h_transfer_count.fetch_add(1, Ordering::Relaxed);
         device
             .dtoh_sync_copy_into(&pos_covered_buf, &mut pos_covered)
-            .map_err(|e| {
-                XlogError::Kernel(format!("ilp_exact_score: dtoh pos_covered: {}", e))
-            })?;
+            .map_err(|e| XlogError::Kernel(format!("ilp_exact_score: dtoh pos_covered: {}", e)))?;
 
         let mut neg_covered = vec![0u32; n_slots];
         self.d2h_transfer_count.fetch_add(1, Ordering::Relaxed);
         device
             .dtoh_sync_copy_into(&neg_covered_buf, &mut neg_covered)
-            .map_err(|e| {
-                XlogError::Kernel(format!("ilp_exact_score: dtoh neg_covered: {}", e))
-            })?;
+            .map_err(|e| XlogError::Kernel(format!("ilp_exact_score: dtoh neg_covered: {}", e)))?;
 
         Ok((pos_covered, neg_covered))
     }
@@ -293,18 +283,16 @@ mod tests {
     /// Build a `(u64, u64)` pair buffer from parallel host-side column arrays.
     /// Uses `create_buffer_from_slice` per column then recombines, relying on
     /// the provider's buffer-from-columns path to set the cached row count.
-    fn pair_buffer(
-        provider: &CudaKernelProvider,
-        arg0: &[u64],
-        arg1: &[u64],
-    ) -> crate::CudaBuffer {
+    fn pair_buffer(provider: &CudaKernelProvider, arg0: &[u64], arg1: &[u64]) -> crate::CudaBuffer {
         assert_eq!(arg0.len(), arg1.len());
         let schema = Schema::new(vec![
             ("arg0".to_string(), ScalarType::U64),
             ("arg1".to_string(), ScalarType::U64),
         ]);
         if arg0.is_empty() {
-            return provider.create_empty_buffer(schema).expect("empty pair buffer");
+            return provider
+                .create_empty_buffer(schema)
+                .expect("empty pair buffer");
         }
         // Pack both columns as a single 2-column buffer by constructing
         // byte-columns manually — mirrors what `from_dlpack_tensors_with_schema`
@@ -312,10 +300,20 @@ mod tests {
         let device = provider.device().inner();
         let arg0_bytes: Vec<u8> = arg0.iter().flat_map(|v| v.to_le_bytes()).collect();
         let arg1_bytes: Vec<u8> = arg1.iter().flat_map(|v| v.to_le_bytes()).collect();
-        let mut col0 = provider.memory().alloc::<u8>(arg0_bytes.len()).expect("alloc");
-        let mut col1 = provider.memory().alloc::<u8>(arg1_bytes.len()).expect("alloc");
-        device.htod_sync_copy_into(&arg0_bytes, &mut col0).expect("h2d arg0");
-        device.htod_sync_copy_into(&arg1_bytes, &mut col1).expect("h2d arg1");
+        let mut col0 = provider
+            .memory()
+            .alloc::<u8>(arg0_bytes.len())
+            .expect("alloc");
+        let mut col1 = provider
+            .memory()
+            .alloc::<u8>(arg1_bytes.len())
+            .expect("alloc");
+        device
+            .htod_sync_copy_into(&arg0_bytes, &mut col0)
+            .expect("h2d arg0");
+        device
+            .htod_sync_copy_into(&arg1_bytes, &mut col1)
+            .expect("h2d arg1");
         provider
             .buffer_from_columns(vec![col0.into(), col1.into()], arg0.len() as u64, schema)
             .expect("buffer_from_columns")

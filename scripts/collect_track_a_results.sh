@@ -51,9 +51,6 @@ for seed in 42 123; do
 
     # Extract all epoch losses
     losses=$(grep -oP 'avg_loss=\K[0-9.]+' "$dir/stdout.log" | paste -sd',' -)
-    initial=$(grep -oP 'avg_loss=\K[0-9.]+' "$dir/stdout.log" | head -1)
-    final=$(grep -oP 'avg_loss=\K[0-9.]+' "$dir/stdout.log" | tail -1)
-
     python3 -c "
 import json, sys
 losses = [$losses]

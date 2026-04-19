@@ -694,7 +694,10 @@ impl CompiledIlpProgram {
             .provider
             .from_dlpack_tensors_with_schema(schema.clone(), tensors)
             .map_err(types::xlog_err)?;
-        let live_buffer = self.provider.clone_buffer(&buffer).map_err(types::xlog_err)?;
+        let live_buffer = self
+            .provider
+            .clone_buffer(&buffer)
+            .map_err(types::xlog_err)?;
         self.relation_overrides.insert(name.clone(), buffer);
         self.executor.put_relation(&name, live_buffer);
         Ok(())
@@ -1113,7 +1116,8 @@ impl CompiledIlpProgram {
             }
             let keys: Vec<usize> = (0..arity).collect();
 
-            let global_indices: Vec<u32> = (next_global_idx..next_global_idx + group.num_rows).collect();
+            let global_indices: Vec<u32> =
+                (next_global_idx..next_global_idx + group.num_rows).collect();
             let mut d_fact_indices = self
                 .provider
                 .memory()

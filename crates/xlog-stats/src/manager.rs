@@ -916,7 +916,7 @@ mod tests {
         // The cached selectivity is an EMA, initial 1.0 * 0.7 + 0.005 * 0.3 = 0.7015
         // Estimate = 1000 * 500 * 0.7015 = 350750
         let js = mgr.get_join_selectivity(RelId(1), RelId(2)).unwrap();
-        let expected = ((1000_u64 as f64 * 500_u64 as f64 * js.selectivity) as u64).max(1);
+        let expected = ((1000_f64 * 500_f64 * js.selectivity) as u64).max(1);
         assert_eq!(estimate, expected);
     }
 

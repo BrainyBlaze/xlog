@@ -8,7 +8,9 @@ use pyo3::prelude::*;
 use xlog_core::{MemoryBudget, Schema};
 #[cfg(feature = "arrow-device-import")]
 use xlog_cuda::{ArrowDeviceArray, ArrowDeviceArrayOwned};
-use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, DlpackManagedTensor, GpuMemoryManager};
+use xlog_cuda::{
+    CudaBuffer, CudaDevice, CudaKernelProvider, DlpackManagedTensor, GpuMemoryManager,
+};
 use xlog_gpu::logic as gpu_logic;
 use xlog_logic::ast::ProbEngine;
 use xlog_neural::{NetworkRegistry, TensorSourceRegistry};

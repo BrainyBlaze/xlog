@@ -233,9 +233,9 @@ mod tests {
     fn next_diagnostics_point_to_rank_plus_one_in_positive_list() {
         // Three positives; K=2. Top-2 get next_* from positions 1 and 2.
         let pairs = vec![
-            pair(Topology::Chain, 1, 1, 5, 0),  // rank 0
-            pair(Topology::Chain, 2, 2, 4, 0),  // rank 1
-            pair(Topology::Chain, 3, 3, 3, 0),  // rank 2
+            pair(Topology::Chain, 1, 1, 5, 0), // rank 0
+            pair(Topology::Chain, 2, 2, 4, 0), // rank 1
+            pair(Topology::Chain, 3, 3, 3, 0), // rank 2
         ];
         let result = reduce_per_topology(&pairs, HEAD, 2);
         assert_eq!(result.len(), 2);
