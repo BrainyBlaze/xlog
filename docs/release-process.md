@@ -54,7 +54,13 @@ Before the first public release, configure:
 - `RELEASE_PLZ_GITHUB_TOKEN` GitHub Actions secret for release-plz PR creation and release
   tagging. This is required on `BrainyBlaze/xlog`: the organization currently blocks GitHub
   Actions from creating pull requests with `github.token`, so release-plz must use a dedicated
-  PAT-style token instead.
+  credential instead.
+- Recommended credential for `RELEASE_PLZ_GITHUB_TOKEN`: a fine-grained PAT with:
+  - resource owner `BrainyBlaze`
+  - repository access `Only select repositories` -> `xlog`
+  - repository permission `Contents: Read and write`
+  - repository permission `Pull requests: Read and write`
+  - repository permission `Administration: Read and write` only if protected tags are enabled
 - If the organization ever allows it, the repository setting `Allow GitHub Actions to create and
   approve pull requests` would let `github.token` create PRs. `BrainyBlaze/xlog` currently cannot
   rely on that path.
@@ -66,6 +72,20 @@ Current GitHub-side status for `BrainyBlaze/xlog`:
 - enabling “GitHub Actions can create or approve pull requests” at the repo level currently returns
   a `409 Conflict` because the organization disallows it
 - therefore `RELEASE_PLZ_GITHUB_TOKEN` is the supported release-plz credential for this repository
+
+GitHub fine-grained PAT creation is currently a browser flow, not a CLI or REST automation flow.
+Use this prefilled GitHub URL to create the replacement token, then update the repository secret:
+
+```text
+https://github.com/settings/personal-access-tokens/new?name=xlog%20release-plz&description=Release-plz%20automation%20for%20BrainyBlaze%2Fxlog&target_name=BrainyBlaze&expires_in=90&contents=write&pull_requests=write
+```
+
+After opening that page, set `Repository access` to `Only select repositories`, choose `xlog`, and
+generate the token. Then replace the existing repository secret:
+
+```bash
+gh secret set RELEASE_PLZ_GITHUB_TOKEN -R BrainyBlaze/xlog
+```
 
 ## Automation Layout
 
