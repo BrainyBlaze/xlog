@@ -37,8 +37,8 @@ jobs:
         shell: bash
     outputs:
       releases_created: ${{ steps.release.outputs.releases_created }}
-      cli_release_created: ${{ steps.release.outputs['crates/xlog-cli--release_created'] }}
-      cli_tag_name: ${{ steps.release.outputs['crates/xlog-cli--tag_name'] }}
+      cli_release_created: ${{ steps.release.outputs.cli_release_created }}
+      cli_tag_name: ${{ steps.release.outputs.cli_tag_name }}
     env:
       XLOG_NO_CUBIN: "1"
       GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_GITHUB_TOKEN }}
@@ -91,6 +91,7 @@ jobs:
             ca-certificates \
             curl \
             git \
+            jq \
             pkg-config \
             python3 \
             python3-dev \
@@ -108,11 +109,88 @@ jobs:
       - name: Show CUDA toolkit
         run: nvcc --version
 
+      - name: Install release-plz toolchain
+        run: |
+          set -euo pipefail
+          install_root="$HOME/.cargo/bin"
+          mkdir -p "$install_root"
+          curl -fsSL \
+            "https://github.com/release-plz/release-plz/releases/download/release-plz-v0.3.157/release-plz-x86_64-unknown-linux-musl.tar.gz" \
+            | tar -xz -C "$install_root" release-plz
+          curl -fsSL \
+            "https://github.com/obi1kenobi/cargo-semver-checks/releases/download/v0.46.0/cargo-semver-checks-x86_64-unknown-linux-musl.tar.gz" \
+            | tar -xz -C "$install_root" cargo-semver-checks
+          echo "$install_root" >> "$GITHUB_PATH"
+          "$install_root/release-plz" --version
+          "$install_root/cargo-semver-checks" semver-checks --version
+
+      - name: Configure git user
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
       - name: Run release-plz
         id: release
-        uses: release-plz/action@1528104d2ca23787631a1c1f022abb64b34c1e11
-        with:
-          command: ${{ github.event_name == 'workflow_dispatch' && 'release' || 'release-pr' }}
+        run: |
+          set -euo pipefail
+          command="${{ github.event_name == 'workflow_dispatch' && 'release' || 'release-pr' }}"
+          {
+            echo "releases_created=false"
+            echo "cli_release_created=false"
+            echo "cli_tag_name="
+          } >> "$GITHUB_OUTPUT"
+
+          if [[ "$command" == "release-pr" ]]; then
+            release_pr_output=$(release-plz release-pr \
+              --git-token "$GITHUB_TOKEN" \
+              --repo-url "https://github.com/${GITHUB_REPOSITORY}" \
+              --config release-plz.toml \
+              -o json)
+            echo "release_pr_output: $release_pr_output"
+
+            prs=$(echo "$release_pr_output" | jq -c '.prs')
+            prs_length=$(echo "$prs" | jq 'length')
+            if [[ "$prs_length" != "0" ]]; then
+              prs_created=true
+            else
+              prs_created=false
+            fi
+
+            {
+              echo "prs_created=$prs_created"
+            } >> "$GITHUB_OUTPUT"
+          else
+            release_output=$(release-plz release \
+              --git-token "$GITHUB_TOKEN" \
+              --token "$CARGO_REGISTRY_TOKEN" \
+              --config release-plz.toml \
+              -o json)
+            echo "release_output: $release_output"
+
+            releases=$(echo "$release_output" | jq -c '.releases')
+            releases_length=$(echo "$releases" | jq 'length')
+            if [[ "$releases_length" != "0" ]]; then
+              releases_created=true
+            else
+              releases_created=false
+            fi
+
+            cli_release=$(echo "$releases" | jq -c '[.[] | select(.package_name == "xlog-cli")]')
+            cli_release_length=$(echo "$cli_release" | jq 'length')
+            if [[ "$cli_release_length" != "0" ]]; then
+              cli_release_created=true
+              cli_tag_name=$(echo "$cli_release" | jq -r '.[0].tag')
+            else
+              cli_release_created=false
+              cli_tag_name=""
+            fi
+
+            {
+              echo "releases_created=$releases_created"
+              echo "cli_release_created=$cli_release_created"
+              echo "cli_tag_name=$cli_tag_name"
+            } >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Summarize release-plz result
         run: |
@@ -121,8 +199,8 @@ jobs:
             echo
             echo "- command: \`${{ github.event_name == 'workflow_dispatch' && 'release' || 'release-pr' }}\`"
             echo "- releases created: \`${{ steps.release.outputs.releases_created }}\`"
-            echo "- xlog-cli release created: \`${{ steps.release.outputs['crates/xlog-cli--release_created'] }}\`"
-            echo "- xlog-cli tag: \`${{ steps.release.outputs['crates/xlog-cli--tag_name'] || 'n/a' }}\`"
+            echo "- xlog-cli release created: \`${{ steps.release.outputs.cli_release_created }}\`"
+            echo "- xlog-cli tag: \`${{ steps.release.outputs.cli_tag_name || 'n/a' }}\`"
             if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
               echo "- GPU validation: ${{ inputs.gpu_validation_notes }}"
             fi
