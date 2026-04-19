@@ -54,13 +54,13 @@ fn main() {
     println!("cargo:rerun-if-env-changed=XLOG_CUBIN_ARCHS");
     println!("cargo:rerun-if-env-changed=NVCC_PATH");
 
-    // Emit kernel-dir metadata for packaging scripts that parse build output
-    // (e.g. maturin, pyxlog wheel builds) to stage artifacts into the
-    // installed layout (<exe_dir>/kernels/).
+    // Emit the canonical kernel artifact root for packaging/staging helpers.
+    // The staging script consumes this OUT_DIR and copies the generated
+    // cubins/PTX into the installed layout (<exe_dir>/kernels/).
     // Note: this is NOT propagated as DEP_* to downstream crates (no `links`
-    // key in Cargo.toml). Scripts should grep `cargo:kernel-dir=` from
-    // `cargo build -vv` output or read OUT_DIR directly.
-    println!("cargo:kernel-dir={}", out_dir.display());
+    // key in Cargo.toml). Packaging tools should read `cargo:kernel-out-dir=`
+    // from `cargo build -vv` output or use OUT_DIR directly.
+    println!("cargo:kernel-out-dir={}", out_dir.display());
 
     for name in KERNEL_CU_NAMES {
         let cu_path = kernels_dir.join(format!("{name}.cu"));

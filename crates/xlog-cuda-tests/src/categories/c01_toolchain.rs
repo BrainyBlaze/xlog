@@ -10,12 +10,11 @@
 use crate::harness::{CategoryResult, TestContext, TestResult};
 use std::collections::HashSet;
 use std::fs;
-use std::path::{Path, PathBuf};
 use std::time::Instant;
-use xlog_cuda::{join_kernels, JOIN_MODULE};
+use xlog_cuda::{join_kernels, provider::kernel_paths::KernelArtifactLocator, JOIN_MODULE};
 
-fn kernels_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../kernels")
+fn kernel_locator() -> KernelArtifactLocator {
+    KernelArtifactLocator::from_env()
 }
 
 fn extract_ptx_directive(ptx: &str, directive: &str) -> Option<String> {
@@ -154,60 +153,48 @@ fn test_compute_capability_check(ctx: &TestContext) -> TestResult {
 
 /// Test 3: Verify all kernel functions can be resolved from the loaded modules.
 ///
-/// This test parses every `kernels/*.ptx` file, extracts all `.entry` points,
-/// and verifies that `CudaKernelProvider` loaded each entry under the expected
-/// module name `xlog_<stem>`.
+/// This test resolves every generated/staged portable PTX artifact, extracts
+/// all `.entry` points, and verifies that `CudaKernelProvider` loaded each
+/// entry under the expected module name.
 fn test_kernel_function_resolution(ctx: &TestContext) -> TestResult {
     let start = Instant::now();
 
     let device = ctx.device.inner();
+    let locator = kernel_locator();
 
     let mut total_functions = 0;
     let mut resolved_functions = 0;
 
-    let kernels_dir = kernels_dir();
-    let mut ptx_files: Vec<PathBuf> = match fs::read_dir(&kernels_dir) {
-        Ok(rd) => rd
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().is_some_and(|ext| ext == "ptx"))
-            .collect(),
-        Err(e) => {
+    for spec in xlog_cuda::kernel_manifest_data::KERNEL_MODULES {
+        let (path, is_cubin) = match locator.resolve_module_path(spec.cu_name, 999) {
+            Some(v) => v,
+            None => {
+                return TestResult::error(
+                    "test_kernel_function_resolution",
+                    start.elapsed(),
+                    format!(
+                        "{}: no portable PTX found in XLOG_CUBIN_DIR, package kernels/, or OUT_DIR",
+                        spec.cu_name
+                    ),
+                );
+            }
+        };
+        if is_cubin {
             return TestResult::error(
                 "test_kernel_function_resolution",
                 start.elapsed(),
                 format!(
-                    "Failed to read kernels dir {}: {}",
-                    kernels_dir.display(),
-                    e
+                    "{}: expected portable PTX fallback when resolving module artifacts",
+                    spec.cu_name
                 ),
             );
         }
-    };
-    ptx_files.sort();
 
-    if ptx_files.is_empty() {
-        return TestResult::error(
-            "test_kernel_function_resolution",
-            start.elapsed(),
-            format!("No PTX files found under {}", kernels_dir.display()),
-        );
-    }
-
-    for path in ptx_files {
         let filename = path
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or("<unknown>");
-        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-        if stem.is_empty() {
-            return TestResult::error(
-                "test_kernel_function_resolution",
-                start.elapsed(),
-                format!("Invalid PTX filename stem: {}", filename),
-            );
-        }
-
-        let module_name = format!("xlog_{}", stem);
+        let module_name = spec.module_name;
 
         let ptx = match fs::read_to_string(&path) {
             Ok(s) => s,

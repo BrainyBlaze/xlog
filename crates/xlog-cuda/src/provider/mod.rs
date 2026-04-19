@@ -24,6 +24,7 @@ mod ilp;
 mod ilp_exact;
 mod io;
 mod kernel_loading;
+pub mod kernel_paths;
 mod probabilistic;
 mod relational;
 mod transfer;
@@ -60,53 +61,8 @@ fn detect_compute_capability(device: &Arc<CudaDevice>) -> Result<u32> {
     Ok((major as u32) * 10 + (minor as u32))
 }
 
-/// Resolve a kernel module to a file path, preferring cubin over portable PTX.
-///
-/// Search order (first match wins):
-///   1. `XLOG_CUBIN_DIR/{name}.sm_{cc}.cubin`
-///   2. `<exe_dir>/kernels/{name}.sm_{cc}.cubin`   (packaged installs)
-///   3. `OUT_DIR/{name}.sm_{cc}.cubin`              (in-tree builds)
-///   4. `XLOG_CUBIN_DIR/{name}.portable.ptx`
-///   5. `<exe_dir>/kernels/{name}.portable.ptx`
-///   6. `OUT_DIR/{name}.portable.ptx`
 fn resolve_module_path(name: &str, cc: u32) -> Option<(std::path::PathBuf, bool)> {
-    let cubin_dir = std::env::var("XLOG_CUBIN_DIR").ok();
-    let exe_kernels_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("kernels")));
-    let out_dir = option_env!("OUT_DIR");
-
-    // Helper: collect candidate directories in priority order.
-    let dirs_for = |suffix: &str, is_cubin: bool| -> Option<(std::path::PathBuf, bool)> {
-        // XLOG_CUBIN_DIR
-        if let Some(dir) = &cubin_dir {
-            let p = std::path::PathBuf::from(dir).join(suffix);
-            if p.exists() {
-                return Some((p, is_cubin));
-            }
-        }
-        // exe-relative kernels/
-        if let Some(dir) = &exe_kernels_dir {
-            let p = dir.join(suffix);
-            if p.exists() {
-                return Some((p, is_cubin));
-            }
-        }
-        // OUT_DIR (compile-time)
-        if let Some(dir) = out_dir {
-            let p = std::path::PathBuf::from(dir).join(suffix);
-            if p.exists() {
-                return Some((p, is_cubin));
-            }
-        }
-        None
-    };
-
-    // Try cubin first, then portable PTX.
-    if let found @ Some(_) = dirs_for(&format!("{name}.sm_{cc}.cubin"), true) {
-        return found;
-    }
-    dirs_for(&format!("{name}.portable.ptx"), false)
+    kernel_paths::KernelArtifactLocator::from_env().resolve_module_path(name, cc)
 }
 
 /// Load a kernel module from file (cubin or portable PTX).
@@ -120,7 +76,7 @@ fn load_module_from_file(name: &str, cc: u32) -> Result<(Ptx, bool)> {
     );
     let (path, is_cubin) = resolve_module_path(name, cc).ok_or_else(|| {
         XlogError::Kernel(format!(
-            "{name}: no cubin or portable PTX found (set XLOG_CUBIN_DIR or rebuild with nvcc)"
+            "{name}: no cubin or portable PTX found (set XLOG_CUBIN_DIR, stage kernels/, or rebuild with nvcc)"
         ))
     })?;
     Ok((Ptx::from_file(path), is_cubin))
@@ -1375,8 +1331,67 @@ mod tests {
     }
 
     #[test]
+    fn test_kernel_artifact_locator_precedence_order() {
+        use super::kernel_paths::KernelArtifactLocator;
+        use std::fs;
+        use std::path::PathBuf;
+
+        let root = std::env::temp_dir().join(format!(
+            "xlog-kernel-paths-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock before UNIX_EPOCH")
+                .as_nanos()
+        ));
+        let cubin_dir = root.join("cubin");
+        let package_dir = root.join("bin").join("kernels");
+        let out_dir = root.join("out");
+        fs::create_dir_all(&cubin_dir).expect("create cubin dir");
+        fs::create_dir_all(&package_dir).expect("create package kernels dir");
+        fs::create_dir_all(&out_dir).expect("create out dir");
+
+        let name = "xlog_join";
+        let cc = 75;
+        let cubin_path = cubin_dir.join(format!("{name}.sm_{cc}.cubin"));
+        let package_path = package_dir.join(format!("{name}.sm_{cc}.cubin"));
+        let out_path = out_dir.join(format!("{name}.sm_{cc}.cubin"));
+        fs::write(&cubin_path, b"cubin").expect("write cubin file");
+        fs::write(&package_path, b"package").expect("write package file");
+        fs::write(&out_path, b"out").expect("write out file");
+
+        let locator = KernelArtifactLocator::new(
+            Some(cubin_dir.clone()),
+            Some(package_dir.clone()),
+            Some(out_dir.clone()),
+        );
+
+        let (path, is_cubin) = locator
+            .resolve_module_path(name, cc)
+            .expect("expected a kernel artifact");
+        assert_eq!(path, cubin_path);
+        assert!(is_cubin);
+
+        fs::remove_file(&cubin_path).expect("remove cubin file");
+        let (path, is_cubin) = locator
+            .resolve_module_path(name, cc)
+            .expect("expected package kernel artifact");
+        assert_eq!(path, package_path);
+        assert!(is_cubin);
+
+        fs::remove_file(&package_path).expect("remove package file");
+        let (path, is_cubin) = locator
+            .resolve_module_path(name, cc)
+            .expect("expected out dir kernel artifact");
+        assert_eq!(path, out_path);
+        assert!(is_cubin);
+
+        let _ = fs::remove_dir_all(PathBuf::from(&root));
+    }
+
+    #[test]
     fn test_module_resolution_finds_portable_ptx() {
-        // Verify resolve_module_path finds portable PTX for all 19 modules.
+        // Verify resolve_module_path finds portable PTX for all modules.
         // Uses a dummy cc (999) so cubin won't match — only portable PTX.
         for name in crate::kernel_manifest_data::KERNEL_CU_NAMES {
             let result = resolve_module_path(name, 999);

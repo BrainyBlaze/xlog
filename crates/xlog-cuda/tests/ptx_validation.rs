@@ -1,9 +1,8 @@
 use std::collections::HashSet;
 use std::fs;
-use std::path::{Path, PathBuf};
 
 use cudarc::nvrtc::Ptx;
-use xlog_cuda::CudaDevice;
+use xlog_cuda::{provider::kernel_paths::KernelArtifactLocator, CudaDevice};
 
 fn extract_ptx_directive(ptx: &str, directive: &str) -> Option<String> {
     for line in ptx.lines() {
@@ -41,8 +40,8 @@ fn extract_entry_names(ptx: &str) -> Vec<String> {
     entries
 }
 
-fn kernels_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../kernels")
+fn kernel_locator() -> KernelArtifactLocator {
+    KernelArtifactLocator::from_env()
 }
 
 #[test]
@@ -55,29 +54,28 @@ fn validate_all_ptx_files_load_and_resolve_all_entry_points() {
         }
     };
 
-    let kernels_dir = kernels_dir();
-    let mut ptx_files: Vec<PathBuf> = fs::read_dir(&kernels_dir)
-        .expect("Failed to read kernels dir")
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|ext| ext == "ptx"))
-        .collect();
-    ptx_files.sort();
+    let locator = kernel_locator();
 
-    assert!(
-        !ptx_files.is_empty(),
-        "No PTX files found under {}",
-        kernels_dir.display()
-    );
+    for spec in xlog_cuda::kernel_manifest_data::KERNEL_MODULES {
+        let (path, is_cubin) = locator
+            .resolve_module_path(spec.cu_name, 999)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{}: no portable PTX found in XLOG_CUBIN_DIR, package kernels/, or OUT_DIR",
+                    spec.cu_name
+                )
+            });
+        assert!(
+            !is_cubin,
+            "{}: expected portable PTX fallback when using dummy cc",
+            spec.cu_name
+        );
 
-    for path in ptx_files {
         let filename = path
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or("<unknown>");
-        let module_name = format!(
-            "validate_{}",
-            path.file_stem().and_then(|s| s.to_str()).unwrap_or("ptx")
-        );
+        let module_name = format!("validate_{}", spec.cu_name);
 
         let ptx = fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("Failed to read {}: {}", path.display(), e));
@@ -149,7 +147,8 @@ fn validate_all_ptx_files_load_and_resolve_all_entry_points() {
 
 #[test]
 fn validate_kernel_build_flags_suppress_deprecated_gpu_targets() {
-    let cmake_path = kernels_dir().join("CMakeLists.txt");
+    let cmake_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../kernels/CMakeLists.txt");
     let cmake = fs::read_to_string(&cmake_path)
         .unwrap_or_else(|e| panic!("Failed to read {}: {}", cmake_path.display(), e));
     assert!(
@@ -160,7 +159,10 @@ fn validate_kernel_build_flags_suppress_deprecated_gpu_targets() {
 
 #[test]
 fn validate_arith_ptx_contains_expected_kernels() {
-    let ptx_path = kernels_dir().join("arith.ptx");
+    let ptx_path = kernel_locator()
+        .resolve_module_path("arith", 999)
+        .map(|(path, _)| path)
+        .expect("arith portable PTX should exist in generated or staged artifacts");
     let ptx = fs::read_to_string(&ptx_path)
         .unwrap_or_else(|e| panic!("arith.ptx should exist after build: {}", e));
     assert!(ptx.contains("arith_binary_i64"));
@@ -172,7 +174,10 @@ fn validate_arith_ptx_contains_expected_kernels() {
 
 #[test]
 fn validate_neural_ptx_contains_expected_kernels() {
-    let ptx_path = kernels_dir().join("neural.ptx");
+    let ptx_path = kernel_locator()
+        .resolve_module_path("neural", 999)
+        .map(|(path, _)| path)
+        .expect("neural portable PTX should exist in generated or staged artifacts");
     let ptx = fs::read_to_string(&ptx_path)
         .unwrap_or_else(|e| panic!("neural.ptx should exist after build: {}", e));
     assert!(ptx.contains("neural_fill_ad_chain_f32"));
@@ -181,7 +186,10 @@ fn validate_neural_ptx_contains_expected_kernels() {
 
 #[test]
 fn validate_d4_ptx_contains_expected_kernels() {
-    let ptx_path = kernels_dir().join("d4.ptx");
+    let ptx_path = kernel_locator()
+        .resolve_module_path("d4", 999)
+        .map(|(path, _)| path)
+        .expect("d4 portable PTX should exist in generated or staged artifacts");
     let ptx = fs::read_to_string(&ptx_path)
         .unwrap_or_else(|e| panic!("d4.ptx should exist after build: {}", e));
 

@@ -1,10 +1,9 @@
 # Build artifacts
 /target/
 
-# Compiled CUDA PTX files (regenerated during build)
-# But track kernels/*.ptx as they're embedded in the binary
+# Compiled CUDA kernel artifacts (regenerated during build)
 *.ptx
-!kernels/*.ptx
+*.cubin
 
 # IDE
 .idea/
