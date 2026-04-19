@@ -17,6 +17,15 @@ Commands run:
 paste commands here
 ```
 
+## Reproduction
+
+- Repro steps for the bug or behavior change:
+
+## Expected vs Actual
+
+- Expected behavior:
+- Actual behavior:
+
 ## Environment
 
 - Supported platform used for primary validation: `yes` / `no`

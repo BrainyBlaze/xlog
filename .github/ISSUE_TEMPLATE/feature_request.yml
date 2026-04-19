@@ -27,6 +27,31 @@ body:
     attributes:
       label: Alternatives considered
       description: What workarounds or other approaches have you tried?
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps or current workflow
+      description: If this request is driven by a current limitation, show the steps or workflow that exposes it.
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What outcome do you want instead?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior today
+      description: What happens now, and why is it insufficient?
+    validations:
+      required: true
   - type: dropdown
     id: supported-platform
     attributes:
