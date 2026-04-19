@@ -1,5 +1,5 @@
 [build-system]
-requires = ["maturin>=1.5"]
+requires = ["maturin>=1.12.1"]
 build-backend = "maturin"
 
 [project]
@@ -18,3 +18,7 @@ classifiers = [
 python-source = "python"
 module-name = "pyxlog._native"
 features = ["pyo3/extension-module", "host-io"]
+include = [
+  { path = "*.portable.ptx", from = "out-dir", to = "pyxlog/kernels/", crate_name = "xlog-cuda" },
+  { path = "*.cubin", from = "out-dir", to = "pyxlog/kernels/", crate_name = "xlog-cuda" },
+]
