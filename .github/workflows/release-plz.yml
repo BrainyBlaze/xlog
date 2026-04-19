@@ -176,6 +176,11 @@ jobs:
               releases_created=true
             else
               releases_created=false
+              if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+                echo "release-plz release produced no releases. This repository only publishes from commits associated with merged release-plz PRs." >&2
+                echo "If you merged post-release fixes directly onto main, open and merge a follow-up PR whose branch name starts with release-plz- and rerun workflow_dispatch from that merge commit." >&2
+                exit 1
+              fi
             fi
 
             cli_release=$(echo "$releases" | jq -c '[.[] | select(.package_name == "xlog-cli")]')

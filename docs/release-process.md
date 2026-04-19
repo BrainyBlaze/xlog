@@ -134,6 +134,24 @@ gpu_validation_notes = <host / commit / evidence>
 That manual dispatch publishes crates, uploads the CLI archive to the GitHub release, and publishes
 the Python distributions to PyPI.
 
+## Recovery When Publish Is Skipped
+
+`release-plz release` publishes only when `HEAD` is associated with a merged PR whose branch name
+starts with `release-plz-`. A manual dispatch from an arbitrary `main` commit will not publish and
+should now fail loudly instead of succeeding with `releases=[]`.
+
+If you merge a post-release fix directly onto `main` after the release PR, recover with this flow:
+
+1. Create a follow-up branch from current `main` whose name starts with `release-plz-`, for example
+   `release-plz-fix-publish`.
+2. Put the required CI/package/docs fix on that branch.
+3. Open a PR back to `main` and merge it with the standard merge strategy, not squash.
+4. Re-run the manual GPU validation on the merged commit if the fix affects release artifacts.
+5. Dispatch `release-plz.yml` from that merge commit with the validation attestation fields.
+
+This mirrors the recovery path recommended by release-plz itself for CI fixes that must still lead
+to a publishable release commit.
+
 ## Local Commands
 
 Non-GPU release sanity:
