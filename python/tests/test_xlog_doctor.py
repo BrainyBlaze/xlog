@@ -1,3 +1,4 @@
+import os
 import json
 import subprocess
 import sys
@@ -108,8 +109,11 @@ def test_prob_cli_mentions_host_io_requirement(monkeypatch, capsys):
 
 
 def test_json_cli_invocation_round_trip():
+    env = dict(os.environ)
+    env[doctor.TEST_MODE_ENV] = "supported"
     result = subprocess.run(
         [sys.executable, "scripts/xlog_doctor.py", "--workflow", "prob-cli", "--json"],
+        env=env,
         capture_output=True,
         text=True,
         check=False,

@@ -10,6 +10,7 @@ import platform
 import shutil
 import subprocess
 import sys
+from functools import lru_cache
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable
@@ -20,6 +21,7 @@ EXIT_UNSUPPORTED = 2
 
 MIN_PYTHON = (3, 8)
 ROOT = Path(__file__).resolve().parents[1]
+TEST_MODE_ENV = "XLOG_DOCTOR_TEST_MODE"
 
 
 @dataclass(frozen=True)
@@ -56,7 +58,9 @@ def _build_runtime_env() -> tuple[dict[str, str], str | None]:
     return env, f"WSL loader shim prepared at {shim_dir}"
 
 
-RUNTIME_ENV, CUDA_SHIM_NOTE = _build_runtime_env()
+@lru_cache(maxsize=1)
+def _runtime_env() -> tuple[dict[str, str], str | None]:
+    return _build_runtime_env()
 
 
 def _ok(slug: str, message: str) -> CheckResult:
@@ -83,7 +87,7 @@ def _run_version_command(command: list[str], slug: str, name: str) -> CheckResul
     proc = subprocess.run(
         [resolved, *command[1:]],
         cwd=ROOT,
-        env=RUNTIME_ENV,
+        env=_runtime_env()[0],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -128,7 +132,7 @@ def _check_nvcc() -> CheckResult:
     proc = subprocess.run(
         [resolved, "--version"],
         cwd=ROOT,
-        env=RUNTIME_ENV,
+        env=_runtime_env()[0],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -159,7 +163,7 @@ def _check_rust() -> CheckResult:
     rustc_version = subprocess.run(
         [rustc, "--version"],
         cwd=ROOT,
-        env=RUNTIME_ENV,
+        env=_runtime_env()[0],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -167,7 +171,7 @@ def _check_rust() -> CheckResult:
     cargo_version = subprocess.run(
         [cargo, "--version"],
         cwd=ROOT,
-        env=RUNTIME_ENV,
+        env=_runtime_env()[0],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -198,8 +202,9 @@ def _check_python() -> CheckResult:
 def _check_cuda_loader() -> CheckResult:
     try:
         ctypes.CDLL("libcuda.so")
-        if CUDA_SHIM_NOTE:
-            return _ok("cuda-loader", f"libcuda.so resolves; {CUDA_SHIM_NOTE}")
+        _, cuda_shim_note = _runtime_env()
+        if cuda_shim_note:
+            return _ok("cuda-loader", f"libcuda.so resolves; {cuda_shim_note}")
         return _ok("cuda-loader", "libcuda.so resolves")
     except OSError:
         wsl_cuda = Path("/usr/lib/wsl/lib/libcuda.so.1")
@@ -215,6 +220,18 @@ def _check_cuda_loader() -> CheckResult:
         )
 
 
+def _synthetic_supported_results(workflow: str) -> list[CheckResult]:
+    return [
+        _ok("platform", "Linux x86_64"),
+        _ok("nvidia-smi", "nvidia-smi visible"),
+        _ok("nvcc", "nvcc visible"),
+        _ok("rust", "rustc/cargo visible"),
+        _ok("python", f"Python {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"),
+        _ok("cuda-loader", "libcuda.so resolves"),
+        _workflow_note(workflow),
+    ]
+
+
 def _workflow_note(workflow: str) -> CheckResult:
     if workflow == "prob-cli":
         return _ok(
@@ -227,6 +244,9 @@ def _workflow_note(workflow: str) -> CheckResult:
 
 
 def evaluate(workflow: str) -> list[CheckResult]:
+    if os.environ.get(TEST_MODE_ENV) == "supported":
+        return _synthetic_supported_results(workflow)
+
     results: list[CheckResult] = []
 
     platform_result = _check_platform()
