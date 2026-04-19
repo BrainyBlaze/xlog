@@ -92,6 +92,7 @@ cd "$repo_root"
 run_cmd python3 scripts/xlog_doctor.py --workflow release
 run_cmd cargo build --workspace --locked --release --exclude pyxlog
 run_cmd cargo build --locked --release -p xlog-cli --features host-io
+run_cmd bash scripts/stage_pyxlog_kernels.sh
 run_cmd maturin build -m crates/pyxlog/Cargo.toml --release --compatibility linux --out "$wheel_dir"
 run_cmd bash scripts/package_cli_release.sh --output "$bundle_dir"
 

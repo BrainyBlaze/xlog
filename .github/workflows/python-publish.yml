@@ -52,6 +52,9 @@ jobs:
       - name: Install maturin
         run: python -m pip install --upgrade pip maturin
 
+      - name: Stage pyxlog kernels
+        run: bash scripts/stage_pyxlog_kernels.sh
+
       - name: Build wheel
         run: maturin build -m crates/pyxlog/Cargo.toml --release --compatibility linux --out dist -i python
 

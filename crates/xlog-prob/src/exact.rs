@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
-use cudarc::driver::{DeviceSlice, LaunchConfig};
+use cudarc::driver::LaunchConfig;
 use xlog_core::{MemoryBudget, Result, ScalarType, XlogError};
 use xlog_cuda::LaunchAsync;
 use xlog_logic::ast::Program;
