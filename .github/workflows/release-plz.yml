@@ -32,6 +32,9 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: nvidia/cuda:12.4.1-devel-ubuntu22.04
+    defaults:
+      run:
+        shell: bash
     outputs:
       releases_created: ${{ steps.release.outputs.releases_created }}
       cli_release_created: ${{ steps.release.outputs['crates/xlog-cli--release_created'] }}
