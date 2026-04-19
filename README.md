@@ -1,7 +1,6 @@
 # XLOG
 
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
-[![CUDA Tests](https://img.shields.io/badge/CUDA%20tests-206%2F206-brightgreen.svg)](docs/architecture/cuda-certification.md)
 [![Version](https://img.shields.io/badge/version-v0.5.0-blue.svg)](CHANGELOG.md)
 
 > **Release status:** `v0.5.0` — GPU-resident ILP credit/loss path (zero D2H), P2a term embeddings
