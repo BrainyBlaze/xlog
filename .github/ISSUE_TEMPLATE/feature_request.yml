@@ -1,0 +1,58 @@
+name: Feature Request
+description: Propose a new capability or improvement.
+title: "[feature] "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please explain the problem first. Requests tied to the supported public platform are easier to prioritize.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: What problem are you trying to solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: Describe the API, workflow, or behavior you want.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What workarounds or other approaches have you tried?
+  - type: dropdown
+    id: supported-platform
+    attributes:
+      label: Is this request for the supported platform contract?
+      options:
+        - "Yes: Linux x86_64 + NVIDIA GPU + CUDA 12.x"
+        - "No"
+        - "Partly"
+        - "Not sure"
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment context
+      description: Include environment details if this request is tied to setup, packaging, or runtime behavior.
+      placeholder: |
+        OS and architecture:
+        GPU model:
+        NVIDIA driver version:
+        CUDA toolkit/runtime version:
+        Rust/Python versions if relevant:
+  - type: textarea
+    id: success
+    attributes:
+      label: Success criteria
+      description: How should maintainers evaluate whether this request is done?
+    validations:
+      required: true

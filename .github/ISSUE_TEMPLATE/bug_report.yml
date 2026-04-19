@@ -1,0 +1,82 @@
+name: Bug Report
+description: Report a reproducible bug in XLOG.
+title: "[bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. Public support currently covers Linux `x86_64` with an NVIDIA GPU and CUDA Toolkit 12.x.
+        GitHub-hosted CI is non-GPU only, so CUDA bugs need validation on a real CUDA machine.
+  - type: dropdown
+    id: supported-platform
+    attributes:
+      label: Supported platform status
+      description: Was this reproduced on the supported public platform contract?
+      options:
+        - "Yes: Linux x86_64 + NVIDIA GPU + CUDA 12.x"
+        - "No"
+        - "Not sure"
+    validations:
+      required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: Bug summary
+      description: What happened?
+      placeholder: A concise description of the failure.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      description: Provide exact steps, commands, inputs, and files if possible.
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      placeholder: What should have happened?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      placeholder: What happened instead? Include errors or incorrect output.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include the details needed to reproduce the issue.
+      placeholder: |
+        XLOG version or commit:
+        OS and architecture:
+        Rust version:
+        Python version:
+    validations:
+      required: true
+  - type: textarea
+    id: gpu
+    attributes:
+      label: GPU / driver / CUDA details
+      description: Required for CUDA, packaging, performance, and release-validation bugs.
+      placeholder: |
+        GPU model:
+        NVIDIA driver version:
+        CUDA toolkit/runtime version:
+        `nvidia-smi` output snippet:
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and artifacts
+      description: Paste the smallest relevant logs, stack traces, or screenshots.
