@@ -220,6 +220,11 @@ def _check_cuda_loader() -> CheckResult:
 
 
 def _workflow_note(workflow: str) -> CheckResult:
+    if workflow == "release":
+        return _ok(
+            "workflow",
+            "release workflow requires `host-io` for xlog-cli and `maturin` for pyxlog packaging",
+        )
     if workflow == "prob-cli":
         return _ok(
             "workflow",
@@ -287,7 +292,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Preflight doctor for the public xlog setup.")
     parser.add_argument(
         "--workflow",
-        choices=("smoke", "run-cli", "prob-cli"),
+        choices=("smoke", "run-cli", "prob-cli", "release"),
         default="smoke",
         help="Select the install or runtime workflow to validate.",
     )

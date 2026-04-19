@@ -1,5 +1,6 @@
 ACTIONLINT ?= actionlint
 SHELLCHECK ?= shellcheck
+PACKAGE_OUTPUT ?= dist
 
 .PHONY: doctor build build-host-io check package validate-release-local lint-workflows lint-shell
 
@@ -31,7 +32,7 @@ check:
 	cargo test --workspace --all-targets --exclude pyxlog
 
 package:
-	cargo build --release -p xlog-cli
+	bash scripts/package_cli_release.sh --output $(PACKAGE_OUTPUT)
 
 validate-release-local:
-	python scripts/xlog_doctor.py --workflow prob-cli
+	bash scripts/validate_release_gpu.sh --mode release

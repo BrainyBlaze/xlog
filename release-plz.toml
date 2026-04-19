@@ -1,0 +1,65 @@
+[workspace]
+release = false
+release_always = false
+dependencies_update = true
+changelog_path = "CHANGELOG.md"
+max_analyze_commits = 5000
+pr_branch_prefix = "release-plz-"
+pr_labels = ["release"]
+git_release_enable = false
+git_tag_enable = false
+
+[[package]]
+name = "xlog-core"
+release = true
+version_group = "xlog"
+
+[[package]]
+name = "xlog-ir"
+release = true
+version_group = "xlog"
+
+[[package]]
+name = "xlog-cuda"
+release = true
+version_group = "xlog"
+
+[[package]]
+name = "xlog-stats"
+release = true
+version_group = "xlog"
+
+[[package]]
+name = "xlog-runtime"
+release = true
+version_group = "xlog"
+
+[[package]]
+name = "xlog-logic"
+release = true
+version_group = "xlog"
+
+[[package]]
+name = "xlog-solve"
+release = true
+version_group = "xlog"
+
+[[package]]
+name = "xlog-gpu"
+release = true
+version_group = "xlog"
+
+[[package]]
+name = "xlog-prob"
+release = true
+version_group = "xlog"
+
+[[package]]
+name = "xlog-cli"
+release = true
+version_group = "xlog"
+publish_features = ["host-io"]
+git_release_enable = true
+git_tag_enable = true
+git_tag_name = "v{{ version }}"
+git_release_name = "v{{ version }}"

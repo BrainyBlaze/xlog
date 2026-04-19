@@ -2,9 +2,13 @@
 name = "xlog-stats"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Runtime statistics and optimizer feedback utilities for XLOG"
+readme = "../../README.md"
 
 [dependencies]
-xlog-core = { path = "../xlog-core" }
+xlog-core.workspace = true
 
 [dev-dependencies]
 criterion = "0.5"

@@ -87,8 +87,31 @@ jobs:
       - name: Validate doctor help
         run: python scripts/xlog_doctor.py --help
 
+      - name: Validate release doctor mode
+        run: python scripts/xlog_doctor.py --workflow release --json > /tmp/xlog-doctor-release.json
+
       - name: Export cargo metadata
         run: cargo metadata --locked --no-deps --format-version=1 > cargo-metadata.json
+
+      - name: Validate publishable crate manifests
+        run: |
+          set -euo pipefail
+          crates=(
+            xlog-core
+            xlog-ir
+            xlog-cuda
+            xlog-stats
+            xlog-runtime
+            xlog-logic
+            xlog-solve
+            xlog-gpu
+            xlog-prob
+            xlog-cli
+          )
+          for crate in "${crates[@]}"; do
+            echo "Validating cargo package metadata for $crate"
+            cargo package --locked --allow-dirty --no-verify --list -p "$crate" >/dev/null
+          done
 
       - name: Validate README quickstart assumptions
         run: |
@@ -233,3 +256,9 @@ jobs:
 
       - name: Build host-io CLI variant
         run: cargo build --locked --release -p xlog-cli --features host-io
+
+      - name: Install maturin
+        run: python3 -m pip install --upgrade pip maturin
+
+      - name: Build pyxlog wheel without GPU execution
+        run: maturin build -m crates/pyxlog/Cargo.toml --release --compatibility linux --out dist

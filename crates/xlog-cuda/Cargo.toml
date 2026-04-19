@@ -2,9 +2,13 @@
 name = "xlog-cuda"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CUDA kernel provider, buffers, and interop for XLOG"
+readme = "../../README.md"
 
 [dependencies]
-xlog-core = { path = "../xlog-core" }
+xlog-core.workspace = true
 cudarc.workspace = true
 arrow = { version = "53", default-features = false, features = ["ffi", "ipc"] }
 

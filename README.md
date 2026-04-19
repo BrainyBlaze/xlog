@@ -70,8 +70,8 @@ The release binary is `./target/release/xlog`.
 ### Planned GitHub release binary install
 
 GitHub release archives are not published yet. When they are available, download the Linux x86_64
-archive, unpack it, and run the `xlog` binary from the extracted directory. Use the source build
-above if you need to rebuild with `host-io` for host-readable probabilistic output.
+archive, unpack it, and run the bundled `xlog` binary from the extracted directory. Public release
+archives are built with `host-io`, so `xlog prob` has host-readable output without a rebuild.
 
 ### Planned PyPI install
 
@@ -87,7 +87,7 @@ pip install pyxlog
 The CLI crate is not published on crates.io yet. When it is, the install flow will be:
 
 ```bash
-cargo install xlog-cli
+cargo install xlog-cli --features host-io
 ```
 
 ### Local Python development install

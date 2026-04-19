@@ -2,8 +2,13 @@
 name = "xlog-induce"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Bounded exact-induction engine used by XLOG's Python training surface"
+readme = "../../README.md"
+publish = false
 
 [dependencies]
-xlog-core = { path = "../xlog-core" }
-xlog-cuda = { path = "../xlog-cuda" }
-xlog-runtime = { path = "../xlog-runtime" }
+xlog-core.workspace = true
+xlog-cuda.workspace = true
+xlog-runtime.workspace = true

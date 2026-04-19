@@ -2,17 +2,21 @@
 name = "xlog-logic"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Parser, compiler, and optimizer for XLOG logic programs"
+readme = "../../README.md"
 
 [dependencies]
-xlog-core = { path = "../xlog-core" }
-xlog-ir = { path = "../xlog-ir" }
-xlog-stats = { path = "../xlog-stats" }
+xlog-core.workspace = true
+xlog-ir.workspace = true
+xlog-stats.workspace = true
 pest.workspace = true
 pest_derive.workspace = true
 
 [dev-dependencies]
-xlog-cuda = { path = "../xlog-cuda" }
-xlog-gpu = { path = "../xlog-gpu" }
-xlog-runtime = { path = "../xlog-runtime" }
+xlog-cuda.workspace = true
+xlog-gpu.workspace = true
+xlog-runtime.workspace = true
 tempfile = "3"
 serial_test = "3"

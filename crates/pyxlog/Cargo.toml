@@ -2,6 +2,11 @@
 name = "pyxlog"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "PyO3 extension crate backing the pyxlog Python package"
+readme = "../../README.md"
+publish = false
 
 [lib]
 name = "pyxlog"
@@ -13,15 +18,15 @@ doctest = false
 pyo3 = { workspace = true, features = ["extension-module", "multiple-pymethods"] }
 cudarc = { workspace = true }
 rand = "0.8"
-xlog-core = { path = "../xlog-core" }
-xlog-cuda = { path = "../xlog-cuda" }
-xlog-gpu = { path = "../xlog-gpu" }
-xlog-prob = { path = "../xlog-prob" }
-xlog-logic = { path = "../xlog-logic" }
-xlog-neural = { path = "../xlog-neural", features = ["python"] }
-xlog-runtime = { path = "../xlog-runtime" }
-xlog-ir = { path = "../xlog-ir" }
-xlog-induce = { path = "../xlog-induce" }
+xlog-core.workspace = true
+xlog-cuda.workspace = true
+xlog-gpu.workspace = true
+xlog-prob.workspace = true
+xlog-logic.workspace = true
+xlog-neural = { workspace = true, features = ["python"] }
+xlog-runtime.workspace = true
+xlog-ir.workspace = true
+xlog-induce.workspace = true
 
 [features]
 default = ["host-io"]

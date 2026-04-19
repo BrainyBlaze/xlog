@@ -5,7 +5,8 @@ usage() {
   cat <<'EOF'
 usage: scripts/package_cli_release.sh --output <dir>
 
-Build the xlog CLI in release mode, stage CUDA kernels beside the binary,
+Build the xlog CLI release artifact in release mode with host-readable
+probabilistic output enabled, stage CUDA kernels beside the binary,
 and write a .tar.gz bundle suitable for a GitHub release.
 EOF
 }
@@ -48,7 +49,7 @@ resolve_target_dir() {
     return
   fi
 
-  cargo metadata --format-version 1 --no-deps \
+  cargo metadata --locked --format-version 1 --no-deps \
     | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])'
 }
 
@@ -58,7 +59,7 @@ resolve_version() {
     return
   fi
 
-  cargo metadata --format-version 1 --no-deps \
+  cargo metadata --locked --format-version 1 --no-deps \
     | python3 -c 'import json, sys; data=json.load(sys.stdin); print(next(pkg["version"] for pkg in data["packages"] if pkg["name"] == "xlog-cli"))'
 }
 
@@ -82,7 +83,7 @@ resolve_binary_path() {
 }
 
 build_release_and_capture_kernel_out_dir() {
-  cargo build -p xlog-cli --release --bin xlog --message-format=json-render-diagnostics \
+  cargo build -p xlog-cli --release --locked --bin xlog --features host-io --message-format=json-render-diagnostics \
     | python3 -c '
 import json
 import sys

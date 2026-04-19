@@ -5,6 +5,8 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Neural network integration for XLOG probabilistic logic"
+readme = "../../README.md"
+publish = false
 
 [lib]
 # `pyxlog` enables `pyo3/extension-module`, which makes Rust test binaries that link `pyo3` fail to
@@ -22,7 +24,7 @@ python = ["pyo3"]
 python-tests = ["python"]
 
 [dependencies]
-xlog-core = { path = "../xlog-core" }
+xlog-core.workspace = true
 thiserror = { workspace = true }
 lru = "0.12"
 # PyO3 is optional - only needed when integrating with Python

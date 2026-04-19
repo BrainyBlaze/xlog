@@ -111,6 +111,18 @@ def test_prob_cli_mentions_host_io_requirement(monkeypatch, capsys):
     assert "host-io" in out
 
 
+def test_release_workflow_mentions_packaging_requirements(monkeypatch, capsys):
+    _patch_supported_env(monkeypatch)
+
+    exit_code = doctor.main(["--workflow", "release"])
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert "release" in out
+    assert "host-io" in out
+    assert "maturin" in out
+
+
 def test_json_cli_invocation_round_trip():
     with tempfile.TemporaryDirectory() as tmpdir:
         result = subprocess.run(

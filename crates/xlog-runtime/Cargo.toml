@@ -2,14 +2,18 @@
 name = "xlog-runtime"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Runtime executor and relation store for XLOG"
+readme = "../../README.md"
 
 [dependencies]
 cudarc = { workspace = true }
-xlog-core = { path = "../xlog-core" }
-xlog-ir = { path = "../xlog-ir" }
-xlog-cuda = { path = "../xlog-cuda" }
-xlog-stats = { path = "../xlog-stats" }
+xlog-core.workspace = true
+xlog-ir.workspace = true
+xlog-cuda.workspace = true
+xlog-stats.workspace = true
 
 [dev-dependencies]
-xlog-logic = { path = "../xlog-logic" }
+xlog-logic.workspace = true
 bytemuck = "1.14"

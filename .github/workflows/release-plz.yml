@@ -1,0 +1,116 @@
+name: release-plz
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      confirm_gpu_validation:
+        description: Confirm that scripts/validate_release_gpu.sh --mode release passed on the release commit.
+        required: true
+        type: boolean
+      gpu_validation_notes:
+        description: Reference the host, commit, and evidence for the manual GPU validation run.
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: release-plz-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release-plz:
+    runs-on: ubuntu-latest
+    container:
+      image: nvidia/cuda:12.4.1-devel-ubuntu22.04
+    outputs:
+      releases_created: ${{ steps.release.outputs.releases_created }}
+      cli_release_created: ${{ steps.release.outputs['crates/xlog-cli--release_created'] }}
+      cli_tag_name: ${{ steps.release.outputs['crates/xlog-cli--tag_name'] }}
+    env:
+      XLOG_NO_CUBIN: "1"
+      GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_GITHUB_TOKEN != '' && secrets.RELEASE_PLZ_GITHUB_TOKEN || github.token }}
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    steps:
+      - name: Require explicit GPU gate acknowledgement
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          set -euo pipefail
+          if [[ "${{ inputs.confirm_gpu_validation }}" != "true" ]]; then
+            echo "workflow_dispatch releases require confirm_gpu_validation=true" >&2
+            exit 1
+          fi
+          if [[ -z "${{ inputs.gpu_validation_notes }}" ]]; then
+            echo "workflow_dispatch releases require gpu_validation_notes" >&2
+            exit 1
+          fi
+
+      - name: Install system dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            build-essential \
+            ca-certificates \
+            curl \
+            git \
+            pkg-config \
+            python3 \
+            python3-dev \
+            python3-pip
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Show CUDA toolkit
+        run: nvcc --version
+
+      - name: Run release-plz
+        id: release
+        uses: release-plz/action@63ab0c2746bedc448370bad4b0b3d536458398b0
+        with:
+          command: ${{ github.event_name == 'workflow_dispatch' && 'release' || 'release-pr' }}
+
+      - name: Summarize release-plz result
+        run: |
+          {
+            echo "## release-plz"
+            echo
+            echo "- command: \`${{ github.event_name == 'workflow_dispatch' && 'release' || 'release-pr' }}\`"
+            echo "- releases created: \`${{ steps.release.outputs.releases_created }}\`"
+            echo "- xlog-cli release created: \`${{ steps.release.outputs['crates/xlog-cli--release_created'] }}\`"
+            echo "- xlog-cli tag: \`${{ steps.release.outputs['crates/xlog-cli--tag_name'] || 'n/a' }}\`"
+            if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+              echo "- GPU validation: ${{ inputs.gpu_validation_notes }}"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  python-publish:
+    needs: release-plz
+    if: needs.release-plz.outputs.cli_release_created == 'true'
+    uses: ./.github/workflows/python-publish.yml
+    with:
+      tag_name: ${{ needs.release-plz.outputs.cli_tag_name }}
+    secrets: inherit
+
+  github-release-assets:
+    needs: release-plz
+    if: needs.release-plz.outputs.cli_release_created == 'true'
+    uses: ./.github/workflows/github-release.yml
+    with:
+      tag_name: ${{ needs.release-plz.outputs.cli_tag_name }}
+    secrets: inherit

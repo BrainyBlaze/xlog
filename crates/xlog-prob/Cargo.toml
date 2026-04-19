@@ -2,14 +2,18 @@
 name = "xlog-prob"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Probabilistic inference engines for XLOG"
+readme = "../../README.md"
 
 [dependencies]
-xlog-core = { path = "../xlog-core" }
-xlog-logic = { path = "../xlog-logic" }
-xlog-ir = { path = "../xlog-ir" }
-xlog-cuda = { path = "../xlog-cuda" }
-xlog-runtime = { path = "../xlog-runtime" }
-xlog-solve = { path = "../xlog-solve" }
+xlog-core.workspace = true
+xlog-logic.workspace = true
+xlog-ir.workspace = true
+xlog-cuda.workspace = true
+xlog-runtime.workspace = true
+xlog-solve.workspace = true
 cudarc = { workspace = true }
 bytemuck = "1"
 

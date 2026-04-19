@@ -2,6 +2,10 @@
 name = "xlog-cli"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Command-line interface for deterministic and probabilistic XLOG execution"
+readme = "../../README.md"
 
 [[bin]]
 name = "xlog"
@@ -11,11 +15,11 @@ path = "src/main.rs"
 clap = { version = "4.5", features = ["derive"] }
 arrow = { version = "53", default-features = false, features = ["ffi", "ipc", "csv", "prettyprint"] }
 thiserror.workspace = true
-xlog-core = { path = "../xlog-core" }
-xlog-cuda = { path = "../xlog-cuda" }
-xlog-logic = { path = "../xlog-logic" }
-xlog-gpu = { path = "../xlog-gpu" }
-xlog-prob = { path = "../xlog-prob" }
+xlog-core.workspace = true
+xlog-cuda.workspace = true
+xlog-logic.workspace = true
+xlog-gpu.workspace = true
+xlog-prob.workspace = true
 
 [dev-dependencies]
 assert_cmd = "2.0"
