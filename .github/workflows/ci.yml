@@ -1,0 +1,222 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint-workflows:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install actionlint
+        env:
+          ACTIONLINT_VERSION: 1.7.7
+        run: |
+          set -euo pipefail
+          curl -sSL \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
+            | tar -xz actionlint
+          install actionlint /usr/local/bin/actionlint
+
+      - name: Run actionlint
+        run: actionlint -color
+
+  lint-shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+
+      - name: Run shellcheck
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(rg --files scripts .github -g '*.sh')
+          if ((${#files[@]} == 0)); then
+            echo "No shell scripts found."
+            exit 0
+          fi
+          printf '%s\n' "${files[@]}"
+          shellcheck "${files[@]}"
+
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+  package-metadata:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Validate doctor help
+        run: python scripts/xlog_doctor.py --help
+
+      - name: Export cargo metadata
+        run: cargo metadata --locked --no-deps --format-version=1 > cargo-metadata.json
+
+      - name: Validate README quickstart assumptions
+        run: |
+          python - <<'PY'
+          import json
+          import re
+          import sys
+          import tomllib
+          from pathlib import Path
+
+          readme = Path("README.md").read_text(encoding="utf-8")
+          readme_plain = readme.replace("**", "")
+          cargo = tomllib.loads(Path("Cargo.toml").read_text(encoding="utf-8"))
+          metadata = json.loads(Path("cargo-metadata.json").read_text(encoding="utf-8"))
+
+          required_snippets = [
+              "python scripts/xlog_doctor.py",
+              "cargo build --release",
+              "cargo build --release -p xlog-cli --features host-io",
+              "./target/release/xlog",
+          ]
+          missing = [snippet for snippet in required_snippets if snippet not in readme]
+          if missing:
+              print("README quickstart is missing required snippets:")
+              for snippet in missing:
+                  print(f"  - {snippet}")
+              sys.exit(1)
+
+          workspace_version = cargo["workspace"]["package"]["version"]
+          badge_match = re.search(r"version-v([0-9][^\-]*)-blue\.svg", readme)
+          if not badge_match:
+              print("Could not find README version badge.")
+              sys.exit(1)
+          if badge_match.group(1) != workspace_version:
+              print(
+                  f"README version badge ({badge_match.group(1)}) does not match workspace version ({workspace_version})."
+              )
+              sys.exit(1)
+
+          status_match = re.search(r"Release status:\s*`v([^`]+)`", readme_plain)
+          if not status_match:
+              print("Could not find README release status line.")
+              sys.exit(1)
+          if status_match.group(1) != workspace_version:
+              print(
+                  f"README release status ({status_match.group(1)}) does not match workspace version ({workspace_version})."
+              )
+              sys.exit(1)
+
+          xlog_cli = next(
+              (
+                  package
+                  for package in metadata["packages"]
+                  if package["name"] == "xlog-cli" and package.get("source") is None
+              ),
+              None,
+          )
+          if xlog_cli is None:
+              print("cargo metadata did not include the local xlog-cli package.")
+              sys.exit(1)
+
+          bin_targets = {
+              target["name"]
+              for target in xlog_cli["targets"]
+              if "bin" in target["kind"]
+          }
+          if "xlog" not in bin_targets:
+              print(f"xlog-cli binary targets do not include `xlog`: {sorted(bin_targets)}")
+              sys.exit(1)
+
+          print("README quickstart assumptions and workspace package metadata validated.")
+          PY
+
+  clippy:
+    runs-on: ubuntu-latest
+    container:
+      image: nvidia/cuda:12.4.1-devel-ubuntu22.04
+    env:
+      XLOG_NO_CUBIN: "1"
+    steps:
+      - name: Install system dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            build-essential \
+            ca-certificates \
+            curl \
+            git \
+            pkg-config \
+            python3 \
+            python3-dev \
+            python3-pip
+
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Show CUDA toolkit
+        run: nvcc --version
+
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets --locked --no-deps -- -D warnings
+
+  cuda-build-no-gpu:
+    runs-on: ubuntu-latest
+    container:
+      image: nvidia/cuda:12.4.1-devel-ubuntu22.04
+    env:
+      XLOG_NO_CUBIN: "1"
+    steps:
+      - name: Install system dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            build-essential \
+            ca-certificates \
+            curl \
+            git \
+            pkg-config \
+            python3 \
+            python3-dev \
+            python3-pip
+
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Show CUDA toolkit
+        run: nvcc --version
+
+      - name: Build workspace without GPU execution
+        run: cargo build --workspace --locked --release --exclude pyxlog
+
+      - name: Build host-io CLI variant
+        run: cargo build --locked --release -p xlog-cli --features host-io
