@@ -96,9 +96,9 @@ gh secret set RELEASE_PLZ_GITHUB_TOKEN -R BrainyBlaze/xlog
 - on pushes to `main`, runs `release-plz` in `release-pr` mode to open or update the release PR
 - on manual `workflow_dispatch`, runs `release-plz` in `release` mode after the maintainer confirms
   that real-GPU validation has already passed
-- before the manual publish step, runs `scripts/preflight_release_publish.sh`; in CI this uses
-  `release-plz release --dry-run` so package verification follows the same publish order as the
-  real release wave
+- before the manual publish step, runs `scripts/preflight_release_publish.sh`, which currently
+  exercises `cargo publish --dry-run -p xlog-cuda --allow-dirty` as the earliest package-level
+  release sanity check
 
 `.github/workflows/python-publish.yml`:
 
