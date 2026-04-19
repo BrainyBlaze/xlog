@@ -17,7 +17,7 @@ Please do not open public GitHub issues for suspected security vulnerabilities.
 Report vulnerabilities privately through one of these channels:
 
 1. Use GitHub's private vulnerability reporting flow for this repository if the `Report a vulnerability` button is available.
-2. If private reporting is not available in the repository UI, contact the maintainers privately through GitHub and include `SECURITY: XLOG vulnerability report` in the subject or first line.
+2. If private vulnerability reporting is not available in the repository UI, use the BrainyBlaze private contact form at `https://brainyblaze.com/contact` and include `SECURITY: XLOG vulnerability report` in the first line of the message.
 
 Include, when possible:
 

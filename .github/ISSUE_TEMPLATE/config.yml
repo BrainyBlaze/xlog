@@ -1,5 +1,5 @@
 blank_issues_enabled: false
 contact_links:
-  - name: Security Policy
-    url: https://github.com/BrainyBlaze/xlog/blob/main/SECURITY.md
-    about: Read this before reporting a suspected vulnerability.
+  - name: Private security contact
+    url: https://brainyblaze.com/contact
+    about: Report suspected vulnerabilities privately and include `SECURITY: XLOG vulnerability report` in the message.
