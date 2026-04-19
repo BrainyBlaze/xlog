@@ -38,9 +38,19 @@ jobs:
       cli_tag_name: ${{ steps.release.outputs['crates/xlog-cli--tag_name'] }}
     env:
       XLOG_NO_CUBIN: "1"
-      GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_GITHUB_TOKEN != '' && secrets.RELEASE_PLZ_GITHUB_TOKEN || github.token }}
+      GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_GITHUB_TOKEN }}
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     steps:
+      - name: Require release-plz GitHub token
+        env:
+          RELEASE_PLZ_GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$RELEASE_PLZ_GITHUB_TOKEN" ]]; then
+            echo "RELEASE_PLZ_GITHUB_TOKEN is required on BrainyBlaze/xlog because the organization blocks GitHub Actions from creating pull requests with github.token." >&2
+            exit 1
+          fi
+
       - name: Require explicit GPU gate acknowledgement
         if: github.event_name == 'workflow_dispatch'
         run: |
@@ -51,6 +61,22 @@ jobs:
           fi
           if [[ -z "${{ inputs.gpu_validation_notes }}" ]]; then
             echo "workflow_dispatch releases require gpu_validation_notes" >&2
+            exit 1
+          fi
+
+      - name: Require publish secrets
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$CARGO_REGISTRY_TOKEN" ]]; then
+            echo "CARGO_REGISTRY_TOKEN is required for release publication." >&2
+            exit 1
+          fi
+          if [[ -z "$PYPI_API_TOKEN" ]]; then
+            echo "PYPI_API_TOKEN is required for release publication." >&2
             exit 1
           fi
 

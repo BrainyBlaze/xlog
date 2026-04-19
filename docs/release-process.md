@@ -50,12 +50,22 @@ crates.io as part of the same release wave, but they do not each create their ow
 Before the first public release, configure:
 
 - `CARGO_REGISTRY_TOKEN` GitHub Actions secret for crates.io publishing
-- `RELEASE_PLZ_GITHUB_TOKEN` GitHub Actions secret if you want CI to run automatically on
-  release-plz-created PRs. Without it, release-plz falls back to `GITHUB_TOKEN`, which can create
-  the PR but will not trigger follow-on PR workflows.
-- PyPI Trusted Publishing for `.github/workflows/python-publish.yml`
-- GitHub Actions environment `pypi` for the PyPI publish job
-- Repository setting `Allow GitHub Actions to create and approve pull requests`
+- `PYPI_API_TOKEN` GitHub Actions secret for uploading `pyxlog` distributions to PyPI
+- `RELEASE_PLZ_GITHUB_TOKEN` GitHub Actions secret for release-plz PR creation and release
+  tagging. This is required on `BrainyBlaze/xlog`: the organization currently blocks GitHub
+  Actions from creating pull requests with `github.token`, so release-plz must use a dedicated
+  PAT-style token instead.
+- If the organization ever allows it, the repository setting `Allow GitHub Actions to create and
+  approve pull requests` would let `github.token` create PRs. `BrainyBlaze/xlog` currently cannot
+  rely on that path.
+
+Current GitHub-side status for `BrainyBlaze/xlog`:
+
+- repository workflow default permissions are `read`
+- workflow files request the write scopes they need explicitly
+- enabling “GitHub Actions can create or approve pull requests” at the repo level currently returns
+  a `409 Conflict` because the organization disallows it
+- therefore `RELEASE_PLZ_GITHUB_TOKEN` is the supported release-plz credential for this repository
 
 ## Automation Layout
 
@@ -70,7 +80,7 @@ Before the first public release, configure:
 - builds Linux `x86_64` `pyxlog` wheels in the CUDA container for CPython 3.8 through 3.12
 - builds a source distribution
 - uploads the distributions to the matching GitHub release
-- publishes the distributions to PyPI using trusted publishing
+- publishes the distributions to PyPI using `PYPI_API_TOKEN`
 
 `.github/workflows/github-release.yml`:
 

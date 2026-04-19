@@ -55,7 +55,7 @@ python scripts/xlog_doctor.py
 ### Source install
 
 ```bash
-git clone https://github.com/xlog-project/xlog.git
+git clone https://github.com/BrainyBlaze/xlog.git
 cd xlog
 python scripts/xlog_doctor.py
 cargo build --release

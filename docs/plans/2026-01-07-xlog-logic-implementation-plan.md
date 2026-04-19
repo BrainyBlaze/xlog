@@ -44,7 +44,7 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/xlog-project/xlog"
+repository = "https://github.com/BrainyBlaze/xlog"
 
 [workspace.dependencies]
 thiserror = "1.0"
