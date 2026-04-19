@@ -106,12 +106,14 @@ gh secret set RELEASE_PLZ_GITHUB_TOKEN -R BrainyBlaze/xlog
 - builds a source distribution
 - uploads the distributions to the matching GitHub release
 - publishes the distributions to PyPI using `PYPI_API_TOKEN`
+- can also be rerun manually with `workflow_dispatch` by supplying an existing `xlog-cli` tag
 
 `.github/workflows/github-release.yml`:
 
 - builds the host-io-enabled CLI release archive with bundled kernels
 - writes `SHA256SUMS`
 - uploads the archive and checksums to the matching GitHub release
+- can also be rerun manually with `workflow_dispatch` by supplying an existing `xlog-cli` tag
 
 ## Human Release Gate
 
@@ -154,6 +156,19 @@ If you merge a post-release fix directly onto `main` after the release PR, recov
 
 This mirrors the recovery path recommended by release-plz itself for CI fixes that must still lead
 to a publishable release commit.
+
+## Recovery When Artifact Upload Fails
+
+If crates have already been published and the follow-on artifact workflows fail, rerun the
+artifact workflows directly against the existing CLI release tag instead of re-dispatching
+`release-plz.yml`.
+
+1. Confirm the published CLI tag, for example `xlog-cli-v0.5.0`.
+2. Re-run Python publishing with `python-publish.yml` and `tag_name=<that tag>`.
+3. Re-run GitHub asset upload with `github-release.yml` and `tag_name=<that tag>`.
+
+This avoids a dead end where `release-plz release` has nothing new to publish and therefore cannot
+re-trigger artifact jobs that are keyed off `cli_release_created=true`.
 
 ## Local Commands
 

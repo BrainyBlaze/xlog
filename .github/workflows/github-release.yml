@@ -6,6 +6,12 @@ on:
       tag_name:
         required: true
         type: string
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: Existing xlog-cli release tag to attach CLI artifacts to.
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -37,6 +43,9 @@ jobs:
 
       - name: Checkout repository
         uses: actions/checkout@v6
+
+      - name: Trust checkout path for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

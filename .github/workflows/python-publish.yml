@@ -6,6 +6,12 @@ on:
       tag_name:
         required: true
         type: string
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: Existing xlog-cli release tag to publish Python artifacts for.
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -33,15 +39,30 @@ jobs:
             ca-certificates \
             curl \
             git \
-            pkg-config
+            pkg-config \
+            software-properties-common
 
       - name: Checkout repository
         uses: actions/checkout@v6
 
       - name: Install Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: ${{ matrix.python-version }}
+        run: |
+          set -euo pipefail
+          python_pkg="python${{ matrix.python-version }}"
+          pip_bootstrap_url="https://bootstrap.pypa.io/get-pip.py"
+          if [[ "${{ matrix.python-version }}" == "3.8" ]]; then
+            pip_bootstrap_url="https://bootstrap.pypa.io/pip/3.8/get-pip.py"
+          fi
+          add-apt-repository ppa:deadsnakes/ppa -y
+          apt-get update
+          packages=("$python_pkg" "${python_pkg}-dev" "${python_pkg}-venv")
+          if apt-cache show "${python_pkg}-distutils" >/dev/null 2>&1; then
+            packages+=("${python_pkg}-distutils")
+          fi
+          DEBIAN_FRONTEND=noninteractive apt-get install -y "${packages[@]}"
+          curl -fsSL "$pip_bootstrap_url" -o /tmp/get-pip.py
+          "$python_pkg" /tmp/get-pip.py
+          echo "PYTHON_BIN=$(command -v "$python_pkg")" >> "$GITHUB_ENV"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -50,13 +71,15 @@ jobs:
         run: nvcc --version
 
       - name: Install maturin
-        run: python -m pip install --upgrade pip maturin
+        run: |
+          "$PYTHON_BIN" -m pip install --upgrade pip maturin
 
       - name: Stage pyxlog kernels
         run: bash scripts/stage_pyxlog_kernels.sh
 
       - name: Build wheel
-        run: maturin build -m crates/pyxlog/Cargo.toml --release --compatibility linux --out dist -i python
+        run: |
+          maturin build -m crates/pyxlog/Cargo.toml --release --compatibility linux --out dist -i "$PYTHON_BIN"
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
