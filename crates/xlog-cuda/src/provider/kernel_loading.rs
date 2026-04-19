@@ -30,11 +30,11 @@ impl CudaKernelProvider {
                 None
             };
 
-            let (ptx, is_cubin) = super::load_module_from_file(spec.cu_name, cc)?;
+            let (path, is_cubin) = super::load_module_from_file(spec.cu_name, cc)?;
 
             device
                 .inner()
-                .load_ptx(ptx, spec.module_name, spec.kernels)
+                .load_file(&path, spec.module_name, spec.kernels)
                 .map_err(|e| {
                     XlogError::Kernel(format!("Failed to load {} module: {}", spec.cu_name, e))
                 })?;

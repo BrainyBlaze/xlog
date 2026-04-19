@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use cudarc::driver::{LaunchAsync, LaunchConfig};
+use crate::{LaunchAsync, LaunchConfig};
 use xlog_core::{Result, ScalarType, Schema, XlogError};
 
 use super::{d4_kernels, pack_kernels, D4_MODULE, PACK_MODULE};
@@ -121,7 +121,7 @@ impl super::CudaKernelProvider {
             let mut col = self.memory.alloc::<u8>(slice.len())?;
             self.device
                 .inner()
-                .htod_sync_copy_into(slice, &mut col)
+                .htod_sync_copy_into(*slice, &mut col)
                 .map_err(|e| XlogError::Kernel(format!("Failed to upload column {}: {}", i, e)))?;
             columns.push(col.into());
         }
@@ -318,6 +318,7 @@ impl super::CudaKernelProvider {
             columns.push(CudaColumn::arrow_device(
                 device_ptr,
                 len_bytes,
+                self.device().inner().stream().clone(),
                 keepalive.clone(),
             ));
             schema_cols.push((field.name().to_string(), scalar_type));
@@ -530,12 +531,12 @@ impl super::CudaKernelProvider {
                 }
                 .map_err(|e| XlogError::Kernel(format!("pack_bools_to_bitmap failed: {}", e)))?;
                 self.device.synchronize()?;
-                let ptr = *cudarc::driver::DevicePtr::device_ptr(&packed) as usize as *mut u8;
+                let ptr = *packed.device_ptr() as usize as *mut u8;
                 extra.push(packed);
                 (ptr, packed_len)
             }
             _ => {
-                let ptr = *cudarc::driver::DevicePtr::device_ptr(col) as usize as *mut u8;
+                let ptr = *col.device_ptr() as usize as *mut u8;
                 (ptr, len_bytes)
             }
         };

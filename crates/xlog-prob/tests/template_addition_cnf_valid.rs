@@ -1,10 +1,10 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use cudarc::driver::{DeviceSlice, LaunchAsync, LaunchConfig};
+use cudarc::driver::{DeviceSlice, LaunchConfig};
 use xlog_core::MemoryBudget;
 use xlog_cuda::provider::{cnf_kernels, CNF_MODULE};
-use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager, LaunchAsync};
 use xlog_prob::compilation::{encode_cnf_gpu, GpuPirGraph, GpuPirRoots};
 use xlog_prob::pir::PirNode;
 use xlog_prob::provenance::extract_from_source;

@@ -31,7 +31,7 @@ jobs:
   release-plz:
     runs-on: ubuntu-latest
     container:
-      image: nvidia/cuda:12.4.1-devel-ubuntu22.04
+      image: nvidia/cuda:13.1.1-devel-ubuntu22.04
     defaults:
       run:
         shell: bash

@@ -1,6 +1,6 @@
 //! Arithmetic column operations: add, sub, mul, div, mod, abs, min, max, pow, cast, select, combine.
 
-use cudarc::driver::{DeviceRepr, DeviceSlice, LaunchAsync, LaunchConfig};
+use crate::{DeviceRepr, DeviceSlice, LaunchAsync, LaunchConfig};
 use xlog_core::{Result, ScalarType, Schema, XlogError};
 
 use super::{arith_kernels, ARITH_MODULE};

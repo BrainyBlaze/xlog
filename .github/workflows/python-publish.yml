@@ -21,7 +21,7 @@ jobs:
       matrix:
         python-version: ["3.8", "3.9", "3.10", "3.11", "3.12"]
     container:
-      image: nvidia/cuda:12.4.1-devel-ubuntu22.04
+      image: nvidia/cuda:13.1.1-devel-ubuntu22.04
     env:
       XLOG_NO_CUBIN: "1"
     steps:
@@ -65,7 +65,7 @@ jobs:
   build-sdist:
     runs-on: ubuntu-latest
     container:
-      image: nvidia/cuda:12.4.1-devel-ubuntu22.04
+      image: nvidia/cuda:13.1.1-devel-ubuntu22.04
     env:
       XLOG_NO_CUBIN: "1"
     steps:

@@ -6,7 +6,6 @@
 use std::ffi::c_void;
 use std::sync::Arc;
 
-use cudarc::driver::DevicePtr;
 use xlog_core::{Result, ScalarType, Schema, XlogError};
 
 use crate::memory::{validate_logical_row_count, CudaBuffer, CudaColumn};
@@ -318,7 +317,7 @@ impl DlpackTable {
             .get(col_idx)
             .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
 
-        let device_ptr = *DevicePtr::device_ptr(col) as usize as *mut c_void;
+        let device_ptr = *col.device_ptr() as usize as *mut c_void;
 
         let mut ctx = Box::new(DlpackCtx {
             buffer: self.buffer.clone(),
@@ -388,7 +387,12 @@ impl CudaKernelProvider {
             }
 
             schema_cols.push((format!("col_{}", i), ty));
-            columns.push(CudaColumn::dlpack(ptr, len_bytes, tensor));
+            columns.push(CudaColumn::dlpack(
+                ptr,
+                len_bytes,
+                self.device().inner().stream().clone(),
+                tensor,
+            ));
         }
 
         let schema = xlog_core::Schema::new(schema_cols);
@@ -438,7 +442,12 @@ impl CudaKernelProvider {
                 num_rows = Some(rows);
             }
 
-            columns.push(CudaColumn::dlpack(ptr, len_bytes, tensor));
+            columns.push(CudaColumn::dlpack(
+                ptr,
+                len_bytes,
+                self.device().inner().stream().clone(),
+                tensor,
+            ));
         }
 
         self.buffer_from_columns(columns, num_rows.unwrap_or(0), schema)

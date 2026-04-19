@@ -7,11 +7,11 @@
 
 use std::sync::Arc;
 
-use cudarc::driver::{DevicePtr, DeviceSlice, LaunchAsync, LaunchConfig};
+use cudarc::driver::{DeviceSlice, LaunchConfig};
 use xlog_core::{Result, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::provider::{d4_kernels, scan_kernels, D4_MODULE, SCAN_MODULE};
-use xlog_cuda::CudaKernelProvider;
+use xlog_cuda::{CudaKernelProvider, LaunchAsync};
 use xlog_solve::GpuCnf;
 
 use crate::gpu::GpuXgcf;
@@ -37,15 +37,12 @@ pub(super) fn alloc_compile_gate(
     Ok(gate)
 }
 
-pub(super) fn memset_u8_sync(
-    device: &Arc<cudarc::driver::CudaDevice>,
-    dst: &mut TrackedCudaSlice<u8>,
-    value: u8,
-) -> Result<()> {
-    device
+pub(super) fn memset_u8_sync(dst: &mut TrackedCudaSlice<u8>, value: u8) -> Result<()> {
+    dst.stream()
+        .context()
         .bind_to_thread()
         .map_err(|e| XlogError::Kernel(format!("bind_to_thread failed: {}", e)))?;
-    let dptr = *DevicePtr::device_ptr(&*dst);
+    let dptr = dst.device_ptr_value();
     unsafe { cudarc::driver::result::memset_d8_sync(dptr, value, dst.len()) }
         .map_err(|e| XlogError::Kernel(format!("memset_d8_sync failed: {}", e)))?;
     Ok(())

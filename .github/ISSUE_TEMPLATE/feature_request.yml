@@ -57,7 +57,7 @@ body:
     attributes:
       label: Is this request for the supported platform contract?
       options:
-        - "Yes: Linux x86_64 + NVIDIA GPU + CUDA 12.x"
+        - "Yes: Linux x86_64 + NVIDIA GPU + CUDA 13.x"
         - "No"
         - "Partly"
         - "Not sure"

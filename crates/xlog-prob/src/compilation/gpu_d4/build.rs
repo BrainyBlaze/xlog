@@ -3,11 +3,11 @@
 use std::ffi::c_void;
 use std::sync::Arc;
 
-use cudarc::driver::{DeviceRepr, LaunchAsync, LaunchConfig};
+use cudarc::driver::LaunchConfig;
 use xlog_core::{Result, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::provider::{d4_kernels, D4_MODULE};
-use xlog_cuda::CudaKernelProvider;
+use xlog_cuda::{AsKernelParam, CudaKernelProvider, LaunchAsync};
 use xlog_solve::GpuCnf;
 
 use super::frontier::build_frontier_bitset;
@@ -211,7 +211,7 @@ pub(super) fn compile_gpu_d4_with_gate(
     // verifier. We default them to `LIT` so SAT CNF encoding skips them; `d4_compile_emit`
     // overwrites the prefix [0..meta_num_nodes) with real tags.
     const XGCF_LIT: u8 = 2;
-    memset_u8_sync(device, &mut node_type, XGCF_LIT)?;
+    memset_u8_sync(&mut node_type, XGCF_LIT)?;
     device
         .memset_zeros(&mut child_offsets)
         .map_err(|e| XlogError::Kernel(format!("Failed to zero child_offsets: {}", e)))?;
@@ -445,10 +445,11 @@ mod tests {
     use std::ffi::c_void;
     use std::sync::Arc;
 
-    use cudarc::driver::{DeviceRepr, LaunchAsync, LaunchConfig};
     use xlog_core::MemoryBudget;
     use xlog_cuda::provider::{d4_kernels, D4_MODULE};
-    use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+    use xlog_cuda::{
+        AsKernelParam, CudaDevice, CudaKernelProvider, GpuMemoryManager, LaunchAsync, LaunchConfig,
+    };
     use xlog_solve::{Clause, GpuCnf, Literal, SolveInstance};
 
     fn try_provider() -> Option<Arc<CudaKernelProvider>> {
@@ -474,7 +475,7 @@ mod tests {
     }
 
     fn alloc_component_scratch(
-        device: &Arc<cudarc::driver::CudaDevice>,
+        provider: &Arc<CudaKernelProvider>,
         memory: &Arc<GpuMemoryManager>,
         max_items: u32,
         var_cap: u32,
@@ -484,6 +485,7 @@ mod tests {
         xlog_cuda::memory::TrackedCudaSlice<u32>,
         u32,
     ) {
+        let device = provider.device().inner();
         let uf_stride = var_cap
             .checked_add(1)
             .expect("var_cap+1 overflow for uf_stride");
@@ -571,7 +573,7 @@ mod tests {
         let mut scratch_trail = memory.alloc::<i32>(trail_len).unwrap();
         device.memset_zeros(&mut scratch_trail).unwrap();
         let (mut uf_parent, mut uf_aux, mut comp_list, uf_stride) =
-            alloc_component_scratch(device, &memory, max_items, phi.var_cap);
+            alloc_component_scratch(&provider, &memory, max_items, phi.var_cap);
 
         let compile_count = device
             .get_func(D4_MODULE, "d4_compile_count")
@@ -854,7 +856,7 @@ mod tests {
         let mut scratch_trail = memory.alloc::<i32>(trail_len).unwrap();
         device.memset_zeros(&mut scratch_trail).unwrap();
         let (mut uf_parent, mut uf_aux, mut comp_list, uf_stride) =
-            alloc_component_scratch(device, &memory, max_items, phi.var_cap);
+            alloc_component_scratch(&provider, &memory, max_items, phi.var_cap);
 
         let compile_count = device
             .get_func(D4_MODULE, d4_kernels::D4_COMPILE_COUNT)
@@ -1142,7 +1144,7 @@ mod tests {
         let mut scratch_trail = memory.alloc::<i32>(trail_len).unwrap();
         device.memset_zeros(&mut scratch_trail).unwrap();
         let (mut uf_parent, mut uf_aux, mut comp_list, uf_stride) =
-            alloc_component_scratch(device, &memory, max_items, phi.var_cap);
+            alloc_component_scratch(&provider, &memory, max_items, phi.var_cap);
 
         let compile_count = device
             .get_func(D4_MODULE, d4_kernels::D4_COMPILE_COUNT)
@@ -1425,7 +1427,7 @@ mod tests {
         let mut scratch_trail = memory.alloc::<i32>(trail_len).unwrap();
         device.memset_zeros(&mut scratch_trail).unwrap();
         let (mut uf_parent, mut uf_aux, mut comp_list, uf_stride) =
-            alloc_component_scratch(device, &memory, max_items, phi.var_cap);
+            alloc_component_scratch(&provider, &memory, max_items, phi.var_cap);
 
         let compile_count = device
             .get_func(D4_MODULE, d4_kernels::D4_COMPILE_COUNT)
@@ -1708,7 +1710,7 @@ mod tests {
         let mut scratch_trail = memory.alloc::<i32>(trail_len).unwrap();
         device.memset_zeros(&mut scratch_trail).unwrap();
         let (mut uf_parent, mut uf_aux, mut comp_list, uf_stride) =
-            alloc_component_scratch(device, &memory, max_items, phi.var_cap);
+            alloc_component_scratch(&provider, &memory, max_items, phi.var_cap);
 
         let compile_count = device
             .get_func(D4_MODULE, d4_kernels::D4_COMPILE_COUNT)

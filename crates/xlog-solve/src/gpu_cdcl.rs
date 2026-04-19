@@ -1,11 +1,11 @@
 use std::ffi::c_void;
 use std::sync::Arc;
 
-use cudarc::driver::{DeviceRepr, DeviceSlice, LaunchAsync, LaunchConfig};
+use cudarc::driver::LaunchConfig;
 use xlog_core::{Result, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::provider::{sat_kernels, SAT_MODULE};
-use xlog_cuda::CudaKernelProvider;
+use xlog_cuda::{AsKernelParam, CudaKernelProvider, DeviceSlice, LaunchAsync};
 
 use crate::gpu_cnf::GpuCnf;
 
@@ -150,7 +150,7 @@ impl GpuCdclWorkspace {
     /// Device pointer of the assignment buffer (for diagnostics / reuse verification).
     #[inline]
     pub fn assign_device_ptr(&self) -> cudarc::driver::sys::CUdeviceptr {
-        *cudarc::driver::DevicePtr::device_ptr(&self.assign)
+        self.assign.device_ptr_value()
     }
 }
 

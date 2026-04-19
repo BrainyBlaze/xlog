@@ -2,11 +2,11 @@
 
 use std::ffi::c_void;
 
-use cudarc::driver::{DeviceRepr, DeviceSlice, LaunchAsync, LaunchConfig};
+use cudarc::driver::{DeviceRepr, DeviceSlice, LaunchConfig};
 use xlog_core::{Result, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::provider::{d4_kernels, D4_MODULE};
-use xlog_cuda::CudaKernelProvider;
+use xlog_cuda::{AsKernelParam, CudaKernelProvider, LaunchAsync};
 use xlog_solve::GpuCnf;
 
 use super::{
@@ -451,10 +451,11 @@ mod tests {
     use std::sync::Arc;
 
     use super::D4WorkItem;
-    use cudarc::driver::{DeviceRepr, LaunchAsync, LaunchConfig};
     use xlog_core::MemoryBudget;
     use xlog_cuda::provider::{scan_kernels, D4_MODULE, SCAN_MODULE};
-    use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+    use xlog_cuda::{
+        AsKernelParam, CudaDevice, CudaKernelProvider, GpuMemoryManager, LaunchAsync, LaunchConfig,
+    };
     use xlog_solve::{Clause, GpuCnf, Literal, SolveInstance};
 
     fn try_provider() -> Option<Arc<CudaKernelProvider>> {

@@ -2,11 +2,11 @@
 
 use std::sync::Arc;
 
-use cudarc::driver::{DeviceSlice, LaunchAsync, LaunchConfig};
+use cudarc::driver::{DeviceSlice, LaunchConfig};
 use xlog_core::{Result, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::provider::{weights_kernels, WEIGHTS_MODULE};
-use xlog_cuda::CudaKernelProvider;
+use xlog_cuda::{CudaKernelProvider, LaunchAsync};
 
 use crate::compilation::gpu_cnf::GpuCnfVarTables;
 

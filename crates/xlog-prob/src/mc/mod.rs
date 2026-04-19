@@ -23,11 +23,11 @@ use std::sync::Arc;
 
 #[cfg(feature = "host-io")]
 use cudarc::driver::DeviceSlice;
-use cudarc::driver::{DevicePtr, LaunchAsync, LaunchConfig};
+use cudarc::driver::LaunchConfig;
 use xlog_core::{MemoryBudget, RelId, Result, Schema, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::provider::{mc_eval_kernels, MC_EVAL_MODULE};
-use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager, LaunchAsync};
 #[cfg(feature = "host-io")]
 use xlog_logic::ast::{BodyLiteral, Rule};
 use xlog_logic::ast::{Evidence, ProbQuery, Program};

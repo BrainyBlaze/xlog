@@ -29,14 +29,7 @@ impl GpuDevicePool {
         }
 
         // cudarc may panic on driver init failures in restricted containers; treat as a normal error.
-        let available = std::panic::catch_unwind(|| cudarc::driver::CudaDevice::count())
-            .map_err(|_| {
-                XlogError::Kernel(
-                    "Failed to count devices: cudarc panicked during driver initialization"
-                        .to_string(),
-                )
-            })?
-            .map_err(|e| XlogError::Kernel(format!("Failed to count devices: {}", e)))?;
+        let available = CudaDevice::count()?;
 
         if device_count > available as usize {
             return Err(XlogError::Kernel(format!(

@@ -7,7 +7,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for filing a bug. Public support currently covers Linux `x86_64` with an NVIDIA GPU and CUDA Toolkit 12.x.
+        Thanks for filing a bug. Public support currently covers Linux `x86_64` with an NVIDIA GPU and CUDA Toolkit 13.x.
         GitHub-hosted CI is non-GPU only, so CUDA bugs need validation on a real CUDA machine.
   - type: dropdown
     id: supported-platform
@@ -15,7 +15,7 @@ body:
       label: Supported platform status
       description: Was this reproduced on the supported public platform contract?
       options:
-        - "Yes: Linux x86_64 + NVIDIA GPU + CUDA 12.x"
+        - "Yes: Linux x86_64 + NVIDIA GPU + CUDA 13.x"
         - "No"
         - "Not sure"
     validations:

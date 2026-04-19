@@ -2,11 +2,11 @@
 
 use std::sync::Arc;
 
-use cudarc::driver::{DeviceRepr, DeviceSlice, LaunchAsync, LaunchConfig};
+use cudarc::driver::{DeviceSlice, LaunchConfig};
 use xlog_core::{Result, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::provider::{cache_kernels, CACHE_MODULE};
-use xlog_cuda::CudaKernelProvider;
+use xlog_cuda::{AsKernelParam, CudaKernelProvider, LaunchAsync};
 use xlog_solve::GpuCnf;
 
 use super::disk_cache;

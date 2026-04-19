@@ -2,7 +2,7 @@
 
 use std::marker::PhantomData;
 
-use cudarc::driver::{DevicePtr, DeviceSlice, LaunchAsync, LaunchConfig};
+use crate::{DeviceSlice, LaunchAsync, LaunchConfig};
 use xlog_core::{Result, ScalarType, Schema, XlogError};
 
 use super::{ilp_credit_kernels, ilp_kernels, RawCudaView, ILP_CREDIT_MODULE, ILP_MODULE};
@@ -32,6 +32,7 @@ impl super::CudaKernelProvider {
         Ok(RawCudaView {
             ptr,
             len: num_elements,
+            stream: col.stream().clone(),
             _marker: PhantomData,
         })
     }
@@ -59,6 +60,7 @@ impl super::CudaKernelProvider {
         Ok(RawCudaView {
             ptr,
             len: num_elements,
+            stream: col.stream().clone(),
             _marker: PhantomData,
         })
     }
@@ -618,8 +620,9 @@ impl super::CudaKernelProvider {
         let grid_size = (num_facts + block_size - 1) / block_size;
         // reinterpret the u8 byte column as f32 for the kernel
         let cand_view = RawCudaView::<f32> {
-            ptr: *cudarc::driver::DevicePtr::device_ptr(cand_probs),
+            ptr: *cand_probs.device_ptr(),
             len: cudarc::driver::DeviceSlice::len(cand_probs) / 4,
+            stream: cand_probs.stream().clone(),
             _marker: PhantomData,
         };
         unsafe {
@@ -675,8 +678,9 @@ impl super::CudaKernelProvider {
         let block_size = 256u32;
         let grid_size = (num_facts + block_size - 1) / block_size;
         let cand_view = RawCudaView::<f64> {
-            ptr: *cudarc::driver::DevicePtr::device_ptr(cand_probs),
+            ptr: *cand_probs.device_ptr(),
             len: cudarc::driver::DeviceSlice::len(cand_probs) / 8,
+            stream: cand_probs.stream().clone(),
             _marker: PhantomData,
         };
         unsafe {

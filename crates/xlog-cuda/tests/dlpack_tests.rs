@@ -3,7 +3,6 @@
 mod common;
 use common::setup_provider;
 
-use cudarc::driver::DevicePtr;
 use xlog_core::{ScalarType, Schema};
 use xlog_cuda::{dlpack, CudaBuffer, CudaKernelProvider};
 
@@ -118,7 +117,7 @@ fn test_roundtrip_import_u32_column_from_dlpack_zero_copy() {
         let base = managed.dl_tensor.data as usize;
         base + managed.dl_tensor.byte_offset as usize
     } as u64;
-    let imported_ptr = *DevicePtr::device_ptr(imported.column(0).unwrap());
+    let imported_ptr = *imported.column(0).unwrap().device_ptr();
     assert_eq!(imported_ptr as u64, dl_data_ptr);
 
     // Verify contents.

@@ -3,11 +3,11 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use cudarc::driver::{CudaView, DeviceSlice, LaunchAsync, LaunchConfig};
+use cudarc::driver::{CudaView, DeviceSlice, LaunchConfig};
 use xlog_core::{Result, ScalarType, Schema, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::provider::{mc_eval_kernels, MC_EVAL_MODULE};
-use xlog_cuda::{CudaBuffer, CudaKernelProvider};
+use xlog_cuda::{CudaBuffer, CudaKernelProvider, LaunchAsync};
 use xlog_logic::ast::{
     AggOp, Atom, BodyLiteral, Evidence, PredDecl, ProbFact, ProbQuery, Program, Term,
 };

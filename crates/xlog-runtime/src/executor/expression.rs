@@ -3,11 +3,11 @@
 //! Production GPU-accelerated filter, predicate mask, arithmetic expression,
 //! and mask operation methods.
 
-use cudarc::driver::{LaunchAsync, LaunchConfig};
+use cudarc::driver::LaunchConfig;
 use xlog_core::{Result, ScalarType, Schema, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::provider::{arith_kernels, filter_kernels, ARITH_MODULE, FILTER_MODULE};
-use xlog_cuda::CudaBuffer;
+use xlog_cuda::{CudaBuffer, LaunchAsync};
 use xlog_ir::{CompareOp, ConstValue, Expr, ProjectExpr};
 
 use super::Executor;

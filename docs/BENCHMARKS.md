@@ -19,7 +19,7 @@ This document describes XLOG's performance benchmarking suite, methodology, and 
 ### Prerequisites
 
 - CUDA-capable NVIDIA GPU (compute capability 7.0+; development device: RTX PRO 3000 Blackwell, SM120)
-- CUDA Toolkit 12.0+
+- CUDA Toolkit 13.x
 - D4 knowledge compiler (for exact inference benchmarks)
 - Sufficient GPU memory (4GB minimum, 12GB recommended for neural-symbolic training)
 

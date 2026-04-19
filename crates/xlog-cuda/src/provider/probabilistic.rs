@@ -1,6 +1,6 @@
 //! Probabilistic operations: Monte Carlo sampling (Bernoulli matrix).
 
-use cudarc::driver::{CudaView, LaunchAsync, LaunchConfig};
+use crate::{CudaView, LaunchAsync, LaunchConfig};
 use xlog_core::{Result, XlogError};
 
 use super::{mc_sample_kernels, MC_SAMPLE_MODULE};

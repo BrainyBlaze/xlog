@@ -7,14 +7,16 @@ use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use cudarc::driver::{CudaViewMut, DevicePtr, DeviceRepr, DeviceSlice, LaunchAsync, LaunchConfig};
-use cudarc::nvrtc::Ptx;
 use std::ffi::c_void;
 use xlog_core::{Result, Schema, XlogError};
 
 use crate::{
+    cuda_compat::{
+        AsKernelParam, DeviceParamStorage, DevicePtr, DeviceRepr, DeviceSlice,
+        IntoKernelParamStorage, LaunchAsync, LaunchConfig,
+    },
     memory::{validate_logical_row_count, CudaColumn, TrackedCudaSlice},
-    CudaBuffer, CudaDevice, GpuMemoryManager,
+    CudaBuffer, CudaDevice, CudaStream, CudaViewMut, GpuMemoryManager,
 };
 
 mod arithmetic;
@@ -69,23 +71,23 @@ fn resolve_module_path(name: &str, cc: u32) -> Option<(std::path::PathBuf, bool)
 ///
 /// Asserts (in debug builds) that `name` is present in the kernel manifest,
 /// catching name/order drift between the manifest and provider load blocks.
-fn load_module_from_file(name: &str, cc: u32) -> Result<(Ptx, bool)> {
+fn load_module_from_file(name: &str, cc: u32) -> Result<(std::path::PathBuf, bool)> {
     debug_assert!(
         crate::kernel_manifest_data::KERNEL_CU_NAMES.contains(&name),
         "kernel module '{name}' is not in KERNEL_CU_NAMES manifest — update kernel_manifest_data.rs"
     );
-    let (path, is_cubin) = resolve_module_path(name, cc).ok_or_else(|| {
+    resolve_module_path(name, cc).ok_or_else(|| {
         XlogError::Kernel(format!(
             "{name}: no cubin or portable PTX found (set XLOG_CUBIN_DIR, stage kernels/, or rebuild with nvcc)"
         ))
-    })?;
-    Ok((Ptx::from_file(path), is_cubin))
+    })
 }
 
-#[derive(Clone, Copy)]
-struct RawCudaView<'a, T> {
+#[derive(Clone)]
+pub(crate) struct RawCudaView<'a, T> {
     ptr: cudarc::driver::sys::CUdeviceptr,
     len: usize,
+    stream: Arc<CudaStream>,
     _marker: PhantomData<&'a [T]>,
 }
 
@@ -93,19 +95,43 @@ impl<'a, T> DeviceSlice<T> for RawCudaView<'a, T> {
     fn len(&self) -> usize {
         self.len
     }
+
+    fn stream(&self) -> &Arc<CudaStream> {
+        &self.stream
+    }
 }
 
 impl<'a, T> DevicePtr<T> for RawCudaView<'a, T> {
-    fn device_ptr(&self) -> &cudarc::driver::sys::CUdeviceptr {
+    fn device_ptr<'b>(
+        &'b self,
+        _stream: &'b CudaStream,
+    ) -> (
+        cudarc::driver::sys::CUdeviceptr,
+        cudarc::driver::SyncOnDrop<'b>,
+    ) {
+        (self.ptr, cudarc::driver::SyncOnDrop::Sync(None))
+    }
+}
+
+impl<'a, T> RawCudaView<'a, T> {
+    pub fn device_ptr(&self) -> &cudarc::driver::sys::CUdeviceptr {
         &self.ptr
     }
 }
 
-unsafe impl<'a, T: DeviceRepr> DeviceRepr for &RawCudaView<'a, T> {
-    #[inline(always)]
+impl<'a, T: DeviceRepr> AsKernelParam for &RawCudaView<'a, T> {
     fn as_kernel_param(&self) -> *mut c_void {
-        let ptr = DevicePtr::device_ptr(*self);
-        ptr as *const cudarc::driver::sys::CUdeviceptr as *mut c_void
+        ((*self).device_ptr() as *const cudarc::driver::sys::CUdeviceptr)
+            .cast_mut()
+            .cast()
+    }
+}
+
+impl<'a, T: DeviceRepr> IntoKernelParamStorage for &'a RawCudaView<'a, T> {
+    type Storage = DeviceParamStorage<'a>;
+
+    fn into_kernel_param_storage(self) -> Self::Storage {
+        DeviceParamStorage::unsynced(self.ptr)
     }
 }
 
@@ -1142,10 +1168,11 @@ impl CudaKernelProvider {
                 num_bytes
             )));
         }
-        let ptr = *cudarc::driver::DevicePtr::device_ptr(col);
+        let ptr = *col.device_ptr();
         Ok(RawCudaView {
             ptr,
             len: num_bytes,
+            stream: col.stream().clone(),
             _marker: PhantomData,
         })
     }
@@ -1173,6 +1200,7 @@ impl CudaKernelProvider {
         Ok(RawCudaView {
             ptr,
             len: num_elements,
+            stream: bytes.stream().clone(),
             _marker: PhantomData,
         })
     }
@@ -1201,6 +1229,7 @@ impl CudaKernelProvider {
         Ok(RawCudaView {
             ptr,
             len: num_elements,
+            stream: col.stream().clone(),
             _marker: PhantomData,
         })
     }
@@ -1228,6 +1257,7 @@ impl CudaKernelProvider {
         Ok(RawCudaView {
             ptr,
             len: num_elements,
+            stream: col.stream().clone(),
             _marker: PhantomData,
         })
     }
@@ -1256,6 +1286,7 @@ impl CudaKernelProvider {
         Ok(RawCudaView {
             ptr,
             len: num_elements,
+            stream: col.stream().clone(),
             _marker: PhantomData,
         })
     }

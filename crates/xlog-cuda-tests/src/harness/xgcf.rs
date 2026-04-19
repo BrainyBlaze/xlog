@@ -2,10 +2,10 @@
 
 use std::ffi::c_void;
 
-use cudarc::driver::{CudaFunction, DeviceRepr, DeviceSlice, LaunchAsync, LaunchConfig};
+use cudarc::driver::{DeviceSlice, LaunchConfig};
 use xlog_core::{Result, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
-use xlog_cuda::{circuit_kernels, CIRCUIT_MODULE};
+use xlog_cuda::{circuit_kernels, AsKernelParam, CudaFunction, LaunchAsync, CIRCUIT_MODULE};
 
 use super::TestContext;
 

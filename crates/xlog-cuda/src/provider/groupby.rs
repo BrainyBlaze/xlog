@@ -1,6 +1,6 @@
 //! Groupby aggregation operations: groupby_agg, groupby_multi_agg.
 
-use cudarc::driver::{LaunchAsync, LaunchConfig};
+use crate::{LaunchAsync, LaunchConfig};
 use xlog_core::{AggOp, Result, ScalarType, Schema, XlogError};
 
 use super::{

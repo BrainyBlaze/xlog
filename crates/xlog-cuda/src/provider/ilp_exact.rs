@@ -9,7 +9,7 @@
 use std::marker::PhantomData;
 use std::sync::atomic::Ordering;
 
-use cudarc::driver::{DevicePtr, LaunchAsync, LaunchConfig};
+use crate::{LaunchAsync, LaunchConfig};
 use xlog_core::{Result, ScalarType, XlogError};
 
 use super::{ilp_exact_kernels, RawCudaView, ILP_EXACT_MODULE};
@@ -141,13 +141,15 @@ impl super::CudaKernelProvider {
         // `uint64_t*` (8-byte aligned by `memory.alloc::<u8>` returning
         // naturally-aligned storage).
         let cand_arg0_view = RawCudaView::<u64> {
-            ptr: *DevicePtr::device_ptr(&cand_arg0_buf),
+            ptr: *cand_arg0_buf.device_ptr(),
             len: total_rows,
+            stream: cand_arg0_buf.stream().clone(),
             _marker: PhantomData,
         };
         let cand_arg1_view = RawCudaView::<u64> {
-            ptr: *DevicePtr::device_ptr(&cand_arg1_buf),
+            ptr: *cand_arg1_buf.device_ptr(),
             len: total_rows,
+            stream: cand_arg1_buf.stream().clone(),
             _marker: PhantomData,
         };
 

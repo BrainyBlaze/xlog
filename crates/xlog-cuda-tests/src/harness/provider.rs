@@ -1,6 +1,6 @@
 //! Test context and provider setup for CUDA certification tests.
 
-use cudarc::driver::{result, sys};
+use cudarc::driver::sys;
 use cudarc::driver::{DevicePtr, DevicePtrMut, DeviceRepr};
 use fs2::FileExt;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -79,7 +79,7 @@ impl TestContext {
         let file_lock = gpu_test_lock_file()?;
 
         // cudarc may panic on driver init failures in restricted containers; treat as a normal error.
-        let device_count = std::panic::catch_unwind(|| cudarc::driver::CudaDevice::count())
+        let device_count = std::panic::catch_unwind(CudaDevice::count)
             .map_err(|_| {
                 XlogError::Kernel(
                     "Failed to get device count: cudarc panicked during driver initialization"
@@ -198,38 +198,32 @@ impl TestContext {
     where
         F: FnOnce() -> Result<()>,
     {
-        let device = self.device.inner();
-        let stream = *device.cu_stream();
-        let start = result::event::create(sys::CUevent_flags::CU_EVENT_DEFAULT)
+        let stream = self.device.inner().stream();
+        let start = stream
+            .context()
+            .new_event(Some(sys::CUevent_flags::CU_EVENT_DEFAULT))
             .map_err(|e| XlogError::Kernel(format!("Failed to create start event: {}", e)))?;
-        let end = result::event::create(sys::CUevent_flags::CU_EVENT_DEFAULT)
+        let end = stream
+            .context()
+            .new_event(Some(sys::CUevent_flags::CU_EVENT_DEFAULT))
             .map_err(|e| XlogError::Kernel(format!("Failed to create end event: {}", e)))?;
 
-        unsafe {
-            result::event::record(start, stream)
-                .map_err(|e| XlogError::Kernel(format!("Failed to record start event: {}", e)))?;
-        }
+        start
+            .record(stream)
+            .map_err(|e| XlogError::Kernel(format!("Failed to record start event: {}", e)))?;
         f()?;
-        unsafe {
-            result::event::record(end, stream)
-                .map_err(|e| XlogError::Kernel(format!("Failed to record end event: {}", e)))?;
-        }
+        end.record(stream)
+            .map_err(|e| XlogError::Kernel(format!("Failed to record end event: {}", e)))?;
         self.sync_and_check()?;
-        let elapsed = unsafe { result::event::elapsed(start, end) }.map_err(|e| {
+        let elapsed = start.elapsed_ms(&end).map_err(|e| {
             XlogError::Kernel(format!("Failed to measure event elapsed time: {}", e))
         })?;
-        unsafe {
-            result::event::destroy(start)
-                .map_err(|e| XlogError::Kernel(format!("Failed to destroy start event: {}", e)))?;
-            result::event::destroy(end)
-                .map_err(|e| XlogError::Kernel(format!("Failed to destroy end event: {}", e)))?;
-        }
         Ok(elapsed)
     }
 
     /// Check if multi-GPU is available.
     pub fn multi_gpu_available(&self) -> bool {
-        match std::panic::catch_unwind(|| cudarc::driver::CudaDevice::count()) {
+        match std::panic::catch_unwind(CudaDevice::count) {
             Ok(Ok(n)) => n > 1,
             _ => false,
         }

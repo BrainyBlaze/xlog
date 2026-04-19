@@ -1,6 +1,7 @@
 //! GPU kernel provider for XLOG
 
 pub mod arrow_device;
+pub mod cuda_compat;
 pub mod device;
 pub mod device_pool;
 pub mod dlpack;
@@ -11,6 +12,11 @@ pub mod provider;
 pub mod type_seam;
 
 pub use arrow_device::{ArrowDeviceArray, ArrowDeviceArrayOwned, ARROW_DEVICE_CUDA};
+pub use cuda_compat::{
+    sys, AsKernelParam, CudaFunction, CudaSlice, CudaStream, CudaView, CudaViewMut, DevicePtr,
+    DevicePtrMut, DeviceRepr, DeviceSlice, DriverError, IntoKernelParamStorage, KernelParamStorage,
+    KernelScalar, LaunchAsync, LaunchConfig, ValidAsZeroBits,
+};
 pub use device::CudaDevice;
 pub use device_pool::GpuDevicePool;
 pub use dlpack::{DLManagedTensor, DlpackManagedTensor, DlpackTable};

@@ -8,7 +8,7 @@ The first public support contract is:
 
 - Linux `x86_64`
 - NVIDIA GPU
-- CUDA Toolkit 12.x
+- CUDA Toolkit 13.x
 
 GitHub-hosted CI is non-GPU only. GPU validation happens outside GitHub Actions on a real CUDA machine. If you change CUDA kernels, GPU execution paths, packaging, or installation flows, validate on supported hardware before asking for review.
 

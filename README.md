@@ -34,7 +34,7 @@
 
 ## Supported Platform Contract
 
-Public releases of XLOG are supported on Linux x86_64 with an NVIDIA GPU and CUDA Toolkit 12.x.
+Public releases of XLOG are supported on Linux x86_64 with an NVIDIA GPU and CUDA Toolkit 13.x.
 The public setup assumes:
 
 - Linux `x86_64`

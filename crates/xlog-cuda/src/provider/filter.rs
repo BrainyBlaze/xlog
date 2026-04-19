@@ -5,7 +5,7 @@
 
 use std::marker::PhantomData;
 
-use cudarc::driver::{DeviceRepr, DeviceSlice, LaunchAsync, LaunchConfig};
+use crate::{DeviceRepr, DeviceSlice, KernelScalar, LaunchAsync, LaunchConfig};
 use xlog_core::{Result, ScalarType, XlogError};
 
 use super::{filter_kernels, scan_kernels, RawCudaView, FILTER_MODULE, SCAN_MODULE};
@@ -82,7 +82,7 @@ impl super::CudaKernelProvider {
     /// Generate a device mask by comparing a column against a constant value.
     ///
     /// Each output byte is 1 if the comparison holds, 0 otherwise.
-    pub(crate) fn compare_const_mask<T: DeviceRepr + Copy>(
+    pub(crate) fn compare_const_mask<T: KernelScalar>(
         &self,
         input: &CudaBuffer,
         col: usize,
@@ -400,7 +400,7 @@ impl super::CudaKernelProvider {
                 T::BYTE_WIDTH,
             )));
         }
-        let ptr = *cudarc::driver::DevicePtr::device_ptr(col);
+        let ptr = *col.device_ptr();
         if T::BYTE_WIDTH > 1 && (ptr as usize) % T::BYTE_WIDTH != 0 {
             return Err(XlogError::Kernel(format!(
                 "Column device pointer is not {}-byte aligned",
@@ -410,6 +410,7 @@ impl super::CudaKernelProvider {
         Ok(RawCudaView {
             ptr,
             len: num_elements,
+            stream: col.stream().clone(),
             _marker: PhantomData,
         })
     }

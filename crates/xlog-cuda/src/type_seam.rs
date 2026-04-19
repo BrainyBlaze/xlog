@@ -32,7 +32,9 @@ mod sealed {
 ///
 /// This trait is **sealed** — it cannot be implemented outside `xlog-cuda`.
 /// The fixed set of implementations covers all GPU-compatible scalar types.
-pub trait GpuScalar: sealed::Sealed + cudarc::driver::DeviceRepr + Copy + Send + 'static {
+pub trait GpuScalar:
+    sealed::Sealed + crate::cuda_compat::KernelScalar + Copy + Send + 'static
+{
     /// Size in bytes of this scalar type.
     const BYTE_WIDTH: usize;
 

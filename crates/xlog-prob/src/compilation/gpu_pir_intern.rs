@@ -5,11 +5,11 @@
 use std::ffi::c_void;
 use std::sync::Arc;
 
-use cudarc::driver::{DeviceRepr, DeviceSlice, LaunchAsync, LaunchConfig};
+use cudarc::driver::{DeviceSlice, LaunchConfig};
 use xlog_core::{Result, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::provider::{pir_kernels, scan_kernels, RadixSortScratch, PIR_MODULE, SCAN_MODULE};
-use xlog_cuda::CudaKernelProvider;
+use xlog_cuda::{AsKernelParam, CudaKernelProvider, LaunchAsync};
 
 use crate::compilation::gpu_pir::{GpuPirGraph, PIR_AND, PIR_CONST};
 

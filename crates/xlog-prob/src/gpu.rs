@@ -2,13 +2,13 @@
 
 use std::ffi::c_void;
 
-use cudarc::driver::{DeviceRepr, DeviceSlice, LaunchAsync, LaunchConfig};
+use cudarc::driver::{DeviceSlice, LaunchConfig};
 use xlog_core::{Result, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::provider::{
     arith_kernels, d4_kernels, filter_kernels, ARITH_MODULE, D4_MODULE, FILTER_MODULE,
 };
-use xlog_cuda::{circuit_kernels, CudaKernelProvider, CIRCUIT_MODULE};
+use xlog_cuda::{circuit_kernels, AsKernelParam, CudaKernelProvider, LaunchAsync, CIRCUIT_MODULE};
 
 use crate::compilation::gpu_d4::exclusive_scan_u32_inplace;
 use crate::xgcf::{Xgcf, XgcfNodeType};

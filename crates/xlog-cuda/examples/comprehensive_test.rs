@@ -10,7 +10,7 @@ fn main() {
     println!("=== XLOG Comprehensive System Validation ===\n");
 
     // Check CUDA availability
-    let device_count = cudarc::driver::CudaDevice::count().unwrap_or(0);
+    let device_count = CudaDevice::count().unwrap_or(0);
     if device_count == 0 {
         println!("ERROR: No CUDA device available!");
         std::process::exit(1);

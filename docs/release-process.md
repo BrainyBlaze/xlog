@@ -12,7 +12,7 @@ This keeps public CI honest. A green PR does not prove GPU correctness.
 Public releases currently target:
 
 - Linux `x86_64`
-- NVIDIA CUDA Toolkit 12.x
+- NVIDIA CUDA Toolkit 13.x
 - GitHub release CLI archives
 - `pyxlog` wheels on PyPI
 - Rust crates on crates.io for the stable public Rust surface

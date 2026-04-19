@@ -4,12 +4,12 @@ use std::sync::Arc;
 
 use std::ffi::c_void;
 
-use cudarc::driver::{DeviceRepr, LaunchAsync, LaunchConfig};
+use cudarc::driver::LaunchConfig;
 use xlog_core::{Result, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::provider::sat_kernels;
 use xlog_cuda::provider::SAT_MODULE;
-use xlog_cuda::CudaKernelProvider;
+use xlog_cuda::{AsKernelParam, CudaKernelProvider, LaunchAsync};
 use xlog_solve::{GpuCdclConfig, GpuCdclSolver, GpuCnf};
 
 #[cfg(debug_assertions)]

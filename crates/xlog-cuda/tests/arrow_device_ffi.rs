@@ -2,9 +2,10 @@ mod common;
 use common::setup_provider;
 
 use arrow::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
-use cudarc::driver::safe::{DevicePtr, DeviceSlice};
-use cudarc::driver::sys;
+use cudarc::driver::SyncOnDrop;
+use std::sync::Arc;
 use xlog_core::{ScalarType, Schema};
+use xlog_cuda::{sys, CudaStream, DevicePtr, DeviceSlice};
 
 #[repr(C)]
 struct RawArrowArray {
@@ -23,17 +24,22 @@ struct RawArrowArray {
 struct RawDeviceSlice {
     ptr: sys::CUdeviceptr,
     len: usize,
+    stream: Arc<CudaStream>,
 }
 
 impl DeviceSlice<u8> for RawDeviceSlice {
     fn len(&self) -> usize {
         self.len
     }
+
+    fn stream(&self) -> &Arc<CudaStream> {
+        &self.stream
+    }
 }
 
 impl DevicePtr<u8> for RawDeviceSlice {
-    fn device_ptr(&self) -> &sys::CUdeviceptr {
-        &self.ptr
+    fn device_ptr<'a>(&'a self, _stream: &'a CudaStream) -> (sys::CUdeviceptr, SyncOnDrop<'a>) {
+        (self.ptr, SyncOnDrop::Sync(None))
     }
 }
 
@@ -146,6 +152,7 @@ fn test_arrow_device_export_bool_bitpacked() {
         let dev_slice = RawDeviceSlice {
             ptr: values_ptr as u64,
             len: packed_len,
+            stream: provider.device().inner().stream().clone(),
         };
         device.dtoh_sync_copy_into(&dev_slice, &mut host).unwrap();
 

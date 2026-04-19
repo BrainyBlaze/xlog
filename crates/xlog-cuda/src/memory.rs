@@ -8,10 +8,11 @@ use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
-use cudarc::driver::CudaSlice;
+use cudarc::driver::{CudaSlice, CudaStream, DevicePtr, DevicePtrMut, DeviceSlice, SyncOnDrop};
 use xlog_core::{MemoryBudget, Result, Schema, XlogError};
 
 use crate::arrow_device::ArrowDeviceImport;
+use crate::cuda_compat::{AsKernelParam, DeviceParamStorage, IntoKernelParamStorage};
 use crate::dlpack::DlpackManagedTensor;
 use crate::CudaDevice;
 
@@ -33,6 +34,7 @@ pub struct TrackedCudaSlice<T: cudarc::driver::DeviceRepr> {
     bytes: u64,
     manager: Arc<GpuMemoryManager>,
     inner: CudaSlice<T>,
+    raw_ptr: cudarc::driver::sys::CUdeviceptr,
 }
 
 impl<T: cudarc::driver::DeviceRepr> Deref for TrackedCudaSlice<T> {
@@ -49,25 +51,43 @@ impl<T: cudarc::driver::DeviceRepr> DerefMut for TrackedCudaSlice<T> {
     }
 }
 
-impl<T: cudarc::driver::DeviceRepr> cudarc::driver::DeviceSlice<T> for TrackedCudaSlice<T> {
+impl<T: cudarc::driver::DeviceRepr> DeviceSlice<T> for TrackedCudaSlice<T> {
     fn len(&self) -> usize {
         self.inner.len()
     }
-}
 
-impl<T: cudarc::driver::DeviceRepr> cudarc::driver::DevicePtr<T> for TrackedCudaSlice<T> {
-    fn device_ptr(&self) -> &cudarc::driver::sys::CUdeviceptr {
-        cudarc::driver::DevicePtr::device_ptr(&self.inner)
+    fn stream(&self) -> &Arc<CudaStream> {
+        self.inner.stream()
     }
 }
 
-impl<T: cudarc::driver::DeviceRepr> cudarc::driver::DevicePtrMut<T> for TrackedCudaSlice<T> {
-    fn device_ptr_mut(&mut self) -> &mut cudarc::driver::sys::CUdeviceptr {
-        cudarc::driver::DevicePtrMut::device_ptr_mut(&mut self.inner)
+impl<T: cudarc::driver::DeviceRepr> DevicePtr<T> for TrackedCudaSlice<T> {
+    fn device_ptr<'a>(
+        &'a self,
+        stream: &'a CudaStream,
+    ) -> (cudarc::driver::sys::CUdeviceptr, SyncOnDrop<'a>) {
+        DevicePtr::device_ptr(&self.inner, stream)
+    }
+}
+
+impl<T: cudarc::driver::DeviceRepr> DevicePtrMut<T> for TrackedCudaSlice<T> {
+    fn device_ptr_mut<'a>(
+        &'a mut self,
+        stream: &'a CudaStream,
+    ) -> (cudarc::driver::sys::CUdeviceptr, SyncOnDrop<'a>) {
+        DevicePtrMut::device_ptr_mut(&mut self.inner, stream)
     }
 }
 
 impl<T: cudarc::driver::DeviceRepr> TrackedCudaSlice<T> {
+    pub fn device_ptr(&self) -> &cudarc::driver::sys::CUdeviceptr {
+        &self.raw_ptr
+    }
+
+    pub fn device_ptr_value(&self) -> cudarc::driver::sys::CUdeviceptr {
+        self.raw_ptr
+    }
+
     /// Reinterpret this typed allocation as a raw byte allocation.
     ///
     /// This is a zero-copy conversion used by XLOG's columnar `CudaBuffer` representation, which
@@ -76,36 +96,61 @@ impl<T: cudarc::driver::DeviceRepr> TrackedCudaSlice<T> {
         let this = ManuallyDrop::new(self);
         let bytes = this.bytes;
         let manager = Arc::clone(&this.manager);
-        let ptr = *cudarc::driver::DevicePtr::device_ptr(&this.inner);
+        let ptr = this.raw_ptr;
 
         let len_bytes: usize = bytes
             .try_into()
             .expect("TrackedCudaSlice byte size must fit into usize");
 
-        let device = manager.device.inner().clone();
-        let inner = unsafe { device.upgrade_device_ptr::<u8>(ptr, len_bytes) };
+        let inner = unsafe {
+            manager
+                .device
+                .inner()
+                .upgrade_device_ptr::<u8>(ptr, len_bytes)
+        };
 
         TrackedCudaSlice {
             bytes,
             manager,
             inner,
+            raw_ptr: ptr,
         }
     }
 }
 
-unsafe impl<T: cudarc::driver::DeviceRepr> cudarc::driver::DeviceRepr for &TrackedCudaSlice<T> {
-    #[inline(always)]
+impl<T: cudarc::driver::DeviceRepr> AsKernelParam for &TrackedCudaSlice<T> {
     fn as_kernel_param(&self) -> *mut std::ffi::c_void {
-        let ptr = cudarc::driver::DevicePtr::device_ptr(*self);
-        ptr as *const cudarc::driver::sys::CUdeviceptr as *mut std::ffi::c_void
+        ((*self).device_ptr() as *const cudarc::driver::sys::CUdeviceptr)
+            .cast_mut()
+            .cast()
     }
 }
 
-unsafe impl<T: cudarc::driver::DeviceRepr> cudarc::driver::DeviceRepr for &mut TrackedCudaSlice<T> {
-    #[inline(always)]
+impl<T: cudarc::driver::DeviceRepr> AsKernelParam for &mut TrackedCudaSlice<T> {
     fn as_kernel_param(&self) -> *mut std::ffi::c_void {
-        let ptr = cudarc::driver::DevicePtr::device_ptr(&**self);
-        ptr as *const cudarc::driver::sys::CUdeviceptr as *mut std::ffi::c_void
+        ((self.device_ptr()) as *const cudarc::driver::sys::CUdeviceptr)
+            .cast_mut()
+            .cast()
+    }
+}
+
+impl<'a, T: cudarc::driver::DeviceRepr> IntoKernelParamStorage for &'a TrackedCudaSlice<T> {
+    type Storage = DeviceParamStorage<'a>;
+
+    fn into_kernel_param_storage(self) -> Self::Storage {
+        let (ptr, sync) = DevicePtr::device_ptr(&self.inner, self.inner.stream());
+        DeviceParamStorage::synced(ptr, sync)
+    }
+}
+
+impl<'a, T: cudarc::driver::DeviceRepr> IntoKernelParamStorage for &'a mut TrackedCudaSlice<T> {
+    type Storage = DeviceParamStorage<'static>;
+
+    fn into_kernel_param_storage(self) -> Self::Storage {
+        let stream = self.inner.stream().clone();
+        let (ptr, sync) = DevicePtrMut::device_ptr_mut(&mut self.inner, &stream);
+        std::mem::forget(sync);
+        DeviceParamStorage::unsynced(ptr)
     }
 }
 
@@ -180,11 +225,14 @@ impl GpuMemoryManager {
                 XlogError::Kernel(format!("GPU allocation failed: {}", e))
             })?
         };
+        let (raw_ptr, sync) = DevicePtr::device_ptr(&slice, slice.stream());
+        std::mem::forget(sync);
 
         Ok(TrackedCudaSlice {
             bytes,
             manager: Arc::clone(self),
             inner: slice,
+            raw_ptr,
         })
     }
 
@@ -267,12 +315,14 @@ pub enum CudaColumn {
 pub struct DlpackColumn {
     ptr: cudarc::driver::sys::CUdeviceptr,
     len_bytes: usize,
+    stream: Arc<CudaStream>,
     _tensor: DlpackManagedTensor,
 }
 
 pub struct ArrowDeviceColumn {
     ptr: cudarc::driver::sys::CUdeviceptr,
     len_bytes: usize,
+    stream: Arc<CudaStream>,
     _import: Arc<ArrowDeviceImport>,
 }
 
@@ -284,11 +334,13 @@ impl CudaColumn {
     pub fn dlpack(
         ptr: cudarc::driver::sys::CUdeviceptr,
         len_bytes: usize,
+        stream: Arc<CudaStream>,
         tensor: DlpackManagedTensor,
     ) -> Self {
         Self::Dlpack(DlpackColumn {
             ptr,
             len_bytes,
+            stream,
             _tensor: tensor,
         })
     }
@@ -296,13 +348,31 @@ impl CudaColumn {
     pub fn arrow_device(
         ptr: cudarc::driver::sys::CUdeviceptr,
         len_bytes: usize,
+        stream: Arc<CudaStream>,
         import: Arc<ArrowDeviceImport>,
     ) -> Self {
         Self::ArrowDevice(ArrowDeviceColumn {
             ptr,
             len_bytes,
+            stream,
             _import: import,
         })
+    }
+
+    pub fn stream(&self) -> &Arc<CudaStream> {
+        match self {
+            CudaColumn::Owned(slice) => slice.stream(),
+            CudaColumn::Dlpack(col) => &col.stream,
+            CudaColumn::ArrowDevice(col) => &col.stream,
+        }
+    }
+
+    pub fn device_ptr(&self) -> &cudarc::driver::sys::CUdeviceptr {
+        match self {
+            CudaColumn::Owned(slice) => slice.device_ptr(),
+            CudaColumn::Dlpack(col) => &col.ptr,
+            CudaColumn::ArrowDevice(col) => &col.ptr,
+        }
     }
 }
 
@@ -312,7 +382,7 @@ impl From<TrackedCudaSlice<u8>> for CudaColumn {
     }
 }
 
-impl cudarc::driver::DeviceSlice<u8> for CudaColumn {
+impl DeviceSlice<u8> for CudaColumn {
     fn len(&self) -> usize {
         match self {
             CudaColumn::Owned(slice) => slice.len(),
@@ -320,41 +390,75 @@ impl cudarc::driver::DeviceSlice<u8> for CudaColumn {
             CudaColumn::ArrowDevice(col) => col.len_bytes,
         }
     }
+
+    fn stream(&self) -> &Arc<CudaStream> {
+        self.stream()
+    }
 }
 
-impl cudarc::driver::DevicePtr<u8> for CudaColumn {
-    fn device_ptr(&self) -> &cudarc::driver::sys::CUdeviceptr {
+impl DevicePtr<u8> for CudaColumn {
+    fn device_ptr<'a>(
+        &'a self,
+        stream: &'a CudaStream,
+    ) -> (cudarc::driver::sys::CUdeviceptr, SyncOnDrop<'a>) {
         match self {
-            CudaColumn::Owned(slice) => cudarc::driver::DevicePtr::device_ptr(slice),
-            CudaColumn::Dlpack(col) => &col.ptr,
-            CudaColumn::ArrowDevice(col) => &col.ptr,
+            CudaColumn::Owned(slice) => DevicePtr::device_ptr(slice, stream),
+            CudaColumn::Dlpack(col) => (col.ptr, SyncOnDrop::Sync(None)),
+            CudaColumn::ArrowDevice(col) => (col.ptr, SyncOnDrop::Sync(None)),
         }
     }
 }
 
-impl cudarc::driver::DevicePtrMut<u8> for CudaColumn {
-    fn device_ptr_mut(&mut self) -> &mut cudarc::driver::sys::CUdeviceptr {
+impl DevicePtrMut<u8> for CudaColumn {
+    fn device_ptr_mut<'a>(
+        &'a mut self,
+        stream: &'a CudaStream,
+    ) -> (cudarc::driver::sys::CUdeviceptr, SyncOnDrop<'a>) {
         match self {
-            CudaColumn::Owned(slice) => cudarc::driver::DevicePtrMut::device_ptr_mut(slice),
-            CudaColumn::Dlpack(col) => &mut col.ptr,
-            CudaColumn::ArrowDevice(col) => &mut col.ptr,
+            CudaColumn::Owned(slice) => DevicePtrMut::device_ptr_mut(slice, stream),
+            CudaColumn::Dlpack(col) => (col.ptr, SyncOnDrop::Sync(None)),
+            CudaColumn::ArrowDevice(col) => (col.ptr, SyncOnDrop::Sync(None)),
         }
     }
 }
 
-unsafe impl cudarc::driver::DeviceRepr for &CudaColumn {
-    #[inline(always)]
+impl AsKernelParam for &CudaColumn {
     fn as_kernel_param(&self) -> *mut std::ffi::c_void {
-        let ptr = cudarc::driver::DevicePtr::device_ptr(*self);
-        ptr as *const cudarc::driver::sys::CUdeviceptr as *mut std::ffi::c_void
+        ((self.device_ptr()) as *const cudarc::driver::sys::CUdeviceptr)
+            .cast_mut()
+            .cast()
     }
 }
 
-unsafe impl cudarc::driver::DeviceRepr for &mut CudaColumn {
-    #[inline(always)]
+impl AsKernelParam for &mut CudaColumn {
     fn as_kernel_param(&self) -> *mut std::ffi::c_void {
-        let ptr = cudarc::driver::DevicePtr::device_ptr(&**self);
-        ptr as *const cudarc::driver::sys::CUdeviceptr as *mut std::ffi::c_void
+        ((self.device_ptr()) as *const cudarc::driver::sys::CUdeviceptr)
+            .cast_mut()
+            .cast()
+    }
+}
+
+impl<'a> IntoKernelParamStorage for &'a CudaColumn {
+    type Storage = DeviceParamStorage<'a>;
+
+    fn into_kernel_param_storage(self) -> Self::Storage {
+        match self {
+            CudaColumn::Owned(slice) => slice.into_kernel_param_storage(),
+            CudaColumn::Dlpack(col) => DeviceParamStorage::unsynced(col.ptr),
+            CudaColumn::ArrowDevice(col) => DeviceParamStorage::unsynced(col.ptr),
+        }
+    }
+}
+
+impl<'a> IntoKernelParamStorage for &'a mut CudaColumn {
+    type Storage = DeviceParamStorage<'a>;
+
+    fn into_kernel_param_storage(self) -> Self::Storage {
+        match self {
+            CudaColumn::Owned(slice) => slice.into_kernel_param_storage(),
+            CudaColumn::Dlpack(col) => DeviceParamStorage::unsynced(col.ptr),
+            CudaColumn::ArrowDevice(col) => DeviceParamStorage::unsynced(col.ptr),
+        }
     }
 }
 

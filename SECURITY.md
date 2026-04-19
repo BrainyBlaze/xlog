@@ -6,7 +6,7 @@ Public support currently covers:
 
 - Linux `x86_64`
 - NVIDIA GPUs
-- CUDA Toolkit 12.x
+- CUDA Toolkit 13.x
 
 GitHub-hosted CI is non-GPU only. GPU validation and release validation happen outside GitHub Actions on a real CUDA machine. Reports that depend on unsupported platforms may still be reviewed, but fixes and response times are best-effort.
 

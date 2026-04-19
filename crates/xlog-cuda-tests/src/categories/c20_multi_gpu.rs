@@ -7,6 +7,7 @@
 use crate::harness::{CategoryResult, TestContext, TestResult};
 use std::time::Instant;
 use xlog_core::{ScalarType, Schema};
+use xlog_cuda::CudaDevice;
 
 /// Run all tests in this category.
 pub fn run_all(ctx: &TestContext) -> CategoryResult {
@@ -262,7 +263,7 @@ fn test_multi_gpu_detection(ctx: &TestContext) -> TestResult {
     let multi_gpu = ctx.multi_gpu_available();
 
     // Get device count for diagnostics
-    let device_count = cudarc::driver::CudaDevice::count().unwrap_or(0);
+    let device_count = CudaDevice::count().unwrap_or(0);
 
     // This test always passes - it's diagnostic
     // The multi_gpu flag should match device_count > 1
@@ -335,7 +336,7 @@ fn test_device_enumeration(ctx: &TestContext) -> TestResult {
     let start = Instant::now();
 
     // Get device count
-    let device_count = match cudarc::driver::CudaDevice::count() {
+    let device_count = match CudaDevice::count() {
         Ok(count) => count,
         Err(e) => {
             return TestResult::error(
@@ -409,7 +410,7 @@ fn test_device_enumeration(ctx: &TestContext) -> TestResult {
     }
 
     // Verify enumeration is consistent
-    let device_count2 = match cudarc::driver::CudaDevice::count() {
+    let device_count2 = match CudaDevice::count() {
         Ok(count) => count,
         Err(e) => {
             return TestResult::error(
@@ -802,7 +803,7 @@ fn test_device_capability_query(ctx: &TestContext) -> TestResult {
 
     // Test multi-GPU detection consistency
     let multi_gpu = ctx.multi_gpu_available();
-    let device_count = cudarc::driver::CudaDevice::count().unwrap_or(0);
+    let device_count = CudaDevice::count().unwrap_or(0);
 
     if (multi_gpu && device_count <= 1) || (!multi_gpu && device_count > 1) {
         return TestResult::error(

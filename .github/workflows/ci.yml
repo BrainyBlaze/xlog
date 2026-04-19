@@ -209,7 +209,7 @@ jobs:
   clippy-high-signal:
     runs-on: ubuntu-latest
     container:
-      image: nvidia/cuda:12.4.1-devel-ubuntu22.04
+      image: nvidia/cuda:13.1.1-devel-ubuntu22.04
     env:
       XLOG_NO_CUBIN: "1"
     steps:
@@ -248,7 +248,7 @@ jobs:
   cuda-build-no-gpu:
     runs-on: ubuntu-latest
     container:
-      image: nvidia/cuda:12.4.1-devel-ubuntu22.04
+      image: nvidia/cuda:13.1.1-devel-ubuntu22.04
     env:
       XLOG_NO_CUBIN: "1"
     steps:

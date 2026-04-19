@@ -2,7 +2,7 @@
 
 use std::ffi::c_void;
 
-use cudarc::driver::{DevicePtr, DeviceRepr, DeviceSlice, LaunchAsync, LaunchConfig};
+use crate::{AsKernelParam, DeviceSlice, LaunchAsync, LaunchConfig};
 use xlog_core::{Result, ScalarType, Schema, XlogError};
 
 use super::{
@@ -298,7 +298,7 @@ impl super::CudaKernelProvider {
                 )));
             }
 
-            let ptr = *cudarc::driver::DevicePtr::device_ptr(col) as u64;
+            let ptr = *col.device_ptr() as u64;
             col_ptrs_host.push(ptr);
             col_sizes_host.push(elem_size as u32);
             col_types_host.push(scalar_type_code(ty));
@@ -2698,11 +2698,11 @@ impl super::CudaKernelProvider {
             shared_mem_bytes: 0,
         };
 
-        let d_count_only = self
-            .device
+        let mut d_count_only = self.memory.alloc::<u32>(1)?;
+        self.device
             .inner()
-            .htod_sync_copy(&[0u32])
-            .map_err(|e| XlogError::Kernel(format!("Failed to alloc output count: {}", e)))?;
+            .memset_zeros(&mut d_count_only)
+            .map_err(|e| XlogError::Kernel(format!("Failed to zero output count: {}", e)))?;
         let d_dummy_left = self.memory.alloc::<u32>(1)?;
         let d_dummy_right = self.memory.alloc::<u32>(1)?;
         let max_output_count_only = 0u32;
@@ -2714,18 +2714,18 @@ impl super::CudaKernelProvider {
         // Note: Using raw pointer launch because tuple exceeds 12-element limit
         unsafe {
             let mut params: Vec<*mut c_void> = vec![
-                (&*left_packed.hashes).as_kernel_param(),
+                (&left_packed.hashes).as_kernel_param(),
                 (&num_left).as_kernel_param(),
-                (&*table.bucket_offsets).as_kernel_param(),
-                (&*table.bucket_counts).as_kernel_param(),
-                (&*table.bucket_entries).as_kernel_param(),
-                (&*table.bucket_entry_hashes).as_kernel_param(),
+                (&table.bucket_offsets).as_kernel_param(),
+                (&table.bucket_counts).as_kernel_param(),
+                (&table.bucket_entries).as_kernel_param(),
+                (&table.bucket_entry_hashes).as_kernel_param(),
                 (&table.bucket_mask).as_kernel_param(),
-                (&*left_packed.packed_keys).as_kernel_param(),
-                (&*right_packed.packed_keys).as_kernel_param(),
+                (&left_packed.packed_keys).as_kernel_param(),
+                (&right_packed.packed_keys).as_kernel_param(),
                 (&left_packed.key_bytes).as_kernel_param(),
-                (&*d_dummy_left).as_kernel_param(),
-                (&*d_dummy_right).as_kernel_param(),
+                (&d_dummy_left).as_kernel_param(),
+                (&d_dummy_right).as_kernel_param(),
                 (&d_count_only).as_kernel_param(),
                 (&max_output_count_only).as_kernel_param(),
             ];
@@ -2764,11 +2764,11 @@ impl super::CudaKernelProvider {
         let max_output = requested as u32;
         let d_output_left = self.memory.alloc::<u32>(max_output as usize)?;
         let d_output_right = self.memory.alloc::<u32>(max_output as usize)?;
-        let d_output_count = self
-            .device
+        let mut d_output_count = self.memory.alloc::<u32>(1)?;
+        self.device
             .inner()
-            .htod_sync_copy(&[0u32])
-            .map_err(|e| XlogError::Kernel(format!("Failed to alloc output count: {}", e)))?;
+            .memset_zeros(&mut d_output_count)
+            .map_err(|e| XlogError::Kernel(format!("Failed to zero output count: {}", e)))?;
 
         // SAFETY: hash_join_probe_v2(probe_hashes, num_probe,
         //                            bucket_offsets, bucket_counts, bucket_entries, bucket_entry_hashes, bucket_mask,
@@ -2777,18 +2777,18 @@ impl super::CudaKernelProvider {
         // Note: Using raw pointer launch because tuple exceeds 12-element limit
         unsafe {
             let mut params: Vec<*mut c_void> = vec![
-                (&*left_packed.hashes).as_kernel_param(),
+                (&left_packed.hashes).as_kernel_param(),
                 (&num_left).as_kernel_param(),
-                (&*table.bucket_offsets).as_kernel_param(),
-                (&*table.bucket_counts).as_kernel_param(),
-                (&*table.bucket_entries).as_kernel_param(),
-                (&*table.bucket_entry_hashes).as_kernel_param(),
+                (&table.bucket_offsets).as_kernel_param(),
+                (&table.bucket_counts).as_kernel_param(),
+                (&table.bucket_entries).as_kernel_param(),
+                (&table.bucket_entry_hashes).as_kernel_param(),
                 (&table.bucket_mask).as_kernel_param(),
-                (&*left_packed.packed_keys).as_kernel_param(),
-                (&*right_packed.packed_keys).as_kernel_param(),
+                (&left_packed.packed_keys).as_kernel_param(),
+                (&right_packed.packed_keys).as_kernel_param(),
                 (&left_packed.key_bytes).as_kernel_param(),
-                (&*d_output_left).as_kernel_param(),
-                (&*d_output_right).as_kernel_param(),
+                (&d_output_left).as_kernel_param(),
+                (&d_output_right).as_kernel_param(),
                 (&d_output_count).as_kernel_param(),
                 (&max_output).as_kernel_param(),
             ];
@@ -2879,29 +2879,29 @@ impl super::CudaKernelProvider {
             shared_mem_bytes: 0,
         };
 
-        let d_count_only = self
-            .device
+        let mut d_count_only = self.memory.alloc::<u32>(1)?;
+        self.device
             .inner()
-            .htod_sync_copy(&[0u32])
-            .map_err(|e| XlogError::Kernel(format!("Failed to alloc output count: {}", e)))?;
+            .memset_zeros(&mut d_count_only)
+            .map_err(|e| XlogError::Kernel(format!("Failed to zero output count: {}", e)))?;
         let d_dummy_left = self.memory.alloc::<u32>(1)?;
         let d_dummy_right = self.memory.alloc::<u32>(1)?;
         let max_output_count_only = 0u32;
 
         unsafe {
             let mut params: Vec<*mut c_void> = vec![
-                (&*left_packed.hashes).as_kernel_param(),
+                (&left_packed.hashes).as_kernel_param(),
                 (&num_left).as_kernel_param(),
-                (&*table.bucket_offsets).as_kernel_param(),
-                (&*table.bucket_counts).as_kernel_param(),
-                (&*table.bucket_entries).as_kernel_param(),
-                (&*table.bucket_entry_hashes).as_kernel_param(),
+                (&table.bucket_offsets).as_kernel_param(),
+                (&table.bucket_counts).as_kernel_param(),
+                (&table.bucket_entries).as_kernel_param(),
+                (&table.bucket_entry_hashes).as_kernel_param(),
                 (&table.bucket_mask).as_kernel_param(),
-                (&*left_packed.packed_keys).as_kernel_param(),
-                (&*index.packed_keys).as_kernel_param(),
+                (&left_packed.packed_keys).as_kernel_param(),
+                (&index.packed_keys).as_kernel_param(),
                 (&index.key_bytes).as_kernel_param(),
-                (&*d_dummy_left).as_kernel_param(),
-                (&*d_dummy_right).as_kernel_param(),
+                (&d_dummy_left).as_kernel_param(),
+                (&d_dummy_right).as_kernel_param(),
                 (&d_count_only).as_kernel_param(),
                 (&max_output_count_only).as_kernel_param(),
             ];
@@ -2940,26 +2940,26 @@ impl super::CudaKernelProvider {
         let max_output = requested as u32;
         let d_output_left = self.memory.alloc::<u32>(max_output as usize)?;
         let d_output_right = self.memory.alloc::<u32>(max_output as usize)?;
-        let d_output_count = self
-            .device
+        let mut d_output_count = self.memory.alloc::<u32>(1)?;
+        self.device
             .inner()
-            .htod_sync_copy(&[0u32])
-            .map_err(|e| XlogError::Kernel(format!("Failed to alloc output count: {}", e)))?;
+            .memset_zeros(&mut d_output_count)
+            .map_err(|e| XlogError::Kernel(format!("Failed to zero output count: {}", e)))?;
 
         unsafe {
             let mut params: Vec<*mut c_void> = vec![
-                (&*left_packed.hashes).as_kernel_param(),
+                (&left_packed.hashes).as_kernel_param(),
                 (&num_left).as_kernel_param(),
-                (&*table.bucket_offsets).as_kernel_param(),
-                (&*table.bucket_counts).as_kernel_param(),
-                (&*table.bucket_entries).as_kernel_param(),
-                (&*table.bucket_entry_hashes).as_kernel_param(),
+                (&table.bucket_offsets).as_kernel_param(),
+                (&table.bucket_counts).as_kernel_param(),
+                (&table.bucket_entries).as_kernel_param(),
+                (&table.bucket_entry_hashes).as_kernel_param(),
                 (&table.bucket_mask).as_kernel_param(),
-                (&*left_packed.packed_keys).as_kernel_param(),
-                (&*index.packed_keys).as_kernel_param(),
+                (&left_packed.packed_keys).as_kernel_param(),
+                (&index.packed_keys).as_kernel_param(),
                 (&index.key_bytes).as_kernel_param(),
-                (&*d_output_left).as_kernel_param(),
-                (&*d_output_right).as_kernel_param(),
+                (&d_output_left).as_kernel_param(),
+                (&d_output_right).as_kernel_param(),
                 (&d_output_count).as_kernel_param(),
                 (&max_output).as_kernel_param(),
             ];
@@ -3595,11 +3595,11 @@ impl super::CudaKernelProvider {
             .ok_or_else(|| XlogError::Kernel("hash_join_probe_v2 kernel not found".to_string()))?;
 
         // Count inner-join matches to size buffers precisely.
-        let d_count_only = self
-            .device
+        let mut d_count_only = self.memory.alloc::<u32>(1)?;
+        self.device
             .inner()
-            .htod_sync_copy(&[0u32])
-            .map_err(|e| XlogError::Kernel(format!("Failed to alloc output count: {}", e)))?;
+            .memset_zeros(&mut d_count_only)
+            .map_err(|e| XlogError::Kernel(format!("Failed to zero output count: {}", e)))?;
         let d_dummy_left = self.memory.alloc::<u32>(1)?;
         let d_dummy_right = self.memory.alloc::<u32>(1)?;
         let max_output_count_only = 0u32;
@@ -3651,11 +3651,11 @@ impl super::CudaKernelProvider {
         let alloc_len = (requested_inner.max(1)) as usize;
         let d_output_left = self.memory.alloc::<u32>(alloc_len)?;
         let d_output_right = self.memory.alloc::<u32>(alloc_len)?;
-        let d_output_count = self
-            .device
+        let mut d_output_count = self.memory.alloc::<u32>(1)?;
+        self.device
             .inner()
-            .htod_sync_copy(&[0u32])
-            .map_err(|e| XlogError::Kernel(format!("Failed to alloc output count: {}", e)))?;
+            .memset_zeros(&mut d_output_count)
+            .map_err(|e| XlogError::Kernel(format!("Failed to zero output count: {}", e)))?;
 
         unsafe {
             let mut params: Vec<*mut c_void> = vec![
@@ -3964,11 +3964,11 @@ impl super::CudaKernelProvider {
             .ok_or_else(|| XlogError::Kernel("hash_join_probe_v2 kernel not found".to_string()))?;
 
         // Count inner-join matches to size buffers precisely.
-        let d_count_only = self
-            .device
+        let mut d_count_only = self.memory.alloc::<u32>(1)?;
+        self.device
             .inner()
-            .htod_sync_copy(&[0u32])
-            .map_err(|e| XlogError::Kernel(format!("Failed to alloc output count: {}", e)))?;
+            .memset_zeros(&mut d_count_only)
+            .map_err(|e| XlogError::Kernel(format!("Failed to zero output count: {}", e)))?;
         let d_dummy_left = self.memory.alloc::<u32>(1)?;
         let d_dummy_right = self.memory.alloc::<u32>(1)?;
         let max_output_count_only = 0u32;
@@ -4020,11 +4020,11 @@ impl super::CudaKernelProvider {
         let alloc_len = (requested_inner.max(1)) as usize;
         let d_output_left = self.memory.alloc::<u32>(alloc_len)?;
         let d_output_right = self.memory.alloc::<u32>(alloc_len)?;
-        let d_output_count = self
-            .device
+        let mut d_output_count = self.memory.alloc::<u32>(1)?;
+        self.device
             .inner()
-            .htod_sync_copy(&[0u32])
-            .map_err(|e| XlogError::Kernel(format!("Failed to alloc output count: {}", e)))?;
+            .memset_zeros(&mut d_output_count)
+            .map_err(|e| XlogError::Kernel(format!("Failed to zero output count: {}", e)))?;
 
         // SAFETY: hash_join_probe_v2(probe_hashes, num_probe,
         //                            bucket_offsets, bucket_counts, bucket_entries, bucket_entry_hashes, bucket_mask,

@@ -125,7 +125,7 @@ def _check_nvcc() -> CheckResult:
         return _fail(
             "nvcc",
             "nvcc is missing",
-            "Install CUDA Toolkit 12.x and ensure `nvcc` is on PATH.",
+            "Install CUDA Toolkit 13.x and ensure `nvcc` is on PATH.",
         )
 
     proc = subprocess.run(

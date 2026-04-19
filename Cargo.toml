@@ -25,7 +25,7 @@ repository = "https://github.com/BrainyBlaze/xlog"
 
 [workspace.dependencies]
 thiserror = "1.0"
-cudarc = { version = "0.12", features = ["cuda-12060"] }
+cudarc = { version = "0.19.4", features = ["cuda-13010"] }
 pest = "2.7"
 pest_derive = "2.7"
 pyo3 = { version = "0.21.2" }
