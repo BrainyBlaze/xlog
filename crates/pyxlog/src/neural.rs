@@ -1647,7 +1647,7 @@ impl CompiledProgram {
 
         if matches > 1 {
             return Err(PyValueError::new_err(format!(
-                "Query predicate '{}' has {} defining rules; expected exactly 1 for v0.4.0-alpha",
+                "Query predicate '{}' has {} defining rules; expected exactly 1 matching rule",
                 pred_name, matches
             )));
         }

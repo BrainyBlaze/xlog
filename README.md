@@ -45,9 +45,13 @@
 ### Build from Source
 
 ```bash
-git clone https://github.com/anthropics/xlog.git
+git clone https://github.com/xlog-project/xlog.git
 cd xlog
 cargo build --release
+
+# If you want host-readable probabilistic CLI output (`xlog prob`)
+# build the CLI with host I/O enabled.
+cargo build --release -p xlog-cli --features host-io
 ```
 
 The `xlog` CLI binary will be at `target/release/xlog`.
@@ -165,6 +169,9 @@ for name, capsule in results.items():
 
 XLOG supports probabilistic Datalog with two inference engines:
 
+> **CLI build note:** The `xlog prob` examples below assume `xlog-cli` was built with
+> `--features host-io`. Deterministic `xlog run` works with the default build.
+
 ### Exact Inference (Knowledge Compilation)
 
 ```prolog
@@ -219,10 +226,11 @@ Gradients flow correctly through negated literals for neural-symbolic training.
 
 ---
 
-## Neural-Symbolic Training (v0.4.0-alpha)
+## Neural-Symbolic Training (Introduced In v0.4.0-alpha, Available In v0.5.0)
 
 XLOG supports neural-symbolic integration where neural network outputs become probabilistic facts in logic programs.
-This infrastructure is now fully implemented and validated as part of the `v0.4.0-alpha` milestone.
+This infrastructure was introduced during the `v0.4.0-alpha` milestone and remains
+available in the current `v0.5.0` release line.
 
 Current required neural example set:
 - `examples/neural/01_minimal`

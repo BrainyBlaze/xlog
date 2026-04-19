@@ -1,7 +1,8 @@
 # XLOG Language Reference
 
-> **Version:** v0.3.2
-> **Last Updated:** January 2026
+> **Release context:** XLOG `v0.5.0`
+> **Language coverage:** Core language surface introduced through `v0.3.2`, still supported in `v0.5.0`
+> **Last Updated:** January 2026 (with release-context note updated April 2026)
 
 This document provides a comprehensive reference for the XLOG language, covering all syntax, semantics, and features of the GPU-accelerated Datalog query engine.
 

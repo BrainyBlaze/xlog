@@ -1,20 +1,26 @@
-# XLOG Validation Report (Current HEAD)
+# XLOG Validation Report (Historical Snapshot)
 
 **Date:** February 23, 2026  
-**Scope:** Repository state on `v0.4.0-alpha-integrated` (v0.4.0-alpha milestone achieved)  
+**Scope:** Validation snapshot captured on `v0.4.0-alpha-integrated` during the
+v0.4.0-alpha neural-symbolic milestone work.
 
-This document is the single source of truth for what is *actually verified* in the repository at a given point in
-time. It is intentionally conservative: if something is not listed here, it is not considered validated.
+This document records a historical validation pass. It is intentionally conservative
+about what was verified in that snapshot, but it is **not** the authoritative source
+for the current release line.
+
+For current release status, see `docs/ROADMAP.md` and `CHANGELOG.md`.
 
 ---
 
 ## Release Status
 
-- **Latest tagged release:** `v0.3.2` (see `git tag -l`).
-- **Current `main`:** ahead of `v0.3.2` (v0.4.0-alpha milestone achieved). The codebase contains major additional functionality (GPU-native
-  exact path + verifier/caching, device-only MC, neural-symbolic training APIs), and has now met the v0.4.0-alpha milestone requirements.
+- **Historical snapshot context:** at the time of this report, validation was being tracked
+  against the `v0.4.0-alpha` milestone branch/worktree.
+- **Current tagged release:** `v0.5.0` (see `git tag -l`).
+- **Current `main`:** ahead of `v0.5.0`; at the time of this update, `HEAD` is the
+  April 17, 2026 M8 exact-induction change (`3d63d197`).
 
-**v0.4.0-alpha gate (**achieved**):**
+**Historical v0.4.0-alpha gate status:**
 - End-to-end validation of *all* examples in `examples/` (CLI + Python where applicable) using `scripts/validate_examples.py`
 - Full-dataset (`--mode release`) validation for all neural examples on real data
 - Additional neural examples beyond `examples/neural/01_minimal` (**implemented**)
@@ -67,9 +73,10 @@ pytest python/tests/test_example_02_coins.py \
 
 ## Example Validation Status
 
-Examples are a release gate for neural milestones, but they are **not yet** validated end-to-end on full datasets.
+This section describes what the historical v0.4.0-alpha validation snapshot covered.
+It should not be read as a complete current-release verification matrix.
 
-What *is* covered today:
+What *was* covered in this snapshot:
 - The Rust test suite includes a basic CLI smoke test (`test_xlog_run_basic`) that exercises `xlog run` on a small
   program.
 - GPU kernels are validated via the certification suite (see above).
@@ -84,7 +91,7 @@ What *is* covered today:
   - `examples/neural/06_clutrr/`
 - Neural example smoke tests verify fail-fast behavior when required real datasets are missing.
 
-What is *not* yet covered:
+What was *not* covered in this snapshot:
 - Multi-GPU distributed training metrics.
 
 ---

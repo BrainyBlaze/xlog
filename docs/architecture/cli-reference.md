@@ -16,7 +16,13 @@ The CLI is built as part of the workspace:
 ```bash
 cargo build --release -p xlog-cli
 # Binary at: target/release/xlog
+
+# For host-readable probabilistic output (`xlog prob`)
+cargo build --release -p xlog-cli --features host-io
 ```
+
+`xlog run` works with the default build. `xlog prob`'s host-readable output path
+requires the `host-io` feature.
 
 ## Commands
 
@@ -37,6 +43,9 @@ xlog run [OPTIONS] <FILE>
 - `--output-dir <DIR>` — Directory for Arrow output files (with `--output arrow`)
 - `--device <N>` — CUDA device index (default: 0)
 - `--memory-mb <MB>` — GPU memory limit in megabytes
+- `--stats` — Emit execution statistics to stderr
+- `--stats-format <FORMAT>` — Statistics format: `human` (default) or `json`
+- `--module-path <DIR[:DIR...]>` — Additional module search paths
 
 **Examples:**
 
@@ -62,21 +71,22 @@ xlog run --device 1 --memory-mb 2048 program.xlog
 Execute a probabilistic Datalog program.
 
 ```bash
-xlog prob [OPTIONS] <FILE>
+xlog prob [OPTIONS] <SOURCE>
 ```
 
 **Arguments:**
-- `<FILE>` — Path to the `.xlog` source file with probabilistic facts
+- `<SOURCE>` — Path to the `.xlog` source file with probabilistic facts
 
 **Options:**
 - `--prob-engine <ENGINE>` — Inference engine: `exact_ddnnf` (default), `mc`
 - `--samples <N>` — Monte Carlo sample count (with `--prob-engine mc`)
 - `--seed <N>` — Random seed for Monte Carlo (with `--prob-engine mc`)
 - `--confidence <LEVEL>` — Confidence level for MC intervals (default: 0.95)
-- `--input <REL>=<PATH>` — Load Arrow IPC file as EDB relation (repeatable)
 - `--output <FORMAT>` — Output format: `pretty` (default), `csv`, `arrow`
+- `--output-dir <DIR>` — Directory for Arrow output files (with `--output arrow`)
 - `--device <N>` — CUDA device index (default: 0)
 - `--memory-mb <MB>` — GPU memory limit in megabytes
+- `--module-path <DIR[:DIR...]>` — Additional module search paths
 
 **Examples:**
 
@@ -167,7 +177,7 @@ Arrow IPC files written to the output directory:
 
 ```bash
 xlog run --output arrow --output-dir ./results program.xlog
-# Creates: ./results/reach.arrow
+# Creates: ./results/query_0.arrow
 ```
 
 ## Probabilistic Output

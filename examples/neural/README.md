@@ -4,7 +4,8 @@ Neural-symbolic training examples demonstrating integration where neural network
 
 ## Overview
 
-These examples exercise XLOG's **unreleased** neural-symbolic milestone work (target: `v0.4.0-alpha`):
+These examples exercise XLOG's neural-symbolic training stack, introduced during the
+`v0.4.0-alpha` milestone and available in the current `v0.5.0` release line:
 
 - **Neural Predicates**: `nn(network, [inputs], output, [labels]) :: predicate(args).`
 - **Network Registration**: PyTorch networks with optimizers and schedulers
@@ -62,7 +63,7 @@ queries = ["addition(0, 1, 7)", "addition(2, 3, 5)", ...]
 history = pyxlog.train_model(program, queries, epochs=50, batch_size=32)
 ```
 
-## Required Example Set (`v0.4.0-alpha`)
+## Required Example Set (Carried Forward Since `v0.4.0-alpha`)
 
 The required neural-symbolic example set is now present in the repository:
 
@@ -74,7 +75,8 @@ The required neural-symbolic example set is now present in the repository:
 | **05_poker** | Card rank classification |
 | **06_clutrr** | Family relationship reasoning with knowledge graphs |
 
-Release remains gated on end-to-end validation across these examples with real datasets.
+The original milestone was gated on end-to-end validation across these examples with
+real datasets; the examples remain part of the current release line.
 
 Each `train.py --mode release` run now emits a `FINAL_METRIC` line and enforces
 the example-specific minimum accuracy from `examples/neural/<example>/dataset.json`
