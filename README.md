@@ -77,9 +77,7 @@ binary from the extracted directory. Use the source build above if you need to r
 ### PyPI install
 
 ```bash
-cd crates/pyxlog
-pip install maturin
-maturin develop --release
+pip install pyxlog
 ```
 
 ### crates.io install
@@ -88,6 +86,16 @@ If you want the CLI crate from crates.io, install it once it is published:
 
 ```bash
 cargo install xlog-cli
+```
+
+### Local Python development install
+
+For editable local development from source:
+
+```bash
+cd crates/pyxlog
+pip install maturin
+maturin develop --release
 ```
 
 ---
@@ -215,6 +223,7 @@ query(wet).
 ```
 
 ```bash
+# Requires xlog-cli built with `--features host-io`
 xlog prob weather.xlog --prob-engine exact_ddnnf
 # P(wet | not sprinkler) = 0.3
 ```
@@ -222,6 +231,7 @@ xlog prob weather.xlog --prob-engine exact_ddnnf
 ### Monte Carlo Sampling
 
 ```bash
+# Requires xlog-cli built with `--features host-io`
 xlog prob weather.xlog --prob-engine mc --samples 10000
 # P(wet) ≈ 0.301 ± 0.009 (95% CI)
 ```
@@ -636,6 +646,7 @@ xlog run program.xlog --output arrow --output-dir ./results
 xlog run program.xlog --input edge=graph.arrow
 
 # Probabilistic execution
+# Requires `xlog-cli` built with `--features host-io`
 xlog prob program.xlog --prob-engine exact_ddnnf
 xlog prob program.xlog --prob-engine mc --samples 10000 --seed 42
 
