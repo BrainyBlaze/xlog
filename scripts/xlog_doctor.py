@@ -21,7 +21,6 @@ EXIT_UNSUPPORTED = 2
 
 MIN_PYTHON = (3, 8)
 ROOT = Path(__file__).resolve().parents[1]
-TEST_MODE_ENV = "XLOG_DOCTOR_TEST_MODE"
 
 
 @dataclass(frozen=True)
@@ -220,18 +219,6 @@ def _check_cuda_loader() -> CheckResult:
         )
 
 
-def _synthetic_supported_results(workflow: str) -> list[CheckResult]:
-    return [
-        _ok("platform", "Linux x86_64"),
-        _ok("nvidia-smi", "nvidia-smi visible"),
-        _ok("nvcc", "nvcc visible"),
-        _ok("rust", "rustc/cargo visible"),
-        _ok("python", f"Python {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"),
-        _ok("cuda-loader", "libcuda.so resolves"),
-        _workflow_note(workflow),
-    ]
-
-
 def _workflow_note(workflow: str) -> CheckResult:
     if workflow == "prob-cli":
         return _ok(
@@ -244,9 +231,6 @@ def _workflow_note(workflow: str) -> CheckResult:
 
 
 def evaluate(workflow: str) -> list[CheckResult]:
-    if os.environ.get(TEST_MODE_ENV) == "supported":
-        return _synthetic_supported_results(workflow)
-
     results: list[CheckResult] = []
 
     platform_result = _check_platform()

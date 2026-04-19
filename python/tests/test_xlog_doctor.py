@@ -1,7 +1,8 @@
-import os
 import json
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from scripts import xlog_doctor as doctor
+
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def _ok_check(message: str = "ok"):
@@ -109,18 +112,46 @@ def test_prob_cli_mentions_host_io_requirement(monkeypatch, capsys):
 
 
 def test_json_cli_invocation_round_trip():
-    env = dict(os.environ)
-    env[doctor.TEST_MODE_ENV] = "supported"
+    with tempfile.TemporaryDirectory() as tmpdir:
+        result = subprocess.run(
+            [sys.executable, "scripts/xlog_doctor.py", "--workflow", "prob-cli", "--json"],
+            cwd=ROOT,
+            env={"PATH": tmpdir},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    assert result.returncode in (doctor.EXIT_FAIL, doctor.EXIT_UNSUPPORTED)
+    payload = json.loads(result.stdout)
+    assert payload["exit_code"] == result.returncode
+    assert payload["workflow"] == "prob-cli"
+    assert payload["overall_status"] in {"FAIL", "UNSUPPORTED"}
+    if payload["overall_status"] == "FAIL":
+        failing = {check["slug"] for check in payload["checks"] if check["status"] == "FAIL"}
+        assert failing & {"nvidia-smi", "nvcc", "rust"}
+        assert any(check["slug"] == "workflow" for check in payload["checks"])
+    else:
+        assert payload["checks"][0]["slug"] == "platform"
+        assert payload["checks"][0]["status"] == "UNSUPPORTED"
+
+
+def test_import_does_not_create_runtime_shim() -> None:
+    shim_dir = Path("/tmp/xlog-cuda-shim")
+    shutil.rmtree(shim_dir, ignore_errors=True)
+
     result = subprocess.run(
-        [sys.executable, "scripts/xlog_doctor.py", "--workflow", "prob-cli", "--json"],
-        env=env,
+        [
+            sys.executable,
+            "-c",
+            "from pathlib import Path; import scripts.xlog_doctor; "
+            "print(Path('/tmp/xlog-cuda-shim').exists())",
+        ],
+        cwd=ROOT,
         capture_output=True,
         text=True,
         check=False,
     )
 
     assert result.returncode == 0
-    payload = json.loads(result.stdout)
-    assert payload["overall_status"] == "SUPPORTED"
-    assert payload["workflow"] == "prob-cli"
-    assert any(check["slug"] == "workflow" for check in payload["checks"])
+    assert result.stdout.strip() == "False"
