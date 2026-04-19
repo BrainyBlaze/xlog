@@ -33,35 +33,61 @@
 
 ---
 
+## Supported Platform Contract
+
+Public releases of XLOG are supported on Linux x86_64 with an NVIDIA GPU and CUDA Toolkit 12.x.
+The public setup assumes:
+
+- Linux `x86_64`
+- `nvidia-smi` sees the GPU
+- `nvcc --version` works
+- Rust `rustc` and `cargo` are available
+- Python 3.8 or newer
+- `xlog prob` host-readable output requires `xlog-cli` built with `host-io`
+
+Run the doctor first after cloning:
+
+```bash
+python scripts/xlog_doctor.py
+```
+
 ## Installation
 
-### Requirements
-
-- Linux (x86_64)
-- NVIDIA GPU with compute capability **sm_70+** (Volta or newer)
-- CUDA Toolkit 12.x
-- Rust 1.75+ (for building from source)
-
-### Build from Source
+### Source install
 
 ```bash
 git clone https://github.com/xlog-project/xlog.git
 cd xlog
+python scripts/xlog_doctor.py
 cargo build --release
 
-# If you want host-readable probabilistic CLI output (`xlog prob`)
+# If you need host-readable probabilistic CLI output (`xlog prob`),
 # build the CLI with host I/O enabled.
 cargo build --release -p xlog-cli --features host-io
 ```
 
-The `xlog` CLI binary will be at `target/release/xlog`.
+The release binary is `./target/release/xlog`.
 
-### Python Package
+### GitHub release binary install
+
+Download the Linux x86_64 release archive from GitHub Releases, unpack it, and run the `xlog`
+binary from the extracted directory. Use the source build above if you need to rebuild with
+`host-io` for host-readable probabilistic output.
+
+### PyPI install
 
 ```bash
 cd crates/pyxlog
 pip install maturin
 maturin develop --release
+```
+
+### crates.io install
+
+If you want the CLI crate from crates.io, install it once it is published:
+
+```bash
+cargo install xlog-cli
 ```
 
 ---
@@ -95,7 +121,7 @@ reach(X, Z) :- reach(X, Y), edge(Y, Z).
 
 ```bash
 # Run the program
-xlog run reachability.xlog
+./target/release/xlog run reachability.xlog
 
 # Output:
 # reach(1, N):
@@ -699,7 +725,7 @@ cargo test -p xlog-cuda-tests --test certification_suite --release
 
 ```bash
 # Using the CLI
-cargo run -p xlog-cli --release -- run examples/xlog/00-basics/01_tc_reachability.xlog
+./target/release/xlog run examples/xlog/00-basics/01_tc_reachability.xlog
 
 # Using the example runner (with more options)
 cargo run -p xlog-logic --release --example xlog_run -- \
