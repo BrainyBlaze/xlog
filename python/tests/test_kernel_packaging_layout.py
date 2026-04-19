@@ -214,3 +214,114 @@ def test_package_cli_release_stages_layout_and_tarball() -> None:
         assert "xlog-v9.9.9-x86_64-unknown-linux-gnu/xlog" in names
         assert "xlog-v9.9.9-x86_64-unknown-linux-gnu/kernels/join.portable.ptx" in names
         assert "xlog-v9.9.9-x86_64-unknown-linux-gnu/kernels/join.sm_75.cubin" in names
+
+
+def test_package_cli_release_default_kernel_discovery_uses_dep_info() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_root = Path(tmp)
+        target_dir = tmp_root / "target"
+        release_dir = target_dir / "release"
+        deps_dir = release_dir / "deps"
+        good_out_dir = release_dir / "build" / "xlog-cuda-good" / "out"
+        unrelated_out_dir = release_dir / "build" / "unrelated-crate" / "out"
+        binary_path = release_dir / "xlog"
+        output_dir = tmp_root / "dist"
+
+        deps_dir.mkdir(parents=True)
+        good_out_dir.mkdir(parents=True)
+        unrelated_out_dir.mkdir(parents=True)
+        binary_path.write_text("#!/usr/bin/env bash\nexit 0\n")
+        binary_path.chmod(0o755)
+
+        (good_out_dir / "join.portable.ptx").write_text("good-ptx")
+        (good_out_dir / "join.sm_75.cubin").write_text("good-cubin")
+        (unrelated_out_dir / "join.portable.ptx").write_text("wrong-ptx")
+        (unrelated_out_dir / "join.sm_75.cubin").write_text("wrong-cubin")
+
+        dep_info = deps_dir / "xlog_cuda-test.d"
+        dep_info.write_text(
+            "\n".join(
+                [
+                    f"{binary_path}: crates/xlog-cli/src/main.rs",
+                    "",
+                    f"# env-dep:OUT_DIR={good_out_dir}",
+                ]
+            )
+        )
+
+        env = os.environ.copy()
+        env.update(
+            {
+                "XLOG_PACKAGE_SKIP_BUILD": "1",
+                "XLOG_PACKAGE_TARGET_DIR": str(target_dir),
+                "XLOG_PACKAGE_BINARY_PATH": str(binary_path),
+                "XLOG_PACKAGE_VERSION": "9.9.9",
+                "XLOG_PACKAGE_HOST_TRIPLE": "x86_64-unknown-linux-gnu",
+            }
+        )
+
+        result = subprocess.run(
+            ["bash", "scripts/package_cli_release.sh", "--output", str(output_dir)],
+            cwd=ROOT,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0, result.stderr or result.stdout
+
+        bundle_root = output_dir / "xlog-v9.9.9-x86_64-unknown-linux-gnu"
+        assert (bundle_root / "kernels" / "join.portable.ptx").read_text() == "good-ptx"
+        assert (bundle_root / "kernels" / "join.sm_75.cubin").read_text() == "good-cubin"
+
+
+def test_package_cli_release_default_kernel_discovery_rejects_ambiguous_dep_info() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_root = Path(tmp)
+        target_dir = tmp_root / "target"
+        release_dir = target_dir / "release"
+        deps_dir = release_dir / "deps"
+        first_out_dir = release_dir / "build" / "xlog-cuda-one" / "out"
+        second_out_dir = release_dir / "build" / "xlog-cuda-two" / "out"
+        binary_path = release_dir / "xlog"
+        output_dir = tmp_root / "dist"
+
+        deps_dir.mkdir(parents=True)
+        first_out_dir.mkdir(parents=True)
+        second_out_dir.mkdir(parents=True)
+        binary_path.write_text("#!/usr/bin/env bash\nexit 0\n")
+        binary_path.chmod(0o755)
+
+        (first_out_dir / "join.portable.ptx").write_text("one-ptx")
+        (second_out_dir / "join.portable.ptx").write_text("two-ptx")
+
+        (deps_dir / "xlog_cuda-one.d").write_text(
+            f"{binary_path}: crates/xlog-cli/src/main.rs\n\n# env-dep:OUT_DIR={first_out_dir}\n"
+        )
+        (deps_dir / "xlog_cuda-two.d").write_text(
+            f"{binary_path}: crates/xlog-cli/src/main.rs\n\n# env-dep:OUT_DIR={second_out_dir}\n"
+        )
+
+        env = os.environ.copy()
+        env.update(
+            {
+                "XLOG_PACKAGE_SKIP_BUILD": "1",
+                "XLOG_PACKAGE_TARGET_DIR": str(target_dir),
+                "XLOG_PACKAGE_BINARY_PATH": str(binary_path),
+                "XLOG_PACKAGE_VERSION": "9.9.9",
+                "XLOG_PACKAGE_HOST_TRIPLE": "x86_64-unknown-linux-gnu",
+            }
+        )
+
+        result = subprocess.run(
+            ["bash", "scripts/package_cli_release.sh", "--output", str(output_dir)],
+            cwd=ROOT,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode != 0
+        assert "multiple xlog-cuda OUT_DIR values found in release dep-info" in result.stderr

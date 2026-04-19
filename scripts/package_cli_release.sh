@@ -81,6 +81,94 @@ resolve_binary_path() {
   printf '%s\n' "$target_dir/release/xlog"
 }
 
+build_release_and_capture_kernel_out_dir() {
+  cargo build -p xlog-cli --release --bin xlog --message-format=json-render-diagnostics \
+    | python3 -c '
+import json
+import sys
+
+kernel_out_dir = None
+
+for raw_line in sys.stdin:
+    line = raw_line.rstrip("\n")
+    if not line:
+        continue
+    try:
+        message = json.loads(line)
+    except json.JSONDecodeError:
+        print(line, file=sys.stderr)
+        continue
+
+    rendered = message.get("message", {}).get("rendered")
+    if rendered:
+        print(rendered, end="", file=sys.stderr)
+
+    if message.get("reason") != "build-script-executed":
+        continue
+
+    package_id = message.get("package_id", "")
+    out_dir = message.get("out_dir")
+    if "xlog-cuda" in package_id and out_dir and kernel_out_dir is None:
+        kernel_out_dir = out_dir
+
+if not kernel_out_dir:
+    print("unable to capture xlog-cuda OUT_DIR from cargo build output", file=sys.stderr)
+    sys.exit(1)
+
+print(kernel_out_dir)
+'
+}
+
+resolve_kernel_out_dir_from_dep_info() {
+  local target_dir="$1"
+
+  python3 - "$target_dir" <<'PY'
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+
+target_dir = Path(sys.argv[1]).resolve()
+deps_dir = target_dir / "release" / "deps"
+if not deps_dir.is_dir():
+    print(f"release deps directory not found: {deps_dir}", file=sys.stderr)
+    sys.exit(1)
+
+matches: list[str] = []
+for dep_info in sorted(deps_dir.glob("xlog_cuda-*.d")):
+    for line in dep_info.read_text(encoding="utf-8", errors="replace").splitlines():
+        marker = "# env-dep:OUT_DIR="
+        if not line.startswith(marker):
+            continue
+
+        candidate = Path(line[len(marker) :])
+        if candidate.is_dir() and any(candidate.glob("*.portable.ptx")):
+            matches.append(str(candidate))
+        break
+
+unique_matches = sorted(dict.fromkeys(matches))
+if not unique_matches:
+    print(
+        f"unable to locate xlog-cuda OUT_DIR from dep-info under {deps_dir}",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+if len(unique_matches) > 1:
+    print(
+        "multiple xlog-cuda OUT_DIR values found in release dep-info; "
+        "set XLOG_PACKAGE_KERNEL_OUT_DIR explicitly or rebuild from a clean target directory",
+        file=sys.stderr,
+    )
+    for match in unique_matches:
+        print(f"  - {match}", file=sys.stderr)
+    sys.exit(1)
+
+print(unique_matches[0])
+PY
+}
+
 resolve_kernel_out_dir() {
   local target_dir="$1"
   if [[ -n "${XLOG_PACKAGE_KERNEL_OUT_DIR:-}" ]]; then
@@ -88,25 +176,7 @@ resolve_kernel_out_dir() {
     return
   fi
 
-  local build_root="$target_dir/release/build"
-  if [[ ! -d "$build_root" ]]; then
-    echo "release build root not found: $build_root" >&2
-    exit 1
-  fi
-
-  local found
-  found="$(
-    find "$build_root" -type f -name '*.portable.ptx' -printf '%T@ %h\n' \
-      | sort -nr \
-      | head -n1 \
-      | cut -d' ' -f2-
-  )"
-  if [[ -z "$found" ]]; then
-    echo "unable to locate xlog-cuda OUT_DIR under $build_root" >&2
-    exit 1
-  fi
-
-  printf '%s\n' "$found"
+  resolve_kernel_out_dir_from_dep_info "$target_dir"
 }
 
 cd "$repo_root"
@@ -123,11 +193,13 @@ rm -rf "$stage_root"
 rm -f "$tarball_path"
 
 if [[ "${XLOG_PACKAGE_SKIP_BUILD:-0}" != "1" ]]; then
-  cargo build -p xlog-cli --release --bin xlog
+  kernel_out_dir="$(build_release_and_capture_kernel_out_dir)"
 fi
 
 binary_path="$(resolve_binary_path "$target_dir")"
-kernel_out_dir="$(resolve_kernel_out_dir "$target_dir")"
+if [[ -z "${kernel_out_dir:-}" ]]; then
+  kernel_out_dir="$(resolve_kernel_out_dir "$target_dir")"
+fi
 
 if [[ ! -f "$binary_path" ]]; then
   echo "release binary not found: $binary_path" >&2
