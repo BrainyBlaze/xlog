@@ -3,6 +3,7 @@ name: ci
 # Local validation:
 #   make lint-workflows  # actionlint + shellcheck for workflow YAML and embedded bash
 #   make lint-shell      # shellcheck for repo shell scripts
+#   make check-tracked-ignored  # tracked files must not match .gitignore
 
 on:
   pull_request:
@@ -60,6 +61,23 @@ jobs:
           fi
           printf '%s\n' "${files[@]}"
           shellcheck "${files[@]}"
+
+  git-hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate tracked files are not ignored
+        shell: bash
+        run: |
+          set -euo pipefail
+          files=$(git ls-files -ci --exclude-standard)
+          if [[ -n "$files" ]]; then
+            echo "Tracked files must not match .gitignore rules:"
+            printf '%s\n' "$files"
+            exit 1
+          fi
+          echo "No tracked files match .gitignore rules."
 
   fmt:
     runs-on: ubuntu-latest

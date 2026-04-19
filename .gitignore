@@ -44,6 +44,14 @@ crates/pyxlog/dist/
 data/
 *.pt
 
+# Committed evidence and example artifacts must stay visible to git-based release tooling.
+!docs/evidence/**/*.log
+!examples/neural/baseline/deepproblog/**/data/
+!examples/neural/baseline/deepproblog/**/data/**
+!examples/neural/baseline/results/**/*.log
+!examples/neural/results/**/*.log
+!examples/neural/results/**/*.pt
+
 .docs/
 
 # Fuzz testing artifacts

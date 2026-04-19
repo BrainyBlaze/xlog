@@ -2,7 +2,7 @@ ACTIONLINT ?= actionlint
 SHELLCHECK ?= shellcheck
 PACKAGE_OUTPUT ?= dist
 
-.PHONY: doctor build build-host-io check package validate-release-local lint-workflows lint-shell
+.PHONY: doctor build build-host-io check package validate-release-local lint-workflows lint-shell check-tracked-ignored
 
 doctor:
 	python scripts/xlog_doctor.py
@@ -21,6 +21,17 @@ lint-shell:
 	fi; \
 	printf "%s\n" "$$files"; \
 	$(SHELLCHECK) $$files'
+
+check-tracked-ignored:
+	@bash -lc 'set -euo pipefail; \
+	files=$$(git ls-files -ci --exclude-standard); \
+	if [ -z "$$files" ]; then \
+		echo "No tracked files match .gitignore rules."; \
+		exit 0; \
+	fi; \
+	echo "Tracked files must not match .gitignore rules:"; \
+	printf "%s\n" "$$files"; \
+	exit 1'
 
 build:
 	cargo build --release
