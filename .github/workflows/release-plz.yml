@@ -103,6 +103,9 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Trust checkout path for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
