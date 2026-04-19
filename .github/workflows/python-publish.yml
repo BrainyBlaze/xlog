@@ -22,6 +22,9 @@ env:
 jobs:
   build-wheel:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
