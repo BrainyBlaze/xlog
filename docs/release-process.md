@@ -42,8 +42,10 @@ Internal only (`publish = false`):
 - `xlog-cuda-tests`
 
 `release-plz` manages only the public crates above. GitHub tags and GitHub releases are emitted for
-`xlog-cli` only, using plain repository tags such as `v0.5.1`. The library crates are published to
-crates.io as part of the same release wave, but they do not each create their own GitHub release.
+`xlog-cli` only, using package-qualified tags such as `xlog-cli-v0.5.1`. This avoids collisions
+with legacy repository-wide tags that are not tied to a published crates.io release. The library
+crates are published to crates.io as part of the same release wave, but they do not each create
+their own GitHub release.
 
 ## Required Repository Configuration
 
