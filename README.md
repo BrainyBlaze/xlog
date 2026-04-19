@@ -630,8 +630,8 @@ Four production-grade multi-module applications demonstrating all v0.3.2 feature
 
 **Run a showcase example:**
 ```bash
-cargo run -p xlog-logic --release --example xlog_run -- \
-    examples/xlog/80-v032-showcase/01-enterprise/main.xlog
+cargo run -p xlog-cli --release --features host-io -- \
+    run examples/xlog/80-v032-showcase/01-enterprise/main.xlog
 ```
 
 ---
@@ -743,10 +743,9 @@ cargo test -p xlog-cuda-tests --test certification_suite --release
 # Using the CLI
 ./target/release/xlog run examples/xlog/00-basics/01_tc_reachability.xlog
 
-# Using the example runner (with more options)
-cargo run -p xlog-logic --release --example xlog_run -- \
-    examples/xlog/00-basics/01_tc_reachability.xlog \
-    --device 0 --memory-mb 1024 --limit 100
+# Build and run the public CLI from source
+cargo run -p xlog-cli --release --features host-io -- \
+    run examples/xlog/00-basics/01_tc_reachability.xlog
 
 # Full example harness (ci/dev/release modes)
 python scripts/validate_examples.py --mode ci

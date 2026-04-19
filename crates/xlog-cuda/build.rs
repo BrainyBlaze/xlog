@@ -27,17 +27,36 @@ fn find_nvcc() -> PathBuf {
     }
 }
 
+fn find_kernel_sources(manifest_dir: &Path) -> PathBuf {
+    let packaged_dir = manifest_dir.join("kernels");
+    if packaged_dir.is_dir() {
+        return packaged_dir;
+    }
+
+    let workspace_dir = manifest_dir
+        .parent()
+        .expect("crate directory must have a parent (workspace crates/)")
+        .parent()
+        .expect("workspace crates/ directory must have a parent (workspace root)")
+        .join("kernels");
+    if workspace_dir.is_dir() {
+        return workspace_dir;
+    }
+
+    panic!(
+        "CUDA kernel sources not found. Expected either {} or {}",
+        packaged_dir.display(),
+        workspace_dir.display()
+    );
+}
+
 fn main() {
     let nvcc = find_nvcc();
 
     let manifest_dir =
         env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR must be set by cargo");
-    let kernels_dir = Path::new(&manifest_dir)
-        .parent()
-        .expect("crate directory must have a parent (workspace root)")
-        .parent()
-        .expect("workspace root must have a parent")
-        .join("kernels");
+    let manifest_dir = PathBuf::from(manifest_dir);
+    let kernels_dir = find_kernel_sources(&manifest_dir);
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR must be set by cargo"));
 
     // Environment knobs.

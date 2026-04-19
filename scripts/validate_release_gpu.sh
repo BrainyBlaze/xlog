@@ -90,6 +90,7 @@ mkdir -p "$wheel_dir" "$bundle_dir"
 cd "$repo_root"
 
 run_cmd python3 scripts/xlog_doctor.py --workflow release
+run_cmd bash scripts/preflight_release_publish.sh
 run_cmd cargo build --workspace --locked --release --exclude pyxlog
 run_cmd cargo build --locked --release -p xlog-cli --features host-io
 run_cmd bash scripts/stage_pyxlog_kernels.sh

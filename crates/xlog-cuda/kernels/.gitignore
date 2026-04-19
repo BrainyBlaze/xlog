@@ -1,0 +1,5 @@
+build/
+*.ptx
+*.cubin
+# PTX and cubin artifacts are generated at build time and staged into release
+# bundles and wheels from OUT_DIR; they are not tracked source files.

@@ -15,5 +15,4 @@ xlog-cuda.workspace = true
 xlog-stats.workspace = true
 
 [dev-dependencies]
-xlog-logic.workspace = true
 bytemuck = "1.14"

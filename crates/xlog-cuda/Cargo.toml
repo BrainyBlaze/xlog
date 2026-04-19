@@ -6,6 +6,16 @@ license.workspace = true
 repository.workspace = true
 description = "CUDA kernel provider, buffers, and interop for XLOG"
 readme = "../../README.md"
+include = [
+    "src/**",
+    "tests/**",
+    "kernels/**",
+    "examples/**",
+    "build.rs",
+    "../../README.md",
+    "../../LICENSE-APACHE",
+    "../../LICENSE-MIT",
+]
 
 [dependencies]
 xlog-core.workspace = true

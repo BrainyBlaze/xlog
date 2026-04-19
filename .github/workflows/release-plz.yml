@@ -132,6 +132,10 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
+      - name: Preflight crate publish verification
+        if: github.event_name == 'workflow_dispatch'
+        run: bash scripts/preflight_release_publish.sh
+
       - name: Run release-plz
         id: release
         run: |
