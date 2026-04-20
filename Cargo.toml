@@ -31,7 +31,7 @@ thiserror = "1.0"
 cudarc = { version = "0.19.4", features = ["cuda-13010"] }
 pest = "2.7"
 pest_derive = "2.7"
-pyo3 = { version = "0.21.2" }
+pyo3 = { version = "0.24.1" }
 xlog-cli = { version = "0.5.2", path = "crates/xlog-cli" }
 xlog-core = { version = "0.5.2", path = "crates/xlog-core" }
 xlog-cuda = { version = "0.5.2", path = "crates/xlog-cuda" }
