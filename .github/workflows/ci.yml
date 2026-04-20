@@ -135,9 +135,7 @@ jobs:
           done
 
       - name: Validate README quickstart assumptions
-        env:
-          XLOG_METADATA_BRANCH: ${{ github.head_ref || github.ref_name }}
-        run: python scripts/validate_package_metadata.py --branch "$XLOG_METADATA_BRANCH"
+        run: python scripts/validate_package_metadata.py
 
   clippy-high-signal:
     runs-on: ubuntu-latest

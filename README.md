@@ -1,9 +1,9 @@
 # XLOG
 
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v0.5.0-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.5.1-blue.svg)](CHANGELOG.md)
 
-> **Release status:** `v0.5.0` — GPU-resident ILP credit/loss path (zero D2H), P2a term embeddings
+> **Release status:** `v0.5.1` — GPU-resident ILP credit/loss path (zero D2H), P2a term embeddings
 > (`register_embedding` / `forward_embedding` with device-aware autograd), P2b extended training
 > controls (gradient clipping, early stopping, lr management), P3 incremental verifier
 > (`GpuCdclWorkspace` arena reuse). See `docs/ROADMAP.md` and `CHANGELOG.md`.
