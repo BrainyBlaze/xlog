@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import argparse
 import re
+import sys
 from pathlib import Path
+
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from scripts.release_version_support import README_BADGE_VERSION_RE
 
 
 def workspace_version(cargo_text: str) -> str:
@@ -19,8 +25,7 @@ def workspace_version(cargo_text: str) -> str:
 
 
 def sync_readme_version(readme: str, version: str) -> str:
-    updated, badge_count = re.subn(
-        r"version-v([0-9][^\-]*)-blue\.svg",
+    updated, badge_count = README_BADGE_VERSION_RE.subn(
         f"version-v{version}-blue.svg",
         readme,
         count=1,

@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
+import sys
 from pathlib import Path
+
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from scripts.release_version_support import README_BADGE_VERSION_RE
 
 REQUIRED_SNIPPETS = (
     "python scripts/xlog_doctor.py",
@@ -21,7 +26,6 @@ def validate_package_metadata(
     readme: str,
     workspace_version: str,
     metadata: dict,
-    branch_name: str | None = None,
 ) -> list[str]:
     errors: list[str] = []
     readme_plain = readme.replace("**", "")
@@ -31,7 +35,7 @@ def validate_package_metadata(
         errors.append("README quickstart is missing required snippets:")
         errors.extend(f"  - {snippet}" for snippet in missing)
 
-    badge_match = re.search(r"version-v([0-9][^\-]*)-blue\.svg", readme)
+    badge_match = README_BADGE_VERSION_RE.search(readme)
     if not badge_match:
         errors.append("Could not find README version badge.")
     elif badge_match.group(1) != workspace_version:
@@ -75,7 +79,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--readme", default="README.md")
     parser.add_argument("--cargo", default="Cargo.toml")
     parser.add_argument("--metadata", default="cargo-metadata.json")
-    parser.add_argument("--branch", default=None)
     return parser.parse_args(argv)
 
 
@@ -92,9 +95,6 @@ def _workspace_version(cargo_text: str) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    branch_name = (
-        args.branch or os.environ.get("GITHUB_HEAD_REF") or os.environ.get("GITHUB_REF_NAME")
-    )
 
     readme = Path(args.readme).read_text(encoding="utf-8")
     cargo_text = Path(args.cargo).read_text(encoding="utf-8")
@@ -105,7 +105,6 @@ def main(argv: list[str] | None = None) -> int:
         readme=readme,
         workspace_version=workspace_version,
         metadata=metadata,
-        branch_name=branch_name,
     )
     if errors:
         print("\n".join(errors))
