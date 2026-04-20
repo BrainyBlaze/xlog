@@ -82,7 +82,7 @@ jobs:
 
       - name: Build wheel
         run: |
-          maturin build -m crates/pyxlog/Cargo.toml --release --compatibility linux --out dist -i "$PYTHON_BIN"
+          maturin build -m crates/pyxlog/Cargo.toml --release --compatibility pypi --out dist -i "$PYTHON_BIN"
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v7

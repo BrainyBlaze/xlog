@@ -282,4 +282,4 @@ jobs:
         run: python3 -m pip install --upgrade pip maturin
 
       - name: Build pyxlog wheel without GPU execution
-        run: maturin build -m crates/pyxlog/Cargo.toml --release --compatibility linux --out dist
+        run: maturin build -m crates/pyxlog/Cargo.toml --release --compatibility pypi --out dist
