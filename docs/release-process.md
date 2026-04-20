@@ -99,6 +99,10 @@ gh secret set RELEASE_PLZ_GITHUB_TOKEN -R BrainyBlaze/xlog
 - before the manual publish step, runs `scripts/preflight_release_publish.sh`, which currently
   exercises `cargo publish --dry-run -p xlog-cuda --allow-dirty` as the earliest package-level
   release sanity check
+- on normal `push` runs, it is expected for the publish-only gates inside the job to be skipped:
+  `Require explicit GPU gate acknowledgement`, `Require publish secrets`, and
+  `Preflight crate publish verification` are guarded by `github.event_name == 'workflow_dispatch'`
+  and therefore do not run during `release-pr` mode
 
 `.github/workflows/python-publish.yml`:
 
@@ -114,6 +118,29 @@ gh secret set RELEASE_PLZ_GITHUB_TOKEN -R BrainyBlaze/xlog
 - writes `SHA256SUMS`
 - uploads the archive and checksums to the matching GitHub release
 - can also be rerun manually with `workflow_dispatch` by supplying an existing `xlog-cli` tag
+
+## Expected Skipped Jobs
+
+On a normal `push` to `main`, `release-plz.yml` runs in `release-pr` mode. That mode opens or
+updates the release PR, but it does not publish crates or create a new `xlog-cli` GitHub release
+tag in that same run.
+
+Because of that, these downstream jobs are expected to show as `skipped` on many successful
+`main` push runs:
+
+- `python-publish`
+- `github-release-assets`
+
+They are gated by:
+
+```yaml
+if: needs.release-plz.outputs.cli_release_created == 'true'
+```
+
+So a skipped result there means `release-plz` did not create a new `xlog-cli` release in that run.
+It does not mean publication failed. Those jobs run only when a publish actually happened and
+`cli_release_created=true`, which normally occurs in the manual `workflow_dispatch` publish flow or
+when the same workflow invocation actually emits the new CLI release.
 
 ## Human Release Gate
 
