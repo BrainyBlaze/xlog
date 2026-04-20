@@ -35,7 +35,7 @@ def _metadata(bin_names: tuple[str, ...] = ("xlog",)) -> dict:
     }
 
 
-def test_release_plz_branch_allows_readme_to_describe_latest_release() -> None:
+def test_release_plz_branch_requires_readme_version_to_match_workspace() -> None:
     errors = validator.validate_package_metadata(
         readme=_readme("0.5.0"),
         workspace_version="0.5.1",
@@ -43,7 +43,14 @@ def test_release_plz_branch_allows_readme_to_describe_latest_release() -> None:
         branch_name="release-plz-2026-04-20T00-23-02Z",
     )
 
-    assert errors == []
+    assert (
+        "README version badge (0.5.0) does not match workspace version (0.5.1)."
+        in errors
+    )
+    assert (
+        "README release status (0.5.0) does not match workspace version (0.5.1)."
+        in errors
+    )
 
 
 def test_main_branch_requires_readme_version_to_match_workspace() -> None:

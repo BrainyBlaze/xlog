@@ -16,10 +16,6 @@ REQUIRED_SNIPPETS = (
 )
 
 
-def _is_release_plz_branch(branch_name: str | None) -> bool:
-    return bool(branch_name) and branch_name.startswith("release-plz-")
-
-
 def validate_package_metadata(
     *,
     readme: str,
@@ -35,22 +31,21 @@ def validate_package_metadata(
         errors.append("README quickstart is missing required snippets:")
         errors.extend(f"  - {snippet}" for snippet in missing)
 
-    if not _is_release_plz_branch(branch_name):
-        badge_match = re.search(r"version-v([0-9][^\-]*)-blue\.svg", readme)
-        if not badge_match:
-            errors.append("Could not find README version badge.")
-        elif badge_match.group(1) != workspace_version:
-            errors.append(
-                f"README version badge ({badge_match.group(1)}) does not match workspace version ({workspace_version})."
-            )
+    badge_match = re.search(r"version-v([0-9][^\-]*)-blue\.svg", readme)
+    if not badge_match:
+        errors.append("Could not find README version badge.")
+    elif badge_match.group(1) != workspace_version:
+        errors.append(
+            f"README version badge ({badge_match.group(1)}) does not match workspace version ({workspace_version})."
+        )
 
-        status_match = re.search(r"Release status:\s*`v([^`]+)`", readme_plain)
-        if not status_match:
-            errors.append("Could not find README release status line.")
-        elif status_match.group(1) != workspace_version:
-            errors.append(
-                f"README release status ({status_match.group(1)}) does not match workspace version ({workspace_version})."
-            )
+    status_match = re.search(r"Release status:\s*`v([^`]+)`", readme_plain)
+    if not status_match:
+        errors.append("Could not find README release status line.")
+    elif status_match.group(1) != workspace_version:
+        errors.append(
+            f"README release status ({status_match.group(1)}) does not match workspace version ({workspace_version})."
+        )
 
     xlog_cli = next(
         (
