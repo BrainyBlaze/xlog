@@ -226,12 +226,8 @@ jobs:
               continue
             fi
 
-            workspace_version=$(python3 - <<'PY'
-            from pathlib import Path
-            from scripts.sync_readme_release_version import workspace_version
-
-            print(workspace_version(Path("Cargo.toml").read_text(encoding="utf-8")))
-            PY
+            workspace_version=$(
+              python3 -c 'from pathlib import Path; from scripts.sync_readme_release_version import workspace_version; print(workspace_version(Path("Cargo.toml").read_text(encoding="utf-8")))'
             )
 
             git add README.md
