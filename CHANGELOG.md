@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
-## [0.5.2](https://github.com/BrainyBlaze/xlog/compare/xlog-core-v0.5.0...xlog-core-v0.5.2) — 2026-04-20
+## [0.5.2](https://github.com/BrainyBlaze/xlog/compare/xlog-cli-v0.5.0...xlog-cli-v0.5.2) — 2026-04-20
 
 ### Fixed
 
