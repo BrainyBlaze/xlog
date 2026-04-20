@@ -128,3 +128,24 @@ use graph_lib.
 The resolver merges the two files before stratification, so the library's recursive \texttt{reach} rules participate in exactly the same SCC analysis and GPU semi-naive evaluation as if they had been written inline.
 
 \subsection{Aggregations and Constraints}\label{sec:lang:agg}
+
+xlog supports stratified aggregation and integrity constraints. Aggregation operators---\texttt{count}, \texttt{sum}, \texttt{min}, \texttt{max}, and \texttt{logsumexp}---appear at head positions of rules, with an explicit aggregation variable. The stratifier rejects any program in which an aggregation participates in a recursive SCC, guaranteeing a well-defined fixpoint order. Aggregations lower to \texttt{GroupBy} RIR nodes, executed on the GPU as radix-sort-and-reduce kernels in \texttt{xlog-cuda}.
+
+Integrity constraints are headless rules: \texttt{:- body.} denotes a program-level assertion that \texttt{body} must be unsatisfiable after evaluation reaches fixpoint. A satisfied constraint is silent; a violated constraint raises a diagnostic. Constraints compose cleanly with stratification---they evaluate after the strata their body predicates inhabit.
+
+A graph-degree computation with an integrity check that every edge source has a degree record:
+
+\begin{lstlisting}[style=xlogstyle]
+pred edge(u32, u32).
+pred degree(u32, u32).
+
+edge(1, 2). edge(1, 3). edge(1, 4). edge(2, 3).
+
+degree(X, count(Y)) :- edge(X, Y).
+
+:- edge(X, _), not degree(X, _).
+
+?- degree(X, N).
+\end{lstlisting}
+
+The \texttt{degree} rule lowers to a \texttt{GroupBy} over \texttt{edge} with \texttt{count} as the aggregator; the integrity constraint lowers to an \texttt{Anti}-join whose output must be empty at evaluation completion. \texttt{logsumexp} is included explicitly because it is the workhorse aggregation for probabilistic circuits (\Cref{sec:prob}), where log-space numerical stability is essential.
