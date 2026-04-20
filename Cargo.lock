@@ -1451,7 +1451,7 @@ dependencies = [
 
 [[package]]
 name = "pyxlog"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "cudarc",
  "pyo3",
@@ -2332,7 +2332,7 @@ dependencies = [
 
 [[package]]
 name = "xlog-cli"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "arrow",
  "assert_cmd",
@@ -2348,7 +2348,7 @@ dependencies = [
 
 [[package]]
 name = "xlog-core"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "arrow",
  "serial_test",
@@ -2357,7 +2357,7 @@ dependencies = [
 
 [[package]]
 name = "xlog-cuda"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "arrow",
  "bytemuck",
@@ -2382,7 +2382,7 @@ dependencies = [
 
 [[package]]
 name = "xlog-gpu"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "criterion",
  "serial_test",
@@ -2395,7 +2395,7 @@ dependencies = [
 
 [[package]]
 name = "xlog-induce"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "xlog-core",
  "xlog-cuda",
@@ -2417,14 +2417,14 @@ dependencies = [
 
 [[package]]
 name = "xlog-ir"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "xlog-core",
 ]
 
 [[package]]
 name = "xlog-logic"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "pest",
  "pest_derive",
@@ -2437,7 +2437,7 @@ dependencies = [
 
 [[package]]
 name = "xlog-neural"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "lru",
  "pyo3",
@@ -2447,7 +2447,7 @@ dependencies = [
 
 [[package]]
 name = "xlog-prob"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "bytemuck",
  "criterion",
@@ -2462,7 +2462,7 @@ dependencies = [
 
 [[package]]
 name = "xlog-runtime"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "bytemuck",
  "cudarc",
@@ -2474,7 +2474,7 @@ dependencies = [
 
 [[package]]
 name = "xlog-solve"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "criterion",
  "cudarc",
@@ -2484,7 +2484,7 @@ dependencies = [
 
 [[package]]
 name = "xlog-stats"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "criterion",
  "xlog-core",
