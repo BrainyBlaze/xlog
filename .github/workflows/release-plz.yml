@@ -51,7 +51,8 @@ jobs:
         run: |
           set -euo pipefail
           if [[ -z "$RELEASE_PLZ_GITHUB_TOKEN" ]]; then
-            echo "RELEASE_PLZ_GITHUB_TOKEN is required on BrainyBlaze/xlog because the organization blocks GitHub Actions from creating pull requests with github.token." >&2
+            echo "RELEASE_PLZ_GITHUB_TOKEN is required on BrainyBlaze/xlog because release-plz must create release-plz-* branches that trigger downstream workflows." >&2
+            echo "Use a GitHub App token or a PAT with contents:write and pull-requests:write on ${GITHUB_REPOSITORY}." >&2
             exit 1
           fi
 
@@ -108,7 +109,7 @@ jobs:
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        run: bash scripts/install_rust_toolchain.sh --toolchain stable
 
       - name: Show CUDA toolkit
         run: nvcc --version
@@ -132,6 +133,18 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Verify release-plz token can create refs
+        run: |
+          set -euo pipefail
+          remote_url="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          probe_ref="refs/heads/release-plz-token-probe-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          if ! git push --dry-run "$remote_url" HEAD:"$probe_ref" >/tmp/release-plz-token-probe.log 2>&1; then
+            cat /tmp/release-plz-token-probe.log >&2
+            echo "RELEASE_PLZ_GITHUB_TOKEN cannot create release-plz refs for ${GITHUB_REPOSITORY}." >&2
+            echo "Replace it with a GitHub App token or a PAT that has contents:write and pull-requests:write." >&2
+            exit 1
+          fi
 
       - name: Preflight crate publish verification
         if: github.event_name == 'workflow_dispatch'

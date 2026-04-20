@@ -48,7 +48,7 @@ jobs:
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        run: bash scripts/install_rust_toolchain.sh --toolchain stable
 
       - name: Show CUDA toolkit
         run: nvcc --version

@@ -68,7 +68,7 @@ jobs:
           echo "PYTHON_BIN=$(command -v "$python_pkg")" >> "$GITHUB_ENV"
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        run: bash scripts/install_rust_toolchain.sh --toolchain stable
 
       - name: Show CUDA toolkit
         run: nvcc --version
@@ -114,7 +114,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        run: bash scripts/install_rust_toolchain.sh --toolchain stable
 
       - name: Install maturin
         run: python3 -m pip install --upgrade pip maturin
