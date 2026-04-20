@@ -148,4 +148,4 @@ degree(X, count(Y)) :- edge(X, Y).
 ?- degree(X, N).
 \end{lstlisting}
 
-The \texttt{degree} rule lowers to a \texttt{GroupBy} over \texttt{edge} with \texttt{count} as the aggregator; the integrity constraint lowers to an \texttt{Anti}-join whose output must be empty at evaluation completion. \texttt{logsumexp} is included explicitly because it is the workhorse aggregation for probabilistic circuits (\Cref{sec:prob}), where log-space numerical stability is essential.
+The \texttt{degree} rule lowers to a \texttt{GroupBy} over \texttt{edge} with \texttt{count} as the aggregator. The integrity constraint is desugared into an auxiliary rule whose body mirrors the constraint body (so the \texttt{not degree(X, \_)} literal here contributes an \texttt{Anti}-join); at evaluation completion the runtime asserts the auxiliary relation is empty and raises a diagnostic otherwise. \texttt{logsumexp} is included explicitly because it is the workhorse aggregation for probabilistic circuits (\Cref{sec:prob}), where log-space numerical stability is essential.
