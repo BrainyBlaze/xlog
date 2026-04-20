@@ -135,76 +135,9 @@ jobs:
           done
 
       - name: Validate README quickstart assumptions
-        run: |
-          python - <<'PY'
-          import json
-          import re
-          import sys
-          import tomllib
-          from pathlib import Path
-
-          readme = Path("README.md").read_text(encoding="utf-8")
-          readme_plain = readme.replace("**", "")
-          cargo = tomllib.loads(Path("Cargo.toml").read_text(encoding="utf-8"))
-          metadata = json.loads(Path("cargo-metadata.json").read_text(encoding="utf-8"))
-
-          required_snippets = [
-              "python scripts/xlog_doctor.py",
-              "cargo build --release",
-              "cargo build --release -p xlog-cli --features host-io",
-              "./target/release/xlog",
-          ]
-          missing = [snippet for snippet in required_snippets if snippet not in readme]
-          if missing:
-              print("README quickstart is missing required snippets:")
-              for snippet in missing:
-                  print(f"  - {snippet}")
-              sys.exit(1)
-
-          workspace_version = cargo["workspace"]["package"]["version"]
-          badge_match = re.search(r"version-v([0-9][^\-]*)-blue\.svg", readme)
-          if not badge_match:
-              print("Could not find README version badge.")
-              sys.exit(1)
-          if badge_match.group(1) != workspace_version:
-              print(
-                  f"README version badge ({badge_match.group(1)}) does not match workspace version ({workspace_version})."
-              )
-              sys.exit(1)
-
-          status_match = re.search(r"Release status:\s*`v([^`]+)`", readme_plain)
-          if not status_match:
-              print("Could not find README release status line.")
-              sys.exit(1)
-          if status_match.group(1) != workspace_version:
-              print(
-                  f"README release status ({status_match.group(1)}) does not match workspace version ({workspace_version})."
-              )
-              sys.exit(1)
-
-          xlog_cli = next(
-              (
-                  package
-                  for package in metadata["packages"]
-                  if package["name"] == "xlog-cli" and package.get("source") is None
-              ),
-              None,
-          )
-          if xlog_cli is None:
-              print("cargo metadata did not include the local xlog-cli package.")
-              sys.exit(1)
-
-          bin_targets = {
-              target["name"]
-              for target in xlog_cli["targets"]
-              if "bin" in target["kind"]
-          }
-          if "xlog" not in bin_targets:
-              print(f"xlog-cli binary targets do not include `xlog`: {sorted(bin_targets)}")
-              sys.exit(1)
-
-          print("README quickstart assumptions and workspace package metadata validated.")
-          PY
+        env:
+          XLOG_METADATA_BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: python scripts/validate_package_metadata.py --branch "$XLOG_METADATA_BRANCH"
 
   clippy-high-signal:
     runs-on: ubuntu-latest
