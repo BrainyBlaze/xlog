@@ -17,7 +17,7 @@ doctest = false
 [dependencies]
 pyo3 = { workspace = true, features = ["extension-module", "multiple-pymethods"] }
 cudarc = { workspace = true }
-rand = "0.8"
+rand = "0.9"
 xlog-core.workspace = true
 xlog-cuda.workspace = true
 xlog-gpu.workspace = true
