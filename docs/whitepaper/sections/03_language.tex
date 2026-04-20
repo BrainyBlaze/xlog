@@ -75,6 +75,56 @@ The rule compiles to a self-join of \texttt{point} with an intermediate \texttt{
 
 \subsection{User-Defined Functions}\label{sec:lang:udf}
 
+xlog extends Datalog with user-defined functions (UDFs): named, typed, side-effect-free computations usable inside rule bodies and expressions. A UDF is introduced with the \texttt{func} keyword; parameters carry optional type annotations, and the return type is declared after a \texttt{->}. Bodies are arithmetic expressions (optionally with conditional \texttt{if/then/else}) or, for more involved logic, a predicate-based form \texttt{V :- body.} that binds the return value by unifying with a relation.
+
+UDFs are pure: they take scalar arguments and return scalar values, with no recursion over relations. Calls to UDFs appear wherever arithmetic expressions do, including as the right-hand side of an \texttt{is}-expression. The implementation lives in \texttt{crates/xlog-logic/src/function.rs}. At lowering time, UDF calls become \texttt{Expr::Call} nodes in the RIR; the \texttt{CudaKernelProvider}'s arithmetic module compiles them into GPU expression kernels alongside the language built-ins. Because UDFs are scalar-valued and pure, they participate in the same predicate-pushdown and common-subexpression-elimination passes the optimizer already applies to built-in arithmetic.
+
+Classical Datalog has no analogue: functors are either absent or restricted to uninterpreted term construction. xlog UDFs close this gap while preserving decidability---bodies cannot materialize new relations, so the fixpoint computation remains monotonic over declared predicates.
+
+A UDF for score normalization:
+
+\begin{lstlisting}[style=xlogstyle]
+pred raw_score(u32, f64).
+pred norm_score(u32, f64).
+
+func clamp01(X: f64) -> f64 =
+  if X < 0.0 then 0.0
+  else if X > 1.0 then 1.0
+  else X.
+
+raw_score(1, -0.3). raw_score(2, 0.7). raw_score(3, 1.4).
+
+norm_score(Id, N) :- raw_score(Id, R), N is clamp01(R).
+\end{lstlisting}
+
+The \texttt{clamp01} UDF lowers to a conditional expression embedded in the \texttt{Project} computing \texttt{norm\_score}'s second column; no host dispatch occurs during evaluation.
+
 \subsection{Modules and Imports}\label{sec:lang:modules}
+
+xlog programs decompose into modules. A module is a \texttt{.xlog} file located on the module search path, which the \texttt{xlog} CLI controls via the \texttt{--module-path} flag. The \texttt{use} directive loads a named module (e.g., \texttt{use graph.}) or selectively imports names from it (\texttt{use utils/math::\{abs, clamp\}.}). Module paths use \texttt{/} as a separator and mirror the on-disk directory structure. Declarations and functions carry an optional \texttt{private} modifier to hide them from importers.
+
+Name resolution runs before type inference. The resolver in \texttt{crates/xlog-logic/src/resolver.rs} (469 lines) traverses the import graph, detects cycles, merges symbol tables, and surfaces a single logical program whose remaining compilation stages proceed as if the user had written all rules inline. Imports are transitive; attempts to reach a \texttt{private} name yield a structured \texttt{ModuleError::PrivatePredicate} diagnostic rather than a silent shadowing.
+
+A two-module program where a top-level entry imports a graph-reachability library:
+
+\begin{lstlisting}[style=xlogstyle]
+// library: graph_lib.xlog
+pred edge(u32, u32).
+pred reach(u32, u32).
+
+edge(1, 2). edge(2, 3). edge(3, 4).
+
+reach(X, Y) :- edge(X, Y).
+reach(X, Z) :- reach(X, Y), edge(Y, Z).
+\end{lstlisting}
+
+\begin{lstlisting}[style=xlogstyle]
+// entry: graph_main.xlog
+use graph_lib.
+
+?- reach(1, N).
+\end{lstlisting}
+
+The resolver merges the two files before stratification, so the library's recursive \texttt{reach} rules participate in exactly the same SCC analysis and GPU semi-naive evaluation as if they had been written inline.
 
 \subsection{Aggregations and Constraints}\label{sec:lang:agg}

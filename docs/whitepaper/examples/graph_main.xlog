@@ -1,0 +1,4 @@
+// Import predicates and rules from the `graph_lib` module.
+use graph_lib.
+
+?- reach(1, N).
