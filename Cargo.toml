@@ -23,6 +23,8 @@ version = "0.5.2"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/BrainyBlaze/xlog"
+homepage = "https://github.com/BrainyBlaze/xlog"
+keywords = ["xlog", "datalog", "gpu", "cuda"]
 
 [workspace.dependencies]
 thiserror = "1.0"

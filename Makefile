@@ -10,10 +10,29 @@ doctor:
 # Local workflow validation mirrors .github/workflows/ci.yml:
 # `actionlint` consumes `shellcheck` from PATH to lint embedded bash in workflow `run:` blocks.
 lint-workflows:
-	PATH="$$(dirname "$(SHELLCHECK)"):$$PATH" $(ACTIONLINT) -color
+	@bash -lc 'set -euo pipefail; \
+	if ! command -v "$(ACTIONLINT)" >/dev/null 2>&1; then \
+		echo "actionlint is required for make lint-workflows." >&2; \
+		echo "Install it with the same version CI uses, for example:" >&2; \
+		echo "  ACTIONLINT_VERSION=1.7.7" >&2; \
+		echo "  curl -sSL https://github.com/rhysd/actionlint/releases/download/v\$$ACTIONLINT_VERSION/actionlint_\$$ACTIONLINT_VERSION_linux_amd64.tar.gz | tar -xz actionlint" >&2; \
+		echo "  install actionlint /usr/local/bin/actionlint" >&2; \
+		exit 127; \
+	fi; \
+	if ! command -v "$(SHELLCHECK)" >/dev/null 2>&1; then \
+		echo "shellcheck is required because actionlint validates embedded bash with it." >&2; \
+		echo "Install it with your package manager, for example: sudo apt-get install -y shellcheck" >&2; \
+		exit 127; \
+	fi; \
+	PATH="$$(dirname "$(SHELLCHECK)"):$$PATH" "$(ACTIONLINT)" -color'
 
 lint-shell:
 	@bash -lc 'set -euo pipefail; \
+	if ! command -v "$(SHELLCHECK)" >/dev/null 2>&1; then \
+		echo "shellcheck is required for make lint-shell." >&2; \
+		echo "Install it with your package manager, for example: sudo apt-get install -y shellcheck" >&2; \
+		exit 127; \
+	fi; \
 	files=$$(rg --files scripts .github -g '"'"'*.sh'"'"'); \
 	if [ -z "$$files" ]; then \
 		echo "No shell scripts found."; \

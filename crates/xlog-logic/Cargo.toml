@@ -4,7 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
 description = "Parser, compiler, and optimizer for XLOG logic programs"
+documentation = "https://docs.rs/xlog-logic"
 readme = "../../README.md"
 
 [dependencies]

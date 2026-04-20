@@ -4,7 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
 description = "Runtime executor and relation store for XLOG"
+documentation = "https://docs.rs/xlog-runtime"
 readme = "../../README.md"
 
 [dependencies]

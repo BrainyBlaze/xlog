@@ -4,7 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
 description = "High-level Rust API for running XLOG programs on NVIDIA GPUs"
+documentation = "https://docs.rs/xlog-gpu"
 readme = "../../README.md"
 
 [dependencies]

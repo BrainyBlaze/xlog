@@ -698,7 +698,7 @@ Kernel design note: `docs/plans/2026-04-17-m8-ilp-exact-kernel-design.md`.
 
 ### Planned 📋
 
-- [ ] PyPI package distribution
+- [x] PyPI package distribution
 - [ ] Type stubs for IDE support
 - [ ] Async evaluation API
 - [ ] Memory limit configuration per-call

@@ -107,7 +107,7 @@ impl super::CudaKernelProvider {
         }
 
         if input.is_empty() {
-            return Ok(self.memory.alloc::<u8>(0)?);
+            return self.memory.alloc::<u8>(0);
         }
 
         let col_type = input
@@ -139,7 +139,7 @@ impl super::CudaKernelProvider {
         }
 
         let block_size = 256u32;
-        let num_blocks = (num_rows + block_size - 1) / block_size;
+        let num_blocks = num_rows.div_ceil(block_size);
         let config = LaunchConfig {
             grid_dim: (num_blocks, 1, 1),
             block_dim: (block_size, 1, 1),

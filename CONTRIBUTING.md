@@ -27,6 +27,11 @@ make build
 make build-host-io
 ```
 
+If you want local parity with the workflow/shell lint jobs, install:
+
+- `shellcheck` via your package manager, for example `sudo apt-get install -y shellcheck`
+- `actionlint` from the release binary that CI uses in `.github/workflows/ci.yml`
+
 ## Local Checks
 
 Run the checks that match your change before opening a pull request.

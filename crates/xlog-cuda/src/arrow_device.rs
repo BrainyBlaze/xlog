@@ -53,7 +53,9 @@ unsafe extern "C" fn release_arrow_device_array(ptr: *mut ArrowDeviceArray) {
     }
     if !dev.private_data.is_null() {
         unsafe {
-            drop(Box::from_raw(dev.private_data));
+            drop(Box::from_raw(
+                dev.private_data.cast::<ArrowCudaAllocation>(),
+            ));
         }
     }
     dev.release = None;
@@ -74,6 +76,12 @@ impl ArrowDeviceArrayOwned {
         ptr
     }
 
+    /// Rebuild an owned wrapper from a raw `ArrowDeviceArray` pointer.
+    ///
+    /// # Safety
+    /// `ptr` must be a valid, uniquely owned pointer produced by
+    /// `ArrowDeviceArrayOwned::into_raw` or an equivalent allocation that
+    /// transfers ownership of the underlying `ArrowDeviceArray`.
     pub unsafe fn from_raw(ptr: *mut ArrowDeviceArray) -> Self {
         Self { ptr }
     }

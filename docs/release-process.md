@@ -17,7 +17,7 @@ Public releases currently target:
 - `pyxlog` wheels on PyPI
 - Rust crates on crates.io for the stable public Rust surface
 
-Everything else remains unsupported for the first public release.
+Everything else remains unsupported under the current public release contract.
 
 ## Crate Publish Policy
 
@@ -49,7 +49,7 @@ their own GitHub release.
 
 ## Required Repository Configuration
 
-Before the first public release, configure:
+Keep these repository settings and secrets configured:
 
 - `CARGO_REGISTRY_TOKEN` GitHub Actions secret for crates.io publishing
 - `PYPI_API_TOKEN` GitHub Actions secret for uploading `pyxlog` distributions to PyPI
@@ -97,8 +97,8 @@ gh secret set RELEASE_PLZ_GITHUB_TOKEN -R BrainyBlaze/xlog
 - on manual `workflow_dispatch`, runs `release-plz` in `release` mode after the maintainer confirms
   that real-GPU validation has already passed
 - before the manual publish step, runs `scripts/preflight_release_publish.sh`, which currently
-  exercises `cargo publish --dry-run -p xlog-cuda --allow-dirty` as the earliest package-level
-  release sanity check
+  validates the publishable crate package layouts without requiring crates.io to already know about
+  the new interdependent workspace versions
 - on normal `push` runs, it is expected for the publish-only gates inside the job to be skipped:
   `Require explicit GPU gate acknowledgement`, `Require publish secrets`, and
   `Preflight crate publish verification` are guarded by `github.event_name == 'workflow_dispatch'`

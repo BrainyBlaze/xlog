@@ -4,7 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
 description = "CUDA kernel provider, buffers, and interop for XLOG"
+documentation = "https://docs.rs/xlog-cuda"
 readme = "../../README.md"
 include = [
     "src/**",

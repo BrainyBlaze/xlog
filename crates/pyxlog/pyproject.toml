@@ -20,6 +20,7 @@ classifiers = [
 Homepage = "https://github.com/BrainyBlaze/xlog"
 Repository = "https://github.com/BrainyBlaze/xlog"
 Issues = "https://github.com/BrainyBlaze/xlog/issues"
+Documentation = "https://github.com/BrainyBlaze/xlog/blob/main/docs/architecture/python-bindings.md"
 
 [tool.maturin]
 python-source = "python"

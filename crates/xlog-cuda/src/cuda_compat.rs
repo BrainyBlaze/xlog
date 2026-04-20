@@ -133,7 +133,7 @@ impl<'a, T> IntoKernelParamStorage for &'a CudaSlice<T> {
     }
 }
 
-impl<'a, T> IntoKernelParamStorage for &'a mut CudaSlice<T> {
+impl<T> IntoKernelParamStorage for &mut CudaSlice<T> {
     type Storage = DeviceParamStorage<'static>;
 
     fn into_kernel_param_storage(self) -> Self::Storage {
@@ -177,9 +177,24 @@ impl<'a, 'b, T> IntoKernelParamStorage for &'a mut CudaViewMut<'b, T> {
 
 /// Old cudarc-style launch trait reimplemented on top of CUDA 13-compatible
 /// raw kernel launches.
+///
+/// # Safety
+/// Implementors must preserve CUDA's launch semantics and must not let kernel
+/// parameter storage or referenced device memory expire before the launch is
+/// enqueued on the target stream.
 pub unsafe trait LaunchAsync<Params> {
+    /// Launch a kernel on the function's default stream.
+    ///
+    /// # Safety
+    /// `params` must match the underlying CUDA kernel ABI exactly, and all
+    /// referenced device pointers must stay valid until the launch is enqueued.
     unsafe fn launch(self, cfg: LaunchConfig, params: Params) -> Result<(), DriverError>;
 
+    /// Launch a kernel on an explicit CUDA stream.
+    ///
+    /// # Safety
+    /// The caller must uphold the same ABI and lifetime guarantees as `launch`
+    /// and must ensure `stream` is valid for the target device.
     unsafe fn launch_on_stream(
         self,
         stream: &CudaStream,
@@ -187,6 +202,12 @@ pub unsafe trait LaunchAsync<Params> {
         params: Params,
     ) -> Result<(), DriverError>;
 
+    /// Launch a cooperative kernel.
+    ///
+    /// # Safety
+    /// The caller must uphold the same ABI and lifetime guarantees as `launch`
+    /// and must also ensure the kernel/configuration satisfies CUDA cooperative
+    /// launch requirements.
     unsafe fn launch_cooperative(
         self,
         cfg: LaunchConfig,

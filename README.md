@@ -1,6 +1,6 @@
 # XLOG
 
-[![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](#license)
 [![Version](https://img.shields.io/badge/version-v0.5.2-blue.svg)](CHANGELOG.md)
 
 > **Release status:** `v0.5.2` — GPU-resident ILP credit/loss path (zero D2H), P2a term embeddings
@@ -67,28 +67,35 @@ cargo build --release -p xlog-cli --features host-io
 
 The release binary is `./target/release/xlog`.
 
-### Planned GitHub release binary install
+Published artifacts follow tagged releases and may lag the current `main` branch workspace version shown at the top of this README.
 
-GitHub release archives are not published yet. When they are available, download the Linux x86_64
-archive, unpack it, and run the bundled `xlog` binary from the extracted directory. Public release
-archives are built with `host-io`, so `xlog prob` has host-readable output without a rebuild.
+### GitHub release binary install
 
-### Planned PyPI install
+Download the Linux `x86_64` archive from the GitHub Releases page, unpack it, and run the bundled
+`xlog` binary from the extracted directory. Public release archives are built with `host-io`, so
+`xlog prob` has host-readable output without a rebuild.
 
-The `pyxlog` PyPI package is not published yet. For now, use the local development install below.
-When it is published, the install flow will be:
+### PyPI install
+
+Install the latest published `pyxlog` wheel from PyPI:
 
 ```bash
 pip install pyxlog
 ```
 
-### Planned crates.io install
+For unreleased `main` branch features, use the local development install below instead of expecting
+PyPI to match the current workspace version.
 
-The CLI crate is not published on crates.io yet. When it is, the install flow will be:
+### crates.io install
+
+Install the latest published CLI crate from crates.io:
 
 ```bash
 cargo install xlog-cli --features host-io
 ```
+
+As with the GitHub and PyPI artifacts, published crate versions follow tagged releases and may lag
+the current `main` branch workspace version.
 
 ### Local Python development install
 

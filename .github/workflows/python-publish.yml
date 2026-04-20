@@ -46,7 +46,7 @@ jobs:
             software-properties-common
 
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Install Python
         run: |
@@ -85,7 +85,7 @@ jobs:
           maturin build -m crates/pyxlog/Cargo.toml --release --compatibility pypi --out dist -i "$PYTHON_BIN"
 
       - name: Upload wheel artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: pyxlog-wheel-${{ matrix.python-version }}
           path: dist/*.whl
@@ -111,7 +111,7 @@ jobs:
             python3-pip
 
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Install Rust toolchain
         run: bash scripts/install_rust_toolchain.sh --toolchain stable
@@ -123,7 +123,7 @@ jobs:
         run: maturin sdist -m crates/pyxlog/Cargo.toml --out dist
 
       - name: Upload source distribution
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: pyxlog-sdist
           path: dist/*.tar.gz
@@ -136,7 +136,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download Python distributions
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           pattern: pyxlog-*
           path: dist
@@ -159,7 +159,7 @@ jobs:
         run: gh release upload "${{ inputs.tag_name }}" dist/* --clobber --repo "$GH_REPO"
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
         with:
           packages-dir: dist
           user: __token__

@@ -18,6 +18,14 @@ Cargo feature so GPU-native call sites can enforce a "no DTOH for results" contr
 
 ## Installation
 
+For the latest published release:
+
+```bash
+pip install pyxlog
+```
+
+For unreleased `main` branch features or local development:
+
 ```bash
 cd crates/pyxlog
 pip install maturin
@@ -635,7 +643,7 @@ for batch in data_loader:
 
 Current limitations:
 - Linux x86_64 + CUDA only
-- No PyPI distribution (build from source)
+- Published PyPI wheels follow tagged releases and may lag the current `main` branch workspace version
 - No async evaluation API
 - No per-call memory limit configuration
 

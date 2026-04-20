@@ -4,7 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
 description = "Command-line interface for deterministic and probabilistic XLOG execution"
+documentation = "https://docs.rs/xlog-cli"
 readme = "../../README.md"
 
 [[bin]]

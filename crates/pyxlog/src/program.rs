@@ -751,7 +751,7 @@ impl CompiledProgram {
     pub fn zero_grad(&self, py: Python<'_>) -> PyResult<()> {
         for name in self.network_registry.names() {
             if let Some(handle) = self.network_registry.get(name) {
-                if let Some(ref optimizer) = handle.optimizer() {
+                if let Some(optimizer) = handle.optimizer() {
                     optimizer.call_method0(py, "zero_grad")?;
                 }
             }
@@ -766,7 +766,7 @@ impl CompiledProgram {
     pub fn optimizer_step(&self, py: Python<'_>) -> PyResult<()> {
         for name in self.network_registry.names() {
             if let Some(handle) = self.network_registry.get(name) {
-                if let Some(ref optimizer) = handle.optimizer() {
+                if let Some(optimizer) = handle.optimizer() {
                     optimizer.call_method0(py, "step")?;
                 }
             }
@@ -783,7 +783,7 @@ impl CompiledProgram {
             .getattr("clip_grad_norm_")?;
         for name in self.network_registry.names() {
             if let Some(handle) = self.network_registry.get(name) {
-                if let Some(ref module) = handle.module() {
+                if let Some(module) = handle.module() {
                     let params = module.call_method0(py, "parameters")?;
                     clip_fn.call1((params, max_norm))?;
                 }
@@ -809,14 +809,14 @@ impl CompiledProgram {
                         "No network registered with name '{name}'"
                     ))
                 })?;
-                if let Some(ref scheduler) = handle.scheduler() {
+                if let Some(scheduler) = handle.scheduler() {
                     scheduler.call_method0(py, "step")?;
                 }
             }
             None => {
                 for name in self.network_registry.names() {
                     if let Some(handle) = self.network_registry.get(name) {
-                        if let Some(ref scheduler) = handle.scheduler() {
+                        if let Some(scheduler) = handle.scheduler() {
                             scheduler.call_method0(py, "step")?;
                         }
                     }

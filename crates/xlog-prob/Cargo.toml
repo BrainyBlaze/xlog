@@ -4,7 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
 description = "Probabilistic inference engines for XLOG"
+documentation = "https://docs.rs/xlog-prob"
 readme = "../../README.md"
 
 [dependencies]

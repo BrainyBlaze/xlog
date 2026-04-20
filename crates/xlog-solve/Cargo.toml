@@ -4,7 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
 description = "Solver services used by XLOG exact inference and verification layers"
+documentation = "https://docs.rs/xlog-solve"
 readme = "../../README.md"
 
 [dependencies]
