@@ -4,9 +4,74 @@ This section describes the xlog language surface: types, expressions, user-defin
 
 \subsection{Design Philosophy}\label{sec:lang:philosophy}
 
+xlog is a typed logic programming language designed for GPU execution. Three principles shape its surface:
+
+\textbf{Typed predicates.} Every predicate has a declared signature over a closed set of scalar types (\texttt{u32}, \texttt{u64}, \texttt{i32}, \texttt{i64}, \texttt{f32}, \texttt{f64}, \texttt{bool}, \texttt{symbol}). Type inference verifies argument consistency across rule bodies before any GPU kernel is generated, catching classes of errors that untyped Datalog engines defer to runtime.
+
+\textbf{Stratified semantics as contract.} Negation, aggregation, and recursion interact through a strongly-connected-component analysis on the predicate dependency graph. Programs whose SCCs cross negation or aggregation edges are rejected at compile time. Every accepted program has a well-defined fixpoint and a deterministic stratum order, which the runtime relies on for GPU scheduling.
+
+\textbf{One language for four paradigms.} Probabilistic facts (\texttt{p::f.}), annotated disjunctions, neural predicate declarations (\texttt{nn/k}), and SAT constraints share the same syntactic core with deterministic Datalog. A single parser, type checker, stratifier, and lowerer produces every downstream IR. The distinction between reasoning paradigms lives in the backend, not in the source language.
+
+A minimal xlog program exhibits the core surface:
+
+\begin{lstlisting}[style=xlogstyle]
+pred edge(u32, u32).
+pred reach(u32, u32).
+
+edge(1, 2). edge(2, 3). edge(3, 4).
+
+reach(X, Y) :- edge(X, Y).
+reach(X, Z) :- reach(X, Y), edge(Y, Z).
+
+?- reach(1, N).
+\end{lstlisting}
+
+Typed predicate declarations, ground facts, recursive rules, and a query appear in eight lines. The remainder of this section expands each component and adds the extensions that move xlog beyond classical Datalog.
+
 \subsection{Type System}\label{sec:lang:types}
 
+Every predicate is declared with a typed signature via \texttt{pred}. Eight scalar types are supported: \texttt{u32}, \texttt{u64}, \texttt{i32}, \texttt{i64} for fixed-width integers; \texttt{f32} and \texttt{f64} for floats with IEEE 754 semantics; \texttt{bool}; and \texttt{symbol} for dictionary-encoded atoms. String literals in source (\texttt{"alice"}) are terms that map to \texttt{symbol} through the \texttt{SymbolTable} in \texttt{xlog-core}, giving the runtime dense integer identifiers while preserving source-level readability. Users can also introduce named type aliases through \texttt{domain} declarations.
+
+Type inference proceeds in a single pass over the AST. For each rule, variable occurrences across body atoms must agree in type; literal constants are type-checked against their position's declared type; arithmetic expressions propagate types through the operator table. The implementation lives in \texttt{crates/xlog-logic/src/typeinfer.rs}. Errors are emitted with source locations and descriptive messages before lowering begins, so no type error survives into the RIR or reaches the GPU.
+
+A well-typed program:
+
+\begin{lstlisting}[style=xlogstyle]
+pred node(u32, symbol).
+pred connected(u32, u32).
+pred bridge(u32, u32).
+
+node(1, "alice"). node(2, "bob").
+connected(1, 2).
+
+bridge(A, B) :- connected(A, B), node(A, _), node(B, _).
+\end{lstlisting}
+
+Changing \texttt{bridge}'s declaration to \texttt{pred bridge(symbol, u32).} would cause inference to report that the head argument \texttt{A} is constrained at \texttt{symbol} (head) and \texttt{u32} (through \texttt{connected}), rejecting the program at compile time.
+
 \subsection{Expressions and Arithmetic}\label{sec:lang:arith}
+
+Rule bodies may contain arithmetic expressions, built-in function calls, and comparison filters. Arithmetic bindings use the \texttt{is} operator following Prolog convention: \texttt{D is X + Y} computes \texttt{X + Y} and binds the result to \texttt{D}. The right-hand side supports the standard arithmetic operators (\texttt{+}, \texttt{-}, \texttt{*}, \texttt{/}, \texttt{\%}), the built-ins \texttt{abs}, \texttt{min}, \texttt{max}, \texttt{pow}, and \texttt{cast}, and calls to user-defined functions (\Cref{sec:lang:udf}). Comparison literals (\texttt{<}, \texttt{<=}, \texttt{=}, \texttt{==}, \texttt{!=}, \texttt{>=}, \texttt{>}) compile to \texttt{Filter} RIR nodes and push down below joins where profitable.
+
+Float arithmetic follows IEEE 754 with explicit NaN and $\pm\infty$ handling: \texttt{NaN != NaN}, and ordering predicates place \texttt{NaN} outside any other value rather than raising errors. This matters for aggregations, where a single unguarded NaN would contaminate downstream GPU computations.
+
+A pairwise-proximity query illustrates expression use:
+
+\begin{lstlisting}[style=xlogstyle]
+pred point(u32, f64, f64).
+pred close(u32, u32).
+
+point(1, 0.0, 0.0). point(2, 0.5, 0.5). point(3, 5.0, 5.0).
+
+close(A, B) :-
+  point(A, Xa, Ya),
+  point(B, Xb, Yb),
+  A < B,
+  D is (Xa - Xb) * (Xa - Xb) + (Ya - Yb) * (Ya - Yb),
+  D < 1.0.
+\end{lstlisting}
+
+The rule compiles to a self-join of \texttt{point} with an intermediate \texttt{Project} that materializes \texttt{D}, followed by a \texttt{Filter} on \texttt{D < 1.0}. The optimizer relocates the cheap comparison \texttt{A < B} ahead of the join when profitable, reducing intermediate cardinality.
 
 \subsection{User-Defined Functions}\label{sec:lang:udf}
 

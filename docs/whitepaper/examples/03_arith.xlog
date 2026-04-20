@@ -1,0 +1,15 @@
+pred point(u32, f64, f64).
+pred close(u32, u32).
+
+point(1, 0.0, 0.0).
+point(2, 0.5, 0.5).
+point(3, 5.0, 5.0).
+
+close(A, B) :-
+  point(A, Xa, Ya),
+  point(B, Xb, Yb),
+  A < B,
+  D is (Xa - Xb) * (Xa - Xb) + (Ya - Yb) * (Ya - Yb),
+  D < 1.0.
+
+?- close(A, B).
