@@ -227,10 +227,11 @@ jobs:
         run: |
           set -euo pipefail
           mapfile -t release_branches < <(jq -r '.[].head_branch' <<<"$RELEASE_PRS_JSON")
+          remote_url="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
 
           for release_branch in "${release_branches[@]}"; do
-            git fetch origin "$release_branch"
-            git checkout -B "$release_branch" "origin/$release_branch"
+            git fetch "$remote_url" "$release_branch"
+            git checkout -B "$release_branch" FETCH_HEAD
 
             python3 scripts/sync_readme_release_version.py
 
@@ -245,8 +246,7 @@ jobs:
 
             git add README.md
             git commit -m "docs: sync README release status for v${workspace_version}"
-            git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
-              "HEAD:${release_branch}"
+            git push "$remote_url" "HEAD:${release_branch}"
           done
 
           git checkout --detach "$GITHUB_SHA"
