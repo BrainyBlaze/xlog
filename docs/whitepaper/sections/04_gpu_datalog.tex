@@ -1,6 +1,6 @@
-\section{GPU-Native Datalog Execution}\label{sec:datalog}
+\section{GPU-Native Datalog Evaluation}\label{sec:datalog}
 
-The deterministic evaluation engine executes standard Datalog with stratified negation and aggregation entirely on the GPU. The algorithmic approach---semi-naive fixpoint iteration over stratified programs---is well established. The contribution here is not algorithmic novelty but engineering: every relational operator runs as a custom CUDA kernel, delta relations are maintained on-device, and no host--device transfers occur during evaluation.
+\Cref{sec:lang} describes the source language; this section describes how its Datalog subset compiles to and executes on the GPU. The deterministic evaluation engine executes standard Datalog with stratified negation and aggregation entirely on the GPU. The algorithmic approach---semi-naive fixpoint iteration over stratified programs---is well established. The contribution here is not algorithmic novelty but engineering: every relational operator runs as a custom CUDA kernel, delta relations are maintained on-device, and no host--device transfers occur during evaluation.
 
 \subsection{Semi-Naive Evaluation on GPU}
 
