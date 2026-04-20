@@ -60,6 +60,30 @@ def test_sync_readme_version_requires_known_patterns() -> None:
         raise AssertionError("expected ValueError for missing README patterns")
 
 
+def test_sync_readme_version_rejects_ambiguous_badge_matches() -> None:
+    readme = f"{_readme('0.5.0')}\n![version](https://img.shields.io/badge/version-v0.5.0-blue.svg)\n"
+
+    try:
+        syncer.sync_readme_version(readme, "0.5.1")
+    except ValueError as exc:
+        assert "README version badge" in str(exc)
+    else:
+        raise AssertionError("expected ValueError for ambiguous README badge")
+
+
+def test_sync_readme_version_rejects_ambiguous_release_status_matches() -> None:
+    readme = f"{_readme('0.5.0')}\nRelease status: `v0.5.0`\n"
+
+    try:
+        syncer.sync_readme_version(readme, "0.5.1")
+    except ValueError as exc:
+        assert "README release status line" in str(exc)
+    else:
+        raise AssertionError(
+            "expected ValueError for ambiguous README release status line"
+        )
+
+
 def test_sync_readme_release_version_script_runs_as_direct_entrypoint() -> None:
     repo_root = Path(__file__).resolve().parents[2]
 

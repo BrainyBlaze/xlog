@@ -11,7 +11,7 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts.release_version_support import README_BADGE_VERSION_RE
+from scripts.release_version_support import README_BADGE_VERSION_RE, workspace_version
 
 REQUIRED_SNIPPETS = (
     "python scripts/xlog_doctor.py",
@@ -80,30 +80,17 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--cargo", default="Cargo.toml")
     parser.add_argument("--metadata", default="cargo-metadata.json")
     return parser.parse_args(argv)
-
-
-def _workspace_version(cargo_text: str) -> str:
-    match = re.search(
-        r"^\[workspace\.package\][^\[]*?^version\s*=\s*\"([^\"]+)\"",
-        cargo_text,
-        re.MULTILINE | re.DOTALL,
-    )
-    if match is None:
-        raise ValueError("Could not determine workspace.package.version from Cargo.toml.")
-    return match.group(1)
-
-
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
 
     readme = Path(args.readme).read_text(encoding="utf-8")
     cargo_text = Path(args.cargo).read_text(encoding="utf-8")
     metadata = json.loads(Path(args.metadata).read_text(encoding="utf-8"))
-    workspace_version = _workspace_version(cargo_text)
+    current_workspace_version = workspace_version(cargo_text)
 
     errors = validate_package_metadata(
         readme=readme,
-        workspace_version=workspace_version,
+        workspace_version=current_workspace_version,
         metadata=metadata,
     )
     if errors:

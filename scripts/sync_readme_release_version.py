@@ -10,37 +10,32 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts.release_version_support import README_BADGE_VERSION_RE
+from scripts.release_version_support import README_BADGE_VERSION_RE, workspace_version
 
 
-def workspace_version(cargo_text: str) -> str:
-    match = re.search(
-        r"^\[workspace\.package\][^\[]*?^version\s*=\s*\"([^\"]+)\"",
-        cargo_text,
-        re.MULTILINE | re.DOTALL,
-    )
-    if match is None:
-        raise ValueError("Could not determine workspace.package.version from Cargo.toml.")
-    return match.group(1)
+RELEASE_STATUS_VERSION_RE = re.compile(
+    r"((?:\*\*)?Release status:(?:\*\*)?\s*`v)([^`]+)(`)"
+)
 
 
 def sync_readme_version(readme: str, version: str) -> str:
-    updated, badge_count = README_BADGE_VERSION_RE.subn(
+    badge_count = len(README_BADGE_VERSION_RE.findall(readme))
+    if badge_count != 1:
+        raise ValueError("README version badge not found or ambiguous.")
+    updated = README_BADGE_VERSION_RE.sub(
         f"version-v{version}-blue.svg",
         readme,
         count=1,
     )
-    if badge_count != 1:
-        raise ValueError("README version badge not found or ambiguous.")
 
-    updated, status_count = re.subn(
-        r"((?:\*\*)?Release status:(?:\*\*)?\s*`v)([^`]+)(`)",
+    status_count = len(RELEASE_STATUS_VERSION_RE.findall(updated))
+    if status_count != 1:
+        raise ValueError("README release status line not found or ambiguous.")
+    updated = RELEASE_STATUS_VERSION_RE.sub(
         rf"\g<1>{version}\g<3>",
         updated,
         count=1,
     )
-    if status_count != 1:
-        raise ValueError("README release status line not found or ambiguous.")
 
     return updated
 
