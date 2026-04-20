@@ -104,11 +104,9 @@ def test_stage_kernels_prunes_and_emits_manifest() -> None:
 def test_pyxlog_pyproject_includes_generated_kernels_in_wheel() -> None:
     pyproject = (PYXLOG_ROOT / "pyproject.toml").read_text()
 
-    assert 'crate_name = "xlog-cuda"' in pyproject
-    assert 'from = "out-dir"' in pyproject
-    assert 'to = "pyxlog/kernels/"' in pyproject
-    assert 'path = "*.portable.ptx"' in pyproject
-    assert 'path = "*.cubin"' in pyproject
+    assert 'include = [' in pyproject
+    assert 'path = "pyxlog/kernels/*"' in pyproject
+    assert 'format = "wheel"' in pyproject
 
 
 def test_pyxlog_kernel_path_helper_prefers_packaged_kernels() -> None:

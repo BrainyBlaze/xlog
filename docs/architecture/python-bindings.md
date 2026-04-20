@@ -24,6 +24,21 @@ For the latest published release:
 pip install pyxlog
 ```
 
+On import, `pyxlog` checks for bundled CUDA kernel artifacts under
+`pyxlog/kernels/` and, when present, exports that directory to
+`XLOG_CUBIN_DIR` automatically. Any pilot script, probe harness, or artifact
+replay that runs outside the packaged wheel layout should set
+`XLOG_CUBIN_DIR` explicitly before importing `pyxlog`, for example:
+
+```bash
+export XLOG_CUBIN_DIR=/home/dev/projects/xlog/crates/pyxlog/python/pyxlog/kernels
+python your_probe.py
+```
+
+This is especially important for `pipeline_run`-style execution on saved
+artifacts: cold starts without `XLOG_CUBIN_DIR` can fail if the active install
+does not contain `pyxlog/kernels/`.
+
 For unreleased `main` branch features or local development:
 
 ```bash

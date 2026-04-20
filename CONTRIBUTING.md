@@ -55,6 +55,14 @@ Required on a supported CUDA machine when your change affects GPU behavior, CUDA
 cargo test -p xlog-cuda-tests --test certification_suite --release
 ```
 
+If you build `pyxlog` wheels or run ad-hoc Python probes against saved artifacts, keep the kernel
+path explicit. The packaged wheel should ship `pyxlog/kernels/`, but source-tree and probe
+workflows should still export `XLOG_CUBIN_DIR` before importing `pyxlog`:
+
+```bash
+export XLOG_CUBIN_DIR=$PWD/crates/pyxlog/python/pyxlog/kernels
+```
+
 ## Pull Request Expectations
 
 Each pull request should:

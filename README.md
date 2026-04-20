@@ -83,6 +83,16 @@ Install the latest published `pyxlog` wheel from PyPI:
 pip install pyxlog
 ```
 
+`pyxlog` will auto-configure `XLOG_CUBIN_DIR` from its packaged
+`pyxlog/kernels/` directory when the wheel includes staged CUDA artifacts. If
+you are running probe scripts, v3 artifact replays, or source-tree experiments
+outside that packaged layout, export `XLOG_CUBIN_DIR` yourself before importing
+`pyxlog`:
+
+```bash
+export XLOG_CUBIN_DIR=/home/dev/projects/xlog/crates/pyxlog/python/pyxlog/kernels
+```
+
 For unreleased `main` branch features, use the local development install below instead of expecting
 PyPI to match the current workspace version.
 

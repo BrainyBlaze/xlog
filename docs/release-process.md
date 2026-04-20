@@ -111,6 +111,9 @@ gh secret set RELEASE_PLZ_GITHUB_TOKEN -R BrainyBlaze/xlog
 - uploads the distributions to the matching GitHub release
 - publishes the distributions to PyPI using `PYPI_API_TOKEN`
 - can also be rerun manually with `workflow_dispatch` by supplying an existing `xlog-cli` tag
+- stages `crates/pyxlog/python/pyxlog/kernels/` with `bash scripts/stage_pyxlog_kernels.sh`
+  before invoking `maturin build`; do not remove that step unless wheel inspection still proves
+  `pyxlog/kernels/` is present in the built artifact
 
 `.github/workflows/github-release.yml`:
 
@@ -213,6 +216,7 @@ cargo clippy --workspace --all-targets --locked --no-deps -- \
   -D clippy::unimplemented
 cargo build --workspace --locked --release --exclude pyxlog
 cargo build --locked --release -p xlog-cli --features host-io
+bash scripts/stage_pyxlog_kernels.sh
 ```
 
 Manual GPU gate:
