@@ -96,6 +96,11 @@ gh secret set RELEASE_PLZ_GITHUB_TOKEN -R BrainyBlaze/xlog
 - on pushes to `main`, runs `release-plz` in `release-pr` mode to open or update the release PR
 - on manual `workflow_dispatch`, runs `release-plz` in `release` mode after the maintainer confirms
   that real-GPU validation has already passed
+- `release-plz.toml` restricts release PR creation to commits whose subject starts with
+  `feat:`, `fix:`, `perf:`, `refactor:`, `docs:`, `build:`, `ci:`, `test:`, or `revert:`
+  including scoped forms such as `build(deps):`
+- plain `chore:` commits are treated as non-release maintenance, so merging a release PR with a
+  title such as `chore: release v0.5.2` does not immediately queue the next release PR
 - before the manual publish step, runs `scripts/preflight_release_publish.sh`, which currently
   validates the publishable crate package layouts without requiring crates.io to already know about
   the new interdependent workspace versions
@@ -144,6 +149,31 @@ So a skipped result there means `release-plz` did not create a new `xlog-cli` re
 It does not mean publication failed. Those jobs run only when a publish actually happened and
 `cli_release_created=true`, which normally occurs in the manual `workflow_dispatch` publish flow or
 when the same workflow invocation actually emits the new CLI release.
+
+## Release Commit Policy
+
+Release-plz PR preparation is intentionally narrower than "every commit that touched packaged
+files". The workspace `release_commits` rule treats the following commit types as release-worthy:
+
+- `feat`
+- `fix`
+- `perf`
+- `refactor`
+- `docs`
+- `build`
+- `ci`
+- `test`
+- `revert`
+
+Everything else is treated as non-release by default, especially generic `chore:` commits. This is
+intentional:
+
+- merged release PR commits use `chore: release ...`
+- the README sync bot commit now uses `chore(release): ...`
+- those release-maintenance commits must not recursively open the next release PR on `main`
+
+If a maintenance change should ship in the next release, use a more specific Conventional Commit
+type such as `build:`, `ci:`, `fix:`, `refactor:`, or `perf:` instead of bare `chore:`.
 
 ## Human Release Gate
 

@@ -245,7 +245,7 @@ jobs:
             )
 
             git add README.md
-            git commit -m "docs: sync README release status for v${workspace_version}"
+            git commit -m "chore(release): sync README release status for v${workspace_version}"
             git push "$remote_url" "HEAD:${release_branch}"
           done
 
