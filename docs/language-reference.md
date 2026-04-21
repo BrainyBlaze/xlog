@@ -3,7 +3,7 @@
 > **Version:** v0.5.0
 > **Last Updated:** March 2026
 
-This document provides a comprehensive reference for the XLOG language, covering all syntax, semantics, and features of the GPU-accelerated Datalog query engine.
+This document provides a comprehensive reference for the XLOG language, covering all syntax, semantics, and features of xlog as a GPU-native logic programming language.
 
 ---
 
@@ -37,7 +37,9 @@ This document provides a comprehensive reference for the XLOG language, covering
 
 ## Overview
 
-XLOG is a GPU-accelerated Datalog query engine that compiles declarative logic programs into optimized relational plans and executes them on NVIDIA GPUs. It supports:
+XLOG is a GPU-native logic programming language. Programs are typed, modular, and compile to a single CUDA runtime that spans four reasoning paradigms — deterministic Datalog evaluation, probabilistic inference, SAT/MaxSAT verification, and differentiable neural-symbolic training. This reference covers the language surface exhaustively; for the architecture behind the runtime see `docs/ARCHITECTURE.md`, and for the design philosophy and evaluation see the v0.5.0 whitepaper at `docs/whitepaper/main.pdf` (Section 3 in particular).
+
+It supports:
 
 - **Datalog fundamentals**: Facts, rules, recursive queries, and stratified negation
 - **Arithmetic operations**: Comparisons, computed values via `is`, and built-in functions
