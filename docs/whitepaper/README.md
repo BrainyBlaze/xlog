@@ -1,6 +1,8 @@
 # xlog v0.5.0 Whitepaper (LaTeX)
 
-arxiv-style single-column LaTeX port of `docs/whitepaper-v050.md`.
+arxiv-style single-column LaTeX source for the xlog v0.5.0 technical whitepaper: *"xlog: A GPU-Native Logic Programming Language for Unified Symbolic Reasoning"*.
+
+The rendered PDF is committed as `main.pdf`; rebuild only when sources change.
 
 ## Build
 
@@ -27,7 +29,7 @@ make figures
 | `main.tex` | Preamble + `\input{sections/*}` |
 | `arxiv.sty` | Vendored arXiv-style preamble |
 | `refs.bib` | Bibliography (biblatex) |
-| `sections/*.tex` | One file per whitepaper section |
+| `sections/*.tex` | One file per whitepaper section (10 sections: abstract, intro, architecture, language, Datalog evaluation, probabilistic, neural-symbolic, interop, evaluation, related work, limitations) |
 | `figures/*.mmd` | Mermaid diagram sources |
-| `figures/*.pdf` | Rendered figures |
+| `figures/*.pdf` | Rendered figures (checked in) |
 | `latexmkrc` / `Makefile` | Build automation |
