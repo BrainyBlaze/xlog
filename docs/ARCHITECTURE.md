@@ -1,6 +1,8 @@
 # XLOG System Architecture
 
-XLOG is a **GPU-accelerated Datalog query engine** built in Rust with CUDA kernels. It compiles Datalog programs into relational algebra plans and executes them efficiently on NVIDIA GPUs.
+XLOG is a **GPU-native logic programming language for unified symbolic reasoning**. Its compiler and runtime span four reasoning paradigms — deterministic Datalog evaluation, probabilistic inference via knowledge compilation, SAT/MaxSAT verification, and differentiable neural-symbolic training — on a single CUDA runtime with zero host–device transfers in production paths. A shared language frontend lowers programs through a staged IR pipeline (XGCF surface syntax, then relational/probabilistic/solver IRs) to GPU-resident execution plans; the four backends are coordinated by a single kernel provider and a common GPU residency model rather than assembled as independent tools.
+
+This document is the contributor-facing deep reference for that architecture: crate decomposition, the intermediate representations that mediate between the language frontend and each backend, the GPU residency model, memory and error-handling strategy, and how the four backends share the CUDA runtime. It is the companion to the v0.5.0 whitepaper (`docs/whitepaper/main.pdf`), which covers the formal semantics and evaluation results; where the whitepaper establishes *what* XLOG is, this document describes *how* the crates, kernels, and pipelines fit together in the repository as it stands.
 
 ## Table of Contents
 
