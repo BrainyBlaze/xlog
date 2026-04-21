@@ -1,6 +1,6 @@
 # XLOG Development Roadmap
 
-> **Last Updated:** March 28, 2026
+> **Last Updated:** April 21, 2026
 > **Current Version:** v0.5.0
 > **Current Milestone:** v0.5.0 released; post-release audit and hardening
 > **Status:** v0.5.0 shipped with P0 zero-D2H chunk merge, P1 artifact schema migration (beta-v2)
@@ -12,7 +12,7 @@
 
 ## Overview
 
-XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented features and planned development across all system components.
+XLOG is a GPU-native logic programming language for unified symbolic reasoning, spanning four reasoning backends on a single CUDA runtime: deterministic Datalog evaluation (with stratified and non-monotone negation), probabilistic inference via knowledge compilation, SAT/MaxSAT verification, and differentiable neural-symbolic training. This roadmap tracks implemented features and planned development across all system components.
 
 ### Glossary of Terms
 
@@ -324,9 +324,6 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 - [x] `leaf_atoms` / `choice_sources` retained inline during extraction (no new passes)
 - [x] Top-level re-exports in `xlog-prob` lib.rs (`ChoiceSource`, `GroundAtom`, `Provenance`, `Value`, PIR types)
 
-**Design document:** `docs/plans/2026-03-08-provenance-primitives-design.md`
-**Implementation plan:** `docs/plans/2026-03-08-provenance-primitives-plan.md`
-
 ### Limitations (Current Version)
 
 - Exact inference does not support aggregation in rule bodies
@@ -414,8 +411,7 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 - [x] ~~Poker (card rank classification)~~ (done: `examples/neural/05_poker/`)
 - [x] ~~CLUTRR (family relationship reasoning)~~ (done: `examples/neural/06_clutrr/`)
 
-**Design document:** `docs/plans/2026-01-20-v0.4.0-neural-symbolic-design.md`
-**Implementation plan:** `docs/plans/v0.4.0-alpha-implementation.md`
+See the v0.5.0 whitepaper §6 (Neural-Symbolic Bridge) for the shipped design.
 
 ---
 
@@ -507,14 +503,7 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 - [x] `GpuCompileConfig.incremental_verify` opt-in → `GpuEquivalenceConfig.reuse_workspace`
 - [x] Integration in `check_equivalence_gpu` / `check_equivalence_gpu_gated`
 
-**Design document:** `docs/plans/2026-02-26-dilp-hardening-design.md`
-**Implementation plan:** `docs/plans/2026-02-26-dilp-beta-impl.md`
-**v0.5.0 design:** `docs/plans/2026-03-05-v050-execution-design.md`
-**v0.5.0 Phase 1 plan:** `docs/plans/2026-03-05-v050-implementation.md`
-**P2a design:** `docs/plans/2026-03-08-p2a-term-embeddings-design.md`
-**P2a plan:** `docs/plans/2026-03-08-p2a-term-embeddings.md`
-**P3 design:** `docs/plans/2026-03-08-p3-incremental-verifier-design.md`
-**P3 plan:** `docs/plans/2026-03-08-p3-incremental-verifier.md`
+Shipped design references: `docs/architecture/dilp-training.md` (current architecture), `docs/architecture/rfc-tensorized-ilp.md` (RFC v5, resolved design decisions).
 
 ### Planned 📋 (dILP beyond GA)
 

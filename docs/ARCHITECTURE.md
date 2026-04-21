@@ -1291,7 +1291,7 @@ cargo test -p xlog-cuda-tests --test certification_suite --release -- --nocaptur
 | [Query Optimizer](architecture/query-optimizer.md) | Cost-based join ordering, predicate pushdown, statistics |
 | [Arithmetic Expressions](architecture/arithmetic-expressions.md) | `is` syntax, type inference, GPU evaluation |
 | [Probabilistic Tier](architecture/xlog-prob.md) | Exact inference (D4/XGCF) and Monte Carlo sampling |
-| [Neural-Symbolic Design](plans/2026-01-20-v0.4.0-neural-symbolic-design.md) | v0.4.0 neural-symbolic integration design |
+| [dILP Training](architecture/dilp-training.md) | Differentiable ILP trainer architecture (v0.5.0 and the RFC that produced it) |
 | [Solver Services](architecture/solver-services.md) | GPU CDCL verifier (zero host reads) + CLS SAT/MaxSAT services |
 | [Adaptive Indexing](architecture/adaptive-indexing.md) | HISA-based heat tracking and index selection |
 | [Multi-GPU Joins](architecture/multi-gpu-join.md) | Distributed join design (planned) |

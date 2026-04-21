@@ -135,8 +135,7 @@ The GPU-native encoder (`encode_cnf_gpu`) in `crates/xlog-prob/src/compilation/g
 ## GPU-Native Compilation + Verification (v0.5.0 foundation)
 
 XLOG’s target architecture is a **100% GPU-native** compilation + verification path (GPU D4 + GPU CDCL verifier) with
-**zero data-plane host transfers**. This path is now integrated into `ExactDdnnfProgram` (see
-`docs/design/2026-01-22-gpu-native-compilation-design.md`):
+**zero data-plane host transfers**. This path is integrated into `ExactDdnnfProgram` and described formally in the v0.5.0 whitepaper §5:
 
 - `xlog_prob::compilation::validate_equivalence_gpu` proves `φ ≡ C` by solving two UNSAT queries on GPU:
   - `UNSAT(φ ∧ ¬C)`
@@ -233,8 +232,7 @@ The PyO3 extension `crates/pyxlog` exposes two entry points:
 
 All GPU table interchange is via DLPack capsules (framework-agnostic). See `examples/python/` for end-to-end scripts.
 
-For training workloads with neural predicates, `pyxlog` uses the **GPU neural fast-path** described in
-`docs/design/2026-01-22-gpu-native-compilation-design.md` §5.3:
+For training workloads with neural predicates, `pyxlog` uses the **GPU neural fast-path** (see whitepaper §6):
 - neural outputs are imported as CUDA tensors via DLPack (no `.tolist()`),
 - AD-chain weights and probability gradients are computed on GPU (`kernels/neural.cu`),
 - Torch receives device-resident gradients via `output.backward(grad)`.
@@ -306,11 +304,7 @@ pub use pir::{ChoiceVarId, LeafId, PirGraph, PirNode, PirNodeId};
 pub use provenance::{ChoiceSource, GroundAtom, Provenance, Value};
 ```
 
-### Design documents
-
-- `docs/plans/2026-03-08-provenance-primitives-design.md`
-- `docs/plans/2026-03-08-provenance-primitives-plan.md`
-- `docs/xlog-change-request-provenance.md` (original change request)
+The provenance API was introduced in v0.5.0 post-release cleanup; see `CHANGELOG.md` Unreleased section for the implementation notes.
 
 ---
 

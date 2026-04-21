@@ -1,5 +1,7 @@
 # Multi-GPU Join Architecture
 
+> **Implementation status (v0.5.0):** **Design only.** Multi-GPU memory management (`crates/xlog-cuda/src/multi_gpu_memory.rs`) is implemented, but distributed join execution and cross-device partitioning kernels are not yet shipped. Single-GPU joins (`hash_join_v2`) are the production path. Use this document to understand the planned architecture; it is not a guide to a running feature.
+
 ## Overview
 
 Distributed hash join across multiple GPUs using hash-based partitioning.

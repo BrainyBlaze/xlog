@@ -34,7 +34,7 @@ Candidate rules          Logit tensor W (C floats)
 At convergence, `argmax(W)` picks the winning rule. Temperature annealing (τ → τ_floor) drives the
 soft mask toward a one-hot selection.
 
-For the full mathematical treatment, see [`docs/ilp/rfc-tensorized-ilp.md`](../ilp/rfc-tensorized-ilp.md).
+For the full mathematical treatment and resolved design decisions (RD-1 through RD-27), see [`rfc-tensorized-ilp.md`](rfc-tensorized-ilp.md).
 
 ## Architecture Overview
 
@@ -211,22 +211,12 @@ The training step loop obeys XLOG's P0 GPU-resident contract:
 
 ## Design Documents
 
-The dILP design evolved through 10 iterations plus an RFC:
+The dILP design went through ten internal iterations before converging on the RFC. Those numbered working documents were archived during the v0.5.0 cleanup; their resolved decisions (RD-1 through RD-27) are consolidated in the RFC. The live design references are:
 
 | Document | Content |
 |----------|---------|
-| [`docs/ilp/1.md`](../ilp/1.md) | Motivation: continuous compilation via tensor masking |
-| [`docs/ilp/2.md`](../ilp/2.md) | Mathematical foundation: Gumbel-Softmax, tensorized semi-naive |
-| [`docs/ilp/3.md`](../ilp/3.md) | Hardware justification: why NVIDIA Tensor Cores |
-| [`docs/ilp/4.md`](../ilp/4.md) | Implementation map across XLOG crate stack |
-| [`docs/ilp/5.md`](../ilp/5.md) | End-to-end math + implementation details |
-| [`docs/ilp/6.md`](../ilp/6.md) | Operational workflow: trigger → search → commit |
-| [`docs/ilp/7.md`](../ilp/7.md) | Design Doc v1.0: Phases 1–4 |
-| [`docs/ilp/8.md`](../ilp/8.md) | Design Doc v2.0: transductive guidance extension |
-| [`docs/ilp/9.md`](../ilp/9.md) | Exhaustive engineering spec (file-by-file) |
-| [`docs/ilp/10.md`](../ilp/10.md) | RFC draft v4.4: resolved design decisions |
-| [`docs/ilp/rfc-tensorized-ilp.md`](../ilp/rfc-tensorized-ilp.md) | Full RFC (supersedes numbered docs) |
-| [`docs/ilp/dilp-showcase-report.md`](../ilp/dilp-showcase-report.md) | Validation: 4-stage showcase run analysis |
+| [`rfc-tensorized-ilp.md`](rfc-tensorized-ilp.md) | Full RFC: mathematical foundation (Gumbel-softmax, tensorized semi-naive), hardware rationale, implementation map, resolved design decisions |
+| [`dilp-showcase-report.md`](dilp-showcase-report.md) | Validation: 4-stage showcase run analysis (reach/grandparent/colleague/plus2) |
 
 ## See Also
 
