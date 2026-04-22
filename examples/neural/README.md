@@ -107,8 +107,11 @@ program = pyxlog.Program.compile("""
     addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
 """)
 
-# Register PyTorch network
+# Register PyTorch network (for nn/k supervised classifiers)
 program.register_network("net_name", model, optimizer, scheduler=None)
+
+# Register embedding module (for nn/3 embedding-mode declarations)
+program.register_embedding("entity_embed", nn.Embedding(100, 64).cuda(), trainable=True)
 
 # Add tensor data source
 program.add_tensor_source("train", images_tensor)

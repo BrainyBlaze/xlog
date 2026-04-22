@@ -54,6 +54,16 @@ All notable changes to this project are documented in this file.
   `num_rows()` (capacity) instead of synchronous `device_row_count_u32()` GPU→CPU transfers.
 - **MC per-sample store management replaced**: Full `snapshot_store()`/`restore_store()` cycle
   replaced by `McSampleResetPlan` with targeted relation-level reset.
+- **Whitepaper and public docs repositioned** around "GPU-native logic programming language
+  for unified symbolic reasoning" instead of "GPU-accelerated Datalog engine". v0.5.0 LaTeX
+  whitepaper (`docs/whitepaper/main.pdf`) gained a new Section 3 "The xlog Language" covering
+  types, UDFs, modules, arithmetic, aggregations, and constraints with validated examples;
+  `docs/ARCHITECTURE.md`, `docs/language-reference.md`, root `README.md`, `ROADMAP.md`, and
+  `docs/whitepaper/README.md` were aligned. Stale Markdown whitepaper draft
+  `docs/whitepaper-v050.md` removed (superseded by the LaTeX version). Broken cross-references
+  to cleanup-deleted `docs/plans/`, `docs/design/`, `docs/ilp/` directories replaced with
+  pointers to surviving docs (whitepaper sections, `dilp-training.md`, `rfc-tensorized-ilp.md`).
+  Docs-only change; no code or API impact.
 
 ### Refactored
 

@@ -280,19 +280,31 @@ XLOG builds on established research in GPU-accelerated databases and probabilist
 
 ## System Overview
 
+A single language frontend compiles source programs into typed AST nodes, then fans out into four backend-specific pipelines that share the GPU residency model and kernel provider:
+
 ```
-Datalog Source → Parser → Stratifier → Lowerer/Optimizer → Executor → GPU Kernels → Results
+                                              ┌──> RIR ──> Deterministic executor  (xlog-runtime)
+                                              │             (semi-naive fixpoint on GPU)
+   xlog source ──> Parser ──> Stratifier ──┤
+                                              │──> PIR ──> CNF ──> D4 ──> XGCF
+                                              │             (probabilistic inference; xlog-prob)
+                                              │
+                                              │──> Solver IR (planned) ──> GPU CDCL
+                                              │             (SAT/MaxSAT verification; xlog-solve)
+                                              │
+                                              └──> RIR + dILP masks ──> differentiable trainer
+                                                            (neural-symbolic; xlog-neural + pyxlog)
 ```
 
-XLOG transforms declarative Datalog rules into efficient GPU-parallel operations:
+Common pipeline stages:
 
-- **Parsing**: PEG-based grammar with Pest
-- **Stratification**: Ensures safe negation ordering via SCC (Strongly Connected Component) analysis
-- **Lowering/Optimization**: Converts AST to Relational IR (RIR) and applies rewrites (predicate pushdown, join planning)
-- **Execution**: Interprets RIR nodes using GPU kernels
-- **GPU Kernels**: CUDA implementations of joins, sorts, aggregations, set operations
+- **Parsing**: PEG-based grammar with Pest (`crates/xlog-logic/src/grammar.pest`)
+- **Stratification**: SCC analysis on the predicate dependency graph; rejects programs with negation or aggregation in a recursive SCC
+- **Lowering**: AST → RIR for relational paths; PIR → CNF → D4 → XGCF for probabilistic paths
+- **Optimization**: predicate pushdown, cost-aware join ordering (DP ≤ 10 atoms, greedy otherwise)
+- **Execution**: the appropriate backend interprets its IR against the shared `CudaKernelProvider`
 
-XLOG also includes a probabilistic reasoning tier (`xlog-prob`) with exact knowledge compilation and Monte Carlo sampling. See [xlog-prob Architecture](architecture/xlog-prob.md) for details.
+Each backend has its own deep-dive document: [Deterministic evaluation](architecture/gpu-execution.md) and [Query optimizer](architecture/query-optimizer.md) for the Datalog path, [Probabilistic tier](architecture/xlog-prob.md) for the knowledge-compilation path, [Solver services](architecture/solver-services.md) for SAT/MaxSAT, and [dILP training](architecture/dilp-training.md) for the neural-symbolic path.
 
 ---
 
@@ -1101,6 +1113,8 @@ println!("{}", profiler.summary());
 ---
 
 ## Dataflow Diagram
+
+The diagram below depicts the **deterministic Datalog evaluation path** end-to-end. The probabilistic, SAT/MaxSAT, and neural-symbolic paths share the parser, stratifier, and kernel provider but branch into their own IRs and executors after lowering — see [xlog-prob](architecture/xlog-prob.md), [solver-services](architecture/solver-services.md), and [dilp-training](architecture/dilp-training.md) for the corresponding diagrams.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐

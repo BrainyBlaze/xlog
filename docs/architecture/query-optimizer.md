@@ -83,11 +83,14 @@ Removes columns not needed by downstream operators:
 - Insert projections to drop unused columns early
 - Reduces memory footprint and improves cache utilization
 
-### 4. Index Selection
+### 4. Index Selection *(design only as of v0.5.0)*
 
-Uses heat tracking from the statistics layer:
+Heat-based index selection is **specified but not yet wired**: `OptimizerConfig.index_heat_threshold` exists as a knob, and `xlog-stats` does record per-relation heat, but the runtime does not currently construct on-the-fly HISA indexes based on those observations. The intended decision logic is:
+
 - If `heat > 0.7` and no index: build HISA index
 - If `heat < 0.1` and has index: drop index (reclaim memory)
+
+See [`adaptive-indexing.md`](adaptive-indexing.md) for the companion design and tracking notes.
 
 ## Unified Statistics Layer
 
