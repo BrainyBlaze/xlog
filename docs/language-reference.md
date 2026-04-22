@@ -26,12 +26,14 @@ This document provides a comprehensive reference for the XLOG language, covering
 15. [Modules](#modules)
 16. [Symbols](#symbols)
 17. [Probabilistic Logic](#probabilistic-logic)
-18. [Term Embeddings](#term-embeddings)
-19. [GPU ILP Configuration](#gpu-ilp-configuration)
-20. [Pragmas and Directives](#pragmas-and-directives)
-21. [Float Predicates and IEEE 754 Semantics](#float-predicates-and-ieee-754-semantics)
-22. [Comments](#comments)
-23. [Complete Grammar Reference](#complete-grammar-reference)
+18. [Neural Predicates](#neural-predicates)
+19. [Learnable Rules](#learnable-rules)
+20. [Term Embeddings](#term-embeddings)
+21. [GPU ILP Configuration](#gpu-ilp-configuration)
+22. [Pragmas and Directives](#pragmas-and-directives)
+23. [Float Predicates and IEEE 754 Semantics](#float-predicates-and-ieee-754-semantics)
+24. [Comments](#comments)
+25. [Complete Grammar Reference](#complete-grammar-reference)
 
 ---
 
@@ -1111,6 +1113,183 @@ q :- not p.
 
 query(p).  // P(p) ≈ 0.5 ± CI
 ```
+
+---
+
+## Neural Predicates
+
+*Added in v0.5.0.*
+
+Neural predicate declarations (`nn/k`) embed a neural network directly into a Datalog program as a first-class predicate. The network's output becomes probabilistic facts (in supervised mode) or a dense embedding tensor (in embedding mode), and participates in the standard probabilistic inference pipeline described above. This is the language surface for the neural-symbolic bridge; see the v0.5.0 whitepaper §6 for the design rationale.
+
+### Declaration Forms
+
+XLOG supports two `nn` declaration arities:
+
+**Supervised (classification) — `nn/4`.** The network outputs a probability distribution over a finite label set. Each sampled label becomes a probabilistic fact instantiated through the atom template:
+
+```xlog
+nn(network_name, [InputVar1, InputVar2, ...], OutputVar, [label1, label2, ...]) :: atom.
+```
+
+**Embedding mode — `nn/3`.** The network outputs a dense vector/tensor rather than a probability distribution. Used together with `register_embedding()` (see below):
+
+```xlog
+nn(network_name, [InputVar], OutputVar) :: atom.
+```
+
+### Arguments
+
+| Position | Meaning |
+|----------|---------|
+| `network_name` | Identifier binding this declaration to a Python-side network registered via `register_network()` (supervised) or `register_embedding()` (embedding mode). |
+| `[InputVar, ...]` | Input variables — passed to the network's forward pass at inference. Each variable is bound by a rule body or fact that precedes the neural call. |
+| `OutputVar` | The variable that receives the sampled label (supervised) or the dense tensor (embedding). |
+| `[label1, ...]` | *(supervised only)* The finite label set the network classifies over. Labels may be integers or identifiers and define the softmax output dimension. |
+| `atom` | The predicate template that is instantiated with the input and output variables as a probabilistic fact. |
+
+### Lowering
+
+A supervised declaration `nn(net, [X], Y, [l0, l1, ..., lK]) :: p(X, Y).` lowers to a family of probabilistic facts, one per label:
+
+```
+P(p(X, l0)) = softmax(net(X))[0]
+P(p(X, l1)) = softmax(net(X))[1]
+...
+P(p(X, lK)) = softmax(net(X))[K]
+```
+
+Forward passes run on GPU; the resulting distribution feeds knowledge compilation (exact inference) or Monte Carlo sampling exactly like any other probabilistic fact. Gradients flow back through the compiled circuit into the network's parameters during training.
+
+An embedding declaration `nn(net, [X], E) :: emb(X, E).` does not produce a distribution — `E` is bound to the raw output tensor and is consumed by downstream rules that expect a dense representation.
+
+### Example: MNIST Digit Classification
+
+```xlog
+// Declare a classifier over the 10 MNIST digit labels.
+// The network takes an image index X and produces a distribution over Y.
+nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
+
+// Addition rule: sum of two classified digits.
+// P(addition(X, Y, Z)) marginalizes over all D1, D2 consistent with Z = D1 + D2.
+addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
+```
+
+Python side:
+
+```python
+import pyxlog
+import torch
+
+program = pyxlog.compile("mnist.xlog")
+net = MnistClassifier().cuda()
+optimizer = torch.optim.Adam(net.parameters(), lr=1e-3)
+
+program.register_network("mnist_net", net, optimizer)
+```
+
+### Example: Coin Flip with Symbolic Labels
+
+```xlog
+// Labels are identifiers, not integers.
+nn(coin_net, [X], Y, [heads, tails]) :: coin(X, Y).
+
+// Deterministic rule consumes the neural prediction.
+wins(X) :- coin(X, heads).
+```
+
+### Example: Embedding Lookup
+
+```xlog
+// Embedding mode (nn/3): no label list. The network returns a dense tensor.
+nn(entity_embed, [X], E) :: embed(X, E).
+```
+
+Python side:
+
+```python
+emb = torch.nn.Embedding(num_embeddings=100, embedding_dim=64).cuda()
+program.register_embedding("entity_embed", emb)
+```
+
+### Cross-Registration Validation
+
+A name registered with `register_embedding()` cannot be used with `register_network()`, and vice versa. The compiler infers the registration mode from the declaration arity: `nn/4` declarations require `register_network()`, and `nn/3` declarations require `register_embedding()`. See [Term Embeddings](#term-embeddings) below for the embedding registration API.
+
+For the full Python registration and training API, see [`docs/architecture/python-bindings.md`](architecture/python-bindings.md). For the design rationale, see whitepaper §6 (Neural-Symbolic Bridge) in `docs/whitepaper/main.pdf`.
+
+---
+
+## Learnable Rules
+
+*Added in v0.5.0.*
+
+Learnable rules are parameterized rules whose activation is gated by a named tensor mask. They are the surface syntax for differentiable Inductive Logic Programming (dILP): during training, each candidate rule contributes to the fixpoint proportionally to a soft mask weight; at convergence, argmax selects the winning rule.
+
+### Syntax
+
+```xlog
+learnable(Mask) :: head :- body.
+```
+
+`Mask` is a mask name (starts with an ASCII letter, may contain letters, digits, and underscores; both `W_reach` and `w_reach` are valid). The head and body follow the same syntax as ordinary rules.
+
+### Example
+
+```xlog
+// A learnable transitive-closure-shaped rule, gated by mask W_reach.
+learnable(W_reach) :: reach(X, Y) :- bL(X, Z), bR(Z, Y).
+```
+
+The body predicates `bL` and `bR` are "base" predicates populated from the candidate vocabulary the trainer searches over. Each distinct candidate assignment corresponds to one logit in the `W_reach` tensor.
+
+### How the Mask Participates in Training
+
+During dILP training, the mask tensor is maintained by the Python trainer and passed into the compiled program each step:
+
+1. **Logits → soft probabilities.** Raw logits `W` are passed through a Gumbel-softmax with temperature `τ` to produce a soft probability vector over candidate rules.
+2. **Soft mask gates the fixpoint.** The runtime treats each candidate rule as active with its soft probability, so the fixpoint is a differentiable function of `W`.
+3. **Temperature annealing.** `τ` is annealed over training (cosine schedule, from an initial value toward a floor), driving the soft distribution toward a one-hot selection.
+4. **Argmax decode.** At convergence, `argmax(W)` picks the winning candidate; the discovered rule is emitted as a concrete, mask-free XLOG rule in the learned artifact.
+
+### Training API
+
+Learnable rules are consumed by the `pyxlog.ilp` training API:
+
+```python
+from pyxlog.ilp import train_only, train_and_promote, TrainConfig
+
+source = """
+    learnable(W_reach) :: reach(X, Y) :- bL(X, Z), bR(Z, Y).
+"""
+config = TrainConfig(...)
+
+# Train the mask only; return the learned artifact.
+result = train_only(source, "W_reach", positive_examples, negative_examples, config)
+
+# Train and run the six-gate promotion pipeline (convergence, novel-rate audit,
+# regression check, holdout F1, ambiguity scan, typed schema validation).
+promotion = train_and_promote(source, "W_reach", positive_examples, negative_examples, config)
+```
+
+The second argument is the mask name as declared in the source.
+
+### Multiple Learnable Rules
+
+A program may declare multiple learnable rules, each with a distinct mask name. The trainer maintains one logit tensor per mask and may jointly optimize them:
+
+```xlog
+learnable(W_gp)  :: grandparent(X, Y) :- bL(X, Z), bR(Z, Y).
+learnable(W_col) :: colleague(X, Y)   :- bL(X, Z), bR(Y, Z).
+```
+
+### Cross-References
+
+- [`docs/architecture/dilp-training.md`](architecture/dilp-training.md) — training-loop architecture, sparse mask APIs, temperature controller
+- [`docs/architecture/rfc-tensorized-ilp.md`](architecture/rfc-tensorized-ilp.md) — full RFC: Gumbel-softmax theory, tensorized semi-naive evaluation, hardware rationale
+- [`docs/architecture/python-bindings.md`](architecture/python-bindings.md) — `pyxlog.ilp` API reference (`train_only`, `train_and_promote`, `TrainConfig`, `LearnedArtifact`)
+
+Differentiable ILP is in beta as of v0.5.0; the search space is restricted to definite programs and the API surface may change in minor releases.
 
 ---
 
