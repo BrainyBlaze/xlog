@@ -17,7 +17,7 @@ throwaway prototype.
 - **pyxlog bridge:** `crates/pyxlog/src/ilp_exact.rs` +
   `crates/pyxlog/python/pyxlog/ilp/exact_induce.py`
 - **Parity tests:** `python/tests/test_ilp_exact_induce.py`
-- **Kernel design note:** `docs/plans/2026-04-17-m8-ilp-exact-kernel-design.md`
+- **Internal kernel design note:** `docs/plans/2026-04-17-m8-ilp-exact-kernel-design.md`
 - **Related:** [Differentiable ILP (dILP)](../ROADMAP.md) — the gradient-trained
   counterpart; this engine is exact / bounded and does not use learnable masks.
 
@@ -308,7 +308,7 @@ Returns an `ExactInductionResult` dataclass with `candidates: list[ScoredCandida
 ## See Also
 
 - `docs/plans/2026-04-17-m8-ilp-exact-kernel-design.md` — the original
-  kernel design note (launch geometry, data layout, D2H accounting).
+  internal kernel design note (launch geometry, data layout, D2H accounting).
 - `docs/architecture/cuda-certification.md` — CUDA certification suite
   (C01–C25 + G01–G08); `ilp_exact` is not yet in the formal certification
   registry because its PTX is not committed (see above).

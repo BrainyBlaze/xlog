@@ -14,7 +14,7 @@ query(rain()).
 query(sprinkler()).
 """.strip()
 
-    prog = Program.compile(source, device=0, memory_mb=1024)
+    prog = Program.compile(source, device=0, memory_mb=32768)
     result = prog.evaluate(return_grads=False)
 
     probs = torch.utils.dlpack.from_dlpack(result.prob).cpu().tolist()
@@ -26,4 +26,3 @@ query(sprinkler()).
 
 if __name__ == "__main__":
     main()
-

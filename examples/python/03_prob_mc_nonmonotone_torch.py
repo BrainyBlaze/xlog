@@ -21,7 +21,7 @@ def main() -> None:
     query(flip()).
     """.strip()
 
-    prog = Program.compile(source, device=0, memory_mb=1024)
+    prog = Program.compile(source, device=0, memory_mb=32768)
     result = prog.evaluate(
         return_grads=False,
         samples=samples,

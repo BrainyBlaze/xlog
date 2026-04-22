@@ -144,6 +144,6 @@ The SAT subsystem in XLOG is defined as:
 
 ## See Also
 
-- `docs/design/2026-01-22-gpu-native-compilation-design.md`
-- `docs/research/2026-01-22-architecture-validation-and-refinement.md`
-- `crates/xlog-prob/src/compilation/` (GPU compilation + verification entrypoints)
+- [`../whitepaper/main.pdf`](../whitepaper/main.pdf) — whitepaper discussion of the GPU CDCL verifier in the compiled reasoning pipeline
+- [`xlog-prob.md`](xlog-prob.md) — probabilistic tier that consumes the verifier
+- `crates/xlog-prob/src/compilation/` — GPU compilation and verification entrypoints

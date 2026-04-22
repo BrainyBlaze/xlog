@@ -1,20 +1,22 @@
 # XLOG Development Roadmap
 
-> **Last Updated:** March 8, 2026
-> **Current Version:** v0.5.0
-> **Current Milestone:** v0.5.0 Phase 2 complete (P2a term embeddings, P2b training controls, P3 incremental verifier)
-> **Status:** `main` has P0 zero-D2H chunk merge (two-pass GPU-only), P1 artifact schema migration
-> (beta-v2) + telemetry persistence, P2a term embeddings (`register_embedding`, `forward_embedding`,
-> cross-registration validation, CUDA device-aware lookup), P2b extended training controls (gradient
-> clipping, early stopping, per-network scheduler_step, get/set_lr), P3 incremental verifier
-> (`GpuCdclWorkspace` arena reuse). All 5 release gates pass. Prior: GPU-resident ILP credit/loss,
-> strict zero-D2H CI gate, 4 CUDA kernels, neural-symbolic training, dILP GA trainer, sparse executor.
+> **Last Updated:** April 22, 2026
+> **Current Version:** v0.5.2
+> **Current Milestone:** v0.5.x stabilization and public-release hardening
+> **Status:** `main` includes the v0.5.0 feature line (zero-D2H ILP credit/loss,
+> term embeddings, extended training controls, incremental verifier), plus
+> v0.5.1 bounded exact induction, MC evidence clamping/runtime optimization,
+> and provenance primitives, and v0.5.2 release-publish verification fixes.
+> See `CHANGELOG.md` for patch-release detail.
 
 ---
 
 ## Overview
 
-XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented features and planned development across all system components.
+XLOG is a GPU-native logic programming language for unified symbolic reasoning.
+This roadmap tracks implemented features and planned development across the
+shared language frontend and the deterministic, probabilistic, solver, and
+neural-symbolic backends.
 
 ### Glossary of Terms
 
@@ -326,8 +328,8 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 - [x] `leaf_atoms` / `choice_sources` retained inline during extraction (no new passes)
 - [x] Top-level re-exports in `xlog-prob` lib.rs (`ChoiceSource`, `GroundAtom`, `Provenance`, `Value`, PIR types)
 
-**Design document:** `docs/plans/2026-03-08-provenance-primitives-design.md`
-**Implementation plan:** `docs/plans/2026-03-08-provenance-primitives-plan.md`
+The shipped provenance surface is documented in `CHANGELOG.md` and the public
+`xlog-prob` API.
 
 ### Limitations (Current Version)
 
@@ -416,8 +418,8 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 - [x] ~~Poker (card rank classification)~~ (done: `examples/neural/05_poker/`)
 - [x] ~~CLUTRR (family relationship reasoning)~~ (done: `examples/neural/06_clutrr/`)
 
-**Design document:** `docs/plans/2026-01-20-v0.4.0-neural-symbolic-design.md`
-**Implementation plan:** `docs/plans/v0.4.0-alpha-implementation.md`
+See the whitepaper neural-symbolic section and
+`docs/architecture/python-bindings.md` for the current shipped surface.
 
 ---
 
@@ -509,14 +511,10 @@ XLOG is a GPU-accelerated Datalog query engine. This roadmap tracks implemented 
 - [x] `GpuCompileConfig.incremental_verify` opt-in → `GpuEquivalenceConfig.reuse_workspace`
 - [x] Integration in `check_equivalence_gpu` / `check_equivalence_gpu_gated`
 
-**Design document:** `docs/plans/2026-02-26-dilp-hardening-design.md`
-**Implementation plan:** `docs/plans/2026-02-26-dilp-beta-impl.md`
-**v0.5.0 design:** `docs/plans/2026-03-05-v050-execution-design.md`
-**v0.5.0 Phase 1 plan:** `docs/plans/2026-03-05-v050-implementation.md`
-**P2a design:** `docs/plans/2026-03-08-p2a-term-embeddings-design.md`
-**P2a plan:** `docs/plans/2026-03-08-p2a-term-embeddings.md`
-**P3 design:** `docs/plans/2026-03-08-p3-incremental-verifier-design.md`
-**P3 plan:** `docs/plans/2026-03-08-p3-incremental-verifier.md`
+Shipped design references:
+- `docs/architecture/dilp-training.md`
+- `docs/ilp/rfc-tensorized-ilp.md`
+- `docs/ilp/dilp-showcase-report.md`
 
 ### Planned 📋 (dILP beyond GA)
 
@@ -539,7 +537,7 @@ the `pyxlog.ilp.induce_exact(backend="python")` prototype, with semantically-cor
 per-topology scoring and a single batched kernel launch per request.
 
 Architecture doc: [bounded-exact-induction.md](architecture/bounded-exact-induction.md).
-Kernel design note: `docs/plans/2026-04-17-m8-ilp-exact-kernel-design.md`.
+Internal kernel design note: `docs/plans/2026-04-17-m8-ilp-exact-kernel-design.md`.
 
 ### Implemented ✅ (M8 Phase 1 Stage B — 2026-04-17)
 

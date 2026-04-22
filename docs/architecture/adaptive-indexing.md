@@ -1,9 +1,15 @@
 # Adaptive Indexing Architecture
 
+> **Implementation status (v0.5.2):** statistics gathering is implemented;
+> **heat-driven index construction remains design-only**. `StatsManager`
+> records relation heat and join selectivities, and
+> `OptimizerConfig.index_heat_threshold` exists, but the runtime does not yet
+> build on-the-fly hash indexes from those observations.
+
 ## Overview
 
-Heat-based index selection (HISA) tracks query patterns and builds indexes
-for frequently accessed relations.
+Heat-based index selection (HISA) tracks query patterns and is intended to
+build indexes for frequently accessed relations.
 
 ## Components
 
@@ -15,7 +21,8 @@ for frequently accessed relations.
 ### 2. JoinStrategy
 - Selects optimal join algorithm
 - Options: Hash, NestedLoop, SortMerge, IndexNestedLoop
-- Location: `xlog-runtime/src/statistics.rs`
+- Current runtime dispatch remains Hash-join oriented; the broader strategy
+  space is future work.
 
 ### 3. Executor Integration (Implemented: statistics wiring)
 
@@ -33,6 +40,7 @@ When to build an index:
 3. Relation is stable (not being modified)
 
 ```rust
+// DESIGN ONLY — not currently wired into the executor
 fn maybe_build_index(&mut self, relation: &str) {
     let heat = self.stats.heat(relation);
     if heat > INDEX_HEAT_THRESHOLD && self.memory.remaining_bytes() > INDEX_MIN_MEMORY {

@@ -1,6 +1,18 @@
 # XLOG System Architecture
 
-XLOG is a **GPU-accelerated Datalog query engine** built in Rust with CUDA kernels. It compiles Datalog programs into relational algebra plans and executes them efficiently on NVIDIA GPUs.
+XLOG is a **GPU-native logic programming language for unified symbolic
+reasoning**. Its compiler and runtime span deterministic Datalog evaluation,
+probabilistic inference via knowledge compilation, SAT/MaxSAT verification, and
+differentiable neural-symbolic training on a shared CUDA substrate. A single
+language frontend lowers source programs through staged IRs to GPU-resident
+execution plans rather than splitting the repository into disconnected engines.
+
+This document is the contributor-facing deep reference for that architecture:
+crate decomposition, intermediate representations, residency and memory model,
+backend boundaries, and how the runtime coordinates the four reasoning paths.
+The companion whitepaper in `docs/whitepaper/main.pdf` explains the language
+framing and evaluation results; this document focuses on how the repository is
+structured today.
 
 ## Table of Contents
 
@@ -112,7 +124,7 @@ Source Code
 
 | IR | Purpose | Key Structures |
 |----|---------|----------------|
-| **RIR** | Relational operations for deterministic logic | `Scan`, `Filter`, `Project`, `Join`, `GroupBy`, `Union`, `Distinct`, `Diff`, `Fixpoint` |
+| **RIR** | Relational operations for deterministic logic | `Unit` (identity), `Scan`, `Filter`, `Project`, `Join`, `GroupBy`, `Union`, `Distinct`, `Diff`, `Fixpoint`, `TensorMaskedJoin` |
 | **PIR** | Provenance tracking for probabilistic inference | `PIR_Lit`, `PIR_NegLit`, `PIR_And`, `PIR_Or`, `PIR_Decision` — weighted Boolean formula / circuit terms |
 | **EIR** | Epistemic reasoning structures (planned) | `EAtom`, `SplitPlan`, `GuessSpace`, `PropagationRules`, `TestTask`, `WorldViewCandidate` |
 | **SIR** | Boolean satisfiability and optimization | `SIR_CNF`, `SIR_Cardinality`, `SIR_Weights`, `SIR_Objective`, `SIR_ProofPolicy` |
@@ -279,18 +291,33 @@ XLOG builds on established research in GPU-accelerated databases and probabilist
 ## System Overview
 
 ```
-Datalog Source → Parser → Stratifier → Lowerer/Optimizer → Executor → GPU Kernels → Results
+                                              ┌──> RIR ──> Deterministic executor  (xlog-runtime)
+                                              │             (semi-naive fixpoint on GPU)
+   xlog source ──> Parser ──> Stratifier ──┤
+                                              │──> PIR ──> CNF ──> D4 ──> XGCF
+                                              │             (probabilistic inference; xlog-prob)
+                                              │
+                                              │──> Solver IR (planned) ──> GPU CDCL
+                                              │             (SAT/MaxSAT verification; xlog-solve)
+                                              │
+                                              └──> RIR + dILP masks ──> differentiable trainer
+                                                            (neural-symbolic; xlog-neural + pyxlog)
 ```
 
-XLOG transforms declarative Datalog rules into efficient GPU-parallel operations:
+Common pipeline stages:
 
-- **Parsing**: PEG-based grammar with Pest
-- **Stratification**: Ensures safe negation ordering via SCC (Strongly Connected Component) analysis
-- **Lowering/Optimization**: Converts AST to Relational IR (RIR) and applies rewrites (predicate pushdown, join planning)
-- **Execution**: Interprets RIR nodes using GPU kernels
-- **GPU Kernels**: CUDA implementations of joins, sorts, aggregations, set operations
+- **Parsing**: PEG grammar with Pest in `crates/xlog-logic`
+- **Stratification**: SCC analysis over the predicate dependency graph
+- **Lowering**: AST to backend-specific IR paths (`RIR`, `PIR`, planned solver IR)
+- **Optimization**: predicate pushdown, join planning, and execution-shape rewrites
+- **Execution**: backend interpreters dispatch against the shared CUDA provider
 
-XLOG also includes a probabilistic reasoning tier (`xlog-prob`) with exact knowledge compilation and Monte Carlo sampling. See [xlog-prob Architecture](architecture/xlog-prob.md) for details.
+Each backend has its own deep-dive document: deterministic evaluation in
+[`architecture/gpu-execution.md`](architecture/gpu-execution.md), probabilistic
+inference in [`architecture/xlog-prob.md`](architecture/xlog-prob.md), solver
+services in [`architecture/solver-services.md`](architecture/solver-services.md),
+and neural/dILP execution in
+[`architecture/dilp-training.md`](architecture/dilp-training.md).
 
 ---
 
@@ -1089,6 +1116,11 @@ println!("{}", profiler.summary());
 
 ## Dataflow Diagram
 
+The diagram below depicts the **deterministic Datalog evaluation path**
+end-to-end. The probabilistic, solver, and neural-symbolic paths share the
+parser, stratifier, and kernel provider but branch into their own IRs and
+executors after lowering.
+
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                         XLOG SYSTEM DATAFLOW                            │
@@ -1278,7 +1310,7 @@ cargo test -p xlog-cuda-tests --test certification_suite --release -- --nocaptur
 | [Query Optimizer](architecture/query-optimizer.md) | Cost-based join ordering, predicate pushdown, statistics |
 | [Arithmetic Expressions](architecture/arithmetic-expressions.md) | `is` syntax, type inference, GPU evaluation |
 | [Probabilistic Tier](architecture/xlog-prob.md) | Exact inference (D4/XGCF) and Monte Carlo sampling |
-| [Neural-Symbolic Design](plans/2026-01-20-v0.4.0-neural-symbolic-design.md) | v0.4.0 neural-symbolic integration design |
+| [dILP Training](architecture/dilp-training.md) | Differentiable ILP trainer architecture and the RFC-backed execution model |
 | [Solver Services](architecture/solver-services.md) | GPU CDCL verifier (zero host reads) + CLS SAT/MaxSAT services |
 | [Adaptive Indexing](architecture/adaptive-indexing.md) | HISA-based heat tracking and index selection |
 | [Multi-GPU Joins](architecture/multi-gpu-join.md) | Distributed join design (planned) |

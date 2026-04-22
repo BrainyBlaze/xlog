@@ -1,10 +1,12 @@
 # XLOG Language Reference
 
-> **Release context:** XLOG `v0.5.0`
-> **Language coverage:** Core language surface introduced through `v0.3.2`, still supported in `v0.5.0`
-> **Last Updated:** January 2026 (with release-context note updated April 2026)
+> **Release context:** XLOG `v0.5.2`
+> **Language coverage:** Core language surface through `v0.5.2`
+> **Last Updated:** April 2026
 
-This document provides a comprehensive reference for the XLOG language, covering all syntax, semantics, and features of the GPU-accelerated Datalog query engine.
+This document provides a comprehensive reference for the XLOG language,
+covering all syntax, semantics, and features of XLOG as a GPU-native logic
+programming language.
 
 ---
 
@@ -27,16 +29,21 @@ This document provides a comprehensive reference for the XLOG language, covering
 15. [Modules](#modules)
 16. [Symbols](#symbols)
 17. [Probabilistic Logic](#probabilistic-logic)
-18. [Pragmas and Directives](#pragmas-and-directives)
-19. [Float Predicates and IEEE 754 Semantics](#float-predicates-and-ieee-754-semantics)
-20. [Comments](#comments)
-21. [Complete Grammar Reference](#complete-grammar-reference)
+18. [Neural Predicates](#neural-predicates)
+19. [Learnable Rules](#learnable-rules)
+20. [Term Embeddings](#term-embeddings)
+21. [GPU ILP Configuration](#gpu-ilp-configuration)
+22. [Pragmas and Directives](#pragmas-and-directives)
+23. [Float Predicates and IEEE 754 Semantics](#float-predicates-and-ieee-754-semantics)
+24. [Comments](#comments)
+25. [Complete Grammar Reference](#complete-grammar-reference)
 
 ---
 
 ## Overview
 
-XLOG is a GPU-accelerated Datalog query engine that compiles declarative logic programs into optimized relational plans and executes them on NVIDIA GPUs. It supports:
+XLOG is a GPU-native logic programming language that compiles typed, modular
+logic programs into backend-specific GPU execution paths. It supports:
 
 - **Datalog fundamentals**: Facts, rules, recursive queries, and stratified negation
 - **Arithmetic operations**: Comparisons, computed values via `is`, and built-in functions
@@ -901,7 +908,9 @@ same_status(X, Y) :- item(X, S), item(Y, S), X != Y.
 
 ### Reversible Symbols (v0.3.2)
 
-As of v0.3.2, symbols are **reversible**: the original string value is preserved and displayed in query output. Symbols are stored internally as `u32` IDs with a bidirectional mapping to strings.
+Symbols are **reversible**: the original string value is preserved and
+displayed in query output. Symbols are stored internally as `u32` IDs with a
+bidirectional mapping to strings.
 
 ```xlog
 pred task(symbol, symbol).
@@ -1035,6 +1044,19 @@ XLOG supports two inference engines:
 xlog prob program.xlog --prob-engine mc --samples 10000 --seed 42
 ```
 
+### Monte Carlo Sampling Methods (v0.5.0)
+
+The Monte Carlo engine supports two sampling methods:
+
+| Method | Description |
+|--------|-------------|
+| `Rejection` | Sample from the prior and discard worlds where evidence is not satisfied. |
+| `EvidenceClamping` | Force evidence variables directly in the CUDA sampler when the evidence is forceable at the probabilistic-fact / positive-AD level. |
+
+Evidence clamping avoids wasted samples when rejection acceptance rates are
+low. If evidence is derived, deterministic, or otherwise not directly
+forceable, XLOG falls back to rejection sampling.
+
 ### Negation in Probabilistic Programs
 
 Exact inference supports both stratified and non-monotone negation:
@@ -1096,6 +1118,182 @@ p :- flip.
 q :- not p.
 
 query(p).  // P(p) ≈ 0.5 ± CI
+```
+
+---
+
+## Neural Predicates
+
+*Introduced in v0.5.0.*
+
+Neural predicate declarations embed a neural network directly into an XLOG
+program as a first-class predicate.
+
+### Declaration Forms
+
+**Classification (`nn/4`):**
+
+```xlog
+nn(network_name, [InputVar1, InputVar2, ...], OutputVar, [label1, label2, ...]) :: atom.
+```
+
+**Embedding mode (`nn/3`):**
+
+```xlog
+nn(network_name, [InputVar], OutputVar) :: atom.
+```
+
+### Arguments
+
+| Position | Meaning |
+|----------|---------|
+| `network_name` | Python-side registration name |
+| `[InputVar, ...]` | Input variables passed to the forward pass |
+| `OutputVar` | Predicted label or dense embedding output |
+| `[label1, ...]` | Label set for `nn/4` declarations |
+| `atom` | Predicate template instantiated by the declaration |
+
+### Lowering
+
+For `nn/4`, the network output is treated as a label distribution and lowered
+to probabilistic facts that enter the inference pipeline. For `nn/3`, the
+network output is a dense tensor bound into the program and used through the
+embedding APIs.
+
+### Example: MNIST Classification
+
+```xlog
+nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
+addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
+```
+
+Python side:
+
+```python
+program = pyxlog.Program.compile(source)
+net = MnistClassifier().cuda()
+optimizer = torch.optim.Adam(net.parameters(), lr=1e-3)
+program.register_network("mnist_net", net, optimizer)
+```
+
+### Example: Embedding Mode
+
+```xlog
+nn(entity_embed, [X], E) :: embed(X, E).
+```
+
+Python side:
+
+```python
+embedding = torch.nn.Embedding(100, 64).cuda()
+program.register_embedding("entity_embed", embedding, trainable=True)
+```
+
+### Cross-Registration Validation
+
+Classification declarations (`nn/4`) require `register_network()`. Embedding
+declarations (`nn/3`) require `register_embedding()`. Reusing the same name
+across both forms is rejected.
+
+---
+
+## Learnable Rules
+
+*Introduced in v0.5.0.*
+
+Learnable rules are the source-level surface for differentiable ILP. A rule is
+gated by a named mask tensor:
+
+```xlog
+learnable(W_reach) :: reach(X, Y) :- bL(X, Z), bR(Z, Y).
+```
+
+During training, candidate rules are softly weighted; at convergence, argmax
+selects the winning rule and the learned artifact serializes the concrete
+program.
+
+### Training API
+
+```python
+from pyxlog.ilp import train_only, train_and_promote, TrainConfig
+
+result = train_only(source, "W_reach", positive_examples, negative_examples, TrainConfig(...))
+promotion = train_and_promote(source, "W_reach", positive_examples, negative_examples, TrainConfig(...))
+```
+
+### Multiple Learnable Rules
+
+```xlog
+learnable(W_gp)  :: grandparent(X, Y) :- bL(X, Z), bR(Z, Y).
+learnable(W_col) :: colleague(X, Y)   :- bL(X, Z), bR(Y, Z).
+```
+
+### Cross-References
+
+- [`architecture/dilp-training.md`](architecture/dilp-training.md)
+- [`ilp/rfc-tensorized-ilp.md`](ilp/rfc-tensorized-ilp.md)
+- [`architecture/python-bindings.md`](architecture/python-bindings.md)
+
+---
+
+## Term Embeddings
+
+*Introduced in v0.5.0.*
+
+Term embeddings associate dense vectors with discrete logic terms.
+
+### `register_embedding()`
+
+```python
+program = pyxlog.Program.compile(source)
+embedding = torch.nn.Embedding(100, 64).cuda()
+program.register_embedding("entity_embed", embedding, trainable=True)
+
+weights = torch.randn(100, 64).cuda()
+program.register_embedding("pretrained_emb", weights, trainable=False)
+```
+
+### `forward_embedding()`
+
+```python
+vectors = program.forward_embedding("entity_embed", [0, 5, 12])
+```
+
+The returned tensor stays on the same device as the registered embedding. For a
+trainable `nn.Embedding`, gradients remain attached; for frozen tensors they do
+not.
+
+**Current scope:** explicit training-side embedding registration and batched
+lookup are supported. Rule-level embedding inference remains deferred.
+
+---
+
+## GPU ILP Configuration
+
+*Introduced in v0.5.0.*
+
+The GPU-resident ILP path exposes runtime configuration and telemetry through
+Python.
+
+### `coo_chunk_budget`
+
+Controls the per-chunk temporary allocation ceiling used during sparse COO
+construction on GPU:
+
+```python
+trainer.set_coo_chunk_budget(256 * 1024 * 1024)
+```
+
+The older `coo_memory_cap` naming is deprecated.
+
+### `host_transfer_stats()`
+
+Training APIs expose transfer telemetry so strict zero-D2H workflows can verify
+that the hot path stayed device-resident:
+
+```python
+stats = trainer.host_transfer_stats()
+trainer.reset_host_transfer_stats()
 ```
 
 ---

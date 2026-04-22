@@ -6,13 +6,13 @@ This document describes the XLOG CUDA/PTX kernel certification test suite, which
 
 The certification suite is implemented in the `xlog-cuda-tests` crate and provides comprehensive coverage of all CUDA kernel operations.
 
-**As of:** February 3, 2026 (`main` / current HEAD)
+**As of:** April 2026 (`main` / current HEAD)
 
 | Metric | Value |
 |--------|-------|
 | Total tests | 206 |
 | Categories | 33 (C01-C25 + G01-G08) |
-| PTX modules | 19 |
+| PTX modules | 22 |
 | Execution mode | GPU-only (requires CUDA hardware) |
 
 ## Crate Structure
@@ -127,6 +127,8 @@ Category C01 enumerates every `.entry` in each PTX module and verifies resolutio
 | `mc_sample.ptx` | `mc_sample_bernoulli` |
 | `mc_eval.ptx` | `mc_eval_*` |
 | `sat.ptx` | `sat_*`, `cdcl_*` |
+| `ilp.ptx` | `ilp_*` kernels for sparse mask and dILP operations |
+| `ilp_credit.ptx` | `ilp_credit_*` kernels for GPU-resident credit/loss |
 | `weights.ptx` | `weights_fill_*`, `weights_apply_evidence`, `weights_map_nodes_to_vars` |
 
 ### Build-time compiled ILP-family modules

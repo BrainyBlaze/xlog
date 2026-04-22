@@ -85,7 +85,7 @@ from pyxlog import dlpack_roundtrip
 s = cudf.Series([1, 2, 3], dtype="int32")
 
 # Returns a DLPack capsule for the round-tripped column.
-out_capsule = dlpack_roundtrip(s, device=0, memory_mb=1024)
+out_capsule = dlpack_roundtrip(s, device=0, memory_mb=32768)
 
 # Convert back to a CuPy array to validate the bytes made the round trip.
 out = cp.fromDlpack(out_capsule)

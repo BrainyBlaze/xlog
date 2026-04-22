@@ -1,51 +1,9 @@
 # Arithmetic Expressions
 
-This document describes XLOG's arithmetic expression support using Prolog/Datalog-style `is` syntax, enabling computation within logic programs while maintaining GPU-accelerated execution.
-
-## Syntax
-
-XLOG uses the standard Prolog `is` syntax for arithmetic:
-
-```prolog
-% Bind fresh variable Z to the result of expression
-Z is X + Y
-```
-
-The left-hand side must be a **fresh (unbound) variable**. The right-hand side is an arithmetic expression referencing bound variables.
-
-## Supported Operations
-
-| Category | Operations | Notes |
-|----------|------------|-------|
-| Binary | `+`, `-`, `*`, `/`, `%` | Modulo (`%`) requires integer types |
-| Unary | `abs` | Absolute value |
-| Binary functions | `min`, `max`, `pow` | `pow` always returns `f64` |
-| Type conversion | `cast` | Explicit type casting |
-
-### Operator Precedence
-
-- `*`, `/`, `%` bind tighter than `+`, `-`
-- Parentheses override precedence
-
-## Grammar
-
-```pest
-arith_op = { "+" | "-" | "*" | "/" | "%" }
-builtin_fn = { "abs" | "min" | "max" | "pow" | "cast" }
-
-arith_primary = {
-    builtin_fn ~ "(" ~ arith_expr ~ ("," ~ (arith_expr | type_spec))* ~ ")" |
-    "(" ~ arith_expr ~ ")" |
-    variable |
-    integer |
-    float_num
-}
-
-arith_term = { arith_primary ~ (("*" | "/" | "%") ~ arith_primary)* }
-arith_expr = { arith_term ~ (("+" | "-") ~ arith_term)* }
-
-is_expr = { variable ~ "is" ~ arith_expr }
-```
+This document describes how XLOG compiles and executes arithmetic expressions on
+the GPU. It complements the user-facing syntax reference in
+[`../language-reference.md`](../language-reference.md): start there if you need
+surface syntax, precedence, built-ins, or worked examples.
 
 ## AST Representation
 
@@ -71,6 +29,9 @@ pub enum ArithExpr {
 
     // Type cast: cast(expr, target_type)
     Cast(Box<ArithExpr>, ScalarType),
+
+    // User-defined function call (inlined before lowering)
+    FuncCall { name: String, args: Vec<ArithExpr> },
 }
 
 /// Is-expression for variable binding
@@ -93,7 +54,8 @@ pub struct IsExpr {
 | Integer literal | - | `i64` |
 | Float literal | - | `f64` |
 
-**Type mismatch**: Clear error message guides users to use `cast()`.
+Type mismatches are rejected during inference with a source-located diagnostic
+that directs users to `cast()` when needed.
 
 ## Lowering to RIR
 
@@ -142,7 +104,8 @@ pub enum ProjectExpr {
 
 ## GPU Execution
 
-Arithmetic expressions are evaluated on the GPU using existing arithmetic kernels.
+Arithmetic expressions are evaluated on the GPU through the arithmetic support
+inside `CudaKernelProvider`.
 
 ### Evaluation Strategy
 
@@ -178,64 +141,14 @@ safe_ratio(X, Y, R) :-
     R is X / Y.
 ```
 
-## Examples
-
-### Basic Arithmetic
-
-```prolog
-increment(X, Y) :- value(X), Y is X + 1.
-```
-
-### Complex Expression
-
-```prolog
-distance(A, B, D) :-
-    point(A, X1, Y1),
-    point(B, X2, Y2),
-    DX is X2 - X1,
-    DY is Y2 - Y1,
-    D is pow(DX * DX + DY * DY, 0.5).
-```
-
-### Type Casting
-
-```prolog
-ratio(X, R) :-
-    count(X, N),
-    total(T),
-    R is cast(N, f64) / cast(T, f64).
-```
-
-### Recursive with Arithmetic (Fibonacci)
-
-```prolog
-fib(0, 1).
-fib(1, 1).
-fib(N, F) :-
-    fib(N1, F1),
-    fib(N2, F2),
-    N is N1 + 1,
-    N1 is N2 + 1,
-    F is F1 + F2,
-    N < 10.
-```
-
 ## Scoping Rules
 
-- `is` bindings are **body-only** — cannot appear in rule heads
-- Target variable must be **fresh** (unbound before the `is`)
-- All variables in the expression must be **bound** (from prior atoms or `is` expressions)
-- Left-to-right evaluation order within rule body
-
-## Limitations
-
-Not supported:
-- Arithmetic in rule heads (use `is` in body instead)
-- String operations (separate feature)
-- Automatic type coercion (use explicit `cast`)
-- User-defined functions (future work)
+- `is` bindings are body-only and cannot appear in rule heads.
+- The target variable must be fresh at the point of the `is`.
+- All variables referenced by the expression must already be bound.
 
 ## See Also
 
-- [GPU Execution](gpu-execution.md) — How arithmetic is evaluated on GPU
-- [Query Optimizer](query-optimizer.md) — Projection optimization
+- [`../language-reference.md`](../language-reference.md) — syntax, operators, and examples
+- [GPU Execution](gpu-execution.md) — execution details for computed expressions
+- [Query Optimizer](query-optimizer.md) — projection and pushdown behavior

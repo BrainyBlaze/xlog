@@ -5,7 +5,7 @@ Neural-symbolic training examples demonstrating integration where neural network
 ## Overview
 
 These examples exercise XLOG's neural-symbolic training stack, introduced during the
-`v0.4.0-alpha` milestone and available in the current `v0.5.0` release line:
+`v0.4.0-alpha` milestone and available in the current `v0.5.x` release line:
 
 - **Neural Predicates**: `nn(network, [inputs], output, [labels]) :: predicate(args).`
 - **Network Registration**: PyTorch networks with optimizers and schedulers
@@ -140,5 +140,6 @@ print(f"Final loss: {history.epoch_losses[-1]}")
 
 ## References
 
-- [XLOG Design Doc](../../docs/plans/2026-01-20-v0.4.0-neural-symbolic-design.md) — v0.4.0 neural-symbolic design
-- [Implementation Plan](../../docs/plans/v0.4.0-alpha-implementation.md) — v0.4.0-alpha implementation details
+- [Whitepaper](../../docs/whitepaper/main.pdf) — architecture, language framing, and neural-symbolic design context
+- [Python Bindings](../../docs/architecture/python-bindings.md) — `register_network`, `register_embedding`, training-loop APIs, and result surfaces
+- [dILP Training](../../docs/architecture/dilp-training.md) — differentiable ILP architecture and trainer contract

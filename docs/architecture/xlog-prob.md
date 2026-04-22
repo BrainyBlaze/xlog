@@ -134,9 +134,10 @@ The GPU-native encoder (`encode_cnf_gpu`) in `crates/xlog-prob/src/compilation/g
 
 ## GPU-Native Compilation + Verification (v0.5.0 foundation)
 
-XLOG’s target architecture is a **100% GPU-native** compilation + verification path (GPU D4 + GPU CDCL verifier) with
-**zero data-plane host transfers**. This path is now integrated into `ExactDdnnfProgram` (see
-`docs/design/2026-01-22-gpu-native-compilation-design.md`):
+XLOG’s target architecture is a **100% GPU-native** compilation + verification
+path (GPU D4 + GPU CDCL verifier) with **zero data-plane host transfers**. This
+path is integrated into `ExactDdnnfProgram` and described in the whitepaper's
+probabilistic and solver sections:
 
 - `xlog_prob::compilation::validate_equivalence_gpu` proves `φ ≡ C` by solving two UNSAT queries on GPU:
   - `UNSAT(φ ∧ ¬C)`
@@ -223,18 +224,18 @@ Host-readable probability outputs are behind `--features host-io`:
 
 The PyO3 extension `crates/pyxlog` exposes two entry points:
 
-- `Program.compile(source, device=0, memory_mb=1024, prob_engine=None) -> CompiledProgram`
+- `Program.compile(source, device=0, memory_mb=32768, prob_engine=None) -> CompiledProgram`
   - `CompiledProgram.evaluate(return_grads=False, ...) -> EvalResult`
   - outputs probabilities as DLPack tensors (`prob`, `log_prob`)
   - exact engine optionally returns per-query gradients (`grad_true`, `grad_false`)
   - MC engine returns uncertainty metadata and sets `approx=True`
-- `LogicProgram.compile(source, device=0, memory_mb=1024) -> CompiledLogicProgram`
+- `LogicProgram.compile(source, device=0, memory_mb=32768) -> CompiledLogicProgram`
   - `CompiledLogicProgram.evaluate(dlpack_inputs={...}) -> LogicEvalResult`
 
 All GPU table interchange is via DLPack capsules (framework-agnostic). See `examples/python/` for end-to-end scripts.
 
-For training workloads with neural predicates, `pyxlog` uses the **GPU neural fast-path** described in
-`docs/design/2026-01-22-gpu-native-compilation-design.md` §5.3:
+For training workloads with neural predicates, `pyxlog` uses the **GPU neural
+fast-path**:
 - neural outputs are imported as CUDA tensors via DLPack (no `.tolist()`),
 - AD-chain weights and probability gradients are computed on GPU (`kernels/neural.cu`),
 - Torch receives device-resident gradients via `output.backward(grad)`.
@@ -306,11 +307,8 @@ pub use pir::{ChoiceVarId, LeafId, PirGraph, PirNode, PirNodeId};
 pub use provenance::{ChoiceSource, GroundAtom, Provenance, Value};
 ```
 
-### Design documents
-
-- `docs/plans/2026-03-08-provenance-primitives-design.md`
-- `docs/plans/2026-03-08-provenance-primitives-plan.md`
-- `docs/xlog-change-request-provenance.md` (original change request)
+The provenance API shipped after the v0.5.0 release cut; use `CHANGELOG.md` and
+the crate-level API docs as the authoritative references.
 
 ---
 

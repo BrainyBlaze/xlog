@@ -1,0 +1,24 @@
+# LaTeX build artifacts
+*.aux
+*.bbl
+*.bcf
+*.blg
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.run.xml
+*.synctex.gz
+*.toc
+*.lof
+*.lot
+*.nav
+*.snm
+*.vrb
+
+# Keep figure PDFs committed, ignore any build temp
+figures/*.tmp
+
+# Build output — do NOT ignore main.pdf; it is the deliverable and should ship
+# (Remove the next line if you prefer the PDF untracked.)
+# main.pdf

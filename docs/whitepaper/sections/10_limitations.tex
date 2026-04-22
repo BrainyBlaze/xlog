@@ -1,0 +1,27 @@
+\section{Limitations and Future Work}\label{sec:limits}
+
+\subsection{Current Limitations}
+
+\textbf{NVIDIA GPU required.} xlog targets CUDA exclusively. The entire execution stack---from hash-join kernels and radix sort to Monte Carlo sampling and knowledge compilation---is written in CUDA C. There is no OpenCL, Metal, or ROCm backend. This is a direct consequence of the GPU-native design philosophy: rather than abstracting over heterogeneous devices behind a portability layer, xlog commits to a single GPU programming model to exploit CUDA-specific features such as cooperative groups, warp-level primitives, and unified virtual addressing. Users without an NVIDIA GPU cannot run xlog.
+
+\textbf{All data must fit in GPU memory.} Relations, indices, circuit buffers, and Monte Carlo sample arrays are allocated entirely on-device. There is no out-of-core spilling mechanism; a program whose working set exceeds GPU VRAM will fail with a \texttt{RESOURCE\_EXHAUSTED} error rather than degrade silently. For most Datalog workloads this is not a bottleneck---a 24\,GB GPU holds billions of 8-byte tuples---but large-scale knowledge graphs or high-sample-count MC inference can hit the ceiling.
+
+\textbf{Python batch queries coerce to u32 entity IDs.} The core Rust engine supports typed relation schemas with u32, u64, i32, i64, f32, f64, and symbol columns. However, the Python batch-query interface---\texttt{batch\_fact\_membership} and \texttt{batch\_tagged\_credit}---marshals all facts through a \texttt{u32} path. Entity IDs wider than 32 bits or non-integer column types are silently truncated when accessed from Python. The typed path works end-to-end in Rust; the Python limitation is a binding-layer gap, not an engine restriction.
+
+\textbf{Differentiable ILP is beta.} The dILP subsystem---structure learning via gradient-based rule search---shipped in v0.4.0 and received significant reliability and performance work in v0.5.0. It remains beta: the search space is restricted to definite programs, convergence is sensitive to learning-rate schedules, and the API surface may change in minor releases.
+
+\textbf{No formal head-to-head benchmarks.} xlog's probabilistic inference pipeline occupies similar territory to DeepProbLog, but no controlled comparison on identical programs and datasets exists. The baseline experiments in \Cref{sec:eval} use different dataset sizes and evaluation protocols. Claims of speedup relative to CPU-based probabilistic logic systems remain informal until such benchmarks are published.
+
+\subsection{Future Work}
+
+The following directions are planned but \textbf{not yet implemented} in any released version of xlog.
+
+\textbf{Epistemic logic programming (xlog-elp).} The EIR (Epistemic Intermediate Representation) slot is reserved in the IR stack (\Cref{sec:arch}), but no runtime code has been written. The planned design supports world views under FAEEL (Founded Autoepistemic Equilibrium Logic) semantics with modal operators K (known in all belief sets) and M (possible in some belief set), evaluated via a Generate--Propagate--Test algorithm on GPU. This is targeted for v0.6.0 (\texttt{docs/ROADMAP.md}).
+
+\textbf{Out-of-core execution.} For programs whose materialized relations exceed GPU memory, a streaming execution mode would partition relations across host and device, paging tiles through GPU memory in fixpoint-iteration order. This would remove the single-GPU-memory ceiling described above, at the cost of added host-device transfer overhead.
+
+\textbf{Magic sets transformation.} Top-down query-directed rewriting would restrict bottom-up evaluation to tuples reachable from a given query, potentially yielding orders-of-magnitude reduction in materialized facts for selective queries. The optimizer currently performs predicate pushdown and cost-based join planning (\Cref{sec:datalog}) but does not yet rewrite the program itself.
+
+\textbf{Multi-GPU partitioned evaluation.} Inspired by mnmgDatalog's radix-hash partitioning and GPU-aware all-to-all shuffle, a multi-GPU backend would distribute relations across devices and coordinate join and union operations via NVLink or PCIe. Partitioning kernels are described in the roadmap but unimplemented.
+
+\textbf{Incremental parsing.} The pest-based PEG parser currently re-parses the entire program on every change. An incremental mode would re-compile only modified rules, enabling tighter interactive feedback loops in notebook and REPL workflows.

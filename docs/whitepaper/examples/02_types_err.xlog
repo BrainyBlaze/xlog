@@ -1,0 +1,12 @@
+// Ill-typed by design: `bridge` column 1 is symbol, but A is constrained to u32
+// by `connected(A, B)` and `node(A, _)`.
+pred node(u32, symbol).
+pred connected(u32, u32).
+pred bridge(symbol, u32).
+
+node(1, "alice").
+connected(1, 2).
+
+bridge(A, B) :- connected(A, B), node(A, _).
+
+?- bridge(W, X).
