@@ -26,7 +26,7 @@ Documentation = "https://github.com/BrainyBlaze/xlog/blob/main/docs/architecture
 python-source = "python"
 module-name = "pyxlog._native"
 compatibility = "pypi"
-features = ["pyo3/extension-module", "host-io"]
+features = ["extension-module", "host-io"]
 include = [
   { path = "pyxlog/kernels/*", format = "wheel" },
 ]

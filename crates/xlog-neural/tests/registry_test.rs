@@ -11,14 +11,7 @@ use xlog_neural::{NetworkConfig, NetworkRegistry};
 fn test_registry_register_and_get() {
     let mut registry = NetworkRegistry::new();
 
-    let config = NetworkConfig {
-        name: "mnist_net".to_string(),
-        batching: true,
-        k: None,
-        det: false,
-        cache_enabled: true,
-        cache_size: 10000,
-    };
+    let config = NetworkConfig::default("mnist_net");
 
     registry.register(config);
 
@@ -68,14 +61,9 @@ fn test_registry_names() {
 fn test_network_config_with_k() {
     let mut registry = NetworkRegistry::new();
 
-    let config = NetworkConfig {
-        name: "top_k_net".to_string(),
-        batching: true,
-        k: Some(5),
-        det: false,
-        cache_enabled: true,
-        cache_size: 1000,
-    };
+    let config = NetworkConfig::default("top_k_net")
+        .k(Some(5))
+        .cache(true, 1000);
 
     registry.register(config);
 
@@ -87,14 +75,10 @@ fn test_network_config_with_k() {
 fn test_network_config_deterministic() {
     let mut registry = NetworkRegistry::new();
 
-    let config = NetworkConfig {
-        name: "det_net".to_string(),
-        batching: false,
-        k: None,
-        det: true,
-        cache_enabled: false,
-        cache_size: 0,
-    };
+    let config = NetworkConfig::default("det_net")
+        .batching(false)
+        .det(true)
+        .cache(false, 0);
 
     registry.register(config);
 

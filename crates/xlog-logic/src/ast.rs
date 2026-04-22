@@ -110,16 +110,23 @@ pub enum ArithExpr {
 
     /// User-defined function call
     FuncCall {
+        /// Function name being invoked.
         name: String,
+        /// Positional arguments supplied to the function.
         args: Vec<ArithExpr>,
     },
 
     /// Conditional expression (for expanded function bodies)
     Conditional {
+        /// Left operand of the condition.
         cond_left: Box<ArithExpr>,
+        /// Comparison operator used in the condition.
         cond_op: CompOp,
+        /// Right operand of the condition.
         cond_right: Box<ArithExpr>,
+        /// Expression evaluated when the condition is true.
         then_expr: Box<ArithExpr>,
+        /// Expression evaluated when the condition is false.
         else_expr: Box<ArithExpr>,
     },
 }

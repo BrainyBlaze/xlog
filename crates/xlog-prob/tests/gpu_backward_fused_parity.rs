@@ -132,14 +132,15 @@ fn fused_backward_matches_per_level() {
         .expect("set weights");
 
     let var_cap = (max_var + 1) as u32;
-    let config = GpuCircuitCacheConfig {
-        num_slots: 2,
-        table_size: 4,
-        node_cap: 16,
-        edge_cap: 16,
-        level_cap: 16,
-        var_cap,
-        ..Default::default()
+    let config = {
+        let mut config = GpuCircuitCacheConfig::default();
+        config.num_slots = 2;
+        config.table_size = 4;
+        config.node_cap = 16;
+        config.edge_cap = 16;
+        config.level_cap = 16;
+        config.var_cap = var_cap;
+        config
     };
 
     let mut cache = GpuCircuitCache::new(&provider, config).expect("cache");

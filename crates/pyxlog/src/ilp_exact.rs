@@ -165,8 +165,8 @@ impl CompiledIlpProgram {
 }
 
 fn empty_result_dict(py: Python<'_>) -> PyResult<PyObject> {
-    let d = PyDict::new_bound(py);
-    let empty_candidates = PyList::empty_bound(py);
+    let d = PyDict::new(py);
+    let empty_candidates = PyList::empty(py);
     d.set_item("candidates", empty_candidates)?;
     d.set_item("total_scored", 0u32)?;
     d.set_item("candidate_count", 0u32)?;
@@ -194,9 +194,9 @@ fn result_to_py_dict(
             })
     };
 
-    let candidates_list = PyList::empty_bound(py);
+    let candidates_list = PyList::empty(py);
     for c in &result.candidates {
-        let entry = PyDict::new_bound(py);
+        let entry = PyDict::new(py);
         entry.set_item("topology", c.topology.as_str())?;
         entry.set_item("head_relation", head_relation)?;
         entry.set_item("left_relation", name_of(c.left_rel_idx)?)?;
@@ -210,7 +210,7 @@ fn result_to_py_dict(
         candidates_list.append(entry)?;
     }
 
-    let d = PyDict::new_bound(py);
+    let d = PyDict::new(py);
     d.set_item("candidates", candidates_list)?;
     d.set_item("total_scored", result.total_scored)?;
     d.set_item("candidate_count", result.candidate_count)?;

@@ -10,7 +10,7 @@ use xlog_core::{ScalarType, Schema};
 use xlog_cuda::CudaDevice;
 
 /// Run all tests in this category.
-pub(crate) fn run_all(ctx: &TestContext) -> CategoryResult {
+pub fn run_all(ctx: &TestContext) -> CategoryResult {
     let mut results = CategoryResult::new("c20_multi_gpu");
     let start = Instant::now();
 

@@ -81,13 +81,14 @@ fn cdcl_config_from_learned_bytes(
 
     let reduce_interval = restart_base.saturating_mul(20);
 
-    GpuCdclConfig {
-        max_learned_clauses,
-        max_learned_lits,
-        max_proof_u32,
-        restart_base,
-        reduce_interval,
-        ..Default::default()
+    {
+        let mut config = GpuCdclConfig::default();
+        config.max_learned_clauses = max_learned_clauses;
+        config.max_learned_lits = max_learned_lits;
+        config.max_proof_u32 = max_proof_u32;
+        config.restart_base = restart_base;
+        config.reduce_interval = reduce_interval;
+        config
     }
 }
 

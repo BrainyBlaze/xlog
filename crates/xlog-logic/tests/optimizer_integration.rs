@@ -178,14 +178,13 @@ fn test_optimizer_with_aggregation() {
 /// Test optimizer with custom configuration affecting cost estimation.
 #[test]
 fn test_optimizer_config_integration() {
-    let config = OptimizerConfig {
-        dp_threshold: 5,
-        index_heat_threshold: 0.5,
-        enable_pushdown: true,
-        default_filter_selectivity: 0.2,
-        transfer_cost_multiplier: 50.0,
-        default_bytes_per_row: 64,
-    };
+    let mut config = OptimizerConfig::default();
+    config.dp_threshold = 5;
+    config.index_heat_threshold = 0.5;
+    config.enable_pushdown = true;
+    config.default_filter_selectivity = 0.2;
+    config.transfer_cost_multiplier = 50.0;
+    config.default_bytes_per_row = 64;
 
     let stats = Arc::new(StatsManager::new());
     let optimizer = Optimizer::with_config(stats, config);
@@ -214,23 +213,19 @@ fn test_optimizer_pushdown_config() {
 
     // Test with pushdown enabled
     let stats_enabled = Arc::new(StatsManager::new());
-    let optimizer_enabled = Optimizer::with_config(
-        stats_enabled,
-        OptimizerConfig {
-            enable_pushdown: true,
-            ..Default::default()
-        },
-    );
+    let optimizer_enabled = Optimizer::with_config(stats_enabled, {
+        let mut config = OptimizerConfig::default();
+        config.enable_pushdown = true;
+        config
+    });
 
     // Test with pushdown disabled
     let stats_disabled = Arc::new(StatsManager::new());
-    let optimizer_disabled = Optimizer::with_config(
-        stats_disabled,
-        OptimizerConfig {
-            enable_pushdown: false,
-            ..Default::default()
-        },
-    );
+    let optimizer_disabled = Optimizer::with_config(stats_disabled, {
+        let mut config = OptimizerConfig::default();
+        config.enable_pushdown = false;
+        config
+    });
 
     // Both optimizers should produce valid cost estimates
     for scc_rules in &plan.rules_by_scc {
@@ -406,10 +401,8 @@ fn test_optimizer_hot_relation_tracking() {
     // Minimal access to relation 3
     stats_mgr.record_access(RelId(3));
 
-    let config = OptimizerConfig {
-        index_heat_threshold: 0.3,
-        ..Default::default()
-    };
+    let mut config = OptimizerConfig::default();
+    config.index_heat_threshold = 0.3;
     let optimizer = Optimizer::with_config(Arc::new(stats_mgr), config);
 
     let hot_rels = optimizer.recommend_indexes();
@@ -542,10 +535,8 @@ fn test_plan_cost_operations() {
 #[test]
 fn test_optimizer_algorithm_selection() {
     let stats = Arc::new(StatsManager::new());
-    let config = OptimizerConfig {
-        dp_threshold: 3,
-        ..Default::default()
-    };
+    let mut config = OptimizerConfig::default();
+    config.dp_threshold = 3;
     let optimizer = Optimizer::with_config(stats, config);
 
     // Single relation: should use DP

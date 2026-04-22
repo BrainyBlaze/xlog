@@ -100,8 +100,8 @@ pub const NONMONOTONE_SEMANTICS: &str = "Synchronous iteration per SCC; if a fix
 #[non_exhaustive]
 /// Configuration for Monte Carlo probabilistic inference.
 ///
-/// Use [`McEvalConfig::default()`] as a starting point and override individual
-/// fields with the functional-update syntax (`McEvalConfig { samples: 50_000, ..Default::default() }`).
+/// Use [`McEvalConfig::default()`] as a starting point and then update the
+/// individual fields you need.
 pub struct McEvalConfig {
     /// Number of Monte Carlo samples.
     pub samples: usize,

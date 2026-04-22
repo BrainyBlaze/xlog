@@ -100,6 +100,7 @@ impl NetworkHandle {
     /// Check if the PyTorch module has been set.
     /// Without Python feature, always returns false.
     #[cfg(not(feature = "python"))]
+    /// Report whether a Python module/tensor handle is attached.
     pub fn has_module(&self) -> bool {
         false
     }

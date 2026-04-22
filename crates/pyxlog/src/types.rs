@@ -55,7 +55,7 @@ pub(crate) fn create_torch_tensor(
     py: pyo3::Python<'_>,
     value: f64,
 ) -> pyo3::PyResult<pyo3::PyObject> {
-    let torch = py.import_bound("torch")?;
+    let torch = py.import("torch")?;
     let tensor = torch.call_method1("tensor", (value,))?;
     Ok(tensor.into())
 }

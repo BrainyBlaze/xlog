@@ -92,7 +92,7 @@ pub(crate) fn dlpack_capsule_from_tensor(
     }
     // SAFETY: capsule is a non-null owned pointer returned by PyCapsule_New; PyO3 takes ownership
     let obj: Py<PyAny> = unsafe { Py::from_owned_ptr(py, capsule) };
-    Ok(obj.into_py(py))
+    Ok(obj)
 }
 
 #[cfg(feature = "arrow-device-import")]
@@ -149,7 +149,7 @@ pub(crate) fn arrow_device_capsule_from_device_array(
     }
     // SAFETY: capsule validity was checked immediately before this call; pointer lifetime is managed by the capsule
     let obj: Py<PyAny> = unsafe { Py::from_owned_ptr(py, capsule) };
-    Ok(obj.into_py(py))
+    Ok(obj)
 }
 
 #[cfg(feature = "arrow-device-import")]

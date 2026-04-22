@@ -2,7 +2,7 @@ ACTIONLINT ?= actionlint
 SHELLCHECK ?= shellcheck
 PACKAGE_OUTPUT ?= dist
 
-.PHONY: doctor build build-host-io check package validate-release-local lint-workflows lint-shell check-tracked-ignored
+.PHONY: doctor build build-host-io check check-warnings package validate-release-local lint-workflows lint-shell check-tracked-ignored
 
 doctor:
 	python scripts/xlog_doctor.py
@@ -60,6 +60,9 @@ build-host-io:
 
 check:
 	cargo test --workspace --all-targets --exclude pyxlog
+
+check-warnings:
+	bash scripts/check_warning_free.sh
 
 package:
 	bash scripts/package_cli_release.sh --output $(PACKAGE_OUTPUT)

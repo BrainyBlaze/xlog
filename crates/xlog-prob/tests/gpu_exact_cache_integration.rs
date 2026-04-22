@@ -6,6 +6,13 @@ use xlog_core::MemoryBudget;
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 use xlog_prob::exact::{ExactDdnnfProgram, GpuConfig};
 
+fn gpu_config(memory_bytes: u64) -> GpuConfig {
+    let mut config = GpuConfig::default();
+    config.device_ordinal = 0;
+    config.memory_bytes = memory_bytes;
+    config
+}
+
 #[test]
 fn exact_gpu_cache_hit_reuses_circuit() {
     let device = match CudaDevice::new(0) {
@@ -25,11 +32,7 @@ fn exact_gpu_cache_hit_reuses_circuit() {
 0.5::a().
 query(a()).
 "#;
-    let config = GpuConfig {
-        device_ordinal: 0,
-        memory_bytes: 1 << 30,
-        ..Default::default()
-    };
+    let config = gpu_config(1 << 30);
 
     let prog = ExactDdnnfProgram::compile_source_with_gpu(source, config).expect("compile");
     let r1 = prog.evaluate().expect("eval 1");

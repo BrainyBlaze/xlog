@@ -47,23 +47,46 @@ impl LoadedModule {
 pub enum ModuleError {
     /// Module file not found
     NotFound {
+        /// Logical module path that failed to resolve.
         path: ModulePath,
+        /// Filesystem locations that were searched.
         searched: Vec<PathBuf>,
     },
     /// Circular import detected
-    CircularImport { cycle: Vec<ModulePath> },
+    CircularImport {
+        /// Ordered import cycle that was discovered.
+        cycle: Vec<ModulePath>,
+    },
     /// Name conflict between imports
     ImportConflict {
+        /// Imported symbol name that collided.
         name: String,
+        /// First module providing the name.
         module1: ModulePath,
+        /// Second module providing the same name.
         module2: ModulePath,
     },
     /// Attempted to import private predicate
-    PrivatePredicate { name: String, module: ModulePath },
+    PrivatePredicate {
+        /// Predicate name that is not exported.
+        name: String,
+        /// Module that owns the private predicate.
+        module: ModulePath,
+    },
     /// Predicate not found in module
-    PredicateNotFound { name: String, module: ModulePath },
+    PredicateNotFound {
+        /// Predicate name that could not be found.
+        name: String,
+        /// Module that was expected to export the predicate.
+        module: ModulePath,
+    },
     /// Parse error in module
-    ParseError { path: PathBuf, message: String },
+    ParseError {
+        /// Source file path that failed to parse.
+        path: PathBuf,
+        /// Human-readable parse failure message.
+        message: String,
+    },
 }
 
 impl std::fmt::Display for ModuleError {

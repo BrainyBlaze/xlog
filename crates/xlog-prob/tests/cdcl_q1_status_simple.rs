@@ -146,13 +146,14 @@ fn cdcl_config_from_compile(config: &GpuCompileConfig) -> xlog_core::Result<GpuC
             xlog_core::XlogError::Compilation("cdcl reduce_interval overflow".to_string())
         })?;
 
-    Ok(GpuCdclConfig {
-        max_learned_clauses,
-        max_learned_lits,
-        max_proof_u32,
-        restart_base: config.cdcl_restart_interval,
-        reduce_interval,
-        ..Default::default()
+    Ok({
+        let mut cdcl_config = GpuCdclConfig::default();
+        cdcl_config.max_learned_clauses = max_learned_clauses;
+        cdcl_config.max_learned_lits = max_learned_lits;
+        cdcl_config.max_proof_u32 = max_proof_u32;
+        cdcl_config.restart_base = config.cdcl_restart_interval;
+        cdcl_config.reduce_interval = reduce_interval;
+        cdcl_config
     })
 }
 

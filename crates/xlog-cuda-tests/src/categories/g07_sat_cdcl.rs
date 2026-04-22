@@ -11,7 +11,7 @@ use xlog_cuda::CudaKernelProvider;
 use xlog_solve::{Clause, GpuCdclConfig, GpuCdclSolver, GpuCnf, Literal, SolveInstance};
 
 /// Run all tests in this category.
-pub(crate) fn run_all(ctx: &TestContext) -> CategoryResult {
+pub fn run_all(ctx: &TestContext) -> CategoryResult {
     let start = Instant::now();
     let mut results = CategoryResult::new("g07_sat_cdcl");
 

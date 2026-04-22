@@ -28,7 +28,7 @@ use xlog_cuda::CompareOp;
 ///
 /// For each group of equal keys, if row A appeared before row B in the input,
 /// row A should appear before row B in the output.
-pub(crate) fn prop_sort_stability(
+pub fn prop_sort_stability(
     ctx: &TestContext,
     keys: Vec<u32>,
     vals: Vec<u32>,
@@ -102,7 +102,7 @@ pub(crate) fn prop_sort_stability(
 ///
 /// For each (key, lval) in left and (key, rval) in right where keys match,
 /// the result should contain exactly one (key, lval, rval) tuple.
-pub(crate) fn prop_join_correctness(
+pub fn prop_join_correctness(
     ctx: &TestContext,
     left_keys: Vec<u32>,
     left_vals: Vec<u32>,
@@ -298,7 +298,7 @@ pub(crate) fn prop_join_correctness(
 ///
 /// This tests that filtering is idempotent - once rows are removed, applying
 /// the same condition again doesn't change anything.
-pub(crate) fn prop_filter_idempotence(
+pub fn prop_filter_idempotence(
     ctx: &TestContext,
     data: Vec<u32>,
     threshold: u32,
@@ -373,7 +373,7 @@ pub(crate) fn prop_filter_idempotence(
 ///
 /// Running dedup multiple times on identical input should produce identical output.
 /// The set of unique keys should match, and the number of rows should be correct.
-pub(crate) fn prop_dedup_determinism(
+pub fn prop_dedup_determinism(
     ctx: &TestContext,
     keys: Vec<u32>,
     vals: Vec<u32>,

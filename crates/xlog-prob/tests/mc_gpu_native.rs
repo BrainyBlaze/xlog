@@ -5,6 +5,15 @@ use cudarc::driver::DeviceSlice;
 use xlog_cuda::LaunchAsync;
 use xlog_prob::mc::{McEvalConfig, McProgram};
 
+fn mc_config(samples: usize, seed: u64, max_nonmonotone_iterations: usize) -> McEvalConfig {
+    let mut config = McEvalConfig::default();
+    config.samples = samples;
+    config.seed = seed;
+    config.confidence = 0.95;
+    config.max_nonmonotone_iterations = max_nonmonotone_iterations;
+    config
+}
+
 #[test]
 fn mc_gpu_device_counts_match_expected_small() {
     let Some(provider) = setup_provider() else {
@@ -20,14 +29,7 @@ query(coin()).
     )
     .expect("compile program");
 
-    let cfg = McEvalConfig {
-        samples: 128,
-        seed: 7,
-        confidence: 0.95,
-        max_nonmonotone_iterations: 16,
-        sampling_method: None,
-        ..Default::default()
-    };
+    let cfg = mc_config(128, 7, 16);
 
     let device_result = program
         .evaluate_gpu_device_with_provider(cfg.clone(), provider.clone())

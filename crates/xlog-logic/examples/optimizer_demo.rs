@@ -428,22 +428,18 @@ fn demo_supply_chain_optimization() {
     // Test with different optimizer configurations
     let configs = vec![
         ("Default", OptimizerConfig::default()),
-        (
-            "Aggressive Pushdown",
-            OptimizerConfig {
-                enable_pushdown: true,
-                default_filter_selectivity: 0.05,
-                ..Default::default()
-            },
-        ),
-        (
-            "Memory Optimized",
-            OptimizerConfig {
-                default_bytes_per_row: 64,
-                transfer_cost_multiplier: 200.0,
-                ..Default::default()
-            },
-        ),
+        ("Aggressive Pushdown", {
+            let mut config = OptimizerConfig::default();
+            config.enable_pushdown = true;
+            config.default_filter_selectivity = 0.05;
+            config
+        }),
+        ("Memory Optimized", {
+            let mut config = OptimizerConfig::default();
+            config.default_bytes_per_row = 64;
+            config.transfer_cost_multiplier = 200.0;
+            config
+        }),
     ];
 
     for (config_name, config) in configs {
@@ -1223,13 +1219,11 @@ fn demo_recursive_patterns() {
     // Analyze with different iteration estimates
     let configs = vec![
         ("Default (log2 iterations)", OptimizerConfig::default()),
-        (
-            "Shallow hierarchy",
-            OptimizerConfig {
-                default_filter_selectivity: 0.2,
-                ..Default::default()
-            },
-        ),
+        ("Shallow hierarchy", {
+            let mut config = OptimizerConfig::default();
+            config.default_filter_selectivity = 0.2;
+            config
+        }),
     ];
 
     for (config_name, config) in configs {
@@ -1331,10 +1325,8 @@ fn demo_recursive_patterns() {
         }
     }
 
-    let config = OptimizerConfig {
-        index_heat_threshold: 0.5,
-        ..Default::default()
-    };
+    let mut config = OptimizerConfig::default();
+    config.index_heat_threshold = 0.5;
     let optimizer = Optimizer::with_config(Arc::new(stats_mgr), config);
     let hot = optimizer.recommend_indexes();
 

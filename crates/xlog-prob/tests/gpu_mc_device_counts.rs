@@ -7,6 +7,15 @@ use cudarc::driver::DeviceSlice;
 use xlog_core::Result;
 use xlog_prob::mc::{McEvalConfig, McProgram, McSamplingMethod};
 
+fn mc_config(samples: usize, seed: u64, max_nonmonotone_iterations: usize) -> McEvalConfig {
+    let mut config = McEvalConfig::default();
+    config.samples = samples;
+    config.seed = seed;
+    config.confidence = 0.95;
+    config.max_nonmonotone_iterations = max_nonmonotone_iterations;
+    config
+}
+
 #[test]
 fn test_mc_device_counts_match_cpu() -> Result<()> {
     let Some(provider) = setup_provider() else {
@@ -21,14 +30,7 @@ fn test_mc_device_counts_match_cpu() -> Result<()> {
     "#,
     )?;
 
-    let cfg = McEvalConfig {
-        samples: 16,
-        seed: 123,
-        confidence: 0.95,
-        max_nonmonotone_iterations: 10,
-        sampling_method: None,
-        ..Default::default()
-    };
+    let cfg = mc_config(16, 123, 10);
 
     let gpu_host = program.evaluate_gpu(cfg.clone())?;
     let gpu = program.evaluate_gpu_device(cfg)?;
@@ -69,14 +71,7 @@ fn test_device_counts_clamped_correct() -> Result<()> {
     "#,
     )?;
 
-    let cfg = McEvalConfig {
-        samples: 100,
-        seed: 42,
-        confidence: 0.95,
-        max_nonmonotone_iterations: 10,
-        sampling_method: None,
-        ..Default::default()
-    };
+    let cfg = mc_config(100, 42, 10);
 
     let gpu = program.evaluate_gpu_device(cfg.clone())?;
     assert_eq!(gpu.sampling_method, McSamplingMethod::EvidenceClamping);
@@ -118,14 +113,7 @@ fn test_device_counts_reuse_pointer_tables_without_semantic_change() -> Result<(
         "#,
     )?;
 
-    let cfg = McEvalConfig {
-        samples: 64,
-        seed: 7,
-        confidence: 0.95,
-        max_nonmonotone_iterations: 8,
-        sampling_method: None,
-        ..Default::default()
-    };
+    let cfg = mc_config(64, 7, 8);
 
     let result = program.evaluate_gpu_device_with_provider(cfg, provider)?;
     assert_eq!(result.total_samples, 64);
@@ -147,14 +135,7 @@ fn test_compact_and_dedup_preserve_host_row_count() -> Result<()> {
         "#,
     )?;
 
-    let cfg = McEvalConfig {
-        samples: 8,
-        seed: 1,
-        confidence: 0.95,
-        max_nonmonotone_iterations: 8,
-        sampling_method: None,
-        ..Default::default()
-    };
+    let cfg = mc_config(8, 1, 8);
 
     let device = program.evaluate_gpu_device(cfg)?;
     // If capacity-based row counting broke dedup, query_counts would be wrong

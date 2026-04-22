@@ -943,10 +943,8 @@ mod business_intelligence {
         stats_mgr.update_cardinality(date_id, 10_000);
 
         // Use a low threshold so 5 relations triggers greedy
-        let config = OptimizerConfig {
-            dp_threshold: 4,
-            ..Default::default()
-        };
+        let mut config = OptimizerConfig::default();
+        config.dp_threshold = 4;
         let optimizer = Optimizer::with_config(Arc::new(stats_mgr), config);
 
         // Build 5-way star join
@@ -1309,22 +1307,18 @@ mod optimizer_config {
         let stats = Arc::new(StatsManager::new());
 
         // Low threshold: even 3 relations triggers greedy
-        let low_threshold = Optimizer::with_config(
-            Arc::clone(&stats),
-            OptimizerConfig {
-                dp_threshold: 2,
-                ..Default::default()
-            },
-        );
+        let low_threshold = Optimizer::with_config(Arc::clone(&stats), {
+            let mut config = OptimizerConfig::default();
+            config.dp_threshold = 2;
+            config
+        });
 
         // High threshold: 10 relations still use DP
-        let high_threshold = Optimizer::with_config(
-            Arc::clone(&stats),
-            OptimizerConfig {
-                dp_threshold: 15,
-                ..Default::default()
-            },
-        );
+        let high_threshold = Optimizer::with_config(Arc::clone(&stats), {
+            let mut config = OptimizerConfig::default();
+            config.dp_threshold = 15;
+            config
+        });
 
         // 3-way join
         let three_way = RirNode::Join {
@@ -1377,26 +1371,22 @@ mod optimizer_config {
         stats_mgr_enabled.register_relation(rel_id);
         stats_mgr_enabled.update_cardinality(rel_id, 1_000_000);
 
-        let enabled = Optimizer::with_config(
-            Arc::new(stats_mgr_enabled),
-            OptimizerConfig {
-                enable_pushdown: true,
-                ..Default::default()
-            },
-        );
+        let enabled = Optimizer::with_config(Arc::new(stats_mgr_enabled), {
+            let mut config = OptimizerConfig::default();
+            config.enable_pushdown = true;
+            config
+        });
 
         // With pushdown disabled
         let mut stats_mgr_disabled = StatsManager::new();
         stats_mgr_disabled.register_relation(rel_id);
         stats_mgr_disabled.update_cardinality(rel_id, 1_000_000);
 
-        let disabled = Optimizer::with_config(
-            Arc::new(stats_mgr_disabled),
-            OptimizerConfig {
-                enable_pushdown: false,
-                ..Default::default()
-            },
-        );
+        let disabled = Optimizer::with_config(Arc::new(stats_mgr_disabled), {
+            let mut config = OptimizerConfig::default();
+            config.enable_pushdown = false;
+            config
+        });
 
         let opt_enabled = enabled.optimize(make_plan());
         let opt_disabled = disabled.optimize(make_plan());
@@ -1484,13 +1474,11 @@ mod optimizer_config {
 
         // No access to relation 3
 
-        let optimizer = Optimizer::with_config(
-            Arc::new(stats_mgr),
-            OptimizerConfig {
-                index_heat_threshold: 0.5,
-                ..Default::default()
-            },
-        );
+        let optimizer = Optimizer::with_config(Arc::new(stats_mgr), {
+            let mut config = OptimizerConfig::default();
+            config.index_heat_threshold = 0.5;
+            config
+        });
 
         let hot = optimizer.recommend_indexes();
 

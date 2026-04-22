@@ -80,13 +80,15 @@ fn test_3sat_satisfiable() {
     ];
 
     let instance = SolveInstance::new(10, clauses);
-    let solver = Solver::with_config_cpu(SolverConfig {
-        max_iterations: 5000,
-        learning_rate: 0.15,
-        momentum: 0.9,
-        discretize_threshold: 0.5,
-        ..Default::default()
-    });
+    let solver_config = {
+        let mut config = SolverConfig::default();
+        config.max_iterations = 5000;
+        config.learning_rate = 0.15;
+        config.momentum = 0.9;
+        config.discretize_threshold = 0.5;
+        config
+    };
+    let solver = Solver::with_config_cpu(solver_config);
 
     let result = solver.solve(instance.clone());
 
@@ -533,13 +535,15 @@ fn test_solver_determinism() {
         ],
     );
 
-    let solver = Solver::with_config_cpu(SolverConfig {
-        max_iterations: 1000,
-        learning_rate: 0.1,
-        momentum: 0.9,
-        discretize_threshold: 0.5,
-        ..Default::default()
-    });
+    let solver_config = {
+        let mut config = SolverConfig::default();
+        config.max_iterations = 1000;
+        config.learning_rate = 0.1;
+        config.momentum = 0.9;
+        config.discretize_threshold = 0.5;
+        config
+    };
+    let solver = Solver::with_config_cpu(solver_config);
 
     // Run solver multiple times
     let result1 = solver.solve(instance.clone());
@@ -607,12 +611,13 @@ fn test_solver_config_effects() {
     );
 
     // Fast config with few iterations
-    let fast_config = SolverConfig {
-        max_iterations: 100,
-        learning_rate: 0.3,
-        momentum: 0.8,
-        discretize_threshold: 0.5,
-        ..Default::default()
+    let fast_config = {
+        let mut config = SolverConfig::default();
+        config.max_iterations = 100;
+        config.learning_rate = 0.3;
+        config.momentum = 0.8;
+        config.discretize_threshold = 0.5;
+        config
     };
     let fast_solver = Solver::with_config_cpu(fast_config);
     let fast_result = fast_solver.solve(instance.clone());
@@ -655,17 +660,19 @@ fn test_discretize_threshold_effects() {
     );
 
     // Low threshold (more likely to set variables true)
-    let low_threshold_config = SolverConfig {
-        discretize_threshold: 0.3,
-        ..SolverConfig::default()
+    let low_threshold_config = {
+        let mut config = SolverConfig::default();
+        config.discretize_threshold = 0.3;
+        config
     };
     let low_solver = Solver::with_config_cpu(low_threshold_config);
     let low_result = low_solver.solve(instance.clone());
 
     // High threshold (more likely to set variables false)
-    let high_threshold_config = SolverConfig {
-        discretize_threshold: 0.7,
-        ..SolverConfig::default()
+    let high_threshold_config = {
+        let mut config = SolverConfig::default();
+        config.discretize_threshold = 0.7;
+        config
     };
     let high_solver = Solver::with_config_cpu(high_threshold_config);
     let high_result = high_solver.solve(instance.clone());
@@ -699,19 +706,21 @@ fn test_learning_rate_effects() {
     );
 
     // Very low learning rate
-    let slow_config = SolverConfig {
-        learning_rate: 0.01,
-        max_iterations: 10000,
-        ..SolverConfig::default()
+    let slow_config = {
+        let mut config = SolverConfig::default();
+        config.learning_rate = 0.01;
+        config.max_iterations = 10000;
+        config
     };
     let slow_solver = Solver::with_config_cpu(slow_config);
     let slow_result = slow_solver.solve(instance.clone());
 
     // Normal learning rate
-    let normal_config = SolverConfig {
-        learning_rate: 0.1,
-        max_iterations: 10000,
-        ..SolverConfig::default()
+    let normal_config = {
+        let mut config = SolverConfig::default();
+        config.learning_rate = 0.1;
+        config.max_iterations = 10000;
+        config
     };
     let normal_solver = Solver::with_config_cpu(normal_config);
     let normal_result = normal_solver.solve(instance.clone());
@@ -754,10 +763,12 @@ fn test_solver_large_instance() {
     }
 
     let instance = SolveInstance::new(50, clauses);
-    let solver = Solver::with_config_cpu(SolverConfig {
-        max_iterations: 10000,
-        ..SolverConfig::default()
-    });
+    let solver_config = {
+        let mut config = SolverConfig::default();
+        config.max_iterations = 10000;
+        config
+    };
+    let solver = Solver::with_config_cpu(solver_config);
 
     let result = solver.solve(instance.clone());
 
@@ -979,9 +990,10 @@ fn test_solver_statistics() {
         ],
     );
 
-    let config = SolverConfig {
-        max_iterations: 500,
-        ..SolverConfig::default()
+    let config = {
+        let mut config = SolverConfig::default();
+        config.max_iterations = 500;
+        config
     };
     let solver = Solver::with_config_cpu(config);
     let result = solver.solve(instance);

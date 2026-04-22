@@ -24,8 +24,11 @@ pub enum Expr {
     Const(ConstValue),
     /// Binary comparison
     Compare {
+        /// Left-hand side expression.
         left: Box<Expr>,
+        /// Comparison operator.
         op: CompareOp,
+        /// Right-hand side expression.
         right: Box<Expr>,
     },
     /// Logical AND
@@ -130,49 +133,70 @@ pub enum RirNode {
     Unit,
 
     /// Scan a base relation
-    Scan { rel: RelId },
+    Scan {
+        /// Relation identifier to scan.
+        rel: RelId,
+    },
 
     /// Filter rows by predicate
     Filter {
+        /// Input relation subtree to filter.
         input: Box<RirNode>,
+        /// Boolean predicate applied to each row.
         predicate: Expr,
     },
 
     /// Project specific columns (pass-through or computed)
     Project {
+        /// Input relation subtree to project from.
         input: Box<RirNode>,
+        /// Output projection expressions in result-column order.
         columns: Vec<ProjectExpr>,
     },
 
     /// Join two relations
     Join {
+        /// Left-hand input relation.
         left: Box<RirNode>,
+        /// Right-hand input relation.
         right: Box<RirNode>,
+        /// Column indices from the left input used as join keys.
         left_keys: Vec<usize>,
+        /// Column indices from the right input used as join keys.
         right_keys: Vec<usize>,
+        /// Join semantics to apply.
         join_type: JoinType,
     },
 
     /// Group by with aggregation
     GroupBy {
+        /// Input relation subtree to aggregate.
         input: Box<RirNode>,
+        /// Column indices preserved as grouping keys.
         key_cols: Vec<usize>,
         /// (value_column, aggregation_op)
         aggs: Vec<(usize, AggOp)>,
     },
 
     /// Union multiple inputs
-    Union { inputs: Vec<RirNode> },
+    Union {
+        /// Input subtrees whose rows are concatenated together.
+        inputs: Vec<RirNode>,
+    },
 
     /// Remove duplicates
     Distinct {
+        /// Input relation subtree to deduplicate.
         input: Box<RirNode>,
+        /// Column indices defining tuple identity.
         key_cols: Vec<usize>,
     },
 
     /// Set difference (left - right)
     Diff {
+        /// Left-hand input relation.
         left: Box<RirNode>,
+        /// Right-hand input relation whose rows are removed from the left input.
         right: Box<RirNode>,
     },
 
@@ -193,9 +217,13 @@ pub enum RirNode {
     /// Tensorized ILP super-graph join. A DLPack mask tensor selects which
     /// (body_i, body_j) → head_k rule combinations are active.
     TensorMaskedJoin {
+        /// Name of the mask tensor registered in the runtime.
         mask_name: String,
+        /// Arity of the relation schema participating in the tensorized join.
         schema_size: usize,
+        /// Left-side join key columns within the body schema.
         left_keys: Vec<usize>,
+        /// Right-side join key columns within the body schema.
         right_keys: Vec<usize>,
         /// Mapping from tensor dimension index → (RelId, relation name).
         /// Sorted by RelId for deterministic ordering (RD-36).

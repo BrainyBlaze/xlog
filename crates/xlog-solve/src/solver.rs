@@ -63,12 +63,11 @@ use crate::proof::{SolveProof, SolveResult, SolveStats, SolveStatus};
 /// ```
 /// use xlog_solve::SolverConfig;
 ///
-/// let config = SolverConfig {
-///     max_iterations: 5000,
-///     learning_rate: 0.05,
-///     momentum: 0.95,
-///     discretize_threshold: 0.5,
-/// };
+/// let mut config = SolverConfig::default();
+/// config.max_iterations = 5000;
+/// config.learning_rate = 0.05;
+/// config.momentum = 0.95;
+/// config.discretize_threshold = 0.5;
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]

@@ -43,7 +43,7 @@ fn collect_dlpack_columns(
         .downcast::<PySequence>()
         .map_err(|_| PyValueError::new_err(err_msg.to_string()))?;
     let mut tensors = Vec::with_capacity(seq.len()? as usize);
-    for item in seq.iter()? {
+    for item in seq.try_iter()? {
         tensors.push(dlpack_from_py(&item?)?);
     }
     Ok(tensors)
@@ -1841,27 +1841,44 @@ use train_only(..., strict_gpu_native=True) or export an explicit compatibility 
         let result: Vec<StdHashMap<String, PyObject>> = candidates
             .iter()
             .enumerate()
-            .map(|(id, &(i, j, k))| {
-                let mut d = StdHashMap::new();
-                d.insert("id".into(), id.into_py(py));
-                d.insert("i".into(), i.into_py(py));
-                d.insert("j".into(), j.into_py(py));
-                d.insert("k".into(), k.into_py(py));
-                d.insert(
-                    "left_name".into(),
-                    self.rel_index[i as usize].1.clone().into_py(py),
-                );
-                d.insert(
-                    "right_name".into(),
-                    self.rel_index[j as usize].1.clone().into_py(py),
-                );
-                d.insert(
-                    "head_name".into(),
-                    self.rel_index[k as usize].1.clone().into_py(py),
-                );
-                d
-            })
-            .collect();
+            .map(
+                |(id, &(i, j, k))| -> PyResult<StdHashMap<String, PyObject>> {
+                    let mut d = StdHashMap::new();
+                    d.insert("id".into(), id.into_pyobject(py)?.into_any().unbind());
+                    d.insert("i".into(), i.into_pyobject(py)?.into_any().unbind());
+                    d.insert("j".into(), j.into_pyobject(py)?.into_any().unbind());
+                    d.insert("k".into(), k.into_pyobject(py)?.into_any().unbind());
+                    d.insert(
+                        "left_name".into(),
+                        self.rel_index[i as usize]
+                            .1
+                            .clone()
+                            .into_pyobject(py)?
+                            .into_any()
+                            .unbind(),
+                    );
+                    d.insert(
+                        "right_name".into(),
+                        self.rel_index[j as usize]
+                            .1
+                            .clone()
+                            .into_pyobject(py)?
+                            .into_any()
+                            .unbind(),
+                    );
+                    d.insert(
+                        "head_name".into(),
+                        self.rel_index[k as usize]
+                            .1
+                            .clone()
+                            .into_pyobject(py)?
+                            .into_any()
+                            .unbind(),
+                    );
+                    Ok(d)
+                },
+            )
+            .collect::<PyResult<_>>()?;
 
         Ok(result)
     }
@@ -2278,7 +2295,7 @@ use train_only(..., strict_gpu_native=True) or export an explicit compatibility 
 
     pub fn host_transfer_stats(&self, py: Python<'_>) -> PyResult<PyObject> {
         let stats = self.provider.host_transfer_stats();
-        let dict = PyDict::new_bound(py);
+        let dict = PyDict::new(py);
         dict.set_item("dtoh_bytes", stats.dtoh_bytes)?;
         dict.set_item("htod_bytes", stats.htod_bytes)?;
         dict.set_item("dtoh_calls", stats.dtoh_calls)?;

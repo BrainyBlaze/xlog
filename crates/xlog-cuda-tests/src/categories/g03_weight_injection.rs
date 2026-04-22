@@ -12,7 +12,7 @@ use crate::harness::{CategoryResult, TestContext, TestResult};
 use std::time::Instant;
 
 /// Run all tests in this category.
-pub(crate) fn run_all(ctx: &TestContext) -> CategoryResult {
+pub fn run_all(ctx: &TestContext) -> CategoryResult {
     let mut results = CategoryResult::new("g03_weight_injection");
     let start = Instant::now();
 

@@ -107,8 +107,6 @@ impl TensorMetadata {
 /// Internal storage for a tensor source (used only with python feature).
 #[cfg(feature = "python")]
 struct TensorSource {
-    /// Metadata about the tensor
-    metadata: TensorMetadata,
     /// The actual PyTorch tensor
     tensor: PyObject,
 }
@@ -163,10 +161,7 @@ impl TensorSourceRegistry {
     /// Add a tensor source with PyTorch tensor.
     #[cfg(feature = "python")]
     pub fn add(&mut self, name: &str, tensor: PyObject, metadata: TensorMetadata) {
-        let source = TensorSource {
-            metadata: metadata.clone(),
-            tensor,
-        };
+        let source = TensorSource { tensor };
         self.sources.insert(name.to_string(), source);
         self.metadata.insert(name.to_string(), metadata);
 

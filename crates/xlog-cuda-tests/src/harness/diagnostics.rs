@@ -4,21 +4,21 @@ use std::time::{Duration, Instant};
 
 /// Rich failure diagnostic with context.
 #[derive(Debug, Clone)]
-pub(crate) struct FailureDiagnostic {
-    pub(crate) category: &'static str,
-    pub(crate) test_name: &'static str,
-    pub(crate) input_size: usize,
-    pub(crate) input_sample: String,
-    pub(crate) expected_sample: String,
-    pub(crate) actual_sample: String,
-    pub(crate) first_diff_index: Option<usize>,
-    pub(crate) diff_count: usize,
-    pub(crate) error_message: String,
+pub struct FailureDiagnostic {
+    pub category: &'static str,
+    pub test_name: &'static str,
+    pub input_size: usize,
+    pub input_sample: String,
+    pub expected_sample: String,
+    pub actual_sample: String,
+    pub first_diff_index: Option<usize>,
+    pub diff_count: usize,
+    pub error_message: String,
 }
 
 impl FailureDiagnostic {
     /// Create a new failure diagnostic.
-    pub(crate) fn new(
+    pub fn new(
         category: &'static str,
         test_name: &'static str,
         input_size: usize,
@@ -38,13 +38,13 @@ impl FailureDiagnostic {
     }
 
     /// Add input sample (first N elements).
-    pub(crate) fn with_input_sample(mut self, sample: String) -> Self {
+    pub fn with_input_sample(mut self, sample: String) -> Self {
         self.input_sample = sample;
         self
     }
 
     /// Add expected/actual samples.
-    pub(crate) fn with_comparison(
+    pub fn with_comparison(
         mut self,
         expected: String,
         actual: String,
@@ -59,7 +59,7 @@ impl FailureDiagnostic {
     }
 
     /// Generate human-readable failure report.
-    pub(crate) fn report(&self) -> String {
+    pub fn report(&self) -> String {
         let mut report = String::new();
         report.push_str(&format!(
             "=== FAILURE: {}/{} ===\n",
@@ -88,7 +88,7 @@ impl FailureDiagnostic {
 
 /// Test execution status.
 #[derive(Debug, Clone)]
-pub(crate) enum TestStatus {
+pub enum TestStatus {
     Passed,
     Failed,
     Skipped { reason: &'static str },
@@ -96,26 +96,26 @@ pub(crate) enum TestStatus {
 }
 
 impl TestStatus {
-    pub(crate) fn is_passed(&self) -> bool {
+    pub fn is_passed(&self) -> bool {
         matches!(self, TestStatus::Passed)
     }
 
-    pub(crate) fn is_failed(&self) -> bool {
+    pub fn is_failed(&self) -> bool {
         matches!(self, TestStatus::Failed | TestStatus::Error { .. })
     }
 }
 
 /// Individual test result.
 #[derive(Debug, Clone)]
-pub(crate) struct TestResult {
-    pub(crate) name: &'static str,
-    pub(crate) status: TestStatus,
-    pub(crate) duration: Duration,
-    pub(crate) diagnostic: Option<FailureDiagnostic>,
+pub struct TestResult {
+    pub name: &'static str,
+    pub status: TestStatus,
+    pub duration: Duration,
+    pub diagnostic: Option<FailureDiagnostic>,
 }
 
 impl TestResult {
-    pub(crate) fn passed(name: &'static str, duration: Duration) -> Self {
+    pub fn passed(name: &'static str, duration: Duration) -> Self {
         Self {
             name,
             status: TestStatus::Passed,
@@ -124,7 +124,7 @@ impl TestResult {
         }
     }
 
-    pub(crate) fn failed(name: &'static str, duration: Duration, diagnostic: FailureDiagnostic) -> Self {
+    pub fn failed(name: &'static str, duration: Duration, diagnostic: FailureDiagnostic) -> Self {
         Self {
             name,
             status: TestStatus::Failed,
@@ -133,7 +133,7 @@ impl TestResult {
         }
     }
 
-    pub(crate) fn skipped(name: &'static str, reason: &'static str) -> Self {
+    pub fn skipped(name: &'static str, reason: &'static str) -> Self {
         Self {
             name,
             status: TestStatus::Skipped { reason },
@@ -142,7 +142,7 @@ impl TestResult {
         }
     }
 
-    pub(crate) fn error(name: &'static str, duration: Duration, message: String) -> Self {
+    pub fn error(name: &'static str, duration: Duration, message: String) -> Self {
         Self {
             name,
             status: TestStatus::Error { message },
@@ -154,14 +154,14 @@ impl TestResult {
 
 /// Category-level result aggregation.
 #[derive(Debug, Clone)]
-pub(crate) struct CategoryResult {
-    pub(crate) name: &'static str,
-    pub(crate) tests: Vec<TestResult>,
-    pub(crate) duration: Duration,
+pub struct CategoryResult {
+    pub name: &'static str,
+    pub tests: Vec<TestResult>,
+    pub duration: Duration,
 }
 
 impl CategoryResult {
-    pub(crate) fn new(name: &'static str) -> Self {
+    pub fn new(name: &'static str) -> Self {
         Self {
             name,
             tests: Vec::new(),
@@ -169,34 +169,34 @@ impl CategoryResult {
         }
     }
 
-    pub(crate) fn add_result(&mut self, result: TestResult) {
+    pub fn add_result(&mut self, result: TestResult) {
         self.tests.push(result);
     }
 
-    pub(crate) fn set_duration(&mut self, duration: Duration) {
+    pub fn set_duration(&mut self, duration: Duration) {
         self.duration = duration;
     }
 
-    pub(crate) fn passed_count(&self) -> usize {
+    pub fn passed_count(&self) -> usize {
         self.tests.iter().filter(|t| t.status.is_passed()).count()
     }
 
-    pub(crate) fn failed_count(&self) -> usize {
+    pub fn failed_count(&self) -> usize {
         self.tests.iter().filter(|t| t.status.is_failed()).count()
     }
 
-    pub(crate) fn skipped_count(&self) -> usize {
+    pub fn skipped_count(&self) -> usize {
         self.tests
             .iter()
             .filter(|t| matches!(t.status, TestStatus::Skipped { .. }))
             .count()
     }
 
-    pub(crate) fn total_count(&self) -> usize {
+    pub fn total_count(&self) -> usize {
         self.tests.len()
     }
 
-    pub(crate) fn all_passed(&self) -> bool {
+    pub fn all_passed(&self) -> bool {
         self.tests
             .iter()
             .all(|t| t.status.is_passed() || matches!(t.status, TestStatus::Skipped { .. }))
@@ -205,14 +205,14 @@ impl CategoryResult {
 
 /// Full certification results.
 #[derive(Debug)]
-pub(crate) struct CertificationResults {
-    pub(crate) categories: Vec<CategoryResult>,
-    pub(crate) start_time: Instant,
-    pub(crate) total_duration: Duration,
+pub struct CertificationResults {
+    pub categories: Vec<CategoryResult>,
+    pub start_time: Instant,
+    pub total_duration: Duration,
 }
 
 impl CertificationResults {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             categories: Vec::new(),
             start_time: Instant::now(),
@@ -221,7 +221,7 @@ impl CertificationResults {
     }
 
     /// Run a category and record results.
-    pub(crate) fn run_category<F>(&mut self, _name: &'static str, f: F)
+    pub fn run_category<F>(&mut self, _name: &'static str, f: F)
     where
         F: FnOnce() -> CategoryResult,
     {
@@ -232,37 +232,37 @@ impl CertificationResults {
     }
 
     /// Add a pre-computed category result.
-    pub(crate) fn add_category(&mut self, result: CategoryResult) {
+    pub fn add_category(&mut self, result: CategoryResult) {
         self.categories.push(result);
     }
 
     /// Finalize results and compute total duration.
-    pub(crate) fn finalize(&mut self) {
+    pub fn finalize(&mut self) {
         self.total_duration = self.start_time.elapsed();
     }
 
-    pub(crate) fn total_tests(&self) -> usize {
+    pub fn total_tests(&self) -> usize {
         self.categories.iter().map(|c| c.total_count()).sum()
     }
 
-    pub(crate) fn total_passed(&self) -> usize {
+    pub fn total_passed(&self) -> usize {
         self.categories.iter().map(|c| c.passed_count()).sum()
     }
 
-    pub(crate) fn total_failed(&self) -> usize {
+    pub fn total_failed(&self) -> usize {
         self.categories.iter().map(|c| c.failed_count()).sum()
     }
 
-    pub(crate) fn total_skipped(&self) -> usize {
+    pub fn total_skipped(&self) -> usize {
         self.categories.iter().map(|c| c.skipped_count()).sum()
     }
 
-    pub(crate) fn all_passed(&self) -> bool {
+    pub fn all_passed(&self) -> bool {
         self.categories.iter().all(|c| c.all_passed())
     }
 
     /// Print summary to stdout.
-    pub(crate) fn print_summary(&self) {
+    pub fn print_summary(&self) {
         println!("\n========== CERTIFICATION RESULTS ==========");
         println!("Total Duration: {:.2}s", self.total_duration.as_secs_f64());
         println!();
@@ -294,7 +294,7 @@ impl CertificationResults {
     }
 
     /// Generate detailed failure report.
-    pub(crate) fn failure_report(&self) -> String {
+    pub fn failure_report(&self) -> String {
         let mut report = String::new();
 
         for cat in &self.categories {
@@ -342,14 +342,4 @@ macro_rules! run_test {
             }
         }
     }};
-}
-
-/// Helper to format a slice sample for diagnostics.
-pub(crate) fn format_sample<T: std::fmt::Debug>(data: &[T], max_items: usize) -> String {
-    if data.len() <= max_items {
-        format!("{:?}", data)
-    } else {
-        let sample: Vec<_> = data.iter().take(max_items).collect();
-        format!("{:?}... ({} more)", sample, data.len() - max_items)
-    }
 }

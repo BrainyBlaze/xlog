@@ -15,7 +15,7 @@ test = false
 doctest = false
 
 [dependencies]
-pyo3 = { workspace = true, features = ["extension-module", "multiple-pymethods"] }
+pyo3 = { workspace = true, features = ["multiple-pymethods"] }
 cudarc = { workspace = true }
 rand = "0.8"
 xlog-core.workspace = true
@@ -31,4 +31,5 @@ xlog-induce.workspace = true
 [features]
 default = ["host-io"]
 host-io = ["xlog-prob/host-io"]
+extension-module = ["pyo3/extension-module"]
 arrow-device-import = ["xlog-cuda/arrow-device-import"]

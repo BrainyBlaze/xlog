@@ -9,15 +9,32 @@ use xlog_core::ScalarType;
 #[non_exhaustive]
 pub enum FunctionError {
     /// Duplicate function definition
-    DuplicateDefinition { name: String },
+    DuplicateDefinition {
+        /// Function name that was defined more than once.
+        name: String,
+    },
     /// Recursive function without base case
-    RecursionWithoutBaseCase { name: String },
+    RecursionWithoutBaseCase {
+        /// Recursive function missing a terminating branch.
+        name: String,
+    },
     /// Undefined function called
-    UndefinedFunction { name: String },
+    UndefinedFunction {
+        /// Function name that could not be resolved.
+        name: String,
+    },
     /// Maximum recursion depth exceeded
-    MaxRecursionDepth { name: String, depth: u32 },
+    MaxRecursionDepth {
+        /// Function name whose expansion exceeded the recursion limit.
+        name: String,
+        /// Maximum recursion depth that was reached.
+        depth: u32,
+    },
     /// Function name conflicts with predicate
-    NameConflict { name: String },
+    NameConflict {
+        /// Name reused by both a function and a predicate.
+        name: String,
+    },
 }
 
 impl std::fmt::Display for FunctionError {

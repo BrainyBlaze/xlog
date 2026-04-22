@@ -22,6 +22,7 @@ impl Executor {
         ))
     }
 
+    /// Execute all rules in a non-recursive strongly connected component once.
     pub fn execute_non_recursive_scc(&mut self, rules: &[xlog_ir::CompiledRule]) -> Result<()> {
         for rule in rules {
             let result = self.execute_node(&rule.body)?;

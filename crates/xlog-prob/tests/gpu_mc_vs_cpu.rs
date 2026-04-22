@@ -7,6 +7,15 @@ fn has_cuda_device() -> bool {
     CudaDevice::new(0).is_ok()
 }
 
+fn mc_config(samples: usize, seed: u64, max_nonmonotone_iterations: usize) -> McEvalConfig {
+    let mut config = McEvalConfig::default();
+    config.samples = samples;
+    config.seed = seed;
+    config.confidence = 0.95;
+    config.max_nonmonotone_iterations = max_nonmonotone_iterations;
+    config
+}
+
 #[test]
 fn gpu_mc_matches_cpu_on_small_program() {
     if !has_cuda_device() {
@@ -15,14 +24,7 @@ fn gpu_mc_matches_cpu_on_small_program() {
     }
 
     let prog = McProgram::compile_source("0.3::coin(1). query(coin(1)).").unwrap();
-    let cfg = McEvalConfig {
-        samples: 20_000,
-        seed: 42,
-        confidence: 0.95,
-        max_nonmonotone_iterations: 128,
-        sampling_method: None,
-        ..Default::default()
-    };
+    let cfg = mc_config(20_000, 42, 128);
 
     let cpu = prog.evaluate_cpu(cfg.clone()).unwrap();
     let gpu = prog.evaluate_gpu(cfg).unwrap();

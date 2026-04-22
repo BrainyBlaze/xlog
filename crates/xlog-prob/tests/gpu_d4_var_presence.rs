@@ -564,19 +564,17 @@ query(dry()).
     }
 
     // Cache configured like the exact engine: single-slot, store circuit + free-var mask + weights.
-    let mut cache = GpuCircuitCache::new(
-        &provider,
-        GpuCircuitCacheConfig {
-            num_slots: 1,
-            table_size: 1,
-            node_cap: compile.smooth_node_cap,
-            edge_cap: compile.smooth_edge_cap,
-            level_cap: compile.smooth_node_cap,
-            var_cap: encoding.cnf.var_cap,
-            ..Default::default()
-        },
-    )
-    .unwrap();
+    let cache_config = {
+        let mut config = GpuCircuitCacheConfig::default();
+        config.num_slots = 1;
+        config.table_size = 1;
+        config.node_cap = compile.smooth_node_cap;
+        config.edge_cap = compile.smooth_edge_cap;
+        config.level_cap = compile.smooth_node_cap;
+        config.var_cap = encoding.cnf.var_cap;
+        config
+    };
+    let mut cache = GpuCircuitCache::new(&provider, cache_config).unwrap();
     let mut handle = cache.claim_slot(0x1234u64).unwrap();
     // Sanity-check cache lookup results: a single-slot cache must return slot 0 and a miss
     // on first insert.

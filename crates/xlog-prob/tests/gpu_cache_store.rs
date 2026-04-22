@@ -69,14 +69,15 @@ fn cache_store_writes_metadata() {
         .set_base_weights(&provider, &weights)
         .expect("set weights");
 
-    let config = GpuCircuitCacheConfig {
-        num_slots: 1,
-        table_size: 4,
-        node_cap: 16,
-        edge_cap: 32,
-        level_cap: 16,
-        var_cap: 16,
-        ..Default::default()
+    let config = {
+        let mut config = GpuCircuitCacheConfig::default();
+        config.num_slots = 1;
+        config.table_size = 4;
+        config.node_cap = 16;
+        config.edge_cap = 32;
+        config.level_cap = 16;
+        config.var_cap = 16;
+        config
     };
     let mut cache = GpuCircuitCache::new(&provider, config).expect("cache");
     let mut handle = cache.claim_slot(0xabcdu64).expect("claim");

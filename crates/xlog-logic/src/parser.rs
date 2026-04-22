@@ -2,6 +2,7 @@
 //!
 //! This module parses XLOG source text into AST structures.
 //! It uses the Pest parser generator with a grammar defined in `grammar.pest`.
+#![allow(missing_docs)] // `pest_derive` emits a public `Rule` enum and helpers without doc hooks.
 
 use pest::iterators::Pair;
 use pest::Parser;

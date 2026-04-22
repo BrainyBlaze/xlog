@@ -13,7 +13,7 @@ use crate::harness::{CategoryResult, TestContext, TestResult};
 use std::time::{Duration, Instant};
 
 /// Run all tests in this category.
-pub(crate) fn run_all(ctx: &TestContext) -> CategoryResult {
+pub fn run_all(ctx: &TestContext) -> CategoryResult {
     let mut results = CategoryResult::new("g04_transfer_efficiency");
     let start = Instant::now();
 

@@ -138,8 +138,8 @@ impl CompiledProgram {
             _ => {} // is_embedding = true, correct
         }
 
-        let torch = py.import_bound("torch")?;
-        let nn = py.import_bound("torch.nn")?;
+        let torch = py.import("torch")?;
+        let nn = py.import("torch.nn")?;
         let obj = module_or_tensor.bind(py);
 
         // Detect payload type and extract shape
@@ -216,7 +216,7 @@ impl CompiledProgram {
 
             // Detach raw tensor to enforce frozen contract
             let detached = obj.call_method0("detach")?;
-            (vs, d, detached.into_py(py))
+            (vs, d, detached.unbind())
         };
 
         let mut handle = EmbeddingHandle::new(name.clone(), trainable, dim, vocab_size);
@@ -245,8 +245,8 @@ impl CompiledProgram {
             .module()
             .ok_or_else(|| PyValueError::new_err(format!("Embedding '{}' has no module", name)))?;
 
-        let torch = py.import_bound("torch")?;
-        let kwargs = PyDict::new_bound(py);
+        let torch = py.import("torch")?;
+        let kwargs = PyDict::new(py);
         kwargs.set_item("dtype", torch.getattr("long")?)?;
 
         // Determine device from the embedding weight/tensor so ids_tensor
@@ -315,7 +315,7 @@ impl CompiledProgram {
                 )))
             }
         };
-        let dict = PyDict::new_bound(py);
+        let dict = PyDict::new(py);
         dict.set_item("network", info.network.clone())?;
         dict.set_item("labels", info.labels.clone())?;
         Ok(dict.into())
@@ -833,8 +833,8 @@ impl CompiledProgram {
         let label_idx = self.get_label_index(predicate, network_name, target_label)?;
         let prob_tensor = output_squeezed.get_item(label_idx)?;
 
-        let torch = py.import_bound("torch")?;
-        let clamp_kwargs = PyDict::new_bound(py);
+        let torch = py.import("torch")?;
+        let clamp_kwargs = PyDict::new(py);
         clamp_kwargs.set_item("min", types::NLL_EPSILON)?;
         let loss = if expected {
             let prob_clamped = prob_tensor.call_method("clamp", (), Some(&clamp_kwargs))?;
@@ -844,7 +844,7 @@ impl CompiledProgram {
             let device = prob_tensor.call_method0("device")?;
             let dtype = prob_tensor.call_method0("dtype")?;
             let one = torch.call_method1("tensor", (1.0f64,))?;
-            let kwargs = PyDict::new_bound(py);
+            let kwargs = PyDict::new(py);
             kwargs.set_item("device", device)?;
             kwargs.set_item("dtype", dtype)?;
             let one_on_device = one.call_method("to", (), Some(&kwargs))?;
@@ -857,7 +857,7 @@ impl CompiledProgram {
         // Backprop through the network.
         loss.call_method0("backward")?;
 
-        Ok(loss.into_py(py))
+        Ok(loss.unbind())
     }
 
     /// Forward-backward for a complex query involving neural predicates through rules.
@@ -906,7 +906,7 @@ impl CompiledProgram {
         };
 
         // Run neural networks and import the outputs as device-resident buffers via DLPack (no .tolist()).
-        let torch = py.import_bound("torch")?;
+        let torch = py.import("torch")?;
         let schema_f32 = prob_schema(ScalarType::F32);
 
         #[derive(Clone)]
@@ -964,7 +964,7 @@ impl CompiledProgram {
                 inputs.push(self.get_input_tensor(py, call.input_idx)?);
             }
 
-            let input_list = pyo3::types::PyList::new_bound(py, &inputs);
+            let input_list = pyo3::types::PyList::new(py, &inputs)?;
             let batch = torch.call_method1("stack", (input_list, 0i32))?;
 
             // Forward pass with gradient tracking (single batched forward).
@@ -1122,13 +1122,13 @@ impl CompiledProgram {
             if idx == last_idx {
                 out_bound.call_method1("backward", (grad.bind(py),))?;
             } else {
-                let kwargs = PyDict::new_bound(py);
+                let kwargs = PyDict::new(py);
                 kwargs.set_item("retain_graph", true)?;
                 out_bound.call_method("backward", (grad.bind(py),), Some(&kwargs))?;
             }
         }
 
-        Ok(loss_tensor.into_py(py))
+        Ok(loss_tensor.into())
     }
 
     /// Batch-process multiple queries that share the same circuit template.
@@ -1248,7 +1248,7 @@ impl CompiledProgram {
         }
 
         // -- 4. Batched forward per network ------
-        let torch = py.import_bound("torch")?;
+        let torch = py.import("torch")?;
         let schema_f32 = prob_schema(ScalarType::F32);
 
         // Storage indexed by (query, group).
@@ -1271,7 +1271,7 @@ impl CompiledProgram {
             for c in calls {
                 inputs.push(self.get_input_tensor(py, c.input_idx)?);
             }
-            let input_list = pyo3::types::PyList::new_bound(py, &inputs);
+            let input_list = pyo3::types::PyList::new(py, &inputs)?;
             let stacked = torch.call_method1("stack", (input_list, 0i32))?;
 
             // Single batched forward: [N_total, num_classes]
@@ -1433,7 +1433,7 @@ impl CompiledProgram {
                     .map_err(|e| types::gpu_err("DLPack export failed", e))?;
                 let loss_capsule = dlpack_capsule_from_tensor(py, loss_dl)?;
                 let loss_tensor = torch.getattr("from_dlpack")?.call1((loss_capsule,))?;
-                loss_tensor.call_method0("sum")?.into_py(py)
+                loss_tensor.call_method0("sum")?.unbind()
             }
             Err(_batch_err) => {
                 // Fallback path: preserve prior semantics if batched circuit path
@@ -1479,7 +1479,7 @@ impl CompiledProgram {
                     let loss_tensor = torch.getattr("from_dlpack")?.call1((loss_capsule,))?;
 
                     accum = Some(match accum {
-                        None => loss_tensor.into_py(py),
+                        None => loss_tensor.unbind(),
                         Some(acc) => {
                             acc.bind(py).call_method1("add_", (loss_tensor,))?;
                             acc
@@ -1494,8 +1494,8 @@ impl CompiledProgram {
         // torch.autograd.backward(tensors, grad_tensors) — single backward pass
         // through the shared batched computation graph.
         let autograd = torch.getattr("autograd")?;
-        let out_list = pyo3::types::PyList::new_bound(py, all_out_tensors.iter());
-        let grad_list = pyo3::types::PyList::new_bound(py, all_grad_tensors.iter());
+        let out_list = pyo3::types::PyList::new(py, all_out_tensors.iter())?;
+        let grad_list = pyo3::types::PyList::new(py, all_grad_tensors.iter())?;
         autograd.call_method1("backward", (out_list, grad_list))?;
 
         // -- 9. Return accumulated loss ------

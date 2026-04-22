@@ -10,6 +10,20 @@ use xlog_prob::exact::{ExactDdnnfProgram, GpuConfig};
 use xlog_prob::neural_fast_path::GpuWeightSlots;
 use xlog_prob::neural_fast_path::NeuralFastPathConfig;
 
+fn gpu_config() -> GpuConfig {
+    let mut config = GpuConfig::default();
+    config.device_ordinal = 0;
+    config.memory_bytes = 1024 * 1024 * 1024;
+    config
+}
+
+fn neural_fast_path_config() -> NeuralFastPathConfig {
+    let mut config = NeuralFastPathConfig::default();
+    config.eps = 1e-7;
+    config.min_p = 1e-12;
+    config
+}
+
 fn try_provider() -> Option<CudaKernelProvider> {
     let device = match CudaDevice::new(0) {
         Ok(d) => Arc::new(d),
@@ -79,11 +93,7 @@ query(pred(0, 1)).
 query(pred(0, 2)).
 "#;
 
-    let cfg = GpuConfig {
-        device_ordinal: 0,
-        memory_bytes: 1024 * 1024 * 1024,
-        ..Default::default()
-    };
+    let cfg = gpu_config();
     let program = ExactDdnnfProgram::compile_source_with_gpu(source, cfg).unwrap();
 
     let vars = program.random_var_indices();
@@ -103,11 +113,7 @@ query(pred(0, 2)).
         .create_buffer_from_slice::<f32>(&[0.0f32; 3], schema)
         .unwrap();
 
-    let cfg = NeuralFastPathConfig {
-        eps: 1e-7,
-        min_p: 1e-12,
-        ..Default::default()
-    };
+    let cfg = neural_fast_path_config();
 
     let probs = vec![prob_buf];
     let mut grads = vec![grad_buf];
@@ -157,11 +163,7 @@ query(pred(0, 1)).
 query(pred(0, 2)).
 "#;
 
-    let cfg = GpuConfig {
-        device_ordinal: 0,
-        memory_bytes: 1024 * 1024 * 1024,
-        ..Default::default()
-    };
+    let cfg = gpu_config();
     let program = ExactDdnnfProgram::compile_source_with_gpu(source, cfg).unwrap();
 
     let vars = program.random_var_indices();
@@ -180,11 +182,7 @@ query(pred(0, 2)).
         .create_buffer_from_slice::<f32>(&[0.0f32; 3], schema)
         .unwrap();
 
-    let cfg = NeuralFastPathConfig {
-        eps: 1e-7,
-        min_p: 1e-12,
-        ..Default::default()
-    };
+    let cfg = neural_fast_path_config();
 
     let probs = vec![prob_buf];
     let mut grads = vec![grad_buf];
@@ -227,11 +225,7 @@ query(pred(0, 1)).
 query(pred(0, 2)).
 "#;
 
-    let cfg = GpuConfig {
-        device_ordinal: 0,
-        memory_bytes: 1024 * 1024 * 1024,
-        ..Default::default()
-    };
+    let cfg = gpu_config();
     let program = ExactDdnnfProgram::compile_source_with_gpu(source, cfg).unwrap();
 
     let vars = program.random_var_indices();
@@ -250,11 +244,7 @@ query(pred(0, 2)).
         .create_buffer_from_slice::<f32>(&[0.0f32; 3], schema)
         .unwrap();
 
-    let cfg = NeuralFastPathConfig {
-        eps: 1e-7,
-        min_p: 1e-12,
-        ..Default::default()
-    };
+    let cfg = neural_fast_path_config();
 
     let probs = vec![prob_buf];
     let mut grads = vec![grad_buf];

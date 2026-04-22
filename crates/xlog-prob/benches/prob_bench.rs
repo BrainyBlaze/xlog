@@ -20,11 +20,18 @@ use xlog_prob::mc::{McEvalConfig, McProgram};
 
 /// Creates GPU config for benchmarks.
 fn make_gpu_config(memory_mb: u64) -> GpuConfig {
-    GpuConfig {
-        device_ordinal: 0,
-        memory_bytes: memory_mb * 1024 * 1024,
-        ..Default::default()
-    }
+    let mut config = GpuConfig::default();
+    config.device_ordinal = 0;
+    config.memory_bytes = memory_mb * 1024 * 1024;
+    config
+}
+
+fn make_mc_config(samples: usize, seed: u64) -> McEvalConfig {
+    let mut config = McEvalConfig::default();
+    config.samples = samples;
+    config.seed = seed;
+    config.confidence = 0.95;
+    config
 }
 
 /// Simple LCG random number generator state
@@ -292,12 +299,7 @@ fn bench_mc_samples_scaling(c: &mut Criterion) {
     };
 
     for num_samples in [1000, 5000, 10000, 50000, 100000].iter() {
-        let mc_config = McEvalConfig {
-            samples: *num_samples,
-            seed: 42,
-            confidence: 0.95,
-            ..Default::default()
-        };
+        let mc_config = make_mc_config(*num_samples, 42);
 
         group.throughput(Throughput::Elements(*num_samples as u64));
         group.bench_with_input(
@@ -319,12 +321,7 @@ fn bench_mc_vars_scaling(c: &mut Criterion) {
     group.sample_size(10);
 
     // Fixed sample count, varying program complexity
-    let mc_config = McEvalConfig {
-        samples: 10000,
-        seed: 42,
-        confidence: 0.95,
-        ..Default::default()
-    };
+    let mc_config = make_mc_config(10000, 42);
 
     for num_ads in [10, 50, 100, 500, 1000].iter() {
         let source = generate_annotated_disjunction_program(*num_ads);
@@ -354,12 +351,7 @@ fn bench_mc_path(c: &mut Criterion) {
     let mut group = c.benchmark_group("mc_path");
     group.sample_size(10);
 
-    let mc_config = McEvalConfig {
-        samples: 10000,
-        seed: 42,
-        confidence: 0.95,
-        ..Default::default()
-    };
+    let mc_config = make_mc_config(10000, 42);
 
     for path_len in [10, 25, 50, 100, 200].iter() {
         let source = generate_prob_path_program(*path_len, 0.9);
@@ -389,12 +381,7 @@ fn bench_mc_grid(c: &mut Criterion) {
     let mut group = c.benchmark_group("mc_grid");
     group.sample_size(10);
 
-    let mc_config = McEvalConfig {
-        samples: 5000,
-        seed: 42,
-        confidence: 0.95,
-        ..Default::default()
-    };
+    let mc_config = make_mc_config(5000, 42);
 
     for grid_size in [5, 10, 15, 20].iter() {
         let source = generate_prob_grid_program(*grid_size, 0.7);
@@ -431,12 +418,7 @@ fn bench_mc_bayesian(c: &mut Criterion) {
     let mut group = c.benchmark_group("mc_bayesian");
     group.sample_size(10);
 
-    let mc_config = McEvalConfig {
-        samples: 10000,
-        seed: 42,
-        confidence: 0.95,
-        ..Default::default()
-    };
+    let mc_config = make_mc_config(10000, 42);
 
     for (label, num_vars, num_edges) in [
         ("small_50v", 50, 80),

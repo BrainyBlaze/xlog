@@ -9,7 +9,7 @@ use std::time::Instant;
 use xlog_core::{ScalarType, Schema};
 
 /// Run all tests in this category.
-pub(crate) fn run_all(ctx: &TestContext) -> CategoryResult {
+pub fn run_all(ctx: &TestContext) -> CategoryResult {
     let mut results = CategoryResult::new("c19_multi_stream");
     let start = Instant::now();
 

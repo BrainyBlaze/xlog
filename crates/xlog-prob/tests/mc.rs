@@ -26,6 +26,21 @@ fn prob_of_atom(result: &xlog_prob::mc::McResult, predicate: &str) -> f64 {
         .prob
 }
 
+fn mc_config(
+    samples: usize,
+    seed: u64,
+    max_nonmonotone_iterations: usize,
+    sampling_method: Option<McSamplingMethod>,
+) -> McEvalConfig {
+    let mut config = McEvalConfig::default();
+    config.samples = samples;
+    config.seed = seed;
+    config.confidence = 0.95;
+    config.max_nonmonotone_iterations = max_nonmonotone_iterations;
+    config.sampling_method = sampling_method;
+    config
+}
+
 #[test]
 fn test_mc_probabilistic_fact_marginal_is_reasonable() {
     if !has_cuda_device() {
@@ -39,14 +54,7 @@ query(rain()).
 "#;
 
     let program = McProgram::compile_source(src).unwrap();
-    let cfg = McEvalConfig {
-        samples: 5_000,
-        seed: 123,
-        confidence: 0.95,
-        max_nonmonotone_iterations: 128,
-        sampling_method: None,
-        ..Default::default()
-    };
+    let cfg = mc_config(5_000, 123, 128, None);
     let result = program.evaluate(cfg).unwrap();
 
     let p = prob_of_atom(&result, "rain");
@@ -72,14 +80,7 @@ query(sprinkler()).
 "#;
 
     let program = McProgram::compile_source(src).unwrap();
-    let cfg = McEvalConfig {
-        samples: 20_000,
-        seed: 7,
-        confidence: 0.95,
-        max_nonmonotone_iterations: 128,
-        sampling_method: None,
-        ..Default::default()
-    };
+    let cfg = mc_config(20_000, 7, 128, None);
     let result = program.evaluate(cfg).unwrap();
 
     let p_wet = 1.0 - (1.0 - 0.7) * (1.0 - 0.2);
@@ -122,14 +123,7 @@ query(flip()).
 "#;
 
     let program = McProgram::compile_source(src).unwrap();
-    let cfg = McEvalConfig {
-        samples: 2_000,
-        seed: 999,
-        confidence: 0.95,
-        max_nonmonotone_iterations: 128,
-        sampling_method: None,
-        ..Default::default()
-    };
+    let cfg = mc_config(2_000, 999, 128, None);
     let result = program.evaluate(cfg).unwrap();
 
     let p_flip = prob_of_atom(&result, "flip");
@@ -155,14 +149,7 @@ query(coin(2)).
 "#;
 
     let program = McProgram::compile_source(src).unwrap();
-    let cfg = McEvalConfig {
-        samples: 2_000,
-        seed: 2026,
-        confidence: 0.95,
-        max_nonmonotone_iterations: 128,
-        sampling_method: None,
-        ..Default::default()
-    };
+    let cfg = mc_config(2_000, 2026, 128, None);
     let result = program.evaluate(cfg).unwrap();
 
     let p_coin2 = result
@@ -286,14 +273,7 @@ evidence(sprinkler(), true).
 query(rain()).
 "#;
     let program = McProgram::compile_source(src).unwrap();
-    let cfg = McEvalConfig {
-        samples: 5_000,
-        seed: 42,
-        confidence: 0.95,
-        max_nonmonotone_iterations: 128,
-        sampling_method: None,
-        ..Default::default()
-    };
+    let cfg = mc_config(5_000, 42, 128, None);
     let result = program.evaluate(cfg).unwrap();
     assert_eq!(result.sampling_method, McSamplingMethod::EvidenceClamping);
     assert_eq!(result.evidence_samples, result.total_samples);
@@ -314,14 +294,7 @@ evidence(sprinkler(), false).
 query(rain()).
 "#;
     let program = McProgram::compile_source(src).unwrap();
-    let cfg = McEvalConfig {
-        samples: 5_000,
-        seed: 42,
-        confidence: 0.95,
-        max_nonmonotone_iterations: 128,
-        sampling_method: None,
-        ..Default::default()
-    };
+    let cfg = mc_config(5_000, 42, 128, None);
     let result = program.evaluate(cfg).unwrap();
     assert_eq!(result.sampling_method, McSamplingMethod::EvidenceClamping);
     assert_eq!(result.evidence_samples, result.total_samples);
@@ -342,14 +315,7 @@ evidence(rare(), true).
 query(other()).
 "#;
     let program = McProgram::compile_source(src).unwrap();
-    let cfg = McEvalConfig {
-        samples: 1000,
-        seed: 7,
-        confidence: 0.95,
-        max_nonmonotone_iterations: 128,
-        sampling_method: None,
-        ..Default::default()
-    };
+    let cfg = mc_config(1000, 7, 128, None);
     let result = program.evaluate(cfg).unwrap();
     assert_eq!(result.sampling_method, McSamplingMethod::EvidenceClamping);
     assert_eq!(result.evidence_samples, 1000);
@@ -371,13 +337,7 @@ evidence(wet(), true).
 query(rain()).
 "#;
     let program = McProgram::compile_source(src).unwrap();
-    let cfg = McEvalConfig {
-        samples: 5_000,
-        seed: 7,
-        confidence: 0.95,
-        max_nonmonotone_iterations: 128,
-        sampling_method: None, // auto-select → should fall back to Rejection
-    };
+    let cfg = mc_config(5_000, 7, 128, None); // auto-select → should fall back to Rejection
     let result = program.evaluate(cfg).unwrap();
     assert_eq!(result.sampling_method, McSamplingMethod::Rejection);
     // P(rain | wet) = P(rain) / P(wet) = 0.3 / 0.3 = 1.0
@@ -398,14 +358,7 @@ evidence(coin(1), false).
 query(coin(2)).
 "#;
     let program = McProgram::compile_source(src).unwrap();
-    let cfg = McEvalConfig {
-        samples: 2_000,
-        seed: 2026,
-        confidence: 0.95,
-        max_nonmonotone_iterations: 128,
-        sampling_method: None,
-        ..Default::default()
-    };
+    let cfg = mc_config(2_000, 2026, 128, None);
     let result = program.evaluate(cfg).unwrap();
     assert_eq!(result.sampling_method, McSamplingMethod::Rejection);
 }
@@ -419,14 +372,7 @@ evidence(wet(), true).
 query(rain()).
 "#;
     let program = McProgram::compile_source(src).unwrap();
-    let cfg = McEvalConfig {
-        samples: 1000,
-        seed: 7,
-        confidence: 0.95,
-        max_nonmonotone_iterations: 128,
-        sampling_method: Some(McSamplingMethod::EvidenceClamping),
-        ..Default::default()
-    };
+    let cfg = mc_config(1000, 7, 128, Some(McSamplingMethod::EvidenceClamping));
     let result = program.evaluate(cfg);
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
@@ -450,14 +396,7 @@ fn test_sampling_method_in_result_metadata() {
 query(a()).
 "#;
     let prog = McProgram::compile_source(src_no_ev).unwrap();
-    let cfg = McEvalConfig {
-        samples: 100,
-        seed: 0,
-        confidence: 0.95,
-        max_nonmonotone_iterations: 128,
-        sampling_method: None,
-        ..Default::default()
-    };
+    let cfg = mc_config(100, 0, 128, None);
     let result = prog.evaluate(cfg).unwrap();
     assert_eq!(result.sampling_method, McSamplingMethod::Rejection);
 
@@ -469,14 +408,7 @@ evidence(a(), true).
 query(b()).
 "#;
     let prog2 = McProgram::compile_source(src_ev).unwrap();
-    let cfg2 = McEvalConfig {
-        samples: 100,
-        seed: 0,
-        confidence: 0.95,
-        max_nonmonotone_iterations: 128,
-        sampling_method: None,
-        ..Default::default()
-    };
+    let cfg2 = mc_config(100, 0, 128, None);
     let result2 = prog2.evaluate(cfg2).unwrap();
     assert_eq!(result2.sampling_method, McSamplingMethod::EvidenceClamping);
 }
@@ -496,14 +428,7 @@ evidence(sprinkler(), true).
 query(rain()).
 "#;
     let program = McProgram::compile_source(src).unwrap();
-    let cfg = McEvalConfig {
-        samples: 5_000,
-        seed: 7,
-        confidence: 0.95,
-        max_nonmonotone_iterations: 128,
-        sampling_method: Some(McSamplingMethod::Rejection),
-        ..Default::default()
-    };
+    let cfg = mc_config(5_000, 7, 128, Some(McSamplingMethod::Rejection));
     let result = program.evaluate(cfg).unwrap();
     assert_eq!(result.sampling_method, McSamplingMethod::Rejection);
     let p = prob_of_atom(&result, "rain");
@@ -530,14 +455,7 @@ query(color(red)).
 query(color(green)).
 "#;
     let program = McProgram::compile_source(src).unwrap();
-    let cfg = McEvalConfig {
-        samples: 10_000,
-        seed: 42,
-        confidence: 0.95,
-        max_nonmonotone_iterations: 128,
-        sampling_method: None,
-        ..Default::default()
-    };
+    let cfg = mc_config(10_000, 42, 128, None);
     let result = program.evaluate(cfg).unwrap();
 
     assert_eq!(result.sampling_method, McSamplingMethod::EvidenceClamping);
@@ -586,14 +504,7 @@ fn test_mc_sample_reset_plan_preserves_base_and_clears_sampled_relations() {
     "#;
 
     let program = McProgram::compile_source(src).unwrap();
-    let cfg = McEvalConfig {
-        samples: 2000,
-        seed: 9,
-        confidence: 0.95,
-        max_nonmonotone_iterations: 64,
-        sampling_method: Some(McSamplingMethod::Rejection),
-        ..Default::default()
-    };
+    let cfg = mc_config(2000, 9, 64, Some(McSamplingMethod::Rejection));
 
     let result = program.evaluate_gpu(cfg).unwrap();
     let p_base = prob_of_atom(&result, "seen_base");

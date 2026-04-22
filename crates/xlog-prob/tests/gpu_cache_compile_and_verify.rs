@@ -43,14 +43,15 @@ fn gpu_cache_compile_reuses_slot() {
         .checked_mul(2)
         .and_then(|v| v.checked_add(8))
         .expect("level_cap overflow");
-    let config = GpuCircuitCacheConfig {
-        num_slots: 1,
-        table_size: 4,
-        node_cap: compile_config.smooth_node_cap,
-        edge_cap: compile_config.smooth_edge_cap,
-        level_cap,
-        var_cap: cnf.var_cap,
-        ..Default::default()
+    let config = {
+        let mut config = GpuCircuitCacheConfig::default();
+        config.num_slots = 1;
+        config.table_size = 4;
+        config.node_cap = compile_config.smooth_node_cap;
+        config.edge_cap = compile_config.smooth_edge_cap;
+        config.level_cap = level_cap;
+        config.var_cap = cnf.var_cap;
+        config
     };
     let mut cache = GpuCircuitCache::new(&provider, config).unwrap();
 

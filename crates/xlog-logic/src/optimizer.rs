@@ -1234,11 +1234,9 @@ mod tests {
     #[test]
     fn test_optimizer_with_config() {
         let stats = make_stats_manager();
-        let config = OptimizerConfig {
-            dp_threshold: 5,
-            enable_pushdown: false,
-            ..Default::default()
-        };
+        let mut config = OptimizerConfig::default();
+        config.dp_threshold = 5;
+        config.enable_pushdown = false;
         let optimizer = Optimizer::with_config(stats, config);
 
         assert_eq!(optimizer.config().dp_threshold, 5);
@@ -1513,10 +1511,8 @@ mod tests {
     #[test]
     fn test_should_use_greedy() {
         let stats = make_stats_manager();
-        let config = OptimizerConfig {
-            dp_threshold: 2,
-            ..Default::default()
-        };
+        let mut config = OptimizerConfig::default();
+        config.dp_threshold = 2;
         let optimizer = Optimizer::with_config(stats, config);
 
         // Single relation: should NOT use greedy
@@ -1757,10 +1753,8 @@ mod tests {
     #[test]
     fn test_pushdown_disabled() {
         let stats = make_stats_manager();
-        let config = OptimizerConfig {
-            enable_pushdown: false,
-            ..Default::default()
-        };
+        let mut config = OptimizerConfig::default();
+        config.enable_pushdown = false;
         let optimizer = Optimizer::with_config(stats, config);
 
         // Filter that could be pushed

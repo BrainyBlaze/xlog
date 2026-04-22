@@ -774,9 +774,7 @@ impl CompiledProgram {
     ///
     /// Uses `torch.nn.utils.clip_grad_norm_`.
     pub fn clip_grad_norms(&self, py: Python<'_>, max_norm: f64) -> PyResult<()> {
-        let clip_fn = py
-            .import_bound("torch.nn.utils")?
-            .getattr("clip_grad_norm_")?;
+        let clip_fn = py.import("torch.nn.utils")?.getattr("clip_grad_norm_")?;
         for name in self.network_registry.names() {
             if let Some(handle) = self.network_registry.get(name) {
                 if let Some(module) = handle.module() {
@@ -867,7 +865,7 @@ impl CompiledProgram {
         let num_groups: usize = param_groups.call_method0(py, "__len__")?.extract(py)?;
         for i in 0..num_groups {
             let group = param_groups.call_method1(py, "__getitem__", (i as i32,))?;
-            group.call_method_bound(py, "__setitem__", ("lr", lr), None)?;
+            group.call_method(py, "__setitem__", ("lr", lr), None)?;
         }
         Ok(())
     }
@@ -962,14 +960,14 @@ impl CompiledProgram {
             return Ok(None);
         }
 
-        let result = PyDict::new_bound(py);
+        let result = PyDict::new(py);
 
         if let Some(ptx) = ptx_profile {
-            let ptx_dict = PyDict::new_bound(py);
+            let ptx_dict = PyDict::new(py);
             ptx_dict.set_item("total_sec", ptx.total_sec)?;
             ptx_dict.set_item("cubin_loaded", ptx.cubin_loaded)?;
             ptx_dict.set_item("ptx_fallback", ptx.ptx_fallback)?;
-            let per_module = PyDict::new_bound(py);
+            let per_module = PyDict::new(py);
             for (name, sec) in &ptx.per_module_sec {
                 per_module.set_item(name, *sec)?;
             }
@@ -978,7 +976,7 @@ impl CompiledProgram {
         }
 
         if let Some(circuit) = circuit_profile {
-            let circuit_dict = PyDict::new_bound(py);
+            let circuit_dict = PyDict::new(py);
             circuit_dict.set_item("gpu_cache_hit", circuit.gpu_cache_hit)?;
             circuit_dict.set_item("disk_cache_hit", circuit.disk_cache_hit)?;
             circuit_dict.set_item("d4_compile_sec", circuit.d4_compile_sec)?;

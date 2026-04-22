@@ -262,7 +262,7 @@ fn collect_dlpack_columns(
         .map_err(|_| PyValueError::new_err(type_error_message.to_string()))?;
 
     let mut tensors: Vec<DlpackManagedTensor> = Vec::with_capacity(seq.len()? as usize);
-    for item in seq.iter()? {
+    for item in seq.try_iter()? {
         let item = item?;
         tensors.push(dlpack_from_py(&item)?);
     }

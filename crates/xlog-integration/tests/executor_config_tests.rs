@@ -101,9 +101,10 @@ fn setup_executor_with_facts(
 
 #[test]
 fn test_executor_respects_max_iterations() {
-    let config = RuntimeConfig {
-        max_iterations: 1,
-        ..RuntimeConfig::default()
+    let config = {
+        let mut config = RuntimeConfig::default();
+        config.max_iterations = 1;
+        config
     };
 
     let (mut executor, provider) = match create_executor_with_config(config) {
