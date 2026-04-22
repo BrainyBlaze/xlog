@@ -2,8 +2,8 @@
 
 /// GPU memory budget configuration.
 ///
-/// Use [`MemoryBudget::default()`] or the builder methods ([`from_device_memory`],
-/// [`with_limit`], [`with_ooc`]) to construct.
+/// Use [`MemoryBudget::default()`] or the builder methods ([`MemoryBudget::from_device_memory`],
+/// [`MemoryBudget::with_limit`], [`MemoryBudget::with_ooc`]) to construct.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct MemoryBudget {
@@ -55,6 +55,7 @@ impl MemoryBudget {
 ///
 /// Use [`RuntimeConfig::default()`] and the builder methods to construct.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct RuntimeConfig {
     /// Memory budget settings
     pub memory: MemoryBudget,

@@ -162,6 +162,7 @@ pub(super) fn compile_gpu_d4_with_gate(
 
     #[cfg(debug_assertions)]
     eprintln!("[xlog-prob] gpu_d4: launch d4_compile_count");
+    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         compile_count.clone().launch(
             LaunchConfig {
@@ -292,6 +293,7 @@ pub(super) fn compile_gpu_d4_with_gate(
     ];
     #[cfg(debug_assertions)]
     eprintln!("[xlog-prob] gpu_d4: launch d4_compile_emit");
+    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         compile_emit.clone().launch(
             LaunchConfig {
@@ -307,6 +309,7 @@ pub(super) fn compile_gpu_d4_with_gate(
     // on same stream.
     #[cfg(debug_assertions)]
     eprintln!("[xlog-prob] gpu_d4: launch d4_capture_emit_meta");
+    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         capture_meta.clone().launch(
             LaunchConfig {
@@ -365,6 +368,7 @@ pub(super) fn compile_gpu_d4_with_gate(
     }
     #[cfg(debug_assertions)]
     eprintln!("[xlog-prob] gpu_d4: launch d4_levelize_counts");
+    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         lvl_counts.clone().launch(
             LaunchConfig {
@@ -394,6 +398,7 @@ pub(super) fn compile_gpu_d4_with_gate(
     let lvl_emit = device
         .get_func(D4_MODULE, d4_kernels::D4_LEVELIZE_EMIT)
         .ok_or_else(|| XlogError::Kernel("d4_levelize_emit kernel not found".to_string()))?;
+    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         lvl_emit.clone().launch(
             LaunchConfig {
@@ -599,6 +604,7 @@ mod tests {
             (&mut node_counts).as_kernel_param(),
             (&mut edge_counts).as_kernel_param(),
         ];
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             compile_count
                 .clone()
@@ -661,6 +667,7 @@ mod tests {
             (&mut decision_child_true).as_kernel_param(),
             (&mut node_level).as_kernel_param(),
         ];
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             compile_emit
                 .clone()
@@ -692,6 +699,7 @@ mod tests {
         let lvl_counts = device
             .get_func(D4_MODULE, d4_kernels::D4_LEVELIZE_COUNTS)
             .expect("d4_levelize_counts must exist");
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             lvl_counts
                 .clone()
@@ -723,6 +731,7 @@ mod tests {
         let lvl_emit = device
             .get_func(D4_MODULE, d4_kernels::D4_LEVELIZE_EMIT)
             .expect("d4_levelize_emit must exist");
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             lvl_emit
                 .clone()
@@ -882,6 +891,7 @@ mod tests {
             (&mut node_counts).as_kernel_param(),
             (&mut edge_counts).as_kernel_param(),
         ];
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             compile_count
                 .clone()
@@ -949,6 +959,7 @@ mod tests {
             (&mut decision_child_true).as_kernel_param(),
             (&mut node_level).as_kernel_param(),
         ];
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             compile_emit
                 .clone()
@@ -984,6 +995,7 @@ mod tests {
         let lvl_counts = device
             .get_func(D4_MODULE, d4_kernels::D4_LEVELIZE_COUNTS)
             .expect("d4_levelize_counts must exist");
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             lvl_counts
                 .clone()
@@ -1016,6 +1028,7 @@ mod tests {
         let lvl_emit = device
             .get_func(D4_MODULE, d4_kernels::D4_LEVELIZE_EMIT)
             .expect("d4_levelize_emit must exist");
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             lvl_emit
                 .clone()
@@ -1170,6 +1183,7 @@ mod tests {
             (&mut node_counts).as_kernel_param(),
             (&mut edge_counts).as_kernel_param(),
         ];
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             compile_count
                 .clone()
@@ -1228,6 +1242,7 @@ mod tests {
             (&mut decision_child_true).as_kernel_param(),
             (&mut node_level).as_kernel_param(),
         ];
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             compile_emit
                 .clone()
@@ -1257,6 +1272,7 @@ mod tests {
         let lvl_counts = device
             .get_func(D4_MODULE, d4_kernels::D4_LEVELIZE_COUNTS)
             .expect("d4_levelize_counts must exist");
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             lvl_counts
                 .clone()
@@ -1296,6 +1312,7 @@ mod tests {
         let lvl_emit = device
             .get_func(D4_MODULE, d4_kernels::D4_LEVELIZE_EMIT)
             .expect("d4_levelize_emit must exist");
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             lvl_emit
                 .clone()
@@ -1453,6 +1470,7 @@ mod tests {
             (&mut node_counts).as_kernel_param(),
             (&mut edge_counts).as_kernel_param(),
         ];
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             compile_count
                 .clone()
@@ -1511,6 +1529,7 @@ mod tests {
             (&mut decision_child_true).as_kernel_param(),
             (&mut node_level).as_kernel_param(),
         ];
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             compile_emit
                 .clone()
@@ -1541,6 +1560,7 @@ mod tests {
         let lvl_counts = device
             .get_func(D4_MODULE, d4_kernels::D4_LEVELIZE_COUNTS)
             .expect("d4_levelize_counts must exist");
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             lvl_counts
                 .clone()
@@ -1572,6 +1592,7 @@ mod tests {
         let lvl_emit = device
             .get_func(D4_MODULE, d4_kernels::D4_LEVELIZE_EMIT)
             .expect("d4_levelize_emit must exist");
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             lvl_emit
                 .clone()
@@ -1736,6 +1757,7 @@ mod tests {
             (&mut node_counts).as_kernel_param(),
             (&mut edge_counts).as_kernel_param(),
         ];
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             compile_count
                 .clone()
@@ -1802,6 +1824,7 @@ mod tests {
             (&mut decision_child_true).as_kernel_param(),
             (&mut node_level).as_kernel_param(),
         ];
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             compile_emit
                 .clone()
@@ -1824,6 +1847,7 @@ mod tests {
         let assert_and = device
             .get_func(D4_MODULE, d4_kernels::D4_ASSERT_LEAF_ROOT_AND_DEGREE)
             .expect("d4_assert_leaf_root_and_degree must exist");
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             assert_and
                 .clone()

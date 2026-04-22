@@ -13,6 +13,7 @@ use xlog_cuda::CudaKernelProvider;
 /// Controls numerical stability parameters for mapping neural-network
 /// output probabilities to CNF variable log-weights.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct NeuralFastPathConfig {
     /// Probability mass reserved for the implicit "none" outcome.
     pub eps: f64,

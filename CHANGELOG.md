@@ -2,7 +2,10 @@
 
 All notable changes to this project are documented in this file.
 
-## [Unreleased]
+## [Unreleased] — targeting v0.6.0
+
+> **Note:** All items below are post-v0.5.0 work (42 commits since the `v0.5.0` tag). They are
+> not part of the v0.5.0 release.
 
 ## [0.5.2](https://github.com/BrainyBlaze/xlog/compare/xlog-cli-v0.5.0...xlog-cli-v0.5.2) — 2026-04-20
 
@@ -130,6 +133,16 @@ All notable changes to this project are documented in this file.
   `num_rows()` (capacity) instead of synchronous `device_row_count_u32()` GPU→CPU transfers.
 - **MC per-sample store management replaced**: Full `snapshot_store()`/`restore_store()` cycle
   replaced by `McSampleResetPlan` with targeted relation-level reset.
+- **Whitepaper and public docs repositioned** around "GPU-native logic programming language
+  for unified symbolic reasoning" instead of "GPU-accelerated Datalog engine". v0.5.0 LaTeX
+  whitepaper (`docs/whitepaper/main.pdf`) gained a new Section 3 "The xlog Language" covering
+  types, UDFs, modules, arithmetic, aggregations, and constraints with validated examples;
+  `docs/ARCHITECTURE.md`, `docs/language-reference.md`, root `README.md`, `ROADMAP.md`, and
+  `docs/whitepaper/README.md` were aligned. Stale Markdown whitepaper draft
+  `docs/whitepaper-v050.md` removed (superseded by the LaTeX version). Broken cross-references
+  to cleanup-deleted `docs/plans/`, `docs/design/`, `docs/ilp/` directories replaced with
+  pointers to surviving docs (whitepaper sections, `dilp-training.md`, `rfc-tensorized-ilp.md`).
+  Docs-only change; no code or API impact.
 
 ### Refactored
 
@@ -310,6 +323,81 @@ All notable changes to this project are documented in this file.
 - **Legacy host-sum export helpers** (`export_loss_grad_f32`, `export_loss_grad_f64`): Replaced by
   device-only `export_loss_grad_device_f32`/`export_loss_grad_device_f64`. All loss/grad export now
   stays on device.
+
+### Breaking Changes
+
+- **`coo_memory_cap` renamed to `coo_chunk_budget`** (`pyxlog`): The parameter on `CompiledIlpProgram`
+  was renamed to reflect the new semantics (chunk-level temp budget, not a hard ceiling on all COO
+  allocations). `set_coo_memory_cap()` is retained as a deprecated alias for one release cycle and
+  will be removed in v0.6.0. Update call sites before upgrading.
+- **Artifact schema `beta-v1` → `beta-v2`** (`pyxlog`): `save()` now writes `beta-v2` artifacts.
+  `load()` accepts both `beta-v1` and `beta-v2`, so existing saved artifacts remain readable, but
+  artifacts saved with v0.5.0+ cannot be loaded by v0.4.x.
+- **`export_loss_grad_f32` / `export_loss_grad_f64` removed** (`pyxlog`): These host-side loss/grad
+  export helpers are gone. Replace with `export_loss_grad_device_f32` / `export_loss_grad_device_f64`
+  respectively. The device-side variants return DLPack tensors with zero D2H transfers.
+- **Type-specialized `download_column_<T>` functions removed** (`xlog-cuda`): All 8 type-specialized
+  variants (`download_column_u32`, `download_column_i32`, etc.) are replaced by the generic
+  `download_column::<T>()`. Similarly the 7 `create_buffer_from_<T>_slice()` variants are replaced
+  by `create_buffer_from_slice::<T>()`, and the 11 `filter_<T>()` variants by `filter::<T>()`.
+  Downstream Rust crates that call these directly must update call sites with turbofish syntax.
+
+### Migrating from v0.3.2
+
+This covers the upgrade path from v0.3.2 (the last stable release) to v0.5.0.
+
+#### New Required Dependencies
+
+- **PyTorch / LibTorch** — required for the neural-symbolic training APIs (`pyxlog`).
+  CPU builds work, but GPU inference requires a CUDA-enabled PyTorch build matching the CUDA
+  toolkit version used to build xlog-cuda.
+- **CUDA toolkit ≥ 11.8** — required for all GPU paths (`xlog-cuda`, `xlog-solve`, `xlog-prob`).
+  The CPU-only `xlog-logic` crate has no new mandatory dependencies.
+
+#### Package Rename (v0.4.0-alpha → v0.5.0, if upgrading through alpha)
+
+```python
+# Before (v0.4.0-alpha and earlier)
+import xlog_gpu
+
+# After (v0.5.0)
+import pyxlog
+```
+
+The PyPI package was renamed from `xlog-gpu` to `pyxlog` in v0.4.0-alpha. If you skipped the
+alpha/beta cycle, update all import statements and remove the `xlog-gpu` package.
+
+#### API Changes
+
+| Old (≤ v0.3.2 / v0.4.x)                    | New (v0.5.0)                                      | Notes                              |
+|---------------------------------------------|---------------------------------------------------|------------------------------------|
+| `set_coo_memory_cap(n)`                     | `set_coo_chunk_budget(n)`                         | Old name deprecated, removed v0.6.0 |
+| `export_loss_grad_f32()`                    | `export_loss_grad_device_f32()`                   | Returns DLPack tensor (on-device)  |
+| `export_loss_grad_f64()`                    | `export_loss_grad_device_f64()`                   | Returns DLPack tensor (on-device)  |
+| `download_column_u32()` (Rust, xlog-cuda)  | `download_column::<u32>()`                        | Generic turbofish form             |
+| `create_buffer_from_u32_slice()` (Rust)    | `create_buffer_from_slice::<u32>()`               | Generic turbofish form             |
+| `filter_u32()` / `filter_f32()` etc. (Rust)| `filter::<u32>()` / `filter::<f32>()`             | Generic turbofish form             |
+
+#### Saved Artifacts
+
+Artifacts saved with v0.4.x (`beta-v1` schema) can be loaded by v0.5.0 without modification.
+Artifacts saved with v0.5.0 (`beta-v2` schema) **cannot** be loaded by v0.4.x. If you need to
+maintain cross-version compatibility, do not upgrade the artifact files until all consumers are
+on v0.5.0.
+
+#### Breaking Changes from v0.3.2 Specifically
+
+v0.3.2 introduced its own breaking changes (serialized Arrow symbol files, `hash_symbol_to_u32`
+removal, `count` aggregation now returns `u64`). If upgrading directly from v0.3.2, address
+those first (see v0.3.2 release notes below), then apply the v0.5.0 changes above.
+
+#### Configuration Changes
+
+- `TrainConfig` now accepts `deterministic`, `max_grad_norm`, `val_queries`, and `patience` fields
+  (all optional, backward-compatible defaults).
+- `GpuCompileConfig` now accepts `incremental_verify` (optional, defaults to `False`).
+- `TrainConfig.persist_telemetry` defaults to `False`; explicitly set `True` to enable telemetry
+  persistence in saved artifacts (new in v0.5.0).
 
 ## [0.4.0-ga] — 2026-03-05
 

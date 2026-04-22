@@ -1,4 +1,5 @@
 //! Core types and traits for XLOG
+#![warn(missing_docs)]
 
 pub mod config;
 pub mod error;

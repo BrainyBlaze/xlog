@@ -73,6 +73,7 @@ struct GpuExactState {
 ///
 /// Use [`GpuConfig::default()`] and override individual fields as needed.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct GpuConfig {
     /// CUDA device ordinal (0-based).
     pub device_ordinal: usize,
@@ -535,6 +536,7 @@ impl ExactDdnnfProgram {
                 let mut q_true = var_log_true_batch.slice_mut(row_start..row_end);
                 let mut q_false = var_log_false_batch.slice_mut(row_start..row_end);
 
+                // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
                 unsafe {
                     fill.clone().launch(
                         LaunchConfig {
@@ -605,6 +607,7 @@ impl ExactDdnnfProgram {
                         XlogError::Kernel("Neural scatter shared memory overflow".to_string())
                     })?;
 
+                // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
                 unsafe {
                     scatter.clone().launch(
                         LaunchConfig {
@@ -641,6 +644,7 @@ impl ExactDdnnfProgram {
         };
         if force_grid != 0 {
             if expected_true {
+                // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
                 unsafe {
                     apply_query_false_batched.clone().launch(
                         LaunchConfig {
@@ -665,6 +669,7 @@ impl ExactDdnnfProgram {
                     ))
                 })?;
             } else {
+                // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
                 unsafe {
                     apply_query_true_batched.clone().launch(
                         LaunchConfig {
@@ -715,6 +720,7 @@ impl ExactDdnnfProgram {
             (batch_u32 + 255) / 256
         };
         if loss_grid != 0 {
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 binary_f64.clone().launch(
                     LaunchConfig {
@@ -756,6 +762,7 @@ impl ExactDdnnfProgram {
                         XlogError::Kernel("Neural scatter shared memory overflow".to_string())
                     })?;
 
+                // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
                 unsafe {
                     scatter.clone().launch(
                         LaunchConfig {
@@ -891,6 +898,7 @@ impl ExactDdnnfProgram {
 
             let (var_log_true, var_log_false) = cache.var_log_weights_mut();
 
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 fill.clone().launch(
                     LaunchConfig {
@@ -966,6 +974,7 @@ impl ExactDdnnfProgram {
                     XlogError::Kernel("Neural scatter shared memory overflow".to_string())
                 })?;
 
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 scatter.clone().launch(
                     LaunchConfig {
@@ -1016,6 +1025,7 @@ impl ExactDdnnfProgram {
                 .as_ref()
                 .expect("base_log_z allocated when out_loss requested");
             let root_view = cache.values().slice(root_idx..(root_idx + 1));
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 binary_f64.clone().launch(
                     LaunchConfig {
@@ -1048,6 +1058,7 @@ impl ExactDdnnfProgram {
                     XlogError::Kernel("Neural scatter shared memory overflow".to_string())
                 })?;
 
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 scatter.clone().launch(
                     LaunchConfig {
@@ -1551,6 +1562,7 @@ fn force_query_var_false(
     let func = device
         .get_func(WEIGHTS_MODULE, weights_kernels::WEIGHTS_FORCE_VAR_FALSE)
         .ok_or_else(|| XlogError::Kernel("weights_force_var_false kernel not found".to_string()))?;
+    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         func.clone().launch(
             LaunchConfig {
@@ -1577,6 +1589,7 @@ fn restore_query_var_false(
         .ok_or_else(|| {
             XlogError::Kernel("weights_restore_var_false kernel not found".to_string())
         })?;
+    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         func.clone().launch(
             LaunchConfig {
@@ -1601,6 +1614,7 @@ fn force_query_var_true(
     let func = device
         .get_func(WEIGHTS_MODULE, weights_kernels::WEIGHTS_FORCE_VAR_TRUE)
         .ok_or_else(|| XlogError::Kernel("weights_force_var_true kernel not found".to_string()))?;
+    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         func.clone().launch(
             LaunchConfig {
@@ -1627,6 +1641,7 @@ fn restore_query_var_true(
         .ok_or_else(|| {
             XlogError::Kernel("weights_restore_var_true kernel not found".to_string())
         })?;
+    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         func.clone().launch(
             LaunchConfig {
@@ -1692,17 +1707,17 @@ pub(crate) fn default_compile_config(
         cdcl_learned_bytes = 4 * 1024 * 1024;
     }
 
-    Ok(GpuCompileConfig {
-        frontier_depth,
-        max_frontier_items,
-        max_depth: 128,
-        smooth_node_cap,
-        smooth_edge_cap,
-        cdcl_restart_interval: 64,
-        cdcl_learned_bytes,
-        cdcl_conflict_budget: None,
-        incremental_verify: false,
-    })
+    let mut config = GpuCompileConfig::default();
+    config.frontier_depth = frontier_depth;
+    config.max_frontier_items = max_frontier_items;
+    config.max_depth = 128;
+    config.smooth_node_cap = smooth_node_cap;
+    config.smooth_edge_cap = smooth_edge_cap;
+    config.cdcl_restart_interval = 64;
+    config.cdcl_learned_bytes = cdcl_learned_bytes;
+    config.cdcl_conflict_budget = None;
+    config.incremental_verify = false;
+    Ok(config)
 }
 
 pub(crate) fn default_cache_config(
@@ -1831,6 +1846,7 @@ fn capture_compact_count_device(
     let capture_fn = device
         .get_func(FILTER_MODULE, filter_kernels::CAPTURE_COMPACT_COUNT)
         .ok_or_else(|| XlogError::Kernel("capture_compact_count kernel not found".to_string()))?;
+    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         capture_fn.clone().launch(
             LaunchConfig {
@@ -1873,6 +1889,7 @@ pub(crate) fn collect_random_vars_device(
         .ok_or_else(|| XlogError::Kernel("fill_u32_iota kernel not found".to_string()))?;
     let block_size = 256u32;
     let grid = (mask_len + block_size - 1) / block_size;
+    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         fill_iota.clone().launch(
             LaunchConfig {
@@ -1898,6 +1915,7 @@ pub(crate) fn collect_random_vars_device(
     let mark_n = leaf_len.max(choice_len);
     if mark_n > 0 {
         let grid = (mark_n + block_size - 1) / block_size;
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             mark_kernel.clone().launch(
                 LaunchConfig {
@@ -1942,6 +1960,7 @@ pub(crate) fn collect_random_vars_device(
     let compact_fn = device
         .get_func(FILTER_MODULE, filter_kernels::COMPACT_U32_BY_MASK)
         .ok_or_else(|| XlogError::Kernel("compact_u32_by_mask kernel not found".to_string()))?;
+    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         compact_fn.clone().launch(
             LaunchConfig {

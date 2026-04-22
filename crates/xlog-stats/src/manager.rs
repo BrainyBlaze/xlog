@@ -14,7 +14,9 @@ use crate::stats::{ColumnStats, JoinSelectivity, RelationStats};
 /// This is intended for feeding runtime observations back into the compiler/optimizer.
 #[derive(Debug, Clone, Default)]
 pub struct StatsSnapshot {
+    /// Per-relation statistics.
     pub relations: Vec<RelationStats>,
+    /// Cached join selectivity models.
     pub join_selectivities: Vec<JoinSelectivity>,
     /// Optional mapping from runtime `RelId` to predicate name.
     ///

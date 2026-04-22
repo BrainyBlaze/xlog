@@ -153,6 +153,7 @@ impl super::CudaKernelProvider {
             .get_func(FILTER_MODULE, kernel)
             .ok_or_else(|| XlogError::Kernel("filter compare kernel not found".into()))?;
 
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             func.clone()
                 .launch(config, (col_data, value, num_rows, op as u8, &mut d_mask))
@@ -248,6 +249,7 @@ impl super::CudaKernelProvider {
             .get_func(FILTER_MODULE, kernel)
             .ok_or_else(|| XlogError::Kernel("filter compare kernel not found".into()))?;
 
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             func.clone().launch(
                 config,
@@ -484,6 +486,7 @@ impl super::CudaKernelProvider {
 
         // SAFETY: Kernel parameters match expected signature:
         // multiblock_scan_phase1(const uint8_t* mask, uint32_t* prefix_sum, uint32_t* block_sums, uint32_t n)
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             phase1_fn.clone().launch(
                 LaunchConfig {
@@ -511,6 +514,7 @@ impl super::CudaKernelProvider {
 
             // SAFETY: Kernel parameters match expected signature:
             // multiblock_scan_phase3(uint32_t* prefix_sum, const uint32_t* block_offsets, uint32_t n)
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 phase3_fn.clone().launch(
                     LaunchConfig {
@@ -698,6 +702,7 @@ impl super::CudaKernelProvider {
             .ok_or_else(|| {
                 XlogError::Kernel("capture_compact_count kernel not found".to_string())
             })?;
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             capture_fn.clone().launch(
                 LaunchConfig {
@@ -786,6 +791,7 @@ impl super::CudaKernelProvider {
 
             // SAFETY: Kernel signature matches:
             // compact_bytes_by_mask(input, mask, prefix_sum, num_rows, elem_size, output)
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 compact_fn.clone().launch(
                     config,
@@ -850,6 +856,7 @@ impl super::CudaKernelProvider {
 
             // SAFETY: Kernel signature matches:
             // compact_bytes_by_mask(input, mask, prefix_sum, num_rows, elem_size, output)
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 compact_fn.clone().launch(
                     config,

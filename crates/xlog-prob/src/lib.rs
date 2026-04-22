@@ -1,17 +1,30 @@
 //! Probabilistic reasoning tier for XLOG (Phase 4).
+#![warn(missing_docs)]
 
+#[allow(missing_docs)] // TODO(v0.6): document or make pub(crate)
 pub mod cnf;
+#[allow(missing_docs)] // TODO(v0.6): document or make pub(crate)
 pub mod compilation;
+#[allow(missing_docs)] // TODO(v0.6): document or make pub(crate)
 pub mod exact;
 #[allow(dead_code)] // reserved: GPU-only exact compilation path (not yet wired to main pipeline)
+#[allow(missing_docs)]
 pub mod exact_gpu;
+#[allow(missing_docs)] // TODO(v0.6): document or make pub(crate)
 pub mod gpu;
+#[allow(missing_docs)] // TODO(v0.6): document or make pub(crate)
 pub mod kc;
+#[allow(missing_docs)] // TODO(v0.6): document or make pub(crate)
 pub mod mc;
+#[allow(missing_docs)] // TODO(v0.6): document or make pub(crate)
 pub mod neural_fast_path;
+#[allow(missing_docs)] // TODO(v0.6): document or make pub(crate)
 pub mod pir;
+#[allow(missing_docs)] // TODO(v0.6): document or make pub(crate)
 pub mod provenance;
+#[allow(missing_docs)] // TODO(v0.6): document or make pub(crate)
 pub mod wfs;
+#[allow(missing_docs)] // TODO(v0.6): document or make pub(crate)
 pub mod xgcf;
 
 pub use pir::{ChoiceVarId, LeafId, PirGraph, PirNode, PirNodeId};

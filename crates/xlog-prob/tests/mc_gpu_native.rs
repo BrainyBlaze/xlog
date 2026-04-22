@@ -141,6 +141,7 @@ fn mc_eval_kernels_set_evidence_ok_without_evidence() {
         )
         .expect("mc_eval_query_evidence_truth kernel");
 
+    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         truth_fn
             .clone()
@@ -233,6 +234,7 @@ fn mc_accumulate_counts_increments_on_ok() {
         )
         .expect("mc_accumulate_counts kernel");
 
+    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         accum_fn
             .clone()

@@ -1,4 +1,5 @@
 //! Neural network integration for XLOG probabilistic logic programs.
+#![warn(missing_docs)]
 //!
 //! This crate provides the infrastructure for integrating PyTorch neural networks
 //! with XLOG's probabilistic inference engine, following the DeepProbLog paradigm.
@@ -45,6 +46,7 @@ pub use pyo3;
 
 /// Error types for neural network operations
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum NeuralError {
     /// Network not found in registry
     #[error("Network not found: {0}")]

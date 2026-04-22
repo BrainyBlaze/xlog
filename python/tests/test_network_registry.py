@@ -14,7 +14,7 @@ torch = pytest.importorskip("torch")
 pyxlog = pytest.importorskip("pyxlog")
 
 
-class SimpleNet(torch.nn.Module):
+class SimpleNet(torch.nn.Module):  # type: ignore[name-defined]
     """Simple network for testing - classifies 784-dim input to 10 classes."""
 
     def __init__(self):
@@ -25,7 +25,7 @@ class SimpleNet(torch.nn.Module):
         return torch.softmax(self.fc(x.view(-1, 784)), dim=-1)
 
 
-class EmbeddingNet(torch.nn.Module):
+class EmbeddingNet(torch.nn.Module):  # type: ignore[name-defined]
     """Embedding network for testing - produces 128-dim embeddings."""
 
     def __init__(self):

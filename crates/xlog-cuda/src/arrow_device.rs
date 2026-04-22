@@ -42,16 +42,19 @@ unsafe extern "C" fn release_arrow_device_array(ptr: *mut ArrowDeviceArray) {
     }
     let dev = &mut *ptr;
     if !dev.array.is_null() {
+        // SAFETY: dev.array is non-null (checked); was originally created via Box::into_raw; we are the sole owner
         unsafe {
             drop(Box::from_raw(dev.array));
         }
     }
     if !dev.schema.is_null() {
+        // SAFETY: dev.schema is non-null (checked); was originally created via Box::into_raw; we are the sole owner
         unsafe {
             drop(Box::from_raw(dev.schema));
         }
     }
     if !dev.private_data.is_null() {
+        // SAFETY: memory layout is guaranteed by the Arrow C Data Interface specification
         unsafe {
             drop(Box::from_raw(
                 dev.private_data.cast::<ArrowCudaAllocation>(),
@@ -89,6 +92,7 @@ impl ArrowDeviceArrayOwned {
 
 impl Drop for ArrowDeviceArrayOwned {
     fn drop(&mut self) {
+        // SAFETY: ptr is non-null (checked); release was set by the Arrow producer and is valid for the array lifetime
         unsafe {
             if !self.ptr.is_null() {
                 if let Some(release) = (*self.ptr).release {

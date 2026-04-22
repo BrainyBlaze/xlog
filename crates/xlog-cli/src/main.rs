@@ -200,11 +200,9 @@ fn run_probabilistic(args: ProbArgs) -> Result<()> {
                 .map_err(|e| XlogError::Execution(format!("Module resolution failed: {}", e)))?;
         }
 
-        let config = GpuConfig {
-            device_ordinal: args.device,
-            memory_bytes: args.memory_mb * 1024 * 1024,
-            ..Default::default()
-        };
+        let mut config = GpuConfig::default();
+        config.device_ordinal = args.device;
+        config.memory_bytes = args.memory_mb * 1024 * 1024;
 
         match args.prob_engine {
             ProbEngineCli::ExactDdnnf => {
@@ -214,12 +212,10 @@ fn run_probabilistic(args: ProbArgs) -> Result<()> {
             }
             ProbEngineCli::Mc => {
                 let prog = McProgram::compile_source_with_gpu(&source, config)?;
-                let cfg = McEvalConfig {
-                    samples: args.samples,
-                    seed: args.seed,
-                    confidence: args.confidence,
-                    ..Default::default()
-                };
+                let mut cfg = McEvalConfig::default();
+                cfg.samples = args.samples;
+                cfg.seed = args.seed;
+                cfg.confidence = args.confidence;
                 let result = prog.evaluate(cfg)?;
                 emit_prob_mc(result, args.output, args.output_dir.as_deref())
             }

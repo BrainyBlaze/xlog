@@ -84,16 +84,19 @@ pub struct PlanBuilder {
 }
 
 impl PlanBuilder {
+    /// Create a new empty plan builder.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Append a strongly connected component to the plan.
     pub fn add_scc(&mut self, scc: Scc) -> &mut Self {
         self.sccs.push(scc);
         self.rules.push(vec![]);
         self
     }
 
+    /// Add a compiled rule to the given SCC (by index).
     pub fn add_rule(&mut self, scc_id: u32, rule: CompiledRule) -> &mut Self {
         if let Some(rules) = self.rules.get_mut(scc_id as usize) {
             rules.push(rule);
@@ -101,11 +104,13 @@ impl PlanBuilder {
         self
     }
 
+    /// Append a stratum to the plan.
     pub fn add_stratum(&mut self, stratum: Stratum) -> &mut Self {
         self.strata.push(stratum);
         self
     }
 
+    /// Consume the builder and produce the final [`ExecutionPlan`].
     pub fn build(self) -> ExecutionPlan {
         ExecutionPlan {
             sccs: self.sccs,

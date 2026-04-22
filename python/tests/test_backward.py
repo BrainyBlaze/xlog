@@ -19,7 +19,7 @@ def _prime_scheduler(optimizer):
     optimizer.step()
 
 
-class SimpleNet(torch.nn.Module):
+class SimpleNet(torch.nn.Module):  # type: ignore[name-defined]
     """Simple neural network for testing gradient flow."""
 
     def __init__(self, input_dim=10, output_dim=3):
@@ -181,7 +181,7 @@ class TestForwardBackward:
         program.zero_grad()
 
         # Forward-backward
-        loss = program.forward_backward("pred(0, a)")
+        program.forward_backward("pred(0, a)")
 
         # Check gradients exist and are non-zero
         for name, param in net.named_parameters():
@@ -229,7 +229,7 @@ class TestTrainingStep:
 
         # Training step
         program.zero_grad()
-        loss = program.forward_backward("pred(0, a)")
+        program.forward_backward("pred(0, a)")
         program.optimizer_step()
 
         # Parameters should have changed

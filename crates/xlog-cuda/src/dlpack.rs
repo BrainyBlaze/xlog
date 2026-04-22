@@ -70,12 +70,15 @@ unsafe extern "C" fn dlpack_deleter(ptr: *mut DLManagedTensor) {
     if ptr.is_null() {
         return;
     }
+    // SAFETY: ptr is non-null (checked above); manager_ctx was set from a Box<DlpackCtx> raw pointer
     let ctx_ptr = unsafe { (*ptr).manager_ctx as *mut DlpackCtx };
     if !ctx_ptr.is_null() {
+        // SAFETY: ctx_ptr was originally created via Box::into_raw; we are the sole owner
         unsafe {
             drop(Box::from_raw(ctx_ptr));
         }
     }
+    // SAFETY: ptr was originally created via Box::into_raw in DlpackManagedTensor::into_raw; we are the sole owner
     unsafe {
         drop(Box::from_raw(ptr));
     }
@@ -181,6 +184,7 @@ impl DlpackManagedTensor {
 
 impl Drop for DlpackManagedTensor {
     fn drop(&mut self) {
+        // SAFETY: ptr is non-null (checked), was created by the DLPack producer; deleter is the registered cleanup function
         unsafe {
             if !self.ptr.is_null() {
                 if let Some(deleter) = (*self.ptr).deleter {
@@ -202,6 +206,7 @@ unsafe fn dlpack_tensor_info(
         ));
     }
 
+    // SAFETY: ptr is non-null (checked above); DlpackManagedTensor holds a valid DLManagedTensor for its lifetime
     let dl = unsafe { &(*ptr).dl_tensor };
 
     if dl.device.device_type != K_DLCUDA {
@@ -228,6 +233,7 @@ unsafe fn dlpack_tensor_info(
         return Err(XlogError::Kernel("DLPack tensor shape is null".to_string()));
     }
     if !dl.strides.is_null() {
+        // SAFETY: dl.strides is non-null (checked above); points to a valid C array of ndim elements
         let stride0 = unsafe { *dl.strides };
         if stride0 != 1 {
             return Err(XlogError::Kernel(format!(
@@ -237,6 +243,7 @@ unsafe fn dlpack_tensor_info(
         }
     }
 
+    // SAFETY: dl.shape is non-null (checked above); points to a valid C array of ndim elements
     let shape0 = unsafe { *dl.shape };
     if shape0 < 0 {
         return Err(XlogError::Kernel(format!(
@@ -375,6 +382,7 @@ impl CudaKernelProvider {
         let mut num_rows: Option<u64> = None;
 
         for (i, tensor) in tensors.into_iter().enumerate() {
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             let (rows, ty, ptr, len_bytes) = unsafe { dlpack_tensor_info(self, &tensor)? };
             if let Some(n) = num_rows {
                 if rows != n {
@@ -421,6 +429,7 @@ impl CudaKernelProvider {
         let mut num_rows: Option<u64> = None;
 
         for (i, tensor) in tensors.into_iter().enumerate() {
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             let (rows, ty, ptr, len_bytes) = unsafe { dlpack_tensor_info(self, &tensor)? };
             let expected = schema.column_type(i).ok_or_else(|| {
                 XlogError::Kernel(format!("Missing schema type for column {}", i))

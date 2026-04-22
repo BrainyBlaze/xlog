@@ -72,36 +72,50 @@ pub enum Expr {
     },
 }
 
-/// Projection expression - either pass-through column or computed value
+/// Projection expression -- either a pass-through column reference or a computed value.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProjectExpr {
-    /// Pass through column at given index
+    /// Pass through column at given index.
     Column(usize),
-    /// Compute expression, result has given type
+    /// Compute an expression whose result has the given scalar type.
     Computed(Expr, ScalarType),
 }
 
 /// Comparison operators
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompareOp {
+    /// Equal (`==`)
     Eq,
+    /// Not equal (`!=`)
     Ne,
+    /// Less than (`<`)
     Lt,
+    /// Less than or equal (`<=`)
     Le,
+    /// Greater than (`>`)
     Gt,
+    /// Greater than or equal (`>=`)
     Ge,
 }
 
 /// Constant values in expressions
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConstValue {
+    /// Unsigned 32-bit integer constant.
     U32(u32),
+    /// Unsigned 64-bit integer constant.
     U64(u64),
+    /// Signed 32-bit integer constant.
     I32(i32),
+    /// Signed 64-bit integer constant.
     I64(i64),
+    /// 32-bit float constant.
     F32(f32),
+    /// 64-bit float constant.
     F64(f64),
+    /// Boolean constant.
     Bool(bool),
+    /// Interned symbol string constant.
     Symbol(String),
 }
 
@@ -193,7 +207,7 @@ pub enum RirNode {
         /// Maximum active rules to process (budget cap, RD-6).
         max_active_rules: usize,
         /// Column indices from the join result to project into the head schema.
-        /// Maps head column i to join result column head_projection[i].
+        /// Maps head column `i` to join result column `head_projection[i]`.
         /// Join result columns are: [left_col_0..left_col_n, right_col_0..right_col_m].
         head_projection: Vec<usize>,
     },

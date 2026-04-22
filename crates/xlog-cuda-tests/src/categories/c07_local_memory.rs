@@ -8,7 +8,7 @@ use std::time::Instant;
 use xlog_core::{ScalarType, Schema};
 
 /// Run all tests in this category.
-pub fn run_all(ctx: &TestContext) -> CategoryResult {
+pub(crate) fn run_all(ctx: &TestContext) -> CategoryResult {
     let mut results = CategoryResult::new("c07_local_memory");
     let start = Instant::now();
 

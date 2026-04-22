@@ -4,7 +4,7 @@ use crate::ast::{ArithExpr, Atom, BodyLiteral, Comparison, FuncBody, FuncDef, Is
 use crate::function::{FunctionError, FunctionRegistry};
 use std::collections::HashMap;
 
-/// Context for expansion
+/// Context for inline expansion of user-defined functions.
 pub struct ExpansionContext<'a> {
     registry: &'a FunctionRegistry,
     depth: u32,
@@ -12,6 +12,7 @@ pub struct ExpansionContext<'a> {
 }
 
 impl<'a> ExpansionContext<'a> {
+    /// Create an expansion context with the given function registry and recursion limit.
     pub fn new(registry: &'a FunctionRegistry, max_depth: u32) -> Self {
         Self {
             registry,
@@ -453,6 +454,7 @@ use crate::ast::{Program, Rule};
 
 /// Expand all user-defined function calls in a program.
 /// Returns a new program with all UDF calls replaced by their expanded bodies.
+/// Expand all user-defined function calls in the program to inline arithmetic.
 pub fn expand_program_functions(
     program: &Program,
     max_depth: u32,

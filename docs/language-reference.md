@@ -1231,7 +1231,7 @@ learnable(W_col) :: colleague(X, Y)   :- bL(X, Z), bR(Y, Z).
 ### Cross-References
 
 - [`architecture/dilp-training.md`](architecture/dilp-training.md)
-- [`ilp/rfc-tensorized-ilp.md`](ilp/rfc-tensorized-ilp.md)
+- [`architecture/rfc-tensorized-ilp.md`](architecture/rfc-tensorized-ilp.md)
 - [`architecture/python-bindings.md`](architecture/python-bindings.md)
 
 ---

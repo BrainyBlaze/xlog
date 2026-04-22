@@ -226,6 +226,7 @@ fn build_circuit_cnf(
         (&mut d_num_clauses).as_kernel_param(),
         (&mut d_num_lits).as_kernel_param(),
     ];
+    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         totals_fn.clone().launch(
             LaunchConfig {
@@ -262,6 +263,7 @@ fn build_circuit_cnf(
         (&mut d_lits).as_kernel_param(),
     ];
 
+    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         emit_fn.clone().launch(
             LaunchConfig {
@@ -370,6 +372,7 @@ fn build_phi_and_not_c(
     // Copy phi (exact sizes) into the front.
     // sat_cnf_copy_into(src_offsets, src_lits, src_num_clauses*, src_num_lits*, src_clause_cap, src_lit_cap,
     //                  dst_clause_base*, dst_lit_base*, dst_clause_cap, dst_lit_cap, dst_offsets, dst_lits)
+    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         copy_fn.clone().launch(
             LaunchConfig {
@@ -410,6 +413,7 @@ fn build_phi_and_not_c(
     if grid_c > 65_535 {
         grid_c = 65_535;
     }
+    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         copy_fn.clone().launch(
             LaunchConfig {
@@ -480,6 +484,7 @@ fn build_phi_and_not_c(
         (&mut out_lits).as_kernel_param(),
     ];
 
+    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         unit_fn.clone().launch(
             LaunchConfig {
@@ -598,6 +603,7 @@ fn build_c_and_not_phi(
         grid = 65_535;
     }
     // sat_cnf_copy_into(...)
+    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         copy_fn.clone().launch(
             LaunchConfig {
@@ -690,6 +696,7 @@ fn build_c_and_not_phi(
         (&mut out_lits).as_kernel_param(),
     ];
 
+    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         unit_fn.clone().launch(
             LaunchConfig {

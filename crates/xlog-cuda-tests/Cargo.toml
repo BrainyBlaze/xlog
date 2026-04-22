@@ -1,8 +1,11 @@
 [package]
 name = "xlog-cuda-tests"
-version = "0.2.0"
+version = "0.5.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/xlog-project/xlog"
 description = "Comprehensive CUDA/PTX kernel certification test suite"
+readme = "../../README.md"
 publish = false
 
 [dependencies]

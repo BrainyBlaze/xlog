@@ -1,4 +1,5 @@
 //! Datalog frontend for XLOG
+#![warn(missing_docs)]
 //!
 //! This crate provides the parsing, analysis, and compilation pipeline
 //! for XLOG Datalog programs.
@@ -23,9 +24,9 @@
 //!
 //! - [`parser`] - Pest-based parser for XLOG syntax
 //! - [`ast`] - Abstract Syntax Tree types
-//! - [`stratify`] - Stratification analysis for negation/aggregation
+//! - [`mod@stratify`] - Stratification analysis for negation/aggregation
 //! - [`lower`] - Lowering from AST to Relational IR
-//! - [`compile`] - Full compilation pipeline
+//! - [`mod@compile`] - Full compilation pipeline
 
 pub mod ast;
 pub mod compile;

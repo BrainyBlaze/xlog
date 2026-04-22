@@ -340,6 +340,7 @@ impl super::CudaKernelProvider {
         // SAFETY: mark_unique_and_scan_columnar(col_ptrs, col_sizes, col_types, num_key_cols,
         //                                       num_rows_device, row_cap,
         //                                       unique_mask, prefix_sum, block_sums)
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             mark_and_scan_fn.clone().launch(
                 config,
@@ -885,6 +886,7 @@ impl super::CudaKernelProvider {
 
         // SAFETY: Kernel signature matches:
         // sorted_diff_mark(a, a_len_device, a_cap, b, b_len_device, b_cap, in_diff)
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             diff_mark_fn.clone().launch(
                 config,
@@ -1819,6 +1821,7 @@ impl super::CudaKernelProvider {
 
         // SAFETY: count_mask(mask, n, count) — writes atomicAdd into count ptr.
         // The slot was pre-zeroed by the caller.
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             count_fn.clone().launch(
                 LaunchConfig {
@@ -2325,6 +2328,7 @@ impl super::CudaKernelProvider {
         // pack_and_hash_keys(col0, col1, col2, col3, col_sizes, num_cols, num_rows, row_size, packed_output, hashes)
         // Column pointers are passed as CudaSlice references - the kernel sees raw device pointers.
         // We pass column data as raw pointers cast to u8* in the kernel.
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             func.clone()
                 .launch(
@@ -2436,6 +2440,7 @@ impl super::CudaKernelProvider {
             shared_mem_bytes: 0,
         };
 
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             func.clone()
                 .launch(
@@ -2712,6 +2717,7 @@ impl super::CudaKernelProvider {
         //                            probe_keys, build_keys, key_bytes,
         //                            output_left, output_right, output_count, max_output)
         // Note: Using raw pointer launch because tuple exceeds 12-element limit
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             let mut params: Vec<*mut c_void> = vec![
                 (&left_packed.hashes).as_kernel_param(),
@@ -2775,6 +2781,7 @@ impl super::CudaKernelProvider {
         //                            probe_keys, build_keys, key_bytes,
         //                            output_left, output_right, output_count, max_output)
         // Note: Using raw pointer launch because tuple exceeds 12-element limit
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             let mut params: Vec<*mut c_void> = vec![
                 (&left_packed.hashes).as_kernel_param(),
@@ -2888,6 +2895,7 @@ impl super::CudaKernelProvider {
         let d_dummy_right = self.memory.alloc::<u32>(1)?;
         let max_output_count_only = 0u32;
 
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             let mut params: Vec<*mut c_void> = vec![
                 (&left_packed.hashes).as_kernel_param(),
@@ -2946,6 +2954,7 @@ impl super::CudaKernelProvider {
             .memset_zeros(&mut d_output_count)
             .map_err(|e| XlogError::Kernel(format!("Failed to zero output count: {}", e)))?;
 
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             let mut params: Vec<*mut c_void> = vec![
                 (&left_packed.hashes).as_kernel_param(),
@@ -3079,6 +3088,7 @@ impl super::CudaKernelProvider {
         // SAFETY: hash_join_semi(probe_hashes, num_probe,
         //                        bucket_offsets, bucket_counts, bucket_entries, bucket_entry_hashes, bucket_mask,
         //                        probe_keys, build_keys, key_bytes, has_match)
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             semi_func
                 .clone()
@@ -3200,6 +3210,7 @@ impl super::CudaKernelProvider {
         //                        bucket_offsets, bucket_counts, bucket_entries,
         //                        bucket_entry_hashes, bucket_mask,
         //                        probe_keys, build_keys, key_bytes, has_match)
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             semi_func
                 .clone()
@@ -3300,6 +3311,7 @@ impl super::CudaKernelProvider {
             shared_mem_bytes: 0,
         };
 
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             semi_func
                 .clone()
@@ -3408,6 +3420,7 @@ impl super::CudaKernelProvider {
         // SAFETY: hash_join_anti(probe_hashes, num_probe,
         //                        bucket_offsets, bucket_counts, bucket_entries, bucket_entry_hashes, bucket_mask,
         //                        probe_keys, build_keys, key_bytes, no_match)
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             anti_func
                 .clone()
@@ -3484,6 +3497,7 @@ impl super::CudaKernelProvider {
             shared_mem_bytes: 0,
         };
 
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             anti_func
                 .clone()
@@ -3566,6 +3580,7 @@ impl super::CudaKernelProvider {
             shared_mem_bytes: 0,
         };
 
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             semi_func
                 .clone()
@@ -3604,6 +3619,7 @@ impl super::CudaKernelProvider {
         let d_dummy_right = self.memory.alloc::<u32>(1)?;
         let max_output_count_only = 0u32;
 
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             let mut params: Vec<*mut c_void> = vec![
                 (&left_packed.hashes).as_kernel_param(),
@@ -3657,6 +3673,7 @@ impl super::CudaKernelProvider {
             .memset_zeros(&mut d_output_count)
             .map_err(|e| XlogError::Kernel(format!("Failed to zero output count: {}", e)))?;
 
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             let mut params: Vec<*mut c_void> = vec![
                 (&left_packed.hashes).as_kernel_param(),
@@ -3695,6 +3712,7 @@ impl super::CudaKernelProvider {
 
         let mut d_no_match = self.memory.alloc::<u8>(num_left as usize)?;
 
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             mask_not_fn
                 .clone()
@@ -3935,6 +3953,7 @@ impl super::CudaKernelProvider {
         // SAFETY: hash_join_semi(probe_hashes, num_probe,
         //                        bucket_offsets, bucket_counts, bucket_entries, bucket_entry_hashes, bucket_mask,
         //                        probe_keys, build_keys, key_bytes, has_match)
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             semi_func
                 .clone()
@@ -3973,6 +3992,7 @@ impl super::CudaKernelProvider {
         let d_dummy_right = self.memory.alloc::<u32>(1)?;
         let max_output_count_only = 0u32;
 
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             let mut params: Vec<*mut c_void> = vec![
                 (&left_packed.hashes).as_kernel_param(),
@@ -4031,6 +4051,7 @@ impl super::CudaKernelProvider {
         //                            probe_keys, build_keys, key_bytes,
         //                            output_left, output_right, output_count, max_output)
         // Note: Using raw pointer launch because tuple exceeds 12-element limit
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             let mut params: Vec<*mut c_void> = vec![
                 (&left_packed.hashes).as_kernel_param(),
@@ -4421,6 +4442,7 @@ impl super::CudaKernelProvider {
         let hard_view = self.column_bytes_view(hard_col, hard_bytes)?;
         let soft_view = self.column_bytes_view(soft_col, soft_bytes)?;
 
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             kernel
                 .clone()

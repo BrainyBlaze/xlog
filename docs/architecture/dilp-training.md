@@ -35,7 +35,7 @@ At convergence, `argmax(W)` picks the winning rule. Temperature annealing (Ï„ â†
 soft mask toward a one-hot selection.
 
 For the full mathematical treatment and the resolved design decisions that led
-to the shipped trainer, see [`../ilp/rfc-tensorized-ilp.md`](../ilp/rfc-tensorized-ilp.md).
+to the shipped trainer, see [`rfc-tensorized-ilp.md`](rfc-tensorized-ilp.md).
 
 ## Architecture Overview
 
@@ -217,8 +217,8 @@ RFC. The live references are:
 
 | Document | Content |
 |----------|---------|
-| [`../ilp/rfc-tensorized-ilp.md`](../ilp/rfc-tensorized-ilp.md) | Full RFC: mathematical foundation, hardware rationale, implementation map, and resolved design decisions |
-| [`../ilp/dilp-showcase-report.md`](../ilp/dilp-showcase-report.md) | Validation: four-stage showcase run analysis |
+| [`rfc-tensorized-ilp.md`](rfc-tensorized-ilp.md) | Full RFC: mathematical foundation, hardware rationale, implementation map, and resolved design decisions |
+| [`dilp-showcase-report.md`](dilp-showcase-report.md) | Validation: four-stage showcase run analysis |
 
 ## See Also
 

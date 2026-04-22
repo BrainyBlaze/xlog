@@ -161,6 +161,7 @@ impl super::CudaKernelProvider {
             .inner()
             .get_func(D4_MODULE, d4_kernels::D4_ASSERT_U32_EQ)
             .ok_or_else(|| XlogError::Kernel("d4_assert_u32_eq kernel not found".to_string()))?;
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             assert_fn.clone().launch(
                 LaunchConfig {
@@ -224,6 +225,7 @@ impl super::CudaKernelProvider {
         use crate::memory::CudaColumn;
 
         let (device_type, device_id, ffi_array, ffi_schema) =
+            // SAFETY: device_array is a valid ArrowDeviceArrayOwned; into_ffi_parts transfers ownership per Arrow C Data Interface
             unsafe { device_array.into_ffi_parts() };
 
         if device_type != ARROW_DEVICE_CUDA {
@@ -240,6 +242,7 @@ impl super::CudaKernelProvider {
             )));
         }
 
+        // SAFETY: ffi_array and ffi_schema conform to the Arrow C Data Interface; device and type checks passed above
         let data: ArrayData = unsafe { from_ffi(ffi_array, &ffi_schema) }
             .map_err(|e| XlogError::Kernel(format!("Arrow device import failed: {}", e)))?;
 
@@ -519,6 +522,7 @@ impl super::CudaKernelProvider {
                     })?;
                 let block_size = 256u32;
                 let grid_size = (packed_len as u32 + block_size - 1) / block_size;
+                // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
                 unsafe {
                     pack_fn.clone().launch(
                         LaunchConfig {
@@ -549,6 +553,7 @@ impl super::CudaKernelProvider {
                 XlogError::Kernel("Arrow device export got null device pointer".to_string())
             })?
         };
+        // SAFETY: nn points to CUDA device memory managed by ArrowCudaAllocation; len is the correct byte length
         let buf = unsafe { Buffer::from_custom_allocation(nn, len, alloc) };
 
         let data = ArrayData::builder(dtype)

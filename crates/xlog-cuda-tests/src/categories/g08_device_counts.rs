@@ -8,7 +8,7 @@ use xlog_core::{AggOp, ScalarType, Schema};
 use xlog_cuda::CudaBuffer;
 
 /// Run all tests in this category.
-pub fn run_all(ctx: &TestContext) -> CategoryResult {
+pub(crate) fn run_all(ctx: &TestContext) -> CategoryResult {
     let start = Instant::now();
     let mut results = CategoryResult::new("g08_device_counts");
 

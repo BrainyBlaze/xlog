@@ -29,6 +29,7 @@ pub struct LoadedModule {
 }
 
 impl LoadedModule {
+    /// Create a new loaded module (exports initially empty).
     pub fn new(path: ModulePath, source_file: PathBuf, program: Program) -> Self {
         Self {
             path,
@@ -42,6 +43,7 @@ impl LoadedModule {
 
 /// Errors that can occur during module resolution
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum ModuleError {
     /// Module file not found
     NotFound {

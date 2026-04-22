@@ -13,7 +13,7 @@ torch = pytest.importorskip("torch")
 pyxlog = pytest.importorskip("pyxlog")
 
 
-class MNISTNet(torch.nn.Module):
+class MNISTNet(torch.nn.Module):  # type: ignore[name-defined]
     """Simple MNIST-like classifier for testing."""
 
     def __init__(self):

@@ -14,6 +14,7 @@ use std::collections::HashMap;
 ///
 /// This mirrors the DeepProbLog `register_network` options.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct NetworkConfig {
     /// Unique name identifying this network (must match nn() declarations)
     pub name: String,

@@ -97,6 +97,7 @@ impl McTimingBreakdown {
 pub const NONMONOTONE_SEMANTICS: &str = "Synchronous iteration per SCC; if a fixpoint is reached, use it; if a cycle is detected, use the intersection of all states in the cycle (skeptical tuples only); if the iteration budget is exceeded, use the intersection across all visited states (conservative).";
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 /// Configuration for Monte Carlo probabilistic inference.
 ///
 /// Use [`McEvalConfig::default()`] as a starting point and override individual
@@ -685,6 +686,7 @@ impl McProgram {
                 let block_dim = 128u32;
                 let threads = if count == 0 { 1 } else { count as u32 };
                 let grid_dim = (threads + block_dim - 1) / block_dim;
+                // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
                 unsafe {
                     truth_fn
                         .clone()
@@ -708,6 +710,7 @@ impl McProgram {
                             XlogError::Kernel(format!("mc_eval_query_evidence_truth failed: {}", e))
                         })?;
                 }
+                // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
                 unsafe {
                     accum_fn
                         .clone()

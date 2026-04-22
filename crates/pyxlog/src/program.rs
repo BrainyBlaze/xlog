@@ -508,14 +508,12 @@ impl CompiledProgram {
                     ));
                 }
 
-                let cfg = McEvalConfig {
-                    samples: samples.unwrap_or(10000),
-                    seed: seed.unwrap_or(0),
-                    confidence,
-                    max_nonmonotone_iterations,
-                    sampling_method: Self::parse_sampling_method(sampling_method)?,
-                    ..Default::default()
-                };
+                let mut cfg = McEvalConfig::default();
+                cfg.samples = samples.unwrap_or(10000);
+                cfg.seed = seed.unwrap_or(0);
+                cfg.confidence = confidence;
+                cfg.max_nonmonotone_iterations = max_nonmonotone_iterations;
+                cfg.sampling_method = Self::parse_sampling_method(sampling_method)?;
                 #[cfg(feature = "host-io")]
                 {
                     let result = _program.evaluate(cfg).map_err(types::xlog_err)?;
@@ -556,14 +554,12 @@ impl CompiledProgram {
             sampling_method_val,
         ) = match &self.program {
             CompiledProbProgram::Mc(program) => {
-                let cfg = McEvalConfig {
-                    samples: samples.unwrap_or(10000),
-                    seed: seed.unwrap_or(0),
-                    confidence,
-                    max_nonmonotone_iterations,
-                    sampling_method: Self::parse_sampling_method(sampling_method)?,
-                    ..Default::default()
-                };
+                let mut cfg = McEvalConfig::default();
+                cfg.samples = samples.unwrap_or(10000);
+                cfg.seed = seed.unwrap_or(0);
+                cfg.confidence = confidence;
+                cfg.max_nonmonotone_iterations = max_nonmonotone_iterations;
+                cfg.sampling_method = Self::parse_sampling_method(sampling_method)?;
 
                 let result = program
                     .evaluate_gpu_device_with_provider(cfg, self.output_provider.clone())

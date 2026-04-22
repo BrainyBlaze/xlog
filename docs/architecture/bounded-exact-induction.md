@@ -312,5 +312,5 @@ Returns an `ExactInductionResult` dataclass with `candidates: list[ScoredCandida
 - `docs/architecture/cuda-certification.md` — CUDA certification suite
   (C01–C25 + G01–G08); `ilp_exact` is not yet in the formal certification
   registry because its PTX is not committed (see above).
-- `docs/ROADMAP.md` → "Bounded Exact Induction (`xlog-induce`) — DTS M8
+- `ROADMAP.md` → "Bounded Exact Induction (`xlog-induce`) — DTS M8
   Phase 1" — milestone-level status, planned DTS-side integration.

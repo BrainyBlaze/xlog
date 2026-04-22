@@ -61,7 +61,6 @@ def test_batch_tagged_credit_device_matches_host_credit():
     entry_j = torch.from_dlpack(credit.entry_j).cpu().tolist()
     entry_k = torch.from_dlpack(credit.entry_k).cpu().tolist()
 
-    nnz = row_offsets[-1]
     actual = []
     for start, end in zip(row_offsets[:-1], row_offsets[1:]):
         actual.append(

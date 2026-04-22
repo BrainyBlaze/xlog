@@ -227,6 +227,7 @@ pub fn encode_cnf_gpu(
     let block = 256u32;
 
     let grid_roots = grid_dim(num_roots_u32, block);
+    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         reach_init_fn.clone().launch(
             LaunchConfig {
@@ -250,6 +251,7 @@ pub fn encode_cnf_gpu(
     .map_err(|e| XlogError::Kernel(format!("cnf_reachability_init failed: {}", e)))?;
 
     let grid_nodes = grid_dim(num_nodes_u32, block);
+    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         reach_bfs_fn.clone().launch(
             LaunchConfig {
@@ -275,6 +277,7 @@ pub fn encode_cnf_gpu(
     }
     .map_err(|e| XlogError::Kernel(format!("cnf_reachability_bfs failed: {}", e)))?;
 
+    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         mark_leaf_choice_fn.clone().launch(
             LaunchConfig {
@@ -310,6 +313,7 @@ pub fn encode_cnf_gpu(
         provider.exclusive_scan_u32_inplace(&mut choice_prefix, choice_cap)?;
     }
 
+    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         leaf_choice_totals_fn.clone().launch(
             LaunchConfig {
@@ -336,6 +340,7 @@ pub fn encode_cnf_gpu(
 
     if leaf_cap > 0 {
         let grid_leaf = grid_dim(leaf_cap, block);
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             assign_leaf_var_fn.clone().launch(
                 LaunchConfig {
@@ -350,6 +355,7 @@ pub fn encode_cnf_gpu(
     }
     if choice_cap > 0 {
         let grid_choice = grid_dim(choice_cap, block);
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             assign_choice_var_fn.clone().launch(
                 LaunchConfig {
@@ -369,6 +375,7 @@ pub fn encode_cnf_gpu(
         .map_err(|e| XlogError::Kernel(format!("cnf_assign_choice_var failed: {}", e)))?;
     }
 
+    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         mark_node_vars_fn.clone().launch(
             LaunchConfig {
@@ -386,6 +393,7 @@ pub fn encode_cnf_gpu(
     }
     .map_err(|e| XlogError::Kernel(format!("cnf_mark_node_vars failed: {}", e)))?;
 
+    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         count_clauses_fn.clone().launch(
             LaunchConfig {
@@ -405,6 +413,7 @@ pub fn encode_cnf_gpu(
     }
     .map_err(|e| XlogError::Kernel(format!("cnf_count_clauses failed: {}", e)))?;
 
+    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         capture_last_fn.clone().launch(
             LaunchConfig {
@@ -445,6 +454,7 @@ pub fn encode_cnf_gpu(
         (&mut d_num_clauses).as_kernel_param(),
         (&mut d_num_lits).as_kernel_param(),
     ];
+    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         compute_totals_fn.clone().launch(
             LaunchConfig {
@@ -457,6 +467,7 @@ pub fn encode_cnf_gpu(
     }
     .map_err(|e| XlogError::Kernel(format!("cnf_compute_totals failed: {}", e)))?;
 
+    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         assign_node_var_fn.clone().launch(
             LaunchConfig {
@@ -500,6 +511,7 @@ pub fn encode_cnf_gpu(
         (&mut d_lits).as_kernel_param(),
     ];
 
+    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         emit_clauses_fn.clone().launch(
             LaunchConfig {
@@ -512,6 +524,7 @@ pub fn encode_cnf_gpu(
     }
     .map_err(|e| XlogError::Kernel(format!("cnf_emit_clauses failed: {}", e)))?;
 
+    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         set_clause_end_fn.clone().launch(
             LaunchConfig {

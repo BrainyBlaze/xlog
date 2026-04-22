@@ -15,7 +15,7 @@ SOURCE = """
     learnable(W) :: reach(X, Y) :- bL(X, Z), bR(Z, Y).
 """
 RECURSIVE_POS = [("reach", [1, 4]), ("reach", [1, 3]), ("reach", [2, 4])]
-RECURSIVE_NEG = []
+RECURSIVE_NEG: list[tuple[str, list[int]]] = []
 
 
 def test_recursive_candidates_no_longer_raises():

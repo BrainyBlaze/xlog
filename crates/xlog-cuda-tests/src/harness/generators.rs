@@ -4,11 +4,11 @@ use rand::prelude::*;
 use rand_chacha::ChaCha8Rng;
 
 /// Size generator for edge case testing.
-pub struct SizeGen;
+pub(crate) struct SizeGen;
 
 impl SizeGen {
     /// Standard edge case sizes covering block boundaries and common edge cases.
-    pub fn edge_cases() -> Vec<usize> {
+    pub(crate) fn edge_cases() -> Vec<usize> {
         vec![
             0, 1, 2, 3, 7, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 255, 256, 257, 511,
             512, 513, 1023, 1024, 1025, 2047, 2048, 2049, 4095, 4096, 4097, 8191, 8192, 8193,
@@ -17,7 +17,7 @@ impl SizeGen {
     }
 
     /// Sizes near 32-bit overflow boundary.
-    pub fn near_i32_max() -> Vec<usize> {
+    pub(crate) fn near_i32_max() -> Vec<usize> {
         vec![
             (i32::MAX as usize) - 2,
             (i32::MAX as usize) - 1,
@@ -26,7 +26,7 @@ impl SizeGen {
     }
 
     /// Sizes that are prime numbers (worst case for some algorithms).
-    pub fn primes() -> Vec<usize> {
+    pub(crate) fn primes() -> Vec<usize> {
         vec![
             2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83,
             89, 97, 101, 103, 107, 127, 131, 251, 257, 509, 521, 1021, 1031, 2039, 2053, 4093,
@@ -35,13 +35,13 @@ impl SizeGen {
     }
 
     /// Random sizes within a range using deterministic RNG.
-    pub fn random(count: usize, min: usize, max: usize, seed: u64) -> Vec<usize> {
+    pub(crate) fn random(count: usize, min: usize, max: usize, seed: u64) -> Vec<usize> {
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
         (0..count).map(|_| rng.gen_range(min..=max)).collect()
     }
 
     /// Warp-related sizes (multiples of 32, and off-by-one).
-    pub fn warp_related() -> Vec<usize> {
+    pub(crate) fn warp_related() -> Vec<usize> {
         vec![
             31, 32, 33, 63, 64, 65, 95, 96, 97, 127, 128, 129, 159, 160, 161, 191, 192, 193, 223,
             224, 225, 255, 256, 257, 287, 288, 289,
@@ -49,7 +49,7 @@ impl SizeGen {
     }
 
     /// Block-related sizes (multiples of 256, and off-by-one).
-    pub fn block_related() -> Vec<usize> {
+    pub(crate) fn block_related() -> Vec<usize> {
         vec![
             255, 256, 257, 511, 512, 513, 767, 768, 769, 1023, 1024, 1025, 1279, 1280, 1281, 1535,
             1536, 1537,
@@ -59,7 +59,7 @@ impl SizeGen {
 
 /// Value distribution patterns for test data generation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Distribution {
+pub(crate) enum Distribution {
     AllEqual,
     AllUnique,
     Sorted,
@@ -74,7 +74,7 @@ pub enum Distribution {
 
 impl Distribution {
     /// Get all distribution variants.
-    pub fn all() -> Vec<Distribution> {
+    pub(crate) fn all() -> Vec<Distribution> {
         vec![
             Distribution::AllEqual,
             Distribution::AllUnique,
@@ -87,7 +87,7 @@ impl Distribution {
     }
 
     /// Generate u32 values with this distribution.
-    pub fn generate_u32(&self, count: usize, seed: u64) -> Vec<u32> {
+    pub(crate) fn generate_u32(&self, count: usize, seed: u64) -> Vec<u32> {
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
         match self {
             Distribution::AllEqual => vec![42u32; count],
@@ -112,7 +112,7 @@ impl Distribution {
     }
 
     /// Generate i64 values with this distribution.
-    pub fn generate_i64(&self, count: usize, seed: u64) -> Vec<i64> {
+    pub(crate) fn generate_i64(&self, count: usize, seed: u64) -> Vec<i64> {
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
         match self {
             Distribution::AllEqual => vec![42i64; count],
@@ -137,7 +137,7 @@ impl Distribution {
     }
 
     /// Generate f64 values with this distribution.
-    pub fn generate_f64(&self, count: usize, seed: u64) -> Vec<f64> {
+    pub(crate) fn generate_f64(&self, count: usize, seed: u64) -> Vec<f64> {
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
         match self {
             Distribution::AllEqual => vec![42.0f64; count],
@@ -162,7 +162,7 @@ impl Distribution {
     }
 
     /// Generate u8 mask values with this distribution.
-    pub fn generate_mask(&self, count: usize, seed: u64) -> Vec<u8> {
+    pub(crate) fn generate_mask(&self, count: usize, seed: u64) -> Vec<u8> {
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
         match self {
             Distribution::AllEqual => vec![1u8; count],
@@ -192,26 +192,26 @@ impl Distribution {
 }
 
 /// Numeric edge value generators for specific types.
-pub struct NumericEdges;
+pub(crate) struct NumericEdges;
 
 impl NumericEdges {
-    pub fn u32_edges() -> Vec<u32> {
+    pub(crate) fn u32_edges() -> Vec<u32> {
         vec![0, 1, 2, u32::MAX - 1, u32::MAX]
     }
 
-    pub fn i32_edges() -> Vec<i32> {
+    pub(crate) fn i32_edges() -> Vec<i32> {
         vec![i32::MIN, i32::MIN + 1, -1, 0, 1, i32::MAX - 1, i32::MAX]
     }
 
-    pub fn u64_edges() -> Vec<u64> {
+    pub(crate) fn u64_edges() -> Vec<u64> {
         vec![0, 1, 2, u64::MAX - 1, u64::MAX]
     }
 
-    pub fn i64_edges() -> Vec<i64> {
+    pub(crate) fn i64_edges() -> Vec<i64> {
         vec![i64::MIN, i64::MIN + 1, -1, 0, 1, i64::MAX - 1, i64::MAX]
     }
 
-    pub fn f32_edges() -> Vec<f32> {
+    pub(crate) fn f32_edges() -> Vec<f32> {
         vec![
             f32::NEG_INFINITY,
             f32::MIN,
@@ -227,7 +227,7 @@ impl NumericEdges {
         ]
     }
 
-    pub fn f64_edges() -> Vec<f64> {
+    pub(crate) fn f64_edges() -> Vec<f64> {
         vec![
             f64::NEG_INFINITY,
             f64::MIN,
@@ -243,7 +243,7 @@ impl NumericEdges {
         ]
     }
 
-    pub fn f64_subnormals() -> Vec<f64> {
+    pub(crate) fn f64_subnormals() -> Vec<f64> {
         vec![
             5e-324,
             1e-323,
@@ -256,7 +256,7 @@ impl NumericEdges {
         ]
     }
 
-    pub fn f64_fma_stress() -> Vec<(f64, f64, f64)> {
+    pub(crate) fn f64_fma_stress() -> Vec<(f64, f64, f64)> {
         vec![
             (1.0 + 1e-15, 1.0 - 1e-15, 1e-30),
             (1e100, 1e100, 1e-100),
@@ -267,10 +267,10 @@ impl NumericEdges {
 }
 
 /// Alignment generator for memory access testing.
-pub struct AlignmentGen;
+pub(crate) struct AlignmentGen;
 
 impl AlignmentGen {
-    pub fn offsets() -> Vec<(usize, &'static str)> {
+    pub(crate) fn offsets() -> Vec<(usize, &'static str)> {
         vec![
             (0, "aligned"),
             (1, "off-by-1"),
@@ -283,17 +283,17 @@ impl AlignmentGen {
         ]
     }
 
-    pub fn violating_offsets(required_alignment: usize) -> Vec<usize> {
+    pub(crate) fn violating_offsets(required_alignment: usize) -> Vec<usize> {
         (1..required_alignment).collect()
     }
 }
 
 /// Key distribution generator for hash table and join testing.
-pub struct KeyDistribution;
+pub(crate) struct KeyDistribution;
 
 impl KeyDistribution {
     /// Generate key pairs for join testing. Returns (left_keys, right_keys, expected_match_count).
-    pub fn join_test_data(
+    pub(crate) fn join_test_data(
         size: usize,
         overlap_ratio: f64,
         seed: u64,
@@ -316,12 +316,12 @@ impl KeyDistribution {
     }
 
     /// Generate keys with many hash collisions.
-    pub fn collision_keys(count: usize, collision_factor: usize) -> Vec<u32> {
+    pub(crate) fn collision_keys(count: usize, collision_factor: usize) -> Vec<u32> {
         (0..count).map(|i| (i * collision_factor) as u32).collect()
     }
 
     /// Generate keys for groupby testing with specified group count.
-    pub fn groupby_keys(total_rows: usize, num_groups: usize, seed: u64) -> Vec<u32> {
+    pub(crate) fn groupby_keys(total_rows: usize, num_groups: usize, seed: u64) -> Vec<u32> {
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
         (0..total_rows)
             .map(|_| rng.gen_range(0..num_groups as u32))

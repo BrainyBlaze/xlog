@@ -127,8 +127,6 @@ def test_cuda_oom_error_shape_and_context():
         strict_gpu_native=False,
     )
 
-    original_apply = SparseMaskBackend.apply_mask
-
     def _raise_oom(*_args, **_kwargs):
         raise RuntimeError("CUDA out of memory while allocating temporary buffer")
 

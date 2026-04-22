@@ -560,11 +560,9 @@ impl IlpProgramFactory {
         rel_index.sort_by_key(|(id, _)| id.0);
         let schemas = compiler.schemas().clone();
 
-        let config = GpuConfig {
-            device_ordinal: device,
-            memory_bytes: memory_mb * 1024 * 1024,
-            ..Default::default()
-        };
+        let mut config = GpuConfig::default();
+        config.device_ordinal = device;
+        config.memory_bytes = memory_mb * 1024 * 1024;
         let provider = Arc::new(provider_from_config(config).map_err(types::xlog_err)?);
 
         let mut executor = Executor::new(provider.clone());

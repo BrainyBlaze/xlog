@@ -40,6 +40,7 @@ use xlog_stats::StatsManager;
 /// Controls optimizer behavior including thresholds for algorithm selection
 /// and feature toggles.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct OptimizerConfig {
     /// Maximum number of relations for exhaustive dynamic programming.
     ///

@@ -6,7 +6,7 @@
 > **Release status:** `v0.5.2` — GPU-resident ILP credit/loss path (zero D2H), P2a term embeddings
 > (`register_embedding` / `forward_embedding` with device-aware autograd), P2b extended training
 > controls (gradient clipping, early stopping, lr management), P3 incremental verifier
-> (`GpuCdclWorkspace` arena reuse). See `docs/ROADMAP.md` and `CHANGELOG.md`.
+> (`GpuCdclWorkspace` arena reuse). See `ROADMAP.md` and `CHANGELOG.md`.
 
 **XLOG is a GPU-native logic programming language for unified symbolic reasoning.**
 It shares one typed language frontend across deterministic Datalog evaluation,
@@ -747,12 +747,12 @@ If `xlog` is installed on your `PATH` in a later packaging workflow, you can dro
 | [Whitepaper (PDF)](docs/whitepaper/main.pdf) | v0.5.0 technical whitepaper covering language framing, architecture, probabilistic inference, neural-symbolic execution, and evaluation |
 | [Language Reference](docs/language-reference.md) | Complete syntax and semantic reference, including probabilistic, neural, and dILP language surfaces |
 | [Architecture](docs/ARCHITECTURE.md) | Crate decomposition, IR layers, execution model, memory, and cross-backend architecture |
-| [Roadmap](docs/ROADMAP.md) | Feature status, shipped milestones, and planned work |
+| [Roadmap](ROADMAP.md) | Feature status, shipped milestones, and planned work |
 | [Benchmarks](docs/BENCHMARKS.md) | Performance methodology and benchmark artifacts |
 | [Probabilistic Tier](docs/architecture/xlog-prob.md) | Exact knowledge compilation, Monte Carlo inference, GPU-native compilation, and Python API notes |
 | [Solver Services](docs/architecture/solver-services.md) | GPU CDCL verifier, SAT/MaxSAT services, and workspace reuse model |
 | [dILP Training](docs/architecture/dilp-training.md) | Differentiable ILP architecture, sparse mask execution, and trainer contract |
-| [dILP Showcase Report](docs/ilp/dilp-showcase-report.md) | End-to-end dILP run analysis and convergence notes |
+| [dILP Showcase Report](docs/architecture/dilp-showcase-report.md) | End-to-end dILP run analysis and convergence notes |
 | [CLI Reference](docs/architecture/cli-reference.md) | `xlog run` and `xlog prob` flags, inputs, outputs, and examples |
 | [Python Bindings](docs/architecture/python-bindings.md) | `pyxlog` API surface, training APIs, term embeddings, and ILP APIs |
 | [Data Interop](docs/architecture/cudf-interop.md) | Arrow and DLPack interchange details |
@@ -824,7 +824,7 @@ python scripts/validate_examples.py --mode ci
 Contributions are welcome! Please see:
 
 - [Architecture Guide](docs/ARCHITECTURE.md) for system design
-- [Roadmap](docs/ROADMAP.md) for planned features
+- [Roadmap](ROADMAP.md) for planned features
 - Run `cargo fmt` and `cargo clippy` before submitting
 
 ---

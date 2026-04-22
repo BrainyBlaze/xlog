@@ -5,18 +5,24 @@ use xlog_core::ScalarType;
 /// A term in an atom
 #[derive(Debug, Clone, PartialEq)]
 pub enum Term {
+    /// Named logic variable (e.g. `X`).
     Variable(String),
-    /// Anonymous wildcard `_` - each occurrence is a fresh unnamed variable
+    /// Anonymous wildcard `_` -- each occurrence is a fresh unnamed variable.
     Anonymous,
+    /// Integer literal.
     Integer(i64),
+    /// Floating-point literal.
     Float(f64),
+    /// Quoted string literal.
     String(String),
-    /// Interned symbol ID - use `xlog_core::symbol::resolve(id)` to get the string
+    /// Interned symbol ID -- use `xlog_core::symbol::resolve(id)` to get the string.
     Symbol(u32),
+    /// Aggregate expression (e.g. `count(X)`).
     Aggregate(AggExpr),
 }
 
 impl Term {
+    /// Returns true if this is a named variable.
     pub fn is_variable(&self) -> bool {
         matches!(self, Term::Variable(_))
     }
@@ -31,6 +37,7 @@ impl Term {
         matches!(self, Term::Variable(_) | Term::Anonymous)
     }
 
+    /// Returns true if this is a ground (non-variable, non-aggregate) term.
     pub fn is_constant(&self) -> bool {
         !self.is_any_variable() && !matches!(self, Term::Aggregate(_))
     }
@@ -47,41 +54,58 @@ impl Term {
 /// Aggregate expression
 #[derive(Debug, Clone, PartialEq)]
 pub struct AggExpr {
+    /// The aggregation operator.
     pub op: AggOp,
+    /// The variable being aggregated.
     pub variable: String,
 }
 
 /// Aggregation operator
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AggOp {
+    /// Count aggregation.
     Count,
+    /// Sum aggregation.
     Sum,
+    /// Minimum aggregation.
     Min,
+    /// Maximum aggregation.
     Max,
+    /// Log-sum-exp aggregation.
     LogSumExp,
 }
 
 /// Arithmetic expression tree
 #[derive(Debug, Clone, PartialEq)]
 pub enum ArithExpr {
+    /// Variable reference.
     Variable(String),
+    /// Integer literal.
     Integer(i64),
+    /// Float literal.
     Float(f64),
 
-    // Binary operations
+    /// Addition.
     Add(Box<ArithExpr>, Box<ArithExpr>),
+    /// Subtraction.
     Sub(Box<ArithExpr>, Box<ArithExpr>),
+    /// Multiplication.
     Mul(Box<ArithExpr>, Box<ArithExpr>),
+    /// Division.
     Div(Box<ArithExpr>, Box<ArithExpr>),
+    /// Modulo.
     Mod(Box<ArithExpr>, Box<ArithExpr>),
 
-    // Built-in functions
+    /// Absolute value.
     Abs(Box<ArithExpr>),
+    /// Minimum of two values.
     Min(Box<ArithExpr>, Box<ArithExpr>),
+    /// Maximum of two values.
     Max(Box<ArithExpr>, Box<ArithExpr>),
+    /// Power (base, exponent).
     Pow(Box<ArithExpr>, Box<ArithExpr>),
 
-    // Type cast
+    /// Type cast to the given scalar type.
     Cast(Box<ArithExpr>, ScalarType),
 
     /// User-defined function call
@@ -140,22 +164,28 @@ impl ArithExpr {
 /// Is-expression for variable binding: Z is X + Y
 #[derive(Debug, Clone, PartialEq)]
 pub struct IsExpr {
-    pub target: String, // Must be fresh (unbound) variable
+    /// Target variable (must be a fresh, unbound variable).
+    pub target: String,
+    /// Arithmetic expression to evaluate.
     pub expr: ArithExpr,
 }
 
 /// An atom (predicate applied to terms)
 #[derive(Debug, Clone, PartialEq)]
 pub struct Atom {
+    /// Predicate name.
     pub predicate: String,
+    /// Argument terms.
     pub terms: Vec<Term>,
 }
 
 impl Atom {
+    /// Number of arguments.
     pub fn arity(&self) -> usize {
         self.terms.len()
     }
 
+    /// Collect all named variables in this atom.
     pub fn variables(&self) -> Vec<&str> {
         self.terms
             .iter()
@@ -167,40 +197,56 @@ impl Atom {
 /// Comparison operator
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompOp {
+    /// Equal.
     Eq,
+    /// Not equal.
     Ne,
+    /// Less than.
     Lt,
+    /// Less than or equal.
     Le,
+    /// Greater than.
     Gt,
+    /// Greater than or equal.
     Ge,
 }
 
 /// A comparison expression
 #[derive(Debug, Clone, PartialEq)]
 pub struct Comparison {
+    /// Left operand.
     pub left: Term,
+    /// Comparison operator.
     pub op: CompOp,
+    /// Right operand.
     pub right: Term,
 }
 
 /// A literal in the body of a rule
 #[derive(Debug, Clone, PartialEq)]
 pub enum BodyLiteral {
+    /// Positive atom.
     Positive(Atom),
+    /// Negated atom (`not p(...)`).
     Negated(Atom),
+    /// Arithmetic comparison (e.g. `X < Y`).
     Comparison(Comparison),
+    /// Is-expression binding (e.g. `Z is X + Y`).
     IsExpr(IsExpr),
 }
 
 impl BodyLiteral {
+    /// Returns true if this is a positive literal.
     pub fn is_positive(&self) -> bool {
         matches!(self, BodyLiteral::Positive(_))
     }
 
+    /// Returns true if this is a negated literal.
     pub fn is_negated(&self) -> bool {
         matches!(self, BodyLiteral::Negated(_))
     }
 
+    /// Returns the atom if this is a positive or negated literal.
     pub fn atom(&self) -> Option<&Atom> {
         match self {
             BodyLiteral::Positive(a) | BodyLiteral::Negated(a) => Some(a),
@@ -208,6 +254,7 @@ impl BodyLiteral {
         }
     }
 
+    /// Collect all named variables referenced by this literal.
     pub fn variables(&self) -> Vec<&str> {
         match self {
             BodyLiteral::Positive(a) | BodyLiteral::Negated(a) => a.variables(),
@@ -233,19 +280,24 @@ impl BodyLiteral {
 /// A rule (head :- body)
 #[derive(Debug, Clone, PartialEq)]
 pub struct Rule {
+    /// Head atom of the rule.
     pub head: Atom,
+    /// Body literals (empty for facts).
     pub body: Vec<BodyLiteral>,
 }
 
 impl Rule {
+    /// Returns true if this rule is a ground fact (empty body).
     pub fn is_fact(&self) -> bool {
         self.body.is_empty()
     }
 
+    /// Returns true if any body literal is negated.
     pub fn has_negation(&self) -> bool {
         self.body.iter().any(|l| l.is_negated())
     }
 
+    /// Returns true if the head contains an aggregate term.
     pub fn has_aggregation(&self) -> bool {
         self.head
             .terms
@@ -253,6 +305,7 @@ impl Rule {
             .any(|t| matches!(t, Term::Aggregate(_)))
     }
 
+    /// Collect predicate names from the body.
     pub fn body_predicates(&self) -> Vec<&str> {
         self.body
             .iter()
@@ -260,10 +313,12 @@ impl Rule {
             .collect()
     }
 
+    /// Collect named variables from the head.
     pub fn head_variables(&self) -> Vec<&str> {
         self.head.variables()
     }
 
+    /// Collect all named variables from the body.
     pub fn body_variables(&self) -> Vec<&str> {
         self.body.iter().flat_map(|l| l.variables()).collect()
     }
@@ -272,42 +327,53 @@ impl Rule {
 /// A constraint (:- body)
 #[derive(Debug, Clone, PartialEq)]
 pub struct Constraint {
+    /// Body literals whose conjunction must never be satisfiable.
     pub body: Vec<BodyLiteral>,
 }
 
-/// A query (?- atom)
+/// A query (`?- atom.`)
 #[derive(Debug, Clone, PartialEq)]
 pub struct Query {
+    /// Query atom.
     pub atom: Atom,
 }
 
-/// Probabilistic engine selection
+/// Probabilistic engine selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProbEngine {
+    /// Exact inference via d-DNNF compilation.
     ExactDdnnf,
+    /// Approximate inference via Monte Carlo sampling.
     Mc,
 }
 
-/// Probabilistic compilation caching
+/// Probabilistic compilation caching.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProbCache {
+    /// Enable circuit caching.
     On,
+    /// Disable circuit caching.
     Off,
 }
 
-/// Compilation/evaluation directives (e.g., `#pragma ...`)
+/// Compilation/evaluation directives (e.g., `#pragma ...`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Directives {
+    /// Override for the probabilistic inference engine.
     pub prob_engine: Option<ProbEngine>,
+    /// Override for circuit caching.
     pub prob_cache: Option<ProbCache>,
+    /// Maximum UDF recursion depth.
     pub max_recursion_depth: Option<u32>,
 }
 
 impl Directives {
+    /// Return the configured prob engine, defaulting to ExactDdnnf.
     pub fn prob_engine_or_default(&self) -> ProbEngine {
         self.prob_engine.unwrap_or(ProbEngine::ExactDdnnf)
     }
 
+    /// Return the configured max recursion depth, defaulting to 1000.
     pub fn max_recursion_depth_or_default(&self) -> u32 {
         self.max_recursion_depth.unwrap_or(1000)
     }
@@ -316,7 +382,9 @@ impl Directives {
 /// A probabilistic fact (`p::atom.`)
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProbFact {
+    /// Probability weight.
     pub prob: f64,
+    /// Ground atom.
     pub atom: Atom,
 }
 
@@ -353,7 +421,9 @@ pub struct NeuralPredDecl {
 /// Labels can be integers or symbols (identifiers).
 #[derive(Debug, Clone, PartialEq)]
 pub enum NeuralLabel {
+    /// Integer label value.
     Integer(i64),
+    /// Symbolic (string) label value.
     Symbol(String),
 }
 
@@ -362,27 +432,34 @@ pub enum NeuralLabel {
 /// combinations are active during execution.
 #[derive(Debug, Clone)]
 pub struct LearnableRule {
+    /// Name of the tensor mask controlling rule activation.
     pub mask_name: String,
+    /// Head atom of the rule template.
     pub head: Atom,
+    /// Body literals of the rule template.
     pub body: Vec<BodyLiteral>,
 }
 
 /// Annotated disjunction (`p1::a1; p2::a2.`)
 #[derive(Debug, Clone, PartialEq)]
 pub struct AnnotatedDisjunction {
+    /// Disjunctive choices with their probability weights.
     pub choices: Vec<ProbFact>,
 }
 
 /// Evidence statement (`evidence(atom, true|false).`)
 #[derive(Debug, Clone, PartialEq)]
 pub struct Evidence {
+    /// The observed atom.
     pub atom: Atom,
+    /// Whether the atom is observed true or false.
     pub value: bool,
 }
 
 /// Probabilistic query statement (`query(atom).`)
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProbQuery {
+    /// The atom whose probability is being queried.
     pub atom: Atom,
 }
 
@@ -398,22 +475,29 @@ pub struct UseDecl {
 /// Domain declaration
 #[derive(Debug, Clone, PartialEq)]
 pub struct DomainDecl {
+    /// Domain name.
     pub name: String,
+    /// Scalar type for the domain.
     pub typ: ScalarType,
 }
 
 /// Predicate declaration
 #[derive(Debug, Clone, PartialEq)]
 pub struct PredDecl {
+    /// Predicate name.
     pub name: String,
+    /// Column types.
     pub types: Vec<ScalarType>,
+    /// Whether this predicate is module-private.
     pub is_private: bool,
 }
 
 /// Function parameter with optional type annotation
 #[derive(Debug, Clone, PartialEq)]
 pub struct FuncParam {
+    /// Parameter name.
     pub name: String,
+    /// Optional type annotation.
     pub typ: Option<ScalarType>,
 }
 
@@ -466,35 +550,53 @@ pub struct FuncDef {
 /// A complete XLOG program
 #[derive(Debug, Clone, Default)]
 pub struct Program {
+    /// Import declarations (`use ...`).
     pub imports: Vec<UseDecl>,
+    /// User-defined function definitions.
     pub functions: Vec<FuncDef>,
+    /// Domain declarations.
     pub domains: Vec<DomainDecl>,
+    /// Predicate type declarations.
     pub predicates: Vec<PredDecl>,
+    /// Rules and facts.
     pub rules: Vec<Rule>,
+    /// Integrity constraints (`:- ...`).
     pub constraints: Vec<Constraint>,
+    /// Queries (`?- ...`).
     pub queries: Vec<Query>,
+    /// Probabilistic facts (`p::atom.`).
     pub prob_facts: Vec<ProbFact>,
+    /// Annotated disjunctions.
     pub annotated_disjunctions: Vec<AnnotatedDisjunction>,
+    /// Evidence statements.
     pub evidence: Vec<Evidence>,
+    /// Probabilistic queries (`query(atom).`).
     pub prob_queries: Vec<ProbQuery>,
+    /// Neural predicate declarations.
     pub neural_predicates: Vec<NeuralPredDecl>,
+    /// Learnable rule templates (ILP).
     pub learnable_rules: Vec<LearnableRule>,
+    /// Compilation directives.
     pub directives: Directives,
 }
 
 impl Program {
+    /// Create an empty program.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Iterate over ground facts (rules with empty bodies).
     pub fn facts(&self) -> impl Iterator<Item = &Rule> {
         self.rules.iter().filter(|r| r.is_fact())
     }
 
+    /// Iterate over proper rules (non-fact rules with bodies).
     pub fn proper_rules(&self) -> impl Iterator<Item = &Rule> {
         self.rules.iter().filter(|r| !r.is_fact())
     }
 
+    /// Collect the set of predicate names defined (appearing as rule heads).
     pub fn defined_predicates(&self) -> Vec<&str> {
         self.rules
             .iter()
@@ -504,6 +606,7 @@ impl Program {
             .collect()
     }
 
+    /// Returns true if this program uses probabilistic features.
     pub fn is_probabilistic_profile(&self) -> bool {
         !self.prob_facts.is_empty()
             || !self.annotated_disjunctions.is_empty()
@@ -513,6 +616,7 @@ impl Program {
             || self.directives.prob_cache.is_some()
     }
 
+    /// Return the probabilistic engine (from directives, or the default).
     pub fn prob_engine(&self) -> ProbEngine {
         self.directives.prob_engine_or_default()
     }

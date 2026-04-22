@@ -76,14 +76,12 @@ impl CompiledProgram {
             )));
         }
 
-        let config = NetworkConfig {
-            name: name.clone(),
-            batching,
-            k,
-            det,
-            cache_enabled: cache,
-            cache_size,
-        };
+        let mut config = NetworkConfig::default(&name);
+        config.batching = batching;
+        config.k = k;
+        config.det = det;
+        config.cache_enabled = cache;
+        config.cache_size = cache_size;
 
         self.network_registry.register(config);
 

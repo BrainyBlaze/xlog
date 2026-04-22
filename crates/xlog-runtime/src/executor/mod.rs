@@ -30,11 +30,14 @@ use join_cache::JoinIndexCache;
 
 /// Incremental update for a base relation.
 pub struct RelationDelta {
+    /// Tuples to insert (if any).
     pub insert: Option<CudaBuffer>,
+    /// Tuples to delete (if any).
     pub delete: Option<CudaBuffer>,
 }
 
 impl RelationDelta {
+    /// Create a new incremental update.
     pub fn new(insert: Option<CudaBuffer>, delete: Option<CudaBuffer>) -> Self {
         Self { insert, delete }
     }

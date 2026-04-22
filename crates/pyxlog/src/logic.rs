@@ -35,11 +35,9 @@ impl Program {
             return Err(PyValueError::new_err("memory_mb must be > 0"));
         }
 
-        let config = GpuConfig {
-            device_ordinal: device,
-            memory_bytes: memory_mb * 1024 * 1024,
-            ..Default::default()
-        };
+        let mut config = GpuConfig::default();
+        config.device_ordinal = device;
+        config.memory_bytes = memory_mb * 1024 * 1024;
 
         // Parse the AST to get prob_engine and neural predicates
         let ast = xlog_logic::parse_program(source).map_err(types::xlog_err)?;
@@ -116,11 +114,9 @@ impl LogicProgram {
             return Err(PyValueError::new_err("memory_mb must be > 0"));
         }
 
-        let config = GpuConfig {
-            device_ordinal: device,
-            memory_bytes: memory_mb * 1024 * 1024,
-            ..Default::default()
-        };
+        let mut config = GpuConfig::default();
+        config.device_ordinal = device;
+        config.memory_bytes = memory_mb * 1024 * 1024;
 
         let program = gpu_logic::LogicProgram::compile(source).map_err(types::xlog_err)?;
         let provider = provider_from_config(config).map_err(types::xlog_err)?;

@@ -4,32 +4,44 @@ use thiserror::Error;
 
 /// Primary error type for XLOG operations
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum XlogError {
+    /// Parse error from the Datalog frontend.
     #[error("Parse error: {0}")]
     Parse(String),
 
+    /// Stratification failed due to a cycle through negation.
     #[error("Stratification failed: cycle through negation involving {0:?}")]
     StratificationCycle(Vec<String>),
 
+    /// A variable is not bound in any positive body literal (domain safety violation).
     #[error("Domain safety: variable {0} not bound in positive literal")]
     UnsafeVariable(String),
 
+    /// GPU memory budget exceeded.
     #[error("Resource exhausted: {context}, estimated {estimated_bytes} bytes, budget {budget_bytes} bytes")]
     ResourceExhausted {
+        /// Description of the operation that exceeded the budget.
         context: String,
+        /// Estimated memory required in bytes.
         estimated_bytes: u64,
+        /// Available memory budget in bytes.
         budget_bytes: u64,
     },
 
+    /// GPU kernel launch or execution error.
     #[error("Kernel error: {0}")]
     Kernel(String),
 
+    /// Type checking or inference error.
     #[error("Type error: {0}")]
     Type(String),
 
+    /// Compilation pipeline error.
     #[error("Compilation error: {0}")]
     Compilation(String),
 
+    /// Runtime execution error.
     #[error("Execution error: {0}")]
     Execution(String),
 }

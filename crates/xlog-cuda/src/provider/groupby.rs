@@ -358,6 +358,7 @@ impl super::CudaKernelProvider {
                             XlogError::Kernel("arith_fill_const_u32 not found".to_string())
                         })?;
                     let fill_config = LaunchConfig::for_num_elems(row_cap_u32);
+                    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
                     unsafe {
                         fill_fn
                             .clone()
@@ -426,6 +427,7 @@ impl super::CudaKernelProvider {
                             XlogError::Kernel("arith_fill_const_f64 not found".to_string())
                         })?;
                     let fill_config = LaunchConfig::for_num_elems(row_cap_u32);
+                    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
                     unsafe {
                         fill_f64
                             .clone()
@@ -442,6 +444,7 @@ impl super::CudaKernelProvider {
                             XlogError::Kernel("groupby_logsumexp_max kernel not found".to_string())
                         })?;
 
+                    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
                     unsafe {
                         max_func
                             .clone()
@@ -461,6 +464,7 @@ impl super::CudaKernelProvider {
                             )
                         })?;
 
+                    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
                     unsafe {
                         sumexp_func
                             .clone()
@@ -481,6 +485,7 @@ impl super::CudaKernelProvider {
                             )
                         })?;
 
+                    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
                     unsafe {
                         final_func.clone().launch(
                             final_config,
@@ -603,6 +608,7 @@ impl super::CudaKernelProvider {
             .inner()
             .get_func(GROUPBY_MODULE, groupby_kernels::CAPTURE_NUM_GROUPS)
             .ok_or_else(|| XlogError::Kernel("capture_num_groups kernel not found".to_string()))?;
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             capture_fn.clone().launch(
                 LaunchConfig {

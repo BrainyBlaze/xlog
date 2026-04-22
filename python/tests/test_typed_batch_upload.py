@@ -8,7 +8,7 @@ from conftest import skip_unless_pyxlog_cuda
 skip_unless_pyxlog_cuda()
 
 
-def _compile_typed(source: str) -> "pyxlog.IlpProgramFactory":
+def _compile_typed(source: str) -> "pyxlog.IlpProgramFactory":  # type: ignore[name-defined]
     prog = pyxlog.IlpProgramFactory.compile(source, device=0, memory_mb=64)
     prog.evaluate()
     return prog

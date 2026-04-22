@@ -13,7 +13,7 @@ use crate::harness::{CategoryResult, TestContext, TestResult};
 use std::time::Instant;
 
 /// Run all tests in this category.
-pub fn run_all(ctx: &TestContext) -> CategoryResult {
+pub(crate) fn run_all(ctx: &TestContext) -> CategoryResult {
     let mut results = CategoryResult::new("g02_circuit_backward");
     let start = Instant::now();
 

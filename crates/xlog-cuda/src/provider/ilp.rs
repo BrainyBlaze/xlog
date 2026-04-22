@@ -113,6 +113,7 @@ impl super::CudaKernelProvider {
                                 "ilp_mark_selected_ids_u32 kernel not found".to_string(),
                             )
                         })?;
+                    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
                     unsafe {
                         func.clone().launch(
                             LaunchConfig {
@@ -146,6 +147,7 @@ impl super::CudaKernelProvider {
                                 "ilp_mark_selected_ids_i32 kernel not found".to_string(),
                             )
                         })?;
+                    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
                     unsafe {
                         func.clone().launch(
                             LaunchConfig {
@@ -179,6 +181,7 @@ impl super::CudaKernelProvider {
                                 "ilp_mark_selected_ids_i64 kernel not found".to_string(),
                             )
                         })?;
+                    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
                     unsafe {
                         func.clone().launch(
                             LaunchConfig {
@@ -212,6 +215,7 @@ impl super::CudaKernelProvider {
                                 "ilp_mark_selected_ids_u64 kernel not found".to_string(),
                             )
                         })?;
+                    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
                     unsafe {
                         func.clone().launch(
                             LaunchConfig {
@@ -324,6 +328,7 @@ impl super::CudaKernelProvider {
                             "ilp_validate_selected_ids_u32 kernel not found".to_string(),
                         )
                     })?;
+                // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
                 unsafe {
                     func.clone().launch(
                         LaunchConfig {
@@ -359,6 +364,7 @@ impl super::CudaKernelProvider {
                             "ilp_validate_selected_ids_i32 kernel not found".to_string(),
                         )
                     })?;
+                // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
                 unsafe {
                     func.clone().launch(
                         LaunchConfig {
@@ -394,6 +400,7 @@ impl super::CudaKernelProvider {
                             "ilp_validate_selected_ids_i64 kernel not found".to_string(),
                         )
                     })?;
+                // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
                 unsafe {
                     func.clone().launch(
                         LaunchConfig {
@@ -429,6 +436,7 @@ impl super::CudaKernelProvider {
                             "ilp_validate_selected_ids_u64 kernel not found".to_string(),
                         )
                     })?;
+                // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
                 unsafe {
                     func.clone().launch(
                         LaunchConfig {
@@ -530,6 +538,7 @@ impl super::CudaKernelProvider {
             })?;
         let block_size = 256u32;
         let grid_size = (row_count + block_size - 1) / block_size;
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             func.clone().launch(
                 LaunchConfig {
@@ -568,6 +577,7 @@ impl super::CudaKernelProvider {
             .ok_or_else(|| XlogError::Kernel("ilp_coo_fill kernel not found".to_string()))?;
         let block_size = 256u32;
         let grid_size = (count + block_size - 1) / block_size;
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             func.clone().launch(
                 LaunchConfig {
@@ -625,6 +635,7 @@ impl super::CudaKernelProvider {
             stream: cand_probs.stream().clone(),
             _marker: PhantomData,
         };
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             func.clone().launch(
                 LaunchConfig {
@@ -683,6 +694,7 @@ impl super::CudaKernelProvider {
             stream: cand_probs.stream().clone(),
             _marker: PhantomData,
         };
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             func.clone().launch(
                 LaunchConfig {
@@ -738,6 +750,7 @@ impl super::CudaKernelProvider {
             })?;
         let block_size = 256u32;
         let grid_size = (num_facts + block_size - 1) / block_size;
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             func.clone().launch(
                 LaunchConfig {
@@ -791,6 +804,7 @@ impl super::CudaKernelProvider {
             })?;
         let block_size = 256u32;
         let grid_size = (num_facts + block_size - 1) / block_size;
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             func.clone().launch(
                 LaunchConfig {
@@ -840,6 +854,7 @@ impl super::CudaKernelProvider {
             .ok_or_else(|| XlogError::Kernel("ilp_reduce_sum_f32 not found".to_string()))?;
         let block_size = 256u32;
         let grid_size = (n + block_size - 1) / block_size;
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             func.clone().launch(
                 LaunchConfig {
@@ -882,6 +897,7 @@ impl super::CudaKernelProvider {
             .ok_or_else(|| XlogError::Kernel("ilp_reduce_sum_f64 not found".to_string()))?;
         let block_size = 256u32;
         let grid_size = (n + block_size - 1) / block_size;
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             func.clone().launch(
                 LaunchConfig {
@@ -930,6 +946,7 @@ impl super::CudaKernelProvider {
             .ok_or_else(|| XlogError::Kernel("ilp_coo_fill_from_mask not found".to_string()))?;
         let block_size = 256u32;
         let grid_size = (num_query + block_size - 1) / block_size;
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             func.clone().launch(
                 LaunchConfig {
@@ -994,6 +1011,7 @@ impl super::CudaKernelProvider {
         let block_size = 256u32;
         let grid_size = (nnz + block_size - 1) / block_size;
 
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             func.clone()
                 .launch(

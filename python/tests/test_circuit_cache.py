@@ -27,7 +27,7 @@ def target_sum(i: int) -> int:
     return (i * 2 + 1) % (MAX_SUM + 1)
 
 
-class SimpleNet(torch.nn.Module):
+class SimpleNet(torch.nn.Module):  # type: ignore[name-defined]
     """Simple network that outputs softmax probabilities."""
 
     def __init__(self, num_classes=NUM_CLASSES):
@@ -88,7 +88,7 @@ class TestCircuitCache:
         program.add_tensor_source("X", dummy_images)
 
         # First query - cache miss
-        loss_first = program.forward_backward("addition(0, 1, 0)")
+        program.forward_backward("addition(0, 1, 0)")
         assert program.template_compile_count() == baseline_compiles + 1
         assert program.template_cache_size() == 1
 

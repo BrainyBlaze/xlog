@@ -51,7 +51,6 @@ def test_reset_clears_ilp_registry():
     """After reset, ILP masks and tagged results must be gone."""
     prog = _compile()
     cands = prog.valid_candidates("W", False)
-    n = prog.ilp_schema_size()
     c = len(cands)
 
     # Set a sparse mask and evaluate
@@ -76,7 +75,6 @@ def test_reset_no_state_leak_across_masks():
     """Post-reset mask must produce same results as fresh compile with same mask."""
     prog = _compile()
     cands = prog.valid_candidates("W", False)
-    n = prog.ilp_schema_size()
     c = len(cands)
 
     # Run with candidate 0 active (produces tagged results)
@@ -177,7 +175,7 @@ PARITY_SOURCE = """
     learnable(W_reach) :: reach(X, Y) :- bL(X, Z), bR(Z, Y).
 """
 PARITY_POS = [("reach", [1, 3]), ("reach", [2, 4]), ("reach", [3, 5]), ("reach", [4, 6])]
-PARITY_NEG = []
+PARITY_NEG: list[tuple[str, list[int]]] = []
 PARITY_MASK = "W_reach"
 
 

@@ -19,6 +19,7 @@ use crate::gpu::GpuXgcf;
 /// use [`crate::exact::default_cache_config`] which sizes caps from the CNF
 /// and compile config.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct GpuCircuitCacheConfig {
     /// Number of circuit slots kept resident on the GPU.
     pub num_slots: u32,
@@ -199,6 +200,7 @@ pub fn hash_cnf_gpu(
         .get_func(CACHE_MODULE, cache_kernels::CACHE_CNF_HASH)
         .ok_or_else(|| XlogError::Kernel("cache_cnf_hash kernel not found".to_string()))?;
 
+    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         func.clone().launch(
             LaunchConfig {
@@ -335,6 +337,7 @@ impl GpuCircuitCache {
             return Ok(());
         }
 
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             func.clone().launch(
                 LaunchConfig {
@@ -469,6 +472,7 @@ impl GpuCircuitCache {
             node_stride.as_kernel_param(),
             batch_size.as_kernel_param(),
         ];
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             eval_all.clone().launch(
                 LaunchConfig {
@@ -483,6 +487,7 @@ impl GpuCircuitCache {
             XlogError::Kernel(format!("xgcf_eval_all_levels_cached_batched failed: {}", e))
         })?;
 
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             set_root_adj.clone().launch(
                 LaunchConfig {
@@ -532,6 +537,7 @@ impl GpuCircuitCache {
             var_stride.as_kernel_param(),
             batch_size.as_kernel_param(),
         ];
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             backward_all.clone().launch(
                 LaunchConfig {
@@ -587,6 +593,7 @@ impl GpuCircuitCache {
             .ok_or_else(|| {
                 XlogError::Kernel("xgcf_copy_root_cached_meta_batched not found".to_string())
             })?;
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             copy_root.clone().launch(
                 LaunchConfig {
@@ -880,6 +887,7 @@ impl GpuCircuitCache {
                 XlogError::Kernel("cache_lookup_or_insert kernel not found".to_string())
             })?;
 
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             func.clone().launch(
                 LaunchConfig {
@@ -1059,6 +1067,7 @@ impl GpuCircuitCache {
 
         let grid_nodes = grid_for(num_nodes);
         if grid_nodes != 0 {
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 store_u8.clone().launch(
                     LaunchConfig {
@@ -1081,6 +1090,7 @@ impl GpuCircuitCache {
 
         let grid_offsets = grid_for(num_nodes_plus1);
         if grid_offsets != 0 {
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 store_u32.clone().launch(
                     LaunchConfig {
@@ -1103,6 +1113,7 @@ impl GpuCircuitCache {
 
         let grid_edges = grid_for(num_edges);
         if grid_edges != 0 {
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 store_u32.clone().launch(
                     LaunchConfig {
@@ -1124,6 +1135,7 @@ impl GpuCircuitCache {
         }
 
         if grid_nodes != 0 {
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 store_i32.clone().launch(
                     LaunchConfig {
@@ -1143,6 +1155,7 @@ impl GpuCircuitCache {
             }
             .map_err(|e| XlogError::Kernel(format!("cache_store_lit failed: {}", e)))?;
 
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 store_u32.clone().launch(
                     LaunchConfig {
@@ -1162,6 +1175,7 @@ impl GpuCircuitCache {
             }
             .map_err(|e| XlogError::Kernel(format!("cache_store_decision_var failed: {}", e)))?;
 
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 store_u32.clone().launch(
                     LaunchConfig {
@@ -1183,6 +1197,7 @@ impl GpuCircuitCache {
                 XlogError::Kernel(format!("cache_store_decision_child_false failed: {}", e))
             })?;
 
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 store_u32.clone().launch(
                     LaunchConfig {
@@ -1204,6 +1219,7 @@ impl GpuCircuitCache {
                 XlogError::Kernel(format!("cache_store_decision_child_true failed: {}", e))
             })?;
 
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 store_u32.clone().launch(
                     LaunchConfig {
@@ -1226,6 +1242,7 @@ impl GpuCircuitCache {
 
         let grid_levels = grid_for(num_levels_plus1);
         if grid_levels != 0 {
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 store_u32.clone().launch(
                     LaunchConfig {
@@ -1248,6 +1265,7 @@ impl GpuCircuitCache {
 
         let grid_weights = grid_for(weights_len);
         if grid_weights != 0 {
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 store_f64.clone().launch(
                     LaunchConfig {
@@ -1267,6 +1285,7 @@ impl GpuCircuitCache {
             }
             .map_err(|e| XlogError::Kernel(format!("cache_store_var_log_true failed: {}", e)))?;
 
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 store_f64.clone().launch(
                     LaunchConfig {
@@ -1287,6 +1306,7 @@ impl GpuCircuitCache {
             .map_err(|e| XlogError::Kernel(format!("cache_store_var_log_false failed: {}", e)))?;
         }
 
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             store_meta.clone().launch(
                 LaunchConfig {
@@ -1352,6 +1372,7 @@ impl GpuCircuitCache {
             let var_stride = self.var_cap.checked_add(1).ok_or_else(|| {
                 XlogError::Compilation("GpuCircuitCache store_weights var_cap overflow".to_string())
             })?;
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 store_f64.clone().launch(
                     LaunchConfig {
@@ -1371,6 +1392,7 @@ impl GpuCircuitCache {
             }
             .map_err(|e| XlogError::Kernel(format!("cache_store_weights_true failed: {}", e)))?;
 
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 store_f64.clone().launch(
                     LaunchConfig {
@@ -1433,6 +1455,7 @@ impl GpuCircuitCache {
                     "GpuCircuitCache overwrite_weights var_cap overflow".to_string(),
                 )
             })?;
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 store_f64.clone().launch(
                     LaunchConfig {
@@ -1454,6 +1477,7 @@ impl GpuCircuitCache {
                 XlogError::Kernel(format!("cache_overwrite_weights_true failed: {}", e))
             })?;
 
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 store_f64.clone().launch(
                     LaunchConfig {
@@ -1518,6 +1542,7 @@ impl GpuCircuitCache {
             return Ok(());
         }
 
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             store_u8.clone().launch(
                 LaunchConfig {
@@ -1694,6 +1719,7 @@ impl GpuCircuitCache {
             device
                 .htod_sync_copy_into(&artifact.node_type[..num_nodes as usize], &mut d_node_type)
                 .map_err(|e| XlogError::Kernel(format!("restore htod node_type failed: {}", e)))?;
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 store_u8.clone().launch(
                     LaunchConfig {
@@ -1728,6 +1754,7 @@ impl GpuCircuitCache {
                 .map_err(|e| {
                     XlogError::Kernel(format!("restore htod child_offsets failed: {}", e))
                 })?;
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 store_u32.clone().launch(
                     LaunchConfig {
@@ -1762,6 +1789,7 @@ impl GpuCircuitCache {
                 .map_err(|e| {
                     XlogError::Kernel(format!("restore htod child_indices failed: {}", e))
                 })?;
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 store_u32.clone().launch(
                     LaunchConfig {
@@ -1790,6 +1818,7 @@ impl GpuCircuitCache {
             device
                 .htod_sync_copy_into(&artifact.lit[..num_nodes as usize], &mut d_lit)
                 .map_err(|e| XlogError::Kernel(format!("restore htod lit failed: {}", e)))?;
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 store_i32.clone().launch(
                     LaunchConfig {
@@ -1819,6 +1848,7 @@ impl GpuCircuitCache {
                 .map_err(|e| {
                     XlogError::Kernel(format!("restore htod decision_var failed: {}", e))
                 })?;
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 store_u32.clone().launch(
                     LaunchConfig {
@@ -1850,6 +1880,7 @@ impl GpuCircuitCache {
                 .map_err(|e| {
                     XlogError::Kernel(format!("restore htod decision_child_false failed: {}", e))
                 })?;
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 store_u32.clone().launch(
                     LaunchConfig {
@@ -1884,6 +1915,7 @@ impl GpuCircuitCache {
                 .map_err(|e| {
                     XlogError::Kernel(format!("restore htod decision_child_true failed: {}", e))
                 })?;
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 store_u32.clone().launch(
                     LaunchConfig {
@@ -1918,6 +1950,7 @@ impl GpuCircuitCache {
                 .map_err(|e| {
                     XlogError::Kernel(format!("restore htod level_nodes failed: {}", e))
                 })?;
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 store_u32.clone().launch(
                     LaunchConfig {
@@ -1952,6 +1985,7 @@ impl GpuCircuitCache {
                 .map_err(|e| {
                     XlogError::Kernel(format!("restore htod level_offsets failed: {}", e))
                 })?;
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 store_u32.clone().launch(
                     LaunchConfig {
@@ -1975,6 +2009,7 @@ impl GpuCircuitCache {
         }
 
         // -- Store metadata via cache_store_meta kernel --
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             store_meta.clone().launch(
                 LaunchConfig {
@@ -2011,6 +2046,7 @@ impl GpuCircuitCache {
             device.memset_zeros(&mut d_zeros).map_err(|e| {
                 XlogError::Kernel(format!("restore memset_zeros free_var_mask failed: {}", e))
             })?;
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 store_u8.clone().launch(
                     LaunchConfig {
@@ -2054,6 +2090,7 @@ impl GpuCircuitCache {
                         .map_err(|e| {
                             XlogError::Kernel(format!("restore htod free_var_mask failed: {}", e))
                         })?;
+                    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
                     unsafe {
                         store_u8.clone().launch(
                             LaunchConfig {
@@ -2311,6 +2348,7 @@ impl GpuCircuitCache {
                 (&mut self.values).as_kernel_param(),
                 (&self.meta_num_levels).as_kernel_param(),
             ];
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 eval_all.clone().launch(
                     LaunchConfig {
@@ -2335,6 +2373,7 @@ impl GpuCircuitCache {
             .ok_or_else(|| {
                 XlogError::Kernel("xgcf_copy_root_cached_meta kernel not found".to_string())
             })?;
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             copy_root.clone().launch(
                 LaunchConfig {
@@ -2389,6 +2428,7 @@ impl GpuCircuitCache {
             (&mut self.values).as_kernel_param(),
             (&self.meta_num_levels).as_kernel_param(),
         ];
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             eval_all.clone().launch(
                 LaunchConfig {
@@ -2423,6 +2463,7 @@ impl GpuCircuitCache {
 
         let grid_nodes = grid_for(self.node_cap);
         if grid_nodes != 0 {
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 store_f64.clone().launch(
                     LaunchConfig {
@@ -2445,6 +2486,7 @@ impl GpuCircuitCache {
 
         let grid_weights = grid_for(weights_len);
         if grid_weights != 0 {
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 store_f64.clone().launch(
                     LaunchConfig {
@@ -2464,6 +2506,7 @@ impl GpuCircuitCache {
             }
             .map_err(|e| XlogError::Kernel(format!("cache zero grad_true failed: {}", e)))?;
 
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 store_f64.clone().launch(
                     LaunchConfig {
@@ -2492,6 +2535,7 @@ impl GpuCircuitCache {
             .ok_or_else(|| {
                 XlogError::Kernel("xgcf_add_scalar_cached kernel not found".to_string())
             })?;
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             add_scalar.clone().launch(
                 LaunchConfig {
@@ -2570,6 +2614,7 @@ impl GpuCircuitCache {
                 (&self.meta_num_levels).as_kernel_param(),
             ];
 
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 propagate.clone().launch(
                     LaunchConfig {
@@ -2609,6 +2654,7 @@ impl GpuCircuitCache {
                 (&self.meta_num_levels).as_kernel_param(),
             ];
 
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 decision_grad.clone().launch(
                     LaunchConfig {
@@ -2643,6 +2689,7 @@ impl GpuCircuitCache {
                 (&self.meta_num_levels).as_kernel_param(),
             ];
 
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 lit_grad.clone().launch(
                     LaunchConfig {
@@ -2699,6 +2746,7 @@ impl GpuCircuitCache {
             (&mut self.values).as_kernel_param(),
             (&self.meta_num_levels).as_kernel_param(),
         ];
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             eval_all.clone().launch(
                 LaunchConfig {
@@ -2733,6 +2781,7 @@ impl GpuCircuitCache {
 
         let grid_nodes = grid_for(self.node_cap);
         if grid_nodes != 0 {
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 store_f64.clone().launch(
                     LaunchConfig {
@@ -2755,6 +2804,7 @@ impl GpuCircuitCache {
 
         let grid_weights = grid_for(weights_len);
         if grid_weights != 0 {
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 store_f64.clone().launch(
                     LaunchConfig {
@@ -2774,6 +2824,7 @@ impl GpuCircuitCache {
             }
             .map_err(|e| XlogError::Kernel(format!("cache zero grad_true failed: {}", e)))?;
 
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 store_f64.clone().launch(
                     LaunchConfig {
@@ -2802,6 +2853,7 @@ impl GpuCircuitCache {
             .ok_or_else(|| {
                 XlogError::Kernel("xgcf_add_scalar_cached kernel not found".to_string())
             })?;
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             add_scalar.clone().launch(
                 LaunchConfig {
@@ -2852,6 +2904,7 @@ impl GpuCircuitCache {
             (&self.meta_num_levels).as_kernel_param(),
         ];
 
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             backward_all.clone().launch(
                 LaunchConfig {
@@ -2900,6 +2953,7 @@ impl GpuCircuitCache {
                         "xgcf_free_var_apply_grad_cached kernel not found".to_string(),
                     )
                 })?;
+            // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 apply_grad.clone().launch(
                     LaunchConfig {
@@ -2963,6 +3017,7 @@ impl GpuCircuitCache {
                     };
                 let mode = if stage0 { 0u32 } else { 1u32 };
 
+                // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
                 unsafe {
                     reduce_stage.clone().launch(
                         LaunchConfig {
@@ -2989,6 +3044,7 @@ impl GpuCircuitCache {
 
                 if out_len == 1 {
                     let result_buf = if output_is_a { &buf_a } else { &buf_b };
+                    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
                     unsafe {
                         add_scalar.clone().launch(
                             LaunchConfig {

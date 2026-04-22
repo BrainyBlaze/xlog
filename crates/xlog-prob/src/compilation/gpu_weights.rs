@@ -63,6 +63,7 @@ pub fn build_evidence_by_var_gpu(
         })?;
     let block = 256u32;
     let grid = grid_for(count as u32, block);
+    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         func.clone().launch(
             LaunchConfig {
@@ -107,6 +108,7 @@ pub fn map_nodes_to_vars_gpu(
 
     let block = 256u32;
     let grid = grid_for(count as u32, block);
+    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         func.clone().launch(
             LaunchConfig {
@@ -160,6 +162,7 @@ pub fn apply_query_vars_device(
 
     let block = 256u32;
     let grid = grid_for(count as u32, block);
+    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         func.clone().launch(
             LaunchConfig {
@@ -213,6 +216,7 @@ pub fn restore_query_vars_device(
 
     let block = 256u32;
     let grid = grid_for(count as u32, block);
+    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         func.clone().launch(
             LaunchConfig {
@@ -290,6 +294,7 @@ pub fn build_weights_gpu(
             .get_func(WEIGHTS_MODULE, weights_kernels::WEIGHTS_FILL_LEAF)
             .ok_or_else(|| XlogError::Kernel("weights_fill_leaf kernel not found".to_string()))?;
         let grid = grid_for(leaf_probs.len() as u32, block);
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             func.clone().launch(
                 LaunchConfig {
@@ -315,6 +320,7 @@ pub fn build_weights_gpu(
             .get_func(WEIGHTS_MODULE, weights_kernels::WEIGHTS_FILL_CHOICE)
             .ok_or_else(|| XlogError::Kernel("weights_fill_choice kernel not found".to_string()))?;
         let grid = grid_for(choice_true.len() as u32, block);
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             func.clone().launch(
                 LaunchConfig {
@@ -343,6 +349,7 @@ pub fn build_weights_gpu(
                 XlogError::Kernel("weights_apply_evidence kernel not found".to_string())
             })?;
         let grid = grid_for(var_cap + 1, block);
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             func.clone().launch(
                 LaunchConfig {

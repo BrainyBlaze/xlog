@@ -44,6 +44,7 @@ use pyo3::PyObject;
 
 /// Errors from tensor source operations.
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum TensorSourceError {
     /// Tensor source not found in registry
     #[error("Tensor source '{0}' not found")]
@@ -103,13 +104,12 @@ impl TensorMetadata {
     }
 }
 
-/// Internal storage for a tensor source.
-#[allow(dead_code)] // metadata field used only with python feature
+/// Internal storage for a tensor source (used only with python feature).
+#[cfg(feature = "python")]
 struct TensorSource {
     /// Metadata about the tensor
     metadata: TensorMetadata,
-    /// The actual PyTorch tensor (when python feature enabled)
-    #[cfg(feature = "python")]
+    /// The actual PyTorch tensor
     tensor: PyObject,
 }
 

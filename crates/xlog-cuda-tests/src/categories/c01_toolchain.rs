@@ -60,7 +60,7 @@ fn parse_sm_target(target: &str) -> Option<u32> {
 }
 
 /// Run all tests in this category.
-pub fn run_all(ctx: &TestContext) -> CategoryResult {
+pub(crate) fn run_all(ctx: &TestContext) -> CategoryResult {
     let mut results = CategoryResult::new("c01_toolchain");
     let start = Instant::now();
 

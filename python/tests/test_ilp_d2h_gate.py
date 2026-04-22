@@ -137,8 +137,8 @@ def test_batch_tagged_credit_basic():
     assert len(credits) == 3
 
     # First two should have at least one contributing entry
-    assert len(credits[0]) > 0, f"(1,3) should be derived, got empty credits"
-    assert len(credits[1]) > 0, f"(2,4) should be derived, got empty credits"
+    assert len(credits[0]) > 0, "(1,3) should be derived, got empty credits"
+    assert len(credits[1]) > 0, "(2,4) should be derived, got empty credits"
     # The contributing entry should be (edge_idx, edge_idx, reach_idx)
     assert credits[0][0] == (i_edge, i_edge, k_reach)
     # (99,99) is not derived -- no contributors

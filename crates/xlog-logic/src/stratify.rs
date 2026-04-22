@@ -20,18 +20,21 @@ pub(crate) struct DepEdge {
     pub dep_type: DepType,
 }
 
-/// Dependency graph for stratification analysis
+/// Dependency graph for stratification analysis.
 #[derive(Debug, Default)]
 pub struct DependencyGraph {
+    /// Set of all predicate names in the graph.
     pub predicates: HashSet<String>,
     pub(crate) edges: Vec<DepEdge>,
 }
 
 impl DependencyGraph {
+    /// Create an empty dependency graph.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Add a predicate node to the graph.
     pub fn add_predicate(&mut self, name: String) {
         self.predicates.insert(name);
     }
@@ -201,10 +204,12 @@ fn check_scc_for_negation_cycle(scc: &[String], graph: &DependencyGraph) -> Opti
     None
 }
 
-/// Stratum assignment result
+/// Stratum assignment result.
 #[derive(Debug, Clone)]
 pub struct Stratum {
+    /// Stratum index (0 = base stratum).
     pub id: usize,
+    /// Predicates assigned to this stratum.
     pub predicates: Vec<String>,
 }
 

@@ -38,6 +38,7 @@ struct GpuCdclRun {
 /// equivalence verification of circuits with up to ~10 000 variables;
 /// larger problems may need proportionally larger arenas.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct GpuCdclConfig {
     /// Maximum number of learned clauses retained in the arena.
     pub max_learned_clauses: u32,
@@ -63,6 +64,7 @@ impl Default for GpuCdclConfig {
     }
 }
 
+/// GPU-native CDCL SAT solver backed by CUDA kernels.
 pub struct GpuCdclSolver {
     provider: Arc<CudaKernelProvider>,
     config: GpuCdclConfig,
@@ -416,6 +418,7 @@ impl GpuCdclSolver {
             (&mut out_learned_count).as_kernel_param(),
         ];
 
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             sat_fn.clone().launch(
                 LaunchConfig {
@@ -588,6 +591,7 @@ impl GpuCdclSolver {
             (&mut ws.out_learned_count).as_kernel_param(),
         ];
 
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             sat_fn.clone().launch(
                 LaunchConfig {
@@ -774,6 +778,7 @@ impl GpuCdclSolver {
         let assert_status_fn = device
             .get_func(SAT_MODULE, sat_kernels::SAT_ASSERT_STATUS)
             .ok_or_else(|| XlogError::Kernel("sat_assert_status kernel not found".to_string()))?;
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             assert_status_fn
                 .clone()
@@ -805,6 +810,7 @@ impl GpuCdclSolver {
         let check_fn = device
             .get_func(SAT_MODULE, sat_kernels::SAT_CHECK_MODEL)
             .ok_or_else(|| XlogError::Kernel("sat_check_model kernel not found".to_string()))?;
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             check_fn
                 .clone()
@@ -831,6 +837,7 @@ impl GpuCdclSolver {
         let assert_ok_fn = device
             .get_func(SAT_MODULE, sat_kernels::SAT_ASSERT_OK)
             .ok_or_else(|| XlogError::Kernel("sat_assert_ok kernel not found".to_string()))?;
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             assert_ok_fn
                 .clone()
@@ -984,6 +991,7 @@ impl GpuCdclSolver {
         let assert_status_fn = device
             .get_func(SAT_MODULE, sat_kernels::SAT_ASSERT_STATUS)
             .ok_or_else(|| XlogError::Kernel("sat_assert_status kernel not found".to_string()))?;
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             assert_status_fn
                 .clone()
@@ -1113,6 +1121,7 @@ impl GpuCdclSolver {
             needed_cap_u32.as_kernel_param(),
             (&mut needed).as_kernel_param(),
         ];
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             mark_needed_fn
                 .clone()
@@ -1162,6 +1171,7 @@ impl GpuCdclSolver {
             scratch_cap_u32.as_kernel_param(),
             (&mut out_ok).as_kernel_param(),
         ];
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             proof_fn
                 .clone()
@@ -1181,6 +1191,7 @@ impl GpuCdclSolver {
         let assert_ok_fn = device
             .get_func(SAT_MODULE, sat_kernels::SAT_ASSERT_OK)
             .ok_or_else(|| XlogError::Kernel("sat_assert_ok kernel not found".to_string()))?;
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             assert_ok_fn
                 .clone()
@@ -1305,6 +1316,7 @@ impl GpuCdclSolver {
         let assert_status_fn = device
             .get_func(SAT_MODULE, sat_kernels::SAT_ASSERT_STATUS)
             .ok_or_else(|| XlogError::Kernel("sat_assert_status kernel not found".to_string()))?;
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             assert_status_fn
                 .clone()
@@ -1434,6 +1446,7 @@ impl GpuCdclSolver {
             needed_cap_u32.as_kernel_param(),
             (&mut needed).as_kernel_param(),
         ];
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             mark_needed_fn
                 .clone()
@@ -1483,6 +1496,7 @@ impl GpuCdclSolver {
             scratch_cap_u32.as_kernel_param(),
             (&mut out_ok).as_kernel_param(),
         ];
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             proof_fn
                 .clone()
@@ -1502,6 +1516,7 @@ impl GpuCdclSolver {
         let assert_ok_fn = device
             .get_func(SAT_MODULE, sat_kernels::SAT_ASSERT_OK)
             .ok_or_else(|| XlogError::Kernel("sat_assert_ok kernel not found".to_string()))?;
+        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             assert_ok_fn
                 .clone()

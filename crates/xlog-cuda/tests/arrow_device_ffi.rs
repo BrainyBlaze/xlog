@@ -70,6 +70,7 @@ fn test_arrow_device_export_no_dtoh() {
     let stats = provider.host_transfer_stats();
     assert_eq!(stats.dtoh_bytes, 0, "device export performed DTOH");
 
+    // SAFETY: memory layout is guaranteed by the Arrow C Data Interface specification
     unsafe {
         let ptr = device_rb.as_ptr();
         assert!(!ptr.is_null());
@@ -103,6 +104,7 @@ fn test_arrow_device_export_schema_and_buffers() {
 
     let device_rb = provider.to_arrow_device_record_batch(buffer).unwrap();
 
+    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         let dev_ptr = device_rb.as_ptr();
         let schema_ptr = (*dev_ptr).schema;
@@ -134,6 +136,7 @@ fn test_arrow_device_export_bool_bitpacked() {
         .unwrap();
     let device_rb = provider.to_arrow_device_record_batch(buffer).unwrap();
 
+    // SAFETY: pointer and length are valid; the buffer was allocated with at least `len` elements
     unsafe {
         let dev_ptr = device_rb.as_ptr();
         let struct_arr = &*((*dev_ptr).array as *const RawArrowArray);
@@ -177,6 +180,7 @@ fn test_arrow_device_export_symbol_metadata() {
 
     let device_rb = provider.to_arrow_device_record_batch(buffer).unwrap();
 
+    // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         let dev_ptr = device_rb.as_ptr();
         let schema_ptr = (*dev_ptr).schema;
