@@ -769,9 +769,32 @@ impl super::CudaKernelProvider {
             shared_mem_bytes: 0,
         };
 
+        // The compact kernel only writes `output_rows` elements, but downstream
+        // metadata must still remember the logical span covered by the mask.
+        // This keeps host-visible `row_cap` aligned with the masked prefix while
+        // the device-side row count tracks the actual compacted cardinality.
         let output_rows = self.dtoh_scalar_untracked(&d_out_count, 0)? as u64;
+        let row_cap = u64::from(n);
+
         if output_rows == 0 {
-            return self.create_empty_buffer(input.schema.clone());
+            let mut new_columns = Vec::with_capacity(input.columns.len());
+            for col_idx in 0..input.columns.len() {
+                let elem_size = input
+                    .schema
+                    .column_type(col_idx)
+                    .map(|t| t.size_bytes())
+                    .unwrap_or(4);
+                let output_bytes = (row_cap as usize) * elem_size;
+                new_columns.push(self.memory.alloc::<u8>(output_bytes)?.into());
+            }
+            let d_zero_rows = self.upload_device_row_count(0)?;
+            return Ok(CudaBuffer::from_columns_with_host_count(
+                new_columns,
+                row_cap,
+                d_zero_rows,
+                input.schema.clone(),
+                0,
+            ));
         }
 
         let mut new_columns = Vec::with_capacity(input.columns.len());
@@ -786,7 +809,7 @@ impl super::CudaKernelProvider {
                 .map(|t| t.size_bytes())
                 .unwrap_or(4) as u32;
 
-            let output_bytes = (output_rows as usize) * (elem_size as usize);
+            let output_bytes = (row_cap as usize) * (elem_size as usize);
             let dst_col = self.memory.alloc::<u8>(output_bytes)?;
 
             // SAFETY: Kernel signature matches:
@@ -805,11 +828,12 @@ impl super::CudaKernelProvider {
 
         self.device.synchronize()?;
 
-        Ok(CudaBuffer::from_columns(
+        Ok(CudaBuffer::from_columns_with_host_count(
             new_columns,
-            output_rows,
+            row_cap,
             d_out_count,
             input.schema.clone(),
+            output_rows as u32,
         ))
     }
 

@@ -22,8 +22,6 @@ MANIFEST = ROOT / "dataset.json"
 
 
 def load_dataset(mode: str):
-    from torchvision import datasets, transforms
-
     manifest = DatasetManifest.load(MANIFEST)
     train_dir = DATA / "coins" / "train"
     test_dir = DATA / "coins" / "test"
@@ -31,6 +29,11 @@ def load_dataset(mode: str):
         raise SystemExit(
             "Dataset missing: examples/neural/02_coins/data/coins with train/ and test/"
         )
+
+    try:
+        from torchvision import datasets, transforms
+    except ImportError as exc:
+        raise SystemExit(f"Missing dependency: {exc}")
 
     transform = transforms.Compose([transforms.Resize((64, 64)), transforms.ToTensor()])
     train_ds = datasets.ImageFolder(train_dir, transform=transform)

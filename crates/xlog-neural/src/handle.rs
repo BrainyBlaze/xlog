@@ -225,6 +225,8 @@ impl EmbeddingHandle {
         self.module.is_some()
     }
 
+    /// Check if the PyTorch module/tensor has been set.
+    /// Without Python feature, always returns false.
     #[cfg(not(feature = "python"))]
     pub fn has_module(&self) -> bool {
         false
