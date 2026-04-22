@@ -14,7 +14,7 @@ reach(X, Z) :- reach(X, Y), edge(Y, Z).
 ?- reach(X, Y).
 """.strip()
 
-    prog = LogicProgram.compile(source, device=0, memory_mb=1024)
+    prog = LogicProgram.compile(source, device=0, memory_mb=32768)
 
     # Input relation: edge(src, dst)
     edge_src = torch.tensor([1, 2], device="cuda", dtype=torch.int64)
@@ -38,4 +38,3 @@ reach(X, Z) :- reach(X, Y), edge(Y, Z).
 
 if __name__ == "__main__":
     main()
-

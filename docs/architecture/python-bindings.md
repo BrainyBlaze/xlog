@@ -297,6 +297,54 @@ vectors = program.forward_embedding("entity_embed", [0, 5, 42])
 
 ---
 
+## Training Loop API (Neural-Symbolic)
+
+For neural-symbolic training with `nn/k` predicates, `Program` exposes loss
+computation, optimizer stepping, gradient clipping, learning-rate control, and
+batched training loops in addition to the single-query
+`forward_backward*` helpers.
+
+### Loss computation
+
+```python
+loss = program.nll_loss("addition(0, 1, 7)")
+loss = program.nll_loss_batch(queries)
+loss = program.nll_loss_mean(queries)
+
+loss_t = program.nll_loss_tensor("addition(0, 1, 7)")
+batch_t = program.nll_loss_batch_tensor(queries)
+avg_loss = program.evaluate_loss(queries)
+```
+
+### Optimizer and scheduler control
+
+```python
+program.zero_grad()
+program.optimizer_step()
+program.clip_grad_norms(max_norm=1.0)
+
+program.scheduler_step()
+program.scheduler_step(network_name="mnist_net")
+
+lr = program.get_lr("mnist_net")
+program.set_lr("mnist_net", 1e-4)
+```
+
+### Batched training epoch
+
+```python
+stats = program.train_epoch(queries, batch_size=32, max_grad_norm=1.0)
+stats = program.train_epoch_tensor(queries, batch_size=32, max_grad_norm=1.0)
+```
+
+### Profiling
+
+```python
+profile = program.warmup_breakdown()
+```
+
+---
+
 ## ILP Training (dILP Beta)
 
 The `pyxlog.ilp` subpackage provides differentiable ILP (Inductive Logic Programming) for learning
@@ -516,7 +564,7 @@ capsule2 = tensor.__dlpack__()
 program = pyxlog.LogicProgram.compile(
     source,                    # str: Datalog source code
     device=0,                  # int: CUDA device index
-    memory_mb=1024,           # int: GPU memory limit
+    memory_mb=32768,          # int: GPU memory limit in megabytes
 )
 ```
 
@@ -527,7 +575,7 @@ program = pyxlog.Program.compile(
     source,                    # str: Probabilistic Datalog source
     prob_engine="exact_ddnnf", # str: "exact_ddnnf" or "mc"
     device=0,                  # int: CUDA device index
-    memory_mb=1024,           # int: GPU memory limit
+    memory_mb=32768,          # int: GPU memory limit in megabytes
 )
 ```
 

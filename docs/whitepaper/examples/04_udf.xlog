@@ -1,0 +1,14 @@
+pred raw_score(u32, f64).
+pred norm_score(u32, f64).
+
+// Clamp a real number into [0.0, 1.0] via a typed UDF.
+func clamp01(X: f64) -> f64 =
+  if X < 0.0 then 0.0
+  else if X > 1.0 then 1.0
+  else X.
+
+raw_score(1, -0.3). raw_score(2, 0.7). raw_score(3, 1.4).
+
+norm_score(Id, N) :- raw_score(Id, R), N is clamp01(R).
+
+?- norm_score(Id, N).

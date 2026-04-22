@@ -1,0 +1,11 @@
+pred node(u32, symbol).
+pred connected(u32, u32).
+pred bridge(u32, u32).
+
+node(1, "alice").
+node(2, "bob").
+connected(1, 2).
+
+bridge(A, B) :- connected(A, B), node(A, _), node(B, _).
+
+?- bridge(A, B).

@@ -1,0 +1,54 @@
+%% arxiv.sty — minimal arXiv-style preamble for xlog whitepaper
+%% Vendored BSD-style, single-column article-based look.
+
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{arxiv}[2026/04/15 xlog arXiv-style preamble]
+
+\RequirePackage[letterpaper,margin=1in,headheight=14pt]{geometry}
+\RequirePackage{lmodern}
+\RequirePackage[T1]{fontenc}
+\RequirePackage[utf8]{inputenc}
+\RequirePackage{microtype}
+\RequirePackage{setspace}
+\RequirePackage{fancyhdr}
+\RequirePackage{lastpage}
+
+\setlength{\parindent}{15pt}
+\setlength{\parskip}{3pt plus 1pt minus 1pt}
+\linespread{1.05}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\itshape A Preprint}
+\fancyhead[R]{\small\thepage\,/\,\pageref{LastPage}}
+\renewcommand{\headrulewidth}{0.4pt}
+\renewcommand{\footrulewidth}{0pt}
+
+\renewcommand{\maketitle}{%
+  \begingroup
+    \centering
+    {\LARGE\bfseries \@title\par}%
+    \vspace{1.2em}%
+    {\large \@author\par}%
+    \vspace{0.6em}%
+    {\small \@date\par}%
+    \vspace{1.5em}%
+  \endgroup
+  \thispagestyle{fancy}%
+}
+
+\@addtoreset{section}{part}
+\renewcommand\section{\@startsection{section}{1}{\z@}%
+  {-3.5ex \@plus -1ex \@minus -.2ex}%
+  {2.3ex \@plus.2ex}%
+  {\normalfont\Large\bfseries}}
+\renewcommand\subsection{\@startsection{subsection}{2}{\z@}%
+  {-3.25ex\@plus -1ex \@minus -.2ex}%
+  {1.5ex \@plus .2ex}%
+  {\normalfont\large\bfseries}}
+\renewcommand\subsubsection{\@startsection{subsubsection}{3}{\z@}%
+  {-3.25ex\@plus -1ex \@minus -.2ex}%
+  {1.5ex \@plus .2ex}%
+  {\normalfont\normalsize\bfseries}}
+
+\endinput

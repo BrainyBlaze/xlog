@@ -8,7 +8,16 @@
 > controls (gradient clipping, early stopping, lr management), P3 incremental verifier
 > (`GpuCdclWorkspace` arena reuse). See `docs/ROADMAP.md` and `CHANGELOG.md`.
 
-**XLOG** is a GPU-accelerated Datalog query engine with neural-symbolic integration. It compiles declarative logic programs into optimized relational plans and executes them on NVIDIA GPUs, achieving high throughput for recursive queries, graph analytics, probabilistic inference, and neural-symbolic training.
+**XLOG is a GPU-native logic programming language for unified symbolic reasoning.**
+It shares one typed language frontend across deterministic Datalog evaluation,
+probabilistic inference, SAT/MaxSAT verification, and differentiable
+neural-symbolic training, all targeting a common CUDA runtime with zero-copy
+interop through DLPack and Arrow.
+
+See [`docs/whitepaper/main.pdf`](docs/whitepaper/main.pdf) for the v0.5.0
+technical whitepaper. The whitepaper is a stable design and evaluation
+reference; the installation, release, and support contract below tracks the
+current `main` branch and public release process.
 
 ---
 
@@ -29,6 +38,55 @@
 | **Bounded Exact Induction** | `xlog-induce` + `ilp_exact` CUDA kernel: score all `(L, R)` pairs across four topologies (chain / star / fanout / fanin) in one batched pass, top-K per topology, constant-size D2H budget — see [docs/architecture/bounded-exact-induction.md](docs/architecture/bounded-exact-induction.md) |
 | **Interop** | Arrow IPC, DLPack (zero-copy), Python bindings, PyTorch autograd |
 | **Profiling** | `--stats` flag for per-stratum/per-operation timing, memory tracking |
+
+---
+
+## Why XLOG
+
+XLOG is not a rule DSL bolted onto a tensor framework. It is a typed logic
+language with a single compiler pipeline and multiple GPU-backed reasoning
+paths:
+
+- **Typed predicates and compile-time checks** catch schema and expression errors
+  before any kernel launch.
+- **One surface language for multiple paradigms** keeps deterministic,
+  probabilistic, solver, and neural-symbolic workloads in one syntax and one
+  frontend.
+- **GPU-resident execution paths** minimize host round-trips in the hot path for
+  relational execution, knowledge compilation, and training.
+- **Zero-copy interop** exposes device-resident data to PyTorch and other
+  DLPack/Arrow consumers without building a separate serving layer.
+
+## When To Use XLOG
+
+- **Recursive or graph-shaped logic workloads** where a GPU-native fixpoint
+  runtime is more useful than CPU-bound rule evaluation.
+- **Probabilistic reasoning loops** that benefit from compile-once, evaluate-many
+  execution over the same program structure.
+- **Neural-symbolic training** where the symbolic component must stay inside the
+  training loop rather than behind a separate CPU service.
+- **Differentiable ILP workflows** that need sparse GPU masks, promotion gates,
+  and artifact persistence in the same runtime.
+
+## Core Concepts
+
+XLOG programs are stratified logic programs with typed predicates. The compiler
+parses source, stratifies the predicate dependency graph, lowers rules into a
+relational IR, and then dispatches to the backend that matches the workload:
+deterministic execution, probabilistic inference, solver services, or
+neural-symbolic training.
+
+Two ideas matter across the whole stack:
+
+- **Reversible symbols** preserve human-readable values while still using dense
+  GPU-friendly identifiers internally.
+- **Shared frontend, backend-specific IR paths** let the same source language
+  feed RIR for relational execution, circuit-oriented compilation for
+  probabilistic inference, and mask-augmented execution for dILP.
+
+For the full syntax surface, see
+[`docs/language-reference.md`](docs/language-reference.md). For crate-level and
+runtime structure, see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ---
 
@@ -281,11 +339,11 @@ Gradients flow correctly through negated literals for neural-symbolic training.
 
 ---
 
-## Neural-Symbolic Training (Introduced In v0.4.0-alpha, Available In v0.5.0)
+## Neural-Symbolic Training (Introduced In v0.4.0-alpha, Available In Current v0.5.x Releases)
 
 XLOG supports neural-symbolic integration where neural network outputs become probabilistic facts in logic programs.
 This infrastructure was introduced during the `v0.4.0-alpha` milestone and remains
-available in the current `v0.5.0` release line.
+available in the current `v0.5.x` release line.
 
 Current required neural example set:
 - `examples/neural/01_minimal`
@@ -671,7 +729,7 @@ cargo run -p xlog-cli --release --features host-io -- \
 
 # Performance profiling
 ./target/release/xlog run program.xlog --stats          # Human-readable timing
-./target/release/xlog run program.xlog --stats --json   # JSON format
+./target/release/xlog run program.xlog --stats --stats-format json   # JSON format
 
 # Options
 ./target/release/xlog run --help
@@ -684,32 +742,23 @@ If `xlog` is installed on your `PATH` in a later packaging workflow, you can dro
 
 ## Documentation
 
-GPU-native compilation status: the GPU-native exact path is implemented end-to-end:
-PIR → GPU CNF (`encode_cnf_gpu`) → GPU D4 compile → GPU CDCL equivalence verification → XGCF + GPU cache-aware eval.
-The legacy CPU D4 vendor pipeline is removed.
-
-| Document | Description |
-|----------|-------------|
-| [Language Reference](docs/language-reference.md) | Complete syntax guide: types, predicates, rules, modules, UDFs |
-| [Architecture](docs/ARCHITECTURE.md) | System design, crate structure, algorithms |
-| [Roadmap](docs/ROADMAP.md) | Feature status and development plans |
-| [Benchmarks](docs/BENCHMARKS.md) | Performance methodology and baseline metrics |
-| [Probabilistic Tier](docs/architecture/xlog-prob.md) | Exact and Monte Carlo inference |
-| [Solver Services](docs/architecture/solver-services.md) | GPU CDCL verifier (zero host reads) + workspace arena reuse + SAT/MaxSAT services |
-| [Neural-Symbolic Design](docs/plans/2026-01-20-v0.4.0-neural-symbolic-design.md) | v0.4.0 neural-symbolic integration design |
-| [GPU-Native Compilation Design](docs/design/2026-01-22-gpu-native-compilation-design.md) | v0.5.0 design for GPU D4 + GPU CDCL verifier |
-| [Data Interop](docs/architecture/cudf-interop.md) | Arrow and DLPack integration |
-| [Examples](examples/) | Annotated example programs |
-| [Neural Examples](examples/neural/) | Neural-symbolic training examples |
-| [dILP Beta Design](docs/plans/2026-02-26-dilp-hardening-design.md) | dILP trainer hardening design |
-| [dILP Beta Plan](docs/plans/2026-02-26-dilp-beta-impl.md) | dILP beta implementation plan (9 tasks) |
-| [dILP Architecture](docs/architecture/dilp-training.md) | Runtime/trainer architecture and GPU hot-loop contract |
-| [Term Embeddings Design](docs/plans/2026-03-08-p2a-term-embeddings-design.md) | P2a embedding registration, forward API, cross-registration validation |
-| [Provenance Primitives Design](docs/plans/2026-03-08-provenance-primitives-design.md) | Retained provenance metadata for external Rust consumers (leaf atoms, choice sources, formula iterator) |
-| [GPU Hot-loop Transfer Elimination](docs/plans/2026-03-01-gpu-hotloop-transfer-elimination.md) | Transfer-reduction design |
-| [Sparse Executor Transfer Fix](docs/plans/2026-03-01-sparse-executor-transfer-fix.md) | Sparse-mask executor alignment and implementation |
+| Document | Scope |
+|----------|-------|
+| [Whitepaper (PDF)](docs/whitepaper/main.pdf) | v0.5.0 technical whitepaper covering language framing, architecture, probabilistic inference, neural-symbolic execution, and evaluation |
+| [Language Reference](docs/language-reference.md) | Complete syntax and semantic reference, including probabilistic, neural, and dILP language surfaces |
+| [Architecture](docs/ARCHITECTURE.md) | Crate decomposition, IR layers, execution model, memory, and cross-backend architecture |
+| [Roadmap](docs/ROADMAP.md) | Feature status, shipped milestones, and planned work |
+| [Benchmarks](docs/BENCHMARKS.md) | Performance methodology and benchmark artifacts |
+| [Probabilistic Tier](docs/architecture/xlog-prob.md) | Exact knowledge compilation, Monte Carlo inference, GPU-native compilation, and Python API notes |
+| [Solver Services](docs/architecture/solver-services.md) | GPU CDCL verifier, SAT/MaxSAT services, and workspace reuse model |
+| [dILP Training](docs/architecture/dilp-training.md) | Differentiable ILP architecture, sparse mask execution, and trainer contract |
+| [dILP Showcase Report](docs/ilp/dilp-showcase-report.md) | End-to-end dILP run analysis and convergence notes |
+| [CLI Reference](docs/architecture/cli-reference.md) | `xlog run` and `xlog prob` flags, inputs, outputs, and examples |
+| [Python Bindings](docs/architecture/python-bindings.md) | `pyxlog` API surface, training APIs, term embeddings, and ILP APIs |
+| [Data Interop](docs/architecture/cudf-interop.md) | Arrow and DLPack interchange details |
+| [CUDA Certification](docs/architecture/cuda-certification.md) | Kernel certification coverage and PTX module inventory |
+| [Examples](examples/) | Annotated example programs across deterministic, probabilistic, and neural workflows |
 | [v0.3.2 Showcase](examples/xlog/80-v032-showcase/) | Production-grade multi-module examples |
-| [CUDA Certification](docs/architecture/cuda-certification.md) | Certification suite coverage (current HEAD) |
 
 ---
 
