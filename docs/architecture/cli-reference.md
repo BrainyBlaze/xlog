@@ -37,6 +37,9 @@ xlog run [OPTIONS] <FILE>
 - `--output-dir <DIR>` — Directory for Arrow output files (with `--output arrow`)
 - `--device <N>` — CUDA device index (default: 0)
 - `--memory-mb <MB>` — GPU memory limit in megabytes
+- `--stats` — Emit execution statistics (per-stratum timing, memory usage, symbol-table size)
+- `--stats-format <FORMAT>` — Stats output format: `human` (default), `json`
+- `--module-path <DIRS>` — Colon-separated directories to search for imported modules (repeatable)
 
 **Examples:**
 
@@ -55,6 +58,13 @@ xlog run --output arrow --output-dir ./results program.xlog
 
 # Specify GPU device and memory
 xlog run --device 1 --memory-mb 2048 program.xlog
+
+# Profiling output
+xlog run --stats program.xlog
+xlog run --stats --stats-format json program.xlog
+
+# Module imports (for programs with `use`)
+xlog run --module-path ./lib:./vendor program.xlog
 ```
 
 ### xlog prob
@@ -70,13 +80,14 @@ xlog prob [OPTIONS] <FILE>
 
 **Options:**
 - `--prob-engine <ENGINE>` — Inference engine: `exact_ddnnf` (default), `mc`
-- `--samples <N>` — Monte Carlo sample count (with `--prob-engine mc`)
-- `--seed <N>` — Random seed for Monte Carlo (with `--prob-engine mc`)
+- `--samples <N>` — Monte Carlo sample count (with `--prob-engine mc`, default: 10000)
+- `--seed <N>` — Random seed for Monte Carlo (default: 0)
 - `--confidence <LEVEL>` — Confidence level for MC intervals (default: 0.95)
-- `--input <REL>=<PATH>` — Load Arrow IPC file as EDB relation (repeatable)
 - `--output <FORMAT>` — Output format: `pretty` (default), `csv`, `arrow`
+- `--output-dir <DIR>` — Directory for Arrow output files (with `--output arrow`)
 - `--device <N>` — CUDA device index (default: 0)
 - `--memory-mb <MB>` — GPU memory limit in megabytes
+- `--module-path <DIRS>` — Colon-separated directories to search for imported modules (repeatable)
 
 **Examples:**
 

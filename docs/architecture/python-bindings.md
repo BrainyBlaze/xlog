@@ -274,6 +274,67 @@ vectors = program.forward_embedding("entity_embed", [0, 5, 42])
 
 ---
 
+## Training Loop API (Neural-Symbolic)
+
+For neural-symbolic training with `nn/k` predicates, `Program` exposes loss computation, optimizer stepping, gradient clipping, learning-rate control, and a batched training loop. These sit alongside `forward_backward` / `forward_backward_tensor` (single-query) to let callers build full training scripts without leaving the CUDA runtime.
+
+### Loss computation
+
+```python
+# Host-side scalar loss (reads back through .item())
+loss = program.nll_loss("addition(0, 1, 7)")                 # float
+loss = program.nll_loss_batch(queries)                       # float: sum over queries
+loss = program.nll_loss_mean(queries)                        # float: mean over queries
+
+# Device-resident loss tensors (no host read; compose with torch.autograd)
+loss_t = program.nll_loss_tensor("addition(0, 1, 7)")        # 0-d CUDA tensor
+batch_t = program.nll_loss_batch_tensor(queries)             # 0-d CUDA tensor, summed
+
+# Validation without parameter update
+avg_loss = program.evaluate_loss(queries)                    # mean NLL over queries
+```
+
+`nll_loss_value(p) = -log(p)` (0 for certain facts, +∞ clamped for impossible ones).
+
+### Optimizer and scheduler control
+
+```python
+program.zero_grad()                                          # zero grads on all registered networks
+program.optimizer_step()                                     # step() on all registered optimizers
+program.clip_grad_norms(max_norm=1.0)                        # torch.nn.utils.clip_grad_norm_ per network
+
+program.scheduler_step()                                     # scheduler.step() on all networks (where scheduler was registered)
+program.scheduler_step(network_name="mnist_net")             # just one network
+
+lr = program.get_lr("mnist_net")                             # current learning rate
+program.set_lr("mnist_net", 1e-4)                            # set learning rate on the optimizer
+```
+
+Registered optimizers and schedulers are owned by the caller; these methods forward to the corresponding PyTorch method names (`zero_grad`, `step`).
+
+### Batched training epoch
+
+```python
+# Host-scalar epoch (reads one loss back per batch for progress reporting)
+stats = program.train_epoch(queries, batch_size=32, max_grad_norm=1.0)
+print(stats.avg_loss, stats.num_batches, stats.total_queries)
+
+# GPU-native epoch (no per-query .item(); loss accumulation stays on device)
+stats = program.train_epoch_tensor(queries, batch_size=32, max_grad_norm=1.0)
+```
+
+Both variants handle `zero_grad` → forward/backward → `optimizer_step` internally. `max_grad_norm=None` disables gradient clipping.
+
+### Profiling
+
+```python
+profile = program.warmup_breakdown()                         # dict or None
+# When XLOG_WARMUP_PROFILE=1 is set, returns {"ptx": {...}, "circuit": {...}}
+# with PTX-load and circuit-compilation timing breakdowns.
+```
+
+---
+
 ## ILP Training (dILP Beta)
 
 The `pyxlog.ilp` subpackage provides differentiable ILP (Inductive Logic Programming) for learning
@@ -493,7 +554,7 @@ capsule2 = tensor.__dlpack__()
 program = pyxlog.LogicProgram.compile(
     source,                    # str: Datalog source code
     device=0,                  # int: CUDA device index
-    memory_mb=1024,           # int: GPU memory limit
+    memory_mb=32768,          # int: GPU memory limit in megabytes
 )
 ```
 
@@ -504,7 +565,7 @@ program = pyxlog.Program.compile(
     source,                    # str: Probabilistic Datalog source
     prob_engine="exact_ddnnf", # str: "exact_ddnnf" or "mc"
     device=0,                  # int: CUDA device index
-    memory_mb=1024,           # int: GPU memory limit
+    memory_mb=32768,          # int: GPU memory limit in megabytes
 )
 ```
 

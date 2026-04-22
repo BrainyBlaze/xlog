@@ -114,7 +114,7 @@ Source Code
 
 | IR | Purpose | Key Structures |
 |----|---------|----------------|
-| **RIR** | Relational operations for deterministic logic | `Scan`, `Filter`, `Project`, `Join`, `GroupBy`, `Union`, `Distinct`, `Diff`, `Fixpoint` |
+| **RIR** | Relational operations for deterministic logic | `Unit` (identity), `Scan`, `Filter`, `Project`, `Join`, `GroupBy`, `Union`, `Distinct`, `Diff`, `Fixpoint`, `TensorMaskedJoin` (dILP) |
 | **PIR** | Provenance tracking for probabilistic inference | `PIR_Lit`, `PIR_NegLit`, `PIR_And`, `PIR_Or`, `PIR_Decision` — weighted Boolean formula / circuit terms |
 | **EIR** | Epistemic reasoning structures (planned) | `EAtom`, `SplitPlan`, `GuessSpace`, `PropagationRules`, `TestTask`, `WorldViewCandidate` |
 | **SIR** | Boolean satisfiability and optimization | `SIR_CNF`, `SIR_Cardinality`, `SIR_Weights`, `SIR_Objective`, `SIR_ProofPolicy` |

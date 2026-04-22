@@ -12,7 +12,7 @@ The certification suite is implemented in the `xlog-cuda-tests` crate and provid
 |--------|-------|
 | Total tests | 206 |
 | Categories | 33 (C01-C25 + G01-G08) |
-| PTX modules | 19 |
+| PTX modules | 21 |
 | Execution mode | GPU-only (requires CUDA hardware) |
 
 ## Crate Structure
@@ -127,6 +127,8 @@ Category C01 enumerates every `.entry` in each PTX module and verifies resolutio
 | `mc_sample.ptx` | `mc_sample_bernoulli` |
 | `mc_eval.ptx` | `mc_eval_*` |
 | `sat.ptx` | `sat_*`, `cdcl_*` |
+| `ilp.ptx` | `ilp_extract_nonzero_indices`, `ilp_*` (sparse mask + credit helpers for dILP) |
+| `ilp_credit.ptx` | `ilp_credit_*` (GPU-resident credit/loss path) |
 | `weights.ptx` | `weights_fill_*`, `weights_apply_evidence`, `weights_map_nodes_to_vars` |
 
 ## Test Harness
