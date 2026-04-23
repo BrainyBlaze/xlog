@@ -19,6 +19,7 @@
 # Keep figure PDFs committed, ignore any build temp
 figures/*.tmp
 
-# Build output — do NOT ignore main.pdf; it is the deliverable and should ship
-# (Remove the next line if you prefer the PDF untracked.)
-# main.pdf
+# Build output — main.pdf is rebuilt locally via `latexmk -pdf main.tex`
+# and is not committed (would create large binary diffs on every source change).
+# Figure PDFs under figures/ remain tracked so the whitepaper builds without mmdc.
+main.pdf

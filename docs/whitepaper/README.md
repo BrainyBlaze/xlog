@@ -2,7 +2,7 @@
 
 arxiv-style single-column LaTeX source for the xlog v0.5.0 technical whitepaper: *"xlog: A GPU-Native Logic Programming Language for Unified Symbolic Reasoning"*.
 
-The rendered PDF is committed as `main.pdf`; rebuild only when sources change.
+The rendered PDF (`main.pdf`) is **not committed** — build it locally via `latexmk -pdf main.tex`. Figure PDFs under `figures/` are committed so the whitepaper can be built without `mmdc`.
 
 ## Build
 

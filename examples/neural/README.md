@@ -141,5 +141,5 @@ print(f"Final loss: {history.epoch_losses[-1]}")
 
 ## References
 
-- [XLOG v0.5.0 whitepaper](../../docs/whitepaper/main.pdf) — §6 (Neural-Symbolic Bridge) covers the design of neural predicate declarations, circuit caching, and PyTorch autograd integration
+- [XLOG v0.5.0 whitepaper](../../docs/whitepaper/) — §6 (Neural-Symbolic Bridge) covers the design of neural predicate declarations, circuit caching, and PyTorch autograd integration (LaTeX source; `main.pdf` is built locally)
 - [Python Bindings](../../docs/architecture/python-bindings.md) — API reference for `register_network`, `forward_backward`, `train_model`, and the training loop
