@@ -11,7 +11,7 @@
 
 **XLOG is a GPU-native logic programming language for unified symbolic reasoning.** Neural-symbolic systems today keep symbolic reasoning on the CPU while neural computation runs on the GPU; every training iteration pays a PCIe round-trip that dominates wall-clock time at scale. XLOG closes that gap: its compiler and runtime span four reasoning paradigms — deterministic Datalog evaluation, probabilistic inference via knowledge compilation (PIR → CNF → D4 → XGCF), SAT/MaxSAT verification, and differentiable neural-symbolic training — on a single CUDA runtime with zero host–device transfers in production paths. Implemented in Rust with 21 custom CUDA kernel files (14.2K lines of device code), XLOG caches compiled circuits across training iterations, yielding a measured **2.74× end-to-end speedup** (95% CI `[2.29, 3.18]`) on the MNIST addition benchmark, and exposes GPU-resident results via DLPack and Arrow for zero-copy interop with PyTorch, JAX, and cuDF.
 
-See [`docs/whitepaper/`](docs/whitepaper/) for the full v0.5.0 technical whitepaper (LaTeX source; `main.pdf` is built locally — see `docs/whitepaper/README.md`).
+See [`docs/whitepaper/main.pdf`](docs/whitepaper/main.pdf) for the full v0.5.0 technical whitepaper.
 
 ---
 
@@ -61,7 +61,7 @@ XLOG programs are **stratified logic programs with typed predicates**. The compi
 
 Key language features worth naming: **reversible symbols** (bidirectional string–ID mapping, so query output stays human-readable without losing GPU-friendly dense integer identifiers); **stratified aggregation** (head-positional, compiled to `GroupBy` RIR nodes executed as radix-sort-and-reduce kernels); **integrity constraints** (headless rules desugared into auxiliary rules whose output must be empty at evaluation completion); **pragma directives** that influence compiler behavior from within a program.
 
-For the full language surface see [`docs/language-reference.md`](docs/language-reference.md). For the design philosophy and the case for each design decision see **Section 3 of the whitepaper** ([`docs/whitepaper/`](docs/whitepaper/); build `main.pdf` locally).
+For the full language surface see [`docs/language-reference.md`](docs/language-reference.md). For the design philosophy and the case for each design decision see **Section 3 of the whitepaper** ([`docs/whitepaper/main.pdf`](docs/whitepaper/main.pdf)).
 
 ---
 
@@ -152,7 +152,7 @@ See [`docs/architecture/cli-reference.md`](docs/architecture/cli-reference.md) f
 
 | Document | Scope |
 |---|---|
-| [Whitepaper](docs/whitepaper/) | **Primary reference.** v0.5.0 technical whitepaper (LaTeX source — build `main.pdf` locally per `docs/whitepaper/README.md`) covering language, architecture, probabilistic inference, neural-symbolic bridge, evaluation, and related work. |
+| [Whitepaper (PDF)](docs/whitepaper/main.pdf) | **Primary reference.** v0.5.0 technical whitepaper covering language, architecture, probabilistic inference, neural-symbolic bridge, evaluation, and related work. |
 | [Language reference](docs/language-reference.md) | Full language surface: types, predicates, rules, modules, UDFs, aggregations, pragmas |
 | [Architecture](docs/ARCHITECTURE.md) | System design, crate structure, IR layers, GPU execution model |
 | [Probabilistic tier](docs/architecture/xlog-prob.md) | Exact knowledge compilation and Monte Carlo inference |

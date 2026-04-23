@@ -1,3 +1,22 @@
+# xlog whitepaper — only the rendered PDF and the directory README are tracked
+# on the default branch. LaTeX source, build artifacts, figure sources, and
+# figure build outputs are all excluded from the GitHub-visible tree.
+#
+# Full source history remains available on the `audit/v0.5.0-prerelease` branch
+# (see README.md). If you need to rebuild or modify the whitepaper, check out
+# that branch, which has the complete LaTeX pipeline.
+
+# LaTeX source
+*.tex
+*.sty
+*.bib
+latexmkrc
+Makefile
+
+# Mermaid figure sources + rendered figures
+figures/*.mmd
+figures/*.pdf
+
 # LaTeX build artifacts
 *.aux
 *.bbl
@@ -15,11 +34,3 @@
 *.nav
 *.snm
 *.vrb
-
-# Keep figure PDFs committed, ignore any build temp
-figures/*.tmp
-
-# Build output — main.pdf is rebuilt locally via `latexmk -pdf main.tex`
-# and is not committed (would create large binary diffs on every source change).
-# Figure PDFs under figures/ remain tracked so the whitepaper builds without mmdc.
-main.pdf
