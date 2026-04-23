@@ -132,7 +132,7 @@ Neural-symbolic training is measured on the \texttt{01\_minimal} benchmark (MNIS
     First epoch (cold) & $\sim$78--83\,s & Includes D4 compile + circuit verification (\texttt{examples/neural/results/track\_a/}) \\
     Steady-state epoch (warm) & $\sim$2.9\,s & Epochs 2--5 with batched evaluation (\texttt{examples/neural/results/track\_a/}) \\
     Total training (5 epochs) & $\sim$89--95\,s & Two seeds (\texttt{examples/neural/results/track\_a/}) \\
-    Circuit cache speedup & $2.74\times$ & 95\% CI: $[2.29, 3.18]$ (\texttt{examples/neural/results/evidence/cache\_ablation\_20260218.json}) \\
+    Circuit cache speedup & $2.74\times$ & 95\% CI: $[2.29, 3.18]$ (\texttt{cache\_ablation\_20260218.json}) \\
     \bottomrule
   \end{tabularx}
 \end{table}
@@ -172,24 +172,23 @@ The cache ablation study compared circuit-cached vs.\ uncached training over 3 s
 
 \subsection{CUDA Certification}
 
-The CUDA kernel certification suite (\texttt{crates/xlog-cuda-tests/}) provides systematic coverage of all GPU kernel operations. As of the v0.5.0 release the statistics in \Cref{tab:cuda-cert} hold.
+The CUDA kernel certification suite (\texttt{crates/xlog-cuda-tests/}) provides systematic coverage of all GPU kernel operations. On current \texttt{main}, the statistics in \Cref{tab:cuda-cert} hold.
 
 \begin{table}[htbp]
   \centering
-  \caption{CUDA certification suite statistics (v0.5.0).}
+  \caption{CUDA certification suite statistics (current \texttt{main}, April 2026).}
   \label{tab:cuda-cert}
   \small
   \begin{tabular}{@{}ll@{}}
     \toprule
     \textbf{Metric} & \textbf{Value} \\
     \midrule
-    Total tests        & 206 \\
-    Categories         & 33 (C01--C25 infrastructure + G01--G08 GPU-specific) \\
-    Pass rate          & 100\% (206/206) \\
-    PTX modules covered & 19 \\
-    Suite execution time & $\sim$14\,s \\
+    Total tests             & 206 \\
+    Categories              & 33 (C01--C25 infrastructure + G01--G08 GPU-specific) \\
+    Latest full certification & 100\% (206/206) \\
+    Kernel modules covered  & 22 \\
     \bottomrule
   \end{tabular}
 \end{table}
 
-The 25 infrastructure categories (C01--C25) cover toolchain validation, launch configuration, pointer bounds, memory spaces (global, shared, local), synchronization, warp-level operations, control flow divergence, atomics, floating-point semantics, integer operations, determinism, async pipelines, caching, host-device transfer, multi-stream execution, multi-GPU, hardware stress, algorithmic correctness, blind spots, edge matrices, and float filter semantics (\texttt{docs/certification/2026-01-22-v0.4.0-alpha-certification-report.md}). The 8 GPU-specific categories (G01--G08) validate circuit forward evaluation, circuit backward (gradient) kernels, weight injection, transfer efficiency, circuit caching, PTX robustness, SAT/CDCL solving, and device-count invariants (\texttt{docs/architecture/cuda-certification.md}). The certification suite runs in CI on every push to \texttt{main} and every pull request.
+The 25 infrastructure categories (C01--C25) cover toolchain validation, launch configuration, pointer bounds, memory spaces (global, shared, local), synchronization, warp-level operations, control flow divergence, atomics, floating-point semantics, integer operations, determinism, async pipelines, caching, host-device transfer, multi-stream execution, multi-GPU, hardware stress, algorithmic correctness, blind spots, edge matrices, and float filter semantics (\texttt{docs/certification/2026-01-22-v0.4.0-alpha-certification-report.md}). The 8 GPU-specific categories (G01--G08) validate circuit forward evaluation, circuit backward (gradient) kernels, weight injection, transfer efficiency, circuit caching, PTX robustness, SAT/CDCL solving, and device-count invariants (\texttt{docs/architecture/cuda-certification.md}). The 22 covered runtime kernel modules consist of 19 committed PTX modules plus 3 build-time ILP-family modules documented in the certification architecture notes. Because the public repository does not rely on hosted GPUs, the full certification suite is exercised through GPU-backed local release validation (\texttt{scripts/validate\_release\_gpu.sh --mode release}) and the manual self-hosted \texttt{cuda-ci} workflow; the always-on push/PR CI remains non-GPU and covers formatting, shell/workflow linting, package metadata, and no-GPU build checks.

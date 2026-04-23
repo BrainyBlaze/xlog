@@ -86,9 +86,9 @@ Each query has the form \texttt{addition(i, j, expected\_sum)}. The training obj
 
 \textbf{Training loop architecture.} \Cref{fig:training} shows one training iteration.
 
-\begin{figure}[htbp]
+\begin{figure}[tbp]
   \centering
-  \includegraphics[width=0.75\linewidth]{training_loop.pdf}
+  \includegraphics[width=0.68\linewidth,height=0.38\textheight,keepaspectratio]{training_loop.pdf}
   \caption{One iteration of neural-symbolic training on MNIST addition. The XGCF circuit is compiled once (first iteration) and reused thereafter; only the leaf weights change across iterations. Gradients flow back through DLPack capsules into PyTorch's autograd graph.}
   \label{fig:training}
 \end{figure}
@@ -106,13 +106,13 @@ The critical performance property is that the circuit compilation (D4) happens o
     \toprule
     \textbf{Seed} & \textbf{Initial Loss} & \textbf{Final Loss} & \textbf{Improvement} & \textbf{Elapsed (s)} \\
     \midrule
-    42 & 2.7779 & 2.5904 & 6.7\% & 20{,}987 \\
-    7  & 2.7797 & 2.5693 & 7.6\% & 21{,}963 \\
+    42 & 2.7771 & 2.5982 & 6.4\% & 89.325 \\
+    7  & 2.7822 & 2.5932 & 6.8\% & 94.719 \\
     \bottomrule
   \end{tabular}
 \end{table}
 
-These runs use the full xlog pipeline---compilation, circuit caching, GPU-resident forward/backward---exercised through \texttt{pyxlog.train\_model\_tensor}. The loss reduction across 5 epochs confirms that gradients flow correctly from the circuit evaluation through the logic program back to the CNN parameters. The relatively long wall-clock times reflect the cold-start compilation cost (which is amortized across subsequent epochs) and the small-scale nature of these development-track validation runs.
+These runs use the post-fix batched training path recorded under \texttt{examples/neural/results/track\_a/.../01\_minimal/}, exercising the full xlog pipeline---compilation, circuit caching, GPU-resident forward/backward, and batched query evaluation---through \texttt{pyxlog.train\_model\_tensor}. The loss reduction across 5 epochs confirms that gradients flow correctly from the circuit evaluation through the logic program back to the CNN parameters, and the elapsed times align with the cold-start vs.\ warm-epoch split reported in \Cref{sec:eval}.
 
 \subsection{Term Embeddings (v0.5.0)}
 
@@ -140,7 +140,7 @@ xlog includes a differentiable inductive logic programming (dILP) trainer~\cite{
 \begin{itemize}
   \item \texttt{set\_rule\_mask\_sparse(name, candidate\_ids, soft\_probs\_dlpack, budget)}---accepts a DLPack GPU tensor of soft probabilities, performs deterministic top-k selection on the Rust side, and stores a sparse \texttt{IlpMask} without dense materialization.
   \item \texttt{set\_rule\_mask\_sparse\_selected(name, selected\_candidate\_ids, selected\_soft\_probs\_dlpack)}---the caller preselects candidate IDs, avoiding the full-vector probability download entirely.
-  \item \texttt{set\_rule\_mask\_sparse\_device(name, \ldots)}---the strictest path where selected candidate IDs remain as a device tensor, with Rust resolving them against a fixed candidate order uploaded via \texttt{set\_candidate\_map()}.
+  \item \texttt{set\_rule\_mask\_sparse\_selected\_device(name, \ldots)}---the strictest path where selected candidate IDs remain as a device tensor, with Rust resolving them against a fixed candidate order uploaded via \texttt{set\_candidate\_map()}.
 \end{itemize}
 
 The GPU loss/gradient computation (\texttt{compute\_ilp\_loss\_grad\_gpu}) builds a sparse COO structure from the per-entry membership masks, converts it to CSR via device-side sort, and launches forward (credit gather + NLL loss) and backward (gradient scatter) CUDA kernels. The entire credit/loss path is GPU-resident with zero host transfers when using the strict sparse device mask.
