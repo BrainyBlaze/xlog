@@ -42,8 +42,9 @@ The supported consumer paths are:
 - PyPI wheel: `pip install pyxlog` installs the native extension plus packaged
   `pyxlog/kernels/`; importing `pyxlog` sets `XLOG_CUBIN_DIR` to that packaged directory when it is
   present.
-- Local Python development: run `bash scripts/stage_pyxlog_kernels.sh` before
-  `maturin develop --release` so the editable package layout matches the wheel layout.
+- Local Python development: run
+  `python scripts/install_pyxlog_for_python.py --python /path/to/project/python` so the local wheel
+  is built for and installed into the exact interpreter used by the downstream project.
 
 Native Linux GPU runners normally expose `/dev/nvidia*`. WSL2 CUDA runners normally expose
 `/dev/dxg` instead; absence of `/dev/nvidia*` is expected there. `scripts/xlog_doctor.py` accepts

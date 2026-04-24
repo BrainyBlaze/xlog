@@ -268,10 +268,8 @@ cargo test -p xlog-cuda-tests --test certification_suite --release -- --nocaptur
 ### Python examples (local wheel)
 
 ```bash
-cd crates/pyxlog
-python -m pip install --upgrade pip maturin
-maturin develop --release
-python ../../examples/python/03_prob_mc_nonmonotone_torch.py
+python scripts/install_pyxlog_for_python.py --python /usr/local/bin/python --user
+python examples/python/03_prob_mc_nonmonotone_torch.py
 ```
 
 ## Provenance Primitives (Rust-only)

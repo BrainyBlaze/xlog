@@ -186,12 +186,17 @@ architecture-specific startup when available.
 
 ### Local Python development install
 
+Install into the exact Python interpreter used by your downstream project. Do not rely on bare
+`maturin develop` from the xlog checkout: if this repository has its own `.venv`, maturin can
+install into that environment while your project imports a different Python.
+
 ```bash
-bash scripts/stage_pyxlog_kernels.sh
-cd crates/pyxlog
-pip install maturin
-maturin develop --release
+python scripts/install_pyxlog_for_python.py --python /usr/local/bin/python --user
 ```
+
+The helper stages CUDA kernels, builds a local wheel for the requested interpreter, installs that
+wheel with the same interpreter's `pip`, and verifies that the installed `pyxlog` package contains
+`pyxlog/kernels/`.
 
 ---
 

@@ -20,4 +20,10 @@ repository root:
 - https://github.com/BrainyBlaze/xlog
 
 Use the root project README for installation requirements, CUDA expectations,
-and end-to-end examples.
+and end-to-end examples. For local source-tree installs, use the repository
+helper from the root directory so the wheel is built for and installed into the
+same Python interpreter your downstream project uses:
+
+```bash
+python scripts/install_pyxlog_for_python.py --python /usr/local/bin/python --user
+```

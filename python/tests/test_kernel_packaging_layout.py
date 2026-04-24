@@ -43,6 +43,60 @@ def test_stage_kernels_help_works() -> None:
     assert "--to" in result.stdout
 
 
+def test_install_pyxlog_for_python_help_works() -> None:
+    result = subprocess.run(
+        [sys.executable, "scripts/install_pyxlog_for_python.py", "--help"],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert "--python" in result.stdout
+    assert "--wheel-dir" in result.stdout
+    assert "maturin build" in result.stdout
+
+
+def test_install_pyxlog_for_python_dry_run_targets_explicit_interpreter() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        wheel_dir = Path(tmp) / "wheels"
+        target_python = "/usr/local/bin/python"
+        result = subprocess.run(
+            [
+                sys.executable,
+                "scripts/install_pyxlog_for_python.py",
+                "--python",
+                target_python,
+                "--wheel-dir",
+                str(wheel_dir),
+                "--dry-run",
+            ],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert f"-i {target_python}" in result.stdout
+    assert f"{target_python} -m pip install --force-reinstall" in result.stdout
+    assert "maturin develop" not in result.stdout
+
+
+def test_public_docs_use_explicit_pyxlog_python_install() -> None:
+    docs = {
+        "README.md": (ROOT / "README.md").read_text(encoding="utf-8"),
+        "docs/architecture/python-bindings.md": (
+            ROOT / "docs" / "architecture" / "python-bindings.md"
+        ).read_text(encoding="utf-8"),
+    }
+
+    for path, text in docs.items():
+        assert "scripts/install_pyxlog_for_python.py --python" in text, path
+        assert "maturin develop --release" not in text, path
+
+
 def test_stage_kernels_prunes_and_emits_manifest() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         tmp_root = Path(tmp)

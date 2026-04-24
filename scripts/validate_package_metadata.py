@@ -18,6 +18,7 @@ REQUIRED_SNIPPETS = (
     "python scripts/xlog_doctor.py",
     "cargo build --release",
     "cargo build --release -p xlog-cli --features host-io",
+    "python scripts/install_pyxlog_for_python.py --python",
     "./target/release/xlog",
 )
 

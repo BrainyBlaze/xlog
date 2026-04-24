@@ -42,16 +42,15 @@ does not contain `pyxlog/kernels/`.
 For unreleased `main` branch features or local development:
 
 ```bash
-bash scripts/stage_pyxlog_kernels.sh
-cd crates/pyxlog
-pip install maturin
-maturin develop --release
+python scripts/install_pyxlog_for_python.py --python /usr/local/bin/python --user
 ```
 
-The staging step makes the editable package layout match the wheel layout by
-copying generated CUDA artifacts into `crates/pyxlog/python/pyxlog/kernels/`.
-Generated `.ptx` and `.cubin` files remain build artifacts and are not tracked
-in git.
+Use the Python executable from the downstream project, not necessarily the
+Python from the xlog checkout. The helper stages generated CUDA artifacts,
+builds a wheel for that interpreter with `maturin build -i`, installs the wheel
+with the same interpreter's `pip`, and verifies that the installed package has
+`pyxlog/kernels/`. Generated `.ptx` and `.cubin` files remain build artifacts
+and are not tracked in git.
 
 ### Build Features
 
@@ -61,8 +60,9 @@ in git.
 Example:
 
 ```bash
-maturin develop --release -m crates/pyxlog/Cargo.toml --features host-io
-maturin develop --release -m crates/pyxlog/Cargo.toml --features arrow-device-import
+python scripts/install_pyxlog_for_python.py --python /usr/local/bin/python
+python scripts/install_pyxlog_for_python.py --python /usr/local/bin/python \
+  --features extension-module,host-io,arrow-device-import
 ```
 
 ## Package Details

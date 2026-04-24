@@ -1,8 +1,9 @@
 ACTIONLINT ?= actionlint
 SHELLCHECK ?= shellcheck
 PACKAGE_OUTPUT ?= dist
+PYTHON ?= python3
 
-.PHONY: doctor build build-host-io check check-warnings package validate-release-local lint-workflows lint-shell check-tracked-ignored
+.PHONY: doctor build build-host-io check check-warnings install-pyxlog package validate-release-local lint-workflows lint-shell check-tracked-ignored
 
 doctor:
 	python scripts/xlog_doctor.py
@@ -63,6 +64,9 @@ check:
 
 check-warnings:
 	bash scripts/check_warning_free.sh
+
+install-pyxlog:
+	python scripts/install_pyxlog_for_python.py --python $(PYTHON)
 
 package:
 	bash scripts/package_cli_release.sh --output $(PACKAGE_OUTPUT)
