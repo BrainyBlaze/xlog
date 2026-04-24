@@ -103,6 +103,8 @@ Tests GROUP BY with COUNT aggregate.
 - 1M rows with 10K groups
 - 1M rows with 100K groups
 
+Aggregation throughput is tracked in groups/sec, but the repository does not currently publish a single public pass/fail threshold for this case.
+
 ### Probabilistic Benchmarks (`xlog-prob`)
 
 **Location:** `crates/xlog-prob/benches/prob_bench.rs`
@@ -201,7 +203,7 @@ All random data generation uses deterministic seeding:
 
 Development hardware: **NVIDIA RTX PRO 3000 Blackwell Generation Laptop GPU** (12 GB, SM120, compute capability 12.0, driver 591.59).
 
-All baseline targets below are measured on this device. Throughput numbers on desktop-class GPUs (e.g. RTX 4090, RTX 5090) will differ due to higher memory bandwidth and SM count.
+All baseline targets below are calibrated on this device. Throughput numbers on desktop-class GPUs (e.g. RTX 4090, RTX 5090) will differ due to higher memory bandwidth and SM count.
 
 ### Transitive Closure
 

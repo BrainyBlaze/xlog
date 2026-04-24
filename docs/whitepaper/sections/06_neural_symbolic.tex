@@ -95,24 +95,26 @@ Each query has the form \texttt{addition(i, j, expected\_sum)}. The training obj
 
 The critical performance property is that the circuit compilation (D4) happens once, during the first forward pass. All subsequent iterations reuse the cached XGCF structure, executing only the weight update and the level-parallel forward/backward kernels. This is the mechanism behind the $2.74\times$ training speedup reported in \Cref{sec:prob}.
 
-\textbf{Results.} On the MNIST addition benchmark (512 training images, 256 addition pairs, batch size 64, learning rate $10^{-3}$, CUDA device), the xlog engine was evaluated over 5 training epochs with two random seeds:
+\textbf{Results.} On the MNIST addition benchmark (512 training images, 256 addition pairs, batch size 64, learning rate $10^{-3}$, CUDA device), the latest checked-in post-fix rerun on \texttt{main} reports the summary in \Cref{tab:training-seeds} over 3 seeds:
 
 \begin{table}[htbp]
   \centering
-  \caption{MNIST addition training results (\texttt{01\_minimal}, 5 epochs, two seeds).}
+  \caption{MNIST addition training summary (\texttt{01\_minimal}, post-fix rerun, 3 seeds).}
   \label{tab:training-seeds}
   \small
-  \begin{tabular}{@{}rllll@{}}
+  \begin{tabular}{@{}llll@{}}
     \toprule
-    \textbf{Seed} & \textbf{Initial Loss} & \textbf{Final Loss} & \textbf{Improvement} & \textbf{Elapsed (s)} \\
+    \textbf{Metric} & \textbf{Value} & \textbf{Artifact} & \textbf{Notes} \\
     \midrule
-    42 & 2.7771 & 2.5982 & 6.4\% & 89.325 \\
-    7  & 2.7822 & 2.5932 & 6.8\% & 94.719 \\
+    Mean first epoch & $71.654$\,s & Track B comparison & Cold start with D4 compile/verify \\
+    Mean steady epoch & $0.248$\,s & Track B comparison & Warm batched path after cache reuse \\
+    Mean total train & $72.645$\,s & Track B comparison & 5 epochs, 3 seeds \\
+    Mean final loss & $2.62953$ & Track B comparison & Final training loss over the 3 recorded seeds \\
     \bottomrule
   \end{tabular}
 \end{table}
 
-These runs use the post-fix batched training path recorded under \texttt{examples/neural/results/track\_a/.../01\_minimal/}, exercising the full xlog pipeline---compilation, circuit caching, GPU-resident forward/backward, and batched query evaluation---through \texttt{pyxlog.train\_model\_tensor}. The loss reduction across 5 epochs confirms that gradients flow correctly from the circuit evaluation through the logic program back to the CNN parameters, and the elapsed times align with the cold-start vs.\ warm-epoch split reported in \Cref{sec:eval}.
+These measurements come from the post-fix Track B comparison artifact at \texttt{examples/neural/results/track\_b/20260218T145032Z\_track\_b/comparisons/mnist\_xlog\_vs\_scallop.json}, which exercises the full xlog pipeline---compilation, circuit caching, GPU-resident forward/backward, and batched query evaluation---through \texttt{pyxlog.train\_model\_tensor}. The loss reduction across the recorded runs confirms that gradients flow from circuit evaluation through the logic program back to the CNN parameters, and the timing split matches the cold-start vs.\ warm-epoch behavior reported in \Cref{sec:eval}.
 
 \subsection{Term Embeddings (v0.5.0)}
 
