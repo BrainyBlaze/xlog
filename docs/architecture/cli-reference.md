@@ -11,6 +11,18 @@ The `xlog` CLI is implemented in the `xlog-cli` crate and provides two main subc
 
 ## Installation
 
+Install the latest published CLI crate:
+
+```bash
+cargo install xlog-cli --features host-io
+```
+
+This path requires Rust, Cargo, CUDA Toolkit 13.x, and `nvcc` at install time.
+The installed binary embeds portable PTX for runtime kernels, so it does not
+require a sidecar `kernels/` directory after `cargo install` completes. If
+`XLOG_CUBIN_DIR` or a binary-adjacent `kernels/` directory is present, xlog
+prefers those staged artifacts before falling back to embedded PTX.
+
 The CLI is built as part of the workspace:
 
 ```bash

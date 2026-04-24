@@ -21,6 +21,7 @@ def _ok_check(message: str = "ok"):
 def _patch_supported_env(monkeypatch):
     monkeypatch.setattr(doctor, "_check_platform", lambda: _ok_check("Linux x86_64"))
     monkeypatch.setattr(doctor, "_check_nvidia_smi", lambda: _ok_check("nvidia-smi visible"))
+    monkeypatch.setattr(doctor, "_check_gpu_device", lambda: _ok_check("WSL /dev/dxg visible"))
     monkeypatch.setattr(doctor, "_check_nvcc", lambda: _ok_check("nvcc visible"))
     monkeypatch.setattr(doctor, "_check_rust", lambda: _ok_check("rustc/cargo visible"))
     monkeypatch.setattr(doctor, "_check_python", lambda: _ok_check("Python supported"))
@@ -154,6 +155,16 @@ def test_release_workflow_requires_maturin_not_gpu(monkeypatch, capsys):
             "FAIL",
             "Missing libcuda.so",
             "Install the NVIDIA driver.",
+        ),
+    )
+    monkeypatch.setattr(
+        doctor,
+        "_check_gpu_device",
+        lambda: doctor.CheckResult(
+            "gpu-device",
+            "FAIL",
+            "No CUDA GPU device node is visible",
+            "Expose /dev/dxg or /dev/nvidia*.",
         ),
     )
 

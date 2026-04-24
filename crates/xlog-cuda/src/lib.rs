@@ -11,6 +11,10 @@ pub mod multi_gpu_memory;
 pub mod provider;
 pub mod type_seam;
 
+pub(crate) mod embedded_kernel_data {
+    include!(concat!(env!("OUT_DIR"), "/embedded_kernel_data.rs"));
+}
+
 pub use arrow_device::{ArrowDeviceArray, ArrowDeviceArrayOwned, ARROW_DEVICE_CUDA};
 pub use cuda_compat::{
     sys, AsKernelParam, CudaFunction, CudaSlice, CudaStream, CudaView, CudaViewMut, DevicePtr,

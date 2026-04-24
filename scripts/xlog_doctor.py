@@ -119,6 +119,23 @@ def _check_nvidia_smi() -> CheckResult:
     return _run_version_command(["nvidia-smi"], "nvidia-smi", "nvidia-smi")
 
 
+def _check_gpu_device() -> CheckResult:
+    wsl_dxg = Path("/dev/dxg")
+    if wsl_dxg.exists():
+        return _ok("gpu-device", "WSL GPU device /dev/dxg is visible")
+
+    linux_nodes = sorted(Path("/dev").glob("nvidia*"))
+    if linux_nodes:
+        names = ", ".join(str(path) for path in linux_nodes)
+        return _ok("gpu-device", f"NVIDIA device nodes visible: {names}")
+
+    return _fail(
+        "gpu-device",
+        "No CUDA GPU device node is visible",
+        "On WSL2, ensure /dev/dxg exists. On native Linux, ensure /dev/nvidia* exists.",
+    )
+
+
 def _check_nvcc() -> CheckResult:
     resolved = shutil.which("nvcc")
     if resolved is None:
@@ -261,6 +278,7 @@ def evaluate(workflow: str) -> list[CheckResult]:
     results.extend(
         [
             _check_nvidia_smi(),
+            _check_gpu_device(),
             _check_nvcc(),
             _check_rust(),
             _check_python(),

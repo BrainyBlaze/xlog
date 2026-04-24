@@ -19,6 +19,36 @@ Public releases currently target:
 
 Everything else remains unsupported under the current public release contract.
 
+## Consumer Build And Kernel Artifact Model
+
+Generated CUDA artifacts are not source files. Keep `.ptx` and `.cubin` outputs out of git; they are
+produced from `kernels/*.cu` by `crates/xlog-cuda/build.rs` and staged only for packaged release
+artifacts.
+
+Runtime kernel lookup is intentionally layered:
+
+1. `XLOG_CUBIN_DIR`
+2. package- or binary-adjacent `kernels/`
+3. Cargo build `OUT_DIR` for source-tree builds
+4. embedded portable PTX compiled into the Rust binary
+
+The supported consumer paths are:
+
+- `cargo install xlog-cli --features host-io`: requires Rust, Cargo, CUDA Toolkit 13.x, and `nvcc`
+  at install time. The installed binary embeds portable PTX, so it does not depend on Cargo
+  retaining build-output sidecars after installation.
+- GitHub release archive: requires no Rust build. The archive contains the `xlog` binary plus a
+  staged `kernels/` directory with release-built CUDA artifacts.
+- PyPI wheel: `pip install pyxlog` installs the native extension plus packaged
+  `pyxlog/kernels/`; importing `pyxlog` sets `XLOG_CUBIN_DIR` to that packaged directory when it is
+  present.
+- Local Python development: run `bash scripts/stage_pyxlog_kernels.sh` before
+  `maturin develop --release` so the editable package layout matches the wheel layout.
+
+Native Linux GPU runners normally expose `/dev/nvidia*`. WSL2 CUDA runners normally expose
+`/dev/dxg` instead; absence of `/dev/nvidia*` is expected there. `scripts/xlog_doctor.py` accepts
+either device model for non-release workflow checks.
+
 ## Crate Publish Policy
 
 Published on crates.io:

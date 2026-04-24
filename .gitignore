@@ -69,3 +69,5 @@ examples/neural/baseline/results/deepproblog_gpu_sequential/*.time
 
 # PyO3 build artifacts
 crates/pyxlog/python/pyxlog/*.so
+
+.codex

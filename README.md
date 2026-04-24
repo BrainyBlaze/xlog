@@ -165,11 +165,29 @@ cargo install xlog-cli --features host-io
 ```
 
 As with the GitHub and PyPI artifacts, published crate versions follow tagged releases and may lag
-the current `main` branch workspace version.
+the current `main` branch workspace version. The Cargo-installed binary embeds portable PTX for all
+runtime kernels, so it can run without a sidecar `kernels/` directory. If a staged `kernels/`
+directory or `XLOG_CUBIN_DIR` is present, xlog still prefers those filesystem artifacts so release
+archives and local builds can use architecture-specific cubins first.
+
+### CUDA kernel artifact model
+
+XLOG does not track generated `.ptx` or `.cubin` files in git. Kernel artifacts are produced from
+`kernels/*.cu` by the Rust build and are resolved at runtime in this order:
+
+1. `XLOG_CUBIN_DIR`
+2. a package- or binary-adjacent `kernels/` directory
+3. Cargo build output for source-tree builds
+4. embedded portable PTX compiled into the Cargo-installed binary
+
+This means `cargo install xlog-cli --features host-io` works without a sidecar `kernels/` directory,
+while GitHub release archives and PyPI wheels still ship staged kernel artifacts for faster,
+architecture-specific startup when available.
 
 ### Local Python development install
 
 ```bash
+bash scripts/stage_pyxlog_kernels.sh
 cd crates/pyxlog
 pip install maturin
 maturin develop --release

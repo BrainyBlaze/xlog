@@ -50,3 +50,30 @@ fn test_package_manifest_includes_cuda_sources() {
         "xlog-cuda package must include CUDA sources so cargo publish --verify works"
     );
 }
+
+#[test]
+fn test_build_script_generates_embedded_portable_ptx_fallback() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+    let build_rs = manifest_dir.join("build.rs");
+    let build_contents = fs::read_to_string(&build_rs).expect("read build.rs");
+    assert!(
+        build_contents.contains("embedded_kernel_data.rs"),
+        "build.rs should generate embedded portable PTX metadata for cargo-installed binaries"
+    );
+    assert!(
+        build_contents.contains("include_str!"),
+        "embedded fallback should use include_str! so portable PTX is compiled into the binary"
+    );
+
+    let lib_rs = manifest_dir.join("src/lib.rs");
+    let lib_contents = fs::read_to_string(&lib_rs).expect("read lib.rs");
+    assert!(
+        lib_contents.contains("embedded_kernel_data"),
+        "xlog-cuda should compile the generated embedded kernel metadata into the crate"
+    );
+    assert!(
+        lib_contents.contains("OUT_DIR"),
+        "embedded kernel metadata should be included from Cargo OUT_DIR"
+    );
+}

@@ -6,9 +6,10 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use cudarc::nvrtc::Ptx;
 use xlog_core::{Result, XlogError};
 
-use super::{CudaKernelProvider, PtxLoadProfile};
+use super::{CudaKernelProvider, KernelModuleSource, PtxLoadProfile};
 use crate::kernel_manifest_data::KERNEL_MODULES;
 use crate::CudaDevice;
 
@@ -30,14 +31,35 @@ impl CudaKernelProvider {
                 None
             };
 
-            let (path, is_cubin) = super::load_module_from_file(spec.cu_name, cc)?;
+            let source = super::load_module_source(spec.cu_name, cc)?;
+            let is_cubin = matches!(source, KernelModuleSource::File { is_cubin: true, .. });
 
-            device
-                .inner()
-                .load_file(&path, spec.module_name, spec.kernels)
-                .map_err(|e| {
-                    XlogError::Kernel(format!("Failed to load {} module: {}", spec.cu_name, e))
-                })?;
+            match source {
+                KernelModuleSource::File { path, .. } => {
+                    device
+                        .inner()
+                        .load_file(&path, spec.module_name, spec.kernels)
+                        .map_err(|e| {
+                            XlogError::Kernel(format!(
+                                "Failed to load {} module from {}: {}",
+                                spec.cu_name,
+                                path.display(),
+                                e
+                            ))
+                        })?;
+                }
+                KernelModuleSource::EmbeddedPortablePtx { ptx } => {
+                    device
+                        .inner()
+                        .load_ptx(Ptx::from_src(ptx), spec.module_name, spec.kernels)
+                        .map_err(|e| {
+                            XlogError::Kernel(format!(
+                                "Failed to load embedded {} portable PTX: {}",
+                                spec.cu_name, e
+                            ))
+                        })?;
+                }
+            }
 
             if let Some(t0) = t0 {
                 if profiling {

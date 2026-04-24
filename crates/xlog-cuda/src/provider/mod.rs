@@ -4,6 +4,7 @@
 //! PTX kernels for GPU execution of relational operations (join, dedup, groupby).
 
 use std::marker::PhantomData;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -63,22 +64,47 @@ fn detect_compute_capability(device: &Arc<CudaDevice>) -> Result<u32> {
     Ok((major as u32) * 10 + (minor as u32))
 }
 
+#[cfg(test)]
 fn resolve_module_path(name: &str, cc: u32) -> Option<(std::path::PathBuf, bool)> {
     kernel_paths::KernelArtifactLocator::from_env().resolve_module_path(name, cc)
 }
 
-/// Load a kernel module from file (cubin or portable PTX).
+#[derive(Debug)]
+pub(crate) enum KernelModuleSource {
+    File { path: PathBuf, is_cubin: bool },
+    EmbeddedPortablePtx { ptx: &'static str },
+}
+
+fn resolve_module_source_with_locator(
+    name: &str,
+    cc: u32,
+    locator: &kernel_paths::KernelArtifactLocator,
+) -> Option<KernelModuleSource> {
+    if let Some((path, is_cubin)) = locator.resolve_module_path(name, cc) {
+        return Some(KernelModuleSource::File { path, is_cubin });
+    }
+
+    crate::embedded_kernel_data::portable_ptx(name)
+        .map(|ptx| KernelModuleSource::EmbeddedPortablePtx { ptx })
+}
+
+fn resolve_module_source(name: &str, cc: u32) -> Option<KernelModuleSource> {
+    let locator = kernel_paths::KernelArtifactLocator::from_env();
+    resolve_module_source_with_locator(name, cc, &locator)
+}
+
+/// Resolve a kernel module from sidecar artifacts or embedded portable PTX.
 ///
 /// Asserts (in debug builds) that `name` is present in the kernel manifest,
 /// catching name/order drift between the manifest and provider load blocks.
-fn load_module_from_file(name: &str, cc: u32) -> Result<(std::path::PathBuf, bool)> {
+fn load_module_source(name: &str, cc: u32) -> Result<KernelModuleSource> {
     debug_assert!(
         crate::kernel_manifest_data::KERNEL_CU_NAMES.contains(&name),
         "kernel module '{name}' is not in KERNEL_CU_NAMES manifest — update kernel_manifest_data.rs"
     );
-    resolve_module_path(name, cc).ok_or_else(|| {
+    resolve_module_source(name, cc).ok_or_else(|| {
         XlogError::Kernel(format!(
-            "{name}: no cubin or portable PTX found (set XLOG_CUBIN_DIR, stage kernels/, or rebuild with nvcc)"
+            "{name}: no cubin, sidecar portable PTX, or embedded portable PTX found"
         ))
     })
 }
@@ -1441,6 +1467,51 @@ mod tests {
                 path
             );
         }
+    }
+
+    #[test]
+    fn test_module_resolution_falls_back_to_embedded_portable_ptx() {
+        use super::kernel_paths::KernelArtifactLocator;
+
+        let locator = KernelArtifactLocator::new(None, None, None);
+        for name in crate::kernel_manifest_data::KERNEL_CU_NAMES {
+            let source = resolve_module_source_with_locator(name, 999, &locator)
+                .unwrap_or_else(|| panic!("{name}: expected embedded portable PTX fallback"));
+
+            match source {
+                KernelModuleSource::EmbeddedPortablePtx { ptx } => {
+                    assert!(
+                        ptx.contains(".entry"),
+                        "{name}: embedded PTX should contain CUDA entry points"
+                    );
+                }
+                KernelModuleSource::File { path, .. } => {
+                    panic!(
+                        "{name}: expected embedded portable PTX fallback, got file {}",
+                        path.display()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_embedded_portable_ptx_manifest_matches_kernel_manifest() {
+        let embedded_names: std::collections::BTreeSet<_> =
+            crate::embedded_kernel_data::EMBEDDED_PORTABLE_PTX
+                .iter()
+                .map(|artifact| artifact.name)
+                .collect();
+        let manifest_names: std::collections::BTreeSet<_> =
+            crate::kernel_manifest_data::KERNEL_CU_NAMES
+                .iter()
+                .copied()
+                .collect();
+
+        assert_eq!(
+            embedded_names, manifest_names,
+            "embedded portable PTX table should cover every runtime kernel module"
+        );
     }
 
     #[test]

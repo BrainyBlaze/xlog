@@ -42,10 +42,16 @@ does not contain `pyxlog/kernels/`.
 For unreleased `main` branch features or local development:
 
 ```bash
+bash scripts/stage_pyxlog_kernels.sh
 cd crates/pyxlog
 pip install maturin
 maturin develop --release
 ```
+
+The staging step makes the editable package layout match the wheel layout by
+copying generated CUDA artifacts into `crates/pyxlog/python/pyxlog/kernels/`.
+Generated `.ptx` and `.cubin` files remain build artifacts and are not tracked
+in git.
 
 ### Build Features
 
