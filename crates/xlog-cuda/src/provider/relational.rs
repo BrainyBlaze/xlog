@@ -6,13 +6,36 @@ use crate::{AsKernelParam, DeviceSlice, LaunchAsync, LaunchConfig};
 use xlog_core::{Result, ScalarType, Schema, XlogError};
 
 use super::{
-    dedup_kernels, filter_kernels, ilp_kernels, join_kernels, pack_kernels, scan_kernels,
-    set_ops_kernels, sort_kernels, HashTableU64, JoinHashTableV2, JoinIndexV2, JoinType,
-    PackedKeyData, RadixSortScratch, DEDUP_MODULE, DEFAULT_JOIN_MAX_OUTPUT, FILTER_MODULE,
-    ILP_MODULE, JOIN_MODULE, PACK_MODULE, SCAN_MODULE, SET_OPS_MODULE, SORT_MODULE,
+    dedup_kernels, ilp_kernels, join_kernels, pack_kernels, scan_kernels, set_ops_kernels,
+    sort_kernels, HashTableU64, JoinHashTableV2, JoinIndexV2, JoinType, PackedKeyData,
+    RadixSortScratch, DEDUP_MODULE, DEFAULT_JOIN_MAX_OUTPUT, ILP_MODULE, JOIN_MODULE, PACK_MODULE,
+    SCAN_MODULE, SET_OPS_MODULE, SORT_MODULE,
 };
 use crate::memory::TrackedCudaSlice;
 use crate::CudaBuffer;
+
+/// Borrows for the inputs of the inner-join count→scan→materialize
+/// pipeline. Lifetime-bounded to the call that builds it; does not
+/// own anything. The build side is split into individual fields so
+/// the helper works for both fresh-build (`hash_join_inner_v2`) and
+/// pre-built index (`hash_join_inner_v2_indexed`) callers.
+struct JoinInnerProbeRefs<'a> {
+    left: &'a CudaBuffer,
+    left_packed: &'a PackedKeyData,
+    build_packed_keys: &'a TrackedCudaSlice<u8>,
+    build_key_bytes: u32,
+    table: &'a JoinHashTableV2,
+}
+
+/// Outputs of the inner-join materialize pipeline: device-resident
+/// row-index pairs, the device-resident logical row count, and the
+/// device-resident overflow flag.
+struct InnerMaterializeOutput {
+    d_output_left: TrackedCudaSlice<u32>,
+    d_output_right: TrackedCudaSlice<u32>,
+    d_logical_count: TrackedCudaSlice<u32>,
+    d_overflow: TrackedCudaSlice<u8>,
+}
 
 // Per-column scalar-type encoding used by the deterministic full-row
 // dedup/diff kernels. Must match the `XLOG_TY_*` defines in
@@ -1180,43 +1203,6 @@ impl super::CudaKernelProvider {
         self.diff_gpu(a, b)
     }
 
-    /// Read a binary-join output-count scalar from device memory.
-    ///
-    /// **Why this is metadata, not data-plane:** the value is a single
-    /// `u32` produced by an atomic-increment counter inside the join
-    /// kernel, used solely to size the next allocation (in the
-    /// count-only pass) or to drive the result buffer's logical row
-    /// count (in the post-materialize pass). It is control-plane state
-    /// in the same sense as a relation's row count — never tuple data.
-    ///
-    /// The strict deterministic-Datalog D2H gate explicitly allows this
-    /// category via `dtoh_scalar_untracked`, which is the auditable,
-    /// single-purpose API for metadata reads.
-    ///
-    /// The v0.5.5 metadata-read hardening replaced eight
-    /// `dtoh_sync_copy_into_tracked` reads of these scalars with this
-    /// helper, so binary-join materialization runs strict-clean.
-    /// **This does not make binary-join materialization fully
-    /// GPU-resident**: the count is still a host scalar, used by host
-    /// code to drive allocation. A future worst-case-bounded
-    /// GPU-resident output buffer can localize the upgrade here once a
-    /// memory-budget-aware upper bound exists.
-    fn read_join_output_count_metadata(&self, d_count: &TrackedCudaSlice<u32>) -> Result<u32> {
-        // Avoid double-prefixing the error string. `XlogError` Display
-        // already prefixes its variants (e.g. "Kernel error: ..."), so
-        // wrapping the whole error would produce
-        // "Kernel error: Failed to read output count: Kernel error: ...".
-        // Extract the inner message for the common Kernel variant; fall
-        // back to Display for everything else.
-        self.dtoh_scalar_untracked::<u32>(d_count, 0)
-            .map_err(|e| match e {
-                XlogError::Kernel(message) => {
-                    XlogError::Kernel(format!("Failed to read output count: {}", message))
-                }
-                other => XlogError::Kernel(format!("Failed to read output count: {}", other)),
-            })
-    }
-
     fn is_full_row_key(key_cols: &[usize], arity: usize) -> bool {
         key_cols.len() == arity
             && key_cols
@@ -2350,101 +2336,6 @@ impl super::CudaKernelProvider {
         )
     }
 
-    /// Gather rows by explicit indices on GPU: output[i] = input[indices[i]].
-    ///
-    /// This is like `apply_permutation_gpu`, but the input can be larger than the output
-    /// (i.e. `output_rows` < input.num_rows()).
-    fn gather_buffer_by_indices(
-        &self,
-        input: &CudaBuffer,
-        indices: &cudarc::driver::CudaSlice<u32>,
-        output_rows: u32,
-    ) -> Result<CudaBuffer> {
-        if output_rows == 0 {
-            return self.create_empty_buffer(input.schema().clone());
-        }
-
-        if input.num_rows() > u32::MAX as u64 {
-            return Err(XlogError::Kernel(format!(
-                "GPU gather supports at most {} input rows, got {}",
-                u32::MAX,
-                input.num_rows()
-            )));
-        }
-
-        let d_output_rows = self.upload_device_row_count(output_rows)?;
-        let device = self.device.inner();
-        let block_size = 256u32;
-        let grid_size = (output_rows + block_size - 1) / block_size;
-        let launch_config = LaunchConfig {
-            grid_dim: (grid_size, 1, 1),
-            block_dim: (block_size, 1, 1),
-            shared_mem_bytes: 0,
-        };
-
-        let gather_fn = device
-            .get_func(SORT_MODULE, sort_kernels::APPLY_PERMUTATION_BYTES)
-            .ok_or_else(|| {
-                XlogError::Kernel("apply_permutation_bytes kernel not found".to_string())
-            })?;
-
-        let mut new_columns = Vec::with_capacity(input.columns.len());
-        for col_idx in 0..input.columns.len() {
-            let src_col = input
-                .column(col_idx)
-                .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
-
-            let elem_size = input
-                .schema
-                .column_type(col_idx)
-                .ok_or_else(|| {
-                    XlogError::Kernel(format!("Schema type for column {} not found", col_idx))
-                })?
-                .size_bytes() as u32;
-
-            let expected_src_bytes = (input.num_rows() as usize) * (elem_size as usize);
-            if src_col.num_bytes() != expected_src_bytes {
-                return Err(XlogError::Kernel(format!(
-                    "Column {} has {} bytes but expected {} (num_rows={}, elem_size={})",
-                    col_idx,
-                    src_col.num_bytes(),
-                    expected_src_bytes,
-                    input.num_rows(),
-                    elem_size
-                )));
-            }
-
-            let dst_bytes = (output_rows as usize) * (elem_size as usize);
-            let dst_col = self.memory.alloc::<u8>(dst_bytes)?;
-
-            // SAFETY: Kernel signature matches: apply_permutation_bytes(input, output, permutation, num_rows_device, row_cap, elem_size)
-            unsafe {
-                gather_fn.clone().launch(
-                    launch_config,
-                    (
-                        src_col,
-                        &dst_col,
-                        indices,
-                        &d_output_rows,
-                        output_rows,
-                        elem_size,
-                    ),
-                )
-            }
-            .map_err(|e| XlogError::Kernel(format!("apply_permutation_bytes failed: {}", e)))?;
-
-            new_columns.push(dst_col.into());
-        }
-
-        self.device.synchronize()?;
-
-        Ok(CudaBuffer::from_columns(
-            new_columns,
-            output_rows as u64,
-            d_output_rows,
-            input.schema.clone(),
-        ))
-    }
     // ============== Hash Join V2 Implementation ==============
 
     /// Multi-column hash join with support for different join types.
@@ -3064,7 +2955,585 @@ impl super::CudaKernelProvider {
         })
     }
 
-    /// Inner join implementation using v2 kernels
+    /// Bundle of references threaded through the count→scan→materialize
+    /// pipeline. Borrowed for the duration of one join call only — does
+    /// not own anything.
+    fn build_inner_probe_index<'a>(
+        left: &'a CudaBuffer,
+        left_packed: &'a PackedKeyData,
+        build_packed_keys: &'a TrackedCudaSlice<u8>,
+        build_key_bytes: u32,
+        table: &'a JoinHashTableV2,
+    ) -> JoinInnerProbeRefs<'a> {
+        JoinInnerProbeRefs {
+            left,
+            left_packed,
+            build_packed_keys,
+            build_key_bytes,
+            table,
+        }
+    }
+
+    /// Compute the host-known upper bound on the inner-join output
+    /// row count, capped to the runtime memory budget and any
+    /// caller-supplied `max_output`.
+    ///
+    /// v0.5.5 first cut: trivial Cartesian upper bound `probe * build`
+    /// clamped to a fraction of the available memory budget. This is
+    /// intentionally simple — exact-size dynamic allocation from a
+    /// device-only count is a separate allocator-architecture effort
+    /// (deferred to v0.6+). The deferred GPU overflow flag handles the
+    /// case where the actual match count exceeds this allocated cap.
+    fn compute_join_output_capacity(
+        &self,
+        probe_cap: u32,
+        build_cap: u32,
+        max_output: Option<usize>,
+    ) -> Result<u32> {
+        // Cartesian upper bound; saturating to avoid u64 overflow on
+        // very large inputs. The budget cap below normally tightens
+        // this further.
+        let cartesian = (probe_cap as u64).saturating_mul(build_cap as u64);
+
+        // Memory-budget cap: each output row is two u32 row-indices
+        // plus the eventual gather to the per-column output. Use 1/8
+        // of the device memory budget as a coarse cap on the index
+        // arrays alone (gathered columns get budgeted separately when
+        // allocated). This is deliberately loose for the first cut;
+        // tightening it requires per-column-width accounting.
+        let bytes_per_row_index_pair: u64 = 2 * std::mem::size_of::<u32>() as u64;
+        let budget_bytes = self.memory.budget().device_bytes;
+        let budget_cap_rows = (budget_bytes / 8).saturating_div(bytes_per_row_index_pair);
+
+        let cap_u64 = cartesian.min(budget_cap_rows);
+        let cap_u64 = match max_output {
+            Some(user) => cap_u64.min(user as u64),
+            None => cap_u64,
+        };
+        let cap_u64 = cap_u64.min(u32::MAX as u64);
+        Ok(cap_u64 as u32)
+    }
+
+    /// Run the count→exclusive-scan→materialize pipeline for an
+    /// inner-join probe. Inputs are device-resident; output is the
+    /// triple `(output_left, output_right, logical_count)` plus the
+    /// device-resident overflow flag. No host scalar D2H is issued in
+    /// this function.
+    fn run_inner_count_scan_materialize(
+        &self,
+        probe: &JoinInnerProbeRefs<'_>,
+        capacity: u32,
+    ) -> Result<InnerMaterializeOutput> {
+        let device = self.device.inner();
+        let probe_cap = u32::try_from(probe.left.num_rows()).map_err(|_| {
+            XlogError::Kernel(format!(
+                "probe capacity {} exceeds u32::MAX",
+                probe.left.num_rows()
+            ))
+        })?;
+
+        // Scan buffers: counts (input) + offsets (scan in place).
+        let mut d_per_probe_count = self.memory.alloc::<u32>(probe_cap as usize)?;
+        let mut d_per_probe_offsets = self.memory.alloc::<u32>(probe_cap as usize)?;
+        device
+            .memset_zeros(&mut d_per_probe_count)
+            .map_err(|e| XlogError::Kernel(format!("zero per_probe_count: {}", e)))?;
+        device
+            .memset_zeros(&mut d_per_probe_offsets)
+            .map_err(|e| XlogError::Kernel(format!("zero per_probe_offsets: {}", e)))?;
+
+        // Output buffers + status.
+        let d_output_left = self.memory.alloc::<u32>(capacity as usize)?;
+        let d_output_right = self.memory.alloc::<u32>(capacity as usize)?;
+        let mut d_logical_count = self.memory.alloc::<u32>(1)?;
+        let mut d_overflow = self.memory.alloc::<u8>(1)?;
+        device
+            .memset_zeros(&mut d_logical_count)
+            .map_err(|e| XlogError::Kernel(format!("zero d_logical_count: {}", e)))?;
+        device
+            .memset_zeros(&mut d_overflow)
+            .map_err(|e| XlogError::Kernel(format!("zero d_overflow: {}", e)))?;
+        self.device.synchronize()?;
+
+        let block_size = 256u32;
+        let probe_grid = (probe_cap + block_size - 1) / block_size;
+        let probe_config = LaunchConfig {
+            grid_dim: (probe_grid.max(1), 1, 1),
+            block_dim: (block_size, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        // 1) per-probe count.
+        let count_func = device
+            .get_func(JOIN_MODULE, join_kernels::HASH_JOIN_PROBE_V2_COUNT_PER_ROW)
+            .ok_or_else(|| {
+                XlogError::Kernel("hash_join_probe_v2_count_per_row kernel not found".to_string())
+            })?;
+        // SAFETY: kernel signature matches the parameters below; device
+        // buffers were allocated with sufficient size.
+        unsafe {
+            let mut params: Vec<*mut c_void> = vec![
+                (&probe.left_packed.hashes).as_kernel_param(),
+                probe.left.num_rows_device().as_kernel_param(),
+                (&probe_cap).as_kernel_param(),
+                (&probe.table.bucket_offsets).as_kernel_param(),
+                (&probe.table.bucket_counts).as_kernel_param(),
+                (&probe.table.bucket_entries).as_kernel_param(),
+                (&probe.table.bucket_entry_hashes).as_kernel_param(),
+                (&probe.table.bucket_mask).as_kernel_param(),
+                (&probe.left_packed.packed_keys).as_kernel_param(),
+                probe.build_packed_keys.as_kernel_param(),
+                (&probe.build_key_bytes).as_kernel_param(),
+                (&d_per_probe_count).as_kernel_param(),
+            ];
+            count_func
+                .clone()
+                .launch(probe_config, &mut params)
+                .map_err(|e| {
+                    XlogError::Kernel(format!("hash_join_probe_v2_count_per_row failed: {}", e))
+                })?;
+        }
+        self.device.synchronize()?;
+
+        // 2) Exclusive scan: copy counts → offsets, scan offsets in place.
+        device
+            .dtod_copy(&d_per_probe_count, &mut d_per_probe_offsets)
+            .map_err(|e| XlogError::Kernel(format!("dtod copy counts->offsets: {}", e)))?;
+        self.exclusive_scan_u32_inplace(&mut d_per_probe_offsets, probe_cap)?;
+        self.device.synchronize()?;
+
+        // 3) Total from scan → device-resident logical row count + overflow flag.
+        let total_func = device
+            .get_func(JOIN_MODULE, join_kernels::HASH_JOIN_TOTAL_FROM_SCAN)
+            .ok_or_else(|| {
+                XlogError::Kernel("hash_join_total_from_scan kernel not found".to_string())
+            })?;
+        // SAFETY: kernel signature matches.
+        unsafe {
+            total_func
+                .clone()
+                .launch(
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (1, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        &d_per_probe_offsets,
+                        &d_per_probe_count,
+                        probe.left.num_rows_device(),
+                        probe_cap,
+                        capacity,
+                        &d_logical_count,
+                        &d_overflow,
+                    ),
+                )
+                .map_err(|e| {
+                    XlogError::Kernel(format!("hash_join_total_from_scan failed: {}", e))
+                })?;
+        }
+        self.device.synchronize()?;
+
+        // 4) Materialize at deterministic offsets.
+        let mat_func = device
+            .get_func(JOIN_MODULE, join_kernels::HASH_JOIN_PROBE_V2_MATERIALIZE)
+            .ok_or_else(|| {
+                XlogError::Kernel("hash_join_probe_v2_materialize kernel not found".to_string())
+            })?;
+        // SAFETY: kernel signature matches the parameters below.
+        unsafe {
+            let mut params: Vec<*mut c_void> = vec![
+                (&probe.left_packed.hashes).as_kernel_param(),
+                probe.left.num_rows_device().as_kernel_param(),
+                (&probe_cap).as_kernel_param(),
+                (&probe.table.bucket_offsets).as_kernel_param(),
+                (&probe.table.bucket_counts).as_kernel_param(),
+                (&probe.table.bucket_entries).as_kernel_param(),
+                (&probe.table.bucket_entry_hashes).as_kernel_param(),
+                (&probe.table.bucket_mask).as_kernel_param(),
+                (&probe.left_packed.packed_keys).as_kernel_param(),
+                probe.build_packed_keys.as_kernel_param(),
+                (&probe.build_key_bytes).as_kernel_param(),
+                (&d_per_probe_offsets).as_kernel_param(),
+                (&capacity).as_kernel_param(),
+                (&d_output_left).as_kernel_param(),
+                (&d_output_right).as_kernel_param(),
+                (&d_overflow).as_kernel_param(),
+            ];
+            mat_func
+                .clone()
+                .launch(probe_config, &mut params)
+                .map_err(|e| {
+                    XlogError::Kernel(format!("hash_join_probe_v2_materialize failed: {}", e))
+                })?;
+        }
+        self.device.synchronize()?;
+
+        Ok(InnerMaterializeOutput {
+            d_output_left,
+            d_output_right,
+            d_logical_count,
+            d_overflow,
+        })
+    }
+
+    /// Gather rows from `input` at positions given by `indices`, using a
+    /// device-resident logical row count (no host D2H). Allocates output
+    /// columns sized to the host-known `capacity`; the result buffer's
+    /// logical row count is a clone of `d_logical_count`.
+    fn gather_buffer_by_indices_device_count(
+        &self,
+        input: &CudaBuffer,
+        indices: &cudarc::driver::CudaSlice<u32>,
+        d_logical_count: &TrackedCudaSlice<u32>,
+        capacity: u32,
+    ) -> Result<CudaBuffer> {
+        if capacity == 0 {
+            return self.create_empty_buffer(input.schema().clone());
+        }
+        if input.num_rows() > u32::MAX as u64 {
+            return Err(XlogError::Kernel(format!(
+                "GPU gather supports at most {} input rows, got {}",
+                u32::MAX,
+                input.num_rows()
+            )));
+        }
+
+        let device = self.device.inner();
+        let block_size = 256u32;
+        let grid_size = (capacity + block_size - 1) / block_size;
+        let launch_config = LaunchConfig {
+            grid_dim: (grid_size.max(1), 1, 1),
+            block_dim: (block_size, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let gather_fn = device
+            .get_func(SORT_MODULE, sort_kernels::APPLY_PERMUTATION_BYTES)
+            .ok_or_else(|| {
+                XlogError::Kernel("apply_permutation_bytes kernel not found".to_string())
+            })?;
+
+        // Clone the logical row count so the returned CudaBuffer owns its
+        // own device-resident d_num_rows. The source `d_logical_count` is
+        // shared across both gather sides of an inner join.
+        let mut d_dst_count = self.memory.alloc::<u32>(1)?;
+        device
+            .dtod_copy(d_logical_count, &mut d_dst_count)
+            .map_err(|e| XlogError::Kernel(format!("dtod copy logical count: {}", e)))?;
+
+        let mut new_columns = Vec::with_capacity(input.columns.len());
+        for col_idx in 0..input.columns.len() {
+            let src_col = input
+                .column(col_idx)
+                .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
+            let elem_size = input
+                .schema
+                .column_type(col_idx)
+                .ok_or_else(|| {
+                    XlogError::Kernel(format!("Schema type for column {} not found", col_idx))
+                })?
+                .size_bytes() as u32;
+            let dst_bytes = (capacity as usize) * (elem_size as usize);
+            let dst_col = self.memory.alloc::<u8>(dst_bytes)?;
+            // SAFETY: kernel signature: apply_permutation_bytes(input, output,
+            //   permutation, num_rows_device, row_cap, elem_size).
+            unsafe {
+                gather_fn
+                    .clone()
+                    .launch(
+                        launch_config,
+                        (
+                            src_col,
+                            &dst_col,
+                            indices,
+                            d_logical_count,
+                            capacity,
+                            elem_size,
+                        ),
+                    )
+                    .map_err(|e| {
+                        XlogError::Kernel(format!("apply_permutation_bytes failed: {}", e))
+                    })?;
+            }
+            new_columns.push(dst_col.into());
+        }
+        self.device.synchronize()?;
+
+        Ok(CudaBuffer::from_columns(
+            new_columns,
+            capacity as u64,
+            d_dst_count,
+            input.schema.clone(),
+        ))
+    }
+
+    /// Run the count→exclusive-scan→materialize pipeline for a
+    /// LEFT-OUTER join probe. Differs from the inner variant only in
+    /// the kernels invoked: the count kernel emits 1 for unmatched
+    /// probe rows and the materialize kernel writes a null sentinel
+    /// (`output_right == 0xFFFFFFFFu`) at those slots.
+    fn run_left_outer_count_scan_materialize(
+        &self,
+        probe: &JoinInnerProbeRefs<'_>,
+        capacity: u32,
+    ) -> Result<InnerMaterializeOutput> {
+        let device = self.device.inner();
+        let probe_cap = u32::try_from(probe.left.num_rows()).map_err(|_| {
+            XlogError::Kernel(format!(
+                "probe capacity {} exceeds u32::MAX",
+                probe.left.num_rows()
+            ))
+        })?;
+
+        let mut d_per_probe_count = self.memory.alloc::<u32>(probe_cap as usize)?;
+        let mut d_per_probe_offsets = self.memory.alloc::<u32>(probe_cap as usize)?;
+        device
+            .memset_zeros(&mut d_per_probe_count)
+            .map_err(|e| XlogError::Kernel(format!("zero per_probe_count: {}", e)))?;
+        device
+            .memset_zeros(&mut d_per_probe_offsets)
+            .map_err(|e| XlogError::Kernel(format!("zero per_probe_offsets: {}", e)))?;
+
+        let d_output_left = self.memory.alloc::<u32>(capacity as usize)?;
+        let d_output_right = self.memory.alloc::<u32>(capacity as usize)?;
+        let mut d_logical_count = self.memory.alloc::<u32>(1)?;
+        let mut d_overflow = self.memory.alloc::<u8>(1)?;
+        device
+            .memset_zeros(&mut d_logical_count)
+            .map_err(|e| XlogError::Kernel(format!("zero d_logical_count: {}", e)))?;
+        device
+            .memset_zeros(&mut d_overflow)
+            .map_err(|e| XlogError::Kernel(format!("zero d_overflow: {}", e)))?;
+        self.device.synchronize()?;
+
+        let block_size = 256u32;
+        let probe_grid = (probe_cap + block_size - 1) / block_size;
+        let probe_config = LaunchConfig {
+            grid_dim: (probe_grid.max(1), 1, 1),
+            block_dim: (block_size, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        // 1) count-per-probe (matches OR 1 for unmatched).
+        let count_func = device
+            .get_func(
+                JOIN_MODULE,
+                join_kernels::HASH_JOIN_LEFT_OUTER_COUNT_PER_ROW,
+            )
+            .ok_or_else(|| {
+                XlogError::Kernel("hash_join_left_outer_count_per_row kernel not found".to_string())
+            })?;
+        // SAFETY: kernel signature matches the parameters below.
+        unsafe {
+            let mut params: Vec<*mut c_void> = vec![
+                (&probe.left_packed.hashes).as_kernel_param(),
+                probe.left.num_rows_device().as_kernel_param(),
+                (&probe_cap).as_kernel_param(),
+                (&probe.table.bucket_offsets).as_kernel_param(),
+                (&probe.table.bucket_counts).as_kernel_param(),
+                (&probe.table.bucket_entries).as_kernel_param(),
+                (&probe.table.bucket_entry_hashes).as_kernel_param(),
+                (&probe.table.bucket_mask).as_kernel_param(),
+                (&probe.left_packed.packed_keys).as_kernel_param(),
+                probe.build_packed_keys.as_kernel_param(),
+                (&probe.build_key_bytes).as_kernel_param(),
+                (&d_per_probe_count).as_kernel_param(),
+            ];
+            count_func
+                .clone()
+                .launch(probe_config, &mut params)
+                .map_err(|e| {
+                    XlogError::Kernel(format!("hash_join_left_outer_count_per_row failed: {}", e))
+                })?;
+        }
+        self.device.synchronize()?;
+
+        // 2) Exclusive scan: copy counts → offsets, then scan in place.
+        device
+            .dtod_copy(&d_per_probe_count, &mut d_per_probe_offsets)
+            .map_err(|e| XlogError::Kernel(format!("dtod copy counts->offsets: {}", e)))?;
+        self.exclusive_scan_u32_inplace(&mut d_per_probe_offsets, probe_cap)?;
+        self.device.synchronize()?;
+
+        // 3) Total → device-resident logical row count + overflow flag.
+        let total_func = device
+            .get_func(JOIN_MODULE, join_kernels::HASH_JOIN_TOTAL_FROM_SCAN)
+            .ok_or_else(|| {
+                XlogError::Kernel("hash_join_total_from_scan kernel not found".to_string())
+            })?;
+        // SAFETY: kernel signature matches.
+        unsafe {
+            total_func
+                .clone()
+                .launch(
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (1, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        &d_per_probe_offsets,
+                        &d_per_probe_count,
+                        probe.left.num_rows_device(),
+                        probe_cap,
+                        capacity,
+                        &d_logical_count,
+                        &d_overflow,
+                    ),
+                )
+                .map_err(|e| {
+                    XlogError::Kernel(format!("hash_join_total_from_scan failed: {}", e))
+                })?;
+        }
+        self.device.synchronize()?;
+
+        // 4) Materialize at deterministic offsets (with null sentinel for unmatched).
+        let mat_func = device
+            .get_func(JOIN_MODULE, join_kernels::HASH_JOIN_LEFT_OUTER_MATERIALIZE)
+            .ok_or_else(|| {
+                XlogError::Kernel("hash_join_left_outer_materialize kernel not found".to_string())
+            })?;
+        // SAFETY: kernel signature matches.
+        unsafe {
+            let mut params: Vec<*mut c_void> = vec![
+                (&probe.left_packed.hashes).as_kernel_param(),
+                probe.left.num_rows_device().as_kernel_param(),
+                (&probe_cap).as_kernel_param(),
+                (&probe.table.bucket_offsets).as_kernel_param(),
+                (&probe.table.bucket_counts).as_kernel_param(),
+                (&probe.table.bucket_entries).as_kernel_param(),
+                (&probe.table.bucket_entry_hashes).as_kernel_param(),
+                (&probe.table.bucket_mask).as_kernel_param(),
+                (&probe.left_packed.packed_keys).as_kernel_param(),
+                probe.build_packed_keys.as_kernel_param(),
+                (&probe.build_key_bytes).as_kernel_param(),
+                (&d_per_probe_offsets).as_kernel_param(),
+                (&capacity).as_kernel_param(),
+                (&d_output_left).as_kernel_param(),
+                (&d_output_right).as_kernel_param(),
+                (&d_overflow).as_kernel_param(),
+            ];
+            mat_func
+                .clone()
+                .launch(probe_config, &mut params)
+                .map_err(|e| {
+                    XlogError::Kernel(format!("hash_join_left_outer_materialize failed: {}", e))
+                })?;
+        }
+        self.device.synchronize()?;
+
+        Ok(InnerMaterializeOutput {
+            d_output_left,
+            d_output_right,
+            d_logical_count,
+            d_overflow,
+        })
+    }
+
+    /// Right-side gather for the deterministic left-outer pipeline.
+    /// Like `gather_buffer_by_indices_device_count`, but routes each
+    /// row through `apply_permutation_bytes_left_outer_null_sentinel`
+    /// so an `indices[i] == 0xFFFFFFFFu` produces a zero-byte output
+    /// row (null right side for an unmatched probe row).
+    fn gather_buffer_by_indices_device_count_with_null_sentinel(
+        &self,
+        input: &CudaBuffer,
+        indices: &cudarc::driver::CudaSlice<u32>,
+        d_logical_count: &TrackedCudaSlice<u32>,
+        capacity: u32,
+    ) -> Result<CudaBuffer> {
+        if capacity == 0 {
+            return self.create_empty_buffer(input.schema().clone());
+        }
+        if input.num_rows() > u32::MAX as u64 {
+            return Err(XlogError::Kernel(format!(
+                "GPU gather supports at most {} input rows, got {}",
+                u32::MAX,
+                input.num_rows()
+            )));
+        }
+
+        let device = self.device.inner();
+        let block_size = 256u32;
+        let grid_size = (capacity + block_size - 1) / block_size;
+        let launch_config = LaunchConfig {
+            grid_dim: (grid_size.max(1), 1, 1),
+            block_dim: (block_size, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let gather_fn = device
+            .get_func(
+                SORT_MODULE,
+                sort_kernels::APPLY_PERMUTATION_BYTES_LEFT_OUTER_NULL_SENTINEL,
+            )
+            .ok_or_else(|| {
+                XlogError::Kernel(
+                    "apply_permutation_bytes_left_outer_null_sentinel kernel not found".to_string(),
+                )
+            })?;
+
+        let mut d_dst_count = self.memory.alloc::<u32>(1)?;
+        device
+            .dtod_copy(d_logical_count, &mut d_dst_count)
+            .map_err(|e| XlogError::Kernel(format!("dtod copy logical count: {}", e)))?;
+
+        let mut new_columns = Vec::with_capacity(input.columns.len());
+        for col_idx in 0..input.columns.len() {
+            let src_col = input
+                .column(col_idx)
+                .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
+            let elem_size = input
+                .schema
+                .column_type(col_idx)
+                .ok_or_else(|| {
+                    XlogError::Kernel(format!("Schema type for column {} not found", col_idx))
+                })?
+                .size_bytes() as u32;
+            let dst_bytes = (capacity as usize) * (elem_size as usize);
+            let dst_col = self.memory.alloc::<u8>(dst_bytes)?;
+            // SAFETY: kernel signature matches apply_permutation_bytes_left_outer_null_sentinel.
+            unsafe {
+                gather_fn
+                    .clone()
+                    .launch(
+                        launch_config,
+                        (
+                            src_col,
+                            &dst_col,
+                            indices,
+                            d_logical_count,
+                            capacity,
+                            elem_size,
+                        ),
+                    )
+                    .map_err(|e| {
+                        XlogError::Kernel(format!(
+                            "apply_permutation_bytes_left_outer_null_sentinel failed: {}",
+                            e
+                        ))
+                    })?;
+            }
+            new_columns.push(dst_col.into());
+        }
+        self.device.synchronize()?;
+
+        Ok(CudaBuffer::from_columns(
+            new_columns,
+            capacity as u64,
+            d_dst_count,
+            input.schema.clone(),
+        ))
+    }
+
+    /// Inner join implementation using v2 kernels.
+    ///
+    /// Deterministic count→exclusive-scan→materialize flow. The output
+    /// row count and offsets stay device-resident; the host issues no
+    /// D2H scalar reads in this function. Output capacity is bounded by
+    /// the host-known input capacities, the user-supplied `max_output`,
+    /// and the runtime memory budget. Overflow (actual matches >
+    /// allocated capacity) sets a device-resident sticky flag that the
+    /// caller may consume via the deferred status API.
     fn hash_join_inner_v2(
         &self,
         left: &CudaBuffer,
@@ -3073,24 +3542,28 @@ impl super::CudaKernelProvider {
         right_keys: &[usize],
         max_output: Option<usize>,
     ) -> Result<CudaBuffer> {
-        let num_left = self.device_row_count(left)?;
-        let num_right = self.device_row_count(right)?;
-        if num_left > u32::MAX as usize || num_right > u32::MAX as usize {
-            return Err(XlogError::Kernel(format!(
-                "Join supports at most {} rows per side (left={}, right={})",
+        // Use host-known capacities from CudaBuffer; the device-resident
+        // logical count is consumed only by the kernels.
+        let probe_cap = u32::try_from(left.num_rows()).map_err(|_| {
+            XlogError::Kernel(format!(
+                "Join supports at most {} rows on the probe side, got {}",
                 u32::MAX,
-                num_left,
-                num_right
-            )));
-        }
+                left.num_rows()
+            ))
+        })?;
+        let build_cap = u32::try_from(right.num_rows()).map_err(|_| {
+            XlogError::Kernel(format!(
+                "Join supports at most {} rows on the build side, got {}",
+                u32::MAX,
+                right.num_rows()
+            ))
+        })?;
 
-        // Handle empty inputs
-        if num_left == 0 || num_right == 0 {
+        if probe_cap == 0 || build_cap == 0 {
             let combined_schema = self.combine_schemas(left.schema(), right.schema());
             return self.create_empty_buffer(combined_schema);
         }
 
-        // Validate key columns
         if left_keys.is_empty() || right_keys.is_empty() {
             return Err(XlogError::Kernel(
                 "Join requires at least one key column".to_string(),
@@ -3101,8 +3574,6 @@ impl super::CudaKernelProvider {
                 "Left and right key columns must have same length".to_string(),
             ));
         }
-
-        // Validate key column types match
         for (&left_idx, &right_idx) in left_keys.iter().zip(right_keys.iter()) {
             let left_type = left.schema().column_type(left_idx);
             let right_type = right.schema().column_type(right_idx);
@@ -3114,167 +3585,70 @@ impl super::CudaKernelProvider {
             }
         }
 
-        let num_left = num_left as u32;
-        let num_right = num_right as u32;
-
-        // Compute composite hashes and pack keys for both sides
         let left_packed = self.compute_hashes_and_pack_keys(left, left_keys)?;
         let right_packed = self.compute_hashes_and_pack_keys(right, right_keys)?;
 
-        // Build hash table from right side (cache-friendly bucket layout).
-        let table = self.build_hash_table_v2(&right_packed.hashes, num_right)?;
+        // Build hash table sized to the build-side capacity.
+        let table = self.build_hash_table_v2(&right_packed.hashes, build_cap)?;
 
-        // Count join output (no truncation) to size buffers precisely.
+        // Count → exclusive scan → materialize.
         //
-        // The probe kernel always increments output_count, even when max_output==0,
-        // so we can run a first pass with max_output=0 to get the full match count.
-        let probe_func = self
-            .device
-            .inner()
-            .get_func(JOIN_MODULE, join_kernels::HASH_JOIN_PROBE_V2)
-            .ok_or_else(|| XlogError::Kernel("hash_join_probe_v2 kernel not found".to_string()))?;
-
-        let block_size = 256u32;
-        let probe_grid = (num_left + block_size - 1) / block_size;
-        let probe_config = LaunchConfig {
-            grid_dim: (probe_grid, 1, 1),
-            block_dim: (block_size, 1, 1),
-            shared_mem_bytes: 0,
-        };
-
-        let mut d_count_only = self.memory.alloc::<u32>(1)?;
-        self.device
-            .inner()
-            .memset_zeros(&mut d_count_only)
-            .map_err(|e| XlogError::Kernel(format!("Failed to zero output count: {}", e)))?;
-        self.device.synchronize()?;
-        let d_dummy_left = self.memory.alloc::<u32>(1)?;
-        let d_dummy_right = self.memory.alloc::<u32>(1)?;
-        let max_output_count_only = 0u32;
-
-        // SAFETY: hash_join_probe_v2(probe_hashes, num_probe,
-        //                            bucket_offsets, bucket_counts, bucket_entries, bucket_entry_hashes, bucket_mask,
-        //                            probe_keys, build_keys, key_bytes,
-        //                            output_left, output_right, output_count, max_output)
-        // Note: Using raw pointer launch because tuple exceeds 12-element limit
-        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
-        unsafe {
-            let mut params: Vec<*mut c_void> = vec![
-                (&left_packed.hashes).as_kernel_param(),
-                (&num_left).as_kernel_param(),
-                (&table.bucket_offsets).as_kernel_param(),
-                (&table.bucket_counts).as_kernel_param(),
-                (&table.bucket_entries).as_kernel_param(),
-                (&table.bucket_entry_hashes).as_kernel_param(),
-                (&table.bucket_mask).as_kernel_param(),
-                (&left_packed.packed_keys).as_kernel_param(),
-                (&right_packed.packed_keys).as_kernel_param(),
-                (&left_packed.key_bytes).as_kernel_param(),
-                (&d_dummy_left).as_kernel_param(),
-                (&d_dummy_right).as_kernel_param(),
-                (&d_count_only).as_kernel_param(),
-                (&max_output_count_only).as_kernel_param(),
-            ];
-            probe_func
-                .clone()
-                .launch(probe_config, &mut params)
-                .map_err(|e| {
-                    XlogError::Kernel(format!("hash_join_probe_v2 (count) failed: {}", e))
-                })?;
-        }
-
-        self.device.synchronize()?;
-
-        // Metadata read: this u32 is the join's count-only result, used to
-        // size the next allocation. See `read_join_output_count_metadata`
-        // for the metadata-vs-data-plane rationale.
-        let full_count = self.read_join_output_count_metadata(&d_count_only)? as u64;
-        let requested = max_output
-            .map(|limit| (limit as u64).min(full_count))
-            .unwrap_or(full_count);
-
-        if requested == 0 {
-            let combined_schema = self.combine_schemas(left.schema(), right.schema());
-            return self.create_empty_buffer(combined_schema);
-        }
-
-        if requested > u32::MAX as u64 {
-            return Err(XlogError::Kernel(format!(
-                "Join produced {} rows which exceeds the u32 index limit",
-                requested
-            )));
-        }
-
-        // Allocate output buffers for row index pairs and rerun probe to materialize results.
-        let max_output = requested as u32;
-        let d_output_left = self.memory.alloc::<u32>(max_output as usize)?;
-        let d_output_right = self.memory.alloc::<u32>(max_output as usize)?;
-        let mut d_output_count = self.memory.alloc::<u32>(1)?;
-        self.device
-            .inner()
-            .memset_zeros(&mut d_output_count)
-            .map_err(|e| XlogError::Kernel(format!("Failed to zero output count: {}", e)))?;
-        self.device.synchronize()?;
-
-        // SAFETY: hash_join_probe_v2(probe_hashes, num_probe,
-        //                            bucket_offsets, bucket_counts, bucket_entries, bucket_entry_hashes, bucket_mask,
-        //                            probe_keys, build_keys, key_bytes,
-        //                            output_left, output_right, output_count, max_output)
-        // Note: Using raw pointer launch because tuple exceeds 12-element limit
-        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
-        unsafe {
-            let mut params: Vec<*mut c_void> = vec![
-                (&left_packed.hashes).as_kernel_param(),
-                (&num_left).as_kernel_param(),
-                (&table.bucket_offsets).as_kernel_param(),
-                (&table.bucket_counts).as_kernel_param(),
-                (&table.bucket_entries).as_kernel_param(),
-                (&table.bucket_entry_hashes).as_kernel_param(),
-                (&table.bucket_mask).as_kernel_param(),
-                (&left_packed.packed_keys).as_kernel_param(),
-                (&right_packed.packed_keys).as_kernel_param(),
-                (&left_packed.key_bytes).as_kernel_param(),
-                (&d_output_left).as_kernel_param(),
-                (&d_output_right).as_kernel_param(),
-                (&d_output_count).as_kernel_param(),
-                (&max_output).as_kernel_param(),
-            ];
-            probe_func
-                .clone()
-                .launch(probe_config, &mut params)
-                .map_err(|e| XlogError::Kernel(format!("hash_join_probe_v2 failed: {}", e)))?;
-        }
-
-        self.device.synchronize()?;
-
-        // Metadata read: post-materialize device-side atomic count.
-        // Used as the result buffer's logical row count after clamping
-        // to the host-allocated upper bound. See
-        // `read_join_output_count_metadata` for the rationale.
-        // Clamp to max_output to prevent buffer overflow (kernel atomically
-        // increments before bounds check, so count can exceed max_output).
-        let result_count =
-            (self.read_join_output_count_metadata(&d_output_count)? as u64).min(max_output as u64);
-
-        if result_count == 0 {
-            let combined_schema = self.combine_schemas(left.schema(), right.schema());
-            return self.create_empty_buffer(combined_schema);
-        }
-
-        let output_rows = result_count as u32;
-
-        // Gather join results fully on-GPU (avoid host index download + host gather).
-        let gathered_left = self.gather_buffer_by_indices(left, &d_output_left, output_rows)?;
-        let gathered_right = self.gather_buffer_by_indices(right, &d_output_right, output_rows)?;
-
+        // The flow keeps the join output count device-resident: a per-probe
+        // count kernel writes one slot per probe row (no atomics), then an
+        // exclusive scan over those counts produces per-probe write
+        // offsets, then a materialize kernel writes deterministically into
+        // pre-allocated output at `offsets[tid] + local_match_index`.
+        let probe_index = Self::build_inner_probe_index(
+            left,
+            &left_packed,
+            &right_packed.packed_keys,
+            left_packed.key_bytes,
+            &table,
+        );
+        let capacity = self.compute_join_output_capacity(probe_cap, build_cap, max_output)?;
         let combined_schema = self.combine_schemas(left.schema(), right.schema());
+
+        if capacity == 0 {
+            return self.create_empty_buffer(combined_schema);
+        }
+
+        let materialize = self.run_inner_count_scan_materialize(&probe_index, capacity)?;
+
+        // Gather the matched rows fully on-GPU using the device-resident
+        // logical row count produced by `hash_join_total_from_scan`. The
+        // result buffer's logical row count is the device-resident count;
+        // host-known capacity is the allocation upper bound.
+        let gathered_left = self.gather_buffer_by_indices_device_count(
+            left,
+            &materialize.d_output_left,
+            &materialize.d_logical_count,
+            capacity,
+        )?;
+        let gathered_right = self.gather_buffer_by_indices_device_count(
+            right,
+            &materialize.d_output_right,
+            &materialize.d_logical_count,
+            capacity,
+        )?;
+
         let mut result_columns = Vec::with_capacity(combined_schema.arity());
         result_columns.extend(gathered_left.columns.into_iter());
         result_columns.extend(gathered_right.columns.into_iter());
 
-        self.buffer_from_columns(result_columns, result_count, combined_schema)
+        let mut result = CudaBuffer::from_columns(
+            result_columns,
+            capacity as u64,
+            materialize.d_logical_count,
+            combined_schema,
+        );
+        result.set_overflow_flag(materialize.d_overflow);
+        Ok(result)
     }
 
+    /// Indexed inner-join via the same deterministic
+    /// count→exclusive-scan→materialize pipeline used by
+    /// `hash_join_inner_v2`. The build-side hash table comes from a
+    /// pre-built `JoinIndexV2` instead of being constructed here.
     fn hash_join_inner_v2_indexed(
         &self,
         left: &CudaBuffer,
@@ -3283,26 +3657,25 @@ impl super::CudaKernelProvider {
         index: &JoinIndexV2,
         max_output: Option<usize>,
     ) -> Result<CudaBuffer> {
-        let num_left = self.device_row_count(left)?;
-        let num_right = self.device_row_count(right)?;
-        if num_left > u32::MAX as usize || num_right > u32::MAX as usize {
-            return Err(XlogError::Kernel(format!(
-                "Join supports at most {} rows per side (left={}, right={})",
+        let probe_cap = u32::try_from(left.num_rows()).map_err(|_| {
+            XlogError::Kernel(format!(
+                "Indexed inner join supports at most {} probe rows, got {}",
                 u32::MAX,
-                num_left,
-                num_right
-            )));
-        }
-
-        // Handle empty inputs.
-        if num_left == 0 || num_right == 0 {
-            let combined_schema = self.combine_schemas(left.schema(), right.schema());
+                left.num_rows()
+            ))
+        })?;
+        let build_cap = u32::try_from(right.num_rows()).map_err(|_| {
+            XlogError::Kernel(format!(
+                "Indexed inner join supports at most {} build rows, got {}",
+                u32::MAX,
+                right.num_rows()
+            ))
+        })?;
+        let combined_schema = self.combine_schemas(left.schema(), right.schema());
+        if probe_cap == 0 || build_cap == 0 {
             return self.create_empty_buffer(combined_schema);
         }
 
-        let num_left = num_left as u32;
-
-        // Compute composite hashes and pack probe keys.
         let left_packed = self.compute_hashes_and_pack_keys(left, left_keys)?;
         if left_packed.key_bytes != index.key_bytes {
             return Err(XlogError::Kernel(
@@ -3310,139 +3683,45 @@ impl super::CudaKernelProvider {
             ));
         }
 
-        let table = &index.table;
-
-        // Count join output (no truncation) to size buffers precisely.
-        let probe_func = self
-            .device
-            .inner()
-            .get_func(JOIN_MODULE, join_kernels::HASH_JOIN_PROBE_V2)
-            .ok_or_else(|| XlogError::Kernel("hash_join_probe_v2 kernel not found".to_string()))?;
-
-        let block_size = 256u32;
-        let probe_grid = (num_left + block_size - 1) / block_size;
-        let probe_config = LaunchConfig {
-            grid_dim: (probe_grid, 1, 1),
-            block_dim: (block_size, 1, 1),
-            shared_mem_bytes: 0,
-        };
-
-        let mut d_count_only = self.memory.alloc::<u32>(1)?;
-        self.device
-            .inner()
-            .memset_zeros(&mut d_count_only)
-            .map_err(|e| XlogError::Kernel(format!("Failed to zero output count: {}", e)))?;
-        self.device.synchronize()?;
-        let d_dummy_left = self.memory.alloc::<u32>(1)?;
-        let d_dummy_right = self.memory.alloc::<u32>(1)?;
-        let max_output_count_only = 0u32;
-
-        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
-        unsafe {
-            let mut params: Vec<*mut c_void> = vec![
-                (&left_packed.hashes).as_kernel_param(),
-                (&num_left).as_kernel_param(),
-                (&table.bucket_offsets).as_kernel_param(),
-                (&table.bucket_counts).as_kernel_param(),
-                (&table.bucket_entries).as_kernel_param(),
-                (&table.bucket_entry_hashes).as_kernel_param(),
-                (&table.bucket_mask).as_kernel_param(),
-                (&left_packed.packed_keys).as_kernel_param(),
-                (&index.packed_keys).as_kernel_param(),
-                (&index.key_bytes).as_kernel_param(),
-                (&d_dummy_left).as_kernel_param(),
-                (&d_dummy_right).as_kernel_param(),
-                (&d_count_only).as_kernel_param(),
-                (&max_output_count_only).as_kernel_param(),
-            ];
-            probe_func
-                .clone()
-                .launch(probe_config, &mut params)
-                .map_err(|e| {
-                    XlogError::Kernel(format!("hash_join_probe_v2 (count) failed: {}", e))
-                })?;
-        }
-
-        self.device.synchronize()?;
-
-        // Metadata read: this u32 is the join's count-only result, used to
-        // size the next allocation. See `read_join_output_count_metadata`
-        // for the metadata-vs-data-plane rationale.
-        let full_count = self.read_join_output_count_metadata(&d_count_only)? as u64;
-        let requested = max_output
-            .map(|limit| (limit as u64).min(full_count))
-            .unwrap_or(full_count);
-
-        if requested == 0 {
-            let combined_schema = self.combine_schemas(left.schema(), right.schema());
+        let probe_index = Self::build_inner_probe_index(
+            left,
+            &left_packed,
+            &index.packed_keys,
+            index.key_bytes,
+            &index.table,
+        );
+        let capacity = self.compute_join_output_capacity(probe_cap, build_cap, max_output)?;
+        if capacity == 0 {
             return self.create_empty_buffer(combined_schema);
         }
 
-        if requested > u32::MAX as u64 {
-            return Err(XlogError::Kernel(format!(
-                "Join produced {} rows which exceeds the u32 index limit",
-                requested
-            )));
-        }
+        let materialize = self.run_inner_count_scan_materialize(&probe_index, capacity)?;
 
-        // Allocate output buffers for row index pairs and rerun probe to materialize results.
-        let max_output = requested as u32;
-        let d_output_left = self.memory.alloc::<u32>(max_output as usize)?;
-        let d_output_right = self.memory.alloc::<u32>(max_output as usize)?;
-        let mut d_output_count = self.memory.alloc::<u32>(1)?;
-        self.device
-            .inner()
-            .memset_zeros(&mut d_output_count)
-            .map_err(|e| XlogError::Kernel(format!("Failed to zero output count: {}", e)))?;
-        self.device.synchronize()?;
+        let gathered_left = self.gather_buffer_by_indices_device_count(
+            left,
+            &materialize.d_output_left,
+            &materialize.d_logical_count,
+            capacity,
+        )?;
+        let gathered_right = self.gather_buffer_by_indices_device_count(
+            right,
+            &materialize.d_output_right,
+            &materialize.d_logical_count,
+            capacity,
+        )?;
 
-        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
-        unsafe {
-            let mut params: Vec<*mut c_void> = vec![
-                (&left_packed.hashes).as_kernel_param(),
-                (&num_left).as_kernel_param(),
-                (&table.bucket_offsets).as_kernel_param(),
-                (&table.bucket_counts).as_kernel_param(),
-                (&table.bucket_entries).as_kernel_param(),
-                (&table.bucket_entry_hashes).as_kernel_param(),
-                (&table.bucket_mask).as_kernel_param(),
-                (&left_packed.packed_keys).as_kernel_param(),
-                (&index.packed_keys).as_kernel_param(),
-                (&index.key_bytes).as_kernel_param(),
-                (&d_output_left).as_kernel_param(),
-                (&d_output_right).as_kernel_param(),
-                (&d_output_count).as_kernel_param(),
-                (&max_output).as_kernel_param(),
-            ];
-            probe_func
-                .clone()
-                .launch(probe_config, &mut params)
-                .map_err(|e| XlogError::Kernel(format!("hash_join_probe_v2 failed: {}", e)))?;
-        }
-
-        self.device.synchronize()?;
-
-        // Metadata read: post-materialize device-side atomic count, used
-        // as the result buffer's logical row count after clamping.
-        let result_count =
-            (self.read_join_output_count_metadata(&d_output_count)? as u64).min(max_output as u64);
-
-        if result_count == 0 {
-            let combined_schema = self.combine_schemas(left.schema(), right.schema());
-            return self.create_empty_buffer(combined_schema);
-        }
-
-        let output_rows = result_count as u32;
-
-        let gathered_left = self.gather_buffer_by_indices(left, &d_output_left, output_rows)?;
-        let gathered_right = self.gather_buffer_by_indices(right, &d_output_right, output_rows)?;
-
-        let combined_schema = self.combine_schemas(left.schema(), right.schema());
         let mut result_columns = Vec::with_capacity(combined_schema.arity());
         result_columns.extend(gathered_left.columns.into_iter());
         result_columns.extend(gathered_right.columns.into_iter());
 
-        self.buffer_from_columns(result_columns, result_count, combined_schema)
+        let mut result = CudaBuffer::from_columns(
+            result_columns,
+            capacity as u64,
+            materialize.d_logical_count,
+            combined_schema,
+        );
+        result.set_overflow_flag(materialize.d_overflow);
+        Ok(result)
     }
 
     /// Semi-join implementation: return left rows that have matches in right
@@ -3967,6 +4246,12 @@ impl super::CudaKernelProvider {
         self.filter_by_device_mask(left, &d_no_match)
     }
 
+    /// Indexed left-outer join via the same deterministic
+    /// count→exclusive-scan→materialize pipeline used by
+    /// `hash_join_left_outer_impl`. The build-side hash table comes
+    /// from a pre-built `JoinIndexV2` instead of being constructed
+    /// here; otherwise the flow is identical, including the null
+    /// sentinel for unmatched probe rows.
     fn hash_join_left_outer_indexed(
         &self,
         left: &CudaBuffer,
@@ -3975,28 +4260,28 @@ impl super::CudaKernelProvider {
         index: &JoinIndexV2,
         max_output: Option<usize>,
     ) -> Result<CudaBuffer> {
-        let num_left = self.device_row_count(left)?;
-        let num_right = self.device_row_count(right)?;
-        if num_left > u32::MAX as usize || num_right > u32::MAX as usize {
-            return Err(XlogError::Kernel(format!(
-                "Join supports at most {} rows per side (left={}, right={})",
+        let probe_cap = u32::try_from(left.num_rows()).map_err(|_| {
+            XlogError::Kernel(format!(
+                "Indexed left-outer join supports at most {} probe rows, got {}",
                 u32::MAX,
-                num_left,
-                num_right
-            )));
-        }
+                left.num_rows()
+            ))
+        })?;
+        let build_cap = u32::try_from(right.num_rows()).map_err(|_| {
+            XlogError::Kernel(format!(
+                "Indexed left-outer join supports at most {} build rows, got {}",
+                u32::MAX,
+                right.num_rows()
+            ))
+        })?;
+        let combined_schema = self.combine_schemas(left.schema(), right.schema());
 
-        // Handle empty left - return empty with combined schema.
-        if num_left == 0 {
-            let combined_schema = self.combine_schemas(left.schema(), right.schema());
+        if probe_cap == 0 {
             return self.create_empty_buffer(combined_schema);
         }
-        // Handle empty right - return left rows with null right columns.
-        if num_right == 0 {
+        if build_cap == 0 {
             return self.left_outer_with_nulls(left, right);
         }
-
-        let num_left = num_left as u32;
 
         let left_packed = self.compute_hashes_and_pack_keys(left, left_keys)?;
         if left_packed.key_bytes != index.key_bytes {
@@ -4005,314 +4290,48 @@ impl super::CudaKernelProvider {
             ));
         }
 
-        let table = &index.table;
-
-        // Allocate mask for semi-join to check which left rows have matches.
-        let d_has_match = self.memory.alloc::<u8>(num_left as usize)?;
-
-        let semi_func = self
-            .device
-            .inner()
-            .get_func(JOIN_MODULE, join_kernels::HASH_JOIN_SEMI)
-            .ok_or_else(|| XlogError::Kernel("hash_join_semi kernel not found".to_string()))?;
-
-        let block_size = 256u32;
-        let grid_size = (num_left + block_size - 1) / block_size;
-        let config = LaunchConfig {
-            grid_dim: (grid_size, 1, 1),
-            block_dim: (block_size, 1, 1),
-            shared_mem_bytes: 0,
-        };
-
-        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
-        unsafe {
-            semi_func
-                .clone()
-                .launch(
-                    config,
-                    (
-                        &left_packed.hashes,
-                        num_left,
-                        &table.bucket_offsets,
-                        &table.bucket_counts,
-                        &table.bucket_entries,
-                        &table.bucket_entry_hashes,
-                        table.bucket_mask,
-                        &left_packed.packed_keys,
-                        &index.packed_keys,
-                        index.key_bytes,
-                        &d_has_match,
-                    ),
-                )
-                .map_err(|e| XlogError::Kernel(format!("hash_join_semi failed: {}", e)))?;
-        }
-
-        let probe_func = self
-            .device
-            .inner()
-            .get_func(JOIN_MODULE, join_kernels::HASH_JOIN_PROBE_V2)
-            .ok_or_else(|| XlogError::Kernel("hash_join_probe_v2 kernel not found".to_string()))?;
-
-        // Count inner-join matches to size buffers precisely.
-        let mut d_count_only = self.memory.alloc::<u32>(1)?;
-        self.device
-            .inner()
-            .memset_zeros(&mut d_count_only)
-            .map_err(|e| XlogError::Kernel(format!("Failed to zero output count: {}", e)))?;
-        let d_dummy_left = self.memory.alloc::<u32>(1)?;
-        let d_dummy_right = self.memory.alloc::<u32>(1)?;
-        let max_output_count_only = 0u32;
-
-        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
-        unsafe {
-            let mut params: Vec<*mut c_void> = vec![
-                (&left_packed.hashes).as_kernel_param(),
-                (&num_left).as_kernel_param(),
-                (&table.bucket_offsets).as_kernel_param(),
-                (&table.bucket_counts).as_kernel_param(),
-                (&table.bucket_entries).as_kernel_param(),
-                (&table.bucket_entry_hashes).as_kernel_param(),
-                (&table.bucket_mask).as_kernel_param(),
-                (&left_packed.packed_keys).as_kernel_param(),
-                (&index.packed_keys).as_kernel_param(),
-                (&index.key_bytes).as_kernel_param(),
-                (&d_dummy_left).as_kernel_param(),
-                (&d_dummy_right).as_kernel_param(),
-                (&d_count_only).as_kernel_param(),
-                (&max_output_count_only).as_kernel_param(),
-            ];
-            probe_func
-                .clone()
-                .launch(config, &mut params)
-                .map_err(|e| {
-                    XlogError::Kernel(format!("hash_join_probe_v2 (count) failed: {}", e))
-                })?;
-        }
-
-        self.device.synchronize()?;
-
-        // Metadata read: this u32 is the join's count-only result, used
-        // to size the next allocation.
-        let full_inner = self.read_join_output_count_metadata(&d_count_only)? as u64;
-        let requested_inner = max_output
-            .map(|limit| (limit as u64).min(full_inner))
-            .unwrap_or(full_inner);
-
-        if requested_inner > u32::MAX as u64 {
-            return Err(XlogError::Kernel(format!(
-                "Join produced {} rows which exceeds the u32 index limit",
-                requested_inner
-            )));
-        }
-
-        let max_output = requested_inner as u32;
-        let alloc_len = (requested_inner.max(1)) as usize;
-        let d_output_left = self.memory.alloc::<u32>(alloc_len)?;
-        let d_output_right = self.memory.alloc::<u32>(alloc_len)?;
-        let mut d_output_count = self.memory.alloc::<u32>(1)?;
-        self.device
-            .inner()
-            .memset_zeros(&mut d_output_count)
-            .map_err(|e| XlogError::Kernel(format!("Failed to zero output count: {}", e)))?;
-
-        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
-        unsafe {
-            let mut params: Vec<*mut c_void> = vec![
-                (&left_packed.hashes).as_kernel_param(),
-                (&num_left).as_kernel_param(),
-                (&table.bucket_offsets).as_kernel_param(),
-                (&table.bucket_counts).as_kernel_param(),
-                (&table.bucket_entries).as_kernel_param(),
-                (&table.bucket_entry_hashes).as_kernel_param(),
-                (&table.bucket_mask).as_kernel_param(),
-                (&left_packed.packed_keys).as_kernel_param(),
-                (&index.packed_keys).as_kernel_param(),
-                (&index.key_bytes).as_kernel_param(),
-                (&d_output_left).as_kernel_param(),
-                (&d_output_right).as_kernel_param(),
-                (&d_output_count).as_kernel_param(),
-                (&max_output).as_kernel_param(),
-            ];
-            probe_func
-                .clone()
-                .launch(config, &mut params)
-                .map_err(|e| XlogError::Kernel(format!("hash_join_probe_v2 failed: {}", e)))?;
-        }
-
-        self.device.synchronize()?;
-
-        let device = self.device.inner();
-
-        // Metadata read: post-materialize device-side atomic count, used
-        // as the inner-join result's logical row count after clamping.
-        // Clamp to max_output to prevent buffer overflow (kernel atomically
-        // increments before bounds check, so count can exceed max_output).
-        let inner_count = self
-            .read_join_output_count_metadata(&d_output_count)?
-            .min(max_output) as u32;
-
-        let mask_not_fn = device
-            .get_func(FILTER_MODULE, filter_kernels::MASK_NOT)
-            .ok_or_else(|| XlogError::Kernel("mask_not kernel not found".to_string()))?;
-
-        let mut d_no_match = self.memory.alloc::<u8>(num_left as usize)?;
-
-        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
-        unsafe {
-            mask_not_fn
-                .clone()
-                .launch(config, (&d_has_match, &mut d_no_match, num_left))
-        }
-        .map_err(|e| XlogError::Kernel(format!("mask_not failed: {}", e)))?;
-
-        let unmatched_left = self.filter_by_device_mask(left, &d_no_match)?;
-
-        let unmatched_rows = self.device_row_count(&unmatched_left)? as u64;
-        let total_rows = (inner_count as u64) + unmatched_rows;
-
-        let combined_schema = self.combine_schemas(left.schema(), right.schema());
-
-        if total_rows == 0 {
+        let probe_index = Self::build_inner_probe_index(
+            left,
+            &left_packed,
+            &index.packed_keys,
+            index.key_bytes,
+            &index.table,
+        );
+        let capacity = self.compute_join_output_capacity(probe_cap, build_cap, max_output)?;
+        if capacity == 0 {
             return self.create_empty_buffer(combined_schema);
         }
 
-        let inner_left = self.gather_buffer_by_indices(left, &d_output_left, inner_count)?;
-        let inner_right = self.gather_buffer_by_indices(right, &d_output_right, inner_count)?;
+        let materialize = self.run_left_outer_count_scan_materialize(&probe_index, capacity)?;
 
-        if unmatched_rows == 0 {
-            let mut result_columns = Vec::with_capacity(combined_schema.arity());
-            result_columns.extend(inner_left.columns.into_iter());
-            result_columns.extend(inner_right.columns.into_iter());
-            return self.buffer_from_columns(result_columns, inner_count as u64, combined_schema);
-        }
-
-        if inner_count == 0 {
-            let mut result_columns = Vec::with_capacity(combined_schema.arity());
-            result_columns.extend(unmatched_left.columns.into_iter());
-
-            for col_idx in 0..right.arity() {
-                let elem_size = right
-                    .schema()
-                    .column_type(col_idx)
-                    .map(|t| t.size_bytes())
-                    .unwrap_or(4);
-
-                let bytes = (unmatched_rows as usize)
-                    .checked_mul(elem_size)
-                    .ok_or_else(|| {
-                        XlogError::Kernel(
-                            "Left outer join: right column byte size overflow".to_string(),
-                        )
-                    })?;
-
-                let mut dst_col = self.memory.alloc::<u8>(bytes)?;
-                if bytes > 0 {
-                    device.memset_zeros(&mut dst_col).map_err(|e| {
-                        XlogError::Kernel(format!("Failed to zero null right column: {}", e))
-                    })?;
-                }
-                result_columns.push(dst_col.into());
-            }
-
-            self.device.synchronize()?;
-            return self.buffer_from_columns(result_columns, unmatched_rows, combined_schema);
-        }
+        let gathered_left = self.gather_buffer_by_indices_device_count(
+            left,
+            &materialize.d_output_left,
+            &materialize.d_logical_count,
+            capacity,
+        )?;
+        let gathered_right = self.gather_buffer_by_indices_device_count_with_null_sentinel(
+            right,
+            &materialize.d_output_right,
+            &materialize.d_logical_count,
+            capacity,
+        )?;
 
         let mut result_columns = Vec::with_capacity(combined_schema.arity());
-        let inner_rows = inner_count as u64;
+        result_columns.extend(gathered_left.columns.into_iter());
+        result_columns.extend(gathered_right.columns.into_iter());
 
-        for (col_idx, (inner_col, unmatched_col)) in inner_left
-            .columns
-            .into_iter()
-            .zip(unmatched_left.columns.into_iter())
-            .enumerate()
-        {
-            let elem_size = left
-                .schema()
-                .column_type(col_idx)
-                .map(|t| t.size_bytes())
-                .unwrap_or(4);
-
-            let inner_bytes = (inner_rows as usize)
-                .checked_mul(elem_size)
-                .ok_or_else(|| {
-                    XlogError::Kernel("Left outer join: inner_bytes overflow".to_string())
-                })?;
-            let unmatched_bytes = (unmatched_rows as usize)
-                .checked_mul(elem_size)
-                .ok_or_else(|| {
-                    XlogError::Kernel("Left outer join: unmatched_bytes overflow".to_string())
-                })?;
-            let total_bytes = inner_bytes.checked_add(unmatched_bytes).ok_or_else(|| {
-                XlogError::Kernel("Left outer join: total_bytes overflow".to_string())
-            })?;
-
-            let mut out_col = self.memory.alloc::<u8>(total_bytes)?;
-
-            if inner_bytes > 0 {
-                let mut out_view = out_col.slice_mut(0..inner_bytes);
-                device.dtod_copy(&inner_col, &mut out_view).map_err(|e| {
-                    XlogError::Kernel(format!("Failed to copy inner left column: {}", e))
-                })?;
-            }
-            if unmatched_bytes > 0 {
-                let mut out_view = out_col.slice_mut(inner_bytes..total_bytes);
-                let unmatched_view = self.column_bytes_view(&unmatched_col, unmatched_bytes)?;
-                device
-                    .dtod_copy(&unmatched_view, &mut out_view)
-                    .map_err(|e| {
-                        XlogError::Kernel(format!("Failed to copy unmatched left column: {}", e))
-                    })?;
-            }
-
-            result_columns.push(out_col.into());
-        }
-
-        for (col_idx, inner_col) in inner_right.columns.into_iter().enumerate() {
-            let elem_size = right
-                .schema()
-                .column_type(col_idx)
-                .map(|t| t.size_bytes())
-                .unwrap_or(4);
-
-            let inner_bytes = (inner_rows as usize)
-                .checked_mul(elem_size)
-                .ok_or_else(|| {
-                    XlogError::Kernel("Left outer join: inner_bytes overflow".to_string())
-                })?;
-            let unmatched_bytes = (unmatched_rows as usize)
-                .checked_mul(elem_size)
-                .ok_or_else(|| {
-                    XlogError::Kernel("Left outer join: unmatched_bytes overflow".to_string())
-                })?;
-            let total_bytes = inner_bytes.checked_add(unmatched_bytes).ok_or_else(|| {
-                XlogError::Kernel("Left outer join: total_bytes overflow".to_string())
-            })?;
-
-            let mut out_col = self.memory.alloc::<u8>(total_bytes)?;
-
-            if total_bytes > 0 {
-                device.memset_zeros(&mut out_col).map_err(|e| {
-                    XlogError::Kernel(format!("Failed to zero right outer column: {}", e))
-                })?;
-            }
-
-            if inner_bytes > 0 {
-                let mut out_view = out_col.slice_mut(0..inner_bytes);
-                device.dtod_copy(&inner_col, &mut out_view).map_err(|e| {
-                    XlogError::Kernel(format!("Failed to copy inner right column: {}", e))
-                })?;
-            }
-
-            result_columns.push(out_col.into());
-        }
-
-        self.device.synchronize()?;
-
-        self.buffer_from_columns(result_columns, total_rows, combined_schema)
+        let mut result = CudaBuffer::from_columns(
+            result_columns,
+            capacity as u64,
+            materialize.d_logical_count,
+            combined_schema,
+        );
+        result.set_overflow_flag(materialize.d_overflow);
+        Ok(result)
     }
 
-    /// Left outer join implementation: return all left rows with matched right columns or nulls
+    /// Left-outer join via the deterministic
     fn hash_join_left_outer_impl(
         &self,
         left: &CudaBuffer,
@@ -4321,29 +4340,29 @@ impl super::CudaKernelProvider {
         right_keys: &[usize],
         max_output: Option<usize>,
     ) -> Result<CudaBuffer> {
-        let num_left = self.device_row_count(left)?;
-        let num_right = self.device_row_count(right)?;
-        if num_left > u32::MAX as usize || num_right > u32::MAX as usize {
-            return Err(XlogError::Kernel(format!(
-                "Join supports at most {} rows per side (left={}, right={})",
+        let probe_cap = u32::try_from(left.num_rows()).map_err(|_| {
+            XlogError::Kernel(format!(
+                "Left-outer join supports at most {} probe rows, got {}",
                 u32::MAX,
-                num_left,
-                num_right
-            )));
-        }
+                left.num_rows()
+            ))
+        })?;
+        let build_cap = u32::try_from(right.num_rows()).map_err(|_| {
+            XlogError::Kernel(format!(
+                "Left-outer join supports at most {} build rows, got {}",
+                u32::MAX,
+                right.num_rows()
+            ))
+        })?;
+        let combined_schema = self.combine_schemas(left.schema(), right.schema());
 
-        // Handle empty left - return empty with combined schema
-        if num_left == 0 {
-            let combined_schema = self.combine_schemas(left.schema(), right.schema());
+        if probe_cap == 0 {
             return self.create_empty_buffer(combined_schema);
         }
-
-        // Handle empty right - return left rows with null right columns
-        if num_right == 0 {
+        if build_cap == 0 {
             return self.left_outer_with_nulls(left, right);
         }
 
-        // Validate key columns
         if left_keys.is_empty() || right_keys.is_empty() {
             return Err(XlogError::Kernel(
                 "Join requires at least one key column".to_string(),
@@ -4354,8 +4373,6 @@ impl super::CudaKernelProvider {
                 "Left and right key columns must have same length".to_string(),
             ));
         }
-
-        // Validate key column types match
         for (&left_idx, &right_idx) in left_keys.iter().zip(right_keys.iter()) {
             let left_type = left.schema().column_type(left_idx);
             let right_type = right.schema().column_type(right_idx);
@@ -4367,333 +4384,49 @@ impl super::CudaKernelProvider {
             }
         }
 
-        let num_left = num_left as u32;
-        let num_right = num_right as u32;
-
-        // Compute composite hashes and pack keys for both sides
         let left_packed = self.compute_hashes_and_pack_keys(left, left_keys)?;
         let right_packed = self.compute_hashes_and_pack_keys(right, right_keys)?;
+        let table = self.build_hash_table_v2(&right_packed.hashes, build_cap)?;
 
-        // Build hash table from right side (cache-friendly bucket layout).
-        let table = self.build_hash_table_v2(&right_packed.hashes, num_right)?;
-
-        // Allocate mask for semi-join to check which left rows have matches
-        let d_has_match = self.memory.alloc::<u8>(num_left as usize)?;
-
-        // Launch semi-join kernel to get match information
-        let semi_func = self
-            .device
-            .inner()
-            .get_func(JOIN_MODULE, join_kernels::HASH_JOIN_SEMI)
-            .ok_or_else(|| XlogError::Kernel("hash_join_semi kernel not found".to_string()))?;
-
-        let block_size = 256u32;
-        let grid_size = (num_left + block_size - 1) / block_size;
-        let config = LaunchConfig {
-            grid_dim: (grid_size, 1, 1),
-            block_dim: (block_size, 1, 1),
-            shared_mem_bytes: 0,
-        };
-
-        // SAFETY: hash_join_semi(probe_hashes, num_probe,
-        //                        bucket_offsets, bucket_counts, bucket_entries, bucket_entry_hashes, bucket_mask,
-        //                        probe_keys, build_keys, key_bytes, has_match)
-        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
-        unsafe {
-            semi_func
-                .clone()
-                .launch(
-                    config,
-                    (
-                        &left_packed.hashes,
-                        num_left,
-                        &table.bucket_offsets,
-                        &table.bucket_counts,
-                        &table.bucket_entries,
-                        &table.bucket_entry_hashes,
-                        table.bucket_mask,
-                        &left_packed.packed_keys,
-                        &right_packed.packed_keys,
-                        left_packed.key_bytes,
-                        &d_has_match,
-                    ),
-                )
-                .map_err(|e| XlogError::Kernel(format!("hash_join_semi failed: {}", e)))?;
-        }
-
-        let probe_func = self
-            .device
-            .inner()
-            .get_func(JOIN_MODULE, join_kernels::HASH_JOIN_PROBE_V2)
-            .ok_or_else(|| XlogError::Kernel("hash_join_probe_v2 kernel not found".to_string()))?;
-
-        // Count inner-join matches to size buffers precisely.
-        let mut d_count_only = self.memory.alloc::<u32>(1)?;
-        self.device
-            .inner()
-            .memset_zeros(&mut d_count_only)
-            .map_err(|e| XlogError::Kernel(format!("Failed to zero output count: {}", e)))?;
-        let d_dummy_left = self.memory.alloc::<u32>(1)?;
-        let d_dummy_right = self.memory.alloc::<u32>(1)?;
-        let max_output_count_only = 0u32;
-
-        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
-        unsafe {
-            let mut params: Vec<*mut c_void> = vec![
-                (&left_packed.hashes).as_kernel_param(),
-                (&num_left).as_kernel_param(),
-                (&table.bucket_offsets).as_kernel_param(),
-                (&table.bucket_counts).as_kernel_param(),
-                (&table.bucket_entries).as_kernel_param(),
-                (&table.bucket_entry_hashes).as_kernel_param(),
-                (&table.bucket_mask).as_kernel_param(),
-                (&left_packed.packed_keys).as_kernel_param(),
-                (&right_packed.packed_keys).as_kernel_param(),
-                (&left_packed.key_bytes).as_kernel_param(),
-                (&d_dummy_left).as_kernel_param(),
-                (&d_dummy_right).as_kernel_param(),
-                (&d_count_only).as_kernel_param(),
-                (&max_output_count_only).as_kernel_param(),
-            ];
-            probe_func
-                .clone()
-                .launch(config, &mut params)
-                .map_err(|e| {
-                    XlogError::Kernel(format!("hash_join_probe_v2 (count) failed: {}", e))
-                })?;
-        }
-
-        self.device.synchronize()?;
-
-        // Metadata read: this u32 is the join's count-only result, used
-        // to size the next allocation.
-        let full_inner = self.read_join_output_count_metadata(&d_count_only)? as u64;
-        let requested_inner = max_output
-            .map(|limit| (limit as u64).min(full_inner))
-            .unwrap_or(full_inner);
-
-        if requested_inner > u32::MAX as u64 {
-            return Err(XlogError::Kernel(format!(
-                "Join produced {} rows which exceeds the u32 index limit",
-                requested_inner
-            )));
-        }
-
-        let max_output = requested_inner as u32;
-        let alloc_len = (requested_inner.max(1)) as usize;
-        let d_output_left = self.memory.alloc::<u32>(alloc_len)?;
-        let d_output_right = self.memory.alloc::<u32>(alloc_len)?;
-        let mut d_output_count = self.memory.alloc::<u32>(1)?;
-        self.device
-            .inner()
-            .memset_zeros(&mut d_output_count)
-            .map_err(|e| XlogError::Kernel(format!("Failed to zero output count: {}", e)))?;
-
-        // SAFETY: hash_join_probe_v2(probe_hashes, num_probe,
-        //                            bucket_offsets, bucket_counts, bucket_entries, bucket_entry_hashes, bucket_mask,
-        //                            probe_keys, build_keys, key_bytes,
-        //                            output_left, output_right, output_count, max_output)
-        // Note: Using raw pointer launch because tuple exceeds 12-element limit
-        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
-        unsafe {
-            let mut params: Vec<*mut c_void> = vec![
-                (&left_packed.hashes).as_kernel_param(),
-                (&num_left).as_kernel_param(),
-                (&table.bucket_offsets).as_kernel_param(),
-                (&table.bucket_counts).as_kernel_param(),
-                (&table.bucket_entries).as_kernel_param(),
-                (&table.bucket_entry_hashes).as_kernel_param(),
-                (&table.bucket_mask).as_kernel_param(),
-                (&left_packed.packed_keys).as_kernel_param(),
-                (&right_packed.packed_keys).as_kernel_param(),
-                (&left_packed.key_bytes).as_kernel_param(),
-                (&d_output_left).as_kernel_param(),
-                (&d_output_right).as_kernel_param(),
-                (&d_output_count).as_kernel_param(),
-                (&max_output).as_kernel_param(),
-            ];
-            probe_func
-                .clone()
-                .launch(config, &mut params)
-                .map_err(|e| XlogError::Kernel(format!("hash_join_probe_v2 failed: {}", e)))?;
-        }
-
-        self.device.synchronize()?;
-
-        let device = self.device.inner();
-
-        // Metadata read: post-materialize device-side atomic count, used
-        // as the inner-join result's logical row count after clamping.
-        // Clamp to max_output to prevent buffer overflow (kernel atomically
-        // increments before bounds check, so count can exceed max_output).
-        let inner_count = self
-            .read_join_output_count_metadata(&d_output_count)?
-            .min(max_output) as u32;
-
-        // Build unmatched-left buffer by inverting has_match mask and compacting on-GPU.
-        let mask_not_fn = device
-            .get_func(FILTER_MODULE, filter_kernels::MASK_NOT)
-            .ok_or_else(|| XlogError::Kernel("mask_not kernel not found".to_string()))?;
-
-        let mut d_no_match = self.memory.alloc::<u8>(num_left as usize)?;
-
-        // SAFETY: mask_not(const uint8_t* a, uint8_t* out, uint32_t n)
-        unsafe {
-            mask_not_fn
-                .clone()
-                .launch(config, (&d_has_match, &mut d_no_match, num_left))
-        }
-        .map_err(|e| XlogError::Kernel(format!("mask_not failed: {}", e)))?;
-
-        let unmatched_left = self.filter_by_device_mask(left, &d_no_match)?;
-
-        let unmatched_rows = self.device_row_count(&unmatched_left)? as u64;
-        let total_rows = (inner_count as u64) + unmatched_rows;
-
-        let combined_schema = self.combine_schemas(left.schema(), right.schema());
-
-        if total_rows == 0 {
+        let probe_index = Self::build_inner_probe_index(
+            left,
+            &left_packed,
+            &right_packed.packed_keys,
+            left_packed.key_bytes,
+            &table,
+        );
+        let capacity = self.compute_join_output_capacity(probe_cap, build_cap, max_output)?;
+        if capacity == 0 {
             return self.create_empty_buffer(combined_schema);
         }
 
-        // Gather matched rows (if any) using on-GPU indices.
-        let inner_left = self.gather_buffer_by_indices(left, &d_output_left, inner_count)?;
-        let inner_right = self.gather_buffer_by_indices(right, &d_output_right, inner_count)?;
+        let materialize = self.run_left_outer_count_scan_materialize(&probe_index, capacity)?;
 
-        if unmatched_rows == 0 {
-            let mut result_columns = Vec::with_capacity(combined_schema.arity());
-            result_columns.extend(inner_left.columns.into_iter());
-            result_columns.extend(inner_right.columns.into_iter());
-            return self.buffer_from_columns(result_columns, inner_count as u64, combined_schema);
-        }
+        let gathered_left = self.gather_buffer_by_indices_device_count(
+            left,
+            &materialize.d_output_left,
+            &materialize.d_logical_count,
+            capacity,
+        )?;
+        let gathered_right = self.gather_buffer_by_indices_device_count_with_null_sentinel(
+            right,
+            &materialize.d_output_right,
+            &materialize.d_logical_count,
+            capacity,
+        )?;
 
-        if inner_count == 0 {
-            let mut result_columns = Vec::with_capacity(combined_schema.arity());
-            result_columns.extend(unmatched_left.columns.into_iter());
-
-            for col_idx in 0..right.arity() {
-                let elem_size = right
-                    .schema()
-                    .column_type(col_idx)
-                    .map(|t| t.size_bytes())
-                    .unwrap_or(4);
-
-                let bytes = (unmatched_rows as usize)
-                    .checked_mul(elem_size)
-                    .ok_or_else(|| {
-                        XlogError::Kernel(
-                            "Left outer join: right column byte size overflow".to_string(),
-                        )
-                    })?;
-
-                let mut dst_col = self.memory.alloc::<u8>(bytes)?;
-                if bytes > 0 {
-                    device.memset_zeros(&mut dst_col).map_err(|e| {
-                        XlogError::Kernel(format!("Failed to zero null right column: {}", e))
-                    })?;
-                }
-                result_columns.push(dst_col.into());
-            }
-
-            self.device.synchronize()?;
-            return self.buffer_from_columns(result_columns, unmatched_rows, combined_schema);
-        }
-
-        // Concatenate: matched rows followed by unmatched rows (null-extended on right).
         let mut result_columns = Vec::with_capacity(combined_schema.arity());
-        let inner_rows = inner_count as u64;
+        result_columns.extend(gathered_left.columns.into_iter());
+        result_columns.extend(gathered_right.columns.into_iter());
 
-        // Left columns: inner-left then unmatched-left.
-        for (col_idx, (inner_col, unmatched_col)) in inner_left
-            .columns
-            .into_iter()
-            .zip(unmatched_left.columns.into_iter())
-            .enumerate()
-        {
-            let elem_size = left
-                .schema()
-                .column_type(col_idx)
-                .map(|t| t.size_bytes())
-                .unwrap_or(4);
-
-            let inner_bytes = (inner_rows as usize)
-                .checked_mul(elem_size)
-                .ok_or_else(|| {
-                    XlogError::Kernel("Left outer join: inner_bytes overflow".to_string())
-                })?;
-            let unmatched_bytes = (unmatched_rows as usize)
-                .checked_mul(elem_size)
-                .ok_or_else(|| {
-                    XlogError::Kernel("Left outer join: unmatched_bytes overflow".to_string())
-                })?;
-            let total_bytes = inner_bytes.checked_add(unmatched_bytes).ok_or_else(|| {
-                XlogError::Kernel("Left outer join: total_bytes overflow".to_string())
-            })?;
-
-            let mut out_col = self.memory.alloc::<u8>(total_bytes)?;
-
-            if inner_bytes > 0 {
-                let mut out_view = out_col.slice_mut(0..inner_bytes);
-                device.dtod_copy(&inner_col, &mut out_view).map_err(|e| {
-                    XlogError::Kernel(format!("Failed to copy inner left column: {}", e))
-                })?;
-            }
-            if unmatched_bytes > 0 {
-                let mut out_view = out_col.slice_mut(inner_bytes..total_bytes);
-                let unmatched_view = self.column_bytes_view(&unmatched_col, unmatched_bytes)?;
-                device
-                    .dtod_copy(&unmatched_view, &mut out_view)
-                    .map_err(|e| {
-                        XlogError::Kernel(format!("Failed to copy unmatched left column: {}", e))
-                    })?;
-            }
-
-            result_columns.push(out_col.into());
-        }
-
-        // Right columns: inner-right then zeros.
-        for (col_idx, inner_col) in inner_right.columns.into_iter().enumerate() {
-            let elem_size = right
-                .schema()
-                .column_type(col_idx)
-                .map(|t| t.size_bytes())
-                .unwrap_or(4);
-
-            let inner_bytes = (inner_rows as usize)
-                .checked_mul(elem_size)
-                .ok_or_else(|| {
-                    XlogError::Kernel("Left outer join: inner_bytes overflow".to_string())
-                })?;
-            let unmatched_bytes = (unmatched_rows as usize)
-                .checked_mul(elem_size)
-                .ok_or_else(|| {
-                    XlogError::Kernel("Left outer join: unmatched_bytes overflow".to_string())
-                })?;
-            let total_bytes = inner_bytes.checked_add(unmatched_bytes).ok_or_else(|| {
-                XlogError::Kernel("Left outer join: total_bytes overflow".to_string())
-            })?;
-
-            let mut out_col = self.memory.alloc::<u8>(total_bytes)?;
-
-            if total_bytes > 0 {
-                device.memset_zeros(&mut out_col).map_err(|e| {
-                    XlogError::Kernel(format!("Failed to zero right outer column: {}", e))
-                })?;
-            }
-
-            if inner_bytes > 0 {
-                let mut out_view = out_col.slice_mut(0..inner_bytes);
-                device.dtod_copy(&inner_col, &mut out_view).map_err(|e| {
-                    XlogError::Kernel(format!("Failed to copy inner right column: {}", e))
-                })?;
-            }
-
-            result_columns.push(out_col.into());
-        }
-
-        self.device.synchronize()?;
-
-        self.buffer_from_columns(result_columns, total_rows, combined_schema)
+        let mut result = CudaBuffer::from_columns(
+            result_columns,
+            capacity as u64,
+            materialize.d_logical_count,
+            combined_schema,
+        );
+        result.set_overflow_flag(materialize.d_overflow);
+        Ok(result)
     }
 
     /// Helper for left outer join with empty right: all left rows with null right columns

@@ -38,13 +38,16 @@ fn test_join_verifies_keys_not_just_hash() {
         .create_buffer_from_u32_columns(&[&right_key, &right_val], right_schema)
         .unwrap();
 
-    // Join on key column - should produce ZERO results since 100 != 200
+    // Join on key column - should produce ZERO results since 100 != 200.
+    // After v0.5.5 GPU-resident-binary-join, `num_rows()` is the
+    // host-known capacity (an upper bound); use `device_row_count`
+    // for the actual logical row count.
     let result = provider
         .hash_join_v2(&left, &right, &[0], &[0], JoinType::Inner)
         .unwrap();
 
     assert_eq!(
-        result.num_rows(),
+        provider.device_row_count(&result).unwrap(),
         0,
         "Join should produce no results when keys differ, even if hashes might collide"
     );
@@ -77,7 +80,11 @@ fn test_join_matches_equal_keys() {
         .hash_join_v2(&left, &right, &[0], &[0], JoinType::Inner)
         .unwrap();
 
-    assert_eq!(result.num_rows(), 1, "Join should match on equal keys");
+    assert_eq!(
+        provider.device_row_count(&result).unwrap(),
+        1,
+        "Join should match on equal keys"
+    );
 }
 
 /// Test multi-column key verification

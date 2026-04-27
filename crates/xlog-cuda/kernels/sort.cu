@@ -281,6 +281,38 @@ extern "C" __global__ void apply_permutation_bytes(
     }
 }
 
+// Variant of `apply_permutation_bytes` for the right side of a left-outer
+// hash join. When `permutation[gid] == 0xFFFFFFFFu` (the null sentinel
+// emitted by `hash_join_left_outer_materialize`), this gather writes
+// zero bytes for that row. Otherwise it copies bytes from the indexed
+// source row exactly like `apply_permutation_bytes`.
+extern "C" __global__ void apply_permutation_bytes_left_outer_null_sentinel(
+    const uint8_t* __restrict__ input,
+    uint8_t* __restrict__ output,
+    const uint32_t* __restrict__ permutation,
+    const uint32_t* __restrict__ num_rows_device,
+    uint32_t row_cap,
+    uint32_t elem_size
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    uint32_t actual = num_rows_device[0];
+    if (actual > row_cap) {
+        actual = row_cap;
+    }
+    if (gid < actual) {
+        uint32_t src_idx = permutation[gid];
+        if (src_idx == 0xFFFFFFFFu) {
+            for (uint32_t b = 0; b < elem_size; b++) {
+                output[gid * elem_size + b] = 0u;
+            }
+        } else {
+            for (uint32_t b = 0; b < elem_size; b++) {
+                output[gid * elem_size + b] = input[src_idx * elem_size + b];
+            }
+        }
+    }
+}
+
 // ============== Key Transform + Gather Kernels ==============
 //
 // IEEE totalOrder mapping for f32 / f64 lives in `totalorder.cuh`
