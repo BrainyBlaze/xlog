@@ -1180,6 +1180,31 @@ impl super::CudaKernelProvider {
         self.diff_gpu(a, b)
     }
 
+    /// Read a binary-join output-count scalar from device memory.
+    ///
+    /// **Why this is metadata, not data-plane:** the value is a single
+    /// `u32` produced by an atomic-increment counter inside the join
+    /// kernel, used solely to size the next allocation (in the
+    /// count-only pass) or to drive the result buffer's logical row
+    /// count (in the post-materialize pass). It is control-plane state
+    /// in the same sense as a relation's row count — never tuple data.
+    ///
+    /// The strict deterministic-Datalog D2H gate (PR 49) explicitly
+    /// allows this category via `dtoh_scalar_untracked`, which is the
+    /// auditable, single-purpose API for metadata reads.
+    ///
+    /// PR 3 in the v0.5.5 chain replaces eight `dtoh_sync_copy_into_tracked`
+    /// reads of these scalars with this helper, so binary-join
+    /// materialization runs strict-clean. **This does not make
+    /// binary-join materialization fully GPU-resident**: the count is
+    /// still a host scalar, used by host code to drive allocation. A
+    /// future "Pattern B" effort (v0.6+) can localize the upgrade here
+    /// once a memory-budget-aware upper bound exists.
+    fn read_join_output_count_metadata(&self, d_count: &TrackedCudaSlice<u32>) -> Result<u32> {
+        self.dtoh_scalar_untracked::<u32>(d_count, 0)
+            .map_err(|e| XlogError::Kernel(format!("Failed to read output count: {}", e)))
+    }
+
     fn is_full_row_key(key_cols: &[usize], arity: usize) -> bool {
         key_cols.len() == arity
             && key_cols
@@ -3148,11 +3173,10 @@ impl super::CudaKernelProvider {
 
         self.device.synchronize()?;
 
-        let mut count_host = vec![0u32];
-        self.dtoh_sync_copy_into_tracked(&d_count_only, &mut count_host)
-            .map_err(|e| XlogError::Kernel(format!("Failed to read output count: {}", e)))?;
-
-        let full_count = count_host[0] as u64;
+        // Metadata read: this u32 is the join's count-only result, used to
+        // size the next allocation. See `read_join_output_count_metadata`
+        // for the metadata-vs-data-plane rationale.
+        let full_count = self.read_join_output_count_metadata(&d_count_only)? as u64;
         let requested = max_output
             .map(|limit| (limit as u64).min(full_count))
             .unwrap_or(full_count);
@@ -3211,13 +3235,14 @@ impl super::CudaKernelProvider {
 
         self.device.synchronize()?;
 
-        // Get output count
-        let mut count_host = vec![0u32];
-        self.dtoh_sync_copy_into_tracked(&d_output_count, &mut count_host)
-            .map_err(|e| XlogError::Kernel(format!("Failed to read output count: {}", e)))?;
-        // Clamp result count to max_output to prevent buffer overflow
-        // (kernel atomically increments before bounds check, so count can exceed max_output)
-        let result_count = (count_host[0] as u64).min(max_output as u64);
+        // Metadata read: post-materialize device-side atomic count.
+        // Used as the result buffer's logical row count after clamping
+        // to the host-allocated upper bound. See
+        // `read_join_output_count_metadata` for the rationale.
+        // Clamp to max_output to prevent buffer overflow (kernel atomically
+        // increments before bounds check, so count can exceed max_output).
+        let result_count =
+            (self.read_join_output_count_metadata(&d_output_count)? as u64).min(max_output as u64);
 
         if result_count == 0 {
             let combined_schema = self.combine_schemas(left.schema(), right.schema());
@@ -3328,11 +3353,10 @@ impl super::CudaKernelProvider {
 
         self.device.synchronize()?;
 
-        let mut count_host = vec![0u32];
-        self.dtoh_sync_copy_into_tracked(&d_count_only, &mut count_host)
-            .map_err(|e| XlogError::Kernel(format!("Failed to read output count: {}", e)))?;
-
-        let full_count = count_host[0] as u64;
+        // Metadata read: this u32 is the join's count-only result, used to
+        // size the next allocation. See `read_join_output_count_metadata`
+        // for the metadata-vs-data-plane rationale.
+        let full_count = self.read_join_output_count_metadata(&d_count_only)? as u64;
         let requested = max_output
             .map(|limit| (limit as u64).min(full_count))
             .unwrap_or(full_count);
@@ -3386,12 +3410,10 @@ impl super::CudaKernelProvider {
 
         self.device.synchronize()?;
 
-        // Get output count.
-        let mut count_host = vec![0u32];
-        self.dtoh_sync_copy_into_tracked(&d_output_count, &mut count_host)
-            .map_err(|e| XlogError::Kernel(format!("Failed to read output count: {}", e)))?;
-
-        let result_count = (count_host[0] as u64).min(max_output as u64);
+        // Metadata read: post-materialize device-side atomic count, used
+        // as the result buffer's logical row count after clamping.
+        let result_count =
+            (self.read_join_output_count_metadata(&d_output_count)? as u64).min(max_output as u64);
 
         if result_count == 0 {
             let combined_schema = self.combine_schemas(left.schema(), right.schema());
@@ -4057,11 +4079,9 @@ impl super::CudaKernelProvider {
 
         self.device.synchronize()?;
 
-        let mut count_host = vec![0u32];
-        self.dtoh_sync_copy_into_tracked(&d_count_only, &mut count_host)
-            .map_err(|e| XlogError::Kernel(format!("Failed to read output count: {}", e)))?;
-
-        let full_inner = count_host[0] as u64;
+        // Metadata read: this u32 is the join's count-only result, used
+        // to size the next allocation.
+        let full_inner = self.read_join_output_count_metadata(&d_count_only)? as u64;
         let requested_inner = max_output
             .map(|limit| (limit as u64).min(full_inner))
             .unwrap_or(full_inner);
@@ -4111,10 +4131,13 @@ impl super::CudaKernelProvider {
 
         let device = self.device.inner();
 
-        let mut count_host = vec![0u32];
-        self.dtoh_sync_copy_into_tracked(&d_output_count, &mut count_host)
-            .map_err(|e| XlogError::Kernel(format!("Failed to read output count: {}", e)))?;
-        let inner_count = count_host[0].min(max_output) as u32;
+        // Metadata read: post-materialize device-side atomic count, used
+        // as the inner-join result's logical row count after clamping.
+        // Clamp to max_output to prevent buffer overflow (kernel atomically
+        // increments before bounds check, so count can exceed max_output).
+        let inner_count = self
+            .read_join_output_count_metadata(&d_output_count)?
+            .min(max_output) as u32;
 
         let mask_not_fn = device
             .get_func(FILTER_MODULE, filter_kernels::MASK_NOT)
@@ -4430,11 +4453,9 @@ impl super::CudaKernelProvider {
 
         self.device.synchronize()?;
 
-        let mut count_host = vec![0u32];
-        self.dtoh_sync_copy_into_tracked(&d_count_only, &mut count_host)
-            .map_err(|e| XlogError::Kernel(format!("Failed to read output count: {}", e)))?;
-
-        let full_inner = count_host[0] as u64;
+        // Metadata read: this u32 is the join's count-only result, used
+        // to size the next allocation.
+        let full_inner = self.read_join_output_count_metadata(&d_count_only)? as u64;
         let requested_inner = max_output
             .map(|limit| (limit as u64).min(full_inner))
             .unwrap_or(full_inner);
@@ -4489,13 +4510,13 @@ impl super::CudaKernelProvider {
 
         let device = self.device.inner();
 
-        // Read inner join result count.
-        let mut count_host = vec![0u32];
-        self.dtoh_sync_copy_into_tracked(&d_output_count, &mut count_host)
-            .map_err(|e| XlogError::Kernel(format!("Failed to read output count: {}", e)))?;
-        // Clamp inner count to max_output to prevent buffer overflow
-        // (kernel atomically increments before bounds check, so count can exceed max_output).
-        let inner_count = count_host[0].min(max_output) as u32;
+        // Metadata read: post-materialize device-side atomic count, used
+        // as the inner-join result's logical row count after clamping.
+        // Clamp to max_output to prevent buffer overflow (kernel atomically
+        // increments before bounds check, so count can exceed max_output).
+        let inner_count = self
+            .read_join_output_count_metadata(&d_output_count)?
+            .min(max_output) as u32;
 
         // Build unmatched-left buffer by inverting has_match mask and compacting on-GPU.
         let mask_not_fn = device

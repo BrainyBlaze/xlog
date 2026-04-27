@@ -214,9 +214,10 @@ fn strict_deterministic_d2h_clean_path() {
         }
     };
 
-    // Single-column facts-only program. Multi-column EDB ingestion still
-    // routes through a host-side dedup helper today; single-column
-    // ingestion uses the GPU dedup path and is provably D2H-free.
+    // Single-column facts-only program. Both single-column and
+    // multi-column EDB ingestion are GPU-D2H-clean as of PR 50; this
+    // test stays single-column because the gate-guard machinery is
+    // what's being exercised here, not the dedup pipeline.
     let source = r#"
         node(1).
         node(2).
@@ -515,25 +516,24 @@ fn strict_deterministic_d2h_two_column_negation_full_row_semantics() {
     );
 }
 
-/// Recursive reach: full-row tuple semantics for semi-naive delta dedup.
+/// Recursive reach: full-row tuple semantics for semi-naive delta dedup,
+/// strict-D2H clean.
 ///
-/// Proves that the recursive fixpoint preserves *full-row* equality, not
-/// first-column key. With key-based dedup, rows `(1,2),(1,3),(1,4)` would
-/// collapse to a single entry. With full-row dedup all three survive and
-/// the answer set has five unique rows.
+/// Proves that the recursive fixpoint preserves *full-row* equality
+/// AND that binary-join materialization is deterministic-D2H clean
+/// after PR 3 — the eight `Failed to read output count` sites in
+/// `provider/relational.rs` were reclassified as metadata reads via
+/// `dtoh_scalar_untracked`, which the strict gate explicitly allows.
 ///
-/// Sorted-set comparison so the test does not depend on row order.
-///
-/// This test deliberately runs with the *default* runtime config — the
-/// recursive evaluation goes through binary join materialization, which
-/// still has known D2H paths flagged by PR 49's gate (see "Failed to
-/// read output count" sites in `provider/relational.rs`). Those are PR
-/// 3's scope (deterministic count → prefix-scan → materialize binary
-/// join). The strict-D2H seal for this program will be added in PR 3
-/// alongside the join-materialize replacement.
+/// With key-based dedup, rows `(1,2),(1,3),(1,4)` would collapse to a
+/// single entry. With full-row dedup all three survive and the answer
+/// set has five unique rows.
 #[test]
-fn recursive_reach_full_row_dedup_correctness() {
-    let (mut executor, provider) = match create_executor_with_config(RuntimeConfig::default()) {
+fn strict_deterministic_d2h_recursive_reach_clean() {
+    let mut config = RuntimeConfig::default();
+    config.strict_deterministic_d2h = true;
+
+    let (mut executor, provider) = match create_executor_with_config(config) {
         Some(e) => e,
         None => {
             eprintln!("Skipping test: no CUDA device available");
@@ -553,7 +553,16 @@ fn recursive_reach_full_row_dedup_correctness() {
     let edge_buffer = create_edge_buffer(&provider, &[(1u32, 2), (1, 3), (2, 4), (3, 4)]);
     setup_executor_with_facts(&mut executor, &compiler, vec![("edge", edge_buffer)]);
 
-    executor.execute_plan(&plan).expect("recursive reach run");
+    provider.reset_deterministic_d2h_violations();
+    executor
+        .execute_plan(&plan)
+        .expect("recursive reach must run clean under strict gate");
+    assert_eq!(
+        provider.deterministic_d2h_violation_count(),
+        0,
+        "recursive reach tripped the gate; binary-join materialization \
+         likely regressed onto a tracked output-count read"
+    );
 
     let reach = executor
         .store()
@@ -569,5 +578,67 @@ fn recursive_reach_full_row_dedup_correctness() {
         expected.len(),
         "row count mismatch — semi-naive delta dedup likely collapsed full rows under a key-only path"
     );
+    assert_eq!(got, expected);
+}
+
+/// Join-heavy strict-gate seal: forces inner-join materialization with a
+/// non-trivial fan-out (one binary join with multiple matches per probe
+/// key), then asserts the result is correct AND that no host D2H tracked
+/// transfer was issued.
+///
+/// Distinct from the recursive-reach test: this exercises a
+/// non-recursive single-rule program with an explicit inner join in the
+/// rule body, so it stresses the `hash_join_inner_v2*` /
+/// `hash_join_left_outer_*` count→materialize path that PR 3 makes
+/// strict-clean by reclassifying the output-count scalars as metadata.
+#[test]
+fn strict_deterministic_d2h_inner_join_materialize_clean() {
+    let mut config = RuntimeConfig::default();
+    config.strict_deterministic_d2h = true;
+
+    let (mut executor, provider) = match create_executor_with_config(config) {
+        Some(e) => e,
+        None => {
+            eprintln!("Skipping test: no CUDA device available");
+            return;
+        }
+    };
+
+    // `path(X, Z)` is a single-step inner join of `edge(X, Y)` with
+    // `edge(Y, Z)` on the middle column. Forces a non-trivial join
+    // materialization with multiple matches per probe key.
+    let source = r#"
+        edge(1, 2). edge(1, 3). edge(2, 4). edge(3, 4). edge(4, 5).
+        path(X, Z) :- edge(X, Y), edge(Y, Z).
+        ?- path(X, Z).
+    "#;
+    let mut compiler = Compiler::new();
+    let plan = compiler.compile(source).expect("compile path");
+
+    let edge_buffer = create_edge_buffer(&provider, &[(1u32, 2), (1, 3), (2, 4), (3, 4), (4, 5)]);
+    setup_executor_with_facts(&mut executor, &compiler, vec![("edge", edge_buffer)]);
+
+    provider.reset_deterministic_d2h_violations();
+    executor
+        .execute_plan(&plan)
+        .expect("inner-join program must run clean under strict gate");
+    assert_eq!(
+        provider.deterministic_d2h_violation_count(),
+        0,
+        "inner-join materialization tripped the gate; output-count reads \
+         must go through `dtoh_scalar_untracked` (metadata)"
+    );
+
+    let path = executor
+        .store()
+        .get("path")
+        .expect("path relation present after execution");
+    let col0 = provider.download_column::<u32>(path, 0).unwrap();
+    let col1 = provider.download_column::<u32>(path, 1).unwrap();
+    let mut got: Vec<(u32, u32)> = col0.into_iter().zip(col1).collect();
+    got.sort_unstable();
+    // edge(X,Y) joined with edge(Y,Z) over {(1,2),(1,3),(2,4),(3,4),(4,5)}:
+    // 1->2->4, 1->3->4, 2->4->5, 3->4->5 → after dedup: {(1,4),(2,5),(3,5)}.
+    let expected = vec![(1u32, 4), (2, 5), (3, 5)];
     assert_eq!(got, expected);
 }
