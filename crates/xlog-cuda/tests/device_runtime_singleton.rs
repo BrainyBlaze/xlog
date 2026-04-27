@@ -38,9 +38,8 @@ fn concurrent_get_returns_same_singleton() {
         let barrier = Arc::clone(&barrier);
         handles.push(thread::spawn(move || {
             barrier.wait();
-            XlogDeviceRuntime::try_get(0)
-                .expect("runtime")
-                .as_ptr_addr()
+            let rt = XlogDeviceRuntime::try_get(0).expect("runtime");
+            rt as *const XlogDeviceRuntime as usize
         }));
     }
 
