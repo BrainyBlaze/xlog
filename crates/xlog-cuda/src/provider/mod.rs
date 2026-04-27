@@ -988,6 +988,7 @@ impl CudaKernelProvider {
             }
             .map_err(|e| XlogError::Kernel(format!("multiblock_scan_phase2 failed: {}", e)))?;
 
+            self.device.synchronize()?;
             return Ok(());
         }
 
@@ -1012,6 +1013,7 @@ impl CudaKernelProvider {
             )
         }
         .map_err(|e| XlogError::Kernel(format!("multiblock_scan_u32_phase1 failed: {}", e)))?;
+        self.device.synchronize()?;
 
         if num_blocks > 1 {
             self.multiblock_scan_u32_inplace(&mut block_sums, num_blocks)?;
@@ -1036,6 +1038,7 @@ impl CudaKernelProvider {
         }
         .map_err(|e| XlogError::Kernel(format!("multiblock_scan_phase3 failed: {}", e)))?;
 
+        self.device.synchronize()?;
         Ok(())
     }
 
@@ -1071,6 +1074,7 @@ impl CudaKernelProvider {
             }
             .map_err(|e| XlogError::Kernel(format!("multiblock_scan_phase2 failed: {}", e)))?;
 
+            self.device.synchronize()?;
             return Ok(());
         }
 
@@ -1095,6 +1099,7 @@ impl CudaKernelProvider {
             )
         }
         .map_err(|e| XlogError::Kernel(format!("multiblock_scan_u32_phase1 failed: {}", e)))?;
+        self.device.synchronize()?;
 
         if num_blocks > 1 {
             self.multiblock_scan_u32_inplace(&mut block_sums, num_blocks)?;
@@ -1119,6 +1124,7 @@ impl CudaKernelProvider {
         }
         .map_err(|e| XlogError::Kernel(format!("multiblock_scan_phase3 failed: {}", e)))?;
 
+        self.device.synchronize()?;
         Ok(())
     }
 

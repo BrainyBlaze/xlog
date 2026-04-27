@@ -1,6 +1,6 @@
 //! Relational operations: join, dedup, union, diff, sort, and related helpers.
 
-use std::ffi::c_void;
+use std::{cmp::Ordering, collections::BTreeSet, ffi::c_void};
 
 use crate::{AsKernelParam, DeviceSlice, LaunchAsync, LaunchConfig};
 use xlog_core::{Result, ScalarType, Schema, XlogError};
@@ -204,6 +204,10 @@ impl super::CudaKernelProvider {
             ));
         }
 
+        if Self::is_full_row_key(key_cols, input.arity()) && input.arity() > 1 {
+            return self.dedup_full_row_deterministic(input);
+        }
+
         let sorted = self.sort(input, key_cols)?;
         self.dedup_sorted(&sorted, key_cols)
     }
@@ -235,6 +239,10 @@ impl super::CudaKernelProvider {
             return Err(XlogError::Kernel(
                 "Dedup requires at least one key column".to_string(),
             ));
+        }
+
+        if Self::is_full_row_key(key_cols, input.arity()) && input.arity() > 1 {
+            return self.dedup_full_row_deterministic(input);
         }
 
         if input.num_rows() <= 1 {
@@ -358,6 +366,7 @@ impl super::CudaKernelProvider {
             )
         }
         .map_err(|e| XlogError::Kernel(format!("mark_unique_and_scan_columnar failed: {}", e)))?;
+        self.device.synchronize()?;
 
         if num_blocks > 1 {
             self.multiblock_scan_u32_inplace(&mut d_block_sums, num_blocks)?;
@@ -380,6 +389,7 @@ impl super::CudaKernelProvider {
                 )
             }
             .map_err(|e| XlogError::Kernel(format!("multiblock_scan_phase3 failed: {}", e)))?;
+            self.device.synchronize()?;
         }
 
         self.device.synchronize()?;
@@ -759,13 +769,13 @@ impl super::CudaKernelProvider {
         self.dedup_sorted(&sorted, &key_cols)
     }
 
-    /// GPU-native set difference (no host roundtrip)
+    /// Set difference (a - b) with deterministic set semantics.
     ///
-    /// Computes a - b (elements in a but not in b) entirely on GPU using:
-    /// 1. Sort both inputs
-    /// 2. Dedup both inputs
-    /// 3. Mark elements in a not in b using sorted_diff_mark kernel (binary search)
-    /// 4. Filter using existing filter_by_mask()
+    /// Single-column `u32` buffers use a GPU sorted-diff fast path. General
+    /// multi-column buffers use a byte-exact host set fallback after GPU dedup;
+    /// the hash anti-join implementation is intentionally not used for Datalog
+    /// delta subtraction because its unordered parallel probe path can leak
+    /// nondeterminism into recursive fixed-point convergence.
     ///
     /// # Arguments
     /// * `a` - Source buffer
@@ -814,19 +824,20 @@ impl super::CudaKernelProvider {
             .column_type(0)
             .ok_or_else(|| XlogError::Kernel("No columns".to_string()))?;
 
-        // Keep the single-column U32 fast path; all other cases use hash-based anti-join.
+        // Keep the single-column U32 fast path; all other cases use the
+        // deterministic byte-exact set-difference fallback.
         if a.arity() == 1 && matches!(col_type, ScalarType::U32) && num_b != 0 {
             return self.diff_gpu_u32(a, b);
         }
 
-        self.diff_via_anti_join(a, b)
+        self.diff_via_deterministic_set(a, b)
     }
 
     /// U32-optimized diff using GPU sort
     fn diff_gpu_u32(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
-        // For multi-column U32 buffers, use anti-join on all columns
+        // For multi-column U32 buffers, use deterministic set difference on all columns.
         if a.arity() != 1 {
-            return self.diff_via_anti_join(a, b);
+            return self.diff_via_deterministic_set(a, b);
         }
 
         // Step 1: Sort and dedup both inputs (sorted, so use dedup_sorted)
@@ -962,11 +973,12 @@ impl super::CudaKernelProvider {
         )
     }
 
-    /// Multi-column diff using anti-join
+    /// General diff using deterministic byte-exact host set difference.
     ///
-    /// Uses hash-based anti-join on all columns to compute set difference.
-    /// This is the appropriate algorithm for multi-column Datalog negation.
-    fn diff_via_anti_join(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
+    /// Recursive Datalog evaluation relies on stable delta subtraction for
+    /// convergence. This path deliberately avoids the GPU hash anti-join because
+    /// its parallel hash/probe ordering is not a safe basis for fixed-point state.
+    fn diff_via_deterministic_set(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
         // Use all columns as join keys for set difference
         let all_cols: Vec<usize> = (0..a.arity()).collect();
 
@@ -984,9 +996,162 @@ impl super::CudaKernelProvider {
             return Ok(deduped_a);
         }
 
-        // Anti-join: return rows from a that don't match any row in b
-        // Since we're doing set difference, all columns are keys
-        self.hash_join_v2(&deduped_a, &deduped_b, &all_cols, &all_cols, JoinType::Anti)
+        let schema = a.schema().clone();
+        let col_widths = self.schema_column_widths(&schema)?;
+        let a_rows = self.collect_deterministic_rows(&deduped_a, &col_widths, a_rows)?;
+        let b_rows = self.collect_deterministic_rows(&deduped_b, &col_widths, b_rows)?;
+
+        let mut diff_rows: Vec<Vec<u8>> = a_rows.difference(&b_rows).cloned().collect();
+        if diff_rows.is_empty() {
+            return self.create_empty_buffer(schema);
+        }
+        self.sort_rows_by_schema(&mut diff_rows, &schema, &col_widths);
+
+        let mut output_columns = vec![Vec::new(); schema.arity()];
+        for row in &diff_rows {
+            let mut offset = 0usize;
+            for (col_idx, width) in col_widths.iter().copied().enumerate() {
+                let end = offset + width;
+                output_columns[col_idx].extend_from_slice(&row[offset..end]);
+                offset = end;
+            }
+        }
+
+        let output_slices: Vec<&[u8]> = output_columns.iter().map(Vec::as_slice).collect();
+        self.create_buffer_from_slices(&output_slices, schema)
+    }
+
+    fn schema_column_widths(&self, schema: &Schema) -> Result<Vec<usize>> {
+        (0..schema.arity())
+            .map(|col_idx| {
+                schema
+                    .column_type(col_idx)
+                    .map(|ty| ty.size_bytes())
+                    .ok_or_else(|| {
+                        XlogError::Kernel(format!("Column {} missing from schema", col_idx))
+                    })
+            })
+            .collect()
+    }
+
+    fn is_full_row_key(key_cols: &[usize], arity: usize) -> bool {
+        key_cols.len() == arity
+            && key_cols
+                .iter()
+                .copied()
+                .enumerate()
+                .all(|(expected, actual)| expected == actual)
+    }
+
+    fn dedup_full_row_deterministic(&self, input: &CudaBuffer) -> Result<CudaBuffer> {
+        let row_count = self.device_row_count(input)?;
+        if row_count == 0 {
+            return self.create_empty_buffer(input.schema().clone());
+        }
+
+        let schema = input.schema().clone();
+        let col_widths = self.schema_column_widths(&schema)?;
+        let mut rows: Vec<Vec<u8>> = self
+            .collect_deterministic_rows(input, &col_widths, row_count)?
+            .into_iter()
+            .collect();
+        self.sort_rows_by_schema(&mut rows, &schema, &col_widths);
+
+        let mut output_columns = vec![Vec::new(); schema.arity()];
+        for row in rows.iter() {
+            let mut offset = 0usize;
+            for (col_idx, width) in col_widths.iter().copied().enumerate() {
+                let end = offset + width;
+                output_columns[col_idx].extend_from_slice(&row[offset..end]);
+                offset = end;
+            }
+        }
+
+        let output_slices: Vec<&[u8]> = output_columns.iter().map(Vec::as_slice).collect();
+        self.create_buffer_from_slices(&output_slices, schema)
+    }
+
+    fn sort_rows_by_schema(&self, rows: &mut [Vec<u8>], schema: &Schema, col_widths: &[usize]) {
+        rows.sort_by(|left, right| Self::compare_rows_by_schema(left, right, schema, col_widths));
+    }
+
+    fn compare_rows_by_schema(
+        left: &[u8],
+        right: &[u8],
+        schema: &Schema,
+        col_widths: &[usize],
+    ) -> Ordering {
+        let mut offset = 0usize;
+        for (col_idx, width) in col_widths.iter().copied().enumerate() {
+            let end = offset + width;
+            let lhs = &left[offset..end];
+            let rhs = &right[offset..end];
+            let ord = match schema
+                .column_type(col_idx)
+                .expect("validated schema column")
+            {
+                ScalarType::U32 | ScalarType::Symbol => {
+                    u32::from_le_bytes(lhs.try_into().expect("u32 width"))
+                        .cmp(&u32::from_le_bytes(rhs.try_into().expect("u32 width")))
+                }
+                ScalarType::U64 => u64::from_le_bytes(lhs.try_into().expect("u64 width"))
+                    .cmp(&u64::from_le_bytes(rhs.try_into().expect("u64 width"))),
+                ScalarType::I32 => i32::from_le_bytes(lhs.try_into().expect("i32 width"))
+                    .cmp(&i32::from_le_bytes(rhs.try_into().expect("i32 width"))),
+                ScalarType::I64 => i64::from_le_bytes(lhs.try_into().expect("i64 width"))
+                    .cmp(&i64::from_le_bytes(rhs.try_into().expect("i64 width"))),
+                ScalarType::F32 => f32::from_le_bytes(lhs.try_into().expect("f32 width"))
+                    .total_cmp(&f32::from_le_bytes(rhs.try_into().expect("f32 width"))),
+                ScalarType::F64 => f64::from_le_bytes(lhs.try_into().expect("f64 width"))
+                    .total_cmp(&f64::from_le_bytes(rhs.try_into().expect("f64 width"))),
+                ScalarType::Bool => lhs[0].cmp(&rhs[0]),
+            };
+            if ord != Ordering::Equal {
+                return ord;
+            }
+            offset = end;
+        }
+        Ordering::Equal
+    }
+
+    fn collect_deterministic_rows(
+        &self,
+        buffer: &CudaBuffer,
+        col_widths: &[usize],
+        row_count: usize,
+    ) -> Result<BTreeSet<Vec<u8>>> {
+        let row_width: usize = col_widths.iter().sum();
+        let mut columns = Vec::with_capacity(col_widths.len());
+
+        for (col_idx, width) in col_widths.iter().copied().enumerate() {
+            let col = buffer.column(col_idx).ok_or_else(|| {
+                XlogError::Kernel(format!("Column {} missing from buffer", col_idx))
+            })?;
+            let num_bytes = row_count.checked_mul(width).ok_or_else(|| {
+                XlogError::Kernel(format!(
+                    "Column {} byte count overflow for {} rows",
+                    col_idx, row_count
+                ))
+            })?;
+            let col_view = self.column_bytes_view(col, num_bytes)?;
+            let mut bytes = vec![0u8; num_bytes];
+            self.dtoh_sync_copy_into_tracked(&col_view, &mut bytes)
+                .map_err(|e| XlogError::Kernel(format!("Failed to read column: {}", e)))?;
+            columns.push(bytes);
+        }
+
+        let mut rows = BTreeSet::new();
+        for row_idx in 0..row_count {
+            let mut row = Vec::with_capacity(row_width);
+            for (col, width) in columns.iter().zip(col_widths.iter().copied()) {
+                let start = row_idx * width;
+                let end = start + width;
+                row.extend_from_slice(&col[start..end]);
+            }
+            rows.insert(row);
+        }
+
+        Ok(rows)
     }
     // ============== Sort Methods ==============
 
@@ -1065,6 +1230,7 @@ impl super::CudaKernelProvider {
                 .launch(launch_config, (&mut indices_a, d_num_rows, n))
         }
         .map_err(|e| XlogError::Kernel(format!("init_indices failed: {}", e)))?;
+        self.device.synchronize()?;
 
         // Working key buffers (u32 words).
         let mut keys_a = self.memory.alloc::<u32>(n as usize)?;
@@ -1340,6 +1506,7 @@ impl super::CudaKernelProvider {
         if row_cap == 0 {
             return Ok(());
         }
+        self.device.synchronize()?;
 
         let device = self.device.inner();
         let block_size = Self::SORT_BLOCK_SIZE;
@@ -1393,6 +1560,7 @@ impl super::CudaKernelProvider {
                 )
             }
             .map_err(|e| XlogError::Kernel(format!("radix_histogram failed: {}", e)))?;
+            self.device.synchronize()?;
 
             // Compute global digit prefix sums.
             // SAFETY: compute_digit_prefix_sums(histograms, grid_size, prefix_sums)
@@ -1402,6 +1570,7 @@ impl super::CudaKernelProvider {
                     .launch(prefix_config, (&*hist, grid_size, &mut *prefix))
             }
             .map_err(|e| XlogError::Kernel(format!("compute_digit_prefix_sums failed: {}", e)))?;
+            self.device.synchronize()?;
 
             // Convert per-block histograms to per-block exclusive offsets (in-place scan per digit).
             for digit in 0..16u32 {
@@ -1410,6 +1579,7 @@ impl super::CudaKernelProvider {
                 let mut digit_slice = hist.slice_mut(start..end);
                 self.multiblock_scan_u32_view_inplace(&mut digit_slice, grid_size)?;
             }
+            self.device.synchronize()?;
 
             // Compute per-element ranks for stability.
             // SAFETY: compute_ranks(keys, num_rows_device, row_cap, ranks, shift)
@@ -1420,6 +1590,7 @@ impl super::CudaKernelProvider {
                 )
             }
             .map_err(|e| XlogError::Kernel(format!("compute_ranks failed: {}", e)))?;
+            self.device.synchronize()?;
 
             // Stable scatter using digit prefix + per-block offsets + ranks.
             // SAFETY: radix_scatter_stable(keys_in, indices_in, ranks, keys_out, indices_out, prefix_sums, block_offsets, num_rows_device, row_cap, shift)
@@ -1441,6 +1612,7 @@ impl super::CudaKernelProvider {
                 )
             }
             .map_err(|e| XlogError::Kernel(format!("radix_scatter_stable failed: {}", e)))?;
+            self.device.synchronize()?;
 
             in_a = !in_a;
         }
@@ -2523,6 +2695,7 @@ impl super::CudaKernelProvider {
             device
                 .memset_zeros(&mut bucket_counts)
                 .map_err(|e| XlogError::Kernel(format!("Failed to zero bucket_counts: {}", e)))?;
+            self.device.synchronize()?;
         }
 
         let block_size = 256u32;
@@ -2548,6 +2721,7 @@ impl super::CudaKernelProvider {
                     XlogError::Kernel(format!("hash_join_bucket_count_v2 failed: {}", e))
                 })?;
         }
+        self.device.synchronize()?;
 
         // bucket_offsets = exclusive scan(bucket_counts)
         let mut bucket_offsets = self.memory.alloc::<u32>(num_buckets as usize)?;
@@ -2555,7 +2729,9 @@ impl super::CudaKernelProvider {
             device
                 .dtod_copy(&bucket_counts, &mut bucket_offsets)
                 .map_err(|e| XlogError::Kernel(format!("Failed to copy bucket_counts: {}", e)))?;
+            self.device.synchronize()?;
             self.multiblock_scan_u32_inplace(&mut bucket_offsets, num_buckets)?;
+            self.device.synchronize()?;
         }
 
         // bucket_cursors = bucket_offsets (then atomically incremented during scatter)
@@ -2564,6 +2740,7 @@ impl super::CudaKernelProvider {
             device
                 .dtod_copy(&bucket_offsets, &mut bucket_cursors)
                 .map_err(|e| XlogError::Kernel(format!("Failed to copy bucket_offsets: {}", e)))?;
+            self.device.synchronize()?;
         }
 
         let bucket_entries = self.memory.alloc::<u32>(num_rows as usize)?;
@@ -2708,6 +2885,7 @@ impl super::CudaKernelProvider {
             .inner()
             .memset_zeros(&mut d_count_only)
             .map_err(|e| XlogError::Kernel(format!("Failed to zero output count: {}", e)))?;
+        self.device.synchronize()?;
         let d_dummy_left = self.memory.alloc::<u32>(1)?;
         let d_dummy_right = self.memory.alloc::<u32>(1)?;
         let max_output_count_only = 0u32;
@@ -2775,6 +2953,7 @@ impl super::CudaKernelProvider {
             .inner()
             .memset_zeros(&mut d_output_count)
             .map_err(|e| XlogError::Kernel(format!("Failed to zero output count: {}", e)))?;
+        self.device.synchronize()?;
 
         // SAFETY: hash_join_probe_v2(probe_hashes, num_probe,
         //                            bucket_offsets, bucket_counts, bucket_entries, bucket_entry_hashes, bucket_mask,
@@ -2891,6 +3070,7 @@ impl super::CudaKernelProvider {
             .inner()
             .memset_zeros(&mut d_count_only)
             .map_err(|e| XlogError::Kernel(format!("Failed to zero output count: {}", e)))?;
+        self.device.synchronize()?;
         let d_dummy_left = self.memory.alloc::<u32>(1)?;
         let d_dummy_right = self.memory.alloc::<u32>(1)?;
         let max_output_count_only = 0u32;
@@ -2953,6 +3133,7 @@ impl super::CudaKernelProvider {
             .inner()
             .memset_zeros(&mut d_output_count)
             .map_err(|e| XlogError::Kernel(format!("Failed to zero output count: {}", e)))?;
+        self.device.synchronize()?;
 
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
@@ -3111,6 +3292,7 @@ impl super::CudaKernelProvider {
                 .map_err(|e| XlogError::Kernel(format!("hash_join_semi failed: {}", e)))?;
         }
 
+        self.device.synchronize()?;
         self.filter_by_device_mask(left, &d_has_match)
     }
 
@@ -3334,6 +3516,7 @@ impl super::CudaKernelProvider {
                 .map_err(|e| XlogError::Kernel(format!("hash_join_semi failed: {}", e)))?;
         }
 
+        self.device.synchronize()?;
         self.filter_by_device_mask(left, &d_has_match)
     }
 
@@ -3443,6 +3626,7 @@ impl super::CudaKernelProvider {
                 .map_err(|e| XlogError::Kernel(format!("hash_join_anti failed: {}", e)))?;
         }
 
+        self.device.synchronize()?;
         self.filter_by_device_mask(left, &d_no_match)
     }
 
@@ -3520,6 +3704,7 @@ impl super::CudaKernelProvider {
                 .map_err(|e| XlogError::Kernel(format!("hash_join_anti failed: {}", e)))?;
         }
 
+        self.device.synchronize()?;
         self.filter_by_device_mask(left, &d_no_match)
     }
 
@@ -4390,6 +4575,7 @@ impl super::CudaKernelProvider {
         device
             .dtod_copy(buffer.num_rows_device(), &mut d_num_rows)
             .map_err(|e| XlogError::Kernel(format!("Failed to copy row count: {}", e)))?;
+        self.device.synchronize()?;
 
         let schema = Schema::new(vec![("col".to_string(), col_type)]);
         Ok(CudaBuffer::from_columns(

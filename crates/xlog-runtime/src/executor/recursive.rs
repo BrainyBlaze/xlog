@@ -1,6 +1,6 @@
 //! Recursive SCC execution using semi-naive fixpoint iteration.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use xlog_core::{RelId, Result, Schema, XlogError};
 use xlog_cuda::CudaBuffer;
@@ -128,16 +128,18 @@ impl Executor {
     /// 4. Repeat until no changes (fixpoint reached)
     pub fn execute_recursive_scc(&mut self, rules: &[xlog_ir::CompiledRule]) -> Result<()> {
         // Identify SCC predicates from rule heads (these are the recursive IDBs).
-        let mut recursive_preds: HashSet<String> = HashSet::new();
+        let mut recursive_pred_names: BTreeSet<String> = BTreeSet::new();
         let mut schema_by_pred: HashMap<String, Schema> = HashMap::new();
         for rule in rules {
-            recursive_preds.insert(rule.head.clone());
+            recursive_pred_names.insert(rule.head.clone());
             if rule.meta.schema.arity() > 0 {
                 schema_by_pred
                     .entry(rule.head.clone())
                     .or_insert_with(|| rule.meta.schema.clone());
             }
         }
+        let recursive_pred_lookup: HashSet<String> = recursive_pred_names.iter().cloned().collect();
+        let recursive_preds: Vec<String> = recursive_pred_names.into_iter().collect();
 
         // Ensure all recursive predicates exist in the store so scans never fail
         // due to evaluation order (mutual recursion can reference an as-yet-empty relation).
@@ -226,7 +228,7 @@ impl Executor {
             }
 
             let key_cols: Vec<usize> = (0..merged.arity()).collect();
-            let full_new = if merged.is_empty() {
+            let full_new = if self.buffer_row_count(&merged)? == 0 {
                 merged
             } else {
                 let dedup_input = merged.num_rows();
@@ -243,7 +245,11 @@ impl Executor {
 
             let delta_name = delta_tracker.delta_name(pred)?;
 
-            let delta_initial = if full_old.is_empty() || full_new.is_empty() {
+            let full_old_rows = self.buffer_row_count(&full_old)?;
+            let full_new_rows = self.buffer_row_count(&full_new)?;
+            let delta_initial = if full_new_rows == 0 {
+                self.create_empty_buffer(full_new.schema().clone())?
+            } else if full_old_rows == 0 {
                 self.clone_buffer(&full_new)?
             } else {
                 let diff_input = full_new.num_rows() + full_old.num_rows();
@@ -283,7 +289,7 @@ impl Executor {
                         Some(n) => n.to_string(),
                         None => continue,
                     };
-                    if !recursive_preds.contains(&pred_name) {
+                    if !recursive_pred_lookup.contains(&pred_name) {
                         continue;
                     }
 
@@ -292,12 +298,11 @@ impl Executor {
                         Some((_rel_id, name)) => name.as_str(),
                         None => continue,
                     };
-                    if self
-                        .store
-                        .get(delta_name)
-                        .map(|b| b.is_empty())
-                        .unwrap_or(true)
-                    {
+                    let delta_is_empty = match self.store.get(delta_name) {
+                        Some(delta) => self.buffer_row_count(delta)? == 0,
+                        None => true,
+                    };
+                    if delta_is_empty {
                         continue;
                     }
 
@@ -381,7 +386,7 @@ impl Executor {
 
                 let delta_raw = delta_new_raw_by_head.remove(pred);
                 let delta_new = if let Some(delta_raw) = delta_raw {
-                    if delta_raw.is_empty() {
+                    if self.buffer_row_count(&delta_raw)? == 0 {
                         self.create_empty_buffer(full.schema().clone())?
                     } else {
                         let diff_input = delta_raw.num_rows() + full.num_rows();
@@ -405,7 +410,7 @@ impl Executor {
                 };
 
                 let delta_name = delta_tracker.delta_name(pred)?.to_string();
-                if !delta_new.is_empty() {
+                if self.buffer_row_count(&delta_new)? != 0 {
                     delta_tracker.mark_changed();
                 }
                 self.store_put(&delta_name, delta_new);
@@ -429,7 +434,7 @@ impl Executor {
                     .store_remove(dn)
                     .ok_or_else(|| XlogError::Execution(format!("Missing relation: {}", dn)))?;
 
-                if delta.is_empty() {
+                if self.buffer_row_count(&delta)? == 0 {
                     self.store_put(pred, full_old);
                     self.store_put(dn, delta);
                     continue;
@@ -446,7 +451,7 @@ impl Executor {
                 }
 
                 let key_cols: Vec<usize> = (0..merged.arity()).collect();
-                let full_new = if merged.is_empty() {
+                let full_new = if self.buffer_row_count(&merged)? == 0 {
                     merged
                 } else {
                     let dedup_input = merged.num_rows();

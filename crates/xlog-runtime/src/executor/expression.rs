@@ -357,6 +357,7 @@ impl Executor {
         }
 
         let d_num_rows = self.clone_device_row_count(buffer)?;
+        self.provider.device().synchronize()?;
         Ok(CudaBuffer::from_columns(
             vec![dst_col.into()],
             num_rows,

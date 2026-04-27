@@ -1092,6 +1092,7 @@ impl super::CudaKernelProvider {
         device
             .dtod_copy(columns[0].num_rows_device(), &mut d_num_rows)
             .map_err(|e| XlogError::Kernel(format!("Failed to copy row count: {}", e)))?;
+        self.device.synchronize()?;
 
         let mut result_columns = Vec::with_capacity(columns.len());
         for (i, col_buf) in columns.into_iter().enumerate() {
