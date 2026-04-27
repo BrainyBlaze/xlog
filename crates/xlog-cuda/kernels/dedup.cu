@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include "totalorder.cuh"
 
 #define BLOCK_SIZE 256
 
@@ -349,23 +350,12 @@ extern "C" __global__ void mark_unique_full_row_bytewise(
 //
 //   * U32, U64, BOOL, SYMBOL: unsigned compare on raw bits.
 //   * I32, I64: sign-flipped unsigned compare (matches `^ 0x80...`).
-//   * F32, F64: total-order key compare (`f{32,64}_to_ordered_u{32,64}`),
-//     so binary search converges with the sort's ordering.
+//   * F32, F64: totalOrder key compare via the shared
+//     `xlog_f{32,64}_to_ordered_u{32,64}` helpers in `totalorder.cuh`,
+//     so the binary search converges with the sort's ordering.
 //
 // Equality is the same as bytewise equality across all the typed branches,
 // so the dedup mask kernel above and this comparator agree on equality.
-__device__ __forceinline__ uint32_t xlog_f32_to_ordered_u32(uint32_t bits) {
-    uint32_t sign = bits >> 31;
-    uint32_t mask = sign ? 0xFFFFFFFFu : 0x80000000u;
-    return bits ^ mask;
-}
-
-__device__ __forceinline__ uint64_t xlog_f64_to_ordered_u64(uint64_t bits) {
-    uint64_t sign = bits >> 63;
-    uint64_t mask = sign ? 0xFFFFFFFFFFFFFFFFull : 0x8000000000000000ull;
-    return bits ^ mask;
-}
-
 __device__ __forceinline__ int32_t xlog_typed_cmp_cell(
     const uint8_t* a_cell,
     const uint8_t* b_cell,

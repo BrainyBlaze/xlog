@@ -14,21 +14,30 @@ use super::{
 use crate::memory::TrackedCudaSlice;
 use crate::CudaBuffer;
 
-/// Per-column scalar-type encoding used by the deterministic full-row
-/// dedup/diff kernels. Must match the `XLOG_TY_*` defines in
-/// `kernels/dedup.cu`. Kept as a free function so the diff helper and
-/// any future full-row callers share one source of truth.
+// Per-column scalar-type encoding used by the deterministic full-row
+// dedup/diff kernels. Must match the `XLOG_TY_*` defines in
+// `kernels/dedup.cu`. Centralized here as named constants and one helper
+// so all full-row callers in this module share one source of truth.
+const XLOG_TY_U32: u8 = 0;
+const XLOG_TY_U64: u8 = 1;
+const XLOG_TY_I32: u8 = 2;
+const XLOG_TY_I64: u8 = 3;
+const XLOG_TY_F32: u8 = 4;
+const XLOG_TY_F64: u8 = 5;
+const XLOG_TY_BOOL: u8 = 6;
+const XLOG_TY_SYMBOL: u8 = 7;
+
 #[inline]
 fn scalar_type_code_dedup(ty: ScalarType) -> u8 {
     match ty {
-        ScalarType::U32 => 0,
-        ScalarType::U64 => 1,
-        ScalarType::I32 => 2,
-        ScalarType::I64 => 3,
-        ScalarType::F32 => 4,
-        ScalarType::F64 => 5,
-        ScalarType::Bool => 6,
-        ScalarType::Symbol => 7,
+        ScalarType::U32 => XLOG_TY_U32,
+        ScalarType::U64 => XLOG_TY_U64,
+        ScalarType::I32 => XLOG_TY_I32,
+        ScalarType::I64 => XLOG_TY_I64,
+        ScalarType::F32 => XLOG_TY_F32,
+        ScalarType::F64 => XLOG_TY_F64,
+        ScalarType::Bool => XLOG_TY_BOOL,
+        ScalarType::Symbol => XLOG_TY_SYMBOL,
     }
 }
 
@@ -275,18 +284,10 @@ impl super::CudaKernelProvider {
             )));
         }
 
-        fn scalar_type_code(ty: ScalarType) -> u8 {
-            match ty {
-                ScalarType::U32 => 0,
-                ScalarType::U64 => 1,
-                ScalarType::I32 => 2,
-                ScalarType::I64 => 3,
-                ScalarType::F32 => 4,
-                ScalarType::F64 => 5,
-                ScalarType::Bool => 6,
-                ScalarType::Symbol => 7,
-            }
-        }
+        // Use the module-level `scalar_type_code_dedup` so the host
+        // encoding stays in lockstep with the `XLOG_TY_*` defines in
+        // `kernels/dedup.cu`.
+        let scalar_type_code = scalar_type_code_dedup;
 
         let device = self.device.inner();
         let num_rows = input.num_rows() as u32;
@@ -1014,11 +1015,15 @@ impl super::CudaKernelProvider {
     /// anti-join (whose unordered parallel probe path can leak
     /// nondeterminism into recursive fixed-point convergence).
     fn diff_via_deterministic_set(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
-        let all_cols: Vec<usize> = (0..a.arity()).collect();
-
-        // Step 1: dedup both inputs to set semantics.
-        let deduped_a = self.dedup(a, &all_cols)?;
-        let deduped_b = self.dedup(b, &all_cols)?;
+        // Step 1: dedup both inputs to set semantics. Route through
+        // `dedup_full_row_deterministic` regardless of arity so the
+        // dedup step and the diff-probe typed comparator agree on
+        // equality even for single-column float buffers — the legacy
+        // `dedup` single-column kernel uses IEEE `==` (collapses
+        // +0/-0), which would mismatch the totalOrder-key probe and
+        // could drop one of {+0, -0} silently from the result.
+        let deduped_a = self.dedup_full_row_deterministic(a)?;
+        let deduped_b = self.dedup_full_row_deterministic(b)?;
 
         let a_rows = self.device_row_count(&deduped_a)? as u32;
         let b_rows = self.device_row_count(&deduped_b)? as u32;
@@ -1034,14 +1039,12 @@ impl super::CudaKernelProvider {
             return self.create_empty_buffer(a.schema().clone());
         }
 
-        // Step 2: ensure `b` is sorted; `dedup` returns sorted+deduped via
-        // the GPU full-row path, but for the single-column u32 path it
-        // may not be the same sort order. Sort explicitly to make the
-        // ordering invariant load-bearing.
-        let sorted_b = self.sort(&deduped_b, &all_cols)?;
-        // `a` doesn't strictly need to be sorted for the per-row probe,
-        // but sorting it gives nicer warp behavior on the binary search;
-        // skip for now to keep the first cut simple.
+        // Step 2: `dedup_full_row_deterministic` already returns `b`
+        // sorted by the same typed multi-column sort the diff probe's
+        // comparator agrees with, so reuse the deduplicated buffer
+        // directly — re-sorting would double the cost on a hot path
+        // (negation / delta subtraction).
+        let sorted_b = deduped_b;
 
         // Step 3: build the typed per-column descriptor arrays for the
         // diff kernel — ptrs and sizes per column for both a and b, plus
@@ -1147,11 +1150,21 @@ impl super::CudaKernelProvider {
     ///   * `+0.0` and `-0.0` are distinct.
     ///   * Two NaNs collapse iff bit-identical.
     ///
-    /// Existing call sites that prefer the legacy single-column key
-    /// behavior should keep using `dedup(input, &[0])` explicitly. The
-    /// runtime's deterministic Datalog tuple-set sites already pass
-    /// the all-columns key vector and route through this method's
-    /// underlying full-row pipeline via `dedup`.
+    /// Routing today (post-PR 2):
+    ///   * `dedup(input, &all_cols)` with `arity > 1` routes to the
+    ///     full-row pipeline (same semantics as this method).
+    ///   * `dedup(input, &[0])` with `arity == 1` keeps the legacy
+    ///     single-column GPU kernel — IEEE `==` for floats, so +0/-0
+    ///     collapse and NaNs collapse iff bit-identical-or-IEEE-eq.
+    ///   * `dedup_full_row(input)` always uses bytewise totalOrder
+    ///     equality for *all* arities, so single-column float
+    ///     callers must use this method explicitly to get the
+    ///     totalOrder semantics.
+    ///
+    /// Multi-column callers that pass the all-columns key vector to
+    /// `dedup` already route through the same deterministic full-row
+    /// pipeline; single-column callers that want totalOrder semantics
+    /// must call `dedup_full_row` directly.
     pub fn dedup_full_row(&self, input: &CudaBuffer) -> Result<CudaBuffer> {
         self.dedup_full_row_deterministic(input)
     }
