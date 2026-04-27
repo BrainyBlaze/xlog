@@ -215,9 +215,10 @@ fn strict_deterministic_d2h_clean_path() {
     };
 
     // Single-column facts-only program. Both single-column and
-    // multi-column EDB ingestion are GPU-D2H-clean as of PR 50; this
-    // test stays single-column because the gate-guard machinery is
-    // what's being exercised here, not the dedup pipeline.
+    // multi-column EDB ingestion are GPU-D2H-clean since the
+    // set-algebra GPU pipeline landed; this test stays single-column
+    // because the gate-guard machinery is what's being exercised
+    // here, not the dedup pipeline.
     let source = r#"
         node(1).
         node(2).
@@ -373,14 +374,15 @@ fn default_runtime_does_not_engage_gate() {
 
 /// Single-column negation seal under the strict gate.
 ///
-/// In the PR 49 baseline this program tripped the gate via the host-side
-/// `diff_via_deterministic_set` → `BTreeSet<Vec<u8>>` fallback used by
-/// stratified negation when the multi-column dedup path entered the
-/// host-collection branch (`provider/relational.rs::collect_deterministic_rows`).
-/// PR 2 replaces that fallback with a deterministic GPU pipeline (typed
-/// multi-column sort → bytewise adjacent-equality mask → exclusive scan →
-/// column-wise gather). After the swap the program must run cleanly under
-/// the strict gate with the correct result set.
+/// In the pre-set-algebra baseline this program tripped the gate via
+/// the host-side `diff_via_deterministic_set` → `BTreeSet<Vec<u8>>`
+/// fallback used by stratified negation when the multi-column dedup
+/// path entered the host-collection branch. The set-algebra GPU
+/// hardening replaced that fallback with a deterministic GPU
+/// pipeline (typed multi-column sort → bytewise adjacent-equality
+/// mask → exclusive scan → column-wise gather). After the swap the
+/// program must run cleanly under the strict gate with the correct
+/// result set.
 #[test]
 fn strict_deterministic_d2h_single_column_negation_clean() {
     let mut config = RuntimeConfig::default();
@@ -521,9 +523,10 @@ fn strict_deterministic_d2h_two_column_negation_full_row_semantics() {
 ///
 /// Proves that the recursive fixpoint preserves *full-row* equality
 /// AND that binary-join materialization is deterministic-D2H clean
-/// after PR 3 — the eight `Failed to read output count` sites in
-/// `provider/relational.rs` were reclassified as metadata reads via
-/// `dtoh_scalar_untracked`, which the strict gate explicitly allows.
+/// after the metadata-read hardening — the eight
+/// `Failed to read output count` sites in `provider/relational.rs`
+/// were reclassified as metadata reads via `dtoh_scalar_untracked`,
+/// which the strict gate explicitly allows.
 ///
 /// With key-based dedup, rows `(1,2),(1,3),(1,4)` would collapse to a
 /// single entry. With full-row dedup all three survive and the answer
