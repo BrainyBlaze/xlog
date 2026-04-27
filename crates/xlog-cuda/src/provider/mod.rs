@@ -424,6 +424,8 @@ pub mod dedup_kernels {
     pub const MARK_UNIQUE_COLUMNAR: &str = "mark_unique_columnar";
     pub const MARK_UNIQUE_AND_SCAN_COLUMNAR: &str = "mark_unique_and_scan_columnar";
     pub const COMPACT_ROWS: &str = "compact_rows";
+    pub const MARK_UNIQUE_FULL_ROW_BYTEWISE: &str = "mark_unique_full_row_bytewise";
+    pub const MARK_DIFF_FULL_ROW_TYPED_SORTED: &str = "mark_diff_full_row_typed_sorted";
 }
 
 /// Kernel function names in the groupby module
