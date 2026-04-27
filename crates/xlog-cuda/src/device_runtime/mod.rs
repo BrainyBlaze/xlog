@@ -16,10 +16,12 @@
 //! ```
 //!
 //! Required resources:
-//!   * [`DirectCudaResource`] — `cuMemAlloc`/`cuMemFree`. Default for
-//!     sanitizer / debug / certification: pool suballocation hides
-//!     out-of-bounds access from Compute Sanitizer, so the
-//!     correctness-gating path goes through the direct backend.
+//!   * [`DirectCudaResource`] — cudarc direct allocation backend
+//!     (synchronous `CudaDevice::alloc::<u8>` / drop). Intended as
+//!     the candidate sanitizer/cert backend because pool suballocation
+//!     hides out-of-bounds access from Compute Sanitizer. The
+//!     sanitizer-visibility property is **unproven** until the M1
+//!     acceptance gate runs on a Compute-Sanitizer-supported host.
 //!   * `AsyncCudaResource` — `cuMemAllocAsync`/`cuMemFreeAsync` via the
 //!     stream pool; production default when supported.
 //!   * `PoolResource` — performance tier, not part of this PR; gated

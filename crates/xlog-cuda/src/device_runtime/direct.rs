@@ -1,21 +1,26 @@
-//! [`DirectCudaResource`] — synchronous `cuMemAlloc` / `cuMemFree`
-//! backend.
+//! [`DirectCudaResource`] — cudarc direct allocation backend.
 //!
-//! Default for sanitizer / debug / certification mode. Each
-//! [`DeviceMemoryResource::allocate`] call performs a fresh
-//! `cuMemAlloc` (no pooling, no suballocation), and each
-//! [`DeviceMemoryResource::deallocate`] call performs a `cuMemFree` —
-//! so out-of-bounds access patterns are visible to Compute Sanitizer
-//! at byte granularity, which is the load-bearing reason this backend
-//! exists separately from the future async/pool tiers.
+//! Each [`DeviceMemoryResource::allocate`] call goes through cudarc's
+//! synchronous `CudaDevice::alloc::<u8>(bytes)` (no pooling, no
+//! suballocation in this layer). Deallocate drops the underlying
+//! `CudaSlice<u8>`, which invokes `cuMemFree` via cudarc.
 //!
-//! Stream-ordered semantics on a synchronous backend are degenerate:
-//! `cuMemAlloc`/`cuMemFree` are device-wide and not stream-ordered, so
-//! reuse across streams is always safe (assuming the caller has
-//! synchronized before deallocating). The backend still records the
-//! `alloc_stream` for downstream resources and tests; it does not
-//! enforce stream-ordering itself because the underlying API has none.
-//! That enforcement is `AsyncCudaResource`'s job.
+//! **Sanitizer status: unproven.** The intent of keeping a
+//! non-pooled backend is that pool suballocation hides byte-level
+//! out-of-bounds access from Compute Sanitizer. This backend is the
+//! candidate for that role, but the **M1 acceptance gate** (manual,
+//! Compute-Sanitizer-supported host) has not been run yet. Do not
+//! describe this backend as "sanitizer-certified" until M1 has
+//! produced a captured negative-test pass.
+//!
+//! Stream-ordered semantics on the cudarc synchronous path are
+//! degenerate: `cuMemAlloc`/`cuMemFree` are device-wide and not
+//! stream-ordered, so reuse across streams is always safe assuming
+//! the caller has synchronized before deallocating. The backend
+//! records the `alloc_stream` field for downstream resources and
+//! tests; it does not enforce stream-ordering itself because the
+//! underlying API has none. That enforcement is `AsyncCudaResource`'s
+//! job (separate commit).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};

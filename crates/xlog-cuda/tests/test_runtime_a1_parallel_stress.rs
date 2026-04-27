@@ -8,12 +8,17 @@
 //! matches, then deallocate. After all threads finish,
 //! `bytes_outstanding()` must return to its baseline.
 //!
-//! Status: this test is expected to **pass** on `DirectCudaResource`.
-//! `cuMemAlloc`/`cuMemFree` are device-wide and synchronous, so
-//! parallel callers should not see overlapping allocations or
-//! corrupted bookkeeping. A failure indicates a real bug in the
-//! direct backend or the singleton — stop and debug, do not advance
-//! to A2.
+//! Status: this test is expected to **pass** on `DirectCudaResource`
+//! (the cudarc direct allocation backend). cudarc's synchronous
+//! `CudaDevice::alloc::<u8>` and the underlying `cuMemAlloc`/
+//! `cuMemFree` are device-wide and not stream-ordered, so parallel
+//! callers should not see overlapping allocations or corrupted
+//! bookkeeping. A failure indicates a real bug in the direct backend
+//! or the singleton — stop and debug, do not advance to A2.
+//!
+//! A1 is a sanity gate for the singleton + resource layer, not a
+//! demonstration of stream-ordered correctness. The async-backend
+//! contract is A2's job.
 //!
 //! The byte-pattern check goes through `cuMemcpyHtoD_v2` /
 //! `cuMemcpyDtoH_v2` on the raw `DeviceBlock::ptr`. This is the
