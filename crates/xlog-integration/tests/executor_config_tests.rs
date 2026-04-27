@@ -638,6 +638,11 @@ fn strict_deterministic_d2h_inner_join_materialize_clean() {
         .expect("path relation present after execution");
     let col0 = provider.download_column::<u32>(path, 0).unwrap();
     let col1 = provider.download_column::<u32>(path, 1).unwrap();
+    assert_eq!(
+        col0.len(),
+        col1.len(),
+        "path relation columns must have the same row count before zipping"
+    );
     let mut got: Vec<(u32, u32)> = col0.into_iter().zip(col1).collect();
     got.sort_unstable();
     // edge(X,Y) joined with edge(Y,Z) over {(1,2),(1,3),(2,4),(3,4),(4,5)}:

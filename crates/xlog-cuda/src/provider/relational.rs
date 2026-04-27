@@ -1202,8 +1202,19 @@ impl super::CudaKernelProvider {
     /// GPU-resident output buffer can localize the upgrade here once a
     /// memory-budget-aware upper bound exists.
     fn read_join_output_count_metadata(&self, d_count: &TrackedCudaSlice<u32>) -> Result<u32> {
+        // Avoid double-prefixing the error string. `XlogError` Display
+        // already prefixes its variants (e.g. "Kernel error: ..."), so
+        // wrapping the whole error would produce
+        // "Kernel error: Failed to read output count: Kernel error: ...".
+        // Extract the inner message for the common Kernel variant; fall
+        // back to Display for everything else.
         self.dtoh_scalar_untracked::<u32>(d_count, 0)
-            .map_err(|e| XlogError::Kernel(format!("Failed to read output count: {}", e)))
+            .map_err(|e| match e {
+                XlogError::Kernel(message) => {
+                    XlogError::Kernel(format!("Failed to read output count: {}", message))
+                }
+                other => XlogError::Kernel(format!("Failed to read output count: {}", other)),
+            })
     }
 
     fn is_full_row_key(key_cols: &[usize], arity: usize) -> bool {
