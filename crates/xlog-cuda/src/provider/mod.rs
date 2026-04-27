@@ -413,6 +413,11 @@ pub mod join_kernels {
     pub const HASH_JOIN_BUCKET_COUNT_V2: &str = "hash_join_bucket_count_v2";
     pub const HASH_JOIN_SCATTER_V2: &str = "hash_join_scatter_v2";
     pub const HASH_JOIN_PROBE_V2: &str = "hash_join_probe_v2";
+    pub const HASH_JOIN_PROBE_V2_COUNT_PER_ROW: &str = "hash_join_probe_v2_count_per_row";
+    pub const HASH_JOIN_PROBE_V2_MATERIALIZE: &str = "hash_join_probe_v2_materialize";
+    pub const HASH_JOIN_TOTAL_FROM_SCAN: &str = "hash_join_total_from_scan";
+    pub const HASH_JOIN_LEFT_OUTER_COUNT_PER_ROW: &str = "hash_join_left_outer_count_per_row";
+    pub const HASH_JOIN_LEFT_OUTER_MATERIALIZE: &str = "hash_join_left_outer_materialize";
     pub const HASH_JOIN_SEMI: &str = "hash_join_semi";
     pub const HASH_JOIN_ANTI: &str = "hash_join_anti";
     pub const INIT_HASH_TABLE: &str = "init_hash_table";
@@ -468,6 +473,8 @@ pub mod sort_kernels {
     pub const INIT_INDICES: &str = "init_indices";
     pub const APPLY_PERMUTATION_U32: &str = "apply_permutation_u32";
     pub const APPLY_PERMUTATION_BYTES: &str = "apply_permutation_bytes";
+    pub const APPLY_PERMUTATION_BYTES_LEFT_OUTER_NULL_SENTINEL: &str =
+        "apply_permutation_bytes_left_outer_null_sentinel";
 
     pub const GATHER_KEYS_I32_ORDERED_U32: &str = "gather_keys_i32_ordered_u32";
     pub const GATHER_KEYS_F32_ORDERED_U32: &str = "gather_keys_f32_ordered_u32";
@@ -745,6 +752,21 @@ pub struct CudaKernelProvider {
     /// the last reset. Increments even on the failing path (the originating
     /// call still returns `Err`); kept for telemetry and tests.
     deterministic_d2h_violations: AtomicU64,
+    /// Cumulative count of control-plane D2H scalar reads (row-count cache
+    /// misses, `dtoh_scalar_untracked` metadata reads). The strict gate
+    /// allows these by design — they are the "metadata escape hatch" — but
+    /// the v0.5.5 GPU-resident binary-join hardening uses this counter to
+    /// prove that the deterministic join hot path issues *zero* such reads.
+    /// Reset / read like the violation counter; success-path acceptance
+    /// tests assert `control_plane_d2h_read_count() == 0`.
+    control_plane_d2h_reads: AtomicU64,
+    /// Cumulative count of explicitly sanctioned status reads, e.g. a
+    /// caller consuming a deferred GPU overflow/budget-exceeded flag via
+    /// a named API. These are the only reads exempt from the
+    /// "deterministic join must be zero-D2H" contract. Counted, never
+    /// silent; success-path tests assert this is 0, error-path tests
+    /// assert exactly the number of sanctioned reads they invoked.
+    sanctioned_status_reads: AtomicU64,
 }
 
 #[derive(Default)]
@@ -822,6 +844,8 @@ impl CudaKernelProvider {
             d2h_transfer_count: AtomicU64::new(0),
             strict_deterministic_d2h: AtomicBool::new(false),
             deterministic_d2h_violations: AtomicU64::new(0),
+            control_plane_d2h_reads: AtomicU64::new(0),
+            sanctioned_status_reads: AtomicU64::new(0),
         })
     }
 
@@ -911,6 +935,87 @@ impl CudaKernelProvider {
     /// If the gate is enabled, increments the violation counter and returns
     /// `XlogError::Execution` naming the offending operation and byte count.
     /// If the gate is disabled, returns `Ok(())` cheaply.
+    /// Cumulative count of control-plane D2H scalar reads (row-count
+    /// cache misses, `dtoh_scalar_untracked` metadata reads) observed
+    /// since the last reset.
+    pub fn control_plane_d2h_read_count(&self) -> u64 {
+        self.control_plane_d2h_reads.load(Ordering::Relaxed)
+    }
+
+    /// Reset the control-plane D2H scalar-read counter to zero.
+    pub fn reset_control_plane_d2h_reads(&self) {
+        self.control_plane_d2h_reads.store(0, Ordering::Relaxed);
+    }
+
+    /// Cumulative count of explicitly sanctioned status reads (e.g.
+    /// deferred overflow/budget-exceeded consumption) since the last reset.
+    pub fn sanctioned_status_read_count(&self) -> u64 {
+        self.sanctioned_status_reads.load(Ordering::Relaxed)
+    }
+
+    /// Reset the sanctioned status-read counter to zero.
+    pub fn reset_sanctioned_status_reads(&self) {
+        self.sanctioned_status_reads.store(0, Ordering::Relaxed);
+    }
+
+    /// Increment the sanctioned status-read counter. Use ONLY from a
+    /// named API that consumes a device-resident status flag (e.g. a
+    /// deferred GPU overflow indicator). Every increment must be
+    /// auditable from the call site.
+    pub(crate) fn record_sanctioned_status_read(&self) {
+        self.sanctioned_status_reads.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Consume a buffer's deferred overflow status flag, if any.
+    ///
+    /// Binary-join materialization (post v0.5.5 hardening) writes its
+    /// overflow indicator to a device-resident byte attached to the
+    /// result buffer. Calling this method reads that byte once,
+    /// returning:
+    ///   * `Ok(false)`: no overflow (or no flag attached).
+    ///   * `Ok(true)`: overflow occurred — the result buffer was
+    ///     truncated to the host-allocated capacity.
+    ///
+    /// Each successful call increments `sanctioned_status_read_count`
+    /// by exactly one. This is the **only** sanctioned host-side scalar
+    /// read in the deterministic-Datalog hot path; success-path
+    /// acceptance tests assert the counter is 0, error-path tests
+    /// assert it is exactly 1 per consume.
+    ///
+    /// Once consumed, the flag remains attached to the buffer; repeat
+    /// calls re-read and re-increment the counter. Callers that want
+    /// "exactly once" semantics should consume eagerly and store the
+    /// result.
+    pub fn try_consume_overflow_status(&self, buffer: &CudaBuffer) -> Result<bool> {
+        let Some(flag) = buffer.overflow_flag() else {
+            return Ok(false);
+        };
+        // Sanctioned status read: counted exactly once, exempt from
+        // `control_plane_d2h_reads` so success-path acceptance tests
+        // can pin both counters at 0 simultaneously while error-path
+        // tests pin `sanctioned_status_reads == 1`.
+        self.record_sanctioned_status_read();
+        let slice = flag.try_slice(0..1).ok_or_else(|| {
+            XlogError::Kernel("try_consume_overflow_status: overflow flag slice failed".to_string())
+        })?;
+        let mut buf = [0u8];
+        self.device
+            .inner()
+            .dtoh_sync_copy_into(&slice, &mut buf)
+            .map_err(|e| {
+                XlogError::Kernel(format!("try_consume_overflow_status: dtoh failed: {}", e))
+            })?;
+        Ok(buf[0] != 0)
+    }
+
+    /// Increment the control-plane D2H scalar-read counter. Called from
+    /// `device_row_count`'s cache-miss path and `dtoh_scalar_untracked`.
+    /// Tests use this to prove the deterministic-join hot path issues
+    /// zero control-plane reads.
+    pub(crate) fn record_control_plane_d2h_read(&self) {
+        self.control_plane_d2h_reads.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub(crate) fn check_deterministic_d2h(&self, op: &'static str, bytes: u64) -> Result<()> {
         if self.strict_deterministic_d2h.load(Ordering::Relaxed) {
             self.deterministic_d2h_violations
@@ -951,6 +1056,10 @@ impl CudaKernelProvider {
         src: &crate::memory::TrackedCudaSlice<T>,
         index: usize,
     ) -> Result<T> {
+        // Control-plane scalar read: counted so the v0.5.5
+        // GPU-resident-binary-join hardening can assert the join hot
+        // path issues zero such reads on success paths.
+        self.record_control_plane_d2h_read();
         if index >= src.len() {
             return Err(XlogError::Kernel(format!(
                 "dtoh_scalar_untracked: index={} >= len={}",
@@ -1213,6 +1322,13 @@ impl CudaKernelProvider {
         if let Some(n) = buffer.cached_row_count() {
             return Ok(n as usize);
         }
+        // Control-plane scalar read: counted under the v0.5.5
+        // GPU-resident-binary-join hardening so success-path acceptance
+        // tests can prove the deterministic join hot path issues zero
+        // such reads. The strict-D2H gate continues to allow the read
+        // (it's metadata, not tuple data); this counter is independent
+        // of the gate and exists for tighter join-path accounting.
+        self.record_control_plane_d2h_read();
         let mut host_rows = [0u32];
         self.device
             .inner()
@@ -2479,36 +2595,40 @@ mod tests {
         let left = create_test_buffer(&provider, &[1, 1, 1, 1, 2, 2, 2, 2], "left_key");
         let right = create_test_buffer(&provider, &[1, 1, 1, 2, 2, 2], "right_key");
 
-        // Test with limit of 10 - should get at most 10
+        // Test with limit of 10 - should get at most 10. After the v0.5.5
+        // GPU-resident-binary-join hardening, `num_rows()` returns the
+        // host-known capacity (an upper bound) and the actual logical
+        // row count is read via `device_row_count`.
         let result_limited = provider
             .hash_join_v2_with_limit(&left, &right, &[0], &[0], JoinType::Inner, Some(10))
             .expect("join with limit should succeed");
+        let limited_rows = provider.device_row_count(&result_limited).unwrap();
         assert!(
-            result_limited.num_rows() <= 10,
-            "With limit 10, got {} rows but expected at most 10",
-            result_limited.num_rows()
+            limited_rows <= 10,
+            "With limit 10, got {} logical rows but expected at most 10",
+            limited_rows
         );
 
-        // Test with None (default) - should get all 24 results
+        // Test with None (default) - should get all 24 results.
         let result_unlimited = provider
             .hash_join_v2_with_limit(&left, &right, &[0], &[0], JoinType::Inner, None)
             .expect("join without limit should succeed");
+        let unlimited_rows = provider.device_row_count(&result_unlimited).unwrap();
         assert_eq!(
-            result_unlimited.num_rows(),
-            24,
-            "Without limit, expected 24 rows but got {}",
-            result_unlimited.num_rows()
+            unlimited_rows, 24,
+            "Without limit, expected 24 logical rows but got {}",
+            unlimited_rows
         );
 
-        // Test legacy API still works (backward compatibility)
+        // Test legacy API still works (backward compatibility).
         let result_legacy = provider
             .hash_join_v2(&left, &right, &[0], &[0], JoinType::Inner)
             .expect("legacy hash_join_v2 should succeed");
+        let legacy_rows = provider.device_row_count(&result_legacy).unwrap();
         assert_eq!(
-            result_legacy.num_rows(),
-            24,
-            "Legacy API without limit, expected 24 rows but got {}",
-            result_legacy.num_rows()
+            legacy_rows, 24,
+            "Legacy API without limit, expected 24 logical rows but got {}",
+            legacy_rows
         );
     }
 

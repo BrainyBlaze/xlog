@@ -252,6 +252,283 @@ extern "C" __global__ void hash_join_probe_v2(
 }
 
 /**
+ * Inner-join probe — count-only pass for the deterministic
+ * count→prefix-scan→materialize flow. Each thread writes its own slot
+ * in `out_per_probe_count[num_probe]`, so there are no global atomics.
+ *
+ * The follow-up pipeline scans the per-probe array exclusively to
+ * produce per-probe write offsets, then `hash_join_probe_v2_materialize`
+ * writes to the deterministic offsets without atomic-append.
+ */
+extern "C" __global__ void hash_join_probe_v2_count_per_row(
+    const uint64_t* __restrict__ probe_hashes,
+    const uint32_t* __restrict__ num_probe_device,
+    uint32_t probe_cap,
+    const uint32_t* __restrict__ bucket_offsets,
+    const uint32_t* __restrict__ bucket_counts,
+    const uint32_t* __restrict__ bucket_entries,
+    const uint64_t* __restrict__ bucket_entry_hashes,
+    uint32_t bucket_mask,
+    const uint8_t* __restrict__ probe_keys,
+    const uint8_t* __restrict__ build_keys,
+    uint32_t key_bytes,
+    uint32_t* __restrict__ out_per_probe_count
+) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= probe_cap) return;
+
+    uint32_t num_probe = *num_probe_device;
+    if (num_probe > probe_cap) num_probe = probe_cap;
+    if (tid >= num_probe) {
+        out_per_probe_count[tid] = 0;
+        return;
+    }
+
+    uint64_t hash = probe_hashes[tid];
+    uint32_t h32 = (uint32_t)(hash ^ (hash >> 32));
+    uint32_t bucket = h32 & bucket_mask;
+
+    uint32_t start = bucket_offsets[bucket];
+    uint32_t count = bucket_counts[bucket];
+
+    uint32_t matches = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t pos = start + i;
+        if (bucket_entry_hashes[pos] == hash) {
+            uint32_t build_idx = bucket_entries[pos];
+            if (keys_equal(probe_keys, build_keys, tid, build_idx, key_bytes)) {
+                matches++;
+            }
+        }
+    }
+    out_per_probe_count[tid] = matches;
+}
+
+/**
+ * Inner-join probe — materialize pass with deterministic per-probe
+ * offsets supplied by the caller (typically the output of an exclusive
+ * prefix scan over the per-probe count array).
+ *
+ * Each probe row writes its `local`-th match to
+ * `output[per_probe_offsets[tid] + local]` directly. Output order is a
+ * deterministic function of probe-row index and per-row match-discovery
+ * order; no global atomic determines positions.
+ *
+ * If a probe row's offset + match would exceed `output_capacity`, the
+ * write is suppressed and `d_overflow` is raised. The caller treats
+ * the overflow flag as a deferred status (consumed via a sanctioned
+ * status-read API) — a non-zero flag means the result is truncated to
+ * the first `output_capacity` rows in deterministic order.
+ */
+extern "C" __global__ void hash_join_probe_v2_materialize(
+    const uint64_t* __restrict__ probe_hashes,
+    const uint32_t* __restrict__ num_probe_device,
+    uint32_t probe_cap,
+    const uint32_t* __restrict__ bucket_offsets,
+    const uint32_t* __restrict__ bucket_counts,
+    const uint32_t* __restrict__ bucket_entries,
+    const uint64_t* __restrict__ bucket_entry_hashes,
+    uint32_t bucket_mask,
+    const uint8_t* __restrict__ probe_keys,
+    const uint8_t* __restrict__ build_keys,
+    uint32_t key_bytes,
+    const uint32_t* __restrict__ per_probe_offsets,
+    uint32_t output_capacity,
+    uint32_t* __restrict__ output_left,
+    uint32_t* __restrict__ output_right,
+    uint8_t* __restrict__ d_overflow
+) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= probe_cap) return;
+
+    uint32_t num_probe = *num_probe_device;
+    if (num_probe > probe_cap) num_probe = probe_cap;
+    if (tid >= num_probe) return;
+
+    uint64_t hash = probe_hashes[tid];
+    uint32_t h32 = (uint32_t)(hash ^ (hash >> 32));
+    uint32_t bucket = h32 & bucket_mask;
+
+    uint32_t start = bucket_offsets[bucket];
+    uint32_t count = bucket_counts[bucket];
+
+    uint32_t base = per_probe_offsets[tid];
+    uint32_t local = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t pos = start + i;
+        if (bucket_entry_hashes[pos] == hash) {
+            uint32_t build_idx = bucket_entries[pos];
+            if (keys_equal(probe_keys, build_keys, tid, build_idx, key_bytes)) {
+                uint32_t out_idx = base + local;
+                local++;
+                if (out_idx < output_capacity) {
+                    output_left[out_idx] = tid;
+                    output_right[out_idx] = build_idx;
+                } else {
+                    *d_overflow = 1;
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Left-outer probe — count-per-probe-row pass.
+ *
+ * For each probe row, write `matches > 0 ? matches : 1` so the
+ * subsequent exclusive scan and materialize allocate one output slot
+ * per unmatched probe row (the slot will hold the "null right" tuple).
+ */
+extern "C" __global__ void hash_join_left_outer_count_per_row(
+    const uint64_t* __restrict__ probe_hashes,
+    const uint32_t* __restrict__ num_probe_device,
+    uint32_t probe_cap,
+    const uint32_t* __restrict__ bucket_offsets,
+    const uint32_t* __restrict__ bucket_counts,
+    const uint32_t* __restrict__ bucket_entries,
+    const uint64_t* __restrict__ bucket_entry_hashes,
+    uint32_t bucket_mask,
+    const uint8_t* __restrict__ probe_keys,
+    const uint8_t* __restrict__ build_keys,
+    uint32_t key_bytes,
+    uint32_t* __restrict__ out_per_probe_count
+) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= probe_cap) return;
+
+    uint32_t num_probe = *num_probe_device;
+    if (num_probe > probe_cap) num_probe = probe_cap;
+    if (tid >= num_probe) {
+        out_per_probe_count[tid] = 0;
+        return;
+    }
+
+    uint64_t hash = probe_hashes[tid];
+    uint32_t h32 = (uint32_t)(hash ^ (hash >> 32));
+    uint32_t bucket = h32 & bucket_mask;
+    uint32_t start = bucket_offsets[bucket];
+    uint32_t count = bucket_counts[bucket];
+
+    uint32_t matches = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t pos = start + i;
+        if (bucket_entry_hashes[pos] == hash) {
+            uint32_t build_idx = bucket_entries[pos];
+            if (keys_equal(probe_keys, build_keys, tid, build_idx, key_bytes)) {
+                matches++;
+            }
+        }
+    }
+    out_per_probe_count[tid] = matches > 0 ? matches : 1;
+}
+
+/**
+ * Left-outer materialize. For each probe row writes either its matched
+ * pairs at the deterministic per-probe offset or a single
+ * null-sentinel row when there were no matches.
+ *
+ * `output_right[i] == 0xFFFFFFFF` is the unmatched sentinel; the
+ * right-side gather kernel
+ * (`apply_permutation_bytes_left_outer_null_sentinel`) interprets it
+ * as "write zero bytes for this row".
+ */
+extern "C" __global__ void hash_join_left_outer_materialize(
+    const uint64_t* __restrict__ probe_hashes,
+    const uint32_t* __restrict__ num_probe_device,
+    uint32_t probe_cap,
+    const uint32_t* __restrict__ bucket_offsets,
+    const uint32_t* __restrict__ bucket_counts,
+    const uint32_t* __restrict__ bucket_entries,
+    const uint64_t* __restrict__ bucket_entry_hashes,
+    uint32_t bucket_mask,
+    const uint8_t* __restrict__ probe_keys,
+    const uint8_t* __restrict__ build_keys,
+    uint32_t key_bytes,
+    const uint32_t* __restrict__ per_probe_offsets,
+    uint32_t output_capacity,
+    uint32_t* __restrict__ output_left,
+    uint32_t* __restrict__ output_right,
+    uint8_t* __restrict__ d_overflow
+) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= probe_cap) return;
+
+    uint32_t num_probe = *num_probe_device;
+    if (num_probe > probe_cap) num_probe = probe_cap;
+    if (tid >= num_probe) return;
+
+    uint64_t hash = probe_hashes[tid];
+    uint32_t h32 = (uint32_t)(hash ^ (hash >> 32));
+    uint32_t bucket = h32 & bucket_mask;
+    uint32_t start = bucket_offsets[bucket];
+    uint32_t count = bucket_counts[bucket];
+
+    uint32_t base = per_probe_offsets[tid];
+    uint32_t local = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t pos = start + i;
+        if (bucket_entry_hashes[pos] == hash) {
+            uint32_t build_idx = bucket_entries[pos];
+            if (keys_equal(probe_keys, build_keys, tid, build_idx, key_bytes)) {
+                uint32_t out_idx = base + local;
+                local++;
+                if (out_idx < output_capacity) {
+                    output_left[out_idx] = tid;
+                    output_right[out_idx] = build_idx;
+                } else {
+                    *d_overflow = 1;
+                }
+            }
+        }
+    }
+    if (local == 0) {
+        // Unmatched probe row: emit one row at `base` with the null sentinel.
+        if (base < output_capacity) {
+            output_left[base] = tid;
+            output_right[base] = 0xFFFFFFFFu;
+        } else {
+            *d_overflow = 1;
+        }
+    }
+}
+
+/**
+ * Compute the total of an exclusive scan on a per-probe count array,
+ * clamp to `capacity`, and write to `d_logical_count`. If the unclamped
+ * total exceeds `capacity`, set `d_overflow` to 1.
+ *
+ * Single-thread kernel; reads two scalars from the device buffers and
+ * writes one scalar. Used to derive the join result's logical row
+ * count without a host-side D2H of the post-scan total.
+ */
+extern "C" __global__ void hash_join_total_from_scan(
+    const uint32_t* __restrict__ per_probe_offsets,
+    const uint32_t* __restrict__ per_probe_count,
+    const uint32_t* __restrict__ num_probe_device,
+    uint32_t probe_cap,
+    uint32_t capacity,
+    uint32_t* __restrict__ d_logical_count,
+    uint8_t* __restrict__ d_overflow
+) {
+    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+    uint32_t num_probe = *num_probe_device;
+    if (num_probe > probe_cap) num_probe = probe_cap;
+    if (num_probe == 0) {
+        *d_logical_count = 0;
+        return;
+    }
+    uint32_t tail_off = per_probe_offsets[num_probe - 1];
+    uint32_t tail_cnt = per_probe_count[num_probe - 1];
+    uint32_t total = tail_off + tail_cnt;
+    if (total > capacity) {
+        *d_overflow = 1;
+        *d_logical_count = capacity;
+    } else {
+        *d_logical_count = total;
+    }
+}
+
+/**
  * Semi-join: mark probe rows that have any match.
  * @param probe_hashes Hash values for probe side
  * @param num_probe Number of probe rows

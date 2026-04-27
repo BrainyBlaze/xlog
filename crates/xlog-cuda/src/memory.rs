@@ -478,6 +478,12 @@ pub struct CudaBuffer {
     /// Cached host-side row count (u32::MAX = not yet cached).
     /// Avoids repeated synchronous D2H transfers for the immutable row count.
     cached_row_count: AtomicU32,
+    /// Optional device-resident overflow flag set by upstream kernels
+    /// (e.g. binary-join materialization that exceeded the budget-capped
+    /// output capacity). The flag is consumed via the deferred
+    /// status-read API on `CudaKernelProvider`; its presence does NOT
+    /// trigger a host read on its own.
+    overflow_flag: Option<TrackedCudaSlice<u8>>,
 }
 
 impl CudaBuffer {
@@ -510,7 +516,22 @@ impl CudaBuffer {
             d_num_rows,
             schema,
             cached_row_count: AtomicU32::new(u32::MAX),
+            overflow_flag: None,
         }
+    }
+
+    /// Attach a device-resident overflow flag (one byte, 0 = no
+    /// overflow, non-zero = overflow). Consumed via the deferred
+    /// status-read API. Reads do not happen until that API is
+    /// explicitly called by the consumer.
+    pub fn set_overflow_flag(&mut self, flag: TrackedCudaSlice<u8>) {
+        self.overflow_flag = Some(flag);
+    }
+
+    /// Borrow the device-resident overflow flag, if any. Used by the
+    /// sanctioned status-read API on `CudaKernelProvider`.
+    pub fn overflow_flag(&self) -> Option<&TrackedCudaSlice<u8>> {
+        self.overflow_flag.as_ref()
     }
 
     /// Like `from_columns`, but eagerly populates the row-count cache.
@@ -535,6 +556,7 @@ impl CudaBuffer {
             d_num_rows,
             schema,
             cached_row_count: AtomicU32::new(host_row_count),
+            overflow_flag: None,
         }
     }
 
