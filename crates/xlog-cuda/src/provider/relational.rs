@@ -1189,17 +1189,18 @@ impl super::CudaKernelProvider {
     /// count (in the post-materialize pass). It is control-plane state
     /// in the same sense as a relation's row count — never tuple data.
     ///
-    /// The strict deterministic-Datalog D2H gate (PR 49) explicitly
-    /// allows this category via `dtoh_scalar_untracked`, which is the
-    /// auditable, single-purpose API for metadata reads.
+    /// The strict deterministic-Datalog D2H gate explicitly allows this
+    /// category via `dtoh_scalar_untracked`, which is the auditable,
+    /// single-purpose API for metadata reads.
     ///
-    /// PR 3 in the v0.5.5 chain replaces eight `dtoh_sync_copy_into_tracked`
-    /// reads of these scalars with this helper, so binary-join
-    /// materialization runs strict-clean. **This does not make
-    /// binary-join materialization fully GPU-resident**: the count is
-    /// still a host scalar, used by host code to drive allocation. A
-    /// future "Pattern B" effort (v0.6+) can localize the upgrade here
-    /// once a memory-budget-aware upper bound exists.
+    /// The v0.5.5 metadata-read hardening replaced eight
+    /// `dtoh_sync_copy_into_tracked` reads of these scalars with this
+    /// helper, so binary-join materialization runs strict-clean.
+    /// **This does not make binary-join materialization fully
+    /// GPU-resident**: the count is still a host scalar, used by host
+    /// code to drive allocation. A future worst-case-bounded
+    /// GPU-resident output buffer can localize the upgrade here once a
+    /// memory-budget-aware upper bound exists.
     fn read_join_output_count_metadata(&self, d_count: &TrackedCudaSlice<u32>) -> Result<u32> {
         self.dtoh_scalar_untracked::<u32>(d_count, 0)
             .map_err(|e| XlogError::Kernel(format!("Failed to read output count: {}", e)))
@@ -1228,8 +1229,8 @@ impl super::CudaKernelProvider {
     /// post-sort buffer is the same membership relation. +0/-0 stay
     /// distinct; two NaNs collapse iff bit-identical.
     ///
-    /// Replaces the host-side `BTreeSet<Vec<u8>>` fallback that PR 49's
-    /// strict deterministic-D2H gate flags as a violator.
+    /// Replaces the host-side `BTreeSet<Vec<u8>>` fallback that the
+    /// strict deterministic-Datalog D2H gate flags as a violator.
     fn dedup_full_row_deterministic(&self, input: &CudaBuffer) -> Result<CudaBuffer> {
         let row_count = self.device_row_count(input)?;
         if row_count == 0 {

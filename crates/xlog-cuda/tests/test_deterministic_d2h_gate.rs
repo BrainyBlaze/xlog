@@ -174,3 +174,62 @@ fn gate_recovers_after_violation() {
     let v = provider.download_column::<u32>(&buf, 0).unwrap();
     assert_eq!(v, vec![7u32, 8]);
 }
+
+/// Targeted strict-gate coverage for `JoinType::LeftOuter`.
+///
+/// The runtime integration test (`*_inner_join_materialize_clean`)
+/// exercises only the inner-join path through Datalog rule lowering;
+/// `LeftOuter` is an internal IR-level join type not directly reachable
+/// from a Datalog rule body. This kernel-level test calls
+/// `hash_join_v2(.., JoinType::LeftOuter)` directly with the strict
+/// gate enabled, asserting both result correctness and zero
+/// `deterministic_d2h_violation_count()`.
+///
+/// Together with the inner-join integration test, this proves the
+/// metadata-read reclassification covers both `hash_join_inner_v2*`
+/// and `hash_join_left_outer_*` count paths under the strict gate.
+#[test]
+fn left_outer_join_strict_gate_clean() {
+    let Some(provider) = setup_provider() else {
+        return;
+    };
+
+    let left_schema = Schema::new(vec![("lval".to_string(), ScalarType::U32)]);
+    let right_schema = Schema::new(vec![("rval".to_string(), ScalarType::U32)]);
+    let left_buf = provider
+        .create_buffer_from_slice::<u32>(&[1u32, 2, 3], left_schema)
+        .unwrap();
+    let right_buf = provider
+        .create_buffer_from_slice::<u32>(&[2u32], right_schema)
+        .unwrap();
+
+    provider.reset_deterministic_d2h_violations();
+    provider.enable_strict_deterministic_d2h();
+    let result = provider.hash_join_v2(
+        &left_buf,
+        &right_buf,
+        &[0],
+        &[0],
+        xlog_cuda::JoinType::LeftOuter,
+    );
+    let violations = provider.deterministic_d2h_violation_count();
+    provider.disable_strict_deterministic_d2h();
+
+    let result = result.expect("left-outer join must run clean under strict gate");
+    assert_eq!(
+        violations, 0,
+        "left-outer join tripped the gate; output-count reads must be \
+         routed through `read_join_output_count_metadata`"
+    );
+
+    // Verify shape with the gate disengaged. Left-outer preserves all
+    // left rows; the matched row (key=2) carries the right value, the
+    // others carry the null sentinel (0).
+    assert_eq!(result.arity(), 2);
+    let left_vals = provider.download_column::<u32>(&result, 0).unwrap();
+    let right_vals = provider.download_column::<u32>(&result, 1).unwrap();
+    assert_eq!(left_vals.len(), 3);
+    let mut pairs: Vec<(u32, u32)> = left_vals.into_iter().zip(right_vals).collect();
+    pairs.sort_unstable();
+    assert_eq!(pairs, vec![(1, 0), (2, 2), (3, 0)]);
+}
