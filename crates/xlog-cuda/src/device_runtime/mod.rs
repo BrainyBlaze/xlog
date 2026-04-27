@@ -39,6 +39,7 @@
 
 pub mod direct;
 pub mod resource;
+pub mod runtime;
 pub mod stream_pool;
 
 pub use direct::DirectCudaResource;
@@ -46,4 +47,5 @@ pub use resource::{
     AllocTag, BlockState, DeviceBlock, DeviceMemoryResource, Generation, ResourceError,
     ResourceResult, StreamId,
 };
+pub use runtime::{XlogDeviceRuntime, MAX_DEVICE_ORDINALS};
 pub use stream_pool::{StreamPool, DEFAULT_MAX_STREAMS};
