@@ -594,9 +594,12 @@ fn strict_deterministic_d2h_recursive_reach_clean() {
 /// rule body, so it stresses the `hash_join_inner_v2*`
 /// count→materialize path. The `hash_join_left_outer_*` path is an
 /// internal IR-level join type not directly reachable from a Datalog
-/// rule body; that path is covered by a kernel-level strict-gate test
-/// in `xlog-cuda/tests/test_deterministic_d2h_gate.rs`
-/// (`left_outer_join_strict_gate_clean`).
+/// rule body; both halves of that path (non-indexed
+/// `hash_join_left_outer_impl` and indexed
+/// `hash_join_left_outer_indexed`) are covered by kernel-level
+/// strict-gate tests in `xlog-cuda/tests/test_deterministic_d2h_gate.rs`
+/// (`left_outer_join_strict_gate_clean` and
+/// `left_outer_join_indexed_strict_gate_clean`).
 #[test]
 fn strict_deterministic_d2h_inner_join_materialize_clean() {
     let mut config = RuntimeConfig::default();
