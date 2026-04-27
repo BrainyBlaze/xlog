@@ -259,6 +259,67 @@ fn strict_deterministic_d2h_clean_path() {
     assert_eq!(vals, vec![1, 2, 3]);
 }
 
+/// `execute_plan` must only reset the provider's
+/// `deterministic_d2h_violation_count` when *this* call is the one that
+/// engages the gate. If a caller has manually enabled the gate to
+/// accumulate violations across a broader strict section,
+/// `execute_plan` running with `RuntimeConfig::strict_deterministic_d2h
+/// = true` must preserve that accumulated count rather than clobbering it.
+#[test]
+fn execute_plan_preserves_externally_engaged_violation_counter() {
+    let mut config = RuntimeConfig::default();
+    config.strict_deterministic_d2h = true;
+
+    let (mut executor, provider) = match create_executor_with_config(config) {
+        Some(e) => e,
+        None => {
+            eprintln!("Skipping test: no CUDA device available");
+            return;
+        }
+    };
+
+    // Pre-accumulate a violation outside any execute_plan call.
+    provider.reset_deterministic_d2h_violations();
+    provider.enable_strict_deterministic_d2h();
+    let schema = Schema::new(vec![("c0".to_string(), ScalarType::U32)]);
+    let probe = provider
+        .create_buffer_from_u32_columns(&[&[1u32, 2]], schema)
+        .unwrap();
+    let _ = provider.download_column::<u32>(&probe, 0); // intentional violation
+    let pre_count = provider.deterministic_d2h_violation_count();
+    assert_eq!(pre_count, 1);
+
+    // Run a clean-path program. With the previous always-reset behavior,
+    // `pre_count` would be wiped to 0; with the transition-only reset,
+    // the counter is preserved across the call.
+    let source = r#"
+        node(1).
+        node(2).
+    "#;
+    let mut compiler = Compiler::new();
+    let plan = compiler.compile(source).expect("compile");
+    let node_schema = Schema::new(vec![("c0".to_string(), ScalarType::U32)]);
+    let node_buffer = provider
+        .create_buffer_from_u32_columns(&[&[1u32, 2]], node_schema)
+        .unwrap();
+    setup_executor_with_facts(&mut executor, &compiler, vec![("node", node_buffer)]);
+
+    executor
+        .execute_plan(&plan)
+        .expect("clean plan must succeed under strict gate");
+    assert!(
+        provider.strict_deterministic_d2h_enabled(),
+        "externally engaged gate must remain on after execute_plan returns"
+    );
+    assert_eq!(
+        provider.deterministic_d2h_violation_count(),
+        pre_count,
+        "execute_plan clobbered an externally accumulated violation count"
+    );
+
+    provider.disable_strict_deterministic_d2h();
+}
+
 /// The gate must default to off — `RuntimeConfig::default()` does not
 /// engage it, and a program that *would* violate while strict therefore
 /// continues to succeed unchanged.

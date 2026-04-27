@@ -302,7 +302,11 @@ impl Executor {
         // replacement before the default flips.
         let gate = self.config.strict_deterministic_d2h;
         let prev_gate = self.provider.strict_deterministic_d2h_enabled();
-        if gate {
+        if gate && !prev_gate {
+            // Only reset the violation counter when *this* call is what
+            // engages the gate. If a caller has manually enabled the
+            // gate to accumulate violations across a broader strict
+            // section, we must not clobber their telemetry.
             self.provider.reset_deterministic_d2h_violations();
             self.provider.enable_strict_deterministic_d2h();
         }
@@ -795,10 +799,14 @@ impl Executor {
         // Metadata-only read: row counts are control-plane state, not
         // tuple data. Route through `dtoh_scalar_untracked` so the
         // metadata-vs-data-plane contract stays grepable and the
-        // deterministic-D2H gate continues to allow it.
+        // deterministic-D2H gate continues to allow it. Re-map the
+        // provider-level `XlogError::Kernel` into `XlogError::Execution`
+        // with the executor's historical "Failed to read row count"
+        // context so callers see a consistent error category.
         let n = self
             .provider
-            .dtoh_scalar_untracked::<u32>(buffer.num_rows_device(), 0)?;
+            .dtoh_scalar_untracked::<u32>(buffer.num_rows_device(), 0)
+            .map_err(|e| XlogError::Execution(format!("Failed to read row count: {}", e)))?;
         buffer.set_cached_row_count_if_unset(n);
         Ok(n)
     }

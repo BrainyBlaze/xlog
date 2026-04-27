@@ -25,15 +25,18 @@ impl super::CudaKernelProvider {
         col_idx: usize,
     ) -> Result<Vec<T>> {
         // Gate first so a deterministic-strict run fails before any host
-        // allocation or counter mutation. Zero-row downloads are a no-op in
-        // `download_column_inner` and never issue a D2H transfer, so the
-        // gate must not fire for them.
+        // allocation or counter mutation. Zero-row downloads are a no-op
+        // in `download_column_inner` and never issue a D2H transfer, so
+        // the gate must not fire for them. The row count we resolve here
+        // is threaded into the inner helper so it does not look it up
+        // again — the cache makes a second call cheap, but the explicit
+        // hand-off keeps the contract clear.
         let num_rows = self.device_row_count(buffer)?;
         if num_rows > 0 {
             self.gate_column_download::<T>("download_column", num_rows)?;
         }
         self.d2h_transfer_count.fetch_add(1, Ordering::Relaxed);
-        self.download_column_inner::<T>(buffer, col_idx)
+        self.download_column_inner_with_rows::<T>(buffer, col_idx, num_rows)
     }
 
     /// Download a column WITHOUT incrementing the per-call
@@ -79,23 +82,24 @@ impl super::CudaKernelProvider {
             .collect())
     }
 
-    /// Shared implementation for tracked column downloads.
+    /// Shared implementation for tracked column downloads, with the row
+    /// count threaded in by the caller so we do not look it up twice.
     ///
     /// Uses `device.inner().dtoh_sync_copy_into()` directly (no stats
-    /// recording), which matches the existing `download_column_u32` pattern.
-    /// The caller (`download_column`) is responsible for the strict
+    /// recording), which matches the existing `download_column_u32`
+    /// pattern. The caller is responsible for the strict
     /// deterministic-D2H gate check and for incrementing
     /// `d2h_transfer_count`; this helper assumes both have already happened.
-    fn download_column_inner<T: GpuScalar>(
+    fn download_column_inner_with_rows<T: GpuScalar>(
         &self,
         buffer: &CudaBuffer,
         col_idx: usize,
+        num_rows: usize,
     ) -> Result<Vec<T>> {
         let col = buffer.column(col_idx).ok_or_else(|| {
             XlogError::kernel_ctx("download_column", "column not found", &col_idx)
         })?;
 
-        let num_rows = self.device_row_count(buffer)?;
         if num_rows == 0 {
             return Ok(vec![]);
         }
