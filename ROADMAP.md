@@ -371,7 +371,7 @@ unchecked boxes and is assigned to a concrete future version.
 - [x] Beta reliability gate at 20/20 across reach, grandparent, colleague, and plus2 stages.
 - [x] Zero D2H column transfers in the training loop.
 
-## v0.4.0-ga - Differentiable ILP GA
+## v0.4.0-ga - Differentiable ILP General Availability
 
 ### Reliability and Determinism
 
@@ -381,18 +381,18 @@ unchecked boxes and is assigned to a concrete future version.
 - [x] Typed-schema gate with waiver-based manual-review fallback.
 - [x] Host-transfer telemetry.
 - [x] `forward_p95_us` telemetry.
-- [x] GA reliability statistical gate.
-- [x] GA performance and transfer smoke test.
-- [x] GA runtime optimization from 1447 seconds to 436 seconds.
+- [x] General-availability reliability statistical gate.
+- [x] General-availability performance and transfer smoke test.
+- [x] General-availability runtime optimization from 1447 seconds to 436 seconds.
 
-### Completed GA Hardening
+### Completed General-Availability Hardening
 
 - [x] GPU-resident loss computation through `compute_ilp_loss_grad_gpu`, strict zero-D2H gates, and four CUDA kernels.
 - [x] Training config restoration on failure.
 - [x] Training telemetry persistence with optional size-bounded artifact snapshots.
 - [x] Typed query-buffer builder for I32, I64, U64, Bool, and Symbol schemas.
-- [x] CI-grade 50-seed GA reliability runtime budget optimization.
-- [x] Full SLO benchmark harness for N=20/50/100/150.
+- [x] CI-grade 50-seed general-availability reliability runtime budget optimization.
+- [x] Full service-level-objective benchmark harness across 20, 50, 100, and 150 example workloads.
 
 ## v0.5.0 - Public-Release Hardening and Bounded GPU ILP
 
@@ -525,7 +525,7 @@ unchecked boxes and is assigned to a concrete future version.
 - [x] Proptest coverage for sort stability, join correctness, filter idempotence, and dedup determinism.
 - [x] Float edge-case tests.
 - [x] dILP beta test suite.
-- [x] dILP GA reliability gate.
+- [x] dILP general-availability reliability gate.
 - [x] dILP performance and transfer smoke test.
 
 ## main after v0.5.2 - Determinism Closure
@@ -534,8 +534,8 @@ unchecked boxes and is assigned to a concrete future version.
 
 - [x] Deterministic recursive SCC predicate processing by replacing randomized `HashSet` iteration with ordered processing.
 - [x] Device logical row-count checks using `buffer_row_count()` instead of stale `is_empty()` state.
-- [x] DTS M34 frozen replay test coverage.
-- [x] `XLOG_DETERMINISM_RESTORED` validated against bundles 28, 29, 30, and 31 with K=20.
+- [x] Downstream crash-window frozen replay test coverage for deterministic recursive evaluation.
+- [x] `XLOG_DETERMINISM_RESTORED` validated against four frozen crash-window relation bundles with 20 fresh subprocess replays each.
 
 ### Build and Packaging
 
@@ -567,8 +567,8 @@ unchecked boxes and is assigned to a concrete future version.
 
 ### Bounded Exact Induction
 
-- [ ] Integrate DTS `exact_backend = native` path in `tensorized_ilp.py`.
-- [ ] Reproduce DTS Phase 0d 449/449 liveness with native exact induction.
+- [ ] Integrate native exact-induction backend into the downstream tensorized ILP consumer path.
+- [ ] Reproduce the downstream 449/449 liveness benchmark with native exact induction.
 - [ ] Add committed `kernels/ilp_exact.ptx` artifact once the kernel packaging policy is finalized and aligned with the existing ILP-family kernel convention.
 
 ### Python and CLI
@@ -580,7 +580,7 @@ unchecked boxes and is assigned to a concrete future version.
 ### Tests and Certification
 
 - [ ] Add deterministic Datalog D2H guardrail tests.
-- [ ] Add DTS frozen replay certification for crash-window bundles.
+- [ ] Add downstream frozen replay certification for crash-window bundles.
 - [ ] Add Same Generation, triangle, skewed multi-way, and deep recursive-frontier benchmarks.
 - [ ] Add skewed multi-way benchmark suite.
 
@@ -596,8 +596,8 @@ unchecked boxes and is assigned to a concrete future version.
 ### Release Gate
 
 - [ ] Public release only after deterministic Datalog guardrails pass locally and in manual GPU certification.
-- [ ] Public release only after M34 frozen replay remains deterministic across K-run subprocess replay.
-- [ ] Public release only after M27-style stress replay is clean.
+- [ ] Public release only after crash-window frozen replay remains deterministic across 20 fresh subprocess replays.
+- [ ] Public release only after downstream widened-frontier stress replay is clean.
 - [ ] Public release only after recursive deterministic set operations have zero data-plane D2H transfers.
 - [ ] Public release only after binary-join and multi-way stress benchmark baselines are captured.
 - [ ] Public release only after docs distinguish release, source-build, and development install paths.
