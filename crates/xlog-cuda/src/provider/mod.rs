@@ -5,7 +5,7 @@
 
 use std::marker::PhantomData;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use std::ffi::c_void;
@@ -733,6 +733,16 @@ pub struct CudaKernelProvider {
     ptx_load_profile: Option<PtxLoadProfile>,
     /// Column-level D2H transfer counter (incremented by each download_column_* call)
     d2h_transfer_count: AtomicU64,
+    /// Strict deterministic-Datalog D2H gate. When `true`, any data-plane D2H
+    /// transfer (column downloads or `dtoh_sync_copy_into_tracked`) increments
+    /// the violation counter and returns `XlogError::Execution` from the
+    /// originating call. Metadata reads via `dtoh_scalar_untracked` are NOT
+    /// gated. See [`CudaKernelProvider::enable_strict_deterministic_d2h`].
+    strict_deterministic_d2h: AtomicBool,
+    /// Cumulative count of deterministic-D2H gate violations observed since
+    /// the last reset. Increments even on the failing path (the originating
+    /// call still returns `Err`); kept for telemetry and tests.
+    deterministic_d2h_violations: AtomicU64,
 }
 
 #[derive(Default)]
@@ -808,6 +818,8 @@ impl CudaKernelProvider {
             transfer_tracker: HostTransferTracker::default(),
             ptx_load_profile,
             d2h_transfer_count: AtomicU64::new(0),
+            strict_deterministic_d2h: AtomicBool::new(false),
+            deterministic_d2h_violations: AtomicU64::new(0),
         })
     }
 
@@ -850,6 +862,65 @@ impl CudaKernelProvider {
         self.d2h_transfer_count.store(0, Ordering::Relaxed);
     }
 
+    /// Enable the strict deterministic-Datalog D2H gate.
+    ///
+    /// While enabled, any data-plane device-to-host transfer (column downloads
+    /// via `download_column` / `download_column_untracked`, and any internal
+    /// transfer routed through `dtoh_sync_copy_into_tracked`) increments
+    /// [`CudaKernelProvider::deterministic_d2h_violation_count`] and returns
+    /// `XlogError::Execution` from the originating call.
+    ///
+    /// Metadata reads via [`CudaKernelProvider::dtoh_scalar_untracked`] are
+    /// allowed and never trip the gate.
+    ///
+    /// Default is `false`; the runtime opts in via
+    /// `RuntimeConfig::strict_deterministic_d2h`. v0.5.5 ships the gate
+    /// opt-in only — known-violating relational paths (set difference,
+    /// join count/materialize) are scheduled for replacement before the
+    /// default flips.
+    pub fn enable_strict_deterministic_d2h(&self) {
+        self.strict_deterministic_d2h.store(true, Ordering::Relaxed);
+    }
+
+    /// Disable the strict deterministic-Datalog D2H gate.
+    pub fn disable_strict_deterministic_d2h(&self) {
+        self.strict_deterministic_d2h
+            .store(false, Ordering::Relaxed);
+    }
+
+    /// Returns whether the strict deterministic-Datalog D2H gate is enabled.
+    pub fn strict_deterministic_d2h_enabled(&self) -> bool {
+        self.strict_deterministic_d2h.load(Ordering::Relaxed)
+    }
+
+    /// Cumulative deterministic-D2H gate violations since the last reset.
+    pub fn deterministic_d2h_violation_count(&self) -> u64 {
+        self.deterministic_d2h_violations.load(Ordering::Relaxed)
+    }
+
+    /// Reset the deterministic-D2H violation counter to zero.
+    pub fn reset_deterministic_d2h_violations(&self) {
+        self.deterministic_d2h_violations
+            .store(0, Ordering::Relaxed);
+    }
+
+    /// Chokepoint for the deterministic-D2H gate.
+    ///
+    /// If the gate is enabled, increments the violation counter and returns
+    /// `XlogError::Execution` naming the offending operation and byte count.
+    /// If the gate is disabled, returns `Ok(())` cheaply.
+    pub(crate) fn check_deterministic_d2h(&self, op: &'static str, bytes: u64) -> Result<()> {
+        if self.strict_deterministic_d2h.load(Ordering::Relaxed) {
+            self.deterministic_d2h_violations
+                .fetch_add(1, Ordering::Relaxed);
+            return Err(XlogError::Execution(format!(
+                "deterministic D2H gate: {} attempted to copy {} bytes from device to host",
+                op, bytes
+            )));
+        }
+        Ok(())
+    }
+
     fn dtoh_sync_copy_into_tracked<T: DeviceRepr, Src: DevicePtr<T>>(
         &self,
         src: &Src,
@@ -858,6 +929,7 @@ impl CudaKernelProvider {
         let bytes = std::mem::size_of::<T>()
             .checked_mul(dst.len())
             .ok_or_else(|| XlogError::Kernel("dtoh size overflow".to_string()))?;
+        self.check_deterministic_d2h("dtoh_sync_copy_into_tracked", bytes as u64)?;
         self.transfer_tracker.record_dtoh(bytes as u64);
         self.device
             .inner()

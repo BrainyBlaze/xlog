@@ -65,6 +65,17 @@ pub struct RuntimeConfig {
     pub profile: bool,
     /// Maximum fixpoint iterations before abort
     pub max_iterations: u32,
+    /// Opt-in: enforce the strict deterministic-Datalog D2H gate during
+    /// `Executor::execute_plan`. When `true`, any data-plane device-to-host
+    /// transfer (column downloads, internal `dtoh_sync_copy_into_tracked`
+    /// calls) returns `XlogError::Execution` and increments the provider's
+    /// `deterministic_d2h_violation_count`. Metadata reads via
+    /// `dtoh_scalar_untracked` remain allowed.
+    ///
+    /// Default `false`: v0.5.5 still has known data-plane D2H paths in
+    /// relational set difference and binary-join count/materialize that are
+    /// scheduled for replacement before the default flips.
+    pub strict_deterministic_d2h: bool,
 }
 
 impl Default for RuntimeConfig {
@@ -74,6 +85,7 @@ impl Default for RuntimeConfig {
             deterministic: true,
             profile: false,
             max_iterations: 1_000_000,
+            strict_deterministic_d2h: false,
         }
     }
 }
@@ -88,6 +100,12 @@ impl RuntimeConfig {
     /// Set memory budget
     pub fn with_memory(mut self, memory: MemoryBudget) -> Self {
         self.memory = memory;
+        self
+    }
+
+    /// Enable the strict deterministic-Datalog D2H gate for this runtime.
+    pub fn with_strict_deterministic_d2h(mut self) -> Self {
+        self.strict_deterministic_d2h = true;
         self
     }
 }
