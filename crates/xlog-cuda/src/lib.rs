@@ -4,6 +4,7 @@ pub mod arrow_device;
 pub mod cuda_compat;
 pub mod device;
 pub mod device_pool;
+pub mod device_runtime;
 pub mod dlpack;
 pub mod kernel_manifest_data;
 pub mod memory;
