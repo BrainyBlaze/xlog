@@ -6,7 +6,9 @@ The previous sections describe xlog as a purely symbolic system: Datalog evaluat
 
 In xlog, a neural network \emph{is} a predicate. The \texttt{nn/4} declaration embeds a network directly into the Datalog program:
 
-\begin{lstlisting}[style=xlogstyle]
+\begin{lstlisting}[style=xlogstyle,
+                   caption={Neural predicate declaration syntax (\texttt{nn/4}).},
+                   label={lst:nn-decl}]
 nn(network_name, [input_vars], output_var, [output_labels]) :: predicate(args).
 \end{lstlisting}
 
@@ -14,7 +16,9 @@ This is not a foreign-function call or an escape hatch. The declaration states t
 
 On the Python side, networks are registered via the \texttt{pyxlog} API. The \texttt{CompiledProgram.register\_network()} method accepts a PyTorch \texttt{nn.Module}, an optimizer, and optional configuration parameters:
 
-\begin{lstlisting}[style=pythonstyle]
+\begin{lstlisting}[style=pythonstyle,
+                   caption={Registering a PyTorch module against a neural predicate via \texttt{pyxlog}.},
+                   label={lst:nn-register}]
 program.register_network("mnist_net", net, optimizer)
 \end{lstlisting}
 
@@ -28,7 +32,9 @@ To make the integration concrete, we walk through the MNIST addition example---t
 
 \textbf{The logic program.} The complete xlog source (\texttt{examples/neural/01\_minimal/minimal.xlog}) is:
 
-\begin{lstlisting}[style=xlogstyle]
+\begin{lstlisting}[style=xlogstyle,
+                   caption={MNIST addition program: a CNN-backed digit predicate plus an addition rule.},
+                   label={lst:mnist-prog}]
 // Neural predicate declaration
 // nn(network_name, [input_vars], output_var, [output_labels]) :: predicate(args).
 //
@@ -62,7 +68,9 @@ Two lines of logic define the entire reasoning structure. The \texttt{nn/4} decl
 
 \textbf{The training script.} The Python driver (\texttt{examples/neural/01\_minimal/train.py}) compiles the program, registers the network, and runs training through the \texttt{pyxlog.train\_model\_tensor} API:
 
-\begin{lstlisting}[style=pythonstyle]
+\begin{lstlisting}[style=pythonstyle,
+                   caption={Python driver for MNIST addition: compile, register network, train.},
+                   label={lst:mnist-train}]
 program = pyxlog.Program.compile("""
     nn(mnist_net, [X], Y, [0,1,2,3,4,5,6,7,8,9]) :: digit(X, Y).
     addition(X, Y, Z) :- digit(X, D1), digit(Y, D2), Z is D1 + D2.
