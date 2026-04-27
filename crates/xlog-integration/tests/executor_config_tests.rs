@@ -338,7 +338,7 @@ fn default_runtime_does_not_engage_gate() {
         edge(2, 3).
         node(1). node(2). node(3).
         has_in(X) :- edge(_, X).
-        no_in(X) :- node(X), !has_in(X).
+        no_in(X) :- node(X), not has_in(X).
         ?- no_in(X).
     "#;
 
@@ -365,19 +365,23 @@ fn default_runtime_does_not_engage_gate() {
     provider.reset_deterministic_d2h_violations();
     executor
         .execute_plan(&plan)
-        .expect("default config must let known-violator programs run");
+        .expect("default config must let the program run");
     assert_eq!(provider.deterministic_d2h_violation_count(), 0);
     assert!(!provider.strict_deterministic_d2h_enabled());
 }
 
-/// Negative-direction coverage: a program that the v0.5.5 runtime still
-/// services via host fallback (stratified negation routes through `diff`)
-/// must surface a violation when the strict gate is enabled. This pins the
-/// gate as a regression detector — if a future change moves negation onto
-/// a GPU-native diff, this test should be updated alongside that work, not
-/// silently passed.
+/// Single-column negation seal under the strict gate.
+///
+/// In the PR 49 baseline this program tripped the gate via the host-side
+/// `diff_via_deterministic_set` → `BTreeSet<Vec<u8>>` fallback used by
+/// stratified negation when the multi-column dedup path entered the
+/// host-collection branch (`provider/relational.rs::collect_deterministic_rows`).
+/// PR 2 replaces that fallback with a deterministic GPU pipeline (typed
+/// multi-column sort → bytewise adjacent-equality mask → exclusive scan →
+/// column-wise gather). After the swap the program must run cleanly under
+/// the strict gate with the correct result set.
 #[test]
-fn strict_deterministic_d2h_known_violator_is_detected() {
+fn strict_deterministic_d2h_single_column_negation_clean() {
     let mut config = RuntimeConfig::default();
     config.strict_deterministic_d2h = true;
 
@@ -389,26 +393,20 @@ fn strict_deterministic_d2h_known_violator_is_detected() {
         }
     };
 
-    // Stratified negation lowers to set difference (`diff`) in the runtime,
-    // and `diff` still falls back to host-side set algebra.
     let source = r#"
         edge(1, 2).
         edge(2, 3).
         edge(3, 4).
         node(1). node(2). node(3). node(4).
         has_in(X) :- edge(_, X).
-        no_in(X) :- node(X), !has_in(X).
+        no_in(X) :- node(X), not has_in(X).
         ?- no_in(X).
     "#;
 
     let mut compiler = Compiler::new();
-    let plan = match compiler.compile(source) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("Skipping: source did not compile: {}", e);
-            return;
-        }
-    };
+    let plan = compiler
+        .compile(source)
+        .expect("single-column negation source must compile");
 
     let edge_buffer = create_edge_buffer(&provider, &[(1, 2), (2, 3), (3, 4)]);
     let node_schema = Schema::new(vec![("c0".to_string(), ScalarType::U32)]);
@@ -422,13 +420,154 @@ fn strict_deterministic_d2h_known_violator_is_detected() {
     );
 
     provider.reset_deterministic_d2h_violations();
-    let res = executor.execute_plan(&plan);
-    assert!(
-        res.is_err(),
-        "expected gate to surface a violation for negation-via-diff"
+    executor
+        .execute_plan(&plan)
+        .expect("single-column negation must run clean under strict gate");
+    assert_eq!(
+        provider.deterministic_d2h_violation_count(),
+        0,
+        "single-column negation tripped the gate; the host-fallback path \
+         should be replaced by the GPU pipeline by this PR"
     );
-    assert!(
-        provider.deterministic_d2h_violation_count() >= 1,
-        "violation counter did not increment for known violator"
+
+    // Result set: nodes with no incoming edge → {1}. Read from the store
+    // (executor.execute_plan returns an empty placeholder buffer; the
+    // answer set lives in the named relation).
+    let no_in = executor
+        .store()
+        .get("no_in")
+        .expect("no_in relation present after execution");
+    let mut vals = provider.download_column::<u32>(no_in, 0).unwrap();
+    vals.sort_unstable();
+    assert_eq!(vals, vec![1u32]);
+}
+
+/// Two-column negation seal — proves the runtime uses *full-row* tuple
+/// equality, not first-column / key-only equality, after PR 2.
+///
+/// Inputs: `pair = {(1,10),(1,20),(2,10)}`, `blocked = {(1,10)}`.
+/// Expected `keep = {(1,20),(2,10)}`.
+///
+/// A first-column key diff would incorrectly remove `(1,20)` because
+/// column 0 alone equals `1` in `blocked`. This test fails iff the
+/// runtime wires negation onto a key-only diff.
+///
+/// Run under `strict_deterministic_d2h = true` so the test simultaneously
+/// seals "no host fallback".
+#[test]
+fn strict_deterministic_d2h_two_column_negation_full_row_semantics() {
+    let mut config = RuntimeConfig::default();
+    config.strict_deterministic_d2h = true;
+
+    let (mut executor, provider) = match create_executor_with_config(config) {
+        Some(e) => e,
+        None => {
+            eprintln!("Skipping test: no CUDA device available");
+            return;
+        }
+    };
+
+    let source = r#"
+        pair(1, 10). pair(1, 20). pair(2, 10).
+        blocked(1, 10).
+        keep(X, Y) :- pair(X, Y), not blocked(X, Y).
+        ?- keep(X, Y).
+    "#;
+    let mut compiler = Compiler::new();
+    let plan = compiler.compile(source).expect("compile two-col negation");
+
+    let pair_buffer = create_edge_buffer(&provider, &[(1u32, 10), (1, 20), (2, 10)]);
+    let blocked_buffer = create_edge_buffer(&provider, &[(1u32, 10)]);
+    setup_executor_with_facts(
+        &mut executor,
+        &compiler,
+        vec![("pair", pair_buffer), ("blocked", blocked_buffer)],
     );
+
+    provider.reset_deterministic_d2h_violations();
+    executor
+        .execute_plan(&plan)
+        .expect("two-column negation must run clean under strict gate");
+    assert_eq!(
+        provider.deterministic_d2h_violation_count(),
+        0,
+        "two-column negation tripped the gate"
+    );
+
+    // Read both columns from the named relation and assert as a sorted set.
+    let keep = executor
+        .store()
+        .get("keep")
+        .expect("keep relation present after execution");
+    let col0 = provider.download_column::<u32>(keep, 0).unwrap();
+    let col1 = provider.download_column::<u32>(keep, 1).unwrap();
+    assert_eq!(
+        col0.len(),
+        col1.len(),
+        "result columns disagree on row count"
+    );
+    let mut got: Vec<(u32, u32)> = col0.into_iter().zip(col1).collect();
+    got.sort_unstable();
+    assert_eq!(
+        got,
+        vec![(1u32, 20), (2u32, 10)],
+        "two-column negation collapsed under key-only diff"
+    );
+}
+
+/// Recursive reach: full-row tuple semantics for semi-naive delta dedup.
+///
+/// Proves that the recursive fixpoint preserves *full-row* equality, not
+/// first-column key. With key-based dedup, rows `(1,2),(1,3),(1,4)` would
+/// collapse to a single entry. With full-row dedup all three survive and
+/// the answer set has five unique rows.
+///
+/// Sorted-set comparison so the test does not depend on row order.
+///
+/// This test deliberately runs with the *default* runtime config — the
+/// recursive evaluation goes through binary join materialization, which
+/// still has known D2H paths flagged by PR 49's gate (see "Failed to
+/// read output count" sites in `provider/relational.rs`). Those are PR
+/// 3's scope (deterministic count → prefix-scan → materialize binary
+/// join). The strict-D2H seal for this program will be added in PR 3
+/// alongside the join-materialize replacement.
+#[test]
+fn recursive_reach_full_row_dedup_correctness() {
+    let (mut executor, provider) = match create_executor_with_config(RuntimeConfig::default()) {
+        Some(e) => e,
+        None => {
+            eprintln!("Skipping test: no CUDA device available");
+            return;
+        }
+    };
+
+    let source = r#"
+        edge(1, 2). edge(1, 3). edge(2, 4). edge(3, 4).
+        reach(X, Y) :- edge(X, Y).
+        reach(X, Z) :- reach(X, Y), edge(Y, Z).
+        ?- reach(X, Y).
+    "#;
+    let mut compiler = Compiler::new();
+    let plan = compiler.compile(source).expect("compile reach");
+
+    let edge_buffer = create_edge_buffer(&provider, &[(1u32, 2), (1, 3), (2, 4), (3, 4)]);
+    setup_executor_with_facts(&mut executor, &compiler, vec![("edge", edge_buffer)]);
+
+    executor.execute_plan(&plan).expect("recursive reach run");
+
+    let reach = executor
+        .store()
+        .get("reach")
+        .expect("reach relation present after execution");
+    let col0 = provider.download_column::<u32>(reach, 0).unwrap();
+    let col1 = provider.download_column::<u32>(reach, 1).unwrap();
+    let mut got: Vec<(u32, u32)> = col0.into_iter().zip(col1).collect();
+    got.sort_unstable();
+    let expected = vec![(1u32, 2), (1, 3), (1, 4), (2, 4), (3, 4)];
+    assert_eq!(
+        got.len(),
+        expected.len(),
+        "row count mismatch — semi-naive delta dedup likely collapsed full rows under a key-only path"
+    );
+    assert_eq!(got, expected);
 }

@@ -1,5 +1,6 @@
 // kernels/sort.cu
 #include <cstdint>
+#include "totalorder.cuh"
 
 /**
  * GPU Radix Sort Kernels
@@ -281,21 +282,12 @@ extern "C" __global__ void apply_permutation_bytes(
 }
 
 // ============== Key Transform + Gather Kernels ==============
-
-__device__ __forceinline__ uint32_t f32_to_ordered_u32(uint32_t bits) {
-    // IEEE totalOrder mapping compatible with Rust's total_cmp:
-    // - negative values: bitwise invert
-    // - non-negative values: flip sign bit
-    uint32_t sign = bits >> 31;
-    uint32_t mask = sign ? 0xFFFFFFFFu : 0x80000000u;
-    return bits ^ mask;
-}
-
-__device__ __forceinline__ uint64_t f64_to_ordered_u64(uint64_t bits) {
-    uint64_t sign = bits >> 63;
-    uint64_t mask = sign ? 0xFFFFFFFFFFFFFFFFull : 0x8000000000000000ull;
-    return bits ^ mask;
-}
+//
+// IEEE totalOrder mapping for f32 / f64 lives in `totalorder.cuh`
+// (`xlog_f32_to_ordered_u32`, `xlog_f64_to_ordered_u64`). The sort
+// codepath and the dedup/diff codepaths share that single source of
+// truth so the deterministic-Datalog set algebra cannot drift between
+// "sort by one ordering, probe by another".
 
 extern "C" __global__ void gather_keys_i32_ordered_u32(
     const uint32_t* __restrict__ i32_bits,     // raw bits of i32 values
@@ -329,7 +321,7 @@ extern "C" __global__ void gather_keys_f32_ordered_u32(
     uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
     if (gid >= actual) return;
     uint32_t src = permutation[gid];
-    out_keys[gid] = f32_to_ordered_u32(f32_bits[src]);
+    out_keys[gid] = xlog_f32_to_ordered_u32(f32_bits[src]);
 }
 
 extern "C" __global__ void gather_keys_bool_ordered_u32(
@@ -430,7 +422,7 @@ extern "C" __global__ void gather_keys_f64_lo_u32(
     }
     uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
     if (gid >= actual) return;
-    uint64_t ord = f64_to_ordered_u64(f64_bits[permutation[gid]]);
+    uint64_t ord = xlog_f64_to_ordered_u64(f64_bits[permutation[gid]]);
     out_keys[gid] = (uint32_t)(ord & 0xFFFFFFFFull);
 }
 
@@ -447,6 +439,6 @@ extern "C" __global__ void gather_keys_f64_hi_u32(
     }
     uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
     if (gid >= actual) return;
-    uint64_t ord = f64_to_ordered_u64(f64_bits[permutation[gid]]);
+    uint64_t ord = xlog_f64_to_ordered_u64(f64_bits[permutation[gid]]);
     out_keys[gid] = (uint32_t)(ord >> 32);
 }

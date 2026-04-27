@@ -1,6 +1,6 @@
 //! Relational operations: join, dedup, union, diff, sort, and related helpers.
 
-use std::{cmp::Ordering, collections::BTreeSet, ffi::c_void};
+use std::ffi::c_void;
 
 use crate::{AsKernelParam, DeviceSlice, LaunchAsync, LaunchConfig};
 use xlog_core::{Result, ScalarType, Schema, XlogError};
@@ -13,6 +13,33 @@ use super::{
 };
 use crate::memory::TrackedCudaSlice;
 use crate::CudaBuffer;
+
+// Per-column scalar-type encoding used by the deterministic full-row
+// dedup/diff kernels. Must match the `XLOG_TY_*` defines in
+// `kernels/dedup.cu`. Centralized here as named constants and one helper
+// so all full-row callers in this module share one source of truth.
+const XLOG_TY_U32: u8 = 0;
+const XLOG_TY_U64: u8 = 1;
+const XLOG_TY_I32: u8 = 2;
+const XLOG_TY_I64: u8 = 3;
+const XLOG_TY_F32: u8 = 4;
+const XLOG_TY_F64: u8 = 5;
+const XLOG_TY_BOOL: u8 = 6;
+const XLOG_TY_SYMBOL: u8 = 7;
+
+#[inline]
+fn scalar_type_code_dedup(ty: ScalarType) -> u8 {
+    match ty {
+        ScalarType::U32 => XLOG_TY_U32,
+        ScalarType::U64 => XLOG_TY_U64,
+        ScalarType::I32 => XLOG_TY_I32,
+        ScalarType::I64 => XLOG_TY_I64,
+        ScalarType::F32 => XLOG_TY_F32,
+        ScalarType::F64 => XLOG_TY_F64,
+        ScalarType::Bool => XLOG_TY_BOOL,
+        ScalarType::Symbol => XLOG_TY_SYMBOL,
+    }
+}
 
 impl super::CudaKernelProvider {
     /// Perform a hash join between two buffers
@@ -257,18 +284,10 @@ impl super::CudaKernelProvider {
             )));
         }
 
-        fn scalar_type_code(ty: ScalarType) -> u8 {
-            match ty {
-                ScalarType::U32 => 0,
-                ScalarType::U64 => 1,
-                ScalarType::I32 => 2,
-                ScalarType::I64 => 3,
-                ScalarType::F32 => 4,
-                ScalarType::F64 => 5,
-                ScalarType::Bool => 6,
-                ScalarType::Symbol => 7,
-            }
-        }
+        // Use the module-level `scalar_type_code_dedup` so the host
+        // encoding stays in lockstep with the `XLOG_TY_*` defines in
+        // `kernels/dedup.cu`.
+        let scalar_type_code = scalar_type_code_dedup;
 
         let device = self.device.inner();
         let num_rows = input.num_rows() as u32;
@@ -973,65 +992,192 @@ impl super::CudaKernelProvider {
         )
     }
 
-    /// General diff using deterministic byte-exact host set difference.
+    /// General-arity deterministic full-row set difference (a \ b) on the GPU.
+    ///
+    /// Pipeline:
+    ///   1. Dedup both sides to set semantics (`a` and `b` may carry
+    ///      duplicates from upstream union/concat steps).
+    ///   2. Sort `b` by all columns using the typed multi-column sort.
+    ///   3. Per-row binary search of each `a` row against sorted `b` using
+    ///      the same typed comparator — `mark_diff_full_row_typed_sorted`.
+    ///   4. Multi-block exclusive scan on the keep mask.
+    ///   5. Column-wise gather via the existing
+    ///      `compact_buffer_by_device_mask_device_count` helper.
+    ///
+    /// The typed comparator agrees with the multi-column sort's order
+    /// convention (signed-int sign-flip; float total-order normalization),
+    /// so the binary search converges. Equality under the typed comparator
+    /// is bytewise equality, which is the same set semantics used by the
+    /// host-side `BTreeSet<Vec<u8>>` fallback this method replaces.
     ///
     /// Recursive Datalog evaluation relies on stable delta subtraction for
-    /// convergence. This path deliberately avoids the GPU hash anti-join because
-    /// its parallel hash/probe ordering is not a safe basis for fixed-point state.
+    /// fixpoint convergence. This path deliberately avoids the GPU hash
+    /// anti-join (whose unordered parallel probe path can leak
+    /// nondeterminism into recursive fixed-point convergence).
     fn diff_via_deterministic_set(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
-        // Use all columns as join keys for set difference
-        let all_cols: Vec<usize> = (0..a.arity()).collect();
+        // Step 1: dedup both inputs to set semantics. Route through
+        // `dedup_full_row_deterministic` regardless of arity so the
+        // dedup step and the diff-probe typed comparator agree on
+        // equality even for single-column float buffers — the legacy
+        // `dedup` single-column kernel uses IEEE `==` (collapses
+        // +0/-0), which would mismatch the totalOrder-key probe and
+        // could drop one of {+0, -0} silently from the result.
+        let deduped_a = self.dedup_full_row_deterministic(a)?;
+        let deduped_b = self.dedup_full_row_deterministic(b)?;
 
-        // Dedup both inputs first (set difference requires set semantics)
-        let deduped_a = self.dedup(a, &all_cols)?;
-        let deduped_b = self.dedup(b, &all_cols)?;
-
-        let a_rows = self.device_row_count(&deduped_a)?;
-        let b_rows = self.device_row_count(&deduped_b)?;
+        let a_rows = self.device_row_count(&deduped_a)? as u32;
+        let b_rows = self.device_row_count(&deduped_b)? as u32;
         if a_rows == 0 {
             return self.create_empty_buffer(a.schema().clone());
         }
-
         if b_rows == 0 {
             return Ok(deduped_a);
         }
-
-        let schema = a.schema().clone();
-        let col_widths = self.schema_column_widths(&schema)?;
-        let a_rows = self.collect_deterministic_rows(&deduped_a, &col_widths, a_rows)?;
-        let b_rows = self.collect_deterministic_rows(&deduped_b, &col_widths, b_rows)?;
-
-        let mut diff_rows: Vec<Vec<u8>> = a_rows.difference(&b_rows).cloned().collect();
-        if diff_rows.is_empty() {
-            return self.create_empty_buffer(schema);
-        }
-        self.sort_rows_by_schema(&mut diff_rows, &schema, &col_widths);
-
-        let mut output_columns = vec![Vec::new(); schema.arity()];
-        for row in &diff_rows {
-            let mut offset = 0usize;
-            for (col_idx, width) in col_widths.iter().copied().enumerate() {
-                let end = offset + width;
-                output_columns[col_idx].extend_from_slice(&row[offset..end]);
-                offset = end;
-            }
+        let arity = deduped_a.arity();
+        if arity == 0 {
+            // 0-arity: {()} - {()} = empty.
+            return self.create_empty_buffer(a.schema().clone());
         }
 
-        let output_slices: Vec<&[u8]> = output_columns.iter().map(Vec::as_slice).collect();
-        self.create_buffer_from_slices(&output_slices, schema)
+        // Step 2: `dedup_full_row_deterministic` already returns `b`
+        // sorted by the same typed multi-column sort the diff probe's
+        // comparator agrees with, so reuse the deduplicated buffer
+        // directly — re-sorting would double the cost on a hot path
+        // (negation / delta subtraction).
+        let sorted_b = deduped_b;
+
+        // Step 3: build the typed per-column descriptor arrays for the
+        // diff kernel — ptrs and sizes per column for both a and b, plus
+        // the type code per column (used by the typed comparator).
+        let schema = deduped_a.schema().clone();
+        let device = self.device.inner();
+
+        let mut a_col_ptrs: Vec<u64> = Vec::with_capacity(arity);
+        let mut b_col_ptrs: Vec<u64> = Vec::with_capacity(arity);
+        let mut col_sizes: Vec<u32> = Vec::with_capacity(arity);
+        let mut col_types: Vec<u8> = Vec::with_capacity(arity);
+        for col_idx in 0..arity {
+            let a_col = deduped_a.column(col_idx).ok_or_else(|| {
+                XlogError::Kernel(format!("diff_full_row: a column {} missing", col_idx))
+            })?;
+            let b_col = sorted_b.column(col_idx).ok_or_else(|| {
+                XlogError::Kernel(format!("diff_full_row: b column {} missing", col_idx))
+            })?;
+            let ty = schema.column_type(col_idx).ok_or_else(|| {
+                XlogError::Kernel(format!("diff_full_row: column {} type missing", col_idx))
+            })?;
+            a_col_ptrs.push(*a_col.device_ptr() as u64);
+            b_col_ptrs.push(*b_col.device_ptr() as u64);
+            col_sizes.push(ty.size_bytes() as u32);
+            col_types.push(scalar_type_code_dedup(ty));
+        }
+
+        let mut d_a_ptrs = self.memory.alloc::<u64>(arity)?;
+        let mut d_b_ptrs = self.memory.alloc::<u64>(arity)?;
+        let mut d_sizes = self.memory.alloc::<u32>(arity)?;
+        let mut d_types = self.memory.alloc::<u8>(arity)?;
+        device
+            .htod_sync_copy_into(&a_col_ptrs, &mut d_a_ptrs)
+            .map_err(|e| XlogError::Kernel(format!("diff_full_row a ptr upload: {}", e)))?;
+        device
+            .htod_sync_copy_into(&b_col_ptrs, &mut d_b_ptrs)
+            .map_err(|e| XlogError::Kernel(format!("diff_full_row b ptr upload: {}", e)))?;
+        device
+            .htod_sync_copy_into(&col_sizes, &mut d_sizes)
+            .map_err(|e| XlogError::Kernel(format!("diff_full_row size upload: {}", e)))?;
+        device
+            .htod_sync_copy_into(&col_types, &mut d_types)
+            .map_err(|e| XlogError::Kernel(format!("diff_full_row type upload: {}", e)))?;
+
+        let block_size = 256u32;
+        let grid = (a_rows + block_size - 1) / block_size;
+        let cfg = LaunchConfig {
+            grid_dim: (grid, 1, 1),
+            block_dim: (block_size, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        let d_keep_mask = self.memory.alloc::<u8>(a_rows as usize)?;
+        let diff_fn = device
+            .get_func(DEDUP_MODULE, dedup_kernels::MARK_DIFF_FULL_ROW_TYPED_SORTED)
+            .ok_or_else(|| {
+                XlogError::Kernel("mark_diff_full_row_typed_sorted kernel not found".to_string())
+            })?;
+        // SAFETY: kernel signature matches:
+        //   mark_diff_full_row_typed_sorted(a_col_ptrs, b_col_ptrs, col_sizes,
+        //       col_types, num_cols, num_a_device, num_b, a_cap, keep_mask)
+        unsafe {
+            diff_fn.clone().launch(
+                cfg,
+                (
+                    &d_a_ptrs,
+                    &d_b_ptrs,
+                    &d_sizes,
+                    &d_types,
+                    arity as u32,
+                    deduped_a.num_rows_device(),
+                    b_rows,
+                    a_rows,
+                    &d_keep_mask,
+                ),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("mark_diff_full_row_typed_sorted launch: {}", e)))?;
+        self.device.synchronize()?;
+
+        // Step 4 + 5: scan + column-wise gather of kept a rows.
+        let (d_prefix_sum, d_out_count) =
+            self.scan_mask_to_prefix_with_count(&d_keep_mask, a_rows)?;
+
+        self.compact_buffer_by_device_mask_device_count(
+            &deduped_a,
+            &d_keep_mask,
+            &d_prefix_sum,
+            d_out_count,
+        )
     }
 
-    fn schema_column_widths(&self, schema: &Schema) -> Result<Vec<usize>> {
-        (0..schema.arity())
-            .map(|col_idx| {
-                schema
-                    .column_type(col_idx)
-                    .map(|ty| ty.size_bytes())
-                    .ok_or_else(|| {
-                        XlogError::Kernel(format!("Column {} missing from schema", col_idx))
-                    })
-            })
-            .collect()
+    /// Public deterministic full-row dedup with totalOrder-bytewise
+    /// equality semantics for *all* arities (including single-column
+    /// float buffers).
+    ///
+    /// Differs from `dedup(input, &[0])` for single-column float
+    /// columns: the legacy single-column GPU kernel collapses +0/-0
+    /// (IEEE `==` says they're equal) and treats two NaNs with
+    /// different payloads as distinct. `dedup_full_row` instead uses
+    /// totalOrder-bijective bytewise equality, so:
+    ///
+    ///   * `+0.0` and `-0.0` are distinct.
+    ///   * Two NaNs collapse iff bit-identical.
+    ///
+    /// Routing today (post-PR 2):
+    ///   * `dedup(input, &all_cols)` with `arity > 1` routes to the
+    ///     full-row pipeline (same semantics as this method).
+    ///   * `dedup(input, &[0])` with `arity == 1` keeps the legacy
+    ///     single-column GPU kernel — IEEE `==` for floats, so +0/-0
+    ///     collapse and NaNs collapse iff bit-identical-or-IEEE-eq.
+    ///   * `dedup_full_row(input)` always uses bytewise totalOrder
+    ///     equality for *all* arities, so single-column float
+    ///     callers must use this method explicitly to get the
+    ///     totalOrder semantics.
+    ///
+    /// Multi-column callers that pass the all-columns key vector to
+    /// `dedup` already route through the same deterministic full-row
+    /// pipeline; single-column callers that want totalOrder semantics
+    /// must call `dedup_full_row` directly.
+    pub fn dedup_full_row(&self, input: &CudaBuffer) -> Result<CudaBuffer> {
+        self.dedup_full_row_deterministic(input)
+    }
+
+    /// Public deterministic full-row set difference. Equivalent to
+    /// `diff_gpu(a, b)` for the multi-column path but named explicitly so
+    /// callers cannot mistake it for the older first-column-key `diff`.
+    /// `a` and `b` must have type-compatible schemas.
+    pub fn diff_full_row(&self, a: &CudaBuffer, b: &CudaBuffer) -> Result<CudaBuffer> {
+        // Single-column types still go through `diff_gpu` so the existing
+        // u32 fast path is preserved; the deterministic-set fallback is
+        // now the GPU pipeline regardless.
+        self.diff_gpu(a, b)
     }
 
     fn is_full_row_key(key_cols: &[usize], arity: usize) -> bool {
@@ -1043,116 +1189,195 @@ impl super::CudaKernelProvider {
                 .all(|(expected, actual)| expected == actual)
     }
 
+    /// Deterministic GPU full-row dedup pipeline.
+    ///
+    /// Pipeline: typed multi-column sort → bytewise per-column adjacent
+    /// equality mask → multi-block exclusive prefix scan → column-wise
+    /// gather (via `compact_buffer_by_device_mask_device_count`).
+    ///
+    /// Bytewise equality matches the host-fallback `BTreeSet<Vec<u8>>`
+    /// semantics. For floats it agrees with IEEE-754 totalOrder equality
+    /// under the project's `f{32,64}_to_ordered_u{32,64}` normalization
+    /// (kernels/sort.cu): the normalization is bijective, so distinct bit
+    /// patterns map to distinct ordered keys, so bytewise eq on the
+    /// post-sort buffer is the same membership relation. +0/-0 stay
+    /// distinct; two NaNs collapse iff bit-identical.
+    ///
+    /// Replaces the host-side `BTreeSet<Vec<u8>>` fallback that PR 49's
+    /// strict deterministic-D2H gate flags as a violator.
     fn dedup_full_row_deterministic(&self, input: &CudaBuffer) -> Result<CudaBuffer> {
         let row_count = self.device_row_count(input)?;
         if row_count == 0 {
             return self.create_empty_buffer(input.schema().clone());
         }
-
-        let schema = input.schema().clone();
-        let col_widths = self.schema_column_widths(&schema)?;
-        let mut rows: Vec<Vec<u8>> = self
-            .collect_deterministic_rows(input, &col_widths, row_count)?
-            .into_iter()
-            .collect();
-        self.sort_rows_by_schema(&mut rows, &schema, &col_widths);
-
-        let mut output_columns = vec![Vec::new(); schema.arity()];
-        for row in rows.iter() {
-            let mut offset = 0usize;
-            for (col_idx, width) in col_widths.iter().copied().enumerate() {
-                let end = offset + width;
-                output_columns[col_idx].extend_from_slice(&row[offset..end]);
-                offset = end;
-            }
+        if row_count == 1 {
+            return self.clone_buffer(input);
+        }
+        if row_count > u32::MAX as usize {
+            return Err(XlogError::Kernel(format!(
+                "dedup_full_row supports at most {} rows, got {}",
+                u32::MAX,
+                row_count
+            )));
+        }
+        let arity = input.arity();
+        if arity == 0 {
+            // 0-arity, non-empty: collapse to {()}.
+            return self.buffer_from_columns(Vec::new(), 1, input.schema().clone());
         }
 
-        let output_slices: Vec<&[u8]> = output_columns.iter().map(Vec::as_slice).collect();
-        self.create_buffer_from_slices(&output_slices, schema)
-    }
+        let all_cols: Vec<usize> = (0..arity).collect();
 
-    fn sort_rows_by_schema(&self, rows: &mut [Vec<u8>], schema: &Schema, col_widths: &[usize]) {
-        rows.sort_by(|left, right| Self::compare_rows_by_schema(left, right, schema, col_widths));
-    }
+        // Step 1: typed multi-column sort. Float columns use total-order
+        // normalization; signed integers use sign-flipped unsigned compare.
+        let sorted = self.sort(input, &all_cols)?;
 
-    fn compare_rows_by_schema(
-        left: &[u8],
-        right: &[u8],
-        schema: &Schema,
-        col_widths: &[usize],
-    ) -> Ordering {
-        let mut offset = 0usize;
-        for (col_idx, width) in col_widths.iter().copied().enumerate() {
-            let end = offset + width;
-            let lhs = &left[offset..end];
-            let rhs = &right[offset..end];
-            let ord = match schema
-                .column_type(col_idx)
-                .expect("validated schema column")
-            {
-                ScalarType::U32 | ScalarType::Symbol => {
-                    u32::from_le_bytes(lhs.try_into().expect("u32 width"))
-                        .cmp(&u32::from_le_bytes(rhs.try_into().expect("u32 width")))
-                }
-                ScalarType::U64 => u64::from_le_bytes(lhs.try_into().expect("u64 width"))
-                    .cmp(&u64::from_le_bytes(rhs.try_into().expect("u64 width"))),
-                ScalarType::I32 => i32::from_le_bytes(lhs.try_into().expect("i32 width"))
-                    .cmp(&i32::from_le_bytes(rhs.try_into().expect("i32 width"))),
-                ScalarType::I64 => i64::from_le_bytes(lhs.try_into().expect("i64 width"))
-                    .cmp(&i64::from_le_bytes(rhs.try_into().expect("i64 width"))),
-                ScalarType::F32 => f32::from_le_bytes(lhs.try_into().expect("f32 width"))
-                    .total_cmp(&f32::from_le_bytes(rhs.try_into().expect("f32 width"))),
-                ScalarType::F64 => f64::from_le_bytes(lhs.try_into().expect("f64 width"))
-                    .total_cmp(&f64::from_le_bytes(rhs.try_into().expect("f64 width"))),
-                ScalarType::Bool => lhs[0].cmp(&rhs[0]),
-            };
-            if ord != Ordering::Equal {
-                return ord;
-            }
-            offset = end;
+        // Step 2: bytewise adjacent-equality mask on the sorted buffer.
+        let n = self.device_row_count(&sorted)? as u32;
+        if n <= 1 {
+            return Ok(sorted);
         }
-        Ordering::Equal
+
+        let device = self.device.inner();
+        let mut col_ptrs_host: Vec<u64> = Vec::with_capacity(arity);
+        let mut col_sizes_host: Vec<u32> = Vec::with_capacity(arity);
+        for col_idx in 0..arity {
+            let col = sorted
+                .column(col_idx)
+                .ok_or_else(|| XlogError::Kernel(format!("Sorted column {} not found", col_idx)))?;
+            let ty = sorted.schema().column_type(col_idx).ok_or_else(|| {
+                XlogError::Kernel(format!("Sorted column {} type missing", col_idx))
+            })?;
+            col_ptrs_host.push(*col.device_ptr() as u64);
+            col_sizes_host.push(ty.size_bytes() as u32);
+        }
+
+        let mut d_col_ptrs = self.memory.alloc::<u64>(arity)?;
+        let mut d_col_sizes = self.memory.alloc::<u32>(arity)?;
+        device
+            .htod_sync_copy_into(&col_ptrs_host, &mut d_col_ptrs)
+            .map_err(|e| XlogError::Kernel(format!("dedup_full_row_gpu col ptr upload: {}", e)))?;
+        device
+            .htod_sync_copy_into(&col_sizes_host, &mut d_col_sizes)
+            .map_err(|e| XlogError::Kernel(format!("dedup_full_row_gpu col size upload: {}", e)))?;
+
+        let block_size = 256u32;
+        let grid = (n + block_size - 1) / block_size;
+        let cfg = LaunchConfig {
+            grid_dim: (grid, 1, 1),
+            block_dim: (block_size, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        let d_unique_mask = self.memory.alloc::<u8>(n as usize)?;
+        let mark_fn = device
+            .get_func(DEDUP_MODULE, dedup_kernels::MARK_UNIQUE_FULL_ROW_BYTEWISE)
+            .ok_or_else(|| {
+                XlogError::Kernel("mark_unique_full_row_bytewise kernel not found".to_string())
+            })?;
+
+        // SAFETY: kernel signature matches:
+        //   mark_unique_full_row_bytewise(col_ptrs, col_sizes, num_cols,
+        //                                 num_rows_device, row_cap, unique_mask)
+        unsafe {
+            mark_fn.clone().launch(
+                cfg,
+                (
+                    &d_col_ptrs,
+                    &d_col_sizes,
+                    arity as u32,
+                    sorted.num_rows_device(),
+                    n,
+                    &d_unique_mask,
+                ),
+            )
+        }
+        .map_err(|e| {
+            XlogError::Kernel(format!(
+                "mark_unique_full_row_bytewise launch failed: {}",
+                e
+            ))
+        })?;
+        self.device.synchronize()?;
+
+        // Step 3: exclusive prefix scan over the mask.
+        let (d_prefix_sum, d_out_count) = self.scan_mask_to_prefix_with_count(&d_unique_mask, n)?;
+
+        // Step 4: gather the kept rows using the existing column-wise
+        // compaction helper. This reuses the same machinery the
+        // existing GPU dedup_sorted typed-columnar path uses.
+        self.compact_buffer_by_device_mask_device_count(
+            &sorted,
+            &d_unique_mask,
+            &d_prefix_sum,
+            d_out_count,
+        )
     }
 
-    fn collect_deterministic_rows(
+    /// Run the multi-block exclusive-scan pipeline on a u8 mask of length
+    /// `n` and return the per-row prefix-sum buffer plus a device-resident
+    /// scalar with the total number of marked rows. Mirrors the helper
+    /// pattern already used by `diff_gpu_u32` and `dedup_sorted`.
+    fn scan_mask_to_prefix_with_count(
         &self,
-        buffer: &CudaBuffer,
-        col_widths: &[usize],
-        row_count: usize,
-    ) -> Result<BTreeSet<Vec<u8>>> {
-        let row_width: usize = col_widths.iter().sum();
-        let mut columns = Vec::with_capacity(col_widths.len());
+        d_mask: &cudarc::driver::CudaSlice<u8>,
+        n: u32,
+    ) -> Result<(
+        crate::memory::TrackedCudaSlice<u32>,
+        crate::memory::TrackedCudaSlice<u32>,
+    )> {
+        let device = self.device.inner();
+        let block_size = 256u32;
+        let num_blocks = (n + block_size - 1) / block_size;
 
-        for (col_idx, width) in col_widths.iter().copied().enumerate() {
-            let col = buffer.column(col_idx).ok_or_else(|| {
-                XlogError::Kernel(format!("Column {} missing from buffer", col_idx))
+        let d_prefix_sum = self.memory.alloc::<u32>(n as usize)?;
+        let mut d_block_sums = self.memory.alloc::<u32>(num_blocks as usize)?;
+
+        let phase1_fn = device
+            .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE1)
+            .ok_or_else(|| {
+                XlogError::Kernel("Failed to get multiblock_scan_phase1 kernel".to_string())
             })?;
-            let num_bytes = row_count.checked_mul(width).ok_or_else(|| {
-                XlogError::Kernel(format!(
-                    "Column {} byte count overflow for {} rows",
-                    col_idx, row_count
-                ))
-            })?;
-            let col_view = self.column_bytes_view(col, num_bytes)?;
-            let mut bytes = vec![0u8; num_bytes];
-            self.dtoh_sync_copy_into_tracked(&col_view, &mut bytes)
-                .map_err(|e| XlogError::Kernel(format!("Failed to read column: {}", e)))?;
-            columns.push(bytes);
+        // SAFETY: kernel signature matches multiblock_scan_phase1.
+        unsafe {
+            phase1_fn.clone().launch(
+                LaunchConfig {
+                    grid_dim: (num_blocks, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (d_mask, &d_prefix_sum, &d_block_sums, n),
+            )
         }
+        .map_err(|e| XlogError::Kernel(format!("multiblock_scan_phase1 failed: {}", e)))?;
 
-        let mut rows = BTreeSet::new();
-        for row_idx in 0..row_count {
-            let mut row = Vec::with_capacity(row_width);
-            for (col, width) in columns.iter().zip(col_widths.iter().copied()) {
-                let start = row_idx * width;
-                let end = start + width;
-                row.extend_from_slice(&col[start..end]);
+        if num_blocks > 1 {
+            self.multiblock_scan_u32_inplace(&mut d_block_sums, num_blocks)?;
+
+            let phase3_fn = device
+                .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE3)
+                .ok_or_else(|| {
+                    XlogError::Kernel("Failed to get multiblock_scan_phase3 kernel".to_string())
+                })?;
+            // SAFETY: kernel signature matches multiblock_scan_phase3.
+            unsafe {
+                phase3_fn.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (num_blocks, 1, 1),
+                        block_dim: (block_size, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (&d_prefix_sum, &d_block_sums, n),
+                )
             }
-            rows.insert(row);
+            .map_err(|e| XlogError::Kernel(format!("multiblock_scan_phase3 failed: {}", e)))?;
         }
+        self.device.synchronize()?;
 
-        Ok(rows)
+        let d_out_count = self.capture_compact_count(&d_prefix_sum, d_mask, n)?;
+        Ok((d_prefix_sum, d_out_count))
     }
+
     // ============== Sort Methods ==============
 
     pub(super) const SORT_BLOCK_SIZE: u32 = 256;
