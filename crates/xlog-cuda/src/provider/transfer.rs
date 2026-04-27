@@ -16,18 +16,34 @@ impl super::CudaKernelProvider {
     /// `download_column_i32`, `download_column_i64`, `download_column_f32`,
     /// `download_column_f64`, `download_column_u8`, `download_column_bool`.
     ///
-    /// Increments the D2H transfer counter (gate-tracked).
+    /// Increments `d2h_transfer_count` (the per-call ILP-style counter)
+    /// and is checked by the strict deterministic-Datalog D2H guard when
+    /// it is enabled (see `enable_strict_deterministic_d2h`).
     pub fn download_column<T: GpuScalar>(
         &self,
         buffer: &CudaBuffer,
         col_idx: usize,
     ) -> Result<Vec<T>> {
+        // Gate first so a deterministic-strict run fails before any host
+        // allocation or counter mutation. Zero-row downloads are a no-op in
+        // `download_column_inner` and never issue a D2H transfer, so the
+        // gate must not fire for them.
+        let num_rows = self.device_row_count(buffer)?;
+        if num_rows > 0 {
+            self.gate_column_download::<T>("download_column", num_rows)?;
+        }
         self.d2h_transfer_count.fetch_add(1, Ordering::Relaxed);
         self.download_column_inner::<T>(buffer, col_idx)
     }
 
-    /// Download a column WITHOUT incrementing the D2H transfer counter.
-    /// Records in `transfer_tracker` for profiling stats but not for the D2H gate.
+    /// Download a column WITHOUT incrementing the per-call
+    /// `d2h_transfer_count` (the ILP-style counter). Records in
+    /// `transfer_tracker` for byte/call profiling stats.
+    ///
+    /// IS still checked by the strict deterministic-Datalog D2H guard when
+    /// it is enabled — "untracked" only refers to `d2h_transfer_count`,
+    /// not to the deterministic gate. Use `dtoh_scalar_untracked` for
+    /// metadata reads that must remain allowed under the gate.
     ///
     /// Replaces: `download_f64_untracked` (now generic over `T`).
     pub fn download_column_untracked<T: GpuScalar>(
@@ -44,6 +60,12 @@ impl super::CudaKernelProvider {
             return Ok(vec![]);
         }
 
+        // Gate first so a deterministic-strict run fails before any host
+        // allocation, mirroring `download_column`. The downstream
+        // `dtoh_sync_copy_into_tracked` would also gate, but we stop earlier
+        // and with a more specific op label.
+        self.gate_column_download::<T>("download_column_untracked", num_rows)?;
+
         let num_bytes = num_rows.checked_mul(T::BYTE_WIDTH).ok_or_else(|| {
             XlogError::kernel_ctx("download_column_untracked", "byte size overflow", &num_rows)
         })?;
@@ -59,9 +81,11 @@ impl super::CudaKernelProvider {
 
     /// Shared implementation for tracked column downloads.
     ///
-    /// Uses `device.inner().dtoh_sync_copy_into()` directly (no stats recording),
-    /// which matches the existing `download_column_u32` pattern. The caller
-    /// (`download_column`) is responsible for incrementing `d2h_transfer_count`.
+    /// Uses `device.inner().dtoh_sync_copy_into()` directly (no stats
+    /// recording), which matches the existing `download_column_u32` pattern.
+    /// The caller (`download_column`) is responsible for the strict
+    /// deterministic-D2H gate check and for incrementing
+    /// `d2h_transfer_count`; this helper assumes both have already happened.
     fn download_column_inner<T: GpuScalar>(
         &self,
         buffer: &CudaBuffer,
@@ -126,5 +150,18 @@ impl super::CudaKernelProvider {
             })?;
 
         self.buffer_from_columns(vec![col.into()], data.len() as u64, schema)
+    }
+
+    /// Probe the deterministic-D2H gate for a column download of `num_rows`
+    /// rows of scalar `T`. Returns `Err` and increments the violation counter
+    /// when the gate is enabled. Used by `download_column` and
+    /// `download_column_untracked` so the gate fires before any host buffer
+    /// is allocated or counter mutated, mirroring the chokepoint in
+    /// `dtoh_sync_copy_into_tracked`.
+    fn gate_column_download<T: GpuScalar>(&self, op: &'static str, num_rows: usize) -> Result<()> {
+        let bytes = num_rows
+            .checked_mul(T::BYTE_WIDTH)
+            .ok_or_else(|| XlogError::kernel_ctx(op, "byte size overflow", &num_rows))?;
+        self.check_deterministic_d2h(op, bytes as u64)
     }
 }

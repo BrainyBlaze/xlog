@@ -294,6 +294,26 @@ impl Executor {
     /// # Errors
     /// Returns an error if any stratum or query execution fails
     pub fn execute_plan(&mut self, plan: &ExecutionPlan) -> Result<CudaBuffer> {
+        // Opt-in deterministic-Datalog D2H gate. Enabled only for the
+        // duration of this call; the provider is shared so we restore the
+        // prior state on every exit path (including errors). This PR ships
+        // the gate as opt-in only — known violating relational paths
+        // (set difference, binary-join count/materialize) are scheduled for
+        // replacement before the default flips.
+        let gate = self.config.strict_deterministic_d2h;
+        let prev_gate = self.provider.strict_deterministic_d2h_enabled();
+        if gate {
+            self.provider.reset_deterministic_d2h_violations();
+            self.provider.enable_strict_deterministic_d2h();
+        }
+        // Cloning the Arc keeps the guard independent of `self`, so the
+        // guard can coexist with `&mut self` calls inside the strata loop.
+        let _gate_guard = D2hGateGuard {
+            provider: Arc::clone(&self.provider),
+            engaged: gate,
+            previous: prev_gate,
+        };
+
         // Execute strata in order
         for (idx, stratum) in plan.strata.iter().enumerate() {
             // Count rules and check if recursive
@@ -772,14 +792,37 @@ impl Executor {
         if let Some(n) = buffer.cached_row_count() {
             return Ok(n);
         }
-        let mut host_rows = [0u32];
-        self.provider
-            .device()
-            .inner()
-            .dtoh_sync_copy_into(buffer.num_rows_device(), &mut host_rows)
-            .map_err(|e| XlogError::Execution(format!("Failed to read row count: {}", e)))?;
-        buffer.set_cached_row_count_if_unset(host_rows[0]);
-        Ok(host_rows[0])
+        // Metadata-only read: row counts are control-plane state, not
+        // tuple data. Route through `dtoh_scalar_untracked` so the
+        // metadata-vs-data-plane contract stays grepable and the
+        // deterministic-D2H gate continues to allow it.
+        let n = self
+            .provider
+            .dtoh_scalar_untracked::<u32>(buffer.num_rows_device(), 0)?;
+        buffer.set_cached_row_count_if_unset(n);
+        Ok(n)
+    }
+}
+
+/// RAII guard that restores the provider's deterministic-D2H gate state on
+/// drop. Engaged only when `Executor::execute_plan` opted in via
+/// `RuntimeConfig::strict_deterministic_d2h`.
+struct D2hGateGuard {
+    provider: Arc<CudaKernelProvider>,
+    engaged: bool,
+    previous: bool,
+}
+
+impl Drop for D2hGateGuard {
+    fn drop(&mut self) {
+        if !self.engaged {
+            return;
+        }
+        if self.previous {
+            self.provider.enable_strict_deterministic_d2h();
+        } else {
+            self.provider.disable_strict_deterministic_d2h();
+        }
     }
 }
 

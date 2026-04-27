@@ -183,3 +183,191 @@ fn test_executor_filter_with_column_column_compare_and_symbol() {
     let vals = provider.download_column::<u32>(&filtered, 0).unwrap();
     assert_eq!(vals, vec![1, 3]);
 }
+
+/// Clean-path coverage for the strict deterministic-Datalog D2H gate.
+///
+/// The v0.5.5 runtime is the *target* of the guard: most non-trivial
+/// deterministic paths still fall back to host-side set algebra (this is
+/// why the guard ships opt-in for now). The clean path that is provably
+/// D2H-free today is a facts-only program: no rules, no queries, no
+/// fixpoint iteration. `execute_plan` must:
+///
+///   * Engage the gate on entry (config flag is `true`).
+///   * Run all strata without issuing a tracked D2H transfer.
+///   * Restore the gate to its prior state on exit (RAII guard).
+///   * Leave the violation counter at zero.
+///
+/// Once the GPU-native dedup/diff and deterministic join-materialize
+/// kernels land, the broader Datalog surface should also satisfy this
+/// contract; this test is the foothold that lets later PRs widen the
+/// clean-path coverage.
+#[test]
+fn strict_deterministic_d2h_clean_path() {
+    let mut config = RuntimeConfig::default();
+    config.strict_deterministic_d2h = true;
+
+    let (mut executor, provider) = match create_executor_with_config(config) {
+        Some(e) => e,
+        None => {
+            eprintln!("Skipping test: no CUDA device available");
+            return;
+        }
+    };
+
+    // Single-column facts-only program. Multi-column EDB ingestion still
+    // routes through a host-side dedup helper today; single-column
+    // ingestion uses the GPU dedup path and is provably D2H-free.
+    let source = r#"
+        node(1).
+        node(2).
+        node(3).
+    "#;
+
+    let mut compiler = Compiler::new();
+    let plan = compiler.compile(source).expect("Compilation failed");
+
+    let node_schema = Schema::new(vec![("c0".to_string(), ScalarType::U32)]);
+    let node_buffer = provider
+        .create_buffer_from_u32_columns(&[&[1u32, 2, 3]], node_schema)
+        .unwrap();
+    setup_executor_with_facts(&mut executor, &compiler, vec![("node", node_buffer)]);
+
+    let prior_gate = provider.strict_deterministic_d2h_enabled();
+    provider.reset_deterministic_d2h_violations();
+    executor
+        .execute_plan(&plan)
+        .expect("facts-only plan must succeed under strict deterministic D2H gate");
+
+    // Gate must have been restored to its prior state by the RAII guard.
+    assert_eq!(
+        provider.strict_deterministic_d2h_enabled(),
+        prior_gate,
+        "gate guard did not restore the provider's prior state"
+    );
+    assert_eq!(
+        provider.deterministic_d2h_violation_count(),
+        0,
+        "facts-only plan tripped the gate; this likely means a new runtime \
+         path now issues a host fallback we did not previously have"
+    );
+
+    // Sanity: the EDB relation is intact and downloadable once the gate is off.
+    let mut vals = provider
+        .download_column::<u32>(executor.store().get("node").unwrap(), 0)
+        .unwrap();
+    vals.sort_unstable();
+    assert_eq!(vals, vec![1, 2, 3]);
+}
+
+/// The gate must default to off — `RuntimeConfig::default()` does not
+/// engage it, and a program that *would* violate while strict therefore
+/// continues to succeed unchanged.
+#[test]
+fn default_runtime_does_not_engage_gate() {
+    let (mut executor, provider) = match create_executor_with_config(RuntimeConfig::default()) {
+        Some(e) => e,
+        None => {
+            eprintln!("Skipping test: no CUDA device available");
+            return;
+        }
+    };
+
+    let source = r#"
+        edge(1, 2).
+        edge(2, 3).
+        node(1). node(2). node(3).
+        has_in(X) :- edge(_, X).
+        no_in(X) :- node(X), !has_in(X).
+        ?- no_in(X).
+    "#;
+
+    let mut compiler = Compiler::new();
+    let plan = match compiler.compile(source) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("Skipping: source did not compile: {}", e);
+            return;
+        }
+    };
+
+    let edge_buffer = create_edge_buffer(&provider, &[(1, 2), (2, 3)]);
+    let node_schema = Schema::new(vec![("c0".to_string(), ScalarType::U32)]);
+    let node_buffer = provider
+        .create_buffer_from_u32_columns(&[&[1u32, 2, 3]], node_schema)
+        .unwrap();
+    setup_executor_with_facts(
+        &mut executor,
+        &compiler,
+        vec![("edge", edge_buffer), ("node", node_buffer)],
+    );
+
+    provider.reset_deterministic_d2h_violations();
+    executor
+        .execute_plan(&plan)
+        .expect("default config must let known-violator programs run");
+    assert_eq!(provider.deterministic_d2h_violation_count(), 0);
+    assert!(!provider.strict_deterministic_d2h_enabled());
+}
+
+/// Negative-direction coverage: a program that the v0.5.5 runtime still
+/// services via host fallback (stratified negation routes through `diff`)
+/// must surface a violation when the strict gate is enabled. This pins the
+/// gate as a regression detector — if a future change moves negation onto
+/// a GPU-native diff, this test should be updated alongside that work, not
+/// silently passed.
+#[test]
+fn strict_deterministic_d2h_known_violator_is_detected() {
+    let mut config = RuntimeConfig::default();
+    config.strict_deterministic_d2h = true;
+
+    let (mut executor, provider) = match create_executor_with_config(config) {
+        Some(e) => e,
+        None => {
+            eprintln!("Skipping test: no CUDA device available");
+            return;
+        }
+    };
+
+    // Stratified negation lowers to set difference (`diff`) in the runtime,
+    // and `diff` still falls back to host-side set algebra.
+    let source = r#"
+        edge(1, 2).
+        edge(2, 3).
+        edge(3, 4).
+        node(1). node(2). node(3). node(4).
+        has_in(X) :- edge(_, X).
+        no_in(X) :- node(X), !has_in(X).
+        ?- no_in(X).
+    "#;
+
+    let mut compiler = Compiler::new();
+    let plan = match compiler.compile(source) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("Skipping: source did not compile: {}", e);
+            return;
+        }
+    };
+
+    let edge_buffer = create_edge_buffer(&provider, &[(1, 2), (2, 3), (3, 4)]);
+    let node_schema = Schema::new(vec![("c0".to_string(), ScalarType::U32)]);
+    let node_buffer = provider
+        .create_buffer_from_u32_columns(&[&[1u32, 2, 3, 4]], node_schema)
+        .unwrap();
+    setup_executor_with_facts(
+        &mut executor,
+        &compiler,
+        vec![("edge", edge_buffer), ("node", node_buffer)],
+    );
+
+    provider.reset_deterministic_d2h_violations();
+    let res = executor.execute_plan(&plan);
+    assert!(
+        res.is_err(),
+        "expected gate to surface a violation for negation-via-diff"
+    );
+    assert!(
+        provider.deterministic_d2h_violation_count() >= 1,
+        "violation counter did not increment for known violator"
+    );
+}
