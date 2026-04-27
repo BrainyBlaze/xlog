@@ -39,9 +39,11 @@
 
 pub mod direct;
 pub mod resource;
+pub mod stream_pool;
 
 pub use direct::DirectCudaResource;
 pub use resource::{
     AllocTag, BlockState, DeviceBlock, DeviceMemoryResource, Generation, ResourceError,
     ResourceResult, StreamId,
 };
+pub use stream_pool::{StreamPool, DEFAULT_MAX_STREAMS};
