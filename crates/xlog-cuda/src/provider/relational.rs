@@ -6284,7 +6284,6 @@ impl super::CudaKernelProvider {
     /// Other join types return a structured `XlogError::Kernel`
     /// directing callers to the legacy `hash_join_v2` until
     /// follow-up sub-slices land:
-    ///   * Semi / Anti — slice #7B.
     ///   * LeftOuter — slice #7C.
     ///   * Indexed (`hash_join_v2_with_index`) — slice #7D.
     pub fn hash_join_v2_recorded(
@@ -6306,14 +6305,216 @@ impl super::CudaKernelProvider {
                 max_output,
                 launch_stream,
             ),
-            JoinType::Semi | JoinType::Anti | JoinType::LeftOuter => {
-                Err(XlogError::Kernel(format!(
-                "hash_join_v2_recorded: {:?} not yet supported (slice #7A migrates Inner only; \
-                 Semi / Anti / LeftOuter deferred to follow-up sub-slices). Use the legacy \
-                 hash_join_v2 for now.",
+            JoinType::Semi => self.hash_join_semi_or_anti_v2_recorded(
+                left,
+                right,
+                left_keys,
+                right_keys,
+                false,
+                launch_stream,
+            ),
+            JoinType::Anti => self.hash_join_semi_or_anti_v2_recorded(
+                left,
+                right,
+                left_keys,
+                right_keys,
+                true,
+                launch_stream,
+            ),
+            JoinType::LeftOuter => Err(XlogError::Kernel(format!(
+                "hash_join_v2_recorded: {:?} not yet supported (slice #7B migrates Semi / \
+                 Anti; LeftOuter deferred to slice #7C). Use the legacy hash_join_v2 for now.",
                 join_type
-            )))
+            ))),
+        }
+    }
+
+    /// Strict-recorder Semi/Anti hash join (slice #7B).
+    /// Single helper parametrized by `anti`: both share the
+    /// kernel-arg shape and chain — pack keys for both sides,
+    /// build the hash table, run the `hash_join_semi` /
+    /// `hash_join_anti` kernel to produce a per-left-row mask,
+    /// then compose with
+    /// `compact_buffer_by_device_mask_counted_recorded` to
+    /// filter `left` by the mask. Semi mask is "has match",
+    /// Anti mask is "no match"; the recorded compact tail keeps
+    /// rows where the mask byte is non-zero either way.
+    fn hash_join_semi_or_anti_v2_recorded(
+        &self,
+        left: &CudaBuffer,
+        right: &CudaBuffer,
+        left_keys: &[usize],
+        right_keys: &[usize],
+        anti: bool,
+        launch_stream: StreamId,
+    ) -> Result<CudaBuffer> {
+        use crate::launch::LaunchRecorder;
+
+        let runtime = self.memory.runtime().ok_or_else(|| {
+            XlogError::Kernel(
+                "hash_join_v2_recorded (semi/anti) requires a runtime-backed GpuMemoryManager"
+                    .to_string(),
+            )
+        })?;
+        let cu_stream = runtime
+            .stream_pool()
+            .resolve(launch_stream)
+            .ok_or_else(|| {
+                XlogError::Kernel(format!(
+                "hash_join_v2_recorded (semi/anti): launch_stream StreamId({}) does not resolve",
+                launch_stream.0
+            ))
+            })?;
+
+        let num_left = self.device_row_count(left)?;
+        let num_right = self.device_row_count(right)?;
+        if num_left > u32::MAX as usize || num_right > u32::MAX as usize {
+            return Err(XlogError::Kernel(format!(
+                "Join supports at most {} rows per side (left={}, right={})",
+                u32::MAX,
+                num_left,
+                num_right
+            )));
+        }
+        if num_left == 0 {
+            return self.create_empty_buffer(left.schema().clone());
+        }
+        if num_right == 0 {
+            // No matches possible.
+            //   * Semi: empty result.
+            //   * Anti: keep all left rows.
+            //
+            // The Anti edge case is a copy of `left`. We use
+            // legacy `clone_buffer` here, which runs on the
+            // default stream and synchronizes before
+            // returning. No launch_stream work is queued, so
+            // there are no recorded events on the original
+            // input columns from this call — which is the
+            // correct semantic: we did not touch them on
+            // launch_stream.
+            return if anti {
+                self.clone_buffer(left)
+            } else {
+                self.create_empty_buffer(left.schema().clone())
+            };
+        }
+        if left_keys.is_empty() || right_keys.is_empty() {
+            return Err(XlogError::Kernel(
+                "Join requires at least one key column".to_string(),
+            ));
+        }
+        if left_keys.len() != right_keys.len() {
+            return Err(XlogError::Kernel(
+                "Left and right key columns must have same length".to_string(),
+            ));
+        }
+        if left_keys.len() > 4 {
+            return Err(XlogError::Kernel(
+                "hash_join_v2_recorded (semi/anti): max 4 key columns supported (pack_keys constraint)"
+                    .to_string(),
+            ));
+        }
+        for (&l, &r) in left_keys.iter().zip(right_keys.iter()) {
+            let lt = left.schema().column_type(l);
+            let rt = right.schema().column_type(r);
+            if lt != rt {
+                return Err(XlogError::Kernel(format!(
+                    "Key column type mismatch: left[{}]={:?}, right[{}]={:?}",
+                    l, lt, r, rt
+                )));
             }
         }
+
+        let num_left = num_left as u32;
+        let num_right = num_right as u32;
+
+        let left_packed =
+            self.pack_keys_gpu_on_stream(left, left_keys, &cu_stream, launch_stream, runtime)?;
+        let right_packed =
+            self.pack_keys_gpu_on_stream(right, right_keys, &cu_stream, launch_stream, runtime)?;
+        let table = self.build_hash_table_v2_on_stream(
+            &right_packed.hashes,
+            num_right,
+            &cu_stream,
+            launch_stream,
+            runtime,
+        )?;
+
+        let d_mask = self.memory.alloc::<u8>(num_left as usize)?;
+
+        let kernel_name = if anti {
+            join_kernels::HASH_JOIN_ANTI
+        } else {
+            join_kernels::HASH_JOIN_SEMI
+        };
+        let func = self
+            .device
+            .inner()
+            .get_func(JOIN_MODULE, kernel_name)
+            .ok_or_else(|| XlogError::Kernel(format!("{} kernel not found", kernel_name)))?;
+
+        let block_size = 256u32;
+        let grid_size = (num_left + block_size - 1) / block_size;
+        let cfg = LaunchConfig {
+            grid_dim: (grid_size, 1, 1),
+            block_dim: (block_size, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        let mut rec = LaunchRecorder::new_strict(launch_stream);
+        rec.read(&left_packed.hashes);
+        rec.read(&left_packed.packed_keys);
+        rec.read(&right_packed.packed_keys);
+        rec.read(&table.bucket_offsets);
+        rec.read(&table.bucket_counts);
+        rec.read(&table.bucket_entries);
+        rec.read(&table.bucket_entry_hashes);
+        rec.preflight(runtime).map_err(|e| {
+            XlogError::Kernel(format!(
+                "hash_join_v2_recorded (semi/anti): preflight failed: {}",
+                e
+            ))
+        })?;
+
+        // SAFETY: hash_join_{semi,anti}(probe_hashes, num_probe,
+        //   bucket_offsets, bucket_counts, bucket_entries,
+        //   bucket_entry_hashes, bucket_mask, probe_keys,
+        //   build_keys, key_bytes, mask). 11 args.
+        unsafe {
+            func.clone().launch_on_stream(
+                &cu_stream,
+                cfg,
+                (
+                    &left_packed.hashes,
+                    num_left,
+                    &table.bucket_offsets,
+                    &table.bucket_counts,
+                    &table.bucket_entries,
+                    &table.bucket_entry_hashes,
+                    table.bucket_mask,
+                    &left_packed.packed_keys,
+                    &right_packed.packed_keys,
+                    left_packed.key_bytes,
+                    &d_mask,
+                ),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("{} (on_stream) failed: {}", kernel_name, e)))?;
+
+        rec.write_post_preflight_fresh(&d_mask);
+        rec.commit(runtime).map_err(|e| {
+            XlogError::Kernel(format!(
+                "hash_join_v2_recorded (semi/anti): commit failed: {}",
+                e
+            ))
+        })?;
+
+        // Filter `left` by the mask via the recorded compact
+        // tail. Its own LaunchRecorder records reads on
+        // left.column[i] and left.num_rows_device against
+        // launch_stream — so dropping `left` after this
+        // method returns is correctly serialized through the
+        // runtime's record-all + wait-all event chain.
+        self.compact_buffer_by_device_mask_counted_recorded(left, &d_mask, launch_stream)
     }
 }

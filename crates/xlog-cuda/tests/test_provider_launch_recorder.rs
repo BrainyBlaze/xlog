@@ -1622,10 +1622,12 @@ fn provider_hash_join_v2_recorded_rejects_legacy_manager() {
     }
 }
 
-/// Negative test: Semi/Anti/LeftOuter rejected with a clear
-/// deferral message until slices #7B / #7C land.
+/// Negative test: LeftOuter rejected with a clear deferral
+/// message until slice #7C lands. Semi and Anti are now
+/// supported (slice #7B); they have positive drop+reuse tests
+/// below.
 #[test]
-fn provider_hash_join_v2_recorded_rejects_non_inner_join_types() {
+fn provider_hash_join_v2_recorded_rejects_left_outer_join_type() {
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::{CudaBuffer, JoinType};
 
@@ -1692,25 +1694,520 @@ fn provider_hash_join_v2_recorded_rejects_non_inner_join_types() {
         Schema::new(vec![("k".to_string(), ScalarType::U32)]),
     );
 
-    for jt in [JoinType::Semi, JoinType::Anti, JoinType::LeftOuter] {
-        let err = provider.hash_join_v2_recorded(&lhs, &rhs, &[0], &[0], jt, None, launch_stream);
-        match err {
-            Err(XlogError::Kernel(msg)) => assert!(
-                msg.contains("not yet supported") && msg.contains("hash_join_v2"),
-                "expected deferral message for {:?}, got {:?}",
-                jt,
-                msg
-            ),
-            Err(other) => panic!(
-                "hash_join_v2_recorded must reject {:?} with Kernel error, got {:?}",
-                jt, other
-            ),
-            Ok(_) => panic!(
-                "hash_join_v2_recorded must reject {:?} — unexpectedly returned Ok",
-                jt
-            ),
-        }
+    let jt = JoinType::LeftOuter;
+    let err = provider.hash_join_v2_recorded(&lhs, &rhs, &[0], &[0], jt, None, launch_stream);
+    match err {
+        Err(XlogError::Kernel(msg)) => assert!(
+            msg.contains("not yet supported") && msg.contains("hash_join_v2"),
+            "expected deferral message for {:?}, got {:?}",
+            jt,
+            msg
+        ),
+        Err(other) => panic!(
+            "hash_join_v2_recorded must reject {:?} with Kernel error, got {:?}",
+            jt, other
+        ),
+        Ok(_) => panic!(
+            "hash_join_v2_recorded must reject {:?} — unexpectedly returned Ok",
+            jt
+        ),
     }
+}
+
+/// Slice #7B: drop+reuse for the recorded Semi hash join.
+/// Semi keeps left rows whose key has a match in right.
+/// Composes pack_keys_on_stream ×2 → build_hash_table_on_stream
+/// → HASH_JOIN_SEMI kernel → recorded compact tail. Drops both
+/// inputs after the call returns.
+///
+/// Predicate: left rows have keys 0..LKEYS, right rows have
+/// keys 0..RKEYS where RKEYS=LKEYS/2. Expected: only left rows
+/// whose key is in [0, RKEYS) survive — half of left.
+#[test]
+fn provider_hash_join_semi_v2_recorded_survives_drop_and_reuse() {
+    use xlog_core::{ScalarType, Schema};
+    use xlog_cuda::{CudaBuffer, JoinType};
+
+    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
+    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
+        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
+    );
+    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
+        async_resource,
+        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
+    ));
+    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
+        Box::new(GlobalDeviceBudget::new(logging, 256 * 1024 * 1024));
+    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
+        Arc::clone(&device),
+        0,
+        Arc::clone(&pool),
+        budget,
+    ));
+    let memory = Arc::new(GpuMemoryManager::with_runtime(
+        Arc::clone(&device),
+        MemoryBudget::with_limit(256 * 1024 * 1024),
+        Arc::clone(&runtime),
+    ));
+    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
+        .expect("provider with_runtime");
+    let launch_stream = pool.acquire().expect("acquire launch_stream");
+    let launch_handle = pool.resolve(launch_stream).expect("resolve");
+    let default_stream = device.inner().stream();
+
+    const LROWS: usize = 256;
+    const RROWS: usize = 256;
+    const LKEYS: u32 = 64;
+    const RKEYS: u32 = 32;
+    // Pool pressure tuned to the same shape as inner-join +
+    // recorded compact tail combined.
+    const ITERATIONS: usize = 512;
+    const PROBE_SLOTS: usize = 16;
+    const TRAMPLE: u8 = 0xEE;
+    let schema = Schema::new(vec![
+        ("k".to_string(), ScalarType::U32),
+        ("v".to_string(), ScalarType::U32),
+    ]);
+
+    let mut reuse_observed = 0usize;
+    let mut bad_output = 0usize;
+
+    for iter in 0..ITERATIONS {
+        // Left: row i has (k = i % LKEYS, v = i + 100_000).
+        let mut lk = Vec::with_capacity(LROWS * 4);
+        let mut lv = Vec::with_capacity(LROWS * 4);
+        for i in 0..LROWS {
+            lk.extend_from_slice(&((i as u32) % LKEYS).to_le_bytes());
+            lv.extend_from_slice(&((i as u32) + 100_000).to_le_bytes());
+        }
+        let mut lk_b = memory.alloc::<u8>(LROWS * 4).expect("alloc lk");
+        let mut lv_b = memory.alloc::<u8>(LROWS * 4).expect("alloc lv");
+        device
+            .inner()
+            .htod_sync_copy_into(&lk, &mut lk_b)
+            .expect("htod lk");
+        device
+            .inner()
+            .htod_sync_copy_into(&lv, &mut lv_b)
+            .expect("htod lv");
+        let lk_ptr = lk_b.device_ptr_value();
+        let lv_ptr = lv_b.device_ptr_value();
+        let mut l_rows = memory.alloc::<u32>(1).expect("alloc l_rows");
+        device
+            .inner()
+            .htod_sync_copy_into(&[LROWS as u32], &mut l_rows)
+            .expect("htod l_rows");
+        let left = CudaBuffer::from_columns(
+            vec![lk_b.into(), lv_b.into()],
+            LROWS as u64,
+            l_rows,
+            schema.clone(),
+        );
+
+        // Right: row j has (k = j % RKEYS, v = j + 200_000).
+        let mut rk = Vec::with_capacity(RROWS * 4);
+        let mut rv = Vec::with_capacity(RROWS * 4);
+        for j in 0..RROWS {
+            rk.extend_from_slice(&((j as u32) % RKEYS).to_le_bytes());
+            rv.extend_from_slice(&((j as u32) + 200_000).to_le_bytes());
+        }
+        let mut rk_b = memory.alloc::<u8>(RROWS * 4).expect("alloc rk");
+        let mut rv_b = memory.alloc::<u8>(RROWS * 4).expect("alloc rv");
+        device
+            .inner()
+            .htod_sync_copy_into(&rk, &mut rk_b)
+            .expect("htod rk");
+        device
+            .inner()
+            .htod_sync_copy_into(&rv, &mut rv_b)
+            .expect("htod rv");
+        let rk_ptr = rk_b.device_ptr_value();
+        let rv_ptr = rv_b.device_ptr_value();
+        let mut r_rows = memory.alloc::<u32>(1).expect("alloc r_rows");
+        device
+            .inner()
+            .htod_sync_copy_into(&[RROWS as u32], &mut r_rows)
+            .expect("htod r_rows");
+        let right = CudaBuffer::from_columns(
+            vec![rk_b.into(), rv_b.into()],
+            RROWS as u64,
+            r_rows,
+            schema.clone(),
+        );
+
+        let result = provider
+            .hash_join_v2_recorded(
+                &left,
+                &right,
+                &[0],
+                &[0],
+                JoinType::Semi,
+                None,
+                launch_stream,
+            )
+            .expect("hash_join_v2_recorded::<Semi>");
+
+        // Drop both inputs WITHOUT host sync.
+        drop(left);
+        drop(right);
+
+        // Reuse + trample.
+        let mut probes: Vec<_> = (0..PROBE_SLOTS)
+            .map(|_| memory.alloc::<u8>(LROWS * 4).expect("alloc probe"))
+            .collect();
+        let probe_ptrs: Vec<u64> = probes.iter().map(|p| p.device_ptr_value()).collect();
+        let reused = probe_ptrs
+            .iter()
+            .any(|p| *p == lk_ptr || *p == lv_ptr || *p == rk_ptr || *p == rv_ptr);
+        if reused {
+            reuse_observed += 1;
+        }
+        unsafe {
+            for &p in &probe_ptrs {
+                memset_sync_default(p, TRAMPLE, LROWS * 4);
+            }
+        }
+        let _ = &mut probes;
+
+        launch_handle.synchronize().expect("sync launch");
+        default_stream.synchronize().expect("sync default");
+
+        // Verify: kept rows are exactly i where i % LKEYS < RKEYS.
+        let expected: Vec<(u32, u32)> = (0..LROWS)
+            .filter_map(|i| {
+                let k = (i as u32) % LKEYS;
+                if k < RKEYS {
+                    Some((k, (i as u32) + 100_000))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let expected_count = expected.len();
+        let mut host_rows = [0u32];
+        device
+            .inner()
+            .dtoh_sync_copy_into(result.num_rows_device(), &mut host_rows)
+            .expect("dtoh result count");
+        if host_rows[0] as usize != expected_count {
+            bad_output += 1;
+            if iter == 0 {
+                eprintln!(
+                    "[hash_join_semi_recorded] iter=0 actual={} expected={} reused={}",
+                    host_rows[0], expected_count, reused
+                );
+            }
+            drop(result);
+            drop(probes);
+            runtime.reap_pending().expect("reap");
+            continue;
+        }
+        let mut k_back = vec![0u8; expected_count * 4];
+        let mut v_back = vec![0u8; expected_count * 4];
+        unsafe {
+            dtoh_sync(&mut k_back, *result.column(0).expect("col0").device_ptr());
+            dtoh_sync(&mut v_back, *result.column(1).expect("col1").device_ptr());
+        }
+        // Compare as sets (compact preserves order, so we
+        // could compare positionally; sets are stricter and
+        // catch any reorder regression).
+        let observed: std::collections::HashSet<(u32, u32)> = (0..expected_count)
+            .map(|i| {
+                let k = u32::from_le_bytes([
+                    k_back[i * 4],
+                    k_back[i * 4 + 1],
+                    k_back[i * 4 + 2],
+                    k_back[i * 4 + 3],
+                ]);
+                let v = u32::from_le_bytes([
+                    v_back[i * 4],
+                    v_back[i * 4 + 1],
+                    v_back[i * 4 + 2],
+                    v_back[i * 4 + 3],
+                ]);
+                (k, v)
+            })
+            .collect();
+        let expected_set: std::collections::HashSet<(u32, u32)> =
+            expected.iter().copied().collect();
+        if observed != expected_set {
+            bad_output += 1;
+            if iter == 0 {
+                eprintln!(
+                    "[hash_join_semi_recorded] iter=0 set mismatch reused={}",
+                    reused
+                );
+            }
+        }
+
+        drop(result);
+        drop(probes);
+        runtime.reap_pending().expect("reap");
+    }
+
+    eprintln!(
+        "[hash_join_semi_recorded] iterations={} reuse_observed={} bad_output={}",
+        ITERATIONS, reuse_observed, bad_output
+    );
+    assert!(
+        reuse_observed > 0,
+        "address reuse never observed across {} iterations; cannot exercise \
+         the cross-stream lifetime safety path",
+        ITERATIONS
+    );
+    assert_eq!(
+        bad_output, 0,
+        "hash_join_v2_recorded::<Semi> produced corrupted output in {}/{} iterations \
+         (reuse_observed={}). Pack / hash table / semi probe / compact tail raced \
+         an alloc-stream reuse + trample.",
+        bad_output, ITERATIONS, reuse_observed,
+    );
+}
+
+/// Slice #7B: drop+reuse for the recorded Anti hash join.
+/// Anti keeps left rows whose key has NO match in right —
+/// the complement of Semi. Same chain shape as Semi; the
+/// kernel selection swaps `HASH_JOIN_SEMI` for `HASH_JOIN_ANTI`
+/// inside `hash_join_semi_or_anti_v2_recorded`. Expected:
+/// only left rows with key ≥ RKEYS survive.
+#[test]
+fn provider_hash_join_anti_v2_recorded_survives_drop_and_reuse() {
+    use xlog_core::{ScalarType, Schema};
+    use xlog_cuda::{CudaBuffer, JoinType};
+
+    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
+    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
+        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
+    );
+    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
+        async_resource,
+        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
+    ));
+    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
+        Box::new(GlobalDeviceBudget::new(logging, 256 * 1024 * 1024));
+    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
+        Arc::clone(&device),
+        0,
+        Arc::clone(&pool),
+        budget,
+    ));
+    let memory = Arc::new(GpuMemoryManager::with_runtime(
+        Arc::clone(&device),
+        MemoryBudget::with_limit(256 * 1024 * 1024),
+        Arc::clone(&runtime),
+    ));
+    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
+        .expect("provider with_runtime");
+    let launch_stream = pool.acquire().expect("acquire launch_stream");
+    let launch_handle = pool.resolve(launch_stream).expect("resolve");
+    let default_stream = device.inner().stream();
+
+    const LROWS: usize = 256;
+    const RROWS: usize = 256;
+    const LKEYS: u32 = 64;
+    const RKEYS: u32 = 32;
+    const ITERATIONS: usize = 512;
+    const PROBE_SLOTS: usize = 16;
+    const TRAMPLE: u8 = 0xEE;
+    let schema = Schema::new(vec![
+        ("k".to_string(), ScalarType::U32),
+        ("v".to_string(), ScalarType::U32),
+    ]);
+
+    let mut reuse_observed = 0usize;
+    let mut bad_output = 0usize;
+
+    for iter in 0..ITERATIONS {
+        let mut lk = Vec::with_capacity(LROWS * 4);
+        let mut lv = Vec::with_capacity(LROWS * 4);
+        for i in 0..LROWS {
+            lk.extend_from_slice(&((i as u32) % LKEYS).to_le_bytes());
+            lv.extend_from_slice(&((i as u32) + 100_000).to_le_bytes());
+        }
+        let mut lk_b = memory.alloc::<u8>(LROWS * 4).expect("alloc lk");
+        let mut lv_b = memory.alloc::<u8>(LROWS * 4).expect("alloc lv");
+        device
+            .inner()
+            .htod_sync_copy_into(&lk, &mut lk_b)
+            .expect("htod lk");
+        device
+            .inner()
+            .htod_sync_copy_into(&lv, &mut lv_b)
+            .expect("htod lv");
+        let lk_ptr = lk_b.device_ptr_value();
+        let lv_ptr = lv_b.device_ptr_value();
+        let mut l_rows = memory.alloc::<u32>(1).expect("alloc l_rows");
+        device
+            .inner()
+            .htod_sync_copy_into(&[LROWS as u32], &mut l_rows)
+            .expect("htod l_rows");
+        let left = CudaBuffer::from_columns(
+            vec![lk_b.into(), lv_b.into()],
+            LROWS as u64,
+            l_rows,
+            schema.clone(),
+        );
+
+        let mut rk = Vec::with_capacity(RROWS * 4);
+        let mut rv = Vec::with_capacity(RROWS * 4);
+        for j in 0..RROWS {
+            rk.extend_from_slice(&((j as u32) % RKEYS).to_le_bytes());
+            rv.extend_from_slice(&((j as u32) + 200_000).to_le_bytes());
+        }
+        let mut rk_b = memory.alloc::<u8>(RROWS * 4).expect("alloc rk");
+        let mut rv_b = memory.alloc::<u8>(RROWS * 4).expect("alloc rv");
+        device
+            .inner()
+            .htod_sync_copy_into(&rk, &mut rk_b)
+            .expect("htod rk");
+        device
+            .inner()
+            .htod_sync_copy_into(&rv, &mut rv_b)
+            .expect("htod rv");
+        let rk_ptr = rk_b.device_ptr_value();
+        let rv_ptr = rv_b.device_ptr_value();
+        let mut r_rows = memory.alloc::<u32>(1).expect("alloc r_rows");
+        device
+            .inner()
+            .htod_sync_copy_into(&[RROWS as u32], &mut r_rows)
+            .expect("htod r_rows");
+        let right = CudaBuffer::from_columns(
+            vec![rk_b.into(), rv_b.into()],
+            RROWS as u64,
+            r_rows,
+            schema.clone(),
+        );
+
+        let result = provider
+            .hash_join_v2_recorded(
+                &left,
+                &right,
+                &[0],
+                &[0],
+                JoinType::Anti,
+                None,
+                launch_stream,
+            )
+            .expect("hash_join_v2_recorded::<Anti>");
+
+        drop(left);
+        drop(right);
+
+        let mut probes: Vec<_> = (0..PROBE_SLOTS)
+            .map(|_| memory.alloc::<u8>(LROWS * 4).expect("alloc probe"))
+            .collect();
+        let probe_ptrs: Vec<u64> = probes.iter().map(|p| p.device_ptr_value()).collect();
+        let reused = probe_ptrs
+            .iter()
+            .any(|p| *p == lk_ptr || *p == lv_ptr || *p == rk_ptr || *p == rv_ptr);
+        if reused {
+            reuse_observed += 1;
+        }
+        unsafe {
+            for &p in &probe_ptrs {
+                memset_sync_default(p, TRAMPLE, LROWS * 4);
+            }
+        }
+        let _ = &mut probes;
+
+        launch_handle.synchronize().expect("sync launch");
+        default_stream.synchronize().expect("sync default");
+
+        // Verify: kept rows are i where i%LKEYS >= RKEYS.
+        let expected: Vec<(u32, u32)> = (0..LROWS)
+            .filter_map(|i| {
+                let k = (i as u32) % LKEYS;
+                if k >= RKEYS {
+                    Some((k, (i as u32) + 100_000))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let expected_count = expected.len();
+        let mut host_rows = [0u32];
+        device
+            .inner()
+            .dtoh_sync_copy_into(result.num_rows_device(), &mut host_rows)
+            .expect("dtoh result count");
+        if host_rows[0] as usize != expected_count {
+            bad_output += 1;
+            if iter == 0 {
+                eprintln!(
+                    "[hash_join_anti_recorded] iter=0 actual={} expected={} reused={}",
+                    host_rows[0], expected_count, reused
+                );
+            }
+            drop(result);
+            drop(probes);
+            runtime.reap_pending().expect("reap");
+            continue;
+        }
+        let mut k_back = vec![0u8; expected_count * 4];
+        let mut v_back = vec![0u8; expected_count * 4];
+        unsafe {
+            dtoh_sync(&mut k_back, *result.column(0).expect("col0").device_ptr());
+            dtoh_sync(&mut v_back, *result.column(1).expect("col1").device_ptr());
+        }
+        let observed: std::collections::HashSet<(u32, u32)> = (0..expected_count)
+            .map(|i| {
+                let k = u32::from_le_bytes([
+                    k_back[i * 4],
+                    k_back[i * 4 + 1],
+                    k_back[i * 4 + 2],
+                    k_back[i * 4 + 3],
+                ]);
+                let v = u32::from_le_bytes([
+                    v_back[i * 4],
+                    v_back[i * 4 + 1],
+                    v_back[i * 4 + 2],
+                    v_back[i * 4 + 3],
+                ]);
+                (k, v)
+            })
+            .collect();
+        let expected_set: std::collections::HashSet<(u32, u32)> =
+            expected.iter().copied().collect();
+        if observed != expected_set {
+            bad_output += 1;
+            if iter == 0 {
+                eprintln!(
+                    "[hash_join_anti_recorded] iter=0 set mismatch reused={}",
+                    reused
+                );
+            }
+        }
+
+        drop(result);
+        drop(probes);
+        runtime.reap_pending().expect("reap");
+    }
+
+    eprintln!(
+        "[hash_join_anti_recorded] iterations={} reuse_observed={} bad_output={}",
+        ITERATIONS, reuse_observed, bad_output
+    );
+    assert!(
+        reuse_observed > 0,
+        "address reuse never observed across {} iterations; cannot exercise \
+         the cross-stream lifetime safety path",
+        ITERATIONS
+    );
+    assert_eq!(
+        bad_output, 0,
+        "hash_join_v2_recorded::<Anti> produced corrupted output in {}/{} iterations \
+         (reuse_observed={}). Pack / hash table / anti probe / compact tail raced \
+         an alloc-stream reuse + trample.",
+        bad_output, ITERATIONS, reuse_observed,
+    );
 }
 
 /// Negative test: recorded sort against a no-runtime manager.
