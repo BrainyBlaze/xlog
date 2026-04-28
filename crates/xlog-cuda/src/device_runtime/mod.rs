@@ -44,6 +44,7 @@
 //! materialization rebase is gated on this allocator landing first.
 
 pub mod async_resource;
+pub mod budget;
 pub mod direct;
 pub mod logging;
 pub mod resource;
@@ -51,6 +52,7 @@ pub mod runtime;
 pub mod stream_pool;
 
 pub use async_resource::AsyncCudaResource;
+pub use budget::GlobalDeviceBudget;
 pub use direct::DirectCudaResource;
 pub use logging::{
     InMemorySink, LogAction, LogRecord, LogResult, LoggingResource, LoggingSink, SinkError,
