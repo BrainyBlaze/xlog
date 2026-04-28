@@ -338,4 +338,39 @@ mod tests {
             "with_resource must not aliase the singleton slot"
         );
     }
+
+    /// `try_get` installs `DirectCudaResource` by default. The
+    /// runtime's `record_block_use` must therefore return
+    /// `StreamMisuse` (the trait's default) rather than silently
+    /// claiming success — anything else would let a launch
+    /// builder running against the singleton observe `Ok(())`
+    /// while no event is actually recorded, reproducing the
+    /// cross-stream use-after-free this whole layer exists to
+    /// prevent. See the trait-level doc on
+    /// `DeviceMemoryResource::record_block_use`.
+    #[test]
+    fn try_get_runtime_record_block_use_rejected_with_stream_misuse() {
+        let Some(rt) = try_runtime() else {
+            return;
+        };
+        let block = rt
+            .allocate(64, StreamId::DEFAULT, AllocTag::UNTAGGED)
+            .expect("alloc through runtime");
+        let err = rt.record_block_use(&block, StreamId::DEFAULT);
+        match err {
+            Err(super::super::resource::ResourceError::StreamMisuse(msg)) => {
+                assert!(
+                    msg.contains("unsupported"),
+                    "expected 'unsupported' in StreamMisuse message, got {:?}",
+                    msg
+                );
+            }
+            other => panic!(
+                "XlogDeviceRuntime::try_get default (DirectCudaResource) must \
+                 reject record_block_use with StreamMisuse; got {:?}",
+                other
+            ),
+        }
+        rt.deallocate(block).expect("dealloc still works");
+    }
 }

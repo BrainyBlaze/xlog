@@ -216,13 +216,37 @@ pub trait DeviceMemoryResource: Send + Sync {
     /// block's `alloc_stream` will wait on every recorded event
     /// before queueing the underlying free.
     ///
-    /// The default implementation is a no-op — resources whose
-    /// free is not stream-ordered (or whose backend handles
-    /// cross-stream coordination differently) need not act.
-    /// `AsyncCudaResource` overrides; the `LoggingResource` and
-    /// `GlobalDeviceBudget` decorators forward to their inner.
+    /// **The default implementation returns
+    /// [`ResourceError::StreamMisuse`].** This is intentional: a
+    /// silent no-op default would let a launch builder call
+    /// `record_block_use` against a resource that does not
+    /// actually track cross-stream uses (e.g.,
+    /// [`crate::device_runtime::direct::DirectCudaResource`]),
+    /// observe `Ok(())`, queue a kernel on a different stream,
+    /// then drop the block — and quietly hit the cross-stream
+    /// use-after-free that this API exists to prevent. False
+    /// safety is worse than no safety. Resources that cannot
+    /// track cross-stream uses MUST inherit this default;
+    /// callers (notably the future xlog launch builder) MUST
+    /// surface the error rather than masking it.
+    ///
+    /// Override status today:
+    ///   * [`crate::device_runtime::async_resource::AsyncCudaResource`]
+    ///     overrides with real event tracking.
+    ///   * [`crate::device_runtime::logging::LoggingResource`] and
+    ///     [`crate::device_runtime::budget::GlobalDeviceBudget`]
+    ///     forward to their inner resource (so the underlying
+    ///     backend's behavior surfaces unchanged).
+    ///   * [`crate::device_runtime::direct::DirectCudaResource`]
+    ///     does NOT override — it correctly returns
+    ///     `StreamMisuse` and forces callers to either route
+    ///     allocations through `AsyncCudaResource` or take
+    ///     responsibility for cross-stream synchronization
+    ///     themselves.
     ///
     /// # Errors
+    ///   * [`ResourceError::StreamMisuse`] from the default impl
+    ///     when the resource cannot track cross-stream uses.
     ///   * [`ResourceError::UseAfterFree`] if `block` is not the
     ///     block currently live at `block.ptr` (caller likely
     ///     handed back a stale [`DeviceBlock`] whose generation
@@ -239,6 +263,12 @@ pub trait DeviceMemoryResource: Send + Sync {
     /// The resource cannot infer arbitrary external CUDA work.
     fn record_block_use(&self, block: &DeviceBlock, use_stream: StreamId) -> ResourceResult<()> {
         let _ = (block, use_stream);
-        Ok(())
+        Err(ResourceError::StreamMisuse(
+            "record_block_use unsupported by this resource (the active backend \
+             does not track cross-stream uses; route allocations through a \
+             stream-ordered backend such as AsyncCudaResource, or take \
+             responsibility for cross-stream synchronization explicitly)"
+                .to_string(),
+        ))
     }
 }

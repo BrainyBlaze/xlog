@@ -264,4 +264,52 @@ mod tests {
             Err(ResourceError::UseAfterFree { .. })
         ));
     }
+
+    /// Locks the contract that DirectCudaResource does NOT
+    /// silently accept `record_block_use`. If a caller (e.g. the
+    /// future xlog launch builder) calls record_block_use against
+    /// a runtime built around DirectCudaResource, the call must
+    /// fail loudly with StreamMisuse — not return Ok and quietly
+    /// fail to track anything. False safety here would let
+    /// downstream code queue cross-stream kernels and drop
+    /// blocks while the cross-stream use was never recorded,
+    /// reproducing exactly the use-after-free this whole layer
+    /// exists to prevent.
+    ///
+    /// Implementation note: DirectCudaResource inherits the
+    /// trait's default `record_block_use` impl (which returns
+    /// `StreamMisuse`). It does NOT override. If a future change
+    /// adds a real override, it must make the override
+    /// genuinely track cross-stream uses (similar to
+    /// AsyncCudaResource's implementation) — anything else
+    /// regresses this contract.
+    #[test]
+    fn record_block_use_rejected_with_stream_misuse() {
+        let Some(device) = try_device() else {
+            return;
+        };
+        let r = DirectCudaResource::new(device, 0);
+        let block = r
+            .allocate(64, StreamId::DEFAULT, AllocTag::UNTAGGED)
+            .expect("alloc");
+        let err = r.record_block_use(&block, StreamId::DEFAULT);
+        match err {
+            Err(ResourceError::StreamMisuse(msg)) => {
+                assert!(
+                    msg.contains("unsupported"),
+                    "expected 'unsupported' in StreamMisuse message, got {:?}",
+                    msg
+                );
+            }
+            other => panic!(
+                "DirectCudaResource::record_block_use must return StreamMisuse \
+                 to surface unsupported cross-stream tracking; got {:?}",
+                other
+            ),
+        }
+        // The block stays live — a failed record_block_use must
+        // NOT have removed the entry or dropped the slice.
+        assert_eq!(r.bytes_outstanding(), 64);
+        r.deallocate(block).expect("dealloc still works");
+    }
 }
