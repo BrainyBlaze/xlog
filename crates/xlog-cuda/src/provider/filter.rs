@@ -1581,6 +1581,14 @@ impl super::CudaKernelProvider {
                 XlogError::Kernel("capture_compact_count kernel not found".to_string())
             })?;
         // SAFETY: capture_compact_count(prefix_sum, mask, n, out_count)
+        //
+        // Use the clamped mask, not the caller's original mask.
+        // Some recorded callers provide a mask sized to the
+        // device-resident logical row count while `n` is the
+        // buffer row capacity. `mask_clamp_rows` expanded that
+        // shorter domain into a row-capacity-sized mask with
+        // slack rows forced to zero; every downstream consumer
+        // in this compaction chain must use that expanded mask.
         unsafe {
             capture_fn.clone().launch_on_stream(
                 &cu_stream,
@@ -1589,7 +1597,7 @@ impl super::CudaKernelProvider {
                     block_dim: (1, 1, 1),
                     shared_mem_bytes: 0,
                 },
-                (&d_prefix_sum, d_mask, n, &mut d_out_count),
+                (&d_prefix_sum, &d_mask_clamped, n, &mut d_out_count),
             )
         }
         .map_err(|e| {
@@ -1638,11 +1646,23 @@ impl super::CudaKernelProvider {
                     .map(|t| t.size_bytes())
                     .unwrap_or(4) as u32;
                 // SAFETY: compact_bytes_by_mask(input, mask, prefix_sum, n, elem_size, output)
+                //
+                // Same domain rule as capture_compact_count:
+                // compact over the row-capacity-sized clamped
+                // mask so rows >= logical_count are never
+                // materialized from valid-looking slack.
                 unsafe {
                     compact_fn.clone().launch_on_stream(
                         &cu_stream,
                         cfg,
-                        (src_col, d_mask, &d_prefix_sum, n, elem_size, dst_col),
+                        (
+                            src_col,
+                            &d_mask_clamped,
+                            &d_prefix_sum,
+                            n,
+                            elem_size,
+                            dst_col,
+                        ),
                     )
                 }
                 .map_err(|e| {

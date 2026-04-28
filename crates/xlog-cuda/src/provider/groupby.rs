@@ -711,6 +711,8 @@ impl super::CudaKernelProvider {
         launch_stream: crate::device_runtime::StreamId,
         runtime: &crate::device_runtime::XlogDeviceRuntime,
     ) -> Result<crate::provider::PackedKeyData> {
+        use crate::launch::LaunchRecorder;
+
         if key_cols.is_empty() {
             return Err(XlogError::Kernel(
                 "pack_keys_gpu_on_stream: no key columns specified".to_string(),
@@ -770,6 +772,27 @@ impl super::CudaKernelProvider {
             col_ptrs[i] = *col.device_ptr() as u64;
         }
 
+        // The pack kernel takes raw column pointers (`u64`)
+        // rather than typed `CudaColumn` kernel params, so the
+        // generic launch recorder cannot infer source-column
+        // lifetimes from the argument list. Record those reads
+        // explicitly before queueing the launch; this also
+        // enforces the strict external-memory policy for
+        // recorded paths.
+        let mut rec = LaunchRecorder::new_strict(launch_stream);
+        for &col_idx in key_cols {
+            let col = buffer
+                .column(col_idx)
+                .ok_or_else(|| XlogError::Kernel(format!("Key column {} not found", col_idx)))?;
+            rec.read_column(col);
+        }
+        rec.preflight(runtime).map_err(|e| {
+            XlogError::Kernel(format!(
+                "pack_keys_gpu_on_stream: launch recorder preflight failed: {}",
+                e
+            ))
+        })?;
+
         let func = self
             .device
             .inner()
@@ -803,30 +826,23 @@ impl super::CudaKernelProvider {
         }
         .map_err(|e| XlogError::Kernel(format!("pack_and_hash_keys (on_stream) failed: {}", e)))?;
 
-        // Record uses for buffers we touched on launch_stream.
-        // col_sizes_slice drops at end of this helper; record
-        // before drop. packed_slice / hash_slice escape to the
-        // caller; record now so downstream drops are gated.
-        for blk in [
-            col_sizes_slice.runtime_block(),
-            packed_slice.runtime_block(),
-            hash_slice.runtime_block(),
-        ] {
-            if let Some(b) = blk {
-                runtime.record_block_use(b, launch_stream).map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "pack_keys_gpu_on_stream: record_block_use failed: {}",
-                        e
-                    ))
-                })?;
-            } else {
-                return Err(XlogError::Kernel(
-                    "pack_keys_gpu_on_stream: buffer has no runtime block — caller \
-                     must use a runtime-backed manager"
-                        .to_string(),
-                ));
-            }
-        }
+        // Record uses for buffers touched on launch_stream.
+        // `col_sizes_slice` is read by the pack kernel and
+        // drops at the end of this helper; `packed_slice` /
+        // `hash_slice` are fresh outputs that escape to the
+        // caller. The post-preflight-fresh path is valid for
+        // all three because they were allocated by this helper
+        // before preflight and first used by the queued pack
+        // launch.
+        rec.write_post_preflight_fresh(&col_sizes_slice);
+        rec.write_post_preflight_fresh(&packed_slice);
+        rec.write_post_preflight_fresh(&hash_slice);
+        rec.commit(runtime).map_err(|e| {
+            XlogError::Kernel(format!(
+                "pack_keys_gpu_on_stream: launch recorder commit failed: {}",
+                e
+            ))
+        })?;
 
         Ok(crate::provider::PackedKeyData {
             hashes: hash_slice,

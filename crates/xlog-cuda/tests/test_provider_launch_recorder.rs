@@ -4328,6 +4328,102 @@ fn provider_compact_buffer_by_device_mask_counted_recorded_survives_drop_and_reu
     );
 }
 
+/// Regression for recorded compaction with `row_cap > logical_count`.
+///
+/// Recorded hash-join Semi/Anti produces a mask sized to the
+/// left input's logical row count, while recursive buffers can
+/// retain a larger row capacity. The compact path must expand
+/// that short logical-domain mask through `mask_clamp_rows` and
+/// then use the clamped row-capacity-domain mask for BOTH
+/// `capture_compact_count` and `compact_bytes_by_mask`.
+#[test]
+fn provider_compact_recorded_short_mask_ignores_capacity_slack() {
+    use xlog_core::{ScalarType, Schema};
+    use xlog_cuda::CudaBuffer;
+
+    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
+
+    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
+        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
+    );
+    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
+        async_resource,
+        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
+    ));
+    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
+        Box::new(GlobalDeviceBudget::new(logging, 64 * 1024 * 1024));
+    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
+        Arc::clone(&device),
+        0,
+        Arc::clone(&pool),
+        budget,
+    ));
+    let memory = Arc::new(GpuMemoryManager::with_runtime(
+        Arc::clone(&device),
+        MemoryBudget::with_limit(64 * 1024 * 1024),
+        Arc::clone(&runtime),
+    ));
+    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
+        .expect("provider with_runtime");
+    let launch_stream = pool.acquire().expect("acquire launch_stream");
+    let launch_handle = pool.resolve(launch_stream).expect("resolve");
+
+    const ROW_CAP: usize = 8;
+    const LOGICAL: usize = 3;
+    let payload = [10u32, 20, 30, 200, 201, 202, 203, 204];
+    let mut col_bytes = memory.alloc::<u8>(ROW_CAP * 4).expect("alloc col");
+    let bytes: Vec<u8> = payload.iter().flat_map(|v| v.to_le_bytes()).collect();
+    device
+        .inner()
+        .htod_sync_copy_into(&bytes, &mut col_bytes)
+        .expect("htod col");
+
+    // Logical-domain mask: keep rows 0 and 2. There are no
+    // mask bytes for capacity slack rows [3, ROW_CAP).
+    let mut d_mask = memory.alloc::<u8>(LOGICAL).expect("alloc short mask");
+    device
+        .inner()
+        .htod_sync_copy_into(&[1u8, 0, 1], &mut d_mask)
+        .expect("htod mask");
+
+    let mut d_num_rows = memory.alloc::<u32>(1).expect("alloc rowcount");
+    device
+        .inner()
+        .htod_sync_copy_into(&[LOGICAL as u32], &mut d_num_rows)
+        .expect("htod rows");
+    let input = CudaBuffer::from_columns(
+        vec![col_bytes.into()],
+        ROW_CAP as u64,
+        d_num_rows,
+        Schema::new(vec![("v".to_string(), ScalarType::U32)]),
+    );
+
+    let output = provider
+        .compact_buffer_by_device_mask_counted_recorded(&input, &d_mask, launch_stream)
+        .expect("compact recorded short mask");
+    launch_handle.synchronize().expect("sync launch");
+
+    let mut host_rows = [0u32];
+    device
+        .inner()
+        .dtoh_sync_copy_into(output.num_rows_device(), &mut host_rows)
+        .expect("dtoh row count");
+    assert_eq!(host_rows[0], 2);
+
+    let out_col = output.column(0).expect("output col");
+    let mut readback = vec![0u8; 2 * 4];
+    unsafe { dtoh_sync(&mut readback, *out_col.device_ptr()) };
+    let observed: Vec<u32> = readback
+        .chunks_exact(4)
+        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .collect();
+    assert_eq!(observed, vec![10, 30]);
+}
+
 /// Negative test: compact migrated path against legacy
 /// (no-runtime) manager. Must reject before any allocation.
 #[test]
