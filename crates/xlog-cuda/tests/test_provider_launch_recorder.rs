@@ -5765,3 +5765,481 @@ fn provider_hash_join_inner_csm_v2_recorded_rejects_legacy_manager() {
         Ok(_) => panic!("CSM inner must reject legacy manager — unexpectedly returned Ok"),
     }
 }
+
+/// Result-set correctness for indexed-Inner CSM
+/// (binary-join retake sub-slice 2). Mirrors the non-indexed
+/// CSM correctness test but uses a cached `JoinIndexV2` for
+/// the build side.
+#[test]
+fn provider_hash_join_inner_csm_v2_with_index_recorded_result_set_matches() {
+    use xlog_core::{ScalarType, Schema};
+    use xlog_cuda::CudaBuffer;
+
+    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
+    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
+        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
+    );
+    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
+        async_resource,
+        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
+    ));
+    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
+        Box::new(GlobalDeviceBudget::new(logging, 64 * 1024 * 1024));
+    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
+        Arc::clone(&device),
+        0,
+        Arc::clone(&pool),
+        budget,
+    ));
+    let memory = Arc::new(GpuMemoryManager::with_runtime(
+        Arc::clone(&device),
+        MemoryBudget::with_limit(64 * 1024 * 1024),
+        Arc::clone(&runtime),
+    ));
+    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
+        .expect("provider with_runtime");
+    let launch_stream = pool.acquire().expect("acquire launch_stream");
+    let launch_handle = pool.resolve(launch_stream).expect("resolve");
+
+    const LROWS: usize = 64;
+    const RROWS: usize = 64;
+    const LKEYS: u32 = 16;
+    const RKEYS: u32 = 8;
+    let schema = Schema::new(vec![
+        ("k".to_string(), ScalarType::U32),
+        ("v".to_string(), ScalarType::U32),
+    ]);
+
+    let mut lk = Vec::with_capacity(LROWS * 4);
+    let mut lv = Vec::with_capacity(LROWS * 4);
+    for i in 0..LROWS {
+        lk.extend_from_slice(&((i as u32) % LKEYS).to_le_bytes());
+        lv.extend_from_slice(&((i as u32) + 100_000).to_le_bytes());
+    }
+    let mut lk_b = memory.alloc::<u8>(LROWS * 4).expect("alloc lk");
+    let mut lv_b = memory.alloc::<u8>(LROWS * 4).expect("alloc lv");
+    device
+        .inner()
+        .htod_sync_copy_into(&lk, &mut lk_b)
+        .expect("htod lk");
+    device
+        .inner()
+        .htod_sync_copy_into(&lv, &mut lv_b)
+        .expect("htod lv");
+    let mut l_rows = memory.alloc::<u32>(1).expect("alloc l_rows");
+    device
+        .inner()
+        .htod_sync_copy_into(&[LROWS as u32], &mut l_rows)
+        .expect("htod l_rows");
+    let left = CudaBuffer::from_columns(
+        vec![lk_b.into(), lv_b.into()],
+        LROWS as u64,
+        l_rows,
+        schema.clone(),
+    );
+
+    let mut rk = Vec::with_capacity(RROWS * 4);
+    let mut rv = Vec::with_capacity(RROWS * 4);
+    for j in 0..RROWS {
+        rk.extend_from_slice(&((j as u32) % RKEYS).to_le_bytes());
+        rv.extend_from_slice(&((j as u32) + 200_000).to_le_bytes());
+    }
+    let mut rk_b = memory.alloc::<u8>(RROWS * 4).expect("alloc rk");
+    let mut rv_b = memory.alloc::<u8>(RROWS * 4).expect("alloc rv");
+    device
+        .inner()
+        .htod_sync_copy_into(&rk, &mut rk_b)
+        .expect("htod rk");
+    device
+        .inner()
+        .htod_sync_copy_into(&rv, &mut rv_b)
+        .expect("htod rv");
+    let mut r_rows = memory.alloc::<u32>(1).expect("alloc r_rows");
+    device
+        .inner()
+        .htod_sync_copy_into(&[RROWS as u32], &mut r_rows)
+        .expect("htod r_rows");
+    let right = CudaBuffer::from_columns(
+        vec![rk_b.into(), rv_b.into()],
+        RROWS as u64,
+        r_rows,
+        schema.clone(),
+    );
+
+    let index = provider
+        .build_join_index_v2(&right, &[0])
+        .expect("build_join_index_v2");
+
+    let result = provider
+        .hash_join_inner_v2_with_index_count_scan_materialize_recorded(
+            &left,
+            &right,
+            &[0],
+            &[0],
+            &index,
+            None,
+            launch_stream,
+        )
+        .expect("indexed CSM inner");
+    launch_handle.synchronize().expect("sync launch");
+
+    let mut expected: std::collections::HashSet<(u32, u32, u32, u32)> = Default::default();
+    for i in 0..LROWS {
+        let lk_e = (i as u32) % LKEYS;
+        let lv_e = (i as u32) + 100_000;
+        for j in 0..RROWS {
+            if (j as u32) % RKEYS == lk_e {
+                let rv_e = (j as u32) + 200_000;
+                expected.insert((lk_e, lv_e, lk_e, rv_e));
+            }
+        }
+    }
+    let mut host_rows = [0u32];
+    device
+        .inner()
+        .dtoh_sync_copy_into(result.num_rows_device(), &mut host_rows)
+        .expect("dtoh count");
+    assert_eq!(host_rows[0] as usize, expected.len(), "row count mismatch");
+
+    let n = expected.len();
+    let mut c0 = vec![0u8; n * 4];
+    let mut c1 = vec![0u8; n * 4];
+    let mut c2 = vec![0u8; n * 4];
+    let mut c3 = vec![0u8; n * 4];
+    unsafe {
+        dtoh_sync(&mut c0, *result.column(0).expect("c0").device_ptr());
+        dtoh_sync(&mut c1, *result.column(1).expect("c1").device_ptr());
+        dtoh_sync(&mut c2, *result.column(2).expect("c2").device_ptr());
+        dtoh_sync(&mut c3, *result.column(3).expect("c3").device_ptr());
+    }
+    let observed: std::collections::HashSet<(u32, u32, u32, u32)> = (0..n)
+        .map(|i| {
+            let r0 = u32::from_le_bytes([c0[i * 4], c0[i * 4 + 1], c0[i * 4 + 2], c0[i * 4 + 3]]);
+            let r1 = u32::from_le_bytes([c1[i * 4], c1[i * 4 + 1], c1[i * 4 + 2], c1[i * 4 + 3]]);
+            let r2 = u32::from_le_bytes([c2[i * 4], c2[i * 4 + 1], c2[i * 4 + 2], c2[i * 4 + 3]]);
+            let r3 = u32::from_le_bytes([c3[i * 4], c3[i * 4 + 1], c3[i * 4 + 2], c3[i * 4 + 3]]);
+            (r0, r1, r2, r3)
+        })
+        .collect();
+    assert_eq!(observed, expected, "result set mismatch");
+}
+
+/// Drop+reuse for indexed-Inner CSM. Drops `left`, `right`,
+/// AND `index` after the call without host sync — the index
+/// holds packed_keys + 4 table buckets that the chain reads
+/// on launch_stream; the recorder must keep them all alive
+/// until the chain completes.
+#[test]
+fn provider_hash_join_inner_csm_v2_with_index_recorded_survives_drop_and_reuse() {
+    use xlog_core::{ScalarType, Schema};
+    use xlog_cuda::CudaBuffer;
+
+    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
+    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
+        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
+    );
+    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
+        async_resource,
+        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
+    ));
+    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
+        Box::new(GlobalDeviceBudget::new(logging, 256 * 1024 * 1024));
+    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
+        Arc::clone(&device),
+        0,
+        Arc::clone(&pool),
+        budget,
+    ));
+    let memory = Arc::new(GpuMemoryManager::with_runtime(
+        Arc::clone(&device),
+        MemoryBudget::with_limit(256 * 1024 * 1024),
+        Arc::clone(&runtime),
+    ));
+    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
+        .expect("provider with_runtime");
+    let launch_stream = pool.acquire().expect("acquire launch_stream");
+    let launch_handle = pool.resolve(launch_stream).expect("resolve");
+    let default_stream = device.inner().stream();
+
+    const LROWS: usize = 256;
+    const RROWS: usize = 256;
+    const LKEYS: u32 = 64;
+    const RKEYS: u32 = 32;
+    const ITERATIONS: usize = 512;
+    const PROBE_SLOTS: usize = 16;
+    const TRAMPLE: u8 = 0xEE;
+    let schema = Schema::new(vec![
+        ("k".to_string(), ScalarType::U32),
+        ("v".to_string(), ScalarType::U32),
+    ]);
+
+    let mut reuse_observed = 0usize;
+    let mut bad_output = 0usize;
+
+    for iter in 0..ITERATIONS {
+        let mut lk = Vec::with_capacity(LROWS * 4);
+        let mut lv = Vec::with_capacity(LROWS * 4);
+        for i in 0..LROWS {
+            lk.extend_from_slice(&((i as u32) % LKEYS).to_le_bytes());
+            lv.extend_from_slice(&((i as u32) + 100_000).to_le_bytes());
+        }
+        let mut lk_b = memory.alloc::<u8>(LROWS * 4).expect("alloc lk");
+        let mut lv_b = memory.alloc::<u8>(LROWS * 4).expect("alloc lv");
+        device
+            .inner()
+            .htod_sync_copy_into(&lk, &mut lk_b)
+            .expect("htod lk");
+        device
+            .inner()
+            .htod_sync_copy_into(&lv, &mut lv_b)
+            .expect("htod lv");
+        let lk_ptr = lk_b.device_ptr_value();
+        let lv_ptr = lv_b.device_ptr_value();
+        let mut l_rows = memory.alloc::<u32>(1).expect("alloc l_rows");
+        device
+            .inner()
+            .htod_sync_copy_into(&[LROWS as u32], &mut l_rows)
+            .expect("htod l_rows");
+        let left = CudaBuffer::from_columns(
+            vec![lk_b.into(), lv_b.into()],
+            LROWS as u64,
+            l_rows,
+            schema.clone(),
+        );
+
+        let mut rk = Vec::with_capacity(RROWS * 4);
+        let mut rv = Vec::with_capacity(RROWS * 4);
+        for j in 0..RROWS {
+            rk.extend_from_slice(&((j as u32) % RKEYS).to_le_bytes());
+            rv.extend_from_slice(&((j as u32) + 200_000).to_le_bytes());
+        }
+        let mut rk_b = memory.alloc::<u8>(RROWS * 4).expect("alloc rk");
+        let mut rv_b = memory.alloc::<u8>(RROWS * 4).expect("alloc rv");
+        device
+            .inner()
+            .htod_sync_copy_into(&rk, &mut rk_b)
+            .expect("htod rk");
+        device
+            .inner()
+            .htod_sync_copy_into(&rv, &mut rv_b)
+            .expect("htod rv");
+        let rk_ptr = rk_b.device_ptr_value();
+        let rv_ptr = rv_b.device_ptr_value();
+        let mut r_rows = memory.alloc::<u32>(1).expect("alloc r_rows");
+        device
+            .inner()
+            .htod_sync_copy_into(&[RROWS as u32], &mut r_rows)
+            .expect("htod r_rows");
+        let right = CudaBuffer::from_columns(
+            vec![rk_b.into(), rv_b.into()],
+            RROWS as u64,
+            r_rows,
+            schema.clone(),
+        );
+
+        let index = provider
+            .build_join_index_v2(&right, &[0])
+            .expect("build_join_index_v2");
+
+        let result = provider
+            .hash_join_inner_v2_with_index_count_scan_materialize_recorded(
+                &left,
+                &right,
+                &[0],
+                &[0],
+                &index,
+                None,
+                launch_stream,
+            )
+            .expect("indexed CSM inner");
+
+        drop(left);
+        drop(right);
+        drop(index);
+
+        let mut probes: Vec<_> = (0..PROBE_SLOTS)
+            .map(|_| memory.alloc::<u8>(LROWS * 4).expect("alloc probe"))
+            .collect();
+        let probe_ptrs: Vec<u64> = probes.iter().map(|p| p.device_ptr_value()).collect();
+        let reused = probe_ptrs
+            .iter()
+            .any(|p| *p == lk_ptr || *p == lv_ptr || *p == rk_ptr || *p == rv_ptr);
+        if reused {
+            reuse_observed += 1;
+        }
+        unsafe {
+            for &p in &probe_ptrs {
+                memset_sync_default(p, TRAMPLE, LROWS * 4);
+            }
+        }
+        let _ = &mut probes;
+        launch_handle.synchronize().expect("sync launch");
+        default_stream.synchronize().expect("sync default");
+
+        let mut expected: Vec<(u32, u32, u32, u32)> = Vec::new();
+        for i in 0..LROWS {
+            let lk_e = (i as u32) % LKEYS;
+            let lv_e = (i as u32) + 100_000;
+            for j in 0..RROWS {
+                if (j as u32) % RKEYS == lk_e {
+                    let rv_e = (j as u32) + 200_000;
+                    expected.push((lk_e, lv_e, lk_e, rv_e));
+                }
+            }
+        }
+        let expected_set: std::collections::HashSet<(u32, u32, u32, u32)> =
+            expected.iter().copied().collect();
+        let expected_count = expected.len();
+        let mut host_rows = [0u32];
+        device
+            .inner()
+            .dtoh_sync_copy_into(result.num_rows_device(), &mut host_rows)
+            .expect("dtoh result count");
+        if host_rows[0] as usize != expected_count {
+            bad_output += 1;
+            if iter == 0 {
+                eprintln!(
+                    "[indexed_csm_inner] iter=0 actual={} expected={} reused={}",
+                    host_rows[0], expected_count, reused
+                );
+            }
+            drop(result);
+            drop(probes);
+            runtime.reap_pending().expect("reap");
+            continue;
+        }
+        let mut c0 = vec![0u8; expected_count * 4];
+        let mut c1 = vec![0u8; expected_count * 4];
+        let mut c2 = vec![0u8; expected_count * 4];
+        let mut c3 = vec![0u8; expected_count * 4];
+        unsafe {
+            dtoh_sync(&mut c0, *result.column(0).expect("c0").device_ptr());
+            dtoh_sync(&mut c1, *result.column(1).expect("c1").device_ptr());
+            dtoh_sync(&mut c2, *result.column(2).expect("c2").device_ptr());
+            dtoh_sync(&mut c3, *result.column(3).expect("c3").device_ptr());
+        }
+        let observed: std::collections::HashSet<(u32, u32, u32, u32)> = (0..expected_count)
+            .map(|i| {
+                let r0 =
+                    u32::from_le_bytes([c0[i * 4], c0[i * 4 + 1], c0[i * 4 + 2], c0[i * 4 + 3]]);
+                let r1 =
+                    u32::from_le_bytes([c1[i * 4], c1[i * 4 + 1], c1[i * 4 + 2], c1[i * 4 + 3]]);
+                let r2 =
+                    u32::from_le_bytes([c2[i * 4], c2[i * 4 + 1], c2[i * 4 + 2], c2[i * 4 + 3]]);
+                let r3 =
+                    u32::from_le_bytes([c3[i * 4], c3[i * 4 + 1], c3[i * 4 + 2], c3[i * 4 + 3]]);
+                (r0, r1, r2, r3)
+            })
+            .collect();
+        if observed != expected_set {
+            bad_output += 1;
+            if iter == 0 {
+                eprintln!("[indexed_csm_inner] iter=0 set mismatch reused={}", reused);
+            }
+        }
+
+        drop(result);
+        drop(probes);
+        runtime.reap_pending().expect("reap");
+    }
+
+    eprintln!(
+        "[indexed_csm_inner] iterations={} reuse_observed={} bad_output={}",
+        ITERATIONS, reuse_observed, bad_output
+    );
+    assert!(reuse_observed > 0, "no reuse observed");
+    assert_eq!(
+        bad_output, 0,
+        "indexed CSM inner produced corrupted output in {}/{} iterations \
+         (reuse_observed={}). The chain (count, scan, total, materialize, \
+         gather) raced an alloc-stream reuse + trample, OR the index \
+         buffers' lifetime was not properly recorded.",
+        bad_output, ITERATIONS, reuse_observed,
+    );
+}
+
+/// Negative test: indexed CSM Inner against a no-runtime
+/// manager.
+#[test]
+fn provider_hash_join_inner_csm_v2_with_index_recorded_rejects_legacy_manager() {
+    use xlog_core::{ScalarType, Schema};
+    use xlog_cuda::CudaBuffer;
+
+    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
+        return;
+    };
+    let memory = Arc::new(GpuMemoryManager::new(
+        Arc::clone(&device),
+        MemoryBudget::with_limit(1024 * 1024),
+    ));
+    let provider =
+        CudaKernelProvider::new(Arc::clone(&device), Arc::clone(&memory)).expect("legacy provider");
+
+    let mut lk = memory.alloc::<u8>(16).expect("alloc lk");
+    let mut rk = memory.alloc::<u8>(16).expect("alloc rk");
+    let payload = [0u32, 1, 2, 3];
+    let bytes: Vec<u8> = payload.iter().flat_map(|x| x.to_le_bytes()).collect();
+    device
+        .inner()
+        .htod_sync_copy_into(&bytes, &mut lk)
+        .expect("htod lk");
+    device
+        .inner()
+        .htod_sync_copy_into(&bytes, &mut rk)
+        .expect("htod rk");
+    let mut l_rows = memory.alloc::<u32>(1).expect("alloc l_rows");
+    device
+        .inner()
+        .htod_sync_copy_into(&[4u32], &mut l_rows)
+        .expect("htod l_rows");
+    let left = CudaBuffer::from_columns(
+        vec![lk.into()],
+        4,
+        l_rows,
+        Schema::new(vec![("k".to_string(), ScalarType::U32)]),
+    );
+    let mut r_rows = memory.alloc::<u32>(1).expect("alloc r_rows");
+    device
+        .inner()
+        .htod_sync_copy_into(&[4u32], &mut r_rows)
+        .expect("htod r_rows");
+    let right = CudaBuffer::from_columns(
+        vec![rk.into()],
+        4,
+        r_rows,
+        Schema::new(vec![("k".to_string(), ScalarType::U32)]),
+    );
+    let index = provider
+        .build_join_index_v2(&right, &[0])
+        .expect("build_join_index_v2");
+
+    let err = provider.hash_join_inner_v2_with_index_count_scan_materialize_recorded(
+        &left,
+        &right,
+        &[0],
+        &[0],
+        &index,
+        None,
+        StreamId::DEFAULT,
+    );
+    match err {
+        Err(XlogError::Kernel(msg)) => assert!(
+            msg.contains("requires") || msg.contains("with_runtime"),
+            "expected helpful Kernel error, got {:?}",
+            msg
+        ),
+        Err(other) => panic!(
+            "indexed CSM inner must reject legacy manager with Kernel error, got {:?}",
+            other
+        ),
+        Ok(_) => panic!("indexed CSM inner must reject legacy manager — unexpectedly returned Ok"),
+    }
+}

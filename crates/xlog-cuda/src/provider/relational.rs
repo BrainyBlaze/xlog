@@ -6802,6 +6802,448 @@ impl super::CudaKernelProvider {
         self.buffer_from_columns(result_columns, output_capacity as u64, combined_schema)
     }
 
+    /// Indexed-Inner CSM (binary-join retake sub-slice 2).
+    ///
+    /// Same deterministic count→scan→materialize algorithm as
+    /// [`Self::hash_join_inner_v2_count_scan_materialize_recorded`]
+    /// but skips pack-right + table-build — the cached
+    /// [`crate::provider::JoinIndexV2`] supplies
+    /// `index.packed_keys` and `&index.table`. Only the probe
+    /// (left) side is packed on `launch_stream`.
+    ///
+    /// Reuses the three CSM kernels migrated in sub-slice 1
+    /// (`hash_join_probe_v2_count_per_row`,
+    /// `hash_join_probe_v2_materialize`,
+    /// `hash_join_total_from_scan`) — no new kernel additions.
+    /// Composes `pack_keys_gpu_on_stream`,
+    /// `multiblock_scan_u32_inplace_on_stream`, and
+    /// `gather_buffer_by_indices_on_stream` unchanged from
+    /// prior slices.
+    ///
+    /// Index buffers (packed_keys + 4 table buckets) are
+    /// owned by the caller and recorded as reads on
+    /// `launch_stream` for the count and materialize
+    /// recorders — dropping the index after the call returns
+    /// is correctly serialized through the runtime's
+    /// record-all + wait-all event chain.
+    pub fn hash_join_inner_v2_with_index_count_scan_materialize_recorded(
+        &self,
+        left: &CudaBuffer,
+        right: &CudaBuffer,
+        left_keys: &[usize],
+        right_keys: &[usize],
+        index: &crate::provider::JoinIndexV2,
+        max_output: Option<usize>,
+        launch_stream: StreamId,
+    ) -> Result<CudaBuffer> {
+        use crate::launch::LaunchRecorder;
+
+        let runtime = self.memory.runtime().ok_or_else(|| {
+            XlogError::Kernel(
+                "hash_join_inner_v2_with_index_count_scan_materialize_recorded requires \
+                 a runtime-backed GpuMemoryManager"
+                    .to_string(),
+            )
+        })?;
+        let cu_stream = runtime
+            .stream_pool()
+            .resolve(launch_stream)
+            .ok_or_else(|| {
+                XlogError::Kernel(format!(
+                    "indexed CSM inner: launch_stream StreamId({}) does not resolve",
+                    launch_stream.0
+                ))
+            })?;
+
+        // Validation (mirror legacy hash_join_v2_with_index +
+        // CSM constraints).
+        let left_rows = self.device_row_count(left)?;
+        let right_rows = self.device_row_count(right)?;
+        if left_rows > u32::MAX as usize || right_rows > u32::MAX as usize {
+            return Err(XlogError::Kernel(format!(
+                "Join supports at most {} rows per side (left={}, right={})",
+                u32::MAX,
+                left_rows,
+                right_rows
+            )));
+        }
+        if left_rows == 0 || right_rows == 0 {
+            let combined_schema = self.combine_schemas(left.schema(), right.schema());
+            return self.create_empty_buffer(combined_schema);
+        }
+        if left_keys.is_empty() || right_keys.is_empty() {
+            return Err(XlogError::Kernel(
+                "Join requires at least one key column".to_string(),
+            ));
+        }
+        if left_keys.len() != right_keys.len() {
+            return Err(XlogError::Kernel(
+                "Left and right key columns must have same length".to_string(),
+            ));
+        }
+        if left_keys.len() > 4 {
+            return Err(XlogError::Kernel(
+                "indexed CSM inner: max 4 key columns supported (pack_keys constraint)".to_string(),
+            ));
+        }
+        for (&l, &r) in left_keys.iter().zip(right_keys.iter()) {
+            if l >= left.arity() {
+                return Err(XlogError::Kernel(format!(
+                    "Left key column index {} out of bounds (arity {})",
+                    l,
+                    left.arity()
+                )));
+            }
+            if r >= right.arity() {
+                return Err(XlogError::Kernel(format!(
+                    "Right key column index {} out of bounds (arity {})",
+                    r,
+                    right.arity()
+                )));
+            }
+            let lt = left.schema().column_type(l);
+            let rt = right.schema().column_type(r);
+            if lt != rt {
+                return Err(XlogError::Kernel(format!(
+                    "Key column type mismatch: left[{}]={:?}, right[{}]={:?}",
+                    l, lt, r, rt
+                )));
+            }
+        }
+        if index.right_num_rows() != right_rows as u32 {
+            return Err(XlogError::Kernel(
+                "Join index row count does not match right relation".to_string(),
+            ));
+        }
+        if index.right_keys() != right_keys {
+            return Err(XlogError::Kernel(
+                "Join index key columns do not match requested right_keys".to_string(),
+            ));
+        }
+
+        let probe_cap = left.num_rows() as u32;
+        let table = &index.table;
+
+        // Pack only LEFT on launch_stream. Build side comes
+        // from the cached index.
+        let left_packed =
+            self.pack_keys_gpu_on_stream(left, left_keys, &cu_stream, launch_stream, runtime)?;
+        if left_packed.key_bytes != index.key_bytes {
+            return Err(XlogError::Kernel(
+                "Join key byte width mismatch between probe and cached index".to_string(),
+            ));
+        }
+
+        let device = self.device.inner();
+        let block_size = 256u32;
+        let probe_grid = (probe_cap + block_size - 1) / block_size;
+        let probe_config = LaunchConfig {
+            grid_dim: (probe_grid, 1, 1),
+            block_dim: (block_size, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        // Allocate count + offsets + total scalar + overflow flag.
+        let per_probe_count = self.memory.alloc::<u32>(probe_cap as usize)?;
+        let mut per_probe_offsets = self.memory.alloc::<u32>(probe_cap as usize)?;
+        let d_logical_count = self.memory.alloc::<u32>(1)?;
+        let d_overflow = self.memory.alloc::<u8>(1)?;
+        // Zero-init both scalars on launch_stream.
+        // SAFETY: 1-byte and 4-byte runtime-backed buffers.
+        unsafe {
+            let res = cudarc::driver::sys::cuMemsetD8Async(
+                *d_overflow.device_ptr(),
+                0,
+                1,
+                cu_stream.cu_stream(),
+            );
+            if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                return Err(XlogError::Kernel(format!(
+                    "indexed CSM inner: cuMemsetD8Async (d_overflow) failed: {:?}",
+                    res
+                )));
+            }
+            let res = cudarc::driver::sys::cuMemsetD8Async(
+                *d_logical_count.device_ptr(),
+                0,
+                std::mem::size_of::<u32>(),
+                cu_stream.cu_stream(),
+            );
+            if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                return Err(XlogError::Kernel(format!(
+                    "indexed CSM inner: cuMemsetD8Async (d_logical_count) failed: {:?}",
+                    res
+                )));
+            }
+        }
+
+        // Count/scan recorder. Reads on left_packed + index
+        // buffers + left.num_rows_device BEFORE preflight;
+        // post-preflight fresh writes for the four newly
+        // allocated buffers.
+        let count_func = device
+            .get_func(JOIN_MODULE, join_kernels::HASH_JOIN_PROBE_V2_COUNT_PER_ROW)
+            .ok_or_else(|| {
+                XlogError::Kernel("hash_join_probe_v2_count_per_row kernel not found".to_string())
+            })?;
+        let total_func = device
+            .get_func(JOIN_MODULE, join_kernels::HASH_JOIN_TOTAL_FROM_SCAN)
+            .ok_or_else(|| {
+                XlogError::Kernel("hash_join_total_from_scan kernel not found".to_string())
+            })?;
+
+        let mut rec_count = LaunchRecorder::new_strict(launch_stream);
+        rec_count.read(&left_packed.hashes);
+        rec_count.read(&left_packed.packed_keys);
+        rec_count.read(&index.packed_keys);
+        rec_count.read(&table.bucket_offsets);
+        rec_count.read(&table.bucket_counts);
+        rec_count.read(&table.bucket_entries);
+        rec_count.read(&table.bucket_entry_hashes);
+        rec_count.read(left.num_rows_device());
+        rec_count.preflight(runtime).map_err(|e| {
+            XlogError::Kernel(format!(
+                "indexed CSM inner: count/scan preflight failed: {}",
+                e
+            ))
+        })?;
+
+        // Step 3: count_per_row.
+        // SAFETY: 12-arg signature matches the PTX kernel.
+        unsafe {
+            count_func.clone().launch_on_stream(
+                &cu_stream,
+                probe_config,
+                (
+                    &left_packed.hashes,
+                    left.num_rows_device(),
+                    probe_cap,
+                    &table.bucket_offsets,
+                    &table.bucket_counts,
+                    &table.bucket_entries,
+                    &table.bucket_entry_hashes,
+                    table.bucket_mask,
+                    &left_packed.packed_keys,
+                    &index.packed_keys,
+                    index.key_bytes,
+                    &per_probe_count,
+                ),
+            )
+        }
+        .map_err(|e| {
+            XlogError::Kernel(format!(
+                "hash_join_probe_v2_count_per_row (on_stream, indexed) failed: {}",
+                e
+            ))
+        })?;
+
+        // Step 4: dtod-async copy per_probe_count → per_probe_offsets,
+        // then exclusive in-place scan.
+        // SAFETY: same length, both runtime-backed u32 buffers.
+        unsafe {
+            let res = cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
+                *per_probe_offsets.device_ptr(),
+                *per_probe_count.device_ptr(),
+                (probe_cap as usize) * std::mem::size_of::<u32>(),
+                cu_stream.cu_stream(),
+            );
+            if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                return Err(XlogError::Kernel(format!(
+                    "indexed CSM inner: cuMemcpyDtoDAsync (count → offsets) failed: {:?}",
+                    res
+                )));
+            }
+        }
+        self.multiblock_scan_u32_inplace_on_stream(
+            &mut per_probe_offsets,
+            probe_cap,
+            &cu_stream,
+            launch_stream,
+            runtime,
+        )?;
+
+        // Step 5: total_from_scan.
+        let materialize_capacity_bound: u64 = (probe_cap as u64).saturating_mul(right_rows as u64);
+        let materialize_capacity_u32 = materialize_capacity_bound.min(u32::MAX as u64) as u32;
+        // SAFETY: 7-arg signature.
+        unsafe {
+            total_func.clone().launch_on_stream(
+                &cu_stream,
+                LaunchConfig {
+                    grid_dim: (1, 1, 1),
+                    block_dim: (1, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (
+                    &per_probe_offsets,
+                    &per_probe_count,
+                    left.num_rows_device(),
+                    probe_cap,
+                    materialize_capacity_u32,
+                    &d_logical_count,
+                    &d_overflow,
+                ),
+            )
+        }
+        .map_err(|e| {
+            XlogError::Kernel(format!(
+                "hash_join_total_from_scan (on_stream, indexed) failed: {}",
+                e
+            ))
+        })?;
+
+        rec_count.write_post_preflight_fresh(&per_probe_count);
+        rec_count.write_post_preflight_fresh(&per_probe_offsets);
+        rec_count.write_post_preflight_fresh(&d_logical_count);
+        rec_count.write_post_preflight_fresh(&d_overflow);
+        rec_count.commit(runtime).map_err(|e| {
+            XlogError::Kernel(format!(
+                "indexed CSM inner: count/scan commit failed: {}",
+                e
+            ))
+        })?;
+
+        cu_stream.synchronize().map_err(|e| {
+            XlogError::Kernel(format!(
+                "indexed CSM inner: sync (total read) failed: {}",
+                e
+            ))
+        })?;
+        let total = self.read_join_output_count_metadata(&d_logical_count)? as u64;
+        let requested = max_output
+            .map(|limit| (limit as u64).min(total))
+            .unwrap_or(total);
+        if requested == 0 {
+            let combined_schema = self.combine_schemas(left.schema(), right.schema());
+            return self.create_empty_buffer(combined_schema);
+        }
+        if requested > u32::MAX as u64 {
+            return Err(XlogError::Kernel(format!(
+                "Join produced {} rows which exceeds the u32 index limit",
+                requested
+            )));
+        }
+        let output_capacity = requested as u32;
+
+        // Step 6: materialize.
+        let d_output_left = self.memory.alloc::<u32>(output_capacity as usize)?;
+        let d_output_right = self.memory.alloc::<u32>(output_capacity as usize)?;
+
+        let mut rec_mat = LaunchRecorder::new_strict(launch_stream);
+        rec_mat.read(&left_packed.hashes);
+        rec_mat.read(&left_packed.packed_keys);
+        rec_mat.read(&index.packed_keys);
+        rec_mat.read(&table.bucket_offsets);
+        rec_mat.read(&table.bucket_counts);
+        rec_mat.read(&table.bucket_entries);
+        rec_mat.read(&table.bucket_entry_hashes);
+        rec_mat.read(&per_probe_offsets);
+        rec_mat.read(left.num_rows_device());
+        rec_mat.preflight(runtime).map_err(|e| {
+            XlogError::Kernel(format!(
+                "indexed CSM inner: materialize preflight failed: {}",
+                e
+            ))
+        })?;
+
+        let materialize_func = device
+            .get_func(JOIN_MODULE, join_kernels::HASH_JOIN_PROBE_V2_MATERIALIZE)
+            .ok_or_else(|| {
+                XlogError::Kernel("hash_join_probe_v2_materialize kernel not found".to_string())
+            })?;
+        // SAFETY: 16-arg signature; raw-param launch path.
+        unsafe {
+            let mut params: Vec<*mut c_void> = vec![
+                (&left_packed.hashes).as_kernel_param(),
+                left.num_rows_device().as_kernel_param(),
+                (&probe_cap).as_kernel_param(),
+                (&table.bucket_offsets).as_kernel_param(),
+                (&table.bucket_counts).as_kernel_param(),
+                (&table.bucket_entries).as_kernel_param(),
+                (&table.bucket_entry_hashes).as_kernel_param(),
+                (&table.bucket_mask).as_kernel_param(),
+                (&left_packed.packed_keys).as_kernel_param(),
+                (&index.packed_keys).as_kernel_param(),
+                (&index.key_bytes).as_kernel_param(),
+                (&per_probe_offsets).as_kernel_param(),
+                (&output_capacity).as_kernel_param(),
+                (&d_output_left).as_kernel_param(),
+                (&d_output_right).as_kernel_param(),
+                (&d_overflow).as_kernel_param(),
+            ];
+            materialize_func
+                .clone()
+                .launch_on_stream(&cu_stream, probe_config, &mut params)
+                .map_err(|e| {
+                    XlogError::Kernel(format!(
+                        "hash_join_probe_v2_materialize (on_stream, indexed) failed: {}",
+                        e
+                    ))
+                })?;
+        }
+
+        rec_mat.write_post_preflight_fresh(&d_output_left);
+        rec_mat.write_post_preflight_fresh(&d_output_right);
+        rec_mat.commit(runtime).map_err(|e| {
+            XlogError::Kernel(format!(
+                "indexed CSM inner: materialize commit failed: {}",
+                e
+            ))
+        })?;
+
+        cu_stream.synchronize().map_err(|e| {
+            XlogError::Kernel(format!(
+                "indexed CSM inner: sync (post-materialize) failed: {}",
+                e
+            ))
+        })?;
+
+        // Step 7: gather both sides on launch_stream.
+        let mut rec_gather = LaunchRecorder::new_strict(launch_stream);
+        for col_idx in 0..left.columns.len() {
+            let c = left
+                .column(col_idx)
+                .ok_or_else(|| XlogError::Kernel(format!("Left column {} not found", col_idx)))?;
+            rec_gather.read_column(c);
+        }
+        for col_idx in 0..right.columns.len() {
+            let c = right
+                .column(col_idx)
+                .ok_or_else(|| XlogError::Kernel(format!("Right column {} not found", col_idx)))?;
+            rec_gather.read_column(c);
+        }
+        rec_gather.read(&d_output_left);
+        rec_gather.read(&d_output_right);
+        rec_gather.preflight(runtime).map_err(|e| {
+            XlogError::Kernel(format!("indexed CSM inner: gather preflight failed: {}", e))
+        })?;
+        let gathered_left = self.gather_buffer_by_indices_on_stream(
+            left,
+            &d_output_left,
+            output_capacity,
+            &cu_stream,
+            launch_stream,
+            runtime,
+        )?;
+        let gathered_right = self.gather_buffer_by_indices_on_stream(
+            right,
+            &d_output_right,
+            output_capacity,
+            &cu_stream,
+            launch_stream,
+            runtime,
+        )?;
+        rec_gather.commit(runtime).map_err(|e| {
+            XlogError::Kernel(format!("indexed CSM inner: gather commit failed: {}", e))
+        })?;
+
+        let combined_schema = self.combine_schemas(left.schema(), right.schema());
+        let mut result_columns = Vec::with_capacity(combined_schema.arity());
+        result_columns.extend(gathered_left.columns.into_iter());
+        result_columns.extend(gathered_right.columns.into_iter());
+        self.buffer_from_columns(result_columns, output_capacity as u64, combined_schema)
+    }
+
     /// Strict-recorder, launch_stream-routed variant of
     /// `hash_join_v2`. **`JoinType::Inner` only** (slice #7A).
     /// Other join types return a structured `XlogError::Kernel`
