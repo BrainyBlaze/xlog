@@ -54,20 +54,34 @@ impl StreamPool {
         Self::new(device, DEFAULT_MAX_STREAMS)
     }
 
-    /// Acquire a stream id. Currently always returns
-    /// [`StreamId::DEFAULT`] so the migration step can wire the
-    /// allocator into `CudaKernelProvider` without changing executor
-    /// stream usage. The fork-and-allocate path is reserved for the
-    /// AsyncCudaResource follow-up commit.
+    /// Acquire a non-default stream id, growing the pool up to
+    /// `max_streams`. Each call returns a distinct [`StreamId`]
+    /// backed by an owned non-blocking `cudarc::driver::CudaStream`
+    /// forked from the device's default stream. When the pool is at
+    /// capacity, returns [`StreamId::DEFAULT`] (which resolves to
+    /// the device default stream) so callers can fall back without
+    /// failing.
     ///
-    /// This is intentionally minimal for the first cut: real
-    /// per-call non-blocking streams arrive together with the async
-    /// backend. Until then, the runtime exposes only the default
-    /// stream slot, and stream-ordered tests use it to assert the
-    /// trait contract holds even on a degenerate single-stream pool.
+    /// Streams are never returned to a free-list; they remain valid
+    /// for the runtime's lifetime so existing [`StreamId`] handles
+    /// keep resolving.
     pub fn acquire(&self) -> StreamId {
-        drop(self.streams.lock());
-        StreamId::DEFAULT
+        let mut streams = self.streams.lock().expect("stream pool poisoned");
+        if streams.len() >= self.max_streams {
+            return StreamId::DEFAULT;
+        }
+        // Fork a non-blocking stream from the device's default stream.
+        // On failure we fall back to the default-stream id.
+        match self.device.inner().stream().fork() {
+            Ok(handle) => {
+                streams.push(handle);
+                // Index 0 is reserved for DEFAULT; non-default
+                // streams start at id 1 and correspond to
+                // `streams[id - 1]`.
+                StreamId(streams.len() as u32)
+            }
+            Err(_) => StreamId::DEFAULT,
+        }
     }
 
     /// Borrow the live `CudaStream` for `id`. Returns `None` if `id`
@@ -83,6 +97,11 @@ impl StreamPool {
             return None;
         }
         Some(Arc::clone(&streams[idx - 1]))
+    }
+
+    /// Number of non-default streams currently in the pool.
+    pub fn non_default_len(&self) -> usize {
+        self.streams.lock().expect("stream pool poisoned").len()
     }
 
     /// Borrow the device handle. Test helpers use this to launch
@@ -107,12 +126,32 @@ mod tests {
     }
 
     #[test]
-    fn acquire_returns_default_for_now() {
+    fn acquire_returns_distinct_non_default_ids() {
         let Some(device) = try_device() else {
             return;
         };
-        let pool = StreamPool::with_defaults(device);
-        assert_eq!(pool.acquire(), StreamId::DEFAULT);
+        let pool = StreamPool::new(device, 4);
+        let a = pool.acquire();
+        let b = pool.acquire();
+        assert_ne!(a, StreamId::DEFAULT);
+        assert_ne!(b, StreamId::DEFAULT);
+        assert_ne!(a, b, "consecutive acquire calls must yield distinct ids");
+        assert_eq!(pool.non_default_len(), 2);
+    }
+
+    #[test]
+    fn acquire_falls_back_to_default_at_capacity() {
+        let Some(device) = try_device() else {
+            return;
+        };
+        let pool = StreamPool::new(device, 1);
+        let _first = pool.acquire();
+        let second = pool.acquire();
+        assert_eq!(
+            second,
+            StreamId::DEFAULT,
+            "pool must fall back to DEFAULT once max_streams is hit"
+        );
     }
 
     #[test]
@@ -122,6 +161,17 @@ mod tests {
         };
         let pool = StreamPool::with_defaults(device);
         assert!(pool.resolve(StreamId::DEFAULT).is_some());
+    }
+
+    #[test]
+    fn resolve_acquired_returns_owned_stream() {
+        let Some(device) = try_device() else {
+            return;
+        };
+        let pool = StreamPool::new(device, 4);
+        let id = pool.acquire();
+        assert_ne!(id, StreamId::DEFAULT);
+        assert!(pool.resolve(id).is_some());
     }
 
     #[test]
