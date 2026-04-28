@@ -1202,6 +1202,139 @@ impl CudaKernelProvider {
         Ok(())
     }
 
+    /// Stream-aware variant of [`Self::multiblock_scan_u32_inplace`].
+    ///
+    /// Runs every kernel of the recursive scan on `cu_stream`
+    /// (no `device.synchronize()`), and records each intermediate
+    /// `block_sums` allocation against the runtime so that when
+    /// the helper returns and the local drops, the runtime's
+    /// deallocate can queue `cuStreamWaitEvent(alloc_stream,
+    /// recorded_event)` BEFORE `cuMemFreeAsync` — the same
+    /// cross-stream lifetime safety the LaunchRecorder gives
+    /// caller-provided buffers.
+    ///
+    /// `data` is not recorded here: the caller already records
+    /// its own write of `data` against the same launch_stream
+    /// (typically via `LaunchRecorder::write_post_preflight_fresh`).
+    pub(crate) fn multiblock_scan_u32_inplace_on_stream(
+        &self,
+        data: &mut crate::memory::TrackedCudaSlice<u32>,
+        n: u32,
+        cu_stream: &cudarc::driver::CudaStream,
+        launch_stream: crate::device_runtime::StreamId,
+        runtime: &crate::device_runtime::XlogDeviceRuntime,
+    ) -> Result<()> {
+        if n == 0 {
+            return Ok(());
+        }
+        let device = self.device.inner();
+        let block_size = 256u32;
+
+        if n <= block_size {
+            let phase2_fn = device
+                .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE2)
+                .ok_or_else(|| {
+                    XlogError::Kernel("Failed to get multiblock_scan_phase2 kernel".to_string())
+                })?;
+            // SAFETY: kernel signature matches; data is mutated in place.
+            unsafe {
+                phase2_fn.clone().launch_on_stream(
+                    cu_stream,
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (block_size, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (&mut *data, n),
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!("multiblock_scan_phase2 (on_stream) failed: {}", e))
+            })?;
+            return Ok(());
+        }
+
+        let num_blocks = (n + block_size - 1) / block_size;
+        let mut block_sums = self.memory.alloc::<u32>(num_blocks as usize)?;
+
+        let phase1_u32_fn = device
+            .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_U32_PHASE1)
+            .ok_or_else(|| {
+                XlogError::Kernel("Failed to get multiblock_scan_u32_phase1 kernel".to_string())
+            })?;
+        // SAFETY: kernel signature matches.
+        unsafe {
+            phase1_u32_fn.clone().launch_on_stream(
+                cu_stream,
+                LaunchConfig {
+                    grid_dim: (num_blocks, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (&mut *data, &mut block_sums, n),
+            )
+        }
+        .map_err(|e| {
+            XlogError::Kernel(format!(
+                "multiblock_scan_u32_phase1 (on_stream) failed: {}",
+                e
+            ))
+        })?;
+
+        if num_blocks > 1 {
+            self.multiblock_scan_u32_inplace_on_stream(
+                &mut block_sums,
+                num_blocks,
+                cu_stream,
+                launch_stream,
+                runtime,
+            )?;
+        }
+
+        let phase3_fn = device
+            .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE3)
+            .ok_or_else(|| {
+                XlogError::Kernel("Failed to get multiblock_scan_phase3 kernel".to_string())
+            })?;
+        // SAFETY: kernel signature matches.
+        unsafe {
+            phase3_fn.clone().launch_on_stream(
+                cu_stream,
+                LaunchConfig {
+                    grid_dim: (num_blocks, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (&mut *data, &block_sums, n),
+            )
+        }
+        .map_err(|e| {
+            XlogError::Kernel(format!("multiblock_scan_phase3 (on_stream) failed: {}", e))
+        })?;
+
+        // Record `block_sums` use on `launch_stream` BEFORE it
+        // drops at end-of-scope. Without this, the runtime's
+        // deallocate would queue `cuMemFreeAsync` on alloc_stream
+        // without waiting for the launch_stream chain that's
+        // still reading/writing block_sums to complete.
+        if let Some(b) = block_sums.runtime_block() {
+            runtime.record_block_use(b, launch_stream).map_err(|e| {
+                XlogError::Kernel(format!(
+                    "multiblock_scan_u32_inplace_on_stream: record_block_use \
+                         for intermediate block_sums failed: {}",
+                    e
+                ))
+            })?;
+        } else {
+            return Err(XlogError::Kernel(
+                "multiblock_scan_u32_inplace_on_stream: intermediate block_sums has no \
+                 runtime block — caller must use a runtime-backed manager"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     fn multiblock_scan_u32_view_inplace(
         &self,
         data: &mut CudaViewMut<'_, u32>,
