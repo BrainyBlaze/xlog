@@ -678,7 +678,7 @@ impl super::CudaKernelProvider {
     /// (`packed_keys`, `hashes`) against the runtime so that
     /// downstream consumers / drops are correctly serialized
     /// against `launch_stream`.
-    fn pack_keys_gpu_on_stream(
+    pub(super) fn pack_keys_gpu_on_stream(
         &self,
         buffer: &CudaBuffer,
         key_cols: &[usize],

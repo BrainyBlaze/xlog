@@ -5588,4 +5588,732 @@ impl super::CudaKernelProvider {
         // Step 3: gather kept rows via the recorded compact tail.
         self.compact_buffer_by_device_mask_counted_recorded(&sorted, &d_unique_mask, launch_stream)
     }
+
+    // ============== Recorded hash join — slice #7A: inner only ==============
+    //
+    // Strict-recorder, launch_stream-routed sibling of
+    // `hash_join_inner_v2`. Composes the existing recorded
+    // pack helper (slice #6, `pack_keys_gpu_on_stream`) with
+    // two new on-stream helpers — `build_hash_table_v2_on_stream`
+    // and `gather_buffer_by_indices_on_stream` — and runs the
+    // probe kernel + count + materialize chain entirely on
+    // launch_stream. Existing `hash_join_v2_*` callers keep
+    // their bit-for-bit semantics; runtime/planner wiring is
+    // NOT in this slice.
+    //
+    // Scope:
+    //   * `JoinType::Inner` only. Semi/Anti/LeftOuter and the
+    //     indexed variant (`hash_join_v2_with_index`) are
+    //     deferred to follow-up sub-slices (#7B, #7C, #7D).
+    //   * Pack-keys constraint of ≤4 columns inherits from
+    //     `pack_keys_gpu_on_stream`.
+    //   * Algorithm is unchanged: count-then-materialize
+    //     (two probe passes); the deferred GPU-resident
+    //     count-prefix-materialize prototype is NOT
+    //     reintroduced.
+
+    /// Stream-aware variant of `build_hash_table_v2`. Mirrors
+    /// the legacy bucket-count → exclusive-scan → scatter chain
+    /// on the caller-supplied `launch_stream` (no internal
+    /// `device.synchronize()`). Records every fresh runtime
+    /// allocation that escapes (the four returned bucket
+    /// buffers) AND the internal `bucket_cursors` scratch
+    /// directly via `runtime.record_block_use` so end-of-scope
+    /// drops are correctly serialized.
+    fn build_hash_table_v2_on_stream(
+        &self,
+        hashes: &TrackedCudaSlice<u64>,
+        num_rows: u32,
+        cu_stream: &cudarc::driver::CudaStream,
+        launch_stream: StreamId,
+        runtime: &crate::device_runtime::XlogDeviceRuntime,
+    ) -> Result<crate::provider::JoinHashTableV2> {
+        let device = self.device.inner();
+
+        let target = (num_rows as u64).saturating_mul(2).max(1024);
+        let num_buckets_u64 = target.next_power_of_two();
+        let num_buckets = u32::try_from(num_buckets_u64).map_err(|_| {
+            XlogError::Kernel(format!(
+                "Join hash table too large: num_buckets={}",
+                num_buckets_u64
+            ))
+        })?;
+        let bucket_mask = num_buckets
+            .checked_sub(1)
+            .ok_or_else(|| XlogError::Kernel("Join hash table size underflow".to_string()))?;
+
+        let bucket_counts = self.memory.alloc::<u32>(num_buckets as usize)?;
+        // Async u32 zero-fill on launch_stream.
+        if num_buckets > 0 {
+            // SAFETY: bucket_counts is runtime-backed for
+            // num_buckets * 4 bytes; cu_stream is a valid
+            // stream the runtime owns.
+            unsafe {
+                let res = cudarc::driver::sys::cuMemsetD8Async(
+                    *bucket_counts.device_ptr(),
+                    0,
+                    (num_buckets as usize) * std::mem::size_of::<u32>(),
+                    cu_stream.cu_stream(),
+                );
+                if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                    return Err(XlogError::Kernel(format!(
+                        "cuMemsetD8Async (bucket_counts) failed: {:?}",
+                        res
+                    )));
+                }
+            }
+        }
+
+        let block_size = 256u32;
+        let grid_size = (num_rows + block_size - 1) / block_size;
+        let cfg = LaunchConfig {
+            grid_dim: (grid_size, 1, 1),
+            block_dim: (block_size, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        let count_fn = device
+            .get_func(JOIN_MODULE, join_kernels::HASH_JOIN_BUCKET_COUNT_V2)
+            .ok_or_else(|| {
+                XlogError::Kernel("hash_join_bucket_count_v2 kernel not found".to_string())
+            })?;
+        // SAFETY: hash_join_bucket_count_v2(hashes, num_rows, bucket_counts, bucket_mask)
+        unsafe {
+            count_fn.clone().launch_on_stream(
+                cu_stream,
+                cfg,
+                (hashes, num_rows, &bucket_counts, bucket_mask),
+            )
+        }
+        .map_err(|e| {
+            XlogError::Kernel(format!(
+                "hash_join_bucket_count_v2 (on_stream) failed: {}",
+                e
+            ))
+        })?;
+
+        let mut bucket_offsets = self.memory.alloc::<u32>(num_buckets as usize)?;
+        if num_buckets > 0 {
+            // dtod copy bucket_counts → bucket_offsets on launch_stream.
+            // SAFETY: both buffers are runtime-backed for the
+            // same num_buckets * 4 bytes; cu_stream is valid.
+            unsafe {
+                let res = cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
+                    *bucket_offsets.device_ptr(),
+                    *bucket_counts.device_ptr(),
+                    (num_buckets as usize) * std::mem::size_of::<u32>(),
+                    cu_stream.cu_stream(),
+                );
+                if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                    return Err(XlogError::Kernel(format!(
+                        "cuMemcpyDtoDAsync (bucket_counts → bucket_offsets) failed: {:?}",
+                        res
+                    )));
+                }
+            }
+            self.multiblock_scan_u32_inplace_on_stream(
+                &mut bucket_offsets,
+                num_buckets,
+                cu_stream,
+                launch_stream,
+                runtime,
+            )?;
+        }
+
+        let bucket_cursors = self.memory.alloc::<u32>(num_buckets as usize)?;
+        if num_buckets > 0 {
+            // dtod copy bucket_offsets → bucket_cursors on launch_stream.
+            // SAFETY: same shape and size constraints as above.
+            unsafe {
+                let res = cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
+                    *bucket_cursors.device_ptr(),
+                    *bucket_offsets.device_ptr(),
+                    (num_buckets as usize) * std::mem::size_of::<u32>(),
+                    cu_stream.cu_stream(),
+                );
+                if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                    return Err(XlogError::Kernel(format!(
+                        "cuMemcpyDtoDAsync (bucket_offsets → bucket_cursors) failed: {:?}",
+                        res
+                    )));
+                }
+            }
+        }
+
+        let bucket_entries = self.memory.alloc::<u32>(num_rows as usize)?;
+        let bucket_entry_hashes = self.memory.alloc::<u64>(num_rows as usize)?;
+
+        let scatter_fn = device
+            .get_func(JOIN_MODULE, join_kernels::HASH_JOIN_SCATTER_V2)
+            .ok_or_else(|| {
+                XlogError::Kernel("hash_join_scatter_v2 kernel not found".to_string())
+            })?;
+        // SAFETY: hash_join_scatter_v2(hashes, num_rows, bucket_cursors, bucket_mask, bucket_entries, bucket_entry_hashes)
+        unsafe {
+            scatter_fn.clone().launch_on_stream(
+                cu_stream,
+                cfg,
+                (
+                    hashes,
+                    num_rows,
+                    &bucket_cursors,
+                    bucket_mask,
+                    &bucket_entries,
+                    &bucket_entry_hashes,
+                ),
+            )
+        }
+        .map_err(|e| {
+            XlogError::Kernel(format!("hash_join_scatter_v2 (on_stream) failed: {}", e))
+        })?;
+
+        // Record uses on launch_stream:
+        // * bucket_cursors drops at end of helper — must be
+        //   recorded so the runtime defers its free behind
+        //   the scatter kernel.
+        // * bucket_counts / bucket_offsets / bucket_entries /
+        //   bucket_entry_hashes escape via JoinHashTableV2;
+        //   record so downstream drops are gated.
+        for blk in [
+            bucket_counts.runtime_block(),
+            bucket_offsets.runtime_block(),
+            bucket_cursors.runtime_block(),
+            bucket_entries.runtime_block(),
+            bucket_entry_hashes.runtime_block(),
+        ] {
+            if let Some(b) = blk {
+                runtime.record_block_use(b, launch_stream).map_err(|e| {
+                    XlogError::Kernel(format!(
+                        "build_hash_table_v2_on_stream: record_block_use failed: {}",
+                        e
+                    ))
+                })?;
+            } else {
+                return Err(XlogError::Kernel(
+                    "build_hash_table_v2_on_stream: buffer has no runtime block — \
+                     caller must use a runtime-backed manager"
+                        .to_string(),
+                ));
+            }
+        }
+
+        Ok(crate::provider::JoinHashTableV2 {
+            bucket_counts,
+            bucket_offsets,
+            bucket_entries,
+            bucket_entry_hashes,
+            bucket_mask,
+        })
+    }
+
+    /// Stream-aware variant of `gather_buffer_by_indices`.
+    /// Allocates output column storage, runs
+    /// `apply_permutation_bytes` per input column on
+    /// `launch_stream`, and assembles a `CudaBuffer`. Records
+    /// every fresh allocation directly via the runtime so the
+    /// returned buffer is safe to drop before any pending
+    /// gather kernel completes.
+    fn gather_buffer_by_indices_on_stream(
+        &self,
+        input: &CudaBuffer,
+        indices: &TrackedCudaSlice<u32>,
+        output_rows: u32,
+        cu_stream: &cudarc::driver::CudaStream,
+        launch_stream: StreamId,
+        runtime: &crate::device_runtime::XlogDeviceRuntime,
+    ) -> Result<CudaBuffer> {
+        if output_rows == 0 {
+            return self.create_empty_buffer(input.schema().clone());
+        }
+        if input.num_rows() > u32::MAX as u64 {
+            return Err(XlogError::Kernel(format!(
+                "GPU gather supports at most {} input rows, got {}",
+                u32::MAX,
+                input.num_rows()
+            )));
+        }
+
+        let d_output_rows = self.upload_device_row_count(output_rows)?;
+        let device = self.device.inner();
+        let block_size = 256u32;
+        let grid_size = (output_rows + block_size - 1) / block_size;
+        let launch_config = LaunchConfig {
+            grid_dim: (grid_size, 1, 1),
+            block_dim: (block_size, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        let gather_fn = device
+            .get_func(SORT_MODULE, sort_kernels::APPLY_PERMUTATION_BYTES)
+            .ok_or_else(|| {
+                XlogError::Kernel("apply_permutation_bytes kernel not found".to_string())
+            })?;
+
+        let mut dst_cols: Vec<TrackedCudaSlice<u8>> = Vec::with_capacity(input.columns.len());
+        for col_idx in 0..input.columns.len() {
+            let elem_size = input
+                .schema
+                .column_type(col_idx)
+                .ok_or_else(|| {
+                    XlogError::Kernel(format!("Schema type for column {} not found", col_idx))
+                })?
+                .size_bytes() as u32;
+            let dst_bytes = (output_rows as usize) * (elem_size as usize);
+            dst_cols.push(self.memory.alloc::<u8>(dst_bytes)?);
+        }
+
+        for (col_idx, dst_col) in dst_cols.iter_mut().enumerate() {
+            let src_col = input
+                .column(col_idx)
+                .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
+            let elem_size = input
+                .schema
+                .column_type(col_idx)
+                .map(|t| t.size_bytes() as u32)
+                .unwrap_or(4);
+            // SAFETY: apply_permutation_bytes(input, output, permutation, num_rows_device, row_cap, elem_size)
+            unsafe {
+                gather_fn.clone().launch_on_stream(
+                    cu_stream,
+                    launch_config,
+                    (
+                        src_col,
+                        &mut *dst_col,
+                        indices,
+                        &d_output_rows,
+                        output_rows,
+                        elem_size,
+                    ),
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!("apply_permutation_bytes (on_stream) failed: {}", e))
+            })?;
+        }
+
+        // Record uses on launch_stream for buffers we wrote
+        // (the dst_cols escape via the returned CudaBuffer).
+        // input.column[i] reads will be recorded by the
+        // caller's outer LaunchRecorder.
+        for dst_col in &dst_cols {
+            if let Some(b) = dst_col.runtime_block() {
+                runtime.record_block_use(b, launch_stream).map_err(|e| {
+                    XlogError::Kernel(format!(
+                        "gather_buffer_by_indices_on_stream: record_block_use \
+                         (dst_col) failed: {}",
+                        e
+                    ))
+                })?;
+            } else {
+                return Err(XlogError::Kernel(
+                    "gather_buffer_by_indices_on_stream: dst_col has no runtime block".to_string(),
+                ));
+            }
+        }
+
+        let new_columns: Vec<CudaColumn> = dst_cols.into_iter().map(|s| s.into()).collect();
+        Ok(CudaBuffer::from_columns(
+            new_columns,
+            output_rows as u64,
+            d_output_rows,
+            input.schema.clone(),
+        ))
+    }
+
+    /// Strict-recorder variant of `hash_join_inner_v2`.
+    /// `JoinType::Inner` only. Same count-then-materialize
+    /// algorithm as the legacy variant, but every kernel
+    /// runs on the caller-supplied `launch_stream` and host
+    /// scalar reads of the join output count are explicitly
+    /// ordered against the stream.
+    pub fn hash_join_inner_v2_recorded(
+        &self,
+        left: &CudaBuffer,
+        right: &CudaBuffer,
+        left_keys: &[usize],
+        right_keys: &[usize],
+        max_output: Option<usize>,
+        launch_stream: StreamId,
+    ) -> Result<CudaBuffer> {
+        use crate::launch::LaunchRecorder;
+
+        let runtime = self.memory.runtime().ok_or_else(|| {
+            XlogError::Kernel(
+                "hash_join_inner_v2_recorded requires a runtime-backed GpuMemoryManager"
+                    .to_string(),
+            )
+        })?;
+        let cu_stream = runtime
+            .stream_pool()
+            .resolve(launch_stream)
+            .ok_or_else(|| {
+                XlogError::Kernel(format!(
+                    "hash_join_inner_v2_recorded: launch_stream StreamId({}) does not resolve",
+                    launch_stream.0
+                ))
+            })?;
+
+        let num_left = self.device_row_count(left)?;
+        let num_right = self.device_row_count(right)?;
+        if num_left > u32::MAX as usize || num_right > u32::MAX as usize {
+            return Err(XlogError::Kernel(format!(
+                "Join supports at most {} rows per side (left={}, right={})",
+                u32::MAX,
+                num_left,
+                num_right
+            )));
+        }
+        if num_left == 0 || num_right == 0 {
+            let combined_schema = self.combine_schemas(left.schema(), right.schema());
+            return self.create_empty_buffer(combined_schema);
+        }
+        if left_keys.is_empty() || right_keys.is_empty() {
+            return Err(XlogError::Kernel(
+                "Join requires at least one key column".to_string(),
+            ));
+        }
+        if left_keys.len() != right_keys.len() {
+            return Err(XlogError::Kernel(
+                "Left and right key columns must have same length".to_string(),
+            ));
+        }
+        if left_keys.len() > 4 {
+            return Err(XlogError::Kernel(
+                "hash_join_inner_v2_recorded: max 4 key columns supported (pack_keys constraint)"
+                    .to_string(),
+            ));
+        }
+        for (&l, &r) in left_keys.iter().zip(right_keys.iter()) {
+            let lt = left.schema().column_type(l);
+            let rt = right.schema().column_type(r);
+            if lt != rt {
+                return Err(XlogError::Kernel(format!(
+                    "Key column type mismatch: left[{}]={:?}, right[{}]={:?}",
+                    l, lt, r, rt
+                )));
+            }
+        }
+
+        let num_left = num_left as u32;
+        let num_right = num_right as u32;
+
+        // Step 1+2: pack keys for both sides on launch_stream.
+        let left_packed =
+            self.pack_keys_gpu_on_stream(left, left_keys, &cu_stream, launch_stream, runtime)?;
+        let right_packed =
+            self.pack_keys_gpu_on_stream(right, right_keys, &cu_stream, launch_stream, runtime)?;
+
+        // Step 3: build hash table on launch_stream.
+        let table = self.build_hash_table_v2_on_stream(
+            &right_packed.hashes,
+            num_right,
+            &cu_stream,
+            launch_stream,
+            runtime,
+        )?;
+
+        let probe_func = self
+            .device
+            .inner()
+            .get_func(JOIN_MODULE, join_kernels::HASH_JOIN_PROBE_V2)
+            .ok_or_else(|| XlogError::Kernel("hash_join_probe_v2 kernel not found".to_string()))?;
+        let block_size = 256u32;
+        let probe_grid = (num_left + block_size - 1) / block_size;
+        let probe_config = LaunchConfig {
+            grid_dim: (probe_grid, 1, 1),
+            block_dim: (block_size, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        // Step 4: count-only pass. Allocate count + dummy
+        // output buffers up front; zero-init via async memset
+        // on launch_stream.
+        let d_count_only = self.memory.alloc::<u32>(1)?;
+        let d_dummy_left = self.memory.alloc::<u32>(1)?;
+        let d_dummy_right = self.memory.alloc::<u32>(1)?;
+        // SAFETY: d_count_only is runtime-backed for 4 bytes.
+        unsafe {
+            let res = cudarc::driver::sys::cuMemsetD8Async(
+                *d_count_only.device_ptr(),
+                0,
+                std::mem::size_of::<u32>(),
+                cu_stream.cu_stream(),
+            );
+            if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                return Err(XlogError::Kernel(format!(
+                    "cuMemsetD8Async (d_count_only) failed: {:?}",
+                    res
+                )));
+            }
+        }
+
+        // Build the recorder for the probe / output stage.
+        // Reads BEFORE preflight: hashes + packed_keys (already
+        // recorded by pack_keys_gpu_on_stream as writes on
+        // launch_stream — recording reads here adds the next
+        // event in the chain), table buckets, dummy buffers.
+        let max_output_count_only = 0u32;
+        let mut rec_count = LaunchRecorder::new_strict(launch_stream);
+        rec_count.read(&left_packed.hashes);
+        rec_count.read(&left_packed.packed_keys);
+        rec_count.read(&right_packed.packed_keys);
+        rec_count.read(&table.bucket_offsets);
+        rec_count.read(&table.bucket_counts);
+        rec_count.read(&table.bucket_entries);
+        rec_count.read(&table.bucket_entry_hashes);
+        rec_count.preflight(runtime).map_err(|e| {
+            XlogError::Kernel(format!(
+                "hash_join_inner_v2_recorded: count-pass preflight failed: {}",
+                e
+            ))
+        })?;
+
+        // SAFETY: hash_join_probe_v2 14-arg signature — see
+        // legacy hash_join_inner_v2 for the canonical
+        // documentation. Tuple exceeds 12-element limit, so
+        // we use the raw-pointer launch path.
+        unsafe {
+            let mut params: Vec<*mut c_void> = vec![
+                (&left_packed.hashes).as_kernel_param(),
+                (&num_left).as_kernel_param(),
+                (&table.bucket_offsets).as_kernel_param(),
+                (&table.bucket_counts).as_kernel_param(),
+                (&table.bucket_entries).as_kernel_param(),
+                (&table.bucket_entry_hashes).as_kernel_param(),
+                (&table.bucket_mask).as_kernel_param(),
+                (&left_packed.packed_keys).as_kernel_param(),
+                (&right_packed.packed_keys).as_kernel_param(),
+                (&left_packed.key_bytes).as_kernel_param(),
+                (&d_dummy_left).as_kernel_param(),
+                (&d_dummy_right).as_kernel_param(),
+                (&d_count_only).as_kernel_param(),
+                (&max_output_count_only).as_kernel_param(),
+            ];
+            probe_func
+                .clone()
+                .launch_on_stream(&cu_stream, probe_config, &mut params)
+                .map_err(|e| {
+                    XlogError::Kernel(format!(
+                        "hash_join_probe_v2 (count, on_stream) failed: {}",
+                        e
+                    ))
+                })?;
+        }
+
+        rec_count.write_post_preflight_fresh(&d_count_only);
+        rec_count.write_post_preflight_fresh(&d_dummy_left);
+        rec_count.write_post_preflight_fresh(&d_dummy_right);
+        rec_count.commit(runtime).map_err(|e| {
+            XlogError::Kernel(format!(
+                "hash_join_inner_v2_recorded: count-pass commit failed: {}",
+                e
+            ))
+        })?;
+
+        // Explicit barrier before host scalar read of full_count.
+        cu_stream.synchronize().map_err(|e| {
+            XlogError::Kernel(format!(
+                "hash_join_inner_v2_recorded: launch_stream sync (count read) failed: {}",
+                e
+            ))
+        })?;
+        let full_count = self.read_join_output_count_metadata(&d_count_only)? as u64;
+        let requested = max_output
+            .map(|limit| (limit as u64).min(full_count))
+            .unwrap_or(full_count);
+        if requested == 0 {
+            let combined_schema = self.combine_schemas(left.schema(), right.schema());
+            return self.create_empty_buffer(combined_schema);
+        }
+        if requested > u32::MAX as u64 {
+            return Err(XlogError::Kernel(format!(
+                "Join produced {} rows which exceeds the u32 index limit",
+                requested
+            )));
+        }
+        let max_output_u32 = requested as u32;
+
+        // Step 5: materialize pass. Allocate output index
+        // buffers + count; zero-init count async on stream.
+        let d_output_left = self.memory.alloc::<u32>(max_output_u32 as usize)?;
+        let d_output_right = self.memory.alloc::<u32>(max_output_u32 as usize)?;
+        let d_output_count = self.memory.alloc::<u32>(1)?;
+        // SAFETY: runtime-backed 4-byte buffer.
+        unsafe {
+            let res = cudarc::driver::sys::cuMemsetD8Async(
+                *d_output_count.device_ptr(),
+                0,
+                std::mem::size_of::<u32>(),
+                cu_stream.cu_stream(),
+            );
+            if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                return Err(XlogError::Kernel(format!(
+                    "cuMemsetD8Async (d_output_count) failed: {:?}",
+                    res
+                )));
+            }
+        }
+
+        let mut rec_mat = LaunchRecorder::new_strict(launch_stream);
+        rec_mat.read(&left_packed.hashes);
+        rec_mat.read(&left_packed.packed_keys);
+        rec_mat.read(&right_packed.packed_keys);
+        rec_mat.read(&table.bucket_offsets);
+        rec_mat.read(&table.bucket_counts);
+        rec_mat.read(&table.bucket_entries);
+        rec_mat.read(&table.bucket_entry_hashes);
+        rec_mat.preflight(runtime).map_err(|e| {
+            XlogError::Kernel(format!(
+                "hash_join_inner_v2_recorded: materialize-pass preflight failed: {}",
+                e
+            ))
+        })?;
+
+        // SAFETY: same 14-arg probe signature.
+        unsafe {
+            let mut params: Vec<*mut c_void> = vec![
+                (&left_packed.hashes).as_kernel_param(),
+                (&num_left).as_kernel_param(),
+                (&table.bucket_offsets).as_kernel_param(),
+                (&table.bucket_counts).as_kernel_param(),
+                (&table.bucket_entries).as_kernel_param(),
+                (&table.bucket_entry_hashes).as_kernel_param(),
+                (&table.bucket_mask).as_kernel_param(),
+                (&left_packed.packed_keys).as_kernel_param(),
+                (&right_packed.packed_keys).as_kernel_param(),
+                (&left_packed.key_bytes).as_kernel_param(),
+                (&d_output_left).as_kernel_param(),
+                (&d_output_right).as_kernel_param(),
+                (&d_output_count).as_kernel_param(),
+                (&max_output_u32).as_kernel_param(),
+            ];
+            probe_func
+                .clone()
+                .launch_on_stream(&cu_stream, probe_config, &mut params)
+                .map_err(|e| {
+                    XlogError::Kernel(format!(
+                        "hash_join_probe_v2 (materialize, on_stream) failed: {}",
+                        e
+                    ))
+                })?;
+        }
+
+        rec_mat.write_post_preflight_fresh(&d_output_left);
+        rec_mat.write_post_preflight_fresh(&d_output_right);
+        rec_mat.write_post_preflight_fresh(&d_output_count);
+        rec_mat.commit(runtime).map_err(|e| {
+            XlogError::Kernel(format!(
+                "hash_join_inner_v2_recorded: materialize-pass commit failed: {}",
+                e
+            ))
+        })?;
+
+        // Explicit barrier before host scalar read of result_count.
+        cu_stream.synchronize().map_err(|e| {
+            XlogError::Kernel(format!(
+                "hash_join_inner_v2_recorded: launch_stream sync (mat read) failed: {}",
+                e
+            ))
+        })?;
+        let result_count = (self.read_join_output_count_metadata(&d_output_count)? as u64)
+            .min(max_output_u32 as u64);
+        if result_count == 0 {
+            let combined_schema = self.combine_schemas(left.schema(), right.schema());
+            return self.create_empty_buffer(combined_schema);
+        }
+        let output_rows = result_count as u32;
+
+        // Step 6: gather both sides on launch_stream. Each
+        // gather records reads of input.column[i] via its own
+        // outer LaunchRecorder — set up below.
+        let mut rec_gather = LaunchRecorder::new_strict(launch_stream);
+        for col_idx in 0..left.columns.len() {
+            let c = left
+                .column(col_idx)
+                .ok_or_else(|| XlogError::Kernel(format!("Left column {} not found", col_idx)))?;
+            rec_gather.read_column(c);
+        }
+        for col_idx in 0..right.columns.len() {
+            let c = right
+                .column(col_idx)
+                .ok_or_else(|| XlogError::Kernel(format!("Right column {} not found", col_idx)))?;
+            rec_gather.read_column(c);
+        }
+        rec_gather.read(&d_output_left);
+        rec_gather.read(&d_output_right);
+        rec_gather.preflight(runtime).map_err(|e| {
+            XlogError::Kernel(format!(
+                "hash_join_inner_v2_recorded: gather preflight failed: {}",
+                e
+            ))
+        })?;
+
+        let gathered_left = self.gather_buffer_by_indices_on_stream(
+            left,
+            &d_output_left,
+            output_rows,
+            &cu_stream,
+            launch_stream,
+            runtime,
+        )?;
+        let gathered_right = self.gather_buffer_by_indices_on_stream(
+            right,
+            &d_output_right,
+            output_rows,
+            &cu_stream,
+            launch_stream,
+            runtime,
+        )?;
+
+        rec_gather.commit(runtime).map_err(|e| {
+            XlogError::Kernel(format!(
+                "hash_join_inner_v2_recorded: gather commit failed: {}",
+                e
+            ))
+        })?;
+
+        let combined_schema = self.combine_schemas(left.schema(), right.schema());
+        let mut result_columns = Vec::with_capacity(combined_schema.arity());
+        result_columns.extend(gathered_left.columns.into_iter());
+        result_columns.extend(gathered_right.columns.into_iter());
+        self.buffer_from_columns(result_columns, result_count, combined_schema)
+    }
+
+    /// Strict-recorder, launch_stream-routed variant of
+    /// `hash_join_v2`. **`JoinType::Inner` only** (slice #7A).
+    /// Other join types return a structured `XlogError::Kernel`
+    /// directing callers to the legacy `hash_join_v2` until
+    /// follow-up sub-slices land:
+    ///   * Semi / Anti — slice #7B.
+    ///   * LeftOuter — slice #7C.
+    ///   * Indexed (`hash_join_v2_with_index`) — slice #7D.
+    pub fn hash_join_v2_recorded(
+        &self,
+        left: &CudaBuffer,
+        right: &CudaBuffer,
+        left_keys: &[usize],
+        right_keys: &[usize],
+        join_type: JoinType,
+        max_output: Option<usize>,
+        launch_stream: StreamId,
+    ) -> Result<CudaBuffer> {
+        match join_type {
+            JoinType::Inner => self.hash_join_inner_v2_recorded(
+                left,
+                right,
+                left_keys,
+                right_keys,
+                max_output,
+                launch_stream,
+            ),
+            JoinType::Semi | JoinType::Anti | JoinType::LeftOuter => {
+                Err(XlogError::Kernel(format!(
+                "hash_join_v2_recorded: {:?} not yet supported (slice #7A migrates Inner only; \
+                 Semi / Anti / LeftOuter deferred to follow-up sub-slices). Use the legacy \
+                 hash_join_v2 for now.",
+                join_type
+            )))
+            }
+        }
+    }
 }
