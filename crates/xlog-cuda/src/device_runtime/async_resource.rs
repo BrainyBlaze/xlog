@@ -43,15 +43,25 @@
 //!
 //! `reap_pending()` drains the per-stream pending map under the
 //! per-stream mutex, synchronizes each drained stream, and then
-//! subtracts exactly the drained total from `pending_bytes` via
-//! `fetch_sub` — it does **not** zero the counter. A `deallocate`
-//! that races between reap's drain and its `fetch_sub` re-populates
-//! both the per-stream map and the global atomic together (under the
-//! same mutex), so its bytes either land entirely before the drain
-//! (reaped this round) or entirely after (kept for the next reap),
-//! never split. Callers (the future `GlobalDeviceBudget`, A2's
-//! final assertions) call this before treating `bytes_outstanding()`
-//! as authoritative.
+//! subtracts only the **synchronized** total from `pending_bytes`
+//! via `fetch_sub` — it does **not** zero the counter. A
+//! `deallocate` that races between reap's drain and its `fetch_sub`
+//! re-populates both the per-stream map and the global atomic
+//! together (under the same mutex), so its bytes either land
+//! entirely before the drain (reaped this round) or entirely after
+//! (kept for the next reap), never split.
+//!
+//! On the first stream-sync failure, the failing entry and every
+//! remaining un-iterated drained entry are **restored** into
+//! `pending_per_stream` so a subsequent reap can retry them. Only
+//! the bytes for streams that successfully synchronized are
+//! decremented from `pending_bytes`. Without this recovery, a
+//! transient driver error mid-reap would lose track of pending
+//! bytes forever — the drained map would be gone, `pending_bytes`
+//! would still count them, but no stream id would be queued for
+//! a future reap. Production callers (`GlobalDeviceBudget`, A2's
+//! final assertions) thus see consistent
+//! `bytes_outstanding()` even on transient sync failures.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -272,17 +282,61 @@ impl DeviceMemoryResource for AsyncCudaResource {
     }
 
     fn reap_pending(&self) -> ResourceResult<()> {
+        self.reap_pending_with(|stream_id| match self.stream_pool.resolve(stream_id) {
+            Some(stream) => stream.synchronize().map_err(|e| {
+                ResourceError::Driver(format!(
+                    "AsyncCudaResource::reap_pending: stream sync failed: {}",
+                    e
+                ))
+            }),
+            // Pool returned no handle for this id. The pool currently
+            // never rotates entries, so this is a defensive branch.
+            // If the id is unresolved there is no stream we can
+            // synchronize on; treat the bytes as definitely freed —
+            // the only consistent accounting is to release them and
+            // let the caller surface any subsequent error against a
+            // known stream.
+            None => Ok(()),
+        })
+    }
+}
+
+impl AsyncCudaResource {
+    /// Drain pending per-stream entries and synchronize each
+    /// drained stream via `sync_stream`, releasing only the bytes
+    /// for streams that the closure successfully synchronized.
+    ///
+    /// On the first synchronization failure, the failing entry and
+    /// **every remaining un-iterated drained entry** are restored
+    /// into `pending_per_stream` so a subsequent reap can retry
+    /// them, and `pending_bytes` is decremented only by the
+    /// already-synchronized total. The closure's error is then
+    /// returned to the caller. Without this recovery, a transient
+    /// driver error mid-reap would lose track of pending bytes
+    /// forever (drained map is gone, `pending_bytes` still counts
+    /// them, but no stream is queued for a future reap).
+    ///
+    /// Production callers go through [`reap_pending`]
+    /// (the trait method), which passes a closure that resolves
+    /// the [`StreamId`] against [`StreamPool`] and calls
+    /// `CudaStream::synchronize`. This helper exists so unit tests
+    /// can inject controlled sync failures without touching the
+    /// CUDA driver.
+    pub(crate) fn reap_pending_with<F>(&self, mut sync_stream: F) -> ResourceResult<()>
+    where
+        F: FnMut(StreamId) -> ResourceResult<()>,
+    {
         // Drain the per-stream map atomically. Anything added by a
         // racing `deallocate` after this point lands in a fresh
         // entry and waits for the next reap.
         //
         // Critically, we do NOT touch `pending_bytes` here — only
-        // after the streams have synchronized do we subtract the
-        // exact total we drained. A `deallocate` that races between
-        // our drain and our subtract has already added to
-        // `pending_bytes` under the same mutex (see `deallocate`),
-        // and that addition is preserved because we use
-        // `fetch_sub(drained_total)` rather than `store(0)`.
+        // after a stream has synchronized do we subtract its bytes.
+        // A `deallocate` that races between our drain and our
+        // subtract has already added to `pending_bytes` under the
+        // same mutex (see `deallocate`), and that addition is
+        // preserved because we `fetch_sub` the synchronized total
+        // rather than `store(0)`.
         let drained: HashMap<StreamId, usize> = {
             let mut per_stream = self
                 .pending_per_stream
@@ -294,35 +348,46 @@ impl DeviceMemoryResource for AsyncCudaResource {
             return Ok(());
         }
 
-        let mut drained_total: usize = 0;
-        for (stream_id, bytes) in &drained {
-            drained_total = drained_total.saturating_add(*bytes);
-            // The pool may have rotated entries (it currently does
-            // not — streams stay alive for the runtime's lifetime —
-            // but be defensive). If the id is unresolved we still
-            // count the pending bytes as drained: there is no
-            // stream we can sync on, so the only consistent
-            // accounting is to clear and let the caller surface a
-            // fresh alloc against a known stream.
-            if let Some(stream) = self.stream_pool.resolve(*stream_id) {
-                stream.synchronize().map_err(|e| {
-                    ResourceError::Driver(format!(
-                        "AsyncCudaResource::reap_pending: stream sync failed: {}",
-                        e
-                    ))
-                })?;
+        let mut synced_total: usize = 0;
+        let mut failure: Option<ResourceError> = None;
+        let mut unsynced: Vec<(StreamId, usize)> = Vec::new();
+        let mut iter = drained.into_iter();
+        while let Some((stream_id, bytes)) = iter.next() {
+            match sync_stream(stream_id) {
+                Ok(()) => {
+                    synced_total = synced_total.saturating_add(bytes);
+                }
+                Err(e) => {
+                    // Restore the failing entry and every remaining
+                    // drained entry so they can be retried by a
+                    // future reap.
+                    unsynced.push((stream_id, bytes));
+                    unsynced.extend(iter.by_ref());
+                    failure = Some(e);
+                    break;
+                }
             }
         }
 
-        // Once the streams have synchronized, the queued
-        // `cuMemFreeAsync` calls for the bytes we drained have
-        // completed by definition. Subtract exactly that total. Any
-        // bytes added by a racing `deallocate` between our drain and
-        // this line remain accounted for in `pending_bytes` and in
-        // a fresh `pending_per_stream` entry for the next reap.
-        self.pending_bytes
-            .fetch_sub(drained_total, Ordering::Relaxed);
-        Ok(())
+        if !unsynced.is_empty() {
+            let mut per_stream = self
+                .pending_per_stream
+                .lock()
+                .expect("AsyncCudaResource pending_per_stream poisoned");
+            for (stream_id, bytes) in unsynced {
+                *per_stream.entry(stream_id).or_insert(0) += bytes;
+            }
+        }
+
+        if synced_total > 0 {
+            self.pending_bytes
+                .fetch_sub(synced_total, Ordering::Relaxed);
+        }
+
+        match failure {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 }
 
@@ -420,5 +485,106 @@ mod tests {
         let r = AsyncCudaResource::new(device, 0, pool);
         r.reap_pending().expect("reap on empty");
         assert_eq!(r.bytes_outstanding(), 0);
+    }
+
+    /// Test-only helper: install pending state directly so we can
+    /// exercise `reap_pending_with` without going through real
+    /// CUDA streams. Bypasses the normal `allocate`/`deallocate`
+    /// path; intended exclusively for the failure-recovery test.
+    fn install_pending(r: &AsyncCudaResource, entries: &[(StreamId, usize)]) {
+        let mut per_stream = r
+            .pending_per_stream
+            .lock()
+            .expect("AsyncCudaResource pending_per_stream poisoned");
+        let mut total: usize = 0;
+        for (id, bytes) in entries {
+            *per_stream.entry(*id).or_insert(0) += *bytes;
+            total = total.saturating_add(*bytes);
+        }
+        drop(per_stream);
+        r.pending_bytes.fetch_add(total, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn reap_pending_recovers_unsynced_streams_when_sync_fails() {
+        // No CUDA needed for the recovery semantics — we use the
+        // real AsyncCudaResource (constructor needs a device only)
+        // and inject sync failures via `reap_pending_with`.
+        let Some((device, pool)) = try_setup() else {
+            return;
+        };
+        let r = AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool));
+
+        // Install two pending entries: the test will fail sync for
+        // StreamId(2). Bytes total 3072.
+        install_pending(&r, &[(StreamId(1), 1024), (StreamId(2), 2048)]);
+        assert_eq!(r.pending_free_bytes(), 3072);
+        assert_eq!(r.pending_per_stream_total(), 3072);
+
+        // Track which streams the closure successfully synchronized.
+        // HashMap iteration order is unspecified, so an
+        // order-independent assertion uses this set: the test must
+        // hold for any iteration order.
+        let synced = std::sync::Mutex::new(Vec::<StreamId>::new());
+        let result = r.reap_pending_with(|stream_id| {
+            if stream_id == StreamId(2) {
+                Err(ResourceError::Driver(
+                    "simulated sync failure on StreamId(2)".into(),
+                ))
+            } else {
+                synced.lock().unwrap().push(stream_id);
+                Ok(())
+            }
+        });
+
+        assert!(matches!(result, Err(ResourceError::Driver(_))));
+
+        let synced = synced.into_inner().unwrap();
+        // Iteration order [1,2]: 1 syncs ok, 2 fails → synced=[1],
+        //   synced_total=1024, pending_bytes=2048, map=[(2,2048)].
+        // Iteration order [2,1]: 2 fails first, break aborts → synced=[],
+        //   synced_total=0, pending_bytes=3072, map=[(1,1024),(2,2048)].
+        // Both must satisfy: pending == 3072 - synced_bytes.
+        let synced_bytes: usize = if synced.contains(&StreamId(1)) {
+            1024
+        } else {
+            0
+        };
+        let expected_pending = 3072 - synced_bytes;
+        assert_eq!(
+            r.pending_free_bytes(),
+            expected_pending,
+            "synced={:?}; pending_bytes must reflect only un-synced bytes",
+            synced
+        );
+        assert_eq!(
+            r.pending_per_stream_total(),
+            expected_pending,
+            "synced={:?}; pending_per_stream_total must equal pending_free_bytes \
+             (cross-counter invariant)",
+            synced
+        );
+
+        // A second reap with a closure that succeeds for everything
+        // must drain the rest cleanly — proves the restored entries
+        // are retried, not lost.
+        r.reap_pending_with(|_| Ok(())).expect("retry reap");
+        assert_eq!(r.pending_free_bytes(), 0);
+        assert_eq!(r.pending_per_stream_total(), 0);
+    }
+
+    #[test]
+    fn reap_pending_drains_normally_when_sync_always_succeeds() {
+        // Sanity: closure-based variant of the success path. Proves
+        // the new factoring hasn't regressed the happy case.
+        let Some((device, pool)) = try_setup() else {
+            return;
+        };
+        let r = AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool));
+
+        install_pending(&r, &[(StreamId(1), 256), (StreamId(2), 512)]);
+        r.reap_pending_with(|_| Ok(())).expect("reap");
+        assert_eq!(r.pending_free_bytes(), 0);
+        assert_eq!(r.pending_per_stream_total(), 0);
     }
 }

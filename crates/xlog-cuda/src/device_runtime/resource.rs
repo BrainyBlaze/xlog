@@ -148,11 +148,20 @@ impl std::error::Error for ResourceError {}
 pub type ResourceResult<T> = std::result::Result<T, ResourceError>;
 
 /// Stream-ordered device memory resource. Implementations:
-///   * [`crate::device_runtime::resource::DirectCudaResource`] (sanitizer/cert)
-///   * `AsyncCudaResource` (production)
-///   * `PoolResource` (performance tier; v0.7+)
-///   * `DebugGuardResource` (debug)
-///   * `LoggingResource` (telemetry)
+///   * [`crate::device_runtime::direct::DirectCudaResource`] —
+///     cudarc default (non-pooled) backend; **candidate** for the
+///     sanitizer/cert role, **unproven** until the M1 manual gate
+///     runs on a Compute-Sanitizer-supported host.
+///   * [`crate::device_runtime::async_resource::AsyncCudaResource`] —
+///     stream-ordered cuMemAllocAsync/cuMemFreeAsync backend;
+///     production default when the context supports async-alloc.
+///   * [`crate::device_runtime::logging::LoggingResource`] —
+///     telemetry decorator over any inner resource.
+///   * [`crate::device_runtime::budget::GlobalDeviceBudget`] —
+///     per-runtime byte-limit decorator over any inner resource.
+///   * `PoolResource` — performance tier; v0.7+ (not implemented).
+///   * `DebugGuardResource` — canary/poison/quarantine; v0.7+
+///     (not implemented).
 ///
 /// Implementations must be thread-safe. The runtime composes resources
 /// via decoration (each resource wraps an inner `Box<dyn
