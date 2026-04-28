@@ -77,6 +77,52 @@ impl super::CudaKernelProvider {
         }
     }
 
+    /// Strict-recorder, end-to-end variant of [`Self::filter`] —
+    /// the first composed migrated DATA path.
+    ///
+    /// Composes [`Self::compare_const_mask_recorded`] and
+    /// [`Self::compact_buffer_by_device_mask_counted_recorded`]
+    /// on a single `launch_stream`. Each primitive builds its
+    /// own [`crate::launch::LaunchRecorder`], records its uses,
+    /// preflights, runs its kernels, and commits — by design
+    /// the runtime's `record_block_use` keeps the latest event
+    /// per `(block, launch_stream)` pair, so the compact's
+    /// commit (which records reads on every input column +
+    /// `d_mask` + `input.num_rows_device()`) supersedes the
+    /// compare's earlier commit on the same buffers. The
+    /// deallocate path then waits on the latest event, which
+    /// covers BOTH operations.
+    ///
+    /// # Slice scope
+    /// Always uses the mask+compact pipeline, even for types
+    /// (`u32`, `f64`) that have a fused compare+scan+compact
+    /// path in the legacy [`Self::filter`]. Migrating the fused
+    /// path is a follow-up — keeping the composed path narrow
+    /// here lets the recorder discipline get certified
+    /// end-to-end against a single, simple shape first.
+    ///
+    /// # Errors
+    /// Propagates the structured `XlogError::Kernel` errors
+    /// produced by either underlying recorded primitive
+    /// (legacy manager, unresolved launch_stream, external
+    /// column, preflight / commit failures, kernel launch
+    /// failures, `cu_stream.synchronize()` before host scalar
+    /// read).
+    pub fn filter_recorded<T: GpuScalar>(
+        &self,
+        input: &CudaBuffer,
+        col: usize,
+        value: T,
+        op: CompareOp,
+        launch_stream: StreamId,
+    ) -> Result<CudaBuffer> {
+        if input.is_empty() {
+            return self.create_empty_buffer(input.schema.clone());
+        }
+        let d_mask = self.compare_const_mask_recorded::<T>(input, col, value, op, launch_stream)?;
+        self.compact_buffer_by_device_mask_counted_recorded(input, &d_mask, launch_stream)
+    }
+
     // ------------------------------------------------------------------
     // Private helpers (moved from mod.rs)
     // ------------------------------------------------------------------

@@ -1163,3 +1163,271 @@ fn provider_compact_buffer_by_device_mask_counted_recorded_rejects_legacy_manage
         ),
     }
 }
+
+/// End-to-end filter slice: the first COMPOSED migrated path.
+///
+/// `filter_recorded::<u32>` chains
+/// `compare_const_mask_recorded` then
+/// `compact_buffer_by_device_mask_counted_recorded` on a
+/// single `launch_stream`. Each primitive builds its own
+/// recorder; the runtime's `record_block_use` keeps the
+/// latest event per `(block, launch_stream)` pair, so the
+/// compact's commit on the input columns +
+/// `input.num_rows_device()` + the freshly produced d_mask
+/// supersedes the compare's earlier commit on the same input
+/// column and chains the deallocate safety end-to-end.
+///
+/// Bug class: caller drops `input` after `filter_recorded`
+/// returns, without host sync. Per-column compact_bytes_by_mask
+/// kernels are still in flight on launch_stream — the
+/// function only synchronized launch_stream BEFORE the host
+/// scalar read in the middle of the chain; the per-column
+/// compact kernels enqueue AFTER that sync. Without proper
+/// recording, the alloc-stream `cuMemFreeAsync` would race
+/// the still-pending compact reads of `input.column[i]`, and
+/// a reuse + trample on the default stream would corrupt the
+/// kernels' reads → output column would have wrong contents.
+///
+/// Mask predicate: `i % 5 == PREDICATE_KEY`. Input column 0
+/// holds `i % 5`, column 1 holds `i * 100`. Expected output
+/// rows are `{i : i%5 == PREDICATE_KEY}`.
+#[test]
+fn provider_filter_recorded_survives_drop_and_reuse() {
+    use xlog_core::{ScalarType, Schema};
+    use xlog_cuda::{CompareOp, CudaBuffer};
+
+    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
+
+    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
+        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
+    );
+    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
+        async_resource,
+        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
+    ));
+    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
+        Box::new(GlobalDeviceBudget::new(logging, 64 * 1024 * 1024));
+    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
+        Arc::clone(&device),
+        0,
+        Arc::clone(&pool),
+        budget,
+    ));
+    let memory = Arc::new(GpuMemoryManager::with_runtime(
+        Arc::clone(&device),
+        MemoryBudget::with_limit(64 * 1024 * 1024),
+        Arc::clone(&runtime),
+    ));
+    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
+        .expect("provider with_runtime");
+
+    let launch_stream = pool.acquire().expect("acquire launch_stream");
+    assert_ne!(launch_stream, StreamId::DEFAULT);
+    let launch_handle = pool.resolve(launch_stream).expect("resolve");
+    let default_stream = device.inner().stream();
+
+    const ROWS: usize = 1024;
+    const PREDICATE_KEY: u32 = 2;
+    const ITERATIONS: usize = 32;
+    const TRAMPLE: u8 = 0xEE;
+    let schema = Schema::new(vec![
+        ("k".to_string(), ScalarType::U32),
+        ("v".to_string(), ScalarType::U32),
+    ]);
+
+    let mut reuse_observed = 0usize;
+    let mut bad_output = 0usize;
+
+    for iter in 0..ITERATIONS {
+        // Column 0 = i%5 (predicate), column 1 = i*100 (payload).
+        let mut k_data = Vec::with_capacity(ROWS * 4);
+        let mut v_data = Vec::with_capacity(ROWS * 4);
+        for i in 0..ROWS {
+            k_data.extend_from_slice(&((i as u32) % 5).to_le_bytes());
+            v_data.extend_from_slice(&((i as u32) * 100).to_le_bytes());
+        }
+        let mut k_bytes = memory.alloc::<u8>(ROWS * 4).expect("alloc k");
+        device
+            .inner()
+            .htod_sync_copy_into(&k_data, &mut k_bytes)
+            .expect("htod k");
+        let k_ptr = k_bytes.device_ptr_value();
+
+        let mut v_bytes = memory.alloc::<u8>(ROWS * 4).expect("alloc v");
+        device
+            .inner()
+            .htod_sync_copy_into(&v_data, &mut v_bytes)
+            .expect("htod v");
+        let v_ptr = v_bytes.device_ptr_value();
+
+        let mut d_num_rows = memory.alloc::<u32>(1).expect("alloc rowcount");
+        device
+            .inner()
+            .htod_sync_copy_into(&[ROWS as u32], &mut d_num_rows)
+            .expect("htod rows");
+
+        let input = CudaBuffer::from_columns(
+            vec![k_bytes.into(), v_bytes.into()],
+            ROWS as u64,
+            d_num_rows,
+            schema.clone(),
+        );
+
+        let output_buf = provider
+            .filter_recorded::<u32>(&input, 0, PREDICATE_KEY, CompareOp::Eq, launch_stream)
+            .expect("filter_recorded");
+
+        // Drop input WITHOUT host sync. Per-column
+        // compact_bytes_by_mask kernels are still pending on
+        // launch_stream.
+        drop(input);
+
+        // Reuse + trample. Pool may serve k or v slot.
+        let next_a = memory.alloc::<u8>(ROWS * 4).expect("alloc next_a");
+        let next_a_ptr = next_a.device_ptr_value();
+        let next_b = memory.alloc::<u8>(ROWS * 4).expect("alloc next_b");
+        let next_b_ptr = next_b.device_ptr_value();
+        let reused = next_a_ptr == k_ptr
+            || next_a_ptr == v_ptr
+            || next_b_ptr == k_ptr
+            || next_b_ptr == v_ptr;
+        if reused {
+            reuse_observed += 1;
+        }
+        unsafe {
+            memset_sync_default(next_a_ptr, TRAMPLE, ROWS * 4);
+            memset_sync_default(next_b_ptr, TRAMPLE, ROWS * 4);
+        }
+
+        launch_handle.synchronize().expect("sync launch");
+        default_stream.synchronize().expect("sync default");
+
+        // Verify: predicate keeps i where i%5 == PREDICATE_KEY.
+        // Output rows = {2, 7, 12, ..., 1022} → 205 rows.
+        let expected_count: usize = (0..ROWS)
+            .filter(|i| (*i as u32) % 5 == PREDICATE_KEY)
+            .count();
+        let k_out = output_buf.column(0).expect("out col 0");
+        let v_out = output_buf.column(1).expect("out col 1");
+
+        let mut k_back = vec![0u8; expected_count * 4];
+        let mut v_back = vec![0u8; expected_count * 4];
+        unsafe {
+            dtoh_sync(&mut k_back, *k_out.device_ptr());
+            dtoh_sync(&mut v_back, *v_out.device_ptr());
+        }
+
+        let mut local_bad = 0usize;
+        let mut kept_idx = 0usize;
+        for i in 0..ROWS {
+            if (i as u32) % 5 != PREDICATE_KEY {
+                continue;
+            }
+            let kb = &k_back[kept_idx * 4..kept_idx * 4 + 4];
+            let vb = &v_back[kept_idx * 4..kept_idx * 4 + 4];
+            let kv = u32::from_le_bytes([kb[0], kb[1], kb[2], kb[3]]);
+            let vv = u32::from_le_bytes([vb[0], vb[1], vb[2], vb[3]]);
+            let k_expected = (i as u32) % 5;
+            let v_expected = (i as u32) * 100;
+            if kv != k_expected || vv != v_expected {
+                local_bad += 1;
+                if iter == 0 && local_bad <= 4 {
+                    eprintln!(
+                        "[filter_recorded] iter=0 row={} kept={} k={}/{} v={}/{} reused={}",
+                        i, kept_idx, kv, k_expected, vv, v_expected, reused
+                    );
+                }
+            }
+            kept_idx += 1;
+        }
+        if local_bad > 0 {
+            bad_output += 1;
+        }
+
+        drop(output_buf);
+        drop(next_a);
+        drop(next_b);
+        runtime.reap_pending().expect("reap");
+    }
+
+    eprintln!(
+        "[filter_recorded] iterations={} reuse_observed={} bad_output={}",
+        ITERATIONS, reuse_observed, bad_output
+    );
+    assert!(
+        reuse_observed > 0,
+        "address reuse never observed across {} iterations; cannot exercise \
+         the cross-stream lifetime safety path",
+        ITERATIONS
+    );
+    assert_eq!(
+        bad_output, 0,
+        "filter_recorded produced corrupted output in {}/{} iterations \
+         (reuse_observed={}). Either the recorder chain (compare → compact) \
+         failed to keep the latest wait-event per (block, launch_stream) pair, \
+         OR an in-flight compact_bytes_by_mask read of an input column was \
+         clobbered by the alloc-stream reuse + trample.",
+        bad_output, ITERATIONS, reuse_observed,
+    );
+}
+
+/// Negative test: composed migrated path against no-runtime
+/// manager. The first underlying primitive
+/// (`compare_const_mask_recorded`) must reject before any
+/// allocation / kernel — same loud-failure contract.
+#[test]
+fn provider_filter_recorded_rejects_legacy_manager() {
+    use xlog_core::{ScalarType, Schema};
+    use xlog_cuda::{CompareOp, CudaBuffer};
+
+    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
+        return;
+    };
+    let memory = Arc::new(GpuMemoryManager::new(
+        Arc::clone(&device),
+        MemoryBudget::with_limit(1024 * 1024),
+    ));
+    let provider =
+        CudaKernelProvider::new(Arc::clone(&device), Arc::clone(&memory)).expect("legacy provider");
+
+    let mut col_bytes = memory.alloc::<u8>(16).expect("alloc col");
+    let payload = [1u32, 2, 3, 4];
+    let bytes: Vec<u8> = payload.iter().flat_map(|v| v.to_le_bytes()).collect();
+    device
+        .inner()
+        .htod_sync_copy_into(&bytes, &mut col_bytes)
+        .expect("htod col");
+    let mut d_num_rows = memory.alloc::<u32>(1).expect("alloc rowcount");
+    device
+        .inner()
+        .htod_sync_copy_into(&[4u32], &mut d_num_rows)
+        .expect("htod rows");
+    let input = CudaBuffer::from_columns(
+        vec![col_bytes.into()],
+        4,
+        d_num_rows,
+        Schema::new(vec![("v".to_string(), ScalarType::U32)]),
+    );
+
+    let err = provider.filter_recorded::<u32>(&input, 0, 2u32, CompareOp::Eq, StreamId::DEFAULT);
+    match err {
+        Err(XlogError::Kernel(msg)) => {
+            assert!(
+                msg.contains("requires") || msg.contains("with_runtime"),
+                "expected helpful Kernel error message, got {:?}",
+                msg
+            );
+        }
+        Err(other) => panic!(
+            "filter_recorded must reject legacy manager with XlogError::Kernel, got {:?}",
+            other
+        ),
+        Ok(_) => {
+            panic!("filter_recorded must reject legacy manager — unexpectedly returned Ok")
+        }
+    }
+}
