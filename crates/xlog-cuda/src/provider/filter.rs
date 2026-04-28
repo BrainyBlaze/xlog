@@ -434,6 +434,182 @@ impl super::CudaKernelProvider {
         Ok(d_mask)
     }
 
+    /// Strict-recorder variant of [`Self::compare_columns_mask`].
+    ///
+    /// Runs the column-column compare kernel on the
+    /// caller-supplied `launch_stream` and threads BOTH column
+    /// reads through the runtime via [`LaunchRecorder`]. Sibling
+    /// of the legacy [`Self::compare_columns_mask`]; existing
+    /// callers stay on the legacy path.
+    ///
+    /// # Strict-mode contract
+    /// * Requires the provider's manager to be built via
+    ///   [`crate::GpuMemoryManager::with_runtime`]; otherwise
+    ///   returns `XlogError::Kernel` before any allocation.
+    /// * `input.column(left)` and `input.column(right)` are both
+    ///   recorded as reads BEFORE preflight. External (DLPack /
+    ///   Arrow) columns on either side are rejected at preflight,
+    ///   before the kernel is enqueued.
+    /// * `d_mask` is freshly allocated by the same runtime-backed
+    ///   manager; its write is recorded via the
+    ///   `write_post_preflight_fresh` escape hatch (the
+    ///   kernel-param borrow rules force this ordering — see
+    ///   `compare_const_mask_recorded` for the same pattern).
+    ///
+    /// # Errors
+    ///   * `XlogError::Kernel` if the manager has no runtime,
+    ///     or if `launch_stream` does not resolve.
+    ///   * `XlogError::Kernel` from preflight (external column
+    ///     on either side, unsupported active resource).
+    ///   * `XlogError::Kernel` from the underlying CUDA launch.
+    ///   * `XlogError::Kernel` from commit on transient
+    ///     `record_block_use` failure.
+    pub fn compare_columns_mask_recorded<T: GpuScalar>(
+        &self,
+        input: &CudaBuffer,
+        left: usize,
+        right: usize,
+        op: CompareOp,
+        launch_stream: StreamId,
+    ) -> Result<TrackedCudaSlice<u8>> {
+        let allowed_types = T::allowed_scalar_types();
+        let kernel = T::compare_col_kernel();
+
+        let runtime = self.memory.runtime().ok_or_else(|| {
+            XlogError::Kernel(
+                "compare_columns_mask_recorded requires a runtime-backed GpuMemoryManager \
+                 (constructed via with_runtime)"
+                    .to_string(),
+            )
+        })?;
+        let pool = runtime.stream_pool();
+        let cu_stream = pool.resolve(launch_stream).ok_or_else(|| {
+            XlogError::Kernel(format!(
+                "compare_columns_mask_recorded: launch_stream StreamId({}) does not resolve",
+                launch_stream.0
+            ))
+        })?;
+
+        if input.num_rows() > u32::MAX as u64 {
+            return Err(XlogError::Kernel(format!(
+                "Filter supports at most {} rows, got {}",
+                u32::MAX,
+                input.num_rows()
+            )));
+        }
+        if left >= input.arity() || right >= input.arity() {
+            return Err(XlogError::Kernel(format!(
+                "Column indices {} or {} out of bounds (arity {})",
+                left,
+                right,
+                input.arity()
+            )));
+        }
+
+        if input.is_empty() {
+            return self.memory.alloc::<u8>(0);
+        }
+
+        let left_type = input
+            .schema()
+            .column_type(left)
+            .ok_or_else(|| XlogError::Kernel("Missing left column type".into()))?;
+        let right_type = input
+            .schema()
+            .column_type(right)
+            .ok_or_else(|| XlogError::Kernel("Missing right column type".into()))?;
+        if left_type != right_type {
+            return Err(XlogError::Kernel(
+                "Column-column compare requires matching types".into(),
+            ));
+        }
+        if !allowed_types.contains(&left_type) {
+            return Err(XlogError::Kernel(format!(
+                "Column type {:?} not supported for compare",
+                left_type
+            )));
+        }
+
+        let num_rows = input.num_rows() as u32;
+        let expected_bytes = (num_rows as usize)
+            .checked_mul(std::mem::size_of::<T>())
+            .ok_or_else(|| XlogError::Kernel("compare columns size overflow".into()))?;
+        let left_col = input
+            .column(left)
+            .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", left)))?;
+        let right_col = input
+            .column(right)
+            .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", right)))?;
+        if left_col.num_bytes() != expected_bytes || right_col.num_bytes() != expected_bytes {
+            return Err(XlogError::Kernel(format!(
+                "Compare columns expect {} bytes per column for {} rows",
+                expected_bytes,
+                input.num_rows()
+            )));
+        }
+
+        let block_size = 256u32;
+        let num_blocks = num_rows.div_ceil(block_size);
+        let config = LaunchConfig {
+            grid_dim: (num_blocks, 1, 1),
+            block_dim: (block_size, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        let mut d_mask = self.memory.alloc::<u8>(num_rows as usize)?;
+        let func = self
+            .device
+            .inner()
+            .get_func(FILTER_MODULE, kernel)
+            .ok_or_else(|| XlogError::Kernel("filter compare kernel not found".into()))?;
+
+        // Record BOTH column reads BEFORE preflight. Strict mode
+        // catches external columns on either side here, before
+        // any CUDA work is queued.
+        let mut rec = LaunchRecorder::new_strict(launch_stream);
+        rec.read_column(left_col);
+        rec.read_column(right_col);
+        rec.preflight(runtime).map_err(|e| {
+            XlogError::Kernel(format!(
+                "compare_columns_mask_recorded: launch recorder preflight failed: {}",
+                e
+            ))
+        })?;
+
+        // SAFETY: PTX kernel signature matches the params tuple;
+        // both columns are validated above and live through the
+        // launch (held by `input`); d_mask was allocated by the
+        // same runtime-backed manager and matches `num_rows`.
+        // launch_on_stream queues on `cu_stream` and returns
+        // immediately.
+        unsafe {
+            func.clone().launch_on_stream(
+                &cu_stream,
+                config,
+                (left_col, right_col, num_rows, op as u8, &mut d_mask),
+            )
+        }
+        .map_err(|e| {
+            XlogError::Kernel(format!(
+                "compare_columns_mask_recorded launch failed: {}",
+                e
+            ))
+        })?;
+
+        // Record d_mask write AFTER the launch enqueues, via the
+        // explicit escape hatch — d_mask is the freshly-allocated
+        // runtime-backed output of THIS call.
+        rec.write_post_preflight_fresh(&d_mask);
+        rec.commit(runtime).map_err(|e| {
+            XlogError::Kernel(format!(
+                "compare_columns_mask_recorded: launch recorder commit failed: {}",
+                e
+            ))
+        })?;
+
+        Ok(d_mask)
+    }
+
     // ------------------------------------------------------------------
     // Fused compare+scan+compact path (generic over T)
     // ------------------------------------------------------------------
