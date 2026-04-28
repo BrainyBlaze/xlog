@@ -1715,3 +1715,258 @@ fn provider_filter_columns_recorded_rejects_legacy_manager() {
         }
     }
 }
+
+/// Fused-recorded slice: the migrated fused
+/// `compare+scan+compact` fast path. `filter_recorded::<u32>`
+/// is already covered by
+/// `provider_filter_recorded_survives_drop_and_reuse` and now
+/// dispatches through `filter_fused_scan_recorded`. This test
+/// adds the f64 case explicitly — different scalar type, same
+/// drop+reuse contract.
+///
+/// The fused path is a single launch that produces
+/// `(d_mask, d_prefix_sum, d_block_sums)` together; the rest
+/// of the chain (`multiblock_scan_phase3`,
+/// `capture_compact_count`, `cu_stream.synchronize()`,
+/// per-column `compact_bytes_by_mask`) matches the non-fused
+/// recorded compact tail.
+///
+/// Predicate: `column[0] == TARGET` (f64 equality, exact bit
+/// match for the integral payload values used here). Input
+/// column is `(i % 5) as f64`; expected kept rows = i where
+/// `i%5 == TARGET as usize`.
+#[test]
+fn provider_filter_fused_scan_recorded_f64_survives_drop_and_reuse() {
+    use xlog_core::{ScalarType, Schema};
+    use xlog_cuda::{CompareOp, CudaBuffer};
+
+    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
+
+    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
+        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
+    );
+    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
+        async_resource,
+        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
+    ));
+    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
+        Box::new(GlobalDeviceBudget::new(logging, 64 * 1024 * 1024));
+    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
+        Arc::clone(&device),
+        0,
+        Arc::clone(&pool),
+        budget,
+    ));
+    let memory = Arc::new(GpuMemoryManager::with_runtime(
+        Arc::clone(&device),
+        MemoryBudget::with_limit(64 * 1024 * 1024),
+        Arc::clone(&runtime),
+    ));
+    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
+        .expect("provider with_runtime");
+
+    let launch_stream = pool.acquire().expect("acquire launch_stream");
+    assert_ne!(launch_stream, StreamId::DEFAULT);
+    let launch_handle = pool.resolve(launch_stream).expect("resolve");
+    let default_stream = device.inner().stream();
+
+    const ROWS: usize = 1024;
+    const TARGET: f64 = 2.0;
+    const ITERATIONS: usize = 32;
+    const TRAMPLE: u8 = 0xEE;
+    let schema = Schema::new(vec![
+        ("k".to_string(), ScalarType::F64),
+        ("v".to_string(), ScalarType::F64),
+    ]);
+
+    let mut reuse_observed = 0usize;
+    let mut bad_output = 0usize;
+
+    for iter in 0..ITERATIONS {
+        let mut k_data = Vec::with_capacity(ROWS * 8);
+        let mut v_data = Vec::with_capacity(ROWS * 8);
+        for i in 0..ROWS {
+            k_data.extend_from_slice(&((i as f64) % 5.0).to_le_bytes());
+            v_data.extend_from_slice(&((i as f64) * 100.0).to_le_bytes());
+        }
+        let mut k_bytes = memory.alloc::<u8>(ROWS * 8).expect("alloc k");
+        device
+            .inner()
+            .htod_sync_copy_into(&k_data, &mut k_bytes)
+            .expect("htod k");
+        let k_ptr = k_bytes.device_ptr_value();
+
+        let mut v_bytes = memory.alloc::<u8>(ROWS * 8).expect("alloc v");
+        device
+            .inner()
+            .htod_sync_copy_into(&v_data, &mut v_bytes)
+            .expect("htod v");
+        let v_ptr = v_bytes.device_ptr_value();
+
+        let mut d_num_rows = memory.alloc::<u32>(1).expect("alloc rowcount");
+        device
+            .inner()
+            .htod_sync_copy_into(&[ROWS as u32], &mut d_num_rows)
+            .expect("htod rows");
+
+        let input = CudaBuffer::from_columns(
+            vec![k_bytes.into(), v_bytes.into()],
+            ROWS as u64,
+            d_num_rows,
+            schema.clone(),
+        );
+
+        let output_buf = provider
+            .filter_fused_scan_recorded::<f64>(&input, 0, TARGET, CompareOp::Eq, launch_stream)
+            .expect("filter_fused_scan_recorded::<f64>");
+
+        // Drop input WITHOUT host sync. Per-column
+        // compact_bytes_by_mask kernels are still pending on
+        // launch_stream.
+        drop(input);
+
+        let next_a = memory.alloc::<u8>(ROWS * 8).expect("alloc next_a");
+        let next_a_ptr = next_a.device_ptr_value();
+        let next_b = memory.alloc::<u8>(ROWS * 8).expect("alloc next_b");
+        let next_b_ptr = next_b.device_ptr_value();
+        let reused = next_a_ptr == k_ptr
+            || next_a_ptr == v_ptr
+            || next_b_ptr == k_ptr
+            || next_b_ptr == v_ptr;
+        if reused {
+            reuse_observed += 1;
+        }
+        unsafe {
+            memset_sync_default(next_a_ptr, TRAMPLE, ROWS * 8);
+            memset_sync_default(next_b_ptr, TRAMPLE, ROWS * 8);
+        }
+
+        launch_handle.synchronize().expect("sync launch");
+        default_stream.synchronize().expect("sync default");
+
+        let target_idx = TARGET as usize;
+        let kept: Vec<usize> = (0..ROWS).filter(|i| (*i % 5) == target_idx).collect();
+        let expected_count = kept.len();
+        let k_out = output_buf.column(0).expect("out col 0");
+        let v_out = output_buf.column(1).expect("out col 1");
+
+        let mut k_back = vec![0u8; expected_count * 8];
+        let mut v_back = vec![0u8; expected_count * 8];
+        unsafe {
+            dtoh_sync(&mut k_back, *k_out.device_ptr());
+            dtoh_sync(&mut v_back, *v_out.device_ptr());
+        }
+
+        let mut local_bad = 0usize;
+        for (k, &i) in kept.iter().enumerate() {
+            let kb = &k_back[k * 8..k * 8 + 8];
+            let vb = &v_back[k * 8..k * 8 + 8];
+            let kv = f64::from_le_bytes([kb[0], kb[1], kb[2], kb[3], kb[4], kb[5], kb[6], kb[7]]);
+            let vv = f64::from_le_bytes([vb[0], vb[1], vb[2], vb[3], vb[4], vb[5], vb[6], vb[7]]);
+            let k_expected = (i as f64) % 5.0;
+            let v_expected = (i as f64) * 100.0;
+            if kv != k_expected || vv != v_expected {
+                local_bad += 1;
+                if iter == 0 && local_bad <= 4 {
+                    eprintln!(
+                        "[fused_recorded_f64] iter=0 row={} kept={} k={}/{} v={}/{} reused={}",
+                        i, k, kv, k_expected, vv, v_expected, reused
+                    );
+                }
+            }
+        }
+        if local_bad > 0 {
+            bad_output += 1;
+        }
+
+        drop(output_buf);
+        drop(next_a);
+        drop(next_b);
+        runtime.reap_pending().expect("reap");
+    }
+
+    eprintln!(
+        "[fused_recorded_f64] iterations={} reuse_observed={} bad_output={}",
+        ITERATIONS, reuse_observed, bad_output
+    );
+    assert!(
+        reuse_observed > 0,
+        "address reuse never observed across {} iterations; cannot exercise \
+         the cross-stream lifetime safety path",
+        ITERATIONS
+    );
+    assert_eq!(
+        bad_output, 0,
+        "filter_fused_scan_recorded::<f64> produced corrupted output in {}/{} iterations \
+         (reuse_observed={}). Either the fused phase1 launch's reads of input.column[0] \
+         were not properly recorded, or one of the chain steps (scan/phase3/capture/sync/\
+         compact) raced an alloc-stream reuse + trample.",
+        bad_output, ITERATIONS, reuse_observed,
+    );
+}
+
+/// Negative test: fused-recorded path against a no-runtime
+/// manager. Must reject before any allocation / kernel.
+#[test]
+fn provider_filter_fused_scan_recorded_rejects_legacy_manager() {
+    use xlog_core::{ScalarType, Schema};
+    use xlog_cuda::{CompareOp, CudaBuffer};
+
+    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
+        return;
+    };
+    let memory = Arc::new(GpuMemoryManager::new(
+        Arc::clone(&device),
+        MemoryBudget::with_limit(1024 * 1024),
+    ));
+    let provider =
+        CudaKernelProvider::new(Arc::clone(&device), Arc::clone(&memory)).expect("legacy provider");
+
+    let mut col_bytes = memory.alloc::<u8>(16).expect("alloc col");
+    let payload = [1u32, 2, 3, 4];
+    let bytes: Vec<u8> = payload.iter().flat_map(|v| v.to_le_bytes()).collect();
+    device
+        .inner()
+        .htod_sync_copy_into(&bytes, &mut col_bytes)
+        .expect("htod col");
+    let mut d_num_rows = memory.alloc::<u32>(1).expect("alloc rowcount");
+    device
+        .inner()
+        .htod_sync_copy_into(&[4u32], &mut d_num_rows)
+        .expect("htod rows");
+    let input = CudaBuffer::from_columns(
+        vec![col_bytes.into()],
+        4,
+        d_num_rows,
+        Schema::new(vec![("v".to_string(), ScalarType::U32)]),
+    );
+
+    let err = provider.filter_fused_scan_recorded::<u32>(
+        &input,
+        0,
+        2u32,
+        CompareOp::Eq,
+        StreamId::DEFAULT,
+    );
+    match err {
+        Err(XlogError::Kernel(msg)) => {
+            assert!(
+                msg.contains("requires") || msg.contains("with_runtime"),
+                "expected helpful Kernel error message, got {:?}",
+                msg
+            );
+        }
+        Err(other) => panic!(
+            "filter_fused_scan_recorded must reject legacy manager with XlogError::Kernel, \
+             got {:?}",
+            other
+        ),
+        Ok(_) => panic!(
+            "filter_fused_scan_recorded must reject legacy manager — unexpectedly returned Ok"
+        ),
+    }
+}
