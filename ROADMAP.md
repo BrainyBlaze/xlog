@@ -682,17 +682,33 @@ execution.
 - [x] `filter_columns_recorded::<T>` — composed
       `compare_columns_mask_recorded` →
       `compact_buffer_by_device_mask_counted_recorded` end-to-end.
-- [ ] Migrate the fused `compare+scan+compact` filter path
-      (`u32`, `f64`) to the recorded discipline.
+- [x] Migrate the fused `compare+scan+compact` filter path
+      (`u32`, `f64`) to the recorded discipline. (slice #3,
+      `filter_fused_scan_recorded`)
 - [ ] Migrate `compact_buffer_by_mask` (host-mask compact entry) to the
       recorded discipline.
 - [ ] Migrate ILP / ILP-exact view helpers and operators to propagate
       runtime block identity and use recorded launches.
-- [ ] Migrate hash-join, GroupBy, sort, and dedup operator surfaces to
-      recorded launches against `launch_stream`.
-- [ ] Wire `filter_recorded` / `filter_columns_recorded` into a
+- [x] Migrate sort operator surface to recorded launches against
+      `launch_stream`. (slice #5, `sort_recorded` — narrow to
+      U32 / Symbol keys; multi-type recorded sort deferred.)
+- [x] Migrate dedup (full-row) operator surface to recorded launches
+      against `launch_stream`. (slice #5, `dedup_full_row_recorded`
+      — narrow to U32 / Symbol columns; key-based dedup,
+      `diff_full_row`, and union deferred.)
+- [x] Migrate GroupBy operator surface to recorded launches against
+      `launch_stream`. (slice #6, `groupby_multi_agg_recorded` /
+      `groupby_agg_recorded` — narrow to U32 / Symbol keys + Count /
+      Sum / Min / Max aggs; LogSumExp and >4 key-column GroupBy
+      deferred.)
+- [ ] Migrate hash-join operator surfaces to recorded launches
+      against `launch_stream`. Prerequisite for retaking the
+      deferred GPU-resident binary-join materialization
+      prototype.
+- [x] Wire `filter_recorded` / `filter_columns_recorded` into a
       runtime / provider opt-in selector so real callers can route
-      filter operations through the recorded path.
+      filter operations through the recorded path. (slice #2,
+      `XLOG_USE_RECORDED_FILTERS` env gate.)
 
 ### Tests and Certification
 
