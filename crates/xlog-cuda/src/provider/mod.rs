@@ -6,7 +6,7 @@
 use std::marker::PhantomData;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use std::ffi::c_void;
 use xlog_core::{Result, Schema, XlogError};
@@ -773,6 +773,13 @@ pub struct CudaKernelProvider {
     /// the last reset. Increments even on the failing path (the originating
     /// call still returns `Err`); kept for telemetry and tests.
     deterministic_d2h_violations: AtomicU64,
+    /// Lazy-initialized non-default launch stream used by recorded
+    /// filter dispatch when the env opt-in is set. Cached for the
+    /// provider's lifetime to avoid exhausting the
+    /// [`crate::device_runtime::StreamPool`] (the pool never returns
+    /// streams to a free-list). One stream per provider is sufficient
+    /// because the recorder serializes work on it.
+    recorded_filter_stream: OnceLock<crate::device_runtime::StreamId>,
 }
 
 #[derive(Default)]
@@ -850,6 +857,7 @@ impl CudaKernelProvider {
             d2h_transfer_count: AtomicU64::new(0),
             strict_deterministic_d2h: AtomicBool::new(false),
             deterministic_d2h_violations: AtomicU64::new(0),
+            recorded_filter_stream: OnceLock::new(),
         })
     }
 
@@ -909,6 +917,50 @@ impl CudaKernelProvider {
             ));
         }
         Self::new(device, memory)
+    }
+
+    /// Whether the recorded filter dispatch is enabled via env.
+    ///
+    /// Reads the `XLOG_USE_RECORDED_FILTERS` env var. Empty / unset
+    /// / `"0"` → disabled (legacy filter path). Any other value →
+    /// enabled. Combined with a runtime-backed manager (see
+    /// [`Self::recorded_filter_stream_or_init`]), this routes
+    /// `filter::<T>` through the recorded launch path.
+    ///
+    /// Env-gated rather than default-on so the migration is opt-in
+    /// for real callers; the existing legacy paths remain the
+    /// production default until the runtime stack is certified
+    /// end-to-end.
+    pub(crate) fn use_recorded_filters_env() -> bool {
+        std::env::var("XLOG_USE_RECORDED_FILTERS")
+            .map(|v| !v.is_empty() && v != "0")
+            .unwrap_or(false)
+    }
+
+    /// Lazily acquire one non-default launch stream from the
+    /// runtime's [`crate::device_runtime::StreamPool`] for use by
+    /// recorded filter dispatch, and cache it for this provider's
+    /// lifetime.
+    ///
+    /// Returns `None` when:
+    ///   * the manager has no runtime attached
+    ///     (`memory.runtime() == None`), or
+    ///   * the stream pool is at capacity and `acquire` fails.
+    ///
+    /// On a lost race during first init the loser leaks one stream
+    /// (the pool keeps it alive); both winners cache the same
+    /// `StreamId`. Acceptable cost — practical pool sizes are
+    /// large compared to the number of providers per process.
+    pub(crate) fn recorded_filter_stream_or_init(&self) -> Option<crate::device_runtime::StreamId> {
+        if let Some(s) = self.recorded_filter_stream.get() {
+            return Some(*s);
+        }
+        let runtime = self.memory.runtime()?;
+        let stream = runtime.stream_pool().acquire().ok()?;
+        // Race-safe: if another thread already set it, ours leaks
+        // (pool retains it) but we still return the cached value.
+        let _ = self.recorded_filter_stream.set(stream);
+        self.recorded_filter_stream.get().copied()
     }
 
     /// Get the CUDA device

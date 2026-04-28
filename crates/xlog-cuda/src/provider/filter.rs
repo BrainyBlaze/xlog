@@ -56,6 +56,16 @@ impl super::CudaKernelProvider {
         value: T,
         op: CompareOp,
     ) -> Result<CudaBuffer> {
+        // Opt-in dispatch: route through the recorded filter path
+        // when the env var is set AND the manager is runtime-backed
+        // AND a launch stream can be acquired from the pool.
+        // Default behavior is unchanged (legacy fused / mask+compact).
+        if Self::use_recorded_filters_env() {
+            if let Some(launch_stream) = self.recorded_filter_stream_or_init() {
+                return self.filter_recorded::<T>(input, col, value, op, launch_stream);
+            }
+        }
+
         if input.is_empty() {
             return self.create_empty_buffer(input.schema.clone());
         }
