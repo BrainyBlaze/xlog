@@ -47,7 +47,7 @@
 //! `GlobalDeviceBudget`, A2's final assertions) call this before
 //! treating `bytes_outstanding()` as authoritative.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -73,12 +73,18 @@ pub struct AsyncCudaResource {
     live_bytes: AtomicUsize,
     /// Bytes for blocks dropped (queued for cuMemFreeAsync) but
     /// whose owning stream has not yet been synchronized by us.
-    /// Drained to zero by `reap_pending`.
+    /// Equal to the sum of values in `pending_per_stream`. Both are
+    /// updated under the `pending_per_stream` mutex so a concurrent
+    /// `reap_pending` cannot wipe out bytes that a racing
+    /// `deallocate` queued after reap drained the per-stream map.
     pending_bytes: AtomicUsize,
-    /// Stream IDs that have at least one undrained queued free.
-    /// Tracked as a set so `reap_pending` synchronizes each stream
-    /// at most once even if many blocks were queued on it.
-    pending_streams: Mutex<HashSet<StreamId>>,
+    /// Per-stream pending-free byte totals. Used by `reap_pending`
+    /// to (a) compute the total to subtract from `pending_bytes`
+    /// after stream synchronization, and (b) preserve any bytes
+    /// added by a `deallocate` that races with reap — those bytes
+    /// remain in this map and in `pending_bytes`, ready for the
+    /// next reap.
+    pending_per_stream: Mutex<HashMap<StreamId, usize>>,
 }
 
 impl AsyncCudaResource {
@@ -93,7 +99,7 @@ impl AsyncCudaResource {
             live: Mutex::new(HashMap::new()),
             live_bytes: AtomicUsize::new(0),
             pending_bytes: AtomicUsize::new(0),
-            pending_streams: Mutex::new(HashSet::new()),
+            pending_per_stream: Mutex::new(HashMap::new()),
         }
     }
 
@@ -116,6 +122,21 @@ impl AsyncCudaResource {
     /// been synchronized by us. Test/diagnostic accessor.
     pub fn pending_free_bytes(&self) -> usize {
         self.pending_bytes.load(Ordering::Relaxed)
+    }
+
+    /// Sum of per-stream pending byte tallies. Test/diagnostic
+    /// accessor used to assert the invariant
+    /// `pending_free_bytes() == pending_per_stream_total()`. The
+    /// invariant must hold at any quiescent moment; if it fails
+    /// the bookkeeping under the `pending_per_stream` mutex has
+    /// drifted from the global atomic — see `deallocate` and
+    /// `reap_pending`, which update both as a unit.
+    pub fn pending_per_stream_total(&self) -> usize {
+        let map = self
+            .pending_per_stream
+            .lock()
+            .expect("AsyncCudaResource pending_per_stream poisoned");
+        map.values().copied().sum()
     }
 }
 
@@ -207,14 +228,24 @@ impl DeviceMemoryResource for AsyncCudaResource {
         // but the driver may not actually free until that stream
         // drains. The trait contract requires us to keep counting
         // these bytes until `reap_pending` confirms completion.
+        //
+        // The pending bookkeeping is updated as a unit under the
+        // `pending_per_stream` mutex: per-stream tally first, then
+        // the global atomic. `reap_pending` reads (drain, sync,
+        // subtract) symmetrically under the same mutex around the
+        // drain so it can only subtract the exact total it drained.
+        // A `deallocate` that races with reap therefore lands either
+        // entirely before reap's drain (its bytes are reaped this
+        // round) or entirely after (its bytes stay pending for the
+        // next reap) — never split.
         self.live_bytes.fetch_sub(block.bytes, Ordering::Relaxed);
-        self.pending_bytes.fetch_add(block.bytes, Ordering::Relaxed);
         {
-            let mut pending = self
-                .pending_streams
+            let mut per_stream = self
+                .pending_per_stream
                 .lock()
-                .expect("AsyncCudaResource pending_streams poisoned");
-            pending.insert(block.alloc_stream);
+                .expect("AsyncCudaResource pending_per_stream poisoned");
+            *per_stream.entry(block.alloc_stream).or_insert(0) += block.bytes;
+            self.pending_bytes.fetch_add(block.bytes, Ordering::Relaxed);
         }
 
         // Dropping the CudaSlice<u8> invokes cuMemFreeAsync on its
@@ -235,20 +266,31 @@ impl DeviceMemoryResource for AsyncCudaResource {
     }
 
     fn reap_pending(&self) -> ResourceResult<()> {
-        // Take the current pending-stream set; any `deallocate` racing
-        // with us will repopulate it for a future reap call.
-        let streams: Vec<StreamId> = {
-            let mut pending = self
-                .pending_streams
+        // Drain the per-stream map atomically. Anything added by a
+        // racing `deallocate` after this point lands in a fresh
+        // entry and waits for the next reap.
+        //
+        // Critically, we do NOT touch `pending_bytes` here — only
+        // after the streams have synchronized do we subtract the
+        // exact total we drained. A `deallocate` that races between
+        // our drain and our subtract has already added to
+        // `pending_bytes` under the same mutex (see `deallocate`),
+        // and that addition is preserved because we use
+        // `fetch_sub(drained_total)` rather than `store(0)`.
+        let drained: HashMap<StreamId, usize> = {
+            let mut per_stream = self
+                .pending_per_stream
                 .lock()
-                .expect("AsyncCudaResource pending_streams poisoned");
-            pending.drain().collect()
+                .expect("AsyncCudaResource pending_per_stream poisoned");
+            std::mem::take(&mut *per_stream)
         };
-        if streams.is_empty() {
+        if drained.is_empty() {
             return Ok(());
         }
 
-        for stream_id in streams {
+        let mut drained_total: usize = 0;
+        for (stream_id, bytes) in &drained {
+            drained_total = drained_total.saturating_add(*bytes);
             // The pool may have rotated entries (it currently does
             // not — streams stay alive for the runtime's lifetime —
             // but be defensive). If the id is unresolved we still
@@ -256,7 +298,7 @@ impl DeviceMemoryResource for AsyncCudaResource {
             // stream we can sync on, so the only consistent
             // accounting is to clear and let the caller surface a
             // fresh alloc against a known stream.
-            if let Some(stream) = self.stream_pool.resolve(stream_id) {
+            if let Some(stream) = self.stream_pool.resolve(*stream_id) {
                 stream.synchronize().map_err(|e| {
                     ResourceError::Driver(format!(
                         "AsyncCudaResource::reap_pending: stream sync failed: {}",
@@ -267,14 +309,13 @@ impl DeviceMemoryResource for AsyncCudaResource {
         }
 
         // Once the streams have synchronized, the queued
-        // `cuMemFreeAsync` calls have completed by definition. Drain
-        // pending_bytes to zero. We use `swap` rather than `store(0)`
-        // so a concurrent `deallocate` that pushed bytes between the
-        // sync and this line is preserved (the swap returns the old
-        // value, but we discard it because we know those bytes are
-        // freed; any new bytes added after our swap will be the new
-        // pending tally and tracked in pending_streams again).
-        self.pending_bytes.store(0, Ordering::Relaxed);
+        // `cuMemFreeAsync` calls for the bytes we drained have
+        // completed by definition. Subtract exactly that total. Any
+        // bytes added by a racing `deallocate` between our drain and
+        // this line remain accounted for in `pending_bytes` and in
+        // a fresh `pending_per_stream` entry for the next reap.
+        self.pending_bytes
+            .fetch_sub(drained_total, Ordering::Relaxed);
         Ok(())
     }
 }
