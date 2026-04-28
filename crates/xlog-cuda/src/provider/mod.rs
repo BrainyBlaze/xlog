@@ -1365,7 +1365,7 @@ impl CudaKernelProvider {
             ptr,
             len: num_bytes,
             stream: col.stream().clone(),
-            source_block: None,
+            source_block: col.runtime_block(),
             _marker: PhantomData,
         })
     }
@@ -1394,7 +1394,7 @@ impl CudaKernelProvider {
             ptr,
             len: num_elements,
             stream: bytes.stream().clone(),
-            source_block: None,
+            source_block: bytes.runtime_block(),
             _marker: PhantomData,
         })
     }
@@ -1424,7 +1424,7 @@ impl CudaKernelProvider {
             ptr,
             len: num_elements,
             stream: col.stream().clone(),
-            source_block: None,
+            source_block: col.runtime_block(),
             _marker: PhantomData,
         })
     }
@@ -1453,7 +1453,7 @@ impl CudaKernelProvider {
             ptr,
             len: num_elements,
             stream: col.stream().clone(),
-            source_block: None,
+            source_block: col.runtime_block(),
             _marker: PhantomData,
         })
     }
@@ -1483,7 +1483,7 @@ impl CudaKernelProvider {
             ptr,
             len: num_elements,
             stream: col.stream().clone(),
-            source_block: None,
+            source_block: col.runtime_block(),
             _marker: PhantomData,
         })
     }
