@@ -84,14 +84,21 @@ impl super::CudaKernelProvider {
     /// [`Self::compact_buffer_by_device_mask_counted_recorded`]
     /// on a single `launch_stream`. Each primitive builds its
     /// own [`crate::launch::LaunchRecorder`], records its uses,
-    /// preflights, runs its kernels, and commits — by design
-    /// the runtime's `record_block_use` keeps the latest event
-    /// per `(block, launch_stream)` pair, so the compact's
-    /// commit (which records reads on every input column +
-    /// `d_mask` + `input.num_rows_device()`) supersedes the
-    /// compare's earlier commit on the same buffers. The
-    /// deallocate path then waits on the latest event, which
-    /// covers BOTH operations.
+    /// preflights, runs its kernels, and commits independently.
+    ///
+    /// Composition correctness rests on the runtime's
+    /// "record-all, wait-all" semantics: every
+    /// `record_block_use` call APPENDS a fresh event to the
+    /// live entry's `last_use_events: Vec<CudaEvent>`, and
+    /// `deallocate` waits on EVERY event in that vector before
+    /// queueing `cuMemFreeAsync`. So the compare's commit and
+    /// the compact's later commit each push their own event
+    /// for `input.column[i]` (and other shared buffers), and
+    /// the deallocate gates the free behind both — closing
+    /// the cross-stream lifetime gap end-to-end. (Latest-event
+    /// coalescing per `(block, launch_stream)` is a possible
+    /// future optimization; today every recorded use is
+    /// retained and waited on.)
     ///
     /// # Slice scope
     /// Always uses the mask+compact pipeline, even for types
@@ -120,6 +127,42 @@ impl super::CudaKernelProvider {
             return self.create_empty_buffer(input.schema.clone());
         }
         let d_mask = self.compare_const_mask_recorded::<T>(input, col, value, op, launch_stream)?;
+        self.compact_buffer_by_device_mask_counted_recorded(input, &d_mask, launch_stream)
+    }
+
+    /// Strict-recorder, end-to-end variant of column-column
+    /// filter: keep rows where `column[left] <op> column[right]`.
+    ///
+    /// Composes [`Self::compare_columns_mask_recorded`] and
+    /// [`Self::compact_buffer_by_device_mask_counted_recorded`]
+    /// on a single `launch_stream`. Same composition contract
+    /// as [`Self::filter_recorded`]: each primitive builds its
+    /// own recorder and commits independently; the runtime
+    /// appends every recorded event to `last_use_events`, and
+    /// `deallocate` waits on every event, so input columns
+    /// referenced by BOTH the compare AND the per-column
+    /// compacts are correctly gated end-to-end.
+    ///
+    /// # Errors
+    /// Propagates the structured `XlogError::Kernel` errors
+    /// produced by either underlying recorded primitive
+    /// (legacy manager, unresolved launch_stream, external
+    /// column on either input side, preflight / commit
+    /// failures, kernel launch failures,
+    /// `cu_stream.synchronize()` before host scalar read).
+    pub fn filter_columns_recorded<T: GpuScalar>(
+        &self,
+        input: &CudaBuffer,
+        left: usize,
+        right: usize,
+        op: CompareOp,
+        launch_stream: StreamId,
+    ) -> Result<CudaBuffer> {
+        if input.is_empty() {
+            return self.create_empty_buffer(input.schema.clone());
+        }
+        let d_mask =
+            self.compare_columns_mask_recorded::<T>(input, left, right, op, launch_stream)?;
         self.compact_buffer_by_device_mask_counted_recorded(input, &d_mask, launch_stream)
     }
 
