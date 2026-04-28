@@ -929,6 +929,313 @@ fn provider_dedup_full_row_recorded_survives_drop_and_reuse() {
     );
 }
 
+/// Slice #6 GroupBy: drop+reuse for the recorded multi-agg
+/// chain. Composes `sort_recorded` → `pack_keys_gpu_on_stream`
+/// → boundary detect → multi-block scan → capture_num_groups
+/// → group-id derivation → per-aggregation kernels (Count,
+/// Sum, Min, Max) → key gather/unpack — every kernel on the
+/// caller-supplied `launch_stream`. Dropping `input` after
+/// the call returns must NOT race the still-pending agg /
+/// gather / unpack kernels.
+///
+/// Input: 1024 rows where row `i` has `(key = i % 64,
+/// value = i)`. Expected per-key results:
+///   * count = 16
+///   * sum   = 16*k + 64*(0+1+...+15) = 16*k + 7680
+///   * min   = k
+///   * max   = k + 15*64 = k + 960
+#[test]
+fn provider_groupby_multi_agg_recorded_survives_drop_and_reuse() {
+    use xlog_core::{AggOp, ScalarType, Schema};
+    use xlog_cuda::CudaBuffer;
+
+    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
+    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
+        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
+    );
+    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
+        async_resource,
+        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
+    ));
+    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
+        Box::new(GlobalDeviceBudget::new(logging, 64 * 1024 * 1024));
+    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
+        Arc::clone(&device),
+        0,
+        Arc::clone(&pool),
+        budget,
+    ));
+    let memory = Arc::new(GpuMemoryManager::with_runtime(
+        Arc::clone(&device),
+        MemoryBudget::with_limit(64 * 1024 * 1024),
+        Arc::clone(&runtime),
+    ));
+    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
+        .expect("provider with_runtime");
+    let launch_stream = pool.acquire().expect("acquire launch_stream");
+    let launch_handle = pool.resolve(launch_stream).expect("resolve");
+    let default_stream = device.inner().stream();
+
+    const KEYS: usize = 64;
+    const REPS: usize = 16;
+    const ROWS: usize = KEYS * REPS;
+    // GroupBy allocates many fresh buffers per call (sort
+    // scratch + pack + boundaries + scan + group ids + agg
+    // outputs + unpacked keys). 256 iterations × 8 probe
+    // slots gives enough pool pressure to observe reuse of
+    // the freed input column slots.
+    const ITERATIONS: usize = 256;
+    const TRAMPLE: u8 = 0xEE;
+    let schema = Schema::new(vec![
+        ("k".to_string(), ScalarType::U32),
+        ("v".to_string(), ScalarType::U32),
+    ]);
+
+    let mut reuse_observed = 0usize;
+    let mut bad_output = 0usize;
+
+    for iter in 0..ITERATIONS {
+        let mut k_data = Vec::with_capacity(ROWS * 4);
+        let mut v_data = Vec::with_capacity(ROWS * 4);
+        for i in 0..ROWS {
+            let k = (i % KEYS) as u32;
+            let v = i as u32;
+            k_data.extend_from_slice(&k.to_le_bytes());
+            v_data.extend_from_slice(&v.to_le_bytes());
+        }
+        let mut k_bytes = memory.alloc::<u8>(ROWS * 4).expect("alloc k");
+        device
+            .inner()
+            .htod_sync_copy_into(&k_data, &mut k_bytes)
+            .expect("htod k");
+        let k_ptr = k_bytes.device_ptr_value();
+        let mut v_bytes = memory.alloc::<u8>(ROWS * 4).expect("alloc v");
+        device
+            .inner()
+            .htod_sync_copy_into(&v_data, &mut v_bytes)
+            .expect("htod v");
+        let v_ptr = v_bytes.device_ptr_value();
+        let mut d_num_rows = memory.alloc::<u32>(1).expect("alloc rowcount");
+        device
+            .inner()
+            .htod_sync_copy_into(&[ROWS as u32], &mut d_num_rows)
+            .expect("htod rows");
+        let input = CudaBuffer::from_columns(
+            vec![k_bytes.into(), v_bytes.into()],
+            ROWS as u64,
+            d_num_rows,
+            schema.clone(),
+        );
+
+        let result = provider
+            .groupby_multi_agg_recorded(
+                &input,
+                &[0],
+                &[
+                    (1, AggOp::Count),
+                    (1, AggOp::Sum),
+                    (1, AggOp::Min),
+                    (1, AggOp::Max),
+                ],
+                launch_stream,
+            )
+            .expect("groupby_multi_agg_recorded");
+
+        // Drop input WITHOUT host sync. The agg / gather /
+        // unpack kernels are still in flight on launch_stream.
+        drop(input);
+
+        // Reuse + trample. Allocate eight probe slots per
+        // iter to drain the pool free-list aggressively.
+        let mut probes: Vec<_> = (0..8)
+            .map(|_| memory.alloc::<u8>(ROWS * 4).expect("alloc probe"))
+            .collect();
+        let probe_ptrs: Vec<u64> = probes.iter().map(|p| p.device_ptr_value()).collect();
+        let reused = probe_ptrs.iter().any(|p| *p == k_ptr || *p == v_ptr);
+        if reused {
+            reuse_observed += 1;
+        }
+        unsafe {
+            for &p in &probe_ptrs {
+                memset_sync_default(p, TRAMPLE, ROWS * 4);
+            }
+        }
+        let _ = &mut probes;
+        launch_handle.synchronize().expect("sync launch");
+        default_stream.synchronize().expect("sync default");
+
+        // Verify: 64 groups, each with count=16, sum=16k+7680,
+        // min=k, max=k+960.
+        let mut host_rows = [0u32];
+        device
+            .inner()
+            .dtoh_sync_copy_into(result.num_rows_device(), &mut host_rows)
+            .expect("dtoh group count");
+        if host_rows[0] as usize != KEYS {
+            bad_output += 1;
+            if iter == 0 {
+                eprintln!(
+                    "[groupby_recorded] iter=0 group_count={} expected={} reused={}",
+                    host_rows[0], KEYS, reused
+                );
+            }
+            drop(result);
+            drop(probes);
+            runtime.reap_pending().expect("reap");
+            continue;
+        }
+        // Read back: column 0 = key (u32), col 1 = count (u64),
+        // col 2 = sum (u64), col 3 = min (u32), col 4 = max (u32).
+        let k_out = result.column(0).expect("out k");
+        let count_out = result.column(1).expect("out count");
+        let sum_out = result.column(2).expect("out sum");
+        let min_out = result.column(3).expect("out min");
+        let max_out = result.column(4).expect("out max");
+        let mut k_back = vec![0u8; KEYS * 4];
+        let mut count_back = vec![0u8; KEYS * 8];
+        let mut sum_back = vec![0u8; KEYS * 8];
+        let mut min_back = vec![0u8; KEYS * 4];
+        let mut max_back = vec![0u8; KEYS * 4];
+        unsafe {
+            dtoh_sync(&mut k_back, *k_out.device_ptr());
+            dtoh_sync(&mut count_back, *count_out.device_ptr());
+            dtoh_sync(&mut sum_back, *sum_out.device_ptr());
+            dtoh_sync(&mut min_back, *min_out.device_ptr());
+            dtoh_sync(&mut max_back, *max_out.device_ptr());
+        }
+        let mut local_bad = 0usize;
+        for grp in 0..KEYS {
+            let kb = &k_back[grp * 4..grp * 4 + 4];
+            let key = u32::from_le_bytes([kb[0], kb[1], kb[2], kb[3]]);
+            let k_e = grp as u32;
+            let cb = &count_back[grp * 8..grp * 8 + 8];
+            let count =
+                u64::from_le_bytes([cb[0], cb[1], cb[2], cb[3], cb[4], cb[5], cb[6], cb[7]]);
+            let sb = &sum_back[grp * 8..grp * 8 + 8];
+            let sum = u64::from_le_bytes([sb[0], sb[1], sb[2], sb[3], sb[4], sb[5], sb[6], sb[7]]);
+            let mb = &min_back[grp * 4..grp * 4 + 4];
+            let min_v = u32::from_le_bytes([mb[0], mb[1], mb[2], mb[3]]);
+            let xb = &max_back[grp * 4..grp * 4 + 4];
+            let max_v = u32::from_le_bytes([xb[0], xb[1], xb[2], xb[3]]);
+            let count_e: u64 = REPS as u64;
+            let sum_e: u64 = (REPS as u64) * (k_e as u64) + 64 * (0..REPS as u64).sum::<u64>();
+            let min_e = k_e;
+            let max_e = k_e + ((REPS - 1) as u32) * (KEYS as u32);
+            if key != k_e || count != count_e || sum != sum_e || min_v != min_e || max_v != max_e {
+                local_bad += 1;
+                if iter == 0 && local_bad <= 4 {
+                    eprintln!(
+                        "[groupby_recorded] iter=0 grp={} k={}/{} count={}/{} sum={}/{} \
+                         min={}/{} max={}/{} reused={}",
+                        grp,
+                        key,
+                        k_e,
+                        count,
+                        count_e,
+                        sum,
+                        sum_e,
+                        min_v,
+                        min_e,
+                        max_v,
+                        max_e,
+                        reused
+                    );
+                }
+            }
+        }
+        if local_bad > 0 {
+            bad_output += 1;
+        }
+
+        drop(result);
+        drop(probes);
+        runtime.reap_pending().expect("reap");
+    }
+
+    eprintln!(
+        "[groupby_recorded] iterations={} reuse_observed={} bad_output={}",
+        ITERATIONS, reuse_observed, bad_output
+    );
+    assert!(
+        reuse_observed > 0,
+        "address reuse never observed across {} iterations; cannot exercise \
+         the cross-stream lifetime safety path",
+        ITERATIONS
+    );
+    assert_eq!(
+        bad_output, 0,
+        "groupby_multi_agg_recorded produced corrupted output in {}/{} iterations \
+         (reuse_observed={}). One of the chain steps (sort, pack, boundary, scan, \
+         capture, group-id derivation, per-agg kernel, gather, unpack) raced an \
+         alloc-stream reuse + trample.",
+        bad_output, ITERATIONS, reuse_observed,
+    );
+}
+
+/// Negative test: recorded GroupBy against a no-runtime manager.
+#[test]
+fn provider_groupby_multi_agg_recorded_rejects_legacy_manager() {
+    use xlog_core::{AggOp, ScalarType, Schema};
+    use xlog_cuda::CudaBuffer;
+
+    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
+        return;
+    };
+    let memory = Arc::new(GpuMemoryManager::new(
+        Arc::clone(&device),
+        MemoryBudget::with_limit(1024 * 1024),
+    ));
+    let provider =
+        CudaKernelProvider::new(Arc::clone(&device), Arc::clone(&memory)).expect("legacy provider");
+    let mut k = memory.alloc::<u8>(16).expect("alloc k");
+    let mut v = memory.alloc::<u8>(16).expect("alloc v");
+    let kv = [0u32, 1, 0, 1];
+    let kv_b: Vec<u8> = kv.iter().flat_map(|x| x.to_le_bytes()).collect();
+    device
+        .inner()
+        .htod_sync_copy_into(&kv_b, &mut k)
+        .expect("htod k");
+    device
+        .inner()
+        .htod_sync_copy_into(&kv_b, &mut v)
+        .expect("htod v");
+    let mut d_num_rows = memory.alloc::<u32>(1).expect("alloc rowcount");
+    device
+        .inner()
+        .htod_sync_copy_into(&[4u32], &mut d_num_rows)
+        .expect("htod rows");
+    let input = CudaBuffer::from_columns(
+        vec![k.into(), v.into()],
+        4,
+        d_num_rows,
+        Schema::new(vec![
+            ("k".to_string(), ScalarType::U32),
+            ("v".to_string(), ScalarType::U32),
+        ]),
+    );
+    let err =
+        provider.groupby_multi_agg_recorded(&input, &[0], &[(1, AggOp::Count)], StreamId::DEFAULT);
+    match err {
+        Err(XlogError::Kernel(msg)) => assert!(
+            msg.contains("requires") || msg.contains("with_runtime"),
+            "expected helpful Kernel error, got {:?}",
+            msg
+        ),
+        Err(other) => panic!(
+            "groupby_multi_agg_recorded must reject legacy manager with XlogError::Kernel, \
+             got {:?}",
+            other
+        ),
+        Ok(_) => panic!(
+            "groupby_multi_agg_recorded must reject legacy manager — unexpectedly returned Ok"
+        ),
+    }
+}
+
 /// Negative test: recorded sort against a no-runtime manager.
 #[test]
 fn provider_sort_recorded_rejects_legacy_manager() {
