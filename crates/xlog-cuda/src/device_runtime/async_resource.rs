@@ -67,7 +67,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use cudarc::driver::CudaSlice;
+use cudarc::driver::{CudaEvent, CudaSlice};
 
 use super::resource::{
     AllocTag, BlockState, DeviceBlock, DeviceMemoryResource, Generation, ResourceError,
@@ -76,15 +76,45 @@ use super::resource::{
 use super::stream_pool::StreamPool;
 use crate::CudaDevice;
 
+/// One live allocation tracked by [`AsyncCudaResource`]. Carries
+/// the cudarc-owned `CudaSlice<u8>` (whose drop queues the
+/// underlying `cuMemFreeAsync`) plus a vector of recorded last-use
+/// events and the allocation's [`Generation`]. The events are
+/// populated by callers who submit work on streams **other than
+/// the block's `alloc_stream`** via
+/// [`AsyncCudaResource::record_block_use`]; on deallocate the
+/// alloc stream waits on each recorded event before the queued
+/// free runs.
+///
+/// The `generation` field guards against ABA: a `DeviceBlock`
+/// with a stale generation (because the address was freed and
+/// reused) must NOT attach a recorded use to whatever live entry
+/// happens to occupy the address now. `record_block_use` and
+/// `deallocate` both validate `block.generation ==
+/// entry.generation` before mutating the entry; mismatch returns
+/// [`ResourceError::UseAfterFree`].
+struct LiveEntry {
+    slice: CudaSlice<u8>,
+    generation: Generation,
+    /// CudaEvents recorded on streams that have queued work
+    /// touching this block's bytes. Each event is associated with
+    /// the stream it was recorded on; on deallocate, the
+    /// alloc_stream waits on every entry here before freeing.
+    last_use_events: Vec<CudaEvent>,
+}
+
 /// Stream-ordered cudarc-backed allocator.
 pub struct AsyncCudaResource {
     device: Arc<CudaDevice>,
     device_ordinal: u32,
     stream_pool: Arc<StreamPool>,
-    /// Live allocations keyed by raw device pointer. Removed on
-    /// deallocate; the slice is then dropped, queueing
-    /// `cuMemFreeAsync` on its bound stream.
-    live: Mutex<HashMap<u64, CudaSlice<u8>>>,
+    /// Live allocations keyed by raw device pointer. Each entry
+    /// holds the cudarc slice and any recorded last-use events
+    /// from cross-stream consumers. Removed on deallocate; the
+    /// slice is then dropped, queueing `cuMemFreeAsync` on its
+    /// bound stream — *after* the stream has been told to wait on
+    /// every recorded event.
+    live: Mutex<HashMap<u64, LiveEntry>>,
     /// Bytes for blocks currently in `live`. Always accurate.
     live_bytes: AtomicUsize,
     /// Bytes for blocks dropped (queued for cuMemFreeAsync) but
@@ -154,6 +184,19 @@ impl AsyncCudaResource {
             .expect("AsyncCudaResource pending_per_stream poisoned");
         map.values().copied().sum()
     }
+
+    /// Number of recorded last-use events currently attached to
+    /// the live block at `ptr`. Test/diagnostic accessor — used
+    /// by reproducers to confirm `record_block_use` actually
+    /// attached an event before deallocate consumed them. Returns
+    /// `None` if `ptr` is not currently in the live map.
+    pub fn pending_use_event_count(&self, ptr: u64) -> Option<usize> {
+        let live = self
+            .live
+            .lock()
+            .expect("AsyncCudaResource live map poisoned");
+        live.get(&ptr).map(|e| e.last_use_events.len())
+    }
 }
 
 impl DeviceMemoryResource for AsyncCudaResource {
@@ -214,20 +257,30 @@ impl DeviceMemoryResource for AsyncCudaResource {
                     ptr
                 )));
             }
-            live.insert(ptr, slice);
+            // Generation must match between the LiveEntry and the
+            // returned DeviceBlock so record_block_use and
+            // deallocate can ABA-validate by (ptr, generation).
+            let generation = Generation::next();
+            live.insert(
+                ptr,
+                LiveEntry {
+                    slice,
+                    generation,
+                    last_use_events: Vec::new(),
+                },
+            );
+            self.live_bytes.fetch_add(bytes, Ordering::Relaxed);
+            Ok(DeviceBlock {
+                ptr,
+                device_ordinal: self.device_ordinal,
+                alloc_stream: stream,
+                bytes,
+                align: std::mem::align_of::<u8>(),
+                tag,
+                generation,
+                state: BlockState::Live,
+            })
         }
-        self.live_bytes.fetch_add(bytes, Ordering::Relaxed);
-
-        Ok(DeviceBlock {
-            ptr,
-            device_ordinal: self.device_ordinal,
-            alloc_stream: stream,
-            bytes,
-            align: std::mem::align_of::<u8>(),
-            tag,
-            generation: Generation::next(),
-            state: BlockState::Live,
-        })
     }
 
     fn deallocate(&self, block: DeviceBlock) -> ResourceResult<()> {
@@ -237,16 +290,71 @@ impl DeviceMemoryResource for AsyncCudaResource {
                 block.device_ordinal, self.device_ordinal
             )));
         }
-        let removed = {
+        // Resolve the alloc stream FIRST. If resolution fails the
+        // live entry stays in place and accounting is unchanged —
+        // the caller can retry. Removing the entry first then
+        // erroring would queue `cuMemFreeAsync` on a stream the
+        // caller did not expect (via the slice drop on the error
+        // return path) AND leave accounting drift behind.
+        let alloc_stream = self
+            .stream_pool
+            .resolve(block.alloc_stream)
+            .ok_or_else(|| {
+                ResourceError::StreamMisuse(format!(
+                    "AsyncCudaResource::deallocate: alloc_stream StreamId({}) does not resolve",
+                    block.alloc_stream.0
+                ))
+            })?;
+
+        // Take the live-map lock and validate (ptr, generation)
+        // before removing. The generation guard closes the ABA
+        // window: if the address was freed and reused, the older
+        // block's deallocate must NOT tear down the new live
+        // entry. Mismatch -> UseAfterFree, no mutation.
+        //
+        // While the entry is still in the map, queue every
+        // recorded last-use event on alloc_stream. cudarc's
+        // `wait` records the dependency synchronously; if any
+        // wait call fails, the events stay owned by the entry,
+        // the entry stays in the map, and accounting is
+        // untouched — caller can retry.
+        //
+        // Only after every wait succeeds do we remove the entry,
+        // taking ownership of the slice and events, and exit the
+        // lock. From that point removal is committed and the
+        // slice drop below queues cuMemFreeAsync correctly
+        // ordered after every wait we just submitted.
+        let (slice, last_use_events) = {
             let mut live = self
                 .live
                 .lock()
                 .expect("AsyncCudaResource live map poisoned");
-            live.remove(&block.ptr)
+            match live.get(&block.ptr) {
+                Some(entry) if entry.generation == block.generation => {
+                    for event in &entry.last_use_events {
+                        alloc_stream.wait(event).map_err(|e| {
+                            ResourceError::Driver(format!(
+                                "AsyncCudaResource::deallocate: cuStreamWaitEvent failed: {}",
+                                e
+                            ))
+                        })?;
+                    }
+                    let LiveEntry {
+                        slice,
+                        last_use_events,
+                        ..
+                    } = live
+                        .remove(&block.ptr)
+                        .expect("present under lock per get above");
+                    (slice, last_use_events)
+                }
+                Some(_) | None => {
+                    return Err(ResourceError::UseAfterFree {
+                        generation: block.generation,
+                    });
+                }
+            }
         };
-        let slice = removed.ok_or_else(|| ResourceError::UseAfterFree {
-            generation: block.generation,
-        })?;
 
         // Move the bytes from "live" to "pending free": the slice
         // drop below queues `cuMemFreeAsync` on `block.alloc_stream`,
@@ -277,8 +385,16 @@ impl DeviceMemoryResource for AsyncCudaResource {
         // bound stream when async-alloc is enabled, otherwise falls
         // back to synchronous cuMemFree. Either way the deallocation
         // is ordered on the slice's stream, which matches the
-        // DeviceBlock's `alloc_stream`.
+        // DeviceBlock's `alloc_stream` — and now also waits for
+        // every recorded cross-stream use event we just queued
+        // above.
         drop(slice);
+        // Drop the events explicitly after the slice drop has
+        // queued the free. The event handles can be released as
+        // soon as the wait calls return — cudarc's `wait` records
+        // the dependency in the stream and does not retain the
+        // event.
+        drop(last_use_events);
         Ok(())
     }
 
@@ -307,6 +423,74 @@ impl DeviceMemoryResource for AsyncCudaResource {
             // known stream.
             None => Ok(()),
         })
+    }
+
+    fn supports_block_use_tracking(&self) -> bool {
+        true
+    }
+
+    fn record_block_use(&self, block: &DeviceBlock, use_stream: StreamId) -> ResourceResult<()> {
+        if block.device_ordinal != self.device_ordinal {
+            return Err(ResourceError::Driver(format!(
+                "AsyncCudaResource::record_block_use: block device {} != resource device {}",
+                block.device_ordinal, self.device_ordinal
+            )));
+        }
+        let cu_stream = self.stream_pool.resolve(use_stream).ok_or_else(|| {
+            ResourceError::StreamMisuse(format!(
+                "AsyncCudaResource::record_block_use: unknown StreamId({})",
+                use_stream.0
+            ))
+        })?;
+        // Validate (ptr, generation) BEFORE recording the event
+        // on `use_stream`. This avoids creating an event that we
+        // would have to immediately destroy on the ABA failure
+        // path.
+        {
+            let live = self
+                .live
+                .lock()
+                .expect("AsyncCudaResource live map poisoned");
+            match live.get(&block.ptr) {
+                Some(entry) if entry.generation == block.generation => {}
+                Some(_) | None => {
+                    return Err(ResourceError::UseAfterFree {
+                        generation: block.generation,
+                    });
+                }
+            }
+        }
+        // Record the event on the use stream OUTSIDE the live-map
+        // lock — event creation/record can block on the CUDA
+        // driver and we don't want to hold the live-map lock
+        // across that. Re-validate generation after acquiring the
+        // lock so a racing dealloc that already removed the entry
+        // doesn't see a phantom event attached to a stale block.
+        let event = cu_stream.record_event(None).map_err(|e| {
+            ResourceError::Driver(format!(
+                "AsyncCudaResource::record_block_use: event record failed: {}",
+                e
+            ))
+        })?;
+        let mut live = self
+            .live
+            .lock()
+            .expect("AsyncCudaResource live map poisoned");
+        match live.get_mut(&block.ptr) {
+            Some(entry) if entry.generation == block.generation => {
+                entry.last_use_events.push(event);
+                Ok(())
+            }
+            Some(_) | None => {
+                // Event drops here, releasing the CUDA event.
+                // cudarc's wait was never queued so no stream
+                // dependency leaks.
+                drop(event);
+                Err(ResourceError::UseAfterFree {
+                    generation: block.generation,
+                })
+            }
+        }
     }
 }
 

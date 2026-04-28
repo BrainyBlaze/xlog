@@ -236,6 +236,42 @@ impl XlogDeviceRuntime {
             .expect("device-runtime resource poisoned")
             .reap_pending()
     }
+
+    /// Record that work has been (or is being) submitted on
+    /// `use_stream` that touches `block`. Forwards to the
+    /// underlying resource stack
+    /// (`GlobalDeviceBudget` → `LoggingResource` → `AsyncCudaResource`),
+    /// where the stream-ordered backend attaches a CUDA event so
+    /// `block.alloc_stream` waits on it before the queued
+    /// `cuMemFreeAsync` runs. This is the production-reachable
+    /// hook the future xlog launch builder will call for
+    /// `read` / `write` / `read_write` buffer args; until that
+    /// lands, callers that submit raw CUDA work on a stream
+    /// other than `block.alloc_stream` should call this directly.
+    /// See [`DeviceMemoryResource::record_block_use`] for the
+    /// underlying contract.
+    pub fn record_block_use(
+        &self,
+        block: &DeviceBlock,
+        use_stream: StreamId,
+    ) -> ResourceResult<()> {
+        self.resource
+            .lock()
+            .expect("device-runtime resource poisoned")
+            .record_block_use(block, use_stream)
+    }
+
+    /// Whether the active resource stack tracks cross-stream
+    /// uses (i.e., supports `record_block_use`). The launch
+    /// recorder's preflight checks this BEFORE queuing CUDA
+    /// work, so a misconfigured runtime fails loudly at the
+    /// boundary rather than after the launch is in flight.
+    pub fn supports_block_use_tracking(&self) -> bool {
+        self.resource
+            .lock()
+            .expect("device-runtime resource poisoned")
+            .supports_block_use_tracking()
+    }
 }
 
 #[cfg(test)]
@@ -313,5 +349,40 @@ mod tests {
             !std::ptr::eq(&owned, singleton),
             "with_resource must not aliase the singleton slot"
         );
+    }
+
+    /// `try_get` installs `DirectCudaResource` by default. The
+    /// runtime's `record_block_use` must therefore return
+    /// `StreamMisuse` (the trait's default) rather than silently
+    /// claiming success — anything else would let a launch
+    /// builder running against the singleton observe `Ok(())`
+    /// while no event is actually recorded, reproducing the
+    /// cross-stream use-after-free this whole layer exists to
+    /// prevent. See the trait-level doc on
+    /// `DeviceMemoryResource::record_block_use`.
+    #[test]
+    fn try_get_runtime_record_block_use_rejected_with_stream_misuse() {
+        let Some(rt) = try_runtime() else {
+            return;
+        };
+        let block = rt
+            .allocate(64, StreamId::DEFAULT, AllocTag::UNTAGGED)
+            .expect("alloc through runtime");
+        let err = rt.record_block_use(&block, StreamId::DEFAULT);
+        match err {
+            Err(super::super::resource::ResourceError::StreamMisuse(msg)) => {
+                assert!(
+                    msg.contains("unsupported"),
+                    "expected 'unsupported' in StreamMisuse message, got {:?}",
+                    msg
+                );
+            }
+            other => panic!(
+                "XlogDeviceRuntime::try_get default (DirectCudaResource) must \
+                 reject record_block_use with StreamMisuse; got {:?}",
+                other
+            ),
+        }
+        rt.deallocate(block).expect("dealloc still works");
     }
 }

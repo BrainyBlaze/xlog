@@ -207,4 +207,80 @@ pub trait DeviceMemoryResource: Send + Sync {
     fn reap_pending(&self) -> ResourceResult<()> {
         Ok(())
     }
+
+    /// Record that work has been (or is being) submitted on
+    /// `use_stream` that touches `block`'s bytes. Resources that
+    /// participate in cross-stream lifetime tracking (notably the
+    /// stream-ordered async backend) MUST attach a CUDA event from
+    /// `use_stream` to the block; on `deallocate(block)`, the
+    /// block's `alloc_stream` will wait on every recorded event
+    /// before queueing the underlying free.
+    ///
+    /// **The default implementation returns
+    /// [`ResourceError::StreamMisuse`].** This is intentional: a
+    /// silent no-op default would let a launch builder call
+    /// `record_block_use` against a resource that does not
+    /// actually track cross-stream uses (e.g.,
+    /// [`crate::device_runtime::direct::DirectCudaResource`]),
+    /// observe `Ok(())`, queue a kernel on a different stream,
+    /// then drop the block — and quietly hit the cross-stream
+    /// use-after-free that this API exists to prevent. False
+    /// safety is worse than no safety. Resources that cannot
+    /// track cross-stream uses MUST inherit this default;
+    /// callers (notably the future xlog launch builder) MUST
+    /// surface the error rather than masking it.
+    ///
+    /// Override status today:
+    ///   * [`crate::device_runtime::async_resource::AsyncCudaResource`]
+    ///     overrides with real event tracking.
+    ///   * [`crate::device_runtime::logging::LoggingResource`] and
+    ///     [`crate::device_runtime::budget::GlobalDeviceBudget`]
+    ///     forward to their inner resource (so the underlying
+    ///     backend's behavior surfaces unchanged).
+    ///   * [`crate::device_runtime::direct::DirectCudaResource`]
+    ///     does NOT override — it correctly returns
+    ///     `StreamMisuse` and forces callers to either route
+    ///     allocations through `AsyncCudaResource` or take
+    ///     responsibility for cross-stream synchronization
+    ///     themselves.
+    ///
+    /// # Errors
+    ///   * [`ResourceError::StreamMisuse`] from the default impl
+    ///     when the resource cannot track cross-stream uses.
+    ///   * [`ResourceError::UseAfterFree`] if `block` is not the
+    ///     block currently live at `block.ptr` (caller likely
+    ///     handed back a stale [`DeviceBlock`] whose generation
+    ///     no longer matches the live entry).
+    ///   * [`ResourceError::StreamMisuse`] if `use_stream` does
+    ///     not resolve in the resource's stream pool.
+    ///   * [`ResourceError::Driver`] for CUDA driver / event
+    ///     creation failures.
+    ///
+    /// Callers that bypass this API and submit cross-stream work
+    /// directly (raw `cuMemcpyDtoHAsync`, raw `Vec<*mut c_void>`
+    /// kernel launches that the launch builder did not see, etc.)
+    /// are responsible for their own cross-stream synchronization.
+    /// The resource cannot infer arbitrary external CUDA work.
+    fn record_block_use(&self, block: &DeviceBlock, use_stream: StreamId) -> ResourceResult<()> {
+        let _ = (block, use_stream);
+        Err(ResourceError::StreamMisuse(
+            "record_block_use unsupported by this resource (the active backend \
+             does not track cross-stream uses; route allocations through a \
+             stream-ordered backend such as AsyncCudaResource, or take \
+             responsibility for cross-stream synchronization explicitly)"
+                .to_string(),
+        ))
+    }
+
+    /// Whether this resource (and any inner resources it
+    /// composes) actually tracks cross-stream uses via
+    /// `record_block_use`. Used by the launch recorder's
+    /// preflight to fail BEFORE queueing CUDA work, rather than
+    /// after. The default returns `false` to match the trait's
+    /// default `record_block_use` behavior; resources that
+    /// override `record_block_use` to track events MUST override
+    /// this to return `true`. Decorators forward to inner.
+    fn supports_block_use_tracking(&self) -> bool {
+        false
+    }
 }

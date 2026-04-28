@@ -193,6 +193,18 @@ impl DeviceMemoryResource for GlobalDeviceBudget {
         }
         result
     }
+
+    fn record_block_use(&self, block: &DeviceBlock, use_stream: StreamId) -> ResourceResult<()> {
+        // Pass-through: budget enforcement does not affect
+        // cross-stream lifetime tracking; the inner resource (the
+        // stream-ordered backend) is the only layer that owns
+        // last-use events.
+        self.inner.record_block_use(block, use_stream)
+    }
+
+    fn supports_block_use_tracking(&self) -> bool {
+        self.inner.supports_block_use_tracking()
+    }
 }
 
 #[cfg(test)]
