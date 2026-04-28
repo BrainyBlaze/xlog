@@ -770,6 +770,20 @@ pub struct DlpackColumn {
     len_bytes: usize,
     stream: Arc<CudaStream>,
     _tensor: DlpackManagedTensor,
+    /// `Some` when this DLPack column wraps memory that xlog
+    /// itself owns through the device runtime — i.e. the
+    /// caller exported an xlog-allocated slice via DLPack and
+    /// kept ownership inside xlog. The strong reference keeps
+    /// the source slice's [`crate::device_runtime::DeviceBlock`]
+    /// reachable for runtime-block identity propagation, and
+    /// keeps the underlying allocation alive across the
+    /// DLPack handoff (drop order: column → tensor →
+    /// `source_slice` → `runtime.deallocate`).
+    ///
+    /// `None` for true external DLPack producers; those
+    /// columns continue to be rejected by strict-mode launch
+    /// recorders.
+    source_slice: Option<Arc<TrackedCudaSlice<u8>>>,
 }
 
 pub struct ArrowDeviceColumn {
@@ -777,6 +791,10 @@ pub struct ArrowDeviceColumn {
     len_bytes: usize,
     stream: Arc<CudaStream>,
     _import: Arc<ArrowDeviceImport>,
+    /// Same role as [`DlpackColumn::source_slice`]: `Some` for
+    /// xlog-owned Arrow device columns, `None` for true
+    /// external Arrow producers.
+    source_slice: Option<Arc<TrackedCudaSlice<u8>>>,
 }
 
 impl CudaColumn {
@@ -795,6 +813,39 @@ impl CudaColumn {
             len_bytes,
             stream,
             _tensor: tensor,
+            source_slice: None,
+        })
+    }
+
+    /// Construct a DLPack column that wraps memory **xlog
+    /// itself owns** through the device runtime.
+    ///
+    /// Use this when xlog allocated `source_slice` via the
+    /// runtime-backed manager and is exporting it as a DLPack
+    /// tensor for inspection by external code while retaining
+    /// ownership. The resulting column reports
+    /// [`Self::is_external`] as `false` and
+    /// [`Self::runtime_block`] returns the slice's
+    /// [`crate::device_runtime::DeviceBlock`] — strict-mode
+    /// launch recorders will record it normally instead of
+    /// rejecting.
+    ///
+    /// True external DLPack producers (DLPack tensors handed
+    /// to xlog by another framework) must continue to use
+    /// [`Self::dlpack`].
+    pub fn dlpack_xlog_owned(
+        source_slice: Arc<TrackedCudaSlice<u8>>,
+        stream: Arc<CudaStream>,
+        tensor: DlpackManagedTensor,
+    ) -> Self {
+        let ptr = *source_slice.device_ptr();
+        let len_bytes = source_slice.len();
+        Self::Dlpack(DlpackColumn {
+            ptr,
+            len_bytes,
+            stream,
+            _tensor: tensor,
+            source_slice: Some(source_slice),
         })
     }
 
@@ -809,6 +860,32 @@ impl CudaColumn {
             len_bytes,
             stream,
             _import: import,
+            source_slice: None,
+        })
+    }
+
+    /// Construct an Arrow device column that wraps memory
+    /// **xlog itself owns** through the device runtime. Same
+    /// contract as [`Self::dlpack_xlog_owned`]: identity is
+    /// preserved, strict recorders accept the column, and
+    /// drop order keeps the underlying allocation alive
+    /// through the Arrow handoff.
+    ///
+    /// True external Arrow device producers must continue to
+    /// use [`Self::arrow_device`].
+    pub fn arrow_device_xlog_owned(
+        source_slice: Arc<TrackedCudaSlice<u8>>,
+        stream: Arc<CudaStream>,
+        import: Arc<ArrowDeviceImport>,
+    ) -> Self {
+        let ptr = *source_slice.device_ptr();
+        let len_bytes = source_slice.len();
+        Self::ArrowDevice(ArrowDeviceColumn {
+            ptr,
+            len_bytes,
+            stream,
+            _import: import,
+            source_slice: Some(source_slice),
         })
     }
 
@@ -828,26 +905,50 @@ impl CudaColumn {
         }
     }
 
-    /// Borrow the underlying [`crate::device_runtime::DeviceBlock`]
-    /// for runtime-backed `Owned` columns. Returns `None` for
-    /// external memory variants (`Dlpack`, `ArrowDevice`) and
-    /// for legacy cudarc-backed `Owned` columns. The launch
-    /// recorder uses this to attach cross-stream uses; strict
-    /// mode rejects `None` returns.
+    /// Borrow the underlying [`crate::device_runtime::DeviceBlock`].
+    ///
+    /// Returns `Some(&block)` when xlog owns the memory through
+    /// the runtime — `Owned` slices that were allocated via a
+    /// runtime-backed manager, AND `Dlpack` / `ArrowDevice`
+    /// columns constructed via the `*_xlog_owned` constructors
+    /// (where the source slice's block is reachable through
+    /// the retained `Arc<TrackedCudaSlice<u8>>`).
+    ///
+    /// Returns `None` for legacy cudarc-backed `Owned` slices
+    /// (no runtime block exists) and for true external
+    /// `Dlpack` / `ArrowDevice` columns (xlog never owned the
+    /// allocation). Strict-mode launch recorders reject `None`
+    /// returns; permissive recorders silently skip.
     pub fn runtime_block(&self) -> Option<&crate::device_runtime::DeviceBlock> {
         match self {
             CudaColumn::Owned(slice) => slice.runtime_block(),
-            CudaColumn::Dlpack(_) | CudaColumn::ArrowDevice(_) => None,
+            CudaColumn::Dlpack(col) => col.source_slice.as_ref().and_then(|s| s.runtime_block()),
+            CudaColumn::ArrowDevice(col) => {
+                col.source_slice.as_ref().and_then(|s| s.runtime_block())
+            }
         }
     }
 
     /// Whether this column wraps externally-managed device
-    /// memory (`Dlpack` / `ArrowDevice`). External memory has
-    /// no xlog-side runtime identity; strict launch recorders
-    /// reject such columns and require callers to coordinate
-    /// cross-stream synchronization themselves.
+    /// memory.
+    ///
+    /// Returns `true` only for `Dlpack` / `ArrowDevice` columns
+    /// where xlog never owned the allocation (no `source_slice`).
+    /// `Dlpack` / `ArrowDevice` columns built via
+    /// `*_xlog_owned` constructors return `false` — xlog still
+    /// owns the memory; the DLPack / Arrow handle is just an
+    /// export wrapper.
+    ///
+    /// External memory has no xlog-side runtime identity;
+    /// strict launch recorders reject such columns and require
+    /// callers to coordinate cross-stream synchronization
+    /// themselves.
     pub fn is_external(&self) -> bool {
-        matches!(self, CudaColumn::Dlpack(_) | CudaColumn::ArrowDevice(_))
+        match self {
+            CudaColumn::Owned(_) => false,
+            CudaColumn::Dlpack(col) => col.source_slice.is_none(),
+            CudaColumn::ArrowDevice(col) => col.source_slice.is_none(),
+        }
     }
 }
 
@@ -1329,6 +1430,180 @@ mod tests {
         assert!(
             result.is_err(),
             "Expected from_columns to panic on schema mismatch"
+        );
+    }
+
+    fn try_runtime() -> Option<(
+        Arc<CudaDevice>,
+        Arc<crate::device_runtime::XlogDeviceRuntime>,
+    )> {
+        use crate::device_runtime::{
+            AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, StreamPool,
+            XlogDeviceRuntime,
+        };
+        let device = try_device()?;
+        let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
+        let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
+            AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
+        );
+        let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
+            Box::new(GlobalDeviceBudget::new(async_resource, 64 * 1024 * 1024));
+        Some((
+            Arc::clone(&device),
+            Arc::new(XlogDeviceRuntime::with_resource(
+                Arc::clone(&device),
+                0,
+                pool,
+                budget,
+            )),
+        ))
+    }
+
+    /// xlog-owned DLPack column constructed from a
+    /// runtime-backed slice exposes its `DeviceBlock` via
+    /// `runtime_block()` and reports `is_external() == false`.
+    /// The recorder will record it normally instead of
+    /// strict-rejecting.
+    ///
+    /// Uses a null-pointer `DlpackManagedTensor` purely as a
+    /// drop-safe placeholder — the recorder never derefs the
+    /// tensor, only the source slice.
+    #[test]
+    fn test_xlog_owned_dlpack_runtime_backed_carries_identity() {
+        let Some((device, runtime)) = try_runtime() else {
+            return;
+        };
+        let manager = Arc::new(GpuMemoryManager::with_runtime(
+            Arc::clone(&device),
+            MemoryBudget::with_limit(1024 * 1024),
+            Arc::clone(&runtime),
+        ));
+        let slice = manager.alloc::<u8>(64).expect("alloc runtime-backed");
+        assert!(slice.runtime_block().is_some());
+        let stream = device.inner().stream().clone();
+        // SAFETY: null-pointer DlpackManagedTensor is drop-safe
+        // (the Drop impl checks for null before invoking the
+        // deleter). Acceptable for a unit fixture that exercises
+        // identity propagation, not the tensor lifecycle.
+        let tensor = unsafe { DlpackManagedTensor::from_raw(std::ptr::null_mut()) };
+        let col = CudaColumn::dlpack_xlog_owned(Arc::new(slice), stream, tensor);
+        assert!(
+            !col.is_external(),
+            "xlog-owned DLPack column must report is_external=false"
+        );
+        assert!(
+            col.runtime_block().is_some(),
+            "xlog-owned DLPack column over a runtime-backed slice must expose runtime_block"
+        );
+    }
+
+    /// xlog-owned DLPack over a LEGACY (cudarc-backed) slice:
+    /// `is_external()` is still false (xlog owns the
+    /// allocation), but `runtime_block()` is None because the
+    /// underlying slice has no runtime block. Strict recorders
+    /// will reject with the "legacy cudarc-backed" message
+    /// rather than the "external memory" message.
+    #[test]
+    fn test_xlog_owned_dlpack_legacy_backed_no_runtime_block() {
+        let Some(device) = try_device() else {
+            return;
+        };
+        let manager = Arc::new(GpuMemoryManager::new(
+            Arc::clone(&device),
+            MemoryBudget::with_limit(1024 * 1024),
+        ));
+        let slice = manager.alloc::<u8>(64).expect("alloc legacy");
+        assert!(slice.runtime_block().is_none());
+        let stream = device.inner().stream().clone();
+        let tensor = unsafe { DlpackManagedTensor::from_raw(std::ptr::null_mut()) };
+        let col = CudaColumn::dlpack_xlog_owned(Arc::new(slice), stream, tensor);
+        assert!(
+            !col.is_external(),
+            "xlog-owned DLPack column is owned regardless of allocator backing"
+        );
+        assert!(
+            col.runtime_block().is_none(),
+            "legacy-backed slice has no runtime block, even when wrapped xlog-owned"
+        );
+    }
+
+    /// True external DLPack (no source_slice) — the existing
+    /// `dlpack` constructor — keeps reporting `is_external=true`
+    /// and `runtime_block=None`. Strict recorders reject with
+    /// the "external memory" message.
+    #[test]
+    fn test_external_dlpack_remains_external() {
+        let Some(device) = try_device() else {
+            return;
+        };
+        let stream = device.inner().stream().clone();
+        let tensor = unsafe { DlpackManagedTensor::from_raw(std::ptr::null_mut()) };
+        // Bogus ptr/len — never dereferenced in this unit test
+        // (we only inspect the column metadata).
+        let col = CudaColumn::dlpack(0, 0, stream, tensor);
+        assert!(
+            col.is_external(),
+            "true external DLPack column must report is_external=true"
+        );
+        assert!(
+            col.runtime_block().is_none(),
+            "true external DLPack column has no xlog-side runtime block"
+        );
+    }
+
+    /// xlog-owned Arrow device column carries identity through
+    /// `arrow_device_xlog_owned`. Mirrors the DLPack test;
+    /// builds a minimal `ArrowDeviceImport` from an empty
+    /// `ArrayData`.
+    #[test]
+    fn test_xlog_owned_arrow_device_runtime_backed_carries_identity() {
+        let Some((device, runtime)) = try_runtime() else {
+            return;
+        };
+        let manager = Arc::new(GpuMemoryManager::with_runtime(
+            Arc::clone(&device),
+            MemoryBudget::with_limit(1024 * 1024),
+            Arc::clone(&runtime),
+        ));
+        let slice = manager.alloc::<u8>(64).expect("alloc runtime-backed");
+        assert!(slice.runtime_block().is_some());
+        let stream = device.inner().stream().clone();
+        // Synthesize a minimal ArrowDeviceImport via empty
+        // ArrayData; Arrow is not exercised on the data path
+        // here — the recorder only reads the column metadata.
+        let import = Arc::new(crate::arrow_device::ArrowDeviceImport::new(
+            arrow::array::ArrayData::new_null(&arrow::datatypes::DataType::UInt8, 0),
+        ));
+        let col = CudaColumn::arrow_device_xlog_owned(Arc::new(slice), stream, import);
+        assert!(
+            !col.is_external(),
+            "xlog-owned Arrow device column must report is_external=false"
+        );
+        assert!(
+            col.runtime_block().is_some(),
+            "xlog-owned Arrow column over a runtime-backed slice must expose runtime_block"
+        );
+    }
+
+    /// True external Arrow device column (no source_slice)
+    /// keeps reporting external + no runtime block.
+    #[test]
+    fn test_external_arrow_device_remains_external() {
+        let Some(device) = try_device() else {
+            return;
+        };
+        let stream = device.inner().stream().clone();
+        let import = Arc::new(crate::arrow_device::ArrowDeviceImport::new(
+            arrow::array::ArrayData::new_null(&arrow::datatypes::DataType::UInt8, 0),
+        ));
+        let col = CudaColumn::arrow_device(0, 0, stream, import);
+        assert!(
+            col.is_external(),
+            "true external Arrow column must report is_external=true"
+        );
+        assert!(
+            col.runtime_block().is_none(),
+            "true external Arrow column has no xlog-side runtime block"
         );
     }
 }

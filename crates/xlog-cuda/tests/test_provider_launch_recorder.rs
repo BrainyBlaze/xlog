@@ -399,32 +399,137 @@ fn provider_memset_column_recorded_survives_drop_and_reuse() {
     assert_eq!(last_writer_was_launch, 0);
 }
 
-/// Column-level negative test: external memory (we synthesize a
-/// DLPack column without an actual tensor — sufficient because
-/// the recorder's strict mode rejects on `is_external()`
-/// without dereferencing). Strict mode must reject at preflight
-/// before the memset is queued.
+/// Column-level negative test: TRUE EXTERNAL DLPack memory
+/// (no `source_slice`) is rejected by the strict launch
+/// recorder at preflight, before any CUDA work is queued, with
+/// the "external (DLPack / ArrowDevice) memory" message.
 ///
-/// We only construct a fake DLPack column if the public
-/// `CudaColumn::dlpack` constructor is reachable. As a
-/// stand-in, we allocate a fresh raw device pointer via
-/// `cuMemAlloc` and synthesize a `DlpackManagedTensor` around
-/// it. If the test fixture cannot construct a DLPack column on
-/// this host, the test skips cleanly.
-///
-/// Actually: constructing a DlpackManagedTensor without a real
-/// producer is non-trivial. Skip this case for now — it would
-/// require wiring up cudarc's DLPack support against a fake
-/// tensor. The launch.rs unit test
-/// `strict_rejects_legacy_at_preflight` already covers the
-/// strict-mode preflight rejection logic; the column-level
-/// equivalent (Dlpack) just exercises the same `is_external()`
-/// branch. If a real DLPack workflow needs explicit coverage,
-/// add it once the DLPack producer side has a test fixture.
+/// Synthesizes a `CudaColumn::dlpack` over a null
+/// `DlpackManagedTensor`. The tensor is never dereferenced —
+/// the recorder only inspects `is_external()` on the column
+/// — and the null pointer is drop-safe (the
+/// `DlpackManagedTensor::Drop` impl checks for null before
+/// invoking the deleter).
 #[test]
-#[ignore = "requires DLPack producer fixture; covered by launch.rs unit test for the underlying logic"]
-fn provider_memset_column_recorded_rejects_dlpack_column() {
-    // Intentional placeholder. See doc above.
+fn provider_memset_column_recorded_rejects_external_dlpack_column() {
+    use xlog_cuda::{CudaColumn, DlpackManagedTensor};
+
+    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
+    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
+        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
+    );
+    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
+        async_resource,
+        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
+    ));
+    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
+        Box::new(GlobalDeviceBudget::new(logging, 64 * 1024 * 1024));
+    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
+        Arc::clone(&device),
+        0,
+        Arc::clone(&pool),
+        budget,
+    ));
+    let memory = Arc::new(GpuMemoryManager::with_runtime(
+        Arc::clone(&device),
+        MemoryBudget::with_limit(64 * 1024 * 1024),
+        Arc::clone(&runtime),
+    ));
+    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
+        .expect("provider with_runtime");
+    let launch_stream = pool.acquire().expect("acquire launch_stream");
+
+    // SAFETY: null-pointer tensor is drop-safe (DlpackManagedTensor's
+    // Drop impl null-checks before invoking the deleter). The recorder
+    // never derefs the tensor.
+    let tensor = unsafe { DlpackManagedTensor::from_raw(std::ptr::null_mut()) };
+    let mut col = CudaColumn::dlpack(0, 0, device.inner().stream().clone(), tensor);
+    assert!(col.is_external());
+
+    let err = provider.memset_column_recorded(&mut col, 0xAA, launch_stream);
+    match err {
+        Err(XlogError::Kernel(msg)) => {
+            assert!(
+                msg.contains("preflight failed") && msg.contains("external"),
+                "expected preflight-failed external-memory error, got {:?}",
+                msg
+            );
+        }
+        other => panic!(
+            "memset_column_recorded must reject external DLPack at preflight, got {:?}",
+            other
+        ),
+    }
+}
+
+/// Column-level positive test: an XLOG-OWNED DLPack column —
+/// constructed via `CudaColumn::dlpack_xlog_owned` over a
+/// runtime-backed slice — is recorded successfully by the
+/// strict launch recorder. `is_external` reports false and
+/// `runtime_block()` resolves to the source slice's
+/// `DeviceBlock`, so the recorder treats the column the same
+/// way it treats `CudaColumn::Owned`.
+///
+/// This locks the slice's intent: zero-copy DLPack export
+/// where xlog retains ownership preserves runtime identity
+/// and remains safe under the strict-recorder discipline.
+/// True external DLPack producers continue to be rejected
+/// (covered by the sibling test above).
+#[test]
+fn provider_memset_column_recorded_accepts_xlog_owned_dlpack_column() {
+    use xlog_cuda::{CudaColumn, DlpackManagedTensor};
+
+    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
+    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
+        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
+    );
+    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
+        async_resource,
+        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
+    ));
+    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
+        Box::new(GlobalDeviceBudget::new(logging, 64 * 1024 * 1024));
+    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
+        Arc::clone(&device),
+        0,
+        Arc::clone(&pool),
+        budget,
+    ));
+    let memory = Arc::new(GpuMemoryManager::with_runtime(
+        Arc::clone(&device),
+        MemoryBudget::with_limit(64 * 1024 * 1024),
+        Arc::clone(&runtime),
+    ));
+    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
+        .expect("provider with_runtime");
+    let launch_stream = pool.acquire().expect("acquire launch_stream");
+    let launch_handle = pool.resolve(launch_stream).expect("resolve");
+
+    let slice = memory.alloc::<u8>(BYTES).expect("alloc runtime-backed");
+    assert!(slice.runtime_block().is_some());
+    let tensor = unsafe { DlpackManagedTensor::from_raw(std::ptr::null_mut()) };
+    let mut col =
+        CudaColumn::dlpack_xlog_owned(Arc::new(slice), device.inner().stream().clone(), tensor);
+    assert!(!col.is_external());
+    assert!(col.runtime_block().is_some());
+
+    provider
+        .memset_column_recorded(&mut col, PATTERN_LAUNCH, launch_stream)
+        .expect("memset_column_recorded must accept xlog-owned DLPack column");
+
+    // Sync to make readback well-defined; we just verify that
+    // strict-recorder dispatch succeeded end-to-end.
+    launch_handle.synchronize().expect("sync launch");
+    drop(col);
+    runtime.reap_pending().expect("reap");
 }
 
 /// Filter-class slice. Proves that the migrated
