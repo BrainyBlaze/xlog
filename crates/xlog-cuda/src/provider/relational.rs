@@ -2432,7 +2432,11 @@ impl super::CudaKernelProvider {
 
         let num_right = num_right as u32;
         let right_packed = self.compute_hashes_and_pack_keys(right, right_keys)?;
-        let table = self.build_hash_table_v2(&right_packed.hashes, num_right)?;
+        let table = self.build_hash_table_v2_counted(
+            &right_packed.hashes,
+            right.num_rows_device(),
+            right.num_rows() as u32,
+        )?;
 
         Ok(JoinIndexV2 {
             right_num_rows: num_right,
@@ -2580,16 +2584,15 @@ impl super::CudaKernelProvider {
             ));
         }
 
-        let num_rows = self.device_row_count(buffer)?;
-        if num_rows > u32::MAX as usize {
+        if buffer.num_rows() > u32::MAX as u64 {
             return Err(XlogError::Kernel(format!(
-                "pack_keys_gpu supports at most {} rows, got {}",
+                "pack_keys_gpu supports at most {} row capacity, got {}",
                 u32::MAX,
-                num_rows
+                buffer.num_rows()
             )));
         }
-        let num_rows = num_rows as u32;
-        if num_rows == 0 {
+        let row_cap = buffer.num_rows() as u32;
+        if row_cap == 0 {
             // Handle empty buffer case
             return Ok(PackedKeyData {
                 hashes: self.memory.alloc::<u64>(0)?,
@@ -2612,9 +2615,9 @@ impl super::CudaKernelProvider {
         }
 
         // Allocate output buffers on GPU
-        let packed_bytes = (num_rows as u64) * (row_size as u64);
+        let packed_bytes = (row_cap as u64) * (row_size as u64);
         let packed_slice = self.memory.alloc::<u8>(packed_bytes as usize)?;
-        let hash_slice = self.memory.alloc::<u64>(num_rows as usize)?;
+        let hash_slice = self.memory.alloc::<u64>(row_cap as usize)?;
 
         // Upload column sizes to GPU
         let mut col_sizes_slice = self.memory.alloc::<u32>(col_sizes.len())?;
@@ -2641,7 +2644,7 @@ impl super::CudaKernelProvider {
 
         // Launch configuration
         let block_size = 256u32;
-        let grid_size = (num_rows + block_size - 1) / block_size;
+        let grid_size = (row_cap + block_size - 1) / block_size;
         let config = LaunchConfig {
             grid_dim: (grid_size, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -2665,7 +2668,8 @@ impl super::CudaKernelProvider {
                         col_ptrs[3],
                         &col_sizes_slice,
                         key_cols.len() as u32,
-                        num_rows,
+                        buffer.num_rows_device(),
+                        row_cap,
                         row_size,
                         &packed_slice,
                         &hash_slice,
@@ -2697,16 +2701,15 @@ impl super::CudaKernelProvider {
             ));
         }
 
-        let num_rows = self.device_row_count(buffer)?;
-        if num_rows > u32::MAX as usize {
+        if buffer.num_rows() > u32::MAX as u64 {
             return Err(XlogError::Kernel(format!(
-                "pack_keys_gpu_generic supports at most {} rows, got {}",
+                "pack_keys_gpu_generic supports at most {} row capacity, got {}",
                 u32::MAX,
-                num_rows
+                buffer.num_rows()
             )));
         }
-        let num_rows = num_rows as u32;
-        if num_rows == 0 {
+        let row_cap = buffer.num_rows() as u32;
+        if row_cap == 0 {
             return Ok(PackedKeyData {
                 hashes: self.memory.alloc::<u64>(0)?,
                 packed_keys: self.memory.alloc::<u8>(0)?,
@@ -2735,11 +2738,11 @@ impl super::CudaKernelProvider {
             col_ptrs.push(*col.device_ptr() as u64);
         }
 
-        let packed_bytes = (num_rows as u64)
+        let packed_bytes = (row_cap as u64)
             .checked_mul(row_size as u64)
             .ok_or_else(|| XlogError::Kernel("Packed key byte size overflow".to_string()))?;
         let packed_slice = self.memory.alloc::<u8>(packed_bytes as usize)?;
-        let hash_slice = self.memory.alloc::<u64>(num_rows as usize)?;
+        let hash_slice = self.memory.alloc::<u64>(row_cap as usize)?;
 
         let mut d_col_sizes = self.memory.alloc::<u32>(col_sizes.len())?;
         self.htod_sync_copy_into_tracked(&col_sizes, &mut d_col_sizes)
@@ -2758,7 +2761,7 @@ impl super::CudaKernelProvider {
             })?;
 
         let block_size = 256u32;
-        let grid_size = (num_rows + block_size - 1) / block_size;
+        let grid_size = (row_cap + block_size - 1) / block_size;
         let config = LaunchConfig {
             grid_dim: (grid_size, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -2774,7 +2777,8 @@ impl super::CudaKernelProvider {
                         &d_col_ptrs,
                         &d_col_sizes,
                         key_cols.len() as u32,
-                        num_rows,
+                        buffer.num_rows_device(),
+                        row_cap,
                         row_size,
                         &packed_slice,
                         &hash_slice,
@@ -2828,10 +2832,26 @@ impl super::CudaKernelProvider {
         hashes: &cudarc::driver::CudaSlice<u64>,
         num_rows: u32,
     ) -> Result<JoinHashTableV2> {
+        let d_num_rows = self.upload_device_row_count(num_rows)?;
+        self.build_hash_table_v2_counted(hashes, &d_num_rows, num_rows)
+    }
+
+    /// Build a cache-friendly hash table from a u64 hash array while
+    /// respecting a device-resident logical row count. `row_cap` is the
+    /// host-known allocation span of `hashes`; only
+    /// `min(*num_rows_device, row_cap)` rows are inserted.
+    fn build_hash_table_v2_counted(
+        &self,
+        hashes: &cudarc::driver::CudaSlice<u64>,
+        num_rows_device: &TrackedCudaSlice<u32>,
+        row_cap: u32,
+    ) -> Result<JoinHashTableV2> {
         let device = self.device.inner();
 
-        // Number of buckets: next power-of-two >= max(2*num_rows, 1024)
-        let target = (num_rows as u64).saturating_mul(2).max(1024);
+        // Number of buckets: next power-of-two >= max(2*row_cap, 1024).
+        // `row_cap` is a safe host-known upper bound for the device
+        // logical row count and for the number of inserted entries.
+        let target = (row_cap as u64).saturating_mul(2).max(1024);
         let num_buckets_u64 = target.next_power_of_two();
         let num_buckets = u32::try_from(num_buckets_u64).map_err(|_| {
             XlogError::Kernel(format!(
@@ -2852,7 +2872,7 @@ impl super::CudaKernelProvider {
         }
 
         let block_size = 256u32;
-        let grid_size = (num_rows + block_size - 1) / block_size;
+        let grid_size = ((row_cap + block_size - 1) / block_size).max(1);
         let config = LaunchConfig {
             grid_dim: (grid_size, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -2865,11 +2885,20 @@ impl super::CudaKernelProvider {
                 XlogError::Kernel("hash_join_bucket_count_v2 kernel not found".to_string())
             })?;
 
-        // SAFETY: hash_join_bucket_count_v2(hashes, num_rows, bucket_counts, bucket_mask)
+        // SAFETY: hash_join_bucket_count_v2(hashes, num_rows_device, row_cap, bucket_counts, bucket_mask)
         unsafe {
             count_fn
                 .clone()
-                .launch(config, (hashes, num_rows, &bucket_counts, bucket_mask))
+                .launch(
+                    config,
+                    (
+                        hashes,
+                        num_rows_device,
+                        row_cap,
+                        &bucket_counts,
+                        bucket_mask,
+                    ),
+                )
                 .map_err(|e| {
                     XlogError::Kernel(format!("hash_join_bucket_count_v2 failed: {}", e))
                 })?;
@@ -2896,8 +2925,8 @@ impl super::CudaKernelProvider {
             self.device.synchronize()?;
         }
 
-        let bucket_entries = self.memory.alloc::<u32>(num_rows as usize)?;
-        let bucket_entry_hashes = self.memory.alloc::<u64>(num_rows as usize)?;
+        let bucket_entries = self.memory.alloc::<u32>(row_cap as usize)?;
+        let bucket_entry_hashes = self.memory.alloc::<u64>(row_cap as usize)?;
 
         let scatter_fn = device
             .get_func(JOIN_MODULE, join_kernels::HASH_JOIN_SCATTER_V2)
@@ -2905,7 +2934,7 @@ impl super::CudaKernelProvider {
                 XlogError::Kernel("hash_join_scatter_v2 kernel not found".to_string())
             })?;
 
-        // SAFETY: hash_join_scatter_v2(hashes, num_rows, bucket_cursors, bucket_mask, bucket_entries, bucket_entry_hashes)
+        // SAFETY: hash_join_scatter_v2(hashes, num_rows_device, row_cap, bucket_cursors, bucket_mask, bucket_entries, bucket_entry_hashes)
         unsafe {
             scatter_fn
                 .clone()
@@ -2913,7 +2942,8 @@ impl super::CudaKernelProvider {
                     config,
                     (
                         hashes,
-                        num_rows,
+                        num_rows_device,
+                        row_cap,
                         &bucket_cursors,
                         bucket_mask,
                         &bucket_entries,
@@ -2984,26 +3014,89 @@ impl super::CudaKernelProvider {
     /// device-only count is a separate allocator-architecture effort
     /// (deferred to v0.6+). The deferred GPU overflow flag handles the
     /// case where the actual match count exceeds this allocated cap.
+    /// Compute a host-known SAFE upper bound on the inner-/left-outer-
+    /// join output row count, capped by user `max_output` and the
+    /// runtime memory budget.
+    ///
+    /// Policy (v0.5.5):
+    ///   * `min(max_output, budget_cap, cartesian)`.
+    ///   * `cartesian = probe_cap * build_cap` is the only host-known
+    ///     upper bound for general many-to-many joins. Tighter
+    ///     bounds (e.g. unique-key indexed joins) would require a
+    ///     GPU-resident count-only stage with a host read, which the
+    ///     v0.5.5 zero-control-D2H gate forbids.
+    ///   * `budget_cap` is computed against the runtime's REMAINING
+    ///     memory budget at call time, with per-column-width
+    ///     accounting on the gather output. This makes the cap shrink
+    ///     under pressure (concurrent joins, large intermediate
+    ///     buffers) instead of running every join against the full
+    ///     1/64-of-total slice and starving the rest of the pipeline.
+    ///   * If `cartesian > budget_cap`, the actual match count may
+    ///     exceed the allocation; the count→scan→materialize kernels
+    ///     set the deferred GPU overflow flag and the caller consumes
+    ///     it via `try_consume_overflow_status`. Under-allocation is
+    ///     never silent.
+    ///
+    /// `combined_arity` is the sum of left + right column widths in
+    /// bytes per row, used to size the gathered output columns. The
+    /// caller knows this from the input schemas.
+    /// Compute a host-known SAFE upper bound on the inner- /
+    /// left-outer-join output row count.
+    ///
+    /// Policy (v0.5.5, explicit):
+    ///   1. `cartesian = probe_cap * build_cap` is the only host-known
+    ///      upper bound for general many-to-many joins.
+    ///   2. `budget_cap_rows` is computed from the **remaining**
+    ///      memory budget (not total) at call time, with explicit
+    ///      per-output-row footprint accounting:
+    ///         per-row bytes = 2 × u32 (output_left + output_right idx)
+    ///                       + left.combined_column_widths
+    ///                       + right.combined_column_widths
+    ///                       + 1 (overflow byte amortized)
+    ///      Capacity = `floor(remaining * fraction / per_row_bytes)`,
+    ///      with a conservative fraction `JOIN_OUTPUT_BUDGET_FRACTION`
+    ///      that leaves room for scans, hash tables, gathered columns
+    ///      of subsequent operators, and concurrent join evaluations
+    ///      on the same device.
+    ///   3. `max_output` is a HARD upper bound applied after both.
+    ///   4. If the actual match count exceeds the chosen capacity, the
+    ///      count→scan→materialize pipeline sets the deferred GPU
+    ///      overflow flag (consumed via `try_consume_overflow_status`).
+    ///      Under-allocation is never silent.
+    ///
+    /// `combined_per_row_bytes` is the sum of left + right column
+    /// widths (in bytes per output row) for the gathered output. The
+    /// caller computes this from the input schemas.
     fn compute_join_output_capacity(
         &self,
         probe_cap: u32,
         build_cap: u32,
+        combined_per_row_bytes: u64,
         max_output: Option<usize>,
     ) -> Result<u32> {
+        // Per-output-row memory footprint in bytes. Includes:
+        //   * Two u32 row-index arrays produced by the materialize
+        //     kernel (output_left, output_right): 8 bytes/row.
+        //   * Gathered output columns sized to capacity: combined
+        //     column widths from the inputs.
+        //   * One amortized byte for the overflow flag bookkeeping.
+        // Excludes the per-PROBE scan buffers (per_probe_count +
+        // per_probe_offsets) which are sized to `probe_cap`, not to
+        // capacity; they're amortized into the budget separately.
+        const JOIN_OUTPUT_BUDGET_FRACTION: u64 = 8; // use 1/8 of remaining
+        const JOIN_PER_ROW_OVERFLOW_BYTES: u64 = 1;
+        let bytes_per_output_row = 8u64 + combined_per_row_bytes + JOIN_PER_ROW_OVERFLOW_BYTES;
+
         // Cartesian upper bound; saturating to avoid u64 overflow on
-        // very large inputs. The budget cap below normally tightens
-        // this further.
+        // very large inputs.
         let cartesian = (probe_cap as u64).saturating_mul(build_cap as u64);
 
-        // Memory-budget cap: each output row is two u32 row-indices
-        // plus the eventual gather to the per-column output. Use 1/8
-        // of the device memory budget as a coarse cap on the index
-        // arrays alone (gathered columns get budgeted separately when
-        // allocated). This is deliberately loose for the first cut;
-        // tightening it requires per-column-width accounting.
-        let bytes_per_row_index_pair: u64 = 2 * std::mem::size_of::<u32>() as u64;
-        let budget_bytes = self.memory.budget().device_bytes;
-        let budget_cap_rows = (budget_bytes / 8).saturating_div(bytes_per_row_index_pair);
+        // REMAINING memory share at call time, not total. Under
+        // parallel pressure (concurrent tests, upstream intermediates
+        // already allocated) this shrinks the cap automatically.
+        let remaining = self.memory.remaining_bytes();
+        let budget_share = remaining / JOIN_OUTPUT_BUDGET_FRACTION;
+        let budget_cap_rows = budget_share.saturating_div(bytes_per_output_row.max(1));
 
         let cap_u64 = cartesian.min(budget_cap_rows);
         let cap_u64 = match max_output {
@@ -3012,6 +3105,21 @@ impl super::CudaKernelProvider {
         };
         let cap_u64 = cap_u64.min(u32::MAX as u64);
         Ok(cap_u64 as u32)
+    }
+
+    /// Per-row gathered-column byte width, summed across the input's
+    /// schema. Used by `compute_join_output_capacity` to size the
+    /// budget cap.
+    fn combined_per_row_bytes(left: &CudaBuffer, right: &CudaBuffer) -> u64 {
+        let l: u64 = (0..left.arity())
+            .filter_map(|i| left.schema().column_type(i))
+            .map(|t| t.size_bytes() as u64)
+            .sum();
+        let r: u64 = (0..right.arity())
+            .filter_map(|i| right.schema().column_type(i))
+            .map(|t| t.size_bytes() as u64)
+            .sum();
+        l + r
     }
 
     /// Run the count→exclusive-scan→materialize pipeline for an
@@ -3589,7 +3697,11 @@ impl super::CudaKernelProvider {
         let right_packed = self.compute_hashes_and_pack_keys(right, right_keys)?;
 
         // Build hash table sized to the build-side capacity.
-        let table = self.build_hash_table_v2(&right_packed.hashes, build_cap)?;
+        let table = self.build_hash_table_v2_counted(
+            &right_packed.hashes,
+            right.num_rows_device(),
+            build_cap,
+        )?;
 
         // Count → exclusive scan → materialize.
         //
@@ -3605,7 +3717,12 @@ impl super::CudaKernelProvider {
             left_packed.key_bytes,
             &table,
         );
-        let capacity = self.compute_join_output_capacity(probe_cap, build_cap, max_output)?;
+        let capacity = self.compute_join_output_capacity(
+            probe_cap,
+            build_cap,
+            Self::combined_per_row_bytes(left, right),
+            max_output,
+        )?;
         let combined_schema = self.combine_schemas(left.schema(), right.schema());
 
         if capacity == 0 {
@@ -3690,7 +3807,12 @@ impl super::CudaKernelProvider {
             index.key_bytes,
             &index.table,
         );
-        let capacity = self.compute_join_output_capacity(probe_cap, build_cap, max_output)?;
+        let capacity = self.compute_join_output_capacity(
+            probe_cap,
+            build_cap,
+            Self::combined_per_row_bytes(left, right),
+            max_output,
+        )?;
         if capacity == 0 {
             return self.create_empty_buffer(combined_schema);
         }
@@ -4297,7 +4419,12 @@ impl super::CudaKernelProvider {
             index.key_bytes,
             &index.table,
         );
-        let capacity = self.compute_join_output_capacity(probe_cap, build_cap, max_output)?;
+        let capacity = self.compute_join_output_capacity(
+            probe_cap,
+            build_cap,
+            Self::combined_per_row_bytes(left, right),
+            max_output,
+        )?;
         if capacity == 0 {
             return self.create_empty_buffer(combined_schema);
         }
@@ -4386,7 +4513,11 @@ impl super::CudaKernelProvider {
 
         let left_packed = self.compute_hashes_and_pack_keys(left, left_keys)?;
         let right_packed = self.compute_hashes_and_pack_keys(right, right_keys)?;
-        let table = self.build_hash_table_v2(&right_packed.hashes, build_cap)?;
+        let table = self.build_hash_table_v2_counted(
+            &right_packed.hashes,
+            right.num_rows_device(),
+            build_cap,
+        )?;
 
         let probe_index = Self::build_inner_probe_index(
             left,
@@ -4395,7 +4526,12 @@ impl super::CudaKernelProvider {
             left_packed.key_bytes,
             &table,
         );
-        let capacity = self.compute_join_output_capacity(probe_cap, build_cap, max_output)?;
+        let capacity = self.compute_join_output_capacity(
+            probe_cap,
+            build_cap,
+            Self::combined_per_row_bytes(left, right),
+            max_output,
+        )?;
         if capacity == 0 {
             return self.create_empty_buffer(combined_schema);
         }

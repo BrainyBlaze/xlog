@@ -198,8 +198,14 @@ impl Executor {
             .column(0)
             .ok_or_else(|| XlogError::Execution("Missing right column".into()))?;
 
-        let num_rows = left.num_rows() as u32;
-        let mut d_mask = self.provider.memory().alloc::<u8>(num_rows as usize)?;
+        // Use the host-known capacity as the launch grid; the kernel
+        // clamps in-kernel via `num_rows_device` so any rows in
+        // `[logical, capacity)` get mask=0 instead of consuming
+        // uninitialized column bytes from a join's capacity-sized
+        // output. This is the load-bearing fix for the
+        // join-output-as-filter-input chain in v0.5.5.
+        let row_cap = left.num_rows() as u32;
+        let mut d_mask = self.provider.memory().alloc::<u8>(row_cap as usize)?;
 
         let func = self
             .provider
@@ -207,13 +213,22 @@ impl Executor {
             .inner()
             .get_func(FILTER_MODULE, kernel)
             .ok_or_else(|| XlogError::Execution("filter compare kernel not found".into()))?;
-        let config = LaunchConfig::for_num_elems(num_rows);
+        let config = LaunchConfig::for_num_elems(row_cap);
 
-        // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
+        // SAFETY: kernel signature matches:
+        //   filter_compare_*_col(left, right, row_cap, num_rows_device, op, mask)
+        // — device buffers were allocated with sufficient size.
         unsafe {
             func.clone().launch(
                 config,
-                (left_col, right_col, num_rows, op as u8, &mut d_mask),
+                (
+                    left_col,
+                    right_col,
+                    row_cap,
+                    left.num_rows_device(),
+                    op as u8,
+                    &mut d_mask,
+                ),
             )
         }
         .map_err(|e| XlogError::execution_ctx("compare_buffers_mask", "filter compare", &e))?;

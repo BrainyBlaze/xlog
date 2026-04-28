@@ -130,12 +130,16 @@ extern "C" __global__ void compute_composite_hash(
  */
 extern "C" __global__ void hash_join_bucket_count_v2(
     const uint64_t* __restrict__ hashes,
-    uint32_t num_rows,
+    const uint32_t* __restrict__ num_rows_device,
+    uint32_t row_cap,
     uint32_t* __restrict__ bucket_counts,
     uint32_t bucket_mask
 ) {
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= num_rows) return;
+    if (tid >= row_cap) return;
+    uint32_t actual = num_rows_device[0];
+    if (actual > row_cap) actual = row_cap;
+    if (tid >= actual) return;
 
     uint64_t hash = hashes[tid];
     uint32_t h32 = (uint32_t)(hash ^ (hash >> 32));
@@ -145,14 +149,18 @@ extern "C" __global__ void hash_join_bucket_count_v2(
 
 extern "C" __global__ void hash_join_scatter_v2(
     const uint64_t* __restrict__ hashes,
-    uint32_t num_rows,
+    const uint32_t* __restrict__ num_rows_device,
+    uint32_t row_cap,
     uint32_t* __restrict__ bucket_cursors,
     uint32_t bucket_mask,
     uint32_t* __restrict__ bucket_entries,
     uint64_t* __restrict__ bucket_entry_hashes
 ) {
     uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= num_rows) return;
+    if (tid >= row_cap) return;
+    uint32_t actual = num_rows_device[0];
+    if (actual > row_cap) actual = row_cap;
+    if (tid >= actual) return;
 
     uint64_t hash = hashes[tid];
     uint32_t h32 = (uint32_t)(hash ^ (hash >> 32));

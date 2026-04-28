@@ -147,13 +147,17 @@ extern "C" __global__ void pack_and_hash_keys(
     const uint8_t* __restrict__ col3,
     const uint32_t* __restrict__ col_sizes,
     uint32_t num_cols,
-    uint32_t num_rows,
+    const uint32_t* __restrict__ num_rows_device,
+    uint32_t row_cap,
     uint32_t row_size,
     uint8_t* __restrict__ packed_output,
     uint64_t* __restrict__ hashes
 ) {
     uint32_t row = blockIdx.x * blockDim.x + threadIdx.x;
-    if (row >= num_rows) return;
+    if (row >= row_cap) return;
+    uint32_t actual = num_rows_device[0];
+    if (actual > row_cap) actual = row_cap;
+    if (row >= actual) return;
 
     uint8_t* out_row = packed_output + (uint64_t)row * row_size;
     uint64_t hash = FNV_OFFSET;
@@ -251,13 +255,17 @@ extern "C" __global__ void pack_and_hash_keys_generic(
     const uint64_t* __restrict__ col_ptrs,
     const uint32_t* __restrict__ col_sizes,
     uint32_t num_cols,
-    uint32_t num_rows,
+    const uint32_t* __restrict__ num_rows_device,
+    uint32_t row_cap,
     uint32_t row_size,
     uint8_t* __restrict__ packed_output,
     uint64_t* __restrict__ hashes
 ) {
     uint32_t row = blockIdx.x * blockDim.x + threadIdx.x;
-    if (row >= num_rows) return;
+    if (row >= row_cap) return;
+    uint32_t actual = num_rows_device[0];
+    if (actual > row_cap) actual = row_cap;
+    if (row >= actual) return;
 
     uint8_t* out_row = packed_output + (uint64_t)row * row_size;
     uint64_t hash = FNV_OFFSET;

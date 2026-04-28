@@ -249,12 +249,19 @@ extern "C" __global__ void filter_compare_u8(
 extern "C" __global__ void filter_compare_u32_col(
     const uint32_t* __restrict__ left,
     const uint32_t* __restrict__ right,
-    uint32_t num_rows,
+    uint32_t row_cap,
+    const uint32_t* __restrict__ num_rows_device,
     uint8_t op,
     uint8_t* __restrict__ mask
 ) {
     uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (gid >= num_rows) return;
+    if (gid >= row_cap) return;
+    uint32_t actual = num_rows_device[0];
+    if (actual > row_cap) actual = row_cap;
+    if (gid >= actual) {
+        mask[gid] = 0;
+        return;
+    }
 
     uint32_t lval = left[gid];
     uint32_t rval = right[gid];
@@ -275,12 +282,19 @@ extern "C" __global__ void filter_compare_u32_col(
 extern "C" __global__ void filter_compare_i32_col(
     const int32_t* __restrict__ left,
     const int32_t* __restrict__ right,
-    uint32_t num_rows,
+    uint32_t row_cap,
+    const uint32_t* __restrict__ num_rows_device,
     uint8_t op,
     uint8_t* __restrict__ mask
 ) {
     uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (gid >= num_rows) return;
+    if (gid >= row_cap) return;
+    uint32_t actual = num_rows_device[0];
+    if (actual > row_cap) actual = row_cap;
+    if (gid >= actual) {
+        mask[gid] = 0;
+        return;
+    }
 
     int32_t lval = left[gid];
     int32_t rval = right[gid];
@@ -301,12 +315,19 @@ extern "C" __global__ void filter_compare_i32_col(
 extern "C" __global__ void filter_compare_i64_col(
     const int64_t* __restrict__ left,
     const int64_t* __restrict__ right,
-    uint32_t num_rows,
+    uint32_t row_cap,
+    const uint32_t* __restrict__ num_rows_device,
     uint8_t op,
     uint8_t* __restrict__ mask
 ) {
     uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (gid >= num_rows) return;
+    if (gid >= row_cap) return;
+    uint32_t actual = num_rows_device[0];
+    if (actual > row_cap) actual = row_cap;
+    if (gid >= actual) {
+        mask[gid] = 0;
+        return;
+    }
 
     int64_t lval = left[gid];
     int64_t rval = right[gid];
@@ -327,12 +348,19 @@ extern "C" __global__ void filter_compare_i64_col(
 extern "C" __global__ void filter_compare_u64_col(
     const uint64_t* __restrict__ left,
     const uint64_t* __restrict__ right,
-    uint32_t num_rows,
+    uint32_t row_cap,
+    const uint32_t* __restrict__ num_rows_device,
     uint8_t op,
     uint8_t* __restrict__ mask
 ) {
     uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (gid >= num_rows) return;
+    if (gid >= row_cap) return;
+    uint32_t actual = num_rows_device[0];
+    if (actual > row_cap) actual = row_cap;
+    if (gid >= actual) {
+        mask[gid] = 0;
+        return;
+    }
 
     uint64_t lval = left[gid];
     uint64_t rval = right[gid];
@@ -355,12 +383,19 @@ extern "C" __global__ void filter_compare_u64_col(
 extern "C" __global__ void filter_compare_f32_col(
     const float* __restrict__ left,
     const float* __restrict__ right,
-    uint32_t num_rows,
+    uint32_t row_cap,
+    const uint32_t* __restrict__ num_rows_device,
     uint8_t op,
     uint8_t* __restrict__ mask
 ) {
     uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (gid >= num_rows) return;
+    if (gid >= row_cap) return;
+    uint32_t actual = num_rows_device[0];
+    if (actual > row_cap) actual = row_cap;
+    if (gid >= actual) {
+        mask[gid] = 0;
+        return;
+    }
 
     float lval = left[gid];
     float rval = right[gid];
@@ -383,12 +418,19 @@ extern "C" __global__ void filter_compare_f32_col(
 extern "C" __global__ void filter_compare_f64_col(
     const double* __restrict__ left,
     const double* __restrict__ right,
-    uint32_t num_rows,
+    uint32_t row_cap,
+    const uint32_t* __restrict__ num_rows_device,
     uint8_t op,
     uint8_t* __restrict__ mask
 ) {
     uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (gid >= num_rows) return;
+    if (gid >= row_cap) return;
+    uint32_t actual = num_rows_device[0];
+    if (actual > row_cap) actual = row_cap;
+    if (gid >= actual) {
+        mask[gid] = 0;
+        return;
+    }
 
     double lval = left[gid];
     double rval = right[gid];
@@ -409,12 +451,19 @@ extern "C" __global__ void filter_compare_f64_col(
 extern "C" __global__ void filter_compare_u8_col(
     const uint8_t* __restrict__ left,
     const uint8_t* __restrict__ right,
-    uint32_t num_rows,
+    uint32_t row_cap,
+    const uint32_t* __restrict__ num_rows_device,
     uint8_t op,
     uint8_t* __restrict__ mask
 ) {
     uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (gid >= num_rows) return;
+    if (gid >= row_cap) return;
+    uint32_t actual = num_rows_device[0];
+    if (actual > row_cap) actual = row_cap;
+    if (gid >= actual) {
+        mask[gid] = 0;
+        return;
+    }
 
     uint8_t lval = left[gid];
     uint8_t rval = right[gid];
