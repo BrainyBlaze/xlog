@@ -773,13 +773,15 @@ pub struct CudaKernelProvider {
     /// the last reset. Increments even on the failing path (the originating
     /// call still returns `Err`); kept for telemetry and tests.
     deterministic_d2h_violations: AtomicU64,
-    /// Lazy-initialized non-default launch stream used by recorded
-    /// filter dispatch when the env opt-in is set. Cached for the
-    /// provider's lifetime to avoid exhausting the
-    /// [`crate::device_runtime::StreamPool`] (the pool never returns
-    /// streams to a free-list). One stream per provider is sufficient
-    /// because the recorder serializes work on it.
-    recorded_filter_stream: OnceLock<crate::device_runtime::StreamId>,
+    /// Lazy-initialized non-default launch stream used by
+    /// env-gated recorded-operator dispatch (filter, sort,
+    /// dedup, GroupBy, hash-join). Cached for the provider's
+    /// lifetime — the [`crate::device_runtime::StreamPool`]
+    /// never returns streams to a free-list, so per-call
+    /// acquire would saturate it. One stream per provider is
+    /// sufficient because the recorder serializes work on it;
+    /// multiple operations chain through commit-order events.
+    recorded_op_stream: OnceLock<crate::device_runtime::StreamId>,
 }
 
 #[derive(Default)]
@@ -857,7 +859,7 @@ impl CudaKernelProvider {
             d2h_transfer_count: AtomicU64::new(0),
             strict_deterministic_d2h: AtomicBool::new(false),
             deterministic_d2h_violations: AtomicU64::new(0),
-            recorded_filter_stream: OnceLock::new(),
+            recorded_op_stream: OnceLock::new(),
         })
     }
 
@@ -919,48 +921,94 @@ impl CudaKernelProvider {
         Self::new(device, memory)
     }
 
-    /// Whether the recorded filter dispatch is enabled via env.
-    ///
-    /// Reads the `XLOG_USE_RECORDED_FILTERS` env var. Empty / unset
-    /// / `"0"` → disabled (legacy filter path). Any other value →
-    /// enabled. Combined with a runtime-backed manager (see
-    /// [`Self::recorded_filter_stream_or_init`]), this routes
-    /// `filter::<T>` through the recorded launch path.
-    ///
-    /// Env-gated rather than default-on so the migration is opt-in
-    /// for real callers; the existing legacy paths remain the
-    /// production default until the runtime stack is certified
-    /// end-to-end.
-    pub(crate) fn use_recorded_filters_env() -> bool {
-        std::env::var("XLOG_USE_RECORDED_FILTERS")
+    /// Internal: parse a "boolean" env var. Empty / unset / `"0"`
+    /// → false; any other value → true.
+    fn env_flag(name: &str) -> bool {
+        std::env::var(name)
             .map(|v| !v.is_empty() && v != "0")
             .unwrap_or(false)
     }
 
+    /// Whether the recorded filter dispatch is enabled via env.
+    ///
+    /// Returns `true` when either `XLOG_USE_RECORDED_FILTERS` or
+    /// the umbrella `XLOG_USE_RECORDED_OPS` env var is set.
+    /// Combined with a runtime-backed manager, this routes
+    /// `filter::<T>` through the recorded launch path.
+    ///
+    /// Env-gated rather than default-on so the migration is
+    /// opt-in for real callers; the existing legacy paths remain
+    /// the production default until the runtime stack is
+    /// certified end-to-end.
+    pub(crate) fn use_recorded_filters_env() -> bool {
+        Self::env_flag("XLOG_USE_RECORDED_FILTERS") || Self::env_flag("XLOG_USE_RECORDED_OPS")
+    }
+
+    /// Whether the recorded sort dispatch is enabled via env.
+    /// Reads `XLOG_USE_RECORDED_SORT` or the umbrella
+    /// `XLOG_USE_RECORDED_OPS`. Slice #5 narrowed
+    /// `sort_recorded` to U32 / Symbol keys only — the public
+    /// `sort()` dispatcher checks both this env flag AND key
+    /// type compatibility before routing.
+    pub(crate) fn use_recorded_sort_env() -> bool {
+        Self::env_flag("XLOG_USE_RECORDED_SORT") || Self::env_flag("XLOG_USE_RECORDED_OPS")
+    }
+
+    /// Whether the recorded full-row dedup dispatch is enabled
+    /// via env. Reads `XLOG_USE_RECORDED_DEDUP` or the umbrella
+    /// `XLOG_USE_RECORDED_OPS`. `dedup_full_row_recorded` is
+    /// narrow to all-U32 / Symbol columns.
+    pub(crate) fn use_recorded_dedup_env() -> bool {
+        Self::env_flag("XLOG_USE_RECORDED_DEDUP") || Self::env_flag("XLOG_USE_RECORDED_OPS")
+    }
+
+    /// Whether the recorded GroupBy dispatch is enabled via
+    /// env. Reads `XLOG_USE_RECORDED_GROUPBY` or
+    /// `XLOG_USE_RECORDED_OPS`. `groupby_multi_agg_recorded`
+    /// supports U32 / Symbol keys + Count / Sum / Min / Max
+    /// aggs only.
+    pub(crate) fn use_recorded_groupby_env() -> bool {
+        Self::env_flag("XLOG_USE_RECORDED_GROUPBY") || Self::env_flag("XLOG_USE_RECORDED_OPS")
+    }
+
+    /// Whether the recorded hash-join dispatch is enabled via
+    /// env. Reads `XLOG_USE_RECORDED_HASH_JOIN` or
+    /// `XLOG_USE_RECORDED_OPS`. `hash_join_v2_recorded` and
+    /// `hash_join_v2_with_index_recorded` cover all four join
+    /// types (Inner / Semi / Anti / LeftOuter); the only
+    /// hard constraint inherited from `pack_keys` is `≤4`
+    /// key columns.
+    pub(crate) fn use_recorded_hash_join_env() -> bool {
+        Self::env_flag("XLOG_USE_RECORDED_HASH_JOIN") || Self::env_flag("XLOG_USE_RECORDED_OPS")
+    }
+
     /// Lazily acquire one non-default launch stream from the
-    /// runtime's [`crate::device_runtime::StreamPool`] for use by
-    /// recorded filter dispatch, and cache it for this provider's
-    /// lifetime.
+    /// runtime's [`crate::device_runtime::StreamPool`] for
+    /// recorded-operator dispatch, and cache it for this
+    /// provider's lifetime. Shared across all env-gated
+    /// recorded paths (filter, sort, dedup, GroupBy,
+    /// hash-join) — a single stream is sufficient because the
+    /// recorder serializes work on it; multiple operations
+    /// chain naturally through commit-order events.
     ///
     /// Returns `None` when:
     ///   * the manager has no runtime attached
     ///     (`memory.runtime() == None`), or
     ///   * the stream pool is at capacity and `acquire` fails.
     ///
-    /// On a lost race during first init the loser leaks one stream
-    /// (the pool keeps it alive); both winners cache the same
-    /// `StreamId`. Acceptable cost — practical pool sizes are
-    /// large compared to the number of providers per process.
-    pub(crate) fn recorded_filter_stream_or_init(&self) -> Option<crate::device_runtime::StreamId> {
-        if let Some(s) = self.recorded_filter_stream.get() {
+    /// On a lost race during first init the loser leaks one
+    /// stream (the pool keeps it alive); both winners cache
+    /// the same `StreamId`. Acceptable cost — practical pool
+    /// sizes are large compared to the number of providers
+    /// per process.
+    pub(crate) fn recorded_op_stream_or_init(&self) -> Option<crate::device_runtime::StreamId> {
+        if let Some(s) = self.recorded_op_stream.get() {
             return Some(*s);
         }
         let runtime = self.memory.runtime()?;
         let stream = runtime.stream_pool().acquire().ok()?;
-        // Race-safe: if another thread already set it, ours leaks
-        // (pool retains it) but we still return the cached value.
-        let _ = self.recorded_filter_stream.set(stream);
-        self.recorded_filter_stream.get().copied()
+        let _ = self.recorded_op_stream.set(stream);
+        self.recorded_op_stream.get().copied()
     }
 
     /// Get the CUDA device

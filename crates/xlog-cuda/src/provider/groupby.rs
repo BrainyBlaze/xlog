@@ -69,6 +69,31 @@ impl super::CudaKernelProvider {
         key_cols: &[usize],
         aggs: &[(usize, AggOp)],
     ) -> Result<CudaBuffer> {
+        // Env-gated recorded dispatch. `groupby_multi_agg_recorded`
+        // (slice #6) is narrow to U32 / Symbol keys + Count /
+        // Sum / Min / Max aggs + ≤4 key columns. Mismatch
+        // (any other key type, LogSumExp, or >4 keys) falls
+        // through to the legacy path.
+        if Self::use_recorded_groupby_env()
+            && !key_cols.is_empty()
+            && !aggs.is_empty()
+            && key_cols.len() <= 4
+        {
+            if let Some(launch_stream) = self.recorded_op_stream_or_init() {
+                let keys_compatible = key_cols.iter().all(|&k| {
+                    matches!(
+                        buffer.schema.column_type(k),
+                        Some(ScalarType::U32) | Some(ScalarType::Symbol)
+                    )
+                });
+                let aggs_compatible = aggs.iter().all(|&(_, op)| {
+                    matches!(op, AggOp::Count | AggOp::Sum | AggOp::Min | AggOp::Max)
+                });
+                if keys_compatible && aggs_compatible {
+                    return self.groupby_multi_agg_recorded(buffer, key_cols, aggs, launch_stream);
+                }
+            }
+        }
         let num_rows = self.device_row_count(buffer)?;
         if num_rows == 0 {
             let result_schema =

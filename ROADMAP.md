@@ -713,6 +713,21 @@ execution.
       runtime / provider opt-in selector so real callers can route
       filter operations through the recorded path. (slice #2,
       `XLOG_USE_RECORDED_FILTERS` env gate.)
+- [x] Extend env-gated dispatch to recorded sort, dedup_full_row,
+      GroupBy, and hash-join (Inner / Semi / Anti / LeftOuter,
+      indexed and non-indexed). Per-operator env vars
+      (`XLOG_USE_RECORDED_SORT`,
+      `XLOG_USE_RECORDED_DEDUP`,
+      `XLOG_USE_RECORDED_GROUPBY`,
+      `XLOG_USE_RECORDED_HASH_JOIN`) plus the umbrella
+      `XLOG_USE_RECORDED_OPS=1` that activates all five. Each
+      dispatcher's eligibility check mirrors the recorded
+      variant's narrow constraints; mismatches fall through
+      to the legacy path. Defaults unchanged. Cert mode
+      (`XLOG_USE_RECORDED_OPS=1 XLOG_USE_DEVICE_RUNTIME=1
+      cargo test -p xlog-integration --test real_world_tests
+      --release -- --test-threads=8`) passes 20/20 stress
+      runs; xlog-cuda default suite (403/403) unchanged.
 
 ### Tests and Certification
 

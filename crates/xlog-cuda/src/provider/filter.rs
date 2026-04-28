@@ -61,7 +61,7 @@ impl super::CudaKernelProvider {
         // AND a launch stream can be acquired from the pool.
         // Default behavior is unchanged (legacy fused / mask+compact).
         if Self::use_recorded_filters_env() {
-            if let Some(launch_stream) = self.recorded_filter_stream_or_init() {
+            if let Some(launch_stream) = self.recorded_op_stream_or_init() {
                 return self.filter_recorded::<T>(input, col, value, op, launch_stream);
             }
         }
@@ -1436,12 +1436,18 @@ impl super::CudaKernelProvider {
         if n == 0 {
             return self.create_empty_buffer(input.schema.clone());
         }
-        if (n as usize) > d_mask.len() {
-            return Err(XlogError::Kernel(format!(
-                "compact_buffer_by_device_mask_counted_recorded: mask len {} < rows {}",
-                d_mask.len(),
-                n
-            )));
+        // The bound `d_mask.len() >= n (row_cap)` is too
+        // strict — `mask_clamp_rows` only reads `d_mask[i]`
+        // for `i < num_rows_device` (logical count). Real
+        // callers (hash_join_semi/anti recorded) pass masks
+        // sized to logical count which can be < row_cap. We
+        // require only that the mask is non-empty; OOB reads
+        // are bounded by the kernel's own check against the
+        // device-resident logical row count.
+        if d_mask.is_empty() {
+            return Err(XlogError::Kernel(
+                "compact_buffer_by_device_mask_counted_recorded: empty d_mask".to_string(),
+            ));
         }
 
         let device = self.device.inner();

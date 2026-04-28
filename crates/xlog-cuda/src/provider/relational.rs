@@ -1168,6 +1168,22 @@ impl super::CudaKernelProvider {
     /// pipeline; single-column callers that want totalOrder semantics
     /// must call `dedup_full_row` directly.
     pub fn dedup_full_row(&self, input: &CudaBuffer) -> Result<CudaBuffer> {
+        // Env-gated recorded dispatch. `dedup_full_row_recorded`
+        // (slice #5) requires every column to be U32 / Symbol;
+        // mixed-type schemas fall through to the legacy path.
+        if Self::use_recorded_dedup_env() && input.num_rows() > 1 && input.arity() > 0 {
+            if let Some(launch_stream) = self.recorded_op_stream_or_init() {
+                let recorded_compatible = (0..input.arity()).all(|c| {
+                    matches!(
+                        input.schema.column_type(c),
+                        Some(ScalarType::U32) | Some(ScalarType::Symbol)
+                    )
+                });
+                if recorded_compatible {
+                    return self.dedup_full_row_recorded(input, launch_stream);
+                }
+            }
+        }
         self.dedup_full_row_deterministic(input)
     }
 
@@ -1439,6 +1455,24 @@ impl super::CudaKernelProvider {
     /// - Input has more than `u32::MAX` rows
     /// - Download/upload or kernel execution fails
     pub fn sort(&self, input: &CudaBuffer, key_cols: &[usize]) -> Result<CudaBuffer> {
+        // Env-gated recorded dispatch. Eligibility check
+        // mirrors `sort_recorded`'s validation (slice #5):
+        // U32 / Symbol key columns only. Other types fall
+        // through to the legacy multi-type path.
+        if Self::use_recorded_sort_env() && !key_cols.is_empty() && input.num_rows() > 0 {
+            if let Some(launch_stream) = self.recorded_op_stream_or_init() {
+                let recorded_compatible = key_cols.iter().all(|&k| {
+                    matches!(
+                        input.schema.column_type(k),
+                        Some(ScalarType::U32) | Some(ScalarType::Symbol)
+                    )
+                });
+                if recorded_compatible {
+                    return self.sort_recorded(input, key_cols, launch_stream);
+                }
+            }
+        }
+
         if input.num_rows() == 0 {
             return self.create_empty_buffer(input.schema.clone());
         }
@@ -2495,6 +2529,27 @@ impl super::CudaKernelProvider {
         join_type: JoinType,
         max_output: Option<usize>,
     ) -> Result<CudaBuffer> {
+        // Env-gated recorded dispatch. The `pack_keys`
+        // constraint inherited by `hash_join_v2_recorded`
+        // requires `left_keys.len() <= 4`. Mismatch falls
+        // through to the legacy path.
+        if Self::use_recorded_hash_join_env()
+            && !left_keys.is_empty()
+            && left_keys.len() == right_keys.len()
+            && left_keys.len() <= 4
+        {
+            if let Some(launch_stream) = self.recorded_op_stream_or_init() {
+                return self.hash_join_v2_recorded(
+                    left,
+                    right,
+                    left_keys,
+                    right_keys,
+                    join_type,
+                    max_output,
+                    launch_stream,
+                );
+            }
+        }
         match join_type {
             JoinType::Inner => {
                 self.hash_join_inner_v2(left, right, left_keys, right_keys, max_output)
@@ -2567,6 +2622,26 @@ impl super::CudaKernelProvider {
         index: &JoinIndexV2,
         max_output: Option<usize>,
     ) -> Result<CudaBuffer> {
+        // Env-gated recorded dispatch. Same `≤4 key column`
+        // constraint as the non-indexed variant.
+        if Self::use_recorded_hash_join_env()
+            && !left_keys.is_empty()
+            && left_keys.len() == right_keys.len()
+            && left_keys.len() <= 4
+        {
+            if let Some(launch_stream) = self.recorded_op_stream_or_init() {
+                return self.hash_join_v2_with_index_recorded(
+                    left,
+                    right,
+                    left_keys,
+                    right_keys,
+                    join_type,
+                    index,
+                    max_output,
+                    launch_stream,
+                );
+            }
+        }
         let left_rows = self.device_row_count(left)?;
         let right_rows = self.device_row_count(right)?;
         if left_rows > u32::MAX as usize || right_rows > u32::MAX as usize {
@@ -5305,7 +5380,12 @@ impl super::CudaKernelProvider {
         let mut d_hist = self.memory.alloc::<u32>((grid_size as usize) * 16)?;
         let mut d_prefix = self.memory.alloc::<u32>(16)?;
         let mut d_ranks = self.memory.alloc::<u32>(n as usize)?;
-        let mut output_d_num_rows = self.upload_device_row_count(n)?;
+        // Output's d_num_rows must reflect input's LOGICAL
+        // row count (not row_cap). The legacy `sort` clones
+        // `input.num_rows_device()` via `dtod_copy`; recorded
+        // sort does the same on launch_stream so downstream
+        // consumers see the correct logical count.
+        let output_d_num_rows = self.memory.alloc::<u32>(1)?;
 
         let mut dst_cols: Vec<TrackedCudaSlice<u8>> = Vec::with_capacity(input.columns.len());
         for col_idx in 0..input.columns.len() {
@@ -5393,7 +5473,28 @@ impl super::CudaKernelProvider {
         // Step 3: gather all input columns by the final permutation.
         self.apply_permutation_gpu_on_stream(input, &indices_a, &mut dst_cols, &cu_stream)?;
 
-        // Step 4: record post-preflight fresh writes.
+        // Step 4: copy input's logical d_num_rows into the
+        // output's slot via dtod-async on launch_stream.
+        // Sort preserves row count, so this matches what
+        // legacy `apply_permutation_gpu` does via
+        // `clone_device_row_count`.
+        // SAFETY: runtime-backed buffers, 4-byte u32 copy.
+        unsafe {
+            let res = cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
+                *output_d_num_rows.device_ptr(),
+                *input.num_rows_device().device_ptr(),
+                std::mem::size_of::<u32>(),
+                cu_stream.cu_stream(),
+            );
+            if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                return Err(XlogError::Kernel(format!(
+                    "sort_recorded: cuMemcpyDtoDAsync (output_d_num_rows) failed: {:?}",
+                    res
+                )));
+            }
+        }
+
+        // Step 5: record post-preflight fresh writes.
         rec.write_post_preflight_fresh(&indices_a);
         rec.write_post_preflight_fresh(&indices_b);
         rec.write_post_preflight_fresh(&keys_a);
@@ -5401,15 +5502,10 @@ impl super::CudaKernelProvider {
         rec.write_post_preflight_fresh(&d_hist);
         rec.write_post_preflight_fresh(&d_prefix);
         rec.write_post_preflight_fresh(&d_ranks);
+        rec.write_post_preflight_fresh(&output_d_num_rows);
         for dst_col in &dst_cols {
             rec.write_post_preflight_fresh(dst_col);
         }
-        // `output_d_num_rows` was populated synchronously via
-        // htod_sync_copy_into; no launch_stream kernel touches
-        // it. Recording would queue a wait-event for no
-        // reason. Leaving it unrecorded is correct — its drop
-        // races nothing.
-        let _ = &mut output_d_num_rows;
 
         rec.commit(runtime)
             .map_err(|e| XlogError::Kernel(format!("sort_recorded: commit failed: {}", e)))?;
