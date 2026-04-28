@@ -4,6 +4,7 @@ pub mod arrow_device;
 pub mod cuda_compat;
 pub mod device;
 pub mod device_pool;
+pub mod device_runtime;
 pub mod dlpack;
 pub mod kernel_manifest_data;
 pub mod memory;
@@ -24,7 +25,7 @@ pub use cuda_compat::{
 pub use device::CudaDevice;
 pub use device_pool::GpuDevicePool;
 pub use dlpack::{DLManagedTensor, DlpackManagedTensor, DlpackTable};
-pub use memory::{CudaBuffer, CudaColumn, GpuMemoryManager};
+pub use memory::{CudaBuffer, CudaColumn, GpuMemoryManager, RuntimeAllocBlock};
 pub use multi_gpu_memory::MultiGpuMemoryManager;
 pub use provider::{
     circuit_kernels, dedup_kernels, filter_kernels, groupby_kernels, ilp_kernels, join_kernels,

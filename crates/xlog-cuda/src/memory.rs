@@ -13,6 +13,7 @@ use xlog_core::{MemoryBudget, Result, Schema, XlogError};
 
 use crate::arrow_device::ArrowDeviceImport;
 use crate::cuda_compat::{AsKernelParam, DeviceParamStorage, IntoKernelParamStorage};
+use crate::device_runtime::{AllocTag, DeviceBlock, ResourceError, StreamId, XlogDeviceRuntime};
 use crate::dlpack::DlpackManagedTensor;
 use crate::CudaDevice;
 
@@ -20,6 +21,32 @@ use crate::CudaDevice;
 ///
 /// Tracks allocated GPU memory and enforces a memory budget.
 /// When the budget would be exceeded, returns `XlogError::ResourceExhausted`.
+///
+/// # v0.6 device-runtime routing (opt-in)
+///
+/// Constructing via [`GpuMemoryManager::with_runtime`] attaches an
+/// [`XlogDeviceRuntime`] that mediates allocations through the v0.6
+/// resource stack (e.g., `GlobalDeviceBudget` → `LoggingResource` →
+/// `AsyncCudaResource`). When attached:
+///   * [`GpuMemoryManager::alloc::<T>`] routes the underlying
+///     allocation through the runtime and produces a typed view via
+///     cudarc's `upgrade_device_ptr::<T>`. The returned
+///     [`TrackedCudaSlice`] frees through the runtime on drop.
+///   * [`GpuMemoryManager::alloc_raw`] is the explicit raw-bytes
+///     entry point (no typed view), also runtime-routed.
+/// Both budgets apply: the manager's local `MemoryBudget` AND any
+/// `GlobalDeviceBudget` stacked above the runtime's underlying
+/// resource.
+///
+/// When the manager is constructed via [`GpuMemoryManager::new`]
+/// (no runtime attached), `alloc::<T>` and the rest of the public
+/// API behave bit-for-bit identically to pre-migration: cudarc's
+/// `device.alloc::<T>(len)` allocates and `cudarc` frees on drop.
+/// `alloc_raw` returns `XlogError::Kernel` when no runtime is
+/// attached (no silent fallback). `CudaKernelProvider::new`
+/// continues to construct the manager via `new` for now;
+/// runtime-routed providers are an opt-in through `with_runtime`
+/// at construction sites that need it.
 pub struct GpuMemoryManager {
     /// The CUDA device for memory operations
     device: Arc<CudaDevice>,
@@ -27,14 +54,50 @@ pub struct GpuMemoryManager {
     budget: MemoryBudget,
     /// Currently allocated bytes (tracked atomically for thread safety)
     allocated: AtomicU64,
+    /// Optional v0.6 device runtime. When set, [`alloc_raw`]
+    /// reserves through the runtime's resource stack in addition
+    /// to enforcing the local budget; both must accept for the
+    /// allocation to proceed.
+    runtime: Option<Arc<XlogDeviceRuntime>>,
 }
 
-/// A `CudaSlice` that automatically updates `GpuMemoryManager` allocation tracking on drop.
+/// Selects which allocator owns the underlying device memory of a
+/// [`TrackedCudaSlice`]. Internal — surfaced only via the methods
+/// on `TrackedCudaSlice`. Migrated allocations carry `Runtime`
+/// backing; legacy allocations stay on `Cudarc`.
+enum Backing {
+    /// Legacy: cudarc owns the slice. The inner `CudaSlice<T>` is
+    /// the actual handle returned by `device.alloc::<T>(..)`, and
+    /// dropping it invokes cudarc's free path. The
+    /// `TrackedCudaSlice` `Drop` impl runs that drop explicitly so
+    /// the timing is identical to pre-migration behavior.
+    Cudarc,
+    /// v0.6 runtime-routed: the [`XlogDeviceRuntime`] owns the
+    /// allocation via its resource stack, and the inner
+    /// `CudaSlice<T>` is a typed view created by
+    /// `upgrade_device_ptr::<T>` over the runtime's raw pointer.
+    /// On drop, the inner view must be **forgotten** (cudarc must
+    /// not free) and the runtime must be told to deallocate the
+    /// `DeviceBlock`. Order of operations matters: deallocate the
+    /// block first, then forget the view, so the runtime sees the
+    /// block in its `live` map.
+    Runtime {
+        runtime: Arc<XlogDeviceRuntime>,
+        block: Option<DeviceBlock>,
+    },
+}
+
+/// A `CudaSlice` that automatically updates `GpuMemoryManager`
+/// allocation tracking on drop. Inner slice is wrapped in
+/// `ManuallyDrop` so the [`Backing`] enum can choose between
+/// cudarc-side free (legacy) and runtime-side deallocate (migrated)
+/// without producing a double-free.
 pub struct TrackedCudaSlice<T: cudarc::driver::DeviceRepr> {
     bytes: u64,
     manager: Arc<GpuMemoryManager>,
-    inner: CudaSlice<T>,
+    inner: ManuallyDrop<CudaSlice<T>>,
     raw_ptr: cudarc::driver::sys::CUdeviceptr,
+    backing: Backing,
 }
 
 impl<T: cudarc::driver::DeviceRepr> Deref for TrackedCudaSlice<T> {
@@ -66,7 +129,9 @@ impl<T: cudarc::driver::DeviceRepr> DevicePtr<T> for TrackedCudaSlice<T> {
         &'a self,
         stream: &'a CudaStream,
     ) -> (cudarc::driver::sys::CUdeviceptr, SyncOnDrop<'a>) {
-        DevicePtr::device_ptr(&self.inner, stream)
+        // Explicit `&*` deref through ManuallyDrop — the trait
+        // method is not auto-resolved through the wrapper.
+        DevicePtr::device_ptr(&*self.inner, stream)
     }
 }
 
@@ -75,7 +140,7 @@ impl<T: cudarc::driver::DeviceRepr> DevicePtrMut<T> for TrackedCudaSlice<T> {
         &'a mut self,
         stream: &'a CudaStream,
     ) -> (cudarc::driver::sys::CUdeviceptr, SyncOnDrop<'a>) {
-        DevicePtrMut::device_ptr_mut(&mut self.inner, stream)
+        DevicePtrMut::device_ptr_mut(&mut *self.inner, stream)
     }
 }
 
@@ -90,9 +155,20 @@ impl<T: cudarc::driver::DeviceRepr> TrackedCudaSlice<T> {
 
     /// Reinterpret this typed allocation as a raw byte allocation.
     ///
-    /// This is a zero-copy conversion used by XLOG's columnar `CudaBuffer` representation, which
-    /// stores device memory as untyped bytes + a schema.
+    /// This is a zero-copy conversion used by XLOG's columnar
+    /// `CudaBuffer` representation, which stores device memory as
+    /// untyped bytes + a schema. The conversion preserves the
+    /// underlying [`Backing`] — runtime-routed slices remain
+    /// runtime-routed, legacy cudarc slices remain cudarc-routed —
+    /// so deallocation continues to match the original allocator.
     pub fn into_bytes(self) -> TrackedCudaSlice<u8> {
+        // Wrap `self` in `ManuallyDrop` so its `Drop` impl never
+        // runs — we are doing the cleanup manually below by either
+        // (a) leaving the original `inner` forgotten and reusing
+        // its `backing` (Runtime mode), or (b) leaving the original
+        // `inner` forgotten while the new u8 view takes ownership
+        // via `upgrade_device_ptr` (Cudarc mode — same dance as
+        // the pre-migration code).
         let this = ManuallyDrop::new(self);
         let bytes = this.bytes;
         let manager = Arc::clone(&this.manager);
@@ -102,7 +178,24 @@ impl<T: cudarc::driver::DeviceRepr> TrackedCudaSlice<T> {
             .try_into()
             .expect("TrackedCudaSlice byte size must fit into usize");
 
-        let inner = unsafe {
+        // SAFETY: `this` is `ManuallyDrop`, so its destructor will
+        // not run. We bit-copy `backing` out of the original; the
+        // original location is forgotten along with the rest of
+        // `this`. This is sound because each field is owned and not
+        // touched again.
+        let backing: Backing = unsafe { std::ptr::read(&this.backing) };
+
+        // SAFETY: the runtime / cudarc-side memory is still live —
+        // the original `inner` ManuallyDrop never had its
+        // destructor called, so cudarc has not freed. The new
+        // `CudaSlice<u8>` is a typed view over the same bytes.
+        // For Cudarc backing the new view will free on drop (one
+        // alloc, one free, balanced — same as pre-migration).
+        // For Runtime backing the new view will be `mem::forget`
+        // -ed by the new `Drop` impl, and the runtime's
+        // `deallocate(block)` (carried in `backing`) is the sole
+        // free path.
+        let new_inner = unsafe {
             manager
                 .device
                 .inner()
@@ -112,8 +205,9 @@ impl<T: cudarc::driver::DeviceRepr> TrackedCudaSlice<T> {
         TrackedCudaSlice {
             bytes,
             manager,
-            inner,
+            inner: ManuallyDrop::new(new_inner),
             raw_ptr: ptr,
+            backing,
         }
     }
 }
@@ -138,7 +232,7 @@ impl<'a, T: cudarc::driver::DeviceRepr> IntoKernelParamStorage for &'a TrackedCu
     type Storage = DeviceParamStorage<'a>;
 
     fn into_kernel_param_storage(self) -> Self::Storage {
-        let (ptr, sync) = DevicePtr::device_ptr(&self.inner, self.inner.stream());
+        let (ptr, sync) = DevicePtr::device_ptr(&*self.inner, self.inner.stream());
         DeviceParamStorage::synced(ptr, sync)
     }
 }
@@ -148,7 +242,7 @@ impl<'a, T: cudarc::driver::DeviceRepr> IntoKernelParamStorage for &'a mut Track
 
     fn into_kernel_param_storage(self) -> Self::Storage {
         let stream = self.inner.stream().clone();
-        let (ptr, sync) = DevicePtrMut::device_ptr_mut(&mut self.inner, &stream);
+        let (ptr, sync) = DevicePtrMut::device_ptr_mut(&mut *self.inner, &stream);
         std::mem::forget(sync);
         DeviceParamStorage::unsynced(ptr)
     }
@@ -156,6 +250,25 @@ impl<'a, T: cudarc::driver::DeviceRepr> IntoKernelParamStorage for &'a mut Track
 
 impl<T: cudarc::driver::DeviceRepr> Drop for TrackedCudaSlice<T> {
     fn drop(&mut self) {
+        match &mut self.backing {
+            Backing::Cudarc => {
+                // SAFETY: drop runs at most once per slice, and the
+                // inner CudaSlice<T> has not been moved out by any
+                // method (`into_bytes` consumes `self` by value and
+                // leaves the original ManuallyDrop forgotten).
+                unsafe { ManuallyDrop::drop(&mut self.inner) };
+            }
+            Backing::Runtime { runtime, block } => {
+                // Runtime owns the underlying memory. Tell it to
+                // deallocate the block; the inner `CudaSlice<T>` is
+                // a typed view that must NOT free on its own,
+                // which `ManuallyDrop` ensures by simply not
+                // calling its destructor here.
+                if let Some(block) = block.take() {
+                    let _ = runtime.deallocate(block);
+                }
+            }
+        }
         self.manager.record_free(self.bytes);
     }
 }
@@ -171,7 +284,40 @@ impl GpuMemoryManager {
             device,
             budget,
             allocated: AtomicU64::new(0),
+            runtime: None,
         }
+    }
+
+    /// Like [`new`], but additionally attaches a v0.6
+    /// [`XlogDeviceRuntime`]. The runtime mediates **both**
+    /// [`alloc::<T>`](Self::alloc) and [`alloc_raw`](Self::alloc_raw)
+    /// through the v0.6 resource stack: typed `alloc::<T>` returns a
+    /// [`TrackedCudaSlice<T>`] whose underlying memory is owned by
+    /// the runtime (typed view via cudarc's `upgrade_device_ptr::<T>`,
+    /// freed through the runtime on drop). The legacy cudarc path is
+    /// only used when the manager is built via [`new`] (no runtime
+    /// attached). Provider construction does not yet require the
+    /// runtime; callers that want runtime-routed allocations opt in
+    /// here.
+    pub fn with_runtime(
+        device: Arc<CudaDevice>,
+        budget: MemoryBudget,
+        runtime: Arc<XlogDeviceRuntime>,
+    ) -> Self {
+        Self {
+            device,
+            budget,
+            allocated: AtomicU64::new(0),
+            runtime: Some(runtime),
+        }
+    }
+
+    /// Borrow the attached device runtime, if any. `None` when the
+    /// manager was constructed via [`new`]. Test/diagnostic
+    /// accessor; production call sites that need the runtime own
+    /// it directly.
+    pub fn runtime(&self) -> Option<&Arc<XlogDeviceRuntime>> {
+        self.runtime.as_ref()
     }
 
     /// Allocate GPU memory for `len` elements of type `T`
@@ -185,6 +331,17 @@ impl GpuMemoryManager {
     /// # Errors
     /// - `XlogError::ResourceExhausted` if allocation would exceed budget
     /// - `XlogError::Kernel` if CUDA allocation fails
+    ///
+    /// # v0.6 routing
+    /// When the manager has an attached [`XlogDeviceRuntime`]
+    /// (constructed via [`with_runtime`]), the underlying allocation
+    /// is routed through the runtime's resource stack and a typed
+    /// view is created via cudarc's `upgrade_device_ptr::<T>` over
+    /// the runtime's raw pointer. The returned [`TrackedCudaSlice`]
+    /// frees through the runtime on drop. Without a runtime
+    /// attached, the legacy cudarc `alloc::<T>` path is used and
+    /// drop frees through cudarc — bit-for-bit identical to
+    /// pre-migration behavior.
     pub fn alloc<T: cudarc::driver::DeviceRepr>(
         self: &Arc<Self>,
         len: usize,
@@ -215,9 +372,93 @@ impl GpuMemoryManager {
             }
         }
 
-        // Perform allocation
-        // SAFETY: We have reserved budget atomically and the device is valid.
-        // cudarc's alloc returns properly aligned memory for type T.
+        if let Some(runtime) = &self.runtime {
+            // Zero-byte allocations (empty Vec, empty buffer) are
+            // legitimate in production code. The v0.6 resource
+            // stack rejects zero-byte requests by contract
+            // (DirectCudaResource and AsyncCudaResource both error
+            // on `bytes == 0` because `cuMemAlloc(0)` is undefined
+            // behavior in the CUDA driver). Cudarc's `alloc::<T>(0)`
+            // does the right thing — returns an empty CudaSlice<T>
+            // without calling the driver — so route zero-byte
+            // requests through the legacy path even when a runtime
+            // is attached. The resulting slice carries
+            // `Backing::Cudarc`; its drop is a no-op against
+            // cudarc's empty handle.
+            //
+            // `len == 0` and `bytes == 0` are equivalent here only
+            // if `T` has nonzero size (the common case). For
+            // zero-sized types (rare but valid in Rust) `bytes`
+            // would also be 0 regardless of `len`; the cudarc empty
+            // path handles both consistently.
+            if bytes == 0 {
+                let slice = unsafe {
+                    self.device.inner().alloc::<T>(len).map_err(|e| {
+                        self.allocated.fetch_sub(bytes, Ordering::SeqCst);
+                        XlogError::Kernel(format!("GPU allocation failed (zero-byte): {}", e))
+                    })?
+                };
+                let (raw_ptr, sync) = DevicePtr::device_ptr(&slice, slice.stream());
+                std::mem::forget(sync);
+                return Ok(TrackedCudaSlice {
+                    bytes,
+                    manager: Arc::clone(self),
+                    inner: ManuallyDrop::new(slice),
+                    raw_ptr,
+                    backing: Backing::Cudarc,
+                });
+            }
+
+            // v0.6 path: route through the runtime resource stack.
+            // Convert checked: `bytes` is u64 from
+            // `len * size_of::<T>()`, and the runtime trait surface
+            // uses `usize`. On 64-bit targets this is lossless; on
+            // 32-bit a stray `bytes as usize` would silently
+            // truncate and desync manager accounting (which still
+            // tracks the full u64) from the runtime's view. Surface
+            // the overflow as `XlogError::Kernel` and roll back the
+            // local reservation so the manager stays consistent.
+            let bytes_usize = match usize::try_from(bytes) {
+                Ok(v) => v,
+                Err(_) => {
+                    self.allocated.fetch_sub(bytes, Ordering::SeqCst);
+                    return Err(XlogError::Kernel(format!(
+                        "GPU allocation size {} bytes exceeds platform usize",
+                        bytes
+                    )));
+                }
+            };
+            let block = match runtime.allocate(bytes_usize, StreamId::DEFAULT, AllocTag::UNTAGGED) {
+                Ok(b) => b,
+                Err(e) => {
+                    self.allocated.fetch_sub(bytes, Ordering::SeqCst);
+                    return Err(map_resource_error(e));
+                }
+            };
+            let raw_ptr = block.ptr;
+            // SAFETY: `block.ptr` is a live device pointer of size
+            // `bytes` returned by the runtime; `len * size_of::<T>()`
+            // == `bytes` by construction. The resulting CudaSlice<T>
+            // is a typed view; the `Backing::Runtime` Drop branch
+            // forgets it (via ManuallyDrop + no destructor call) so
+            // cudarc never frees — the runtime's deallocate is the
+            // sole free path.
+            let typed_view = unsafe { self.device.inner().upgrade_device_ptr::<T>(raw_ptr, len) };
+            return Ok(TrackedCudaSlice {
+                bytes,
+                manager: Arc::clone(self),
+                inner: ManuallyDrop::new(typed_view),
+                raw_ptr,
+                backing: Backing::Runtime {
+                    runtime: Arc::clone(runtime),
+                    block: Some(block),
+                },
+            });
+        }
+
+        // Legacy path: cudarc allocator. SAFETY: budget reserved
+        // atomically above and the device is valid; cudarc's
+        // alloc returns properly aligned memory for type T.
         let slice = unsafe {
             self.device.inner().alloc::<T>(len).map_err(|e| {
                 // Rollback the allocation tracking if CUDA allocation fails
@@ -231,8 +472,9 @@ impl GpuMemoryManager {
         Ok(TrackedCudaSlice {
             bytes,
             manager: Arc::clone(self),
-            inner: slice,
+            inner: ManuallyDrop::new(slice),
             raw_ptr,
+            backing: Backing::Cudarc,
         })
     }
 
@@ -284,6 +526,82 @@ impl GpuMemoryManager {
         self.allocated.fetch_sub(bytes, Ordering::SeqCst);
     }
 
+    /// v0.6 device-runtime entry point: allocate `bytes` raw bytes
+    /// through the attached [`XlogDeviceRuntime`].
+    ///
+    /// Returns a [`RuntimeAllocBlock`] that owns the allocation. On
+    /// drop, the block deallocates through the runtime and updates
+    /// both the manager's local `allocated` counter and the
+    /// runtime's bookkeeping.
+    ///
+    /// Both budgets apply: the manager's local
+    /// `MemoryBudget::device_bytes` AND any `GlobalDeviceBudget`
+    /// stacked above the runtime's underlying resource. Either
+    /// rejecting the request returns an `XlogError`. On runtime
+    /// rejection the local reservation is rolled back so subsequent
+    /// allocations see consistent state.
+    ///
+    /// # Errors
+    /// * `XlogError::Kernel` if no runtime is attached.
+    /// * `XlogError::ResourceExhausted` if the local budget cannot
+    ///   accommodate the request.
+    /// * `XlogError::Kernel` (with the resource error rendered)
+    ///   if the runtime rejects the request — including the
+    ///   runtime's own `OutOfBudget`, which is mapped here so
+    ///   callers see a single error surface.
+    pub fn alloc_raw(self: &Arc<Self>, bytes: usize, tag: AllocTag) -> Result<RuntimeAllocBlock> {
+        let runtime = self.runtime.as_ref().ok_or_else(|| {
+            XlogError::Kernel(
+                "GpuMemoryManager::alloc_raw called without an attached XlogDeviceRuntime; \
+                 construct via with_runtime to enable runtime routing"
+                    .to_string(),
+            )
+        })?;
+
+        let bytes_u64 = bytes as u64;
+
+        // Reserve against the local budget first (preserves the
+        // pre-existing semantics for callers that mix alloc and
+        // alloc_raw under a single MemoryBudget).
+        loop {
+            let current = self.allocated.load(Ordering::SeqCst);
+            let new_val = current.saturating_add(bytes_u64);
+            if new_val > self.budget.device_bytes {
+                return Err(XlogError::ResourceExhausted {
+                    context: "GPU memory allocation (runtime path)".to_string(),
+                    estimated_bytes: bytes_u64,
+                    budget_bytes: self.budget.device_bytes,
+                });
+            }
+            if self
+                .allocated
+                .compare_exchange(current, new_val, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                break;
+            }
+        }
+
+        // Route through the runtime. Stream is the runtime's
+        // default for now; once stream-aware kernel launches start
+        // routing through alloc_raw the caller will pass an
+        // explicit StreamId.
+        match runtime.allocate(bytes, StreamId::DEFAULT, tag) {
+            Ok(block) => Ok(RuntimeAllocBlock {
+                bytes: bytes_u64,
+                manager: Arc::clone(self),
+                runtime: Arc::clone(runtime),
+                block: Some(block),
+            }),
+            Err(e) => {
+                // Roll back local reservation; runtime did not
+                // accept the bytes.
+                self.allocated.fetch_sub(bytes_u64, Ordering::SeqCst);
+                Err(map_resource_error(e))
+            }
+        }
+    }
+
     /// Get remaining budget in bytes
     pub fn remaining_bytes(&self) -> u64 {
         let allocated = self.allocated.load(Ordering::SeqCst);
@@ -298,6 +616,120 @@ impl GpuMemoryManager {
     /// RAII-based tracking is implemented.
     pub fn reset_tracking(&self) {
         self.allocated.store(0, Ordering::SeqCst);
+    }
+}
+
+fn map_resource_error(e: ResourceError) -> XlogError {
+    match e {
+        ResourceError::OutOfBudget {
+            requested,
+            remaining,
+        } => XlogError::ResourceExhausted {
+            context: format!(
+                "device-runtime budget refused allocation ({} bytes, {} remaining)",
+                requested, remaining
+            ),
+            estimated_bytes: requested as u64,
+            budget_bytes: (requested + remaining) as u64,
+        },
+        ResourceError::Driver(msg) => XlogError::Kernel(format!("device-runtime driver: {}", msg)),
+        ResourceError::StreamMisuse(msg) => {
+            XlogError::Kernel(format!("device-runtime stream misuse: {}", msg))
+        }
+        ResourceError::UseAfterFree { generation } => XlogError::Kernel(format!(
+            "device-runtime use-after-free on generation {:?}",
+            generation
+        )),
+        ResourceError::OutOfBounds { generation } => XlogError::Kernel(format!(
+            "device-runtime out-of-bounds on generation {:?}",
+            generation
+        )),
+    }
+}
+
+/// Owned handle for a raw allocation routed through
+/// [`GpuMemoryManager::alloc_raw`] / the v0.6 device runtime.
+///
+/// Manual `Debug` impl below — the runtime / manager handles
+/// inside this struct are not `Debug`, so a derive would not
+/// compile.
+///
+/// On drop, deallocates through the runtime (returning the bytes
+/// to the runtime's bookkeeping — pending if the runtime's backend
+/// is async) and decrements the manager's local `allocated`
+/// counter. The block exposes only the raw device pointer and
+/// byte length; typed views are the caller's responsibility (this
+/// path is not yet wired into the typed `CudaSlice<T>` API — that
+/// is a follow-up slice).
+pub struct RuntimeAllocBlock {
+    bytes: u64,
+    manager: Arc<GpuMemoryManager>,
+    runtime: Arc<XlogDeviceRuntime>,
+    /// `None` after Drop fires; `Some(_)` while the block is live.
+    /// Wrapped in Option so `Drop` can move the block out and pass
+    /// it by value to `runtime.deallocate`.
+    block: Option<DeviceBlock>,
+}
+
+impl RuntimeAllocBlock {
+    /// Raw device pointer for this allocation. Live until the
+    /// block is dropped.
+    pub fn ptr(&self) -> u64 {
+        self.block
+            .as_ref()
+            .expect("RuntimeAllocBlock used after drop")
+            .ptr
+    }
+
+    /// Allocation size in bytes.
+    pub fn bytes(&self) -> usize {
+        self.bytes as usize
+    }
+
+    /// Borrow the underlying [`DeviceBlock`] metadata. Test/
+    /// diagnostic accessor.
+    pub fn device_block(&self) -> &DeviceBlock {
+        self.block
+            .as_ref()
+            .expect("RuntimeAllocBlock used after drop")
+    }
+}
+
+impl std::fmt::Debug for RuntimeAllocBlock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut dbg = f.debug_struct("RuntimeAllocBlock");
+        dbg.field("bytes", &self.bytes);
+        match &self.block {
+            Some(b) => {
+                dbg.field("ptr", &format_args!("{:#x}", b.ptr));
+                dbg.field("device_ordinal", &b.device_ordinal);
+                dbg.field("alloc_stream", &b.alloc_stream);
+                dbg.field("tag", &b.tag);
+                dbg.field("generation", &b.generation);
+                dbg.field("state", &b.state);
+            }
+            None => {
+                dbg.field("block", &"<dropped>");
+            }
+        }
+        dbg.finish()
+    }
+}
+
+impl Drop for RuntimeAllocBlock {
+    fn drop(&mut self) {
+        if let Some(block) = self.block.take() {
+            // Runtime deallocate may queue an async free (see
+            // AsyncCudaResource); the local manager counter
+            // releases immediately because the block.bytes are
+            // no longer "live from the manager's perspective".
+            // Runtime-side bookkeeping converges after
+            // `runtime.reap_pending()`.
+            let _ = self.runtime.deallocate(block);
+            self.manager
+                .allocated
+                .fetch_sub(self.bytes, Ordering::SeqCst);
+        }
     }
 }
 
