@@ -14,9 +14,10 @@
 //! and is covered by the `legacy_*` test below.
 //!
 //! `CudaKernelProvider`'s public surface is unchanged here; the
-//! tests construct managers directly. Wiring providers to the
-//! runtime is a later slice that adds an opt-in
-//! `CudaKernelProvider` constructor.
+//! tests construct managers directly to exercise the manager-level
+//! routing in isolation. Provider-level routing through the
+//! `CudaKernelProvider::with_runtime` opt-in constructor is
+//! covered by `test_provider_with_runtime.rs`.
 //!
 //! What these tests assert:
 //!   1. `alloc_raw` and `alloc::<T>` (u8 + non-byte) both produce

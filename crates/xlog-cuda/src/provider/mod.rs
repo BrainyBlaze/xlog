@@ -830,11 +830,22 @@ impl CudaKernelProvider {
     /// attached via [`GpuMemoryManager::with_runtime`].
     ///
     /// Equivalent to [`Self::new`] in every respect — same kernel
-    /// loading, same field initialization — but errors out
-    /// explicitly if the supplied manager has no runtime, so the
-    /// caller cannot accidentally compose a runtime-routed manager
-    /// with the legacy provider construction path and silently
-    /// keep using the cudarc-default allocator.
+    /// loading, same field initialization — but **rejects** managers
+    /// that lack a runtime. This guards against the misconfiguration
+    /// in which a caller asks for runtime-routed provider semantics
+    /// (by calling `with_runtime`) but supplies a legacy manager
+    /// built via [`GpuMemoryManager::new`]; without the check, the
+    /// resulting provider would silently keep using the cudarc
+    /// default allocator and the runtime budget/logging stack would
+    /// never observe the allocations the caller expected to be
+    /// routed through it.
+    ///
+    /// Note: a runtime-routed manager passed to [`Self::new`] still
+    /// routes correctly — `alloc::<T>` and `alloc_raw` consult
+    /// `memory.runtime()` regardless of which provider constructor
+    /// was used. `with_runtime` exists for callers that want the
+    /// requirement enforced at construction time, not for
+    /// correctness of the routing itself.
     ///
     /// This is the **opt-in** runtime entry point for providers.
     /// `Self::new` continues to accept managers without a runtime
