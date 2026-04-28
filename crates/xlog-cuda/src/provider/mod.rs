@@ -441,6 +441,9 @@ pub mod join_kernels {
     pub const HASH_JOIN_BUCKET_COUNT_V2: &str = "hash_join_bucket_count_v2";
     pub const HASH_JOIN_SCATTER_V2: &str = "hash_join_scatter_v2";
     pub const HASH_JOIN_PROBE_V2: &str = "hash_join_probe_v2";
+    pub const HASH_JOIN_PROBE_V2_COUNT_PER_ROW: &str = "hash_join_probe_v2_count_per_row";
+    pub const HASH_JOIN_PROBE_V2_MATERIALIZE: &str = "hash_join_probe_v2_materialize";
+    pub const HASH_JOIN_TOTAL_FROM_SCAN: &str = "hash_join_total_from_scan";
     pub const HASH_JOIN_SEMI: &str = "hash_join_semi";
     pub const HASH_JOIN_ANTI: &str = "hash_join_anti";
     pub const INIT_HASH_TABLE: &str = "init_hash_table";
