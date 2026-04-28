@@ -13,6 +13,7 @@ use xlog_core::{MemoryBudget, Result, Schema, XlogError};
 
 use crate::arrow_device::ArrowDeviceImport;
 use crate::cuda_compat::{AsKernelParam, DeviceParamStorage, IntoKernelParamStorage};
+use crate::device_runtime::{AllocTag, DeviceBlock, ResourceError, StreamId, XlogDeviceRuntime};
 use crate::dlpack::DlpackManagedTensor;
 use crate::CudaDevice;
 
@@ -20,6 +21,20 @@ use crate::CudaDevice;
 ///
 /// Tracks allocated GPU memory and enforces a memory budget.
 /// When the budget would be exceeded, returns `XlogError::ResourceExhausted`.
+///
+/// # v0.6 device-runtime routing (opt-in)
+///
+/// Constructing via [`GpuMemoryManager::with_runtime`] attaches an
+/// [`XlogDeviceRuntime`] that mediates allocations through the v0.6
+/// resource stack (e.g., `GlobalDeviceBudget` → `LoggingResource` →
+/// `AsyncCudaResource`). Only the new [`GpuMemoryManager::alloc_raw`]
+/// entry point routes through the runtime in this slice; the
+/// existing `alloc::<T>` typed-slice path stays on the cudarc-default
+/// allocator unchanged. This preserves the public API while letting
+/// callers exercise the runtime stack end-to-end on a single
+/// well-defined choke point. Subsequent slices migrate more
+/// allocation sites once `alloc_raw` is certified under existing
+/// workloads.
 pub struct GpuMemoryManager {
     /// The CUDA device for memory operations
     device: Arc<CudaDevice>,
@@ -27,6 +42,11 @@ pub struct GpuMemoryManager {
     budget: MemoryBudget,
     /// Currently allocated bytes (tracked atomically for thread safety)
     allocated: AtomicU64,
+    /// Optional v0.6 device runtime. When set, [`alloc_raw`]
+    /// reserves through the runtime's resource stack in addition
+    /// to enforcing the local budget; both must accept for the
+    /// allocation to proceed.
+    runtime: Option<Arc<XlogDeviceRuntime>>,
 }
 
 /// A `CudaSlice` that automatically updates `GpuMemoryManager` allocation tracking on drop.
@@ -171,7 +191,35 @@ impl GpuMemoryManager {
             device,
             budget,
             allocated: AtomicU64::new(0),
+            runtime: None,
         }
+    }
+
+    /// Like [`new`], but additionally attaches a v0.6
+    /// [`XlogDeviceRuntime`]. The runtime mediates [`alloc_raw`]
+    /// through the v0.6 resource stack while the existing
+    /// `alloc::<T>` path remains on the cudarc-default allocator.
+    /// Provider construction does not yet require the runtime;
+    /// callers that want runtime-routed allocations opt in here.
+    pub fn with_runtime(
+        device: Arc<CudaDevice>,
+        budget: MemoryBudget,
+        runtime: Arc<XlogDeviceRuntime>,
+    ) -> Self {
+        Self {
+            device,
+            budget,
+            allocated: AtomicU64::new(0),
+            runtime: Some(runtime),
+        }
+    }
+
+    /// Borrow the attached device runtime, if any. `None` when the
+    /// manager was constructed via [`new`]. Test/diagnostic
+    /// accessor; production call sites that need the runtime own
+    /// it directly.
+    pub fn runtime(&self) -> Option<&Arc<XlogDeviceRuntime>> {
+        self.runtime.as_ref()
     }
 
     /// Allocate GPU memory for `len` elements of type `T`
@@ -284,6 +332,82 @@ impl GpuMemoryManager {
         self.allocated.fetch_sub(bytes, Ordering::SeqCst);
     }
 
+    /// v0.6 device-runtime entry point: allocate `bytes` raw bytes
+    /// through the attached [`XlogDeviceRuntime`].
+    ///
+    /// Returns a [`RuntimeAllocBlock`] that owns the allocation. On
+    /// drop, the block deallocates through the runtime and updates
+    /// both the manager's local `allocated` counter and the
+    /// runtime's bookkeeping.
+    ///
+    /// Both budgets apply: the manager's local
+    /// `MemoryBudget::device_bytes` AND any `GlobalDeviceBudget`
+    /// stacked above the runtime's underlying resource. Either
+    /// rejecting the request returns an `XlogError`. On runtime
+    /// rejection the local reservation is rolled back so subsequent
+    /// allocations see consistent state.
+    ///
+    /// # Errors
+    /// * `XlogError::Kernel` if no runtime is attached.
+    /// * `XlogError::ResourceExhausted` if the local budget cannot
+    ///   accommodate the request.
+    /// * `XlogError::Kernel` (with the resource error rendered)
+    ///   if the runtime rejects the request — including the
+    ///   runtime's own `OutOfBudget`, which is mapped here so
+    ///   callers see a single error surface.
+    pub fn alloc_raw(self: &Arc<Self>, bytes: usize, tag: AllocTag) -> Result<RuntimeAllocBlock> {
+        let runtime = self.runtime.as_ref().ok_or_else(|| {
+            XlogError::Kernel(
+                "GpuMemoryManager::alloc_raw called without an attached XlogDeviceRuntime; \
+                 construct via with_runtime to enable runtime routing"
+                    .to_string(),
+            )
+        })?;
+
+        let bytes_u64 = bytes as u64;
+
+        // Reserve against the local budget first (preserves the
+        // pre-existing semantics for callers that mix alloc and
+        // alloc_raw under a single MemoryBudget).
+        loop {
+            let current = self.allocated.load(Ordering::SeqCst);
+            let new_val = current.saturating_add(bytes_u64);
+            if new_val > self.budget.device_bytes {
+                return Err(XlogError::ResourceExhausted {
+                    context: "GPU memory allocation (runtime path)".to_string(),
+                    estimated_bytes: bytes_u64,
+                    budget_bytes: self.budget.device_bytes,
+                });
+            }
+            if self
+                .allocated
+                .compare_exchange(current, new_val, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                break;
+            }
+        }
+
+        // Route through the runtime. Stream is the runtime's
+        // default for now; once stream-aware kernel launches start
+        // routing through alloc_raw the caller will pass an
+        // explicit StreamId.
+        match runtime.allocate(bytes, StreamId::DEFAULT, tag) {
+            Ok(block) => Ok(RuntimeAllocBlock {
+                bytes: bytes_u64,
+                manager: Arc::clone(self),
+                runtime: Arc::clone(runtime),
+                block: Some(block),
+            }),
+            Err(e) => {
+                // Roll back local reservation; runtime did not
+                // accept the bytes.
+                self.allocated.fetch_sub(bytes_u64, Ordering::SeqCst);
+                Err(map_resource_error(e))
+            }
+        }
+    }
+
     /// Get remaining budget in bytes
     pub fn remaining_bytes(&self) -> u64 {
         let allocated = self.allocated.load(Ordering::SeqCst);
@@ -298,6 +422,120 @@ impl GpuMemoryManager {
     /// RAII-based tracking is implemented.
     pub fn reset_tracking(&self) {
         self.allocated.store(0, Ordering::SeqCst);
+    }
+}
+
+fn map_resource_error(e: ResourceError) -> XlogError {
+    match e {
+        ResourceError::OutOfBudget {
+            requested,
+            remaining,
+        } => XlogError::ResourceExhausted {
+            context: format!(
+                "device-runtime budget refused allocation ({} bytes, {} remaining)",
+                requested, remaining
+            ),
+            estimated_bytes: requested as u64,
+            budget_bytes: (requested + remaining) as u64,
+        },
+        ResourceError::Driver(msg) => XlogError::Kernel(format!("device-runtime driver: {}", msg)),
+        ResourceError::StreamMisuse(msg) => {
+            XlogError::Kernel(format!("device-runtime stream misuse: {}", msg))
+        }
+        ResourceError::UseAfterFree { generation } => XlogError::Kernel(format!(
+            "device-runtime use-after-free on generation {:?}",
+            generation
+        )),
+        ResourceError::OutOfBounds { generation } => XlogError::Kernel(format!(
+            "device-runtime out-of-bounds on generation {:?}",
+            generation
+        )),
+    }
+}
+
+/// Owned handle for a raw allocation routed through
+/// [`GpuMemoryManager::alloc_raw`] / the v0.6 device runtime.
+///
+/// Manual `Debug` impl below — the runtime / manager handles
+/// inside this struct are not `Debug`, so a derive would not
+/// compile.
+///
+/// On drop, deallocates through the runtime (returning the bytes
+/// to the runtime's bookkeeping — pending if the runtime's backend
+/// is async) and decrements the manager's local `allocated`
+/// counter. The block exposes only the raw device pointer and
+/// byte length; typed views are the caller's responsibility (this
+/// path is not yet wired into the typed `CudaSlice<T>` API — that
+/// is a follow-up slice).
+pub struct RuntimeAllocBlock {
+    bytes: u64,
+    manager: Arc<GpuMemoryManager>,
+    runtime: Arc<XlogDeviceRuntime>,
+    /// `None` after Drop fires; `Some(_)` while the block is live.
+    /// Wrapped in Option so `Drop` can move the block out and pass
+    /// it by value to `runtime.deallocate`.
+    block: Option<DeviceBlock>,
+}
+
+impl RuntimeAllocBlock {
+    /// Raw device pointer for this allocation. Live until the
+    /// block is dropped.
+    pub fn ptr(&self) -> u64 {
+        self.block
+            .as_ref()
+            .expect("RuntimeAllocBlock used after drop")
+            .ptr
+    }
+
+    /// Allocation size in bytes.
+    pub fn bytes(&self) -> usize {
+        self.bytes as usize
+    }
+
+    /// Borrow the underlying [`DeviceBlock`] metadata. Test/
+    /// diagnostic accessor.
+    pub fn device_block(&self) -> &DeviceBlock {
+        self.block
+            .as_ref()
+            .expect("RuntimeAllocBlock used after drop")
+    }
+}
+
+impl std::fmt::Debug for RuntimeAllocBlock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut dbg = f.debug_struct("RuntimeAllocBlock");
+        dbg.field("bytes", &self.bytes);
+        match &self.block {
+            Some(b) => {
+                dbg.field("ptr", &format_args!("{:#x}", b.ptr));
+                dbg.field("device_ordinal", &b.device_ordinal);
+                dbg.field("alloc_stream", &b.alloc_stream);
+                dbg.field("tag", &b.tag);
+                dbg.field("generation", &b.generation);
+                dbg.field("state", &b.state);
+            }
+            None => {
+                dbg.field("block", &"<dropped>");
+            }
+        }
+        dbg.finish()
+    }
+}
+
+impl Drop for RuntimeAllocBlock {
+    fn drop(&mut self) {
+        if let Some(block) = self.block.take() {
+            // Runtime deallocate may queue an async free (see
+            // AsyncCudaResource); the local manager counter
+            // releases immediately because the block.bytes are
+            // no longer "live from the manager's perspective".
+            // Runtime-side bookkeeping converges after
+            // `runtime.reap_pending()`.
+            let _ = self.runtime.deallocate(block);
+            self.manager
+                .allocated
+                .fetch_sub(self.bytes, Ordering::SeqCst);
+        }
     }
 }
 
