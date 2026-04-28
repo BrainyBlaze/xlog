@@ -28,6 +28,7 @@ mod ilp_exact;
 mod io;
 mod kernel_loading;
 pub mod kernel_paths;
+mod launch_safe;
 mod probabilistic;
 mod relational;
 mod transfer;

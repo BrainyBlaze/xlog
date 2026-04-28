@@ -153,6 +153,27 @@ impl<T: cudarc::driver::DeviceRepr> TrackedCudaSlice<T> {
         self.raw_ptr
     }
 
+    /// Borrow the underlying [`DeviceBlock`] for runtime-backed
+    /// allocations. Returns `None` for legacy cudarc-backed
+    /// slices ([`Backing::Cudarc`]) — those are not tracked by
+    /// the v0.6 device runtime and therefore have no
+    /// runtime-side block to record uses against.
+    ///
+    /// Callers (notably [`crate::launch::LaunchRecorder`]) use
+    /// this to attach cross-stream uses via
+    /// [`crate::device_runtime::XlogDeviceRuntime::record_block_use`].
+    /// A `None` return signals that the slice is on the legacy
+    /// path and the recorder cannot track its lifetime — callers
+    /// must either route the allocation through
+    /// [`GpuMemoryManager::with_runtime`] or accept that no
+    /// cross-stream safety applies to this buffer.
+    pub fn runtime_block(&self) -> Option<&crate::device_runtime::DeviceBlock> {
+        match &self.backing {
+            Backing::Cudarc => None,
+            Backing::Runtime { block, .. } => block.as_ref(),
+        }
+    }
+
     /// Reinterpret this typed allocation as a raw byte allocation.
     ///
     /// This is a zero-copy conversion used by XLOG's columnar
