@@ -411,6 +411,18 @@ impl DeviceMemoryResource for LoggingResource {
         });
         result
     }
+
+    fn record_block_use(&self, block: &DeviceBlock, use_stream: StreamId) -> ResourceResult<()> {
+        // Pass-through to the inner stream-ordered backend.
+        // No log record emitted: the launch builder calls this
+        // potentially many times per launch; recording each
+        // would balloon the log without telling the consumer
+        // anything they couldn't infer from Allocate/Deallocate
+        // pairs. If a future need arises, add a LogAction::Use
+        // variant rather than tagging this onto the existing
+        // shape.
+        self.inner.record_block_use(block, use_stream)
+    }
 }
 
 #[cfg(test)]

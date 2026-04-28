@@ -236,6 +236,30 @@ impl XlogDeviceRuntime {
             .expect("device-runtime resource poisoned")
             .reap_pending()
     }
+
+    /// Record that work has been (or is being) submitted on
+    /// `use_stream` that touches `block`. Forwards to the
+    /// underlying resource stack
+    /// (`GlobalDeviceBudget` → `LoggingResource` → `AsyncCudaResource`),
+    /// where the stream-ordered backend attaches a CUDA event so
+    /// `block.alloc_stream` waits on it before the queued
+    /// `cuMemFreeAsync` runs. This is the production-reachable
+    /// hook the future xlog launch builder will call for
+    /// `read` / `write` / `read_write` buffer args; until that
+    /// lands, callers that submit raw CUDA work on a stream
+    /// other than `block.alloc_stream` should call this directly.
+    /// See [`DeviceMemoryResource::record_block_use`] for the
+    /// underlying contract.
+    pub fn record_block_use(
+        &self,
+        block: &DeviceBlock,
+        use_stream: StreamId,
+    ) -> ResourceResult<()> {
+        self.resource
+            .lock()
+            .expect("device-runtime resource poisoned")
+            .record_block_use(block, use_stream)
+    }
 }
 
 #[cfg(test)]

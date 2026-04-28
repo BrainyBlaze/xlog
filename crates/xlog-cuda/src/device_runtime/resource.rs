@@ -207,4 +207,38 @@ pub trait DeviceMemoryResource: Send + Sync {
     fn reap_pending(&self) -> ResourceResult<()> {
         Ok(())
     }
+
+    /// Record that work has been (or is being) submitted on
+    /// `use_stream` that touches `block`'s bytes. Resources that
+    /// participate in cross-stream lifetime tracking (notably the
+    /// stream-ordered async backend) MUST attach a CUDA event from
+    /// `use_stream` to the block; on `deallocate(block)`, the
+    /// block's `alloc_stream` will wait on every recorded event
+    /// before queueing the underlying free.
+    ///
+    /// The default implementation is a no-op — resources whose
+    /// free is not stream-ordered (or whose backend handles
+    /// cross-stream coordination differently) need not act.
+    /// `AsyncCudaResource` overrides; the `LoggingResource` and
+    /// `GlobalDeviceBudget` decorators forward to their inner.
+    ///
+    /// # Errors
+    ///   * [`ResourceError::UseAfterFree`] if `block` is not the
+    ///     block currently live at `block.ptr` (caller likely
+    ///     handed back a stale [`DeviceBlock`] whose generation
+    ///     no longer matches the live entry).
+    ///   * [`ResourceError::StreamMisuse`] if `use_stream` does
+    ///     not resolve in the resource's stream pool.
+    ///   * [`ResourceError::Driver`] for CUDA driver / event
+    ///     creation failures.
+    ///
+    /// Callers that bypass this API and submit cross-stream work
+    /// directly (raw `cuMemcpyDtoHAsync`, raw `Vec<*mut c_void>`
+    /// kernel launches that the launch builder did not see, etc.)
+    /// are responsible for their own cross-stream synchronization.
+    /// The resource cannot infer arbitrary external CUDA work.
+    fn record_block_use(&self, block: &DeviceBlock, use_stream: StreamId) -> ResourceResult<()> {
+        let _ = (block, use_stream);
+        Ok(())
+    }
 }

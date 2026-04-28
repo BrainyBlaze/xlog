@@ -201,8 +201,15 @@ fn managed_cross_stream_use_does_not_corrupt_reuse() {
             .expect("alloc A on s_alloc");
         let ptr_a = block_a.ptr;
 
-        // Step 3: initialize A's contents to zeros via an
-        // s_alloc-bound memset.
+        // Step 3: queue a baseline memset on s_alloc. This is NOT
+        // a duplicate of the PATTERN_B write below — it adds
+        // bounded latency to s_alloc so the cross-stream race in
+        // step 4 is observable in BOTH the managed (PATTERN_B
+        // wins via the wait chain) and the unmanaged
+        // (`#[ignore]`d) tests (PATTERN_USE wins by raceful
+        // ordering). Without this padding s_alloc finishes its
+        // free→alloc→memset_B chain before s_use's memset has a
+        // chance to land, masking the unmanaged contract.
         unsafe { memset_async(s_alloc.cu_stream(), ptr_a, 0x00, BYTES) };
 
         // Step 4: cross-stream queued memset of `PATTERN_USE` on
@@ -217,8 +224,8 @@ fn managed_cross_stream_use_does_not_corrupt_reuse() {
         // s_alloc will be made to wait on this event before the
         // queued cuMemFreeAsync runs.
         resource
-            .record_block_use(ptr_a, s_use_id)
-            .expect("record_block_use(ptr_a, s_use)");
+            .record_block_use(&block_a, s_use_id)
+            .expect("record_block_use(&block_a, s_use)");
 
         // Step 5: drop block A. `deallocate` enqueues
         // `s_alloc.wait(event)` (recorded above), THEN the slice
@@ -395,6 +402,8 @@ fn unmanaged_cross_stream_use_corrupts_reuse_by_design() {
             .expect("alloc A");
         let ptr_a = block_a.ptr;
 
+        // Latency-padding baseline on s_alloc — same role as in
+        // the managed test (see comment there).
         unsafe { memset_async(s_alloc.cu_stream(), ptr_a, 0x00, BYTES) };
         unsafe { memset_async(s_use_handle, ptr_a, PATTERN_USE, BYTES) };
 
