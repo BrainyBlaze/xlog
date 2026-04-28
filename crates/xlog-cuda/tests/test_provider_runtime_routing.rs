@@ -212,6 +212,173 @@ fn alloc_raw_rejected_by_local_budget_does_not_call_runtime() {
 }
 
 #[test]
+fn alloc_u8_via_runtime_records_in_sink_and_releases_on_drop() {
+    // Typed-slice path through the runtime: alloc::<u8>(len) on a
+    // manager built via with_runtime must produce a TrackedCudaSlice<u8>
+    // whose underlying allocation is owned by the runtime.
+    // Allocate, observe sink + counters, drop, reap, observe release.
+    let Some((manager, runtime, sink)) = build_stack() else {
+        return;
+    };
+
+    let len = 1024usize;
+    let slice = manager.alloc::<u8>(len).expect("alloc<u8> via runtime");
+    assert_eq!(slice.len(), len);
+    // Both counters reflect the allocation.
+    assert_eq!(manager.allocated_bytes(), len as u64);
+    assert_eq!(runtime.bytes_outstanding(), len);
+
+    let recs = sink.snapshot();
+    assert_eq!(recs.len(), 1, "expected 1 alloc record, got {:?}", recs);
+    assert_eq!(recs[0].action, LogAction::Allocate);
+    assert_eq!(recs[0].result, LogResult::Ok);
+    assert_eq!(recs[0].bytes, Some(len));
+
+    // Drop frees through the runtime (Backing::Runtime branch).
+    drop(slice);
+    assert_eq!(manager.allocated_bytes(), 0);
+    assert_eq!(
+        runtime.bytes_outstanding(),
+        len,
+        "async backend: runtime holds bytes pending until reap"
+    );
+
+    runtime.reap_pending().expect("reap");
+    assert_eq!(runtime.bytes_outstanding(), 0);
+
+    let recs = sink.snapshot();
+    assert!(
+        recs.iter().any(|r| r.action == LogAction::Deallocate),
+        "expected a Deallocate record after drop, got {:?}",
+        recs
+    );
+}
+
+#[test]
+fn alloc_non_byte_type_via_runtime_routes_correctly() {
+    // Non-byte (4-byte) element type: alloc::<u32>(len). Verifies
+    // that bytes accounting uses len * size_of::<T>() and that the
+    // typed view via upgrade_device_ptr::<u32> behaves correctly.
+    let Some((manager, runtime, sink)) = build_stack() else {
+        return;
+    };
+
+    let len = 256usize;
+    let bytes = len * std::mem::size_of::<u32>();
+    let slice = manager.alloc::<u32>(len).expect("alloc<u32> via runtime");
+    assert_eq!(slice.len(), len);
+    assert_eq!(manager.allocated_bytes(), bytes as u64);
+    assert_eq!(runtime.bytes_outstanding(), bytes);
+
+    let recs = sink.snapshot();
+    assert_eq!(recs.len(), 1);
+    assert_eq!(recs[0].bytes, Some(bytes));
+    assert_eq!(recs[0].result, LogResult::Ok);
+
+    drop(slice);
+    runtime.reap_pending().expect("reap");
+    assert_eq!(manager.allocated_bytes(), 0);
+    assert_eq!(runtime.bytes_outstanding(), 0);
+}
+
+#[test]
+fn into_bytes_preserves_runtime_backing() {
+    // A runtime-routed alloc::<u32>(N) converted into a u8 view via
+    // into_bytes must remain runtime-routed: drop should free
+    // through the runtime, not through cudarc, and counters must
+    // return to zero after reap.
+    let Some((manager, runtime, _sink)) = build_stack() else {
+        return;
+    };
+
+    let len = 128usize;
+    let bytes = len * std::mem::size_of::<u32>();
+    let typed = manager.alloc::<u32>(len).expect("alloc<u32> via runtime");
+    assert_eq!(runtime.bytes_outstanding(), bytes);
+
+    let as_bytes = typed.into_bytes();
+    // Bytes accounting unchanged: into_bytes is a reinterpretation,
+    // not a new allocation.
+    assert_eq!(manager.allocated_bytes(), bytes as u64);
+    assert_eq!(runtime.bytes_outstanding(), bytes);
+
+    drop(as_bytes);
+    runtime.reap_pending().expect("reap");
+    assert_eq!(manager.allocated_bytes(), 0);
+    assert_eq!(
+        runtime.bytes_outstanding(),
+        0,
+        "into_bytes must preserve Backing::Runtime so the runtime frees on drop"
+    );
+}
+
+#[test]
+fn legacy_alloc_path_unchanged_when_no_runtime_attached() {
+    // Manager constructed via legacy `new` must not touch any
+    // runtime: build a runtime as a side channel and verify its
+    // sink stays empty and its bytes_outstanding stays at zero
+    // throughout an alloc<T>/drop cycle on the legacy manager.
+    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
+        return;
+    };
+
+    // Side-channel runtime — same device, never attached to the
+    // legacy manager.
+    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
+    let side_sink: Arc<InMemorySink> = Arc::new(InMemorySink::new());
+    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
+        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
+    );
+    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
+        async_resource,
+        side_sink.clone() as Arc<dyn LoggingSink>,
+    ));
+    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
+        Box::new(GlobalDeviceBudget::new(logging, 1024 * 1024));
+    let side_runtime = Arc::new(XlogDeviceRuntime::with_resource(
+        Arc::clone(&device),
+        0,
+        Arc::clone(&pool),
+        budget,
+    ));
+
+    // Legacy manager: NO runtime attached. MemoryBudget::default()
+    // would give device_bytes = 0; set an explicit budget so the
+    // legacy path's TOCTOU-safe reservation actually succeeds.
+    let mut legacy_budget = MemoryBudget::default();
+    legacy_budget.device_bytes = 64 * 1024;
+    let manager = Arc::new(GpuMemoryManager::new(Arc::clone(&device), legacy_budget));
+    assert!(manager.runtime().is_none());
+
+    // Allocate, mutate counter, drop. Side-channel runtime must
+    // be entirely undisturbed.
+    let len = 512usize;
+    let bytes = (len * std::mem::size_of::<u32>()) as u64;
+    let slice = manager
+        .alloc::<u32>(len)
+        .expect("legacy alloc::<u32> still works");
+    assert_eq!(slice.len(), len);
+    assert_eq!(manager.allocated_bytes(), bytes);
+    assert_eq!(
+        side_runtime.bytes_outstanding(),
+        0,
+        "side-channel runtime must not see legacy allocations"
+    );
+    assert_eq!(
+        side_sink.len(),
+        0,
+        "side-channel sink must remain empty for legacy allocations"
+    );
+
+    drop(slice);
+    // Legacy drop frees through cudarc and decrements the local
+    // counter; runtime side channel still untouched.
+    assert_eq!(manager.allocated_bytes(), 0);
+    assert_eq!(side_runtime.bytes_outstanding(), 0);
+    assert_eq!(side_sink.len(), 0);
+}
+
+#[test]
 fn alloc_raw_without_runtime_returns_kernel_error() {
     // Manager constructed via legacy `new` — no runtime attached.
     // alloc_raw must surface a clear error rather than silently
