@@ -39,11 +39,13 @@
 //! binary-join output counts). The fully GPU-resident binary-join
 //! materialization rebase is gated on this allocator landing first.
 
+pub mod async_resource;
 pub mod direct;
 pub mod resource;
 pub mod runtime;
 pub mod stream_pool;
 
+pub use async_resource::AsyncCudaResource;
 pub use direct::DirectCudaResource;
 pub use resource::{
     AllocTag, BlockState, DeviceBlock, DeviceMemoryResource, Generation, ResourceError,
