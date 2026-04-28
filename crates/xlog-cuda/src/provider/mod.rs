@@ -1421,9 +1421,6 @@ impl CudaKernelProvider {
         Ok(())
     }
 
-    /// (GPU-asserted). If they diverge, the GPU asserts and the export fails.
-    /// - Download fails
-
     // ============== Internal Helper Methods ==============
 
     /// Read a buffer's logical row count, using the host cache when available

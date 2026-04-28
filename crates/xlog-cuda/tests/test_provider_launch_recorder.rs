@@ -1370,9 +1370,9 @@ fn provider_filter_recorded_survives_drop_and_reuse() {
         bad_output, 0,
         "filter_recorded produced corrupted output in {}/{} iterations \
          (reuse_observed={}). Either the recorder chain (compare → compact) \
-         failed to keep the latest wait-event per (block, launch_stream) pair, \
-         OR an in-flight compact_bytes_by_mask read of an input column was \
-         clobbered by the alloc-stream reuse + trample.",
+         failed to retain every recorded input event until deallocate, OR an \
+         in-flight compact_bytes_by_mask read of an input column was clobbered \
+         by the alloc-stream reuse + trample.",
         bad_output, ITERATIONS, reuse_observed,
     );
 }
