@@ -1,8 +1,14 @@
 # XLOG Development Roadmap
 
-Last updated: April 27, 2026
+Last updated: April 28, 2026
 Current released version: v0.5.2
-Current development target: v0.5.5 deterministic hardening, then v0.6.0 WCOJ
+Current development target: v0.6.0 stream-safe GPU runtime and execution
+discipline. v0.5.5 deterministic hardening is closed at PRs #49 (strict D2H
+guard), #50 (GPU full-row dedup / set-difference), #52 (binary-join output
+counts as metadata reads), plus crash-window frozen replay evidence; fully
+GPU-resident binary-join materialization (count → prefix → materialize) is
+explicitly deferred. WCOJ moves to v0.6.1 — it must not land before
+recorded launch discipline covers the operators it depends on.
 
 This roadmap is version-oriented so planned work is not hidden inside subsystem
 sections. Historical and current-main work uses checked boxes. Future work uses
@@ -550,18 +556,23 @@ unchecked boxes and is assigned to a concrete future version.
 
 ## v0.5.5 - Consolidated Deterministic Hardening
 
+Status: closed as deterministic hardening at PRs #49 (strict D2H guard), #50
+(GPU full-row dedup / set-difference), #52 (binary-join output counts as
+metadata reads), plus crash-window frozen replay evidence. Fully GPU-resident
+binary-join materialization through count → prefix → materialize is deferred
+to v0.6.x — see "v0.6.x Deferred From v0.5.5" below.
+
 ### xlog-runtime
 
-- [ ] Replace host-side multi-column full-row dedup/difference fallback with GPU-native deterministic set algebra.
-- [ ] Add strict D2H guardrails for deterministic Datalog evaluation.
-- [ ] Make binary hash-join materialization deterministic through count, prefix-scan, and materialize phases.
+- [x] Replace host-side multi-column full-row dedup/difference fallback with GPU-native deterministic set algebra. (#50)
+- [x] Add strict D2H guardrails for deterministic Datalog evaluation. (#49)
 - [ ] Preserve deterministic mixed execution when binary joins, recursive rules, and future WCOJ rules coexist.
 - [ ] Add query progress reporting API.
 
 ### xlog-cuda
 
-- [ ] Add GPU-native schema-aware full-row deduplication and set difference.
-- [ ] Add deterministic count-prefix-materialize binary join kernels.
+- [x] Add GPU-native schema-aware full-row deduplication and set difference. (#50)
+- [x] Treat binary-join output counts as metadata reads (control-plane D2H exception, scoped to binary-join shape). (#52)
 - [ ] Add shared-memory optimization for small relations.
 - [ ] Add warp-level primitives for small-relation optimization.
 
@@ -579,8 +590,8 @@ unchecked boxes and is assigned to a concrete future version.
 
 ### Tests and Certification
 
-- [ ] Add deterministic Datalog D2H guardrail tests.
-- [ ] Add downstream frozen replay certification for crash-window bundles.
+- [x] Add deterministic Datalog D2H guardrail tests. (#49)
+- [x] Add downstream frozen replay certification for crash-window bundles.
 - [ ] Add Same Generation, triangle, skewed multi-way, and deep recursive-frontier benchmarks.
 - [ ] Add skewed multi-way benchmark suite.
 
@@ -595,14 +606,139 @@ unchecked boxes and is assigned to a concrete future version.
 
 ### Release Gate
 
-- [ ] Public release only after deterministic Datalog guardrails pass locally and in manual GPU certification.
-- [ ] Public release only after crash-window frozen replay remains deterministic across 20 fresh subprocess replays.
+- [x] Public release only after deterministic Datalog guardrails pass locally and in manual GPU certification.
+- [x] Public release only after crash-window frozen replay remains deterministic across 20 fresh subprocess replays.
 - [ ] Public release only after downstream widened-frontier stress replay is clean.
-- [ ] Public release only after recursive deterministic set operations have zero data-plane D2H transfers.
+- [x] Public release only after recursive deterministic set operations have zero data-plane D2H transfers. (#50, #52)
 - [ ] Public release only after binary-join and multi-way stress benchmark baselines are captured.
 - [ ] Public release only after docs distinguish release, source-build, and development install paths.
 
-## v0.6.0 - Worst-Case Optimal Joins
+### v0.6.x Deferred From v0.5.5
+
+Originally scoped to v0.5.5 as a deterministic-materialization prototype but
+blocked; moved out of v0.5.5 closure and re-targeted under v0.6.x once the
+recorded-launch operator coverage that the binary-join refactor depends on is
+in place.
+
+- [ ] Make binary hash-join materialization deterministic through count, prefix-scan, and materialize phases. (deferred — depends on recorded-launch operator coverage)
+- [ ] Add deterministic count-prefix-materialize binary join kernels. (deferred — same dependency)
+
+## v0.6.0 - Stream-Safe GPU Runtime And Execution Discipline
+
+The v0.6.0 release is the prerequisite layer for fully GPU-resident
+binary-join retake (deferred from v0.5.5) and for v0.6.1 WCOJ. It is
+infrastructure hardening, not a join-algorithm feature: the goal is a
+stream-safe GPU runtime so subsequent work can be trusted under parallel
+execution.
+
+### xlog-cuda Runtime
+
+- [x] Add v0.6 device-runtime allocator (`AsyncCudaResource`,
+      `LoggingResource`, `GlobalDeviceBudget`, `XlogDeviceRuntime`,
+      `StreamPool`) as an opt-in path next to legacy cudarc-backed
+      allocation. (#54)
+- [x] Add `record_block_use` API + `cuStreamWaitEvent` chaining before
+      `cuMemFreeAsync` so cross-stream uses cannot be freed out from
+      under in-flight kernels. (#54 follow-ups)
+- [x] Add ABA guard via `(ptr, generation)` keying on
+      `AsyncCudaResource::LiveEntry`.
+- [x] Make `record_block_use` failure-safe in `deallocate` (resolve
+      `alloc_stream` and queue waits BEFORE removing the live entry).
+- [x] Default trait `record_block_use` returns
+      `ResourceError::StreamMisuse` so `DirectCudaResource`-style stacks
+      surface as loud failures instead of silent gaps.
+
+### xlog-cuda LaunchRecorder
+
+- [x] Add `LaunchRecorder` (strict / permissive modes) with
+      `read` / `write` / `read_write` / `read_column` / `write_column`
+      primitives and an explicit preflight + commit pattern.
+- [x] Make `preflight(&mut self)` stateful; `commit` rejects non-empty
+      recorders that were not preflighted (closes the
+      "discover-at-commit-time" footgun).
+- [x] Freeze recorder uses after preflight in the standard `note` path;
+      add the `write_post_preflight_fresh` escape hatch for
+      freshly-allocated runtime-backed outputs whose kernel-param
+      borrow rules force post-launch recording.
+- [x] Reject DLPack / Arrow external columns at preflight in strict
+      mode (`is_external()` branch in `read_column` / `write_column`).
+- [x] Propagate `CudaColumn::runtime_block()` identity through
+      filter-adjacent view helpers (`column_as_*`, `bytes_as_*`,
+      `column_as_typed_view`).
+
+### Recorded Launch Paths (xlog-cuda Provider)
+
+- [x] `memset_recorded` (slice and column variants).
+- [x] `compare_const_mask_recorded::<T: GpuScalar>`.
+- [x] `compare_columns_mask_recorded::<T: GpuScalar>`.
+- [x] `compact_buffer_by_device_mask_counted_recorded` — multi-kernel
+      chain (`mask_clamp_rows` → `multiblock_scan_phase1` → recursive
+      `multiblock_scan_u32_inplace_on_stream` + `phase3` →
+      `capture_compact_count` → explicit `cu_stream.synchronize()` →
+      host scalar read → per-column `compact_bytes_by_mask`) all on
+      one explicit `launch_stream` via `launch_on_stream`.
+- [x] `filter_recorded::<T>` — composed `compare_const_mask_recorded`
+      → `compact_buffer_by_device_mask_counted_recorded` end-to-end.
+- [x] `filter_columns_recorded::<T>` — composed
+      `compare_columns_mask_recorded` →
+      `compact_buffer_by_device_mask_counted_recorded` end-to-end.
+- [ ] Migrate the fused `compare+scan+compact` filter path
+      (`u32`, `f64`) to the recorded discipline.
+- [ ] Migrate `compact_buffer_by_mask` (host-mask compact entry) to the
+      recorded discipline.
+- [ ] Migrate ILP / ILP-exact view helpers and operators to propagate
+      runtime block identity and use recorded launches.
+- [ ] Migrate hash-join, GroupBy, sort, and dedup operator surfaces to
+      recorded launches against `launch_stream`.
+- [ ] Wire `filter_recorded` / `filter_columns_recorded` into a
+      runtime / provider opt-in selector so real callers can route
+      filter operations through the recorded path.
+
+### Tests and Certification
+
+- [x] RED reproducer for cross-stream use-after-free in the runtime
+      allocator (`test_runtime_cross_stream_use_after_free.rs`).
+- [x] Provider-level drop+reuse tests for every recorded primitive
+      and every composed end-to-end migrated path.
+- [x] Strict-recorder contract tests in `launch::tests`: post-preflight
+      additions are rejected; the `write_post_preflight_fresh` escape
+      hatch is accepted only for fresh runtime-backed slices.
+- [ ] A3 / A4 stress reproducer suite (cross-stream lifetime
+      stress under parallel forks, fixed and random schedules).
+- [ ] Public certification of the recorded launch discipline against
+      the cert suite (`cargo test -p xlog-cuda-tests --test
+      certification_suite --release`) on a runtime-backed manager.
+
+### Documentation
+
+- [ ] Document the v0.6 device runtime stack
+      (`AsyncCudaResource` / `LoggingResource` / `GlobalDeviceBudget`)
+      and the `LaunchRecorder` preflight + commit contract.
+- [ ] Add migration guidance for operator authors:
+      `read_column` / `write_post_preflight_fresh`,
+      `cu_stream.synchronize()` before host scalar reads,
+      external-column rejection.
+
+### Release Gate
+
+- [ ] Public release only after no WCOJ or fully GPU-resident
+      binary-join PR is merged ahead of v0.6.0 — recorded launch
+      discipline must cover the operators those slices depend on
+      first. Specifically: (a) the operator under migration must use
+      `launch_on_stream` on a caller-supplied `launch_stream`; (b) all
+      caller-provided buffers used by the kernel must be recorded
+      before `preflight`; (c) every fresh runtime-backed allocation
+      that outlives any in-flight kernel must be recorded via
+      `write_post_preflight_fresh` before `commit`; (d) any host
+      scalar read inside the chain must be explicitly ordered against
+      `launch_stream` (non-blocking streams do not get default-stream
+      implicit synchronization).
+- [ ] Public release only after the cert suite passes against a
+      runtime-backed manager with the recorded launch paths exercised.
+- [ ] Public release only after the A3 / A4 stress reproducer suite
+      observes zero use-after-free / stream-misuse failures.
+
+## v0.6.1 - Worst-Case Optimal Joins
 
 ### xlog-ir and Optimizer
 
@@ -781,7 +917,14 @@ unchecked boxes and is assigned to a concrete future version.
 
 ### v0.6.0 Risks
 
+- [ ] Stream-safety migration scope can expand beyond the release window if every operator family is migrated in one cut. Mitigated by per-operator slices behind sibling `*_recorded` entry points; legacy paths remain until the recorded path is certified.
+- [ ] Composing recorded primitives currently relies on the runtime's record-all + wait-all event semantics (`last_use_events: Vec<CudaEvent>` in `AsyncCudaResource`). If composition depth grows materially, a future event-coalescing optimization may be needed to keep `deallocate` cost bounded.
+- [ ] DLPack / Arrow external-memory consumers must coordinate cross-stream synchronization themselves; strict-mode rejection at preflight is loud, but downstream consumers depending on permissive recorders need explicit migration guidance.
+
+### v0.6.1 Risks
+
 - [ ] WCOJ planner and kernel scope can expand beyond the release window without strict 3-way/4-way certification gates.
+- [ ] WCOJ kernels must not land before the operators they depend on are migrated to recorded launch discipline; otherwise multi-stream WCOJ execution would re-introduce the cross-stream use-after-free class v0.6.0 just closed.
 
 ### v0.7.0 Risks
 
