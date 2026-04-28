@@ -69,6 +69,46 @@ pub struct XlogDeviceRuntime {
 }
 
 impl XlogDeviceRuntime {
+    /// Compose an owned runtime around a caller-supplied resource
+    /// stack. **Not** a singleton — the returned value is *not*
+    /// stored in [`RUNTIMES`] and does not interact with `try_get`.
+    ///
+    /// Intended uses:
+    ///   * Tests that need to drive a specific backend (e.g.,
+    ///     `AsyncCudaResource`) through the same facade production
+    ///     code uses, instead of constructing the resource directly.
+    ///   * Future decorator stacks (`LoggingResource`,
+    ///     `GlobalDeviceBudget`, `DebugGuardResource`) that wrap the
+    ///     base resource before installation.
+    ///
+    /// The `device` and `stream_pool` arguments must be consistent
+    /// with `device_ordinal` (the pool must be bound to the same
+    /// device handle, and the device must be the one the resource
+    /// allocates against). The constructor does not verify this —
+    /// callers that compose mismatched parts get undefined
+    /// runtime-level behavior, but the per-resource device-ordinal
+    /// check on `deallocate` will still surface obvious mistakes as
+    /// `ResourceError::Driver`.
+    ///
+    /// The singleton path remains [`Self::try_get`], which today
+    /// always installs the cudarc default (non-pooled) backend
+    /// ([`DirectCudaResource`]). Swapping the singleton's default
+    /// resource is a separate later change gated on
+    /// `GlobalDeviceBudget` and `LoggingResource` landing.
+    pub fn with_resource(
+        device: Arc<CudaDevice>,
+        device_ordinal: u32,
+        stream_pool: Arc<StreamPool>,
+        resource: Box<dyn DeviceMemoryResource + Send + Sync>,
+    ) -> Self {
+        Self {
+            device_ordinal,
+            device,
+            stream_pool,
+            resource: Mutex::new(resource),
+        }
+    }
+
     /// Get the singleton for `ordinal`, initializing it on first
     /// access. Subsequent calls return the same `&'static`.
     ///
@@ -236,5 +276,42 @@ mod tests {
     fn try_get_rejects_out_of_range_ordinal() {
         let err = XlogDeviceRuntime::try_get(MAX_DEVICE_ORDINALS as u32);
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn with_resource_composes_owned_runtime_outside_singleton() {
+        use super::super::async_resource::AsyncCudaResource;
+
+        let Some(rt) = try_runtime() else {
+            return;
+        };
+        let device = Arc::clone(rt.device());
+        let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
+        let resource = Box::new(AsyncCudaResource::new(
+            Arc::clone(&device),
+            0,
+            Arc::clone(&pool),
+        ));
+
+        let owned = XlogDeviceRuntime::with_resource(device, 0, pool, resource);
+        assert_eq!(owned.device_ordinal(), 0);
+
+        let block = owned
+            .allocate(1024, StreamId::DEFAULT, AllocTag::UNTAGGED)
+            .expect("alloc through composed runtime");
+        assert_eq!(block.bytes, 1024);
+        assert_eq!(owned.bytes_outstanding(), 1024);
+        owned.deallocate(block).expect("dealloc");
+        owned.reap_pending().expect("reap");
+        assert_eq!(owned.bytes_outstanding(), 0);
+
+        // Composed runtime is not stored in the singleton table:
+        // the singleton for ordinal 0 is whatever `try_get` returns,
+        // which must be a different memory address.
+        let singleton = XlogDeviceRuntime::try_get(0).expect("singleton");
+        assert!(
+            !std::ptr::eq(&owned, singleton),
+            "with_resource must not aliase the singleton slot"
+        );
     }
 }
