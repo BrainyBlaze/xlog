@@ -115,6 +115,20 @@ pub(crate) struct RawCudaView<'a, T> {
     ptr: cudarc::driver::sys::CUdeviceptr,
     len: usize,
     stream: Arc<CudaStream>,
+    /// Optional back-reference to the source [`DeviceBlock`]
+    /// when this view borrows a region of a runtime-backed
+    /// allocation. The launch recorder uses this to attach
+    /// cross-stream uses without losing identity through view
+    /// construction. `None` for views built from external
+    /// memory or legacy paths; strict-mode launch recorders
+    /// reject `None` views.
+    ///
+    /// Read by [`RawCudaView::runtime_block`]; the field
+    /// itself is intentionally not directly exposed because
+    /// the lifetime of the back-reference is bound to the
+    /// view's `'a`.
+    #[allow(dead_code)]
+    source_block: Option<&'a crate::device_runtime::DeviceBlock>,
     _marker: PhantomData<&'a [T]>,
 }
 
@@ -143,6 +157,19 @@ impl<'a, T> DevicePtr<T> for RawCudaView<'a, T> {
 impl<'a, T> RawCudaView<'a, T> {
     pub fn device_ptr(&self) -> &cudarc::driver::sys::CUdeviceptr {
         &self.ptr
+    }
+
+    /// Borrow the back-reference to the source
+    /// [`crate::device_runtime::DeviceBlock`], if this view was
+    /// constructed from a runtime-backed allocation. Returns
+    /// `None` for views built from external memory or legacy
+    /// paths.
+    ///
+    /// Public API placeholder for the upcoming filter-class
+    /// migration; no production caller exists yet.
+    #[allow(dead_code)]
+    pub fn runtime_block(&self) -> Option<&'a crate::device_runtime::DeviceBlock> {
+        self.source_block
     }
 }
 
@@ -1338,6 +1365,7 @@ impl CudaKernelProvider {
             ptr,
             len: num_bytes,
             stream: col.stream().clone(),
+            source_block: None,
             _marker: PhantomData,
         })
     }
@@ -1366,6 +1394,7 @@ impl CudaKernelProvider {
             ptr,
             len: num_elements,
             stream: bytes.stream().clone(),
+            source_block: None,
             _marker: PhantomData,
         })
     }
@@ -1395,6 +1424,7 @@ impl CudaKernelProvider {
             ptr,
             len: num_elements,
             stream: col.stream().clone(),
+            source_block: None,
             _marker: PhantomData,
         })
     }
@@ -1423,6 +1453,7 @@ impl CudaKernelProvider {
             ptr,
             len: num_elements,
             stream: col.stream().clone(),
+            source_block: None,
             _marker: PhantomData,
         })
     }
@@ -1452,6 +1483,7 @@ impl CudaKernelProvider {
             ptr,
             len: num_elements,
             stream: col.stream().clone(),
+            source_block: None,
             _marker: PhantomData,
         })
     }

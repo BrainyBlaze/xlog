@@ -26,7 +26,7 @@ use xlog_core::{Result, XlogError};
 
 use crate::device_runtime::StreamId;
 use crate::launch::LaunchRecorder;
-use crate::memory::TrackedCudaSlice;
+use crate::memory::{CudaColumn, TrackedCudaSlice};
 
 impl super::CudaKernelProvider {
     /// Async memset of `value` into every byte of `dst` on
@@ -77,12 +77,29 @@ impl super::CudaKernelProvider {
         let dst_ptr = dst.device_ptr_value();
         let dst_len = dst.len();
 
+        // STRICT recorder + PREFLIGHT before queueing CUDA work.
+        // If the active resource cannot track cross-stream uses,
+        // or if dst is not actually runtime-backed, preflight
+        // surfaces the failure here and we never enqueue the
+        // memset. Without preflight, `commit` would discover the
+        // failure only after the memset is in flight, leaving
+        // unprotected work hanging.
+        let mut rec = LaunchRecorder::new_strict(launch_stream);
+        rec.write(dst);
+        rec.preflight(runtime).map_err(|e| {
+            XlogError::Kernel(format!(
+                "memset_recorded: launch recorder preflight failed: {}",
+                e
+            ))
+        })?;
+
         // SAFETY: dst_ptr is a live device pointer, the buffer
         // owns `dst_len` bytes (verified by the slice's len),
         // and cu_stream is a valid CUDA stream the runtime
         // owns. cuMemsetD8Async is genuinely
         // stream-asynchronous: it queues on the stream and
-        // returns immediately.
+        // returns immediately. We get here only if preflight
+        // succeeded.
         unsafe {
             let res = sys::cuMemsetD8Async(dst_ptr, value, dst_len, cu_stream.cu_stream());
             if res != sys::cudaError_enum::CUDA_SUCCESS {
@@ -93,17 +110,72 @@ impl super::CudaKernelProvider {
             }
         }
 
-        // Record the use AFTER queuing the work on
-        // launch_stream so the recorded event fires when the
-        // memset completes. `commit` calls
-        // runtime.record_block_use which surfaces any
-        // StreamMisuse from the active resource — no silent
-        // fallback.
-        let mut rec = LaunchRecorder::new(launch_stream);
-        rec.write(dst);
+        // Record the use AFTER the launch is queued so the
+        // event fires when the memset completes. Preflight
+        // already validated the path; commit should only fail
+        // on transient driver errors at event-record time.
         rec.commit(runtime).map_err(|e| {
             XlogError::Kernel(format!(
                 "memset_recorded: launch recorder commit failed: {}",
+                e
+            ))
+        })?;
+        Ok(())
+    }
+
+    /// Column-level variant of [`Self::memset_recorded`] —
+    /// exercises the `LaunchRecorder::write_column` path. Used
+    /// by tests that prove `CudaColumn::Owned` records its
+    /// runtime block automatically; strict mode rejects
+    /// `CudaColumn::Dlpack` / `CudaColumn::ArrowDevice` at
+    /// preflight (no CUDA work queued).
+    pub fn memset_column_recorded(
+        &self,
+        dst: &mut CudaColumn,
+        value: u8,
+        launch_stream: StreamId,
+    ) -> Result<()> {
+        let runtime = self.memory().runtime().ok_or_else(|| {
+            XlogError::Kernel(
+                "memset_column_recorded requires a runtime-backed GpuMemoryManager".to_string(),
+            )
+        })?;
+        let pool = runtime.stream_pool();
+        let cu_stream = pool.resolve(launch_stream).ok_or_else(|| {
+            XlogError::Kernel(format!(
+                "memset_column_recorded: launch_stream StreamId({}) does not resolve",
+                launch_stream.0
+            ))
+        })?;
+
+        let dst_ptr = *dst.device_ptr();
+        let dst_len = <CudaColumn as cudarc::driver::DeviceSlice<u8>>::len(dst);
+
+        let mut rec = LaunchRecorder::new_strict(launch_stream);
+        rec.write_column(dst);
+        rec.preflight(runtime).map_err(|e| {
+            XlogError::Kernel(format!(
+                "memset_column_recorded: launch recorder preflight failed: {}",
+                e
+            ))
+        })?;
+
+        // SAFETY: dst_ptr is a live device pointer of `dst_len`
+        // bytes (CudaColumn ensures len matches the underlying
+        // memory). cuMemsetD8Async queues on the stream.
+        unsafe {
+            let res = sys::cuMemsetD8Async(dst_ptr, value, dst_len, cu_stream.cu_stream());
+            if res != sys::cudaError_enum::CUDA_SUCCESS {
+                return Err(XlogError::Kernel(format!(
+                    "cuMemsetD8Async (column) failed: {:?}",
+                    res
+                )));
+            }
+        }
+
+        rec.commit(runtime).map_err(|e| {
+            XlogError::Kernel(format!(
+                "memset_column_recorded: launch recorder commit failed: {}",
                 e
             ))
         })?;

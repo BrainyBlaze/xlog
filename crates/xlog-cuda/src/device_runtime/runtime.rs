@@ -260,6 +260,18 @@ impl XlogDeviceRuntime {
             .expect("device-runtime resource poisoned")
             .record_block_use(block, use_stream)
     }
+
+    /// Whether the active resource stack tracks cross-stream
+    /// uses (i.e., supports `record_block_use`). The launch
+    /// recorder's preflight checks this BEFORE queuing CUDA
+    /// work, so a misconfigured runtime fails loudly at the
+    /// boundary rather than after the launch is in flight.
+    pub fn supports_block_use_tracking(&self) -> bool {
+        self.resource
+            .lock()
+            .expect("device-runtime resource poisoned")
+            .supports_block_use_tracking()
+    }
 }
 
 #[cfg(test)]

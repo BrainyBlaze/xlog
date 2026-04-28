@@ -1,164 +1,277 @@
 //! Launch / use recorder for runtime-backed buffers.
 //!
 //! Closes the production-side of the cross-stream lifetime gap
-//! identified by A4 and proven on
-//! `tests/test_runtime_cross_stream_use_after_free.rs`. Code that
-//! enqueues kernels or copies on a `launch_stream` other than the
-//! buffer's `alloc_stream` MUST tell the runtime about the use so
-//! the runtime can wait for the launch to complete before its
-//! `cuMemFreeAsync` runs. Without this, the CUDA mempool is free
-//! to reuse the address while the cross-stream work is still in
-//! flight.
+//! identified by A4. Code that enqueues kernels or copies on a
+//! `launch_stream` other than the buffer's `alloc_stream` MUST
+//! tell the runtime about the use so the runtime can wait for
+//! the launch to complete before its `cuMemFreeAsync` runs.
+//! Without this, the CUDA mempool is free to reuse the address
+//! while the cross-stream work is still in flight.
 //!
-//! # Usage
+//! # Modes
 //!
-//! ```ignore
-//! use xlog_cuda::launch::LaunchRecorder;
+//! Two construction modes:
 //!
-//! let mut rec = LaunchRecorder::new(launch_stream);
-//! rec.read(&input_a);
-//! rec.read(&input_b);
-//! rec.write(&mut output);
-//! // ... build kernel params, launch on launch_stream ...
-//! unsafe { func.launch(cfg, &mut params)?; }
-//! // Now record the uses against the runtime. This MUST be
-//! // called AFTER the launch is queued so the runtime's
-//! // recorded events fire when the launch completes.
-//! rec.commit(&runtime)?;
-//! ```
+//!   * [`LaunchRecorder::new_permissive`] — silently skips
+//!     buffers that have no runtime-side identity (legacy
+//!     cudarc-backed `TrackedCudaSlice`, external `Dlpack` /
+//!     `ArrowDevice` columns). Intended for low-level helpers
+//!     during the migration window where mixed legacy/runtime
+//!     calls are unavoidable. **Not safe for production
+//!     migrated paths** — silent skips are silent gaps.
 //!
-//! # Failure semantics
+//!   * [`LaunchRecorder::new_strict`] — rejects any buffer that
+//!     cannot be tracked. Intended for production migrated
+//!     launch paths: any buffer the recorder cannot attach an
+//!     event to is a structural problem the caller must fix
+//!     (route the allocation through the runtime, or refuse
+//!     external memory in this code path).
 //!
-//! `commit` calls
-//! [`XlogDeviceRuntime::record_block_use`](crate::device_runtime::XlogDeviceRuntime::record_block_use)
-//! for every recorded buffer. If the active resource does not
-//! support cross-stream tracking (e.g. the runtime was built
-//! around `DirectCudaResource`, the trait default), the call
-//! returns
-//! [`ResourceError::StreamMisuse`](crate::device_runtime::ResourceError::StreamMisuse)
-//! and the recorder surfaces it to the caller. **No silent
-//! fallback.** Callers must either:
-//!   * Route allocations through
-//!     [`GpuMemoryManager::with_runtime`](crate::GpuMemoryManager::with_runtime)
-//!     against an `AsyncCudaResource`-backed runtime, or
-//!   * Take explicit responsibility for cross-stream
-//!     synchronization (and use a launch path that does NOT go
-//!     through the recorder).
+//! # Preflight + commit
 //!
-//! # Legacy cudarc-backed buffers
+//! Production callers split the recorder into TWO phases around
+//! the actual CUDA call:
 //!
-//! Buffers allocated via the legacy `GpuMemoryManager::new` path
-//! return `None` from
-//! [`TrackedCudaSlice::runtime_block`](crate::memory::TrackedCudaSlice::runtime_block).
-//! The recorder skips those — they are not tracked by the v0.6
-//! runtime and the recorder cannot attach an event. This is by
-//! design for the migration window; callers that mix legacy
-//! and runtime-backed buffers in the same launch should be
-//! aware that legacy buffers carry no cross-stream lifetime
-//! guarantee.
+//!   1. Build the recorder, register buffers via `read` /
+//!      `write` / `read_write` / `read_column` / etc.
+//!   2. Call [`LaunchRecorder::preflight`] BEFORE enqueueing the
+//!      CUDA work. Preflight verifies the active resource
+//!      supports cross-stream tracking AND (in strict mode)
+//!      that every recorded buffer has a runtime block. On
+//!      failure no CUDA work has been queued yet.
+//!   3. Enqueue the CUDA call on `launch_stream`.
+//!   4. Call [`LaunchRecorder::commit`] AFTER the launch is
+//!      enqueued. Commit calls `record_block_use` on each
+//!      tracked block — the runtime records its event on
+//!      `launch_stream` at this point, and that event will
+//!      fire when the queued work completes.
+//!
+//! Without preflight, a recorder against `DirectCudaResource`
+//! would discover the resource is unsupported only AFTER the
+//! launch has been queued, leaving in-flight work without
+//! cross-stream protection.
+//!
+//! # External memory (DLPack, Arrow device)
+//!
+//! Strict mode rejects [`crate::memory::CudaColumn::Dlpack`]
+//! and [`crate::memory::CudaColumn::ArrowDevice`] columns
+//! outright. External memory has no xlog-side runtime identity
+//! — the `record_block_use` API cannot attach an event to a
+//! buffer the runtime did not allocate. Callers that need to
+//! consume external columns must either:
+//!   * use a permissive recorder (and accept that no
+//!     cross-stream safety applies to those buffers), or
+//!   * synchronize externally (e.g., wait on the producing
+//!     framework's stream / event before queueing xlog work).
+//!
+//! Permissive mode skips external columns silently, matching
+//! the legacy-buffer policy.
 
-use crate::device_runtime::{DeviceBlock, ResourceResult, StreamId, XlogDeviceRuntime};
+use crate::device_runtime::{
+    DeviceBlock, ResourceError, ResourceResult, StreamId, XlogDeviceRuntime,
+};
+
+/// Recorder construction mode.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RecorderMode {
+    /// Silently skip untracked buffers. Acceptable for low-level
+    /// helpers during the migration window; **not** safe for
+    /// production migrated paths.
+    Permissive,
+    /// Reject untracked buffers. Production migrated paths use
+    /// this so silent skips become loud failures.
+    Strict,
+}
 
 /// Records buffer uses for a single launch / copy on
-/// `launch_stream`. Drop without calling `commit` is a
-/// programmer error; the recorder logs (via `eprintln!` only in
-/// debug builds) but does not panic.
+/// `launch_stream`. Drop without `commit` is a programmer error;
+/// the recorder logs (debug builds only) and never panics.
 pub struct LaunchRecorder<'b> {
     launch_stream: StreamId,
-    /// Recorded uses, by reference. Held as `&DeviceBlock` rather
-    /// than copied so the caller's borrow of the
-    /// [`crate::memory::TrackedCudaSlice`] enforces that the
-    /// buffer is alive at recorder-construction time.
-    uses: Vec<&'b DeviceBlock>,
+    mode: RecorderMode,
+    /// Recorded uses, by reference. Held as `&DeviceBlock`
+    /// rather than copied so the caller's borrow of the source
+    /// buffer enforces that the buffer is alive at
+    /// recorder-construction time.
+    uses: Vec<RecordedUse<'b>>,
+    /// First strict-mode rejection encountered while recording.
+    /// Surfaced from `preflight`; the recorder's record methods
+    /// return `&mut Self` so callers can chain naturally.
+    strict_reject: Option<ResourceError>,
     committed: bool,
 }
 
+struct RecordedUse<'b> {
+    block: &'b DeviceBlock,
+    /// Site label (e.g., `"read"`, `"write"`,
+    /// `"read_column"`) for diagnostics. Not used at runtime
+    /// beyond error messages.
+    #[allow(dead_code)]
+    label: &'static str,
+}
+
 impl<'b> LaunchRecorder<'b> {
-    /// Construct a recorder for a launch on `launch_stream`. The
-    /// caller is responsible for passing the same `launch_stream`
-    /// id used for the actual kernel/copy invocation.
-    pub fn new(launch_stream: StreamId) -> Self {
+    /// Permissive recorder: silently skips untracked buffers.
+    pub fn new_permissive(launch_stream: StreamId) -> Self {
+        Self::new(launch_stream, RecorderMode::Permissive)
+    }
+
+    /// Strict recorder: rejects any untracked buffer.
+    /// Production migrated launch paths use this.
+    pub fn new_strict(launch_stream: StreamId) -> Self {
+        Self::new(launch_stream, RecorderMode::Strict)
+    }
+
+    fn new(launch_stream: StreamId, mode: RecorderMode) -> Self {
         Self {
             launch_stream,
+            mode,
             uses: Vec::new(),
+            strict_reject: None,
             committed: false,
         }
     }
 
-    /// Record a buffer that the launch will READ from on
-    /// `launch_stream`. The buffer's runtime block is borrowed
-    /// for the recorder's lifetime; if the buffer is legacy
-    /// cudarc-backed (`runtime_block() == None`) the call is a
-    /// no-op (logged in debug builds).
+    /// Configured launch stream.
+    pub fn launch_stream(&self) -> StreamId {
+        self.launch_stream
+    }
+
+    /// Configured mode.
+    pub fn mode(&self) -> RecorderMode {
+        self.mode
+    }
+
+    fn note(
+        &mut self,
+        label: &'static str,
+        block: Option<&'b DeviceBlock>,
+        external: bool,
+    ) -> &mut Self {
+        if let Some(b) = block {
+            self.uses.push(RecordedUse { block: b, label });
+            return self;
+        }
+        if self.mode == RecorderMode::Strict && self.strict_reject.is_none() {
+            let why = if external {
+                "external (DLPack / ArrowDevice) memory has no runtime identity; \
+                 strict launch recorders cannot attach a cross-stream use to it. \
+                 Use a permissive recorder OR coordinate the cross-stream \
+                 synchronization explicitly outside xlog"
+            } else {
+                "buffer is legacy cudarc-backed (no runtime block); strict launch \
+                 recorders require the allocation to be routed through \
+                 GpuMemoryManager::with_runtime so a DeviceBlock is available"
+            };
+            self.strict_reject = Some(ResourceError::StreamMisuse(format!(
+                "LaunchRecorder::{}: untracked buffer rejected — {}",
+                label, why
+            )));
+        }
+        self
+    }
+
+    /// Record a runtime-backed [`crate::memory::TrackedCudaSlice`]
+    /// the launch will read.
     pub fn read<T: cudarc::driver::DeviceRepr>(
         &mut self,
         slice: &'b crate::memory::TrackedCudaSlice<T>,
     ) -> &mut Self {
-        self.maybe_push("read", slice.runtime_block(), slice.device_ptr_value())
+        self.note("read", slice.runtime_block(), false)
     }
 
-    /// Record a buffer that the launch will WRITE to. Same shape
-    /// as [`read`](Self::read); the recorder does not currently
-    /// distinguish between read and write at the runtime level
-    /// (both attach an event), but the access mode is captured
-    /// for future telemetry / dependency-graph use.
+    /// Record a runtime-backed slice the launch will write.
     pub fn write<T: cudarc::driver::DeviceRepr>(
         &mut self,
         slice: &'b crate::memory::TrackedCudaSlice<T>,
     ) -> &mut Self {
-        self.maybe_push("write", slice.runtime_block(), slice.device_ptr_value())
+        self.note("write", slice.runtime_block(), false)
     }
 
-    /// Record a buffer that the launch will both READ and WRITE.
+    /// Record a runtime-backed slice the launch will both read
+    /// and write.
     pub fn read_write<T: cudarc::driver::DeviceRepr>(
         &mut self,
         slice: &'b mut crate::memory::TrackedCudaSlice<T>,
     ) -> &mut Self {
-        self.maybe_push(
-            "read_write",
-            slice.runtime_block(),
-            slice.device_ptr_value(),
-        )
+        self.note("read_write", slice.runtime_block(), false)
     }
 
-    fn maybe_push(
-        &mut self,
-        _mode: &'static str,
-        block: Option<&'b DeviceBlock>,
-        _raw_ptr: cudarc::driver::sys::CUdeviceptr,
-    ) -> &mut Self {
-        if let Some(b) = block {
-            self.uses.push(b);
-        }
-        // Legacy slices (block == None) are intentionally
-        // skipped: they have no runtime-side identity to
-        // attach uses to. See module-level doc.
-        self
+    /// Record a [`crate::memory::CudaColumn`] the launch will
+    /// read. Owned columns surface their runtime block; external
+    /// (`Dlpack` / `ArrowDevice`) columns are rejected in strict
+    /// mode and silently skipped in permissive mode.
+    pub fn read_column(&mut self, col: &'b crate::memory::CudaColumn) -> &mut Self {
+        self.note("read_column", col.runtime_block(), col.is_external())
     }
 
-    /// Number of recorded runtime-backed buffer uses. Test/
-    /// diagnostic accessor.
+    /// Record a [`crate::memory::CudaColumn`] the launch will
+    /// write.
+    pub fn write_column(&mut self, col: &'b crate::memory::CudaColumn) -> &mut Self {
+        self.note("write_column", col.runtime_block(), col.is_external())
+    }
+
+    /// Record a [`crate::provider::RawCudaView`]-style view that
+    /// borrows a region of a runtime-backed allocation. The
+    /// view must carry its source block via `runtime_block()`;
+    /// strict mode rejects views built from legacy / external
+    /// paths.
+    ///
+    /// Public API placeholder for the upcoming filter-class
+    /// migration; no production caller exists yet.
+    #[allow(dead_code)]
+    pub(crate) fn read_view_runtime(&mut self, block: Option<&'b DeviceBlock>) -> &mut Self {
+        self.note("read_view", block, false)
+    }
+
+    /// Number of recorded runtime-backed uses. Diagnostic.
     pub fn recorded_count(&self) -> usize {
         self.uses.len()
     }
 
-    /// Commit the recorded uses to the runtime. MUST be called
-    /// AFTER the launch / copy has been enqueued on
-    /// `launch_stream` — the runtime records its event on
-    /// `launch_stream` at this point, and that event will fire
-    /// when the queued work completes.
+    /// Preflight: validate the recorder is ready to commit
+    /// against `runtime`. Call BEFORE enqueueing the CUDA
+    /// launch / copy. On failure no CUDA work has been queued
+    /// yet — production migrated paths must fail here rather
+    /// than after enqueue.
     ///
-    /// Returns the first error from
-    /// [`XlogDeviceRuntime::record_block_use`] (notably
-    /// `StreamMisuse` when the active resource does not support
-    /// cross-stream tracking). On error, any earlier successful
-    /// records remain attached to their blocks — the runtime
-    /// already recorded those events on `launch_stream`, and the
-    /// blocks' subsequent deallocate will wait on them as
-    /// designed.
+    /// Verifies (in order):
+    ///   * No strict-mode rejection during recording
+    ///     (untracked / external buffer in strict mode).
+    ///   * The active resource stack supports cross-stream
+    ///     tracking (`runtime.supports_block_use_tracking()`)
+    ///     OR the recorder has zero tracked uses (no events to
+    ///     record).
+    ///
+    /// Returns `Ok(())` on success.
+    pub fn preflight(&self, runtime: &XlogDeviceRuntime) -> ResourceResult<()> {
+        if let Some(err) = &self.strict_reject {
+            return Err(ResourceError::StreamMisuse(format!("{}", err)));
+        }
+        if !self.uses.is_empty() && !runtime.supports_block_use_tracking() {
+            return Err(ResourceError::StreamMisuse(
+                "LaunchRecorder::preflight: active resource does not support \
+                 cross-stream use tracking. Build the runtime around \
+                 AsyncCudaResource (or a decorator stack over it) for \
+                 stream-lifetime-safe launches"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Commit the recorded uses to the runtime. MUST be called
+    /// AFTER preflight succeeded AND the CUDA launch has been
+    /// enqueued on `launch_stream`. Returns the first error from
+    /// [`XlogDeviceRuntime::record_block_use`].
     pub fn commit(mut self, runtime: &XlogDeviceRuntime) -> ResourceResult<()> {
-        for block in &self.uses {
-            runtime.record_block_use(block, self.launch_stream)?;
+        // Re-check the strict reject — preflight may not have
+        // been called.
+        if let Some(err) = self.strict_reject.take() {
+            return Err(err);
+        }
+        for used in &self.uses {
+            runtime.record_block_use(used.block, self.launch_stream)?;
         }
         self.committed = true;
         Ok(())
@@ -168,20 +281,14 @@ impl<'b> LaunchRecorder<'b> {
 impl Drop for LaunchRecorder<'_> {
     fn drop(&mut self) {
         if !self.committed && !self.uses.is_empty() {
-            // A recorder dropped without commit means the launch
-            // was queued on launch_stream but the runtime was
-            // never told about the uses. That is a
-            // lifetime-safety bug class. We log loudly in debug
-            // builds; we cannot panic here because the builder
-            // may have intentionally bailed before commit (e.g.,
-            // an error elsewhere prompted early return).
             #[cfg(debug_assertions)]
             eprintln!(
                 "[xlog_cuda::launch] LaunchRecorder dropped without commit: \
-                 {} uses on launch_stream={} were NOT recorded; \
+                 {} uses on launch_stream={} (mode={:?}) were NOT recorded; \
                  cross-stream lifetime safety lost for this launch",
                 self.uses.len(),
-                self.launch_stream.0
+                self.launch_stream.0,
+                self.mode,
             );
         }
     }
@@ -191,13 +298,13 @@ impl Drop for LaunchRecorder<'_> {
 mod tests {
     use super::*;
     use crate::device_runtime::{
-        AsyncCudaResource, DeviceMemoryResource, ResourceError, StreamPool,
+        AsyncCudaResource, DeviceMemoryResource, DirectCudaResource, StreamPool,
     };
     use crate::CudaDevice;
     use std::sync::Arc;
     use xlog_core::MemoryBudget;
 
-    fn try_runtime() -> Option<(Arc<crate::CudaDevice>, Arc<XlogDeviceRuntime>, StreamId)> {
+    fn try_async_runtime() -> Option<(Arc<CudaDevice>, Arc<XlogDeviceRuntime>, StreamId)> {
         let device = Arc::new(CudaDevice::new(0).ok()?);
         let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
         let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
@@ -213,47 +320,35 @@ mod tests {
         Some((device, runtime, launch_stream))
     }
 
-    #[test]
-    fn empty_commit_is_ok() {
-        let Some((_d, rt, ls)) = try_runtime() else {
-            return;
-        };
-        let rec = LaunchRecorder::new(ls);
-        rec.commit(&rt).expect("empty commit must be Ok");
-    }
-
-    #[test]
-    fn read_write_runtime_backed_records_use() {
-        let Some((device, runtime, launch_stream)) = try_runtime() else {
-            return;
-        };
-        let manager = Arc::new(crate::GpuMemoryManager::with_runtime(
+    fn try_direct_runtime() -> Option<(Arc<CudaDevice>, Arc<XlogDeviceRuntime>, StreamId)> {
+        let device = Arc::new(CudaDevice::new(0).ok()?);
+        let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
+        let direct: Box<dyn DeviceMemoryResource + Send + Sync> =
+            Box::new(DirectCudaResource::new(Arc::clone(&device), 0));
+        let runtime = Arc::new(XlogDeviceRuntime::with_resource(
             Arc::clone(&device),
-            MemoryBudget::with_limit(1024 * 1024),
-            Arc::clone(&runtime),
+            0,
+            Arc::clone(&pool),
+            direct,
         ));
-        let input = manager.alloc::<u8>(64).expect("alloc input");
-        let mut output = manager.alloc::<u8>(64).expect("alloc output");
-
-        // Sanity: both slices are runtime-backed.
-        assert_eq!(input.runtime_block().unwrap().bytes, 64);
-        assert_eq!(output.runtime_block().unwrap().bytes, 64);
-
-        // Build the recorder in its own scope so its borrows on
-        // input/output drop before we keep using them. Sequence:
-        // read(input), read_write(output), commit, drop recorder.
-        {
-            let mut rec = LaunchRecorder::new(launch_stream);
-            rec.read(&input);
-            rec.read_write(&mut output);
-            assert_eq!(rec.recorded_count(), 2);
-            rec.commit(&runtime).expect("commit");
-        }
+        Some((device, runtime, StreamId::DEFAULT))
     }
 
     #[test]
-    fn legacy_slice_silently_skipped() {
-        // No runtime attached — manager built via legacy `new`.
+    fn empty_commit_is_ok_in_both_modes() {
+        let Some((_d, rt, ls)) = try_async_runtime() else {
+            return;
+        };
+        LaunchRecorder::new_permissive(ls)
+            .commit(&rt)
+            .expect("permissive empty");
+        LaunchRecorder::new_strict(ls)
+            .commit(&rt)
+            .expect("strict empty");
+    }
+
+    #[test]
+    fn permissive_skips_legacy_silently() {
         let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
             return;
         };
@@ -269,52 +364,57 @@ mod tests {
         ));
         let launch_stream = pool.acquire().expect("acquire");
 
+        // Legacy manager — no runtime — produces None block.
         let manager = Arc::new(crate::GpuMemoryManager::new(
             Arc::clone(&device),
             MemoryBudget::with_limit(1024 * 1024),
         ));
-        // Legacy alloc path: no runtime block.
         let legacy = manager.alloc::<u8>(64).expect("legacy alloc");
         assert!(legacy.runtime_block().is_none());
 
-        let mut rec = LaunchRecorder::new(launch_stream);
+        let mut rec = LaunchRecorder::new_permissive(launch_stream);
         rec.read(&legacy);
-        assert_eq!(
-            rec.recorded_count(),
-            0,
-            "legacy slice without runtime block must be skipped"
-        );
-        rec.commit(&runtime).expect("commit no-op");
+        assert_eq!(rec.recorded_count(), 0);
+        rec.preflight(&runtime).expect("permissive preflight");
+        rec.commit(&runtime).expect("permissive commit");
     }
 
     #[test]
-    fn commit_surfaces_stream_misuse_from_direct_resource() {
-        // Build a runtime around DirectCudaResource (the trait
-        // default behavior — record_block_use returns
-        // StreamMisuse). LaunchRecorder::commit must surface
-        // that error rather than masking it.
-        use crate::device_runtime::DirectCudaResource;
-
-        let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
+    fn strict_rejects_legacy_at_preflight() {
+        let Some((device, runtime, launch_stream)) = try_async_runtime() else {
             return;
         };
-        let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-        let direct: Box<dyn DeviceMemoryResource + Send + Sync> =
-            Box::new(DirectCudaResource::new(Arc::clone(&device), 0));
-        let runtime = Arc::new(XlogDeviceRuntime::with_resource(
+        let manager = Arc::new(crate::GpuMemoryManager::new(
             Arc::clone(&device),
-            0,
-            Arc::clone(&pool),
-            direct,
+            MemoryBudget::with_limit(1024 * 1024),
         ));
+        let legacy = manager.alloc::<u8>(64).expect("legacy alloc");
 
-        // We need a runtime-backed TrackedCudaSlice (so the
-        // recorder records something). The manager's
-        // `with_runtime` path against this Direct-backed runtime
-        // will call runtime.allocate which goes through
-        // DirectCudaResource — that returns a DeviceBlock just
-        // like AsyncCudaResource would. The difference shows up
-        // only at record_block_use time.
+        let mut rec = LaunchRecorder::new_strict(launch_stream);
+        rec.read(&legacy);
+        let err = rec.preflight(&runtime);
+        match err {
+            Err(ResourceError::StreamMisuse(msg)) => {
+                assert!(msg.contains("untracked buffer rejected"), "msg: {}", msg);
+            }
+            other => panic!(
+                "strict mode must reject untracked buffer at preflight; got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn preflight_rejects_direct_runtime_before_enqueue() {
+        let Some((device, runtime, launch_stream)) = try_direct_runtime() else {
+            return;
+        };
+        // Need a runtime-backed slice to record (so the
+        // strict_reject path doesn't preempt the
+        // supports-tracking check). Use the manager built
+        // around the Direct-backed runtime — alloc returns a
+        // DeviceBlock; the supports-tracking failure surfaces
+        // at preflight.
         let manager = Arc::new(crate::GpuMemoryManager::with_runtime(
             Arc::clone(&device),
             MemoryBudget::with_limit(1024 * 1024),
@@ -323,23 +423,62 @@ mod tests {
         let buf = manager.alloc::<u8>(64).expect("alloc");
         assert!(buf.runtime_block().is_some());
 
-        let launch_stream = StreamId::DEFAULT;
-        let mut rec = LaunchRecorder::new(launch_stream);
+        let mut rec = LaunchRecorder::new_strict(launch_stream);
         rec.read(&buf);
-        let err = rec.commit(&runtime);
+        let err = rec.preflight(&runtime);
         match err {
             Err(ResourceError::StreamMisuse(msg)) => {
                 assert!(
-                    msg.contains("unsupported"),
-                    "expected 'unsupported' in StreamMisuse message, got {:?}",
+                    msg.contains("does not support cross-stream use tracking"),
+                    "msg: {}",
                     msg
                 );
             }
             other => panic!(
-                "LaunchRecorder::commit must surface StreamMisuse from \
-                 DirectCudaResource; got {:?}",
+                "preflight must reject Direct-backed runtime before enqueue; got {:?}",
                 other
             ),
         }
+    }
+
+    #[test]
+    fn preflight_then_commit_async_runtime() {
+        let Some((device, runtime, launch_stream)) = try_async_runtime() else {
+            return;
+        };
+        let manager = Arc::new(crate::GpuMemoryManager::with_runtime(
+            Arc::clone(&device),
+            MemoryBudget::with_limit(1024 * 1024),
+            Arc::clone(&runtime),
+        ));
+        let buf = manager.alloc::<u8>(64).expect("alloc");
+
+        let mut rec = LaunchRecorder::new_strict(launch_stream);
+        rec.read(&buf);
+        rec.preflight(&runtime).expect("preflight ok");
+        // (in production: enqueue CUDA launch here)
+        rec.commit(&runtime).expect("commit ok");
+    }
+
+    #[test]
+    fn read_column_owned_runtime_backed() {
+        use crate::memory::CudaColumn;
+        let Some((device, runtime, launch_stream)) = try_async_runtime() else {
+            return;
+        };
+        let manager = Arc::new(crate::GpuMemoryManager::with_runtime(
+            Arc::clone(&device),
+            MemoryBudget::with_limit(1024 * 1024),
+            Arc::clone(&runtime),
+        ));
+        let slice = manager.alloc::<u8>(64).expect("alloc");
+        let col = CudaColumn::owned(slice);
+        assert!(col.runtime_block().is_some());
+
+        let mut rec = LaunchRecorder::new_strict(launch_stream);
+        rec.read_column(&col);
+        assert_eq!(rec.recorded_count(), 1);
+        rec.preflight(&runtime).expect("preflight");
+        rec.commit(&runtime).expect("commit");
     }
 }

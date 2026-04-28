@@ -271,4 +271,16 @@ pub trait DeviceMemoryResource: Send + Sync {
                 .to_string(),
         ))
     }
+
+    /// Whether this resource (and any inner resources it
+    /// composes) actually tracks cross-stream uses via
+    /// `record_block_use`. Used by the launch recorder's
+    /// preflight to fail BEFORE queueing CUDA work, rather than
+    /// after. The default returns `false` to match the trait's
+    /// default `record_block_use` behavior; resources that
+    /// override `record_block_use` to track events MUST override
+    /// this to return `true`. Decorators forward to inner.
+    fn supports_block_use_tracking(&self) -> bool {
+        false
+    }
 }

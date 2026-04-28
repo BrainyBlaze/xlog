@@ -413,6 +413,7 @@ impl super::CudaKernelProvider {
             ptr,
             len: num_elements,
             stream: col.stream().clone(),
+            source_block: None,
             _marker: PhantomData,
         })
     }

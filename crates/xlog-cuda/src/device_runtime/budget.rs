@@ -201,6 +201,10 @@ impl DeviceMemoryResource for GlobalDeviceBudget {
         // last-use events.
         self.inner.record_block_use(block, use_stream)
     }
+
+    fn supports_block_use_tracking(&self) -> bool {
+        self.inner.supports_block_use_tracking()
+    }
 }
 
 #[cfg(test)]

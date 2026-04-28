@@ -425,6 +425,10 @@ impl DeviceMemoryResource for AsyncCudaResource {
         })
     }
 
+    fn supports_block_use_tracking(&self) -> bool {
+        true
+    }
+
     fn record_block_use(&self, block: &DeviceBlock, use_stream: StreamId) -> ResourceResult<()> {
         if block.device_ordinal != self.device_ordinal {
             return Err(ResourceError::Driver(format!(

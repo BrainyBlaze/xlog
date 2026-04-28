@@ -827,6 +827,28 @@ impl CudaColumn {
             CudaColumn::ArrowDevice(col) => &col.ptr,
         }
     }
+
+    /// Borrow the underlying [`crate::device_runtime::DeviceBlock`]
+    /// for runtime-backed `Owned` columns. Returns `None` for
+    /// external memory variants (`Dlpack`, `ArrowDevice`) and
+    /// for legacy cudarc-backed `Owned` columns. The launch
+    /// recorder uses this to attach cross-stream uses; strict
+    /// mode rejects `None` returns.
+    pub fn runtime_block(&self) -> Option<&crate::device_runtime::DeviceBlock> {
+        match self {
+            CudaColumn::Owned(slice) => slice.runtime_block(),
+            CudaColumn::Dlpack(_) | CudaColumn::ArrowDevice(_) => None,
+        }
+    }
+
+    /// Whether this column wraps externally-managed device
+    /// memory (`Dlpack` / `ArrowDevice`). External memory has
+    /// no xlog-side runtime identity; strict launch recorders
+    /// reject such columns and require callers to coordinate
+    /// cross-stream synchronization themselves.
+    pub fn is_external(&self) -> bool {
+        matches!(self, CudaColumn::Dlpack(_) | CudaColumn::ArrowDevice(_))
+    }
 }
 
 impl From<TrackedCudaSlice<u8>> for CudaColumn {

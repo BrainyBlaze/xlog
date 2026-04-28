@@ -249,9 +249,10 @@ fn provider_memset_recorded_rejects_legacy_manager() {
 
 /// Negative test: provider built around `DirectCudaResource`
 /// (the trait default that intentionally rejects
-/// `record_block_use`). The launch's memset queues fine, but
-/// the recorder's commit must surface `StreamMisuse` wrapped in
-/// `XlogError::Kernel` rather than masking the fault.
+/// `record_block_use`). With the strict-mode + preflight
+/// pattern the launch's memset is **never enqueued** —
+/// preflight surfaces `StreamMisuse` BEFORE the CUDA call. The
+/// error message identifies preflight rather than commit.
 #[test]
 fn provider_memset_recorded_surfaces_stream_misuse_from_direct_resource() {
     use xlog_cuda::device_runtime::DirectCudaResource;
@@ -281,15 +282,127 @@ fn provider_memset_recorded_surfaces_stream_misuse_from_direct_resource() {
     match err {
         Err(XlogError::Kernel(msg)) => {
             assert!(
-                msg.contains("commit failed") || msg.contains("unsupported"),
-                "expected commit-failed StreamMisuse-derived error, got {:?}",
+                msg.contains("preflight failed") && msg.contains("does not support cross-stream"),
+                "expected preflight-failed StreamMisuse-derived error, got {:?}",
                 msg
             );
         }
         other => panic!(
             "memset_recorded must surface StreamMisuse from DirectCudaResource as \
-             XlogError::Kernel, got {:?}",
+             XlogError::Kernel at preflight, got {:?}",
             other
         ),
     }
+}
+
+/// Column-level variant: prove `provider.memset_column_recorded`
+/// records use through the `CudaColumn::Owned` runtime block
+/// automatically. Same drop+reuse safety check as the slice
+/// version.
+#[test]
+fn provider_memset_column_recorded_survives_drop_and_reuse() {
+    use xlog_cuda::CudaColumn;
+
+    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
+        return;
+    };
+    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
+    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
+        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
+    );
+    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
+        async_resource,
+        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
+    ));
+    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
+        Box::new(GlobalDeviceBudget::new(logging, 64 * 1024 * 1024));
+    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
+        Arc::clone(&device),
+        0,
+        Arc::clone(&pool),
+        budget,
+    ));
+    let memory = Arc::new(GpuMemoryManager::with_runtime(
+        Arc::clone(&device),
+        MemoryBudget::with_limit(64 * 1024 * 1024),
+        Arc::clone(&runtime),
+    ));
+    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
+        .expect("provider with_runtime");
+    let launch_stream = pool.acquire().expect("acquire");
+    let launch_handle = pool.resolve(launch_stream).expect("resolve");
+    let default_stream = device.inner().stream();
+
+    const ITERATIONS: usize = 32;
+    let mut last_writer_was_new = 0usize;
+    let mut last_writer_was_launch = 0usize;
+    let mut reuse_observed = 0usize;
+
+    for _ in 0..ITERATIONS {
+        let slice = memory.alloc::<u8>(BYTES).expect("alloc");
+        let in_ptr = slice.device_ptr_value();
+        let mut col = CudaColumn::owned(slice);
+        provider
+            .memset_column_recorded(&mut col, PATTERN_LAUNCH, launch_stream)
+            .expect("memset_column_recorded");
+        drop(col);
+
+        let next = memory.alloc::<u8>(BYTES).expect("alloc next");
+        let next_ptr = next.device_ptr_value();
+        if next_ptr == in_ptr {
+            reuse_observed += 1;
+        }
+        unsafe {
+            let res = cudarc::driver::sys::cuMemsetD8_v2(next_ptr, PATTERN_NEW, BYTES);
+            assert_eq!(res, cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS);
+        }
+        launch_handle.synchronize().expect("sync");
+        default_stream.synchronize().expect("sync");
+
+        let mut readback = vec![0u8; BYTES];
+        unsafe { dtoh_sync(&mut readback, next_ptr) };
+        if next_ptr == in_ptr {
+            if readback[0] == PATTERN_NEW && readback[BYTES - 1] == PATTERN_NEW {
+                last_writer_was_new += 1;
+            } else if readback[0] == PATTERN_LAUNCH && readback[BYTES - 1] == PATTERN_LAUNCH {
+                last_writer_was_launch += 1;
+            }
+        }
+        drop(next);
+        runtime.reap_pending().expect("reap");
+    }
+    eprintln!(
+        "[column] iters={} reuse={} new={} launch={}",
+        ITERATIONS, reuse_observed, last_writer_was_new, last_writer_was_launch
+    );
+    assert!(reuse_observed > 0);
+    assert_eq!(last_writer_was_launch, 0);
+}
+
+/// Column-level negative test: external memory (we synthesize a
+/// DLPack column without an actual tensor — sufficient because
+/// the recorder's strict mode rejects on `is_external()`
+/// without dereferencing). Strict mode must reject at preflight
+/// before the memset is queued.
+///
+/// We only construct a fake DLPack column if the public
+/// `CudaColumn::dlpack` constructor is reachable. As a
+/// stand-in, we allocate a fresh raw device pointer via
+/// `cuMemAlloc` and synthesize a `DlpackManagedTensor` around
+/// it. If the test fixture cannot construct a DLPack column on
+/// this host, the test skips cleanly.
+///
+/// Actually: constructing a DlpackManagedTensor without a real
+/// producer is non-trivial. Skip this case for now — it would
+/// require wiring up cudarc's DLPack support against a fake
+/// tensor. The launch.rs unit test
+/// `strict_rejects_legacy_at_preflight` already covers the
+/// strict-mode preflight rejection logic; the column-level
+/// equivalent (Dlpack) just exercises the same `is_external()`
+/// branch. If a real DLPack workflow needs explicit coverage,
+/// add it once the DLPack producer side has a test fixture.
+#[test]
+#[ignore = "requires DLPack producer fixture; covered by launch.rs unit test for the underlying logic"]
+fn provider_memset_column_recorded_rejects_dlpack_column() {
+    // Intentional placeholder. See doc above.
 }
