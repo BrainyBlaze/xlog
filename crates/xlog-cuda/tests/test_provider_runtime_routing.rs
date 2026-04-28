@@ -1,33 +1,41 @@
 // crates/xlog-cuda/tests/test_provider_runtime_routing.rs
-//! First-slice migration test: prove `GpuMemoryManager::alloc_raw`
-//! routes through an [`XlogDeviceRuntime`] composed via
+//! Migration tests for `GpuMemoryManager`'s runtime-routing paths.
+//!
+//! The manager is composed via [`GpuMemoryManager::with_runtime`]
+//! over an [`XlogDeviceRuntime`] built via
 //! [`XlogDeviceRuntime::with_resource`], stacking
 //! [`GlobalDeviceBudget`] over [`LoggingResource`] over
-//! [`AsyncCudaResource`].
+//! [`AsyncCudaResource`]. With the runtime attached, **both**
+//! `alloc_raw` and the typed `alloc::<T>` path route through the
+//! runtime stack; `TrackedCudaSlice<T>` returned from `alloc::<T>`
+//! frees through the runtime on drop via the `Backing::Runtime`
+//! branch of its `Drop` impl. The legacy
+//! [`GpuMemoryManager::new`] path remains bit-for-bit unchanged
+//! and is covered by the `legacy_*` test below.
 //!
-//! Scope is intentionally narrow:
-//!   * Only `alloc_raw` flows through the runtime.
-//!   * The pre-existing `alloc::<T>` typed-slice path is out of
-//!     scope for this slice — it stays on the cudarc-default
-//!     allocator and existing tests cover it.
-//!   * `CudaKernelProvider`'s public surface is unchanged. This
-//!     test composes a `GpuMemoryManager` via `with_runtime`
-//!     directly; the provider construction in production code
-//!     still uses `GpuMemoryManager::new` and is unaffected.
+//! `CudaKernelProvider`'s public surface is unchanged here; the
+//! tests construct managers directly. Wiring providers to the
+//! runtime is a later slice that adds an opt-in
+//! `CudaKernelProvider` constructor.
 //!
-//! What this test asserts:
-//!   1. A successful `alloc_raw` produces a record in the logging
-//!      sink, increases the runtime's `bytes_outstanding`, and
-//!      raises both the local manager counter and the budget's
-//!      reserved bytes.
-//!   2. Dropping the returned [`RuntimeAllocBlock`] releases both
-//!      the manager counter (immediately) and, after a
+//! What these tests assert:
+//!   1. `alloc_raw` and `alloc::<T>` (u8 + non-byte) both produce
+//!      records in the logging sink and raise both the local
+//!      manager counter and the runtime's `bytes_outstanding`.
+//!   2. Dropping the returned tracked slice / runtime block
+//!      releases the manager counter immediately and, after a
 //!      `runtime.reap_pending()`, the runtime's reserved bytes
-//!      (correctly held while async-free is queued).
-//!   3. An over-limit `alloc_raw` returns
+//!      (held while the async free is queued).
+//!   3. `into_bytes` preserves the `Backing::Runtime` ownership
+//!      tag so a runtime-routed `u32` reinterpreted as bytes still
+//!      frees through the runtime.
+//!   4. An over-limit `alloc_raw` returns
 //!      `XlogError::ResourceExhausted` originating from the budget,
-//!      with no leak to the local counter and no log record for
-//!      the failed inner allocation.
+//!      with no leak to the local counter and no log record for the
+//!      failed inner allocation.
+//!   5. Legacy `GpuMemoryManager::new` (no runtime attached) leaves
+//!      a side-channel runtime/sink completely untouched —
+//!      including for `alloc::<T>`.
 
 use std::sync::Arc;
 

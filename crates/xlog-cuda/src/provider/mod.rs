@@ -825,6 +825,53 @@ impl CudaKernelProvider {
         })
     }
 
+    /// Construct a provider whose `GpuMemoryManager` must already
+    /// have a v0.6 [`crate::device_runtime::XlogDeviceRuntime`]
+    /// attached via [`GpuMemoryManager::with_runtime`].
+    ///
+    /// Equivalent to [`Self::new`] in every respect — same kernel
+    /// loading, same field initialization — but errors out
+    /// explicitly if the supplied manager has no runtime, so the
+    /// caller cannot accidentally compose a runtime-routed manager
+    /// with the legacy provider construction path and silently
+    /// keep using the cudarc-default allocator.
+    ///
+    /// This is the **opt-in** runtime entry point for providers.
+    /// `Self::new` continues to accept managers without a runtime
+    /// (the legacy default) and remains the production constructor
+    /// until the runtime stack is certified end-to-end.
+    ///
+    /// # Errors
+    /// Returns `XlogError::Kernel` if `memory.runtime()` is `None`,
+    /// or anything `Self::new` would return.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let device = Arc::new(CudaDevice::new(0)?);
+    /// let runtime = Arc::new(XlogDeviceRuntime::with_resource(
+    ///     Arc::clone(&device),
+    ///     0,
+    ///     Arc::new(StreamPool::with_defaults(Arc::clone(&device))),
+    ///     Box::new(AsyncCudaResource::new(/* ... */)),
+    /// ));
+    /// let memory = Arc::new(GpuMemoryManager::with_runtime(
+    ///     Arc::clone(&device),
+    ///     MemoryBudget::default(),
+    ///     runtime,
+    /// ));
+    /// let provider = CudaKernelProvider::with_runtime(device, memory)?;
+    /// ```
+    pub fn with_runtime(device: Arc<CudaDevice>, memory: Arc<GpuMemoryManager>) -> Result<Self> {
+        if memory.runtime().is_none() {
+            return Err(XlogError::Kernel(
+                "CudaKernelProvider::with_runtime requires a GpuMemoryManager built via \
+                 GpuMemoryManager::with_runtime; got a manager with no runtime attached"
+                    .to_string(),
+            ));
+        }
+        Self::new(device, memory)
+    }
+
     /// Get the CUDA device
     pub fn device(&self) -> &Arc<CudaDevice> {
         &self.device

@@ -289,11 +289,16 @@ impl GpuMemoryManager {
     }
 
     /// Like [`new`], but additionally attaches a v0.6
-    /// [`XlogDeviceRuntime`]. The runtime mediates [`alloc_raw`]
-    /// through the v0.6 resource stack while the existing
-    /// `alloc::<T>` path remains on the cudarc-default allocator.
-    /// Provider construction does not yet require the runtime;
-    /// callers that want runtime-routed allocations opt in here.
+    /// [`XlogDeviceRuntime`]. The runtime mediates **both**
+    /// [`alloc::<T>`](Self::alloc) and [`alloc_raw`](Self::alloc_raw)
+    /// through the v0.6 resource stack: typed `alloc::<T>` returns a
+    /// [`TrackedCudaSlice<T>`] whose underlying memory is owned by
+    /// the runtime (typed view via cudarc's `upgrade_device_ptr::<T>`,
+    /// freed through the runtime on drop). The legacy cudarc path is
+    /// only used when the manager is built via [`new`] (no runtime
+    /// attached). Provider construction does not yet require the
+    /// runtime; callers that want runtime-routed allocations opt in
+    /// here.
     pub fn with_runtime(
         device: Arc<CudaDevice>,
         budget: MemoryBudget,
