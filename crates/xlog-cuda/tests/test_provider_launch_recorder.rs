@@ -75,8 +75,21 @@ unsafe fn dtoh_sync(dst: &mut [u8], src: u64) {
     );
 }
 unsafe fn memset_sync_default(dst: u64, value: u8, len: usize) {
-    // cuMemsetD8 (no Async) is synchronous w.r.t. host AND
-    // synchronizes against the legacy default stream.
+    // cuMemsetD8 (no Async) is synchronous from the host's
+    // perspective: it returns only after the operation
+    // completes. It runs on the legacy default stream.
+    //
+    // Important: legacy-default-stream implicit synchronization
+    // does NOT extend to non-blocking streams. Per NVIDIA's
+    // "Default Stream" docs, only blocking streams synchronize
+    // implicitly with the legacy default; streams created via
+    // `cudaStreamNonBlocking` (which is what
+    // `StreamPool::fork` produces) are explicitly excluded.
+    // The runtime's cross-stream wait-event chain set up at
+    // `record_block_use` -> `deallocate` is what actually
+    // orders the launch_stream memset before any subsequent
+    // alloc on alloc_stream — the legacy-default sync below
+    // does not by itself protect against the bug class.
     let res = sys::cuMemsetD8_v2(dst, value, len);
     assert_eq!(
         res,
@@ -157,15 +170,22 @@ fn provider_memset_recorded_survives_drop_and_reuse() {
         }
 
         // Step 6: synchronously memset `next` to PATTERN_NEW
-        // via cuMemsetD8 on the legacy default stream. With
-        // legacy-default-stream semantics this synchronizes
-        // against ALL prior queued work on every stream — but
-        // critically, the runtime's wait-event in deallocate
-        // already ordered the launch_stream memset before the
-        // free before this alloc. So when this synchronous
-        // memset runs, PATTERN_LAUNCH has long since been
-        // overwritten by the free's own bookkeeping (or never
-        // landed on next_ptr if the address was different).
+        // via cuMemsetD8 on the legacy default stream. The
+        // legacy default does NOT implicitly synchronize with
+        // the non-blocking streams produced by
+        // `StreamPool::fork`; per NVIDIA's default-stream docs
+        // only blocking streams synchronize implicitly. The
+        // safety here comes from the runtime's wait-event
+        // chain: at `drop(input)`, the runtime queued
+        // `cuStreamWaitEvent(alloc_stream, recorded_event)`
+        // BEFORE `cuMemFreeAsync`, so the alloc-stream's free
+        // could not run until the launch_stream memset
+        // completed. The subsequent allocate on alloc_stream
+        // is therefore correctly ordered after the launch's
+        // memset. Without that wait-event, this synchronous
+        // default-stream memset would race the still-queued
+        // launch_stream memset and PATTERN_LAUNCH could clobber
+        // PATTERN_NEW under reuse.
         unsafe { memset_sync_default(next_ptr, PATTERN_NEW, BYTES) };
 
         // Step 7: explicit synchronizes for clarity.

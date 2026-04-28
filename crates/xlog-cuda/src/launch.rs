@@ -86,6 +86,23 @@ pub enum RecorderMode {
 /// Records buffer uses for a single launch / copy on
 /// `launch_stream`. Drop without `commit` is a programmer error;
 /// the recorder logs (debug builds only) and never panics.
+///
+/// # Required call order for non-empty recorders
+///
+/// `preflight(&runtime)` MUST be called and return `Ok(())`
+/// BEFORE any CUDA work is enqueued, AND BEFORE `commit`. The
+/// preflighted flag is checked at commit time: a non-empty
+/// recorder that reaches `commit` without a successful
+/// `preflight` is rejected with `StreamMisuse`. This closes the
+/// footgun where a future migrated operator could enqueue CUDA
+/// work, then call commit, then discover at commit-time that
+/// the active resource is unsupported — leaving unprotected
+/// work in flight.
+///
+/// Empty recorders (no `read`/`write`/... calls) are a no-op
+/// and bypass the preflight requirement: there are no events
+/// to record, so the launch / copy was either fully outside
+/// the recorder's domain or already protected by other means.
 pub struct LaunchRecorder<'b> {
     launch_stream: StreamId,
     mode: RecorderMode,
@@ -98,6 +115,12 @@ pub struct LaunchRecorder<'b> {
     /// Surfaced from `preflight`; the recorder's record methods
     /// return `&mut Self` so callers can chain naturally.
     strict_reject: Option<ResourceError>,
+    /// `true` after a successful `preflight(&runtime)` returns
+    /// `Ok(())`. `commit` rejects non-empty recorders that
+    /// were not preflighted, so a future migrated operator
+    /// cannot accidentally enqueue CUDA work first and discover
+    /// the failure only at commit-time.
+    preflighted: bool,
     committed: bool,
 }
 
@@ -128,6 +151,7 @@ impl<'b> LaunchRecorder<'b> {
             mode,
             uses: Vec::new(),
             strict_reject: None,
+            preflighted: false,
             committed: false,
         }
     }
@@ -230,22 +254,27 @@ impl<'b> LaunchRecorder<'b> {
     }
 
     /// Preflight: validate the recorder is ready to commit
-    /// against `runtime`. Call BEFORE enqueueing the CUDA
-    /// launch / copy. On failure no CUDA work has been queued
-    /// yet — production migrated paths must fail here rather
-    /// than after enqueue.
+    /// against `runtime`. **Stateful** — sets a flag that
+    /// `commit` checks. MUST be called BEFORE enqueueing the
+    /// CUDA launch / copy. On failure no CUDA work has been
+    /// queued yet, the flag remains unset, and the caller can
+    /// either fix the recorder or abandon the launch.
     ///
     /// Verifies (in order):
-    ///   * No strict-mode rejection during recording
+    ///   * No strict-mode rejection accumulated during recording
     ///     (untracked / external buffer in strict mode).
     ///   * The active resource stack supports cross-stream
     ///     tracking (`runtime.supports_block_use_tracking()`)
     ///     OR the recorder has zero tracked uses (no events to
     ///     record).
     ///
-    /// Returns `Ok(())` on success.
-    pub fn preflight(&self, runtime: &XlogDeviceRuntime) -> ResourceResult<()> {
+    /// Returns `Ok(())` on success and marks the recorder as
+    /// preflighted; subsequent `commit` will allow the
+    /// recorded events to be queued.
+    pub fn preflight(&mut self, runtime: &XlogDeviceRuntime) -> ResourceResult<()> {
         if let Some(err) = &self.strict_reject {
+            // Surface the captured strict-mode rejection
+            // verbatim. Do NOT mark preflighted.
             return Err(ResourceError::StreamMisuse(format!("{}", err)));
         }
         if !self.uses.is_empty() && !runtime.supports_block_use_tracking() {
@@ -257,18 +286,45 @@ impl<'b> LaunchRecorder<'b> {
                     .to_string(),
             ));
         }
+        self.preflighted = true;
         Ok(())
     }
 
     /// Commit the recorded uses to the runtime. MUST be called
     /// AFTER preflight succeeded AND the CUDA launch has been
-    /// enqueued on `launch_stream`. Returns the first error from
+    /// enqueued on `launch_stream`.
+    ///
+    /// **Non-empty recorders that were not preflighted are
+    /// rejected** with `StreamMisuse`. This closes the footgun
+    /// where a caller could enqueue CUDA work, then call
+    /// commit, then discover at commit-time that the active
+    /// resource is unsupported — leaving unprotected work in
+    /// flight. Production migrated launch paths must therefore
+    /// always preflight BEFORE the CUDA call.
+    ///
+    /// Empty recorders (no recorded uses) bypass the check:
+    /// nothing to record, no events to fire, no contract to
+    /// honor.
+    ///
+    /// Returns the first error from
     /// [`XlogDeviceRuntime::record_block_use`].
     pub fn commit(mut self, runtime: &XlogDeviceRuntime) -> ResourceResult<()> {
-        // Re-check the strict reject — preflight may not have
-        // been called.
+        // Re-check any strict reject that may have accumulated
+        // — preflight may not have been called, or may not have
+        // surfaced this particular path. (Same string as
+        // preflight would produce.)
         if let Some(err) = self.strict_reject.take() {
             return Err(err);
+        }
+        if !self.uses.is_empty() && !self.preflighted {
+            return Err(ResourceError::StreamMisuse(
+                "LaunchRecorder::commit: non-empty recorder reached commit without \
+                 a successful preflight. The caller MUST call preflight(&runtime) \
+                 BEFORE enqueueing CUDA work; otherwise commit-time failures leave \
+                 unprotected work in flight. See the preflight + commit contract \
+                 in the LaunchRecorder doc"
+                    .to_string(),
+            ));
         }
         for used in &self.uses {
             runtime.record_block_use(used.block, self.launch_stream)?;
@@ -458,6 +514,56 @@ mod tests {
         rec.preflight(&runtime).expect("preflight ok");
         // (in production: enqueue CUDA launch here)
         rec.commit(&runtime).expect("commit ok");
+    }
+
+    /// Locks the contract from the review: a non-empty
+    /// recorder that reaches `commit` without a successful
+    /// `preflight` must be rejected with `StreamMisuse`. A
+    /// future migrated operator that accidentally enqueues
+    /// CUDA work first and only calls commit afterwards would
+    /// leave unprotected work in flight without this guard.
+    #[test]
+    fn commit_rejects_un_preflighted_strict_recorder() {
+        let Some((device, runtime, launch_stream)) = try_async_runtime() else {
+            return;
+        };
+        let manager = Arc::new(crate::GpuMemoryManager::with_runtime(
+            Arc::clone(&device),
+            MemoryBudget::with_limit(1024 * 1024),
+            Arc::clone(&runtime),
+        ));
+        let buf = manager.alloc::<u8>(64).expect("alloc");
+
+        let mut rec = LaunchRecorder::new_strict(launch_stream);
+        rec.read(&buf);
+        // Skip preflight on purpose. Commit must reject.
+        let err = rec.commit(&runtime);
+        match err {
+            Err(ResourceError::StreamMisuse(msg)) => {
+                assert!(
+                    msg.contains("without a successful preflight"),
+                    "msg: {}",
+                    msg
+                );
+            }
+            other => panic!(
+                "non-empty un-preflighted commit must return StreamMisuse, got {:?}",
+                other
+            ),
+        }
+    }
+
+    /// Empty recorders bypass the preflight requirement: no
+    /// recorded uses → no events → no contract to honor.
+    #[test]
+    fn empty_recorder_commit_without_preflight_is_ok() {
+        let Some((_d, rt, ls)) = try_async_runtime() else {
+            return;
+        };
+        // Strict mode, no recorded uses, no preflight, commit Ok.
+        LaunchRecorder::new_strict(ls)
+            .commit(&rt)
+            .expect("empty strict commit without preflight");
     }
 
     #[test]
