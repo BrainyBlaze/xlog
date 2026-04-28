@@ -320,11 +320,12 @@ impl super::CudaKernelProvider {
             XlogError::Kernel(format!("compare_const_mask_recorded launch failed: {}", e))
         })?;
 
-        // Record the write AFTER the launch enqueues — see the
-        // "Strict-mode contract" doc on this method for why this
-        // ordering is sound for THIS slice but is NOT a general
-        // pattern.
-        rec.write(&d_mask);
+        // Record the write AFTER the launch enqueues, using the
+        // explicit escape hatch. d_mask is the freshly-allocated
+        // runtime-backed output of THIS call; the kernel-param
+        // borrow rules force this ordering. See the
+        // "Strict-mode contract" on this method.
+        rec.write_post_preflight_fresh(&d_mask);
         rec.commit(runtime).map_err(|e| {
             XlogError::Kernel(format!(
                 "compare_const_mask_recorded: launch recorder commit failed: {}",

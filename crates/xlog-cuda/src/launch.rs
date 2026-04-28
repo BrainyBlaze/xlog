@@ -121,6 +121,15 @@ pub struct LaunchRecorder<'b> {
     /// cannot accidentally enqueue CUDA work first and discover
     /// the failure only at commit-time.
     preflighted: bool,
+    /// Per-recorder opt-in for the post-preflight escape
+    /// hatch. Default `false` — `note` rejects post-preflight
+    /// additions. Set transiently by
+    /// `write_post_preflight_fresh` (and siblings) for ONE
+    /// `note` call: the recorder is the freshly-allocated
+    /// runtime-backed output buffer of a launch that the
+    /// caller has already enqueued, and the kernel-param borrow
+    /// rules made pre-launch recording impossible.
+    allow_post_preflight: bool,
     committed: bool,
 }
 
@@ -152,6 +161,7 @@ impl<'b> LaunchRecorder<'b> {
             uses: Vec::new(),
             strict_reject: None,
             preflighted: false,
+            allow_post_preflight: false,
             committed: false,
         }
     }
@@ -172,6 +182,29 @@ impl<'b> LaunchRecorder<'b> {
         block: Option<&'b DeviceBlock>,
         external: bool,
     ) -> &mut Self {
+        // Post-preflight additions are forbidden by default. The
+        // contract is: every recorded use must be visible to
+        // preflight so its strict-mode validity (external /
+        // legacy / supports_block_use_tracking) is decided
+        // BEFORE any CUDA work is queued. Adding uses after
+        // preflight would let a strict-reject slip through to
+        // commit-time, leaving unprotected work in flight.
+        // Callers that legitimately need to record a write of a
+        // freshly-allocated runtime-backed output AFTER the
+        // launch enqueues must use the explicit
+        // `*_post_preflight_fresh` escape hatches, which set
+        // `allow_post_preflight` and document the invariant.
+        if self.preflighted && !self.allow_post_preflight && self.strict_reject.is_none() {
+            self.strict_reject = Some(ResourceError::StreamMisuse(format!(
+                "LaunchRecorder::{}: recorded after preflight — once preflight \
+                 succeeds, the set of uses is frozen so commit-time discoveries \
+                 cannot leave unprotected work in flight. Either record this use \
+                 BEFORE preflight, or use a `*_post_preflight_fresh` escape hatch \
+                 if the buffer is a freshly-allocated runtime-backed output",
+                label,
+            )));
+            return self;
+        }
         if let Some(b) = block {
             self.uses.push(RecordedUse { block: b, label });
             return self;
@@ -246,6 +279,56 @@ impl<'b> LaunchRecorder<'b> {
     #[allow(dead_code)]
     pub(crate) fn read_view_runtime(&mut self, block: Option<&'b DeviceBlock>) -> &mut Self {
         self.note("read_view", block, false)
+    }
+
+    /// Post-preflight escape hatch for recording a write of a
+    /// freshly-allocated, runtime-backed output buffer.
+    ///
+    /// **Use only when both conditions hold:**
+    ///
+    ///   1. `slice` was just allocated by a runtime-backed
+    ///      [`crate::GpuMemoryManager`] in this same operator
+    ///      call, so its `runtime_block()` is `Some` by
+    ///      construction and strict-mode rejection is
+    ///      impossible.
+    ///   2. The kernel-param borrow rules made pre-launch
+    ///      recording impossible (the launch needs `&mut slice`
+    ///      while a recorder holds `&slice`).
+    ///
+    /// This method is the **only** sanctioned way to add a use
+    /// after preflight. It surfaces a structured `StreamMisuse`
+    /// at commit time if either invariant breaks (slice is not
+    /// runtime-backed, recorder was not preflighted).
+    ///
+    /// Production callers should add a comment naming the
+    /// freshly-allocated buffer at the call site to keep the
+    /// "fresh" invariant auditable.
+    pub fn write_post_preflight_fresh<T: cudarc::driver::DeviceRepr>(
+        &mut self,
+        slice: &'b crate::memory::TrackedCudaSlice<T>,
+    ) -> &mut Self {
+        if !self.preflighted {
+            // The escape hatch only makes sense AFTER a
+            // successful preflight. If preflight was skipped,
+            // commit's preflighted-flag check will surface the
+            // problem; we still flip the flag so `note`'s
+            // post-preflight branch isn't entered for an
+            // un-preflighted recorder.
+            self.allow_post_preflight = true;
+            let r = self.note("write_post_preflight_fresh", slice.runtime_block(), false);
+            r.allow_post_preflight = false;
+            return r;
+        }
+        // Strict-mode rejection of the slice (legacy backing)
+        // is still surfaced via `note` — the "fresh
+        // runtime-backed" invariant is the caller's
+        // responsibility, but the recorder still verifies it
+        // and turns a violation into a structured error rather
+        // than a silent miss.
+        self.allow_post_preflight = true;
+        let r = self.note("write_post_preflight_fresh", slice.runtime_block(), false);
+        r.allow_post_preflight = false;
+        r
     }
 
     /// Number of recorded runtime-backed uses. Diagnostic.
@@ -564,6 +647,117 @@ mod tests {
         LaunchRecorder::new_strict(ls)
             .commit(&rt)
             .expect("empty strict commit without preflight");
+    }
+
+    /// Locks the new hardening: post-preflight `read` / `write`
+    /// via the standard methods is rejected with a structured
+    /// `StreamMisuse` at commit time. Without this guard the
+    /// recorder allowed callers to add uses freely after
+    /// preflight, which would let strict-rejects slip past the
+    /// validation step.
+    #[test]
+    fn note_after_preflight_via_standard_method_is_rejected() {
+        let Some((device, runtime, launch_stream)) = try_async_runtime() else {
+            return;
+        };
+        let manager = Arc::new(crate::GpuMemoryManager::with_runtime(
+            Arc::clone(&device),
+            MemoryBudget::with_limit(1024 * 1024),
+            Arc::clone(&runtime),
+        ));
+        let buf_a = manager.alloc::<u8>(64).expect("alloc a");
+        let buf_b = manager.alloc::<u8>(64).expect("alloc b");
+
+        let mut rec = LaunchRecorder::new_strict(launch_stream);
+        rec.read(&buf_a);
+        rec.preflight(&runtime).expect("preflight ok");
+        // Adding a normal `read` AFTER preflight must be
+        // rejected; the standard methods do not accept post-
+        // preflight uses.
+        rec.read(&buf_b);
+        let err = rec.commit(&runtime);
+        match err {
+            Err(ResourceError::StreamMisuse(msg)) => {
+                assert!(msg.contains("recorded after preflight"), "msg: {}", msg);
+            }
+            other => panic!(
+                "post-preflight standard-method record must be rejected; got {:?}",
+                other
+            ),
+        }
+    }
+
+    /// The escape hatch: `write_post_preflight_fresh` is the
+    /// one sanctioned post-preflight addition, used by callers
+    /// (like `compare_const_mask_recorded`) that allocate the
+    /// output AFTER preflight and cannot record it earlier
+    /// because of kernel-param borrow rules.
+    #[test]
+    fn write_post_preflight_fresh_is_accepted() {
+        let Some((device, runtime, launch_stream)) = try_async_runtime() else {
+            return;
+        };
+        let manager = Arc::new(crate::GpuMemoryManager::with_runtime(
+            Arc::clone(&device),
+            MemoryBudget::with_limit(1024 * 1024),
+            Arc::clone(&runtime),
+        ));
+        let buf_a = manager.alloc::<u8>(64).expect("alloc a");
+        let buf_fresh = manager.alloc::<u8>(64).expect("alloc fresh");
+
+        let mut rec = LaunchRecorder::new_strict(launch_stream);
+        rec.read(&buf_a);
+        rec.preflight(&runtime).expect("preflight ok");
+        // (in production: enqueue CUDA launch with &mut buf_fresh here)
+        rec.write_post_preflight_fresh(&buf_fresh);
+        rec.commit(&runtime).expect("commit ok");
+    }
+
+    /// Locks the safety net: even the escape hatch must validate
+    /// the "fresh runtime-backed" invariant. A legacy
+    /// (cudarc-backed) slice fed to
+    /// `write_post_preflight_fresh` must surface a structured
+    /// rejection at commit; the hatch is for fresh
+    /// runtime-backed outputs only.
+    #[test]
+    fn write_post_preflight_fresh_rejects_legacy_slice() {
+        let Some((device, runtime, launch_stream)) = try_async_runtime() else {
+            return;
+        };
+        let runtime_manager = Arc::new(crate::GpuMemoryManager::with_runtime(
+            Arc::clone(&device),
+            MemoryBudget::with_limit(1024 * 1024),
+            Arc::clone(&runtime),
+        ));
+        // A second manager WITHOUT a runtime — slices it allocs
+        // are legacy cudarc-backed (no DeviceBlock).
+        let legacy_manager = Arc::new(crate::GpuMemoryManager::new(
+            Arc::clone(&device),
+            MemoryBudget::with_limit(1024 * 1024),
+        ));
+        let buf_a = runtime_manager.alloc::<u8>(64).expect("alloc a");
+        let buf_legacy = legacy_manager.alloc::<u8>(64).expect("alloc legacy");
+        assert!(buf_legacy.runtime_block().is_none());
+
+        let mut rec = LaunchRecorder::new_strict(launch_stream);
+        rec.read(&buf_a);
+        rec.preflight(&runtime).expect("preflight ok");
+        rec.write_post_preflight_fresh(&buf_legacy);
+        let err = rec.commit(&runtime);
+        match err {
+            Err(ResourceError::StreamMisuse(msg)) => {
+                assert!(
+                    msg.contains("untracked buffer rejected")
+                        && msg.contains("write_post_preflight_fresh"),
+                    "msg: {}",
+                    msg
+                );
+            }
+            other => panic!(
+                "post-preflight escape hatch must reject legacy slice; got {:?}",
+                other
+            ),
+        }
     }
 
     #[test]
