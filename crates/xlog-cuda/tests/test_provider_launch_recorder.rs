@@ -426,3 +426,232 @@ fn provider_memset_column_recorded_survives_drop_and_reuse() {
 fn provider_memset_column_recorded_rejects_dlpack_column() {
     // Intentional placeholder. See doc above.
 }
+
+/// Filter-class slice. Proves that the migrated
+/// `compare_const_mask_recorded` correctly threads the column
+/// READ through the runtime: the kernel runs on a non-default
+/// `launch_stream`, but the column was allocated on the default
+/// alloc-stream. Dropping `input` BEFORE the kernel completes
+/// must NOT free the column out from under the launch-stream
+/// read.
+///
+/// Bug class: without `record_block_use`, `drop(input)` queues
+/// `cuMemFreeAsync(alloc_stream)` with no wait on the
+/// launch_stream's recorded event. The pool reuses the address
+/// to satisfy the next allocation, which is then trampled with a
+/// known pattern on the default stream. The launch_stream
+/// kernel — still pending — reads the trampled bytes and
+/// produces a corrupted mask. With the recorder, the free is
+/// gated on the launch_stream event and the kernel reads the
+/// original column data.
+///
+/// Mask check: column is filled with `(i % 5) as u32`; we
+/// compare-equal against `TARGET=2`, so the expected mask is
+/// `1` at every `i where i%5==2` and `0` elsewhere. Any
+/// deviation is a corruption signal.
+#[test]
+fn provider_compare_const_mask_recorded_survives_drop_and_reuse() {
+    use xlog_core::{ScalarType, Schema};
+    use xlog_cuda::{CompareOp, CudaBuffer};
+
+    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
+
+    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
+        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
+    );
+    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
+        async_resource,
+        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
+    ));
+    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
+        Box::new(GlobalDeviceBudget::new(logging, 64 * 1024 * 1024));
+    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
+        Arc::clone(&device),
+        0,
+        Arc::clone(&pool),
+        budget,
+    ));
+    let memory = Arc::new(GpuMemoryManager::with_runtime(
+        Arc::clone(&device),
+        MemoryBudget::with_limit(64 * 1024 * 1024),
+        Arc::clone(&runtime),
+    ));
+    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
+        .expect("provider with_runtime");
+
+    let launch_stream = pool.acquire().expect("acquire launch_stream");
+    assert_ne!(launch_stream, StreamId::DEFAULT);
+    let launch_handle = pool.resolve(launch_stream).expect("resolve");
+    let default_stream = device.inner().stream();
+
+    const ROWS: usize = 1024;
+    const TARGET: u32 = 2;
+    const ITERATIONS: usize = 32;
+    const TRAMPLE: u8 = 0xEE;
+    let schema = Schema::new(vec![("v".to_string(), ScalarType::U32)]);
+
+    let mut reuse_observed = 0usize;
+    let mut bad_mask = 0usize;
+
+    for iter in 0..ITERATIONS {
+        // Build column data: [0,1,2,3,4,0,1,2,3,4,...] mod 5.
+        let mut col_data = Vec::with_capacity(ROWS * 4);
+        for i in 0..ROWS {
+            col_data.extend_from_slice(&((i as u32) % 5).to_le_bytes());
+        }
+        let mut col_bytes = memory.alloc::<u8>(ROWS * 4).expect("alloc col");
+        device
+            .inner()
+            .htod_sync_copy_into(&col_data, &mut col_bytes)
+            .expect("htod col");
+        let col_ptr = col_bytes.device_ptr_value();
+
+        let mut d_num_rows = memory.alloc::<u32>(1).expect("alloc rowcount");
+        device
+            .inner()
+            .htod_sync_copy_into(&[ROWS as u32], &mut d_num_rows)
+            .expect("htod rows");
+
+        let input = CudaBuffer::from_columns(
+            vec![col_bytes.into()],
+            ROWS as u64,
+            d_num_rows,
+            schema.clone(),
+        );
+
+        // Migrated launch: kernel queues on launch_stream, read
+        // recorded against runtime via LaunchRecorder strict.
+        let d_mask = provider
+            .compare_const_mask_recorded::<u32>(&input, 0, TARGET, CompareOp::Eq, launch_stream)
+            .expect("compare_const_mask_recorded");
+
+        // Drop input WITHOUT host sync. runtime.deallocate must
+        // queue cuStreamWaitEvent(alloc_stream, recorded_event)
+        // BEFORE cuMemFreeAsync, gating the free on the kernel's
+        // read.
+        drop(input);
+
+        // Try to reuse the column slot.
+        let next = memory.alloc::<u8>(ROWS * 4).expect("alloc next");
+        let next_ptr = next.device_ptr_value();
+        let reused = next_ptr == col_ptr;
+        if reused {
+            reuse_observed += 1;
+        }
+
+        // Trample the slot on default stream. With the
+        // wait-event chain, this is correctly ordered AFTER the
+        // kernel's read; without it, the kernel would race this
+        // memset.
+        unsafe { memset_sync_default(next_ptr, TRAMPLE, ROWS * 4) };
+
+        launch_handle.synchronize().expect("sync launch");
+        default_stream.synchronize().expect("sync default");
+
+        // Verify mask integrity: any byte that doesn't match
+        // (i%5 == TARGET) is a corruption signal.
+        let mut readback = vec![0u8; ROWS];
+        unsafe { dtoh_sync(&mut readback, *d_mask.device_ptr()) };
+        for (i, &b) in readback.iter().enumerate() {
+            let expected = if (i as u32) % 5 == TARGET { 1 } else { 0 };
+            if b != expected {
+                bad_mask += 1;
+                if iter == 0 {
+                    eprintln!(
+                        "[compare_recorded] iter=0 row={} got={} expected={} reused={}",
+                        i, b, expected, reused
+                    );
+                }
+                break;
+            }
+        }
+
+        drop(d_mask);
+        drop(next);
+        runtime.reap_pending().expect("reap");
+    }
+
+    eprintln!(
+        "[compare_recorded] iterations={} reuse_observed={} bad_mask={}",
+        ITERATIONS, reuse_observed, bad_mask
+    );
+    assert!(
+        reuse_observed > 0,
+        "address reuse never observed across {} iterations; cannot exercise \
+         the cross-stream lifetime safety path",
+        ITERATIONS
+    );
+    assert_eq!(
+        bad_mask, 0,
+        "compare_const_mask_recorded produced a corrupted mask in {}/{} iterations \
+         (reuse_observed={}). The recorder's read on input.column(0) failed to \
+         propagate a wait-event through the deallocate path.",
+        bad_mask, ITERATIONS, reuse_observed,
+    );
+}
+
+/// Negative test: filter-class migrated path against legacy
+/// (no-runtime) manager. Must reject before any allocation
+/// happens.
+#[test]
+fn provider_compare_const_mask_recorded_rejects_legacy_manager() {
+    use xlog_core::{ScalarType, Schema};
+    use xlog_cuda::{CompareOp, CudaBuffer};
+
+    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
+        return;
+    };
+    let memory = Arc::new(GpuMemoryManager::new(
+        Arc::clone(&device),
+        MemoryBudget::with_limit(1024 * 1024),
+    ));
+    let provider =
+        CudaKernelProvider::new(Arc::clone(&device), Arc::clone(&memory)).expect("legacy provider");
+
+    let mut col_bytes = memory.alloc::<u8>(16).expect("alloc col");
+    let payload = [1u32, 2, 3, 4];
+    let bytes: Vec<u8> = payload.iter().flat_map(|v| v.to_le_bytes()).collect();
+    device
+        .inner()
+        .htod_sync_copy_into(&bytes, &mut col_bytes)
+        .expect("htod col");
+    let mut d_num_rows = memory.alloc::<u32>(1).expect("alloc rowcount");
+    device
+        .inner()
+        .htod_sync_copy_into(&[4u32], &mut d_num_rows)
+        .expect("htod rows");
+    let input = CudaBuffer::from_columns(
+        vec![col_bytes.into()],
+        4,
+        d_num_rows,
+        Schema::new(vec![("v".to_string(), ScalarType::U32)]),
+    );
+
+    let err = provider.compare_const_mask_recorded::<u32>(
+        &input,
+        0,
+        2u32,
+        CompareOp::Eq,
+        StreamId::DEFAULT,
+    );
+    match err {
+        Err(XlogError::Kernel(msg)) => {
+            assert!(
+                msg.contains("requires") || msg.contains("with_runtime"),
+                "expected helpful Kernel error message, got {:?}",
+                msg
+            );
+        }
+        Err(other) => panic!(
+            "compare_const_mask_recorded must reject legacy manager with XlogError::Kernel, got {:?}",
+            other
+        ),
+        Ok(_) => panic!(
+            "compare_const_mask_recorded must reject legacy manager — unexpectedly returned Ok"
+        ),
+    }
+}
