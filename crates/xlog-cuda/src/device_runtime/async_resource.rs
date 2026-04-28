@@ -41,11 +41,17 @@
 //!
 //! `bytes_outstanding()` returns `live_bytes + pending_bytes`.
 //!
-//! `reap_pending()` synchronizes each unique stream that has queued
-//! frees we haven't drained, then atomically zeros `pending_bytes`
-//! and clears the per-stream tracking. Callers (the future
-//! `GlobalDeviceBudget`, A2's final assertions) call this before
-//! treating `bytes_outstanding()` as authoritative.
+//! `reap_pending()` drains the per-stream pending map under the
+//! per-stream mutex, synchronizes each drained stream, and then
+//! subtracts exactly the drained total from `pending_bytes` via
+//! `fetch_sub` — it does **not** zero the counter. A `deallocate`
+//! that races between reap's drain and its `fetch_sub` re-populates
+//! both the per-stream map and the global atomic together (under the
+//! same mutex), so its bytes either land entirely before the drain
+//! (reaped this round) or entirely after (kept for the next reap),
+//! never split. Callers (the future `GlobalDeviceBudget`, A2's
+//! final assertions) call this before treating `bytes_outstanding()`
+//! as authoritative.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
