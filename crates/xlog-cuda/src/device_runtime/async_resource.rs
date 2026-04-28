@@ -67,7 +67,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use cudarc::driver::CudaSlice;
+use cudarc::driver::{CudaEvent, CudaSlice};
 
 use super::resource::{
     AllocTag, BlockState, DeviceBlock, DeviceMemoryResource, Generation, ResourceError,
@@ -76,15 +76,36 @@ use super::resource::{
 use super::stream_pool::StreamPool;
 use crate::CudaDevice;
 
+/// One live allocation tracked by [`AsyncCudaResource`]. Carries
+/// the cudarc-owned `CudaSlice<u8>` (whose drop queues the
+/// underlying `cuMemFreeAsync`) plus a vector of recorded last-use
+/// events. The events are populated by callers who submit work on
+/// streams **other than the block's `alloc_stream`** via
+/// [`AsyncCudaResource::record_block_use`]. On deallocate, the
+/// alloc stream waits on each recorded event before the queued
+/// free runs — closing the cross-stream lifetime gap that the
+/// CUDA stream-ordered allocator does not track on its own.
+struct LiveEntry {
+    slice: CudaSlice<u8>,
+    /// CudaEvents recorded on streams that have queued work
+    /// touching this block's bytes. Each event is associated with
+    /// the stream it was recorded on; on deallocate, the
+    /// alloc_stream waits on every entry here before freeing.
+    last_use_events: Vec<CudaEvent>,
+}
+
 /// Stream-ordered cudarc-backed allocator.
 pub struct AsyncCudaResource {
     device: Arc<CudaDevice>,
     device_ordinal: u32,
     stream_pool: Arc<StreamPool>,
-    /// Live allocations keyed by raw device pointer. Removed on
-    /// deallocate; the slice is then dropped, queueing
-    /// `cuMemFreeAsync` on its bound stream.
-    live: Mutex<HashMap<u64, CudaSlice<u8>>>,
+    /// Live allocations keyed by raw device pointer. Each entry
+    /// holds the cudarc slice and any recorded last-use events
+    /// from cross-stream consumers. Removed on deallocate; the
+    /// slice is then dropped, queueing `cuMemFreeAsync` on its
+    /// bound stream — *after* the stream has been told to wait on
+    /// every recorded event.
+    live: Mutex<HashMap<u64, LiveEntry>>,
     /// Bytes for blocks currently in `live`. Always accurate.
     live_bytes: AtomicUsize,
     /// Bytes for blocks dropped (queued for cuMemFreeAsync) but
@@ -154,6 +175,90 @@ impl AsyncCudaResource {
             .expect("AsyncCudaResource pending_per_stream poisoned");
         map.values().copied().sum()
     }
+
+    /// Record that work has been (or is being) submitted on
+    /// `use_stream_id` that touches the live block at `ptr`. The
+    /// resource records a CUDA event on `use_stream_id` at the
+    /// time of this call and attaches it to the block's live
+    /// entry; on [`deallocate`], the block's `alloc_stream` is
+    /// told to wait on every recorded event before the queued
+    /// `cuMemFreeAsync` runs.
+    ///
+    /// # Why this exists
+    ///
+    /// `cuMemAllocAsync` / `cuMemFreeAsync` track free-then-reuse
+    /// ordering only against the stream the free is queued on,
+    /// plus explicit `cuStreamWaitEvent` dependencies. Work
+    /// submitted on a different stream that touches the
+    /// allocation is **invisible to the pool**. Without this API,
+    /// callers that submit launches / memcpys / memsets on a
+    /// stream other than `block.alloc_stream` and then drop the
+    /// block can have the pool reuse the address while their
+    /// queued work is still in flight, silently corrupting the
+    /// new allocation.
+    ///
+    /// Callers responsible for honoring this:
+    /// * The future xlog launch builder — it will call this
+    ///   automatically for every buffer arg recorded as `read` /
+    ///   `write` / `read_write` against a non-alloc-stream
+    ///   launch stream.
+    /// * Any code that bypasses the launch builder and submits
+    ///   raw CUDA work on a stream other than `block.alloc_stream`.
+    ///   Failure to call this is a lifetime-safety violation;
+    ///   `AsyncCudaResource` cannot infer arbitrary external
+    ///   CUDA work.
+    ///
+    /// Recording the use against `block.alloc_stream` itself is
+    /// allowed and is a no-op semantically (the alloc stream
+    /// already orders against itself), but the caller should
+    /// avoid the round trip in hot paths.
+    ///
+    /// # Errors
+    ///   * [`ResourceError::UseAfterFree`] (with a placeholder
+    ///     generation) if `ptr` is not currently in the live map.
+    ///   * [`ResourceError::StreamMisuse`] if `use_stream_id`
+    ///     does not resolve in the stream pool.
+    ///   * [`ResourceError::Driver`] if event creation/record
+    ///     fails at the cudarc / CUDA driver level.
+    pub fn record_block_use(&self, ptr: u64, use_stream_id: StreamId) -> ResourceResult<()> {
+        let cu_stream = self.stream_pool.resolve(use_stream_id).ok_or_else(|| {
+            ResourceError::StreamMisuse(format!(
+                "AsyncCudaResource::record_block_use: unknown StreamId({})",
+                use_stream_id.0
+            ))
+        })?;
+        // Record the event on the use stream FIRST (outside the
+        // live-map lock) — event creation/record can block on the
+        // CUDA driver and we don't want to hold the live-map lock
+        // across that. After the event is recorded, take the lock
+        // briefly to attach it to the block's entry. If the block
+        // is no longer live by the time we re-take the lock, drop
+        // the event and surface the error; the caller will see
+        // UseAfterFree which is the right diagnostic.
+        let event = cu_stream.record_event(None).map_err(|e| {
+            ResourceError::Driver(format!(
+                "AsyncCudaResource::record_block_use: event record failed: {}",
+                e
+            ))
+        })?;
+        let mut live = self
+            .live
+            .lock()
+            .expect("AsyncCudaResource live map poisoned");
+        match live.get_mut(&ptr) {
+            Some(entry) => {
+                entry.last_use_events.push(event);
+                Ok(())
+            }
+            None => {
+                // Event drops here, releasing CUDA resources.
+                drop(event);
+                Err(ResourceError::UseAfterFree {
+                    generation: Generation::next(),
+                })
+            }
+        }
+    }
 }
 
 impl DeviceMemoryResource for AsyncCudaResource {
@@ -214,7 +319,13 @@ impl DeviceMemoryResource for AsyncCudaResource {
                     ptr
                 )));
             }
-            live.insert(ptr, slice);
+            live.insert(
+                ptr,
+                LiveEntry {
+                    slice,
+                    last_use_events: Vec::new(),
+                },
+            );
         }
         self.live_bytes.fetch_add(bytes, Ordering::Relaxed);
 
@@ -244,9 +355,44 @@ impl DeviceMemoryResource for AsyncCudaResource {
                 .expect("AsyncCudaResource live map poisoned");
             live.remove(&block.ptr)
         };
-        let slice = removed.ok_or_else(|| ResourceError::UseAfterFree {
+        let LiveEntry {
+            slice,
+            last_use_events,
+        } = removed.ok_or(ResourceError::UseAfterFree {
             generation: block.generation,
         })?;
+
+        // Bridge the cross-stream lifetime gap that the CUDA
+        // stream-ordered allocator does not track on its own:
+        // before the queued `cuMemFreeAsync` runs on
+        // `block.alloc_stream`, that stream must wait for every
+        // last-use event recorded against this block by callers
+        // who submitted work on a *different* stream (see
+        // `record_block_use`). After this loop runs, the
+        // alloc_stream's queue contains, in order:
+        //   wait_event(use_evt_1) ... wait_event(use_evt_N)
+        //   cuMemFreeAsync(ptr)        (queued by the slice drop below)
+        // so the free cannot precede any recorded cross-stream
+        // use.
+        if !last_use_events.is_empty() {
+            let alloc_stream = self
+                .stream_pool
+                .resolve(block.alloc_stream)
+                .ok_or_else(|| {
+                    ResourceError::StreamMisuse(format!(
+                        "AsyncCudaResource::deallocate: alloc_stream StreamId({}) does not resolve",
+                        block.alloc_stream.0
+                    ))
+                })?;
+            for event in &last_use_events {
+                alloc_stream.wait(event).map_err(|e| {
+                    ResourceError::Driver(format!(
+                        "AsyncCudaResource::deallocate: cuStreamWaitEvent failed: {}",
+                        e
+                    ))
+                })?;
+            }
+        }
 
         // Move the bytes from "live" to "pending free": the slice
         // drop below queues `cuMemFreeAsync` on `block.alloc_stream`,
@@ -277,8 +423,16 @@ impl DeviceMemoryResource for AsyncCudaResource {
         // bound stream when async-alloc is enabled, otherwise falls
         // back to synchronous cuMemFree. Either way the deallocation
         // is ordered on the slice's stream, which matches the
-        // DeviceBlock's `alloc_stream`.
+        // DeviceBlock's `alloc_stream` — and now also waits for
+        // every recorded cross-stream use event we just queued
+        // above.
         drop(slice);
+        // Drop the events explicitly after the slice drop has
+        // queued the free. The event handles can be released as
+        // soon as the wait calls return — cudarc's `wait` records
+        // the dependency in the stream and does not retain the
+        // event.
+        drop(last_use_events);
         Ok(())
     }
 

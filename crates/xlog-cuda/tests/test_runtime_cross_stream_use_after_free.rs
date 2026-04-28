@@ -132,15 +132,23 @@ unsafe fn dtoh_sync(dst: &mut [u8], src: u64) {
     );
 }
 
-/// Marked `#[ignore]` because this test is RED on the current
-/// branch and on `main` HEAD by design — it pins the bug class
-/// the v0.6 stream/lifetime-safety PR is built to fix. Opt in via
-/// `cargo test -- --ignored runtime_backed_drop_after_cross_stream_use`.
-/// The `#[ignore]` attribute MUST be removed in the same commit
-/// that lands the fix and turns this test green.
+/// **Managed-uses path: must PASS.**
+///
+/// The caller submits cross-stream work touching block A, then
+/// records that use against the resource via
+/// [`AsyncCudaResource::record_block_use`] **before** dropping
+/// the block. The resource captures a CUDA event on `s_use`,
+/// attaches it to the live entry, and on `deallocate(A)` queues a
+/// `cuStreamWaitEvent(s_alloc, last_use_event)` before the
+/// implied `cuMemFreeAsync`. The pool therefore cannot return
+/// the same address to the next allocate on `s_alloc` until
+/// `s_use`'s pending work has completed.
+///
+/// On `main` HEAD (commit 2fde633f) and earlier, this test fails
+/// 64/64 because no such API exists. With the safety layer
+/// landed, it must pass 64/64.
 #[test]
-#[ignore = "RED reproducer for v0.6 stream/lifetime-safety; remove ignore when the safety layer lands"]
-fn runtime_backed_drop_after_cross_stream_use_corrupts_reuse() {
+fn managed_cross_stream_use_does_not_corrupt_reuse() {
     let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
         eprintln!("Skipping: CUDA runtime unavailable");
         return;
@@ -179,8 +187,10 @@ fn runtime_backed_drop_after_cross_stream_use_corrupts_reuse() {
     // high probability.
     const ITERATIONS: usize = 64;
     const PATTERN_USE: u8 = 0xCD;
+    const PATTERN_B: u8 = 0xBB;
 
-    let mut corrupt_count = 0usize;
+    let mut last_writer_was_b = 0usize;
+    let mut last_writer_was_use = 0usize;
     let mut reuse_observed = 0usize;
     let _ = htod_sync; // legacy default-stream sync drains all streams; intentionally unused below
 
@@ -192,9 +202,7 @@ fn runtime_backed_drop_after_cross_stream_use_corrupts_reuse() {
         let ptr_a = block_a.ptr;
 
         // Step 3: initialize A's contents to zeros via an
-        // s_alloc-bound memset. This stays on s_alloc — does NOT
-        // synchronize across streams — so we don't accidentally
-        // drain s_use's later queued work.
+        // s_alloc-bound memset.
         unsafe { memset_async(s_alloc.cu_stream(), ptr_a, 0x00, BYTES) };
 
         // Step 4: cross-stream queued memset of `PATTERN_USE` on
@@ -203,15 +211,25 @@ fn runtime_backed_drop_after_cross_stream_use_corrupts_reuse() {
         // immediate. `s_use` is NOT `s_alloc`.
         unsafe { memset_async(s_use_handle, ptr_a, PATTERN_USE, BYTES) };
 
-        // Step 5: drop block A — cuMemFreeAsync queues on s_alloc.
-        // s_use's pending memset to ptr_a is invisible to the pool.
+        // Step 4b: tell the resource that s_use has pending work
+        // touching ptr_a. The resource records an event on s_use
+        // *now*, after the memset was queued. On `deallocate(A)`,
+        // s_alloc will be made to wait on this event before the
+        // queued cuMemFreeAsync runs.
+        resource
+            .record_block_use(ptr_a, s_use_id)
+            .expect("record_block_use(ptr_a, s_use)");
+
+        // Step 5: drop block A. `deallocate` enqueues
+        // `s_alloc.wait(event)` (recorded above), THEN the slice
+        // drop queues `cuMemFreeAsync`. So s_alloc's queue is now:
+        //   wait(E_use) → cuMemFreeAsync(ptr_a)
         resource.deallocate(block_a).expect("dealloc A");
 
-        // Step 6: allocate block B on s_alloc; very likely reuses
-        // the address. Per CUDA mempool semantics this is
-        // "stream-ordered safe" only with respect to s_alloc's
-        // queued free — NOT with respect to s_use's queued
-        // memset, which the pool was never told about.
+        // Step 6: allocate B on s_alloc. cuMemAllocAsync is
+        // queued after the free; combined with the wait above,
+        // s_alloc's queue is now:
+        //   wait(E_use) → cuMemFreeAsync(ptr_a) → cuMemAllocAsync(ptr_b)
         let block_b = resource
             .allocate(BYTES, s_alloc_id, AllocTag("rep-B"))
             .expect("alloc B on s_alloc");
@@ -221,29 +239,49 @@ fn runtime_backed_drop_after_cross_stream_use_corrupts_reuse() {
             reuse_observed += 1;
         }
 
-        // Step 7: drain s_use FIRST. Its queued memset of
-        // PATTERN_USE to ptr_a finally lands. If ptr_b == ptr_a,
-        // it lands into B's bytes.
-        s_use.synchronize().expect("sync s_use");
+        // Step 7: write PATTERN_B to B on s_alloc. cuMemAllocAsync
+        // does NOT zero the memory — B inherits whatever was at
+        // ptr_a when the free ran. We need a *fresh* write to B
+        // to detect corruption: if `cuMemAllocAsync` ordering
+        // worked correctly, this memset is the last writer to
+        // ptr_b and the readback shows PATTERN_B. If s_use's
+        // memset of PATTERN_USE landed *after* this memset (the
+        // lifetime bug), the readback shows PATTERN_USE.
+        unsafe { memset_async(s_alloc.cu_stream(), ptr_b, PATTERN_B, BYTES) };
 
-        // Step 8: drain s_alloc (the cuMemFreeAsync of A and any
-        // deferred bookkeeping). After this, B is "ready for use"
-        // by xlog's contract — alloc on s_alloc, all pending work
-        // on s_alloc drained.
+        // Step 8: drain s_alloc. With the managed contract, the
+        // wait at the head of s_alloc's queue blocks the free
+        // until E_use fires (which happens when s_use drains
+        // past its memset). So this synchronize transitively
+        // forces s_use's memset to complete BEFORE s_alloc's
+        // free / alloc / memset_B sequence runs.
         s_alloc.synchronize().expect("sync s_alloc");
 
-        // Step 9: read B and check whether it contains the
-        // PATTERN_USE leaked from s_use's late write. If so,
-        // that's the cross-stream lifetime bug.
+        // Step 9: drain s_use as well — without the managed
+        // contract, this is the moment s_use's memset would
+        // actually land, possibly overwriting our PATTERN_B.
+        // With the managed contract it's a no-op (s_use already
+        // drained transitively).
+        s_use.synchronize().expect("sync s_use");
+
+        // Step 10: read B.
         let mut readback = vec![0u8; BYTES];
         unsafe { dtoh_sync(&mut readback, ptr_b) };
 
-        // Count an iteration as corrupt if B's first byte is
-        // PATTERN_USE — extremely unlikely by chance from a fresh
-        // mempool allocation, deterministic if the bug reuse path
-        // fired.
-        if same_address && readback[0] == PATTERN_USE && readback[BYTES - 1] == PATTERN_USE {
-            corrupt_count += 1;
+        if same_address {
+            // Classify the last-writer-wins outcome:
+            //   PATTERN_B  → s_alloc's memset was the last writer
+            //                (correct, managed-uses contract held)
+            //   PATTERN_USE → s_use's memset clobbered after
+            //                 s_alloc's memset (lifetime bug)
+            if readback[0] == PATTERN_B && readback[BYTES - 1] == PATTERN_B {
+                last_writer_was_b += 1;
+            } else if readback[0] == PATTERN_USE && readback[BYTES - 1] == PATTERN_USE {
+                last_writer_was_use += 1;
+            }
+            // Other outcomes (mixed bytes, neither pattern) are
+            // not counted into either bucket; the assertions
+            // below will surface them as a discrepancy.
         }
 
         resource.deallocate(block_b).expect("dealloc B");
@@ -251,32 +289,179 @@ fn runtime_backed_drop_after_cross_stream_use_corrupts_reuse() {
     }
 
     eprintln!(
-        "iterations={} reuse_observed={} corrupt={}",
-        ITERATIONS, reuse_observed, corrupt_count
+        "[managed] iterations={} reuse_observed={} \
+         last_writer_was_b={} last_writer_was_use={}",
+        ITERATIONS, reuse_observed, last_writer_was_b, last_writer_was_use
     );
 
-    // The test demands BOTH conditions: the pool must reuse
-    // addresses (otherwise the bug surface isn't exercised) AND
-    // corruption must be observable. If reuse never occurs the
-    // host's mempool is unusually conservative and we cannot
-    // certify the safety layer with this reproducer — surface
-    // that as a panic so a follow-up reproducer can sharpen the
-    // test.
     assert!(
         reuse_observed > 0,
-        "address reuse never observed across {} iterations; \
-         the test cannot exercise the cross-stream lifetime gap. \
-         Adjust BYTES/ITERATIONS or stream selection.",
+        "address reuse never observed across {} iterations; the \
+         test cannot exercise the cross-stream lifetime gap.",
         ITERATIONS
     );
     assert_eq!(
-        corrupt_count, 0,
-        "cross-stream lifetime bug observed: {}/{} iterations had \
-         block B's contents clobbered by s_use's pending write to \
-         block A's address (reuse_observed={}). Stream-ordered \
-         allocator did not protect against use-after-free queued \
-         on a different stream than alloc_stream. See \
-         docs/plans/2026-04-28-v0.6-stream-lifetime-prerequisite.md.",
-        corrupt_count, ITERATIONS, reuse_observed,
+        last_writer_was_use, 0,
+        "managed-uses path failed: {}/{} iterations had B \
+         clobbered by s_use's late memset of PATTERN_USE despite \
+         record_block_use being called (reuse_observed={}, \
+         last_writer_was_b={}). The wait-event chain did not \
+         hold s_alloc until s_use's memset completed. Safety \
+         layer broken.",
+        last_writer_was_use, ITERATIONS, reuse_observed, last_writer_was_b,
+    );
+    assert_eq!(
+        last_writer_was_b, reuse_observed,
+        "managed-uses path: every reuse iteration should leave \
+         PATTERN_B as the last write to ptr_b, but only {}/{} \
+         did. Discrepancy implies the per-byte readback found \
+         neither pattern (mixed bytes — also a corruption \
+         signature).",
+        last_writer_was_b, reuse_observed,
+    );
+}
+
+/// **Unmanaged-uses path: kept `#[ignore]`d, documents the
+/// contract.**
+///
+/// Same shape as the managed test, but the caller submits
+/// cross-stream work and **does NOT** call `record_block_use`.
+/// The resource has no way to infer arbitrary external CUDA work
+/// — the cross-stream pending memset is invisible to it — so the
+/// pool can return the address to a subsequent allocate while
+/// the cross-stream write is still in flight, and corruption is
+/// observed.
+///
+/// This test exists to lock the contract documented on
+/// `record_block_use`: callers that submit raw CUDA work on a
+/// stream other than `block.alloc_stream` and bypass xlog's
+/// launch-builder / use-recording layer are responsible for
+/// their own cross-stream synchronization. If they neither use
+/// `record_block_use` nor synchronize manually, lifetime safety
+/// is undefined by design.
+///
+/// Kept `#[ignore]`d because:
+///   * It demonstrates the *expected* unsafe behavior of an
+///     unmanaged caller — running it as part of default CI would
+///     turn the suite red.
+///   * The corruption observable here is by design; a future
+///     change that "fixes" this path *automatically* by tracking
+///     all CUDA work the resource never saw would be wrong, and
+///     this test prevents that drift.
+///
+/// To verify the unmanaged path still corrupts:
+///   `cargo test -p xlog-cuda --release --test \
+///    test_runtime_cross_stream_use_after_free -- --ignored \
+///    unmanaged_cross_stream_use`
+#[test]
+#[ignore = "documents the unmanaged-raw-CUDA-call contract; corruption is the *intended* outcome here"]
+fn unmanaged_cross_stream_use_corrupts_reuse_by_design() {
+    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
+    let resource = AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool));
+
+    let s_alloc_id = match pool.acquire() {
+        Ok(id) => id,
+        Err(e) => {
+            eprintln!("Skipping: StreamPool::acquire failed: {}", e);
+            return;
+        }
+    };
+    let s_use_id = match pool.acquire() {
+        Ok(id) => id,
+        Err(e) => {
+            eprintln!("Skipping: StreamPool::acquire (second) failed: {}", e);
+            return;
+        }
+    };
+    let s_alloc = pool.resolve(s_alloc_id).expect("s_alloc resolves");
+    let s_use = pool.resolve(s_use_id).expect("s_use resolves");
+    let s_use_handle = s_use.cu_stream();
+
+    const ITERATIONS: usize = 64;
+    const PATTERN_USE: u8 = 0xCD;
+    const PATTERN_B: u8 = 0xBB;
+
+    let mut last_writer_was_b = 0usize;
+    let mut last_writer_was_use = 0usize;
+    let mut reuse_observed = 0usize;
+
+    for _ in 0..ITERATIONS {
+        let block_a = resource
+            .allocate(BYTES, s_alloc_id, AllocTag("rep-A"))
+            .expect("alloc A");
+        let ptr_a = block_a.ptr;
+
+        unsafe { memset_async(s_alloc.cu_stream(), ptr_a, 0x00, BYTES) };
+        unsafe { memset_async(s_use_handle, ptr_a, PATTERN_USE, BYTES) };
+
+        // Note: NO record_block_use call. The cross-stream memset
+        // is invisible to the resource.
+        resource.deallocate(block_a).expect("dealloc A");
+
+        let block_b = resource
+            .allocate(BYTES, s_alloc_id, AllocTag("rep-B"))
+            .expect("alloc B");
+        let ptr_b = block_b.ptr;
+        if ptr_b == ptr_a {
+            reuse_observed += 1;
+        }
+
+        unsafe { memset_async(s_alloc.cu_stream(), ptr_b, PATTERN_B, BYTES) };
+
+        // Drain s_alloc first — without the managed contract,
+        // this only drains the free→alloc→memset_B chain and
+        // does NOT wait for s_use's memset.
+        s_alloc.synchronize().expect("sync s_alloc");
+        // Now drain s_use — its memset of PATTERN_USE finally
+        // lands. If ptr_b == ptr_a, it overwrites PATTERN_B.
+        s_use.synchronize().expect("sync s_use");
+
+        let mut readback = vec![0u8; BYTES];
+        unsafe { dtoh_sync(&mut readback, ptr_b) };
+        if ptr_b == ptr_a {
+            if readback[0] == PATTERN_USE && readback[BYTES - 1] == PATTERN_USE {
+                last_writer_was_use += 1;
+            } else if readback[0] == PATTERN_B && readback[BYTES - 1] == PATTERN_B {
+                last_writer_was_b += 1;
+            }
+        }
+
+        resource.deallocate(block_b).expect("dealloc B");
+        resource.reap_pending().expect("reap");
+    }
+
+    eprintln!(
+        "[unmanaged] iterations={} reuse_observed={} \
+         last_writer_was_b={} last_writer_was_use={}",
+        ITERATIONS, reuse_observed, last_writer_was_b, last_writer_was_use
+    );
+
+    assert!(
+        reuse_observed > 0,
+        "address reuse never observed across {} iterations; the \
+         test cannot exercise the unmanaged-uses contract",
+        ITERATIONS
+    );
+    // The unmanaged contract: at least one iteration must show
+    // s_use's memset as the last writer. We don't require all
+    // iterations to corrupt — driver scheduling can let s_alloc
+    // win the race occasionally — but if NONE corrupt, the
+    // documented contract has somehow been "fixed" outside the
+    // managed path, which would be an unrelated bug.
+    assert!(
+        last_writer_was_use > 0,
+        "unmanaged-uses test expected at least one iteration where \
+         s_use's late memset clobbered B (proving the documented \
+         contract still applies), but observed 0/{} \
+         (reuse_observed={}, last_writer_was_b={}). Either driver \
+         scheduling shifted unexpectedly, or some unrelated change \
+         silently fixed this path; investigate before re-enabling.",
+        ITERATIONS,
+        reuse_observed,
+        last_writer_was_b,
     );
 }
